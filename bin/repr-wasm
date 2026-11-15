@@ -1,0 +1,227 @@
+#!/bin/bash
+# repr/wasm, WebAssembly's bridge (doc/wasm/SPEC.md; doc/wasm/WASM-SURVEY.md §4, §5, §12, WA1, WA2): a module's binary format, and
+# (WA2) the text format and the testsuite's .wast scripts, as Wasm forms and back, arbace.repr.wasm on the tools' host (evaluated
+# from the checkout: a crop's namespace, bin/lib/version.bash's arbace_crop_paths). No Wasm tool runs: every judge is the input's
+# own (the forms read again equal, mode :full printed back byte for byte, the testsuite's assertions); wabt, wasmtime and node are
+# the oracle tier's (test/wasm/corpora.edn's :oracle-packages).
+#
+#   bin/repr-wasm read [--full] FILE.wasm [-o OUT.ae]   FILE's Wasm forms as .ae text (a header, an item a line, a function's
+#                                                    instructions a line each); --full: mode :full, the layer in the last line
+#   bin/repr-wasm print [--full] FILE.ae -o OUT.wasm  the forms encoded canonically; --full: with the layer, the original's bytes
+#   bin/repr-wasm corpus fetch                       test/wasm/corpora.edn's pins fetched (curl) into $REPR_WASM_SRC (default
+#                                                    MAIN/.tmp/wasm/src) unless present, each checked against its SHA-256 and
+#                                                    SHA-512, the archives extracted under MAIN/.tmp/wasm/tree (the user's go-ahead
+#                                                    of 2026-11-13: the testsuite, the spec at wg-3.0, wazero, webgpu.idl)
+#   bin/repr-wasm corpus check                       each pin's file against its SHA-256 and SHA-512, nothing fetched (bin/gate --pins)
+#   bin/repr-wasm corpus build                       the Go-built corpus (:go-programs) built by TamaGo's go ($ARBACE_GOROOT, default
+#                                                    /root/tamago-go) for each :corpora GOOS into MAIN/.tmp/wasm/go/GOOS/NAME.wasm,
+#                                                    once per toolchain VERSION and sources' digest (a stamp beside them), under a lock
+#   bin/repr-wasm corpus lists [CORPUS...]           each corpus's list (NAME<tab>PATH) into .tmp/repr-wasm/lists/CORPUS.list
+#   bin/repr-wasm roundtrip [--record] [CORPUS...]   each module of each corpus (default: go-wasip1 go-js): decoded in :full, validated, its
+#                                                    .ae text read back (forms and layer equal), printed back byte for byte, the
+#                                                    canonical print decoded again to the same forms with no layer; rows against
+#                                                    test/wasm/roundtrip-results.edn (every recorded :pass passes, every module
+#                                                    recorded; --record rewrites the corpora's rows from the run), every non-pass in
+#                                                    a class of test/wasm/divergences-read.edn, the negative controls of
+#                                                    test/wasm/controls.txt failing (and its positive check passing), and the
+#                                                    instructions the modules use summed into WORK/ops.tsv; WORK .tmp/repr-wasm/rt/CORPUS
+#   bin/repr-wasm wast [--record] [--only LIST]        WA2, WA3: the testsuite's scripts, the root's and proposals/, legacy/, custom/'s
+#                                                    (test/wasm/corpora.edn's :testsuite, extracted by
+#                                                    corpus fetch; --only LIST: the scripts named in LIST, a path under the testsuite a
+#                                                    line), each command judged at the read level by its own assertion (doc/wasm/SPEC.md
+#                                                    §8: a module read, the cross-format judge, a binary one byte for byte, its canonical
+#                                                    text read again, the module validated (WA3, arbace.wasm.valid); assert_malformed
+#                                                    rejected; assert_invalid rejected by the validator; each rejection's message a
+#                                                    second level, msg/ rows, by prefix; @custom and @name annotations), rows against
+#                                                    test/wasm/wast-results.edn (--record rewrites the run's scripts' rows), every non-pass
+#                                                    in a class of test/wasm/divergences-wast.edn, the controls of
+#                                                    test/wasm/controls-wast.txt failing; WORK .tmp/repr-wasm/wast
+#   bin/repr-wasm divergences [RESULTS]              the results' non-passes judged against the classes (none unclassed)
+#   bin/repr-wasm ops gen|check                      the instruction table arbace/repr/wasm/ops.ae from the spec's pin
+#                                                    (interpreter/binary/decode.ml, interpreter/text/lexer.mll; test/wasm/gen_ops.ae):
+#                                                    gen writes it, check regenerates it and compares byte for byte, then checks every
+#                                                    opcode Go's wasm assembler can emit against it (test/wasm/go_ops.ae)
+#
+# Memory: each process under GOMEMLIMIT (default 1500MiB; a Go-built module's forms are some hundreds of MB), one module at a
+# time (REPR_WASM_THREADS, default 1).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
+main=$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd)
+case $root in */.tmp/gate-clean/*) main=${root%%/.tmp/gate-clean/*} ;; esac
+src=${REPR_WASM_SRC:-$main/.tmp/wasm/src}
+tree=${REPR_WASM_TREE:-$main/.tmp/wasm/tree}
+gobuilt=${REPR_WASM_GO:-$main/.tmp/wasm/go}
+corpora=$root/test/wasm/corpora.edn
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+results=$root/test/wasm/roundtrip-results.edn
+classes=$root/test/wasm/divergences-read.edn
+controls=$root/test/wasm/controls.txt
+lists=$root/.tmp/repr-wasm/lists
+
+edn() { arbace_tool -e "(let [c (read-string (slurp \"$corpora\"))] $1)"; }
+
+# pins: KEY URL FILE SHA256 SHA512 TOP (TOP - for a plain file)
+pins() {
+  edn '(doseq [[k p] (:pins c)] (println (name k) (:url p) (:fetched-into p) (:sha256 p) (:sha512 p) (or (:top p) "-")))'
+}
+
+check_pin() { # FILE SHA256 SHA512
+  [ -f "$1" ] || { echo "repr-wasm: $1 is not on this host (bin/repr-wasm corpus fetch)" >&2; return 1; }
+  local a b
+  a=$(sha256sum "$1" | cut -d' ' -f1); b=$(sha512sum "$1" | cut -d' ' -f1)
+  [ "$a" = "$2" ] && [ "$b" = "$3" ] || { echo "repr-wasm: $1's digests are not its pin's (SHA-256 $a, pin $2)" >&2; return 1; }
+}
+
+corpus_ids() { edn '(doseq [x (:corpora c)] (println (name (:id x))))'; }
+
+# the Go-built corpus: KEY = the toolchain's VERSION line and the programs' sources' digest
+go_key() {
+  { head -1 "$goroot/VERSION"; edn '(doseq [p (:go-programs c)] (println (:name p) (:src p) (boolean (:goroot p))))' |
+      while read -r n s g; do if [ "$g" = true ]; then sha256sum "$goroot/$s"; else (cd "$root" && sha256sum "$s"); fi; done
+    for o in $(edn '(doseq [x (:corpora c)] (println (:goos x)))'); do echo "$o"; done; } | sha256sum | cut -c1-64
+}
+
+go_build() {
+  local key stamp lock n s g o out w
+  key=$(go_key); stamp=$gobuilt/stamp
+  mkdir -p "$gobuilt"; lock=$gobuilt/.lock
+  exec 9>"$lock"; flock 9
+  if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$key" ]; then exec 9>&-; return 0; fi
+  rm -rf "$gobuilt"/*/
+  edn '(doseq [p (:go-programs c)] (println (:name p) (:src p) (boolean (:goroot p))))' > "$TMPDIR/wasm-progs.txt"
+  for o in $(edn '(doseq [x (:corpora c)] (println (:goos x)))'); do
+    while read -r n s g; do
+      w=$TMPDIR/wasm-build/$n; rm -rf "$w"; mkdir -p "$w"
+      if [ "$g" = true ]; then cp "$goroot/$s" "$w/main.go"; else cp "$root/$s" "$w/main.go"; fi
+      printf 'module wasmprog\n\ngo 1.27\n' > "$w/go.mod"
+      out=$gobuilt/$o/$n.wasm; mkdir -p "${out%/*}"
+      (cd "$w" && env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+         GOOS="$o" GOARCH=wasm GOCACHE="$main/.tmp/wasm/gocache" "$goroot/bin/go" build -p 2 -trimpath -o "$out" .) ||
+        { echo "repr-wasm: the Go build of $n for $o failed" >&2; exec 9>&-; return 1; }
+    done < "$TMPDIR/wasm-progs.txt"
+  done
+  echo "$key" > "$stamp"
+  exec 9>&-
+}
+
+make_list() { # CORPUS
+  local goos
+  goos=$(edn "(println (:goos (first (filter #(= :$1 (:id %)) (:corpora c)))))")
+  [ -n "$goos" ] && [ "$goos" != nil ] || { echo "repr-wasm: no corpus $1" >&2; return 1; }
+  mkdir -p "$lists"
+  : > "$lists/$1.list"
+  for f in "$gobuilt/$goos"/*.wasm; do printf '%s\t%s\n' "$(basename "$f" .wasm)" "$f" >> "$lists/$1.list"; done
+}
+
+judge() { # KIND RESULTS ROWS CLASSES RECORD IDS
+  arbace_tool -e "(do (load-file \"$root/test/wasm/judge.ae\") nil)" \
+    -e "(wasm.judge/main \"repr-wasm $1\" \"$1\" \"$2\" \"$3\" \"$4\" \"${5:-}\" \"${6:-}\")"
+}
+
+case ${1:-} in
+  read|print) v=$1; shift; arbace_tool -m arbace.repr.wasm "$v" "$@" ;;
+  corpus)
+    case ${2:-} in
+      fetch)
+        mkdir -p "$src" "$tree"
+        pins > "$TMPDIR/wasm-pins.txt"
+        while read -r k url file s256 s512 top; do
+          f=$main/$file
+          [ -f "$f" ] || { echo "repr-wasm: fetching $k from $url"; curl -sSfL -o "$f.part" "$url" && mv "$f.part" "$f"; }
+          check_pin "$f" "$s256" "$s512"
+          if [ "$top" != - ] && [ ! -d "$tree/$top" ]; then tar -xzf "$f" -C "$tree"; fi
+          echo "repr-wasm: $k ok ($(stat -c %s "$f") bytes)"
+        done < "$TMPDIR/wasm-pins.txt" ;;
+      check)
+        pins > "$TMPDIR/wasm-pins.txt"; bad=0
+        while read -r k url file s256 s512 top; do
+          if check_pin "$main/$file" "$s256" "$s512"; then echo "repr-wasm: pin $k ok"; else bad=1; fi
+        done < "$TMPDIR/wasm-pins.txt"
+        exit $bad ;;
+      build) go_build; for o in "$gobuilt"/*/; do echo "repr-wasm: $(ls "$o" | wc -l) modules in $o"; done ;;
+      lists) shift 2; ids=("$@"); [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(corpus_ids)
+             go_build; for id in "${ids[@]}"; do make_list "$id"; echo "$lists/$id.list"; done ;;
+      *) echo "repr-wasm corpus fetch|check|build|lists" >&2; exit 2 ;;
+    esac ;;
+  roundtrip)
+    shift; record=; ids=()
+    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(corpus_ids)
+    go_build
+    all=$root/.tmp/repr-wasm/rt/rows.edn; mkdir -p "${all%/*}"; : > "$all"
+    : > "$root/.tmp/repr-wasm/rt/ops.tsv"
+    for id in "${ids[@]}"; do
+      make_list "$id"
+      work=$root/.tmp/repr-wasm/rt/$id; rm -rf "$work"; mkdir -p "$work"
+      arbace_tool -m arbace.repr.wasm check "$lists/$id.list" "$work"
+      awk -F'\t' -v c="$id" '{ r = ($2 == "ok") ? ":pass" : ":fail"; why = ($2 == "ok") ? "" : $2 ($5 == "" ? "" : ": " $5);
+        gsub(/"/, "'"'"'", why); printf "[\"%s/%s\" %s \"%s\"]\n", c, $1, r, why }' "$work/check.tsv" >> "$all"
+      awk -F'\t' -v c="$id" '{ print c "/" $0 }' "$work/ops.tsv" >> "$root/.tmp/repr-wasm/rt/ops.tsv"
+    done
+    fails=0
+    # the negative controls: a subject's :full .ae printed back must differ from the reference's bytes (flip: the subject's
+    # own bytes with one byte flipped); the positive check (_check/...): a subject's own bytes, which it must equal
+    while read -r cid subj ref flip; do
+      case $cid in ''|'#'*) continue ;; esac
+      sc=${subj%%/*} sn=${subj#*/} rc=${ref%%/*} rn=${ref#*/}
+      sa=$root/.tmp/repr-wasm/rt/$sc/ae/$sn.ae
+      rp=$(awk -F'\t' -v n="$rn" '$1 == n { print $2 }' "$lists/$rc.list" 2>"$TMPDIR/wasm-ctl.err" || true)
+      if [ ! -f "$sa" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.repr.wasm control "$sa" "$rp" ${flip:+"$flip"} | tail -1)
+      case $cid in
+        _check/*) if [ "$v" = same ]; then echo "check $cid: the same, as it must"; else echo "FAIL: check $cid: $v"; fails=$((fails + 1)); fi ;;
+        *) if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi ;;
+      esac
+    done < "$controls"
+    n=$(cut -f2 "$root/.tmp/repr-wasm/rt/ops.tsv" | sort -u | wc -l)
+    echo "repr-wasm roundtrip: $n distinct instructions in the modules (.tmp/repr-wasm/rt/ops.tsv)"
+    judge roundtrip "$results" "$all" "$classes" "${record:-}" "${ids[*]}" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  wast)
+    shift; record=; only=
+    while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only) only=$2; shift 2 ;; *) echo "repr-wasm wast: $1?" >&2; exit 2 ;; esac; done
+    ts=$tree/$(edn '(println (:top (:testsuite (:pins c))))')
+    [ -d "$ts" ] || { echo "repr-wasm: $ts missing: bin/repr-wasm corpus fetch" >&2; exit 1; }
+    mkdir -p "$lists"; work=$root/.tmp/repr-wasm/wast; rm -rf "$work"; mkdir -p "$work"
+    if [ -n "$only" ]; then
+      grep -v '^#' "$only" | sed '/^$/d' | while read -r f; do printf 'testsuite/%s\t%s\n' "$f" "$ts/$f"; done > "$lists/testsuite.list"
+    else
+      # the root scripts, then proposals/, legacy/ and custom/ (classed by proposal, WAS5 (a))
+      { (cd "$ts" && ls *.wast); (cd "$ts" && find proposals legacy custom -name '*.wast' | LC_ALL=C sort); } |
+        while read -r f; do printf 'testsuite/%s\t%s\n' "$f" "$ts/$f"; done > "$lists/testsuite.list"
+    fi
+    arbace_tool -m arbace.repr.wasm.wast "$lists/testsuite.list" "$work"
+    fails=0
+    while read -r cid subj mode other; do
+      case $cid in ''|'#'*) continue ;; esac
+      sp=${subj%#*} sk=${subj##*#}
+      grep -q "^testsuite/$sp	" "$lists/testsuite.list" || { echo "control $cid: left (not in this run)"; continue; }
+      if [ "$mode" = vs ] || [ "$mode" = msg-vs ]; then op=${other%#*} ok=${other##*#}; v=$(arbace_tool -m arbace.repr.wasm.wast control "$ts/$sp" "$sk" "$mode" "$ts/$op" "$ok" | tail -1)
+      else v=$(arbace_tool -m arbace.repr.wasm.wast control "$ts/$sp" "$sk" "$mode" | tail -1); fi
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/wasm/controls-wast.txt"
+    ids=; [ -n "$only" ] || ids="testsuite print msg"
+    if [ -n "$only" ]; then
+      # a partial run: judged on its scripts' rows alone
+      arbace_tool -e "(let [run (set (map #(first (arbace.string/split (first %) #\"#\")) (read-string (str \"[\" (slurp \"$work/rows.edn\") \"]\")))) old (read-string (slurp \"$root/test/wasm/wast-results.edn\"))] (spit \"$work/old.edn\" (pr-str (vec (filter #(run (first (arbace.string/split (first %) #\"#\"))) old)))))"
+      judge wast "$work/old.edn" "$work/rows.edn" "$root/test/wasm/divergences-wast.edn" "" "" || fails=$((fails + 1))
+    else
+      judge wast "$root/test/wasm/wast-results.edn" "$work/rows.edn" "$root/test/wasm/divergences-wast.edn" "${record:-}" "$ids" || fails=$((fails + 1))
+    fi
+    [ $fails = 0 ] ;;
+  divergences)
+    r=${2:-$results}
+    judge roundtrip "$r" "$r" "$classes" "" "" ;;
+  ops)
+    spec=$tree/$(edn '(println (:top (:spec (:pins c))))')/interpreter
+    [ -f "$spec/binary/decode.ml" ] || { echo "repr-wasm: $spec/binary/decode.ml missing: bin/repr-wasm corpus fetch" >&2; exit 1; }
+    case ${2:-} in gen) chk=nil ;; check) chk=true ;; *) echo "repr-wasm ops gen|check" >&2; exit 2 ;; esac
+    arbace_tool -e "(do (load-file \"$root/test/wasm/gen_ops.ae\") nil)" \
+      -e "(wasm.gen-ops/main \"$spec/binary/decode.ml\" \"$spec/text/lexer.mll\" \"$root/arbace/repr/wasm/ops.ae\" $chk)"
+    [ "$chk" = true ] && arbace_tool -e "(do (load-file \"$root/test/wasm/go_ops.ae\") nil)" -e "(wasm.go-ops/main \"$goroot\")"
+    exit 0 ;;
+  *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

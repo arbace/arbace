@@ -1,0 +1,58 @@
+(ns wasm.go-ops
+  "Every opcode Go's wasm assembler can emit is in repr/wasm's instruction table (doc/wasm/WASM-SURVEY.md, \"As built: WA1\";
+  bin/repr-wasm ops check): $GOROOT/src/cmd/internal/obj/wasm/a.out.go lists the low-level instructions from AUnreachable to
+  ALast in encoding order, and wasmobj.go's writeOpcode maps each to its bytes by ranges (one byte; 0xFC and a byte; 0xFD and
+  a LEB128; 0xFD, a LEB128 and 0x01; 0xFD, a LEB128 and 0x02). Each instruction's (prefix, code) found that way is looked up
+  in arbace/repr/wasm/ops.ae and its name compared with Go's (letters and digits alike, the case and the separators aside:
+  Go's I32TruncSatF32S is the spec's i32.trunc_sat_f32_s). Go's structured and pseudo entries (Block, Loop, If, Else, End and
+  the Reserved* placeholders) are the decoder's own or no instruction. writeOpcode's two SIMD ranges whose u32 is 0x80 or
+  more write a byte after it (0x01, 0x02) that is no part of the spec's encoding (the u32's LEB128 already ends; for the
+  relaxed ones the u32 written is 0x80 more than their opcode less 0x100, so their bytes decode as i16x8.abs ... and a stray
+  0x02): reported as a note; the names are checked against the opcodes Go means (0x80 on, 0x100 on)."
+  (:require [arbace.string :as str]
+            [arbace.repr.wasm.ops :as ops]))
+
+(defn- consts [^String aout]
+  (let [a (.indexOf aout "AUnreachable") b (.indexOf aout "ALast")
+        body (subs aout a b)]
+    (vec (for [l (str/split-lines body)
+               :let [t (str/trim (first (str/split l #"//")))]
+               :when (re-matches #"A[A-Za-z0-9]+" t)]
+           t))))
+
+(defn- norm [^String s] (str/lower-case (str/replace s #"[^A-Za-z0-9]" "")))
+
+(def spellings
+  ;; Go's names that are not the spec's, by opcode: the MVP's draft names of memory.size and memory.grow, the shuffle's
+  ;; lane count, and two relaxed truncations without their _zero
+  {"CurrentMemory" "memory.size" "GrowMemory" "memory.grow" "I8x16Shuffle16" "i8x16.shuffle"
+   "I32x4RelaxedTruncF64x2S" "i32x4.relaxed_trunc_f64x2_s_zero" "I32x4RelaxedTruncF64x2U" "i32x4.relaxed_trunc_f64x2_u_zero"})
+
+(defn main [goroot]
+  (let [aout (slurp (str goroot "/src/cmd/internal/obj/wasm/a.out.go"))
+        cs (consts aout)
+        idx (into {} (map-indexed (fn [i c] [c i]) cs))
+        at (fn [c] (or (idx c) (throw (ex-info (str "a.out.go: no " c) {}))))
+        anchors [["AUnreachable" nil 0x00] ["AEnd" nil 0x0b] ["ADrop" nil 0x1a] ["ALocalGet" nil 0x20] ["AI32Load" nil 0x28]
+                 ["AI32TruncSatF32S" 0xfc 0x00] ["AV128Load" 0xfd 0x00] ["AI16x8Abs" 0xfd 0x80] ["AI8x16RelaxedSwizzle" 0xfd 0x100]]
+        ranges (mapv (fn [[c p base]] [(at c) p base c]) anchors)
+        table (into {} (map (fn [[p c n]] [[p c] n]) ops/rows))
+        rows (for [[i c] (map-indexed vector cs)
+                   :let [[start p base anchor] (last (filter #(<= (first %) i) ranges))
+                         code (+ base (- i start))
+                         nm (subs c 1)]
+                   :when (not (re-find #"^Reserved" nm))
+                   :when (not (#{"Block" "Loop" "If" "Else" "End"} nm))]
+               [nm p code (table [p code]) (#{"AI16x8Abs" "AI8x16RelaxedSwizzle"} anchor)])
+        missing (filter #(nil? (nth % 3)) rows)
+        differ (filter #(and (nth % 3) (not= (norm (first %)) (norm (nth % 3))) (not= (spellings (first %)) (nth % 3))) rows)
+        extra (filter #(nth % 4) rows)]
+    (println (str "repr-wasm ops: Go's wasm assembler (" goroot "/src/cmd/internal/obj/wasm): " (count rows) " instructions, "
+                  (- (count rows) (count missing) (count differ)) " in the table by the same name (" (count spellings) " of them by test/wasm/go_ops.ae's spellings)"))
+    (when (seq extra)
+      (println (str "repr-wasm ops: note: " (count extra) " of them (" (ffirst extra) " ... " (first (last extra))
+                    ") are written by writeOpcode with an extra byte after the opcode's u32 (0x01 or 0x02): no part of the spec's encoding"
+                    " (verified 2026-11-13 on a GOEXPERIMENT=simd build: the 0x01 decodes as a nop after each; doc/wasm/WASM-SURVEY.md, \"As built: WA3\")")))
+    (doseq [[nm p code] missing] (println (str "FAIL: Go's " nm " (" (if p (format "0x%02x " p) "") (format "0x%02x" code) ") is not in the table")))
+    (doseq [[nm p code t] differ] (println (str "FAIL: Go's " nm " (" (if p (format "0x%02x " p) "") (format "0x%02x" code) ") is the table's " t)))
+    (when (or (seq missing) (seq differ)) (System/exit 1))))

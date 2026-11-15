@@ -1,0 +1,911 @@
+;; Portions derived from Go's lib/wasm/wasm_exec.js and wasm_exec_node.js (TamaGo's go1.27.1): Copyright 2018, 2021 The Go
+;; Authors. All rights reserved. Use of this source code is governed by a BSD-style license (LICENSE.md, Go's section).
+
+(in-ns 'go.arbace.wai) (go/file "gojs.go" :imports [
+
+
+    ^{:line 7} [binary "encoding/binary"]
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [math "math"]
+    ^{:line 11} [rand "math/rand"]
+    ^{:line 12} [sort "sort"]
+    ^{:line 13} [strings "strings"]])
+
+
+;; gojs, the headless world (doc/wasm/WAI.md §10; WA11, WAS13, WAS16, WAS17): Go's js/wasm import ABI implemented over the JS
+;; value model of js.go and jsrt.go, derived from the pinned TamaGo's lib/wasm/wasm_exec.js (go1.27.1, BSD-3, the Go Authors) as
+;; wasm_exec_node.js runs it: the 24 imports of module gojs (each a function of the stack pointer, its arguments read from Go's
+;; stack as wasm_exec.js reads them), the reference table (_values, _goRefCounts, _ids, _idPool), the exports run, resume and getsp,
+;; the event loop (Go's timeouts, setTimeout, promises' microtasks, animation frames) on a virtual clock, and the globals Go and the
+;; browser's programs read: fs (Node's callback API, over directories mounted by the driver), process, path, console, performance,
+;; crypto, and the recording fakes of a browser page (document with one canvas, requestAnimationFrame, input events,
+;; navigator.gpu) with the WebGPU bridge of doc/wasm/WEB.md.
+
+
+
+
+(go/var ^{:doc "GoJSImports are the names of module gojs's imports, as wasm_exec.js defines them (its object's keys, \"debug\" its 25th, which no\nGo code imports) and as the pinned Go's //go:wasmimport gojs directives name them: the shim's import-list check compares the\nthree (WAS15 (a)).\n"} GoJSImports ^{:go/breaks [2 7 10 15 20 24]} (lit (slice string)
+    "runtime.wasmExit" "runtime.wasmWrite" "runtime.resetMemoryDataView" "runtime.nanotime1" "runtime.walltime"
+    "runtime.scheduleTimeoutEvent" "runtime.clearTimeoutEvent" "runtime.getRandomData"
+    "syscall/js.finalizeRef" "syscall/js.stringVal" "syscall/js.valueGet" "syscall/js.valueSet" "syscall/js.valueDelete"
+    "syscall/js.valueIndex" "syscall/js.valueSetIndex" "syscall/js.valueCall" "syscall/js.valueInvoke" "syscall/js.valueNew"
+    "syscall/js.valueLength" "syscall/js.valuePrepareString" "syscall/js.valueLoadString" "syscall/js.valueInstanceOf"
+    "syscall/js.copyBytesToGo" "syscall/js.copyBytesToJS" "debug"))
+
+
+
+(go/type GoJS "GoJS is one guest's world.\n" (struct
+    ^{:line 39 :tag (slice string)} Args ; argv (wasm_exec_node.js: the module's path, then its arguments)
+    ^{:line 40 :tag (slice string)} Env ; K=V, sorted by the run as wasm_exec.js sorts its keys
+    ^{:line 41 :tag io/Reader} Stdin
+    ^{:line 42 :tag io/Writer} Stdout
+    ^{:line 43 :tag io/Writer} Stderr
+    ^{:line 44 :tag int64} Seed
+
+
+    ^{:line 47 :tag float64 :doc "Epoch is the virtual wall clock's start, ms since 1970 (Date.now() and walltime); the monotonic clock starts at 0 and advances\n1 µs at each reading and to each timer's time when the world is idle (WAS44 (a))\n"} Epoch
+
+    ^{:line 49 :tag (slice Mount) :doc "Mounts are the directories fs sees (guest path, host path, read-only), Cwd process.cwd()\n"} Mounts
+    ^{:line 50 :tag string} Cwd
+
+
+    ^{:line 53 :tag int :doc "Frames > 0: the browser's mode: animation frames every 1000/60 ms until that many ran (the world then ends, status 0); 0:\nNode's mode (a program idle with nothing pending is resumed as deadlocked, as wasm_exec_node.js's exit handler does)\n"} Frames
+
+    ^{:line 55 :tag (slice InputEvent) :doc "Input are the events injected before a frame (doc/wasm/WEB.md §3)\n"} Input
+
+    ^{:line 57 :tag (slice string) :doc "Rec is the recording: the fakes' calls, the bridge's decoded commands, a \"frame N T\" line before each frame's\n"} Rec
+
+    ^{:line 59 :tag float64 :doc "MaxMs bounds the virtual clock (default a day): a program still running past it fails the world\n"} MaxMs
+
+    ^{:line 61 :tag (* JSRealm)} R
+    ^{:line 62 :tag (* Machine)} m
+    ^{:line 63 :tag (* Instance)} inst
+    ^{:line 64 :tag (* Memory)} mem
+    ^{:line 65 :tag (* JSObject)} goObj
+    ^{:line 66 :tag (slice any)} values
+    ^{:line 67 :tag (slice int)} refs ; -1: permanent
+    ^{:line 68 :tag (map any int)} ids
+    ^{:line 69 :tag (slice int)} pool
+    ^{:line 70 :tag bool} exited
+    ^{:line 71 :tag int32} code
+    ^{:line 72 :tag any} pending ; _pendingEvent
+    ^{:line 73 :tag float64} nowMs
+    ^{:line 74 :tag int64} ticks
+    ^{:line 75 :tag (slice (* jsTimer))} timers
+    ^{:line 76 :tag int} seq
+    ^{:line 77 :tag int} nextTID
+    ^{:line 78 :tag int} nextT
+    ^{:line 79 :tag (map int32 (* jsTimer))} goTO ; Go's scheduled timeouts (scheduleTimeoutEvent's ids)
+    ^{:line 80 :tag (slice (func []))} micro
+    ^{:line 81 :tag (slice rafEntry)} raf
+    ^{:line 82 :tag int} rafID
+    ^{:line 83 :tag int} frame
+    ^{:line 84 :tag (* rand/Rand)} rnd
+    ^{:line 85 :tag int} depth ; the world's entries into the machine (a callback's resume inside an import)
+    ^{:line 86 :tag (map int (* jsFD))} fds
+    ^{:line 87 :tag int} nextFD
+    ^{:line 88 :tag (map string (slice any))} listen ; addEventListener's listeners by event type (window, document and the canvas share them)
+    ^{:line 89 :tag (map string int)} fakeN
+    ^{:line 90 :tag (* gpuBridge)} gpu
+    ^{:line 91 :tag error} failure
+    ^{:line 92 :tag bool} stopped
+    ^{:line 93 :tag int} warnings))
+
+
+
+(go/type Mount "Mount is a directory of the world's fs.\n" (struct
+    ^{:line 98 :tag string} Guest ^string Host
+    ^{:line 99 :tag bool} ReadOnly))
+
+
+
+
+(go/type InputEvent "InputEvent is an input event delivered before frame Frame: Type keydown, keyup, pointermove, pointerdown, pointerup, wheel or\nresize; Code the key's KeyboardEvent.code; X, Y the pointer's position (the wheel's deltaY in Y; resize's width and height).\n" (struct
+    ^{:line 105 :tag int} Frame
+    ^{:line 106 :tag string} Type
+    ^{:line 107 :tag string} Code
+    ^{:line 108 :tag float64} X ^float64 Y))
+
+
+(go/type jsTimer (struct
+    ^{:line 112 :tag int} id
+    ^{:line 113 :tag float64} at
+    ^{:line 114 :tag int} seq
+    ^{:line 115 :tag (func [])} fn
+    ^{:line 116 :tag bool} dead))
+
+
+(go/type rafEntry (struct
+    ^{:line 120 :tag int} id
+    ^{:line 121 :tag any} cb))
+
+
+^{:go/end 130} (go/method bytes ^{:tag (slice byte)} [^{:tag (* GoJS)} w ^uint32 p ^uint32 n]
+  (let [d (.-Data (.-mem w))]
+    (when (> (+ (conv uint64 p) (conv uint64 n)) (conv uint64 (len d)))
+      (trap "out of bounds memory access"))
+
+    (subslice d p (+ p n))))
+
+
+^{:go/end 132} (go/method getInt64 ^int64 [^{:tag (* GoJS)} w ^uint32 a] (conv int64 (.Uint64 binary/LittleEndian (.bytes w a 8))))
+^{:go/end 135} (go/method setInt64 [^{:tag (* GoJS)} w ^uint32 a ^int64 v]
+  (.PutUint64 binary/LittleEndian (.bytes w a 8) (conv uint64 v)))
+
+^{:go/end 136} (go/method getInt32 ^int32 [^{:tag (* GoJS)} w ^uint32 a] (conv int32 (.Uint32 binary/LittleEndian (.bytes w a 4))))
+^{:go/end 139} (go/method setInt32 [^{:tag (* GoJS)} w ^uint32 a ^int32 v]
+  (.PutUint32 binary/LittleEndian (.bytes w a 4) (conv uint32 v)))
+
+^{:go/end 140} (go/method setUint8 [^{:tag (* GoJS)} w ^uint32 a ^byte v] (aset (.bytes w a 1) 0 v))
+
+
+^{:go/end 148} (go/method setNum64 "wasm_exec.js's setInt64 writes v's low 32 bits and floor(v / 2^32): a number's integral part\n" [^{:tag (* GoJS)} w ^uint32 a ^float64 v]
+  (let [lo (conv uint32 (conv int64 (math/Mod v 4294967296)))
+      ^{:line 145} hi (conv uint32 (conv int32 (math/Floor (/ v 4294967296))))]
+    (.PutUint32 binary/LittleEndian (.bytes w a 4) lo)
+    (.PutUint32 binary/LittleEndian (.bytes w (+ a 4) 4) hi)))
+
+
+(go/const ^{:val 2146959360} nanHead 0x7FF80000)
+
+^{:go/end 166} (go/method loadValue ^any [^{:tag (* GoJS)} w ^uint32 a]
+  (let [bits (.Uint64 binary/LittleEndian (.bytes w a 8))
+      ^{:line 154} f (math/Float64frombits bits)]
+    (when (== f 0)
+      (return JSUndefined))
+
+    (when (not (math/IsNaN f))
+      (return f))
+
+    (let [id (conv uint32 bits)]
+      (when (>= (conv int id) (len (.-values w)))
+        (trap (+ "gojs: reference " (itoa (conv int id)) " out of the table")))
+
+      (aget (.-values w) id))))
+
+
+^{:go/breaks [[4 180]] :go/end 181} (go/func typeFlag ^uint32 [^any v]
+  (type-switch [x v]
+    (case [(* JSObject)]
+      (when (!= (.-Fn x) nil)
+        (return 4))
+
+      (return 1))
+    (case [string]
+      (return 2))
+    (case [(* JSSymbol)]
+      (return 3)))
+
+  0)
+
+
+^{:go/end 218} (go/method storeValue [^{:tag (* GoJS)} w ^uint32 a ^any v]
+  (when [(values f ok) (assert float64 v)] (and ok (!= f 0))
+    (when (math/IsNaN f)
+      (.PutUint32 binary/LittleEndian (.bytes w (+ a 4) 4) nanHead)
+      (.PutUint32 binary/LittleEndian (.bytes w a 4) 0)
+      (return))
+
+    (.PutUint64 binary/LittleEndian (.bytes w a 8) (math/Float64bits f))
+    (return))
+
+  (when (== v JSUndefined)
+    (.PutUint64 binary/LittleEndian (.bytes w a 8) 0)
+    (return))
+
+  (when [(values f ok) (assert float64 v)] (and ok (== f 0))
+    (set! v 0.0)) ; SameValueZero: -0 is 0's id
+
+  (let [(values id ok) (aget (.-ids w) v)]
+    (when (not ok)
+      (if [n (len (.-pool w))] (> n 0)
+        (set! (values id (.-pool w)) (values (aget (.-pool w) (- n 1)) (subslice (.-pool w) _ (- n 1))))
+        (do
+          (set! id (len (.-values w)))
+          (set! (.-values w) (append (.-values w) nil))
+          (set! (.-refs w) (append (.-refs w) 0))))
+
+      (aset (.-values w) id v)
+      (aset (.-refs w) id 0)
+      (aset (.-ids w) v id))
+
+    (when (>= (aget (.-refs w) id) 0)
+      (inc! (aget (.-refs w) id)))
+
+    (.PutUint32 binary/LittleEndian (.bytes w (+ a 4) 4) (bit-or nanHead (typeFlag v)))
+    (.PutUint32 binary/LittleEndian (.bytes w a 4) (conv uint32 id))))
+
+
+^{:go/end 223} (go/method loadSlice ^{:tag (slice byte)} [^{:tag (* GoJS)} w ^uint32 a]
+  (let [(values p n) (values (.getInt64 w a) (.getInt64 w (+ a 8)))]
+    (.bytes w (conv uint32 p) (conv uint32 n))))
+
+
+^{:go/end 232} (go/method loadSliceOfValues ^{:tag (slice any)} [^{:tag (* GoJS)} w ^uint32 a]
+  (let [(values p n) (values (.getInt64 w a) (.getInt64 w (+ a 8)))
+      ^{:line 227} out (make (slice any) n)]
+    (for [i (conv int64 0)] (< i n) (inc! i)
+      (aset out i (.loadValue w (+ (conv uint32 p) (* (conv uint32 i) 8)))))
+
+    ^{:line 231} out))
+
+
+^{:go/end 237} (go/method loadString ^string [^{:tag (* GoJS)} w ^uint32 a]
+  (let [(values p n) (values (.getInt64 w a) (.getInt64 w (+ a 8)))]
+    (jsDecodeUTF8 (.bytes w (conv uint32 p) (conv uint32 n)))))
+
+
+
+^{:go/end 244} (go/method getsp "getsp is the export getsp (Go's SP after a call that may have run Go code: wasm_exec.js's \"see comment above\").\n" ^uint32 [^{:tag (* GoJS)} w]
+  (let [x (aget (.-Exports (.-inst w)) "getsp")
+      ^{:line 242} res (.enter w (.-Func x) nil)]
+    (conv uint32 (.-L (aget res 0)))))
+
+
+
+
+^{:go/end 276} (go/method enter "enter calls an export: at the world's top as Machine.Call does (the engine's errors stop the world), inside an import (a\ncallback's resume, an export called from an import) on the running machine, its failures unwinding to the top.\n" ^{:tag (slice V)} [^{:tag (* GoJS)} w ^{:tag (* Func)} f ^{:tag (slice V)} args]
+  (when (.-exited w)
+    (panic (addr (lit Exit (.-code w)))))
+
+  (when (> (.-depth w) 0)
+    (inc! (.-depth w))
+    (defer (^{:go/end 254} (fn [] (dec! (.-depth w)))))
+    (let [(values res err) (.call (.-m w) f args)]
+      (when (!= err nil)
+        (panic err))
+
+      (return res)))
+
+  (inc! (.-depth w))
+  (let [(values res err) (.Call (.-m w) f args)]
+    (dec! (.-depth w))
+    (when (!= err nil)
+      (when [(values e ok) (assert (* Exit) err)] ok
+        (set! (values (.-exited w) (.-code w)) (values true (.-Code e)))
+        (return nil))
+
+      (when (== (.-failure w) nil)
+        (set! (.-failure w) err))
+
+      (set! (.-stopped w) true)
+      (return nil))
+
+    ^{:line 275} res))
+
+
+^{:go/end 288} (go/method resume [^{:tag (* GoJS)} w]
+  (when (.-exited w)
+    (.Throw (.-R w) "" "Go program has already exited"))
+
+  (when [(values x ok) (aget (.-Exports (.-inst w)) "resume")] ok
+    (.enter w (.-Func x) nil))
+
+  (when (and (.-exited w) (> (.-depth w) 0))
+    (panic (addr (lit Exit (.-code w))))))
+
+
+
+
+
+^{:go/end 302} (go/method guard "guard runs an import's body: a JavaScript exception escaping it is the world's failure (wasm_exec.js would leave it to the\nhost's unhandled-rejection report), Go's own panics unwind as they are.\n" [^{:tag (* GoJS)} w ^string name ^{:tag (func [])} fn]
+  (defer (^{:go/end 300} (fn []
+        (when [x (recover)] (!= x nil)
+          (when [(values t ok) (assert (* JSThrow) x)] ok
+            (trap (+ "gojs: " name ": uncaught " (jsDescribe (.-V t)))))
+
+          (panic x)))))
+
+
+  (go/call fn))
+
+
+
+
+^{:go/end 513} (go/method Instance "Instance is module gojs over this world (and _gotest, wasm_exec.js's test imports, as GoTest): registered in m's store; Bind\ngives it its guest's instance.\n" ^{:tag (* Instance)} [^{:tag (* GoJS)} w ^{:tag (* Machine)} m]
+  (set! (.-m w) m)
+  (.init w)
+  (let [inst (addr (lit Instance :Exports (lit (map string Extern))))
+      ^{:line 310} i32 (lit ValType :K tI32)
+      ^{:line 311} def ^{:go/end 317} (fn [^string name ^{:tag (func [^uint32 sp])} fn]
+        (let [f (.addFunc (.-St m) (addr (lit Func :Type (funcTypeID (lit (slice ValType) i32) nil) :Host ^{:go/breaks [3] :go/end 315} (fn ^{:tag (slice V)} [^{:tag (* Machine)} m ^{:tag (slice V)} args]
+                    (.guard w name ^{:go/end 313} (fn [] (go/call fn (conv uint32 (.-L (aget args 0))))))
+                    nil))))]
+
+          (aset (.-Exports inst) name (lit Extern :Kind xFunc :Func f))))
+
+      ^{:line 318} r (.-R w)]
+    (def "runtime.wasmExit" ^{:go/end 322} (fn [^uint32 sp]
+        (set! (.-code w) (.getInt32 w (+ sp 8)))
+        (set! (.-exited w) true)))
+
+    (def "runtime.wasmWrite" ^{:go/end 328} (fn [^uint32 sp]
+        (let [fd (.getInt64 w (+ sp 8))
+            ^{:line 325} p (.getInt64 w (+ sp 16))
+            ^{:line 326} n (.getInt32 w (+ sp 24))]
+          (.writeSync w (conv int fd) (.bytes w (conv uint32 p) (conv uint32 n))))))
+
+    (def "runtime.resetMemoryDataView" ^{:go/end 329} (fn [^uint32 sp]))
+    (def "runtime.nanotime1" ^{:go/end 333} (fn [^uint32 sp]
+        ;; wasm_exec.js's (timeOrigin + performance.now()) * 1e6: the epoch plus the monotonic clock
+        (.setNum64 w (+ sp 8) (math/Floor (* (+ (.-Epoch w) (.perfNow w)) 1000000.0)))))
+
+    (def "runtime.walltime" ^{:go/end 338} (fn [^uint32 sp]
+        (let [ms (.dateNow w)]
+          (.setNum64 w (+ sp 8) (math/Floor (/ ms 1000)))
+          (.setInt32 w (+ sp 16) (conv int32 (* (math/Mod ms 1000) 1000000.0))))))
+
+    (def "runtime.scheduleTimeoutEvent" ^{:go/end 357} (fn [^uint32 sp]
+        (let [id (conv int32 (.-nextTID w))]
+          (inc! (.-nextTID w))
+          (let [delay (conv float64 (.getInt64 w (+ sp 8)))
+              ^{:line 343 :tag (* jsTimer)} t (zero (* jsTimer))]
+            (set! t (.setTimeout w delay ^{:go/end 354} (fn []
+                  (.resume w)
+                  (for [k 0] (and (== (aget (.-goTO w) id) t) (not (.-exited w))) (inc! k)
+                    ;; wasm_exec.js's workaround for golang/go#28975
+                    (fmt/Fprintln (.-Stderr w) "scheduleTimeoutEvent: missed timeout event")
+                    (when (== k 100)
+                      (trap "gojs: a timeout event missed 100 times"))
+
+                    (.resume w)))))
+
+
+            (aset (.-goTO w) id t)
+            (.setInt32 w (+ sp 16) id)))))
+
+    (def "runtime.clearTimeoutEvent" ^{:go/end 364} (fn [^uint32 sp]
+        (let [id (.getInt32 w (+ sp 8))]
+          (when [(values t ok) (aget (.-goTO w) id)] ok
+            (set! (.-dead t) true)
+            (delete (.-goTO w) id)))))
+
+
+    (def "runtime.getRandomData" ^{:go/end 367} (fn [^uint32 sp]
+        (.Read (.-rnd w) (.loadSlice w (+ sp 8)))))
+
+    (def "syscall/js.finalizeRef" ^{:go/end 380} (fn [^uint32 sp]
+        (let [id (.Uint32 binary/LittleEndian (.bytes w (+ sp 8) 4))]
+          (when (or (>= (conv int id) (len (.-refs w))) (< (aget (.-refs w) id) 0))
+            (return))
+
+          (dec! (aget (.-refs w) id))
+          (when (== (aget (.-refs w) id) 0)
+            (let [v (aget (.-values w) id)]
+              (aset (.-values w) id JSNull)
+              (delete (.-ids w) v)
+              (set! (.-pool w) (append (.-pool w) (conv int id))))))))
+
+
+    (def "syscall/js.stringVal" ^{:go/end 383} (fn [^uint32 sp]
+        (.storeValue w (+ sp 24) (.loadString w (+ sp 8)))))
+
+    (def "syscall/js.valueGet" ^{:go/end 388} (fn [^uint32 sp]
+        (let [res (.Get r (.loadValue w (+ sp 8)) (.loadString w (+ sp 16)))]
+          (set! sp (.getsp w))
+          (.storeValue w (+ sp 32) res))))
+
+    (def "syscall/js.valueSet" ^{:go/end 391} (fn [^uint32 sp]
+        (.Set r (.loadValue w (+ sp 8)) (.loadString w (+ sp 16)) (.loadValue w (+ sp 32)))))
+
+    (def "syscall/js.valueDelete" ^{:go/end 394} (fn [^uint32 sp]
+        (.Delete r (.loadValue w (+ sp 8)) (.loadString w (+ sp 16)))))
+
+    (def "syscall/js.valueIndex" ^{:go/end 397} (fn [^uint32 sp]
+        (.storeValue w (+ sp 24) (.Get r (.loadValue w (+ sp 8)) (jsNumStr (conv float64 (.getInt64 w (+ sp 16))))))))
+
+    (def "syscall/js.valueSetIndex" ^{:go/end 400} (fn [^uint32 sp]
+        (.Set r (.loadValue w (+ sp 8)) (jsNumStr (conv float64 (.getInt64 w (+ sp 16)))) (.loadValue w (+ sp 24)))))
+
+    ;; valueCall, valueInvoke, valueNew: wasm_exec.js's try around the call, the exception stored as the result with ok 0
+    (let [tryCall ^{:go/end 424} (fn [^uint32 sp ^uint32 resAt ^{:tag (func [] [any])} fn]
+          (let [^any res (zero any)
+              ^{:line 404} ok true]
+            (^{:go/end 416} (fn []
+                (defer (^{:go/end 414} (fn []
+                      (when [x (recover)] (!= x nil)
+                        (let [(values t isT) (assert (* JSThrow) x)]
+                          (when (not isT)
+                            (panic x))
+
+                          (set! (values res ok) (values (.-V t) false)))))))
+
+
+                (set! res (go/call fn))))
+
+            (set! sp (.getsp w))
+            (.storeValue w (+ sp resAt) res)
+            (if ok
+              (.setUint8 w (+ sp resAt 8) 1)
+
+              (.setUint8 w (+ sp resAt 8) 0))))]
+
+
+      (def "syscall/js.valueCall" ^{:go/end 432} (fn [^uint32 sp]
+          (tryCall sp 56 ^{:go/end 431} (fn ^any []
+              (let [v (.loadValue w (+ sp 8))
+                  ^{:line 428} m (.Get r v (.loadString w (+ sp 16)))
+                  ^{:line 429} args (.loadSliceOfValues w (+ sp 32))]
+                (.Call r m v args))))))
+
+
+      (def "syscall/js.valueInvoke" ^{:go/end 439} (fn [^uint32 sp]
+          (tryCall sp 40 ^{:go/end 438} (fn ^any []
+              (let [v (.loadValue w (+ sp 8))
+                  ^{:line 436} args (.loadSliceOfValues w (+ sp 16))]
+                (.Call r v JSUndefined args))))))
+
+
+      (def "syscall/js.valueNew" ^{:go/end 446} (fn [^uint32 sp]
+          (tryCall sp 40 ^{:go/end 445} (fn ^any []
+              (let [v (.loadValue w (+ sp 8))
+                  ^{:line 443} args (.loadSliceOfValues w (+ sp 16))]
+                (.Construct r v args))))))
+
+
+      (def "syscall/js.valueLength" ^{:go/end 449} (fn [^uint32 sp]
+          (.setNum64 w (+ sp 16) (jsParseInt r (.Get r (.loadValue w (+ sp 8)) "length")))))
+
+      (def "syscall/js.valuePrepareString" ^{:go/end 461} (fn [^uint32 sp]
+          (let [v (.loadValue w (+ sp 8))
+              ^{:line 452 :tag string} s (zero string)]
+            (if [(values sym ok) (assert (* JSSymbol) v)] ok
+              (set! s (+ "Symbol(" (.-Desc sym) ")"))
+
+              (set! s (.ToString r v)))
+
+            (let [b (.Bytes r (conv (slice byte) s))]
+              (.storeValue w (+ sp 16) b)
+              (.setInt64 w (+ sp 24) (conv int64 (len (.-Bytes b))))))))
+
+      (def "syscall/js.valueLoadString" ^{:go/end 472} (fn [^uint32 sp]
+          (let [(values s _) (assert (* JSObject) (.loadValue w (+ sp 8)))
+              ^{:line 464} dst (.loadSlice w (+ sp 16))]
+            (when (or (== s nil) (== (.-Bytes s) nil))
+              (.Throw r "type" "valueLoadString: not a Uint8Array"))
+
+            (when (> (len (.-Bytes s)) (len dst))
+              (.Throw r "range" "offset is out of bounds"))
+
+            (copy dst (.-Bytes s)))))
+
+      (def "syscall/js.valueInstanceOf" ^{:go/end 479} (fn [^uint32 sp]
+          (if (.InstanceOf r (.loadValue w (+ sp 8)) (.loadValue w (+ sp 16)))
+            (.setUint8 w (+ sp 24) 1)
+
+            (.setUint8 w (+ sp 24) 0))))
+
+
+      (let [isBytes ^{:go/end 483} (fn [^any v] :results [(* JSObject) bool]
+            (let [(values o ok) (assert (* JSObject) v)]
+              (return o (and ok ^:go/paren (or (== (.-Class o) "Uint8Array") (== (.-Class o) "Uint8ClampedArray"))))))]
+
+        (def "syscall/js.copyBytesToGo" ^{:go/end 494} (fn [^uint32 sp]
+            (let [dst (.loadSlice w (+ sp 8))
+                (values src ok) (isBytes (.loadValue w (+ sp 32)))]
+              (when (not ok)
+                (.setUint8 w (+ sp 48) 0)
+                (return))
+
+              (let [n (copy dst (.-Bytes src))]
+                (.setInt64 w (+ sp 40) (conv int64 n))
+                (.setUint8 w (+ sp 48) 1)))))
+
+        (def "syscall/js.copyBytesToJS" ^{:go/end 505} (fn [^uint32 sp]
+            (let [(values dst ok) (isBytes (.loadValue w (+ sp 8)))
+                ^{:line 497} src (.loadSlice w (+ sp 16))]
+              (when (not ok)
+                (.setUint8 w (+ sp 48) 0)
+                (return))
+
+              (let [n (copy (.-Bytes dst) src)]
+                (.setInt64 w (+ sp 40) (conv int64 n))
+                (.setUint8 w (+ sp 48) 1)))))
+
+        ;; debug(value): wasm_exec.js's console.log of its argument (an i32 here; no Go code imports it)
+        (let [f (.addFunc (.-St m) (addr (lit Func :Type (funcTypeID (lit (slice ValType) i32) nil) :Host ^{:go/breaks [3] :go/end 510} (fn ^{:tag (slice V)} [^{:tag (* Machine)} m ^{:tag (slice V)} args]
+                    (fmt/Fprintln (.-Stdout w) (conv int32 (.-L (aget args 0))))
+                    nil))))]
+
+          (aset (.-Exports inst) "debug" (lit Extern :Kind xFunc :Func f))
+          ^{:line 512} inst)))))
+
+
+
+
+^{:go/end 536} (go/method GoTest "GoTest is wasm_exec.js's _gotest module (syscall/js's tests' imports): add, and callExport calling the guest's exports\ntestExport0 and testExport.\n" ^{:tag (* Instance)} [^{:tag (* GoJS)} w ^{:tag (* Machine)} m]
+  (let [inst (addr (lit Instance :Exports (lit (map string Extern))))
+      (values i32 i64) (values (lit ValType :K tI32) (lit ValType :K tI64))
+      ^{:line 520} add (.addFunc (.-St m) (addr (lit Func :Type (funcTypeID (lit (slice ValType) i32 i32) (lit (slice ValType) i32)) :Host ^{:go/end 522} (fn ^{:tag (slice V)} [^{:tag (* Machine)} m ^{:tag (slice V)} args]
+              (lit (slice V) (lit _ :L (conv uint64 (conv uint32 (+ (.-L (aget args 0)) (.-L (aget args 1)))))))))))
+
+      ^{:line 523} call (.addFunc (.-St m) (addr (lit Func :Type (funcTypeID (lit (slice ValType) i32 i64) (lit (slice ValType) i64)) :Host ^{:go/end 532} (fn ^{:tag (slice V)} [^{:tag (* Machine)} m ^{:tag (slice V)} args]
+              (when [(values x ok) (aget (.-Exports (.-inst w)) "testExport0")] ok
+                (.enter w (.-Func x) nil))
+
+              (let [(values x ok) (aget (.-Exports (.-inst w)) "testExport")]
+                (when (not ok)
+                  (trap "gojs: _gotest.callExport: no export testExport"))
+
+                (.enter w (.-Func x) args))))))]
+
+    (aset (.-Exports inst) "add" (lit Extern :Kind xFunc :Func add))
+    (aset (.-Exports inst) "callExport" (lit Extern :Kind xFunc :Func call))
+    ^{:line 535} inst))
+
+
+^{:go/end 544} (go/func jsParseInt ^float64 [^{:tag (* JSRealm)} r ^any v]
+  (let [f (.ToNumber r v)]
+    (when (or (math/IsNaN f) (math/IsInf f 0))
+      (return 0))
+
+    (math/Trunc f)))
+
+
+
+^{:go/end 552} (go/method Bind "Bind gives the world its guest's instance (its memory, the export mem).\n" [^{:tag (* GoJS)} w ^{:tag (* Instance)} inst]
+  (set! (.-inst w) inst)
+  (when [(values x ok) (aget (.-Exports inst) "mem")] (and ok (== (.-Kind x) xMemory))
+    (set! (.-mem w) (.-Mem x))))
+
+
+
+^{:go/end 557} (go/method perfNow ^float64 [^{:tag (* GoJS)} w]
+  (inc! (.-ticks w))
+  (+ (.-nowMs w) (* (conv float64 (.-ticks w)) 0.001)))
+
+
+
+^{:go/end 564} (go/method advance "advance moves the clock to a timer's or a frame's time (never back).\n" [^{:tag (* GoJS)} w ^float64 at]
+  (when (> at (+ (.-nowMs w) (* (conv float64 (.-ticks w)) 0.001)))
+    (set! (values (.-nowMs w) (.-ticks w)) (values at 0))))
+
+
+
+^{:go/end 566} (go/method dateNow ^float64 [^{:tag (* GoJS)} w] (math/Floor (+ (.-Epoch w) (.perfNow w))))
+
+
+^{:go/end 581} (go/method setTimeout "setTimeout is a timer after delay ms (Node's: at least 1).\n" ^{:tag (* jsTimer)} [^{:tag (* GoJS)} w ^float64 delay ^{:tag (func [])} fn]
+  (when (not (>= delay 1))
+    (set! delay 1))
+
+  (when (> delay 2147483647)
+    (set! delay 1))
+
+  (inc! (.-seq w))
+  (inc! (.-nextT w))
+  (let [t (addr (lit jsTimer :id (.-nextT w) :at (+ (.-nowMs w) (* (conv float64 (.-ticks w)) 0.001) delay) :seq (.-seq w) :fn fn))]
+    (set! (.-timers w) (append (.-timers w) t))
+    ^{:line 580} t))
+
+
+^{:go/end 589} (go/method drainMicro [^{:tag (* GoJS)} w]
+  (while (and (> (len (.-micro w)) 0) (not (.-stopped w)) (not (.-exited w)))
+    (let [f (aget (.-micro w) 0)]
+      (set! (.-micro w) (subslice (.-micro w) 1))
+      (.callback w f))))
+
+
+
+
+^{:go/end 612} (go/method callback "callback runs a task of the event loop: a JavaScript exception escaping it is reported (Node prints it and exits 1).\n" [^{:tag (* GoJS)} w ^{:tag (func [])} f]
+  (defer (^{:go/end 610} (fn []
+        (when [x (recover)] (!= x nil)
+          (type-switch [e x]
+            (case [(* JSThrow)]
+              (fmt/Fprintln (.-Stderr w) (+ "Uncaught " (jsDescribe (.-V e))))
+              (set! (values (.-code w) (.-exited w)) (values 1 true)))
+            (case [(* Exit)]
+              (set! (values (.-exited w) (.-code w)) (values true (.-Code e))))
+            (case [error]
+              (when (== (.-failure w) nil)
+                (set! (.-failure w) e))
+
+              (set! (.-stopped w) true))
+            (default
+              (panic x)))))))
+
+
+
+  (f))
+
+
+
+
+
+^{:go/end 700} (go/method Run "Run starts the guest (wasm_exec.js's run: argv and the environment written at 4096, then the export run) and runs the event\nloop until the program exits, the frames are done, or the world fails: the status (the program's, or 0 in the browser's mode\nwhen the frames are done) and the world's failure (a trap, a crash).\n" [^{:tag (* GoJS)} w] :results [int error]
+  (when (== (.-mem w) nil)
+    (return 126 (fmt/Errorf "gojs: the module exports no memory mem")))
+
+  (let [(values run ok) (aget (.-Exports (.-inst w)) "run")]
+    (when (not ok)
+      (return 126 (fmt/Errorf "gojs: the module exports no run")))
+
+    (let [offset (conv uint32 4096)
+        ^{:line 626} strPtr ^{:go/end 635} (fn ^uint32 [^string s]
+          (let [p offset
+              ^{:line 628} b (append (conv (slice byte) s) 0)]
+            (copy (.bytes w offset (conv uint32 (len b))) b)
+            (set! offset + (conv uint32 (len b)))
+            (when (!= (% offset 8) 0)
+              (set! offset + (- 8 (% offset 8))))
+
+            ^{:line 634} p))
+
+        ^{:line 636 :tag (slice uint32)} ptrs (zero (slice uint32))]
+      (range [_ a (.-Args w)]
+        (set! ptrs (append ptrs (strPtr a))))
+
+      (set! ptrs (append ptrs 0))
+      (let [env (append (lit (slice string)) (spread (.-Env w)))]
+        (sort/Slice env ^{:go/end 646} (fn ^bool [^int i ^int j]
+            (let [(values ki _ _) (strings/Cut (aget env i) "=")
+                (values kj _ _) (strings/Cut (aget env j) "=")]
+              (< ki kj))))
+
+        (range [_ e env]
+          (set! ptrs (append ptrs (strPtr e))))
+
+        (set! ptrs (append ptrs 0))
+        (let [argv offset]
+          (range [_ p ptrs]
+            (.PutUint32 binary/LittleEndian (.bytes w offset 4) p)
+            (.PutUint32 binary/LittleEndian (.bytes w (+ offset 4) 4) 0)
+            (set! offset + 8))
+
+          (when (>= offset (+ 4096 8192))
+            (return 126 (fmt/Errorf "gojs: total length of command line and environment variables exceeds limit")))
+
+          (.callback w ^{:go/end 660} (fn [] (.enter w (.-Func run) (lit (slice V) (lit _ :L (conv uint64 (len (.-Args w)))) (lit _ :L (conv uint64 argv))))))
+          (.drainMicro w)
+          (while (and (not (.-exited w)) (not (.-stopped w)))
+            (when (and (> (.-Frames w) 0) (>= (.-frame w) (.-Frames w)))
+              (break))
+
+            (let [t (.nextTimer w)
+                ^{:line 667} frameAt (/ (* (conv float64 (+ (.-frame w) 1)) 1000) 60)]
+              (switch
+                (case [(and (> (.-Frames w) 0) (> (len (.-raf w)) 0) ^:go/paren (or (== t nil) (< frameAt (.-at t))))]
+                  (.runFrame w frameAt))
+                (case [(!= t nil)]
+                  (when (> (.-at t) (.-MaxMs w))
+                    (set! (.-failure w) (fmt/Errorf "gojs: the virtual clock passed %s ms" (jsNumStr (.-MaxMs w))))
+                    (set! (.-stopped w) true)
+                    (break))
+
+                  (set! (.-dead t) true)
+                  (.advance w (.-at t))
+                  (.callback w (.-fn t)))
+                (case [(> (.-Frames w) 0)]
+                  ;; the browser's mode: a page idle with no frame asked stays as it is: the world ends
+                  (set! (.-stopped w) true))
+                (default
+                  ;; wasm_exec_node.js's exit handler: an idle program is resumed with event 0, Go reporting its deadlock
+                  (set! (.-pending w) (.Object (.-R w) "id" 0.0))
+                  (.callback w (.-resume w))
+                  (when (not (.-exited w))
+                    (set! (.-stopped w) true))))
+
+
+              (.drainMicro w)))
+
+          (when (!= (.-failure w) nil)
+            (return 126 (.-failure w)))
+
+          (when (.-exited w)
+            (return (conv int (.-code w)) nil))
+
+          (return 0 nil))))))
+
+
+^{:go/end 716} (go/method nextTimer ^{:tag (* jsTimer)} [^{:tag (* GoJS)} w]
+  (let [^{:tag (* jsTimer)} best (zero (* jsTimer))
+      ^{:line 704} live (subslice (.-timers w) _ 0)]
+    (range [_ t (.-timers w)]
+      (when (.-dead t)
+        (continue))
+
+      (set! live (append live t))
+      (when (or (== best nil) (< (.-at t) (.-at best)) (and (== (.-at t) (.-at best)) (< (.-seq t) (.-seq best))))
+        (set! best t)))
+
+
+    (set! (.-timers w) live)
+    ^{:line 715} best))
+
+
+
+
+^{:go/end 739} (go/method runFrame "runFrame is an animation frame: the input events of this frame delivered, then the callbacks requestAnimationFrame registered\n(each with the frame's time), the recording marked.\n" [^{:tag (* GoJS)} w ^float64 at]
+  (inc! (.-frame w))
+  (.advance w at)
+  (set! (.-Rec w) (append (.-Rec w) (fmt/Sprintf "frame %d %s" (.-frame w) (jsNumStr (/ (math/Round (* at 1000)) 1000)))))
+  (range [_ e (.-Input w)]
+    (when (== (.-Frame e) (.-frame w))
+      (.deliver w e)))
+
+
+  (let [cbs (.-raf w)]
+    (set! (.-raf w) nil)
+    (range [_ c cbs]
+      (let [cb (.-cb c)]
+        (.callback w ^{:go/end 733} (fn [] (.Call (.-R w) cb JSUndefined (lit (slice any) at))))
+        (.drainMicro w)
+        (when (or (.-exited w) (.-stopped w))
+          (return))))))
+
+
+
+
+^{:go/end 759} (go/method writeSync ^int [^{:tag (* GoJS)} w ^int fd ^{:tag (slice byte)} b]
+  (switch fd
+    (case [1]
+      (.Write (.-Stdout w) b))
+    (case [2]
+      (.Write (.-Stderr w) b))
+    (default
+      (let [(values f ok) (aget (.-fds w) fd)]
+        (when (not ok)
+          (.Throw (.-R w) "" "EBADF: bad file descriptor, write"))
+
+        (let [(values n err) (.write f b -1)]
+          (when (!= err nil)
+            (panic (addr (lit JSThrow (.nodeError w err "write")))))
+
+          (return n)))))
+
+  (len b))
+
+
+
+^{:go/end 912} (go/method init "init makes the realm and the world's globals.\n" [^{:tag (* GoJS)} w]
+  (when (== (.-Stdout w) nil)
+    (set! (.-Stdout w) io/Discard))
+
+  (when (== (.-Stderr w) nil)
+    (set! (.-Stderr w) io/Discard))
+
+  (when (== (.-Stdin w) nil)
+    (set! (.-Stdin w) (strings/NewReader "")))
+
+  (when (== (.-Cwd w) "")
+    (set! (.-Cwd w) "/"))
+
+  (when (== (.-MaxMs w) 0)
+    (set! (.-MaxMs w) 86400000))
+
+  (when (== (.-Epoch w) 0)
+    (set! (.-Epoch w) 1767225600000)) ; 2026-01-01T00:00:00Z
+
+  (set! (.-rnd w) (rand/New (rand/NewSource (.-Seed w))))
+  (set! (.-goTO w) (lit (map int32 (* jsTimer))))
+  (set! (.-nextTID w) 1)
+  (set! (.-fds w) (lit (map int (* jsFD))))
+  (set! (.-nextFD w) 3)
+  (set! (.-listen w) (lit (map string (slice any))))
+  (set! (.-fakeN w) (lit (map string int)))
+  (let [r (NewRealm)]
+    (set! (.-R w) r)
+    (set! (.-Now r) (.-dateNow w))
+    (set! (.-Micro r) ^{:go/end 791} (fn [^{:tag (func [])} f] (set! (.-micro w) (append (.-micro w) f))))
+    (let [g (.-Global r)
+        ^{:line 793} go_ (.obj r)]
+      (set! (.-goObj w) go_)
+      (set! (.-Class go_) "Go")
+      (set! (.-Getter go_) ^{:go/end 809} (fn [^string k] :results [any bool]
+          (switch k
+            (case ["_pendingEvent"]
+              (when (== (.-pending w) nil)
+                (return JSNull true))
+
+              (return (.-pending w) true))
+            (case ["_values"]
+              (return (.Array r (append (lit (slice any)) (spread (.-values w)))) true))
+            (case ["exited"]
+              (return (.-exited w) true)))
+
+          (return nil false)))
+
+      (set! (.-Setter go_) ^{:go/breaks [[3 818]] :go/end 819} (fn ^bool [^string k ^any v]
+          (when (== k "_pendingEvent")
+            (set! (.-pending w) v)
+            (when (== v JSNull)
+              (set! (.-pending w) nil))
+
+            (return true))
+
+          false))
+
+      (.Method r go_ "_makeFuncWrapper" ^{:go/end 828} (fn ^any [^any this ^{:tag (slice any)} args]
+          (let [id (arg args 0)]
+            (.Func r "" ^{:go/end 827} (fn ^any [^any this ^{:tag (slice any)} a]
+                (let [ev (.Object r "id" id "this" this "args" (.Array r (append (lit (slice any)) (spread a))))]
+                  (set! (.-pending w) ev)
+                  (.resume w)
+                  (.Get r ev "result")))))))
+
+
+      (set! (.-values w) (lit (slice any) (math/NaN) 0.0 JSNull true false g go_))
+      (set! (.-refs w) (lit (slice int) -1 -1 -1 -1 -1 -1 -1))
+      (set! (.-ids w) (lit (map any int) [0.0 1] [JSNull 2] [true 3] [false 4] [(conv any g) 5] [(conv any go_) 6]))
+
+      (let [console (.obj r)]
+        (.Put g "console" console)
+        (let [out ^{:go/end 844} (fn ^{:tag (func [^any this ^{:tag (slice any)} args] [any])} [^io/Writer dst]
+              ^{:go/end 843} (fn ^any [^any this ^{:tag (slice any)} args]
+                (let [parts (make (slice string) (len args))]
+                  (range [i a args]
+                    (aset parts i (jsDescribe a)))
+
+                  (fmt/Fprintln dst (strings/Join parts " "))
+                  ^{:line 842} JSUndefined)))]
+
+
+          (.Method r console "log" (out (.-Stdout w)))
+          (.Method r console "info" (out (.-Stdout w)))
+          (.Method r console "warn" (out (.-Stderr w)))
+          (.Method r console "error" (out (.-Stderr w)))
+          (let [perf (.obj r)]
+            (.Put g "performance" perf)
+            (.Method r perf "now" ^{:go/end 851} (fn ^any [^any this ^{:tag (slice any)} args] (.perfNow w)))
+            (let [crypto (.obj r)]
+              (.Put g "crypto" crypto)
+              (.Method r crypto "getRandomValues" ^{:go/end 861} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (let [(values o ok) (assert (* JSObject) (arg args 0))]
+                    (when (or (not ok) (== (.-Bytes o) nil))
+                      (.Throw r "type" "The data argument must be an integer-type TypedArray"))
+
+                    (.Read (.-rnd w) (.-Bytes o))
+                    ^{:line 860} o)))
+
+              (.Method r g "setTimeout" ^{:go/end 870} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (let [cb (arg args 0)
+                      ^{:line 864} rest (lit (slice any))]
+                    (when (> (len args) 2)
+                      (set! rest (append rest (spread (subslice args 2)))))
+
+                    (let [t (.setTimeout w (.ToNumber r (arg args 1)) ^{:go/end 868} (fn [] (.Call r cb JSUndefined rest)))]
+                      (conv float64 (.-id t))))))
+
+              (.Method r g "clearTimeout" ^{:go/end 879} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (let [id (conv int (.ToNumber r (arg args 0)))]
+                    (range [_ t (.-timers w)]
+                      (when (== (.-id t) id)
+                        (set! (.-dead t) true)))
+
+
+                    ^{:line 878} JSUndefined)))
+
+              (.Method r g "queueMicrotask" ^{:go/end 884} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (let [cb (arg args 0)]
+                    (set! (.-micro w) (append (.-micro w) ^{:go/end 882} (fn [] (.Call r cb JSUndefined nil))))
+                    ^{:line 883} JSUndefined)))
+
+              (let [te (.Func r "TextEncoder" ^{:go/breaks [3] :go/end 888} (fn ^any [^any this ^{:tag (slice any)} args]
+                      (.Throw r "type" "Class constructor TextEncoder cannot be invoked without 'new'")
+                      nil))]
+
+                (set! (.-Ctor te) ^{:go/end 893} (fn ^any [^{:tag (slice any)} args]
+                    (let [o (.obj r)]
+                      (.Method r o "encode" ^{:go/end 891} (fn ^any [^any this ^{:tag (slice any)} a] (.Bytes r (conv (slice byte) (.ToString r (arg a 0))))))
+                      ^{:line 892} o)))
+
+                (.Put g "TextEncoder" te)
+                (let [td (.Func r "TextDecoder" ^{:go/breaks [3] :go/end 898} (fn ^any [^any this ^{:tag (slice any)} args]
+                        (.Throw r "type" "Class constructor TextDecoder cannot be invoked without 'new'")
+                        nil))]
+
+                  (set! (.-Ctor td) ^{:go/end 908} (fn ^any [^{:tag (slice any)} args]
+                      (let [o (.obj r)]
+                        (.Method r o "decode" ^{:go/breaks [[3 905]] :go/end 906} (fn ^any [^any this ^{:tag (slice any)} a]
+                            (when [(values b ok) (assert (* JSObject) (arg a 0))] (and ok (!= (.-Bytes b) nil))
+                              (return (jsDecodeUTF8 (.-Bytes b))))
+
+                            ""))
+
+                        ^{:line 907} o)))
+
+                  (.Put g "TextDecoder" td)
+                  (.initNode w)
+                  (.initPage w))))))))))

@@ -42,12 +42,17 @@ arbace_crop_paths=(
   arbace/repr/asm.ae 'arbace/repr/asm/*'
   # the assembler of the assembly crops: TableGen, amd64's table generator, matcher, encoder and check (AX2)
   'arbace/asm/*'
+  # repr/wasm, WebAssembly's bridge, and the Wasm crop's namespaces (arbace.wasm.*: the validator, w2g, the check; doc/wasm/WASM-SURVEY.md
+  # §13.2, WAS24 (a), WA1)
+  arbace/repr/wasm.ae 'arbace/repr/wasm/*' 'arbace/wasm/*'
   # their Go forms: oi's (with its C API, oicapi), si's (scm, scminterp), pyi's (py, expat, pyexpat), hsi's (hs) and the libm port hsi and pyi import
   go/arbace/oi.ae 'go/arbace/oi/*' go/arbace/oicapi.ae 'go/arbace/oicapi/*' go/arbace/scm.ae 'go/arbace/scm/*' go/arbace/scminterp.ae 'go/arbace/scminterp/*'
   go/arbace/py.ae 'go/arbace/py/*' go/arbace/expat.ae 'go/arbace/expat/*' go/arbace/pyexpat.ae 'go/arbace/pyexpat/*'
   go/arbace/hs.ae 'go/arbace/hs/*' go/arbace/libm.ae 'go/arbace/libm/*'
   # x86i's (the x86-64 integer machine, AX5) and the frame of the machine emulators it runs on, a light driver (AXS51 (a))
   go/arbace/x86i.ae 'go/arbace/x86i/*' go/arbace/emu.ae 'go/arbace/emu/*' go/arbace/a64i.ae 'go/arbace/a64i/*'
+  # wai's (the Wasm engine, a light driver; WAS6 (a), WA4)
+  go/arbace/wai.ae 'go/arbace/wai/*'
   # pyi's lazy modules (queue 208, 209, 215: the C library host, _bz2's, _lzma's, _zstd's, _ssl's and _sqlite3's glue; W-P6 (a))
   go/arbace/clib.ae 'go/arbace/clib/*' go/arbace/pybz2.ae 'go/arbace/pybz2/*' go/arbace/pylzma.ae 'go/arbace/pylzma/*'
   go/arbace/pyzstd.ae 'go/arbace/pyzstd/*' go/arbace/pyssl.ae 'go/arbace/pyssl/*' go/arbace/pysqlite3.ae 'go/arbace/pysqlite3/*'
@@ -58,7 +63,7 @@ arbace_crop_paths=(
   # the crops' scripts' libraries
   'bin/lib/oi/*' 'bin/lib/repr-cpp/*' 'bin/lib/cppi/*' 'bin/lib/rsi/*' 'bin/lib/hsi/*' 'bin/lib/si/*' 'bin/lib/pyi/*'
   'bin/lib/repr-haskell/*' 'bin/lib/repr-rust/*' 'bin/lib/repr-ocaml/*' 'bin/lib/repr-scheme/*' 'bin/lib/repr-python/*'
-  'bin/lib/repr-llvm/*' 'bin/lib/crops/*'
+  'bin/lib/repr-llvm/*' 'bin/lib/crops/*' 'bin/lib/repr-wasm/*' 'bin/lib/wai/*'
 )
 arbace_not_crops=()
 for _p in "${arbace_crop_paths[@]}"; do arbace_not_crops+=(! -path "$_p"); done

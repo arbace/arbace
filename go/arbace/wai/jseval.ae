@@ -1,0 +1,1152 @@
+(in-ns 'go.arbace.wai) (go/file "jseval.go" :imports [
+
+
+    ^{:line 4} [math "math"]
+    ^{:line 5} [strconv "strconv"]
+    ^{:line 6} [strings "strings"]
+    ^{:line 7} [utf8 "unicode/utf8"]])
+
+
+;; The headless world's eval (doc/wasm/WAI.md §10.3, WAS43 (a)): a small subset of JavaScript, parsed and evaluated over the
+;; realm's values, for the programs that hand the world source text (syscall/js's tests' eval of object literals and of an
+;; immediately invoked function). The subset: number, string (with escapes), template-free literals, object and array literals
+;; (methods' shorthand), function expressions and declarations, arrow functions with an expression or a block body, this,
+;; var/let/const, if/else, while, for(;;), return, throw, try/catch/finally, the operators of assignment (= += -= *= /=), ?:, || &&,
+;; ?? , == != === !==, < > <= >=, + - * / %, unary ! - + typeof void, prefix and postfix ++ --, calls, member access, new, delete,
+;; instanceof, in. A program outside it is a SyntaxError naming the subset.
+
+(go/type jsTok (struct
+    ^{:line 19 :tag byte} k ; 'n' number, 's' string, 'i' identifier, 'p' punctuator, 'e' end
+    ^{:line 20 :tag string} s
+    ^{:line 21 :tag float64} num
+    ^{:line 22 :tag bool} nl)) ; a line terminator before it
+
+
+(go/type jsLexer (struct
+    ^{:line 26 :tag string} src
+    ^{:line 27 :tag int} pos
+    ^{:line 28 :tag (slice jsTok)} toks))
+
+
+(go/var jsPuncts ^{:go/breaks [20 44]} (lit (slice string) ">>>=" "===" "!==" "**=" "..." "<<=" ">>=" ">>>" "=>" "==" "!=" "<=" ">=" "&&" "||" "??" "++" "--"
+    "+=" "-=" "*=" "/=" "%=" "**" "<<" ">>" "?." "{" "}" "(" ")" "[" "]" ";" "," "<" ">" "+" "-" "*" "/" "%"
+    "!" "~" "?" ":" "=" "." "&" "|" "^"))
+
+^{:go/end 198} (go/method lex ^{:tag (slice jsTok)} [^{:tag (* JSRealm)} r ^string src]
+  (let [l (addr (lit jsLexer :src src))
+      ^{:line 37} nl false]
+    (while true
+      (while (< (.-pos l) (len src))
+        (let [c (aget src (.-pos l))]
+          (cond (or (== c \newline) (== c \return)) (do
+              (set! nl true)
+              (inc! (.-pos l)))
+            (or (== c \space) (== c \tab) (== c \formfeed) (== c \u000b))
+            (inc! (.-pos l))
+            (strings/HasPrefix (subslice src (.-pos l)) "//")
+            (while (and (< (.-pos l) (len src)) (!= (aget src (.-pos l)) \newline))
+              (inc! (.-pos l)))
+
+            (strings/HasPrefix (subslice src (.-pos l)) "/*")
+            (let [e (strings/Index (subslice src (+ (.-pos l) 2)) "*/")]
+              (when (< e 0)
+                (.Throw r "syntax" "Invalid or unexpected token"))
+
+              (when (strings/ContainsAny (subslice src (.-pos l) (+ (.-pos l) 2 e)) "\n\r")
+                (set! nl true))
+
+              (set! (.-pos l) + (+ e 4))) :else
+
+            (break))))
+
+
+      (when (>= (.-pos l) (len src))
+        (set! (.-toks l) (append (.-toks l) (lit jsTok :k \e :nl nl)))
+        (return (.-toks l)))
+
+      (let [c (aget src (.-pos l))
+          ^{:line 68} st (.-pos l)]
+        (switch
+          (case [(or (and (>= c \0) (<= c \9)) (and (== c \.) (< (+ (.-pos l) 1) (len src)) (>= (aget src (+ (.-pos l) 1)) \0) (<= (aget src (+ (.-pos l) 1)) \9)))]
+            (when (and (== c \0) (< (+ (.-pos l) 1) (len src)) ^:go/paren (or (== (bit-or (aget src (+ (.-pos l) 1)) 0x20) \x) (== (bit-or (aget src (+ (.-pos l) 1)) 0x20) \b) (== (bit-or (aget src (+ (.-pos l) 1)) 0x20) \o)))
+              (let [base (aget (lit (map byte int) [\x 16] [\b 2] [\o 8]) (bit-or (aget src (+ (.-pos l) 1)) 0x20))]
+                (set! (.-pos l) + 2)
+                (while (and (< (.-pos l) (len src)) (isJSIdent (aget src (.-pos l))))
+                  (inc! (.-pos l)))
+
+                (let [(values n err) (strconv/ParseUint (subslice src (+ st 2) (.-pos l)) base 64)]
+                  (when (!= err nil)
+                    (.Throw r "syntax" "Invalid or unexpected token"))
+
+                  (set! (.-toks l) (append (.-toks l) (lit jsTok :k \n :num (conv float64 n) :nl nl)))
+                  (break))))
+
+            (while (and (< (.-pos l) (len src)) ^:go/paren (or (and (>= (aget src (.-pos l)) \0) (<= (aget src (.-pos l)) \9)) (== (aget src (.-pos l)) \.)))
+              (inc! (.-pos l)))
+
+            (when (and (< (.-pos l) (len src)) (== (bit-or (aget src (.-pos l)) 0x20) \e))
+              (inc! (.-pos l))
+              (when (and (< (.-pos l) (len src)) ^:go/paren (or (== (aget src (.-pos l)) \+) (== (aget src (.-pos l)) \-)))
+                (inc! (.-pos l)))
+
+              (while (and (< (.-pos l) (len src)) (>= (aget src (.-pos l)) \0) (<= (aget src (.-pos l)) \9))
+                (inc! (.-pos l))))
+
+
+            (let [(values f err) (strconv/ParseFloat (subslice src st (.-pos l)) 64)]
+              (when (!= err nil)
+                (.Throw r "syntax" "Invalid or unexpected token"))
+
+              (set! (.-toks l) (append (.-toks l) (lit jsTok :k \n :num f :nl nl)))))
+          (case [(or (== c \") (== c \'))]
+            (inc! (.-pos l))
+            (let [^strings/Builder sb (zero strings/Builder)]
+              (while true
+                (when (or (>= (.-pos l) (len src)) (== (aget src (.-pos l)) \newline))
+                  (.Throw r "syntax" "Invalid or unexpected token"))
+
+                (let [d (aget src (.-pos l))]
+                  (when (== d c)
+                    (inc! (.-pos l))
+                    (break))
+
+                  (when (!= d \\)
+                    (.WriteByte sb d)
+                    (inc! (.-pos l))
+                    (continue))
+
+                  (inc! (.-pos l))
+                  (when (>= (.-pos l) (len src))
+                    (.Throw r "syntax" "Invalid or unexpected token"))
+
+                  (let [e (aget src (.-pos l))]
+                    (inc! (.-pos l))
+                    (switch e
+                      (case [\n]
+                        (.WriteByte sb \newline))
+                      (case [\t]
+                        (.WriteByte sb \tab))
+                      (case [\r]
+                        (.WriteByte sb \return))
+                      (case [\b]
+                        (.WriteByte sb \backspace))
+                      (case [\f]
+                        (.WriteByte sb \formfeed))
+                      (case [\v]
+                        (.WriteByte sb \u000b))
+                      (case [\0]
+                        (.WriteByte sb 0))
+                      (case [\newline])
+                      (case [\x \u]
+                        (let [n 2]
+                          (when (== e \u)
+                            (set! n 4)
+                            (when (and (< (.-pos l) (len src)) (== (aget src (.-pos l)) \{))
+                              (let [end (strings/IndexByte (subslice src (.-pos l)) \})]
+                                (when (< end 0)
+                                  (.Throw r "syntax" "Invalid Unicode escape sequence"))
+
+                                (let [(values v err) (strconv/ParseUint (subslice src (+ (.-pos l) 1) (+ (.-pos l) end)) 16 32)]
+                                  (when (!= err nil)
+                                    (.Throw r "syntax" "Invalid Unicode escape sequence"))
+
+                                  (.WriteRune sb (conv rune v))
+                                  (set! (.-pos l) + (+ end 1))
+                                  (continue)))))
+
+
+                          (when (> (+ (.-pos l) n) (len src))
+                            (.Throw r "syntax" "Invalid hexadecimal escape sequence"))
+
+                          (let [(values v err) (strconv/ParseUint (subslice src (.-pos l) (+ (.-pos l) n)) 16 32)]
+                            (when (!= err nil)
+                              (.Throw r "syntax" "Invalid hexadecimal escape sequence"))
+
+                            (.WriteRune sb (conv rune v))
+                            (set! (.-pos l) + n))))
+                      (default
+                        (.WriteByte sb e))))))
+
+
+              (set! (.-toks l) (append (.-toks l) (lit jsTok :k \s :s (.String sb) :nl nl)))))
+          (case [(or (and (isJSIdent c) (not (and (>= c \0) (<= c \9)))) (>= c 0x80))]
+            (while (and (< (.-pos l) (len src)) ^:go/paren (or (isJSIdent (aget src (.-pos l))) (>= (aget src (.-pos l)) 0x80)))
+              (if (>= (aget src (.-pos l)) 0x80)
+                (let [(values _ n) (utf8/DecodeRuneInString (subslice src (.-pos l)))]
+                  (set! (.-pos l) + n))
+
+                (inc! (.-pos l))))
+
+
+            (set! (.-toks l) (append (.-toks l) (lit jsTok :k \i :s (subslice src st (.-pos l)) :nl nl))))
+          (default
+            (let [found ""]
+              (range [_ p jsPuncts]
+                (when (strings/HasPrefix (subslice src (.-pos l)) p)
+                  (set! found p)
+                  (break)))
+
+
+              (when (== found "")
+                (.Throw r "syntax" "Invalid or unexpected token"))
+
+              (set! (.-pos l) + (len found))
+              (set! (.-toks l) (append (.-toks l) (lit jsTok :k \p :s found :nl nl))))))
+
+        (set! nl false)))))
+
+
+
+^{:go/end 202} (go/func isJSIdent ^bool [^byte c]
+  (or (== c \_) (== c \$) (and (>= c \a) (<= c \z)) (and (>= c \A) (<= c \Z)) (and (>= c \0) (<= c \9))))
+
+
+
+(go/type jsNode "The tree: an expression or a statement is a node; each is evaluated by the evaluator below.\n" (struct
+    ^{:line 206 :tag string} op ; the node's kind
+    ^{:line 207 :tag string} s
+    ^{:line 208 :tag float64} num
+    ^{:line 209 :tag (slice (* jsNode))} kids
+    ^{:line 210 :tag (slice string)} names ; parameters, an object literal's keys, a declaration's names
+    ^{:line 211 :tag (* jsNode)} body
+    ^{:line 212 :tag bool} arrow))
+
+
+(go/type jsParser (struct
+    ^{:line 216 :tag (* JSRealm)} r
+    ^{:line 217 :tag (slice jsTok)} toks
+    ^{:line 218 :tag int} i))
+
+
+^{:go/end 221} (go/method peek ^jsTok [^{:tag (* jsParser)} p] (aget (.-toks p) (.-i p)))
+^{:go/end 228} (go/method next ^jsTok [^{:tag (* jsParser)} p]
+  (let [t (aget (.-toks p) (.-i p))]
+    (when (!= (.-k t) \e)
+      (inc! (.-i p)))
+
+    ^{:line 227} t))
+
+^{:go/end 232} (go/method is ^bool [^{:tag (* jsParser)} p ^string s]
+  (let [t (aget (.-toks p) (.-i p))]
+    (and ^:go/paren (or (== (.-k t) \p) (== (.-k t) \i)) (== (.-s t) s))))
+
+^{:go/breaks [[4 238]] :go/end 239} (go/method eat ^bool [^{:tag (* jsParser)} p ^string s]
+  (when (.is p s)
+    (inc! (.-i p))
+    (return true))
+
+  false)
+
+^{:go/end 248} (go/method want [^{:tag (* jsParser)} p ^string s]
+  (when (not (.eat p s))
+    (let [t (.peek p)]
+      (when (== (.-k t) \e)
+        (.Throw (.-r p) "syntax" "Unexpected end of input"))
+
+      (.Throw (.-r p) "syntax" (+ "Unexpected token '" (.-s t) "' (expected '" s "'; the headless world's eval is a subset)")))))
+
+
+
+^{:go/end 255} (go/method semi [^{:tag (* jsParser)} p]
+  (when (or (.eat p ";") (.is p "}") (== (.-k (.peek p)) \e) (.-nl (.peek p)))
+    (return))
+
+  (.want p ";"))
+
+
+(go/var jsReserved (lit (map string bool) ["var" true] ["let" true] ["const" true] ["function" true] ["return" true] ["if" true] ["else" true]
+    ^{:line 258} ["while" true] ["for" true] ["new" true] ["this" true] ["typeof" true] ["void" true] ["delete" true] ["throw" true] ["try" true]
+    ^{:line 259} ["catch" true] ["finally" true] ["instanceof" true] ["in" true] ["true" true] ["false" true] ["null" true] ["break" true]
+    ^{:line 260} ["continue" true] ["class" true] ["do" true] ["switch" true]))
+
+^{:go/end 268} (go/method ident ^string [^{:tag (* jsParser)} p]
+  (let [t (.next p)]
+    (when (or (!= (.-k t) \i) (aget jsReserved (.-s t)))
+      (.Throw (.-r p) "syntax" (+ "Unexpected token '" (.-s t) "'")))
+
+    (.-s t)))
+
+
+^{:go/end 276} (go/method program ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (let [n (addr (lit jsNode :op "block"))]
+    (while (!= (.-k (.peek p)) \e)
+      (set! (.-kids n) (append (.-kids n) (.statement p))))
+
+    ^{:line 275} n))
+
+
+^{:go/end 288} (go/method block ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (.want p "{")
+  (let [n (addr (lit jsNode :op "block"))]
+    (while (not (.eat p "}"))
+      (when (== (.-k (.peek p)) \e)
+        (.Throw (.-r p) "syntax" "Unexpected end of input"))
+
+      (set! (.-kids n) (append (.-kids n) (.statement p))))
+
+    ^{:line 287} n))
+
+
+^{:go/end 404} (go/method statement ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (let [t (.peek p)]
+    (when (== (.-k t) \p)
+      (switch (.-s t)
+        (case ["{"]
+          (return (.block p)))
+        (case [";"]
+          (.next p)
+          (return (addr (lit jsNode :op "block"))))))
+
+
+    (when (== (.-k t) \i)
+      (switch (.-s t)
+        (case ["var" "let" "const"]
+          (.next p)
+          (let [n (addr (lit jsNode :op "decl" :s (.-s t)))]
+            (while true
+              (set! (.-names n) (append (.-names n) (.ident p)))
+              (if (.eat p "=")
+                (set! (.-kids n) (append (.-kids n) (.assign p)))
+
+                (set! (.-kids n) (append (.-kids n) nil)))
+
+              (when (not (.eat p ","))
+                (break)))
+
+
+            (.semi p)
+            (return n)))
+        (case ["function"]
+          (.next p)
+          (let [name (.ident p)
+              ^{:line 322} f (.function p name)]
+            (return (addr (lit jsNode :op "decl" :s "var" :names (lit (slice string) name) :kids (lit (slice (* jsNode)) f))))))
+        (case ["return"]
+          (.next p)
+          (let [n (addr (lit jsNode :op "return"))]
+            (when (and (not (.is p ";")) (not (.is p "}")) (!= (.-k (.peek p)) \e) (not (.-nl (.peek p))))
+              (set! (.-kids n) (lit (slice (* jsNode)) (.expr p))))
+
+            (.semi p)
+            (return n)))
+        (case ["throw"]
+          (.next p)
+          (let [n (addr (lit jsNode :op "throw" :kids (lit (slice (* jsNode)) (.expr p))))]
+            (.semi p)
+            (return n)))
+        (case ["if"]
+          (.next p)
+          (.want p "(")
+          (let [c (.expr p)]
+            (.want p ")")
+            (let [n (addr (lit jsNode :op "if" :kids (lit (slice (* jsNode)) c (.statement p) nil)))]
+              (when (.eat p "else")
+                (aset (.-kids n) 2 (.statement p)))
+
+              (return n))))
+        (case ["while"]
+          (.next p)
+          (.want p "(")
+          (let [c (.expr p)]
+            (.want p ")")
+            (return (addr (lit jsNode :op "for" :kids (lit (slice (* jsNode)) nil c nil (.statement p)))))))
+        (case ["for"]
+          (.next p)
+          (.want p "(")
+          (let [(values ^{:tag (* jsNode)} init ^{:tag (* jsNode)} cond ^{:tag (* jsNode)} step) (zero (* jsNode))]
+            (when (not (.is p ";"))
+              (if (or (.is p "var") (.is p "let") (.is p "const")) (do
+                  (set! init (.statement p))
+                  (dec! (.-i p))) ; the declaration ate its ';'
+
+                (set! init (addr (lit jsNode :op "expr" :kids (lit (slice (* jsNode)) (.expr p)))))))
+
+
+            (.want p ";")
+            (when (not (.is p ";"))
+              (set! cond (.expr p)))
+
+            (.want p ";")
+            (when (not (.is p ")"))
+              (set! step (.expr p)))
+
+            (.want p ")")
+            (return (addr (lit jsNode :op "for" :kids (lit (slice (* jsNode)) init cond step (.statement p)))))))
+        (case ["break"]
+          (.next p)
+          (.semi p)
+          (return (addr (lit jsNode :op "break"))))
+        (case ["continue"]
+          (.next p)
+          (.semi p)
+          (return (addr (lit jsNode :op "continue"))))
+        (case ["try"]
+          (.next p)
+          (let [n (addr (lit jsNode :op "try" :kids (lit (slice (* jsNode)) (.block p) nil nil)))]
+            (when (.eat p "catch")
+              (let [name ""]
+                (when (.eat p "(")
+                  (set! name (.ident p))
+                  (.want p ")"))
+
+                (set! (.-s n) name)
+                (aset (.-kids n) 1 (.block p))))
+
+            (when (.eat p "finally")
+              (aset (.-kids n) 2 (.block p)))
+
+            (return n)))))
+
+
+    (let [n (addr (lit jsNode :op "expr" :kids (lit (slice (* jsNode)) (.expr p))))]
+      (.semi p)
+      ^{:line 403} n)))
+
+
+^{:go/end 418} (go/method function ^{:tag (* jsNode)} [^{:tag (* jsParser)} p ^string name]
+  (.want p "(")
+  (let [n (addr (lit jsNode :op "func" :s name))]
+    (while (not (.eat p ")"))
+      (set! (.-names n) (append (.-names n) (.ident p)))
+      (when (not (.eat p ","))
+        (.want p ")")
+        (break)))
+
+
+    (set! (.-body n) (.block p))
+    ^{:line 417} n))
+
+
+^{:go/end 426} (go/method expr ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (let [e (.assign p)]
+    (while (.eat p ",")
+      (set! e (addr (lit jsNode :op "seq" :kids (lit (slice (* jsNode)) e (.assign p))))))
+
+    ^{:line 425} e))
+
+
+
+^{:go/end 453} (go/method arrowAhead "arrowAhead: the tokens at the parser start an arrow function's parameters (x => or (a, b) =>).\n" ^bool [^{:tag (* jsParser)} p]
+  (let [t (.peek p)]
+    (when (and (== (.-k t) \i) (not (aget jsReserved (.-s t))) (== (.-k (aget (.-toks p) (+ (.-i p) 1))) \p) (== (.-s (aget (.-toks p) (+ (.-i p) 1))) "=>"))
+      (return true))
+
+    (when (not (.is p "("))
+      (return false))
+
+    ^{:go/breaks [[3 452]]} (let [depth 0]
+      (for [j (.-i p)] (< j (len (.-toks p))) (inc! j)
+        (let [u (aget (.-toks p) j)]
+          (when (== (.-k u) \e)
+            (return false))
+
+          (cond (and (== (.-k u) \p) (== (.-s u) "("))
+            (inc! depth)
+            (and (== (.-k u) \p) (== (.-s u) ")")) (do
+              (dec! depth)
+              (when (== depth 0)
+                (return (and (== (.-k (aget (.-toks p) (+ j 1))) \p) (== (.-s (aget (.-toks p) (+ j 1))) "=>"))))))))
+
+
+
+      false)))
+
+
+^{:go/end 475} (go/method arrow ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (let [n (addr (lit jsNode :op "func" :arrow true))]
+    (if (.eat p "(")
+      (while (not (.eat p ")"))
+        (set! (.-names n) (append (.-names n) (.ident p)))
+        (when (not (.eat p ","))
+          (.want p ")")
+          (break)))
+
+
+
+      (set! (.-names n) (lit (slice string) (.ident p))))
+
+    (.want p "=>")
+    (if (.is p "{")
+      (set! (.-body n) (.block p))
+
+      (set! (.-body n) (addr (lit jsNode :op "block" :kids (lit (slice (* jsNode)) (lit _ :op "return" :kids (lit (slice (* jsNode)) (.assign p))))))))
+
+    ^{:line 474} n))
+
+
+^{:go/end 494} (go/method assign ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (when (.arrowAhead p)
+    (return (.arrow p)))
+
+  (let [l (.cond p)
+      ^{:line 482} t (.peek p)]
+    (when (== (.-k t) \p)
+      (switch (.-s t)
+        (case ["=" "+=" "-=" "*=" "/=" "%="]
+          (when (and (!= (.-op l) "name") (!= (.-op l) "member"))
+            (.Throw (.-r p) "syntax" "Invalid left-hand side in assignment"))
+
+          (.next p)
+          (return (addr (lit jsNode :op "assign" :s (.-s t) :kids (lit (slice (* jsNode)) l (.assign p))))))))
+
+
+    ^{:line 493} l))
+
+
+^{:go/end 504} (go/method cond ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (let [c (.binary p 0)]
+    (when (.eat p "?")
+      (let [a (.assign p)]
+        (.want p ":")
+        (return (addr (lit jsNode :op "cond" :kids (lit (slice (* jsNode)) c a (.assign p)))))))
+
+    ^{:line 503} c))
+
+
+(go/var jsPrec (lit (slice (slice string)) (lit _ "??") (lit _ "||") (lit _ "&&") (lit _ "|") (lit _ "^") (lit _ "&") (lit _ "==" "!=" "===" "!==") (lit _ "<" ">" "<=" ">=" "instanceof" "in")
+    (lit _ "<<" ">>" ">>>") (lit _ "+" "-") (lit _ "*" "/" "%")))
+
+^{:go/end 530} (go/method binary ^{:tag (* jsNode)} [^{:tag (* jsParser)} p ^int level]
+  (when (== level (len jsPrec))
+    (return (.unary p)))
+
+  (let [l (.binary p (+ level 1))]
+    (while true
+      (let [t (.peek p)
+          ^{:line 516} hit ""]
+        (when (or (== (.-k t) \p) (== (.-k t) \i))
+          (range [_ o (aget jsPrec level)]
+            (when (== (.-s t) o)
+              (set! hit o))))
+
+
+
+        (when (== hit "")
+          (return l))
+
+        (.next p)
+        (set! l (addr (lit jsNode :op "bin" :s hit :kids (lit (slice (* jsNode)) l (.binary p (+ level 1))))))))))
+
+
+
+^{:go/end 548} (go/method unary ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (let [t (.peek p)]
+    (when (or ^:go/paren (and (== (.-k t) \p) ^:go/paren (or (== (.-s t) "!") (== (.-s t) "-") (== (.-s t) "+") (== (.-s t) "~"))) ^:go/paren (and (== (.-k t) \i) ^:go/paren (or (== (.-s t) "typeof") (== (.-s t) "void") (== (.-s t) "delete"))))
+      (.next p)
+      (return (addr (lit jsNode :op "unary" :s (.-s t) :kids (lit (slice (* jsNode)) (.unary p))))))
+
+    (when (and (== (.-k t) \p) ^:go/paren (or (== (.-s t) "++") (== (.-s t) "--")))
+      (.next p)
+      (return (addr (lit jsNode :op "update" :s (.-s t) :num 1 :kids (lit (slice (* jsNode)) (.unary p))))))
+
+    (let [e (.postfix p)]
+      (when [t (.peek p)] (and (== (.-k t) \p) ^:go/paren (or (== (.-s t) "++") (== (.-s t) "--")) (not (.-nl t)))
+        (.next p)
+        (return (addr (lit jsNode :op "update" :s (.-s t) :kids (lit (slice (* jsNode)) e)))))
+
+      ^{:line 547} e)))
+
+
+^{:go/end 560} (go/method args ^{:tag (slice (* jsNode))} [^{:tag (* jsParser)} p]
+  (let [^{:tag (slice (* jsNode))} out (zero (slice (* jsNode)))]
+    (while (not (.eat p ")"))
+      (set! out (append out (.assign p)))
+      (when (not (.eat p ","))
+        (.want p ")")
+        (break)))
+
+
+    ^{:line 559} out))
+
+
+^{:go/end 588} (go/method postfix ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  (let [^{:tag (* jsNode)} e (zero (* jsNode))]
+    (if (.eat p "new")
+      (let [callee (.primary p)]
+        (while (or (.is p ".") (.is p "["))
+          (set! callee (.member p callee)))
+
+        (let [n (addr (lit jsNode :op "new" :kids (lit (slice (* jsNode)) callee)))]
+          (when (.eat p "(")
+            (set! (.-kids n) (append (.-kids n) (spread (.args p)))))
+
+          (set! e n)))
+
+      (set! e (.primary p)))
+
+    (while true
+      (switch
+        (case [(or (.is p ".") (.is p "["))]
+          (set! e (.member p e)))
+        (case [(.is p "(")]
+          (.next p)
+          (set! e (addr (lit jsNode :op "call" :kids (append (lit (slice (* jsNode)) e) (spread (.args p)))))))
+        (default
+          (return e))))))
+
+
+
+
+^{:go/end 602} (go/method member ^{:tag (* jsNode)} [^{:tag (* jsParser)} p ^{:tag (* jsNode)} e]
+  (when (.eat p ".")
+    (let [t (.next p)]
+      (when (!= (.-k t) \i)
+        (.Throw (.-r p) "syntax" (+ "Unexpected token '" (.-s t) "'")))
+
+      (return (addr (lit jsNode :op "member" :kids (lit (slice (* jsNode)) e (lit _ :op "str" :s (.-s t))))))))
+
+  (.want p "[")
+  (let [k (.expr p)]
+    (.want p "]")
+    (addr (lit jsNode :op "member" :kids (lit (slice (* jsNode)) e k)))))
+
+
+^{:go/end 681} (go/method primary ^{:tag (* jsNode)} [^{:tag (* jsParser)} p]
+  ^{:go/breaks [4]} (let [t (.next p)]
+    (switch (.-k t)
+      (case [\n]
+        (return (addr (lit jsNode :op "num" :num (.-num t)))))
+      (case [\s]
+        (return (addr (lit jsNode :op "str" :s (.-s t)))))
+      (case [\i]
+        (switch (.-s t)
+          (case ["true" "false"]
+            (return (addr (lit jsNode :op "bool" :s (.-s t)))))
+          (case ["null"]
+            (return (addr (lit jsNode :op "null"))))
+          (case ["this"]
+            (return (addr (lit jsNode :op "this"))))
+          (case ["function"]
+            (let [name ""]
+              (when (== (.-k (.peek p)) \i)
+                (set! name (.ident p)))
+
+              (return (.function p name)))))
+
+        (when (aget jsReserved (.-s t))
+          (.Throw (.-r p) "syntax" (+ "Unexpected token '" (.-s t) "' (the headless world's eval is a subset)")))
+
+        (return (addr (lit jsNode :op "name" :s (.-s t)))))
+      (case [\p]
+        (switch (.-s t)
+          (case ["("]
+            (let [e (.expr p)]
+              (.want p ")")
+              (return e)))
+          (case ["["]
+            (let [n (addr (lit jsNode :op "array"))]
+              (while (not (.eat p "]"))
+                (set! (.-kids n) (append (.-kids n) (.assign p)))
+                (when (not (.eat p ","))
+                  (.want p "]")
+                  (break)))
+
+
+              (return n)))
+          (case ["{"]
+            (let [n (addr (lit jsNode :op "object"))]
+              (while (not (.eat p "}"))
+                (let [k (.next p)
+                    ^{:line 650} key (.-s k)]
+                  (switch (.-k k)
+                    (case [\n]
+                      (set! key (jsNumStr (.-num k))))
+                    (case [\s \i])
+                    (default
+                      (.Throw (.-r p) "syntax" (+ "Unexpected token '" (.-s k) "'"))))
+
+                  (let [^{:tag (* jsNode)} v (zero (* jsNode))]
+                    (cond (.is p "(")
+                      (set! v (.function p key))
+                      (and (== (.-k k) \i) ^:go/paren (or (.is p ",") (.is p "}")))
+                      (set! v (addr (lit jsNode :op "name" :s key))) :else
+                      (do
+                        (.want p ":")
+                        (set! v (.assign p))))
+
+                    (set! (.-names n) (append (.-names n) key))
+                    (set! (.-kids n) (append (.-kids n) v))
+                    (when (not (.eat p ","))
+                      (.want p "}")
+                      (break)))))
+
+
+              (return n)))))
+
+      (case [\e]
+        (.Throw (.-r p) "syntax" "Unexpected end of input")))
+
+    (.Throw (.-r p) "syntax" (+ "Unexpected token '" (.-s t) "' (the headless world's eval is a subset)"))
+    nil))
+
+
+
+(go/type jsScope "The evaluator: a scope chain over the global object.\n" (struct
+    ^{:line 685 :tag (map string any)} vars
+    ^{:line 686 :tag (* jsScope)} parent
+    ^{:line 687 :tag any} this))
+
+
+^{:go/end 697} (go/method lookup [^{:tag (* jsScope)} s ^string name] :results [(* jsScope) bool]
+  (for [c s] (!= c nil) (set! c (.-parent c))
+    (when [(values _ ok) (aget (.-vars c) name)] ok
+      (return c true)))
+
+
+  (return nil false))
+
+
+(go/type jsCompletion (struct
+    ^{:line 700 :tag string} kind ; "", "return", "break", "continue"
+    ^{:line 701 :tag any} v))
+
+
+
+^{:go/end 721} (go/method Eval "Eval evaluates a program's source in the global scope: its last expression statement's value.\n" ^any [^{:tag (* JSRealm)} r ^string src]
+  (let [p (addr (lit jsParser :r r :toks (.lex r src)))
+      ^{:line 707} prog (.program p)
+      ^{:line 708} sc (addr (lit jsScope :vars (lit (map string any)) :this (.-Global r)))
+      ^{:line 709 :tag any} last JSUndefined]
+    (range [_ st (.-kids prog)]
+      (when (== (.-op st) "expr")
+        (set! last (.ev r (aget (.-kids st) 0) sc))
+        (continue))
+
+      (let [c (.exec r st sc)]
+        (when (!= (.-kind c) "")
+          (break))))
+
+
+    ^{:line 720} last))
+
+
+^{:go/end 786} (go/method exec ^jsCompletion [^{:tag (* JSRealm)} r ^{:tag (* jsNode)} n ^{:tag (* jsScope)} sc]
+  (switch (.-op n)
+    (case ["block"]
+      (let [inner (addr (lit jsScope :vars (lit (map string any)) :parent sc :this (.-this sc)))]
+        ;; function declarations are hoisted
+        (range [_ k (.-kids n)]
+          (when (and (== (.-op k) "decl") (== (len (.-kids k)) 1) (!= (aget (.-kids k) 0) nil) (== (.-op (aget (.-kids k) 0)) "func") (== (.-s k) "var") (== (.-s (aget (.-kids k) 0)) (aget (.-names k) 0)))
+            (aset (.-vars inner) (aget (.-names k) 0) (.ev r (aget (.-kids k) 0) inner))))
+
+
+        (range [_ k (.-kids n)]
+          (when [c (.exec r k inner)] (!= (.-kind c) "")
+            (return c)))))
+
+
+    (case ["decl"]
+      (range [i name (.-names n)]
+        (let [^any v JSUndefined]
+          (when (!= (aget (.-kids n) i) nil)
+            (set! v (.ev r (aget (.-kids n) i) sc)))
+
+          (aset (.-vars sc) name v))))
+
+    (case ["expr"]
+      (.ev r (aget (.-kids n) 0) sc))
+    (case ["return"]
+      (when (== (len (.-kids n)) 0)
+        (return (lit jsCompletion "return" JSUndefined)))
+
+      (return (lit jsCompletion "return" (.ev r (aget (.-kids n) 0) sc))))
+    (case ["throw"]
+      (panic (addr (lit JSThrow (.ev r (aget (.-kids n) 0) sc)))))
+    (case ["if"]
+      (cond (jsTruthy (.ev r (aget (.-kids n) 0) sc))
+        (return (.exec r (aget (.-kids n) 1) sc))
+        (!= (aget (.-kids n) 2) nil)
+        (return (.exec r (aget (.-kids n) 2) sc))))
+
+    (case ["for"]
+      (let [inner (addr (lit jsScope :vars (lit (map string any)) :parent sc :this (.-this sc)))]
+        (when (!= (aget (.-kids n) 0) nil)
+          (.exec r (aget (.-kids n) 0) inner))
+
+        (while (or (== (aget (.-kids n) 1) nil) (jsTruthy (.ev r (aget (.-kids n) 1) inner)))
+          (let [c (.exec r (aget (.-kids n) 3) inner)]
+            (when (== (.-kind c) "return")
+              (return c))
+
+            (when (== (.-kind c) "break")
+              (break))
+
+            (when (!= (aget (.-kids n) 2) nil)
+              (.ev r (aget (.-kids n) 2) inner))))))
+
+
+    (case ["break" "continue"]
+      (return (lit jsCompletion :kind (.-op n))))
+    (case ["try"]
+      (return (.execTry r n sc)))
+    (default
+      (.Throw r "syntax" (+ "unsupported statement " (.-op n)))))
+
+  (lit jsCompletion))
+
+
+^{:go/end 825} (go/method execTry [^{:tag (* JSRealm)} r ^{:tag (* jsNode)} n ^{:tag (* jsScope)} sc] :results [^jsCompletion c]
+  (when (!= (aget (.-kids n) 2) nil)
+    (defer (^{:go/end 799} (fn []
+          (let [x (recover)]
+            (when [fc (.exec r (aget (.-kids n) 2) sc)] (!= (.-kind fc) "")
+              (set! c fc)
+              (return))
+
+            (when (!= x nil)
+              (panic x)))))))
+
+
+
+  (when (== (aget (.-kids n) 1) nil)
+    (return (.exec r (aget (.-kids n) 0) sc)))
+
+  (let [(values thrown val) (values false (conv any nil))]
+    (^{:go/end 816} (fn []
+        (defer (^{:go/end 814} (fn []
+              (when [x (recover)] (!= x nil)
+                (let [(values t ok) (assert (* JSThrow) x)]
+                  (when (not ok)
+                    (panic x))
+
+                  (set! (values thrown val) (values true (.-V t))))))))
+
+
+        (set! c (.exec r (aget (.-kids n) 0) sc))))
+
+    (when thrown
+      (let [inner (addr (lit jsScope :vars (lit (map string any)) :parent sc :this (.-this sc)))]
+        (when (!= (.-s n) "")
+          (aset (.-vars inner) (.-s n) val))
+
+        (set! c (.exec r (aget (.-kids n) 1) inner))))
+
+    ^{:line 824} c))
+
+
+^{:go/end 844} (go/method ref [^{:tag (* JSRealm)} r ^{:tag (* jsNode)} n ^{:tag (* jsScope)} sc] :results [^{:tag (func [] [any])} get ^{:tag (func [any])} set]
+  (switch (.-op n)
+    (case ["name"]
+      (return ^{:go/end 830} (fn ^any [] (.lookupName r (.-s n) sc)) ^{:go/end 836} (fn [^any v]
+          (when [(values s ok) (.lookup sc (.-s n))] ok
+            (aset (.-vars s) (.-s n) v)
+            (return))
+
+          (.Set r (.-Global r) (.-s n) v))))
+
+    (case ["member"]
+      (let [o (.ev r (aget (.-kids n) 0) sc)
+          ^{:line 839} k (.propKey r (.ev r (aget (.-kids n) 1) sc))]
+        (return ^{:go/end 840} (fn ^any [] (.Get r o k)) ^{:go/end 840} (fn [^any v] (.Set r o k v))))))
+
+  (.Throw r "syntax" "Invalid left-hand side")
+  (return nil nil))
+
+
+^{:go/breaks [6] :go/end 855} (go/method lookupName ^any [^{:tag (* JSRealm)} r ^string name ^{:tag (* jsScope)} sc]
+  (when [(values s ok) (.lookup sc name)] ok
+    (return (aget (.-vars s) name)))
+
+  (when (.hasProp r (.-Global r) name)
+    (return (.Get r (.-Global r) name)))
+
+  (.Throw r "reference" (+ name " is not defined"))
+  nil)
+
+
+^{:go/breaks [[4 868]] :go/end 869} (go/method hasProp ^bool [^{:tag (* JSRealm)} r ^{:tag (* JSObject)} o ^string k]
+  (for [p o] (!= p nil) (set! p (.-Proto p))
+    (when (.HasOwn r p k)
+      (return true))
+
+    (when (!= (.-Getter p) nil)
+      (when [(values _ ok) ((.-Getter p) k)] ok
+        (return true))))
+
+
+
+  false)
+
+
+^{:go/end 876} (go/method propKey ^string [^{:tag (* JSRealm)} r ^any v]
+  (when [(values f ok) (assert float64 v)] ok
+    (return (jsNumStr f)))
+
+  (.ToString r v))
+
+
+
+^{:go/breaks [6] :go/end 956} (go/method Arith "Arith is the binary operators' arithmetic.\n" ^any [^{:tag (* JSRealm)} r ^string op ^any a ^any b]
+  (switch op
+    (case ["+"]
+      (let [(values pa pb) (values (.ToPrimitive r a "default") (.ToPrimitive r b "default"))
+          (values _ sa) (assert string pa)
+          (values _ sb) (assert string pb)]
+        (when (or sa sb)
+          (return (+ (.ToString r pa) (.ToString r pb))))
+
+        (return (+ (.ToNumber r pa) (.ToNumber r pb)))))
+    (case ["-"]
+      (return (- (.ToNumber r a) (.ToNumber r b))))
+    (case ["*"]
+      (return (* (.ToNumber r a) (.ToNumber r b))))
+    (case ["/"]
+      (return (/ (.ToNumber r a) (.ToNumber r b))))
+    (case ["%"]
+      (return (math/Mod (.ToNumber r a) (.ToNumber r b))))
+    (case ["=="]
+      (return (.LooseEquals r a b)))
+    (case ["!="]
+      (return (not (.LooseEquals r a b))))
+    (case ["==="]
+      (return (StrictEquals a b)))
+    (case ["!=="]
+      (return (not (StrictEquals a b))))
+    (case ["<" ">" "<=" ">="]
+      (let [(values pa pb) (values (.ToPrimitive r a "number") (.ToPrimitive r b "number"))
+          (values sa aok) (assert string pa)
+          (values sb bok) (assert string pb)]
+        (when (and aok bok)
+          (switch op
+            (case ["<"]
+              (return (< sa sb)))
+            (case [">"]
+              (return (> sa sb)))
+            (case ["<="]
+              (return (<= sa sb))))
+
+          (return (>= sa sb)))
+
+        (let [(values x y) (values (.ToNumber r pa) (.ToNumber r pb))]
+          (switch op
+            (case ["<"]
+              (return (< x y)))
+            (case [">"]
+              (return (> x y)))
+            (case ["<="]
+              (return (<= x y))))
+
+          (return (>= x y)))))
+    (case ["&" "|" "^" "<<" ">>" ">>>"]
+      (let [(values x y) (values (toInt32 (.ToNumber r a)) (toInt32 (.ToNumber r b)))]
+        (switch op
+          (case ["&"]
+            (return (conv float64 (bit-and x y))))
+          (case ["|"]
+            (return (conv float64 (bit-or x y))))
+          (case ["^"]
+            (return (conv float64 (bit-xor x y))))
+          (case ["<<"]
+            (return (conv float64 (<< x (bit-and (conv uint32 y) 31)))))
+          (case [">>"]
+            (return (conv float64 (>> x (bit-and (conv uint32 y) 31))))))
+
+        (return (conv float64 (>> (conv uint32 x) (bit-and (conv uint32 y) 31))))))
+    (case ["instanceof"]
+      (return (.InstanceOf r a b)))
+    (case ["in"]
+      (let [(values o ok) (assert (* JSObject) b)]
+        (when (not ok)
+          (.Throw r "type" "Cannot use 'in' operator to search for a key in a non-object"))
+
+        (return (.hasProp r o (.propKey r a))))))
+
+  (.Throw r "syntax" (+ "unsupported operator " op))
+  nil)
+
+
+
+^{:go/end 964} (go/func toInt32 "toInt32 is ToInt32.\n" ^int32 [^float64 f]
+  (when (or (math/IsNaN f) (math/IsInf f 0))
+    (return 0))
+
+  (conv int32 (conv uint32 (conv int64 (math/Mod (math/Trunc f) 4294967296)))))
+
+
+^{:go/breaks [5] :go/end 1102} (go/method ev ^any [^{:tag (* JSRealm)} r ^{:tag (* jsNode)} n ^{:tag (* jsScope)} sc]
+  (switch (.-op n)
+    (case ["num"]
+      (return (.-num n)))
+    (case ["str"]
+      (return (.-s n)))
+    (case ["bool"]
+      (return (== (.-s n) "true")))
+    (case ["null"]
+      (return JSNull))
+    (case ["this"]
+      (return (.-this sc)))
+    (case ["name"]
+      (return (.lookupName r (.-s n) sc)))
+    (case ["array"]
+      (let [out (make (slice any) (len (.-kids n)))]
+        (range [i k (.-kids n)]
+          (aset out i (.ev r k sc)))
+
+        (return (.Array r out))))
+    (case ["object"]
+      (let [o (.obj r)]
+        (range [i k (.-kids n)]
+          (.Put o (aget (.-names n) i) (.ev r k sc)))
+
+        (return o)))
+    (case ["func"]
+      (return (.closure r n sc)))
+    (case ["seq"]
+      (.ev r (aget (.-kids n) 0) sc)
+      (return (.ev r (aget (.-kids n) 1) sc)))
+    (case ["cond"]
+      (when (jsTruthy (.ev r (aget (.-kids n) 0) sc))
+        (return (.ev r (aget (.-kids n) 1) sc)))
+
+      (return (.ev r (aget (.-kids n) 2) sc)))
+    (case ["assign"]
+      (let [(values get set) (.ref r (aget (.-kids n) 0) sc)
+          ^{:line 1004 :tag any} v (zero any)]
+        (if (== (.-s n) "=")
+          (set! v (.ev r (aget (.-kids n) 1) sc))
+
+          (set! v (.Arith r (subslice (.-s n) _ 1) (get) (.ev r (aget (.-kids n) 1) sc))))
+
+        (set v)
+        (return v)))
+    (case ["update"]
+      (let [(values get set) (.ref r (aget (.-kids n) 0) sc)
+          ^{:line 1014} old (.ToNumber r (get))
+          ^{:line 1015} nv (+ old 1)]
+        (when (== (.-s n) "--")
+          (set! nv (- old 1)))
+
+        (set nv)
+        (when (== (.-num n) 1)
+          (return nv))
+
+        (return old)))
+    (case ["bin"]
+      (switch (.-s n)
+        (case ["&&"]
+          (let [l (.ev r (aget (.-kids n) 0) sc)]
+            (when (not (jsTruthy l))
+              (return l))
+
+            (return (.ev r (aget (.-kids n) 1) sc))))
+        (case ["||"]
+          (let [l (.ev r (aget (.-kids n) 0) sc)]
+            (when (jsTruthy l)
+              (return l))
+
+            (return (.ev r (aget (.-kids n) 1) sc))))
+        (case ["??"]
+          (let [l (.ev r (aget (.-kids n) 0) sc)]
+            (when (and (!= l JSUndefined) (!= l JSNull))
+              (return l))
+
+            (return (.ev r (aget (.-kids n) 1) sc)))))
+
+      (return (.Arith r (.-s n) (.ev r (aget (.-kids n) 0) sc) (.ev r (aget (.-kids n) 1) sc))))
+    (case ["unary"]
+      (when (and (== (.-s n) "typeof") (== (.-op (aget (.-kids n) 0)) "name"))
+        (when [(values _ ok) (.lookup sc (.-s (aget (.-kids n) 0)))] (and (not ok) (not (.hasProp r (.-Global r) (.-s (aget (.-kids n) 0)))))
+          (return "undefined")))
+
+
+      (when (== (.-s n) "delete")
+        (when (== (.-op (aget (.-kids n) 0)) "member")
+          (return (.Delete r (.ev r (aget (.-kids (aget (.-kids n) 0)) 0) sc) (.propKey r (.ev r (aget (.-kids (aget (.-kids n) 0)) 1) sc)))))
+
+        (return true))
+
+      (let [v (.ev r (aget (.-kids n) 0) sc)]
+        (switch (.-s n)
+          (case ["!"]
+            (return (not (jsTruthy v))))
+          (case ["-"]
+            (return (- (.ToNumber r v))))
+          (case ["+"]
+            (return (.ToNumber r v)))
+          (case ["~"]
+            (return (conv float64 (bit-not (toInt32 (.ToNumber r v))))))
+          (case ["typeof"]
+            (return (jsTypeof v)))
+          (case ["void"]
+            (return JSUndefined)))))
+
+    (case ["member"]
+      (return (.Get r (.ev r (aget (.-kids n) 0) sc) (.propKey r (.ev r (aget (.-kids n) 1) sc)))))
+    (case ["call"]
+      (let [(values ^any f ^any this) (zero any)]
+        (if (== (.-op (aget (.-kids n) 0)) "member") (do
+            (set! this (.ev r (aget (.-kids (aget (.-kids n) 0)) 0) sc))
+            (set! f (.Get r this (.propKey r (.ev r (aget (.-kids (aget (.-kids n) 0)) 1) sc)))))
+          (do
+            (set! f (.ev r (aget (.-kids n) 0) sc))
+            (set! this JSUndefined)))
+
+        (let [args (make (slice any) (- (len (.-kids n)) 1))]
+          (range [i k (subslice (.-kids n) 1)]
+            (aset args i (.ev r k sc)))
+
+          (when (not (isCallable f))
+            (.Throw r "type" (+ (jsCallee (aget (.-kids n) 0)) " is not a function")))
+
+          (return (.Call r f this args)))))
+    (case ["new"]
+      (let [c (.ev r (aget (.-kids n) 0) sc)
+          ^{:line 1094} args (make (slice any) (- (len (.-kids n)) 1))]
+        (range [i k (subslice (.-kids n) 1)]
+          (aset args i (.ev r k sc)))
+
+        (return (.Construct r c args)))))
+
+  (.Throw r "syntax" (+ "unsupported expression " (.-op n)))
+  nil)
+
+
+^{:go/breaks [[4 1113]] :go/end 1114} (go/func jsCallee ^string [^{:tag (* jsNode)} n]
+  (switch (.-op n)
+    (case ["name"]
+      (return (.-s n)))
+    (case ["member"]
+      (when (== (.-op (aget (.-kids n) 1)) "str")
+        (return (+ (jsCallee (aget (.-kids n) 0)) "." (.-s (aget (.-kids n) 1)))))))
+
+
+  "expression")
+
+
+
+
+^{:go/end 1153} (go/method closure "closure is a function object of the subset: called with its own scope (this from the call, or the arrow's enclosing this);\nconstructible unless an arrow (its prototype object made on demand).\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r ^{:tag (* jsNode)} n ^{:tag (* jsScope)} sc]
+  (let [f (addr (lit JSObject :Class "Function" :Proto (.-FunctionProto r) :Name (.-s n)))
+      ^{:line 1120} call ^{:go/end 1134} (fn ^any [^any this ^{:tag (slice any)} args]
+        (let [inner (addr (lit jsScope :vars (lit (map string any)) :parent sc :this this))]
+          (when (.-arrow n)
+            (set! (.-this inner) (.-this sc)))
+
+          (range [i p (.-names n)]
+            (aset (.-vars inner) p (arg args i)))
+
+          (aset (.-vars inner) "arguments" (.Array r (append (lit (slice any)) (spread args))))
+          (let [c (.exec r (.-body n) inner)]
+            (when (== (.-kind c) "return")
+              (return (.-v c)))
+
+            ^{:line 1133} JSUndefined)))]
+
+    (set! (.-Fn f) call)
+    (when (not (.-arrow n))
+      (let [proto (.obj r)]
+        (.Put proto "constructor" f)
+        (.Put f "prototype" proto)
+        (set! (.-Ctor f) ^{:go/end 1150} (fn ^any [^{:tag (slice any)} args]
+            (let [(values p _) (assert (* JSObject) (.Get r f "prototype"))]
+              (when (== p nil)
+                (set! p (.-ObjectProto r)))
+
+              (let [o (addr (lit JSObject :Class "Object" :Proto p))]
+                (when [(values res ok) (assert (* JSObject) (call o args))] ok
+                  (return res))
+
+                ^{:line 1149} o))))))
+
+
+    ^{:line 1152} f))

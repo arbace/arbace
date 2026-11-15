@@ -1,0 +1,122 @@
+(in-ns 'go.arbace.waidriver) (go/file "run.go" :imports [
+
+
+    ^{:line 4} [bufio "bufio"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [os "os"]
+    ^{:line 7} [strconv "strconv"]
+    ^{:line 8} [strings "strings"]
+
+    ^{:line 10} [wai "arbace/wai"]])
+
+
+
+
+
+
+
+^{:go/end 112} (go/func runMain "runMain is `waidriver run [--dir GUEST=HOST[:ro]]... [--env K=V]... [--seed N] [--no-validate] MODULE [ARG...]` (doc/wasm/WAI.md\n§6): a WASI preview 1 program (a command: its export _start) validated by wai's validator, instantiated with\nwasi_snapshot_preview1 over the preopened directories and run, its standard streams the driver's; the exit status the\nprogram's (proc_exit's, 0 when _start returns). wai's own failures: 125 a module wai does not run (unimplemented), 126 an\ninvalid module, a link failure, a trap or a crash, with a line `wai: ...` on standard error.\n" ^int [^{:tag (slice string)} args]
+  (let [w (addr (lit wai/WASI :Stdin os/Stdin))
+      ^{:line 20} validate true]
+    (while (and (> (len args) 0) (strings/HasPrefix (aget args 0) "--"))
+      (switch (aget args 0)
+        (case ["--dir"]
+          (let [(values g h _) (strings/Cut (aget args 1) "=")
+              ^{:line 25} ro (strings/HasSuffix h ":ro")]
+            (set! h (strings/TrimSuffix h ":ro"))
+            (set! (.-Dirs w) (append (.-Dirs w) (lit wai/Preopen :Guest g :Host h :ReadOnly ro)))
+            (set! args (subslice args 2))))
+        (case ["--env"]
+          (set! (.-Env w) (append (.-Env w) (aget args 1)))
+          (set! args (subslice args 2)))
+        (case ["--seed"]
+          (let [(values n _) (strconv/ParseInt (aget args 1) 10 64)]
+            (set! (.-Seed w) n)
+            (set! args (subslice args 2))))
+        (case ["--no-validate"]
+          (set! validate false)
+          (set! args (subslice args 1)))
+        (default
+          (fmt/Fprintln os/Stderr "wai: unknown option" (aget args 0))
+          (return 2))))
+
+
+    (when (== (len args) 0)
+      (fmt/Fprintln os/Stderr "waidriver run [--dir GUEST=HOST[:ro]]... [--env K=V]... [--seed N] [--no-validate] MODULE [ARG...]")
+      (return 2))
+
+    (let [(values b err) (os/ReadFile (aget args 0))]
+      (when (!= err nil)
+        (fmt/Fprintln os/Stderr "wai:" err)
+        (return 126))
+
+      (when validate
+        (when [err (wai/Validate b)] (!= err nil)
+          (fmt/Fprintln os/Stderr "wai: invalid module:" err)
+          (when [(values _ ok) (assert (* wai/Unimplemented) err)] ok
+            (return 125))
+
+          (return 126)))
+
+
+      (let [(values mod ^:assign err) (wai/Decode b)]
+        (when (!= err nil)
+          (fmt/Fprintln os/Stderr "wai:" err)
+          (when [(values _ ok) (assert (* wai/Unimplemented) err)] ok
+            (return 125))
+
+          (return 126))
+
+        (let [out (bufio/NewWriterSize os/Stdout (<< 1 16))]
+          (set! (.-Stdout w) out)
+          (set! (.-Stderr w) (lit flushFirst out os/Stderr))
+          (set! (.-Args w) (append (lit (slice string) (aget args 0)) (spread (subslice args 1))))
+          (let [m (wai/NewMachine)
+              ^{:line 75} host (.Instance w m)
+              (values inst ^:assign err) (.Instantiate m mod ^{:go/end 82} (fn [^string module ^string name] :results [wai/Extern bool]
+                  (when (!= module "wasi_snapshot_preview1")
+                    (return (lit wai/Extern) false))
+
+                  (let [(values x ok) (aget (.-Exports host) name)]
+                    (return x ok))))]
+
+            (when (!= err nil)
+              (.Flush out)
+              (fmt/Fprintln os/Stderr "wai:" (errText err))
+              (return 126))
+
+            (.Bind w inst)
+            ^{:go/breaks [[7 111]]} (let [(values start ok) (aget (.-Exports inst) "_start")]
+              (when (not ok)
+                (fmt/Fprintln os/Stderr "wai: no export _start")
+                (return 126))
+
+              (set! (values _ err) (.Call m (.-Func start) nil))
+              (.Flush out)
+              ;; an AOT program (WA7): the calls the interpreter ran, for the corpus's judge (WAI_AOT_STATS names the file)
+              (when [p (os/Getenv "WAI_AOT_STATS")] (!= p "")
+                (let [(values n tr) (wai/AOTInterpreted mod)]
+                  (os/WriteFile p (conv (slice byte) (fmt/Sprintf "translated %v\nleft %d\ninterpreted %d\nwhy %s\n" tr n (.-Interpreted m) (.-InterpretedWhy m))) 0644)))
+
+              (when (!= err nil)
+                (when [(values e ok) (assert (* wai/Exit) err)] ok
+                  (return (conv int (.-Code e))))
+
+                (fmt/Fprintln os/Stderr "wai:" (errText err))
+                (when [(values _ ok) (assert (* wai/Unimplemented) err)] ok
+                  (return 125))
+
+                (return 126))
+
+              0)))))))
+
+
+
+(go/type flushFirst "flushFirst writes to standard error after flushing standard output, so the two streams keep the program's order.\n" (struct
+    ^{:line 116 :tag (* bufio/Writer)} out
+    ^{:line 117 :tag (* os/File)} err))
+
+
+^{:go/end 123} (go/method Write [^flushFirst f ^{:tag (slice byte)} p] :results [int error]
+  (.Flush (.-out f))
+  (.Write (.-err f) p))

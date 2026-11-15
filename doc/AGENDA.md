@@ -639,6 +639,37 @@ model's edges), 251 (pyi on goi's speed), 252 (3.15's P6-P8).
 - `arbace/c/repl.ae`'s back-end default and the judge tests that stand in for the compiled parser: at W.
 - The box can no longer build the program: `go/arbace/crt` calls `syscall.Access` and `syscall.Stat_t`, which TamaGo's
   syscall lacks (C9.2's hazard (e)); for the box's revival.
+- WebAssembly, the new crop ([wasm/WASM-SURVEY.md](wasm/WASM-SURVEY.md); WAS1-WAS26 decided as recommended, the user 2026-11-13;
+  branch `wasm-wa1`): WA1 built (repr/wasm's binary format, every Wasm 3.0 instruction, the 20 Go-built modules byte for byte, the
+  pins fetched: the testsuite, the spec at wg-3.0, wazero, webgpu.idl; wabt, wasmtime and node installed for the oracle tier) and WA2
+  (the text format and the testsuite's scripts at the read and print levels: "As built: WA2", "As built: WA2 (rest)": the
+  proposals/, legacy/ and custom/ scripts classed by proposal, @custom and @name, the messages' second level); branch `wasm-wa3`: WA3
+  built (`arbace.wasm.valid`, Wasm 3.0's validation: the root scripts 7,182 of 7,182 read cases, 4,668 of 4,668 messages; "As built:
+  WA3"); Go's SIMD encoding verified (a `nop` after each SIMD opcode at or above 0x80); WAS27-WAS29 decided as recommended (the
+  user 2026-11-13). Branch `wasm-wa4`: WA4 built (wai, the engine in Go forms as a light driver, with SIMD128 and relaxed SIMD and
+  GC; `bin/wai check`: the root scripts 60,498 of 60,498 commands, 5,192 of 5,192 messages, the 35 beyond classed by proposal;
+  doc/wasm/WAI.md, "As built: WA4"); WAS30-WAS32 decided (a) (the user 2026-11-13). Branch `wasm-wa5`: WA5 built (wai's own
+  validator, 5,237 of 5,237 root modules agreeing with arbace.wasm.valid; WASI preview 1; `bin/wai go`: `$GOROOT/test`'s 1,051 run
+  programs and 6 own programs built for wasip1 and run on wai, 1,001 pass, 53 n/a, 3 over budget; "As built: WA5"). The REAP row
+  read 7,840 / 0 / 454, eval 61,890 / 0 / 1,046, AOT "no check yet". WAS33-WAS37 decided (a) (the user 2026-11-13). Branch
+  `wasm-wa6`: WAS33 (the data count section written by the encoder and the text reader, required by the decoder, wai's validator
+  strict), WA5b (the 131 directory tests built for wasip1 as Go's test driver builds them: 123 pass; the Go corpus 1,124 of 1,188) and
+  WA7's first part (w2g: wai's internal code translated to Go packages over the interpreter's own cases, generated from exec.go;
+  `bin/wai check --aot`: the testsuite at AOT equal to eval, 60,498 of 60,498 root commands, every function translated; `bin/wai go
+  --aot`: 18 of 18, the 3 over eval's budget among them; "As built: WAS33, WA5b, WA7 (first part)"). Branch `wasm-wa7` (taking
+  WAS38-WAS42 as recommended): WA11 (gojs, the headless world in wai: Go's js/wasm imports after the pinned wasm_exec.js, the JS value
+  model, a small eval, fs, a virtual clock, the page's recording fakes; syscall/js's tests 37 of 37 on wai, 6 own js programs) and WA12
+  begun (the shim `wasm/web/index.html` and `arbace.js` with its import-list check, the WebGPU bridge's command buffer, the demo scene's
+  90 frames against its stated values; `bin/wai js` 47 of 47; `bin/wasm build|serve|check`; doc/wasm/WEB.md; "As built: WA11, WA12
+  (begun)"); WAS40 (a)'s rotation declared, unspliced. Branch `wasm-wa8` (WAS43-WAS49 taken as recommended): WAS40 (c), w2g by
+  shape (a function's immediates read from its code: the 1,176 Go modules' 1.6 million functions are 8,869 shapes; one AOT program a
+  slice of 400 programs; functions over 2,000 instructions in segments): the whole Go corpus at AOT in 37 minutes, 1,127 of 1,188 pass,
+  61 n/a, equal to eval but the 3 over its budget (WAS51 (a): the rotation removed); WA8's rest, the legacy exceptions (try, catch,
+  delegate, rethrow) at read, eval and AOT, legacy/ all passing; REAP read 7,854 / 0 / 440, eval 62,088 / 0 / 971, AOT 62,091 / 0 /
+  971, print 2,785 / 0 / 0 ("As built: WAS40 (c), WA8"). To decide: WAS50-WAS54 (taken as recommended on the branch). Next: WA9
+  (Arbace's own js build, at the key window), then the scene from Arbace with the REPL in the page; a persistent cache of shape
+  packages; the proposals beyond 3.0 (threads WA13).
+  The branches move `gate_key` once (WA1's crop paths' lists): they merge in a key window.
 - repr/haskell and repr/rust's round trips stay out of `--full` until their rows fit the budget; Zed parked
   ([ZED-SURVEY.md](ZED-SURVEY.md)).
 

@@ -1208,3 +1208,43 @@ check-makefile: ## every bin/ script this Makefile's recipes run exists and is e
 	    | grep -oE 'bin/[a-z0-9-]+' | sort -u); do \
 	  [ -x "$$s" ] || { echo "Makefile: $$s is not an executable script" >&2; missing=1; }; done; \
 	exit $$missing
+
+.PHONY: wai-light wai-check wai-essential wai-record wai-divergences wai-ops-check wai-go wai-go-essential wai-go-record wai-aot wai-aot-essential wai-aot-record wai-go-aot wai-go-aot-record wai-w2g-check wai-js wai-js-essential wai-js-record wasm-shim-check
+wai-light: ## wai, Arbace's WebAssembly engine (WA4, doc/wasm/WAI.md): its light driver built alone by TamaGo's go into .tmp/wai/wai (bin/wai light)
+	bin/wai light
+wai-check: ## the testsuite's scripts planned by arbace.wasm.check and run on wai, each command by its own assertion, against test/wasm/eval-results.edn (bin/wai check)
+	bin/wai check
+wai-essential: ## wai's essential subset, test/wasm/essential-eval.txt, with the negative controls (bin/wai essential)
+	bin/wai essential
+wai-record: ## wai's check recorded into test/wasm/eval-results.edn (bin/wai check --record)
+	bin/wai check --record
+wai-go: ## the Go run corpus (WA5): $GOROOT/test's run programs and Go's own small programs built for wasip1 and run on wai under WASI preview 1, against gc's runs (bin/wai go)
+	bin/wai go
+wai-go-essential: ## the Go run corpus's essential part: goi's essential run programs and the own programs, with the negative controls (bin/wai go --essential)
+	bin/wai go --essential
+wai-go-record: ## the Go run corpus recorded into test/wasm/go-results.edn (bin/wai go --record)
+	bin/wai go --record
+wai-divergences: ## the eval record's non-passes against test/wasm/divergences-eval.edn (bin/wai divergences)
+	bin/wai divergences
+wai-ops-check: ## wai's instruction table against repr/wasm's arbace/repr/wasm/ops.ae, row for row (bin/wai ops check)
+	bin/wai ops check
+wai-aot: ## w2g's AOT level (WA7): the testsuite's scripts run by AOT programs, every module translated by w2g and built by TamaGo's go, against test/wasm/aot-results.edn (bin/wai check --aot)
+	bin/wai check --aot
+wai-aot-essential: ## w2g's essential subset, test/wasm/essential-aot.txt, with the AOT controls (bin/wai aot-essential)
+	bin/wai aot-essential
+wai-aot-record: ## the AOT level recorded into test/wasm/aot-results.edn (bin/wai check --aot --record)
+	bin/wai check --aot --record
+wai-go-aot: ## the Go run corpus at AOT (WAS50, WAS51: its functions translated by shape, one AOT program a slice of 400), against test/wasm/go-aot-results.edn (bin/wai go --aot)
+	bin/wai go --aot
+wai-go-aot-record: ## the Go run corpus at AOT recorded (bin/wai go --aot --record)
+	bin/wai go --aot --record
+wai-w2g-check: ## w2g's bodies and wai's exports regenerated from exec.go and compared with the committed ones (bin/wai w2g check)
+	bin/wai w2g check
+wai-js: ## Go's js/wasm programs on wai's headless world (WA11, doc/wasm/WAI.md §10): syscall/js's tests, the own programs, the demo's frames, the shim's checks, with the controls (bin/wai js)
+	bin/wai js
+wai-js-essential: ## the js/wasm corpus's essential list, test/wasm/essential-js.txt (bin/wai js --essential)
+	bin/wai js --essential
+wai-js-record: ## the js/wasm corpus recorded into test/wasm/js-results.edn and the scene's digests (bin/wai js --record)
+	bin/wai js --record
+wasm-shim-check: ## the shim's gojs imports against Go's, wasm_exec.js's and wai's, its WebGPU operation table against wai's (bin/wasm check)
+	bin/wasm check

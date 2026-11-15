@@ -1,0 +1,219 @@
+(in-ns 'go.arbace.waidriver) (go/file "gojs.go" :imports [
+
+
+    ^{:line 4} [bufio "bufio"]
+    ^{:line 5} [sha256 "crypto/sha256"]
+    ^{:line 6} [hex "encoding/hex"]
+    ^{:line 7} [fmt "fmt"]
+    ^{:line 8} [os "os"]
+    ^{:line 9} [strconv "strconv"]
+    ^{:line 10} [strings "strings"]
+
+    ^{:line 12} [wai "arbace/wai"]])
+
+
+
+
+
+
+
+
+^{:go/end 136} (go/func gojsMain "gojsMain is `waidriver gojs [--dir GUEST=HOST[:ro]]... [--env K=V]... [--cwd DIR] [--seed N] [--frames N] [--input FILE]\n[--record FRAMES.EDN] [--no-validate] MODULE [ARG...]` (doc/wasm/WAI.md §10): a GOOS=js program run on the headless world, as\ngo_js_wasm_exec runs it under Node.js (argv the module's path and its arguments; the exit status the program's), or with\n--frames N as a page: N animation frames stepped, the input script's events delivered, the recording of the fakes' calls and\nthe bridge's commands written by frame to FRAMES.EDN. wai's own failures: 125 a module wai does not run, 126 an invalid module,\na link failure, a trap or a crash, with a line `wai: ...` on standard error.\n" ^int [^{:tag (slice string)} args]
+  (let [w (addr (lit wai/GoJS :Stdin os/Stdin))
+      ^{:line 23} validate true
+      ^{:line 24} record ""]
+    (while (and (> (len args) 0) (strings/HasPrefix (aget args 0) "--"))
+      (when (== (aget args 0) "--no-validate")
+        (set! validate false)
+        (set! args (subslice args 1))
+        (continue))
+
+      (when (< (len args) 2)
+        (fmt/Fprintln os/Stderr "wai: option" (aget args 0) "needs a value")
+        (return 2))
+
+      (let [v (aget args 1)]
+        (switch (aget args 0)
+          (case ["--dir"]
+            (let [(values g h _) (strings/Cut v "=")
+                ^{:line 39} ro (strings/HasSuffix h ":ro")]
+              (set! (.-Mounts w) (append (.-Mounts w) (lit wai/Mount :Guest g :Host (strings/TrimSuffix h ":ro") :ReadOnly ro)))))
+          (case ["--env"]
+            (set! (.-Env w) (append (.-Env w) v)))
+          (case ["--cwd"]
+            (set! (.-Cwd w) v))
+          (case ["--seed"]
+            (let [(values n _) (strconv/ParseInt v 10 64)]
+              (set! (.-Seed w) n)))
+          (case ["--frames"]
+            (let [(values n _) (strconv/Atoi v)]
+              (set! (.-Frames w) n)))
+          (case ["--input"]
+            (let [(values evs err) (readInput v)]
+              (when (!= err nil)
+                (fmt/Fprintln os/Stderr "wai:" err)
+                (return 2))
+
+              (set! (.-Input w) evs)))
+          (case ["--record"]
+            (set! record v))
+          (default
+            (fmt/Fprintln os/Stderr "wai: unknown option" (aget args 0))
+            (return 2)))
+
+        (set! args (subslice args 2))))
+
+    (when (== (len args) 0)
+      (fmt/Fprintln os/Stderr "waidriver gojs [--dir GUEST=HOST[:ro]]... [--env K=V]... [--cwd DIR] [--seed N] [--frames N] [--input FILE] [--record FILE] MODULE [ARG...]")
+      (return 2))
+
+    (let [(values b err) (os/ReadFile (aget args 0))]
+      (when (!= err nil)
+        (fmt/Fprintln os/Stderr "wai:" err)
+        (return 126))
+
+      (when validate
+        (when [err (wai/Validate b)] (!= err nil)
+          (fmt/Fprintln os/Stderr "wai: invalid module:" err)
+          (when [(values _ ok) (assert (* wai/Unimplemented) err)] ok
+            (return 125))
+
+          (return 126)))
+
+
+      (let [(values mod ^:assign err) (wai/Decode b)]
+        (when (!= err nil)
+          (fmt/Fprintln os/Stderr "wai:" err)
+          (when [(values _ ok) (assert (* wai/Unimplemented) err)] ok
+            (return 125))
+
+          (return 126))
+
+        (let [out (bufio/NewWriterSize os/Stdout (<< 1 16))]
+          (set! (.-Stdout w) out)
+          (set! (.-Stderr w) (lit flushFirst out os/Stderr))
+          (set! (.-Args w) (append (lit (slice string) (aget args 0)) (spread (subslice args 1))))
+          (let [m (wai/NewMachine)
+              ^{:line 97} host (.Instance w m)
+              ^{:line 98} test (.GoTest w m)
+              (values inst ^:assign err) (.Instantiate m mod ^{:go/end 109} (fn [^string module ^string name] :results [wai/Extern bool]
+                  (let [^wai/Extern x (zero wai/Extern)
+                      ^{:line 101} ok false]
+                    (switch module
+                      (case ["gojs"]
+                        (set! (values x ok) (aget (.-Exports host) name)))
+                      (case ["_gotest"]
+                        (set! (values x ok) (aget (.-Exports test) name))))
+
+                    (return x ok))))]
+
+            (when (!= err nil)
+              (.Flush out)
+              (fmt/Fprintln os/Stderr "wai:" (errText err))
+              (return 126))
+
+            (.Bind w inst)
+            (let [(values status ^:assign err) (.Run w)]
+              (.Flush out)
+              (when [p (os/Getenv "WAI_AOT_STATS")] (!= p "")
+                (let [(values n tr) (wai/AOTInterpreted mod)]
+                  (os/WriteFile p (conv (slice byte) (fmt/Sprintf "translated %v\nleft %d\ninterpreted %d\nwhy %s\n" tr n (.-Interpreted m) (.-InterpretedWhy m))) 0644)))
+
+              (when (!= record "")
+                (when [e (os/WriteFile record (conv (slice byte) (framesEDN (.-Rec w))) 0644)] (!= e nil)
+                  (fmt/Fprintln os/Stderr "wai:" e)
+                  (return 126)))
+
+
+              (when (!= err nil)
+                (fmt/Fprintln os/Stderr "wai:" (errText err))
+                (when [(values _ ok) (assert (* wai/Unimplemented) err)] ok
+                  (return 125))
+
+                (return 126))
+
+              ^{:line 135} status)))))))
+
+
+
+^{:go/end 169} (go/func readInput "readInput reads an input script: `FRAME TYPE [CODE [X Y]]` a line (# comments), CODE \"-\" for none.\n" [^string path] :results [(slice wai/InputEvent) error]
+  (let [(values b err) (os/ReadFile path)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [^{:tag (slice wai/InputEvent)} out (zero (slice wai/InputEvent))]
+      (range [i l (strings/Split (conv string b) "\n")]
+        (set! l (strings/TrimSpace l))
+        (when (or (== l "") (== (aget l 0) \#))
+          (continue))
+
+        (let [f (strings/Fields l)]
+          (when (< (len f) 2)
+            (return nil (fmt/Errorf "%s:%d: FRAME TYPE [CODE [X Y]]" path (+ i 1))))
+
+          (let [(values n err) (strconv/Atoi (aget f 0))]
+            (when (!= err nil)
+              (return nil (fmt/Errorf "%s:%d: %v" path (+ i 1) err)))
+
+            (let [e (lit wai/InputEvent :Frame n :Type (aget f 1))]
+              (when (and (> (len f) 2) (!= (aget f 2) "-"))
+                (set! (.-Code e) (aget f 2)))
+
+              (when (> (len f) 4)
+                (set! (values (.-X e) _) (strconv/ParseFloat (aget f 3) 64))
+                (set! (values (.-Y e) _) (strconv/ParseFloat (aget f 4) 64)))
+
+              (set! out (append out e))))))
+
+      (return out nil))))
+
+
+
+
+^{:go/end 201} (go/func framesEDN "framesEDN is the recording by frame, for the Clojure reader: [{:frame N :t \"T\" :digest \"SHA-256 of the frame's lines\" :lines\n[...]} ...], frame 0 the calls before the first frame.\n" ^string [^{:tag (slice string)} rec]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (.WriteString sb "[")
+    (let [(values frame t) (values "0" "0")
+        ^{:line 177 :tag (slice string)} lines (zero (slice string))
+        ^{:line 178} flush ^{:go/end 188} (fn []
+          (let [h (sha256/Sum256 (conv (slice byte) (strings/Join lines "\n")))]
+            (fmt/Fprintf (addr sb) "{:frame %s :t %s :digest %s :lines [" frame (ednStr t) (ednStr (hex/EncodeToString (subslice h))))
+            (range [i l lines]
+              (when (> i 0)
+                (.WriteString sb "\n   "))
+
+              (.WriteString sb (ednStr l)))
+
+            (.WriteString sb "]}\n")))]
+
+      (range [_ l rec]
+        (when (strings/HasPrefix l "frame ")
+          (flush)
+          (let [f (strings/Fields l)]
+            (set! (values frame t lines) (values (aget f 1) (aget f 2) nil))
+            (continue)))
+
+        (set! lines (append lines l)))
+
+      (flush)
+      (.WriteString sb "]\n")
+      (.String sb))))
+
+
+
+^{:go/end 220} (go/func ednStr "ednStr is a string literal for the Clojure reader (\\\" \\\\ and the control characters as \\uXXXX; the rest as it is).\n" ^string [^string s]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (.WriteByte sb \")
+    (range [_ r s]
+      (switch
+        (case [(or (== r \") (== r \\))]
+          (.WriteByte sb \\)
+          (.WriteRune sb r))
+        (case [(or (< r 0x20) (== r 0x7f))]
+          (fmt/Fprintf (addr sb) "\\u%04x" r))
+        (default
+          (.WriteRune sb r))))
+
+
+    (.WriteByte sb \")
+    (.String sb)))
