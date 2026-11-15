@@ -8128,6 +8128,11 @@ No key moves: bin/cppi is in none, bin/lib/cppi/ is a crop path (`arbace_crop_pa
 | threads.cpp alone (`bin/cppi check --only`), before | `differ status 139 (g++ 0)`, terminate on thread 1003 with thread 0's `runtime_error("t0")` |
 | its node program built under `cppi_ci`, three runs | status 0, `11000 11000 11000 11000` (g++'s digest) |
 | `bin/cppi check --record` (the samples and runtime corpora, the gate's cpp-check parts; 48 min, the fragments made once) | samples 7 of 7; runtime 7 pass, thread-throw.cpp in `:threads` as recorded; **runtime/threads.cpp passes** (9.8 s): its row re-recorded `:pass` (it was `:fail`, `:thread-exceptions`), the times file with it. Peak 5.7 GB (nodes-list, 3 threads under 6 GiB, the evaluated builder making the runtime's fragments: against 2.3 GB compiled) |
+| cpp-check-essential's command (`CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt`) | samples 4 of 4, runtime 3 pass and thread-throw.cpp in `:threads`, the control differs as it must, exit 0 (about 18 min, the samples' fragments made again evaluated) |
+| cpp-print-essential's command (`bin/repr-cpp roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own`) | 33 of 33 and 9 of 9 pass, the control fails as it must, exit 0 (1m56 s; untouched by the change) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `test/gate/gate-key-crops-test.bash` | 0 problems (C++ eval: class thread-exceptions 1 → 0); C++ completeness 0.9104 → 0.9134; exit 0; PASS |
+
+gen-batch was not rerun: no code generator or front-end source changed.
 
 `:thread-exceptions` (CP367) now holds no program: its cause was this, not the pending-flag layer's design nor the route's try/catch.
 The AOT record (`check-aot-linux-amd64.edn`'s threads.cpp row, the runtime part `:clean-only`) is not re-run here: cf2g's build goes
