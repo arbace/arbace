@@ -769,21 +769,30 @@ prepare() {
   local exe=$1 image=$2 nss
   echo "== prepare the namespaces (the image)" >&2
   # the embedded namespaces, as j2g lists them (its sources may be compressed: amendment SZ2)
-  nss=$(tr '\n' ' ' < "$dir/j2g$variant/prog/namespaces.txt")
+  nss=${PREPARE_NSS:-$(tr '\n' ' ' < "$dir/j2g$variant/prog/namespaces.txt")}
   rm -f "$image"
-  printf '(doseq [n (quote [%s])]\n  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))\n' "$nss" \
+  # a namespace that does not load (a syntax error, a forward reference: jcs127's day test, 2026-11-15, interp.ae:537 left
+  # arbace.classes.interp and arbace.classes.native out of the image of a build that passed) fails the prepare, and so the build:
+  # each one named, then exit 1 after the c2j part, whose failures fail it too
+  printf '(def prepare-bad (atom []))\n(doseq [n (quote [%s])]\n  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)) (swap! prepare-bad conj n))))\n' "$nss" \
     > "$dir/prepare$variant.ae"
   # the namespaces compiled to Java forms too (standalone S6, arbace.c2j): the units the run
   # records, compiled when all are loaded into the tree $aot_out
   local compile=()
   if [ -n "${aot_out:-}" ]; then
     rm -rf "$aot_out"
-    printf '(require (quote arbace.c2j.main))\n(let [r (arbace.c2j.main/run "%s" nil)]\n  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")\n  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m)))\n' "$aot_out" \
+    printf '(require (quote arbace.c2j.main))\n(let [r (arbace.c2j.main/run "%s" nil)]\n  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")\n  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))\n  (when (seq (:failed r)) (swap! prepare-bad conj :c2j)))\n' "$aot_out" \
       >> "$dir/prepare$variant.ae"
     compile=(env ARBACE_COMPILE=1 ARBACE_PATH="$root" ARBACE_AOT_ROOT="$root")
   fi
+  printf '(when (seq @prepare-bad) (println "image:" (count @prepare-bad) "namespaces not prepared") (shutdown-agents) (System/exit 1))\n' >> "$dir/prepare$variant.ae"
   "${compile[@]}" env GOGC=${GOGC:-400} ARBACE_PREPARE=$image "$exe" "$dir/prepare$variant.ae" > "$dir/prepare$variant.log" 2>&1 \
     || { tail -20 "$dir/prepare$variant.log" >&2; echo "arbace-go: prepare failed ($dir/prepare$variant.log)" >&2; return 1; }
+  # the same from the log, whatever the script's exit: a namespace not prepared, or a source c2j did not compile
+  if grep -q '^image: not prepared:\|^aot: not compiled:' "$dir/prepare$variant.log"; then
+    grep '^image: not prepared:\|^aot: not compiled:' "$dir/prepare$variant.log" | head -20 >&2
+    echo "arbace-go: prepare failed: a namespace not prepared or not compiled ($dir/prepare$variant.log)" >&2; return 1
+  fi
   [ -s "$image" ] || { echo "arbace-go: prepare wrote no image ($dir/prepare$variant.log)" >&2; return 1; }
   grep '^image:\|^aot:' "$dir/prepare$variant.log" >&2
   echo "arbace-go: image $(stat -c %s "$image") bytes" >&2
@@ -1415,6 +1424,11 @@ case ${1:-} in
     [ $# = 3 ] || { echo "usage: bin/arbace-go --compile-aot HOST OUT" >&2; exit 2; }
     seed_aot "$2" "$3" ;;
   --image) image ;;
+  # --prepare-check EXE DIR NS...: prepare's run alone over the namespaces NS (from ARBACE_PATH's sources), its work in DIR; the
+  # status prepare gives the build (test/gate/prepare-fail-test.bash)
+  # --host-compile-check HOST DIR NS...: host_compile's run alone (bin/lib/program.bash) over NS, HOST_COMPILE_PATH their root
+  --host-compile-check) shift; h=$1 dir=$2; shift 2; mkdir -p "$dir"; HOST_COMPILE_NSS="$*" host_compile "$h" "$dir/aot" ;;
+  --prepare-check) shift; e=$1 dir=$2; shift 2; mkdir -p "$dir"; PREPARE_NSS="$*" prepare "$e" "$dir/image.bin" ;;
   --smoke)
     if [ "${2:-}" = --box ]; then box_smoke; exit; fi
     for a in ${arches//,/ }; do [ -x "$dir/$a/arbace" ] || { build || exit 1; break; }; done; smoke ;;
