@@ -63,6 +63,7 @@ import (
 func main() {
 	switch os.Args[1] {
 	case "loop":
+		fmt.Println("ready")
 		for {
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -114,8 +115,22 @@ if (cd "$t/toy" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local
   toy=$t/toy.exe
   fresh() { rm -rf "$t/cov"; mkdir -p "$t/cov"; }
   counters() { find "$t/cov" -name 'covcounters.*' | wc -l; }
-  # term MODE [DELAY]: the toy's run, SIGTERM after DELAY (0.3 s); its status in st, its output in $t/out
-  term() { GOCOVERDIR=$t/cov "$toy" "$1" > "$t/out" 2>&1 & local p=$!; sleep "${2:-0.3}"; kill -TERM "$p"; wait "$p"; st=$?; }
+  # term MODE [DELAY]: the toy's run, SIGTERM DELAY (0.3 s) after it printed "ready" (its handler, if any, installed: a
+  # SIGTERM in its start, under strace's slowdown, found no handler of the program's and the hook took it for one; gate
+  # 13d's hang, 2026-11-15); its status in st, its output in $t/out. Capped: no ready line in 30 s, or no end 30 s after
+  # the signal, is SIGKILLed and st is "hung" (or "no-ready"), which every check below reports as a failure
+  # (term MODE DELAY early: no wait for the line, the end capped at 5 s)
+  term() {
+    GOCOVERDIR=$t/cov "$toy" "$1" > "$t/out" 2>&1 & local p=$! k=0 cap=300
+    if [ "${3:-}" = early ]; then cap=50
+    else
+      while ! grep -qx ready "$t/out" && kill -0 "$p" 2>"$t/kill.err" && [ "$k" -lt 600 ]; do sleep 0.05; k=$((k + 1)); done
+      if ! grep -qx ready "$t/out"; then { kill -KILL "$p"; wait "$p"; } 2>"$t/kill.err"; st=no-ready; return; fi
+    fi
+    sleep "${2:-0.3}"; kill -TERM "$p"; k=0
+    while kill -0 "$p" 2>"$t/kill.err" && [ "$k" -lt "$cap" ]; do sleep 0.1; k=$((k + 1)); done
+    if kill -0 "$p" 2>"$t/kill.err"; then { kill -KILL "$p"; wait "$p"; } 2>"$t/kill.err"; st=hung; else wait "$p"; st=$?; fi
+  }
 
   # (L3) a program without a handler of its own: the counters written, the signal raised again (143)
   fresh; term loop
@@ -128,6 +143,13 @@ if (cd "$t/toy" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local
   for i in 1 2 3 4 5 6 7 8 9 10 11 12; do term handler 0.2; sts="$sts$st "; done
   tmp=$(find "$t/cov" -name 'tmp.*' | wc -l)
   if [ "$tmp" = 0 ] && [ "$sts" = "0 0 0 0 0 0 0 0 0 0 0 0 " ]; then ok "a handler that exits at once: status 0 in 12 runs, no tmp.covcounters left"; else no "a handler that exits at once: statuses $sts, $tmp tmp files"; fi
+  # (L3) a SIGTERM early in the start, before the program's own handler: delivered to the hook's channel alone, so raised
+  # again (143), or the program's handler registered by then takes the raised one (0); never left to a handler that did not
+  # receive it (gate 13d's hang: the hook counted the channels registered after its write, not those the delivery reached;
+  # tools/covsubset/hook/signal/refs.go's ArbaceCoverDelivered), 20 runs, each SIGKILLed after 5 s as "hung"
+  fresh; sts= bad20=0
+  for i in $(seq 1 20); do term handler 0 early; sts="$sts$st "; case $st in 0|143) ;; *) bad20=$((bad20 + 1));; esac; done
+  if [ "$bad20" = 0 ]; then ok "a SIGTERM early in the start: 20 runs ended (status 0 or 143), none hung"; else no "a SIGTERM early in the start: statuses $sts"; fi
   # (L3) SIGHUP ignored at the start (nohup) stays ignored
   fresh; (trap '' HUP; GOCOVERDIR=$t/cov exec "$toy" loop) > "$t/out" 2>&1 & p=$!
   sleep 0.3; kill -HUP "$p"; sleep 1.5

@@ -5849,3 +5849,45 @@ tsvs read in place).
 - Keys unmoved: `bin/arbace-go --gate-key` 66c29674829e..., test/gate/gate-key-crops-test.bash passes.
 - Steps to rerun: java-judge and java-held; oi-aot.run, oi-suite-aot.suite, ocaml-judges; reap and crops-score; suite-aot-essential;
   hsi-check-aot.
+
+## 2026-11-15: the cover hook's swallowed SIGTERM (gate 13d's gate-tests hang, n17-fix)
+
+- **What hung**: gate 13d (`bin/gate --full --concurrent` on next 30c598795) ran the step gate-tests. Its
+  test/gate/gate-reads-test.bash runs `bin/gate-tests --nested` under `strace -f`. Inside that, test/gate/cover-test.bash's
+  12 `term handler 0.2` runs left one `toy.exe handler` asleep for about 5.5 h: 25 threads, main in `<-c`, the hook's
+  goroutine back in its `range c`. Nothing capped the test's `wait`, so the main session ended the gate with SIGKILL at about
+  06:25 UTC.
+- **The cause** was a real bug in the cover build's SIGTERM hook (tools/covsubset/hook/cover.go with signal/refs.go), not
+  only the test's timing. After writing the counters, the hook read `signal.ArbaceCoverRefs(s)`: the channels registered
+  now. A SIGTERM that comes before the program's own `signal.Notify` is delivered to the hook's channel alone. If the program
+  registered during the hook's write, the count was 2. The hook then took the signal for the program's and left it to the
+  program, which never received it and waited forever. Without the hook, Go's default would have ended the program (143).
+  Under strace's slowdown, the test's 0.2 s after the start fell into the program's start.
+- **Reproduced** without strace, SIGTERM sent at once to the old toy: 13 of 30 runs hung. Reading the count when the
+  signal arrives, before the write, narrows the window but does not close it: 9 of 130 runs still hung, because the hook's
+  goroutine wakes after the delivery. So the count is taken at the delivery itself.
+- **The runtime fix** is in the cover builds' overlay only. refs.go makes os/signal's signal loop its own:
+  `watchSignalLoop`, set by an init after signal_unix.go's, since the overlay's zz_arbace_cover.go sorts last. The loop is
+  `process`'s delivery, with the channels it sent to counted under the same lock. `ArbaceCoverDelivered(sig)` returns that
+  count, or -1 when the loop is not this file's. The hook decides on that count, and falls back to `ArbaceCoverRefs` on -1.
+  refs.go's pin in bin/lib/cover.bash's cover_hook_table is now 2bd07bb5....
+  Considered and rejected:
+  - re-sending the signal when in doubt: a program that did receive it would get it twice;
+  - overlaying signal.go itself: a larger replacement of the standard library.
+- **The test fix**: test/gate/cover-test.bash's `term` waits for the toy's "ready" line before the SIGTERM. The line is
+  printed after the toy's own Notify, and `loop` prints it too. The wait is capped:
+  - no line in 30 s: SIGKILL, status `no-ready`;
+  - no end 30 s after the signal: SIGKILL, status `hung`.
+  Either one fails the check that reads it. A new check sends 20 SIGTERMs at once, early in the start, each capped at 5 s.
+  Each run must end with 0 (the program's handler took the raised signal) or 143. No other wait in test/gate/*.bash waits
+  uncapped on a child it signalled: lanes-test's awk ends by its own `sleep 30`.
+- **Proof**:
+  - cover-test passes alone, 23 of 23, and under `strace -f`.
+  - The test's `term handler 0.2` ran 100 times under `strace -f`: 100 of 100 status 0 with the new hook, 100 of 100 with
+    the old one too (the ready line alone removes the test's race), and keepgoing 100 of 100 status 3.
+  - SIGTERM sent at once to the new toy: 300 runs plus about 1,200 under CPU load, none hung.
+  - gate-reads-test was not run. It nests the whole gate-tests, about 5 h under the gate's load.
+- **Keys**:
+  - `bin/arbace-go --gate-key` stays 66c29674829e...: tools/covsubset and bin/lib/cover.bash are out of gate_key.
+  - test/gate/gate-key-crops-test.bash passes.
+  - The cover key moves (cover.go and cover.bash), so the cover build is rebuilt at its next use.

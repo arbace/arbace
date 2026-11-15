@@ -129,8 +129,17 @@ func arbaceCoverHook() {
 		signal.Notify(c, sigs...)
 		go func() {
 			for s := range c {
+				// whether the program's own handler received this signal: the count of the channels its delivery was
+				// sent to (refs.go's), not of those registered now: a handler registered after the delivery (a signal
+				// early in the program's start) never sees it, and the program, left to it, waited forever (gate 13d's
+				// hang, 2026-11-15); then the signal is raised again, as Go's default would have acted
+				k := signal.ArbaceCoverDelivered(s)
+				if k < 0 {
+					k = signal.ArbaceCoverRefs(s)
+				}
+				own := k > 1
 				arbaceEmit(d)
-				if signal.ArbaceCoverRefs(s) > 1 {
+				if own {
 					continue // the program's own handler has it too
 				}
 				signal.Stop(c) // the hook's alone: the signal's default action back (no other channel wants it)

@@ -138,7 +138,7 @@ cover_settle() {
 # that differs from its pin fails cover_go_flags (and test/gate/cover-test.bash): its new digest here
 cover_hook_table() {
   printf '%s\n' "internal/coverage/cfile tools/covsubset/hook/cover.go -" \
-    "os/signal tools/covsubset/hook/signal/refs.go f69a96aabc678f8b7fdbd8e3cdf81b8a4388f0db1a186ec6e016a9fa962b65a4" \
+    "os/signal tools/covsubset/hook/signal/refs.go 2bd07bb5e08c0f9c75f91a7a60aac676963b69da041b38b868641071e82fb3a3" \
     "runtime tools/covsubset/hook/runtime/timers.go 7ee8ebb52ddecc820261b1ab1e7a0f03bbf519796bb2061827797613239bc7c4"
 }
 
