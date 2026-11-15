@@ -6262,6 +6262,31 @@ poly-kinded tycon's kind arguments now (deferred: the elaborator erases kind arg
 the run corpora), P41 (Typeable's kind arguments), P42 (the testsuite's Typeable programs on the own path). Details:
 doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P37-P39".
 
+### 2026-11-13: java-jdk: the two parked jdk parts, causes found on slices (the round trip's loop fixed, attr's read limited)
+
+Branch `java-jdk` from mac/next ca3c7aff8, light only (each run at most 2.6 GiB under a watcher) beside the serial rerun.
+doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the jdk parts' memory and round trip", has the numbers.
+- `repr-java-roundtrip.jdk`: no tool regression. Nothing in `arbace/repr/java/` changed since its last pass (59f546ada); the jdk
+  corpus grew from 906 to 2,277 files at b6a6093af (11-07) and its references were never recorded again: 784 of night 13's 839
+  unexpected entries are new files, the 30 old read failures are the same as 11-05's, the 9 new ones new files. The other 55:
+  `compile_printed`'s six rounds of replacing javac's rejected printed files by their originals were too few for the larger
+  corpus (PKCS12KeyStore.java's errors came in the seventh round), so the last tree did not compile and whole packages' printed
+  classes were missing. Fixed in `bin/lib/repr-java/roundtrip`: until javac accepts the tree, at most 20 rounds, a failure when a
+  round rejects nothing new. Considered: bisecting the jdk forms since 11-05 (the triage's guess); the old files' identical read
+  failures and the round counts made it unnecessary.
+- `repr-java-attr.jdk`: the slices' heap profiles hold no javac object at the end (no chunk's javac or registry is retained); the
+  live heap is 0.28 of the RSS (GOGC 200); one chunk seeing the whole java.base tree passed 2.6 GiB unlimited and ran in 2.08 GiB
+  under GOMEMLIMIT=2000MiB at the same speed. Built: front-check's jdk reads (attr-check, front-check, nojavac-check) and the round
+  trip's jdk reads under `GOMEMLIMIT=${GOMEMLIMIT:-26GiB}`, estimated 27-28 GiB for the whole attr part (jrt-convert's precedent:
+  47.6 -> 31.4 GiB under 28GiB). Considered: fewer threads (doubles the 19 minutes), a parse cache of the side sources shared by
+  the chunks and a bounded check read (both change arbace/repr/java and so the javac tool's key; the second measured no gain).
+- Night commands, not run (each heavy, under `bin/heavy-lock`, after the rerun and the main session's go-ahead), from the worktree
+  with `REPR_JAVA_EXE` the gate's javac tool: `bin/repr-java attr-check --corpus jdk` (expected 27-30 GiB, about 20-25 min; then
+  `:clean-only` lifted and `:mem-gib` from its peak); `bin/repr-java roundtrip --corpus jdk --text --record` (expected about 30-35
+  GiB with javac's c1 compile beside the read, about 35 min; it rewrites test/repr/java/roundtrip/jdk{,-known,-text,-text-known}.edn,
+  to review), then the same without `--record` to pass. Neither moves a key (gate_key unchanged; bin/lib/repr-java is out of the
+  javac key).
+
 ### 2026-11-14: n15-fix, night 13's rerun (`bin/gate --full --concurrent` on next 7658c750c, 495 min, 8 failed)
 
 Branch `n15-fix` from `mac/next` 7658c750c. Each failure was diagnosed from the night's logs (`.tmp/worktrees/next/.tmp/gate/`)
@@ -6793,6 +6818,45 @@ Proof: `bin/gate` (essential) on `3f9adc624` passed (72m44s; 39 run, 17 skipped 
 the store no longer held, made again). Flagged, not failing: cpp-runtime's build peaked at 6.6 GiB over its declared 3, hsi-essential
 (23m35s) and llvmi-essential (28m39s) over their budgets (the cpp-runtime build beside them). `bin/reap`: 49 of 52 cells checked, 3 no
 check yet, 0 problems, the matrix unchanged (no `--record` needed); `bin/crops-score --judge --strict`: 13 crops, 0 problems.
+
+## 2026-11-15: B0 of the consolidation plan, the no-key units (branch `b0-1115`, from `mac/next` `98b7d7507`)
+
+The user decided the consolidation plan's order and U1-U6 (a) on 2026-11-15, round 41 (`.tmp/consolidation-plan-1115.md`, §5 "B0").
+B0 takes the two units that move no key:
+- `mac/java-jdk` (032335813, 11-13: repr/java's round trip loops until javac accepts the printed tree, at most 20 rounds; the jdk reads
+  of front-check and the round trip under `GOMEMLIMIT=${GOMEMLIMIT:-26GiB}`) merged `--no-ff` (6ba9d9506). One conflict, doc/JOURNAL.md:
+  java-jdk's 11-13 entry placed after next's last 11-13 entry (HF10-P37), both sides kept, nothing else changed.
+- `ocaml-libs1`'s "Decided (2026-11-05, the user: OT11-OT15)" section (69cbbee3b) re-applied to doc/ocaml/DEFERRED-TRIAGE.md after OT15,
+  where next's file still had only "Proposed (OT11-OT15; none decided)" (f9b5bd405): the file moved on next, so the branch's merge
+  conflicts. The Proposed heading is kept as the file's other Proposed headings are, each followed by its Decided section. Considered:
+  amending the heading as the plan's §4 suggests; the file's convention won.
+- review-fix-2's GOI-SPEC note is held for B1, as the plan says.
+
+The keys: `bin/arbace-go --gate-key` 07a904f8b13b… before and after; `test/gate/gate-key-crops-test.bash` passes. The diff against
+next: `bin/lib/repr-java/{front-check,roundtrip}` (out of gate_key and the javac key) and docs. Proof: the essential gate (`bin/gate`)
+passed in 4m07s, 7 steps run (oracle-go as the canary, crops-score and repr-java-closure for the changed repr-java scripts), 53 skipped
+at their keys; `bin/reap`: 49 of 52 cells checked, 3 no check yet, 0 problems; `bin/crops-score --judge --strict`: exit 0.
+
+## 2026-11-15: JCS127's day test (U2 (a)): it fails, to W1
+
+`mac/mac/039-jcs127` (d6870d37c, 11-01, write-ahead: volatile fields of interpreted classes under Rt's striped locks, `CF$VolField`)
+merged onto B0's head b43362b9c in a worktree of its own (branch `jcs127-test`, 7a4650d9b; only the survey conflicted, its "As built:
+JCS127" placed after next's sections). gate_key 07a904f8b13b… -> 8c4d39a049c5… (arbace/classes/interp.ae, arbace/lang/Compiler.ae), as
+the plan said. `bin/arbace-go --gate-build` on the main checkout's stage 0: 36m33s wall (the two-run path: j2g 745 s, build-go 371 s,
+c2j 309 s, then j2g 172 s and the test build 434 s), peak 19.9 GiB. Then the interp level of t03832 (DekkerTest) and the 24 essential
+tests with a volatile field the survey lists (`bin/java-check --levels interp --only ... --save`, the forms from the main checkout's read
+cache with JAVA_CHECK_FORMS_ONLY=1 and B0's javac tool, REPR_JAVA_STALE_OK=1: jcs127 changes no reader source).
+- jcs127's executable: 25 of 25 `load-failed`, "Attempting to call unbound fn: #'arbace.classes.native/compile-top".
+- The control, B0's gate executable (66c29674829e…), same command: 24 pass, t03832 fails as recorded ("Got 5 failed ITERATIONS").
+- The cause: the build's image prepare printed "not prepared: … Syntax error compiling at (arbace/classes/interp.ae:537:3)": the new
+  `volatile-field?` names `ACC_VOLATILE`, whose `def` comes after it, so `arbace.classes.interp` and `arbace.classes.native` were left
+  out of the image (on the executable `arbace.classes.native` loads with no var). The build still ended with status 0 ("aot: 159
+  sources compiled … 0 failed"): a prepare failure does not fail `--gate-build`.
+- Verdict: fail; JCS127 goes to W1, not B1. The one-line fix (the defn moved after the defs) is on `jcs127-test` (ef9937644), pushed
+  to mac, untested (its form count read back, 152 forms; no build: the night's rules start at 18:45 and the disk is at 86%). The next
+  test of it: the same build and the same 25 tests, expecting t03832 to pass a few times in a row and the 24 to stay passing, then
+  `bin/diffcheck` and `bin/java-check --essential`. Considered: rebuilding at once (37 min at 20 GiB into the night's window).
+- The broken build stays in `.tmp/gate-exe/8c4d39a049c567e0253e/` (its key is jcs127-test's 7a4650d9b tree alone; the fix moves the key).
 
 ## 2026-11-15: revisit-1115, gate 13e's failures and review 300's medium findings (batch B1; branch `revisit-1115` from `mac/next` `98b7d7507`)
 
