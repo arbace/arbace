@@ -7590,3 +7590,31 @@ cast; alternatives (a) each the fuller port, recorded in the survey. Proposed: H
 (T15598), next round. Slips: none known; the night.sh chain's disk wait (`waitdisk.sh`) took its command as its limit and looped,
 stopped and fixed before any run; the `--only` list of night.sh named bare ids, which match nothing, replaced by the full ids.
 Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P54".
+
+## 2026-11-15: cpp-threads, runtime/threads.cpp's crash diagnosed: bin/cppi built C++ programs with the seed's ci (branch `cpp-threads` from `mac/revisit-1115` `3d0cae3c1`)
+
+- The brief (B1, tonight's gate): runtime/threads.cpp, recorded in `:thread-exceptions` as a segmentation fault in `_ZL4worki`,
+  aborts through `std::terminate` from `std::this_thread::yield` since the C++ chain cpp-s13..cpp-s15 merged (ff30398d0); suspected
+  cpp-s14's or cpp-s15's front end (CP395's noexcept, the conversion templates, the destroy landing pad).
+- Not the front end: threads.cpp's IR by our route here and in next's `.tmp/cppi-check` (made at 1b381e60b, gate 13e's tree) are equal
+  up to the inliner's counters, and their lowered C too. The abort's own message names the cause: thread 1003 (`work(2)`) terminates
+  on `std::runtime_error("t0")`, thread 0's exception. The node program held the lowered runtime's `_Thread_local` `cx$pending` and
+  `cx$cur` (arbace/cpp/rt/eh.c.ae, CP103 (b)) as plain statics, `(static 320 4 4 0 "cx$pending")`, on both trees: one pending flag for
+  four threads. bin/cppi's `arbace_tool -m arbace.cpp.run` runs used stage 0's embedded ci (the seed d5548e72, 2026-11-05), older than
+  ci's threads (de576f46b, 2026-11-06: `RO 2`, a block per thread); RT.toolSource does not reload `arbace/c/` from the checkout, which is
+  why bin/ci, bin/llvmi and bin/rsi run under `bin/lib/ci/fresh.bash`'s `c_ci_fresh` (686246a33) and bin/cppi did not. A C probe of
+  `_Thread_local` counters on four threads: `bad 79996` by the embedded ci, 0 by the checkout's. The old fault and the new abort are the
+  same race: llvm-eh's `cx$exception` (writing the adjusted pointer into `cx$cur`) moved where it lands.
+- Fix (crop paths only, no key moves): `bin/lib/cppi/ci-fresh.bash`'s `cppi_ci` runs every `arbace.cpp.run` step (read-lib, check-c,
+  lower-lib, nodes-list, compile-list, nodes) under `c_ci_fresh` in a subshell; the front end, the lowering and the judges stay
+  compiled. Alternatives: `c_ci_fresh` for the whole bin/cppi (every C++ front-end run evaluated too: slower for nothing); reloading
+  `arbace.c.build` from inside arbace.cpp.run (a C namespace's loading decided by a C++ one, against fresh.bash's single rule); a
+  re-seed (window W, not tonight). Cost: ci's prebuilt fragments are keyed by how its sources ran, so the first build at a key makes them
+  with the evaluated builder (io.cpp's build 435 s once, threads.cpp's 138 s, then 56 s).
+- Probe `test/cpp/selftest/tls.sh` (cpp-selftest; tls.cpp by our route): the statics `RO 2`, three runs pass; controls: the judge rejects
+  `cx$pending` `RO 0`, and the build under `CI_FRESH=0` has it `RO 0`.
+- Judged: `bin/cppi check --record` over samples and runtime (the gate's cpp-check parts): samples 7 of 7, runtime 7 pass and
+  thread-throw.cpp in `:threads` as recorded, runtime/threads.cpp passes (9.8 s, g++'s digest): its row re-recorded `:pass` from `:fail`
+  (`:thread-exceptions`, now without a member: CP396 proposed, (b) keep it until the weekly AOT runtime part confirms). The record run's
+  nodes-list peaked 5.7 GB (3 threads, 6 GiB, the evaluated builder): CP397 proposed (cpp-check with the essential's `CPPI_THREADS=2
+  CPPI_CI_MEMLIMIT=2GiB`). The watcher was raised from 2.5 to 6.5 GB for the record run (MemAvailable stayed above 37 GB): a rule slip, said.
