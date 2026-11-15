@@ -2659,3 +2659,68 @@ Numbering from ARS93. Each with options, the recommended named; none taken.
   process's own calls: the shared mappings written back before each file call and read again after each writing one (write,
   pwrite64, writev, ftruncate, fallocate), a cost on every such call while a shared mapping exists (cmd/compile's runs map their
   imports shared); another process's writes stay unseen.
+
+## As built: AR24 (2026-11-15; branch `299-asm-arm64-ar24`, from `295-asm-arm64-ar23` `8536a02d5`; queue task 299, the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, load 9-13, 3 jobs of this task's), stage 0 and TamaGo's go. The user's answer to
+ARS93: (a), as built (round 38).
+
+- **`bin/a64i goroot-check`** (test/asm/a64i-goroot/: `check.bash` the driver, `one.bash` a program, `judge.ae` the judgment;
+  `make a64i-goroot-check`): goi's $GOROOT/test corpus, the run, rundir, buildrundir and runindir programs of goi's linux record
+  (test/goi/check-linux-amd64.edn: 1,178), built for linux/arm64 by TamaGo's go1.27.1 (CGO_ENABLED=0) as cmd/internal/testdir
+  builds them: a run `go tool compile -p=main` and `go tool link -s -w -buildid=test` against std's export data as the driver lists
+  it (`go list -export std`, the importcfg), a run with flags or arguments `go build` of the program and its leading .go
+  arguments (the driver's `go run`, GOPATH mode), a rundir its .dir's packages compiled in file order as `test/NAME` (`-s`: one per
+  file) and the last linked, a buildrundir its .go and .s files (asm -gensymabis, compile -asmhdr, asm, pack, link), a runindir `go
+  build .` in a module copy (`-gomodversion`); the driver's shouldTest on the //go:build line for linux/arm64 (Go's release and
+  tool tags, linux, arm64, gc, test_run), its -t timeout (the CPU's run 3 times it), its environment (STDLIB_IMPORTCFG, GOENV=off,
+  GOFLAGS=, GOROOT, its bin first on PATH), $GOROOT/test the directory, stdin empty. Each is run on this arm64 CPU, the reference
+  (gc's run on arm64, judged as goi's check judges gc's: status 0, stdout then stderr the golden .out, or no output), and on a64i
+  (`run --stats`, a budget of A64I_GOROOT_TMO, 120 s): a64i's status, stdout byte for byte and stderr up to the goroutines' traces
+  (a [signal] line's addresses masked) equal to the CPU's. Rows `[PROGRAM RESULT DETAIL]` in
+  test/asm/a64i-goroot-results-arm64.edn, every non-pass a class of test/asm/divergences-a64i-goroot.edn (goi's format):
+  `:not-arm64` (the build constraint), `:driver-skip` (-goexperiment, -godebug, the CPU's own timeout), `:gc-arm64` (the CPU's own
+  run does not pass: none), `:speed` (a program known over the budget, test/asm/a64i-goroot/known.edn, not run on a64i again, or one
+  whose CPU run is over A64I_GOROOT_CPU_MAX, 1,000 ms: a64i runs Go's code about a thousand times slower), `:one-process`; a program
+  a64i's run differs on, times out on or that does not build is failing unless known.edn names its class. `--only`, `--from N
+  --count M` (pieces), `--resume` (the rows of an earlier run kept), `--record` (a whole run without failures). The controls
+  (test/asm/a64i-goroot/controls.txt, from the runs' digests): goroot-1 (helloworld's a64i run against 235's CPU run), goroot-2
+  (235's CPU output against helloworld's golden .out), goroot-3 (a rundir's a64i run against helloworld's): fail as they must.
+- **The rows** (the recorded run, `--record`, at ba415c603's a64i): 1,140 of 1,178 pass; 19 `:one-process`, 14 `:speed` (8 over
+  the budget, known; 3 over 1,000 ms on the CPU; issue22781, 107 s alone, over the budget under the check's load), 5 `:not-arm64`;
+  none failing. 333 s wall at 3 jobs (817 s of a64i runs, 2.85 G instructions; the first run before the fixes, every program run,
+  599 s and 1,991 s). The CPU passes every test it runs (no `:gc-arm64` row).
+- **What a64i lacked, found by the corpus** (built generally in emu.Kernel, x86i's kernel too):
+  - **madvise's MADV_DONTNEED** was a no-op (crt's madvise 0): the pages kept their bytes where Linux gives zeros again. Go's
+    scavenger returns free heap pages with it and the runtime reuses them as zeros: fixedbugs/issue22781.go (SetGCPercent(1)) ended
+    with `fatal error: found bad pointer in Go heap` or `marked free object in span` after 50-500 M instructions, with
+    GOMAXPROCS=1 and asyncpreemptoff=1 too, `gccheckmark=1` found unmarked reachable objects; issue27695, issue9321 (SIGSEGV),
+    issue5291 and issue25897a failed so at times. Now `madvise`: an address not page-aligned EINVAL; MADV_DONTNEED zeroes each
+    mapped page of a private mapping (a private file mapping's too: not read again from the file, no program advises one), a shared
+    one's kept (a file's, or an anonymous one's: `markAnon` records MAP_SHARED|MAP_ANONYMOUS pages, cleared at munmap and by a later
+    mapping over them); other advice a hint, 0. issue22781 runs to its end, 1.2 G instructions, twice of two.
+  - **mkdirat** was ENOSYS (crt has mkdir, not mkdirat): os.MkdirTemp failed (`mkdir ...: function not implemented`). At AT_FDCWD
+    it is crt's mkdir with its umask; another dirfd stays ENOSYS (Go's os.Mkdir uses AT_FDCWD). The lockstep takes mkdirat from
+    the native.
+  - Tests `linux-madvise.s` and `linux-mkdirat.s` (test/asm/a64i/, essential): eval, AOT, forms, the CPU, lockstep sys and step,
+    the loader agree; controls verdict-40, verdict-41, cpu-8.
+- **Not built (`:one-process`)**: 19 programs run the go command through os/exec (go tool compile or link, go run, go build) and
+  judge its output; a64i's clone of a process, fork, vfork and execve are ENOSYS (AX5), so os/exec fails with `fork/exec
+  /root/tamago-go/bin/go: function not implemented`. ARS94 below.
+- **The harness's own fix**: a run's leading .go arguments are its files (cmplxdivide.go cmplxdivide1.go), as go run takes them.
+
+### Proposed (AR24)
+
+Numbering from ARS94. Each with options, the recommended named; none taken.
+
+- **ARS94 where goroot-check runs.** 333 s wall at 3 jobs on the M2 (about 14 CPU-minutes), peak memory small (one a64i a job);
+  the reference is this arm64 CPU's run. (a) a `--full` step `a64i-goroot` in chain asm-arm64-full, on arm64 hosts (the VM's nights),
+  the corpus whole (recommended: ten minutes at most, the whole corpus judged each night, as a64i-go-compile); (b) the same step on
+  every host, the CPU's runs recorded on the M2 (their digests beside the record) and a64i judged against them on amd64 too (Go's
+  cross builds are byte-identical, AR22), a change of the judge's and one more record to keep; (c) a rotation (GT8.4's `:rotate`, a
+  quarter a night), under 2 minutes, a program judged every fourth night.
+- **ARS95 programs that run the go command (19 `:one-process`).** (a) as built, a class (recommended: a64i is one process by design
+  since AX5; the programs test gc's tools, which AR21-AR23 already run on a64i); (b) os/exec's clone(CLONE_VFORK) and the child's
+  execve passed to the host, the child a native process (crt's vfork spawn, as ci's); a process the program makes then runs outside
+  a64i, the check's judgment unchanged; (c) the child run by a second a64i (fork's copy of the address space, then exec's loader),
+  the whole process tree emulated: the largest.
