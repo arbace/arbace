@@ -1137,14 +1137,19 @@
   unsolved one improved by its class's dependencies and tried again, until all are solved or a round changes nothing;
   the terms, or nil"
   [preds givens depth]
-  (loop [k 0 terms (vec (repeat (count preds) nil))]
-    (let [before (mapv zonk-pred preds)
-          terms' (mapv (fn [t p] (or t (do (when (seq (some-> *classes* deref (get (first (zonk-pred p))) :fundeps)) (improve-one! (zonk-pred p)))
-                                           (solve-pred p givens depth))))
-                       terms preds)]
-      (cond (every? some? terms') terms'
-            (or (> k 8) (and (= (count (filter some? terms')) (count (filter some? terms))) (= before (mapv zonk-pred preds)))) nil
-            :else (recur (inc k) terms')))))
+  (if (not-any? (fn [[_ ts]] (some #(seq (metas-of %)) ts)) preds)
+    ;; no metas: nothing to improve, one pass that stops at the first failure (an instance's context solved before)
+    (let [subs (reduce (fn [acc p] (if-let [t (solve-pred p givens depth)] (conj acc t) (reduced nil))) [] preds)] subs)
+    (loop [k 0 terms (vec (repeat (count preds) nil))]
+      (let [before (mapv zonk-pred preds)
+            terms' (mapv (fn [t p] (or t (do (when (seq (some-> *classes* deref (get (first (zonk-pred p))) :fundeps)) (improve-one! (zonk-pred p)))
+                                             (solve-pred p givens depth))))
+                         terms preds)]
+        ;; another round only when this one unified a meta (a failed predicate is tried again only when it changed:
+        ;; trying every one again each round was exponential in the instances' depth, AtomicPrimops' 9 s became minutes)
+        (cond (every? some? terms') terms'
+              (or (> k 8) (= before (mapv zonk-pred preds))) nil
+              :else (recur (inc k) terms'))))))
 
 (def ^:dynamic *solving* {}) ; {pred (atom lv)}: the predicates whose instance is being solved (recursive dictionaries)
 
@@ -3345,7 +3350,8 @@
   ;; (P54fd's Integral ?e before Coll c ?e, whose given's functional dependency gives ?e := e); the left deferred in
   ;; their order
   (loop [ws wanteds]
-  (let [left (filterv (fn [w0]
+  (let [before (mapv (comp zonk-pred :pred) ws)
+        left (filterv (fn [w0]
     (if-let [term (let [solve (fn [] (under-givens w0 (fn [w]
                                         (let [t (solve-pred (:pred w) givens 0)]
                                           (if (and *self-givens* (not (and (seq? t) (contains? '#{v lv} (first t)))))
@@ -3360,7 +3366,8 @@
       (do (swap! *evidence* assoc (:ev w0) term) false)
       true))
                       ws)]
-    (if (and (seq left) (< (count left) (count ws)))
+    ;; (again only when the round unified a meta: solving one cannot help another otherwise)
+    (if (and (seq left) (< (count left) (count ws)) (not= before (mapv (comp zonk-pred :pred) ws)))
       (recur left)
       (doseq [w0 left] (swap! *wanteds* conj w0))))))
 
@@ -4719,14 +4726,15 @@
     ;; after TypeEq [Char] [Char] ?b gave ?b := HTrue); a wanted made under a let ?x = e's bindings solved with them
     ;; (:ipg, T17104's F Int, a family reducing to ?x :: String)
     (loop [ws ws]
-      (let [left (filterv (fn [w]
+      (let [before (mapv (comp zonk-pred :pred) ws)
+            left (filterv (fn [w]
                             (if-let [term (binding [*ip-givens* (or (:ipg w) *ip-givens*)]
                                             (or (if-let [g (:geqs w)] (binding [*given-eqs* g] (solve-pred (:pred w) [] 0)) (solve-pred (:pred w) [] 0))
                                                 (default-ip (:pred w))))]
                               (do (swap! *evidence* assoc (:ev w) term) false)
                               true))
                           ws)]
-        (if (and (seq left) (< (count left) (count ws)))
+        (if (and (seq left) (< (count left) (count ws)) (not= before (mapv (comp zonk-pred :pred) ws)))
           (recur left)
           (doseq [w left] (error! "unsolved: " (pr-str (zonk-pred (:pred w)))))))))))
 
