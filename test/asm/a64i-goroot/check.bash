@@ -80,6 +80,16 @@ if [ "$r1" = pass ]; then echo "a64i goroot-check: rule: a recorded :pass runs p
 else echo "FAIL: a64i goroot-check: rule: helloworld.go, recorded :pass, under A64I_GOROOT_CPU_MAX=-1: ${r1:-no row}, not pass"; rules=1; fi
 if [ "$r2" = speed ]; then echo "control goroot-4: fails as it must (helloworld.go with no recorded pass, A64I_GOROOT_CPU_MAX=-1: speed)"
 else echo "FAIL: control goroot-4: helloworld.go with no recorded pass under A64I_GOROOT_CPU_MAX=-1: ${r2:-no row}, not speed"; rules=1; fi
+# queue 308's second rule and its control goroot-5: a64i's budget is CPU time, not the wall clock. helloworld.go with A64I a shim
+# that sleeps 3 s and then runs a64i, under A64I_GOROOT_TMO=2: 3 s of wall time, almost no CPU time, so it passes (a wall budget
+# would time it out); with a shim that spins on the CPU, it is over its 2 s of CPU time: timeout, as it must
+printf '#!/bin/sh\nsleep 3\nexec "%s" "$@"\n' "$A64I" > "$W/a64i-sleep"; printf '#!/bin/sh\nwhile :; do :; done\n' > "$W/a64i-spin"; chmod +x "$W/a64i-sleep" "$W/a64i-spin"
+tmo_run() { rm -rf "$rw"; mkdir -p "$rw"; cp "$W/importcfg" "$rw/"; W=$rw A64I=$1 A64I_GOROOT_TMO=2 bash "$root/test/asm/a64i-goroot/one.bash" helloworld.go; cut -f2 "$rw/res/helloworld.go.tsv" 2>/dev/null; }
+r3=$(tmo_run "$W/a64i-sleep") r4=$(tmo_run "$W/a64i-spin"); rm -rf "$rw" "$W/a64i-sleep" "$W/a64i-spin"
+if [ "$r3" = pass ]; then echo "a64i goroot-check: rule: a64i's budget is CPU time (helloworld.go after 3 s of sleep under A64I_GOROOT_TMO=2: pass)"
+else echo "FAIL: a64i goroot-check: rule: helloworld.go after 3 s of sleep under A64I_GOROOT_TMO=2: ${r3:-no row}, not pass (a wall-clock budget?)"; rules=1; fi
+if [ "$r4" = timeout ]; then echo "control goroot-5: fails as it must (a64i spinning on the CPU under A64I_GOROOT_TMO=2: timeout)"
+else echo "FAIL: control goroot-5: a64i spinning on the CPU under A64I_GOROOT_TMO=2: ${r4:-no row}, not timeout"; rules=1; fi
 . "$root/bin/lib/tools.bash"
 arbace_tool -e "(do (load-file \"$root/test/asm/a64i-goroot/judge.ae\") nil)" \
   -e "(asm.a64i-goroot/main \"$root\" \"$W/results.tsv\" \"${rec:-}\" \"${partial:-}\")" || exit 1
