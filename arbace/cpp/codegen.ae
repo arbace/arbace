@@ -70,6 +70,28 @@
     (swap! *top* update :declared conj nm)
     (add-top! (apply list 'llvm/declare (gsym nm) ret (cond-> (mapv (fn [t i] (into [t] (nth pattrs i nil))) ps (range)) va (conj '&)) (when nounwind [:attrs [:nounwind]])))))
 
+;; (cpp-s12, CP382 (a): a wide or Unicode literal's global, its code units as an array of i16 or i32, clang's
+;; GetAddrOfConstantStringFromLiteral: the same `.str` numbering, all zero as zeroinitializer, aligned to the unit)
+(declare string-global)
+
+(defn- wide-global [us ^long w]
+  (let [k [w us]]
+    (or (get-in @*top* [:strings k])
+        (let [n (count (:strings @*top*))
+              nm (if (zero? n) ".str" (str ".str." n))
+              lt (case w 2 'i16 4 'i32)
+              vs (conj (vec us) 0)]
+          (swap! *top* assoc-in [:strings k] nm)
+          (add-top! (list 'llvm/global (gsym nm) (list 'array (count vs) lt)
+                          (if (every? zero? vs) 'zeroinitializer (apply list 'array (map (fn [u] [lt u]) vs)))
+                          :linkage :private :unnamed-addr :unnamed_addr :constant true :align w))
+          nm))))
+
+(defn- str-global
+  "A string literal node's global."
+  [e]
+  (if (:units e) (wide-global (:units e) (:w e)) (string-global (:s e))))
+
 (defn- string-global [^String s]
   (or (get-in @*top* [:strings s])
       (let [n (count (:strings @*top*))
@@ -161,7 +183,9 @@
   [{:keys [bf shift w ty]}]
   (let [lt (abi/llvm-type ty) n (* 8 (abi/size-of ty)) shift (long shift) w (long w)
         v (val! (list 'load lt ['ptr bf] :align (abi/align-of ty)))
-        r (if (abi/signed? ty)
+        ;; (cpp-s13: an enumeration of no negative enumerator and no fixed type: unsigned, as clang's integer type of it)
+        sgn (and (abi/signed? ty) (not (let [u (abi/unq ty)] (and (abi/enum? u) (:nonneg (abi/enm (:id u)))))))
+        r (if sgn
             (let [hi (- n w shift) v (if (pos? hi) (val! (list 'shl lt v hi)) v)] (if (< w n) (val! (list 'ashr lt v (- n w))) v))
             (let [v (if (pos? shift) (val! (list 'lshr lt v shift)) v)] (if (< w n) (val! (list 'and lt v (dec (bit-shift-left 1 w)))) v)))]
     (if (= :bool (abi/bn (abi/underlying (abi/unq ty)))) (val! (list 'trunc lt r 'i1)) r)))
@@ -602,7 +626,14 @@
                                          (emit-init t (abi/unq p) init)
                                          (push-temp-cleanup! (:id (abi/unq p)) t)
                                          ['ptr t])
-              :else [(abi/llvm-type p true) (emit-rv (:e init))])))
+              ;; (cpp-s11: a scalar parameter value-initialized, `f({})` or a default argument `= {}`: its zero,
+              ;; [dcl.init.general]/9; <ranges>' subrange, through <format>'s _Utf32_view)
+              (and (= :zero (:i init)) (abi/scalar? (abi/unq p))) [(abi/llvm-type p true) (zero-of (abi/unq p))]
+              :else [(abi/llvm-type p true)
+                     (emit-rv (or (:e init)
+                                  ;; (cpp-s11: an initializer of another shape than the parameter's type takes, named)
+                                  (fail :codegen "argument " i " of type " (pr-str p) " initialized as " (pr-str (:i init))
+                                        (when-let [t (:ty init)] (str " of " (pr-str t))))))])))
         inits)))
 
 (defn- vcall-target [cid fid variant obj]
@@ -883,6 +914,7 @@
         (format "f0x%04X%016X" (bit-or (if neg 0x8000 0) (+ (long e) 16383)) m)))))
 
 (defn- fp-const [t ^double v & [lit]]
+  (when (#{:float16 :float128} (abi/bn (abi/unq t))) (fail :codegen "a constant of " (name (abi/bn (abi/unq t)))))
   (if (= :float (abi/bn (abi/unq t)))
     (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits (double (float v)))))))
     (if (= :ldouble (abi/bn (abi/unq t)))
@@ -1370,7 +1402,8 @@
               :else (load! (:ty e) (emit-lv x))))
     :cast (cast! e)
     :decay (emit-lv (:e e))
-    :fnaddr (want-fn! (:fn e))
+    ;; (cpp-s14: a function glvalue's decay, a reference to function's value: the reference's own address)
+    :fnaddr (if (:fn e) (want-fn! (:fn e)) (emit-lv (:e e)))
     :addr (emit-lv (:e e))
     :this (or (when (identical? (first *this-val*) *f*) (second *this-val*)) (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8)))
     :unop (let [v (emit-rv (:e e)) t (:ty e)]
@@ -1615,7 +1648,7 @@
     :base-lv (base-addr! (emit-lv (:e e)) (:id (abi/unq (:ty (:e e)))) (:to e))
     :derived-lv (offset! (emit-lv (:e e)) (- (long (base-offset (:to e) (:id (abi/unq (:ty (:e e))))))))
     :reinterpret-lv (emit-lv (:e e))
-    :str (gsym (string-global (:s e)))
+    :str (gsym (str-global e))
     :exn-obj (:exn-adj @*f*)
     :mfield (let [a (emit-lv (:obj e)) o (emit-rv (:m e))] (val! (list 'getelementptr :inbounds 'i8 ['ptr a] ['i64 o])))
     :mcall (if (= :pr (:cat e)) (materialize! e) (mcall! e nil))
@@ -1760,8 +1793,11 @@
       :complex (let [et (:of tu) es (abi/size-of et) [a b] (:items init)]
                  (store! et (if a (emit-rv a) (zero-of et)) addr)
                  (store! et (if b (emit-rv b) (zero-of et)) (offset! addr es)))
-      :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
-                (memcpy! addr (gsym (string-global (subs (str s (apply str (repeat n (char 0)))) 0 (dec n)))) n))
+      :string (if-let [us (:units (:e init))]
+                (let [w (long (:w (:e init))) n (long (or (:n init) (inc (count us))))]
+                  (memcpy! addr (gsym (wide-global (vec (take (dec n) (concat us (repeat 0)))) w)) (* n w)))
+                (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
+                  (memcpy! addr (gsym (string-global (subs (str s (apply str (repeat n (char 0)))) 0 (dec n)))) n)))
       :bind (store! (abi/ptr abi/void) (let [e (:e init)] (binding [*extend-root* (when *extend* (extend-root e))] (emit-lv e))) addr)
       :bind-temp (let [tt (:ty init) tmpa (slot! tt)]
                    (emit-init tmpa tt (:init init))
@@ -1820,6 +1856,8 @@
             (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
             (push-cleanup! {:addr addr :cls (:id bt)})))))))
 
+(declare const-leaves leaves-constant)
+
 (defn- static-local! [vid]
   (let [v (sema/var* vid)
         f (sema/fnd (:fn-of v))
@@ -1829,7 +1867,19 @@
         init (:sinit v)
         cinit (when (#{:none :zero} (:i init)) (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer))
         cexpr (when (and (= :expr (:i init)) (abi/scalar? (abi/unq t))) (let [e (:e init)] (when (#{:int :float :null} (:op e)) (emit-rv e))))
-        ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8))]
+        ;; (cpp-s14: another constant initializer -- an array's or a class's elements constants, `static unsigned short
+        ;; t[256] = {};` -- is constant initialization ([basic.start.static]/2, [stmt.dcl]/3: no guard), its leaves
+        ;; written as a namespace-scope variable's are (emit-globals!'s const-leaves, CP380's rule for locals), as clang
+        ;; does; a class with a non-trivial destructor keeps its guard, which registers the destructor)
+        leaves (when-not (or cinit cexpr (abi/ref? t) (let [bt (loop [x (abi/unq t)] (if (abi/arr? x) (recur (abi/unq (:of x))) x))]
+                                                         (and (abi/class? bt) (nontrivial-dtor? (:id bt)))))
+                 (const-leaves t init 0))
+        [ltype lval] (cond (nil? leaves) [nil nil]
+                           (abi/scalar? (abi/unq t)) (when (<= (count leaves) 1) [nil (if (seq leaves) (nth (first leaves) 2) (zero-mem t))])
+                           (empty? leaves) [nil 'zeroinitializer]
+                           :else (leaves-constant leaves s))
+        cexpr (or cexpr lval)
+        ltype (or ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8)))]
     (when (and (:tls v) (not (or cinit cexpr))) (fail :tls "a thread-local static with dynamic initialization (" (:name v) ")"))
     (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage :internal :align a))
     (when-not (or cinit cexpr)
@@ -2431,7 +2481,9 @@
                             (let [off (long (nth (:bases l) i))]
                               (push-cleanup! {:addr (offset! thisv off) :cls (:cls b)
                                               :vtt (when (vb-class? (:cls b)) (vtt-ref cid vttp (get (:sub-vtts lay) [(:cls b) off])))}))))
-                        (doseq [[i fl] (map-indexed vector (:fields c))]
+                        ;; (cpp-s13: a union's members are variant members, which its destructor does not destroy,
+                        ;; [class.dtor]/13: <format>'s _Optional_locale's anonymous union had destroyed the locale it never held)
+                        (doseq [[i fl] (map-indexed vector (:fields c)) :when (not (:union c))]
                           (let [bt (loop [t (abi/unq (:ty fl))] (if (abi/arr? t) (recur (abi/unq (:of t))) t))]
                             (when (and (abi/class? bt) (nontrivial-dtor? (:id bt)))
                               (if (abi/arr? (abi/unq (:ty fl)))
@@ -2741,13 +2793,15 @@
                                     :int (:v e)
                                     :float (fp-const (:ty e) (:v e) (:lit e))
                                     :null 'null
-                                    :decay (when (= :str (:op (:e e))) (gsym (string-global (:s (:e e)))))
+                                    :decay (when (= :str (:op (:e e))) (gsym (str-global (:e e))))
                                     :addr (when (= :var (:op (:e e))) (let [v (sema/var* (:id (:e e)))] (when (#{:global :member-static} (:storage v)) (gsym (abi/mangle-var v)))))
                                     :fnaddr (want-fn! (:fn e))
                                     :cast (case (:ck e)
                                             (:int :noop) (when-let [x (cv (:e e))] (if (number? x)
-                                                                                     (let [bits (* 8 (abi/size-of tu)) m (dec (bit-shift-left 1 (min 63 bits)))]
-                                                                                       (if (= bits 64) x (let [y (bit-and (long x) (bit-or m (if (= bits 64) -1 0)))]
+                                                                                     (let [bits (* 8 (abi/size-of tu))]
+                                                                                       ;; (cpp-s14: the mask only below 64 bits: 1 << 63 less one overflowed, an int to
+                                                                                       ;; long cast among a local static's constants)
+                                                                                       (if (>= bits 64) x (let [m (dec (bit-shift-left 1 bits)) y (bit-and (long x) m)]
                                                                                                            (if (and (abi/signed? tu) (>= y (bit-shift-left 1 (dec bits)))) (- y (bit-shift-left 1 bits)) y))))
                                                                                      x))
                                             :int->fp (when-let [x (cv (:e e))] (when (number? x) (fp-const tu (double x))))
@@ -2762,14 +2816,18 @@
               (let [et (:of tu) sz (abi/size-of et)
                     ls (map-indexed (fn [i it] (const-leaves et it (+ off (* i sz)))) (:items init))
                     fill (:fill init)]
-                (when (and (every? some? ls) (#{:none :zero} (:i fill))) (vec (apply concat ls))))
+                ;; (cpp-s14: every element written, no fill: `static int u[3] = {1, 2, 3};`)
+                (when (and (every? some? ls) (or (nil? fill) (#{:none :zero} (:i fill)))) (vec (apply concat ls))))
               (let [cid (:id tu) l (abi/layout cid) c (abi/cls cid)
                     subs (concat (map-indexed (fn [i b] [(nth (:bases l) i) {:k :class :id (:cls b)}]) (:bases c))
                                  (map (fn [i] [(nth (:fields l) i) (:ty (nth (:fields c) i))]) (or (:fields-used init) (range (count (:fields c))))))
                     ls (map (fn [[o st] it] (const-leaves st it (+ off (long o)))) subs (:items init))]
                 (when (and (not (abi/dynamic? cid)) (not-any? :bits (:fields c)) (every? some? ls)) (vec (apply concat ls)))))
-      :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
-                (vec (map-indexed (fn [i ch] [(+ off i) 'i8 (long (int ch))]) (subs (str s (apply str (repeat n (char 0)))) 0 n))))
+      :string (if-let [us (:units (:e init))]
+                (let [w (long (:w (:e init))) n (long (or (:n init) (inc (count us)))) lt (case w 2 'i16 4 'i32)]
+                  (vec (map-indexed (fn [i u] [(+ off (* i w)) lt u]) (take n (concat us (repeat 0))))))
+                (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
+                  (vec (map-indexed (fn [i ch] [(+ off i) 'i8 (long (int ch))]) (subs (str s (apply str (repeat n (char 0)))) 0 n)))))
       :zero-then (const-leaves t (:then init) off)
       ;; an implicit or defaulted default constructor that only stores constants (constexpr: clang initializes the
       ;; object as a constant, its vptrs included)

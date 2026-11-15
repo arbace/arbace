@@ -352,6 +352,29 @@ musl_prepare() {
   "$root/bin/ci" musl prepare
 }
 
+# llvm-eh (doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvm-eh"): a module that unwinds (arbace.llvm.run's :eh, its C lowered as C++'s
+# check route lowers a program) is linked with C++'s lowered runtime, bin/cppi runtime-ci's library (libsupc++, libstdc++ and the
+# pending-flag layer arbace/cpp/rt/eh.c.ae, lowered from the recorded IR pack cpp-runtime-ir: no clang, no gcc; built when stale,
+# LLVMI_CPP_RUNTIME names another), and musl's forms by arbace.cpp.run, then run by ci's back end (tools/cirun)
+eh_rtlib() {
+  [ -n "${eh_rt:-}" ] && { echo "$eh_rt"; return 0; }
+  # LLVMI_CPP_RTLIB: a library read already (a directory of bin/cppi runtime-ci's, used as it is, its key unchecked: by hand)
+  [ -n "${LLVMI_CPP_RTLIB:-}" ] && { eh_rt=$LLVMI_CPP_RTLIB; echo "$eh_rt"; return 0; }
+  eh_rt=$(CPPI_RUNTIME=${LLVMI_CPP_RUNTIME:-${CPPI_RUNTIME:-}} "$root/bin/cppi" runtime-ci 2> "$TMPDIR/llvmi-rt.$$.log") || { cat "$TMPDIR/llvmi-rt.$$.log" >&2; rm -f "$TMPDIR/llvmi-rt.$$.log"; return 1; }
+  rm -f "$TMPDIR/llvmi-rt.$$.log"; echo "$eh_rt"
+}
+eh_cirun() {
+  local c=${CIRUN:-$root/.tmp/ci/cirun}
+  { [ -n "${CIRUN:-}" ] && [ -x "$c" ]; } || "$root/bin/ci" cirun-build --ensure > "$TMPDIR/llvmi-cirun.$$.log" 2>&1 || { cat "$TMPDIR/llvmi-cirun.$$.log" >&2; return 1; }
+  rm -f "$TMPDIR/llvmi-cirun.$$.log"; echo "$c"
+}
+eh_link() { # eh_link C NODES: the lowered C of a module that unwinds linked with the runtime into a node program
+  local rt; rt=$(eh_rtlib) || return 1
+  "$root/bin/ci" musl ensure >&2 || return 1
+  (cd "$root" && GOMEMLIMIT=${LLVMI_EH_MEMLIMIT:-2GiB} tool -m arbace.cpp.run nodes "$rt" "" "$2" "$1") >&2
+  [ -f "$2" ]
+}
+
 cmd=${1:-}; [ $# -gt 0 ] && shift
 # the checkout's ci, not the host's embedded copy of an older one (bin/lib/ci/fresh.bash): the lowered C is checked and built by
 # arbace.c's builder on the tools' host, and a seed older than the checkout's ci (LLS21 (a)'s __atomic_* and fmodf, after d5548e72)
@@ -371,6 +394,12 @@ case $cmd in
     [ "${1:-}" = -- ] && shift
     c=$TMPDIR/llvmi-$$-$(basename "$f" .ll).c
     tool -m arbace.llvm.run lower "$f" "$c" || exit $?
+    if [ -f "$c.eh" ]; then
+      # llvm-eh: a module that unwinds, linked with C++'s lowered runtime (eh_link), its exceptions the pending flag's on ci
+      eh_link "$c" "$c.nodes" || { rm -f "$c" "$c.eh"; exit 1; }
+      "$(eh_cirun)" "$c.nodes" "$@"; st=$?
+      rm -f "$c" "$c.eh" "$c.nodes"; exit $st
+    fi
     "$root/bin/ci" run "$c" -- "$@"; st=$?
     rm -f "$c"; exit $st ;;
   modules)
@@ -474,13 +503,18 @@ case $cmd in
       t0=$(date +%s)
       tool -m arbace.llvm.run lower-list "$work/modules.tsv" "$work/c" "$threads"
       t1=$(date +%s)
-      awk -F'\t' '$2 == "ok" {print $1 "\t'"$work"'/c\tgnu23\t\t" $1 ".c"}' "$work/c/lower.tsv" > "$work/build.list"
+      awk -F'\t' '$2 == "ok" && $3 != "eh" {print $1 "\t'"$work"'/c\tgnu23\t\t" $1 ".c"}' "$work/c/lower.tsv" > "$work/build.list"
+      # llvm-eh: the modules that unwind, linked with C++'s lowered runtime by arbace.cpp.run (ID LOWERED.C EXTRA-LIB)
+      awk -F'\t' '$2 == "ok" && $3 == "eh" {print $1 "\t'"$work"'/c/" $1 ".c\t"}' "$work/c/lower.tsv" > "$work/build-eh.list"
+      if [ -s "$work/build-eh.list" ]; then rtlib=$(eh_rtlib) || exit 1; fi
       # AOT's heavy modules (test/llvm/aot-heavy.txt: Go's compiler above 2 GiB on their package) only with LLVMI_AOT_HEAVY=1 (the night's);
       # else not built, their rows kept from the record (WORK/kept.txt)
       if [ -n "$aot" ] && [ -z "${LLVMI_AOT_HEAVY:-}" ]; then
         grep -v '^#' "$root/test/llvm/aot-heavy.txt" | grep . > "$work/kept.txt" || true
-        awk -F'\t' 'FILENAME == ARGV[1] { k[$1] = 1; next } !($1 in k)' "$work/kept.txt" "$work/build.list" > "$work/build.list.new"
-        mv "$work/build.list.new" "$work/build.list"
+        for bl in build build-eh; do
+          awk -F'\t' 'FILENAME == ARGV[1] { k[$1] = 1; next } !($1 in k)' "$work/kept.txt" "$work/$bl.list" > "$work/$bl.list.new"
+          mv "$work/$bl.list.new" "$work/$bl.list"
+        done
       fi
       if [ -z "$aot" ]; then
         { [ -n "${CIRUN:-}" ] && [ -x "$CIRUN" ]; } || "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log" >&2; exit 1; }
@@ -488,8 +522,16 @@ case $cmd in
         mkdir -p "$work/nodes"
         tool -m arbace.c.run "$ARBACE_C_HOST" nodes-list "$work/nodes" "$work/build.list" "$threads" > "$work/nodes.log" 2>&1
         cp "$work/nodes/nodes.tsv" "$work/build.tsv" 2>/dev/null || : > "$work/build.tsv"
+        if [ -s "$work/build-eh.list" ]; then
+          mkdir -p "$work/nodes-eh"; "$root/bin/ci" musl ensure > "$work/nodes-eh.log" 2>&1
+          GOMEMLIMIT=${LLVMI_EH_MEMLIMIT:-2GiB} tool -m arbace.cpp.run nodes-list "$work/nodes-eh" "$work/build-eh.list" "$rtlib" "$threads" >> "$work/nodes-eh.log" 2>&1
+          [ -f "$work/nodes-eh/nodes.tsv" ] && grep . "$work/nodes-eh/nodes.tsv" >> "$work/build.tsv"
+          # (a node program kept under its build's directory: the run below finds it by the directory of its list)
+          awk -F'\t' '$2 == "ok" {print $1}' "$work/nodes-eh/nodes.tsv" 2>"$TMPDIR/llvmi-eh.err" > "$work/run-eh.ids" || : > "$work/run-eh.ids"
+        fi
         t2=$(date +%s)
-        awk -F'\t' '$2 == "ok" {print $1}' "$work/build.tsv" | xargs -d '\n' -P "$jobs" -I{} bash -c 'run1 "$1" '"$cirun"' "$2/$1.nodes"' _ {} "$work/nodes" > "$work/run.tsv"
+        awk -F'\t' '$2 == "ok" {print $1}' "$work/nodes/nodes.tsv" 2>"$TMPDIR/llvmi-nodes.err" | xargs -d '\n' -P "$jobs" -I{} bash -c 'run1 "$1" '"$cirun"' "$2/$1.nodes"' _ {} "$work/nodes" > "$work/run.tsv"
+        [ -s "$work/run-eh.ids" ] && xargs -d '\n' -P "$jobs" -I{} bash -c 'run1 "$1" '"$cirun"' "$2/$1.nodes"' _ {} "$work/nodes-eh" < "$work/run-eh.ids" >> "$work/run.tsv"
       else
         go=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
         mod=$work/mod
@@ -498,7 +540,9 @@ case $cmd in
         "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log" >&2; exit 1; }
         : > "$work/build.tsv"; : > "$work/run.tsv"; : > "$work/go-errors.tsv"
         split -l "${LLVMI_SHARD:-40}" -d -a 3 "$work/build.list" "$work/shard."
-        for s in "$work"/shard.[0-9][0-9][0-9]; do
+        # llvm-eh: the modules that unwind in shards of their own, compiled with C++'s runtime by arbace.cpp.run's compile-list
+        [ -s "$work/build-eh.list" ] && split -l "${LLVMI_SHARD:-40}" -d -a 3 "$work/build-eh.list" "$work/shard.eh"
+        for s in "$work"/shard.[0-9][0-9][0-9] "$work"/shard.eh[0-9][0-9][0-9]; do
           [ -f "$s" ] || continue
           rm -rf "$mod"; mkdir -p "$mod/progs" "$mod/shard"
           cp -r "$root/.tmp/ci/go/ci" "$root/.tmp/ci/go/crt" "$mod/"
@@ -507,7 +551,10 @@ case $cmd in
           # program importing musl's units fails to build (llvm-compl2, 2026-11-10)
           mkdir -p "$CI_AOT_LIB"; ln -sfn "$CI_AOT_LIB" "$mod/cilib"
           awk -F'\t' '{ print $0 "\tp" NR }' "$s" > "$s.list"
-          tool -m arbace.c.cf2g compile-list "$ARBACE_C_HOST" "$mod" "$s.list" "$threads" > "$s.compile.log" 2>&1
+          case $s in
+            */shard.eh*) GOMEMLIMIT=${LLVMI_EH_MEMLIMIT:-2GiB} tool -m arbace.cpp.run compile-list "$mod" "$s.list" "$rtlib" "$threads" > "$s.compile.log" 2>&1 ;;
+            *) tool -m arbace.c.cf2g compile-list "$ARBACE_C_HOST" "$mod" "$s.list" "$threads" > "$s.compile.log" 2>&1 ;;
+          esac
           [ -f "$mod/nodes.tsv" ] && grep . "$mod/nodes.tsv" >> "$work/build.tsv"
           awk -F'\t' 'FILENAME == ARGV[1] { if ($2 == "ok") ok[$1] = 1; next } ($1 in ok) { print $1 "\t" $6 }' "$mod/nodes.tsv" "$s.list" > "$s.built"
           [ -s "$s.built" ] || continue

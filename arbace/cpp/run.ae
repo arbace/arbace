@@ -16,6 +16,7 @@
             [arbace.c.build :as build]
             [arbace.c.musl :as musl]
             [arbace.c.run :as crun]
+            [arbace.c.runtime :as rtm]
             [arbace.cpp.lower :as lower]
             [arbace.repr.llvm :as llvm]
             [arbace.string :as str])
@@ -288,8 +289,58 @@
         u)
       (finally (.delete f)))))
 
-(defn build-linked
-  "The node program's commands of the program's checked units linked with the libraries (musl's library last, a map of
+(defn- lib-key
+  "A library directory's key for ci's prebuilt runtime: its index's and key file's digest."
+  ^String [^String dir]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        sb (StringBuilder.)]
+    (doseq [f ["index.edn" "key" "read.tsv"]]
+      (let [x (File. (str dir "/" f))]
+        (.update md (.getBytes (str f "\n") "UTF-8"))
+        (when (.exists x) (.update md (java.nio.file.Files/readAllBytes (.toPath x))))))
+    (doseq [b (.digest md)] (.append sb (format "%02x" (bit-and 0xff (long b)))))
+    (str sb)))
+
+(defn prebuilt-lib
+  "A library of read units made prebuilt (arbace.c.runtime/prebuilt): its units' fragments made once and cached by its key."
+  [h lib]
+  (let [dir (:dir lib)]
+    (rtm/prebuilt lib (System/getProperty "user.dir")
+                  (str "cpp-" (subs (lib-key (.getCanonicalPath (File. ^String dir))) 0 12)) (lib-key dir)
+                  #(check-lib-unit h lib %))))
+
+(defn build-linked-prebuilt
+  "build-linked's node program text with ci's prebuilt runtime (doc/C23-SURVEY.md, \"As built: ci's prebuilt runtime\"): the
+  program's units and the constructors' unit built into fragments, the libraries' fragments made once (cached), the C++
+  libraries' candidates cut at the link to what the program reaches (arbace.c.build/link-text's :prune, as prune cut the forms)."
+  [h libs units]
+  (let [pdefs (set (mapcat #(keys (musl/unit-defs (:forms (:rd %)))) units))
+        prefs (set (mapcat #(musl/refs (concat (:forms (:rd %)) (mapcat :forms (vals (:units (:rd %)))))) units))
+        prefs (into prefs (keep #(when (str/starts-with? % "__builtin_") (subs % 10)) prefs))
+        linked (closure libs pdefs prefs)
+        trace (System/getenv "CPPI_TRACE")
+        _ (when trace (binding [*out* *err*] (println "cppi: linked" (count linked) (mapv second linked))))
+        t0 (System/nanoTime)
+        lfs (mapv (fn [[lib s]] (rtm/lib-fragment lib s)) linked)
+        t1 (System/nanoTime)
+        cs (concat (mapcat #(:ctors (:rd %)) units) (mapcat :ctors lfs))
+        init (when (seq cs) (init-unit h (map second (sort-by first cs))))
+        pre (cond-> (mapv build/unit-fragment units) init (conj (build/unit-fragment init)))
+        n (count pre)
+        prune (set (keep-indexed (fn [i [lib]] (when-not (:root lib) (+ n i))) linked))
+        t2 (System/nanoTime)
+        text (build/link-text (into pre lfs) :libc-start true
+                              :prune (when-not (System/getenv "CPPI_NO_PRUNE") prune)
+                              :roots (concat (map second cs) ["main" "_init"]))]
+    (when trace
+      (binding [*out* *err*]
+        (println (format "cppi: library fragments %.1f s, the program's %.1f s, linked %.1f s; %d bytes" (/ (- t1 t0) 1e9)
+                         (/ (- t2 t1) 1e9) (/ (- (System/nanoTime) t2) 1e9) (count text)))))
+    text))
+
+(defn- build-linked-forms
+  "The node program's commands of the program's checked units linked with the libraries, the old build (CI_PREBUILT=0): every
+  linked unit checked and kept, the C++ units' forms pruned (prune), all built together (musl's library last, a map of
   arbace.c.musl/library's)."
   [h libs units]
   (let [pdefs (set (mapcat #(keys (musl/unit-defs (:forms (:rd %)))) units))
@@ -319,6 +370,14 @@
                            (/ (- (System/nanoTime) t2) 1e9) (reduce + (map #(count (:forms (:rd %))) pruned))
                            (reduce + (keep-indexed (fn [i [lib s]] (when (cpp? i) (count (:forms (:rd (checked-lib-unit h lib s)))))) linked))))))
       r)))
+
+(defn build-linked
+  "The node program's commands of the program's checked units linked with the libraries: ci's prebuilt runtime
+  (build-linked-prebuilt, cpp-s13, CS273 (a)), CI_PREBUILT=0 the old build (build-linked-forms)."
+  [h libs units]
+  (if (= "0" (System/getenv "CI_PREBUILT"))
+    (build-linked-forms h libs units)
+    (build/read-program (build-linked-prebuilt h libs units))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Programs
@@ -423,13 +482,13 @@
 (defn- libs-fn
   "A function of a program's extra library directory (or \"\") giving its libraries: [extra? runtime musl], each loaded once."
   [h ^String rtlib]
-  (let [rt (delay (library rtlib))
+  (let [rt (delay (prebuilt-lib h (library rtlib)))
         ;; ci's overrides (test/cpp/runtime/ci/*.c, read by bin/cppi runtime-ci into RTLIB/over): linked before the runtime
-        over (delay (when (.exists (File. (str rtlib "/over/index.edn"))) (library (str rtlib "/over"))))
-        ms (delay (musl/library h (System/getProperty "user.dir")))
+        over (delay (when (.exists (File. (str rtlib "/over/index.edn"))) (prebuilt-lib h (library (str rtlib "/over")))))
+        ms (delay (rtm/library h (System/getProperty "user.dir")))
         extra (ConcurrentHashMap.)]
     (fn [^String xdir]
-      (vec (concat (when (seq xdir) [(or (.get extra xdir) (let [l (library xdir)] (.putIfAbsent extra xdir l) (.get extra xdir)))])
+      (vec (concat (when (seq xdir) [(or (.get extra xdir) (let [l (prebuilt-lib h (library xdir))] (.putIfAbsent extra xdir l) (.get extra xdir)))])
                    (when @over [@over])
                    [@rt @ms])))))
 

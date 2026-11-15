@@ -5544,6 +5544,34 @@ numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s9".
   on ci (commands in the survey). Proposed CP378 (class objects and __builtin_is_constant_evaluated in the evaluator). Slips: the
   sysroot unpack's peak (2.69 GB) on the first probe, `<(...)` twice, one source edit during a run (all parts rerun after).
 
+## 2026-11-12: cpp-s10, CP378 (a): class objects in the constant evaluator (branch `cpp-s10`, from `mac/cpp-s9` e2e446170)
+
+The user decided CP378 (a) (2026-11-12): class objects in sema's constant evaluator and `__builtin_is_constant_evaluated()` true wherever
+the language requires a constant, false elsewhere, aimed at f8's refusal (<bits/unicode.h>'s `string_view __s(__enc)` under
+`__clang_literal_encoding__`). Light, by night 12's rules while its gate ran (one process at a time, gated on MemAvailable >= 12 GiB and
+`df /` <= 88%, `GOMEMLIMIT=1200MiB GOGC=30`, main's stage 0, a watcher at 1.5 GiB), then the day's 2.5 GiB for library.cpp after it ended
+(about 14:55 UTC); no clang, g++, gate or big lock. Details and numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s10".
+- The evaluator (arbace/cpp/sema.ae's ce-eval, ce-exec) holds an object as a map of its fields' and bases' values (immutable: a copy is
+  the value) in a cell, and a glvalue as a location {cell, path}, which is also `this`, a pointer to an object and a reference's value;
+  initializers by init-for's shapes (ce-init), constexpr constructors by their mem-initializers then body (ce-construct), defaulted copy
+  and move constructors and assignments memberwise, member calls with `this`. Considered: mutable objects (an atom per object, copied
+  deeply on a copy): the immutable maps make every copy correct by construction and a store an assoc-in at the location's path.
+- `__builtin_is_constant_evaluated()` (and `std::__is_constant_evaluated()`, which sema replaces) stays the 0 the code generator emits,
+  marked, read as 1 while the evaluation is manifestly constant-evaluated (a dynamic flag bound by const-int, if constexpr, static_assert,
+  constexpr and const integral variables' initializers, ce-call-fn; ce-try's run-time folds and the analysis of a reached body bind it
+  false). `if consteval` keeps its run-time branch and carries the other in the statement's metadata for the evaluator (not analyzed for
+  the checker, whose verdicts it would move). Considered: a new node kind for the builtin (every consumer of :int would need it; the mark
+  leaves the code generator's IR byte for byte).
+- template.ae: a template argument written as a call of a constexpr function named alone (`T<ice()>`) evaluated.
+- Probes s1-s4 (classes; the builtin and if consteval in every manifest context and at run time; <string_view>; the clang branch of
+  <bits/unicode.h> written out) generate and run on llvmi with status 0, from refusals; controls s2c (an IR edit) and s4n (UTF-16) exit 1.
+- f8: `constexpr-if` "a local's initializer (:ctor of __s)" → past the check (the encoding is UTF-8), to the next refusal, an overload:
+  `basic_string<_CharT> __padstr(__v.begin(), __v.end())` in `__write_padded`'s encoding branch (_Utf_iterator, which has only an
+  iterator_concept: its iterator_category comes from C++20 iterator_traits' cpp17-input-iterator machinery); drops as before (47
+  causes, 98). CP379 proposed. library.cpp alone: the same refusal, 39 causes (cpp-s7's 47), 1.43 GB.
+- The 81 run programs' gen-batch against cpp-s9's: 69 generated, none lost, the IR byte for byte or equal by the inliner's numbering; the
+  first run found vector's `_S_max_size` no longer folded (an empty allocator by reference had become a location to bind), restored.
+
 ## 2026-11-12: gf-cpp, night 12's C++ failures: cpp-s9 merged into next's tree, a floating literal in eval-text (branch `gf-cpp`, from `mac/next` `bd6ab3ddd`)
 
 - Merged mac/cpp-s9 (e2e446170: cpp-s7, cpp-s8, cpp-gatefix with it) into next's tree: no conflict.
@@ -5572,130 +5600,6 @@ test/gate/crops/cpp.edn), the cap per crop (`:budgets :essential-mem-gib-by {:cp
 beside `:essential-mem-gib`); later (b), building the samples' nodes one program per process, may bring it back under 3.
 Considered: (c) io.cpp out of the essential list into the nightly cpp-check. Proofs: test/gate/crops-test.bash ok (the real
 table passes GT9's rules), `bin/gate --full --plan` status 0. (The name CP379 is cpp-s10's iterator_traits decision.)
-
-### 2026-11-13: night 13's failures: three parked by the user's decision, the cheap ones fixed
-
-Night 13 (serial `bin/gate --full` on next 265cab86a, 11-12 17:12 to 11-13 11:49) failed 21 steps; the triage
-(.tmp/night13/triage/TRIAGE.md, read-only) found three that block for days. The user (2026-11-13) chose to park them, as the
-Haskell and Rust round trips were, and advance: `repr-java-roundtrip`'s jdk part (a regression since 11-05: classes 1,081 fail,
-javac's inference errors in the converted jdk forms; not an OOM, nothing killed at 47 GiB), `repr-java-attr`'s jdk part (61.4 GiB
-peak, OOM-killed on this 54.7 GiB host) and `rsi-check-ui` (its IR pack, the oracle tier's rustc, was never made) are
-`:clean-only` until fixed. Fixed here: cpp-dg declared at 6 GiB (dg-error-own peaked 5.1), cpp-lower run with CPPI_DISK_MAX=90 (its
-own guard stopped it at 82%: the gate keeps the disk), C's two stale annotation entries (pr33855.c, pr54559.c: test/repr/c/annot-known.edn,
-gf-misc's note), oi's two slow entries that now pass (parallel/churn, weak-ephe-final/weak_array_par). The rest reruns as-is: the
-Java levels after night 12's disk-full results, hsi-check's three CPU-limit programs, C++'s runtime samples (gf-cpp, merged in
-5ac770072). Considered: fixing the three first (a bisect over the jdk forms since 11-05, attr's memory, the pack: days).
-
-### 2026-11-13: night 13's Java "No space left" was ext4's directory index; hsi's three CPU-limit programs classed :speed
-
-The Java levels' ENOSPC (java-forms-verify's `environment: line 47: /root/arbace/.tmp/java-check/forms/f4d899f8338604b3f6ffef64.log:
-No space left on device`, the read failures behind java-judge's 174 read, 118 interp, 394 compiled and 427 print regressions)
-came with `/` at 80-84 % and its inodes at 15 %: no tmpfs, quota, ulimit -f or size cap is involved (`mount`: `/` the only
-writable disk, `/dev/shm` and `/run` near empty). dmesg named it: `EXT4-fs warning (device vda2): ext4_dx_add_entry: Directory
-(ino: 837812) index full, reach max htree level :2` and `Large directory feature is not enabled on this filesystem`; inode 837812
-is the read level's shared cache `/root/arbace/.tmp/java-check/forms` (bin/lib/gate-run.bash's GATE_JAVA_FORMS), one flat
-directory of 208,010 entries (52,000 keys, a forms directory, `.lock`, `.log`, `.result` each, from every reader key since
-JC1). Without ext4's large_dir a directory's htree has two levels, so once its leaves fill, creating a name that hashes to a
-full leaf fails with ENOSPC while others still succeed (a `touch` passed, t03224's log and the night's reads did not), and the
-rerun of 12:15 hit it again at 13:30 with the disk at 84 %. The fix (bin/java-check): every read cache (the read level's
-`forms`, `forms-nojavac`, print's `forms-full`) is now `CACHE/KK/KEY`, KK the key's first two hex characters, 256 shards
-of about 800 entries for today's 52,000 keys (`cache_slot`), and a flat entry of the old layout is moved into its shard
-under the shard's lock when the key is next used (`cache_take`). The shared cache was moved once by hand (the flat directory
-renamed aside, each prefix's entries moved into its shard, the empty old directory removed), since even a shard's `mkdir` failed in
-the full directory; it now has 258 entries at the top. A shard reaches ext4's limit at about 50 times today's size; the cache
-is never pruned, so later, if needed, old reader keys can be trimmed per shard. Considered: enabling large_dir with tune2fs (a
-host change, not ours); pruning the flat directory (it refills); a new cache per reader key (the same growth, one level down).
-Proofs: `bin/java-check --forms verify` passes (428 tests, 55 s; before the move it failed on t03558's shard); the 175 tests
-the night's read saves had not passing, read again with `--levels read --only`: 174 pass, t05973 its recorded class (javac's
-`--release` without ct.sym). The night's Java level steps passed with corrupted saves, so they must run again (bin/gate
---rerun of java-read, java-interp, java-compiled-full and java-print), then java-judge.
-
-hsi-check's three (status 137 `:reason :limit` on night 13 at four at a time and other lanes' load) run alone with `bin/hsi
-check --only ... --jobs 1`: nofib/shootout/fasta passes at 43.16 s of wall (recorded 38.79; the night 47.25), nofib/spectral/
-exact-reals at 45.57 s (recorded 41.24), testsuite/codeGen/should_run/T16846 at 31.46 s (recorded 29.44; the night 43.97 killed).
-Each run's user and system CPU together (Go's collector threads counted against the 60 s `ulimit -t`) came close to the
-limit, so they are listed under `:speed` (test/haskell/divergences.edn, the times in its `:why`), as T8726, T23071 and
-CarryOverflow are: passing alone, near the limit. hsi has no per-program limit to raise (HSI_TIMEOUT is global). fasta and T16846
-need more than 3 GiB (Go's out of memory at ARBACE_MEM_GIB=3, 1.87 GB in use); fasta ran at 8, T16846 needs above 8 GiB of address
-space and ran at the default 16 (the coordinator's go-ahead). `bin/hsi divergences --results` of the rerun's results: 908 programs,
-0 not in a class (3 before).
-Proofs: `bin/reap` 0 problems; `bin/crops-score --judge --strict` 0; `bin/arbace-go --gate-key` unchanged (1170c98c...).
-
-### 2026-11-13: gate-tests' nested lanes-test failure: admission timing, made robust
-
-The step gate-tests failed on nights 12 and 13 and on the rerun on next ca3c7aff8 (12:43). In each case gate-reads-test's
-`bin/gate-tests --nested`, run under `strace -f`, reported "failed: lanes-test.bash". The outer run of lanes-test passed. The
-nested log was lost: `TMPDIR/gate-tests.lanes-test.bash.log` was overwritten by the outer run.
-
-Reproduced by hand under `strace -f` on the loaded host, without the gate's environment: 2 of 3 runs of the committed
-lanes-test failed. The leaked variables gf-gate unset were not the cause; timing was.
-- Section 7b (the free lane), "small beside a big one: 0": the blocker's fixed 1.2 s ended before b1, b3 and b4 registered.
-- After a first fix, "blocker {b2 b3 s1} b1 b4": bin/gate-lane admits a waiter at the waiter's own poll. Under strace a
-  waiter takes its admission seconds late. A step of its round that had already ended (fixed 0.6-2 s runs) then let the
-  next round in beside the late one.
-
-Fixed in the test, not with longer sleeps. The synthetic steps hold on conditions (`syn_body`'s HOLD, at most 60 s):
-- section 2's and 7b's blockers until every waiter of the case has registered (the lane's wait/ entries);
-- the steps of one round (2: b2 and s1; 7b: b1, b2 and s1) until each other has started;
-- 8b's blocker until b1 and a2 wait on the host's state, or, for the control, until b1 has started beside it.
-
-The checks themselves are unchanged. Proof: four runs under `strace -f` and one plain run pass (51 of 51). The whole
-`bin/gate-tests` passes (36 of 36 on branch `gate-lanes-fix`, 32 min, gate-reads-test's nested run included; 37 of 37
-on `gate-gts`).
-
-Also changed:
-- `bin/gate-tests --nested` writes `TMPDIR/gate-tests.nested.NAME.log`.
-- A failing test's `FAIL` lines are printed first.
-- gate-reads-test prints the nested run's failures, and keeps its output, when the nested run fails.
-
-Considered:
-- raising the sleeps. This only moves the race.
-- skipping lanes-test when nested. This loses the reads check of a test that reads the planner.
-
-(The other nested failures in next's `.tmp/tmp/gate-reads.*.out` of 12:51-13:07, audited-test and audit-trace-test, came
-from runs that were not the gate's step and were not looked into.)
-### 2026-11-13: oi-fix, night 13's oi-check.run (branch `oi-fix`, from `mac/next` ca3c7aff8)
-
-- **The two slow entries restored.** ca3c7aff8 dropped `parallel/churn` and `weak-ephe-final/weak_array_par` from
-  `test/ocaml/oi-slow.edn` on their STALE lines, but both stay recorded `slow` "timeout 120s" in check-oi.edn and
-  check-oi-native.edn, and `oi_check.ae`'s `near-limit?` excuses a recorded slow row only for a listed id: the next run would fail
-  CHANGED on them whether they pass or time out (review 1113's finding 1). The STALE line is a `println`, it never failed the step.
-  Restored with their comment. Considered: re-recording them as pass (rejected: 165 s alone against a 120 s limit; load decides).
-- **What failed the step.** Rerun alone with the gate's exact command (`bin/oi check && bin/oi suite check && bin/oi suite
-  rollup`, native path, 3 jobs, 32 min, peak under 2 GiB): `bin/oi check` exits 1 on the native judgment alone, "202 results
-  differ from check-oi-native.edn"; 379 pass, 0 failing (every non-pass classed). The second comparison, against ocamlc's path
-  (check-oi.edn, its 10 CHANGED lines), is printed for information (`|| true` in `cmd_check_native`) and fails nothing.
-- **The 202, by cause: a record that should move.** check-oi-native.edn had been recorded by list only (4700fce37, b45b8aa4f,
-  d73b7e2fd: 357 rows of 545), so a whole run differs on every row it never held: 123 header-classed rows (`nil -> class`), 54
-  passes, 15 fails all in their classes (the C stubs below, `caml_unix_fork` :unix-fork, backtrace/callstack's known, Memprof's
-  moved_while_blocking) and 2 slow (ast-invariants/test, parallel/fib_threads, both listed in oi-slow.edn); 5 statmemprof rows
-  `dump "typer: Unbound constructor ..."` now typed and failing with their known gc entry (the typer's progress since the record);
-  3 known bigarray fails now pass (bigarrays, reshape_overflow, marshal_bigarray). No row went from pass to anything else: no
-  regression. Recorded whole from that run (the judge in record mode on its rows, as `--record` does), misc/darkening_work and
-  weak_array_par kept `slow` (load-sensitive: this run finished them, night 12's timed out).
-- **The 10 against check-oi.edn** (not judged by the step): the C API on ci (ef4f24416, fb8a73f19, 2026-11-08) made header.awk run
-  `modules = X.c` tests with their stubs, after check-oi.edn's class rows were last recorded whole. locale/test now passes;
-  alloc_async, test_c_thread_has_lock(_systhread), lib-systhreads/ and parallel/test_c_thread_register fail `cstubs: read-error:
-  include file not found <caml/gc.h>`, `<caml/domain_state.h>`, `<caml/gc_ctrl.h>`: those are OCaml's runtime-internal headers,
-  which oi's clean-room `test/ocaml/capi/include/caml/` does not provide by design (not the host: no host header is read);
-  embedded/cmcaml's `cmmain.c` (caml_startup embedding) does not parse on them; pr3612 (custom finalizers), statmemprof/bigarray
-  (output) and regression/pr11865/mkroot (timeout, global roots) run and differ: all in `:c-runtime-internals` (OT6 (a), :design),
-  whose `:match` already takes `fail cstubs:`, `fail output differs` and `fail timeout`. Environment differences: none. Left as
-  recorded: check-oi.edn is ocamlc's path, re-recorded only with `--ocdump` (the oracle's ocdump on the host's OCaml, by hand).
-- **Not mine, met on the way:** the first run sat 5 hours in `bin/lib/ci/musl read` (a fresh worktree reads musl's forms on one
-  core, and the C stubs wait on its lock); stopped by PID and next's forms copied in (`bin/lib/ci/musl key` the same,
-  90921e33..., `musl fresh` 0). A worktree's first oi check should take the main checkout's or next's forms.
-- Keys: only test/ocaml/ changes; gate_key, the runtime key and the seed's keys do not move.
-- **The rollup.** With the native judgment passing, the step's third command failed: `bin/oi suite rollup`, "the rollup differs
-  from the record". It runs nothing: test/ocaml/testsuite-results.edn is derived from the levels' records (check-oi.edn,
-  check-suite-oi.edn, check-aot.edn, roundtrip-known.edn, the classes, the headers' roles), and 16 of its rows lagged records
-  committed since it was written (OC216 (a)'s Gc and Marshal ports: compaction, gctweaks, reachable_words, fuzzy, intext, Tests.ml,
-  weaktest, weaklifetime, pr5233 pass; d73b7e2fd's and OC216's slow rows: churn, weak_array_par, darkening_work `class:speed`;
-  OC193's ocamlrunparam headers: pr7168, stackoverflow now run rows; lexing/newlines.ml read pass, night 12's text-bytes fix).
-  No program's result moved here; recorded again (`bin/oi suite rollup --record`), then the judgment 0 files without a result.
-- **Proof:** the gate's exact command, whole: `bin/oi check` (380 pass, 0 failing, 0 CHANGED against the native record; churn and
-  weak_array_par passed this time, STALE notes only) and `bin/oi suite check` (131 programs, 110 pass, 0 failing) exit 0 in 48 min
-  (3 jobs); `bin/oi suite rollup` exit 0 after its record.
 
 ## 2026-11-12: AR12, NEON's saturating doubling multiplies and saturating shifts and narrows in a64i (branch `asm-ar12`, from `mac/asm-ar11` `5740229b4`)
 
@@ -5782,6 +5686,131 @@ pairwise classes, SatQ, PolynomialMult; no code copied. doc/asm/ARM64-SURVEY.md,
   3.82, about 1 min 4 s) and the second set (`.tmp/essR*.log`) was run; the table check's linux/arm64 std forms came from an older
   `bin/goi table` cache key than the checkout's (read only, std unchanged since).
 
+### 2026-11-13: night 13's failures: three parked by the user's decision, the cheap ones fixed
+
+Night 13 (serial `bin/gate --full` on next 265cab86a, 11-12 17:12 to 11-13 11:49) failed 21 steps; the triage
+(.tmp/night13/triage/TRIAGE.md, read-only) found three that block for days. The user (2026-11-13) chose to park them, as the
+Haskell and Rust round trips were, and advance: `repr-java-roundtrip`'s jdk part (a regression since 11-05: classes 1,081 fail,
+javac's inference errors in the converted jdk forms; not an OOM, nothing killed at 47 GiB), `repr-java-attr`'s jdk part (61.4 GiB
+peak, OOM-killed on this 54.7 GiB host) and `rsi-check-ui` (its IR pack, the oracle tier's rustc, was never made) are
+`:clean-only` until fixed. Fixed here: cpp-dg declared at 6 GiB (dg-error-own peaked 5.1), cpp-lower run with CPPI_DISK_MAX=90 (its
+own guard stopped it at 82%: the gate keeps the disk), C's two stale annotation entries (pr33855.c, pr54559.c: test/repr/c/annot-known.edn,
+gf-misc's note), oi's two slow entries that now pass (parallel/churn, weak-ephe-final/weak_array_par). The rest reruns as-is: the
+Java levels after night 12's disk-full results, hsi-check's three CPU-limit programs, C++'s runtime samples (gf-cpp, merged in
+5ac770072). Considered: fixing the three first (a bisect over the jdk forms since 11-05, attr's memory, the pack: days).
+
+### 2026-11-13: night 13's Java "No space left" was ext4's directory index; hsi's three CPU-limit programs classed :speed
+
+The Java levels' ENOSPC (java-forms-verify's `environment: line 47: /root/arbace/.tmp/java-check/forms/f4d899f8338604b3f6ffef64.log:
+No space left on device`, the read failures behind java-judge's 174 read, 118 interp, 394 compiled and 427 print regressions)
+came with `/` at 80-84 % and its inodes at 15 %: no tmpfs, quota, ulimit -f or size cap is involved (`mount`: `/` the only
+writable disk, `/dev/shm` and `/run` near empty). dmesg named it: `EXT4-fs warning (device vda2): ext4_dx_add_entry: Directory
+(ino: 837812) index full, reach max htree level :2` and `Large directory feature is not enabled on this filesystem`; inode 837812
+is the read level's shared cache `/root/arbace/.tmp/java-check/forms` (bin/lib/gate-run.bash's GATE_JAVA_FORMS), one flat
+directory of 208,010 entries (52,000 keys, a forms directory, `.lock`, `.log`, `.result` each, from every reader key since
+JC1). Without ext4's large_dir a directory's htree has two levels, so once its leaves fill, creating a name that hashes to a
+full leaf fails with ENOSPC while others still succeed (a `touch` passed, t03224's log and the night's reads did not), and the
+rerun of 12:15 hit it again at 13:30 with the disk at 84 %. The fix (bin/java-check): every read cache (the read level's
+`forms`, `forms-nojavac`, print's `forms-full`) is now `CACHE/KK/KEY`, KK the key's first two hex characters, 256 shards
+of about 800 entries for today's 52,000 keys (`cache_slot`), and a flat entry of the old layout is moved into its shard
+under the shard's lock when the key is next used (`cache_take`). The shared cache was moved once by hand (the flat directory
+renamed aside, each prefix's entries moved into its shard, the empty old directory removed), since even a shard's `mkdir` failed in
+the full directory; it now has 258 entries at the top. A shard reaches ext4's limit at about 50 times today's size; the cache
+is never pruned, so later, if needed, old reader keys can be trimmed per shard. Considered: enabling large_dir with tune2fs (a
+host change, not ours); pruning the flat directory (it refills); a new cache per reader key (the same growth, one level down).
+Proofs: `bin/java-check --forms verify` passes (428 tests, 55 s; before the move it failed on t03558's shard); the 175 tests
+the night's read saves had not passing, read again with `--levels read --only`: 174 pass, t05973 its recorded class (javac's
+`--release` without ct.sym). The night's Java level steps passed with corrupted saves, so they must run again (bin/gate
+--rerun of java-read, java-interp, java-compiled-full and java-print), then java-judge.
+
+hsi-check's three (status 137 `:reason :limit` on night 13 at four at a time and other lanes' load) run alone with `bin/hsi
+check --only ... --jobs 1`: nofib/shootout/fasta passes at 43.16 s of wall (recorded 38.79; the night 47.25), nofib/spectral/
+exact-reals at 45.57 s (recorded 41.24), testsuite/codeGen/should_run/T16846 at 31.46 s (recorded 29.44; the night 43.97 killed).
+Each run's user and system CPU together (Go's collector threads counted against the 60 s `ulimit -t`) came close to the
+limit, so they are listed under `:speed` (test/haskell/divergences.edn, the times in its `:why`), as T8726, T23071 and
+CarryOverflow are: passing alone, near the limit. hsi has no per-program limit to raise (HSI_TIMEOUT is global). fasta and T16846
+need more than 3 GiB (Go's out of memory at ARBACE_MEM_GIB=3, 1.87 GB in use); fasta ran at 8, T16846 needs above 8 GiB of address
+space and ran at the default 16 (the coordinator's go-ahead). `bin/hsi divergences --results` of the rerun's results: 908 programs,
+0 not in a class (3 before).
+Proofs: `bin/reap` 0 problems; `bin/crops-score --judge --strict` 0; `bin/arbace-go --gate-key` unchanged (1170c98c...).
+
+### 2026-11-13: gate-tests' nested lanes-test failure: admission timing, made robust
+
+The step gate-tests failed on nights 12 and 13 and on the rerun on next ca3c7aff8 (12:43). In each case gate-reads-test's
+`bin/gate-tests --nested`, run under `strace -f`, reported "failed: lanes-test.bash". The outer run of lanes-test passed. The
+nested log was lost: `TMPDIR/gate-tests.lanes-test.bash.log` was overwritten by the outer run.
+
+Reproduced by hand under `strace -f` on the loaded host, without the gate's environment: 2 of 3 runs of the committed
+lanes-test failed. The leaked variables gf-gate unset were not the cause; timing was.
+- Section 7b (the free lane), "small beside a big one: 0": the blocker's fixed 1.2 s ended before b1, b3 and b4 registered.
+- After a first fix, "blocker {b2 b3 s1} b1 b4": bin/gate-lane admits a waiter at the waiter's own poll. Under strace a
+  waiter takes its admission seconds late. A step of its round that had already ended (fixed 0.6-2 s runs) then let the
+  next round in beside the late one.
+
+Fixed in the test, not with longer sleeps. The synthetic steps hold on conditions (`syn_body`'s HOLD, at most 60 s):
+- section 2's and 7b's blockers until every waiter of the case has registered (the lane's wait/ entries);
+- the steps of one round (2: b2 and s1; 7b: b1, b2 and s1) until each other has started;
+- 8b's blocker until b1 and a2 wait on the host's state, or, for the control, until b1 has started beside it.
+
+The checks themselves are unchanged. Proof: four runs under `strace -f` and one plain run pass (51 of 51). The whole
+`bin/gate-tests` passes (36 of 36 on branch `gate-lanes-fix`, 32 min, gate-reads-test's nested run included; 37 of 37
+on `gate-gts`).
+
+Also changed:
+- `bin/gate-tests --nested` writes `TMPDIR/gate-tests.nested.NAME.log`.
+- A failing test's `FAIL` lines are printed first.
+- gate-reads-test prints the nested run's failures, and keeps its output, when the nested run fails.
+
+Considered:
+- raising the sleeps. This only moves the race.
+- skipping lanes-test when nested. This loses the reads check of a test that reads the planner.
+
+(The other nested failures in next's `.tmp/tmp/gate-reads.*.out` of 12:51-13:07, audited-test and audit-trace-test, came
+from runs that were not the gate's step and were not looked into.)
+
+### 2026-11-13: oi-fix, night 13's oi-check.run (branch `oi-fix`, from `mac/next` ca3c7aff8)
+
+- **The two slow entries restored.** ca3c7aff8 dropped `parallel/churn` and `weak-ephe-final/weak_array_par` from
+  `test/ocaml/oi-slow.edn` on their STALE lines, but both stay recorded `slow` "timeout 120s" in check-oi.edn and
+  check-oi-native.edn, and `oi_check.ae`'s `near-limit?` excuses a recorded slow row only for a listed id: the next run would fail
+  CHANGED on them whether they pass or time out (review 1113's finding 1). The STALE line is a `println`, it never failed the step.
+  Restored with their comment. Considered: re-recording them as pass (rejected: 165 s alone against a 120 s limit; load decides).
+- **What failed the step.** Rerun alone with the gate's exact command (`bin/oi check && bin/oi suite check && bin/oi suite
+  rollup`, native path, 3 jobs, 32 min, peak under 2 GiB): `bin/oi check` exits 1 on the native judgment alone, "202 results
+  differ from check-oi-native.edn"; 379 pass, 0 failing (every non-pass classed). The second comparison, against ocamlc's path
+  (check-oi.edn, its 10 CHANGED lines), is printed for information (`|| true` in `cmd_check_native`) and fails nothing.
+- **The 202, by cause: a record that should move.** check-oi-native.edn had been recorded by list only (4700fce37, b45b8aa4f,
+  d73b7e2fd: 357 rows of 545), so a whole run differs on every row it never held: 123 header-classed rows (`nil -> class`), 54
+  passes, 15 fails all in their classes (the C stubs below, `caml_unix_fork` :unix-fork, backtrace/callstack's known, Memprof's
+  moved_while_blocking) and 2 slow (ast-invariants/test, parallel/fib_threads, both listed in oi-slow.edn); 5 statmemprof rows
+  `dump "typer: Unbound constructor ..."` now typed and failing with their known gc entry (the typer's progress since the record);
+  3 known bigarray fails now pass (bigarrays, reshape_overflow, marshal_bigarray). No row went from pass to anything else: no
+  regression. Recorded whole from that run (the judge in record mode on its rows, as `--record` does), misc/darkening_work and
+  weak_array_par kept `slow` (load-sensitive: this run finished them, night 12's timed out).
+- **The 10 against check-oi.edn** (not judged by the step): the C API on ci (ef4f24416, fb8a73f19, 2026-11-08) made header.awk run
+  `modules = X.c` tests with their stubs, after check-oi.edn's class rows were last recorded whole. locale/test now passes;
+  alloc_async, test_c_thread_has_lock(_systhread), lib-systhreads/ and parallel/test_c_thread_register fail `cstubs: read-error:
+  include file not found <caml/gc.h>`, `<caml/domain_state.h>`, `<caml/gc_ctrl.h>`: those are OCaml's runtime-internal headers,
+  which oi's clean-room `test/ocaml/capi/include/caml/` does not provide by design (not the host: no host header is read);
+  embedded/cmcaml's `cmmain.c` (caml_startup embedding) does not parse on them; pr3612 (custom finalizers), statmemprof/bigarray
+  (output) and regression/pr11865/mkroot (timeout, global roots) run and differ: all in `:c-runtime-internals` (OT6 (a), :design),
+  whose `:match` already takes `fail cstubs:`, `fail output differs` and `fail timeout`. Environment differences: none. Left as
+  recorded: check-oi.edn is ocamlc's path, re-recorded only with `--ocdump` (the oracle's ocdump on the host's OCaml, by hand).
+- **Not mine, met on the way:** the first run sat 5 hours in `bin/lib/ci/musl read` (a fresh worktree reads musl's forms on one
+  core, and the C stubs wait on its lock); stopped by PID and next's forms copied in (`bin/lib/ci/musl key` the same,
+  90921e33..., `musl fresh` 0). A worktree's first oi check should take the main checkout's or next's forms.
+- Keys: only test/ocaml/ changes; gate_key, the runtime key and the seed's keys do not move.
+- **The rollup.** With the native judgment passing, the step's third command failed: `bin/oi suite rollup`, "the rollup differs
+  from the record". It runs nothing: test/ocaml/testsuite-results.edn is derived from the levels' records (check-oi.edn,
+  check-suite-oi.edn, check-aot.edn, roundtrip-known.edn, the classes, the headers' roles), and 16 of its rows lagged records
+  committed since it was written (OC216 (a)'s Gc and Marshal ports: compaction, gctweaks, reachable_words, fuzzy, intext, Tests.ml,
+  weaktest, weaklifetime, pr5233 pass; d73b7e2fd's and OC216's slow rows: churn, weak_array_par, darkening_work `class:speed`;
+  OC193's ocamlrunparam headers: pr7168, stackoverflow now run rows; lexing/newlines.ml read pass, night 12's text-bytes fix).
+  No program's result moved here; recorded again (`bin/oi suite rollup --record`), then the judgment 0 files without a result.
+- **Proof:** the gate's exact command, whole: `bin/oi check` (380 pass, 0 failing, 0 CHANGED against the native record; churn and
+  weak_array_par passed this time, STALE notes only) and `bin/oi suite check` (131 programs, 110 pass, 0 failing) exit 0 in 48 min
+  (3 jobs); `bin/oi suite rollup` exit 0 after its record.
+
 ## 2026-11-13: GATE-DIET-SURVEY, the gate measured and a diet proposed (branch `gate-diet`, from `mac/next` `3b25e0d43`)
 
 The user (2026-11-13): "Our testing harness is still a behemoth, that we need to address asap." doc/GATE-DIET-SURVEY.md measures
@@ -5841,6 +5870,74 @@ Alternatives considered:
 - Keeping the fixpoint nightly: the survey's list moves it to the weekly run. Its "nights that touch j2g" rule waits for
   the planner change (GDS4 (b)).
 - For repr-go, a 40 GiB declaration under GDS3's ceiling was set aside for its measured ⌈1.1 × 37.3⌉ = 42.
+
+## 2026-11-13: cpp-s11, CP379 (a): C++20 iterator_traits for an iterator with only iterator_concept, and f8's next refusals (branch `cpp-s11`, from `mac/cpp-s10` c77ecab08 with `mac/gf-cpp` df35aae0f merged)
+
+The user decided CP379 (a) (2026-11-13): build what libstdc++'s concept-constrained `__iterator_traits` partial specializations need of
+Sema, generally; CP380 (a) only when a program needs it (none of the runs did). Light, one process at a time by the RERUN rules (a serial
+`bin/gate --full` on next until about 16:15 UTC), each process under 2.5 GiB (the largest 1.35 GB, gen-batch's part 03), no gate, big lock,
+clang or g++. Details and numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s11".
+- Merged mac/gf-cpp into mac/cpp-s10: journal, AGENDA and the survey in union; gf-cpp's survey proposal "CP379" (the essential step's memory)
+  named CP381 there, as its merge to next had named it.
+- CP379: the constrained partial specializations, their satisfaction and subsumption were in place (cpp-s5, cpp-s8); what failed was a
+  requirement's decltype: `typename common_reference_t<decltype(*__it++)&&, ...>` in `__cpp17_input_iterator`, whose operand the native
+  parser had not kept (a requirement is kept as text). repr/cpp's parser now keeps the decltype operands of type requirements and of
+  return-type-requirements (`keep-decltypes!`). Considered: parsing the requirement's type-id as a type (it would also need concept-ids
+  in it, and the text is what sema resolves); keeping the operands is what decl-specifiers already do.
+- f8 then went through seven refusals, each fixed generally in arbace/cpp/sema.ae or template.ae: ADL for enumeration arguments
+  ([basic.lookup.argdep]/3.3, <system_error>'s error_condition(errc)); abbreviated function templates ([dcl.fct]/22, <ranges>' subrange
+  constructor); [over.ics.list]/7's viable-constructor test for a braced list to a class and `T x({...})` as direct-initialization with one
+  list argument; sizeof(T) as a template argument's form (<charconv>); a CRTP base's members' requires-clauses kept for overload resolution
+  while the derived class is unfinished, and no concept satisfaction memoized for an unfinished class (view_interface<subrange>); a
+  namespace-scope array of unknown bound completed by its initializer at declaration (unicode-data.h through std::end); and a pack named
+  only in a constant's text found for a type pack expansion, which had made <type_traits>' `__or_<false_type, false_type>` true_type (at
+  cpp-s10's tree too, checked by checking out the earlier commits in turn). On the way: `x = {}` on scalars, a value-initialized scalar
+  argument emitted as zero, a trivial copy from a braced list. f8 stops at "a wide string" (CP382 proposed); drops 47 causes, 98 → 36, 87.
+- Proofs: 21 probes generated and run by llvmi (controls exit by the bit they test); gen-batch over the 81 run programs at the final code
+  against cpp-s10's: 69 generated, none lost, the IR byte for byte or equal by the inliner's numbering (an intermediate run had lost
+  hello.cpp to the list change: "lvalue :init-list", a trivial copy from a list; fixed and its IR equal again); the rest in the survey.
+  library.cpp alone not run (the brief: after PID 65142 ends and with the main session's agreement).
+
+## 2026-11-13: cpp-s12, CP382 (b) then (a): wide and Unicode string literals, and f8's and library.cpp's next refusals (branch `cpp-s12`, from `mac/cpp-s11` eadeca9d6)
+
+The user decided (2026-11-13) CP382 (b) then (a), CP383 (b), and approved library.cpp alone (about 1.4 GB). Light, one process at a time
+(each under 1.4 GB, the watcher's limit 2.5 GiB never reached), no gate, big lock, clang or g++. Details and numbers in
+doc/cpp/CPP-SURVEY.md, "As built: cpp-s12".
+- library.cpp alone, at cpp-s11's code: refused at `a functional cast of a scalar type with 3 arguments` in <format>'s make_format_args
+  (1.22 GB, 254 s), not at f8's wide string.
+- CP382 (b): no use instantiates the wchar_t path; `_GLIBCXX_WIDEN(S)` is `_Widen<_CharT>(S, L##S)`, so every char instantiation names the
+  wide literal as an argument of a consteval selector. (a) built: sema keeps a wide or Unicode literal's code units by its element type
+  (UTF-32 for L and U, UTF-16 for u as the parser encodes them; u8's char8_t narrow), the constant evaluator reads them, arrays are
+  initialized and sized from them, and the code generator emits `[N x i32]`/`[N x i16]` globals as clang does. Considered: holding the
+  units in the Java string (a UTF-32 unit above 0xFFFF does not fit a char); a separate `:units` with one accessor was the smaller change.
+- CP383 (b): nothing changed (cpp-s11's rule is the narrow one).
+- Then, each general, with probes and controls: `using enum` at every scope ([enum.udecl]/2; f8's <bits/unicode.h>), `_Float16` and
+  `__float128` as types of their own (library.cpp's `_S_to_arg_type<const char*>` reached their `is_same_v` tests under clang's predefined
+  `__FLT16_DIG__` and `__SIZEOF_FLOAT128__`; a constant of either refused by name), a constexpr static data member implicitly inline from
+  C++17 (<charconv>'s `__from_chars_alnum_to_val_table<false>::value`, an unknown global at lowering), and a static data member's
+  redeclaration without an initializer keeping the in-class one (found by a probe: `constexpr int A::n;` had made it zero).
+- f8 and library.cpp now generate and lower (41,366 and 45,920 lines of IR); their runs need the client crop's runtime and gcc, not run.
+
+## 2026-11-13: llvm-eh, llvmi runs modules that unwind (branch `llvm-eh`, from `mac/cpp-s12` ff95fe3e3)
+
+The user decided (2026-11-13) that llvmi runs C++'s exceptions on Arbace's own engine, in llvmi's model of the program, f8 and
+library.cpp first. Light, one process at a time, a watcher at 2.5 GiB; no gate, big lock, clang, g++ or gcc. Details in
+doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvm-eh".
+- Found: the shared lowering already lowers exceptions by the pending flag and C++'s check route runs them on ci with libsupc++ lowered
+  and the hand-written unwinder and personality (arbace/cpp/rt/eh.c.ae); llvmi refused them only because its one unit links musl and
+  the personality-free layer. Built LLS22 (a): an unwinding module with C++'s personality is lowered as cppi lowers a program and
+  linked with cppi's lowered runtime by arbace.cpp.run (`bin/llvmi run`, `check` eval and AOT); another personality is still refused.
+  Considered: a second unwinder of llvmi's own (two models of one ABI to keep equal) and host unwinding (excluded by the decision).
+- Completed in the layer: a filter's rejection (`__cxa_call_unexpected` as eh_personality.cc: the handler's new exception admitted, else
+  std::bad_exception, else std::terminate; the lowering records a filter's types through `cx$spec_catches`), and the adjusted pointer
+  set to the thrown object at each landing pad (a rejection's `__cxa_begin_catch` read zero).
+- bin/cppi runtime-ci's chunked read resumes after a killed chunk (its reader key written first); llvmi's full steps need cpp-runtime.
+- Proofs: hand IR probes i1a/i2a pass, their controls i1n/i2n fail by their bits; of the 24 unwinding programs of cpp-s12's IR (22 of the
+  81 with f8 and library.cpp) 16 pass against g++'s records, 3 fail in cppi's own classes (pretty1's oracle text, ci's threads), 5 not
+  run (their link passes 2.5 GiB: f8, library.cpp, pr77550, atomics, hello). c++20/tzdb.cc's read alone passes 2.5 GiB: the library used
+  leaves it out (by hand). Stopped by the disk at 86% (not this worktree's: 0.5 GB): the C++ probes, llvmi's checks with the 13
+  `:personality` modules and their records are the night's commands in the survey. gate_key unchanged (314c8e5b...), the crops' key test
+  passes. Proposed LLS51 (the search phase), LLS52 (the link's memory), LLS53 (llvmi-check needing cpp-runtime).
 
 ### 2026-11-14: n15-fix, night 13's rerun (`bin/gate --full --concurrent` on next 7658c750c, 495 min, 8 failed)
 
@@ -6090,6 +6187,76 @@ tsvs read in place).
 - Steps to rerun: java-judge and java-held; oi-aot.run, oi-suite-aot.suite, ocaml-judges; reap and crops-score; suite-aot-essential;
   hsi-check-aot.
 
+## 2026-11-14: llvm-eh's light proofs, and LLS51 (b), LLS52 (a), LLS53 (a)
+
+After the disk came back to 82%: llvm-essential's commands (43, 43, 4, 43 pass; llvmi's 10 of 10, controls failing as they must),
+controls-test, cpp-print-essential's command (33 and 9 of 9), `bin/cppi codegen-gen` (155 of 155), `bin/reap` (0 problems) and
+`bin/crops-score --judge --strict` (0), each under 1.5 GB. Decided by the main session for the user's overnight rule: LLS51 (b), LLS52 (a)
+(the >2.5 GiB runs scheduled by the main session when no gate runs), LLS53 (a).
+
+## 2026-11-14: cpp-s13, C++'s link within 2.5 GiB and f8's and library.cpp's drops (branch `cpp-s13`, from `mac/llvm-eh` 821192482)
+
+The chain's continuation under the user's overnight rule (recommended continuations, no key move, nothing fetched). Light, one process
+at a time, a watcher at 2.5 GiB; no gate, big lock, clang, g++ or gcc. Details in doc/cpp/CPP-SURVEY.md, "As built: cpp-s13".
+- The link's memory: arbace.cpp.run kept every linked runtime unit checked (forms and the checker's results) and built the program from
+  all of them at once. Taken: CS273 (a) (the user, 2026-11-03), `ci-prebuilt-cpp`'s build-linked-prebuilt (bbeab9fe7): each unit checked
+  alone into its fragment, cached by the library's key, the link over the fragments with link-text's prune; `CI_PREBUILT=0` the old
+  build. Considered: per-unit disk caches of the checked forms (LLS52 (b)'s wording), a GOMEMLIMIT alone (the units were live, not
+  garbage). The five links: 0.47-1.94 GB (before: killed past 2.5 GiB); pr77550, atomics and hello pass against g++'s records; f8 and
+  library.cpp fail (an undefined constructor template; an uncaught __ios_failure).
+- tzdb.cc's read: its 107,471-byte table was a list of integer constants; the lowering writes a c-string of 4,096 bytes or more as one
+  literal (only tzdb.cc's in the runtime): 2.20 GB (before 2.6+). Considered: reading the unit in parts (the read is per file), every
+  c-string a literal (every lowered C changes).
+- The drops, each general with a probe and a control: the headers' last round makes a never-defined template's specialization an
+  incomplete class; variable templates' explicit specializations; members of explicit specializations defined outside them (template-id
+  qualifiers); constructor templates defined outside a class template; GNU abi_tag on classes; 128-bit values inside the constant
+  evaluators (out of them only as an i128 constant); the generic bit builtins of 128-bit operands (not run). f8 35/86 → 12/20 causes/drops,
+  library.cpp 26/67 → 14/33.
+- Stopped when `/` reached 86% then 88% (the concurrent gate on next; this worktree 0.6 GB): the probes b1a/b1n, f8's and library.cpp's
+  generation and runs, the full runtime, gen-batch over the 81, codegen-gen, the essential commands, reap, crops-score and the key test
+  are the survey's night commands. Proposed CP386 (the prebuilt link as cppi's default), CP387 (long strings as literals), CP388
+  (128-bit constants).
+
+## 2026-11-14: cpp-s13 finished: the five programs pass, the full runtime, the proofs
+
+After the disk's stops (the main session's limits 85-88%, one run at a time): CP386 (a), CP387 (a), CP388 (a) decided by the main session
+for the user's overnight rule. Fixed on the way, each with a probe and a control: `sizeof...(P)` in a signature mangled `sZ
+<template-param>`; a union's destructor destroys no variant member (`_Optional_locale` had destroyed a locale it never held); an
+enumeration without a fixed type and with no negative enumerator read from a bit-field zero-extended, as clang's unsigned int (`_Spec`'s
+`_M_align` had read `_Align_right` as -2, so `{:>6}` padded the wrong side). Results: f8 ("3") and runtime/library.cpp (g++'s stdout)
+pass on llvmi with C++'s lowered runtime, beside pr77550, atomics and hello; the runtime at the branch's key with tzdb.cc (199 of 199
+units read); gen-batch over the 81 byte for byte (69), codegen-gen 155 of 155, cpp-print-essential, llvm-essential's commands,
+llvmi check --essential, lower-essential, cpp-check-essential, bin/reap (0 problems), crops-score strict (0) and the crops' key test pass,
+every peak under 2.1 GB. Proposed CP389, conversion function templates (f8's largest remaining drop). The kill of 06:29 used PIDs from a
+snapshot taken seconds earlier (not re-read before the kill): since then a helper reads each PID's command line before killing it.
+
+## 2026-11-14: cpp-s14: conversion function templates (CP389 (a)), f8's and library.cpp's drops 20 → 4 and 33 → 6
+
+The user's decision of the day: CP389 (a), then the two programs' drops, then cpp-s13's two findings. Branch `cpp-s14` from mac/cpp-s13
+(87bab53ba); doc/cpp/CPP-SURVEY.md, "As built: cpp-s14". All in arbace/cpp/ (template.ae, sema.ae, codegen.ae), one record line
+(test/cpp/codegen/forms.sha256's `globals`): no gate, runtime or seed key moves (gate-key-crops-test PASS).
+- Conversion function templates: declared on their class (`:conv-tmpls`), each deduced from the conversion's target type as
+  [temp.deduct.conv] says (a reference P's referred type; an array or function P decayed and top-level cv dropped for a non-reference
+  target; a reference target's referred type at least as qualified; pointers and pointers to members by a qualification conversion;
+  clang's TDF flags), instantiated with its constraints and ranked after the non-template conversion functions; mangled `cv T_ I...E`.
+  On the way, references bound directly to a conversion's lvalue or xvalue ([dcl.init.ref]/5.1.2, 5.3.2), non-template ones too (before:
+  a copy, or refused), references to functions bound to an overload set, and member-pointer deduction for the code generator. Considered:
+  a template's specializations kept among the class's conversion functions (rejected: one made for int* was offered for const int*).
+- The drops, each general with a probe and a control: a partial specialization's arguments taken as the preprocessor gave them (a
+  macro's name had stood in them: _GLIBCXX_NOEXCEPT_QUAL, _GLIBCXX_MOF_CV, _GLIBCXX_STD_C); noexcept(B) of a function type deduced false
+  (CP390 (b), decided by the brief's rule: the slice's function types carry no exception specification; (a), modelling them, left for a
+  program that needs it); decltype of a function's name its type; an explicit specialization's defaulted arguments completed in their
+  own scope (`__promote<long double>`); a variable template's partial specialization by a qualified name (`__detail::__is_subrange`); an
+  enumerator's attributes not its value (`_Ios_Openmode`).
+- cpp-s13's findings: a local static whose initializer is constant initialized statically (no guard), with two faults of the constant
+  leaves fixed (an array of every element written, an int-to-long cast's mask); `decltype(e)::name` as a qualifier.
+- Results: f8 and runtime/library.cpp generate (drops 4 and 6 causes) and pass on llvmi (f8 "3"; library.cpp g++'s stdout); gen-batch over
+  the 81: 69 generated, none lost, 66 byte for byte, 3 changed only by constant initializations clang also writes (their runs as recorded);
+  codegen-gen 155 (one record line re-hashed for the same reason), cpp-print-essential, llvm-essential's commands, llvmi's essential check,
+  lower-essential, cpp-check-essential, bin/reap (0 problems), crops-score strict (0) pass, every peak under 2.1 GB.
+- Proposed CP391 (a dependent decltype in a signature mangled as clang's DT...E) and CP392 (the native parser's decltype statements and a
+  using-declaration's tokens, outside arbace/cpp/). The disk stood at 85-89% most of the day (not this worktree's); runs waited for it.
+
 ## 2026-11-15: the cover hook's swallowed SIGTERM (gate 13d's gate-tests hang, n17-fix)
 
 - **What hung**: gate 13d (`bin/gate --full --concurrent` on next 30c598795) ran the step gate-tests. Its
@@ -6138,4 +6305,31 @@ Gate 13e's gate-tests failed java-timeouts-test (and gate-reads-test and gate-te
 held test/java/timeouts.txt at 35 lines, 21 above 60 s, and n16-fix (30c598795; the user, 2026-11-14, round 38) added the measured limits of
 t03459 (128), t03897 (88) and t08163 (112). The test's counts are now 38 and 24; the data is unchanged. Proof: the test alone, 36 of 36.
 The main session, for 13e's revisit (the user, round 40: main advances anyway; the fix waits on next for the next gate).
+
+## 2026-11-15: cpp-s15: dependent decltypes mangled as clang (CP391 (a)), the native parser's two reads (CP392 (a)), f8's and library.cpp's drops 4 → 1 and 6 → 1
+
+The user's decisions of 2026-11-14: CP391 (a) and CP392 (a), then the two programs' last drops. Branch `cpp-s15` from mac/cpp-s14
+(3524ff441); doc/cpp/CPP-SURVEY.md, "As built: cpp-s15". In arbace/cpp/ (abi.ae, sema.ae, template.ae) and arbace/repr/cpp/parse.ae (crop
+paths), one record line (test/cpp/codegen/forms.sha256's `hdr-vector`): no gate, runtime or seed key moves (gate-key-crops-test PASS).
+- CP391 (a): a dependent decltype's operand kept beside its stand-in as plain data (parameters by index and cv, the template's non-type
+  parameters, the written types resolved, unresolved names as written), mangled `DT <expression> E` as Itanium 5.1.6 and clang's
+  mangleExpression write it (cl, fp_, fpT, dt/pt, dtdefpT, sr, operators, literals, sizeof, casts, constructions); the signature a
+  specialization is mangled with now resolved with the parameters in scope; a type-dependent operand that analyzes is the dependent
+  decltype too (CP394 (a)). Checked by probe dt1 (seven names) and by clang's own name for basic_string's operator<=> in cpp-runtime-ir,
+  which hello.cpp's IR now has byte for byte. Considered: refusing every operand not written (rejected: the unwritten kinds are refused
+  only when a name needs them, which none of the programs does).
+- CP392 (a): `decltype(e)::type x = ...;` read as a declaration; a using-declaration's preprocessed tokens kept (`:_text`) and read by
+  sema. repr/cpp's own checks pass: cpp-read-essential's and cpp-print-essential's commands, native-check over the samples and its four
+  known lists (cxxdump built and run here, as the brief said).
+- The drops, each general with a probe and a control: `__extension__ using` (`__max_size_type`'s `__rep`); `X<T>::template Y` as a template
+  template argument (`__xref<_Tp1>::template __type`); an unfinished instance's out-of-line members attached when its definition finishes
+  (`extern template class basic_ios<char>` before <ostream>: the cause cpp-s14 could not find, its d7 having every class defined);
+  noexcept-expressions in template arguments evaluated (CP395 (a)); and CP393 (a), an unsigned template argument's value mangled unsigned
+  (`Lm18446744073709551615E`). Left: `__make_unsigned_selector` (right: clang diagnoses only a use).
+- Results: f8 "3" and library.cpp g++'s stdout on llvmi; gen-batch over the 81: 69 generated, none lost, 67 byte for byte, hello.cpp and
+  atomics.cpp changed (the operator<=> name; destroy noexcept as clang's) and both pass; codegen-gen 155 after hdr-vector's line (its
+  realloc_append without a landing pad, construct noexcept), the essentials, reap (0 problems), crops-score strict (0), the key test.
+- Slips: cpp-check-essential's first attempt read the whole lowered runtime here and passed 2.5 GiB (killed by the watcher; the read then
+  copied from cpp-s14's, the same key); one `<(...)`; gen-batch's first run read cpp-s13's removed worktree (repeated). The disk stood at
+  87-95% for about 10 hours (not this worktree's); the runs waited.
 

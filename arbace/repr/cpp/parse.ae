@@ -669,7 +669,16 @@
                             (adv! p)
                             (let [ok (and (is? p "(") (skip-balanced! p))
                                   r (cond (not ok) :error
-                                          (is? p "::") (do (seek! p b) (let [[qn e] (scan-name p)] (if (and qn (type-ent? (:ent qn))) (if (= :paren (after-name-kind p e)) :ambig :true) :false)))
+                                          (is? p "::") (do (seek! p b) (let [[qn e] (scan-name p)]
+                                                                         (cond (and qn (type-ent? (:ent qn))) (if (= :paren (after-name-kind p e)) :ambig :true)
+                                                                               ;; (cpp-s15, CP392 (a): `decltype(e)::type x = ...;`, a member the
+                                                                               ;; parser cannot resolve through the decltype followed by a name:
+                                                                               ;; a declaration, as an unknown type name's is; an expression
+                                                                               ;; `a::b c` is never one)
+                                                                               (and qn (nil? (:ent qn)) (= :id (after-name-kind p e))
+                                                                                    (not (#{"final" "override"} (ts (tok-at p e)))))
+                                                                               :true
+                                                                               :else :false)))
                                           (is? p "(") :ambig
                                           (is? p "{") braced
                                           :else :true)]
@@ -1901,7 +1910,14 @@
           (do (adv! p) (let [ty (parse-type-id p :paren)] (expect! p ")") (node p "UnaryExprOrTypeTraitExpr" b (last-ix p) {:name nm :argType {:qualType (qt ty)}})))
           (let [x (parse-cast-expr p)] (node p "UnaryExprOrTypeTraitExpr" b (ne x) {:name nm :inner [x]}))))
       (and (t= t "noexcept") (is-at? p 1 "("))
-      (do (adv! p) (adv! p) (let [x (with-gt p true (parse-expr p))] (expect! p ")") (node p "CXXNoexceptExpr" b (last-ix p) {:inner [x]})))
+      (do (adv! p) (adv! p)
+          (let [ob (ix p) x (with-gt p true (parse-expr p))]
+            ;; (cpp-s15: the operand kept for the code generator by its text, as a noexcept-specifier's is: a noexcept-expression
+            ;; in a template argument the code generator evaluates from its text, <type_traits>' __is_nothrow_new_constructible_impl's
+            ;; base `__bool_constant<noexcept(::new(std::declval<void*>()) _Tp(std::declval<_Args>()...))>`)
+            (when (and *full-headers* (not (skim? p)) (map? x) (> (ix p) ob))
+              (.put ^HashMap (stv p DECLTYPES) (str "noexcept-expr:" (str/replace (tok-text p ob (dec (ix p))) #"\s+" "")) x))
+            (expect! p ")") (node p "CXXNoexceptExpr" b (last-ix p) {:inner [x]})))
       (t= t "new") (parse-new p b false)
       (and (t= t "::") (is-at? p 1 "new")) (do (adv! p) (parse-new p b true))
       (or (t= t "delete") (and (t= t "::") (is-at? p 1 "delete")))
@@ -3846,7 +3862,10 @@
                               (declare! p (cond-> (or (when-let [t (:ent qn)] (assoc t :name nm)) (if tn {:k :type :name nm} {:k :fn :name nm}))
                                             ;; a value named through a dependent qualifier: unresolved until instantiated
                                             (and dep (not tn) (not (type-ent? (:ent qn)))) (assoc :unres true))))
-                          out (conj out (node p (cond (not dep) "UsingDecl" tn "UnresolvedUsingTypenameDecl" :else "UnresolvedUsingValueDecl") b e {}))]
+                          ;; (cpp-s15, CP392 (a): the code generator's: the declaration's tokens as the preprocessor gave them, `using
+                          ;; std :: vector` for <vector>'s `using _GLIBCXX_STD_C::vector;`, whose source text is the macro's name)
+                          out (conj out (node p (cond (not dep) "UsingDecl" tn "UnresolvedUsingTypenameDecl" :else "UnresolvedUsingValueDecl") b e
+                                              (if *full-headers* {:_text (tok-text p b e)} {})))]
                       (if (accept! p ",") (recur out) out))))]
         (expect! p ";")
         out))))
@@ -3938,6 +3957,9 @@
       ;; (cpp-s5: `__extension__ template<...>`, clang's ParseExternalDeclaration consuming the keyword before the
       ;; declaration: <type_traits>' __is_signed_integer alias template)
       (and (t= t "__extension__") (is-at? p 1 "template")) (do (adv! p) (parse-template-decl p ctx (ix p) 1))
+      ;; (cpp-s15: `__extension__ using ...;` likewise, <bits/max_size_type.h>'s `__extension__ using __rep = unsigned
+      ;; __int128;`, a member alias-declaration the keyword had hidden: "unknown type __rep")
+      (and (t= t "__extension__") (is-at? p 1 "using")) (do (adv! p) (parse-using p))
       ;; clang's recovery of `inline template <...>`: the stray specifier dropped, the template declaration read
       (and (t= t "inline") (is-at? p 1 "template")) (do (adv! p) (parse-template-decl p ctx (ix p) 1))
       (and (t= t "extern") (identical? :str (tk (nxt p 1))) (not (is-at? p 2 ";"))) (parse-linkage p)
@@ -4058,6 +4080,30 @@
       (let [x (tentatively p (fn [p] (seek! p (inc b)) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) e) x))))]
         (when (map? x) x)))))
 
+(defn- keep-decltypes!
+  "cpp-s11 (CP379 (a)): the operands of the decltypes among the tokens [from, to) of a requirement the parser keeps as its
+  text (a type requirement, a return-type-requirement), parsed tentatively and kept by their text for the code generator's
+  decltype as a decl-specifier's are (G4); the cursor put back."
+  [^P p ^long from ^long to]
+  (let [save (ix p)]
+    (loop [i from]
+      (when (< i to)
+        (let [^T t (tok-at p i)]
+          (if (and (or (t= t "decltype") (t= t "__decltype")) (t= (tok-at p (inc i)) "("))
+            (let [close (loop [j (+ i 2) d 1]
+                          (let [^T x (tok-at p j)]
+                            (cond (or (identical? :eof (.-k x)) (>= j to)) nil
+                                  (t= x "(") (recur (inc j) (inc d))
+                                  (t= x ")") (if (= d 1) j (recur (inc j) (dec d)))
+                                  :else (recur (inc j) d))))]
+              (when (and close (not (and (t= (tok-at p (+ i 2)) "auto") (= (long close) (+ i 3)))))
+                (seek! p (inc i))
+                (let [x (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))]
+                  (when (map? x) (.put ^HashMap (stv p DECLTYPES) (str/replace (tok-text p (+ i 2) (dec (long close))) #"\s+" "") x))))
+              (recur (inc i)))
+            (recur (inc i))))))
+    (seek! p save)))
+
 (defn- parse-requires-body
   "A requires-expression's parameters and requirements ([expr.prim.req]), the cursor after its `requires`: the node with
   its requirements as clang's AST has them (SimpleRequirement, TypeRequirement, CompoundRequirement, NestedRequirement:
@@ -4070,7 +4116,16 @@
           reqs (loop [out []]
                  (cond
                    (accept! p "}") out
-                   (is? p "typename") (let [rb (ix p)] (skip-until! p #{";"}) (let [e (last-ix p)] (expect! p ";")
+                   (is? p "typename") (let [rb (ix p)]
+                                        ;; (cpp-s11, CP379 (a): its decltypes' operands parsed tentatively and kept by their
+                                        ;; text as a decl-specifier's are (keep-decltypes!): <iterator_concepts.h>'s
+                                        ;; __cpp17_input_iterator requires `typename common_reference_t<decltype(*__it++)&&,
+                                        ;; ...>`, which had not resolved, "decltype(* __it ++)", so the requirement was false,
+                                        ;; iterator_traits of a C++20 iterator declaring only iterator_concept took the output
+                                        ;; iterator's specialization and <format>'s basic_string(_Utf_iterator, _Utf_iterator)
+                                        ;; no constructor; the requirement is still kept as its text)
+                                        (skip-until! p #{";"})
+                                        (keep-decltypes! p (inc rb) (ix p)) (let [e (last-ix p)] (expect! p ";")
                                                                                   (recur (conj out {:kind "TypeRequirement" :type {:qualType (tok-text p (inc rb) e)}}))))
                    (is? p "{") (do (adv! p)
                                    (let [x (with-gt p true (parse-expr p))]
@@ -4079,6 +4134,9 @@
                                            ;; (CX12, CP281 (a): the return-type-requirement's type-constraint as written)
                                            rb (when (accept! p "->") (ix p))]
                                        (skip-until! p #{";"})
+                                       ;; (cpp-s11: its decltypes' operands kept too, __cpp17_randacc_iterator's
+                                       ;; `{ __it - __it } -> same_as<decltype(__n)>`)
+                                       (when rb (keep-decltypes! p rb (ix p)))
                                        (let [rt (when (and rb (> (long (ix p)) (long rb))) (tok-text p rb (last-ix p)))]
                                          (expect! p ";")
                                          (recur (conj out (cond-> {:kind "CompoundRequirement" :inner [x]}

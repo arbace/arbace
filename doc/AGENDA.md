@@ -60,7 +60,7 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 | Scheme | 98.4 (99.95); 97.4 before `scheme-aot1` | 100 | 100 | |
 | Haskell | 96.3 (98.4) | 100 | 78.9 | independence |
 | Rust | 75.0 (75.0) | 95.8 | 80.0 | all three |
-| LLVM IR | 97.6 (98.5) | 100 | 97.1 | llvm-ind2 (LLS47 (a), LLS50): judge 0.8541 (52 split-file sections by their parent's RUN lines), independence 97.08; left as decided: the probes (LLS48), llvmi's 177 (LLS49) |
+| LLVM IR | 97.6 (98.5) | 100 | 97.1 | llvm-ind2 (LLS47 (a), LLS50): judge 0.8541 (52 split-file sections by their parent's RUN lines), independence 97.08; left as decided: the probes (LLS48), llvmi's 177 (LLS49); llvm-eh (2026-11-13): llvmi runs modules that unwind with C++'s lowered runtime (16 of cpp-s12's 24 unwinding programs pass, 3 in cppi's classes, 5 links above 2.5 GiB: f8, library.cpp; the 13 `:personality` modules' check and records the night's), LLS51 (b), LLS52 (a), LLS53 (a) decided; the light proofs pass |
 | Python | 0 | 83.3 | 20.0 | all three |
 
 Six crops are above 90 on all three. What the others still need:
@@ -88,7 +88,39 @@ Six crops are above 90 on all three. What the others still need:
   layout), its memory limit 2GiB; hello.cpp's `cpp-check` regression is CP377. `cpp-s9` (2026-11-12): CP377 (a) (a directive inside a declarator, a member template's specialization of an extern
   template class: hello.cpp's resize_and_overwrite defined), CP376 (a) (clang's size floor; nua-layout.cpp), CP374 (a) (pointers in the
   evaluator: f8 moved to `string_view __s`, CP378 proposed), CP375 (a); the 81's IR: 69 generated, none lost, 13 differing as intended;
-  codegen-gen recorded (155); library.cpp alone and the ci runs of cpp-check-essential and hello.cpp wait for night 12's gate's end.
+  codegen-gen recorded (155); library.cpp alone and the ci runs of cpp-check-essential and hello.cpp wait for night 12's gate's end. `cpp-s10`
+  (2026-11-12): CP378 (a), class objects in sema's constant evaluator (constexpr constructors with `this`, copies by value, field reads and
+  stores, member calls, references as locations) and `__builtin_is_constant_evaluated()` / `if consteval` true when manifestly
+  constant-evaluated: f8 (<format>'s vformat) past the literal-encoding check (`constexpr-if` → the encoding branch of `__write_padded`,
+  basic_string from _Utf_iterator, an overload refusal: CP379 proposed; library.cpp alone the same, 39 causes of drops from 47); the
+  81's IR unchanged (none lost, byte for byte or by the inliner's numbering); codegen-gen 155 as recorded, print essential, the dg
+  sample (own pass 127), reap and crops-score unchanged; cpp-check-essential left (the disk at 86%, its lower step stops above 85%);
+  CP380 proposed (a plain global's constant initialization manifestly constant-evaluated). `cpp-s11` (2026-11-13, "As built: cpp-s11"):
+  CP379 (a) built (a requirement's decltype operands kept by the parser: iterator_traits of an iterator with only iterator_concept),
+  then f8 through seven more refusals, each general (ADL of enumerations, abbreviated function templates, [over.ics.list]/7 and `T x({...})`,
+  sizeof(T) as a template argument, a CRTP base's requires-clauses at overload resolution, an unknown-bound global array, a pack named in a
+  constant's text, which had made `__or_<false_type, false_type>` true); f8 now stops at "a wide string" (CP382 proposed); the 81's IR
+  unchanged (69 generated, none lost); CP380 not needed by any run; library.cpp alone waits for the main session. `cpp-s12` (2026-11-13, "As built:
+  cpp-s12"): CP382 (b) (`_GLIBCXX_WIDEN` names the wide literal in every char instantiation) then (a) (wide and Unicode literals: code
+  units, i16/i32 globals, the evaluator's element reads), CP383 (b) kept; library.cpp alone first refused at make_format_args (`_Float16`
+  and `__float128` unknown); then `using enum`, the extended floating types, constexpr static members inline since C++17: **f8 and
+  library.cpp both generate and lower**; their runs need gcc (not run); the 81's IR byte for byte (69); CP384, CP385 proposed. `cpp-s13` (2026-11-14, "As built: cpp-s13"): C++'s link on ci's prebuilt runtime (CS273 (a): a fragment per unit, the link's
+  prune; CP386 (a)): llvm-eh's five links above 2.5 GiB now 0.47-2.04 GB and **all five pass** (f8 by its "3", library.cpp as g++'s run,
+  pr77550, atomics, hello), after the code generator's fixes (constructor templates defined outside a class template, GNU abi_tag on a
+  class, sizeof... in signatures, unions' destructors, non-negative enumerations' bit-fields unsigned, 128-bit constants inside
+  evaluations, CP388 (a)); the full runtime with tzdb.cc (its table a string literal, CP387 (a), read in 2.2 GB); drops f8 35/86 → 12/20,
+  library.cpp 26/67 → 14/33; the 81's IR byte for byte (69), codegen-gen 155, the essentials, reap and crops-score pass; no gate key
+  moves; CP389 (conversion function templates) proposed. `cpp-s14` (2026-11-14, "As built: cpp-s14"): CP389 (a), conversion function
+  templates deduced from the target type ([temp.deduct.conv]), references bound directly to conversions' results; partial
+  specializations' preprocessed arguments, noexcept(B) deduced false (CP390 (b)), explicit specializations' defaults, qualified variable
+  template partials, enumerators' attributes; local statics constant-initialized, `decltype(e)::name`: drops f8 12/20 → 4/4, library.cpp
+  14/33 → 5/6, both pass on llvmi; the 81's IR 66 byte for byte, 3 changed by constant initializations (as clang); the essentials, reap and
+  crops-score pass; no gate key moves; CP391 (decltype mangling), CP392 (parser reads) proposed. `cpp-s15` (2026-11-15, "As built:
+  cpp-s15"): CP391 (a), dependent decltypes mangled `DT <expression> E` as clang (hello.cpp's operator<=> clang's name byte for byte),
+  CP392 (a), `decltype(e)::type x` declarations and a using-declaration's preprocessed tokens (native-check over its lists passes);
+  `__extension__ using`, `X<T>::template Y` template template arguments, unfinished instances' out-of-line members, noexcept-expressions
+  in template arguments, unsigned template argument values: drops f8 4 → 1, library.cpp 6 → 1 (both `__make_unsigned_selector`, right),
+  both pass on llvmi; the 81's IR 67 byte for byte, 2 changed as explained and passing; CP393-CP395 decided; no gate key moves.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).
@@ -404,7 +436,7 @@ items below are the ones whose work is still ahead or tied to a night.
   later; F15 (JCS350-JCS356) for the next Java night.
 - **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): `gf-cpp` (2026-11-12, "As built: gf-cpp"): cpp-s9 merged into next's tree, explicit6.C's
   explicit((T) 1.0) evaluated (floating literals in eval-text), the runtime part of cpp-check-essential as recorded; its samples part,
-  cpp-check.samples-runtime and dg-error-own whole are night commands; CP379 (the essential step's memory) proposed. CP243 (a) (`cpp-print-own`) and CP352 (`cpp-cp352`, the five valid-code reader
+  cpp-check.samples-runtime and dg-error-own whole are night commands; CP381 (the essential step's memory; CP379 on its branch) proposed. CP243 (a) (`cpp-print-own`) and CP352 (`cpp-cp352`, the five valid-code reader
   gaps) merged into next; CP250 when
   needed; CP251 at the next re-record; CP264 a night task; CP240 (b) and CP320-CP324 (above). CP338-CP351 (the user,
   2026-11-10, as recommended): CP338 (a) and CP350 (a) built on `cpp-cp338` (the run corpora's refusals in the plan's order,

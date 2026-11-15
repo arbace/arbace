@@ -48,10 +48,21 @@
 ;; the lowering's: a resume instruction, a landing pad's in-flight exception and its catch clauses
 (c/defn cx$resume ^void [^{:tag (* void)} o] (cx$raise o))
 
-(c/defn cx$exception ^{:tag (* void)} [void] (return cx$cur))
+(c/var ^:static ^:thread_local ^int cx$nspecs 0)
 
 (c/defn ^:static cx$gxx ^int [^unsigned-long c]
   (return (== (>> c 8) (lit unsigned-long 0x474E5543432B2B))))
+
+;; (each landing pad starts here: the filter's types it records, cx$spec_catches below, are the last landing pad's). The adjusted
+;; pointer starts as the thrown object (llvm-eh): eh_personality.cc's search phase saves the thrown object's address for the handler it
+;; finds, a filter's rejection too, whose __cxa_begin_catch reads it (__cxa_call_unexpected's); a catch clause's match sets its own
+(c/defn cx$exception ^{:tag (* void)} [void]
+  (set! cx$nspecs 0)
+  (when (and (!= cx$cur 0) (cx$gxx (-> cx$cur cls)))
+    (let [^{:tag (* char)} ue (conv (* char) cx$cur)]
+      (set! @(conv (* (* void)) (- ue 8))
+            (? (== (bit-and (-> cx$cur cls) 255) 1) @(conv (* (* void)) (- ue 80)) (conv (* void) (+ ue 32))))))
+  (return cx$cur))
 
 ;; the matching runs lowered code (the type_info classes' __do_catch and __do_upcast), whose calls return at once while the
 ;; flag is set: it is lowered while they run and raised again after
@@ -214,9 +225,70 @@
     (cx$qgive)
     (return 0)))
 
-;; a filter clause that rejects the exception (C++98's dynamic exception specifications): eh_personality.cc's
-;; __cxa_call_unexpected, without its bad_exception translation
+;; a filter clause (a dynamic exception specification, C++98 to C++14): its types, recorded as the landing pad asks them
+;; (the lowering asks a filter's types through cx$spec_catches, a catch's through cx$catches), are the specification a rejection checks a new
+;; exception against, as eh_personality.cc's check_exception_spec reads it from the LSDA (llvm-eh): reset at each landing pad's
+;; start (cx$exception), so they are the last landing pad's filter
+(c/var ^:static ^:thread_local ^{:tag (array 32 (* void))} cx$specs)
+
+(c/defn cx$spec_catches ^int [^{:tag (* void)} ti]
+  (when (< cx$nspecs 32)
+    (set! (aget cx$specs cx$nspecs) ti)
+    (set! cx$nspecs (+ cx$nspecs 1)))
+  (return (cx$catches ti)))
+
+;; std::bad_exception, which a specification that names it (or a base of it) admits in place of a new exception it does not
+;; (eh_personality.cc's `throw std::bad_exception()`): its vtable and type_info are libsupc++'s (eh_exception.cc, lowered)
+(c/var ^{:extern true :tag (array 5 (* void))} _ZTVSt13bad_exception)
+(c/var ^{:extern true :tag (array 3 (* void))} _ZTISt13bad_exception)
+(c/declare _ZNSt13bad_exceptionD1Ev ^void [(* void)])
+(c/declare __cxa_end_catch ^void [void])
+(c/declare __cxa_allocate_exception ^{:tag (* void)} [unsigned-long])
+(c/declare __cxa_throw ^void [(* void) (* void) (* (fn [(* void)] void))])
+
+;; a filter clause that rejects the exception (the landing pad's selector -1, the IR's ehspec.unexpected path): eh_personality.cc's
+;; __cxa_call_unexpected. The exception is caught, the unexpected handler called (std::unexpected: it terminates when the handler
+;; returns); the handler's new exception, in flight when it returns here, goes on when the specification admits it, else a
+;; std::bad_exception when the specification admits that, else std::terminate; the original exception's catch ends either way
 (c/defn __cxa_call_unexpected ^void [^{:tag (* void)} ue]
-  (__cxa_begin_catch ue)
-  (_ZSt10unexpectedv)
-  (_ZSt9terminatev))
+  (let [^{:tag (array 32 (* void))} specs (init 0)
+        ^int n cx$nspecs
+        ^int i 0]
+    (while (< i n)
+      (set! (aget specs i) (aget cx$specs i))
+      (set! i (+ i 1)))
+    (set! cx$pending 0)
+    (__cxa_begin_catch ue)
+    (_ZSt10unexpectedv)
+    (when (not cx$pending) (_ZSt9terminatev))
+    (set! cx$pending 0)
+    (let [^int ok 0]
+      (set! i 0)
+      (while (and (< i n) (not ok))
+        (set! ok (cx$match (aget specs i)))
+        (set! i (+ i 1)))
+      (when ok
+        (let [^{:tag (* (struct cx$ue))} cur cx$cur]
+          (__cxa_end_catch)
+          (set! cx$cur cur)
+          (set! cx$pending 1)
+          (return))))
+    (let [^int bad 0
+          ^{:tag (* void)} p0 0]
+      (set! i 0)
+      (while (and (< i n) (not bad))
+        (let [^{:tag (* (* void))} cvt @(conv (* (* (* void))) (aget specs i))]
+          (set! p0 0)
+          (set! bad ((conv (* (fn [(* void) (* void) (* (* void)) unsigned] _Bool)) (aget cvt 4)) (aget specs i) (conv (* void) _ZTISt13bad_exception) (addr p0) 1)))
+        (set! i (+ i 1)))
+      (__cxa_begin_catch cx$cur)
+      (when (not bad) (_ZSt9terminatev))
+      (let [^{:tag (* void)} obj (__cxa_allocate_exception 8)]
+        (set! @(conv (* (* void)) obj) (conv (* void) (addr (aget _ZTVSt13bad_exception 2))))
+        (__cxa_throw obj (conv (* void) _ZTISt13bad_exception) _ZNSt13bad_exceptionD1Ev)
+        (let [^{:tag (* (struct cx$ue))} cur cx$cur]
+          (set! cx$pending 0)
+          (__cxa_end_catch)
+          (__cxa_end_catch)
+          (set! cx$cur cur)
+          (set! cx$pending 1))))))
