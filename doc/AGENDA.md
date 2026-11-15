@@ -106,7 +106,12 @@ Six crops are above 90 on all three. What the others still need:
   specializations' preprocessed arguments, noexcept(B) deduced false (CP390 (b)), explicit specializations' defaults, qualified variable
   template partials, enumerators' attributes; local statics constant-initialized, `decltype(e)::name`: drops f8 12/20 → 4/4, library.cpp
   14/33 → 5/6, both pass on llvmi; the 81's IR 66 byte for byte, 3 changed by constant initializations (as clang); the essentials, reap and
-  crops-score pass; no gate key moves; CP391 (decltype mangling), CP392 (parser reads) proposed.
+  crops-score pass; no gate key moves; CP391 (decltype mangling), CP392 (parser reads) proposed. `cpp-s15` (2026-11-15, "As built:
+  cpp-s15"): CP391 (a), dependent decltypes mangled `DT <expression> E` as clang (hello.cpp's operator<=> clang's name byte for byte),
+  CP392 (a), `decltype(e)::type x` declarations and a using-declaration's preprocessed tokens (native-check over its lists passes);
+  `__extension__ using`, `X<T>::template Y` template template arguments, unfinished instances' out-of-line members, noexcept-expressions
+  in template arguments, unsigned template argument values: drops f8 4 → 1, library.cpp 6 → 1 (both `__make_unsigned_selector`, right),
+  both pass on llvmi; the 81's IR 67 byte for byte, 2 changed as explained and passing; CP393-CP395 decided; no gate key moves.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).

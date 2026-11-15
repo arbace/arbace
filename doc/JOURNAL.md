@@ -5457,3 +5457,30 @@ The user's decision of the day: CP389 (a), then the two programs' drops, then cp
   lower-essential, cpp-check-essential, bin/reap (0 problems), crops-score strict (0) pass, every peak under 2.1 GB.
 - Proposed CP391 (a dependent decltype in a signature mangled as clang's DT...E) and CP392 (the native parser's decltype statements and a
   using-declaration's tokens, outside arbace/cpp/). The disk stood at 85-89% most of the day (not this worktree's); runs waited for it.
+
+## 2026-11-15: cpp-s15: dependent decltypes mangled as clang (CP391 (a)), the native parser's two reads (CP392 (a)), f8's and library.cpp's drops 4 → 1 and 6 → 1
+
+The user's decisions of 2026-11-14: CP391 (a) and CP392 (a), then the two programs' last drops. Branch `cpp-s15` from mac/cpp-s14
+(3524ff441); doc/cpp/CPP-SURVEY.md, "As built: cpp-s15". In arbace/cpp/ (abi.ae, sema.ae, template.ae) and arbace/repr/cpp/parse.ae (crop
+paths), one record line (test/cpp/codegen/forms.sha256's `hdr-vector`): no gate, runtime or seed key moves (gate-key-crops-test PASS).
+- CP391 (a): a dependent decltype's operand kept beside its stand-in as plain data (parameters by index and cv, the template's non-type
+  parameters, the written types resolved, unresolved names as written), mangled `DT <expression> E` as Itanium 5.1.6 and clang's
+  mangleExpression write it (cl, fp_, fpT, dt/pt, dtdefpT, sr, operators, literals, sizeof, casts, constructions); the signature a
+  specialization is mangled with now resolved with the parameters in scope; a type-dependent operand that analyzes is the dependent
+  decltype too (CP394 (a)). Checked by probe dt1 (seven names) and by clang's own name for basic_string's operator<=> in cpp-runtime-ir,
+  which hello.cpp's IR now has byte for byte. Considered: refusing every operand not written (rejected: the unwritten kinds are refused
+  only when a name needs them, which none of the programs does).
+- CP392 (a): `decltype(e)::type x = ...;` read as a declaration; a using-declaration's preprocessed tokens kept (`:_text`) and read by
+  sema. repr/cpp's own checks pass: cpp-read-essential's and cpp-print-essential's commands, native-check over the samples and its four
+  known lists (cxxdump built and run here, as the brief said).
+- The drops, each general with a probe and a control: `__extension__ using` (`__max_size_type`'s `__rep`); `X<T>::template Y` as a template
+  template argument (`__xref<_Tp1>::template __type`); an unfinished instance's out-of-line members attached when its definition finishes
+  (`extern template class basic_ios<char>` before <ostream>: the cause cpp-s14 could not find, its d7 having every class defined);
+  noexcept-expressions in template arguments evaluated (CP395 (a)); and CP393 (a), an unsigned template argument's value mangled unsigned
+  (`Lm18446744073709551615E`). Left: `__make_unsigned_selector` (right: clang diagnoses only a use).
+- Results: f8 "3" and library.cpp g++'s stdout on llvmi; gen-batch over the 81: 69 generated, none lost, 67 byte for byte, hello.cpp and
+  atomics.cpp changed (the operator<=> name; destroy noexcept as clang's) and both pass; codegen-gen 155 after hdr-vector's line (its
+  realloc_append without a landing pad, construct noexcept), the essentials, reap (0 problems), crops-score strict (0), the key test.
+- Slips: cpp-check-essential's first attempt read the whole lowered runtime here and passed 2.5 GiB (killed by the watcher; the read then
+  copied from cpp-s14's, the same key); one `<(...)`; gen-batch's first run read cpp-s13's removed worktree (repeated). The disk stood at
+  87-95% for about 10 hours (not this worktree's); the runs waited.

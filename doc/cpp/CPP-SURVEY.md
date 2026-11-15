@@ -7968,3 +7968,118 @@ taken. test/cpp/codegen/forms.sha256's `globals` line was replaced while the pro
 which do not read it); reap, crops-score and the key test were run again after it (0 problems, exit 0, PASS). A Clojure regex in a Python-written edit (`\s` unescaped) made one probe's generation fail at read (no result taken). No
 run started above the limits (the runs waited at 86-89%); no source was edited while a run that loads it ran (the llvmi runs of f8 and
 library.cpp load no sema, template or codegen; the edits of the probe sources were before their runs started).
+
+## As built: cpp-s15 (2026-11-14/15; branch `cpp-s15` from mac/cpp-s14 3524ff441; CP391 (a), CP392 (a) decided by the user 2026-11-14)
+
+The user's decisions of 2026-11-14: CP391 (a), a dependent decltype in a signature mangled as clang mangles it, with probes and controls;
+CP392 (a), the native parser's `decltype(e)::type x = ...;` and a using-declaration's preprocessed tokens, with repr/cpp's own checks;
+then f8's last 4 and library.cpp's last 6 drops reduced generally, each with a probe. Light, one run at a time, main's stage 0, the
+watcher killing any process of the worktree past 2.5 GiB (it killed none); no gate, big lock, g++ or gcc. The disk stood at 87-93% most
+of the session (not this worktree's: under 0.1 GB of scratch): the probes (each under 1 GB) ran at 87% or less, the runs waited for 85%.
+
+### CP391 (a): dependent decltypes mangled as clang does
+
+| Part | Built |
+|---|---|
+| The operand as data | sema.ae's decltype-of keeps beside the dependent stand-in `:dt`, the operand (the native parser's node) as the mangler's data (dt-ir), made where its names resolve: the function's parameters (index and top-level cv), the template's non-type parameters, the written types resolved (their parameters without their template's id: inert to substitution and deduction, which match parameters by it), unresolved names as written (`sr <namespaces> E`, `sr T_`), explicit template arguments. What it cannot write (a variable not a parameter: clang's `L <mangled> E`; ++/--; a qualified member; a lambda...) is kept as `{:x :fail}`, refused only when the name is mangled |
+| The parameters | declare-fn!'s trailing-return scope, now sema/fn-type-scope, records each parameter's index (`:fpi`); template.ae's sym-sig (the signature a specialization is mangled with) resolves the pattern's type in that scope too (before: no parameters, every decltype naming one a stand-in by its spelling) |
+| Type-dependence | in a function's type, an operand that analyzes but is type-dependent ([temp.dep.expr]: its type, or a parameter it names, depends on a template parameter) is the dependent decltype too: `decltype(ns::id<T>(t))` had been mangled as `T_`, `decltype(hh(t, t))::type` as `l` |
+| The mangling | abi.ae's mangle-dt-expr, Itanium 5.1.6 as clang's mangleExpression writes it: `DT <expression> E`, a substitution candidate after its operand's; calls `cl ... E`, parameters `fp_` `fpK_` `fp0_`, `this` `fpT`, members `dt`/`pt` (an implicit `this` `dtdefpT`, as gcc and clang), operators, literals `L <type> n E`, sizeof/alignof `st`/`sz`/`at`/`az`, `sZ`, casts `sc`/`cv`/`rc`/`cc`/`dc`, constructions `cv <type> _ ... E` and `tl`, pack expansions `sp`, noexcept `nx`; `decltype(e)::type` `N DT...E 4type E` |
+
+| Probe | What | Result (control) |
+|---|---|---|
+| dt1a, dt1n | an ADL call, a member call, an arrow member, an operator, a literal, a qualified call of a function template with explicit arguments, `decltype(e)::type`: seven names (`_Z2f1IiEDTcl1hfp_EET_`, `_Z2f3I1SEDTcldtfp_4sizeEET_`, `_Z2f4I1SEDTptfp_1xEPT_`, `_Z2f5IiEDTplfp_fp0_ET_S1_`, `_Z2f6IiEDTclsr2nsE2idIT_Efp_EES0_`, `_Z2f7IiEDTmlfp_Li2EET_`, `_Z1kIiENDTcl2hhfp_fp_EE4typeET_`) defined in the IR, the run | 7 of 7 found, llvmi 0 (the control's two wrong names, `fp_` for `fp0_` and `T_` for the substitution `S0_`, missing: 1) |
+
+The reference beyond the probe: clang's own IR of the runtime (the pack cpp-runtime-ir) names `_ZStssIcSt11char_traitsIcESaIcEEDTclsr8__detailE21__char_traits_cmp_catIT0_ELi0EEERKNSt7__cxx1112basic_stringIT_S3_T1_EESB_`
+(basic_string's operator<=>); hello.cpp's IR named it `_ZStssIcSt11char_traitsIcESaIcEENT-2_61decltype(__detail :: ...)E...` before.
+gen-batch's hello.cpp now names it as clang does, byte for byte. Not written, refused if a name needs it: a variable that is not a
+parameter (clang's `L <mangled> E`), a qualified call that resolves to a single non-template function (clang's DeclRefExpr, also `L ... E`;
+written as an unresolved name today: none of the 81, f8 or library.cpp has one), increments, lambdas; a requires-clause naming an alias
+whose expansion is a decltype (ranges::copy's `indirectly_copyable<iterator_t<_Range>, _Out>`, clang's `Q19indirectly_copyableIDT...`) is
+still left out of the name, as before (mangle-constraint reads the clause's text).
+
+### CP392 (a): the native parser's two reads (arbace/repr/cpp/parse.ae)
+
+| Read | Built | Probe (control) |
+|---|---|---|
+| `decltype(e)::type x = ...;` as a declaration statement | tp-decl-spec: a decltype-specifier's member the parser cannot resolve, followed by a name, is a declaration (as an unknown type name's; an expression `a::b c` never is) | u1a, u1n: 0 (1); cpp-s14's code: "statement: expected ;" |
+| a using-declaration's tokens as the preprocessor gave them | the parser keeps `:_text` (tok-text of the declaration, `using std :: vector` for <vector>'s `using _GLIBCXX_STD_C::vector;`) under *full-headers*; sema's UsingDecl reads it before the source text | u1a (a macro-written qualifier), f8's and library.cpp's `_GLIBCXX_STD_C` drop gone |
+
+repr/cpp's own checks after the change: cpp-read-essential's command (cpp-lexical 19, gxx-dg 31, libstdcxx-headers 3 files, the controls
+failing as they must; 1.40 GB), cpp-print-essential's (33 of 33, 9 of 9), and `bin/repr-cpp native-check` over the samples and the four
+known lists (samples 9 same, 68 of 68 items; gxx-a 62 same; gxx-b 162 same, 1 differs as known (`:builtin-signature`); gxx-26 38 same;
+gxx-mod 109 same; the controls failing as they must where their files are in the run; under 0.8 GB each; cxxdump built and run here, the
+brief's host use).
+
+### f8's and library.cpp's drops (gen-batch's drops.tsv, causes / drops)
+
+| Program | cpp-s14 | cpp-s15 |
+|---|---|---|
+| f8 | 4 / 4 | **1 / 1** |
+| runtime/library.cpp | 5 / 6 | **1 / 1** |
+
+| # | Drop (before) | Cause | Fix | Probe (control) |
+|---|---|---|---|---|
+| 1 | f8, library.cpp: "no scope _GLIBCXX_STD_C" | a using-declaration read from its source text | CP392 (a) above | u1 |
+| 2 | f8, library.cpp: "unknown type __rep" (`__max_size_type`) | `__extension__ using __rep = unsigned __int128;`: parse-external-decl took `__extension__` before a template only, the member alias-declaration declined ("a declaration without a type"); cpp-s14's d6 had no `__extension__` | `__extension__ using ...` read as the using-declaration (clang's ParseExternalDeclaration consuming the keyword) | r1a, r1n: 0 (1); cpp-s14's code: declined |
+| 3 | f8, library.cpp: "a template template argument (cpp/scope (<> __xref _Tp1) (template __type))" (`__common_reference_impl`'s bullet 2, `__basic_common_ref`) | a qualified template name as a template template argument was not read | template.ae's template-arg-of: `X<T>::template Y` the class's member template when the class is known, else a dependent template name `{:k :ttdep}` (resolved again where the parameters are bound; its mangling refused) | x1a, x1n: 0 (1); cpp-s14's code: refused |
+| 4 | library.cpp 2: "no member clear of basic_ios to define" (`extern template class basic_ios<char>`, `<wchar_t>`) | the explicit instantiation instantiated basic_ios<char> while basic_ostream was only declared: the instance's definition was dropped for the header retry (its `basic_ostream<_CharT, _Traits>* _M_tie`, "an incomplete class template"), then its out-of-line members were attached to the empty class. cpp-s14's d7 had every class defined | attach-one!: an instance whose definition did not finish records `:ool-pending`; class-completed! attaches its out-of-line members when the retry finishes it | b2 (`#include <ios>` alone: 2 drops, now 0) |
+| 5 | library.cpp: "not a constant: noexcept" (`__is_nothrow_new_constructible_impl`) | a noexcept-expression in a base's template argument: eval-text knew none | the parser keeps a noexcept-expression's operand by its text (`noexcept-expr:`, as a noexcept-specifier's); eval-text analyzes it as sema's CXXNoexceptExpr (true when nothing it calls may throw), dependent while the operand does not analyze with the template's parameters unbound | n1a, n1n: 0 (1); cpp-s14's code: refused |
+| - | (left) f8, library.cpp: "an incomplete class template __make_unsigned_selector" | <type_traits>' alias of a specialization nothing defines: right, clang diagnoses only a use | - | - |
+
+Found on the way, not fixed: `extern template class X<char>;` followed by the explicit instantiation definition `template class X<char>;` in the
+same unit leaves the members undefined (probe b3: llvmi "undefined function", status 139; cpp-s14's code the same), [temp.explicit]/11; a
+statement starting with a template-id whose arguments hold `X<T>::template Y` is declined by the native parser (x1's first form; the probe
+names the type through an alias).
+
+### The IR changes these make (each explained)
+
+| Where | Change | Why |
+|---|---|---|
+| hello.cpp | basic_string's operator<=> named `_ZStssIcSt11char_traitsIcESaIcEEDT...EESB_` | CP391 (a): clang's name, byte for byte (cpp-runtime-ir) |
+| hello.cpp, atomics.cpp | `_Sp_counted_ptr_inplace<...>::_M_dispose`'s inlined `allocator_traits::destroy` keeps its own terminate landing pad | `is_nothrow_destructible<vector<int>>` true now (its `__do_is_nt_destructible_impl::__test`'s `__bool_constant<noexcept(declval<_Tp&>().~_Tp())>`, fix 5), so destroy is noexcept as clang's; the program terminates the same way |
+| codegen-gen's hdr-vector | `vector<int>::_M_realloc_append` without personality or cleanup | `allocator_traits::construct`'s `noexcept(__is_nothrow_new_constructible<_Up, _Args...>)` true for int (fix 5): every call in `__guard`'s block nounwind, no landing pad, as clang emits; its line in test/cpp/codegen/forms.sha256 replaced by the run's hash |
+
+### Checked (one at a time, peaks by busybox `time -v`)
+
+| Run | Result |
+|---|---|
+| f8 and library.cpp generated (291 s, 1.21 GB; 456 s, 1.31 GB), linked with C++'s lowered runtime on the prebuilt link and run by llvmi | **both pass**: f8 "3", status 0 (15 min 21 s, 1.88 GB, a cold fragment cache); library.cpp status 0, stdout 70c08058... as g++'s (7 min 39 s, 2.02 GB) |
+| gen-batch over the 81 run programs, five parts, against cpp-s14's G12 | **69 generated, none lost or gained; 67 byte for byte, 2 differ** (hello.cpp, atomics.cpp, above); both run on llvmi and **pass** against ref-gxx15 (0.96, 1.48 GB); 0.36-1.35 GB |
+| cpp-read-essential's command (`bin/repr-cpp target verify && bin/repr-cpp pp-check --essential`) | pass, the controls failing as they must; 1.40 GB |
+| cpp-print-essential's command | 33 of 33, 9 of 9, `_control/bitfields-vs-io` failing as it must; 1.40 GB |
+| `bin/repr-cpp native-check` samples, gxx-a, gxx-b, gxx-26, gxx-mod | as above; under 0.8 GB |
+| llvm-essential's commands (`bin/repr-llvm check roundtrip-llvmtest`, `verify-llvmtest`, `verify-probes`, `text-llvmtest`, `--essential`), `bin/llvmi check --essential`, `test/repr/llvm/controls-test.bash` | pass, 0 failing, the controls failing as they must; 10 of 10; all ok; 0.16-0.36 GB |
+| `bin/cppi lower-essential` | 6 of 6; 1.55 GB |
+| cpp-check-essential's command (`CPPI_THREADS=1`) | samples 4 programs, pass 4, the run control differs as it must; 1.40 GB (the first attempt read the whole lowered runtime afresh, its tzdb.cc read passing 2.5 GiB, killed by the watcher; the read copied from cpp-s14's worktree, the same key: lower.ae, run.ae, repr/c unchanged) |
+| `bin/cppi codegen-gen` | first 154 of 155 (hdr-vector forms-differ, above); its line replaced; then **155 of 155**, the controls failing as they must; 1.13-1.14 GB |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --judge --strict` | exit 0, 0 problems |
+| `test/gate/gate-key-crops-test.bash` | PASS: the branch changes `arbace/cpp/`, `arbace/repr/cpp/` (crop paths), `test/cpp/codegen/forms.sha256` and doc/: no gate, runtime or seed key moves |
+
+### Decided (the brief's rule: the recommended option taken)
+
+- **CP393 An unsigned non-type template argument's value in a mangled name.** abi.ae wrote a value above Long/MAX_VALUE of an unsigned
+  type as negative (`Lmn1E` for span's dynamic_extent), clang writes the unsigned number (`Lm18446744073709551615E`, cpp-runtime-ir's
+  ranges::__copy_fn). (a) the unsigned number for an unsigned type (Long/toUnsignedString), a negative only for a signed one; (b) leave it
+  (consistent within a program). **Recommended and taken: (a)** (probe m2a: `_Z1f1EILm18446744073709551615EE`, `_Z1g1UILj4294967295EE`,
+  `_Z1h1LILln1EE`; the control's `Lmn1E` missing); none of the 81's IR changed.
+- **CP394 A type-dependent operand that analyzes, in a function's type.** With the parameters now in the signature's scope, some operands
+  analyze in the pattern (`ns::id<T>(t)` to T, `hh(t, t)` to I<2>): (a) such an operand ([temp.dep.expr]: its type, or a parameter it
+  names, dependent) is the dependent decltype, mangled DT as clang, the pattern's own analysis not taken; (b) take the analysis' type
+  (`T_`, `l` in the name: not clang's, and `hh(t, t)`'s I<2> a guess of the pattern). **Recommended and taken: (a)**, limited to a function's
+  type (sema/fn-type-scope's `:fn-type`): elsewhere decltype keeps what it had.
+- **CP395 noexcept-expressions in template arguments.** (a) as built: the operand the parser keeps, analyzed per specialization as sema's
+  noexcept(e), dependent while it does not analyze; (b) leave the class templates that use one dropped (their noexcept-specifier users
+  then noexcept(false)). **Recommended and taken: (a)**: clang's answer, and it makes is_nothrow_destructible and the allocator's construct
+  noexcept as clang's (the IR changes above).
+
+### Rule slips
+
+One process passed 2.5 GiB: cpp-check-essential's first attempt read the whole lowered runtime in this worktree (its `.tmp/cppi/runtime`
+had no read; tzdb.cc's read is 2.2-2.6 GB), killed by the watcher at 2,573 MB; then the read was copied from cpp-s14's (the same key).
+One shell command used `<(...)` (a `diff` of the two runtimes' key files). gen-batch's first run read cpp-s13's removed worktree (its part
+lists named cpp-s13's sources): 13 programs crashed "lost", the lists corrected to this worktree's test/ and the run repeated (the result
+above is the second). Probes started at 87% (the rule's limit for probes); the runs waited for 85% (in run.sh's 10-minute re-checks,
+about 10 hours at 87-95%). No source was edited while a run that loads it ran; debugging prints added to template.ae for the basic_ios
+probe were removed before the proofs.
