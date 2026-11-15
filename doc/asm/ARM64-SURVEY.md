@@ -2751,3 +2751,59 @@ a64i-go-compile (d6432df30): its fragment in test/gate/crops/asm.edn, spliced in
 - Checked on the VM: `gate.crops check` 0 problems, `gate-key-crops-test` PASS, `crops-test` ok, `make check-makefile` ok. `bin/gate
   --plan` needs a stage 0 this VM lacks for the seed: on the main host `bin/gate --full --plan` should list a64i-goroot in
   asm-arm64-full.
+
+## As built: AR25 (2026-11-15; branch `302-asm-arm64-arbace`, from `299-asm-arm64-ar24` `151aa8da7`; queue task 302, the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, load 9-17, at most 4 processes of this task's). The user's answers to ARS94 and
+ARS95: (a) and (a). The executable: Arbace's own linux/arm64 stage 0 (the nf worktree's `target/seed/arm64/arbace`, 194,904,224
+bytes, sha256 9db9765c...f92d, built 2026-11-03 from seed 1fe1063f; no build on the VM).
+
+- **Arbace on a64i**: `-e '(+ 1 2)'`, a REPL session fed from a file on stdin and a namespace load (`-m demo.core 1 two`: two
+  namespaces of a directory on ARBACE_PATH loaded from their source, with arbace.set, arbace.walk, arbace.string and arbace.pprint)
+  each ran to its end on the base a64i (151aa8da7) already, status, stdout and stderr byte for byte the CPU's: 595 M, 813 M and
+  1,419 M instructions in 53, 77 and 132 s (about 11 M instructions a second; the native runs take 60 to 105 ms). The counts are
+  the program's work: GOMAXPROCS=1 or asyncpreemptoff=1 change them by under 1 %. On a64i the run makes about 42,000 system calls
+  for `-e`, most of them Go's sysmon over the wall clock (13,268 clock_gettime, 5,404 nanosleep, 2,691 tgkill preemptions with as
+  many signal deliveries, 3,055 epoll_pwait), and 57 sched_getaffinity, ENOSYS before AR25 (Go's GOMAXPROCS update asks it each
+  second; its CPU count stayed 1).
+- **What the lockstep found** (it stopped at Arbace's first system call, as at every Go program's, AR24's Low), built generally in
+  emu.Kernel (x86i's kernel too):
+  - **sched_getaffinity**: one CPU, CPU 0 (a64i runs one thread at a time), Linux's order of checks (len*8 under the CPU count or not
+    a multiple of 8 EINVAL, a negative pid ESRCH, the mask's word written or EFAULT), the bytes written its result; the lockstep
+    takes the native's mask (its world list, with prctl's answer: PR_SET_VMA is EINVAL on a kernel without CONFIG_ANON_VMA_NAME).
+  - **THP placement**: a private anonymous mmap of a multiple of 2 MiB with no hint is 2 MiB-aligned (Linux 6.7 on with
+    transparent huge pages configured: __get_unmapped_area's THP case, a gap of the size plus 2 MiB searched top-down and its
+    highest aligned address taken; `thpTopDown`). Go's heap reservations (32 MiB, 64 MiB, 512 MiB) are such mappings: system call
+    11 returned 0xfffff769a000 where the native's was 0xfffff7600000.
+  - **mmap's hint limit** was x86-64's stack area on arm64 too (0x7ffffffff000 less 8 MiB), so every hint in arm64's mmap area was
+    refused; now the kernel's `StackLow`, each architecture's.
+  - **The lockstep's end at the first thread**: a clone with CLONE_THREAD ends it, every system call and stop before it compared:
+    ptrace follows the traced thread alone and the native's threads run in its scheduler's order. The verdict `EQUAL TO THE FIRST
+    THREAD` (the trace's status 3); `a64i check` takes a header's `# lockstep: first-thread` as the expected one. Arbace's start is
+    followed to its first clone: about 158 system calls and 5.7 M instructions, sys mode 6 s, step mode 30 s (2.96 M stepped, 71
+    exclusive regions); a Go program's (go-check's hello) 158 calls, 222 K instructions.
+  - **Inherited SIG_IGN**: a64i's guest started with every disposition SIG_DFL; the lockstep's native, forked from a64i, inherits
+    an ignored SIGINT (a shell's background job), so Go's initsig skipped it natively and not on a64i (rt_sigaction(2) against (3)
+    at system call 47). The guest's dispositions now start with the signals a64i's own process ignores (os/signal.Ignored: Go's
+    runtime keeps an inherited SIG_IGN of SIGHUP and SIGINT; a SIGQUIT or SIGTERM ignored before a64i started is lost to Go's own
+    handlers).
+  - Tests `linux-sched-getaffinity.s`, `linux-mmap-thp.s` and `linux-thread.s` (test/asm/a64i/, essential); controls verdict-42..44,
+    cpu-9, thread-1 and thread-2 (a new kind: a program's lockstep judged by another's `# lockstep:` statement).
+- **`bin/a64i arbace-check`** (test/asm/a64i-arbace/, `make a64i-arbace-check`; arm64 hosts): the three runs (e, repl, ns) of
+  A64I_ARBACE_EXE, else ARBACE_HOST_EXE, else stage 0, natively and on a64i in one environment, a64i's status, stdout and stderr
+  the native's, the native's stdout `NAME.want` (repl's less the banner, which names the version; `--record`), the lockstep's sys
+  mode EQUAL TO THE FIRST THREAD; controls arbace-1 (e's a64i run against repl's native run), arbace-2 (ns's against a native run
+  with another argument), arbace-3 (e's native stdout against repl.want), arbace-4 (e's lockstep judged as a whole run's): fail as
+  they must. 94 s for e and repl, 192 s for ns at load 17 (ns 1,438 M instructions in 185 s).
+
+### Proposed (AR25)
+
+Numbering from ARS96. Each with options, the recommended named; none taken.
+
+- **ARS96 where arbace-check runs.** Three a64i runs of Arbace (e 1 min, repl 1.5 min, ns 2-3 min), the reference this arm64
+  CPU's run; an a64i of Arbace peaks at 2.6 GiB (e; the guest's heap and the 195 MB executable's pages), the lockstep at 2.4 GiB.
+  (a) a `--full` step `a64i-arbace` in chain asm-arm64-full on arm64 hosts, `--jobs 1` (about 5-6 minutes, `:mem-gib 3`), its
+  inputs test/asm/a64i-arbace/, go/arbace/{emu,a64i,crt}, the driver and the executable's bytes (stage 0's: a re-seed reruns it)
+  (recommended: Arbace's own executable judged nightly as the user's programs are, light in memory); (b) the same at 3 jobs (about
+  3 minutes, `:mem-gib 8`); (c) `--only e` essential on arm64 hosts (1 minute, 3 GiB: Arbace's start and its lockstep on every
+  change to a64i) and the whole in `--full`.

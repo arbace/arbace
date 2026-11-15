@@ -25,7 +25,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
-  a64i-light a64i-run a64i-trace a64i-check a64i-record a64i-table-check a64i-go-check a64i-go-tools a64i-go-compile a64i-goroot-check \
+  a64i-light a64i-run a64i-trace a64i-check a64i-record a64i-table-check a64i-go-check a64i-go-tools a64i-go-compile a64i-goroot-check a64i-arbace-check \
   x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
   repr-rust-native-check \
   repr-rust-native-errors \
@@ -602,6 +602,8 @@ a64i-go-compile: ## cmd/compile, cmd/asm, cmd/pack and cmd/link (test/asm/a64i-g
 	bin/a64i go-check --tools compile
 a64i-goroot-check: ## goi's GOROOT/test corpus (its linux record's run, rundir, buildrundir and runindir programs) built for linux/arm64 and run on this arm64 CPU and on a64i, a64i's run equal to the CPU's and the CPU's the golden .out (bin/a64i goroot-check; AR24)
 	bin/a64i goroot-check
+a64i-arbace-check: ## Arbace's own linux/arm64 executable (stage 0) on a64i: -e '(+ 1 2)', a REPL session and a namespace load, each equal to this arm64 CPU's run byte for byte, its lockstep equal to the first thread (bin/a64i arbace-check; AR25)
+	bin/a64i arbace-check
 x86i-light: ## x86i, the x86-64 integer machine (AX5.2): its light driver built alone by TamaGo's go into .tmp/x86i/x86i (bin/repr-asm x86i light)
 	bin/repr-asm x86i light
 x86i-run: ## a static x86-64 executable run on x86i: its status, or 128 + the signal (bin/repr-asm x86i run EXE [ARG...]; EXE=..., ARGS=...)

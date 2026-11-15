@@ -13,6 +13,7 @@
     ^{:line 13 :tag uint64} BrkBase
     ^{:line 14 :tag uint64} Brk
     ^{:line 15 :tag uint64} MmapNext ; the top of mmap's area (topDown)
+    ^{:tag uint64} StackLow ; the stack's area's bottom: mmap's hint is taken below it (queue 302: arm64's, not x86-64's)
     ^{:tag (slice (* sharedMap))} shared
     ^{:tag (map uint64 bool)} anonShared)) ; the pages of shared anonymous mappings (AR24: madvise's MADV_DONTNEED keeps them)
 
@@ -38,14 +39,17 @@ as last read from or written to the file, against which writeBack finds the page
   ^{:line 23} [^{:val 19} eNODEV 19]
   ^{:line 24} [^{:val 9} eBADF 9]
   [^{:val 13} eACCES 13]
+  [^{:val 3} eSRCH 3]
+  [^{:val 14} eFAULT 14]
   [^{:val 27} eFBIG 27]
   [^{:val 95} eOPNOTSUPP 95]
-  [^{:val 1073741824} sharedFdBase 0x40000000]) ; a shared mapping's own descriptor: fcntl F_DUPFD's lowest
+  [^{:val 1073741824} sharedFdBase 0x40000000] ; a shared mapping's own descriptor: fcntl F_DUPFD's lowest
+  [^{:tag uint64 :val 2097152} pmdSize 0x200000]) ; the PMD's span, a transparent huge page (thpTopDown)
 
 
 
 ^{:go/end 30} (go/func NewKernel "NewKernel is the kernel of the program in a, its break from img.\n" ^{:tag (* Kernel)} [^{:tag (* AS)} a ^{:tag (* Image)} img ^{:tag (* crt/Sys)} sys]
-  (addr (lit Kernel :AS a :Sys sys :BrkBase (.-BrkBase img) :Brk (.-BrkBase img) :MmapNext (- MmapTop VdsoSize))))
+  (addr (lit Kernel :AS a :Sys sys :BrkBase (.-BrkBase img) :Brk (.-BrkBase img) :MmapNext (- MmapTop VdsoSize) :StackLow (- StackTop StackSize))))
 
 
 ^{:go/end 32} (go/func pageUp ^uint64 [^uint64 n] (bit-and-not (+ n pageMask) pageMask))
@@ -122,6 +126,8 @@ as last read from or written to the file, against which writeBack finds the page
         (return (.passthru k 83 a2 a3 0 0 0 0)))
 
       (return (- eNOSYS) nil))
+    (case [204] ; sched_getaffinity (queue 302: Go's runtime, its CPU count at start and its GOMAXPROCS update each second)
+      (return (.affinity k a1 a2 a3) nil))
     (case [285] ; fallocate (AR23)
       (return (.fallocate k a1 a2 a3 a4) nil))
     (case [10] ; mprotect
@@ -153,11 +159,13 @@ as last read from or written to the file, against which writeBack finds the page
   (.passthru k n a1 a2 a3 a4 a5 a6))
 
 
-(go/method MapAnon "MapAnon maps size bytes (page-aligned) of zeros with prot (mmap's) as mmap does under flags: at addr with MAP_FIXED, else\nat addr when it is free and below the stack's area, else where Linux's top-down search puts it (topDown); the address.\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags]
+(go/method MapAnon "MapAnon maps size bytes (page-aligned) of zeros with prot (mmap's) as mmap does under flags: at addr with MAP_FIXED, else\nat addr when it is free and below the stack's area (StackLow), else where Linux's top-down search puts it (topDown; a private\nmapping of a multiple of 2 MiB with no hint 2 MiB-aligned, thpTopDown); the address.\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags]
   (cond (!= (bit-and flags 0x10) 0) (do ; MAP_FIXED: what it replaces unmapped as munmap does (AR23)
       (.release k addr size)
       (.Unmap (.-AS k) addr size))
-    (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (- StackTop StackSize)))
+    (and (== addr 0) (== (bit-and flags 3) 2) (== (bit-and size (- pmdSize 1)) 0)) ; queue 302: private, no hint, PMD-sized
+    (set! addr (.thpTopDown k size))
+    (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (.-StackLow k)))
     (set! addr (.topDown k size)))
 
   (.Map (.-AS k) addr size (protPerm prot) "mmap")
@@ -171,6 +179,19 @@ as last read from or written to the file, against which writeBack finds the page
         (set! a (- p size))))
 
     a))
+
+
+(go/method thpTopDown "thpTopDown is the address of a private anonymous mapping of size bytes, a multiple of the PMD's 2 MiB, mapped with no
+hint (queue 302: Go's heap arenas and its 32 MiB and 64 MiB reservations): Linux (6.7 on, with transparent huge pages configured;
+__get_unmapped_area's THP case, __thp_get_unmapped_area) searches a gap of size plus 2 MiB top-down (topDown) and returns its
+highest 2 MiB-aligned address that holds size bytes: the gap's start rounded up to 2 MiB, or 2 MiB above it when it is aligned.
+" ^uint64 [^{:tag (* Kernel)} k ^uint64 size]
+  (let [r (.topDown k (+ size pmdSize))
+        sub (bit-and (- r) (- pmdSize 1))]
+    (when (== sub 0)
+      (return (+ r pmdSize)))
+
+    (+ r sub)))
 
 
 (go/method fileMap "fileMap is mmap of a file's descriptor fd (AR22, queue 294: cmd/compile's export data, cmd/internal/bio's and\nbase.MapFile's MAP_SHARED PROT_READ mappings): Linux's checks in its order (an offset not page-aligned EINVAL, the descriptor\nEBADF, no mapping type EINVAL, a descriptor not open for reading, or a shared writable mapping of one not open for writing,\nEACCES, not a regular file ENODEV), then MapAnon's pages with the file's bytes from off read in by crt's pread64, to the file's\nend (the rest zero). The mapping is a copy: a shared one does not see later writes to the file, and the pages past the file's\nend read as zeros where Linux raises SIGBUS. A shared one is recorded (share, AR23, queue 295): its changed pages written back\nto the file at msync, munmap and the process's end (End), as Linux's page cache keeps them.\n" [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags ^uint64 fd ^uint64 off] :results [^int64 ret ^{:tag (* Exited)} exit]
@@ -516,6 +537,25 @@ anonymous (markAnon) or a file's, keep their bytes, as Linux's shared memory and
             (clear b))))))
 
   0)
+
+
+(go/method affinity "affinity is sched_getaffinity(pid, len, mask) (queue 302: Go's runtime counts its CPUs by it at start, getproccount, and
+its GOMAXPROCS update asks it again each second): the machine is one CPU, CPU 0, one thread running at a time, so the mask is the
+word 1. Linux's order: len*8 below the CPU count or not a multiple of the word's size EINVAL, a pid that names no task (a
+negative one) ESRCH, the mask's word written (min(len, 8) bytes, Linux's cpumask_size for one CPU) or EFAULT; the result is the
+bytes written. The kernel holds one process and knows no ids (the CPU's layer does), so every pid >= 0 is the process's.
+" ^int64 [^{:tag (* Kernel)} k ^uint64 pid ^uint64 n ^uint64 mask]
+  (let [size (conv uint32 n)]
+    (when (or (< (* (conv uint64 size) 8) 1) (!= (bit-and size 7) 0))
+      (return (- eINVAL)))
+
+    (when (< (conv int32 pid) 0)
+      (return (- eSRCH)))
+
+    (when (not (.Write (.-AS k) mask 8 1))
+      (return (- eFAULT)))
+
+    8))
 
 
 (go/method markAnon "markAnon records [base, base+size) as pages of a shared anonymous mapping (on), or as not (off: another mapping or none
