@@ -7558,6 +7558,7 @@ cppi gets a memory cap of its own under a CPU-time limit, not only the programs 
   change: the program built from 13e's tree (next's `.tmp/cppi-check/nodes`) still segfaults in `_ZL4worki` under the new limits,
   and the branch's own build aborts under the old limit as well (three runs of each); its nodes come from next's newer C++ front end
   (cpp-s14, cpp-s15, merged after 13e, the `ours` route). Left to C++'s owners: tonight's cpp-check.samples-runtime fails on it.
+
 ## 2026-11-15: HF10-P54 (a) built (branch `hs-p54`, from `mac/hs-p48` 5a19578e8)
 
 By an agent (one run at a time, each process under 1.4 GiB; stage 0; no GHC, no network, no gate run). HF10-P54 (a), the 18 gaps
