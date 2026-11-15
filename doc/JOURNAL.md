@@ -7618,3 +7618,102 @@ Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P54".
   (`:thread-exceptions`, now without a member: CP396 proposed, (b) keep it until the weekly AOT runtime part confirms). The record run's
   nodes-list peaked 5.7 GB (3 threads, 6 GiB, the evaluated builder): CP397 proposed (cpp-check with the essential's `CPPI_THREADS=2
   CPPI_CI_MEMLIMIT=2GiB`). The watcher was raised from 2.5 to 6.5 GB for the record run (MemAvailable stayed above 37 GB): a rule slip, said.
+
+## 2026-11-15: B1 of the consolidation plan, the key-window batch (branch `b1-1115`, from `mac/next` `e298bf3d8`)
+
+The plan `.tmp/consolidation-plan-1115.md` §B1, with the order and U1-U6 (a) the user decided on 2026-11-15. Each unit a `git merge
+--no-ff` or a cherry-pick, in this order, `test/gate/gate-key-crops-test.bash` passing after each.
+
+1. `mac/gate-gd4` (f6d369f62, with gate-gd23: GD2-GD4). Conflicts: `test/gate/steps.edn` (llvmi-aot: GD3's `:phase :weekly` with
+   next's `:needs [llvmi-check cpp-runtime]`), the journal (both sides, in date order). Round 33's answers to gate-gd23's Q1-Q6, GDS14 (a)
+   and GD4's three W items ("at W") recorded in doc/GATE-DIET-SURVEY.md's new "Decided after GD2-GD4".
+2. `mac/gate-gts` (701f75dc2). `bin/lib/gate-run.bash`'s two conflicts resolved to keep both: in `run_one`, GTS-A's wait for a need of
+   another chain first, then GD4's "a need deferred for the disk defers its dependant" (so a cross-chain need is judged once done); in
+   `report`, GD4's `deferred` and GTS-A's `notrun X: why` cases side by side. AGENDA and journal: both. The merge's semantic fault:
+   needs-wait-test wrote plan.tsv rows without GD4's DECLARED and DISK columns, so the command landed in DECLARED and every made-up step
+   passed ("a need that fails" failed, 10 of 11); fixed (2509a641c), 11 of 11. disk-policy, chain-needs, admit, plan-logic, lanes (51)
+   pass on the merge.
+3. `mac/c-py1` (24c55f93c). Conflicts: C23-SURVEY and the journal (both), `test/reap/matrix.edn` and `test/crops/scores.edn`
+   regenerated, not merged. `bin/reap` found 3 problems: gate-gts's review 1113 finding 2 (a results row recorded :known that the known
+   file does not list). 262 of them were a false report: the parse check's "pp-known" rows, listed in pp-check-known.edn; fixed in
+   `c-results-problems` (329d2a369). The other 36 are stale records: annot-results' pr33855.c and pr54559.c (entries night 13's triage
+   removed) and 34 roundtrip-results rows (torture-execute 15, gcc-bitint 12, tcc-tests2 2, torture-compile 2, benchmarksgame,
+   torture-execute-mirror, zlib), whose entries were removed by fixes (808d08d60, CS274) after the record. They need the whole C runs'
+   `--record` (`--only` refuses `--record`), by hand at night. As gate-gts did, the matrix was recorded with that one check turned off
+   for the one run (`bin/reap --record`, then `bin/crops-score --record`, `--judge --strict` 0); `bin/reap` itself fails on the 36
+   until they are re-recorded.
+4. review-fix-2's goi commits, cherry-picked: aabb45df8 -> e0be24e71, 6542d2a11 -> 2e59f0e17; the GOI-SPEC note of b6345ae2d alone
+   (fdf4d66c2).
+5. wasm-wa8 (1265c602e): conflicts the journal (its entries placed by date) and the matrix (recorded again, as in 3). Its fragment
+   `test/gate/crops/wasm.edn` spliced into steps.edn (`gate.crops splice`: 6 groups, 11 steps, the crop's entry, 12 controls);
+   `gate.crops check` 0 problems; `bin/reap` 53 of 56 cells checked.
+6. New: the CPU hosts (doc/GATE-SURVEY.md, "As built: the CPU hosts, :arm64"). A `:host-ids` recipe's `[:arch NAME...]` item (`:arm64
+   [[:arch "aarch64" "arm64"]]`) has identity none on another CPU, and `gate.plan/cpu-hosts` makes a step on it absent in every phase,
+   as the oracle tier's absent hosts work: no key, no run, no failure, never a pass. The fixture step `arm64-host`, which fails if it
+   ever runs off arm64, and `test/gate/arm64-host-test.bash` (13 checks with their controls; 5 fail with the rule turned off).
+   Considered: writing `:arm64` in plan_inputs' fixed hosts (the tests' made-up hosts.edn would all need it), or a planner-side
+   `uname` (the planner reads hosts.edn only). Queue 301's step is not here: on merge it declares `:arm64` and drops its `case`.
+
+Keys (gate_key's first 20, runtime 16, javac 16, epoch):
+
+| after | head | gate_key | runtime | javac | epoch |
+|---|---|---|---|---|---|
+| next | e298bf3d8 | 66c29674829ea3c6e486 | 7cebcc75beef87c7 | 09cfb08baf252509 | none |
+| 1 gd4 | aa001cf4c | 66c29674829ea3c6e486 | = | ce8cf528e82f95a3 | 2 |
+| 2 gts | da74b0008 | 122e1784175f0321b258 | = | 3b5fccd77bae4b4a | 2 |
+| 3 c-py1 | 2509a641c | 7b5f6b941d441929b0d3 | = | c8941b15455cf092 | 2 |
+| 4 goi picks | fdf4d66c2 | 74e2600f12ec23cbff8f | = | aec9b1af2df8a572 | 2 |
+| 5 wasm | 5d118383b | d2d5d5cf336360bd7e55 | = | eb74caf25140dc37 | 2 |
+| 6 :arm64 | 06c5998e0 | d2d5d5cf336360bd7e55 | = | eb74caf25140dc37 | 2 |
+| 7 revisit | 168e75687 | 4bec7e1b1160cf0cc13e | = | 7346f4d70d349475 | 2 |
+| 8 goi retry, hsi | 59b3ad30b | ac3b447b458361b34e7e | = | f70d1a9d900eb07a | 2 |
+| 9 revisit again, hs-p54 | f5ad46ea2 | ac3b447b458361b34e7e | = | f70d1a9d900eb07a | 2 |
+| 10 cpp-threads | 660731adf | ac3b447b458361b34e7e | = | f70d1a9d900eb07a | 2 |
+
+7. `mac/revisit-1115` (4398943f5, the main session's): gate 13e's fixes, review 300's medium findings, a failed image prepare
+   failing the build (730f59621), crops-test's chain expectation. Conflicts: steps.edn's gate-tests inputs (GD4's `bin/gate-policy`
+   with revisit's prepare-fail-test reads) and `test/c/musl-lock-test.bash` (GD4's shared-copy case 4 and review 300's two lock cases,
+   renumbered 5 and 6; not run here: it reads musl through repr/c, a night command). crops-test passes after it.
+8. `.tmp/night13/revisit-1115-goi-retry.patch` (review 300's low finding 6) as its own commit, 7a6fab130 (bin/goi: GOI_RETRY_MAX,
+   the retry-passed summary; test/goi/retry-test.bash 3 of 3). Then the user's item: hsi-check `:start-after haskell-lib-stg-own`
+   (its and hsi-check-aot's `:uses` are haskell-lib's own libraries, another chain: a race under `--concurrent`; hsi-check-aot keeps
+   `:start-after hsi-check`, after the producers by transitivity, as `:start-after` names one step). `test/gate/chain-needs-test.bash`
+   extended from `:needs` to `:uses`, the chain's wait transitive, with the control (a `:uses` of another chain with no wait is
+   flagged; on steps.edn before the fix it named hsi-check's and hsi-check-aot's five producers each): 5 of 5.
+
+9. The essential gate on 59b3ad30b (111m51s: the executables 16m53s at 20.0 GiB, cpp-runtime's first build in this worktree
+   42m30s at 6.6 GiB, over its declared 3, and musl's forms read again under the gate, ~20 min, because c-py1 changed repr/c,
+   which the plan had said to read by day) failed on five steps, four of them from the merge, fixed in ee94b98ae:
+   - caches-table: wasm's `.tmp` names, given rows in `test/gate/caches.edn`;
+   - records-check: five of GD4's accepted roundtrip rows are no longer problems, since GTS-B restored them as `:time-dependent`,
+     so `test/records/accepted.edn` is drained to 36;
+   - reap: gate-gts's unlisted check and GD4's accepted list name the same 36 rows; reap now passes over the rows accepted there,
+     with one list to drain, and the step declares the file;
+   - crops-score: not run, because it needs reap.
+   The fifth, suite-aot-essential, was not the merge's fault. Go's build cache lost entries during its build ("could not import
+   strings (open /root/.cache/go-build/...: no such file)") while other agents' builds ran. It passed on the rerun. Then
+   `mac/revisit-1115` again (3d0cae3c1: cppi's per-run caps for every cirun program) and `mac/hs-p54` (02088dfd1, P54; the journal
+   kept both). The keyed essential gate on f5ad46ea2 passed (19m29s; 13 run, 50 skipped).
+10. `mac/cpp-threads` (08fbc5a1c: cppi's C steps under `c_ci_fresh`, runtime/threads.cpp passing). Conflicts: `bin/cppi`,
+    `bin/lib/cppi/{check,check-aot,run}`. Each kept GD4's `GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-$(bin/gate-policy mem 6GiB)}` and added
+    cpp-threads' `cppi_ci` prefix. CP397 (a): the gate's cpp-check runs with `CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB` and `:mem-gib 6`
+    (it was 8 and 4GiB, with a recorded peak of 5.1 GiB), in steps.edn and in the fragment. The fragment is not spliced again,
+    because its other lines have drifted from steps.edn's since batch 1 and a splice would add the step a second time.
+    `gate.crops check` reports 0 problems; reap, crops-score and records-check pass.
+
+So gate_key moved at 2 (gate-gts' `arbace/repr/c/rtcheck.ae`, which the plan had foreseen) and at 3-5, 7 (revisit's bin/arbace-go and bin/lib/program.bash) and 8 (bin/goi), not at 6. Step 6 touches only
+the planner, bin/gate's host functions, crops.ae and steps.edn, and none of these is in gate_key. The runtime key never moved; the
+javac key moved at every step (it takes `bin/lib` whole). The epoch went from none to 2 at step 1.
+
+`bin/gate --loads-update` made the same `test/gate/loads.edn` (235 closures): no change. `bin/gate --full --concurrent --plan` exits 0
+(354 steps, 1 absent: arm64-host). Before the revisit merge, crops-test failed ("steps.edn's chains": haskell-lib is no longer among the
+concurrent chains). It failed the same way on next's own steps.edn, so it came from next and not from this batch. revisit's 19d7d13c0
+fixes it. The first essential gate on 06c5998e0 was stopped in its build (19:05) to take in the revisit merge, and was run again on the
+merged head.
+
+The keyed essential gate on 660731adf passed in 28m26s. It ran reap, crops-score, caches-table, the four C++ essentials and a canary;
+the rest was skipped at their passes from 59b3ad30b and f5ad46ea2. gate_key is ac3b447b4583, and the executables are in
+`.tmp/gate-exe/ac3b447b458361b34e7e`. The epoch is 2. Left open: C's 36 stale rows (annot 2, roundtrip 34) await the whole runs'
+`--record` (by hand; `--only` refuses it), after which `test/records/accepted.edn` drains. The `--full` is the main session's, at night.
+Considered: hand-merging matrix.edn and scores.edn, which the plan forbids; re-recording the 36 rows without a run, which would be
+fabrication; re-splicing cpp.edn whole, which would duplicate steps.
