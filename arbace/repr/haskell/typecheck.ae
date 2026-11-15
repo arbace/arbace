@@ -1116,20 +1116,21 @@
   those another more specific one overlaps are pruned (pruneOverlappedMatches: the program was accepted, so the overlap
   is allowed), the first left; none when ts has metas and an instance that does not match unifies with it (its choice
   waits for them: Note [Overlapping instances])"
-  [c ts]
+  ([c ts] (inst-candidate c ts true))
+  ([c ts wait?]
   (let [is (insts-of c)
         ms (vec (keep (fn [i] (when-let [m (head-match i ts)] [i m])) is))]
     (when (seq ms)
       (let [spec? (fn [a b] (some? (head-match b (second (:head a))))) ; a's head an instance of b's
             pruned (if (= 1 (count ms)) ms
                        (filterv (fn [[a _]] (not-any? (fn [[b _]] (and (not (identical? a b)) (spec? b a) (not (spec? a b)))) ms)) ms))
-            metas? (some #(seq (metas-of %)) ts)]
+            metas? (and wait? (some #(seq (metas-of %)) ts))]
         (when-not (and metas?
                        (let [mset (set (map first ms))]
                          (some (fn [i] (and (not (contains? mset i))
                                             (inst-unify (set (:tvs i)) {} [:tc :h (second (:head i))] [:tc :h (vec ts)])))
                                is)))
-          (first pruned))))))
+          (first pruned)))))))
 
 (defn- solve-ctx
   "An instance's context [pred...] solved together (GHC's solver works on the wanteds as a set): each round every
@@ -3321,11 +3322,15 @@
 (defn- reduce-by-instance
   "The instance whose head matches pred: [dfun [sub-pred...]], nil when none"
   [[c ts]]
-  (some (fn [{:keys [dfun tvs ctx head]}]
-          (when (= (first head) c)
-            (when-let [m (reduce (fn [m [p t]] (match-ty (set tvs) m p t)) {} (map vector (second head) ts))]
-              [dfun (mapv (fn [[pc pts]] [pc (mapv #(subst m %) pts)]) ctx)])))
-        (insts-of c)))
+  ;; HF10-P54 (a): as the solver chooses (inst-candidate): a class with functional dependencies improved from the
+  ;; instances first, an overlapped instance pruned (T5759's Num (Cont Integer) by instance (Container a b, ...) => Num
+  ;; a), and the instance's variables its head does not bind fresh metas (its context's b, which Container's
+  ;; dependency then fixes), not left rigid; the choice not deferred for the metas (the generalization's simplification)
+  (when (seq (some-> *classes* deref (get c) :fundeps)) (improve-one! [c ts]))
+  (let [ts (second (zonk-pred [c ts]))]
+    (when-let [[{:keys [dfun tvs ctx]} m] (inst-candidate c ts false)]
+      (let [m (into (into {} (map (fn [v] [v (fresh-meta)]) (remove #(contains? m %) tvs))) m)]
+        [dfun (mapv (fn [[pc pts]] [pc (mapv #(subst m %) pts)]) ctx)]))))
 
 (def ^:dynamic *self-givens* nil) ; an instance's own dictionary and its superclasses, for its methods
 
@@ -3336,7 +3341,11 @@
   constraint the instances solve to a dictionary variable is solved so, else by the instance's own dictionary's
   superclasses when they give it (as GHC's solver chose on the corpora)"
   [wanteds givens]
-  (doseq [w0 wanteds]
+  ;; HF10-P54 (a): in rounds, until one solves nothing: a wanted solved later in the list may improve an earlier one
+  ;; (P54fd's Integral ?e before Coll c ?e, whose given's functional dependency gives ?e := e); the left deferred in
+  ;; their order
+  (loop [ws wanteds]
+  (let [left (filterv (fn [w0]
     (if-let [term (let [solve (fn [] (under-givens w0 (fn [w]
                                         (let [t (solve-pred (:pred w) givens 0)]
                                           (if (and *self-givens* (not (and (seq? t) (contains? '#{v lv} (first t)))))
@@ -3348,8 +3357,12 @@
                         (when (and *deferred-eqs* (some #(= :mv (first (prune %))) (second (zonk-pred (:pred w0))))
                                    (loop [k 0 any false] (if (and (< k 4) (invert-families! [(:pred w0)])) (recur (inc k) true) any)))
                           (solve))))]
-      (swap! *evidence* assoc (:ev w0) term)
-      (swap! *wanteds* conj w0))))
+      (do (swap! *evidence* assoc (:ev w0) term) false)
+      true))
+                      ws)]
+    (if (and (seq left) (< (count left) (count ws)))
+      (recur left)
+      (doseq [w0 left] (swap! *wanteds* conj w0))))))
 
 (defn- core-name [top? n] (if top? n (lv n)))
 (defn- bind-core [top? n] (if (and top? (ext? n)) n (lv n)))
@@ -4164,6 +4177,8 @@
           :desc (assoc (:desc info) :var (last (:names info))) :stock? (if kw (= kw :stock) (contains? deriv/generators (occ cls))) :standalone? true
           :strat kw :anyclass? (= kw :anyclass) :via (when via (nth (sig-type via) 3)) :dnames (:names info)})))
 
+(declare head-occs)
+
 (defn- derive-all!
   "The derived instances of the module (deriving clauses and standalone declarations): their heads entered, the
   contexts inferred by fixpoint, their bindings generated; the newtype strategy for a newtype's Eq, Ord, Ix, Bounded
@@ -4183,7 +4198,13 @@
                              r))
                    @*derivs*)
         reqs (into reqs (standalone-requests decls))
-        dfun (fn [r] (ext-name "var" m (str "$f" (occ (:cls r)) (occ (:tn r)))))
+        ;; HF10-P54 (a): a multi-parameter class's derived instance named by every argument of its head (newDFunName's
+        ;; getDFunTyKey of each: P54gnd's Conv Bool Age and Conv [y] Age, $fConvBoolAge and $fConvListAge, not one
+        ;; $fConvAge for both)
+        dfun (fn [r] (ext-name "var" m (if (next (:ts r))
+                                         (str "$f" (occ (:cls r))
+                                              (head-occs (:ts r) (into {} (map (fn [n] [n (first (str/split n #"_"))]) (:tvs r)))))
+                                         (str "$f" (occ (:cls r)) (occ (:tn r))))))
         rep-of (fn [r]
                  (let [t (first (:tys (first (:cons (:desc r)))))
                        t (if (:ctor? r)
@@ -4771,8 +4792,10 @@
         (and (seq? (nth c 2)) (= 'olit (first (nth c 2))) (= :str (second (nth c 2))) (= (deep-expand t) (list-ty (con-ty tc-char))))
         (list 'plit (resolve-core (nth c 2)))
         :else
+      ;; (an overloaded string at another type keeps its (==): T3382's "hello" at Int, its IsString Int's fromString)
       (if (and (= :tc (first t)) (contains? #{"Int" "Word" "Char" "Double" "Float"} (occ (second t)))
-               (contains? #{"GHC.Internal.Types"} (nmod (second t))))
+               (contains? #{"GHC.Internal.Types"} (nmod (second t)))
+               (not (and (seq? (nth c 2)) (= 'olit (first (nth c 2))) (= :str (second (nth c 2))))))
         (let [l (nth c 2)]
           ;; HF10-P20: at Word the literal W# n## (tidyNPat's mb_int_lit at wordTy; lit-core folds no Word literal,
           ;; GHC's expressions keep fromInteger there: Num Word's `signum 0 = 0` matched nothing)
