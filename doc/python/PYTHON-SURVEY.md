@@ -6828,3 +6828,29 @@ GOGC=50 PYI_AOT_LIB_JOBS=4 PYI_LIB_TEST_JOBS=4 PYI_AOT_LIB_BATCH=40 \
   (`.tmp/q293/t/`, against python3 3.14.10, a mutated reference the control; base FAIL, head PASS): the events around
   _pyio (pb), compile and FunctionType as the asyncio console uses them (pc), test_skip, test_method_with_c_function and
   settrace's test_reentrancy (ptf), test_repl's three (prr); the replaced hooks' `__del__` compiled (pe).
+
+## As built: 296, a _remote_debugging of pyi's own (2026-11-15, the Mac VM, queue 296; 293's DECISION 1 (a))
+
+293 found `python -m asyncio` stopping at asyncio.tools's `from _remote_debugging import RemoteUnwinder, FrameInfo`
+(test_repl's eight asyncio rows in `:remote-debugging`; test_asyncio.test_tools and test_external_inspection did not import).
+
+- **The module** (`go/arbace/py/builtins_remote_debugging.go`; CPython 3.14.10's Modules/_remote_debugging_module.c and
+  Python/remote_debug.h read for behaviour): the five struct sequences TaskInfo, FrameInfo, CoroInfo, ThreadInfo and
+  AwaitedInfo with CPython's fields and docs, `PROCESS_VM_READV_SUPPORTED` 0, and `RemoteUnwinder(pid, *, all_threads=False,
+  only_active_thread=False, debug=False)` with clinic's argument errors and `__init__`'s ValueError (all_threads with
+  only_active_thread), then failing as CPython's Linux search fails on a process that holds no PyRuntime section: an
+  unreadable `/proc/PID/maps` is its errno's OSError with the "Cannot open process memory map file" OSError raised from it,
+  then RuntimeError "Failed to find the PyRuntime section in process PID on Linux platform" (context: that OSError), and
+  under `debug=True` "Failed to get Python runtime address" raised from it. Its methods get_stack_trace,
+  get_all_awaited_by and get_async_stack_trace exist; no instance reaches them attached.
+- **Left out**: reading a process's frames. Another pyi's frames are Go's, with no PyRuntime section or debug offsets;
+  a CPython's would need its `_Py_DebugOffsets` read through /proc/PID/mem (`PROCESS_VM_READV_SUPPORTED` 0 keeps
+  test_external_inspection's Linux readers skipped). A larger unwinder over pyi's own frames is 293's option (c).
+- **sys.flags from the command line**: `-q` sets `quiet`, `-E` and `-I` `ignore_environment`, `-I` `isolated` (bin/pyi
+  python's `PYI_START_FLAGS`, read once by the runtime's `startFlag`): asyncio's REPL reads quiet for its banner and
+  ignore_environment before running PYTHONSTARTUP (test_quiet_mode, test_asyncio_repl_respects_isolated_mode).
+- Rows (the VM's runs, judged): test_repl 7 pass -> 14 (the asyncio REPL's seven; test_asyncio_repl_is_ok, a pty
+  session, joins `:repl-console`: the start on a pty past its 30 s); test_asyncio.test_tools 22 in `:remote-debugging`
+  (no import) -> 22 pass; test_external_inspection 25 skipped at import -> 23 in `:remote-debugging` (18 skips on
+  PROCESS_VM_READV_SUPPORTED, 5 that unwind a pyi child) and 2 free-threading skips equal to CPython's; test_cmd_line's
+  test_isolatedmode passes (out of `:pyi-command-line`); test_utf8_mode and test_faulthandler unchanged.
