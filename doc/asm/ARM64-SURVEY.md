@@ -2751,3 +2751,45 @@ a64i-go-compile (d6432df30): its fragment in test/gate/crops/asm.edn, spliced in
 - Checked on the VM: `gate.crops check` 0 problems, `gate-key-crops-test` PASS, `crops-test` ok, `make check-makefile` ok. `bin/gate
   --plan` needs a stage 0 this VM lacks for the seed: on the main host `bin/gate --full --plan` should list a64i-goroot in
   asm-arm64-full.
+
+## As built: the exclusive monitor across threads (2026-11-15; branch `308-asm-arm64-monitor`, from `301-asm-arm64-goroot-step` `88ba2c365`; queue task 308, review 306's F1, the Mac VM)
+
+- **The fault.** a64i's monitor (CPU.exclValid, exclAddr, exclSize) was per thread and cleared only by the thread's own store, clrex
+  and a signal's delivery or return. A thread's ldxr, the quantum's end, the other thread's store to the word, then the first
+  thread's stxr passed with its stale value: review 306's probes, ldxr/stxr from two pthreads 500,282 of 600,000 and musl's
+  pthread_mutex 347,118 of 400,000 (natively exact). Go's programs escaped it: Go's runtime takes LSE when AT_HWCAP has ATOMICS.
+- **The fix, as the architecture specifies.** An exception's return clears the local monitor (the Arm ARM, B2.9.5: so a context
+  switch needs no clrex). a64i's exceptions are the system call (CPU.svc) and the quantum's end, the timer interrupt (thread.go's
+  run, every 4,096 instructions of a threaded program); both call CPU.clearMonitor. One thread runs at a time and the baton passes
+  only at these two points (crt's Sched: futex, nanosleep, sched_yield, epoll_pwait, exit, and the quantum's Yield), so another
+  thread's store to a marked granule always follows the marking thread's clear: the global monitor's effect, with no per-granule
+  table. clone copies the CPU inside svc, after the clear, so a new thread starts with its monitor clear. The injected fault `m`
+  (A64I_INJECT=FAMILY:m) keeps the monitor, as before: the controls.
+- **The other atomic paths, checked.** LSE's LD<op>, ST<op>, SWP and CAS and CASP (exec.go's atomic, atomicPair) read, compute and
+  write in one Step, never split by the baton: atomic as they were (thread-sync's casal, caspal and swpa sections exact before the
+  fix too). The futex: futexWait compares the word and blocks with no baton pass between, futexWake runs under the baton; the
+  CLONE_CHILD_CLEARTID word is cleared and woken by the ending thread. A signal's delivery and rt_sigreturn cleared the monitor already.
+  x86i has no monitor (its lock-prefixed atomics are single instructions).
+- **The lockstep and threads.** It follows one native thread (AR19's rule): at a clone(2) with CLONE_THREAD it now stops, everything
+  before compared equal (`a64i trace MODE: THREADS: ...`, LockstepResult.Threads), judged :lockstep-threads (test/asm/divergences-a64i.edn,
+  by design) where it was a DIFF at clone's result. A threaded program is judged by its verdict at eval and AOT and against the CPU's run.
+- **Programs** (test/asm/a64i/, in the essential subset; lib/thread.s: spawn by clone, join by futex): `excl-svc.s` (ldxr, getpid,
+  stxr fails and stores nothing; ldaxp, sched_yield, stlxp fails; the retry passes: in the lockstep's sys and step modes too),
+  `thread-llsc.s` (two threads: ldxr/stxr 2^18 each, ldaxr/stlxr against ldadd 2^18 each, ldxp/stxp 2^17 each: exactly 2^19, 2^19,
+  2^18, 2^18), `thread-sync.s` (casal, caspal, a swpa spinlock and a futex mutex as musl's, by ldaxr/stlxr: exact). Controls
+  inject-57..59 (excl:m: thread-llsc's 0x6ad2a, 0x6aa80, 0x326c9 as before the fix, thread-sync's mutex deadlocked, excl-svc's
+  stxr passing), sys-4 (excl-svc's lockstep under excl:m: DIFF at the first write), verdict-42.
+
+| check | before | after |
+|---|---|---|
+| review 306's p4 (ldxr/stxr, two pthreads) | 500,282 of 600,000 | **600,000** (10 of 10) |
+| review 306's p6 (musl pthread_mutex) | 347,118 of 400,000 | **400,000** (10 of 10) |
+| `bin/a64i check` eval, AOT, forms, cpu, loader | 128 / 128 each | **131 / 131 each** |
+| lockstep sys, step | 128 / 128 | **129 / 131** (2 :lockstep-threads) |
+| controls (test/asm/controls-a64i.txt) | 153 | **158** |
+| `--essential` | 101 programs | **104** |
+| `[:asm-arm64 :eval]` | 512 / 0 / 0 | **520 / 4 by design / 0** |
+| `[:asm-arm64 :aot]` | 3,090 / 0 / 13 | **3,093 / 0 / 13** |
+
+`bin/a64i go-check` 8 of 8, `--tools` 3 of 3, table-check ok, goroot-check 1,141 of 1,178 as recorded (gc2.go's :speed flake once
+under load 20, its CPU run 1,505 ms CPU time; alone 183-313 ms, 3 of 3 pass).
