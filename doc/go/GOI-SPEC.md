@@ -2055,6 +2055,14 @@ requires gc's messages to be the expected ones: `test/goi/gc_errors.ae`); `make
 goi-annotations`, `make goi-test`; `bin/gate --full` runs both after repr-go's round trips
 (§11.5), on their fresh conversions.
 
+Review 1111's fixes (2026-11-11, branch `review-fix-2`): `load.ae` matches a file name's GOOS and GOARCH parts as go/build's
+`goodOSArchFile` and `matchTag` do (GOOS android satisfies `linux`, illumos `solaris`, ios `darwin`, never the reverse; the
+name cut at its first dot), `tag-set` gives `//go:build` the same implications, and a file without a `//go:build` line is
+judged by its `// +build` lines (space OR, comma AND, `!` not, the lines ANDed), as go/build's `shouldBuild`
+(`test/goi/check_test.ae`'s `build-constraints`). The REPL (`arbace.go.repl`'s `complete!`) points `:current` at the last
+file loaded that the configuration keeps (else `repl.go`), so a declaration typed after a load that ended on an excluded
+file is checked and defined (`test/goi/repl-pkgs/go/rt/lastex`, `test/goi/repl.ae`).
+
 **Imports from forms, not the digest.** Before GR1 there is no digest (§6.5): an imported
 package is checked from its forms, whole (bodies included), once per session and in parallel
 (each package's imports first), in a forms root: `tamago/goroot` (with `arch/ARCH/` laid over
