@@ -275,17 +275,77 @@
                       m names))
             m [1 2])))
 
+(defn with-adt-names
+  "RF20: the names with core's structs as their modules' children where missing: the type and its constructor
+  (`casemappingiter_impls!`'s `ToLowercase` in char/mod.rs: a macro made it, so core's index, read from the sources
+  unexpanded, lacks its constructor, which std's names omit too, private to its module): from ADTS (std's interface's or
+  the native interface's), each a struct of core with a constructor"
+  [names adts]
+  (reduce (fn [m [p a]]
+            (let [i (.lastIndexOf ^String p "::") mp (when (pos? i) (subs p 0 i)) nm (when (pos? i) (subs p (+ i 2)))
+                  e (when mp (get m mp)) ck (:ctor (first (:variants a)))
+                  has? (fn [ns] (some #(and (= ns (:ns %)) (= nm (:name %))) (:children e)))]
+              (if (or (nil? e) (not= "Struct" (:kind a)) (not (str/starts-with? p "core::")))
+                m
+                (assoc m mp (update e :children into
+                                    (cond-> []
+                                      (not (has? :type)) (conj {:ns :type :name nm :kind "Struct" :path p})
+                                      (and ck (not (has? :value))) (conj {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))))))
+          names adts))
+
+(defn with-native-names [names native] (with-adt-names names (:adts native)))
+
+(defn with-native-std
+  "RF20: std's names with the native interface's type aliases (their types and generics) added, and its macro-made
+  structs (with-native-names)"
+  [std native]
+  (cond-> (update std :mods with-native-names native)
+    (seq (:aliases native)) (-> (update :aliases #(merge (:aliases native) %))
+                                (update :generics #(merge (:alias-generics native) %)))))
+
+(defn with-core-kinds
+  "RF20: std's names' kinds (collect's ext-kind) with core's own definitions' added where std's lack them (a crate-private
+  trait and its items: `clone::uninit::CopySpec::clone_one` an AssocFn of a Trait, so a qualified path to it prints as
+  `<T as clone::uninit::CopySpec>::clone_one`)"
+  [std names]
+  (update std :kinds
+          (fn [kinds]
+            (reduce (fn [k [p {:keys [kind children]}]]
+                      (reduce (fn [k c] (if (or (contains? k (:path c)) (nil? (:kind c))) k (assoc k (:path c) (:kind c))))
+                              (if (or (contains? k p) (nil? kind)) k (assoc k p kind))
+                              children))
+                    kinds names))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; core's interface from its own sources: each module's functions and ADTs that std's interface lacks (its private items:
 ;; `pub(crate) fn check_language_ub`, `struct IndexRange`), written in the helper's --std-iface forms from our collection
 ;; (generics_of, fn_sig, predicates_of, the fields' types) as each module is processed, and read by the modules after it
 ;; (and by the next run: the cache native-iface.edn)
 
+(def ^:dynamic *late-sig*
+  "RF20: while a function's signature is written, an atom [NAMED-LATE-COUNT {ANON-ID INDEX}]: its late-bound regions as the
+  helper writes them (`'^#N` an anonymous one, its bound variable's index after the named ones; `'^'a` a named one), not erased"
+  nil)
+
 (defn- region-name [r]
   (case (first r)
     :re-static "'static"
     :re-early (nth r 2)
+    :re-bound (cond (nil? *late-sig*) "'_"
+                    (= :anon (nth r 2 nil)) (let [[n m] @*late-sig* id (nth r 3)]
+                                              (str "'^#" (or (get m id) (let [k (+ (long n) (count m))] (swap! *late-sig* assoc-in [1 id] k) k))))
+                    (and (= 2 (count r)) (string? (second r)) (not= "'_" (second r))) (str "'^" (second r))
+                    :else "'_")
     "'_"))
+
+(declare ty->sty)
+
+(defn- sig-sty
+  "RF20: a function's inputs and output as the helper writes them, its late-bound regions bound ([INS OUT])"
+  [id sig path-of]
+  (binding [*late-sig* (atom [(count (:late (collect/generics-of id))) {}])]
+    (let [ins (mapv #(ty->sty % path-of) (:inputs sig))]
+      [ins (ty->sty (:output sig) path-of)])))
 
 (defn ty->sty
   "A type as the helper's structural form (sty->ty's inverse); PATH-OF gives a local definition's interface path; nil
@@ -309,9 +369,14 @@
     (try (s t) (catch Throwable _ nil))))
 
 (defn- clause->sty [c path-of]
-  (when (= :trait (first c))
-    (let [[tr args] (second c) p (if (number? tr) (path-of tr) tr) as (mapv #(ty->sty % path-of) args)]
-      (when (and p (every? some? as)) (list 'trait p as)))))
+  (case (first c)
+    :trait (let [[tr args] (second c) p (if (number? tr) (path-of tr) tr) as (mapv #(ty->sty % path-of) args)]
+             (when (and p (every? some? as)) (list 'trait p as)))
+    ;; RF20: a projection clause (`I: Iterator<Item: Try<Output = T>>`'s `<<I as Iterator>::Item as Try>::Output == T`), as
+    ;; the helper writes it: (proj ITEM [ARGS] TERM)
+    :proj (let [[_ ad args term] c p (if (number? ad) (path-of ad) ad) as (mapv #(ty->sty % path-of) args) tt (ty->sty term path-of)]
+            (when (and p (every? some? as) tt) (list 'proj p as tt)))
+    nil))
 
 (defn- generics-sty [g]
   (vec (for [p (:params g)]
@@ -349,7 +414,7 @@
                                           :else [n kk kp (ty->sty (collect/type-of (:id k)) path-of)])))
                        fns (into {} (for [k kids :when (= "AssocFn" (:kind k))
                                           :let [kg (collect/generics-of (:id k)) sig (collect/fn-sig (:id k))
-                                                ins (mapv #(ty->sty % path-of) (:inputs sig)) out (ty->sty (:output sig) path-of)]
+                                                [ins out] (sig-sty (:id k) sig path-of)]
                                           :when (and (every? some? ins) out (not (get (:fns si) (str ip "::" (second (:data k))))))]
                                       [(str ip "::" (second (:data k)))
                                        {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
@@ -365,9 +430,22 @@
                          (update :fns merge fns))
                      acc))))
              (nil? p) acc
+             ;; RF20: a type alias std's names lack (`pub(crate) type ChangeOutputType<T, V> = <T::Residual as Residual<V>>::TryType`):
+             ;; its type and generics as the helper's --std-names writes an alias, which collect expands at its arguments
+             (and (= "TyAlias" (:kind d)) (not (get (:aliases collect/*std*) p)))
+             (let [t (ty->sty (collect/type-of (:id d)) path-of)]
+               (if t
+                 (-> acc (assoc-in [:aliases p] t) (assoc-in [:alias-generics p] (generics-sty (collect/generics-of (:id d)))))
+                 acc))
+             ;; RF20: a crate-private constant (`const MAX_ONE_B: u32 = 0x80` in char/mod.rs): its type, and an integer one's value
+             ;; (its expression of literals) for a pattern that names it (`..MAX_ONE_B =>`)
+             (and (= "Const { is_type_const: false }" (str (:kind d))) (not (get (:consts si) p)))
+             (let [t (ty->sty (collect/type-of (:id d)) path-of)
+                   v (try (some-> (:expr (:node d)) collect/const-int-value) (catch Throwable _ nil))]
+               (if t (assoc-in acc [:consts p] (cond-> {:kind (str (:kind d)) :ty t :native true} v (assoc :value v))) acc))
              (and (= "Fn" (:kind d)) (not (get (:fns si) p)))
              (let [g (collect/generics-of (:id d)) sig (collect/fn-sig (:id d))
-                   ins (mapv #(ty->sty % path-of) (:inputs sig)) out (ty->sty (:output sig) path-of)
+                   [ins out] (sig-sty (:id d) sig path-of)
                    preds (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))]
                (if (and (every? some? ins) out)
                  (assoc-in acc [:fns p] {:generics (generics-sty g) :parent-count 0 :has-self false :predicates preds
@@ -407,10 +485,10 @@
                                               (if (= "AssocTy" (:kind k)) [n "AssocTy" kp []] [n (:kind k) kp]))))
                    fns (into {} (for [k kids :when (= "AssocFn" (:kind k))
                                       :let [kg (collect/generics-of (:id k)) sig (collect/fn-sig (:id k))
-                                            ins (mapv #(ty->sty % path-of) (:inputs sig)) out (ty->sty (:output sig) path-of)]
+                                            [ins out] (sig-sty (:id k) sig path-of)]
                                       :when (and (every? some? ins) out)]
                                   [(str p "::" (second (:data k)))
-                                   {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
+                                   {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self true
                                     :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                     :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
                                     :abi "\"Rust\"" :const false :promotable false :nounwind false :native true}]))]
@@ -708,6 +786,10 @@
                         (spit cache (pr-str t)) t)))
             table (:macros index)
             names (with-core-names (resolve/load-std-names std-file) (:names index))
+            ;; RF20: collect's names too: core's own modules and re-exports where std's lack them (`ascii::Char`, a re-export of
+            ;; `ascii_char::AsciiChar`, as the resolver's names have them)
+            names (with-adt-names names (:adts si))
+            std (assoc (with-core-kinds std (:names index)) :mods names)
             verbose (System/getenv "CORE_VERBOSE")
             totals (atom {})
             control (atom nil)
@@ -727,7 +809,7 @@
             _ (when-not (= "cache" (System/getenv "CORE_IFACE"))
                 (let [t0 (System/nanoTime)]
                   (doseq [f iface-files :let [m (get mods (.getCanonicalPath (File. ^String f)))] :when m]
-                    (let [{:keys [native]} (binding [*collect-only* true] (run-module m table names std-file std (with-native-iface si @native-all) lib-dir identity))]
+                    (let [{:keys [native]} (binding [*collect-only* true] (run-module m table (with-native-names names @native-all) std-file (with-native-std std @native-all) (with-native-iface si @native-all) lib-dir identity))]
                       (when native (swap! native-all #(merge-with merge % native)))))
                   (println (format "core-check: the interface pass over %d files: %d functions, %d ADTs, %d traits (%d s)" (count iface-files)
                                    (count (:fns @native-all)) (count (:adts @native-all)) (count (:traits @native-all)) (quot (- (System/nanoTime) t0) 1000000000)))))
@@ -741,7 +823,7 @@
                            (str lib-dir "/core/src/" x))]
                   (doseq [f fs :let [m (get mods (.getCanonicalPath (File. ^String f)))]]
                     (if m
-                      (let [{:keys [native]} (binding [*collect-only* true] (run-module m table names std-file std (with-native-iface si @native-all) lib-dir identity))]
+                      (let [{:keys [native]} (binding [*collect-only* true] (run-module m table (with-native-names names @native-all) std-file (with-native-std std @native-all) (with-native-iface si @native-all) lib-dir identity))]
                         (when native (swap! native-all #(merge-with merge % native))))
                       (println "core-check: core-iface-extra: not a module file:" f)))
                   (println (format "core-check: the extra interface files (%d): %d functions, %d ADTs, %d traits, %d impls (%d s)" (count fs)
@@ -761,7 +843,7 @@
                                 (when-let [e (export-entry b k (contains? #{:equal :equal-alloc-ids :equal-allocs} (first row)))]
                                   (swap! exported conj e)))
                               row)))
-                {:keys [stages bodies native]} (run-module m table names std-file std si lib-dir on-body)
+                {:keys [stages bodies native]} (run-module m table (with-native-names names @native-all) std-file (with-native-std std @native-all) si lib-dir on-body)
                 _ (when native (swap! native-all #(merge-with merge % native)))
                 rows bodies
                 fr (frequencies (map first rows))]

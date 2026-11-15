@@ -625,6 +625,8 @@
 (declare lookup-name)
 (def ^:dynamic *looking* #{})   ; the names being looked up (glob imports may cycle)
 
+(declare ext-of-local)
+
 (defn- walk-written
   "A written path's segments from a starting resolution: [:local ID] (a module or an item) or [:ext PATH]"
   [start names]
@@ -635,7 +637,11 @@
                          (or (some (fn [d] (when (and (= id (:parent d)) (#{[:type nm] [:value nm]} (:data d)) (not (str/starts-with? (str (:kind d)) "Ctor")))
                                              [:local (:id d)]))
                                    @*defs*)
-                             (when (:module (def-of id)) (lookup-name nm id false))))
+                             (when (:module (def-of id)) (lookup-name nm id false))
+                             ;; RF20: an out-of-line module's item (`drain::Drain` from array/mod.rs: drain.rs is another file): the
+                             ;; module's interface path's child, when core's names know its kind
+                             (when-let [mp (ext-of-local id)]
+                               (let [cp (str mp "::" nm)] (when (ext-kind cp) [:ext cp])))))
                 :ext (when-let [p (std-child (second r) nm nil)] [:ext p])
                 nil)))
           start names))
@@ -808,7 +814,12 @@
   (case (:kind x)
     :lit (let [t (str (or (:symbol (:lit x)) (:text (:lit x)) (:lit x)))
                t (str/replace (str/replace t "_" "") #"(u|i)(8|16|32|64|128|size)$" "")]
-           (when (re-matches #"[0-9]+" t) (bigint t)))
+           ;; (RF20: a hexadecimal, octal or binary literal too: `0x80`, `0b1110_0000`)
+           (cond (re-matches #"[0-9]+" t) (bigint t)
+                 (re-matches #"0x[0-9a-fA-F]+" t) (bigint (java.math.BigInteger. (subs t 2) 16))
+                 (re-matches #"0o[0-7]+" t) (bigint (java.math.BigInteger. (subs t 2) 8))
+                 (re-matches #"0b[01]+" t) (bigint (java.math.BigInteger. (subs t 2) 2))
+                 :else nil))
     :block (when (empty? (:stmts (:block x))) (some-> (:expr (:block x)) eval-int-expr))
     ;; RF13c: `size_of::<T>()` of a thin pointer, a unit or a primitive (TypeId's `16 / size_of::<*const ()>()`): its
     ;; layout's size on the target (x86_64: 8-byte pointers)

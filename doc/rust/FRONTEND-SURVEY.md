@@ -3768,3 +3768,84 @@ GB): 4,695 paths, 13 answered differently, all `core::cmp::impls::{impl#57}` to 
 `clamp` had lost `#[track_caller]`.
 `bin/rust-front essential` equals its known file (38 minutes, 1.0 GB), `bin/rust-front core-essential` its own (13 minutes, 2.0 GB).
 Night command (not run): RF19's plan, whose rsi-build now makes `core-attrs.edn` again (23 minutes, 2.3 GB), then the synthetic corpus.
+
+## As built: RF20: RFP52's rest, core's crate-private items in the bodies (2026-11-11)
+
+Branch `rust-rf20` (from `mac/next` `4b8fc77e3`, which carries rust-rf19), light lane (`GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`, each
+process watched and killed by PID above 2.5 GiB; none was). RF19's caches were copied into the worktree and their absolute paths
+rewritten (`rust-rf19/` to `rust-rf20/`) before any run; the baseline core-check ran on an export of `mac/next` (`git archive` into
+the worktree's `.tmp/base`, its own caches), so the sources under test were never edited under a run. Only `arbace/rust/front/`
+and `test/rust/front/core-essential-known.txt` change (crop paths): ci, `arbace/cpp/lower.ae` and `gate_key` do not move
+(`bin/arbace-go --gate-key` equal before and after, `test/gate/gate-key-crops-test.bash` passes). Every rule follows rustc 1.99.1's
+own code (the pinned rust-src's `compiler/`).
+
+### RFP52's rest
+
+- **A qualified path to a crate-private trait in an out-of-line module** (`<T as self::uninit::CopySpec>::clone_one`, clone.rs):
+  the written prefix `self::uninit::CopySpec` does not walk (uninit.rs is another file); the trait is taken from the item's own
+  resolution, its parent (instantiate_value_path: tcx.parent of the resolved item), when the interface holds the trait.
+- **The native interface's late-bound regions** (`ty->sty` over a function's signature, `sig-sty`): an anonymous late-bound region
+  is written `'^#N` (its bound variable's index after the named ones) and a named one `'^'a`, as the helper's `--std-iface` writes
+  them; before, both were `'_` (erased), so a crate-private function's type printed `unsafe fn(&T, ..)`, not `for<'a> unsafe
+  fn(&'a T, ..)`. A trait's own functions are written `:has-self true`, as the helper writes them.
+- **core's own kinds in collect's names** (`with-core-kinds`): collect's `ext-kind` read std's names alone, which lack crate-private
+  items, so `clone::uninit::CopySpec::clone_one` was not known as a trait's function and its path printed without `<T as ..>`.
+  Then **core's own modules and re-exports in collect's names** (`:mods`, the resolver's union of std's names and core's index):
+  `ascii::Char` (ascii.rs' `pub use ascii_char::AsciiChar as Char`) now walks in collect as in the resolver.
+- **Type aliases in the native interface** (`:aliases` with their generics, merged into collect's names per module,
+  `with-native-std`): `pub(crate) type ChangeOutputType<T, V> = <T::Residual as Residual<V>>::TryType` expands at its arguments as
+  a std alias does (`array::try_from_fn`'s signature).
+- **An out-of-line module's item through a written path** (`walk-written`): `drain::Drain::new` from array/mod.rs (drain.rs another
+  file): the module's interface path's child when core's names know its kind (`array::map`'s `try_map`).
+- **The enclosing impl's trait is in scope for method calls** (rustc_resolve's traits_in_scope: `current_trait` first, when it may
+  have the item): `"could not convert slice to array".fmt(f)` inside `impl fmt::Display for TryFromSliceError` names Display,
+  which array/mod.rs does not import.
+- **The constructors of core's structs the names lack** (`with-adt-names`): `casemappingiter_impls!` makes `ToLowercase(..)` and
+  its siblings in char/mod.rs; core's index (the sources unexpanded) does not see them and std's names omit their private
+  constructors, so `ToLowercase(CaseMappingIter::new(..))` did not resolve; from std's interface's ADTs (and the native ones), each
+  core struct with a constructor gets its type and constructor in its module where missing.
+- **A crate-private constant in a range pattern** (`..MAX_ONE_B => 1`, char/methods.rs' `len_utf8`): the native interface writes a
+  constant's type and, for an integer one, its value from its expression of literals (`const MAX_ONE_B: u32 = 0x80`), and
+  `pat-expr-const` takes it (a local constant's likewise); `eval-int-expr` now reads hexadecimal, octal and binary literals.
+- **derive(Debug) of a struct whose fields are all cfg'd out** (`#[derive(Debug)] pub struct BorrowError { #[cfg(feature =
+  "debug_refcell")] location: .. }`, cell.rs): `Formatter::write_str(f, "BorrowError")`, debug.rs' special case for no fields;
+  the expansion called a `debug_struct_field0_finish` that does not exist.
+- **Projection clauses in the native interface** (`clause->sty`: `(proj ITEM [ARGS] TERM)` as the helper writes them), written; no
+  body gains by them yet (below).
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (the interface pass afresh, 23 minutes of it; 48 to 56 minutes,
+  2.16 GB peak), against the baseline run on `mac/next`'s export the same day (62 minutes, 2.22 GB): **5,576 -> 5,594 equal** to
+  rustc's built MIR, 157 -> 161 but for the allocations, 37 -> 33 differ, **24 -> 6 refused**, 74 without rustc's body (the
+  first run, before the derive change, 5,594 / 159 / 33 / 8; the derive change made cell's two `fmt` equal but for the
+  allocations). No
+  module lost an equal body; gains: char::methods +8 (59 -> 67: `ascii::Char` 2, the case mappings' constructors 4,
+  `MAX_ONE_B`, `encode_utf8_raw_unchecked`), clone +2 (CopySpec), array +2 (`try_from_fn`, `try_map`; `fmt` but for the
+  allocations), mem +2, any +1, non_null +1, result +1 and option +1 (`from_iter`'s closure, its signature through `try_process`'s alias), time one refusal
+  fewer (now but for the allocations).
+- `bin/rust-front core-essential`: clone 27 -> 29 of 29 equal, total 564 -> 566 equal and no refusal; its known file recorded
+  again (`test/rust/front/core-essential-known.txt`, the run's summary) and the step equals it (6 min). `bin/rust-front
+  essential` equals its known file unchanged (4 min 22 s; the derive change moves none of its lines). Both peaks 2.1 GB.
+- `bin/reap` 49 of 52 cells checked, 0 problems; `bin/crops-score --record` leaves `test/crops/scores.edn` as it was,
+  `--judge --strict` exit 0, Rust 75.0 / 75.0 / 95.8 / 80.0, unchanged (RFP43 (a), RFP53 (a): no case is own end to end yet).
+
+### Left
+
+- The 6 refusals left are not RFP52's: time's `Debug for Duration` (`fmt_decimal`'s
+  `prefix` closure capture and its method call, 3), any's `trait_info_of_trait_type_id` (`type_id_vtable`'s callee), mem's
+  maybe_uninit `write_default` (a call's type), ptr's `swap_nonoverlapping_short` (`swap_prefix!`'s `$n:literal` turbofish).
+- `try_process`'s turbofish (result's and option's `from_iter`): its second argument stays an inference variable; the native
+  interface now writes the function's projection clauses, but `I: Iterator<Item: Try<Output = T, Residual = R>>`'s associated
+  item bounds (a bound on `<I as Iterator>::Item`, then its projections) are not among collect's clauses yet.
+- `NeverShortCircuit::wrap_mut_1` (array's `from_fn` and `map`): its return type is an opaque type (`impl FnMut(..) +
+  Destruct`), which neither interface writes with its bounds (std's `(opaque ..)` forms are read but never resolved): the next
+  piece of RFP57's native interface.
+- RF13e's others (tuple.rs' metavariable spans 12, braced const arguments 3, `array::clone`'s DefIndex, drop orders).
+
+### The night's commands (none run here)
+
+- RF18's and RF19's (RFP63 (a)'s dump and the packs again; RFP46 (a)'s whole plan with `rsi-native` and `rsi check --front own`).
+  RF20 changes `core_check.ae`, `collect.ae` and the front end's expansion-side files that `core-attrs.edn.key` hashes
+  (`collect.ae`, `core_check.ae`), so the plan's rsi-build makes `core-attrs.edn` again first (about 23 minutes, 2.3 GB, one
+  process), then the 67 programs.

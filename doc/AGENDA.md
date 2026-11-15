@@ -527,7 +527,7 @@ items below are the ones whose work is still ahead or tied to a night.
   RFP42 (a), RFP45 (a), RFP47 (a) and RFP46 (a)'s whole run at night ("As built: RF13 (first slice)", its night commands);
   core-check 5,576 equal at RF13e ("As built: RF13e": 5,551 by its causes, then RFP52 (a)'s interface list; rust-rf13e on
   rust-rf13d, which carries rust-rf13b's fix and RF13c); RFP52 (a) decided by the user 2026-11-10 (with RFP48-RFP61,
-  RF12-P8), its rest (aliases, CopySpec, Drain, ascii::Char) left. RF14 (`rust-rf14` on rust-rf13e, "As built: RF14 (RFP48)"):
+  RF12-P8), its rest built at RF20 (below). RF14 (`rust-rf14` on rust-rf13e, "As built: RF14 (RFP48)"):
   RFP48 (a) built (trait resolution in mono: impls, specialization's leaf, default bodies, the Fn traits' builtin candidates;
   the native callees of the synthetic corpus 3,503 -> 4,079 of about 4,500, vtables 0 -> 25 of 32) and RFP49 (a)'s first part
   (the local non-generic instances std's bodies reach): 48 of 67 synthetic programs own (47). RF15 (`rust-rf15` on rust-rf14,
@@ -546,7 +546,11 @@ items below are the ones whose work is still ahead or tied to a night.
   rsi-build, rsi-native over the own programs RF15-RF18 added, `rsi check --front own`. RF19 (`rust-rf19` on next, "As built:
   RF19"): `Box<dyn Fn>` calls native (the builtin Tuple candidate), collections 2.62 -> 2.09 GB (the whole corpus 2.24 GB at
   RF11_BATCH=3), core's macro-made functions' attributes by `bin/rust-front core-attrs` (native callees 4,528 -> 4,985 of 4,985):
-  66 of 67 own, independence unchanged.
+  66 of 67 own, independence unchanged. RF20 (`rust-rf20` on next, "As built: RF20"): RFP52's rest (crate-private traits, aliases,
+  constants and macro-made constructors in the native interface and collect's names, out-of-line modules' items, the impl's trait
+  in scope, derive(Debug) of a cfg'd-out struct): core-check 5,576 -> 5,594 equal, refused 24 -> 6 (core-essential 564 -> 566);
+  `gate_key` unmoved. Next: `try_process`'s associated item bounds, opaque return types in the native interface (RFP57), RFP56's
+  census.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above); `llvm-compl2` (2026-11-10): llvmi on the checkout's ci and RES34's cilib, eight Verifier rules
   ported, completeness 97.6.

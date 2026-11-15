@@ -5104,57 +5104,6 @@ The user decided CP365-CP371 all (a) (2026-11-11). Done in the brief's order, li
   edited while a probe run's front end could load it (the Prim-unit change, a no-op where the libraries hold Prim's stub, as the
   run's did); two lib-check runs started at once collided in `.tmp/repr-haskell/lib-check/iface2` (both stopped, rerun serially).
 
-## 2026-11-12: cpp-s7, cpp-s6's proofs, CP372 (a) and CP373 (a) (branch `cpp-s7`, from `mac/cpp-s6` b14a077c0)
-
-The user decided CP372 (a) and CP373 (a) (2026-11-11), after cpp-s6's unrun proofs. Light, by night 12's rules (one process at a time,
-each gated in its command on MemAvailable >= 12 GiB and `df /` <= 85%, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, main's stage 0;
-no clang, g++, gate or big lock). Details and numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s7".
-- cpp-s6's proofs: the 82 programs' gen-batch at cpp-s6's code against cpp-s5b's G3 gave CP369's linkage alone in two programs, and one
-  lost: thread_local12e.C, its header's out-of-line `thread_local S T::u3` definition taken for linkonce (a template's member) once CP369
-  made the member external. That process peaked at 2.4 GB, over the rules' 1.5 GiB (GOMEMLIMIT is soft): a slip; the later run of the 82
-  was in five parts (peak 1.27 GB) without library.cpp, which is left to a night. library.cpp's refusal and drops were cpp-s5b's.
-  member_kinds.C showed an inline static data member never defined (lower's "unknown global").
-- Fixes: a header's out-of-line static data member is not linkonce; an inline static data member is a definition, defined when used,
-  linkonce_odr (a constexpr one still not: considered, left, its reads fold and defining it would emit globals clang does not).
-- CP372 (a): a class template specialization named in the main file before the template's definition is an incomplete instance, completed
-  in place (same id) when the definition or an explicit specialization arrives, CP365's hook remaking what waited on it. Considered:
-  doing it in the headers too (dropped: the headers' retry works, and a header's use needing completeness would turn from a retried
-  refusal into a dropped declaration); CP372 (b), CP338's typedef retry (it cannot wait for a later use of the alias, prov2.C's A<ctx>).
-- CP373 (a): an extern reference's declaration `ptr`, every reference (clang's), not only thread-local ones.
-- The own dg record's sample run found cpp2a/explicit6.C crashed (NumberFormatException on "1.0", review 1111 #5's integer read): eval-text
-  refuses a non-integer literal; 127 own passes as recorded.
-- codegen-gen re-recorded once: the five samples with static data members, CP369's linkage alone. bin/reap 0 problems, crops-score
-  strict 0, the gate key the same as cpp-s6's.
-
-## 2026-11-12: cpp-s8, CP366 (a)'s slice: <format>'s way through span, ranges and the formatting machinery (branch `cpp-s8`, from `mac/cpp-s7` b7d9b0249)
-
-The user decided CP366 (a) (2026-11-11): the rest of <format> one slice a day, library.cpp's refusal and drops.tsv the measure. By night
-12's rules until 07:00 UTC (one process at a time, each gated in its command on MemAvailable >= 12 GiB and `df /` <= 85%, `GOMEMLIMIT=1000MiB
-GOGC=20 REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID past 1.5 GiB), library.cpp's refusal reproduced on header subsets
-(`.tmp/probe/`): `f8.cpp` (<format>'s vformat, 1.0 GB) for the whole way and a small probe for each cause. Details and numbers in
-doc/cpp/CPP-SURVEY.md, "As built: cpp-s8".
-- The refusal at cpp-s7 (`_Seq_sink<string>::_M_reserve`'s span<char>(string&)): ranges' concepts on `char*` and string's iterator
-  measured 6 and 5 of 16 true. Five causes, each general: a partial specialization's arguments completed by the primary's defaults
-  (common_reference_t<char&, char&&>), a dependent non-type default as a signature's expression (__copy_cv's __match_cv_qualifiers), T{}
-  of a scalar type (default_initializable), hidden friends by ADL alone (unreachable_sentinel_t's operator== had been a candidate of every
-  ==, recursing to the constraints' depth), partial specializations told apart by their type-constraints (indirectly_readable_traits'
-  value_type one had been replaced by the element_type one). Then 16 of 16 for both.
-- Further, each found by f8's next refusal: a concept-id as a template argument (borrowed_iterator_t), a function template's name declared
-  before its body in the native parser (a qualified recursive call read as a comparison), partial specializations ordered by their
-  constraints with qualified concept-ids normalized (LWG 3446/3541's indirectly_readable_traits for span), a specialization instantiated
-  during its own selection kept (two __iterator_traits<span, void>), satisfactions over a class still being defined not memoized, a
-  constructor template with too few arguments dropped before its constraints (span's iterator constructor asking is_constructible<span,
-  span> of itself), provisional instances also for a dropped member (CP365's follow-up: _Arg_value's anonymous union), GNU's frexp,
-  toupper, copysign, signbit and isfinite builtins, and an if constexpr's condition the evaluator cannot compute a refusal, not a crash.
-  Considered: the too-few-arguments drop for every call's templates (taken back: a function template's defaults may be on an earlier
-  declaration, `__do_vformat_to`'s, which the pattern does not show; constructor templates only); memoizing doubtful satisfactions not at
-  all (too broad; only those that asked __is_base_of of a class not finished).
-- Measured: f8.cpp (<format>'s vformat) from cpp-s7's refusal (55 causes, 111 drops) to `constexpr-if` at `__literal_encoding_is_utf8()`
-  (47 causes, 98 drops); 80 of the 81 run programs' IR byte for byte cpp-s7's (68 generated). From 07:16 UTC `df /` stood at 86-87%, so
-  library.cpp alone, the last part, codegen-gen, the print and dg checks, reap, crops-score and the keys were not run: commands in the
-  survey. Proposed CP374 (pointers into string literals in the constant evaluator, the next refusal) and CP375 (a function template's
-  default arguments from its earlier declarations). Slips: the sysroot unpack's 2.58 GB peak on the first run, one /dev/null.
-
 ## 2026-11-11: Scheme's AOT: compiled libraries installed in psyntax, SCS30 (a) (branch `scheme-scs30`, from `mac/next` `4b8fc77e3`)
 
 The user decided SCS29 (a) (the late constants' identities stay per compiled unit) and SCS30 (a): SC94 (b)'s other half, with a
@@ -5497,6 +5446,76 @@ problems). Alternative considered: a flag in the cell naming the switch by hand:
 Tried the switch on a copy of the interim record: its 764 programs left 6 in no class, so the night's whole record needs its classes
 first. `bin/reap --self-test` in the reap step; the step's inputs gained `test/haskell/*.edn`. Details: doc/haskell/FRONTEND-SURVEY.md,
 "As built: HF10-P31".
+
+## 2026-11-11: RF20: RFP52's rest, core's crate-private items in core-check's bodies (branch `rust-rf20`, from `mac/next` `4b8fc77e3`)
+
+- RFP52 (a)'s rest (the user's decision of 2026-11-10), each after rustc 1.99.1's own code: a qualified path's trait taken from the
+  resolved item's parent when its written prefix crosses an out-of-line module (`<T as self::uninit::CopySpec>::clone_one`); the
+  native interface writes late-bound regions as the helper does (`'^#N`, `'^'a`, not erased), type aliases with their generics
+  (`ChangeOutputType`), crate-private constants with an integer value (`MAX_ONE_B`, hexadecimal literals now evaluated) and
+  projection clauses; collect's names gain core's kinds, modules and re-exports (`ascii::Char`) and the constructors of core's
+  structs the names lack (`casemappingiter_impls!`'s `ToLowercase`, private constructors std's names omit); an out-of-line
+  module's item walks through its interface path (`drain::Drain::new`); the impl's trait is in scope for method calls (rustc's
+  traits_in_scope `current_trait`); derive(Debug) of a struct whose fields are all cfg'd out is `write_str`.
+- core-check over the 37 modules: 5,576 -> 5,594 equal (157 -> 161 but for the allocations), 24 -> 6 refused (baseline on an export of `mac/next` the same day, so no
+  source was edited under a run); no module lost an equal body. core-essential 564 -> 566 equal (known file recorded again);
+  essential unchanged; reap 0 problems; crops-score unchanged (Rust 80.0).
+- Alternatives considered: `CORE_IFACE_FILES=all` (RFP52 (b): every module file in the interface pass, far longer and still
+  without the macro-made constructors); special-casing the four names (no: each follows a rustc rule that other modules use too).
+  Left: `try_process`'s associated item bounds, `NeverShortCircuit::wrap_mut_1`'s opaque return type, RF13e's others. `gate_key`
+  unmoved (`bin/arbace-go --gate-key` equal; only `arbace/rust/front/` and a test file change); `core-attrs.edn`'s key moves, so the
+  night's rsi-build makes it again first. Details: doc/rust/FRONTEND-SURVEY.md, "As built: RF20".
+
+## 2026-11-12: cpp-s7, cpp-s6's proofs, CP372 (a) and CP373 (a) (branch `cpp-s7`, from `mac/cpp-s6` b14a077c0)
+
+The user decided CP372 (a) and CP373 (a) (2026-11-11), after cpp-s6's unrun proofs. Light, by night 12's rules (one process at a time,
+each gated in its command on MemAvailable >= 12 GiB and `df /` <= 85%, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, main's stage 0;
+no clang, g++, gate or big lock). Details and numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s7".
+- cpp-s6's proofs: the 82 programs' gen-batch at cpp-s6's code against cpp-s5b's G3 gave CP369's linkage alone in two programs, and one
+  lost: thread_local12e.C, its header's out-of-line `thread_local S T::u3` definition taken for linkonce (a template's member) once CP369
+  made the member external. That process peaked at 2.4 GB, over the rules' 1.5 GiB (GOMEMLIMIT is soft): a slip; the later run of the 82
+  was in five parts (peak 1.27 GB) without library.cpp, which is left to a night. library.cpp's refusal and drops were cpp-s5b's.
+  member_kinds.C showed an inline static data member never defined (lower's "unknown global").
+- Fixes: a header's out-of-line static data member is not linkonce; an inline static data member is a definition, defined when used,
+  linkonce_odr (a constexpr one still not: considered, left, its reads fold and defining it would emit globals clang does not).
+- CP372 (a): a class template specialization named in the main file before the template's definition is an incomplete instance, completed
+  in place (same id) when the definition or an explicit specialization arrives, CP365's hook remaking what waited on it. Considered:
+  doing it in the headers too (dropped: the headers' retry works, and a header's use needing completeness would turn from a retried
+  refusal into a dropped declaration); CP372 (b), CP338's typedef retry (it cannot wait for a later use of the alias, prov2.C's A<ctx>).
+- CP373 (a): an extern reference's declaration `ptr`, every reference (clang's), not only thread-local ones.
+- The own dg record's sample run found cpp2a/explicit6.C crashed (NumberFormatException on "1.0", review 1111 #5's integer read): eval-text
+  refuses a non-integer literal; 127 own passes as recorded.
+- codegen-gen re-recorded once: the five samples with static data members, CP369's linkage alone. bin/reap 0 problems, crops-score
+  strict 0, the gate key the same as cpp-s6's.
+
+## 2026-11-12: cpp-s8, CP366 (a)'s slice: <format>'s way through span, ranges and the formatting machinery (branch `cpp-s8`, from `mac/cpp-s7` b7d9b0249)
+
+The user decided CP366 (a) (2026-11-11): the rest of <format> one slice a day, library.cpp's refusal and drops.tsv the measure. By night
+12's rules until 07:00 UTC (one process at a time, each gated in its command on MemAvailable >= 12 GiB and `df /` <= 85%, `GOMEMLIMIT=1000MiB
+GOGC=20 REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID past 1.5 GiB), library.cpp's refusal reproduced on header subsets
+(`.tmp/probe/`): `f8.cpp` (<format>'s vformat, 1.0 GB) for the whole way and a small probe for each cause. Details and numbers in
+doc/cpp/CPP-SURVEY.md, "As built: cpp-s8".
+- The refusal at cpp-s7 (`_Seq_sink<string>::_M_reserve`'s span<char>(string&)): ranges' concepts on `char*` and string's iterator
+  measured 6 and 5 of 16 true. Five causes, each general: a partial specialization's arguments completed by the primary's defaults
+  (common_reference_t<char&, char&&>), a dependent non-type default as a signature's expression (__copy_cv's __match_cv_qualifiers), T{}
+  of a scalar type (default_initializable), hidden friends by ADL alone (unreachable_sentinel_t's operator== had been a candidate of every
+  ==, recursing to the constraints' depth), partial specializations told apart by their type-constraints (indirectly_readable_traits'
+  value_type one had been replaced by the element_type one). Then 16 of 16 for both.
+- Further, each found by f8's next refusal: a concept-id as a template argument (borrowed_iterator_t), a function template's name declared
+  before its body in the native parser (a qualified recursive call read as a comparison), partial specializations ordered by their
+  constraints with qualified concept-ids normalized (LWG 3446/3541's indirectly_readable_traits for span), a specialization instantiated
+  during its own selection kept (two __iterator_traits<span, void>), satisfactions over a class still being defined not memoized, a
+  constructor template with too few arguments dropped before its constraints (span's iterator constructor asking is_constructible<span,
+  span> of itself), provisional instances also for a dropped member (CP365's follow-up: _Arg_value's anonymous union), GNU's frexp,
+  toupper, copysign, signbit and isfinite builtins, and an if constexpr's condition the evaluator cannot compute a refusal, not a crash.
+  Considered: the too-few-arguments drop for every call's templates (taken back: a function template's defaults may be on an earlier
+  declaration, `__do_vformat_to`'s, which the pattern does not show; constructor templates only); memoizing doubtful satisfactions not at
+  all (too broad; only those that asked __is_base_of of a class not finished).
+- Measured: f8.cpp (<format>'s vformat) from cpp-s7's refusal (55 causes, 111 drops) to `constexpr-if` at `__literal_encoding_is_utf8()`
+  (47 causes, 98 drops); 80 of the 81 run programs' IR byte for byte cpp-s7's (68 generated). From 07:16 UTC `df /` stood at 86-87%, so
+  library.cpp alone, the last part, codegen-gen, the print and dg checks, reap, crops-score and the keys were not run: commands in the
+  survey. Proposed CP374 (pointers into string literals in the constant evaluator, the next refusal) and CP375 (a function template's
+  default arguments from its earlier declarations). Slips: the sysroot unpack's 2.58 GB peak on the first run, one /dev/null.
 
 ## 2026-11-12: gf-gate, the gate's own bugs of night 12's `--full` (45 FAILED lines; triage `.tmp/night12/triage/TRIAGE.md`)
 
