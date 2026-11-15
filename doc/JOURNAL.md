@@ -6793,3 +6793,70 @@ Proof: `bin/gate` (essential) on `3f9adc624` passed (72m44s; 39 run, 17 skipped 
 the store no longer held, made again). Flagged, not failing: cpp-runtime's build peaked at 6.6 GiB over its declared 3, hsi-essential
 (23m35s) and llvmi-essential (28m39s) over their budgets (the cpp-runtime build beside them). `bin/reap`: 49 of 52 cells checked, 3 no
 check yet, 0 problems, the matrix unchanged (no `--record` needed); `bin/crops-score --judge --strict`: 13 crops, 0 problems.
+
+## 2026-11-15: revisit-1115, gate 13e's failures and review 300's medium findings (batch B1; branch `revisit-1115` from `mac/next` `98b7d7507`)
+
+Gate 13e (`bin/gate --full --concurrent` on next `1b381e60b`, `.tmp/night13/REVISIT-13e.md`) failed seven steps; gate-tests' stale counts
+were already fixed on next (n18-fix). Each of the rest read from its log in next's `.tmp/gate/`, reproduced alone in the worktree where
+it was affordable, and fixed:
+
+- hsi-check-aot: three programs in no class, all "hsi aot: go build failed: \"arbace/hs\" imported and not used" (T9577's module
+  T9577_A, nofib/gc/happy's Set, nofib/spectral/minimax's Wins: modules of data and strings alone, whose compiled closures name nothing
+  of the package). `go/arbace/hs/aot.ae` writes `var _ hs.Value` after the imports beside `math`'s; the three pass alone (`bin/hsi
+  check --aot --only ...`). The peak, 12.0 GiB at `--jobs 2` against a declared 8, is declared as measured (`:mem-gib 13`).
+- java-judge: not the compiled or diagnostics levels (0 regressions there) but interp's three regressions and levels-known's four new
+  rows. ExpandingMap (t05123) and BashStreams (t05214) need 185.2 and 187.5 s of CPU alone (`ARBACE_CPU_LOG`, `bin/java-speed record
+  interp`), over the default's 100 s and close to the second attempt's 200: limits 93 and 94 in `test/java/timeouts.txt` (GTS102's
+  2.5 times) and both in `:speed`; at those limits both pass at the first attempt. BasicCancelTest (t05704) needs 1508.7 s of CPU
+  interpreted (passed alone at the second attempt's 1610 s), above GTS208's 600 s: `:speed-hang`'s by the rule, so round 38's interp
+  `:pass` (13c's run) was re-recorded `:timeout` from 13e's row (`bin/java-check --judge --partial --record`), with its levels-known
+  entry. InterruptDeadlock (t05126), a `:speed-hang` test whose interp run passed in 13e, gets levels-known's interp-pass/compiled-timeout
+  entry by hand (its interp record stays `:timeout`: a pass is "now passing", a timeout prints "resolved"). 13e's saved results judged
+  again: nothing in no class, the only regressions the two whose limits moved.
+- cpp-check.samples-runtime: runtime/atomics.cpp timed out at 120.1 s of wall and again in the quiet retry. Not the load: bin/cppi
+  exports its tools' `GOMEMLIMIT=1500MiB`, which the run inherits, and the program's heap is 2.8 GB, so Go collects without end: alone
+  with that limit 210 s of wall and 750 s of CPU, without it 33 s of both (GOMAXPROCS=4, also exported, does not matter: 32 s). The
+  fix: `test/cpp/check-budget.edn` takes `:cpu N` after an entry's seconds and `bin/lib/cppi/check`'s run1 runs such a program with its
+  own memory cap (`GOMEMLIMIT` unset, limit.bash's `ARBACE_MEM_GIB`, `CPPI_RUN_MEM_GIB` default 8) under `limited_cpu N max(4N,
+  SECONDS)`, a 137 at four fifths of N or more and a 124 being the timeout (a CPU judgment, not the host's load); atomics.cpp at `:cpu
+  100`. `bin/cppi check --corpus runtime --only atomics`: pass, 34.0 s. The control by hand: `limited_cpu 5` on its nodes reads as a
+  timeout (137 at 5 s of CPU). `bin/cppi check --aot` keeps the wall seconds. Left: every other cirun run of cppi's still inherits
+  1500MiB (a program with a large heap is slowed the same way), and why atomics.cpp's lowered program holds 2.8 GB.
+- oi-check.run: failed on `bin/oi suite rollup` alone ("the rollup differs from the record"); its CHANGED lines are the native path
+  printed against ocamlc's record, informational (`|| true`). The rollup is a function of the levels' records: round 38's 67791c84f
+  moved md5, hamming and lists_in_minor into aot-slow.edn and re-recorded boundscheck's AOT row without it. Re-recorded (`bin/oi suite
+  rollup --record`), four rows.
+- gate-tests on 98b7d7507 (not 13e's): crops-test's expected concurrent chains still named haskell-lib, which hsi-check's `:uses` of its
+  outputs (HF10-P29/P32, 3b577236f, ec06f5853) made a chain another needs; the expectation follows the rule.
+
+Review 300 (`reports/300-review-gate-fixes.md` in the Mac's queue), the three medium findings:
+
+1. `bin/oi`: a program's own exit 124 (cmdliner's) is told from the wall cap's by `oi_limit_kill` (124 only at nine tenths of the cap's
+   seconds; 137 and 152 as before): the "timeout" note only for a limit's kill at oi's runs, the suite's, the compiled level's and
+   o2j_alone. The judges compare an own 124 as a status, and vs-oi says "differs" when exactly one side was stopped. judges_test's
+   own-124 case without the oi note, a one-sided control, five oi-limit-kill cases (57 cases pass).
+2. ci's musl forms cache: one helper, `bin/lib/crops/musl-hold.bash`'s `ci_musl_hold` (the shared flock first, then the fresh check,
+   an ensure only when stale; the lock on fd 197 inherited; `CI_MUSL_HELD` so a child's hold, read or ensure takes no lock and never
+   waits on its parent; each wait at most `CI_MUSL_LOCK_WAIT`, by timeout(1): busybox's flock has no -w), used by bin/ci (before it
+   execs check, check --aot and run; its musl verb under the hold), llvmi (its own `flock -s 8` replaced), repr-haskell-target, hsi's
+   cnodes, cppi's, rsi's, oi's cstubs, pyi-clib, repr-haskell and rust-front. First written in bin/lib/ci, which moved both javac keys;
+   moved to bin/lib/crops, in no key. `test/c/musl-lock-test.bash` cases 4 (a reader waits for a holder) and 5 (a holder's child neither
+   rereads nor waits).
+3. `bin/repr-asm`'s make_list builds the split parts in a tree of its own run and renames the symlink `split/ID` onto it (old trees
+   pruned after a day); `roundtrip musl mc-asmparser` as before.
+
+Lows: 6 (goi's retry unreported and uncapped) is written (a summary line, `GOI_RETRY_MAX`, two retry-test cases) but not committed:
+bin/goi is in gate_key; the patch is `.tmp/night13/revisit-1115-goi-retry.patch`. 5 (repr/c rtcheck) and 8 (j2g's clone) are in
+gate_key's sources and left. 7 (oi-slow's hidden hangs) left. 4 and 9 (round 38's records) untouched.
+
+The coordinator's added item (jcs127's day test): `bin/arbace-go --gate-build` exited 0 when the image prepare failed (interp.ae:537's
+syntax error left arbace.classes.interp and arbace.classes.native out, "159 sources compiled ... 0 failed"). The prepare script and
+bin/lib/program.bash's host_compile caught each require's error and printed "image: not prepared" and went on; c2j's failures were
+printed too, never counted. Both now exit 1 on a namespace not loaded or a source not compiled, and the shell fails on either line in
+the log. `test/gate/prepare-fail-test.bash` (gate-tests) runs each path alone (`--prepare-check`, `--host-compile-check`) on
+`test/gate/prepare-fixture`: prepfix.ok passes, prepfix.bad (a forward reference) fails; with the fix taken out (by hand, a copy)
+both bad cases exit 0.
+
+Keys: until 730f59621 none moved (gate_key `66c29674...`, javac keys `09cfb08b...`/`5b3a6705...`, as on 98b7d7507: 992a9b712 moved the
+javac keys through bin/lib/ci, f1e7a5b5b moved them back). 730f59621 (bin/arbace-go, bin/lib/program.bash) moves gate_key to
+`c7a2235a...` and the javac keys to `310c28e6...`/`47ff9274...`, as the item asked.
