@@ -9055,3 +9055,53 @@ the rest was skipped at their passes from 59b3ad30b and f5ad46ea2. gate_key is a
 `--record` (by hand; `--only` refuses it), after which `test/records/accepted.edn` drains. The `--full` is the main session's, at night.
 Considered: hand-merging matrix.edn and scores.edn, which the plan forbids; re-recording the 36 rows without a run, which would be
 fabrication; re-splicing cpp.edn whole, which would duplicate steps.
+
+## 2026-11-15: B2 of the consolidation plan, the Java night by day (branch `b2-1115`, from `mac/next` 9da791cd4 = B1)
+
+`mac/java-night` (989b6607a: the seven Java slices, ghidra-g1b and ghidra-gh4iii, the generic machinery for large Java
+programs) merged with `--no-ff` (badd0dc9a), then its conversion, which had never run (night 11 stopped at it), run by day
+in the light of the user's resource rule: B1's `bin/gate --full --concurrent` had priority, so each heavy step started only
+with the disk at most 85% and MemAvailable at least its peak plus 12 GiB (a driver, `.tmp/b2-conv.sh`, re-checking every
+10 minutes; once it waited at 88%), and no step took the big lock.
+
+**Conflicts (14 files).** `overlay/jdk/variants/DatagramSocket.ae` java-night's (F10b). The Makefile's `.PHONY` and
+`bin/java-check`'s `export -f` the union. `test/gate/steps.edn` by hand: java-check-judge's summary java-night's (golden),
+java-compiled next's `:mem-gib 28`, java-night's `jrt-deflate` before gate-tests (next's `:full`), programs-full next's
+`:weekly`, `:mem-gib 30` and `:also-changed` with java-night's javac-tool need, JUnit's fetch, `:javac-prog` and pins.
+`test/java/corpora.edn` next's GD2 header and subsets with java-night's `:night 1` and its library and framework corpora
+(the subsets written again by `bin/gate-subsets java`, e504b8ecd). `jdk/javac/provenance.edn` java-night's `:sources` with
+next's `:jdk-edge`, then regenerated. `test/java/divergences.edn`: `:serialization` java-night's (JCS167, `:world`) with
+next's t04402, `:mxbeans` both sides' tests with next's match. `levels-known.edn` java-night's, `check-print.edn` next's
+rows: both for the Java night's re-record. `matrix.edn` and `scores.edn` regenerated; AGENDA, JAVA-FRONTEND-SURVEY and
+this journal both sides, by date.
+
+**What the conversion found** (each a java-night defect its own night would have met; the slices' day checks each saw
+their own world):
+- 2b8235e24: j2g's duplicate-name check counted jrt's hand-written names across every file; F9 declares `sysStatx` and
+  `sysCopyFileRange` in `nio_fs_linux_amd64.ae` and `_arm64.ae`. A name is now a duplicate only within one architecture
+  (`test/j2g/unit.ae`'s test-arch-collisions, three controls).
+- 49e03c1e9: `bin/jrt-convert update` stopped at "not generated: sun/nio/fs/UnixConstants.java" (F9 lists it as gensrc,
+  nothing made it). `preproc_src` makes it as `test/javac-platform/gensrc.bash` does (JCS369 (a): repr/c's preprocessor on
+  C's own target, cppout.ae, make's awk and sed; no gcc, nothing copied), held to the JDK build's file: byte for byte.
+- ef73b3e77, 6e558dc7f: 21 renames in `arbace/j2g/names.ae` for namesakes the joint world first holds (Hc_Transport,
+  Classfile_TypeAnnotation, Classfile_Util_1, Hs_Utils, Generics_Signature, Jmx_Timer, Generics_ClassSignature,
+  Classfile_ConstantPool, Jmx_InvalidKeyException, Crypto_PermissionsEnumerator, Time_Ser, Chrono_Ser, Jmx_Attribute,
+  Jmx_Loading_DefaultLoaderRepository, Hc_Log, Net_ExtendedSocketOptions), the side new to the world renamed, none named by
+  jrt's hand-written code. The first runs learned them 16 at a time (the log prints 16); by the main session's call the rest
+  were taken in one pass from the run's `report.edn` (its `:errors` holds them all). **Correction:** ef73b3e77's message
+  says "bin/j2g-unit: all passed"; it was not: its provides test failed (its count of `jdk/provides.txt` was the constant 2),
+  which f15f51285 fixed (the count from the file); since then `bin/j2g-unit` passes.
+- 6b5f91a70: javac's world's Files variant added ten members beyond jrt's old Files; F9 makes the world's Files jdk26u's, which
+  has them: the variant keeps JN7's ordered walk (a replacement) and walkInto.
+- 9473b70b2: `bin/jrt-convert verify`'s only difference was `jdk/provides.txt`, bin/jrt provides' (its `--check` proves it):
+  left out of verify's top-level comparison as repl-exports.txt is.
+
+**The conversion** (435ba0f03), on javac's tool javac-09cfb08baf25 with `REPR_JAVA_STALE_OK=1` (java-night's night commands):
+`bin/javac-vendor convert` 298 s, 8.1 GiB; `bin/jrt-convert update` 775 s, 35.3 GiB (3,348 Java files, 130 generated, 0
+failed, 0 javac errors, 3,552 forms files; `jdk/sources.txt` about +1,080 lines); `bin/jrt modules` and `provides` regenerated
+(java.management's packages; six providers); `bin/j2g-edge update` 104 s; `bin/javac-vendor edge` 62 s by hand (the fifth
+edge run, jdk/edge.edn already written, skipped it: `:jdk-edge` stale); the fixtures' and forms' updates; then
+`bin/provenance-check`, `bin/jrt-convert verify` (765 s, 35.0 GiB, byte for byte) and `bin/j2g-edge verify` (103 s) pass.
+`bin/reap --record` and `bin/crops-score --record`: no change (53 of 56 cells, 0 problems). Considered: copying UnixConstants
+from the build tree (the no-copied-gensrc rule forbids it); renaming the old side of a pair (jrt's code and records name it).
+Left for the Java night (the main session's `--full`): the Java levels' re-record over the new world.
