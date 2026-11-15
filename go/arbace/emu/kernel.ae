@@ -13,7 +13,8 @@
     ^{:line 13 :tag uint64} BrkBase
     ^{:line 14 :tag uint64} Brk
     ^{:line 15 :tag uint64} MmapNext ; the top of mmap's area (topDown)
-    ^{:tag (slice (* sharedMap))} shared))
+    ^{:tag (slice (* sharedMap))} shared
+    ^{:tag (map uint64 bool)} anonShared)) ; the pages of shared anonymous mappings (AR24: madvise's MADV_DONTNEED keeps them)
 
 
 (go/type sharedMap "sharedMap is a shared file mapping (MAP_SHARED, AR23, queue 295): its pages [Base, Base+Size) hold the file's bytes from Off
@@ -92,18 +93,35 @@ as last read from or written to the file, against which writeBack finds the page
           (return (- eINVAL) nil))
 
         (when (== (bit-and a4 0x20) 0) ; not MAP_ANONYMOUS: a file's mapping (AR22)
-          (return (.fileMap k a1 size a3 a4 a5 a6)))
+          (let [(values r ex) (.fileMap k a1 size a3 a4 a5 a6)]
+            (when (>= r 0)
+              (.markAnon k (conv uint64 r) size false))
 
-        (return (conv int64 (.MapAnon k a1 size a3 a4)) nil)))
+            (return r ex)))
+
+        (let [r (.MapAnon k a1 size a3 a4)]
+          (when (and (< (conv int64 r) 0) (> (conv int64 r) -4096))
+            (return (conv int64 r) nil))
+
+          (.markAnon k r size (== (bit-and a4 3) 1))
+          (return (conv int64 r) nil))))
     (case [11] ; munmap: a shared file mapping's pages written back first (AR23)
       (when (or (!= (bit-and a1 pageMask) 0) (== a2 0))
         (return (- eINVAL) nil))
 
+      (.markAnon k a1 (pageUp a2) false)
       (.release k a1 (pageUp a2))
       (.Unmap (.-AS k) a1 (pageUp a2))
       (return 0 nil))
     (case [26] ; msync (AR23)
       (return (.msync k a1 a2 a3) nil))
+    (case [28] ; madvise (AR24, queue 299)
+      (return (.madvise k a1 a2 a3) nil))
+    (case [258] ; mkdirat (AR24, queue 299: os.Mkdir, os.MkdirTemp): at AT_FDCWD crt's mkdir, its umask; another dirfd ENOSYS
+      (when (== (conv int32 a1) -100)
+        (return (.passthru k 83 a2 a3 0 0 0 0)))
+
+      (return (- eNOSYS) nil))
     (case [285] ; fallocate (AR23)
       (return (.fallocate k a1 a2 a3 a4) nil))
     (case [10] ; mprotect
@@ -472,3 +490,44 @@ machines' Run calls it.
 
 
   (return (.Syscall (.-Sys k) (conv int64 n) a1 a2 a3 a4 a5 a6) nil))
+
+
+(go/method madvise "madvise(addr, len, advice) (AR24, queue 299: Go's scavenger returns its free pages with MADV_DONTNEED and the
+heap, its bitmaps and the GC's work buffers reuse them as zeros): addr not page-aligned EINVAL; MADV_DONTNEED (4) makes each mapped
+page of a private mapping in [addr, addr+len) read as zeros again, as Linux drops a private anonymous page (a private file
+mapping's page is zeroed too, not read again from its file: no program of the checks advises one); a shared mapping's pages,
+anonymous (markAnon) or a file's, keep their bytes, as Linux's shared memory and page cache do; every other advice is a hint, 0.
+" ^int64 [^{:tag (* Kernel)} k ^uint64 addr ^uint64 n ^uint64 advice]
+  (when (!= (bit-and addr pageMask) 0)
+    (return (- eINVAL)))
+
+  (when (!= advice 4)
+    (return 0))
+
+  (let [end (+ addr (pageUp n))]
+    (for [p addr] (< p end) (set! p + pageSize)
+      (let [shared (aget (.-anonShared k) p)]
+        (range [_ sm (.-shared k)]
+          (when (and (>= p (.-Base sm)) (< p (+ (.-Base sm) (.-Size sm))))
+            (set! shared true)))
+
+        (when (not shared)
+          (when [b (.Bytes (.-AS k) p)] (!= b nil)
+            (clear b))))))
+
+  0)
+
+
+(go/method markAnon "markAnon records [base, base+size) as pages of a shared anonymous mapping (on), or as not (off: another mapping or none
+there now).
+" [^{:tag (* Kernel)} k ^uint64 base ^uint64 size ^bool on]
+  (when (and on (== (.-anonShared k) nil))
+    (set! (.-anonShared k) (make (map uint64 bool))))
+
+  (when (== (.-anonShared k) nil)
+    (return))
+
+  (for [p base] (< p (+ base size)) (set! p + pageSize)
+    (if on
+      (aset (.-anonShared k) p true)
+      (delete (.-anonShared k) p))))

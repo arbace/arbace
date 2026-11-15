@@ -58,7 +58,10 @@ case $kind in
         env "${genv[@]}" "$GOROOT/bin/go" tool link -s -w -buildid=test -o "$exe" -importcfg="$W/importcfg" "$t/pkg.a") > "$t/build.log" 2>&1
     else
       # the driver's go run with the action's flags (GOPATH mode in $GOROOT/test, which has no go.mod)
-      (cd "$dir" && env "${genv[@]}" GO111MODULE=off "$GOROOT/bin/go" build ${flags[@]+"${flags[@]}"} -o "$exe" "$p") > "$t/build.log" 2>&1
+      # go run's files: the program, then the arguments up to the first that is not a .go file (cmplxdivide.go's cmplxdivide1.go,
+      # in the program's directory)
+      gofiles=("$p"); while [ ${#args[@]} -gt 0 ] && [[ ${args[0]} == *.go ]]; do gofiles+=("$(dirname "$p")/${args[0]}"); args=("${args[@]:1}"); done
+      (cd "$dir" && env "${genv[@]}" GO111MODULE=off "$GOROOT/bin/go" build ${flags[@]+"${flags[@]}"} -o "$exe" "${gofiles[@]}") > "$t/build.log" 2>&1
     fi ;;
   rundir)
     # each package of the .dir compiled in the files' order (one per file with -s), the last linked (its first file's object)
@@ -124,7 +127,7 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ast" "$(dg < "$t/a.out")" "$(head_er
   "$(head_err "$t/c.err" | dg)" "$(cat "$t/c.out" "$t/c.err" | dg)" "$(if [ -f "$GOROOT/test/${p%.go}.out" ]; then dg < "$GOROOT/test/${p%.go}.out"; else printf '' | dg; fi)" > "$W/res/$id.dig"
 case $ast in 124|137) row timeout "a64i over its budget of ${A64I_GOROOT_TMO:-120} s (the CPU's run ${cs} ms)" "$st" ;; esac
 why=
-if [ "$ast" != "$cst" ]; then why="status $ast, the CPU's $cst"
+if [ "$ast" != "$cst" ]; then why="status $ast, the CPU's $cst: $(head_err "$t/a.err" | grep . | tail -1 | cut -c1-160)"
 elif ! cmp -s "$t/a.out" "$t/c.out"; then why="stdout differs from the CPU's: $(diff "$t/c.out" "$t/a.out" | grep '^[<>]' | head -2 | tr '\n' ' ' | cut -c1-200)"
 elif [ "$(head_err "$t/a.err")" != "$(head_err "$t/c.err")" ]; then why="stderr differs from the CPU's: $(diff <(head_err "$t/c.err") <(head_err "$t/a.err") | grep '^[<>]' | head -2 | tr '\n' ' ' | cut -c1-200)"
 fi
