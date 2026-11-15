@@ -2891,3 +2891,48 @@ most 4 processes of this task's).
   control may name an injection, a fourth field) and go-14: fail as they must.
 - Left: os.Root's Mkdir (mkdirat with a directory descriptor), Chmod (fchmodat), Chtimes (utimensat) and Lchown (fchownat) are
   ENOSYS on a64i.
+
+## As built: queue 314, os.Root's remaining *at calls and pselect6 (2026-11-15; branch `314-asm-emu-root-calls`, from `8f67b4b02`; the Mac VM)
+
+309's DECISION (a), the user's: os.Root's Mkdir, MkdirAll, Chmod, Chtimes and Lchown were "function not implemented" on a64i, and musl's
+select ENOSYS. On the light lane of the Mac VM (the M2 Max, Linux 7.3.4, at most 4 processes of this task's); every value below is this
+M2's kernel's answer (the probe `.tmp/q314/pr/g.c`, 133 lines, raw arm64 system calls: a64i equal byte for byte, the base 290 lines apart).
+
+- **mkdirat** (arm64 34, x86-64 258; mkdir 83 the same) at any directory descriptor (an O_PATH one's too), in crt; emu's kernel no
+  longer takes it (it did at AT_FDCWD alone, ENOSYS elsewhere). The mode as vfs_mkdir's: the permissions and S_ISVTX (01777) less the
+  umask (07777 gives 041755 under 022), set exactly after the host's mkdir (the runner's own umask would strip more), an S_ISGID the
+  parent gives kept; a file's descriptor ENOTDIR, a bad one EBADF, the empty name ENOENT, NULL EFAULT, an absolute name whatever the
+  descriptor. umask (arm64 166) enters the table: it was ENOSYS, so umask(0) was lost.
+- **fchmodat** (53, 268; chmod 90): three arguments, Linux's: a fourth (AT_SYMLINK_NOFOLLOW) unseen, a link followed; mode's 07777.
+  **fchmodat2** (452 on both; os.Root's Chmod, Go's syscall.Fchmodat with flags): flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH
+  EINVAL before anything (a bad descriptor's too); AT_SYMLINK_NOFOLLOW on a symlink, a dangling one too, EOPNOTSUPP (Linux changes no
+  link's mode), as does AT_EMPTY_PATH on an O_PATH descriptor of a link; AT_EMPTY_PATH the descriptor's own file (an O_PATH one's,
+  a directory's).
+- **fchownat** (54, 260; chown 92, lchown 94): the same flags' EINVAL first; AT_SYMLINK_NOFOLLOW (or AT_EMPTY_PATH on an O_PATH
+  link) the link's own owner (the host's lchown), else the target's; -1 keeps an id. The host clears S_ISUID and S_ISGID as Linux does.
+- **utimensat** (88, 280; os.Root's Chtimes, os.Chtimes, musl's futimens): both UTIME_OMIT 0 before anything is looked at (a missing
+  name, a bad flag, a bad descriptor); a NULL name with a descriptor the descriptor's file (flags EINVAL, an O_PATH descriptor EBADF);
+  AT_FDCWD with NULL EFAULT; else the flags' EINVAL, the lookup's errors, then a tv_nsec outside 0..999999999 (not UTIME_NOW or
+  UTIME_OMIT) EINVAL; a link's own times with AT_SYMLINK_NOFOLLOW. The host's utimensat on linux (sys_linux.ae's sysUtimens); on tamago
+  UtimesNano with UTIME_NOW and UTIME_OMIT resolved.
+- **pselect6** (72, 270; x86-64's select 23 with its timeval, tv_usec carried into seconds as kern_select does): nfds below 0 EINVAL;
+  the timeout first (a negative one or a bad tv_nsec EINVAL), then the signal mask's argument (a set of size other than 8 EINVAL, a
+  NULL set any size); nfds cut at the descriptor table's size (64, else 128 times a power of two holding the highest descriptor, as
+  alloc_fdtable rounds: nfds 1025 is no EINVAL); a set bit below it of no open descriptor EBADF; every open descriptor ready to read
+  and to write (crt's poll's model; an O_PATH descriptor's too, empty_fops' DEFAULT_POLLMASK), none exceptional; the sets written back
+  (nfds' longs, the except set zero); the result the bits set (3 for one descriptor in the read and write sets and another in the read
+  set); nothing ready, the timeout slept, and a timeout not zero written back as what remains (0 after a 20 ms sleep).
+- The lockstep takes fchmodat, fchmodat2, fchownat and utimensat from the native (the files are the world's), and pselect6's result,
+  its three sets (cut at 1024) and its timeout (the descriptors are the native's).
+- Tests: `test/asm/a64i/linux-at-calls.s` (essential; eval, AOT, forms, the CPU, lockstep sys and step: 109 system calls, 7,508
+  instructions) and `test/asm/a64i-go/osroot` extended to every os.Root method (Name, Create, WriteFile, ReadFile, Mkdir, MkdirAll,
+  Chmod, Chtimes, Chown, Lchown, Symlink, Readlink, Link, Rename, OpenFile, Remove, RemoveAll, Stat, Lstat, OpenRoot, FS) inside the
+  root, through its links and out of it, the file outside unchanged. Controls: u314-inject-1 (A64I_INJECT=FAMILY:t: AT_SYMLINK_NOFOLLOW
+  dropped from fchmodat2, fchownat and utimensat, pselect6's nfds 0), u314-verdict-1, u314-go-1 (FAMILY:k: mkdirat's descriptor taken
+  as AT_FDCWD, osroot's directories made beside the root): fail as they must.
+- x86i: crt is shared and emu's kernel passes mkdirat on, so x86i gains mkdirat at a descriptor, mkdir's S_ISVTX and exact mode,
+  chmod, fchmodat, fchmodat2, chown, lchown, fchownat, utimensat, select and the new pselect6 (probed: `.tmp/q314/crtx`, x86-64's
+  numbers to crt.Sys.Syscall on this VM, 48 rows equal to the arm64 native's); x86i's lockstep world is untouched (no x86 test uses them).
+- Left: fchmod and fchown (52, 55; Go's File.Chmod and File.Chown) stay ENOSYS on a64i; a descriptor's path is its name at its open
+  (futimens or AT_EMPTY_PATH of a file renamed or removed since acts on the name, Linux on the inode); select with no descriptor and no
+  timeout returns 0 where Linux blocks.
