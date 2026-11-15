@@ -2891,3 +2891,29 @@ most 4 processes of this task's).
   control may name an injection, a fourth field) and go-14: fail as they must.
 - Left: os.Root's Mkdir (mkdirat with a directory descriptor), Chmod (fchmodat), Chtimes (utimensat) and Lchown (fchownat) are
   ENOSYS on a64i.
+## As built: queue 310 (2026-11-15; branch `310-asm-emu-shared-writeback`, from `eb933b551`; the Mac VM): the shared write-back
+
+Review 306's F4: AR23's write-back wrote each page's span from its first changed byte to its last, over the bytes a write(2) put
+between them since the mapping read the file (probe p5: `XYaa` at 50 where Linux has `XYWW`), and on an O_APPEND descriptor wrote
+nothing (p1: both stores lost; crt's pwrite64 is Go's WriteAt, which refuses an append-mode file, and the error was dropped).
+ARS93 (a) stays: the mapping is a copy written back at msync, munmap, MAP_FIXED over it and the process's end; only the file's
+integrity changed (emu, so x86i's kernel too).
+
+- **`writeBack`** writes each run of bytes that differ from the mapping's shadow, one pwrite a run, never the bytes between the
+  runs: a write(2)'s bytes the program did not also change through the mapping stay (a byte both changed is the mapping's, as
+  before: the copy cannot order them).
+- **O_APPEND**: crt's new `Sys.WriteBack(fd, b, off)` writes at `off` whatever the description's O_APPEND (`pwriteInPlace`,
+  sys_linux.ae: the host description's O_APPEND cleared around one pwrite and put back, under crt's one-thread-at-a-time turn;
+  sys_other.ae Go's WriteAt). The program's descriptor still appends.
+- **Errors where Linux reports them**: a run not written stays changed (tried again at the next write-back), and the first failure
+  is the mapping's (`sharedMap.Err`; ENOSPC and EDQUOT as themselves, any other EIO, as mapping_set_error records them) until
+  msync with MS_SYNC returns it and clears it, as vfs_fsync_range of the mapping's file does; MS_ASYNC, munmap and the end report
+  none (Linux's neither). Probe (a64i only: the failure is made by closing the mapping's own descriptor, 0x40000000, which Linux
+  does not have): MS_ASYNC 0, MS_SYNC EIO.
+- **The lockstep** takes pwrite64 from the native (its descriptors are the world's; it was a64i's own, EBADF) and the shared
+  mappings' pages from the native after it, as after write.
+- `linux-msync-wb.s` (test/asm/a64i/, essential; controls verdict-47, cpu-10): p5 and p1 as a program (a pwrite64 between two
+  stores in a page, twice; a mapping of an O_APPEND descriptor, msync MS_SYNC and munmap; the descriptor still appending, F_GETFL's
+  O_APPEND): eval, AOT, the CPU, lockstep sys and step (49 system calls, 3,722 instructions) and the loader agree; before, eval, AOT
+  and the CPU differ in 6 of 22 lines. x86i's twin `test/asm/x86i/linux-msync-wb.s` (control cpu-msyncwb-vs-misc), its rows the
+  main host's `bin/repr-asm x86i-check --record`.
