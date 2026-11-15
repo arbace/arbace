@@ -6924,3 +6924,29 @@ both bad cases exit 0.
 Keys: until 730f59621 none moved (gate_key `66c29674...`, javac keys `09cfb08b...`/`5b3a6705...`, as on 98b7d7507: 992a9b712 moved the
 javac keys through bin/lib/ci, f1e7a5b5b moved them back). 730f59621 (bin/arbace-go, bin/lib/program.bash) moves gate_key to
 `c7a2235a...` and the javac keys to `310c28e6...`/`47ff9274...`, as the item asked.
+
+## 2026-11-15: revisit-1115's round 43 (the user's decisions on its two questions)
+
+The user decided (round 43): InterruptDeadlock's (t05126) hand-written levels-known entry stays (option (a)); and every cirun run of
+cppi gets a memory cap of its own under a CPU-time limit, not only the programs check-budget.edn lists (option (a)).
+
+- `bin/lib/cppi/runprog.bash`'s `cppi_run_prog CPU WALL STATUS PROGRAM...` (a crop path, in no key): `GOMEMLIMIT` unset (bin/cppi
+  exports its tools' 1500MiB), limit.bash's `limited_cpu` with `ARBACE_MEM_GIB=CPPI_RUN_MEM_GIB` (default 8: an 8 GiB address
+  space, GOMEMLIMIT 6144MiB), CPU seconds of CPU time and a wall cap of at least four times that; a 124 at the wall cap or a 137 at
+  four fifths of the CPU seconds is "timeout". bin/cppi check's run1 takes it for every program (CPU: the entry's `:cpu`, else its
+  seconds, 30 by default), bin/cppi run too (`CPPI_RUN_CPU`, default 3600).
+- `test/cpp/selftest/run-limits.sh` (bin/cppi selftest, the `cpp-selftest` step): under the tool's exported 1500MiB a stand-in program
+  run through it sees `GOMEMLIMIT=6144MiB` and `ulimit -v` 8388608; the control, the same program run directly, sees 1500MiB; a
+  program's own exit 3 stays 3; a spin past 1 s of CPU is a timeout.
+- Why atomics.cpp holds 2.8 GB (a short look, `GODEBUG=gctrace=1` on its nodes): the live heap stays at about 92 MB; what grows is
+  the goroutine stacks, 339 MB at 8 s, 627 MB at 14 s, 1126 MB at 25 s, linearly with the loop's iterations. Go counts stacks in the
+  collector's goal, so under 1500MiB it collected without end. Some frame of ci's back end grows a stack per iteration of the threads'
+  loop (a recursion or a retained frame in go/arbace/ci's run of the lowered loop); not fixed here: go/arbace/ci is a gate_key input
+  and the cause is not found yet, a finding for C's and C++'s owners.
+- Reruns on the branch: cpp-check-essential's command (`bin/cppi check --only test/cpp/essential-check.txt`): samples 4 of 4, runtime
+  3 pass and threads 1 in its class, exit 0 (12m12s, peak 1.9 GiB). The samples/runtime part (`bin/cppi check`): samples 7 of 7,
+  runtime 6 pass (atomics.cpp at 32.8 s), threads 1 in its class, and runtime/threads.cpp failing: recorded in `:thread-exceptions`
+  (a segmentation fault in `_ZL4worki`), now an abort through `std::terminate` from `std::this_thread::yield` (status 139). Not this
+  change: the program built from 13e's tree (next's `.tmp/cppi-check/nodes`) still segfaults in `_ZL4worki` under the new limits,
+  and the branch's own build aborts under the old limit as well (three runs of each); its nodes come from next's newer C++ front end
+  (cpp-s14, cpp-s15, merged after 13e, the `ours` route). Left to C++'s owners: tonight's cpp-check.samples-runtime fails on it.
