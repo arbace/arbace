@@ -326,6 +326,10 @@ their classes), `bin/reap record`. Until the compiled record covers the corpus t
   (b) the JDK's translated classes in a package of their own built once (the shards share jrt's and the JDK's compiled objects in Go's cache).
   *Recommended: (a) now, (b) when the gate step is added*: it would turn a shard into j2g plus a small link.
 
+## Decided (2026-11-05, the user: OT11-OT15)
+
+OT11: the compiled depth limit stays 200,000; OT12: a --full step oi-aot-compiled and divergences --compiled in the essential step; OT13: musl's strerror texts; OT14: the classes needing the JDK's resource data kept avoided; OT15: compiled builds at night for now, the JDK's translated classes built once later.
+
 ## As built: OT9's next three fixes (2026-11-05, branch `ocaml-libs2`)
 
 Built on the light tier of the day, as the first two (no gate, no build of Arbace's executables, no corpus run, stage 0 of main as the
