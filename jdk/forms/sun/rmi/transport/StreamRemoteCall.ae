@@ -1,0 +1,165 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/StreamRemoteCall.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport)
+
+(import '(java.io DataInputStream
+                  DataOutputStream
+                  IOException
+                  ObjectInput
+                  ObjectInputFilter
+                  ObjectOutput
+                  StreamCorruptedException)
+        '(java.rmi MarshalException RemoteException UnmarshalException)
+        '(java.rmi.server ObjID RemoteCall)
+        '(sun.rmi.runtime Log)
+        '(sun.rmi.server UnicastRef)
+        '(sun.rmi.transport.tcp TCPEndpoint))
+
+(defclass ^:public StreamRemoteCall
+  :implements [RemoteCall]
+
+  (field ^:private ^ConnectionInputStream in nil)
+
+  (field ^:private ^ConnectionOutputStream out nil)
+
+  (field ^:private ^Connection conn)
+
+  (field ^:private ^ObjectInputFilter filter nil)
+
+  (field ^:private ^boolean resultStarted false)
+
+  (field ^:private ^Exception serverException nil)
+
+  (constructor ^:public [this ^Connection c] (set! conn c))
+
+  (constructor :throws [RemoteException] ^:public [this ^Connection c ^ObjID id ^int op ^long hash]
+    (try
+      (set! conn c)
+      (.log Transport/transportLog Log/VERBOSE "write remote call header...")
+      (.write (.getOutputStream conn) TransportConstants/Call)
+      (.getOutputStream this)
+      (.write id out)
+      (.writeInt out op)
+      (.writeLong out hash)
+      (catch IOException e (throw (MarshalException. "Error marshaling call header" e)))))
+
+  (method ^:public getConnection ^Connection [this] conn)
+
+  (method ^:public getOutputStream :throws [IOException] ^ObjectOutput [this]
+    (.getOutputStream this false))
+
+  (method ^:private getOutputStream :throws [IOException] ^ObjectOutput [this ^boolean resultStream]
+    (when (nil? out)
+      (.log Transport/transportLog Log/VERBOSE "getting output stream")
+      (set! out (ConnectionOutputStream. conn resultStream)))
+    out)
+
+  (method ^:public releaseOutputStream :throws [IOException] ^void [this]
+    (try
+      (when (some? out) (try (.flush out) (finally (.done out))))
+      (.releaseOutputStream conn)
+      (finally (set! out nil))))
+
+  (method ^:public setObjectInputFilter ^void [this ^ObjectInputFilter filter]
+    (when (some? in)
+      (throw (IllegalStateException. "set filter must occur before calling getInputStream")))
+    (set! (.-filter this) filter))
+
+  (method ^:public getInputStream :throws [IOException] ^ObjectInput [this]
+    (when (nil? in)
+      (.log Transport/transportLog Log/VERBOSE "getting input stream")
+      (set! in (ConnectionInputStream. (.getInputStream conn)))
+      (when (some? filter) (.setObjectInputFilter in filter)))
+    in)
+
+  (method ^:public releaseInputStream :throws [IOException] ^void [this]
+    (try
+      (when (some? in)
+        (try (.done in) (catch RuntimeException e))
+        (.registerRefs in)
+        (.done in conn))
+      (.releaseInputStream conn)
+      (finally (set! in nil))))
+
+  (method ^:public discardPendingRefs ^void [this] (.discardRefs in))
+
+  (method ^:public getResultStream :throws [IOException] ^ObjectOutput [this ^boolean success]
+    (if resultStarted
+        (throw (StreamCorruptedException. "result already in progress"))
+        (set! resultStarted true))
+    (let [wr (DataOutputStream. (.getOutputStream conn))]
+      (.writeByte wr TransportConstants/Return)
+      (.getOutputStream this true)
+      (if success
+          (.writeByte out TransportConstants/NormalReturn)
+          (.writeByte out TransportConstants/ExceptionalReturn))
+      (.writeID out)
+      out))
+
+  (method ^:public executeCall :throws [Exception] ^void [this]
+    (let [^:mutable ^byte returnType 0
+          ^:mutable ^DGCAckHandler ackHandler nil]
+      (try
+        (when (some? out) (set! ackHandler (.getDGCAckHandler out)))
+        (.releaseOutputStream this)
+        (let [rd (DataInputStream. (.getInputStream conn))
+              op (.readByte rd)]
+          (when-not (== op TransportConstants/Return)
+            (when (.isLoggable Transport/transportLog Log/BRIEF)
+              (.log Transport/transportLog
+                    Log/BRIEF
+                    (java-str "transport return code invalid: " op)))
+            (throw (UnmarshalException. "Transport return code invalid")))
+          (.getInputStream this)
+          (set! returnType (.readByte in))
+          (.readID in))
+        (catch UnmarshalException e (throw e))
+        (catch IOException e (throw (UnmarshalException. "Error unmarshaling return header" e)))
+        (finally (when (some? ackHandler) (.release ackHandler))))
+      (switch returnType
+        TransportConstants/NormalReturn nil
+        TransportConstants/ExceptionalReturn
+          (let [^:mutable ^Object ex nil]
+            (try
+              (set! ex (.readObject in))
+              (catch Exception e
+                (.discardPendingRefs this)
+                (throw (UnmarshalException. "Error unmarshaling return" e))))
+            (if (instance? Exception ex)
+                (.exceptionReceivedFromServer this (cast Exception ex))
+                (do
+                  (.discardPendingRefs this)
+                  (throw (UnmarshalException. "Return type not Exception"))))
+            (when (.isLoggable Transport/transportLog Log/BRIEF)
+              (.log Transport/transportLog Log/BRIEF (java-str "return code invalid: " returnType)))
+            (throw (UnmarshalException. "Return code invalid")))
+        (do
+          (when (.isLoggable Transport/transportLog Log/BRIEF)
+            (.log Transport/transportLog Log/BRIEF (java-str "return code invalid: " returnType)))
+          (throw (UnmarshalException. "Return code invalid"))))))
+
+  (method ^:protected exceptionReceivedFromServer :throws [Exception] ^void [this ^Exception ex]
+    (set! serverException ex)
+    (let [serverTrace (.getStackTrace ex)
+          clientTrace (.getStackTrace (Throwable.))
+          combinedTrace (new StackTraceElement/1
+                             (unchecked-add-int (alength serverTrace) (alength clientTrace)))]
+      (System/arraycopy serverTrace 0 combinedTrace 0 (alength serverTrace))
+      (System/arraycopy clientTrace 0 combinedTrace (alength serverTrace) (alength clientTrace))
+      (.setStackTrace ex combinedTrace)
+      (when (.isLoggable UnicastRef/clientCallLog Log/BRIEF)
+        (let [ep (cast TCPEndpoint (.getEndpoint (.getChannel conn)))]
+          (.log UnicastRef/clientCallLog
+                Log/BRIEF
+                (java-str "outbound call received exception: ["
+                          (.getHost ep)
+                          ":"
+                          (.getPort ep)
+                          "] exception: ")
+                ex)))
+      (throw ex)))
+
+  (method ^:public getServerException ^Exception [this] serverException)
+
+  (method ^:public done :throws [IOException] ^void [this]
+    (.releaseInputStream this)))

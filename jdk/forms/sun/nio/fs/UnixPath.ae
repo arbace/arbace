@@ -1,0 +1,681 @@
+;; Converted from overlay/jdk/java.base/sun/nio/fs/UnixPath.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.net URI)
+        '(java.nio.charset CharacterCodingException)
+        '(java.nio.file DirectoryStream
+                        DirectoryStream$Filter
+                        InvalidPathException
+                        LinkOption
+                        Path
+                        ProviderMismatchException
+                        WatchEvent$Kind
+                        WatchEvent$Modifier
+                        WatchKey
+                        WatchService)
+        '(java.util Arrays Objects)
+        '(jdk.internal.access JavaLangAccess SharedSecrets)
+        '(jdk.internal.jrt NioStrings)
+        '(jdk.internal.util ArraysSupport)
+        '(jdk.internal.vm.annotation Stable))
+
+(defclass UnixPath
+  :implements [Path]
+
+  (field ^:private ^:static ^:final ^JavaLangAccess JLA (SharedSecrets/getJavaLangAccess))
+
+  (field ^:private ^:final ^UnixFileSystem fs)
+
+  (field ^:private ^:final ^byte/1 path)
+
+  (field ^:private ^{Stable true} ^String stringValue)
+
+  (field ^:private ^int hash)
+
+  (field ^:private ^:volatile ^int/1 offsets)
+
+  (constructor [this ^UnixFileSystem fs ^byte/1 path]
+    (set! (.-fs this) fs)
+    (set! (.-path this) path))
+
+  (constructor [this ^UnixFileSystem fs ^String input]
+    (this. fs (UnixPath/encode fs (UnixPath/normalizeAndCheck input))))
+
+  (method ^:static normalizeAndCheck ^String [^String input]
+    (let [n (.length input)
+          ^:mutable ^char prevChar 0]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [c (.charAt input i)]
+            (when (and (== c \/) (== prevChar \/))
+              (return (UnixPath/normalize input n (unchecked-subtract-int i 1))))
+            (UnixPath/checkNotNul input c)
+            (set! prevChar c)
+            (recur (unchecked-inc-int i)))))
+      (if (and (== prevChar \/) (> n 1)) (.substring input 0 (unchecked-subtract-int n 1)) input)))
+
+  (method ^:private ^:static checkNotNul ^void [^String input ^char c]
+    (when (== c \u0000) (throw (InvalidPathException. input "Nul character not allowed"))))
+
+  (method ^:private ^:static normalize ^String [^String input ^int len ^int off]
+    (if (== len 0)
+        input
+        (let [^:mutable n len]
+          (while (and (> n 0) (== (.charAt input (unchecked-subtract-int n 1)) \/))
+            (set! n (unchecked-dec-int n)))
+          (if (== n 0)
+              "/"
+              (let [sb (StringBuilder. (.length input))]
+                (when (> off 0) (.append sb input 0 off))
+                (let [^:mutable ^char prevChar 0]
+                  (loop [^int i off]
+                    (when (< i n)
+                      (let [c (.charAt input i)]
+                        (if (and (== c \/) (== prevChar \/))
+                            (recur (unchecked-inc-int i))
+                            (do
+                              (UnixPath/checkNotNul input c)
+                              (.append sb c)
+                              (set! prevChar c)
+                              (recur (unchecked-inc-int i)))))))
+                  (.toString sb)))))))
+
+  (method ^:private ^:static encode ^byte/1 [^UnixFileSystem fs ^String input]
+    (try
+      (NioStrings/getBytesOrThrow input (Util/jnuEncoding))
+      (catch CharacterCodingException cce
+        (throw (InvalidPathException. input
+                                      "Malformed input or input contains unmappable characters")))))
+
+  (method asByteArray ^byte/1 [this] path)
+
+  (method getByteArrayForSysCalls ^byte/1 [this]
+    (cond
+      (.needToResolveAgainstDefaultDirectory (.getFileSystem this))
+        (UnixPath/resolve (.defaultDirectory (.getFileSystem this)) path)
+      (not (.isEmpty this)) path
+      :else (let [here (new byte/1 [(unchecked-byte \.)])] here)))
+
+  (method getPathForExceptionMessage ^String [this] (.toString this))
+
+  (method getPathForPermissionCheck ^String [this]
+    (if (.needToResolveAgainstDefaultDirectory (.getFileSystem this))
+        (Util/toString (.getByteArrayForSysCalls this))
+        (.toString this)))
+
+  (method ^:static toUnixPath ^UnixPath [^Path obj]
+    (when (nil? obj) (throw (NullPointerException.)))
+    (when-not (instance? UnixPath obj) (throw (ProviderMismatchException.)))
+    (cast UnixPath obj))
+
+  (method ^:private initOffsets ^void [this]
+    (when (nil? offsets)
+      (let [^:mutable ^int count 0
+            ^:mutable ^int index 0]
+        (set! count 0)
+        (set! index 0)
+        (if (.isEmpty this)
+            (set! count 1)
+            (while (< index (alength path))
+              (let [c (aget path (let [old-1 index] (set! index (unchecked-inc-int index)) old-1))]
+                (when-not (== c \/)
+                  (set! count (unchecked-inc-int count))
+                  (while (and (< index (alength path)) (not (== (aget path index) \/)))
+                    (set! index (unchecked-inc-int index)))))))
+        (let [result (new int/1 count)]
+          (set! count 0)
+          (set! index 0)
+          (while (< index (alength path))
+            (let [c (aget path index)]
+              (if (== c \/)
+                  (set! index (unchecked-inc-int index))
+                  (do
+                    (aset result count index)
+                    (set! count (unchecked-inc-int count))
+                    (set! index (unchecked-inc-int index))
+                    (while (and (< index (alength path)) (not (== (aget path index) \/)))
+                      (set! index (unchecked-inc-int index)))))))
+          (locking this (when (nil? offsets) (set! offsets result)))))))
+
+  (method isEmpty ^boolean [this] (== (alength path) 0))
+
+  (method ^:private emptyPath ^UnixPath [this]
+    (UnixPath. (.getFileSystem this) (new byte/1 0)))
+
+  (method ^:private hasDotOrDotDot ^boolean [this]
+    (let [n (.getNameCount this)]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [bytes (.-path (.getName this i))]
+            (when (and (== (alength bytes) 1) (== (aget bytes 0) \.)) (return true))
+            (if (and (and (== (alength bytes) 2) (== (aget bytes 0) \.)) (== (aget bytes 1) \.))
+                (return true)
+                (recur (unchecked-inc-int i))))))
+      false))
+
+  (method ^:public getFileSystem ^UnixFileSystem [this] fs)
+
+  (method ^:public getRoot ^UnixPath [this]
+    (when (and (> (alength path) 0) (== (aget path 0) \/)) (.rootDirectory (.getFileSystem this))))
+
+  (method ^:public getFileName ^UnixPath [this]
+    (.initOffsets this)
+    (let [count (alength offsets)]
+      (when-not (== count 0)
+        (if (and (and (== count 1) (> (alength path) 0)) (not (== (aget path 0) \/)))
+            this
+            (let [lastOffset (aget offsets (unchecked-subtract-int count 1))
+                  len (unchecked-subtract-int (alength path) lastOffset)
+                  result (new byte/1 len)]
+              (System/arraycopy path lastOffset result 0 len)
+              (UnixPath. (.getFileSystem this) result))))))
+
+  (method ^:public getParent ^UnixPath [this]
+    (.initOffsets this)
+    (let [count (alength offsets)]
+      (when-not (== count 0)
+        (let [len (unchecked-subtract-int (aget offsets (unchecked-subtract-int count 1)) 1)]
+          (if (<= len 0)
+              (.getRoot this)
+              (let [result (new byte/1 len)]
+                (System/arraycopy path 0 result 0 len)
+                (UnixPath. (.getFileSystem this) result)))))))
+
+  (method ^:public getNameCount ^int [this]
+    (.initOffsets this)
+    (alength offsets))
+
+  (method ^:public getName ^UnixPath [this ^int index]
+    (.initOffsets this)
+    (when (< index 0) (throw (IllegalArgumentException.)))
+    (when (>= index (alength offsets)) (throw (IllegalArgumentException.)))
+    (let [begin (aget offsets index)
+          ^int len (if (== index (unchecked-subtract-int (alength offsets) 1))
+                       (unchecked-subtract-int (alength path) begin)
+                       (unchecked-subtract-int
+                         (unchecked-subtract-int (aget offsets (unchecked-add-int index 1)) begin)
+                         1))]
+      (let [result (new byte/1 len)]
+        (System/arraycopy path begin result 0 len)
+        (UnixPath. (.getFileSystem this) result))))
+
+  (method ^:public subpath ^UnixPath [this ^int beginIndex ^int endIndex]
+    (.initOffsets this)
+    (when (< beginIndex 0) (throw (IllegalArgumentException.)))
+    (when (>= beginIndex (alength offsets)) (throw (IllegalArgumentException.)))
+    (when (> endIndex (alength offsets)) (throw (IllegalArgumentException.)))
+    (when (>= beginIndex endIndex) (throw (IllegalArgumentException.)))
+    (let [begin (aget offsets beginIndex)
+          ^int len (if (== endIndex (alength offsets))
+                       (unchecked-subtract-int (alength path) begin)
+                       (unchecked-subtract-int
+                         (unchecked-subtract-int (aget offsets endIndex) begin)
+                         1))]
+      (let [result (new byte/1 len)]
+        (System/arraycopy path begin result 0 len)
+        (UnixPath. (.getFileSystem this) result))))
+
+  (method ^:public isAbsolute ^boolean [this]
+    (and (> (alength path) 0) (== (aget path 0) \/)))
+
+  (method ^:private ^:static resolve ^byte/1 [^byte/1 base ^byte/1 child]
+    (let [baseLength (alength base)
+          childLength (alength child)]
+      (cond
+        (== childLength 0) base
+        (or (== baseLength 0) (== (aget child 0) \/)) child
+        :else
+          (let [^:mutable ^byte/1 result nil]
+            (if (and (== baseLength 1) (== (aget base 0) \/))
+                (do
+                  (set! result (new byte/1 (unchecked-add-int childLength 1)))
+                  (aset result 0 (unchecked-byte \/))
+                  (System/arraycopy child 0 result 1 childLength))
+                (do
+                  (set! result
+                        (new byte/1
+                             (unchecked-add-int (unchecked-add-int baseLength 1) childLength)))
+                  (System/arraycopy base 0 result 0 baseLength)
+                  (aset result (alength base) (unchecked-byte \/))
+                  (System/arraycopy child 0 result (unchecked-add-int baseLength 1) childLength)))
+            result))))
+
+  (method ^:public resolve ^UnixPath [this ^Path obj]
+    (let [other (.-path (UnixPath/toUnixPath obj))]
+      (if (and (> (alength other) 0) (== (aget other 0) \/))
+          (cast UnixPath obj)
+          (let [result (UnixPath/resolve path other)] (UnixPath. (.getFileSystem this) result)))))
+
+  (method resolve ^UnixPath [this ^byte/1 other]
+    (.resolve this (UnixPath. (.getFileSystem this) other)))
+
+  (method ^:private ^:static ^:final resolve ^byte/1 [^byte/1 base & ^byte/2 children]
+    (let [^:mutable ^int start 0
+          ^:mutable resultLength (alength base)
+          count (alength children)]
+      (when (> count 0)
+        (loop [^int i 0]
+          (when (< i count)
+            (let [b (aget children i)]
+              (if (> (alength b) 0)
+                  (if (== (aget b 0) \/)
+                      (do
+                        (set! start (unchecked-add-int i 1))
+                        (set! resultLength (alength b))
+                        (recur (unchecked-inc-int i)))
+                      (do
+                        (when (> resultLength 0)
+                          (set! resultLength (unchecked-inc-int resultLength)))
+                        (set! resultLength (unchecked-add-int resultLength (alength b)))
+                        (recur (unchecked-inc-int i))))
+                  (recur (unchecked-inc-int i)))))))
+      (when (and (and (and (== start 0) (> resultLength (alength base))) (== (alength base) 1))
+                 (== (aget base 0) \/))
+        (set! resultLength (unchecked-dec-int resultLength)))
+      (let [result (new byte/1 resultLength)]
+        (if (== (alength result) 0)
+            result
+            (let [^:mutable ^int offset 0]
+              (when (and (== start 0) (> (alength base) 0))
+                (System/arraycopy base 0 result 0 (alength base))
+                (set! offset (unchecked-add-int offset (alength base))))
+              (when (> count 0)
+                (let [idx (^[int int] Math/max 0 (unchecked-subtract-int start 1))]
+                  (loop [^int i idx]
+                    (when (< i count)
+                      (let [b (aget children i)]
+                        (if (> (alength b) 0)
+                            (do
+                              (when (and (> offset 0)
+                                         (not (==
+                                                (aget result (unchecked-subtract-int offset 1))
+                                                \/)))
+                                (aset result offset (unchecked-byte \/))
+                                (set! offset (unchecked-inc-int offset)))
+                              (System/arraycopy b 0 result offset (alength b))
+                              (set! offset (unchecked-add-int offset (alength b)))
+                              (recur (unchecked-inc-int i)))
+                            (recur (unchecked-inc-int i))))))))
+              result)))))
+
+  (method ^:public resolve ^UnixPath [this ^Path first & ^Path/1 more]
+    (if (== (alength more) 0)
+        (.resolve this first)
+        (let [children (new byte/2 (unchecked-add-int 1 (alength more)))]
+          (aset children 0 (.-path (UnixPath/toUnixPath first)))
+          (loop [^int i 0]
+            (when (< i (alength more))
+              (aset children (unchecked-add-int i 1) (.-path (UnixPath/toUnixPath (aget more i))))
+              (recur (unchecked-inc-int i))))
+          (let [result (UnixPath/resolve path children)] (UnixPath. (.getFileSystem this) result)))))
+
+  (method ^:public relativize ^UnixPath [this ^Path obj]
+    (let [^:mutable child (UnixPath/toUnixPath obj)]
+      (if (.equals child this)
+          (.emptyPath this)
+          (do
+            (when-not (= (.isAbsolute this) (.isAbsolute child))
+              (throw (IllegalArgumentException. "'other' is different type of Path")))
+            (if (.isEmpty this)
+                child
+                (let [^:mutable base this]
+                  (when (or (.hasDotOrDotDot base) (.hasDotOrDotDot child))
+                    (set! base (.normalize base))
+                    (set! child (.normalize child)))
+                  (let [baseCount (.getNameCount base)
+                        childCount (.getNameCount child)
+                        n (Math/min baseCount childCount)
+                        ^:mutable ^int i 0]
+                    (while (< i n)
+                      (when-not (.equals (.getName base i) (.getName child i)) (break))
+                      (set! i (unchecked-inc-int i)))
+                    (let [^:mutable ^UnixPath childRemaining nil
+                          ^:mutable ^boolean isChildEmpty false]
+                      (if (== i childCount)
+                          (do (set! childRemaining (.emptyPath this)) (set! isChildEmpty true))
+                          (do
+                            (set! childRemaining (.subpath child i childCount))
+                            (set! isChildEmpty (.isEmpty childRemaining))))
+                      (if (== i baseCount)
+                          childRemaining
+                          (let [baseRemaining (.subpath base i baseCount)]
+                            (when (.hasDotOrDotDot baseRemaining)
+                              (throw (IllegalArgumentException.
+                                       (java-str
+                                         "Unable to compute relative  path from "
+                                         this
+                                         " to "
+                                         obj))))
+                            (if (.isEmpty baseRemaining)
+                                childRemaining
+                                (let [^:mutable dotdots (.getNameCount baseRemaining)]
+                                  (if (== dotdots 0)
+                                      childRemaining
+                                      (let [^:mutable len (unchecked-add-int
+                                                            (unchecked-multiply-int dotdots 3)
+                                                            (alength (.-path childRemaining)))]
+                                        (when isChildEmpty
+                                          (java-assert (.isEmpty childRemaining))
+                                          (set! len (unchecked-dec-int len)))
+                                        (let [result (new byte/1 len)
+                                              ^:mutable ^int pos 0]
+                                          (while (> dotdots 0)
+                                            (aset result pos (unchecked-byte \.))
+                                            (set! pos (unchecked-inc-int pos))
+                                            (aset result pos (unchecked-byte \.))
+                                            (set! pos (unchecked-inc-int pos))
+                                            (if isChildEmpty
+                                                (when (> dotdots 1)
+                                                  (aset result pos (unchecked-byte \/))
+                                                  (set! pos (unchecked-inc-int pos)))
+                                                (do
+                                                  (aset result pos (unchecked-byte \/))
+                                                  (set! pos (unchecked-inc-int pos))))
+                                            (set! dotdots (unchecked-dec-int dotdots)))
+                                          (System/arraycopy
+                                            (.-path childRemaining)
+                                            0
+                                            result
+                                            pos
+                                            (alength (.-path childRemaining)))
+                                          (UnixPath. (.getFileSystem this) result))))))))))))))))
+
+  (method ^:public normalize ^UnixPath [this]
+    (let [count (.getNameCount this)]
+      (if (or (== count 0) (.isEmpty this))
+          this
+          (let [ignore (new boolean/1 count)
+                size (new int/1 count)
+                ^:mutable remaining count
+                ^:mutable hasDotDot false
+                isAbsolute (.isAbsolute this)]
+            (loop [^int i 0]
+              (when (< i count)
+                (let [begin (aget offsets i)
+                      ^int len (if (== i (unchecked-subtract-int (alength offsets) 1))
+                                   (unchecked-subtract-int (alength path) begin)
+                                   (unchecked-subtract-int
+                                     (unchecked-subtract-int
+                                       (aget offsets (unchecked-add-int i 1))
+                                       begin)
+                                     1))]
+                  (aset size i len)
+                  (if (== (aget path begin) \.)
+                      (cond
+                        (== len 1)
+                          (do
+                            (aset ignore i true)
+                            (set! remaining (unchecked-dec-int remaining))
+                            (recur (unchecked-inc-int i)))
+                        (== (aget path (unchecked-add-int begin 1)) \.)
+                          (do (set! hasDotDot true) (recur (unchecked-inc-int i)))
+                        :else (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i))))))
+            (when hasDotDot
+              (let [^:mutable ^int prevRemaining 0]
+                (loop []
+                  (set! prevRemaining remaining)
+                  (let [^:mutable ^int prevName -1]
+                    (loop [^int i 0]
+                      (when (< i count)
+                        (cond
+                          (aget ignore i) (recur (unchecked-inc-int i))
+                          (not (== (aget size i) 2))
+                            (do (set! prevName i) (recur (unchecked-inc-int i)))
+                          :else
+                            (let [begin (aget offsets i)]
+                              (cond
+                                (or (not (== (aget path begin) \.))
+                                    (not (== (aget path (unchecked-add-int begin 1)) \.)))
+                                  (do (set! prevName i) (recur (unchecked-inc-int i)))
+                                (>= prevName 0)
+                                  (do
+                                    (aset ignore prevName true)
+                                    (aset ignore i true)
+                                    (set! remaining (unchecked-subtract-int remaining 2))
+                                    (set! prevName -1)
+                                    (recur (unchecked-inc-int i)))
+                                isAbsolute
+                                  (let [^:mutable hasPrevious false]
+                                    (loop [^int j 0]
+                                      (if (< j i)
+                                          (if (not (aget ignore j))
+                                              (set! hasPrevious true)
+                                              (recur (unchecked-inc-int j)))
+                                          nil))
+                                    (if (not hasPrevious)
+                                        (do
+                                          (aset ignore i true)
+                                          (set! remaining (unchecked-dec-int remaining))
+                                          (recur (unchecked-inc-int i)))
+                                        (recur (unchecked-inc-int i))))
+                                :else (recur (unchecked-inc-int i))))))))
+                  (when (> prevRemaining remaining) (recur)))))
+            (cond
+              (== remaining count) this
+              (== remaining 0)
+                (if isAbsolute (.rootDirectory (.getFileSystem this)) (.emptyPath this))
+              :else
+                (let [^:mutable len (unchecked-subtract-int remaining 1)]
+                  (when isAbsolute (set! len (unchecked-inc-int len)))
+                  (loop [^int i 0]
+                    (if (< i count)
+                        (if (not (aget ignore i))
+                            (do
+                              (set! len (unchecked-add-int len (aget size i)))
+                              (recur (unchecked-inc-int i)))
+                            (recur (unchecked-inc-int i)))
+                        nil))
+                  (let [result (new byte/1 len)
+                        ^:mutable ^int pos 0]
+                    (when isAbsolute
+                      (aset result pos (unchecked-byte \/))
+                      (set! pos (unchecked-inc-int pos)))
+                    (loop [^int i 0]
+                      (if (< i count)
+                          (if (not (aget ignore i))
+                              (do
+                                (System/arraycopy path (aget offsets i) result pos (aget size i))
+                                (set! pos (unchecked-add-int pos (aget size i)))
+                                (if (> (set! remaining (unchecked-dec-int remaining)) 0)
+                                    (do
+                                      (aset result pos (unchecked-byte \/))
+                                      (set! pos (unchecked-inc-int pos))
+                                      (recur (unchecked-inc-int i)))
+                                    (recur (unchecked-inc-int i))))
+                              (recur (unchecked-inc-int i)))
+                          nil))
+                    (UnixPath. (.getFileSystem this) result))))))))
+
+  (method ^:public startsWith ^boolean [this ^Path other]
+    (if (not (instance? UnixPath (Objects/requireNonNull other)))
+        false
+        (let [that (cast UnixPath other)]
+          (if (> (alength (.-path that)) (alength path))
+              false
+              (let [thisOffsetCount (.getNameCount this)
+                    thatOffsetCount (.getNameCount that)]
+                (cond
+                  (and (== thatOffsetCount 0) (.isAbsolute this)) (if (.isEmpty that) false true)
+                  (> thatOffsetCount thisOffsetCount) false
+                  (and (== thatOffsetCount thisOffsetCount)
+                       (not (== (alength path) (alength (.-path that)))))
+                    false
+                  :else
+                    (do
+                      (loop [^int i 0]
+                        (when (< i thatOffsetCount)
+                          (let [^Integer o1 (aget offsets i)
+                                ^Integer o2 (aget (.-offsets that) i)]
+                            (if (not (.equals o1 o2)) (return false) (recur (unchecked-inc-int i))))))
+                      (let [^:mutable ^int i 0]
+                        (while (< i (alength (.-path that)))
+                          (when-not (== (aget (.-path this) i) (aget (.-path that) i))
+                            (return false))
+                          (set! i (unchecked-inc-int i)))
+                        (if (and (< i (alength path)) (not (== (aget (.-path this) i) \/)))
+                            false
+                            true)))))))))
+
+  (method ^:public endsWith ^boolean [this ^Path other]
+    (if (not (instance? UnixPath (Objects/requireNonNull other)))
+        false
+        (let [that (cast UnixPath other)
+              thisLen (alength path)
+              thatLen (alength (.-path that))]
+          (cond
+            (> thatLen thisLen) false
+            (and (> thisLen 0) (== thatLen 0)) false
+            (and (.isAbsolute that) (not (.isAbsolute this))) false
+            :else
+              (let [thisOffsetCount (.getNameCount this)
+                    thatOffsetCount (.getNameCount that)]
+                (if (> thatOffsetCount thisOffsetCount)
+                    false
+                    (do
+                      (cond
+                        (== thatOffsetCount thisOffsetCount)
+                          (do
+                            (when (== thisOffsetCount 0) (return true))
+                            (let [^:mutable expectedLen thisLen]
+                              (when (and (.isAbsolute this) (not (.isAbsolute that)))
+                                (set! expectedLen (unchecked-dec-int expectedLen)))
+                              (when-not (== thatLen expectedLen) (return false))))
+                        (.isAbsolute that) (return false))
+                      (let [thisPos (aget offsets
+                                          (unchecked-subtract-int thisOffsetCount thatOffsetCount))
+                            thatPos (aget (.-offsets that) 0)]
+                        (Arrays/equals (.-path this) thisPos thisLen (.-path that) thatPos thatLen)))))))))
+
+  (method ^:public compareTo ^int [this ^Path other]
+    (Arrays/compareUnsigned path (.-path (cast UnixPath other))))
+
+  (method ^:public equals ^boolean [this ob]
+    (if-instance [^UnixPath p ob] (== (.compareTo this p) 0) false))
+
+  (method ^:public hashCode ^int [this]
+    (let [^:mutable h hash]
+      (when (== h 0)
+        (set! h (ArraysSupport/hashCodeOfUnsigned path 0 (alength path) 0))
+        (set! hash h))
+      h))
+
+  (method ^:public toString ^String [this]
+    (let [^:mutable stringValue (.-stringValue this)]
+      (when (nil? stringValue) (set! (.-stringValue this) (set! stringValue (Util/toString path))))
+      stringValue))
+
+  (method openForAttributeAccess :throws [UnixException] ^int [this ^boolean followLinks]
+    (let [^:mutable flags UnixConstants/O_RDONLY]
+      (when-not followLinks
+        (when (== UnixConstants/O_NOFOLLOW 0)
+          (throw (UnixException. "NOFOLLOW_LINKS is not supported on this platform")))
+        (set! flags (bit-or-int flags UnixConstants/O_NOFOLLOW)))
+      (UnixNativeDispatcher/open this flags 0)))
+
+  (method ^:public toAbsolutePath ^UnixPath [this]
+    (if (.isAbsolute this)
+        this
+        (UnixPath. (.getFileSystem this)
+                   (UnixPath/resolve (.defaultDirectory (.getFileSystem this)) path))))
+
+  (method ^:public toRealPath :throws [IOException] ^Path [this & ^LinkOption/1 options]
+    (let [absolute (.toAbsolutePath this)]
+      (when (Util/followLinks options)
+        (try
+          (let [rp (UnixNativeDispatcher/realpath absolute)]
+            (return (UnixPath. (.getFileSystem this) rp)))
+          (catch UnixException x (.rethrowAsIOException x this))))
+      (let [^:mutable result (.rootDirectory fs)
+            ^:mutable parentIsDotDot false]
+        (loop [^int i 0]
+          (when (< i (.getNameCount absolute))
+            (let [element (.getName absolute i)]
+              (if (and (== (alength (.asByteArray element)) 1)
+                       (== (aget (.asByteArray element) 0) \.))
+                  (recur (unchecked-inc-int i))
+                  (do
+                    (if (and (and (== (alength (.asByteArray element)) 2)
+                                  (== (aget (.asByteArray element) 0) \.))
+                             (== (aget (.asByteArray element) 1) \.))
+                        (let [^:mutable ^UnixFileAttributes attrs nil]
+                          (try
+                            (set! attrs (UnixFileAttributes/get result false))
+                            (catch UnixException x (.rethrowAsIOException x result)))
+                          (when (and (not (.isSymbolicLink attrs)) (not parentIsDotDot))
+                            (set! result (.getParent result))
+                            (when (nil? result) (set! result (.rootDirectory fs)))
+                            (continue (unchecked-inc-int i)))
+                          (set! parentIsDotDot true))
+                        (set! parentIsDotDot false))
+                    (set! result (.resolve result element))
+                    (recur (unchecked-inc-int i)))))))
+        (try
+          (UnixFileAttributes/get result false)
+          (catch UnixException x (.rethrowAsIOException x result)))
+        (if (not (.isCaseInsensitiveAndPreserving fs))
+            result
+            (let [^:mutable path (.rootDirectory fs)]
+              (loop [^int i 0]
+                (when (< i (.getNameCount result))
+                  (let [element (.getName result i)]
+                    (if (.equals (.toString element) "..")
+                        (do (set! path (.resolve path element)) (recur (unchecked-inc-int i)))
+                        (let [elementPath (.resolve path element)
+                              ^:mutable ^UnixFileAttributes attrs nil]
+                          (try
+                            (set! attrs (UnixFileAttributes/get elementPath false))
+                            (catch UnixException x (.rethrowAsIOException x result)))
+                          (let [elementKey (.fileKey attrs)
+                                ^:mutable dp -1]
+                            (try
+                              (set! dp (UnixNativeDispatcher/opendir path))
+                              (catch UnixException x (.rethrowAsIOException x path)))
+                            (let [^:mutable found false
+                                  ^{:tag (DirectoryStream$Filter Path)} filter
+                                    (lambda DirectoryStream$Filter ^boolean [^Path p] true)]
+                              (with-resources [^{:tag (DirectoryStream Path)} entries
+                                                 (UnixDirectoryStream. path dp filter)]
+                                (for-each [^Path entry entries]
+                                  (let [name (.getFileName entry)]
+                                    (when (== (.compareTo name element) 0)
+                                      (set! found true)
+                                      (set! path (.resolve path entry))
+                                      (break)))))
+                              (if (not found)
+                                  (do
+                                    (try
+                                      (set! dp (UnixNativeDispatcher/opendir path))
+                                      (catch UnixException x (.rethrowAsIOException x path)))
+                                    (with-resources [^{:tag (DirectoryStream Path)} entries
+                                                       (UnixDirectoryStream. path dp filter)]
+                                      (for-each [^Path entry entries]
+                                        (let [name (.getFileName entry)
+                                              p (.resolve path name)
+                                              ^:mutable ^UnixFileAttributes attributes nil]
+                                          (try
+                                            (set! attributes (UnixFileAttributes/get p false))
+                                            (let [key (.fileKey attributes)]
+                                              (when (.equals key elementKey)
+                                                (set! found true)
+                                                (set! path (.resolve path entry))
+                                                (break)))
+                                            (catch UnixException ignore)))))
+                                    (if (not found)
+                                        (do
+                                          (set! path (.resolve path element))
+                                          (recur (unchecked-inc-int i)))
+                                        (recur (unchecked-inc-int i))))
+                                  (recur (unchecked-inc-int i))))))))))
+              path)))))
+
+  (method ^:public toUri ^URI [this] (UnixUriUtils/toUri this))
+
+  (method ^:public register :throws [IOException] ^WatchKey [this ^WatchService watcher
+                                                             ^{:tag (array (WatchEvent$Kind ?))} events
+                                                             & ^WatchEvent$Modifier/1 modifiers]
+    (when (nil? watcher) (throw (NullPointerException.)))
+    (when-not (instance? AbstractWatchService watcher) (throw (ProviderMismatchException.)))
+    (.register (cast AbstractWatchService watcher) this events modifiers)))

@@ -1,0 +1,393 @@
+;; Converted from jdk26u src/java.security.sasl/share/classes/com/sun/security/sasl/digest/DigestMD5Client.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.security.sasl.digest)
+
+(import '(java.io ByteArrayOutputStream IOException)
+        '(java.nio.charset StandardCharsets)
+        '(java.security NoSuchAlgorithmException)
+        '(java.util ArrayList Arrays List Map StringTokenizer)
+        '(java.util.logging Level)
+        '(javax.security.auth.callback Callback
+                                       CallbackHandler
+                                       NameCallback
+                                       PasswordCallback
+                                       UnsupportedCallbackException)
+        '(javax.security.sasl RealmCallback RealmChoiceCallback SaslClient SaslException))
+
+(defclass ^:final DigestMD5Client
+  :extends DigestMD5Base
+  :implements [SaslClient]
+
+  (field ^:private ^:static ^:final ^String MY_CLASS_NAME (.getName DigestMD5Client))
+
+  (field ^:private ^:static ^:final ^String CIPHER_PROPERTY "com.sun.security.sasl.digest.cipher")
+
+  (field ^:private ^:static ^:final ^String/1 DIRECTIVE_KEY
+    (new String/1 ["realm" "qop" "algorithm" "nonce" "maxbuf" "charset" "cipher" "rspauth" "stale"]))
+
+  (field ^:private ^:static ^:final ^int REALM 0)
+
+  (field ^:private ^:static ^:final ^int QOP 1)
+
+  (field ^:private ^:static ^:final ^int ALGORITHM 2)
+
+  (field ^:private ^:static ^:final ^int NONCE 3)
+
+  (field ^:private ^:static ^:final ^int MAXBUF 4)
+
+  (field ^:private ^:static ^:final ^int CHARSET 5)
+
+  (field ^:private ^:static ^:final ^int CIPHER 6)
+
+  (field ^:private ^:static ^:final ^int RESPONSE_AUTH 7)
+
+  (field ^:private ^:static ^:final ^int STALE 8)
+
+  (field ^:private ^int nonceCount)
+
+  (field ^:private ^String specifiedCipher)
+
+  (field ^:private ^byte/1 cnonce)
+
+  (field ^:private ^String username)
+
+  (field ^:private ^char/1 passwd)
+
+  (field ^:private ^byte/1 authzidBytes)
+
+  (constructor :throws [SaslException] [this ^String authzid ^String protocol ^String serverName
+                                        ^{:tag (Map String ?)} props ^CallbackHandler cbh]
+    (super. props MY_CLASS_NAME 2 (java-str protocol "/" serverName) cbh)
+    (when (some? authzid)
+      (set! (.-authzid this) authzid)
+      (set! authzidBytes (.getBytes authzid StandardCharsets/UTF_8)))
+    (when (some? props)
+      (set! specifiedCipher (cast String (.get props CIPHER_PROPERTY)))
+      (.log DigestMD5Client/logger
+            Level/FINE
+            "DIGEST60:Explicitly specified cipher: {0}"
+            specifiedCipher)))
+
+  (method ^:public hasInitialResponse ^boolean [this] false)
+
+  (method ^:public evaluateChallenge :throws [SaslException] ^byte/1 [this ^byte/1 challengeData]
+    (when (> (alength challengeData) DigestMD5Client/MAX_CHALLENGE_LENGTH)
+      (throw (SaslException.
+               (java-str "DIGEST-MD5: Invalid digest-challenge length. Got:  "
+                         (alength challengeData)
+                         " Expected < "
+                         DigestMD5Client/MAX_CHALLENGE_LENGTH))))
+    (let [^:mutable ^byte/2 challengeVal nil]
+      (switch (.-step this)
+        2
+          (let [^{:tag (List byte/1)} realmChoices (ArrayList. 3)]
+            (set! challengeVal
+                  (DigestMD5Client/parseDirectives challengeData DIRECTIVE_KEY realmChoices REALM))
+            (try
+              (.processChallenge this challengeVal realmChoices)
+              (.checkQopSupport this (aget challengeVal QOP) (aget challengeVal CIPHER))
+              (set! (.-step this) (unchecked-inc-int (.-step this)))
+              (.generateClientResponse this (aget challengeVal CHARSET))
+              (catch SaslException e (set! (.-step this) 0) (.clearPassword this) (throw e))
+              (catch IOException e
+                (set! (.-step this) 0)
+                (.clearPassword this)
+                (throw (SaslException. "DIGEST-MD5: Error generating digest response-value" e)))))
+        3
+          (try
+            (set! challengeVal
+                  (DigestMD5Client/parseDirectives challengeData DIRECTIVE_KEY nil REALM))
+            (.validateResponseValue this (aget challengeVal RESPONSE_AUTH))
+            (cond
+              (and (.-integrity this) (.-privacy this))
+                (set! (.-secCtx this) (DigestMD5Base$DigestPrivacy. true))
+              (.-integrity this) (set! (.-secCtx this) (DigestMD5Base$DigestIntegrity. true)))
+            nil
+            (finally (.clearPassword this) (set! (.-step this) 0) (set! (.-completed this) true)))
+        (throw (SaslException. "DIGEST-MD5: Client at illegal state")))))
+
+  (method ^:private processChallenge :throws [SaslException] ^void [this ^byte/2 challengeVal
+                                                                    ^{:tag (List byte/1)} realmChoices]
+    (when (some? (aget challengeVal CHARSET))
+      (if (not (.equals "utf-8" (String. (aget challengeVal CHARSET) (.-encoding this))))
+          (throw (SaslException.
+                   (java-str
+                     "DIGEST-MD5: digest-challenge format violation. Unrecognised charset value: "
+                     (String. (aget challengeVal CHARSET)))))
+          (do (set! (.-encoding this) StandardCharsets/UTF_8) (set! (.-useUTF8 this) true))))
+    (if (nil? (aget challengeVal ALGORITHM))
+        (throw (SaslException.
+                 "DIGEST-MD5: Digest-challenge format violation: algorithm directive missing"))
+        (when-not (.equals "md5-sess" (String. (aget challengeVal ALGORITHM) (.-encoding this)))
+          (throw
+            (SaslException.
+              (java-str
+                "DIGEST-MD5: Digest-challenge format violation. Invalid value for 'algorithm' directive: "
+                (aget challengeVal ALGORITHM))))))
+    (if (nil? (aget challengeVal NONCE))
+        (throw (SaslException.
+                 "DIGEST-MD5: Digest-challenge format violation: nonce directive missing"))
+        (set! (.-nonce this) (aget challengeVal NONCE)))
+    (try
+      (let [^:mutable ^String/1 realmTokens nil]
+        (when (some? (aget challengeVal REALM))
+          (if (or (nil? realmChoices) (<= (.size realmChoices) 1))
+              (set! (.-negotiatedRealm this) (String. (aget challengeVal REALM) (.-encoding this)))
+              (do
+                (set! realmTokens (new String/1 (.size realmChoices)))
+                (loop [^int i 0]
+                  (when (< i (alength realmTokens))
+                    (aset realmTokens
+                          i
+                          (String. (cast byte/1 (.get realmChoices i)) (.-encoding this)))
+                    (recur (unchecked-inc-int i)))))))
+        (let [^NameCallback ncb (if (nil? (.-authzid this))
+                                    (NameCallback. "DIGEST-MD5 authentication ID: ")
+                                    (NameCallback.
+                                      "DIGEST-MD5 authentication ID: "
+                                      (.-authzid this)))
+              pcb (PasswordCallback. "DIGEST-MD5 password: " false)]
+          (if (nil? realmTokens)
+              (let [^RealmCallback tcb (if (nil? (.-negotiatedRealm this))
+                                           (RealmCallback. "DIGEST-MD5 realm: ")
+                                           (RealmCallback.
+                                             "DIGEST-MD5 realm: "
+                                             (.-negotiatedRealm this)))]
+                (.handle (.-cbh this) (new Callback/1 [tcb ncb pcb]))
+                (set! (.-negotiatedRealm this) (.getText tcb))
+                (when (nil? (.-negotiatedRealm this)) (set! (.-negotiatedRealm this) "")))
+              (let [ccb (RealmChoiceCallback. "DIGEST-MD5 realm: " realmTokens 0 false)]
+                (.handle (.-cbh this) (new Callback/1 [ccb ncb pcb]))
+                (let [selected (.getSelectedIndexes ccb)]
+                  (when (or (or (nil? selected) (< (aget selected 0) 0))
+                            (>= (aget selected 0) (alength realmTokens)))
+                    (throw (SaslException. "DIGEST-MD5: Invalid realm chosen")))
+                  (set! (.-negotiatedRealm this) (aget realmTokens (aget selected 0))))))
+          (set! passwd (.getPassword pcb))
+          (.clearPassword pcb)
+          (set! username (.getName ncb))))
+      (catch SaslException se (throw se))
+      (catch UnsupportedCallbackException e
+        (throw
+          (SaslException.
+            "DIGEST-MD5: Cannot perform callback to acquire realm, authentication ID or password"
+            e)))
+      (catch IOException e
+        (throw
+          (SaslException. "DIGEST-MD5: Error acquiring realm, authentication ID or password" e))))
+    (when (or (nil? username) (nil? passwd))
+      (throw (SaslException. "DIGEST-MD5: authentication ID and password must be specified")))
+    (let [^int srvMaxBufSize (if (nil? (aget challengeVal MAXBUF))
+                                 DigestMD5Client/DEFAULT_MAXBUF
+                                 (Integer/parseInt
+                                   (String. (aget challengeVal MAXBUF) (.-encoding this))))]
+      (set! (.-sendMaxBufSize this)
+            (if (== (.-sendMaxBufSize this) 0)
+                srvMaxBufSize
+                (Math/min (.-sendMaxBufSize this) srvMaxBufSize)))))
+
+  (method ^:private checkQopSupport :throws [IOException] ^void [this ^byte/1 qopInChallenge
+                                                                 ^byte/1 ciphersInChallenge]
+    (let [^String qopOptions (if (nil? qopInChallenge)
+                                 "auth"
+                                 (String. qopInChallenge (.-encoding this)))]
+      (let [serverQopTokens (new String/1 3)
+            serverQop (DigestMD5Client/parseQop qopOptions serverQopTokens true)
+            serverAllQop (DigestMD5Client/combineMasks serverQop)]
+        (switch (DigestMD5Client/findPreferredMask serverAllQop (.-qop this))
+          0
+            (throw (SaslException.
+                     "DIGEST-MD5: No common protection layer between client and server"))
+          DigestMD5Client/NO_PROTECTION (set! (.-negotiatedQop this) "auth")
+          DigestMD5Client/INTEGRITY_ONLY_PROTECTION
+            (do
+              (set! (.-negotiatedQop this) "auth-int")
+              (set! (.-integrity this) true)
+              (set! (.-rawSendSize this) (unchecked-subtract-int (.-sendMaxBufSize this) 16)))
+          DigestMD5Client/PRIVACY_PROTECTION
+            (do
+              (set! (.-negotiatedQop this) "auth-conf")
+              (set! (.-privacy this) (set! (.-integrity this) true))
+              (set! (.-rawSendSize this) (unchecked-subtract-int (.-sendMaxBufSize this) 26))
+              (.checkStrengthSupport this ciphersInChallenge)))
+        (when (.isLoggable DigestMD5Client/logger Level/FINE)
+          (.log DigestMD5Client/logger
+                Level/FINE
+                "DIGEST61:Raw send size: {0}"
+                (.-rawSendSize this))))))
+
+  (method ^:private checkStrengthSupport :throws [IOException] ^void [this
+                                                                      ^byte/1 ciphersInChallenge]
+    (when (nil? ciphersInChallenge)
+      (throw (SaslException. "DIGEST-MD5: server did not specify cipher to use for 'auth-conf'")))
+    (let [cipherOptions (String. ciphersInChallenge (.-encoding this))
+          parser (StringTokenizer. cipherOptions ", \t\n")
+          tokenCount (.countTokens parser)
+          ^:mutable ^String token nil
+          serverCiphers (new byte/1
+                             [DigestMD5Client/UNSET
+                              DigestMD5Client/UNSET
+                              DigestMD5Client/UNSET
+                              DigestMD5Client/UNSET
+                              DigestMD5Client/UNSET])
+          serverCipherStrs (new String/1 (alength serverCiphers))]
+      (loop [^int i 0]
+        (when (< i tokenCount)
+          (set! token (.nextToken parser))
+          (loop [^int j 0]
+            (if (< j (alength DigestMD5Client/CIPHER_TOKENS))
+                (if (.equals token (aget DigestMD5Client/CIPHER_TOKENS j))
+                    (do
+                      (aset serverCiphers
+                            j
+                            (unchecked-byte
+                              (bit-or-int (aget serverCiphers j)
+                                          (aget DigestMD5Client/CIPHER_MASKS j))))
+                      (aset serverCipherStrs j token)
+                      (.log DigestMD5Client/logger Level/FINE "DIGEST62:Server supports {0}" token)
+                      (recur (unchecked-inc-int j)))
+                    (recur (unchecked-inc-int j)))
+                nil))
+          (recur (unchecked-inc-int i))))
+      (let [clntCiphers (DigestMD5Client/getPlatformCiphers)
+            ^:mutable ^byte inter 0]
+        (loop [^int i 0]
+          (when (< i (alength serverCiphers))
+            (aset serverCiphers
+                  i
+                  (unchecked-byte (bit-and-int (aget serverCiphers i) (aget clntCiphers i))))
+            (set! inter (unchecked-byte (bit-or-int inter (aget serverCiphers i))))
+            (recur (unchecked-inc-int i))))
+        (when (== inter DigestMD5Client/UNSET)
+          (throw (SaslException.
+                   (java-str "DIGEST-MD5: Client supports none of these cipher suites: "
+                             cipherOptions))))
+        (set! (.-negotiatedCipher this)
+              (.findCipherAndStrength this serverCiphers serverCipherStrs))
+        (when (nil? (.-negotiatedCipher this))
+          (throw
+            (SaslException. "DIGEST-MD5: Unable to negotiate a strength level for 'auth-conf'")))
+        (.log DigestMD5Client/logger
+              Level/FINE
+              "DIGEST63:Cipher suite: {0}"
+              (.-negotiatedCipher this)))))
+
+  (method ^:private findCipherAndStrength ^String [this ^byte/1 supportedCiphers ^String/1 tokens]
+    (let [^:mutable ^byte s 0]
+      (loop [^int i 0]
+        (if (< i (alength (.-strength this)))
+            (if (not (== (set! s (aget (.-strength this) i)) 0))
+                (do
+                  (loop [^int j 0]
+                    (if (< j (alength supportedCiphers))
+                        (if (and (== s (aget supportedCiphers j))
+                                 (or (nil? specifiedCipher)
+                                     (.equals specifiedCipher (aget tokens j))))
+                            (do
+                              (switch s
+                                DigestMD5Client/HIGH_STRENGTH
+                                  (set! (.-negotiatedStrength this) "high")
+                                DigestMD5Client/MEDIUM_STRENGTH
+                                  (set! (.-negotiatedStrength this) "medium")
+                                DigestMD5Client/LOW_STRENGTH
+                                  (set! (.-negotiatedStrength this) "low"))
+                              (return (aget tokens j)))
+                            (recur (unchecked-inc-int j)))
+                        nil))
+                  (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i)))
+            nil))
+      nil))
+
+  (method ^:private generateClientResponse :throws [IOException] ^byte/1 [this ^byte/1 charset]
+    (let [digestResp (ByteArrayOutputStream.)]
+      (when (.-useUTF8 this)
+        (.write digestResp (.getBytes "charset=" (.-encoding this)))
+        (.write digestResp charset)
+        (.write digestResp \,))
+      (.write digestResp
+              (.getBytes (java-str "username=\"" (DigestMD5Client/quotedStringValue username) "\",")
+                         (.-encoding this)))
+      (when (> (.length (.-negotiatedRealm this)) 0)
+        (.write digestResp
+                (.getBytes (java-str "realm=\""
+                                     (DigestMD5Client/quotedStringValue (.-negotiatedRealm this))
+                                     "\",")
+                           (.-encoding this))))
+      (.write digestResp (.getBytes "nonce=\"" (.-encoding this)))
+      (DigestMD5Client/writeQuotedStringValue digestResp (.-nonce this))
+      (.write digestResp \")
+      (.write digestResp \,)
+      (set! nonceCount (DigestMD5Client/getNonceCount (.-nonce this)))
+      (.write digestResp
+              (.getBytes (java-str "nc=" (DigestMD5Client/nonceCountToHex nonceCount) ",")
+                         (.-encoding this)))
+      (set! cnonce (DigestMD5Client/generateNonce))
+      (.write digestResp (.getBytes "cnonce=\"" (.-encoding this)))
+      (DigestMD5Client/writeQuotedStringValue digestResp cnonce)
+      (.write digestResp (.getBytes "\"," (.-encoding this)))
+      (.write digestResp
+              (.getBytes (java-str "digest-uri=\"" (.-digestUri this) "\",") (.-encoding this)))
+      (.write digestResp (.getBytes "maxbuf=" (.-encoding this)))
+      (.write digestResp (.getBytes (String/valueOf (.-recvMaxBufSize this)) (.-encoding this)))
+      (.write digestResp \,)
+      (try
+        (.write digestResp (.getBytes "response=" (.-encoding this)))
+        (.write digestResp
+                (.generateResponseValue this
+                                        "AUTHENTICATE"
+                                        (.-digestUri this)
+                                        (.-negotiatedQop this)
+                                        username
+                                        (.-negotiatedRealm this)
+                                        passwd
+                                        (.-nonce this)
+                                        cnonce
+                                        nonceCount
+                                        authzidBytes))
+        (.write digestResp \,)
+        (catch Exception e (throw (SaslException. "DIGEST-MD5: Error generating response value" e))))
+      (.write digestResp (.getBytes (java-str "qop=" (.-negotiatedQop this)) (.-encoding this)))
+      (when (some? (.-negotiatedCipher this))
+        (.write
+          digestResp
+          (.getBytes (java-str ",cipher=\"" (.-negotiatedCipher this) "\"") (.-encoding this))))
+      (when (some? authzidBytes)
+        (.write digestResp (.getBytes ",authzid=\"" (.-encoding this)))
+        (DigestMD5Client/writeQuotedStringValue digestResp authzidBytes)
+        (.write digestResp (.getBytes "\"" (.-encoding this))))
+      (when (> (.size digestResp) DigestMD5Client/MAX_RESPONSE_LENGTH)
+        (throw (SaslException.
+                 (java-str "DIGEST-MD5: digest-response size too large. Length: "
+                           (.size digestResp)))))
+      (.toByteArray digestResp)))
+
+  (method ^:private validateResponseValue :throws [SaslException] ^void [this ^byte/1 fromServer]
+    (when (nil? fromServer)
+      (throw
+        (SaslException.
+          "DIGEST-MD5: Authentication failed. Expecting 'rspauth' authentication success message")))
+    (try
+      (let [expected (.generateResponseValue this
+                                             ""
+                                             (.-digestUri this)
+                                             (.-negotiatedQop this)
+                                             username
+                                             (.-negotiatedRealm this)
+                                             passwd
+                                             (.-nonce this)
+                                             cnonce
+                                             nonceCount
+                                             authzidBytes)]
+        (when-not (Arrays/equals expected fromServer)
+          (throw (SaslException. "Server's rspauth value does not match what client expects"))))
+      (catch [NoSuchAlgorithmException IOException] e
+        (throw (SaslException. "Problem generating response value for verification" e)))))
+
+  (method ^:private ^:static getNonceCount ^int [^byte/1 nonceValue] 1)
+
+  (method ^:private clearPassword ^void [this]
+    (when (some? passwd)
+      (loop [^int i 0]
+        (when (< i (alength passwd)) (aset passwd i 0) (recur (unchecked-inc-int i))))
+      (set! passwd nil))))

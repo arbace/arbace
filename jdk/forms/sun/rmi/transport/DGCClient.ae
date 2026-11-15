@@ -1,0 +1,354 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/DGCClient.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport)
+
+(import '(java.io InvalidClassException)
+        '(java.lang.ref PhantomReference ReferenceQueue)
+        '(java.rmi RemoteException UnmarshalException)
+        '(java.rmi.dgc DGC Lease VMID)
+        '(java.rmi.server ObjID)
+        '(java.util HashMap HashSet Iterator List Map Set)
+        '(sun.rmi.runtime Log RuntimeUtil)
+        '(sun.rmi.server UnicastRef Util))
+
+(defclass ^:final DGCClient
+  (field ^:private ^:static ^long nextSequenceNum Long/MIN_VALUE)
+
+  (field ^:private ^:static ^VMID vmid (VMID.))
+
+  (field ^:private ^:static ^:final ^long leaseValue
+    (Long/getLong "java.rmi.dgc.leaseValue" 600000))
+
+  (field ^:private ^:static ^:final ^long cleanInterval
+    (Long/getLong "sun.rmi.dgc.cleanInterval" 180000))
+
+  (field ^:private ^:static ^:final ^long gcInterval
+    (Long/getLong "sun.rmi.dgc.client.gcInterval" 3600000))
+
+  (field ^:private ^:static ^:final ^int dirtyFailureRetries 5)
+
+  (field ^:private ^:static ^:final ^int cleanFailureRetries 5)
+
+  (field ^:private ^:static ^:final ^ObjID/1 emptyObjIDArray (new ObjID/1 0))
+
+  (field ^:private ^:static ^:final ^ObjID dgcID (ObjID. ObjID/DGC_ID))
+
+  (constructor ^:private [this])
+
+  (method ^:static registerRefs ^void [^Endpoint ep ^{:tag (List LiveRef)} refs]
+    (let [^:mutable ^EndpointEntry epEntry nil]
+      (loop []
+        (set! epEntry (EndpointEntry/lookup ep))
+        (when-not (.registerRefs epEntry refs) (recur)))))
+
+  (method ^:private ^:static ^:synchronized getNextSequenceNum ^long []
+    (let [nextSequenceNum-1 nextSequenceNum]
+      (set! nextSequenceNum (unchecked-inc nextSequenceNum))
+      nextSequenceNum-1))
+
+  (method ^:private ^:static computeRenewTime ^long [^long grantTime ^long duration]
+    (unchecked-add grantTime (unchecked-divide duration 2)))
+
+  (defclass ^:private ^:static EndpointEntry
+    (field ^:private ^Endpoint endpoint)
+
+    (field ^:private ^DGC dgc)
+
+    (field ^:private ^{:tag (Map LiveRef RefEntry)} refTable (HashMap. 5))
+
+    (field ^:private ^{:tag (Set RefEntry)} invalidRefs (HashSet. 5))
+
+    (field ^:private ^boolean removed false)
+
+    (field ^:private ^long renewTime Long/MAX_VALUE)
+
+    (field ^:private ^long expirationTime Long/MIN_VALUE)
+
+    (field ^:private ^int dirtyFailures 0)
+
+    (field ^:private ^long dirtyFailureStartTime)
+
+    (field ^:private ^long dirtyFailureDuration)
+
+    (field ^:private ^Thread renewCleanThread)
+
+    (field ^:private ^boolean interruptible false)
+
+    (field ^:private ^{:tag (ReferenceQueue LiveRef)} refQueue (ReferenceQueue.))
+
+    (field ^:private ^{:tag (Set CleanRequest)} pendingCleans (HashSet. 5))
+
+    (field ^:private ^:static ^{:tag (Map Endpoint EndpointEntry)} endpointTable (HashMap. 5))
+
+    (field ^:private ^:static ^GC$LatencyRequest gcLatencyRequest nil)
+
+    (method ^:public ^:static lookup ^EndpointEntry [^Endpoint ep]
+      (locking endpointTable
+        (let [^:mutable entry (cast EndpointEntry (.get endpointTable ep))]
+          (when (nil? entry)
+            (set! entry (EndpointEntry. ep))
+            (.put endpointTable ep entry)
+            (when (nil? gcLatencyRequest) (set! gcLatencyRequest (GC/requestLatency gcInterval))))
+          entry)))
+
+    (constructor ^:private [this ^:final ^Endpoint endpoint]
+      (set! (.-endpoint this) endpoint)
+      (try
+        (let [dgcRef (LiveRef. dgcID endpoint false)]
+          (set! dgc (cast DGC (Util/createProxy DGCImpl (UnicastRef. dgcRef) true))))
+        (catch RemoteException e (throw (Error. "internal error creating DGC stub"))))
+      (set!
+        renewCleanThread
+        (RuntimeUtil/newSystemThread (RenewCleanThread.) (java-str "RenewClean-" endpoint) true))
+      (.start renewCleanThread))
+
+    (method ^:public registerRefs ^boolean [this ^{:tag (List LiveRef)} refs]
+      (java-assert (not (Thread/holdsLock this)))
+      (let [^:mutable ^{:tag (Set RefEntry)} refsToDirty nil
+            ^:mutable ^long sequenceNum 0]
+        (locking this
+          (when removed (return false))
+          (let [^{:tag (Iterator LiveRef)} iter (.iterator refs)]
+            (while (.hasNext iter)
+              (let [ref (cast LiveRef (.next iter))]
+                (java-assert (.equals (.getEndpoint ref) endpoint))
+                (let [^:mutable refEntry (cast RefEntry (.get refTable ref))]
+                  (when (nil? refEntry)
+                    (let [refClone (cast LiveRef (.clone ref))]
+                      (set! refEntry (RefEntry. refClone))
+                      (.put refTable refClone refEntry)
+                      (when (nil? refsToDirty) (set! refsToDirty (HashSet. 5)))
+                      (.add refsToDirty refEntry)))
+                  (.addInstanceToRefSet refEntry ref))))
+            (when (nil? refsToDirty) (return true))
+            (.addAll refsToDirty invalidRefs)
+            (.clear invalidRefs)
+            (set! sequenceNum (DGCClient/getNextSequenceNum))))
+        (.makeDirtyCall this refsToDirty sequenceNum)
+        true))
+
+    (method ^:private removeRefEntry ^void [this ^RefEntry refEntry]
+      (java-assert (Thread/holdsLock this))
+      (java-assert (not removed))
+      (java-assert (.containsKey refTable (.getRef refEntry)))
+      (.remove refTable (.getRef refEntry))
+      (.remove invalidRefs refEntry)
+      (when (.isEmpty refTable)
+        (locking endpointTable
+          (.remove endpointTable endpoint)
+          (let [transport (.getOutboundTransport endpoint)]
+            (.free transport endpoint)
+            (when (.isEmpty endpointTable)
+              (java-assert (some? gcLatencyRequest))
+              (.cancel gcLatencyRequest)
+              (set! gcLatencyRequest nil))
+            (set! removed true)))))
+
+    (method ^:private makeDirtyCall ^void [this ^{:tag (Set RefEntry)} refEntries ^long sequenceNum]
+      (java-assert (not (Thread/holdsLock this)))
+      (let [^ObjID/1 ids (if (some? refEntries)
+                             (EndpointEntry/createObjIDArray refEntries)
+                             emptyObjIDArray)]
+        (let [startTime (System/currentTimeMillis)]
+          (try
+            (let [lease (.dirty dgc ids sequenceNum (Lease. vmid leaseValue))
+                  duration (.getValue lease)
+                  newRenewTime (DGCClient/computeRenewTime startTime duration)
+                  newExpirationTime (unchecked-add startTime duration)]
+              (locking this
+                (set! dirtyFailures 0)
+                (.setRenewTime this newRenewTime)
+                (set! expirationTime newExpirationTime)))
+            (catch Exception e
+              (let [endTime (System/currentTimeMillis)]
+                (locking this
+                  (set! dirtyFailures (unchecked-inc-int dirtyFailures))
+                  (if (and (instance? UnmarshalException e)
+                           (instance? InvalidClassException (.getCause e)))
+                      (.log DGCImpl/dgcLog
+                            Log/BRIEF
+                            "InvalidClassException exception in DGC dirty call"
+                            e)
+                      (do
+                        (if (== dirtyFailures 1)
+                            (do
+                              (set! dirtyFailureStartTime startTime)
+                              (set! dirtyFailureDuration (unchecked-subtract endTime startTime))
+                              (.setRenewTime this endTime))
+                            (let [n (unchecked-subtract-int dirtyFailures 2)]
+                              (when (== n 0)
+                                (set! dirtyFailureDuration
+                                      (Math/max (bit-shift-right
+                                                  (unchecked-add
+                                                    dirtyFailureDuration
+                                                    (unchecked-subtract endTime startTime))
+                                                  1)
+                                                1000)))
+                              (let [newRenewTime (unchecked-add
+                                                   endTime
+                                                   (bit-shift-left dirtyFailureDuration n))]
+                                (if (or (or (< newRenewTime expirationTime)
+                                            (< dirtyFailures dirtyFailureRetries))
+                                        (< newRenewTime
+                                           (unchecked-add dirtyFailureStartTime leaseValue)))
+                                    (.setRenewTime this newRenewTime)
+                                    (.setRenewTime this Long/MAX_VALUE)))))
+                        (when (some? refEntries)
+                          (.addAll invalidRefs refEntries)
+                          (let [^{:tag (Iterator RefEntry)} iter (.iterator refEntries)]
+                            (while (.hasNext iter)
+                              (let [refEntry (cast RefEntry (.next iter))]
+                                (.markDirtyFailed refEntry)))))
+                        (when (>= renewTime expirationTime)
+                          (.addAll invalidRefs (.values refTable))))))))))))
+
+    (method ^:private setRenewTime ^void [this ^long newRenewTime]
+      (java-assert (Thread/holdsLock this))
+      (if (< newRenewTime renewTime)
+          (do (set! renewTime newRenewTime) (when interruptible (.interrupt renewCleanThread)))
+          (set! renewTime newRenewTime)))
+
+    (defclass ^:private RenewCleanThread
+      :implements [Runnable]
+
+      (method ^:public run ^void [this]
+        (loop []
+          (let [^:mutable ^long timeToWait 0
+                ^:mutable ^DGCClient$EndpointEntry$RefEntry$PhantomLiveRef phantom nil
+                ^:mutable needRenewal false
+                ^:mutable ^{:tag (Set RefEntry)} refsToDirty nil
+                ^:mutable sequenceNum Long/MIN_VALUE]
+            (locking EndpointEntry/this
+              (let [timeUntilRenew (unchecked-subtract renewTime (System/currentTimeMillis))]
+                (set! timeToWait (Math/max timeUntilRenew 1))
+                (when-not (.isEmpty pendingCleans)
+                  (set! timeToWait (Math/min timeToWait cleanInterval)))
+                (set! interruptible true)))
+            (try
+              (set! phantom
+                    (cast DGCClient$EndpointEntry$RefEntry$PhantomLiveRef
+                          (.remove refQueue timeToWait)))
+              (catch InterruptedException e))
+            (locking EndpointEntry/this
+              (set! interruptible false)
+              (Thread/interrupted)
+              (when (some? phantom) (.processPhantomRefs EndpointEntry/this phantom))
+              (let [currentTime (System/currentTimeMillis)]
+                (when (> currentTime renewTime)
+                  (set! needRenewal true)
+                  (when-not (.isEmpty invalidRefs)
+                    (set! refsToDirty invalidRefs)
+                    (set! invalidRefs (HashSet. 5)))
+                  (set! sequenceNum (DGCClient/getNextSequenceNum)))))
+            (when needRenewal (.makeDirtyCall EndpointEntry/this refsToDirty sequenceNum))
+            (when-not (.isEmpty pendingCleans) (.makeCleanCalls EndpointEntry/this)))
+          (when (or (not removed) (not (.isEmpty pendingCleans))) (recur)))))
+
+    (method ^:private processPhantomRefs ^void [this
+                                                ^:mutable ^DGCClient$EndpointEntry$RefEntry$PhantomLiveRef phantom]
+      (java-assert (Thread/holdsLock this))
+      (let [^:mutable ^{:tag (Set RefEntry)} strongCleans nil
+            ^:mutable ^{:tag (Set RefEntry)} normalCleans nil]
+        (loop []
+          (let [refEntry (.getRefEntry phantom)]
+            (.removeInstanceFromRefSet refEntry phantom)
+            (when (.isRefSetEmpty refEntry)
+              (if (.hasDirtyFailed refEntry)
+                  (do
+                    (when (nil? strongCleans) (set! strongCleans (HashSet. 5)))
+                    (.add strongCleans refEntry))
+                  (do
+                    (when (nil? normalCleans) (set! normalCleans (HashSet. 5)))
+                    (.add normalCleans refEntry)))
+              (.removeRefEntry this refEntry)))
+          (when (some? (set!
+                         phantom
+                         (cast DGCClient$EndpointEntry$RefEntry$PhantomLiveRef (.poll refQueue))))
+            (recur)))
+        (when (some? strongCleans)
+          (.add pendingCleans
+                (CleanRequest. (EndpointEntry/createObjIDArray strongCleans)
+                               (DGCClient/getNextSequenceNum)
+                               true)))
+        (when (some? normalCleans)
+          (.add pendingCleans
+                (CleanRequest. (EndpointEntry/createObjIDArray normalCleans)
+                               (DGCClient/getNextSequenceNum)
+                               false)))))
+
+    (defclass ^:private ^:static CleanRequest
+      (field ^:final ^ObjID/1 objIDs)
+
+      (field ^:final ^long sequenceNum)
+
+      (field ^:final ^boolean strong)
+
+      (field ^int failures 0)
+
+      (constructor [this ^ObjID/1 objIDs ^long sequenceNum ^boolean strong]
+        (set! (.-objIDs this) objIDs)
+        (set! (.-sequenceNum this) sequenceNum)
+        (set! (.-strong this) strong)))
+
+    (method ^:private makeCleanCalls ^void [this]
+      (java-assert (not (Thread/holdsLock this)))
+      (let [^{:tag (Iterator CleanRequest)} iter (.iterator pendingCleans)]
+        (while (.hasNext iter)
+          (let [request (cast CleanRequest (.next iter))]
+            (try
+              (.clean dgc (.-objIDs request) (.-sequenceNum request) vmid (.-strong request))
+              (.remove iter)
+              (catch Exception e
+                (when (>= (set! (.-failures request) (unchecked-inc-int (.-failures request)))
+                          cleanFailureRetries)
+                  (.remove iter))))))))
+
+    (method ^:private ^:static createObjIDArray ^ObjID/1 [^{:tag (Set RefEntry)} refEntries]
+      (let [ids (new ObjID/1 (.size refEntries))
+            ^{:tag (Iterator RefEntry)} iter (.iterator refEntries)]
+        (loop [^int i 0]
+          (when (< i (alength ids))
+            (aset ids i (.getObjID (.getRef (cast RefEntry (.next iter)))))
+            (recur (unchecked-inc-int i))))
+        ids))
+
+    (defclass ^:private RefEntry
+      (field ^:private ^LiveRef ref)
+
+      (field ^:private ^{:tag (Set PhantomLiveRef)} refSet (HashSet. 5))
+
+      (field ^:private ^boolean dirtyFailed false)
+
+      (constructor ^:public [this ^LiveRef ref] (set! (.-ref this) ref))
+
+      (method ^:public getRef ^LiveRef [this] ref)
+
+      (method ^:public addInstanceToRefSet ^void [this ^LiveRef ref]
+        (java-assert (Thread/holdsLock EndpointEntry/this))
+        (java-assert (.equals ref (.-ref this)))
+        (.add refSet (PhantomLiveRef. ref)))
+
+      (method ^:public removeInstanceFromRefSet ^void [this ^PhantomLiveRef phantom]
+        (java-assert (Thread/holdsLock EndpointEntry/this))
+        (java-assert (.contains refSet phantom))
+        (.remove refSet phantom))
+
+      (method ^:public isRefSetEmpty ^boolean [this]
+        (java-assert (Thread/holdsLock EndpointEntry/this))
+        (== (.size refSet) 0))
+
+      (method ^:public markDirtyFailed ^void [this]
+        (java-assert (Thread/holdsLock EndpointEntry/this))
+        (set! dirtyFailed true))
+
+      (method ^:public hasDirtyFailed ^boolean [this]
+        (java-assert (Thread/holdsLock EndpointEntry/this))
+        dirtyFailed)
+
+      (defclass ^:private PhantomLiveRef
+        :extends (PhantomReference LiveRef)
+
+        (constructor ^:public [this ^LiveRef ref]
+          (super. ref (.-refQueue EndpointEntry/this)))
+
+        (method ^:public getRefEntry ^RefEntry [this] RefEntry/this)))))

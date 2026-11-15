@@ -1,0 +1,281 @@
+;; Converted from overlay/jdk/java.base/sun/nio/fs/LinuxWatchService.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.file NotDirectoryException
+                        Path
+                        StandardWatchEventKinds
+                        WatchEvent$Kind
+                        WatchEvent$Modifier
+                        WatchKey)
+        '(java.util HashMap Map Map$Entry Set)
+        '(java.util.function Function)
+        '(jdk.internal.misc Unsafe))
+
+(defclass LinuxWatchService
+  :extends AbstractWatchService
+
+  (field ^:private ^:static ^:final ^Unsafe unsafe (Unsafe/getUnsafe))
+
+  (field ^:private ^:final ^Poller poller)
+
+  (constructor :throws [IOException] [this ^UnixFileSystem fs]
+    (let [^:mutable ^int ifd -1]
+      (try
+        (set! ifd (LinuxWatchService/inotifyInit))
+        (catch UnixException x
+          (let [^String msg (if (== (.errno x) UnixConstants/EMFILE)
+                                "User limit of inotify instances reached or too many open files"
+                                (.errorString x))]
+            (throw (IOException. msg)))))
+      (let [sp (new int/1 2)]
+        (try
+          (LinuxWatchService/configureBlocking ifd false)
+          (LinuxWatchService/socketpair sp)
+          (LinuxWatchService/configureBlocking (aget sp 0) false)
+          (catch UnixException x
+            (UnixNativeDispatcher/close ifd
+                                        (lambda Function ^RuntimeException [^UnixException e] nil))
+            (throw (IOException. (.errorString x)))))
+        (set! (.-poller this) (Poller. fs this ifd sp))
+        (.start (.-poller this)))))
+
+  (method register :throws [IOException] ^WatchKey [this ^Path dir
+                                                    ^{:tag (array (WatchEvent$Kind ?))} events &
+                                                    ^WatchEvent$Modifier/1 modifiers]
+    (.register poller dir events modifiers))
+
+  (method implClose :throws [IOException] ^void [this] (.close poller))
+
+  (defclass ^:private ^:static LinuxWatchKey
+    :extends AbstractWatchKey
+
+    (field ^:private ^:final ^int ifd)
+
+    (field ^:private ^:volatile ^int wd)
+
+    (constructor [this ^UnixPath dir ^LinuxWatchService watcher ^int ifd ^int wd]
+      (super. dir watcher)
+      (set! (.-ifd this) ifd)
+      (set! (.-wd this) wd))
+
+    (method descriptor ^int [this] wd)
+
+    (method invalidate ^void [this ^boolean remove]
+      (when remove (try (LinuxWatchService/inotifyRmWatch ifd wd) (catch UnixException x)))
+      (set! wd -1))
+
+    (method ^:public isValid ^boolean [this] (not (== wd -1)))
+
+    (method ^:public cancel ^void [this]
+      (when (.isValid this) (.cancel (.-poller (cast LinuxWatchService (.watcher this))) this))))
+
+  (defclass ^:private ^:static Poller
+    :extends AbstractPoller
+
+    (field ^:private ^:static ^:final ^int SIZEOF_INOTIFY_EVENT (LinuxWatchService/eventSize))
+
+    (field ^:private ^:static ^:final ^int/1 offsets (LinuxWatchService/eventOffsets))
+
+    (field ^:private ^:static ^:final ^int OFFSETOF_WD (aget offsets 0))
+
+    (field ^:private ^:static ^:final ^int OFFSETOF_MASK (aget offsets 1))
+
+    (field ^:private ^:static ^:final ^int OFFSETOF_LEN (aget offsets 3))
+
+    (field ^:private ^:static ^:final ^int OFFSETOF_NAME (aget offsets 4))
+
+    (field ^:private ^:static ^:final ^int IN_MODIFY 0x00000002)
+
+    (field ^:private ^:static ^:final ^int IN_ATTRIB 0x00000004)
+
+    (field ^:private ^:static ^:final ^int IN_MOVED_FROM 0x00000040)
+
+    (field ^:private ^:static ^:final ^int IN_MOVED_TO 0x00000080)
+
+    (field ^:private ^:static ^:final ^int IN_CREATE 0x00000100)
+
+    (field ^:private ^:static ^:final ^int IN_DELETE 0x00000200)
+
+    (field ^:private ^:static ^:final ^int IN_UNMOUNT 0x00002000)
+
+    (field ^:private ^:static ^:final ^int IN_Q_OVERFLOW 0x00004000)
+
+    (field ^:private ^:static ^:final ^int IN_IGNORED 0x00008000)
+
+    (field ^:private ^:static ^:final ^int BUFFER_SIZE 8192)
+
+    (field ^:private ^:final ^UnixFileSystem fs)
+
+    (field ^:private ^:final ^LinuxWatchService watcher)
+
+    (field ^:private ^:final ^int ifd)
+
+    (field ^:private ^:final ^int/1 socketpair)
+
+    (field ^:private ^:final ^{:tag (Map Integer LinuxWatchKey)} wdToKey)
+
+    (field ^:private ^:final ^long address)
+
+    (constructor [this ^UnixFileSystem fs ^LinuxWatchService watcher ^int ifd ^int/1 sp]
+      (set! (.-fs this) fs)
+      (set! (.-watcher this) watcher)
+      (set! (.-ifd this) ifd)
+      (set! (.-socketpair this) sp)
+      (set! (.-wdToKey this) (HashMap.))
+      (set! (.-address this) (.allocateMemory unsafe BUFFER_SIZE)))
+
+    (method wakeup :throws [IOException] ^void [this]
+      (try
+        (UnixNativeDispatcher/write (aget socketpair 1) address 1)
+        (catch UnixException x (throw (IOException. (.errorString x))))))
+
+    (method implRegister [this ^Path obj ^{:tag (Set (? extends (WatchEvent$Kind ?)))} events &
+                          ^WatchEvent$Modifier/1 modifiers]
+      (let [dir (cast UnixPath obj)
+            ^:mutable ^int mask 0]
+        (for-each [^{:tag (WatchEvent$Kind ?)} event events]
+          (cond
+            (identical? event StandardWatchEventKinds/ENTRY_CREATE)
+              (set! mask (bit-or-int mask (bit-or-int IN_CREATE IN_MOVED_TO)))
+            (identical? event StandardWatchEventKinds/ENTRY_DELETE)
+              (set! mask (bit-or-int mask (bit-or-int IN_DELETE IN_MOVED_FROM)))
+            (identical? event StandardWatchEventKinds/ENTRY_MODIFY)
+              (set! mask (bit-or-int mask (bit-or-int IN_MODIFY IN_ATTRIB)))))
+        (for-each [^WatchEvent$Modifier modifier modifiers]
+          (when (nil? modifier) (return (NullPointerException.)))
+          (when (and (and (not (.matches ExtendedOptions/SENSITIVITY_HIGH modifier))
+                          (not (.matches ExtendedOptions/SENSITIVITY_MEDIUM modifier)))
+                     (not (.matches ExtendedOptions/SENSITIVITY_LOW modifier)))
+            (return (UnsupportedOperationException. "Modifier not supported"))))
+        (let [^:mutable ^UnixFileAttributes attrs nil]
+          (try
+            (set! attrs (UnixFileAttributes/get dir true))
+            (catch UnixException x (return (.asIOException x dir))))
+          (if (not (.isDirectory attrs))
+              (NotDirectoryException. (.getPathForExceptionMessage dir))
+              (let [^:mutable ^int wd 0]
+                (try
+                  (with-resources [buffer (NativeBuffers/asNativeBuffer
+                                            (.getByteArrayForSysCalls dir))]
+                    (set! wd (LinuxWatchService/inotifyAddWatch ifd (.address buffer) mask)))
+                  (catch UnixException x
+                    (when (== (.errno x) UnixConstants/ENOSPC)
+                      (return (IOException. "User limit of inotify watches reached")))
+                    (return (.asIOException x dir))))
+                (let [^:mutable key (cast LinuxWatchKey (.get wdToKey wd))]
+                  (when (nil? key)
+                    (set! key (LinuxWatchKey. dir watcher ifd wd))
+                    (.put wdToKey wd key))
+                  key))))))
+
+    (method implCancelKey ^void [this ^WatchKey obj]
+      (let [key (cast LinuxWatchKey obj)]
+        (when (.isValid key) (.remove wdToKey (.descriptor key)) (.invalidate key true))))
+
+    (method implCloseAll ^void [this]
+      (for-each [^{:tag (Map$Entry Integer LinuxWatchKey)} entry (.entrySet wdToKey)]
+        (.invalidate (cast LinuxWatchKey (.getValue entry)) true))
+      (.clear wdToKey)
+      (.freeMemory unsafe address)
+      (UnixNativeDispatcher/close (aget socketpair 0)
+                                  (lambda Function ^RuntimeException [^UnixException e] nil))
+      (UnixNativeDispatcher/close (aget socketpair 1)
+                                  (lambda Function ^RuntimeException [^UnixException e] nil))
+      (UnixNativeDispatcher/close ifd (lambda Function ^RuntimeException [^UnixException e] nil)))
+
+    (method ^:public run ^void [this]
+      (try
+        (while true
+          (let [^:mutable ^int nReady 0
+                ^:mutable ^int bytesRead 0]
+            (set! nReady (LinuxWatchService/poll ifd (aget socketpair 0)))
+            (try
+              (set! bytesRead (UnixNativeDispatcher/read ifd address BUFFER_SIZE))
+              (catch UnixException x
+                (when (and (not (== (.errno x) UnixConstants/EAGAIN))
+                           (not (== (.errno x) UnixConstants/EWOULDBLOCK)))
+                  (throw x))
+                (set! bytesRead 0)))
+            (let [^:mutable ^int offset 0]
+              (while (< offset bytesRead)
+                (let [event (unchecked-add address offset)
+                      wd (.getInt unsafe (unchecked-add event OFFSETOF_WD))
+                      mask (.getInt unsafe (unchecked-add event OFFSETOF_MASK))
+                      len (.getInt unsafe (unchecked-add event OFFSETOF_LEN))
+                      ^:mutable ^UnixPath name nil]
+                  (when (> len 0)
+                    (let [^:mutable actual len]
+                      (while (> actual 0)
+                        (let [last (unchecked-subtract
+                                     (unchecked-add (unchecked-add event OFFSETOF_NAME) actual)
+                                     1)]
+                          (when-not (== (.getByte unsafe last) 0) (break))
+                          (set! actual (unchecked-dec-int actual))))
+                      (when (> actual 0)
+                        (let [buf (new byte/1 actual)]
+                          (.copyMemory unsafe
+                                       nil
+                                       (unchecked-add event OFFSETOF_NAME)
+                                       buf
+                                       Unsafe/ARRAY_BYTE_BASE_OFFSET
+                                       actual)
+                          (set! name (UnixPath. fs buf))))))
+                  (.processEvent this wd mask name)
+                  (set! offset
+                        (unchecked-add-int offset (unchecked-add-int SIZEOF_INOTIFY_EVENT len)))))
+              (when (or (> nReady 1) (and (== nReady 1) (== bytesRead 0)))
+                (try
+                  (UnixNativeDispatcher/read (aget socketpair 0) address BUFFER_SIZE)
+                  (let [shutdown (.processRequests this)] (when shutdown (break)))
+                  (catch UnixException x
+                    (when (and (not (== (.errno x) UnixConstants/EAGAIN))
+                               (not (== (.errno x) UnixConstants/EWOULDBLOCK)))
+                      (throw x))))))))
+        (catch UnixException x (.printStackTrace x))))
+
+    (method ^:private maskToEventKind ^{:tag (WatchEvent$Kind ?)} [this ^int mask]
+      (cond
+        (> (bit-and-int mask IN_MODIFY) 0) StandardWatchEventKinds/ENTRY_MODIFY
+        (> (bit-and-int mask IN_ATTRIB) 0) StandardWatchEventKinds/ENTRY_MODIFY
+        (> (bit-and-int mask IN_CREATE) 0) StandardWatchEventKinds/ENTRY_CREATE
+        (> (bit-and-int mask IN_MOVED_TO) 0) StandardWatchEventKinds/ENTRY_CREATE
+        (> (bit-and-int mask IN_DELETE) 0) StandardWatchEventKinds/ENTRY_DELETE
+        (> (bit-and-int mask IN_MOVED_FROM) 0) StandardWatchEventKinds/ENTRY_DELETE))
+
+    (method ^:private processEvent ^void [this ^int wd ^int mask ^:final ^UnixPath name]
+      (if (> (bit-and-int mask IN_Q_OVERFLOW) 0)
+          (for-each [^{:tag (Map$Entry Integer LinuxWatchKey)} entry (.entrySet wdToKey)]
+            (.signalEvent (cast LinuxWatchKey (.getValue entry))
+                          StandardWatchEventKinds/OVERFLOW
+                          nil))
+          (let [key (cast LinuxWatchKey (.get wdToKey wd))]
+            (when (some? key)
+              (cond
+                (> (bit-and-int mask IN_IGNORED) 0)
+                  (do (.remove wdToKey wd) (.invalidate key false) (.signal key))
+                (some? name)
+                  (let [^{:tag (WatchEvent$Kind ?)} kind (.maskToEventKind this mask)]
+                    (when (some? kind) (.signalEvent key kind name)))))))))
+
+  (method ^:private ^:static ^:native eventSize ^int [])
+
+  (method ^:private ^:static ^:native eventOffsets ^int/1 [])
+
+  (method ^:private ^:static ^:native inotifyInit :throws [UnixException] ^int [])
+
+  (method ^:private ^:static ^:native inotifyAddWatch :throws [UnixException] ^int [^int fd
+                                                                                    ^long pathAddress
+                                                                                    ^int mask])
+
+  (method ^:private ^:static ^:native inotifyRmWatch :throws [UnixException] ^void [^int fd ^int wd])
+
+  (method ^:private ^:static ^:native configureBlocking :throws [UnixException] ^void [^int fd
+                                                                                       ^boolean blocking])
+
+  (method ^:private ^:static ^:native socketpair :throws [UnixException] ^void [^int/1 sv])
+
+  (method ^:private ^:static ^:native poll :throws [UnixException] ^int [^int fd1 ^int fd2])
+
+  (static-initializer (UnixNativeDispatcher/openatSupported)))

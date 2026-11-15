@@ -1,0 +1,261 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/PlainHttpConnection.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net ConnectException InetSocketAddress StandardSocketOptions)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels SelectableChannel SelectionKey SocketChannel)
+        '(java.time Duration)
+        '(java.util.concurrent CompletableFuture)
+        '(java.util.concurrent.atomic AtomicReference)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function Consumer Supplier)
+        '(jdk.internal.net.http.common FlowTube Log Logger MinimalFuture Utils))
+
+(defclass PlainHttpConnection
+  :extends HttpConnection
+
+  (field ^:protected ^:final ^SocketChannel chan)
+
+  (field ^:private ^:final ^SocketTube tube)
+
+  (field ^:private ^:final ^HttpConnection$PlainHttpPublisher writePublisher
+    (HttpConnection$PlainHttpPublisher.))
+
+  (field ^:private ^:volatile ^boolean connected)
+
+  (field ^:private ^:volatile ^boolean closed)
+
+  (field ^:private ^:volatile ^ConnectTimerEvent connectTimerEvent)
+
+  (field ^:private ^:final ^ReentrantLock stateLock (ReentrantLock.))
+
+  (field ^:private ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+  (method ^:private newConnectTimer ^ConnectTimerEvent [this ^{:tag (Exchange ?)} exchange
+                                                        ^{:tag (CompletableFuture ?)} cf]
+    (let [duration (cast Duration (.orElse (.remainingConnectTimeout exchange) nil))]
+      (when (some? duration) (let [cte (ConnectTimerEvent. duration exchange cf)] cte))))
+
+  (defclass ^:final ConnectTimerEvent
+    :extends TimeoutEvent
+
+    (field ^:private ^:final ^{:tag (CompletableFuture ?)} cf)
+
+    (field ^:private ^:final ^{:tag (Exchange ?)} exchange)
+
+    (constructor [this ^Duration duration ^{:tag (Exchange ?)} exchange
+                  ^{:tag (CompletableFuture ?)} cf]
+      (super. duration)
+      (set! (.-exchange this) exchange)
+      (set! (.-cf this) cf))
+
+    (method ^:public handle ^void [this]
+      (when (.on (.-debug PlainHttpConnection/this))
+        (.log (.-debug PlainHttpConnection/this) "HTTP connect timed out"))
+      (let [ce (ConnectException. "HTTP connect timed out")]
+        (.cancel (.-multi exchange) ce)
+        (.execute (.theExecutor (.client PlainHttpConnection/this))
+                  (lambda Runnable ^void [] (.completeExceptionally cf ce)))))
+
+    (method ^:public toString ^String [this]
+      (java-str "ConnectTimerEvent, " (.toString super))))
+
+  (method getError ^Throwable [this ^Throwable cause]
+    (if (.compareAndSet errorRef nil cause) cause (cast Throwable (.get errorRef))))
+
+  (defclass ^:final ConnectEvent
+    :extends AsyncEvent
+
+    (field ^:private ^:final ^{:tag (CompletableFuture Void)} cf)
+
+    (field ^:private ^:final ^{:tag (Exchange ?)} exchange)
+
+    (constructor [this ^{:tag (CompletableFuture Void)} cf ^{:tag (Exchange ?)} exchange]
+      (set! (.-cf this) cf)
+      (set! (.-exchange this) exchange))
+
+    (method ^:public channel ^SelectableChannel [this] chan)
+
+    (method ^:public interestOps ^int [this] SelectionKey/OP_CONNECT)
+
+    (method ^:public handle ^void [this]
+      (try
+        (java-assert (not connected) "Already connected")
+        (java-assert (not (.isBlocking chan)) "Unexpected blocking channel")
+        (when (.on (.-debug PlainHttpConnection/this))
+          (.log (.-debug PlainHttpConnection/this) "ConnectEvent: finishing connect"))
+        (let [finished (.finishConnect chan)]
+          (when (.on (.-debug PlainHttpConnection/this))
+            (.log (.-debug PlainHttpConnection/this)
+                  "ConnectEvent: connect finished: %s, cancelled: %s, Local addr: %s"
+                  (new Object/1
+                       [finished (.requestCancelled (.-multi exchange)) (.getLocalAddress chan)])))
+          (java-assert (or finished (.requestCancelled (.-multi exchange)))
+            "Expected channel to be connected")
+          (if (.connectionOpened PlainHttpConnection/this)
+              (do
+                (when (.on (.-debug PlainHttpConnection/this))
+                  (.log (.-debug PlainHttpConnection/this)
+                        "%s has been connected asynchronously"
+                        (new Object/1 [(.label PlainHttpConnection/this)])))
+                (.completeAsync cf
+                                (lambda Supplier ^Void [] nil)
+                                (.theExecutor (.client PlainHttpConnection/this))))
+              (throw (ConnectException. "Connection closed"))))
+        (catch Throwable e
+          (let [t (.getError PlainHttpConnection/this (Utils/toConnectException e))]
+            (.execute (.theExecutor (.client PlainHttpConnection/this))
+                      (lambda Runnable ^void [] (.completeExceptionally cf t)))
+            (.close PlainHttpConnection/this t)))))
+
+    (method ^:public abort ^void [this ^IOException ioe]
+      (let [cause (.getError PlainHttpConnection/this ioe)]
+        (.execute (.theExecutor (.client PlainHttpConnection/this))
+                  (lambda Runnable ^void [] (.completeExceptionally cf cause)))
+        (.close PlainHttpConnection/this cause))))
+
+  (method ^:public connectAsync ^{:tag (CompletableFuture Void)} [this ^{:tag (Exchange ?)} exchange]
+    (let [^:mutable ^{:tag (CompletableFuture Void)} cf (MinimalFuture.)]
+      (try
+        (java-assert (not connected) "Already connected")
+        (java-assert (not (.isBlocking chan)) "Unexpected blocking channel")
+        (let [^:mutable ^boolean finished false]
+          (when (nil? connectTimerEvent)
+            (set! connectTimerEvent (.newConnectTimer this exchange cf))
+            (when (some? connectTimerEvent)
+              (when (.on (.-debug this))
+                (.log (.-debug this) (java-str "registering connect timer: " connectTimerEvent)))
+              (.registerTimer (.client this) connectTimerEvent)))
+          (let [localAddr (.localAddress (.client this))]
+            (when (some? localAddr)
+              (when (.on (.-debug this))
+                (.log (.-debug this) (java-str "binding to configured local address " localAddr)))
+              (let [sockAddr (InetSocketAddress. localAddr 0)]
+                (try
+                  (.bind chan sockAddr)
+                  (when (.on (.-debug this))
+                    (.log (.-debug this) (java-str "bind completed " localAddr)))
+                  (catch IOException cause
+                    (when (.on (.-debug this))
+                      (.log (.-debug this)
+                            (java-str "bind to " localAddr " failed: " (.getMessage cause))))
+                    (throw cause)))))
+            (set! finished (.connect chan (Utils/resolveAddress (.-address this))))
+            (if finished
+                (do
+                  (when (.on (.-debug this))
+                    (.log (.-debug this) "connect finished without blocking"))
+                  (if (.connectionOpened this)
+                      (do
+                        (when (.on (.-debug this))
+                          (.log (.-debug this)
+                                "%s has been connected"
+                                (new Object/1 [(.label this)])))
+                        (.complete cf nil))
+                      (throw (.getError this (ConnectException. "connection closed")))))
+                (do
+                  (when (.on (.-debug this)) (.log (.-debug this) "registering connect event"))
+                  (.registerEvent (.client this) (ConnectEvent. cf exchange))))
+            (set! cf (.checkCancelled exchange cf this))))
+        (catch Throwable throwable
+          (let [cause (.getError this (Utils/toConnectException throwable))]
+            (.completeExceptionally cf cause)
+            (try
+              (when (Log/channel)
+                (Log/logChannel (java-str "Closing connection: connect failed due to: " throwable)
+                                (new Object/1 [])))
+              (.close this cause)
+              (catch Exception x
+                (when (.on (.-debug this))
+                  (.log (.-debug this) "Failed to close channel after unsuccessful connect")))))))
+      cf))
+
+  (method connectionOpened ^boolean [this]
+    (let [^:mutable closed (.-closed this)]
+      (if closed
+          false
+          (do
+            (.lock stateLock)
+            (try
+              (set! closed (.-closed this))
+              (when-not closed (.connectionOpened (.client this) this))
+              (set! closed (.-closed this))
+              (finally (.unlock stateLock)))
+            (not closed)))))
+
+  (method ^:public finishConnect ^{:tag (CompletableFuture Void)} [this]
+    (java-assert (= connected false))
+    (when (.on (.-debug this)) (.log (.-debug this) "finishConnect, setting connected=true"))
+    (set! connected true)
+    (when (some? connectTimerEvent) (.cancelTimer (.client this) connectTimerEvent))
+    (MinimalFuture/completedFuture nil))
+
+  (method channel ^SocketChannel [this] chan)
+
+  (method ^:final getConnectionFlow ^FlowTube [this] tube)
+
+  (constructor [this ^Origin originServer ^InetSocketAddress addr ^HttpClientImpl client
+                ^String label]
+    (super. originServer addr client label)
+    (try
+      (set! (.-chan this) (SocketChannel/open))
+      (.configureBlocking chan false)
+      (Utils/configureChannelBuffers (method-ref Consumer [String] (.-debug this) Logger/.log)
+                                     chan
+                                     (.getReceiveBufferSize client)
+                                     (.getSendBufferSize client))
+      (.setOption chan StandardSocketOptions/TCP_NODELAY true)
+      (set! tube
+            (SocketTube. (.client this)
+                         chan
+                         (method-ref Supplier ^ByteBuffer [] Utils/getBuffer)
+                         label))
+      (catch IOException e (throw (InternalError. e)))))
+
+  (method publisher ^HttpConnection$HttpPublisher [this] writePublisher)
+
+  (method ^:public toString ^String [this]
+    (java-str "PlainHttpConnection: " (.toString super)))
+
+  (method ^:public close ^void [this] (.close this nil))
+
+  (method close ^void [this ^Throwable cause]
+    (let [^:mutable closed (.-closed this)]
+      (when-not closed
+        (.lock stateLock)
+        (try
+          (when (set! closed (.-closed this)) (return))
+          (set! closed (set! (.-closed this) true))
+          (let [reason (.getError this cause)]
+            (Log/logTrace (java-str "Closing: " (.toString this)))
+            (when (.on (.-debug this))
+              (let [interestOps (.debugInterestOps (.client this) chan)]
+                (if (nil? reason)
+                    (.log (.-debug this) (java-str "Closing channel: " interestOps))
+                    (.log (.-debug this)
+                          "Closing channel: %s due to %s"
+                          (new Object/1 [interestOps reason])))))
+            (let [connectTimerEvent (.-connectTimerEvent this)]
+              (when (some? connectTimerEvent) (.cancelTimer (.client this) connectTimerEvent))))
+          (finally (.unlock stateLock)))
+        (when (Log/channel) (Log/logChannel (java-str "Closing channel: " chan) (new Object/1 [])))
+        (try
+          (.signalClosed tube (cast Throwable (.get errorRef)))
+          (.close chan)
+          (catch IOException e
+            (.log (.-debug this) (java-str "Closing resulted in " e))
+            (Log/logTrace (java-str "Closing resulted in " e)))
+          (finally (.connectionClosed (.client this) this))))))
+
+  (method cacheKey ^ConnectionPool$CacheKey [this]
+    (ConnectionPool/cacheKey false (.-address this) nil))
+
+  (method connected ^boolean [this] connected)
+
+  (method isSecure ^boolean [this] false)
+
+  (method isProxied ^boolean [this] false)
+
+  (method proxy ^InetSocketAddress [this] nil))

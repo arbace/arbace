@@ -1,0 +1,884 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/common/SSLFlowDelegate.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.common)
+
+(import '(java.io IOException)
+        '(java.lang.ref Reference ReferenceQueue WeakReference)
+        '(java.nio ByteBuffer)
+        '(java.util ArrayList Collections Iterator LinkedList List)
+        '(java.util.concurrent CompletableFuture ConcurrentLinkedQueue Executor Flow$Subscriber)
+        '(java.util.concurrent.atomic AtomicInteger)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function Consumer Function IntBinaryOperator Supplier)
+        '(javax.net.ssl SSLEngine
+                        SSLEngineResult
+                        SSLEngineResult$HandshakeStatus
+                        SSLEngineResult$Status
+                        SSLException
+                        SSLHandshakeException))
+
+(defclass ^:public SSLFlowDelegate
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this SSLFlowDelegate/.dbgString)
+                          Utils/DEBUG))
+
+  (field ^:private ^:static ^:final ^ByteBuffer SENTINEL Utils/EMPTY_BYTEBUFFER)
+
+  (field ^:private ^:static ^:final ^ByteBuffer HS_TRIGGER (ByteBuffer/allocate 0))
+
+  (field ^:private ^:static ^:final ^ByteBuffer NOTHING (ByteBuffer/allocate 0))
+
+  (field ^:private ^:static ^:final ^String monProp
+    (Utils/getProperty "jdk.internal.httpclient.monitorFlowDelegate"))
+
+  (field ^:private ^:static ^:final ^boolean isMonitored
+    (and (some? monProp) (or (.isEmpty monProp) (.equalsIgnoreCase monProp "true"))))
+
+  (field ^:final ^Executor exec)
+
+  (field ^:final ^Reader reader)
+
+  (field ^:final ^Writer writer)
+
+  (field ^:final ^SSLEngine engine)
+
+  (field ^:final ^String tubeName)
+
+  (field ^:final ^{:tag (CompletableFuture String)} alpnCF)
+
+  (field ^:final ^Monitorable monitor
+    (when isMonitored (method-ref Monitorable this SSLFlowDelegate/.monitor)))
+
+  (field ^:volatile ^boolean close_notify_received)
+
+  (field ^:final ^{:tag (CompletableFuture Void)} readerCF)
+
+  (field ^:final ^{:tag (CompletableFuture Void)} writerCF)
+
+  (field ^:final ^{:tag (CompletableFuture Void)} stopCF)
+
+  (field ^:final ^{:tag (Consumer ByteBuffer)} recycler)
+
+  (field ^:static ^AtomicInteger scount (AtomicInteger. 1))
+
+  (field ^:final ^int id)
+
+  (constructor ^:public [this ^SSLEngine engine ^Executor exec
+                         ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downReader
+                         ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downWriter]
+    (this. engine exec nil downReader downWriter))
+
+  (constructor ^:public [this ^SSLEngine engine ^Executor exec
+                         ^{:tag (Consumer ByteBuffer)} recycler
+                         ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downReader
+                         ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downWriter]
+    (set! (.-id this) (.getAndIncrement scount))
+    (set! (.-tubeName this) (String/valueOf downWriter))
+    (set! (.-recycler this) recycler)
+    (set! (.-reader this) (Reader.))
+    (set! (.-writer this) (Writer.))
+    (set! (.-engine this) engine)
+    (set! (.-exec this) exec)
+    (set! (.-handshakeState this) (AtomicInteger. NOT_HANDSHAKING))
+    (set! (.-readerCF this) (.completion reader))
+    (set! (.-writerCF this) (.completion reader))
+    (.exceptionally readerCF
+                    (method-ref Function ^Void [Throwable] this SSLFlowDelegate/.stopOnError))
+    (.exceptionally writerCF
+                    (method-ref Function ^Void [Throwable] this SSLFlowDelegate/.stopOnError))
+    (set! (.-stopCF this)
+          (.thenRun (CompletableFuture/allOf (.completion reader) (.completion writer))
+                    (method-ref Runnable this SSLFlowDelegate/.normalStop)))
+    (set! (.-alpnCF this) (MinimalFuture.))
+    (.connect this downReader downWriter)
+    (when isMonitored (Monitor/add monitor)))
+
+  (method ^:public closeNotifyReceived ^boolean [this]
+    close_notify_received)
+
+  (method connect ^void [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downReader
+                         ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downWriter]
+    (.subscribe (.-reader this) downReader)
+    (.subscribe (.-writer this) downWriter))
+
+  (method ^:public alpn ^{:tag (CompletableFuture String)} [this] alpnCF)
+
+  (method ^:private setALPN ^void [this]
+    (when-not (.isDone alpnCF)
+      (let [alpn (.getApplicationProtocol engine)]
+        (when (.on debug) (.log debug "setALPN = %s" (new Object/1 [alpn])))
+        (.complete alpnCF alpn))))
+
+  (method ^:public monitor ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append (.append sb "SSL: id ") id)
+      (.append (.append sb " ") (.dbgString this))
+      (.append sb (java-str " HS state: " (SSLFlowDelegate/states handshakeState)))
+      (.append sb (java-str " Engine state: " (.toString (.getHandshakeStatus engine))))
+      (when (some? stateList)
+        (.append sb " LL : ")
+        (for-each [^String s stateList] (.append (.append sb s) " ")))
+      (.append sb "\r\n")
+      (.append (.append sb "Reader:: ") (.toString reader))
+      (.append sb "\r\n")
+      (.append (.append sb "Writer:: ") (.toString writer))
+      (.append sb "\r\n===================================")
+      (.toString sb)))
+
+  (method ^:protected enterReadScheduling ^SubscriberWrapper$SchedulingAction [this]
+    SubscriberWrapper$SchedulingAction/CONTINUE)
+
+  (method ^:protected checkForHandshake ^Throwable [this ^Throwable t] t)
+
+  (defclass ^:final Reader
+    :extends SubscriberWrapper
+    :implements [FlowTube$TubeSubscriber]
+
+    (field ^:static ^:final ^int TARGET_BUFSIZE (unchecked-multiply-int 16 1024))
+
+    (field ^:final ^SequentialScheduler scheduler)
+
+    (field ^:volatile ^ByteBuffer readBuf)
+
+    (field ^boolean completing)
+
+    (field ^:final ^ReentrantLock readBufferLock (ReentrantLock.))
+
+    (field ^:final ^Logger debugr
+      (Utils/getDebugLogger (method-ref Supplier ^String [] this Reader/.dbgString) Utils/DEBUG))
+
+    (defclass ^:private ^:final ReaderDownstreamPusher
+      :implements [Runnable]
+
+      (method ^:public run ^void [this] (.processData Reader/this)))
+
+    (constructor [this]
+      (super.)
+      (set! scheduler (SequentialScheduler/lockingScheduler (ReaderDownstreamPusher.)))
+      (set! (.-readBuf this) (ByteBuffer/allocate 1024))
+      (.limit readBuf 0))
+
+    (method ^:public supportsRecycling ^boolean [this] (some? recycler))
+
+    (method ^:protected enterScheduling ^SubscriberWrapper$SchedulingAction [this]
+      (.enterReadScheduling SSLFlowDelegate/this))
+
+    (method ^:public closing ^boolean [this]
+      (.closeNotifyReceived SSLFlowDelegate/this))
+
+    (method ^:public ^:final dbgString ^String [this]
+      (java-str "SSL Reader(" tubeName ")"))
+
+    (method ^:public incoming ^void [this ^{:tag (List ByteBuffer)} buffers ^boolean complete]
+      (when (.on debugr)
+        (.log debugr "Adding %d bytes to read buffer" (new Object/1 [(Utils/remaining buffers)])))
+      (.addToReadBuf this buffers complete)
+      (.runOrSchedule scheduler exec))
+
+    (method ^:public toString ^String [this]
+      (java-str "READER: "
+                (.toString super)
+                ", readBuf: "
+                (.toString readBuf)
+                ", count: "
+                (.toString count)
+                ", scheduler: "
+                (if (.isStopped scheduler) "stopped" "running")
+                ", status: "
+                lastUnwrapStatus
+                ", handshakeState: "
+                (.get handshakeState)
+                ", engine: "
+                (.getHandshakeStatus engine)))
+
+    (method ^:private reallocReadBuf ^void [this]
+      (let [sz (.capacity readBuf)
+            newb (ByteBuffer/allocate (unchecked-multiply-int sz 2))]
+        (.flip readBuf)
+        (Utils/copy readBuf newb)
+        (set! readBuf newb)))
+
+    (method ^:protected upstreamWindowUpdate ^long [this ^long currentWindow ^long downstreamQsize]
+      (when (.needsMoreData this)
+        (when (.on debugr)
+          (let [remaining (.remaining readBuf)]
+            (when (> remaining TARGET_BUFSIZE)
+              (.log debugr "readBuf has more than TARGET_BUFSIZE: %d" (new Object/1 [remaining])))))
+        (.runOrSchedule scheduler))
+      0)
+
+    (method ^:private addToReadBuf ^void [this ^{:tag (List ByteBuffer)} buffers ^boolean complete]
+      (java-assert (or (> (Utils/remaining buffers) 0) (.isEmpty buffers)))
+      (.lock readBufferLock)
+      (try
+        (for-each [^ByteBuffer buf buffers]
+          (.compact readBuf)
+          (while (< (.remaining readBuf) (.remaining buf)) (.reallocReadBuf this))
+          (.put readBuf buf)
+          (.flip readBuf)
+          (when (some? recycler) (.accept recycler buf)))
+        (when complete (set! (.-completing this) complete) (set! minBytesRequired 0))
+        (finally (.unlock readBufferLock))))
+
+    (method ^:protected errorCommon ^boolean [this ^:mutable ^Throwable throwable]
+      (set! throwable (.checkForHandshake SSLFlowDelegate/this throwable))
+      (.errorCommon super throwable))
+
+    (method schedule ^void [this] (.runOrSchedule scheduler exec))
+
+    (method stop ^void [this]
+      (when (.on debugr) (.log debugr "stop"))
+      (.stop scheduler))
+
+    (field ^AtomicInteger count (AtomicInteger.))
+
+    (field ^:volatile ^int minBytesRequired)
+
+    (method needsMoreData ^boolean [this]
+      (if (and (and (some? (.-upstreamSubscription this))
+                    (<= (.remaining readBuf) minBytesRequired))
+               (or (identical? (.getHandshakeStatus engine)
+                               SSLEngineResult$HandshakeStatus/NEED_UNWRAP)
+                   (and (not (.isFulfilled (.-demand (.-downstreamSubscription this))))
+                        (.hasNoOutputData this))))
+          true
+          false))
+
+    (method requestMoreDataIfNeeded ^void [this]
+      (when (.needsMoreData this) (.requestMore this)))
+
+    (method ^:final processData ^void [this]
+      (try
+        (when (.on debugr)
+          (.log debugr
+                (java-str "processData: readBuf remaining:"
+                          (.remaining readBuf)
+                          ", state:"
+                          (SSLFlowDelegate/states handshakeState)
+                          ", engine handshake status:"
+                          (.getHandshakeStatus engine))))
+        (let [^:mutable ^int len 0
+              ^:mutable complete false]
+          (while (> (.remaining readBuf) (set! len minBytesRequired))
+            (let [^:mutable handshaking false]
+              (try
+                (let [^:mutable ^EngineResult result nil]
+                  (.lock readBufferLock)
+                  (try
+                    (set! complete (.-completing this))
+                    (when (.on debugr)
+                      (.log debugr "Unwrapping: %s" (new Object/1 [(.remaining readBuf)])))
+                    (set! len (if (> len 0) (set! minBytesRequired 0) len))
+                    (set! result (.unwrapBuffer this readBuf))
+                    (set! len (.remaining readBuf))
+                    (when (.on debugr)
+                      (.log debugr "Unwrapped: result: %s" (new Object/1 [(.-result result)]))
+                      (.log debugr
+                            "Unwrapped: consumed: %s"
+                            (new Object/1 [(.bytesConsumed result)])))
+                    (finally (.unlock readBufferLock)))
+                  (when (> (.bytesProduced result) 0)
+                    (when (.on debugr)
+                      (.log debugr "sending %d" (new Object/1 [(.bytesProduced result)])))
+                    (.addAndGet count (.bytesProduced result))
+                    (.outgoing this (.-destBuffer result) false))
+                  (when (identical? (.status result) SSLEngineResult$Status/BUFFER_UNDERFLOW)
+                    (when (.on debugr) (.log debugr "BUFFER_UNDERFLOW"))
+                    (.lock readBufferLock)
+                    (try
+                      (set! minBytesRequired len)
+                      (java-assert (>= (.remaining readBuf) len))
+                      (if (> (.remaining readBuf) len)
+                          (continue)
+                          (when (.-completing this)
+                            (when (.on (.-debug this))
+                              (.log debugr
+                                    "BUFFER_UNDERFLOW with EOF, %d bytes non decrypted."
+                                    (new Object/1 [len])))
+                            (throw (IOException.
+                                     (java-str "BUFFER_UNDERFLOW with EOF, "
+                                               len
+                                               " bytes non decrypted.")))))
+                      (finally (.unlock readBufferLock)))
+                    (.requestMoreDataIfNeeded this)
+                    (return))
+                  (when (and complete (identical? (.status result) SSLEngineResult$Status/CLOSED))
+                    (when (.on debugr) (.log debugr "Closed: completing"))
+                    (.outgoing this Utils/EMPTY_BB_LIST true)
+                    (.setALPN SSLFlowDelegate/this)
+                    (.requestMoreDataIfNeeded this)
+                    (return))
+                  (cond
+                    (.handshaking result)
+                      (do
+                        (set! handshaking true)
+                        (when (.on debugr) (.log debugr "handshaking"))
+                        (if (.doHandshake SSLFlowDelegate/this (.handshakeStatus result) READER)
+                            (continue)
+                            (break)))
+                    (.trySetALPN SSLFlowDelegate/this) (.resumeActivity SSLFlowDelegate/this)))
+                (catch IOException ex
+                  (let [cause (.checkForHandshake SSLFlowDelegate/this ex)]
+                    (.errorCommon this cause)
+                    (.handleError SSLFlowDelegate/this cause)
+                    (return))))
+              (when (and handshaking (not complete)) (.requestMoreDataIfNeeded this) (return))))
+          (when-not complete
+            (.lock readBufferLock)
+            (try
+              (set! complete (and (.-completing this) (not (.hasRemaining readBuf))))
+              (finally (.unlock readBufferLock))))
+          (if complete
+              (do
+                (when (.on debugr) (.log debugr "completing"))
+                (.setALPN SSLFlowDelegate/this)
+                (.outgoing this Utils/EMPTY_BB_LIST true))
+              (.requestMoreDataIfNeeded this)))
+        (catch Throwable ^:mutable ex
+          (set! ex (.checkForHandshake SSLFlowDelegate/this ex))
+          (.errorCommon this ex)
+          (.handleError SSLFlowDelegate/this ex))))
+
+    (field ^:private ^:volatile ^SSLEngineResult$Status lastUnwrapStatus)
+
+    (method unwrapBuffer :throws [IOException] ^EngineResult [this ^ByteBuffer src]
+      (java-assert (.isHeldByCurrentThread readBufferLock))
+      (let [^:mutable dst (.getAppBuffer SSLFlowDelegate/this)
+            len (.remaining src)]
+        (while true
+          (let [sslResult (.unwrap engine src dst)]
+            (switch (set! lastUnwrapStatus (.getStatus sslResult))
+              BUFFER_OVERFLOW
+                (let [appSize (set! applicationBufferSize
+                                    (.getApplicationBufferSize (.getSession engine)))
+                      b (ByteBuffer/allocate (unchecked-add-int appSize (.position dst)))]
+                  (.flip dst)
+                  (.put b dst)
+                  (set! dst b))
+              CLOSED
+                (do
+                  (java-assert (== (.position dst) 0))
+                  (.position src (.limit src))
+                  (set! completing true)
+                  (return (.doClosure SSLFlowDelegate/this (EngineResult. sslResult))))
+              BUFFER_UNDERFLOW
+                (do (java-assert (== (.position dst) 0)) (return (EngineResult. sslResult)))
+              OK
+                (let [size (.position dst)]
+                  (when (.on (.-debug this))
+                    (.log debugr
+                          (java-str "Decoded "
+                                    size
+                                    " bytes out of "
+                                    len
+                                    " into buffer of "
+                                    (.capacity dst)
+                                    " remaining to decode: "
+                                    (.remaining src))))
+                  (when (> size adaptiveAppBufferSize)
+                    (set! adaptiveAppBufferSize
+                          (bit-shift-left-int
+                            (unsigned-bit-shift-right-int (unchecked-add-int size 7) 3)
+                            3)))
+                  (.flip dst)
+                  (return (EngineResult. sslResult dst)))))))))
+
+  (defclass ^:public ^:interface Monitorable
+    (method ^:public getInfo ^String [this]))
+
+  (defclass ^:public ^:static Monitor
+    :extends Thread
+
+    (field ^:final ^{:tag (List (WeakReference Monitorable))} list)
+
+    (field ^:final ^{:tag (List FinalMonitorable)} finalList)
+
+    (field ^:final ^{:tag (ReferenceQueue Monitorable)} queue (ReferenceQueue.))
+
+    (field ^:static ^Monitor themon)
+
+    (static-initializer (set! themon (Monitor.)) (.start themon))
+
+    (defclass ^:final FinalMonitorable
+      :implements [Monitorable]
+
+      (field ^:final ^String finalState)
+
+      (constructor [this ^Monitorable o]
+        (set! finalState (.getInfo o))
+        (.add finalList this))
+
+      (method ^:public getInfo ^String [this]
+        (.remove finalList this)
+        finalState))
+
+    (constructor [this]
+      (super. "Monitor")
+      (.setDaemon this true)
+      (set! list (Collections/synchronizedList (LinkedList.)))
+      (set! finalList (ArrayList.)))
+
+    (method addTarget ^void [this ^Monitorable o]
+      (.add list (WeakReference. o queue)))
+
+    (method removeTarget ^void [this ^Monitorable o]
+      (locking list
+        (let [^{:tag (Iterator (WeakReference Monitorable))} it (.iterator list)]
+          (while (.hasNext it)
+            (let [m (cast Monitorable (.get (cast WeakReference (.next it))))]
+              (when (nil? m) (.remove it))
+              (when (identical? o m) (.remove it) (break))))
+          (let [m (FinalMonitorable. o)] (.addTarget this m) (Reference/reachabilityFence m)))))
+
+    (method ^:public ^:static add ^void [^Monitorable o]
+      (.addTarget themon o))
+
+    (method ^:public ^:static remove ^void [^Monitorable o]
+      (.removeTarget themon o))
+
+    (method ^:public run ^void [this]
+      (.println System/out "Monitor starting")
+      (try
+        (while true
+          (Thread/sleep (unchecked-multiply-int 20 1000))
+          (locking list
+            (let [^:mutable ^{:tag (Reference (? extends Monitorable))} expired nil]
+              (while (some? (set! expired (.poll queue))) (.remove list expired))
+              (for-each [^{:tag (WeakReference Monitorable)} ref list]
+                (let [o (cast Monitorable (.get ref))]
+                  (when (some? o)
+                    (when (instance? FinalMonitorable o) (.enqueue ref))
+                    (.println System/out (.getInfo o))
+                    (.println System/out "-------------------------"))))))
+          (.println System/out "--o-o-o-o-o-o-o-o-o-o-o-o-o-o-"))
+        (catch InterruptedException e (.println System/out (java-str "Monitor exiting with " e))))))
+
+  (defclass Writer
+    :extends SubscriberWrapper
+
+    (field ^:final ^SequentialScheduler scheduler)
+
+    (field ^:final ^{:tag (List ByteBuffer)} writeList)
+
+    (field ^:final ^Logger debugw
+      (Utils/getDebugLogger (method-ref Supplier ^String [] this Writer/.dbgString) Utils/DEBUG))
+
+    (field ^:volatile ^boolean completing)
+
+    (field ^boolean completed)
+
+    (defclass WriterDownstreamPusher
+      :extends SequentialScheduler$CompleteRestartableTask
+
+      (method ^:public run ^void [this] (.processData Writer/this)))
+
+    (constructor [this]
+      (super.)
+      (set! writeList (Collections/synchronizedList (LinkedList.)))
+      (set! scheduler (SequentialScheduler. (WriterDownstreamPusher.))))
+
+    (method ^:protected incoming ^void [this ^{:tag (List ByteBuffer)} buffers ^boolean complete]
+      (java-assert (if complete (identical? buffers Utils/EMPTY_BB_LIST) true))
+      (java-assert (if (not (identical? buffers Utils/EMPTY_BB_LIST)) (= complete false) true))
+      (if complete
+          (do
+            (when (.on debugw) (.log debugw "adding SENTINEL"))
+            (set! completing true)
+            (.add writeList SENTINEL))
+          (.addAll writeList buffers))
+      (when (.on debugw)
+        (.log debugw
+              (java-str "added "
+                        (.size buffers)
+                        " ("
+                        (Utils/remaining buffers)
+                        " bytes) to the writeList")))
+      (.runOrSchedule scheduler))
+
+    (method ^:public ^:final dbgString ^String [this]
+      (java-str "SSL Writer(" tubeName ")"))
+
+    (method ^:protected onSubscribe ^void [this]
+      (when (.on debugw) (.log debugw "onSubscribe initiating handshaking"))
+      (.addData this HS_TRIGGER))
+
+    (method schedule ^void [this] (.runOrSchedule scheduler))
+
+    (method stop ^void [this]
+      (when (.on debugw) (.log debugw "stop"))
+      (.stop scheduler))
+
+    (method ^:public closing ^boolean [this]
+      (.closeNotifyReceived SSLFlowDelegate/this))
+
+    (method ^:private isCompleting ^boolean [this] completing)
+
+    (method ^:protected upstreamWindowUpdate ^long [this ^long currentWindow ^long downstreamQsize]
+      (if (> (.size writeList) 10) 0 (.upstreamWindowUpdate super currentWindow downstreamQsize)))
+
+    (method ^:private hsTriggered ^boolean [this]
+      (locking writeList
+        (for-each [^ByteBuffer b writeList] (when (identical? b HS_TRIGGER) (return true)))
+        false))
+
+    (method triggerWrite ^void [this]
+      (locking writeList (when (.isEmpty writeList) (.add writeList HS_TRIGGER)))
+      (.runOrSchedule scheduler))
+
+    (method ^:private processData ^void [this]
+      (let [^:mutable completing (.isCompleting this)]
+        (try
+          (when (.on debugw)
+            (.log debugw
+                  (java-str "processData, writeList remaining:"
+                            (Utils/synchronizedRemaining writeList)
+                            ", hsTriggered:"
+                            (.hsTriggered this)
+                            ", needWrap:"
+                            (.needWrap this))))
+          (while (or (or (> (Utils/synchronizedRemaining writeList) 0) (.hsTriggered this))
+                     (.needWrap this))
+            (when (.isStopped scheduler) (return))
+            (let [outbufs (cast ByteBuffer/1 (.toArray writeList Utils/EMPTY_BB_ARRAY))
+                  result (.wrapBuffers this outbufs)]
+              (when (.on debugw)
+                (.log debugw "wrapBuffer returned %s" (new Object/1 [(.-result result)])))
+              (when (identical? (.status result) SSLEngineResult$Status/CLOSED)
+                (when-not (.-upstreamCompleted this)
+                  (set! (.-upstreamCompleted this) true)
+                  (.cancel (.-upstreamSubscription this))
+                  (.setALPN SSLFlowDelegate/this))
+                (when (<= (.bytesProduced result) 0) (return))
+                (when (and (not completing) (not completed))
+                  (set! completing (set! (.-completing this) true))
+                  (.add writeList SENTINEL)))
+              (let [^:mutable handshaking false]
+                (cond
+                  (.handshaking result)
+                    (do
+                      (when (.on debugw) (.log debugw "handshaking"))
+                      (.doHandshake SSLFlowDelegate/this (.handshakeStatus result) WRITER)
+                      (set! handshaking true))
+                  (.trySetALPN SSLFlowDelegate/this) (.resumeActivity SSLFlowDelegate/this))
+                (.cleanList SSLFlowDelegate/this writeList)
+                (.sendResultBytes this result)
+                (when handshaking (when-not (and (not completing) (.needWrap this)) (return))))))
+          (cond
+            (and completing (== (Utils/synchronizedRemaining writeList) 0))
+              (when-not completed
+                (set! completed true)
+                (.clear writeList)
+                (.outgoing this Utils/EMPTY_BB_LIST true))
+            (and (.isEmpty writeList) (.needWrap this)) (.addData writer HS_TRIGGER))
+          (catch Throwable ^:mutable ex
+            (set! ex (.checkForHandshake SSLFlowDelegate/this ex))
+            (.errorCommon this ex)
+            (.handleError SSLFlowDelegate/this ex)))))
+
+    (field ^:volatile ^ByteBuffer writeBuffer)
+
+    (field ^:private ^:volatile ^SSLEngineResult$Status lastWrappedStatus)
+
+    (method wrapBuffers :throws [SSLException] ^EngineResult [this ^ByteBuffer/1 src]
+      (let [len (Utils/remaining src)]
+        (when (.on debugw) (.log debugw (java-str "wrapping " len " bytes")))
+        (let [^:mutable dst writeBuffer]
+          (when (nil? dst) (set! dst (set! writeBuffer (.getNetBuffer SSLFlowDelegate/this))))
+          (java-assert (== (.position dst) 0) (java-str "buffer position is " (.position dst)))
+          (java-assert (.hasRemaining dst)
+            (java-str "buffer has no remaining space: capacity=" (.capacity dst)))
+          (while true
+            (let [sslResult (.wrap engine src dst)]
+              (when (.on debugw) (.log debugw (java-str "SSLResult: " sslResult)))
+              (switch (set! lastWrappedStatus (.getStatus sslResult))
+                BUFFER_OVERFLOW
+                  (do
+                    (when (.on debugw) (.log debugw "BUFFER_OVERFLOW"))
+                    (let [netSize (set! packetBufferSize
+                                        (.getPacketBufferSize (.getSession engine)))
+                          b (set! writeBuffer
+                                  (ByteBuffer/allocate (unchecked-add-int netSize (.position dst))))]
+                      (.flip dst)
+                      (.put b dst)
+                      (set! dst b)))
+                CLOSED
+                  (do
+                    (when (.on debugw) (.log debugw "CLOSED"))
+                    (let [^:mutable ^ByteBuffer dest nil]
+                      (cond
+                        (== (.position dst) 0) (set! dest NOTHING)
+                        (< (.position dst) (unchecked-divide-int (.capacity dst) 2))
+                          (do (.flip dst) (set! dest (Utils/copyAligned dst)) (.clear dst))
+                        :else (do (.flip dst) (set! dest dst) (set! writeBuffer nil)))
+                      (when (.on debugw)
+                        (.log debugw
+                              "OK => produced: %d bytes into %d, not wrapped: %d"
+                              (new Object/1
+                                   [(.remaining dest) (.capacity dest) (Utils/remaining src)])))
+                      (return (EngineResult. sslResult dest))))
+                OK
+                  (let [^:mutable ^ByteBuffer dest nil]
+                    (cond
+                      (== (.position dst) 0) (set! dest NOTHING)
+                      (< (.position dst) (unchecked-divide-int (.capacity dst) 2))
+                        (do (.flip dst) (set! dest (Utils/copyAligned dst)) (.clear dst))
+                      :else (do (.flip dst) (set! dest dst) (set! writeBuffer nil)))
+                    (when (.on debugw)
+                      (.log debugw
+                            "OK => produced: %d bytes into %d, not wrapped: %d"
+                            (new Object/1
+                                 [(.remaining dest) (.capacity dest) (Utils/remaining src)])))
+                    (return (EngineResult. sslResult dest)))
+                BUFFER_UNDERFLOW
+                  (do
+                    (when (.on (.-debug this)) (.log (.-debug this) "BUFFER_UNDERFLOW"))
+                    (return (EngineResult. sslResult)))
+                (do
+                  (when (.on debugw)
+                    (.log debugw "result: %s" (new Object/1 [(.getStatus sslResult)])))
+                  (java-assert false (java-str "result:" (.getStatus sslResult))))))))))
+
+    (method ^:private needWrap ^boolean [this]
+      (identical? (.getHandshakeStatus engine) SSLEngineResult$HandshakeStatus/NEED_WRAP))
+
+    (method ^:private sendResultBytes ^void [this ^EngineResult result]
+      (when (> (.bytesProduced result) 0)
+        (when (.on debugw)
+          (.log debugw "Sending %d bytes downstream" (new Object/1 [(.bytesProduced result)])))
+        (.outgoing this (.-destBuffer result) false)))
+
+    (method ^:public toString ^String [this]
+      (java-str "WRITER: "
+                (.toString super)
+                ", writeList size: "
+                (.size writeList)
+                ", scheduler: "
+                (if (.isStopped scheduler) "stopped" "running")
+                ", status: "
+                lastWrappedStatus)))
+
+  (method ^:private handleError ^void [this ^Throwable t]
+    (when (.on debug) (.log debug "handleError" t))
+    (.completeExceptionally readerCF t)
+    (.completeExceptionally writerCF t)
+    (.completeExceptionally alpnCF t)
+    (.stop reader)
+    (.stop writer))
+
+  (field ^boolean stopped)
+
+  (method ^:private normalStop ^void [this]
+    (locking this (when stopped (return)) (set! stopped true))
+    (.stop reader)
+    (.stop writer)
+    (when-not (.isDone alpnCF)
+      (let [^Throwable alpn (SSLHandshakeException.
+                              "Connection closed before successful ALPN negotiation")]
+        (.completeExceptionally alpnCF alpn)))
+    (when isMonitored (Monitor/remove monitor)))
+
+  (method ^:private stopOnError ^Void [this ^Throwable error]
+    (when-not (.isDone alpnCF) (.completeExceptionally alpnCF error))
+    (.normalStop this)
+    nil)
+
+  (method ^:private cleanList ^void [this ^{:tag (List ByteBuffer)} l]
+    (locking l
+      (let [^{:tag (Iterator ByteBuffer)} iter (.iterator l)]
+        (while (.hasNext iter)
+          (let [b (cast ByteBuffer (.next iter))]
+            (when (and (not (.hasRemaining b)) (not (identical? b SENTINEL))) (.remove iter)))))))
+
+  (field ^:private ^:static ^:final ^int NOT_HANDSHAKING 0)
+
+  (field ^:private ^:static ^:final ^int HANDSHAKING 1)
+
+  (field ^:private ^:static ^:final ^int DOING_TASKS 4)
+
+  (field ^:private ^:static ^:final ^int REQUESTING_TASKS 8)
+
+  (field ^:private ^:static ^:final ^int TASK_BITS 12)
+
+  (field ^:private ^:static ^:final ^int READER 1)
+
+  (field ^:private ^:static ^:final ^int WRITER 2)
+
+  (method ^:private ^:static states ^String [^AtomicInteger state]
+    (let [s (.get state)
+          sb (StringBuilder.)
+          x (bit-and-int s (bit-not-int TASK_BITS))]
+      (switch x
+        NOT_HANDSHAKING (.append sb " NOT_HANDSHAKING ")
+        HANDSHAKING (.append sb " HANDSHAKING ")
+        (throw (InternalError.)))
+      (when (> (bit-and-int s DOING_TASKS) 0) (.append sb "|DOING_TASKS"))
+      (when (> (bit-and-int s REQUESTING_TASKS) 0) (.append sb "|REQUESTING_TASKS"))
+      (.toString sb)))
+
+  (method ^:private resumeActivity ^void [this]
+    (.schedule reader)
+    (.schedule writer))
+
+  (field ^:final ^AtomicInteger handshakeState)
+
+  (field ^:final ^{:tag (ConcurrentLinkedQueue String)} stateList
+    (when (.on debug) (ConcurrentLinkedQueue.)))
+
+  (field ^:private ^:static ^:final ^IntBinaryOperator REQUEST_OR_DO_TASKS
+    (lambda IntBinaryOperator ^int [^int current ^int ignored]
+      (if (== (bit-and-int current DOING_TASKS) 0)
+          (bit-or-int DOING_TASKS (bit-and-int current HANDSHAKING))
+          (bit-or-int (bit-or-int DOING_TASKS REQUESTING_TASKS) (bit-and-int current HANDSHAKING)))))
+
+  (field ^:private ^:static ^:final ^IntBinaryOperator FINISH_OR_DO_TASKS
+    (lambda IntBinaryOperator ^int [^int current ^int ignored]
+      (if (not (== (bit-and-int current REQUESTING_TASKS) 0))
+          (bit-or-int DOING_TASKS (bit-and-int current HANDSHAKING))
+          (bit-and-int current HANDSHAKING))))
+
+  (method ^:private doHandshake ^boolean [this ^SSLEngineResult$HandshakeStatus handshakeStatus
+                                          ^int caller]
+    (.getAndAccumulate handshakeState
+                       0
+                       (lambda IntBinaryOperator ^int [^int current ^int unused]
+                         (bit-or-int HANDSHAKING (bit-and-int current TASK_BITS))))
+    (when (and (some? stateList) (.on debug))
+      (.add stateList (.toString handshakeStatus))
+      (.add stateList (Integer/toString caller)))
+    (switch handshakeStatus
+      NEED_TASK
+        (let [s (.accumulateAndGet handshakeState 0 REQUEST_OR_DO_TASKS)]
+          (when (> (bit-and-int s REQUESTING_TASKS) 0) (return false))
+          (when (.on debug) (.log debug "obtaining and initiating task execution"))
+          (let [^{:tag (List Runnable)} tasks (.obtainTasks this)]
+            (.executeTasks this tasks)
+            (return false)))
+      NEED_WRAP (when (== caller READER) (.triggerWrite writer) (return false))
+      (NEED_UNWRAP NEED_UNWRAP_AGAIN) (when (== caller WRITER) (.schedule reader) (return false))
+      (throw (InternalError. (java-str "Unexpected handshake status:" handshakeStatus))))
+    true)
+
+  (method ^:private obtainTasks ^{:tag (List Runnable)} [this]
+    (let [^{:tag (List Runnable)} l (ArrayList.)
+          ^:mutable ^Runnable r nil]
+      (while (some? (set! r (.getDelegatedTask engine))) (.add l r))
+      l))
+
+  (method ^:private executeTasks ^void [this ^{:tag (List Runnable)} tasks]
+    (.execute exec
+              (lambda Runnable ^void []
+                (try
+                  (let [^:mutable ^{:tag (List Runnable)} nextTasks tasks]
+                    (when (.on debug)
+                      (.log debug (java-str "#tasks to execute: " (.size nextTasks))))
+                    (loop []
+                      (.forEach nextTasks (method-ref Consumer [Runnable] Runnable/.run))
+                      (if (identical? (.getHandshakeStatus engine)
+                                      SSLEngineResult$HandshakeStatus/NEED_TASK)
+                          (set! nextTasks (.obtainTasks this))
+                          (let [s (.accumulateAndGet handshakeState 0 FINISH_OR_DO_TASKS)]
+                            (if (not (== (bit-and-int s DOING_TASKS) 0))
+                                (do
+                                  (when (.on debug) (.log debug "re-running tasks (B)"))
+                                  (set! nextTasks (.obtainTasks this)))
+                                (break))))
+                      (when true (recur)))
+                    (when (.on debug) (.log debug "finished task execution"))
+                    (let [hs (.getHandshakeStatus engine)]
+                      (when (or (identical? hs SSLEngineResult$HandshakeStatus/FINISHED)
+                                (identical? hs SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING))
+                        (.trySetALPN this))
+                      (.resumeActivity this)))
+                  (catch Throwable t (.handleError this (.checkForHandshake this t)))))))
+
+  (method trySetALPN ^boolean [this]
+    (if (== (bit-and-int (.getAndSet handshakeState NOT_HANDSHAKING) (bit-not-int DOING_TASKS))
+            HANDSHAKING)
+        (do
+          (set! applicationBufferSize (.getApplicationBufferSize (.getSession engine)))
+          (set! packetBufferSize (.getPacketBufferSize (.getSession engine)))
+          (.setALPN this)
+          true)
+        false))
+
+  (method doClosure :throws [IOException] ^EngineResult [this ^EngineResult r]
+    (when (.on debug)
+      (.log debug
+            "doClosure(%s): %s [isOutboundDone: %s, isInboundDone: %s]"
+            (new Object/1
+                 [(.-result r)
+                  (.getHandshakeStatus engine)
+                  (.isOutboundDone engine)
+                  (.isInboundDone engine)])))
+    (when (.on debug) (.log debug "doClosure: close_notify received"))
+    (set! close_notify_received true)
+    (.closeOutbound engine)
+    (when (identical? (.getHandshakeStatus engine) SSLEngineResult$HandshakeStatus/NEED_WRAP)
+      (when-not (.isStopped (.-scheduler writer))
+        (.doHandshake this SSLEngineResult$HandshakeStatus/NEED_WRAP READER)))
+    r)
+
+  (method ^:public upstreamReader ^{:tag (Flow$Subscriber (List ByteBuffer))} [this]
+    reader)
+
+  (method ^:public upstreamWriter ^{:tag (Flow$Subscriber (List ByteBuffer))} [this]
+    writer)
+
+  (method ^:public resumeReader ^boolean [this]
+    (.signalScheduling reader))
+
+  (method ^:public resetReaderDemand ^void [this]
+    (.resetDownstreamDemand reader))
+
+  (defclass ^:static EngineResult
+    (field ^:final ^SSLEngineResult result)
+
+    (field ^:final ^ByteBuffer destBuffer)
+
+    (constructor [this ^SSLEngineResult result] (this. result nil))
+
+    (constructor [this ^SSLEngineResult result ^ByteBuffer destBuffer]
+      (set! (.-result this) result)
+      (set! (.-destBuffer this) destBuffer))
+
+    (method handshaking ^boolean [this]
+      (let [s (.getHandshakeStatus result)]
+        (and (and (not (identical? s SSLEngineResult$HandshakeStatus/FINISHED))
+                  (not (identical? s SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING)))
+             (not (identical? (.getStatus result) SSLEngineResult$Status/CLOSED)))))
+
+    (method needUnwrap ^boolean [this]
+      (let [s (.getHandshakeStatus result)]
+        (identical? s SSLEngineResult$HandshakeStatus/NEED_UNWRAP)))
+
+    (method bytesConsumed ^int [this] (.bytesConsumed result))
+
+    (method bytesProduced ^int [this] (.bytesProduced result))
+
+    (method handshakeStatus ^SSLEngineResult$HandshakeStatus [this]
+      (.getHandshakeStatus result))
+
+    (method status ^SSLEngineResult$Status [this] (.getStatus result)))
+
+  (field ^:volatile ^int packetBufferSize)
+
+  (method ^:final getNetBuffer ^ByteBuffer [this]
+    (let [^:mutable netSize packetBufferSize]
+      (when (<= netSize 0)
+        (set! packetBufferSize (set! netSize (.getPacketBufferSize (.getSession engine)))))
+      (ByteBuffer/allocate netSize)))
+
+  (field ^:volatile ^int applicationBufferSize)
+
+  (field ^:volatile ^int adaptiveAppBufferSize)
+
+  (method ^:final getAppBuffer ^ByteBuffer [this]
+    (let [^:mutable appSize applicationBufferSize]
+      (when (<= appSize 0)
+        (set! applicationBufferSize (set! appSize (.getApplicationBufferSize (.getSession engine)))))
+      (let [^:mutable size adaptiveAppBufferSize]
+        (cond (<= size 0) (set! size 512) (> size appSize) (set! size appSize))
+        (ByteBuffer/allocate size))))
+
+  (method ^:final dbgString ^String [this]
+    (java-str "SSLFlowDelegate(" tubeName ")")))

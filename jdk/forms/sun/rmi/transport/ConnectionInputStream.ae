@@ -1,0 +1,59 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/ConnectionInputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport)
+
+(import '(java.io DataInput DataOutput DataOutputStream IOException InputStream)
+        '(java.rmi RemoteException)
+        '(java.rmi.server UID)
+        '(java.util ArrayList HashMap List Map Map$Entry)
+        '(sun.rmi.runtime Log)
+        '(sun.rmi.server MarshalInputStream))
+
+(defclass ConnectionInputStream
+  :extends MarshalInputStream
+
+  (field ^:private ^boolean dgcAckNeeded false)
+
+  (field ^:private ^{:tag (Map Endpoint (List LiveRef))} incomingRefTable (HashMap. 5))
+
+  (field ^:private ^UID ackID)
+
+  (constructor :throws [IOException] [this ^InputStream in] (super. in))
+
+  (method readID :throws [IOException] ^void [this]
+    (set! ackID (UID/read ^DataInput this)))
+
+  (method saveRef ^void [this ^LiveRef ref]
+    (let [ep (.getEndpoint ref)
+          ^:mutable ^{:tag (List LiveRef)} refList (cast List (.get incomingRefTable ep))]
+      (when (nil? refList) (set! refList (ArrayList.)) (.put incomingRefTable ep refList))
+      (.add refList ref)))
+
+  (method discardRefs ^void [this] (.clear incomingRefTable))
+
+  (method registerRefs :throws [IOException] ^void [this]
+    (when-not (.isEmpty incomingRefTable)
+      (for-each [^{:tag (Map$Entry Endpoint (List LiveRef))} entry (.entrySet incomingRefTable)]
+        (DGCClient/registerRefs (cast Endpoint (.getKey entry)) (cast List (.getValue entry))))))
+
+  (method setAckNeeded ^void [this] (set! dgcAckNeeded true))
+
+  (method done ^void [this ^Connection c]
+    (when dgcAckNeeded
+      (let [^:mutable ^Connection conn nil
+            ^:mutable ^Channel ch nil
+            ^:mutable reuse true]
+        (.log DGCImpl/dgcLog Log/VERBOSE "send ack")
+        (try
+          (set! ch (.getChannel c))
+          (set! conn (.newConnection ch))
+          (let [out (DataOutputStream. (.getOutputStream conn))]
+            (.writeByte out TransportConstants/DGCAck)
+            (when (nil? ackID) (set! ackID (UID.)))
+            (.write ackID ^DataOutput out)
+            (.releaseOutputStream conn)
+            (.available (.getInputStream conn))
+            (.releaseInputStream conn))
+          (catch RemoteException e (set! reuse false))
+          (catch IOException e (set! reuse false)))
+        (try (when (some? conn) (.free ch conn reuse)) (catch RemoteException e))))))

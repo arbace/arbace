@@ -1,0 +1,224 @@
+;; Converted from jdk26u src/java.management/share/classes/com/sun/jmx/remote/security/FileLoginModule.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.remote.security)
+
+(import '(com.sun.jmx.mbeanserver Util)
+        '(com.sun.jmx.remote.util ClassLogger EnvHelp)
+        '(java.io File IOException)
+        '(java.util Arrays Map)
+        '(javax.management.remote JMXPrincipal)
+        '(javax.security.auth Subject)
+        '(javax.security.auth.callback Callback
+                                       CallbackHandler
+                                       NameCallback
+                                       PasswordCallback
+                                       UnsupportedCallbackException)
+        '(javax.security.auth.login FailedLoginException LoginException)
+        '(javax.security.auth.spi LoginModule))
+
+(defclass ^:public FileLoginModule
+  :implements [LoginModule]
+
+  (field ^:private ^:static ^:final ^String PASSWORD_FILE_NAME "jmxremote.password")
+
+  (field ^:private ^:static ^:final ^String DEFAULT_PASSWORD_FILE_NAME
+    (java-str (System/getProperty "java.home")
+              File/separatorChar
+              "conf"
+              File/separatorChar
+              "management"
+              File/separatorChar
+              PASSWORD_FILE_NAME))
+
+  (field ^:private ^:static ^:final ^String USERNAME_KEY "javax.security.auth.login.name")
+
+  (field ^:private ^:static ^:final ^String PASSWORD_KEY "javax.security.auth.login.password")
+
+  (field ^:private ^:static ^:final ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.misc" "FileLoginModule"))
+
+  (field ^:private ^boolean useFirstPass false)
+
+  (field ^:private ^boolean tryFirstPass false)
+
+  (field ^:private ^boolean storePass false)
+
+  (field ^:private ^boolean clearPass false)
+
+  (field ^:private ^boolean hashPasswords false)
+
+  (field ^:private ^boolean succeeded false)
+
+  (field ^:private ^boolean commitSucceeded false)
+
+  (field ^:private ^String username)
+
+  (field ^:private ^char/1 password)
+
+  (field ^:private ^JMXPrincipal user)
+
+  (field ^:private ^Subject subject)
+
+  (field ^:private ^CallbackHandler callbackHandler)
+
+  (field ^:private ^{:tag (Map String Object)} sharedState)
+
+  (field ^:private ^{:tag (Map String ?)} options)
+
+  (field ^:private ^String passwordFile)
+
+  (field ^:private ^String passwordFileDisplayName)
+
+  (field ^:private ^boolean userSuppliedPasswordFile)
+
+  (field ^:private ^HashedPasswordManager hashPwdMgr)
+
+  (method ^:public initialize ^void [this ^Subject subject ^CallbackHandler callbackHandler
+                                     ^{:tag (Map String ?)} sharedState
+                                     ^{:tag (Map String ?)} options]
+    (set! (.-subject this) subject)
+    (set! (.-callbackHandler this) callbackHandler)
+    (set! (.-sharedState this) (cast Map (Util/cast sharedState)))
+    (set! (.-options this) options)
+    (set! tryFirstPass (.equalsIgnoreCase "true" (cast String (.get options "tryFirstPass"))))
+    (set! useFirstPass (.equalsIgnoreCase "true" (cast String (.get options "useFirstPass"))))
+    (set! storePass (.equalsIgnoreCase "true" (cast String (.get options "storePass"))))
+    (set! clearPass (.equalsIgnoreCase "true" (cast String (.get options "clearPass"))))
+    (set! hashPasswords (.equalsIgnoreCase "true" (cast String (.get options "hashPasswords"))))
+    (set! passwordFile (cast String (.get options "passwordFile")))
+    (set! passwordFileDisplayName passwordFile)
+    (set! userSuppliedPasswordFile true)
+    (when (nil? passwordFile)
+      (set! passwordFile DEFAULT_PASSWORD_FILE_NAME)
+      (set! userSuppliedPasswordFile false)
+      (set! passwordFileDisplayName passwordFile)))
+
+  (method ^:public login :throws [LoginException] ^boolean [this]
+    (try
+      (locking this
+        (when (nil? hashPwdMgr)
+          (set! hashPwdMgr (HashedPasswordManager. passwordFile hashPasswords))))
+      (.loadPasswords hashPwdMgr)
+      (catch IOException ioe
+        (let [le (LoginException.
+                   (java-str "Error: unable to load the password file: " passwordFileDisplayName))]
+          (throw (cast LoginException (EnvHelp/initCause le ioe))))))
+    (when (.debugOn logger)
+      (.debug logger "login" (java-str "Using password file: " passwordFileDisplayName)))
+    (cond
+      tryFirstPass
+        (try
+          (.attemptAuthentication this true)
+          (set! succeeded true)
+          (when (.debugOn logger)
+            (.debug logger "login" "Authentication using cached password has succeeded"))
+          (return true)
+          (catch LoginException le
+            (.cleanState this)
+            (.debug logger "login" "Authentication using cached password has failed")))
+      useFirstPass
+        (try
+          (.attemptAuthentication this true)
+          (set! succeeded true)
+          (when (.debugOn logger)
+            (.debug logger "login" "Authentication using cached password has succeeded"))
+          (return true)
+          (catch LoginException le
+            (.cleanState this)
+            (.debug logger "login" "Authentication using cached password has failed")
+            (throw le))))
+    (when (.debugOn logger) (.debug logger "login" "Acquiring password"))
+    (try
+      (.attemptAuthentication this false)
+      (set! succeeded true)
+      (when (.debugOn logger) (.debug logger "login" "Authentication has succeeded"))
+      true
+      (catch LoginException le
+        (.cleanState this)
+        (.debug logger "login" "Authentication has failed")
+        (throw le))))
+
+  (method ^:public commit :throws [LoginException] ^boolean [this]
+    (if (= succeeded false)
+        false
+        (do
+          (when (.isReadOnly subject)
+            (.cleanState this)
+            (throw (LoginException. "Subject is read-only")))
+          (when-not (.contains (.getPrincipals subject) user) (.add (.getPrincipals subject) user))
+          (when (.debugOn logger)
+            (.debug logger "commit" "Authentication has completed successfully"))
+          (.cleanState this)
+          (set! commitSucceeded true)
+          true)))
+
+  (method ^:public abort :throws [LoginException] ^boolean [this]
+    (when (.debugOn logger) (.debug logger "abort" "Authentication has not completed successfully"))
+    (if (= succeeded false)
+        false
+        (do
+          (if (and (= succeeded true) (= commitSucceeded false))
+              (do (set! succeeded false) (.cleanState this) (set! user nil))
+              (.logout this))
+          true)))
+
+  (method ^:public logout :throws [LoginException] ^boolean [this]
+    (when (.isReadOnly subject) (.cleanState this) (throw (LoginException. "Subject is read-only")))
+    (when (some? user) (.remove (.getPrincipals subject) user))
+    (.cleanState this)
+    (set! succeeded false)
+    (set! commitSucceeded false)
+    (set! user nil)
+    (when (.debugOn logger) (.debug logger "logout" "Subject is being logged out"))
+    true)
+
+  (method ^:private attemptAuthentication :throws [LoginException] ^void [this
+                                                                          ^boolean usePasswdFromSharedState]
+    (.getUsernamePassword this usePasswdFromSharedState)
+    (when-not (.authenticate hashPwdMgr username password)
+      (when (.debugOn logger) (.debug logger "login" "Invalid username or password"))
+      (throw (FailedLoginException. "Invalid username or password")))
+    (when (and (and storePass (not (.containsKey sharedState USERNAME_KEY)))
+               (not (.containsKey sharedState PASSWORD_KEY)))
+      (.put sharedState USERNAME_KEY username)
+      (.put sharedState PASSWORD_KEY password))
+    (set! user (JMXPrincipal. username))
+    (when (.debugOn logger)
+      (.debug logger "login" (java-str "User '" username "' successfully validated"))))
+
+  (method ^:private getUsernamePassword :throws [LoginException] ^void [this
+                                                                        ^boolean usePasswdFromSharedState]
+    (if usePasswdFromSharedState
+        (do
+          (set! username (cast String (.get sharedState USERNAME_KEY)))
+          (set! password (cast char/1 (.get sharedState PASSWORD_KEY))))
+        (do
+          (when (nil? callbackHandler)
+            (throw
+              (LoginException.
+                "Error: no CallbackHandler available to garner authentication information from the user")))
+          (let [callbacks (new Callback/1 2)]
+            (aset callbacks 0 (NameCallback. "username"))
+            (aset callbacks 1 (PasswordCallback. "password" false))
+            (try
+              (.handle callbackHandler callbacks)
+              (set! username (.getName (cast NameCallback (aget callbacks 0))))
+              (let [tmpPassword (.getPassword (cast PasswordCallback (aget callbacks 1)))]
+                (set! password (new char/1 (alength tmpPassword)))
+                (System/arraycopy tmpPassword 0 password 0 (alength tmpPassword))
+                (.clearPassword (cast PasswordCallback (aget callbacks 1))))
+              (catch IOException ioe
+                (let [le (LoginException. (.toString ioe))]
+                  (throw (cast LoginException (EnvHelp/initCause le ioe)))))
+              (catch UnsupportedCallbackException uce
+                (let [le (LoginException.
+                           (java-str
+                             "Error: "
+                             (.toString (.getCallback uce))
+                             " not available to garner authentication information from the user"))]
+                  (throw (cast LoginException (EnvHelp/initCause le uce))))))))))
+
+  (method ^:private cleanState ^void [this]
+    (set! username nil)
+    (when (some? password) (Arrays/fill password \space) (set! password nil))
+    (when clearPass (.remove sharedState USERNAME_KEY) (.remove sharedState PASSWORD_KEY))))

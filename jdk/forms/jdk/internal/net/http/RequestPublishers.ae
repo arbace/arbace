@@ -1,0 +1,489 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/RequestPublishers.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io FileNotFoundException IOException InputStream UncheckedIOException)
+        '(java.lang.reflect UndeclaredThrowableException)
+        '(java.net.http HttpRequest$BodyPublisher)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels FileChannel)
+        '(java.nio.charset Charset)
+        '(java.nio.file Files NoSuchFileException Path)
+        '(java.util ArrayList Collections Iterator List NoSuchElementException Objects Queue)
+        '(java.util.concurrent ConcurrentLinkedQueue
+                               Flow$Publisher
+                               Flow$Subscriber
+                               Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicReference)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function LongBinaryOperator Supplier ToLongFunction)
+        '(jdk.internal.net.http.common Demand SequentialScheduler Utils))
+
+(defclass ^:public ^:final RequestPublishers
+  (constructor ^:private [this])
+
+  (defclass ^:public ^:static ByteArrayPublisher
+    :implements [HttpRequest$BodyPublisher]
+
+    (field ^:private ^:final ^int length)
+
+    (field ^:private ^:final ^byte/1 content)
+
+    (field ^:private ^:final ^int offset)
+
+    (field ^:private ^:final ^int bufSize)
+
+    (constructor ^:public [this ^byte/1 content]
+      (this. content 0 (alength content)))
+
+    (constructor ^:public [this ^byte/1 content ^int offset ^int length]
+      (this. content offset length Utils/BUFSIZE))
+
+    (constructor ^:private [this ^byte/1 content ^int offset ^int length ^int bufSize]
+      (Objects/checkFromIndexSize offset length (alength content))
+      (when (<= bufSize 0)
+        (throw (IllegalArgumentException. (java-str "Invalid buffer size: " bufSize))))
+      (set! (.-content this) content)
+      (set! (.-offset this) offset)
+      (set! (.-length this) length)
+      (set! (.-bufSize this) bufSize))
+
+    (method copy ^{:tag (List ByteBuffer)} [this ^byte/1 content ^:mutable ^int offset
+                                            ^:mutable ^int length]
+      (let [^{:tag (List ByteBuffer)} bufs (ArrayList.)]
+        (while (> length 0)
+          (let [b (ByteBuffer/allocate (Math/min bufSize length))
+                max (.capacity b)
+                tocopy (Math/min max length)]
+            (.put b content offset tocopy)
+            (set! offset (unchecked-add-int offset tocopy))
+            (set! length (unchecked-subtract-int length tocopy))
+            (.flip b)
+            (.add bufs b)))
+        bufs))
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (let [^{:tag (List ByteBuffer)} copy (.copy this content offset length)
+            delegate (PullPublisher. (CheckedIterable/fromIterable copy))]
+        (.subscribe delegate subscriber)))
+
+    (method ^:public contentLength ^long [this] length))
+
+  (defclass ^:public ^:static IterablePublisher
+    :implements [HttpRequest$BodyPublisher]
+
+    (field ^:private ^:final ^{:tag (Iterable byte/1)} content)
+
+    (field ^:private ^:volatile ^long contentLength)
+
+    (constructor ^:public [this ^{:tag (Iterable byte/1)} content]
+      (set! (.-content this) (cast Iterable (Objects/requireNonNull content))))
+
+    (defclass ^:private ^:final ByteBufferIterator
+      :implements [(CheckedIterator ByteBuffer)]
+
+      (field ^:final ^{:tag (ConcurrentLinkedQueue ByteBuffer)} buffers (ConcurrentLinkedQueue.))
+
+      (field ^:final ^{:tag (Iterator byte/1)} iterator (.iterator content))
+
+      (method ^:public hasNext ^boolean [this]
+        (or (not (.isEmpty buffers)) (.hasNext iterator)))
+
+      (method ^:public next ^ByteBuffer [this]
+        (let [^:mutable buffer (cast ByteBuffer (.poll buffers))]
+          (while (nil? buffer) (.copy this) (set! buffer (cast ByteBuffer (.poll buffers))))
+          buffer))
+
+      (method getBuffer ^ByteBuffer [this] (Utils/getBuffer))
+
+      (method copy ^void [this]
+        (let [bytes (cast byte/1 (.next iterator))
+              ^:mutable length (alength bytes)]
+          (when-not (and (== length 0) (.hasNext iterator))
+            (let [^:mutable ^int offset 0]
+              (loop []
+                (let [b (.getBuffer this)
+                      max (.capacity b)
+                      tocopy (Math/min max length)]
+                  (.put b bytes offset tocopy)
+                  (set! offset (unchecked-add-int offset tocopy))
+                  (set! length (unchecked-subtract-int length tocopy))
+                  (.flip b)
+                  (.add buffers b))
+                (when (> length 0) (recur))))))))
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (let [^{:tag (CheckedIterable ByteBuffer)} iterable
+              (lambda CheckedIterable ^CheckedIterator [] (ByteBufferIterator.))
+            delegate (PullPublisher. iterable)]
+        (.subscribe delegate subscriber)))
+
+    (method ^:static computeLength ^long [^{:tag (Iterable byte/1)} bytes]
+      -1)
+
+    (method ^:public contentLength ^long [this]
+      (when (== contentLength 0)
+        (locking this
+          (when (== contentLength 0) (set! contentLength (IterablePublisher/computeLength content)))))
+      contentLength))
+
+  (defclass ^:public ^:static StringPublisher
+    :extends ByteArrayPublisher
+
+    (constructor ^:public [this ^String content ^Charset charset]
+      (super. (.getBytes content (cast Charset (Objects/requireNonNull charset))))))
+
+  (defclass ^:public ^:static EmptyPublisher
+    :implements [HttpRequest$BodyPublisher]
+
+    (field ^:private ^:final ^{:tag (Flow$Publisher ByteBuffer)} delegate
+      (PullPublisher. (CheckedIterable/fromIterable (Collections/emptyList)) nil))
+
+    (method ^:public contentLength ^long [this] 0)
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (.subscribe delegate subscriber)))
+
+  (defclass ^:public ^:static FilePublisher
+    :implements [HttpRequest$BodyPublisher]
+
+    (field ^:private ^:final ^Path path)
+
+    (field ^:private ^:final ^long length)
+
+    (method ^:public ^:static create :throws [FileNotFoundException] ^FilePublisher [^Path path]
+      (when (Files/notExists path) (throw (FileNotFoundException. (java-str path " not found"))))
+      (let [^:mutable ^long length 0]
+        (try (set! length (Files/size path)) (catch IOException ioe (set! length -1)))
+        (FilePublisher. path length)))
+
+    (constructor ^:private [this ^Path name ^long length]
+      (set! path name)
+      (set! (.-length this) length))
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (let [^:mutable ^InputStream is nil
+            ^:mutable ^Throwable t nil]
+        (try
+          (when-not (Files/isRegularFile path)
+            (throw (FileNotFoundException. (java-str path " (Not a regular file)"))))
+          (set! is (Files/newInputStream path))
+          (catch NoSuchFileException nsfe
+            (set! t (FileNotFoundException. (java-str path " (No such file or directory)"))))
+          (catch [UncheckedIOException UndeclaredThrowableException] ue (set! t (.getCause ue)))
+          (catch Throwable th (set! t th)))
+        (let [fis is
+              ^{:tag (PullPublisher ByteBuffer)} publisher (if (nil? t)
+                                                               (PullPublisher.
+                                                                 (lambda CheckedIterable ^CheckedIterator []
+                                                                   (StreamIterator. fis)))
+                                                               (PullPublisher. nil t))]
+          (.subscribe publisher subscriber))))
+
+    (method ^:public contentLength ^long [this] length))
+
+  (defclass ^:private ^:static ^:final StreamIterator
+    :implements [(CheckedIterator ByteBuffer)]
+
+    (field ^:final ^InputStream is)
+
+    (field ^:final ^{:tag (Supplier (? extends ByteBuffer))} bufSupplier)
+
+    (field ^:private ^:volatile ^boolean eof)
+
+    (field ^:volatile ^ByteBuffer nextBuffer)
+
+    (field ^:volatile ^boolean need2Read true)
+
+    (field ^:volatile ^boolean haveNext)
+
+    (field ^:final ^ReentrantLock stateLock (ReentrantLock.))
+
+    (constructor [this ^InputStream is]
+      (this. is (method-ref Supplier ^ByteBuffer [] Utils/getBuffer)))
+
+    (constructor [this ^InputStream is ^{:tag (Supplier (? extends ByteBuffer))} bufSupplier]
+      (set! (.-is this) is)
+      (set! (.-bufSupplier this) bufSupplier))
+
+    (method ^:private read :throws [IOException] ^int [this]
+      (if eof
+          -1
+          (do
+            (set! nextBuffer (cast ByteBuffer (.get bufSupplier)))
+            (.clear nextBuffer)
+            (let [buf (.array nextBuffer)
+                  offset (.arrayOffset nextBuffer)
+                  cap (.capacity nextBuffer)
+                  n (.read is buf offset cap)]
+              (if (== n -1)
+                  (do (set! eof true) -1)
+                  (do (.limit nextBuffer n) (.position nextBuffer 0) n))))))
+
+    (method ^:public hasNext :throws [IOException] ^boolean [this]
+      (.lock stateLock)
+      (try (.hasNext0 this) (finally (.unlock stateLock))))
+
+    (method ^:private hasNext0 :throws [IOException] ^boolean [this]
+      (when need2Read
+        (try
+          (set! haveNext (not (== (.read this) -1)))
+          (when haveNext (set! need2Read false))
+          (catch IOException e (set! haveNext false) (set! need2Read false) (throw e))
+          (finally (when-not haveNext (.close is)))))
+      haveNext)
+
+    (method ^:public next :throws [IOException] ^ByteBuffer [this]
+      (.lock stateLock)
+      (try
+        (when-not (.hasNext this) (throw (NoSuchElementException.)))
+        (set! need2Read true)
+        nextBuffer
+        (finally (.unlock stateLock)))))
+
+  (defclass ^:public ^:static InputStreamPublisher
+    :implements [HttpRequest$BodyPublisher]
+
+    (field ^:private ^:final ^{:tag (Supplier (? extends InputStream))} streamSupplier)
+
+    (constructor ^:public [this ^{:tag (Supplier (? extends InputStream))} streamSupplier]
+      (set! (.-streamSupplier this) (cast Supplier (Objects/requireNonNull streamSupplier))))
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (let [^:mutable ^InputStream is nil
+            ^:mutable ^Exception exception nil]
+        (try
+          (set! is (cast InputStream (.get streamSupplier)))
+          (when (nil? is) (set! exception (IOException. "Stream supplier returned null")))
+          (catch Exception cause (set! exception (IOException. "Stream supplier has failed" cause))))
+        (let [^{:tag (PullPublisher ByteBuffer)} publisher (if (some? exception)
+                                                               (PullPublisher. nil exception)
+                                                               (PullPublisher.
+                                                                 (.iterableOf this is)
+                                                                 nil))]
+          (.subscribe publisher subscriber))))
+
+    (method ^:private iterableOf ^{:tag (CheckedIterable ByteBuffer)} [this ^InputStream is]
+      (lambda CheckedIterable ^CheckedIterator [] (StreamIterator. is)))
+
+    (method ^:public contentLength ^long [this] -1))
+
+  (defclass ^:public ^:static ^:final FileChannelPublisher
+    :implements [HttpRequest$BodyPublisher]
+
+    (field ^:private ^:final ^FileChannel channel)
+
+    (field ^:private ^:final ^long position)
+
+    (field ^:private ^:final ^long limit)
+
+    (constructor :throws [IOException] ^:public [this ^FileChannel channel ^long offset ^long length]
+      (set! (.-channel this) (cast FileChannel (Objects/requireNonNull channel "channel")))
+      (let [fileSize (.size channel)]
+        (Objects/checkFromIndexSize offset length fileSize)
+        (set! (.-position this) offset)
+        (set! (.-limit this) (unchecked-add offset length))))
+
+    (method ^:public contentLength ^long [this]
+      (unchecked-subtract limit position))
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (let [^{:tag (CheckedIterable ByteBuffer)} iterable
+              (lambda CheckedIterable ^CheckedIterator []
+                (FileChannelIterator. channel position limit))]
+        (.subscribe (PullPublisher. iterable) subscriber))))
+
+  (defclass ^:private ^:static ^:final FileChannelIterator
+    :implements [(CheckedIterator ByteBuffer)]
+
+    (field ^:private ^:final ^FileChannel channel)
+
+    (field ^:private ^:final ^long limit)
+
+    (field ^:private ^long position)
+
+    (field ^:private ^boolean terminated)
+
+    (constructor ^:private [this ^FileChannel channel ^long position ^long limit]
+      (set! (.-channel this) channel)
+      (set! (.-position this) position)
+      (set! (.-limit this) limit))
+
+    (method ^:public hasNext ^boolean [this]
+      (and (< position limit) (not terminated)))
+
+    (method ^:public next :throws [IOException] ^ByteBuffer [this]
+      (when-not (.hasNext this) (throw (NoSuchElementException.)))
+      (let [remaining (unchecked-subtract limit position)
+            buffer (Utils/getBufferWithAtMost remaining)]
+        (try
+          (let [readLength (.read channel buffer position)]
+            (if (< readLength 0)
+                (throw (IOException. (.formatted "Unexpected EOF (position=%s)" position)))
+                (set! position (unchecked-add position readLength))))
+          (catch IOException ioe (set! terminated true) (throw ioe)))
+        (.flip buffer))))
+
+  (defclass ^:public ^:static ^:final PublisherAdapter
+    :implements [HttpRequest$BodyPublisher]
+
+    (field ^:private ^:final ^{:tag (Flow$Publisher (? extends ByteBuffer))} publisher)
+
+    (field ^:private ^:final ^long contentLength)
+
+    (constructor ^:public [this ^{:tag (Flow$Publisher (? extends ByteBuffer))} publisher
+                           ^long contentLength]
+      (set! (.-publisher this) (cast Flow$Publisher (Objects/requireNonNull publisher)))
+      (set! (.-contentLength this) contentLength))
+
+    (method ^:public contentLength ^long [this] contentLength)
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (.subscribe publisher subscriber)))
+
+  (method ^:public ^:static concat ^HttpRequest$BodyPublisher [&
+                                                               ^HttpRequest$BodyPublisher/1 publishers]
+    (cond
+      (== (alength publishers) 0) (EmptyPublisher.)
+      (== (alength publishers) 1)
+        (cast HttpRequest$BodyPublisher (Objects/requireNonNull (aget publishers 0)))
+      :else (AggregatePublisher. (List/of publishers))))
+
+  (defclass ^:private ^:static ^:final AggregatePublisher
+    :implements [HttpRequest$BodyPublisher]
+
+    (field ^:final ^{:tag (List HttpRequest$BodyPublisher)} bodies)
+
+    (constructor [this ^{:tag (List HttpRequest$BodyPublisher)} bodies]
+      (set! (.-bodies this) bodies))
+
+    (method ^:public contentLength ^long [this]
+      (let [length (.orElse (.reduce (.mapToLong
+                                       (.stream bodies)
+                                       (method-ref
+                                         ToLongFunction
+                                         [HttpRequest$BodyPublisher]
+                                         HttpRequest$BodyPublisher/.contentLength))
+                                     (lambda LongBinaryOperator ^long [^long a ^long b]
+                                       (if (or (< a 0) (< b 0)) -1 (unchecked-add a b))))
+                            0)]
+        (if (< length 0) -1 length)))
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (.onSubscribe subscriber (AggregateSubscription. bodies subscriber))))
+
+  (defclass ^:private ^:static ^:final AggregateSubscription
+    :implements [Flow$Subscription (Flow$Subscriber ByteBuffer)]
+
+    (field ^:final ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber)
+
+    (field ^:final ^{:tag (Queue HttpRequest$BodyPublisher)} bodies)
+
+    (field ^:final ^SequentialScheduler scheduler)
+
+    (field ^:final ^Demand demand (Demand.))
+
+    (field ^:final ^Demand demanded (Demand.))
+
+    (field ^:final ^{:tag (AtomicReference Throwable)} error (AtomicReference.))
+
+    (field ^:volatile ^Throwable illegalRequest)
+
+    (field ^:volatile ^HttpRequest$BodyPublisher publisher)
+
+    (field ^:volatile ^Flow$Subscription subscription)
+
+    (field ^:volatile ^boolean cancelled)
+
+    (constructor [this ^{:tag (List HttpRequest$BodyPublisher)} bodies
+                  ^{:tag (Flow$Subscriber (? super ByteBuffer))} subscriber]
+      (set! (.-bodies this) (ConcurrentLinkedQueue. bodies))
+      (set! (.-subscriber this) subscriber)
+      (set! (.-scheduler this)
+            (SequentialScheduler/lockingScheduler
+              (method-ref Runnable this AggregateSubscription/.run))))
+
+    (method ^:public request ^void [this ^long n]
+      (locking this (when (or cancelled (and (nil? publisher) (.isEmpty bodies))) (return)))
+      (try (.increase demand n) (catch IllegalArgumentException x (set! illegalRequest x)))
+      (.runOrSchedule scheduler))
+
+    (method ^:public cancel ^void [this]
+      (set! cancelled true)
+      (.runOrSchedule scheduler))
+
+    (method ^:private cancelSubscription ^boolean [this ^Flow$Subscription subscription]
+      (when (some? subscription)
+        (locking this
+          (when (identical? (.-subscription this) subscription)
+            (set! (.-subscription this) nil)
+            (set! (.-publisher this) nil)))
+        (.cancel subscription))
+      (.stop scheduler)
+      (some? subscription))
+
+    (method ^:public run ^void [this]
+      (try
+        (let [^:mutable ^HttpRequest$BodyPublisher publisher nil
+              ^:mutable ^Flow$Subscription subscription nil]
+          (while (and (nil? (.get error))
+                      (or (not (.isFulfilled demand))
+                          (and (nil? (.-publisher this)) (not (.isEmpty bodies)))))
+            (let [cancelled (.-cancelled this)]
+              (locking this
+                (set! publisher (.-publisher this))
+                (set! subscription (.-subscription this)))
+              (let [illegalRequest (.-illegalRequest this)]
+                (when cancelled (.clear bodies) (.cancelSubscription this subscription) (return))
+                (cond
+                  (and (nil? publisher) (not (.isEmpty bodies)))
+                    (do
+                      (locking this
+                        (set! (.-publisher this)
+                              (set! publisher (cast HttpRequest$BodyPublisher (.poll bodies)))))
+                      (.subscribe publisher this))
+                  (nil? publisher) (return))
+                (when (some? illegalRequest) (.onError this illegalRequest) (return))
+                (let [^:mutable n 0]
+                  (locking this
+                    (when (nil? (set! subscription (.-subscription this))) (return))
+                    (when-not (.isFulfilled demand)
+                      (set! n (.decreaseAndGet demand (.get demand)))
+                      (.increase demanded n)))
+                  (when (and (> n 0) (not cancelled)) (.request subscription n)))))))
+        (catch Throwable t (.onError this t))))
+
+    (method ^:private ^:synchronized publisherDone ^void [this]
+      (set! publisher nil)
+      (set! subscription nil))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (locking this
+        (java-assert (or (some? publisher) (some? (.get error))))
+        (set! (.-subscription this) subscription))
+      (.runOrSchedule scheduler))
+
+    (method ^:public onNext ^void [this ^ByteBuffer item]
+      (if (or cancelled (some? (.get error)))
+          (.cancelSubscription this (.-subscription this))
+          (do (.tryDecrement demanded) (.onNext subscriber item))))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (when (.compareAndSet error nil throwable)
+        (.publisherDone this)
+        (.onError subscriber throwable)
+        (.stop scheduler)))
+
+    (method ^:private ^:synchronized completeAndContinue ^boolean [this]
+      (if (and (some? publisher) (not (.isEmpty bodies)))
+          (do
+            (while (not (.isFulfilled demanded))
+              (.increase demand (.decreaseAndGet demanded (.get demanded))))
+            (.publisherDone this)
+            true)
+          (do (.publisherDone this) false)))
+
+    (method ^:public onComplete ^void [this]
+      (if (.completeAndContinue this)
+          (.runOrSchedule scheduler)
+          (do (when-not cancelled (.onComplete subscriber)) (.stop scheduler))))))

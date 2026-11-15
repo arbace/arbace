@@ -1,0 +1,136 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/PlainTunnelingConnection.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net InetSocketAddress)
+        '(java.net.http HttpResponse$BodyHandlers HttpTimeoutException)
+        '(java.nio.channels SocketChannel)
+        '(java.util.concurrent CompletableFuture CompletionException CompletionStage)
+        '(java.util.function BiFunction Function)
+        '(jdk.internal.net.http.common FlowTube MinimalFuture Utils$ProxyHeaders))
+
+(defclass ^:final PlainTunnelingConnection
+  :extends HttpConnection
+
+  (field ^:final ^PlainHttpConnection delegate)
+
+  (field ^:final ^Utils$ProxyHeaders proxyHeaders)
+
+  (field ^:final ^InetSocketAddress proxyAddr)
+
+  (field ^:private ^:volatile ^boolean connected)
+
+  (constructor ^:protected [this ^Origin originServer ^InetSocketAddress addr
+                            ^InetSocketAddress proxy ^HttpClientImpl client
+                            ^Utils$ProxyHeaders proxyHeaders ^String label]
+    (super. originServer addr client label)
+    (set! (.-proxyAddr this) proxy)
+    (set! (.-proxyHeaders this) proxyHeaders)
+    (set! delegate (PlainHttpConnection. originServer proxy client label)))
+
+  (method ^:public connectAsync ^{:tag (CompletableFuture Void)} [this ^{:tag (Exchange ?)} exchange]
+    (when (.on (.-debug this)) (.log (.-debug this) "Connecting plain connection"))
+    (.thenCompose
+      (.thenCompose (.connectAsync delegate exchange)
+                    (lambda Function ^CompletionStage [^Void unused] (.finishConnect delegate)))
+      (lambda Function ^CompletionStage [^Void v]
+        (when (.on (.-debug this)) (.log (.-debug this) "sending HTTP/1.1 CONNECT"))
+        (let [client (.client this)]
+          (java-assert (some? client))
+          (let [req (HttpRequestImpl. "CONNECT" (.-address this) proxyHeaders)
+                ^{:tag (MultiExchange Void)} mulEx (MultiExchange.
+                                                     nil
+                                                     req
+                                                     client
+                                                     (HttpResponse$BodyHandlers/discarding)
+                                                     nil)
+                ^{:tag (Exchange Void)} connectExchange (.getExchange mulEx)]
+            (.thenCompose (.handle
+                            (.thenCompose
+                              (.responseAsyncImpl connectExchange delegate)
+                              (lambda Function ^CompletionStage [^Response resp]
+                                (let [^{:tag (CompletableFuture Void)} cf (MinimalFuture.)]
+                                  (when (.on (.-debug this))
+                                    (.log (.-debug this)
+                                          "got response: %d"
+                                          (new Object/1 [(.statusCode resp)])))
+                                  (if (== (.statusCode resp) 407)
+                                      (.thenCompose
+                                        (.handle
+                                          (.ignoreBody connectExchange)
+                                          (lambda BiFunction ^CompletableFuture [^Void r
+                                                                                 ^Throwable t]
+                                            (.close delegate)
+                                            (let [authenticationRequired
+                                                    (ProxyAuthenticationRequired. resp)]
+                                              (.completeExceptionally cf authenticationRequired)
+                                              cf)))
+                                        (Function/identity))
+                                      (do
+                                        (if (not (== (.statusCode resp) 200))
+                                            (do
+                                              (.close delegate)
+                                              (.completeExceptionally
+                                                cf
+                                                (IOException.
+                                                  (java-str
+                                                    "Tunnel failed, got: "
+                                                    (.statusCode resp)))))
+                                            (let [b (.drainLeftOverBytes
+                                                      (cast
+                                                        Http1Exchange
+                                                        (.-exchImpl connectExchange)))
+                                                  remaining (.remaining b)]
+                                              (java-assert (== remaining 0)
+                                                (java-str "Unexpected remaining: " remaining))
+                                              (.complete cf nil)))
+                                        cf)))))
+                            (lambda BiFunction ^CompletableFuture [^Void result ^Throwable ex]
+                              (if (nil? ex)
+                                  (MinimalFuture/completedFuture result)
+                                  (do
+                                    (when (.on (.-debug this))
+                                      (.log (.-debug this)
+                                            "tunnel failed with \"%s\""
+                                            (new Object/1 [(.toString ex)])))
+                                    (let [^:mutable t ex]
+                                      (when (instance? CompletionException t)
+                                        (set! t (.getCause t)))
+                                      (when (instance? HttpTimeoutException t)
+                                        (let [msg "proxy tunneling CONNECT request timed out"]
+                                          (set! t (HttpTimeoutException. msg))
+                                          (.initCause t ex)))
+                                      (MinimalFuture/failedFuture t))))))
+                          (Function/identity)))))))
+
+  (method ^:public finishConnect ^{:tag (CompletableFuture Void)} [this]
+    (set! connected true)
+    (MinimalFuture/completedFuture nil))
+
+  (method isTunnel ^boolean [this] true)
+
+  (method publisher ^HttpConnection$HttpPublisher [this]
+    (.publisher delegate))
+
+  (method connected ^boolean [this] connected)
+
+  (method channel ^SocketChannel [this] (.channel delegate))
+
+  (method getConnectionFlow ^FlowTube [this]
+    (.getConnectionFlow delegate))
+
+  (method cacheKey ^ConnectionPool$CacheKey [this]
+    (ConnectionPool/cacheKey false nil proxyAddr))
+
+  (method ^:public close ^void [this] (.close this nil))
+
+  (method close ^void [this ^Throwable cause]
+    (.close delegate cause)
+    (set! connected false))
+
+  (method isSecure ^boolean [this] false)
+
+  (method isProxied ^boolean [this] true)
+
+  (method proxy ^InetSocketAddress [this] proxyAddr))

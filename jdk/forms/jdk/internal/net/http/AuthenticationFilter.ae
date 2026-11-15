@@ -1,0 +1,321 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/AuthenticationFilter.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net Authenticator
+                   Authenticator$RequestorType
+                   InetSocketAddress
+                   MalformedURLException
+                   PasswordAuthentication
+                   URI
+                   URISyntaxException
+                   URL)
+        '(java.nio.charset Charset StandardCharsets)
+        '(java.util Base64 Base64$Encoder LinkedList List Objects WeakHashMap)
+        '(java.util.function Supplier)
+        '(jdk.internal.net.http.common Log Utils))
+
+(defclass AuthenticationFilter
+  :implements [HeaderFilter]
+
+  (field ^:volatile ^{:tag (MultiExchange ?)} exchange)
+
+  (field ^:private ^:static ^:final ^Base64$Encoder encoder (Base64/getEncoder))
+
+  (field ^:static ^:final ^int DEFAULT_RETRY_LIMIT 3)
+
+  (field ^:static ^:final ^int retry_limit
+    (Utils/getIntegerNetProperty "jdk.httpclient.auth.retrylimit" DEFAULT_RETRY_LIMIT))
+
+  (field ^:static ^:final ^int UNAUTHORIZED 401)
+
+  (field ^:static ^:final ^int PROXY_UNAUTHORIZED 407)
+
+  (field ^:private ^:static ^:final ^String BASIC_DUMMY
+    (java-str "Basic "
+              (.encodeToString (Base64/getEncoder) (.getBytes "o:o" StandardCharsets/ISO_8859_1))))
+
+  (constructor ^:public [this])
+
+  (method ^:private getCredentials :throws [IOException] ^PasswordAuthentication [this
+                                                                                  ^String header
+                                                                                  ^boolean proxy
+                                                                                  ^HttpRequestImpl req]
+    (let [client (.client exchange)
+          auth (cast Authenticator
+                     (.orElseThrow (.authenticator client)
+                                   (lambda Supplier ^IOException []
+                                     (IOException. "No authenticator set"))))
+          uri (.uri req)
+          parser (HeaderParser. header)
+          authscheme (.findKey parser 0)
+          realm (.findValue parser "realm")
+          ^Authenticator$RequestorType rtype (if proxy
+                                                 Authenticator$RequestorType/PROXY
+                                                 Authenticator$RequestorType/SERVER)
+          url (.toURL this uri (.method req) proxy)
+          ^:mutable ^String host nil
+          ^:mutable ^int port 0
+          ^:mutable ^String protocol nil
+          ^:mutable ^InetSocketAddress proxyAddress nil]
+      (if (and proxy (some? (set! proxyAddress (.proxy req))))
+          (do
+            (set! host (.getHostString proxyAddress))
+            (set! port (.getPort proxyAddress))
+            (set! protocol "http"))
+          (do
+            (set! host (.getHost uri))
+            (set! port (.getPort uri))
+            (set! protocol (.getScheme uri))))
+      (.requestPasswordAuthenticationInstance auth
+                                              host
+                                              nil
+                                              port
+                                              protocol
+                                              realm
+                                              authscheme
+                                              url
+                                              rtype)))
+
+  (method ^:private toURL :throws [MalformedURLException] ^URL [this ^URI uri ^String method
+                                                                ^boolean proxy]
+    (when-not (and (and proxy (.equalsIgnoreCase "CONNECT" method))
+                   (.equalsIgnoreCase "socket" (.getScheme uri)))
+      (.toURL uri)))
+
+  (method ^:private getProxyURI ^URI [this ^HttpRequestImpl r]
+    (let [proxy (.proxy r)]
+      (when (some? proxy)
+        (let [scheme (java-str "proxy." (.getScheme (.uri r)))]
+          (try
+            (URI. scheme nil (.getHostString proxy) (.getPort proxy) "/" nil nil)
+            (catch URISyntaxException e (throw (InternalError. e))))))))
+
+  (method ^:public request :throws [IOException] ^void [this ^HttpRequestImpl r
+                                                        ^{:tag (MultiExchange ?)} e]
+    (let [cache (AuthenticationFilter/getCache e)]
+      (set! (.-exchange this) e)
+      (when (nil? (.-proxyauth exchange))
+        (let [proxyURI (.getProxyURI this r)]
+          (when (some? proxyURI)
+            (let [ca (.get cache proxyURI true)]
+              (when (some? ca)
+                (set! (.-proxyauth exchange) (AuthInfo. true (.-scheme ca) nil ca (.-isUTF8 ca)))
+                (AuthenticationFilter/addBasicCredentials r true (.-value ca) (.-isUTF8 ca)))))))
+      (when (nil? (.-serverauth exchange))
+        (let [ca (.get cache (.uri r) false)]
+          (when (some? ca)
+            (set! (.-serverauth exchange) (AuthInfo. true (.-scheme ca) nil ca (.-isUTF8 ca)))
+            (AuthenticationFilter/addBasicCredentials r false (.-value ca) (.-isUTF8 ca)))))))
+
+  (method ^:private ^:static addBasicCredentials ^void [^HttpRequestImpl r ^boolean proxy
+                                                        ^PasswordAuthentication pw ^boolean isUTF8]
+    (let [^String hdrname (if proxy "Proxy-Authorization" "Authorization")
+          sb (StringBuilder. 128)]
+      (.append (.append (.append sb (.getUserName pw)) \:) (.getPassword pw))
+      (let [^Charset charset (if isUTF8 StandardCharsets/UTF_8 StandardCharsets/ISO_8859_1)
+            s (.encodeToString encoder (.getBytes (.toString sb) charset))
+            value (java-str "Basic " s)]
+        (when proxy
+          (cond
+            (.isConnect r)
+              (when-not (.test Utils/PROXY_TUNNEL_FILTER hdrname value)
+                (Log/logError "{0} disabled" (new Object/1 [hdrname]))
+                (return))
+            (some? (.proxy r))
+              (when-not (.test Utils/PROXY_FILTER hdrname value)
+                (Log/logError "{0} disabled" (new Object/1 [hdrname]))
+                (return))))
+        (.setSystemHeader r hdrname value))))
+
+  (defclass ^:static AuthInfo
+    (field ^:final ^boolean fromcache)
+
+    (field ^:final ^String scheme)
+
+    (field ^int retries)
+
+    (field ^PasswordAuthentication credentials)
+
+    (field ^CacheEntry cacheEntry)
+
+    (field ^:final ^boolean isUTF8)
+
+    (constructor [this ^boolean fromcache ^String scheme ^PasswordAuthentication credentials
+                  ^boolean isUTF8]
+      (set! (.-fromcache this) fromcache)
+      (set! (.-scheme this) scheme)
+      (set! (.-credentials this) credentials)
+      (set! (.-retries this) 1)
+      (set! (.-isUTF8 this) isUTF8))
+
+    (constructor [this ^boolean fromcache ^String scheme ^PasswordAuthentication credentials
+                  ^CacheEntry ca ^boolean isUTF8]
+      (this. fromcache scheme credentials isUTF8)
+      (java-assert (or (nil? credentials) (and (some? ca) (nil? (.-value ca)))))
+      (set! cacheEntry ca))
+
+    (method retryWithCredentials ^AuthInfo [this ^PasswordAuthentication pw ^boolean isUTF8]
+      (let [^AuthInfo res (if fromcache (AuthInfo. false scheme pw isUTF8) this)]
+        (set! (.-credentials res) (cast PasswordAuthentication (Objects/requireNonNull pw)))
+        (set! (.-retries res) retries)
+        res)))
+
+  (method ^:public response :throws [IOException] ^HttpRequestImpl [this ^Response r]
+    (let [cache (AuthenticationFilter/getCache exchange)
+          status (.statusCode r)
+          hdrs (.headers r)
+          ^:mutable req (.request r)]
+      (when-not (and (.getUserSetAuthFlag req Authenticator$RequestorType/SERVER)
+                     (== status UNAUTHORIZED))
+        (when-not (and (.getUserSetAuthFlag req Authenticator$RequestorType/PROXY)
+                       (== status PROXY_UNAUTHORIZED))
+          (when-not (== status PROXY_UNAUTHORIZED)
+            (when (and (some? (.-proxyauth exchange)) (not (.-fromcache (.-proxyauth exchange))))
+              (let [au (.-proxyauth exchange)
+                    proxyURI (.getProxyURI this req)]
+                (when (some? proxyURI)
+                  (set! (.-proxyauth exchange) nil)
+                  (.store cache (.-scheme au) proxyURI true (.-credentials au) (.-isUTF8 au)))))
+            (when-not (== status UNAUTHORIZED)
+              (when (and (some? (.-serverauth exchange))
+                         (not (.-fromcache (.-serverauth exchange))))
+                (let [au (.-serverauth exchange)]
+                  (.store cache (.-scheme au) (.uri req) false (.-credentials au) (.-isUTF8 au))))
+              (return nil)))
+          (let [proxy (== status PROXY_UNAUTHORIZED)
+                ^String authname (if proxy "Proxy-Authenticate" "WWW-Authenticate")
+                ^{:tag (List String)} authvals (.allValues hdrs authname)]
+            (when (and (.isEmpty authvals) (.isPresent (.authenticator (.client exchange))))
+              (throw (IOException. (java-str authname " header missing for response code " status))))
+            (let [^:mutable ^String authval nil
+                  ^:mutable isUTF8 false]
+              (for-each [^String aval authvals]
+                (let [parser (HeaderParser. aval)
+                      scheme (.findKey parser 0)]
+                  (when (and (some? scheme) (.equalsIgnoreCase scheme "Basic"))
+                    (set! authval aval)
+                    (let [charset (.findValue parser "charset")]
+                      (set! isUTF8 (and (some? charset) (.equalsIgnoreCase charset "UTF-8")))
+                      (break)))))
+              (when (some? authval)
+                (when proxy
+                  (cond
+                    (.-isConnectResponse r)
+                      (when-not (.test Utils/PROXY_TUNNEL_FILTER "Proxy-Authorization" BASIC_DUMMY)
+                        (Log/logError "{0} disabled" (new Object/1 ["Proxy-Authorization"]))
+                        (return nil))
+                    (some? (.proxy req))
+                      (when-not (.test Utils/PROXY_FILTER "Proxy-Authorization" BASIC_DUMMY)
+                        (Log/logError "{0} disabled" (new Object/1 ["Proxy-Authorization"]))
+                        (return nil))))
+                (let [^:mutable ^AuthInfo au (if proxy
+                                                 (.-proxyauth exchange)
+                                                 (.-serverauth exchange))]
+                  (cond
+                    (nil? au)
+                      (when-not (.isEmpty (.authenticator (.client exchange)))
+                        (let [pw (.getCredentials this authval proxy req)]
+                          (when (nil? pw) (throw (IOException. "No credentials provided")))
+                          (set! au (AuthInfo. false "Basic" pw isUTF8))
+                          (if proxy
+                              (set! (.-proxyauth exchange) au)
+                              (set! (.-serverauth exchange) au))
+                          (set! req (HttpRequestImpl/newInstanceForAuthentication req))
+                          (AuthenticationFilter/addBasicCredentials req proxy pw isUTF8)
+                          req))
+                    (> (.-retries au) retry_limit)
+                      (throw (IOException. (java-str
+                                             "too many authentication attempts. Limit: "
+                                             retry_limit)))
+                    :else
+                      (do
+                        (when (.-fromcache au) (.remove cache (.-cacheEntry au)))
+                        (when-not (.isEmpty (.authenticator (.client exchange)))
+                          (let [pw (.getCredentials this authval proxy req)]
+                            (when (nil? pw) (throw (IOException. "No credentials provided")))
+                            (set! au (.retryWithCredentials au pw isUTF8))
+                            (if proxy
+                                (set! (.-proxyauth exchange) au)
+                                (set! (.-serverauth exchange) au))
+                            (set! req (HttpRequestImpl/newInstanceForAuthentication req))
+                            (AuthenticationFilter/addBasicCredentials
+                              req
+                              proxy
+                              (.-credentials au)
+                              isUTF8)
+                            (set! (.-retries au) (unchecked-inc-int (.-retries au)))
+                            req))))))))))))
+
+  (field ^:static ^:final ^{:tag (WeakHashMap HttpClientImpl Cache)} caches (WeakHashMap.))
+
+  (method ^:static ^:synchronized getCache ^Cache [^{:tag (MultiExchange ?)} exchange]
+    (let [client (.client exchange)
+          ^:mutable c (cast Cache (.get caches client))]
+      (when (nil? c) (set! c (Cache.)) (.put caches client c))
+      c))
+
+  (defclass ^:static ^:final Cache
+    (field ^:final ^{:tag (LinkedList CacheEntry)} entries (LinkedList.))
+
+    (constructor [this])
+
+    (method ^:synchronized get ^CacheEntry [this ^URI uri ^boolean proxy]
+      (for-each [^CacheEntry entry entries] (when (.equalsKey entry uri proxy) (return entry)))
+      nil)
+
+    (method ^:private ^:static equalsIgnoreCase ^boolean [^String s1 ^String s2]
+      (or (identical? s1 s2) (and (some? s1) (.equalsIgnoreCase s1 s2))))
+
+    (method ^:synchronized remove ^void [this ^String authscheme ^URI domain ^boolean proxy]
+      (let [iterator (.iterator entries)]
+        (while (.hasNext iterator)
+          (let [entry (cast CacheEntry (.next iterator))]
+            (when (Cache/equalsIgnoreCase (.-scheme entry) authscheme)
+              (when (.equalsKey entry domain proxy) (.remove iterator)))))))
+
+    (method ^:synchronized remove ^void [this ^CacheEntry entry]
+      (.remove entries entry))
+
+    (method ^:synchronized store ^void [this ^String authscheme ^URI domain ^boolean proxy
+                                        ^PasswordAuthentication value ^boolean isUTF8]
+      (.remove this authscheme domain proxy)
+      (.add entries (CacheEntry. authscheme domain proxy value isUTF8))))
+
+  (method ^:static normalize ^URI [^URI uri ^boolean isPrimaryKey]
+    (let [path (.getPath uri)]
+      (cond
+        (or (nil? path) (.isEmpty path))
+          (try
+            (URI. (.getScheme uri) (.getAuthority uri) "/" nil nil)
+            (catch URISyntaxException e (throw (InternalError. e))))
+        (or isPrimaryKey (not (.equals "/" path))) (.resolve uri ".")
+        :else uri)))
+
+  (defclass ^:static ^:final CacheEntry
+    (field ^:final ^String root)
+
+    (field ^:final ^String scheme)
+
+    (field ^:final ^boolean proxy)
+
+    (field ^:final ^PasswordAuthentication value)
+
+    (field ^:final ^boolean isUTF8)
+
+    (constructor [this ^String authscheme ^URI uri ^boolean proxy ^PasswordAuthentication value
+                  ^boolean isUTF8]
+      (set! (.-scheme this) authscheme)
+      (set! (.-root this) (.toString (AuthenticationFilter/normalize uri true)))
+      (set! (.-proxy this) proxy)
+      (set! (.-value this) value)
+      (set! (.-isUTF8 this) isUTF8))
+
+    (method ^:public value ^PasswordAuthentication [this] value)
+
+    (method ^:public equalsKey ^boolean [this ^URI uri ^boolean proxy]
+      (if (not (= (.-proxy this) proxy))
+          false
+          (let [other (String/valueOf (AuthenticationFilter/normalize uri false))]
+            (.startsWith other root))))))

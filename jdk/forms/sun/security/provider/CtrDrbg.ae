@@ -1,0 +1,310 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/CtrDrbg.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.security GeneralSecurityException
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        SecureRandomParameters)
+        '(java.util Arrays HexFormat Locale)
+        '(javax.crypto Cipher NoSuchPaddingException)
+        '(javax.crypto.spec SecretKeySpec))
+
+(defclass ^:public CtrDrbg
+  :extends AbstractDrbg
+
+  (field ^:private ^:static ^:final ^int AES_LIMIT)
+
+  (static-initializer
+    (try
+      (set! AES_LIMIT (Cipher/getMaxAllowedKeyLength "AES"))
+      (catch Exception e (throw (AssertionError. "Cannot detect AES" e)))))
+
+  (field ^:private ^Cipher cipher)
+
+  (field ^:private ^String cipherAlg)
+
+  (field ^:private ^String keyAlg)
+
+  (field ^:private ^int ctrLen)
+
+  (field ^:private ^int blockLen)
+
+  (field ^:private ^int keyLen)
+
+  (field ^:private ^int seedLen)
+
+  (field ^:private ^byte/1 v)
+
+  (field ^:private ^byte/1 k)
+
+  (constructor ^:public [this ^SecureRandomParameters params]
+    (set! (.-mechName this) "CTR_DRBG")
+    (.configure this params))
+
+  (method ^:private ^:static alg2strength ^int [^String algorithm]
+    (switch (.toUpperCase algorithm Locale/ROOT)
+      "AES-128" 128
+      "AES-192" 192
+      "AES-256" 256
+      (throw (IllegalArgumentException. (java-str algorithm " not supported in CTR_DBRG")))))
+
+  (method ^:protected chooseAlgorithmAndStrength ^void [this]
+    (if (some? (.-requestedAlgorithm this))
+        (do
+          (set! (.-algorithm this) (.toUpperCase (.-requestedAlgorithm this) Locale/ROOT))
+          (let [supportedStrength (CtrDrbg/alg2strength (.-algorithm this))]
+            (if (>= (.-requestedInstantiationSecurityStrength this) 0)
+                (let [tryStrength (CtrDrbg/getStandardStrength
+                                    (.-requestedInstantiationSecurityStrength this))]
+                  (when (> tryStrength supportedStrength)
+                    (throw (IllegalArgumentException.
+                             (java-str (.-algorithm this)
+                                       " does not support strength "
+                                       (.-requestedInstantiationSecurityStrength this)))))
+                  (set! (.-securityStrength this) tryStrength))
+                (set! (.-securityStrength this)
+                      (Math/min CtrDrbg/DEFAULT_STRENGTH supportedStrength)))))
+        (let [^:mutable ^int tryStrength (if (< (.-requestedInstantiationSecurityStrength this) 0)
+                                             CtrDrbg/DEFAULT_STRENGTH
+                                             (.-requestedInstantiationSecurityStrength this))]
+          (set! tryStrength (CtrDrbg/getStandardStrength tryStrength))
+          (cond
+            (and (<= tryStrength 128) (< AES_LIMIT 256)) (set! (.-algorithm this) "AES-128")
+            (>= AES_LIMIT 256) (set! (.-algorithm this) "AES-256")
+            :else
+              (throw (IllegalArgumentException.
+                       (java-str "unsupported strength "
+                                 (.-requestedInstantiationSecurityStrength this)))))
+          (set! (.-securityStrength this) tryStrength)))
+    (switch (.toUpperCase (.-algorithm this) Locale/ROOT)
+      ("AES-128" "AES-192" "AES-256")
+        (do
+          (set! (.-keyAlg this) "AES")
+          (set! (.-cipherAlg this) "AES/ECB/NoPadding")
+          (switch (.-algorithm this)
+            "AES-128" (set! (.-keyLen this) (unchecked-divide-int 128 8))
+            "AES-192"
+              (do
+                (set! (.-keyLen this) (unchecked-divide-int 192 8))
+                (when (< AES_LIMIT 192)
+                  (throw (IllegalArgumentException.
+                           (java-str (.-algorithm this)
+                                     " not available (because policy) in CTR_DBRG")))))
+            "AES-256"
+              (do
+                (set! (.-keyLen this) (unchecked-divide-int 256 8))
+                (when (< AES_LIMIT 256)
+                  (throw (IllegalArgumentException.
+                           (java-str (.-algorithm this)
+                                     " not available (because policy) in CTR_DBRG")))))
+            (throw (IllegalArgumentException.
+                     (java-str (.-algorithm this) " not supported in CTR_DBRG"))))
+          (set! (.-blockLen this) (unchecked-divide-int 128 8)))
+      (throw (IllegalArgumentException. (java-str (.-algorithm this) " not supported in CTR_DBRG"))))
+    (set! (.-seedLen this) (unchecked-add-int (.-blockLen this) (.-keyLen this)))
+    (set! (.-ctrLen this) (.-blockLen this))
+    (if (.-usedf this)
+        (set! (.-minLength this) (unchecked-divide-int (.-securityStrength this) 8))
+        (set! (.-minLength this)
+              (set! (.-maxLength this)
+                    (set! (.-maxPersonalizationStringLength this)
+                          (set! (.-maxAdditionalInputLength this) seedLen))))))
+
+  (method ^:protected initEngine ^void [this]
+    (try
+      (set! cipher (Cipher/getInstance cipherAlg "SunJCE"))
+      (catch [NoSuchProviderException NoSuchAlgorithmException NoSuchPaddingException] e
+        (try
+          (set! cipher (Cipher/getInstance cipherAlg))
+          (catch [NoSuchAlgorithmException NoSuchPaddingException] exc
+            (throw (InternalError. (java-str "internal error: " cipherAlg " not available.") exc)))))))
+
+  (method ^:private status ^void [this]
+    (when (some? CtrDrbg/debug)
+      (.println CtrDrbg/debug this (java-str "Key = " (.formatHex (HexFormat/of) k)))
+      (.println CtrDrbg/debug this (java-str "V   = " (.formatHex (HexFormat/of) v)))
+      (.println CtrDrbg/debug this (java-str "reseed counter = " (.-reseedCounter this)))))
+
+  (method ^:private update ^void [this ^byte/1 input]
+    (when-not (== (alength input) seedLen)
+      (throw (IllegalArgumentException. (java-str "input length not seedLen: " (alength input)))))
+    (try
+      (let [m (unchecked-divide-int (unchecked-subtract-int (unchecked-add-int seedLen blockLen) 1)
+                                    blockLen)
+            ^:mutable temp (new byte/1 (unchecked-multiply-int m blockLen))]
+        (loop [^int i 0]
+          (when (< i m)
+            (CtrDrbg/addOne v ctrLen)
+            (.init cipher Cipher/ENCRYPT_MODE (SecretKeySpec. k keyAlg))
+            (.doFinal cipher v 0 blockLen temp (unchecked-multiply-int i blockLen))
+            (recur (unchecked-inc-int i))))
+        (set! temp (Arrays/copyOf temp seedLen))
+        (loop [^int i 0]
+          (when (< i seedLen)
+            (aset temp i (unchecked-byte (bit-xor-int (aget temp i) (aget input i))))
+            (recur (unchecked-inc-int i))))
+        (set! k (Arrays/copyOf temp keyLen))
+        (set! v (Arrays/copyOfRange temp (unchecked-subtract-int seedLen blockLen) seedLen)))
+      (catch GeneralSecurityException e (throw (InternalError. e)))))
+
+  (method ^:protected instantiateAlgorithm ^void [this ^byte/1 ei]
+    (when (some? CtrDrbg/debug) (.println CtrDrbg/debug this "instantiate"))
+    (let [^:mutable ^byte/1 more nil]
+      (if (.-usedf this)
+          (if (nil? (.-personalizationString this))
+              (set! more (.-nonce this))
+              (do
+                (when (< (unchecked-add-int (alength (.-nonce this))
+                                            (alength (.-personalizationString this)))
+                         0)
+                  (throw
+                    (IllegalArgumentException. "nonce plus personalization string is too long")))
+                (set! more
+                      (Arrays/copyOf (.-nonce this)
+                                     (unchecked-add-int
+                                       (alength (.-nonce this))
+                                       (alength (.-personalizationString this)))))
+                (System/arraycopy (.-personalizationString this)
+                                  0
+                                  more
+                                  (alength (.-nonce this))
+                                  (alength (.-personalizationString this)))))
+          (set! more (.-personalizationString this)))
+      (.reseedAlgorithm this ei more)))
+
+  (method ^:private df ^byte/1 [this ^byte/1 input]
+    (let [l (alength input)
+          n seedLen
+          ln (new byte/1 8)]
+      (aset ln 0 (unchecked-byte (bit-shift-right-int l 24)))
+      (aset ln 1 (unchecked-byte (bit-shift-right-int l 16)))
+      (aset ln 2 (unchecked-byte (bit-shift-right-int l 8)))
+      (aset ln 3 (unchecked-byte l))
+      (aset ln 4 (unchecked-byte (bit-shift-right-int n 24)))
+      (aset ln 5 (unchecked-byte (bit-shift-right-int n 16)))
+      (aset ln 6 (unchecked-byte (bit-shift-right-int n 8)))
+      (aset ln 7 (unchecked-byte n))
+      (let [^:mutable k (new byte/1 keyLen)]
+        (loop [^int i 0]
+          (when (< i (alength k)) (aset k i (unchecked-byte i)) (recur (unchecked-inc-int i))))
+        (let [temp (new byte/1 seedLen)]
+          (loop [^int i 0]
+            (when (< (unchecked-multiply-int i blockLen) (alength temp))
+              (let [iv (new byte/1 blockLen)]
+                (aset iv 0 (unchecked-byte (bit-shift-right-int i 24)))
+                (aset iv 1 (unchecked-byte (bit-shift-right-int i 16)))
+                (aset iv 2 (unchecked-byte (bit-shift-right-int i 8)))
+                (aset iv 3 (unchecked-byte i))
+                (let [^:mutable tailLen (unchecked-subtract-int
+                                          (alength temp)
+                                          (unchecked-multiply-int blockLen i))]
+                  (when (> tailLen blockLen) (set! tailLen blockLen))
+                  (System/arraycopy (.bcc this k iv ln input (new byte/1 [(unchecked-byte 0x80)]))
+                                    0
+                                    temp
+                                    (unchecked-multiply-int blockLen i)
+                                    tailLen)
+                  (recur (unchecked-inc-int i))))))
+          (set! k (Arrays/copyOf temp keyLen))
+          (let [^:mutable x (Arrays/copyOfRange temp keyLen (alength temp))]
+            (loop [^int i 0]
+              (when (< (unchecked-multiply-int i blockLen) seedLen)
+                (try
+                  (.init cipher Cipher/ENCRYPT_MODE (SecretKeySpec. k keyAlg))
+                  (let [^:mutable tailLen (unchecked-subtract-int
+                                            (alength temp)
+                                            (unchecked-multiply-int blockLen i))]
+                    (when (> tailLen blockLen) (set! tailLen blockLen))
+                    (set! x (.doFinal cipher x))
+                    (System/arraycopy x 0 temp (unchecked-multiply-int blockLen i) tailLen))
+                  (catch GeneralSecurityException e (throw (InternalError. e))))
+                (recur (unchecked-inc-int i))))
+            temp)))))
+
+  (method ^:private bcc ^byte/1 [this ^byte/1 k & ^byte/2 data]
+    (let [^:mutable chain (new byte/1 blockLen)
+          ^:mutable ^int n1 0
+          ^:mutable ^int n2 0]
+      (while (< n1 (alength data))
+        (let [^:mutable ^int j 0]
+          (set! j 0)
+          (label :out
+            (while (< j blockLen)
+              (while (>= n2 (alength (aget data n1)))
+                (set! n1 (unchecked-inc-int n1))
+                (when (>= n1 (alength data)) (break :out))
+                (set! n2 0))
+              (aset chain j (unchecked-byte (bit-xor-int (aget chain j) (aget data n1 n2))))
+              (set! n2 (unchecked-inc-int n2))
+              (set! j (unchecked-inc-int j))))
+          (when (== j 0) (break))
+          (try
+            (.init cipher Cipher/ENCRYPT_MODE (SecretKeySpec. k keyAlg))
+            (set! chain (.doFinal cipher chain))
+            (catch GeneralSecurityException e (throw (InternalError. e))))))
+      chain))
+
+  (method ^:protected ^:synchronized reseedAlgorithm ^void [this ^:mutable ^byte/1 ei
+                                                            ^byte/1 additionalInput]
+    (cond
+      (.-usedf this)
+        (do
+          (when (some? additionalInput)
+            (when (< (unchecked-add-int (alength ei) (alength additionalInput)) 0)
+              (throw (IllegalArgumentException. "entropy plus additional input is too long")))
+            (let [temp (Arrays/copyOf ei (unchecked-add-int (alength ei) (alength additionalInput)))]
+              (System/arraycopy additionalInput 0 temp (alength ei) (alength additionalInput))
+              (set! ei temp)))
+          (set! ei (.df this ei)))
+      (some? additionalInput)
+        (loop [^int i 0]
+          (when (< i (alength additionalInput))
+            (aset ei i (unchecked-byte (bit-xor-int (aget ei i) (aget additionalInput i))))
+            (recur (unchecked-inc-int i)))))
+    (when (nil? v) (set! k (new byte/1 keyLen)) (set! v (new byte/1 blockLen)))
+    (.update this ei)
+    (set! (.-reseedCounter this) 1))
+
+  (method ^:private ^:static addOne ^void [^byte/1 data ^int len]
+    (loop [^int i 0]
+      (when (< i len)
+        (let [i-1 (unchecked-subtract-int (unchecked-subtract-int (alength data) 1) i)]
+          (aset data i-1 (unchecked-byte (unchecked-inc-int (aget data i-1)))))
+        (when-not (not (== (aget data
+                                 (unchecked-subtract-int
+                                   (unchecked-subtract-int (alength data) 1)
+                                   i))
+                           0))
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:public ^:synchronized generateAlgorithm ^void [this ^byte/1 result
+                                                           ^:mutable ^byte/1 additionalInput]
+    (when (some? CtrDrbg/debug) (.println CtrDrbg/debug this "generateAlgorithm"))
+    (if (some? additionalInput)
+        (do
+          (if (.-usedf this)
+              (set! additionalInput (.df this additionalInput))
+              (set! additionalInput (Arrays/copyOf additionalInput seedLen)))
+          (.update this additionalInput))
+        (set! additionalInput (new byte/1 seedLen)))
+    (let [^:mutable ^int pos 0
+          ^:mutable len (alength result)]
+      (while (> len 0)
+        (CtrDrbg/addOne v ctrLen)
+        (try
+          (.init cipher Cipher/ENCRYPT_MODE (SecretKeySpec. k keyAlg))
+          (if (> len blockLen)
+              (.doFinal cipher v 0 blockLen result pos)
+              (let [out (.doFinal cipher v)]
+                (System/arraycopy out 0 result pos len)
+                (Arrays/fill out (unchecked-byte 0))))
+          (catch GeneralSecurityException e (throw (InternalError. e))))
+        (set! len (unchecked-subtract-int len blockLen))
+        (when (<= len 0) (break))
+        (set! pos (unchecked-add-int pos blockLen)))
+      (.update this additionalInput)
+      (set! (.-reseedCounter this) (unchecked-inc-int (.-reseedCounter this)))))
+
+  (method ^:public toString ^String [this]
+    (java-str (.toString super) "," (if (.-usedf this) "use_df" "no_df"))))

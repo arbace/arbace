@@ -1,0 +1,477 @@
+;; Converted from overlay/jdk/java.base/com/sun/jmx/remote/internal/ClientNotifForwarder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.remote.internal)
+
+(import '(com.sun.jmx.remote.util ClassLogger EnvHelp)
+        '(java.io IOException NotSerializableException)
+        '(java.util ArrayList HashMap List Map)
+        '(java.util.concurrent Executor RejectedExecutionException)
+        '(javax.management InstanceNotFoundException
+                           ListenerNotFoundException
+                           MBeanServerNotification
+                           NotificationFilter
+                           NotificationListener
+                           ObjectName)
+        '(javax.management.remote NotificationResult TargetedNotification))
+
+(defclass ^:public ^:abstract ClientNotifForwarder
+  (constructor ^:public [this ^{:tag (Map String ?)} env] (this. nil env))
+
+  (field ^:private ^:static ^int threadId)
+
+  (defclass ^:private ^:static LinearExecutor
+    :implements [Executor]
+
+    (method ^:public ^:synchronized execute ^void [this ^Runnable command]
+      (when (some? (.-command this)) (throw (IllegalArgumentException. "More than one command")))
+      (set! (.-command this) command)
+      (when (nil? thread)
+        (set! thread
+              (Thread. (lambda Runnable ^void []
+                         (while true
+                           (let [^:mutable ^Runnable r nil]
+                             (locking this
+                               (if (nil? (.-command this))
+                                   (do (set! thread nil) (return))
+                                   (do (set! r (.-command this)) (set! (.-command this) nil))))
+                             (.run r))))
+                       (java-str "ClientNotifForwarder-"
+                                 (set! threadId (unchecked-inc-int threadId)))))
+        (.setDaemon thread true)
+        (.start thread)))
+
+    (field ^:private ^Runnable command)
+
+    (field ^:private ^Thread thread))
+
+  (constructor ^:public [this ^ClassLoader defaultClassLoader ^{:tag (Map String ?)} env]
+    (set! maxNotifications (EnvHelp/getMaxFetchNotifNumber env))
+    (set! timeout (EnvHelp/getFetchTimeout env))
+    (let [^:mutable ex (cast Executor (.get env "jmx.remote.x.fetch.notifications.executor"))]
+      (cond
+        (nil? ex) (set! ex (LinearExecutor.))
+        (.traceOn logger) (.trace logger "ClientNotifForwarder" (java-str "executor is " ex)))
+      (set! (.-defaultClassLoader this) defaultClassLoader)
+      (set! (.-executor this) ex)))
+
+  (method ^:protected ^:abstract fetchNotifs :throws [IOException ClassNotFoundException] ^NotificationResult [this
+                                                                                                               ^long clientSequenceNumber
+                                                                                                               ^int maxNotifications
+                                                                                                               ^long timeout])
+
+  (method ^:protected ^:abstract addListenerForMBeanRemovedNotif :throws [IOException
+                                                                          InstanceNotFoundException] ^Integer [this])
+
+  (method ^:protected ^:abstract removeListenerForMBeanRemovedNotif :throws [IOException
+                                                                             InstanceNotFoundException
+                                                                             ListenerNotFoundException] ^void [this
+                                                                                                               ^Integer id])
+
+  (method ^:protected ^:abstract lostNotifs ^void [this ^String message ^long number])
+
+  (method ^:public ^:synchronized addNotificationListener :throws [IOException
+                                                                   InstanceNotFoundException] ^void [this
+                                                                                                     ^Integer listenerID
+                                                                                                     ^ObjectName name
+                                                                                                     ^NotificationListener listener
+                                                                                                     ^NotificationFilter filter
+                                                                                                     handback]
+    (when (.traceOn logger)
+      (.trace logger "addNotificationListener" (java-str "Add the listener " listener " at " name)))
+    (.put infoList listenerID (ClientListenerInfo. listenerID name listener filter handback))
+    (.init this false))
+
+  (method ^:public ^:synchronized getListenerIds :throws [ListenerNotFoundException IOException] ^Integer/1 [this
+                                                                                                             ^ObjectName name
+                                                                                                             ^NotificationListener listener]
+    (let [^{:tag (List Integer)} ids (ArrayList.)
+          ^{:tag (List ClientListenerInfo)} values (ArrayList. (.values infoList))]
+      (loop [^int i (unchecked-subtract-int (.size values) 1)]
+        (when (>= i 0)
+          (let [li (cast ClientListenerInfo (.get values i))]
+            (if (.sameAs li name listener)
+                (do (.add ids (.getListenerID li)) (recur (unchecked-dec-int i)))
+                (recur (unchecked-dec-int i))))))
+      (when (.isEmpty ids) (throw (ListenerNotFoundException. "Listener not found")))
+      (cast Integer/1 (.toArray ids (new Integer/1 0)))))
+
+  (method ^:public ^:synchronized getListenerId :throws [ListenerNotFoundException IOException] ^Integer [this
+                                                                                                          ^ObjectName name
+                                                                                                          ^NotificationListener listener
+                                                                                                          ^NotificationFilter filter
+                                                                                                          handback]
+    (let [^:mutable ^Integer id nil
+          ^{:tag (List ClientListenerInfo)} values (ArrayList. (.values infoList))]
+      (loop [^int i (unchecked-subtract-int (.size values) 1)]
+        (when (>= i 0)
+          (let [li (cast ClientListenerInfo (.get values i))]
+            (if (.sameAs li name listener filter handback)
+                (set! id (.getListenerID li))
+                (recur (unchecked-dec-int i))))))
+      (when (nil? id) (throw (ListenerNotFoundException. "Listener not found")))
+      id))
+
+  (method ^:public ^:synchronized removeNotificationListener :throws [ListenerNotFoundException
+                                                                      IOException] ^Integer/1 [this
+                                                                                               ^ObjectName name
+                                                                                               ^NotificationListener listener]
+    (.beforeRemove this)
+    (when (.traceOn logger)
+      (.trace logger
+              "removeNotificationListener"
+              (java-str "Remove the listener " listener " from " name)))
+    (let [liIds (.getListenerIds this name listener)]
+      (loop [^int i 0]
+        (when (< i (alength liIds)) (.remove infoList (aget liIds i)) (recur (unchecked-inc-int i))))
+      liIds))
+
+  (method ^:public ^:synchronized removeNotificationListener :throws [ListenerNotFoundException
+                                                                      IOException] ^Integer [this
+                                                                                             ^ObjectName name
+                                                                                             ^NotificationListener listener
+                                                                                             ^NotificationFilter filter
+                                                                                             handback]
+    (when (.traceOn logger)
+      (.trace logger
+              "removeNotificationListener"
+              (java-str "Remove the listener " listener " from " name)))
+    (.beforeRemove this)
+    (let [liId (.getListenerId this name listener filter handback)] (.remove infoList liId) liId))
+
+  (method ^:public ^:synchronized removeNotificationListener ^Integer/1 [this ^ObjectName name]
+    (when (.traceOn logger)
+      (.trace logger
+              "removeNotificationListener"
+              (java-str "Remove all listeners registered at " name)))
+    (let [^{:tag (List Integer)} ids (ArrayList.)
+          ^{:tag (List ClientListenerInfo)} values (ArrayList. (.values infoList))]
+      (loop [^int i (unchecked-subtract-int (.size values) 1)]
+        (when (>= i 0)
+          (let [li (cast ClientListenerInfo (.get values i))]
+            (if (.sameAs li name)
+                (do
+                  (.add ids (.getListenerID li))
+                  (.remove infoList (.getListenerID li))
+                  (recur (unchecked-dec-int i)))
+                (recur (unchecked-dec-int i))))))
+      (cast Integer/1 (.toArray ids (new Integer/1 0)))))
+
+  (method ^:public ^:synchronized preReconnection :throws [IOException] ^ClientListenerInfo/1 [this]
+    (when (or (== state TERMINATED) beingReconnected) (throw (IOException. "Illegal state.")))
+    (let [tmp (cast ClientListenerInfo/1 (.toArray (.values infoList) (new ClientListenerInfo/1 0)))]
+      (set! beingReconnected true)
+      (.clear infoList)
+      tmp))
+
+  (method ^:public ^:synchronized postReconnection :throws [IOException] ^void [this
+                                                                                ^ClientListenerInfo/1 listenerInfos]
+    (when-not (== state TERMINATED)
+      (while (== state STOPPING)
+        (try
+          (.wait this)
+          (catch InterruptedException ire (throw (IOException. (.toString ire) ire)))))
+      (let [trace (.traceOn logger)
+            len (alength listenerInfos)]
+        (loop [^int i 0]
+          (when (< i len)
+            (when trace
+              (.trace logger
+                      "addNotificationListeners"
+                      (java-str "Add a listener at " (.getListenerID (aget listenerInfos i)))))
+            (.put infoList (.getListenerID (aget listenerInfos i)) (aget listenerInfos i))
+            (recur (unchecked-inc-int i))))
+        (set! beingReconnected false)
+        (.notifyAll this)
+        (if (or (or (identical? currentFetchThread (Thread/currentThread)) (== state STARTING))
+                (== state STARTED))
+            (try
+              (set! mbeanRemovedNotifID (.addListenerForMBeanRemovedNotif this))
+              (catch Exception e
+                (let [^:const msg
+                        "Failed to register a listener to the mbean server: the client will not do clean when an MBean is unregistered"]
+                  (when (.traceOn logger) (.trace logger "init" msg e)))))
+            (do
+              (while (== state STOPPING)
+                (try
+                  (.wait this)
+                  (catch InterruptedException ire (throw (IOException. (.toString ire) ire)))))
+              (cond
+                (> (alength listenerInfos) 0) (.init this true)
+                (> (.size infoList) 0) (.init this false)))))))
+
+  (method ^:public ^:synchronized terminate ^void [this]
+    (when-not (== state TERMINATED)
+      (when (.traceOn logger) (.trace logger "terminate" "Terminating..."))
+      (when (== state STARTED) (.clear infoList))
+      (.setState this TERMINATED)))
+
+  (defclass ^:private NotifFetcher
+    :implements [Runnable]
+
+    (field ^:private ^:volatile ^boolean alreadyLogged false)
+
+    (method ^:private logOnce ^void [this ^String msg ^SecurityException x]
+      (when-not alreadyLogged
+        (.config logger "setContextClassLoader" msg)
+        (when (some? x) (.fine logger "setContextClassLoader" x))
+        (set! alreadyLogged true)))
+
+    (method ^:private ^:final setContextClassLoader ^ClassLoader [this ^:final ^ClassLoader loader]
+      (let [previous (.getContextClassLoader (Thread/currentThread))]
+        (if (identical? loader previous)
+            previous
+            (do (.setContextClassLoader (Thread/currentThread) loader) previous))))
+
+    (method ^:public run ^void [this]
+      (let [^ClassLoader previous (when (some? defaultClassLoader)
+                                    (.setContextClassLoader this defaultClassLoader))]
+        (try
+          (.doRun this)
+          (finally (when (some? defaultClassLoader) (.setContextClassLoader this previous))))))
+
+    (method ^:private doRun ^void [this]
+      (locking ClientNotifForwarder/this
+        (set! currentFetchThread (Thread/currentThread))
+        (when (== state STARTING) (.setState ClientNotifForwarder/this STARTED)))
+      (let [^:mutable ^NotificationResult nr nil]
+        (when (and (not (.shouldStop this)) (some? (set! nr (.fetchNotifs this))))
+          (let [notifs (.getTargetedNotifications nr)
+                len (alength notifs)
+                ^:mutable ^{:tag (Map Integer ClientListenerInfo)} listeners nil
+                ^:mutable ^Integer myListenerID nil
+                ^:mutable missed 0]
+            (locking ClientNotifForwarder/this
+              (when (>= clientSequenceNumber 0)
+                (set! missed
+                      (unchecked-subtract (.getEarliestSequenceNumber nr) clientSequenceNumber)))
+              (set! clientSequenceNumber (.getNextSequenceNumber nr))
+              (set! listeners (HashMap.))
+              (loop [^int i 0]
+                (when (< i len)
+                  (let [tn (aget notifs i)
+                        listenerID (.getListenerID tn)]
+                    (if (not (.equals listenerID mbeanRemovedNotifID))
+                        (let [li (cast ClientListenerInfo (.get infoList listenerID))]
+                          (when (some? li) (.put listeners listenerID li))
+                          (recur (unchecked-inc-int i)))
+                        (let [notif (.getNotification tn)
+                              ^:const unreg MBeanServerNotification/UNREGISTRATION_NOTIFICATION]
+                          (if (and (instance? MBeanServerNotification notif)
+                                   (.equals (.getType notif) unreg))
+                              (let [mbsn (cast MBeanServerNotification notif)
+                                    name (.getMBeanName mbsn)]
+                                (.removeNotificationListener ClientNotifForwarder/this name)
+                                (recur (unchecked-inc-int i)))
+                              (recur (unchecked-inc-int i))))))))
+              (set! myListenerID mbeanRemovedNotifID))
+            (when (> missed 0)
+              (let [msg (java-str "May have lost up to "
+                                  missed
+                                  " notification"
+                                  (if (== missed 1) "" "s"))]
+                (.lostNotifs ClientNotifForwarder/this msg missed)
+                (.trace logger "NotifFetcher.run" msg)))
+            (loop [^int i 0]
+              (when (< i len)
+                (let [tn (aget notifs i)]
+                  (.dispatchNotification this tn myListenerID listeners)
+                  (recur (unchecked-inc-int i)))))))
+        (locking ClientNotifForwarder/this (set! currentFetchThread nil))
+        (when (nil? nr)
+          (when (.traceOn logger)
+            (.trace
+              logger
+              "NotifFetcher-run"
+              "Received null object as notifs, stops fetching because the notification server is terminated.")))
+        (if (or (nil? nr) (.shouldStop this))
+            (do
+              (.setState ClientNotifForwarder/this STOPPED)
+              (try
+                (.removeListenerForMBeanRemovedNotif ClientNotifForwarder/this mbeanRemovedNotifID)
+                (catch Exception e
+                  (when (.traceOn logger)
+                    (.trace logger "NotifFetcher-run" "removeListenerForMBeanRemovedNotif" e)))))
+            (try
+              (.execute executor this)
+              (catch Exception e
+                (if (.isRejectedExecutionException this e)
+                    (when-not (instance? LinearExecutor executor)
+                      (set! executor (LinearExecutor.))
+                      (.execute executor this))
+                    (throw e)))))))
+
+    (method ^:private isRejectedExecutionException ^boolean [this ^Exception e]
+      (let [^:mutable ^Throwable cause e]
+        (while (some? cause)
+          (when (instance? RejectedExecutionException cause) (return true))
+          (set! cause (.getCause cause)))
+        false))
+
+    (method dispatchNotification ^void [this ^TargetedNotification tn ^Integer myListenerID
+                                        ^{:tag (Map Integer ClientListenerInfo)} listeners]
+      (let [notif (.getNotification tn)
+            listenerID (.getListenerID tn)]
+        (when-not (.equals listenerID myListenerID)
+          (let [li (cast ClientListenerInfo (.get listeners listenerID))]
+            (if (nil? li)
+                (.trace logger "NotifFetcher.dispatch" "Listener ID not in map")
+                (let [l (.getListener li)
+                      h (.getHandback li)]
+                  (try
+                    (.handleNotification l notif h)
+                    (catch RuntimeException e
+                      (let [^:const msg "Failed to forward a notification to a listener"]
+                        (.trace logger "NotifFetcher-run" msg e))))))))))
+
+    (method ^:private fetchNotifs ^NotificationResult [this]
+      (try
+        (let [nr (.fetchNotifs ClientNotifForwarder/this
+                               clientSequenceNumber
+                               maxNotifications
+                               timeout)]
+          (when (.traceOn logger)
+            (.trace logger "NotifFetcher-run" (java-str "Got notifications from the server: " nr)))
+          nr)
+        (catch [ClassNotFoundException NotSerializableException] e
+          (.trace logger "NotifFetcher.fetchNotifs" e)
+          (.fetchOneNotif this))
+        (catch IOException ioe
+          (when-not (.shouldStop this)
+            (.error logger
+                    "NotifFetcher-run"
+                    (java-str "Failed to fetch notification, stopping thread. Error is: " ioe)
+                    ioe)
+            (.debug logger "NotifFetcher-run" ioe))
+          nil)))
+
+    (method ^:private fetchOneNotif ^NotificationResult [this]
+      (let [cnf ClientNotifForwarder/this
+            ^:mutable startSequenceNumber clientSequenceNumber
+            ^:mutable ^int notFoundCount 0
+            ^:mutable ^NotificationResult result nil
+            ^:mutable firstEarliest -1]
+        (while (and (nil? result) (not (.shouldStop this)))
+          (let [^:mutable ^NotificationResult nr nil]
+            (try
+              (set! nr (.fetchNotifs cnf startSequenceNumber 0 0))
+              (catch ClassNotFoundException e
+                (.warning logger "NotifFetcher.fetchOneNotif" (java-str "Impossible exception: " e))
+                (.debug logger "NotifFetcher.fetchOneNotif" e)
+                (return nil))
+              (catch IOException e
+                (when-not (.shouldStop this) (.trace logger "NotifFetcher.fetchOneNotif" e))
+                (return nil)))
+            (when (or (.shouldStop this) (nil? nr)) (return nil))
+            (set! startSequenceNumber (.getNextSequenceNumber nr))
+            (when (< firstEarliest 0) (set! firstEarliest (.getEarliestSequenceNumber nr)))
+            (try
+              (set! result (.fetchNotifs cnf startSequenceNumber 1 0))
+              (catch [ClassNotFoundException NotSerializableException] e
+                (.warning logger
+                          "NotifFetcher.fetchOneNotif"
+                          (java-str "Failed to deserialize a notification: " (.toString e)))
+                (when (.traceOn logger)
+                  (.trace logger
+                          "NotifFetcher.fetchOneNotif"
+                          "Failed to deserialize a notification."
+                          e))
+                (set! notFoundCount (unchecked-inc-int notFoundCount))
+                (set! startSequenceNumber (unchecked-inc startSequenceNumber)))
+              (catch Exception e
+                (when-not (.shouldStop this) (.trace logger "NotifFetcher.fetchOneNotif" e))
+                (return nil)))))
+        (when (> notFoundCount 0)
+          (let [msg (java-str "Dropped "
+                              notFoundCount
+                              " notification"
+                              (if (== notFoundCount 1) "" "s")
+                              " because classes were missing locally or incompatible")]
+            (.lostNotifs ClientNotifForwarder/this msg notFoundCount)
+            (when (some? result)
+              (set! result
+                    (NotificationResult. firstEarliest
+                                         (.getNextSequenceNumber result)
+                                         (.getTargetedNotifications result))))))
+        result))
+
+    (method ^:private shouldStop ^boolean [this]
+      (locking ClientNotifForwarder/this
+        (cond
+          (not (== state STARTED)) true
+          (== (.size infoList) 0) (do (.setState ClientNotifForwarder/this STOPPING) true)
+          :else false))))
+
+  (method ^:private ^:synchronized setState ^void [this ^int newState]
+    (when-not (== state TERMINATED) (set! state newState) (.notifyAll this)))
+
+  (method ^:private ^:synchronized init :throws [IOException] ^void [this ^boolean reconnected]
+    (switch state
+      STARTED nil
+      STARTING nil
+      TERMINATED (throw (IOException. "The ClientNotifForwarder has been terminated."))
+      STOPPING
+        (when-not (= beingReconnected true)
+          (while (== state STOPPING)
+            (try
+              (.wait this)
+              (catch InterruptedException ire (throw (IOException. (.toString ire) ire)))))
+          (.init this reconnected))
+      STOPPED
+        (when-not (= beingReconnected true)
+          (when (.traceOn logger) (.trace logger "init" "Initializing..."))
+          (when-not reconnected
+            (try
+              (let [nr (.fetchNotifs this -1 0 0)]
+                (when-not (== state STOPPED) (return))
+                (set! clientSequenceNumber (.getNextSequenceNumber nr)))
+              (catch ClassNotFoundException e
+                (.warning logger "init" (java-str "Impossible exception: " e))
+                (.debug logger "init" e))))
+          (try
+            (set! mbeanRemovedNotifID (.addListenerForMBeanRemovedNotif this))
+            (catch Exception e
+              (let [^:const msg
+                      "Failed to register a listener to the mbean server: the client will not do clean when an MBean is unregistered"]
+                (when (.traceOn logger) (.trace logger "init" msg e)))))
+          (.setState this STARTING)
+          (.execute executor (NotifFetcher.)))
+      (throw (IOException. "Unknown state."))))
+
+  (method ^:private ^:synchronized beforeRemove :throws [IOException] ^void [this]
+    (while beingReconnected
+      (when (== state TERMINATED) (throw (IOException. "Terminated.")))
+      (try (.wait this) (catch InterruptedException ire (throw (IOException. (.toString ire) ire)))))
+    (when (== state TERMINATED) (throw (IOException. "Terminated."))))
+
+  (field ^:private ^:final ^ClassLoader defaultClassLoader)
+
+  (field ^:private ^Executor executor)
+
+  (field ^:private ^:final ^{:tag (Map Integer ClientListenerInfo)} infoList (HashMap.))
+
+  (field ^:private ^long clientSequenceNumber -1)
+
+  (field ^:private ^:final ^int maxNotifications)
+
+  (field ^:private ^:final ^long timeout)
+
+  (field ^:private ^Integer mbeanRemovedNotifID nil)
+
+  (field ^:private ^Thread currentFetchThread)
+
+  (field ^:private ^:static ^:final ^int STARTING 0)
+
+  (field ^:private ^:static ^:final ^int STARTED 1)
+
+  (field ^:private ^:static ^:final ^int STOPPING 2)
+
+  (field ^:private ^:static ^:final ^int STOPPED 3)
+
+  (field ^:private ^:static ^:final ^int TERMINATED 4)
+
+  (field ^:private ^int state STOPPED)
+
+  (field ^:private ^boolean beingReconnected false)
+
+  (field ^:private ^:static ^:final ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.misc" "ClientNotifForwarder")))

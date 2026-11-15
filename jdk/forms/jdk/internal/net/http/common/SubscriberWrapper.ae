@@ -1,0 +1,309 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/common/SubscriberWrapper.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.common)
+
+(import '(java.io Closeable)
+        '(java.nio ByteBuffer)
+        '(java.util List Objects)
+        '(java.util.concurrent CompletableFuture
+                               ConcurrentLinkedQueue
+                               Flow$Processor
+                               Flow$Subscriber
+                               Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicLong AtomicReference)
+        '(java.util.function BiConsumer Supplier))
+
+(defclass ^:public ^:abstract SubscriberWrapper
+  :implements [FlowTube$TubeSubscriber
+               Closeable
+               (Flow$Processor (List ByteBuffer) (List ByteBuffer))]
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this SubscriberWrapper/.dbgString)
+                          Utils/DEBUG))
+
+  (defclass ^:public ^:enum SchedulingAction
+    (constants CONTINUE RETURN RESCHEDULE))
+
+  (field ^:volatile ^Flow$Subscription upstreamSubscription)
+
+  (field ^:final ^SubscriptionBase downstreamSubscription)
+
+  (field ^:volatile ^boolean upstreamCompleted)
+
+  (field ^:volatile ^boolean downstreamCompleted)
+
+  (field ^:volatile ^boolean completionAcknowledged)
+
+  (field ^:private ^:volatile ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downstreamSubscriber)
+
+  (field ^:private ^:final ^{:tag (ConcurrentLinkedQueue (List ByteBuffer))} outputQ)
+
+  (field ^:private ^:final ^{:tag (CompletableFuture Void)} cf)
+
+  (field ^:private ^:final ^SequentialScheduler pushScheduler)
+
+  (field ^:private ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+  (field ^:final ^AtomicLong upstreamWindow (AtomicLong.))
+
+  (constructor ^:public [this]
+    (set! (.-outputQ this) (ConcurrentLinkedQueue.))
+    (set! (.-cf this) (MinimalFuture.))
+    (.whenComplete cf
+                   (lambda BiConsumer ^void [^Void v ^Throwable t]
+                     (when (some? t) (.errorCommon this t))))
+    (set! (.-pushScheduler this) (SequentialScheduler/lockingScheduler (DownstreamPusher.)))
+    (set! (.-downstreamSubscription this)
+          (SubscriptionBase. pushScheduler
+                             (method-ref Runnable this SubscriberWrapper/.downstreamCompletion))))
+
+  (method ^:public ^:final subscribe ^void [this
+                                            ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downstreamSubscriber]
+    (Objects/requireNonNull downstreamSubscriber)
+    (set! (.-downstreamSubscriber this) downstreamSubscriber))
+
+  (constructor ^:public [this
+                         ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downstreamWrapper]
+    (this.)
+    (.subscribe this downstreamWrapper))
+
+  (method ^:protected ^:abstract incoming ^void [this ^{:tag (List ByteBuffer)} buffers
+                                                 ^boolean complete])
+
+  (method ^:protected upstreamWindowUpdate ^long [this ^long currentWindow ^long downstreamQsize]
+    (cond (> downstreamQsize 5) 0 (== currentWindow 0) 1 :else 0))
+
+  (method ^:protected onSubscribe ^void [this])
+
+  (method ^:protected enterScheduling ^SchedulingAction [this]
+    SchedulingAction/CONTINUE)
+
+  (method ^:protected signalScheduling ^boolean [this]
+    (if (or downstreamCompleted (.isStopped pushScheduler))
+        false
+        (do (.runOrSchedule pushScheduler) true)))
+
+  (method ^:public outgoing ^void [this ^ByteBuffer buffer ^boolean complete]
+    (Objects/requireNonNull buffer)
+    (java-assert (or (not complete) (not (.hasRemaining buffer))))
+    (.outgoing this (List/of buffer) complete))
+
+  (method ^:public closing ^boolean [this] false)
+
+  (method ^:public outgoing ^void [this ^{:tag (List ByteBuffer)} buffers ^boolean complete]
+    (Objects/requireNonNull buffers)
+    (if complete
+        (do
+          (java-assert (== (Utils/remaining buffers) 0))
+          (let [closing (.closing this)]
+            (when (.on debug)
+              (.log
+                debug
+                "completionAcknowledged upstreamCompleted:%s, downstreamCompleted:%s, closing:%s"
+                (new Object/1 [upstreamCompleted downstreamCompleted closing])))
+            (when (and (not upstreamCompleted) (not closing))
+              (throw (IllegalStateException. "upstream not completed")))
+            (set! completionAcknowledged true)))
+        (do
+          (when (.on debug)
+            (.log debug "Adding %d to outputQ queue" (new Object/1 [(Utils/remaining buffers)])))
+          (.add outputQ buffers)))
+    (when (.on debug)
+      (.log debug
+            (java-str "pushScheduler" (if (.isStopped pushScheduler) " is stopped!" " is alive"))))
+    (.runOrSchedule pushScheduler))
+
+  (method ^:public completion ^{:tag (CompletableFuture Void)} [this] cf)
+
+  (defclass DownstreamPusher
+    :implements [Runnable]
+
+    (method ^:public run ^void [this]
+      (try
+        (.run1 this)
+        (catch Throwable t
+          (when (.on debug) (.log debug (java-str "DownstreamPusher threw: " t)))
+          (.errorCommon SubscriberWrapper/this t))))
+
+    (method ^:private run1 ^void [this]
+      (if downstreamCompleted
+          (when (.on debug) (.log debug "DownstreamPusher: downstream is already completed"))
+          (do
+            (switch (.enterScheduling SubscriberWrapper/this)
+              CONTINUE nil
+              RESCHEDULE (do (.runOrSchedule pushScheduler) (return))
+              RETURN (return)
+              (.compareAndSet errorRef nil (InternalError. "unknown scheduling command")))
+            (let [error (cast Throwable (.get errorRef))]
+              (if (and (some? error) (.isEmpty outputQ))
+                  (do
+                    (locking this
+                      (when downstreamCompleted (return))
+                      (set! downstreamCompleted true))
+                    (when (.on debug)
+                      (.log debug
+                            (java-str "DownstreamPusher: forwarding error downstream: " error)))
+                    (.stop pushScheduler)
+                    (.clear outputQ)
+                    (.onError downstreamSubscriber error)
+                    (.completeExceptionally cf error))
+                  (do
+                    (cond
+                      (not (.isEmpty outputQ))
+                        (when (.on debug)
+                          (.log debug
+                                "DownstreamPusher: queue not empty, downstreamSubscription: %s"
+                                (new Object/1 [downstreamSubscription])))
+                      (.on debug)
+                        (.log debug
+                              "DownstreamPusher: queue empty, downstreamSubscription: %s"
+                              (new Object/1 [downstreamSubscription])))
+                    (let [^:mutable datasent false]
+                      (while (and (not (.isEmpty outputQ)) (.tryDecrement downstreamSubscription))
+                        (let [^{:tag (List ByteBuffer)} b (cast List (.poll outputQ))]
+                          (when (.on debug)
+                            (.log debug
+                                  "DownstreamPusher: Pushing %d bytes downstream"
+                                  (new Object/1 [(Utils/remaining b)])))
+                          (.onNext downstreamSubscriber b)
+                          (set! datasent true)))
+                      (when (or datasent
+                                (and (and (and (.isEmpty outputQ)
+                                               (not
+                                                 (.isFulfilled (.-demand downstreamSubscription))))
+                                          (not upstreamCompleted))
+                                     (== (.get upstreamWindow) 0)))
+                        (.upstreamWindowUpdate SubscriberWrapper/this))
+                      (.checkCompletion SubscriberWrapper/this)))))))))
+
+  (method ^:final outputQueueSize ^int [this] (.size outputQ))
+
+  (method ^:final hasNoOutputData ^boolean [this] (.isEmpty outputQ))
+
+  (method upstreamWindowUpdate ^void [this]
+    (when-not (.isStopped pushScheduler)
+      (let [^long downstreamQueueSize (.size outputQ)
+            upstreamWindowSize (.get upstreamWindow)
+            n (.upstreamWindowUpdate this upstreamWindowSize downstreamQueueSize)]
+        (when (.on debug)
+          (.log debug
+                "upstreamWindowUpdate, downstreamQueueSize:%d, upstreamWindow:%d"
+                (new Object/1 [downstreamQueueSize upstreamWindowSize])))
+        (when (> n 0) (.upstreamRequest this n)))))
+
+  (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+    (when (some? upstreamSubscription) (throw (IllegalStateException. "Single shot publisher")))
+    (set! (.-upstreamSubscription this) subscription)
+    (.upstreamRequest this (.initialUpstreamDemand this))
+    (when (.on debug)
+      (.log debug
+            "calling downstreamSubscriber::onSubscribe on %s"
+            (new Object/1 [downstreamSubscriber])))
+    (.onSubscribe downstreamSubscriber downstreamSubscription)
+    (.onSubscribe this))
+
+  (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+    (when (.on debug) (.log debug "onNext"))
+    (let [prev (.getAndDecrement upstreamWindow)]
+      (when (<= prev 0) (throw (IllegalStateException. "invalid onNext call")))
+      (.incomingCaller this item false)))
+
+  (method ^:private upstreamRequest ^void [this ^long n]
+    (when-not (.isStopped pushScheduler)
+      (when (.on debug) (.log debug "requesting %d" (new Object/1 [n])))
+      (.getAndAdd upstreamWindow n)
+      (.request upstreamSubscription n)))
+
+  (method ^:protected initialUpstreamDemand ^long [this] 1)
+
+  (method ^:protected requestMore ^void [this]
+    (when (== (.get upstreamWindow) 0) (.upstreamRequest this 1)))
+
+  (method ^:public upstreamWindow ^long [this] (.get upstreamWindow))
+
+  (method ^:public onError ^void [this ^Throwable throwable]
+    (when (.on debug) (.log debug (java-str "onError: " throwable)))
+    (.errorCommon this (cast Throwable (Objects/requireNonNull throwable))))
+
+  (method ^:protected errorCommon ^boolean [this ^:mutable ^Throwable throwable]
+    (java-assert (or (some? throwable) (some? (set! throwable (AssertionError. "null throwable")))))
+    (if (.compareAndSet errorRef nil throwable)
+        (do
+          (when (.on debug) (.log debug "error" throwable))
+          (set! upstreamCompleted true)
+          (.runOrSchedule pushScheduler)
+          true)
+        false))
+
+  (method ^:public close ^void [this]
+    (.errorCommon this (RuntimeException. "wrapper closed")))
+
+  (method ^:public close ^void [this ^Throwable t] (.errorCommon this t))
+
+  (method ^:private incomingCaller ^void [this ^{:tag (List ByteBuffer)} l ^boolean complete]
+    (try (.incoming this l complete) (catch Throwable t (.errorCommon this t))))
+
+  (method ^:public onComplete ^void [this]
+    (when (.on debug) (.log debug (java-str "upstream completed: " (.toString this))))
+    (set! upstreamCompleted true)
+    (.incomingCaller this Utils/EMPTY_BB_LIST true)
+    (.runOrSchedule pushScheduler))
+
+  (method ^:public addData ^void [this ^ByteBuffer l]
+    (when (nil? upstreamSubscription)
+      (throw (IllegalStateException. "can't add data before upstream subscriber subscribes")))
+    (.incomingCaller this (List/of l) false))
+
+  (method checkCompletion ^void [this]
+    (when-not (or downstreamCompleted (and (not upstreamCompleted) (not completionAcknowledged)))
+      (when-not (not (.isEmpty outputQ))
+        (if (some? (.get errorRef))
+            (.runOrSchedule pushScheduler)
+            (when completionAcknowledged
+              (when (.on debug) (.log debug "calling downstreamSubscriber.onComplete()"))
+              (.onComplete downstreamSubscriber)
+              (set! downstreamCompleted true)
+              (.complete cf nil))))))
+
+  (method downstreamCompletion ^void [this]
+    (.cancel upstreamSubscription)
+    (.complete cf nil))
+
+  (method ^:public resetDownstreamDemand ^void [this]
+    (.reset (.-demand downstreamSubscription)))
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append (.append (.append (.append (.append
+                                            (.append
+                                              (.append
+                                                (.append
+                                                  (.append
+                                                    (.append
+                                                      (.append
+                                                        (.append
+                                                          (.append
+                                                            (.append
+                                                              (.append
+                                                                (.append
+                                                                  (.append sb "SubscriberWrapper:")
+                                                                  " upstreamCompleted: ")
+                                                                upstreamCompleted)
+                                                              " upstreamWindow: ")
+                                                            upstreamWindow)
+                                                          " downstreamCompleted: ")
+                                                        downstreamCompleted)
+                                                      " completionAcknowledged: ")
+                                                    completionAcknowledged)
+                                                  " outputQ size: ")
+                                                (.size outputQ))
+                                              " cf: ")
+                                            cf)
+                                          " downstreamSubscription: ")
+                                 downstreamSubscription)
+                        " downstreamSubscriber: ")
+               downstreamSubscriber)
+      (.toString sb)))
+
+  (method ^:public dbgString ^String [this] "SubscriberWrapper"))

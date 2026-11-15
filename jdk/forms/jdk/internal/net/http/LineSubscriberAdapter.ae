@@ -1,0 +1,319 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/LineSubscriberAdapter.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.net.http HttpResponse$BodySubscriber)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset CharacterCodingException
+                           Charset
+                           CharsetDecoder
+                           CoderResult
+                           CodingErrorAction)
+        '(java.util List Objects)
+        '(java.util.concurrent CompletableFuture
+                               CompletionStage
+                               ConcurrentLinkedDeque
+                               Flow$Subscriber
+                               Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference)
+        '(java.util.function Function)
+        '(jdk.internal.net.http.common Demand MinimalFuture SequentialScheduler))
+
+(defclass ^:public ^:final LineSubscriberAdapter
+  :implements [(HttpResponse$BodySubscriber R)]
+  :type-params [(S extends (Flow$Subscriber (? super String))) R]
+
+  (field ^:private ^:final ^{:tag (CompletableFuture R)} cf (MinimalFuture.))
+
+  (field ^:private ^:final ^S subscriber)
+
+  (field ^:private ^:final ^{:tag (Function (? super S) (? extends R))} finisher)
+
+  (field ^:private ^:final ^Charset charset)
+
+  (field ^:private ^:final ^String eol)
+
+  (field ^:private ^:final ^AtomicBoolean subscribed (AtomicBoolean.))
+
+  (field ^:private ^:volatile ^LineSubscription downstream)
+
+  (constructor ^:private [this ^S subscriber ^{:tag (Function (? super S) (? extends R))} finisher
+                          ^Charset charset ^String eol]
+    (when (and (some? eol) (.isEmpty eol))
+      (throw (IllegalArgumentException. "empty line separator")))
+    (set! (.-subscriber this) (cast Flow$Subscriber (Objects/requireNonNull subscriber)))
+    (set! (.-finisher this) (cast Function (Objects/requireNonNull finisher)))
+    (set! (.-charset this) (cast Charset (Objects/requireNonNull charset)))
+    (set! (.-eol this) eol))
+
+  (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+    (Objects/requireNonNull subscription)
+    (if (not (.compareAndSet subscribed false true))
+        (.cancel subscription)
+        (do
+          (set! downstream (LineSubscription/create subscription charset eol subscriber cf))
+          (.onSubscribe subscriber downstream))))
+
+  (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+    (Objects/requireNonNull item)
+    (try (.submit downstream item) (catch Throwable t (.onError this t))))
+
+  (method ^:public onError ^void [this ^Throwable throwable]
+    (Objects/requireNonNull throwable)
+    (try (.signalError downstream throwable) (finally (.completeExceptionally cf throwable))))
+
+  (method ^:public onComplete ^void [this]
+    (try (.signalComplete downstream) (finally (.complete cf (.apply finisher subscriber)))))
+
+  (method ^:public getBody ^{:tag (CompletionStage R)} [this] cf)
+
+  (method ^:public ^:static create :type-params [(S extends (Flow$Subscriber (? super String))) R] ^{:tag (LineSubscriberAdapter S R)} [^S subscriber
+                                                                                                                                        ^{:tag (Function (? super S) (? extends R))} finisher
+                                                                                                                                        ^Charset charset
+                                                                                                                                        ^String eol]
+    (when (and (some? eol) (.isEmpty eol))
+      (throw (IllegalArgumentException. "empty line separator")))
+    (LineSubscriberAdapter. (cast Flow$Subscriber (Objects/requireNonNull subscriber))
+                            (cast Function (Objects/requireNonNull finisher))
+                            (cast Charset (Objects/requireNonNull charset))
+                            eol))
+
+  (defclass ^:static ^:final LineSubscription
+    :implements [Flow$Subscription]
+
+    (field ^:final ^Flow$Subscription upstreamSubscription)
+
+    (field ^:final ^CharsetDecoder decoder)
+
+    (field ^:final ^String newline)
+
+    (field ^:final ^Demand downstreamDemand)
+
+    (field ^:final ^{:tag (ConcurrentLinkedDeque ByteBuffer)} queue)
+
+    (field ^:final ^SequentialScheduler scheduler)
+
+    (field ^:final ^{:tag (Flow$Subscriber (? super String))} upstream)
+
+    (field ^:final ^{:tag (CompletableFuture ?)} cf)
+
+    (field ^:private ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+    (field ^:private ^:final ^AtomicLong demanded (AtomicLong.))
+
+    (field ^:private ^:volatile ^boolean completed)
+
+    (field ^:private ^:volatile ^boolean cancelled)
+
+    (field ^:private ^:final ^char/1 chars (new char/1 1024))
+
+    (field ^:private ^:final ^ByteBuffer leftover (ByteBuffer/wrap (new byte/1 64)))
+
+    (field ^:private ^:final ^CharBuffer buffer (CharBuffer/wrap chars))
+
+    (field ^:private ^:final ^StringBuilder builder (StringBuilder.))
+
+    (field ^:private ^String nextLine)
+
+    (constructor ^:private [this ^Flow$Subscription s ^CharsetDecoder dec ^String separator
+                            ^{:tag (Flow$Subscriber (? super String))} subscriber
+                            ^{:tag (CompletableFuture ?)} completion]
+      (set! downstreamDemand (Demand.))
+      (set! queue (ConcurrentLinkedDeque.))
+      (set! upstreamSubscription (cast Flow$Subscription (Objects/requireNonNull s)))
+      (set! decoder (cast CharsetDecoder (Objects/requireNonNull dec)))
+      (set! newline separator)
+      (set! upstream (cast Flow$Subscriber (Objects/requireNonNull subscriber)))
+      (set! cf (cast CompletableFuture (Objects/requireNonNull completion)))
+      (set!
+        scheduler
+        (SequentialScheduler/lockingScheduler (method-ref Runnable this LineSubscription/.loop))))
+
+    (method ^:public request ^void [this ^long n]
+      (when-not cancelled (when (.increase downstreamDemand n) (.runOrSchedule scheduler))))
+
+    (method ^:public cancel ^void [this]
+      (set! cancelled true)
+      (.cancel upstreamSubscription))
+
+    (method ^:public submit ^void [this ^{:tag (List ByteBuffer)} list]
+      (.addAll queue list)
+      (.decrementAndGet demanded)
+      (.runOrSchedule scheduler))
+
+    (method ^:public signalComplete ^void [this]
+      (set! completed true)
+      (.runOrSchedule scheduler))
+
+    (method ^:public signalError ^void [this ^Throwable error]
+      (when (.compareAndSet errorRef nil (cast Throwable (Objects/requireNonNull error)))
+        (.runOrSchedule scheduler)))
+
+    (method ^:private isUnderFlow :throws [CharacterCodingException] ^boolean [this ^ByteBuffer in
+                                                                               ^CharBuffer out
+                                                                               ^boolean endOfInput]
+      (let [^:mutable limit (.position leftover)]
+        (if (== limit 0)
+            false
+            (let [^:mutable ^CoderResult res nil]
+              (while (.hasRemaining in)
+                (.position leftover limit)
+                (.limit leftover (set! limit (unchecked-inc-int limit)))
+                (.put leftover (.get in))
+                (.position leftover 0)
+                (set! res (.decode decoder leftover out (and endOfInput (not (.hasRemaining in)))))
+                (let [remaining (.remaining leftover)]
+                  (if (> remaining 0)
+                      (do (java-assert (== (.position leftover) 0)) (.position leftover remaining))
+                      (.position leftover 0))
+                  (.limit leftover (.capacity leftover))
+                  (when-not (and (and (.isUnderflow res) (> remaining 0)) (.hasRemaining in))
+                    (when (.isError res) (.throwException res))
+                    (java-assert (not (.isOverflow res)))
+                    (return false))))
+              (not endOfInput)))))
+
+    (method ^:private ^:static take ^String [^StringBuilder b ^int start ^int end]
+      (java-assert (== start 0))
+      (let [^:mutable ^String line nil]
+        (if (== end start) "" (do (set! line (.substring b start end)) (.delete b start end) line))))
+
+    (method ^:private ^:static endOfLine ^int [^StringBuilder b ^String eol ^boolean endOfInput]
+      (let [len (.length b)]
+        (if (some? eol)
+            (let [i (.indexOf b eol)]
+              (when (>= i 0) (.delete b i (unchecked-add-int i (.length eol))) (return i)))
+            (let [^:mutable crfound false]
+              (loop [^int i 0]
+                (when (< i len)
+                  (let [c (.charAt b i)]
+                    (if (== c \newline)
+                        (do
+                          (.delete b
+                                   (if crfound (unchecked-subtract-int i 1) i)
+                                   (unchecked-add-int i 1))
+                          (return (if crfound (unchecked-subtract-int i 1) i)))
+                        (when crfound
+                          (java-assert (not (== i 0)))
+                          (.delete b (unchecked-subtract-int i 1) i)
+                          (return (unchecked-subtract-int i 1))))
+                    (set! crfound (== c \return))
+                    (recur (unchecked-inc-int i)))))
+              (when (and crfound endOfInput)
+                (.delete b (unchecked-subtract-int len 1) len)
+                (return (unchecked-subtract-int len 1)))))
+        (if (and endOfInput (> len 0)) len -1)))
+
+    (method ^:private ^:static nextLine ^String [^StringBuilder b ^String eol ^boolean endOfInput]
+      (let [next (LineSubscription/endOfLine b eol endOfInput)]
+        (when (> next -1) (LineSubscription/take b 0 next))))
+
+    (method ^:private nextLine :throws [CharacterCodingException] ^String [this]
+      (java-assert (nil? nextLine))
+      (label :LINES
+        (while (nil? nextLine)
+          (let [endOfInput (and completed (.isEmpty queue))]
+            (set! nextLine
+                  (LineSubscription/nextLine builder
+                                             newline
+                                             (and endOfInput (== (.position leftover) 0))))
+            (when (some? nextLine) (return nextLine))
+            (let [^:mutable ^ByteBuffer b nil]
+              (label :BUFFERS
+                (while (some? (set! b (cast ByteBuffer (.peek queue))))
+                  (if (not (.hasRemaining b))
+                      (.poll queue)
+                      (while (.hasRemaining b)
+                        (.position buffer 0)
+                        (.limit buffer (.capacity buffer))
+                        (let [endofInput (and completed (<= (.size queue) 1))]
+                          (when (.isUnderFlow this b buffer endofInput)
+                            (java-assert (not (.hasRemaining b)))
+                            (when (> (.position buffer) 0) (.flip buffer) (.append builder buffer))
+                            (continue :BUFFERS))
+                          (let [res (.decode decoder b buffer endofInput)]
+                            (when (.isError res) (.throwException res))
+                            (when (> (.position buffer) 0)
+                              (.flip buffer)
+                              (.append builder buffer)
+                              (continue :LINES))
+                            (when (and (.isUnderflow res) (.hasRemaining b))
+                              (.put leftover b)
+                              (java-assert (not (.hasRemaining b)))
+                              (continue :BUFFERS))))))))
+              (java-assert (.isEmpty queue))
+              (when endOfInput
+                (.flip leftover)
+                (.position buffer 0)
+                (.limit buffer (.capacity buffer))
+                (let [^:mutable res (.decode decoder leftover buffer endOfInput)]
+                  (when (> (.position buffer) 0) (.flip buffer) (.append builder buffer))
+                  (when (.isError res) (.throwException res))
+                  (.position buffer 0)
+                  (.limit buffer (.capacity buffer))
+                  (set! res (.flush decoder buffer))
+                  (when (> (.position buffer) 0) (.flip buffer) (.append builder buffer))
+                  (when (.isError res) (.throwException res))
+                  (.position leftover 0)
+                  (.limit leftover (.capacity leftover))
+                  (.reset decoder)
+                  (return (set! nextLine (LineSubscription/nextLine builder newline endOfInput)))))
+              (return nil)))))
+      nil)
+
+    (method ^:private loop ^void [this]
+      (try
+        (while (not cancelled)
+          (let [error (cast Throwable (.get errorRef))]
+            (when (some? error)
+              (set! cancelled true)
+              (.stop scheduler)
+              (.onError upstream error)
+              (.completeExceptionally cf error)
+              (return))
+            (when (nil? nextLine) (set! nextLine (.nextLine this)))
+            (when (nil? nextLine)
+              (cond
+                completed
+                  (do
+                    (.stop scheduler)
+                    (if (not (== (.position leftover) 0))
+                        (do
+                          (.compareAndSet errorRef
+                                          nil
+                                          (IllegalStateException.
+                                            (java-str
+                                              "premature end of input ("
+                                              (.position leftover)
+                                              " undecoded bytes)")))
+                          (continue))
+                        (.onComplete upstream))
+                    (return))
+                (and (== (.get demanded) 0) (not (.isFulfilled downstreamDemand)))
+                  (let [incr (Math/max 1 (.get downstreamDemand))]
+                    (.addAndGet demanded incr)
+                    (.request upstreamSubscription incr)
+                    (continue))
+                :else (return)))
+            (java-assert (some? nextLine))
+            (java-assert (or (or (and (some? newline) (not (.endsWith nextLine newline)))
+                                 (not (.endsWith nextLine "\n")))
+                             (not (.endsWith nextLine "\r"))))
+            (if (.tryDecrement downstreamDemand)
+                (let [forward nextLine] (set! nextLine nil) (.onNext upstream forward))
+                (return))))
+        (catch Throwable t (try (.cancel upstreamSubscription) (finally (.signalError this t))))))
+
+    (method ^:static create ^LineSubscription [^Flow$Subscription s ^Charset charset
+                                               ^String lineSeparator
+                                               ^{:tag (Flow$Subscriber (? super String))} upstream
+                                               ^{:tag (CompletableFuture ?)} cf]
+      (LineSubscription. (cast Flow$Subscription (Objects/requireNonNull s))
+                         (.onUnmappableCharacter
+                           (.onMalformedInput
+                             (.newDecoder (cast Charset (Objects/requireNonNull charset)))
+                             CodingErrorAction/REPLACE)
+                           CodingErrorAction/REPLACE)
+                         lineSeparator
+                         (cast Flow$Subscriber (Objects/requireNonNull upstream))
+                         (cast CompletableFuture (Objects/requireNonNull cf))))))

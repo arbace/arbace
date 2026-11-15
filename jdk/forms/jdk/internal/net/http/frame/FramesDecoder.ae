@@ -1,0 +1,447 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/frame/FramesDecoder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.frame)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.charset StandardCharsets)
+        '(java.util ArrayDeque ArrayList List Optional)
+        '(java.util.function Supplier)
+        '(jdk.internal.net.http.common Log Logger Utils))
+
+(defclass ^:public FramesDecoder
+  (field ^:static ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] "FramesDecoder" String/.toString)
+                          Utils/DEBUG))
+
+  (defclass ^:public ^{FunctionalInterface true} ^:interface FrameProcessor
+    (method processFrame :throws [IOException] ^void [this ^Http2Frame frame]))
+
+  (field ^:private ^:final ^FrameProcessor frameProcessor)
+
+  (field ^:private ^:final ^int maxFrameSize)
+
+  (field ^:private ^ByteBuffer currentBuffer)
+
+  (field ^:private ^:final ^{:tag (ArrayDeque ByteBuffer)} tailBuffers (ArrayDeque.))
+
+  (field ^:private ^int tailSize 0)
+
+  (field ^:private ^boolean slicedToDataFrame false)
+
+  (field ^:private ^:final ^{:tag (List ByteBuffer)} prepareToRelease (ArrayList.))
+
+  (field ^:private ^boolean frameHeaderParsed false)
+
+  (field ^:private ^int frameLength)
+
+  (field ^:private ^int frameType)
+
+  (field ^:private ^int frameFlags)
+
+  (field ^:private ^int frameStreamid)
+
+  (field ^:private ^boolean closed)
+
+  (constructor ^:public [this ^FrameProcessor frameProcessor]
+    (this. frameProcessor (unchecked-multiply-int 16 1024)))
+
+  (constructor ^:public [this ^FrameProcessor frameProcessor ^int maxFrameSize]
+    (set! (.-frameProcessor this) frameProcessor)
+    (set! (.-maxFrameSize this)
+          (Math/min (Math/max (unchecked-multiply-int 16 1024) maxFrameSize)
+                    (unchecked-subtract-int
+                      (unchecked-multiply-int (unchecked-multiply-int 16 1024) 1024)
+                      1))))
+
+  (field ^:private ^:static ^:final ^int COPY_THRESHOLD 8192)
+
+  (method ^:public decode :throws [IOException] ^void [this ^ByteBuffer inBoundBuffer]
+    (if closed
+        (do
+          (when (.on debug)
+            (.log debug
+                  "closed: ignoring buffer (%s bytes)"
+                  (new Object/1 [(.remaining inBoundBuffer)])))
+          (.position inBoundBuffer (.limit inBoundBuffer)))
+        (let [remaining (.remaining inBoundBuffer)]
+          (when (.on debug) (.log debug "decodes: %d" (new Object/1 [remaining])))
+          (when (> remaining 0)
+            (if (nil? currentBuffer)
+                (set! currentBuffer inBoundBuffer)
+                (let [^:mutable b currentBuffer]
+                  (when-not (.isEmpty tailBuffers)
+                    (set! b (cast ByteBuffer (.getLast tailBuffers))))
+                  (let [limit (.limit b)
+                        freeSpace (unchecked-subtract-int (.capacity b) limit)]
+                    (if (and (<= remaining COPY_THRESHOLD) (>= freeSpace remaining))
+                        (let [position (.position b)]
+                          (.position b limit)
+                          (.limit b (unchecked-add-int limit (.remaining inBoundBuffer)))
+                          (.put b inBoundBuffer)
+                          (.position b position)
+                          (when-not (identical? b currentBuffer)
+                            (set! tailSize (unchecked-add-int tailSize remaining)))
+                          (when (.on debug) (.log debug "copied: %d" (new Object/1 [remaining]))))
+                        (do
+                          (when (.on debug) (.log debug "added: %d" (new Object/1 [remaining])))
+                          (.add tailBuffers inBoundBuffer)
+                          (set! tailSize (unchecked-add-int tailSize remaining))))))))
+          (when (.on debug)
+            (.log debug
+                  "Tail size is now: %d, current="
+                  (new Object/1
+                       [tailSize
+                        (Integer/valueOf (if (nil? currentBuffer) 0 (.remaining currentBuffer)))])))
+          (let [^:mutable ^Http2Frame frame nil]
+            (while (some? (set! frame (.nextFrame this)))
+              (when (.on debug) (.log debug "Got frame: %s" (new Object/1 [frame])))
+              (.processFrame frameProcessor frame)
+              (.frameProcessed this))))))
+
+  (method ^:private nextFrame :throws [IOException] ^Http2Frame [this]
+    (while true
+      (when (nil? currentBuffer) (return nil))
+      (let [^:mutable ^long available (unchecked-add-int (.remaining currentBuffer) tailSize)]
+        (when-not frameHeaderParsed
+          (if (>= available Http2Frame/FRAME_HEADER_SIZE)
+              (do
+                (.parseFrameHeader this)
+                (when (> frameLength maxFrameSize)
+                  (return (MalformedFrame. ErrorFrame/FRAME_SIZE_ERROR
+                                           (java-str
+                                             "Frame type("
+                                             frameType
+                                             ") length("
+                                             frameLength
+                                             ") exceeds MAX_FRAME_SIZE("
+                                             maxFrameSize
+                                             ")"))))
+                (set! frameHeaderParsed true))
+              (do
+                (when (.on debug)
+                  (.log debug
+                        "Not enough data to parse header, needs: %d, has: %d"
+                        (new Object/1 [Http2Frame/FRAME_HEADER_SIZE available])))
+                (return nil))))
+        (set! available
+              (if (nil? currentBuffer) 0 (unchecked-add-int (.remaining currentBuffer) tailSize)))
+        (if (or (== frameLength 0) (and (some? currentBuffer) (>= available frameLength)))
+            (let [frame (.parseFrameBody this)]
+              (set! frameHeaderParsed false)
+              (when (some? frame) (return frame)))
+            (do
+              (when (.on debug)
+                (.log debug
+                      "Not enough data to parse frame body, needs: %d,  has: %d"
+                      (new Object/1 [frameLength available])))
+              (return nil))))))
+
+  (method ^:private frameProcessed ^void [this] (.clear prepareToRelease))
+
+  (method ^:private parseFrameHeader :throws [IOException] ^void [this]
+    (let [x (.getInt this)]
+      (set! (.-frameLength this) (bit-and-int (unsigned-bit-shift-right-int x 8) 0x00ffffff))
+      (set! (.-frameType this) (bit-and-int x 0xff))
+      (set! (.-frameFlags this) (.getByte this))
+      (set! (.-frameStreamid this) (bit-and-int (.getInt this) 0x7fffffff))))
+
+  (method ^:private nextBuffer ^void [this]
+    (when-not (.hasRemaining currentBuffer)
+      (when-not slicedToDataFrame (.add prepareToRelease currentBuffer))
+      (set! slicedToDataFrame false)
+      (set! currentBuffer (cast ByteBuffer (.poll tailBuffers)))
+      (when (some? currentBuffer)
+        (set! tailSize (unchecked-subtract-int tailSize (.remaining currentBuffer))))))
+
+  (method ^:public getByte ^int [this]
+    (let [res (bit-and-int (.get currentBuffer) 0xff)] (.nextBuffer this) res))
+
+  (method ^:public getShort ^int [this]
+    (if (>= (.remaining currentBuffer) 2)
+        (let [res (bit-and-int (.getShort currentBuffer) 0xffff)] (.nextBuffer this) res)
+        (let [^:mutable val (.getByte this)]
+          (set! val (unchecked-add-int (bit-shift-left-int val 8) (.getByte this)))
+          val)))
+
+  (method ^:public getInt ^int [this]
+    (if (>= (.remaining currentBuffer) 4)
+        (let [res (.getInt currentBuffer)] (.nextBuffer this) res)
+        (let [^:mutable val (.getByte this)]
+          (set! val (unchecked-add-int (bit-shift-left-int val 8) (.getByte this)))
+          (set! val (unchecked-add-int (bit-shift-left-int val 8) (.getByte this)))
+          (set! val (unchecked-add-int (bit-shift-left-int val 8) (.getByte this)))
+          val)))
+
+  (method ^:public getBytes ^byte/1 [this ^:mutable ^int n]
+    (let [bytes (new byte/1 n)
+          ^:mutable ^int offset 0]
+      (while (> n 0)
+        (let [length (Math/min n (.remaining currentBuffer))]
+          (.get currentBuffer bytes offset length)
+          (set! offset (unchecked-add-int offset length))
+          (set! n (unchecked-subtract-int n length))
+          (.nextBuffer this)))
+      bytes))
+
+  (method ^:private getBuffers ^{:tag (List ByteBuffer)} [this ^boolean isDataFrame
+                                                          ^:mutable ^int bytecount]
+    (let [^{:tag (List ByteBuffer)} res (ArrayList.)]
+      (while (> bytecount 0)
+        (let [remaining (.remaining currentBuffer)
+              extract (Math/min remaining bytecount)
+              ^:mutable ^ByteBuffer extractedBuf nil]
+          (if isDataFrame
+              (do
+                (set! extractedBuf
+                      (.asReadOnlyBuffer (Utils/sliceWithLimitedCapacity currentBuffer extract)))
+                (set! slicedToDataFrame true))
+              (set! extractedBuf (Utils/sliceWithLimitedCapacity currentBuffer extract)))
+          (.add res extractedBuf)
+          (set! bytecount (unchecked-subtract-int bytecount extract))
+          (.nextBuffer this)))
+      res))
+
+  (method ^:public close ^void [this ^String msg]
+    (set! closed true)
+    (.clear tailBuffers)
+    (let [^:mutable bytes tailSize
+          b currentBuffer]
+      (when (some? b)
+        (set! bytes (unchecked-add-int bytes (.remaining b)))
+        (.position b (.limit b)))
+      (set! tailSize 0)
+      (set! currentBuffer nil)
+      (when (.on debug) (.log debug "closed %s, ignoring %d bytes" (new Object/1 [msg bytes])))))
+
+  (method ^:public skipBytes ^void [this ^:mutable ^int bytecount]
+    (while (> bytecount 0)
+      (let [remaining (.remaining currentBuffer)
+            extract (Math/min remaining bytecount)]
+        (.position currentBuffer (unchecked-add-int (.position currentBuffer) extract))
+        (set! bytecount (unchecked-subtract-int bytecount remaining))
+        (.nextBuffer this))))
+
+  (method ^:private parseFrameBody :throws [IOException] ^Http2Frame [this]
+    (java-assert frameHeaderParsed)
+    (switch frameType
+      DataFrame/TYPE (.parseDataFrame this frameLength frameStreamid frameFlags)
+      HeadersFrame/TYPE (.parseHeadersFrame this frameLength frameStreamid frameFlags)
+      PriorityFrame/TYPE (.parsePriorityFrame this frameLength frameStreamid frameFlags)
+      ResetFrame/TYPE (.parseResetFrame this frameLength frameStreamid frameFlags)
+      SettingsFrame/TYPE (.parseSettingsFrame this frameLength frameStreamid frameFlags)
+      PushPromiseFrame/TYPE (.parsePushPromiseFrame this frameLength frameStreamid frameFlags)
+      PingFrame/TYPE (.parsePingFrame this frameLength frameStreamid frameFlags)
+      GoAwayFrame/TYPE (.parseGoAwayFrame this frameLength frameStreamid frameFlags)
+      WindowUpdateFrame/TYPE (.parseWindowUpdateFrame this frameLength frameStreamid frameFlags)
+      ContinuationFrame/TYPE (.parseContinuationFrame this frameLength frameStreamid frameFlags)
+      AltSvcFrame/TYPE (.parseAltSvcFrame this frameLength frameStreamid frameFlags)
+      (do
+        (Log/logTrace "Unknown incoming frame type: {0}" frameType)
+        (.skipBytes this frameLength)
+        nil)))
+
+  (method ^:private parseDataFrame ^Http2Frame [this ^:mutable ^int frameLength ^int streamid
+                                                ^int flags]
+    (if (== streamid 0)
+        (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "zero streamId for DataFrame")
+        (let [^:mutable ^int padLength 0]
+          (when-not (== (bit-and-int flags DataFrame/PADDED) 0)
+            (set! padLength (.getByte this))
+            (when (>= padLength frameLength)
+              (return (MalformedFrame.
+                        ErrorFrame/PROTOCOL_ERROR
+                        "the length of the padding is the length of the frame payload or greater")))
+            (set! frameLength (unchecked-dec-int frameLength)))
+          (let [df (DataFrame. streamid
+                               flags
+                               (.getBuffers this
+                                            true
+                                            (unchecked-subtract-int frameLength padLength))
+                               padLength)]
+            (.skipBytes this padLength)
+            df))))
+
+  (method ^:private parseHeadersFrame ^Http2Frame [this ^:mutable ^int frameLength ^int streamid
+                                                   ^int flags]
+    (if (== streamid 0)
+        (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "zero streamId for HeadersFrame")
+        (let [^:mutable ^int padLength 0]
+          (when-not (== (bit-and-int flags HeadersFrame/PADDED) 0)
+            (set! padLength (.getByte this))
+            (set! frameLength (unchecked-dec-int frameLength)))
+          (let [hasPriority (not (== (bit-and-int flags HeadersFrame/PRIORITY) 0))
+                ^:mutable exclusive false
+                ^:mutable ^int streamDependency 0
+                ^:mutable ^int weight 0]
+            (when hasPriority
+              (let [x (.getInt this)]
+                (set! exclusive (not (== (bit-and-int x (unchecked-int 0x80000000)) 0)))
+                (set! streamDependency (bit-and-int x 0x7fffffff))
+                (set! weight (.getByte this))
+                (set! frameLength (unchecked-subtract-int frameLength 5))))
+            (if (< frameLength padLength)
+                (MalformedFrame. ErrorFrame/PROTOCOL_ERROR
+                                 "Padding exceeds the size remaining for the header block")
+                (let [hf (HeadersFrame. streamid
+                                        flags
+                                        (.getBuffers
+                                          this
+                                          false
+                                          (unchecked-subtract-int frameLength padLength))
+                                        padLength)]
+                  (.skipBytes this padLength)
+                  (when hasPriority (.setPriority hf streamDependency exclusive weight))
+                  hf))))))
+
+  (method ^:private parsePriorityFrame ^Http2Frame [this ^int frameLength ^int streamid ^int flags]
+    (cond
+      (== streamid 0) (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "zero streamId for PriorityFrame")
+      (not (== frameLength 5))
+        (do
+          (.skipBytes this frameLength)
+          (MalformedFrame. ErrorFrame/FRAME_SIZE_ERROR
+                           streamid
+                           (java-str "PriorityFrame length is " frameLength ", expected 5")))
+      :else
+        (let [x (.getInt this)
+              weight (.getByte this)]
+          (PriorityFrame. streamid
+                          (bit-and-int x 0x7fffffff)
+                          (not (== (bit-and-int x (unchecked-int 0x80000000)) 0))
+                          weight))))
+
+  (method ^:private parseResetFrame ^Http2Frame [this ^int frameLength ^int streamid ^int flags]
+    (cond
+      (== streamid 0) (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "zero streamId for ResetFrame")
+      (not (== frameLength 4))
+        (MalformedFrame. ErrorFrame/FRAME_SIZE_ERROR
+                         (java-str "ResetFrame length is " frameLength ", expected 4"))
+      :else (ResetFrame. streamid (.getInt this))))
+
+  (method ^:private parseSettingsFrame ^Http2Frame [this ^int frameLength ^int streamid ^int flags]
+    (cond
+      (not (== streamid 0))
+        (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "non-zero streamId for SettingsFrame")
+      (and (not (== (bit-and-int SettingsFrame/ACK flags) 0)) (> frameLength 0))
+        (MalformedFrame. ErrorFrame/FRAME_SIZE_ERROR "ACK SettingsFrame is not empty")
+      (not (== (unchecked-remainder-int frameLength 6) 0))
+        (MalformedFrame. ErrorFrame/FRAME_SIZE_ERROR
+                         (java-str "invalid SettingsFrame size: " frameLength))
+      :else
+        (let [sf (SettingsFrame. flags)
+              n (unchecked-divide-int frameLength 6)]
+          (loop [^int i 0]
+            (when (< i n)
+              (let [id (.getShort this)
+                    val (.getInt this)]
+                (if (and (> id 0) (<= id SettingsFrame/MAX_PARAM))
+                    (do
+                      (when (and (== id SettingsFrame/INITIAL_WINDOW_SIZE) (< val 0))
+                        (return (MalformedFrame.
+                                  ErrorFrame/FLOW_CONTROL_ERROR
+                                  (java-str "SettingsFrame with INITIAL_WINDOW_SIZE > 2^31 -1: "
+                                            (bit-and val 0xffffffff)))))
+                      (when (and (== id SettingsFrame/MAX_FRAME_SIZE)
+                                 (or (< val 16384) (> val 16777215)))
+                        (return (MalformedFrame.
+                                  ErrorFrame/PROTOCOL_ERROR
+                                  (java-str "SettingsFrame with MAX_FRAME_SIZE out of range: "
+                                            (bit-and val 0xffffffff)))))
+                      (.setParameter sf id val)
+                      (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i))))))
+          sf)))
+
+  (method ^:private parsePushPromiseFrame ^Http2Frame [this ^:mutable ^int frameLength ^int streamid
+                                                       ^int flags]
+    (if (== streamid 0)
+        (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "zero streamId for PushPromiseFrame")
+        (let [^:mutable ^int padLength 0]
+          (when-not (== (bit-and-int flags PushPromiseFrame/PADDED) 0)
+            (set! padLength (.getByte this))
+            (set! frameLength (unchecked-dec-int frameLength)))
+          (let [promisedStream (bit-and-int (.getInt this) 0x7fffffff)]
+            (set! frameLength (unchecked-subtract-int frameLength 4))
+            (if (< frameLength padLength)
+                (MalformedFrame. ErrorFrame/PROTOCOL_ERROR
+                                 "Padding exceeds the size remaining for the PushPromiseFrame")
+                (let [ppf (PushPromiseFrame. streamid
+                                             flags
+                                             promisedStream
+                                             (.getBuffers
+                                               this
+                                               false
+                                               (unchecked-subtract-int frameLength padLength))
+                                             padLength)]
+                  (.skipBytes this padLength)
+                  ppf))))))
+
+  (method ^:private parsePingFrame ^Http2Frame [this ^int frameLength ^int streamid ^int flags]
+    (cond
+      (not (== streamid 0))
+        (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "non-zero streamId for PingFrame")
+      (not (== frameLength 8))
+        (MalformedFrame. ErrorFrame/FRAME_SIZE_ERROR
+                         (java-str "PingFrame length is " frameLength ", expected 8"))
+      :else (PingFrame. flags (.getBytes this 8))))
+
+  (method ^:private parseGoAwayFrame ^Http2Frame [this ^int frameLength ^int streamid ^int flags]
+    (cond
+      (not (== streamid 0))
+        (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "non-zero streamId for GoAwayFrame")
+      (< frameLength 8) (MalformedFrame. ErrorFrame/FRAME_SIZE_ERROR "Invalid GoAway frame size")
+      :else
+        (let [lastStream (bit-and-int (.getInt this) 0x7fffffff)
+              errorCode (.getInt this)
+              debugData (.getBytes this (unchecked-subtract-int frameLength 8))]
+          (when (> (alength debugData) 0)
+            (Log/logError (java-str "GoAway debugData " (String. debugData StandardCharsets/UTF_8))
+                          (new Object/1 [])))
+          (GoAwayFrame. lastStream errorCode debugData))))
+
+  (method ^:private parseWindowUpdateFrame ^Http2Frame [this ^int frameLength ^int streamid
+                                                        ^int flags]
+    (if (not (== frameLength 4))
+        (MalformedFrame. ErrorFrame/FRAME_SIZE_ERROR
+                         (java-str "WindowUpdateFrame length is " frameLength ", expected 4"))
+        (let [update (.getInt this)]
+          (if (< update 0)
+              (MalformedFrame. ErrorFrame/FLOW_CONTROL_ERROR
+                               (java-str "WindowUpdateFrame with value > 2^31 -1 "
+                                         (bit-and update 0xffffffff)))
+              (WindowUpdateFrame. streamid (bit-and-int update 0x7fffffff))))))
+
+  (method ^:private parseContinuationFrame ^Http2Frame [this ^int frameLength ^int streamid
+                                                        ^int flags]
+    (if (== streamid 0)
+        (MalformedFrame. ErrorFrame/PROTOCOL_ERROR "zero streamId for ContinuationFrame")
+        (ContinuationFrame. streamid flags (.getBuffers this false frameLength))))
+
+  (method ^:private parseAltSvcFrame ^Http2Frame [this ^int frameLength ^int frameStreamid
+                                                  ^int frameFlags]
+    (let [len (.getShort this)
+          ^:mutable ^byte/1 origin nil
+          ^:mutable ^{:tag (Optional String)} originUri (Optional/empty)]
+      (when (> len 0)
+        (set! origin (.getBytes this len))
+        (when-not (FramesDecoder/isUSAscii origin)
+          (return (MalformedFrame. ErrorFrame/PROTOCOL_ERROR
+                                   frameStreamid
+                                   "illegal character in AltSvcFrame")))
+        (set! originUri (Optional/of (String. origin StandardCharsets/US_ASCII))))
+      (let [altbytes (.getBytes this
+                                (unchecked-subtract-int (unchecked-subtract-int frameLength 2) len))]
+        (if (not (FramesDecoder/isUSAscii altbytes))
+            (MalformedFrame. ErrorFrame/PROTOCOL_ERROR
+                             frameStreamid
+                             "illegal character in AltSvcFrame")
+            (let [altSvc (String. altbytes StandardCharsets/US_ASCII)]
+              (AltSvcFrame. frameStreamid 0 originUri altSvc))))))
+
+  (method ^:static isUSAscii ^boolean [^byte/1 bytes]
+    (loop [^int i 0]
+      (if (< i (alength bytes))
+          (if (< (aget bytes i) 0) (return false) (recur (unchecked-inc-int i)))
+          nil))
+    true))

@@ -1,0 +1,178 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/websocket/MessageDecoder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.websocket)
+
+(import '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset CharacterCodingException StandardCharsets)
+        '(java.util Objects)
+        '(java.util.function Supplier)
+        '(jdk.internal.net.http.common Logger Utils))
+
+(defclass MessageDecoder
+  :implements [Frame$Consumer]
+
+  (field ^:private ^:static ^:final ^Logger debug
+    (Utils/getWebSocketLogger (method-ref Supplier ^String [] "[Input]" String/.toString)))
+
+  (field ^:private ^:final ^MessageStreamConsumer output)
+
+  (field ^:private ^:final ^UTF8AccumulatingDecoder decoder (UTF8AccumulatingDecoder.))
+
+  (field ^:private ^boolean fin)
+
+  (field ^:private ^Frame$Opcode opcode)
+
+  (field ^:private ^Frame$Opcode originatingOpcode)
+
+  (field ^:private ^long payloadLen)
+
+  (field ^:private ^long unconsumedPayloadLen)
+
+  (field ^:private ^ByteBuffer binaryData)
+
+  (field ^:private ^:final ^boolean server)
+
+  (field ^:private ^int maskingKey)
+
+  (constructor [this ^MessageStreamConsumer output] (this. output false))
+
+  (constructor [this ^MessageStreamConsumer output ^boolean server]
+    (set! (.-output this) (cast MessageStreamConsumer (Objects/requireNonNull output)))
+    (set! (.-server this) server))
+
+  (method getOutput ^MessageStreamConsumer [this] output)
+
+  (method ^:public fin ^void [this ^boolean value]
+    (when (.on debug) (.log debug "fin %s" (new Object/1 [value])))
+    (set! fin value))
+
+  (method ^:public rsv1 ^void [this ^boolean value]
+    (when (.on debug) (.log debug "rsv1 %s" (new Object/1 [value])))
+    (when value (throw (FailWebSocketException. "Unexpected rsv1 bit"))))
+
+  (method ^:public rsv2 ^void [this ^boolean value]
+    (when (.on debug) (.log debug "rsv2 %s" (new Object/1 [value])))
+    (when value (throw (FailWebSocketException. "Unexpected rsv2 bit"))))
+
+  (method ^:public rsv3 ^void [this ^boolean value]
+    (when (.on debug) (.log debug "rsv3 %s" (new Object/1 [value])))
+    (when value (throw (FailWebSocketException. "Unexpected rsv3 bit"))))
+
+  (method ^:public opcode ^void [this ^Frame$Opcode v]
+    (when (.on debug) (.log debug "opcode %s" (new Object/1 [v])))
+    (cond
+      (or (or (identical? v Frame$Opcode/PING) (identical? v Frame$Opcode/PONG))
+          (identical? v Frame$Opcode/CLOSE))
+        (do
+          (when-not fin (throw (FailWebSocketException. (java-str "Fragmented control frame  " v))))
+          (set! opcode v))
+      (or (identical? v Frame$Opcode/TEXT) (identical? v Frame$Opcode/BINARY))
+        (do
+          (when (some? originatingOpcode)
+            (throw (FailWebSocketException.
+                     (String/format "Unexpected frame %s (fin=%s)" (new Object/1 [v fin])))))
+          (set! opcode v)
+          (when-not fin (set! originatingOpcode v)))
+      (identical? v Frame$Opcode/CONTINUATION)
+        (do
+          (when (nil? originatingOpcode)
+            (throw (FailWebSocketException.
+                     (String/format "Unexpected frame %s (fin=%s)" (new Object/1 [v fin])))))
+          (set! opcode v))
+      :else (throw (FailWebSocketException. (java-str "Unexpected opcode " v)))))
+
+  (method ^:public mask ^void [this ^boolean value]
+    (when (.on debug) (.log debug "mask %s" (new Object/1 [value])))
+    (when (and value (not server)) (throw (FailWebSocketException. "Masked frame received")))
+    (when (and (not value) server) (throw (FailWebSocketException. "Masked frame expected"))))
+
+  (method ^:public payloadLen ^void [this ^long value]
+    (when (.on debug) (.log debug "payloadLen %s" (new Object/1 [value])))
+    (when (.isControl opcode)
+      (when (> value Frame/MAX_CONTROL_FRAME_PAYLOAD_LENGTH)
+        (throw (FailWebSocketException.
+                 (String/format "%s's payload length %s" (new Object/1 [opcode value])))))
+      (java-assert (.isControl Frame$Opcode/CLOSE))
+      (when (and (identical? opcode Frame$Opcode/CLOSE) (== value 1))
+        (throw (FailWebSocketException. "Incomplete status code"))))
+    (set! payloadLen value)
+    (set! unconsumedPayloadLen value))
+
+  (method ^:public maskingKey ^void [this ^int value]
+    (when-not server (throw (InternalError.)))
+    (set! maskingKey value))
+
+  (method ^:public payloadData ^void [this ^ByteBuffer data]
+    (when (.on debug) (.log debug "payload %s" (new Object/1 [data])))
+    (set! unconsumedPayloadLen (unchecked-subtract unconsumedPayloadLen (.remaining data)))
+    (let [lastPayloadChunk (== unconsumedPayloadLen 0)]
+      (if (.isControl opcode)
+          (cond
+            (some? binaryData) (.put binaryData data)
+            (not lastPayloadChunk)
+              (let [remaining (.remaining data)]
+                (java-assert (< remaining Frame/MAX_CONTROL_FRAME_PAYLOAD_LENGTH)
+                  (Utils/dump remaining))
+                (set! binaryData
+                      (.put (ByteBuffer/allocate Frame/MAX_CONTROL_FRAME_PAYLOAD_LENGTH) data)))
+            :else (set! binaryData (.put (ByteBuffer/allocate (.remaining data)) data)))
+          (let [last (and fin lastPayloadChunk)
+                text (or (identical? opcode Frame$Opcode/TEXT)
+                         (identical? originatingOpcode Frame$Opcode/TEXT))]
+            (if (not text)
+                (let [slice (.slice data)]
+                  (when server (.unMask this slice))
+                  (.onBinary output slice last)
+                  (.position data (.limit data)))
+                (let [binaryNonEmpty (.hasRemaining data)]
+                  (when server (.unMask this data))
+                  (let [^:mutable ^CharBuffer textData nil]
+                    (try
+                      (set! textData (.decode decoder data last))
+                      (catch CharacterCodingException e
+                        (throw (.initCause (FailWebSocketException.
+                                             (java-str "Invalid UTF-8 in frame " opcode)
+                                             StatusCodes/NOT_CONSISTENT)
+                                           e))))
+                    (when-not (and binaryNonEmpty (not (.hasRemaining textData)))
+                      (.onText output textData last)))))))))
+
+  (method ^:private unMask ^void [this ^ByteBuffer src]
+    (let [pos (.position src)
+          size (.remaining src)
+          temp (ByteBuffer/allocate size)]
+      (Frame$Masker/applyMask src temp maskingKey)
+      (.flip temp)
+      (.position src pos)
+      (.put src temp)
+      (.limit (.position src pos) (unchecked-add-int pos size))))
+
+  (method ^:public endFrame ^void [this]
+    (when (.on debug) (.log debug "end frame"))
+    (when (.isControl opcode) (.flip binaryData))
+    (switch opcode
+      CLOSE
+        (let [^:mutable statusCode (unchecked-char StatusCodes/NO_STATUS_CODE)
+              ^:mutable reason ""]
+          (when-not (== payloadLen 0)
+            (let [len (.remaining binaryData)]
+              (java-assert (and (<= 2 len) (<= len Frame/MAX_CONTROL_FRAME_PAYLOAD_LENGTH))
+                (Utils/dump len payloadLen))
+              (set! statusCode (.getChar binaryData))
+              (when-not (StatusCodes/isLegalToReceiveFromServer statusCode)
+                (throw (FailWebSocketException. (java-str "Illegal status code: " statusCode))))
+              (try
+                (set! reason (.toString (.decode (.newDecoder StandardCharsets/UTF_8) binaryData)))
+                (catch CharacterCodingException e
+                  (throw (.initCause (FailWebSocketException. "Illegal close reason") e))))))
+          (.onClose output statusCode reason))
+      PING (do (.onPing output binaryData) (set! binaryData nil))
+      PONG (do (.onPong output binaryData) (set! binaryData nil))
+      (do
+        (java-assert (or (or (identical? opcode Frame$Opcode/TEXT)
+                             (identical? opcode Frame$Opcode/BINARY))
+                         (identical? opcode Frame$Opcode/CONTINUATION))
+          (Utils/dump opcode))
+        (when fin (set! originatingOpcode nil))))
+    (set! payloadLen 0)
+    (set! opcode nil)))
