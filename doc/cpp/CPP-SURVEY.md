@@ -8083,3 +8083,62 @@ lists named cpp-s13's sources): 13 programs crashed "lost", the lists corrected 
 above is the second). Probes started at 87% (the rule's limit for probes); the runs waited for 85% (in run.sh's 10-minute re-checks,
 about 10 hours at 87-95%). No source was edited while a run that loads it ran; debugging prints added to template.ae for the basic_ios
 probe were removed before the proofs.
+
+## As built: cpp-threads (2026-11-15; branch `cpp-threads` from mac/revisit-1115 3d0cae3c1)
+
+The brief: runtime/threads.cpp, recorded in `:thread-exceptions` as a segmentation fault in `_ZL4worki`, aborted through
+`std::terminate` from `std::this_thread::yield` once cpp-s14/cpp-s15 merged; find the cause, fix it generally, judge it again.
+
+### The cause: not the front end
+
+- The IR is not the change: threads.cpp's IR by our route on this tree and on gate 13e's (next's `.tmp/cppi-check`, made at
+  1b381e60b) are the same up to the inliner's counters (`.iNNN`), and so are their lowered C.
+- The run names it: the aborting thread (`thread 1003`, main's third lambda, `work(2)`) terminates on `std::runtime_error("t0")`, the
+  exception thread 0 threw. The lowered runtime's pending flag and in-flight exception (`arbace/cpp/rt/eh.c.ae`'s `cx$pending`, `cx$cur`;
+  CP103 (b)) are `_Thread_local`, but the node program had them as plain statics: `(static 320 4 4 0 "cx$pending")`, `RO 0`, on both
+  trees. One flag for four threads: a thread's `invoke` saw another's throw pending and went to its landing pad with the other's
+  exception (or none: the old fault in `work`); since llvm-eh's `cx$exception` (it writes the adjusted pointer into `cx$cur`) the same
+  race lands in yield's terminate pad instead. The old segmentation fault was this bug too, seen differently.
+- Why plain statics: bin/cppi built every node program with stage 0's embedded ci (`arbace.c.build` compiled into the seed d5548e72,
+  2026-11-05), older than ci's threads (de576f46b, 2026-11-06: a `_Thread_local` object's static `RO 2`, each thread its own block).
+  RT.toolSource reloads only `arbace/repr/`, `j2g`, `build`, `c2j` and `go` from the checkout, so `arbace/c/` ran as the seed's:
+  bin/ci, bin/llvmi and bin/rsi take `bin/lib/ci/fresh.bash`'s `c_ci_fresh` for that (C's triage, 686246a33), bin/cppi did not. A plain C
+  probe (`_Thread_local` counters on four threads) shows it: built by the embedded ci, `bad 79996`; by the checkout's, `RO 2` and 0.
+
+### The fix
+
+| Part | Built |
+|---|---|
+| `bin/lib/cppi/ci-fresh.bash` | `cppi_ci CMD`: CMD in a subshell under `c_ci_fresh` (the checkout's ci evaluated, `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`, while it differs from the host's; nothing after a re-seed or under `CI_FRESH=0`) |
+| Its users | every `arbace.cpp.run` step: bin/cppi's `read-lib` (runtime-ci) and `check-c` (the lowering's ci check), bin/lib/cppi/check's `lower-lib` and `nodes-list`, check-aot's `lower-lib` and `compile-list` (cf2g's), bin/lib/cppi/run's `nodes`. The C++ front end, the lowering and the judges load no ci namespace and stay compiled |
+| Cost | ci's prebuilt runtime fragments are keyed by how its sources ran (arbace.c.runtime's runtime-key): the first build makes the runtime's fragments again with the evaluated builder (threads.cpp's build 2m18 s against 43 s), later builds hit them (56 s) |
+
+No key moves: bin/cppi is in none, bin/lib/cppi/ is a crop path (`arbace_crop_paths`), test/cpp/ is the crop's.
+
+### Probe and control
+
+| Probe | What | Result (control) |
+|---|---|---|
+| `test/cpp/selftest/tls.sh` (`bin/cppi selftest tls`, in cpp-selftest; 4.4 min the first time, 1.5 GB) | tls.cpp (four threads throwing and catching at once, a `thread_local` checked across yields) by our route, built as bin/cppi check builds it | `cx$pending`, `cx$cur` and `_ZL4mine` `RO 2`; three runs `1500 1500 1500 1500`, status 0 (the judge rejects the same text with `cx$pending` `RO 0`; the build under `CI_FRESH=0`, the old bin/cppi's, has `cx$pending` `RO 0`) |
+
+### Proofs
+
+| Run | Result |
+|---|---|
+| threads.cpp alone (`bin/cppi check --only`), before | `differ status 139 (g++ 0)`, terminate on thread 1003 with thread 0's `runtime_error("t0")` |
+| its node program built under `cppi_ci`, three runs | status 0, `11000 11000 11000 11000` (g++'s digest) |
+| `bin/cppi check --record` (the samples and runtime corpora, the gate's cpp-check parts; 48 min, the fragments made once) | samples 7 of 7; runtime 7 pass, thread-throw.cpp in `:threads` as recorded; **runtime/threads.cpp passes** (9.8 s): its row re-recorded `:pass` (it was `:fail`, `:thread-exceptions`), the times file with it. Peak 5.7 GB (nodes-list, 3 threads under 6 GiB, the evaluated builder making the runtime's fragments: against 2.3 GB compiled) |
+
+`:thread-exceptions` (CP367) now holds no program: its cause was this, not the pending-flag layer's design nor the route's try/catch.
+The AOT record (`check-aot-linux-amd64.edn`'s threads.cpp row, the runtime part `:clean-only`) is not re-run here: cf2g's build goes
+through `cppi_ci` too, so the weekly run should find it passing ("now passes", an improvement, not a failure).
+
+### Proposed
+
+- **CP396 `:thread-exceptions` without a member.** (a) remove the class and close CP367 as diagnosed (the record has no row it matches);
+  (b) keep it until the AOT runtime part's weekly run confirms threads.cpp at both levels, then remove it. **Recommended: (b)**: one weekly
+  run, and the AOT row is still the old fault.
+- **CP397 cpp-check's memory declaration under the evaluated ci.** Until the next re-seed the builder runs evaluated: nodes-list peaked
+  5.7 GB at the default 3 threads and 6 GiB (`:mem-gib 3` declared). (a) cpp-check's command takes the essential's `CPPI_THREADS=2
+  CPPI_CI_MEMLIMIT=2GiB`; (b) `:mem-gib 6`; (c) leave it (the lane flags the peak). **Recommended: (a)** (the essential's settings, proven
+  below), with (b) if its peak stays above 3.

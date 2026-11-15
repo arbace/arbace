@@ -121,6 +121,10 @@ Six crops are above 90 on all three. What the others still need:
   `__extension__ using`, `X<T>::template Y` template template arguments, unfinished instances' out-of-line members, noexcept-expressions
   in template arguments, unsigned template argument values: drops f8 4 → 1, library.cpp 6 → 1 (both `__make_unsigned_selector`, right),
   both pass on llvmi; the 81's IR 67 byte for byte, 2 changed as explained and passing; CP393-CP395 decided; no gate key moves.
+  `cpp-threads` (2026-11-15, "As built: cpp-threads"): runtime/threads.cpp's crash was bin/cppi building node programs with stage 0's
+  embedded ci (seed d5548e72, before ci's threads), so the lowered runtime's `_Thread_local` pending flag was one for all threads; its
+  `arbace.cpp.run` steps now run under `c_ci_fresh` (`bin/lib/cppi/ci-fresh.bash`), probe `selftest tls`; threads.cpp passes and is
+  re-recorded `:pass`; CP396 (the empty `:thread-exceptions`), CP397 (cpp-check's memory while ci runs evaluated) proposed.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)). OC219 (a)'s first part
