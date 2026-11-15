@@ -2917,3 +2917,9 @@ integrity changed (emu, so x86i's kernel too).
   O_APPEND): eval, AOT, the CPU, lockstep sys and step (49 system calls, 3,722 instructions) and the loader agree; before, eval, AOT
   and the CPU differ in 6 of 22 lines. x86i's twin `test/asm/x86i/linux-msync-wb.s` (control cpu-msyncwb-vs-misc), its rows the
   main host's `bin/repr-asm x86i-check --record`.
+- **x86i's lockstep** (go/arbace/x86i/lockstep_linux.ae; the main host's first --record found it: unlinkat's ENOENT, the
+  mapping without pwrite64's bytes in step mode): both processes act on the same files, so the calls not to be made twice are
+  the native's alone: pwrite64, unlink, unlinkat, rmdir, mkdir, mkdirat (the world list), and write and writev to a regular file
+  (x86i's own descriptor's offset moved as the native's: to the end for O_APPEND, else on by the bytes written); after those and
+  after ftruncate and fallocate (made by both) the shared file mappings' pages are taken from the native (`refreshShared`, the
+  mappings recorded at mmap and forgotten at munmap or MAP_FIXED), as a64i's.
