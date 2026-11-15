@@ -2940,3 +2940,9 @@ integrity changed (emu, so x86i's kernel too).
   2.94 GB -> 40.7 s, 0.78 GB; go-check's 8 programs 4.0 s, 233 MB -> 2.7 s, 88 MB; goroot-check's first 60 programs 153 s, 299 MB ->
   99 s, 205 MB.
 - Controls verdict-u311-1..3 and cpu-u311-1; the three programs are in the essential subset.
+- **x86i's lockstep** (go/arbace/x86i/lockstep_linux.ae; the main host's first --record found it: unlinkat's ENOENT, the
+  mapping without pwrite64's bytes in step mode): both processes act on the same files, so the calls not to be made twice are
+  the native's alone: pwrite64, unlink, unlinkat, rmdir, mkdir, mkdirat (the world list), and write and writev to a regular file
+  (x86i's own descriptor's offset moved as the native's: to the end for O_APPEND, else on by the bytes written); after those and
+  after ftruncate and fallocate (made by both) the shared file mappings' pages are taken from the native (`refreshShared`, the
+  mappings recorded at mmap and forgotten at munmap or MAP_FIXED), as a64i's.
