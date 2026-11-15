@@ -85,7 +85,8 @@ as last read from or written to the file, against which writeBack finds the page
             (when (.Mapped (.-AS k) old (- nw old))
               (return (conv int64 (.-Brk k)) nil))
 
-            (.Map (.-AS k) old (- nw old) (bit-or PermR PermW) "brk"))
+            (when (not (.Map (.-AS k) old (- nw old) (bit-or PermR PermW) "brk"))
+              (return (conv int64 (.-Brk k)) nil)))
           (< nw old)
           (.Unmap (.-AS k) nw (- old nw)))
 
@@ -168,15 +169,27 @@ as last read from or written to the file, against which writeBack finds the page
     (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (.-StackLow k)))
     (set! addr (.topDown k size)))
 
-  (.Map (.-AS k) addr size (protPerm prot) "mmap")
+  (when (not (.Map (.-AS k) addr size (protPerm prot) "mmap"))
+    (let [^int64 e (- eNOMEM)]
+      (return (conv uint64 e))))
+
   addr)
 
 
 (go/method topDown "topDown is the address of a mapping of size bytes in mmap's area as Linux's top-down search gives it (vm_unmapped_area; AR23,\nqueue 295): the highest free gap that holds it below the area's top (MmapNext), so a hole munmap left is reused as on Linux\n(before AR23 the area grew down from the last mapping, a hole never reused).\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 size]
-  (let [a (- (.-MmapNext k) size)]
-    (for [p (- (.-MmapNext k) pageSize)] (>= p a) (set! p - pageSize)
-      (when (.Mapped (.-AS k) p pageSize)
-        (set! a (- p size))))
+  (let [a (- (.-MmapNext k) size)
+        vs (.-vmas (.-AS k))]
+    ;; queue 311: the mappings from the highest down, each below the candidate's end and over it moving it below itself (the page walk
+    ;; it replaces took a page at a time, so a reservation of 1 TiB was 2^28 steps)
+    (for [i (min (.at (.-AS k) (- (.-MmapNext k) 1)) (- (len vs) 1))] (>= i 0) (dec! i)
+      (let [v (aget vs i)]
+        (when (>= (.-base v) (+ a size))
+          (continue))
+
+        (when (<= (.-end v) a)
+          (break))
+
+        (set! a (- (.-base v) size))))
 
     a))
 
@@ -226,8 +239,11 @@ highest 2 MiB-aligned address that holds size bytes: the gap's start rounded up 
         (when (< r 0)
           (return (- eNODEV) nil)))
 
-      (let [a (.MapAnon k addr size prot flags)
-            s (.Slab (.-M (.-AS k)) a)
+      (let [a (.MapAnon k addr size prot flags)]
+       (when (> a (bit-not (conv uint64 4095))) ; ENOMEM (queue 311)
+        (return (conv int64 a) nil))
+
+       (let [s (.Slab (.-M (.-AS k)) a)
             ro (.-RO s)
             ^uint64 done 0]
         ;; crt's pread64 writes into the slab even when the mapping is read-only
@@ -252,7 +268,7 @@ highest 2 MiB-aligned address that holds size bytes: the gap's start rounded up 
         (when shared
           (.share k a size off fd (== acc 2)))
 
-        (return (conv int64 a) nil)))))
+        (return (conv int64 a) nil))))))
 
 
 (go/method share "share records the shared file mapping [a, a+size) of fd from off (AR23, queue 295): when fd is open for writing, with a
@@ -398,9 +414,8 @@ written back (writeBack; MS_ASYNC too: the copy's nearest to Linux's page cache)
         (when (< lo up)
           (.writeBack k m lo up))))
 
-    (for [p base] (< p hi) (set! p + pageSize)
-      (when (not (.Mapped (.-AS k) p pageSize))
-        (return (- eNOMEM))))
+    (when (not (.Covered (.-AS k) base (- hi base)))
+      (return (- eNOMEM)))
 
     0))
 
@@ -532,9 +547,8 @@ anonymous (markAnon) or a file's, keep their bytes, as Linux's shared memory and
           (when (and (>= p (.-Base sm)) (< p (+ (.-Base sm) (.-Size sm))))
             (set! shared true)))
 
-        (when (not shared)
-          (when [b (.Bytes (.-AS k) p)] (!= b nil)
-            (clear b))))))
+        (when (and (not shared) (.Mapped (.-AS k) p pageSize))
+          (.Zero (.-M (.-AS k)) p pageSize)))))
 
   0)
 
@@ -565,6 +579,14 @@ there now).
     (set! (.-anonShared k) (make (map uint64 bool))))
 
   (when (== (.-anonShared k) nil)
+    (return))
+
+  (when (and (not on) (< (conv uint64 (len (.-anonShared k))) (/ size pageSize)))
+    ;; queue 311: fewer shared pages than the range's: theirs looked at, not the range's every page
+    (range [p (.-anonShared k)]
+      (when (and (>= p base) (< p (+ base size)))
+        (delete (.-anonShared k) p)))
+
     (return))
 
   (for [p base] (< p (+ base size)) (set! p + pageSize)
