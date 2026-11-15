@@ -72,10 +72,11 @@ check "one limited call (run_actions')" "$(grep -c '&& limited ' "$R/bin/java-ch
 
 # 6. the committed data
 tt=$R/test/java/timeouts.txt
-# GTS180 (a)'s 14 audit-only lines at 60, and since GTS208 (a) (2026-11-04) java-speed's 21 measured limits, each above 60
-check "timeouts.txt's lines" "$(grep -vc '^#' "$tt" 2>/dev/null)" "35"
+# GTS180 (a)'s 14 audit-only lines at 60, and since GTS208 (a) (2026-11-04) java-speed's measured limits, each above 60: 21, and 24 since
+# gate 13c's three :speed tests (t03459, t03897, t08163; the user, 2026-11-14, round 38)
+check "timeouts.txt's lines" "$(grep -vc '^#' "$tt" 2>/dev/null)" "38"
 check "the audit-only lines at 60" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$2 == 60' | wc -l)" "14"
-check "java-speed's lines above 60" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$2 > 60' | wc -l)" "21"
+check "java-speed's lines above 60" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$2 > 60' | wc -l)" "24"
 want=$(for id in t03235 t03314 t03513 t03627 t03628 t03720 t03744 t03756 t03796 t03797 t03798 t03836 t04819 t03686; do
   grep -o "\[\"$id\" \"[^\"]*\"" "$R/test/java/check-interp.edn" | sed 's/.* "//; s/"$//'; done | LC_ALL=C sort)
 check "the 14 held tests' names, as check-interp.edn" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$2 == 60 { print $1 }' | LC_ALL=C sort | md5sum)" "$(md5sum <<< "$want")"

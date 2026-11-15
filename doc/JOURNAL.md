@@ -5891,3 +5891,10 @@ tsvs read in place).
   - `bin/arbace-go --gate-key` stays 66c29674829e...: tools/covsubset and bin/lib/cover.bash are out of gate_key.
   - test/gate/gate-key-crops-test.bash passes.
   - The cover key moves (cover.go and cover.bash), so the cover build is rebuilt at its next use.
+
+## 2026-11-15: timeouts-test's counts follow round 38's three :speed timeouts
+
+Gate 13e's gate-tests failed java-timeouts-test (and gate-reads-test and gate-tests-test, which nest gate-tests): test/java/timeouts-test.bash
+held test/java/timeouts.txt at 35 lines, 21 above 60 s, and n16-fix (30c598795; the user, 2026-11-14, round 38) added the measured limits of
+t03459 (128), t03897 (88) and t08163 (112). The test's counts are now 38 and 24; the data is unchanged. Proof: the test alone, 36 of 36.
+The main session, for 13e's revisit (the user, round 40: main advances anyway; the fix waits on next for the next gate).
