@@ -204,6 +204,35 @@ gen_tools="$gen_tools build.tools.compileproperties.CompileProperties"
 # since F8 (doc/classes/JAVA-DEFERRED-TRIAGE.md): java.base's charset tables' generator
 gen_tools="$gen_tools build.tools.charsetmapping.Main"
 
+# preproc_src TEMPLATE OUT: generate-preproc-src (GensrcMisc.gmk) for one template, as test/javac-platform/gensrc.bash's
+# gensrc_preproc: platform-build.edn's :cpp options (-D, -U, -I, -std), cppout.ae on the tools' host, the template's lines
+# up to @@END_COPYRIGHT@@, then the output from @@START_HERE@@ with make's sed; compared with the JDK build's file when present
+preproc_src() {
+  local t=$1 o=$2 opts=() b
+  mkdir -p "$(dirname "$o")"
+  awk -v field=" :cpp [" 'index($0, field) == 1 {
+      s = substr($0, length(field) + 1); ins = 0; buf = ""
+      for (j = 1; j <= length(s); j++) {
+        c = substr(s, j, 1)
+        if (ins) { if (c == "\\") { j++; buf = buf substr(s, j, 1) } else if (c == "\"") { print buf; ins = 0; buf = "" } else buf = buf c }
+        else if (c == "\"") ins = 1
+        else if (c == "]") exit
+      }
+      exit }' "$root/jdk/javac/platform-build.edn" | grep -e '^-[DUI]' -e '^-std' > "$o.opts" || { echo "jrt-convert: no :cpp options in jdk/javac/platform-build.edn" >&2; return 1; }
+  mapfile -t opts < "$o.opts"
+  ( . "$root/bin/lib/repr-c/sysroot.bash" && c_sysroot &&
+    "$(arbace_host_exe)" "$root/test/javac-platform/cppout.ae" "$root/test/c/host" "$t" "${opts[@]}" ) > "$o.E" ||
+    { echo "jrt-convert: preprocessing $t failed" >&2; return 1; }
+  { awk '/@@END_COPYRIGHT@@/{exit}1' "$t"
+    awk '/@@START_HERE@@/,0' "$o.E" | sed -e 's/@@START_HERE@@/\/\/ AUTOMATICALLY GENERATED FILE - DO NOT EDIT/' -e 's/PREFIX_//' -e 's/^#.*//'
+  } > "$o" && rm -f "$o.E" "$o.opts" || return 1
+  b=${conf:+$(dirname "$conf")/support/gensrc/java.base/${o#*/java.base/}}
+  if [ -n "$b" ] && [ -f "$b" ]; then
+    cmp -s "$o" "$b" || { echo "jrt-convert: ${o#*/java.base/} differs from the JDK build's $b" >&2; return 1; }
+    echo "   ${o#*/java.base/}: generated, the JDK build's byte for byte" >&2
+  fi
+}
+
 generate() {
   local tree=$1 out tools=$2 u c t f
   u=$jdk/src/java.base/share/data/unicodedata
@@ -516,6 +545,14 @@ generate() {
   # installs it: a copy of src/java.logging/share/conf/logging.properties (LogManager's variant
   # reads it as the resource conf/logging.properties)
   cp "$jdk/src/java.logging/share/conf/logging.properties" "$data/conf/logging.properties" || return 1
+  # F9's sun.nio.fs.UnixConstants (B2, 2026-11-15), as make/modules/java.base/gensrc/GensrcMisc.gmk's
+  # generate-preproc-src makes it, the way bin/javac-vendor gensrc does (JCS369 (a), test/javac-platform/gensrc.bash's
+  # gensrc_preproc): the template preprocessed by repr/c's preprocessor on C's own target (no gcc) with the build's
+  # -D, -U, -I and -std (jdk/javac/platform-build.edn's :cpp), laid out as gcc -E lays it out
+  # (test/javac-platform/cppout.ae), then make's awk and sed; held byte for byte to the JDK build's when it has one
+  if grep -q '^java\.base gensrc sun/nio/fs/UnixConstants\.java$' "$work/sources.txt"; then
+    preproc_src "$jdk/src/java.base/unix/classes/sun/nio/fs/UnixConstants.java.template" "$out/sun/nio/fs/UnixConstants.java" || return 1
+  fi
   # every gensrc file of the closure is made
   while read -r _ kind rel; do
     case $kind in gensrc|gensrc:*|jrtgen) [ ! -f "$out/$rel" ] && { echo "not generated: $rel" >&2; return 1; } ;; esac
