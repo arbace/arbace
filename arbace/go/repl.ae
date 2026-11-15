@@ -136,6 +136,8 @@
                (swap! packages assoc path st)
                st)))))))
 
+(declare start-read-ahead!)
+
 (defn package!
   "go/package: the namespace's package (its name, :path, :files ...); in a load, the load's start."
   [ns-sym nm opts]
@@ -149,7 +151,8 @@
       (swap! st assoc :load-file *file*))
     (when (:files opts)
       ;; a package file: the load of its files starts (§2.3), its declarations queued
-      (swap! st assoc :loading true :files []))
+      (swap! st assoc :loading true :files [])
+      (start-read-ahead! st ns-sym (:files opts)))
     nil))
 
 (defn- file-entry [st fname]
@@ -286,6 +289,79 @@
             (or (some (fn [^String d] (let [g (File. d lf)] (when (.isFile g) g)))
                       (remove #(str/starts-with? % "store:") (some-> (System/getenv "ARBACE_PATH") (str/split #":"))))
                 (when (.isFile f) f)))))))
+
+;;; The package's forms files read ahead (queue 298)
+
+(defonce ^{:private true :doc "The forms files of the package files being loaded, read ahead: {resolved-path promise}, the
+  path as arbace.core/load resolves a (load ...) of the package file (\"/go/arbace/py/abstract\"); each package's
+  entries removed when its load ends (a package another one's load loads has its own)."}
+  ahead (atom {}))
+
+(defn- read-forms-file
+  "The top-level forms of forms file f as arbace.core/load reads them (a LineNumberingPushbackReader: their :line and
+  :column), in namespace ns-sym (the one each file's in-ns names)"
+  [^File f ns-sym]
+  (binding [*ns* (create-ns ns-sym)]
+    (with-open [r (arbace.lang.LineNumberingPushbackReader.
+                   (java.io.InputStreamReader. (java.io.FileInputStream. f) "UTF-8"))]
+      (let [eof (Object.)]
+        (loop [acc (transient [])]
+          (let [x (read r false eof)]
+            (if (identical? x eof) (persistent! acc) (recur (conj! acc x)))))))))
+
+(defn- start-read-ahead!
+  "At a package file's go/package: its forms files (one per :files entry, beside it in the directory of its stem) read
+  on GOMAXPROCS - 1 threads in the files' order, so the loads its (load ...) forms make evaluate forms read meanwhile:
+  reading pyi's runtime, 25 MB of forms, was a third of goi's load of it on one thread. Only for a package file on disk."
+  [st ns-sym fnames]
+  (when-let [^File pf (package-file @st)]
+    (let [pp (.getPath pf)
+          dir (File. (subs pp 0 (- (count pp) 3)))
+          root (str (#'arbace.core/root-directory ns-sym) "/" (.getName dir) "/")
+          jobs (vec (for [^String fname fnames
+                          :when (str/ends-with? fname ".go")
+                          :let [stem (subs fname 0 (- (count fname) 3))
+                                f (File. dir (str stem ".ae"))]
+                          :when (.isFile f)]
+                      [(str root stem) f (promise)]))
+          next-job (java.util.concurrent.atomic.AtomicInteger. 0)
+          n (max 1 (min 8 (dec (.availableProcessors (Runtime/getRuntime)))))]
+      (when (and (.endsWith pp ".ae") (seq jobs))
+        (swap! st assoc :ahead (mapv first jobs))
+        (swap! ahead into (map (fn [[k _ p]] [k p]) jobs))
+        (dotimes [_ n]
+          (future
+            (loop []
+              (let [i (.getAndIncrement next-job)]
+                (when (< i (count jobs))
+                  (let [[_ f p] (nth jobs i)]
+                    (deliver p (try {:forms (read-forms-file f ns-sym)} (catch Throwable e {:error e})))
+                    (recur)))))))))))
+
+(defn- load-ahead
+  "arbace.core/load's load of resolved path (\"/go/...\"), whose forms were read ahead: each evaluated in order as
+  Compiler's load evaluates a file's (*ns* and *file* bound), then RT's after-load hooks"
+  [^String path read]
+  (let [{:keys [forms error]} @read
+        ok (volatile! false)]
+    (when error (throw error))
+    (try
+      (binding [*ns* *ns* *file* (str (subs path 1) ".ae")]
+        (doseq [f forms] (eval f)))
+      (vreset! ok true)
+      (finally (arbace.lang.RT/afterLoad path @ok)))))
+
+(defonce ^:private load-wrapped
+  ;; arbace.core/load (:redef true) takes the read-ahead forms while a package file loads (ahead), else as before
+  (do (alter-var-root #'arbace.core/load
+                      (fn [orig]
+                        (fn [& paths]
+                          (if-let [a (not-empty @ahead)]
+                            (doseq [^String p paths]
+                              (let [r (if (.startsWith p "/") p (str (#'arbace.core/root-directory (ns-name *ns*)) "/" p))]
+                                (if-let [rd (get a r)] (load-ahead r rd) (orig p))))
+                            (apply orig paths)))))
+      true))
 
 (defn- embed-kind
   "The kind of a go:embed variable's type (gc's embedKind): :fs, :string, :bytes, or nil."
@@ -730,6 +806,7 @@
   listing every error), defined, initialized (§2.6)."
   [st]
   (swap! st dissoc :loading)
+  (apply swap! ahead dissoc (:ahead @st))
   (let [r (check-source (source-of st) nil)]
     (when (seq (:errors r))
       (throw (ex-info (str "Go check errors in package " (:path @st) ":\n" (error-text (:errors r)))
@@ -751,7 +828,7 @@
           (when (and (:loading @st) (= (str (:ns @st)) ns-name))
             (if ok
               (complete! st)
-              (swap! packages dissoc path))))))))
+              (do (apply swap! ahead dissoc (:ahead @st)) (swap! packages dissoc path)))))))))
 
 (defonce ^:private hook-registered
   (do (swap! arbace.lang.RT/AFTER_LOAD conj #'after-load) true))

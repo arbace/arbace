@@ -6854,3 +6854,36 @@ GOGC=50 PYI_AOT_LIB_JOBS=4 PYI_LIB_TEST_JOBS=4 PYI_AOT_LIB_BATCH=40 \
   (no import) -> 22 pass; test_external_inspection 25 skipped at import -> 23 in `:remote-debugging` (18 skips on
   PROCESS_VM_READV_SUPPORTED, 5 that unwind a pyi child) and 2 free-threading skips equal to CPython's; test_cmd_line's
   test_isolatedmode passes (out of `:pyi-command-line`); test_utf8_mode and test_faulthandler unchanged.
+
+## As built: 298, _pyrepl on a terminal, and pyi's start on a pty (2026-11-15, the Mac VM, queue 298)
+
+293's DECISION 3 (a): on a terminal CPython 3.14 runs _pyrepl, pyi ran its basic REPL; and pyi's start under a pty was
+past test_pyrepl's run_repl wait (30 s of silence: `:repl-console`'s 20 pty sessions).
+
+- **_pyrepl on a terminal** (interp.go's `endMain`, repl.go's `runPyrepl`): after the main module under -i, or as the run
+  with no code, `_pymain_run_repl`'s terminal branch: stdin a terminal and no PYTHON_BASIC_REPL (not under -E or -I),
+  `_pyrepl` imported (ModuleNotFoundError: the basic REPL) and `_pyrepl.main.interactive_console(mainmodule=__main__,
+  pythonstartup=...)` called, pythonstartup after code (pymain_repl), not for stdin's run (its startup file ran before);
+  an error printed as `pymain_exit_err_print`, SystemExit's status the run's. Its console is _pyrepl's own unix console
+  (Lib/_pyrepl/unix_console.py, its terminfo reader, keymaps and history), on pyi's termios, select and os.
+- **The interactive hook** (`runInteractiveHook`, pymain_run_interactive_hook): `sys.__interactivehook__` called before the
+  REPL; pyi does not import site at start, so site is imported there (not under -I: site.main's enablerlcompleter),
+  whose register_readline reads the history file (PYTHON_HISTORY) by _pyrepl's readline or the readline module and
+  writes it at exit. `sys.flags.isolated` is -I's (296's PYI_START_FLAGS, `startFlag('I')`).
+- **sys._baserepl** (repl.go's `baseRepl`): the basic REPL in __main__'s namespace, what interactive_console falls back
+  on (TERM=dumb: "warning: can't use pyrepl"); `repl` and `baseRepl` share `replLoop`, which on a terminal with the readline
+  module imported reads by its editor (`readlineInput`, PyOS_Readline's `call_readline`: the echo off, the prompt and line
+  on stdout), as CPython's basic REPL does (test_no_newline, test_not_wiping_history_file's basic part).
+- **The no-code __main__** (`mainModuleDefaults`): `__package__` and `__spec__` None, `__loader__` BuiltinImporter, as
+  pylifecycle's add_main_module gives it (test_pyrepl's globals tests).
+- **fcntl.ioctl with a buffer** (builtins_fcntl.go's `ioctlBuf`, fcntlmodule.c's cases): a writable buffer with
+  mutate_flag copied into a 1024-byte buffer (larger: passed as it is) and back, the call's int returned; a bytes-like or
+  str argument of at most 1024 bytes copied, the result's bytes returned; the guard bytes checked ("buffer overflow");
+  the bytes passed by their address (reflect's Pointer, as termios's). unix_console's TIOCGWINSZ and FIONREAD.
+- **The start** (measured on the VM under other agents' runs): goi's load of go.arbace.py was 19.7 s of a 27 s start at
+  GOGC=50 (the runs' setting): its forms files read (6 s on one thread), the whole package checked (8.6 s), defined (2.4
+  s). Now the start runs at GOGC 200 at least (arbace/python.ae's `with-start-gc`, the environment's setting restored
+  before the program), and goi reads a package file's forms files ahead on GOMAXPROCS-1 threads while the package
+  file's loads evaluate them (arbace/go/repl.ae's `start-read-ahead!`, `load-ahead`: arbace.core/load, :redef, takes
+  the forms read ahead while a package file loads). `-c pass`: 34 s -> 25 s under the same load. The check itself is
+  the rest; it is not cut here.
