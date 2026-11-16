@@ -9117,3 +9117,37 @@ send java-night back to build alone. **Decided (the user, 2026-11-16): (b).** `c
 it compile). jdk/ converted again without it (6df319ee1: 276 paths, F26's forms deleted), every step of the conversion and
 both verifies passing; the remaining errors are fixed in build rounds (`bin/arbace-go --gate-build`, heavy commands in their
 own lane, `ARBACE_HEAVY_LOCK=.tmp/big-b.lock`), a slice reverted (`.tmp/javanight/revert-slice.sh`) only if it resists.
+
+## 2026-11-16: W1 prepared by day (branch `w1-1116`, on B2's `b2-1115` 71f9d2f7b; the consolidation plan's B3)
+
+For the user's new order (each unit merged onto next with an essential gate, the re-seed last, then one `--full`): W1 =
+`mac/eval-speed-w1` 1d59af130 (the evaluator's speed, rounds 1 and 2) and `mac/039-jcs127` d6870d37c (U2: volatile fields of
+interpreted classes under Rt's striped locks) with its day-test fix ef9937644, merged onto B2. Built first on b2-1115 9e3d05d2b,
+then redone on its head 71f9d2f7b (B2's build rounds 1-2, F26 out) with the same resolutions; W1's delta from the first equals
+B2's delta byte for byte.
+
+Conflicts. `arbace/j2g/dyn.ae` (eval-speed's base held an older java-night): B2 split `forms` into core-forms, native-forms and
+proxy-forms (379130378) and gave defineClass its SerialNew (aedf8cdf7, c0661d323); eval-speed took dynConvert and defineClass
+into fns of their own for the same 64 KB limit. Resolved on B2's structure with eval-speed's five changes re-applied:
+dynConvert's early return for a reference class (dyn-convert-form), defineClass's IsInstance by `(assert (* Dyn) x)`,
+defineInterface's fast path through a Dyn's Ifaces, `Compiler$Dyn.methodImpl` (method-impl-native, in native-forms), getField's
+fast path; eval-speed's define-class-native dropped (B2's inline defineClass keeps SerialNew). Considered: eval-speed's whole
+file with B2's SerialNew re-added (rejected: B2's later fixes are in its structure). Auto-merged, every line kept:
+`arbace/lang/Compiler.ae` (B2's JCS351 implicit constructor arguments, eval-speed's call path), `go/arbace/jrt/{natives,thread}.ae`,
+`doc/go/J2G-SPEC.md`. `arbace/lang/go/CompilerNodes.ae` and `CompilerAOTFn.ae` regenerated on stage 0 (`test/c2j/gen_nodes.ae`,
+`gen_fns.ae`; stage 0 reproduces both parents' files first): equal to the merge's text. `doc/classes/JAVA-CONFORMANCE-SURVEY.md`
+(jcs127): its "As built: JCS127" after B2's sections.
+
+Checks. Light, on stage 0: `bin/generated-check` (stage 0 as EXE): all six generated sets as their generators write them;
+`bin/j2g-unit`: all passed; dyn.ae loaded and its form fns called; `bin/gate --plan` (essential): 60 run, 4 skip, 1 after.
+jcs127's day test (U2 (a)), on a scratch tree next 9da791cd4 + d6870d37c + ef9937644 (`jcs127-1116`, not pushed; B2's head did
+not build then), `bin/arbace-go --gate-build` under the heavy lock (39 min, 20.9 GiB; key bd26a10da8b6): the image prepares (159
+sources, 0 failed: ef9937644's order fix holds), then at interp, on next's javac tool (`REPR_JAVA_STALE_OK=1`): t03832
+DekkerTest passes 3 of 3 (each time its first attempt timed out and the retry at limit 40 passed: the survey's contention risk,
+the spinning volatile reader against the striped locks), the 24 essential tests with volatile fields 24 of 24, `bin/java-check
+--essential` 428 of 428 (the own verdict 394, the JDK's record agreeing on 428). To do with the records: t03832 leaves its class
+(`test/java/divergences.edn`'s, line 756) and `check-interp.edn`'s `:fail`, re-recorded by a Java levels' night. Not run:
+`bin/diffcheck` (31-36 GiB declared), the build of W1 itself.
+
+Keys (first 12 hex, unhosted): on b2-1115 9e3d05d2b's base W1 moved gate 141350b87f49 -> 68a27212a1a0, runtime 912878e8eaae ->
+2ecb7b044b69, javac d0842fdc3ebf -> 610533f1f22a (all three, as planned); seed d5548e72 unchanged.
