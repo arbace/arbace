@@ -445,8 +445,10 @@ data, `:java`:
   forms do not depend on where the work directory is. The modules' forms are merged into one tree for
   j2g (`WORK/forms.all`; a package split over modules, as class-path programs have them, gets one
   namespace file with the loads of both), the resources likewise (`WORK/resources.all`; a
-  `META-INF/services` file in two modules concatenated, any other file in two modules an error unless
-  equal).
+  `META-INF/services` file in two modules concatenated; another `META-INF` file in two modules that
+  differ, as artifacts' `LICENSE`, `NOTICE` and `DEPENDENCIES` do, the first module's, as a class path's
+  `getResource` answers, the later ones listed in `WORK/resources.shadowed` and kept in their modules'
+  `resources.jars`; any other file in two modules an error unless equal).
 - **An artifact sources-first** (A2): its sources jar unpacked with the release's multi-release layer
   laid over the base (`META-INF/versions/9..R`, in order, as javac's file manager reads a multi-release
   jar for a release). A binary jar's versioned classes whose source the sources jar lacks (log4j's
