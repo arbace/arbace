@@ -9,9 +9,10 @@ public class Main {
         System.out.println("store: " + Store.kind());
         System.out.println("texts: " + Texts.plain("plain") + " " + Texts.library());
         System.out.println("listener: " + Recorder.name());
+        events.fire("old", "new");
         String what = args.length > 0 ? args[0] : "";
         if (what.equals("reach")) {
-            events.fire("old", "new");
+            events.support("old", "new");
         } else if (what.equals("reach-jar")) {
             System.out.println(Texts.fancy("x"));
         }

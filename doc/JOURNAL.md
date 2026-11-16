@@ -9656,3 +9656,22 @@ and fixtures' updates, then this branch's four commits (cherry-picked: they are 
   subset into the world, as java.awt.Point is, or GH5 (i)); the second guava's sources module, which needs jsr305 3.0.2 and
   checker-qual 3.37.0 pinned (A3's closure of BiMap fails at its root on javax.annotation's absence): a fetch to approve.
 - Correction to the entry above: the first run's `No matching clause` failures were 276 of the 310, not 286.
+
+## 2026-11-16: GH5 (iii)'s first slice, java.beans' PropertyChangeEvent and PropertyChangeListener (branch `ghidra-a8`; conversion pending)
+
+- **Decided (the user, round 49):** GH5 (iii) for PropertyChangeEvent: it and PropertyChangeListener, with the supertypes they
+  need, into the world from jdk26u's java.desktop sources (jdk26u `baf63fbe`, `src/java.desktop/share/classes/java/beans/`),
+  as java.awt.Point is. Their supertypes, java.util.EventObject and EventListener, are the world's already; PropertyChangeEvent
+  imports java.io.Serial alone. `test/jrt/jrt_sources.ae`'s `added-module-sources` lists the two files (KIND
+  share:java.desktop, translated into java.base's tree). On ghidra-a8 only: it lands after the consolidation.
+- `test/programs/outside` follows: Events.fire (a PropertyChangeEvent to a world PropertyChangeListener, Recorder) now runs in the
+  main run (`changed: config`), and the negative control `reach` uses java.beans.PropertyChangeSupport, still outside.
+- **The conversion is not done.** `bin/jrt-convert update` (javac's tool `javac-f70d1a9d900eb07a9afc`, `REPR_JAVA_STALE_OK=1`,
+  under `ARBACE_HEAVY_LOCK=.tmp/big-h.lock`) ran twice and its read was killed by the kernel's OOM killer both times: at 20:27
+  (MemAvailable 53 GiB at the start, the javac tool at 42 GiB RSS when killed) and at 20:40 with `GOMEMLIMIT=34GiB` (60 GiB at the
+  start; the host's MemAvailable fell to 13 GiB under the other jobs, the tool killed at 29 GiB). jdk/ is untouched: `update` writes
+  it only after every step passes. Left for a morning window with the host otherwise quiet (the read's own peak, 35-42 GiB, plus
+  margin): `GOMEMLIMIT=34GiB ARBACE_HEAVY_LOCK=.tmp/big-h.lock bin/heavy-lock bin/jrt-convert update`, then `bin/j2g-edge update`
+  (PropertyChangeListener leaves the edge for the forms), `bin/clojure-tests --java-fixtures update` if the fixtures' forms move,
+  `bin/provenance-check` and `bin/jrt-convert verify`. Until then `jdk/sources.txt` and `jdk/forms` lag `jrt_sources.ae` by these
+  two files.
