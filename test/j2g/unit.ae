@@ -17,6 +17,7 @@
             [arbace.j2g.meta :as meta]
             [arbace.j2g.model :as m]
             [arbace.j2g.out :as out]
+            [arbace.j2g.outside :as outside]
             [arbace.j2g.world :as w]
             [j2g.typeann :as ta]))
 
@@ -463,6 +464,93 @@
            (and (= "a/Base" (:owner direct)) (= "shown" (:name direct)))
            (pr-str (select-keys direct [:owner :name])))))
 
+;; A8 and A8b (the Ghidra case study's G1 plan; J2G-SPEC §4.1, "Declarations outside the world"): a class naming
+;; a class of a platform module outside the world (java.desktop, java.sql) or of a binary-only jar analyzes, its
+;; operations on that class J2g_Missing naming the declaration's source; a class no source declares is refused
+;; still. The platform: J2G_UNIT_PLATFORM (bin/j2g-unit: bin/repr-java platform-dir's); the class directory:
+;; J2G_UNIT_OUTSIDE_CLASSES (bin/j2g-unit unpacks test/programs/java-project/maven's org.example:toyext:1.0)
+
+(defn- outside-sources []
+  (let [p (System/getenv "J2G_UNIT_PLATFORM") c (System/getenv "J2G_UNIT_OUTSIDE_CLASSES")]
+    (when (and (seq p) (seq c))
+      [(outside/platform-source p) (outside/classes-source c "org.example:toyext:1.0")])))
+
+(defn test-outside []
+  (let [srcs (outside-sources)
+        e (edge/read-edge "jdk/edge.edn")
+        load (fn [declared]
+               (binding [m/*run* true env/*declared* declared edge/*edge* e a/*source-lookup* false]
+                 ;; with the world's EventListener and EventObject (java.base's, which the java.beans classes extend)
+                 [(w/load-world [{:root "test/j2g/unit/outside" :tree true}
+                                 {:files ["jdk/forms/java/util/EventListener.ae" "jdk/forms/java/util/EventObject.ae"]}]
+                                :variant-files [])
+                  declared]))
+        failed-of (fn [world] (into {} (for [[c msg] (:failed world)] [c msg])))
+        classes ["q/Events" "q/Listener" "q/Store" "q/Texts"]]
+    (check "outside: the platform and the class directory given (J2G_UNIT_PLATFORM, J2G_UNIT_OUTSIDE_CLASSES)"
+           (some? srcs) "bin/j2g-unit sets them")
+    (when srcs
+      (let [[w0 _] (load (:classes e))
+            f0 (failed-of w0)
+            d (outside/declared (:classes e) srcs)
+            [w1 _] (load d)
+            f1 (failed-of w1)
+            reason (fn [cls mname op]
+                     (w/with-world w1
+                       (binding [m/*w* {:T (set (keys @(:compile-set w1))) :jrt-classes {} :jrt {}}
+                                 env/*declared* d]
+                         (some (fn [[[n _] b]]
+                                 (when (= n mname)
+                                   (some #(when (= op (:op %)) (code/missing-reason %)) (nodes-of b))))
+                               (:bodies @(:state (a/decl cls)))))))
+            fact (fn [n k] (get (get d n) k))]
+        (check "outside: control: without the declarations the four classes are refused (JCS69 (b), A7)"
+               (every? #(contains? f0 %) classes) (pr-str (keys f0)))
+        (check "outside: with them none of the four is refused"
+               (not-any? #(contains? f1 %) classes) (pr-str (select-keys f1 classes)))
+        (check "outside: control: a class no source declares is refused still (javax.nonesuch.Gadget)"
+               (str/includes? (str (get f1 "q/Absent")) "Gadget") (pr-str (get f1 "q/Absent")))
+        (check "outside: PropertyChangeEvent's constructor is J2g_Missing naming java.desktop"
+               (= (reason "q/Events" "fire" :new)
+                  "class java.beans.PropertyChangeEvent is outside the closed world: declarations only, from java.desktop (the platform)")
+               (pr-str (reason "q/Events" "fire" :new)))
+        (check "outside: a binary-only jar's static call is J2g_Missing naming its coordinate"
+               (= (reason "q/Texts" "fancy" :invoke)
+                  "class org.example.toyext.ToyText is outside the closed world: declarations only, from org.example:toyext:1.0")
+               (pr-str (reason "q/Texts" "fancy" :invoke)))
+        (check "outside: a call of a world method whose parameter is an outside interface is no stub (Events.listen)"
+               (and (nil? (reason "q/Listener" "wire" :invoke))
+                    (w/with-world w1 (binding [m/*w* {:T (set (keys @(:compile-set w1))) :jrt-classes {} :jrt {}} env/*declared* d]
+                                       (m/member-mdesc? "(Ljava/beans/PropertyChangeListener;)V"))))
+               (pr-str (reason "q/Listener" "wire" :invoke)))
+        (check "outside: control: without the declarations that descriptor is no member's (m/member-mdesc?)"
+               (w/with-world w0 (binding [m/*w* {:T #{} :jrt-classes {} :jrt {}} env/*declared* (:classes e)]
+                                  (not (m/member-mdesc? "(Ljava/beans/PropertyChangeListener;)V")))))
+        (check "outside: describe and plain name no outside class (no missing operation)"
+               (and (nil? (reason "q/Events" "describe" :invoke)) (nil? (reason "q/Texts" "plain" :invoke))))
+        (check "outside: a binary-only jar's constant folded as javac folds it (ToyText.NAME)"
+               (some #(= "toyext" (:val %))
+                     (w/with-world w1 (nodes-of (some (fn [[[n _] b]] (when (= n "library") b)) (:bodies @(:state (a/decl "q/Texts")))))))
+               "library's body")
+        (check "outside: the declarations' facts: an inner enum's modifiers and constants, a super, an annotation's retention"
+               (and (= 16409 (:flags (fact "java/awt/Desktop$Action" :info)))
+                    (= "BROWSE" (nth (fact "java/awt/Desktop$Action" :enum-constants) 4))
+                    (= "java/util/EventObject" (:super (fact "java/beans/PropertyChangeEvent" :info)))
+                    (nil? (:super (fact "javax/sql/DataSource" :info)))
+                    (= :runtime (fact "org/example/toyext/Marker" :retention))
+                    (= #{"TYPE" "METHOD" "FIELD"} (fact "org/example/toyext/Marker" :targets))))
+        (let [r (outside/report srcs d)]
+          (check "outside: the report lists each declared class with its source"
+                 (and (= "java.desktop (the platform)" (get (outside/asked d) "java/beans/PropertyChangeEvent"))
+                      (= "java.sql (the platform)" (get (outside/asked d) "javax/sql/DataSource"))
+                      (= "org.example:toyext:1.0" (get (outside/asked d) "org/example/toyext/ToyText"))
+                      (= (:declared r) (count (:classes r))))
+                 (pr-str (outside/asked d))))
+        (check "outside: control: java.base is not declared from the platform (java.lang.classfile, out of the world)"
+               (not (contains? d "java/lang/classfile/ClassFile")))
+        (check "outside: the edge's classes keep its answers (String's info is the edge's)"
+               (identical? (:info (get (:classes e) "java/lang/String")) (:info (get d "java/lang/String"))))))))
+
 (defn -main [& _]
   (test-support-tables)
   (test-unresolved-cause)
@@ -479,6 +567,7 @@
   (test-properties)
   (test-arch-collisions)
   (test-inherited-static-accessor)
+  (test-outside)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
   (shutdown-agents)
   (System/exit (if (zero? @failures) 0 1)))

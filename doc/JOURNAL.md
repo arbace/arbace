@@ -9584,3 +9584,57 @@ and fixtures' updates, then this branch's four commits (cherry-picked: they are 
   listed and in `002-b`) and the control `res-dup.edn` (`shared.txt` in both must fail, its message naming it). `bin/java-project
   test` 31 of 31 (main's stage 0, javac's tool `javac-f70d1a9d900eb07a9afc` with `REPR_JAVA_STALE_OK=1`). doc/go/BUILD.md's
   "Java sources by module".
+
+## 2026-11-16: A8 and A8b, declarations outside the world (branch `ghidra-a8`, from B2's `71f9d2f7b` with `6519bdd3b`)
+
+- **The decision** (the user, round 48): A8 is built as the Ghidra case study's G1 plan intended (§2's row: java.desktop's
+  declarations so that unreached GUI code translates to stubs), with A8b (the same over the binary jars on javac's class path
+  alone). The case: the demo's `bin/run-g1 analyze` over B2's world refused 23 classes the JDK's runs load, 11 for a type of a JDK
+  module outside the world (java.beans.PropertyChangeEvent in log4j-core's LoggerContext and its cascade, java.awt.Desktop in
+  Ghidra's FileUtilities, javax.sql in log4j's JDBC sources) and 9 for a class-path-only jar's type (jdom2, commons-io, OSGi, the
+  disruptor, jspecify's @Nullable, javax.annotation.processing).
+- **The design** (`arbace.j2g.outside`; J2G-SPEC §4.1, "Declarations outside the world"; doc/go/BUILD.md, "Declarations outside the
+  world"). j2g's `--outside-platform DIR` (the platform's exploded modules but java.base: `bin/repr-java platform-dir`, the
+  platform javac compiles against, jdk/javac/platform.sha256's pin) and `--outside-classes DIR=ORIGIN` (a binary jar unpacked,
+  named by its coordinate) make `env/*declared*` a lookup over the edge's classes and those sources in javac's order: a class
+  neither the forms, jrt nor the edge has is declared on first use from its class file (`arbace.repr.java.classfile`), in the shape
+  the JVM's reflection gave the edge (`env/reflect-info`'s: modifiers from InnerClasses for an inner class, ACC_SUPER off, no super
+  for an interface, fields with constants, methods and constructors without an inner member class's outer instance, generic
+  signatures, retention and targets, @FunctionalInterface's method, enum constants, record components), read back by the edge's
+  own `edge/facets-value` (factored out of `read-edge`). The class is outside the world: a class naming it analyzes and is
+  translated; each operation on it is `J2g_Missing`, which throws `UnsupportedOperationException: j2g: class C is outside the
+  closed world: declarations only, from SOURCE` when reached (`code/class-missing`; SOURCE `java.desktop (the platform)` or the
+  coordinate). A member of a translated class whose descriptor names such a class exists in Go, the type Go's `any`
+  (`m/member-desc?`, `member-mdesc?` in `decls/class-methods`, `class-fields`, `m/member-in-world?`; code's member-descriptor
+  checks): without it a call of a world method taking an outside interface, made with a world object (the fixture's
+  `events.listen(new Recorder())`), was itself a stub on the main path; a value, a cast and an array of the class stay stubs, and a
+  catch of it catches nothing (no instance exists). Constants of such a class fold as javac folds them; an annotation of such a
+  type is left out at run time (jrt skips a type it cannot load). java.base is never a source (its classes outside the world are
+  jrt's, the cut ones or refused on purpose); an edge class keeps the edge's facets and takes a missing one (java.desktop's
+  JPanel's generics) from its class file only when it is a platform class. The methods' declaration annotations and NestHost are
+  left out (documented). `report.edn`'s `:outside`: the sources and each class declared with its source (the provenance).
+  Opt-in: `program.edn`'s `:java :outside [:platform :class-path]` (test/java/project.ae checks it); `bin/java-project read` writes
+  j2g's arguments into `WORK/outside.args`, which `bin/arbace-go --build-program` appends to j2g's and keys with the platform's pin.
+  Without the options nothing changes (`report-str` leaves a nil `:outside` out).
+- **Alternatives**: the edge recorded on the frozen JVM for java.desktop's classes (`bin/j2g-edge`), the case study's GH5 (iv) as
+  written: binds a program's world to the JVM's recording and to one shipped file, and A8b's jars have no JVM recording at all;
+  declarations as generated Java forms stubs (bodies that throw): the classes would be in the world, their instances creatable and
+  their failures later and quieter; refusals left as they were (A7 alone): stubs SleighCompile itself.
+- **Fixtures and controls**. `bin/j2g-unit`'s `test-outside` (test/j2g/unit/outside, the platform and the toy jar unpacked by
+  bin/j2g-unit): without the declarations the four classes are refused (the control), with them none; a class naming
+  javax.nonesuch.Gadget is refused still (the control); `new PropertyChangeEvent` and `ToyText.upper` are J2g_Missing naming their
+  sources; a world method taking the outside interface is no stub, and without the declarations its descriptor is no member's (the
+  control); ToyText.NAME folded; the declarations' facts (Desktop$Action's modifiers 16409 and constants, PropertyChangeEvent's
+  super, DataSource's none, Marker's retention and targets); java.base not declared (java.lang.classfile); the edge's classes
+  keep its answers. 14 of 14 pass; bin/j2g-unit's 7 other failures (type annotations, invokers) fail alike at HEAD on B2's
+  executable (`08bfa5c8`), not this branch's. The toy repository gains `org.example:toyext:1.0` (binary only: a utility with a
+  constant, an exception, an interface, a RUNTIME annotation; test/java/project/make-jars, `--check` byte for byte).
+  `test/programs/outside` (java.beans, java.awt.Desktop, javax.sql and toyext, each named in code the main run never executes; its
+  runs `main`, and `reach` and `reach-jar`, the negative controls, which must fail with the stub's message on stderr, exit 1 as an
+  uncaught exception's); `bin/java-project test` 34 of 34 (its `outside.args` and the control `controls/outside-bad.edn`).
+  `bin/j2g --analyze-only` over the fixture on the whole world (stage 0): without `:outside` 6 failures in 5 classes (Main
+  itself by the cascade through Recorder), with it 0, the stubs (`J2G_MISSING`) only in fire, propertyChange, connect, browse,
+  fancy and readOr.
+- **Waiting for a build**: `test/programs/outside`'s build and runs (`bin/arbace-go --build-program --check outside`) need the gate
+  build at this branch's key (j2g changed: the key moved from B2's `08bfa5c8`); the runs' exit code 1 and stderr prefix are as
+  jrt's uncaught exception prints them, to confirm there.

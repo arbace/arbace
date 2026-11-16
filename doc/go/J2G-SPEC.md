@@ -642,6 +642,36 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   method of another class needs it (its operations there throw), `:dropped [[class cause]]`, nothing translated
   needs it (`meta/refusals` over reach's `:unavailable`). Under `--own-roots entry` an unreached refused class is
   dropped; under the REPL's world every class is rooted, and a class only the roots name is dropped too.
+- **Declarations outside the world** (A8 and A8b of the G1 plan, the user's decision of round 48, 2026-11-16; built on
+  branch `ghidra-a8`: `arbace.j2g.outside`). `--outside-platform DIR` (the platform's exploded modules, `bin/repr-java
+  platform-dir`) and `--outside-classes DIR=ORIGIN` (a directory of class files: a binary jar on javac's class path
+  alone, unpacked; repeatable) declare, beside the edge, the classes a program's sources were compiled against that
+  neither the forms, jrt nor the edge has: `env/*declared*` is then a lookup over the edge's classes and these
+  sources, in javac's order (the platform, then the directories in order), each class made on first use from its
+  class file (`arbace.repr.java.classfile`) in the shape the JVM's reflection gave the edge (`env/reflect-info`'s: the
+  modifiers, an inner class's from InnerClasses, ACC_SUPER off; no super for an interface; the fields with their
+  constants; the methods and constructors, an inner member class's without the outer instance; the generic
+  signatures; an annotation type's retention and targets; `@FunctionalInterface` and its method; an enum's constants;
+  a record's components), read back as the edge's are (`edge/facets-value`). java.base is never a source: its classes
+  outside the world are jrt's, the cut ones or refused on purpose. An edge class keeps every facet the edge gives; one
+  it lacks (java.desktop's `JPanel` recorded without its generics) is the class file's when the class is a platform
+  class. A class so declared is outside the world: a class naming it analyzes and is translated, and each operation on
+  it is a `J2g_Missing` stub that throws `UnsupportedOperationException` when reached, `class C is outside the closed
+  world: declarations only, from SOURCE` (`java.desktop (the platform)`, `org.example:toyext:1.0`): the program's
+  semantics where its code runs, a loud failure where it would need the class. A member of a translated class whose
+  descriptor names such a class exists in Go, the type Go's `any` (`m/member-desc?`, `m/member-mdesc?`: a world method
+  taking the outside interface, called with a world object implementing it, is no stub); a value of the class, a cast
+  to it and an array of it stay stubs, and a catch of it catches nothing (no instance of it exists). The reflection
+  tables (dyncf's, dyn's) still list only members whose descriptors are in the world. A constant of such a class is folded
+  as javac folds it; an annotation of such a type is left out at run time, as AnnotationParser skips a type it cannot
+  load; a world class implementing such an interface has the interface's world supertypes. A class no source declares
+  is refused still. Left out of the declarations: the methods' annotations (javac copies them to bridges) and the
+  NestHost attribute (the outermost class of InnerClasses). `report.edn`'s `:outside` lists the sources and every
+  class declared, with its source. `program.edn`'s `:java :outside [:platform :class-path]` asks for it
+  (doc/go/BUILD.md, "Declarations outside the world"); without the options j2g is unchanged. Unit tests:
+  `bin/j2g-unit`'s `test-outside` (the fixture test/j2g/unit/outside, with the control that without the declarations
+  the classes are refused); the program `test/programs/outside`, its runs `reach` and `reach-jar` the negative
+  controls.
 
 ### 4.2 Go packages
 
