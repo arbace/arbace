@@ -1,0 +1,191 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/RSAClientKeyExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security GeneralSecurityException PrivateKey PublicKey)
+        '(java.text MessageFormat)
+        '(java.util Locale)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final RSAClientKeyExchange
+  (field ^:static ^:final ^SSLConsumer rsaHandshakeConsumer (RSAClientKeyExchangeConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer rsaHandshakeProducer (RSAClientKeyExchangeProducer.))
+
+  (defclass ^:private ^:static ^:final RSAClientKeyExchangeMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:final ^int protocolVersion)
+
+    (field ^:final ^boolean useTLS10PlusSpec)
+
+    (field ^:final ^byte/1 encrypted)
+
+    (constructor :throws [GeneralSecurityException] [this ^HandshakeContext context
+                                                     ^RSAKeyExchange$RSAPremasterSecret premaster
+                                                     ^PublicKey publicKey]
+      (super. context)
+      (set! (.-protocolVersion this) (.-clientHelloVersion context))
+      (set! (.-encrypted this)
+            (.getEncoded premaster publicKey (.getSecureRandom (.-sslContext context))))
+      (set! (.-useTLS10PlusSpec this)
+            (ProtocolVersion/useTLS10PlusSpec protocolVersion (.isDTLS (.-sslContext context)))))
+
+    (constructor :throws [IOException] [this ^HandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (when (< (.remaining m) 2)
+        (throw (.fatal (.-conContext context)
+                       Alert/HANDSHAKE_FAILURE
+                       "Invalid RSA ClientKeyExchange message: insufficient data")))
+      (set! (.-protocolVersion this) (.-clientHelloVersion context))
+      (set! (.-useTLS10PlusSpec this)
+            (ProtocolVersion/useTLS10PlusSpec protocolVersion (.isDTLS (.-sslContext context))))
+      (if useTLS10PlusSpec
+          (set! (.-encrypted this) (Record/getBytes16 m))
+          (do (set! (.-encrypted this) (new byte/1 (.remaining m))) (.get m encrypted))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CLIENT_KEY_EXCHANGE)
+
+    (method ^:public messageLength ^int [this]
+      (if useTLS10PlusSpec (unchecked-add-int (alength encrypted) 2) (alength encrypted)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (if useTLS10PlusSpec (.putBytes16 hos encrypted) (.write hos encrypted)))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"RSA ClientKeyExchange\": '{'\n  \"client_version\":  {0}\n  \"encrypted\": '{'\n{1}\n  '}'\n'}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(ProtocolVersion/nameOf protocolVersion)
+                                (Utilities/indent (.encodeBuffer hexEncoder encrypted) "    ")])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:private ^:static ^:final RSAClientKeyExchangeProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            ^:mutable ^RSAKeyExchange$EphemeralRSACredentials rsaCredentials nil
+            ^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+        (for-each [^SSLCredentials credential (.-handshakeCredentials chc)]
+          (if (instance? RSAKeyExchange$EphemeralRSACredentials credential)
+              (do
+                (set! rsaCredentials (cast RSAKeyExchange$EphemeralRSACredentials credential))
+                (when (some? x509Credentials) (break)))
+              (when (instance? X509Authentication$X509Credentials credential)
+                (set! x509Credentials (cast X509Authentication$X509Credentials credential))
+                (when (some? rsaCredentials) (break)))))
+        (when (and (nil? rsaCredentials) (nil? x509Credentials))
+          (throw (.fatal (.-conContext chc)
+                         Alert/ILLEGAL_PARAMETER
+                         "No RSA credentials negotiated for client key exchange")))
+        (let [^PublicKey publicKey (if (some? rsaCredentials)
+                                       ^PublicKey (.-popPublicKey rsaCredentials)
+                                       (.-popPublicKey x509Credentials))]
+          (when-not (.equals (.getAlgorithm publicKey) "RSA")
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           "Not RSA public key for client key exchange")))
+          (let [^:mutable ^RSAKeyExchange$RSAPremasterSecret premaster nil
+                ^:mutable ^RSAClientKeyExchangeMessage ckem nil]
+            (try
+              (set! premaster (RSAKeyExchange$RSAPremasterSecret/createPremasterSecret chc))
+              (.add (.-handshakePossessions chc) premaster)
+              (set! ckem (RSAClientKeyExchangeMessage. chc premaster publicKey))
+              (catch GeneralSecurityException gse
+                (throw (.fatal (.-conContext chc)
+                               Alert/ILLEGAL_PARAMETER
+                               "Cannot generate RSA premaster secret"
+                               gse))))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Produced RSA ClientKeyExchange handshake message" ckem))
+            (.write ckem (.-handshakeOutput chc))
+            (.flush (.-handshakeOutput chc))
+            (let [ke (SSLKeyExchange/valueOf (.-keyExchange (.-negotiatedCipherSuite chc))
+                                             (.-negotiatedProtocol chc))]
+              (if (nil? ke)
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/INTERNAL_ERROR
+                                 "Not supported key exchange type"))
+                  (let [masterKD (.createKeyDerivation ke chc)
+                        masterSecret (.deriveKey masterKD "MasterSecret")]
+                    (.setMasterSecret (.-handshakeSession chc) masterSecret)
+                    (let [kd (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol chc))]
+                      (if (nil? kd)
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/INTERNAL_ERROR
+                                         (java-str
+                                           "Not supported key derivation: "
+                                           (.-negotiatedProtocol chc))))
+                          (set! (.-handshakeKeyDerivation chc)
+                                (.createKeyDerivation kd chc masterSecret))))))
+              nil))))))
+
+  (defclass ^:private ^:static ^:final RSAClientKeyExchangeConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [shc (cast ServerHandshakeContext context)
+            ^:mutable ^RSAKeyExchange$EphemeralRSAPossession rsaPossession nil
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions shc)]
+          (cond
+            (instance? RSAKeyExchange$EphemeralRSAPossession possession)
+              (do
+                (set! rsaPossession (cast RSAKeyExchange$EphemeralRSAPossession possession))
+                (break))
+            (instance? X509Authentication$X509Possession possession)
+              (set! x509Possession (cast X509Authentication$X509Possession possession))))
+        (when (and (nil? rsaPossession) (nil? x509Possession))
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         "No RSA possessions negotiated for client key exchange")))
+        (let [^PrivateKey privateKey (if (some? rsaPossession)
+                                         (.-popPrivateKey rsaPossession)
+                                         (.-popPrivateKey x509Possession))]
+          (when-not (.equals (.getAlgorithm privateKey) "RSA")
+            (throw (.fatal (.-conContext shc)
+                           Alert/ILLEGAL_PARAMETER
+                           "Not RSA private key for client key exchange")))
+          (let [ckem (RSAClientKeyExchangeMessage. shc message)]
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Consuming RSA ClientKeyExchange handshake message" ckem))
+            (let [^:mutable ^RSAKeyExchange$RSAPremasterSecret premaster nil]
+              (try
+                (set! premaster
+                      (RSAKeyExchange$RSAPremasterSecret/decode shc privateKey (.-encrypted ckem)))
+                (.add (.-handshakeCredentials shc) premaster)
+                (catch GeneralSecurityException gse
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/ILLEGAL_PARAMETER
+                                 "Cannot decode RSA premaster secret"
+                                 gse))))
+              (let [ke (SSLKeyExchange/valueOf (.-keyExchange (.-negotiatedCipherSuite shc))
+                                               (.-negotiatedProtocol shc))]
+                (if (nil? ke)
+                    (throw (.fatal (.-conContext shc)
+                                   Alert/INTERNAL_ERROR
+                                   "Not supported key exchange type"))
+                    (let [masterKD (.createKeyDerivation ke shc)
+                          masterSecret (.deriveKey masterKD "MasterSecret")]
+                      (.setMasterSecret (.-handshakeSession shc) masterSecret)
+                      (let [kd (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol shc))]
+                        (if (nil? kd)
+                            (throw (.fatal (.-conContext shc)
+                                           Alert/INTERNAL_ERROR
+                                           (java-str
+                                             "Not supported key derivation: "
+                                             (.-negotiatedProtocol shc))))
+                            (set! (.-handshakeKeyDerivation shc)
+                                  (.createKeyDerivation kd shc masterSecret))))))))))))))

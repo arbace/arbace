@@ -1,0 +1,466 @@
+;; Converted from overlay/jdk/java.base/sun/nio/ch/FileChannelImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io Closeable File FileDescriptor FileNotFoundException IOException)
+        '(java.nio ByteBuffer MappedByteBuffer)
+        '(java.nio.channels ClosedByInterruptException
+                            ClosedChannelException
+                            FileChannel
+                            FileChannel$MapMode
+                            FileLock
+                            FileLockInterruptionException
+                            NonReadableChannelException
+                            NonWritableChannelException
+                            ReadableByteChannel
+                            WritableByteChannel)
+        '(java.nio.file FileAlreadyExistsException
+                        FileSystemException
+                        LinkOption
+                        NoSuchFileException
+                        OpenOption
+                        Path
+                        StandardOpenOption)
+        '(java.util ArrayList List Objects Set)
+        '(jdk.internal.jrt HostFileChannels HostFileChannels$Mapping HostFiles))
+
+(defclass ^:public FileChannelImpl
+  :extends FileChannel
+
+  (field ^:private ^:static ^:final ^int TRANSFER_SIZE 8192)
+
+  (field ^:private ^:final ^FileDescriptor fd)
+
+  (field ^:private ^:final ^boolean writable)
+
+  (field ^:private ^:final ^boolean readable)
+
+  (field ^:private ^:final ^boolean append)
+
+  (field ^:private ^:final ^Closeable parent)
+
+  (field ^:private ^:final ^String path)
+
+  (field ^:private ^:final lockKey)
+
+  (field ^:private ^:final ^{:tag (List MappedByteBuffer)} mappings (ArrayList.))
+
+  (constructor ^:private [this ^FileDescriptor fd ^String path ^boolean readable ^boolean writable
+                          ^boolean append ^Closeable parent]
+    (set! (.-fd this) fd)
+    (set! (.-path this) path)
+    (set! (.-readable this) readable)
+    (set! (.-writable this) writable)
+    (set! (.-append this) append)
+    (set! (.-parent this) parent)
+    (set! (.-lockKey this) (HostFileChannels/lockKey fd path)))
+
+  (method ^:public ^:static open ^FileChannel [^FileDescriptor fd ^String path ^boolean readable
+                                               ^boolean writable ^boolean sync ^boolean direct
+                                               ^Closeable parent]
+    (FileChannelImpl. fd path readable writable false parent))
+
+  (method ^:public ^:static open ^FileChannel [^FileDescriptor fd ^String path ^boolean readable
+                                               ^boolean writable ^boolean append ^Closeable parent]
+    (FileChannelImpl. fd path readable writable append parent))
+
+  (method ^:public ^:static open :throws [IOException] ^FileChannel [^Path path
+                                                                     ^{:tag (Set (? extends OpenOption))} options]
+    (Objects/requireNonNull path "path")
+    (let [^:mutable read false
+          ^:mutable write false
+          ^:mutable appendMode false
+          ^:mutable truncate false
+          ^:mutable create false
+          ^:mutable createNew false
+          ^:mutable deleteOnClose false]
+      (for-each [^OpenOption o options]
+        (cond
+          (identical? o StandardOpenOption/READ) (set! read true)
+          (identical? o StandardOpenOption/WRITE) (set! write true)
+          (identical? o StandardOpenOption/APPEND) (do (set! appendMode true) (set! write true))
+          (identical? o StandardOpenOption/TRUNCATE_EXISTING) (set! truncate true)
+          (identical? o StandardOpenOption/CREATE) (set! create true)
+          (identical? o StandardOpenOption/CREATE_NEW) (set! createNew true)
+          (identical? o StandardOpenOption/DELETE_ON_CLOSE) (set! deleteOnClose true)
+          :else
+            (when-not (or (or (or (identical? o StandardOpenOption/SPARSE)
+                                  (identical? o StandardOpenOption/SYNC))
+                              (identical? o StandardOpenOption/DSYNC))
+                          (identical? o LinkOption/NOFOLLOW_LINKS))
+              (if (nil? o)
+                  (throw (NullPointerException.))
+                  (throw (UnsupportedOperationException. (java-str o " not supported")))))))
+      (when (and (not read) (not write)) (set! read true))
+      (when (and read appendMode) (throw (IllegalArgumentException. "READ + APPEND not allowed")))
+      (when (and appendMode truncate)
+        (throw (IllegalArgumentException. "APPEND + TRUNCATE_EXISTING not allowed")))
+      (let [name (.toString path)
+            f (File. name)
+            exists (.exists f)]
+        (when (and (and createNew write) exists) (throw (FileAlreadyExistsException. name)))
+        (when (and (not exists) (not (and write (or create createNew))))
+          (throw (NoSuchFileException. name)))
+        (let [^int mode (cond
+                          appendMode (if read HostFiles/READ_WRITE HostFiles/APPEND)
+                          write HostFiles/READ_WRITE
+                          :else HostFiles/READ)]
+          (let [^:mutable ^int h 0]
+            (try
+              (set! h (HostFiles/open name mode))
+              (catch FileNotFoundException x
+                (throw (FileSystemException. name nil (.getMessage x)))))
+            (let [fdObj (FileDescriptor.)]
+              (HostFiles/setHandle fdObj h)
+              (let [fc (FileChannelImpl. fdObj name read write appendMode nil)]
+                (when (and (and write truncate) (not appendMode)) (HostFiles/setLength h 0))
+                (when deleteOnClose (.deleteOnExit f))
+                fc)))))))
+
+  (method ^:private handle ^int [this] (HostFiles/handle fd))
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when-not (.isOpen this) (throw (ClosedChannelException.))))
+
+  (method ^:protected implCloseChannel :throws [IOException] ^void [this]
+    (when-not (not (.valid fd))
+      (let [^:mutable ^{:tag (List MappedByteBuffer)} ms nil]
+        (locking mappings (set! ms (ArrayList. mappings)) (.clear mappings))
+        (for-each [^MappedByteBuffer m ms] (try (.force m) (catch RuntimeException x)))
+        (for-each [^FileLock fl (HostFileChannels/removeLocks lockKey this)]
+          (locking fl (when (.isValid fl) (.invalidate (cast FileLockImpl fl)))))
+        (if (some? parent)
+            (.close parent)
+            (let [h (.handle this)] (HostFiles/setHandle fd -1) (when (> h 2) (HostFiles/close h)))))))
+
+  (method ^:private readInto :throws [IOException] ^int [this ^ByteBuffer dst ^long pos]
+    (when (.isReadOnly dst) (throw (IllegalArgumentException. "Read-only buffer")))
+    (let [^:mutable rem (.remaining dst)]
+      (if (== rem 0)
+          0
+          (let [^:mutable ^byte/1 b nil
+                ^:mutable ^int off 0
+                direct (.hasArray dst)]
+            (if direct
+                (do
+                  (set! b (.array dst))
+                  (set! off (unchecked-add-int (.arrayOffset dst) (.position dst))))
+                (do
+                  (set! b (new byte/1 (Math/min rem TRANSFER_SIZE)))
+                  (set! off 0)
+                  (set! rem (alength b))))
+            (let [^int n (if (< pos 0)
+                             (HostFiles/read (.handle this) b off rem)
+                             (HostFileChannels/pread fd pos b off rem))]
+              (when (> n 0)
+                (if direct (.position dst (unchecked-add-int (.position dst) n)) (.put dst b 0 n)))
+              n)))))
+
+  (method ^:private writeFrom :throws [IOException] ^int [this ^ByteBuffer src ^long pos]
+    (let [rem (.remaining src)]
+      (if (== rem 0)
+          0
+          (let [^:mutable ^byte/1 b nil
+                ^:mutable ^int off 0]
+            (if (.hasArray src)
+                (do
+                  (set! b (.array src))
+                  (set! off (unchecked-add-int (.arrayOffset src) (.position src))))
+                (do (set! b (new byte/1 rem)) (set! off 0) (.get (.duplicate src) b)))
+            (if (< pos 0)
+                (HostFiles/write (.handle this) b off rem)
+                (HostFileChannels/pwrite fd pos b off rem))
+            (.position src (unchecked-add-int (.position src) rem))
+            rem))))
+
+  (method ^:public read :throws [IOException] ^int [this ^ByteBuffer dst]
+    (Objects/requireNonNull dst)
+    (.ensureOpen this)
+    (when-not readable (throw (NonReadableChannelException.)))
+    (locking fd
+      (let [^:mutable ^int n 0]
+        (try
+          (.begin this)
+          (if (not (.isOpen this)) 0 (do (set! n (.readInto this dst -1)) n))
+          (finally (.end this (> n 0)))))))
+
+  (method ^:public read :throws [IOException] ^long [this ^ByteBuffer/1 dsts ^int offset ^int length]
+    (Objects/checkFromIndexSize offset length (alength dsts))
+    (.ensureOpen this)
+    (when-not readable (throw (NonReadableChannelException.)))
+    (locking fd
+      (let [^:mutable total 0]
+        (try
+          (.begin this)
+          (if (not (.isOpen this))
+              0
+              (do
+                (loop [^int i offset]
+                  (when (< i (unchecked-add-int offset length))
+                    (let [dst (aget dsts i)
+                          want (.remaining dst)]
+                      (if (== want 0)
+                          (recur (unchecked-inc-int i))
+                          (let [n (.readInto this dst -1)]
+                            (when (< n 0) (return (if (== total 0) -1 total)))
+                            (set! total (unchecked-add total n))
+                            (when-not (< n want) (recur (unchecked-inc-int i))))))))
+                total))
+          (finally (.end this (> total 0)))))))
+
+  (method ^:public write :throws [IOException] ^int [this ^ByteBuffer src]
+    (Objects/requireNonNull src)
+    (.ensureOpen this)
+    (when-not writable (throw (NonWritableChannelException.)))
+    (locking fd
+      (let [^:mutable ^int n 0]
+        (try
+          (.begin this)
+          (if (not (.isOpen this)) 0 (do (set! n (.writeFrom this src -1)) n))
+          (finally (.end this (> n 0)))))))
+
+  (method ^:public write :throws [IOException] ^long [this ^ByteBuffer/1 srcs ^int offset
+                                                      ^int length]
+    (Objects/checkFromIndexSize offset length (alength srcs))
+    (.ensureOpen this)
+    (when-not writable (throw (NonWritableChannelException.)))
+    (locking fd
+      (let [^:mutable total 0]
+        (try
+          (.begin this)
+          (if (not (.isOpen this))
+              0
+              (do
+                (loop [^int i offset]
+                  (when (< i (unchecked-add-int offset length))
+                    (set! total (unchecked-add total (.writeFrom this (aget srcs i) -1)))
+                    (recur (unchecked-inc-int i))))
+                total))
+          (finally (.end this (> total 0)))))))
+
+  (method ^:public position :throws [IOException] ^long [this]
+    (.ensureOpen this)
+    (locking fd
+      (let [^:mutable p -1]
+        (try
+          (.begin this)
+          (if (not (.isOpen this))
+              0
+              (do
+                (set! p
+                      (if append
+                          (HostFiles/length (.handle this))
+                          (HostFiles/position (.handle this))))
+                p))
+          (finally (.end this (> p -1)))))))
+
+  (method ^:public position :throws [IOException] ^FileChannel [this ^long newPosition]
+    (.ensureOpen this)
+    (when (< newPosition 0) (throw (IllegalArgumentException.)))
+    (locking fd
+      (let [^:mutable done false]
+        (try
+          (.begin this)
+          (when-not (not (.isOpen this))
+            (HostFiles/seek (.handle this) newPosition)
+            (set! done true)
+            this)
+          (finally (.end this done))))))
+
+  (method ^:public size :throws [IOException] ^long [this]
+    (.ensureOpen this)
+    (locking fd
+      (let [^:mutable s -1]
+        (try
+          (.begin this)
+          (if (not (.isOpen this)) -1 (do (set! s (HostFiles/length (.handle this))) s))
+          (finally (.end this (> s -1)))))))
+
+  (method available :throws [IOException] ^int [this]
+    (.ensureOpen this)
+    (locking fd (HostFiles/available (.handle this))))
+
+  (method isOther :throws [IOException] ^boolean [this]
+    (.ensureOpen this)
+    (and (nil? path) (<= (.handle this) 2)))
+
+  (method ^:public truncate :throws [IOException] ^FileChannel [this ^long newSize]
+    (.ensureOpen this)
+    (when (< newSize 0) (throw (IllegalArgumentException. "Negative size")))
+    (when-not writable (throw (NonWritableChannelException.)))
+    (locking fd
+      (let [^:mutable done false]
+        (try
+          (.begin this)
+          (when-not (not (.isOpen this))
+            (let [h (.handle this)
+                  size (HostFiles/length h)
+                  ^:mutable p (HostFiles/position h)]
+              (when (< newSize size) (HostFiles/setLength h newSize))
+              (when (> p newSize) (set! p newSize))
+              (HostFiles/seek h p)
+              (set! done true)
+              this))
+          (finally (.end this done))))))
+
+  (method ^:public force :throws [IOException] ^void [this ^boolean metaData]
+    (.ensureOpen this))
+
+  (method ^:public transferTo :throws [IOException] ^long [this ^long position ^long count
+                                                           ^WritableByteChannel target]
+    (.ensureOpen this)
+    (when-not (.isOpen target) (throw (ClosedChannelException.)))
+    (when-not readable (throw (NonReadableChannelException.)))
+    (when (and (instance? FileChannelImpl target) (not (.-writable (cast FileChannelImpl target))))
+      (throw (NonWritableChannelException.)))
+    (when (or (< position 0) (< count 0)) (throw (IllegalArgumentException.)))
+    (let [sz (.size this)]
+      (if (> position sz)
+          0
+          (let [remaining (Math/min count (unchecked-subtract sz position))
+                ^:mutable tw 0
+                b (new byte/1 (unchecked-int (Math/min remaining TRANSFER_SIZE)))]
+            (try
+              (while (< tw remaining)
+                (let [want (unchecked-int (Math/min (unchecked-subtract remaining tw) (alength b)))
+                      n (HostFileChannels/pread fd (unchecked-add position tw) b 0 want)]
+                  (when (<= n 0) (break))
+                  (let [bb (ByteBuffer/wrap b 0 n)
+                        ^:mutable ^int w 0]
+                    (while (.hasRemaining bb)
+                      (let [k (.write target bb)]
+                        (when (<= k 0) (break))
+                        (set! w (unchecked-add-int w k))))
+                    (set! tw (unchecked-add tw w))
+                    (when (< w n) (break)))))
+              tw
+              (catch IOException x (if (> tw 0) tw (throw x))))))))
+
+  (method ^:public transferFrom :throws [IOException] ^long [this ^ReadableByteChannel src
+                                                             ^long position ^long count]
+    (.ensureOpen this)
+    (when-not (.isOpen src) (throw (ClosedChannelException.)))
+    (when-instance [^FileChannelImpl fci src]
+      (when-not (.-readable fci) (throw (NonReadableChannelException.))))
+    (when-not writable (throw (NonWritableChannelException.)))
+    (when (or (< position 0) (< count 0)) (throw (IllegalArgumentException.)))
+    (if (> position (.size this))
+        0
+        (let [^:mutable tw 0
+              bb (ByteBuffer/allocate (unchecked-int (Math/min (Math/max count 0) TRANSFER_SIZE)))]
+          (try
+            (while (< tw count)
+              (.clear bb)
+              (.limit bb (unchecked-int (Math/min (unchecked-subtract count tw) (.capacity bb))))
+              (let [n (.read src bb)]
+                (when (<= n 0) (break))
+                (.flip bb)
+                (HostFileChannels/pwrite fd (unchecked-add position tw) (.array bb) 0 n)
+                (set! tw (unchecked-add tw n))))
+            tw
+            (catch IOException x (if (> tw 0) tw (throw x)))))))
+
+  (method ^:public read :throws [IOException] ^int [this ^ByteBuffer dst ^long position]
+    (when (nil? dst) (throw (NullPointerException.)))
+    (when (< position 0) (throw (IllegalArgumentException. "Negative position")))
+    (.ensureOpen this)
+    (when-not readable (throw (NonReadableChannelException.)))
+    (let [^:mutable ^int n 0]
+      (try
+        (.begin this)
+        (if (not (.isOpen this)) -1 (do (set! n (.readInto this dst position)) n))
+        (finally (.end this (> n 0))))))
+
+  (method ^:public write :throws [IOException] ^int [this ^ByteBuffer src ^long position]
+    (when (nil? src) (throw (NullPointerException.)))
+    (when (< position 0) (throw (IllegalArgumentException. "Negative position")))
+    (.ensureOpen this)
+    (when-not writable (throw (NonWritableChannelException.)))
+    (let [^:mutable ^int n 0]
+      (try
+        (.begin this)
+        (if (not (.isOpen this)) -1 (do (set! n (.writeFrom this src position)) n))
+        (finally (.end this (> n 0))))))
+
+  (method ^:public map :throws [IOException] ^MappedByteBuffer [this ^FileChannel$MapMode mode
+                                                                ^long position ^long size]
+    (when (> size Integer/MAX_VALUE)
+      (throw (IllegalArgumentException. "Size exceeds Integer.MAX_VALUE")))
+    (.ensureOpen this)
+    (when (nil? mode) (throw (NullPointerException. "Mode is null")))
+    (when (< position 0) (throw (IllegalArgumentException. "Negative position")))
+    (when (< size 0) (throw (IllegalArgumentException. "Negative size")))
+    (when (< (unchecked-add position size) 0)
+      (throw (IllegalArgumentException. "Position + size overflow")))
+    (let [^:mutable ^boolean readOnly false
+          ^:mutable ^boolean writeBack false]
+      (cond
+        (identical? mode FileChannel$MapMode/READ_ONLY)
+          (do (set! readOnly true) (set! writeBack false))
+        (identical? mode FileChannel$MapMode/READ_WRITE)
+          (do (set! readOnly false) (set! writeBack true))
+        (identical? mode FileChannel$MapMode/PRIVATE)
+          (do (set! readOnly false) (set! writeBack false))
+        :else (throw (UnsupportedOperationException.)))
+      (when (and (not readOnly) (not writable)) (throw (NonWritableChannelException.)))
+      (when-not readable (throw (NonReadableChannelException.)))
+      (let [contents (new byte/1 (unchecked-int size))
+            ^:mutable done false]
+        (try
+          (.begin this)
+          (when-not (.isOpen this) (return nil))
+          (locking fd
+            (let [h (.handle this)
+                  filesize (HostFiles/length h)]
+              (when (< filesize (unchecked-add position size))
+                (when-not writable
+                  (throw (IOException.
+                           "Channel not open for writing - cannot extend file to required size")))
+                (HostFiles/setLength h (unchecked-add position size)))
+              (let [^:mutable ^int got 0]
+                (while (< got size)
+                  (let [n (HostFileChannels/pread
+                            fd
+                            (unchecked-add position got)
+                            contents
+                            got
+                            (unchecked-subtract-int (unchecked-int size) got))]
+                    (when (<= n 0) (break))
+                    (set! got (unchecked-add-int got n)))))))
+          (set! done true)
+          (finally (.end this done)))
+        (let [m (HostFileChannels$Mapping. fd path position writeBack)
+              mbb (HostFileChannels/map contents m readOnly)]
+          (when (and writeBack (> size 0)) (locking mappings (.add mappings mbb)))
+          mbb))))
+
+  (method ^:public lock :throws [IOException] ^FileLock [this ^long position ^:mutable ^long size
+                                                         ^boolean shared]
+    (.ensureOpen this)
+    (when (and shared (not readable)) (throw (NonReadableChannelException.)))
+    (when (and (not shared) (not writable)) (throw (NonWritableChannelException.)))
+    (when (== size 0) (set! size (unchecked-subtract Long/MAX_VALUE (Math/max 0 position))))
+    (let [fli (FileLockImpl. this position size shared)]
+      (HostFileChannels/addLock lockKey fli)
+      (let [^:mutable completed false]
+        (try
+          (.begin this)
+          (set! completed (.isOpen this))
+          (finally
+            (when-not completed (HostFileChannels/removeLock lockKey fli))
+            (try
+              (.end this completed)
+              (catch ClosedByInterruptException e (throw (FileLockInterruptionException.))))))
+        fli)))
+
+  (method ^:public tryLock :throws [IOException] ^FileLock [this ^long position ^:mutable ^long size
+                                                            ^boolean shared]
+    (.ensureOpen this)
+    (when (and shared (not readable)) (throw (NonReadableChannelException.)))
+    (when (and (not shared) (not writable)) (throw (NonWritableChannelException.)))
+    (when (== size 0) (set! size (unchecked-subtract Long/MAX_VALUE (Math/max 0 position))))
+    (let [fli (FileLockImpl. this position size shared)] (HostFileChannels/addLock lockKey fli) fli))
+
+  (method release :throws [IOException] ^void [this ^FileLockImpl fli]
+    (.ensureOpen this)
+    (HostFileChannels/removeLock lockKey fli)))

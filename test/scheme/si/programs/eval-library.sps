@@ -1,0 +1,20 @@
+;; SCS30 (SC94 (b)): a program's own library, compiled, installed in the expander: `eval` in an environment that names it sees
+;; the library's one instance (its state, its record type, its macro), not a second one expanded from the source
+;; (doc/scheme/SCHEME-SURVEY.md, "As built: SCS30"). The libraries lead the file (Larceny's layout, SCS8 (b)).
+(library (scs30 counter)
+  (export bump! current make-box box? box-value twice)
+  (import (rnrs))
+  (define n 0)
+  (define (bump!) (set! n (+ n 1)) n)
+  (define (current) n)
+  (define-record-type box (fields value))
+  (define-syntax twice (syntax-rules () [(_ e) (begin e e)])))
+(import (rnrs) (rnrs eval) (scs30 counter))
+(define env (environment '(rnrs) '(scs30 counter)))
+(bump!) (bump!)
+(write (list (current) (eval '(current) env))) (newline)
+(eval '(bump!) env)
+(write (list (current) (eval '(current) env))) (newline)
+(write (eval '(twice (bump!)) env)) (newline)
+(write (current)) (newline)
+(write (list (box? (eval '(make-box 1) env)) (box-value (eval '(make-box 7) env)) (box? (make-box 2)))) (newline)

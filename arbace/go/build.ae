@@ -37,6 +37,37 @@
 
 (defn- oa [xs] (object-array xs))
 
+(def ^:private code-frames?
+  "Whether goi's back end takes the frames' data (CodeFrame, AtLineR: GOI-SPEC.md, \"Since v1:
+  frames\"); an executable built before it does not."
+  (delay (try (op "CodeFrame" nil "" "" 0 0 false) true (catch Throwable _ false))))
+
+(def ^:private at-line-i?
+  "Whether goi's back end has AtLineI (mode :full's positions within a statement)."
+  (delay (try (op "AtLineI" nil 0) true (catch Throwable _ false))))
+
+(def ^:dynamic *stmt-line*
+  "The line the statement being built stores in its frame (body-node's), or nil."
+  nil)
+
+(defn- at-index-line
+  "Index operand node x of index or slice node n, evaluated at n's line (its [, mode :full's)
+  when that is not its statement's: gc's line of the bounds check's panic."
+  [x n]
+  (let [l (long (or (:line n) 0))]
+    (if (and x (pos? l) *stmt-line* (pos? (long *stmt-line*)) (not= l (long *stmt-line*)) @code-frames? @at-line-i?)
+      (op "AtLineI" x l)
+      x)))
+
+(def ^:private frame-fn*
+  (delay (try (op "FrameFn" nil) true (catch Throwable _ false))))
+
+(defn frame-fn?
+  "Whether goi's back end has FrameFn (the initializers' frames naming each its own file: GOI-SPEC.md,
+  \"Since v1: frames\"); an executable built before it has not."
+  []
+  @frame-fn*)
+
 (defn unsupported!
   "Ends the build of a form goi does not support yet (§3.4): what, the milestone that brings it."
   [what gr]
@@ -479,7 +510,14 @@
     (.put ^IdentityHashMap (:locs *fn*) x l)
     l))
 
-(defn- temp! [k] (new-slot! k))
+(defn- temp!
+  "A new temporary slot of kind k; one of R or S is logged for the statement being built, which clears it
+  when it has run (liveness: a temporary holds what no variable does)."
+  [k]
+  (let [s (new-slot! k)]
+    (when-let [lg (:tmp-log *fn*)]
+      (when (and (#{:R :S} k)) (vswap! lg conj [k s])))
+    s))
 
 ;;; Kinds of nodes
 
@@ -797,11 +835,11 @@ GR9a)."
   (let [x (:x n) u (t/under (:type x))]
     (cond
       (and (vector? u) (= :slice (nth u 0)))
-      (op "SliceElemP" (exk x :R) (exk (:index n) :I) (desc (nth u 1)) (uidx? (:index n)))
+      (op "SliceElemP" (exk x :R) (at-index-line (exk (:index n) :I) n) (desc (nth u 1)) (uidx? (:index n)))
       (and (vector? u) (= :array (nth u 0)))
-      (op "ArrayElemP" (value-place x) (exk (:index n) :I) (desc (:type x)) (uidx? (:index n)))
+      (op "ArrayElemP" (value-place x) (at-index-line (exk (:index n) :I) n) (desc (:type x)) (uidx? (:index n)))
       (and (vector? u) (= :pointer (nth u 0)))
-      (op "ArrayElemP" (op "DerefP" (exk x :R)) (exk (:index n) :I) (desc (nth u 1)) (uidx? (:index n)))
+      (op "ArrayElemP" (op "DerefP" (exk x :R)) (at-index-line (exk (:index n) :I) n) (desc (nth u 1)) (uidx? (:index n)))
       :else (unsupported! (str "indexing " (tstr (:type x))) "GR3"))))
 
 (defn place
@@ -937,13 +975,15 @@ GR9a)."
          :convert-iface [:R (iface-content (ex (:x n) (:type (:x n))) (:type (:x n)))]
          :field (load-p (field-place n) (:type n))
          :index (if (t/string-type? (:type (:x n)))
-                  [:I (op "IndexS" (exk (:x n) :S) (exk (:index n) :I) (uidx? (:index n)))]
+                  [:I (op "IndexS" (exk (:x n) :S) (at-index-line (exk (:index n) :I) n) (uidx? (:index n)))]
                   (load-p (index-place n) (:type n)))
          :map-index (let [m (:x n) mt (:type m) [_ K V] (t/under mt)
                           kn (elem-node (:key n) K)]
                       [(kind V) (op (str "MapGet" (name (kind V))) (exk m :R) kn (desc mt))])
          :slice (let [x (:x n) u (t/under (:type x))
                       [lo hi mx] (map #(when % (exk % :I)) (concat (:indexes n) (repeat nil)))
+                      ;; the first bound evaluated at the expression's line (at-index-line)
+                      [lo hi mx] (cond lo [(at-index-line lo n) hi mx] hi [lo (at-index-line hi n) mx] :else [lo hi mx])
                       um (uidx-mask (:indexes n))]
                   (cond
                     (t/string-type? (:type x)) [:S (op "SliceString" (exk x :S) lo hi um)]
@@ -995,7 +1035,7 @@ GR9a)."
 (defn- arg-setter [[k s] node]
   (op (case k :I "ArgI" :F "ArgF" :S "ArgS" :R "ArgR") node (long s)))
 
-(declare error-type? compiled-iface?)
+(declare error-type? compiled-iface? kill-arg with-temp-clears)
 
 (defn- mem-converted?
   "Whether a value of type ty differs in Go memory from a frame: a function (a closure as a Go
@@ -1018,7 +1058,7 @@ GR9a)."
   (let [[_ ps _ variadic] sig
         mem-node (if cmp mem-node (fn [kn ty] (as-kind kn (kind ty))))
         nfix (if variadic (dec (count ps)) (count ps))
-        fixed (mapv (fn [a p] (mem-node (ex a p) p)) (take nfix args) ps)]
+        fixed (mapv (fn [a p] (mem-node (kill-arg (ex a p) a) p)) (take nfix args) ps)]
     (if-not variadic
       fixed
       (let [st (last ps)
@@ -1369,9 +1409,13 @@ GR9a)."
                 (assoc sel :panicwrap (str "value method " (:pkg-name i) "." (:name i) "." (e/o (:obj r) :name)
                                            " called using nil *" (:name i) " pointer")))
               sel)]
-    (build-code {:op :func :recv rcv :recv-type D :params params :results (mapv (fn [t] {:type t}) (nth sig 2))
-                 :sig sig :body (thunk-body sel params sig)}
-                nm [])))
+    (let [code (build-code {:op :func :recv rcv :recv-type D :params params :results (mapv (fn [t] {:type t}) (nth sig 2))
+                            :sig sig :body (thunk-body sel params sig)}
+                           nm [])]
+      ;; a wrapper's frames, which traces skip (GOI-SPEC.md, "Since v1: frames")
+      (when @code-frames?
+        (op "CodeWrapper" code))
+      code)))
 
 (defn- method-expr-node
   "T.M (a method expression): a function of the receiver first, a thunk (§4.6)."
@@ -1552,10 +1596,66 @@ GR9a)."
       :S [:S (op "AssertS" xr d iname)]
       :R [:R (op "AssertR" xr d iname)])))
 
+;;; //go:uintptrescapes (GOI-SPEC.md, "As built: liveness")
+;;;
+;;; An argument uintptr(p) of a call of a function with the pragma keeps the pointer p alive until the call
+;;; returns (gc's escape analysis makes it escape). The pointer is held in a slot of the caller's frame (a
+;;; deferred or go call's: also in its own frame) for the call, cleared when it returns.
+
+(defn- ptr-conv?
+  "Whether argument node a is a conversion of an unsafe.Pointer to a uintptr."
+  [a]
+  (and (= :conv (:op a)) (not= :constant (:mode a)) (:x a) (not (:kept a))
+       (= :uintptr (basic-of (:to a))) (= :unsafe-pointer (basic-of (:type (:x a))))))
+
+(defn- call-escapes?
+  "Whether call n is of a function or method with the pragma //go:uintptrescapes."
+  [n]
+  (let [callee (:callee n)
+        o (case (:kind n)
+            :static (:obj callee)
+            :closure (when (= :func (:op callee)) (:obj callee))
+            :method (:method callee)
+            nil)]
+    (boolean (and o (e/obj? o) (e/o o :uintptrescapes)))))
+
+(defn- kept-arg
+  "Argument node a (a pointer's conversion) with the pointer taken from caller slot s."
+  [a s]
+  (assoc a :kept true :x {:op ::node :k :R :node (local-node :R s) :type (:type (:x a)) :mode :value}))
+
+(declare call-node* slots-clear)
+
+(defn- keep-call
+  "Call n of a function with //go:uintptrescapes: its pointer conversions' operands are held in slots
+  during the call; [k node] or {:t :temps} as call-node*."
+  [n mode]
+  (let [args (vec (:args n))
+        idx (vec (keep-indexed (fn [i a] (when (ptr-conv? a) i)) args))]
+    (if (empty? idx)
+      (call-node* n mode)
+      (let [slots (mapv (fn [_] (temp! :R)) idx)
+            sets (mapv (fn [i s] (set-slot :R s (exk (:x (nth args i)) :R))) idx slots)
+            args2 (reduce (fn [as [i s]] (assoc as i (kept-arg (nth args i) s))) args (map vector idx slots))
+            r (call-node* (assoc n :args args2) mode)
+            clear (slots-clear slots [] [])
+            pre (op "StmtT" (op "Seq" (oa sets) (oa [])))]
+        (if (map? r)
+          ;; a new map: assoc over a func-valued key compares the old and new funcs, which Go cannot
+          {:t (op "ThenT" pre (op "ThenT" (:t r) (op "StmtT" clear))) :temps (:temps r)}
+          (let [[k nd] r
+                tmp (temp! k)
+                seqn (op "Seq" (oa [(set-slot k tmp nd) clear]) (oa []))]
+            [k (op (case k :I "ThenI" :F "ThenF" :S "ThenS" :R "ThenR") (op "ThenT" pre (op "StmtT" seqn)) (local-node k tmp))]))))))
+
 (defn call-node
   "[kind node] of a call of one result (mode :multi, or no result: {:t T :temps})."
   ([n] (call-node n nil))
-  ([n mode]
+  ([n mode] (if (call-escapes? n) (keep-call n mode) (call-node* n mode))))
+
+(defn- call-node*
+  [n mode]
+  (do
    (let [callee (:callee n) args (:args n)]
      (case (:kind n)
        :builtin (builtin n mode)
@@ -1868,6 +1968,206 @@ GR9a)."
             (let [[evals ts] (temps-of vals)]
               (op "Seq" (oa (concat evals (map target objs ts))) (oa [])))))))))
 
+;;; Liveness (GOI-SPEC.md, "As built: liveness")
+;;;
+;;; gc's collector sees a function's variables only up to their last use; goi's frame slots live
+;;; to the call's end. A plan made before a function's body is built (plan-fn) names, per
+;;; statement, the variables whose last use it is: the statement's node is followed by a
+;;; ClearSlots of their slots, and an argument that holds their only references in a simple
+;;; statement clears them as it is evaluated (Kill: the value moves into the callee's frame).
+;;; Cells (the variables in Go memory) are cleared in their C slot: the closures and pointers
+;;; that hold them keep them. A function with a goto is not planned.
+
+(def ^:private live-off? (delay (= "0" (System/getenv "GOI_LIVENESS"))))
+
+(def ^:private clear-op?
+  "Whether goi's back end has ClearSlots, KillR and KillS (an older executable has not: the slots are
+  then set by SetR and SetS, and no argument moves)."
+  (delay (try (op "ClearSlots" (oa []) (oa []) (oa [])) true (catch Throwable _ false))))
+
+(def ^:private ref-skip
+  #{:form :type :obj :method :field :val :to :recv-type :iface :sig :tag-type :refs :params :results :var :objs :goi/label :goi/orig})
+
+(defn- walk-objs
+  "Calls (f obj) for each object that tree x names: a node's :obj, a declaration's :objs, a clause's :var."
+  [f x]
+  (cond
+    (map? x) (do (when-let [o (:obj x)] (f o))
+                 (doseq [o (:objs x)] (when o (f o)))
+                 (when-let [o (:var x)] (f o))
+                 (doseq [[k v] x :when (not (contains? ref-skip k))] (walk-objs f v)))
+    (sequential? x) (doseq [y x] (walk-objs f y))
+    :else nil))
+
+(defn- refs-of
+  "The references in tree x to the candidates cands: an IdentityHashMap object -> count."
+  ^IdentityHashMap [^IdentityHashMap cands x]
+  (let [m (IdentityHashMap.)]
+    (walk-objs (fn [o] (when (.containsKey cands o) (.put m o (inc (long (or (.get m o) 0)))))) x)
+    m))
+
+(defn- id-set ^IdentityHashMap [xs]
+  (let [m (IdentityHashMap.)] (doseq [x xs] (when x (.put m x true))) m))
+
+(defn- has-goto?
+  [body]
+  (letfn [(walk [x]
+            (cond
+              (map? x) (or (= :goto (:op x))
+                           (some (fn [[k v]] (and (not (contains? ref-skip k)) (walk v))) x))
+              (sequential? x) (some walk x)
+              :else false))]
+    (boolean (walk body))))
+
+(defn- candidates
+  "The variables of function tree that liveness may clear: its parameters, receiver and locals held in
+  an R or S slot or a cell, not its named results."
+  [tree]
+  (let [cands (IdentityHashMap.)
+        res (id-set (keep :obj (:results tree)))
+        cand? (fn [o]
+                (and (some? o) (not (.containsKey res o)) (= :var (e/o o :kind)) (e/o o :local?)
+                     (let [ty (e/o o :type)]
+                       (and ty (or (cell-var? o)
+                                   (contains? #{:R :S} (try (kind ty) (catch Throwable _ nil))))))))]
+    (walk-objs (fn [o] (when (cand? o) (.put cands o true))) (:body tree))
+    (doseq [p (:params tree)] (when (and p (cand? p)) (.put cands p true)))
+    (when-let [x (:recv tree)] (when (cand? x) (.put cands x true)))
+    cands))
+
+(def ^:private simple-ops #{:expr :assign :op-assign :incdec :return :send})
+(def ^:private terminal-ops #{:return :break :continue :goto :fallthrough})
+
+(declare plan-list)
+
+(defn- plan-block
+  "The plan of block b, the statement whose last use of di is in it: its let's declared variables and the
+  dead outer ones; a variable only its declarations use is cleared once they ran (:start)."
+  [^IdentityHashMap plan cands b di]
+  (let [decl-objs (when (and (:let b) (not (:let-type b))) (mapcat :objs (:decls b)))
+        dead (id-set (concat di decl-objs))
+        stmts (:stmts b)
+        srefs (refs-of cands stmts)
+        drefs (refs-of cands (:decls b))
+        start (vec (for [x (.keySet dead) :when (and (.containsKey drefs x) (not (.containsKey srefs x)))] x))]
+    (when (seq start) (.put plan b (assoc (or (.get plan b) {}) :start start)))
+    (plan-list plan cands stmts dead)))
+
+(defn- plan-stmt
+  "Plans statement s, the last use of the variables di (a vector): its sub-lists, and its entry."
+  [^IdentityHashMap plan cands s di]
+  (let [dset (id-set di)
+        sub (fn [stmts extra loop?] (plan-list plan cands stmts (id-set (concat (when-not loop? di) extra))))]
+    (case (:op s)
+      :block (plan-block plan cands s di)
+      :if (do (when (:then s) (plan-list plan cands [(:then s)] dset))
+              (when (:else s) (plan-list plan cands [(:else s)] dset)))
+      (:for :range) (sub (:body s) nil true)
+      :switch (doseq [cl (:clauses s)] (sub (:body cl) nil false))
+      :type-switch (doseq [cl (:clauses s)] (sub (:body cl) (when (:var cl) [(:var cl)]) false))
+      :select (doseq [cl (:clauses s)]
+                (sub (:body cl) (when (= :decl (:op (:comm cl))) (:objs (:comm cl))) false))
+      :label (when (:stmt s) (plan-list plan cands [(:stmt s)] dset))
+      nil)
+    (when (seq di)
+      (let [simple? (contains? simple-ops (:op s))
+            refs (when simple? (refs-of cands s))
+            e (cond-> {}
+                (not (contains? terminal-ops (:op s))) (assoc :after di)
+                simple? (assoc :moves (let [m (IdentityHashMap.)] (doseq [x di] (.put m x (long (.get refs x)))) m)))]
+        ;; a statement can be keyed twice (a label's statement): the entries merge
+        (.put plan s (merge (.get plan s) e))))))
+
+(defn- plan-list
+  "Plans a statement list: for each variable of dead (an IdentityHashMap) the statement of its last use."
+  [^IdentityHashMap plan cands stmts ^IdentityHashMap dead]
+  (let [stmts (vec stmts)
+        n (count stmts)
+        last-at (IdentityHashMap.)]
+    (when-not (.isEmpty dead)
+      (dotimes [i n]
+        (doseq [x (.keySet (refs-of cands (nth stmts i)))]
+          (when (.containsKey dead x) (.put last-at x i)))))
+    (dotimes [i n]
+      (plan-stmt plan cands (nth stmts i)
+                 (vec (for [x (.keySet last-at) :when (= i (long (.get last-at x)))] x))))))
+
+(declare plan-fn*)
+
+(defn plan-fn
+  "The liveness plan of function tree (an IdentityHashMap statement -> entry), nil when there is none to make:
+  the function has a goto, or liveness is off (GOI_LIVENESS=0), or its tree is not of the shape the plan reads."
+  [tree]
+  (try (plan-fn* tree)
+       (catch Throwable ex
+         (when (System/getenv "GOI_LIVENESS_TRACE") (binding [*out* *err*] (println "liveness: no plan:" (str ex))))
+         nil)))
+
+(defn- plan-fn*
+  [tree]
+  (when-not (or @live-off? (has-goto? (:body tree)))
+    (let [cands (candidates tree)]
+      (when-not (.isEmpty cands)
+        (let [plan (IdentityHashMap.)
+              ps (id-set (concat (:params tree) [(:recv tree)]))
+              ;; parameters the body never mentions are dead from the start
+              body (:body tree)
+              brefs (refs-of cands body)
+              unused (vec (for [x (.keySet ps) :when (and (.containsKey cands x) (not (.containsKey brefs x)))] x))
+              used (id-set (for [x (.keySet ps) :when (.containsKey brefs x)] x))]
+          (when (seq unused) (.put plan body {:start unused}))
+          (plan-list plan cands [body] used)
+          (when (System/getenv "GOI_LIVENESS_TRACE")
+            (binding [*out* *err*]
+              (println "liveness" (:name tree) (str (:line tree)))
+              (doseq [[s e] (sort-by (fn [[s _]] (long (or (:line s) 0))) (map (fn [[k v]] [k v]) plan))]
+                (println "  " (:op s) (:line s) "after" (mapv #(e/o % :name) (:after e)) "start" (mapv #(e/o % :name) (:start e))
+                         "moves" (when-let [m (:moves e)] (vec (map #(e/o % :name) (.keySet ^IdentityHashMap m))))))))
+          plan)))))
+
+(defn- slots-clear
+  "The statement clearing R slots rs, S slots ss and C slots cs."
+  [rs ss cs]
+  (if @clear-op?
+    (op "ClearSlots" (oa rs) (oa ss) (oa cs))
+    (op "Seq" (oa (concat (map #(op "SetR" % (op "ConstR" nil)) rs) (map #(op "SetS" % (op "ConstS" "")) ss))) (oa []))))
+
+(defn- clear-slots-of
+  "The node clearing the slots of objects objs (those with a slot of R or S kind, or a cell), or nil."
+  [objs]
+  (let [rs (volatile! []) ss (volatile! []) cs (volatile! [])]
+    (doseq [x objs]
+      (when-let [l (.get ^IdentityHashMap (:locs *fn*) x)]
+        (case (nth l 0)
+          :slot (case (nth l 1) :R (vswap! rs conj (long (nth l 2))) :S (vswap! ss conj (long (nth l 2))) nil)
+          :cell (vswap! cs conj (long (nth l 1)))
+          nil)))
+    (when (or (seq @rs) (seq @ss) (seq @cs))
+      (slots-clear @rs @ss @cs))))
+
+(defn- kill-arg
+  "Node [k n] of an argument of the current simple statement, clearing the variables whose every reference
+  in the statement it holds as it is evaluated (the value then lives in the callee's frame alone)."
+  [[k n :as kn] a]
+  (let [^IdentityHashMap moves (:moves *fn*)]
+    (if (and moves @clear-op? (#{:R :S} k) (not (.isEmpty moves)))
+      (let [refs (refs-of moves a)
+            xs (vec (for [x (.keySet refs) :when (= (long (.get refs x)) (long (.get moves x)))] x))]
+        (if (seq xs)
+          (let [rs (volatile! []) ss (volatile! []) cs (volatile! [])]
+            (doseq [x xs]
+              (when-let [l (.get ^IdentityHashMap (:locs *fn*) x)]
+                (case (nth l 0)
+                  :slot (case (nth l 1) :R (vswap! rs conj (long (nth l 2))) :S (vswap! ss conj (long (nth l 2))) nil)
+                  :cell (vswap! cs conj (long (nth l 1)))
+                  nil)))
+            (if (or (seq @rs) (seq @ss) (seq @cs))
+              (do (doseq [x xs] (.remove moves x))
+                  [k (op (if (= k :R) "KillR" "KillS") n (oa @rs) (oa @ss) (oa @cs))])
+              kn))
+          kn))
+      kn)))
+
 ;;; Statements
 
 (defn- jump [c] (op "Jump" (long c)))
@@ -2043,7 +2343,7 @@ GR9a)."
   can panic or call store in the frame, for traces: §10.6, GR5, GR5.1)."
   [stmts]
   (let [ss (vec stmts)
-        built (mapv stmt ss)
+        built (mapv #(binding [*stmt-line* (stored-line %)] (stmt %)) ss)
         labels (mapv (fn [s] (cond
                                (= :label (:op s)) (label-code! (:label s))
                                ;; a let's block whose first declaration is labeled (F1)
@@ -2057,18 +2357,35 @@ GR9a)."
 
 (defn stmt-list [stmts] (body-node stmts))
 
+(defn- start-clear
+  "The node clearing the variables dead from the start of block n (the liveness plan's :start), or nil."
+  [n]
+  (when-let [^IdentityHashMap plan (:plan *fn*)]
+    (some-> (.get plan n) :start clear-slots-of)))
+
 (defn- block-node
   "A block's node: its declarations (a let's) and its statements."
   [n]
   (if (or (:let n) (:let-type n))
-    (let [ds (if (:let-type n) [] (mapv decl-stmt (:decls n)))
+    (let [ds (if (:let-type n) [] (mapv #(with-temp-clears (fn [] (decl-stmt %)) nil) (:decls n)))
+          ;; variables only the declarations use are dead once they ran (liveness)
           rest (body-node (:stmts n))
+          rest (if-let [c (start-clear n)] (op "Seq" (oa [c rest]) (oa [])) rest)
           ;; labeled declarations (L: x := e) resume the block there (GR8a, F1): a goto from
           ;; the block's body to any of them; one from before the block reaches the first
           ;; through the enclosing list's label (body-node)
-          labels (if (:let-type n) [] (mapv #(if-let [l (:decl-label %)] (label-code! l) 0) (:decls n)))]
-      (op "Seq" (oa (conj ds rest)) (oa (map long (if (some pos? labels) (conj labels 0) [])))))
-    (body-node (:stmts n))))
+          labels (if (:let-type n) [] (mapv #(if-let [l (:decl-label %)] (label-code! l) 0) (:decls n)))
+          ;; a declaration on a line of its own after the let's first stores its line, as a
+          ;; statement does (§10.6; gc's line of a call or panic in it: GOI-SPEC.md, "Since v1: frames")
+          lines (if (or (:let-type n) (not @code-frames?))
+                  []
+                  (let [l0 (long (or (:line n) 0))
+                        ls (mapv #(let [l (stored-line %)] (if (= l l0) 0 l)) (:decls n))]
+                    (if (some pos? ls) (conj ls 0) [])))]
+      (op "SeqL" (oa (conj ds rest)) (oa (map long (if (some pos? labels) (conj labels 0) []))) (oa (map long lines))))
+    (if-let [c (start-clear n)]
+      (op "Seq" (oa [c (body-node (:stmts n))]) (oa []))
+      (body-node (:stmts n)))))
 
 (defn- loop-target [n]
   (let [brk (next-code!) cont (next-code!)
@@ -2287,9 +2604,21 @@ GR9a)."
   [call]
   (let [mini (volatile! {:I 0 :F 0 :S 0 :R 0})
         setters (volatile! [])
-        to-mini (fn [an]
-                  (if (and (= :constant (:mode an)) (not= :unknown (:val an)))
+        escapes? (call-escapes? call)
+        hidden (volatile! [])
+        to-mini (fn to-mini [an]
+                  (cond
+                    (and (= :constant (:mode an)) (not= :unknown (:val an)))
                     an
+                    ;; //go:uintptrescapes: the pointer stays alive in the deferred frame too, until the call is made
+                    (and escapes? (ptr-conv? an))
+                    (let [t (temp! :R)
+                          s2 (get @mini :R)]
+                      (vswap! mini update :R inc)
+                      (vswap! hidden conj (long s2))
+                      (vswap! setters conj (arg-setter [:R s2] (op "ThenR" (op "StmtT" (set-slot :R t (exk (:x an) :R))) (local-node :R t))))
+                      (to-mini (kept-arg an t)))
+                    :else
                     (let [kn (ex an)
                           k (if (= :B (first kn)) :I (first kn))
                           node (as-kind kn k)
@@ -2318,7 +2647,10 @@ GR9a)."
                          :args (mapv to-mini (:args call))))
                 :else (unsupported! (str "deferring a call of kind " (name (:kind call))) "GR4"))
         ;; the call runs with the deferred call's frame as its caller: its temporaries there
-        t (binding [*fn* (assoc *fn* :slots mini)] (op "StmtT" (call-stmt call*)))
+        t (binding [*fn* (assoc *fn* :slots mini :tmp-log nil)] (op "StmtT" (call-stmt call*)))
+        ;; the frame's hidden pointers (//go:uintptrescapes) are read again after the call: the frame, and
+        ;; they, live for the call (Go's liveness would end the frame's at the call)
+        t (if (seq @hidden) (op "ThenT" t (op "StmtT" (slots-clear @hidden [] []))) t)
         {:keys [I F S R]} @mini]
     [(oa @setters) t [(long I) (long F) (long S) (long R)]]))
 
@@ -2386,6 +2718,15 @@ GR9a)."
                :assign (assign-stmt (assoc c :rhs (assoc (vec (:rhs c)) 0 marker))))]
     {:ch ch :ct ct :k k :vs vs :oks oks :bind bind}))
 
+(defn- at-case-line
+  "A select case's channel node, at the case's line when it has one of its own (gc's line of a
+  panic evaluating it: GOI-SPEC.md, \"Since v1: frames\")."
+  [node n cl c]
+  (let [l (long (or (:line c) (:line cl) 0))]
+    (if (and (pos? l) (not= l (long (or (:line n) 0))) @code-frames?)
+      (op "AtLineR" node l)
+      node)))
+
 (defn- select-stmt [n]
   (let [brk (next-code!)
         lbl (:goi/label n)
@@ -2399,15 +2740,15 @@ GR9a)."
                       (let [ch (:ch c) ct (:type ch)
                             v (elem-node (:value c) (elem-type ct))
                             body (push-target tg #(stmt-list (:body cl)))]
-                        (op "NewSelCase" true (exk ch :R) (desc ct) v 0 -1 -1 nil body))
+                        (op "NewSelCase" true (at-case-line (exk ch :R) n cl c) (desc ct) v 0 -1 -1 nil body))
                       (let [{:keys [ch ct k vs oks bind]} (select-recv c)
                             body (push-target tg #(stmt-list (:body cl)))]
-                        (op "NewSelCase" false (exk ch :R) (desc ct) nil (long (int (first (name k)))) (long vs) (long oks)
+                        (op "NewSelCase" false (at-case-line (exk ch :R) n cl c) (desc ct) nil (long (int (first (name k)))) (long vs) (long oks)
                             bind body))))))
         def (when defcl (push-target tg #(stmt-list (:body defcl))))]
     (op "Select" (oa cases) (boolean defcl) def (long brk))))
 
-(defn stmt
+(defn- stmt*
   "The node of statement n."
   [n]
   (case (:op n)
@@ -2428,7 +2769,7 @@ GR9a)."
     :range (range-stmt n)
     :switch (switch-stmt n)
     :label (if-let [s (:stmt n)]
-             (stmt (assoc s :goi/label (:label n)))
+             (stmt (assoc s :goi/label (:label n) :goi/orig s))
              (op "Nop"))
     :break (if-let [nm (:label n)]
              (jump (or (:brk @(label-entry nm)) (throw (ex-info (str "goi's builder: no break target " nm) {}))))
@@ -2446,6 +2787,43 @@ GR9a)."
     :select (select-stmt n)
     :type-switch (type-switch-stmt n)
     (unsupported! (str "the statement " (name (:op n))) "GR3")))
+
+(defn- with-temp-clears
+  "The node (f) builds, with the logged temporaries it used and the nodes after cleared once it has run; extra
+  (nodes) come first."
+  [f extra]
+  (let [lg (volatile! [])
+        node (binding [*fn* (assoc *fn* :tmp-log lg)] (f))
+        tmps @lg
+        tc (when (and (seq tmps) @clear-op? (not @live-off?))
+             (slots-clear (vec (for [[k s] tmps :when (= k :R)] (long s))) (vec (for [[k s] tmps :when (= k :S)] (long s))) []))
+        cs (cond-> (vec extra) tc (conj tc))]
+    (if (empty? cs) node (op "Seq" (oa (cons node cs)) (oa [])))))
+
+(defn stmt
+  "The node of statement n, followed by the clearing of the variables the liveness plan ends with it and of
+  the temporaries it used."
+  [n]
+  (let [^IdentityHashMap plan (:plan *fn*)
+        pl (when plan (or (.get plan n) (when-let [o (:goi/orig n)] (.get plan o))))]
+    (if (or @live-off? (and (nil? pl) (not @clear-op?)))
+      (stmt* n)
+      (let [^IdentityHashMap m (:moves pl)
+            node-fn (fn [] (if m (binding [*fn* (assoc *fn* :moves m)] (stmt* n)) (stmt* n)))
+            ;; the plan's variables are cleared after the statement's own temporaries are logged: the node is
+            ;; built first, and a variable an argument moved is gone from the plan's moves
+            lg (volatile! [])
+            node (binding [*fn* (assoc *fn* :tmp-log lg)] (node-fn))
+            after (if m (remove #(not (.containsKey m %)) (:after pl)) (:after pl))
+            c (when (seq after) (clear-slots-of after))
+            tmps @lg
+            tc (when (and (seq tmps) @clear-op?)
+                 (slots-clear (vec (for [[k s] tmps :when (= k :R)] (long s))) (vec (for [[k s] tmps :when (= k :S)] (long s))) []))
+            cs (cond-> [] c (conj c) tc (conj tc))]
+        (case (count cs)
+          0 node
+          1 (op "Seq" (oa [node (first cs)]) (oa []))
+          (op "Seq" (oa (cons node cs)) (oa [])))))))
 
 ;;; Functions (§4.6)
 
@@ -2495,30 +2873,130 @@ GR9a)."
       ;; only when not declared inside
       (vec (remove #(.containsKey declared %) (keys out))))))
 
+(defn gc-prefix
+  "The package part of gc's names of the functions of the package being built: main's main, else
+  its path."
+  []
+  (if (= "main" (:name *ctx*)) "main" (str (:path *ctx*))))
+
+(defn- gc-func-name
+  "gc's name of the function of tree (built as fname): a literal's or an initialization's given
+  (:gc-name), a method's pkg.T.M or pkg.(*T).M (a generic type's pkg.T[...].M, pkg.(*T[...]).M),
+  else pkg.fname."
+  [tree fname]
+  (or (:gc-name tree)
+      (let [o (:obj tree)]
+        (if (and o (e/o o :method) (e/o o :recv-named))
+          (let [base (str (:name (t/info (e/o o :recv-named))) (if (seq (e/o o :rtparams)) "[...]" ""))]
+            (str (gc-prefix) "." (if (e/o o :ptr-recv) (str "(*" base ")") base) "." (e/o o :name)))
+          (str (gc-prefix) "." fname)))))
+
+(defn code-frame!
+  "Gives code its frames' data for runtime's API (GOI-SPEC.md, \"Since v1: frames\"): gc's name,
+  the source directory, its first and last lines, whether it has arguments."
+  [code gc-name line0 end args?]
+  (when @code-frames?
+    (op "CodeFrame" code (str gc-name) (str (or (:dir *ctx*) "")) (long (or line0 0)) (long (or end 0)) (boolean args?)))
+  code)
+
+(defn- code-end
+  "The last line of a function's code as gc's line table has it: its closing brace's (:go/end,
+  where a function that ends without a return returns and runs its deferred calls), or the line
+  of its last statement when that is a return (gc emits no code at the brace then)."
+  [tree]
+  (let [end (some-> (:form tree) meta :go/end)
+        last-stmt (loop [s (last (:stmts (:body tree)))]
+                    ;; a let's block holds the rest of its list
+                    (if (and (map? s) (= :block (:op s)) (seq (:stmts s))) (recur (last (:stmts s))) s))]
+    (if (and (map? last-stmt) (= :return (:op last-stmt)) (:line last-stmt))
+      (:line last-stmt)
+      end)))
+
+(defn file-line-dirs
+  "The //line directives of a Go file's declaration forms decls, between the declarations and in
+  the functions' bodies, in order: [{:line :text}] (gc applies one to the rest of its file)."
+  [decls]
+  (let [out (java.util.ArrayList.)
+        walk (fn walk [f]
+               (cond
+                 (and (seq? f) (= "go/directive" (code/head-name f)))
+                 (let [t (second f) l (code/fline f)]
+                   (when (and (string? t) (str/starts-with? t "//line ") l)
+                     (.add out {:line (long l) :text t})))
+                 (or (seq? f) (vector? f)) (doseq [x f] (walk x))
+                 (map? f) (doseq [x (vals f)] (walk x))
+                 :else nil))]
+    (doseq [d decls] (walk d))
+    (vec (sort-by :line (vec out)))))
+
+(defn- line-dirs!
+  "Gives code the //line directives that apply to function tree (gc's updateBase: a comment //line
+  FILE:LINE or FILE:LINE:COL makes the next line LINE of FILE, to the next directive or the file's
+  end; an empty FILE is ?? without COL, the file before with it), for its frames (GOI-SPEC.md,
+  \"Since v1: frames\"): its Go file's (go-file; the context's :line-dirs, every directive before
+  the function's end, between declarations and in other functions' bodies too), else its body's."
+  [code tree src-file go-file]
+  (when @code-frames?
+    (let [walk (fn walk [n]
+                 (cond
+                   (vector? n) (mapcat walk n)
+                   (map? n) (if (= :directive (:op n)) [n] (mapcat #(walk (get n %)) [:stmts :body :then :else :clauses :stmt]))
+                   :else nil))
+          end (code-end tree)
+          file-ds (when-let [lds (:line-dirs *ctx*)] (get @lds go-file))
+          ds (if file-ds
+               (cond->> file-ds end (filter #(< (long (:line %)) (long end))))
+               (->> (walk (:body tree))
+                    (filter #(and (string? (:text %))
+                                  (str/starts-with? (:text %) "//line ") (:line %)))
+                    (sort-by :line)))]
+      (when (seq ds)
+        (let [rows (loop [ds ds prev src-file acc []]
+                     (if-let [d (first ds)]
+                       (let [text (subs (:text d) 7)
+                             [f n] (or (when-let [[_ f n] (re-find #"^(.*):([0-9]+):[0-9]+$" text)]
+                                         [(if (= "" f) prev f) (Long/parseLong n)])
+                                       (when-let [[_ f n] (re-find #"^(.*):([0-9]+)$" text)]
+                                         [f (Long/parseLong n)]))]
+                         (if (and f (pos? (long n)))
+                           (recur (rest ds) f (conj acc [(long (:line d)) f n]))
+                           (recur (rest ds) prev acc)))
+                       acc))]
+          (when (seq rows)
+            (op "CodeLineDirs" code (oa (map #(long (nth % 0)) rows)) (oa (map #(str (nth % 1)) rows))
+                (oa (map #(long (nth % 2)) rows))))))))
+  code)
+
 (defn build-code
   "The *goi.Code of a function node (:func, :fn, :body) with its signature sig; captures, the
   cells it receives first (a literal's); a method's receiver (:recv, of type :recv-type or its
   method object's) laid after the parameters and results."
   [tree fname captures]
   (let [sig (or (:sig tree) (sig-of (:type tree)))
+        gc-name (gc-func-name tree fname)
         rty (or (:recv-type tree) (when (and (:obj tree) (e/o (:obj tree) :method)) (recv-type-of (:obj tree))))
         {:keys [params results counts recv]} (slot-layout sig rty)
         src (or (when-let [o (:obj tree)] (when-let [sf (:source *ctx*)] (sf (e/o o :file)))) (:src *fn*))
+        go-file (or (some-> (:obj tree) (e/o :file)) (:go-file *fn*))
         f {:slots (volatile! (assoc counts :C 0)) :locs (IdentityHashMap.) :code (volatile! 2)
            :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name fname
-           :src src :has-defer (has-defer? (:body tree))}]
+           :src src :go-file go-file :has-defer (has-defer? (:body tree)) :gc-name gc-name :gc-lits (volatile! 0) :gc-lit (boolean (:gc-lit tree))
+           :plan (plan-fn tree)}]
     (binding [*fn* f]
       ;; the captured cells, the first C slots
       (doseq [x captures]
         (.put ^IdentityHashMap (:locs *fn*) x [:cell (new-slot! :C)]))
       (let [pro (volatile! [])
             epi (volatile! [])
+            ;; the argument slots of the parameters that moved into cells: dead once copied (liveness)
+            dead-args (volatile! [])
             pobjs (:params tree)]
         (doseq [[x [k s]] (map vector pobjs params)]
           (when x
             (if (cell-var? x)
               (let [c (new-slot! :C)]
                 (vswap! pro conj (op (str "ProCell" (name k)) (long s) (long c) (desc (e/o x :type))))
+                (when (and (:plan *fn*) (#{:R :S} k)) (vswap! dead-args conj [k s]))
                 (.put ^IdentityHashMap (:locs *fn*) x [:cell c]))
               (.put ^IdentityHashMap (:locs *fn*) x [:slot k s]))))
         (when-let [x (:recv tree)]
@@ -2543,18 +3021,31 @@ GR9a)."
                                 {:loc [:slot k s] :type ty})))))]
           (binding [*fn* (assoc *fn* :results rs)]
             (let [body (stmt (:body tree))
+                  body (if (and @clear-op? (seq @dead-args))
+                         (op "Seq" (oa [(op "ClearSlots" (oa (for [[k s] @dead-args :when (= k :R)] (long s)))
+                                            (oa (for [[k s] @dead-args :when (= k :S)] (long s))) (oa []))
+                                        body])
+                             (oa []))
+                         body)
                   {:keys [I F S R C]} @(:slots *fn*)]
-              (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa @pro) body
-                  (or @(:defer *fn*) (has-defer? (:body tree))) (oa @epi)))))))))
+              (line-dirs! (code-frame! (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa @pro) body
+                                           (or @(:defer *fn*) (has-defer? (:body tree))) (oa @epi))
+                                       gc-name (:line tree) (code-end tree)
+                                       (or (seq (:params tree)) (:recv tree)))
+                          tree (second src) go-file))))))))
 
 (defn build-fn-lit
   "A function literal's closure node (its code built now)."
   [n]
   (let [caps (free-locals n)
         nm (str (:name *fn*) ".func" (swap! (:lit-count *ctx*) inc))
+        ;; gc's name: its enclosing function's, .funcN after a declared function's, .N after a
+        ;; literal's (the literals numbered per enclosing function)
+        gc-name (when-let [pn (:gc-name *fn*)]
+                  (str pn (if (:gc-lit *fn*) "." ".func") (vswap! (:gc-lits *fn*) inc)))
         cell (op "FuncCell" nm (:name *ctx*) nil)
         _ (when-let [[ns f] (:src *fn*)] (op "FuncSource" cell ns f))
-        code (build-code n nm caps)]
+        code (build-code (cond-> (assoc n :gc-lit true) gc-name (assoc :gc-name gc-name)) nm caps)]
     (op "SetCode" cell code nil)
     (op "MakeClosure" cell (oa (map #(long (nth (loc %) 1)) caps)))))
 
@@ -2567,18 +3058,39 @@ GR9a)."
 
 (defn build-inits
   "The code of a package's initialization: its variables' initializers in initialization order
-  (trees {:op :var-init :lhs :rhs}), as a function of no parameters."
-  [inits]
+  (trees {:op :var-init :lhs :rhs}), as a function of no parameters. cell-of, when given: an
+  initializer's function cell (its file's), made its frame's function before it runs when it is
+  not the one before's (FrameFn: gc's package init function, one function whose lines are in each
+  initializer's file)."
+  [inits cell-of]
   (let [f {:slots (volatile! {:I 0 :F 0 :S 0 :R 0 :C 0}) :locs (IdentityHashMap.) :code (volatile! 2)
-           :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name "init"}]
+           :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name "init"
+           :gc-name (str (gc-prefix) ".init") :gc-lits (volatile! 0)}]
     (binding [*fn* (assoc f :results [])]
       (let [ss (vec (for [tr inits]
                       (let [lhs (:lhs tr)
                             places (mapv (fn [x] (if (= "_" (e/o x :name)) :blank {:op :place-global :obj x :type (e/o x :type)})) lhs)]
-                        (assign-stmt {:lhs places :rhs (:rhs tr)}))))
-            body (op "Seq" (oa ss) (oa []))
-            {:keys [I F S R C]} @(:slots *fn*)]
-        (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa []) body (boolean @(:defer *fn*)) (oa []))))))
+                        ;; its Go file: its literals' //line directives (line-dirs!)
+                        (binding [*fn* (assoc *fn* :go-file (some-> (first lhs) (e/o :file)))]
+                          (assign-stmt {:lhs places :rhs (:rhs tr)})))))
+            ;; each initializer's line, its frame's (gc's package init function's lines)
+            lines (mapv #(long (or (:line %) (some-> (first (:lhs %)) (e/o :line)) 0)) inits)
+            ;; each file's cell before its initializers (cell-of)
+            [ss lines] (if cell-of
+                         (loop [ts inits ss ss ls lines cur ::none acc-s [] acc-l []]
+                           (if (empty? ts)
+                             [acc-s acc-l]
+                             (let [c (cell-of (first ts))
+                                   sw? (and c (not (identical? c cur)))]
+                               (recur (rest ts) (rest ss) (rest ls) (if sw? c cur)
+                                      (cond-> (if sw? (conj acc-s (op "FrameFn" c)) acc-s) true (conj (first ss)))
+                                      (cond-> (if sw? (conj acc-l 0) acc-l) true (conj (first ls)))))))
+                         [ss lines])
+            body (op "SeqL" (oa ss) (oa []) (oa (if (some pos? lines) lines [])))
+            {:keys [I F S R C]} @(:slots *fn*)
+            ls (filter pos? lines)]
+        (code-frame! (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa []) body (boolean @(:defer *fn*)) (oa []))
+                     (:gc-name f) (when (seq ls) (apply min ls)) (when (seq ls) (apply max ls)) false)))))
 
 ;;; Generics: instances per type-argument list (§9.2, GR6)
 

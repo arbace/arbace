@@ -1,0 +1,237 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/http/AuthenticationInfo.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.http)
+
+(import '(java.net PasswordAuthentication URL)
+        '(java.util HashMap Locale Objects)
+        '(java.util.concurrent.locks Condition ReentrantLock)
+        '(java.util.function BiFunction)
+        '(sun.net.www HeaderParser))
+
+(defclass ^:public ^:abstract AuthenticationInfo
+  :extends AuthCacheValue
+  :implements [Cloneable]
+
+  (field ^:public ^:static ^:final ^char SERVER_AUTHENTICATION \s)
+
+  (field ^:public ^:static ^:final ^char PROXY_AUTHENTICATION \p)
+
+  (field ^:static ^:final ^boolean serializeAuth (Boolean/getBoolean "http.auth.serializeRequests"))
+
+  (field ^:protected ^PasswordAuthentication pw)
+
+  (method ^:public credentials ^PasswordAuthentication [this] pw)
+
+  (method ^:public getAuthType ^AuthCacheValue$Type [this]
+    (if (== type SERVER_AUTHENTICATION) AuthCacheValue$Type/Server AuthCacheValue$Type/Proxy))
+
+  (method getAuthScheme ^AuthScheme [this] authScheme)
+
+  (method ^:public getHost ^String [this] host)
+
+  (method ^:public getPort ^int [this] port)
+
+  (method ^:public getRealm ^String [this] realm)
+
+  (method ^:public getPath ^String [this] path)
+
+  (method ^:public getProtocolScheme ^String [this] protocol)
+
+  (method ^:protected useAuthCache ^boolean [this] true)
+
+  (field ^:private ^:static ^:final ^{:tag (HashMap String Thread)} requests (HashMap.))
+
+  (field ^:private ^:static ^:final ^ReentrantLock requestLock (ReentrantLock.))
+
+  (field ^:private ^:static ^:final ^Condition requestFinished (.newCondition requestLock))
+
+  (method ^:private ^:static requestAuthentication ^AuthenticationInfo [^String key
+                                                                        ^AuthCacheImpl acache
+                                                                        ^{:tag (BiFunction String AuthCacheImpl AuthenticationInfo)} cachefunc]
+    (let [^:mutable cached (cast AuthenticationInfo (.apply cachefunc key acache))]
+      (if (or (some? cached) (not serializeAuth))
+          cached
+          (do
+            (.lock requestLock)
+            (try
+              (set! cached (cast AuthenticationInfo (.apply cachefunc key acache)))
+              (when (some? cached) (return cached))
+              (let [c (Thread/currentThread)
+                    t (cast Thread (.putIfAbsent requests key c))]
+                (when (or (nil? t) (identical? t c)) (return nil))
+                (while (.containsKey requests key) (.awaitUninterruptibly requestFinished)))
+              (finally (.unlock requestLock)))
+            (cast AuthenticationInfo (.apply cachefunc key acache))))))
+
+  (method ^:private ^:static requestCompleted ^void [^String key]
+    (.lock requestLock)
+    (try
+      (let [thread (cast Thread (.get requests key))]
+        (when (and (some? thread) (identical? thread (Thread/currentThread)))
+          (let [waspresent (some? (.remove requests key))] (java-assert waspresent)))
+        (.signalAll requestFinished))
+      (finally (.unlock requestLock))))
+
+  (field ^char type)
+
+  (field ^AuthScheme authScheme)
+
+  (field ^String protocol)
+
+  (field ^String host)
+
+  (field ^int port)
+
+  (field ^String realm)
+
+  (field ^String path)
+
+  (constructor ^:public [this ^char type ^AuthScheme authScheme ^String host ^int port ^String realm]
+    (set! (.-type this) type)
+    (set! (.-authScheme this) authScheme)
+    (set! (.-protocol this) "")
+    (set! (.-host this) (.toLowerCase host Locale/ROOT))
+    (set! (.-port this) port)
+    (set! (.-realm this) realm)
+    (set! (.-path this) nil))
+
+  (method ^:public clone [this]
+    (try (.clone super) (catch CloneNotSupportedException e nil)))
+
+  (constructor ^:public [this ^char type ^AuthScheme authScheme ^URL url ^String realm]
+    (set! (.-type this) type)
+    (set! (.-authScheme this) authScheme)
+    (set! (.-protocol this) (.toLowerCase (.getProtocol url) Locale/ROOT))
+    (set! (.-host this) (.toLowerCase (.getHost url) Locale/ROOT))
+    (set! (.-port this) (.getPort url))
+    (when (== (.-port this) -1) (set! (.-port this) (.getDefaultPort url)))
+    (set! (.-realm this) realm)
+    (let [urlPath (.getPath url)]
+      (if (.isEmpty urlPath)
+          (set! (.-path this) urlPath)
+          (set! (.-path this) (AuthenticationInfo/reducePath urlPath)))))
+
+  (method ^:static reducePath ^String [^String urlPath]
+    (let [sepIndex (.lastIndexOf urlPath \/)
+          targetSuffixIndex (.lastIndexOf urlPath \.)]
+      (if (not (== sepIndex -1))
+          (if (< sepIndex targetSuffixIndex)
+              (.substring urlPath 0 (unchecked-add-int sepIndex 1))
+              urlPath)
+          urlPath)))
+
+  (method ^:static getServerAuth ^AuthenticationInfo [^URL url ^AuthCacheImpl cache]
+    (let [^:mutable port (.getPort url)]
+      (when (== port -1) (set! port (.getDefaultPort url)))
+      (let [key (java-str (java-str SERVER_AUTHENTICATION ":")
+                          (.toLowerCase (.getProtocol url) Locale/ROOT)
+                          ":"
+                          (.toLowerCase (.getHost url) Locale/ROOT)
+                          ":"
+                          port)]
+        (AuthenticationInfo/getAuth key url cache))))
+
+  (method ^:static getServerAuthKey ^String [^URL url ^String realm ^AuthScheme scheme]
+    (let [^:mutable port (.getPort url)]
+      (when (== port -1) (set! port (.getDefaultPort url)))
+      (let [key (java-str (java-str SERVER_AUTHENTICATION ":")
+                          scheme
+                          ":"
+                          (.toLowerCase (.getProtocol url) Locale/ROOT)
+                          ":"
+                          (.toLowerCase (.getHost url) Locale/ROOT)
+                          ":"
+                          port
+                          ":"
+                          realm)]
+        key)))
+
+  (method ^:private ^:static getCachedServerAuth ^AuthenticationInfo [^String key
+                                                                      ^AuthCacheImpl cache]
+    (AuthenticationInfo/getAuth key nil cache))
+
+  (method ^:static getServerAuth ^AuthenticationInfo [^String key ^AuthCacheImpl cache]
+    (if (not serializeAuth)
+        (AuthenticationInfo/getCachedServerAuth key cache)
+        (AuthenticationInfo/requestAuthentication
+          key
+          cache
+          (method-ref BiFunction
+                      ^AuthenticationInfo [String AuthCacheImpl]
+                      AuthenticationInfo/getCachedServerAuth))))
+
+  (method ^:static getAuth ^AuthenticationInfo [^String key ^URL url ^AuthCacheImpl acache]
+    (Objects/requireNonNull acache)
+    (if (nil? url)
+        (cast AuthenticationInfo (.get acache key nil))
+        (cast AuthenticationInfo (.get acache key (.getPath url)))))
+
+  (method ^:static getProxyAuth ^AuthenticationInfo [^String host ^int port ^AuthCacheImpl acache]
+    (Objects/requireNonNull acache)
+    (let [key (java-str (java-str PROXY_AUTHENTICATION "::")
+                        (.toLowerCase host Locale/ROOT)
+                        ":"
+                        port)
+          result (cast AuthenticationInfo (.get acache key nil))]
+      result))
+
+  (method ^:static getProxyAuthKey ^String [^String host ^int port ^String realm ^AuthScheme scheme]
+    (let [key (java-str (java-str PROXY_AUTHENTICATION ":")
+                        scheme
+                        "::"
+                        (.toLowerCase host Locale/ROOT)
+                        ":"
+                        port
+                        ":"
+                        realm)]
+      key))
+
+  (method ^:private ^:static getCachedProxyAuth ^AuthenticationInfo [^String key
+                                                                     ^AuthCacheImpl acache]
+    (Objects/requireNonNull acache)
+    (cast AuthenticationInfo (.get acache key nil)))
+
+  (method ^:static getProxyAuth ^AuthenticationInfo [^String key ^AuthCacheImpl acache]
+    (if (not serializeAuth)
+        (AuthenticationInfo/getCachedProxyAuth key acache)
+        (AuthenticationInfo/requestAuthentication
+          key
+          acache
+          (method-ref BiFunction
+                      ^AuthenticationInfo [String AuthCacheImpl]
+                      AuthenticationInfo/getCachedProxyAuth))))
+
+  (method addToCache ^void [this ^AuthCacheImpl authcache]
+    (Objects/requireNonNull authcache)
+    (let [key (.cacheKey this true)]
+      (when (.useAuthCache this)
+        (.put authcache key this)
+        (when (.supportsPreemptiveAuthorization this) (.put authcache (.cacheKey this false) this)))
+      (AuthenticationInfo/endAuthRequest key)))
+
+  (method ^:static endAuthRequest ^void [^String key]
+    (when-not (not serializeAuth) (AuthenticationInfo/requestCompleted key)))
+
+  (method removeFromCache ^void [this ^AuthCacheImpl authcache]
+    (Objects/requireNonNull authcache)
+    (.remove authcache (.cacheKey this true) this)
+    (when (.supportsPreemptiveAuthorization this) (.remove authcache (.cacheKey this false) this)))
+
+  (method ^:public ^:abstract supportsPreemptiveAuthorization ^boolean [this])
+
+  (method ^:public getHeaderName ^String [this]
+    (if (== type SERVER_AUTHENTICATION) "Authorization" "Proxy-authorization"))
+
+  (method ^:public ^:abstract getHeaderValue ^String [this ^URL url ^String method])
+
+  (method ^:public ^:abstract setHeaders ^boolean [this ^HttpURLConnection conn ^HeaderParser p
+                                                   ^String raw])
+
+  (method ^:public ^:abstract isAuthorizationStale ^boolean [this ^String header])
+
+  (method cacheKey ^String [this ^boolean includeRealm]
+    (if includeRealm
+        (java-str type ":" authScheme ":" protocol ":" host ":" port ":" realm)
+        (java-str type ":" protocol ":" host ":" port)))
+
+  (method ^:public disposeContext ^void [this]))

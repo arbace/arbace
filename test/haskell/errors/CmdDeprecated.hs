@@ -1,0 +1,2 @@
+module CmdDeprecated where
+x = (

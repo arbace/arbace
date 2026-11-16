@@ -53,7 +53,7 @@ for w in jdk jdk/newdir; do
   else bad "symlinked checkout, work $w: status $st: $out"; fi
 done
 out=$(cd "$t" && J2G_EDGE_WORK=.tmp/w FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
-if [ "$st" = 1 ] && ! echo "$out" | grep -q 'tracked'; then ok "work under .tmp accepted"; else bad "work .tmp/w: status $st: $out"; fi
+if [ "$st" = 1 ] && ! grep -q 'tracked' <<< "$out"; then ok "work under .tmp accepted"; else bad "work .tmp/w: status $st: $out"; fi
 # report 050: another checkout nested under .tmp/ (a worktree, the clean run's clone), and one outside
 n=$t/.tmp/worktrees/other; mkdir -p "$n/jdk"; echo OTHER > "$n/jdk/edge.edn"
 (cd "$n" && git init -q . && git add -A && git -c user.name=t -c user.email=t@t commit -q -m t) || bad "git init nested"
@@ -76,7 +76,7 @@ out=$(cd "$o/.tmp/arch" && J2G_EDGE_WORK=$o/jdk FAKE_LOG=$scratch/fake.log bin/j
 if [ "$st" = 2 ] && [ "$(cat "$o/jdk/edge.edn")" = edge ] && [ -z "$(cd "$o" && git status --porcelain)" ]; then ok "an archive under another checkout: its tracked files refused"
 else bad "outer checkout: status $st: $out"; fi
 out=$(cd "$o/.tmp/arch" && J2G_EDGE_WORK=$o/.tmp/arch/.tmp/w FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
-if [ "$st" = 1 ] && ! echo "$out" | grep -q "not its root"; then ok "an archive under another checkout: its own .tmp accepted"; else bad "archive .tmp: status $st: $out"; fi
+if [ "$st" = 1 ] && ! grep -q "not its root" <<< "$out"; then ok "an archive under another checkout: its own .tmp accepted"; else bad "archive .tmp: status $st: $out"; fi
 
 [ "$fails" = 0 ] && echo "frozen-test: passed" || echo "frozen-test: $fails failed"
 exit $((fails > 0))

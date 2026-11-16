@@ -1,0 +1,1729 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0,
+;; pinned by tools/rsdump/apks.sha256): RF10's third slice, the first of the passes after MIR building:
+;; compiler/rustc_mir_transform/src/{lib.rs (mir_built's pass list), lint_and_remove_uninhabited.rs
+;;   (LintAndRemoveUninhabited's removal of the returns of calls to an uninhabited destination), simplify.rs (SimplifyCfg:
+;;   CfgSimplifier's collapse_goto_chain, merge_successor, simplify_branch, strip_nops, remove_dead_blocks)},
+;; compiler/rustc_middle/src/mir/terminator.rs (successors' order), mir/traversal.rs (preorder, reachable).
+;; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.passes
+  "RF10's third and fourth slices (doc/rust/FRONTEND-SURVEY.md, \"As built: RF10 (third slice)\", \"(fourth slice)\"): MIR passes
+  over the bodies of arbace.rust.front.build (MIR forms), each as rustc runs it, judged against rustc's -Zdump-mir after
+  the pass.
+
+    (mir-built-passes BODY)   mir_built's passes after the `built` dump: LintAndRemoveUninhabited, SimplifyCfg-initial
+    pipeline                  every pass from mir_built to runtime MIR's cleanup, in rustc's order: [[NAME F] ...]
+    (stages BODY UPTO CTX)    the body after each pass to UPTO: [[NAME {body-name body}] ...] (promoted bodies join
+                              at PromoteTemps; within the builder's bindings, build/*after-finish*)"
+  (:require [arbace.rust.front.build :as build] [arbace.rust.front.typeck :as tc] [arbace.rust.front.collect :as c]
+            [arbace.string :as str]))
+
+(defn- cleanup-of [u] (when (and (seq? u) (= "cleanup" (name (first u)))) (second u)))
+
+(defn successors
+  "Terminator::successors in rustc's order (a switch's targets then otherwise; a call's return then its unwind cleanup)"
+  [t]
+  (if (nil? t)
+    []
+    (case (name (first t))
+      "goto" [(second t)]
+      "switch" (conj (mapv second (nth t 2)) (nth t 3))
+      "drop" (let [[_ _ target u _ drop] t] (cond-> [target] (cleanup-of u) (conj (cleanup-of u)) drop (conj drop)))
+      "call" (let [[_ _ _ _ target u] t] (cond-> [] target (conj target) (cleanup-of u) (conj (cleanup-of u))))
+      "assert" (let [[_ _ _ _ target u] t] (cond-> [target] (cleanup-of u) (conj (cleanup-of u))))
+      "false-edge" [(second t) (nth t 2)]
+      "false-unwind" (let [[_ real u] t] (cond-> [real] (cleanup-of u) (conj (cleanup-of u))))
+      "yield" (let [[_ _ resume _ drop] t] (cond-> [resume] drop (conj drop)))
+      [])))
+
+(defn map-successors
+  "Terminator::successors_mut: each successor replaced by (F block), in successors' order"
+  [t f]
+  (let [u! (fn [u] (if-let [c (cleanup-of u)] (list (first u) (f c)) u))
+        v (vec t)]
+    (apply list
+           (case (name (first t))
+             "goto" (assoc v 1 (f (nth v 1)))
+             "switch" (let [vals (mapv (fn [[x b]] [x (f b)]) (nth v 2))] (-> v (assoc 2 vals) (assoc 3 (f (nth v 3)))))
+             "drop" (let [v (assoc v 2 (f (nth v 2))) v (assoc v 3 (u! (nth v 3)))] (if (nth v 5 nil) (assoc v 5 (f (nth v 5))) v))
+             "call" (let [v (if (nth v 4) (assoc v 4 (f (nth v 4))) v)] (assoc v 5 (u! (nth v 5))))
+             "assert" (-> v (assoc 4 (f (nth v 4))) (assoc 5 (u! (nth v 5))))
+             "false-edge" (-> v (assoc 1 (f (nth v 1))) (assoc 2 (f (nth v 2))))
+             "false-unwind" (-> v (assoc 1 (f (nth v 1))) (assoc 2 (u! (nth v 2))))
+             "yield" (let [v (assoc v 2 (f (nth v 2)))] (if (nth v 4 nil) (assoc v 4 (f (nth v 4))) v))
+             v))))
+
+(defn- preorder
+  "traversal::preorder from the start block: each reachable block once, in preorder"
+  [blocks]
+  (let [seen (atom #{}) out (atom [])]
+    (loop [stack [0]]
+      (when-let [b (peek stack)]
+        (let [stack (pop stack)]
+          (if (contains? @seen b)
+            (recur stack)
+            (do (swap! seen conj b) (swap! out conj b)
+                (recur (into stack (rseq (vec (successors (:term (nth blocks b))))))))))))
+    @out))
+
+;; ---------------------------------------------------------------------------------------------
+;; LintAndRemoveUninhabited: a call whose destination's type is uninhabited returns nowhere
+
+(defn- uninhabited?
+  "Ty::is_inhabited_from's negation for the types the slice meets: `!`, a tuple or a nonempty array of one, an enum with
+  no inhabited variant (UNINHABITED-ADT? answers for an ADT)"
+  [t uninhabited-adt?]
+  (case (first t)
+    :never true
+    :tuple (boolean (some #(uninhabited? % uninhabited-adt?) (second t)))
+    :adt (boolean (uninhabited-adt? t))
+    false))
+
+(defn lint-and-remove-uninhabited
+  "LintAndRemoveUninhabited: each call into a local of an uninhabited type loses its return target (LOCAL-TYS the
+  locals' types)"
+  [body local-tys uninhabited-adt?]
+  (update body :blocks
+          (fn [bs]
+            (mapv (fn [b]
+                    (let [t (:term b)]
+                      (if (and (seq? t) (= "call" (name (first t))) (nth t 4)
+                               (let [[_ l & proj] (nth t 3)] (and (empty? proj) (uninhabited? (nth local-tys l) uninhabited-adt?))))
+                        (assoc b :term (apply list (assoc (vec t) 4 nil)))
+                        b)))
+                  bs))))
+
+;; ---------------------------------------------------------------------------------------------
+;; SimplifyCfg
+
+(defn remove-dead-blocks
+  "remove_dead_blocks: unreachable blocks dropped, the reachable empty unreachable blocks (not cleanup) one"
+  [body]
+  (let [blocks (:blocks body)
+        n (count blocks)
+        reachable (set (preorder blocks))
+        empty-unreachable? (fn [b] (and (:term b) (empty? (:stmts b)) (= "unreachable" (name (first (:term b)))) (not (:cleanup b))))
+        eu (count (filter #(and (reachable %) (empty-unreachable? (nth blocks %))) (range n)))]
+    (if (and (= n (count reachable)) (<= eu 1))
+      body
+      (let [[kept repl] (loop [i 0 used 0 kept [] repl {} keep-u nil]
+                          (if (>= i n)
+                            [kept repl]
+                            (let [b (nth blocks i)]
+                              (cond (not (reachable i)) (recur (inc i) used kept repl keep-u)
+                                    (and (empty-unreachable? b) keep-u) (recur (inc i) used kept (assoc repl i keep-u) keep-u)
+                                    :else (recur (inc i) (inc used) (conj kept b) (assoc repl i used)
+                                                 (if (empty-unreachable? b) used keep-u))))))]
+        (assoc body :blocks (mapv (fn [b] (update b :term map-successors #(get repl %))) kept))))))
+
+(defn simplify-cfg
+  "simplify_cfg: CfgSimplifier::simplify (goto chains collapsed, single-predecessor successors merged; a switch's equal
+  targets kept before the runtime phases, preserve_switch_reads) then remove_dead_blocks"
+  [body & [{:keys [preserve-switch-reads] :or {preserve-switch-reads true}}]]
+  (let [bbs (atom (mapv (fn [b] (update b :stmts (fn [ss] (filterv #(not= "nop" (name (first %))) ss)))) (:blocks body)))   ; strip_nops
+        n (count @bbs)
+        pred (atom (vec (repeat n 0)))
+        term (fn [b] (:term (nth @bbs b)))
+        set-term! (fn [b t] (swap! bbs assoc-in [b :term] t))
+        take-simple-goto! (fn [b] (let [blk (nth @bbs b) t (:term blk)]
+                                    (when (and (empty? (:stmts blk)) (seq? t) (= "goto" (name (first t))))
+                                      (set-term! b nil) t)))
+        changed (atom false)]
+    (swap! pred assoc 0 1)
+    (doseq [b (preorder @bbs) s (successors (term b))] (swap! pred update s inc))
+    (letfn [(collapse-goto-chain [start]
+              (let [chain (loop [current start acc []]
+                            (if-let [t (take-simple-goto! current)]
+                              (recur (second t) (conj acc [current t]))
+                              [current acc]))
+                    [last terms] chain]
+                (when (not= start last) (reset! changed true))
+                (doseq [[current t] (rseq terms)]
+                  (when (not= (second t) last) (reset! changed true))
+                  (if (= 1 (nth @pred current))
+                    (swap! pred assoc current 0)
+                    (do (swap! pred update last inc) (swap! pred update current dec)))
+                  (set-term! current (list (first t) last)))
+                last))
+            (merge-successor! [merged t]
+              (if (and (seq? t) (= "goto" (name (first t))) (= 1 (nth @pred (second t))))
+                (let [target (second t) nt (term target)]
+                  (if (nil? nt)
+                    [false t]
+                    (do (set-term! target nil)
+                        (swap! merged conj target)
+                        (swap! pred assoc target 0)
+                        [true nt])))
+                [false t]))
+            (simplify-branch [t]
+              (if (or preserve-switch-reads (not (and (seq? t) (= "switch" (name (first t))))))
+                [false t]
+                (let [ss (successors t)]
+                  (if (apply = ss)
+                    (do (swap! pred update (first ss) - (dec (count ss))) [true (list 'goto (first ss))])
+                    [false t]))))]
+      (loop []
+        (reset! changed false)
+        (doseq [bb (range n) :when (pos? (nth @pred bb))]
+          (let [t0 (term bb)
+                _ (set-term! bb nil)
+                t (map-successors t0 collapse-goto-chain)
+                merged (atom [])
+                t (loop [t t]
+                    (let [[c1 t] (simplify-branch t)
+                          [c2 t] (merge-successor! merged t)]
+                      (when (or c1 c2) (reset! changed true))
+                      (if (or c1 c2) (recur t) t)))]
+            (when (pos? (reduce + (map #(count (:stmts (nth @bbs %))) @merged)))
+              (let [stmts (into (vec (:stmts (nth @bbs bb))) (mapcat #(:stmts (nth @bbs %)) @merged))]
+                (doseq [m @merged] (swap! bbs assoc-in [m :stmts] []))
+                (swap! bbs assoc-in [bb :stmts] stmts)))
+            (set-term! bb t)))
+        (when @changed (recur))))
+    (remove-dead-blocks (assoc body :blocks @bbs))))
+
+(defn mir-built-passes
+  "mir_built's passes after the `built` dump that change a body: LintAndRemoveUninhabited, then SimplifyCfg-initial"
+  [body local-tys uninhabited-adt?]
+  (-> body (lint-and-remove-uninhabited local-tys uninhabited-adt?) simplify-cfg))
+
+;; ---------------------------------------------------------------------------------------------
+;; Forms: places, operands, types (the typeck type of a type form is its metadata's :tc, build/ty-form)
+
+(defn- k [x] (when (seq? x) (name (first x))))
+(defn- tc-of [tyf] (:tc (meta tyf)))
+(defn- keep-meta [old new] (if (meta old) (with-meta new (meta old)) new))
+(defn- relist [old v] (keep-meta old (apply list v)))
+
+(defn- place-local [p] (second p))
+(defn- place-proj [p] (vec (drop 2 p)))
+(defn- mk-place [l proj] (apply list 'place l proj))
+
+(defn- deref-tc [t]
+  (case (first t)
+    :ref (nth t 3)
+    :ptr (nth t 2)
+    :adt (first (nth t 2))
+    (throw (ex-info "passes: a deref of" {:what "a deref" :x t}))))
+
+(defn- elem-tc [t] (second t))
+
+(defn place-tc
+  "The typeck type of a place form in BODY"
+  [body p]
+  (reduce (fn [t e]
+            (case (k e)
+              "deref" (deref-tc t)
+              "field" (tc-of (nth e 2))
+              ("index" "cindex") (elem-tc t)
+              "subslice" t
+              "downcast" t
+              t))
+          (nth (:local-tys body) (place-local p)) (place-proj p)))
+
+(defn- deref-form [f]
+  (let [s (nth f 2)]
+    (case (k s)
+      "ref" (second s)
+      "ptr" (second s)
+      "adt" (first (nth s 3))
+      (throw (ex-info "passes: a deref of" {:what "a deref" :x f})))))
+
+(defn place-ty-form
+  "The MIR type form of a place form (a prefix's type for a new local)"
+  [body p]
+  (reduce (fn [f e]
+            (case (k e)
+              "deref" (deref-form f)
+              "field" (nth e 2)
+              ("index" "cindex") (second (nth f 2))
+              f))
+          (:ty (nth (:locals body) (place-local p))) (place-proj p)))
+
+(defn- ty-form-of [t] (build/ty-form t))
+
+(defn- push-local
+  "BODY with a new local of TYPE (a typeck type) at SCOPE; [body index]"
+  [body t & [scope]]
+  (let [n (count (:locals body))]
+    [(-> body (update :locals conj {:mut true :scope (or scope 0) :ty (ty-form-of t)}) (update :local-tys conj t)) n]))
+
+(defn- operand-tc [body o]
+  (case (k o) ("copy" "move") (place-tc body (second o)) "const" (tc-of (nth o 2)) "runtime-checks" [:bool]))
+
+(defn- box? [t] (and (= :adt (first t)) (= "alloc::boxed::Box" (second t))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The MIR visitor's places, in Visitor's order (super_statement, super_rvalue, super_terminator, super_place):
+;; [[place-form context] ...]; a context [:mut KIND], [:nonmut KIND] or [:nonuse KIND]
+
+(defn- op-places [o] (case (k o) "copy" [[(second o) [:nonmut :copy]]] "move" [[(second o) [:nonmut :move]]] []))
+
+(defn- rvalue-places [r]
+  (case (k r)
+    ("use" "use-noretag" "repeat" "unop" "wrap-binder") (op-places (if (= "unop" (k r)) (nth r 2) (second r)))
+    "cast" (op-places (nth r 2))
+    "binop" (concat (op-places (nth r 2)) (op-places (nth r 3)))
+    "ref" [[(nth r 2) (case (second r) :shared [:nonmut :shared-borrow] (:fake-shallow :fake-deep) [:nonmut :fake-borrow] [:mut :borrow])]]
+    "rawptr" [[(nth r 2) (if (= "mut" (second r)) [:mut :raw-borrow] [:nonmut :raw-borrow])]]
+    ("discriminant" "copy-for-deref") [[(second r) [:nonmut :inspect]]]
+    "aggregate" (mapcat op-places (nth r 2))
+    []))
+
+(defn stmt-places [s]
+  (let [s (if (= "dbg-stmt" (k s)) (second s) s)]
+    (case (k s)
+      "assign" (concat [[(second s) [:mut :store]]] (rvalue-places (nth s 2)))
+      "fake-read" [[(nth s 2) [:nonmut :inspect]]]
+      "set-discriminant" [[(second s) [:mut :set-discriminant]]]
+      "place-mention" [[(second s) [:nonuse :place-mention]]]
+      "assume" (op-places (second s))
+      "copy-nonoverlapping" (mapcat op-places (rest s))
+      [])))
+
+(defn term-places [t]
+  (case (k t)
+    "switch" (op-places (second t))
+    "drop" [[(second t) [:mut :drop]]]
+    "call" (concat (op-places (second t)) (mapcat op-places (nth t 2)) [[(nth t 3) [:mut :call]]])
+    "assert" (op-places (second t))
+    "return" [[(list 'place 0) [:nonmut :move]]]
+    []))
+
+(defn- local-uses
+  "super_place's locals of a place under CONTEXT: the base (a projected place's context Projection), then its index locals"
+  [p ctx]
+  (let [proj (place-proj p)
+        ctx (if (and (seq proj) (not= :nonuse (first ctx))) [(first ctx) :projection] ctx)]
+    (into [[(place-local p) ctx]]
+          (for [e (rseq proj) :when (= "index" (k e))] [(second e) [:nonmut :copy]]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Traversals
+
+(defn postorder
+  "traversal::postorder from the start block (successors taken from the back)"
+  [blocks]
+  (let [visited (atom #{}) out (atom [])
+        visit (fn [stack b] (if (contains? @visited b) stack
+                                (do (swap! visited conj b) (conj stack [b (vec (successors (:term (nth blocks b))))]))))]
+    (loop [stack (visit [] 0)]
+      (when (seq stack)
+        (let [[b succ] (peek stack)]
+          (if (seq succ)
+            (recur (visit (conj (pop stack) [b (pop succ)]) (peek succ)))
+            (do (swap! out conj b) (recur (pop stack)))))))
+    @out))
+
+(defn reverse-postorder [blocks] (vec (rseq (postorder blocks))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Qualifs (rustc_const_eval/src/check_consts/qualifs.rs): HasMutInterior and NeedsDrop
+
+(def ^:private freeze-stack (atom #{}))
+
+(defn freeze?
+  "The Freeze auto trait for the types the corpus meets: trivially freeze scalars, references and pointers; UnsafeCell
+  never; an ADT structurally by its fields (PhantomData always); a type parameter or a trait object not known to be"
+  [t]
+  (case (first t)
+    (:bool :char :int :uint :float :str :never :ref :ptr :fnptr :fndef) true
+    :tuple (every? freeze? (second t))
+    (:array :slice) (freeze? (second t))
+    :closure (every? freeze? (get build/*closure-tys* (second t)))
+    :adt (let [d (second t)]
+           (cond (= "core::cell::UnsafeCell" d) false
+                 (= "core::marker::PhantomData" d) true
+                 (contains? @freeze-stack [d (nth t 2)]) true
+                 :else
+                 (let [fields (cond (number? d) (tc/all-fields d (nth t 2))
+                                    (tc/std-adt-known? d) (tc/std-all-fields d (nth t 2))
+                                    :else ::unknown)]
+                   (if (= ::unknown fields)
+                     false
+                     (try (swap! freeze-stack conj [d (nth t 2)])
+                          (every? (fn [[_ ft]] (freeze? ft)) fields)
+                          (finally (swap! freeze-stack disj [d (nth t 2)])))))))
+    false))
+
+(defn- unsafe-cell? [t] (and (= :adt (first t)) (= "core::cell::UnsafeCell" (second t))))
+
+(defn- in-any-value-of-ty? [q t]
+  (case q
+    :needs-drop (build/needs-drop? t)
+    :mut-interior (not (freeze? t))))
+
+(defn- structural-in-adt? [q t]
+  (case q
+    :mut-interior (not (unsafe-cell? t))
+    :needs-drop (not (tc/implements-drop? t))))
+
+(declare in-place?)
+
+(defn- in-operand? [q body in-local o]
+  (case (k o)
+    ("copy" "move") (in-place? q body in-local (second o))
+    "runtime-checks" (in-any-value-of-ty? q [:bool])
+    ;; a constant: by its type (a named constant's mir_const_qualif is its value's, which the slice approximates by its type)
+    "const" (in-any-value-of-ty? q (tc-of (nth o 2)))))
+
+(defn- in-place? [q body in-local p]
+  (loop [proj (place-proj p)]
+    (if (empty? proj)
+      (in-local (place-local p))
+      (let [e (peek proj) base (pop proj)]
+        (if (and (= "index" (k e)) (in-local (second e)))
+          true
+          (let [pt (place-tc body (mk-place (place-local p) proj))]
+            (cond (not (in-any-value-of-ty? q pt)) false
+                  (= "deref" (k e)) true
+                  :else (recur base))))))))
+
+(defn- in-rvalue? [q body in-local r rv-ty]
+  (case (k r)
+    "tlsref" (in-any-value-of-ty? q rv-ty)
+    ("discriminant" "copy-for-deref") (in-place? q body in-local (second r))
+    ("use" "use-noretag" "repeat" "wrap-binder") (in-operand? q body in-local (second r))
+    "unop" (in-operand? q body in-local (nth r 2))
+    "cast" (in-operand? q body in-local (nth r 2))
+    "binop" (or (in-operand? q body in-local (nth r 2)) (in-operand? q body in-local (nth r 3)))
+    ("ref" "rawptr") (let [p (nth r 2) proj (place-proj p)]
+                       (if (and (seq proj) (= "deref" (k (peek proj)))
+                                (= :ref (first (place-tc body (mk-place (place-local p) (pop proj))))))
+                         (in-place? q body in-local (mk-place (place-local p) (pop proj)))
+                         (in-place? q body in-local p)))
+    "aggregate" (let [kind (second r)]
+                  (if (and (= "adt" (k kind)) (= :adt (first rv-ty))
+                           (or (and (number? (second rv-ty)) (= "Union" (:kind (c/def-of (second rv-ty)))))
+                               (not (structural-in-adt? q rv-ty))))
+                    (in-any-value-of-ty? q rv-ty)
+                    (boolean (some #(in-operand? q body in-local %) (nth r 2)))))
+    false))
+
+;; ---------------------------------------------------------------------------------------------
+;; PromoteTemps (promote_consts.rs): borrows of constant temporaries into promoted bodies
+
+(defn- unwrap-dbg [s] (if (= "dbg-stmt" (k s)) (second s) s))
+
+(defn- stmt-at [body [bb i]]
+  (let [b (nth (:blocks body) bb)]
+    (if (< i (count (:stmts b))) [:stmt (unwrap-dbg (nth (:stmts b) i))] [:term (:term b)])))
+
+(defn- local-kind [body l] (cond (zero? l) :return (<= l (:args body)) :arg :else :temp))
+
+(defn- collect-temps-and-candidates
+  "collect_temps_and_candidates: each local's TempState and the candidates (every Ref rvalue), in reverse postorder"
+  [body]
+  (let [temps (atom (vec (repeat (count (:locals body)) {:state :undefined})))
+        cands (atom [])
+        visit! (fn [l ctx loc]
+                 (when-not (or (= :arg (local-kind body l)) (and (= :temp (local-kind body l)) (:user (nth (:locals body) l)))
+                               (= ctx [:mut :drop]) (= :nonuse (first ctx)))
+                   (let [t (nth @temps l)]
+                     (swap! temps assoc l
+                            (case (:state t)
+                              :undefined (if (#{[:mut :store] [:mut :call]} ctx) {:state :defined :loc loc :uses 0} {:state :unpromotable})
+                              :defined (if (or (= :nonmut (first ctx)) (= ctx [:mut :borrow])) (update t :uses inc) {:state :unpromotable})
+                              {:state :unpromotable})))))]
+    (doseq [bb (reverse-postorder (:blocks body))
+            :let [b (nth (:blocks body) bb)]]
+      (doseq [[i s] (map-indexed vector (:stmts b))]
+        (doseq [[p ctx] (stmt-places s) [l c] (local-uses p ctx)] (visit! l c [bb i]))
+        (let [s (unwrap-dbg s)]
+          (when (and (= "assign" (k s)) (= "ref" (k (nth s 2)))) (swap! cands conj [bb i]))))
+      (when-let [t (:term b)]
+        (doseq [[p ctx] (term-places t) [l c] (local-uses p ctx)] (visit! l c [bb (count (:stmts b))]))))
+    [@temps @cands]))
+
+(def ^:private pow2 (fn [n] (reduce * 1N (repeat n 2N))))
+
+(defn- scalar-of [o] (when (and (= "const" (k o)) (= "scalar" (k (nth o 3)))) [(bigint (second (nth o 3))) (nth (nth o 3) 2)]))
+
+(defn- array-len [t] (when (= :array (first t)) (let [n (nth t 2)] (cond (number? n) n (= :cval (first n)) (let [v (second n)] (if (number? v) v (try (Long/parseLong (str/replace (str v) #"_usize$" "")) (catch Exception _ nil)))) :else nil))))
+
+(defn- std-fn-attr
+  "RFP32 (a): an attribute std's interface records for a std function (the helper's --std-iface: :const, is_const_fn;
+  :promotable, is_promotable_const_fn, #[rustc_promotable]; :nounwind, NEVER_UNWIND), by its def path; nil when not std's"
+  [path attr]
+  (when (string? path) (get (get (:fns c/*si*) path) attr)))
+
+(defn- promotable-const-fn? [ft]
+  (and (= :fndef (first ft)) (boolean (std-fn-attr (second ft) :promotable))))
+
+(defn- validate-candidates
+  "validate_candidates: the candidates whose borrowed temporary is promotable (Validator's rules)"
+  [body temps0 cands]
+  (let [temps (atom temps0)
+        ck (:const-kind body)
+        safe (delay (loop [b 0 acc #{}]
+                      (let [acc (conj acc b) t (:term (nth (:blocks body) b))]
+                        (case (k t)
+                          "goto" (recur (second t) acc)
+                          "call" (if (nth t 4) (recur (nth t 4) acc) acc)
+                          ("drop" "assert") (recur (if (= "drop" (k t)) (nth t 2) (nth t 4)) acc)
+                          acc))))]
+    (letfn [(qualif-local [q l]
+              (let [t (nth @temps l)]
+                (if (not= :defined (:state t))
+                  false
+                  (let [[kind x] (stmt-at body (:loc t))]
+                    (if (= kind :stmt)
+                      (in-rvalue? q body #(qualif-local q %) (nth x 2) (place-tc body (second x)))
+                      (in-any-value-of-ty? q (nth (:local-tys body) l)))))))
+            (validate-local [l]
+              (let [t (nth @temps l)]
+                (cond (not= :defined (:state t)) false
+                      (qualif-local :needs-drop l) false
+                      (:valid t) true
+                      :else
+                      (let [[kind x] (stmt-at body (:loc t))
+                            ok (if (= kind :stmt)
+                                 (validate-rvalue (nth x 2))
+                                 (and (= "call" (k x)) (validate-call x (first (:loc t)))))]
+                        (swap! temps assoc l (if ok (assoc t :valid true) {:state :unpromotable}))
+                        ok))))
+            (def-stmt [l] (let [t (nth @temps l)] (when (= :defined (:state t)) (let [[kind x] (stmt-at body (:loc t))] (when (= kind :stmt) x)))))
+            (validate-place [p]
+              (let [proj (place-proj p) l (place-local p)]
+                (if (empty? proj)
+                  (validate-local l)
+                  (let [e (peek proj) base (mk-place l (pop proj))]
+                    (case (k e)
+                      ("cindex" "subslice" "unwrap-binder") (validate-place base)
+                      ("opaque" "downcast") false
+                      "deref" (if (and (= 1 (count proj)) (= :static ck)
+                                       (let [s (def-stmt l)] (and s (= "use" (k (nth s 2))) (= "const" (k (second (nth s 2))))
+                                                                  (= "static-ptr" (k (nth (second (nth s 2)) 3))))))
+                                (validate-place base)
+                                false)
+                      "index" (let [s (def-stmt (second e))
+                                    idx (when (and s (= "use" (k (nth s 2)))) (first (scalar-of (second (nth s 2)))))
+                                    len (array-len (place-tc body base))]
+                                (if (and idx len (< idx len))
+                                  (and (validate-local (second e)) (validate-place base))
+                                  false))
+                      "field" (let [bt (place-tc body base)]
+                                (if (and (= :adt (first bt)) (number? (second bt)) (= "Union" (:kind (c/def-of (second bt)))))
+                                  false
+                                  (validate-place base)))
+                      (validate-place base))))))
+            (validate-operand [o]
+              (case (k o)
+                ("copy" "move") (validate-place (second o))
+                "runtime-checks" false
+                "const" (if (= "static-ptr" (k (nth o 3))) (= :static ck) true)))
+            (validate-ref [kind p]
+              (case kind
+                (:fake-shallow :fake-deep :unique) false
+                :shared (not (qualif-local :mut-interior (place-local p)))
+                (let [t (place-tc body p)] (and (= :array (first t)) (= 0 (array-len t))))))
+            (validate-rvalue [r]
+              (case (k r)
+                "use-noretag" false
+                ("use" "repeat" "wrap-binder") (validate-operand (second r))
+                "copy-for-deref" (validate-operand (list 'copy (second r)))
+                "discriminant" (validate-place (second r))
+                "tlsref" false
+                "cast" (if (= "PointerExposeProvenance" (second r)) false (validate-operand (nth r 2)))
+                "unop" (validate-operand (nth r 2))
+                "binop" (let [[_ op lhs rhs] r lt (operand-tc body lhs)]
+                          (cond (#{:ptr :fnptr} (first lt)) false
+                                (and (#{"Div" "Rem"} op) (#{:int :uint} (first lt)))
+                                (let [[rv size] (scalar-of rhs) bits (when size (* 8 size))]
+                                  (cond (or (nil? rv) (zero? rv)) false
+                                        (and (= :int (first lt)) (= rv (dec (pow2 bits))))
+                                        (let [[lv] (scalar-of lhs)] (if (and lv (not= lv (pow2 (dec bits)))) (and (validate-operand lhs) (validate-operand rhs)) false))
+                                        :else (and (validate-operand lhs) (validate-operand rhs))))
+                                :else (and (validate-operand lhs) (validate-operand rhs))))
+                "rawptr" (let [p (nth r 2) proj (place-proj p)]
+                           (if (and (seq proj) (= "deref" (k (peek proj))) (= :ref (first (place-tc body (mk-place (place-local p) (pop proj))))))
+                             (validate-place (mk-place (place-local p) (pop proj)))
+                             false))
+                "ref" (let [p (nth r 2) proj (place-proj p)
+                            simple (if (and (seq proj) (= "deref" (k (peek proj))) (= :ref (first (place-tc body (mk-place (place-local p) (pop proj))))))
+                                     (mk-place (place-local p) (pop proj)) p)]
+                        (and (validate-place simple) (validate-ref (second r) p)))
+                "aggregate" (every? validate-operand (nth r 2))
+                false))
+            (validate-call [t bb]
+              (let [[_ f args] t
+                    ft (operand-tc body f)]
+                (and (validate-operand f) (every? validate-operand args)
+                     ;; #[rustc_promotable], else only in a const's or static's initializer: a const fn in a block that
+                     ;; is not dead code
+                     (or (promotable-const-fn? ft)
+                         (and (#{:static :const} ck)
+                              (and (= :fndef (first ft))
+                                   (if (number? (second ft))
+                                     (let [d (c/def-of (second ft))] (and d (map? (:node d)) (= :const (get-in (:node d) [:header :constness]))))
+                                     ;; a std function: is_const_fn (RFP32 (a))
+                                     (boolean (std-fn-attr (second ft) :const))))
+                              (contains? @safe bb))))))]
+      (let [ok (vec (filter (fn [[bb i]]
+                              (let [s (unwrap-dbg (nth (:stmts (nth (:blocks body) bb)) i))
+                                    [_ kind p] (nth s 2)]
+                                (and (validate-local (place-local p)) (validate-ref kind p)
+                                     (not (some #(= "deref" (k %)) (place-proj p))))))
+                            cands))]
+        [@temps ok]))))
+
+(defn- map-place-locals
+  "MutVisitor's locals of a place: the base, then its index locals in order, each replaced by (F local)"
+  [p f]
+  (let [l (f (place-local p))
+        proj (mapv (fn [e] (if (= "index" (k e)) (list 'index (f (second e))) e)) (place-proj p))]
+    (mk-place l proj)))
+
+(defn- map-operand-places [o f] (case (k o) ("copy" "move") (list (first o) (f (second o))) o))
+
+(defn- map-rvalue-places
+  "super_rvalue's places, in order, each replaced by (F place)"
+  [r f]
+  (let [v (vec r) op #(map-operand-places % f)]
+    (relist r
+            (case (k r)
+              ("use" "use-noretag" "repeat" "wrap-binder") (assoc v 1 (op (nth v 1)))
+              ("cast" "unop") (assoc v 2 (op (nth v 2)))
+              "binop" (let [l (op (nth v 2)) rr (op (nth v 3))] (-> v (assoc 2 l) (assoc 3 rr)))
+              ("ref" "rawptr") (assoc v 2 (f (nth v 2)))
+              ("discriminant" "copy-for-deref") (assoc v 1 (f (nth v 1)))
+              "aggregate" (assoc v 2 (mapv op (nth v 2)))
+              v))))
+
+(defn- unit-use [] (list 'use (list 'const "const ()" (build/ty-form [:tuple []]) '(zst))))
+
+(defn- body-alloc-ids
+  "The allocations a body's constants name, with the pointers in them, transitively"
+  [b]
+  (let [ids (atom #{})
+        walk (fn walk [x] (cond (and (seq? x) (#{"raw-str" "raw-bytes" "static-ptr"} (k x)) (number? (second x))) (swap! ids conj (second x))
+                                (and (seq? x) (= "ty" (k x))) nil
+                                (or (seq? x) (vector? x)) (doseq [y x] (walk y))
+                                :else nil))]
+    (doseq [blk (:blocks b)] (walk (:stmts blk)) (walk (:term blk)))
+    (loop [todo (vec @ids) seen #{}]
+      (if-let [i (peek todo)]
+        (if (seen i) (recur (pop todo) seen) (recur (into (pop todo) (get (:alloc-deps b) i)) (conj seen i)))
+        seen))))
+
+(defn- recompute-allocs [b]
+  (if (:alloc-texts b)
+    (assoc b :allocs (apply str (for [id (sort > (body-alloc-ids b)) :let [t (get (:alloc-texts b) id)] :when t] t)))
+    b))
+
+(defn promote-temps
+  "PromoteTemps: the promotable candidates' temporaries moved into promoted bodies (promote_candidates, Promoter); the
+  body with :promoted-bodies"
+  [body]
+  (let [[temps0 cands] (collect-temps-and-candidates body)
+        [temps1 ok] (validate-candidates body temps0 cands)]
+    (if (empty? ok)
+      body
+      (let [src (atom body) temps (atom temps1) extra (atom []) promotions (atom [])]
+        (doseq [[bb i :as loc] (rseq ok)]
+          (let [s (nth (:stmts (nth (:blocks @src) bb)) i)
+                lhs (second (unwrap-dbg s))]
+            (when-not (and (empty? (place-proj lhs)) (= :promoted-out (:state (nth @temps (place-local lhs)))))
+              (let [pr (atom {:locals [{:mut true :scope 0 :ty (build/ty-form [:never])}] :local-tys [[:never]] :blocks []})
+                    keep (atom false)
+                    idx (count @promotions)
+                    new-block! (fn [] (let [n (count (:blocks @pr))] (swap! pr update :blocks conj {:cleanup false :stmts [] :after-dbg [] :term '(return)}) n))
+                    passign! (fn [l rv] (swap! pr update-in [:blocks (dec (count (:blocks @pr))) :stmts] conj (list 'assign (mk-place l []) rv)))]
+                (letfn [(promote-temp [temp]
+                          (let [old-keep @keep
+                                t (nth @temps temp)
+                                _ (when (> (:uses t) 1) (reset! keep true))
+                                _ (when-not @keep (swap! temps assoc temp {:state :promoted-out}))
+                                loc (:loc t)
+                                [lbb li] loc
+                                n (count (:locals @pr))
+                                _ (swap! pr #(-> % (update :locals conj {:mut true :scope 0 :ty (:ty (nth (:locals @src) temp))})
+                                                 (update :local-tys conj (nth (:local-tys @src) temp))))
+                                blk (nth (:blocks @src) lbb)]
+                            (if (< li (count (:stmts blk)))
+                              (let [st (nth (:stmts blk) li)
+                                    rhs (nth (unwrap-dbg st) 2)]
+                                (when-not @keep
+                                  (swap! src assoc-in [:blocks lbb :stmts li] (relist st (assoc (vec (unwrap-dbg st)) 2 (unit-use)))))
+                                (passign! n (visit-rvalue rhs)))
+                              (let [term (:term blk)
+                                    [_ f args _ target] term]
+                                (when-not @keep (swap! src assoc-in [:blocks lbb :term] (list 'goto target)))
+                                (let [f (map-operand-places f promote-place)
+                                      args (mapv #(map-operand-places % promote-place) args)
+                                      last (dec (count (:blocks @pr)))
+                                      nt (new-block!)]
+                                  (swap! pr assoc-in [:blocks last :term] (list 'call f args (mk-place n []) nt '(continue))))))
+                            (reset! keep old-keep)
+                            n))
+                        (promote-place [p] (map-place-locals p (fn [l] (if (= :temp (local-kind @src l)) (promote-temp l) l))))
+                        (visit-rvalue [r] (map-rvalue-places r promote-place))]
+                  (let [[_ kind pl] (nth (unwrap-dbg s) 2)
+                        ty (nth (:local-tys @src) (place-local pl))
+                        ref-tc [:ref [:re-erased] (boolean (#{:mut :unique} kind)) ty]
+                        ref-form (build/ty-form ref-tc)
+                        scope (or (:scope (meta s)) 0)
+                        prl (count (:locals @src))
+                        _ (swap! src #(-> % (update :locals conj {:mut true :scope scope :ty ref-form}) (update :local-tys conj ref-tc)))
+                        _ (swap! temps conj {:state :unpromotable})
+                        operand (list 'const (str "const " (:name body) "::promoted[" idx "]") ref-form (list 'unevaluated (:name body) [] idx))
+                        _ (swap! extra conj [loc (with-meta (list 'assign (mk-place prl []) (list 'use operand)) (meta s))])
+                        _ (swap! src assoc-in [:blocks bb :stmts i]
+                                 (relist s (list 'assign lhs (list 'ref kind (mk-place prl (into [(list 'deref)] (place-proj pl)))))))
+                        rv (list 'ref kind (mk-place (place-local pl) []))]
+                    (new-block!)
+                    (let [rv (visit-rvalue rv)]
+                      (passign! 0 rv))
+                    (swap! pr #(-> % (assoc-in [:locals 0] {:mut true :scope 0 :ty ref-form}) (assoc-in [:local-tys 0] ref-tc)))
+                    (swap! promotions conj
+                           (recompute-allocs
+                            (merge (select-keys body [:name :kind :def :alloc-texts :alloc-deps])
+                                   {:promoted idx :args 0 :ret ref-form :locals (:locals @pr) :local-tys (:local-tys @pr)
+                                    :scopes [[nil nil]] :debug [] :blocks (:blocks @pr) :user-types [] :const-kind :const
+                                    :allocs ""})))))))))
+        ;; the extra statements, each before its location, in reverse location order
+        (doseq [[[bb i] st] (sort-by first #(compare %2 %1) @extra)]
+          (swap! src update-in [:blocks bb :stmts] (fn [ss] (into (into (subvec (vec ss) 0 i) [st]) (subvec (vec ss) i)))))
+        (let [out? (fn [l] (= :promoted-out (:state (nth @temps l))))]
+          (swap! src update :blocks
+                 (fn [bs]
+                   (mapv (fn [b]
+                           (let [b (update b :stmts (fn [ss] (filterv (fn [s] (let [s (unwrap-dbg s)]
+                                                                               (case (k s)
+                                                                                 "assign" (not (and (empty? (place-proj (second s))) (out? (place-local (second s)))))
+                                                                                 ("storage-live" "storage-dead") (not (out? (second s)))
+                                                                                 true)))
+                                                                      ss)))
+                                 t (:term b)]
+                             (if (and (= "drop" (k t)) (empty? (place-proj (second t))) (out? (place-local (second t))))
+                               (assoc b :term (list 'goto (nth t 2)))
+                               b)))
+                         bs))))
+        (-> @src recompute-allocs (assoc :promoted-bodies @promotions))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; CleanupPostBorrowck (cleanup_post_borrowck.rs)
+
+(defn cleanup-post-borrowck
+  "CleanupPostBorrowck: AscribeUserType, FakeRead, fake borrows and drop hints made nops; array-to-pointer and
+  mut-to-const coercions plain pointer casts; false edges gotos; the user type annotations cleared"
+  [body]
+  (-> body
+      (update :blocks
+              (fn [bs]
+                (mapv (fn [b]
+                        (-> b
+                            (update :stmts
+                                    (fn [ss]
+                                      (mapv (fn [s0]
+                                              (let [s (unwrap-dbg s0)]
+                                                (cond
+                                                  (or (#{"fake-read" "bidh"} (k s))
+                                                      (and (= "raw" (k s)) (str/starts-with? (second s) "AscribeUserType("))
+                                                      (and (= "assign" (k s)) (= "ref" (k (nth s 2))) (#{:fake-shallow :fake-deep} (second (nth s 2)))))
+                                                  (keep-meta s0 (list 'nop))
+                                                  (and (= "assign" (k s)) (= "cast" (k (nth s 2)))
+                                                       (re-find #"^PointerCoercion\((ArrayToPointer|MutToConstPointer)," (str (second (nth s 2)))))
+                                                  (relist s0 (list 'assign (second s) (relist (nth s 2) (assoc (vec (nth s 2)) 1 "PtrToPtr"))))
+                                                  :else s0)))
+                                            ss)))
+                            (update :term (fn [t] (case (k t) ("false-edge" "false-unwind") (list 'goto (second t)) t)))))
+                      bs)))
+      (assoc :user-types [])
+      (update :locals (fn [ls] (mapv #(dissoc % :user-ty) ls)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; RemoveNoopLandingPads (remove_noop_landing_pads.rs), MirPatch's resume block
+
+(defn- nop-landing-pad? [b nops]
+  (and (every? (fn [s] (let [s (unwrap-dbg s)]
+                         (case (k s)
+                           ("fake-read" "storage-live" "storage-dead" "place-mention" "nop" "const-eval-counter" "bidh") true
+                           "raw" (str/starts-with? (second s) "AscribeUserType(")
+                           "assign" (and (#{"use" "use-noretag" "discriminant"} (k (nth s 2))) (empty? (place-proj (second s))))
+                           false)))
+               (:stmts b))
+       (let [t (:term b)]
+         (case (k t)
+           ("goto" "resume" "switch" "false-edge" "false-unwind") (every? nops (successors t))
+           false))))
+
+(defn- unwind-index [t] (case (k t) "drop" 3 "call" 5 "assert" 5 "false-unwind" 2 nil))
+
+(defn remove-noop-landing-pads
+  "RemoveNoopLandingPads (when the session unwinds): cleanup edges into landing pads that do nothing become
+  `unwind continue`, jumps into them the resume block"
+  [body]
+  (let [bs (:blocks body)]
+    (if-not (some #(= "resume" (k (:term %))) bs)
+      body
+      (let [nops (reduce (fn [acc b] (if (nop-landing-pad? (nth bs b) acc) (conj acc b) acc)) #{} (postorder bs))]
+        (if (empty? nops)
+          body
+          (let [existing (last (keep-indexed (fn [i b] (when (and (= "resume" (k (:term b))) (empty? (:stmts b))) i)) bs))
+                [bs resume] (if existing [bs existing] [(conj bs {:cleanup true :stmts [] :after-dbg [] :term '(resume)}) (count bs)])]
+            (assoc body :blocks
+                   (mapv (fn [b]
+                           (let [t (:term b)
+                                 ui (unwind-index t)
+                                 t (if (and ui (= "cleanup" (k (nth t ui nil))) (nops (second (nth t ui))))
+                                     (relist t (assoc (vec t) ui '(continue)))
+                                     t)
+                                 t (if t (map-successors t #(if (and (not= % resume) (nops %)) resume %)) t)]
+                             (assoc b :term t)))
+                         bs))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Derefer (deref_separator.rs): a place's inner derefs through CopyForDeref temporaries
+
+(defn- map-stmt-places [s f]
+  (let [s0 s s (unwrap-dbg s) v (vec s)]
+    (relist s0
+            (case (k s)
+              "assign" (let [lhs (f (nth v 1))] (-> v (assoc 1 lhs) (assoc 2 (map-rvalue-places (nth v 2) f))))
+              "fake-read" (assoc v 2 (f (nth v 2)))
+              ("set-discriminant" "place-mention") (assoc v 1 (f (nth v 1)))
+              "assume" (assoc v 1 (map-operand-places (nth v 1) f))
+              v))))
+
+(defn- map-term-places [t f]
+  (let [v (vec t) op #(map-operand-places % f)]
+    (relist t
+            (case (k t)
+              "switch" (assoc v 1 (op (nth v 1)))
+              "drop" (assoc v 1 (f (nth v 1)))
+              "call" (let [fn* (op (nth v 1)) args (mapv op (nth v 2)) dest (f (nth v 3))] (-> v (assoc 1 fn*) (assoc 2 args) (assoc 3 dest)))
+              "assert" (assoc v 1 (op (nth v 1)))
+              v))))
+
+(defn- apply-patch
+  "MirPatch::apply's new statements: each [[bb i] stmt] inserted before statement I of BB (stable by location)"
+  [body new-stmts]
+  (reduce (fn [body [bb group]]
+            (update-in body [:blocks bb :stmts]
+                       (fn [ss]
+                         (let [by-i (group-by (comp second first) group)]
+                           (vec (concat (mapcat (fn [i s] (concat (map second (get by-i i)) [s])) (range) ss)
+                                        (map second (get by-i (count ss)))))))))
+          body (group-by ffirst new-stmts)))
+
+(defn derefer
+  "Derefer: each place (but debuginfo's) with a deref after its first projection split, every deref but the last
+  through a `deref_copy` temporary"
+  [body]
+  (let [b (atom body) news (atom [])
+        fix (fn [loc p]
+              (let [proj (place-proj p)]
+                (if-not (and (seq proj) (some #(= "deref" (k %)) (rest proj)))
+                  p
+                  (let [last-deref (last (keep-indexed (fn [i e] (when (= "deref" (k e)) i)) proj))]
+                    (loop [idx 0 base-local (place-local p) last-len 0 out p]
+                      (if (>= idx (count proj))
+                        out
+                        (let [prefix (subvec proj 0 idx) e (nth proj idx)]
+                          (if (and (seq prefix) (= "deref" (k e)))
+                            (let [pref (mk-place (place-local p) prefix)
+                                  tyf (place-ty-form @b pref)
+                                  t (place-tc @b pref)
+                                  n (count (:locals @b))
+                                  _ (swap! b #(-> % (update :locals conj {:mut true :scope 0 :ty tyf :deref-temp true}) (update :local-tys conj t)))
+                                  deref-place (mk-place base-local (subvec prefix last-len))]
+                              (swap! news conj [loc (list 'assign (mk-place n []) (list 'copy-for-deref deref-place))])
+                              (recur (inc idx) n (count prefix) (if (= idx last-deref) (mk-place n (subvec proj idx)) out)))
+                            (recur (inc idx) base-local last-len out)))))))))]
+    (let [bs (:blocks @b)
+          nbs (vec (map-indexed (fn [bb blk]
+                                 (-> blk
+                                     (update :stmts (fn [ss] (vec (map-indexed (fn [i s] (map-stmt-places s #(fix [bb i] %))) ss))))
+                                     (update :term (fn [t] (if t (map-term-places t #(fix [bb (count (:stmts blk))] %)) t)))))
+                               bs))]
+      (swap! b assoc :blocks nbs))
+    (apply-patch @b @news)))
+
+;; ---------------------------------------------------------------------------------------------
+;; AddCallGuards (add_call_guards.rs), CriticalCallEdges
+
+(defn add-call-guards
+  "CriticalCallEdges: a call that may unwind into a cleanup and returns to a block of several predecessors returns
+  through a new block"
+  [body]
+  (let [bs (:blocks body)
+        pred (frequencies (mapcat #(successors (:term %)) bs))
+        work (keep-indexed (fn [i b] (let [t (:term b)]
+                                       (when (and (= "call" (k t)) (nth t 4) (> (get pred (nth t 4) 0) 1)
+                                                  (#{"cleanup" "terminate"} (k (nth t 5))))
+                                         i)))
+                           bs)]
+    (if (empty? work)
+      body
+      (let [[bs _] (reduce (fn [[bs n] i]
+                             (let [t (:term (nth bs i))]
+                               [(-> bs (assoc-in [i :term] (relist t (assoc (vec t) 4 n)))
+                                    (conj {:cleanup (:cleanup (nth bs i)) :stmts [] :after-dbg [] :term (list 'goto (nth t 4))}))
+                                (inc n)]))
+                           [bs (count bs)] work)]
+        (assoc body :blocks bs)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; AbortUnwindingCalls (abort_unwinding_calls.rs) over layout::fn_can_unwind
+
+(def ^:dynamic *panic-abort* false)   ; the session's panic strategy is abort (build-oracles' -C panic=abort)
+
+(defn- intrinsic-name
+  "The intrinsic a callee's type names (tcx.intrinsic): core::intrinsics' functions"
+  [t]
+  (when (and (= :fndef (first t)) (string? (second t)))
+    (second (re-find #"^core::intrinsics::([A-Za-z0-9_]+)$" (second t)))))
+
+(defn- fn-can-unwind?
+  "fn_can_unwind: a function never unwinds when it is NEVER_UNWIND (#[rustc_nounwind], the intrinsics: std's interface's :nounwind), or the session aborts on panic
+  and it is not a foreign item, or its ABI is one that cannot (extern \"C\" and the like without -unwind)"
+  [def-id abi foreign?]
+  (cond (and def-id (string? def-id) (std-fn-attr def-id :nounwind)) false
+        ;; an intrinsic std's interface does not list (RFP32 (a): the interface records NEVER_UNWIND for those it lists)
+        (and def-id (string? def-id) (not (contains? (:fns c/*si*) def-id)) (re-find #"^core::intrinsics::" def-id)) false
+        (and def-id *panic-abort* (not foreign?)) false
+        (and abi (not (#{"Rust" "rust-call"} abi))) (str/ends-with? abi "-unwind")
+        :else (not *panic-abort*)))
+
+(defn- callee-unwinds? [t]
+  (case (first t)
+    :fndef (let [d (second t)
+                 local (when (number? d) (c/def-of d))
+                 foreign? (boolean (and local (re-find #"Foreign" (str (:kind local)))))
+                 abi (when (and local (#{"Fn" "AssocFn"} (str (:kind local)))) (:abi (try (c/fn-sig d) (catch Throwable _ nil))))
+                 abi (or abi (when foreign? "C"))]
+             (fn-can-unwind? d abi foreign?))
+    :fnptr (fn-can-unwind? nil (let [sig (second t)] (when (map? sig) (:abi sig))) false)
+    (fn-can-unwind? nil nil false)))
+
+(defn abort-unwinding-calls
+  "AbortUnwindingCalls (fn-like bodies): resumes of a body that cannot unwind terminate (Abi); a call, drop or assert
+  that cannot unwind unwinds to unreachable, one that can in a body that cannot terminates; then remove_dead_blocks"
+  [body]
+  (if-not (= :fn (:kind body))
+    body
+    (let [d (:def body)
+          closure? (= "Closure" (str (:kind d)))
+          abi (when (and (not closure?) (#{"Fn" "AssocFn"} (str (:kind d)))) (:abi (try (c/fn-sig (:id d)) (catch Throwable _ nil))))
+          body-can (fn-can-unwind? (if closure? nil (:id d)) (if closure? "rust-call" abi) false)
+          bs (mapv (fn [b]
+                     (let [t (:term b)
+                           t (if (and (= "resume" (k t)) (not body-can)) '(terminate "abi") t)]
+                       (if (or (:cleanup b) (nil? t))
+                         (assoc b :term t)
+                         (let [ui (unwind-index t)
+                               can (case (k t)
+                                     "call" (callee-unwinds? (operand-tc body (second t)))
+                                     ("drop" "assert" "false-unwind") (fn-can-unwind? nil nil false)
+                                     nil)]
+                           (cond (nil? can) (assoc b :term t)
+                                 (not can) (assoc b :term (relist t (assoc (vec t) ui '(unreachable))))
+                                 (and (not body-can) (= "continue" (k (nth t ui))))
+                                 (assoc b :term (relist t (assoc (vec t) ui '(terminate "abi"))))
+                                 :else (assoc b :term t))))))
+                   (:blocks body))]
+      (remove-dead-blocks (assoc body :blocks bs)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; EraseDerefTemps, ElaborateBoxDerefs, LowerIntrinsics, RemovePlaceMention
+
+(defn erase-deref-temps
+  "EraseDerefTemps: `deref_copy P` a plain `no_retag copy P`"
+  [body]
+  (update body :blocks
+          (fn [bs] (mapv (fn [b] (update b :stmts (fn [ss] (mapv (fn [s] (let [u (unwrap-dbg s)]
+                                                                         (if (and (= "assign" (k u)) (= "copy-for-deref" (k (nth u 2))))
+                                                                           (relist s (list 'assign (second u) (list 'use-noretag (list 'copy (second (nth u 2))))))
+                                                                           s)))
+                                                                 ss))))
+                         bs))))
+
+(defn elaborate-box-derefs
+  "ElaborateBoxDerefs: a place that dereferences a Box local reads the Box's pointer first, `copy (b.0: Unique<T>) as
+  *const T (BoxDerefTransmute)`, and dereferences that"
+  [body]
+  (let [b (atom body) news (atom [])
+        fix (fn [loc p]
+              (let [proj (place-proj p) l (place-local p) bt (nth (:local-tys @b) l)]
+                (if (and (seq proj) (= "deref" (k (first proj))) (box? bt))
+                  (let [inner (first (nth bt 2))
+                        ptr-t [:ptr false inner]
+                        unique-t [:adt "core::ptr::unique::Unique" [inner]]
+                        n (count (:locals @b))]
+                    (swap! b #(-> % (update :locals conj {:mut true :scope 0 :ty (build/ty-form ptr-t)}) (update :local-tys conj ptr-t)))
+                    (swap! news conj [loc (list 'assign (mk-place n [])
+                                                (list 'cast "BoxDerefTransmute" (list 'copy (mk-place l [(list 'field 0 (with-meta (list 'ty (str "std::ptr::Unique<" (build/ty-text inner) ">") '(other "adt")) {:tc unique-t}))])) (build/ty-form ptr-t)))])
+                    (mk-place n proj))
+                  p)))]
+    (let [bs (:blocks @b)
+          nbs (vec (map-indexed (fn [bb blk]
+                                 (-> blk
+                                     (update :stmts (fn [ss] (vec (map-indexed (fn [i s] (map-stmt-places s #(fix [bb i] %))) ss))))
+                                     (update :term (fn [t] (if t (map-term-places t #(fix [bb (count (:stmts blk))] %)) t)))))
+                               bs))]
+      (swap! b assoc :blocks nbs))
+    (apply-patch @b @news)))
+
+(def ^:private intrinsic-binops
+  {"wrapping_add" "Add" "wrapping_sub" "Sub" "wrapping_mul" "Mul" "three_way_compare" "Cmp" "unchecked_add" "AddUnchecked"
+   "unchecked_sub" "SubUnchecked" "unchecked_mul" "MulUnchecked" "unchecked_div" "Div" "unchecked_rem" "Rem"
+   "unchecked_shl" "ShlUnchecked" "unchecked_shr" "ShrUnchecked"})
+
+(defn lower-intrinsics
+  "LowerIntrinsics: calls of the intrinsics MIR has a statement or terminator for (discriminant_value, unreachable,
+  forget, assume, the wrapping and unchecked operators)"
+  [body]
+  (update body :blocks
+          (fn [bs]
+            (mapv (fn [b]
+                    (let [t (:term b)]
+                      (if-not (= "call" (k t))
+                        b
+                        (let [[_ f args dest target] t
+                              nm (intrinsic-name (operand-tc body f))
+                              push (fn [s] (-> b (update :stmts conj s) (assoc :term (list 'goto target))))]
+                          (cond
+                            (nil? nm) b
+                            (= nm "unreachable") (assoc b :term '(unreachable))
+;; RF12-P6: ptr_metadata as UnOp::PtrMetadata
+                            (= nm "ptr_metadata") (push (list 'assign dest (list 'unop "PtrMetadata" (first args))))
+                            ;; RF12-P6: transmute as Rvalue::Cast(Transmute) to the destination's type (lower_intrinsics.rs)
+                            (#{"transmute" "transmute_unchecked"} nm) (push (list 'assign dest (list 'cast "Transmute" (first args) (ty-form-of (place-tc body dest)))))
+                            ;; RF12-P6: ub_checks, overflow_checks and contract_checks as Operand::RuntimeChecks
+                            (#{"ub_checks" "overflow_checks" "contract_checks"} nm)
+                            (push (list 'assign dest (list 'use (list 'runtime-checks ({"ub_checks" "UbChecks" "overflow_checks" "OverflowChecks" "contract_checks" "ContractChecks"} nm)))))
+                            (= nm "forget") (push (list 'assign dest (unit-use)))
+                            (= nm "assume") (push (list 'assume (first args)))
+                            (= nm "discriminant_value")
+                            (let [a (first args) p (second a)]
+                              (push (list 'assign dest (list 'discriminant (mk-place (place-local p) (conj (place-proj p) (list 'deref)))))))
+                            (intrinsic-binops nm) (push (list 'assign dest (list 'binop (intrinsic-binops nm) (first args) (second args))))
+                            :else b)))))
+                  bs))))
+
+(defn remove-place-mention
+  "RemovePlaceMention: PlaceMention and nop statements dropped"
+  [body]
+  (update body :blocks (fn [bs] (mapv (fn [b] (update b :stmts (fn [ss] (filterv #(not (#{"place-mention" "nop"} (k (unwrap-dbg %)))) ss)))) bs))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The pipeline (lib.rs: mir_built, mir_promoted, run_analysis_cleanup_passes, run_runtime_lowering_passes,
+;; run_runtime_cleanup_passes) and the stages the judge compares
+
+(declare elaborate-drops)
+
+;; ---------------------------------------------------------------------------------------------
+;; PostAnalysisNormalize (post_analysis_normalize.rs): opaque types revealed (TypingMode::PostAnalysis), each by its
+;; defining function's hidden type, the type of that function's body (the corpus's opaque types are return-position
+;; `impl Trait` of the crate's functions). Since RFP33 (a) an opaque type carries its OpaqueTy definition, whose parent is
+;; its definer (two functions' alike opaque types are two types, a generic definer's hidden type takes the use's arguments);
+;; one without (an expansion's, no root-file span) by the signatures equal to it, as before: one alike definer or none
+
+(def ^:dynamic *opaque-cache* nil)   ; atom: an opaque type -> its hidden type, or ::none
+
+(defn- param-args
+  "RFP33 (a): the arguments an opaque type's use gives its definer's parameters: the definition's args (the identity) against
+  the use's, {index arg}"
+  [def-args use-args]
+  (into {} (for [[t x] (map vector def-args use-args) :when (and (vector? t) (number? (second t)))] [(second t) x])))
+
+(defn- subst-map [t m]
+  (cond (and (vector? t) (#{:param :re-early} (first t)) (contains? m (second t))) (get m (second t))
+        (vector? t) (mapv #(subst-map % m) t)
+        (map? t) (into {} (for [[a b] t] [a (subst-map b m)]))
+        (seq? t) (apply list (map #(subst-map % m) t))
+        :else t))
+
+(defn- definer-closure?
+  "RF18: TEXT (typeck's `{closure@FILE:L:C: L:C}`) is a closure defined inside the function DEF (its definitions' parents)"
+  [^String text def]
+  (when-let [[_ a b c d] (re-find #":(\d+):(\d+): (\d+):(\d+)\}$" text)]
+    (let [want (mapv parse-long [a b c d])
+          cl (some (fn [x] (when (and (= "Closure" (:kind x))
+                                      (= want (some->> (try (#'tc/closure-decl-span (:node x)) (catch Throwable _ nil)) (take 4) (mapv long))))
+                             x))
+                   (c/defs))]
+      (loop [x cl] (cond (nil? x) false (= def (:id x)) true :else (recur (c/def-of (:parent x))))))))
+
+(defn- close-definer-closures
+  "RF18 (RFP62 (a)): a generic definer's own closures in its hidden type at the definer's identity arguments (a closure's
+  ClosureArgs carry its parent's: `[:closure TEXT SIG ARGS]`, mono's closed form), substituted with the type at the use"
+  [t def]
+  (let [g (c/generics-of def)]
+    (if-not (some #(#{:type :const} (:kind %)) (c/all-params g))
+      t
+      (let [ids (mapv tc/erase-ty (c/identity-args g))]
+        (letfn [(walk [x] (cond (and (vector? x) (= :closure (first x)) (= 3 (count x)) (string? (second x)) (definer-closure? (second x) def))
+                                (conj x ids)
+                                (vector? x) (mapv walk x)
+                                (map? x) (into {} (for [[a b] x] [a (walk b)]))
+                                :else x))]
+          (walk t))))))
+
+(defn- hidden-type [op]
+  (let [cache (or *opaque-cache* (atom {}))]
+    (if (contains? @cache op)
+      (get @cache op)
+      (if-let [od (when-let [id (nth op 2 nil)] (c/def-of id))]
+        ;; RFP33 (a): the opaque type's definition names its defining function (its parent); the hidden type that body's
+        ;; typeck gives it (its return-position opaque type: the body's type), the definer's parameters taken from the use's
+        ;; clauses (the opaque type's args)
+        (let [d (c/def-of (:parent od))
+              out (when (and d (#{"Fn" "AssocFn"} (str (:kind d))) (map? (:node d)) (:body (:node d)))
+                    (:output (try (tc/erased-sig (:id d)) (catch Throwable _ nil))))
+              h (when (and (vector? out) (= :opaque (first out)) (= (nth out 2 nil) (nth op 2 nil)))
+                  (let [res (tc/body-results d)]
+                    (some-> (:ty (get res [(first (:hir-id (:node d))) :body])) tc/erase-ty (close-definer-closures (:id d))
+                            (subst-map (param-args (nth out 3 nil) (nth op 3 nil))))))]
+          (swap! cache assoc op h)
+          h)
+      (let [ds (filter (fn [d] (and (#{"Fn" "AssocFn"} (str (:kind d))) (map? (:node d)) (:body (:node d))
+                                    (= op (:output (try (tc/erased-sig (:id d)) (catch Throwable _ nil))))))
+                       (c/defs))
+            h (when (= 1 (count ds))
+                (let [d (first ds)
+                      res (tc/body-results d)]
+                  (some-> (:ty (get res [(first (:hir-id (:node d))) :body])) tc/erase-ty)))]
+        (swap! cache assoc op h)
+        h)))))
+
+(defn- reveal [t]
+  (cond (and (vector? t) (= :opaque (first t))) (if-let [h (hidden-type t)] (reveal h) t)
+        (vector? t) (mapv reveal t)
+        (map? t) (into {} (for [[a b] t] [a (reveal b)]))
+        (seq? t) (apply list (map reveal t))
+        :else t))
+
+(defn- has-opaque? [t] (boolean (some #(and (vector? %) (= :opaque (first %))) (tree-seq coll? seq t))))
+
+(defn- reveal-consts
+  "RFP33 (a): the blocks' function item constants whose type names an opaque type (`twice::<impl Fn(i32) -> i32>`) revealed,
+  their text printed again from the revealed type as MIR building prints a function constant"
+  [blocks]
+  (letfn [(walk [x]
+            (cond (and (seq? x) (= 'const (first x)) (seq? (nth x 2 nil)) (:tc (meta (nth x 2))))
+                  (let [t (:tc (meta (nth x 2)))]
+                    (if (and (= :fndef (first t)) (has-opaque? t))
+                      (let [t2 (reveal t)]
+                        (apply list 'const (build/fn-const-text t2) (build/ty-form t2) (drop 3 x)))
+                      x))
+                  (seq? x) (with-meta (apply list (map walk x)) (meta x))
+                  (vector? x) (with-meta (mapv walk x) (meta x))
+                  (map? x) (with-meta (into {} (for [[a b] x] [a (walk b)])) (meta x))
+                  :else x))]
+    (walk blocks)))
+
+(defn post-analysis-normalize
+  "PostAnalysisNormalize: the locals', the return type's and (RFP33 (a)) the function constants' opaque types revealed"
+  [body]
+  (if-not (or (some has-opaque? (:local-tys body))
+              (some #(and (seq? %) (= 'const (first %)) (has-opaque? (:tc (meta (nth % 2 nil)))))
+                    (tree-seq coll? seq (:blocks body))))
+    body
+    (let [lts (mapv #(if (has-opaque? %) (reveal %) %) (:local-tys body))
+          changed (set (keep-indexed (fn [i t] (when (not= t (nth (:local-tys body) i)) i)) lts))]
+      (-> body
+          (assoc :local-tys lts)
+          (update :locals (fn [ls] (vec (map-indexed (fn [i l] (if (changed i) (assoc l :ty (build/ty-form (nth lts i))) l)) ls))))
+          (cond-> (changed 0) (assoc :ret (build/ty-form (nth lts 0))))
+          (update :blocks reveal-consts)))))
+
+(def pipeline
+  "Each pass's -Zdump-mir name and its function; a promoted body starts at ImpossibleClauses. Passes that change nothing
+  in the corpus's bodies are identities here (ImpossibleClauses: no impossible predicates; Subtyper: no subtyping projections; AddMovesForPackedDrops: no packed drops;
+  StateTransform: no coroutines)"
+  [["LintAndRemoveUninhabited" (fn [b] (lint-and-remove-uninhabited b (:local-tys b) build/uninhabited-adt?))]
+   ["SimplifyCfg-initial" simplify-cfg]
+   ["PromoteTemps" promote-temps]
+   ["SimplifyCfg-promote-consts" simplify-cfg]
+   ["ImpossibleClauses" identity]
+   ["CleanupPostBorrowck" cleanup-post-borrowck]
+   ["RemoveNoopLandingPads" (fn [b] (if *panic-abort* b (remove-noop-landing-pads b)))]
+   ["SimplifyCfg-post-analysis" simplify-cfg]
+   ["Derefer" derefer]
+   ["AddCallGuards" add-call-guards]
+   ["PostAnalysisNormalize" post-analysis-normalize]
+   ["Subtyper" identity]
+   ["ElaborateDrops" (fn [b] (elaborate-drops b))]
+   ["AbortUnwindingCalls" abort-unwinding-calls]
+   ["AddMovesForPackedDrops" identity]
+   ["EraseDerefTemps" erase-deref-temps]
+   ["ElaborateBoxDerefs" elaborate-box-derefs]
+   ["StateTransform" identity]
+   ["LowerIntrinsics" lower-intrinsics]
+   ["RemovePlaceMention" remove-place-mention]
+   ["SimplifyCfg-pre-optimizations" #(simplify-cfg % {:preserve-switch-reads false})]])
+
+(def pass-names (mapv first pipeline))
+
+(defn pass-phase
+  "The MIR phase a pass runs in as -Zdump-mir numbers it (a pass name run again in a later phase, RemoveNoopLandingPads and
+  AddCallGuards among the optimizations, or in a shim's construction, is judged at its first phase's dump)"
+  [nm]
+  (let [i (.indexOf ^java.util.List pass-names nm)]
+    (cond (< i (.indexOf ^java.util.List pass-names "ImpossibleClauses")) "1-1-"
+          (< i (.indexOf ^java.util.List pass-names "AddCallGuards")) "2-1-"
+          (< i (.indexOf ^java.util.List pass-names "LowerIntrinsics")) "2-2-"
+          :else "3-1-")))
+
+(defn body-key [b] (if (:promoted b) (str (:name b) "::promoted[" (:promoted b) "]") (:name b)))
+
+(defn stages
+  "BODY after each pass of the pipeline to UPTO (a pass name): [[NAME {key body-or-{:error msg}}] ...], the promoted
+  bodies from PromoteTemps on"
+  [body upto]
+  (let [names (vec (take (inc (.indexOf ^java.util.List pass-names upto)) pass-names))]
+    (loop [ps (take (count names) pipeline) cur {(body-key body) body} out []]
+      (if-let [[nm f] (first ps)]
+        (let [nxt (reduce-kv (fn [acc key b]
+                               (if (:error b)
+                                 (assoc acc key b)
+                                 (let [_ (when-let [f (System/getenv "PASS_TRACE")] (spit f (str "pass " nm " " key "\n") :append true))
+                                       r (try (f b)
+                                              (catch Throwable e
+                                                (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
+                                                {:error (str nm ": " (or (:what (ex-data e)) e))}))]
+                                   (if-let [pbs (:promoted-bodies r)]
+                                     (into (assoc acc key (dissoc r :promoted-bodies)) (for [pb pbs] [(body-key pb) pb]))
+                                     (assoc acc key r)))))
+                             {} cur)]
+          (recur (rest ps) nxt (conj out [nm nxt])))
+        out))))
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Move paths (rustc_mir_dataflow/src/move_paths/{mod,builder}.rs, un_derefer.rs), over the types that need drop
+
+(defn- subpath-of
+  "MoveSubPath::of: [:one KEY], [:subslice from to], :skip or :stop"
+  [e]
+  (case (k e)
+    "deref" [:one [:deref]]
+    "field" [:one [:field (second e)]]
+    "cindex" (if (nth e 3) :stop [:one [:cindex (second e)]])
+    "downcast" [:one [:downcast (nth e 2)]]
+    "opaque" :skip
+    "index" :stop
+    "subslice" (if (nth e 3) :stop [:subslice (second e) (nth e 2)])
+    :stop))
+
+(defn- iter-projections
+  "UnDerefer::iter_projections: [[prefix-place elem] ...] through a deref temporary's chain, then the place's own"
+  [md p]
+  (let [chain (get (:un-derefer md) (place-local p))
+        places (if (seq (place-proj p)) (conj (vec chain) p) (vec chain))]
+    (vec (for [q places i (range (count (place-proj q)))]
+           [(mk-place (place-local q) (subvec (place-proj q) 0 i)) (nth (place-proj q) i)]))))
+
+(defn- adt-dtor? [t] (and (= :adt (first t)) (not (box? t)) (tc/implements-drop? t)))
+(defn- union? [t] (and (= :adt (first t)) (number? (second t)) (= "Union" (:kind (c/def-of (second t))))))
+
+(defn- proj-tc [body t e]
+  (case (k e)
+    "deref" (deref-tc t)
+    "field" (tc-of (nth e 2))
+    ("index" "cindex") (elem-tc t)
+    t))
+
+(defn- new-path! [md parent place]
+  (let [i (count (:paths @md))]
+    (swap! md update :paths conj {:parent parent :first-child nil :next-sibling nil :place place})
+    (when parent
+      (let [old (get-in @md [:paths parent :first-child])]
+        (swap! md #(-> % (assoc-in [:paths parent :first-child] i) (assoc-in [:paths i :next-sibling] old)))))
+    i))
+
+(defn- move-path-for
+  "move_path_for: the move path of PLACE (made as needed), ON-MOVE called with it; nothing for a place through a
+  reference, a field of a type with a destructor, a slice's element or a type that does not need drop"
+  [body md p on-move]
+  (when-let [base0 (get (:locals @md) (place-local p))]
+    (loop [ps (iter-projections @md p) base base0 union-path nil]
+      (if-let [[pref e] (first ps)]
+        (let [pt (place-tc body pref)
+              res (subpath-of e)]
+          (cond
+            (= :skip res) (recur (rest ps) base union-path)
+            (= :stop res) nil
+            (= :subslice (first res)) nil   ; a subslice of an array moved: not in the corpus
+            :else
+            (let [[_ key] res
+                  stop? (case (first key)
+                          :deref (#{:ref :ptr} (first pt))
+                          :field (adt-dtor? pt)
+                          :cindex (= :slice (first pt))
+                          false)]
+              (if stop?
+                nil
+                (let [union-path (if (and (= :field (first key)) (union? pt)) (or union-path base) union-path)
+                      et (proj-tc body pt e)]
+                  (if-not (build/needs-drop? et)
+                    nil
+                    (if union-path
+                      (recur (rest ps) base union-path)
+                      (let [b2 (or (get (:projections @md) [base key])
+                                   (let [i (new-path! md base (mk-place (place-local pref) (conj (place-proj pref) e)))]
+                                     (swap! md assoc-in [:projections [base key]] i) i))]
+                        (recur (rest ps) b2 union-path)))))))))
+        (on-move (or union-path base))))))
+
+(defn- find-path
+  "MovePathLookup::find: [:exact PATH] or [:parent PATH-or-nil]"
+  [md p]
+  (if-let [r0 (get (:locals md) (place-local p))]
+    (loop [ps (iter-projections md p) r r0]
+      (if-let [[_ e] (first ps)]
+        (let [res (subpath-of e)]
+          (if (= :skip res)
+            (recur (rest ps) r)
+            (let [sub (when (= :one (first res)) (get (:projections md) [r (second res)]))]
+              (if sub (recur (rest ps) sub) [:parent r]))))
+        [:exact r]))
+    [:parent nil]))
+
+(defn- gather-moves
+  "gather_moves: the move paths, the moves out and the initializations of BODY's places whose types need drop"
+  [body]
+  (let [md (atom {:paths [] :locals [] :projections {} :un-derefer {} :moves {} :inits {} :arg-inits []})
+        _ (swap! md assoc :locals
+                 (vec (for [[i l] (map-indexed vector (:locals body))]
+                        (when (and (not (:deref-temp l)) (build/needs-drop? (nth (:local-tys body) i)))
+                          (new-path! md nil (mk-place i []))))))
+        loc (atom [0 0])
+        gather-move (fn [p] (move-path-for body md p (fn [mpi] (swap! md update-in [:moves @loc] (fnil conj []) mpi))))
+        gather-op (fn [o] (when (= "move" (k o)) (gather-move (second o))))
+        create (fn [p] (move-path-for body md p (fn [_] nil)))
+        gather-init (fn [p kind]
+                      (let [proj (place-proj p)
+                            p (if (and (seq proj) (= "field" (k (peek proj))) (union? (place-tc body (mk-place (place-local p) (pop proj)))))
+                                (mk-place (place-local p) (pop proj)) p)
+                            [r path] (find-path @md p)]
+                        (when (= :exact r) (swap! md update-in [:inits @loc] (fnil conj []) [path kind]))))]
+    ;; gather_args
+    (doseq [a (range 1 (inc (:args body)))]
+      (when-let [path (get (:locals @md) a)] (swap! md update :arg-inits conj path)))
+    (doseq [[bb blk] (map-indexed vector (:blocks body))]
+      (doseq [[i s] (map-indexed vector (:stmts blk))
+              :let [s (unwrap-dbg s)]]
+        (reset! loc [bb i])
+        (case (k s)
+          "assign" (let [[_ p r] s]
+                     (if (= "copy-for-deref" (k r))
+                       (let [l (place-local p) reffed (second r)
+                             chain (conj (vec (get (:un-derefer @md) (place-local reffed))) reffed)]
+                         (swap! md #(-> % (update :un-derefer dissoc (place-local reffed)) (assoc-in [:un-derefer l] chain)
+                                        (assoc-in [:locals l] (get (:locals %) (place-local (first chain)))))))
+                       (do (create p)
+                           (gather-init p :deep)
+                           (case (k r)
+                             ("use" "use-noretag" "repeat" "wrap-binder") (gather-op (second r))
+                             ("cast" "unop") (gather-op (nth r 2))
+                             "binop" (do (gather-op (nth r 2)) (gather-op (nth r 3)))
+                             "aggregate" (doseq [o (nth r 2)] (gather-op o))
+                             nil))))
+          "fake-read" (create (nth s 2))
+          "storage-dead" (when-not (:deref-temp (nth (:locals body) (second s))) (gather-move (mk-place (second s) [])))
+          nil))
+      (reset! loc [bb (count (:stmts blk))])
+      (let [t (:term blk)]
+        (case (k t)
+          "assert" (gather-op (second t))
+          "switch" (gather-op (second t))
+          "call" (let [[_ f args dest target] t]
+                   (gather-op f)
+                   (doseq [a args] (gather-op a))
+                   (when target (create dest) (gather-init dest :non-panic-path-only)))
+          nil)))
+    @md))
+
+(defn- children
+  "on_all_children_bits' order: the path, then each child's subtree (a path's first child its newest)"
+  [md path]
+  (loop [todo [path] acc []]
+    (if-let [p (peek todo)]
+      (let [kids (loop [c (get-in md [:paths p :first-child]) ks []] (if c (recur (get-in md [:paths c :next-sibling]) (conj ks c)) ks))]
+        (recur (into (pop todo) (rseq kids)) (conj acc p)))
+      acc)))
+
+;; ---------------------------------------------------------------------------------------------
+;; MaybeInitializedPlaces and MaybeUninitializedPlaces (rustc_mir_dataflow/src/impls/initialized.rs, drop_flag_effects.rs,
+;; framework/direction.rs's Forward), to their fixpoint
+
+(defn- location-effects
+  "drop_flag_effects_for_location: [[path :absent|:present] ...] in order (the moves out, a drop's place, the inits)"
+  [body md [bb i :as loc]]
+  (let [blk (nth (:blocks body) bb)
+        t (when (= i (count (:stmts blk))) (:term blk))]
+    (concat
+     (for [mpi (get (:moves md) loc) c (children md mpi)] [c :absent])
+     (when (= "drop" (k t))
+       (let [[r path] (find-path md (second t))] (when (= :exact r) (for [c (children md path)] [c :absent]))))
+     (for [[path kind] (get (:inits md) loc) :when (= :deep kind) c (children md path)] [c :present]))))
+
+(defn- entry-effects [body md] (for [path (:arg-inits md) c (children md path)] c))
+
+(defn- switch-int-data
+  "MaybePlacesSwitchIntData::new: a switch on `discriminant(P)` just computed: [enum-place [variant ...]] for its values"
+  [body bb t]
+  (let [d (second t)]
+    (when (#{"copy" "move"} (k d))
+      (let [discr (second d)
+            s (some-> (peek (vec (:stmts (nth (:blocks body) bb)))) unwrap-dbg)]
+        (when (and s (= "assign" (k s)) (= discr (second s)) (= "discriminant" (k (nth s 2))))
+          (let [ep (second (nth s 2)) et (place-tc body ep)]
+            (when (= :adt (first et))
+              (let [vals (tc/discriminant-values (second et))]
+                [ep (mapv (fn [[v _]] (.indexOf ^java.util.List (mapv bigint vals) (bigint v))) (nth t 2))]))))))))
+
+(defn- inactive-variant-paths
+  "on_all_inactive_variants: the paths under ENUM-PLACE's downcasts to variants INACTIVE? holds for"
+  [md ep inactive?]
+  (let [[r mpi] (find-path md ep)]
+    (when (= :exact r)
+      (for [c (loop [c (get-in md [:paths mpi :first-child]) ks []] (if c (recur (get-in md [:paths c :next-sibling]) (conj ks c)) ks))
+            :let [e (peek (place-proj (get-in md [:paths c :place])))]
+            :when (and (= "downcast" (k e)) (inactive? (nth e 2)))
+            x (children md c)]
+        x))))
+
+(defn- unwind-dead? [md p state]
+  (let [[r path] (find-path md p)]
+    (and (= :exact r) (not (some #(contains? state %) (children md path))))))
+
+(defn- maybe-places
+  "The fixpoint of MaybeInitializedPlaces (INIT? true: exclude_inactive_in_otherwise, skipping_unreachable_unwind) or
+  MaybeUninitializedPlaces (mark_inactive_variants_as_uninit, DEAD-UNWINDS skipped): each block's entry state (a set of
+  paths; nil an unreachable block's, for inits)"
+  [body md init? dead-unwinds]
+  (let [n (count (:blocks body))
+        all (set (range (count (:paths md))))
+        ;; Absent kills for inits and gens for uninits
+        upd (fn [st [path ds]] (if (= init? (= ds :present)) (conj st path) (disj st path)))
+        start (if init? (into #{} (entry-effects body md)) (reduce disj all (entry-effects body md)))
+        entry (atom (assoc (vec (repeat n (if init? nil #{}))) 0 start))
+        rpo (reverse-postorder (:blocks body))
+        dirty (atom (set rpo))]
+    (loop []
+      (when-let [bb (first (filter @dirty rpo))]
+        (swap! dirty disj bb)
+        (when-let [st0 (nth @entry bb)]
+          (let [blk (nth (:blocks body) bb)
+                st (reduce (fn [st [i s]]
+                             (let [st (reduce upd st (location-effects body md [bb i]))
+                                   s (unwrap-dbg s)]
+                               ;; precise_enum_drop_elaboration: a mutable borrow or raw pointer may initialize
+                               (if (and init? (= "assign" (k s)) (or (and (= "ref" (k (nth s 2))) (#{:mut :unique} (second (nth s 2))))
+                                                                     (= "rawptr" (k (nth s 2)))))
+                                 (let [[r mpi] (find-path md (nth (nth s 2) 2))]
+                                   (if (= :exact r) (into st (children md mpi)) st))
+                                 st)))
+                           st0 (map-indexed vector (:stmts blk)))
+                t (:term blk)
+                tloc [bb (count (:stmts blk))]
+                ;; get_terminator_edges before the terminator's effect
+                skip-unwind? (and (= "drop" (k t)) (= "cleanup" (k (nth t 3)))
+                                  (if init? (unwind-dead? md (second t) st) (contains? dead-unwinds bb)))
+                st (reduce upd st (location-effects body md tloc))
+                prop (fn [target s]
+                       (let [old (nth @entry target) nw (if old (into old s) s)]
+                         (when (not= old nw) (swap! entry assoc target nw) (swap! dirty conj target))))]
+            (case (k t)
+              ("goto") (prop (second t) st)
+              ("assert" "drop" "false-unwind")
+              (let [[target u] (case (k t) "assert" [(nth t 4) (nth t 5)] "drop" [(nth t 2) (nth t 3)] "false-unwind" [(nth t 1) (nth t 2)])]
+                (prop target st)
+                (when (and (= "cleanup" (k u)) (not skip-unwind?)) (prop (second u) st)))
+              "false-edge" (do (prop (second t) st) (prop (nth t 2) st))
+              "call" (let [[_ _ _ dest target u] t]
+                       (when (= "cleanup" (k u)) (prop (second u) st))
+                       (when target
+                         (let [[r mpi] (find-path md dest)
+                               st (if (= :exact r) (reduce (fn [s c] (if init? (conj s c) (disj s c))) st (children md mpi)) st)]
+                           (prop target st))))
+              "switch" (if-let [[ep variants] (switch-int-data body bb t)]
+                         (do (doseq [[i [_ target]] (map-indexed vector (nth t 2))]
+                               (let [active (nth variants i)
+                                     ps (inactive-variant-paths md ep #(not= % active))]
+                                 (prop target (if init? (reduce disj st ps) (into st ps)))))
+                             (prop (nth t 3) (let [ps (inactive-variant-paths md ep (set variants))]
+                                               (if init? (reduce disj st ps) (into st ps)))))
+                         (doseq [target (successors t)] (prop target st)))
+              nil)))
+        (recur)))
+    @entry))
+
+(defn- state-before
+  "The state before the statement or terminator at LOC (seek_before_primary_effect) from the block's entry state"
+  [body md entry init? [bb i]]
+  (when-let [st0 (nth entry bb)]
+    (let [upd (fn [st [path ds]] (if (= init? (= ds :present)) (conj st path) (disj st path)))]
+      (reduce (fn [st j]
+                (let [st (reduce upd st (location-effects body md [bb j]))
+                      s (unwrap-dbg (nth (:stmts (nth (:blocks body) bb)) j))]
+                  (if (and init? (= "assign" (k s)) (or (and (= "ref" (k (nth s 2))) (#{:mut :unique} (second (nth s 2))))
+                                                        (= "rawptr" (k (nth s 2)))))
+                    (let [[r mpi] (find-path md (nth (nth s 2) 2))]
+                      (if (= :exact r) (into st (children md mpi)) st))
+                    st)))
+              st0 (range i)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; ElaborateDrops (elaborate_drops.rs, elaborate_drop.rs's DropCtxt): drops made static, conditional on a drop flag,
+;; open (a field, variant or element ladder) or dead, by the places' maybe-initialized and maybe-uninitialized states
+
+(defn- bool-const [v] (list 'const (str "const " v) (build/ty-form [:bool]) (list 'scalar (if v 1 0) 1)))
+
+(defn- drop-fn-operand [t]
+  (let [ft [:fndef "core::ops::drop::Drop::drop" [t]]]
+    (list 'const (str "<" (build/ty-text t) " as std::ops::Drop>::drop") (with-meta (list 'ty "fn" '(other "fndef")) {:tc ft}) '(zst))))
+
+(defn- into-action [u] (if (= :in-cleanup u) '(terminate "cleanup") (list 'cleanup (second u))))
+
+(defn- adt-variants
+  "An ADT's variants as [[index name fields] ...], each field [name type] at ARGS"
+  [t]
+  (let [d (second t) args (nth t 2)]
+    (cond (number? d)
+          (if (tc/enum? d)
+            (vec (map-indexed (fn [i v] [i (second (:data v)) (tc/variant-fields (:id v) args)]) (tc/variants-of d)))
+            [[0 nil (tc/variant-fields d args)]])
+          (tc/std-adt-known? d)
+          (vec (map-indexed (fn [i v] [i (tc/variant-name (:path v)) (if (tc/enum? d) (tc/variant-fields (:path v) args) (tc/variant-fields d args))])
+                            (:variants (get (:adts c/*si*) d))))
+          :else (throw (ex-info "passes: an ADT's variants" {:what "an ADT's variants" :x d})))))
+
+(defn elaborate-drops
+  "ElaborateDrops"
+  [body]
+  (let [tr (fn [& xs] (when-let [f (System/getenv "PASS_TRACE")] (spit f (str (apply str (interpose " " xs)) "\n") :append true)))
+        _ (tr "ed" (:name body))
+        md (gather-moves body)
+        _ (tr "moves" (count (:paths md)))
+        inits-entry (maybe-places body md true nil)
+        _ (tr "inits")
+        dead-unwinds (set (for [[bb blk] (map-indexed vector (:blocks body))
+                                :let [t (:term blk)]
+                                :when (and (= "drop" (k t)) (= "cleanup" (k (nth t 3))))
+                                :let [st (state-before body md inits-entry true [bb (count (:stmts blk))])]
+                                :when (and st (unwind-dead? md (second t) st))]
+                            bb))
+        uninits-entry (maybe-places body md false dead-unwinds)
+        nb (count (:blocks body)) nl (count (:locals body))
+        last-idx (fn [pred] (last (keep-indexed (fn [i b] (when (and (pred (:term b)) (empty? (:stmts b))) i)) (:blocks body))))
+        patch (atom {:blocks [] :locals [] :terms {} :stmts []
+                     :resume (last-idx #(= "resume" (k %)))
+                     :unreachable-cleanup (last-idx #(= "unreachable" (k %)))   ; refined below
+                     :terminate (last-idx #(= "terminate" (k %)))})
+        _ (swap! patch assoc
+                 :unreachable-cleanup (last (keep-indexed (fn [i b] (when (and (= "unreachable" (k (:term b))) (empty? (:stmts b)) (:cleanup b)) i)) (:blocks body)))
+                 :terminate (when-let [i (:terminate @patch)] [i (second (:term (nth (:blocks body) i)))]))
+        new-block! (fn [cleanup term & [stmts]]
+                     (let [i (+ nb (count (:blocks @patch)))]
+                       (swap! patch update :blocks conj {:cleanup (boolean cleanup) :stmts (vec stmts) :after-dbg [] :term term}) i))
+        new-temp! (fn [t] (let [i (+ nl (count (:locals @patch)))] (swap! patch update :locals conj t) i))
+        patch-term! (fn [bb t] (swap! patch assoc-in [:terms bb] t))
+        add-assign! (fn [loc p rv] (swap! patch update :stmts conj [loc (list 'assign p rv)]))
+        resume-block! (fn [] (or (:resume @patch) (let [b (new-block! true '(resume))] (swap! patch assoc :resume b) b)))
+        unreachable-cleanup! (fn [] (or (:unreachable-cleanup @patch) (let [b (new-block! true '(unreachable))] (swap! patch assoc :unreachable-cleanup b) b)))
+        terminate-block! (fn [reason] (let [[b r] (:terminate @patch)]
+                                        (if (and b (= r reason)) b (let [b (new-block! true (list 'terminate reason))] (swap! patch assoc :terminate [b reason]) b))))
+        flags (atom {})   ; path -> drop flag local
+        cur (atom nil)    ; [init-state uninit-state] at the drop being elaborated
+        seek! (fn [loc] (reset! cur [(or (state-before body md inits-entry true loc) #{}) (or (state-before body md uninits-entry false loc) #{})]))
+        mi (fn [path] [(contains? (first @cur) path) (contains? (second @cur) path)])
+        drop-style (fn [path mode]
+                     (let [[init uninit multi]
+                           (if (= mode :shallow)
+                             (conj (mi path) false)
+                             (let [cs (children md path) ss (map mi cs)]
+                               [(boolean (some first ss)) (boolean (some second ss)) (not= 1 (count cs))]))]
+                       (cond (not init) :dead (not uninit) :static (not multi) :conditional :else :open)))
+        drop-flags-for (fn [path mode] (if (= mode :shallow)
+                                         (keep identity [(get @flags path)])
+                                         (keep #(get @flags %) (children md path))))
+        child-matching (fn [path pred] (loop [c (get-in md [:paths path :first-child])]
+                                         (when c (if (pred (peek (place-proj (get-in md [:paths c :place])))) c (recur (get-in md [:paths c :next-sibling]))))))
+        field-subpath (fn [path i] (child-matching path #(and (= "field" (k %)) (= i (second %)))))
+        downcast-subpath (fn [path vi] (child-matching path #(and (= "downcast" (k %)) (= vi (nth % 2)))))
+        deref-subpath (fn [path] (child-matching path #(= "deref" (k %))))
+        ty-of (fn [p] (if (< (place-local p) nl) (place-tc body p)
+                          (reduce #(proj-tc body %1 %2) (nth (:locals @patch) (- (place-local p) nl)) (place-proj p))))
+        field-place (fn [p i t] (mk-place (place-local p) (conj (place-proj p) (list 'field i (build/ty-form t)))))]
+    (letfn [(elaborate-drop [{:keys [path succ] :as d} bb]
+              (case (drop-style path :deep)
+                :dead (patch-term! bb (list 'goto succ))
+                :static (patch-term! bb (list 'drop (:place d) succ (into-action (:unwind d)) false nil))
+                :conditional (patch-term! bb (list 'goto (complete-drop d succ (:unwind d))))
+                :open (patch-term! bb (list 'goto (open-drop d)))))
+            (complete-drop [d succ unwind] (drop-flag-test-block d (drop-block d succ unwind) succ unwind))
+            (drop-block [d target unwind] (new-block! (= :in-cleanup unwind) (list 'drop (:place d) target (into-action unwind) false nil)))
+            (drop-flag-test-block [d on-set on-unset unwind]
+              (case (drop-style (:path d) :shallow)
+                :dead on-unset
+                :static on-set
+                (new-block! (= :in-cleanup unwind) (list 'switch (list 'copy (mk-place (get @flags (:path d)) [])) [[0 on-unset]] on-set))))
+            (drop-flag-reset-block [d mode succ unwind]
+              (if (= :in-cleanup unwind)
+                succ
+                (let [fl (drop-flags-for (:path d) mode)]
+                  (if (empty? fl)
+                    succ
+                    (new-block! false (list 'goto succ) (for [f fl] (list 'assign (mk-place f []) (list 'use (bool-const false)))))))))
+            (elaborated-drop-block [d]
+              (let [blk (new-block! (= :in-cleanup (:unwind d)) (list 'drop (:place d) (:succ d) (into-action (:unwind d)) false nil))]
+                (elaborate-drop d blk)
+                blk))
+            (drop-subpath [d place path succ unwind]
+              (if path
+                (elaborated-drop-block (assoc d :path path :place place :succ succ :unwind unwind))
+                (complete-drop (assoc d :place place :succ succ :unwind unwind) succ unwind)))
+            (drop-halfladder [d unwind-ladder succ fields]
+              (loop [fs (reverse fields) us unwind-ladder succ succ acc [succ]]
+                (if-let [[place path] (first fs)]
+                  (let [s (drop-subpath d place path succ (first us))]
+                    (recur (rest fs) (rest us) s (conj acc s)))
+                  acc)))
+            (retain? [[place path]]
+              (and (build/needs-drop? (ty-of place)) (not (and path (= :dead (drop-style path :deep))))))
+            (drop-ladder [d fields succ unwind]
+              (let [fields (vec (filter retain? fields))
+                    ul (vec (repeat (inc (count fields)) :in-cleanup))
+                    ul (if (= :in-cleanup unwind) ul (mapv (fn [b] [:to b]) (drop-halfladder d ul (second unwind) fields)))
+                    normal (drop-halfladder d ul succ fields)]
+                [(peek normal) (peek ul)]))
+            (ladder-bottom [d] [(drop-flag-reset-block d :shallow (:succ d) (:unwind d)) (:unwind d)])
+            (open-drop-for-tuple [d tys]
+              (let [fields (vec (map-indexed (fn [i t] [(field-place (:place d) i t) (field-subpath (:path d) i)]) tys))
+                    [succ unwind] (ladder-bottom d)]
+                (first (drop-ladder d fields succ unwind))))
+            (fields-of [d base vpath fs]
+              (vec (filter retain? (map-indexed (fn [i [_ ft]] [(field-place base i ft) (field-subpath vpath i)]) fs))))
+            (adt-switch-block [d t blocks values succ unwind]
+              (let [sb (if (apply = blocks)
+                         (first blocks)
+                         (let [dt (tc/discr-ty (second t))
+                               dl (new-temp! dt)]
+                           (new-block! (= :in-cleanup unwind)
+                                       (list 'switch (list 'move (mk-place dl [])) (mapv vector values blocks) (peek blocks))
+                                       [(list 'assign (mk-place dl []) (list 'discriminant (:place d)))])))]
+                (drop-flag-test-block d sb succ unwind)))
+            (open-drop-for-multivariant [d t succ unwind]
+              (let [vals (tc/discriminant-values (second t))
+                    st (atom {:values [] :normal [] :unwind [] :otherwise false :otherwise-glue false})]
+                (doseq [[vi vname fs] (adt-variants t)]
+                  (if-let [vpath (downcast-subpath (:path d) vi)]
+                    (let [base (mk-place (place-local (:place d)) (conj (place-proj (:place d)) (list 'downcast vname vi)))
+                          fields (fields-of d base vpath fs)]
+                      (swap! st update :values conj (nth vals vi))
+                      (when-not (= :in-cleanup unwind)
+                        (swap! st update :unwind conj (peek (drop-halfladder d (vec (repeat (inc (count fields)) :in-cleanup)) (second unwind) fields))))
+                      (swap! st update :normal conj (first (drop-ladder d fields succ unwind))))
+                    (do (swap! st assoc :otherwise true)
+                        (when (some (fn [[_ ft]] (build/needs-drop? ft)) fs) (swap! st assoc :otherwise-glue true)))))
+                (cond (not (:otherwise @st)) (swap! st update :values pop)
+                      (not (:otherwise-glue @st))
+                      (do (swap! st update :normal conj succ)
+                          (when-not (= :in-cleanup unwind) (swap! st update :unwind conj (second unwind))))
+                      :else
+                      (do (swap! st update :normal conj (drop-block d succ unwind))
+                          (when-not (= :in-cleanup unwind) (swap! st update :unwind conj (drop-block d (second unwind) :in-cleanup)))))
+                (let [s @st
+                      n (adt-switch-block d t (:normal s) (:values s) succ unwind)
+                      u (if (= :in-cleanup unwind) :in-cleanup [:to (adt-switch-block d t (:unwind s) (:values s) (second unwind) :in-cleanup)])]
+                  [n u])))
+            (destructor-call-block [d succ unwind]
+              (let [t (ty-of (:place d))
+                    rt [:ref [:re-erased] true t]
+                    r (new-temp! rt)
+                    u (new-temp! [:tuple []])]
+                (new-block! (= :in-cleanup unwind)
+                            (list 'call (drop-fn-operand t) [(list 'move (mk-place r []))] (mk-place u []) succ (into-action unwind))
+                            [(list 'assign (mk-place r []) (list 'ref :mut (:place d)))])))
+            (open-drop-for-box-contents [d t succ unwind]
+              (let [inner (first (nth t 2))
+                    it (build/ty-text inner)
+                    unique-f (with-meta (list 'ty (str "std::ptr::Unique<" it ">") '(other "adt")) {:tc [:adt "core::ptr::unique::Unique" [inner]]})
+                    nonnull-f (with-meta (list 'ty (str "std::ptr::NonNull<" it ">") '(other "adt")) {:tc [:adt "core::ptr::non_null::NonNull" [inner]]})
+                    ptr-t [:ptr false inner]
+                    pl (new-temp! ptr-t)
+                    interior (mk-place pl [(list 'deref)])
+                    do-drop (drop-subpath d interior (deref-subpath (:path d)) succ unwind)
+                    src (mk-place (place-local (:place d)) (into (place-proj (:place d)) [(list 'field 0 unique-f) (list 'field 0 nonnull-f)]))]
+                (new-block! (= :in-cleanup unwind) (list 'goto do-drop)
+                            [(list 'assign (mk-place pl []) (list 'cast "Transmute" (list 'copy src) (build/ty-form ptr-t)))])))
+            (open-drop-for-adt [d t]
+              (let [vs (adt-variants t)]
+                (if (empty? vs)
+                  (new-block! (= :in-cleanup (:unwind d)) '(unreachable))
+                  (let [skip (or (union? t) (= "core::mem::manually_drop::ManuallyDrop" (second t)))
+                        [csucc cunwind] (cond skip [(:succ d) (:unwind d)]
+                                              (not (tc/enum? (second t)))
+                                              (let [[succ unwind] (ladder-bottom d)]
+                                                (drop-ladder d (fields-of d (:place d) (:path d) (nth (first vs) 2)) succ unwind))
+                                              :else (let [[succ unwind] (ladder-bottom d)] (open-drop-for-multivariant d t succ unwind)))]
+                    (cond (box? t)
+                          (let [succ (destructor-call-block d csucc cunwind)
+                                unwind (if (= :in-cleanup cunwind) :in-cleanup [:to (destructor-call-block d (second cunwind) :in-cleanup)])]
+                            (drop-flag-test-block d (open-drop-for-box-contents d t succ unwind) csucc cunwind))
+                          (adt-dtor? t) (drop-flag-test-block d (destructor-call-block d csucc cunwind) csucc cunwind)
+                          :else csucc)))))
+            (open-drop [d]
+              (let [t (ty-of (:place d))]
+                (case (first t)
+                  :closure (open-drop-for-tuple d (get build/*closure-tys* (second t)))
+                  :tuple (open-drop-for-tuple d (second t))
+                  :adt (open-drop-for-adt d t)
+                  :dyn (complete-drop d (:succ d) (:unwind d))
+                  (throw (ex-info "passes: an open drop of" {:what (str "an open drop of " (first t))})))))]
+      ;; collect_drop_flags
+      (doseq [[bb blk] (map-indexed vector (:blocks body))
+              :let [t (:term blk)] :when (= "drop" (k t))
+              :let [[r path] (find-path md (second t))] :when (= :exact r)]
+        (seek! [bb (count (:stmts blk))])
+        (doseq [c (children md path)]
+          (let [[i u] (mi c)] (when (and i u (not (get @flags c))) (swap! flags assoc c (new-temp! [:bool]))))))
+      ;; elaborate_drops
+      (doseq [[bb blk] (map-indexed vector (:blocks body))
+              :let [t (:term blk)] :when (= "drop" (k t))
+              :let [[_ p target u _ dropline] t]]
+        (if-not (build/needs-drop? (place-tc body p))
+          (patch-term! bb (list 'goto target))
+          (let [[r path] (find-path md p)]
+            (when (= :exact r)
+              (let [unwind (cond (:cleanup blk) :in-cleanup
+                                 (= "cleanup" (k u)) [:to (second u)]
+                                 (= "continue" (k u)) [:to (resume-block!)]
+                                 (= "unreachable" (k u)) [:to (unreachable-cleanup!)]
+                                 (= "terminate" (k u)) [:to (terminate-block! (second u))])]
+                (seek! [bb (count (:stmts blk))])
+                (elaborate-drop {:place p :path path :succ target :unwind unwind} bb))))))
+      (let [set-flag! (fn [loc path v] (when-let [f (get @flags path)] (add-assign! loc (mk-place f []) (list 'use (bool-const v)))))]
+        ;; drop_flags_on_init
+        (doseq [[_ f] (sort-by key @flags)] (add-assign! [0 0] (mk-place f []) (list 'use (bool-const false))))
+        ;; drop_flags_for_fn_rets
+        (doseq [blk (:blocks body) :let [t (:term blk)]
+                :when (and (= "call" (k t)) (nth t 4) (= "cleanup" (k (nth t 5))))
+                :let [[r path] (find-path md (nth t 3))] :when (= :exact r)
+                c (children md path)]
+          (set-flag! [(nth t 4) 0] c true))
+        ;; drop_flags_for_args
+        (doseq [c (entry-effects body md)] (set-flag! [0 0] c true))
+        ;; drop_flags_for_locs
+        (doseq [[bb blk] (map-indexed vector (:blocks body))]
+          (doseq [i (range (inc (count (:stmts blk))))
+                  :when (not (and (= i (count (:stmts blk))) (= "drop" (k (:term blk)))))]
+            (doseq [[path ds] (location-effects body md [bb i])] (set-flag! [bb i] path (= ds :present))))
+          (let [t (:term blk)]
+            (when (and (= "call" (k t)) (nth t 4) (#{"continue" "unreachable" "terminate"} (k (nth t 5))))
+              (let [[r path] (find-path md (nth t 3))]
+                (when (= :exact r) (doseq [c (children md path)] (set-flag! [bb (count (:stmts blk))] c true))))))))
+      ;; MirPatch::apply
+      (let [p @patch
+            b (-> body
+                  (update :blocks into (:blocks p))
+                  (update :locals into (map (fn [t] {:mut true :scope 0 :ty (build/ty-form t)}) (:locals p)))
+                  (update :local-tys into (:locals p)))
+            b (apply-patch b (:stmts p))]
+        (reduce (fn [b [bb t]] (cond-> (assoc-in b [:blocks bb :term] t) (= "unreachable" (k t)) (assoc-in [:blocks bb :stmts] [])))
+                b (:terms p))))))

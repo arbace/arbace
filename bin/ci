@@ -37,6 +37,17 @@
 #   bin/ci musl read           musl's sources read by repr/c into the forms cache .tmp/ci-musl/forms, indexed
 #   bin/ci musl fresh|ensure   exit 0 when the forms cache was read by this checkout's repr/c (forms/key, CS211); ensure: prepare,
 #                              then read when it was not (bin/ci check and check --aot do)
+#   bin/ci aot-lib build|prune     cf2g's prebuilt libraries (RES34, doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 (write-ahead)"): build:
+#                              every musl unit translated once into its Go package in .tmp/ci-aot-lib/musl_KEY/ (CI_AOT_LIB; a
+#                              program's AOT build makes the ones it lacks itself); prune: per library the newest 3 keys kept, an
+#                              older one removed when unused for a day. CI_AOT_LIB_OFF=1: each program translated whole, as before
+#   bin/ci runtime build|key|dir|prune
+#                              ci's prebuilt runtime (doc/C23-SURVEY.md, "As built: ci's prebuilt runtime"): build: every musl
+#                              unit checked and built once into its fragment, cached in .tmp/ci-runtime/musl-KEY/ (CI_RUNTIME;
+#                              CI_THREADS, default 4; a program's build makes the fragments it lacks itself); key: the runtime's key
+#                              (the fragments' format, the target, musl's forms cache's key, ci's checker and builder as loaded); dir: its
+#                              directory; prune: the other keys' directories unused for a day removed (build does too). CI_PREBUILT=0 builds each program with its runtime as before; CI_LINK_CHECK=1 builds both ways
+#                              and requires the same node program
 #   bin/ci cirun-build         ci's back end, go/arbace/crt and go/arbace/ci printed by repr/go, with tools/cirun
 #                              built by TamaGo's go into .tmp/ci/cirun (CI_GO_SRC: a Go tree of the packages instead)
 #   bin/ci diagnose [--std S] [OPTION...] FILE...
@@ -54,19 +65,36 @@
 #                              committed files and the corpus' :count against the table's, nothing written
 #   bin/ci record-ref [--corpus C,...] [--only]
 #                              gcc 15.2's runs of the single-file run corpora recorded as data,
-#                              test/c/ref-gcc15.edn (bin/lib/ci/record-ref, its header; CS14 (a))
+#                              test/c/ref-gcc15.edn (bin/lib/ci/record-ref, its header; CS14 (a)); since the user's
+#                              decision of 2026-11-07 the oracle tier's for the cases with a verdict of their own
+#   bin/ci selfref ref|agree   the run corpora's own verdicts (test/c/selfref.ae): ref the judges' reference (each case's
+#                              own verdict, else gcc's run); agree the two judges compared from the records alone
+# The target and the judge (doc/C23-SURVEY.md, "As built: C's own target", "Decided (the user, 2026-11-07): the judge"):
+# ARBACE_C_TARGET=arbace (the default: c/target, c/include and musl's tarball) or gcc (test/c/host, the host's headers);
+# ARBACE_C_JUDGE=self (the default: each test's own verdict) or gcc (gcc 15.2's outcomes: the oracle tier's, by hand).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
+# the target (c/README.md): Arbace's c/target and sysroot by default, gcc's test/c/host under ARBACE_C_TARGET=gcc
+# the oracles' packs (doc/ORACLE-RECORDS-SURVEY.md): gcc's records C's oracle tier reads and verifies
+. "$root/test/oracle-records/oracle.bash"
+. "$root/bin/lib/repr-c/sysroot.bash"
+case "${1:-}" in musl|cirun-build|c2j-check|cinterp-check|synth|selfref|"") ;; *) c_sysroot || exit 1 ;; esac
+# the checkout's ci, not the host's embedded copy of an older one (bin/lib/ci/fresh.bash; the own target's triage)
+. "$root/bin/lib/ci/fresh.bash"
+case "${1:-}" in cirun-build|c2j-check|cinterp-check|synth|selfref|"") ;; *) c_ci_fresh || exit 1 ;; esac
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
   diagnose) arbace_tool -m arbace.repr.c.annot check "$root/test/c/host" "$@" ;;
   annot) arbace_tool -m arbace.repr.c.annot "$cmd" "$root/test/c/host" "$@" ;;
-  run) exec "$root/bin/lib/ci/run" "$@" ;;
-  nodes) "$root/bin/ci" musl ensure && arbace_tool -m arbace.c.run "$root/test/c/host" nodes "$@" ;;
+  # the readers of musl's forms cache hold it shared for their run (bin/lib/crops/musl-hold.bash, review 300's finding 2): taken here,
+  # before the exec, so the run inherits the lock and CI_MUSL_HELD (bin/lib/ci is in the javac keys; bin/lib/crops is in none)
+  run) . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold || exit 1; exec "$root/bin/lib/ci/run" "$@" ;;
+  nodes) . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold && arbace_tool -m arbace.c.run "$root/test/c/host" nodes "$@" ;;
   check)
+    case " $* " in *" --judge "*) ;; *) . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold || exit 1 ;; esac
     for a in "$@"; do [ "$a" = --aot ] && { args=(); for b in "$@"; do [ "$b" = --aot ] || args+=("$b"); done; exec "$root/bin/lib/ci/check-aot" "${args[@]}"; }; done
     exec "$root/bin/lib/ci/check" "$@" ;;
   dg) exec "$root/bin/lib/ci/dg" "$@" ;;
@@ -78,13 +106,70 @@ case $cmd in
     exit "${PIPESTATUS[0]}" ;;
   divergences) arbace_tool -m arbace.c.run "$root/test/c/host" divergences test/c/check-linux-amd64.edn test/c/divergences.edn ;;
   aot) arbace_tool -m arbace.c.cf2g translate "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" "$2" ;;
-  musl) exec "$root/bin/lib/ci/musl" "$@" ;;
+  musl)
+    # under a holder's shared lock (ci_musl_hold, CI_MUSL_HELD: this process descends from it) no read can take the exclusive lock
+    # (it would wait on its own parent): ensure and read find the cache fresh and read nothing, or fail at once when it is stale
+    case ${CI_MUSL_HELD:+held}:${1:-} in
+      held:read|held:ensure)
+        "$root/bin/lib/ci/musl" fresh && { echo "musl: the forms cache is fresh (held by a parent), nothing to read"; exit 0; }
+        echo "musl: the forms cache is held by a parent (CI_MUSL_HELD) and not fresh: no read under it" >&2; exit 1 ;;
+    esac
+    exec "$root/bin/lib/ci/musl" "$@" ;;
+  selfref) # the run corpora's own verdicts (test/c/selfref.ae; the user, 2026-11-07): ref prints the judges' reference file;
+           # agree compares them with gcc 15.2's recorded runs and the recorded results (the oracle tier's, no run)
+    . "$root/bin/lib/ci/selfref.bash"
+    case ${1:-} in
+      ref) ARBACE_C_JUDGE=self c_run_ref ;;
+      agree) modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE); gccroot=$("$root/bin/repr-c" gcc-tests) || exit 1
+             arbace_tool -p "$root/test" -m c.selfref agree "{:gomodcache \"$modcache\" :gcc-15.2.0 \"$gccroot\" :checkout \"$root\"}" \
+               test/c/ref-gcc15.edn test/c/check-linux-amd64.edn ;;
+      *) echo "ci selfref: ref or agree" >&2; exit 2 ;;
+    esac ;;
   repl-session)
-    "$root/bin/ci" musl ensure
+    . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold
     { [ -n "${CIRUN:-}" ] && [ -x "$CIRUN" ]; } || "$root/bin/ci" cirun-build --ensure
     out=$TMPDIR/ci-repl-session.out
     (cd "$root" && arbace_tool "$root/test/c/repl/letters.ae") 2>&1 | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; } > "$out"
     if diff "$root/test/c/repl/letters.out" "$out"; then echo "ci: the REPL session passes"; else echo "ci: the REPL session differs" >&2; exit 1; fi ;;
+  aot-lib)
+    # RES34 (doc/rust/RUST-EVAL-SURVEY.md, "As built: RES34 (write-ahead)"): cf2g's prebuilt libraries, .tmp/ci-aot-lib/LIB_KEY/
+    case ${1:-} in
+      # RES40 (a): the cache shared by the worktrees, the main checkout's (CI_AOT_LIB overrides), as bin/lib/ci/check-aot takes it
+      build) export CI_AOT_LIB=${CI_AOT_LIB:-${root%%/.tmp/worktrees/*}/.tmp/ci-aot-lib}
+        . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold && arbace_tool -m arbace.c.aotlib translate-musl "${CI_THREADS:-2}" ;;
+      prune)
+        # per library (the name before its key) the newest 3 directories kept, an older one removed when unused for a day
+        c=${CI_AOT_LIB:-${root%%/.tmp/worktrees/*}/.tmp/ci-aot-lib}; [ -d "$c" ] || exit 0   # RES40 (a): the main checkout's
+        for n in $(ls "$c" | sed 's/_[0-9a-f]\{16\}$//' | sort -u); do
+          ls -dt "$c/${n}"_???????????????? 2>"$TMPDIR/ci-aot-lib.err" | tail -n +4 | while read -r d; do
+            [ -n "$(find "$d" -maxdepth 0 -mmin +1440)" ] && { echo "ci aot-lib: removed $d"; rm -rf "${d:?}"; }
+          done
+        done ;;
+      *) echo "usage: bin/ci aot-lib build|prune" >&2; exit 2 ;;
+    esac ;;
+  runtime)
+    . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold
+    case ${1:-} in
+      build) arbace_tool -p "$root" -e "(require 'arbace.c.runtime 'arbace.repr.c.host)" \
+               -e "(let [lib (arbace.c.runtime/library (arbace.repr.c.host/load-host \"$root/test/c/host\") \"$root\") r (arbace.c.runtime/prebuild lib ${CI_THREADS:-4})] (println \"ci runtime:\" (:units r) \"units,\" (:made r) \"fragments made,\" (:items-refused r) \"items refused (an error only when linked), in\" (:dir r)) (shutdown-agents))" ;;
+      key|dir) arbace_tool -p "$root" -e "(require 'arbace.c.runtime 'arbace.repr.c.host)" \
+               -e "(let [lib (arbace.c.runtime/library (arbace.repr.c.host/load-host \"$root/test/c/host\") \"$root\")] (println (if (= \"$1\" \"key\") (:runtime-key lib) (:frag-dir lib))))" ;;
+      prune) ;;
+      *) echo "usage: bin/ci runtime build|key|dir|prune" >&2; exit 2 ;;
+    esac
+    # CS272 (a): build and prune remove the other keys' directories unused for a day (review 187: a younger one may be another
+    # process's, a stage 0's ci or a worktree's; each build marks its key's directory used); bin/gate --prune trims the cache
+    # too: per library the newest 3, an older one when a day old
+    case ${1:-} in
+      build|prune)
+        cur=$("$root/bin/ci" runtime dir 2>"$TMPDIR/ci-runtime-dir.err" | tail -1)
+        case $cur in */musl-*) ;; *) echo "bin/ci runtime: no current directory ($TMPDIR/ci-runtime-dir.err)" >&2; exit 1 ;; esac
+        for d in "$(dirname "$cur")"/musl-*; do
+          [ -d "$d" ] && [ "$d" != "$cur" ] || continue
+          [ -n "$(find "$d" -maxdepth 0 -mmin +1440)" ] || continue
+          echo "ci runtime: removed $d (another key, unused for a day)"; rm -rf "${d:?}"
+        done ;;
+    esac ;;
   cirun-build) exec "$root/bin/lib/ci/cirun-build" "$@" ;;
   annotations) exec "$root/bin/lib/repr-c/annotations" "$@" ;;
   synth)

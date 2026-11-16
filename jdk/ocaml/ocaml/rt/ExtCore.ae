@@ -4,6 +4,8 @@
 
 (in-ns 'ocaml.rt)
 
+(import '(java.util IdentityHashMap ArrayList))
+
 (defclass ^:public ^:final ExtCore
 
   (field ^:public ^:static ^long ooId 0)
@@ -36,7 +38,44 @@
   (method ^:public ^:static caml_obj_raw_field [x i] (NInt. (Rt/l (Rt/field x (Rt/ii i)))))
   (method ^:public ^:static caml_obj_set_raw_field [x i v]
     (Rt/setField x (Rt/ii i) (Long/valueOf (.-v (cast NInt v)))))
-  (method ^:public ^:static caml_obj_reachable_words [x] (Long/valueOf (long (unchecked-inc-int (Rt/size x)))))
+  ;; extern.c's caml_obj_reachable_words (OC216 (a), oi's reachableWords): the words of the blocks reachable from x, each counted
+  ;; once with its header, by OCaml's layout on 64 bits (an immediate none, a boxed float 2, a boxed integer 3, a string its padded
+  ;; words, a float array one a float, a block its fields; a closure 3 and a partial application caml_curry's, their environments not
+  ;; seen by the runtime's Java objects)
+  (method ^:public ^:static caml_obj_reachable_words [x]
+    (let [seen (IdentityHashMap.)
+          stack (ArrayList.)
+          ^:mutable ^long n 0]
+      (when (not (instance? Long x)) (.add stack x))
+      (while (not (.isEmpty stack))
+        (let [v (.remove stack (unchecked-dec-int (.size stack)))]
+          (cond
+            (instance? Double v) (set! n (unchecked-add n 2))
+            (or (instance? Integer v) (instance? I64 v) (instance? NInt v)) (set! n (unchecked-add n 3))
+            (.containsKey seen v) nil
+            :else
+            (do (.put seen v Boolean/TRUE)
+                (cond
+                  (instance? byte/1 v) (set! n (unchecked-add n (unchecked-add 1 (unchecked-divide (unchecked-add (long (alength (cast byte/1 v))) 8) 8))))
+                  (instance? double/1 v) (set! n (unchecked-add n (unchecked-add 1 (long (alength (cast double/1 v))))))
+                  (instance? Block v)
+                  (let [b (cast Block v) f (.-f b)]
+                    (set! n (unchecked-add n (unchecked-add 1 (long (alength f)))))
+                    (when (< (.-tag b) 251)
+                      (loop [^int i 0]
+                        (when (< i (alength f))
+                          (let [y (aget f i)] (when (not (or (nil? y) (instance? Long y))) (.add stack y)))
+                          (recur (unchecked-inc-int i))))))
+                  (instance? Pap v)
+                  (let [p (cast Pap v)]
+                    (set! n (unchecked-add n (unchecked-add 4 (long (alength (.-args p))))))
+                    (.add stack (.-fn p))
+                    (loop [^int i 0]
+                      (when (< i (alength (.-args p)))
+                        (let [y (aget (.-args p) i)] (when (not (or (nil? y) (instance? Long y))) (.add stack y)))
+                        (recur (unchecked-inc-int i)))))
+                  :else (set! n (unchecked-add n 3)))))))
+      (Long/valueOf n)))
   (method ^:public ^:static caml_obj_is_shared [x] Rt/TRUE)
   (method ^:public ^:static caml_obj_compare_and_swap [x i old v]
     (let [f (.-f (cast Block x)) k (Rt/ii i)]
@@ -186,9 +225,62 @@
 
   ;; ---- domains (domain.c)
 
-  (method ^:public ^:static caml_domain_spawn [f ts] (Effects/spawn f ts))
+  ;; OCAMLRUNPARAM's d, the domains at most (startup_aux.c's scanmult; OC193 (a), oi's ext_domain.go's maxDomains): 128 by default,
+  ;; read once; a spawn beyond it fails as domain_create's does
+  (field ^:static ^long maxDomainsParam 0)
+  (method ^:static scanMult ^long [^String opt]
+    (let [n (.length opt)
+          ^:mutable ^long val 1 ^:mutable ^int mult 32]
+      (when (and (> n 0) (== (int (.charAt opt 0)) 61))
+        (let [hex (and (> n 2) (== (int (.charAt opt 1)) 48) (or (== (int (.charAt opt 2)) 120) (== (int (.charAt opt 2)) 88)))
+              ^int j (if hex (int 3) (int 1))
+              ^:mutable ^int k j]
+          (while (and (< k n) (or (Character/isDigit (.charAt opt k))
+                                  (and hex (>= (Character/digit (.charAt opt k) 16) 0))))
+            (set! k (unchecked-inc-int k)))
+          (when (> k j)
+            (try (set! val (Long/parseLong (.substring opt j k) (if hex (int 16) (int 10))))
+                 (catch NumberFormatException _ nil)))
+          (when (< k n) (set! mult (int (.charAt opt k))))))
+      (cond (== mult 107) (unchecked-multiply val 1024)
+            (== mult 77) (unchecked-multiply val 1048576)
+            (== mult 71) (unchecked-multiply val 1073741824)
+            :else val)))
+  ;; OCAMLRUNPARAM's (or CAMLRUNPARAM's) option of letter c as caml_parse_ocamlrunparam scans it (options separated by commas, the
+  ;; last of a letter wins), -1 when it is not set (OC216 (a), oi's ext_domain.go's runParam)
+  (method ^:static runParam ^long [^int c]
+    (let [o (System/getenv "OCAMLRUNPARAM")
+          opt (if (nil? o) (let [cr (System/getenv "CAMLRUNPARAM")] (if (nil? cr) "" cr)) o)
+          n (.length opt)
+          ^:mutable ^long v -1
+          ^:mutable ^int i 0]
+      (while (< i n)
+        (when (== (int (.charAt opt i)) c) (set! v (ExtCore/scanMult (.substring opt (unchecked-inc-int i)))))
+        (while (and (< i n) (not (== (int (.charAt opt i)) 44))) (set! i (unchecked-inc-int i)))
+        (set! i (unchecked-inc-int i)))
+      v))
+  ;; OCAMLRUNPARAM's l, the stack's limit in words (128 Mi by default; oi's stackWords)
+  (method ^:static stackWords ^long []
+    (let [l (ExtCore/runParam 108)] (if (> l 0) l 134217728)))
+  (method ^:static maxDomains ^long []
+    (when (== maxDomainsParam 0)
+      (let [o (System/getenv "OCAMLRUNPARAM")
+            opt (if (nil? o) (let [c (System/getenv "CAMLRUNPARAM")] (if (nil? c) "" c)) o)
+            ^:mutable ^long d 128]
+        (loop [^int i 0]
+          (when (< i (.length opt))
+            (when (== (int (.charAt opt i)) 100) (set! d (ExtCore/scanMult (.substring opt (unchecked-inc-int i)))))
+            (recur (unchecked-inc-int i))))
+        (when (< d 1) (throw (Fatal. "Fatal error: OCAMLRUNPARAM: max_domains(d) must be at least 1" 2)))
+        (when (> d 4096) (throw (Fatal. "Fatal error: OCAMLRUNPARAM: max_domains(d) is too large. The maximum value is 4096." 2)))
+        (set! maxDomainsParam d)))
+    maxDomainsParam)
+  (method ^:public ^:static caml_domain_spawn [f ts]
+    (when (>= (unchecked-inc Effects/domainsRunning) (ExtCore/maxDomains))
+      (throw (Rt/failwith "failed to allocate domain: domain_create")))
+    (Effects/spawn f ts))
   (method ^:public ^:static caml_ml_domain_id [u] (Long/valueOf (.-id (.-dom (Effects/st)))))
   (method ^:public ^:static caml_ml_domain_index [u] (Long/valueOf (.-id (.-dom (Effects/st)))))
   (method ^:public ^:static caml_ml_domain_cpu_relax [u] (Gil/yield) Rt/UNIT)
-  (method ^:public ^:static caml_recommended_domain_count [u] (Long/valueOf 128))
+  (method ^:public ^:static caml_recommended_domain_count [u] (Long/valueOf 1)) ; oi's (ext_sys.go): at most the host's processors (parallel/recommended_domain_count_unix)
   (method ^:public ^:static caml_domain_count [u] (Long/valueOf (unchecked-inc Effects/domainsRunning))))

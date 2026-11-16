@@ -1,0 +1,280 @@
+(ns arbace.repr.haskell.driver
+  "GHC's driver's preprocessing of a module, in Arbace (doc/haskell/NATIVE.md, \"CPP, unlit,
+  hsc2hs\"): what GHC 9.14.1's pipeline runs before it parses (GHC.Driver.Pipeline's preprocess:
+  unlit for a literate module, then CPP when the CPP extension is on), with the arguments its
+  GHC.SysTools.Cpp.doCpp gives the Haskell C preprocessor: the -D and -U flags (opt_P), the -I
+  directories with the include directories of the preload units, ghcversion.h, the platform's
+  macros (linux_HOST_OS, x86_64_HOST_ARCH...), __GLASGOW_HASKELL_TH__, the SSE macros, the I/O
+  manager's, and the header of MIN_VERSION_pkg macros of the units in scope. The GHC installation
+  is read as data: its settings file (the target, the CPP command) and its package database (the
+  units' names, versions, dependencies and include directories), never run. The preprocessor is
+  arbace.repr.haskell.cpp, unlit arbace.repr.haskell.unlit; hsc2hs stays the helper's (it compiles
+  and runs a C program the .hsc makes, which needs the host's C compiler and linker).
+
+  The record of a preprocessing, `:cpp` (SPEC §2.8), as the helper writes it, but for one
+  canonical choice: GHC writes the MIN_VERSION header's blocks, and orders the preload units its
+  include directories come from, in the order of its unit map's keys, the uniques GHC's process gave
+  their names, which nothing outside that process can know; :macros is the SHA-256 of the header
+  with its blocks sorted (the helper's since its version 5), the preload units are closed from the
+  -package flags in their order."
+  (:require [arbace.repr.haskell.cpp :as cpp]
+            [arbace.repr.haskell.unlit :as unlit]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(set! *warn-on-reflection* true)
+
+(defn- sha256-hex ^String [^bytes bs]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") bs)
+        sb (StringBuilder.)]
+    (doseq [x d] (.append sb (format "%02x" (bit-and (long x) 0xff))))
+    (.toString sb)))
+
+(defn- latin1-bytes ^bytes [^String s] (.getBytes s "ISO-8859-1"))
+
+;;; The installation (GHC.Settings.IO, GHC.Unit.Database)
+
+(defn- hs-unescape ^String [^String s]
+  (str/replace s #"\\(.)" (fn [[_ c]] (case c "n" "\n" "t" "\t" c))))
+
+(defn- read-settings
+  "The settings file's pairs (libdir/settings, a Haskell [(String, String)]), $topdir expanded"
+  [^String libdir]
+  (let [t (slurp (cpp/file-at (str libdir "/settings")))]
+    (into {} (for [[_ k v] (re-seq #"\(\"((?:[^\"\\]|\\.)*)\"\s*,\s*\"((?:[^\"\\]|\\.)*)\"\)" t)]
+               [(hs-unescape k) (str/replace (hs-unescape v) "$topdir" libdir)]))))
+
+(defn- conf-fields
+  "An InstalledPackageInfo file's fields: name -> its text (continuation lines joined)"
+  [^String text]
+  (loop [ls (str/split-lines text) k nil acc {}]
+    (if-let [l (first ls)]
+      (cond
+        (re-find #"^\s" l) (recur (rest ls) k (if k (update acc k #(str % " " (str/trim l))) acc))
+        :else (if-let [[_ k2 v] (re-matches #"([A-Za-z0-9-]+):\s*(.*)" l)]
+                (recur (rest ls) k2 (assoc acc k2 (str/trim v)))
+                (recur (rest ls) k acc)))
+      acc)))
+
+(defn- words [^String s] (remove str/blank? (str/split (or s "") #"\s+")))
+
+(defn- version-key [^String v] (mapv #(Long/parseLong %) (re-seq #"\d+" v)))
+
+(defn installation
+  "The GHC installation under libdir: {:libdir :settings :units [unit...] :by-id {id unit}}, a unit
+  {:id :name :version :exposed :include-dirs :depends}, in the database's order (its files sorted)"
+  [^String libdir]
+  (let [db (cpp/file-at (str libdir "/package.conf.d"))
+        files (sort (filter #(str/ends-with? % ".conf") (.list db)))
+        units (vec (for [f files]
+                     (let [fs (conf-fields (slurp (str db "/" f)))
+                           expand #(str/replace % "${pkgroot}" libdir)]
+                       {:id (get fs "id") :name (get fs "name") :version (get fs "version")
+                        :exposed (= "True" (get fs "exposed"))
+                        :include-dirs (mapv expand (words (get fs "include-dirs")))
+                        :depends (vec (words (get fs "depends")))})))]
+    {:libdir libdir
+     :settings (read-settings libdir)
+     :units units
+     :by-id (into {} (map (juxt :id identity) units))}))
+
+(defn ghc-unit
+  "The unit id of the ghc library in the database (the helper's :ghc-unit): ghc-VERSION-HASH"
+  [inst version]
+  (some #(when (and (= "ghc" (:name %)) (= version (:version %))) (:id %)) (:units inst)))
+
+(def ^:private os-names
+  {"OSLinux" "linux" "OSDarwin" "darwin" "OSMinGW32" "mingw32" "OSFreeBSD" "freebsd" "OSOpenBSD" "openbsd"
+   "OSNetBSD" "netbsd" "OSSolaris2" "solaris2" "OSDragonFly" "dragonfly" "OSAIX" "aix" "OSHurd" "hurd"
+   "OSQNXNTO" "nto-qnx" "OSHaiku" "haiku" "OSWasi" "wasi" "OSGhcjs" "ghcjs"})
+
+(def ^:private arch-names
+  {"ArchX86_64" "x86_64" "ArchX86" "i386" "ArchAArch64" "aarch64" "ArchPPC" "powerpc" "ArchS390X" "s390x"
+   "ArchRISCV64" "riscv64" "ArchLoongArch64" "loongarch64" "ArchWasm32" "wasm32" "ArchJavaScript" "javascript"})
+
+(defn platform
+  "GHC's target: {:target :os :arch} (stringEncodeOS, stringEncodeArch of the settings' target)"
+  [inst]
+  (let [s (:settings inst)
+        arch (get s "target arch")]
+    {:target (get s "target platform string")
+     :os (get os-names (get s "target os"))
+     :arch (or (get arch-names arch)
+               (when (str/starts-with? arch "ArchARM") "arm")
+               (when (str/starts-with? arch "ArchPPC_64") "powerpc64"))}))
+
+;;; The units in scope (GHC.Unit.State: the visibility map, the preload closure)
+
+(defn- unit-named
+  "The most preferable unit of a package name (the latest version), or of an id"
+  [inst ^String p]
+  (or (get (:by-id inst) p)
+      (last (sort-by (comp version-key :version) (filter #(= p (:name %)) (:units inst))))
+      (last (sort-by (comp version-key :version) (filter #(= p (str (:name %) "-" (:version %))) (:units inst))))))
+
+(defn- package-flags
+  "The flags' package choices: {:hide-all bool :packages [unit...] in order :hidden #{name} :home id}"
+  [inst flags]
+  (loop [fs (seq flags) acc {:hide-all false :packages [] :hidden #{} :home nil}]
+    (if-not fs
+      acc
+      (let [[f a] fs]
+        (case f
+          "-hide-all-packages" (recur (next fs) (assoc acc :hide-all true))
+          ("-package" "-package-id")
+          (recur (nnext fs) (update acc :packages conj (or (unit-named inst a) (throw (ex-info (str "cannot satisfy -package " a) {})))))
+          "-hide-package" (recur (nnext fs) (update acc :hidden conj a))
+          "-this-unit-id" (recur (nnext fs) (assoc acc :home a))
+          (recur (next fs) acc))))))
+
+(defn- wired-id
+  "A wired-in unit's id in the database (GHC rewires ghc-internal, rts... to their package's unit)"
+  [inst ^String id]
+  (if (get (:by-id inst) id) id (:id (unit-named inst id))))
+
+(defn- close-deps
+  "closeUnitDeps: each unit and its dependencies, a unit before those it depends on"
+  [inst ids]
+  (reduce (fn [ps id]
+            (letfn [(add [ps id]
+                      (if (some #{id} ps)
+                        ps
+                        (let [u (or (get (:by-id inst) id) (throw (ex-info (str "unknown unit: " id) {})))
+                              ps (reduce add ps (:depends u))]
+                          (cons id ps))))]
+              (add ps id)))
+          () ids))
+
+(defn units-in-scope
+  "{:explicit [unit...] the units whose MIN_VERSION macros GHC writes, :preload [unit...]}"
+  [inst flags]
+  (let [{:keys [hide-all packages hidden home]} (package-flags inst flags)
+        latest (vals (reduce (fn [m u] (let [o (get m (:name u))]
+                                         (if (or (nil? o) (pos? (compare (version-key (:version u)) (version-key (:version o)))))
+                                           (assoc m (:name u) u) m)))
+                             {} (filter :exposed (:units inst))))
+        explicit (distinct (concat (when-not hide-all (remove #(contains? hidden (:name %)) latest)) packages))
+        base-id (get-in inst [:settings "base unit-id"])
+        auto (keep #(when (and % (not= % home)) (wired-id inst %))
+                   [base-id (when-not (= home "ghc-internal") "ghc-internal") (when-not (= home "rts") "rts")])
+        preload (distinct (concat auto (map :id packages)))]
+    {:explicit (vec explicit)
+     :preload (mapv #(get (:by-id inst) %) (close-deps inst preload))}))
+
+(defn version-macros
+  "generatePackageVersionMacros's header, its blocks sorted (the canonical order, see the ns doc)"
+  ^String [units]
+  (apply str
+         (sort
+          (for [u units]
+            (let [n (str/replace (:name u) "-" "_")
+                  v (:version u)
+                  [a b c] (concat (map str (version-key v)) (repeat "0"))]
+              (str "#define VERSION_" n " \"" v "\"\n"
+                   "#define MIN_VERSION_" n "(major1,major2,minor) (\\\n"
+                   "  (major1) <  " a " || \\\n"
+                   "  (major1) == " a " && (major2) <  " b " || \\\n"
+                   "  (major1) == " a " && (major2) == " b " && (minor) <= " c ")"
+                   "\n\n"))))))
+
+(defn canonical-macros
+  "A MIN_VERSION header's text with its blocks sorted (the helper's :macros since its version 5)"
+  ^String [^String text]
+  (let [blocks (re-seq #"(?s)#define VERSION_.*?\n\n" text)]
+    (apply str (sort blocks))))
+
+;;; doCpp's arguments
+
+(defn- rel-libdir [^String libdir ^String p]
+  (if (str/starts-with? p libdir) (str "$libdir" (subs p (count libdir))) p))
+
+(defn cpp-invocation
+  "GHC's Haskell CPP run of file under the module's GHC flags (the command line's, then its
+  OPTIONS_GHC pragmas' extra): {:command :args (the record's) :opts (arbace.repr.haskell.cpp's)
+  :macros (the header's text or nil) :defines :include-dirs (the command line's)}"
+  [inst cmdline ^String file & [extra]]
+  (let [flags (vec (concat cmdline extra))
+        libdir (:libdir inst)
+        s (:settings inst)
+        {:keys [os arch]} (platform inst)
+        command (vec (concat [(get s "Haskell CPP command")] (words (get s "Haskell CPP flags"))))
+        opt-p (vec (keep (fn [f] (cond (or (str/starts-with? f "-D") (str/starts-with? f "-U")) f
+                                       (str/starts-with? f "-optP") (subs f 5)))
+                         flags))
+        incs (vec (keep #(when (and (str/starts-with? % "-I") (> (count %) 2)) (subs % 2)) flags))
+        {:keys [explicit preload]} (units-in-scope inst flags)
+        pkg-incs (distinct (remove str/blank? (mapcat :include-dirs preload)))
+        rts (some #(when (= "rts" (:name %)) %) (:units inst))
+        ghcversion (some #(let [p (str % "/ghcversion.h")] (when (.isFile (cpp/file-at p)) p)) (:include-dirs rts))
+        host-os "linux" host-arch "x86_64"
+        target-defs [(str "-D" host-os "_BUILD_OS") (str "-D" host-arch "_BUILD_ARCH")
+                     (str "-D" os "_HOST_OS") (str "-D" arch "_HOST_ARCH")]
+        optimizing (some #(re-matches #"-O[12]?" %) flags)
+        asserts (when (and optimizing (not (some #{"-fno-ignore-asserts"} flags))) ["-D__GLASGOW_HASKELL_ASSERTS_IGNORED__"])
+        sse (when (#{"x86_64" "i386"} arch) ["-D__SSE__" "-D__SSE2__"])
+        io ["-D__IO_MANAGER_MIO__=1"]
+        macros (when (seq explicit) (version-macros explicit))
+        ds (concat opt-p target-defs ["-D__GLASGOW_HASKELL_TH__"] asserts sse io)
+        args (vec (concat opt-p
+                          ;; the command line's directories, the preload units', then the home
+                          ;; units' (ue_transitiveHomeDeps' include paths: the module's own unit's,
+                          ;; the command line's again)
+                          (map #(str "-I" %) (concat incs pkg-incs incs))
+                          (when ghcversion ["-include" ghcversion])
+                          target-defs ["-D__GLASGOW_HASKELL_TH__"] asserts sse io
+                          (when macros ["-include<macros>"])
+                          ["-x" "assembler-with-cpp" file "-o" "<output>"]))]
+    {:command command
+     :args (mapv #(cond (str/starts-with? % "-I") (str "-I" (rel-libdir libdir (subs % 2)))
+                        :else (rel-libdir libdir %))
+                 args)
+     :defines (vec (filter #(str/starts-with? % "-D") cmdline))
+     :include-dirs (mapv #(rel-libdir libdir %) (keep #(when (and (str/starts-with? % "-I") (> (count %) 2)) (subs % 2)) cmdline))
+     :macros macros
+     :opts {:defines (vec (for [d ds] [(subs d 0 2) (subs d 2)]))
+            :includes (vec (concat (when ghcversion [ghcversion]) (when macros ["<macros>"])))
+            :bracket (vec (concat incs pkg-incs))
+            :virtual (when macros {"<macros>" macros})}}))
+
+;;; The pipeline
+
+(defn needs-cpp?
+  "Whether the module's flags (the configuration's and its header's) turn CPP on"
+  [exts flags]
+  (or (contains? (set exts) "CPP") (some #{"-cpp" "-XCPP"} flags)))
+
+(defn literate? [^String f] (some #(str/ends-with? f %) [".lhs" ".lhs-boot" ".lhsig"]))
+
+(defn preprocess
+  "GHC's preprocessing of the module file (as the command line names it) under its GHC flags, cpp?
+  whether CPP is on: {:text the text GHC parses (UTF-8 decoded), :cpp the record or nil, :unlit
+  bool}; the text of a module that needs neither is its file's"
+  [inst flags ^String file cpp? & [extra]]
+  (let [lit (literate? file)
+        raw (String. (java.nio.file.Files/readAllBytes (.toPath (cpp/file-at file))) "ISO-8859-1")
+        unlitted (when lit (unlit/unlit raw (unlit/escape-label file) file))]
+    (if-not cpp?
+      {:text (String. (latin1-bytes (or unlitted raw)) "UTF-8") :unlit lit}
+      (let [input (if lit "<unlit>" file)
+            inv (cpp-invocation inst flags input extra)
+            opts (cond-> (:opts inv) lit (assoc-in [:virtual "<unlit>"] unlitted))
+            {:keys [text]} (cpp/preprocess input opts)
+            libdir (:libdir inst)
+            mfiles (distinct (for [[_ f] (re-seq #"(?m)^# \d+ \"((?:[^\"\\]|\\.)*)\"" text)
+                                   :let [f (str/replace f #"\\(.)" "$1")]
+                                   :when (and (not= f input) (not= f file) (or (= f "<macros>") (not (str/starts-with? f "<"))))]
+                               f))
+            hash #(str "sha256:" (sha256-hex %))
+            files (into (array-map)
+                        (for [f mfiles]
+                          (if (= f "<macros>")
+                            ["<macros>" (hash (.getBytes ^String (:macros inv) "ISO-8859-1"))]
+                            [(rel-libdir libdir f) (let [g (cpp/file-at f)]
+                                                     (if (.isFile g) (hash (java.nio.file.Files/readAllBytes (.toPath g))) "sha256:missing"))])))]
+        {:text (String. (latin1-bytes text) "UTF-8")
+         :raw text
+         :unlit lit
+         :cpp (cond-> {:command (:command inv) :args (:args inv) :defines (:defines inv)
+                       :include-dirs (:include-dirs inv) :files files}
+                (:macros inv) (assoc :macros (hash (.getBytes ^String (:macros inv) "ISO-8859-1")))
+                true (assoc :output (hash (latin1-bytes text))))}))))

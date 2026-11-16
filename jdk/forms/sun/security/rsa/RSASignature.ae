@@ -1,0 +1,227 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/rsa/RSASignature.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.rsa)
+
+(import '(java.nio ByteBuffer)
+        '(java.security AlgorithmParameters
+                        GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        InvalidParameterException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        ProviderException
+                        PublicKey
+                        SecureRandom
+                        SignatureException
+                        SignatureSpi)
+        '(java.security.interfaces RSAKey RSAPrivateKey RSAPublicKey)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(javax.crypto BadPaddingException)
+        '(sun.security.util ObjectIdentifier)
+        '(sun.security.x509 AlgorithmId))
+
+(defclass ^:abstract RSASignature
+  :extends SignatureSpi
+
+  (field ^:private ^:static ^:final ^int baseLength 8)
+
+  (field ^:private ^:final ^ObjectIdentifier digestOID)
+
+  (field ^:private ^:final ^int encodedLength)
+
+  (field ^:private ^:final ^MessageDigest md)
+
+  (field ^:private ^boolean digestReset)
+
+  (field ^:private ^RSAPrivateKey privateKey)
+
+  (field ^:private ^RSAPublicKey publicKey)
+
+  (field ^:private ^RSAPadding padding)
+
+  (constructor [this ^String algorithm ^ObjectIdentifier digestOID ^int oidLength]
+    (set! (.-digestOID this) digestOID)
+    (try
+      (set! md (MessageDigest/getInstance algorithm))
+      (catch NoSuchAlgorithmException e (throw (ProviderException. e))))
+    (set! digestReset true)
+    (set! encodedLength
+          (unchecked-add-int (unchecked-add-int baseLength oidLength) (.getDigestLength md))))
+
+  (method ^:protected engineInitVerify :throws [InvalidKeyException] ^void [this
+                                                                            ^PublicKey publicKey]
+    (let [rsaKey (cast RSAPublicKey (RSAKeyFactory/toRSAKey publicKey))]
+      (set! (.-privateKey this) nil)
+      (set! (.-publicKey this) rsaKey)
+      (.initCommon this rsaKey nil)))
+
+  (method ^:protected engineInitSign :throws [InvalidKeyException] ^void [this
+                                                                          ^PrivateKey privateKey]
+    (.engineInitSign this privateKey nil))
+
+  (method ^:protected engineInitSign :throws [InvalidKeyException] ^void [this
+                                                                          ^PrivateKey privateKey
+                                                                          ^SecureRandom random]
+    (let [rsaKey (cast RSAPrivateKey (RSAKeyFactory/toRSAKey privateKey))]
+      (set! (.-privateKey this) rsaKey)
+      (set! (.-publicKey this) nil)
+      (.initCommon this rsaKey random)))
+
+  (method ^:private initCommon :throws [InvalidKeyException] ^void [this ^RSAKey rsaKey
+                                                                    ^SecureRandom random]
+    (try
+      (RSAUtil/checkParamsAgainstType RSAUtil$KeyType/RSA (.getParams rsaKey))
+      (catch ProviderException e (throw (InvalidKeyException. "Invalid key for RSA signatures" e))))
+    (.resetDigest this)
+    (let [keySize (RSACore/getByteLength rsaKey)]
+      (try
+        (set! padding (RSAPadding/getInstance RSAPadding/PAD_BLOCKTYPE_1 keySize random))
+        (catch InvalidAlgorithmParameterException iape
+          (throw (InvalidKeyException. (.getMessage iape)))))
+      (let [maxDataSize (.getMaxDataSize padding)]
+        (when (> encodedLength maxDataSize)
+          (throw (InvalidKeyException. "Key is too short for this signature algorithm"))))))
+
+  (method ^:private resetDigest ^void [this]
+    (when-not digestReset (.reset md) (set! digestReset true)))
+
+  (method ^:private getDigestValue ^byte/1 [this]
+    (set! digestReset true)
+    (.digest md))
+
+  (method ^:protected engineUpdate :throws [SignatureException] ^void [this ^byte b]
+    (.update md b)
+    (set! digestReset false))
+
+  (method ^:protected engineUpdate :throws [SignatureException] ^void [this ^byte/1 b ^int off
+                                                                       ^int len]
+    (.update md b off len)
+    (set! digestReset false))
+
+  (method ^:protected engineUpdate ^void [this ^ByteBuffer b]
+    (.update md b)
+    (set! digestReset false))
+
+  (method ^:protected engineSign :throws [SignatureException] ^byte/1 [this]
+    (when (nil? privateKey) (throw (SignatureException. "Missing private key")))
+    (let [digest (.getDigestValue this)]
+      (try
+        (let [encoded (RSAUtil/encodeSignature digestOID digest)
+              padded (.pad padding encoded)]
+          (when (some? padded) (return (RSACore/rsa padded privateKey true))))
+        (catch GeneralSecurityException e (throw (SignatureException. "Could not sign data" e))))
+      (throw (SignatureException. "Could not sign data"))))
+
+  (method ^:protected engineVerify :throws [SignatureException] ^boolean [this ^byte/1 sigBytes]
+    (when (nil? publicKey) (throw (SignatureException. "Missing public key")))
+    (try
+      (when-not (== (alength sigBytes) (RSACore/getByteLength publicKey))
+        (throw (SignatureException.
+                 (java-str "Bad signature length: got "
+                           (alength sigBytes)
+                           " but was expecting "
+                           (RSACore/getByteLength publicKey)))))
+      (let [decrypted (RSACore/rsa sigBytes publicKey)
+            digest (.getDigestValue this)
+            ^:mutable encoded (RSAUtil/encodeSignature digestOID digest)
+            ^:mutable padded (.pad padding encoded)]
+        (if (MessageDigest/isEqual padded decrypted)
+            true
+            (do
+              (set! encoded (RSAUtil/encodeSignatureWithoutNULL digestOID digest))
+              (set! padded (.pad padding encoded))
+              (MessageDigest/isEqual padded decrypted))))
+      (catch BadPaddingException e false)
+      (finally (.resetDigest this))))
+
+  (method ^:protected ^{Deprecated true} engineSetParameter :throws [InvalidParameterException] ^void [this
+                                                                                                       ^String param
+                                                                                                       value]
+    (throw (UnsupportedOperationException. "setParameter() not supported")))
+
+  (method ^:protected engineSetParameter :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                             ^AlgorithmParameterSpec params]
+    (when (some? params) (throw (InvalidAlgorithmParameterException. "No parameters accepted"))))
+
+  (method ^:protected ^{Deprecated true} engineGetParameter :throws [InvalidParameterException] [this
+                                                                                                 ^String param]
+    (throw (UnsupportedOperationException. "getParameter() not supported")))
+
+  (method ^:protected engineGetParameters ^AlgorithmParameters [this] nil)
+
+  (defclass ^:public ^:static ^:final MD2withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this] (super. "MD2" AlgorithmId/MD2_oid 10)))
+
+  (defclass ^:public ^:static ^:final MD5withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this] (super. "MD5" AlgorithmId/MD5_oid 10)))
+
+  (defclass ^:public ^:static ^:final SHA1withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this] (super. "SHA-1" AlgorithmId/SHA_oid 7)))
+
+  (defclass ^:public ^:static ^:final SHA224withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA-224" AlgorithmId/SHA224_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA256withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA-256" AlgorithmId/SHA256_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA384withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA-384" AlgorithmId/SHA384_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA512withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA-512" AlgorithmId/SHA512_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA512_224withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA-512/224" AlgorithmId/SHA512_224_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA512_256withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA-512/256" AlgorithmId/SHA512_256_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA3_224withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA3-224" AlgorithmId/SHA3_224_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA3_256withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA3-256" AlgorithmId/SHA3_256_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA3_384withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA3-384" AlgorithmId/SHA3_384_oid 11)))
+
+  (defclass ^:public ^:static ^:final SHA3_512withRSA
+    :extends RSASignature
+
+    (constructor ^:public [this]
+      (super. "SHA3-512" AlgorithmId/SHA3_512_oid 11))))

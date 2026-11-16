@@ -1,0 +1,283 @@
+;; Runtime_events (OC219 (a)), ported from oi's ext_runtime_events.go (OCaml 5.5.0's runtime/runtime_events.c and
+;; otherlibs/runtime_events/runtime_events_consumer.c, read for their behaviour): the ring of events is the process's own,
+;; started by Runtime_events.start (the ring's file, OCAML_RUNTIME_EVENTS_DIR or the current directory, PID.events, created and
+;; removed at the program's end unless OCAML_RUNTIME_EVENTS_PRESERVE is set; OCAML_RUNTIME_EVENTS_START starts it with the
+;; program); the events of the collections a program asks for as the C runtime emits them (ExtGc's caml_gc_minor, major,
+;; full_major, compaction call ExtRtEvents/explicit), the lifecycle events, the program's user events; a cursor on the
+;; process's own ring reads them from its start, read_poll calling the callbacks. Divergences as oi's (doc/ocaml/OCAML-SURVEY.md,
+;; "As built: OC219 (a)"): the JVM's own collections and the C runtime's other phases, counters and allocation buckets are not
+;; emitted; one ring for all domains; another process's file is not mapped. An event is an Object/1 [pos words dom ts kind id
+;; data utype payload] (longs boxed, payload a byte/1 or nil), kind 0 runtime_begin, 1 runtime_end, 4 lifecycle, 5 user, -1
+;; padding.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util ArrayList) '(java.io File RandomAccessFile))
+
+(defclass ^:public ^:final ExtRtEvents
+  (field ^:static ^boolean inited false)
+  (field ^:static ^boolean enabled false)
+  (field ^:static ^boolean paused false)
+  (field ^:static ^String loc nil)
+  (field ^:static ^:final ^ArrayList ring (ArrayList.))
+  (field ^:static ^long head 0)
+  (field ^:static ^long tail 0)
+  (field ^:static ^long size 65536)
+  (field ^:static ^long t0 0)
+  (field ^:static ^:final ^ArrayList users (ArrayList.))
+
+  (method ^:public ^:static init ^void []
+    (when (not inited)
+      (set! inited true)
+      (set! t0 (System/nanoTime))
+      (let [e (ExtCore/runParam 101)]
+        (set! size (if (or (< e 0) (> e 30)) 65536 (bit-shift-left 1 e))))
+      (when (some? (System/getenv "OCAML_RUNTIME_EVENTS_START"))
+        (ExtRtEvents/start))))
+
+  ;; the program's end (caml_runtime_events_destroy), and the state as before any program ran (Main/reset)
+  (method ^:public ^:static destroy ^void []
+    (when enabled
+      (when (nil? (System/getenv "OCAML_RUNTIME_EVENTS_PRESERVE"))
+        (.delete (File. loc)))
+      (set! enabled false)))
+  (method ^:public ^:static reset ^void []
+    (ExtRtEvents/destroy)
+    (set! inited false)
+    (set! paused false)
+    (.clear ring)
+    (.clear users)
+    (set! head 0)
+    (set! tail 0))
+
+  (method ^:static now ^long [] (unchecked-subtract (System/nanoTime) t0))
+  (method ^:static pid ^long [] (.pid (ProcessHandle/current)))
+
+  (method ^:static start ^void []
+    (ExtRtEvents/init)
+    (when (not enabled)
+      (let [name (java-str (ExtRtEvents/pid) ".events")
+            dir (System/getenv "OCAML_RUNTIME_EVENTS_DIR")]
+        (set! loc (if (and (some? dir) (not (.isEmpty dir))) (java-str dir "/" name) name))
+        (try (.close (RandomAccessFile. loc "rw"))
+             (catch java.io.IOException _ (throw (Fatal. (java-str "Fatal error: Couldn't open ring buffer loc: " loc) 2)))))
+      (.clear ring)
+      (set! head 0)
+      (set! tail 0)
+      (set! enabled true)
+      (set! paused false)
+      (ExtRtEvents/write 0 4 0 (ExtRtEvents/pid) 0 nil 1)))
+
+  (method ^:static active ^boolean [] (and enabled (not paused)))
+
+  ;; write_to_ring: a padding message first when the message would straddle the ring's end, the oldest overwritten when full
+  (method ^:static write ^void [^long dom ^long kind ^long id ^long data ^long utype payload ^long n]
+    (when (ExtRtEvents/active)
+      (let [w (unchecked-add n 2)
+            off (unchecked-remainder tail size)]
+        (when (< (unchecked-subtract size off) w)
+          (.add ring (new Object/1 [(Long/valueOf tail) (Long/valueOf (unchecked-subtract size off)) (Long/valueOf 0) (Long/valueOf 0)
+                                    (Long/valueOf -1) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) nil]))
+          (set! tail (unchecked-add tail (unchecked-subtract size off))))
+        (.add ring (new Object/1 [(Long/valueOf tail) (Long/valueOf w) (Long/valueOf dom) (Long/valueOf (ExtRtEvents/now))
+                                  (Long/valueOf kind) (Long/valueOf id) (Long/valueOf data) (Long/valueOf utype) payload]))
+        (set! tail (unchecked-add tail w))
+        (while (> (unchecked-subtract tail head) size)
+          (.remove ring 0)
+          (set! head (if (.isEmpty ring) tail (ExtRtEvents/ev (.get ring 0) 0)))))))
+
+  (method ^:static ev ^long [e ^int i] (.longValue (cast Long (aget (cast Object/1 e) i))))
+  (method ^:static dom ^long [] (.-id (.-dom (Effects/st))))
+  (method ^:static phase ^void [^boolean begin ^long ph]
+    (ExtRtEvents/write (ExtRtEvents/dom) (if begin 0 1) ph 0 0 nil 0))
+  (method ^:static minor ^void []
+    (ExtRtEvents/phase true 11)
+    (ExtRtEvents/phase false 11))
+  ;; stw_finish_major_cycle: the minor heap emptied, then EV_MAJOR_FINISH_CYCLE around the cycle and stw_cycle_all_domains' minor
+  (method ^:static cycle ^void [^boolean compact]
+    (ExtRtEvents/minor)
+    (ExtRtEvents/phase true 28)
+    (ExtRtEvents/minor)
+    (when compact
+      (ExtRtEvents/phase true 44)
+      (ExtRtEvents/phase false 44))
+    (ExtRtEvents/phase false 28))
+  ;; an asked collection's events (gc_ctrl.c): 0 Gc.minor, 1 Gc.major, 2 Gc.full_major, 3 Gc.compact
+  (method ^:public ^:static explicit ^void [^int kind]
+    (when (ExtRtEvents/active)
+      (cond
+        (== kind 0) (do (ExtRtEvents/phase true 2) (ExtRtEvents/minor) (ExtRtEvents/phase false 2))
+        (== kind 1) (do (ExtRtEvents/phase true 3) (ExtRtEvents/minor) (ExtRtEvents/cycle false) (ExtRtEvents/phase false 3))
+        (== kind 2) (do (ExtRtEvents/phase true 4) (ExtRtEvents/cycle false) (ExtRtEvents/cycle false) (ExtRtEvents/cycle false)
+                        (ExtRtEvents/phase false 4))
+        :else (do (ExtRtEvents/phase true 5) (ExtRtEvents/cycle false) (ExtRtEvents/cycle false) (ExtRtEvents/cycle true)
+                  (ExtRtEvents/phase false 5)))))
+
+  (method ^:public ^:static caml_ml_runtime_events_start [u] (ExtRtEvents/start) Rt/UNIT)
+  (method ^:public ^:static caml_ml_runtime_events_pause [u]
+    (when (and enabled (not paused))
+      (ExtRtEvents/write 0 4 2 0 0 nil 1)
+      (set! paused true))
+    Rt/UNIT)
+  (method ^:public ^:static caml_ml_runtime_events_resume [u]
+    (when (and enabled paused)
+      (set! paused false)
+      (ExtRtEvents/write 0 4 3 0 0 nil 1))
+    Rt/UNIT)
+  (method ^:public ^:static caml_ml_runtime_events_are_active [u] (Rt/b (ExtRtEvents/active)))
+  (method ^:public ^:static caml_ml_runtime_events_path [u]
+    (if enabled (Rt/some (Rt/ofUtf8 loc)) (Long/valueOf 0)))
+  (method ^:public ^:static caml_ml_runtime_current_timestamp [u]
+    (ExtRtEvents/init)
+    (I64. (ExtRtEvents/now)))
+
+  (method ^:static cursorState [w]
+    (.-v (cast Custom (aget (.-f (cast Block w)) 0))))
+  (method ^:public ^:static caml_ml_runtime_events_create_cursor [opt]
+    (let [path (if (instance? Block opt)
+                 (let [p (cast Block (aget (.-f (cast Block opt)) 0))]
+                   (java-str (Rt/utf8 (aget (.-f p) 0)) "/" (Rt/l (aget (.-f p) 1)) ".events"))
+                 (do (when (not enabled)
+                       (throw (Rt/failwith "Runtime_events: no ring for current process.          Was runtime_events started?")))
+                     loc))
+          f (File. path)]
+      (when (not (and (.isFile f) (.canRead f)))
+        (throw (Rt/failwith "Runtime_events: could not create cursor for specified path.")))
+      ;; the file must be this process's ring: another process's ring is not mapped (OC219's divergence)
+      (when (or (not enabled)
+                (not (.equals (.getCanonicalPath f) (.getCanonicalPath (File. loc)))))
+        (throw (Rt/failwith "Runtime_events: could not map underlying runtime_events.")))
+      ;; the cursor's state: [open in-poll position]
+      (Rt/tuple (new Object/1 [(Custom. "runtime_events.cursor" (new long/1 [1 0 0])) (Long/valueOf 0) (Long/valueOf 0)]))))
+  (method ^:public ^:static caml_ml_runtime_events_free_cursor [w]
+    (set! (.-v (cast Custom (aget (.-f (cast Block w)) 0))) nil)
+    Rt/UNIT)
+
+  (method ^:static callback [cbs ^int i]
+    (let [o (aget (.-f (cast Block cbs)) i)]
+      (if (instance? Block o) (aget (.-f (cast Block o)) 0) nil)))
+  (method ^:static find ^int [^long p]
+    (let [^:mutable ^int lo 0
+          ^:mutable ^int hi (.size ring)]
+      (while (< lo hi)
+        (let [m (unchecked-int (unsigned-bit-shift-right (unchecked-add lo hi) 1))]
+          (if (< (ExtRtEvents/ev (.get ring m) 0) p) (set! lo (unchecked-inc-int m)) (set! hi m))))
+      lo))
+
+  (method ^:static dispatch ^void [cbs e]
+    (let [kind (ExtRtEvents/ev e 4)
+          d (Long/valueOf (ExtRtEvents/ev e 2))
+          ts (I64. (ExtRtEvents/ev e 3))
+          id (ExtRtEvents/ev e 5)
+          data (ExtRtEvents/ev e 6)]
+      (cond
+        (or (== kind 0) (== kind 1))
+        (let [f (ExtRtEvents/callback cbs (unchecked-int kind))]
+          (when (some? f) (Rt/ap3 f d ts (Long/valueOf id))))
+        (== kind 4)
+        (let [f (ExtRtEvents/callback cbs 4)]
+          (when (some? f)
+            (Rt/ap f (new Object/1 [d ts (Long/valueOf id) (if (== data 0) (Long/valueOf 0) (Rt/some (Long/valueOf data)))]))))
+        (== kind 5)
+        (when (< id (.size users))
+          (let [ue (.get users (unchecked-int id))
+                typ (aget (.-f (cast Block ue)) 2)
+                utype (ExtRtEvents/ev e 7)
+                payload (aget (cast Object/1 e) 8)
+                ^:mutable ^long tid 0
+                ^:mutable ^Object v Rt/UNIT
+                ^:mutable ^boolean ok true]
+            (if (instance? Block typ)
+              (let [rec (cast Block (aget (.-f (cast Block typ)) 0))]
+                (set! tid (Rt/l (aget (.-f rec) 2)))
+                (if (== utype 4)
+                  (let [b (cast byte/1 payload)]
+                    (set! v (Rt/ap2 (aget (.-f rec) 1) (.clone b) (Long/valueOf (alength b)))))
+                  (set! ok false)))
+              (do (set! tid (Rt/l typ))
+                  (cond (== utype 0) (set! v Rt/UNIT)
+                        (== utype 1) (set! v (Long/valueOf data))
+                        (== utype 2) (set! v (Long/valueOf 0))
+                        (== utype 3) (set! v (Long/valueOf 1))
+                        :else (set! ok false))))
+            (when ok
+              (let [arr (.-f (cast Block (aget (.-f (cast Block cbs)) 6)))]
+                (when (< tid (alength arr))
+                  (let [^:mutable ^Object l (aget arr (unchecked-int tid))]
+                    (while (instance? Block l)
+                      (let [cell (cast Block l)
+                            cb (aget (.-f (cast Block (aget (.-f cell) 0))) 0)]
+                        (Rt/ap cb (new Object/1 [d ts ue v]))
+                        (set! l (aget (.-f cell) 1))))))))))
+        :else nil)))
+
+  ;; caml_ml_runtime_events_read_poll: max as the C stub reads it (Some n's tagged word, 2n+1; None no limit)
+  (method ^:public ^:static caml_ml_runtime_events_read_poll [w cbs maxv]
+    (let [st (ExtRtEvents/cursorState w)]
+      (when (nil? st) (throw (Rt/failwith "Runtime_events: invalid or closed cursor")))
+      (let [c (cast long/1 st)
+            mx (if (instance? Block maxv) (unchecked-add (unchecked-multiply 2 (Rt/l (aget (.-f (cast Block maxv)) 0))) 1) 0)
+            ^:mutable ^long count 0
+            ^:mutable ^boolean more true]
+        (when (== (aget c 0) 0) (throw (Rt/failwith "Runtime_events: cursor is not open")))
+        (when (== (aget c 1) 1) (throw (Rt/failwith "Runtime_events: poll called concurrently or reentrant")))
+        (aset c 1 1)
+        (try
+          (while more
+            (cond
+              (> head (aget c 2))
+              (let [lost (unchecked-subtract head (aget c 2))
+                    f (ExtRtEvents/callback cbs 5)]
+                (aset c 2 head)
+                (when (some? f) (Rt/ap2 f (Long/valueOf 0) (Long/valueOf lost))))
+              (>= (aget c 2) tail) (set! more false)
+              :else
+              (let [p (aget c 2)
+                    i (ExtRtEvents/find p)]
+                (when (or (>= i (.size ring)) (not (== (ExtRtEvents/ev (.get ring i) 0) p)))
+                  (throw (Rt/failwith "Runtime_events: corrupt stream")))
+                (let [e (.get ring i)]
+                  (aset c 2 (unchecked-add p (ExtRtEvents/ev e 1)))
+                  (when (not (== (ExtRtEvents/ev e 4) -1))
+                    (ExtRtEvents/dispatch cbs e)
+                    (set! count (unchecked-add count 1))
+                    (when (and (> mx 0) (>= count mx)) (set! more false)))))))
+          (finally (aset c 1 0)))
+        (Long/valueOf count))))
+
+  (method ^:public ^:static caml_runtime_events_user_register [name tag typ]
+    (let [idx (.size users)
+          s (cast byte/1 name)]
+      (when (> idx 8192)
+        (throw (Rt/invalidArg "Runtime_events.User.register: maximum number of custom events exceeded")))
+      (when (> (alength s) 127)
+        (throw (Rt/invalidArg "Runtime_events.User.register: maximum length for event name exceeded")))
+      (loop [^int i 0]
+        (when (< i (alength s))
+          (when (== (aget s i) 0)
+            (throw (Rt/invalidArg "Runtime_events.User.register: event name has null characters")))
+          (recur (unchecked-inc-int i))))
+      (let [e (Block. 0 (new Object/1 [(Long/valueOf idx) name typ tag]))]
+        (.add users e)
+        e)))
+
+  (method ^:public ^:static caml_runtime_events_user_write [buf e v]
+    (when (ExtRtEvents/active)
+      (let [f (.-f (cast Block e))
+            id (Rt/l (aget f 0))
+            typ (aget f 2)
+            d (ExtRtEvents/dom)]
+        (if (instance? Block typ)
+          (let [ser (aget (.-f (cast Block (aget (.-f (cast Block typ)) 0))) 0)
+                n (Rt/l (Rt/ap2 ser buf v))]
+            (when (ExtRtEvents/active)
+              (let [bs (cast byte/1 buf)]
+                (when (or (< n 0) (> n (alength bs)))
+                  (throw (Rt/invalidArg "Runtime_events.User.write")))
+                (ExtRtEvents/write d 5 id 0 4 (java.util.Arrays/copyOf bs (unchecked-int n)) (unchecked-divide (unchecked-add n 8) 8)))))
+          (let [t (Rt/l typ)]
+            (cond (== t 0) (ExtRtEvents/write d 5 id 0 0 nil 0)
+                  (== t 1) (ExtRtEvents/write d 5 id (Rt/l v) 1 nil 1)
+                  (== t 2) (ExtRtEvents/write d 5 id 0 (if (== (Rt/l v) 0) 2 3) nil 0)
+                  :else nil)))))
+    Rt/UNIT))

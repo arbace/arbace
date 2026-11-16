@@ -30,7 +30,7 @@ r=$scratch/noexe-root; mkdir -p "$r/bin/lib" "$r/d"
 cp "$src/bin/gate-tests" "$r/bin/"; cp "$src/bin/lib/tmpdir.bash" "$src/bin/lib/host.bash" "$r/bin/lib/"
 printf '#!/bin/bash\nexit 0\n' > "$r/d/plain-test.bash"; printf '#!/bin/bash\n# needs: exe\nexit 1\n' > "$r/d/exe-test.bash"; chmod +x "$r/d/"*
 out=$(cd "$r" && env -u ARBACE_HOST_EXE bin/gate-tests d 2>&1); st=$?
-if [ "$st" = 1 ] && echo "$out" | grep -q "exe-test.bash not run" && echo "$out" | grep -q "plain-test.bash passed"; then ok "no stage 0: the tests that need it are named, status 1"
+if [ "$st" = 1 ] && grep -q "exe-test.bash not run" <<< "$out" && grep -q "plain-test.bash passed" <<< "$out"; then ok "no stage 0: the tests that need it are named, status 1"
 else bad "no exe: status $st: $out"; fi
 out=$(cd "$r" && env -u ARBACE_HOST_EXE bin/gate-tests --no-exe d 2>&1); st=$?
 [ "$st" = 0 ] && ok "--no-exe: the others alone, status 0" || bad "--no-exe: status $st: $out"
@@ -38,7 +38,7 @@ out=$(cd "$r" && env -u ARBACE_HOST_EXE bin/gate-tests --no-exe d 2>&1); st=$?
 # report 059: a test that exits 77 is "not run", not passed, and does not fail the run
 mkdir -p "$scratch/u77"; printf '#!/bin/bash\necho already traced\nexit 77\n' > "$scratch/u77/a-test.bash"; cp "$scratch/pass/a-test.bash" "$scratch/u77/b-test.bash"; chmod +x "$scratch/u77/"*
 out=$(env -u GATE_AUDITED "$src/bin/gate-tests" "$scratch/u77" 2>&1); st=$?
-if [ "$st" = 1 ] && echo "$out" | grep -q "a-test.bash FAILED (not run, already traced, and no audit"; then ok "exit 77 without the audit's marker fails"
+if [ "$st" = 1 ] && grep -q "a-test.bash FAILED (not run, already traced, and no audit" <<< "$out"; then ok "exit 77 without the audit's marker fails"
 else bad "exit 77 unaudited: status $st: $out"; fi
 # the marker is set in both of the gate's audited runs (bin/lib/gate-run.bash)
 [ "$(grep -c 'GATE_AUDITED=1' "$src/bin/lib/gate-run.bash")" -ge 2 ] && ok "gate-run.bash sets GATE_AUDITED in both audited runs" || bad "GATE_AUDITED missing in gate-run.bash"
@@ -46,14 +46,14 @@ else bad "exit 77 unaudited: status $st: $out"; fi
 mkdir -p "$scratch/inh"; printf '#!/bin/bash\n[ -z "${GATE_TESTS_IN_NESTED:-}" ]\n' > "$scratch/inh/a-test.bash"; chmod +x "$scratch/inh/a-test.bash"
 out=$(GATE_TESTS_IN_NESTED=1 "$src/bin/gate-tests" "$scratch/inh" 2>&1) && ok "an inherited GATE_TESTS_IN_NESTED is dropped" || bad "inherited in-nested: $out"
 out=$(GATE_AUDITED=1 "$src/bin/gate-tests" "$scratch/u77" 2>&1); st=$?
-if [ "$st" = 0 ] && echo "$out" | grep -q "a-test.bash not run (already traced)" && ! echo "$out" | grep -q "a-test.bash passed" && echo "$out" | grep -q "not run: a-test.bash"; then ok "exit 77 is listed as not run, not passed"
+if [ "$st" = 0 ] && grep -q "a-test.bash not run (already traced)" <<< "$out" && ! grep -q "a-test.bash passed" <<< "$out" && grep -q "not run: a-test.bash" <<< "$out"; then ok "exit 77 is listed as not run, not passed"
 else bad "exit 77: status $st: $out"; fi
 # report 059: GATE_TESTS_NESTED in the caller's environment skips nothing; only --nested skips gate-reads-test
 mkdir -p "$scratch/nest"; printf '#!/bin/bash\nexit 1\n' > "$scratch/nest/gate-reads-test.bash"; chmod +x "$scratch/nest/gate-reads-test.bash"
 out=$(GATE_TESTS_NESTED=1 "$src/bin/gate-tests" "$scratch/nest" 2>&1); st=$?
 [ "$st" = 1 ] && ok "an inherited GATE_TESTS_NESTED skips nothing" || bad "inherited nested: status $st: $out"
 out=$("$src/bin/gate-tests" --nested "$scratch/nest" 2>&1); st=$?
-[ "$st" = 0 ] && echo "$out" | grep -q "gate-reads-test.bash not run (nested" && ok "--nested skips gate-reads-test, loudly" || bad "--nested: status $st: $out"
+[ "$st" = 0 ] && grep -q "gate-reads-test.bash not run (nested" <<< "$out" && ok "--nested skips gate-reads-test, loudly" || bad "--nested: status $st: $out"
 
 # report 059: gate-reads-test must not pass without having looked. Cases with a fake strace (a mode: no trace
 # file, an empty one, one without -f) and through a symlinked checkout; skipped inside gate-reads-test's own run
@@ -91,9 +91,9 @@ F
   if [ -n "$real" ] && [ "${traced:-0}" = 0 ]; then
     ln -s "$src" "$scratch/lnk"
     out=$("$scratch/lnk/test/gate/gate-reads-test.bash" 2>&1); st=$?
-    [ "$st" = 0 ] && echo "$out" | grep -q "canary seen" && ok "gate-reads-test through a symlinked checkout sees its canary" || bad "symlinked checkout: status $st: $out"
+    [ "$st" = 0 ] && grep -q "canary seen" <<< "$out" && ok "gate-reads-test through a symlinked checkout sees its canary" || bad "symlinked checkout: status $st: $out"
     out=$("$real" -f -o "$scratch/outer.strace" "$src/test/gate/gate-reads-test.bash" 2>&1); st=$?
-    [ "$st" = 77 ] && echo "$out" | grep -q "already traced" && ok "gate-reads-test under a tracer: not run (77)" || bad "traced: status $st: $out"
+    [ "$st" = 77 ] && grep -q "already traced" <<< "$out" && ok "gate-reads-test under a tracer: not run (77)" || bad "traced: status $st: $out"
   else echo "skip: gate-reads-test real-strace cases (no strace, or this process is traced)"; fi
 fi
 
@@ -105,10 +105,18 @@ git -C "$src" ls-files | LC_ALL=C sort | sed 's|^|000000000000000000000000000000
 echo '{:gate "a" :javac "b" :prog-units "pending" :prog-rest "c" :javac-prog-units "pending" :javac-prog-rest "d" :stage0 "e" :frozen "f" :jdk "g" :go "h" :gcc "i"}' > "$scratch/logs/hosts.edn"
 . "$src/bin/lib/tools.bash"
 root=$src
-arbace_tool -p "$src/test" -m gate.plan plan "$src" "$scratch/logs" "$scratch/store" essential > "$scratch/plan.out" 2>&1
+# GT9 (GTS210 (a)): the table's :host-ids hosts beside (bin/gate's gate_host_ids adds those a step names)
+for h in $(arbace_tool -p "$src/test" -m gate.crops host-names "$src/test/gate/steps.edn"); do
+  grep -q ":$h \"" "$scratch/logs/hosts.edn" || sed -i "\$ s/}\$/ :$h \"x\"}/" "$scratch/logs/hosts.edn"
+done
+# (GD1, GDS7 (a): gate-tests is a step of the full tier; the planner checks every step's rules in the essential mode too, and
+# its full mode would read the rotated steps' universes and subsets, which this step does not declare)
+# (GD3: no load closures, GATE_LOADS none: their text scan reads arbace/'s sources, which gate-tests does not declare)
+GATE_LOADS=$scratch/no-loads.edn arbace_tool -p "$src/test" -m gate.plan plan "$src" "$scratch/logs" "$scratch/store" essential > "$scratch/plan.out" 2>&1
 if grep -q "problem(s)" "$scratch/plan.out"; then bad "the planner rejects the table: $(grep -A5 'problem(s)' "$scratch/plan.out")"
-elif grep -q "^ *run *gate-tests " "$scratch/plan.out"; then ok "the planner accepts the table and plans gate-tests"
-else bad "gate-tests not planned: $(head -5 "$scratch/plan.out")"; fi
+elif grep -q "^ *run *claude-md " "$scratch/plan.out" && grep -q '^  {:name gate-tests :mem-gib [0-9]* :phase :full ' "$src/test/gate/steps.edn"; then
+  ok "the planner accepts the table, plans claude-md, and gate-tests is a step of the full tier"
+else bad "claude-md not planned or gate-tests not :phase :full: $(head -5 "$scratch/plan.out")"; fi
 
 [ "$fails" = 0 ] && echo "gate-tests-test: passed" || echo "gate-tests-test: $fails failed"
 exit $((fails > 0))

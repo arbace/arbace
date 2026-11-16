@@ -1,0 +1,5 @@
+let rec fact n = if n <= 1 then 1 else n * fact (n - 1)
+let rec even n = n = 0 || odd (n - 1)
+and odd n = n <> 0 && even (n - 1)
+let () = print_int (fact 10); print_newline ()
+let () = print_string (if even 10 then "even" else "odd"); print_newline ()

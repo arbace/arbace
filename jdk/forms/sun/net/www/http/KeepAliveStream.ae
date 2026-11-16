@@ -1,0 +1,105 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/http/KeepAliveStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.http)
+
+(import '(java.io ByteArrayInputStream DataInputStream IOException InputStream)
+        '(jdk.internal.misc InnocuousThread)
+        '(sun.net.www MeteredStream))
+
+(defclass ^:public KeepAliveStream
+  :extends MeteredStream
+  :implements [Hurryable]
+
+  (field ^HttpClient hc)
+
+  (field ^boolean hurried)
+
+  (field ^:protected ^:volatile ^boolean queuedForCleanup false)
+
+  (field ^:private ^:static ^:final ^KeepAliveStreamCleaner queue (KeepAliveStreamCleaner.))
+
+  (field ^:private ^:static ^Thread cleanerThread)
+
+  (constructor ^:public [this ^InputStream is ^long expected ^HttpClient hc]
+    (super. is expected)
+    (set! (.-hc this) hc))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when-not queuedForCleanup
+      (.lock this)
+      (try
+        (when-not (or (.-closed this) queuedForCleanup)
+          (try
+            (when (> (.-expected this) (.-count this))
+              (let [^:mutable nskip (unchecked-subtract (.-expected this) (.-count this))]
+                (cond
+                  (<= nskip (.available this))
+                    (loop []
+                      (when (and (> (set! nskip
+                                          (unchecked-subtract (.-expected this) (.-count this)))
+                                    0)
+                                 (> (.skip this (Math/min nskip (.available this))) 0))
+                        (recur)))
+                  (and (<= (.-expected this) KeepAliveStreamCleaner/MAX_DATA_REMAINING)
+                       (not hurried))
+                    (KeepAliveStream/queueForCleanup (KeepAliveCleanerEntry. this hc))
+                  :else (.closeServer hc))))
+            (when (and (and (not (.-closed this)) (not hurried)) (not queuedForCleanup))
+              (.finished hc))
+            (finally
+              (when-not queuedForCleanup
+                (set! (.-in this) nil)
+                (set! hc nil)
+                (set! (.-closed this) true)))))
+        (finally (.unlock this)))))
+
+  (method ^:public markSupported ^boolean [this] false)
+
+  (method ^:public mark ^void [this ^int limit])
+
+  (method ^:public reset :throws [IOException] ^void [this]
+    (throw (IOException. "mark/reset not supported")))
+
+  (method ^:public hurry ^boolean [this]
+    (.lock this)
+    (try
+      (cond
+        (or (.-closed this) (>= (.-count this) (.-expected this))) false
+        (< (.available (.-in this)) (unchecked-subtract (.-expected this) (.-count this))) false
+        :else
+          (let [size (unchecked-int (unchecked-subtract (.-expected this) (.-count this)))
+                buf (new byte/1 size)
+                dis (DataInputStream. (.-in this))]
+            (.readFully dis buf)
+            (set! (.-in this) (ByteArrayInputStream. buf))
+            (set! hurried true)
+            true))
+      (catch IOException e false)
+      (finally (.unlock this))))
+
+  (method ^:private ^:static queueForCleanup ^void [^KeepAliveCleanerEntry kace]
+    (.lock queue)
+    (try
+      (when-not (.getQueuedForCleanup kace)
+        (when-not (.offer queue kace) (.closeServer (.getHttpClient kace)) (return))
+        (.setQueuedForCleanup kace)
+        (.signalAll queue))
+      (let [^:mutable startCleanupThread (nil? cleanerThread)]
+        (when-not startCleanupThread
+          (when-not (.isAlive cleanerThread) (set! startCleanupThread true)))
+        (when startCleanupThread
+          (set! cleanerThread (InnocuousThread/newSystemThread "Keep-Alive-SocketCleaner" queue))
+          (.setDaemon cleanerThread true)
+          (.setPriority cleanerThread (unchecked-subtract-int Thread/MAX_PRIORITY 2))
+          (.start cleanerThread)))
+      (finally (.unlock queue))))
+
+  (method ^:protected remainingToRead ^long [this]
+    (java-assert (.isLockHeldByCurrentThread this))
+    (unchecked-subtract (.-expected this) (.-count this)))
+
+  (method ^:protected setClosed ^void [this]
+    (java-assert (.isLockHeldByCurrentThread this))
+    (set! (.-in this) nil)
+    (set! hc nil)
+    (set! (.-closed this) true)))

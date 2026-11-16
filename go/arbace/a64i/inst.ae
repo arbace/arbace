@@ -1,0 +1,322 @@
+;; Package a64i is arm64's machine on Arbace's emulator frame (doc/asm/ARM64-SURVEY.md §4.2, AR5; the frame go/arbace/emu,
+;; SH5): A64's integer core (data processing, branches, loads and stores, exclusives and LSE atomics, the system
+;; instructions a user program meets) run at user level, Linux's system calls by name. Two inputs, one machine: an
+;; instruction comes from the decoder (Decode: the linked bytes, AOT) or from its assembly form (FromForm: the forms laid
+;; out, eval), both giving an Inst, the one execution's input. The semantics are written from the Arm ARM's pseudocode
+;; (DDI 0487), by Arbace; no code copied.
+(in-ns 'go.arbace.a64i) (go/file "inst.go" :doc "Package a64i is arm64's machine on Arbace's emulator frame (doc/asm/ARM64-SURVEY.md §4.2, AR5; the frame go/arbace/emu,\nSH5): A64's integer core (data processing, branches, loads and stores, exclusives and LSE atomics, the system\ninstructions a user program meets) run at user level, Linux's system calls by name. Two inputs, one machine: an\ninstruction comes from the decoder (Decode: the linked bytes, AOT) or from its assembly form (FromForm: the forms laid\nout, eval), both giving an Inst, the one execution's input. The semantics are written from the Arm ARM's pseudocode\n(DDI 0487), by Arbace; no code copied.\n" :imports [
+
+    ^{:line 9} [fmt "fmt"]])
+
+
+(go/type Op "Op is an operation after the aliases: the Arm ARM's instruction (encoding class) a form or a word names.\n" uint8)
+
+(go/const
+  ^{:line 15} [^{:tag Op :val 0} OpInvalid iota]
+  ^{:line 16} [^{:val 1} OpADDI] ; add/sub immediate: Rd|SP = Rn|SP + Imm (S: Rd ZR, flags)
+  ^{:line 17} [^{:val 2} OpSUBI]
+  ^{:line 18} [^{:val 3} OpADDR] ; add/sub shifted register
+  ^{:line 19} [^{:val 4} OpSUBR]
+  ^{:line 20} [^{:val 5} OpADDX] ; add/sub extended register: Rn|SP, Rd|SP unless S
+  ^{:line 21} [^{:val 6} OpSUBX]
+  ^{:line 22} [^{:val 7} OpADC]
+  ^{:line 23} [^{:val 8} OpSBC]
+  ^{:line 24} [^{:val 9} OpANDI] ; logical immediate: Imm the decoded mask; Rd|SP unless S (ANDS)
+  ^{:line 25} [^{:val 10} OpORRI]
+  ^{:line 26} [^{:val 11} OpEORI]
+  ^{:line 27} [^{:val 12} OpAND] ; logical shifted register; N inverts the operand (BIC, ORN, EON, BICS)
+  ^{:line 28} [^{:val 13} OpORR]
+  ^{:line 29} [^{:val 14} OpEOR]
+  ^{:line 30} [^{:val 15} OpMOVZ] ; move wide: Imm the 16 bits, Amount the shift
+  ^{:line 31} [^{:val 16} OpMOVN]
+  ^{:line 32} [^{:val 17} OpMOVK]
+  ^{:line 33} [^{:val 18} OpSBFM] ; bitfield: Imm immr, Imm2 imms
+  ^{:line 34} [^{:val 19} OpBFM]
+  ^{:line 35} [^{:val 20} OpUBFM]
+  ^{:line 36} [^{:val 21} OpEXTR] ; Imm lsb
+  ^{:line 37} [^{:val 22} OpADR] ; Target
+  ^{:line 38} [^{:val 23} OpADRP]
+  ^{:line 39} [^{:val 24} OpB]
+  ^{:line 40} [^{:val 25} OpBL]
+  ^{:line 41} [^{:val 26} OpBCOND]
+  ^{:line 42} [^{:val 27} OpCBZ]
+  ^{:line 43} [^{:val 28} OpCBNZ]
+  ^{:line 44} [^{:val 29} OpTBZ] ; Imm the bit
+  ^{:line 45} [^{:val 30} OpTBNZ]
+  ^{:line 46} [^{:val 31} OpBR]
+  ^{:line 47} [^{:val 32} OpBLR]
+  ^{:line 48} [^{:val 33} OpRET]
+  ^{:line 49} [^{:val 34} OpCSEL]
+  ^{:line 50} [^{:val 35} OpCSINC]
+  ^{:line 51} [^{:val 36} OpCSINV]
+  ^{:line 52} [^{:val 37} OpCSNEG]
+  ^{:line 53} [^{:val 38} OpCCMP] ; conditional compare: N set for CCMN; Imm2 the nzcv; Imm the immediate when Rm is 255
+  ^{:line 54} [^{:val 39} OpRBIT]
+  ^{:line 55} [^{:val 40} OpREV16]
+  ^{:line 56} [^{:val 41} OpREV32]
+  ^{:line 57} [^{:val 42} OpREV]
+  ^{:line 58} [^{:val 43} OpCLZ]
+  ^{:line 59} [^{:val 44} OpCLS]
+  ^{:line 60} [^{:val 45} OpUDIV]
+  ^{:line 61} [^{:val 46} OpSDIV]
+  ^{:line 62} [^{:val 47} OpLSLV]
+  ^{:line 63} [^{:val 48} OpLSRV]
+  ^{:line 64} [^{:val 49} OpASRV]
+  ^{:line 65} [^{:val 50} OpRORV]
+  ^{:line 66} [^{:val 51} OpMADD]
+  ^{:line 67} [^{:val 52} OpMSUB]
+  ^{:line 68} [^{:val 53} OpSMADDL]
+  ^{:line 69} [^{:val 54} OpSMSUBL]
+  ^{:line 70} [^{:val 55} OpUMADDL]
+  ^{:line 71} [^{:val 56} OpUMSUBL]
+  ^{:line 72} [^{:val 57} OpSMULH]
+  ^{:line 73} [^{:val 58} OpUMULH]
+  ^{:line 74} [^{:val 59} OpLDR] ; load register: Size, Signed, Wide (to 64 bits); Mode with Imm or Rm, Ext, Amount
+  ^{:line 75} [^{:val 60} OpSTR] ; store register
+  ^{:line 76} [^{:val 61} OpLDRLIT] ; load literal: Target
+  ^{:line 77} [^{:val 62} OpPRFM] ; a prefetch: no effect
+  ^{:line 78} [^{:val 63} OpLDP] ; load pair: Rd, Ra the two registers
+  ^{:line 79} [^{:val 64} OpSTP]
+  ^{:line 80} [^{:val 65} OpLDXR] ; load exclusive (Ra the second register of a pair when Pair); Acq
+  ^{:line 81} [^{:val 66} OpSTXR] ; store exclusive: Rm the status; Rel
+  ^{:line 82} [^{:val 67} OpLDAR] ; load-acquire (and LDAPR)
+  ^{:line 83} [^{:val 68} OpSTLR] ; store-release
+  ^{:line 84} [^{:val 69} OpLDOP] ; LSE's atomic memory operations: Sys the operation (AtomADD...), Rm the source, Rd the destination
+  ^{:line 85} [^{:val 70} OpSWP]
+  ^{:line 86} [^{:val 71} OpCAS] ; compare and swap: Rm the compared and old value
+  ^{:line 87} [^{:val 72} OpCASP] ; pair: Rm, Rm+1 compared; Rd, Rd+1 new
+  ^{:line 88} [^{:val 73} OpSVC]
+  ^{:line 89} [^{:val 74} OpHINT] ; NOP and the hints: Sys the CRm:op2
+  ^{:line 90} [^{:val 75} OpBARRIER]
+  ^{:line 91} [^{:val 76} OpCLREX]
+  ^{:line 92} [^{:val 77} OpMRS] ; Sys the system register (op0:op1:CRn:CRm:op2)
+  ^{:line 93} [^{:val 78} OpMSR]
+  ^{:line 94} [^{:val 79} OpBRK]
+  ^{:line 95} [^{:val 80} OpUDF]
+  [^{:val 81} OpCRC32] ; FEAT_CRC32 (AR18): crc32b/h/w/x, Size the source's log2 bytes; Sys 1 crc32c*
+  [^{:val 82} OpFLAGM] ; FEAT_FlagM, FEAT_FlagM2 (AR18): Sys flagmNames' index; rmif's Imm the rotation and Imm2 the mask
+  [^{:val 83} OpLDAPUR] ; FEAT_LRCPC2 (AR18): load-acquire RCpc, unscaled offset (Imm): Size, Signed, Wide
+  [^{:val 84} OpSTLUR] ; store-release, unscaled offset (Imm)
+  ^{:line 96} [^{:val 85} opCount])
+
+(go/const ^{:tag Op :val 127 :doc "OpSYS is SYS's DC and IC (AR19, queue 288): Rd the address's register, Sys CRm (dc zva 4, ic ivau 5, dc cvac 10, cvau 11,\ncvap 12, cvadp 13, civac 14); past the FP and SIMD operations, so that theirs keep their values.\n"} OpSYS (+ opSIMDEnd 1))
+
+(go/var ^{:doc "sysOpNames are SYS's operations by CRm (AR19).\n"} sysOpNames (lit (map uint32 string) [4 "dc.zva"] [5 "ic.ivau"] [10 "dc.cvac"] [11 "dc.cvau"] [12 "dc.cvap"] [13 "dc.cvadp"] [14 "dc.civac"]))
+
+
+(go/var opNames ^{:go/breaks [14 30 45 59 74]} (lit (array ... string) "invalid" "addi" "subi" "addr" "subr" "addx" "subx" "adc" "sbc" "andi" "orri" "eori"
+    "and" "orr" "eor" "movz" "movn" "movk" "sbfm" "bfm" "ubfm" "extr" "adr" "adrp" "b" "bl" "bcond" "cbz"
+    "cbnz" "tbz" "tbnz" "br" "blr" "ret" "csel" "csinc" "csinv" "csneg" "ccmp" "rbit" "rev16" "rev32" "rev"
+    "clz" "cls" "udiv" "sdiv" "lslv" "lsrv" "asrv" "rorv" "madd" "msub" "smaddl" "smsubl" "umaddl" "umsubl"
+    "smulh" "umulh" "ldr" "str" "ldrlit" "prfm" "ldp" "stp" "ldxr" "stxr" "ldar" "stlr" "ldop" "swp" "cas"
+    "casp" "svc" "hint" "barrier" "clrex" "mrs" "msr" "brk" "udf" "crc32" "flagm" "ldapur" "stlur"))
+
+^{:go/end 111} (go/method String ^string [^Op o]
+  (when (< (conv int o) (len opNames))
+    (return (aget opNames o)))
+
+  (when (== o OpSYS)
+    (return "sys"))
+
+  (fpOpName o))
+
+
+
+(go/const "Addressing modes of a load or store.\n"
+  ^{:line 115} [^{:val 0} ModeOff iota] ; [Rn, #Imm]
+  ^{:line 116} [^{:val 1} ModePre] ; [Rn, #Imm]!
+  ^{:line 117} [^{:val 2} ModePost] ; [Rn], #Imm
+  ^{:line 118} [^{:val 3} ModeReg]) ; [Rn, Rm, Ext #Amount]
+
+
+
+(go/const "Shift types and extends.\n"
+  ^{:line 123} [^{:val 0} ShLSL iota]
+  ^{:line 124} [^{:val 1} ShLSR]
+  ^{:line 125} [^{:val 2} ShASR]
+  ^{:line 126} [^{:val 3} ShROR])
+
+
+(go/const
+  ^{:line 130} [^{:val 0} ExtUXTB iota]
+  ^{:line 131} [^{:val 1} ExtUXTH]
+  ^{:line 132} [^{:val 2} ExtUXTW]
+  ^{:line 133} [^{:val 3} ExtUXTX]
+  ^{:line 134} [^{:val 4} ExtSXTB]
+  ^{:line 135} [^{:val 5} ExtSXTH]
+  ^{:line 136} [^{:val 6} ExtSXTW]
+  ^{:line 137} [^{:val 7} ExtSXTX])
+
+
+
+(go/const "LSE's operations (OpLDOP's Sys).\n"
+  ^{:line 142} [^{:val 0} AtomADD iota]
+  ^{:line 143} [^{:val 1} AtomCLR]
+  ^{:line 144} [^{:val 2} AtomEOR]
+  ^{:line 145} [^{:val 3} AtomSET]
+  ^{:line 146} [^{:val 4} AtomSMAX]
+  ^{:line 147} [^{:val 5} AtomSMIN]
+  ^{:line 148} [^{:val 6} AtomUMAX]
+  ^{:line 149} [^{:val 7} AtomUMIN])
+
+
+
+(go/const "System registers a64i models (MRS/MSR's Sys: op0<<14 | op1<<11 | CRn<<7 | CRm<<3 | op2).\n"
+  ^{:line 154} [^{:val 55824} SysNZCV (bit-or (<< 3 14) (<< 3 11) (<< 4 7) (<< 2 3) 0)]
+  ^{:line 155} [^{:val 55840} SysFPCR (bit-or (<< 3 14) (<< 3 11) (<< 4 7) (<< 4 3) 0)]
+  ^{:line 156} [^{:val 55841} SysFPSR (bit-or (<< 3 14) (<< 3 11) (<< 4 7) (<< 4 3) 1)]
+  ^{:line 157} [^{:val 56962} SysTPIDR (bit-or (<< 3 14) (<< 3 11) (<< 13 7) (<< 0 3) 2)]
+  ^{:line 158} [^{:val 56963} SysTPIDRRO (bit-or (<< 3 14) (<< 3 11) (<< 13 7) (<< 0 3) 3)]
+  ^{:line 159} [^{:val 57090} SysCNTVCT (bit-or (<< 3 14) (<< 3 11) (<< 14 7) (<< 0 3) 2)]
+  ^{:line 160} [^{:val 57088} SysCNTFRQ (bit-or (<< 3 14) (<< 3 11) (<< 14 7) (<< 0 3) 0)]
+  ^{:line 161} [^{:val 55303} SysDCZID (bit-or (<< 3 14) (<< 3 11) (<< 0 7) (<< 0 3) 7)]
+  ^{:line 162} [^{:val 55297} SysCTR (bit-or (<< 3 14) (<< 3 11) (<< 0 7) (<< 0 3) 1)]
+  ^{:line 163} [^{:val 49152} SysMIDR (bit-or (<< 3 14) (<< 0 11) (<< 0 7) (<< 0 3) 0)]
+  [^{:val 57094} SysCNTVCTSS (bit-or (<< 3 14) (<< 3 11) (<< 14 7) (<< 0 3) 6)] ; AR19: FEAT_ECV's self-synchronised counter
+  [^{:val 55829} SysDIT (bit-or (<< 3 14) (<< 3 11) (<< 4 7) (<< 2 3) 5)] ; AR19: PSTATE.DIT (bit 24)
+  [^{:val 55830} SysSSBS (bit-or (<< 3 14) (<< 3 11) (<< 4 7) (<< 2 3) 6)] ; AR19: PSTATE.SSBS (bit 12)
+  ^{:line 164} [^{:val 65535} SysDAIFSet 0xffff]
+  ^{:line 165} [^{:val 0} sysUnmodeled 0])
+
+
+
+(go/type Inst "Inst is one instruction as a64i executes it. Registers are numbers 0-31 (31: ZR or SP by the operation's operand).\n" (struct
+    ^{:line 170 :tag Op} Op
+    ^{:line 171 :tag bool} Sf ; 64-bit operation
+    ^{:line 172 :tag bool} S ; sets the flags
+    ^{:line 173 :tag bool} N ; the operand inverted (BIC, ORN, EON), CCMN
+    ^{:line 174 :tag uint8} Rd
+    ^{:line 175 :tag uint8} Rn
+    ^{:line 176 :tag uint8} Rm ; 255: an immediate (CCMP)
+    ^{:line 177 :tag uint8} Ra
+    ^{:line 178 :tag int64} Imm
+    ^{:line 179 :tag int64} Imm2
+    ^{:line 180 :tag uint8} Shift
+    ^{:line 181 :tag uint8} Amount
+    ^{:line 182 :tag uint8} Ext
+    ^{:line 183 :tag uint8} Cond
+    ^{:line 184 :tag uint8} Size ; a load's or store's log2 bytes
+    ^{:line 185 :tag bool} Signed ; a sign-extending load
+    ^{:line 186 :tag bool} Wide ; a sign-extending load to 64 bits
+    ^{:line 187 :tag uint8} Mode
+    ^{:line 188 :tag bool} Pair ; an exclusive pair
+    ^{:line 189 :tag bool} Vreg ; a SIMD&FP register's load or store (Size 0-4: b, h, s, d, q)
+    ^{:line 190 :tag bool} Acq
+    ^{:line 191 :tag bool} Rel
+    ^{:line 192 :tag uint64} Target ; a branch's, ADR's, ADRP's or a literal's address
+    ^{:line 193 :tag uint32} Sys))
+
+
+
+^{:go/end 201} (go/method Key "Key is the instruction's fields in one line: the decoder's and the forms' Insts of an address compare by it.\n" ^string [^{:tag (* Inst)} in]
+  (fmt/Sprintf "%v v=%v sf=%v s=%v n=%v d=%d n=%d m=%d a=%d imm=%d imm2=%d sh=%d amt=%d ext=%d c=%d sz=%d sg=%v w=%v mode=%d p=%v acq=%v rel=%v t=%#x sys=%#x"
+    (.-Op in) (.-Vreg in) (.-Sf in) (.-S in) (.-N in) (.-Rd in) (.-Rn in) (.-Rm in) (.-Ra in) (.-Imm in) (.-Imm2 in) (.-Shift in) (.-Amount in) (.-Ext in) (.-Cond in) (.-Size in)
+    (.-Signed in) (.-Wide in) (.-Mode in) (.-Pair in) (.-Acq in) (.-Rel in) (.-Target in) (.-Sys in)))
+
+
+
+
+^{:go/breaks [[5 234]] :go/end 235} (go/method Family "Family is the instruction's family (the coverage's, the injected faults' and the reports'): alu, logic, move, bitfield,\nbranch, cond, dp1, dp2, mul, ldst, pair, excl, lse, sys, fp (AR6).\n" ^string [^{:tag (* Inst)} in]
+  (when (isFPOp (.-Op in))
+    (return (fpFamily (.-Op in))))
+
+  (switch (.-Op in)
+    (case [OpADDI OpSUBI OpADDR OpSUBR OpADDX OpSUBX OpADC OpSBC]
+      (return "alu"))
+    (case [OpANDI OpORRI OpEORI OpAND OpORR OpEOR]
+      (return "logic"))
+    (case [OpMOVZ OpMOVN OpMOVK OpADR OpADRP]
+      (return "move"))
+    (case [OpSBFM OpBFM OpUBFM OpEXTR]
+      (return "bitfield"))
+    (case [OpB OpBL OpBCOND OpCBZ OpCBNZ OpTBZ OpTBNZ OpBR OpBLR OpRET]
+      (return "branch"))
+    (case [OpCSEL OpCSINC OpCSINV OpCSNEG OpCCMP OpFLAGM]
+      (return "cond"))
+    (case [OpRBIT OpREV16 OpREV32 OpREV OpCLZ OpCLS]
+      (return "dp1"))
+    (case [OpUDIV OpSDIV OpLSLV OpLSRV OpASRV OpRORV OpCRC32]
+      (return "dp2"))
+    (case [OpMADD OpMSUB OpSMADDL OpSMSUBL OpUMADDL OpUMSUBL OpSMULH OpUMULH]
+      (return "mul"))
+    (case [OpLDR OpSTR OpLDRLIT OpPRFM]
+      (return "ldst"))
+    (case [OpLDP OpSTP]
+      (return "pair"))
+    (case [OpLDXR OpSTXR OpLDAR OpSTLR OpLDAPUR OpSTLUR]
+      (return "excl"))
+    (case [OpLDOP OpSWP OpCAS OpCASP]
+      (return "lse")))
+
+  "sys")
+
+
+
+(go/var ^{:doc "Families are the families' names, in order.\n"} Families (lit (slice string) "alu" "logic" "move" "bitfield" "branch" "cond" "dp1" "dp2" "mul" "ldst" "pair" "excl" "lse" "sys" "fp" "simd"))
+
+
+^{:go/end 282} (go/method Name "Name is the instruction's name for the coverage: its operation and the variant the decoder tells apart.\n" ^string [^{:tag (* Inst)} in]
+  (when (isFPOp (.-Op in))
+    (return (fpName in)))
+
+  ;; AR18: crc32 and crc32c by the source's width; the flag manipulation by its instruction
+  (switch (.-Op in)
+    (case [OpCRC32]
+      (let [s "crc32"]
+        (when (== (.-Sys in) 1)
+          (set! s "crc32c"))
+
+        (return (fmt/Sprintf "%s.%d" s ^int (<< 8 (.-Size in))))))
+    (case [OpFLAGM]
+      (return (aget (lit (slice string) "cfinv" "xaflag" "axflag" "rmif" "setf8" "setf16") (.-Sys in))))
+    (case [OpSYS]
+      ;; AR19: dc and ic by their operation
+      (return (aget sysOpNames (.-Sys in))))
+    (case [OpMSR]
+      ;; AR19: MSR (immediate) of PSTATE.DIT and PSTATE.SSBS
+      (when (== (.-Rm in) 255)
+        (return "msr.imm"))))
+
+  (let [s (.String (.-Op in))]
+    (if (.-Sf in)
+      (set! s + ".x")
+
+      (set! s + ".w"))
+
+    (when (.-S in)
+      (set! s + ".s"))
+
+    (when (.-N in)
+      (set! s + ".n"))
+
+    (switch (.-Op in)
+      (case [OpLDR OpSTR OpLDRLIT OpLDP OpSTP OpLDXR OpSTXR OpLDAR OpSTLR OpLDAPUR OpSTLUR OpLDOP OpSWP OpCAS OpCASP]
+        (when (.-Vreg in)
+          (set! s + ".v"))
+
+        (set! s + (fmt/Sprintf ".%d" ^int (<< 8 (.-Size in))))
+        (when (.-Signed in)
+          (set! s + ".sg"))
+
+        (when (== (.-Op in) OpLDOP)
+          (set! s + (fmt/Sprintf ".op%d" (.-Sys in))))
+
+        (when (!= (.-Op in) OpLDRLIT)
+          (set! s + (aget (lit (slice string) ".off" ".pre" ".post" ".reg") (.-Mode in))))
+
+        (when (.-Acq in)
+          (set! s + ".a"))
+
+        (when (.-Rel in)
+          (set! s + ".l"))
+
+        (when (.-Pair in)
+          (set! s + ".p")))
+
+      (case [OpADDR OpSUBR OpAND OpORR OpEOR]
+        (set! s + (aget (lit (slice string) ".lsl" ".lsr" ".asr" ".ror") (bit-and (.-Shift in) 3)))))
+
+    ^{:line 281} s))
+
+
+^{:go/end 284} (go/method String ^string [^{:tag (* Inst)} in] (.Key in))

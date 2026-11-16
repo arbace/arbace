@@ -99,7 +99,7 @@
           text0 (wr/forms-text forms)
           read0 (wr/read-all text0)
           _ (when-let [d (wr/check-read forms read0)] (throw (ex-info (str "the forms text misreads: " (pr-str d)) {})))]
-      {:ns ns :warnings warnings :forms (fl/full-forms forms read0 text source)})
+      {:ns ns :warnings warnings :forms (fl/full-forms forms read0 text toks)})
     (cv/convert-module dump module-file)))
 
 (defn read-dump
@@ -316,11 +316,21 @@
                                  (String. x (int s) (int (- e s)) "UTF-8")))]
         {:level :text :status :differs :at (line-col-at a i) :bytes [(alength a) (alength b)]
          :detail (ctx a) :cand (ctx b)})
+      (nil? orig-tree) {:status :ok :size (alength a)}
       :else (assoc (compare-module orig-tree cand-tree orig-lines cand-lines) :size (alength a)))))
+
+(declare run-controls)
+
+(defn compare-bytes
+  "The text level by its own verdict (the native reader's, 2026-11-07): the printed file against its reference (the original,
+  or a CPP module's module view) byte for byte, and nothing else: equal bytes read alike"
+  [printed reference & _]
+  (compare-text printed reference nil nil nil nil))
 
 (defn- cmd-compare-text [args]
   (let [{:keys [opts]} (parse-args args #{"--corpus" "--src" "--views" "--cand" "--trees" "--known" "--report"
-                                          "--forms-report" "--only" "--times"})
+                                          "--forms-report" "--only" "--times" "--bytes-only" "--controls"})
+        bytes-only (= "true" (get opts "--bytes-only"))
         corpus (read-string (slurp (get opts "--corpus")))
         src (get opts "--src") views (get opts "--views") cand (get opts "--cand") trees (get opts "--trees")
         known-file (get opts "--known")
@@ -338,7 +348,7 @@
                                    cpp? (.isFile (File. view))]
                                [k (assoc (if (and conv (not= :ok (:status conv)))
                                            {:level :convert :status (:status conv) :detail (:error conv)}
-                                           (compare-text (str cand "/" (:name p) "/" f)
+                                           ((if bytes-only compare-bytes compare-text) (str cand "/" (:name p) "/" f)
                                                          (if cpp? view (str src "/" (:dir p) "/" f))
                                                          (str trees "/orig/" (:name p) "/" f ".tree") (str trees "/cand/" (:name p) "/" f ".tree")
                                                          (str trees "/orig/" (:name p) "/" f ".lines") (str trees "/cand/" (:name p) "/" f ".lines")))
@@ -350,15 +360,28 @@
         fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
         by-level (frequencies (map (comp :level second) failing))
         same-text (filter #(:size (second %)) results)
-        bytes (reduce + 0 (keep #(:size (second %)) same-text))]
+        bytes (reduce + 0 (keep #(:size (second %)) same-text))
+        ;; the negative controls (GTS81 (a)): a module's print against another module's reference, by the same byte judge
+        paths (into {} (for [[k p f] mods]
+                         (let [view (str views "/" (:name p) "/" f ".view")]
+                           [k [(str cand "/" (:name p) "/" f) (if (.isFile (File. view)) view (str src "/" (:dir p) "/" f))]])))
+        okeys (mapv first ok)
+        [njudged passed] (run-controls (get opts "--controls") :text okeys
+                                       (fn [s r] (let [a (file-bytes (first (paths s))) b (file-bytes (second (paths r)))]
+                                                   (when (and a b) (java.util.Arrays/equals ^bytes a ^bytes b)))))
+        ctl-bad (or (seq passed) (and (zero? njudged) (>= (count okeys) 2)))]
+    (doseq [[s r _] passed] (println "control FAILED:" s "printed equals" r "'s reference: the judge does not tell modules apart"))
+    (when-not ctl-bad (println (format "control: %d pairs (a module's print against another's reference) differ, as they must" njudged)))
     (doseq [[k r] unexpected]
       (println "DIFFERS" k (pr-str (dissoc r :detail :cand)))
       (when (:detail r) (println "  original:\n" (:detail r)))
       (when (:cand r) (println "  printed:\n" (:cand r))))
     (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
     (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:level :status])) "--" (get known k)))
-    (println (format "repr-haskell roundtrip (text level): %d modules (%d with CPP: their module views), %d byte-identical (%d bytes), %d also with equal trees and lines of mode :full; %d differ (%s), %d known, %d unexpected, %d fixed%s"
-                     (count results) (count (filter #(:cpp (second %)) results)) (count same-text) bytes (count ok) (count failing) (pr-str by-level)
+    (println (format "repr-haskell roundtrip (text level): %d modules (%d with CPP: their module views), %d byte-identical (%d bytes), %d %s; %d differ (%s), %d known, %d unexpected, %d fixed%s"
+                     (count results) (count (filter #(:cpp (second %)) results)) (count same-text) bytes (count ok)
+                     (if bytes-only "equal by their own verdict (the bytes: no tree made)" "also with equal trees and lines of mode :full")
+                     (count failing) (pr-str by-level)
                      (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
                      (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
     (when-let [rep (get opts "--report")]
@@ -367,7 +390,110 @@
                         :by-level by-level :unexpected (mapv first unexpected) :fixed (mapv first fixed)
                         :times (get opts "--times")
                         :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
-    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+    (if (and (empty? unexpected) (empty? fixed) (not ctl-bad)) 0 1)))
+
+;;; The round trip's tree level with the native reader (2026-11-07, the crop's independence): its own verdict
+
+(def ^:private preprocessing-keys
+  "The keys of a module's form that record how its text was made rather than what it says: GHC's installation and flags
+  as the preprocessing saw them, the C preprocessor's, unlit's and hsc2hs's records. The print is the preprocessed module,
+  so its reread has no such record (or another): they are left out of the comparison."
+  #{:config :cpp :hsc2hs :unlit})
+
+(defn- norm-forms [forms]
+  (mapv (fn [f]
+          (if (and (seq? f) (= 'hs/module (first f)))
+            ;; (hs/module NAME [EXPORTS] :k v ...): a key of the set dropped with its value, wherever it stands
+            (apply list (loop [xs (seq f) out []]
+                          (cond (nil? xs) out
+                                (contains? preprocessing-keys (first xs)) (recur (nnext xs) out)
+                                :else (recur (next xs) (conj out (first xs))))))
+            f))
+        forms))
+
+(defn- forms-of [report k]
+  (when-let [o (get-in report [:modules k :out])]
+    (when (.isFile (File. ^String o)) (norm-forms (wr/read-all (slurp o))))))
+
+(defn compare-forms-module
+  "The tree level of one module by its own verdict: the original's forms (the native reader's) against the printed
+  module's read again: {:status :ok} or {:level :reread :status ...}"
+  [orig-report cand-report k]
+  (let [a (forms-of orig-report k) b (forms-of cand-report k)]
+    (cond
+      (nil? a) {:level :reread :status :no-original}
+      (nil? b) {:level :reread :status (if (get-in cand-report [:modules k]) :printed-fails-to-convert :printed-fails-to-read)
+                :detail (get-in cand-report [:modules k :error])}
+      (not= a b) (let [i (first (keep-indexed (fn [i [x y]] (when (not= x y) i)) (map vector a b)))
+                       i (or i (min (count a) (count b)))]
+                   {:level :reread :status :differs :at i :detail (pr-str (get a i)) :cand (pr-str (get b i))})
+      :else {:status :ok})))
+
+(defn- run-controls
+  "The negative controls (GTS81 (a)): a subject's result judged against another module's reference by the level's own
+  judge must differ. The pairs are the controls file's (:tree or :text, [subject reference] module keys) among the modules
+  run, then each run module against the next one (the first five pairs): [judged failures-that-passed]"
+  [controls-file level mods judge]
+  (let [listed (when (and controls-file (.exists (File. ^String controls-file)))
+                 (get (read-string (slurp controls-file)) level))
+        have (set mods)
+        pairs (concat (filter (fn [[s r]] (and (have s) (have r))) listed)
+                      (take 5 (map vector mods (rest mods))))
+        res (doall (for [[s r] pairs :let [v (judge s r)] :when (some? v)] [s r v]))]
+    [(count res) (filterv (fn [[_ _ v]] (true? v)) res)]))
+
+(defn- cmd-compare-forms [args]
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--known" "--report" "--forms-report" "--only" "--times"
+                                          "--label" "--controls"})
+        corpus (read-string (slurp (get opts "--corpus")))
+        known-file (get opts "--known")
+        known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        only (some-> (get opts "--only") re-pattern)
+        rd (fn [f] (when (and f (.exists (File. ^String f))) (read-string (slurp f))))
+        orig-report (rd (get opts "--forms-report"))
+        cand-report (rd (str (get opts "--cand") ".report.edn"))
+        mods (for [p (:packages corpus) [m cf f] (corpus-modules p)
+                   :let [k (str (:name p) "/" cf)]
+                   :when (or (nil? only) (re-find only k))]
+               [k (str (:name p) "/" f)])
+        results (pmap-jobs 16
+                           (fn [[k fk]]
+                             (let [conv (get-in orig-report [:modules fk])]
+                               [k (if (and conv (not= :ok (:status conv)))
+                                    {:level :convert :status (:status conv) :detail (:error conv)}
+                                    (compare-forms-module orig-report cand-report fk))]))
+                           mods)
+        ok (filter #(= :ok (:status (second %))) results)
+        failing (remove #(= :ok (:status (second %))) results)
+        unexpected (remove #(contains? known (first %)) failing)
+        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
+        by-level (frequencies (map (comp :level second) failing))
+        fk-of (into {} mods)
+        okeys (mapv first ok)
+        [njudged passed] (run-controls (get opts "--controls") :tree okeys
+                                       (fn [s r] (let [a (forms-of orig-report (fk-of r)) b (forms-of cand-report (fk-of s))]
+                                                   (when (and a b) (= a b)))))
+        ctl-bad (or (seq passed) (and (zero? njudged) (>= (count okeys) 2)))]
+    (doseq [[k r] unexpected]
+      (println "DIFFERS" k (pr-str (dissoc r :detail :cand)))
+      (when (:detail r) (println "  original:\n" (:detail r)))
+      (when (:cand r) (println "  printed, read again:\n" (:cand r))))
+    (doseq [[k _] fixed] (println "FIXED (listed as known, no longer differs)" k))
+    (doseq [[k r] failing :when (contains? known k)] (println "known" k (pr-str (select-keys r [:level :status])) "--" (get known k)))
+    (doseq [[s r _] passed] (println "control FAILED:" s "read again equals" r "'s original forms: the judge does not tell modules apart"))
+    (when-not ctl-bad (println (format "control: %d pairs (a module's reread forms against another's original forms) differ, as they must" njudged)))
+    (println (format "repr-haskell roundtrip (tree level, native reader%s): %d modules, %d equal (the printed module read again gives the original's forms), %d differ (%s), %d known, %d unexpected, %d fixed%s"
+                     (if-let [l (get opts "--label")] (str ", " l) "") (count results) (count ok) (count failing) (pr-str by-level)
+                     (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
+                     (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str
+                  (prn {:modules (count results) :equal (count ok) :differ (count failing) :reader :native
+                        :by-level by-level :unexpected (mapv first unexpected) :fixed (mapv first fixed)
+                        :controls {:judged njudged :passed (mapv #(vec (take 2 %)) passed)}
+                        :times (get opts "--times")
+                        :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
+    (if (and (empty? unexpected) (empty? fixed) (not ctl-bad)) 0 1)))
 
 ;;; The round trip's interface level (SPEC §9.3)
 
@@ -533,7 +659,7 @@
                    :detail (around a) :cand-detail (around b)}))))))
 
 (defn- cmd-compare-iface [args]
-  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--printed" "--builds" "--side" "--known" "--report" "--only" "--times" "--mode" "--label"})
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--orig" "--cand" "--printed" "--builds" "--side" "--known" "--report" "--only" "--times" "--mode" "--label" "--controls"})
         corpus (read-string (slurp (get opts "--corpus")))
         mode (keyword (get opts "--mode" "lines"))
         known-file (get opts "--known")
@@ -558,7 +684,16 @@
         failing (remove #(= :ok (:status (second %))) results)
         unexpected (remove #(contains? known (first %)) failing)
         fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)
-        by-status (frequencies (map (comp :status second) failing))]
+        by-status (frequencies (map (comp :status second) failing))
+        ;; the negative controls (GTS81 (a)): a module's printed interface against another module's original, by the same judge
+        mod-of (into {} (map (fn [[k pkg m _]] [k [pkg m]]) mods))
+        units (fn [side k] (let [[pkg m] (mod-of k) f (File. (str (get opts side) "/" pkg "/" m ".iface"))]
+                             (when (.exists f) (iface-units (normalize-iface (slurp f) mode) mode))))
+        [njudged passed] (run-controls (get opts "--controls") :iface (mapv first ok)
+                                       (fn [s r] (let [a (units "--orig" r) b (units "--cand" s)] (when (and a b) (= a b)))))
+        ctl-bad (or (seq passed) (and (zero? njudged) (>= (count ok) 2)))]
+    (doseq [[s r _] passed] (println "control FAILED:" s "'s printed interface equals" r "'s original: the judge does not tell modules apart"))
+    (when-not ctl-bad (println (format "control: %d pairs (a module's printed interface against another's original) differ, as they must" njudged)))
     (when (get opts "--prune")
       ;; the texts of the equal modules removed (the scratch stays small; SPEC §9.3)
       (doseq [[k r] ok :let [[_ pkg m] (first (filter #(= k (first %)) mods))]]
@@ -582,7 +717,7 @@
                         :by-status by-status :unexpected (mapv first unexpected) :fixed (mapv first fixed)
                         :times (get opts "--times")
                         :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand-detail)]))}))))
-    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+    (if (and (empty? unexpected) (empty? fixed) (not ctl-bad)) 0 1)))
 
 (defn -main [& args]
   (let [[verb & more] args
@@ -593,6 +728,7 @@
                    "compare" (cmd-compare more)
                    "compare-iface" (cmd-compare-iface more)
                    "compare-text" (cmd-compare-text more)
+                   "compare-forms" (cmd-compare-forms more)
                    (do (println "usage: -m arbace.repr.haskell read|print|compare|compare-iface|compare-text ...") 2))
                  (catch Throwable e
                    (.printStackTrace e)

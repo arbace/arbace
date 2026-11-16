@@ -49,6 +49,14 @@
 (defn- fail [msg & [data]]
   (throw (ex-info (str "aot: " msg) (or data {}))))
 
+(defn- dup-str
+  "v printed for the reader (*print-dup*), or \"#<CLASS>\" when print-dup has no method for it (an
+  Object a macro left in code: print-dup's own error came before c2j's \"can't embed unreadable object\";
+  queue 206's low)."
+  [v]
+  (try (binding [*print-dup* true] (pr-str v))
+       (catch Exception _ (str "#<" (.getName (class v)) ">"))))
+
 ;; ---------------------------------------------------------------------------------------
 ;; class names and types
 
@@ -255,7 +263,7 @@
                                        (str v))
                                  true]
           :else
-          (let [s (binding [*print-dup* true] (pr-str v))]
+          (let [s (dup-str v)]
             (when (or (empty? s) (str/starts-with? s "#<"))
               (fail (str "can't embed unreadable object in code: " s)))
             [(list (with-meta 'arbace.lang.RT/readString {:param-tags '[java.lang.String]}) s) false]))
@@ -361,7 +369,7 @@
         :set (if (empty? v) (.append sb \E) (arr \S (vec (seq v))))
         :list (arr \L (vec v))
         :pattern (do (.append sb \p) (pool-str sb (str v)))
-        :read (let [s (if (instance? IType v) (type-literal v) (binding [*print-dup* true] (pr-str v)))]
+        :read (let [s (if (instance? IType v) (type-literal v) (dup-str v))]
                 (when (or (empty? s) (str/starts-with? s "#<"))
                   (fail (str "can't embed unreadable object in code: " s)))
                 (.append sb \r) (pool-str sb s)))
@@ -2409,8 +2417,12 @@
         ;; the lines its forms carry (J2G-SPEC §4.3), so lines that go back and forth pad it
         kids (group-by parent (sort-by (fn [n] [(or (:line (recs n)) 0) n]) all))
         children-of (fn [n] (map recs (get kids n)))]
+    ;; a constant c2j cannot embed (pool-encode's fail) names the top-level class whose pool holds it,
+    ;; so the build's error names the namespace (queue 206's low)
     (for [top (sort (get kids nil))]
-      (class-form (recs top) children-of true pools))))
+      (try (class-form (recs top) children-of true pools)
+           (catch arbace.lang.ExceptionInfo e
+             (throw (ex-info (str (ex-message e) " (in the class " top ")") (assoc (ex-data e) :class top) e)))))))
 
 (defn interface-record
   "The record of an interface made by gen-interface (events iface and imethod): name, the

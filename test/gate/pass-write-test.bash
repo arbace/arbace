@@ -10,6 +10,8 @@
 # instead of the checkout's (before GTS80: a93329c0^, whose publication, inline in clean_launch, is
 # copied below as its publish_passes)
 set -uo pipefail
+# the gate's own run (bin/gate --clean's audit_step, GATE_CLEAN_INNER, audit_all) is not the fabricated runner's
+unset audit_step audit_all GATE_CLEAN_INNER
 here=$(cd "$(dirname "$0")/../.." && pwd)
 export TMPDIR=$here/.tmp/tmp; mkdir -p "$TMPDIR"
 T=$here/.tmp/pass-write-test

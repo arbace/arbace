@@ -1,0 +1,216 @@
+;; The Str library's matcher (DEFERRED-TRIAGE §3 item 10), ported from oi's ext_str_re.go, itself a port of
+;; otherlibs/str/strstubs.c of OCaml 5.5.0 (LGPL-2.1 with the OCaml linking exception): re_match's backtracking interpreter
+;; of str.ml's compiled programs, re_string_match, re_partial_match, re_search_forward, re_search_backward and
+;; re_replacement_text. A regexp is str.ml's record { prog; cpool; normtable; numgroups; numregisters; startchars }.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io ByteArrayOutputStream) '(java.util Arrays))
+
+(defclass ^:public ^:final ExtStrRe
+
+  (field ^:private ^:static ^:final ^byte/1 WORD
+    (new byte/1 [0 0 0 0 0 0 -1 3 -2 -1 -1 -121 -2 -1 -1 7
+                 0 0 0 0 0 0 0 0 -1 -1 127 -1 -1 -1 127 -1]))
+
+  (method ^:private ^:static ub ^int [^byte/1 s ^int i] (unchecked-int (bit-and (long (aget s i)) 255)))
+  ;; the subject's byte at i, 0 at its end (an OCaml string's padding byte, which strstubs.c reads there)
+  (method ^:private ^:static at ^int [^byte/1 s ^int i] (if (>= i (alength s)) 0 (ExtStrRe/ub s i)))
+  (method ^:private ^:static inSet ^boolean [^byte/1 set ^int c]
+    (== (bit-and (bit-shift-right (ExtStrRe/ub set (unchecked-int (bit-shift-right c 3))) (bit-and c 7)) 1) 1))
+  (method ^:private ^:static word ^boolean [^int c] (ExtStrRe/inSet WORD c))
+  ;; a constant pool string's length up to its first NUL (C's String_val)
+  (method ^:private ^:static clen ^int [^byte/1 b]
+    (let [^:mutable ^int i 0]
+      (while (and (< i (alength b)) (not (== (aget b i) 0))) (set! i (unchecked-inc-int i)))
+      i))
+
+  ;; re_match: the groups' positions as an int array, or nil
+  (method ^:private ^:static match [rev ^byte/1 s ^int txt0 ^boolean partial]
+    (let [re (.-f (cast Block rev))
+          prog (.-f (cast Block (aget re 0)))
+          cpool (.-f (cast Block (aget re 1)))
+          ^byte/1 norm (cast byte/1 (aget re 2))
+          ngroups (Rt/ii (aget re 3))
+          nregs (Rt/ii (aget re 4))
+          end (alength s)
+          ^int/1 groups (new int/1 (unchecked-multiply-int 2 (if (< ngroups 1) 1 ngroups)))
+          ^int/1 regs (new int/1 (if (< nregs 1) 1 nregs))
+          ^:mutable ^int/1 sk (new int/1 64)
+          ^:mutable ^int/1 sa (new int/1 64)
+          ^:mutable ^int/1 sb (new int/1 64)
+          ^:mutable ^int sp 0
+          ^:mutable ^int pc 0
+          ^:mutable ^int txt txt0
+          ^:mutable result nil
+          ^:mutable ^boolean done false]
+      (Arrays/fill groups -1)
+      (Arrays/fill regs -1)
+      (aset groups 0 txt0)
+      (while (not done)
+        (let [instr (Rt/l (aget prog pc))
+              op (unchecked-int (bit-and instr 255))
+              arg (unchecked-int (bit-shift-right instr 8))
+              ^:mutable ^boolean fail false
+              ^:mutable ^boolean prefix false
+              ^:mutable ^boolean accept false
+              ^:mutable ^int push 0
+              ^:mutable ^int pa 0
+              ^:mutable ^int pb 0]
+          (set! pc (unchecked-inc-int pc))
+          (cond
+            (== op 0) (cond (== txt end) (set! prefix true)
+                            (not (== (ExtStrRe/ub s txt) arg)) (set! fail true)
+                            :else (set! txt (unchecked-inc-int txt)))
+            (== op 1) (cond (== txt end) (set! prefix true)
+                            (not (== (ExtStrRe/ub norm (ExtStrRe/ub s txt)) arg)) (set! fail true)
+                            :else (set! txt (unchecked-inc-int txt)))
+            (or (== op 2) (== op 3))
+            (let [^byte/1 cs (cast byte/1 (aget cpool arg))
+                  n (ExtStrRe/clen cs)
+                  ^:mutable ^int k 0]
+              (while (and (< k n) (not fail) (not prefix))
+                (if (== txt end)
+                  (set! prefix true)
+                  (let [t (if (== op 3) (ExtStrRe/ub norm (ExtStrRe/ub s txt)) (ExtStrRe/ub s txt))]
+                    (if (not (== (ExtStrRe/ub cs k) t))
+                      (set! fail true)
+                      (do (set! txt (unchecked-inc-int txt))
+                          (set! k (unchecked-inc-int k))))))))
+            (== op 4) (cond (== txt end) (set! prefix true)
+                            (not (ExtStrRe/inSet (cast byte/1 (aget cpool arg)) (ExtStrRe/ub s txt))) (set! fail true)
+                            :else (set! txt (unchecked-inc-int txt)))
+            (== op 5) (when (and (> txt 0) (not (== (ExtStrRe/ub s (unchecked-dec-int txt)) 10))) (set! fail true))
+            (== op 6) (when (and (< txt end) (not (== (ExtStrRe/ub s txt) 10))) (set! fail true))
+            (== op 7) (cond (== txt 0) (cond (== txt end) (set! prefix true)
+                                             (not (ExtStrRe/word (ExtStrRe/ub s 0))) (set! fail true))
+                            (== txt end) (when (not (ExtStrRe/word (ExtStrRe/ub s (unchecked-dec-int txt)))) (set! fail true))
+                            :else (when (if (ExtStrRe/word (ExtStrRe/ub s (unchecked-dec-int txt))) (ExtStrRe/word (ExtStrRe/ub s txt)) (not (ExtStrRe/word (ExtStrRe/ub s txt))))
+                                    (set! fail true)))
+            (or (== op 8) (== op 9))
+            (let [slot (if (== op 9) (unchecked-inc-int (unchecked-multiply-int 2 arg)) (unchecked-multiply-int 2 arg))]
+              (set! push 2) (set! pa slot) (set! pb (aget groups slot))
+              (aset groups slot txt))
+            (== op 10)
+            (let [gs (aget groups (unchecked-multiply-int 2 arg))
+                  ge (aget groups (unchecked-inc-int (unchecked-multiply-int 2 arg)))
+                  ^:mutable ^int k gs]
+              (if (or (== gs -1) (== ge -1))
+                (set! fail true)
+                (while (and (< k ge) (not fail) (not prefix))
+                  (cond (== txt end) (set! prefix true)
+                        (not (== (aget s k) (aget s txt))) (set! fail true)
+                        :else (do (set! txt (unchecked-inc-int txt)) (set! k (unchecked-inc-int k)))))))
+            (== op 11) (set! accept true)
+            (== op 12) (when (and (< txt end) (ExtStrRe/inSet (cast byte/1 (aget cpool arg)) (ExtStrRe/ub s txt)))
+                         (set! txt (unchecked-inc-int txt)))
+            (== op 13) (let [^byte/1 set (cast byte/1 (aget cpool arg))]
+                         (while (and (< txt end) (ExtStrRe/inSet set (ExtStrRe/ub s txt)))
+                           (set! txt (unchecked-inc-int txt))))
+            (== op 14) (let [^byte/1 set (cast byte/1 (aget cpool arg))]
+                         (cond (== txt end) (set! prefix true)
+                               (not (ExtStrRe/inSet set (ExtStrRe/ub s txt))) (set! fail true)
+                               :else (do (set! txt (unchecked-inc-int txt))
+                                         (while (and (< txt end) (ExtStrRe/inSet set (ExtStrRe/ub s txt)))
+                                           (set! txt (unchecked-inc-int txt))))))
+            (== op 15) (set! pc (unchecked-add-int pc arg))
+            (== op 16) (do (set! push 1) (set! pa (unchecked-add-int pc arg)) (set! pb txt))
+            (== op 17) (do (set! push 3) (set! pa arg) (set! pb (aget regs arg)) (aset regs arg txt))
+            (== op 18) (when (== (aget regs arg) txt) (set! fail true))
+            :else (throw (Rt/internal "impossible case in re_match")))
+          ;; push: kind 0 a program point (pc, txt), 1 a group bound's undo (slot, old), 2 a register's (reg, old)
+          (when (> push 0)
+            (when (== sp (alength sk))
+              (set! sk (Arrays/copyOf sk (unchecked-multiply-int sp 2)))
+              (set! sa (Arrays/copyOf sa (unchecked-multiply-int sp 2)))
+              (set! sb (Arrays/copyOf sb (unchecked-multiply-int sp 2))))
+            (aset sk sp (if (== push 1) 0 (if (== push 2) 1 2)))
+            (aset sa sp pa)
+            (aset sb sp pb)
+            (set! sp (unchecked-inc-int sp)))
+          ;; prefix_match: a partial match accepts at the end of the text
+          (when prefix (if partial (set! accept true) (set! fail true)))
+          (when accept
+            (aset groups 1 txt)
+            (let [res (new Object/1 (unchecked-multiply-int 2 ngroups))]
+              (loop [^int i 0]
+                (when (< i ngroups)
+                (let [a (aget groups (unchecked-multiply-int 2 i))
+                      b (aget groups (unchecked-inc-int (unchecked-multiply-int 2 i)))
+                      ok (not (or (== a -1) (== b -1)))]
+                  (aset res (unchecked-multiply-int 2 i) (Long/valueOf (long (if ok a -1))))
+                  (aset res (unchecked-inc-int (unchecked-multiply-int 2 i)) (Long/valueOf (long (if ok b -1)))))
+                (recur (unchecked-inc-int i))))
+              (set! result (Block. 0 res))
+              (set! done true)))
+          ;; backtrack: to the most recent program point, undoing on the way
+          (when (and fail (not done))
+            (let [^:mutable ^boolean found false]
+              (while (and (not found) (not done))
+                (if (== sp 0)
+                  (set! done true)
+                  (do (set! sp (unchecked-dec-int sp))
+                      (let [k (aget sk sp)]
+                        (cond (== k 0) (do (set! pc (aget sa sp)) (set! txt (aget sb sp)) (set! found true))
+                              (== k 1) (aset groups (aget sa sp) (aget sb sp))
+                              :else (aset regs (aget sa sp) (aget sb sp)))))))))))
+      result))
+
+  (method ^:private ^:static search [rev ^byte/1 s ^int txt0 ^int dir]
+    (let [re (.-f (cast Block rev))
+          end (alength s)
+          sc (Rt/ii (aget re 5))
+          ^byte/1 starts (if (== sc -1) nil (cast byte/1 (aget (.-f (cast Block (aget re 1))) sc)))
+          ^:mutable ^int txt txt0
+          ^:mutable r nil]
+      (while (and (nil? r) (>= txt 0) (<= txt end))
+        (when (some? starts)
+          (if (> dir 0)
+            (while (and (< txt end) (== (aget starts (ExtStrRe/ub s txt)) 0)) (set! txt (unchecked-inc-int txt)))
+            (while (and (> txt 0) (== (aget starts (ExtStrRe/at s txt)) 0)) (set! txt (unchecked-dec-int txt)))))
+        (set! r (ExtStrRe/match rev s txt false))
+        (set! txt (unchecked-add-int txt dir)))
+      (if (nil? r) (Block. 0 (new Object/1 0)) r)))
+
+  (method ^:private ^:static pos ^int [sv p ^String fn]
+    (let [s (cast byte/1 sv) k (Rt/l p)]
+      (when (or (< k 0) (> k (alength s))) (throw (Rt/invalidArg fn)))
+      (unchecked-int k)))
+
+  (method ^:public ^:static re_string_match [re s p]
+    (let [r (ExtStrRe/match re (cast byte/1 s) (ExtStrRe/pos s p "Str.string_match") false)]
+      (if (nil? r) (Block. 0 (new Object/1 0)) r)))
+  (method ^:public ^:static re_partial_match [re s p]
+    (let [r (ExtStrRe/match re (cast byte/1 s) (ExtStrRe/pos s p "Str.string_partial_match") true)]
+      (if (nil? r) (Block. 0 (new Object/1 0)) r)))
+  (method ^:public ^:static re_search_forward [re s p]
+    (ExtStrRe/search re (cast byte/1 s) (ExtStrRe/pos s p "Str.search_forward") 1))
+  (method ^:public ^:static re_search_backward [re s p]
+    (ExtStrRe/search re (cast byte/1 s) (ExtStrRe/pos s p "Str.search_backward") -1))
+
+  (method ^:public ^:static re_replacement_text [replv groupsv origv]
+    (let [^byte/1 p (cast byte/1 replv)
+          g (.-f (cast Block groupsv))
+          ^byte/1 o (cast byte/1 origv)
+          out (ByteArrayOutputStream.)
+          n (alength p)
+          ^:mutable ^int i 0]
+      (while (< i n)
+        (let [c (ExtStrRe/ub p i)]
+          (if (not (== c 92))
+            (.write out c)
+            (do (when (== (unchecked-inc-int i) n) (throw (Rt/failwith "Str.replace: illegal backslash sequence")))
+                (set! i (unchecked-inc-int i))
+                (let [d (ExtStrRe/ub p i)]
+                  (cond (== d 92) (.write out 92)
+                        (and (>= d 48) (<= d 57))
+                        (let [k (unchecked-subtract-int d 48)]
+                          (when (>= (unchecked-multiply-int k 2) (alength g))
+                            (throw (Rt/failwith "Str.replace: reference to unmatched group")))
+                          (let [st (Rt/ii (aget g (unchecked-multiply-int k 2)))
+                                en (Rt/ii (aget g (unchecked-inc-int (unchecked-multiply-int k 2))))]
+                            (when (== st -1) (throw (Rt/failwith "Str.replace: reference to unmatched group")))
+                            (.write out o st (unchecked-subtract-int en st))))
+                        :else (do (.write out 92) (.write out d))))))
+          (set! i (unchecked-inc-int i))))
+      (.toByteArray out))))

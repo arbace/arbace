@@ -135,6 +135,22 @@
   (rdCheck t "'" "ERR \"unexpected end-of-file reading ~a\" (\"quote\")")
   (rdCheck t "\"abc" "ERR \"unexpected end-of-file reading ~a\" (\"string\")"))
 
+(go/func TestReadChezLexical "SMR3: Chez's own lexical syntaxes, only with ChezLex on.\n" [^{:tag (* testing/T)} t]
+  (let [save ChezLex]
+    (set! ChezLex false)
+    (rdCheck t "#vfx(1 2)" "ERR \"invalid syntax #~a\" (\"vfx\")")
+    (rdCheck t "(a #!bwp)" "ERR \"invalid syntax #!~a\" (\"bwp\")")
+    (set! ChezLex true)
+    (rdCheck t "#vfx(1 2)" "#(1 2)")
+    (rdCheck t "#vfl(1.0 2.5)" "#(?float64 ?float64)")
+    (rdCheck t "#vfx(1.5)" "ERR \"invalid value ~s found in fxvector\" (?float64)")
+    (rdCheck t "(a #!eof b)" "('a #!eof 'b)")
+    (rdCheck t "(a #!bwp)" "('a #!bwp)")
+    (rdCheck t "#!eof" "#!eof")
+    (rdCheck t "#!eofx" "ERR \"invalid syntax #!~a\" (\"eofx\")")
+    (rdCheck t "#!fold-case a" "'a")
+    (set! ChezLex save)))
+
 (go/func TestReadR7RS [^{:tag (* testing/T)} t]
   (set! R7RS true)
   (defer ((fn [] (set! R7RS false))))
@@ -209,6 +225,31 @@
     (when (not (IsIdentInitial 0x300))
       (.Error t "U+300 initial in Chez's table"))))
 
+(go/func TestFoldAndWhitespace "SCS12 (c), SCS13 (b): #!fold-case folds identifiers and character names by full case folding, a port keeps it between reads, #!chezscheme is taken; the whitespace tables are UCD 16.0.0's.\n" [^{:tag (* testing/T)} t]
+  (rdCheck t "#!fold-case \u1E9E" "'ss")
+  (rdCheck t "#!fold-case \uFB01x" "'fix")
+  (rdCheck t "#!fold-case \u03A3\u0391\u03A3" "'\u03C3\u03B1\u03C3")
+  (rdCheck t "#!fold-case \uAB70" "'\u13A0")
+  (rdCheck t "#!fold-case #\\SPACE" "#\\U+20")
+  (rdCheck t "#!fold-case #\\Nul" "#\\U+0")
+  (rdCheck t "#!chezscheme a" "'a")
+  (let [p (NewStringInput (conv (slice rune) "#!fold-case ABC DEF #!no-fold-case GHI"))
+        a (rdDump (ReadDatum p)) b (rdDump (ReadDatum p)) c (rdDump (ReadDatum p))]
+    (when (or (!= a "'abc") (!= b "'def") (!= c "'GHI"))
+      (.Errorf t "a port's fold-case: %s %s %s" a b c)))
+  (when (or (!= (FoldRune 0x1E9E) 0xDF) (!= (FoldRune 0x130) 0x130) (!= (FoldRune \A) \a))
+    (.Error t "FoldRune"))
+  (let [ws (lit (slice rune) 9 10 11 12 13 32 0x85 0xA0 0x1680 0x2000 0x200A 0x2028 0x2029 0x202F 0x205F 0x3000)
+        no (lit (slice rune) 0 8 14 31 \a 0x180E 0x200B 0xFEFF 0x2060)]
+    (range [_ c ws]
+      (when (not (IsWhitespace c))
+        (.Errorf t "whitespace %x" c)))
+    (range [_ c no]
+      (when (IsWhitespace c)
+        (.Errorf t "not whitespace %x" c)))
+    (when (or (not (IsIntralineSpace 9)) (not (IsIntralineSpace 0x3000)) (IsIntralineSpace 0x2028) (IsIntralineSpace 10))
+      (.Error t "IsIntralineSpace"))))
+
 (go/func readAll [^string src ^{:tag (* int)} n ^{:tag (* string)} msg]
   (defer ((fn []
             (let [e (recover)]
@@ -248,3 +289,22 @@
 
 
 (go/func As2 ^int64 [^any x] ((inst As int64) x))
+
+(go/func TestStringToNumberRefusals "SCS19 (b): in R6RS's syntax string->number refuses the three texts the reader refuses (+INF.0, #x1|53, #e1#), R7RS's syntax and the extended third argument keep Chez's.\n" [^{:tag (* testing/T)} t]
+  (let [save R7RS
+        refused (lit (slice string) "+INF.0" "#i-NaN.0" "#x1|53" "#b1|53" "#e1#")
+        kept (lit (slice string) "+inf.0" "-nan.0" "1|53" "#e1.5" "#x10" "1+inf.0i")]
+    (set! R7RS false)
+    (range [_ s refused]
+      (when (!= (callP "string->number" (str s)) false)
+        (t.Errorf "R6RS: (string->number %q) is not #f" s))
+      (when (== (callP "string->number" (str s) (conv int64 10) true) false)
+        (t.Errorf "extended: (string->number %q 10 #t) is #f" s)))
+    (range [_ s kept]
+      (when (== (callP "string->number" (str s)) false)
+        (t.Errorf "R6RS: (string->number %q) is #f" s)))
+    (set! R7RS true)
+    (range [_ s refused]
+      (when (and (!= s "#e1#") (== (callP "string->number" (str s)) false))
+        (t.Errorf "R7RS: (string->number %q) is #f" s)))
+    (set! R7RS save)))

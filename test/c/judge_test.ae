@@ -90,6 +90,21 @@
     (is (= ["c/a.c" "c/b.c"] (mapv first (:regressions r))))
     (is (= ["c/c.c"] (:absent r)))))
 
+;; review 181 L3 (GT8.4): the judge prints the first 40 FAIL lines and writes every one to GATE_FAIL_LINES's file, which
+;; the gate's runner reads for the rotation's failed files
+
+(deftest report-failing-every-line
+  (let [f (java.io.File/createTempFile "fail" ".lines" (java.io.File. (str (System/getProperty "user.dir") "/.tmp")))
+        rows (vec (for [i (range 45)] [(str "c/p" i ".c") :fail (str "differ stdout " i)]))
+        out (with-out-str (run/report-failing rows (.getPath f)))
+        all (str/split-lines (slurp f))]
+    (.delete f)
+    (is (= 40 (count (str/split-lines out))))
+    (is (= "FAIL c/p0.c\tdiffer stdout 0" (first (str/split-lines out))))
+    (is (= 45 (count all)))
+    (is (= "FAIL c/p44.c\tdiffer stdout 44" (last all)))
+    (is (= 40 (count (str/split-lines (with-out-str (run/report-failing rows nil))))))))
+
 ;; finding 6: dg-excess-errors and a line-0 directive no longer wave missed and extra lines through
 
 (deftest excess-keeps-missed
@@ -541,6 +556,9 @@
       (spit (java.io.File. work "key") "0000\n")
       (is (= 1 (sh-status env "bin/ci" "musl" "fresh")))
       (spit (java.io.File. work "key") (str key "\n"))
+      ;; since f5894050d fresh also needs a complete index (one {:defs ...} a cached source): an empty cache's, here
+      (spit (java.io.File. work "index.edn") "[]\n")
+      (.mkdirs (java.io.File. work "src"))
       (is (= 0 (sh-status env "bin/ci" "musl" "fresh")))
       (finally
         (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
@@ -614,6 +632,18 @@
     (is (not= [:ok 0] ((juxt :status :other) (rd (str "-isystem=" dir)))))
     ;; an angled include searches -I too (gcc), and the header there is not a system header: its pedwarn is an error
     (is (= [:ok 1] ((juxt :status :other) (rd (str "-I" dir)))))))
+
+;; CS297 (a): implicit int's permerror for an identifier list's parameter, off under -fpermissive, -Wno-implicit-int and
+;; -Wno-error=implicit-int (a warning, not the checker's), each case run with gcc 15.2 by hand (-std=c17 -c)
+(deftest implicit-int-options
+  (let [h (host/load-host "test/c/host")
+        rd (fn [& opts]
+             (dg/read-file h judge-dir {:name "implicit-int-param.c" :read (str judge-dir "/implicit-int-param.c")
+                                        :fc (host/file-config (vec (concat ["-std=c17"] opts)) "gnu17")} :compile))]
+    (is (= {3 ["3: type of 'x' defaults to 'int'"]} (:all-texts (rd))))
+    (is (= {} (:all-texts (rd "-fpermissive"))))
+    (is (= {} (:all-texts (rd "-Wno-implicit-int"))))
+    (is (= {} (:all-texts (rd "-Wno-error=implicit-int"))))))
 
 (defn- found-headers
   "The paths (relative to test/c/judge/inc) of the header units the preprocessor finds for the main file `main` of
@@ -936,7 +966,7 @@
   (let [w (dg/load-wording)]
     (is (seq (:families w)))
     (is (every? (fn [f] (and (keyword? (:id f)) (re-pattern (:gcc f)) (re-pattern (:checker f)))) (:families w)))
-    (is (= 13 (count (:wrong-reason w))))
+    (is (= 2 (count (:wrong-reason w)))) ; 13 to 5: c-compl (doc/C23-SURVEY.md, CC.1) gave eight files gcc's wording; 5 to 4: CS292 (a)'s family (c23-attr-syntax-7); 4 to 3: CS293 (c23-attr-syntax-6); 3 to 2: CS294 (a) (gnu23-attr-syntax-3)
     (is (every? (fn [[_ v]] (and (seq (:lines v)) (string? (:why v)))) (:wrong-reason w)))))
 
 (deftest every-directive-needs-a-message
@@ -1335,11 +1365,37 @@
                          "src/e.c" "#embed \"f\"\n" "src/z.c" "int x;\n" "src/g.c" "int g;\n" "src/h.c" "int h;\n"
                          "known.edn" (pr-str {:classes {:embed "e" :undiagnosed "u"} :pp {} :lex {} :gcc {:c {"g.c" {:class :undiagnosed}}}})}
                         (rej "e.c" true) (rej "z.c" true) (rej "g.c" false) (rej "h.c" false)))
-    (is (= 2 (rec w ["c"] kf)))
+    ;; gcc's judge (ARBACE_C_JUDGE=gcc, the oracle tier's): gcc's runs under WORK/c/gcc/ decide the :gcc level
+    (is (= 2 (with-redefs [host/gcc-judge? (constantly true)] (rec w ["c"] kf))))
     (let [m (read-string (slurp kf))]
       (is (= {"e.c" {:class :embed}} (get-in m [:lex :c])))
       (is (= {"g.c" {:class :undiagnosed}} (get-in m [:gcc :c])))
       (is (not (re-find #"unclassified" (slurp kf)))))))
+
+(deftest token-record-keeps-gcc-under-own-verdict
+  ;; the own target's triage (doc/C23-SURVEY.md, "As built: the own target's triage"; night 7): under each test's own verdict
+  ;; (the default, the user 2026-11-07) gcc does not run, so --record keeps the :gcc level and the :pp entries' :gcc digests
+  ;; as recorded (night 7's record wrote 430 files "no class at :gcc" and :pp entries' digests as :differs) and rewrites only
+  ;; the :pp and :lex classes from the run
+  (require 'arbace.repr.c.ppcheck)
+  (let [rec (resolve 'arbace.repr.c.ppcheck/record)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-tokens-record-own")
+        b (str w "/src")
+        kf (str w "/known.edn")
+        old-gcc {:c {"g.c" {:class :undiagnosed} "gone.c" {:class :undiagnosed}}}]
+    ;; p.c: pp differs from cc and was known with gcc's digest; q.c: pp known by class (the check's "gcc" status); n.c: a new
+    ;; pp difference, classed by classify (#embed); h.c: equal, its stream not gcc's (gcc's run absent: no :gcc entry made)
+    (put-files w {"c/base.txt" b
+                  "c/files.tsv" "p.c\tequal\tgcc\td1\nq.c\tequal\tgcc\td2\nn.c\tequal\tdiffer\td3\nh.c\tequal\tequal\td4\n"
+                  "src/p.c" "int p;\n" "src/q.c" "int q;\n" "src/n.c" "#embed \"f\"\n" "src/h.c" "int h;\n"
+                  "known.edn" (pr-str {:classes {:embed "e" :undiagnosed "u" :k "k"}
+                                       :pp {:c {"p.c" {:class :k :gcc "d1"} "q.c" {:class :k :gcc :differs}}}
+                                       :lex {} :gcc old-gcc})})
+    (is (= 0 (with-redefs [host/gcc-judge? (constantly false)] (rec w ["c"] kf))))
+    (let [m (read-string (slurp kf))]
+      (is (= {"p.c" {:class :k :gcc "d1"} "q.c" {:class :k :gcc :differs} "n.c" {:class :embed}} (get-in m [:pp :c])))
+      (is (= (:c old-gcc) (get-in m [:gcc :c])))
+      (is (= {} (get-in m [:lex :c] {}))))))
 
 (deftest parse-record-writes-no-placeholder
   ;; queue 122 F1: the tree check's --record: a kept or guessed class, a file of no class left out, never :unclassified
@@ -1428,6 +1484,92 @@
     (is (= 1 (rec w ["c"] kf)))
     (is (= {"k.c" {:class :objects}} (get-in (read-string (slurp kf)) [:roundtrip :c])))
     (is (not (re-find #"unclassified" (slurp kf))))))
+
+;; GTS-B (doc/C23-SURVEY.md, "As built: GTS-B"): an entry marked :time-dependent (a file near the read's budget, whose outcome
+;; the host's load decides: quickjs's libunicode.c, torture-compile's limits-*.c) is accepted either way. t1.c passes: its marked
+;; entry is not stale (a plain one, t3.c's, is); t2.c's read times out: known by its marked entry; the record keeps t1.c's entry
+;; though the file passed; a marked entry of a file the run does not hold (gone.c) is stale as any
+(deftest roundtrip-time-dependent-either-way
+  (require 'arbace.repr.c.rtcheck)
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-rt-time-dependent")
+        kf (str w "/known.edn")
+        td {:class :eval-limits :time-dependent true}
+        known (fn [es] (pr-str {:classes {:eval-limits "e"} :roundtrip {:c es}}))
+        forms "t1.c\tok\tequal\tequal\t\t\nt2.c\ttimeout\t-\t-\tbudget\t\nt3.c\tok\tequal\tequal\t\t\n"]
+    (put-files w {"c/forms.tsv" forms "gcc.tsv" "# hdr\n# hdr\n0\tc/t1.c\n0\tc/t2.c\n0\tc/t3.c\n"
+                  "known.edn" (known {"t1.c" td "t2.c" td "t3.c" {:class :eval-limits}})})
+    (with-redefs [rt/known-file kf rt/gcc-file (str w "/gcc.tsv")]
+      (let [out (with-out-str (is (= 1 (rt/judge w "c"))))
+            st (into {} (map (fn [l] (let [xs (str/split l #"\t" -1)] [(first xs) (second xs)]))
+                             (str/split-lines (slurp (str w "/c/files.tsv")))))]
+        (is (re-find #"(?m)^FAIL c/t3\.c\tknown entry stale" out) "a plain entry of a passing file is stale")
+        (is (not (re-find #"(?m)^FAIL c/t1\.c" out)) "a marked entry of a passing file is not")
+        (is (re-find #"1 time-dependent entries passing" out))
+        (is (= {"t1.c" "pass" "t2.c" "known" "t3.c" "pass"} st)))
+      (spit kf (known {"t1.c" td "t2.c" td}))
+      (is (= 0 (rt/judge w "c")) "marked entries accepted, passing or failing")
+      (is (= 0 (rt/record w ["c"] kf)))
+      (is (= {"t1.c" td "t2.c" td} (get-in (read-string (slurp kf)) [:roundtrip :c])) "the record keeps a marked entry whose file passed")
+      (spit kf (known {"t1.c" td "t2.c" td "gone.c" td}))
+      (is (re-find #"(?m)^FAIL c/gone\.c\tknown entry stale" (with-out-str (is (= 1 (rt/judge w "c")))))))))
+
+(deftest roundtrip-record-keeps-oracle-levels-under-own-verdict
+  ;; CS282 (a) (the user, 2026-11-08; doc/C23-SURVEY.md, "As built: CS282"): the round trip's --record without gcc reruns
+  ;; levels 1 and 2 and keeps levels 3-4 and gcc's acceptance from the results file's recorded rows (the oracle tier's), as
+  ;; token-record-keeps-gcc-under-own-verdict keeps the token check's :gcc level. a.c: known :objects by its recorded level 3
+  ;; (a plain judge without gcc finds the entry stale; the record keeps it); b.c: fprintf-1's case, level 1 equal now, its
+  ;; recorded levels 3-4 pass: the row passes; c.c: rejected, gcc's recorded acceptance 0 (port-only-rejects): known kept;
+  ;; d.c: no recorded row (no level 3): passes on levels 1-2; e.c: a recorded level 4 that differs, no entry: fails; f.c: zlib
+  ;; inflate.c's case, read now, refused when recorded, known :objects-macro-body (a class only levels 3-4 give): known kept;
+  ;; g.c: reverse-complement-5.c's case, its row known :run-address by a level 4 that differed, the entry removed since (808d08d60):
+  ;; the row's levels 3-4 dropped, it passes
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-rt-record-own")
+        id "torture-execute"
+        kf (str w "/known.edn")
+        rf (str w "/rt.edn")
+        row (fn [n r why] [(str id " " n) r why])]
+    (put-files w {(str id "/forms.tsv") (str "a.c\tok\tequal\tequal\t\t\nb.c\tok\tequal\tequal\t\t\nc.c\terror\t-\t-\tc.c:1:1: boom\t\n"
+                                             "d.c\tok\tequal\tequal\t\t\ne.c\tok\tequal\tequal\t\t\nf.c\tok\tequal\tequal\t\t\ng.c\tok\tequal\tequal\t\t\n")
+                  "gcc.tsv" (str "# hdr\n# hdr\n0\t" id "/a.c\n0\t" id "/b.c\n0\t" id "/c.c\n0\t" id "/e.c\n0\t" id "/f.c\n0\t" id "/g.c\n")
+                  "known.edn" (pr-str {:classes {:objects "o" :objects-macro-body "m" :k "k" :reexpansion "r"}
+                                       :roundtrip {(keyword id) {"a.c" {:class :objects} "c.c" {:class :k} "gone.c" {:class :k}
+                                                                 "f.c" {:class :objects-macro-body}}}})
+                  "rt.edn" (pr-str [(row "a.c" :known "known: read ok, l1 equal, l2 equal, l3 differ, l4 -, gcc agree, class objects: x")
+                                    (row "b.c" :known "known: read ok, l1 differ, l2 equal, l3 equal, l4 same, gcc agree, class reexpansion: form 3")
+                                    (row "c.c" :known "known: read error, l1 -, l2 -, l3 -, l4 -, gcc port-only-rejects, class k: c.c:1:1: boom")
+                                    (row "e.c" :pass "pass: read ok, l1 equal, l2 equal, l3 equal, l4 differ, gcc agree")
+                                    (row "g.c" :known "known: read ok, l1 equal, l2 equal, l3 equal, l4 differ, gcc agree, class run-address")
+                                    (row "f.c" :known "known: read refused:split-declaration, l1 -, l2 -, l3 -, l4 -, gcc agree, class split-declaration: x")
+                                    ["zlib z.c" :pass "pass: read ok, l1 equal, l2 equal, l3 equal, l4 -, gcc agree"]])})
+    (with-redefs [rt/known-file kf rt/gcc-file (str w "/gcc.tsv")]
+      (is (= {"a.c" {:read "ok" :l3 "differ" :l4 "-" :accept "agree" :class :objects}} (select-keys (rt/load-recorded rf id) ["a.c"])))
+      (is (= [nil nil] (rt/recorded-levels {:read "ok" :l3 "equal" :l4 "same"} "error")) "a file not read now has no level 3")
+      ;; the plain judge without gcc: a.c passes levels 1-2, its entry stale (the driver defers it)
+      (is (re-find #"(?m)^FAIL torture-execute/a\.c\tknown entry stale" (with-out-str (rt/judge w id))))
+      (let [out (with-out-str (is (= 1 (rt/judge w id rf))))
+            st (into {} (map (fn [l] (let [xs (str/split l #"\t" -1)] [(first xs) (vec (rest xs))]))
+                             (str/split-lines (slurp (str w "/" id "/files.tsv")))))]
+        (is (re-find #"(?m)^FAIL torture-execute/e\.c\tlevels l4" out))
+        (is (re-find #"(?m)^FAIL torture-execute/gone\.c\tknown entry stale" out))
+        (is (= ["known" "ok" "equal" "equal" "differ" "-" "agree" "objects"] (subvec (st "a.c") 0 8)))
+        (is (= ["pass" "ok" "equal" "equal" "equal" "same" "agree"] (subvec (st "b.c") 0 7)))
+        (is (= ["known" "error" "-" "-" "-" "-" "port-only-rejects" "k"] (subvec (st "c.c") 0 8)))
+        (is (= ["pass" "ok" "equal" "equal" "-" "-" "unrecorded"] (subvec (st "d.c") 0 7)))
+        (is (= "fail" (first (st "e.c"))))
+        (is (= ["known" "ok" "equal" "equal" "-" "-" "agree" "objects-macro-body"] (subvec (st "f.c") 0 8)))
+        (is (= ["pass" "ok" "equal" "equal" "-" "-" "agree"] (subvec (st "g.c") 0 7))))
+      ;; the record: a.c's, c.c's and f.c's entries kept, gone.c's dropped, e.c of no class left out (counted)
+      (is (= 1 (rt/record w [id] kf)))
+      (is (= {"a.c" {:class :objects} "c.c" {:class :k} "f.c" {:class :objects-macro-body}}
+             (get-in (read-string (slurp kf)) [:roundtrip (keyword id)])))
+      (rt/judge w id rf)
+      (is (= 1 (results/write :roundtrip w rf {} [id])))
+      (let [rs (into {} (map (juxt first rest) (read-string (slurp rf))))]
+        (is (= [:known "known: read ok, l1 equal, l2 equal, l3 differ, l4 -, gcc agree, class objects"] (rs (str id " a.c"))))
+        (is (= [:pass "pass: read ok, l1 equal, l2 equal, l3 equal, l4 same, gcc agree"] (rs (str id " b.c"))))
+        (is (= :known (first (rs (str id " c.c")))))
+        (is (= :fail (first (rs (str id " e.c")))))
+        (is (= [:pass "pass: read ok, l1 equal, l2 equal, l3 equal, l4 -, gcc agree"] (rs "zlib z.c")) "another corpus's row kept")))))
 
 (deftest roundtrip-controls
   (require 'arbace.repr.c.rtcheck)
@@ -1572,3 +1714,16 @@
     (is (= 2 (sh-status {} "bin/ci" "annotations" "--corpus" "benchmarksgame" "--only" bad)))
     (is (= 2 (sh-status {} "bin/ci" "dg" "--only" l)) "an id outside the dg groups")
     (is (= 2 (sh-status {} "bin/ci" "dg" "--only" l "--essential")))))
+
+;; review 196, finding 4: a directive's line spec may name a dg-line (gcc-dg.exp's get-absolute-line), before or after it
+(deftest dg-line-names
+  (let [d (dg/analyze (str "/* { dg-do compile } */\n"
+                           "/* { dg-error \"e\" \"\" { target *-*-* } f_line } */\n"
+                           "int f (void);\n"
+                           "int f (int); /* { dg-line f_line } */\n"
+                           "int g; /* { dg-error \"x\" \"\" { target *-*-* } .+1 } */\n"
+                           "int g2;\n"))]
+    (is (= [4 6] (get-in d [:expect :error])))
+    (is (= [:pass] (dg/verdict d {:status :ok :lines {4 1 6 1}})))
+    ;; the old reading (the directive's own line 2) is now an extra line, and 4 missed
+    (is (= :both (second (dg/verdict d {:status :ok :lines {2 1 6 1}}))))))

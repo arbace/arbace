@@ -1,0 +1,205 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/RSAKeyExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.security GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        PublicKey
+                        SecureRandom)
+        '(java.security.interfaces RSAPublicKey)
+        '(javax.crypto BadPaddingException Cipher KeyGenerator SecretKey)
+        '(javax.net.ssl SSLHandshakeException)
+        '(sun.security.internal.spec TlsRsaPremasterSecretParameterSpec)
+        '(sun.security.util KeyUtil))
+
+(defclass ^:final RSAKeyExchange
+  (field ^:static ^:final ^SSLPossessionGenerator poGenerator (EphemeralRSAPossessionGenerator.))
+
+  (field ^:static ^:final ^SSLKeyAgreementGenerator kaGenerator (RSAKAGenerator.))
+
+  (defclass ^:static ^:final EphemeralRSAPossession
+    :implements [SSLPossession]
+
+    (field ^:final ^RSAPublicKey popPublicKey)
+
+    (field ^:final ^PrivateKey popPrivateKey)
+
+    (constructor [this ^PrivateKey popPrivateKey ^RSAPublicKey popPublicKey]
+      (set! (.-popPublicKey this) popPublicKey)
+      (set! (.-popPrivateKey this) popPrivateKey)))
+
+  (defclass ^:static ^:final EphemeralRSACredentials
+    :implements [SSLCredentials]
+
+    (field ^:final ^RSAPublicKey popPublicKey)
+
+    (constructor [this ^RSAPublicKey popPublicKey]
+      (set! (.-popPublicKey this) popPublicKey)))
+
+  (defclass ^:private ^:static ^:final EphemeralRSAPossessionGenerator
+    :implements [SSLPossessionGenerator]
+
+    (constructor ^:private [this])
+
+    (method ^:public createPossession ^SSLPossession [this ^HandshakeContext context]
+      (try
+        (let [ekm (.getEphemeralKeyManager (.-sslContext context))
+              kp (.getRSAKeyPair ekm true (.getSecureRandom (.-sslContext context)))]
+          (when (some? kp)
+            (EphemeralRSAPossession. (.getPrivate kp) (cast RSAPublicKey (.getPublic kp)))))
+        (catch RuntimeException rte nil))))
+
+  (defclass ^:static ^:final RSAPremasterSecret
+    :implements [SSLPossession SSLCredentials]
+
+    (field ^:final ^SecretKey premasterSecret)
+
+    (constructor [this ^SecretKey premasterSecret]
+      (set! (.-premasterSecret this) premasterSecret))
+
+    (method getEncoded :throws [GeneralSecurityException] ^byte/1 [this ^PublicKey publicKey
+                                                                   ^SecureRandom secureRandom]
+      (let [cipher (Cipher/getInstance JsseJce/CIPHER_RSA_PKCS1)]
+        (.init cipher Cipher/WRAP_MODE publicKey secureRandom)
+        (.wrap cipher premasterSecret)))
+
+    (method ^:static createPremasterSecret :throws [GeneralSecurityException] ^RSAPremasterSecret [^ClientHandshakeContext chc]
+      (let [^String algorithm (if (.useTLS12PlusSpec (.-negotiatedProtocol chc))
+                                  "SunTls12RsaPremasterSecret"
+                                  "SunTlsRsaPremasterSecret")
+            kg (KeyGenerator/getInstance algorithm)
+            spec (TlsRsaPremasterSecretParameterSpec.
+                   (.-clientHelloVersion chc)
+                   (.-id (.-negotiatedProtocol chc)))]
+        (.init kg spec (.getSecureRandom (.-sslContext chc)))
+        (RSAPremasterSecret. (.generateKey kg))))
+
+    (method ^:static decode :throws [GeneralSecurityException] ^RSAPremasterSecret [^ServerHandshakeContext shc
+                                                                                    ^PrivateKey privateKey
+                                                                                    ^byte/1 encrypted]
+      (let [^:mutable ^byte/1 encoded nil
+            ^:mutable ^boolean needFailover false
+            ^:mutable cipher (Cipher/getInstance JsseJce/CIPHER_RSA_PKCS1)]
+        (try
+          (.init cipher
+                 Cipher/UNWRAP_MODE
+                 privateKey
+                 (TlsRsaPremasterSecretParameterSpec.
+                   (.-clientHelloVersion shc)
+                   (.-id (.-negotiatedProtocol shc)))
+                 (.getSecureRandom (.-sslContext shc)))
+          (set! needFailover (not (KeyUtil/isOracleJCEProvider (.getName (.getProvider cipher)))))
+          (catch [InvalidKeyException UnsupportedOperationException] iue
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/warning
+                (java-str "The Cipher provider "
+                          (RSAPremasterSecret/safeProviderName cipher)
+                          " caused exception: "
+                          (.getMessage iue))))
+            (set! needFailover true)))
+        (let [^:mutable ^SecretKey preMaster nil]
+          (if needFailover
+              (do
+                (set! cipher (Cipher/getInstance JsseJce/CIPHER_RSA_PKCS1))
+                (.init cipher Cipher/DECRYPT_MODE privateKey)
+                (let [^:mutable failed false]
+                  (try
+                    (set! encoded (.doFinal cipher encrypted))
+                    (catch BadPaddingException bpe (set! failed true)))
+                  (set! encoded
+                        (KeyUtil/checkTlsPreMasterSecretKey
+                          (.-clientHelloVersion shc)
+                          (.-id (.-negotiatedProtocol shc))
+                          (.getSecureRandom (.-sslContext shc))
+                          encoded
+                          failed))
+                  (set! preMaster
+                        (RSAPremasterSecret/generatePremasterSecret
+                          (.-clientHelloVersion shc)
+                          (.-id (.-negotiatedProtocol shc))
+                          encoded
+                          (.getSecureRandom (.-sslContext shc))))))
+              (set! preMaster
+                    (cast SecretKey
+                          (.unwrap cipher encrypted "TlsRsaPremasterSecret" Cipher/SECRET_KEY))))
+          (RSAPremasterSecret. preMaster))))
+
+    (method ^:private ^:static safeProviderName ^String [^Cipher cipher]
+      (try
+        (return (.toString (.getProvider cipher)))
+        (catch Exception e
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Retrieving The Cipher provider name caused exception " e))))
+      (try
+        (return (java-str (.toString cipher) " (provider name not available)"))
+        (catch Exception e
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Retrieving The Cipher name caused exception " e))))
+      "(cipher/provider names not available)")
+
+    (method ^:private ^:static generatePremasterSecret :throws [GeneralSecurityException] ^SecretKey [^int clientVersion
+                                                                                                      ^int serverVersion
+                                                                                                      ^byte/1 encodedSecret
+                                                                                                      ^SecureRandom generator]
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+        (SSLLogger/fine "Generating a premaster secret"))
+      (try
+        (let [^String s (if (>= clientVersion (.-id ProtocolVersion/TLS12))
+                            "SunTls12RsaPremasterSecret"
+                            "SunTlsRsaPremasterSecret")
+              kg (KeyGenerator/getInstance s)]
+          (.init kg
+                 (TlsRsaPremasterSecretParameterSpec. clientVersion serverVersion encodedSecret)
+                 generator)
+          (.generateKey kg))
+        (catch [InvalidAlgorithmParameterException NoSuchAlgorithmException] iae
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "RSA premaster secret generation error" iae))
+          (throw (GeneralSecurityException. "Could not generate premaster secret" iae))))))
+
+  (defclass ^:private ^:static ^:final RSAKAGenerator
+    :implements [SSLKeyAgreementGenerator]
+
+    (constructor ^:private [this])
+
+    (method ^:public createKeyDerivation :throws [IOException] ^SSLKeyDerivation [this
+                                                                                  ^HandshakeContext context]
+      (let [^:mutable ^RSAPremasterSecret premaster nil]
+        (if (instance? ClientHandshakeContext context)
+            (for-each [^SSLPossession possession (.-handshakePossessions context)]
+              (when (instance? RSAPremasterSecret possession)
+                (set! premaster (cast RSAPremasterSecret possession))
+                (break)))
+            (for-each [^SSLCredentials credential (.-handshakeCredentials context)]
+              (when (instance? RSAPremasterSecret credential)
+                (set! premaster (cast RSAPremasterSecret credential))
+                (break))))
+        (when (nil? premaster)
+          (throw (.fatal (.-conContext context)
+                         Alert/HANDSHAKE_FAILURE
+                         "No sufficient RSA key agreement parameters negotiated")))
+        (RSAKAKeyDerivation. context (.-premasterSecret premaster))))
+
+    (defclass ^:private ^:static ^:final RSAKAKeyDerivation
+      :implements [SSLKeyDerivation]
+
+      (field ^:private ^:final ^HandshakeContext context)
+
+      (field ^:private ^:final ^SecretKey preMasterSecret)
+
+      (constructor [this ^HandshakeContext context ^SecretKey preMasterSecret]
+        (set! (.-context this) context)
+        (set! (.-preMasterSecret this) preMasterSecret))
+
+      (method ^:public deriveKey :throws [IOException] ^SecretKey [this ^String typeNotUsed]
+        (let [mskd (SSLMasterKeyDerivation/valueOf (.-negotiatedProtocol context))]
+          (when (nil? mskd)
+            (throw (SSLHandshakeException.
+                     (java-str "No expected master key derivation for protocol: "
+                               (.-name (.-negotiatedProtocol context))))))
+          (let [kd (.createKeyDerivation mskd context preMasterSecret)]
+            (.deriveKey kd "MasterSecret")))))))

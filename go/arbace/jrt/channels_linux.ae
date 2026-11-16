@@ -1,0 +1,821 @@
+;; jrt: the host's descriptors under java.nio's selectable channels (doc/go/JRT-NOTES.md, "Channels"; F10 of
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a"): the natives of jdk.internal.jrt.HostChannels
+;; (overlay/jdk/java.base/jdk/internal/jrt/HostChannels.java), which jrt's overlays of sun.nio.ch's Net,
+;; IOUtil, SocketDispatcher, UnixDispatcher and PollSelectorImpl call on a descriptor's number. Ports of
+;; jdk26u's src/java.base/unix/native/libnio/ch/{Net,IOUtil,SocketDispatcher,UnixDispatcher,
+;; PollSelectorImpl}.c and libnet's NET_SetSockOpt, NET_GetSockOpt and NET_Bind (baf63fb): the same system
+;; calls, options and results (sun.nio.ch.IOStatus's), an error's number in err[0] where they throw.
+;;
+;; Two departures, below the natives' interface: every descriptor is non-blocking in the kernel and
+;; registered with Go's poller (an os.File); one configured blocking (configureBlocking0) waits there for the
+;; readiness the kernel would have waited for, as a blocking descriptor's read, write, connect and accept do,
+;; so that preClose0 (UnixDispatcher.c's dup2 of a closed socket over the descriptor, and the signal that
+;; releases a thread blocked in it) can wake that thread: it marks the descriptor, which from then on reads
+;; its end, fails a write with EPIPE and answers a poll with POLLHUP, and moves its deadlines to the past.
+;; Linux's: channels_other.ae answers every native "not available" on other systems (TamaGo's, the box).
+;; The port's parts: Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception (LICENSE.md);
+;; the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'go.arbace.jrt)
+
+(go/file "channels_linux.go"
+  :build ["//go:build linux"]
+  :imports [[encoding/binary "encoding/binary"] [errors "errors"] [net "net"] [os "os"] [sync "sync"]
+            [syscall "syscall"] [time "time"] [unsafe "unsafe"]])
+
+;; sun.nio.ch.IOStatus's values
+(go/const
+  [^{:tag int32 :val -1} iosEOF -1]
+  [^{:tag int32 :val -2} iosUnavailable -2]
+  [^{:tag int32 :val -3} iosInterrupted -3]
+  [^{:tag int32 :val -5} iosThrown -5])
+
+;; poll.h's events; SO_DOMAIN (39), IPV6_FLOWINFO_SEND (33), IP_MULTICAST_ALL (49), IPV6_MULTICAST_ALL (29),
+;; FIONREAD (0x541B, TIOCINQ): Linux's, the same on amd64 and arm64
+(go/const
+  [^{:tag int16 :val 1} pollIn 0x0001]
+  [^{:tag int16 :val 4} pollOut 0x0004]
+  [^{:tag int16 :val 16} pollHup 0x0010]
+  [^{:val 39} chSoDomain 39]
+  [^{:val 33} ipv6FlowinfoSend 33]
+  [^{:val 49} ipMulticastAll 49]
+  [^{:val 29} ipv6MulticastAll 29])
+
+(go/type chanFD
+  "chanFD is a descriptor of HostChannels': its file on Go's poller, whether the channel configured it
+blocking, whether preClose0 marked it.\n"
+  (struct ^{:tag (* os/File)} f ^{:tag syscall/RawConn} rc ^bool blocking ^bool preclosed))
+
+(go/var ^{:tag sync/Mutex} chanMu)
+(go/var ^{:tag (map int32 (* chanFD))} chanFDs (make (map int32 (* chanFD))))
+
+(go/func chanAdd "chanAdd enters descriptor fd (made non-blocking) into the table, blocking as given.\n"
+  ^error [^int fd ^bool blocking]
+  (when [err (syscall/SetNonblock fd true)] (!= err nil)
+    (return err))
+  (let [f (os/NewFile (conv uintptr fd) "")
+        (values rc err) (.SyscallConn f)]
+    (when (!= err nil)
+      (return err))
+    (.Lock chanMu)
+    (aset chanFDs (conv int32 fd) (addr (lit chanFD :f f :rc rc :blocking blocking)))
+    (.Unlock chanMu)
+    nil))
+
+(go/func chanGet "chanGet is descriptor fd's entry, or nil.\n" ^{:tag (* chanFD)} [^int32 fd]
+  (.Lock chanMu)
+  (defer (.Unlock chanMu))
+  (aget chanFDs fd))
+
+(go/func chanState "chanState is whether c is configured blocking and whether it was pre-closed.\n"
+  [^{:tag (* chanFD)} c] :results [bool bool]
+  (.Lock chanMu)
+  (defer (.Unlock chanMu))
+  (return (.-blocking c) (.-preclosed c)))
+
+(go/func preclosed "preclosed is whether preClose0 marked c.\n" ^bool [^{:tag (* chanFD)} c]
+  (let [(values _ pre) (chanState c)]
+    pre))
+
+(go/func chErrno "chErrno is err's error number (EIO when it has none).\n" ^int32 [^error err]
+  (do
+    (let [^syscall/Errno e 0]
+      (when (errors/As err (addr e))
+        (return (conv int32 e)))))
+  (when (errors/Is err os/ErrDeadlineExceeded)
+    (return (conv int32 syscall/ETIMEDOUT)))
+  (conv int32 syscall/EIO))
+
+(go/func chThrown "chThrown puts err's number into err[0]: IOStatus.THROWN.\n"
+  ^int32 [^{:tag (* IntArray)} errs ^error err]
+  (when (and (!= errs nil) (> (len (.-A errs)) 0))
+    (aset (.-A errs) 0 (chErrno err)))
+  iosThrown)
+
+(go/func chBadFD "chBadFD is thrown with EBADF (a descriptor not in the table).\n"
+  ^int32 [^{:tag (* IntArray)} errs]
+  (chThrown errs syscall/EBADF))
+
+(go/func waitFD
+  "waitFD runs op on c's descriptor until it is done, waiting in Go's poller (for writing when write) between
+tries, until deadline dl (zero: none); a pre-closed descriptor ends the wait. op answers whether it is done.\n"
+  ^error [^{:tag (* chanFD)} c ^bool write ^{:tag time/Time} dl ^{:tag (func [int] [bool])} op]
+  (if write
+    (.SetWriteDeadline (.-f c) dl)
+    (.SetReadDeadline (.-f c) dl))
+  (let [attempt (fn ^bool [^uintptr fd]
+                  (when (preclosed c)
+                    (return true))
+                  (op (conv int fd)))]
+    (when write
+      (return (.Write (.-rc c) attempt)))
+    (.Read (.-rc c) attempt)))
+
+(go/func pollNow "pollNow is the events of descriptor fd among events now (poll(2) with no wait).\n"
+  [^int fd ^int16 events] :results [int16 syscall/Errno]
+  (let [p (lit (slice pollFD) (lit pollFD :fd (conv int32 fd) :events events))
+        (values n e) (ppoll p 0)]
+    (when (or (!= e 0) (== n 0))
+      (return 0 e))
+    (return (.-revents (aget p 0)) 0)))
+
+(go/type pollFD "pollFD is poll.h's struct pollfd.\n" (struct ^int32 fd ^int16 events ^int16 revents))
+
+(go/func ppoll "ppoll is poll(2) of fds within timeout ms (negative: no limit): the count and the error.\n"
+  [^{:tag (slice pollFD)} fds ^int timeout] :results [int syscall/Errno]
+  (let [^{:tag (* syscall/Timespec)} tsp nil]
+    (when (>= timeout 0)
+      (let [ts (syscall/NsecToTimespec (* (conv int64 timeout) 1000000))]
+        (set! tsp (addr ts))))
+    (let [^{:tag (* pollFD)} p nil]
+      (when (> (len fds) 0)
+        (set! p (addr (aget fds 0))))
+      (let [(values r _ e) (syscall/Syscall6 syscall/SYS_PPOLL (conv uintptr (conv unsafe/Pointer p))
+                                             (conv uintptr (len fds)) (conv uintptr (conv unsafe/Pointer tsp)) 0 0 0)]
+        (return (conv int r) e)))))
+
+(go/func chDeadline "chDeadline is the deadline of a timeout of ms milliseconds (zero time for none: ms < 0).\n"
+  ^{:tag time/Time} [^int64 ms]
+  (when (< ms 0)
+    (return (lit time/Time)))
+  (.Add (time/Now) (* (conv time/Duration ms) time/Millisecond)))
+
+;; ---------------------------------------------------------------------------------------
+;; addresses (Net.c's NET_InetAddressToSockaddr and NET_SockaddrToInetAddress)
+
+(go/func chanSockaddr
+  "chanSockaddr is address addr (4 or 16 bytes), scope and port as a socket address for socket fd's family (an
+IPv4 address v4-mapped on an AF_INET6 socket).\n"
+  [^int fd ^{:tag (* ByteArray)} addr ^int32 scope ^int32 port] :results [syscall/Sockaddr error]
+  (let [(values dom err) (syscall/GetsockoptInt fd syscall/SOL_SOCKET chSoDomain)]
+    (when (!= err nil)
+      (return nil err))
+    (let [ip (make net/IP (len (.-A addr)))]
+      (range [i x (.-A addr)]
+        (aset ip i (conv byte x)))
+      (if (== dom syscall/AF_INET)
+        (let [v4 (.To4 ip)]
+          (when (or (== v4 nil) (== (len ip) 16))
+            (return nil syscall/EAFNOSUPPORT))
+          (let [s (addr (lit syscall/SockaddrInet4 :Port (conv int port)))]
+            (copy (subslice (.-Addr s) 0 4) v4)
+            (return s nil)))
+        (let [s (addr (lit syscall/SockaddrInet6 :Port (conv int port) :ZoneId (conv uint32 scope)))]
+          (copy (subslice (.-Addr s) 0 16) (.To16 ip))
+          (return s nil))))))
+
+(go/func sockaddrParts
+  "sockaddrParts is socket address sa's address (as Java's bytes: a v4-mapped address its 4), port and scope.\n"
+  [^syscall/Sockaddr sa] :results [(* ByteArray) int32 int32]
+  (do
+   (let [(values s4 ok4) (assert (* syscall/SockaddrInet4) sa)
+        (values s6 ok6) (assert (* syscall/SockaddrInet6) sa)]
+    (cond ok4 (return (ipBytes (subslice (.-Addr s4) 0 4)) (conv int32 (.-Port s4)) 0)
+          ok6 (let [ip (make net/IP 16)]
+                (copy ip (subslice (.-Addr s6) 0 16))
+                (if (!= (.To4 ip) nil)
+                  (return (ipBytes ip) (conv int32 (.-Port s6)) 0)
+                  (return (ipBytes ip) (conv int32 (.-Port s6)) (conv int32 (.-ZoneId s6))))))))
+  (return (NewByteArray 4) 0 0))
+
+;; ---------------------------------------------------------------------------------------
+;; the natives
+
+(go/func HostChannels_Strerror0_I__String_native
+  "HostChannels_Strerror0_I__String_native is strerror(errno) (net.ae's texts, the C library's).\n"
+  ^{:tag (* String)} [^int32 errno]
+  (let [e (conv syscall/Errno errno)
+        (values text ok) (aget errnoText e)]
+    (when ok
+      (return (Str text)))
+    (Str (capitalized (.Error e)))))
+
+(go/var ^{:tag sync/Once} ipv6Once)
+(go/var ^bool ipv6Has)
+
+(go/func HostChannels_Ipv6Available0__Z_native
+  "HostChannels_Ipv6Available0__Z_native is libnet's IPv6_supported(): an AF_INET6 socket can be made and the
+kernel lists IPv6 interfaces (/proc/net/if_inet6).\n"
+  ^bool []
+  (.Do ipv6Once (fn []
+                  (let [(values fd err) (syscall/Socket syscall/AF_INET6 syscall/SOCK_STREAM 0)]
+                    (when (== err nil)
+                      (syscall/Close fd)
+                      (let [(values _ serr) (os/Stat "/proc/net/if_inet6")]
+                        (set! ipv6Has (== serr nil)))))))
+  ipv6Has)
+
+(go/func HostChannels_Socket0_Z_Z_Z_I1__I_native
+  "HostChannels_Socket0_Z_Z_Z_I1__I_native is Net.socket0: a socket of AF_INET6 (ipv6) or AF_INET, stream or
+datagram, IPV6_V6ONLY off on an AF_INET6 one, SO_REUSEADDR when reuse, Linux's datagram options; blocking.\n"
+  ^int32 [^bool ipv6 ^bool stream ^bool reuse ^{:tag (* IntArray)} errs]
+  (let [typ syscall/SOCK_STREAM
+        domain syscall/AF_INET]
+    (when (not stream)
+      (set! typ syscall/SOCK_DGRAM))
+    (when ipv6
+      (set! domain syscall/AF_INET6))
+    (let [(values fd err) (syscall/Socket domain (bit-or typ syscall/SOCK_CLOEXEC) 0)]
+      (when (!= err nil)
+        (return (chThrown errs err)))
+      (let [fail (fn ^int32 [^error e]
+                   (syscall/Close fd)
+                   (chThrown errs e))]
+        (when (== domain syscall/AF_INET6)
+          (when [e (syscall/SetsockoptInt fd syscall/IPPROTO_IPV6 syscall/IPV6_V6ONLY 0)] (!= e nil)
+            (return (fail e))))
+        (when reuse
+          (when [e (syscall/SetsockoptInt fd syscall/SOL_SOCKET syscall/SO_REUSEADDR 1)] (!= e nil)
+            (return (fail e))))
+        (when (== typ syscall/SOCK_DGRAM)
+          (do
+           (let [level syscall/IPPROTO_IP]
+            (when (== domain syscall/AF_INET6)
+              (set! level syscall/IPPROTO_IPV6))
+            (when [e (syscall/SetsockoptInt fd level ipMulticastAll 0)] (!= e nil)
+              (when (!= e syscall/ENOPROTOOPT)
+                (return (fail e))))))
+          (when (== domain syscall/AF_INET6)
+            (when [e (syscall/SetsockoptInt fd syscall/IPPROTO_IPV6 syscall/IPV6_MULTICAST_HOPS 1)] (!= e nil)
+              (return (fail e)))
+            (when [e (syscall/SetsockoptInt fd syscall/IPPROTO_IPV6 ipv6MulticastAll 0)] (!= e nil)
+              (when (!= e syscall/ENOPROTOOPT)
+                (return (fail e))))))
+        (when [e (chanAdd fd true)] (!= e nil)
+          (return (fail e)))
+        (conv int32 fd)))))
+
+(go/func HostChannels_Bind0_I_B1_I_I_I1__I_native
+  "HostChannels_Bind0_I_B1_I_I_I1__I_native is Net.bind0 (NET_Bind: no 127.x.y.255 on Linux): 0 or THROWN.\n"
+  ^int32 [^int32 fd ^{:tag (* ByteArray)} addr ^int32 scope ^int32 port ^{:tag (* IntArray)} errs]
+  (let [(values sa err) (chanSockaddr (conv int fd) addr scope port)]
+    (when (!= err nil)
+      (return (chThrown errs err)))
+    (do
+      (let [(values s4 ok4) (assert (* syscall/SockaddrInet4) sa)]
+        (when (and ok4 (== (bit-and (aget (.-Addr s4) 0) 0x7f) 0x7f) (== (aget (.-Addr s4) 3) 255))
+          (return (chThrown errs syscall/EADDRNOTAVAIL)))))
+    (when [e (syscall/Bind (conv int fd) sa)] (!= e nil)
+      (return (chThrown errs e)))
+    0))
+
+(go/func HostChannels_Listen0_I_I_I1__I_native
+  "HostChannels_Listen0_I_I_I1__I_native is Net.listen: 0 or THROWN.\n"
+  ^int32 [^int32 fd ^int32 backlog ^{:tag (* IntArray)} errs]
+  (when [e (syscall/Listen (conv int fd) (conv int backlog))] (!= e nil)
+    (return (chThrown errs e)))
+  0)
+
+(go/func connectDone
+  "connectDone is a connecting socket's outcome once poll says it is writable: getsockopt's SO_ERROR (Net.c's
+pollConnect).\n"
+  ^error [^int fd]
+  (let [(values soerr err) (syscall/GetsockoptInt fd syscall/SOL_SOCKET syscall/SO_ERROR)]
+    (when (!= err nil)
+      (return err))
+    (when (!= soerr 0)
+      (return (conv syscall/Errno soerr)))
+    nil))
+
+(go/func HostChannels_Connect0_I_B1_I_I_I1__I_native
+  "HostChannels_Connect0_I_B1_I_I_I1__I_native is Net.connect0: 1 connected, UNAVAILABLE in progress (a
+non-blocking socket), INTERRUPTED or THROWN; a blocking socket waits for the outcome, as the kernel's connect.\n"
+  ^int32 [^int32 fd ^{:tag (* ByteArray)} addr ^int32 scope ^int32 port ^{:tag (* IntArray)} errs]
+  (let [(values sa err) (chanSockaddr (conv int fd) addr scope port)]
+    (when (!= err nil)
+      (return (chThrown errs err)))
+    (let [e (syscall/Connect (conv int fd) sa)]
+      (when (== e nil)
+        (return 1))
+      (when (== e syscall/EINTR)
+        (return iosInterrupted))
+      (when (!= e syscall/EINPROGRESS)
+        (return (chThrown errs e)))
+      (let [c (chanGet fd)]
+        (when (== c nil)
+          (return iosUnavailable))
+        (let [(values blocking _) (chanState c)]
+          (when (not blocking)
+            (return iosUnavailable))
+          (let [^error out nil
+                werr (waitFD c true (lit time/Time)
+                             (fn ^bool [^int d]
+                               (let [(values r _) (pollNow d pollOut)]
+                                 (when (== r 0)
+                                   (return false))
+                                 (set! out (connectDone d))
+                                 true)))]
+            (when (preclosed c)
+              (return (chThrown errs syscall/EBADF)))
+            (when (!= werr nil)
+              (return (chThrown errs werr)))
+            (when (!= out nil)
+              (return (chThrown errs out)))
+            1))))))
+
+(go/func HostChannels_Accept0_I_I1_B2_I1_I1__I_native
+  "HostChannels_Accept0_I_I1_B2_I1_I1__I_native is Net.accept (ECONNABORTED retried): 1 with the new descriptor
+(blocking) in newfd[0], the peer's address in addr[0], its port and scope in port; UNAVAILABLE (a non-blocking
+socket with none pending), INTERRUPTED or THROWN; a blocking socket waits for a connection.\n"
+  ^int32 [^int32 fd ^{:tag (* IntArray)} newfd ^{:tag (* RefArray)} addr ^{:tag (* IntArray)} port
+          ^{:tag (* IntArray)} errs]
+  (let [c (chanGet fd)]
+    (when (== c nil)
+      (return (chBadFD errs)))
+    (let [^int nfd -1
+          ^syscall/Sockaddr sa nil
+          ^error aerr nil
+          ^int32 status 0
+          (values blocking _) (chanState c)
+          werr (waitFD c false (lit time/Time)
+                       (fn ^bool [^int d]
+                         (while true
+                           (let [(values n s e) (syscall/Accept4 d (bit-or syscall/SOCK_NONBLOCK syscall/SOCK_CLOEXEC))]
+                             (when (== e syscall/ECONNABORTED)
+                               (continue))
+                             (when (== e syscall/EAGAIN)
+                               (when blocking
+                                 (return false))
+                               (set! status iosUnavailable)
+                               (return true))
+                             (when (== e syscall/EINTR)
+                               (set! status iosInterrupted)
+                               (return true))
+                             (set! nfd n)
+                             (set! sa s)
+                             (set! aerr e)
+                             (return true)))))]
+      (when (and (preclosed c) (< nfd 0))
+        (return (chThrown errs syscall/EBADF)))
+      (when (!= werr nil)
+        (return (chThrown errs werr)))
+      (when (!= status 0)
+        (return status))
+      (when (!= aerr nil)
+        (return (chThrown errs aerr)))
+      (when [e (chanAdd nfd true)] (!= e nil)
+        (syscall/Close nfd)
+        (return (chThrown errs e)))
+      (do
+        (let [(values b p s) (sockaddrParts sa)]
+          (aset (.-A newfd) 0 (conv int32 nfd))
+          (aset (.-A addr) 0 b)
+          (aset (.-A port) 0 p)
+          (aset (.-A port) 1 s)))
+      1)))
+
+(go/func HostChannels_Shutdown0_I_I_I1__I_native
+  "HostChannels_Shutdown0_I_I_I1__I_native is Net.shutdown (0 read, 1 write, else both; ENOTCONN ignored).\n"
+  ^int32 [^int32 fd ^int32 how ^{:tag (* IntArray)} errs]
+  (let [h syscall/SHUT_RDWR]
+    (cond (== how 0) (set! h syscall/SHUT_RD)
+          (== how 1) (set! h syscall/SHUT_WR))
+    (when [e (syscall/Shutdown (conv int fd) h)] (!= e nil)
+      (when (!= e syscall/ENOTCONN)
+        (return (chThrown errs e))))
+    0))
+
+(go/func HostChannels_Address0_I_Z_B2_I1_I1__I_native
+  "HostChannels_Address0_I_Z_B2_I1_I1__I_native is Net's localInetAddress and localPort (getsockname), or
+remoteInetAddress and remotePort (getpeername): 0 with the address in addr[0], its port and scope in port, or
+THROWN.\n"
+  ^int32 [^int32 fd ^bool local ^{:tag (* RefArray)} addr ^{:tag (* IntArray)} port ^{:tag (* IntArray)} errs]
+  (let [^syscall/Sockaddr sa nil
+        ^error err nil]
+    (if local
+      (set! (values sa err) (syscall/Getsockname (conv int fd)))
+      (set! (values sa err) (syscall/Getpeername (conv int fd))))
+    (when (!= err nil)
+      (return (chThrown errs err)))
+    (do
+      (let [(values b p s) (sockaddrParts sa)]
+        (aset (.-A addr) 0 b)
+        (aset (.-A port) 0 p)
+        (aset (.-A port) 1 s)))
+    0))
+
+(go/func sockoptRaw "sockoptRaw is getsockopt(2) (get) or setsockopt(2) of buf: the length got and the error.\n"
+  [^int fd ^int level ^int opt ^{:tag (slice byte)} buf ^bool get] :results [int error]
+  (let [n (conv uint32 (len buf))]
+    (if get
+      (let [(values _ _ e) (syscall/Syscall6 syscall/SYS_GETSOCKOPT (conv uintptr fd) (conv uintptr level)
+                                             (conv uintptr opt) (conv uintptr (conv unsafe/Pointer (unsafe/SliceData buf)))
+                                             (conv uintptr (conv unsafe/Pointer (addr n))) 0)]
+        (when (!= e 0)
+          (return 0 e))
+        (return (conv int n) nil))
+      (let [(values _ _ e) (syscall/Syscall6 syscall/SYS_SETSOCKOPT (conv uintptr fd) (conv uintptr level)
+                                             (conv uintptr opt) (conv uintptr (conv unsafe/Pointer (unsafe/SliceData buf)))
+                                             (conv uintptr n) 0)]
+        (when (!= e 0)
+          (return 0 e))
+        (return (conv int n) nil)))))
+
+(go/func HostChannels_GetIntOption0_I_Z_I_I_I1_I1__I_native
+  "HostChannels_GetIntOption0_I_Z_I_I_I1_I1__I_native is Net.getIntOption0: IP_MULTICAST_TTL and _LOOP a byte,
+SO_LINGER its seconds or -1, else an int; with conversion (NET_GetSockOpt) SO_SNDBUF and SO_RCVBUF halved, as
+Linux doubles them: 0 with the value in value[0], or THROWN.\n"
+  ^int32 [^int32 fd ^bool conversion ^int32 level ^int32 opt ^{:tag (* IntArray)} value ^{:tag (* IntArray)} errs]
+  (let [f (conv int fd)
+        l (conv int level)
+        o (conv int opt)]
+    (when (and (== l syscall/IPPROTO_IP) (or (== o syscall/IP_MULTICAST_TTL) (== o syscall/IP_MULTICAST_LOOP)))
+      (let [b (make (slice byte) 1)
+            (values _ err) (sockoptRaw f l o b true)]
+        (when (!= err nil)
+          (return (chThrown errs err)))
+        (aset (.-A value) 0 (conv int32 (aget b 0)))
+        (return 0)))
+    (when (and (== l syscall/SOL_SOCKET) (== o syscall/SO_LINGER))
+      (let [b (make (slice byte) 8)
+            (values _ err) (sockoptRaw f l o b true)]
+        (when (!= err nil)
+          (return (chThrown errs err)))
+        (if (!= (.Uint32 binary/NativeEndian (subslice b 0 4)) 0)
+          (aset (.-A value) 0 (conv int32 (.Uint32 binary/NativeEndian (subslice b 4 8))))
+          (aset (.-A value) 0 -1))
+        (return 0)))
+    (let [(values v err) (syscall/GetsockoptInt f l o)]
+      (when (!= err nil)
+        (return (chThrown errs err)))
+      (when (and conversion (== l syscall/SOL_SOCKET) (or (== o syscall/SO_SNDBUF) (== o syscall/SO_RCVBUF)))
+        (set! v (/ v 2)))
+      (aset (.-A value) 0 (conv int32 v))
+      0)))
+
+(go/func HostChannels_SetIntOption0_I_Z_I_I_I_Z_I1__I_native
+  "HostChannels_SetIntOption0_I_Z_I_I_I_Z_I1__I_native is Net.setIntOption0: IP_MULTICAST_TTL and _LOOP a byte,
+SO_LINGER a struct linger (on when arg >= 0), else an int; with conversion (NET_SetSockOpt) IP_TOS also as
+IPV6_TCLASS (with IPV6_FLOWINFO_SEND) when the host has IPv6, SO_RCVBUF at least 1024: 0 or THROWN.\n"
+  ^int32 [^int32 fd ^bool conversion ^int32 level ^int32 opt ^int32 arg ^bool isIPv6 ^{:tag (* IntArray)} errs]
+  (let [f (conv int fd)
+        l (conv int level)
+        o (conv int opt)
+        a arg]
+    (when (and (== l syscall/IPPROTO_IP) (or (== o syscall/IP_MULTICAST_TTL) (== o syscall/IP_MULTICAST_LOOP)))
+      (let [(values _ err) (sockoptRaw f l o (lit (slice byte) (conv byte a)) false)]
+        (when (!= err nil)
+          (return (chThrown errs err)))
+        (return 0)))
+    (when (and (== l syscall/SOL_SOCKET) (== o syscall/SO_LINGER))
+      (let [b (make (slice byte) 8)]
+        (when (>= a 0)
+          (.PutUint32 binary/NativeEndian (subslice b 0 4) 1)
+          (.PutUint32 binary/NativeEndian (subslice b 4 8) (conv uint32 a)))
+        (let [(values _ err) (sockoptRaw f l o b false)]
+          (when (!= err nil)
+            (return (chThrown errs err)))
+          (return 0))))
+    (when conversion
+      (when (and (== l syscall/IPPROTO_IP) (== o syscall/IP_TOS) (HostChannels_Ipv6Available0__Z_native))
+        (when [e (syscall/SetsockoptInt f syscall/IPPROTO_IPV6 ipv6FlowinfoSend 1)] (!= e nil)
+          (return (chThrown errs e)))
+        (when [e (syscall/SetsockoptInt f syscall/IPPROTO_IPV6 syscall/IPV6_TCLASS (conv int a))] (!= e nil)
+          (return (chThrown errs e))))
+      (when (and (== l syscall/SOL_SOCKET) (== o syscall/SO_RCVBUF) (< a 1024))
+        (set! a 1024)))
+    (when [e (syscall/SetsockoptInt f l o (conv int a))] (!= e nil)
+      (return (chThrown errs e)))
+    0))
+
+(go/func HostChannels_Poll0_I_I_J_I1__I_native
+  "HostChannels_Poll0_I_I_J_I1__I_native is Net.poll: descriptor fd's events among events within timeout ms
+(0: now, -1: no limit), 0 when none, POLLHUP when it was pre-closed, or THROWN; the wait is Go's poller's
+(preClose0 ends it).\n"
+  ^int32 [^int32 fd ^int32 events ^int64 timeout ^{:tag (* IntArray)} errs]
+  (let [c (chanGet fd)
+        ev (conv int16 events)]
+    (when (== c nil)
+      ;; not a channel's descriptor: poll(2) itself (POLLNVAL for a closed one)
+      (let [p (lit (slice pollFD) (lit pollFD :fd fd :events ev))
+            to (conv int timeout)]
+        (when (or (< timeout -1) (> timeout 2147483647))
+          (set! to -1))
+        (let [(values n e) (ppoll p to)]
+          (when (== e syscall/EINTR)
+            (return 0))
+          (when (!= e 0)
+            (return (chThrown errs e)))
+          (when (== n 0)
+            (return 0))
+          (return (conv int32 (.-revents (aget p 0)))))))
+    (when (preclosed c)
+      (return (conv int32 pollHup)))
+    (do
+      (let [(values r e) (pollNow (conv int fd) ev)]
+        (when (!= e 0)
+          (when (== e syscall/EINTR)
+            (return 0))
+          (return (chThrown errs e)))
+        (when (or (!= r 0) (== timeout 0))
+          (return (conv int32 r)))))
+    (let [^int16 got 0
+          werr (waitFD c (== (bit-and ev pollIn) 0) (chDeadline timeout)
+                       (fn ^bool [^int d]
+                         (let [(values r _) (pollNow d ev)]
+                           (set! got r)
+                           (!= r 0))))]
+      (when (preclosed c)
+        (return (conv int32 pollHup)))
+      (when (and (!= werr nil) (not (errors/Is werr os/ErrDeadlineExceeded)))
+        (return (chThrown errs werr)))
+      (conv int32 got))))
+
+(go/func HostChannels_PollConnect0_I_J_I1__I_native
+  "HostChannels_PollConnect0_I_J_I1__I_native is Net.pollConnect: 1 connected, 0 not yet (or a timeout), or
+THROWN with the connection's error (SO_ERROR; ENOTCONN on POLLHUP), a failed poll's as its negative.\n"
+  ^int32 [^int32 fd ^int64 timeout ^{:tag (* IntArray)} errs]
+  (let [n (HostChannels_Poll0_I_I_J_I1__I_native fd (conv int32 pollOut) timeout errs)]
+    (when (== n iosThrown)
+      (aset (.-A errs) 0 (- (aget (.-A errs) 0)))
+      (return iosThrown))
+    (when (== n 0)
+      (return 0))
+    (when [e (connectDone (conv int fd))] (!= e nil)
+      (return (chThrown errs e)))
+    (when (!= (bit-and (conv int16 n) pollHup) 0)
+      (return (chThrown errs syscall/ENOTCONN)))
+    1))
+
+(go/func HostChannels_Available0_I_I1__I_native
+  "HostChannels_Available0_I_I1__I_native is Net.available (FIONREAD): the count or THROWN.\n"
+  ^int32 [^int32 fd ^{:tag (* IntArray)} errs]
+  (let [^int32 count 0
+        (values _ _ e) (syscall/Syscall syscall/SYS_IOCTL (conv uintptr fd) (conv uintptr syscall/TIOCINQ)
+                                       (conv uintptr (conv unsafe/Pointer (addr count))))]
+    (when (!= e 0)
+      (return (chThrown errs e)))
+    count))
+
+(go/func convertReturn
+  "convertReturn is IOUtil.c's convertReturnVal of a read or write's count n and error e: n, EOF for a read's 0,
+UNAVAILABLE, INTERRUPTED or THROWN.\n"
+  ^int32 [^int n ^error e ^bool reading ^{:tag (* IntArray)} errs]
+  (when (== e nil)
+    (when (and (== n 0) reading)
+      (return iosEOF))
+    (return (conv int32 n)))
+  (when (== e syscall/EAGAIN)
+    (return iosUnavailable))
+  (when (== e syscall/EINTR)
+    (return iosInterrupted))
+  (chThrown errs e))
+
+(go/func HostChannels_SendOOB0_I_B_I1__I_native
+  "HostChannels_SendOOB0_I_B_I1__I_native is Net.sendOOB: one byte of urgent data (MSG_OOB).\n"
+  ^int32 [^int32 fd ^int8 b ^{:tag (* IntArray)} errs]
+  (let [e (syscall/Sendto (conv int fd) (lit (slice byte) (conv byte b)) syscall/MSG_OOB nil)]
+    (when (== e nil)
+      (return (convertReturn 1 nil false errs)))
+    (convertReturn -1 e false errs)))
+
+(go/func HostChannels_Read0_I_B1_I_I_Z_I1__I_native
+  "HostChannels_Read0_I_B1_I_I_Z_I1__I_native is SocketDispatcher.read0: up to len bytes of fd into b at off (a
+blocking descriptor waits for some), as convertReturnVal; a pre-closed descriptor reads its end.\n"
+  ^int32 [^int32 fd ^{:tag (* ByteArray)} b ^int32 off ^int32 n ^bool socket ^{:tag (* IntArray)} errs]
+  (let [c (chanGet fd)]
+    (when (== c nil)
+      (return (chBadFD errs)))
+    (let [p (byteView b off n)
+          ^int k -1
+          ^error rerr nil
+          (values blocking _) (chanState c)
+          werr (waitFD c false (lit time/Time)
+                       (fn ^bool [^int d]
+                         (while true
+                           (let [(values m e) (syscall/Read d p)]
+                             (when (== e syscall/EINTR)
+                               (continue))
+                             (when (and (== e syscall/EAGAIN) blocking)
+                               (return false))
+                             (set! k m)
+                             (set! rerr e)
+                             (return true)))))]
+      (when (preclosed c)
+        (return iosEOF))
+      (when (!= werr nil)
+        (return (chThrown errs werr)))
+      (convertReturn k rerr true errs))))
+
+(go/func HostChannels_Write0_I_B1_I_I_I1__I_native
+  "HostChannels_Write0_I_B1_I_I_I1__I_native is SocketDispatcher.write0: len bytes of b from off to fd, every
+byte when fd is blocking (as the kernel's write to a blocking socket), as convertReturnVal; a pre-closed
+descriptor fails with EPIPE.\n"
+  ^int32 [^int32 fd ^{:tag (* ByteArray)} b ^int32 off ^int32 n ^{:tag (* IntArray)} errs]
+  (let [c (chanGet fd)]
+    (when (== c nil)
+      (return (chBadFD errs)))
+    (let [p (byteView b off n)
+          ^int done 0
+          ^error werr2 nil
+          (values blocking _) (chanState c)
+          werr (waitFD c true (lit time/Time)
+                       (fn ^bool [^int d]
+                         (while true
+                           (when (>= done (len p))
+                             (return true))
+                           (let [(values m e) (syscall/Write d (subslice p done))]
+                             (when (== e syscall/EINTR)
+                               (continue))
+                             (when (== e syscall/EAGAIN)
+                               (when (and blocking (< done (len p)))
+                                 (return false))
+                               (when (== done 0)
+                                 (set! werr2 e))
+                               (return true))
+                             (when (!= e nil)
+                               (when (== done 0)
+                                 (set! werr2 e))
+                               (return true))
+                             (set! done (+ done m))
+                             (when (not blocking)
+                               (return true))
+                             (continue)))))]
+      (when (and (preclosed c) (== done 0))
+        (return (chThrown errs syscall/EPIPE)))
+      (when (and (!= werr nil) (== done 0))
+        (return (chThrown errs werr)))
+      (convertReturn done werr2 false errs))))
+
+(go/func HostChannels_Close0_I_I1__I_native
+  "HostChannels_Close0_I_I1__I_native is UnixDispatcher.close0 (and FileDispatcherImpl.closeIntFD): the
+descriptor closed (EINTR ignored, as closeFileDescriptor): 0 or THROWN.\n"
+  ^int32 [^int32 fd ^{:tag (* IntArray)} errs]
+  (.Lock chanMu)
+  (let [c (aget chanFDs fd)]
+    (delete chanFDs fd)
+    (.Unlock chanMu)
+    (if (!= c nil)
+      (when [e (.Close (.-f c))] (!= e nil)
+        (when (not (errors/Is e syscall/EINTR))
+          (return (chThrown errs e))))
+      (when [e (syscall/Close (conv int fd))] (!= e nil)
+        (when (!= e syscall/EINTR)
+          (return (chThrown errs e)))))
+    0))
+
+(go/func HostChannels_PreClose0_I__V_native
+  "HostChannels_PreClose0_I__V_native is UnixDispatcher.preClose0 with the signal it is sent with: descriptor fd
+marked closed for its users, a thread waiting in it woken.\n"
+  [^int32 fd]
+  (let [c (chanGet fd)]
+    (when (== c nil)
+      (return))
+    (.Lock chanMu)
+    (set! (.-preclosed c) true)
+    (.Unlock chanMu)
+    (.SetDeadline (.-f c) (time/Unix 1 0))))
+
+(go/func HostChannels_ConfigureBlocking0_I_Z_I1__I_native
+  "HostChannels_ConfigureBlocking0_I_Z_I1__I_native is IOUtil.configureBlocking: the descriptor's mode as the
+channel sees it (the kernel's stays non-blocking): 0 or THROWN.\n"
+  ^int32 [^int32 fd ^bool blocking ^{:tag (* IntArray)} errs]
+  (let [c (chanGet fd)]
+    (when (== c nil)
+      (return (chBadFD errs)))
+    (.Lock chanMu)
+    (set! (.-blocking c) blocking)
+    (.Unlock chanMu)
+    0))
+
+(go/func HostChannels_MakePipe0_Z_I1_I1__I_native
+  "HostChannels_MakePipe0_Z_I1_I1__I_native is IOUtil.makePipe: a pipe's read and write ends into fds, blocking
+as given: 0 or THROWN.\n"
+  ^int32 [^bool blocking ^{:tag (* IntArray)} fds ^{:tag (* IntArray)} errs]
+  (let [p (make (slice int) 2)]
+    (when [e (syscall/Pipe2 p syscall/O_CLOEXEC)] (!= e nil)
+      (return (chThrown errs e)))
+    (when [e (chanAdd (aget p 0) blocking)] (!= e nil)
+      (syscall/Close (aget p 0))
+      (syscall/Close (aget p 1))
+      (return (chThrown errs e)))
+    (when [e (chanAdd (aget p 1) blocking)] (!= e nil)
+      (HostChannels_Close0_I_I1__I_native (conv int32 (aget p 0)) nil)
+      (syscall/Close (aget p 1))
+      (return (chThrown errs e)))
+    (aset (.-A fds) 0 (conv int32 (aget p 0)))
+    (aset (.-A fds) 1 (conv int32 (aget p 1)))
+    0))
+
+(go/func HostChannels_WriteOne0_I_B_I1__I_native
+  "HostChannels_WriteOne0_I_B_I1__I_native is IOUtil.write1: one byte written at once, as convertReturnVal.\n"
+  ^int32 [^int32 fd ^int8 b ^{:tag (* IntArray)} errs]
+  (let [(values n e) (syscall/Write (conv int fd) (lit (slice byte) (conv byte b)))]
+    (convertReturn n e false errs)))
+
+(go/func HostChannels_Drain0_I_I1__I_native
+  "HostChannels_Drain0_I_I1__I_native is IOUtil.drain: every byte read at once and discarded: 1 when there was
+one, else 0, or THROWN.\n"
+  ^int32 [^int32 fd ^{:tag (* IntArray)} errs]
+  (let [buf (make (slice byte) 16)
+        tn 0]
+    (while true
+      (let [(values n e) (syscall/Read (conv int fd) buf)]
+        (when (and (!= e nil) (!= e syscall/EAGAIN))
+          (return (chThrown errs e)))
+        (when (> n 0)
+          (set! tn (+ tn n)))
+        (when (== n 16)
+          (continue))
+        (if (> tn 0)
+          (return 1)
+          (return 0))))))
+
+(go/func HostChannels_DrainOne0_I_I1__I_native
+  "HostChannels_DrainOne0_I_I1__I_native is IOUtil.drain1: at most one byte read at once and discarded: 1, 0
+(none), INTERRUPTED or THROWN.\n"
+  ^int32 [^int32 fd ^{:tag (* IntArray)} errs]
+  (let [(values n e) (syscall/Read (conv int fd) (make (slice byte) 1))]
+    (when (== e syscall/EAGAIN)
+      (return 0))
+    (when (== e syscall/EINTR)
+      (return iosInterrupted))
+    (when (!= e nil)
+      (return (chThrown errs e)))
+    (conv int32 n)))
+
+(go/func HostChannels_FdLimit0__I_native
+  "HostChannels_FdLimit0__I_native is IOUtil.fdLimit: RLIMIT_NOFILE's hard limit (Integer.MAX_VALUE when
+unlimited or larger).\n"
+  ^int32 []
+  (let [rl (lit syscall/Rlimit)]
+    (when (!= (syscall/Getrlimit syscall/RLIMIT_NOFILE (addr rl)) nil)
+      (return -1))
+    (when (> (.-Max rl) 2147483647)
+      (return 2147483647))
+    (conv int32 (.-Max rl))))
+
+(go/func HostChannels_Poll1_I1_I1_I1_I_I_I1__I_native
+  "HostChannels_Poll1_I1_I1_I1_I_I_I1__I_native is PollSelectorImpl.poll: poll(2) of the first n descriptors of
+fds with their events, their revents into revents, within timeout ms (negative: no limit): the count,
+INTERRUPTED or THROWN.\n"
+  ^int32 [^{:tag (* IntArray)} fds ^{:tag (* IntArray)} events ^{:tag (* IntArray)} revents ^int32 n
+          ^int32 timeout ^{:tag (* IntArray)} errs]
+  (let [p (make (slice pollFD) n)]
+    (range [i (conv int n)]
+      (aset p i (lit pollFD :fd (aget (.-A fds) i) :events (conv int16 (aget (.-A events) i)))))
+    (let [(values r e) (ppoll p (conv int timeout))]
+      (when (== e syscall/EINTR)
+        (return iosInterrupted))
+      (when (!= e 0)
+        (return (chThrown errs e)))
+      (range [i (conv int n)]
+        (aset (.-A revents) i (conv int32 (.-revents (aget p i)))))
+      (conv int32 r))))
+
+;; ---------------------------------------------------------------------------------------
+;; Linux's selector: EPoll.c's and EventFD.c's natives
+
+(go/func HostChannels_EpollCreate0_I1__I_native
+  "HostChannels_EpollCreate0_I1__I_native is EPoll.create: epoll_create1(EPOLL_CLOEXEC), or THROWN.\n"
+  ^int32 [^{:tag (* IntArray)} errs]
+  (let [(values epfd err) (syscall/EpollCreate1 syscall/EPOLL_CLOEXEC)]
+    (when (!= err nil)
+      (return (chThrown errs err)))
+    (conv int32 epfd)))
+
+(go/func HostChannels_EpollCtl0_I_I_I_I__I_native
+  "HostChannels_EpollCtl0_I_I_I_I__I_native is EPoll.ctl: epoll_ctl of fd with events, the event's data the
+descriptor: 0 or the error number.\n"
+  ^int32 [^int32 epfd ^int32 opcode ^int32 fd ^int32 events]
+  (let [ev (lit syscall/EpollEvent :Events (conv uint32 events) :Fd fd)]
+    (when [err (syscall/EpollCtl (conv int epfd) (conv int opcode) (conv int fd) (addr ev))] (!= err nil)
+      (return (chErrno err)))
+    0))
+
+(go/func HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native
+  "HostChannels_EpollWait0_I_I1_I1_I_I_I1__I_native is EPoll.wait: epoll_wait for at most n events within timeout
+ms (negative: no limit), their descriptors and events into fds and events: the count, INTERRUPTED or THROWN.\n"
+  ^int32 [^int32 epfd ^{:tag (* IntArray)} fds ^{:tag (* IntArray)} events ^int32 n ^int32 timeout
+          ^{:tag (* IntArray)} errs]
+  (let [evs (make (slice syscall/EpollEvent) n)
+        (values k err) (syscall/EpollWait (conv int epfd) evs (conv int timeout))]
+    (when (== err syscall/EINTR)
+      (return iosInterrupted))
+    (when (!= err nil)
+      (return (chThrown errs err)))
+    (range [i k]
+      (aset (.-A fds) i (.-Fd (aget evs i)))
+      (aset (.-A events) i (conv int32 (.-Events (aget evs i)))))
+    (conv int32 k)))
+
+(go/func HostChannels_Eventfd0_I1__I_native
+  "HostChannels_Eventfd0_I1__I_native is EventFD.eventfd0: eventfd(0, 0), entered into the table (blocking, as
+jdk26u's: EPollSelectorImpl configures it non-blocking): the descriptor or THROWN.\n"
+  ^int32 [^{:tag (* IntArray)} errs]
+  (let [(values r _ e) (syscall/Syscall syscall/SYS_EVENTFD2 0 (conv uintptr syscall/O_CLOEXEC) 0)]
+    (when (!= e 0)
+      (return (chThrown errs e)))
+    (let [fd (conv int r)]
+      (when [err (chanAdd fd true)] (!= err nil)
+        (syscall/Close fd)
+        (return (chThrown errs err)))
+      (conv int32 fd))))
+
+(go/func HostChannels_EventfdSet0_I_I1__I_native
+  "HostChannels_EventfdSet0_I_I1__I_native is EventFD.set0: 1 added to the counter (8 bytes in the native byte
+order), as convertReturnVal.\n"
+  ^int32 [^int32 efd ^{:tag (* IntArray)} errs]
+  (let [b (make (slice byte) 8)]
+    (.PutUint64 binary/NativeEndian b 1)
+    (let [(values n e) (syscall/Write (conv int efd) b)]
+      (convertReturn n e false errs))))

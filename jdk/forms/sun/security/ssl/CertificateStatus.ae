@@ -1,0 +1,182 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/CertificateStatus.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security.cert X509Certificate)
+        '(java.text MessageFormat)
+        '(java.util ArrayList List Locale)
+        '(javax.net.ssl SSLHandshakeException)
+        '(sun.security.provider.certpath OCSPResponse))
+
+(defclass ^:final CertificateStatus
+  (field ^:static ^:final ^SSLConsumer handshakeConsumer (CertificateStatusConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer handshakeProducer (CertificateStatusProducer.))
+
+  (field ^:static ^:final ^HandshakeAbsence handshakeAbsence (CertificateStatusAbsence.))
+
+  (defclass ^:static ^:final CertificateStatusMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:final ^CertStatusExtension$CertStatusRequestType statusType)
+
+    (field ^:final ^int encodedResponsesLen)
+
+    (field ^:final ^int messageLength)
+
+    (field ^:final ^{:tag (List byte/1)} encodedResponses (ArrayList.))
+
+    (constructor [this ^HandshakeContext handshakeContext]
+      (super. handshakeContext)
+      (let [shc (cast ServerHandshakeContext handshakeContext)
+            stapleParams (.-stapleParams shc)]
+        (when (nil? stapleParams)
+          (throw (IllegalArgumentException. "Unexpected null stapling parameters")))
+        (let [certChain (cast X509Certificate/1 (.getLocalCertificates (.-handshakeSession shc)))]
+          (when (nil? certChain)
+            (throw (IllegalArgumentException. "Unexpected null certificate chain")))
+          (set! statusType (.-statReqType stapleParams))
+          (let [^:mutable ^int encodedLen 0]
+            (cond
+              (identical? statusType CertStatusExtension$CertStatusRequestType/OCSP)
+                (let [^:mutable resp (cast byte/1
+                                           (.get (.-responseMap stapleParams) (aget certChain 0)))]
+                  (when (nil? resp) (set! resp (new byte/1 0)))
+                  (.add encodedResponses resp)
+                  (set! encodedLen
+                        (unchecked-add-int encodedLen (unchecked-add-int (alength resp) 3))))
+              (identical? statusType CertStatusExtension$CertStatusRequestType/OCSP_MULTI)
+                (for-each [^X509Certificate cert certChain]
+                  (let [^:mutable resp (cast byte/1 (.get (.-responseMap stapleParams) cert))]
+                    (when (nil? resp) (set! resp (new byte/1 0)))
+                    (.add encodedResponses resp)
+                    (set! encodedLen
+                          (unchecked-add-int encodedLen (unchecked-add-int (alength resp) 3)))))
+              :else
+                (throw (IllegalArgumentException.
+                         (java-str "Unsupported StatusResponseType: " statusType))))
+            (set! encodedResponsesLen encodedLen)
+            (set! messageLength
+                  (CertificateStatusMessage/messageLength statusType encodedResponsesLen))))))
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext ^ByteBuffer m]
+      (super. handshakeContext)
+      (set! statusType
+            (CertStatusExtension$CertStatusRequestType/valueOf (unchecked-byte (Record/getInt8 m))))
+      (cond
+        (identical? statusType CertStatusExtension$CertStatusRequestType/OCSP)
+          (let [respDER (Record/getBytes24 m)]
+            (if (> (alength respDER) 0)
+                (do
+                  (.add encodedResponses respDER)
+                  (set! encodedResponsesLen (unchecked-add-int 3 (alength respDER))))
+                (throw (.fatal (.-conContext handshakeContext)
+                               Alert/HANDSHAKE_FAILURE
+                               "Zero-length OCSP Response"))))
+        (identical? statusType CertStatusExtension$CertStatusRequestType/OCSP_MULTI)
+          (let [^:mutable respListLen (Record/getInt24 m)]
+            (set! encodedResponsesLen respListLen)
+            (while (> respListLen 0)
+              (let [respDER (Record/getBytes24 m)]
+                (.add encodedResponses respDER)
+                (set! respListLen
+                      (unchecked-subtract-int respListLen (unchecked-add-int (alength respDER) 3)))))
+            (when-not (== respListLen 0)
+              (throw (.fatal (.-conContext handshakeContext)
+                             Alert/INTERNAL_ERROR
+                             "Bad OCSP response list length"))))
+        :else
+          (throw (.fatal (.-conContext handshakeContext)
+                         Alert/HANDSHAKE_FAILURE
+                         (java-str "Unsupported StatusResponseType: " statusType))))
+      (set! messageLength (CertificateStatusMessage/messageLength statusType encodedResponsesLen)))
+
+    (method ^:private ^:static messageLength ^int [^CertStatusExtension$CertStatusRequestType statusType
+                                                   ^int encodedResponsesLen]
+      (cond
+        (identical? statusType CertStatusExtension$CertStatusRequestType/OCSP)
+          (unchecked-add-int 1 encodedResponsesLen)
+        (identical? statusType CertStatusExtension$CertStatusRequestType/OCSP_MULTI)
+          (unchecked-add-int 4 encodedResponsesLen)
+        :else -1))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CERTIFICATE_STATUS)
+
+    (method ^:public messageLength ^int [this] messageLength)
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream s]
+      (.putInt8 s (.-id statusType))
+      (cond
+        (identical? statusType CertStatusExtension$CertStatusRequestType/OCSP)
+          (.putBytes24 s (cast byte/1 (.get encodedResponses 0)))
+        (identical? statusType CertStatusExtension$CertStatusRequestType/OCSP_MULTI)
+          (do
+            (.putInt24 s encodedResponsesLen)
+            (for-each [^byte/1 respBytes encodedResponses] (.putBytes24 s respBytes)))
+        :else
+          (throw (SSLHandshakeException. (java-str "Unsupported status_type: " (.-id statusType))))))
+
+    (method ^:public toString ^String [this]
+      (let [sb (StringBuilder.)]
+        (for-each [^byte/1 respDER encodedResponses]
+          (if (> (alength respDER) 0)
+              (try
+                (let [oResp (OCSPResponse. respDER)] (.append (.append sb (.toString oResp)) "\n"))
+                (catch IOException ioe
+                  (.append (.append (.append sb "OCSP Response Exception: ") ioe) "\n")))
+              (.append sb "<Zero-length entry>\n")))
+        (let [messageFormat (MessageFormat.
+                              "\"CertificateStatus\": '{'\n  \"type\"                : \"{0}\",\n  \"responses \"          : [\n{1}\n  ]\n'}'"
+                              Locale/ENGLISH)
+              messageFields (new Object/1
+                                 [(.-name statusType)
+                                  (Utilities/indent (Utilities/indent (.toString sb)))])]
+          (.format messageFormat messageFields)))))
+
+  (defclass ^:private ^:static ^:final CertificateStatusConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [chc (cast ClientHandshakeContext context)
+            cst (CertificateStatusMessage. chc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming server CertificateStatus handshake message" cst))
+        (.setStatusResponses (.-handshakeSession chc) (.-encodedResponses cst))
+        (CertificateMessage$T12CertificateConsumer/checkServerCerts chc (.-deferredCerts chc))
+        (.remove (.-handshakeConsumers chc) (.-id SSLHandshake/CERTIFICATE_STATUS)))))
+
+  (defclass ^:private ^:static ^:final CertificateStatusProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when-not (not (.-staplingActive shc))
+          (let [csm (CertificateStatusMessage. shc)]
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Produced server CertificateStatus handshake message" csm))
+            (.write csm (.-handshakeOutput shc))
+            (.flush (.-handshakeOutput shc))
+            nil)))))
+
+  (defclass ^:private ^:static ^:final CertificateStatusAbsence
+    :implements [HandshakeAbsence]
+
+    (constructor ^:private [this])
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when (.-staplingActive chc)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine
+              "Server did not send CertificateStatus, checking cert chain without status info."))
+          (CertificateMessage$T12CertificateConsumer/checkServerCerts chc (.-deferredCerts chc)))))))

@@ -1,0 +1,267 @@
+;; jrt's tests: the live threads' registry and java.lang.management's natives (management.ae).
+(in-ns 'go.arbace.jrt)
+
+(go/file "management_test.go"
+  :imports [[strings "strings"] [sync "sync"] [testing "testing"] [time "time"]])
+
+(go/func TestLiveThreads
+  "A started thread is live, counted among the started and in the peak, and gone at its end; a daemon is
+counted as one (the test's goroutine is an adopted daemon, so a is made a user thread).\n"
+  [^{:tag (* testing/T)} t]
+  (let [live0 (HostManagement_LiveCount0__I_native)
+        started0 (HostManagement_TotalStarted0__J_native)
+        daemons0 (HostManagement_DaemonCount0__I_native)
+        release (make (chan (struct)))
+        a (Thread_New_Runnable_String (RunnableOf (fn [] (<! release))) (Str "live-a"))
+        b (Thread_New_Runnable_String (RunnableOf (fn [] (<! release))) (Str "live-b"))]
+    (.SetDaemon_Z__V a false)
+    (.SetDaemon_Z__V b true)
+    (.Start__V a)
+    (.Start__V b)
+    (let [deadline (.Add (time/Now) time/Second)]
+      (while (and (< (HostManagement_LiveCount0__I_native) (+ live0 2)) (.Before (time/Now) deadline))
+        (time/Sleep time/Millisecond)))
+    (when (!= (HostManagement_LiveCount0__I_native) (+ live0 2))
+      (.Errorf t "live %d, want %d" (HostManagement_LiveCount0__I_native) (+ live0 2)))
+    (when (!= (HostManagement_TotalStarted0__J_native) (+ started0 2))
+      (.Errorf t "started %d, want %d" (HostManagement_TotalStarted0__J_native) (+ started0 2)))
+    (when (!= (HostManagement_DaemonCount0__I_native) (+ daemons0 1))
+      (.Errorf t "daemons %d, want %d" (HostManagement_DaemonCount0__I_native) (+ daemons0 1)))
+    (when (< (HostManagement_PeakCount0__I_native) (+ live0 2))
+      (.Errorf t "peak %d below %d" (HostManagement_PeakCount0__I_native) (+ live0 2)))
+    (let [ts (HostManagement_Threads0__Thread1_native)
+          ^int ia -1
+          ^int ib -1]
+      (range [i x (.-A ts)]
+        (when (== x (.-self a)) (set! ia i))
+        (when (== x (.-self b)) (set! ib i)))
+      (when (or (< ia 0) (< ib 0))
+        (.Errorf t "threads: a at %d, b at %d" ia ib)))
+    (close release)
+    (.Join__V a)
+    (.Join__V b)
+    (when (!= (HostManagement_LiveCount0__I_native) live0)
+      (.Errorf t "after the joins live %d, want %d" (HostManagement_LiveCount0__I_native) live0))
+    (HostManagement_ResetPeakCount0__V_native)
+    (when (!= (HostManagement_PeakCount0__I_native) (HostManagement_LiveCount0__I_native))
+      (.Errorf t "reset peak %d, live %d" (HostManagement_PeakCount0__I_native) (HostManagement_LiveCount0__I_native)))))
+
+(go/func TestRuntimeTimes
+  "The start time is in the past and the uptime grows; the process id is the process's.\n"
+  [^{:tag (* testing/T)} t]
+  (let [u0 (HostManagement_Uptime0__J_native)]
+    (time/Sleep (* 5 time/Millisecond))
+    (when (< (HostManagement_Uptime0__J_native) (+ u0 5))
+      (.Errorf t "uptime %d after %d and 5 ms" (HostManagement_Uptime0__J_native) u0))
+    (when (> (HostManagement_StartTime0__J_native) (.UnixMilli (time/Now)))
+      (.Error t "start time in the future"))
+    (when (<= (HostManagement_Pid0__I_native) 0)
+      (.Error t "pid"))))
+
+(go/func waitState
+  "waitState waits up to a second for th to be in state st.\n"
+  ^bool [^{:tag (* Thread)} th ^{:tag (* Thread_State)} st]
+  (let [deadline (.Add (time/Now) time/Second)]
+    (while (.Before (time/Now) deadline)
+      (when (== (.GetState__Thread_State th) st) (return true))
+      (time/Sleep time/Millisecond))
+    false))
+
+(go/func TestThreadStatesAndLocks
+  "A thread entering a held monitor is BLOCKED on its object, the holder its owner; in Object.wait it is
+WAITING on it, in a timed wait TIMED_WAITING; in sleep TIMED_WAITING on nothing; waiting for a held
+ReentrantLock WAITING on the lock, its holder the owner; the blocked and waited counts grow.\n"
+  [^{:tag (* testing/T)} t]
+  (HostManagement_SetContentionMonitoring0_Z__V_native true)
+  (defer (HostManagement_SetContentionMonitoring0_Z__V_native false))
+  (let [o (Object_New)
+        holder (CurrentThread)
+        go1 (make (chan (struct)))
+        b (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter o) (MonitorExit o) (close go1))) (Str "blocker"))]
+    (MonitorEnter o)
+    (.Start__V b)
+    (when (not (waitState b Thread_State_BLOCKED))
+      (.Fatalf t "the contending thread is %s" (.String (.Name__String (.GetState__Thread_State b)))))
+    (when (!= (HostManagement_WaitOn0_Thread__O_native b) o)
+      (.Error t "blocked on another object"))
+    (when (!= (HostManagement_LockOwner0_O__Thread_native o) (.-self holder))
+      (.Error t "the monitor's owner"))
+    (time/Sleep (* 3 time/Millisecond))
+    (MonitorExit o)
+    (<! go1)
+    (.Join__V b)
+    (when (< (HostManagement_BlockedCount0_Thread__J_native b) 1)
+      (.Error t "blocked count"))
+    (when (< (HostManagement_BlockedTime0_Thread__J_native b) 0)
+      (.Error t "blocked time with monitoring on")))
+  ;; Object.wait, timed and not, then notify
+  (let [o (Object_New)
+        w (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter o) (Wait o) (MonitorExit o))) (Str "waiter"))
+        tw (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter o) (WaitTimeout o 10000 0) (MonitorExit o))) (Str "timed"))]
+    (.Start__V w)
+    (.Start__V tw)
+    (when (not (waitState w Thread_State_WAITING))
+      (.Errorf t "waiter %s" (.String (.Name__String (.GetState__Thread_State w)))))
+    (when (not (waitState tw Thread_State_TIMED_WAITING))
+      (.Errorf t "timed waiter %s" (.String (.Name__String (.GetState__Thread_State tw)))))
+    (when (!= (HostManagement_WaitOn0_Thread__O_native w) o)
+      (.Error t "waiting on another object"))
+    (MonitorEnter o)
+    (NotifyAll o)
+    (MonitorExit o)
+    (.Join__V w)
+    (.Join__V tw)
+    (when (< (HostManagement_WaitedCount0_Thread__J_native w) 1)
+      (.Error t "waited count")))
+  ;; sleep
+  (let [s (Thread_New_Runnable_String (RunnableOf (fn [] (Thread_Sleep_J__V 200))) (Str "sleeper"))]
+    (.Start__V s)
+    (when (not (waitState s Thread_State_TIMED_WAITING))
+      (.Errorf t "sleeper %s" (.String (.Name__String (.GetState__Thread_State s)))))
+    (when (!= (HostManagement_WaitOn0_Thread__O_native s) nil)
+      (.Error t "a sleeper waits on an object"))
+    (.Interrupt__V s)
+    (.Join__V s))
+  ;; a held ReentrantLock
+  (let [l (ReentrantLock_New)
+        holder (CurrentThread)
+        lw (Thread_New_Runnable_String (RunnableOf (fn [] (.Lock__V l) (.Unlock__V l))) (Str "locker"))]
+    (.Lock__V l)
+    (.Start__V lw)
+    (when (not (waitState lw Thread_State_WAITING))
+      (.Errorf t "locker %s" (.String (.Name__String (.GetState__Thread_State lw)))))
+    (when (!= (HostManagement_WaitOn0_Thread__O_native lw) l)
+      (.Error t "the locker waits on another object"))
+    (when (!= (HostManagement_LockOwner0_O__Thread_native l) (.-self holder))
+      (.Error t "the lock's owner"))
+    (.Unlock__V l)
+    (.Join__V lw)
+    (when (!= (.GetState__Thread_State lw) Thread_State_TERMINATED)
+      (.Error t "the locker did not end"))))
+
+(go/func TestDeadlocks
+  "Two threads each holding the monitor the other is BLOCKED to enter are found by both searches; two each
+holding the ReentrantLock the other waits for only by the synchronizers' search; none before or after. The
+waits are recorded as the contended paths record them (waitBegin) while the threads sit on a channel, so that
+the cycles end with the test (TestThreadStatesAndLocks proves the recording itself).\n"
+  [^{:tag (* testing/T)} t]
+  (when (!= (HostManagement_FindDeadlocked0__Thread1_native) nil)
+    (.Fatal t "a deadlock before any"))
+  (let [a (Object_New)
+        b (Object_New)
+        l1 (ReentrantLock_New)
+        l2 (ReentrantLock_New)
+        ^sync/WaitGroup held (zero sync/WaitGroup)
+        release (make (chan (struct)))
+        cycle (fn ^Runnable [^any mine ^any theirs ^int32 ws ^bool monitor]
+                (RunnableOf (fn []
+                              (let [me (CurrentThread)
+                                    (values rl _) (assert (* ReentrantLock) mine)]
+                                (if monitor (MonitorEnter mine) (.Lock__V rl))
+                                (waitBegin me ws theirs)
+                                (.Done held)
+                                (<! release)
+                                (waitEnd me)
+                                (if monitor (MonitorExit mine) (.Unlock__V rl))))))
+        t1 (Thread_New_Runnable_String (cycle a b wsBlocked true) (Str "dl-1"))
+        t2 (Thread_New_Runnable_String (cycle b a wsBlocked true) (Str "dl-2"))
+        t3 (Thread_New_Runnable_String (cycle l1 l2 wsWaiting false) (Str "dl-3"))
+        t4 (Thread_New_Runnable_String (cycle l2 l1 wsWaiting false) (Str "dl-4"))]
+    (.Add held 4)
+    (.Start__V t1)
+    (.Start__V t2)
+    (.Start__V t3)
+    (.Start__V t4)
+    (.Wait held)
+    (let [m (HostManagement_FindMonitorDeadlocked0__Thread1_native)
+          d (HostManagement_FindDeadlocked0__Thread1_native)]
+      (when (or (== m nil) (!= (len (.-A m)) 2))
+        (.Errorf t "monitor search: %v" m))
+      (when (or (== d nil) (!= (len (.-A d)) 4))
+        (.Errorf t "synchronizers search: %v" d)))
+    (close release)
+    (.Join__V t1)
+    (.Join__V t2)
+    (.Join__V t3)
+    (.Join__V t4)
+    (when (!= (HostManagement_FindDeadlocked0__Thread1_native) nil)
+      (.Error t "a deadlock after the cycles ended"))))
+
+(go/func TestLockedMonitorsAndSynchronizers
+  "Once tracked, the monitors a thread holds are listed latest first and once each, its jrt ReentrantLocks as
+its synchronizers; released, they are gone; a monitor it waits on is not listed while it waits.\n"
+  [^{:tag (* testing/T)} t]
+  (HostManagement_TrackLocks0__V_native)
+  (let [me (.-self (CurrentThread))
+        a (Object_New)
+        b (Object_New)
+        l (ReentrantLock_New)]
+    (MonitorEnter a)
+    (MonitorEnter b)
+    (MonitorEnter b)
+    (.Lock__V l)
+    (let [ms (HostManagement_LockedMonitors0_Thread__O1_native me)
+          ss (HostManagement_LockedSynchronizers0_Thread__O1_native me)]
+      (when (or (!= (len (.-A ms)) 2) (!= (aget (.-A ms) 0) b) (!= (aget (.-A ms) 1) a))
+        (.Errorf t "locked monitors %v" (.-A ms)))
+      (when (or (!= (len (.-A ss)) 1) (!= (aget (.-A ss) 0) l))
+        (.Errorf t "locked synchronizers %v" (.-A ss))))
+    (.Unlock__V l)
+    (MonitorExit b)
+    (MonitorExit b)
+    (MonitorExit a)
+    (when (or (!= (len (.-A (HostManagement_LockedMonitors0_Thread__O1_native me))) 0)
+              (!= (len (.-A (HostManagement_LockedSynchronizers0_Thread__O1_native me))) 0))
+      (.Error t "still held after the exits")))
+  (let [o (Object_New)
+        p (Object_New)
+        w (Thread_New_Runnable_String (RunnableOf (fn [] (MonitorEnter p) (MonitorEnter o) (Wait o) (MonitorExit o) (MonitorExit p))) (Str "waiter-held"))]
+    (.Start__V w)
+    (when (not (waitState w Thread_State_WAITING))
+      (.Fatal t "the waiter does not wait"))
+    (let [ms (HostManagement_LockedMonitors0_Thread__O1_native w)]
+      (when (or (!= (len (.-A ms)) 1) (!= (aget (.-A ms) 0) p))
+        (.Errorf t "a waiter's locked monitors %v" (.-A ms))))
+    (MonitorEnter o)
+    (NotifyAll o)
+    (MonitorExit o)
+    (.Join__V w)))
+
+(go/func TestOtherThreadsStacks
+  "Once tracked, a waiting thread's stack is the one it had when it began to wait, its top frame the wait's
+(Thread.sleep); a running thread's is empty; the current thread's is its own.\n"
+  [^{:tag (* testing/T)} t]
+  (HostManagement_TrackLocks0__V_native)
+  (let [s (Thread_New_Runnable_String (RunnableOf (fn [] (Thread_Sleep_J__V 5000))) (Str "sleeper-stack"))]
+    (.Start__V s)
+    (when (not (waitState s Thread_State_TIMED_WAITING))
+      (.Fatal t "the sleeper does not sleep"))
+    (let [st (HostManagement_StackTrace0_Thread__StackTraceElement1_native (.-self s))]
+      (when (== (len (.-A st)) 0)
+        (.Fatal t "a sleeping thread's stack is empty"))
+      (let [(values top ok) (assert Object_I (aget (.-A st) 0))]
+        (when (not ok) (.Fatal t "a frame that is no object"))
+        (let [txt (.String (.ToString__String top))]
+          (.Logf t "sleeper's stack: %d frames, top %s" (len (.-A st)) txt)
+          (when (not (strings/Contains txt "sleep"))
+            (.Errorf t "the top frame %s is not the sleep" txt)))))
+    (.Interrupt__V s)
+    (.Join__V s)))
+
+(go/func TestOperatingSystemFacts
+  "On Linux the memory sizes, the CPU time, the descriptors and the CPUs are read, the loads in [0, 1].\n"
+  [^{:tag (* testing/T)} t]
+  (range [_ k (lit (slice int32) osCommittedVirtual osFreeMemory osTotalMemory osProcessCpuTime osOpenFds osMaxFds
+                   osConfiguredCpus osOnlineCpus osTotalCpuTicksNanos)]
+    (when (<= (HostManagement_Os0_I__J_native k) 0)
+      (.Errorf t "fact %d: %d" k (HostManagement_Os0_I__J_native k))))
+  (when (> (HostManagement_Os0_I__J_native osFreeMemory) (HostManagement_Os0_I__J_native osTotalMemory))
+    (.Error t "free memory above the total"))
+  (when (< (HostManagement_Os0_I__J_native osTotalSwap) 0)
+    (.Error t "total swap"))
+  (range [_ l (lit (slice float64) (HostManagement_CpuLoad0_I__D_native -1) (HostManagement_CpuLoad0_I__D_native 0)
+                   (HostManagement_ProcessCpuLoad0__D_native))]
+    (when (or (< l 0) (> l 1))
+      (.Errorf t "a load %v" l)))
+  (when (< (HostManagement_LoadAverage0__D_native) 0)
+    (.Error t "load average")))

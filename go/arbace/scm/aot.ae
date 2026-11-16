@@ -40,6 +40,14 @@
       (aset v i Unbound))
     (addr (lit Env :V v :Up up))))
 
+(go/func AotLoc "AotLoc is the store's location of the compiled program's own global named name with uid (SCS30: a library's global is the location eval's code finds, the gensym read by its uid as the constants' are).\n"
+  ^{:tag (* Loc)} [^{:tag (* M)} m ^string name ^string uid]
+  (let [s (aget aotGensyms uid)]
+    (when (== s nil)
+      (set! s (addr (lit Symbol :Name name :Gensym true :Uid uid)))
+      (aset aotGensyms uid s))
+    (.LocOf m s)))
+
 (go/func NewLoc "NewLoc is a location of the compiled program's own (a library's global), not in the store.\n"
   ^{:tag (* Loc)} [^string name]
   (addr (lit Loc :Name (Gensym name) :V Unbound)))
@@ -83,13 +91,47 @@
         (set! out (append out (.datum r "datum")))))
     out))
 
+(go/func noopThunk ^{:tag (* Prim)} [^string name]
+  (addr (lit Prim :Name name :Min 0 :Max 0 :Fn (fn [^{:tag (slice any)} _] :results [any] (return Unspec)))))
+
+(go/func InstallAOTLibrary
+  "InstallAOTLibrary installs a compiled library in psyntax (SCS30, SC94 (b)): info the unit's constant libInfo made, its invoke state
+already run by the program's start, visit (nil when none) run when psyntax first visits it; a library whose dependencies
+psyntax does not hold is left to the library path as before.\n"
+  [^{:tag (* M)} m ^any info ^{:tag (func [(* M)])} visit]
+  (let [(values x ok) (ListSlice info)
+        held (make (map any bool))
+        (values libs _) (ListSlice (.Call m (.Psyntax m "installed-libraries") true))
+        all true]
+    (when (or (not ok) (!= (len x) 9))
+      (panic "scm aot: a library's info does not read back"))
+    (range [_ l libs]
+      (aset held (aget (.-F ((inst As (* Record)) l)) 0) true))
+    (range [_ i (lit (slice int) 3 4 5)]
+      (let [(values ds _) (ListSlice (aget x i))]
+        (range [_ d ds]
+          (let [(values sp _) (ListSlice d)]
+            (when (not (aget held (aget sp 0)))
+              (set! all false))))))
+    (when (not all)
+      (return))
+    (let [vp (noopThunk "visit")]
+      (when (!= visit nil)
+        (set! vp (addr (lit Prim :Name "visit" :Min 0 :Max 0 :Fn (fn [^{:tag (slice any)} _] :results [any] (visit m) (return Unspec))))))
+      (.Call m (.Psyntax m "install-library") (aget x 0) (aget x 1) (aget x 2) (aget x 3) (aget x 4) (aget x 5) (aget x 6) (aget x 7)
+             vp (noopThunk "invoke") (conv any false) (conv any false) (List (Intern "quote") (conv any false)) Null (aget x 8) (conv any false)))))
+
 (go/method readGensym "readGensym reads #{NAME UID} after its #.\n" ^any [^{:tag (* reader)} r]
   (.next r)
   (.skipAtmosphere r)
   (let [name (conv string (.token r false))
-        ^{:tag (slice rune)} uid nil]
+        ^{:tag (slice rune)} uid nil
+        closed (strings/HasSuffix name "}")]
+    ;; #{NAME} (Chez's one-part form): the token took the brace
+    (when closed
+      (set! name (strings/TrimSuffix name "}")))
     (.skipAtmosphere r)
-    (while true
+    (while (not closed)
       (let [(values c ok) (.peek r)]
         (when (not ok)
           (return (.readEof r "gensym")))
@@ -97,6 +139,9 @@
         (when (== c \})
           (break))
         (set! uid (append uid c))))
+    ;; #{UID} alone (Chez's): the uid is its name
+    (when (== (len uid) 0)
+      (set! uid (conv (slice rune) name)))
     (let [u (conv string uid)
           s (aget aotGensyms u)]
       (when (== s nil)
@@ -264,7 +309,9 @@
 ;; The dumper
 
 (go/type aotUnit "aotUnit is a unit being dumped: its text, its constants (by identity for objects), why it is refused.\n"
-  (struct ^{:tag (* M)} m ^{:tag strings/Builder} b ^{:tag (slice string)} consts ^{:tag (map any int)} ix ^string refused))
+  (struct ^{:tag (* M)} m ^{:tag strings/Builder} b ^{:tag (slice string)} consts ^{:tag (map any int)} ix ^string refused
+          ^{:tag (map any int)} gix ^{:tag (slice string)} gnodes ^{:tag (slice string)} groots
+          ^string info ^{:tag (slice string)} visit))
 
 (go/func cljQuote "cljQuote is s as a Clojure string literal.\n" ^string [^string s]
   (let [^strings/Builder b (zero strings/Builder)]
@@ -323,6 +370,8 @@ a gensym by its name and uid; budget bounds the walk (a cyclic constant is refus
       (let [(values i ok) (aget (.-ix u) x)]
         (when ok
           (return i))))
+    (when (and byId (aotHasRecord x (make (map any bool))))
+      (return (.lateConst u x)))
     (let [text (WriteValue x false)
           i (len (.-consts u))]
       (when (== (.-refused u) "")
@@ -338,6 +387,173 @@ a gensym by its name and uid; budget bounds the walk (a cyclic constant is refus
       (when byId
         (aset (.-ix u) x i))
       i)))
+
+(go/func aotHasRecord "aotHasRecord is whether constant x holds a record (in its pairs and vectors).\n"
+  ^bool [^any x ^{:tag (map any bool)} seen]
+  (type-switch [v x]
+    (case [(* Record)] (return true))
+    (case [(* Pair)]
+      (when (aget seen x)
+        (return false))
+      (aset seen x true)
+      (return (or (aotHasRecord (.-Car v) seen) (aotHasRecord (.-Cdr v) seen))))
+    (case [(* Vector)]
+      (when (aget seen x)
+        (return false))
+      (aset seen x true)
+      (range [_ e (.-V v)]
+        (when (aotHasRecord e seen)
+          (return true)))))
+  false)
+
+;; ---------------------------------------------------------------------------------------
+;; Late constants (SC90 (b)): a constant that holds records of psyntax's own types (its syntax objects: stx,
+;; rib) is written as a recipe, the unit's graph of objects: one node an object (a pair, a vector, a string, a
+;; bytevector, a record, an atom), each object once, so the identities psyntax compares with eq? (a mark is a
+;; fresh string, a rib is shared and mutated) hold among all of a unit's late constants; a record's type named
+;; by its name among the record types psyntax made while it booted (bootRTDs). The graph is built in the unit's
+;; setup (ReadLate), after psyntax's boot.
+
+(go/var ^{:tag (map string (* RTD)) :doc "bootRTDs is the record types made while psyntax boots, by name (nil: two of one name).\n"}
+  bootRTDs (make (map string (* RTD))))
+
+(go/var ^{:tag bool :doc "bootingPsyntax is whether psyntax is booting (BootBegin, BootEnd).\n"} bootingPsyntax)
+
+(go/func BootBegin "BootBegin marks the start of psyntax's boot: the record types made until BootEnd are psyntax's.\n" []
+  (set! bootingPsyntax true))
+
+(go/func BootEnd "BootEnd marks the end of psyntax's boot.\n" []
+  (set! bootingPsyntax false))
+
+(go/func noteBootRTD "noteBootRTD records r among psyntax's record types while psyntax boots.\n" [^{:tag (* RTD)} r]
+  (when bootingPsyntax
+    (let [n (.-Name (.-Name r))
+          (values _ seen) (aget bootRTDs n)]
+      (if seen
+        (aset bootRTDs n nil)
+        (aset bootRTDs n r)))))
+
+(go/method lateConst "lateConst is the index of constant x, a late one: a root of the unit's graph.\n" ^int [^{:tag (* aotUnit)} u ^any x]
+  (when (== (.-gix u) nil)
+    (set! (.-gix u) (make (map any int))))
+  (let [n (.gnode u x)
+        i (len (.-consts u))]
+    (set! (.-consts u) (append (.-consts u) "#f"))
+    (set! (.-groots u) (append (.-groots u) (+ "(" (strconv/Itoa i) " . " (strconv/Itoa n) ")")))
+    (aset (.-ix u) x i)
+    i))
+
+(go/method gnode "gnode is the index of object x's node in the unit's graph, made with its parts' when new.\n"
+  ^int [^{:tag (* aotUnit)} u ^any x]
+  (let [byId false]
+    (type-switch x
+      (case [(* Pair) (* String) (* Vector) (* Bytevector) (* Symbol) (* Record)] (set! byId true)))
+    (when byId
+      (let [(values i ok) (aget (.-gix u) x)]
+        (when ok
+          (return i))))
+    (let [i (len (.-gnodes u))]
+      (set! (.-gnodes u) (append (.-gnodes u) ""))
+      (when byId
+        (aset (.-gix u) x i))
+      (let [t (.gtext u x)]
+        (aset (.-gnodes u) i t))
+      i)))
+
+(go/method gtext "gtext is the text of object x's node, its parts' nodes made first.\n" ^string [^{:tag (* aotUnit)} u ^any x]
+  (type-switch [v x]
+    (case [(* Pair)]
+      (let [a (.gnode u (.-Car v))
+            d (.gnode u (.-Cdr v))]
+        (return (+ "(p " (strconv/Itoa a) " " (strconv/Itoa d) ")"))))
+    (case [(* Vector)]
+      (let [^strings/Builder b (zero strings/Builder)]
+        (if (.-RO v) (.WriteString (addr b) "(v #t") (.WriteString (addr b) "(v #f"))
+        (range [_ e (.-V v)]
+          (let [j (.gnode u e)]
+            (.WriteString (addr b) " ")
+            (.WriteString (addr b) (strconv/Itoa j))))
+        (.WriteString (addr b) ")")
+        (return (.String b))))
+    (case [(* String)]
+      (if (.-RO v)
+        (return (+ "(s " (WriteValue v false) " #t)"))
+        (return (+ "(s " (WriteValue v false) " #f)"))))
+    (case [(* Bytevector)] (return (+ "(b " (WriteValue v false) ")")))
+    (case [(* Record)]
+      (let [name (.-Name (.-Name (.-RTD v)))
+            r (aget bootRTDs name)]
+        (when (and (!= r (.-RTD v)) (== (.-refused u) ""))
+          (set! (.-refused u) (+ "a constant that does not read back: " (TruncText (WriteValue x false) 60))))
+        (let [^strings/Builder b (zero strings/Builder)]
+          (.WriteString (addr b) "(r ")
+          (.WriteString (addr b) (WriteValue (Str name) false))
+          (range [_ e (.-F v)]
+            (let [j (.gnode u e)]
+              (.WriteString (addr b) " ")
+              (.WriteString (addr b) (strconv/Itoa j))))
+          (.WriteString (addr b) ")")
+          (return (.String b))))))
+  (let [text (WriteValue x false)
+        ok false]
+    (when (== (.-refused u) "")
+      ((fn []
+         (defer ((fn [] (recover))))
+         (let [back (ReadAOT text)
+               budget 1000]
+           (set! ok (and (== (len back) 1) (aotSame x (aget back 0) (addr budget)))))))
+      (when (not ok)
+        (set! (.-refused u) (+ "a constant that does not read back: " (TruncText text 60)))))
+    (+ "(k " text ")")))
+
+(go/method lateText "lateText is the unit's graph as ReadLate reads it: its nodes, then its roots.\n" ^string [^{:tag (* aotUnit)} u]
+  (+ "#(" (strings/Join (.-gnodes u) "\n") ")\n(" (strings/Join (.-groots u) " ") ")"))
+
+(go/func lateIx ^int [^any x] (conv int ((inst As int64) x)))
+
+(go/func ReadLate
+  "ReadLate builds a unit's late constants from s, the graph gnode wrote (a vector of nodes, then the roots:
+(K-index . node)), into K; psyntax booted (its record types).\n"
+  [^{:tag (slice any)} K ^string s]
+  (let [d (ReadAOT s)
+        nodes (.-V ((inst As (* Vector)) (aget d 0)))
+        (values roots _) (ListSlice (aget d 1))
+        objs (make (slice any) (len nodes))
+        parts (make (slice (slice any)) (len nodes))]
+    (range [i n nodes]
+      (let [(values xs _) (ListSlice n)]
+        (aset parts i xs)
+        (switch (.-Name ((inst As (* Symbol)) (aget xs 0)))
+          (case ["p"] (aset objs i (addr (lit Pair))))
+          (case ["v"] (aset objs i (addr (lit Vector :V (make (slice any) (- (len xs) 2)) :RO (Truthy (aget xs 1))))))
+          (case ["s"]
+            (let [st ((inst As (* String)) (aget xs 1))]
+              (set! (.-RO st) (Truthy (aget xs 2)))
+              (aset objs i st)))
+          (case ["b" "k"] (aset objs i (aget xs 1)))
+          (case ["r"]
+            (let [name (.String ((inst As (* String)) (aget xs 1)))
+                  rtd (aget bootRTDs name)]
+              (when (== rtd nil)
+                (panic (+ "scm aot: no record type of psyntax's named " name)))
+              (aset objs i (addr (lit Record :RTD rtd :F (make (slice any) (.-N rtd))))))))))
+    (range [i xs parts]
+      (switch (.-Name ((inst As (* Symbol)) (aget xs 0)))
+        (case ["p"]
+          (let [p ((inst As (* Pair)) (aget objs i))]
+            (set! (.-Car p) (aget objs (lateIx (aget xs 1))))
+            (set! (.-Cdr p) (aget objs (lateIx (aget xs 2))))))
+        (case ["v"]
+          (let [v ((inst As (* Vector)) (aget objs i))]
+            (range [j _ (.-V v)]
+              (aset (.-V v) j (aget objs (lateIx (aget xs (+ j 2))))))))
+        (case ["r"]
+          (let [r ((inst As (* Record)) (aget objs i))]
+            (range [j _ (.-F r)]
+              (aset (.-F r) j (aget objs (lateIx (aget xs (+ j 2))))))))))
+    (range [_ x roots]
+      (let [p ((inst As (* Pair)) x)]
+        (aset K (lateIx (.-Car p)) (aget objs (lateIx (.-Cdr p))))))))
 
 (go/func TruncText "TruncText is s cut to n characters.\n" ^string [^string s ^int n]
   (let [rs (conv (slice rune) s)]
@@ -494,7 +710,16 @@ a gensym by its name and uid; budget bounds the walk (a cyclic constant is refus
     (.WriteString (addr b) "\n :consts [")
     (range [_ c (.-consts u)]
       (.WriteString (addr b) (+ (cljQuote c) "\n")))
-    (.WriteString (addr b) "]\n :forms [")
+    (.WriteString (addr b) "]\n")
+    (when (!= (.-info u) "")
+      (.WriteString (addr b) (+ " :info " (.-info u) "\n"))
+      (.WriteString (addr b) " :visit [")
+      (range [_ f (.-visit u)]
+        (.WriteString (addr b) (+ f "\n")))
+      (.WriteString (addr b) "]\n"))
+    (when (> (len (.-gnodes u)) 0)
+      (.WriteString (addr b) (+ " :late " (cljQuote (.lateText u)) "\n")))
+    (.WriteString (addr b) " :forms [")
     (range [_ f forms]
       (.WriteString (addr b) (+ f "\n")))
     (.WriteString (addr b) "]}\n")
@@ -514,10 +739,30 @@ primitives resolved as the evaluator resolves them then): the unit :psyntax.\n"
   ^string [^{:tag (* M)} m ^{:tag (slice any)} forms]
   (let [u (newAotUnit m)
         ^{:tag (slice string)} out nil]
+    (BootBegin)
     (range [_ f forms]
       (set! out (append out (.dumpForm u f)))
       (.Eval m f))
+    (BootEnd)
     (.unitText u "psyntax" "psyntax" out)))
+
+;; SCS30: the data psyntax's install-library takes of a library, as one list: id name version imp* vis* inv* subst env visible?
+;; (the dependencies as specs: id name version)
+(go/func libSpec ^any [^any l]
+  (let [rec ((inst As (* Record)) l)]
+    (List (aget (.-F rec) 0) (aget (.-F rec) 1) (aget (.-F rec) 2))))
+
+(go/func libSpecs ^any [^any ls]
+  (let [(values xs _) (ListSlice ls)
+        ^{:tag (slice any)} out nil]
+    (range [_ x xs]
+      (set! out (append out (libSpec x))))
+    (ListTail out Null)))
+
+(go/func libInfo ^any [^{:tag (* Record)} rec]
+  (let [f (.-F rec)]
+    (List (aget f 0) (aget f 1) (aget f 2) (libSpecs (aget f 3)) (libSpecs (aget f 4)) (libSpecs (aget f 5))
+          (aget f 6) (aget f 7) (aget f 14))))
 
 (go/method DumpProgram
   "DumpProgram expands the top-level program forms by psyntax as RunProgram does and dumps, instead of
@@ -541,6 +786,15 @@ library after those it invokes) and the program's core form: one unit each.\n"
                    (when (!= (aget (.-F rec) 15) (conv any false))
                      (let [u (newAotUnit m)
                            f (.dumpForm u (aget (.-F rec) 11))]
+                       ;; SCS30 (SC94 (b)): the library as psyntax installs it, and its visit code (its macros' transformers)
+                       (let [r0 (.-refused u)]
+                         (set! (.-visit u) (lit (slice string) (.dumpForm u (aget (.-F rec) 10))))
+                         (set! (.-info u) (strconv/Itoa (.konst u (libInfo rec))))
+                         ;; a library the install would newly refuse is compiled as before, not installed
+                         (when (and (== r0 "") (!= (.-refused u) ""))
+                           (set! (.-refused u) "")
+                           (set! (.-info u) "")
+                           (set! (.-visit u) nil)))
                        (.WriteString (addr b) (.unitText u "library" (WriteValue (aget (.-F rec) 1) false) (lit (slice string) f))))))))
     (range [_ l libs]
       (walk l))

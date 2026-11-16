@@ -457,3 +457,5 @@ for linux/amd64 and 46 s for linux/arm64 (2026-10-08), 10 to 11 s after. `--make
 - **gc's own nondeterminism** under equal positions (above) is avoided by the layout, not
   excluded in general: a difference that comes and goes between two runs of the same comparison
   would be gc's.
+
+**The negative controls** (doc/GATE-SURVEY.md, GTS88 (b), 2026-11-07): `test/repr/go/roundtrip-controls.txt`, lines `package|test|text SUBJECT REFERENCE`: the candidate of one entry judged against the original of another, by gocmp at the tree level (`package`, `test`; `bin/lib/repr-go/check --controls`) or byte for byte (`text`), which must fail; a control that passes fails the run. `test/repr/go/controls-test.bash` proves the wiring on a few files.

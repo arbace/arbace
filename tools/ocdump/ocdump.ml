@@ -855,7 +855,8 @@ let () =
       ("-rectypes", Arg.Set Clflags.recursive_types, " types, lambda: as ocamlc -rectypes");
       ("-no-strict-formats", Arg.Clear Clflags.strict_formats, " types, lambda: as ocamlc -no-strict-formats");
       ("-strict-formats", Arg.Set Clflags.strict_formats, " types, lambda: as ocamlc -strict-formats");
-      ("-g", Arg.Set Clflags.debug, " types, lambda: as ocamlc -g") ]
+      ("-g", Arg.Set Clflags.debug, " types, lambda: as ocamlc -g");
+      ("-safer-matching", Arg.Set Clflags.safer_matching, " lambda: as ocamlc -safer-matching (OT9's third fix)") ]
     (fun f -> file := Some f)
     "ocdump [options] [FILE]";
   let src, path =

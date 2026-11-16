@@ -1,0 +1,55 @@
+;; Go-build variant of com.sun.crypto.provider.KeyProtector (J2G-SPEC §4.6;
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, F2, "As built: F2 (write-ahead)"): read by j2g only.
+;; jdk26u's recover (its key spec's clearing) read SharedSecrets' JavaSecuritySpecAccess from F1's
+;; jdk.internal.jrt.CryptoAccess (java-jc9-jca), which EncodedKeySpec's static initializer sets; the
+;; variant reads it from jrt's holder instead. The replacing members are jdk26u's (baf63fb;
+;; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md) as
+;; repr/java converts them, with the change named; the rest Copyright (c) the Arbace authors;
+;; Eclipse Public License 1.0.
+(in-ns 'com.sun.crypto.provider)
+
+(j2g/variant KeyProtector
+  (method recover :throws [UnrecoverableKeyException NoSuchAlgorithmException] ^Key [this
+                                                                                     ^EncryptedPrivateKeyInfo encrInfo]
+    (let [^:mutable ^byte/1 plain nil
+          ^:mutable ^SecretKey sKey nil]
+      (try
+        (let [encrAlg (.toString (.getOID (.getAlgorithm encrInfo)))]
+          (when (and (not (.equals encrAlg (.value KnownOIDs/JAVASOFT_JCEKeyProtector)))
+                     (not (.equals encrAlg (.value KnownOIDs/JAVASOFT_JDKKeyProtector))))
+            (throw (UnrecoverableKeyException. "Unsupported encryption algorithm")))
+          (if (.equals encrAlg (.value KnownOIDs/JAVASOFT_JDKKeyProtector))
+              (set! plain (.recover this (.getEncryptedData encrInfo)))
+              (let [encodedParams (.getEncodedParams (.getAlgorithm encrInfo))]
+                (when (nil? encodedParams) (throw (IOException. "Missing PBE parameters")))
+                (let [pbeParams (AlgorithmParameters/getInstance "PBE")]
+                  (.init pbeParams encodedParams)
+                  (let [pbeSpec (cast PBEParameterSpec
+                                      (.getParameterSpec pbeParams PBEParameterSpec))]
+                    (when (> (.getIterationCount pbeSpec) MAX_ITERATION_COUNT)
+                      (throw (IOException. "PBE iteration count too large")))
+                    (let [pbeKeySpec (PBEKeySpec. (.-password this))]
+                      (set! sKey (PBEKey. pbeKeySpec "PBEWithMD5AndTripleDES"))
+                      (.clearPassword pbeKeySpec)
+                      (let [^:mutable ^PBEWithMD5AndTripleDESCipher cipher nil]
+                        (set! cipher (PBEWithMD5AndTripleDESCipher.))
+                        (.engineInit cipher Cipher/DECRYPT_MODE sKey pbeSpec nil)
+                        (set! plain
+                              (.engineDoFinal cipher
+                                              (.getEncryptedData encrInfo)
+                                              0
+                                              (alength (.getEncryptedData encrInfo))))))))))
+          (let [privateKeyInfo (PrivateKeyInfo. plain)
+                spec (PKCS8EncodedKeySpec. plain)
+                oidName (.getName (AlgorithmId. (.getOID (.getAlgorithm privateKeyInfo))))]
+            (try
+              (let [kFac (KeyFactory/getInstance oidName)] (.generatePrivate kFac spec))
+              (finally
+                (.clear privateKeyInfo)
+                (.clearEncodedKeySpec (jdk.internal.jrt.CryptoAccess/javaSecuritySpecAccess) spec)))))
+        (catch NoSuchAlgorithmException ex (throw ex))
+        (catch [IOException GeneralSecurityException] e
+          (throw (UnrecoverableKeyException. (.getMessage e))))
+        (finally
+          (when (some? plain) (Arrays/fill plain (unchecked-byte 0x00)))
+          (when (some? sKey) (try (.destroy sKey) (catch DestroyFailedException e))))))))

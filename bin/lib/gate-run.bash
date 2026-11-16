@@ -9,7 +9,10 @@
 #   step NAME HEAVY CMD  one step, logged, timed, measured (GT1); a heavy one under GATE_HEAVY_CMD
 #   record_pass, load_plan, run_one, report, pre_step, run_chain, chains_of, names_of
 #   inputs_unchanged NAME  the plan's file, pin and logic lines hashed again before a pass is recorded
-#   gate_prune [--dry-run]  the store and the executables trimmed (GTS27 (a))
+#   gate_prune [--dry-run] [--cheap] [--worktrees]  the store and the executables trimmed (GTS27 (a)); since GD4 every
+#                        cache of test/gate/caches.edn by its rule (GDS17 (a)); --cheap its cheap rules alone (a gate's start,
+#                        a step that finds the disk below the floor); --worktrees the merged and idle worktrees listed
+#   disk_admit NAME      GD4 (GDS12 (a)): the disk floor before a step (deferred below it), enospc NAME after it
 #   gate_audit [STEP...] the strace audit of the declared inputs (GT4)
 #   audit_reducer DIR, audit_reduce FIFO, audit_compare NAME STATUS
 #                        the audit's reducer and comparison; with audit_all set (bin/gate --clean, GT7)
@@ -29,6 +32,14 @@
 # HEAVY_LOCK_WAITS). A caller that holds the lock already (flock .tmp/big.lock bin/gate) sets
 # GATE_HEAVY_CMD=env: then ARBACE_HEAVY_HELD=1 for every step, nothing locks again.
 #
+# The memory lanes (GTS227 (a), "As built: GTS227 (a)"): with GATE_LANES=1 (bin/gate --full [--clean] --concurrent)
+# every step of the plan runs under bin/gate-lane in place of GATE_HEAVY_CMD, admitted by its declared :mem-gib
+# (run_one's step_lane) and its index in the plan (ordix), ARBACE_HEAVY_HELD=1 inside (the run holds the big lock);
+# the admission's state and events in LOGS/lanes/. With GATE_LANES=free (bin/gate without --concurrent: the essential
+# memory lane, doc/GATE-SURVEY.md, "As built: the essential memory lane") every step of the plan is admitted by bin/gate-lane's
+# free mode (its :mem-gib against MemAvailable) before GATE_HEAVY_CMD, which a :heavy true step still takes; report flags a
+# peak over the declaration.
+
 # Outputs (GT5): a step with :outputs writes into GATE_OUT (.tmp/gate/out/NAME), kept with its pass
 # (STORE/NAME/KEY.out) and put back when it is skipped; a step whose :uses name them reads them under
 # GATE_OUTS, their digests in its key: known at the plan when the producers are skipped, else computed
@@ -67,6 +78,12 @@ gate_env() {
   # Java's check's cache of read forms, shared by the worktrees (GT5: keyed by the sources, the options,
   # the reader's sources and the tool's key), so that a level that runs where the read was skipped finds it
   export GATE_JAVA_FORMS=${GATE_JAVA_FORMS:-$main/.tmp/java-check/forms}
+  # GD4 (GDS12 (a), doc/GATE-DIET-SURVEY.md, "As built: GD4"): the disk is the gate's: every tool's own guard (cppi's, rsi's:
+  # bin/gate-policy disk-ok) yields under ARBACE_DISK_POLICY=gate, the runner's floor before each step deciding instead
+  export ARBACE_DISK_POLICY=gate
+  # GD4 (GDS17 (a)): Go's build cache is held to its size by the caches' table (gate_cache_cap), so bin/lib/gocache.bash's trim
+  # in the builds keeps Go's own five days (7200 minutes) in place of its 90-minute wipe, which started every night cold
+  export ARBACE_GOCACHE_KEEP_MIN=${ARBACE_GOCACHE_KEEP_MIN:-7200}
 }
 
 gate_gcc_id() {  # the :gcc host's identity: gcc's --version line, its driver's, cc1's and the C checks' headers' SHA-256; none without gcc
@@ -151,15 +168,19 @@ sampler() {
   while :; do
     t=$(date +%s) steps=
     for f in "$logs"/*.pid; do [ -f "$f" ] && steps="$steps $(basename "$f" .pid):$(cat "$f" 2>"$logs/sampler.err")"; done
-    awk -v t="$t" -v gate="$$" -v steps="$steps" '
-      FILENAME == "/proc/meminfo" { if ($1 == "MemAvailable:") print t "\tMemAvailable\t" $2; next }
-      FNR == 1 { s = $0; i = index(s, ")"); while ((j = index(substr(s, i + 1), ")")) > 0) i += j
+    # (through cat: busybox awk stops at a file it cannot open, and a process may end between the glob and its read,
+    # which lost the whole sample)
+    { cat /proc/meminfo; cat /proc/[0-9]*/stat; } 2>>"$logs/sampler.err" | awk -v t="$t" -v gate="$$" -v steps="$steps" '
+      $1 ~ /:$/ { if ($1 == "MemAvailable:") print t "\tMemAvailable\t" $2; next }
+      { s = $0; i = index(s, ")"); while ((j = index(substr(s, i + 1), ")")) > 0) i += j
                  pid = $1; n = split(substr(s, i + 2), f, " "); ppid[pid] = f[2]; rss[pid] = f[22] * 4
                  kids[f[2]] = kids[f[2]] " " pid }
       function tree(p,   k, a, n, sum) { sum = rss[p]; n = split(kids[p], a, " "); for (k = 1; k <= n; k++) sum += tree(a[k]); return sum }
       END { print t "\tgate\t" tree(gate)
             n = split(steps, st, " "); for (k = 1; k <= n; k++) { split(st[k], q, ":"); if (q[2] in rss) print t "\t" q[1] "\t" tree(q[2]) } }
-    ' /proc/meminfo /proc/[0-9]*/stat >> "$logs/mem.tsv" 2>>"$logs/sampler.err"
+    ' >> "$logs/mem.tsv" 2>>"$logs/sampler.err"
+    # GD4 (GDS12 (a)): the free disk too (KiB, the checkout's file system), DiskAvail beside MemAvailable
+    printf '%s\tDiskAvail\t%s\n' "$t" "$(disk_free_kib)" >> "$logs/mem.tsv" 2>>"$logs/sampler.err"
     sleep 5
   done
 }
@@ -169,6 +190,22 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
   [ "$hv" = yes ] || hv=
   rm -f "${logs:?}/${name:?}.start" "${logs:?}/${name:?}.waits"
   [ -n "$hv" ] && read -r -a pre <<< "$GATE_HEAVY_CMD"
+  # GTS227 (a), the memory lanes (GATE_LANES=1: bin/gate --full --concurrent, --full --clean --concurrent): every step of
+  # the plan (run_one's step_lane, its declared :mem-gib) admitted by bin/gate-lane, by its declared memory and its place
+  # in the plan, in place of the heavy lock; the run holds the host's big lock as a whole, so its tools take none
+  # (ARBACE_HEAVY_HELD=1: the admission is the step's, :inner ones too)
+  if [ "${GATE_LANES:-}" = free ] && [ -n "${step_lane:-}" ]; then
+    # the essential memory lane (GATE_LANES=free: bin/gate without --concurrent, GATE_MEM_LANE=0 not): admitted against
+    # the host's free memory first (bin/gate-lane's free mode), then the heavy lock as before (a :heavy true step's
+    # GATE_HEAVY_CMD, its FIFO; an :inner step's tools lock their heavy process), the lane's wait in NAME.lane-wait
+    rm -f "${logs:?}/${name:?}.lane-wait"
+    pre=(env GATE_LANE_MODE=free GATE_LANE_DIR="$logs/lanes" GATE_LANE_STEP="$name" GATE_LANE_GIB="$step_lane"
+         GATE_LANE_ORDER="${ordix[$name]:-0}" GATE_LANE_WAITS="$logs/$name.lane-wait" "$root/bin/gate-lane" ${pre[@]+"${pre[@]}"})
+  elif [ -n "${GATE_LANES:-}" ] && [ -n "${step_lane:-}" ]; then
+    pre=(env GATE_LANE_DIR="$logs/lanes" GATE_LANE_STEP="$name" GATE_LANE_GIB="$step_lane" GATE_LANE_ORDER="${ordix[$name]:-0}"
+         "$root/bin/gate-lane")
+    hv=yes
+  fi
   # GT7: the step's own run under the audit (audit_step, bin/gate --clean): strace into a FIFO its
   # reducer reads at once (NAME.paths), the namespaces loaded in NAME.loaded; the programs' CPU times
   # (GTS33 (a), bin/lib/limit.bash) in NAME.cpu.tsv
@@ -184,7 +221,7 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
   [ -n "${GATE_CPU_LOG:-}" ] && { rm -f "${logs:?}/$name.cpu.tsv"; ae+=(ARBACE_CPU_LOG="$logs/$name.cpu.tsv"); }
   # the lock first, then the clock: the start file is written once the step holds the lock
   "${pre[@]}" bash -c 'date +%s > "$1"; shift; exec "$@"' gate-step "$logs/$name.start" \
-    env -u GATE_AUDITED ${hv:+ARBACE_HEAVY_HELD=1} HEAVY_LOCK_WAITS="$logs/$name.waits" ${ae[@]+"${ae[@]}"} ${tr[@]+"${tr[@]}"} \
+    env -u GATE_AUDITED ${GATE_STEP_MEM_GIB:+GATE_STEP_MEM_GIB=$GATE_STEP_MEM_GIB} ${hv:+ARBACE_HEAVY_HELD=1} HEAVY_LOCK_WAITS="$logs/$name.waits" ${ae[@]+"${ae[@]}"} ${tr[@]+"${tr[@]}"} \
     /usr/bin/time -v -o "$logs/$name.time" "$@" > "$logs/$name.log" 2>&1 &
   pid=$!
   echo "$pid" > "$logs/$name.pid"
@@ -201,10 +238,12 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
   cpu=$(awk -F': ' '/User time|System time/ {s += $2} END {printf "%.1f", s}' "$logs/$name.time" 2>"$logs/$name.time.err")
   rss=$(awk -F': ' '/Maximum resident set size/ {print $2}' "$logs/$name.time" 2>"$logs/$name.time.err")
   tree=$(awk -F'\t' -v n="$name" '$2 == n && $3 > m {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/$name.time.err")
-  local iw=0
+  local iw=0 fso
   [ -f "$logs/$name.waits" ] && iw=$(awk '{s += $1} END {print s + 0}' "$logs/$name.waits")
-  printf '{:step "%s" :wall-s %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s :wait-s %s :inner-wait-s %s}\n' \
-    "$name" "$(cat "$logs/$name.secs")" "${cpu:-0}" "${rss:-0}" "${tree:-0}" "$(cat "$logs/$name.wait")" "$iw" > "$logs/$name.mem"
+  # GD4 (GDS16 rule 3): time's "File system outputs" (512-byte blocks), kept as :fs-out-kib, the material of a :disk-gib
+  fso=$(awk -F': ' '/File system outputs/ {print int($2 / 2)}' "$logs/$name.time" 2>"$logs/$name.time.err")
+  printf '{:step "%s" :wall-s %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s :wait-s %s :inner-wait-s %s :fs-out-kib %s}\n' \
+    "$name" "$(cat "$logs/$name.secs")" "${cpu:-0}" "${rss:-0}" "${tree:-0}" "$(cat "$logs/$name.wait")" "$iw" "${fso:-0}" > "$logs/$name.mem"
   return $st
 }
 mem_of() {  # mem_of NAME FIELD: a number of NAME.mem
@@ -285,19 +324,21 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
 }
 
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
-# SUMMARY-N SUMMARY-RE WHY AUDIT-CMD OUTPUTS USES KIND CMD
+# SUMMARY-N SUMMARY-RE WHY AUDIT-CMD OUTPUTS USES KIND DECLARED DISK CMD (GD4: MEM the admission, the declaration or 1.1 x the
+# recorded peak when larger, GDS13 (a); DECLARED the table's :mem-gib; DISK its :disk-gib, GDS12 (a))
 order=()
-declare -A dec key phase chain needs after heavy memgib budget sum_n sum_re why acmd outputs uses kind cmd
-load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan: the order anew)
-  local n d k p c ne a hv mg bu sn sre w ac ou us ki cm
+declare -A dec key phase chain needs after heavy memgib declgib diskgib budget sum_n sum_re why acmd outputs uses kind cmd ordix
+load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan: the order anew; ordix, a step's index in it)
+  local n d k p c ne a hv mg bu sn sre w ac ou us ki dm dg cm
   order=()
-  while IFS=$'\t' read -r n d k p c ne a hv mg bu sn sre w ac ou us ki cm; do
+  while IFS=$'\t' read -r n d k p c ne a hv mg bu sn sre w ac ou us ki dm dg cm; do
+    ordix[$n]=${#order[@]}
     order+=("$n"); dec[$n]=$d key[$n]=$k phase[$n]=$p chain[$n]=$c needs[$n]=${ne//,/ } after[$n]=$a
     heavy[$n]=$hv memgib[$n]=$mg budget[$n]=$bu sum_n[$n]=$sn sum_re[$n]=$sre why[$n]=$w acmd[$n]=$ac
-    outputs[$n]=$ou uses[$n]=${us//,/ } kind[$n]=$ki cmd[$n]=$cm
+    outputs[$n]=$ou uses[$n]=${us//,/ } kind[$n]=$ki declgib[$n]=$dm diskgib[$n]=$dg cmd[$n]=$cm
   done < "$logs/plan.tsv"
 }
-ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip) return 0 ;; esac; return 1; }
+ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip|absent) return 0 ;; esac; return 1; }
 # out_sha PATH: an output's digest, as gate.plan's out-digest: a file's SHA-256; a directory's, the
 # SHA-256 of sha256sum's lines of its files in order; missing
 out_sha() {
@@ -331,9 +372,20 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
           rotation_note "$n" skip
           echo skip > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
     none) echo none > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
+    # the oracle tier (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a)): a step whose toolchain this host lacks
+    absent) echo absent > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
   esac
+  local nw
   for x in ${needs[$n]}; do
     [ "$x" = - ] && continue
+    # GTS-A: a needed step of another runner (a chain beside this one) not done yet is waited for
+    nw=$(need_wait "$n" "$x")
+    [ -z "$nw" ] || { echo "notrun $x: $nw" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
+    # GD4 (GDS12 (a)): a step whose need was deferred for the disk is deferred with it (retried with it), not failed (after
+    # GTS-A's wait, so that a need of another chain is judged once it is done)
+    if [ "$(cat "$logs/$x.status" 2>"$logs/$n.need.err")" = deferred ]; then
+      echo "its need $x was deferred" > "$logs/$n.deferred"; echo deferred > "$logs/$n.status"; touch "$logs/$n.done"; return 1
+    fi
     ok_status "$x" || { echo "notrun $x" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
   done
   if [ "${dec[$n]}" = after ]; then
@@ -352,17 +404,31 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
   fi
   local attempt aud= hv=${heavy[$n]}
   [ -n "${audit_all:-}" ] && aud=1
+  # GD4 (GDS12 (a)): the disk floor first (a step below it waits, then is deferred: no run, no failure, retried at the end)
+  disk_admit "$n" || { echo deferred > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
+  gate_cache_cap
   # GTS57 (a): a build kept at its key (a few seconds) takes no lock and queues for none
   if [ "${kind[$n]}" = build ] && [ "$hv" = yes ] && build_cached "$n"; then hv=cached; fi
   for attempt in 1 2 3; do
     if [ "${outputs[$n]}" = yes ]; then rm -rf "${logs:?}/out/$n"; mkdir -p "$logs/out/$n"; fi
-    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out GATE_LIST=$logs/rotation/$n.list GATE_USES="${uses[$n]}" step "$n" "$hv" bash -c "${cmd[$n]}"; st=$?
+    # GATE_FAIL_LINES (review 181 L3): a file the step's judge writes every failure line into, in its log's format (the
+    # log shows the first 40), which rotation_note and judge_note read with the log
+    rm -f "${logs:?}/$n.fail-lines"
+    # GD4 (GDS13 (a)): the admission (MEM, the plan's: the declaration or 1.1 x the recorded peak) handed to the tools as
+    # GATE_STEP_MEM_GIB, from which their GOMEMLIMIT defaults are capped (bin/gate-policy mem); unset for an undeclared,
+    # unrecorded step (the runner's 1 GiB is the lane's, no tool's limit)
+    gsm=; [ "${memgib[$n]:--}" = - ] || gsm=${memgib[$n]}
+    GATE_STEP_MEM_GIB=$gsm step_lane=$( [ "$hv" = cached ] || { m=${memgib[$n]:--}; [ "$m" = - ] && m=1; echo "$m"; } ) \
+    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out GATE_LIST=$logs/rotation/$n.list GATE_USES="${uses[$n]}" GATE_FAIL_LINES=$logs/$n.fail-lines step "$n" "$hv" bash -c "${cmd[$n]}"; st=$?
     # GT4: strace -f aborts (ptrace(PTRACE_LISTEN): I/O error) when a traced process dies in a group
     # stop; an aborted trace is no audit and its run no run: again, twice at most
     [ -n "$aud" ] && grep -q '^strace: ptrace' "$logs/$n.log" || break
     echo "$attempt" > "$logs/$n.audit-aborts"
     cp "$logs/$n.log" "$logs/$n.log.aborted$attempt"
   done
+  # GD4 (GDS12 (a)): a step whose log or outputs say "No space left on device" fails (a full disk's corrupt saves are no
+  # pass), whatever its status; NAME.enospc names where
+  if enospc "$n" && [ $st = 0 ]; then st=28; echo $st > "$logs/$n.status"; fi
   [ -n "$aud" ] && audit_compare "$n" "$st"
   if [ $st = 0 ]; then rotation_note "$n" pass; else rotation_note "$n" fail; judge_note "$n"; fi
   if [ $st = 0 ] && [ "${dec[$n]}" = run ]; then
@@ -399,6 +465,7 @@ rotation_note_locked() {
   as=$(awk -F'\t' '$1 == "failed-as" {print $2}' "$r"); as=${as:-\\1}
   # a judge's failure (judge_note): its log and its own expressions
   [ -z "${4:-}" ] || { re=$4 as=$5; }
+  [ -n "${3:-}" ] || lg=$(fail_source "$n")
   rn=$(awk -F'\t' '$1 == "runs" {print $2}' "$r"); rn=${rn:-$n}
   now=$(date +%s)
   sq=$(( $(cat "$rd/.seq" 2>"$logs/$n.rot.err" || echo 0) + 1 )); echo "$sq" > "$rd/.seq"
@@ -419,6 +486,16 @@ rotation_note_locked() {
   fi
   return 0
 }
+# fail_source NAME: the file a step's failure lines are read from: its log, and when its judge wrote GATE_FAIL_LINES
+# (every failure line, where the log prints the first 40: review 181 L3, a mass regression's files all join the subset
+# at once) the two together, LOGS/NAME.fail-all
+fail_source() {
+  if [ -s "$logs/$1.fail-lines" ]; then
+    cat "$logs/$1.log" "$logs/$1.fail-lines" > "$logs/$1.fail-all" 2>"$logs/$1.fail-all.err"; echo "$logs/$1.fail-all"
+  else
+    echo "$logs/$1.log"
+  fi
+}
 # judge_note NAME (GT8, doc/GATE-SURVEY.md, "As built: GT8 (the tools' lists)"): a failed judge of rotated checks
 # (a step whose :judges {:failed-re ERE :failed-as REPL} the planner wrote as LOGS/rotation/NAME.judges, its :uses'
 # rotated producers): each producer whose list has an id its log's failure lines name is noted as failed with them
@@ -429,10 +506,11 @@ judge_note() {
   [ -f "$j" ] && [ -f "$logs/$n.log" ] || return 0
   re=$(awk -F'\t' '$1 == "failed-re" {print $2}' "$j") as=$(awk -F'\t' '$1 == "failed-as" {print $2}' "$j"); as=${as:-\\1}
   [ -n "$re" ] || return 0
+  local src; src=$(fail_source "$n")
   for p in $(awk -F'\t' '$1 == "producer" {print $2}' "$j"); do
     [ -f "$logs/rotation/$p.rot" ] || continue
-    sed -nE "s"$'\001'"$re"$'\001'"$as"$'\001''p' "$logs/$n.log" | grep -qFxf "$logs/rotation/$p.list" || continue
-    rotation_note "$p" fail "$logs/$n.log" "$re" "$as"
+    sed -nE "s"$'\001'"$re"$'\001'"$as"$'\001''p' "$src" | grep -qFxf "$logs/rotation/$p.list" || continue
+    rotation_note "$p" fail "$src" "$re" "$as"
     echo "   $n: failed ids of $p's list noted as its failure (judge_note)" >> "$logs/$n.log"
   done
   return 0
@@ -447,15 +525,32 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
   case $st in
     skip) echo "   skipped  $n (${why[$n]})"; return ;;
     none) echo "   -  $n (not needed: no step that runs needs it)"; return ;;
+    absent) echo "   absent  $n (${why[$n]})"; return ;;
+    # GD4 (GDS12 (a)): deferred for the disk: not a failure; bin/gate retries it at the end, and a run left with one is incomplete
+    deferred) echo "   deferred  $n ($(cat "$logs/$n.deferred" 2>"$logs/count.err"))"; return ;;
+    notrun*:*) echo "   FAILED  $n (not run: needs ${st#notrun })"; status=1; return ;;
     notrun*) echo "   FAILED  $n (not run: ${st#notrun } did not pass)"; status=1; return ;;
   esac
   s=$(cat "$logs/$n.secs"); w=$(mmss "$s")
   local c; c=$(mem_of "$n" cpu-s); c=${c%.*}
   w="$w, cpu $(mmss "${c:-0}"), peak $(gib "$(mem_of "$n" maxrss-kib)") (tree $(gib "$(mem_of "$n" tree-peak-kib)"))"
   wt=$(cat "$logs/$n.wait" 2>"$logs/count.err"); wt=${wt:-0}
+  # the essential memory lane: the wait for room in it (NAME.lane-wait, bin/gate-lane's), the rest the lock's
+  local lw; lw=$(cat "$logs/$n.lane-wait" 2>"$logs/count.err"); lw=${lw:-0}
+  [ "$lw" -ge 5 ] && w="$w, waited $(mmss "$lw") for room in the memory lane"
+  wt=$(( wt - lw ))
   [ "$wt" -ge 5 ] && w="$w, waited $(mmss "$wt") for the lock"
   wt=$(mem_of "$n" inner-wait-s); wt=${wt:-0}
   [ "$wt" -ge 5 ] && w="$w, its tools waited $(mmss "$wt") for the lock"
+  # the essential memory lane: a peak (the larger of the largest process's and the tree's) over the step's declared
+  # :mem-gib by test/gate/lanes.ae's mem-check margin (10% and 0.5 GiB) flagged, never failed (bin/gate --mem-check
+  # and gate-tests' lanes-test hold the declarations to the recorded peaks)
+  local mg=${memgib[$n]:--} pk
+  if [ "$mg" != - ]; then
+    pk=$(mem_of "$n" maxrss-kib); local tp; tp=$(mem_of "$n" tree-peak-kib)
+    awk -v a="${pk:-0}" -v b="${tp:-0}" -v d="$mg" 'BEGIN {p = (a > b ? a : b) / 1048576; exit !(p > d * 1.1 + 0.5)}' \
+      && w="$w; OVER ITS DECLARED :mem-gib $mg"
+  fi
   # GT6, GTS17 (a): a budget is a warning (three times the longest of its last passes), never a kill
   b=${budget[$n]:--}
   if [ "$b" != - ] && [ "$s" -gt "$b" ]; then w="$w; OVER ITS BUDGET of $(mmss "$b")"; fi
@@ -467,10 +562,12 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
       *) au=", AUDIT $(cat "$logs/$n.audit-status") ($logs/$n.audit)"; status=1 ;;
     esac
   fi
+  local ns=
+  [ -f "$logs/$n.enospc" ] && ns="; NO SPACE LEFT ON DEVICE in $(cat "$logs/$n.enospc"): no pass recorded"
   if [ "$st" = 0 ]; then
     echo "   ok  $n ($w$au)"
   else
-    echo "   FAILED  $n ($w$au; log $logs/$n.log)"; status=1
+    echo "   FAILED  $n ($w$au$ns; log $logs/$n.log)"; status=1
   fi
   [ -f "$logs/$n.audit-status" ] && [ "$(cat "$logs/$n.audit-status")" != ok ] && [ "$st" = 0 ] \
     && grep -A8 '^UNDECLARED' "$logs/$n.audit" | sed 's/^/     /' 
@@ -483,16 +580,100 @@ pre_step() {  # pre_step NAME REGEX LINES CMD...: before the plan, one after the
     tail -20 "$logs/$name.log"; echo "== gate FAILED ($(secs "$start"))"; exit 1
   fi
 }
-run_chain() {  # run_chain PHASE CHAIN: its steps one after the other (after its :start-after)
-  local n first=1
-  for n in "${order[@]}"; do
-    [ "${phase[$n]}" = "$1" ] && [ "${chain[$n]}" = "$2" ] || continue
-    if [ -n "$first" ] && [ "${after[$n]}" != - ]; then
-      while [ ! -f "$logs/${after[$n]}.done" ]; do sleep 5; done
-    fi
-    first=
-    run_one "$n"
+chain_steps() {  # chain_steps PHASE CHAIN: its steps in the plan's order
+  local n
+  for n in "${order[@]}"; do [ "${phase[$n]}" = "$1" ] && [ "${chain[$n]}" = "$2" ] && echo "$n"; done
+  return 0
+}
+queue_chains() {  # queue_chains PHASE: every chain's queue written (queue_write) before any of them starts (GTS-A)
+  local c
+  for c in $(chains_of "$1"); do queue_write "$1.$c" $(chain_steps "$1" "$c"); done
+}
+run_chain() {  # run_chain PHASE CHAIN: its steps one after the other (after its :start-after), a runner PHASE.CHAIN
+  local q=()
+  q=($(chain_steps "$1" "$2"))
+  [ ${#q[@]} -gt 0 ] || return 0
+  if [ "${after[${q[0]}]}" != - ]; then
+    while [ ! -f "$logs/${after[${q[0]}]}.done" ]; do sleep 5; done
+  fi
+  run_queue "$1.$2" "${q[@]}"
+}
+# The runners (GTS-A, doc/GATE-SURVEY.md, "As built: GTS-A"): run_queue ID STEP... runs its steps one after the other
+# as the runner ID, its queue in LOGS/runners/ID.queue (a step a line) and its end in ID.end. A step whose :needs names a
+# step of another runner not done yet waits for it (need_wait: its .done), the wait in ID.waits ("STEP NEEDED"); it fails
+# at once, as before, on a needed step in no runner's queue (a step of an earlier phase is done, of a later one never
+# started) or later in its own runner's queue, and while it waits on a needed step whose runner ended without it (never
+# started) or on a cycle of waits (its needed step's runner waits, through others, on this runner). Outside a runner
+# (the builds, the oracle tier's loop) every need is decided at once, as before
+# (queue_write ID STEP...: the queue alone, written before the runners start, so that no runner looks for a step of a
+# runner not yet started; bin/gate writes them all, queue_chains, before it starts any)
+queue_write() {
+  local id=$1; shift
+  mkdir -p "$logs/runners"
+  rm -f "$logs/runners/$id.end" "$logs/runners/$id.waits" "$logs/runners/$id.pid"
+  printf '%s\n' "$@" > "$logs/runners/$id.queue.tmp" && mv -f "$logs/runners/$id.queue.tmp" "$logs/runners/$id.queue"
+}
+run_queue() {  # run_queue ID STEP...
+  local gate_runner=$1 n; shift
+  queue_write "$gate_runner" "$@"
+  echo "$BASHPID" > "$logs/runners/$gate_runner.pid"
+  for n in "$@"; do run_one "$n"; done
+  touch "$logs/runners/$gate_runner.end"
+}
+runner_of() {  # runner_of STEP: the runner whose queue holds it (none: nothing)
+  local f
+  for f in "$logs"/runners/*.queue; do
+    [ -f "$f" ] && grep -qxF "$1" "$f" && { f=${f##*/}; echo "${f%.queue}"; return 0; }
   done
+  return 0
+}
+# need_wait STEP NEEDED: waits for NEEDED when it is another runner's and not done; prints why it will not be (a cycle,
+# its runner ended, later in this runner's own queue), else nothing
+need_wait() {
+  local n=$1 x=$2 r
+  [ -f "$logs/$x.done" ] && return 0
+  [ -n "${gate_runner:-}" ] || return 0
+  # GATE_NEED_WAIT=0: no wait, every need decided at once (before GTS-A; its test's demonstration of the old failure)
+  [ "${GATE_NEED_WAIT:-1}" = 0 ] && return 0
+  r=$(runner_of "$x")
+  [ -n "$r" ] || return 0
+  [ "$r" = "$gate_runner" ] && { echo "later in its own chain ($r): never run before $n"; return 0; }
+  echo "$n $x" > "$logs/runners/$gate_runner.waits"
+  echo "   $n waits for $x (runner $r)" >> "$logs/runners/waits.log"
+  local why=
+  while [ ! -f "$logs/$x.done" ]; do
+    if [ -f "$logs/runners/$r.end" ]; then
+      [ -f "$logs/$x.done" ] || why="never run: its chain ($r) ended without it"; break
+    fi
+    # a runner that started and is gone without its end (killed): its step will never run
+    local rp; rp=$(cat "$logs/runners/$r.pid" 2>"$logs/runners/pid.err")
+    if [ -n "$rp" ] && ! kill -0 "$rp" 2>"$logs/runners/pid.err" && [ ! -f "$logs/runners/$r.end" ] && [ ! -f "$logs/$x.done" ]; then
+      why="never run: its chain's runner ($r, PID $rp) is gone"; break
+    fi
+    why=$(need_cycle "$x" "$n -> $x")
+    [ -n "$why" ] && break
+    sleep "${GATE_NEED_POLL:-5}"
+  done
+  rm -f "$logs/runners/$gate_runner.waits"
+  [ -z "$why" ] || echo "$why"
+}
+# need_cycle NEEDED PATH: a cycle of waits back to this runner (gate_runner): NEEDED's runner waits on a step whose
+# runner waits ... on a step of this runner's queue not done (the steps of a runner run in order, so a step not done
+# in a waiting runner's queue is after its waiting step). Prints "a cycle of waits: PATH", else nothing
+need_cycle() {
+  local cur=$1 path=$2 r m y i=0
+  while [ $i -le 64 ]; do
+    i=$((i + 1))
+    [ -f "$logs/$cur.done" ] && return 0
+    r=$(runner_of "$cur")
+    [ -n "$r" ] || return 0
+    [ "$r" = "$gate_runner" ] && { echo "a cycle of waits: $path"; return 0; }
+    [ -f "$logs/runners/$r.waits" ] || return 0
+    read -r m y < "$logs/runners/$r.waits" 2>"$logs/runners/cycle.err" || return 0
+    [ -n "$y" ] || return 0
+    path="$path (in $r, waiting at $m) -> $y" cur=$y
+  done
+  return 0
 }
 chains_of() {  # chains_of PHASE: its chains, in the order of their first step
   local n seen=" "
@@ -503,11 +684,90 @@ chains_of() {  # chains_of PHASE: its chains, in the order of their first step
 }
 names_of() { local n; for n in "${order[@]}"; do [ "${phase[$n]}" = "$1" ] && echo "$n"; done; }
 
+# ---- GD4 (doc/GATE-DIET-SURVEY.md, GDS12 (a), "As built: GD4"): the gate's disk policy
+# disk_free_kib: the free KiB of the checkout's file system (GATE_DISK_FREE_FILE: a file holding the number, the gate's own
+# tests, with a store of their own)
+disk_free_kib() {
+  if [ -n "${GATE_DISK_FREE_FILE:-}" ] && [ -n "${ARBACE_GATE_STORE:-}" ]; then cat "$GATE_DISK_FREE_FILE"; return; fi
+  df -Pk "$root" 2>"$logs/df.err" | awk 'NR == 2 {print $4 + 0}'
+}
+# disk_admit NAME: 0 when the free disk holds the step's :disk-gib (DISK, the plan's) plus the floor GATE_DISK_FLOOR (GiB,
+# default 25). Below it: the prune's cheap rules once a low spell (gate_prune --cheap, LOGS/disk.log), then a wait for the
+# disk to come back, GATE_DISK_WAIT seconds (default 1800) shared by the run's steps from the spell's start (LOGS/disk.low-since:
+# a later step waits only what is left, so a night of low disk defers its steps at once and does not wait 30 minutes each),
+# polled every GATE_DISK_POLL (30); then 1, NAME.deferred saying why. GATE_DISK_FLOOR=0 and no :disk-gib: never deferred
+disk_admit() {
+  local n=$1 need free since now f=${GATE_DISK_FLOOR:-25} d=${diskgib[$1]:--} w=${GATE_DISK_WAIT:-1800}
+  [ "$d" = - ] && d=0
+  need=$(awk -v f="$f" -v d="$d" 'BEGIN {printf "%d", (f + d) * 1048576}')
+  [ "$need" -gt 0 ] || return 0
+  free=$(disk_free_kib); free=${free:-0}
+  if [ "$free" -ge "$need" ]; then rm -f "${logs:?}/disk.low-since"; return 0; fi
+  if [ ! -f "$logs/disk.low-since" ]; then
+    date +%s > "$logs/disk.low-since"
+    echo "$(date -u +%T) $n: $(gib "$free") free, below $(gib "$need") (the floor $f GiB + its :disk-gib $d): the cheap prune" >> "$logs/disk.log"
+    gate_prune --cheap >> "$logs/disk.log" 2>&1
+  fi
+  since=$(cat "$logs/disk.low-since" 2>"$logs/df.err"); since=${since:-$(date +%s)}
+  while :; do
+    free=$(disk_free_kib); free=${free:-0}
+    if [ "$free" -ge "$need" ]; then rm -f "${logs:?}/disk.low-since"; echo "$(date -u +%T) $n: the disk back ($(gib "$free") free)" >> "$logs/disk.log"; return 0; fi
+    now=$(date +%s)
+    [ $(( now - since )) -lt "$w" ] || break
+    sleep "${GATE_DISK_POLL:-30}"
+  done
+  echo "the disk: $(gib "$free") free, below the floor $f GiB + its :disk-gib $d (waited from $(date -u -d "@$since" +%T), GATE_DISK_WAIT $w s)" > "$logs/$n.deferred"
+  echo "$(date -u +%T) $n: deferred" >> "$logs/disk.log"
+  return 1
+}
+# enospc NAME: 0 (and NAME.enospc naming where) when the step's log, its failure lines or its outputs (GATE_OUT: the saves) say
+# "No space left on device", the message of ENOSPC (a full disk, or ext4's full directory index: night 12's 208,000 entries)
+enospc() {
+  local n=$1 f w=
+  rm -f "${logs:?}/$n.enospc"
+  for f in "$logs/$n.log" "$logs/$n.fail-lines"; do
+    [ -f "$f" ] && grep -qsF 'No space left on device' "$f" && w="$w ${f##*/}"
+  done
+  [ -d "$logs/out/$n" ] && grep -rqsIF 'No space left on device' "$logs/out/$n" && w="$w its outputs"
+  [ -n "$w" ] || return 1
+  echo "${w# }" > "$logs/$n.enospc"
+}
+# disk_retry: the steps deferred for the disk run again, in the plan's order, once the run's chains are done (the night's
+# slack), each admitted without a wait (the floor checked once); prints their reports. A step deferred again stays deferred
+disk_retry() {
+  local n any=
+  for n in "${order[@]}"; do [ "$(cat "$logs/$n.status" 2>"$logs/count.err")" = deferred ] && any=1; done
+  [ -n "$any" ] || return 0
+  echo "   the steps deferred for the disk, again ($(gib "$(disk_free_kib)") free):"
+  for n in "${order[@]}"; do
+    [ "$(cat "$logs/$n.status" 2>"$logs/count.err")" = deferred ] || continue
+    rm -f "${logs:?}/$n.done" "${logs:?}/$n.status" "${logs:?}/$n.deferred"
+    rm -f "${logs:?}/disk.low-since"
+    GATE_DISK_WAIT=0 run_one "$n"; report "$n"
+  done
+}
+# deferred_count: the steps left deferred
+deferred_count() {
+  local n c=0
+  for n in "${order[@]}"; do [ "$(cat "$logs/$n.status" 2>"$logs/count.err")" = deferred ] && c=$((c + 1)); done
+  echo "$c"
+}
+
 # GTS27 (a): per step the last ARBACE_GATE_KEEP (5) passes and every pass younger than
 # ARBACE_GATE_KEEP_DAYS (30) kept, the rest removed (a pass is KEY.edn, KEY.log, KEY.inputs); the
 # executables' directories (the gate's, javac's, the cover builds', GT8.3) older than a day but the newest 3 of each removed; a
 # KEY.log, KEY.inputs or KEY.out with no KEY.edn, and a temporary, removed once older than a day
-gate_prune() {  # gate_prune [--dry-run]
+gate_prune() {  # gate_prune [--dry-run] [--cheap] [--worktrees]
+  local o dry= cheap= wts=
+  for o in "$@"; do case $o in --dry-run) dry=--dry-run ;; --cheap) cheap=1 ;; --worktrees) wts=1 ;; esac; done
+  # GD4 (GDS17 (a)): --cheap, the table's cheap rules alone (seconds: Go's caches by size, TMPDIR by age)
+  if [ -n "$cheap" ]; then caches_prune "$dry" cheap; return 0; fi
+  gate_prune_store $dry
+  caches_prune "$dry" all
+  [ -z "$wts" ] || worktrees_list
+  return 0
+}
+gate_prune_store() {  # gate_prune_store [--dry-run]: GTS27 (a)'s store and executables, ci's runtime (the table's :builtin rows)
   local dry= keep=${ARBACE_GATE_KEEP:-5} days=${ARBACE_GATE_KEEP_DAYS:-30} d n f k i pat npass=0 nkeep=0 freed=0 sz b now
   local norphan=0 old
   now=$(date +%s)
@@ -516,6 +776,8 @@ gate_prune() {  # gate_prune [--dry-run]
   for d in "$store"/*/; do
     [ -d "$d" ] || continue
     n=$(basename "$d"); i=0
+    # the rotation's record is no step's passes: its .seq and .lock are never temporaries (review 181 L7)
+    [ "$n" = _rotation ] && continue
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       i=$((i + 1)); npass=$((npass + 1)); k=${f%.edn}
@@ -540,6 +802,7 @@ gate_prune() {  # gate_prune [--dry-run]
     done <<< "$(ls "$d" | sed -nE 's/^([0-9a-f]+)\.(log|inputs|out)$/\1/p' | sort -u)"
     [ -n "$dry" ] || find "$d" -maxdepth 1 -name '.*' -mmin +1440 -exec rm -rf {} + 2>"$store/.prune.err"
   done
+  rotation_prune "$now" "$days" "$dry"
   echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes), $norphan left without a record ${dry:+would be }removed in $store"
   for pat in gate javac cover; do
     i=0
@@ -561,6 +824,186 @@ gate_prune() {  # gate_prune [--dry-run]
       [ -n "$dry" ] || rm -rf "${f:?}"
     done <<< "$(ls -dt "$exes"/* 2>"$store/.prune.err")"
   done
+  # ci's prebuilt runtime (doc/C23-SURVEY.md, "As built: ci's prebuilt runtime", CS272 (a)): the checkout's cache of
+  # fragments, a directory per library and key (NAME-KEY); per library the newest 3 kept, an older one removed when a day old
+  local rtc=${CI_RUNTIME:-$root/.tmp/ci-runtime} lib
+  if [ -d "$rtc" ]; then
+    for lib in $(ls "$rtc" | sed -n 's/^\(.*\)-[0-9a-f]\{64\}$/\1/p' | sort -u); do
+      i=0
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        i=$((i + 1)); [ $i -gt 3 ] || continue
+        [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] || continue
+        echo "gate --prune: ${dry:+would remove }ci's runtime $f"
+        [ -n "$dry" ] || rm -rf "${f:?}"
+      done <<< "$(ls -dt "$rtc/$lib"-* 2>"$store/.prune.err")"
+    done
+  fi
+}
+
+# ---- GD4 (doc/GATE-DIET-SURVEY.md, GDS17 (a), GDS18 (a), "As built: GD4"): the caches' table, test/gate/caches.edn
+# (GATE_CACHES another, "none" no table: the gate's own tests), one entry a line (the format caches_rows reads, held by
+# test/gate/caches-test.bash): :path, where it is (:where :checkout, this checkout's; :main, the main checkout's, shared by
+# the worktrees; :home, under HOME; {gocache}: Go's build cache, go env GOCACHE), its :owner, its :rule:
+#   [:size GIB :lru]   the files of the directory, the least recently used first (their mtime: Go refreshes an entry it
+#                      uses, hourly), removed until it holds GIB at most
+#   [:age DAYS]        the files not modified for DAYS days removed ([:age DAYS :atime]: not read: relatime's atime), then the
+#                      empty directories
+#   [:key-gen N]       the directory's children named by a key (:match, an ERE, default 16 to 64 hex digits): the newest N kept
+#                      by mtime, an older one removed when a day old
+#   [:count N]         the newest N children kept, an older one removed when a day old
+#   [:age-self DAYS]   the path itself removed when its own mtime is DAYS days old (the gate's tests' scratch)
+#   :builtin           gate_prune_store's own rule (the store, the executables, ci's runtime)
+#   :keep              never removed (the clean runs' logs, the oracles' packs, locks), its tool's own eviction
+#   :list              listed by --prune, never removed (the main session's: keep/, the worktrees)
+# :cheap true: also by --cheap (a gate's start, a step below the disk floor); :max-entries N: a directory (any under :path)
+# holding more entries is a warning of --prune (ext4's index filled at 208,000 in night 12); :shared true: content-keyed,
+# one copy at the main checkout's .tmp/shared for every worktree at the same key (bin/lib/ci/musl's forms)
+caches_rows() {  # caches_rows TABLE: PATH WHERE RULE A1 A2 MATCH CHEAP MAXENT, a line each (TSV)
+  awk '
+    /^[ \t]*;/ { next }
+    /:path "/ {
+      l = $0; sub(/;.*$/, "", l)
+      p = l; sub(/.*:path "/, "", p); sub(/".*/, "", p)
+      w = "checkout"; if (match(l, /:where :[a-z]+/)) w = substr(l, RSTART + 8, RLENGTH - 8)
+      r = "keep"; a1 = "-"; a2 = "-"
+      if (match(l, /:rule \[[^]]*\]/)) {
+        v = substr(l, RSTART + 7, RLENGTH - 8); n = split(v, f, /[ \t]+/)
+        r = f[1]; sub(/^:/, "", r); if (n >= 2) a1 = f[2]; if (n >= 3) { a2 = f[3]; sub(/^:/, "", a2) }
+      } else if (match(l, /:rule :[a-z-]+/)) r = substr(l, RSTART + 7, RLENGTH - 7)
+      m = "-"; if (match(l, /:match "[^"]*"/)) m = substr(l, RSTART + 8, RLENGTH - 9)
+      c = (l ~ /:cheap true/) ? "cheap" : "-"
+      x = "-"; if (match(l, /:max-entries [0-9]+/)) x = substr(l, RSTART + 13, RLENGTH - 13)
+      print p "\t" w "\t" r "\t" a1 "\t" a2 "\t" m "\t" c "\t" x
+    }' "$1"
+}
+caches_base() {  # caches_base WHERE PATH: the path on disk
+  local w=$1 p=$2
+  case $p in
+    '{gocache}') if [ -n "${GATE_CACHES_GOCACHE:-}" ]; then echo "$GATE_CACHES_GOCACHE"; else "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOCACHE 2>"$TMPDIR/caches-go.err"; fi; return ;;
+  esac
+  case $w in
+    main) echo "${GATE_CACHES_MAIN:-$(arbace_main_checkout "$root")}/$p" ;;
+    home) echo "${GATE_CACHES_HOME:-$HOME}/${p#\~/}" ;;
+    *) echo "${GATE_CACHES_ROOT:-$root}/$p" ;;
+  esac
+}
+caches_prune() {  # caches_prune DRY(--dry-run or "") all|cheap
+  local tab=${GATE_CACHES:-$root/test/gate/caches.edn} dry=$1 which=$2 p w r a1 a2 m c x base now n freed tot=0 rm=0 warn=0 g
+  [ "$tab" = none ] && return 0
+  [ -f "$tab" ] || { echo "gate --prune: no table $tab"; return 0; }
+  now=$(date +%s)
+  local lst=$TMPDIR/caches-prune.$$
+  caches_rows "$tab" > "$lst.rows"
+  while IFS=$'\t' read -r p w r a1 a2 m c x; do
+    [ "$which" = cheap ] && [ "$c" != cheap ] && continue
+    for base in $(caches_base "$w" "$p"); do
+      [ -e "$base" ] || continue
+      : > "$lst"
+      case $r in
+        size)
+          # the least recently used files first, until the directory holds A1 GiB
+          find "$base" -type f -printf '%T@\t%s\t%p\n' 2>"$lst.err" | sort -n \
+            | awk -F'\t' -v cap="$a1" '{ f[NR] = $3; s[NR] = $2; t += $2 } END { lim = cap * 1073741824; for (i = 1; i <= NR && t > lim; i++) { print s[i] "\t" f[i]; t -= s[i] } }' > "$lst" ;;
+        age)
+          if [ "$a2" = atime ]; then find "$base" -type f -atime +"$a1" -printf '%s\t%p\n' 2>"$lst.err" > "$lst"
+          else find "$base" -type f -mtime +"$a1" -printf '%s\t%p\n' 2>"$lst.err" > "$lst"; fi ;;
+        age-self)
+          # the path itself (a test's scratch directory), when nothing in it changed for A1 days (its own mtime)
+          [ $(( now - $(stat -c %Y "$base") )) -ge $(( a1 * 86400 )) ] && printf '%s\t%s\n' "$(du -sb "$base" 2>"$lst.err" | cut -f1)" "$base" > "$lst" ;;
+        key-gen|count)
+          [ -d "$base" ] || continue
+          g=$m; [ "$g" = - ] && { [ "$r" = key-gen ] && g='^[0-9a-f]{16,64}$' || g='.'; }
+          ls -t "$base" 2>"$lst.err" | grep -E "$g" | tail -n +$((a1 + 1)) | while IFS= read -r n; do
+            [ $(( now - $(stat -c %Y "$base/$n") )) -ge 86400 ] || continue
+            printf '%s\t%s\n' "$(du -sb "$base/$n" 2>"$lst.err" | cut -f1)" "$base/$n"
+          done > "$lst" ;;
+      esac
+      if [ -s "$lst" ]; then
+        freed=$(awk -F'\t' '{s += $1} END {print s + 0}' "$lst"); n=$(wc -l < "$lst")
+        tot=$((tot + freed)); rm=$((rm + n))
+        echo "gate --prune: ${dry:+would remove }$n entries of $base (its rule $r $a1$( [ "$a2" = - ] || echo " $a2"): $(gib $((freed / 1024))))"
+        [ -n "$dry" ] || { cut -f2- "$lst" | xargs -r -d '\n' rm -rf --; [ "$r" = age ] && find "$base" -mindepth 1 -type d -empty -delete 2>"$lst.err"; }
+      fi
+      if [ "$x" != - ] && [ -d "$base" ]; then
+        # GDS17 (a): no directory above :max-entries (night 12: ext4's directory index full at 208,000 entries)
+        # (one pass: each entry's parent counted)
+        find "$base" -mindepth 1 -printf '%h\n' 2>"$lst.err" | sort | uniq -c | awk -v x="$x" '$1 > x {n = $1; sub(/^ *[0-9]+ /, ""); print n "\t" $0}' > "$lst.big"
+        while IFS=$'\t' read -r n g; do
+          echo "gate --prune: WARNING: $g holds $n entries, more than its :max-entries $x (test/gate/caches.edn)"; warn=$((warn + 1))
+        done < "$lst.big"
+      fi
+    done
+  done < "$lst.rows"
+  rm -f "$lst" "$lst.rows" "$lst.err" "$lst.big"
+  echo "gate --prune: the caches' table ($which): $rm entries ${dry:+would be }removed ($(gib $((tot / 1024)))), $warn over their :max-entries"
+  [ "$which" = all ] && caches_unlisted "$tab"
+  return 0
+}
+caches_unlisted() {  # caches_unlisted TABLE: this checkout's .tmp entries no row of the table names (listed, never removed)
+  local tab=$1 base=${GATE_CACHES_ROOT:-$root}/.tmp e un=() k
+  [ -d "$base" ] || return 0
+  caches_rows "$tab" | awk -F'\t' '$2 == "checkout" || $2 == "main" {p = $1; if (p ~ /^\.tmp\//) { sub(/^\.tmp\//, "", p); sub(/\/.*/, "", p); print p }}' | sort -u > "$TMPDIR/caches-names.$$"
+  for e in "$base"/* "$base"/.[!.]*; do
+    [ -e "$e" ] || continue
+    k=${e##*/}
+    awk -v k="$k" 'BEGIN { st = 1 } { g = $0; gsub(/\./, "\\.", g); gsub(/\*/, ".*", g); if (k ~ ("^" g "$")) st = 0 } END { exit st }' "$TMPDIR/caches-names.$$" || un+=("$k")
+  done
+  rm -f "$TMPDIR/caches-names.$$"
+  [ ${#un[@]} -eq 0 ] && return 0
+  echo "gate --prune: ${#un[@]} entries of $base the table does not name (scratch: listed, the main session removes them): $(printf '%s ' "${un[@]:0:30}")$( [ ${#un[@]} -gt 30 ] && echo "...")"
+}
+# worktrees_list (GDS18 (a)): the main checkout's worktrees whose branch is merged into GATE_PRUNE_MERGED (default mac/next,
+# else next) and idle for a day (their index and HEAD untouched): listed with their size class, never removed
+worktrees_list() {
+  local m into w b idle now t n=0
+  m=${GATE_CACHES_MAIN:-$(arbace_main_checkout "$root")}
+  into=${GATE_PRUNE_MERGED:-mac/next}
+  git -C "$m" rev-parse -q --verify "$into" > "$TMPDIR/wt.rev" 2>&1 || into=next
+  now=$(date +%s)
+  git -C "$m" for-each-ref --merged "$into" --format='%(refname:short)' refs/heads > "$TMPDIR/wt.merged" 2>"$TMPDIR/wt.err" || return 0
+  for w in "$m"/.tmp/worktrees/*/; do
+    w=${w%/}; [ -e "$w/.git" ] || continue
+    b=$(git -C "$w" symbolic-ref -q --short HEAD 2>"$TMPDIR/wt.err") || continue
+    grep -qxF "$b" "$TMPDIR/wt.merged" || continue
+    t=$(stat -c %Y "$(git -C "$w" rev-parse --git-path index)" 2>"$TMPDIR/wt.err" || echo "$now")
+    idle=$(( (now - t) / 3600 ))
+    [ "$idle" -ge 24 ] || continue
+    n=$((n + 1))
+    echo "gate --prune --worktrees: $w ($b, merged into $into, idle ${idle} h): the main session removes it once its report is read"
+  done
+  echo "gate --prune --worktrees: $n worktrees merged into $into and idle for a day"
+}
+# gate_cache_cap: the table's cheap rules before a step, at most every GATE_CACHE_CAP_EVERY seconds (300) and by one step at a
+# time (flock -n: a concurrent step skips it): Go's build cache held to its size between the night's builds, not a 90-minute wipe
+gate_cache_cap() {
+  local st=$logs/cache-cap.at now
+  now=$(date +%s)
+  [ $(( now - $(cat "$st" 2>"$logs/count.err" || echo 0) )) -ge "${GATE_CACHE_CAP_EVERY:-300}" ] || return 0
+  { flock -n 9 || return 0; echo "$now" > "$st"; caches_prune "" cheap >> "$logs/cache-cap.log" 2>&1; } 9>>"$logs/cache-cap.lock"
+}
+
+# rotation_prune NOW DAYS [DRY] (review 181 L7): each rotated check's runs, STORE/_rotation/NAME.runs, trimmed to the last
+# ARBACE_GATE_KEEP_RUNS (50) lines and every line younger than DAYS (its EPOCH), under the store's lock (the runner
+# appends to them under it). The period the record is judged over (7 days) is shorter than DAYS, and a slice whose
+# every run is older reads as never run, which the night's choice ranks with the oldest: no decision moves. The failed
+# files' events (NAME.PART.failed) are kept: a failure stands until a later event clears it
+rotation_prune() {
+  local now=$1 days=$2 dry=$3 rd=$store/_rotation keep=${ARBACE_GATE_KEEP_RUNS:-50} f nl kept tot=0 cut=0
+  [ -d "$rd" ] || return 0
+  for f in "$rd"/*.runs; do
+    [ -f "$f" ] || continue
+    nl=$(wc -l < "$f")
+    kept=$(awk -F'\t' -v n="$nl" -v k="$keep" -v since=$(( now - days * 86400 )) 'NR > n - k || $1 >= since' "$f" | wc -l)
+    tot=$((tot + nl)); [ "$kept" -lt "$nl" ] || continue
+    cut=$((cut + nl - kept))
+    echo "gate --prune: ${dry:+would trim }_rotation/${f##*/} ($nl runs, $kept kept)"
+    [ -n "$dry" ] && continue
+    { flock 9 && nl=$(wc -l < "$f") \
+        && awk -F'\t' -v n="$nl" -v k="$keep" -v since=$(( now - days * 86400 )) 'NR > n - k || $1 >= since' "$f" > "$f.tmp.$$" \
+        && mv -f "$f.tmp.$$" "$f"; } 9>>"$rd/.lock"
+  done
+  echo "gate --prune: $tot rotation runs, $cut ${dry:+would be }trimmed in $rd"
 }
 
 # the audit's reducer (GT5, GTS30 (a)): tools/gateaudit, the Go port of test/gate/audit.awk (23 times

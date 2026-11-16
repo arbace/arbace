@@ -32,21 +32,35 @@ function emit(op, path, pid,   k) {
 # the path argument of CALL's text ARGS: [dirfd, ] "path"; returns "" without one. dirfd: AT_FDCWD
 # (the process's directory), N<dir> (-y), or a bare N (a descriptor strace could not name)
 function target(args, pid, haspathfirst,   m, base, q) {
+  trel = 0
   if (haspathfirst) {
-    if (match(args, /^"([^"\\]|\\.)*"/)) return resolve(unq(substr(args, 2, RLENGTH - 2)), cwd[pid])
+    if (match(args, /^"([^"\\]|\\.)*"/)) { q = unq(substr(args, 2, RLENGTH - 2)); trel = (substr(q, 1, 1) != "/"); return resolve(q, cwd[pid]) }
     return ""
   }
   base = cwd[pid]
   if (match(args, /^AT_FDCWD<[^>]*>, /)) {
     m = substr(args, 1, RLENGTH); sub(/^AT_FDCWD</, "", m); sub(/>, $/, "", m); base = m
     args = substr(args, RLENGTH + 1)
-  } else if (match(args, /^AT_FDCWD, /)) args = substr(args, RLENGTH + 1)
+  } else if (match(args, /^AT_FDCWD, /)) { args = substr(args, RLENGTH + 1); trel = 1 }
   else if (match(args, /^[0-9]+<[^>]*>, /)) {
     m = substr(args, 1, RLENGTH); sub(/^[0-9]+</, "", m); sub(/>, $/, "", m); base = m
     args = substr(args, RLENGTH + 1)
   } else if (match(args, /^[0-9]+, /)) { return "" }
-  if (match(args, /^"([^"\\]|\\.)*"/)) return resolve(unq(substr(args, 2, RLENGTH - 2)), base)
+  if (match(args, /^"([^"\\]|\\.)*"/)) {
+    q = unq(substr(args, 2, RLENGTH - 2)); if (substr(q, 1, 1) == "/") trel = 0
+    return resolve(q, base)
+  }
+  trel = 0
   return ""
+}
+# the path of a call by a process not yet born (its first lines printed before its parent's clone result: its
+# directory is not known yet), relative to that directory: the opened file's own path when the result names it
+# (-y: "= N</abs/path>"), else P as resolved against the checkout's root (review: night 5's gate-tests flake, a
+# fabricated tree's go/arbace/goi/ops.ae opened by bare name and resolved against the root)
+function early(p, pid, args,   m) {
+  if (!trel || !(pid in unborn) || (pid in cdAt)) return p
+  if (match(args, /\) += [0-9]+<\/[^>]*>$/)) { m = substr(args, RSTART, RLENGTH); sub(/^[^<]*</, "", m); sub(/>$/, "", m); return norm(m) }
+  return p
 }
 function resolve(p, base) {
   if (substr(p, 1, 1) == "/") return norm(p)
@@ -69,6 +83,7 @@ function opfor(call, args, flags) {
 # thread's first call, or a vfork child's execve, ahead of it). Lines of an earlier life of a reused PID (strace -qq
 # hides the exits, and PIDs wrap) are older than the clone call and give way (review 081, N1)
 function birth(child, parent) {
+  delete unborn[child]
   if (!(cdAt[child] > cloneAt[parent])) cwd[child] = cwd[parent]
   if (!(exAt[child] > cloneAt[parent])) exe[child] = exe[parent]
 }
@@ -82,7 +97,7 @@ BEGIN { cwd[0] = root }
   # thread's first call, which strace can print before its parent's clone result; it carries no path and says
   # nothing about the process, so it is no bookkeeping (review 080, finding 1)
   if (line ~ /^(<\.\.\. )?rt_sigprocmask[( ]/) next
-  if (!(pid in cwd)) cwd[pid] = root
+  if (!(pid in cwd)) { cwd[pid] = root; if (NR > 1) unborn[pid] = 1 }
   alive[pid] = 1
   # a call resumed: only clone's result matters (its path arguments came in the unfinished line)
   if (match(line, /^<\.\.\. [a-z_0-9]+ resumed>/)) {
@@ -122,13 +137,13 @@ BEGIN { cwd[0] = root }
   # the calls whose first argument is the path
   if (call ~ /^(open|creat|stat|lstat|access|readlink|unlink|rmdir|mkdir|chmod|chown|lchown|truncate|utimes|rename|link|symlink|mknod|setxattr|lsetxattr|removexattr|lremovexattr|getxattr|lgetxattr|listxattr|llistxattr|statfs|utime)$/) {
     p = target(args, pid, 1)
-    if (p != "") emit(opfor(call, args, args), p, pid)
+    if (p != "") emit(opfor(call, args, args), early(p, pid, args), pid)
     next
   }
   # the calls with a directory descriptor first
   if (call ~ /^(openat|openat2|newfstatat|fstatat64|statx|faccessat|faccessat2|readlinkat|unlinkat|mkdirat|renameat|renameat2|linkat|symlinkat|fchmodat|fchmodat2|fchownat|utimensat|futimesat|mknodat)$/) {
     p = target(args, pid, 0)
-    if (p != "") emit(opfor(call, args, args), p, pid)
+    if (p != "") emit(opfor(call, args, args), early(p, pid, args), pid)
     next
   }
 }

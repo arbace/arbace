@@ -1,0 +1,793 @@
+(in-ns 'go.arbace.wai) (go/file "simd.go" :imports [
+
+
+    ^{:line 4} [binary "encoding/binary"]
+    ^{:line 5} [math "math"]
+    ^{:line 6} [bits "math/bits"]
+    ^{:line 7} [strings "strings"]])
+
+
+;; SIMD128 and relaxed SIMD (doc/wasm/WAI.md §4): a v128 is a V (bytes 0-7 in L, 8-15 in H), each lane operation written out over
+;; its 16 bytes; the relaxed operations take the reference interpreter's choices (interpreter/exec/eval_vec.ml at wg-3.0: swizzle,
+;; trunc_sat, fused madd, bitselect, min and max, q15mulr_sat_s, the signed dot products).
+
+(go/type v128 (array 16 byte))
+
+^{:go/end 20} (go/func vb [^V v] :results [^v128 b]
+  (.PutUint64 binary/LittleEndian (subslice b _ 8) (.-L v))
+  (.PutUint64 binary/LittleEndian (subslice b 8) (.-H v))
+  (return))
+
+
+^{:go/end 24} (go/func bv ^V [^v128 b]
+  (lit V :L (.Uint64 binary/LittleEndian (subslice b _ 8)) :H (.Uint64 binary/LittleEndian (subslice b 8))))
+
+
+^{:go/end 36} (go/method get ^uint64 [^{:tag (* v128)} b ^int w ^int i]
+  (switch w
+    (case [1]
+      (return (conv uint64 (aget b i))))
+    (case [2]
+      (return (conv uint64 (.Uint16 binary/LittleEndian (subslice b (* 2 i))))))
+    (case [4]
+      (return (conv uint64 (.Uint32 binary/LittleEndian (subslice b (* 4 i)))))))
+
+  (.Uint64 binary/LittleEndian (subslice b (* 8 i))))
+
+
+^{:go/end 49} (go/method set [^{:tag (* v128)} b ^int w ^int i ^uint64 x]
+  (switch w
+    (case [1]
+      (aset b i (conv byte x)))
+    (case [2]
+      (.PutUint16 binary/LittleEndian (subslice b (* 2 i)) (conv uint16 x)))
+    (case [4]
+      (.PutUint32 binary/LittleEndian (subslice b (* 4 i)) (conv uint32 x)))
+    (default
+      (.PutUint64 binary/LittleEndian (subslice b (* 8 i)) x))))
+
+
+
+^{:go/end 54} (go/func sext ^int64 [^uint64 x ^int w]
+  (let [s (conv uint (- 64 (* 8 w)))]
+    (>> (conv int64 (<< x s)) s)))
+
+
+^{:go/end 61} (go/func mask ^uint64 [^int w]
+  (when (== w 8)
+    (return math/MaxUint64))
+
+  (- ^uint64 (<< 1 (conv uint (* 8 w))) 1))
+
+
+^{:go/end 72} (go/func satS ^uint64 [^int64 x ^int w]
+  (let [(values lo hi) (values (<< (- (conv int64 1)) (conv uint (- (* 8 w) 1))) (- (<< (conv int64 1) (conv uint (- (* 8 w) 1))) 1))]
+    (when (< x lo)
+      (set! x lo))
+
+    (when (> x hi)
+      (set! x hi))
+
+    (bit-and (conv uint64 x) (mask w))))
+
+
+^{:go/end 82} (go/func satU ^uint64 [^int64 x ^int w]
+  (when (< x 0)
+    (set! x 0))
+
+  (when [hi (conv int64 (mask w))] (> x hi)
+    (set! x hi))
+
+  (conv uint64 x))
+
+
+(go/type simdFn (func [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp] [int]))
+
+(go/var simdFns (lit (map uint16 simdFn)))
+
+(go/var shapes (lit (map string (array 2 int)) ["i8x16" (lit _ 1 16)] ["i16x8" (lit _ 2 8)] ["i32x4" (lit _ 4 4)] ["i64x2" (lit _ 8 2)] ["f32x4" (lit _ 4 4)] ["f64x2" (lit _ 8 2)]))
+
+^{:go/end 103} (go/func init []
+  (for [op 1] (< op opTableEnd) (inc! op)
+    (when (!= (.-prefix (aget opInfos op)) 0xfd)
+      (continue))
+
+    (let [name (.-name (aget opInfos op))
+        (values fn pop push) (simdBuild name)]
+      (when (== fn nil)
+        (continue))
+
+      (aset simdFns (conv uint16 op) fn)
+      (set! (values (aget effPop op) (aget effPush op)) (values (conv int8 pop) (conv int8 push))))))
+
+
+
+^{:go/end 110} (go/func un [^{:tag (func [^v128 a] [v128])} f] :results [simdFn int int]
+  ^{:go/breaks [2]} (return ^{:go/end 109} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+      (aset st (- sp 1) (bv (f (vb (aget st (- sp 1))))))
+      ^{:line 108} sp)
+    1 1))
+
+
+^{:go/end 117} (go/func bin [^{:tag (func [^v128 a ^v128 b] [v128])} f] :results [simdFn int int]
+  ^{:go/breaks [2]} (return ^{:go/end 116} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+      (aset st (- sp 2) (bv (f (vb (aget st (- sp 2))) (vb (aget st (- sp 1))))))
+      (- sp 1))
+    2 1))
+
+
+^{:go/end 124} (go/func tern [^{:tag (func [^v128 a ^v128 b ^v128 c] [v128])} f] :results [simdFn int int]
+  ^{:go/breaks [2]} (return ^{:go/end 123} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+      (aset st (- sp 3) (bv (f (vb (aget st (- sp 3))) (vb (aget st (- sp 2))) (vb (aget st (- sp 1))))))
+      (- sp 2))
+    3 1))
+
+
+^{:go/end 133} (go/func lanewise1 ^{:tag (func [^v128 a] [v128])} [^int w ^int n ^{:tag (func [^uint64 x] [uint64])} f]
+  ^{:go/end 132} (fn [^v128 a] :results [^v128 r]
+    (for [i 0] (< i n) (inc! i)
+      (.set r w i (bit-and (f (.get a w i)) (mask w))))
+
+    (return)))
+
+
+
+^{:go/end 142} (go/func lanewise2 ^{:tag (func [^v128 a ^v128 b] [v128])} [^int w ^int n ^{:tag (func [^uint64 x ^uint64 y] [uint64])} f]
+  ^{:go/end 141} (fn [^v128 a ^v128 b] :results [^v128 r]
+    (for [i 0] (< i n) (inc! i)
+      (.set r w i (bit-and (f (.get a w i) (.get b w i)) (mask w))))
+
+    (return)))
+
+
+
+^{:go/breaks [[4 148]] :go/end 149} (go/func cmpMask ^uint64 [^bool c]
+  (when c
+    (return math/MaxUint64))
+
+  0)
+
+
+
+^{:go/end 157} (go/func fbin "float lanes: the scalar ops on bits\n" ^{:tag (func [^uint64 x ^uint64 y] [uint64])} [^int w ^{:tag (func [^uint32 a ^uint32 b] [V])} f32 ^{:tag (func [^uint64 a ^uint64 b] [V])} f64]
+  (when (== w 4)
+    (return ^{:go/end 154} (fn ^uint64 [^uint64 x ^uint64 y] (.-L (f32 (conv uint32 x) (conv uint32 y))))))
+
+  ^{:go/end 156} (fn ^uint64 [^uint64 x ^uint64 y] (.-L (f64 x y))))
+
+
+^{:go/end 159} (go/func fl32 ^float32 [^uint64 x] (math/Float32frombits (conv uint32 x)))
+^{:go/end 160} (go/func fl64 ^float64 [^uint64 x] (math/Float64frombits x))
+
+^{:go/end 419} (go/func simdBuild [^string name] :results [simdFn int int]
+  (let [dot (strings/IndexByte name \.)
+      (values sh s) (values (subslice name _ dot) (subslice name (+ dot 1)))
+      ^{:line 165} wn (aget shapes sh)
+      (values w n) (values (aget wn 0) (aget wn 1))
+      ^{:line 167} isF (== (aget sh 0) \f)]
+    (switch
+      (case [(and (== sh "v128") (== s "const"))]
+        ^{:go/breaks [2]} (return ^{:go/end 173} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (aset st sp (bv (aget (.-V128s code) (.-A in))))
+            (+ sp 1))
+          0 1))
+      (case [(or (and (== sh "v128") (strings/HasPrefix s "load")) (and (== sh "v128") (strings/HasPrefix s "store")))]
+        (return (simdMem s)))
+      (case [(== s "shuffle")]
+        ^{:go/breaks [2]} (return ^{:go/end 190} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [(values a b) (values (vb (aget st (- sp 2))) (vb (aget st (- sp 1))))
+                ^{:line 179} ix (aget (.-V128s code) (.-A in))
+                ^{:line 180 :tag v128} r (zero v128)]
+              (for [i 0] (< i 16) (inc! i)
+                (if (< (aget ix i) 16)
+                  (aset r i (aget a (aget ix i)))
+
+                  (aset r i (aget b (- (aget ix i) 16)))))
+
+
+              (aset st (- sp 2) (bv r))
+              (- sp 1)))
+          2 1))
+      (case [(or (== s "swizzle") (== s "relaxed_swizzle"))]
+        (return (bin ^{:go/end 199} (fn [^v128 a ^v128 b] :results [^v128 r]
+              (for [i 0] (< i 16) (inc! i)
+                (when (< (aget b i) 16)
+                  (aset r i (aget a (aget b i)))))
+
+
+              (return)))))
+
+      (case [(== s "splat")]
+        ^{:go/breaks [2]} (return ^{:go/end 208} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [^v128 r (zero v128)]
+              (for [i 0] (< i n) (inc! i)
+                (.set r w i (.-L (aget st (- sp 1)))))
+
+              (aset st (- sp 1) (bv r))
+              ^{:line 207} sp))
+          1 1))
+      (case [(strings/HasPrefix s "extract_lane")]
+        (let [signed (strings/HasSuffix s "_s")]
+          ^{:go/breaks [2]} (return ^{:go/end 219} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+              (let [a (vb (aget st (- sp 1)))
+                  ^{:line 213} x (.get a w (conv int (.-A in)))]
+                (when signed
+                  (set! x (conv uint64 (conv uint32 (sext x w)))))
+
+                (aset st (- sp 1) (lit V :L x))
+                ^{:line 218} sp))
+            1 1)))
+      (case [(== s "replace_lane")]
+        ^{:go/breaks [2]} (return ^{:go/end 226} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [a (vb (aget st (- sp 2)))]
+              (.set a w (conv int (.-A in)) (.-L (aget st (- sp 1))))
+              (aset st (- sp 2) (bv a))
+              (- sp 1)))
+          2 1))
+      (case [(== sh "v128")]
+        (switch s
+          (case ["not"]
+            (return (un ^{:go/end 230} (fn ^v128 [^v128 a] (.b (lit V :L (bit-not (.-L (bv a))) :H (bit-not (.-H (bv a)))))))))
+          (case ["and" "andnot" "or" "xor"]
+            (return (bin ^{:go/end 243} (fn ^v128 [^v128 a ^v128 b]
+                  (let [(values x y) (values (bv a) (bv b))]
+                    (switch s
+                      (case ["and"]
+                        (return (.b (lit V :L (bit-and (.-L x) (.-L y)) :H (bit-and (.-H x) (.-H y))))))
+                      (case ["andnot"]
+                        (return (.b (lit V :L (bit-and-not (.-L x) (.-L y)) :H (bit-and-not (.-H x) (.-H y))))))
+                      (case ["or"]
+                        (return (.b (lit V :L (bit-or (.-L x) (.-L y)) :H (bit-or (.-H x) (.-H y)))))))
+
+                    (.b (lit V :L (bit-xor (.-L x) (.-L y)) :H (bit-xor (.-H x) (.-H y)))))))))
+
+          (case ["bitselect"]
+            (return (tern bitselect)))
+          (case ["any_true"]
+            ^{:go/breaks [2]} (return ^{:go/end 250} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+                (aset st (- sp 1) (b2v (!= (bit-or (.-L (aget st (- sp 1))) (.-H (aget st (- sp 1)))) 0)))
+                ^{:line 249} sp)
+              1 1))))
+
+      (case [(strings/HasSuffix s "relaxed_laneselect")]
+        (return (tern bitselect)))
+      (case [(== s "all_true")]
+        ^{:go/breaks [2]} (return ^{:go/end 263} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [a (vb (aget st (- sp 1)))
+                ^{:line 257} ok true]
+              (for [i 0] (< i n) (inc! i)
+                (set! ok (and ok (!= (.get a w i) 0))))
+
+              (aset st (- sp 1) (b2v ok))
+              ^{:line 262} sp))
+          1 1))
+      (case [(== s "bitmask")]
+        ^{:go/breaks [2]} (return ^{:go/end 275} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [a (vb (aget st (- sp 1)))
+                ^{:line 267 :tag uint32} r (zero uint32)]
+              (for [i 0] (< i n) (inc! i)
+                (when (!= (>> (.get a w i) (conv uint (- (* 8 w) 1))) 0)
+                  (set! r bit-or ^uint32 (<< 1 (conv uint i)))))
+
+
+              (aset st (- sp 1) (vi32 r))
+              ^{:line 274} sp))
+          1 1))
+      (case [(or (== s "shl") (== s "shr_s") (== s "shr_u"))]
+        ^{:go/breaks [2]} (return ^{:go/end 295} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [a (vb (aget st (- sp 2)))
+                ^{:line 279} k (% (conv uint (.-L (aget st (- sp 1)))) (conv uint (* 8 w)))
+                ^{:line 280 :tag v128} r (zero v128)]
+              (for [i 0] (< i n) (inc! i)
+                (let [x (.get a w i)]
+                  (switch s
+                    (case ["shl"]
+                      (set! x << k))
+                    (case ["shr_s"]
+                      (set! x (conv uint64 (>> (sext x w) k))))
+                    (default
+                      (set! x >> k)))
+
+                  (.set r w i (bit-and x (mask w)))))
+
+              (aset st (- sp 2) (bv r))
+              (- sp 1)))
+          2 1))
+      (case [(or (strings/HasPrefix s "extend_low_") (strings/HasPrefix s "extend_high_"))]
+        (let [hi (strings/HasPrefix s "extend_high_")
+            ^{:line 298} signed (strings/HasSuffix s "_s")]
+          (return (un ^{:go/end 313} (fn [^v128 a] :results [^v128 r]
+                (let [sw (/ w 2)]
+                  (for [i 0] (< i n) (inc! i)
+                    (let [j i]
+                      (when hi
+                        (set! j + n))
+
+                      (let [x (.get a sw j)]
+                        (when signed
+                          (set! x (conv uint64 (sext x sw))))
+
+                        (.set r w i (bit-and x (mask w))))))
+
+                  (return)))))))
+
+      (case [(strings/HasPrefix s "extmul_")]
+        (let [hi (strings/Contains s "_high_")
+            ^{:line 316} signed (strings/HasSuffix s "_s")]
+          (return (bin ^{:go/end 331} (fn [^v128 a ^v128 b] :results [^v128 r]
+                (let [sw (/ w 2)]
+                  (for [i 0] (< i n) (inc! i)
+                    (let [j i]
+                      (when hi
+                        (set! j + n))
+
+                      (let [(values x y) (values (.get a sw j) (.get b sw j))]
+                        (when signed
+                          (set! (values x y) (values (conv uint64 (sext x sw)) (conv uint64 (sext y sw)))))
+
+                        (.set r w i (bit-and (* x y) (mask w))))))
+
+                  (return)))))))
+
+      (case [(strings/HasPrefix s "extadd_pairwise_")]
+        (let [signed (strings/HasSuffix s "_s")]
+          (return (un ^{:go/end 344} (fn [^v128 a] :results [^v128 r]
+                (let [sw (/ w 2)]
+                  (for [i 0] (< i n) (inc! i)
+                    (let [(values x y) (values (.get a sw (* 2 i)) (.get a sw (+ (* 2 i) 1)))]
+                      (when signed
+                        (set! (values x y) (values (conv uint64 (sext x sw)) (conv uint64 (sext y sw)))))
+
+                      (.set r w i (bit-and (+ x y) (mask w)))))
+
+                  (return)))))))
+
+      (case [(strings/HasPrefix s "narrow_")]
+        (let [signed (strings/HasSuffix s "_s")]
+          (return (bin ^{:go/end 363} (fn [^v128 a ^v128 b] :results [^v128 r]
+                (let [sw (* 2 w)]
+                  (for [i 0] (< i n) (inc! i)
+                    (let [^int64 x (zero int64)]
+                      (if (< i (/ n 2))
+                        (set! x (sext (.get a sw i) sw))
+
+                        (set! x (sext (.get b sw (- i (/ n 2))) sw)))
+
+                      (if signed
+                        (.set r w i (satS x w))
+
+                        (.set r w i (satU x w)))))
+
+
+                  (return)))))))
+
+      (case [(== s "dot_i16x8_s")]
+        (return (bin ^{:go/end 371} (fn [^v128 a ^v128 b] :results [^v128 r]
+              (for [i 0] (< i 4) (inc! i)
+                (let [x (+ (* (conv int32 (conv int16 (.get a 2 (* 2 i)))) (conv int32 (conv int16 (.get b 2 (* 2 i))))) (* (conv int32 (conv int16 (.get a 2 (+ (* 2 i) 1)))) (conv int32 (conv int16 (.get b 2 (+ (* 2 i) 1))))))]
+                  (.set r 4 i (conv uint64 (conv uint32 x)))))
+
+              (return)))))
+
+      (case [(== s "relaxed_dot_i8x16_i7x16_s")]
+        (return (bin ^{:go/end 379} (fn [^v128 a ^v128 b] :results [^v128 r]
+              (for [i 0] (< i 8) (inc! i)
+                (let [x (+ (* (conv int16 (conv int8 (aget a (* 2 i)))) (conv int16 (conv int8 (aget b (* 2 i))))) (* (conv int16 (conv int8 (aget a (+ (* 2 i) 1)))) (conv int16 (conv int8 (aget b (+ (* 2 i) 1))))))]
+                  (.set r 2 i (conv uint64 (conv uint16 x)))))
+
+              (return)))))
+
+      (case [(== s "relaxed_dot_i8x16_i7x16_add_s")]
+        (return (tern ^{:go/end 390} (fn [^v128 a ^v128 b ^v128 c] :results [^v128 r]
+              (for [i 0] (< i 4) (inc! i)
+                (let [^int32 x (zero int32)]
+                  (for [j 0] (< j 4) (inc! j)
+                    (set! x + (* (conv int32 (conv int8 (aget a (+ (* 4 i) j)))) (conv int32 (conv int8 (aget b (+ (* 4 i) j)))))))
+
+                  (.set r 4 i (conv uint64 (conv uint32 (+ x (conv int32 (.get c 4 i))))))))
+
+              (return)))))
+
+      (case [(or (== s "q15mulr_sat_s") (== s "relaxed_q15mulr_s"))]
+        (return (bin (lanewise2 2 8 ^{:go/end 394} (fn ^uint64 [^uint64 x ^uint64 y]
+                (satS (>> (+ (* (sext x 2) (sext y 2)) 0x4000) 15) 2))))))
+
+      (case [(or (== s "relaxed_madd") (== s "relaxed_nmadd"))]
+        (let [neg (== s "relaxed_nmadd")]
+          (return (tern ^{:go/end 414} (fn [^v128 a ^v128 b ^v128 c] :results [^v128 r]
+                (for [i 0] (< i n) (inc! i)
+                  (if (== w 4)
+                    (let [x (conv float64 (fl32 (.get a 4 i)))]
+                      (when neg
+                        (set! x (- x)))
+
+                      (.set r 4 i (conv uint64 (math/Float32bits (fma32 x (conv float64 (fl32 (.get b 4 i))) (conv float64 (fl32 (.get c 4 i))))))))
+
+                    (let [x (fl64 (.get a 8 i))]
+                      (when neg
+                        (set! x (- x)))
+
+                      (.set r 8 i (math/Float64bits (math/FMA x (fl64 (.get b 8 i)) (fl64 (.get c 8 i))))))))
+
+
+                (return))))))
+
+      (case [isF]
+        (return (simdFloat s w n))))
+
+    (simdInt s w n)))
+
+
+^{:go/end 421} (go/method b ^v128 [^V v] (vb v))
+
+^{:go/end 426} (go/func bitselect ^v128 [^v128 a ^v128 b ^v128 c]
+  (let [(values x y z) (values (bv a) (bv b) (bv c))]
+    (.b (lit V :L (bit-or (bit-and (.-L x) (.-L z)) (bit-and-not (.-L y) (.-L z))) :H (bit-or (bit-and (.-H x) (.-H z)) (bit-and-not (.-H y) (.-H z)))))))
+
+
+^{:go/end 542} (go/func simdInt [^string s ^int w ^int n] :results [simdFn int int]
+  (let [^{:tag (func [^uint64 x ^uint64 y] [uint64])} f (zero (func [^uint64 x ^uint64 y] [uint64]))
+      ^{:line 430} cmp ^{:go/end 432} (fn ^{:tag (func [^uint64 x ^uint64 y] [uint64])} [^{:tag (func [^uint64 x ^uint64 y] [bool])} c]
+        ^{:go/end 431} (fn ^uint64 [^uint64 x ^uint64 y] (cmpMask (c x y))))
+
+      ^{:line 433} sg ^{:go/end 433} (fn ^int64 [^uint64 x] (sext x w))]
+    (switch s
+      (case ["add"]
+        (set! f ^{:go/end 436} (fn ^uint64 [^uint64 x ^uint64 y] (+ x y))))
+      (case ["sub"]
+        (set! f ^{:go/end 438} (fn ^uint64 [^uint64 x ^uint64 y] (- x y))))
+      (case ["mul"]
+        (set! f ^{:go/end 440} (fn ^uint64 [^uint64 x ^uint64 y] (* x y))))
+      (case ["min_s"]
+        (set! f ^{:go/end 447} (fn ^uint64 [^uint64 x ^uint64 y]
+            (when (< (sg x) (sg y))
+              (return x))
+
+            ^{:line 446} y)))
+
+      (case ["min_u"]
+        (set! f ^{:go/end 454} (fn ^uint64 [^uint64 x ^uint64 y]
+            (when (< x y)
+              (return x))
+
+            ^{:line 453} y)))
+
+      (case ["max_s"]
+        (set! f ^{:go/end 461} (fn ^uint64 [^uint64 x ^uint64 y]
+            (when (> (sg x) (sg y))
+              (return x))
+
+            ^{:line 460} y)))
+
+      (case ["max_u"]
+        (set! f ^{:go/end 468} (fn ^uint64 [^uint64 x ^uint64 y]
+            (when (> x y)
+              (return x))
+
+            ^{:line 467} y)))
+
+      (case ["avgr_u"]
+        (set! f ^{:go/end 470} (fn ^uint64 [^uint64 x ^uint64 y] (>> (+ x y 1) 1))))
+      (case ["add_sat_s"]
+        (set! f ^{:go/end 472} (fn ^uint64 [^uint64 x ^uint64 y] (satS (+ (sg x) (sg y)) w))))
+      (case ["add_sat_u"]
+        (set! f ^{:go/end 474} (fn ^uint64 [^uint64 x ^uint64 y] (satU (conv int64 (+ x y)) w))))
+      (case ["sub_sat_s"]
+        (set! f ^{:go/end 476} (fn ^uint64 [^uint64 x ^uint64 y] (satS (- (sg x) (sg y)) w))))
+      (case ["sub_sat_u"]
+        (set! f ^{:go/end 478} (fn ^uint64 [^uint64 x ^uint64 y] (satU (- (conv int64 x) (conv int64 y)) w))))
+      (case ["eq"]
+        (set! f (cmp ^{:go/end 480} (fn ^bool [^uint64 x ^uint64 y] (== x y)))))
+      (case ["ne"]
+        (set! f (cmp ^{:go/end 482} (fn ^bool [^uint64 x ^uint64 y] (!= x y)))))
+      (case ["lt_s"]
+        (set! f (cmp ^{:go/end 484} (fn ^bool [^uint64 x ^uint64 y] (< (sg x) (sg y))))))
+      (case ["lt_u"]
+        (set! f (cmp ^{:go/end 486} (fn ^bool [^uint64 x ^uint64 y] (< x y)))))
+      (case ["gt_s"]
+        (set! f (cmp ^{:go/end 488} (fn ^bool [^uint64 x ^uint64 y] (> (sg x) (sg y))))))
+      (case ["gt_u"]
+        (set! f (cmp ^{:go/end 490} (fn ^bool [^uint64 x ^uint64 y] (> x y)))))
+      (case ["le_s"]
+        (set! f (cmp ^{:go/end 492} (fn ^bool [^uint64 x ^uint64 y] (<= (sg x) (sg y))))))
+      (case ["le_u"]
+        (set! f (cmp ^{:go/end 494} (fn ^bool [^uint64 x ^uint64 y] (<= x y)))))
+      (case ["ge_s"]
+        (set! f (cmp ^{:go/end 496} (fn ^bool [^uint64 x ^uint64 y] (>= (sg x) (sg y))))))
+      (case ["ge_u"]
+        (set! f (cmp ^{:go/end 498} (fn ^bool [^uint64 x ^uint64 y] (>= x y)))))
+      (case ["neg"]
+        (return (un (lanewise1 w n ^{:go/end 500} (fn ^uint64 [^uint64 x] (- x))))))
+      (case ["abs"]
+        (return (un (lanewise1 w n ^{:go/end 507} (fn ^uint64 [^uint64 x]
+                (when (< (sg x) 0)
+                  (return (- x)))
+
+                ^{:line 506} x)))))
+
+      (case ["popcnt"]
+        (return (un (lanewise1 w n ^{:go/end 509} (fn ^uint64 [^uint64 x] (conv uint64 (bits/OnesCount64 x)))))))
+      (case ["trunc_sat_f32x4_s" "relaxed_trunc_f32x4_s"]
+        (return (un ^{:go/end 516} (fn [^v128 a] :results [^v128 r]
+              (for [i 0] (< i 4) (inc! i)
+                (.set r 4 i (conv uint64 (satS32 (conv float64 (fl32 (.get a 4 i)))))))
+
+              (return)))))
+
+      (case ["trunc_sat_f32x4_u" "relaxed_trunc_f32x4_u"]
+        (return (un ^{:go/end 523} (fn [^v128 a] :results [^v128 r]
+              (for [i 0] (< i 4) (inc! i)
+                (.set r 4 i (conv uint64 (satU32 (conv float64 (fl32 (.get a 4 i)))))))
+
+              (return)))))
+
+      (case ["trunc_sat_f64x2_s_zero" "relaxed_trunc_f64x2_s_zero"]
+        (return (un ^{:go/end 530} (fn [^v128 a] :results [^v128 r]
+              (for [i 0] (< i 2) (inc! i)
+                (.set r 4 i (conv uint64 (satS32 (fl64 (.get a 8 i))))))
+
+              (return)))))
+
+      (case ["trunc_sat_f64x2_u_zero" "relaxed_trunc_f64x2_u_zero"]
+        (return (un ^{:go/end 537} (fn [^v128 a] :results [^v128 r]
+              (for [i 0] (< i 2) (inc! i)
+                (.set r 4 i (conv uint64 (satU32 (fl64 (.get a 8 i))))))
+
+              (return)))))
+
+      (default
+        (return nil 0 0)))
+
+    (bin (lanewise2 w n f))))
+
+
+^{:go/end 676} (go/func simdFloat [^string s ^int w ^int n] :results [simdFn int int]
+  (let [f32u ^{:go/end 547} (fn ^{:tag (func [^uint64 x] [uint64])} [^{:tag (func [float64] [float64])} fn]
+        ^{:go/end 546} (fn ^uint64 [^uint64 x] (.-L (un32 (conv uint32 x) fn))))
+
+      ^{:line 548} f64u ^{:go/end 550} (fn ^{:tag (func [^uint64 x] [uint64])} [^{:tag (func [float64] [float64])} fn]
+        ^{:go/end 549} (fn ^uint64 [^uint64 x] (.-L (un64 x fn))))
+
+      ^{:line 551} unf ^{:go/end 556} (fn [^{:tag (func [float64] [float64])} fn] :results [simdFn int int]
+        (when (== w 4)
+          (return (un (lanewise1 w n (f32u fn)))))
+
+        (un (lanewise1 w n (f64u fn))))
+
+      ^{:line 557} arith ^{:go/end 564} (fn [^{:tag (func [^float64 a ^float64 b] [float64])} o] :results [simdFn int int]
+        (when (== w 4)
+          (return (bin (lanewise2 w n ^{:go/end 561} (fn ^uint64 [^uint64 x ^uint64 y]
+                  (conv uint64 (math/Float32bits (conv float32 (o (conv float64 (fl32 x)) (conv float64 (fl32 y))))))))))) ; exact: one f32 rounding
+
+
+        (bin (lanewise2 w n ^{:go/end 563} (fn ^uint64 [^uint64 x ^uint64 y] (math/Float64bits (o (fl64 x) (fl64 y)))))))
+
+      ^{:line 565} fcmp ^{:go/end 572} (fn [^{:tag (func [^float64 a ^float64 b] [bool])} c] :results [simdFn int int]
+        (bin (lanewise2 w n ^{:go/end 571} (fn ^uint64 [^uint64 x ^uint64 y]
+              (when (== w 4)
+                (return (cmpMask (c (conv float64 (fl32 x)) (conv float64 (fl32 y))))))
+
+              (cmpMask (c (fl64 x) (fl64 y)))))))]
+
+
+    (switch s
+      (case ["add" "sub" "mul" "div"]
+        ;; f32 lanes: the operation in float32 itself (no double rounding)
+        (when (== w 4)
+          (return (bin (lanewise2 w n ^{:go/end 591} (fn ^uint64 [^uint64 x ^uint64 y]
+                  (let [(values a b) (values (fl32 x) (fl32 y))
+                      ^{:line 579 :tag float32} r (zero float32)]
+                    (switch s
+                      (case ["add"]
+                        (set! r (+ a b)))
+                      (case ["sub"]
+                        (set! r (- a b)))
+                      (case ["mul"]
+                        (set! r (* a b)))
+                      (default
+                        (set! r (/ a b))))
+
+                    (conv uint64 (math/Float32bits r))))))))
+
+
+        (return (arith (aget (lit (map string (func [^float64 a ^float64 b] [float64]))
+                ^{:line 594} ["add" ^{:go/end 594} (fn ^float64 [^float64 a ^float64 b] (+ a b))] ["sub" ^{:go/end 594} (fn ^float64 [^float64 a ^float64 b] (- a b))]
+                ^{:line 595} ["mul" ^{:go/end 595} (fn ^float64 [^float64 a ^float64 b] (* a b))] ["div" ^{:go/end 595} (fn ^float64 [^float64 a ^float64 b] (/ a b))]) s))))
+      (case ["min" "relaxed_min"]
+        (return (bin (lanewise2 w n (fbin w min32 min64)))))
+      (case ["max" "relaxed_max"]
+        (return (bin (lanewise2 w n (fbin w max32 max64)))))
+      (case ["pmin"]
+        (return (bin (lanewise2 w n ^{:go/end 606} (fn ^uint64 [^uint64 x ^uint64 y]
+                (when (or (and (== w 4) (< (fl32 y) (fl32 x))) (and (== w 8) (< (fl64 y) (fl64 x))))
+                  (return y))
+
+                ^{:line 605} x)))))
+
+      (case ["pmax"]
+        (return (bin (lanewise2 w n ^{:go/end 613} (fn ^uint64 [^uint64 x ^uint64 y]
+                (when (or (and (== w 4) (< (fl32 x) (fl32 y))) (and (== w 8) (< (fl64 x) (fl64 y))))
+                  (return y))
+
+                ^{:line 612} x)))))
+
+      (case ["abs"]
+        (return (un (lanewise1 w n ^{:go/end 615} (fn ^uint64 [^uint64 x] (bit-and-not x ^uint64 (<< 1 (conv uint (- (* 8 w) 1)))))))))
+      (case ["neg"]
+        (return (un (lanewise1 w n ^{:go/end 617} (fn ^uint64 [^uint64 x] (bit-xor x ^uint64 (<< 1 (conv uint (- (* 8 w) 1)))))))))
+      (case ["sqrt"]
+        (when (== w 4)
+          (return (un (lanewise1 w n ^{:go/end 620} (fn ^uint64 [^uint64 x] (conv uint64 (math/Float32bits (conv float32 (math/Sqrt (conv float64 (fl32 x)))))))))))
+
+        (return (un (lanewise1 w n ^{:go/end 622} (fn ^uint64 [^uint64 x] (math/Float64bits (math/Sqrt (fl64 x))))))))
+      (case ["ceil"]
+        (return (unf math/Ceil)))
+      (case ["floor"]
+        (return (unf math/Floor)))
+      (case ["trunc"]
+        (return (unf math/Trunc)))
+      (case ["nearest"]
+        (return (unf math/RoundToEven)))
+      (case ["eq"]
+        (return (fcmp ^{:go/end 632} (fn ^bool [^float64 a ^float64 b] (== a b)))))
+      (case ["ne"]
+        (return (fcmp ^{:go/end 634} (fn ^bool [^float64 a ^float64 b] (!= a b)))))
+      (case ["lt"]
+        (return (fcmp ^{:go/end 636} (fn ^bool [^float64 a ^float64 b] (< a b)))))
+      (case ["gt"]
+        (return (fcmp ^{:go/end 638} (fn ^bool [^float64 a ^float64 b] (> a b)))))
+      (case ["le"]
+        (return (fcmp ^{:go/end 640} (fn ^bool [^float64 a ^float64 b] (<= a b)))))
+      (case ["ge"]
+        (return (fcmp ^{:go/end 642} (fn ^bool [^float64 a ^float64 b] (>= a b)))))
+      (case ["convert_i32x4_s"]
+        (return (un (lanewise1 4 4 ^{:go/end 644} (fn ^uint64 [^uint64 x] (conv uint64 (math/Float32bits (conv float32 (conv int32 x)))))))))
+      (case ["convert_i32x4_u"]
+        (return (un (lanewise1 4 4 ^{:go/end 646} (fn ^uint64 [^uint64 x] (conv uint64 (math/Float32bits (conv float32 (conv uint32 x)))))))))
+      (case ["convert_low_i32x4_s" "convert_low_i32x4_u"]
+        (let [signed (strings/HasSuffix s "_s")]
+          (return (un ^{:go/end 659} (fn [^v128 a] :results [^v128 r]
+                (for [i 0] (< i 2) (inc! i)
+                  (let [x (.get a 4 i)]
+                    (if signed
+                      (.set r 8 i (math/Float64bits (conv float64 (conv int32 x))))
+
+                      (.set r 8 i (math/Float64bits (conv float64 (conv uint32 x)))))))
+
+
+                (return))))))
+
+      (case ["demote_f64x2_zero"]
+        (return (un ^{:go/end 666} (fn [^v128 a] :results [^v128 r]
+              (for [i 0] (< i 2) (inc! i)
+                (.set r 4 i (conv uint64 (math/Float32bits (conv float32 (fl64 (.get a 8 i)))))))
+
+              (return)))))
+
+      (case ["promote_low_f32x4"]
+        (return (un ^{:go/end 673} (fn [^v128 a] :results [^v128 r]
+              (for [i 0] (< i 2) (inc! i)
+                (.set r 8 i (math/Float64bits (conv float64 (fl32 (.get a 4 i))))))
+
+              (return))))))
+
+
+    (return nil 0 0)))
+
+
+^{:go/end 765} (go/func simdMem [^string s] :results [simdFn int int]
+  (switch
+    (case [(== s "load")]
+      ^{:go/breaks [2]} (return ^{:go/end 686} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+          (let [^v128 r (zero v128)]
+            (copy (subslice r) (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 16))
+            (aset st (- sp 1) (bv r))
+            ^{:line 685} sp))
+        1 1))
+    (case [(== s "store")]
+      ^{:go/breaks [2]} (return ^{:go/end 692} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+          (let [b (vb (aget st (- sp 1)))]
+            (copy (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 2))) (.-C in) 16) (subslice b))
+            (- sp 2)))
+        2 0))
+    (case [(strings/HasSuffix s "_splat")]
+      (let [w (aget (lit (map string int) ["load8_splat" 1] ["load16_splat" 2] ["load32_splat" 4] ["load64_splat" 8]) s)]
+        ^{:go/breaks [2]} (return ^{:go/end 705} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [^v128 t (zero v128)]
+              (copy (subslice t) (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 w)))
+              (let [x (.get t w 0)
+                  ^{:line 699 :tag v128} r (zero v128)]
+                (for [i 0] (< i (/ 16 w)) (inc! i)
+                  (.set r w i x))
+
+                (aset st (- sp 1) (bv r))
+                ^{:line 704} sp)))
+          1 1)))
+    (case [(strings/HasSuffix s "_zero")]
+      (let [w 4]
+        (when (== s "load64_zero")
+          (set! w 8))
+
+        ^{:go/breaks [2]} (return ^{:go/end 716} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [^v128 r (zero v128)]
+              (copy (subslice r) (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) (conv uint64 w)))
+              (aset st (- sp 1) (bv r))
+              ^{:line 715} sp))
+          1 1)))
+    (case [(strings/HasSuffix s "_lane")]
+      (let [w (aget (lit (map string int) ["8" 1] ["16" 2] ["32" 4] ["64" 8]) (strings/TrimSuffix (strings/TrimPrefix (strings/TrimPrefix s "load") "store") "_lane"))]
+        (when (strings/HasPrefix s "load")
+          ^{:go/breaks [2]} (return ^{:go/end 727} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+              (let [^v128 t (zero v128)]
+                (copy (subslice t) (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 2))) (.-C in) (conv uint64 w)))
+                (let [r (vb (aget st (- sp 1)))]
+                  (.set r w (conv int (.-B in)) (.get t w 0))
+                  (aset st (- sp 2) (bv r))
+                  (- sp 1))))
+            2 1))
+
+        ^{:go/breaks [2]} (return ^{:go/end 735} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+            (let [a (vb (aget st (- sp 1)))
+                ^{:line 731 :tag v128} t (zero v128)]
+              (.set t w 0 (.get a w (conv int (.-B in))))
+              (copy (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 2))) (.-C in) (conv uint64 w)) (subslice t _ w))
+              (- sp 2)))
+          2 0)))
+    (default
+      ;; load8x8_s ... load32x2_u: 8 bytes, each lane extended to twice its width
+      (let [^int sw (zero int)]
+        (switch
+          (case [(strings/HasPrefix s "load8x8")]
+            (set! sw 1))
+          (case [(strings/HasPrefix s "load16x4")]
+            (set! sw 2))
+          (case [(strings/HasPrefix s "load32x2")]
+            (set! sw 4))
+          (default
+            (return nil 0 0)))
+
+        (let [signed (strings/HasSuffix s "_s")]
+          ^{:go/breaks [2]} (return ^{:go/end 763} (fn ^int [^{:tag (* Machine)} m ^{:tag (* Ins)} in ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^{:tag (slice V)} st ^int sp]
+              (let [^v128 t (zero v128)]
+                (copy (subslice t) (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 8))
+                (let [^v128 r (zero v128)]
+                  (for [i 0] (< i (/ 8 sw)) (inc! i)
+                    (let [x (.get t sw i)]
+                      (when signed
+                        (set! x (conv uint64 (sext x sw))))
+
+                      (.set r (* 2 sw) i (bit-and x (mask (* 2 sw))))))
+
+                  (aset st (- sp 1) (bv r))
+                  ^{:line 762} sp)))
+            1 1))))))
+
+
+
+
+
+^{:go/end 794} (go/func fma32 "fma32 is the fused multiply-add of three f32 values (as float64s) rounded once to f32: x*y is exact in float64, the sum is\nrounded to odd (its error folded into the last bit), so that the conversion to f32 rounds as the exact sum would.\n" ^float32 [^float64 x ^float64 y ^float64 z]
+  (let [p (* x y)
+      ^{:line 771} s (+ p z)]
+    (when (or (math/IsInf s 0) (!= s s) (math/IsInf p 0))
+      (return (conv float32 (math/FMA x y z))))
+
+    (let [bb (- s p)
+        ^{:line 776} e (+ (- p (- s bb)) (- z bb))]
+      (when (and (== s 0) (!= e 0))
+        ;; the sum's error is the exact sum
+        (return (conv float32 e)))
+
+      (when (!= e 0)
+        (let [u (math/Float64bits s)]
+          (when (== (bit-and u 1) 0)
+            ;; toward the error's side, to the odd neighbour
+            (if (== (> e 0) (> s 0))
+              (inc! u)
+
+              (dec! u))
+
+            (set! s (math/Float64frombits u)))))
+
+
+      (conv float32 s))))

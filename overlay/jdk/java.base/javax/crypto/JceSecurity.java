@@ -2,7 +2,8 @@
  * jrt's own javax.crypto.JceSecurity for the Go build (doc/go/JRT-NOTES.md, "Security"). The
  * JDK generates its JceSecurity from JceSecurity.java.template, which reads the crypto policy
  * files of $JAVA_HOME/conf/security/policy and verifies a provider by the signature of its jar.
- * The Go build has the java.base providers alone (SUN and SunJCE), which the JDK trusts without
+ * The Go build has the java.base providers alone (SUN, SunRsaSign, SunEC and SunJCE since
+ * doc/classes/JAVA-DEFERRED-TRIAGE.md's F1), which the JDK trusts without
  * verification (a class of the boot layer), and the unlimited policy, the JDK's default. Its
  * getInstance methods are transcribed from openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/javax/crypto/JceSecurity.java.template, Copyright (c) 1997, 2025,
@@ -61,6 +62,14 @@ final class JceSecurity {
         }
         throw new NoSuchAlgorithmException("Algorithm " + algorithm
                 + " not available", failure);
+    }
+
+    /**
+     * The result of verifying provider p (null: verified), which Cipher.getInstance(transformation,
+     * provider) asks (F1): every provider is, as canUseProvider says.
+     */
+    static Exception getVerificationResult(Provider p) {
+        return null;
     }
 
     /** Every provider can be used: no provider jar to verify in a static executable. */

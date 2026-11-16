@@ -30,7 +30,7 @@ arbace_tool -m arbace.repr.cpp.rtcheck judge "$w" "$t/of.edn" objects > "$w.log"
 [ $st = 0 ] && [ "$(v "$w" tc/y.C)" = pass ] && ok "a recorded tc/y.C original failure is allowed" || bad "orig-fails: exit $st, $(cut -f1,2,8 "$w/results.tsv")"
 # the committed known file: every name is under one of the round trip's corpora
 k=$root/test/repr/cpp/roundtrip-known.edn
-n=$(grep -c '^ *"[^"]*" \(:\|#{\)' "$k"); q=$(grep -c '^ *"\(samples\|gxx-dg\|gxx-old-deja\|c-c++-common\|libstdcxx-testsuite\|hotspot-x86-linux\)/[^"]*" \(:\|#{\)' "$k")
+n=$(grep -c '^ *"[^"]*" \(:\|#{\)' "$k"); q=$(grep -c '^ *"\(samples\|gxx-dg\|gxx-old-deja\|gxx-modules\|c-c++-common\|libstdcxx-testsuite\|hotspot-x86-linux\)/[^"]*" \(:\|#{\)' "$k")
 [ "$n" -gt 0 ] && [ "$n" = "$q" ] && ok "the known file's $n names are qualified" || bad "the known file: $q of $n names qualified"
 grep -q '"samples/coroutine.cpp" :gxx-objects-location' "$k" && ok "samples/coroutine.cpp is in it" || bad "no samples/coroutine.cpp"
 finish

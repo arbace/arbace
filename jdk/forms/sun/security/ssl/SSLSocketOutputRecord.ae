@@ -1,0 +1,259 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLSocketOutputRecord.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io ByteArrayInputStream IOException OutputStream)
+        '(java.net SocketException)
+        '(java.nio ByteBuffer)
+        '(javax.net.ssl SSLHandshakeException))
+
+(defclass ^:final SSLSocketOutputRecord
+  :extends OutputRecord
+  :implements [SSLRecord]
+
+  (field ^:private ^OutputStream deliverStream nil)
+
+  (constructor [this ^HandshakeHash handshakeHash]
+    (this. handshakeHash nil))
+
+  (constructor [this ^HandshakeHash handshakeHash ^TransportContext tc]
+    (super. handshakeHash (SSLCipher$SSLWriteCipher/nullTlsWriteCipher))
+    (set! (.-tc this) tc)
+    (set! (.-packetSize this) SSLRecord/maxRecordSize)
+    (set! (.-protocolVersion this) ProtocolVersion/NONE))
+
+  (method encodeAlert :throws [IOException] ^void [this ^byte level ^byte description]
+    (.lock (.-recordLock this))
+    (try
+      (if (.isClosed this)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning
+              (java-str "outbound has closed, ignore outbound alert message: "
+                        (Alert/nameOf description))))
+          (do
+            (set! (.-count this)
+                  (unchecked-add-int SSLSocketOutputRecord/headerSize
+                                     (.getExplicitNonceSize (.-writeCipher this))))
+            (.write this level)
+            (.write this description)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+              (SSLLogger/fine
+                (java-str "WRITE: "
+                          (.-name (.-protocolVersion this))
+                          " "
+                          (.-name ContentType/ALERT)
+                          "("
+                          (Alert/nameOf description)
+                          "), length = "
+                          (unchecked-subtract-int (.-count this) SSLSocketOutputRecord/headerSize))))
+            (.encrypt this
+                      (.-writeCipher this)
+                      (.-id ContentType/ALERT)
+                      SSLSocketOutputRecord/headerSize)
+            (.write deliverStream (.-buf this) 0 (.-count this))
+            (.flush deliverStream)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+              (SSLLogger/fine "Raw write" (ByteArrayInputStream. (.-buf this) 0 (.-count this))))
+            (set! (.-count this) 0)))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method encodeHandshake :throws [IOException] ^void [this ^byte/1 source ^:mutable ^int offset
+                                                       ^int length]
+    (.lock (.-recordLock this))
+    (try
+      (if (.isClosed this)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning "outbound has closed, ignore outbound handshake message"
+                               (ByteBuffer/wrap source offset length)))
+          (do
+            (when (.-firstMessage this)
+              (set! (.-firstMessage this) false)
+              (when (and (and (identical? (.-helloVersion this) ProtocolVersion/SSL20Hello)
+                              (== (aget source offset) (.-id SSLHandshake/CLIENT_HELLO)))
+                         (== (aget source
+                                   (unchecked-add-int
+                                     (unchecked-add-int (unchecked-add-int offset 4) 2)
+                                     32))
+                             0))
+                (let [v2ClientHello (SSLSocketOutputRecord/encodeV2ClientHello
+                                      source
+                                      (unchecked-add-int offset 4)
+                                      (unchecked-subtract-int length 4))
+                      record (.array v2ClientHello)
+                      limit (.limit v2ClientHello)]
+                  (.deliver (.-handshakeHash this) record 2 (unchecked-subtract-int limit 2))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+                    (SSLLogger/fine (java-str "WRITE: SSLv2 ClientHello message, length = " limit)))
+                  (.write deliverStream record 0 limit)
+                  (.flush deliverStream)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+                    (SSLLogger/fine "Raw write" (ByteArrayInputStream. record 0 limit)))
+                  (return))))
+            (let [handshakeType (aget source 0)]
+              (when (.isHashable (.-handshakeHash this) handshakeType)
+                (.deliver (.-handshakeHash this) source offset length))
+              (let [fragLimit (.getFragLimit this)
+                    position (unchecked-add-int SSLSocketOutputRecord/headerSize
+                                                (.getExplicitNonceSize (.-writeCipher this)))]
+                (when (== (.-count this) 0) (set! (.-count this) position))
+                (if (< (unchecked-subtract-int (.-count this) position)
+                       (unchecked-subtract-int fragLimit length))
+                    (.write this source offset length)
+                    (loop [^int limit (unchecked-add-int offset length)]
+                      (when (< offset limit)
+                        (let [remains (unchecked-subtract-int limit offset)
+                              fragLen (Math/min (unchecked-add-int
+                                                  (unchecked-subtract-int fragLimit (.-count this))
+                                                  position)
+                                                remains)]
+                          (.write this source offset fragLen)
+                          (when (< remains fragLen) (return))
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+                            (SSLLogger/fine
+                              (java-str "WRITE: "
+                                        (.-name (.-protocolVersion this))
+                                        " "
+                                        (.-name ContentType/HANDSHAKE)
+                                        ", length = "
+                                        (unchecked-subtract-int
+                                          (.-count this)
+                                          SSLSocketOutputRecord/headerSize))))
+                          (.encrypt this
+                                    (.-writeCipher this)
+                                    (.-id ContentType/HANDSHAKE)
+                                    SSLSocketOutputRecord/headerSize)
+                          (.write deliverStream (.-buf this) 0 (.-count this))
+                          (.flush deliverStream)
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+                            (SSLLogger/fine "Raw write"
+                                            (ByteArrayInputStream. (.-buf this) 0 (.-count this))))
+                          (set! offset (unchecked-add-int offset fragLen))
+                          (set! (.-count this) position)
+                          (recur limit)))))))))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method encodeChangeCipherSpec :throws [IOException] ^void [this]
+    (.lock (.-recordLock this))
+    (try
+      (if (.isClosed this)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning "outbound has closed, ignore outbound change_cipher_spec message"))
+          (do
+            (set! (.-count this)
+                  (unchecked-add-int SSLSocketOutputRecord/headerSize
+                                     (.getExplicitNonceSize (.-writeCipher this))))
+            (.write this (unchecked-byte 1))
+            (.encrypt this
+                      (.-writeCipher this)
+                      (.-id ContentType/CHANGE_CIPHER_SPEC)
+                      SSLSocketOutputRecord/headerSize)
+            (.write deliverStream (.-buf this) 0 (.-count this))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+              (SSLLogger/fine "Raw write" (ByteArrayInputStream. (.-buf this) 0 (.-count this))))
+            (set! (.-count this) 0)))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method disposeWriteCipher ^void [this] (.dispose (.-writeCipher this)))
+
+  (method ^:public flush :throws [IOException] ^void [this]
+    (.lock (.-recordLock this))
+    (try
+      (let [position (unchecked-add-int SSLSocketOutputRecord/headerSize
+                                        (.getExplicitNonceSize (.-writeCipher this)))]
+        (when-not (<= (.-count this) position)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+            (SSLLogger/fine
+              (java-str "WRITE: "
+                        (.-name (.-protocolVersion this))
+                        " "
+                        (.-name ContentType/HANDSHAKE)
+                        ", length = "
+                        (unchecked-subtract-int (.-count this) SSLSocketOutputRecord/headerSize))))
+          (.encrypt this
+                    (.-writeCipher this)
+                    (.-id ContentType/HANDSHAKE)
+                    SSLSocketOutputRecord/headerSize)
+          (.write deliverStream (.-buf this) 0 (.-count this))
+          (.flush deliverStream)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+            (SSLLogger/fine "Raw write" (ByteArrayInputStream. (.-buf this) 0 (.-count this))))
+          (set! (.-count this) 0)))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method deliver :throws [IOException] ^void [this ^byte/1 source ^:mutable ^int offset ^int length]
+    (.lock (.-recordLock this))
+    (try
+      (when (.isClosed this) (throw (SocketException. "Connection or outbound has been closed")))
+      (when (.seqNumOverflow (.-authenticator (.-writeCipher this)))
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/fine
+            "sequence number extremely close to overflow (2^64-1 packets). Closing connection."))
+        (throw (SSLHandshakeException. "sequence number overflow")))
+      (let [^:mutable isFirstRecordOfThePayload true]
+        (loop [^int limit (unchecked-add-int offset length)]
+          (when (< offset limit)
+            (let [^:mutable ^int fragLen 0]
+              (if (> (.-packetSize this) 0)
+                  (do
+                    (set! fragLen
+                          (Math/min SSLSocketOutputRecord/maxRecordSize (.-packetSize this)))
+                    (set! fragLen
+                          (.calculateFragmentSize
+                            (.-writeCipher this)
+                            fragLen
+                            SSLSocketOutputRecord/headerSize))
+                    (set! fragLen (Math/min fragLen Record/maxDataSize)))
+                  (set! fragLen Record/maxDataSize))
+              (set! fragLen (.calculateFragmentSize this fragLen))
+              (if (and isFirstRecordOfThePayload (.needToSplitPayload this))
+                  (do (set! fragLen 1) (set! isFirstRecordOfThePayload false))
+                  (set! fragLen (Math/min fragLen (unchecked-subtract-int limit offset))))
+              (let [position (unchecked-add-int SSLSocketOutputRecord/headerSize
+                                                (.getExplicitNonceSize (.-writeCipher this)))]
+                (set! (.-count this) position)
+                (.write this source offset fragLen)
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+                  (SSLLogger/fine
+                    (java-str "WRITE: "
+                              (.-name (.-protocolVersion this))
+                              " "
+                              (.-name ContentType/APPLICATION_DATA)
+                              ", length = "
+                              (unchecked-subtract-int (.-count this) position))))
+                (.encrypt this
+                          (.-writeCipher this)
+                          (.-id ContentType/APPLICATION_DATA)
+                          SSLSocketOutputRecord/headerSize)
+                (.write deliverStream (.-buf this) 0 (.-count this))
+                (.flush deliverStream)
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+                  (SSLLogger/fine "Raw write" (ByteArrayInputStream. (.-buf this) 0 (.-count this))))
+                (set! (.-count this) 0)
+                (when (.-isFirstAppOutputRecord this) (set! (.-isFirstAppOutputRecord this) false))
+                (set! offset (unchecked-add-int offset fragLen))
+                (recur limit))))))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method setDeliverStream ^void [this ^OutputStream outputStream]
+    (.lock (.-recordLock this))
+    (try (set! (.-deliverStream this) outputStream) (finally (.unlock (.-recordLock this)))))
+
+  (method ^:private needToSplitPayload ^boolean [this]
+    (and (and (and (not (.useTLS11PlusSpec (.-protocolVersion this)))
+                   (.isCBCMode (.-writeCipher this)))
+              (not (.-isFirstAppOutputRecord this)))
+         Record/enableCBCProtection))
+
+  (method ^:private getFragLimit ^int [this]
+    (let [^:mutable ^int fragLimit 0]
+      (if (> (.-packetSize this) 0)
+          (do
+            (set! fragLimit (Math/min SSLSocketOutputRecord/maxRecordSize (.-packetSize this)))
+            (set! fragLimit
+                  (.calculateFragmentSize (.-writeCipher this)
+                                          fragLimit
+                                          SSLSocketOutputRecord/headerSize))
+            (set! fragLimit (Math/min fragLimit Record/maxDataSize)))
+          (set! fragLimit Record/maxDataSize))
+      (set! fragLimit (.calculateFragmentSize this fragLimit))
+      fragLimit)))

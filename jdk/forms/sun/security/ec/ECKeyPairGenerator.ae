@@ -1,0 +1,125 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ec/ECKeyPairGenerator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ec)
+
+(import '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        InvalidParameterException
+                        KeyPair
+                        KeyPairGeneratorSpi
+                        ProviderException
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec
+                             ECGenParameterSpec
+                             ECParameterSpec
+                             InvalidParameterSpecException)
+        '(java.util Arrays Optional)
+        '(sun.security.jca JCAUtil)
+        '(sun.security.util ECUtil SecurityProviderConstants))
+
+(defclass ^:public ^:final ECKeyPairGenerator
+  :extends KeyPairGeneratorSpi
+
+  (field ^:private ^:static ^:final ^int KEY_SIZE_MIN 112)
+
+  (field ^:private ^:static ^:final ^int KEY_SIZE_MAX 571)
+
+  (field ^:private ^SecureRandom random)
+
+  (field ^:private ^int keySize)
+
+  (field ^:private ^AlgorithmParameterSpec params nil)
+
+  (constructor ^:public [this]
+    (.initialize this SecurityProviderConstants/DEF_EC_KEY_SIZE nil))
+
+  (method ^:public initialize ^void [this ^int keySize ^SecureRandom random]
+    (.checkKeySize this keySize)
+    (set! (.-params this) (ECUtil/getECParameterSpec keySize))
+    (when (nil? params)
+      (throw (InvalidParameterException.
+               (java-str "No EC parameters available for key size " keySize " bits"))))
+    (set! (.-random this) random))
+
+  (method ^:public initialize :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                  ^AlgorithmParameterSpec params
+                                                                                  ^SecureRandom random]
+    (let [^:mutable ^ECParameterSpec ecSpec nil]
+      (cond
+        (instance? ECParameterSpec params)
+          (let [ecParams (cast ECParameterSpec params)]
+            (set! ecSpec (ECUtil/getECParameterSpec ecParams))
+            (when (nil? ecSpec)
+              (throw
+                (InvalidAlgorithmParameterException. (java-str "Curve not supported: " params)))))
+        (instance? ECGenParameterSpec params)
+          (let [name (.getName (cast ECGenParameterSpec params))]
+            (set! ecSpec (ECUtil/getECParameterSpec name))
+            (when (nil? ecSpec)
+              (throw (InvalidAlgorithmParameterException. (java-str "Unknown curve name: " name)))))
+        :else
+          (throw (InvalidAlgorithmParameterException.
+                   "ECParameterSpec or ECGenParameterSpec required for EC")))
+      (ECKeyPairGenerator/ensureCurveIsSupported ecSpec)
+      (set! (.-params this) ecSpec)
+      (set! (.-keySize this) (.getFieldSize (.getField (.getCurve ecSpec))))
+      (set! (.-random this) random)))
+
+  (method ^:private ^:static ensureCurveIsSupported :throws [InvalidAlgorithmParameterException] ^void [^ECParameterSpec ecSpec]
+    (let [ecParams (ECUtil/getECParameters)]
+      (try
+        (.init ecParams ecSpec)
+        (catch InvalidParameterSpecException ex
+          (throw (InvalidAlgorithmParameterException.
+                   (java-str "Curve not supported: " (.toString ecSpec))))))
+      (when (.isEmpty (ECOperations/forParameters ecSpec))
+        (throw (InvalidAlgorithmParameterException.
+                 (java-str "Curve not supported: " (.toString ecSpec)))))))
+
+  (method ^:public generateKeyPair ^KeyPair [this]
+    (when (nil? random) (set! random (JCAUtil/getSecureRandom)))
+    (try
+      (let [^{:tag (Optional KeyPair)} kp (.generateKeyPairImpl this random)]
+        (when (.isPresent kp) (return (cast KeyPair (.get kp)))))
+      (catch Exception ex (throw (ProviderException. ex))))
+    (throw (ProviderException. (java-str "Curve not supported:  " (.toString params)))))
+
+  (method ^:private generatePrivateScalar ^byte/1 [this ^SecureRandom random ^ECOperations ecOps
+                                                   ^int seedSize]
+    (let [^int numAttempts 128
+          seedArr (new byte/1 seedSize)]
+      (loop [^int i 0]
+        (when (< i numAttempts)
+          (.nextBytes random seedArr)
+          (try
+            (return (.seedToScalar ecOps seedArr))
+            (catch ECOperations$IntermediateValueException ex))
+          (recur (unchecked-inc-int i))))
+      (throw (ProviderException.
+               (java-str "Unable to produce private key after " numAttempts " attempts")))))
+
+  (method ^:private generateKeyPairImpl :throws [InvalidKeyException] ^{:tag (Optional KeyPair)} [this
+                                                                                                  ^SecureRandom random]
+    (let [ecParams (cast ECParameterSpec params)
+          ^{:tag (Optional ECOperations)} opsOpt (ECOperations/forParameters ecParams)]
+      (if (.isEmpty opsOpt)
+          (Optional/empty)
+          (let [ops (cast ECOperations (.get opsOpt))
+                field (.getField ops)
+                numBits (.bitLength (.getOrder ecParams))
+                seedBits (unchecked-add-int numBits 64)
+                seedSize (unchecked-divide-int (unchecked-add-int seedBits 7) 8)
+                privArr (.generatePrivateScalar this random ops seedSize)
+                privateKey (ECPrivateKeyImpl. privArr ecParams)]
+            (Arrays/fill privArr (unchecked-byte 0))
+            (let [publicKey (.calculatePublicKey privateKey)]
+              (Optional/of (KeyPair. publicKey privateKey)))))))
+
+  (method ^:private checkKeySize :throws [InvalidParameterException] ^void [this ^int keySize]
+    (when (< keySize KEY_SIZE_MIN)
+      (throw (InvalidParameterException.
+               (java-str (java-str "Key size must be at least " KEY_SIZE_MIN) " bits"))))
+    (when (> keySize KEY_SIZE_MAX)
+      (throw (InvalidParameterException.
+               (java-str (java-str "Key size must be at most " KEY_SIZE_MAX) " bits"))))
+    (set! (.-keySize this) keySize)))

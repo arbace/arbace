@@ -1,0 +1,559 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/KeyShareExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security CryptoPrimitive GeneralSecurityException)
+        '(java.text MessageFormat)
+        '(java.util Collections EnumSet LinkedList List Locale Map$Entry)
+        '(javax.net.ssl SSLProtocolException)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final KeyShareExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (CHKeyShareProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer (CHKeyShareConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence chOnTradeAbsence (CHKeyShareOnTradeAbsence.))
+
+  (field ^:static ^:final ^SSLStringizer chStringizer (CHKeyShareStringizer.))
+
+  (field ^:static ^:final ^HandshakeProducer shNetworkProducer (SHKeyShareProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer shOnLoadConsumer (SHKeyShareConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence shOnLoadAbsence (SHKeyShareAbsence.))
+
+  (field ^:static ^:final ^SSLStringizer shStringizer (SHKeyShareStringizer.))
+
+  (field ^:static ^:final ^HandshakeProducer hrrNetworkProducer (HRRKeyShareProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer hrrOnLoadConsumer (HRRKeyShareConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer hrrNetworkReproducer (HRRKeyShareReproducer.))
+
+  (field ^:static ^:final ^SSLStringizer hrrStringizer (HRRKeyShareStringizer.))
+
+  (defclass ^:private ^:static ^:final KeyShareEntry
+    (field ^:final ^int namedGroupId)
+
+    (field ^:final ^byte/1 keyExchange)
+
+    (constructor ^:private [this ^int namedGroupId ^byte/1 keyExchange]
+      (set! (.-namedGroupId this) namedGroupId)
+      (set! (.-keyExchange this) keyExchange))
+
+    (method ^:private getEncoded ^byte/1 [this]
+      (let [buffer (new byte/1 (unchecked-add-int (alength keyExchange) 4))
+            m (ByteBuffer/wrap buffer)]
+        (try
+          (Record/putInt16 m namedGroupId)
+          (Record/putBytes16 m keyExchange)
+          (catch IOException ioe
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/warning "Unlikely IOException" ioe))))
+        buffer))
+
+    (method ^:private getEncodedSize ^int [this]
+      (unchecked-add-int (alength keyExchange) 4))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\n'{'\n  \"named group\": {0}\n  \"key_exchange\": '{'\n{1}\n  '}'\n'}',"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(NamedGroup/nameOf namedGroupId)
+                                (Utilities/indent (.encode hexEncoder keyExchange) "    ")])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:static ^:final CHKeyShareSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^{:tag (List KeyShareEntry)} clientShares)
+
+    (constructor ^:private [this ^{:tag (List KeyShareEntry)} clientShares]
+      (set! (.-clientShares this) clientShares))
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext handshakeContext
+                                                  ^ByteBuffer buffer]
+      (when (< (.remaining buffer) 2)
+        (throw (.fatal (.-conContext handshakeContext)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         (java-str "Invalid key_share extension: insufficient data (length="
+                                   (.remaining buffer)
+                                   ")")))))
+      (let [listLen (Record/getInt16 buffer)]
+        (when-not (== listLen (.remaining buffer))
+          (throw (.fatal (.-conContext handshakeContext)
+                         Alert/DECODE_ERROR
+                         (SSLProtocolException.
+                           (java-str "Invalid key_share extension: incorrect list length (length="
+                                     listLen
+                                     ")")))))
+        (let [^{:tag (List KeyShareEntry)} keyShares (LinkedList.)]
+          (while (.hasRemaining buffer)
+            (let [namedGroupId (Record/getInt16 buffer)
+                  keyExchange (Record/getBytes16 buffer)]
+              (when (== (alength keyExchange) 0)
+                (throw (.fatal (.-conContext handshakeContext)
+                               Alert/DECODE_ERROR
+                               (SSLProtocolException.
+                                 "Invalid key_share extension: empty key_exchange"))))
+              (.add keyShares (KeyShareEntry. namedGroupId keyExchange))))
+          (set! (.-clientShares this) (Collections/unmodifiableList keyShares)))))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat. "\"client_shares\": '['{0}\n']'" Locale/ENGLISH)
+            builder (StringBuilder. 512)]
+        (for-each [^KeyShareEntry entry clientShares] (.append builder (.toString entry)))
+        (let [messageFields (new Object/1 [(Utilities/indent (.toString builder))])]
+          (.format messageFormat messageFields)))))
+
+  (defclass ^:private ^:static ^:final CHKeyShareStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext handshakeContext ^ByteBuffer buffer]
+      (try
+        (.toString (CHKeyShareSpec. handshakeContext buffer))
+        (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final CHKeyShareProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig chc) SSLExtension/CH_KEY_SHARE))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Ignore unavailable key_share extension"))
+              nil)
+            (let [^:mutable ^{:tag (List NamedGroup)} namedGroups nil]
+              (if (some? (.-serverSelectedNamedGroup chc))
+                  (set! namedGroups (List/of (.-serverSelectedNamedGroup chc)))
+                  (do
+                    (set! namedGroups (.-clientRequestedNamedGroups chc))
+                    (when (or (nil? namedGroups) (.isEmpty namedGroups))
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                        (SSLLogger/warning "Ignore key_share extension, no supported groups"))
+                      (return nil))))
+              (let [^{:tag (List KeyShareEntry)} keyShares (LinkedList.)
+                    ^{:tag (EnumSet NamedGroup$NamedGroupSpec)} ngTypes (EnumSet/noneOf
+                                                                          NamedGroup$NamedGroupSpec)
+                    ^:mutable ^byte/1 keyExchangeData nil]
+                (for-each [^NamedGroup ng namedGroups]
+                  (when-not (.contains ngTypes (.-spec ng))
+                    (when (some? (set! keyExchangeData (CHKeyShareProducer/getShare chc ng)))
+                      (.add keyShares (KeyShareEntry. (.-id ng) keyExchangeData))
+                      (.add ngTypes (.-spec ng))
+                      (when (== (.size ngTypes) 2) (break)))))
+                (let [^:mutable ^int listLen 0]
+                  (for-each [^KeyShareEntry entry keyShares]
+                    (set! listLen (unchecked-add-int listLen (.getEncodedSize entry))))
+                  (let [extData (new byte/1 (unchecked-add-int listLen 2))
+                        m (ByteBuffer/wrap extData)]
+                    (Record/putInt16 m listLen)
+                    (for-each [^KeyShareEntry entry keyShares] (.put m (.getEncoded entry)))
+                    (.put (.-handshakeExtensions chc)
+                          SSLExtension/CH_KEY_SHARE
+                          (CHKeyShareSpec. keyShares))
+                    extData)))))))
+
+    (method ^:private ^:static getShare ^byte/1 [^ClientHandshakeContext chc ^NamedGroup ng]
+      (let [ke (SSLKeyExchange/valueOf ng)]
+        (if (nil? ke)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/warning (java-str "No key exchange for named group " (.-name ng))))
+            (let [poses (.createPossessions ke chc)]
+              (for-each [^SSLPossession pos poses]
+                (.add (.-handshakePossessions chc) pos)
+                (when (instance? NamedGroupPossession pos) (return (.encode pos))))))
+        nil)))
+
+  (defclass ^:private ^:static ^:final CHKeyShareConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [shc (cast ServerHandshakeContext context)]
+        (cond
+          (.containsKey (.-handshakeExtensions shc) SSLExtension/CH_KEY_SHARE)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "The key_share extension has been loaded"))
+          (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_KEY_SHARE))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Ignore unavailable key_share extension"))
+          :else
+            (let [spec (CHKeyShareSpec. shc buffer)
+                  ^{:tag (List SSLCredentials)} credentials (LinkedList.)]
+              (for-each [^KeyShareEntry entry (.-clientShares spec)]
+                (let [ng (NamedGroup/valueOf (.-namedGroupId entry))]
+                  (if (or (nil? ng)
+                          (not (NamedGroup/isActivatable
+                                 (.-sslConfig shc)
+                                 (.-algorithmConstraints shc)
+                                 ng)))
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                        (SSLLogger/fine
+                          (java-str "Ignore unsupported named group: "
+                                    (NamedGroup/nameOf (.-namedGroupId entry)))))
+                      (try
+                        (let [^:mutable kaCred (.decodeCredentials ng (.-keyExchange entry))]
+                          (when (some? (.-algorithmConstraints shc))
+                            (when-instance [^NamedGroupCredentials namedGroupCredentials kaCred]
+                              (when-not (.permits
+                                          (.-algorithmConstraints shc)
+                                          (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                                          (.getPublicKey namedGroupCredentials))
+                                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                                  (SSLLogger/warning
+                                    (java-str "key share entry of "
+                                              ng
+                                              " does not  comply with algorithm constraints")))
+                                (set! kaCred nil))))
+                          (when (some? kaCred) (.add credentials kaCred)))
+                        (catch GeneralSecurityException ex
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/warning
+                              (java-str "Cannot decode named group: "
+                                        (NamedGroup/nameOf (.-namedGroupId entry))))))))))
+              (if (not (.isEmpty credentials))
+                  (.addAll (.-handshakeCredentials shc) credentials)
+                  (.put (.-handshakeProducers shc)
+                        (.-id SSLHandshake/HELLO_RETRY_REQUEST)
+                        SSLHandshake/HELLO_RETRY_REQUEST))
+              (.put (.-handshakeExtensions shc) SSLExtension/CH_KEY_SHARE spec))))))
+
+  (defclass ^:private ^:static ^:final CHKeyShareOnTradeAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (and (.useTLS13PlusSpec (.-negotiatedProtocol shc))
+                   (.containsKey (.-handshakeExtensions shc) SSLExtension/CH_SUPPORTED_GROUPS))
+          (throw (.fatal (.-conContext shc)
+                         Alert/MISSING_EXTENSION
+                         "No key_share extension to work with the supported_groups extension"))))))
+
+  (defclass ^:static ^:final SHKeyShareSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^KeyShareEntry serverShare)
+
+    (constructor [this ^KeyShareEntry serverShare]
+      (set! (.-serverShare this) serverShare))
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext handshakeContext
+                                                  ^ByteBuffer buffer]
+      (when (< (.remaining buffer) 5)
+        (throw (.fatal (.-conContext handshakeContext)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         (java-str "Invalid key_share extension: insufficient data (length="
+                                   (.remaining buffer)
+                                   ")")))))
+      (let [namedGroupId (Record/getInt16 buffer)
+            keyExchange (Record/getBytes16 buffer)]
+        (when (.hasRemaining buffer)
+          (throw (.fatal (.-conContext handshakeContext)
+                         Alert/DECODE_ERROR
+                         (SSLProtocolException. "Invalid key_share extension: unknown extra data"))))
+        (set! (.-serverShare this) (KeyShareEntry. namedGroupId keyExchange))))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"server_share\": '{'\n  \"named group\": {0}\n  \"key_exchange\": '{'\n{1}\n  '}'\n'}',"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(NamedGroup/nameOf (.-namedGroupId serverShare))
+                                (Utilities/indent
+                                  (.encode hexEncoder (.-keyExchange serverShare))
+                                  "    ")])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:private ^:static ^:final SHKeyShareStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext handshakeContext ^ByteBuffer buffer]
+      (try
+        (.toString (SHKeyShareSpec. handshakeContext buffer))
+        (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final SHKeyShareProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            kss (cast CHKeyShareSpec (.get (.-handshakeExtensions shc) SSLExtension/CH_KEY_SHARE))]
+        (cond
+          (nil? kss)
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/warning "Ignore, no client key_share extension"))
+              nil)
+          (not (.isAvailable (.-sslConfig shc) SSLExtension/SH_KEY_SHARE))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/warning "Ignore, no available server key_share extension"))
+              nil)
+          (or (nil? (.-handshakeCredentials shc)) (.isEmpty (.-handshakeCredentials shc)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/warning "No available client key share entries"))
+              nil)
+          :else
+            (let [^:mutable ^KeyShareEntry keyShare nil]
+              (for-each [^SSLCredentials cd (.-handshakeCredentials shc)]
+                (let [^:mutable ^NamedGroup ng nil]
+                  (when-instance [^NamedGroupCredentials creds cd] (set! ng (.getNamedGroup creds)))
+                  (when (some? ng)
+                    (let [ke (SSLKeyExchange/valueOf ng)]
+                      (if (nil? ke)
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/warning
+                              (java-str "No key exchange for named group " (.-name ng))))
+                          (let [poses (.createPossessions ke shc)]
+                            (for-each [^SSLPossession pos poses]
+                              (when-not (not (instance? NamedGroupPossession pos))
+                                (set! (.-handshakeKeyExchange shc) ke)
+                                (.add (.-handshakePossessions shc) pos)
+                                (set! keyShare (KeyShareEntry. (.-id ng) (.encode pos)))
+                                (break)))
+                            (when (some? keyShare)
+                              (for-each [^{:tag (Map$Entry Byte HandshakeProducer)} me
+                                           (.getHandshakeProducers ke shc)]
+                                (.put (.-handshakeProducers shc)
+                                      (cast Byte (.getKey me))
+                                      (cast HandshakeProducer (.getValue me))))
+                              (break))))))))
+              (if (nil? keyShare)
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/warning "No available server key_share extension"))
+                    nil)
+                  (let [extData (.getEncoded keyShare)
+                        spec (SHKeyShareSpec. keyShare)]
+                    (.put (.-handshakeExtensions shc) SSLExtension/SH_KEY_SHARE spec)
+                    extData)))))))
+
+  (defclass ^:private ^:static ^:final SHKeyShareConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when (or (nil? (.-clientRequestedNamedGroups chc))
+                  (.isEmpty (.-clientRequestedNamedGroups chc)))
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected key_share extension in ServerHello")))
+        (when-not (.isAvailable (.-sslConfig chc) SSLExtension/SH_KEY_SHARE)
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unsupported key_share extension in ServerHello")))
+        (let [spec (SHKeyShareSpec. chc buffer)
+              keyShare (.-serverShare spec)
+              ng (NamedGroup/valueOf (.-namedGroupId keyShare))]
+          (when (or (nil? ng)
+                    (not (NamedGroup/isActivatable
+                           (.-sslConfig chc)
+                           (.-algorithmConstraints chc)
+                           ng)))
+            (throw (.fatal (.-conContext chc)
+                           Alert/UNEXPECTED_MESSAGE
+                           (java-str "Unsupported named group: "
+                                     (NamedGroup/nameOf (.-namedGroupId keyShare))))))
+          (let [ke (SSLKeyExchange/valueOf ng)]
+            (when (nil? ke)
+              (throw (.fatal (.-conContext chc)
+                             Alert/UNEXPECTED_MESSAGE
+                             (java-str "No key exchange for named group " (.-name ng)))))
+            (let [^:mutable ^SSLCredentials credentials nil]
+              (try
+                (let [kaCred (.decodeCredentials ng (.-keyExchange keyShare))]
+                  (when (some? (.-algorithmConstraints chc))
+                    (when-instance [^NamedGroupCredentials namedGroupCredentials kaCred]
+                      (when-not (.permits (.-algorithmConstraints chc)
+                                          (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                                          (.getPublicKey namedGroupCredentials))
+                        (.fatal (.-conContext chc)
+                                Alert/INSUFFICIENT_SECURITY
+                                (java-str "key share entry of "
+                                          ng
+                                          " does not  comply with algorithm constraints")))))
+                  (when (some? kaCred) (set! credentials kaCred)))
+                (catch GeneralSecurityException ex
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/UNEXPECTED_MESSAGE
+                                 (java-str "Cannot decode named group: "
+                                           (NamedGroup/nameOf (.-namedGroupId keyShare)))))))
+              (when (nil? credentials)
+                (throw (.fatal (.-conContext chc)
+                               Alert/UNEXPECTED_MESSAGE
+                               (java-str "Unsupported named group: " (.-name ng)))))
+              (set! (.-handshakeKeyExchange chc) ke)
+              (.add (.-handshakeCredentials chc) credentials)
+              (.put (.-handshakeExtensions chc) SSLExtension/SH_KEY_SHARE spec)))))))
+
+  (defclass ^:private ^:static ^:final SHKeyShareAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "handshake"))
+          (SSLLogger/fine
+            "No key_share extension in ServerHello, cleanup the key shares if necessary"))
+        (.clear (.-handshakePossessions chc)))))
+
+  (defclass ^:static ^:final HRRKeyShareSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^int selectedGroup)
+
+    (constructor [this ^NamedGroup serverGroup]
+      (set! (.-selectedGroup this) (.-id serverGroup)))
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext handshakeContext
+                                                  ^ByteBuffer buffer]
+      (when-not (== (.remaining buffer) 2)
+        (throw (.fatal (.-conContext handshakeContext)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         (java-str "Invalid key_share extension: improper data (length="
+                                   (.remaining buffer)
+                                   ")")))))
+      (set! (.-selectedGroup this) (Record/getInt16 buffer)))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat. "\"selected group\": '['{0}']'" Locale/ENGLISH)
+            messageFields (new Object/1 [(NamedGroup/nameOf selectedGroup)])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:private ^:static ^:final HRRKeyShareStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext handshakeContext ^ByteBuffer buffer]
+      (try
+        (.toString (HRRKeyShareSpec. handshakeContext buffer))
+        (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final HRRKeyShareProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when-not (.isAvailable (.-sslConfig shc) SSLExtension/HRR_KEY_SHARE)
+          (throw (.fatal (.-conContext shc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unsupported key_share extension in HelloRetryRequest")))
+        (when (or (nil? (.-clientRequestedNamedGroups shc))
+                  (.isEmpty (.-clientRequestedNamedGroups shc)))
+          (throw (.fatal (.-conContext shc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected key_share extension in HelloRetryRequest")))
+        (let [^:mutable ^NamedGroup selectedGroup nil]
+          (for-each [^NamedGroup ng (.-clientRequestedNamedGroups shc)]
+            (when (NamedGroup/isActivatable (.-sslConfig shc) (.-algorithmConstraints shc) ng)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine (java-str "HelloRetryRequest selected named group: " (.-name ng))))
+              (set! selectedGroup ng)
+              (break)))
+          (when (nil? selectedGroup)
+            (throw (.fatal (.-conContext shc) Alert/UNEXPECTED_MESSAGE "No common named group")))
+          (let [extdata (new byte/1
+                             [(unchecked-byte
+                                (bit-and-int (bit-shift-right-int (.-id selectedGroup) 8) 0xFF))
+                              (unchecked-byte (bit-and-int (.-id selectedGroup) 0xFF))])]
+            (set! (.-serverSelectedNamedGroup shc) selectedGroup)
+            (.put (.-handshakeExtensions shc)
+                  SSLExtension/HRR_KEY_SHARE
+                  (HRRKeyShareSpec. selectedGroup))
+            extdata)))))
+
+  (defclass ^:private ^:static ^:final HRRKeyShareReproducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when-not (.isAvailable (.-sslConfig shc) SSLExtension/HRR_KEY_SHARE)
+          (throw (.fatal (.-conContext shc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unsupported key_share extension in HelloRetryRequest")))
+        (let [spec (cast CHKeyShareSpec
+                         (.get (.-handshakeExtensions shc) SSLExtension/CH_KEY_SHARE))]
+          (when (and (and (some? spec) (some? (.-clientShares spec)))
+                     (== (.size (.-clientShares spec)) 1))
+            (let [namedGroupId (.-namedGroupId (cast KeyShareEntry (.get (.-clientShares spec) 0)))]
+              (new byte/1
+                   [(unchecked-byte (bit-and-int (bit-shift-right-int namedGroupId 8) 0xFF))
+                    (unchecked-byte (bit-and-int namedGroupId 0xFF))])))))))
+
+  (defclass ^:private ^:static ^:final HRRKeyShareConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when-not (.isAvailable (.-sslConfig chc) SSLExtension/HRR_KEY_SHARE)
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unsupported key_share extension in HelloRetryRequest")))
+        (when (or (nil? (.-clientRequestedNamedGroups chc))
+                  (.isEmpty (.-clientRequestedNamedGroups chc)))
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected key_share extension in HelloRetryRequest")))
+        (let [spec (HRRKeyShareSpec. chc buffer)
+              serverGroup (NamedGroup/valueOf (.-selectedGroup spec))]
+          (when (nil? serverGroup)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           (java-str "Unsupported HelloRetryRequest selected group: "
+                                     (NamedGroup/nameOf (.-selectedGroup spec))))))
+          (when-not (.contains (.-clientRequestedNamedGroups chc) serverGroup)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           (java-str "Unexpected HelloRetryRequest selected group: "
+                                     (.-name serverGroup)))))
+          (let [chKsSpec (cast CHKeyShareSpec
+                               (.get (.-handshakeExtensions chc) SSLExtension/CH_KEY_SHARE))]
+            (if (some? chKsSpec)
+                (for-each [^KeyShareEntry kse (.-clientShares chKsSpec)]
+                  (when (== (.-id serverGroup) (.-namedGroupId kse))
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/ILLEGAL_PARAMETER
+                                   (java-str "Illegal HelloRetryRequest selected group: "
+                                             (.-name serverGroup))))))
+                (throw
+                  (.fatal
+                    (.-conContext chc)
+                    Alert/INTERNAL_ERROR
+                    "Unable to retrieve ClientHello key_share extension during HRR processing")))
+            (set! (.-serverSelectedNamedGroup chc) serverGroup)
+            (.put (.-handshakeExtensions chc) SSLExtension/HRR_KEY_SHARE spec)))))))

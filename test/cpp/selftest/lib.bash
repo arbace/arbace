@@ -3,8 +3,13 @@
 #   finish            the test's exit status
 set -uo pipefail
 # a test runs Arbace's tools on a copy of the tree too, where no stage 0 can be built: the host is named
-[ -n "${ARBACE_HOST_EXE:-}" ] || { echo "selftest: ARBACE_HOST_EXE is not set (the tools' host)"; exit 1; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# the gate unsets ARBACE_HOST_EXE (the checkout's own stage 0 hosts): bin/lib/host.bash's arbace_host_exe names it
+if [ -z "${ARBACE_HOST_EXE:-}" ]; then
+  . "$root/bin/lib/host.bash"
+  ARBACE_HOST_EXE=$(arbace_host_exe) || { echo "selftest: no host for the tools (ARBACE_HOST_EXE)"; exit 1; }
+  export ARBACE_HOST_EXE
+fi
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}

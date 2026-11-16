@@ -769,21 +769,30 @@ prepare() {
   local exe=$1 image=$2 nss
   echo "== prepare the namespaces (the image)" >&2
   # the embedded namespaces, as j2g lists them (its sources may be compressed: amendment SZ2)
-  nss=$(tr '\n' ' ' < "$dir/j2g$variant/prog/namespaces.txt")
+  nss=${PREPARE_NSS:-$(tr '\n' ' ' < "$dir/j2g$variant/prog/namespaces.txt")}
   rm -f "$image"
-  printf '(doseq [n (quote [%s])]\n  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))\n' "$nss" \
+  # a namespace that does not load (a syntax error, a forward reference: jcs127's day test, 2026-11-15, interp.ae:537 left
+  # arbace.classes.interp and arbace.classes.native out of the image of a build that passed) fails the prepare, and so the build:
+  # each one named, then exit 1 after the c2j part, whose failures fail it too
+  printf '(def prepare-bad (atom []))\n(doseq [n (quote [%s])]\n  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)) (swap! prepare-bad conj n))))\n' "$nss" \
     > "$dir/prepare$variant.ae"
   # the namespaces compiled to Java forms too (standalone S6, arbace.c2j): the units the run
   # records, compiled when all are loaded into the tree $aot_out
   local compile=()
   if [ -n "${aot_out:-}" ]; then
     rm -rf "$aot_out"
-    printf '(require (quote arbace.c2j.main))\n(let [r (arbace.c2j.main/run "%s" nil)]\n  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")\n  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m)))\n' "$aot_out" \
+    printf '(require (quote arbace.c2j.main))\n(let [r (arbace.c2j.main/run "%s" nil)]\n  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")\n  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))\n  (when (seq (:failed r)) (swap! prepare-bad conj :c2j)))\n' "$aot_out" \
       >> "$dir/prepare$variant.ae"
     compile=(env ARBACE_COMPILE=1 ARBACE_PATH="$root" ARBACE_AOT_ROOT="$root")
   fi
+  printf '(when (seq @prepare-bad) (println "image:" (count @prepare-bad) "namespaces not prepared") (shutdown-agents) (System/exit 1))\n' >> "$dir/prepare$variant.ae"
   "${compile[@]}" env GOGC=${GOGC:-400} ARBACE_PREPARE=$image "$exe" "$dir/prepare$variant.ae" > "$dir/prepare$variant.log" 2>&1 \
     || { tail -20 "$dir/prepare$variant.log" >&2; echo "arbace-go: prepare failed ($dir/prepare$variant.log)" >&2; return 1; }
+  # the same from the log, whatever the script's exit: a namespace not prepared, or a source c2j did not compile
+  if grep -q '^image: not prepared:\|^aot: not compiled:' "$dir/prepare$variant.log"; then
+    grep '^image: not prepared:\|^aot: not compiled:' "$dir/prepare$variant.log" | head -20 >&2
+    echo "arbace-go: prepare failed: a namespace not prepared or not compiled ($dir/prepare$variant.log)" >&2; return 1
+  fi
   [ -s "$image" ] || { echo "arbace-go: prepare wrote no image ($dir/prepare$variant.log)" >&2; return 1; }
   grep '^image:\|^aot:' "$dir/prepare$variant.log" >&2
   echo "arbace-go: image $(stat -c %s "$image") bytes" >&2
@@ -991,11 +1000,9 @@ EOF
 # the clean run's audit of go-build found them read and unkeyed (doc/GATE-SURVEY.md, "As built: GT7 (tooling)")
 # Since queue 111 (054's finding 9) also less the crops' files no build reads, evaluated from the checkout or
 # built by the crops' own scripts: bin/lib/ci, bin/lib/oi and bin/lib/repr-cpp (only bin/ci, bin/oi and
-# bin/repr-cpp run them), the Go forms of oi and scm (go/arbace/{oi,scm}{.ae,/}) and pyi's lazy modules (expat, pyexpat, clib, pybz2,
-# pylzma, pyzstd, pyssl: W-P6 (a), queue 214; pyi's runtime go/arbace/py and libm are read since W2, PYS28 (a): j2g copies them
-# and goi's table lists them; ci, cinterp and crt are read since C9:
+# bin/repr-cpp run them), the Go forms of oi, scm and pyi (go/arbace/{oi,scm,py}{.ae,/}, PYS18 (a); ci, cinterp and crt are read since C9:
 # j2g --program copies only go/arbace/jrt, goi, api, arbace.ae, repr and the main package's files,
-# arbace/j2g/main.ae; goi's table reads only arbace, arbace/repr/*, py, libm, ci and crt, arbace/go/table.ae's program-path?),
+# arbace/j2g/main.ae; goi's table reads only arbace and arbace/repr/*, arbace/go/table.ae's program-path?),
 # and OCaml's runtime jdk/ocaml (j2g reads jdk/forms, jdk/data and jdk/edge.edn; arbace.o2j reads jdk/ocaml at
 # its own run, -main). Must stay: arbace/o2j.ae (embedded: arbace/j2g/embed.ae excludes it not), arbace/http.ae
 # and arbace/tls (embedded, net/http), bin/lib/tls-checks.bash (the smoke test), the rest of go/arbace and jdk/
@@ -1003,18 +1010,10 @@ gate_key() {
   (cd "$root" && {
     { arbace_embedded_sources "$root"
       find go overlay jdk x509roots bin/lib test/java-fixtures tamago/goroot tools/godump -type f ! -path 'jdk/javac/*' ! -path jdk/provenance.edn \
-        ! -path 'jdk/platform/*' ! -path 'jdk/ocaml/*' \
+        ! -path 'jdk/platform/*' \
         ! -path 'overlay/jdk/javac/*' ! -path test/java-fixtures/provenance.edn ! -path 'bin/lib/repr-java/*' \
-        ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*' ! -path 'bin/lib/repr-c/*' ! -path bin/lib/gate-run.bash ! -path bin/lib/cover.bash \
-        ! -path 'bin/lib/ci/*' ! -path 'bin/lib/oi/*' ! -path 'bin/lib/repr-cpp/*' \
-        ! -path go/arbace/oi.ae ! -path 'go/arbace/oi/*' \
-        ! -path go/arbace/scm.ae ! -path 'go/arbace/scm/*' \
-        ! -path go/arbace/expat.ae ! -path 'go/arbace/expat/*' \
-        ! -path go/arbace/pyexpat.ae ! -path 'go/arbace/pyexpat/*' \
-        ! -path go/arbace/clib.ae ! -path 'go/arbace/clib/*' ! -path go/arbace/pybz2.ae ! -path 'go/arbace/pybz2/*' \
-        ! -path go/arbace/pylzma.ae ! -path 'go/arbace/pylzma/*' ! -path go/arbace/pyzstd.ae ! -path 'go/arbace/pyzstd/*' \
-        ! -path go/arbace/pyssl.ae ! -path 'go/arbace/pyssl/*' \
-        ! -path go/arbace/pysqlite3.ae ! -path 'go/arbace/pysqlite3/*'; } | LC_ALL=C sort
+        ! -path 'bin/lib/repr-c/*' ! -path bin/lib/gate-run.bash ! -path bin/lib/cover.bash ! -path 'bin/lib/ci/*' \
+        "${arbace_not_crops[@]}"; } | LC_ALL=C sort
     printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi
   } | xargs -d '\n' sha256sum
     [ -z "${ARBACE_HOST_EXE:-}" ] || sha256sum < "$ARBACE_HOST_EXE"
@@ -1030,8 +1029,8 @@ gate_key() {
 gate_rest_key() {
   (cd "$root" && {
     { find overlay x509roots bin/lib -type f ! -path 'overlay/jdk/*' ! -path 'bin/lib/repr-java/*' \
-        ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*' ! -path 'bin/lib/repr-c/*' ! -path bin/lib/gate-run.bash ! -path bin/lib/cover.bash \
-        ! -path 'bin/lib/ci/*' ! -path 'bin/lib/oi/*' ! -path 'bin/lib/repr-cpp/*'; } | LC_ALL=C sort
+        ! -path 'bin/lib/repr-c/*' ! -path bin/lib/gate-run.bash ! -path bin/lib/cover.bash ! -path 'bin/lib/ci/*' \
+        "${arbace_not_crops[@]}"; } | LC_ALL=C sort
     printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi
   } | xargs -d '\n' sha256sum
     [ -z "${ARBACE_HOST_EXE:-}" ] || sha256sum < "$ARBACE_HOST_EXE"
@@ -1425,6 +1424,11 @@ case ${1:-} in
     [ $# = 3 ] || { echo "usage: bin/arbace-go --compile-aot HOST OUT" >&2; exit 2; }
     seed_aot "$2" "$3" ;;
   --image) image ;;
+  # --prepare-check EXE DIR NS...: prepare's run alone over the namespaces NS (from ARBACE_PATH's sources), its work in DIR; the
+  # status prepare gives the build (test/gate/prepare-fail-test.bash)
+  # --host-compile-check HOST DIR NS...: host_compile's run alone (bin/lib/program.bash) over NS, HOST_COMPILE_PATH their root
+  --host-compile-check) shift; h=$1 dir=$2; shift 2; mkdir -p "$dir"; HOST_COMPILE_NSS="$*" host_compile "$h" "$dir/aot" ;;
+  --prepare-check) shift; e=$1 dir=$2; shift 2; mkdir -p "$dir"; PREPARE_NSS="$*" prepare "$e" "$dir/image.bin" ;;
   --smoke)
     if [ "${2:-}" = --box ]; then box_smoke; exit; fi
     for a in ${arches//,/ }; do [ -x "$dir/$a/arbace" ] || { build || exit 1; break; }; done; smoke ;;

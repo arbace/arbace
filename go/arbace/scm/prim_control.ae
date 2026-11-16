@@ -22,15 +22,40 @@
         (aset cdrs i (.-Cdr p))))
     (return cars cdrs true)))
 
-(go/func checkLists "checkLists checks that every list of ls is proper and that they have one length.\n"
-  [^string who ^{:tag (slice any)} ls]
+(go/func carsCdrsN
+  "carsCdrsN is carsCdrs for the n steps still to take of a walk whose length was checked at its entry (SMR2): ok false
+at n = 0, and a list that is no pair before that has been altered by the procedure argument, Chez's
+\"input list was altered during operation\" (for-each, for-all, exists, andmap, ormap; map and fold-right do not look).\n"
+  [^string who ^{:tag (slice any)} ls ^int n] :results [(slice any) (slice any) bool]
+  (when (== n 0)
+    (return nil nil false))
+  (let [(values cars cdrs ok) (carsCdrs ls)]
+    (when (not ok)
+      (Violation CondAssertion who "input list was altered during operation"))
+    (return cars cdrs true)))
+
+(go/func carsCdrsAlt
+  "carsCdrsAlt is carsCdrs for fold-left (SMR2): the end is the lists' empty list, any other tail that is no pair (a list
+altered by the procedure argument) raises Chez's \"input list was altered during operation\".\n"
+  [^string who ^{:tag (slice any)} ls] :results [(slice any) (slice any) bool]
+  (let [(values cars cdrs ok) (carsCdrs ls)]
+    (when (not ok)
+      (range [_ l ls]
+        (when (not (dlIsNull l))
+          (Violation CondAssertion who "input list was altered during operation")))
+      (return nil nil false))
+    (return cars cdrs true)))
+
+(go/func checkLists "checkLists checks that every list of ls is proper and that they have one length, and is that length.\n"
+  ^int [^string who ^{:tag (slice any)} ls]
   (let [n -1]
     (range [_ l ls]
       (let [xs (ArgList who l)]
         (if (< n 0)
           (set! n (len xs))
           (when (!= n (len xs))
-            (AssertionViolation who "lists ~s and ~s differ in length" (aget ls 0) l)))))))
+            (AssertionViolation who "lists ~s and ~s differ in length" (aget ls 0) l)))))
+    (return n)))
 
 (go/func reverseList ^any [^any l]
   (let [^any r Null]
@@ -50,25 +75,24 @@
     (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool] (return (mapStep m2 f cdrs (Cons v acc)))))
     (return (.Apply m f cars))))
 
-(go/func forEachStep [^{:tag (* M)} m ^any f ^{:tag (slice any)} ls] :results [any bool]
-  (let [(values cars cdrs ok) (carsCdrs ls)]
+(go/func forEachStep [^{:tag (* M)} m ^any f ^{:tag (slice any)} ls ^int n] :results [any bool]
+  (let [(values cars cdrs ok) (carsCdrsN "for-each" ls n)]
     (when (not ok)
       (return Unspec true))
-    (.PushGo m (fn [^{:tag (* M)} m2 ^any _] :results [any bool] (return (forEachStep m2 f cdrs))))
+    (.PushGo m (fn [^{:tag (* M)} m2 ^any _] :results [any bool] (return (forEachStep m2 f cdrs (- n 1)))))
     (return (.Apply m f cars))))
 
 (go/func forAllStep "forAllStep is for-all (all true) or exists (all false), the last call in tail position.\n"
-  [^{:tag (* M)} m ^any f ^{:tag (slice any)} ls ^bool all] :results [any bool]
-  (let [(values cars cdrs ok) (carsCdrs ls)]
+  [^{:tag (* M)} m ^string who ^any f ^{:tag (slice any)} ls ^bool all ^int n] :results [any bool]
+  (let [(values cars cdrs ok) (carsCdrsN who ls n)]
     (when (not ok)
       (return all true))
-    (let [(values _ _ more) (carsCdrs cdrs)]
-      (when (not more)
-        (return (.Apply m f cars))))
+    (when (== n 1)
+      (return (.Apply m f cars)))
     (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
                  (when (== (Truthy v) (not all))
                    (return v true))
-                 (return (forAllStep m2 f cdrs all))))
+                 (return (forAllStep m2 who f cdrs all (- n 1)))))
     (return (.Apply m f cars))))
 
 (go/func filterStep
@@ -88,26 +112,43 @@
       (return (.Apply m f (lit (slice any) x))))))
 
 (go/func findStep
-  "findStep is find (the element), memp (the tail) or assp (the pair whose car satisfies f).\n"
-  [^{:tag (* M)} m ^string mode ^any f ^any l] :results [any bool]
+  "findStep is find (the element), memp (the tail) or assp (the pair whose car satisfies f); orig is the list as given, slow
+the tortoise of the cycle test (SMR2: Chez's \"improper list\", \"cyclic list\", \"improperly formed alist\", \"cyclic alist\").\n"
+  [^{:tag (* M)} m ^string mode ^any f ^any l ^any orig ^any slow ^int n] :results [any bool]
   (let [(values p ok) (assert (* Pair) l)]
     (when (not ok)
-      (return false true))
+      (when (dlIsNull l)
+        (return false true))
+      (if (== mode "assp")
+        (Violation CondAssertion mode "improperly formed alist ~s" orig)
+        (Violation CondAssertion mode "improper list ~s" orig)))
     (let [x (.-Car p)
-          arg x]
+          arg x
+          next (.-Cdr p)
+          slow2 slow
+          n2 (+ n 1)]
       (when (== mode "assp")
-        (set! arg (.-Car (ArgPair "assp" x))))
+        (let [(values e ok2) (assert (* Pair) x)]
+          (when (not ok2)
+            (Violation CondAssertion mode "improperly formed alist ~s" orig))
+          (set! arg (.-Car e))))
+      (when (== (% n2 2) 0)
+        (set! slow2 (dlCdrOf slow))
+        (when (== slow2 next)
+          (if (== mode "assp")
+            (Violation CondAssertion mode "cyclic alist ~s" orig)
+            (Violation CondAssertion mode "cyclic list ~s" orig))))
       (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
                    (when (Truthy v)
                      (switch mode
                        (case ["find"] (return x true))
                        (case ["memp"] (return p true)))
                      (return x true))
-                   (return (findStep m2 mode f (.-Cdr p)))))
+                   (return (findStep m2 mode f next orig slow2 n2))))
       (return (.Apply m f (lit (slice any) arg))))))
 
 (go/func foldLeftStep [^{:tag (* M)} m ^any f ^any acc ^{:tag (slice any)} ls] :results [any bool]
-  (let [(values cars cdrs ok) (carsCdrs ls)]
+  (let [(values cars cdrs ok) (carsCdrsAlt "fold-left" ls)]
     (when (not ok)
       (return acc true))
     (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool] (return (foldLeftStep m2 f v cdrs))))
@@ -226,14 +267,11 @@
     (checkLists "map" (subslice a 1))
     (return (mapStep m (ArgProc "map" (aget a 0)) (subslice a 1) Null))))
   (DefCtl "for-each" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
-    (checkLists "for-each" (subslice a 1))
-    (return (forEachStep m (ArgProc "for-each" (aget a 0)) (subslice a 1)))))
+    (return (forEachStep m (ArgProc "for-each" (aget a 0)) (subslice a 1) (checkLists "for-each" (subslice a 1))))))
   (DefCtl "for-all" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
-    (checkLists "for-all" (subslice a 1))
-    (return (forAllStep m (ArgProc "for-all" (aget a 0)) (subslice a 1) true))))
+    (return (forAllStep m "for-all" (ArgProc "for-all" (aget a 0)) (subslice a 1) true (checkLists "for-all" (subslice a 1))))))
   (DefCtl "exists" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
-    (checkLists "exists" (subslice a 1))
-    (return (forAllStep m (ArgProc "exists" (aget a 0)) (subslice a 1) false))))
+    (return (forAllStep m "exists" (ArgProc "exists" (aget a 0)) (subslice a 1) false (checkLists "exists" (subslice a 1))))))
   (range [_ mode (lit (slice string) "filter" "remp" "partition")]
     (let [md mode]
       (DefCtl md 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
@@ -242,7 +280,7 @@
   (range [_ mode (lit (slice string) "find" "memp" "assp")]
     (let [md mode]
       (DefCtl md 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
-        (return (findStep m md (ArgProc md (aget a 0)) (aget a 1)))))))
+        (return (findStep m md (ArgProc md (aget a 0)) (aget a 1) (aget a 1) (aget a 1) 0))))))
   (DefCtl "fold-left" 3 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
     (checkLists "fold-left" (subslice a 2))
     (return (foldLeftStep m (ArgProc "fold-left" (aget a 0)) (aget a 1) (subslice a 2)))))

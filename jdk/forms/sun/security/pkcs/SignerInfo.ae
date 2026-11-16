@@ -1,0 +1,478 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/pkcs/SignerInfo.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.pkcs)
+
+(import '(java.io IOException)
+        '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        Principal
+                        ProviderException
+                        PublicKey
+                        Signature
+                        SignatureException
+                        Timestamp)
+        '(java.security.cert CertPathValidatorException
+                             CertificateException
+                             CertificateFactory
+                             X509Certificate)
+        '(java.security.spec PSSParameterSpec)
+        '(java.util ArrayList HashMap HashSet Map Map$Entry Set)
+        '(sun.security.provider SHA3$SHAKE256)
+        '(sun.security.timestamp TimestampToken)
+        '(sun.security.util Debug
+                            DerEncoder
+                            DerInputStream
+                            DerOutputStream
+                            DerValue
+                            DisabledAlgorithmConstraints
+                            HexDumpEncoder
+                            JarConstraintsParameters
+                            KeyUtil
+                            KnownOIDs
+                            ObjectIdentifier
+                            SignatureUtil
+                            SignatureUtil$DigestAlgHolder)
+        '(sun.security.x509 AlgorithmId KeyUsageExtension X500Name))
+
+(defclass ^:public SignerInfo
+  :implements [DerEncoder]
+
+  (field ^:private ^:static ^:final ^DisabledAlgorithmConstraints JAR_DISABLED_CHECK
+    (DisabledAlgorithmConstraints/jarConstraints))
+
+  (field ^BigInteger version)
+
+  (field ^X500Name issuerName)
+
+  (field ^BigInteger certificateSerialNumber)
+
+  (field ^AlgorithmId digestAlgorithmId)
+
+  (field ^AlgorithmId digestEncryptionAlgorithmId)
+
+  (field ^byte/1 encryptedDigest)
+
+  (field ^Timestamp timestamp)
+
+  (field ^:private ^boolean hasTimestamp true)
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "jar"))
+
+  (field ^PKCS9Attributes authenticatedAttributes)
+
+  (field ^PKCS9Attributes unauthenticatedAttributes)
+
+  (defclass ^:private ^:record AlgorithmInfo [^String field ^boolean checkKey])
+
+  (field ^:private ^:final ^{:tag (Map AlgorithmId AlgorithmInfo)} algorithms (HashMap.))
+
+  (constructor ^:public [this ^X500Name issuerName ^BigInteger serial ^AlgorithmId digestAlgorithmId
+                         ^AlgorithmId digestEncryptionAlgorithmId ^byte/1 encryptedDigest]
+    (this. issuerName serial digestAlgorithmId nil digestEncryptionAlgorithmId encryptedDigest nil))
+
+  (constructor ^:public [this ^X500Name issuerName ^BigInteger serial ^AlgorithmId digestAlgorithmId
+                         ^PKCS9Attributes authenticatedAttributes
+                         ^AlgorithmId digestEncryptionAlgorithmId ^byte/1 encryptedDigest
+                         ^PKCS9Attributes unauthenticatedAttributes]
+    (set! (.-version this) BigInteger/ONE)
+    (set! (.-issuerName this) issuerName)
+    (set! (.-certificateSerialNumber this) serial)
+    (set! (.-digestAlgorithmId this) digestAlgorithmId)
+    (set! (.-authenticatedAttributes this) authenticatedAttributes)
+    (set! (.-digestEncryptionAlgorithmId this) digestEncryptionAlgorithmId)
+    (set! (.-encryptedDigest this) encryptedDigest)
+    (set! (.-unauthenticatedAttributes this) unauthenticatedAttributes))
+
+  (constructor :throws [IOException] ^:public [this ^DerInputStream derin]
+    (this. derin false))
+
+  (constructor :throws [IOException] ^:public [this ^DerInputStream derin ^boolean oldStyle]
+    (set! version (.getBigInteger derin))
+    (let [issuerAndSerialNumber (.getSequence derin 2)]
+      (when-not (== (alength issuerAndSerialNumber) 2)
+        (throw (ParsingException. "Invalid length for IssuerAndSerialNumber")))
+      (let [issuerBytes (.toByteArray (aget issuerAndSerialNumber 0))]
+        (set! issuerName (X500Name. (DerValue. DerValue/tag_Sequence issuerBytes)))
+        (set! certificateSerialNumber (.getBigInteger (aget issuerAndSerialNumber 1)))
+        (let [^:mutable tmp (.getDerValue derin)]
+          (set! digestAlgorithmId (AlgorithmId/parse tmp))
+          (cond
+            oldStyle (.getSet derin 0)
+            (== (unchecked-byte (.peekByte derin)) (unchecked-byte 0xA0))
+              (set! authenticatedAttributes (PKCS9Attributes. derin)))
+          (set! tmp (.getDerValue derin))
+          (set! digestEncryptionAlgorithmId (AlgorithmId/parse tmp))
+          (set! encryptedDigest (.getOctetString derin))
+          (cond
+            oldStyle (.getSet derin 0)
+            (and (not (== (.available derin) 0))
+                 (== (unchecked-byte (.peekByte derin)) (unchecked-byte 0xA1)))
+              (set! unauthenticatedAttributes (PKCS9Attributes. derin true)))
+          (when-not (== (.available derin) 0) (throw (ParsingException. "extra data at the end")))
+          (.checkCMSAlgorithmProtection this)))))
+
+  (method ^:private checkCMSAlgorithmProtection :throws [IOException] ^void [this]
+    (when (some? authenticatedAttributes)
+      (let [ap (.getAttribute authenticatedAttributes PKCS9Attribute/CMS_ALGORITHM_PROTECTION_OID)]
+        (when (some? ap)
+          (let [dv (DerValue. (cast byte/1 (.getValue ap)))
+                data (.data dv)
+                d (AlgorithmId/parse (.getDerValue data))
+                ds (.getDerValue data)]
+            (when (> (.available data) 0)
+              (throw (IOException. "Unknown field in CMSAlgorithmProtection")))
+            (when-not (.isContextSpecific ds (unchecked-byte 1))
+              (throw (IOException. "No signature algorithm in CMSAlgorithmProtection")))
+            (let [s (AlgorithmId/parse (.withTag ds DerValue/tag_Sequence))]
+              (when (or (not (.equals s digestEncryptionAlgorithmId))
+                        (not (.equals d digestAlgorithmId)))
+                (throw (IOException. "CMSAlgorithmProtection check failed")))))))))
+
+  (method ^:public encode ^void [this ^DerOutputStream out]
+    (let [seq (DerOutputStream.)]
+      (.putInteger seq version)
+      (let [issuerAndSerialNumber (DerOutputStream.)]
+        (.encode issuerName issuerAndSerialNumber)
+        (.putInteger issuerAndSerialNumber certificateSerialNumber)
+        (.write seq DerValue/tag_Sequence issuerAndSerialNumber)
+        (.encode digestAlgorithmId seq)
+        (when (some? authenticatedAttributes)
+          (.encode authenticatedAttributes (unchecked-byte 0xA0) seq))
+        (.encode digestEncryptionAlgorithmId seq)
+        (.putOctetString seq encryptedDigest)
+        (when (some? unauthenticatedAttributes)
+          (.encode unauthenticatedAttributes (unchecked-byte 0xA1) seq))
+        (.write out DerValue/tag_Sequence seq))))
+
+  (method ^:public getCertificate :throws [IOException] ^X509Certificate [this ^PKCS7 block]
+    (.getCertificate block certificateSerialNumber issuerName))
+
+  (method ^:public getCertificateChain :throws [IOException] ^{:tag (ArrayList X509Certificate)} [this
+                                                                                                  ^PKCS7 block]
+    (let [^:mutable ^X509Certificate userCert nil]
+      (set! userCert (.getCertificate block certificateSerialNumber issuerName))
+      (when (some? userCert)
+        (let [^{:tag (ArrayList X509Certificate)} certList (ArrayList.)]
+          (.add certList userCert)
+          (let [pkcsCerts (.getCertificates block)]
+            (if (or
+                  (nil? pkcsCerts)
+                  (.equals (.getSubjectX500Principal userCert) (.getIssuerX500Principal userCert)))
+                certList
+                (let [^:mutable ^Principal issuer (.getIssuerX500Principal userCert)
+                      ^:mutable ^int start 0]
+                  (while true
+                    (let [^:mutable match false
+                          ^:mutable i start]
+                      (while (< i (alength pkcsCerts))
+                        (if (.equals issuer (.getSubjectX500Principal (aget pkcsCerts i)))
+                            (do
+                              (.add certList (aget pkcsCerts i))
+                              (if (.equals (.getSubjectX500Principal (aget pkcsCerts i))
+                                           (.getIssuerX500Principal (aget pkcsCerts i)))
+                                  (set! start (alength pkcsCerts))
+                                  (do
+                                    (set! issuer (.getIssuerX500Principal (aget pkcsCerts i)))
+                                    (let [tmpCert (aget pkcsCerts start)]
+                                      (aset pkcsCerts start (aget pkcsCerts i))
+                                      (aset pkcsCerts i tmpCert)
+                                      (set! start (unchecked-inc-int start)))))
+                              (set! match true)
+                              (break))
+                            (set! i (unchecked-inc-int i))))
+                      (when-not match (break))))
+                  certList)))))))
+
+  (method verify :throws [NoSuchAlgorithmException SignatureException] ^SignerInfo [this
+                                                                                    ^PKCS7 block
+                                                                                    ^:mutable ^byte/1 data
+                                                                                    ^:mutable ^X509Certificate cert]
+    (try
+      (try
+        (.getTimestamp this)
+        (catch Exception e
+          (when (some? debug)
+            (.println debug (java-str "Unexpected exception while getting timestamp: " e)))))
+      (let [content (.getContentInfo block)]
+        (when (nil? data) (set! data (.getContentBytes content)))
+        (let [digestAlgName (.getName digestAlgorithmId)]
+          (.put algorithms
+                digestAlgorithmId
+                (AlgorithmInfo. "SignerInfo digestAlgorithm field" false))
+          (let [^:mutable ^byte/1 dataSigned nil]
+            (if (nil? authenticatedAttributes)
+                (do
+                  (if (not (.equals (.getContentType content) ContentInfo/DATA_OID))
+                      (throw (SignatureException. "Missing authenticatedAttributes"))
+                      (try
+                        (let [c (DerValue. data)]
+                          (when (== (.-tag c) DerValue/tag_Set)
+                            (throw (SignatureException. "Not a .SF file content"))))
+                        (catch IOException e)))
+                  (set! dataSigned data))
+                (let [contentType (cast ObjectIdentifier
+                                        (.getAttributeValue
+                                          authenticatedAttributes
+                                          PKCS9Attribute/CONTENT_TYPE_OID))]
+                  (when (or (nil? contentType) (not (.equals contentType (.-contentType content))))
+                    (return nil))
+                  (let [messageDigest (cast byte/1
+                                            (.getAttributeValue
+                                              authenticatedAttributes
+                                              PKCS9Attribute/MESSAGE_DIGEST_OID))]
+                    (when (nil? messageDigest) (return nil))
+                    (let [^:mutable ^byte/1 computedMessageDigest nil]
+                      (if (.equals digestAlgName "SHAKE256-LEN")
+                          (let [params (.getEncodedParams digestAlgorithmId)]
+                            (when (nil? params)
+                              (throw (SignatureException. "id-shake256-len oid missing length")))
+                            (let [v (.getInteger (DerValue. params))]
+                              (when-not (== v 512)
+                                (throw
+                                  (SignatureException. (java-str "Unsupported id-shake256-" v))))
+                              (let [md (SHA3$SHAKE256. 64)]
+                                (.update md data 0 (alength data))
+                                (set! computedMessageDigest (.digest md)))))
+                          (let [md (MessageDigest/getInstance digestAlgName)]
+                            (set! computedMessageDigest (.digest md data))))
+                      (when-not (MessageDigest/isEqual messageDigest computedMessageDigest)
+                        (return nil))
+                      (set! dataSigned (.getDerEncoding authenticatedAttributes))))))
+            (let [sigAlgName (SignerInfo/makeSigAlg digestAlgorithmId digestEncryptionAlgorithmId)
+                  oid (KnownOIDs/findMatch sigAlgName)]
+              (when (some? oid)
+                (let [sigAlgId (AlgorithmId. (ObjectIdentifier/of oid)
+                                             (.getParameters digestEncryptionAlgorithmId))]
+                  (.put algorithms
+                        sigAlgId
+                        (AlgorithmInfo. "SignerInfo digestEncryptionAlgorithm field" true))))
+              (when (nil? cert)
+                (set! cert (.getCertificate this block))
+                (when (nil? cert) (return nil)))
+              (let [key (.getPublicKey cert)]
+                (when (.hasUnsupportedCriticalExtension cert)
+                  (throw (SignatureException. "Certificate has unsupported critical extension(s)")))
+                (SignerInfo/algorithmsConformanceCheck
+                  digestAlgorithmId
+                  digestEncryptionAlgorithmId
+                  key
+                  (nil? authenticatedAttributes))
+                (let [keyUsageBits (.getKeyUsage cert)]
+                  (when (some? keyUsageBits)
+                    (let [^:mutable ^KeyUsageExtension keyUsage nil]
+                      (set! keyUsage (KeyUsageExtension. keyUsageBits))
+                      (let [digSigAllowed (.get keyUsage KeyUsageExtension/DIGITAL_SIGNATURE)
+                            nonRepuAllowed (.get keyUsage KeyUsageExtension/NON_REPUDIATION)]
+                        (when (and (not digSigAllowed) (not nonRepuAllowed))
+                          (throw (SignatureException.
+                                   "Key usage restricted: cannot be used for digital signatures"))))))
+                  (let [sig (Signature/getInstance sigAlgName)
+                        ap (.getParameters digestEncryptionAlgorithmId)]
+                    (try
+                      (SignatureUtil/initVerifyWithParam
+                        sig
+                        key
+                        (SignatureUtil/getParamSpec sigAlgName ap))
+                      (catch [ProviderException
+                              InvalidAlgorithmParameterException
+                              InvalidKeyException] e
+                        (throw (SignatureException. (.getMessage e) e))))
+                    (.update sig dataSigned)
+                    (when (.verify sig encryptedDigest) (return this)))))))))
+      (catch IOException e (throw (SignatureException. "Error verifying signature" e))))
+    nil)
+
+  (method ^:private ^:static algorithmsConformanceCheck :throws [NoSuchAlgorithmException] ^void [^AlgorithmId digAlgId
+                                                                                                  ^AlgorithmId encAlgId
+                                                                                                  ^PublicKey key
+                                                                                                  ^boolean directSign]
+    (let [encAlg (.getName encAlgId)]
+      (switch encAlg
+        "RSASSA-PSS"
+          (let [spec (cast PSSParameterSpec
+                           (SignatureUtil/getParamSpec encAlg (.getParameters encAlgId)))]
+            (when (nil? spec)
+              (throw
+                (NoSuchAlgorithmException. "Missing PSSParameterSpec for RSASSA-PSS algorithm")))
+            (when-not (.equals (AlgorithmId/get (.getDigestAlgorithm spec)) digAlgId)
+              (throw (NoSuchAlgorithmException.
+                       (java-str "Incompatible digest algorithm " digAlgId)))))
+        "Ed25519"
+          (when-not (.equalsOID digAlgId AlgorithmId/SHA512_oid)
+            (throw (NoSuchAlgorithmException. (java-str "Incompatible digest algorithm " digAlgId))))
+        "Ed448"
+          (if directSign
+              (when-not (.equalsOID digAlgId AlgorithmId/SHAKE256_512_oid)
+                (throw (NoSuchAlgorithmException.
+                         (java-str "Incompatible digest algorithm " digAlgId))))
+              (when-not (.equals digAlgId SignatureUtil$DigestAlgHolder/shake256lenWith512)
+                (throw (NoSuchAlgorithmException.
+                         (java-str "Incompatible digest algorithm " digAlgId)))))
+        "HSS/LMS"
+          (when-not (.equalsOID digAlgId (KeyUtil/hashAlgFromHSS key))
+            (throw (NoSuchAlgorithmException. (java-str "Incompatible digest algorithm " digAlgId))))
+        "ML-DSA-44"
+          (when (and (and (and (and (and (and (and
+                                                (not (.equalsOID digAlgId AlgorithmId/SHA256_oid))
+                                                (not (.equalsOID digAlgId AlgorithmId/SHA384_oid)))
+                                              (not (.equalsOID digAlgId AlgorithmId/SHA512_oid)))
+                                         (not (.equalsOID digAlgId AlgorithmId/SHA3_256_oid)))
+                                    (not (.equalsOID digAlgId AlgorithmId/SHA3_384_oid)))
+                               (not (.equalsOID digAlgId AlgorithmId/SHA3_512_oid)))
+                          (not (.equalsOID digAlgId AlgorithmId/SHAKE128_256_oid)))
+                     (not (.equalsOID digAlgId AlgorithmId/SHAKE256_512_oid)))
+            (throw (NoSuchAlgorithmException. (java-str "Incompatible digest algorithm " digAlgId))))
+        "ML-DSA-65"
+          (when (and (and (and (and (not (.equalsOID digAlgId AlgorithmId/SHA384_oid))
+                                    (not (.equalsOID digAlgId AlgorithmId/SHA512_oid)))
+                               (not (.equalsOID digAlgId AlgorithmId/SHA3_384_oid)))
+                          (not (.equalsOID digAlgId AlgorithmId/SHA3_512_oid)))
+                     (not (.equalsOID digAlgId AlgorithmId/SHAKE256_512_oid)))
+            (throw (NoSuchAlgorithmException. (java-str "Incompatible digest algorithm " digAlgId))))
+        "ML-DSA-87"
+          (when (and (and (not (.equalsOID digAlgId AlgorithmId/SHA512_oid))
+                          (not (.equalsOID digAlgId AlgorithmId/SHA3_512_oid)))
+                     (not (.equalsOID digAlgId AlgorithmId/SHAKE256_512_oid)))
+            (throw (NoSuchAlgorithmException. (java-str "Incompatible digest algorithm " digAlgId)))))))
+
+  (method ^:public ^:static makeSigAlg ^String [^AlgorithmId digAlgId ^AlgorithmId encAlgId]
+    (let [encAlg (.getName encAlgId)
+          ^:mutable keyAlg (SignatureUtil/extractKeyAlgFromDwithE encAlg)]
+      (when (nil? keyAlg)
+        (if (or (or (.equals encAlg "RSA") (.equals encAlg "DSA")) (.equals encAlg "EC"))
+            (set! keyAlg encAlg)
+            (return encAlg)))
+      (let [^:mutable digAlg (.getName digAlgId)]
+        (when (.startsWith digAlg "SHA-") (set! digAlg (java-str "SHA" (.substring digAlg 4))))
+        (when (.equals keyAlg "EC") (set! keyAlg "ECDSA"))
+        (java-str digAlg "with" keyAlg))))
+
+  (method verify :throws [NoSuchAlgorithmException SignatureException] ^SignerInfo [this
+                                                                                    ^PKCS7 block]
+    (.verify this block nil nil))
+
+  (method ^:public getVersion ^BigInteger [this] version)
+
+  (method ^:public getIssuerName ^X500Name [this] issuerName)
+
+  (method ^:public getCertificateSerialNumber ^BigInteger [this]
+    certificateSerialNumber)
+
+  (method ^:public getDigestAlgorithmId ^AlgorithmId [this]
+    digestAlgorithmId)
+
+  (method ^:public getAuthenticatedAttributes ^PKCS9Attributes [this]
+    authenticatedAttributes)
+
+  (method ^:public getDigestEncryptionAlgorithmId ^AlgorithmId [this]
+    digestEncryptionAlgorithmId)
+
+  (method ^:public getEncryptedDigest ^byte/1 [this] encryptedDigest)
+
+  (method ^:public getUnauthenticatedAttributes ^PKCS9Attributes [this]
+    unauthenticatedAttributes)
+
+  (method ^:public getTsToken :throws [IOException] ^PKCS7 [this]
+    (when (some? unauthenticatedAttributes)
+      (let [tsTokenAttr (.getAttribute unauthenticatedAttributes
+                                       PKCS9Attribute/SIGNATURE_TIMESTAMP_TOKEN_OID)]
+        (when (some? tsTokenAttr) (PKCS7. (cast byte/1 (.getValue tsTokenAttr)))))))
+
+  (method ^:public getTimestamp :throws [IOException
+                                         NoSuchAlgorithmException
+                                         SignatureException
+                                         CertificateException] ^Timestamp [this]
+    (if (or (some? timestamp) (not hasTimestamp))
+        timestamp
+        (let [tsToken (.getTsToken this)]
+          (if (nil? tsToken)
+              (do (set! hasTimestamp false) nil)
+              (do
+                (when-not (.equals (.getContentType (.getContentInfo tsToken))
+                                   ContentInfo/TIMESTAMP_TOKEN_INFO_OID)
+                  (throw (SignatureException. "Not using id-ct-TSTInfo")))
+                (let [encTsTokenInfo (.getData (.getContentInfo tsToken))
+                      tsa (.verify tsToken encTsTokenInfo)]
+                  (when (or (nil? tsa) (== (alength tsa) 0))
+                    (throw (SignatureException. "Unable to verify timestamp")))
+                  (let [^{:tag (ArrayList X509Certificate)} chain (.getCertificateChain
+                                                                    (aget tsa 0)
+                                                                    tsToken)
+                        cf (CertificateFactory/getInstance "X.509")
+                        tsaChain (.generateCertPath cf chain)
+                        tsTokenInfo (TimestampToken. encTsTokenInfo)]
+                    (.verifyTimestamp this tsTokenInfo)
+                    (.putAll algorithms (.-algorithms (aget tsa 0)))
+                    (set! timestamp (Timestamp. (.getDate tsTokenInfo) tsaChain))
+                    timestamp)))))))
+
+  (method ^:private verifyTimestamp :throws [NoSuchAlgorithmException SignatureException] ^void [this
+                                                                                                 ^TimestampToken token]
+    (let [digestAlgId (.getHashAlgorithm token)]
+      (.put algorithms digestAlgId (AlgorithmInfo. "TimestampToken digestAlgorithm field" false))
+      (let [md (MessageDigest/getInstance (.getName digestAlgId))]
+        (when-not (MessageDigest/isEqual (.getHashedMessage token) (.digest md encryptedDigest))
+          (throw (SignatureException.
+                   (java-str "Signature timestamp (#"
+                             (Debug/toString (.getSerialNumber token))
+                             ") generated on "
+                             (.getDate token)
+                             " is inapplicable"))))
+        (when (some? debug)
+          (.println debug)
+          (.println debug
+                    (java-str "Detected signature timestamp (#"
+                              (Debug/toString (.getSerialNumber token))
+                              ") generated on "
+                              (.getDate token)))
+          (.println debug)))))
+
+  (method ^:public toString ^String [this]
+    (let [hexDump (HexDumpEncoder.)
+          ^:mutable out ""]
+      (set! out (java-str out (java-str "Signer Info for (issuer): " issuerName "\n")))
+      (set! out (java-str out (java-str "\tversion: " (Debug/toHexString version) "\n")))
+      (set! out
+            (java-str out
+                      (java-str "\tcertificateSerialNumber: "
+                                (Debug/toHexString certificateSerialNumber)
+                                "\n")))
+      (set! out (java-str out (java-str "\tdigestAlgorithmId: " digestAlgorithmId "\n")))
+      (when (some? authenticatedAttributes)
+        (set! out
+              (java-str out (java-str "\tauthenticatedAttributes: " authenticatedAttributes "\n"))))
+      (set!
+        out
+        (java-str out (java-str "\tdigestEncryptionAlgorithmId: " digestEncryptionAlgorithmId "\n")))
+      (set! out
+            (java-str out
+                      (java-str "\tencryptedDigest: \n"
+                                (.encodeBuffer hexDump encryptedDigest)
+                                "\n")))
+      (when (some? unauthenticatedAttributes)
+        (set! out
+              (java-str out
+                        (java-str "\tunauthenticatedAttributes: " unauthenticatedAttributes "\n"))))
+      out))
+
+  (method ^:public ^:static verifyAlgorithms :throws [SignatureException] ^{:tag (Set String)} [^SignerInfo/1 infos
+                                                                                                ^JarConstraintsParameters params
+                                                                                                ^String name]
+    (let [^{:tag (Map AlgorithmId AlgorithmInfo)} algorithms (HashMap.)]
+      (for-each [^SignerInfo info infos] (.putAll algorithms (.-algorithms info)))
+      (let [^{:tag (Set String)} enabledAlgorithms (HashSet.)]
+        (try
+          (for-each [^Map$Entry algEntry (.entrySet algorithms)]
+            (let [info (cast AlgorithmInfo (.getValue algEntry))]
+              (.setExtendedExceptionMsg params name (.field info))
+              (let [algId (cast AlgorithmId (.getKey algEntry))]
+                (.permits JAR_DISABLED_CHECK
+                          (.getName algId)
+                          (.getParameters algId)
+                          params
+                          (.checkKey info))
+                (.add enabledAlgorithms (.getName algId)))))
+          (catch CertPathValidatorException e (throw (SignatureException. e))))
+        enabledAlgorithms))))

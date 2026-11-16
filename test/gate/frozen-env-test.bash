@@ -14,7 +14,8 @@ cat > "$t" <<'F'
 (let [steps (read-string (slurp (first *command-line-args*)))
       need #{"ARBACE_FROZEN_JAVA_HOME" "FROZEN_CP" "FROZEN_TAG" "ARBACE_ORACLE_JAR" "ARBACE_ORACLE_TAG"}
       steps (filter map? (if (map? steps) (:steps steps) steps))
-      sources? (fn [s] (re-find #"bin/(oracle|j2g-edge)\b" (str (:cmd s))))
+      ;; bin/oracle and bin/j2g-edge themselves, not bin/oracle-records (which sources no frozen.bash): \b matched before its -
+      sources? (fn [s] (re-find #"bin/(oracle|j2g-edge)(?![\w-])" (str (:cmd s))))
       frozen (filter #(or (some #{:frozen} (:hosts %)) (sources? %)) steps)
       bad (remove #(every? (set (:env %)) need) frozen)]
   (println (count frozen) "steps use the frozen JVM:" (apply str (interpose " " (map :name frozen))))

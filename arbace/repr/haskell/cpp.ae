@@ -1,0 +1,1180 @@
+;; A clean-room implementation (2026-11-04): written from the documented behaviour of GCC's
+;; traditional mode and from gcc's `cpp -traditional` (Alpine's gcc 15.2.0) run as a black box on
+;; inputs, its output and line markers observed; no code of GCC's (doc/haskell/NATIVE.md, "CPP,
+;; unlit, hsc2hs").
+
+(ns arbace.repr.haskell.cpp
+  "GHC's C preprocessor as GHC's driver runs it (doc/haskell/NATIVE.md, \"CPP, unlit, hsc2hs\"):
+  `cc -E -undef -traditional -x assembler-with-cpp`, GCC's traditional mode, in Arbace, a clean-room
+  implementation judged against gcc's output. Traditional preprocessing does not tokenize: the text
+  is copied as it is, identifiers outside quotes looked up as macros (a quote, ' or \", runs to its
+  match or the line's end: in Haskell `foldl'` quotes the rest of its line), C block comments
+  removed, a function-like macro's arguments substituted as written (inside the body's quotes too)
+  and the result rescanned, directives recognized only with the # in the line's first column, and
+  in assembler mode an unknown directive (`#!`, `#-}`) is text. The output is gcc's: its line
+  markers (`# 1 \"file\" 1`), and blank lines for lines that give no text, up to seven before a
+  marker resynchronizes.
+
+  `preprocess` runs it over a file with the arguments GHC's doCpp gives (arbace.repr.haskell.driver
+  makes them), the host's answers (`host`: the system include directories, the macros gcc defines
+  under -undef in assembler mode, the preinclude stdc-predef.h) recorded, never asked at read time."
+  (:require [arbace.string :as str])
+  (:import [java.io File]
+           [java.util ArrayList HashMap HashSet]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:dynamic *cwd*
+  "The directory relative paths are resolved against (the preprocessor's working directory), nil
+  for the process's"
+  nil)
+
+(def ^:dynamic *virtual*
+  "Files that exist only in memory: name -> text (one char a byte); GHC's temporary files (the
+  MIN_VERSION header, unlit's output) as their records name them"
+  {})
+
+(def ^:dynamic *sysroot*
+  "A directory holding the host's files the preprocessing reads (the GHC installation's settings, package database and
+  include directories, the system headers), under their absolute paths, or nil for the host's own: an absolute path P is
+  read as *sysroot*/P while it is still named P (the records, the line markers and the :cpp records name the host's paths).
+  The pinned pack haskell-sysroot-ghc-9.14.1 is one (bin/repr-haskell's native reads; doc/haskell/NATIVE.md)."
+  nil)
+
+(defn file-at
+  "The file of a path as the preprocessor names it, resolved against *cwd*, an absolute one under *sysroot*"
+  ^File [^String p]
+  (let [f (File. p)]
+    (cond (.isAbsolute f) (if *sysroot* (File. (str *sysroot* p)) f)
+          (nil? *cwd*) f
+          :else (File. ^String *cwd* p))))
+
+(def host
+  "The host's answers, recorded from Alpine's gcc 15.2.0 (`cc -E -undef -traditional -x
+  assembler-with-cpp -v` for the directories, `-dM -nostdinc` for the macros): the system include
+  directories in their order, the macros defined before the command line's, the preinclude"
+  {:system-dirs ["/usr/include/fortify" "/usr/include" "/usr/lib/gcc/x86_64-alpine-linux-musl/15.2.0/include"]
+   :predefined [["__STDC_HOSTED__" "1"] ["__STDC_EMBED_EMPTY__" "2"] ["__STDC_EMBED_FOUND__" "1"]
+                ["__STDC_EMBED_NOT_FOUND__" "0"] ["__ASSEMBLER__" "1"]]
+   :preinclude "stdc-predef.h"})
+
+;;; Errors
+
+(defn- fail [where ^String msg]
+  (throw (ex-info (str where ": error: " msg) {:cpp true})))
+
+;;; Characters
+
+(defn- id-start? [^long c] (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (= c 95)))
+(defn- id-char? [^long c] (or (id-start? c) (and (>= c 48) (<= c 57))))
+(defn- hspace? [^long c] (or (= c 32) (= c 9) (= c 12) (= c 11)))
+(defn- ch-at ^long [^String s ^long i] (long (int (.charAt s (int i)))))
+
+;; In a directive's text, a comment is this char (above Latin-1, so never the input's): a space
+;; for the most, nothing in a #define's body
+(def ^:private CMT (char 0xE000))
+(defn- blank? [^long c] (or (hspace? c) (= c 0xE000)))
+
+(defn- clean
+  "The file's text as the scanner reads it: CR LF, CR and LF as LF, a backslash before a newline
+  (blanks between allowed) removed with it; a last line without a newline given one. Returns
+  [text lines], lines the line of each char (an int array): its physical line, but for a line's
+  first char the line the line began on (a splice at its start does not move it)"
+  [^String raw]
+  (let [n (.length raw)
+        sb (StringBuilder. (inc n))
+        ln (int-array (+ n 2))
+        bol (long-array [1])
+        put (fn [c ^long line]
+              (let [k (.length sb)]
+                (aset ln k (int (if (or (zero? k) (= \newline (.charAt sb (dec k)))) (aget bol 0) line)))
+                (.append sb (char c))
+                (when (= c \newline) (aset bol 0 (inc line)))))]
+    (loop [i 0 line 1]
+      (if (>= i n)
+        (do (when (and (pos? (.length sb)) (not= \newline (.charAt sb (dec (.length sb)))))
+              (put \newline line))
+            [(.toString sb) ln])
+        (let [c (.charAt raw i)]
+          (cond
+            (= c \return)
+            (do (put \newline line)
+                (recur (if (and (< (inc i) n) (= \newline (.charAt raw (inc i)))) (+ i 2) (inc i)) (inc line)))
+            (= c \\)
+            (let [j (long (loop [j (inc i)] (if (and (< j n) (hspace? (ch-at raw j))) (recur (inc j)) j)))]
+              (if (and (< j n) (or (= \newline (.charAt raw j)) (= \return (.charAt raw j))))
+                (recur (if (and (= \return (.charAt raw j)) (< (inc j) n) (= \newline (.charAt raw (inc j)))) (+ j 2) (inc j))
+                       (inc line))
+                (do (put c line) (recur (inc i) line))))
+            :else
+            (do (put c line)
+                (recur (inc i) (if (= c \newline) (inc line) line)))))))))
+
+;;; Sources: the text a scan reads, a stack of them (the base, a file's text or a directive's,
+;;; and the macro expansions over it). An expansion's chars carry the set of macros that may not
+;;; expand in them (segs: [start set] in order): a body's chars its macro's and its invoker's, an
+;;; argument's chars the set of the place they were read from.
+
+(deftype Src [^String text ^long end ^longs pos segs])
+(defn- text-of ^String [^Src t] (.-text t))
+
+(defn- src ^Src [^String text ^long start ^long end segs]
+  (Src. text end (doto (long-array 1) (aset 0 start)) segs))
+
+(defn- top
+  "The source the next char comes from, exhausted expansions popped"
+  ^Src [^ArrayList stk]
+  (loop []
+    (let [k (dec (.size stk))
+          ^Src t (.get stk k)]
+      (if (and (pos? k) (>= (aget ^longs (.-pos t) 0) (.-end t)))
+        (do (.remove stk (int k)) (recur))
+        t))))
+
+(defn- pos-of ^long [^Src t] (aget ^longs (.-pos t) 0))
+(defn- pos! [^Src t ^long p] (aset ^longs (.-pos t) 0 p))
+
+(defn- set-at
+  "The macros disabled at position p of a source"
+  [^Src t ^long p]
+  (let [segs (.-segs t)]
+    (if (nil? segs)
+      #{}
+      (loop [ss (seq segs) cur #{}]
+        (if-let [[s0 st] (first ss)]
+          (if (<= (long s0) p) (recur (next ss) st) cur)
+          cur)))))
+
+;;; The macro table: name -> {:kind :object|:function|:builtin, :params [..], :parts [..]}.
+;;; A body's parts: strings and [param-index in-double-quotes?].
+
+(defn- uncomment ^String [^String s] (.replace s (str CMT) ""))
+
+(defn- body-parts
+  "A body's parts: its text with each parameter's occurrence (outside quotes and in them) apart"
+  [^String body params]
+  (let [idx (into {} (map-indexed (fn [i p] [p i]) params))
+        n (.length body)
+        parts (ArrayList.)
+        lit (StringBuilder.)]
+    (loop [i 0 q 0]
+      (if (>= i n)
+        (do (when (pos? (.length lit)) (.add parts (uncomment (.toString lit))))
+            (vec parts))
+        (let [c (ch-at body i)]
+          (cond
+            (id-start? c)
+            (let [j (loop [j (inc i)] (if (and (< j n) (id-char? (ch-at body j))) (recur (inc j)) j))
+                  w (.substring body i j)
+                  k (get idx w)]
+              (if k
+                (do (when (pos? (.length lit)) (.add parts (uncomment (.toString lit))) (.setLength lit 0))
+                    (.add parts [k (= q 34)]))
+                (.append lit w))
+              (recur (long j) q))
+            (not= q 0)
+            (cond
+              (and (= c 92) (< (inc i) n)) (do (.append lit (.substring body i (+ i 2))) (recur (+ i 2) q))
+              (= c q) (do (.append lit (char c)) (recur (inc i) 0))
+              :else (do (.append lit (char c)) (recur (inc i) q)))
+            (or (= c 34) (= c 39)) (do (.append lit (char c)) (recur (inc i) (long c)))
+            (and (= c 92) (< (inc i) n) (let [d (ch-at body (inc i))] (or (= d 34) (= d 39) (= d 92))))
+            (do (.append lit (.substring body i (+ i 2))) (recur (+ i 2) q))
+            :else (do (.append lit (char c)) (recur (inc i) q))))))))
+
+(def ^:private builtins
+  ["__FILE__" "__LINE__" "__COUNTER__" "__INCLUDE_LEVEL__" "__BASE_FILE__" "__FILE_NAME__"
+   "__DATE__" "__TIME__" "__TIMESTAMP__" "__has_include" "__has_include_next" "__has_feature"
+   "__has_extension" "__has_embed"])
+
+;;; The state of a run (pp): :macros, :st [P counter tok], :out, :conds, :frames, :records, :once,
+;;; :quote-dirs, :bracket (the -I and system directories as {:dir :sys :idx}), :base (the main
+;;; file's name), :dline (the line of the directive being run)
+
+(def ^:private P 0)
+(def ^:private COUNTER 1)
+(def ^:private TOK 2)
+
+(defn- st ^long [pp ^long k] (aget ^longs (:st pp) k))
+(defn- st! [pp ^long k ^long v] (aset ^longs (:st pp) k v))
+
+(defn- frame [pp] (let [^ArrayList fs (:frames pp)] (.get fs (dec (.size fs)))))
+
+(defn- line-of
+  "The presumed line of a position of a frame's text"
+  ^long [fr ^long p]
+  (let [^ints ln (:ln fr)]
+    (+ (aget ln (int p)) (aget ^longs (:delta fr) 0))))
+
+(defn- where [pp] (let [fr (frame pp)] (str @(:name fr) ":" @(:dline pp))))
+
+(defn- esc-name ^String [^String s]
+  (let [sb (StringBuilder.)]
+    (dotimes [i (.length s)]
+      (let [c (.charAt s i)]
+        (cond
+          (or (= c \\) (= c \")) (.append (.append sb \\) c)
+          (or (< (int c) 32) (= (int c) 127)) (.append sb (format "\\%03o" (int c)))
+          :else (.append sb c))))
+    (.toString sb)))
+
+;;; Output
+
+(defn- marker! [pp ^long line ^String name ^String flags sys]
+  (let [^StringBuilder out (:out pp)]
+    (.append out (str "# " line " \"" (esc-name name) "\"" flags (when sys " 3 4") "\n"))
+    (st! pp P line)))
+
+(defn- catch-up!
+  "Brings the output to line of the current file: blank lines for a gap under 8, else a marker"
+  [pp ^long line]
+  (let [p (st pp P)]
+    (when (> line p)
+      (if (< (- line p) 8)
+        (let [^StringBuilder out (:out pp)]
+          (dotimes [_ (- line p)] (.append out \newline))
+          (st! pp P line))
+        (let [fr (frame pp)] (marker! pp line @(:name fr) "" (:sys fr)))))))
+
+(defn- print-line! [pp ^long line ^CharSequence text]
+  (catch-up! pp line)
+  (let [^StringBuilder out (:out pp)]
+    (.append out text)
+    (.append out \newline)
+    (st! pp P (inc line))))
+
+;;; The scan: a text line (the file's text from a line's start to its end, the end past newlines
+;;; when a comment, a function-like macro's search for its parenthesis or its arguments run over
+;;; them), or a directive's text (mode :dir; :if, #if's, keeping defined's operand and
+;;; __has_include's), its macros expanded into out
+
+(declare builtin-text)
+
+(defn- skip-comment!
+  "At a /* of source t: past its */"
+  [pp ^Src t base?]
+  (let [s (text-of t) e (.-end t) p (pos-of t)
+        q (.indexOf s "*/" (int (+ p 2)))]
+    (if (or (neg? q) (>= q e))
+      (if base? (fail (where pp) "unterminated comment") (pos! t e))
+      (pos! t (+ q 2)))))
+
+(defn- next-char
+  "The char after the current one in the same source, or -1"
+  ^long [^Src t]
+  (let [p (inc (pos-of t))] (if (< p (.-end t)) (ch-at (text-of t) p) -1)))
+
+(defn- collect-args
+  "A function-like macro's arguments, after its (: [{:text :segs}...]"
+  [pp ^ArrayList stk ^String name]
+  (let [args (ArrayList.)
+        sb (StringBuilder.)
+        segs (ArrayList.)
+        last (object-array 1)
+        add (fn [^Src t ^long p ^long c]
+              (let [s (set-at t p)]
+                (when-not (identical? s (aget last 0))
+                  (aset last 0 s)
+                  (.add segs [(.length sb) s]))
+                (.append sb (char c))))
+        flush (fn []
+                (.add args {:text (.toString sb) :segs (vec segs)})
+                (.setLength sb 0) (.clear segs) (aset last 0 nil))]
+    (loop [depth 0 q 0]
+      (let [t (top stk) p (pos-of t)]
+        (if (>= p (.-end t))
+          (fail (where pp) (str "unterminated argument list invoking macro '" name "'"))
+          (let [c (ch-at (text-of t) p)
+                bs (identical? t (.get stk 0))]
+            (cond
+              (not= q 0)
+              (let [d (next-char t)]
+                (add t p (if (= c 10) 32 c))
+                (cond
+                  (and (= c 92) (>= d 0) (not= d 10))
+                  (do (add t (inc p) d) (pos! t (+ p 2)) (recur depth q))
+                  (= c q) (do (pos! t (inc p)) (recur depth 0))
+                  :else (do (pos! t (inc p)) (recur depth q))))
+              (and (= c 47) (= 42 (next-char t))) (do (skip-comment! pp t bs) (recur depth q))
+              (= c 10) (do (add t p 32) (pos! t (inc p)) (recur depth q))
+              (or (= c 34) (= c 39)) (do (add t p c) (pos! t (inc p)) (recur depth (long c)))
+              (= c 92) (let [d (next-char t)]
+                         (add t p c)
+                         (if (or (= d 34) (= d 39) (= d 92))
+                           (do (add t (inc p) d) (pos! t (+ p 2)))
+                           (pos! t (inc p)))
+                         (recur depth q))
+              (= c 40) (do (add t p c) (pos! t (inc p)) (recur (inc depth) q))
+              (= c 41) (if (zero? depth)
+                         (do (pos! t (inc p)) (flush) args)
+                         (do (add t p c) (pos! t (inc p)) (recur (dec depth) q)))
+              (and (= c 44) (zero? depth)) (do (pos! t (inc p)) (flush) (recur depth q))
+              :else (do (add t p c) (pos! t (inc p)) (recur depth q)))))))))
+
+(defn- expand-function
+  "The text of a function-like macro's invocation, with its sets: a Src to push"
+  [pp m ^String name args set-p]
+  (let [params (:params m)
+        n (count params)
+        nargs (count args)]
+    (cond
+      (and (zero? n) (not (and (= 1 nargs) (= "" (:text (first args))))))
+      (fail (where pp) (str "macro '" name "' passed " nargs " arguments, but takes just 0"))
+      (and (pos? n) (< nargs n))
+      (fail (where pp) (str "macro '" name "' requires " n " arguments, but only " nargs " given"))
+      (and (pos? n) (> nargs n))
+      (fail (where pp) (str "macro '" name "' passed " nargs " arguments, but takes just " n)))
+    (let [bset (conj set-p name)
+          sb (StringBuilder.)
+          segs (ArrayList.)
+          cur (object-array 1)
+          seg! (fn [s] (when-not (identical? s (aget cur 0)) (aset cur 0 s) (.add segs [(.length sb) s])))]
+      (doseq [part (:parts m)]
+        (if (string? part)
+          (do (seg! bset) (.append sb ^String part))
+          (let [[k dq] part
+                arg (nth args k)
+                ^String text (:text arg)]
+            (if dq
+              (do (seg! bset)
+                  (dotimes [i (.length text)]
+                    (let [c (.charAt text i)] (when (= c \") (.append sb \\)) (.append sb c))))
+              (let [base (.length sb)]
+                (doseq [[s0 s] (:segs arg)]
+                  (aset cur 0 s)
+                  (.add segs [(+ base (long s0)) s]))
+                (.append sb text))))))
+      (let [t (.toString sb)]
+        (src t 0 (.length t) (vec segs))))))
+
+(defn- scan!
+  "Scans the stack's sources in mode (:text, :dir, :if) into out"
+  [pp ^ArrayList stk mode ^StringBuilder out]
+  (let [text? (= mode :text)
+        if? (= mode :if)
+        ^HashMap macros (:macros pp)]
+    (loop [q 0 nx false]
+      (let [t (top stk) p (pos-of t) e (.-end t)]
+        (when (< p e)
+          (let [s (text-of t)
+                c (ch-at s (int p))
+                bs (identical? t (.get stk 0))]
+            (cond
+              (not= q 0)
+              (cond
+                (= c 10) (pos! t (inc p))
+                (and (= c 92) (< (inc p) e) (not= 10 (ch-at s (inc p))))
+                (do (.append out (.subSequence s (int p) (int (+ p 2)))) (pos! t (+ p 2)) (recur q nx))
+                :else (do (.append out (char c)) (pos! t (inc p)) (recur (if (= c q) 0 q) nx)))
+              (= c 10) (pos! t (inc p))
+              (and (= c 47) (= 42 (next-char t)))
+              (do (skip-comment! pp t bs) (when-not text? (.append out \space)) (recur q nx))
+              (or (= c 34) (= c 39)) (do (st! pp TOK 1) (.append out (char c)) (pos! t (inc p)) (recur (long c) false))
+              (= c 92)
+              (let [d (next-char t)]
+                (st! pp TOK 1)
+                (if (or (= d 34) (= d 39) (= d 92))
+                  (do (.append out (.subSequence s (int p) (int (+ p 2)))) (pos! t (+ p 2)))
+                  (do (.append out (char c)) (pos! t (inc p))))
+                (recur q false))
+              (id-start? c)
+              (let [j (loop [j (inc p)] (if (and (< j e) (id-char? (ch-at s (int j)))) (recur (inc j)) j))
+                    name (.substring s (int p) (int j))
+                    m (.get macros name)]
+                (st! pp TOK 1)
+                (pos! t j)
+                (cond
+                  nx (do (.append out name) (recur q false))
+                  (and if? (= "defined" name)) (do (.append out name) (recur q true))
+                  (nil? m) (do (.append out name) (recur q false))
+                  (and if? (or (= name "__has_include") (= name "__has_include_next")))
+                  (let [k (.indexOf s ")" (int j))
+                        k (if (or (neg? k) (>= k e)) e (inc k))]
+                    (.append out name) (.append out (.subSequence s (int j) (int k))) (pos! t k)
+                    (recur q false))
+                  (= :builtin (:kind m)) (do (.append out ^String (builtin-text pp stk name)) (recur q false))
+                  (= :object (:kind m))
+                  (let [sp (set-at t p)]
+                    (when (contains? sp name) (fail (where pp) (str "detected recursion whilst expanding macro '" name "'")))
+                    (let [^String b (:body m)]
+                      (when (pos? (.length b)) (.add stk (src b 0 (.length b) [[0 (conj sp name)]])))
+                      (recur q false)))
+                  :else
+                  ;; a function-like macro: its ( after blanks, newlines and comments, else its name
+                  (let [ws (StringBuilder.)
+                        nl (long-array [-1 0])
+                        found (loop []
+                                (let [t2 (top stk) p2 (pos-of t2)]
+                                  (if (>= p2 (.-end t2))
+                                    :eof
+                                    (let [c2 (ch-at (text-of t2) p2)]
+                                      (cond
+                                        (hspace? c2) (do (.append ws (char c2)) (pos! t2 (inc p2)) (recur))
+                                        (and (= c2 10) text?) (do (when (neg? (aget nl 0)) (aset nl 0 (long p2)) (aset nl 1 (long (.length ws))))
+                                                                 (.append ws \newline) (pos! t2 (inc p2)) (recur))
+                                        (and (= c2 47) (= 42 (next-char t2)))
+                                        (do (skip-comment! pp t2 (identical? t2 (.get stk 0))) (recur))
+                                        (= c2 40) (let [sp (set-at t2 p2)] (pos! t2 (inc p2)) sp)
+                                        :else nil)))))]
+                    (cond
+                      (nil? found) (do (.append out name) (.append out ws) (recur q false))
+                      ;; at the end of the file: the name and the blanks of its line, the newline left to end it
+                      (= :eof found)
+                      (do (.append out name)
+                          (if (neg? (aget nl 0))
+                            (.append out ws)
+                            (do (.append out (.subSequence ws 0 (int (aget nl 1)))) (pos! ^Src (.get stk 0) (aget nl 0))))
+                          (recur q false))
+                      :else
+                      (do (when (contains? found name)
+                            (fail (where pp) (str "detected recursion whilst expanding macro '" name "'")))
+                          (let [args (collect-args pp stk name)
+                                ^Src x (expand-function pp m name args found)]
+                            (when (pos? (.-end x)) (.add stk x))
+                            (recur q false)))))))
+              :else
+              (do (when-not (hspace? c) (st! pp TOK 1))
+                  (.append out (char c)) (pos! t (inc p))
+                  (recur q (and nx (or (hspace? c) (= c 40) (= c 0xE000))))))))))))
+
+(defn- expand-string
+  "A directive's text with its macros expanded (mode :dir or :if)"
+  ^String [pp ^String text mode]
+  (let [stk (ArrayList.) out (StringBuilder.)]
+    (.add stk (src text 0 (.length text) nil))
+    (scan! pp stk mode out)
+    (.toString out)))
+
+(defn- quoted ^String [^String s] (str "\"" (esc-name s) "\""))
+
+(defn- builtin-text ^String [pp ^ArrayList stk ^String name]
+  (let [fr (frame pp)]
+    (case name
+      "__FILE__" (quoted @(:name fr))
+      "__BASE_FILE__" (quoted (:base pp))
+      "__FILE_NAME__" (let [^String n @(:name fr)] (quoted (subs n (inc (.lastIndexOf n "/")))))
+      "__LINE__" (str (if (:in-directive @(:dline-mode pp))
+                        @(:dline pp)
+                        (let [^Src b (.get stk 0) p (min (pos-of b) (dec (.-end b)))] (line-of fr p))))
+      "__INCLUDE_LEVEL__" (str (- (.size ^ArrayList (:frames pp)) 2))
+      "__COUNTER__" (let [n (st pp COUNTER)] (st! pp COUNTER (inc n)) (str n))
+      (fail (where pp) (str "'" name "' is not supported by this preprocessor")))))
+
+;;; Files and their search
+
+(defn- dir-of ^String [^String path]
+  (let [i (.lastIndexOf path "/")]
+    (cond (neg? i) "" (zero? i) "/" :else (subs path 0 i))))
+
+(defn- join ^String [^String dir ^String name]
+  (cond (or (= dir "") (.startsWith name "/")) name
+        (= dir "/") (str "/" name)
+        :else (str dir "/" name)))
+
+(defn- norm-dir ^String [^String d]
+  (loop [d d] (if (and (> (.length d) 1) (.endsWith d "/")) (recur (subs d 0 (dec (.length d)))) d)))
+
+(defn- canonical ^String [^String p]
+  (try (.getCanonicalPath (file-at p)) (catch Exception _ p)))
+
+(defn- dirs
+  "The -I directories then the system ones, as gcc keeps them: those that exist, each once (the
+  first), a -I directory that is a system one left to its system place"
+  [bracket]
+  (let [sys (:system-dirs host)
+        sys-canon (set (map canonical (filter #(.isDirectory (file-at %)) sys)))
+        seen (HashSet.)
+        out (ArrayList.)]
+    (doseq [d (map norm-dir bracket)]
+      (when (.isDirectory (file-at d))
+        (let [c (canonical d)]
+          (when (and (not (contains? sys-canon c)) (.add seen c))
+            (.add out {:dir d :sys false})))))
+    (doseq [d sys]
+      (when (.isDirectory (file-at d))
+        (when (.add seen (canonical d)) (.add out {:dir d :sys true}))))
+    (vec (map-indexed (fn [i d] (assoc d :idx i :key (str "b:" i))) out))))
+
+(defn- exists? [^String p] (or (contains? *virtual* p) (.isFile (file-at p))))
+
+(defn- search
+  "The file a name finds along the directories: {:path :sys :idx} or nil"
+  [^String name chain]
+  (if (or (contains? *virtual* name) (.startsWith name "/"))
+    (when (exists? name) {:path name :sys false :idx nil})
+    (some (fn [{:keys [dir sys idx]}]
+            (let [p (join dir name)] (when (.isFile (file-at p)) {:path p :sys sys :idx idx})))
+          chain)))
+
+(defn- chain
+  "The directories an #include searches (each with its :key, the cache's): kind :quote, :angle,
+  :next, :cmdline"
+  [pp fr kind]
+  (let [br (:bracket pp)]
+    (case kind
+      :angle br
+      :next (let [i (:idx fr)] (if (nil? i) br (filterv #(> (long (:idx %)) (long i)) br)))
+      :cmdline (concat [{:dir "." :sys false :idx nil :key "f:."}] (:quote-dirs pp) br)
+      (let [here (when-not (:virtual fr) {:dir (:dir fr) :sys (:sys fr) :idx (:idx fr) :key (str "f:" (:dir fr))})]
+        (concat (when here [here]) (:quote-dirs pp) br)))))
+
+(defn- lookup
+  "The record of the file an #include of name finds along dirs, as gcc caches them: by name and
+  directory, the search's first directory and each directory it finds the file in (a later search
+  that meets one of those directories finds the same record); {:path :sys :idx :guard} or nil"
+  [pp ^String name dirs]
+  (let [^HashMap rs (:records pp)
+        mk (fn [p sys idx] {:path p :sys sys :idx idx :guard (volatile! nil)})]
+    (if (or (contains? *virtual* name) (.startsWith name "/"))
+      (let [k [name "abs"]]
+        (or (.get rs k) (when (exists? name) (let [r (mk name false nil)] (.put rs k r) r))))
+      (let [sk [name (:key (first dirs))]]
+        (or (.get rs sk)
+            (some (fn [d]
+                    (let [k [name (:key d)]]
+                      (if-let [r (.get rs k)]
+                        (do (.put rs sk r) r)
+                        (let [p (join (:dir d) name)]
+                          (when (.isFile (file-at p))
+                            (let [r (mk p (:sys d) (:idx d))] (.put rs k r) (.put rs sk r) r))))))
+                  dirs))))))
+
+(defn- read-file ^String [^String path]
+  (or (get *virtual* path)
+      (String. (java.nio.file.Files/readAllBytes (.toPath (file-at path))) "ISO-8859-1")))
+
+;;; Directives
+
+(defn- read-directive
+  "The text of the directive at p (its #), its comments as CMT, to its line's end (past the
+  newlines of a comment); returns [text next-position]"
+  [pp fr ^long p]
+  (let [^String s (:s fr) n (.length s) sb (StringBuilder.)]
+    (loop [i (inc p) q 0]
+      (if (>= i n)
+        [(.toString sb) n]
+        (let [c (ch-at s i)]
+          (cond
+            (not= q 0) (cond
+                         (= c 10) (recur i 0)
+                         (and (= c 92) (< (inc i) n) (not= 10 (ch-at s (inc i))))
+                         (do (.append sb (.subSequence s i (+ i 2))) (recur (+ i 2) q))
+                         :else (do (.append sb (char c)) (recur (inc i) (if (= c q) 0 q))))
+            (= c 10) [(.toString sb) (inc i)]
+            (and (= c 47) (< (inc i) n) (= \* (.charAt s (inc i))))
+            (let [k (.indexOf s "*/" (int (+ i 2)))]
+              (when (neg? k) (fail (str @(:name fr) ":" (line-of fr i)) "unterminated comment"))
+              (.append sb CMT) (recur (+ k 2) q))
+            (or (= c 34) (= c 39)) (do (.append sb (char c)) (recur (inc i) (long c)))
+            (= c 92) (if (and (< (inc i) n) (let [d (ch-at s (inc i))] (or (= d 34) (= d 39) (= d 92))))
+                       (do (.append sb (.subSequence s i (+ i 2))) (recur (+ i 2) q))
+                       (do (.append sb (char c)) (recur (inc i) q)))
+            :else (do (.append sb (char c)) (recur (inc i) q))))))))
+
+(defn- skip-blanks ^long [^String s ^long i]
+  (loop [i i] (if (and (< i (.length s)) (blank? (ch-at s (int i)))) (recur (inc i)) i)))
+
+(defn- ident-at
+  "The identifier at i of s, or nil"
+  ^String [^String s ^long i]
+  (when (and (< i (.length s)) (id-start? (ch-at s (int i))))
+    (let [j (loop [j (inc i)] (if (and (< j (.length s)) (id-char? (ch-at s (int j)))) (recur (inc j)) j))]
+      (.substring s (int i) (int j)))))
+
+(defn- spaces ^String [^String s] (.replace s (char 0xE000) \space))
+
+(defn- trim-blanks ^String [^String s]
+  (let [n (.length s)
+        i (loop [i 0] (if (and (< i n) (blank? (ch-at s i))) (recur (inc i)) i))
+        j (loop [j n] (if (and (> j i) (blank? (ch-at s (dec j)))) (recur (dec j)) j))]
+    (subs s i j)))
+
+(defn- macro-name
+  "The macro name a directive's text gives (#define, #undef, #ifdef...)"
+  ^String [pp ^String rest ^String dname]
+  (let [i (skip-blanks rest 0)]
+    (cond
+      (>= i (.length rest)) (fail (where pp) (str "no macro name given in '#" dname "' directive"))
+      :else (let [nm (ident-at rest i)]
+              (when-not nm (fail (where pp) "macro names must be identifiers"))
+              (when (= nm "defined") (fail (where pp) "'defined' cannot be used as a macro name"))
+              nm))))
+
+(defn- define!
+  "#define's text: NAME body, NAME(params) body"
+  [pp ^String rest]
+  (let [name (macro-name pp rest "define")
+        i (+ (skip-blanks rest 0) (.length name))
+        n (.length rest)
+        [params j] (if (and (< i n) (= \( (.charAt rest i)))
+                     (loop [k (skip-blanks rest (inc i)) ps [] need false]
+                       (let [c (if (< k n) (.charAt rest k) \u0000)]
+                         (cond
+                           (and (= c \)) (not need) (or (empty? ps) false)) [ps (inc k)]
+                           :else
+                           (let [p (ident-at rest k)]
+                             (when-not p (fail (where pp) "syntax error in macro parameter list"))
+                             (when (some #{p} ps) (fail (where pp) (str "duplicate macro parameter '" p "'")))
+                             (let [k2 (skip-blanks rest (+ k (.length p)))
+                                   c2 (if (< k2 n) (.charAt rest k2) \u0000)]
+                               (cond
+                                 (= c2 \)) [(conj ps p) (inc k2)]
+                                 (= c2 \,) (recur (skip-blanks rest (inc k2)) (conj ps p) true)
+                                 :else (fail (where pp) "syntax error in macro parameter list")))))))
+                     [nil i])
+        body (trim-blanks (subs rest j))]
+    (.put ^HashMap (:macros pp) name
+          (if params
+            {:kind :function :params params :parts (body-parts body params)}
+            {:kind :object :body (uncomment body)}))))
+
+;;; #if's expressions
+
+(defn- num-value
+  "A pp-number of #if: [value unsigned?]"
+  [pp ^String t]
+  (let [lc (.toLowerCase t)
+        [base digits-start] (cond (or (.startsWith lc "0x")) [16 2]
+                                  (.startsWith lc "0b") [2 2]
+                                  (.startsWith lc "0") [8 0]
+                                  :else [10 0])
+        base (long base)
+        n (.length t)
+        dig (fn [^long c] (let [d (Character/digit (char c) 16)] d))
+        j (loop [j (long digits-start)]
+            (if (and (< j n) (let [d (long (dig (ch-at t j)))] (and (>= d 0) (< d (if (= base 8) 10 base)))))
+              (recur (inc j)) j))]
+    (when (or (.contains t ".")
+              (and (not= base 16) (some #(= % \e) lc) (not (re-find #"^[0-9]+[ul]*$" lc)))
+              (and (= base 16) (some #(= % \p) lc)))
+      (fail (where pp) "floating constant in preprocessor expression"))
+    (when (and (= base 16 2) false) nil)
+    (when (and (> base 10) (= j 2)) (fail (where pp) (str "invalid suffix '" (subs t 1) "' on integer constant")))
+    (when (and (= base 2) (= j 2)) (fail (where pp) (str "invalid suffix '" (subs t 1) "' on integer constant")))
+    (let [digits (subs t digits-start j)
+          sfx (subs t j)]
+      (when (and (= base 8) (some #(or (= % \8) (= % \9)) digits))
+        (fail (where pp) (str "invalid digit in octal constant")))
+      (when-not (re-matches #"(?:[uU]?(?:l|L|ll|LL)?|(?:l|L|ll|LL)[uU])" sfx)
+        (if (re-matches #"[uUlL]*[ijIJ][uUlL]*" sfx)
+          (fail (where pp) "imaginary number in preprocessor expression")
+          (fail (where pp) (str "invalid suffix '" sfx "' on integer constant"))))
+      [(reduce (fn [^long v c] (unchecked-add (unchecked-multiply v base) (long (dig (long c))))) 0 digits)
+       (boolean (re-find #"[uU]" sfx))])))
+
+(defn- char-value
+  "A character constant of #if at i of s ('...', after an optional L): [value next-i]"
+  [pp ^String s ^long i wide]
+  (let [n (.length s)]
+    (loop [k (inc i) cs []]
+      (when (>= k n) (fail (where pp) "missing terminating ' character"))
+      (let [c (.charAt s k)]
+        (cond
+          (= c \') (do (when (empty? cs) (fail (where pp) "empty character constant"))
+                       [(if wide
+                          (long (last cs))
+                          (if (= 1 (count cs))
+                            (let [v (bit-and (long (first cs)) 0xff)] (if (> v 127) (- v 256) v))
+                            (long (.intValue (Long/valueOf (long (reduce (fn [^long v c] (bit-or (bit-shift-left v 8) (bit-and (long c) 0xff))) 0 cs)))))))
+                        (inc k)])
+          (= c \\)
+          (let [d (if (< (inc k) n) (.charAt s (inc k)) \u0000)]
+            (cond
+              (<= (int \0) (int d) (int \7))
+              (let [e (loop [e (inc k) m 0] (if (and (< e n) (< m 3) (<= (int \0) (int (.charAt s e)) (int \7))) (recur (inc e) (inc m)) e))]
+                (recur (long e) (conj cs (Long/parseLong (subs s (inc k) e) 8))))
+              (= d \x)
+              (let [e (loop [e (+ k 2)] (if (and (< e n) (>= (Character/digit (.charAt s e) 16) 0)) (recur (inc e)) e))]
+                (recur (long e) (conj cs (Long/parseLong (subs s (+ k 2) e) 16))))
+              :else (recur (+ k 2) (conj cs (case d \n 10 \t 9 \r 13 \a 7 \b 8 \f 12 \v 11 (\e \E) 27 (long d))))))
+          :else (recur (inc k) (conj cs (long (int c)))))))))
+
+(defn- has-include
+  "__has_include's answer for its operand's text (after the name)"
+  [pp ^String operand next?]
+  (let [o (trim-blanks (spaces operand))
+        o (if (and (.startsWith o "(") (.endsWith o ")")) (trim-blanks (subs o 1 (dec (.length o)))) o)
+        fr (frame pp)]
+    (cond
+      (and (.startsWith o "\"") (.endsWith o "\"") (> (.length o) 1))
+      (some? (search (subs o 1 (dec (.length o))) (chain pp fr (if next? :next :quote))))
+      (and (.startsWith o "<") (.endsWith o ">"))
+      (some? (search (subs o 1 (dec (.length o))) (chain pp fr (if next? :next :angle))))
+      :else (fail (where pp) "operator \"__has_include\" requires a header-name"))))
+
+(defn- tokens
+  "#if's expanded text as tokens: [:num v u], [:op s]; defined and __has_include answered"
+  [pp ^String s]
+  (let [n (.length s) out (ArrayList.) ^HashMap macros (:macros pp)]
+    (loop [i 0]
+      (if (>= i n)
+        (vec out)
+        (let [c (ch-at s i)]
+          (cond
+            (blank? c) (recur (inc i))
+            (and (= c 76) (< (inc i) n) (= \' (.charAt s (inc i))))
+            (let [[v k] (char-value pp s (inc i) true)] (.add out [:num v false]) (recur (long k)))
+            (id-start? c)
+            (let [w (ident-at s i) j (+ i (.length w))]
+              (case w
+                "defined"
+                (let [k (skip-blanks s j)
+                      paren (and (< k n) (= \( (.charAt s k)))
+                      k (if paren (skip-blanks s (inc k)) k)
+                      nm (ident-at s k)
+                      _ (when-not nm (fail (where pp) "operator \"defined\" requires an identifier"))
+                      k (+ k (.length nm))
+                      k (if paren
+                          (let [k (skip-blanks s k)]
+                            (when-not (and (< k n) (= \) (.charAt s k))) (fail (where pp) "missing ')' after \"defined\""))
+                            (inc k))
+                          k)]
+                  (.add out [:num (if (.containsKey macros nm) 1 0) false])
+                  (recur (long k)))
+                ("__has_include" "__has_include_next")
+                (let [k (.indexOf s ")" (int j))
+                      k (if (neg? k) (fail (where pp) "missing ')' after \"__has_include\"") (inc k))]
+                  (.add out [:num (if (has-include pp (subs s j k) (= w "__has_include_next")) 1 0) false])
+                  (recur (long k)))
+                (do (.add out [:num 0 false :id w]) (recur (long j)))))
+            (or (and (>= c 48) (<= c 57))
+                (and (= c 46) (< (inc i) n) (Character/isDigit (.charAt s (inc i)))))
+            (let [j (loop [j (inc i)]
+                      (if (< j n)
+                        (let [d (.charAt s j)]
+                          (cond
+                            (and (or (= d \+) (= d \-)) (#{\e \E \p \P} (.charAt s (dec j)))) (recur (inc j))
+                            (or (Character/isLetterOrDigit d) (= d \_) (= d \.)) (recur (inc j))
+                            :else j))
+                        j))
+                  [v u] (num-value pp (subs s i j))]
+              (.add out [:num v u]) (recur (long j)))
+            (= c 39) (let [[v k] (char-value pp s i false)] (.add out [:num v false]) (recur (long k)))
+            (= c 34) (fail (where pp) "token is not valid in preprocessor expressions")
+            :else
+            (let [two (when (< (inc i) n) (subs s i (+ i 2)))]
+              (if (#{"||" "&&" "==" "!=" "<=" ">=" "<<" ">>"} two)
+                (do (.add out [:op two]) (recur (+ i 2)))
+                (let [one (str (char c))]
+                  (if (#{"+" "-" "*" "/" "%" "<" ">" "&" "|" "^" "!" "~" "?" ":" "(" ")" ","} one)
+                    (do (.add out [:op one]) (recur (inc i)))
+                    (fail (where pp) (str "token '" one "' is not valid in preprocessor expressions"))))))))))))
+
+(defn- shl ^long [^long v ^long n]
+  (cond (neg? n) (if (<= n -64) (if (neg? v) -1 0) (bit-shift-right v (- n)))
+        (>= n 64) 0
+        :else (bit-shift-left v n)))
+
+(defn- shr ^long [^long v ^long n u]
+  (cond (neg? n) (shl v (- n))
+        (>= n 64) (if (and (not u) (neg? v)) -1 0)
+        u (unsigned-bit-shift-right v n)
+        :else (bit-shift-right v n)))
+
+;; The evaluator's state: {:toks [..] :i [next] :skip [depth of unevaluated operands]}
+
+(defn- tok-at [ev] (get (:toks ev) (aget ^longs (:i ev) 0)))
+(defn- tok-op [ev] (let [t (tok-at ev)] (when (= :op (first t)) (second t))))
+(defn- tok-next! [ev] (aset ^longs (:i ev) 0 (inc (aget ^longs (:i ev) 0))))
+(defn- skip+! [ev ^long d] (aset ^longs (:skip ev) 0 (+ d (aget ^longs (:skip ev) 0))))
+
+(defn- bad-token [pp ev]
+  (let [t (tok-at ev)]
+    (if t
+      (fail (where pp) (str "missing binary operator before token '" (if (= :op (first t)) (second t) (or (get t 4) (second t))) "'"))
+      (fail (where pp) "#if with no expression"))))
+
+(def ^:private precs
+  {"," 0 "?" 1 "||" 2 "&&" 3 "|" 4 "^" 5 "&" 6 "==" 7 "!=" 7 "<" 8 ">" 8 "<=" 8 ">=" 8
+   "<<" 9 ">>" 9 "+" 10 "-" 10 "*" 11 "/" 11 "%" 11})
+
+(declare ex-binary)
+
+(defn- ex-unary
+  "An operand: [value unsigned?]"
+  [pp ev]
+  (let [t (tok-at ev)]
+    (cond
+      (nil? t) (fail (where pp) "#if with no expression")
+      (= :num (first t)) (do (tok-next! ev) [(long (second t)) (boolean (nth t 2))])
+      (= "(" (second t)) (do (tok-next! ev)
+                             (let [v (ex-binary pp ev 0)]
+                               (when-not (= ")" (tok-op ev)) (fail (where pp) "missing ')' in expression"))
+                               (tok-next! ev)
+                               v))
+      (#{"+" "-" "~" "!"} (second t))
+      (do (tok-next! ev)
+          (when-not (tok-at ev) (fail (where pp) (str "operator '" (second t) "' has no right operand")))
+          (let [[v u] (ex-unary pp ev)
+                v (long v)]
+            (case (second t)
+              "+" [v u]
+              "-" [(unchecked-negate v) u]
+              "~" [(bit-not v) u]
+              "!" [(if (zero? v) 1 0) false])))
+      :else (bad-token pp ev))))
+
+(defn- arith
+  "a op b, op a binary operator but , ? || &&"
+  [pp ev ^String op ^long a au ^long b bu]
+  (let [u (or au bu)
+        c (if u (Long/compareUnsigned a b) (Long/compare a b))]
+    (case op
+      "|" [(bit-or a b) u]
+      "^" [(bit-xor a b) u]
+      "&" [(bit-and a b) u]
+      "==" [(if (= a b) 1 0) false]
+      "!=" [(if (= a b) 0 1) false]
+      "<" [(if (neg? c) 1 0) false]
+      ">" [(if (pos? c) 1 0) false]
+      "<=" [(if (pos? c) 0 1) false]
+      ">=" [(if (neg? c) 0 1) false]
+      "<<" [(shl a (if (and bu (neg? b)) 64 b)) au]
+      ">>" [(shr a (if (and bu (neg? b)) 64 b) au) au]
+      "+" [(unchecked-add a b) u]
+      "-" [(unchecked-subtract a b) u]
+      "*" [(unchecked-multiply a b) u]
+      ("/" "%")
+      (cond
+        (zero? b) (if (pos? (aget ^longs (:skip ev) 0)) [0 u] (fail (where pp) "division by zero in #if"))
+        (= op "/") [(cond u (Long/divideUnsigned a b) (and (= b -1) (= a Long/MIN_VALUE)) a :else (quot a b)) u]
+        :else [(cond u (Long/remainderUnsigned a b) (= b -1) 0 :else (rem a b)) u]))))
+
+(defn- ex-binary
+  "The expression of operators of precedence prec and above: [value unsigned?]"
+  [pp ev ^long prec]
+  (loop [[a au] (ex-unary pp ev)]
+    (let [op (tok-op ev)
+          p (long (get precs op -1))
+          a (long a)]
+      (cond
+        (and (nil? op) (tok-at ev)) (bad-token pp ev)
+        (or (neg? p) (< p prec)) [a au]
+        :else
+        (do (tok-next! ev)
+            (when-not (tok-at ev) (fail (where pp) (str "operator '" op "' has no right operand")))
+            (case op
+              "," (recur (ex-binary pp ev 1))
+              "?" (let [_ (when (zero? a) (skip+! ev 1))
+                        [b bu] (ex-binary pp ev 0)
+                        _ (when (zero? a) (skip+! ev -1))
+                        _ (when-not (= ":" (tok-op ev)) (fail (where pp) "'?' without following ':'"))
+                        _ (tok-next! ev)
+                        _ (when-not (zero? a) (skip+! ev 1))
+                        [c cu] (ex-binary pp ev 1)
+                        _ (when-not (zero? a) (skip+! ev -1))]
+                    (recur [(if (zero? a) c b) (or bu cu)]))
+              ("||" "&&")
+              (let [short (if (= op "||") (not (zero? a)) (zero? a))
+                    _ (when short (skip+! ev 1))
+                    [b _] (ex-binary pp ev (inc p))
+                    _ (when short (skip+! ev -1))
+                    t (if (= op "||") (or (not (zero? a)) (not (zero? (long b)))) (and (not (zero? a)) (not (zero? (long b)))))]
+                (recur [(if t 1 0) false]))
+              (let [[b bu] (ex-binary pp ev (inc p))]
+                (recur (arith pp ev op a au (long b) bu)))))))))
+
+(defn- eval-if
+  "The value of #if's tokens: true when not zero"
+  [pp toks]
+  (when (empty? toks) (fail (where pp) "#if with no expression"))
+  (let [ev {:toks (vec toks) :i (long-array 1) :skip (long-array 1)}
+        [v _] (ex-binary pp ev 0)]
+    (when (tok-at ev) (bad-token pp ev))
+    (not (zero? (long v)))))
+
+(defn- if-value [pp ^String rest]
+  (eval-if pp (tokens pp (expand-string pp (spaces rest) :if))))
+
+;;; Conditionals: {:outer skipping-before :taken :active :else :depth}
+
+(defn- skipping? [pp]
+  (let [^ArrayList cs (:conds pp)]
+    (and (pos? (.size cs)) (let [c (.get cs (dec (.size cs)))] (or (:outer c) (not (:active c)))))))
+
+(defn- push-cond! [pp active?]
+  (let [outer (skipping? pp)
+        v (and (not outer) (boolean (active?)))]
+    (.add ^ArrayList (:conds pp) {:outer outer :taken v :active v :else false})))
+
+(defn- top-cond [pp ^String dname]
+  (let [^ArrayList cs (:conds pp) fr (frame pp)]
+    (when (<= (.size cs) (long (:depth0 fr))) (fail (where pp) (str "#" dname " without #if")))
+    (.get cs (dec (.size cs)))))
+
+(defn- set-cond! [pp c]
+  (let [^ArrayList cs (:conds pp)] (.set cs (dec (.size cs)) c)))
+
+(defn- elif! [pp ^String dname active?]
+  (let [c (top-cond pp dname)]
+    (when (:else c) (fail (where pp) (str "#" dname " after #else")))
+    (set-cond! pp (if (or (:outer c) (:taken c))
+                    (assoc c :active false)
+                    (let [v (boolean (active?))] (assoc c :active v :taken v))))))
+
+(defn- guard-of
+  "The macro of a multiple-include guard's opening: #ifndef X, #if !defined X, #if !defined(X)"
+  [^String dname ^String rest]
+  (let [r (trim-blanks (spaces rest))]
+    (case dname
+      "ifndef" (re-matches #"[A-Za-z_][A-Za-z0-9_]*" r)
+      "if" (second (or (re-matches #"!\s*defined\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)" r)
+                       (re-matches #"!\s*defined\s+([A-Za-z_][A-Za-z0-9_]*)" r)))
+      nil)))
+
+(defn- mio-directive!
+  "The multiple-include optimization's view of a directive at the file's depth rel (before it)"
+  [fr ^String dname ^String rest ^long rel]
+  (let [m (:mio fr) s @m]
+    (cond
+      (= rel 0) (vreset! m (if-let [g (and (= s :start) (guard-of dname rest))] [:inside g] :invalid))
+      (and (= rel 1) (vector? s) (= :inside (first s)) (#{"else" "elif" "elifdef" "elifndef"} dname)) (vreset! m :invalid)
+      (and (= rel 1) (vector? s) (= :inside (first s)) (= "endif" dname)) (vreset! m [:ended (second s)]))))
+
+(declare include! run-file!)
+
+(defn- header-name
+  "An #include's operand: [name angled?]"
+  [pp ^String rest]
+  (let [r (trim-blanks (spaces rest))
+        parse (fn [^String r]
+                (cond
+                  (.startsWith r "\"") (let [k (.indexOf r "\"" 1)] (when (pos? k) [(subs r 1 k) false]))
+                  (.startsWith r "<") (let [k (.indexOf r ">" 1)] (when (pos? k) [(subs r 1 k) true]))))]
+    (or (parse r)
+        (parse (trim-blanks (expand-string pp r :dir)))
+        (fail (where pp) "#include expects \"FILENAME\" or <FILENAME>"))))
+
+(defn- line-after
+  "The presumed line after a directive that ends before next (past its newline)"
+  ^long [fr ^long next]
+  (inc (line-of fr (dec next))))
+
+(defn- pragma!
+  "#pragma: those libcpp runs bring the output to the line after them (once, push_macro, pop_macro,
+  GCC poison, system_header, dependency, warning, error: of them once, push_macro, pop_macro and error
+  act); some others make gcc fail, as here; the rest print nothing"
+  [pp fr ^String text ^long after]
+  (let [r (trim-blanks (spaces text))
+        [_ w1 w2] (re-find #"^([A-Za-z_][A-Za-z0-9_]*)(?:\s+([A-Za-z_][A-Za-z0-9_]*))?" r)
+        ^HashMap macros (:macros pp)
+        ^HashMap saved (:saved pp)
+        restored (volatile! false)
+        arg (fn [] (second (re-find #"\(\s*\"([^\"]*)\"\s*\)" r)))]
+    (cond
+      (or (= w1 "once") (= w1 "push_macro") (= w1 "pop_macro")
+          (and (= w1 "GCC") (#{"poison" "system_header" "dependency" "warning" "error"} w2)))
+      (do (case w1
+            "once" (.add ^HashSet (:once pp) (canonical (:path fr)))
+            "push_macro" (when-let [n (arg)] (.put saved n (conj (or (.get saved n) ()) (.get macros n))))
+            "pop_macro" (when-let [n (arg)]
+                          (when-let [st (seq (.get saved n))]
+                            (if-let [m (first st)] (do (.put macros n m) (vreset! restored true)) (.remove macros n))
+                            (.put saved n (rest st))))
+            (case w2
+              "error" (fail (where pp) (str "#pragma " r))
+              "dependency" (let [[_ f] (re-find #"^GCC\s+dependency\s+\"([^\"]*)\"" r)]
+                             (when (and f (nil? (search f (chain pp fr :quote))))
+                               (fail (where pp) (str "fatal error: " f ": No such file or directory"))))
+              nil))
+          (catch-up! pp after)
+          ;; gcc's output has one newline more after a pop_macro that restores a definition
+          (when @restored
+            (.append ^StringBuilder (:out pp) \newline)))
+      (or (#{"redefine_extname" "message"} w1)
+          (and (= w1 "GCC") (#{"diagnostic" "push_options" "pop_options" "reset_options" "target"} w2)))
+      (fail (where pp) (str "#pragma " r " (gcc rejects it in traditional mode)")))))
+
+(defn- directive!
+  "Runs the directive at p of the frame's text; returns the position after it"
+  [pp fr ^long p]
+  (let [[^String text np] (read-directive pp fr p)
+        np (long np)
+        i (skip-blanks text 0)
+        dname (ident-at text i)
+        rest (if dname (subs text (+ i (.length dname))) "")
+        skip (skipping? pp)
+        ^ArrayList cs (:conds pp)
+        rel (- (.size cs) (long (:depth0 fr)))
+        ^HashMap macros (:macros pp)]
+    (vreset! (:dline pp) (line-of fr p))
+    (cond
+      ;; a null directive; in assembler mode a # line without a name is text
+      (nil? dname) (if (or skip (>= i (.length text))) np (do (vreset! (:mio fr) :invalid) (long (run-file! pp fr p :text))))
+      skip
+      (do (when (#{"if" "ifdef" "ifndef" "elif" "elifdef" "elifndef" "else" "endif"} dname)
+            (mio-directive! fr dname rest rel))
+          (case dname
+            ("if" "ifdef" "ifndef") (push-cond! pp (constantly false))
+            "elif" (elif! pp dname #(if-value pp rest))
+            "elifdef" (elif! pp dname #(.containsKey macros (macro-name pp rest dname)))
+            "elifndef" (elif! pp dname #(not (.containsKey macros (macro-name pp rest dname))))
+            "else" (let [c (top-cond pp dname)]
+                     (when (:else c) (fail (where pp) "#else after #else"))
+                     (set-cond! pp (assoc c :else true :active (and (not (:outer c)) (not (:taken c))) :taken true)))
+            "endif" (do (top-cond pp dname) (.remove cs (int (dec (.size cs)))))
+            nil)
+          np)
+      :else
+      (let [known #{"define" "undef" "include" "include_next" "import" "if" "ifdef" "ifndef" "elif"
+                    "elifdef" "elifndef" "else" "endif" "line" "error" "warning" "pragma" "ident" "sccs"
+                    "assert" "unassert" "embed"}]
+        (if-not (known dname)
+          (do (vreset! (:mio fr) (if (= rel 0) :invalid @(:mio fr))) (long (run-file! pp fr p :text)))
+          (do
+            (mio-directive! fr dname rest rel)
+            (case dname
+              "define" (define! pp rest)
+              "undef" (.remove macros (macro-name pp rest "undef"))
+              "ifdef" (push-cond! pp #(.containsKey macros (macro-name pp rest dname)))
+              "ifndef" (push-cond! pp #(not (.containsKey macros (macro-name pp rest dname))))
+              "if" (push-cond! pp #(if-value pp rest))
+              ("elif" "elifdef" "elifndef") (elif! pp dname (constantly false))
+              "else" (let [c (top-cond pp dname)]
+                       (when (:else c) (fail (where pp) "#else after #else"))
+                       (set-cond! pp (assoc c :else true :active false :taken true)))
+              "endif" (do (top-cond pp dname) (.remove cs (int (dec (.size cs)))))
+              ("include" "include_next" "import")
+              (let [[nm angled] (header-name pp rest)]
+                (include! pp fr nm (cond (= dname "include_next") :next angled :angle :else :quote)
+                          (line-after fr np) (= dname "import")))
+              "line"
+              (let [r (trim-blanks (spaces rest))
+                    r (if (and (pos? (.length r)) (Character/isDigit (.charAt r 0))) r (trim-blanks (expand-string pp r :dir)))
+                    [_ digits nm] (or (re-matches #"([0-9]+)(?:\s+\"((?:[^\"\\]|\\.)*)\")?\s*" r)
+                                      (fail (where pp) (str "\"" r "\" after #line is not a positive integer")))
+                    target (Long/parseLong digits)]
+                (aset ^longs (:delta fr) 0 (- target (- (line-after fr np) (aget ^longs (:delta fr) 0))))
+                (when nm (vreset! (:name fr) (str/replace nm #"\\(.)" "$1")))
+                (marker! pp target @(:name fr) "" (:sys fr)))
+              "error" (fail (where pp) (str "#error" (spaces rest)))
+              "pragma" (pragma! pp fr rest (line-after fr np))
+              ("warning" "ident" "sccs") nil
+              (fail (where pp) (str "#" dname " is not supported by this preprocessor")))
+            np))))))
+
+;;; Files
+
+(defn- run-file!
+  "Runs the frame's text from p (mode :text: one text line only, returning the position after
+  it); else the whole file"
+  [pp fr ^long p & [mode]]
+  (let [^String s (:s fr) n (.length s)
+        text-line (fn [^long p]
+                    (let [stk (ArrayList.) base (src s p n nil) out (StringBuilder.)]
+                      (.add stk base)
+                      (st! pp TOK 0)
+                      (scan! pp stk :text out)
+                      (when (and (= 1 (st pp TOK)) (= (.size ^ArrayList (:conds pp)) (long (:depth0 fr))))
+                        (vreset! (:mio fr) :invalid))
+                      (print-line! pp (line-of fr p) out)
+                      (pos-of base)))
+        skip-line (fn [^long p]
+                    (loop [i p q 0]
+                      (if (>= i n)
+                        n
+                        (let [c (ch-at s i)]
+                          (cond
+                            (not= q 0) (cond (= c 10) (inc i)
+                                             (and (= c 92) (< (inc i) n) (not= 10 (ch-at s (inc i)))) (recur (+ i 2) q)
+                                             (= c q) (recur (inc i) 0)
+                                             :else (recur (inc i) q))
+                            (= c 10) (inc i)
+                            (and (= c 47) (< (inc i) n) (= \* (.charAt s (inc i))))
+                            (let [k (.indexOf s "*/" (int (+ i 2)))]
+                              (when (neg? k) (fail (str @(:name fr) ":" (line-of fr i)) "unterminated comment"))
+                              (recur (+ k 2) q))
+                            (or (= c 34) (= c 39)) (recur (inc i) (long c))
+                            (and (= c 92) (< (inc i) n) (let [d (ch-at s (inc i))] (or (= d 34) (= d 39) (= d 92))))
+                            (recur (+ i 2) q)
+                            :else (recur (inc i) q))))))]
+    (vreset! (:dline-mode pp) {:in-directive false})
+    (if (= mode :text)
+      (text-line p)
+      (loop [p p]
+        (when (< p n)
+          (recur (long (cond
+                         (= \# (.charAt s (int p)))
+                         (do (vreset! (:dline-mode pp) {:in-directive true})
+                             (let [np (directive! pp fr p)]
+                               (vreset! (:dline-mode pp) {:in-directive false})
+                               np))
+                         (skipping? pp) (skip-line p)
+                         :else (text-line p)))))))))
+
+(defn- open-frame [pp ^String path sys idx]
+  (let [[s ln] (clean (read-file path))
+        virtual (contains? *virtual* path)]
+    {:path path :name (volatile! path) :dir (if virtual nil (dir-of path)) :virtual virtual :sys sys :idx idx
+     :s s :ln ln :delta (long-array 1) :mio (volatile! :start)
+     :depth0 (.size ^ArrayList (:conds pp))}))
+
+(defn- enter!
+  "Runs a file's frame between its markers: its entry's, then its parent's return at line back"
+  [pp fr record parent ^long back]
+  (let [^ArrayList fs (:frames pp)]
+    (when (> (.size fs) 200) (fail (where pp) "#include nested depth 200 exceeds maximum of 200"))
+    (marker! pp 1 (:path fr) " 1" (:sys fr))
+    (.add fs fr)
+    (run-file! pp fr 0)
+    (when (> (.size ^ArrayList (:conds pp)) (long (:depth0 fr)))
+      (fail (str @(:name fr) ":" (:line (.get ^ArrayList (:conds pp) (dec (.size ^ArrayList (:conds pp)))) "?")) "unterminated #if"))
+    (.remove fs (int (dec (.size fs))))
+    (let [s @(:mio fr)]
+      (when (and record (vector? s) (= :ended (first s))) (vreset! (:guard record) (second s))))
+    (marker! pp back @(:name parent) " 2" (:sys parent))))
+
+(defn- include!
+  "An #include of name (kind :quote, :angle, :next, :cmdline) from frame fr, the parent's output
+  line after it back"
+  [pp fr ^String name kind ^long back once?]
+  (let [record (or (lookup pp name (chain pp fr kind))
+                   (fail (where pp) (str "fatal error: " name ": No such file or directory")))
+        g @(:guard record)
+        path (:path record)
+        canon (if (contains? *virtual* path) path (canonical path))
+        ^HashSet once (:once pp)]
+    (when-not (or (and g (.containsKey ^HashMap (:macros pp) g)) (.contains once canon))
+      (when once? (.add once canon))
+      (catch-up! pp back)
+      (enter! pp (open-frame pp path (:sys record) (:idx record)) record fr back))))
+
+(defn preprocess
+  "Preprocesses the file at path (as the command line names it, relative to the working directory
+  the paths are resolved against: cwd) as `cc -E -undef -traditional -x assembler-with-cpp` with
+  opts: :defines [[\"-D\" \"X=1\"] [\"-U\" \"Y\"] ...] in order, :includes [files of -include], :bracket
+  [-I directories], :quote [-iquote directories], :virtual {name text} (files that exist only in
+  memory). Returns {:text the output (one char a byte)}"
+  [^String path opts]
+  (binding [*virtual* (merge *virtual* (or (:virtual opts) {}))]
+    (let [macros (HashMap.)
+          out (StringBuilder.)
+          cmdline {:path "<command-line>" :name (volatile! "<command-line>") :dir "." :sys false :idx nil
+                   :s "" :ln (int-array 1) :delta (long-array 1) :mio (volatile! :invalid) :depth0 0}
+          pp {:macros macros :st (long-array 3) :out out :conds (ArrayList.) :frames (doto (ArrayList.) (.add cmdline))
+              :records (HashMap.) :once (HashSet.) :saved (HashMap.)
+              :quote-dirs (mapv (fn [d] {:dir (norm-dir d) :sys false :idx nil}) (filter #(.isDirectory (file-at %)) (:quote opts)))
+              :bracket (dirs (:bracket opts)) :base path
+              :dline (volatile! 0) :dline-mode (volatile! {:in-directive true})}]
+      (.append out (str "# 0 \"" (esc-name path) "\"\n# 0 \"<built-in>\"\n# 0 \"<command-line>\"\n"))
+      (doseq [[n b] (:predefined host)] (.put macros n {:kind :object :body b}))
+      (doseq [b builtins] (.put macros b {:kind :builtin}))
+      (let [defs (:defines opts)
+            k (count defs)]
+        (doseq [[i [flag ^String d]] (map-indexed vector defs)]
+          (vreset! (:dline pp) (inc (long i)))
+          (if (= flag "-U")
+            (.remove macros (macro-name pp d "undef"))
+            (let [e (.indexOf d "=")]
+              (define! pp (if (neg? e) (str d " 1") (str (subs d 0 e) " " (subs d (inc e))))))))
+        (vreset! (:dline pp) k)
+        (when (lookup pp (:preinclude host) (:bracket pp))
+          (include! pp cmdline (:preinclude host) :angle k false))
+        (doseq [f (:includes opts)]
+          (include! pp cmdline f :cmdline k false)))
+      (let [main (open-frame pp path false nil)]
+        (marker! pp 1 path "" false)
+        (.add ^ArrayList (:frames pp) main)
+        (run-file! pp main 0)
+        (when (pos? (.size ^ArrayList (:conds pp))) (fail (str @(:name main)) "unterminated #if")))
+      {:text (.toString out)})))

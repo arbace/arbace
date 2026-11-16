@@ -1,0 +1,828 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Parser.y.source's
+;; actions of the value declarations, signatures and activations, the expressions, commands,
+;; patterns, statements, comprehensions, case alternatives, guards, record fields and implicit
+;; parameter bindings, whose notice follows (LICENSE.md, "GHC: the Glasgow Haskell Compiler
+;; License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.rules-expr
+  "Parser.y's actions (doc/haskell/NATIVE.md) of value declarations (decl_no_th, decl, rhs, gdrhs),
+  signatures (sigdecl) and activations, and of the expressions, arrow commands, patterns,
+  statements, comprehensions, alternatives, guards, record fields, projections, splices and
+  quotations, implicit parameters and overloaded labels. A production's ECP is a fn of the mode
+  (:expr, :pat, :cmd; arbace.repr.haskell.post), a DisambECP-polymorphic PV value too; the
+  monadic actions ({% runPV ...}) run their PV computations at the reduction, as GHC does."
+  (:require [arbace.repr.haskell.ast :as a :refer [defrule L unLoc getLoc gl comb2 comb3 combine sL1 sLL sLZ noLoc nx con just maybe tuple]]
+            [arbace.repr.haskell.lex :as lx]
+            [arbace.repr.haskell.post :as pp]
+            [arbace.string :as str]))
+
+(defn- tv "a token's value" [t] (nth t 1))
+
+(defmacro ^:private ecp
+  "An ECP: a fn of the mode"
+  [[mode] & body]
+  `(fn [~mode] ~@body))
+
+(def no-activation-ann "noAnn of ActivationAnn" (con ActivationAnn nil nil 'Nothing 'Nothing))
+
+(defn- post-decl [sym] (requiring-resolve (symbol "arbace.repr.haskell.post-decl" (name sym))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Value declarations
+
+(defrule "decl_no_th" "sigdecl" [ps $1] $1)
+
+(defrule "decl_no_th" "infixexp opt_sig rhs" [ps $1 $2 $3]
+  (let [e (pp/run-pat $1)
+        l (comb2 e $3)
+        sig (when (a/just? $2) (second (second $2)))]
+    (L l (con ValD nx (pp/check-val-def ps l e [(con HsUnannotated nil) sig] $3)))))
+
+(defrule "decl_no_th" "PREFIX_PERCENT atype infixexp opt_sig rhs" [ps $1 $2 $3 $4 $5]
+  (let [e (pp/run-pat $3)
+        l (comb2 $1 $5)
+        sig (when (a/just? $4) (second (second $4)))
+        mult ((post-decl 'mk-mult-ann) $1 $2 nil)]
+    (L l (con ValD nx (pp/check-val-def ps l e [mult sig] $5)))))
+
+(defrule "decl_no_th" "pattern_synonym_decl" [ps $1] $1)
+
+(defrule "decl" "decl_no_th" [ps $1] $1)
+(defrule "decl" "splice_exp" [ps $1] ((post-decl 'mk-splice-decl) $1))
+
+(defrule "rhs" "'=' exp wherebinds" [ps $1 $2 $3]
+  (let [e (pp/run-expr $2)
+        bs (pp/adapt-where-binds $3)
+        loc (comb3 $1 e bs)
+        locg (comb2 $1 e)]
+    (L loc (con GRHSs nil (pp/unguarded-rhs locg e) (unLoc bs)))))
+
+(defrule "rhs" "gdrhs wherebinds" [ps $1 $2]
+  (let [bs (pp/adapt-where-binds $2)]
+    (L (comb2 $1 bs) (con GRHSs nil (vec (reverse (unLoc $1))) (unLoc bs)))))
+
+;; gdrhs: (L span [grhs...]) reversed
+(defrule "gdrhs" "gdrhs gdrh" [ps $1 $2] (sLL $1 $2 (cons $2 (unLoc $1))))
+(defrule "gdrhs" "gdrh" [ps $1] (sL1 $1 [$1]))
+
+(defrule "gdrh" "'|' guardquals '=' exp" [ps $1 $2 $3 $4]
+  (let [e (pp/run-expr $4)] (L (comb2 $1 e) (con GRHS nil (unLoc $2) e))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Signatures
+
+(defrule "sigdecl" "infixexp '::' sigtype" [ps $1 $2 $3]
+  (let [e (pp/run-expr $1)
+        v (pp/check-val-sig-lhs e)]
+    (sLL e $3 (con SigD nx (con TypeSig nil [v] (pp/mk-hs-wild-card-bndrs $3))))))
+
+(defrule "sigdecl" "var ',' sig_vars '::' sigtype" [ps $1 $2 $3 $4 $5]
+  (sLL $1 $5 (con SigD nx (con TypeSig nil (into [$1] (reverse (unLoc $3))) (pp/mk-hs-wild-card-bndrs $5)))))
+
+(defrule "sigdecl" "infix prec namespace_spec ops" [ps $1 $2 $3 $4]
+  (let [[fix-text fix-prec ann] (if (a/just? $2)
+                                  (let [[src n] (unLoc (second $2))] [src n (just nil)])
+                                  [nil 9 'Nothing])]
+    (when (a/just? $2)
+      (let [[_ l [_ i]] (second $2)]
+        (when-not (or (<= 0 (long i) 9) (every? #(= (unLoc %) (a/exact 'tc "->")) (unLoc $4)))
+          (pp/fatal! (lx/msg :PsErrPrecedenceOutOfRange l i)))))
+    (sLL $1 $4 (con SigD nx (con FixSig (tuple (tuple nil ann) fix-text)
+                                 (con FixitySig (unLoc $3) (unLoc $4) (con Fixity fix-prec (unLoc $1))))))))
+
+(defrule "sigdecl" "pattern_synonym_sig" [ps $1] (L (getLoc $1) (con SigD nx (unLoc $1))))
+
+(defrule "sigdecl" "'{-# COMPLETE' qcon_list opt_tyconsig '#-}'" [ps $1 $2 $3 $4]
+  (let [[_ tc] $3
+        dcolon (if (a/just? tc) (just nil) 'Nothing)]
+    (sLL $1 $4 (con SigD nx (con CompleteMatchSig (tuple (tuple nil dcolon nil) (tv $1)) (vec $2) tc)))))
+
+(defn- inline-spec-source "inlineSpecSource" [spec] (second spec))
+
+(defn mk-inline-pragma
+  "mkInlinePragma: an InlinePragma of its source, (inline-spec match-info), and activation (a Maybe)"
+  [src [inl match-info] mb-act]
+  (let [act (if (a/just? mb-act)
+              (second mb-act)
+              (if (and (seq? inl) (#{'NoInline 'Opaque} (first inl))) 'NeverActive 'AlwaysActive))]
+    (con InlinePragma src inl 'Nothing act match-info)))
+
+(defn mk-opaque-pragma "mkOpaquePragma" [src]
+  (con InlinePragma src (con Opaque src) 'Nothing 'NeverActive 'FunLike))
+
+(defrule "sigdecl" "'{-# INLINE' activation qvarcon '#-}'" [ps $1 $2 $3 $4]
+  (let [[src inl match] (tv $1)]
+    (sLL $1 $4 (con SigD nx (con InlineSig (tuple nil nil (first $2)) $3
+                                 (mk-inline-pragma (inline-spec-source inl) [inl match] (second $2)))))))
+
+(defrule "sigdecl" "'{-# OPAQUE' qvar '#-}'" [ps $1 $2 $3]
+  (sLL $1 $3 (con SigD nx (con InlineSig (tuple nil nil no-activation-ann) $2 (mk-opaque-pragma (tv $1))))))
+
+(defrule "sigdecl" "'{-# SCC' qvar '#-}'" [ps $1 $2 $3]
+  (sLL $1 $3 (con SigD nx (con SCCFunSig (tuple (tuple nil nil) (tv $1)) $2 'Nothing))))
+
+(defn- get-scc
+  "getSCC: an SCC pragma's string, refused when it has a space"
+  [t]
+  (let [[_ s] (tv t)]
+    (when (str/includes? s " ") (pp/fatal! (lx/msg :PsErrSpaceInSCC (gl t))))
+    s))
+
+(defrule "sigdecl" "'{-# SCC' qvar STRING '#-}'" [ps $1 $2 $3 $4]
+  (let [scc (get-scc $3)
+        [src _] (tv $3)]
+    (sLL $1 $4 (con SigD nx (con SCCFunSig (tuple (tuple nil nil) (tv $1)) $2
+                                 (just (sL1 $3 (con StringLiteral src scc 'Nothing))))))))
+
+(defn- rule-bndrs-or-def
+  "ruleBndrsOrDef"
+  [m]
+  (if (a/just? m) (second m) (con RuleBndrs (con HsRuleBndrsAnn 'Nothing 'Nothing) 'Nothing [])))
+
+(defn- mk-spec-sig
+  "mkSpecSig: the new form SpecSigE, or the old SpecSig of several signatures"
+  [inl-prag rule-binds expr m-sigtypes]
+  (if-not (a/just? m-sigtypes)
+    (con SpecSigE nil (rule-bndrs-or-def rule-binds) expr inl-prag)
+    (let [[_ lt [_ sigtypes]] (second m-sigtypes)]
+      (cond
+        (= 1 (count sigtypes))
+        (con SpecSigE nil (rule-bndrs-or-def rule-binds)
+             (L (combine (getLoc expr) lt) (con ExprWithTySig nil expr (pp/mk-hs-wild-card-bndrs (first sigtypes))))
+             inl-prag)
+        (and (not (a/just? rule-binds)) (= 'HsVar (first (unLoc expr))))
+        (do (lx/add-warning! pp/*ps* (lx/msg :PsWarnSpecMultipleTypeAscription lt))
+            (con SpecSig nil (nth (unLoc expr) 2) (vec sigtypes) inl-prag))
+        :else (pp/fatal! (lx/msg :PsErrSpecExprMultipleTypeAscription lt))))))
+
+(defrule "sigdecl" "'{-# SPECIALISE' activation rule_foralls infixexp sigtypes_maybe '#-}'" [ps $1 $2 $3 $4 $5 $6]
+  (let [e (pp/run-expr $4)
+        inl (mk-inline-pragma (tv $1) ['NoUserInlinePrag 'FunLike] (second $2))]
+    (sLL $1 $6 (con SigD nx (mk-spec-sig inl $3 e $5)))))
+
+(defrule "sigdecl" "'{-# SPECIALISE_INLINE' activation rule_foralls infixexp sigtypes_maybe '#-}'" [ps $1 $2 $3 $4 $5 $6]
+  (let [e (pp/run-expr $4)
+        [src inline?] (tv $1)
+        spec (if inline? [(con Inline src) 'FunLike] [(con NoInline src) 'FunLike])
+        inl (mk-inline-pragma src spec (second $2))]
+    (sLL $1 $6 (con SigD nx (mk-spec-sig inl $3 e $5)))))
+
+(defrule "sigdecl" "'{-# SPECIALISE' 'instance' inst_type '#-}'" [ps $1 $2 $3 $4]
+  (sLL $1 $4 (con SigD nx (con SpecInstSig (tuple (tuple nil nil nil) (tv $1)) $3))))
+
+(defrule "sigdecl" "'{-# MINIMAL' name_boolformula_opt '#-}'" [ps $1 $2 $3]
+  (sLL $1 $3 (con SigD nx (con MinimalSig (tuple (tuple nil nil) (tv $1)) $2))))
+
+;; sigtypes_maybe: Nothing / (Just (L span [ann sigtypes]))
+(defrule "sigtypes_maybe" "'::' sigtypes1" [ps $1 $2] (just (sLL $1 $2 [nil (unLoc $2)])))
+(defrule "sigtypes_maybe" "" [ps] 'Nothing)
+
+;; activation: [ActivationAnn (Maybe Activation)]
+(defrule "activation" "" [ps] [no-activation-ann 'Nothing])
+(defrule "activation" "explicit_activation" [ps $1] [(first $1) (just (second $1))])
+
+(defn- int-lit [t] (let [[_ src _ v] (tv t)] [src v]))
+
+(defrule "explicit_activation" "'[' INTEGER ']'" [ps $1 $2 $3]
+  (let [[src v] (int-lit $2)]
+    [(con ActivationAnn nil nil 'Nothing (just nil)) (con ActiveAfter src v)]))
+(defrule "explicit_activation" "'[' rule_activation_marker INTEGER ']'" [ps $1 $2 $3 $4]
+  (let [[src v] (int-lit $3)]
+    [(con ActivationAnn nil nil $2 (just nil)) (con ActiveBefore src v)]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Quasi-quotes
+
+(defrule "quasiquote" "TH_QUASIQUOTE" [ps $1]
+  (let [[quoter quoter-span quote quote-span] (tv $1)]
+    (sL1 $1 (con HsQuasiQuote nx (L quoter-span (a/unqual 'var quoter)) (L quote-span quote)))))
+(defrule "quasiquote" "TH_QQUASIQUOTE" [ps $1]
+  (let [[qual quoter quoter-span quote quote-span] (tv $1)]
+    (sL1 $1 (con HsQuasiQuote nx (L quoter-span (a/qual 'var qual quoter)) (L quote-span quote)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Expressions
+
+(defrule "exp" "exp_gen(infixexp)" [ps $1] $1)
+(defrule "exp2" "exp_gen(infixexp2)" [ps $1] $1)
+
+(defrule "exp_gen(IEXP)" "IEXP '::' ctype" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [e ($1 mode)]
+      (pp/mk-hs-ty-sig-pv ps mode (comb2 e $3) e $3))))
+
+(defn- cmd-arr-app [ps $1 $3 order left?]
+  (let [e1 (pp/run-expr $1) e3 (pp/run-expr $3)
+        l (comb2 e1 e3)]
+    (pp/ecp-from-cmd
+     (L l (if left?
+            (con HsCmdArrApp (tuple nil nil) e1 e3 order true)
+            (con HsCmdArrApp (tuple nil nil) e3 e1 order false))))))
+
+(defrule "exp_gen(IEXP)" "IEXP '-<' exp_gen(IEXP)" [ps $1 $2 $3] (cmd-arr-app ps $1 $3 'HsFirstOrderApp true))
+(defrule "exp_gen(IEXP)" "IEXP '>-' exp_gen(IEXP)" [ps $1 $2 $3] (cmd-arr-app ps $1 $3 'HsFirstOrderApp false))
+(defrule "exp_gen(IEXP)" "IEXP '-<<' exp_gen(IEXP)" [ps $1 $2 $3] (cmd-arr-app ps $1 $3 'HsHigherOrderApp true))
+(defrule "exp_gen(IEXP)" "IEXP '>>-' exp_gen(IEXP)" [ps $1 $2 $3] (cmd-arr-app ps $1 $3 'HsHigherOrderApp false))
+(defrule "exp_gen(IEXP)" "IEXP" [ps $1] $1)
+(defrule "exp_gen(IEXP)" "exp_prag(exp_gen(IEXP))" [ps $1] $1)
+(defrule "exp_gen(IEXP)" "'type' atype" [ps $1 $2]
+  (ecp [mode] (pp/mk-hs-emb-ty-pv mode (comb2 $1 $2) $2)))
+
+(defrule "infixexp2" "infixexp" [ps $1] $1)
+
+(defrule "infixexp2" "infixexp '->' infixexp2" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [amode (pp/arrow-parsing-mode ps)
+          e1 ($1 (pp/lhs-mode amode mode))
+          e3 ($3 mode)]
+      (pp/mk-hs-arrow-pv ps mode (comb2 e1 e3) amode e1 (con HsUnannotated nil) e3))))
+
+(defrule "infixexp2" "infixexp expmult '->' infixexp2" [ps $1 $2 $3 $4]
+  (ecp [mode]
+    (let [e1 ($1 mode)
+          m ($2 mode)
+          e4 ($4 mode)
+          _ (pp/hint-linear (getLoc m))
+          arr ((unLoc m) $3)]
+      (pp/mk-hs-arrow-pv ps mode (comb2 e1 e4) :fun-type e1 arr e4))))
+
+(defrule "infixexp2" "infixexp '->.' infixexp2" [ps $1 $2 $3]
+  (ecp [mode]
+    (pp/hint-linear (gl $2))
+    (let [e1 ($1 mode) e3 ($3 mode)]
+      (pp/mk-hs-arrow-pv ps mode (comb2 e1 e3) :fun-type e1 (con HsLinearAnn nil) e3))))
+
+(defrule "infixexp2" "expcontext '=>' infixexp2" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [c ($1 mode) e3 ($3 mode)]
+      (pp/mk-qual-pv mode (comb2 c e3) c e3))))
+
+(defrule "infixexp2" "forall_telescope infixexp2" [ps $1 $2]
+  (ecp [mode]
+    (let [e2 ($2 mode)]
+      (pp/mk-hs-forall-pv mode (comb2 $1 e2) (unLoc $1) e2))))
+
+(defrule "infixexp" "exp10" [ps $1] $1)
+(defrule "infixexp" "infixexp qop exp10p" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [op ($2 (pp/infix-op-mode mode))
+          e1 ($1 mode)
+          e3 ($3 mode)]
+      (pp/mk-hs-op-app-pv mode (comb2 e1 e3) e1 op e3))))
+
+(defrule "exp10p" "exp10" [ps $1] $1)
+(defrule "exp10p" "exp_prag(exp10p)" [ps $1] $1)
+
+(defrule "exp_prag(e)" "prag_e e" [ps $1 $2]
+  (let [e (pp/run-expr $2)]
+    (pp/ecp-from-exp (sLL $1 e (con HsPragE nx (unLoc $1) e)))))
+
+(defrule "exp10" "'-' fexp" [ps $1 $2]
+  (ecp [mode]
+    (let [e ($2 mode)] (pp/mk-hs-neg-app-pv mode (comb2 $1 e) e))))
+(defrule "exp10" "fexp" [ps $1] $1)
+
+;; optSemi: [token-or-nil bool]
+(defrule "optSemi" "';'" [ps $1] [$1 true])
+(defrule "optSemi" "" [ps] [nil false])
+
+(defrule "prag_e" "'{-# SCC' STRING '#-}'" [ps $1 $2 $3]
+  (let [scc (get-scc $2) [src _] (tv $2)]
+    (sLL $1 $3 (con HsPragSCC (tuple nil (tv $1)) (con StringLiteral src scc 'Nothing)))))
+(defrule "prag_e" "'{-# SCC' VARID '#-}'" [ps $1 $2 $3]
+  (sLL $1 $3 (con HsPragSCC (tuple nil (tv $1)) (con StringLiteral nil (tv $2) 'Nothing))))
+
+(defrule "fexp" "fexp aexp" [ps $1 $2]
+  (ecp [mode]
+    (let [f ($1 mode)
+          x ($2 (pp/fun-arg-mode mode))]
+      (pp/mk-hs-app-pv mode (comb2 f x) f x))))
+
+(defrule "fexp" "fexp PREFIX_AT atype" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [f ($1 mode)] (pp/mk-hs-app-type-pv mode (comb2 f $3) f $2 $3))))
+
+(defrule "fexp" "'static' aexp" [ps $1 $2]
+  (let [e (pp/run-expr $2)] (pp/ecp-from-exp (sLL $1 e (con HsStatic nil e)))))
+
+(defrule "fexp" "aexp" [ps $1] $1)
+
+(defrule "aexp" "qvar TIGHT_INFIX_AT aexp" [ps $1 $2 $3]
+  (ecp [mode] (let [e ($3 mode)] (pp/mk-hs-as-pat-pv ps mode (comb2 $1 e) $1 e))))
+(defrule "aexp" "PREFIX_TILDE aexp" [ps $1 $2]
+  (ecp [mode] (let [e ($2 mode)] (pp/mk-hs-lazy-pat-pv ps mode (comb2 $1 e) e))))
+(defrule "aexp" "PREFIX_BANG aexp" [ps $1 $2]
+  (ecp [mode] (let [e ($2 mode)] (pp/mk-hs-bang-pat-pv ps mode (comb2 $1 e) e))))
+(defrule "aexp" "PREFIX_MINUS aexp" [ps $1 $2]
+  (ecp [mode] (let [e ($2 mode)] (pp/mk-hs-neg-app-pv mode (comb2 $1 e) e))))
+
+(defrule "aexp" "'let' binds 'in' exp" [ps $1 $2 $3 $4]
+  (ecp [mode] (let [e ($4 mode)] (pp/mk-hs-let-pv mode (comb2 $1 e) (unLoc $2) e))))
+
+(defrule "aexp" "'\\\\' argpats '->' exp" [ps $1 $2 $3 $4]
+  (ecp [mode]
+    (let [e ($4 mode)
+          l (comb2 $1 e)
+          m (L l (con Match nx (con LamAlt 'LamSingle) (L (pp/list-location $2) (vec $2))
+                      (pp/unguarded-grhss (comb2 $3 e) e)))]
+      (pp/mk-hs-lam-pv mode l 'LamSingle (L l [m])))))
+
+(defrule "aexp" "'\\\\' 'lcase' altslist(pats1)" [ps $1 $2 $3]
+  (ecp [mode] (let [alts ($3 mode)] (pp/mk-hs-lam-pv mode (comb3 $1 $2 alts) 'LamCase alts))))
+(defrule "aexp" "'\\\\' 'lcases' altslist(argpats)" [ps $1 $2 $3]
+  (ecp [mode] (let [alts ($3 mode)] (pp/mk-hs-lam-pv mode (comb3 $1 $2 alts) 'LamCases alts))))
+
+(defrule "aexp" "'if' exp optSemi 'then' exp optSemi 'else' exp" [ps $1 $2 $3 $4 $5 $6 $7 $8]
+  (let [c (pp/run-expr $2)]
+    (ecp [mode]
+      (let [a ($5 mode) b ($8 mode)]
+        (pp/check-do-and-if-then-else mode c (second $3) a (second $6) b)
+        (pp/mk-hs-if-pv mode (comb2 $1 b) c a b)))))
+
+(defrule "aexp" "'if' ifgdpats" [ps $1 $2]
+  (pp/hint-multi-way-if $1)
+  (let [[_ gdpats] (unLoc $2)]
+    (pp/ecp-from-exp (sLL $1 $2 (con HsMultiIf (tuple nil nil nil) (vec (reverse gdpats)))))))
+
+(defrule "aexp" "'case' exp 'of' altslist(pats1)" [ps $1 $2 $3 $4]
+  (let [e (pp/run-expr $2)]
+    (ecp [mode]
+      (let [alts ($4 mode)] (pp/mk-hs-case-pv mode (comb3 $1 $3 alts) e alts)))))
+
+(defrule "aexp" "DO stmtlist" [ps $1 $2]
+  (pp/hint-qualified-do $1 "do")
+  (ecp [mode]
+    (let [stmts ($2 mode)
+          m (tv $1)]
+      (pp/mk-hs-do-pv mode (comb2 $1 stmts) (if m (just (a/mod-name m)) 'Nothing) stmts))))
+
+(defrule "aexp" "MDO stmtlist" [ps $1 $2]
+  (pp/hint-qualified-do $1 "mdo")
+  (let [stmts ($2 :expr)
+        m (tv $1)]
+    (pp/ecp-from-exp (L (comb2 $1 stmts) (con HsDo nil (con MDoExpr (if m (just (a/mod-name m)) 'Nothing)) stmts)))))
+
+(defrule "aexp" "'proc' aexp '->' exp" [ps $1 $2 $3 $4]
+  (let [p (pp/check-pattern ps (pp/run-pat $2))
+        cmd (pp/run-cmd $4)]
+    (pp/ecp-from-exp (sLL $1 cmd (con HsProc (tuple nil nil) p (sLL $1 cmd (con HsCmdTop nx cmd)))))))
+
+(defrule "aexp" "aexp1" [ps $1] $1)
+
+(defrule "aexp1" "aexp1 '{' fbinds '}'" [ps $1 $2 $3 $4]
+  (ecp [mode]
+    (let [overloaded (lx/get-bit ps :OverloadedRecordUpdateBit)
+          e ($1 mode)
+          fb ($3 mode)]
+      (pp/mk-hs-record-pv ps mode overloaded (comb2 e $4) (comb2 $2 $4) e fb))))
+
+(defrule "aexp1" "aexp1 TIGHT_INFIX_PROJ field" [ps $1 $2 $3]
+  (let [e (pp/run-expr $1)
+        fl (sLL $2 $3 (con DotFieldOcc nil $3))]
+    (pp/ecp-from-exp (sLL e $3 (con HsGetField nx e fl)))))
+
+(defrule "aexp1" "aexp2" [ps $1] $1)
+
+(defrule "aexp2" "qvar" [ps $1] (ecp [mode] (pp/mk-hs-var-pv mode $1)))
+(defrule "aexp2" "qcon" [ps $1] (ecp [mode] (pp/mk-hs-var-pv mode $1)))
+(defrule "aexp2" "ipvar" [ps $1] (pp/ecp-from-exp (L (getLoc $1) (con HsIPVar nx (unLoc $1)))))
+(defrule "aexp2" "overloaded_label" [ps $1]
+  (let [[src s] (unLoc $1)] (pp/ecp-from-exp (L (getLoc $1) (con HsOverLabel src s)))))
+(defrule "aexp2" "literal" [ps $1] (ecp [mode] (pp/mk-hs-lit-pv mode $1)))
+(defrule "aexp2" "INTEGER" [ps $1]
+  (ecp [mode] (pp/mk-hs-over-lit-pv mode (sL1 $1 (con OverLit nx (con HsIntegral (tv $1)))))))
+(defrule "aexp2" "RATIONAL" [ps $1]
+  (ecp [mode] (pp/mk-hs-over-lit-pv mode (sL1 $1 (con OverLit nx (con HsFractional (tv $1)))))))
+
+(defrule "aexp2" "'(' texp ')'" [ps $1 $2 $3]
+  (ecp [mode] (pp/mk-hs-par-pv mode (comb2 $1 $3) $1 ($2 mode) $3)))
+
+(defrule "aexp2" "'(' tup_exprs ')'" [ps $1 $2 $3]
+  (ecp [mode] (pp/mk-sum-or-tuple-pv ps mode (comb2 $1 $3) 'Boxed ($2 mode))))
+
+(defrule "aexp2" "'(' orpats(exp2) ')'" [ps $1 $2 $3]
+  (let [pat (pp/hint-or-pats (sL1 $2 (con OrPat nx (unLoc $2))))]
+    (pp/ecp-from-pat (sLL $1 $3 (con ParPat (tuple nil nil) pat)))))
+
+(defrule "aexp2" "'(' projection ')'" [ps $1 $2 $3]
+  (pp/ecp-from-exp (sLL $1 $3 (con HsProjection nil (mapv unLoc (reverse (unLoc $2)))))))
+
+(defrule "aexp2" "'(#' texp '#)'" [ps $1 $2 $3]
+  (ecp [mode] (pp/mk-sum-or-tuple-pv ps mode (comb2 $1 $3) 'Unboxed [:tuple [[:present ($2 mode)]]])))
+(defrule "aexp2" "'(#' tup_exprs '#)'" [ps $1 $2 $3]
+  (ecp [mode] (pp/mk-sum-or-tuple-pv ps mode (comb2 $1 $3) 'Unboxed ($2 mode))))
+
+(defrule "aexp2" "'[' list ']'" [ps $1 $2 $3] ($2 (comb2 $1 $3)))
+(defrule "aexp2" "'_'" [ps $1] (ecp [mode] (pp/mk-hs-wild-card-pv mode (gl $1))))
+
+(defrule "aexp2" "splice_untyped" [ps $1] (ecp [mode] (pp/mk-hs-splice-pv mode $1)))
+(defrule "aexp2" "splice_typed" [ps $1] (pp/ecp-from-exp (L (getLoc $1) (con HsTypedSplice nx (unLoc $1)))))
+
+(defrule "aexp2" "SIMPLEQUOTE qvar" [ps $1 $2] (pp/ecp-from-exp (sLL $1 $2 (con HsUntypedBracket nx (con VarBr nil true $2)))))
+(defrule "aexp2" "SIMPLEQUOTE qcon" [ps $1 $2] (pp/ecp-from-exp (sLL $1 $2 (con HsUntypedBracket nx (con VarBr nil true $2)))))
+(defrule "aexp2" "TH_TY_QUOTE tyvar" [ps $1 $2] (pp/ecp-from-exp (sLL $1 $2 (con HsUntypedBracket nx (con VarBr nil false $2)))))
+(defrule "aexp2" "TH_TY_QUOTE gtycon" [ps $1 $2] (pp/ecp-from-exp (sLL $1 $2 (con HsUntypedBracket nx (con VarBr nil false $2)))))
+(defrule "aexp2" "TH_TY_QUOTE" [ps $1] (pp/fatal! (lx/msg :PsErrEmptyDoubleQuotes (gl $1) (lx/get-bit ps :ThQuotesBit))))
+
+(defn- bracket-ann [t] (if (= :HasE (if (vector? (tv t)) (first (tv t)) (tv t))) (con BracketHasE nil) (con BracketNoE nil)))
+
+(defrule "aexp2" "'[|' exp '|]'" [ps $1 $2 $3]
+  (let [e (pp/run-expr $2)]
+    (pp/ecp-from-exp (sLL $1 $3 (con HsUntypedBracket nx (con ExpBr (tuple (bracket-ann $1) nil) e))))))
+(defrule "aexp2" "'[||' exp '||]'" [ps $1 $2 $3]
+  (let [e (pp/run-expr $2)]
+    (pp/ecp-from-exp (sLL $1 $3 (con HsTypedBracket (tuple (bracket-ann $1) nil) e)))))
+(defrule "aexp2" "'[t|' ktype '|]'" [ps $1 $2 $3]
+  (pp/ecp-from-exp (sLL $1 $3 (con HsUntypedBracket nx (con TypBr (tuple nil nil) $2)))))
+(defrule "aexp2" "'[p|' infixexp '|]'" [ps $1 $2 $3]
+  (let [p (pp/check-pattern ps (pp/run-pat $2))]
+    (pp/ecp-from-exp (sLL $1 $3 (con HsUntypedBracket nx (con PatBr (tuple nil nil) p))))))
+(defrule "aexp2" "'[d|' cvtopbody '|]'" [ps $1 $2 $3]
+  (pp/ecp-from-exp (sLL $1 $3 (con HsUntypedBracket nx (con DecBrL (tuple nil nil (tuple nil nil)) (second $2))))))
+(defrule "aexp2" "quasiquote" [ps $1] (ecp [mode] (pp/mk-hs-splice-pv mode $1)))
+
+(defrule "aexp2" "'(|' aexp cmdargs '|)'" [ps $1 $2 $3 $4]
+  (let [e (pp/run-expr $2)]
+    (pp/ecp-from-cmd (sLL $1 $4 (con HsCmdArrForm nil e 'Prefix (vec (reverse $3)))))))
+
+;; projection: (L span [DotFieldOcc...]) reversed
+(defrule "projection" "projection TIGHT_INFIX_PROJ field" [ps $1 $2 $3]
+  (sLL $1 $3 (cons (sLL $2 $3 (con DotFieldOcc nil $3)) (unLoc $1))))
+(defrule "projection" "PREFIX_PROJ field" [ps $1 $2]
+  (sLL $1 $2 (list (sLL $1 $2 (con DotFieldOcc nil $2)))))
+
+(defrule "splice_exp" "splice_untyped" [ps $1] (L (getLoc $1) (con HsUntypedSplice nx (unLoc $1))))
+(defrule "splice_exp" "splice_typed" [ps $1] (L (getLoc $1) (con HsTypedSplice nx (unLoc $1))))
+
+(defrule "splice_untyped" "PREFIX_DOLLAR aexp2" [ps $1 $2]
+  (let [e (pp/run-expr $2)] (sLL $1 e (con HsUntypedSpliceExpr nil e))))
+(defrule "splice_typed" "PREFIX_DOLLAR_DOLLAR aexp2" [ps $1 $2]
+  (let [e (pp/run-expr $2)] (sLL $1 e (con HsTypedSpliceExpr nil e))))
+
+;; cmdargs reversed
+(defrule "cmdargs" "cmdargs acmd" [ps $1 $2] (cons $2 $1))
+(defrule "cmdargs" "" [ps] ())
+(defrule "acmd" "aexp" [ps $1]
+  (let [cmd (pp/run-cmd $1)] (L (getLoc cmd) (con HsCmdTop nx cmd))))
+
+;; cvtopbody: [anns decls]
+(defrule "cvtopbody" "'{' cvtopdecls0 '}'" [ps $1 $2 $3] [nil $2])
+(defrule "cvtopbody" "vocurly cvtopdecls0 close" [ps $1 $2 $3] [nil $2])
+(defrule "cvtopdecls0" "topdecls_semi" [ps $1] ((post-decl 'cv-top-decls) $1))
+(defrule "cvtopdecls0" "topdecls" [ps $1] ((post-decl 'cv-top-decls) $1))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Tuple expressions
+
+(defrule "texp" "exp2" [ps $1] $1)
+
+(defrule "texp" "infixexp qop" [ps $1 $2]
+  (let [e (pp/run-expr $1)
+        op ($2 :expr)]
+    (pp/reject-pragma-pv e)
+    (pp/ecp-from-exp (sLL e op (con SectionL nx e op)))))
+
+(defrule "texp" "qopm infixexp" [ps $1 $2]
+  (ecp [mode]
+    (let [e ($2 mode)
+          op ($1 (pp/infix-op-mode mode))]
+      (pp/mk-hs-section-r-pv mode (comb2 op e) op e))))
+
+;; orpats(EXP): (L span [pats])
+(defrule "orpats(EXP)" "EXP" [ps $1]
+  (let [p (pp/check-pattern ps (pp/run-pat $1))] (sL1 p [p])))
+(defrule "orpats(EXP)" "EXP ';' orpats(EXP)" [ps $1 $2 $3]
+  (let [p (pp/check-pattern ps (pp/run-pat $1))] (sLL p $3 (into [p] (unLoc $3)))))
+
+;; tup_exprs: fns of the mode giving a SumOrTuple ([:tuple elems] / [:sum alt arity e])
+(defrule "tup_exprs" "texp commas_tup_tail" [ps $1 $2]
+  (ecp [mode]
+    (let [t ($1 mode) [_ tail] ($2 mode)]
+      [:tuple (into [[:present t]] tail)])))
+(defrule "tup_exprs" "commas tup_tail" [ps $1 $2]
+  (ecp [mode]
+    (let [tail ($2 mode)]
+      [:tuple (into (vec (repeat (count (first $1)) [:missing])) tail)])))
+(defrule "tup_exprs" "texp bars" [ps $1 $2]
+  (ecp [mode] [:sum 1 (inc (long (second $2))) ($1 mode)]))
+(defrule "tup_exprs" "bars texp bars0" [ps $1 $2 $3]
+  (ecp [mode] [:sum (inc (long (second $1))) (+ (long (second $1)) (long (second $3)) 1) ($2 mode)]))
+
+;; commas_tup_tail: [first-comma-span elems]
+(defrule "commas_tup_tail" "commas tup_tail" [ps $1 $2]
+  (ecp [mode]
+    (let [tail ($2 mode)]
+      [(first (first $1)) (into (vec (repeat (dec (count (first $1))) [:missing])) tail)])))
+
+(defrule "tup_tail" "texp commas_tup_tail" [ps $1 $2]
+  (ecp [mode] (let [t ($1 mode) [_ tail] ($2 mode)] (into [[:present t]] tail))))
+(defrule "tup_tail" "texp" [ps $1] (ecp [mode] [[:present ($1 mode)]]))
+(defrule "tup_tail" "" [ps] (ecp [mode] [[:missing]]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; List expressions: fns of the brackets' span giving an ECP
+
+(defrule "list" "texp" [ps $1]
+  (fn [loc] (ecp [mode] (pp/mk-hs-explicit-list-pv ps mode loc [($1 mode)]))))
+(defrule "list" "lexps" [ps $1]
+  (fn [loc] (ecp [mode] (pp/mk-hs-explicit-list-pv ps mode loc (vec (reverse ($1 mode)))))))
+
+(defn- arith-seq
+  "An arithmetic sequence's ECP (an expression; ecpFromExp'), info computed when it is run"
+  [loc info-fn]
+  (ecp [mode] ((pp/ecp-from-exp (L loc (con ArithSeq nil 'Nothing (info-fn)))) mode)))
+
+(defrule "list" "texp '..'" [ps $1 $2]
+  (fn [loc] (arith-seq loc #(con From (pp/run-expr $1)))))
+(defrule "list" "texp ',' exp2 '..'" [ps $1 $2 $3 $4]
+  (fn [loc] (arith-seq loc #(con FromThen (pp/run-expr $1) (pp/run-expr $3)))))
+(defrule "list" "texp '..' exp2" [ps $1 $2 $3]
+  (fn [loc] (arith-seq loc #(con FromTo (pp/run-expr $1) (pp/run-expr $3)))))
+(defrule "list" "texp ',' exp2 '..' exp2" [ps $1 $2 $3 $4 $5]
+  (fn [loc] (arith-seq loc #(con FromThenTo (pp/run-expr $1) (pp/run-expr $3) (pp/run-expr $5)))))
+
+(defrule "list" "texp '|' flattenedpquals" [ps $1 $2 $3]
+  (fn [loc]
+    (ecp [mode]
+      (let [ctxt (if (lx/get-bit ps :MonadComprehensionsBit) 'MonadComp 'ListComp)
+            e (pp/run-expr $1)]
+        ((pp/ecp-from-exp (L loc (pp/mk-hs-comp ctxt (unLoc $3) e))) mode)))))
+
+;; lexps: fns of the mode giving the reversed items
+(defrule "lexps" "lexps ',' texp" [ps $1 $2 $3]
+  (ecp [mode] (let [xs ($1 mode) x ($3 mode)] (cons x xs))))
+(defrule "lexps" "texp ',' texp" [ps $1 $2 $3]
+  (ecp [mode] (let [a ($1 mode) b ($3 mode)] (list b a))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; List comprehensions
+
+(defrule "flattenedpquals" "pquals" [ps $1]
+  (let [qss (unLoc $1)]
+    (if (= 1 (count qss))
+      (sL1 $1 (first qss))
+      (sL1 $1 [(sL1 $1 (con ParStmt nx (mapv (fn [qs] (con ParStmtBlock nx (vec qs) [] nx)) qss) pp/no-expr nx))]))))
+
+;; pquals: (L span [stmts-lists in order])
+(defrule "pquals" "squals '|' pquals" [ps $1 $2 $3]
+  (sLL $1 $3 (into [(vec (reverse (unLoc $1)))] (unLoc $3))))
+(defrule "pquals" "squals" [ps $1] (L (getLoc $1) [(vec (reverse (unLoc $1)))]))
+
+;; squals: (L span [stmts]) reversed (the last first)
+(defrule "squals" "squals ',' transformqual" [ps $1 $2 $3]
+  (sLL $1 $3 [(sLL $1 $3 ((unLoc $3) (vec (reverse (unLoc $1)))))]))
+(defrule "squals" "squals ',' qual" [ps $1 $2 $3]
+  (let [q ($3 :expr)] (sLL $1 $3 (into [q] (unLoc $1)))))
+(defrule "squals" "transformqual" [ps $1] (sLL $1 $1 [(L (getLoc $1) ((unLoc $1) []))]))
+(defrule "squals" "qual" [ps $1] (let [q ($1 :expr)] (sL1 q [q])))
+
+(defrule "transformqual" "'then' exp" [ps $1 $2]
+  (let [e (pp/run-expr $2)]
+    (sLL $1 e (fn [ss] (pp/mk-trans-stmt 'ThenForm ss e nil)))))
+(defrule "transformqual" "'then' exp 'by' exp" [ps $1 $2 $3 $4]
+  (let [e (pp/run-expr $2) b (pp/run-expr $4)]
+    (sLL $1 b (fn [ss] (pp/mk-trans-stmt 'ThenForm ss e b)))))
+(defrule "transformqual" "'then' 'group' 'using' exp" [ps $1 $2 $3 $4]
+  (let [e (pp/run-expr $4)]
+    (sLL $1 e (fn [ss] (pp/mk-trans-stmt 'GroupForm ss e nil)))))
+(defrule "transformqual" "'then' 'group' 'by' exp 'using' exp" [ps $1 $2 $3 $4 $5 $6]
+  (let [b (pp/run-expr $4) e (pp/run-expr $6)]
+    (sLL $1 e (fn [ss] (pp/mk-trans-stmt 'GroupForm ss e b)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Guards
+
+(defrule "guardquals" "guardquals1" [ps $1] (L (getLoc $1) (vec (reverse (unLoc $1)))))
+(defrule "guardquals1" "guardquals1 ',' qual" [ps $1 $2 $3]
+  (let [q ($3 :expr)] (sLL $1 q (cons q (unLoc $1)))))
+(defrule "guardquals1" "qual" [ps $1] (let [q ($1 :expr)] (sL1 q [q])))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Case alternatives (fns of the mode)
+
+(defrule "altslist(PATS)" "'{' alts(PATS) '}'" [ps $1 $2 $3]
+  (ecp [mode] (let [alts ($2 mode)] (sLL $1 $3 (vec (reverse (second (unLoc alts))))))))
+(defrule "altslist(PATS)" "vocurly alts(PATS) close" [ps $1 $2 $3]
+  (ecp [mode] (let [alts ($2 mode)] (L (getLoc alts) (vec (reverse (second (unLoc alts))))))))
+(defrule "altslist(PATS)" "'{' '}'" [ps $1 $2] (ecp [mode] (sLL $1 $2 [])))
+(defrule "altslist(PATS)" "vocurly close" [ps $1 $2] (ecp [mode] (L nil [])))
+
+;; alts, alts1: (L span [semis matches-reversed])
+(defrule "alts(PATS)" "alts1(PATS)" [ps $1] (ecp [mode] (let [a ($1 mode)] (sL1 a (unLoc a)))))
+(defrule "alts(PATS)" "';' alts(PATS)" [ps $1 $2]
+  (ecp [mode] (let [a ($2 mode)] (sLL $1 a (unLoc a)))))
+
+(defrule "alts1(PATS)" "alts1(PATS) ';' alt(PATS)" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [a ($1 mode) m ($3 mode)]
+      (sLL a m [nil (cons m (second (unLoc a)))]))))
+(defrule "alts1(PATS)" "alts1(PATS) ';'" [ps $1 $2]
+  (ecp [mode] (let [a ($1 mode)] (sLZ a $2 (unLoc a)))))
+(defrule "alts1(PATS)" "alt(PATS)" [ps $1] (ecp [mode] (let [m ($1 mode)] (sL1 m [nil [m]]))))
+
+(defrule "alt(PATS)" "PATS alt_rhs" [ps $1 $2]
+  (ecp [mode]
+    (let [rhs ($2 mode)
+          pats $1
+          l (if (seq pats) (comb2 (first pats) rhs) (gl rhs))]
+      (L l (con Match nx 'CaseAlt (L (pp/list-location pats) (vec pats)) (unLoc rhs))))))
+
+(defrule "alt_rhs" "ralt wherebinds" [ps $1 $2]
+  (ecp [mode]
+    (let [alt ($1 mode)
+          bs (pp/adapt-where-binds $2)]
+      (L (comb2 alt bs) (con GRHSs nil (unLoc alt) (unLoc bs))))))
+
+(defrule "ralt" "'->' exp" [ps $1 $2]
+  (ecp [mode]
+    (let [e ($2 mode) l (comb2 $1 e)]
+      (L l (pp/unguarded-rhs l e)))))
+(defrule "ralt" "gdpats" [ps $1]
+  (ecp [mode] (let [g ($1 mode)] (sL1 g (vec (reverse (unLoc g)))))))
+
+;; gdpats: (L span [grhs...]) reversed
+(defrule "gdpats" "gdpats gdpat" [ps $1 $2]
+  (ecp [mode] (let [gs ($1 mode) g ($2 mode)] (sLL gs g (cons g (unLoc gs))))))
+(defrule "gdpats" "gdpat" [ps $1] (ecp [mode] (let [g ($1 mode)] (sL1 g [g]))))
+
+;; ifgdpats: (L span [anns grhss-reversed])
+(defrule "ifgdpats" "'{' gdpats '}'" [ps $1 $2 $3] (let [g ($2 :expr)] (sLL $1 $3 [nil (unLoc g)])))
+(defrule "ifgdpats" "gdpats close" [ps $1 $2] (let [g ($1 :expr)] (sL1 g [nil (unLoc g)])))
+
+(defrule "gdpat" "'|' guardquals '->' exp" [ps $1 $2 $3 $4]
+  (ecp [mode] (let [e ($4 mode)] (L (comb2 $1 e) (con GRHS nil (unLoc $2) e)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Patterns
+
+(defrule "pat_syn_pat" "exp" [ps $1] (pp/check-pattern ps (pp/run-pat $1)))
+
+(defrule "pat" "orpats(exp)" [ps $1]
+  (let [pats (unLoc $1)]
+    (if (= 1 (count pats))
+      (first pats)
+      (pp/hint-or-pats (sL1 $1 (con OrPat nx pats))))))
+
+(defrule "pats1" "pat" [ps $1] [$1])
+
+(defrule "bindpat" "exp" [ps $1]
+  ;; checkPattern_details incompleteDoBlock
+  (binding [pp/*parse-context* [nil true]] (pp/check-pattern ps (pp/run-pat $1))))
+
+(defrule "argpat" "apat" [ps $1] $1)
+(defrule "argpat" "PREFIX_AT atype" [ps $1 $2]
+  (sLL $1 $2 (con InvisPat (tuple nil 'SpecifiedSpec) ((post-decl 'mk-hs-ty-pat) $2))))
+
+(defrule "argpats" "argpat argpats" [ps $1 $2] (into [$1] $2))
+(defrule "argpats" "" [ps] [])
+
+(defrule "apat" "aexp" [ps $1] (pp/check-pattern ps (pp/run-pat $1)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Statement sequences (fns of the mode)
+
+(defn- stmts-loc
+  "stmtsLoc: the statements' span, widened by a leading semicolon"
+  [lstmts]
+  (let [[_ l [semis _]] lstmts]
+    (if (seq semis) (combine l (gl (first semis))) l)))
+
+(defrule "stmtlist" "'{' stmts '}'" [ps $1 $2 $3]
+  (ecp [mode] (let [s ($2 mode)] (sLL $1 $3 (vec (reverse (second (unLoc s))))))))
+(defrule "stmtlist" "vocurly stmts close" [ps $1 $2 $3]
+  (ecp [mode] (let [s ($2 mode)] (L (stmts-loc s) (vec (reverse (second (unLoc s))))))))
+
+;; stmts: (L span [leading-semis stmts-reversed])
+(defrule "stmts" "stmts ';' stmt" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [s ($1 mode) st ($3 mode) [semis xs] (unLoc s)]
+      (if (empty? xs)
+        (sLL s st [(conj semis $2) (list st)])
+        (sLL s st [semis (cons st xs)])))))
+(defrule "stmts" "stmts ';'" [ps $1 $2]
+  (ecp [mode]
+    (let [s ($1 mode) [semis xs] (unLoc s)]
+      (if (empty? xs)
+        (sLZ s $2 [(conj semis $2) xs])
+        (sLZ s $2 [semis xs])))))
+(defrule "stmts" "stmt" [ps $1] (ecp [mode] (let [st ($1 mode)] (sL1 st [[] (list st)]))))
+(defrule "stmts" "" [ps] (ecp [mode] (noLoc [[] ()])))
+
+(defrule "maybe_stmt" "stmt" [ps $1] (just ($1 :expr)))
+(defrule "maybe_stmt" "" [ps] 'Nothing)
+(defrule "e_stmt" "stmt" [ps $1] ($1 :expr))
+
+(defrule "stmt" "qual" [ps $1] $1)
+(defrule "stmt" "'rec' stmtlist" [ps $1 $2]
+  (ecp [mode] (let [s ($2 mode)] (sLL $1 s (pp/mk-rec-stmt s)))))
+
+(defrule "qual" "bindpat '<-' exp" [ps $1 $2 $3]
+  (ecp [mode] (let [e ($3 mode)] (sLL $1 e (con BindStmt nil $1 e)))))
+(defrule "qual" "exp" [ps $1]
+  (ecp [mode] (let [e ($1 mode)] (sL1 e (con BodyStmt nx e nx nx)))))
+(defrule "qual" "'let' binds" [ps $1 $2]
+  (ecp [mode] (sLL $1 $2 (con LetStmt nil (unLoc $2)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Record field update and construction (fns of the mode)
+
+;; fbinds: [[[:left lfield]|[:right lproj]...] dotdot-span-or-nil]
+(defrule "fbinds" "fbinds1" [ps $1] $1)
+(defrule "fbinds" "" [ps] (ecp [mode] [[] nil]))
+
+(defrule "fbinds1" "fbind ',' fbinds1" [ps $1 $2 $3]
+  (ecp [mode] (let [f ($1 mode) [flds dd] ($3 mode)] [(into [f] flds) dd])))
+(defrule "fbinds1" "fbind" [ps $1] (ecp [mode] [[($1 mode)] nil]))
+(defrule "fbinds1" "'..'" [ps $1] (ecp [mode] [[] (gl $1)]))
+
+(defn- mk-field-occ "mkFieldOcc" [lname] (con FieldOcc nx lname))
+
+(defrule "fbind" "qvar '=' texp" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [e ($3 mode)]
+      [:left (sLL $1 e (con HsFieldBind (just nil) (sL1 $1 (mk-field-occ $1)) e false))])))
+(defrule "fbind" "qvar" [ps $1]
+  (ecp [mode]
+    (let [rhs (pp/mk-hs-var-pv mode (L nil pp/pun-rdr))]
+      [:left (sL1 $1 (con HsFieldBind 'Nothing (sL1 $1 (mk-field-occ $1)) rhs true))])))
+
+(defn- proj-fields
+  "The fields of field.fieldToUpdate: the top field, then the rest with the first's span widened
+  by the . token"
+  [$1 $2 $3]
+  (let [top (sL1 $1 (con DotFieldOcc nil $1))
+        [first-f & rest-f] (reverse (unLoc $3))
+        [_ lf [_ _ f]] first-f
+        lf' (combine (gl $2) lf)]
+    (into [top (L lf' (con DotFieldOcc nil f))] rest-f)))
+
+(defrule "fbind" "field TIGHT_INFIX_PROJ fieldToUpdate '=' texp" [ps $1 $2 $3 $4 $5]
+  (ecp [mode]
+    (let [fields (proj-fields $1 $2 $3)
+          l (comb2 $1 $3)
+          e ($5 mode)]
+      [:right (pp/mk-hs-proj-update-pv mode (comb2 $1 e) (L l fields) e false (just nil))])))
+(defrule "fbind" "field TIGHT_INFIX_PROJ fieldToUpdate" [ps $1 $2 $3]
+  (ecp [mode]
+    (let [fields (proj-fields $1 $2 $3)
+          l (comb2 $1 $3)
+          final (peek fields)
+          [_ fl [_ _ [_ _ [_ s]]]] final
+          v (pp/mk-hs-var-pv mode (L (getLoc final) (a/unqual 'var s)))]
+      [:right (pp/mk-hs-proj-update-pv mode l (L l fields) v true 'Nothing)])))
+
+;; fieldToUpdate: (L span [DotFieldOcc...]) reversed
+(defrule "fieldToUpdate" "fieldToUpdate TIGHT_INFIX_PROJ field" [ps $1 $2 $3]
+  (sLL $1 $3 (cons (sLL $2 $3 (con DotFieldOcc nil $3)) (unLoc $1))))
+(defrule "fieldToUpdate" "field" [ps $1] (sL1 $1 (list (sL1 $1 (con DotFieldOcc nil $1)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Implicit parameter bindings
+
+;; dbinds: (L span [ipbinds]) reversed
+(defrule "dbinds" "dbinds ';' dbind" [ps $1 $2 $3] (sLL $1 $3 (cons $3 (unLoc $1))))
+(defrule "dbinds" "dbinds ';'" [ps $1 $2] (sLZ $1 $2 (unLoc $1)))
+(defrule "dbinds" "dbind" [ps $1] (sL1 $1 (list $1)))
+
+(defrule "dbind" "ipvar '=' exp" [ps $1 $2 $3]
+  (let [e (pp/run-expr $3)] (sLL $1 e (con IPBind nil $1 e))))
+
+(defrule "ipvar" "IPDUPVARID" [ps $1] (sL1 $1 (con HsIPName (tv $1))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Overloaded labels: (L span [SourceText name])
+
+(defrule "overloaded_label" "LABELVARID" [ps $1] (let [[src s] (tv $1)] (sL1 $1 [src s])))

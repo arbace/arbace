@@ -1,0 +1,557 @@
+(in-ns 'go.arbace.a64i) (go/file "cpu.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [os "os"]
+    ^{:line 6} [strings "strings"]
+
+    [time "time"]
+
+    [crt "arbace/crt"]
+    ^{:line 8} [emu "arbace/emu"]])
+
+
+
+(go/const "Signals a64i raises (Linux's numbers).\n"
+  ^{:line 13} [^{:val 4} SIGILL 4]
+  ^{:line 14} [^{:val 5} SIGTRAP 5]
+  ^{:line 15} [^{:val 7} SIGBUS 7]
+  ^{:line 16} [^{:val 11} SIGSEGV 11])
+
+
+
+(go/type CPU "CPU is one arm64 thread at EL0 over the frame's address space and kernel.\n" (struct
+    ^{:line 21 :tag (array 32 uint64)} X ; X[31] is SP
+    ^{:line 22 :tag (array 32 (array 2 uint64))} Q ; the SIMD&FP registers, low and high halves (their loads and stores alone, AR5)
+    ^{:line 23 :tag uint64} PC
+    ^{:line 24 :tag bool} N ^bool Z ^bool C ^bool V
+    ^{:line 25 :tag uint64} TPIDR
+    ^{:line 26 :tag uint64} FPCR ^uint64 FPSR
+    ^{:tag bool :doc "PSTATE.DIT and PSTATE.SSBS (AR19; SSBS set at the process's start, as the M2's Linux sets it)\n"} DIT ^bool SSBS
+    ^{:tag time/Time :doc "t0 is the counter's origin (CNTVCT_EL0, AR19)\n"} t0
+    ^{:line 27 :tag (* emu/AS)} AS
+    ^{:line 28 :tag (* emu/Kernel)} K
+
+    ^{:line 30 :tag bool :doc "the exclusive monitor: an address and size marked by a load-exclusive\n"} exclValid
+    ^{:line 31 :tag uint64} exclAddr
+    ^{:line 32 :tag uint64} exclSize
+
+    ^{:line 34 :tag (map uint64 (* Inst)) :doc "Forms, when set, are the instructions by address (eval: the forms laid out); the bytes are not decoded then\n"} Forms
+    ^{:line 35 :tag (map uint64 string)} FormErr
+    ^{:line 36 :tag (map uint64 cached)} cache
+    ^{:line 37 :tag uint64} Steps
+
+    ^{:line 39 :tag bool :doc "the end\n"} Done
+    ^{:line 40 :tag int} Code ^int Signal
+    ^{:line 41 :tag string} Reason
+    ^{:line 42 :tag uint64} FaultAddr
+    ^{:line 43 :tag (map string uint64)} Cover
+    ^{:line 44 :tag int} Pid
+    ^{:tag int :doc "Tid is the thread's id (AR19: the main thread's is Pid)\n"} Tid
+    ^{:tag (* proc) :doc "P is the process's part its threads share (thread.go, AR19), nil until a signal's disposition or a thread\n"} P
+    ^{:tag uint64 :doc "the thread's signal mask and alternate stack (AR19)\n"} SigMask
+    ^{:tag uint64} AltSP ^uint64 AltSize
+    ^{:tag uint64 :doc "AltFlags is the alternate stack's flags as sigaltstack was given them (0, or SS_DISABLE), the frames' uc_stack.ss_flags\n(AR20)\n"} AltFlags
+    ^{:tag uint64 :doc "the thread's pending signals and their siginfo (AR20, signal.go)\n"} Pending
+    ^{:tag (array 65 sigInfo)} pendInfo
+    ^{:tag uint64 :doc "faultISS is the faulting access's ESR bits beyond the fault status: WnR (a write), CM (cache maintenance) (AR20)\n"} faultISS
+    ^{:tag (slice Delivery) :doc "Delivered are the signals delivered to handlers, in order (the lockstep takes them)\n"} Delivered
+    ^{:tag (slice int) :doc "Ignored are the signals dropped as ignored, in order (the lockstep's: the traced native reports them)\n"} Ignored
+    ^{:tag uint64 :doc "SysX0 is the last system call's result, before any signal delivered at its end (the lockstep's)\n"} SysX0
+    ^{:tag (* crt/Task) :doc "the thread's task in crt's scheduler, once the process has several threads (AR19)\n"} task
+    ^bool threaded
+    ^bool exited
+
+    ^{:line 46 :tag (func [^uint64 n ^{:tag (array 6 uint64)} args] [int64 bool]) :doc "SysHook, when set, answers a system call first (the lockstep's): its result and true, or false to perform it\n"} SysHook
+
+    ^{:line 48 :tag uint64 :doc "LastSys is the last system call's number (the lockstep's)\n"} LastSys
+
+    ^{:line 50 :tag (* Inst) :doc "Last is the last instruction executed\n"} Last
+
+    ^{:line 52 :tag bool :doc "stop after a system call (the lockstep's sys mode)\n"} StopAtSys
+    ^{:line 53 :tag bool} SysDone))
+
+
+(go/type cached (struct
+    ^{:line 57 :tag uint32} w
+    ^{:line 58 :tag Inst} in
+    ^{:line 59 :tag string} r))
+
+
+
+^{:go/end 67} (go/func New "New is a CPU at entry with the stack pointer sp.\n" ^{:tag (* CPU)} [^{:tag (* emu/AS)} as ^{:tag (* emu/Kernel)} k ^uint64 entry ^uint64 sp]
+  (let [c (addr (lit CPU :AS as :K k :PC entry :cache (lit (map uint64 cached)) :SSBS true :t0 (time/Now)))]
+    (aset (.-X c) 31 sp)
+    ^{:line 66} c))
+
+
+
+^{:go/end 75} (go/method Status "Status is the process's exit status: its code, or 128 and the signal that ended it.\n" ^int [^{:tag (* CPU)} c]
+  (when (!= (.-Signal c) 0)
+    (return (+ 128 (.-Signal c))))
+
+  (.-Code c))
+
+
+^{:go/end 79} (go/method raise [^{:tag (* CPU)} c ^int sig ^string reason]
+  (set! (values (.-Done c) (.-Signal c) (.-Reason c)) (values true sig reason)))
+
+
+
+
+(go/var (values ^{:tag string :doc "the injected faults (A64I_INJECT=FAMILY:FLAG, the negative controls): after each instruction of the family, the flag\n(n, z, c, v) flipped, (x) the destination register's lowest bit, (f) FPSR's IOC, (q) FPSR's QC, (r) FPCR's RMode's low bit or\n(a) after msr fpcr the written FEAT_AFP bits 0-2 kept, as before ARS71 (a), or (h, any family: simdhalf's fz16) FPCR.FZ16's input flush skipped, or (d, any family: fp's fz) FPCR.FZ's\ninput flush skipped (ARS44: the lockstep's controls; q, a: queue 276; h: queue 280; d: queue 282)\n"} injFamily ^string injFlag))
+
+
+^{:go/end 93} (go/func Inject "Inject sets the injected fault from \"FAMILY:FLAG\".\n" ^error [^string s]
+  ^{:go/breaks [4]} (let [(values f g ok) (strings/Cut s ":")]
+    (when (or (not ok) (not (strings/Contains "nzcvxfqrahd" g)) (!= (len g) 1))
+      (return (fmt/Errorf "A64I_INJECT: FAMILY:n|z|c|v|x|f|q|r|a|h|d, not %q" s)))
+
+    (set! (values injFamily injFlag) (values f g))
+    nil))
+
+
+^{:go/end 101} (go/func init []
+  (when [s (os/Getenv "A64I_INJECT")] (!= s "")
+    (when [err (Inject s)] (!= err nil)
+      (fmt/Fprintln os/Stderr "a64i:" err))))
+
+
+
+
+^{:go/end 121} (go/method inject [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (!= (.Family in) injFamily)
+    (return))
+
+  (switch injFlag
+    (case ["n"]
+      (set! (.-N c) (not (.-N c))))
+    (case ["z"]
+      (set! (.-Z c) (not (.-Z c))))
+    (case ["c"]
+      (set! (.-C c) (not (.-C c))))
+    (case ["v"]
+      (set! (.-V c) (not (.-V c))))
+    (case ["x"]
+      (.injectX c in))
+    (case ["f"]
+      (set! (.-FPSR c) bit-xor 1))
+    (case ["q"]
+      (set! (.-FPSR c) bit-xor 0x8000000))
+    (case ["r"]
+      (set! (.-FPCR c) bit-xor 0x400000))
+    (case ["a"]
+      (when (and (== (.-Op in) OpMSR) (== (.-Sys in) SysFPCR))
+        (set! (.-FPCR c) bit-or (bit-and (.reg c (.-Rd in) false) 7))))))
+
+
+
+
+
+^{:go/end 159} (go/method Fetch "Fetch is the instruction at pc: from the forms (eval) or decoded from the bytes (AOT), with the reason when there is none.\n" [^{:tag (* CPU)} c ^uint64 pc] :results [(* Inst) int string]
+  (when (!= (bit-and pc 3) 0)
+    (return nil SIGBUS ":pc-alignment"))
+
+  (when (!= (.-Forms c) nil)
+    (when (== (bit-and (.Perm (.-AS c) pc) emu/PermX) 0)
+      (return nil SIGSEGV ":fetch"))
+
+    (let [(values in ok) (aget (.-Forms c) pc)]
+      (when (not ok)
+        (return nil SIGILL ":code-as-data no form at this address"))
+
+      (when (== (.-Op in) OpInvalid)
+        (return nil SIGILL (aget (.-FormErr c) pc)))
+
+      (return in 0 "")))
+
+  (let [^{:tag (array 4 byte)} b (zero (array 4 byte))]
+    (when (< (.Fetch (.-AS c) pc (subslice b)) 4)
+      (return nil SIGSEGV ":fetch"))
+
+    (let [w (bit-or (conv uint32 (aget b 0)) (<< (conv uint32 (aget b 1)) 8) (<< (conv uint32 (aget b 2)) 16) (<< (conv uint32 (aget b 3)) 24))]
+      (when [(values e ok) (aget (.-cache c) pc)] (and ok (== (.-w e) w))
+        (when (!= (.-r e) "")
+          (return nil SIGILL (.-r e)))
+
+        (return (addr (.-in e)) 0 ""))
+
+      (let [(values in r) (Decode w pc)]
+        (aset (.-cache c) pc (lit cached w in r))
+        (when (!= r "")
+          (return nil SIGILL r))
+
+        (let [e (aget (.-cache c) pc)]
+          (return (addr (.-in e)) 0 ""))))))
+
+
+
+^{:go/end 182} (go/method Step "Step executes one instruction; false when the process has ended. AR20: a synchronous fault with a handler is\ndelivered to it, and the signals pending and not blocked at the instruction's end (signal.go).\n" ^bool [^{:tag (* CPU)} c]
+  (when (.-Done c)
+    (return false))
+
+  (let [pc (.-PC c)
+        (values in sig r) (.Fetch c pc)]
+    (when (== in nil)
+      (set! (.-FaultAddr c) pc)
+      (.raise c sig r)
+      (.signalled c pc true)
+      (return (not (.-Done c))))
+
+    (set! (.-Last c) in)
+    (inc! (.-Steps c))
+    (when (!= (.-Cover c) nil)
+      (inc! (aget (.-Cover c) (+ (.Name in) " " (.Family in)))))
+
+    (.exec c in)
+    (when (.-Done c)
+      (.signalled c pc false))
+
+    (when (and (!= injFamily "") (not (.-Done c)))
+      (.inject c in))
+
+    (when (and (!= (.-Pending c) 0) (not (.-Done c)))
+      (.deliverPending c))
+
+    (not (.-Done c))))
+
+
+
+^{:go/end 188} (go/method Run "Run executes until the process ends (AR19: its threads run in turn; another thread's end of the process raised\nwhere the main thread waits is taken here; AR23: then the kernel's End, the shared file mappings written back).\n" [^{:tag (* CPU)} c]
+  (defer (.End (.-K c)))
+  (defer ((fn []
+      (when [r (recover)] (!= r nil)
+        (.ended c r)))))
+
+  (.run c))
+
+
+
+
+^{:go/breaks [[6 198]] :go/end 199} (go/method RunToSys "RunToSys executes until a system call has been made (true) or the process ended (false).\n" ^bool [^{:tag (* CPU)} c]
+  (set! (.-SysDone c) false)
+  (while (not (.-SysDone c))
+    (when (not (.Step c))
+      (return false)))
+
+
+  true)
+
+
+;; the registers
+
+^{:go/end 208} (go/method reg ^uint64 [^{:tag (* CPU)} c ^uint8 r ^bool sp]
+  (when (and (== r 31) (not sp))
+    (return 0))
+
+  (aget (.-X c) r))
+
+
+^{:go/end 218} (go/method regw ^uint64 [^{:tag (* CPU)} c ^uint8 r ^bool sf]
+  (when (== r 31)
+    (return 0))
+
+  (when sf
+    (return (aget (.-X c) r)))
+
+  (bit-and (aget (.-X c) r) 0xffffffff))
+
+
+^{:go/end 228} (go/method set [^{:tag (* CPU)} c ^uint8 r ^uint64 v ^bool sf ^bool sp]
+  (when (and (== r 31) (not sp))
+    (return))
+
+  (when (not sf)
+    (set! v bit-and 0xffffffff))
+
+  (aset (.-X c) r v))
+
+
+;; memory
+
+^{:go/end 235} (go/method segv [^{:tag (* CPU)} c ^uint64 addr]
+  (set! (values (.-FaultAddr c) (.-faultISS c)) (values addr 0))
+  (.raise c SIGSEGV (fmt/Sprintf ":segv %#x" addr)))
+
+
+(go/method segvW "segvW is segv for a write (the ESR's WnR; AR20)\n" [^{:tag (* CPU)} c ^uint64 addr]
+  (.segv c addr)
+  (set! (.-faultISS c) 0x40))
+
+
+^{:go/end 243} (go/method load [^{:tag (* CPU)} c ^uint64 addr ^uint8 size] :results [uint64 bool]
+  (let [(values v ok) (.Read (.-AS c) addr ^int (<< 1 size))]
+    (when (not ok)
+      (.segv c (.-FaultAddr (.-AS c))))
+
+    (return v ok)))
+
+
+^{:go/breaks [[5 254]] :go/end 255} (go/method store ^bool [^{:tag (* CPU)} c ^uint64 addr ^uint8 size ^uint64 v]
+  (when (not (.Write (.-AS c) addr ^int (<< 1 size) v))
+    (.segvW c (.-FaultAddr (.-AS c)))
+    (return false))
+
+  ;; a store to a marked address clears the monitor (the global monitor's effect, one thread)
+  (when (and (.-exclValid c) (< addr (+ (.-exclAddr c) (.-exclSize c))) (< (.-exclAddr c) (+ addr ^uint64 (<< 1 size))))
+    (set! (.-exclValid c) false))
+
+  true)
+
+
+^{:go/breaks [[4 263]] :go/end 264} (go/method aligned "aligned is FEAT_LSE2's rule for the exclusives, the acquires and releases and the atomics (AR18; the M2's uscat, its\nSCTLR_EL1.nAA as Linux sets it): SIGBUS only for an access that crosses a 16-byte boundary.\n" ^bool [^{:tag (* CPU)} c ^uint64 addr ^uint64 n]
+  (when (> (+ (bit-and addr 15) n) 16)
+    (set! (values (.-FaultAddr c) (.-faultISS c)) (values addr 0))
+    (.raise c SIGBUS (fmt/Sprintf ":alignment %#x" addr))
+    (return false))
+
+  true)
+
+
+
+^{:go/end 291} (go/method cond "the conditions (ConditionHolds)\n" ^bool [^{:tag (* CPU)} c ^uint8 k]
+  (let [^bool r (zero bool)]
+    (switch (>> k 1)
+      (case [0]
+        (set! r (.-Z c)))
+      (case [1]
+        (set! r (.-C c)))
+      (case [2]
+        (set! r (.-N c)))
+      (case [3]
+        (set! r (.-V c)))
+      (case [4]
+        (set! r (and (.-C c) (not (.-Z c)))))
+      (case [5]
+        (set! r (== (.-N c) (.-V c))))
+      (case [6]
+        (set! r (and (== (.-N c) (.-V c)) (not (.-Z c)))))
+      (case [7]
+        (set! r true)))
+
+    (when (and (== (bit-and k 1) 1) (!= k 15))
+      (set! r (not r)))
+
+    ^{:line 290} r))
+
+
+
+^{:go/end 302} (go/method NZCV "NZCV is the flags as the NZCV register holds them (bits 31-28).\n" ^uint64 [^{:tag (* CPU)} c]
+  (let [^uint64 v (zero uint64)]
+    (range [i f (lit (slice bool) (.-N c) (.-Z c) (.-C c) (.-V c))]
+      (when f
+        (set! v bit-or ^uint64 (<< 1 (- 31 i)))))
+
+
+    ^{:line 301} v))
+
+
+
+^{:go/end 307} (go/method SetNZCV "SetNZCV sets the flags from NZCV's bits.\n" [^{:tag (* CPU)} c ^uint64 v]
+  (set! (values (.-N c) (.-Z c) (.-C c) (.-V c)) (values (== (bit-and (>> v 31) 1) 1) (== (bit-and (>> v 30) 1) 1) (== (bit-and (>> v 29) 1) 1) (== (bit-and (>> v 28) 1) 1))))
+
+
+
+(go/var ^{:tag bool :doc "strace, from A64I_STRACE (set, not empty), prints each system call to stderr: the thread, its name and arguments, x0 after\n(AR19, queue 288: the Go programs' runs followed)\n"} strace (!= (os/Getenv "A64I_STRACE") ""))
+
+
+(go/method tid "tid is the thread's id: Tid, else (the main thread) Pid\n" ^int [^{:tag (* CPU)} c]
+  (when (!= (.-Tid c) 0)
+    (return (.-Tid c)))
+
+  (.-Pid c))
+
+
+(go/method svc "the system call (SVC #0), traced when strace is set\n" [^{:tag (* CPU)} c]
+  (if (not strace)
+    (do
+      (.svcCall c)
+      (set! (.-SysX0 c) (aget (.-X c) 0)))
+    (let [n (aget (.-X c) 8)
+          args (lit (array 6 uint64) (aget (.-X c) 0) (aget (.-X c) 1) (aget (.-X c) 2) (aget (.-X c) 3) (aget (.-X c) 4) (aget (.-X c) 5))
+          (values s _) (emu/SyscallA64 (conv int n))]
+      (.svcCall c)
+      (set! (.-SysX0 c) (aget (.-X c) 0))
+      (let [r (fmt/Sprintf "%#x" (aget (.-X c) 0))]
+        (when (.-Done c)
+          (set! r (fmt/Sprintf "(the end: status %d)" (.Status c))))
+        (fmt/Fprintf os/Stderr "a64i: [%d] %s(%d) %#x %#x %#x %#x %#x %#x = %s at %#x\n" (.tid c) (.-Name s) n (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5) r (- (.-PC c) 4))))))
+
+
+^{:go/end 353} (go/method svcCall "the system call (SVC #0): x8 the number, x0-x5 the arguments, x0 the result\n" [^{:tag (* CPU)} c]
+  (let [n (aget (.-X c) 8)
+      ^{:line 312} args (lit (array 6 uint64) (aget (.-X c) 0) (aget (.-X c) 1) (aget (.-X c) 2) (aget (.-X c) 3) (aget (.-X c) 4) (aget (.-X c) 5))]
+    (set! (.-LastSys c) n)
+    (set! (.-SysDone c) true)
+    (when (!= (.-SysHook c) nil)
+      (when [(values r ok) ((.-SysHook c) n args)] ok
+        (aset (.-X c) 0 (conv uint64 r))
+        (return)))
+
+
+    ;; AR19: the poller's calls and descriptors (thread.go)
+    (when [(values r ok) (.poll c n args)] ok
+      (aset (.-X c) 0 (conv uint64 r))
+      (return))
+
+    (let [(values s ok) (emu/SyscallA64 (conv int n))]
+      (when (not ok)
+        (aset (.-X c) 0 enosys)
+        (return))
+
+      (switch (.-Name s)
+        (case ["rt_sigaction"]
+          ;; AR19: the dispositions, signals' masks and alternate stacks (thread.go); AR20: delivered (signal.go)
+          (aset (.-X c) 0 (conv uint64 (.sigaction c (aget args 0) (aget args 1) (aget args 2) (aget args 3))))
+          (return))
+        (case ["rt_sigprocmask"]
+          (aset (.-X c) 0 (conv uint64 (.sigprocmask c (aget args 0) (aget args 1) (aget args 2) (aget args 3))))
+          (return))
+        (case ["sigaltstack"]
+          (aset (.-X c) 0 (conv uint64 (.sigaltstack c (aget args 0) (aget args 1))))
+          (return))
+        (case ["clone"]
+          ;; AR19: a thread (thread.go); a process (fork) stays refused
+          (aset (.-X c) 0 (conv uint64 (.clone c (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4))))
+          (return))
+        (case ["rt_sigreturn"]
+          ;; AR20: the signal frame restored (signal.go); x0 is the frame's
+          (.sigreturn c)
+          (return))
+        (case ["clone3" "execve" "rseq" "set_robust_list"]
+          ;; clone3 (callers fall back on clone), exec, rseq, the robust
+          ;; futex list
+          (aset (.-X c) 0 enosys)
+          (return))
+        (case ["exit"]
+          ;; AR19: with several threads, a thread other than the main one ends alone (thread.go's run)
+          (when (.threadExit c (conv int (bit-and (aget args 0) 255)))
+            (return)))
+        (case ["kill" "tkill" "tgkill"]
+          (aset (.-X c) 0 (conv uint64 (.kill c (.-Name s) args)))
+          (return))
+        (case ["getpid"]
+          (aset (.-X c) 0 (conv uint64 (.-Pid c)))
+          (return))
+        (case ["gettid"]
+          (aset (.-X c) 0 (conv uint64 (.tid c)))
+          (return))
+        (case ["newfstatat" "fstat"]
+          ;; AR21: arm64's struct stat (statA64)
+          (aset (.-X c) 0 (conv uint64 (.statA64 c (.-Name s) args)))
+          (return)))
+
+      (let [(values r exit) (.SyscallByName (.-K c) s (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5))]
+        (when (!= exit nil)
+          (set! (values (.-Done c) (.-Code c)) (values true (.-Code exit)))
+          (return))
+
+        (aset (.-X c) 0 (conv uint64 r))))))
+
+
+
+(go/const ^{:val 18446744073709551578N :doc "enosys is -ENOSYS as x0 holds it.\n"} enosys (bit-not (conv uint64 37)))
+
+(go/method statA64 "statA64 is newfstatat and fstat with arm64's 128-byte struct stat (AR21, queue 292: gofmt's and vet's files): crt's x86-64\ncall (newfstatat 262, fstat 5) fills its 144-byte layout in one mapping (crt's slab) at the buffer, else 16 bytes before it, else\nbelow the stack pointer, those bytes kept and put back (one thread runs at a time), a buffer that is not writable EFAULT after\nthe call's own error; the fields then move to arm64's places at the\nbuffer (nlink 32 bits after mode, blksize 32 bits, the padding zero). Linux leaves the buffer as it was on an error, and so does this.\n" ^int64 [^{:tag (* CPU)} c ^string name ^{:tag (array 6 uint64)} args]
+  (let [^int i 2
+        ^int64 n 262]
+    (when (== name "fstat")
+      (set! (values i n) (values 1 5)))
+
+    (let [buf (aget args i)
+          ^uint64 lo 0
+          ok false]
+      (range [_ at (lit (slice uint64) buf (- buf 16) (bit-and-not (- (aget (.-X c) 31) 4096) 15))]
+        (when [sl (.Slab (.-M (.-AS c)) at)] (and (!= sl nil) (not (.-RO sl)) (>= (.End sl) (+ at 144)))
+          (set! (values lo ok) (values at true))
+          (break)))
+
+      (when (not ok)
+        (return (- eFAULT)))
+
+      (let [(values keep _) (.ReadBytes (.-AS c) lo 144)
+            writable (.Probe (.-AS c) buf 128)]
+        (aset args i lo)
+        (let [r (.Syscall (.-Sys (.-K c)) n (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5))
+              (values x _) (.ReadBytes (.-AS c) lo 144)]
+          (.WriteBytes (.-AS c) lo keep)
+          (when (< r 0)
+            (return r))
+
+          (when (not writable) ; Linux's copy after the call: its error first
+            (return (- eFAULT)))
+
+          (let [y (make (slice byte) 128)]
+            (copy (subslice y 0 16) (subslice x 0 16)) ; st_dev, st_ino
+            (copy (subslice y 16 20) (subslice x 24 28)) ; st_mode
+            (copy (subslice y 20 24) (subslice x 16 20)) ; st_nlink
+            (copy (subslice y 24 32) (subslice x 28 36)) ; st_uid, st_gid
+            (copy (subslice y 32 40) (subslice x 40 48)) ; st_rdev
+            (copy (subslice y 48 60) (subslice x 48 60)) ; st_size, st_blksize
+            (copy (subslice y 64 120) (subslice x 64 120)) ; st_blocks, st_atim, st_mtim, st_ctim
+            (.WriteBytes (.-AS c) buf y)
+            r))))))
+
+
+
+(go/const "The M2's identification a program reads at EL0 (AR19, queue 288; read on the VM's M2 under Linux 7.3): CTR_EL0 (64-byte\nlines, DIC and IDC clear), DCZID_EL0 (dc zva allowed, 64-byte blocks), CNTFRQ_EL0 (24 MHz).\n"
+  [^{:tag uint64 :val 2487533572} CTR 0x9444c004]
+  [^{:tag uint64 :val 4} DCZID 4]
+  [^{:tag uint64 :val 64} dczBlock 64]
+  [^{:tag uint64 :val 24000000} CNTFRQ 24000000])
+
+
+(go/method Counter "Counter is CNTVCT_EL0 (and CNTVCTSS_EL0): the time since the CPU's origin (a thread's is its process's) plus 1000 s, as crt's\nCLOCK_MONOTONIC counts, at CNTFRQ_EL0's 24 MHz; it never goes back.\n" ^uint64 [^{:tag (* CPU)} c]
+  (let [ns (conv uint64 (.Nanoseconds (+ (time/Since (.-t0 c)) (* 1000 time/Second))))]
+    (+ (* (/ ns 1000) 24) (/ (* (% ns 1000) 24) 1000))))
+
+
+(go/func IDReg "IDReg is the value of an ID register Linux emulates for EL0 (MRS of op0 3, op1 0, CRn 0, with CRm 0 or 2-7: MIDR_EL1,
+MPIDR_EL1, REVIDR_EL1 and the 48 of the ID space, the unallocated ones 0) as a64i answers it (AR20, ARS85 (a)): this M2's values under
+Linux 7.3 (queue 291's probe of all 51) with the fields of what a64i does not implement made 0: ID_AA64ISAR1_EL1's API and GPI
+(FEAT_PAuth), BF16 and I8MM; ID_AA64PFR1_EL1's BT (FEAT_BTI). False for any other register (UNDEFINED).
+" [^uint32 sys] :results [uint64 bool]
+  (when (!= (>> sys 7) 0x180)
+    (return 0 false))
+
+  (let [crm (bit-and (>> sys 3) 15)
+        op2 (bit-and sys 7)]
+    (when (== crm 0)
+      (switch op2
+        (case [0]
+          (return 0x610f0000 true)) ; MIDR_EL1: Apple's implementer, the architecture's 0xf (Linux hides the part)
+        (case [5]
+          (return 0x80000000 true)) ; MPIDR_EL1: RES1 bit 31 alone
+        (case [6]
+          (return 0 true))) ; REVIDR_EL1
+
+      (return 0 false))
+
+    (when (or (== crm 1) (> crm 7))
+      (return 0 false))
+
+    (switch (bit-or (<< crm 3) op2)
+      (case [32] ; ID_AA64PFR0_EL1: EL0 and EL1 AArch64, FP and AdvSIMD with half precision, DIT
+        (return 0x0001000000110011 true))
+      (case [40] ; ID_AA64DFR0_EL1: DebugVer 6
+        (return 6 true))
+      (case [48] ; ID_AA64ISAR0_EL1: AES and PMULL, SHA1, SHA2 with SHA512, CRC32, LSE, RDM, SHA3, DotProd, FHM, FlagM2
+        (return 0x0021100110212120 true))
+      (case [49] ; ID_AA64ISAR1_EL1: DC CVAP and CVADP, JSCVT, FCMA, LRCPC2, FRINTTS, SB (the M2's API 4, GPI 1, BF16 1, I8MM 1 made 0)
+        (return 0x0000001100211002 true))
+      (case [56] ; ID_AA64MMFR0_EL1: the translation granules Linux shows
+        (return 0x00000111ff000000 true))
+      (case [58] ; ID_AA64MMFR2_EL1: AT (FEAT_LSE2)
+        (return 0x0000000100000000 true)))
+
+    (return 0 true)))
+
+
+(go/func IDHidden "IDHidden are the fields of an ID register IDReg makes 0 where this M2 shows a feature a64i does not implement (the lockstep\ncompares the others; AR20).\n" ^uint64 [^uint32 sys]
+  (switch sys
+    (case [49201] ; ID_AA64ISAR1_EL1 (3, 0, 0, 6, 1): API, GPI, BF16, I8MM
+      (return 0x00f0f000f0000f00))
+    (case [49185] ; ID_AA64PFR1_EL1 (3, 0, 0, 4, 1): BT
+      (return 0xf)))
+
+  0)

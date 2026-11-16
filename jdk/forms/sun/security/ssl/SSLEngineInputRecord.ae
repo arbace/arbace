@@ -1,0 +1,253 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLEngineInputRecord.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security GeneralSecurityException)
+        '(java.util ArrayList)
+        '(javax.crypto BadPaddingException)
+        '(javax.net.ssl SSLException SSLHandshakeException SSLProtocolException))
+
+(defclass ^:final SSLEngineInputRecord
+  :extends InputRecord
+  :implements [SSLRecord]
+
+  (field ^:private ^boolean formatVerified false)
+
+  (field ^:private ^ByteBuffer handshakeBuffer nil)
+
+  (constructor [this ^HandshakeHash handshakeHash]
+    (super. handshakeHash (SSLCipher$SSLReadCipher/nullTlsReadCipher)))
+
+  (method estimateFragmentSize ^int [this ^int packetSize]
+    (if (> packetSize 0)
+        (.estimateFragmentSize (.-readCipher this) packetSize SSLEngineInputRecord/headerSize)
+        Record/maxDataSize))
+
+  (method bytesInCompletePacket :throws [IOException] ^int [this ^ByteBuffer/1 srcs ^int srcsOffset
+                                                            ^int srcsLength]
+    (.bytesInCompletePacket this (aget srcs srcsOffset)))
+
+  (method ^:private bytesInCompletePacket :throws [SSLException] ^int [this ^ByteBuffer packet]
+    (if (< (.remaining packet) 5)
+        -1
+        (let [pos (.position packet)
+              byteZero (.get packet pos)
+              ^:mutable ^int len 0]
+          (if (or (or formatVerified (== byteZero (.-id ContentType/HANDSHAKE)))
+                  (== byteZero (.-id ContentType/ALERT)))
+              (let [majorVersion (.get packet (unchecked-add-int pos 1))
+                    minorVersion (.get packet (unchecked-add-int pos 2))]
+                (when-not (ProtocolVersion/isNegotiable majorVersion minorVersion false false)
+                  (throw (SSLException.
+                           (java-str "Unrecognized record version "
+                                     (ProtocolVersion/nameOf majorVersion minorVersion)
+                                     " , plaintext connection?"))))
+                (set! formatVerified true)
+                (set! len
+                      (unchecked-add-int
+                        (unchecked-add-int
+                          (bit-shift-left-int
+                            (bit-and-int (.get packet (unchecked-add-int pos 3)) 0xFF)
+                            8)
+                          (bit-and-int (.get packet (unchecked-add-int pos 4)) 0xFF))
+                        SSLEngineInputRecord/headerSize)))
+              (let [isShort (not (== (bit-and-int byteZero 0x80) 0))]
+                (if (and isShort
+                         (or (== (.get packet (unchecked-add-int pos 2)) 1)
+                             (== (.get packet (unchecked-add-int pos 2)) 4)))
+                    (let [majorVersion (.get packet (unchecked-add-int pos 3))
+                          minorVersion (.get packet (unchecked-add-int pos 4))]
+                      (when-not (ProtocolVersion/isNegotiable majorVersion minorVersion false false)
+                        (throw (SSLException.
+                                 (java-str "Unrecognized record version "
+                                           (ProtocolVersion/nameOf majorVersion minorVersion)
+                                           " , plaintext connection?"))))
+                      (let [^int mask (if isShort 0x7F 0x3F)]
+                        (set! len
+                              (unchecked-add-int
+                                (unchecked-add-int
+                                  (bit-shift-left-int (bit-and-int byteZero mask) 8)
+                                  (bit-and-int (.get packet (unchecked-add-int pos 1)) 0xFF))
+                                (if isShort 2 3)))))
+                    (throw (SSLException. "Unrecognized SSL message, plaintext connection?")))))
+          len)))
+
+  (method decode :throws [IOException BadPaddingException] ^Plaintext/1 [this ^ByteBuffer/1 srcs
+                                                                         ^int srcsOffset
+                                                                         ^int srcsLength]
+    (cond
+      (or (or (nil? srcs) (== (alength srcs) 0)) (== srcsLength 0)) (new Plaintext/1 0)
+      (== srcsLength 1) (.decode this (aget srcs srcsOffset))
+      :else
+        (let [packet (SSLEngineInputRecord/extract srcs srcsOffset srcsLength SSLRecord/headerSize)]
+          (.decode this packet))))
+
+  (method ^:private decode :throws [IOException BadPaddingException] ^Plaintext/1 [this
+                                                                                   ^ByteBuffer packet]
+    (when-not (.-isClosed this)
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet")) (SSLLogger/fine "Raw read" packet))
+      (when-not formatVerified
+        (set! formatVerified true)
+        (let [pos (.position packet)
+              byteZero (.get packet pos)]
+          (when (and (not (== byteZero (.-id ContentType/HANDSHAKE)))
+                     (not (== byteZero (.-id ContentType/ALERT))))
+            (return (.handleUnknownRecord this packet)))))
+      (.decodeInputRecord this packet)))
+
+  (method ^:private decodeInputRecord :throws [IOException BadPaddingException] ^Plaintext/1 [this
+                                                                                              ^ByteBuffer packet]
+    (let [srcPos (.position packet)
+          srcLim (.limit packet)
+          ^:mutable contentType (.get packet)
+          majorVersion (.get packet)
+          minorVersion (.get packet)
+          contentLen (Record/getInt16 packet)]
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+        (SSLLogger/fine
+          (java-str "READ: "
+                    (ProtocolVersion/nameOf majorVersion minorVersion)
+                    " "
+                    (ContentType/nameOf contentType)
+                    ", length = "
+                    contentLen)))
+      (when (or (< contentLen 0)
+                (> contentLen
+                   (unchecked-subtract-int SSLEngineInputRecord/maxLargeRecordSize
+                                           SSLEngineInputRecord/headerSize)))
+        (throw (SSLProtocolException.
+                 (java-str "Bad input record size, TLSCiphertext.length = " contentLen))))
+      (let [recLim (unchecked-add-int (unchecked-add-int srcPos SSLRecord/headerSize) contentLen)]
+        (.limit packet recLim)
+        (.position packet (unchecked-add-int srcPos SSLRecord/headerSize))
+        (let [^:mutable ^ByteBuffer fragment nil]
+          (try
+            (let [plaintext (.decrypt (.-readCipher this) contentType packet nil)]
+              (set! fragment (.-fragment plaintext))
+              (set! contentType (.-contentType plaintext)))
+            (catch BadPaddingException bpe (throw bpe))
+            (catch GeneralSecurityException gse
+              (throw (SSLProtocolException. "Unexpected exception" gse)))
+            (finally (.limit packet srcLim) (.position packet recLim)))
+          (when (and (and (not (== contentType (.-id ContentType/HANDSHAKE)))
+                          (some? handshakeBuffer))
+                     (.hasRemaining handshakeBuffer))
+            (throw (SSLProtocolException.
+                     (java-str "Expecting a handshake fragment, but received "
+                               (ContentType/nameOf contentType)))))
+          (if (== contentType (.-id ContentType/HANDSHAKE))
+              (do
+                (when (== contentLen 0)
+                  (throw (SSLProtocolException. "Handshake packets must not be zero-length")))
+                (let [^:mutable handshakeFrag fragment]
+                  (when (and (some? handshakeBuffer) (not (== (.remaining handshakeBuffer) 0)))
+                    (let [bb (ByteBuffer/wrap
+                               (new byte/1
+                                    (unchecked-add-int
+                                      (.remaining handshakeBuffer)
+                                      (.remaining fragment))))]
+                      (.put bb handshakeBuffer)
+                      (.put bb fragment)
+                      (set! handshakeFrag (.rewind bb))
+                      (set! handshakeBuffer nil)))
+                  (let [^{:tag (ArrayList Plaintext)} plaintexts (ArrayList. 5)]
+                    (while (.hasRemaining handshakeFrag)
+                      (let [remaining (.remaining handshakeFrag)]
+                        (when (< remaining SSLEngineInputRecord/handshakeHeaderSize)
+                          (set! handshakeBuffer (ByteBuffer/wrap (new byte/1 remaining)))
+                          (.put handshakeBuffer handshakeFrag)
+                          (.rewind handshakeBuffer)
+                          (break))
+                        (.mark handshakeFrag)
+                        (let [handshakeType (.get handshakeFrag)]
+                          (when-not (SSLHandshake/isKnown handshakeType)
+                            (throw (SSLProtocolException.
+                                     (java-str "Unknown handshake type size, Handshake.msg_type = "
+                                               (bit-and-int handshakeType 0xFF)))))
+                          (let [handshakeBodyLen (Record/getInt24 handshakeFrag)]
+                            (when (> handshakeBodyLen SSLConfiguration/maxHandshakeMessageSize)
+                              (throw (SSLProtocolException.
+                                       (java-str
+                                         "The size of the handshake message ("
+                                         handshakeBodyLen
+                                         ") exceeds the maximum allowed size ("
+                                         SSLConfiguration/maxHandshakeMessageSize
+                                         ")"))))
+                            (.reset handshakeFrag)
+                            (let [handshakeMessageLen (unchecked-add-int
+                                                        SSLEngineInputRecord/handshakeHeaderSize
+                                                        handshakeBodyLen)]
+                              (cond
+                                (< remaining handshakeMessageLen)
+                                  (do
+                                    (set! handshakeBuffer (ByteBuffer/wrap (new byte/1 remaining)))
+                                    (.put handshakeBuffer handshakeFrag)
+                                    (.rewind handshakeBuffer)
+                                    (break))
+                                (== remaining handshakeMessageLen)
+                                  (do
+                                    (when (.isHashable (.-handshakeHash this) handshakeType)
+                                      (.receive (.-handshakeHash this) handshakeFrag))
+                                    (.add plaintexts
+                                          (Plaintext.
+                                            contentType
+                                            majorVersion
+                                            minorVersion
+                                            -1
+                                            -1
+                                            handshakeFrag))
+                                    (break))
+                                :else
+                                  (let [fragPos (.position handshakeFrag)
+                                        fragLim (.limit handshakeFrag)
+                                        nextPos (unchecked-add-int fragPos handshakeMessageLen)]
+                                    (.limit handshakeFrag nextPos)
+                                    (when (.isHashable (.-handshakeHash this) handshakeType)
+                                      (.receive (.-handshakeHash this) handshakeFrag))
+                                    (.add plaintexts
+                                          (Plaintext.
+                                            contentType
+                                            majorVersion
+                                            minorVersion
+                                            -1
+                                            -1
+                                            (.slice handshakeFrag)))
+                                    (.position handshakeFrag nextPos)
+                                    (.limit handshakeFrag fragLim))))))))
+                    (cast Plaintext/1 (.toArray plaintexts (new Plaintext/1 0))))))
+              (new Plaintext/1 [(Plaintext. contentType majorVersion minorVersion -1 -1 fragment)]))))))
+
+  (method ^:private handleUnknownRecord :throws [IOException] ^Plaintext/1 [this ^ByteBuffer packet]
+    (let [srcPos (.position packet)
+          firstByte (.get packet srcPos)
+          thirdByte (.get packet (unchecked-add-int srcPos 2))]
+      (if (and (not (== (bit-and-int firstByte 0x80) 0)) (== thirdByte 1))
+          (do
+            (when-not (identical? (.-helloVersion this) ProtocolVersion/SSL20Hello)
+              (throw (SSLHandshakeException. "SSLv2Hello is not enabled")))
+            (let [majorVersion (.get packet (unchecked-add-int srcPos 3))
+                  minorVersion (.get packet (unchecked-add-int srcPos 4))]
+              (when (and (== majorVersion (.-major ProtocolVersion/SSL20Hello))
+                         (== minorVersion (.-minor ProtocolVersion/SSL20Hello)))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+                  (SSLLogger/fine "Requested to negotiate unsupported SSLv2!"))
+                (throw (UnsupportedOperationException. "Unsupported SSL v2.0 ClientHello")))
+              (.position packet (unchecked-add-int srcPos 2))
+              (.receive (.-handshakeHash this) packet)
+              (.position packet srcPos)
+              (let [converted (SSLEngineInputRecord/convertToClientHello packet)]
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+                  (SSLLogger/fine "[Converted] ClientHello" converted))
+                (new Plaintext/1
+                     [(Plaintext. (.-id ContentType/HANDSHAKE)
+                                  majorVersion
+                                  minorVersion
+                                  -1
+                                  -1
+                                  converted)]))))
+          (do
+            (when (and (not (== (bit-and-int firstByte 0x80) 0)) (== thirdByte 4))
+              (throw (SSLException. "SSL V2.0 servers are not supported.")))
+            (throw (SSLException. "Unsupported or unrecognized SSL message")))))))

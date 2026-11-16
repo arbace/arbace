@@ -20,6 +20,13 @@
 ;; is printed as the JVM's launcher prints it ("Exception in thread \"main\" " and the trace) and
 ;; the status is 1, as the JVM's; System.exit's status is the test's. A definition that fails
 ;; prints "java-check: load-failed: " and its last cause and exits 126.
+;;
+;; jtreg's rule for the other threads (the own verdict, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As
+;; built: JCV1"): jtreg's MainWrapper runs main in a thread group of its own whose uncaughtException
+;; keeps the first Throwable but a ThreadDeath, and a test whose main returned fails on it. Here a
+;; default uncaught-exception handler keeps it (and prints it as the JVM's default handler does), and
+;; a main that returned exits 97 when one was kept: bin/java-check's own judge fails the test, its
+;; oracle (the JDK's launcher, which has no such rule) takes 97 as 0.
 (ns java.check.run
   (:require [arbace.string :as str]
             [arbace.java.io :as io])
@@ -99,6 +106,11 @@
         (in-ns n)
         (when (seq classes) (eval (cons 'do classes)))))))
 
+(def ^:private uncaught
+  "The first Throwable but a ThreadDeath another thread did not catch, with its thread's name (jtreg's
+  MainThreadGroup)."
+  (atom nil))
+
 (defn -main [& argv]
   (let [[mode [root main & more]] (if (= "--load" (first argv)) [(second argv) (drop 2 argv)] ["files" argv])
         [props [_ & args]] (split-with #(not= "--" %) more)]
@@ -115,6 +127,15 @@
              (.flush System/err)
              false))
       (System/exit 126))
+    (Thread/setDefaultUncaughtExceptionHandler
+     (reify Thread$UncaughtExceptionHandler
+       (uncaughtException [_ t e]
+         (when-not (instance? ThreadDeath e)
+           (compare-and-set! uncaught nil [(.getName ^Thread t) e])
+           (locking System/err
+             (.print System/err (str "Exception in thread \"" (.getName ^Thread t) "\" "))
+             (.printStackTrace ^Throwable e)
+             (.flush System/err))))))
     (try
       (eval (list (symbol main "main") (list 'into-array 'String (vec args))))
       (catch Throwable e
@@ -124,6 +145,10 @@
         (.flush System/err)
         (System/exit 1)))
     (.flush System/out)
+    (when-let [[tn ^Throwable e] @uncaught]
+      (.println System/err (str "java-check: uncaught: in thread \"" tn "\": " (one-line (str e))))
+      (.flush System/err)
+      (System/exit 97))
     (.flush System/err)
     (System/exit 0)))
 

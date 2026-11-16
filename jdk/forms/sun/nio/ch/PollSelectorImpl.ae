@@ -1,0 +1,239 @@
+;; Converted from overlay/jdk/java.base/sun/nio/ch/PollSelectorImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io IOException)
+        '(java.nio.channels ClosedSelectorException SelectionKey Selector)
+        '(java.nio.channels.spi SelectorProvider)
+        '(java.util ArrayDeque ArrayList Arrays Deque List)
+        '(java.util.concurrent TimeUnit)
+        '(java.util.function Consumer)
+        '(jdk.internal.jrt HostChannels))
+
+(defclass PollSelectorImpl
+  :extends SelectorImpl
+
+  (field ^:private ^:static ^:final ^int INITIAL_CAPACITY 16)
+
+  (field ^:private ^int pollArrayCapacity INITIAL_CAPACITY)
+
+  (field ^:private ^int pollArraySize)
+
+  (field ^:private ^int/1 pollFds)
+
+  (field ^:private ^int/1 pollEvents)
+
+  (field ^:private ^int/1 pollRevents)
+
+  (field ^:private ^:final ^int fd0)
+
+  (field ^:private ^:final ^int fd1)
+
+  (field ^:private ^:final ^{:tag (List SelectionKeyImpl)} pollKeys (ArrayList.))
+
+  (field ^:private ^:final updateLock (Object.))
+
+  (field ^:private ^:final ^{:tag (Deque SelectionKeyImpl)} updateKeys (ArrayDeque.))
+
+  (field ^:private ^:final interruptLock (Object.))
+
+  (field ^:private ^boolean interruptTriggered)
+
+  (constructor :throws [IOException] [this ^SelectorProvider sp]
+    (super. sp)
+    (set! (.-pollFds this) (new int/1 pollArrayCapacity))
+    (set! (.-pollEvents this) (new int/1 pollArrayCapacity))
+    (set! (.-pollRevents this) (new int/1 pollArrayCapacity))
+    (try
+      (let [fds (IOUtil/makePipe false)]
+        (set! (.-fd0 this) (unchecked-int (unsigned-bit-shift-right fds 32)))
+        (set! (.-fd1 this) (unchecked-int fds)))
+      (catch IOException ioe (throw ioe)))
+    (locking this (.setFirst this fd0 Net/POLLIN)))
+
+  (method ^:private ensureOpen ^void [this]
+    (when-not (.isOpen this) (throw (ClosedSelectorException.))))
+
+  (method ^:protected doSelect :throws [IOException] ^int [this
+                                                           ^{:tag (Consumer SelectionKey)} action
+                                                           ^long timeout]
+    (java-assert (Thread/holdsLock this))
+    (let [^:mutable to (unchecked-int (Math/min timeout Integer/MAX_VALUE))
+          blocking (not (== to 0))
+          timedPoll (> to 0)]
+      (.processUpdateQueue this)
+      (.processDeregisterQueue this)
+      (try
+        (.begin this blocking)
+        (let [^:mutable ^int numPolled 0]
+          (loop []
+            (let [startTime (if timedPoll (System/nanoTime) 0)]
+              (set! numPolled (.poll this pollArraySize to))
+              (when (and (== numPolled IOStatus/INTERRUPTED) timedPoll)
+                (let [adjust (unchecked-subtract (System/nanoTime) startTime)]
+                  (set! to
+                        (unchecked-subtract-int to
+                                                (unchecked-int
+                                                  (.toMillis TimeUnit/NANOSECONDS adjust))))
+                  (when (<= to 0) (set! numPolled 0)))))
+            (when (== numPolled IOStatus/INTERRUPTED) (recur)))
+          (java-assert (<= numPolled pollArraySize)))
+        (finally (.end this blocking)))
+      (.processDeregisterQueue this)
+      (.processEvents this action)))
+
+  (method ^:private processUpdateQueue ^void [this]
+    (java-assert (Thread/holdsLock this))
+    (locking updateLock
+      (let [^:mutable ^SelectionKeyImpl ski nil]
+        (while (some? (set! ski (cast SelectionKeyImpl (.pollFirst updateKeys))))
+          (let [newEvents (.translateInterestOps ski)]
+            (when (.isValid ski)
+              (let [index (.getIndex ski)]
+                (java-assert (and (>= index 0) (< index pollArraySize)))
+                (if (> index 0)
+                    (do
+                      (java-assert (identical? (.get pollKeys index) ski))
+                      (if (== newEvents 0) (.remove this ski) (.update this ski newEvents)))
+                    (when-not (== newEvents 0) (.add this ski newEvents))))))))))
+
+  (method ^:private processEvents :throws [IOException] ^int [this
+                                                              ^{:tag (Consumer SelectionKey)} action]
+    (java-assert (Thread/holdsLock this))
+    (java-assert (and (> pollArraySize 0) (== pollArraySize (.size pollKeys))))
+    (let [^:mutable ^int numKeysUpdated 0]
+      (loop [^int i 1]
+        (when (< i pollArraySize)
+          (let [rOps (.getReventOps this i)]
+            (if (not (== rOps 0))
+                (let [ski (cast SelectionKeyImpl (.get pollKeys i))]
+                  (java-assert (== (.getFDVal ski) (.getDescriptor this i)))
+                  (if (.isValid ski)
+                      (do
+                        (set! numKeysUpdated
+                              (unchecked-add-int
+                                numKeysUpdated
+                                (.processReadyEvents this rOps ski action)))
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i))))
+                (recur (unchecked-inc-int i))))))
+      (when-not (== (.getReventOps this 0) 0)
+        (java-assert (== (.getDescriptor this 0) fd0))
+        (.clearInterrupt this))
+      numKeysUpdated))
+
+  (method ^:protected implClose :throws [IOException] ^void [this]
+    (java-assert (not (.isOpen this)))
+    (java-assert (Thread/holdsLock this))
+    (locking interruptLock (set! interruptTriggered true))
+    (PollSelectorImpl/closeIntFD fd0)
+    (PollSelectorImpl/closeIntFD fd1))
+
+  (method ^:protected implRegister ^void [this ^SelectionKeyImpl ski]
+    (java-assert (== (.getIndex ski) 0))
+    (.ensureOpen this))
+
+  (method ^:protected implDereg :throws [IOException] ^void [this ^SelectionKeyImpl ski]
+    (java-assert (not (.isValid ski)))
+    (java-assert (Thread/holdsLock this))
+    (let [index (.getIndex ski)] (when (> index 0) (.remove this ski))))
+
+  (method ^:public setEventOps ^void [this ^SelectionKeyImpl ski]
+    (locking updateLock (.addLast updateKeys ski)))
+
+  (method ^:public wakeup ^Selector [this]
+    (locking interruptLock
+      (when-not interruptTriggered
+        (try
+          (IOUtil/write1 fd1 (unchecked-byte 0))
+          (catch IOException ioe (throw (InternalError. ioe))))
+        (set! interruptTriggered true)))
+    this)
+
+  (method ^:private clearInterrupt :throws [IOException] ^void [this]
+    (locking interruptLock (IOUtil/drain fd0) (set! interruptTriggered false)))
+
+  (method ^:private setFirst ^void [this ^int fd ^int ops]
+    (java-assert (== pollArraySize 0))
+    (java-assert (.isEmpty pollKeys))
+    (.putDescriptor this 0 fd)
+    (.putEventOps this 0 ops)
+    (set! pollArraySize 1)
+    (.add pollKeys nil))
+
+  (method ^:private add ^void [this ^SelectionKeyImpl ski ^int ops]
+    (.expandIfNeeded this)
+    (let [index pollArraySize]
+      (java-assert (> index 0))
+      (.putDescriptor this index (.getFDVal ski))
+      (.putEventOps this index ops)
+      (.putReventOps this index 0)
+      (.setIndex ski index)
+      (set! pollArraySize (unchecked-inc-int pollArraySize))
+      (.add pollKeys ski)
+      (java-assert (== (.size pollKeys) pollArraySize))))
+
+  (method ^:private update ^void [this ^SelectionKeyImpl ski ^int ops]
+    (let [index (.getIndex ski)]
+      (java-assert (and (> index 0) (< index pollArraySize)))
+      (java-assert (== (.getDescriptor this index) (.getFDVal ski)))
+      (.putEventOps this index ops)))
+
+  (method ^:private remove ^void [this ^SelectionKeyImpl ski]
+    (let [index (.getIndex ski)]
+      (java-assert (and (> index 0) (< index pollArraySize)))
+      (java-assert (== (.getDescriptor this index) (.getFDVal ski)))
+      (let [lastIndex (unchecked-subtract-int pollArraySize 1)]
+        (when-not (== lastIndex index)
+          (let [lastKey (cast SelectionKeyImpl (.get pollKeys lastIndex))]
+            (java-assert (== (.getIndex lastKey) lastIndex))
+            (let [lastFd (.getDescriptor this lastIndex)
+                  lastOps (.getEventOps this lastIndex)
+                  lastRevents (.getReventOps this lastIndex)]
+              (java-assert (== (.getFDVal lastKey) lastFd))
+              (.putDescriptor this index lastFd)
+              (.putEventOps this index lastOps)
+              (.putReventOps this index lastRevents)
+              (.set pollKeys index lastKey)
+              (.setIndex lastKey index))))
+        (.remove pollKeys lastIndex)
+        (set! pollArraySize (unchecked-dec-int pollArraySize))
+        (java-assert (== (.size pollKeys) pollArraySize))
+        (.setIndex ski 0))))
+
+  (method ^:private expandIfNeeded ^void [this]
+    (when (== pollArraySize pollArrayCapacity)
+      (let [newCapacity (unchecked-add-int pollArrayCapacity INITIAL_CAPACITY)]
+        (set! pollFds (Arrays/copyOf pollFds newCapacity))
+        (set! pollEvents (Arrays/copyOf pollEvents newCapacity))
+        (set! pollRevents (Arrays/copyOf pollRevents newCapacity))
+        (set! pollArrayCapacity newCapacity))))
+
+  (method ^:private putDescriptor ^void [this ^int i ^int fd]
+    (aset pollFds i fd))
+
+  (method ^:private getDescriptor ^int [this ^int i] (aget pollFds i))
+
+  (method ^:private putEventOps ^void [this ^int i ^int event]
+    (aset pollEvents i (unchecked-short event)))
+
+  (method ^:private getEventOps ^int [this ^int i] (aget pollEvents i))
+
+  (method ^:private putReventOps ^void [this ^int i ^int revent]
+    (aset pollRevents i (unchecked-short revent)))
+
+  (method ^:private getReventOps ^int [this ^int i] (aget pollRevents i))
+
+  (method ^:private poll :throws [IOException] ^int [this ^int numfds ^int timeout]
+    (let [err (new int/1 1)
+          n (HostChannels/poll1 pollFds pollEvents pollRevents numfds timeout err)]
+      (when (== n HostChannels/THROWN)
+        (throw (HostChannels/ioException (aget err 0) "poll failed")))
+      n))
+
+  (method ^:private ^:static closeIntFD :throws [IOException] ^void [^int fd]
+    (let [err (new int/1 1)]
+      (when (== (HostChannels/close0 fd err) HostChannels/THROWN)
+        (throw (HostChannels/ioException (aget err 0) "close failed")))))
+
+  (static-initializer (IOUtil/load)))

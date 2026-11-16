@@ -83,7 +83,7 @@ got=$(root=$r dir=$r/none programs=$r/programs ARBACE_GATE_EXES=$r/exes bash -c 
   program_aot_current() { [ -f \"\$1/packages.edn\" ]; }
   $(fn "$here/bin/lib/program.bash" program_base)
   program_base 2>&1 >/dev/null | head -3" 2>&1)
-echo "$got" | grep -q "compiled namespaces: $r/exes/$K20/amd64/aot " && ok "program_base: EXES/KEY20/amd64" || bad "program_base gave: $got"
+grep -q "compiled namespaces: $r/exes/$K20/amd64/aot " <<< "$got" && ok "program_base: EXES/KEY20/amd64" || bad "program_base gave: $got"
 
 # 6. clojure-tests --aot without CLOJURE_TESTS_AOT_EXES
 r=$T/ct; mk_tree "$r"
@@ -92,7 +92,7 @@ got=$(root=$r work=$r/w ARBACE_GATE_EXES=$r/exes CLOJURE_TESTS_AOT_EXES= bash -c
   program_aot_current() { echo \"aot-dir=\$1\"; return 1; }
   $(fn "$here/bin/clojure-tests" aot_build)
   aot_build" 2>&1)
-echo "$got" | grep -q "aot-dir=$r/exes/$K20/amd64/aot" && ok "clojure-tests --aot: EXES/KEY20" || bad "aot_build gave: $got"
+grep -q "aot-dir=$r/exes/$K20/amd64/aot" <<< "$got" && ok "clojure-tests --aot: EXES/KEY20" || bad "aot_build gave: $got"
 
 # 7. (gate_build itself: test/gate/gate-build-test.bash, the real script under set -u)
 

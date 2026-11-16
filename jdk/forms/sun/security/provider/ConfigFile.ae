@@ -1,0 +1,347 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/ConfigFile.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.io BufferedReader
+                  File
+                  FileInputStream
+                  FileNotFoundException
+                  IOException
+                  InputStream
+                  InputStreamReader
+                  Reader
+                  StreamTokenizer)
+        '(java.net MalformedURLException URI URL)
+        '(java.nio.charset StandardCharsets)
+        '(java.security Security URIParameter)
+        '(java.text MessageFormat)
+        '(java.util HashMap Iterator LinkedList List Locale Map)
+        '(javax.security.auth.login AppConfigurationEntry
+                                    AppConfigurationEntry$LoginModuleControlFlag
+                                    Configuration
+                                    Configuration$Parameters
+                                    ConfigurationSpi)
+        '(sun.security.util Debug PropertyExpander PropertyExpander$ExpandException ResourcesMgr))
+
+(defclass ^:public ^:final ConfigFile
+  :extends Configuration
+
+  (field ^:private ^:final ^Spi spi)
+
+  (constructor ^:public [this] (set! spi (Spi.)))
+
+  (method ^:public getAppConfigurationEntry ^AppConfigurationEntry/1 [this ^String appName]
+    (.engineGetAppConfigurationEntry spi appName))
+
+  (method ^:public ^:synchronized refresh ^void [this]
+    (.engineRefresh spi))
+
+  (defclass ^:public ^:static ^:final Spi
+    :extends ConfigurationSpi
+
+    (field ^:private ^URL url)
+
+    (field ^:private ^boolean expandProp true)
+
+    (field ^:private ^{:tag (Map String (List AppConfigurationEntry))} configuration)
+
+    (field ^:private ^int linenum)
+
+    (field ^:private ^StreamTokenizer st)
+
+    (field ^:private ^int lookahead)
+
+    (field ^:private ^:static ^:final ^Debug debugConfig (Debug/getInstance "configfile"))
+
+    (field ^:private ^:static ^:final ^Debug debugParser (Debug/getInstance "configparser"))
+
+    (constructor ^:public [this]
+      (try (.init this) (catch IOException ioe (throw (SecurityException. ioe)))))
+
+    (constructor ^:public [this ^URI uri]
+      (try
+        (set! url (.toURL uri))
+        (.init this)
+        (catch IOException ioe (throw (SecurityException. ioe)))))
+
+    (constructor :throws [IOException] ^:public [this ^:final ^Configuration$Parameters params]
+      (if (nil? params)
+          (.init this)
+          (do
+            (when-not (instance? URIParameter params)
+              (throw (IllegalArgumentException. (java-str "Unrecognized parameter: " params))))
+            (let [uriParam (cast URIParameter params)]
+              (set! url (.toURL (.getURI uriParam)))
+              (.init this)))))
+
+    (method ^:private init :throws [IOException] ^void [this]
+      (let [^:mutable initialized false
+            ^:mutable expand (Security/getProperty "policy.expandProperties")]
+        (when (nil? expand) (set! expand (System/getProperty "policy.expandProperties")))
+        (when (.equals "false" expand) (set! expandProp false))
+        (let [^{:tag (Map String (List AppConfigurationEntry))} newConfig (HashMap.)]
+          (if (some? url)
+              (do
+                (when (some? debugConfig) (.println debugConfig (java-str "reading " url)))
+                (.init this url newConfig)
+                (set! configuration newConfig))
+              (let [allowSys (Security/getProperty "policy.allowSystemProperty")]
+                (when (.equalsIgnoreCase "true" allowSys)
+                  (let [^:mutable extra_config (System/getProperty
+                                                 "java.security.auth.login.config")]
+                    (when (some? extra_config)
+                      (let [^:mutable overrideAll false]
+                        (when (.startsWith extra_config "=")
+                          (set! overrideAll true)
+                          (set! extra_config (.substring extra_config 1)))
+                        (try
+                          (set! extra_config (PropertyExpander/expand extra_config))
+                          (catch PropertyExpander$ExpandException peee
+                            (throw (.ioException
+                                     this
+                                     "Unable.to.properly.expand.config"
+                                     extra_config))))
+                        (let [^:mutable ^URL configURL nil]
+                          (try
+                            (set! configURL (ConfigFile/newURL extra_config))
+                            (catch MalformedURLException mue
+                              (let [configFile (File. extra_config)]
+                                (if (.exists configFile)
+                                    (set! configURL (.toURL (.toURI configFile)))
+                                    (throw (.ioException
+                                             this
+                                             "extra.config.No.such.file.or.directory."
+                                             extra_config))))))
+                          (when (some? debugConfig)
+                            (.println debugConfig (java-str "reading " configURL)))
+                          (.init this configURL newConfig)
+                          (set! initialized true)
+                          (when overrideAll
+                            (when (some? debugConfig)
+                              (.println debugConfig "overriding other policies!"))
+                            (set! configuration newConfig)
+                            (return)))))))
+                (let [^:mutable ^int n 1
+                      ^:mutable ^String config_url nil]
+                  (while (some? (set! config_url
+                                      (Security/getProperty (java-str "login.config.url." n))))
+                    (try
+                      (set! config_url
+                            (.replace (PropertyExpander/expand config_url) File/separatorChar \/))
+                      (when (some? debugConfig)
+                        (.println debugConfig (java-str "\tReading config: " config_url)))
+                      (.init this (ConfigFile/newURL config_url) newConfig)
+                      (set! initialized true)
+                      (catch PropertyExpander$ExpandException peee
+                        (throw (.ioException this "Unable.to.properly.expand.config" config_url))))
+                    (set! n (unchecked-inc-int n)))
+                  (when (and (not initialized) (== n 1))
+                    (when (some? debugConfig)
+                      (.println debugConfig "\tReading Policy from ~/.java.login.config"))
+                    (set! config_url (System/getProperty "user.home"))
+                    (let [userConfigFile (java-str
+                                           config_url
+                                           File/separatorChar
+                                           ".java.login.config")]
+                      (when (.exists (File. userConfigFile))
+                        (.init this (.toURL (.toURI (File. userConfigFile))) newConfig))))
+                  (set! configuration newConfig)))))))
+
+    (method ^:private init :throws [IOException] ^void [this ^URL config
+                                                        ^{:tag (Map String (List AppConfigurationEntry))} newConfig]
+      (try
+        (with-resources [isr (InputStreamReader.
+                               (.getInputStream this config)
+                               StandardCharsets/UTF_8)]
+          (.readConfig this isr newConfig))
+        (catch FileNotFoundException fnfe
+          (when (some? debugConfig) (.println debugConfig (.toString fnfe)))
+          (throw (IOException. (ResourcesMgr/getAuthResourceString
+                                 "Configuration.Error.No.such.file.or.directory"))))))
+
+    (method ^:public engineGetAppConfigurationEntry ^AppConfigurationEntry/1 [this
+                                                                              ^String applicationName]
+      (let [^:mutable ^{:tag (List AppConfigurationEntry)} list nil]
+        (locking configuration (set! list (cast List (.get configuration applicationName))))
+        (when-not (or (nil? list) (== (.size list) 0))
+          (let [entries (new AppConfigurationEntry/1 (.size list))
+                ^{:tag (Iterator AppConfigurationEntry)} iterator (.iterator list)]
+            (loop [^int i 0]
+              (when (.hasNext iterator)
+                (let [e (cast AppConfigurationEntry (.next iterator))]
+                  (aset entries
+                        i
+                        (AppConfigurationEntry. (.getLoginModuleName e)
+                                                (.getControlFlag e)
+                                                (.getOptions e)))
+                  (recur (unchecked-inc-int i)))))
+            entries))))
+
+    (method ^:public ^:synchronized engineRefresh ^void [this]
+      (try
+        (.init this)
+        (catch IOException ioe (throw (SecurityException. (.getLocalizedMessage ioe) ioe)))))
+
+    (method ^:private readConfig :throws [IOException] ^void [this ^:mutable ^Reader reader
+                                                              ^{:tag (Map String (List AppConfigurationEntry))} newConfig]
+      (set! linenum 1)
+      (when-not (instance? BufferedReader reader) (set! reader (BufferedReader. reader)))
+      (set! st (StreamTokenizer. reader))
+      (.quoteChar st \")
+      (.wordChars st \$ \$)
+      (.wordChars st \_ \_)
+      (.wordChars st \- \-)
+      (.wordChars st \* \*)
+      (.lowerCaseMode st false)
+      (.slashSlashComments st true)
+      (.slashStarComments st true)
+      (.eolIsSignificant st true)
+      (set! lookahead (.nextToken this))
+      (while (not (== lookahead StreamTokenizer/TT_EOF)) (.parseLoginEntry this newConfig)))
+
+    (method ^:private parseLoginEntry :throws [IOException] ^void [this
+                                                                   ^{:tag (Map String (List AppConfigurationEntry))} newConfig]
+      (let [^{:tag (List AppConfigurationEntry)} configEntries (LinkedList.)
+            appName (.-sval st)]
+        (set! lookahead (.nextToken this))
+        (when (some? debugParser)
+          (.println debugParser (java-str "\tReading next config entry: " appName)))
+        (.match this "{")
+        (while (not (.peek this "}"))
+          (let [moduleClass (.match this "module class name")
+                ^:mutable ^AppConfigurationEntry$LoginModuleControlFlag controlFlag nil
+                sflag (.toUpperCase (.match this "controlFlag") Locale/ENGLISH)]
+            (switch sflag
+              "REQUIRED" (set! controlFlag AppConfigurationEntry$LoginModuleControlFlag/REQUIRED)
+              "REQUISITE" (set! controlFlag AppConfigurationEntry$LoginModuleControlFlag/REQUISITE)
+              "SUFFICIENT"
+                (set! controlFlag AppConfigurationEntry$LoginModuleControlFlag/SUFFICIENT)
+              "OPTIONAL" (set! controlFlag AppConfigurationEntry$LoginModuleControlFlag/OPTIONAL)
+              (throw (.ioException this "Configuration.Error.Invalid.control.flag.flag" sflag)))
+            (let [^{:tag (Map String String)} options (HashMap.)]
+              (while (not (.peek this ";"))
+                (let [key (.match this "option key")]
+                  (.match this "=")
+                  (try
+                    (.put options key (.expand this (.match this "option value")))
+                    (catch PropertyExpander$ExpandException peee
+                      (throw (IOException. (.getLocalizedMessage peee)))))))
+              (set! lookahead (.nextToken this))
+              (when (some? debugParser)
+                (.println debugParser (java-str "\t\t" moduleClass ", " sflag))
+                (for-each [^String key (.keySet options)]
+                  (.println debugParser
+                            (java-str "\t\t\t" key "=" (cast String (.get options key))))))
+              (.add configEntries (AppConfigurationEntry. moduleClass controlFlag options)))))
+        (.match this "}")
+        (.match this ";")
+        (when (.containsKey newConfig appName)
+          (throw (.ioException this
+                               "Configuration.Error.Can.not.specify.multiple.entries.for.appName"
+                               appName)))
+        (.put newConfig appName configEntries)))
+
+    (method ^:private match :throws [IOException] ^String [this ^String expect]
+      (let [^:mutable ^String value nil]
+        (switch lookahead
+          StreamTokenizer/TT_EOF
+            (throw (.ioException this
+                                 "Configuration.Error.expected.expect.read.end.of.file."
+                                 expect))
+          (\" StreamTokenizer/TT_WORD)
+            (if (or (or (or (.equalsIgnoreCase expect "module class name")
+                            (.equalsIgnoreCase expect "controlFlag"))
+                        (.equalsIgnoreCase expect "option key"))
+                    (.equalsIgnoreCase expect "option value"))
+                (do (set! value (.-sval st)) (set! lookahead (.nextToken this)))
+                (throw (.ioException this
+                                     "Configuration.Error.Line.line.expected.expect.found.value."
+                                     linenum
+                                     expect
+                                     (.-sval st))))
+          \{
+            (if (.equalsIgnoreCase expect "{")
+                (set! lookahead (.nextToken this))
+                (throw (.ioException this
+                                     "Configuration.Error.Line.line.expected.expect."
+                                     linenum
+                                     expect
+                                     (.-sval st))))
+          \;
+            (if (.equalsIgnoreCase expect ";")
+                (set! lookahead (.nextToken this))
+                (throw (.ioException this
+                                     "Configuration.Error.Line.line.expected.expect."
+                                     linenum
+                                     expect
+                                     (.-sval st))))
+          \}
+            (if (.equalsIgnoreCase expect "}")
+                (set! lookahead (.nextToken this))
+                (throw (.ioException this
+                                     "Configuration.Error.Line.line.expected.expect."
+                                     linenum
+                                     expect
+                                     (.-sval st))))
+          \=
+            (if (.equalsIgnoreCase expect "=")
+                (set! lookahead (.nextToken this))
+                (throw (.ioException this
+                                     "Configuration.Error.Line.line.expected.expect."
+                                     linenum
+                                     expect
+                                     (.-sval st))))
+          (throw (.ioException this
+                               "Configuration.Error.Line.line.expected.expect.found.value."
+                               linenum
+                               expect
+                               (.-sval st))))
+        value))
+
+    (method ^:private peek ^boolean [this ^String expect]
+      (switch lookahead
+        \, (.equalsIgnoreCase expect ",")
+        \; (.equalsIgnoreCase expect ";")
+        \{ (.equalsIgnoreCase expect "{")
+        \} (.equalsIgnoreCase expect "}")
+        false))
+
+    (method ^:private nextToken :throws [IOException] ^int [this]
+      (let [^:mutable ^int tok 0]
+        (while (== (set! tok (.nextToken st)) StreamTokenizer/TT_EOL)
+          (set! linenum (unchecked-inc-int linenum)))
+        tok))
+
+    (method ^:private getInputStream :throws [IOException] ^InputStream [this ^URL url]
+      (if (.equalsIgnoreCase "file" (.getProtocol url))
+          (try
+            (.openStream url)
+            (catch Exception e
+              (let [^:mutable file (.getPath url)]
+                (when-not (.isEmpty (.getHost url)) (set! file (java-str "//" (.getHost url) file)))
+                (when (some? debugConfig)
+                  (.println debugConfig (java-str "cannot read " url ", try " file)))
+                (FileInputStream. file))))
+          (.openStream url)))
+
+    (method ^:private expand :throws [PropertyExpander$ExpandException IOException] ^String [this
+                                                                                             ^String value]
+      (cond
+        (.isEmpty value) value
+        (not expandProp) value
+        :else
+          (let [s (PropertyExpander/expand value)]
+            (when (or (nil? s) (.isEmpty s))
+              (throw (.ioException
+                       this
+                       "Configuration.Error.Line.line.system.property.value.expanded.to.empty.value"
+                       linenum
+                       value)))
+            s)))
+
+    (method ^:private ioException ^IOException [this ^String resourceKey & ^Object/1 args]
+      (let [form (MessageFormat. (ResourcesMgr/getAuthResourceString resourceKey))]
+        (IOException. (.format form args)))))
+
+  (method ^:private ^:static newURL :throws [MalformedURLException] ^URL [^String spec]
+    (URL. spec)))

@@ -604,6 +604,47 @@ JCS93 (c)), from jdk26u at `baf63fb`, `test/jrt/jrt_sources.ae`'s `io-sources` a
   982 forms files; `bin/javac-vendor`'s list loses the six java.io and helper files and
   `DeflaterOutputStream`, javac's world's `Deflater` moving to the program's.
 
+## The JCA (F1, write-ahead, 2026-11-05)
+
+javax.crypto with SunJCE's services, java.security's key factories, key pair generators,
+signatures and key specs, the SunRsaSign and SunEC providers and SUN's DSA, HSS/LMS and ML-DSA
+(doc/classes/JAVA-DEFERRED-TRIAGE.md, F1 and "As built: F1 (write-ahead)"; the user's JCS134 (a)),
+from jdk26u at `baf63fb`, `test/jrt/jrt_sources.ae`'s `jca-sources` and the intpoly fields of
+`added-gensrc`. Prepared on the branch `java-jc9-jca`; `bin/jrt-convert update` not run yet (the
+night's):
+
+- **Sources added**: 335 of `src/java.base/share/classes` (90,145 lines): javax.crypto (28),
+  `spec` (17), `interfaces` (4); `com/sun/crypto/provider` (93: all but `JceKeyStore`,
+  `KeyProtector`, `SealedObjectForKeyProtector`); java.security (24, `Permission`,
+  `PermissionCollection` and `Guard` among them), `spec` (33), `interfaces` (19);
+  `java/lang/SecurityException` (a cut class until then); `jdk/internal/access`'s
+  `JavaxCryptoSpecAccess`, `JavaSecuritySpecAccess`; `sun/security/provider` (17), `rsa` (14), `ec`
+  (17, `point` 6, `ed` 11), `util` (27), `util/math` (6), `util/math/intpoly` (4), `internal/spec`
+  (5), `internal/interfaces` (1), `pkcs` (2), `x509` (4).
+- **Generated** (KIND `gensrc`, 6,628 lines): the 10 fields of `sun/security/util/math/intpoly`
+  (`IntegerPolynomialP256`, `P384`, `P521`, `25519`, `448` and the five order fields), made by the
+  generate step as `make/modules/java.base/Gensrc.gmk`'s `INTPOLY_GEN_DONE` makes them:
+  `build.tools.intpoly.FieldGen` on its `header.txt`, on javac's tool executable (its `buildtools`
+  module gains `make/jdk/src/classes/build/tools/intpoly`, `bin/javac-vendor`'s `tool_dirs`); equal
+  to the JDK build's `support/gensrc` when run on the JDK (checked, 2026-11-05).
+- **jrt's own Java** (KIND `overlay`): `javax/crypto/JceSecurityManager.java`,
+  `jdk/internal/jrt/CryptoAccess.java`, `sun/security/rsa/RsaServices.java` (new);
+  `com/sun/crypto/provider/JceServices.java` (every SunJCE service class but JCEKS's, and the KDF
+  constructors), `sun/security/provider/JrtServices.java` (DSA, HSS/LMS, ML-DSA; the KDF engine's
+  parameter; SunRsaSign's through `RsaServices`), `javax/crypto/JceSecurity.java`
+  (`getVerificationResult`).
+- **Variants**: `SunEntries` (to the digests), `ProviderConfig` (SunRsaSign, SunEC), `SunJCE`
+  removed (jdk26u's whole); `SecretKeySpec`, `EncodedKeySpec` (their accesses to `CryptoAccess`),
+  `SealedObject`, `Signature` (static initializers cut), `GaloisCounterMode` (no `JavaNioAccess`),
+  `PBES2Core`, `HmacPKCS12PBECore`, `PBMAC1Core`, `HKDFKeyDerivation`, `ConstructKeys`, `KeyUtil`,
+  `ECUtil`, `PKCS8Key` (`CryptoAccess`), `DESKey`, `DESedeKey`, `PBEKey`, `PBKDF2KeyImpl` (no
+  `Cleaner`).
+- **Expected result**: 1,254 lines of `jdk/sources.txt` before the locales' index (907 now): 1,150
+  of `share`, 6 `unix`, 41 generated, 54 of jrt's own; about 3.1 MB more forms, +28% on
+  `jdk/forms`' 11.2 MB (the 345 files read by repr/java on javac's tool: 2,397,063 bytes of the
+  `share` files' 356 forms files and 680,623 of the generated fields', the same read without javac
+  byte for byte).
+
 ## The committed forms (standalone S1, 2026-10-12)
 
 The user's decision D2 (doc/STANDALONE-SURVEY.md §4.2, §9.1 S1) reverses "regenerated on every
