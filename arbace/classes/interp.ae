@@ -28,7 +28,7 @@
                         Compiler$CF$VarDeref Compiler$CF$VarInvoke Compiler$CF$FiAdapter
                         Compiler$CF$NewI Compiler$CF$CtorCall Compiler$CF$NewR Compiler$CF$GetField
                         Compiler$CF$SetField Compiler$CF$GetStatic Compiler$CF$SetStatic
-                        Compiler$CF$FieldR Compiler$CF$NewArray Compiler$CF$ArrayInit
+                        Compiler$CF$FieldR Compiler$CF$VolField Compiler$CF$NewArray Compiler$CF$ArrayInit
                         Compiler$CF$Aget Compiler$CF$Aset Compiler$CF$Alength Compiler$CF$ArrayClone
                         Compiler$CF$JavaStr Compiler$CF$ForEach Compiler$CF$Pat Compiler$CF$Switch
                         Compiler$CF$IfInstance Compiler$CF$MakeLambda Compiler$CF$RecordOp
@@ -531,10 +531,17 @@
 (defn- ptypes [desc] (char-array (map tc (first (t/parse-method-desc desc)))))
 
 (defn- has? [flags f] (not (zero? (bit-and (or flags 0) f))))
+
+(defn- volatile-field?
+  "Is field f (an analyzed field's map) volatile? Its accesses are then CF$VolField's,
+  sequentially consistent (JCS127), and the other fields' stay GetField's and the others'."
+  [f]
+  (has? (:flags f) ACC_VOLATILE))
 (def ^:private ACC_STATIC 0x0008)
 (def ^:private ACC_PRIVATE 0x0002)
 (def ^:private ACC_ABSTRACT 0x0400)
 (def ^:private ACC_INTERFACE 0x0200)
+(def ^:private ACC_VOLATILE 0x0040)
 
 (defn method-of
   "The Meth of interpreted class k declaring or inheriting method key (non-virtual lookup:
@@ -681,7 +688,9 @@
       (= fname "$assertionsDisabled") (konst "Z" true)
       (klass owner) (let [[sk i] (or (find-static (klass owner) fname)
                                      (fail (str "No static field " fname " in " owner)))]
-                      (arbace.lang.Compiler$CF$GetStatic. (char (tc ty)) sk (int i)))
+                      (if (volatile-field? f)
+                        (arbace.lang.Compiler$CF$VolField. (char (tc ty)) sk nil (int i) nil)
+                        (arbace.lang.Compiler$CF$GetStatic. (char (tc ty)) sk (int i))))
       :else (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) fname)
                                                     (fail (str "No field " owner "." fname)))
                                  nil nil))))
@@ -693,7 +702,9 @@
         ty (:desc f)]
     (if (klass owner)
       (let [[sk i] (or (find-static (klass owner) fname) (fail (str "No static field " fname " in " owner)))]
-        (arbace.lang.Compiler$CF$SetStatic. (char (tc ty)) sk (int i) (coerce ctx (:val an) ty)))
+        (if (volatile-field? f)
+          (arbace.lang.Compiler$CF$VolField. (char (tc ty)) sk nil (int i) (coerce ctx (:val an) ty))
+          (arbace.lang.Compiler$CF$SetStatic. (char (tc ty)) sk (int i) (coerce ctx (:val an) ty))))
       (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) fname)
                                               (fail (str "No field " owner "." fname)))
                            nil (coerce ctx (:val an) ty)))))
@@ -715,7 +726,9 @@
         tn (coerce ctx (:target an) (t/internal->desc owner))]
     (if-let [k (klass owner)]
       (if-let [i (field-index k (:name f))]
-        (arbace.lang.Compiler$CF$GetField. (char (tc ty)) tn (int i))
+        (if (volatile-field? f)
+          (arbace.lang.Compiler$CF$VolField. (char (tc ty)) nil tn (int i) nil)
+          (arbace.lang.Compiler$CF$GetField. (char (tc ty)) tn (int i)))
         (super-field ctx k f ty tn nil))
       (if-let [fd (find-field (internal->class owner) (:name f))]
         (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) fd tn nil)
@@ -729,7 +742,9 @@
         v (coerce ctx (:val an) ty)]
     (if-let [k (klass owner)]
       (if-let [i (field-index k (:name f))]
-        (arbace.lang.Compiler$CF$SetField. (char (tc ty)) tn (int i) v)
+        (if (volatile-field? f)
+          (arbace.lang.Compiler$CF$VolField. (char (tc ty)) nil tn (int i) v)
+          (arbace.lang.Compiler$CF$SetField. (char (tc ty)) tn (int i) v))
         (super-field ctx k f ty tn v))
       (if-let [fd (find-field (internal->class owner) (:name f))]
         (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) fd tn v)

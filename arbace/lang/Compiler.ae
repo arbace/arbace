@@ -6287,6 +6287,43 @@
                 (recur (unchecked-inc-int i))))
             c)))
 
+      ;; volatile fields of interpreted classes (JCS127; CF$VolField). Their slots hold boxed
+      ;; values, an interface's two words in Go, which sync/atomic cannot load or store as one,
+      ;; so a volatile read or write holds a lock of VLOCKS, chosen by the field's index: all
+      ;; the accesses to one field take the same lock, a lock's acquisitions are totally ordered
+      ;; and each release happens before the next acquisition (Go's memory model, sync.Mutex and
+      ;; jrt's monitors over sync/atomic), so the volatile accesses are sequentially consistent
+      ;; as j2g's sync/atomic makes a translated volatile field's (J2G-SPEC §8.2), and none
+      ;; tears. The lock is held over one slot's load or store alone: no evaluation, no class
+      ;; initialization, no other lock
+      (field ^:static ^:final ^Object/1 VLOCKS (Rt/newLocks 64))
+
+      (method ^:static newLocks ^Object/1 [^int n]
+        (let [a (new Object/1 n)]
+          (loop [^int i 0]
+            (when (< i n)
+              (aset a i (Object.))
+              (recur (unchecked-inc-int i))))
+          a))
+
+      ;; o's field i, volatile (o an object of an interpreted class, not null)
+      (method ^:public ^:static vfield [o ^int i]
+        (locking (aget VLOCKS (bit-and-int i 63))
+          (.field HOST o i)))
+
+      (method ^:public ^:static vsetField ^void [o ^int i v]
+        (locking (aget VLOCKS (bit-and-int i 63))
+          (.setField HOST o i v)))
+
+      ;; static field i of an interpreted class (its Klass's statics), volatile
+      (method ^:public ^:static vstatic [^Object/1 statics ^int i]
+        (locking (aget VLOCKS (bit-and-int i 63))
+          (aget statics i)))
+
+      (method ^:public ^:static vsetStatic ^void [^Object/1 statics ^int i v]
+        (locking (aget VLOCKS (bit-and-int i 63))
+          (aset statics i v)))
+
       ;; the deepest nesting of interpreted calls on one thread before StackOverflowError
       ;; (J2G-SPEC §10.5: Go's stack overflow is fatal)
       (field ^:public ^:static ^:final ^int MAX_DEPTH 10000)
@@ -8230,6 +8267,44 @@
                 (when (== (.-jump f) 0) (.set fd o x))
                 x)
               (.get fd o)))))
+
+    ;; a volatile field of an interpreted class (JCS127): an object's (target, index i) or a
+    ;; static one (k, i; target nil), read, or written with v when v is set, through Rt's
+    ;; volatile accesses (Rt/vfield and the others), where GetField, SetField, GetStatic and
+    ;; SetStatic, which stay the plain fields' nodes, load and store the slot plainly
+    (defclass ^:public ^:static VolField
+      :extends Node
+      (field ^:public ^:final ^Klass k)
+      (field ^:public ^:final ^Node target)
+      (field ^:public ^:final ^int i)
+      (field ^:public ^:final ^Node v)
+      (constructor ^:public [this ^char t ^Klass k ^Node target ^int i ^Node v]
+        (set! (.-t this) t)
+        (set! (.-k this) k)
+        (set! (.-target this) target)
+        (set! (.-i this) i)
+        (set! (.-v this) v))
+      (method ^:public eval [this ^Frame f]
+        (let [o (if (some? target) (.eval target f) nil)]
+          (when (not (== (.-jump f) 0)) (return nil))
+          ;; a static field's class initialized first, as GetStatic and SetStatic do
+          (when (nil? target) (.init k))
+          (if (some? v)
+              (let [x (switch (Rt/kind (.-t this))
+                        \J (Rt/box (.-t this) (.evalJ v f))
+                        \D (Rt/boxD (.-t this) (.evalD v f))
+                        (.eval v f))]
+                (when (not (== (.-jump f) 0)) (return nil))
+                (when (and (some? target) (nil? o)) (throw (NullPointerException.)))
+                (if (some? target)
+                    (Rt/vsetField o i x)
+                    (Rt/vsetStatic (.-statics k) i x))
+                x)
+              (do
+                (when (and (some? target) (nil? o)) (throw (NullPointerException.)))
+                (if (some? target)
+                    (Rt/vfield o i)
+                    (Rt/vstatic (.-statics k) i)))))))
 
     ;; ------------------------------------------------------------------------------------
     ;; arrays
