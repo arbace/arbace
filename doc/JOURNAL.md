@@ -9567,3 +9567,20 @@ the JDK's byte for byte** (`ClassFileSmoke.out`). So once B2's own fixes land, F
 update` (MethodHandleInfo's REF_ constants, Enum$EnumDesc, VarHandle$VarHandleDesc, as in F26's night commands), the forms'
 and fixtures' updates, then this branch's four commits (cherry-picked: they are no-ops in a world without F26, each guarded by
 `m/translated?`), a gate build, the smoke by its header's commands, and Java's levels on F26's 44 corpus tests.
+
+## 2026-11-16: `bin/java-project`: a `META-INF` file in two modules shadowed, not an error (branch `ghidra-g1n`, from `mac/java-night` `989b6607a`)
+
+- Found by the Ghidra demo's `bin/run-g1 analyze` (run by day while B2's build is fixed): SleighCompile's read stopped after
+  every module read, merging `WORK/resources.all`, at `META-INF/DEPENDENCIES` in log4j-api and log4j-core (Maven's
+  remote-resources output; their `LICENSE` and `NOTICE` too, equal by chance). Any program of two Apache artifacts hits it; so
+  would night 18's `--build-program` of SleighCompile and of G1's tests.
+- The rule: a `META-INF` file (not `META-INF/services`, still concatenated) in two modules that differ is the first module's in
+  `resources.all`, as a class path's `getResource` answers in its order; the later ones are listed in `WORK/resources.shadowed`
+  (path and module a line) and kept in their own `resources.jars/NNN-MODULE`, which is what `--build-program` gives j2g. A file
+  outside `META-INF` in two modules that differ stays an error. Alternatives: dropping `DEPENDENCIES`, `LICENSE` and `NOTICE` as
+  Maven metadata beside `META-INF/maven` (a program may read its notices; the class path keeps them), or the first copy of every
+  duplicate (hides real conflicts of program data).
+- Fixture: `test/java/project/controls/meta-dup.edn` (two source modules, each `META-INF/NOTICE`: the first kept, the second
+  listed and in `002-b`) and the control `res-dup.edn` (`shared.txt` in both must fail, its message naming it). `bin/java-project
+  test` 31 of 31 (main's stage 0, javac's tool `javac-f70d1a9d900eb07a9afc` with `REPR_JAVA_STALE_OK=1`). doc/go/BUILD.md's
+  "Java sources by module".
