@@ -9655,3 +9655,4 @@ and fixtures' updates, then this branch's four commits (cherry-picked: they are 
   SourceFileIndexer uses guava's HashBiMap, declared from guava's binary jar. The first needs a decision (GH5 (iii)'s headless
   subset into the world, as java.awt.Point is, or GH5 (i)); the second guava's sources module, which needs jsr305 3.0.2 and
   checker-qual 3.37.0 pinned (A3's closure of BiMap fails at its root on javax.annotation's absence): a fetch to approve.
+- Correction to the entry above: the first run's `No matching clause` failures were 276 of the 310, not 286.
