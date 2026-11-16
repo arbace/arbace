@@ -3529,8 +3529,9 @@
 
     (method ^:public ^:final methods ^IPersistentCollection [this] methods)
 
-    ;; the methods of fixed arity by their arity, 0 to 20 (CodeRun.fixed)
-    (field ^:public ^Compiler$FnMethod/1 evalArities))
+    ;; the compiled methods of fixed arity by their arity, 0 to 20, each filled at the arity's
+    ;; first call (CodeRun.fixed; CodeRun/NONE: the fn has no fixed method of that arity)
+    (field ^:public ^Compiler$CMethod/1 evalArities))
 
   (defclass ^:public ^:static ObjExpr
     :implements [Expr]
@@ -8987,7 +8988,7 @@
 
   (defclass ^:public ^:static Frame
     ;; the locals of one invocation, by LocalBinding.idx
-    ;; (not final: the frames of compiled methods are reused, Evaluator.frame)
+    ;; (not final: the frames of compiled methods are reused, CodeRun.frame)
     (field ^:public ^Object/1 slots)
     ;; the fn whose method runs (its closed-over values); nil in a deftype's method
     (field ^:public ^EvalFn fn)
@@ -9005,6 +9006,9 @@
     ;; method (a double as its raw bits), or nil; set by a recur, cleared by its loop
     (field ^:public ^long/1 prims)
     (field ^:public ^boolean recur)
+    ;; the compiled method the frame was last made ready for (reset): its slots and prims
+    ;; sized for it, its method, objx and source its own
+    (field ^CMethod cm)
 
     (constructor ^:public [this ^int n ^EvalFn fn ^ObjMethod method ^ObjExpr objx self]
       (set! (.-slots this) (new Object/1 n))
@@ -9020,30 +9024,30 @@
       (set! (.-slots this) (new Object/1 (.-nslots cm)))
       (.reset this cm fn self))
 
-    ;; this frame made ready for a call of compiled method cm (Evaluator.frame)
+    ;; this frame made ready for a call of compiled method cm (CodeRun.frame)
     (method ^:public reset ^Frame [this ^CMethod cm ^EvalFn fn self]
-      (when (< (alength slots) (.-nslots cm))
-        (set! slots (new Object/1 (.-nslots cm))))
-      (when (and (> (.-nprims cm) 0) (or (nil? prims) (< (alength prims) (.-nprims cm))))
-        (set! prims (new long/1 (.-nprims cm))))
+      (when-not (identical? cm (.-cm this))
+        (when (< (alength slots) (.-nslots cm))
+          (set! slots (new Object/1 (.-nslots cm))))
+        (when (and (> (.-nprims cm) 0) (or (nil? prims) (< (alength prims) (.-nprims cm))))
+          (set! prims (new long/1 (.-nprims cm))))
+        (set! (.-method this) (.-method cm))
+        (set! (.-objx this) (.-objx cm))
+        (set! (.-source this) (.-source cm))
+        (set! (.-cm this) cm))
       (set! (.-fn this) fn)
       ;; slot 0: the fn itself (its name in its body), unless the fn is direct
       (when (and (some? fn) (.-selfSlot cm))
         (aset slots 0 fn))
-      (set! (.-method this) (.-method cm))
-      (set! (.-objx this) (.-objx cm))
       (set! (.-self this) self)
-      (set! (.-line this) (.-line (.-method cm)))
-      (set! (.-source this) (.-evalSource (.-objx cm)))
+      (set! (.-line this) (.-line cm))
       (set! (.-recur this) false)
       this)
 
-    ;; the call has returned: nothing it held is kept
+    ;; the call has returned: nothing it held is kept (its first n slots cleared at once:
+    ;; CodeRun.clear)
     (method ^:public release ^void [this ^int n]
-      (loop [^int i 0]
-        (when (< i n)
-          (aset slots i nil)
-          (recur (unchecked-inc-int i))))
+      (CodeRun/clear slots n)
       (set! (.-fn this) nil)
       (set! (.-self this) nil)
       (set! (.-caller this) nil))
@@ -9086,68 +9090,177 @@
       (Evaluator/invokeFn this (RT/seq args)))
 
     ;; a call of a fixed arity the fn has: its compiled method called with the arguments in
-    ;; a frame, without a seq (CodeRun); the other calls go through RestFn to doInvoke
+    ;; a frame, without a seq (CodeRun; the parameters stored directly when they all are as is,
+    ;; CMethod.plain); a call of another arity: the variadic method, its rest parameter a seq of
+    ;; the arguments past its fixed ones (Evaluator.invokeSpread), as RestFn's doInvoke of an
+    ;; ArraySeq of them binds it. Past 5 arguments the values are put in an array first
+    ;; (Evaluator.invokeArray; RestFn's seq before, doc/go/EVAL-SPEED.md)
     (method ^:public invoke [this]
       (let [cm (CodeRun/fixed this 0)]
         (if (some? cm)
-            (let [st (Evaluator/state)]
-              (Evaluator/invokeFn this cm (Evaluator/frame st cm this nil) st))
-            (.doInvoke this nil))))
+            (let [st (CodeRun/state)]
+              (CodeRun/invokeFn this cm (CodeRun/frame st cm this nil) st))
+            (Evaluator/invokeSpread this RT/EMPTY_ARRAY))))
 
     (method ^:public invoke [this a]
       (let [cm (CodeRun/fixed this 1)]
         (if (some? cm)
-            (let [st (Evaluator/state)
-                  f (Evaluator/frame st cm this nil)]
-              (CodeRun/bind f cm 0 a)
-              (Evaluator/invokeFn this cm f st))
-            (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a]))))))
+            (let [st (CodeRun/state)
+                  f (CodeRun/frame st cm this nil)]
+              (if (.-plain cm)
+                  (let [ss (.-slots f)
+                        pi (.-pidx cm)]
+                    (aset ss (aget pi 0) a))
+                  (CodeRun/bind f cm 0 a))
+              (CodeRun/invokeFn this cm f st))
+            (Evaluator/invokeSpread this (new Object/1 [a])))))
 
     (method ^:public invoke [this a b]
       (let [cm (CodeRun/fixed this 2)]
         (if (some? cm)
-            (let [st (Evaluator/state)
-                  f (Evaluator/frame st cm this nil)]
-              (CodeRun/bind f cm 0 a)
-              (CodeRun/bind f cm 1 b)
-              (Evaluator/invokeFn this cm f st))
-            (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a b]))))))
+            (let [st (CodeRun/state)
+                  f (CodeRun/frame st cm this nil)]
+              (if (.-plain cm)
+                  (let [ss (.-slots f)
+                        pi (.-pidx cm)]
+                    (aset ss (aget pi 0) a)
+                    (aset ss (aget pi 1) b))
+                  (do (CodeRun/bind f cm 0 a)
+                      (CodeRun/bind f cm 1 b)))
+              (CodeRun/invokeFn this cm f st))
+            (Evaluator/invokeSpread this (new Object/1 [a b])))))
 
     (method ^:public invoke [this a b c]
       (let [cm (CodeRun/fixed this 3)]
         (if (some? cm)
-            (let [st (Evaluator/state)
-                  f (Evaluator/frame st cm this nil)]
-              (CodeRun/bind f cm 0 a)
-              (CodeRun/bind f cm 1 b)
-              (CodeRun/bind f cm 2 c)
-              (Evaluator/invokeFn this cm f st))
-            (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a b c]))))))
+            (let [st (CodeRun/state)
+                  f (CodeRun/frame st cm this nil)]
+              (if (.-plain cm)
+                  (let [ss (.-slots f)
+                        pi (.-pidx cm)]
+                    (aset ss (aget pi 0) a)
+                    (aset ss (aget pi 1) b)
+                    (aset ss (aget pi 2) c))
+                  (do (CodeRun/bind f cm 0 a)
+                      (CodeRun/bind f cm 1 b)
+                      (CodeRun/bind f cm 2 c)))
+              (CodeRun/invokeFn this cm f st))
+            (Evaluator/invokeSpread this (new Object/1 [a b c])))))
 
     (method ^:public invoke [this a b c d]
       (let [cm (CodeRun/fixed this 4)]
         (if (some? cm)
-            (let [st (Evaluator/state)
-                  f (Evaluator/frame st cm this nil)]
-              (CodeRun/bind f cm 0 a)
-              (CodeRun/bind f cm 1 b)
-              (CodeRun/bind f cm 2 c)
-              (CodeRun/bind f cm 3 d)
-              (Evaluator/invokeFn this cm f st))
-            (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a b c d]))))))
+            (let [st (CodeRun/state)
+                  f (CodeRun/frame st cm this nil)]
+              (if (.-plain cm)
+                  (let [ss (.-slots f)
+                        pi (.-pidx cm)]
+                    (aset ss (aget pi 0) a)
+                    (aset ss (aget pi 1) b)
+                    (aset ss (aget pi 2) c)
+                    (aset ss (aget pi 3) d))
+                  (do (CodeRun/bind f cm 0 a)
+                      (CodeRun/bind f cm 1 b)
+                      (CodeRun/bind f cm 2 c)
+                      (CodeRun/bind f cm 3 d)))
+              (CodeRun/invokeFn this cm f st))
+            (Evaluator/invokeSpread this (new Object/1 [a b c d])))))
 
     (method ^:public invoke [this a b c d e]
       (let [cm (CodeRun/fixed this 5)]
         (if (some? cm)
-            (let [st (Evaluator/state)
-                  f (Evaluator/frame st cm this nil)]
-              (CodeRun/bind f cm 0 a)
-              (CodeRun/bind f cm 1 b)
-              (CodeRun/bind f cm 2 c)
-              (CodeRun/bind f cm 3 d)
-              (CodeRun/bind f cm 4 e)
-              (Evaluator/invokeFn this cm f st))
-            (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a b c d e])))))))
+            (let [st (CodeRun/state)
+                  f (CodeRun/frame st cm this nil)]
+              (if (.-plain cm)
+                  (let [ss (.-slots f)
+                        pi (.-pidx cm)]
+                    (aset ss (aget pi 0) a)
+                    (aset ss (aget pi 1) b)
+                    (aset ss (aget pi 2) c)
+                    (aset ss (aget pi 3) d)
+                    (aset ss (aget pi 4) e))
+                  (do (CodeRun/bind f cm 0 a)
+                      (CodeRun/bind f cm 1 b)
+                      (CodeRun/bind f cm 2 c)
+                      (CodeRun/bind f cm 3 d)
+                      (CodeRun/bind f cm 4 e)))
+              (CodeRun/invokeFn this cm f st))
+            (Evaluator/invokeSpread this (new Object/1 [a b c d e])))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6]
+      (let [cm (CodeRun/fixed this 6)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7]
+      (let [cm (CodeRun/fixed this 7)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8]
+      (let [cm (CodeRun/fixed this 8)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9]
+      (let [cm (CodeRun/fixed this 9)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10]
+      (let [cm (CodeRun/fixed this 10)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11]
+      (let [cm (CodeRun/fixed this 11)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12]
+      (let [cm (CodeRun/fixed this 12)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13]
+      (let [cm (CodeRun/fixed this 13)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14]
+      (let [cm (CodeRun/fixed this 14)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15]
+      (let [cm (CodeRun/fixed this 15)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16]
+      (let [cm (CodeRun/fixed this 16)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17]
+      (let [cm (CodeRun/fixed this 17)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18]
+      (let [cm (CodeRun/fixed this 18)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19]
+      (let [cm (CodeRun/fixed this 19)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20]
+      (let [cm (CodeRun/fixed this 20)
+            vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20])]
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs)))))
 
   (defclass ^:public ^:static EvalMethod
     :extends RestFn
@@ -9169,37 +9282,51 @@
     ;; a frame, without a seq (CodeRun)
     (method ^:public invoke [this o]
       (let [cm (CodeRun/method this 0)
-            st (Evaluator/state)
-            f (Evaluator/frame st cm nil o)]
+            st (CodeRun/state)
+            f (CodeRun/frame st cm nil o)]
         (aset (.-slots f) 0 o)
-        (Evaluator/invokeMethod this cm f st)))
+        (CodeRun/invokeMethod this cm f st)))
 
     (method ^:public invoke [this o a]
       (let [cm (CodeRun/method this 1)
-            st (Evaluator/state)
-            f (Evaluator/frame st cm nil o)]
-        (aset (.-slots f) 0 o)
-        (CodeRun/bind f cm 0 a)
-        (Evaluator/invokeMethod this cm f st)))
+            st (CodeRun/state)
+            f (CodeRun/frame st cm nil o)
+            ss (.-slots f)]
+        (aset ss 0 o)
+        (if (.-plain cm)
+            (aset ss (aget (.-pidx cm) 0) a)
+            (CodeRun/bind f cm 0 a))
+        (CodeRun/invokeMethod this cm f st)))
 
     (method ^:public invoke [this o a b]
       (let [cm (CodeRun/method this 2)
-            st (Evaluator/state)
-            f (Evaluator/frame st cm nil o)]
-        (aset (.-slots f) 0 o)
-        (CodeRun/bind f cm 0 a)
-        (CodeRun/bind f cm 1 b)
-        (Evaluator/invokeMethod this cm f st)))
+            st (CodeRun/state)
+            f (CodeRun/frame st cm nil o)
+            ss (.-slots f)]
+        (aset ss 0 o)
+        (if (.-plain cm)
+            (let [pi (.-pidx cm)]
+              (aset ss (aget pi 0) a)
+              (aset ss (aget pi 1) b))
+            (do (CodeRun/bind f cm 0 a)
+                (CodeRun/bind f cm 1 b)))
+        (CodeRun/invokeMethod this cm f st)))
 
     (method ^:public invoke [this o a b c]
       (let [cm (CodeRun/method this 3)
-            st (Evaluator/state)
-            f (Evaluator/frame st cm nil o)]
-        (aset (.-slots f) 0 o)
-        (CodeRun/bind f cm 0 a)
-        (CodeRun/bind f cm 1 b)
-        (CodeRun/bind f cm 2 c)
-        (Evaluator/invokeMethod this cm f st))))
+            st (CodeRun/state)
+            f (CodeRun/frame st cm nil o)
+            ss (.-slots f)]
+        (aset ss 0 o)
+        (if (.-plain cm)
+            (let [pi (.-pidx cm)]
+              (aset ss (aget pi 0) a)
+              (aset ss (aget pi 1) b)
+              (aset ss (aget pi 2) c))
+            (do (CodeRun/bind f cm 0 a)
+                (CodeRun/bind f cm 1 b)
+                (CodeRun/bind f cm 2 c)))
+        (CodeRun/invokeMethod this cm f st))))
 
   (defclass ^:public ^:static EvalState
     ;; one thread's evaluator: the innermost frame and the depth (J2G-SPEC §10.5, §10.7)
@@ -9260,6 +9387,11 @@
     (method ^:public ^:static ^:native defineAOTFnFields ^void [^Class c body])
 
     (method ^:public ^:static ^:native newInstance [^Class c ^Object/1 fieldValues])
+
+    ;; the fn setMethod set for the method of key name(descriptors)ret on o's class, when o is an
+    ;; object of a deftype, defrecord or reify made at run time (not a proxy, nor an interpreted
+    ;; Java class, whose members may be published again); else nil (CodeImplEntry)
+    (method ^:public ^:static ^:native methodImpl ^IFn [o ^String key])
 
     (method ^:public ^:static ^:native getField [o ^int i])
 
@@ -9505,7 +9637,6 @@
     ;; StackOverflowError (EVAL-PLAN.md Q4; J2G-SPEC §10.5)
     (field ^:public ^:static ^:final ^int MAX_DEPTH 10000)
 
-    (field ^:static ^:final ^ThreadLocal STATE (ThreadLocal.))
 
     ;; true while RT.load evaluates a source embedded in the program: the namespaces the
     ;; JVM ships AOT-compiled, whose top-level defs run as emitted (DefExpr.eval)
@@ -9546,17 +9677,12 @@
 
     (method ^:public ^:static ^:native monitorExit ^void [o])
 
-    (method ^:public ^:static state ^EvalState []
-      (let [^:mutable s (cast EvalState (.get STATE))]
-        (when (nil? s)
-          (set! s (EvalState.))
-          (.set STATE s))
-        s))
+    (method ^:public ^:static state ^EvalState [] (CodeRun/state))
 
     ;; the evaluated frames of this thread, innermost first, as StackTraceElements: the fn's
     ;; or the type's class name, its method, the source file and the line being evaluated
     (method ^:public ^:static trace []
-      (let [s (cast EvalState (.get STATE))
+      (let [s (cast EvalState (CodeRun/threadState))
             ^{:tag (ArrayList StackTraceElement)} es (ArrayList.)]
         (when (some? s)
           (loop [fr (.-top s)]
@@ -9573,29 +9699,7 @@
               (recur (.-caller fr)))))
         (.toArray es (new StackTraceElement/1 (.size es)))))
 
-    (method ^:static push ^EvalState [^Frame fr]
-      (let [s (Evaluator/state)]
-        (set! (.-caller fr) (.-top s))
-        (set! (.-top s) fr)
-        (set! (.-depth s) (unchecked-inc-int (.-depth s)))
-        (when (> (.-depth s) MAX_DEPTH)
-          (set! (.-top s) (.-caller fr))
-          (set! (.-depth s) (unchecked-dec-int (.-depth s)))
-          (throw (StackOverflowError.)))
-        s))
-
-    (method ^:static push ^void [^EvalState s ^Frame fr]
-      (set! (.-caller fr) (.-top s))
-      (set! (.-top s) fr)
-      (set! (.-depth s) (unchecked-inc-int (.-depth s)))
-      (when (> (.-depth s) MAX_DEPTH)
-        (set! (.-top s) (.-caller fr))
-        (set! (.-depth s) (unchecked-dec-int (.-depth s)))
-        (throw (StackOverflowError.))))
-
-    (method ^:static pop ^void [^EvalState s ^Frame fr]
-      (set! (.-top s) (.-caller fr))
-      (set! (.-depth s) (unchecked-dec-int (.-depth s))))
+    ;; (a frame pushed and popped: CodeRun.invokeFn's and invokeMethod's own code)
 
     ;; the line and source of the form being evaluated in frame f (stack traces)
     (method ^:public ^:static at ^void [^Frame f ^int line ^String source]
@@ -9864,25 +9968,19 @@
             vreq (if (some? vm) (.count (.-reqParms vm)) -1)
             limit (if (> maxf vreq) maxf vreq)
             n (RT/boundedLength args limit)
-            ^:mutable ^FnMethod m nil]
+            ^:mutable ^CMethod cm nil]
+        ;; a fixed arity's compiled method (cached by arity, CodeRun.fixed), else the variadic
+        ;; one's
         (when (<= n maxf)
-          (loop [s (RT/seq (.-methods fe))]
-            (when (some? s)
-              (let [fm (cast FnMethod (.first s))]
-                (if (and (nil? (.-restParm fm)) (== (.count (.-reqParms fm)) n))
-                    (set! m fm)
-                    (recur (.next s)))))))
-        (when (and (nil? m) (some? vm) (>= n vreq))
-          (set! m vm))
-        (when (nil? m)
+          (set! cm (CodeRun/fixed fn n)))
+        (when (and (nil? cm) (some? vm) (>= n vreq))
+          (let [c (.-evalCM vm)]
+            (set! cm (if (some? c) c (CodeRun/cmethod vm fe true)))))
+        (when (nil? cm)
           (throw (ArityException. (if (instance? Counted args) (RT/count args) (RT/boundedLength args 20)) (.-name fe))))
-        ;; the method compiled to closures (CompilerCode.ae), its parameters bound in a frame
-        ;; (the arguments taken from the seq first: realizing it may call evaluated fns,
-        ;; which take frames of this depth); compiled once, at the first call (cached on the
-        ;; method, as CodeRun.fixed takes it), not at each call through a seq
-        (let [cm0 (.-evalCM m)
-              cm (if (some? cm0) cm0 (CodeRun/cmethod m fe true))
-              nreq (.count (.-reqParms m))
+        ;; its parameters bound in a frame (the arguments taken from the seq first: realizing it
+        ;; may call evaluated fns, which take frames of this depth)
+        (let [nreq (alength (.-pidx cm))
               vs (new Object/1 nreq)
               ^:mutable ^ISeq s args]
           (loop [^int i 0]
@@ -9890,46 +9988,51 @@
               (aset vs i (.first s))
               (set! s (.next s))
               (recur (unchecked-inc-int i))))
-          (let [st (Evaluator/state)
-                f (Evaluator/frame st cm fn nil)]
+          (let [st (CodeRun/state)
+                f (CodeRun/frame st cm fn nil)]
             (loop [^int i 0]
               (when (< i nreq)
                 (CodeRun/bind f cm i (aget vs i))
                 (recur (unchecked-inc-int i))))
-            (when (some? (.-restParm m))
-              (aset (.-slots f) (.-idx (.-restParm m)) s))
-            (Evaluator/invokeFn fn cm f st)))))
+            (when (>= (.-restIdx cm) 0)
+              (aset (.-slots f) (.-restIdx cm) s))
+            (CodeRun/invokeFn fn cm f st)))))
 
-    ;; a call of a compiled method of an evaluated fn, its parameters bound in frame f: its
-    ;; body run until it does not recur, its result converted to a primitive return as the
-    ;; bytecode does. (The function literal of this try is the Go frame that stack traces show
-    ;; as the fn's Clojure frame: jrt's isEvalCall)
-    (method ^:public ^:static invokeFn [^EvalFn fn ^CMethod cm ^Frame f ^EvalState st]
-      (Evaluator/push st f)
-      (try
-        (CodeRun/run cm f)
-        (finally
-          (Evaluator/pop st f)
-          (.release f (.-nslots cm)))))
+    ;; a call of compiled method cm of fn's fixed arity with the arguments vs (past 5 of them,
+    ;; EvalFn.invoke)
+    (method ^:public ^:static invokeArray [^EvalFn fn ^CMethod cm ^Object/1 vs]
+      (let [st (CodeRun/state)
+            f (CodeRun/frame st cm fn nil)
+            n (alength vs)]
+        (loop [^int i 0]
+          (when (< i n)
+            (CodeRun/bind f cm i (aget vs i))
+            (recur (unchecked-inc-int i))))
+        (CodeRun/invokeFn fn cm f st)))
 
-    ;; the frame for a call of compiled method cm at this thread's depth (reused: EvalState.pool)
-    (method ^:public ^:static frame ^Frame [^EvalState s ^CMethod cm ^EvalFn fn self]
-      (let [d (.-depth s)
-            ^:mutable p (.-pool s)]
-        (when (nil? p)
-          (set! p (new Frame/1 64))
-          (set! (.-pool s) p))
-        (when (>= d (alength p))
-          (let [q (new Frame/1 (unchecked-multiply-int 2 (alength p)))]
-            (System/arraycopy p 0 q 0 (alength p))
-            (set! (.-pool s) q)
-            (set! p q)))
-        (let [f (aget p d)]
-          (if (nil? f)
-              (let [g (Frame. cm fn self)]
-                (aset p d g)
-                g)
-              (.reset f cm fn self)))))
+    ;; a call of fn with the arguments vs, of a count it has no fixed method of: its variadic
+    ;; method, the rest parameter an ArraySeq of the arguments past its fixed ones (nil when
+    ;; none), as doInvoke binds the seq RestFn makes of them; else ArityException
+    (method ^:public ^:static invokeSpread [^EvalFn fn ^Object/1 vs]
+      (let [fe (.-fe fn)
+            vm (.-variadicMethod fe)
+            n (alength vs)]
+        (when (or (nil? vm) (< n (.count (.-reqParms vm))))
+          (throw (ArityException. n (.-name fe))))
+        (let [c (.-evalCM vm)
+              cm (if (some? c) c (CodeRun/cmethod vm fe true))
+              nreq (alength (.-pidx cm))
+              st (CodeRun/state)
+              f (CodeRun/frame st cm fn nil)]
+          (loop [^int i 0]
+            (when (< i nreq)
+              (CodeRun/bind f cm i (aget vs i))
+              (recur (unchecked-inc-int i))))
+          (aset (.-slots f) (.-restIdx cm) (if (< nreq n) (ArraySeq. vs nreq) nil))
+          (CodeRun/invokeFn fn cm f st))))
+
+    ;; (a call of a compiled method of an evaluated fn, its parameters bound in a frame, and the
+    ;; frame for it: CodeRun.invokeFn, CodeRun.frame)
 
     ;; a method's result converted to its return class as the bytecode does
     ;; (ObjMethod.emitBody): a primitive body by RT's checked casts, any other unboxed
@@ -9960,26 +10063,18 @@
     ;; a call of a deftype's or reify's method: args[0] is the object (this, slot 0)
     (method ^:public ^:static invokeMethod [^EvalMethod em ^Object/1 args]
       (let [cm (CodeRun/method em (unchecked-dec-int (alength args)))
-            st (Evaluator/state)
-            f (Evaluator/frame st cm nil (aget args 0))
+            st (CodeRun/state)
+            f (CodeRun/frame st cm nil (aget args 0))
             n (.count (.-argLocals (.-m em)))]
         (aset (.-slots f) 0 (aget args 0))
         (loop [^int i 0]
           (when (< i n)
             (CodeRun/bind f cm i (aget args (unchecked-inc-int i)))
             (recur (unchecked-inc-int i))))
-        (Evaluator/invokeMethod em cm f st)))
+        (CodeRun/invokeMethod em cm f st)))
 
-    ;; a call of a compiled method of a deftype, defrecord or reify, its object and parameters
-    ;; bound in frame f (the function literal of this try is the method's Go frame in stack
-    ;; traces: jrt's isEvalCall)
-    (method ^:public ^:static invokeMethod [^EvalMethod em ^CMethod cm ^Frame f ^EvalState st]
-      (Evaluator/push st f)
-      (try
-        (CodeRun/run cm f)
-        (finally
-          (Evaluator/pop st f)
-          (.release f (.-nslots cm)))))
+    ;; (a call of a compiled method of a deftype, defrecord or reify, its object and parameters
+    ;; bound in a frame: CodeRun.invokeMethod)
 
     ;; a class's JVM descriptor (I, [Ljava/lang/String;, Ljava/lang/Object;)
     (method ^:static descriptor ^String [^Class c]
@@ -10873,34 +10968,133 @@
     (field ^:public ^int rkind)
     (field ^:public ^Class retClass)
     ;; the body's primitive type (Compiler.maybePrimitiveType), or nil
-    (field ^:public ^Class bodyPrim))
+    (field ^:public ^Class bodyPrim)
+    ;; the method's line and its fn's or type's source, a frame's when the call starts
+    (field ^:public ^int line)
+    (field ^:public ^String source)
+    ;; every parameter stored as is (pkind 0): the calls bind them without CodeRun.bind
+    (field ^:public ^boolean plain)
+    ;; a variadic fn method's rest parameter's slot, else -1
+    (field ^:public ^int restIdx)
+    ;; FnExpr.evalArities' marker of an arity without a fixed method (CodeRun.fixed)
+    (field ^:public ^boolean none))
 
   (defclass ^:public ^:static CodeRun
     (field ^:static ^java.util.HashMap OPS)
 
-    ;; the compiled method of fn's fixed arity n, or nil (none: a variadic call or an
-    ;; ArityException, through RestFn's seq)
-    (method ^:public ^:static fixed ^CMethod [^EvalFn fn ^int n]
-      (let [fe (.-fe fn)
-            ^:mutable ms (.-evalArities fe)]
-        (when (nil? ms)
-          (set! ms (CodeRun/arities fe)))
-        (let [m (aget ms n)]
-          (if (nil? m)
-              nil
-              (let [cm (.-evalCM m)]
-                (if (some? cm) cm (CodeRun/cmethod m fe true)))))))
+    ;; The call path (EvalFn, EvalMethod) is here, in a class without a static initializer:
+    ;; Evaluator's static methods each begin with its class's initialization guard, five of them
+    ;; a call, and gc's inlining of them is not to be relied on (doc/go/EVAL-SPEED.md)
 
-    (method ^:static arities ^FnMethod/1 [^FnExpr fe]
-      (let [ms (new FnMethod/1 (unchecked-inc-int MAX_POSITIONAL_ARITY))]
+    ;; the thread's evaluator state: a field of jrt's Thread (natives.go; a ThreadLocal's map
+    ;; lookup was a tenth of a call)
+    (method ^:static ^:native threadState [])
+    (method ^:static ^:native setThreadState ^void [s])
+
+    (method ^:public ^:static state ^EvalState []
+      (let [^:mutable s (cast EvalState (CodeRun/threadState))]
+        (when (nil? s)
+          (set! s (EvalState.))
+          (CodeRun/setThreadState s))
+        s))
+
+    ;; the frame for a call of compiled method cm at this thread's depth (reused: EvalState.pool)
+    (method ^:public ^:static frame ^Frame [^EvalState s ^CMethod cm ^EvalFn fn self]
+      (let [d (.-depth s)
+            ^:mutable p (.-pool s)]
+        (when (nil? p)
+          (set! p (new Frame/1 64))
+          (set! (.-pool s) p))
+        (when (>= d (alength p))
+          (let [q (new Frame/1 (unchecked-multiply-int 2 (alength p)))]
+            (System/arraycopy p 0 q 0 (alength p))
+            (set! (.-pool s) q)
+            (set! p q)))
+        (let [f (aget p d)]
+          (if (nil? f)
+              (let [g (Frame. cm fn self)]
+                (aset p d g)
+                g)
+              (.reset f cm fn self)))))
+
+    ;; a call of a compiled method of an evaluated fn, its parameters bound in frame f: the frame
+    ;; pushed, its body run until it does not recur, its result converted to a
+    ;; primitive return as the bytecode does, the frame popped and released. (The function literal
+    ;; of this try is the Go frame that stack traces show as the fn's Clojure frame: jrt's
+    ;; isEvalCall)
+    (method ^:public ^:static invokeFn [^EvalFn fn ^CMethod cm ^Frame f ^EvalState st]
+      (set! (.-caller f) (.-top st))
+      (set! (.-top st) f)
+      (set! (.-depth st) (unchecked-inc-int (.-depth st)))
+      (when (> (.-depth st) Evaluator/MAX_DEPTH)
+        (set! (.-top st) (.-caller f))
+        (set! (.-depth st) (unchecked-dec-int (.-depth st)))
+        (throw (StackOverflowError.)))
+      (try
+        (CodeRun/run cm f)
+        (finally
+          (set! (.-top st) (.-caller f))
+          (set! (.-depth st) (unchecked-dec-int (.-depth st)))
+          (.release f (.-nslots cm)))))
+
+    ;; a call of a compiled method of a deftype, defrecord or reify, its object and parameters
+    ;; bound in frame f, as invokeFn's (the function literal of this try is the method's Go frame
+    ;; in stack traces: jrt's isEvalCall)
+    (method ^:public ^:static invokeMethod [^EvalMethod em ^CMethod cm ^Frame f ^EvalState st]
+      (set! (.-caller f) (.-top st))
+      (set! (.-top st) f)
+      (set! (.-depth st) (unchecked-inc-int (.-depth st)))
+      (when (> (.-depth st) Evaluator/MAX_DEPTH)
+        (set! (.-top st) (.-caller f))
+        (set! (.-depth st) (unchecked-dec-int (.-depth st)))
+        (throw (StackOverflowError.)))
+      (try
+        (CodeRun/run cm f)
+        (finally
+          (set! (.-top st) (.-caller f))
+          (set! (.-depth st) (unchecked-dec-int (.-depth st)))
+          (.release f (.-nslots cm)))))
+
+    ;; the compiled method of fn's fixed arity n, or nil (none: a variadic call or an
+    ;; ArityException, Evaluator.invokeSpread). The compiled methods by arity, FnExpr.evalArities,
+    ;; are filled at each arity's first call; the array's last element, a CMethod of its own,
+    ;; marks an arity without a fixed method (no static here: CodeRun's static methods are
+    ;; without class initialization guards)
+    (method ^:public ^:static fixed ^CMethod [^EvalFn fn ^int n]
+      (let [cms (.-evalArities (.-fe fn))]
+        (if (nil? cms)
+            (CodeRun/arity fn n)
+            (let [cm (aget cms n)]
+              (cond
+                (nil? cm) (CodeRun/arity fn n)
+                (.-none cm) nil
+                :else cm)))))
+
+    ;; the compiled method of fn's fixed arity n found, compiled and cached (FnExpr.evalArities),
+    ;; or nil. (Threads that fill the cache at once may each make an array: a lost one is made
+    ;; again; the methods themselves are compiled once, CodeRun.cmethod)
+    (method ^:static arity ^CMethod [^EvalFn fn ^int n]
+      (let [fe (.-fe fn)
+            ^:mutable cms (.-evalArities fe)
+            ^:mutable ^FnMethod m nil]
+        (when (nil? cms)
+          (set! cms (new CMethod/1 (unchecked-add-int MAX_POSITIONAL_ARITY 2)))
+          (let [none (CMethod.)]
+            (set! (.-none none) true)
+            (aset cms (unchecked-inc-int MAX_POSITIONAL_ARITY) none))
+          (set! (.-evalArities fe) cms))
         (loop [s (RT/seq (.-methods fe))]
           (when (some? s)
             (let [fm (cast FnMethod (.first s))]
-              (when (nil? (.-restParm fm))
-                (aset ms (.count (.-reqParms fm)) fm)))
-            (recur (.next s))))
-        (set! (.-evalArities fe) ms)
-        ms))
+              (if (and (nil? (.-restParm fm)) (== (.count (.-reqParms fm)) n))
+                  (set! m fm)
+                  (recur (.next s))))))
+        (if (nil? m)
+            (do (aset cms n (aget cms (unchecked-inc-int MAX_POSITIONAL_ARITY))) nil)
+            (let [c (.-evalCM m)
+                  cm (if (some? c) c (CodeRun/cmethod m fe true))]
+              (aset cms n cm)
+              cm))))
 
     ;; the compiled method of a deftype's method called with n arguments (and the object)
     (method ^:public ^:static method ^CMethod [^EvalMethod em ^int n]
@@ -10950,6 +11144,10 @@
     ;; method run and every recur, a runtime.Gosched every 65,536 on TamaGo, which has no
     ;; preemption (jrt's native; nothing on Linux, where Go's runtime preempts)
     (method ^:public ^:static ^:native tick ^void [])
+
+    ;; a's first n elements set to nil (Frame.release; jrt's native: Go's clear, one bulk write
+    ;; where a store per slot was a tenth of si's run, doc/go/EVAL-SPEED.md)
+    (method ^:public ^:static ^:native clear ^void [^Object/1 a ^int n])
 
     ;; this cleared before a call in tail position (CodeInvoke.clearThis;
     ;; ObjMethod.emitClearThis): the frame's object and slot 0
@@ -11038,6 +11236,32 @@
     (method ^:public ^:static unboxBool ^boolean [v]
       (when (nil? v) (throw (NullPointerException.)))
       (.booleanValue (cast Boolean v)))
+
+    ;; the byte, short and float arguments (Evaluator.typedArgs: a Character as its code, else
+    ;; a Number, by RT's checked casts), widened; a char argument's code
+    (method ^:static num ^Number [v]
+      (when (nil? v) (throw (NullPointerException.)))
+      (if (instance? Character v)
+          (Integer/valueOf (int (.charValue (cast Character v))))
+          (cast Number v)))
+
+    (method ^:public ^:static unboxByte ^long [v]
+      (^[Object] RT/byteCast (CodeRun/num v)))
+
+    (method ^:public ^:static unboxShort ^long [v]
+      (^[Object] RT/shortCast (CodeRun/num v)))
+
+    (method ^:public ^:static unboxFloat ^double [v]
+      (^[Object] RT/floatCast (CodeRun/num v)))
+
+    (method ^:public ^:static unboxChar ^long [v]
+      (when (nil? v) (throw (NullPointerException.)))
+      (long (.charValue (cast Character v))))
+
+    ;; the arguments of a host call (CodeHost*): none an empty array shared (the calls read
+    ;; their arguments, never keep or write the array)
+    (method ^:public ^:static argsOf ^Object/1 [^Code/1 cs ^Frame f]
+      (if (== (alength cs) 0) RT/EMPTY_ARRAY (CodeRun/runAll cs f)))
 
     (method ^:public ^:static runAll ^Object/1 [^Code/1 cs ^Frame f]
       (let [n (alength cs)
@@ -11148,7 +11372,18 @@
               (recur (unchecked-inc-int i))))
           (set! (.-pidx cm) pidx)
           (set! (.-pkind cm) pkind)
-          (set! (.-pclass cm) pclass))
+          (set! (.-pclass cm) pclass)
+          (let [^:mutable plain true]
+            (loop [^int i 0]
+              (when (< i n)
+                (when-not (== (aget pkind i) 0) (set! plain false))
+                (recur (unchecked-inc-int i))))
+            (set! (.-plain cm) plain)))
+        (set! (.-line cm) (.-line m))
+        (set! (.-source cm) (.-evalSource objx))
+        (set! (.-restIdx cm) (if (and isFn (some? (.-restParm (cast FnMethod m))))
+                                 (.-idx (.-restParm (cast FnMethod m)))
+                                 -1))
         ;; the result
         (let [rc (if isFn (.-retClass (cast FnMethod m)) (.-retClass (cast NewInstanceMethod m)))
               bc (arbace.lang.Compiler/maybePrimitiveType (.-body m))]
@@ -11191,24 +11426,43 @@
           (== k 0) (CodeLocal. (.-idx lb))
           :else (CodeLocalBoxed. (.-idx lb) k))))
 
-    ;; the value of e as an argument for a parameter of class p (MethodExpr.emitTypedArgs)
+    ;; the value of e as an argument for a parameter of class p (MethodExpr.emitTypedArgs): in
+    ;; the channel the static call reads it (CompilerNodes.ae's CodeOpN: runLong for a long,
+    ;; int, byte, short or char, runDouble for a double or float), converted as the bytecode
+    ;; converts it (a byte or short widened, a float to a double, a double narrowed to a
+    ;; float: their values exact, or Java's d2f; else unboxed by RT's checked casts, as
+    ;; Evaluator.typedArgs converts the other calls' arguments)
     (method convert ^Code [this ^Class p ^Expr e]
       (let [c (.compile this e)
             k (arbace.lang.Compiler/maybePrimitiveType e)
-            kl (or (identical? k Long/TYPE) (identical? k Integer/TYPE))]
+            ks (or (identical? k Byte/TYPE) (identical? k Short/TYPE))
+            kl (or (identical? k Long/TYPE) (identical? k Integer/TYPE) ks)]
         (cond
           (identical? p Long/TYPE) (if kl c (CodeUnbox. c 0))
           (identical? p Integer/TYPE)
             (cond
-              (identical? k Integer/TYPE) c
+              (or (identical? k Integer/TYPE) ks) c
               (identical? k Long/TYPE) (CodeL2I. c)
               :else (CodeUnbox. c 1))
           (identical? p Double/TYPE)
             (cond
-              (identical? k Double/TYPE) c
+              (or (identical? k Double/TYPE) (identical? k Float/TYPE)) c
               kl (CodeL2D. c)
               :else (CodeUnbox. c 2))
           (identical? p Boolean/TYPE) (if (identical? k Boolean/TYPE) c (CodeUnbox. c 3))
+          (identical? p Byte/TYPE) (if (identical? k Byte/TYPE) c (CodeUnbox. c 4))
+          (identical? p Short/TYPE) (if ks c (CodeUnbox. c 5))
+          ;; a char's code: a direct call's own runLong (CompilerNodes.ae: a method returning a
+          ;; char has the channel), else the boxed Character's
+          (identical? p Character/TYPE)
+            (if (and (identical? k Character/TYPE)
+                     (or (instance? CodeOp1 c) (instance? CodeOp2 c) (instance? CodeOp3 c)
+                         (instance? CodeCall0 c) (instance? CodeCall1 c) (instance? CodeCall2 c)
+                         (instance? CodeCall3 c)))
+                c
+                (CodeUnbox. c 6))
+          (identical? p Float/TYPE)
+            (if (or (identical? k Float/TYPE) (identical? k Double/TYPE)) c (CodeUnbox. c 7))
           :else c)))
 
     ;; a recur value for a local stored as store kind k (storeKind): its natural channel
@@ -11223,13 +11477,36 @@
     ;; CodeNodes/compile (CompilerNodes.ae, generated): constants, if, the static calls of the
     ;; listed methods, invoke; the others here
     (method ^:public compile ^Code [this ^Expr e]
-      (let [c (CodeNodes/compile this e)]
+      (let [p (.compileProto this e)
+            c (if (some? p) p (CodeNodes/compile this e))]
         (if (some? c) c (.compileOther this e))))
+
+    ;; a protocol fn's call of a protocol made at run time, of at most 3 arguments after the
+    ;; target (CodeProto), else nil
+    (method compileProto ^Code [this ^Expr e]
+      (when (instance? InvokeExpr e)
+        (let [ie (cast InvokeExpr e)
+              n (.count (.-args ie))]
+          (when (and (.-isProtocol ie) (some? (.-protocolOn ie)) (some? (.-onMethod ie))
+                     (>= n 1) (<= n 4))
+            (let [k (CodeImplEntry/key (.-onMethod ie))]
+              (when (some? k)
+                (let [cs (.compileAll this (.-args ie))
+                      rest (new Code/1 (unchecked-dec-int n))]
+                  (System/arraycopy cs 1 rest 0 (unchecked-dec-int n))
+                  (CodeProto. (.compile this (.-fexpr ie)) (aget cs 0) rest (.-line ie)
+                              (and (.-tailPosition ie) (not (.-canBeDirect objx)))
+                              (.-protocolOn ie) k))))))))
 
     (method compileOther ^Code [this ^Expr e]
       (cond
         (instance? LocalBindingExpr e) (.localUse this (cast LocalBindingExpr e))
-        (instance? VarExpr e) (CodeVar. (.-var (cast VarExpr e)))
+        ;; a var's value: a dynamic var's binding or root (deref), another's root, as compiled
+        ;; code reads it (getRawRoot: a var that is not dynamic has no binding, pushThreadBindings
+        ;; refuses one)
+        (instance? VarExpr e)
+          (let [v (.-var (cast VarExpr e))]
+            (if (.isDynamic v) (CodeVar. v) (CodeVarRoot. v)))
         (instance? BodyExpr e)
           (let [es (.-exprs (cast BodyExpr e))
                 n (.count es)]
@@ -11376,17 +11653,34 @@
               (aset kinds i k)
               (aset vkinds i (.valueKind this a))
               (aset dest i (.-idx lb))
-              (aset pcs i (.getPrimitiveType lb))
-              (when (> n 1)
-                ;; a temporary: the values are all computed before any is stored
-                (if (>= k 2)
-                    (do (set! usesPrims true)
-                        (aset tmp i nprims)
-                        (set! nprims (unchecked-inc-int nprims)))
-                    (do (aset tmp i nslots)
-                        (set! nslots (unchecked-inc-int nslots))))))
+              (aset pcs i (.getPrimitiveType lb)))
             (recur (unchecked-inc-int i))))
-        (CodeRecur. cs kinds vkinds dest tmp pcs)))
+        (cond
+          ;; one or two values stored as they are, a long or a double (store kinds 0, 2 and 3):
+          ;; the values kept in Go's locals until they are stored (CodeRecur1, CodeRecur2)
+          (and (== n 1) (CodeCompiler/simpleStore (aget kinds 0)))
+            (CodeRecur1. (aget cs 0) (aget kinds 0) (aget vkinds 0) (aget dest 0))
+          (and (== n 2) (CodeCompiler/simpleStore (aget kinds 0)) (CodeCompiler/simpleStore (aget kinds 1)))
+            (CodeRecur2. (aget cs 0) (aget kinds 0) (aget vkinds 0) (aget dest 0)
+                         (aget cs 1) (aget kinds 1) (aget vkinds 1) (aget dest 1))
+          :else
+            (do
+              (when (> n 1)
+                ;; temporaries: the values are all computed before any is stored
+                (loop [^int i 0]
+                  (when (< i n)
+                    (if (>= (aget kinds i) 2)
+                        (do (set! usesPrims true)
+                            (aset tmp i nprims)
+                            (set! nprims (unchecked-inc-int nprims)))
+                        (do (aset tmp i nslots)
+                            (set! nslots (unchecked-inc-int nslots))))
+                    (recur (unchecked-inc-int i)))))
+              (CodeRecur. cs kinds vkinds dest tmp pcs)))))
+
+    ;; a store kind CodeRecur1 and CodeRecur2 make (storeKind: 0 a slot, 2 a long, 3 a double)
+    (method ^:static simpleStore ^boolean [^int k]
+      (or (== k 0) (== k 2) (== k 3)))
 
     ;; the reads, in the method being compiled, of the locals objx closes over: through its
     ;; closesExprs (made by ObjExpr.compile, as ObjExpr.emit loads them), which take part in
@@ -11472,13 +11766,22 @@
                   (when (some? (.-finallyExpr te)) (.compile this (.-finallyExpr te))))))
 
     (method compileCase ^Code [this ^CaseExpr ce]
-      (let [^{:tag (HashMap Integer Object)} thens (HashMap.)
-            ^{:tag (HashMap Integer Object)} tests (HashMap.)]
-        (for-each [^Map$Entry en (.entrySet (.-thens ce))]
-          (.put thens (cast Integer (.getKey en)) (.compile this (cast Expr (.getValue en)))))
+      ;; the keys in order (tests is a SortedMap), each with its test's value, its then and
+      ;; whether it is one of skipCheck's (CodeCase)
+      (let [n (.size (.-tests ce))
+            keys (new int/1 n)
+            tests (new Object/1 n)
+            thens (new Code/1 n)
+            skips (new boolean/1 n)
+            ^:mutable ^int i 0]
         (for-each [^Map$Entry en (.entrySet (.-tests ce))]
-          (.put tests (cast Integer (.getKey en)) (.eval (cast Expr (.getValue en)))))
-        (CodeCase. ce (.compile this (.-expr ce)) (.compile this (.-defaultExpr ce)) thens tests
+          (let [k (cast Integer (.getKey en))]
+            (aset keys i (.intValue k))
+            (aset tests i (.eval (cast Expr (.getValue en))))
+            (aset thens i (.compile this (cast Expr (.get (.-thens ce) k))))
+            (aset skips i (RT/booleanCast (RT/contains (.-skipCheck ce) k)))
+            (set! i (unchecked-inc-int i))))
+        (CodeCase. ce (.compile this (.-expr ce)) (.compile this (.-defaultExpr ce)) keys tests thens skips
                    (arbace.lang.Compiler/maybePrimitiveType (.-expr ce)))))
 
     (method compileAssign ^Code [this ^AssignExpr ae]
@@ -11535,17 +11838,33 @@
     (constructor ^:public [this ^Var v] (set! (.-v this) v))
     (method ^:public run [this ^Frame f] (.deref v)))
 
+  (defclass ^:public ^:static CodeVarRoot
+    :extends Code
+    ;; a var that is not dynamic: its root (CodeCompiler.compileOther)
+    (field ^:public ^:final ^Var v)
+    (constructor ^:public [this ^Var v] (set! (.-v this) v))
+    (method ^:public run [this ^Frame f] (.getRawRoot v)))
+
   (defclass ^:public ^:static CodeUnbox
     :extends Code
+    ;; a boxed argument for a primitive parameter (CodeCompiler.convert): mode 0 a long, 1 an
+    ;; int, 2 a double, 3 a boolean, 4 a byte, 5 a short, 6 a char (runLong its code), 7 a
+    ;; float (runDouble)
     (field ^:public ^:final ^Code c)
     (field ^:public ^:final ^int mode)
     (constructor ^:public [this ^Code c ^int mode] (set! (.-c this) c) (set! (.-mode this) mode))
     (method ^:public run [this ^Frame f] (.run c f))
     (method ^:public runLong ^long [this ^Frame f]
-      (if (== mode 1)
-          (CodeRun/unboxInt (.run c f))
-          (CodeRun/unboxLong (.run c f))))
-    (method ^:public runDouble ^double [this ^Frame f] (CodeRun/unboxDouble (.run c f)))
+      (cond
+        (== mode 1) (CodeRun/unboxInt (.run c f))
+        (== mode 4) (CodeRun/unboxByte (.run c f))
+        (== mode 5) (CodeRun/unboxShort (.run c f))
+        (== mode 6) (CodeRun/unboxChar (.run c f))
+        :else (CodeRun/unboxLong (.run c f))))
+    (method ^:public runDouble ^double [this ^Frame f]
+      (if (== mode 7)
+          (CodeRun/unboxFloat (.run c f))
+          (CodeRun/unboxDouble (.run c f))))
     (method ^:public runBool ^boolean [this ^Frame f] (CodeRun/unboxBool (.run c f))))
 
   (defclass ^:public ^:static CodeL2I
@@ -11707,6 +12026,67 @@
     (method ^:public runDouble ^double [this ^Frame f] (.run this f) 0.0)
     (method ^:public runBool ^boolean [this ^Frame f] (.run this f) false))
 
+  (defclass ^:public ^:static CodeRecur1
+    :extends Code
+    ;; a recur of one value, stored as kind k says (0 a slot, 2 a long, 3 a double), from its
+    ;; natural channel v (0 run, 1 runLong, 2 runDouble): CodeRecur's case of one value
+    (field ^:public ^:final ^Code c)
+    (field ^:public ^:final ^int k)
+    (field ^:public ^:final ^int v)
+    (field ^:public ^:final ^int d)
+    (constructor ^:public [this ^Code c ^int k ^int v ^int d]
+      (set! (.-c this) c)
+      (set! (.-k this) k)
+      (set! (.-v this) v)
+      (set! (.-d this) d))
+    (method ^:public run [this ^Frame f]
+      (if (== k 0)
+          (aset (.-slots f) d (.run c f))
+          (aset (.-prims f) d (CodeRecur1/bits k v c f)))
+      (set! (.-recur f) true)
+      nil)
+    ;; a value for a long store (k 2) or a double's (3), as CodeRecur.bits computes it
+    (method ^:static bits ^long [^int k ^int v ^Code c ^Frame f]
+      (if (== k 2)
+          (if (== v 1) (.runLong c f) (CodeRun/toLong (.run c f)))
+          (Double/doubleToRawLongBits (if (== v 2) (.runDouble c f) (CodeRun/toDouble (.run c f))))))
+    (method ^:public runLong ^long [this ^Frame f] (.run this f) 0)
+    (method ^:public runDouble ^double [this ^Frame f] (.run this f) 0.0)
+    (method ^:public runBool ^boolean [this ^Frame f] (.run this f) false))
+
+  (defclass ^:public ^:static CodeRecur2
+    :extends Code
+    ;; a recur of two values, each as CodeRecur1's, both computed before either is stored
+    (field ^:public ^:final ^Code c0)
+    (field ^:public ^:final ^int k0)
+    (field ^:public ^:final ^int v0)
+    (field ^:public ^:final ^int d0)
+    (field ^:public ^:final ^Code c1)
+    (field ^:public ^:final ^int k1)
+    (field ^:public ^:final ^int v1)
+    (field ^:public ^:final ^int d1)
+    (constructor ^:public [this ^Code c0 ^int k0 ^int v0 ^int d0 ^Code c1 ^int k1 ^int v1 ^int d1]
+      (set! (.-c0 this) c0)
+      (set! (.-k0 this) k0)
+      (set! (.-v0 this) v0)
+      (set! (.-d0 this) d0)
+      (set! (.-c1 this) c1)
+      (set! (.-k1 this) k1)
+      (set! (.-v1 this) v1)
+      (set! (.-d1 this) d1))
+    (method ^:public run [this ^Frame f]
+      (let [o0 (if (== k0 0) (.run c0 f) nil)
+            b0 (if (== k0 0) 0 (CodeRecur1/bits k0 v0 c0 f))
+            o1 (if (== k1 0) (.run c1 f) nil)
+            b1 (if (== k1 0) 0 (CodeRecur1/bits k1 v1 c1 f))]
+        (if (== k0 0) (aset (.-slots f) d0 o0) (aset (.-prims f) d0 b0))
+        (if (== k1 0) (aset (.-slots f) d1 o1) (aset (.-prims f) d1 b1))
+        (set! (.-recur f) true)
+        nil))
+    (method ^:public runLong ^long [this ^Frame f] (.run this f) 0)
+    (method ^:public runDouble ^double [this ^Frame f] (.run this f) 0.0)
+    (method ^:public runBool ^boolean [this ^Frame f] (.run this f) false))
+
   (defclass ^:public ^:static CodeLetFn
     :extends Code
     ;; the fns made first, then each one's closed-over letfn locals filled (emitLetFnInits)
@@ -11801,43 +12181,81 @@
 
   (defclass ^:public ^:static CodeCase
     :extends Code
-    ;; CaseExpr.doEmit's switch: the key's then when its test holds, else the default
+    ;; CaseExpr.doEmit's switch: the key's then when its test holds, else the default. The keys
+    ;; in order in an array, found by bisection (the JVM's tableswitch or lookupswitch), with
+    ;; their tests, thens and skip checks in arrays beside them; an integer expression's key
+    ;; from its long value, unboxed (a HashMap's three lookups and an Integer per key before:
+    ;; doc/go/EVAL-SPEED.md). The choice is Evaluator.caseKey's and CaseExpr.evalIn's
     (field ^:public ^:final ^CaseExpr ce)
     (field ^:public ^:final ^Code expr)
     (field ^:public ^:final ^Code dflt)
-    (field ^:public ^:final ^{:tag (HashMap Integer Object)} thens)
-    (field ^:public ^:final ^{:tag (HashMap Integer Object)} tests)
+    (field ^:public ^:final ^int/1 keys)
+    (field ^:public ^:final ^Object/1 tests)
+    (field ^:public ^:final ^Code/1 thens)
+    (field ^:public ^:final ^boolean/1 skips)
     (field ^:public ^:final ^Class pc)
-    (constructor ^:public [this ^CaseExpr ce ^Code expr ^Code dflt
-                           ^{:tag (HashMap Integer Object)} thens
-                           ^{:tag (HashMap Integer Object)} tests ^Class pc]
+    ;; 0 int tests of a long, int, short or byte expression, 1 int tests of an expression of
+    ;; another type (no key unless it is a Number: Evaluator.caseKey), 2 hash tests
+    (field ^:public ^:final ^int mode)
+    (constructor ^:public [this ^CaseExpr ce ^Code expr ^Code dflt ^int/1 keys ^Object/1 tests
+                           ^Code/1 thens ^boolean/1 skips ^Class pc]
       (set! (.-ce this) ce)
       (set! (.-expr this) expr)
       (set! (.-dflt this) dflt)
-      (set! (.-thens this) thens)
+      (set! (.-keys this) keys)
       (set! (.-tests this) tests)
-      (set! (.-pc this) pc))
-    (method choose ^Code [this ^Frame f]
-      (let [v (.run expr f)
-            k (Evaluator/caseKey ce v)]
-        (if (or (nil? k) (not (.containsKey tests k)))
-            dflt
-            (let [test (.get tests k)
-                  then (cast Code (.get thens k))
-                  tt (.-testType ce)]
+      (set! (.-thens this) thens)
+      (set! (.-skips this) skips)
+      (set! (.-pc this) pc)
+      (set! (.-mode this)
+            (cond
+              (not (identical? (.-testType ce) CaseExpr/intKey)) 2
+              (or (identical? pc Long/TYPE) (identical? pc Integer/TYPE)
+                  (identical? pc Short/TYPE) (identical? pc Byte/TYPE))
+                0
+              :else 1)))
+    ;; key k shifted and masked as the case's switch takes it (Evaluator.caseKey's last step)
+    (method ^:static shift ^int [^CaseExpr ce ^int k]
+      (if (== (.-mask ce) 0)
+          k
+          (unchecked-int (bit-and (bit-shift-right k (.-shift ce)) (.-mask ce)))))
+    ;; the index of key k in keys, or -1
+    (method ^:static index ^int [^int/1 keys ^int k]
+      (loop [^int lo 0 ^int hi (unchecked-dec-int (alength keys))]
+        (if (> lo hi)
+            -1
+            (let [mid (unchecked-divide-int (unchecked-add-int lo hi) 2)
+                  m (aget keys mid)]
               (cond
-                (identical? tt CaseExpr/intKey)
-                  (cond
-                    (nil? pc) (if (Util/equiv v test) then dflt)
-                    (identical? pc Long/TYPE)
-                      (if (== (.longValue (cast Number test)) (.longValue (cast Number v))) then dflt)
-                    (and (not (== (.-mask ce) 0))
-                         (not (== (.longValue (cast Number test)) (.longValue (cast Number v)))))
-                      dflt
-                    :else then)
-                (RT/booleanCast (RT/contains (.-skipCheck ce) k)) then
-                (identical? tt CaseExpr/hashIdentityKey) (if (identical? v test) then dflt)
-                :else (if (Util/equiv v test) then dflt))))))
+                (< m k) (recur (unchecked-inc-int mid) hi)
+                (> m k) (recur lo (unchecked-dec-int mid))
+                :else mid)))))
+    (method choose ^Code [this ^Frame f]
+      (cond
+        (== mode 0)
+          (let [x (.runLong expr f)
+                i (CodeCase/index keys (CodeCase/shift ce (unchecked-int x)))]
+            (cond
+              (< i 0) dflt
+              (identical? pc Long/TYPE)
+                (if (== (.longValue (cast Number (aget tests i))) x) (aget thens i) dflt)
+              (and (not (== (.-mask ce) 0)) (not (== (.longValue (cast Number (aget tests i))) x))) dflt
+              :else (aget thens i)))
+        (== mode 1)
+          (let [v (.run expr f)]
+            (if (and (nil? pc) (instance? Number v))
+                (let [i (CodeCase/index keys (CodeCase/shift ce (.intValue (cast Number v))))]
+                  (if (and (>= i 0) (Util/equiv v (aget tests i))) (aget thens i) dflt))
+                dflt))
+        :else
+          (let [v (.run expr f)
+                i (CodeCase/index keys (CodeCase/shift ce (Util/hash v)))]
+            (cond
+              (< i 0) dflt
+              (aget skips i) (aget thens i)
+              (identical? (.-testType ce) CaseExpr/hashIdentityKey)
+                (if (identical? v (aget tests i)) (aget thens i) dflt)
+              :else (if (Util/equiv v (aget tests i)) (aget thens i) dflt)))))
     (method ^:public run [this ^Frame f] (.run (.choose this f) f))
     (method ^:public runLong ^long [this ^Frame f] (.runLong (.choose this f) f))
     (method ^:public runDouble ^double [this ^Frame f] (.runDouble (.choose this f) f))
@@ -12024,6 +12442,134 @@
         (set! (.-line f) line)
         (.invoke k t))))
 
+  ;; a run-time interface's method called on an object of a class made at run time: the fn the
+  ;; class set for it (Dyn.setMethod), by the object's class (doc/go/EVAL-SPEED.md, round 2). A
+  ;; site (CodeProto, CodeHostInstance) keeps up to 8 entries, each its class's fn or nil (not an
+  ;; object of a class made at run time implementing the interface with a fn for the method: the
+  ;; site's other path). Only for a method whose parameters and return are Object (defprotocol's,
+  ;; definterface's untyped ones) and of at most 3 parameters: then the call through the method's
+  ;; invoker (Dyn's addInterfaceMethod: its fn by the same key, invoke of that arity, the result
+  ;; as it is) is the fn's invoke with the object and the arguments, as here
+  (defclass ^:public ^:static CodeImplEntry
+    (field ^:public ^:final ^Class c)
+    (field ^:public ^:final ^IFn impl)
+    (constructor ^:public [this ^Class c ^IFn impl]
+      (set! (.-c this) c)
+      (set! (.-impl this) impl))
+
+    ;; the key of interface method m (Dyn's: name(descriptors)ret) when its calls may take the
+    ;; fn, else nil
+    (method ^:public ^:static key ^String [^java.lang.reflect.Method m]
+      (let [ps (.getParameterTypes m)
+            dc (.getDeclaringClass m)]
+        (if (and (.isInterface dc) (AST/dynamic dc) (identical? (.getReturnType m) Object)
+                 (<= (alength ps) 3)
+                 (loop [^int i 0]
+                   (if (< i (alength ps))
+                       (if (identical? (aget ps i) Object) (recur (unchecked-inc-int i)) false)
+                       true)))
+            (let [sb (StringBuilder. (.getName m))]
+              (.append sb "(")
+              (loop [^int i 0]
+                (when (< i (alength ps))
+                  (.append sb "Ljava/lang/Object;")
+                  (recur (unchecked-inc-int i))))
+              (.append sb ")Ljava/lang/Object;")
+              (.toString sb))
+            nil)))
+
+    ;; the entry of es for class c, or nil
+    (method ^:public ^:static find ^CodeImplEntry [^CodeImplEntry/1 es ^Class c]
+      (if (nil? es)
+          nil
+          (loop [^int i 0]
+            (if (< i (alength es))
+                (let [e (aget es i)]
+                  (if (identical? (.-c e) c) e (recur (unchecked-inc-int i))))
+                nil))))
+
+    ;; es with e added, up to 8 entries (past them the fn is looked up at each call)
+    (method ^:public ^:static add ^CodeImplEntry/1 [^CodeImplEntry/1 es ^CodeImplEntry e]
+      (let [n (if (nil? es) 0 (alength es))]
+        (if (>= n 8)
+            es
+            (let [a (new CodeImplEntry/1 (unchecked-inc-int n))]
+              (when (> n 0) (System/arraycopy es 0 a 0 n))
+              (aset a n e)
+              a))))
+
+    ;; the fn of key for t, an instance of interface on (else nil), its class's entry found in
+    ;; es or made: the site's new entries when made (an entry's array, else es)
+    (method ^:public ^:static lookup ^CodeImplEntry [^CodeImplEntry/1 es ^Class on ^String key t]
+      (let [c (.getClass t)
+            e (CodeImplEntry/find es c)]
+        (if (some? e)
+            e
+            (CodeImplEntry. c (if (.isInstance on t) (Dyn/methodImpl t key) nil)))))
+
+    ;; the fn's call with object t and the arguments vs (at most 3)
+    (method ^:public ^:static call [^IFn i t ^Object/1 vs]
+      (let [n (alength vs)]
+        (cond
+          (== n 0) (.invoke i t)
+          (== n 1) (.invoke i t (aget vs 0))
+          (== n 2) (.invoke i t (aget vs 0) (aget vs 1))
+          :else (.invoke i t (aget vs 0) (aget vs 1) (aget vs 2))))))
+
+  (defclass ^:public ^:static CodeProto
+    :extends Code
+    ;; a protocol fn's call whose method is of a protocol made at run time (InvokeExpr.isProtocol,
+    ;; its interface protocolOn and method onMethod; CodeImplEntry): the fn, then the target and
+    ;; the arguments, in order, as CodeInvokeN; then, the target an object of a class made at run
+    ;; time that implements the interface, the fn its class set for the method, called directly,
+    ;; as compiled code calls the interface's method (InvokeExpr.emitProto, c2j's invoke-linked):
+    ;; the protocol fn and its interface fn, two evaluated calls, are not made; else the
+    ;; protocol fn's call
+    (field ^:public ^:final ^Code fx)
+    (field ^:public ^:final ^Code target)
+    (field ^:public ^:final ^Code/1 args)
+    (field ^:public ^:final ^int line)
+    (field ^:public ^:final ^boolean clear)
+    (field ^:public ^:final ^Class on)
+    (field ^:public ^:final ^String key)
+    (field ^:volatile ^CodeImplEntry/1 cache)
+    (constructor ^:public [this ^Code fx ^Code target ^Code/1 args ^int line ^boolean clear
+                           ^Class on ^String key]
+      (set! (.-fx this) fx)
+      (set! (.-target this) target)
+      (set! (.-args this) args)
+      (set! (.-line this) line)
+      (set! (.-clear this) clear)
+      (set! (.-on this) on)
+      (set! (.-key this) key))
+    (method ^:public run [this ^Frame f]
+      (let [g (cast IFn (let [v (.run fx f)] (set! (.-line f) line) v))
+            t (.run target f)
+            n (alength args)
+            a (if (> n 0) (.run (aget args 0) f) nil)
+            b (if (> n 1) (.run (aget args 1) f) nil)
+            c (if (> n 2) (.run (aget args 2) f) nil)]
+        (set! (.-line f) line)
+        (when clear (CodeRun/clearThis f))
+        (let [^:mutable ^IFn i nil]
+          (when (some? t)
+            (let [es cache
+                  e (CodeImplEntry/lookup es on key t)]
+              (when (nil? (CodeImplEntry/find es (.-c e)))
+                (set! cache (CodeImplEntry/add es e)))
+              (set! i (.-impl e))))
+          (if (some? i)
+              (cond
+                (== n 0) (.invoke i t)
+                (== n 1) (.invoke i t a)
+                (== n 2) (.invoke i t a b)
+                :else (.invoke i t a b c))
+              (cond
+                (== n 0) (.invoke g t)
+                (== n 1) (.invoke g t a)
+                (== n 2) (.invoke g t a b)
+                :else (.invoke g t a b c)))))))
+
   (defclass ^:public ^:static CodeHostStatic
     :extends Code
     ;; a resolved static method not listed for CodeOpN: through its invoker
@@ -12042,30 +12588,47 @@
       (set! (.-direct this) (Evaluator/directOk m))
       (set! (.-ms this) (CodeRun/one m)))
     (method ^:public run [this ^Frame f]
-      (let [vs (CodeRun/runAll args f)]
+      (let [vs (CodeRun/argsOf args f)]
         (set! (.-line f) line)
         (CodeRun/call m ps ms direct nil vs))))
 
   (defclass ^:public ^:static CodeHostStaticReflect
     :extends Code
+    ;; a static method by reflection (Reflector.invokeStaticMethod), with an inline cache of the
+    ;; methods Reflector chose by the arguments' classes (CodeReflectEntry; a class made at run
+    ;; time, whose members may change, is not cached)
     (field ^:public ^:final ^Class c)
     (field ^:public ^:final ^String name)
     (field ^:public ^:final ^Code/1 args)
     (field ^:public ^:final ^int line)
+    (field ^:volatile ^CodeReflectEntry/1 cache)
     (constructor ^:public [this ^Class c ^String name ^Code/1 args ^int line]
       (set! (.-c this) c)
       (set! (.-name this) name)
       (set! (.-args this) args)
       (set! (.-line this) line))
     (method ^:public run [this ^Frame f]
-      (let [vs (CodeRun/runAll args f)]
+      (let [vs (CodeRun/argsOf args f)]
         (set! (.-line f) line)
-        (Reflector/invokeStaticMethod c name vs))))
+        (let [e (CodeReflectEntry/find cache nil vs)]
+          (cond
+            (some? e) (CodeReflectEntry/call e nil vs)
+            (or (.equals name "new") (AST/dynamic c)) (Reflector/invokeStaticMethod c name vs)
+            :else
+              ;; Reflector.invokeStaticMethod's choice, kept, then its call
+              (let [ms (Reflector/getMethods c (alength vs) name true)]
+                (if (.isEmpty ms)
+                    (Reflector/invokeStaticMethod c name vs)
+                    (let [ne (CodeReflectEntry/choose name ms nil nil vs (CodeReflectEntry/full ms))]
+                      (set! cache (CodeReflectEntry/add cache ne))
+                      (CodeReflectEntry/call ne nil vs)))))))))
 
   (defclass ^:public ^:static CodeHostInstance
     :extends Code
     ;; a resolved instance method: the compiled call's checkcast of the target to the method's
-    ;; class, then its invoker (virtual)
+    ;; class, then its invoker (virtual); a method of an interface made at run time on an object
+    ;; of a class made at run time, the fn its class set for it (CodeImplEntry, by the object's
+    ;; class; key, else nil)
     (field ^:public ^:final ^Code target)
     (field ^:public ^:final ^java.lang.reflect.Method m)
     (field ^:public ^:final ^Class dc)
@@ -12074,6 +12637,8 @@
     (field ^:public ^:final ^int line)
     (field ^:public ^:final ^boolean direct)
     (field ^:public ^:final ^List ms)
+    (field ^:public ^:final ^String key)
+    (field ^:volatile ^CodeImplEntry/1 cache)
     (constructor ^:public [this ^Code target ^java.lang.reflect.Method m ^Code/1 args ^int line]
       (set! (.-target this) target)
       (set! (.-m this) m)
@@ -12082,57 +12647,289 @@
       (set! (.-args this) args)
       (set! (.-line this) line)
       (set! (.-direct this) (Evaluator/directOk m))
-      (set! (.-ms this) (CodeRun/one m)))
+      (set! (.-ms this) (CodeRun/one m))
+      (set! (.-key this) (if (Evaluator/directOk m) (CodeImplEntry/key m) nil)))
     (method ^:public run [this ^Frame f]
       (let [t (.run target f)
-            vs (CodeRun/runAll args f)]
+            vs (CodeRun/argsOf args f)]
         (set! (.-line f) line)
-        (Evaluator/checkCast dc t)
-        (CodeRun/call m ps ms direct t vs))))
+        (let [^:mutable ^IFn i nil]
+          (when (and (some? key) (some? t))
+            (let [es cache
+                  e (CodeImplEntry/lookup es dc key t)]
+              (when (nil? (CodeImplEntry/find es (.-c e)))
+                (set! cache (CodeImplEntry/add es e)))
+              (set! i (.-impl e))))
+          ;; a fn found: t is an instance of dc (CodeImplEntry.lookup), its checkcast passes
+          (if (some? i)
+              (CodeImplEntry/call i t vs)
+              (do (Evaluator/checkCast dc t)
+                  (CodeRun/call m ps ms direct t vs)))))))
 
   (defclass ^:public ^:static CodeHostInstanceReflect
     :extends Code
+    ;; an instance method by reflection (Reflector.invokeInstanceMethod, of the qualifying class
+    ;; qc when given), with an inline cache of the methods Reflector chose by the receiver's
+    ;; class and, when it chose among several, the arguments' (CodeReflectEntry; a Go value, nil
+    ;; and an object of a class made at run time go through Reflector each time)
     (field ^:public ^:final ^Code target)
     (field ^:public ^:final ^Class qc)
     (field ^:public ^:final ^String name)
     (field ^:public ^:final ^Code/1 args)
     (field ^:public ^:final ^int line)
+    (field ^:volatile ^CodeReflectEntry/1 cache)
     (constructor ^:public [this ^Code target ^Class qc ^String name ^Code/1 args ^int line]
       (set! (.-target this) target)
       (set! (.-qc this) qc)
       (set! (.-name this) name)
       (set! (.-args this) args)
       (set! (.-line this) line))
+    (method reflect [this t ^Object/1 vs]
+      (if (some? qc)
+          (Reflector/invokeInstanceMethodOfClass t qc name vs)
+          (Reflector/invokeInstanceMethod t name vs)))
     (method ^:public run [this ^Frame f]
       (let [t (.run target f)
-            vs (CodeRun/runAll args f)]
+            vs (CodeRun/argsOf args f)]
         (set! (.-line f) line)
-        (if (some? qc)
-            (Reflector/invokeInstanceMethodOfClass t qc name vs)
-            (Reflector/invokeInstanceMethod t name vs)))))
+        (let [e (if (nil? t) nil (CodeReflectEntry/find cache t vs))]
+          (cond
+            (some? e) (CodeReflectEntry/call e t vs)
+            (or (nil? t) (instance? GoValue t) (AST/dynamic (.getClass t))) (.reflect this t vs)
+            :else
+              ;; Reflector.invokeInstanceMethodOfClass's choice, kept, then its call
+              (let [c (if (some? qc) qc (.getClass t))
+                    ms (Reflector/instanceMethods t c name (alength vs))]
+                (if (.isEmpty ms)
+                    (.reflect this t vs)
+                    (let [ne (CodeReflectEntry/choose name ms c t vs (CodeReflectEntry/full ms))]
+                      (set! cache (CodeReflectEntry/add cache ne))
+                      (CodeReflectEntry/call ne t vs)))))))))
+
+  (defclass ^:public ^:static CodeMemberEntry
+    ;; a reflective member read's member as Reflector.invokeNoArgInstanceMember finds it for a
+    ;; receiver's class: the method of no arguments it calls (m), or the field it reads (fld)
+    (field ^:public ^:final ^Class receiver)
+    (field ^:public ^:final ^java.lang.reflect.Method m)
+    (field ^:public ^:final ^java.lang.reflect.Field fld)
+    (constructor ^:public [this ^Class receiver ^java.lang.reflect.Method m ^java.lang.reflect.Field fld]
+      (set! (.-receiver this) receiver)
+      (set! (.-m this) m)
+      (set! (.-fld this) fld))
+
+    ;; the member's value on t (invokeNoArgInstanceMember's: invokeMatchingMethod's call, or
+    ;; getInstanceField's read)
+    (method ^:public read [this t]
+      (if (some? m)
+          (CodeReflectEntry/invoke m t RT/EMPTY_ARRAY)
+          (Reflector/prepRet (.getType fld) (.get fld t))))
+
+    ;; the entry of es for class c, or nil
+    (method ^:public ^:static find ^CodeMemberEntry [^CodeMemberEntry/1 es ^Class c]
+      (if (nil? es)
+          nil
+          (loop [^int i 0]
+            (if (< i (alength es))
+                (let [e (aget es i)]
+                  (if (identical? (.-receiver e) c) e (recur (unchecked-inc-int i))))
+                nil))))
+
+    ;; es with e added, up to 4 entries
+    (method ^:public ^:static add ^CodeMemberEntry/1 [^CodeMemberEntry/1 es ^CodeMemberEntry e]
+      (let [n (if (nil? es) 0 (alength es))]
+        (if (>= n 4)
+            es
+            (let [a (new CodeMemberEntry/1 (unchecked-inc-int n))]
+              (when (> n 0) (System/arraycopy es 0 a 0 n))
+              (aset a n e)
+              a))))
+
+    ;; the member invokeNoArgInstanceMember reads for name on t (a field when requireField, else
+    ;; a method of no arguments, else a field), or nil (none: Reflector throws)
+    (method ^:public ^:static choose ^CodeMemberEntry [t ^String name ^boolean requireField]
+      (let [c (.getClass t)]
+        (if requireField
+            (let [fld (Reflector/getField c name false)]
+              (if (nil? fld) nil (CodeMemberEntry. c nil fld)))
+            (let [meths (Reflector/getMethods c 0 name false)]
+              (if (> (.size meths) 0)
+                  (let [argsRef (new Object/2 1)]
+                    (aset argsRef 0 RT/EMPTY_ARRAY)
+                    (CodeMemberEntry. c (Reflector/selectMatchingMethod name meths c t argsRef) nil))
+                  (let [fld (Reflector/getField c name false)]
+                    (if (nil? fld) nil (CodeMemberEntry. c nil fld)))))))))
+
+  (defclass ^:public ^:static CodeReflectEntry
+    ;; a reflective call's method as Reflector chose it (the evaluator's inline caches of
+    ;; reflective calls, CodeHostInstanceReflect and CodeHostStaticReflect, after the JVM's
+    ;; ReflectorCallSite): the classes the choice depends on, the receiver's (nil for a static
+    ;; method) and, when Reflector chose among several methods, the arguments' (nil for nil),
+    ;; the method, and whether Reflector widened the arguments first (widenBoxedArgs). Its call
+    ;; is Reflector.invokeMatchingMethod's of the method it chooses: the arguments widened as it
+    ;; widens them, converted by boxArgs, the result by prepRet, the method's exception thrown
+    ;; as it throws it; a site's choices are a function of those classes (Reflector's matching
+    ;; reads the classes alone, Method.canAccess is true), so behaviour and messages are
+    ;; Reflector's
+    (field ^:public ^:final ^Class receiver)
+    (field ^:public ^:final ^Class/1 classes)
+    (field ^:public ^:final ^java.lang.reflect.Method m)
+    (field ^:public ^:final ^boolean widen)
+    ;; the method's parameter and return classes, and whether a hit calls it through its
+    ;; invoker directly (round 2: its class public, the receiver's class one Method.invoke takes):
+    ;; Method.invoke's InvocationTargetException, which invoke unwraps, not made
+    (field ^:public ^:final ^Class/1 ps)
+    (field ^:public ^:final ^Class ret)
+    (field ^:public ^:final ^boolean direct)
+    (constructor ^:public [this ^Class receiver ^Class/1 classes ^java.lang.reflect.Method m ^boolean widen]
+      (set! (.-receiver this) receiver)
+      (set! (.-classes this) classes)
+      (set! (.-m this) m)
+      (set! (.-widen this) widen)
+      (set! (.-ps this) (.getParameterTypes m))
+      (set! (.-ret this) (.getReturnType m))
+      (set! (.-direct this)
+            (and (Evaluator/directOk m)
+                 (if (java.lang.reflect.Modifier/isStatic (.getModifiers m))
+                     (nil? receiver)
+                     (and (some? receiver) (.isAssignableFrom (.getDeclaringClass m) receiver))))))
+
+    ;; whether the receiver t (nil: a static method's) and the arguments vs are of the entry's
+    ;; classes
+    (method ^:public matches ^boolean [this t ^Object/1 vs]
+      (cond
+        (and (some? t) (not (identical? (.getClass t) receiver))) false
+        (nil? classes) true
+        (not (== (alength classes) (alength vs))) false
+        :else
+          (loop [^int i 0]
+            (if (< i (alength vs))
+                (let [v (aget vs i)
+                      k (aget classes i)]
+                  (if (if (nil? v) (nil? k) (identical? (.getClass v) k))
+                      (recur (unchecked-inc-int i))
+                      false))
+                true))))
+
+    ;; the entry of es that matches, or nil
+    (method ^:public ^:static find ^CodeReflectEntry [^CodeReflectEntry/1 es t ^Object/1 vs]
+      (if (nil? es)
+          nil
+          (loop [^int i 0]
+            (if (< i (alength es))
+                (let [e (aget es i)]
+                  (if (.matches e t vs) e (recur (unchecked-inc-int i))))
+                nil))))
+
+    ;; es with e added, up to 4 entries (past them the site goes through Reflector's choice)
+    (method ^:public ^:static add ^CodeReflectEntry/1 [^CodeReflectEntry/1 es ^CodeReflectEntry e]
+      (let [n (if (nil? es) 0 (alength es))]
+        (if (>= n 4)
+            es
+            (let [a (new CodeReflectEntry/1 (unchecked-inc-int n))]
+              (when (> n 0) (System/arraycopy es 0 a 0 n))
+              (aset a n e)
+              a))))
+
+    ;; whether the choice among methods ms depends on the arguments' classes
+    (method ^:public ^:static full ^boolean [^List ms] (> (.size ms) 1))
+
+    ;; Reflector's choice (selectMatchingMethod) of method name among methods ms, with the
+    ;; context class cc, for receiver t and the arguments vs, as an entry (guarded on the
+    ;; arguments when full); Reflector's exceptions thrown as they are
+    (method ^:public ^:static choose ^CodeReflectEntry [^String name ^List ms ^Class cc t ^Object/1 vs
+                                                        ^boolean full]
+      (let [argsRef (new Object/2 1)]
+        (aset argsRef 0 vs)
+        (let [m (Reflector/selectMatchingMethod name ms cc t argsRef)
+              cs (when full
+                   (let [a (new Class/1 (alength vs))]
+                     (loop [^int i 0]
+                       (when (< i (alength vs))
+                         (aset a i (if (nil? (aget vs i)) nil (.getClass (aget vs i))))
+                         (recur (unchecked-inc-int i))))
+                     a))]
+          (CodeReflectEntry. (if (nil? t) nil (.getClass t)) cs m (not (identical? (aget argsRef 0) vs))))))
+
+    ;; the entry's call on receiver t (nil: static) with the arguments vs (the site's own array,
+    ;; which boxed converts in place): invokeMatchingMethod's, through the method's invoker
+    ;; directly when the entry may (an exception the method throws propagating as it is, which
+    ;; invoke's unwrapping of Method.invoke's InvocationTargetException gives)
+    (method ^:public ^:static call [^CodeReflectEntry e t ^Object/1 vs]
+      (let [args (if (.-widen e) (CodeReflectEntry/widened vs) vs)]
+        (if (.-direct e)
+            (Reflector/prepRet (.-ret e) (Evaluator/invokeDirect (.-m e) t (CodeReflectEntry/boxed (.-ps e) args)))
+            (CodeReflectEntry/invoke (.-m e) t args))))
+
+    ;; Reflector.boxArgs of args for parameters ps, in args (a fresh array of the call's)
+    (method ^:static boxed ^Object/1 [^Class/1 ps ^Object/1 args]
+      (loop [^int i 0]
+        (when (< i (alength ps))
+          (aset args i (Reflector/boxArg (aget ps i) (aget args i)))
+          (recur (unchecked-inc-int i))))
+      args)
+
+    ;; Reflector.invokeMatchingMethod's call of the method m it chose, on target t with the
+    ;; arguments args
+    (method ^:public ^:static invoke [^java.lang.reflect.Method m t ^Object/1 args]
+      (try
+        (Reflector/prepRet (.getReturnType m) (.invoke m t (Reflector/boxArgs (.getParameterTypes m) args)))
+        (catch Exception x (throw (Util/sneakyThrow (if (some? (.getCause x)) (.getCause x) x))))))
+
+    ;; Reflector.widenBoxedArgs: an Integer, Short or Byte as a Long, a Float as a Double
+    (method ^:static widened ^Object/1 [^Object/1 args]
+      (let [w (new Object/1 (alength args))]
+        (loop [^int i 0]
+          (when (< i (alength args))
+            (let [a (aget args i)]
+              (when (some? a)
+                (let [c (.getClass a)]
+                  (aset w i (cond
+                              (or (identical? c Integer) (identical? c Short) (identical? c Byte))
+                                (Long/valueOf (.longValue (cast Number a)))
+                              (identical? c Float) (Double/valueOf (.doubleValue (cast Number a)))
+                              :else a)))))
+            (recur (unchecked-inc-int i))))
+        w)))
 
   (defclass ^:public ^:static CodeHostNew
     :extends Code
     (field ^:public ^:final ^Class c)
     (field ^:public ^:final ^java.lang.reflect.Constructor ctor)
     (field ^:public ^:final ^Code/1 args)
+    ;; c a deftype's stub class (its class looked up when the code runs), else what the call of
+    ;; ctor needs found once: whether c is abstract, the constructor's parameter types
+    (field ^:public ^:final ^boolean stub)
+    (field ^:public ^:final ^boolean abstract)
+    (field ^:public ^:final ^Class/1 ps)
     (constructor ^:public [this ^Class c ^java.lang.reflect.Constructor ctor ^Code/1 args]
       (set! (.-c this) c)
       (set! (.-ctor this) ctor)
-      (set! (.-args this) args))
+      (set! (.-args this) args)
+      (set! (.-stub this) (.startsWith (.getName c) COMPILE_STUB_PREFIX))
+      (set! (.-abstract this) (and (some? ctor) (not stub)
+                                   (java.lang.reflect.Modifier/isAbstract (.getModifiers c))))
+      (set! (.-ps this) (when (and (some? ctor) (not stub)) (.getParameterTypes ctor))))
     (method ^:public run [this ^Frame f]
-      ;; compiled code's new of an abstract class: InstantiationError before the arguments
-      ;; (NewExpr.evalIn says why)
-      (when (and (some? ctor) (java.lang.reflect.Modifier/isAbstract (.getModifiers (Evaluator/destub c))))
-        (throw (InstantiationError. (.getName (Evaluator/destub c)))))
-      (let [vs (CodeRun/runAll args f)
-            dc (Evaluator/destub c)]
-        (if (some? ctor)
-            (let [k (if (identical? dc c)
-                        ctor
-                        (.getConstructor dc (.getParameterTypes ctor)))]
-              (CodeRun/construct k (CodeRun/directArgs (.getParameterTypes k) vs)))
-            (Reflector/invokeConstructor dc vs)))))
+      (if stub
+          (do
+            ;; compiled code's new of an abstract class: InstantiationError before the
+            ;; arguments (NewExpr.evalIn says why)
+            (when (and (some? ctor) (java.lang.reflect.Modifier/isAbstract (.getModifiers (Evaluator/destub c))))
+              (throw (InstantiationError. (.getName (Evaluator/destub c)))))
+            (let [vs (CodeRun/runAll args f)
+                  dc (Evaluator/destub c)]
+              (if (some? ctor)
+                  (let [k (if (identical? dc c)
+                              ctor
+                              (.getConstructor dc (.getParameterTypes ctor)))]
+                    (CodeRun/construct k (CodeRun/directArgs (.getParameterTypes k) vs)))
+                  (Reflector/invokeConstructor dc vs))))
+          (do
+            (when abstract (throw (InstantiationError. (.getName c))))
+            (let [vs (CodeRun/argsOf args f)]
+              (if (some? ctor)
+                  (CodeRun/construct ctor (CodeRun/directArgs ps vs))
+                  (Reflector/invokeConstructor c vs)))))))
 
   (defclass ^:public ^:static CodeFI
     :extends Code
@@ -12148,22 +12945,44 @@
   (defclass ^:public ^:static CodeHostField
     :extends Code
     ;; a resolved field as the bytecode reads it (checkcast to its class, getfield), else by
-    ;; reflection
+    ;; reflection (Reflector.invokeNoArgInstanceMember: (.-f x), or (.m x) a method of no
+    ;; arguments or else a field), with an inline cache of the member it reads by the
+    ;; receiver's class (CodeMemberEntry; a Go value, nil and an object of a class made at run
+    ;; time go through Reflector each time)
     (field ^:public ^:final ^InstanceFieldExpr fe)
     (field ^:public ^:final ^Code target)
+    (field ^:volatile ^CodeMemberEntry/1 cache)
+    ;; the target class is a deftype's stub (its class, made at run time, looked up when the
+    ;; code runs: Evaluator.destub): found once (it was at every read)
+    (field ^:public ^:final ^boolean stub)
     (constructor ^:public [this ^InstanceFieldExpr fe ^Code target]
       (set! (.-fe this) fe)
-      (set! (.-target this) target))
+      (set! (.-target this) target)
+      (set! (.-stub this) (and (some? (.-targetClass fe))
+                               (.startsWith (.getName (.-targetClass fe)) COMPILE_STUB_PREFIX))))
+    (method member [this t]
+      (let [e (if (nil? t) nil (CodeMemberEntry/find cache (.getClass t)))]
+        (cond
+          (some? e) (.read e t)
+          (or (nil? t) (instance? GoValue t) (AST/dynamic (.getClass t)))
+            (Reflector/invokeNoArgInstanceMember t (.-fieldName fe) (.-requireField fe))
+          :else
+            (let [ne (CodeMemberEntry/choose t (.-fieldName fe) (.-requireField fe))]
+              (if (nil? ne)
+                  (Reflector/invokeNoArgInstanceMember t (.-fieldName fe) (.-requireField fe))
+                  (do
+                    (set! cache (CodeMemberEntry/add cache ne))
+                    (.read ne t)))))))
     (method ^:public run [this ^Frame f]
       (let [t (.run target f)
             tc (.-targetClass fe)]
         ;; the field's own line for the access, after its target (InstanceFieldExpr.emit's mark:
-        ;; RPS53)
-        (Evaluator/at f (.-line fe) nil)
+        ;; RPS53; Evaluator.at's, without its class's guard)
+        (set! (.-line f) (.-line fe))
         (cond
           (or (nil? tc) (nil? (.-field fe)))
-            (Reflector/invokeNoArgInstanceMember t (.-fieldName fe) (.-requireField fe))
-          (not (identical? (Evaluator/destub tc) tc))
+            (.member this t)
+          stub
             (do
               (Evaluator/checkCast (Evaluator/destub tc) t)
               (when (nil? t) (throw (NullPointerException.)))

@@ -3267,13 +3267,14 @@ native `Compiler$Evaluator.setTraceHook`), as `StackTraceElement`s: the fn's cla
 or the method's name, the source file the fn was analyzed in, the line of the call being
 evaluated (`Compiler$Frame`, per-thread `Compiler$EvalState`). jrt's frame mapping (§7.9.6) puts
 each in place of the Go frame of the evaluator's call body (`Evaluator.invokeFn`'s `try`
-literal) and leaves out the evaluator's own frames, the `Dyn` and `DynSub_C` dispatch, member
+literal; `Compiler$CodeRun.invokeFn`'s since doc/go/EVAL-SPEED.md) and leaves out the evaluator's own frames, the `Dyn` and `DynSub_C` dispatch, member
 tables' invokers, and the reflective call frames under an evaluated host call, which compiled
 code calls directly. So `arbace.main`'s error report names the Clojure frame (`Execution error
 (ArithmeticException) at user/f (REPL:1)`).
 
 With the closure compiler (amendment EC5, accepted 2026-10-10) the call body is still
-`Evaluator.invokeFn`'s and `invokeMethod`'s `try` literal; the compiled nodes' frames
+`Evaluator.invokeFn`'s and `invokeMethod`'s `try` literal (`CodeRun`'s since doc/go/EVAL-SPEED.md:
+a class without a static initializer, so its static methods have no initialization guard); the compiled nodes' frames
 (`arbace/lang.(*Compiler_Code...`, `Compiler_Code...`, jrt's `Compiler_CodeRun_` natives) are
 the evaluator's own, and a `CodeHost*` node (a host call) hides the reflective frames above it,
 as the host nodes' `evalIn` did. A compiled node sets the frame's line before each call, so the
