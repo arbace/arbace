@@ -1842,3 +1842,42 @@ Numbering from AXS97.
   working directory) and refuses a file number seen before; Arbace keeps the directory and allows the same file again. (a) check both
   against llvm-mc's sources and the recorded objects (the oracle tier's, by hand); (b) as built. *Recommended: (a)*.
 
+
+## As built: queue 315, x86i's per-page decode cache (2026-11-16; branch `315-asm-x86i-speed`, from `98cfb63c4`; the Mac VM)
+
+a64i's decode cache of queue 303 (doc/asm/ARM64-SURVEY.md, "As built: queue 303") for x86i. The Mac VM is aarch64: x86i's CPU
+rows and lockstep are the main host's; here x86i's interpreter ran in a probe build of the printed light driver for arm64 (the
+lockstep, amd64's ptrace, stubbed), over every program of x86i-check, assembled and linked by Arbace.
+
+- **The decoded instructions a page's array** (cpu.ae's `Inst`, `decodeAt`): `pages`, a `codePage` of 4,096 entries a code page by
+  offset, each a copy of the instruction's bytes and its decoding; the last fetched page (`AS.ExecPage`'s bytes, its array) kept while
+  `emu.AS.Gen` is unchanged; an entry used only when its bytes equal the page's now (compared at every fetch, `bytes.Equal` over
+  its length), so a store into code is seen at the next fetch and nothing invalidates: x86i no longer marks code pages (emu's
+  `PermCode`, `MarkCode`, `ClearCode` and `OnCode` are unused by both machines now; emu unchanged). The hit is Inst's, inline.
+  Decoding reads the page's own bytes when 15 fit in it, else `AS.Fetch` across its end.
+- **An instruction across a page's end** is in no page's array (a page's entry could only compare its own bytes): it is kept in
+  `cross` by address, used when the bytes fetched now from both pages (the second page's permission checked by AS.Fetch) are its
+  own. Rare (a fetch then costs AS.Fetch and a map lookup, as every fetch did before).
+- **PendingSignal** returns at once when nothing is pending and unblocked: Step asks after every instruction, and its loop over 64
+  signals was 40% of a fetch-bound loop's time (pprof) once the fetch was cheap.
+- **Injected faults** (`X86I_INJECT=any:F`, any family): `w` an entry used whatever the bytes now, `g` the last page's bytes kept
+  across Gen's changes, `x` an instruction across a page's end kept in its first page's array and compared there alone. The program
+  `test/asm/x86i/smc.s`: code in an RWX page called, its immediate rewritten and called again; a loop rewriting an instruction it ran
+  in the page it runs in; `mov $imm32, %eax` across two pages' boundary, its immediate rewritten on the second page, then on the
+  first; a file mapped MAP_PRIVATE|MAP_FIXED over the page running the mmap (the instruction after the syscall the file's), then
+  the page's other function called again. Controls `u315-inject-smc-w` (steps 2, 3, 5, 6, 9 run the old code), `-g` (step 8),
+  `-x` (step 5), `u315-cpu-smc-vs-misc`: fail as they must (probed: judged by x86i_judge with the CPU's run stood in for by x86i's).
+- **Results unchanged** (probed, base and head built alike): every one of x86i-check's 46 programs' stdout, stderr, status, coverage
+  and decode-text equal; the coverage computed from the runs equal to `test/asm/x86i-coverage-amd64.txt` (smc executes no
+  instruction not already executed). a64i's `check --record` (980 rows) and `goroot-check --record` (1,178) rewrite their files
+  byte for byte, go-check's controls fail as they must.
+
+| x86i run (arm64 probe, wall) | base 98cfb63c4 | the cache alone | head | |
+|---|---|---|---|---|
+| a fetch-bound loop, 72 M instructions | 4.24 s (17 M/s) | 3.35 s | 1.42 s (51 M/s) | 3.0x |
+| alu.s (8.6 M) | 0.50 s | | 0.15 s | 3.3x |
+| synth-ssefp (0.65 M, decode-heavy) | 61 ms | | 27 ms | 2.2x |
+| x86i-check's 46 programs run, 3 passes | 5.0 s | | 2.6 s | 1.9x |
+
+x86i-check's wall time on amd64 is mostly the CPU's runs, the eval's builds and the lockstep's ptrace, as a64i check's: x86i's own runs
+are a part of it (the main host's measurement).
