@@ -26,7 +26,7 @@ cmd=${1:-}; lib=${2:-}
 [ -n "$cmd" ] && [ -n "$lib" ] || { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2; }
 dir=$root/tools/pyi/clib/$lib
 [ -f "$dir/lib.conf" ] || die "no library $lib (tools/pyi/clib/$lib/lib.conf)"
-url= sha256= top= cflags= sources= glue= includes= cache_var= members= root_includes=
+url= sha256= top= cflags= sources= glue= includes= cache_var= members= root_includes= inline=
 . "$dir/lib.conf"
 work=$root/.tmp/pyi-clib/$lib
 cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
@@ -64,21 +64,31 @@ build_into() {
   # shellcheck disable=SC2086
   tar -xf "$tb" -C "$work/src" $members
   src=$work/src/$top
+  # queue 269: lib.conf's inline (FILE:FRAGMENT): FILE's line #include "FRAGMENT's name" replaced by FRAGMENT's text
+  local il
+  for il in $inline; do
+    awk -v inc="$src/${il##*:}" -v line="#include \"$(basename "${il##*:}")\"" \
+      '$0 == line { while ((getline l < inc) > 0) print l; next } { print }' "$src/${il%%:*}" > "$src/${il%%:*}.inl"
+    mv "$src/${il%%:*}.inl" "$src/${il%%:*}"
+  done
+  # queue 270: every path ci sees relative to the checkout, ci run from it, so __FILE__ (assert's messages) and the
+  # statics' sizes do not depend on where the checkout lives (261's build at another path differed at the same key)
+  local rdir=${dir#"$root"/} rsrc=${src#"$root"/}
   local files=() f
-  for f in $glue; do files+=("$dir/$f"); done
-  for f in $sources; do files+=("$src/$f"); done
+  for f in $glue; do files+=("$rdir/$f"); done
+  for f in $sources; do files+=("$rsrc/$f"); done
   # the include path: the glue's directory first (a library's configured config.h lives there), the tarball's top,
   # then lib.conf's includes (directories of the tarball)
-  local incs=(-I"$dir" -I"$src")
-  for f in $includes; do incs+=(-I"$src/$f"); done
+  local incs=(-I"$rdir" -I"$rsrc")
+  for f in $includes; do incs+=(-I"$rsrc/$f"); done
   # queue 244: lib.conf's root_includes, directories of the checkout (Arbace's clean-room Python.h), after the glue's
-  for f in $root_includes; do incs+=(-I"$root/$f"); done
+  for f in $root_includes; do incs+=(-I"$f"); done
   rm -rf "$out"; mkdir -p "$out/go/clib/$lib"
   # shellcheck disable=SC2086
   # the checkout's builder, evaluated (a stage 0 embeds the arbace/c it was built from, which the key does not name:
   # RULES' ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1, about 5 times slower)
-  ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 \
-  "$root/bin/ci" nodes $cflags "${incs[@]}" -o "$out/$lib.nodes" "${files[@]}" > "$out/nodes.log" 2>&1 \
+  (cd "$root" && ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 \
+  "$root/bin/ci" nodes $cflags "${incs[@]}" -o "$out/$lib.nodes" "${files[@]}") > "$out/nodes.log" 2>&1 \
     || { grep -v '^Reflection\|^Auto-boxing\|recur arg' "$out/nodes.log" >&2; die "ci's builder refused $lib"; }
   printf 'module arbace\n\ngo 1.27\n' > "$out/go/go.mod"
   python3 -I -S -B - "$out/$lib.nodes" "$out/go/clib/$lib/nodes.go" "$lib" "$k" "$sha256" "$url" <<'PY'

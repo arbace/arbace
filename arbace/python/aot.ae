@@ -126,7 +126,8 @@
                      (list 'when 'done (list 'goto (lbl arg))))]
     :return ['(return (py/AotPop f) nil)]
     :raise [(list 'return (list 'py/AotRaise 't 'f arg))]
-    :reraise ['(return (py/AotReraise f))]
+    ;; the instruction's index: RERAISE N's reported lasti (queue 279)
+    :reraise [(list 'return (list 'py/AotReraise 'f n))]
     :push-exc-info ['(py/AotPushExcInfo t f)]
     :pop-except ['(py/AotPopExcept t f)]
     :check-exc-match [(chk '(py/AotCheckExcMatch f))]
@@ -283,6 +284,9 @@
             out (java.util.ArrayList.)
             emit! (fn [x] (.add out x))
             m (volatile! 0) d (volatile! 0) live (volatile! false)
+            ;; whether a live operation jumps to the dispatch label (queue 279: an AotExec operation in dead code emits none,
+            ;; and Go refuses a label defined and not used)
+            dispatched (volatile! false)
             fail! (fn [msg] (throw (ex-info (str "aot regs: " msg) {:regs true})))
             push! (fn [] (let [k @d] (vswap! d inc) (sv k)))
             slot (fn [k] (if (>= k @m) (sv k) (list 'aget '(.-Stack f) k)))
@@ -390,6 +394,7 @@
                         (emit! (list 'when [(list 'values 'r 'err) (list 'py/AotExec 't 'f n)] '(or (!= err nil) (!= r nil))
                                      '(return r err)))
                         (emit! (list 'when (list '!= '(.-PC f) (inc n)) '(goto :dispatch)))
+                        (vreset! dispatched true)
                         (if-let [dn1 (get depth (inc n))]
                           (do (vreset! m dn1) (vreset! d dn1))
                           (vreset! live false))
@@ -533,7 +538,7 @@
                                     (vreset! live false))
                         :raise (do (spill-all!) (emit! (lasti n)) (emit! (list 'return (list 'py/AotRaise 't 'f arg)))
                                    (vreset! live false))
-                        :reraise (do (spill-all!) (emit! (lasti n)) (emit! '(return (py/AotReraise f))) (vreset! live false))
+                        :reraise (do (spill-all!) (emit! (lasti n)) (emit! (list 'return (list 'py/AotReraise 'f n))) (vreset! live false))
                         :push-exc-info (do (take! (dec @d))
                                            (let [e (sv (dec @d)) r (sv @d)]
                                              (emit! (list 'set! r e)) (emit! (list 'set! e '(.-Handled t)))
@@ -550,7 +555,7 @@
         (let [vars (concat (for [k (range (+ 2 (reduce max 0 (keep identity depth))))] (tagged (sv k) 'py/Object))
                            [(tagged 'tmp 'py/Object) (tagged 'err 'error) (tagged 'tb 'bool)
                             (tagged 'items '(slice py/Object))])
-              exec-any? (some exec? (range nc))
+              exec-any? @dispatched
               sw (list* 'switch '(.-PC f) (concat (for [n starts :when (< n nc)] (list 'case [n] (list 'goto (lbl n))))
                                                   (for [n reentries] (list 'case [n] (list 'goto (keyword (str "C" n)))))))]
           (list 'go/func nm [go-thread go-frame] :results '[py/Object error]
@@ -927,7 +932,8 @@
 
 (defn- class-of
   "The class of a non-pass that the rule (:as-pyi) does not take: the first class of CLASSES whose :ids hold ID or
-  whose :match finds itself in TEXT"
+  whose :match finds itself in TEXT (its name is its :id; queue 279: the judge read :class, so a classed run's record
+  named :differs or :refused)"
   [classes id text]
   (first (filter (fn [c] (or (some #{id} (:ids c)) (and (:match c) text (re-find (re-pattern (:match c)) text)))) classes)))
 
