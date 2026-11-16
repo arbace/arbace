@@ -31,7 +31,17 @@
     ^{:line 31 :tag uint64} Base
     ^{:line 32 :tag (slice byte)} B
     ^{:line 33 :tag bool} RO
-    ^{:line 34 :tag string} Name))
+    ^{:line 34 :tag string} Name
+    ^{:tag (* hostMem) :doc "host, when set, is the host's mapping the bytes lie in (Reserve, queue 311)\n"} host))
+
+
+(go/type hostMem "hostMem is a host's mapping that backs a reservation's slabs (Reserve, queue 311): its bytes B from the guest's address Base,\nlive the bytes of it still mapped in the guest; the host's mapping is returned when none is.\n" (struct
+    ^{:tag uint64} Base
+    ^{:tag (slice byte)} B
+    ^{:tag uint64} live))
+
+
+(go/const ^{:tag uint64 :val 65536 :doc "hostMin is the size from which Reserve takes the host's mapping, below it Go's memory.\n"} hostMin 65536)
 
 
 
@@ -242,6 +252,56 @@
 
 
 
+(go/method Reserve "Reserve maps size zero bytes at base (a fixed address, page-aligned) as Map does, their bytes the host's demand-zero memory\nfrom hostMin bytes on (hostAlloc: on Linux an anonymous MAP_NORESERVE mapping, so a page costs memory at its first touch and a\nreservation only its record; queue 311, review 306 F6), Go's below it; nil when the host refuses the mapping.\n" ^{:tag (* Slab)} [^{:tag (* Mem)} m ^uint64 base ^uint64 size ^bool ro ^string name]
+  (when (< size hostMin)
+    (return (.Map m base size ro name)))
+
+  (let [b (hostAlloc size)]
+    (when (== b nil)
+      (return nil))
+
+    (let [s (addr (lit Slab :Base base :B b :RO ro :Name name :host (addr (lit hostMem :Base base :B b :live size))))]
+      (.insert m s)
+      (set! (values (.-last m) (.-prev m)) (values nil nil))
+      s)))
+
+
+(go/method release "release gives the host the bytes [lo, hi) of s's host mapping that the guest no longer maps (Unmap): its whole host pages\nthere zeroed and freed (hostZero), the mapping itself returned when nothing of it is mapped.\n" [^{:tag (* Slab)} s ^uint64 lo ^uint64 hi]
+  (let [h (.-host s)]
+    (when (or (== h nil) (>= lo hi))
+      (return))
+
+    (set! (.-live h) - (- hi lo))
+    (when (== (.-live h) 0)
+      (hostFree (.-B h))
+      (set! (.-B h) nil)
+      (return))
+
+    (hostZero (.-B h) (- lo (.-Base h)) (- hi (.-Base h)))))
+
+
+(go/method Zero "Zero makes the n bytes at a (mapped, in one slab) zeros, the host's whole pages among them freed where the host backs them\n(madvise's MADV_DONTNEED, queue 311).\n" [^{:tag (* Mem)} m ^uint64 a ^uint64 n]
+  (let [s (.find m a n)]
+    (when (== s nil)
+      (return))
+
+    (let [o (- a (.-Base s))
+          b (subslice (.-B s) o (+ o n))
+          ^uint64 l n
+          ^uint64 e n]
+      (when [h (.-host s)] (!= h nil)
+        (let [(values fl fh) (hostZero (.-B h) (- a (.-Base h)) (- (+ a n) (.-Base h)))]
+          (when (< fl fh)
+            (set! (values l e) (values (- (+ fl (.-Base h)) a) (- (+ fh (.-Base h)) a))))))
+
+      ;; the bytes the host did not free: all of them, or those before and after its pages
+      (when (== l n)
+        (set! (values l e) (values 0 0)))
+
+      (clear (subslice b _ l))
+      (clear (subslice b e)))))
+
+
 ^{:go/end 261} (go/method Unmap "Unmap removes the pages [base, base+size) from every slab, splitting one that holds them\npartly; it reports whether anything was mapped there.\n" ^bool [^{:tag (* Mem)} m ^uint64 base ^uint64 size]
   (let [end (+ base size)
       ^{:line 240 :tag (slice (* Slab))} out (zero (slice (* Slab)))
@@ -253,10 +313,12 @@
 
       (set! hit true)
       (when (< (.-Base s) base)
-        (set! out (append out (addr (lit Slab :Base (.-Base s) :B (subslice (.-B s) _ (- base (.-Base s)) (- base (.-Base s))) :RO (.-RO s) :Name (.-Name s))))))
+        (set! out (append out (addr (lit Slab :Base (.-Base s) :B (subslice (.-B s) _ (- base (.-Base s)) (- base (.-Base s))) :RO (.-RO s) :Name (.-Name s) :host (.-host s))))))
 
       (when (> (.End s) end)
-        (set! out (append out (addr (lit Slab :Base end :B (subslice (.-B s) (- end (.-Base s))) :RO (.-RO s) :Name (.-Name s))))))
+        (set! out (append out (addr (lit Slab :Base end :B (subslice (.-B s) (- end (.-Base s))) :RO (.-RO s) :Name (.-Name s) :host (.-host s))))))
+
+      (.release s (max base (.-Base s)) (min end (.End s)))
 
       (when (== s (.-heap m))
         (set! (.-heap m) nil)))

@@ -30,7 +30,9 @@
   ^{:line 30} [^{:val 29} eSPIPE 29]
   ^{:line 31} [^{:val 32} ePIPE 32]
   ^{:line 32} [^{:val 34} eRANGE 34]
-  ^{:line 33} [^{:val 38} eNOSYS 38])
+  ^{:line 33} [^{:val 38} eNOSYS 38]
+  [^{:val 40} eLOOP 40]
+  [^{:val 95} eOPNOTSUPP 95])
 
 
 (go/const
@@ -45,7 +47,17 @@
   ^{:line 45} [^{:val 1024} oAppend 02000]
   ^{:line 46} [^{:val 2048} oNonblock 04000]
   ^{:line 47} [^{:val 65536} oDirectory 0200000]
-  ^{:line 48} [^{:val 524288} oCloexec 02000000])
+  ^{:line 48} [^{:val 524288} oCloexec 02000000]
+  ;; queue 309: x86-64's O_NOCTTY, O_LARGEFILE, O_NOFOLLOW and O_PATH (an arm64 program's flags are translated to these by a64i)
+  [^{:val 256} oNoctty 0400]
+  [^{:val 32768} oLargefile 0100000]
+  [^{:val 131072} oNofollow 0400000]
+  [^{:val 2097152} oPath 010000000]
+  ;; queue 314: the *at calls' AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH, utimensat's UTIME_NOW and UTIME_OMIT
+  [^{:val 256} atSymlinkNofollow 0x100]
+  [^{:val 4096} atEmptyPath 0x1000]
+  [^{:val 1073741823} utimeNow 0x3fffffff]
+  [^{:val 1073741822} utimeOmit 0x3ffffffe])
 
 
 
@@ -57,6 +69,8 @@
     ^{:line 57 :tag int} refs
     ^{:line 58 :tag int} flags ; O_* status flags and the access mode
     ^{:line 59 :tag bool} dir
+    ^{:tag bool :doc "opath is an O_PATH descriptor's (queue 309): no host file, its I/O EBADF; link when it is a symlink's own (O_NOFOLLOW).\n"} opath
+    ^{:tag bool} link
     ^{:line 60 :tag string} path
     ^{:line 61 :tag (slice sysDirent)} ents
     ^{:line 62 :tag bool} loaded
@@ -101,6 +115,7 @@
     ^{:tag (slice string)} Self
     ^{:tag string} Argv0
     ^{:tag (array 3 (* os/File))} StdFiles
+    ^{:tag string :doc "Machine is uname's machine field (queue 311, review 306 F5: the emulated machine's, a64i's \"aarch64\"); empty, \"x86_64\".\n"} Machine
     ^{:tag bool} inChild
     ^{:tag (map int (* childProc))} procs
     ^{:tag int} nextFake
@@ -164,6 +179,21 @@
     (return (.-of e)))
 
   nil)
+
+
+(go/method getIO "getIO is fd's open file description for I/O: nil (EBADF) for an O_PATH descriptor's too (queue 309).\n" ^{:tag (* sysFile)} [^{:tag (* Sys)} s ^int fd]
+  (let [of (.get s fd)]
+    (when (and (!= of nil) (.-opath of))
+      (return nil))
+
+    ^{:line 168} of))
+
+
+(go/method machine "machine is uname's machine field: Machine, else x86-64's (queue 311).\n" ^string [^{:tag (* Sys)} s]
+  (when (== (.-Machine s) "")
+    (return "x86_64"))
+
+  (.-Machine s))
 
 
 ^{:go/end 169} (go/method alloc ^int64 [^{:tag (* Sys)} s ^{:tag (* sysFile)} of ^int min ^bool cloexec]
@@ -273,13 +303,13 @@
   (let [m (.-M s)]
     (switch n
       (case [0] ; read
-        (let [of (.get s (fdArg a1))]
+        (let [of (.getIO s (fdArg a1))]
           (when (== of nil)
             (return (- eBADF)))
 
           (return (.doRead s of (.W m a2 (clampCount a3))))))
       (case [1] ; write
-        (let [of (.get s (fdArg a1))]
+        (let [of (.getIO s (fdArg a1))]
           (when (== of nil)
             (return (- eBADF)))
 
@@ -312,7 +342,9 @@
       (case [271] ; ppoll
         (return (.poll s a1 a2)))
       (case [270] ; pselect6
-        (return (.pselect s a1 a2 a3 a4)))
+        (return (.pselect s a1 a2 a3 a4 a5 a6 false)))
+      (case [23] ; select (queue 314: musl x86_64's)
+        (return (.pselect s a1 a2 a3 a4 a5 0 true)))
       (case [8] ; lseek
         (return (.lseek s (fdArg a1) (conv int64 a2) (conv int (conv int32 a3)))))
       (case [9]
@@ -334,6 +366,9 @@
       (case [16] ; ioctl: nothing is a terminal; FIONBIO, FIOCLEX and FIONCLEX as fcntl's (RE6: std's read2 sets its pipes
         ;; non-blocking so; a read still waits for data, poll answering ready)
         (let [e (aget (.-fds s) (fdArg a1))]
+          (when (and (!= e nil) (.-opath (.-of e))) ; queue 309: O_PATH's
+            (return (- eBADF)))
+
           (switch a2
             (case [0x5421] ; FIONBIO
               (when (== e nil)
@@ -349,7 +384,7 @@
               (return 0))))
         (return (- eNOTTY)))
       (case [17] ; pread64
-        (let [of (.get s (fdArg a1))]
+        (let [of (.getIO s (fdArg a1))]
           (when (== of nil)
             (return (- eBADF)))
 
@@ -365,7 +400,7 @@
 
             (return (conv int64 k)))))
       (case [18] ; pwrite64
-        (let [of (.get s (fdArg a1))]
+        (let [of (.getIO s (fdArg a1))]
           (when (== of nil)
             (return (- eBADF)))
 
@@ -478,14 +513,14 @@
           (range [i b]
             (aset b i 0))
 
-          (range [i f (lit (slice string) "Linux" "arbace" "6.18.0" "#1" "x86_64" "(none)")]
+          (range [i f (lit (slice string) "Linux" "arbace" "6.18.0" "#1" (.machine s) "(none)")]
             (copy (subslice b (* i 65) (+ (* i 65) 64)) f))
 
           (return 0)))
       (case [72]
         (return (.fcntl s (fdArg a1) (conv int (conv int32 a2)) a3)))
       (case [74 75] ; fsync, fdatasync
-        (let [of (.get s (fdArg a1))]
+        (let [of (.getIO s (fdArg a1))]
           (when (== of nil)
             (return (- eBADF)))
 
@@ -496,7 +531,7 @@
 
           (return 0)))
       (case [77] ; ftruncate
-        (let [of (.get s (fdArg a1))]
+        (let [of (.getIO s (fdArg a1))]
           (when (== of nil)
             (return (- eBADF)))
 
@@ -537,7 +572,27 @@
           (when (!= e 0)
             (return e))
 
-          (return (errOrZero (syscall/Mkdir p (bit-and (bit-and-not (conv uint32 a2) (.-umask s)) 0777))))))
+          (return (.mkdir s p (conv uint32 a2)))))
+      (case [258] ; mkdirat (queue 314: os.Root's Mkdir and MkdirAll; at AT_FDCWD emu's kernel's before)
+        (let [(values p e) (.pathArg s (fdArg a1) a2)]
+          (when (!= e 0)
+            (return e))
+
+          (return (.mkdir s p (conv uint32 a3)))))
+      (case [90] ; chmod (queue 314)
+        (return (.chmod s sysAtFDCWD a1 (conv uint32 a2) 0)))
+      (case [268] ; fchmodat: three arguments, no flags (Linux's: AT_SYMLINK_NOFOLLOW unseen, a link followed)
+        (return (.chmod s (fdArg a1) a2 (conv uint32 a3) 0)))
+      (case [452] ; fchmodat2 (os.Root's Chmod, Go's syscall.Fchmodat with flags)
+        (return (.chmod s (fdArg a1) a2 (conv uint32 a3) (conv int (conv int32 a4)))))
+      (case [92] ; chown
+        (return (.chown s sysAtFDCWD a1 a2 a3 0)))
+      (case [94] ; lchown
+        (return (.chown s sysAtFDCWD a1 a2 a3 atSymlinkNofollow)))
+      (case [260] ; fchownat (os.Root's Lchown and Chown)
+        (return (.chown s (fdArg a1) a2 a3 a4 (conv int (conv int32 a5)))))
+      (case [280] ; utimensat (os.Root's Chtimes, os.Chtimes, musl's futimens)
+        (return (.utimens s (fdArg a1) a2 a3 (conv int (conv int32 a4)))))
       (case [84] ; rmdir
         (let [(values p e) (.resolve s sysAtFDCWD (.CString m a1))]
           (when (!= e 0)
@@ -561,6 +616,14 @@
           (return (errOrZero (syscall/Unlink p)))))
       (case [89]
         (return (.readlink s sysAtFDCWD a1 a2 a3)))
+      (case [88] ; symlink (queue 309)
+        (return (.symlink s a1 sysAtFDCWD a2)))
+      (case [266] ; symlinkat
+        (return (.symlink s a1 (fdArg a2) a3)))
+      (case [86] ; link
+        (return (.link s sysAtFDCWD a1 sysAtFDCWD a2 0)))
+      (case [265] ; linkat
+        (return (.link s (fdArg a1) a2 (fdArg a3) a4 (conv int (conv int32 a5)))))
       (case [267]
         (return (.readlink s (fdArg a1) a2 a3 a4)))
       (case [95] ; umask
@@ -707,7 +770,7 @@
 
 
 ^{:go/end 703} (go/method vector "vector is readv (read) or writev over the struct iovec array at iov.\n" ^int64 [^{:tag (* Sys)} s ^bool read ^int fd ^uint64 iov ^uint64 cnt]
-  (let [of (.get s fd)]
+  (let [of (.getIO s fd)]
     (when (== of nil)
       (return (- eBADF)))
 
@@ -737,10 +800,42 @@
       ^{:line 702} total)))
 
 
-^{:go/end 748} (go/method open ^int64 [^{:tag (* Sys)} s ^int dirfd ^string p ^int flags ^uint32 mode]
-  (let [(values path e) (.resolve s dirfd p)]
+^{:go/end 748} (go/method open "open is openat with x86-64's flags as Linux 7.3 takes them (queue 309): O_PATH keeps O_DIRECTORY, O_NOFOLLOW and\nO_CLOEXEC alone and opens no host file; O_CREAT with O_DIRECTORY EINVAL; O_NOFOLLOW on a symlink ELOOP (O_DIRECTORY's ENOTDIR\nfirst, O_CREAT|O_EXCL's EEXIST, with O_PATH the link itself); O_DIRECTORY on what is not a directory ENOTDIR before the open; the\ndescription's flags without O_CREAT, O_EXCL, O_NOCTTY, O_TRUNC and O_CLOEXEC, with O_LARGEFILE (F_GETFL's).\n" ^int64 [^{:tag (* Sys)} s ^int dirfd ^string p ^int flags ^uint32 mode]
+  (if (!= (bit-and flags oPath) 0)
+    (set! flags bit-and (bit-or oPath oDirectory oNofollow oCloexec))
+    (when (and (!= (bit-and flags oCreat) 0) (!= (bit-and flags oDirectory) 0))
+      (return (- eINVAL))))
+
+  (let [(values path e) (.resolve s dirfd p)
+        cx (!= (bit-and flags oCloexec) 0)]
     (when (!= e 0)
       (return e))
+
+    (when (!= (bit-and flags oNofollow) 0)
+      (when [(values fi err) (os/Lstat path)] (and (== err nil) (!= (bit-and (.Mode fi) fs/ModeSymlink) 0))
+        (switch
+          (case [(!= (bit-and flags oDirectory) 0)]
+            (return (- eNOTDIR)))
+          (case [(!= (bit-and flags oPath) 0)]
+            (return (.alloc s (addr (lit sysFile :opath true :link true :flags (bit-and-not flags oCloexec) :path (filepath/Clean path))) 0 cx)))
+          (case [(== (bit-and flags (bit-or oCreat oExcl)) (bit-or oCreat oExcl))]
+            (return (- eEXIST))))
+
+        (return (- eLOOP))))
+
+    (when (!= (bit-and flags oPath) 0)
+      (let [(values fi err) (os/Stat path)]
+        (when (!= err nil)
+          (return (eno err)))
+
+        (when (and (!= (bit-and flags oDirectory) 0) (not (.IsDir fi)))
+          (return (- eNOTDIR)))
+
+        (return (.alloc s (addr (lit sysFile :opath true :flags (bit-and-not flags oCloexec) :dir (.IsDir fi) :path (filepath/Clean path))) 0 cx))))
+
+    (when (!= (bit-and flags oDirectory) 0)
+      (when [(values fi err) (os/Stat path)] (and (== err nil) (not (.IsDir fi)))
+        (return (- eNOTDIR))))
 
     (let [^int gf (zero int)]
       (switch (bit-and flags 3)
@@ -778,12 +873,12 @@
             (.Close f)
             (return (- eNOTDIR)))
 
-          (let [of (addr (lit sysFile :f f :flags (bit-and-not flags (bit-or oCreat oExcl oTrunc oDirectory oCloexec)) :dir (.IsDir fi) :path (filepath/Clean path)))]
-            (.alloc s of 0 (!= (bit-and flags oCloexec) 0))))))))
+          (let [of (addr (lit sysFile :f f :flags (bit-or (bit-and-not flags (bit-or oCreat oExcl oNoctty oTrunc oCloexec)) oLargefile) :dir (.IsDir fi) :path (filepath/Clean path)))]
+            (.alloc s of 0 cx)))))))
 
 
 ^{:go/end 766} (go/method lseek ^int64 [^{:tag (* Sys)} s ^int fd ^int64 off ^int whence]
-  (let [of (.get s fd)]
+  (let [of (.getIO s fd)]
     (when (== of nil)
       (return (- eBADF)))
 
@@ -836,10 +931,16 @@
       (case [3] ; F_GETFL
         (return (conv int64 (.-flags (.-of e)))))
       (case [4] ; F_SETFL
+        (when (.-opath (.-of e)) ; queue 309: O_PATH's
+          (return (- eBADF)))
+
         (let [^:const ^{:val 27648} settable (bit-or oAppend oNonblock 020000 040000)]
           (set! (.-flags (.-of e)) (bit-or (bit-and-not (.-flags (.-of e)) settable) (bit-and (conv int arg) settable)))
           (return 0)))
       (case [5 6 7] ; record locks: nothing contends
+        (when (.-opath (.-of e)) ; queue 309: O_PATH's
+          (return (- eBADF)))
+
         (return 0)))
 
     (- eINVAL)))
@@ -855,8 +956,8 @@
           (values fd ev) (values (conv int32 (.Load32 (.-M s) p)) (.Load16 (.-M s) (+ p 4)))
           ^{:line 821 :tag uint16} rev (zero uint16)]
         (when (>= fd 0)
-          (if (== (.get s (conv int fd)) nil)
-            (set! rev 0x20) ; POLLNVAL
+          (if (== (.getIO s (conv int fd)) nil)
+            (set! rev 0x20) ; POLLNVAL (queue 309: an O_PATH descriptor's too)
 
             (set! rev (bit-and ev 5)))) ; POLLIN|POLLOUT: always ready
 
@@ -869,26 +970,95 @@
     ^{:line 834} cnt))
 
 
-^{:go/end 857} (go/method pselect ^int64 [^{:tag (* Sys)} s ^uint64 nfds ^uint64 rd ^uint64 wr ^uint64 ex]
-  (when (> nfds 1024)
+(go/method pselect "pselect is pselect6, or x86-64's select with tv (queue 314), as Linux 7.3: nfds below 0 EINVAL; the timeout read first (a\nnegative one or a tv_nsec past 999999999 EINVAL; select's tv_usec carried into seconds), then pselect6's signal mask argument (a set\nwhose size is not 8 EINVAL); nfds cut at the descriptor table's size (fdsMax); a bit set below it of no open descriptor EBADF; every\nopen descriptor ready to read and to write (crt's poll's model: a file always is, an O_PATH descriptor too: Linux's empty_fops'\nDEFAULT_POLLMASK, queue 309), none exceptional; the sets given written back (nfds' longs), the result the bits set; nothing ready,\nthe timeout slept; a timeout not zero written back as what remains of it.\n" ^int64 [^{:tag (* Sys)} s ^uint64 nfds ^uint64 rd ^uint64 wr ^uint64 ex ^uint64 tp ^uint64 smask ^bool tv]
+  (when (< (conv int32 nfds) 0)
     (return (- eINVAL)))
 
-  (let [^int64 cnt (zero int64)]
-    (range [_ set (lit (slice uint64) rd wr)]
-      (when (== set 0)
-        (continue))
+  (let [m (.-M s)
+      ^time/Duration d -1
+      start (time/Now)]
+    (when (!= tp 0)
+      (let [sec (conv int64 (.Load64 m tp))
+          nsec (conv int64 (.Load64 m (+ tp 8)))]
+        (when tv
+          (set! (values sec nsec) (values (+ sec (/ nsec 1000000)) (* (% nsec 1000000) 1000))))
 
-      (let [b (.R (.-M s) set (/ (+ nfds 7) 8))]
-        (for [i 0] (< i (conv int nfds)) (inc! i)
-          (when (!= (bit-and (>> (aget b (/ i 8)) (% i 8)) 1) 0)
-            (when (== (.get s i) nil)
-              (return (- eBADF)))
+        (when (or (< sec 0) (< nsec 0) (>= nsec 1000000000))
+          (return (- eINVAL)))
 
-            (inc! cnt)))))
+        (when (> sec (<< 1 32))
+          (set! sec (<< 1 32)))
+
+        (set! d (+ (* (conv time/Duration sec) time/Second) (conv time/Duration nsec)))))
+
+    (when (!= smask 0)
+      (when (and (!= (.Load64 m smask) 0) (!= (.Load64 m (+ smask 8)) 8))
+        (return (- eINVAL))))
+
+    (let [n (min (conv int (conv int32 nfds)) (.fdsMax s))
+        words (/ (+ n 63) 64)
+        sets (lit (array 3 uint64) rd wr ex)
+        ^{:tag (array 3 (slice uint64))} in (zero (array 3 (slice uint64)))
+        ^int64 cnt 0]
+      (range [k p sets]
+        (aset in k (make (slice uint64) words))
+        (when (!= p 0)
+          (for [w 0] (< w words) (inc! w)
+            (aset (aget in k) w (.Load64 m (+ p (conv uint64 (* 8 w)))))))
+
+        (when (and (> words 0) (!= (% n 64) 0))
+          (let [last (aget in k)]
+            (aset last (- words 1) (bit-and (aget last (- words 1)) (- (<< (conv uint64 1) (% n 64)) 1))))))
+
+      (for [i 0] (< i n) (inc! i)
+        (let [bit (<< (conv uint64 1) (% i 64))]
+          (when (and (!= (bit-and (bit-or (aget (aget in 0) (/ i 64)) (aget (aget in 1) (/ i 64)) (aget (aget in 2) (/ i 64))) bit) 0) (== (.get s i) nil))
+            (return (- eBADF)))
+
+          (range [k _ sets]
+            (when (and (< k 2) (!= (bit-and (aget (aget in k) (/ i 64)) bit) 0))
+              (inc! cnt)))))
+
+      (range [k p sets]
+        (when (!= p 0)
+          (for [w 0] (< w words) (inc! w)
+            (let [^uint64 v 0]
+              (when (< k 2)
+                (set! v (aget (aget in k) w)))
+
+              (.Store64 m (+ p (conv uint64 (* 8 w))) v)))))
+
+      (when (and (== cnt 0) (> d 0))
+        (.sleep s d))
+
+      (when (> d 0)
+        (let [left (- d (time/Since start))]
+          (when (< left 0)
+            (set! left 0))
+
+          (.Store64 m tp (conv uint64 (/ left time/Second)))
+          (if tv
+            (.Store64 m (+ tp 8) (conv uint64 (/ (% left time/Second) time/Microsecond)))
+            (.Store64 m (+ tp 8) (conv uint64 (% left time/Second))))))
+
+      cnt)))
 
 
+(go/method fdsMax "fdsMax is Linux's descriptor table's size (max_fds) for the open descriptors below 1<<20 (nr_open's default: emu's own descriptors\nabove it are not the program's): 64 (NR_OPEN_DEFAULT), else 128 times a power of two that holds the highest (alloc_fdtable's\nrounding; Linux's table never shrinks, this one follows the open descriptors).\n" ^int [^{:tag (* Sys)} s]
+  (let [hi -1]
+    (range [fd _ (.-fds s)]
+      (when (and (> fd hi) (< fd (<< 1 20)))
+        (set! hi fd)))
 
-    ^{:line 856} cnt))
+    (when (< hi 64)
+      (return 64))
+
+    (let [k (+ (/ hi 128) 1)
+        p 1]
+      (while (< p k)
+        (set! p * 2))
+
+      (* 128 p))))
 
 
 ^{:go/end 876} (go/method mmap ^int64 [^{:tag (* Sys)} s ^uint64 addr ^uint64 length ^uint64 flags ^int fd]
@@ -956,15 +1126,188 @@
       (errOrZero (syscall/Rename o n)))))
 
 
-^{:go/end 939} (go/method readlink ^int64 [^{:tag (* Sys)} s ^int dirfd ^uint64 p ^uint64 buf ^uint64 size]
-  (let [(values path e) (.pathArg s dirfd p)]
+(go/method symlink "symlink is symlinkat (queue 309): the link lp relative to dirfd holding target, an empty target ENOENT.\n" ^int64 [^{:tag (* Sys)} s ^uint64 target ^int dirfd ^uint64 lp]
+  (let [t (.CString (.-M s) target)]
+    (when (== t "")
+      (return (- eNOENT)))
+
+    (let [(values path e) (.pathArg s dirfd lp)]
+      (when (!= e 0)
+        (return e))
+
+      (errOrZero (syscall/Symlink t path)))))
+
+
+(go/method link "link is linkat (queue 309): flags other than AT_SYMLINK_FOLLOW and AT_EMPTY_PATH EINVAL; a symlink linked itself, not\nfollowed, without AT_SYMLINK_FOLLOW; the empty old path with AT_EMPTY_PATH od's own file (a directory's EPERM).\n" ^int64 [^{:tag (* Sys)} s ^int od ^uint64 op ^int nd ^uint64 np ^int flags]
+  (when (!= (bit-and-not flags (bit-or 0x400 0x1000)) 0)
+    (return (- eINVAL)))
+
+  (let [name (.CString (.-M s) op)
+      ^string o ""
+      ^int64 e 0]
+    (if (and (== name "") (!= (bit-and flags 0x1000) 0))
+      (let [of (.get s od)]
+        (when (== od sysAtFDCWD)
+          (return (- ePERM)))
+
+        (when (== of nil)
+          (return (- eBADF)))
+
+        (when (.-dir of)
+          (return (- ePERM)))
+
+        (set! o (.-path of)))
+
+      (set! (values o e) (.resolve s od name)))
+
     (when (!= e 0)
       (return e))
 
-    (when (<= (conv int64 size) 0)
-      (return (- eINVAL)))
+    (when (!= (bit-and flags 0x400) 0)
+      (let [(values r err) (filepath/EvalSymlinks o)]
+        (when (!= err nil)
+          (return (eno err)))
 
-    (let [tmp (make (slice byte) (min size (<< 1 16)))
+        (set! o r)))
+
+    (let [(values n ^:assign e) (.pathArg s nd np)]
+      (when (!= e 0)
+        (return e))
+
+      (errOrZero (syscall/Link o n)))))
+
+
+(go/method atPath "atPath is the host path of an *at call's name at a relative to dirfd under its flags (queue 314): the empty name with\nAT_EMPTY_PATH dirfd's own file (AT_FDCWD's the cwd; any descriptor, an O_PATH one's too) and whether it is a symlink's own (an\nO_PATH|O_NOFOLLOW descriptor of a link, queue 309), else resolve's (the empty name ENOENT).\n" [^{:tag (* Sys)} s ^int dirfd ^uint64 a ^int flags] :results [string bool int64]
+  (let [name (.CString (.-M s) a)]
+    (when (or (!= name "") (== (bit-and flags atEmptyPath) 0))
+      (let [(values p e) (.resolve s dirfd name)]
+        (return p false e)))
+
+    (when (== dirfd sysAtFDCWD)
+      (return (.-cwd s) false 0))
+
+    (let [of (.get s dirfd)]
+      (when (== of nil)
+        (return "" false (- eBADF)))
+
+      (return (.-path of) (.-link of) 0))))
+
+
+(go/method mkdir "mkdir is mkdirat's directory at the host path p (queue 314): its mode as Linux's vfs_mkdir takes it, the permissions and\nS_ISVTX (01777) less the umask, set exactly after the host's mkdir (whose own umask is the runner's), an S_ISGID the parent gave kept.\n" ^int64 [^{:tag (* Sys)} s ^string p ^uint32 mode]
+  (let [want (bit-and-not (bit-and mode 01777) (.-umask s))]
+    (when [err (syscall/Mkdir p want)] (!= err nil)
+      (return (eno err)))
+
+    (let [^{:tag syscall/Stat_t} st (zero syscall/Stat_t)]
+      (when [err (syscall/Lstat p (addr st))] (and (== err nil) (!= (bit-and (.-Mode st) 01777) want))
+        (syscall/Chmod p (bit-or want (bit-and (.-Mode st) 02000))))
+
+      0)))
+
+
+(go/method chmod "chmod is fchmodat2 (fchmodat and chmod with flags 0; queue 314) as Linux 7.3: flags other than AT_SYMLINK_NOFOLLOW and\nAT_EMPTY_PATH EINVAL first; with AT_SYMLINK_NOFOLLOW, or AT_EMPTY_PATH on an O_PATH descriptor of a link, a symlink EOPNOTSUPP (Linux\nchanges no link's mode); else the host's chmod of mode's 07777 (a link followed).\n" ^int64 [^{:tag (* Sys)} s ^int dirfd ^uint64 a ^uint32 mode ^int flags]
+  (when (!= (bit-and-not flags (bit-or atSymlinkNofollow atEmptyPath)) 0)
+    (return (- eINVAL)))
+
+  (let [(values p link e) (.atPath s dirfd a flags)]
+    (when (!= e 0)
+      (return e))
+
+    (when (or link (!= (bit-and flags atSymlinkNofollow) 0))
+      (let [^{:tag syscall/Stat_t} st (zero syscall/Stat_t)]
+        (when [err (syscall/Lstat p (addr st))] (!= err nil)
+          (return (eno err)))
+
+        (when (== (bit-and (.-Mode st) 0170000) 0120000)
+          (return (- eOPNOTSUPP)))))
+
+    (errOrZero (syscall/Chmod p (bit-and mode 07777)))))
+
+
+(go/method chown "chown is fchownat (chown, lchown; queue 314) as Linux 7.3: flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH EINVAL\nfirst; a link's own owner with AT_SYMLINK_NOFOLLOW, or AT_EMPTY_PATH on an O_PATH descriptor of a link (the host's lchown), else the\nhost's chown (a link followed); an id of -1 left as it is.\n" ^int64 [^{:tag (* Sys)} s ^int dirfd ^uint64 a ^uint64 uid ^uint64 gid ^int flags]
+  (when (!= (bit-and-not flags (bit-or atSymlinkNofollow atEmptyPath)) 0)
+    (return (- eINVAL)))
+
+  (let [(values p link e) (.atPath s dirfd a flags)
+      (values u g) (values (conv int (conv int32 uid)) (conv int (conv int32 gid)))]
+    (when (!= e 0)
+      (return e))
+
+    (when (or link (!= (bit-and flags atSymlinkNofollow) 0))
+      (return (errOrZero (syscall/Lchown p u g))))
+
+    (errOrZero (syscall/Chown p u g))))
+
+
+(go/method utimens "utimens is utimensat (queue 314) as Linux 7.3: the times at tp (NULL: now), UTIME_NOW or UTIME_OMIT in a tv_nsec; both\nUTIME_OMIT 0 before anything else is looked at; a NULL name with a descriptor (musl's futimens) the descriptor's file (flags EINVAL,\nan O_PATH descriptor EBADF); else flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH EINVAL, then the name looked up\n(AT_SYMLINK_NOFOLLOW, or AT_EMPTY_PATH on an O_PATH descriptor of a link: the link's own times); then a tv_nsec outside\n0..999999999 EINVAL; the host's utimensat (sysUtimens).\n" ^int64 [^{:tag (* Sys)} s ^int dirfd ^uint64 a ^uint64 tp ^int flags]
+  (let [^{:tag (array 4 int64)} t (zero (array 4 int64))
+      have (!= tp 0)]
+    (when have
+      (for [i 0] (< i 4) (inc! i)
+        (aset t i (conv int64 (.Load64 (.-M s) (+ tp (conv uint64 (* 8 i)))))))
+
+      (when (and (== (aget t 1) utimeOmit) (== (aget t 3) utimeOmit))
+        (return 0)))
+
+    (let [^string p ""
+        nofollow (!= (bit-and flags atSymlinkNofollow) 0)]
+      (if (and (== a 0) (!= dirfd sysAtFDCWD))
+        (do
+          (when (!= flags 0)
+            (return (- eINVAL)))
+
+          (let [of (.getIO s dirfd)]
+            (when (== of nil)
+              (return (- eBADF)))
+
+            (set! p (.-path of))))
+        (do
+          (when (!= (bit-and-not flags (bit-or atSymlinkNofollow atEmptyPath)) 0)
+            (return (- eINVAL)))
+
+          (let [(values q link e) (.atPath s dirfd a flags)]
+            (when (!= e 0)
+              (return e))
+
+            (set! p q)
+            (when link
+              (set! nofollow true)))))
+
+      (let [^{:tag syscall/Stat_t} st (zero syscall/Stat_t)
+          ^error err nil]
+        (if nofollow
+          (set! err (syscall/Lstat p (addr st)))
+          (set! err (syscall/Stat p (addr st))))
+
+        (when (!= err nil)
+          (return (eno err)))
+
+        (when have
+          (range [_ ns (lit (slice int64) (aget t 1) (aget t 3))]
+            (when (and (!= ns utimeNow) (!= ns utimeOmit) (or (< ns 0) (> ns 999999999)))
+              (return (- eINVAL)))))
+
+        (errOrZero (sysUtimens p t have nofollow))))))
+
+
+^{:go/end 939} (go/method readlink "readlink is readlinkat (Linux's order: a size <= 0 EINVAL first); the empty path names dirfd's own file, an O_PATH\ndescriptor of a symlink's (queue 309), else ENOENT.\n" ^int64 [^{:tag (* Sys)} s ^int dirfd ^uint64 p ^uint64 buf ^uint64 size]
+  (when (<= (conv int64 (conv int32 size)) 0)
+    (return (- eINVAL)))
+
+  (let [name (.CString (.-M s) p)
+      (values path e) (.resolve s dirfd name)]
+    (when (and (== name "") (!= dirfd sysAtFDCWD))
+      (let [of (.get s dirfd)]
+        (when (== of nil)
+          (return (- eBADF)))
+
+        (when (.-link of)
+          (set! (values path e) (values (.-path of) 0)))))
+
+    (when (!= e 0)
+      (return e))
+
+    (let [tmp (make (slice byte) (min (conv uint64 (conv int32 size)) (<< 1 16)))
         (values k err) (syscall/Readlink path tmp)]
       (when (!= err nil)
         (return (eno err)))
@@ -1099,6 +1442,19 @@
         (sysPutStat b nil)
         (return 0))
 
+      ;; queue 309: an O_PATH descriptor's file by its path (a symlink's own, O_NOFOLLOW's)
+      (when (.-opath of)
+        (let [^os/FileInfo fi (zero os/FileInfo)
+              ^error err (zero error)]
+          (if (.-link of)
+            (set! (values fi err) (os/Lstat (.-path of)))
+            (set! (values fi err) (os/Stat (.-path of))))
+          (when (!= err nil)
+            (return (eno err)))
+
+          (sysPutStat b fi)
+          (return 0)))
+
       ^{:go/breaks [4]} (let [(values fi err) (.Stat (.-f of))]
         (when (!= err nil)
           (return (eno err)))
@@ -1194,7 +1550,7 @@
 
 
 ^{:go/end 1212} (go/method getdents ^int64 [^{:tag (* Sys)} s ^int fd ^uint64 buf ^uint64 count]
-  (let [of (.get s fd)]
+  (let [of (.getIO s fd)]
     (when (== of nil)
       (return (- eBADF)))
 
@@ -1255,3 +1611,23 @@
         (return (- eINVAL)))
 
       (conv int64 off))))
+
+
+(go/method WriteBack "WriteBack writes b to fd's file at off, whatever the description's O_APPEND (emu's shared file mappings' write-back,
+queue 310: Linux's page cache writes a mapped page in place): the bytes written, or -errno (EBADF, a pipe's ESPIPE, a directory's EISDIR, the host's).
+" ^int64 [^{:tag (* Sys)} s ^int fd ^{:tag (slice byte)} b ^int64 off]
+  (let [of (.get s fd)]
+    (when (== of nil)
+      (return (- eBADF)))
+
+    (when (== (.-f of) nil)
+      (return (- eSPIPE)))
+
+    (when (.-dir of)
+      (return (- eISDIR)))
+
+    (let [(values k err) (pwriteInPlace (.-f of) b off)]
+      (when (and (!= err nil) (== k 0))
+        (return (eno err)))
+
+      (conv int64 k))))

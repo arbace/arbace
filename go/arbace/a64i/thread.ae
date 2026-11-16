@@ -8,6 +8,8 @@
 (in-ns 'go.arbace.a64i) (go/file "thread.go" :imports [
     [fmt "fmt"]
     [os "os"]
+    [signal "os/signal"]
+    [syscall "syscall"]
     [time "time"]
 
     [crt "arbace/crt"]])
@@ -45,11 +47,19 @@
   [^{:tag uint64 :val 4095} quantumMask 4095]) ; a thread runs 4,096 instructions before the next runnable one
 
 
-(go/method p "p is the process's shared part, made at its first use.\n" ^{:tag (* proc)} [^{:tag (* CPU)} c]
+(go/method p "p is the process's shared part, made at its first use: the dispositions SIG_DFL but those a64i's own process
+ignores (inheritedIgnored), as execve keeps an ignored signal ignored.\n" ^{:tag (* proc)} [^{:tag (* CPU)} c]
   (when (== (.-P c) nil)
-    (set! (.-P c) (addr (lit proc :tasks (lit (map int (* crt/Task))) :cpus (lit (map int (* CPU)))))))
+    (set! (.-P c) (addr (lit proc :tasks (lit (map int (* crt/Task))) :cpus (lit (map int (* CPU))))))
+    (for [sig 1] (<= sig 64) (inc! sig)
+      (when (inheritedIgnored sig)
+        (aset (aget (.-actions (.-P c)) sig) 0 1))))
 
   (.-P c))
+
+
+(go/func inheritedIgnored "inheritedIgnored reports a signal a64i's process ignores (queue 302): the guest starts with it ignored, as a program\nexecve'd from this process would (Linux keeps SIG_IGN across execve), and so does the lockstep's native, forked and exec'd\nfrom it. Go's runtime keeps an inherited SIG_IGN of SIGHUP and SIGINT (os/signal.Ignored), the signals a shell's background\njob ignores (SIGINT; SIGQUIT's Go replaces by its handler, so a guest of a background a64i gets it at SIG_DFL).\n" ^bool [^int sig]
+  (signal/Ignored (conv syscall/Signal sig)))
 
 
 (go/method sigaction "sigaction is rt_sigaction(sig, act, oact, sigsetsize): the old disposition written, the new one kept.\n" ^int64 [^{:tag (* CPU)} c ^uint64 sig ^uint64 act ^uint64 oact ^uint64 setsize]
@@ -77,9 +87,19 @@
     (when (!= act 0)
       ;; the mask never holds SIGKILL or SIGSTOP
       (aset nw 3 (bit-and-not (aget nw 3) (bit-or (<< 1 (- sigKILL 1)) (<< 1 (- sigSTOP 1)))))
-      (aset (.-actions p) sig nw))
+      (aset (.-actions p) sig nw)
+      ;; queue 311 (review 306 F7): a disposition that ignores the signal (SIG_IGN, or SIG_DFL of one whose default is to ignore
+      ;; it) discards it where it is pending, in every thread, as Linux's do_sigaction flushes it (sig_handler_ignored)
+      (when (or (== (aget nw 0) 1) ^:go/paren (and (== (aget nw 0) 0) (kernelIgnored (conv int sig))))
+        (set! (.-Pending c) bit-and-not (sigBit (conv int sig)))
+        (range [_ o (.-cpus p)]
+          (set! (.-Pending o) bit-and-not (sigBit (conv int sig))))))
 
     0))
+
+
+(go/func kernelIgnored "kernelIgnored reports a signal whose default action is to ignore it (Linux's sig_kernel_ignore: SIGCONT, SIGCHLD,\nSIGWINCH, SIGURG); the stop signals, which defaultIgnored also counts (no job control here), are not, so a pending one is kept\nat SIG_DFL as Linux keeps it (queue 311).\n" ^bool [^int sig]
+  (or (== sig 17) (== sig 18) (== sig 23) (== sig 28)))
 
 
 (go/method sigprocmask "sigprocmask is rt_sigprocmask(how, set, oset, sigsetsize): the thread's mask (SIG_BLOCK 0, SIG_UNBLOCK 1, SIG_SETMASK 2),\nSIGKILL and SIGSTOP never in it.\n" ^int64 [^{:tag (* CPU)} c ^uint64 how ^uint64 set ^uint64 oset ^uint64 setsize]
@@ -277,9 +297,10 @@
       (.EndProgram sys (addr (lit crt/Exit :Code (.-Code c)))))))
 
 
-(go/method run "run executes the thread until it ends, giving the other threads their turns every quantum of instructions.\n" [^{:tag (* CPU)} c]
+(go/method run "run executes the thread until it ends, giving the other threads their turns every quantum of instructions. The quantum's\nend is the timer interrupt's exception: its return clears the exclusive monitor (queue 308), so that a store-exclusive whose\nload-exclusive came before another thread ran fails and its loop retries, as on the CPU, where the other thread's store to\nthe granule and the context switch's exception return clear it.\n" [^{:tag (* CPU)} c]
   (while (.Step c)
     (when (and (.-threaded c) (== (bit-and (.-Steps c) quantumMask) 0))
+      (.clearMonitor c)
       (.Yield (.-Sys (.-K c))))))
 
 

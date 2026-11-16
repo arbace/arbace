@@ -40,7 +40,10 @@
     ^{:line 40} [186 (lit _ -1 0)] ; gettid
     ^{:line 41} [110 (lit _ -1 0)] ; getppid
     ^{:line 42} [63 (lit _ 0 390)] ; uname
-    ^{:line 43} [204 (lit _ 2 -1)])) ; sched_getaffinity(pid, len, mask)
+    ^{:line 43} [204 (lit _ 2 -1)] ; sched_getaffinity(pid, len, mask)
+    ;; queue 310: the calls whose effect on the file system is not to be made twice (both processes act on the same files): pwrite64
+    ;; (the native's mapping shows its bytes at once, refreshShared), unlink, unlinkat, rmdir, mkdir and mkdirat the native's alone
+    [18 (lit _ -1 0)] [87 (lit _ -1 0)] [263 (lit _ -1 0)] [84 (lit _ -1 0)] [83 (lit _ -1 0)] [258 (lit _ -1 0)]))
 
 
 (go/var regNames (lit (array 16 string) "RAX" "RCX" "RDX" "RBX" "RSP" "RBP" "RSI" "RDI" "R8" "R9" "R10" "R11" "R12" "R13" "R14" "R15"))
@@ -94,7 +97,8 @@
     ^{:line 94 :tag uint64} stackLo
     ^{:line 95 :tag bool} stepping
     ^{:line 96 :tag uint64} sinceMem
-    ^{:line 97 :tag uint64} lastSys)) ; the step mode's last system call's number
+    ^{:line 97 :tag uint64} lastSys ; the step mode's last system call's number
+    ^{:tag (slice (array 2 uint64))} shared)) ; queue 310: the shared file mappings' base and size (refreshShared)
 
 
 
@@ -188,8 +192,23 @@
 ^{:go/end 215} (go/method sysHook "sysHook answers system call n as the world list and the layout say, the native's result nret in hand.\n" ^{:tag (func [uint64 (array 6 uint64)] [int64 bool])} [^{:tag (* lockstep)} l ^uint64 n ^uint64 nret]
   (let [(values w isWorld) (aget world n)]
     ^{:go/end 214} (fn [^uint64 sn ^{:tag (array 6 uint64)} a] :results [int64 bool]
+      (.noteShared l sn a nret)
       (switch
+        (case [(and (or (== sn 1) (== sn 20)) (> (conv int64 (conv int32 (aget a 0))) 2) (.seekable l (aget a 0)))]
+          ;; queue 310: write and writev to a file: the native's alone (twice, an O_APPEND file's bytes would be appended twice);
+          ;; x86i's own descriptor's offset moved as the native's (to the end for O_APPEND, else on by the bytes written)
+          (when (> (conv int64 nret) 0)
+            (let [(values fl _) (.Syscall (.-k l) 72 (aget a 0) 3 0 0 0 0)]
+              (if (and (>= fl 0) (!= (bit-and fl 0x400) 0))
+                (.Syscall (.-k l) 8 (aget a 0) 0 2 0 0 0)
+                (.Syscall (.-k l) 8 (aget a 0) nret 1 0 0 0))))
+
+          (.refreshShared l)
+          (return (conv int64 nret) true))
         (case [isWorld]
+          (when (== sn 18)
+            (.refreshShared l))
+
           (when (and (>= (aget w 0) 0) (>= (conv int64 nret) 0))
             (let [size (aget w 1)]
               (when (< size 0)
@@ -210,7 +229,54 @@
           (set! (values (.-BrkBase (.-k l)) (.-Brk (.-k l))) (values nret nret))
           (return (conv int64 nret) true)))
 
+      ;; queue 310: ftruncate and fallocate are made by both (the same size twice); the native's mapping shows the change at once
+      (when (or (== sn 77) (== sn 285))
+        (let [(values r _) (.Syscall (.-k l) sn (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4) (aget a 5))]
+          (.refreshShared l)
+          (return r true)))
+
       (return 0 false))))
+
+
+(go/method noteShared "noteShared records a shared file mapping at its mmap (the native's address nret) and forgets the ones under munmap
+or a MAP_FIXED (queue 310); sysHook's and the step mode's layoutHook's, which makes mmap itself.
+" [^{:tag (* lockstep)} l ^uint64 sn ^{:tag (array 6 uint64)} a ^uint64 nret]
+  (when (or (== sn 11) (and (== sn 9) (!= (bit-and (aget a 3) 0x10) 0)))
+    (.dropShared l (aget a 0) (aget a 1)))
+
+  (when (and (== sn 9) (>= (conv int64 nret) 0) (== (bit-and (aget a 3) 0x20) 0) (or (== (bit-and (aget a 3) 3) 1) (== (bit-and (aget a 3) 3) 3)))
+    (set! (.-shared l) (append (.-shared l) (lit (array 2 uint64) nret (bit-and-not (+ (aget a 1) 4095) 4095))))))
+
+
+(go/method seekable "seekable is whether x86i's own descriptor fd is a regular file's (lseek's SEEK_CUR answers; a pipe's ESPIPE, a
+standard stream's) (queue 310).
+" ^bool [^{:tag (* lockstep)} l ^uint64 fd]
+  (let [(values r _) (.Syscall (.-k l) 8 fd 0 1 0 0 0)]
+    (>= r 0)))
+
+
+(go/method refreshShared "refreshShared takes the native's pages of the shared file mappings after a call that changes a file (queue 310, as
+a64i's AR23): the native's mapping is the file's page cache and shows the change at once, x86i's kernel holds a copy (written
+back at msync, munmap and the end; the bytes taken here go back as they are in the file).
+" [^{:tag (* lockstep)} l]
+  (range [_ m (.-shared l)]
+    (for [p (aget m 0)] (< p (+ (aget m 0) (aget m 1))) (set! p + 4096)
+      (let [(values b err) (.Read (.-t l) p 4096)]
+        (when (!= err nil)
+          (break))
+
+        (.WriteBytes (.-as l) p b)))))
+
+
+(go/method dropShared "dropShared forgets the shared file mappings over [base, base+n) (queue 310).
+" [^{:tag (* lockstep)} l ^uint64 base ^uint64 n]
+  (let [hi (+ base (bit-and-not (+ n 4095) 4095))
+        ^{:tag (slice (array 2 uint64))} kept nil]
+    (range [_ m (.-shared l)]
+      (when (or (>= base (+ (aget m 0) (aget m 1))) (<= hi (aget m 0)))
+        (set! kept (append kept m))))
+
+    (set! (.-shared l) kept)))
 
 
 
@@ -505,6 +571,8 @@
 
 ^{:go/end 528} (go/method layoutHook "layoutHook: in the step mode x86i's kernel chooses mmap's address and the break's start itself, held to the native's.\n" ^{:tag (func [uint64 (array 6 uint64)] [int64 bool])} [^{:tag (* lockstep)} l ^uint64 n ^uint64 nret ^{:tag (func [uint64 (array 6 uint64)] [int64 bool])} next]
   ^{:go/end 527} (fn [^uint64 sn ^{:tag (array 6 uint64)} a] :results [int64 bool]
+    ;; queue 310: the mmap is made here, not by next (sysHook): its shared file mapping recorded here
+    (.noteShared l sn a nret)
     (let [(values r _) (.Syscall (.-k l) sn (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4) (aget a 5))]
       (when (!= (conv uint64 r) nret)
         (set! (.-At (.-res l)) (.-RIP (.-c l)))

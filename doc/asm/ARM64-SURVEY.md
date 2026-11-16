@@ -2451,7 +2451,7 @@ probes `sigframe.c`, `sig2.c`, `sig3.c`, `idregs.c`: the frame word by word on a
 |---|---|---|
 | `bin/a64i check` eval, AOT, forms; cpu, sys, step, loader | 119 / 119 each | **122 / 122 each** (signal-fault, signal-kill, sys-idregs) |
 | coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,958 of 2,958 | 2,958 of 2,958 |
-| controls (`test/asm/controls-a64i.txt`) | 137 | **142** (verdict-34, verdict-35, cpu-3, sys-3, step-20); table check's 1; go-check's **2** |
+| controls (`test/asm/controls-a64i.txt`) | 137 | **142** (verdict-34, verdict-35, cpu-3, sys-5 (sys-3 until 2026-11-15: a second sys-3, renamed on the main host's request), step-20); table check's 1; go-check's **2** |
 | the system space's sweep against the M2 | 56 of 101,376 differ | **5** (the FPAC hints) |
 | Go programs on a64i to their end (`bin/a64i go-check`) | 4 of 4 (a recovered nil dereference: SIGSEGV, 139) | **8 of 8** |
 | `--essential` | 92 programs | **95** |
@@ -2724,3 +2724,312 @@ Numbering from ARS94. Each with options, the recommended named; none taken.
   execve passed to the host, the child a native process (crt's vfork spawn, as ci's); a process the program makes then runs outside
   a64i, the check's judgment unchanged; (c) the child run by a second a64i (fork's copy of the address space, then exec's loader),
   the whole process tree emulated: the largest.
+
+### As built: ARS94 (a) (2026-11-15; branch `299b-asm-a64i-goroot-step`, from `299-asm-arm64-ar24` `151aa8da7`; the Mac VM)
+
+The user's decision on ARS94: (a). `bin/a64i goroot-check` is a `--full` step `a64i-goroot` in chain asm-arm64-full, as
+a64i-go-compile (d6432df30): its fragment in test/gate/crops/asm.edn, spliced into test/gate/steps.edn.
+
+- **Arm64 hosts only**: the step's command is `case $(uname -m) in aarch64|arm64) bin/a64i goroot-check ;; *) echo ... skipped ;; esac`;
+  the check itself refuses elsewhere (exit 2: this CPU's run is the reference), so on amd64 the step passes at once.
+- `:mem-gib 1`: peak 0.43 GiB (busybox time -v, four runs 0.35-0.43 GiB); 265-295 s wall at 3 jobs on the VM.
+- **Absent on amd64?** The planner's absence rule (`absent`, plan.ae) is the :oracle phase's: a step whose host identity is none.
+  A :full step has no such rule, so the guard stays in the command (the step passes at once off arm64). A rule for it would be a
+  change to plan.ae and the table (a step flag, or an :arm64 host identity): to decide.
+- **CPU time, not wall time** (the flake): one.bash classed `:speed` a program whose native run took over 1,000 ms by the wall
+  clock; gc2.go (339 ms of CPU) flipped under load. It now takes user + sys of the run (bash's `time`). Recorded passes reach
+  339 ms (gc2.go), the next below the cut-off is 213 ms; over it, issue79186 (1,050 ms) and issue19658 (1,102 ms) are near, so
+  issue79186 is in known.edn (:speed) and cannot fail by running just under. issue16016 (20 ms of CPU, over a second of sleeping)
+  now runs and passes: 1,141 of 1,178, the record rewritten (`--record`).
+- **Reruns**: the built programs are kept in `.tmp/a64i/goroot/built/KEY` (1.6 GB), KEY the hash of seed/goroot.sha256, seed/goroot-test.sha256,
+  the Go tree's VERSION, goi's linux record and one.bash (other keys removed; `A64I_GOROOT_NOCACHE=1`): a second run 265 s against 294 s, the
+  a64i runs (700 s of CPU in 3 jobs) being the time.
+- **Inputs**: `:lib-tools :tools :asm :a64i` (test/asm/ holds goroot-check's own files, its record and classes), goi's linux
+  record `test/goi/check-linux-amd64.edn` (the program list), less `test/asm/a64i-go/`; pins `seed/goroot.sha256` (TamaGo's go) and
+  `seed/goroot-test.sha256` ($GOROOT/test).
+- **Controls**: goroot-1 to goroot-3, `test/asm/a64i-goroot/controls.txt`.
+- Checked on the VM: `gate.crops check` 0 problems, `gate-key-crops-test` PASS, `crops-test` ok, `make check-makefile` ok. `bin/gate
+  --plan` needs a stage 0 this VM lacks for the seed: on the main host `bin/gate --full --plan` should list a64i-goroot in
+  asm-arm64-full.
+
+## As built: AR25 (2026-11-15; branch `302-asm-arm64-arbace`, from `299-asm-arm64-ar24` `151aa8da7`; queue task 302, the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, load 9-17, at most 4 processes of this task's). The user's answers to ARS94 and
+ARS95: (a) and (a). The executable: Arbace's own linux/arm64 stage 0 (the nf worktree's `target/seed/arm64/arbace`, 194,904,224
+bytes, sha256 9db9765c...f92d, built 2026-11-03 from seed 1fe1063f; no build on the VM).
+
+- **Arbace on a64i**: `-e '(+ 1 2)'`, a REPL session fed from a file on stdin and a namespace load (`-m demo.core 1 two`: two
+  namespaces of a directory on ARBACE_PATH loaded from their source, with arbace.set, arbace.walk, arbace.string and arbace.pprint)
+  each ran to its end on the base a64i (151aa8da7) already, status, stdout and stderr byte for byte the CPU's: 595 M, 813 M and
+  1,419 M instructions in 53, 77 and 132 s (about 11 M instructions a second; the native runs take 60 to 105 ms). The counts are
+  the program's work: GOMAXPROCS=1 or asyncpreemptoff=1 change them by under 1 %. On a64i the run makes about 42,000 system calls
+  for `-e`, most of them Go's sysmon over the wall clock (13,268 clock_gettime, 5,404 nanosleep, 2,691 tgkill preemptions with as
+  many signal deliveries, 3,055 epoll_pwait), and 57 sched_getaffinity, ENOSYS before AR25 (Go's GOMAXPROCS update asks it each
+  second; its CPU count stayed 1).
+- **What the lockstep found** (it stopped at Arbace's first system call, as at every Go program's, AR24's Low), built generally in
+  emu.Kernel (x86i's kernel too):
+  - **sched_getaffinity**: one CPU, CPU 0 (a64i runs one thread at a time), Linux's order of checks (len*8 under the CPU count or not
+    a multiple of 8 EINVAL, a negative pid ESRCH, the mask's word written or EFAULT), the bytes written its result; the lockstep
+    takes the native's mask (its world list, with prctl's answer: PR_SET_VMA is EINVAL on a kernel without CONFIG_ANON_VMA_NAME).
+  - **THP placement**: a private anonymous mmap of a multiple of 2 MiB with no hint is 2 MiB-aligned (Linux 6.7 on with
+    transparent huge pages configured: __get_unmapped_area's THP case, a gap of the size plus 2 MiB searched top-down and its
+    highest aligned address taken; `thpTopDown`). Go's heap reservations (32 MiB, 64 MiB, 512 MiB) are such mappings: system call
+    11 returned 0xfffff769a000 where the native's was 0xfffff7600000.
+  - **mmap's hint limit** was x86-64's stack area on arm64 too (0x7ffffffff000 less 8 MiB), so every hint in arm64's mmap area was
+    refused; now the kernel's `StackLow`, each architecture's.
+  - **The lockstep's end at the first thread**: a clone with CLONE_THREAD ends it, every system call and stop before it compared:
+    ptrace follows the traced thread alone and the native's threads run in its scheduler's order. The verdict `EQUAL TO THE FIRST
+    THREAD` (the trace's status 3); `a64i check` takes a header's `# lockstep: first-thread` as the expected one. Arbace's start is
+    followed to its first clone: about 158 system calls and 5.7 M instructions, sys mode 6 s, step mode 30 s (2.96 M stepped, 71
+    exclusive regions); a Go program's (go-check's hello) 158 calls, 222 K instructions.
+  - **Inherited SIG_IGN**: a64i's guest started with every disposition SIG_DFL; the lockstep's native, forked from a64i, inherits
+    an ignored SIGINT (a shell's background job), so Go's initsig skipped it natively and not on a64i (rt_sigaction(2) against (3)
+    at system call 47). The guest's dispositions now start with the signals a64i's own process ignores (os/signal.Ignored: Go's
+    runtime keeps an inherited SIG_IGN of SIGHUP and SIGINT; a SIGQUIT or SIGTERM ignored before a64i started is lost to Go's own
+    handlers).
+  - Tests `linux-sched-getaffinity.s`, `linux-mmap-thp.s` and `linux-thread.s` (test/asm/a64i/, essential); controls verdict-42..44,
+    cpu-9, thread-1 and thread-2 (a new kind: a program's lockstep judged by another's `# lockstep:` statement).
+- **`bin/a64i arbace-check`** (test/asm/a64i-arbace/, `make a64i-arbace-check`; arm64 hosts): the three runs (e, repl, ns) of
+  A64I_ARBACE_EXE, else ARBACE_HOST_EXE, else stage 0, natively and on a64i in one environment, a64i's status, stdout and stderr
+  the native's, the native's stdout `NAME.want` (repl's less the banner, which names the version; `--record`), the lockstep's sys
+  mode EQUAL TO THE FIRST THREAD; controls arbace-1 (e's a64i run against repl's native run), arbace-2 (ns's against a native run
+  with another argument), arbace-3 (e's native stdout against repl.want), arbace-4 (e's lockstep judged as a whole run's): fail as
+  they must. 94 s for e and repl, 192 s for ns at load 17 (ns 1,438 M instructions in 185 s).
+
+### Proposed (AR25)
+
+Numbering from ARS96. Each with options, the recommended named; none taken.
+
+- **ARS96 where arbace-check runs.** Three a64i runs of Arbace (e 1 min, repl 1.5 min, ns 2-3 min), the reference this arm64
+  CPU's run; an a64i of Arbace peaks at 2.6 GiB (e; the guest's heap and the 195 MB executable's pages), the lockstep at 2.4 GiB.
+  (a) a `--full` step `a64i-arbace` in chain asm-arm64-full on arm64 hosts, `--jobs 1` (about 5-6 minutes, `:mem-gib 3`), its
+  inputs test/asm/a64i-arbace/, go/arbace/{emu,a64i,crt}, the driver and the executable's bytes (stage 0's: a re-seed reruns it)
+  (recommended: Arbace's own executable judged nightly as the user's programs are, light in memory); (b) the same at 3 jobs (about
+  3 minutes, `:mem-gib 8`); (c) `--only e` essential on arm64 hosts (1 minute, 3 GiB: Arbace's start and its lockstep on every
+  change to a64i) and the whole in `--full`.
+
+## As built: the exclusive monitor across threads (2026-11-15; branch `308-asm-arm64-monitor`, from `301-asm-arm64-goroot-step` `88ba2c365`; queue task 308, review 306's F1, the Mac VM)
+
+- **The fault.** a64i's monitor (CPU.exclValid, exclAddr, exclSize) was per thread and cleared only by the thread's own store, clrex
+  and a signal's delivery or return. A thread's ldxr, the quantum's end, the other thread's store to the word, then the first
+  thread's stxr passed with its stale value: review 306's probes, ldxr/stxr from two pthreads 500,282 of 600,000 and musl's
+  pthread_mutex 347,118 of 400,000 (natively exact). Go's programs escaped it: Go's runtime takes LSE when AT_HWCAP has ATOMICS.
+- **The fix, as the architecture specifies.** An exception's return clears the local monitor (the Arm ARM, B2.9.5: so a context
+  switch needs no clrex). a64i's exceptions are the system call (CPU.svc) and the quantum's end, the timer interrupt (thread.go's
+  run, every 4,096 instructions of a threaded program); both call CPU.clearMonitor. One thread runs at a time and the baton passes
+  only at these two points (crt's Sched: futex, nanosleep, sched_yield, epoll_pwait, exit, and the quantum's Yield), so another
+  thread's store to a marked granule always follows the marking thread's clear: the global monitor's effect, with no per-granule
+  table. clone copies the CPU inside svc, after the clear, so a new thread starts with its monitor clear. The injected fault `m`
+  (A64I_INJECT=FAMILY:m) keeps the monitor, as before: the controls.
+- **The other atomic paths, checked.** LSE's LD<op>, ST<op>, SWP and CAS and CASP (exec.go's atomic, atomicPair) read, compute and
+  write in one Step, never split by the baton: atomic as they were (thread-sync's casal, caspal and swpa sections exact before the
+  fix too). The futex: futexWait compares the word and blocks with no baton pass between, futexWake runs under the baton; the
+  CLONE_CHILD_CLEARTID word is cleared and woken by the ending thread. A signal's delivery and rt_sigreturn cleared the monitor already.
+  x86i has no monitor (its lock-prefixed atomics are single instructions).
+- **The lockstep and threads.** AR25's (queue 302): the run ends at the first CLONE_THREAD with EQUAL TO THE FIRST THREAD,
+  every call before compared; thread-llsc and thread-sync state `# lockstep: first-thread`. (308's branch had its own stop, a
+  THREADS verdict and a by-design class :lockstep-threads; dropped at the merge with 302 for AR25's one mechanism.) A threaded
+  program's threads are judged by its verdict at eval and AOT and against the CPU's run.
+- **Programs** (test/asm/a64i/, in the essential subset; lib/thread.s: spawn by clone, join by futex): `excl-svc.s` (ldxr, getpid,
+  stxr fails and stores nothing; ldaxp, sched_yield, stlxp fails; the retry passes: in the lockstep's sys and step modes too),
+  `thread-llsc.s` (two threads: ldxr/stxr 2^18 each, ldaxr/stlxr against ldadd 2^18 each, ldxp/stxp 2^17 each: exactly 2^19, 2^19,
+  2^18, 2^18), `thread-sync.s` (casal, caspal, a swpa spinlock and a futex mutex as musl's, by ldaxr/stlxr: exact). Controls
+  inject-57..59 (excl:m: thread-llsc's 0x6ad2a, 0x6aa80, 0x326c9 as before the fix, thread-sync's mutex deadlocked, excl-svc's
+  stxr passing), sys-4 (excl-svc's lockstep under excl:m: DIFF at the first write), verdict-45, thread-3 (thread-sync's lockstep
+  judged as excl-svc's, not threaded).
+
+On the merge with AR25 (302's `eb933b551`):
+
+| check | before (`eb933b551`) | after |
+|---|---|---|
+| review 306's p4 (ldxr/stxr, two pthreads) | 500,282 of 600,000 (at `88ba2c365`) | **600,000** (10 of 10) |
+| review 306's p6 (musl pthread_mutex) | 347,118 of 400,000 (at `88ba2c365`) | **400,000** (10 of 10) |
+| `bin/a64i check` eval, AOT, forms, cpu, sys, step, loader | 131 / 131 each | **134 / 134 each** (938 rows) |
+| controls (test/asm/controls-a64i.txt) | 159 | **165** (inject-57..59, sys-4, verdict-45, thread-3) |
+| `--essential` | 104 programs | **107** |
+| `[:asm-arm64 :eval]` | 524 / 0 / 0 | **536 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,093 / 0 / 13 | **3,096 / 0 / 13** |
+
+- **goroot-check made load-independent** (`test/asm/a64i-goroot/one.bash`, `check.bash`): (1) a program the record has as :pass is
+  never cut by the CPU's CPU-time cut-off (A64I_GOROOT_CPU_MAX applies only to one with no recorded pass: gc2.go, 0.2 s of CPU time
+  alone, 1.5-2.1 s at load 20, flipped to :speed); (2) a64i's own budget (A64I_GOROOT_TMO, 120 s) is its CPU time (ulimit -t,
+  SIGXCPU a timeout), the wall clock a hang guard of three times it, and a64i runs with GOMAXPROCS=1 (its guest sees one CPU; the
+  host's parallel GC only slowed it: fixedbugs/issue16249.go 104 s of wall time, a timeout at load 19, now 53-56 s of CPU time);
+  the row's note names a64i's CPU time as the budget's measure. Each rule checked on helloworld.go in every run (under
+  A64I_GOROOT_CPU_MAX=-1: pass; after a 3 s sleep under A64I_GOROOT_TMO=2: pass), each failing without its rule, and their controls
+  goroot-4 (no recorded pass: speed) and goroot-5 (a spinning a64i: timeout). fixedbugs/issue22781.go (known :speed): 99 s of CPU time
+  (128 s of wall time at load 14), under the budget, left known. Two whole runs beside other work, load 17-18: 1,141 of 1,178, ok.
+
+`bin/a64i go-check` 8 of 8, `--tools gofmt vet` 2 of 2, `--tools compile` 1 of 1, table-check ok, arbace-check ok (e, repl, ns
+equal to the native's; 4 controls).
+## As built: queue 309, open's flags (2026-11-15; branch `309-asm-emu-open-flags`, from `eb933b551`; the Mac VM)
+
+Review 306's findings 2 and 3 (`reports/306-review-emu-arm64.md`), on the light lane of the Mac VM (the M2 Max, load 11-15, at
+most 4 processes of this task's).
+
+- **arm64's flags as crt's**: a64i translates openat's flags and fcntl F_SETFL's argument from arm64's values to x86-64's, crt's,
+  and F_GETFL's result back (emu.OpenFlagsFromA64, OpenFlagsToA64; arch/arm64's uapi asm/fcntl.h: O_DIRECTORY 040000, O_NOFOLLOW
+  0100000, O_DIRECT 0200000, O_LARGEFILE 0400000, the same four bits as x86-64's O_DIRECT, O_LARGEFILE, O_DIRECTORY and O_NOFOLLOW;
+  the rest asm-generic's on both). Before, O_DIRECTORY was ignored, O_DIRECT read as O_DIRECTORY (ENOTDIR on a file), and musl's
+  every open (O_LARGEFILE, x86-64's O_NOFOLLOW) would have been O_NOFOLLOW once crt honoured it. x86i passes x86-64's own.
+- **crt's open as Linux 7.3's** (x86i's, ci's and a64i's): O_PATH keeps O_DIRECTORY, O_NOFOLLOW and O_CLOEXEC alone and opens no
+  host file (read, write, lseek, pread, pwrite, ftruncate, fsync, getdents, ioctl, F_SETFL and the record locks EBADF, poll
+  POLLNVAL, select ready, as natively; fstat by its path; as a dirfd a directory's); O_CREAT|O_DIRECTORY EINVAL; O_NOFOLLOW on a symlink ELOOP (O_DIRECTORY's
+  ENOTDIR first, O_CREAT|O_EXCL's EEXIST, with O_PATH the link itself: fstat S_IFLNK, readlinkat(fd, "") its target); O_DIRECTORY
+  on what is not a directory ENOTDIR before the open (before O_TRUNC); F_GETFL's flags Linux's f_flags (O_CREAT, O_EXCL, O_NOCTTY,
+  O_TRUNC and O_CLOEXEC dropped, O_DIRECTORY and O_NOFOLLOW kept, O_LARGEFILE forced, as force_o_largefile on 64-bit). The last
+  component is classified by Lstat before the open (a race with a concurrent rename the host's own O_NOFOLLOW would close; crt also
+  runs on tamago).
+- **symlinkat, linkat** (arm64 36 and 37; x86-64 266 and 265, symlink 88, link 86): an empty target ENOENT; linkat's flags other
+  than AT_SYMLINK_FOLLOW and AT_EMPTY_PATH EINVAL, a symlink linked itself without AT_SYMLINK_FOLLOW, AT_EMPTY_PATH the
+  descriptor's own file (a directory's EPERM); readlinkat's size <= 0 EINVAL first. The lockstep takes both from the world.
+- **Go's os.Root** holds: `os.OpenRoot(dir).Open` of a link out of the root, absolute or relative or through a directory link, is
+  "path escapes from parent" as natively; before, a64i read the file outside (and OpenFile with O_TRUNC truncated it).
+- Tests: `test/asm/a64i/linux-open-flags.s` (essential; eval, AOT, the CPU, lockstep sys and step: 72 system calls, 4,623
+  instructions) and `test/asm/a64i-go/osroot` (go-check). Controls: inject-60 (A64I_INJECT=FAMILY:o, a new injected fault: arm64's
+  open flags passed to crt untranslated), verdict-46, go-13 (osroot's run under the injection judged by its own want: a go-check
+  control may name an injection, a fourth field) and go-14: fail as they must.
+- Left: os.Root's Mkdir (mkdirat with a directory descriptor), Chmod (fchmodat), Chtimes (utimensat) and Lchown (fchownat) are
+  ENOSYS on a64i.
+## As built: queue 310 (2026-11-15; branch `310-asm-emu-shared-writeback`, from `eb933b551`; the Mac VM): the shared write-back
+
+Review 306's F4: AR23's write-back wrote each page's span from its first changed byte to its last, over the bytes a write(2) put
+between them since the mapping read the file (probe p5: `XYaa` at 50 where Linux has `XYWW`), and on an O_APPEND descriptor wrote
+nothing (p1: both stores lost; crt's pwrite64 is Go's WriteAt, which refuses an append-mode file, and the error was dropped).
+ARS93 (a) stays: the mapping is a copy written back at msync, munmap, MAP_FIXED over it and the process's end; only the file's
+integrity changed (emu, so x86i's kernel too).
+
+- **`writeBack`** writes each run of bytes that differ from the mapping's shadow, one pwrite a run, never the bytes between the
+  runs: a write(2)'s bytes the program did not also change through the mapping stay (a byte both changed is the mapping's, as
+  before: the copy cannot order them).
+- **O_APPEND**: crt's new `Sys.WriteBack(fd, b, off)` writes at `off` whatever the description's O_APPEND (`pwriteInPlace`,
+  sys_linux.ae: the host description's O_APPEND cleared around one pwrite and put back, under crt's one-thread-at-a-time turn;
+  sys_other.ae Go's WriteAt). The program's descriptor still appends.
+- **Errors where Linux reports them**: a run not written stays changed (tried again at the next write-back), and the first failure
+  is the mapping's (`sharedMap.Err`; ENOSPC and EDQUOT as themselves, any other EIO, as mapping_set_error records them) until
+  msync with MS_SYNC returns it and clears it, as vfs_fsync_range of the mapping's file does; MS_ASYNC, munmap and the end report
+  none (Linux's neither). Probe (a64i only: the failure is made by closing the mapping's own descriptor, 0x40000000, which Linux
+  does not have): MS_ASYNC 0, MS_SYNC EIO.
+- **The lockstep** takes pwrite64 from the native (its descriptors are the world's; it was a64i's own, EBADF) and the shared
+  mappings' pages from the native after it, as after write.
+- `linux-msync-wb.s` (test/asm/a64i/, essential; controls verdict-47, cpu-10): p5 and p1 as a program (a pwrite64 between two
+  stores in a page, twice; a mapping of an O_APPEND descriptor, msync MS_SYNC and munmap; the descriptor still appending, F_GETFL's
+  O_APPEND): eval, AOT, the CPU, lockstep sys and step (49 system calls, 3,722 instructions) and the loader agree; before, eval, AOT
+  and the CPU differ in 6 of 22 lines. x86i's twin `test/asm/x86i/linux-msync-wb.s` (control cpu-msyncwb-vs-misc), its rows the
+  main host's `bin/repr-asm x86i-check --record`.
+## As built: queue 311 (2026-11-15; branch `311-asm-emu-uname-mmap-signals`, from eb933b551; review 306's findings 5-7, the Mac VM)
+
+- **uname** (F5): crt's Sys has a `Machine` (uname's machine field; empty: `x86_64`), which `emu.NewKernelA64` sets to `aarch64`.
+  The lockstep takes uname from the world, so the proof is the program's own output: `linux-uname` prints the field (eval, AOT
+  and the CPU judge it against `aarch64`). x86i keeps `x86_64`.
+- **A pending signal that comes to be ignored** (F7): a64i's rt_sigaction discards it in every thread when the new disposition is
+  SIG_IGN, or SIG_DFL of a signal Linux ignores by default (`kernelIgnored`: SIGCHLD, SIGCONT, SIGURG, SIGWINCH; the stop signals,
+  which a64i's delivery treats as ignored, kept as Linux keeps them), as do_sigaction's flush (`sig_handler_ignored`). Test
+  `signal-ignore` (SIGUSR1 to SIG_IGN, SIGURG to SIG_DFL: discarded; SIGTSTP to SIG_DFL and SIGUSR2 to a handler: kept).
+- **Reservations** (F6): emu's AS keeps its mappings as ranges (`vma`: base, end, permissions; PermCode a set of pages, x86i's)
+  where it kept a permission a page, and crt's `Mem.Reserve` backs a mapping from 64 KiB on by the host's demand-zero memory (on
+  Linux an anonymous private MAP_NORESERVE mapping: a page costs memory at its first touch, a reservation its record), returned at
+  munmap (the cut part's host pages freed, the host mapping unmapped when nothing of it is left) and madvise's MADV_DONTNEED
+  (`Mem.Zero`: the host's whole pages freed, the rest cleared); elsewhere (TamaGo) Go's memory as before. topDown searches the gaps
+  between the ranges (a page walk before), msync and mprotect check coverage by range, markAnon looks at its pages when they are
+  fewer than the range's, and mmap is ENOMEM when the host refuses the memory. Test `linux-mmap-reserve` (1 TiB PROT_NONE, two pages
+  mprotected and written, a MiB mapped over it and filled by getrandom, unmapped and reserved again at the same address). With the
+  guest's memory out of Go's heap, Go's collector ran far more often over the one allocation a step (Fetch's copy of the cached
+  instruction), so the decode cache now holds pointers. Measured on the M2 (4 of 8 cores, CPU seconds and peak RSS):
+  8 GiB PROT_NONE 171 MB, 0.2 s -> 11 MB, 0.000 s; 1 TiB killed a64i -> 9 MB; Arbace's `-e '(+ 1 2)'` (arbace-check e) 67.5 s,
+  2.94 GB -> 40.7 s, 0.78 GB; go-check's 8 programs 4.0 s, 233 MB -> 2.7 s, 88 MB; goroot-check's first 60 programs 153 s, 299 MB ->
+  99 s, 205 MB.
+- Controls verdict-u311-1..3 and cpu-u311-1; the three programs are in the essential subset.
+- **x86i's lockstep** (go/arbace/x86i/lockstep_linux.ae; the main host's first --record found it: unlinkat's ENOENT, the
+  mapping without pwrite64's bytes in step mode): both processes act on the same files, so the calls not to be made twice are
+  the native's alone: pwrite64, unlink, unlinkat, rmdir, mkdir, mkdirat (the world list), and write and writev to a regular file
+  (x86i's own descriptor's offset moved as the native's: to the end for O_APPEND, else on by the bytes written); after those and
+  after ftruncate and fallocate (made by both) the shared file mappings' pages are taken from the native (`refreshShared`, the
+  mappings recorded at mmap and forgotten at munmap or MAP_FIXED), as a64i's.
+
+
+## As built: queue 314, os.Root's remaining *at calls and pselect6 (2026-11-15; branch `314-asm-emu-root-calls`, from `8f67b4b02`; the Mac VM)
+
+309's DECISION (a), the user's: os.Root's Mkdir, MkdirAll, Chmod, Chtimes and Lchown were "function not implemented" on a64i, and musl's
+select ENOSYS. On the light lane of the Mac VM (the M2 Max, Linux 7.3.4, at most 4 processes of this task's); every value below is this
+M2's kernel's answer (the probe `.tmp/q314/pr/g.c`, 148 lines, raw arm64 system calls: a64i equal byte for byte, the base 290 lines apart).
+
+- **mkdirat** (arm64 34, x86-64 258; mkdir 83 the same) at any directory descriptor (an O_PATH one's too), in crt; emu's kernel no
+  longer takes it (it did at AT_FDCWD alone, ENOSYS elsewhere). The mode as vfs_mkdir's: the permissions and S_ISVTX (01777) less the
+  umask (07777 gives 041755 under 022), set exactly after the host's mkdir (the runner's own umask would strip more), an S_ISGID the
+  parent gives kept; a file's descriptor ENOTDIR, a bad one EBADF, the empty name ENOENT, NULL EFAULT, an absolute name whatever the
+  descriptor. umask (arm64 166) enters the table: it was ENOSYS, so umask(0) was lost.
+- **fchmodat** (53, 268; chmod 90): three arguments, Linux's: a fourth (AT_SYMLINK_NOFOLLOW) unseen, a link followed; mode's 07777.
+  **fchmodat2** (452 on both; os.Root's Chmod, Go's syscall.Fchmodat with flags): flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH
+  EINVAL before anything (a bad descriptor's too); AT_SYMLINK_NOFOLLOW on a symlink, a dangling one too, EOPNOTSUPP (Linux changes no
+  link's mode), as does AT_EMPTY_PATH on an O_PATH descriptor of a link; AT_EMPTY_PATH the descriptor's own file (an O_PATH one's,
+  a directory's).
+- **fchownat** (54, 260; chown 92, lchown 94): the same flags' EINVAL first; AT_SYMLINK_NOFOLLOW (or AT_EMPTY_PATH on an O_PATH
+  link) the link's own owner (the host's lchown), else the target's; -1 keeps an id. The host clears S_ISUID and S_ISGID as Linux does.
+- **utimensat** (88, 280; os.Root's Chtimes, os.Chtimes, musl's futimens): both UTIME_OMIT 0 before anything is looked at (a missing
+  name, a bad flag, a bad descriptor); a NULL name with a descriptor the descriptor's file (flags EINVAL, an O_PATH descriptor EBADF);
+  AT_FDCWD with NULL EFAULT; else the flags' EINVAL, the lookup's errors, then a tv_nsec outside 0..999999999 (not UTIME_NOW or
+  UTIME_OMIT) EINVAL; a link's own times with AT_SYMLINK_NOFOLLOW. The host's utimensat on linux (sys_linux.ae's sysUtimens); on tamago
+  UtimesNano with UTIME_NOW and UTIME_OMIT resolved.
+- **pselect6** (72, 270; x86-64's select 23 with its timeval, tv_usec carried into seconds as kern_select does): nfds below 0 EINVAL;
+  the timeout first (a negative one or a bad tv_nsec EINVAL), then the signal mask's argument (a set of size other than 8 EINVAL, a
+  NULL set any size); nfds cut at the descriptor table's size (64, else 128 times a power of two holding the highest descriptor, as
+  alloc_fdtable rounds: nfds 1025 is no EINVAL); a set bit below it of no open descriptor EBADF; every open descriptor ready to read
+  and to write (crt's poll's model; an O_PATH descriptor's too, empty_fops' DEFAULT_POLLMASK), none exceptional; the sets written back
+  (nfds' longs, the except set zero); the result the bits set (3 for one descriptor in the read and write sets and another in the read
+  set); nothing ready, the timeout slept, and a timeout not zero written back as what remains (0 after a 20 ms sleep).
+- The lockstep takes fchmodat, fchmodat2, fchownat and utimensat from the native (the files are the world's), and pselect6's result,
+  its three sets (cut at 1024) and its timeout (the descriptors are the native's).
+- Tests: `test/asm/a64i/linux-at-calls.s` (essential; eval, AOT, forms, the CPU, lockstep sys and step: 109 system calls, 7,508
+  instructions) and `test/asm/a64i-go/osroot` extended to every os.Root method (Name, Create, WriteFile, ReadFile, Mkdir, MkdirAll,
+  Chmod, Chtimes, Chown, Lchown, Symlink, Readlink, Link, Rename, OpenFile, Remove, RemoveAll, Stat, Lstat, OpenRoot, FS) inside the
+  root, through its links and out of it, the file outside unchanged. Controls: u314-inject-1 (A64I_INJECT=FAMILY:t: AT_SYMLINK_NOFOLLOW
+  dropped from fchmodat2, fchownat and utimensat, pselect6's nfds 0), u314-verdict-1, u314-go-1 (FAMILY:k: mkdirat's descriptor taken
+  as AT_FDCWD, osroot's directories made beside the root): fail as they must.
+- x86i: crt is shared and emu's kernel passes mkdirat on, so x86i gains mkdirat at a descriptor, mkdir's S_ISVTX and exact mode,
+  chmod, fchmodat, fchmodat2, chown, lchown, fchownat, utimensat, select and the new pselect6 (probed: `.tmp/q314/crtx`, x86-64's
+  numbers to crt.Sys.Syscall on this VM, 48 rows equal to the arm64 native's); x86i's lockstep world is untouched (no x86 test uses them).
+- Left: fchmod and fchown (52, 55; Go's File.Chmod and File.Chown) stay ENOSYS on a64i; a descriptor's path is its name at its open
+  (futimens or AT_EMPTY_PATH of a file renamed or removed since acts on the name, Linux on the inode); select with no descriptor and no
+  timeout returns 0 where Linux blocks.
+- Merged onto 311's 5286f3df4 (with 310's write-back and x86i's lockstep fix): both sides' crt and emu kept (sys_linux.ae's
+  pwriteInPlace, hostAlloc, hostZero beside sysUtimens; the lockstep's pwrite64 beside the four calls). a64i check --record: 140
+  programs, 980 rows (+7, linux-at-calls's); x86i's records the main host's, unchanged (crt's change reaches x86i: to be rerecorded
+  there). The second control `sys-3` (signal-kill alu:c) renamed `sys-5`.
+
+## As built: queue 303, a64i's speed (2026-11-16; branch `303-asm-arm64-speed`, from `8aba666ff`; the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, 8 cores, load 10-16 from other jobs, at most 4 processes of this task's); every time
+below is CPU time (user + sys) unless named wall, base and head run back to back.
+
+- **The profile** (Go's pprof on a64i's process, `A64I_CPUPROFILE` in a copy of the printed driver; cmd/link's run of go-check's
+  compile, 545 M instructions, and goroot-check's gcgort.go and fixedbugs/issue16249.go): exec's dispatch 33% flat; Fetch 28% (its
+  map by PC 14%, AS.Fetch's TLB walk and copy 11%); the loads and stores 19% (AS.Read, Write, entry 8%); AESE/AESMC's aesMix 7% (Go's
+  map hash); system calls under 1%, Go's collector none; the lockstep's ptrace is the check's, not a run's.
+- **The decoded instructions a page's array** (cpu.ae's Fetch): `pages`, a `codePage` of 1,024 decoded instructions a code page,
+  and the last fetched page (its bytes, its array) kept while the address space's new `emu.AS.Gen` is unchanged: Gen counts every TLB
+  flush (Map, Unmap, Protect, the loader) and entry invalidation (MarkCode, ClearCode), so the bytes `AS.ExecPage` handed out are the
+  page's own as long as the TLB's would be. The word is still read and compared at every fetch, as before, so a store into code
+  (self-modifying code, a JIT, MADV_DONTNEED's zeros) is seen at the next fetch whatever the page; no assumption about Go's runtime
+  (which writes no code) is needed. Step takes the hit inline. x86i is unchanged (emu's Gen and ExecPage unused by it).
+- **aesMix's products from a table** (`gmulTab`, gmul's own products for the factors 0-15, made at init): equal to the loop's on
+  4,000,000 random states both ways (probed).
+- **Results unchanged**: `bin/a64i check --record` (980 rows) and `goroot-check --record` (1,178 rows) write the committed files
+  byte for byte; go-check 10 of 10, `--tools gofmt vet` 2 of 2, `--tools compile` 1 of 1 (every run's out, err, status and files as
+  wanted), table-check ok; every control fails as it must (a64i check's 175, go-check's, goroot-1..5).
+- **The control** (test/asm/a64i-go/smc, go-check copies a program's other .go and .s files now): code written into an RWX page and
+  run (call_arm64.s: BLR, dc cvau / ic ivau), the word rewritten and run, code that rewrites its own next instruction three times, the
+  page unmapped and mapped again, made writable only and executable again, and a file mapped over the running page by its own mmap
+  system call (the next instruction the file's); the M2's run its want. Injected faults `w` (Fetch runs a decoded instruction
+  whatever the word) and `g` (the last page's bytes kept across a flush): u303-go-1 (smc under sys:w: every result 1), u303-go-2
+  (sys:g: the file mapped over itself runs the old page's #10, not #9), u303-go-3 (smc judged by hello's): fail as they must.
+
+| run (CPU seconds) | base 8aba666ff | head | |
+|---|---|---|---|
+| cmd/link on a64i (545 M instructions) | 23.6 | 10.1 | 2.3x |
+| cmd/compile -S (listing, 340 M) | 17.1 | 6.8 | 2.5x |
+| go-check --tools compile (16 runs) | 95.0 (125 s wall) | 39.4 (45 s wall) | 2.4x |
+| go-check --tools gofmt vet | 58.8 (65 s wall) | 32.9 (29 s wall) | 1.8x |
+| goroot-check, a64i's runs summed (1,141 passing) | 303 | 141 | 2.15x |
+| goroot-check whole (--record, 3 jobs) | 382 (308 s wall in 4 pieces) | 206 (174 s wall) | 1.85x |
+| bin/a64i check | 113 (117 s wall) | 111 (117 s wall) | the eval's builds on stage 0 and the lockstep's ptrace |

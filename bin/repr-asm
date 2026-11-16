@@ -1094,12 +1094,16 @@ case ${1:-} in
           [ $bad = 0 ] || exit 1
         fi
         arbace_tool -e "(do (load-file \"$root/test/asm/a64i/gen.ae\") nil)" -e "(asm.a64i-gen/main \"$dir\" \"$root/test/asm/a64i/lib/out.s\" \"$root/test/asm/a64i/synth-digests.edn\" \"$rec\")" ;;
+      arbace-check) shift 2
+        # queue 302: Arbace's own linux/arm64 executable on a64i, three runs against this CPU's (test/asm/a64i-arbace/)
+        [ -x "$a64i_exe" ] || a64i_light
+        exec bash "$root/test/asm/a64i-arbace/check.bash" "$root" "$a64i_exe" "$@" ;;
       goroot-check) shift 2
         # AR24 (queue 299): goi's $GOROOT/test corpus built for linux/arm64 and run on this CPU and on a64i (test/asm/a64i-goroot/)
         [ -x "$a64i_exe" ] || a64i_light
         exec bash "$root/test/asm/a64i-goroot/check.bash" "$root" "$a64i_exe" "$@" ;;
       go-check) shift 2
-        # AR19 (queue 288, ARS81 (a)): real Go programs on a64i, test/asm/a64i-go/NAME/main.go (or the names given) built for
+        # AR19 (queue 288, ARS81 (a)): real Go programs on a64i, test/asm/a64i-go/NAME/main.go (with its other .go and .s files, queue 303; or the names given) built for
         # linux/arm64 by TamaGo's go (no cgo) into .tmp/a64i/go, each run on a64i to its end and judged by its own output, NAME/want.txt
         # (written from this M2's native run), with status 0; on an arm64 host also run natively, the same output required
         [ -x "$a64i_exe" ] || a64i_light
@@ -1119,7 +1123,7 @@ case ${1:-} in
             continue
           fi
           [ -f "$d/main.go" ] || { echo "FAIL: a64i go-check: no $d/main.go"; bad=1; continue; }
-          rm -rf "$gw/$n"; mkdir -p "$gw/$n"; cp "$d/main.go" "$gw/$n/"; printf 'module a64igo%s\ngo 1.27\n' "$n" > "$gw/$n/go.mod"
+          rm -rf "$gw/$n"; mkdir -p "$gw/$n"; cp "$d"/*.go "$gw/$n/"; for x in "$d"/*.s; do [ ! -e "$x" ] || cp "$x" "$gw/$n/"; done; printf 'module a64igo%s\ngo 1.27\n' "$n" > "$gw/$n/go.mod"
           (cd "$gw/$n" && GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=linux \
              GOARCH=arm64 GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" "$goroot/bin/go" build -trimpath -o "$n" .) > "$gw/$n/build.log" 2>&1 \
             || { echo "FAIL: a64i go-check: $n: go build: $(head -c 300 "$gw/$n/build.log")"; bad=1; continue; }
@@ -1134,9 +1138,10 @@ case ${1:-} in
           n_ok=$((n_ok + 1)); echo "a64i go-check: $n: to its end, its output as wanted ($(tail -1 "$gw/$n/a64i.err" | sed 's/^a64i: //'))"
         done
         echo "a64i go-check: $n_ok of ${#names[@]} Go programs${tools:+ (the tools)}"
-        # the negative controls (test/asm/controls-a64i-go.txt: ID SUBJECT REFERENCE; queue 291, ARS86 (a)): SUBJECT's run judged by
-        # REFERENCE's want.txt must fail; one whose subject did not run here is not judged
-        while read -r id subj ref; do
+        # the negative controls (test/asm/controls-a64i-go.txt: ID SUBJECT REFERENCE [INJECT]; queue 291, ARS86 (a)): SUBJECT's run judged by
+        # REFERENCE's want.txt must fail; one whose subject did not run here is not judged; with INJECT (queue 309) SUBJECT run again under
+        # A64I_INJECT=INJECT (a64i's injected fault, cpu.go's Inject) is the run judged
+        while read -r id subj ref inj; do
           case $id in ''|'#'*) continue ;; esac
           case $ran in *" ${subj%%/*} "*) ;; *) continue ;; esac # a subject this run did not run is not judged
           case $subj in
@@ -1151,14 +1156,19 @@ case ${1:-} in
               continue ;;
           esac
           [ -f "$gw/$subj/a64i.out" ] && [ -f "$root/test/asm/a64i-go/$ref/want.txt" ] || continue
-          if cmp -s "$gw/$subj/a64i.out" "$root/test/asm/a64i-go/$ref/want.txt"; then echo "FAIL: control $id: $subj's run passes as $ref"; bad=1
-          else echo "control $id: fails as it must ($subj's run judged by $ref's output)"; fi
+          so=$gw/$subj/a64i.out
+          if [ -n "$inj" ]; then
+            so=$gw/$subj/a64i.inject.out
+            (cd "$gw/$subj" && A64I_INJECT=$inj timeout 120 "$a64i_exe" run "./$subj" > a64i.inject.out 2> a64i.inject.err) || true
+          fi
+          if cmp -s "$so" "$root/test/asm/a64i-go/$ref/want.txt"; then echo "FAIL: control $id: $subj's run${inj:+ under $inj} passes as $ref"; bad=1
+          else echo "control $id: fails as it must ($subj's run${inj:+ under $inj} judged by $ref's output)"; fi
         done < "$root/test/asm/controls-a64i-go.txt"
         [ $bad = 0 ] || { echo "FAIL: a64i go-check"; exit 1; } ;;
       eval-build) shift 2; [ $# -eq 2 ] || { echo "repr-asm a64i eval-build LIST WORK" >&2; exit 2; }
         export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
         arbace_tool -m arbace.asm.arm64.eval build "$1" "$2" "$src/musl-1.2.6" ;;
-      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|claimed|synth DIR [--record]|eval-build LIST WORK|table-check|go-check [NAME...]|goroot-check [--record] [--only LIST] [--from N --count M] [--jobs N]" >&2; exit 2 ;;
+      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|claimed|synth DIR [--record]|eval-build LIST WORK|table-check|go-check [NAME...]|goroot-check [--record] [--only LIST] [--from N --count M] [--jobs N]|arbace-check [--record] [--only NAME,...] [--jobs N]" >&2; exit 2 ;;
     esac ;;
   a64i-check)
     # AR5: test/asm/run-arm64/'s and test/asm/a64i/'s programs built for AOT (arbace.asm.link build: WORK/NAME) and for eval
@@ -1227,6 +1237,8 @@ case ${1:-} in
         echo "$st" > "$work/$n.status"
         (cd "$work" && GOMAXPROCS=1 timeout 120 "$a64i_exe" trace --mode sys "./$n" > "$n.sys" 2>&1) || true
         lim=$(sed -n 's/^#[[:space:]]*step-limit:[[:space:]]*\([0-9]*\).*/\1/p' "$(awk -F'\t' -v n="$n" '$1==n{print $2}' "$lists/a64i.list")" | head -1)
+        # queue 302: a header's `# lockstep: first-thread` states the lockstep's verdict EQUAL TO THE FIRST THREAD (a threaded program)
+        sed -n 's/^#[[:space:]]*lockstep:[[:space:]]*\([a-z-]*\).*/\1/p' "$(awk -F'\t' -v n="$n" '$1==n{print $2}' "$lists/a64i.list")" | head -1 > "$work/$n.lockstep"
         (cd "$work" && A64I_STEP_LIMIT=${lim:-0} GOMAXPROCS=1 timeout "${REPR_ASM_STEP_TIMEOUT:-600}" "$a64i_exe" trace --mode step "./$n" > "$n.step" 2>&1) || true
       fi
       while read -r cid kind subj ref; do

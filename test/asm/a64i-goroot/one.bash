@@ -11,8 +11,9 @@
 #               line's addresses masked) and the CPU's passing the test (status 0, stdout and stderr the golden .out, or none)
 #   ref         a64i's run equal to the CPU's, the CPU's not passing the test (DETAIL why: gc's own run on arm64)
 #   differs     a64i's run not equal to the CPU's (DETAIL what)
-#   timeout     a64i over its budget (the CPU's run within its own)
-#   speed       not run on a64i: known over its budget, or the CPU's run over A64I_GOROOT_CPU_MAX ms
+#   timeout     a64i over its budget, CPU time (the CPU's run within its own)
+#   speed       not run on a64i: known over its budget, or the CPU's run over A64I_GOROOT_CPU_MAX ms (a program with no
+#               recorded :pass: A64I_GOROOT_PASSED, queue 308)
 #   build       the build failed; constraint: the program's //go:build excludes linux/arm64 (the driver's shouldTest)
 #   skip        the action sets -goexperiment or -godebug (as goi's check), or the CPU's run timed out
 # STATS: the CPU's seconds, a64i's seconds and instructions.
@@ -51,6 +52,15 @@ while IFS= read -r line; do
 done < <(awk '/^package /{exit} /^\/\/go:build /{print}' "$g")
 
 dir=$GOROOT/test rdir=$GOROOT/test exe=$t/a.exe
+# the built programs kept by check.bash's key (the Go tree's and the corpus's pins, this script, A64I_GOROOT_BUILT): a program built
+# once is copied back, not built again (a runindir's copy of its directory is made again, the run's working directory)
+if [ -n "${A64I_GOROOT_BUILT:-}" ] && [ -f "$A64I_GOROOT_BUILT/$id.exe" ]; then
+  cp "$A64I_GOROOT_BUILT/$id.exe" "$exe"
+  if [ "$kind" = runindir ]; then
+    d=$GOROOT/test/${p%.go}.dir m=$(basename "$d") rdir=$t/src/$(basename "$d")
+    mkdir -p "$rdir"; cp -R "$d/." "$rdir/"; printf 'module %s\ngo %s\n' "$m" "$modv" > "$rdir/go.mod"
+  fi
+else
 case $kind in
   run)
     if [ ${#flags[@]} = 0 ] && [ ${#args[@]} = 0 ]; then
@@ -103,29 +113,43 @@ case $kind in
     (cd "$rdir" && env "${genv[@]}" GOPATH="$t" "$GOROOT/bin/go" build ${flags[@]+"${flags[@]}"} -o "$exe" .) > "$t/build.log" 2>&1 ;;
   *) row skip "not a run test: $kind" ;;
 esac || row build "$(grep -v '^#' "$t/build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"
+if [ -n "${A64I_GOROOT_BUILT:-}" ]; then mkdir -p "$A64I_GOROOT_BUILT"; cp "$exe" "$A64I_GOROOT_BUILT/$id.exe.$$" && mv "$A64I_GOROOT_BUILT/$id.exe.$$" "$A64I_GOROOT_BUILT/$id.exe"; fi
+fi
 
 head_err() { awk '/^goroutine /{exit} {print}' "$1" | sed -E 's/^\[signal ([A-Z]+): (.*) code=0x[0-9a-f]+ addr=0x[0-9a-f]+ pc=0x[0-9a-f]+\]$/[signal \1: \2 code=X addr=X pc=X]/'; }
-s0=$(date +%s%N); cst=0
-(cd "$rdir" && env "${renv[@]}" PWD="$rdir" timeout -k 5 $((tmo * 3)) "$exe" ${args[@]+"${args[@]}"} > "$t/c.out" 2> "$t/c.err" < /dev/null) || cst=$?
-cs=$(( ($(date +%s%N) - s0) / 1000000 ))
+# the CPU's run is timed by its CPU time (user + sys of the run and its children, bash's time), not the wall clock: under load a
+# program near the cut-off (gc2.go, about 1 s of wall time on the M2) must not change class between runs
+cst=0
+{ TIMEFORMAT='%3U %3S'; time (cd "$rdir" && env "${renv[@]}" PWD="$rdir" timeout -k 5 $((tmo * 3)) "$exe" ${args[@]+"${args[@]}"} > "$t/c.out" 2> "$t/c.err" < /dev/null) ; } 2> "$t/c.time" || cst=$?
+cs=$(awk 'END{printf "%d", ($1 + $2) * 1000 + 0.5}' "$t/c.time")
 case $cst in 124|137) row skip "the CPU's run timed out ($((tmo * 3)) s)" ;; esac
 # speed (AR24): a program known over a64i's budget (known.edn's :speed, A64I_GOROOT_SPEED) is not run on a64i, nor one whose CPU
-# run took over A64I_GOROOT_CPU_MAX ms (default 1000: a64i runs Go's code about a thousand times slower than the M2, so such a
+# run took over A64I_GOROOT_CPU_MAX ms of CPU time (default 1000: a64i runs Go's code about a thousand times slower than the M2, so such a
 # run is far over any budget); an a64i timeout is a failure until known.edn names it
 if grep -qxF "$p" "${A64I_GOROOT_SPEED:-/dev/null}"; then row speed "known over a64i's budget (the CPU's run ${cs} ms)" "cpu ${cs}ms"; fi
-[ "$cs" -le "${A64I_GOROOT_CPU_MAX:-1000}" ] || row speed "the CPU's run ${cs} ms, over ${A64I_GOROOT_CPU_MAX:-1000} ms: a64i not run" "cpu ${cs}ms"
+# queue 308: the cut-off applies only to a program with no recorded :pass (A64I_GOROOT_PASSED, check.bash's list from the record):
+# a recorded pass always runs on a64i, judged by a64i's own budget alone, so the CPU's load never changes its class (gc2.go: 0.2 s
+# of CPU time alone, 1.5 s at load 20)
+if ! grep -qxF "$p" "${A64I_GOROOT_PASSED:-/dev/null}"; then
+  [ "$cs" -le "${A64I_GOROOT_CPU_MAX:-1000}" ] || row speed "the CPU's run ${cs} ms, over ${A64I_GOROOT_CPU_MAX:-1000} ms: a64i not run" "cpu ${cs}ms"
+fi
+# queue 308: a64i's budget (A64I_GOROOT_TMO, 120 s) is its CPU time (ulimit -t: SIGXCPU, status 152), the wall clock only a cap of three
+# times it, and a64i runs with GOMAXPROCS=1 (its guest sees one CPU whatever the host's; the host's parallel GC only costs it under
+# load): fixedbugs/issue16249.go took 104 s of wall time at load 19 and timed out at 120 s beside three jobs, and takes 52 s of CPU
+# time with GOMAXPROCS=1
 s0=$(date +%s%N); ast=0
-(cd "$rdir" && env "${renv[@]}" PWD="$rdir" timeout -k 5 "${A64I_GOROOT_TMO:-120}" "$A64I" run --stats "$exe" ${args[@]+"${args[@]}"} > "$t/a.out" 2> "$t/a.raw" < /dev/null) || ast=$?
+{ TIMEFORMAT='%3U %3S'; time (cd "$rdir" && ulimit -t "${A64I_GOROOT_TMO:-120}" && env "${renv[@]}" PWD="$rdir" GOMAXPROCS=1 timeout -k 5 $(( ${A64I_GOROOT_TMO:-120} * 3 )) "$A64I" run --stats "$exe" ${args[@]+"${args[@]}"} > "$t/a.out" 2> "$t/a.raw" < /dev/null) ; } 2> "$t/a.time" || ast=$?
 as=$(( ($(date +%s%N) - s0) / 1000000 ))
+acs=$(awk 'END{printf "%d", ($1 + $2) * 1000 + 0.5}' "$t/a.time")
 # a64i's own line last on stderr (--stats): N instructions in ...
 ins=$(tail -1 "$t/a.raw" | sed -nE 's/^a64i: ([0-9]+) instructions in .*/\1/p')
 if [ -n "$ins" ]; then sed '$d' "$t/a.raw" > "$t/a.err"; else cp "$t/a.raw" "$t/a.err"; fi
-st="cpu ${cs}ms a64i ${as}ms ${ins:-?} instructions"
+st="cpu ${cs}ms a64i ${as}ms (cpu ${acs}ms, the budget's measure) ${ins:-?} instructions"
 # the runs' digests for the negative controls (judge.ae): a64i's and the CPU's status, stdout, stderr's head; the golden's
 dg() { sha256sum | cut -c1-16; }
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ast" "$(dg < "$t/a.out")" "$(head_err "$t/a.err" | dg)" "$cst" "$(dg < "$t/c.out")" \
   "$(head_err "$t/c.err" | dg)" "$(cat "$t/c.out" "$t/c.err" | dg)" "$(if [ -f "$GOROOT/test/${p%.go}.out" ]; then dg < "$GOROOT/test/${p%.go}.out"; else printf '' | dg; fi)" > "$W/res/$id.dig"
-case $ast in 124|137) row timeout "a64i over its budget of ${A64I_GOROOT_TMO:-120} s (the CPU's run ${cs} ms)" "$st" ;; esac
+case $ast in 124|137|152) row timeout "a64i over its budget of ${A64I_GOROOT_TMO:-120} s of CPU time (a64i's ${acs} ms; the CPU's run ${cs} ms)" "$st" ;; esac
 why=
 if [ "$ast" != "$cst" ]; then why="status $ast, the CPU's $cst: $(head_err "$t/a.err" | grep . | tail -1 | cut -c1-160)"
 elif ! cmp -s "$t/a.out" "$t/c.out"; then why="stdout differs from the CPU's: $(diff "$t/c.out" "$t/a.out" | grep '^[<>]' | head -2 | tr '\n' ' ' | cut -c1-200)"

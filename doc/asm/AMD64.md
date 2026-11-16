@@ -328,7 +328,8 @@ oi's are (AXS51 (a)), out of every key (`arbace_crop_paths`): no Arbace build re
   (SIGILL, `:unimplemented`). The machine (`cpu`): sixteen registers, RIP, lazy flags (`flags`, AXS55 (a): the last
   flag-setting instruction's kind, size, operands and result; a condition computed from them, a `cmp`'s directly; RFLAGS
   materialized on a whole read; `Undef`, the bits the SDM leaves undefined after it), FS and GS bases; instructions decoded once
-  per address (a store into a page holding decoded code invalidates it). The families (`sem`, hand-written from the Intel SDM vol. 2
+  per address (since queue 315 in a page's array by offset, each entry's bytes compared with the page's at every fetch, so a store
+  into code is seen at the next fetch; an instruction across a page's end kept by address, its bytes on both pages compared). The families (`sem`, hand-written from the Intel SDM vol. 2
   and the AMD APM vol. 3 as references, AXS54 (a)), chosen by the instruction's Intel mnemonic from the table: alu (add or adc sbb
   and sub xor cmp test), unary (inc dec neg not), mov (mov movabs movzx movsx movsxd lea xchg bswap cmovcc setcc), stack (push pop
   pushfq popfq leave), branch (jmp jcc call ret loop loope loopne jrcxz jecxz), muldiv (mul imul div idiv; #DE is SIGFPE), shift

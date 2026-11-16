@@ -5,6 +5,7 @@
 (in-ns 'go.arbace.emu) (go/file "as.go" :doc "Package emu is the frame of Arbace's machine emulators (doc/asm/AMD64.md §10; AX5-DESIGN §1, AXS52 (a)): a Linux\nprocess's address space over crt's Mem (crt's slabs hold the bytes; emu keeps the permissions per page, Linux's layout and\na software TLB), its loader (a static ELF executable and the stack Linux builds for it) and the part of the kernel a\nmachine needs beyond crt's system calls (brk, mmap, munmap, mprotect). It imports std and arbace/crt only.\n" :imports [
 
 
+    [sort "sort"]
     ^{:line 8} [crt "arbace/crt"]])
 
 
@@ -34,11 +35,20 @@
 
 
 
+(go/type vma "vma is a range of mapped pages [base, end) with their permissions (queue 311: the address space's mappings as ranges, Linux's\nVMAs, not a permission a page).\n" (struct
+    ^{:tag uint64} base
+    ^{:tag uint64} end
+    ^{:tag uint8} perm))
+
+
+
 (go/type AS "AS is a process's address space.\n" (struct
     ^{:line 38 :tag (* crt/Mem)} M
-    ^{:line 39 :tag (map uint64 uint8)} perm ; by page address
+    ^{:tag (slice vma)} vmas ; sorted by base, disjoint (queue 311)
+    ^{:tag (map uint64 bool)} code ; the pages marked PermCode
     ^{:line 40 :tag (array 256 tlbEntry)} tlb
     ^{:line 41 :tag (func [^uint64 page])} OnCode ; a store into a PermCode page: the decoded instructions there are stale
+    ^{:tag uint64 :doc "Gen counts the TLB's flushes and entry invalidations (queue 303): a page's bytes ExecPage gave stay this page's\nwhile Gen is unchanged (a mapping, an unmapping or a protection change flushes).\n"} Gen
 
     ^{:line 43 :tag uint64 :doc "the last fault: its address and whether it was a write or a fetch\n"} FaultAddr
     ^{:line 44 :tag uint8} FaultKind ; FaultRead, FaultWrite, FaultFetch
@@ -49,99 +59,187 @@
 
 
 ^{:go/end 53} (go/func NewAS "NewAS is an empty address space (crt's Mem without its stack: the loader maps Linux's).\n" ^{:tag (* AS)} []
-  (addr (lit AS :M (new crt/Mem) :perm (lit (map uint64 uint8)))))
+  (addr (lit AS :M (new crt/Mem) :code (lit (map uint64 bool)))))
 
 
 ^{:go/end 59} (go/method flush [^{:tag (* AS)} a]
+  (inc! (.-Gen a))
   (range [i (.-tlb a)]
     (aset (.-tlb a) i (lit tlbEntry))))
 
 
 
 
-^{:go/breaks [[5 68]] :go/end 69} (go/method Mapped "Mapped reports whether any page of [base, base+size) is mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size]
-  (for [p (bit-and-not base pageMask)] (< p (+ base size)) (set! p + pageSize)
-    (when [(values _ ok) (aget (.-perm a) p)] ok
-      (return true)))
+(go/method at "at is the index of the first mapping that ends after addr (len(vmas): none).\n" ^int [^{:tag (* AS)} a ^uint64 addr]
+  (sort/Search (len (.-vmas a)) (fn ^bool [^int i] (> (.-end (aget (.-vmas a) i)) addr))))
 
 
-  false)
+(go/method lookup "lookup is the permissions of the page at p (PermCode not among them), false when it is not mapped.\n" [^{:tag (* AS)} a ^uint64 p] :results [uint8 bool]
+  (let [i (.at a p)]
+    (when (and (< i (len (.-vmas a))) (<= (.-base (aget (.-vmas a) i)) p))
+      (return (.-perm (aget (.-vmas a) i)) true))
+
+    (return 0 false)))
+
+
+(go/method set "set makes [base, end) (page-aligned) one mapping with the permissions perm, what was mapped there cut out of the others.\n" [^{:tag (* AS)} a ^uint64 base ^uint64 end ^uint8 perm]
+  (.cut a base end)
+  (let [i (.at a base)
+        out (make (slice vma) 0 (+ (len (.-vmas a)) 1))]
+    (set! out (append out (spread (subslice (.-vmas a) _ i))))
+    (set! out (append out (lit vma :base base :end end :perm perm)))
+    (set! (.-vmas a) (append out (spread (subslice (.-vmas a) i))))))
+
+
+(go/method cut "cut removes [base, end) from the mappings, splitting one that holds it partly.\n" [^{:tag (* AS)} a ^uint64 base ^uint64 end]
+  (let [i (.at a base)
+        j i
+        ^{:tag (slice vma)} mid nil]
+    (while (and (< j (len (.-vmas a))) (< (.-base (aget (.-vmas a) j)) end))
+      (let [v (aget (.-vmas a) j)]
+        (when (< (.-base v) base)
+          (set! mid (append mid (lit vma :base (.-base v) :end base :perm (.-perm v)))))
+
+        (when (> (.-end v) end)
+          (set! mid (append mid (lit vma :base end :end (.-end v) :perm (.-perm v))))))
+
+      (inc! j))
+
+    (when (and (== i j) (== (len mid) 0))
+      (return))
+
+    (let [out (make (slice vma) 0 (+ (- (len (.-vmas a)) (- j i)) (len mid)))]
+      (set! out (append out (spread (subslice (.-vmas a) _ i))))
+      (set! out (append out (spread mid)))
+      (set! (.-vmas a) (append out (spread (subslice (.-vmas a) j)))))))
+
+
+(go/method codeIn "codeIn is the PermCode pages of [base, end), in order.\n" ^{:tag (slice uint64)} [^{:tag (* AS)} a ^uint64 base ^uint64 end]
+  (let [^{:tag (slice uint64)} out nil]
+    (when (== (len (.-code a)) 0)
+      (return nil))
+
+    (if (< (conv uint64 (len (.-code a))) (/ (- end base) pageSize))
+      (do
+        (range [p (.-code a)]
+          (when (and (>= p base) (< p end))
+            (set! out (append out p))))
+
+        (sort/Slice out (fn ^bool [^int i ^int j] (< (aget out i) (aget out j)))))
+      (for [p base] (< p end) (set! p + pageSize)
+        (when (aget (.-code a) p)
+          (set! out (append out p)))))
+
+    out))
+
+
+(go/method Mapped "Mapped reports whether any page of [base, base+size) is mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size]
+  (let [lo (bit-and-not base pageMask)
+        hi (+ base size)]
+    (when (>= lo hi)
+      (return false))
+
+    (let [i (.at a lo)]
+      (and (< i (len (.-vmas a))) (< (.-base (aget (.-vmas a) i)) hi)))))
+
+
+(go/method Covered "Covered reports whether every page of [base, base+size) (base page-aligned) is mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size]
+  (let [p base
+        hi (+ base size)
+        i (.at a p)]
+    (while (< p hi)
+      (when (or (>= i (len (.-vmas a))) (> (.-base (aget (.-vmas a) i)) p))
+        (return false))
+
+      (set! p (.-end (aget (.-vmas a) i)))
+      (inc! i))
+
+    true))
 
 
 
 (go/method TableLevel "TableLevel is the translation table level at which a walk for the unmapped addr would stop, as Linux's 4 KB granule and\n48-bit tables hold it when every table covering a mapped page exists: 0 when no page is mapped in addr's 512 GB, 1 in its\n1 GB, 2 in its 2 MB, else 3 (a64i's ESR of a translation fault, AR20; the kernel's tables are made lazily, so the world's\nmay stop sooner).\n" ^int [^{:tag (* AS)} a ^uint64 addr]
-  (let [level 0]
-    (range [p (.-perm a)]
-      (cond
-        (== (>> p 21) (>> addr 21))
-        (return 3)
-        (and (== (>> p 30) (>> addr 30)) (< level 2))
-        (set! level 2)
-        (and (== (>> p 39) (>> addr 39)) (< level 1))
-        (set! level 1)))
+  (range [_ l (lit (slice uint) 21 30 39)]
+    (when (.Mapped a (<< (>> addr l) l) (<< (conv uint64 1) l))
+      (return (- 3 (conv int (/ (- l 21) 9))))))
 
-    level))
+  0)
 
 
-^{:go/end 78} (go/method Map "Map maps [base, base+size) (page-aligned) with zero bytes and the permissions perm.\n" [^{:tag (* AS)} a ^uint64 base ^uint64 size ^uint8 perm ^string name]
-  (.Map (.-M a) base size (== (bit-and perm PermW) 0) name)
-  (for [p base] (< p (+ base size)) (set! p + pageSize)
-    (aset (.-perm a) p perm))
+^{:go/end 78} (go/method Map "Map maps [base, base+size) (page-aligned) with zero bytes and the permissions perm, its bytes reserved (crt's Reserve:\nthe host's memory at a page's first touch, queue 311); false when the host refuses the memory.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size ^uint8 perm ^string name]
+  (when (== (.Reserve (.-M a) base size (== (bit-and perm PermW) 0) name) nil)
+    (return false))
 
-  (.flush a))
+  (range [_ p (.codeIn a base (+ base size))]
+    (delete (.-code a) p))
 
-
-
-^{:go/end 92} (go/method Unmap "Unmap removes [base, base+size) (page-aligned).\n" [^{:tag (* AS)} a ^uint64 base ^uint64 size]
-  (.Unmap (.-M a) base size)
-  (for [p base] (< p (+ base size)) (set! p + pageSize)
-    (when [(values pr ok) (aget (.-perm a) p)] ok
-      (when (and (!= (bit-and pr PermCode) 0) (!= (.-OnCode a) nil))
-        ((.-OnCode a) p))
-
-      (delete (.-perm a) p)))
-
-
-  (.flush a))
-
-
-
-^{:go/breaks [7] :go/end 110} (go/method Protect "Protect sets the permissions of the mapped pages of [base, base+size); false when a page is not mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size ^uint8 perm]
-  (for [p base] (< p (+ base size)) (set! p + pageSize)
-    (when [(values _ ok) (aget (.-perm a) p)] (not ok)
-      (return false)))
-
-
-  (for [p base] (< p (+ base size)) (set! p + pageSize)
-    (let [old (aget (.-perm a) p)]
-      (when (and (!= (bit-and old PermCode) 0) (!= (.-OnCode a) nil))
-        ((.-OnCode a) p))
-
-      (aset (.-perm a) p perm)))
-
+  (.set a base (+ base size) perm)
   (.flush a)
   true)
 
 
 
+^{:go/end 92} (go/method Unmap "Unmap removes [base, base+size) (page-aligned).\n" [^{:tag (* AS)} a ^uint64 base ^uint64 size]
+  (.Unmap (.-M a) base size)
+  (range [_ p (.codeIn a base (+ base size))]
+    (when (!= (.-OnCode a) nil)
+      ((.-OnCode a) p))
+
+    (delete (.-code a) p))
+
+  (.cut a base (+ base size))
+  (.flush a))
+
+
+
+^{:go/breaks [7] :go/end 110} (go/method Protect "Protect sets the permissions of the mapped pages of [base, base+size); false when a page is not mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size ^uint8 perm]
+  (when (not (.Covered a base size))
+    (return false))
+
+  (range [_ p (.codeIn a base (+ base size))]
+    (when (!= (.-OnCode a) nil)
+      ((.-OnCode a) p))
+
+    (delete (.-code a) p))
+
+  (when (> size 0)
+    (.set a base (+ base size) perm))
+
+  (.flush a)
+  true)
+
+
+(go/method joinPerm "joinPerm adds perm to the permissions of the mapped page p (the loader's page two segments share).\n" [^{:tag (* AS)} a ^uint64 p ^uint8 perm]
+  (when [(values pr ok) (.lookup a p)] ok
+    (.set a p (+ p pageSize) (bit-or pr perm))))
+
+
+
 ^{:go/end 121} (go/method Writable "Writable are the writable pages' addresses, in no order (the lockstep's comparison of the writable segments).\n" ^{:tag (slice uint64)} [^{:tag (* AS)} a]
   (let [^{:tag (slice uint64)} out (zero (slice uint64))]
-    (range [p pr (.-perm a)]
-      (when (!= (bit-and pr PermW) 0)
-        (set! out (append out p))))
+    (range [_ v (.-vmas a)]
+      (when (!= (bit-and (.-perm v) PermW) 0)
+        (for [p (.-base v)] (< p (.-end v)) (set! p + pageSize)
+          (set! out (append out p)))))
+
+    out))
 
 
-    ^{:line 120} out))
 
+^{:go/end 124} (go/method Perm "Perm is the page's permissions (0: unmapped).\n" ^uint8 [^{:tag (* AS)} a ^uint64 addr]
+  (let [p (bit-and-not addr pageMask)
+        (values pr _) (.lookup a p)]
+    (when (aget (.-code a) p)
+      (return (bit-or pr PermCode)))
 
-
-^{:go/end 124} (go/method Perm "Perm is the page's permissions (0: unmapped).\n" ^uint8 [^{:tag (* AS)} a ^uint64 addr] (aget (.-perm a) (bit-and-not addr pageMask)))
+    pr))
 
 
 ^{:go/end 133} (go/method MarkCode "MarkCode marks the page as holding decoded instructions.\n" [^{:tag (* AS)} a ^uint64 addr]
   (let [p (bit-and-not addr pageMask)]
-    (when [(values pr ok) (aget (.-perm a) p)] (and ok (== (bit-and pr PermCode) 0))
-      (aset (.-perm a) p (bit-or pr PermCode))
+    (when [(values _ ok) (.lookup a p)] (and ok (not (aget (.-code a) p)))
+      (aset (.-code a) p true)
+      (inc! (.-Gen a))
       (aset (.-tlb a) (bit-and (>> p 12) 255) (lit tlbEntry)))))
 
 
@@ -149,8 +247,9 @@
 
 ^{:go/end 142} (go/method ClearCode "ClearCode unmarks the page.\n" [^{:tag (* AS)} a ^uint64 addr]
   (let [p (bit-and-not addr pageMask)]
-    (when [(values pr ok) (aget (.-perm a) p)] ok
-      (aset (.-perm a) p (bit-and-not pr PermCode))
+    (when [(values _ ok) (.lookup a p)] ok
+      (delete (.-code a) p)
+      (inc! (.-Gen a))
       (aset (.-tlb a) (bit-and (>> p 12) 255) (lit tlbEntry)))))
 
 
@@ -162,9 +261,12 @@
     (when (== (.-page e) (+ p 1))
       (return e))
 
-    (let [(values pr ok) (aget (.-perm a) p)]
+    (let [(values pr ok) (.lookup a p)]
       (when (not ok)
         (return nil))
+
+      (when (aget (.-code a) p)
+        (set! pr bit-or PermCode))
 
       (let [s (.Slab (.-M a) p)]
         (when (== s nil)
@@ -281,6 +383,17 @@
         (set! n + (copy (subslice buf n) (subslice (.-b e) (bit-and (+ addr (conv uint64 n)) pageMask))))))
 
     ^{:line 269} n))
+
+
+
+(go/method ExecPage "ExecPage is the bytes of the executable page holding addr, the whole page (queue 303: a64i's fetch keeps them while\nGen is unchanged); nil when it is not mapped or not executable (FaultAddr addr, FaultKind FaultFetch, as Fetch).\n" ^{:tag (slice byte)} [^{:tag (* AS)} a ^uint64 addr]
+  (let [e (.entry a addr)]
+    (when (or (== e nil) (== (bit-and (.-perm e) PermX) 0))
+      (set! (.-FaultAddr a) addr)
+      (set! (.-FaultKind a) FaultFetch)
+      (return nil))
+
+    (.-b e)))
 
 
 

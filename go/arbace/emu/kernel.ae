@@ -13,6 +13,7 @@
     ^{:line 13 :tag uint64} BrkBase
     ^{:line 14 :tag uint64} Brk
     ^{:line 15 :tag uint64} MmapNext ; the top of mmap's area (topDown)
+    ^{:tag uint64} StackLow ; the stack's area's bottom: mmap's hint is taken below it (queue 302: arm64's, not x86-64's)
     ^{:tag (slice (* sharedMap))} shared
     ^{:tag (map uint64 bool)} anonShared)) ; the pages of shared anonymous mappings (AR24: madvise's MADV_DONTNEED keeps them)
 
@@ -20,14 +21,16 @@
 (go/type sharedMap "sharedMap is a shared file mapping (MAP_SHARED, AR23, queue 295): its pages [Base, Base+Size) hold the file's bytes from Off
 as fileMap read them in; MayWrite when its descriptor was open for writing, and then Fd is the mapping's own descriptor (the
 program's duplicated above its own numbers, as Linux's mapping holds its file past the descriptor's close) and Shadow the bytes
-as last read from or written to the file, against which writeBack finds the pages the program changed.
+as last read from or written to the file, against which writeBack finds the bytes the program changed; Err a write-back's
+failure not yet reported (msync's MS_SYNC reports it, as Linux's fsync of the mapping's file does; queue 310).
 " (struct
     ^{:tag uint64} Base
     ^{:tag uint64} Size
     ^{:tag uint64} Off
     ^{:tag int64} Fd
     ^{:tag bool} MayWrite
-    ^{:tag (slice byte)} Shadow))
+    ^{:tag (slice byte)} Shadow
+    ^{:tag int64} Err))
 
 
 
@@ -38,14 +41,20 @@ as last read from or written to the file, against which writeBack finds the page
   ^{:line 23} [^{:val 19} eNODEV 19]
   ^{:line 24} [^{:val 9} eBADF 9]
   [^{:val 13} eACCES 13]
+  [^{:val 3} eSRCH 3]
+  [^{:val 14} eFAULT 14]
   [^{:val 27} eFBIG 27]
   [^{:val 95} eOPNOTSUPP 95]
-  [^{:val 1073741824} sharedFdBase 0x40000000]) ; a shared mapping's own descriptor: fcntl F_DUPFD's lowest
+  [^{:val 5} eIO 5]
+  [^{:val 28} eNOSPC 28]
+  [^{:val 122} eDQUOT 122]
+  [^{:val 1073741824} sharedFdBase 0x40000000] ; a shared mapping's own descriptor: fcntl F_DUPFD's lowest
+  [^{:tag uint64 :val 2097152} pmdSize 0x200000]) ; the PMD's span, a transparent huge page (thpTopDown)
 
 
 
 ^{:go/end 30} (go/func NewKernel "NewKernel is the kernel of the program in a, its break from img.\n" ^{:tag (* Kernel)} [^{:tag (* AS)} a ^{:tag (* Image)} img ^{:tag (* crt/Sys)} sys]
-  (addr (lit Kernel :AS a :Sys sys :BrkBase (.-BrkBase img) :Brk (.-BrkBase img) :MmapNext (- MmapTop VdsoSize))))
+  (addr (lit Kernel :AS a :Sys sys :BrkBase (.-BrkBase img) :Brk (.-BrkBase img) :MmapNext (- MmapTop VdsoSize) :StackLow (- StackTop StackSize))))
 
 
 ^{:go/end 32} (go/func pageUp ^uint64 [^uint64 n] (bit-and-not (+ n pageMask) pageMask))
@@ -81,7 +90,8 @@ as last read from or written to the file, against which writeBack finds the page
             (when (.Mapped (.-AS k) old (- nw old))
               (return (conv int64 (.-Brk k)) nil))
 
-            (.Map (.-AS k) old (- nw old) (bit-or PermR PermW) "brk"))
+            (when (not (.Map (.-AS k) old (- nw old) (bit-or PermR PermW) "brk"))
+              (return (conv int64 (.-Brk k)) nil)))
           (< nw old)
           (.Unmap (.-AS k) nw (- old nw)))
 
@@ -117,11 +127,8 @@ as last read from or written to the file, against which writeBack finds the page
       (return (.msync k a1 a2 a3) nil))
     (case [28] ; madvise (AR24, queue 299)
       (return (.madvise k a1 a2 a3) nil))
-    (case [258] ; mkdirat (AR24, queue 299: os.Mkdir, os.MkdirTemp): at AT_FDCWD crt's mkdir, its umask; another dirfd ENOSYS
-      (when (== (conv int32 a1) -100)
-        (return (.passthru k 83 a2 a3 0 0 0 0)))
-
-      (return (- eNOSYS) nil))
+    (case [204] ; sched_getaffinity (queue 302: Go's runtime, its CPU count at start and its GOMAXPROCS update each second)
+      (return (.affinity k a1 a2 a3) nil))
     (case [285] ; fallocate (AR23)
       (return (.fallocate k a1 a2 a3 a4) nil))
     (case [10] ; mprotect
@@ -153,24 +160,51 @@ as last read from or written to the file, against which writeBack finds the page
   (.passthru k n a1 a2 a3 a4 a5 a6))
 
 
-(go/method MapAnon "MapAnon maps size bytes (page-aligned) of zeros with prot (mmap's) as mmap does under flags: at addr with MAP_FIXED, else\nat addr when it is free and below the stack's area, else where Linux's top-down search puts it (topDown); the address.\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags]
+(go/method MapAnon "MapAnon maps size bytes (page-aligned) of zeros with prot (mmap's) as mmap does under flags: at addr with MAP_FIXED, else\nat addr when it is free and below the stack's area (StackLow), else where Linux's top-down search puts it (topDown; a private\nmapping of a multiple of 2 MiB with no hint 2 MiB-aligned, thpTopDown); the address.\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags]
   (cond (!= (bit-and flags 0x10) 0) (do ; MAP_FIXED: what it replaces unmapped as munmap does (AR23)
       (.release k addr size)
       (.Unmap (.-AS k) addr size))
-    (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (- StackTop StackSize)))
+    (and (== addr 0) (== (bit-and flags 3) 2) (== (bit-and size (- pmdSize 1)) 0)) ; queue 302: private, no hint, PMD-sized
+    (set! addr (.thpTopDown k size))
+    (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (.-StackLow k)))
     (set! addr (.topDown k size)))
 
-  (.Map (.-AS k) addr size (protPerm prot) "mmap")
+  (when (not (.Map (.-AS k) addr size (protPerm prot) "mmap"))
+    (let [^int64 e (- eNOMEM)]
+      (return (conv uint64 e))))
+
   addr)
 
 
 (go/method topDown "topDown is the address of a mapping of size bytes in mmap's area as Linux's top-down search gives it (vm_unmapped_area; AR23,\nqueue 295): the highest free gap that holds it below the area's top (MmapNext), so a hole munmap left is reused as on Linux\n(before AR23 the area grew down from the last mapping, a hole never reused).\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 size]
-  (let [a (- (.-MmapNext k) size)]
-    (for [p (- (.-MmapNext k) pageSize)] (>= p a) (set! p - pageSize)
-      (when (.Mapped (.-AS k) p pageSize)
-        (set! a (- p size))))
+  (let [a (- (.-MmapNext k) size)
+        vs (.-vmas (.-AS k))]
+    ;; queue 311: the mappings from the highest down, each below the candidate's end and over it moving it below itself (the page walk
+    ;; it replaces took a page at a time, so a reservation of 1 TiB was 2^28 steps)
+    (for [i (min (.at (.-AS k) (- (.-MmapNext k) 1)) (- (len vs) 1))] (>= i 0) (dec! i)
+      (let [v (aget vs i)]
+        (when (>= (.-base v) (+ a size))
+          (continue))
+
+        (when (<= (.-end v) a)
+          (break))
+
+        (set! a (- (.-base v) size))))
 
     a))
+
+
+(go/method thpTopDown "thpTopDown is the address of a private anonymous mapping of size bytes, a multiple of the PMD's 2 MiB, mapped with no
+hint (queue 302: Go's heap arenas and its 32 MiB and 64 MiB reservations): Linux (6.7 on, with transparent huge pages configured;
+__get_unmapped_area's THP case, __thp_get_unmapped_area) searches a gap of size plus 2 MiB top-down (topDown) and returns its
+highest 2 MiB-aligned address that holds size bytes: the gap's start rounded up to 2 MiB, or 2 MiB above it when it is aligned.
+" ^uint64 [^{:tag (* Kernel)} k ^uint64 size]
+  (let [r (.topDown k (+ size pmdSize))
+        sub (bit-and (- r) (- pmdSize 1))]
+    (when (== sub 0)
+      (return (+ r pmdSize)))
+
+    (+ r sub)))
 
 
 (go/method fileMap "fileMap is mmap of a file's descriptor fd (AR22, queue 294: cmd/compile's export data, cmd/internal/bio's and\nbase.MapFile's MAP_SHARED PROT_READ mappings): Linux's checks in its order (an offset not page-aligned EINVAL, the descriptor\nEBADF, no mapping type EINVAL, a descriptor not open for reading, or a shared writable mapping of one not open for writing,\nEACCES, not a regular file ENODEV), then MapAnon's pages with the file's bytes from off read in by crt's pread64, to the file's\nend (the rest zero). The mapping is a copy: a shared one does not see later writes to the file, and the pages past the file's\nend read as zeros where Linux raises SIGBUS. A shared one is recorded (share, AR23, queue 295): its changed pages written back\nto the file at msync, munmap and the process's end (End), as Linux's page cache keeps them.\n" [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags ^uint64 fd ^uint64 off] :results [^int64 ret ^{:tag (* Exited)} exit]
@@ -205,8 +239,11 @@ as last read from or written to the file, against which writeBack finds the page
         (when (< r 0)
           (return (- eNODEV) nil)))
 
-      (let [a (.MapAnon k addr size prot flags)
-            s (.Slab (.-M (.-AS k)) a)
+      (let [a (.MapAnon k addr size prot flags)]
+       (when (> a (bit-not (conv uint64 4095))) ; ENOMEM (queue 311)
+        (return (conv int64 a) nil))
+
+       (let [s (.Slab (.-M (.-AS k)) a)
             ro (.-RO s)
             ^uint64 done 0]
         ;; crt's pread64 writes into the slab even when the mapping is read-only
@@ -231,7 +268,7 @@ as last read from or written to the file, against which writeBack finds the page
         (when shared
           (.share k a size off fd (== acc 2)))
 
-        (return (conv int64 a) nil)))))
+        (return (conv int64 a) nil))))))
 
 
 (go/method share "share records the shared file mapping [a, a+size) of fd from off (AR23, queue 295): when fd is open for writing, with a
@@ -259,17 +296,21 @@ put back), or -errno (a pipe's ESPIPE).
       end)))
 
 
-(go/method writeBack "writeBack writes the pages of [lo, hi) (page-aligned, within m) of the shared mapping m that the program changed to m's
-file (AR23, queue 295): each page's bytes from its first changed one to its last (against m's Shadow) by pwrite64 on m's own
-descriptor at their offsets, as far as the file's end reaches (Linux writes no page's part past it: the file does not grow);
-the Shadow then holds them. A mapping whose descriptor was not open for writing has nothing to write.
-" [^{:tag (* Kernel)} k ^{:tag (* sharedMap)} m ^uint64 lo ^uint64 hi]
+(go/method writeBack "writeBack writes the bytes of [lo, hi) (page-aligned, within m) of the shared mapping m that the program changed to m's
+file (AR23, queue 295; queue 310): in each page each run of bytes that differ from m's Shadow, by crt's WriteBack on m's own
+descriptor at its offset (a pwrite whatever the descriptor's O_APPEND: Linux's page cache writes a mapped page in place), as far as
+the file's end reaches (Linux writes no page's part past it: the file does not grow). The file's bytes between the runs are not
+written, so a write(2)'s bytes there since the mapping read them stay. The Shadow then holds the bytes written; a run not written
+stays changed, tried again at the next write-back. 0, or the first failure as Linux's writeback records it (ENOSPC and EDQUOT,
+any other EIO), the runs after it still tried. A mapping whose descriptor was not open for writing has nothing to write.
+" ^int64 [^{:tag (* Kernel)} k ^{:tag (* sharedMap)} m ^uint64 lo ^uint64 hi]
   (when (or (< (.-Fd m) 0) (>= lo hi))
-    (return))
+    (return 0))
 
-  (let [end (.fileSize k (.-Fd m))]
+  (let [end (.fileSize k (.-Fd m))
+        ^int64 res 0]
     (when (< end 0)
-      (return))
+      (return (wbErr end)))
 
     (for [p lo] (< p hi) (set! p + pageSize)
       (let [i (- p (.-Base m))
@@ -288,16 +329,37 @@ the Shadow then holds them. A mapping whose descriptor was not open for writing 
           (let [old (subslice (.-Shadow m) i (+ i n))
                 ^int j 0
                 e (conv int n)]
-            (while (and (< j e) (== (aget b j) (aget old j)))
-              (inc! j))
+            (while (< j e)
+              (while (and (< j e) (== (aget b j) (aget old j)))
+                (inc! j))
 
-            (while (and (> e j) (== (aget b (- e 1)) (aget old (- e 1))))
-              (dec! e))
+              (let [^int r j]
+                (while (and (< r e) (!= (aget b r) (aget old r)))
+                  (inc! r))
 
-            (when (< j e)
-              (let [(values r _) (.passthru k 18 (conv uint64 (.-Fd m)) (+ p (conv uint64 j)) (conv uint64 (- e j)) (+ fo (conv uint64 j)) 0 0)]
-                (when (== r (conv int64 (- e j)))
-                  (copy (subslice old j e) (subslice b j e)))))))))))
+                (while (< j r)
+                  (let [w (.WriteBack (.-Sys k) (conv int (.-Fd m)) (subslice b j r) (conv int64 (+ fo (conv uint64 j))))]
+                    (if (<= w 0)
+                      (do
+                        (when (== res 0)
+                          (set! res (wbErr w)))
+
+                        (set! j r))
+
+                      (do
+                        (copy (subslice old j (+ j (conv int w))) (subslice b j (+ j (conv int w))))
+                        (set! j + (conv int w))))))))))))
+
+    res))
+
+
+(go/func wbErr "wbErr is a write-back's failure w (-errno, or 0: nothing written) as Linux's writeback records it for fsync and msync
+(mapping_set_error): ENOSPC and EDQUOT themselves, any other EIO.
+" ^int64 [^int64 w]
+  (when (or (== w (- eNOSPC)) (== w (- eDQUOT)))
+    (return w))
+
+  (- eIO))
 
 
 (go/method release "release is munmap's part for the shared file mappings over [base, base+size) (munmap, and mmap's MAP_FIXED over them;
@@ -320,7 +382,9 @@ own descriptor duplicated when both sides remain), a mapping wholly gone its des
           (when (< hi up)
             (set! up hi))
 
-          (.writeBack k m lo up)
+          (when [w (.writeBack k m lo up)] (!= w 0) ; munmap reports no write-back's failure (Linux's neither)
+            (set! (.-Err m) w))
+
           (let [left (> base (.-Base m))
                 right (< hi mend)]
             (when right
@@ -343,7 +407,7 @@ own descriptor duplicated when both sides remain), a mapping wholly gone its des
 descriptor of its own (m keeps its part on the left), else m's.
 " ^{:tag (* sharedMap)} [^{:tag (* Kernel)} k ^{:tag (* sharedMap)} m ^uint64 hi ^bool dup]
   (let [d (- hi (.-Base m))
-        r (addr (lit sharedMap :Base hi :Size (- (.-Size m) d) :Off (+ (.-Off m) d) :Fd (.-Fd m) :MayWrite (.-MayWrite m)))]
+        r (addr (lit sharedMap :Base hi :Size (- (.-Size m) d) :Off (+ (.-Off m) d) :Fd (.-Fd m) :MayWrite (.-MayWrite m) :Err (.-Err m)))]
     (when (!= (.-Shadow m) nil)
       (set! (.-Shadow r) (subslice (.-Shadow m) d)))
 
@@ -355,8 +419,10 @@ descriptor of its own (m keeps its part on the left), else m's.
 
 
 (go/method msync "msync(addr, len, flags) (AR23, queue 295): Linux's checks (a flag beyond MS_ASYNC, MS_INVALIDATE and MS_SYNC, an address not
-page-aligned, MS_ASYNC with MS_SYNC: EINVAL; a range that wraps ENOMEM), the shared file mappings' changed pages in the range
-written back (writeBack; MS_ASYNC too: the copy's nearest to Linux's page cache), then ENOMEM when a page of it is not mapped.
+page-aligned, MS_ASYNC with MS_SYNC: EINVAL; a range that wraps ENOMEM), the shared file mappings' changed bytes in the range
+written back (writeBack; MS_ASYNC too: the copy's nearest to Linux's page cache), then ENOMEM when a page of it is not mapped. A
+write-back's failure (queue 310) is the mapping's until reported: MS_SYNC returns it at once, as Linux's vfs_fsync_range of the
+mapping's file does (EIO; ENOSPC, EDQUOT), and clears it; MS_ASYNC and munmap keep it.
 " ^int64 [^{:tag (* Kernel)} k ^uint64 base ^uint64 n ^uint64 flags]
   (when (or (!= (bit-and flags (bit-not (conv uint64 7))) 0) (!= (bit-and base pageMask) 0) (== (bit-and flags 5) 5))
     (return (- eINVAL)))
@@ -375,11 +441,16 @@ written back (writeBack; MS_ASYNC too: the copy's nearest to Linux's page cache)
           (set! up hi))
 
         (when (< lo up)
-          (.writeBack k m lo up))))
+          (when [w (.writeBack k m lo up)] (!= w 0)
+            (set! (.-Err m) w))
 
-    (for [p base] (< p hi) (set! p + pageSize)
-      (when (not (.Mapped (.-AS k) p pageSize))
-        (return (- eNOMEM))))
+          (when (and (!= (bit-and flags 4) 0) (!= (.-Err m) 0))
+            (let [w (.-Err m)]
+              (set! (.-Err m) 0)
+              (return w))))))
+
+    (when (not (.Covered (.-AS k) base (- hi base)))
+      (return (- eNOMEM)))
 
     0))
 
@@ -511,11 +582,29 @@ anonymous (markAnon) or a file's, keep their bytes, as Linux's shared memory and
           (when (and (>= p (.-Base sm)) (< p (+ (.-Base sm) (.-Size sm))))
             (set! shared true)))
 
-        (when (not shared)
-          (when [b (.Bytes (.-AS k) p)] (!= b nil)
-            (clear b))))))
+        (when (and (not shared) (.Mapped (.-AS k) p pageSize))
+          (.Zero (.-M (.-AS k)) p pageSize)))))
 
   0)
+
+
+(go/method affinity "affinity is sched_getaffinity(pid, len, mask) (queue 302: Go's runtime counts its CPUs by it at start, getproccount, and
+its GOMAXPROCS update asks it again each second): the machine is one CPU, CPU 0, one thread running at a time, so the mask is the
+word 1. Linux's order: len*8 below the CPU count or not a multiple of the word's size EINVAL, a pid that names no task (a
+negative one) ESRCH, the mask's word written (min(len, 8) bytes, Linux's cpumask_size for one CPU) or EFAULT; the result is the
+bytes written. The kernel holds one process and knows no ids (the CPU's layer does), so every pid >= 0 is the process's.
+" ^int64 [^{:tag (* Kernel)} k ^uint64 pid ^uint64 n ^uint64 mask]
+  (let [size (conv uint32 n)]
+    (when (or (< (* (conv uint64 size) 8) 1) (!= (bit-and size 7) 0))
+      (return (- eINVAL)))
+
+    (when (< (conv int32 pid) 0)
+      (return (- eSRCH)))
+
+    (when (not (.Write (.-AS k) mask 8 1))
+      (return (- eFAULT)))
+
+    8))
 
 
 (go/method markAnon "markAnon records [base, base+size) as pages of a shared anonymous mapping (on), or as not (off: another mapping or none
@@ -525,6 +614,14 @@ there now).
     (set! (.-anonShared k) (make (map uint64 bool))))
 
   (when (== (.-anonShared k) nil)
+    (return))
+
+  (when (and (not on) (< (conv uint64 (len (.-anonShared k))) (/ size pageSize)))
+    ;; queue 311: fewer shared pages than the range's: theirs looked at, not the range's every page
+    (range [p (.-anonShared k)]
+      (when (and (>= p base) (< p (+ base size)))
+        (delete (.-anonShared k) p)))
+
     (return))
 
   (for [p base] (< p (+ base size)) (set! p + pageSize)
