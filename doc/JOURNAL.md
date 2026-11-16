@@ -7736,3 +7736,47 @@ fabrication; re-splicing cpp.edn whole, which would duplicate steps.
 - **cpp-dg.dg-error-own** (subagent). This was a real regression from cpp-s14: ref-conv-for took the first conversion candidate. `556e44df7` picks the best candidate per [over.match.best] and reports ambiguity when none is best. ambig2.C passes, and the whole part gives 823 own passes (822 at the gate).
 - **oi-check.run** (subagent). The record was stale after OC219 (a). `4b2a4ff13` exports OI_SELECTED on the native path, and `0dbc015a2` re-records three lib-runtime-events rows. The step's command and ocaml-judges pass. oi-aot and oi-suite-aot were not rerun because the disk was at 87%.
 - **haskell-lib-stg, hsi-check** (subagent, in progress at this entry). `6dad48dd1` adds unlit for literate programs, `af9d14ce2` wraps Int#/Word# literal keys, `808faefbb` covers own-verdicts' empty stdout and ManyUbxSums, and `3df7fa0b0` re-records two pack rows. Further uncommitted work on typecheck.ae and divergences-own.edn is still the agent's.
+
+## 2026-11-16: revisit-b1's remaining items: Haskell's haskell-lib-stg, hsi-check, hsi-check-aot; OCaml's AOT steps
+
+Continues the entry above (B1's full gate failures revisited). Each step rerun by its own command on outputs made afresh in the
+worktree (`.tmp/b1fix/outs2`: the haskell-lib chain's producer steps run one after another, each by its steps.edn command), stage 0
+the host, no GHC, no network.
+
+- **haskell-lib-stg** (GHC.Internal.Bignum.BigNat 81 -> 80 bindings equal). Bisected over the 39 commits that touched
+  `arbace/repr/haskell` since the record (`e5f778a94`): `0abaac3b6` (HF10-P32, local binders' types noted for tostg). bigNatTestBit#'s
+  banged unlifted lets were also forced after the lets, so with their types known sz's call came before nw. GHC's ds_val_bind gives an
+  unlifted binding no seq. `8a13537e0` forces only lifted banged bindings: BigNat 81, the step 7,883 of 9,904 equal, 0 worse, 35 better
+  (not re-recorded: the judge passes, and the 35 are the Haskell line's), runs 61 of 64, 0 lost, exit 0.
+- **hsi-check** (44 own-only failures). Causes, each fixed or classed:
+  - sixteen literate nofib programs read as empty modules ("no binding of main"): the front end now runs unlit (`6dad48dd1`), and
+    front_eligible scans the code without bird tracks;
+  - T10246: Int#/Word# literal pattern keys wrapped as hsLitKey (`af9d14ce2`);
+  - T21973a (<<loop>>): HF10-P50's prohibitedSuperClassSolve compared the head unreduced (ClassDecode (Tx (MyLedger c)) is the
+    instance's own head); `cce8f923d` compares with families reduced;
+  - unpack_sums_3 and unboxedsums_unit_tests (no class): a pending test without a shipped stdout expects an empty one (`808faefbb`,
+    and in a2485e6db the check reads "-" as empty); ManyUbxSums (its main is a pre_cmd's output) in :no-reference;
+  - callback002 and hs_try_putmvar001: their check-hsi.edn rows were stale against today's pack runs, re-recorded (`3df7fa0b0`);
+  - the rest are gaps of the front end or the own libraries' speed, classed in divergences-own.edn (`a2485e6db`, taken overnight):
+    :own-pat-error-text (patError's text without GHC's span), :own-instance-sig-callstack (instance signatures ignored: no "a type
+    signature in an instance" frame), :own-strict-extension (-XStrict), :own-speed (fourteen programs near the 60 s CPU limit on the
+    own -O0 libraries, killed in one run and passing in another). A class may now hold several :outcomes.
+  The step's command passed on its third full run: 0 not passing in no class, the five controls fail as they must, exit 0.
+- **hsi-check-aot** (first run: 34 in no class). check-hsi-aot.edn holds 140 of the 950 programs, so the own judge compared most
+  programs with an empty pack row and called every non-pass own-only. A program without a pack row is now in its own class when one
+  names it with its outcome, else judged by divergences.edn's classes as the pack's check judges it (bin/lib/hsi/check, `0991f3f67`). Second full run: 4 left (fibheaps, treejoin, DsDoExprFailMsg, DsMonadCompFailMsg, the own classes' programs
+  without a pack row), which the final rule covers. Checked by the step's command with `--only` over those four and eight pack-classed programs of
+  the first run's 34 (AtomicPrimops, T21305, T24598b, hs_try_putmvar003, numsparks001, setnumcapabilities001, IncallAffinity,
+  T24672): 0 in no class (exit 1 only for "no negative control ran", as any partial run); the other 25 of the 34 each have a
+  divergences.edn class. No third full AOT run (105 minutes) before the batch's merge: the night's gate is its whole verification.
+- Slip: the first producer chain's lib-stg-own run shared `.tmp/repr-haskell/run-check` with a concurrent lib-stg run and with
+  three runs of runtime-exceptions (which passed alone, 3 of 3). The OCaml agent stopped that chain. The second chain, serial,
+  passed: haskell-lib-stg-own 7,962 of 9,931 equal, 0 worse, runs 52 of 64 on both sets, 0 lost; haskell-lib-stg as above. Its
+  ghc-internal-own.tar is byte for byte the first chain's.
+- **OCaml** (the other agent): `8d8ad09c4` re-records check-aot.edn's seven lib-runtime-events rows (OC219 (a)'s runtime_events now
+  runs: four pass, the others classed) and ephetest3's; misc/taku and parallel/domain_parallel_spawn_burn, timeouts in the full run,
+  pass alone and are left unchanged. `f0f5871e8` rolls testsuite-results.edn's five rows up again (bin/oi suite rollup --record).
+  `4108dbffd`: the o2j judge treats a known program failing again in its known kind with different output (testyield's schedule) as
+  no change.
+- Left open: instance signatures, -XStrict and patError's spans in the front end; the own libraries' speed; lib-stg's 35 and
+  lib-stg-own's 36 better rows not re-recorded.
