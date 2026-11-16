@@ -235,6 +235,37 @@ x86i_light() {
      "$goroot/bin/go" build -p 2 -trimpath -o "$x86i_exe" ./x86idriver/)
 }
 
+# The light drivers kept by key: DIR/NAME.key holds
+# the digest of SRC's .ae files, repr/go's printer's and bin/build-go's, and Go's VERSION it was built from (B1's gate, 2026-11-16: `[ -x EXE ] || build` kept an a64i of
+# 2026-11-11 in the gate's long-lived worktree for every a64i step, 30 of its programs failing on instructions added since).
+# light_ensure NAME DIR EXE BUILD SRC...: EXE (built into DIR) rebuilt by BUILD when its key is not current, under DIR/NAME.lock (two steps in one checkout build it once).
+light_digest() {
+  { cat "$goroot/VERSION" "$root/bin/build-go"
+    { find "$@" "$root/arbace/repr/go.ae" "$root/arbace/repr/go" -name '*.ae' -type f; find "$root/bin/lib/build-go" -type f; } |
+      LC_ALL=C sort | xargs sha256sum; } | sha256sum | cut -c1-64
+}
+light_ensure() {
+  local n=$1 d=$2 exe=$3 build=$4 key; shift 4
+  key=$(light_digest "$@")
+  [ -x "$exe" ] && [ -d "$d/print/mod" ] && [ "$(cat "$d/$n.key" 2>&1)" = "$key" ] && return 0
+  mkdir -p "$d"
+  (
+    flock 9
+    [ -x "$exe" ] && [ -d "$d/print/mod" ] && [ "$(cat "$d/$n.key" 2>&1)" = "$key" ] && exit 0
+    rm -f "$d/$n.key"
+    "$build" && echo "$key" > "$d/$n.key"
+  ) 9> "$d/$n.lock"
+}
+x86i_ensure() {
+  light_ensure x86i "$x86i_dir" "$x86i_exe" x86i_light "$root/go/arbace/crt.ae" "$root/go/arbace/crt" "$root/go/arbace/emu.ae" \
+    "$root/go/arbace/emu" "$root/go/arbace/x86i.ae" "$root/go/arbace/x86i" "$root/test/asm/x86i-driver/go/arbace"
+}
+a64i_ensure() {
+  [ -z "${A64I_EXE:-}" ] || return 0
+  light_ensure a64i "$a64i_dir" "$a64i_exe" a64i_light "$root/go/arbace/crt.ae" "$root/go/arbace/crt" "$root/go/arbace/emu.ae" \
+    "$root/go/arbace/emu" "$root/go/arbace/a64i.ae" "$root/go/arbace/a64i" "$root/test/asm/a64i-driver/go/arbace"
+}
+
 # a64i's light driver (AR5): go/arbace/{crt,emu,a64i} and test/asm/a64i-driver printed by repr/go and built alone by TamaGo's
 # go into .tmp/a64i/a64i, as x86i's (A64I_EXE: another build of it)
 a64i_dir=$root/.tmp/a64i
@@ -398,7 +429,7 @@ a64i_go_tool() {
 a64i_table_check() {
   local w=$a64i_dir/table pk key std gkey ctl id kind what rc=0 t0=$SECONDS
   mkdir -p "$w"
-  [ -n "${A64I_EXE:-}" ] || a64i_light >/dev/null
+  a64i_ensure >&2
   pk=$(cd "$a64i_dir/print/mod" && GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
          GOOS=linux GOARCH=arm64 GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" "$goroot/bin/go" list -deps -f '{{if .Standard}}{{.ImportPath}}{{end}}' ./a64i | grep . | LC_ALL=C sort) \
     || { echo "FAIL: a64i table-check: go list -deps"; return 1; }
@@ -1069,7 +1100,7 @@ case ${1:-} in
     case ${2:-} in
       light) a64i_light ;;
       table-check) a64i_table_check ;;
-      run|decode-text|forms-check|trace|claimed) v=$2; shift 2; [ -x "$a64i_exe" ] || a64i_light; rm -rf "$asm_tmp"; exec "$a64i_exe" "$v" "$@" ;;
+      run|decode-text|forms-check|trace|claimed) v=$2; shift 2; a64i_ensure; rm -rf "$asm_tmp"; exec "$a64i_exe" "$v" "$@" ;;
       synth) shift 2; [ $# -ge 1 ] || { echo "repr-asm --arch arm64 a64i synth DIR [--record]" >&2; exit 2; }
         # AR6, ARS42 (b): a64i's synthetic programs (test/asm/a64i/gen.ae, seeded, self-checking against its model), written into
         # DIR, their digests held to test/asm/a64i/synth-digests.edn; --record first assembles and links them (arbace.asm.link) and
@@ -1096,13 +1127,13 @@ case ${1:-} in
         arbace_tool -e "(do (load-file \"$root/test/asm/a64i/gen.ae\") nil)" -e "(asm.a64i-gen/main \"$dir\" \"$root/test/asm/a64i/lib/out.s\" \"$root/test/asm/a64i/synth-digests.edn\" \"$rec\")" ;;
       goroot-check) shift 2
         # AR24 (queue 299): goi's $GOROOT/test corpus built for linux/arm64 and run on this CPU and on a64i (test/asm/a64i-goroot/)
-        [ -x "$a64i_exe" ] || a64i_light
+        a64i_ensure
         exec bash "$root/test/asm/a64i-goroot/check.bash" "$root" "$a64i_exe" "$@" ;;
       go-check) shift 2
         # AR19 (queue 288, ARS81 (a)): real Go programs on a64i, test/asm/a64i-go/NAME/main.go (or the names given) built for
         # linux/arm64 by TamaGo's go (no cgo) into .tmp/a64i/go, each run on a64i to its end and judged by its own output, NAME/want.txt
         # (written from this M2's native run), with status 0; on an arm64 host also run natively, the same output required
-        [ -x "$a64i_exe" ] || a64i_light
+        a64i_ensure
         # AR21 (queue 292): a directory with a file `tool` is a Go tool's (a64i_go_tool); --tools: all of those (by default the
         # programs alone, main.go's); --record (arm64): the tools' want/ written from the native runs
         gw=$a64i_dir/go; mkdir -p "$gw"; bad=0; n_ok=0; tools=; grec=; names=(); ran=
@@ -1208,7 +1239,7 @@ case ${1:-} in
     cat "$work/build-aot.log" "$work/build-eval.log"
     [ $st_aot = 0 ] && [ $st_eval = 0 ] || { echo "FAIL: a64i-check: the builds failed (AOT exit $st_aot, eval exit $st_eval)"; exit 1; }
     echo "a64i-check: the AOT and eval builds side by side in $((SECONDS - t_b0))s"
-    [ -x "$a64i_exe" ] || a64i_light
+    a64i_ensure
     t_progs0=$SECONDS
     case $(uname -m) in aarch64|arm64) native=1 ;; *) native=0; echo "a64i-check: not an arm64 host: the CPU's runs and the lockstep are the arm64 VM's (their recorded rows stand)" ;; esac
     ctl=$root/test/asm/controls-a64i.txt
@@ -1277,11 +1308,11 @@ case ${1:-} in
     shift
     case ${1:-} in
       light) x86i_light ;;
-      run) shift; [ -x "$x86i_exe" ] || x86i_light; rm -rf "$asm_tmp"; exec "$x86i_exe" run "$@" ;;
-      decode-text) shift; [ -x "$x86i_exe" ] || x86i_light; rm -rf "$asm_tmp"; exec "$x86i_exe" decode-text "$@" ;;
-      decode-hex) shift; [ -x "$x86i_exe" ] || x86i_light; rm -rf "$asm_tmp"; exec "$x86i_exe" decode-hex "$@" ;;
-      claimed) shift; [ -x "$x86i_exe" ] || x86i_light; rm -rf "$asm_tmp"; exec "$x86i_exe" claimed ;;
-      trace) shift; [ -x "$x86i_exe" ] || x86i_light; rm -rf "$asm_tmp"; exec "$x86i_exe" trace "$@" ;;
+      run) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" run "$@" ;;
+      decode-text) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" decode-text "$@" ;;
+      decode-hex) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" decode-hex "$@" ;;
+      claimed) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" claimed ;;
+      trace) shift; x86i_ensure; rm -rf "$asm_tmp"; exec "$x86i_exe" trace "$@" ;;
       gen) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen gen "$root/go/arbace/x86i/dectab.ae" ;;
       gen-check) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen check "$root/go/arbace/x86i/dectab.ae" ;;
       synth) shift; [ $# -ge 1 ] || { echo "repr-asm x86i synth DIR [--record]" >&2; exit 2; }
@@ -1318,7 +1349,7 @@ case ${1:-} in
     fi
     t_start=$SECONDS; : > "$work/times.tsv"
     arbace_tool -m arbace.asm.link build "$lists/x86i.list" "$work" "$src/musl-1.2.6"
-    x86i_light
+    x86i_ensure
     t_progs0=$SECONDS
     ctl=$root/test/asm/controls-x86i.txt
     while IFS=$'\t' read -r n c _; do
@@ -1393,7 +1424,7 @@ case ${1:-} in
       awk -v d="$d" '{ n = $0; sub(/\.(txt|s)$/, "", n); gsub("/", "-", n); print n "\t" d "/" $0 }' > "$lists/mc-x86-dis.list"
     make_list mc-x86
     arbace_tool -m arbace.asm.amd64.decode-check x86i-corpus "$lists/mc-x86-dis.list" "$lists/mc-x86.list" "$work/expected.tsv"
-    [ -x "$x86i_exe" ] || x86i_light
+    x86i_ensure
     "$x86i_exe" decode-hex "$work/expected.tsv" > "$work/x86i.tsv"
     fails=0
     judge=(-e "(do (load-file \"$root/test/asm/x86i_decode_judge.ae\") nil)")
