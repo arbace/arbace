@@ -1,0 +1,263 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/fs/UnixFileAttributeViews.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.file ProviderMismatchException)
+        '(java.nio.file.attribute BasicFileAttributes
+                                  FileTime
+                                  GroupPrincipal
+                                  PosixFileAttributeView
+                                  PosixFileAttributes
+                                  PosixFilePermission
+                                  UserPrincipal)
+        '(java.util Map Set)
+        '(java.util.concurrent TimeUnit)
+        '(java.util.function Function))
+
+(defclass UnixFileAttributeViews
+  (defclass ^:static Basic
+    :extends AbstractBasicFileAttributeView
+
+    (field ^:protected ^:final ^UnixPath file)
+
+    (field ^:protected ^:final ^boolean followLinks)
+
+    (constructor [this ^UnixPath file ^boolean followLinks]
+      (set! (.-file this) file)
+      (set! (.-followLinks this) followLinks))
+
+    (method ^:public readAttributes :throws [IOException] ^BasicFileAttributes [this]
+      (try
+        (let [attrs (UnixFileAttributes/get file followLinks)] (.asBasicFileAttributes attrs))
+        (catch UnixException x
+          (when (== (.errno x) UnixConstants/ENOTDIR) (.setError x UnixConstants/ENOENT))
+          (.rethrowAsIOException x file)
+          nil)))
+
+    (method ^:public setTimes :throws [IOException] ^void [this ^:mutable ^FileTime lastModifiedTime
+                                                           ^:mutable ^FileTime lastAccessTime
+                                                           ^FileTime createTime]
+      (when-not (and (nil? lastModifiedTime) (nil? lastAccessTime))
+        (let [^:mutable ^int fd -1]
+          (try
+            (set! fd (.openForAttributeAccess file followLinks))
+            (catch UnixException x
+              (when-not (or (== (.errno x) UnixConstants/ENXIO) (== (.errno x) UnixConstants/ELOOP))
+                (.rethrowAsIOException x file))))
+          (try
+            (when (or (nil? lastModifiedTime) (nil? lastAccessTime))
+              (try
+                (let [^UnixFileAttributes attrs (if (>= fd 0)
+                                                    (UnixFileAttributes/get fd)
+                                                    (UnixFileAttributes/get file followLinks))]
+                  (when (nil? lastModifiedTime) (set! lastModifiedTime (.lastModifiedTime attrs)))
+                  (when (nil? lastAccessTime) (set! lastAccessTime (.lastAccessTime attrs))))
+                (catch UnixException x (.rethrowAsIOException x file))))
+            (let [^:mutable modValue (.to lastModifiedTime TimeUnit/NANOSECONDS)
+                  ^:mutable accessValue (.to lastAccessTime TimeUnit/NANOSECONDS)
+                  ^:mutable retry false]
+              (try
+                (if (>= fd 0)
+                    (UnixNativeDispatcher/futimens fd accessValue modValue)
+                    (UnixNativeDispatcher/utimensat
+                      UnixConstants/AT_FDCWD
+                      file
+                      accessValue
+                      modValue
+                      (if followLinks 0 UnixConstants/AT_SYMLINK_NOFOLLOW)))
+                (catch UnixException x
+                  (if (and (== (.errno x) UnixConstants/EINVAL)
+                           (or (< modValue 0) (< accessValue 0)))
+                      (set! retry true)
+                      (.rethrowAsIOException x file))))
+              (when retry
+                (when (< modValue 0) (set! modValue 0))
+                (when (< accessValue 0) (set! accessValue 0))
+                (try
+                  (if (>= fd 0)
+                      (UnixNativeDispatcher/futimens fd accessValue modValue)
+                      (UnixNativeDispatcher/utimensat
+                        UnixConstants/AT_FDCWD
+                        file
+                        accessValue
+                        modValue
+                        (if followLinks 0 UnixConstants/AT_SYMLINK_NOFOLLOW)))
+                  (catch UnixException x (.rethrowAsIOException x file)))))
+            (finally
+              (UnixNativeDispatcher/close
+                fd
+                (lambda Function ^RuntimeException [^UnixException e] nil))))))))
+
+  (defclass ^:static Posix
+    :extends Basic
+    :implements [PosixFileAttributeView]
+
+    (field ^:private ^:static ^:final ^String PERMISSIONS_NAME "permissions")
+
+    (field ^:private ^:static ^:final ^String OWNER_NAME "owner")
+
+    (field ^:private ^:static ^:final ^String GROUP_NAME "group")
+
+    (field ^:static ^:final ^{:tag (Set String)} posixAttributeNames
+      (Util/newSet Posix/basicAttributeNames
+                   (new String/1 [PERMISSIONS_NAME OWNER_NAME GROUP_NAME])))
+
+    (constructor [this ^UnixPath file ^boolean followLinks]
+      (super. file followLinks))
+
+    (method ^:public name ^String [this] "posix")
+
+    (method ^:public setAttribute :throws [IOException] ^void [this ^String attribute value]
+      (cond
+        (.equals attribute PERMISSIONS_NAME) (.setPermissions this (cast Set value))
+        (.equals attribute OWNER_NAME) (.setOwner this (cast UserPrincipal value))
+        (.equals attribute GROUP_NAME) (.setGroup this (cast GroupPrincipal value))
+        :else (.setAttribute super attribute value)))
+
+    (method ^:final addRequestedPosixAttributes ^void [this ^PosixFileAttributes attrs
+                                                       ^AbstractBasicFileAttributeView$AttributesBuilder builder]
+      (.addRequestedBasicAttributes this attrs builder)
+      (when (.match builder PERMISSIONS_NAME) (.add builder PERMISSIONS_NAME (.permissions attrs)))
+      (when (.match builder OWNER_NAME) (.add builder OWNER_NAME (.owner attrs)))
+      (when (.match builder GROUP_NAME) (.add builder GROUP_NAME (.group attrs))))
+
+    (method ^:public readAttributes :throws [IOException] ^{:tag (Map String Object)} [this
+                                                                                       ^String/1 requested]
+      (let [builder (AbstractBasicFileAttributeView$AttributesBuilder/create
+                      posixAttributeNames
+                      requested)
+            ^PosixFileAttributes attrs (.readAttributes this)]
+        (.addRequestedPosixAttributes this attrs builder)
+        (.unmodifiableMap builder)))
+
+    (method ^:public readAttributes :throws [IOException] ^UnixFileAttributes [this]
+      (try
+        (UnixFileAttributes/get (.-file this) (.-followLinks this))
+        (catch UnixException x
+          (when (== (.errno x) UnixConstants/ENOTDIR) (.setError x UnixConstants/ENOENT))
+          (.rethrowAsIOException x (.-file this))
+          nil)))
+
+    (method ^:final setMode :throws [IOException] ^void [this ^int mode]
+      (if (.-followLinks this)
+          (try
+            (UnixNativeDispatcher/chmod (.-file this) mode)
+            (catch UnixException e (.rethrowAsIOException e (.-file this))))
+          (do
+            (when (== UnixConstants/O_NOFOLLOW 0)
+              (throw (IOException. "NOFOLLOW_LINKS is not supported on this platform")))
+            (let [^:mutable ^int fd -1]
+              (try
+                (set! fd
+                      (UnixNativeDispatcher/open
+                        (.-file this)
+                        UnixConstants/O_RDONLY
+                        UnixConstants/O_NOFOLLOW))
+                (catch UnixException e1
+                  (if (== (.errno e1) UnixConstants/EACCES)
+                      (try
+                        (set! fd
+                              (UnixNativeDispatcher/open
+                                (.-file this)
+                                UnixConstants/O_WRONLY
+                                UnixConstants/O_NOFOLLOW))
+                        (catch UnixException e2 (.rethrowAsIOException e2 (.-file this))))
+                      (.rethrowAsIOException e1 (.-file this)))))
+              (try
+                (try
+                  (UnixNativeDispatcher/fchmod fd mode)
+                  (finally (UnixNativeDispatcher/close fd)))
+                (catch UnixException e (.rethrowAsIOException e (.-file this))))))))
+
+    (method ^:final setOwners :throws [IOException] ^void [this ^int uid ^int gid]
+      (try
+        (if (.-followLinks this)
+            (UnixNativeDispatcher/chown (.-file this) uid gid)
+            (UnixNativeDispatcher/lchown (.-file this) uid gid))
+        (catch UnixException x (.rethrowAsIOException x (.-file this)))))
+
+    (method ^:public setPermissions :throws [IOException] ^void [this
+                                                                 ^{:tag (Set PosixFilePermission)} perms]
+      (.setMode this (UnixFileModeAttribute/toUnixMode perms)))
+
+    (method ^:public setOwner :throws [IOException] ^void [this ^UserPrincipal owner]
+      (when (nil? owner) (throw (NullPointerException. "'owner' is null")))
+      (when-not (instance? UnixUserPrincipals$User owner) (throw (ProviderMismatchException.)))
+      (when (instance? UnixUserPrincipals$Group owner)
+        (throw (IOException. "'owner' parameter can't be a group")))
+      (let [uid (.uid (cast UnixUserPrincipals$User owner))] (.setOwners this uid -1)))
+
+    (method ^:public getOwner :throws [IOException] ^UserPrincipal [this]
+      (.owner (.readAttributes this)))
+
+    (method ^:public setGroup :throws [IOException] ^void [this ^GroupPrincipal group]
+      (when (nil? group) (throw (NullPointerException. "'owner' is null")))
+      (when-not (instance? UnixUserPrincipals$Group group) (throw (ProviderMismatchException.)))
+      (let [gid (.gid (cast UnixUserPrincipals$Group group))] (.setOwners this -1 gid))))
+
+  (defclass ^:static Unix
+    :extends Posix
+
+    (field ^:private ^:static ^:final ^String MODE_NAME "mode")
+
+    (field ^:private ^:static ^:final ^String INO_NAME "ino")
+
+    (field ^:private ^:static ^:final ^String DEV_NAME "dev")
+
+    (field ^:private ^:static ^:final ^String RDEV_NAME "rdev")
+
+    (field ^:private ^:static ^:final ^String NLINK_NAME "nlink")
+
+    (field ^:private ^:static ^:final ^String UID_NAME "uid")
+
+    (field ^:private ^:static ^:final ^String GID_NAME "gid")
+
+    (field ^:private ^:static ^:final ^String CTIME_NAME "ctime")
+
+    (field ^:static ^:final ^{:tag (Set String)} unixAttributeNames
+      (Util/newSet Unix/posixAttributeNames
+                   (new String/1
+                        [MODE_NAME INO_NAME DEV_NAME RDEV_NAME NLINK_NAME UID_NAME GID_NAME
+                         CTIME_NAME])))
+
+    (constructor [this ^UnixPath file ^boolean followLinks]
+      (super. file followLinks))
+
+    (method ^:public name ^String [this] "unix")
+
+    (method ^:public setAttribute :throws [IOException] ^void [this ^String attribute value]
+      (cond
+        (.equals attribute MODE_NAME) (.setMode this (cast Integer value))
+        (.equals attribute UID_NAME) (.setOwners this (cast Integer value) -1)
+        (.equals attribute GID_NAME) (.setOwners this -1 (cast Integer value))
+        :else (.setAttribute super attribute value)))
+
+    (method ^:public readAttributes :throws [IOException] ^{:tag (Map String Object)} [this
+                                                                                       ^String/1 requested]
+      (let [builder (AbstractBasicFileAttributeView$AttributesBuilder/create
+                      unixAttributeNames
+                      requested)
+            attrs (.readAttributes this)]
+        (.addRequestedPosixAttributes this attrs builder)
+        (when (.match builder MODE_NAME) (.add builder MODE_NAME (.mode attrs)))
+        (when (.match builder INO_NAME) (.add builder INO_NAME (.ino attrs)))
+        (when (.match builder DEV_NAME) (.add builder DEV_NAME (.dev attrs)))
+        (when (.match builder RDEV_NAME) (.add builder RDEV_NAME (.rdev attrs)))
+        (when (.match builder NLINK_NAME) (.add builder NLINK_NAME (.nlink attrs)))
+        (when (.match builder UID_NAME) (.add builder UID_NAME (.uid attrs)))
+        (when (.match builder GID_NAME) (.add builder GID_NAME (.gid attrs)))
+        (when (.match builder CTIME_NAME) (.add builder CTIME_NAME (.ctime attrs)))
+        (.unmodifiableMap builder))))
+
+  (method ^:static createBasicView ^Basic [^UnixPath file ^boolean followLinks]
+    (Basic. file followLinks))
+
+  (method ^:static createPosixView ^Posix [^UnixPath file ^boolean followLinks]
+    (Posix. file followLinks))
+
+  (method ^:static createUnixView ^Unix [^UnixPath file ^boolean followLinks]
+    (Unix. file followLinks))
+
+  (method ^:static createOwnerView ^FileOwnerAttributeViewImpl [^UnixPath file ^boolean followLinks]
+    (FileOwnerAttributeViewImpl. (UnixFileAttributeViews/createPosixView file followLinks))))

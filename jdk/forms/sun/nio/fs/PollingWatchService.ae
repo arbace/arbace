@@ -1,0 +1,204 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/fs/PollingWatchService.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.file ClosedWatchServiceException
+                        DirectoryIteratorException
+                        DirectoryStream
+                        Files
+                        LinkOption
+                        NotDirectoryException
+                        Path
+                        StandardWatchEventKinds
+                        WatchEvent$Kind
+                        WatchEvent$Modifier
+                        WatchKey)
+        '(java.nio.file.attribute BasicFileAttributes FileTime)
+        '(java.util HashMap HashSet Iterator Map Map$Entry Set)
+        '(java.util.concurrent Executors
+                               ScheduledExecutorService
+                               ScheduledFuture
+                               ThreadFactory
+                               TimeUnit)
+        '(jdk.internal.misc InnocuousThread))
+
+(defclass PollingWatchService
+  :extends AbstractWatchService
+
+  (field ^:private ^:static ^:final ^int POLLING_INTERVAL 2)
+
+  (field ^:private ^:final ^{:tag (Map Object PollingWatchKey)} map (HashMap.))
+
+  (field ^:private ^:final ^ScheduledExecutorService scheduledExecutor)
+
+  (constructor [this]
+    (set!
+      scheduledExecutor
+      (Executors/newSingleThreadScheduledExecutor
+        (anon ThreadFactory []
+          (method ^:public newThread ^Thread [this ^Runnable r]
+            (let [t (InnocuousThread/newThread "FileSystemWatcher" r)] (.setDaemon t true) t))))))
+
+  (method register :throws [IOException] ^WatchKey [this ^:final ^Path path
+                                                    ^{:tag (array (WatchEvent$Kind ?))} events &
+                                                    ^WatchEvent$Modifier/1 modifiers]
+    (let [^{:tag (Set (WatchEvent$Kind ?))} eventSet (HashSet/newHashSet (alength events))]
+      (for-each [^{:tag (WatchEvent$Kind ?)} event events]
+        (if (or (or (identical? event StandardWatchEventKinds/ENTRY_CREATE)
+                    (identical? event StandardWatchEventKinds/ENTRY_MODIFY))
+                (identical? event StandardWatchEventKinds/ENTRY_DELETE))
+            (.add eventSet event)
+            (when-not (identical? event StandardWatchEventKinds/OVERFLOW)
+              (when (nil? event)
+                (throw (NullPointerException. "An element in event set is 'null'")))
+              (throw (UnsupportedOperationException. (.name event))))))
+      (when (.isEmpty eventSet) (throw (IllegalArgumentException. "No events to register")))
+      (for-each [^WatchEvent$Modifier modifier modifiers]
+        (when (nil? modifier) (throw (NullPointerException.)))
+        (when (and (and (not (.matches ExtendedOptions/SENSITIVITY_HIGH modifier))
+                        (not (.matches ExtendedOptions/SENSITIVITY_MEDIUM modifier)))
+                   (not (.matches ExtendedOptions/SENSITIVITY_LOW modifier)))
+          (throw (UnsupportedOperationException. "Modifier not supported"))))
+      (when-not (.isOpen this) (throw (ClosedWatchServiceException.)))
+      (let [attrs (Files/readAttributes path BasicFileAttributes (new LinkOption/1 []))]
+        (when-not (.isDirectory attrs) (throw (NotDirectoryException. (.toString path))))
+        (let [fileKey (.fileKey attrs)]
+          (when (nil? fileKey) (throw (AssertionError. "File keys must be supported")))
+          (locking (.closeLock this)
+            (when-not (.isOpen this) (throw (ClosedWatchServiceException.)))
+            (let [^:mutable ^PollingWatchKey watchKey nil]
+              (locking map
+                (set! watchKey (cast PollingWatchKey (.get map fileKey)))
+                (if (nil? watchKey)
+                    (do
+                      (set! watchKey (PollingWatchKey. path this fileKey))
+                      (.put map fileKey watchKey))
+                    (.disable watchKey)))
+              (.enable watchKey eventSet)
+              watchKey))))))
+
+  (method implClose :throws [IOException] ^void [this]
+    (locking map
+      (for-each [^{:tag (Map$Entry Object PollingWatchKey)} entry (.entrySet map)]
+        (let [watchKey (cast PollingWatchKey (.getValue entry))]
+          (.disable watchKey)
+          (.invalidate watchKey)))
+      (.clear map))
+    (.shutdown scheduledExecutor))
+
+  (defclass ^:private ^:static CacheEntry
+    (field ^:private ^FileTime lastModified)
+
+    (field ^:private ^int lastTickCount)
+
+    (constructor [this ^FileTime lastModified ^int lastTickCount]
+      (set! (.-lastModified this) lastModified)
+      (set! (.-lastTickCount this) lastTickCount))
+
+    (method lastTickCount ^int [this] lastTickCount)
+
+    (method lastModified ^FileTime [this] lastModified)
+
+    (method update ^void [this ^FileTime lastModified ^int tickCount]
+      (set! (.-lastModified this) lastModified)
+      (set! (.-lastTickCount this) tickCount)))
+
+  (defclass ^:private PollingWatchKey
+    :extends AbstractWatchKey
+
+    (field ^:private ^:final fileKey)
+
+    (field ^:private ^{:tag (Set (? extends (WatchEvent$Kind ?)))} events)
+
+    (field ^:private ^{:tag (ScheduledFuture ?)} poller)
+
+    (field ^:private ^:volatile ^boolean valid)
+
+    (field ^:private ^int tickCount)
+
+    (field ^:private ^{:tag (Map Path CacheEntry)} entries)
+
+    (constructor :throws [IOException] [this ^Path dir ^PollingWatchService watcher fileKey]
+      (super. dir watcher)
+      (set! (.-fileKey this) fileKey)
+      (set! (.-valid this) true)
+      (set! (.-tickCount this) 0)
+      (set! (.-entries this) (HashMap.))
+      (try
+        (with-resources [^{:tag (DirectoryStream Path)} stream (Files/newDirectoryStream dir)]
+          (for-each [^Path entry stream]
+            (let [lastModified (Files/getLastModifiedTime entry LinkOption/NOFOLLOW_LINKS)]
+              (.put entries (.getFileName entry) (CacheEntry. lastModified tickCount)))))
+        (catch DirectoryIteratorException e (throw (.getCause e)))))
+
+    (method fileKey [this] fileKey)
+
+    (method ^:public isValid ^boolean [this] valid)
+
+    (method invalidate ^void [this] (set! valid false))
+
+    (method enable ^void [this ^{:tag (Set (? extends (WatchEvent$Kind ?)))} events]
+      (locking this
+        (set! (.-events this) events)
+        (let [^Runnable thunk (anon Runnable []
+                                (method ^:public run ^void [this] (.poll PollingWatchKey/this)))]
+          (set! (.-poller this)
+                (.scheduleAtFixedRate scheduledExecutor
+                                      thunk
+                                      POLLING_INTERVAL
+                                      POLLING_INTERVAL
+                                      TimeUnit/SECONDS)))))
+
+    (method disable ^void [this]
+      (locking this (when (some? poller) (.cancel poller false))))
+
+    (method ^:public cancel ^void [this]
+      (set! valid false)
+      (locking map (.remove map (.fileKey this)))
+      (.disable this))
+
+    (method ^:synchronized poll ^void [this]
+      (when-not (not valid)
+        (set! tickCount (unchecked-inc-int tickCount))
+        (let [^:mutable ^{:tag (DirectoryStream Path)} stream nil]
+          (try
+            (set! stream (Files/newDirectoryStream (.watchable this)))
+            (catch IOException x (.cancel this) (.signal this) (return)))
+          (try
+            (for-each [^Path entry stream]
+              (let [^:mutable ^FileTime lastModified nil]
+                (try
+                  (set! lastModified (Files/getLastModifiedTime entry LinkOption/NOFOLLOW_LINKS))
+                  (catch IOException x (continue)))
+                (let [e (cast CacheEntry (.get entries (.getFileName entry)))]
+                  (if (nil? e)
+                      (do
+                        (.put entries (.getFileName entry) (CacheEntry. lastModified tickCount))
+                        (cond
+                          (.contains events StandardWatchEventKinds/ENTRY_CREATE)
+                            (.signalEvent this
+                                          StandardWatchEventKinds/ENTRY_CREATE
+                                          (.getFileName entry))
+                          (.contains events StandardWatchEventKinds/ENTRY_MODIFY)
+                            (.signalEvent this
+                                          StandardWatchEventKinds/ENTRY_MODIFY
+                                          (.getFileName entry))))
+                      (do
+                        (when-not (.equals (.lastModified e) lastModified)
+                          (when (.contains events StandardWatchEventKinds/ENTRY_MODIFY)
+                            (.signalEvent this
+                                          StandardWatchEventKinds/ENTRY_MODIFY
+                                          (.getFileName entry))))
+                        (.update e lastModified tickCount))))))
+            (catch DirectoryIteratorException e)
+            (finally (try (.close stream) (catch IOException x))))
+          (let [^{:tag (Iterator (Map$Entry Path CacheEntry))} i (.iterator (.entrySet entries))]
+            (while (.hasNext i)
+              (let [^{:tag (Map$Entry Path CacheEntry)} mapEntry (cast Map$Entry (.next i))
+                    entry (cast CacheEntry (.getValue mapEntry))]
+                (when-not (== (.lastTickCount entry) tickCount)
+                  (let [name (cast Path (.getKey mapEntry))]
+                    (.remove i)
+                    (when (.contains events StandardWatchEventKinds/ENTRY_DELETE)
+                      (.signalEvent this StandardWatchEventKinds/ENTRY_DELETE name))))))))))))

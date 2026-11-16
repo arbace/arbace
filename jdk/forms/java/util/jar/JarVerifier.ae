@@ -1,8 +1,12 @@
-;; Converted from overlay/jdk/java.base/java/util/jar/JarVerifier.java by arbace.repr.java. Regenerate rather than edit.
+;; Converted from jdk26u src/java.base/share/classes/java/util/jar/JarVerifier.java by arbace.repr.java. Regenerate rather than edit.
 
 (in-ns 'java.util.jar)
 
-(import '(sun.security.util Debug ManifestEntryVerifier))
+(import '(java.io ByteArrayOutputStream IOException InputStream)
+        '(java.security CodeSigner NoSuchAlgorithmException SignatureException)
+        '(java.security.cert Certificate CertificateException)
+        '(java.util ArrayList HashMap Hashtable LinkedList List Locale Map Objects)
+        '(sun.security.util Debug ManifestDigester ManifestEntryVerifier SignatureFileVerifier))
 
 (defclass JarVerifier
   (field ^:public ^:static ^:final ^String MULTIPLE_MANIFEST_WARNING
@@ -10,22 +14,207 @@
 
   (field ^:static ^:final ^Debug debug (Debug/getInstance "jar"))
 
+  (field ^:private ^{:tag (Hashtable String CodeSigner/1)} verifiedSigners)
+
+  (field ^:private ^{:tag (Hashtable String CodeSigner/1)} sigFileSigners)
+
+  (field ^:private ^{:tag (Hashtable String byte/1)} sigFileData)
+
+  (field ^:private ^{:tag (ArrayList SignatureFileVerifier)} pendingBlocks)
+
+  (field ^:private ^{:tag (List CodeSigner/1)} signerCache)
+
+  (field ^:private ^boolean parsingBlockOrSF false)
+
+  (field ^:private ^boolean parsingMeta true)
+
+  (field ^:private ^boolean anyToVerify true)
+
+  (field ^:private ^ByteArrayOutputStream baos)
+
+  (field ^:private ^:volatile ^ManifestDigester manDig)
+
+  (field ^byte/1 manifestRawBytes nil)
+
   (field ^:final ^String manifestName)
 
-  (field ^:final ^byte/1 manifestRawBytes)
+  (field ^:private ^{:tag (List Object)} manifestDigests)
 
-  (constructor [this ^String name ^byte/1 rawBytes]
+  (field ^:private ^{:tag (Map CodeSigner/1 (Map String Boolean))} signersToAlgs)
+
+  (constructor ^:public [this ^String name ^byte/1 rawBytes]
     (set! manifestName name)
-    (set! manifestRawBytes rawBytes))
+    (set! manifestRawBytes rawBytes)
+    (set! sigFileSigners (Hashtable.))
+    (set! verifiedSigners (Hashtable.))
+    (set! sigFileData (Hashtable. 11))
+    (set! pendingBlocks (ArrayList.))
+    (set! baos (ByteArrayOutputStream.))
+    (set! manifestDigests (ArrayList.))
+    (set! signersToAlgs (HashMap.)))
 
-  (method ^:public beginEntry ^void [this ^JarEntry je ^ManifestEntryVerifier mev])
+  (method ^:public beginEntry :throws [IOException] ^void [this ^JarEntry je
+                                                           ^ManifestEntryVerifier mev]
+    (when (some? je)
+      (when (some? debug) (.println debug (java-str "beginEntry " (.getName je))))
+      (let [^:mutable name (.getName je)]
+        (when parsingMeta
+          (when (SignatureFileVerifier/isInMetaInf name)
+            (when (.isDirectory je) (.setEntry mev nil je) (return))
+            (let [uname (.toUpperCase name Locale/ENGLISH)]
+              (when (or (.equals uname JarFile/MANIFEST_NAME) (.equals uname JarFile/INDEX_NAME))
+                (return))
+              (when (SignatureFileVerifier/isBlockOrSF uname)
+                (set! parsingBlockOrSF true)
+                (.reset baos)
+                (.setEntry mev nil je)
+                (return)))))
+        (when parsingMeta (.doneWithMeta this))
+        (if (.isDirectory je)
+            (.setEntry mev nil je)
+            (do
+              (when (.startsWith name "./") (set! name (.substring name 2)))
+              (when (.startsWith name "/") (set! name (.substring name 1)))
+              (when-not (.equalsIgnoreCase name JarFile/MANIFEST_NAME)
+                (when (or (some? (.get sigFileSigners name)) (some? (.get verifiedSigners name)))
+                  (.setEntry mev name je)
+                  (return)))
+              (.setEntry mev nil je))))))
 
-  (method ^:public update ^void [this ^int b ^ManifestEntryVerifier mev])
+  (method ^:public update :throws [IOException] ^void [this ^int b ^ManifestEntryVerifier mev]
+    (if (not (== b -1))
+        (if parsingBlockOrSF (.write baos b) (.update mev (unchecked-byte b)))
+        (.processEntry this mev)))
 
-  (method ^:public update ^void [this ^int n ^byte/1 b ^int off ^int len ^ManifestEntryVerifier mev])
+  (method ^:public update :throws [IOException] ^void [this ^int n ^byte/1 b ^int off ^int len
+                                                       ^ManifestEntryVerifier mev]
+    (if (not (== n -1))
+        (if parsingBlockOrSF (.write baos b off n) (.update mev b off n))
+        (.processEntry this mev)))
 
-  (method isTrustedManifestEntry ^boolean [this ^String name] false)
+  (method ^:private processEntry :throws [IOException] ^void [this ^ManifestEntryVerifier mev]
+    (if (not parsingBlockOrSF)
+        (let [je (.getEntry mev)]
+          (when (and (some? je) (nil? (.-signers je)))
+            (set! (.-signers je) (.verify mev verifiedSigners sigFileSigners signersToAlgs))
+            (set! (.-certs je) (JarVerifier/mapSignersToCertArray (.-signers je)))))
+        (try
+          (set! parsingBlockOrSF false)
+          (when (some? debug) (.println debug "processEntry: processing block"))
+          (let [uname (.toUpperCase (.getName (.getEntry mev)) Locale/ENGLISH)]
+            (if (.endsWith uname ".SF")
+                (let [key (.substring uname 0 (unchecked-subtract-int (.length uname) 3))
+                      bytes (.toByteArray baos)]
+                  (.put sigFileData key bytes)
+                  (for-each [^SignatureFileVerifier sfv pendingBlocks]
+                    (when (.needSignatureFile sfv key)
+                      (when (some? debug) (.println debug "processEntry: processing pending block"))
+                      (.setSignatureFile sfv bytes)
+                      (.process sfv sigFileSigners manifestDigests manifestName))))
+                (let [key (.substring uname 0 (.lastIndexOf uname \.))]
+                  (when (nil? signerCache) (set! signerCache (LinkedList.)))
+                  (when (nil? manDig)
+                    (locking manifestRawBytes
+                      (when (nil? manDig)
+                        (set! manDig (ManifestDigester. manifestRawBytes))
+                        (set! manifestRawBytes nil))))
+                  (let [sfv (SignatureFileVerifier. signerCache manDig uname (.toByteArray baos))]
+                    (when (.needSignatureFileBytes sfv)
+                      (let [bytes (cast byte/1 (.get sigFileData key))]
+                        (if (nil? bytes)
+                            (do
+                              (when (some? debug) (.println debug "adding pending block"))
+                              (.add pendingBlocks sfv)
+                              (return))
+                            (.setSignatureFile sfv bytes))))
+                    (.process sfv sigFileSigners manifestDigests manifestName)))))
+          (catch [IOException CertificateException NoSuchAlgorithmException SignatureException] e
+            (when (some? debug) (.println debug (java-str "processEntry caught: " e)))))))
 
-  (method nothingToVerify ^boolean [this] true)
+  (method ^:public getCerts ^Certificate/1 [this ^JarEntry entry]
+    (JarVerifier/mapSignersToCertArray (.getCodeSigners this entry)))
 
-  (method doneWithMeta ^void [this]))
+  (method ^:public getCodeSigners ^CodeSigner/1 [this ^JarEntry entry]
+    (cast CodeSigner/1 (.get verifiedSigners (.getName entry))))
+
+  (method ^:private ^:static mapSignersToCertArray ^Certificate/1 [^CodeSigner/1 signers]
+    (when (some? signers)
+      (let [^{:tag (ArrayList Certificate)} certChains (ArrayList.)]
+        (for-each [^CodeSigner signer signers]
+          (.addAll certChains (.getCertificates (.getSignerCertPath signer))))
+        (cast Certificate/1 (.toArray certChains (new Certificate/1 (.size certChains)))))))
+
+  (method nothingToVerify ^boolean [this] (= anyToVerify false))
+
+  (method doneWithMeta ^void [this]
+    (set! parsingMeta false)
+    (set! anyToVerify (not (.isEmpty sigFileSigners)))
+    (set! baos nil)
+    (set! sigFileData nil)
+    (set! pendingBlocks nil)
+    (set! signerCache nil)
+    (set! manDig nil)
+    (let [codeSigners (cast CodeSigner/1 (.remove sigFileSigners manifestName))]
+      (when (some? codeSigners) (.put verifiedSigners manifestName codeSigners))))
+
+  (defclass ^:static VerifierStream
+    :extends InputStream
+
+    (field ^:private ^InputStream is)
+
+    (field ^:private ^JarVerifier jv)
+
+    (field ^:private ^ManifestEntryVerifier mev)
+
+    (field ^:private ^long numLeft)
+
+    (constructor :throws [IOException] [this ^Manifest man ^JarEntry je ^InputStream is
+                                        ^JarVerifier jv]
+      (set! (.-is this) (cast InputStream (Objects/requireNonNull is)))
+      (set! (.-jv this) jv)
+      (set! (.-mev this) (ManifestEntryVerifier. man (.-manifestName jv)))
+      (.beginEntry (.-jv this) je mev)
+      (set! (.-numLeft this) (.getSize je))
+      (when (== (.-numLeft this) 0) (.update (.-jv this) -1 (.-mev this))))
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (.ensureOpen this)
+      (if (> numLeft 0)
+          (let [b (.read is)]
+            (.update jv b mev)
+            (set! numLeft (unchecked-dec numLeft))
+            (when (== numLeft 0) (.update jv -1 mev))
+            b)
+          -1))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^:mutable ^int len]
+      (.ensureOpen this)
+      (when (and (> numLeft 0) (< numLeft len)) (set! len (unchecked-int numLeft)))
+      (if (> numLeft 0)
+          (let [n (.read is b off len)]
+            (.update jv n b off len mev)
+            (set! numLeft (unchecked-subtract numLeft n))
+            (when (== numLeft 0) (.update jv -1 b off len mev))
+            n)
+          -1))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when (some? is) (.close is))
+      (set! is nil)
+      (set! mev nil)
+      (set! jv nil))
+
+    (method ^:public available :throws [IOException] ^int [this]
+      (.ensureOpen this)
+      (.available is))
+
+    (method ^:private ensureOpen :throws [IOException] ^void [this]
+      (when (nil? is) (throw (IOException. "stream closed")))))
+
+  (method isTrustedManifestEntry ^boolean [this ^String name]
+    (let [forMan (cast CodeSigner/1 (.get verifiedSigners manifestName))]
+      (if (nil? forMan)
+          true
+          (let [^:mutable forName (cast CodeSigner/1 (.get sigFileSigners name))]
+            (when (nil? forName) (set! forName (cast CodeSigner/1 (.get verifiedSigners name))))
+            (and (some? forName) (== (alength forName) (alength forMan))))))))

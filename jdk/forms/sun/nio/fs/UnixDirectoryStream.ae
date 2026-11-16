@@ -1,0 +1,112 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/fs/UnixDirectoryStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.file DirectoryIteratorException DirectoryStream DirectoryStream$Filter Path)
+        '(java.util Iterator NoSuchElementException)
+        '(java.util.concurrent.locks Lock ReentrantReadWriteLock))
+
+(defclass UnixDirectoryStream
+  :implements [(DirectoryStream Path)]
+
+  (field ^:private ^:final ^UnixPath dir)
+
+  (field ^:private ^:final ^long dp)
+
+  (field ^:private ^:final ^{:tag (DirectoryStream$Filter (? super Path))} filter)
+
+  (field ^:private ^:final ^ReentrantReadWriteLock streamLock (ReentrantReadWriteLock. true))
+
+  (field ^:private ^:volatile ^boolean isClosed)
+
+  (field ^:private ^{:tag (Iterator Path)} iterator)
+
+  (constructor [this ^UnixPath dir ^long dp ^{:tag (DirectoryStream$Filter (? super Path))} filter]
+    (set! (.-dir this) dir)
+    (set! (.-dp this) dp)
+    (set! (.-filter this) filter))
+
+  (method ^:final directory ^UnixPath [this] dir)
+
+  (method ^:protected ^:final readLock ^Lock [this]
+    (.readLock streamLock))
+
+  (method ^:protected ^:final writeLock ^Lock [this]
+    (.writeLock streamLock))
+
+  (method ^:protected ^:final isOpen ^boolean [this] (not isClosed))
+
+  (method ^:protected ^:final closeImpl :throws [IOException] ^boolean [this]
+    (if (not isClosed)
+        (do
+          (set! isClosed true)
+          (try
+            (UnixNativeDispatcher/closedir dp)
+            (catch UnixException x (throw (IOException. (.errorString x)))))
+          true)
+        false))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (.lock (.writeLock this))
+    (try (.closeImpl this) (finally (.unlock (.writeLock this)))))
+
+  (method ^:protected ^:final iterator ^{:tag (Iterator Path)} [this
+                                                                ^{:tag (DirectoryStream Path)} ds]
+    (when isClosed (throw (IllegalStateException. "Directory stream is closed")))
+    (locking this
+      (when (some? iterator) (throw (IllegalStateException. "Iterator already obtained")))
+      (set! iterator (UnixDirectoryIterator.))
+      iterator))
+
+  (method ^:public iterator ^{:tag (Iterator Path)} [this]
+    (.iterator this this))
+
+  (defclass ^:private UnixDirectoryIterator
+    :implements [(Iterator Path)]
+
+    (field ^:private ^boolean atEof)
+
+    (field ^:private ^Path nextEntry)
+
+    (constructor [this] (set! atEof false))
+
+    (method ^:private isSelfOrParent ^boolean [this ^byte/1 nameAsBytes]
+      (when (== (aget nameAsBytes 0) \.)
+        (when (or (== (alength nameAsBytes) 1)
+                  (and (== (alength nameAsBytes) 2) (== (aget nameAsBytes 1) \.)))
+          (return true)))
+      false)
+
+    (method ^:private readNextEntry ^Path [this]
+      (java-assert (Thread/holdsLock this))
+      (while true
+        (let [^:mutable ^byte/1 nameAsBytes nil]
+          (.lock (.readLock UnixDirectoryStream/this))
+          (try
+            (when (.isOpen UnixDirectoryStream/this)
+              (set! nameAsBytes (UnixNativeDispatcher/readdir dp)))
+            (catch UnixException x
+              (let [ioe (.asIOException x dir)] (throw (DirectoryIteratorException. ioe))))
+            (finally (.unlock (.readLock UnixDirectoryStream/this))))
+          (when (nil? nameAsBytes) (set! atEof true) (return nil))
+          (when-not (.isSelfOrParent this nameAsBytes)
+            (let [^Path entry (.resolve dir nameAsBytes)]
+              (try
+                (when (or (nil? filter) (.accept filter entry)) (return entry))
+                (catch IOException ioe (throw (DirectoryIteratorException. ioe)))))))))
+
+    (method ^:public ^:synchronized hasNext ^boolean [this]
+      (when (and (nil? nextEntry) (not atEof)) (set! nextEntry (.readNextEntry this)))
+      (some? nextEntry))
+
+    (method ^:public ^:synchronized next ^Path [this]
+      (let [^:mutable ^Path result nil]
+        (if (and (nil? nextEntry) (not atEof))
+            (set! result (.readNextEntry this))
+            (do (set! result nextEntry) (set! nextEntry nil)))
+        (when (nil? result) (throw (NoSuchElementException.)))
+        result))
+
+    (method ^:public remove ^void [this]
+      (throw (UnsupportedOperationException.)))))

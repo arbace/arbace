@@ -11,6 +11,9 @@
 # It writes under $JRT_WORK (default .tmp/jrt) and, with update, jdk/.
 #
 # Usage: bin/jrt-convert [verify|update] [--twice]
+#        bin/jrt-convert derive [--check] [PATH...]
+#        bin/jrt-convert predict [--since REV] [--list FILE] [--missing RE] [--out DIR] [PATH...]
+#        bin/jrt-convert vet [--forms DIR] [--forms-add DIR]... [--classes RE] [--known FILE] [--strict] [--others] [FILE...]
 #   (none)    every step into $JRT_WORK (the checks), jdk/ untouched
 #   verify    the same, then $JRT_WORK's conv (without repr/java's report), data, sources.txt and
 #             provenance.edn compared with jdk/forms, jdk/data, jdk/sources.txt and
@@ -21,6 +24,23 @@
 #             jdk/provenance.edn replaced by them: after a change to what the conversion reads
 #             (jrt's own Java, overlay/jdk/java.base; the closure, test/jrt/jrt_sources.ae and
 #             doc/go/java-surface.edn; repr/java; jdk26u's checkout) commit jdk/ with it
+#   derive    jrt's derived overlays (JCS166 (a); test/jrt/derive.ae, jrt.derive on the tools' host): an
+#             overlay of overlay/jdk/java.base made from jdk26u's file ($JDK) by asserted exact
+#             replacements, written (or, with --check, compared byte for byte: 1 on a difference);
+#             PATH names one by its path below overlay/jdk/java.base (default all)
+#   vet       jrt's Go-build variants vetted by day (JCS253; test/jrt/vet.ae): per variant file, the classes it
+#             names entered from jdk/forms by j2g's world alone (arbace.j2g.world/load-world), the variant
+#             applied, analyzed as j2g's analysis does, every other class resolved from the tools' host
+#             (ARBACE_HOST_EXE: a gate executable of a recent world); a failure not in test/jrt/vet-known.edn
+#             fails (exit 1); light, a file's classes at a time; JCS313 (a): --classes RE analyzes the classes whose
+#             top-level name RE finds too (a new slice's, by day; alone without FILE), --forms-add DIR lays DIR's forms
+#             (the day's read of the slice) over the world's by their paths
+#   predict   the night's world by day (JCS283 (b), JCS324 (a)): the files that changed against the committed
+#             conversion (new closure lines, overlays changed since REV, default the commit that last wrote
+#             jdk/forms; or the PATHs alone, a slice's files below java.base's root) read with their context, laid over a copy of jdk/forms ($JRT_WORK/predict, or
+#             --out), then on it: vet (the variants and the changed classes), j2g's analysis of the whole world
+#             with J2G_MISSING (the changed classes', or --missing RE's, operation-level stubs), and with --list
+#             FILE those tests (bin/java-check --analyze-only, JRT_CONV); light (GOMEMLIMIT, two threads)
 #   --twice   afterwards run the generators and repr/java a second time into $JRT_WORK/again and
 #             require the same files (determinism)
 # Steps ($JRT_STEPS, default all, comma-separated: sources,generate,convert,javac,check,edge,report):
@@ -43,7 +63,9 @@
 #             its boot JDK's, is taken when they differ by its entries alone, :boot-jdk); and the resource data
 #             the program embeds (uniName.dat as Gendata.gmk makes it, ICU's nfc.nrm and
 #             nfkc.nrm; the time-zone database lib/tzdb.dat as GendataTZDB.gmk makes it; the
-#             security properties conf/security/java.security as Gendata.gmk makes them; java.util.logging's
+#             security properties conf/security/java.security as Gendata.gmk makes them, the crypto policies
+#             conf/security/policy as GendataCryptoPolicy.gmk installs them and the trust anchors
+#             lib/security/cacerts, the JDK build image's (JCS233, JCS140 (a)); java.util.logging's
 #             conf/logging.properties as java.logging's Copy.gmk installs it)
 #             into $JRT_WORK/data, compared with the build's jdk/modules (jdk/lib for lib/)
 #   convert   bin/repr-java read-jdk --check: the tree into Java forms, $JRT_WORK/conv (java.base,
@@ -87,6 +109,18 @@ cd "$root"
 . bin/lib/tools.bash
 . bin/lib/repr-java/host.bash
 jdk=${JDK:-/root/jdk26u}
+if [ "${1:-}" = derive ]; then
+  shift
+  JDK=$jdk arbace_tool -p "$root/test" -m jrt.derive "$@"
+  exit $?
+fi
+if [ "${1:-}" = vet ]; then
+  # JCS253: each variant file's classes analyzed by j2g's world alone, the variant applied (test/jrt/vet.ae)
+  shift
+  # light: the world declared, not analyzed (about 20 s); its heap held under 2 GiB
+  GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -p "$root/test" -m jrt.vet "$@"
+  exit $?
+fi
 surface=${SURFACE:-$root/doc/go/java-surface.edn}
 work=${JRT_WORK:-$root/.tmp/jrt}
 case "$work" in /*) ;; *) work=$root/$work ;; esac
@@ -169,6 +203,35 @@ gen_script() {
 gen_tools="$gen_tools build.tools.compileproperties.CompileProperties"
 # since F8 (doc/classes/JAVA-DEFERRED-TRIAGE.md): java.base's charset tables' generator
 gen_tools="$gen_tools build.tools.charsetmapping.Main"
+
+# preproc_src TEMPLATE OUT: generate-preproc-src (GensrcMisc.gmk) for one template, as test/javac-platform/gensrc.bash's
+# gensrc_preproc: platform-build.edn's :cpp options (-D, -U, -I, -std), cppout.ae on the tools' host, the template's lines
+# up to @@END_COPYRIGHT@@, then the output from @@START_HERE@@ with make's sed; compared with the JDK build's file when present
+preproc_src() {
+  local t=$1 o=$2 opts=() b
+  mkdir -p "$(dirname "$o")"
+  awk -v field=" :cpp [" 'index($0, field) == 1 {
+      s = substr($0, length(field) + 1); ins = 0; buf = ""
+      for (j = 1; j <= length(s); j++) {
+        c = substr(s, j, 1)
+        if (ins) { if (c == "\\") { j++; buf = buf substr(s, j, 1) } else if (c == "\"") { print buf; ins = 0; buf = "" } else buf = buf c }
+        else if (c == "\"") ins = 1
+        else if (c == "]") exit
+      }
+      exit }' "$root/jdk/javac/platform-build.edn" | grep -e '^-[DUI]' -e '^-std' > "$o.opts" || { echo "jrt-convert: no :cpp options in jdk/javac/platform-build.edn" >&2; return 1; }
+  mapfile -t opts < "$o.opts"
+  ( . "$root/bin/lib/repr-c/sysroot.bash" && c_sysroot &&
+    "$(arbace_host_exe)" "$root/test/javac-platform/cppout.ae" "$root/test/c/host" "$t" "${opts[@]}" ) > "$o.E" ||
+    { echo "jrt-convert: preprocessing $t failed" >&2; return 1; }
+  { awk '/@@END_COPYRIGHT@@/{exit}1' "$t"
+    awk '/@@START_HERE@@/,0' "$o.E" | sed -e 's/@@START_HERE@@/\/\/ AUTOMATICALLY GENERATED FILE - DO NOT EDIT/' -e 's/PREFIX_//' -e 's/^#.*//'
+  } > "$o" && rm -f "$o.E" "$o.opts" || return 1
+  b=${conf:+$(dirname "$conf")/support/gensrc/java.base/${o#*/java.base/}}
+  if [ -n "$b" ] && [ -f "$b" ]; then
+    cmp -s "$o" "$b" || { echo "jrt-convert: ${o#*/java.base/} differs from the JDK build's $b" >&2; return 1; }
+    echo "   ${o#*/java.base/}: generated, the JDK build's byte for byte" >&2
+  fi
+}
 
 generate() {
   local tree=$1 out tools=$2 u c t f
@@ -452,6 +515,27 @@ generate() {
   "${java[@]}" build.tools.makejavasecurity.MakeJavaSecurity \
     "$jdk/src/java.base/share/conf/security/java.security" "$data/conf/security/java.security" \
     linux x86 unlimited || return 1
+  # the crypto jurisdiction policies (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS233"), the
+  # image's conf/security/policy, as make/modules/java.base/gendata/GendataCryptoPolicy.gmk installs
+  # them: src/java.base/share/conf/security/policy's README.txt and its limited and unlimited
+  # directories' files, copied (javax.crypto.JceSecurity reads ${java.home}/conf/security/policy/
+  # <crypto.policy>/{default,exempt}_*.policy)
+  local p=$jdk/src/java.base/share/conf/security/policy
+  mkdir -p "$data/conf/security/policy/limited" "$data/conf/security/policy/unlimited"
+  cp "$p/README.txt" "$data/conf/security/policy/" &&
+  cp "$p/limited/default_US_export.policy" "$p/limited/default_local.policy" "$p/limited/exempt_local.policy" \
+    "$data/conf/security/policy/limited/" &&
+  cp "$p/unlimited/default_US_export.policy" "$p/unlimited/default_local.policy" \
+    "$data/conf/security/policy/unlimited/" || return 1
+  # the trust anchors (JCS140 (a), built with JCS233): the image's lib/security/cacerts, which
+  # make/modules/java.base/Gendata.gmk makes with TOOL_GENERATECACERTS
+  # (build.tools.generatecacerts.GenerateCacerts) from src/java.base/share/data/cacerts; the tool needs
+  # KeyStore and CertificateFactory, which javac's tool's world does not hold, so the file is the JDK
+  # build's, copied from its image (generated.edn's :data names it :build-image, not :same)
+  local cacerts=${conf:+$(dirname "$conf")/images/jdk/lib/security/cacerts}
+  [ -n "$cacerts" ] && [ -f "$cacerts" ] || { echo "jrt-convert: no JDK build image with lib/security/cacerts under $jdk/build" >&2; return 1; }
+  mkdir -p "$data/lib/security"
+  cp "$cacerts" "$data/lib/security/cacerts" || return 1
   # the JCA's field arithmetic (doc/classes/JAVA-DEFERRED-TRIAGE.md, F1): the fields of
   # sun.security.util.math.intpoly, as make/modules/java.base/Gensrc.gmk makes them (INTPOLY_GEN_DONE:
   # TOOL_INTPOLY, build.tools.intpoly.FieldGen, on its header.txt into the gensrc root)
@@ -461,6 +545,14 @@ generate() {
   # installs it: a copy of src/java.logging/share/conf/logging.properties (LogManager's variant
   # reads it as the resource conf/logging.properties)
   cp "$jdk/src/java.logging/share/conf/logging.properties" "$data/conf/logging.properties" || return 1
+  # F9's sun.nio.fs.UnixConstants (B2, 2026-11-15), as make/modules/java.base/gensrc/GensrcMisc.gmk's
+  # generate-preproc-src makes it, the way bin/javac-vendor gensrc does (JCS369 (a), test/javac-platform/gensrc.bash's
+  # gensrc_preproc): the template preprocessed by repr/c's preprocessor on C's own target (no gcc) with the build's
+  # -D, -U, -I and -std (jdk/javac/platform-build.edn's :cpp), laid out as gcc -E lays it out
+  # (test/javac-platform/cppout.ae), then make's awk and sed; held byte for byte to the JDK build's when it has one
+  if grep -q '^java\.base gensrc sun/nio/fs/UnixConstants\.java$' "$work/sources.txt"; then
+    preproc_src "$jdk/src/java.base/unix/classes/sun/nio/fs/UnixConstants.java.template" "$out/sun/nio/fs/UnixConstants.java" || return 1
+  fi
   # every gensrc file of the closure is made
   while read -r _ kind rel; do
     case $kind in gensrc|gensrc:*|jrtgen) [ ! -f "$out/$rel" ] && { echo "not generated: $rel" >&2; return 1; } ;; esac
@@ -506,6 +598,153 @@ convert() {
   grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$log"
 }
 
+# predict (JCS283 (b), JCS324 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS283 (b), JCS324 (a)"): the night's
+# world by day, light: the closure's sources made as the sources step makes them ($out/src, $out/sources.txt); the
+# files that changed against the committed conversion (predict_changed: a line of the new sources.txt that
+# jdk/sources.txt lacks, an overlay file changed since REV, the PATHs) read by repr/java as the convert step reads
+# them, with their context (every overlay of the closure and the closure's files of their packages and of their
+# other modules, REPR_JAVA_PATCH_ALL); their forms laid over a copy of jdk/forms ($out/world; a package file's loads
+# merged, a file the closure dropped removed); then j2g's world vetted on it (jrt.vet: every variant and the changed
+# classes, --classes), j2g's analysis of the whole world with J2G_MISSING (bin/j2g --analyze-only: the analysis
+# failures and what the translation of the changed classes, or of --missing RE's, would stub), and, with --list
+# FILE, those tests analyzed on it (bin/java-check --levels read,compiled --analyze-only, JRT_CONV). Generated
+# sources (gensrc, jrtgen, locales) are the night's: not predicted
+predict_changed() {
+  local rev=$1 kind rel
+  shift
+  # PATHs: those files alone (a slice's, the rest of the world jdk/forms')
+  if [ $# -gt 0 ]; then
+    for rel in "$@"; do echo "${rel#./}"; done
+    return 0
+  fi
+  # new or moved lines (kind and path) of the closure, generated kinds apart
+  awk 'FILENAME == ARGV[1] { old[$2 " " $3] = 1; next } !(($2 " " $3) in old) && $2 !~ /^(gensrc|jrtgen|locales)/ { print $3 }' \
+    "$committed/sources.txt" "$work/sources.txt"
+  # jrt's own Java changed since REV (derived overlays among them), in the closure
+  git -C "$root" diff --name-only "$rev" -- overlay/jdk/java.base | sed 's|^overlay/jdk/java.base/||' \
+    | awk 'FILENAME == ARGV[1] { if ($2 == "overlay") ov[$3] = 1; next } ($0 in ov)' "$work/sources.txt" -
+}
+if [ "${1:-}" = predict ]; then
+  shift
+  rev="" list="" missing="" out=$work/predict paths=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --since) rev=$2; shift 2 ;;
+      --list) list=$(realpath -m "$2"); shift 2 ;;
+      --missing) missing=$2; shift 2 ;;
+      --out) out=$(realpath -m "$2"); shift 2 ;;
+      -*) echo "jrt-convert predict: unknown option $1" >&2; exit 2 ;;
+      *) paths+=("$1"); shift ;;
+    esac
+  done
+  # REV: the commit that last wrote jdk/forms (the committed conversion's)
+  rev=${rev:-$(git -C "$root" log -1 --format=%H -- jdk/forms)}
+  [ -z "$list" ] || [ -f "$list" ] || { echo "jrt-convert predict: --list $list: no such file" >&2; exit 2; }
+  work=$out
+  rm -rf "$out"; mkdir -p "$out/log"
+  t0=$(date +%s)
+  echo "== predict: the closure's sources ($surface)"
+  make_sources "$out/src" || exit 1
+  predict_changed "$rev" ${paths[@]+"${paths[@]}"} | LC_ALL=C sort -u > "$out/changed.txt"
+  if [ ${#paths[@]} = 0 ]; then
+    awk 'FILENAME == ARGV[1] { now[$3] = 1; next } !($3 in now) && $2 !~ /^(gensrc|jrtgen|locales)/ { print $3 }' \
+      "$out/sources.txt" "$committed/sources.txt" | LC_ALL=C sort -u > "$out/removed.txt"
+  else
+    : > "$out/removed.txt"
+  fi
+  # a PATH not in the closure is refused (no source to read)
+  while read -r rel; do
+    [ -f "$out/src/java.base/$rel" ] || { echo "jrt-convert predict: $rel is no source of the closure ($out/sources.txt)" >&2; exit 2; }
+  done < "$out/changed.txt"
+  echo "$(wc -l < "$out/changed.txt") files changed since $(git -C "$root" rev-parse --short "$rev") (the committed conversion's), $(wc -l < "$out/removed.txt") left the closure"
+  if [ ! -s "$out/changed.txt" ] && [ ! -s "$out/removed.txt" ]; then echo "predict: nothing changed: the world is jdk/forms"; fi
+  # the read's context: every overlay of the closure, and the closure's files of the changed files' packages and of
+  # their other modules (share:MODULE)
+  awk 'FNR == 1 { k++ }
+       k == 1 { p = $0; sub(/\/[^\/]*$/, "", p); pk[p] = 1; ch[$0] = 1; next }
+       k == 2 { if (($3 in ch) && $2 ~ /^share:/) md[$2] = 1; next }
+       $2 ~ /^(gensrc|jrtgen|locales)/ { next }
+       { p = $3; sub(/\/[^\/]*$/, "", p) }
+       ($3 in ch) || $2 == "overlay" || (p in pk) || ($2 in md) { print $3 }' \
+    "$out/changed.txt" "$out/sources.txt" "$out/sources.txt" | LC_ALL=C sort -u > "$out/read.txt"
+  if [ -s "$out/changed.txt" ]; then
+    origins > "$out/origins.edn" || exit 1
+    ro=$(repr_java_vendor_read_opts) || exit 1
+    [ -s "$out/read.txt" ] || { echo "jrt-convert predict: no file to read ($out/read.txt)" >&2; exit 1; }
+    echo "== predict: the read, $(wc -l < "$out/read.txt") files ($(wc -l < "$out/changed.txt") changed, the rest their context)"
+    mapfile -t rp < "$out/read.txt"
+    st=0
+    (cd "$out" && GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} REPR_JAVA_THREADS=${REPR_JAVA_THREADS:-2} REPR_JAVA_PATCH_ALL=1 \
+       "$root/bin/repr-java" read-jdk --check $ro --origins "$out/origins.edn" "$out/read" java.base "$out/src/java.base" "${rp[@]}") \
+      > "$out/log/read.log" 2>&1 || st=$?
+    tail -1 "$out/log/read.log"
+    grep '^no javac: ' "$out/log/read.log" || true
+  fi
+  # the world: jdk/forms, the changed files' forms over it (a package file's loads merged, in the committed order then
+  # the new ones'), the dropped files' forms removed
+  echo "== predict: the world ($out/world)"
+  cp -r "$committed/forms" "$out/world"
+  : > "$out/unread.txt"
+  while read -r rel; do
+    f=${rel%.java}.ae
+    if [ -f "$out/read/$f" ]; then
+      mkdir -p "$(dirname "$out/world/$f")"; cp "$out/read/$f" "$out/world/$f"
+      pf=$(dirname "$f").ae
+      if [ -f "$out/read/$pf" ]; then
+        if [ -f "$out/world/$pf" ]; then
+          awk 'FILENAME == ARGV[1] { print; if (/^\(load /) seen[$0] = 1; next } /^\(load / && !($0 in seen) { print; seen[$0] = 1 }' \
+            "$out/world/$pf" "$out/read/$pf" > "$out/world/$pf.new" && mv "$out/world/$pf.new" "$out/world/$pf"
+        else
+          cp "$out/read/$pf" "$out/world/$pf"
+        fi
+      fi
+    else
+      echo "$rel" >> "$out/unread.txt"
+    fi
+  done < "$out/changed.txt"
+  while read -r rel; do
+    f=${rel%.java}.ae
+    rm -f "$out/world/$f"
+    pf=$(dirname "$f").ae b=$(basename "${rel%.java}")
+    [ -f "$out/world/$pf" ] && grep -v "^(load \"[^\"]*/$b\")\$" "$out/world/$pf" > "$out/world/$pf.new" && mv "$out/world/$pf.new" "$out/world/$pf"
+  done < "$out/removed.txt"
+  [ ! -s "$out/unread.txt" ] || { echo "predict: $(wc -l < "$out/unread.txt") changed files not read (their forms jdk/forms' or none: $out/unread.txt):"; sed 's/^/  /' "$out/unread.txt"; status=1; }
+  # the changed classes as a regex of top-level internal names (vet's --classes, J2G_MISSING's default)
+  cre=$(sed 's/\.java$//' "$out/changed.txt" | sed 's/[.$]/\\&/g' | paste -sd'|')
+  [ -n "$missing" ] || missing=${cre:+^($cre)(\$|\\$)}
+  echo "== predict: j2g's world vetted (bin/jrt-convert vet --forms WORLD${cre:+ --classes CHANGED})"
+  st=0
+  # (every variant file named: with --classes and no FILE, vet would analyze the classes alone)
+  vfiles=()
+  for f in "$root"/overlay/jdk/variants/*.ae; do vfiles+=("$(basename "$f")"); done
+  (cd "$root" && bin/jrt-convert vet --forms "$out/world" ${cre:+--classes "^($cre)\$"} --others "${vfiles[@]}") > "$out/log/vet.log" 2>&1 || st=$?
+  grep -E '^(REFUSED|MISSING|stale|   after)' "$out/log/vet.log" | head -40; tail -1 "$out/log/vet.log"
+  [ "$st" = 0 ] || status=1
+  echo "== predict: j2g's analysis of the world (bin/j2g --analyze-only${missing:+, J2G_MISSING})"
+  mkdir -p "$out/empty-input"
+  st=0
+  (cd "$root" && J2G_MISSING=$missing bin/j2g --analyze-only --jdk "$out/world" --input "$out/empty-input" --out "$out/j2g") > "$out/log/j2g.log" 2>&1 || st=$?
+  grep -E '^j2g: (analysis failure|missing in) ' "$out/log/j2g.log" | cut -c1-300 > "$out/j2g-findings.txt" || true
+  echo "$(grep -c '^j2g: analysis failure' "$out/j2g-findings.txt") analysis failures, $(grep -c '^j2g: missing in' "$out/j2g-findings.txt") stubs in the classes of J2G_MISSING ($out/j2g-findings.txt, $out/j2g/report.edn)"
+  grep '^j2g: missing in' "$out/j2g-findings.txt" | head -30
+  [ -f "$out/j2g/report.edn" ] || { tail -20 "$out/log/j2g.log"; echo "predict: j2g's analysis failed ($out/log/j2g.log)"; status=1; }
+  if [ -n "$list" ]; then
+    echo "== predict: the tests of $list analyzed on the world (bin/java-check --levels read,compiled --analyze-only)"
+    st=0
+    # (the executable that hosts j2g: JAVA_CHECK_EXE, else J2G_GO_EXE's, else java-check's own choice)
+    (cd "$root" && JAVA_CHECK_EXE=${JAVA_CHECK_EXE:-${J2G_GO_EXE:-}} JRT_CONV=$out/world J2G_MISSING=$missing bin/java-check --levels read,compiled --analyze-only --list "$list" \
+       --shard-size 30 --jobs 2 --save "$out/check") > "$out/log/java-check.log" 2>&1 || st=$?
+    if [ -f "$out/check/results.tsv" ]; then
+      awk -F'\t' '$2 == "compiled" { n[$3]++ } END { for (k in n) printf "%s %d  ", k, n[k]; print "" }' "$out/check/results.tsv"
+      awk -F'\t' '$2 == "compiled" && $3 == "refused" { print "  refused " $1 ": " substr($4, 1, 200) }' "$out/check/results.tsv" | head -40
+    else
+      tail -20 "$out/log/java-check.log"; echo "predict: java-check failed ($out/log/java-check.log)"; status=1
+    fi
+  fi
+  echo "jrt-convert predict: $(($(date +%s) - t0)) s, $out (status $status)"
+  exit $status
+fi
+
 if has sources; then
   echo "== sources ($surface)"
   make_sources "$work/src" || exit 1
@@ -544,6 +783,7 @@ if has generate; then
       # lib/ and conf/: the image's own files (tzdb.dat, java.security), against the build's jdk/
       case $rel in lib/*|conf/*) ref=${conf:+$(dirname "$conf")/jdk/$rel} ;; *) ref=${modules_ref:+$modules_ref/$rel} ;; esac
       if [ -z "$ref" ] || [ ! -f "$ref" ]; then v=:no-reference
+      elif [ "$rel" = lib/security/cacerts ] && cmp -s "$work/data/$rel" "$ref"; then v=:build-image  # copied from it (above)
       elif cmp -s "$work/data/$rel" "$ref"; then v=:same
       else v=:different; fi
       echo "  \"$rel\" $v"
@@ -663,7 +903,8 @@ fi
 # sources.txt, by path from the top; a top-level entry of COMMITTED that is neither these nor the
 # ones the conversion does not write (README.md, .gitattributes, edge.edn, provenance.edn, compared
 # apart, javac, platform, ocaml, repl-exports.txt: the REPL's exports, hand-written and read by
-# arbace.j2g.main and test/java/check.ae, JCS136 (a), e3d5b57a5) is reported as a difference
+# arbace.j2g.main and test/java/check.ae, JCS136 (a), e3d5b57a5; provides.txt, the world's module provides, which
+# bin/jrt provides writes and --check proves, A4 of Ghidra's G1, found by B2's verify) is reported as a difference
 jdk_verify_diff() {
   local c=$1 f=$2 s=0 e
   diff -r "$c/forms" "$f/forms" || s=1
@@ -672,7 +913,7 @@ jdk_verify_diff() {
   for e in "$c"/* "$c"/.[!.]*; do
     [ -e "$e" ] || continue
     case ${e##*/} in
-      forms|data|sources.txt|README.md|.gitattributes|edge.edn|provenance.edn|javac|platform|ocaml|repl-exports.txt) ;;
+      forms|data|sources.txt|README.md|.gitattributes|edge.edn|provenance.edn|javac|platform|ocaml|repl-exports.txt|provides.txt) ;;
       *) echo "Only in $c: ${e##*/}"; s=1 ;;
     esac
   done

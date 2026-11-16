@@ -1,0 +1,864 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/SocketTube.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels SelectableChannel SelectionKey SocketChannel)
+        '(java.util ArrayList List Objects)
+        '(java.util.concurrent Flow$Publisher Flow$Subscriber Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicReference)
+        '(java.util.concurrent.locks Lock ReentrantLock)
+        '(java.util.function Consumer Supplier)
+        '(jdk.internal.net.http.common BufferSupplier
+                                       Demand
+                                       FlowTube
+                                       FlowTube$TubePublisher
+                                       FlowTube$TubeSubscriber
+                                       Log
+                                       Logger
+                                       SequentialScheduler
+                                       SequentialScheduler$DeferredCompleter
+                                       SequentialScheduler$RestartableTask
+                                       Utils))
+
+(defclass ^:final SocketTube
+  :implements [FlowTube]
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this SocketTube/.dbgString) Utils/DEBUG))
+
+  (field ^:private ^:final ^HttpClientImpl client)
+
+  (field ^:private ^:final ^SocketChannel channel)
+
+  (field ^:private ^:final ^SliceBufferSource sliceBuffersSource)
+
+  (field ^:private ^:final lock (Object.))
+
+  (field ^:private ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+  (field ^:private ^:final ^InternalReadPublisher readPublisher)
+
+  (field ^:private ^:final ^InternalWriteSubscriber writeSubscriber)
+
+  (field ^:private ^:final ^String connectionLabel)
+
+  (constructor ^:public [this ^HttpClientImpl client ^SocketChannel channel
+                         ^{:tag (Supplier ByteBuffer)} buffersFactory ^String connectionLabel]
+    (set! (.-client this) client)
+    (set! (.-channel this) channel)
+    (set! (.-sliceBuffersSource this) (SliceBufferSource. buffersFactory))
+    (set! (.-connectionLabel this) connectionLabel)
+    (set! (.-readPublisher this) (InternalReadPublisher.))
+    (set! (.-writeSubscriber this) (InternalWriteSubscriber.)))
+
+  (method ^:public isFinished ^boolean [this]
+    (let [subscription (.-subscriptionImpl readPublisher)]
+      (or (and (some? subscription) (.-completed subscription))
+          (and (nil? subscription) (some? (.get errorRef))))))
+
+  (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} s]
+    (Objects/requireNonNull s)
+    (java-assert (instance? FlowTube$TubeSubscriber s) (java-str "Expected TubeSubscriber, got:" s))
+    (.subscribe readPublisher s))
+
+  (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+    (.onSubscribe writeSubscriber subscription))
+
+  (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+    (.onNext writeSubscriber item))
+
+  (method ^:public onError ^void [this ^Throwable throwable]
+    (.onError writeSubscriber throwable))
+
+  (method ^:public onComplete ^void [this] (.onComplete writeSubscriber))
+
+  (method signalClosed ^void [this ^Throwable cause]
+    (when (Log/channel)
+      (Log/logChannel "Connection close signalled: connection closed locally ({0})"
+                      (new Object/1 [(.channelDescr this)])))
+    (.signalError (.-subscriptionImpl readPublisher)
+                  (IOException. "connection closed locally" cause)))
+
+  (defclass ^:private ^:static SocketFlowTask
+    :implements [SequentialScheduler$RestartableTask]
+
+    (field ^:final ^Runnable task)
+
+    (field ^:private ^:final ^Lock lock (ReentrantLock.))
+
+    (constructor [this ^Runnable task] (set! (.-task this) task))
+
+    (method ^:public ^:final run ^void [this ^SequentialScheduler$DeferredCompleter taskCompleter]
+      (try
+        (let [locked (.tryLock lock)]
+          (java-assert locked "contention detected in SequentialScheduler")
+          (try (.run task) (finally (when locked (.unlock lock)))))
+        (finally (.complete taskCompleter)))))
+
+  (method debugState ^void [this ^String when]
+    (arbace.core/when (.on debug)
+                      (let [state (StringBuilder.)
+                            sub (.-subscriptionImpl readPublisher)
+                            ^SocketTube$InternalReadPublisher$ReadEvent readEvent (arbace.core/when
+                                                                                    (some? sub)
+                                                                                    (.-readEvent
+                                                                                      sub))
+                            ^Demand rdemand (arbace.core/when (some? sub) (.-demand sub))
+                            writeEvent (.-writeEvent writeSubscriber)
+                            wdemand (.-writeDemand writeSubscriber)
+                            ^int rops (if (nil? readEvent) 0 (.interestOps readEvent))
+                            rd (if (nil? rdemand) 0 (.get rdemand))
+                            ^int wops (if (nil? writeEvent) 0 (.interestOps writeEvent))
+                            wd (if (nil? wdemand) 0 (.get wdemand))]
+                        (.append (.append (.append
+                                            (.append
+                                              (.append
+                                                (.append
+                                                  (.append
+                                                    (.append
+                                                      (.append
+                                                        (.append
+                                                          (.append
+                                                            (.append state when)
+                                                            " Reading: [ops=")
+                                                          (Utils/describeOps rops))
+                                                        ", demand=")
+                                                      rd)
+                                                    ", stopped=")
+                                                  (if (nil? sub)
+                                                      false
+                                                      (.isStopped (.-readScheduler sub))))
+                                                "], Writing: [ops=")
+                                              (Utils/describeOps wops))
+                                            ", demand=")
+                                          wd)
+                                 "]")
+                        (.log debug (.toString state)))))
+
+  (defclass ^:private ^:abstract ^:static SocketFlowEvent
+    :extends AsyncEvent
+
+    (field ^:final ^SocketChannel channel)
+
+    (field ^:final ^int defaultInterest)
+
+    (field ^:volatile ^int interestOps)
+
+    (field ^:volatile ^boolean registered)
+
+    (constructor [this ^int defaultInterest ^SocketChannel channel]
+      (super. AsyncEvent/REPEATING)
+      (set! (.-defaultInterest this) defaultInterest)
+      (set! (.-channel this) channel))
+
+    (method ^:final registered ^boolean [this] registered)
+
+    (method ^:final resume ^void [this]
+      (set! interestOps defaultInterest)
+      (set! registered true))
+
+    (method ^:final pause ^void [this] (set! interestOps 0))
+
+    (method ^:public ^:final channel ^SelectableChannel [this] channel)
+
+    (method ^:public ^:final interestOps ^int [this] interestOps)
+
+    (method ^:public ^:final handle ^void [this]
+      (.pause this)
+      (.signalEvent this))
+
+    (method ^:public ^:final abort ^void [this ^IOException error]
+      (.log (.debug this)
+            (lambda Supplier ^String []
+              (java-str (.getSimpleName (.getClass this)) " abort: " error)))
+      (.pause this)
+      (.signalError this error))
+
+    (method ^:protected ^:abstract signalEvent ^void [this])
+
+    (method ^:protected ^:abstract signalError ^void [this ^Throwable error])
+
+    (method ^:abstract debug ^Logger [this]))
+
+  (defclass ^:private ^:final InternalWriteSubscriber
+    :implements [(Flow$Subscriber (List ByteBuffer))]
+
+    (field ^:volatile ^WriteSubscription subscription)
+
+    (field ^:volatile ^{:tag (List ByteBuffer)} current)
+
+    (field ^:volatile ^boolean completed)
+
+    (field ^:final ^AsyncTriggerEvent startSubscription
+      (AsyncTriggerEvent.
+        (method-ref Consumer [IOException] this InternalWriteSubscriber/.signalError)
+        (method-ref Runnable this InternalWriteSubscriber/.startSubscription)))
+
+    (field ^:final ^WriteEvent writeEvent (WriteEvent. channel this))
+
+    (field ^:final ^Demand writeDemand (Demand.))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (let [previous (.-subscription this)]
+        (when (.on debug) (.log debug "subscribed for writing"))
+        (try
+          (let [needEvent (nil? current)]
+            (when needEvent
+              (when (and (some? previous)
+                         (not (identical? (.-upstreamSubscription previous) subscription)))
+                (.dropSubscription previous)))
+            (set! (.-subscription this) (WriteSubscription. subscription))
+            (when needEvent
+              (when (.on debug) (.log debug "write: registering startSubscription event"))
+              (.registerEvent client startSubscription)))
+          (catch Throwable t (.signalError this t)))))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} bufs]
+      (java-assert (nil? current)
+        (java-str (.dbgString SocketTube/this) "w.onNext current: " current))
+      (java-assert (some? subscription)
+        (java-str (.dbgString SocketTube/this) "w.onNext: subscription is null"))
+      (set! current bufs)
+      (.tryFlushCurrent this (.isSelectorThread client))
+      (.debugState SocketTube/this "leaving w.onNext"))
+
+    (method tryFlushCurrent ^void [this ^boolean inSelectorThread]
+      (let [^{:tag (List ByteBuffer)} bufs current]
+        (arbace.core/when
+          (some? bufs)
+          (if (.isSelectorClosed client)
+              (.signalError this (.selectorClosedException client))
+              (try
+                (java-assert (= inSelectorThread (.isSelectorThread client))
+                  (java-str "should " (if inSelectorThread "" "not ") " be in the selector thread"))
+                (let [remaining (Utils/remaining bufs)]
+                  (when (.on debug) (.log debug "trying to write: %d" (new Object/1 [remaining])))
+                  (let [written (.writeAvailable SocketTube/this bufs)]
+                    (when (.on debug) (.log debug "wrote: %d" (new Object/1 [written])))
+                    (java-assert (>= written 0)
+                      (java-str "negative number of bytes written:" written))
+                    (java-assert (<= written remaining))
+                    (if (== (unchecked-subtract remaining written) 0)
+                        (do
+                          (set! current nil)
+                          (when (.tryDecrement writeDemand)
+                            (if (.isSelectorClosed client)
+                                (.signalError this (.selectorClosedException client))
+                                (let [requestMore (method-ref
+                                                    Runnable
+                                                    this
+                                                    InternalWriteSubscriber/.requestMore)]
+                                  (if inSelectorThread
+                                      (do
+                                        (java-assert (.isSelectorThread client))
+                                        (.execute (.theExecutor client) requestMore))
+                                      (do
+                                        (java-assert (not (.isSelectorThread client)))
+                                        (.run requestMore)))))))
+                        (.resumeWriteEvent this inSelectorThread))))
+                (catch Throwable t (.signalError this t)))))))
+
+    (method startSubscription ^void [this]
+      (try
+        (when (.on debug) (.log debug "write: starting subscription"))
+        (when (Log/channel)
+          (Log/logChannel "Start requesting bytes for writing to channel: {0}"
+                          (new Object/1 [(.channelDescr SocketTube/this)])))
+        (java-assert (.isSelectorThread client))
+        (.handlePending (.-subscriptionImpl readPublisher))
+        (when (.on debug) (.log debug "write: offloading requestMore"))
+        (.execute (.theExecutor client)
+                  (method-ref Runnable this InternalWriteSubscriber/.requestMore))
+        (catch Throwable t (.signalError this t))))
+
+    (method requestMore ^void [this]
+      (let [subscription (.-subscription this)] (.requestMore subscription)))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (.signalError this throwable))
+
+    (method ^:public onComplete ^void [this]
+      (set! completed true)
+      (let [^{:tag (List ByteBuffer)} bufs current
+            remaining (if (nil? bufs) 0 (Utils/remaining bufs))]
+        (when (.on debug) (.log debug "write completed, %d yet to send" (new Object/1 [remaining])))
+        (.debugState SocketTube/this "InternalWriteSubscriber::onComplete")))
+
+    (method resumeWriteEvent ^void [this ^boolean inSelectorThread]
+      (when (.on debug) (.log debug "scheduling write event"))
+      (.resumeEvent SocketTube/this
+                    writeEvent
+                    (method-ref Consumer [Throwable] this InternalWriteSubscriber/.signalError)))
+
+    (method signalWritable ^void [this]
+      (when (.on debug) (.log debug "channel is writable"))
+      (.tryFlushCurrent this true))
+
+    (method signalError ^void [this ^Throwable error]
+      (when (.on debug) (.log debug (lambda Supplier ^String [] (java-str "write error: " error))))
+      (when (Log/channel)
+        (Log/logChannel "Failed to write to channel ({0}: {1})"
+                        (new Object/1 [(.channelDescr SocketTube/this) error])))
+      (set! completed true)
+      (.signalError readPublisher error)
+      (let [^Flow$Subscription subscription (.-subscription this)]
+        (when (some? subscription) (.cancel subscription))))
+
+    (defclass ^:final WriteEvent
+      :extends SocketFlowEvent
+
+      (field ^:final ^InternalWriteSubscriber sub)
+
+      (constructor [this ^SocketChannel channel ^InternalWriteSubscriber sub]
+        (super. SelectionKey/OP_WRITE channel)
+        (set! (.-sub this) sub))
+
+      (method ^:protected ^:final signalEvent ^void [this]
+        (try
+          (.eventUpdated client this)
+          (.signalWritable sub)
+          (catch Throwable t (.signalError sub t))))
+
+      (method ^:protected signalError ^void [this ^Throwable error]
+        (.signalError sub error))
+
+      (method debug ^Logger [this] debug))
+
+    (defclass ^:final WriteSubscription
+      :implements [Flow$Subscription]
+
+      (field ^:final ^Flow$Subscription upstreamSubscription)
+
+      (field ^:volatile ^boolean cancelled)
+
+      (constructor [this ^Flow$Subscription subscription]
+        (set! (.-upstreamSubscription this) subscription))
+
+      (method ^:public request ^void [this ^long n]
+        (when-not cancelled (.request upstreamSubscription n)))
+
+      (method ^:public cancel ^void [this]
+        (when-not cancelled
+          (when (.on debug) (.log debug "write: cancel"))
+          (when (Log/channel) (Log/logChannel "Cancelling write subscription" (new Object/1 [])))
+          (.dropSubscription this)
+          (.cancel upstreamSubscription)))
+
+      (method dropSubscription ^void [this]
+        (when (.on debug) (.log debug "write: resetting demand to 0"))
+        (locking InternalWriteSubscriber/this (set! cancelled true) (.reset writeDemand)))
+
+      (method requestMore ^void [this]
+        (try
+          (when-not (or completed cancelled)
+            (let [^:mutable ^boolean requestMore false
+                  ^:mutable ^long d 0]
+              (locking InternalWriteSubscriber/this
+                (when cancelled (return))
+                (set! d (.get writeDemand))
+                (set! requestMore (.increaseIfFulfilled writeDemand)))
+              (cond
+                requestMore
+                  (do
+                    (when (.on debug) (.log debug "write: requesting more..."))
+                    (.request upstreamSubscription 1))
+                (.on debug) (.log debug "write: no need to request more: %d" (new Object/1 [d])))))
+          (catch Throwable t
+            (when (.on debug) (.log debug (java-str "write: error while requesting more: " t)))
+            (.signalError InternalWriteSubscriber/this t))
+          (finally (.debugState SocketTube/this "leaving requestMore: "))))))
+
+  (defclass ^:private ^:final InternalReadPublisher
+    :implements [(Flow$Publisher (List ByteBuffer))]
+
+    (field ^:private ^:final ^InternalReadSubscription subscriptionImpl (InternalReadSubscription.))
+
+    (field ^:private ^:final ^{:tag (AtomicReference ReadSubscription)} pendingSubscriptions
+      (AtomicReference.))
+
+    (field ^:private ^:volatile ^ReadSubscription subscription)
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} s]
+      (Objects/requireNonNull s)
+      (when (.on debug) (.log debug "Offering new subscriber: %s" (new Object/1 [s])))
+      (.offer subscriptionImpl (FlowTube/asTubeSubscriber s))
+      (.debugState SocketTube/this "leaving read.subscribe: "))
+
+    (method signalError ^void [this ^Throwable error]
+      (when (.on debug) (.log debug (java-str "error signalled " error)))
+      (when-not (not (.compareAndSet errorRef nil error))
+        (when (Log/channel)
+          (Log/logChannel "Error signalled on channel {0}: {1}"
+                          (new Object/1 [(.channelDescr SocketTube/this) error])))
+        (.handleError subscriptionImpl)))
+
+    (defclass ^:final ReadSubscription
+      :implements [Flow$Subscription]
+
+      (field ^:final ^InternalReadSubscription impl)
+
+      (field ^:final ^FlowTube$TubeSubscriber subscriber)
+
+      (field ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+      (field ^:final ^BufferSource bufferSource)
+
+      (field ^:volatile ^boolean subscribed)
+
+      (field ^:volatile ^boolean cancelled)
+
+      (field ^:volatile ^boolean completed)
+
+      (field ^:private ^:volatile ^boolean stopped)
+
+      (constructor ^:public [this ^InternalReadSubscription impl ^FlowTube$TubeSubscriber subscriber]
+        (set! (.-impl this) impl)
+        (set! (.-bufferSource this)
+              (if (.supportsRecycling subscriber)
+                  ^BufferSource (SSLDirectBufferSource. client)
+                  ^BufferSource (.-sliceBuffersSource SocketTube/this)))
+        (set! (.-subscriber this) subscriber))
+
+      (method ^:public cancel ^void [this] (set! cancelled true))
+
+      (method ^:public request ^void [this ^long n]
+        (cond
+          (and (not cancelled) (not stopped)) (.request impl n)
+          (.on debug)
+            (.log debug "subscription stopped or cancelled, ignoring request %d" (new Object/1 [n]))))
+
+      (method signalCompletion ^void [this]
+        (java-assert (or subscribed cancelled))
+        (when-not (or completed cancelled)
+          (locking this (when completed (return)) (set! completed true))
+          (let [error (cast Throwable (.get errorRef))]
+            (if (some? error)
+                (do
+                  (when (.on debug)
+                    (.log debug (java-str "forwarding error to subscriber: " error)))
+                  (.onError subscriber error))
+                (do
+                  (when (.on debug) (.log debug "completing subscriber"))
+                  (.onComplete subscriber))))))
+
+      (method signalOnSubscribe ^void [this]
+        (when-not (or subscribed cancelled)
+          (locking this (when (or subscribed cancelled) (return)) (set! subscribed true))
+          (.onSubscribe subscriber this)
+          (when (.on debug) (.log debug "onSubscribe called"))
+          (when (some? (.get errorRef)) (.signalCompletion this))))
+
+      (method ^:synchronized stopReading ^void [this] (set! stopped true))
+
+      (method ^:synchronized tryDecrementDemand ^boolean [this]
+        (if stopped false (.tryDecrement (.-demand impl))))
+
+      (method ^:synchronized isStopped ^boolean [this] stopped)
+
+      (method ^:synchronized increaseDemand ^void [this ^long n]
+        (when-not stopped (.increase (.-demand impl) n))))
+
+    (defclass ^:final InternalReadSubscription
+      :implements [Flow$Subscription]
+
+      (field ^:private ^:final ^Demand demand (Demand.))
+
+      (field ^:final ^SequentialScheduler readScheduler)
+
+      (field ^:private ^:volatile ^boolean completed)
+
+      (field ^:private ^:final ^ReadEvent readEvent)
+
+      (field ^:private ^:final ^AsyncEvent subscribeEvent)
+
+      (constructor [this]
+        (set! readScheduler
+              (SequentialScheduler.
+                (SocketFlowTask. (method-ref Runnable this InternalReadSubscription/.read))))
+        (set! subscribeEvent
+              (AsyncTriggerEvent.
+                (method-ref Consumer [IOException] this InternalReadSubscription/.signalError)
+                (method-ref Runnable this InternalReadSubscription/.handleSubscribeEvent)))
+        (set! readEvent (ReadEvent. channel this)))
+
+      (method ^:final signalSubscribe ^void [this]
+        (if (or (.isStopped readScheduler) completed)
+            (do
+              (when (.on debug) (.log debug "handling pending subscription while completed"))
+              (.handlePending this))
+            (try
+              (when (.on debug) (.log debug "registering subscribe event"))
+              (.registerEvent client subscribeEvent)
+              (catch Throwable t (.signalError this t) (.handlePending this)))))
+
+      (method ^:final handleSubscribeEvent ^void [this]
+        (java-assert (.isSelectorThread client))
+        (.log debug "subscribe event raised")
+        (when (Log/channel)
+          (Log/logChannel "Start reading from {0}" (new Object/1 [(.channelDescr SocketTube/this)])))
+        (.handlePending this))
+
+      (method ^:public ^:final request ^void [this ^long n]
+        (if (> n 0)
+            (let [wasFulfilled (.increase demand n)]
+              (when wasFulfilled
+                (when (.on debug) (.log debug "got some demand for reading"))
+                (.resumeReadEvent this)))
+            (.signalError this (IllegalArgumentException. "non-positive request")))
+        (.debugState SocketTube/this (java-str "leaving request(" n "): ")))
+
+      (method ^:public ^:final cancel ^void [this]
+        (.pauseReadEvent this)
+        (when (.on debug) (.log debug "Read subscription cancelled"))
+        (when (Log/channel)
+          (Log/logChannel "Read subscription cancelled for channel {0}"
+                          (new Object/1 [(.channelDescr SocketTube/this)])))
+        (when (.on debug) (.log debug "Stopping read scheduler"))
+        (.stop readScheduler))
+
+      (method ^:private resumeReadEvent ^void [this]
+        (when (.on debug) (.log debug "resuming read event"))
+        (.resumeEvent SocketTube/this
+                      readEvent
+                      (method-ref Consumer [Throwable] this InternalReadSubscription/.signalError)))
+
+      (method ^:private pauseReadEvent ^void [this]
+        (when (.on debug) (.log debug "pausing read event"))
+        (.pauseEvent SocketTube/this
+                     readEvent
+                     (method-ref Consumer [Throwable] this InternalReadSubscription/.signalError)))
+
+      (method ^:final handleError ^void [this]
+        (java-assert (some? (.get errorRef)))
+        (.runOrSchedule readScheduler))
+
+      (method ^:final signalError ^void [this ^Throwable error]
+        (when (.on debug) (.log debug (java-str "signal read error: " error)))
+        (when-not (not (.compareAndSet errorRef nil error))
+          (when (.on debug) (.log debug (java-str "got read error: " error)))
+          (when (Log/channel)
+            (Log/logChannel "Read error signalled on channel {0}: {1}"
+                            (new Object/1 [(.channelDescr SocketTube/this) error])))
+          (.runOrSchedule readScheduler)))
+
+      (method ^:final signalReadable ^void [this]
+        (.runOrSchedule readScheduler))
+
+      (method ^:final read ^void [this]
+        (try
+          (while (not (.isStopped readScheduler))
+            (when completed (return))
+            (when (.handlePending this)
+              (when (.on debug) (.log debug "pending subscriber subscribed"))
+              (return))
+            (let [current subscription
+                  error (cast Throwable (.get errorRef))]
+              (when (nil? current)
+                (java-assert (some? error))
+                (when (.on debug)
+                  (.log debug
+                        "error raised before subscriber subscribed: %s"
+                        (new Object/1 [^Object error])))
+                (return))
+              (let [subscriber (.-subscriber current)]
+                (when (some? error)
+                  (set! completed true)
+                  (.pauseReadEvent this)
+                  (when (.on debug)
+                    (.log debug (java-str "Sending error " error " to subscriber " subscriber)))
+                  (when (Log/channel)
+                    (Log/logChannel "Raising error with subscriber for {0}: {1}"
+                                    (new Object/1 [(.channelDescr SocketTube/this) error])))
+                  (.compareAndSet (.-errorRef current) nil error)
+                  (.signalCompletion current)
+                  (when (.on debug) (.log debug "Stopping read scheduler"))
+                  (.stop readScheduler)
+                  (.debugState SocketTube/this "leaving read() loop with error: ")
+                  (return))
+                (java-assert (.isSelectorThread client))
+                (if (.tryDecrementDemand current)
+                    (try
+                      (let [^{:tag (List ByteBuffer)} bytes (.readAvailable
+                                                              SocketTube/this
+                                                              (.-bufferSource current))]
+                        (cond
+                          (identical? bytes EOF)
+                            (do
+                              (when-not completed
+                                (when (.on debug) (.log debug "got read EOF"))
+                                (when (Log/channel)
+                                  (Log/logChannel
+                                    "EOF read from channel: {0}"
+                                    (new Object/1 [(.channelDescr SocketTube/this)])))
+                                (set! completed true)
+                                (.pauseReadEvent this)
+                                (.signalCompletion current)
+                                (when (.on debug) (.log debug "Stopping read scheduler"))
+                                (.stop readScheduler))
+                              (.debugState SocketTube/this "leaving read() loop after EOF: ")
+                              (return))
+                          (> (Utils/remaining bytes) 0)
+                            (do
+                              (when (.on debug)
+                                (.log debug (java-str "read bytes: " (Utils/remaining bytes))))
+                              (java-assert (not (.-completed current)))
+                              (.onNext subscriber bytes)
+                              (.resumeReadEvent this)
+                              (when-not (some? (.get errorRef))
+                                (.debugState SocketTube/this "leaving read() loop after onNext: ")
+                                (return)))
+                          :else
+                            (do
+                              (when (.on debug) (.log debug "no more bytes available"))
+                              (when-not (.isStopped current)
+                                (.increaseDemand current 1)
+                                (.resumeReadEvent this))
+                              (when-not (some? (.get errorRef))
+                                (.debugState SocketTube/this "leaving read() loop with no bytes")
+                                (return)))))
+                      (catch Throwable x (.signalError this x)))
+                    (do
+                      (when (.on debug) (.log debug "no more demand for reading"))
+                      (when-not (some? (.get errorRef))
+                        (.debugState SocketTube/this "leaving read() loop with no demand")
+                        (break)))))))
+          (catch Throwable t
+            (when (.on debug) (.log debug "Unexpected exception in read loop" t))
+            (.signalError this t))
+          (finally
+            (when (.isStopped readScheduler)
+              (when (.on debug) (.log debug "Read scheduler stopped"))
+              (when (Log/channel)
+                (Log/logChannel "Stopped reading from channel {0}"
+                                (new Object/1 [(.channelDescr SocketTube/this)]))))
+            (.handlePending this))))
+
+      (method ^:synchronized offer ^void [this ^FlowTube$TubeSubscriber sub]
+        (let [target (ReadSubscription. this sub)
+              previous (cast ReadSubscription (.getAndSet pendingSubscriptions target))]
+          (when (some? previous)
+            (when (.on debug)
+              (.log debug
+                    (java-str "read publisher: dropping pending subscriber: "
+                              (.-subscriber previous))))
+            (.compareAndSet (.-errorRef previous) nil (cast Throwable (.get errorRef)))
+            (.stopReading previous)
+            (.signalOnSubscribe previous)
+            (if completed (.signalCompletion previous) (.dropSubscription (.-subscriber previous))))
+          (when (.on debug) (.log debug (java-str "read publisher got new subscriber: " sub)))
+          (.signalSubscribe this)))
+
+      (method ^:synchronized handlePending ^boolean [this]
+        (let [^:mutable subscribed false
+              current subscription
+              pending (cast ReadSubscription (.getAndSet pendingSubscriptions nil))]
+          (when (some? pending)
+            (set! subscribed true)
+            (when (.on debug)
+              (.log debug
+                    "handling pending subscription for %s"
+                    (new Object/1 [(.-subscriber pending)])))
+            (when (and (some? current) (not completed))
+              (.log debug
+                    "dropping subscription for current %s"
+                    (new Object/1 [(.-subscriber current)]))
+              (.stopReading current)
+              (.dropSubscription (.-subscriber current)))
+            (when (.on debug) (.log debug "read demand reset to 0"))
+            (.reset demand)
+            (.compareAndSet (.-errorRef pending) nil (cast Throwable (.get errorRef)))
+            (cond
+              (not (.isStopped readScheduler)) (set! subscription pending)
+              (.on debug) (.log debug "socket tube is already stopped"))
+            (when (.on debug)
+              (.log debug (java-str "calling onSubscribe on " (.-subscriber pending))))
+            (.signalOnSubscribe pending)
+            (when completed
+              (.compareAndSet (.-errorRef pending) nil (cast Throwable (.get errorRef)))
+              (.signalCompletion pending)))
+          subscribed)))
+
+    (defclass ^:final ReadEvent
+      :extends SocketFlowEvent
+
+      (field ^:final ^InternalReadSubscription sub)
+
+      (constructor [this ^SocketChannel channel ^InternalReadSubscription sub]
+        (super. SelectionKey/OP_READ channel)
+        (set! (.-sub this) sub))
+
+      (method ^:protected ^:final signalEvent ^void [this]
+        (try
+          (.eventUpdated client this)
+          (.signalReadable sub)
+          (catch Throwable t (.signalError sub t))))
+
+      (method ^:protected ^:final signalError ^void [this ^Throwable error]
+        (when (.on debug) (.log debug "signalError to %s (%s)" (new Object/1 [sub error])))
+        (.signalError sub error))
+
+      (method debug ^Logger [this] debug)))
+
+  (defclass ^:public ^:interface BufferSource
+    (method getBuffer ^ByteBuffer [this])
+
+    (method append ^{:tag (List ByteBuffer)} [this ^{:tag (List ByteBuffer)} list ^ByteBuffer buffer
+                                              ^int start])
+
+    (method ^:default returnUnused ^void [this ^ByteBuffer buffer]))
+
+  (defclass ^:private ^:static ^:final SliceBufferSource
+    :implements [BufferSource]
+
+    (field ^:private ^:final ^{:tag (Supplier ByteBuffer)} factory)
+
+    (field ^:private ^:volatile ^ByteBuffer current)
+
+    (constructor ^:public [this]
+      (this. (method-ref Supplier ^ByteBuffer [] Utils/getBuffer)))
+
+    (constructor ^:public [this ^{:tag (Supplier ByteBuffer)} factory]
+      (set! (.-factory this) (cast Supplier (Objects/requireNonNull factory))))
+
+    (method ^:public ^:final getBuffer ^ByteBuffer [this]
+      (let [^:mutable buf current]
+        (set! buf
+              (if (or (nil? buf) (not (.hasRemaining buf)))
+                  (set! current (cast ByteBuffer (.get factory)))
+                  buf))
+        (java-assert (.hasRemaining buf))
+        buf))
+
+    (method ^:public ^:final append ^{:tag (List ByteBuffer)} [this ^{:tag (List ByteBuffer)} list
+                                                               ^ByteBuffer buf ^int start]
+      (let [limit (.limit buf)]
+        (.limit buf (.position buf))
+        (.position buf start)
+        (let [slice (.slice buf)]
+          (.position buf (.limit buf))
+          (.limit buf limit)
+          (SocketTube/listOf list (.asReadOnlyBuffer slice))))))
+
+  (defclass ^:private ^:static ^:final SSLDirectBufferSource
+    :implements [BufferSource]
+
+    (field ^:private ^:final ^BufferSupplier factory)
+
+    (field ^:private ^:final ^HttpClientImpl client)
+
+    (field ^:private ^ByteBuffer current)
+
+    (constructor ^:public [this ^HttpClientImpl client]
+      (set! (.-client this) (cast HttpClientImpl (Objects/requireNonNull client)))
+      (set! (.-factory this)
+            (cast BufferSupplier (Objects/requireNonNull (.getSSLBufferSupplier client)))))
+
+    (method ^:public ^:final getBuffer ^ByteBuffer [this]
+      (java-assert (.isSelectorThread client))
+      (let [^:mutable buf current]
+        (when (nil? buf) (set! buf (set! current (.get factory))))
+        (java-assert (.hasRemaining buf))
+        (java-assert (== (.position buf) 0))
+        buf))
+
+    (method ^:public ^:final append ^{:tag (List ByteBuffer)} [this ^{:tag (List ByteBuffer)} list
+                                                               ^ByteBuffer buf ^int start]
+      (java-assert (.isSelectorThread client))
+      (java-assert (.isDirect buf))
+      (java-assert (== start 0))
+      (java-assert (identical? current buf))
+      (set! current nil)
+      (.limit buf (.position buf))
+      (.position buf start)
+      (SocketTube/listOf list buf))
+
+    (method ^:public returnUnused ^void [this ^ByteBuffer buffer]
+      (java-assert (identical? buffer current))
+      (let [buf current]
+        (when (some? buf)
+          (java-assert (== (.position buf) 0))
+          (set! current nil)
+          (.limit buf (.position buf))
+          (.recycle factory buf)))))
+
+  (field ^:static ^:final ^int MAX_BUFFERS 3)
+
+  (field ^:static ^:final ^{:tag (List ByteBuffer)} EOF (List/of))
+
+  (field ^:static ^:final ^{:tag (List ByteBuffer)} NOTHING (List/of Utils/EMPTY_BYTEBUFFER))
+
+  (method ^:private readAvailable :throws [IOException] ^{:tag (List ByteBuffer)} [this
+                                                                                   ^BufferSource buffersSource]
+    (let [^:mutable buf (.getBuffer buffersSource)]
+      (java-assert (.hasRemaining buf))
+      (let [^:mutable ^int read 0
+            ^:mutable pos (.position buf)
+            ^:mutable ^{:tag (List ByteBuffer)} list nil]
+        (while (.hasRemaining buf)
+          (try
+            (while (> (set! read (.read channel buf)) 0) (when-not (.hasRemaining buf) (break)))
+            (catch IOException x
+              (if (and (== (.position buf) pos) (nil? list))
+                  (do (.returnUnused buffersSource buf) (throw x))
+                  (do (.compareAndSet errorRef nil x) (set! read 0)))))
+          (when (== (.position buf) pos)
+            (.returnUnused buffersSource buf)
+            (when (nil? list) (set! list (if (== read -1) EOF NOTHING)))
+            (break))
+          (set! list (.append buffersSource list buf pos))
+          (when (or (<= read 0) (== (.size list) MAX_BUFFERS)) (break))
+          (set! buf (.getBuffer buffersSource))
+          (set! pos (.position buf))
+          (java-assert (.hasRemaining buf)))
+        list)))
+
+  (method ^:private ^:static listOf :type-params [T] ^{:tag (List T)} [^{:tag (List T)} list ^T item]
+    (let [^int size (if (nil? list) 0 (.size list))]
+      (switch size
+        0 (List/of item)
+        1 (List/of (.get list 0) item)
+        2 (List/of (.get list 0) (.get list 1) item)
+        (let [^{:tag (List T)} res (if (instance? ArrayList list) list ^List (ArrayList. list))]
+          (.add res item)
+          res))))
+
+  (method ^:private writeAvailable :throws [IOException] ^long [this ^{:tag (List ByteBuffer)} bytes]
+    (let [srcs (cast ByteBuffer/1 (.toArray bytes Utils/EMPTY_BB_ARRAY))
+          remaining (Utils/remaining srcs)
+          ^:mutable written 0]
+      (while (> remaining written)
+        (try
+          (let [w (.write channel srcs)]
+            (java-assert (>= w 0) (java-str "negative number of bytes written:" w))
+            (when (== w 0) (break))
+            (set! written (unchecked-add written w)))
+          (catch IOException x (if (== written 0) (throw x) (break)))))
+      written))
+
+  (method ^:private resumeEvent ^void [this ^SocketFlowEvent event
+                                       ^{:tag (Consumer Throwable)} errorSignaler]
+    (let [^:mutable ^boolean registrationRequired false]
+      (locking lock (set! registrationRequired (not (.registered event))) (.resume event))
+      (try
+        (if registrationRequired (.registerEvent client event) (.eventUpdated client event))
+        (catch Throwable t (.accept errorSignaler t)))))
+
+  (method ^:private pauseEvent ^void [this ^SocketFlowEvent event
+                                      ^{:tag (Consumer Throwable)} errorSignaler]
+    (locking lock (.pause event))
+    (try (.eventUpdated client event) (catch Throwable t (.accept errorSignaler t))))
+
+  (method ^:public connectFlows ^void [this ^FlowTube$TubePublisher writePublisher
+                                       ^FlowTube$TubeSubscriber readSubscriber]
+    (when (.on debug) (.log debug "connecting flows"))
+    (.subscribe this readSubscriber)
+    (.subscribe writePublisher this))
+
+  (method ^:public toString ^String [this] (.dbgString this))
+
+  (method ^:final dbgString ^String [this]
+    (java-str "SocketTube(" connectionLabel ")"))
+
+  (method ^:final channelDescr ^String [this] (String/valueOf channel)))

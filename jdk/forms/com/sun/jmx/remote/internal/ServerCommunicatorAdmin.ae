@@ -1,0 +1,107 @@
+;; Converted from overlay/jdk/java.base/com/sun/jmx/remote/internal/ServerCommunicatorAdmin.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.remote.internal)
+
+(import '(com.sun.jmx.remote.util ClassLogger))
+
+(defclass ^:public ^:abstract ServerCommunicatorAdmin
+  (constructor ^:public [this ^long timeout]
+    (when (.traceOn logger)
+      (.trace logger
+              "Constructor"
+              (java-str "Creates a new ServerCommunicatorAdmin object with the timeout " timeout)))
+    (set! (.-timeout this) timeout)
+    (set! timestamp 0)
+    (when (< timeout Long/MAX_VALUE)
+      (let [^Runnable timeoutTask (Timeout.)
+            t (Thread. timeoutTask "JMX-Server-Admin-Timeout")]
+        (.setName t (java-str "JMX server connection timeout " (.threadId t)))
+        (.setDaemon t true)
+        (.start t))))
+
+  (method ^:public reqIncoming ^boolean [this]
+    (when (.traceOn logger) (.trace logger "reqIncoming" "Receive a new request."))
+    (locking lock
+      (when terminated
+        (.warning logger "reqIncoming" "The server has decided to close this client connection."))
+      (set! currentJobs (unchecked-inc-int currentJobs))
+      terminated))
+
+  (method ^:public rspOutgoing ^boolean [this]
+    (when (.traceOn logger) (.trace logger "reqIncoming" "Finish a request."))
+    (locking lock
+      (when (== (set! currentJobs (unchecked-dec-int currentJobs)) 0)
+        (set! timestamp (System/currentTimeMillis))
+        (.logtime this "Admin: Timestamp=" timestamp)
+        (.notify lock))
+      terminated))
+
+  (method ^:protected ^:abstract doStop ^void [this])
+
+  (method ^:public terminate ^void [this]
+    (when (.traceOn logger)
+      (.trace logger "terminate" "terminate the ServerCommunicatorAdmin object."))
+    (locking lock (when-not terminated (set! terminated true) (.notify lock))))
+
+  (defclass ^:private Timeout
+    :implements [Runnable]
+
+    (method ^:public run ^void [this]
+      (let [^:mutable stopping false]
+        (locking lock
+          (when (== timestamp 0) (set! timestamp (System/currentTimeMillis)))
+          (.logtime ServerCommunicatorAdmin/this "Admin: timeout=" timeout)
+          (.logtime ServerCommunicatorAdmin/this "Admin: Timestamp=" timestamp)
+          (while (not terminated)
+            (try
+              (while (and (not terminated) (not (== currentJobs 0)))
+                (when (.traceOn logger) (.trace logger "Timeout-run" "Waiting without timeout."))
+                (.wait lock))
+              (when terminated (return))
+              (let [remaining (unchecked-subtract
+                                timeout
+                                (unchecked-subtract (System/currentTimeMillis) timestamp))]
+                (.logtime ServerCommunicatorAdmin/this "Admin: remaining timeout=" remaining)
+                (when (> remaining 0)
+                  (when (.traceOn logger)
+                    (.trace logger
+                            "Timeout-run"
+                            (java-str "Waiting with timeout: " remaining " ms remaining")))
+                  (.wait lock remaining))
+                (when-not (> currentJobs 0)
+                  (let [elapsed (unchecked-subtract (System/currentTimeMillis) timestamp)]
+                    (.logtime ServerCommunicatorAdmin/this "Admin: elapsed=" elapsed)
+                    (when (and (not terminated) (> elapsed timeout))
+                      (when (.traceOn logger) (.trace logger "Timeout-run" "timeout elapsed"))
+                      (.logtime ServerCommunicatorAdmin/this
+                                (java-str "Admin: timeout elapsed! " elapsed ">")
+                                timeout)
+                      (set! terminated true)
+                      (set! stopping true)
+                      (break)))))
+              (catch InterruptedException ire
+                (.warning logger "Timeout-run" (java-str "Unexpected Exception: " ire))
+                (.debug logger "Timeout-run" ire)
+                (return)))))
+        (when stopping
+          (when (.traceOn logger) (.trace logger "Timeout-run" "Call the doStop."))
+          (.doStop ServerCommunicatorAdmin/this)))))
+
+  (method ^:private logtime ^void [this ^String desc ^long time]
+    (.trace timelogger "synchro" (java-str desc time)))
+
+  (field ^:private ^long timestamp)
+
+  (field ^:private ^:final ^int/1 lock (new int/1 0))
+
+  (field ^:private ^int currentJobs 0)
+
+  (field ^:private ^long timeout)
+
+  (field ^:private ^boolean terminated false)
+
+  (field ^:private ^:static ^:final ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.misc" "ServerCommunicatorAdmin"))
+
+  (field ^:private ^:static ^:final ^ClassLogger timelogger
+    (ClassLogger. "javax.management.remote.timeout" "ServerCommunicatorAdmin")))

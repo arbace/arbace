@@ -1,0 +1,413 @@
+;; Converted from jdk26u src/java.management/share/classes/com/sun/jmx/remote/internal/ArrayNotificationBuffer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.remote.internal)
+
+(import '(com.sun.jmx.remote.util ClassLogger EnvHelp)
+        '(java.util ArrayList Collection Collections HashMap HashSet List Map Set)
+        '(javax.management MBeanServer
+                           MBeanServerDelegate
+                           MBeanServerNotification
+                           Notification
+                           NotificationBroadcaster
+                           NotificationFilter
+                           NotificationFilterSupport
+                           NotificationListener
+                           ObjectName
+                           QueryEval
+                           QueryExp)
+        '(javax.management.remote NotificationResult TargetedNotification))
+
+(defclass ^:public ArrayNotificationBuffer
+  :implements [NotificationBuffer]
+
+  (field ^:private ^boolean disposed false)
+
+  (field ^:private ^:static ^:final globalLock (Object.))
+
+  (field ^:private ^:static ^:final ^{:tag (HashMap MBeanServer ArrayNotificationBuffer)} mbsToBuffer
+    (HashMap. 1))
+
+  (field ^:private ^:final ^{:tag (Collection ShareBuffer)} sharers (HashSet. 1))
+
+  (method ^:public ^:static getNotificationBuffer ^NotificationBuffer [^MBeanServer mbs
+                                                                       ^:mutable ^{:tag (Map String ?)} env]
+    (when (nil? env) (set! env (Collections/emptyMap)))
+    (let [queueSize (EnvHelp/getNotifBufferSize env)
+          ^:mutable ^ArrayNotificationBuffer buf nil
+          ^:mutable ^boolean create false
+          ^:mutable ^NotificationBuffer sharer nil]
+      (locking globalLock
+        (set! buf (cast ArrayNotificationBuffer (.get mbsToBuffer mbs)))
+        (set! create (nil? buf))
+        (when create (set! buf (ArrayNotificationBuffer. mbs queueSize)) (.put mbsToBuffer mbs buf))
+        (set! sharer (.new buf ShareBuffer queueSize)))
+      (when create (.createListeners buf))
+      sharer))
+
+  (method ^:static removeNotificationBuffer ^void [^MBeanServer mbs]
+    (locking globalLock (.remove mbsToBuffer mbs)))
+
+  (method addSharer ^void [this ^ShareBuffer sharer]
+    (locking globalLock
+      (locking this (when (> (.getSize sharer) queueSize) (.resize this (.getSize sharer))))
+      (.add sharers sharer)))
+
+  (method ^:private removeSharer ^void [this ^ShareBuffer sharer]
+    (let [^:mutable ^boolean empty false]
+      (locking globalLock
+        (.remove sharers sharer)
+        (set! empty (.isEmpty sharers))
+        (if empty
+            (ArrayNotificationBuffer/removeNotificationBuffer mBeanServer)
+            (let [^:mutable ^int max 0]
+              (for-each [^ShareBuffer buf sharers]
+                (let [bufsize (.getSize buf)] (when (> bufsize max) (set! max bufsize))))
+              (when (< max queueSize) (.resize this max)))))
+      (when empty (locking this (set! disposed true) (.notifyAll this)) (.destroyListeners this))))
+
+  (method ^:private ^:synchronized resize ^void [this ^int newSize]
+    (when-not (== newSize queueSize)
+      (while (> (.size queue) newSize) (.dropNotification this))
+      (.resize queue newSize)
+      (set! queueSize newSize)))
+
+  (defclass ^:private ShareBuffer
+    :implements [NotificationBuffer]
+
+    (constructor [this ^int size]
+      (set! (.-size this) size)
+      (.addSharer ArrayNotificationBuffer/this this))
+
+    (method ^:public fetchNotifications :throws [InterruptedException] ^NotificationResult [this
+                                                                                            ^NotificationBufferFilter filter
+                                                                                            ^long startSequenceNumber
+                                                                                            ^long timeout
+                                                                                            ^int maxNotifications]
+      (let [^NotificationBuffer buf ArrayNotificationBuffer/this]
+        (.fetchNotifications buf filter startSequenceNumber timeout maxNotifications)))
+
+    (method ^:public dispose ^void [this]
+      (.removeSharer ArrayNotificationBuffer/this this))
+
+    (method getSize ^int [this] size)
+
+    (field ^:private ^:final ^int size))
+
+  (constructor ^:private [this ^MBeanServer mbs ^int queueSize]
+    (when (.traceOn logger) (.trace logger "Constructor" (java-str "queueSize=" queueSize)))
+    (when (or (nil? mbs) (< queueSize 1)) (throw (IllegalArgumentException. "Bad args")))
+    (set! (.-mBeanServer this) mbs)
+    (set! (.-queueSize this) queueSize)
+    (set! (.-queue this) (ArrayQueue. queueSize))
+    (set! (.-earliestSequenceNumber this) (System/currentTimeMillis))
+    (set! (.-nextSequenceNumber this) (.-earliestSequenceNumber this))
+    (.trace logger "Constructor" "ends"))
+
+  (method ^:private ^:synchronized isDisposed ^boolean [this] disposed)
+
+  (method ^:public dispose ^void [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public fetchNotifications :throws [InterruptedException] ^NotificationResult [this
+                                                                                          ^NotificationBufferFilter filter
+                                                                                          ^long startSequenceNumber
+                                                                                          ^long timeout
+                                                                                          ^:mutable ^int maxNotifications]
+    (.trace logger "fetchNotifications" "starts")
+    (when (or (< startSequenceNumber 0) (.isDisposed this))
+      (locking this
+        (return (NotificationResult. (.earliestSequenceNumber this)
+                                     (.nextSequenceNumber this)
+                                     (new TargetedNotification/1 0)))))
+    (when (or (or (or (nil? filter) (< startSequenceNumber 0)) (< timeout 0))
+              (< maxNotifications 0))
+      (.trace logger "fetchNotifications" "Bad args")
+      (throw (IllegalArgumentException. "Bad args to fetch")))
+    (when (.debugOn logger)
+      (.trace logger
+              "fetchNotifications"
+              (java-str "filter="
+                        filter
+                        "; startSeq="
+                        startSequenceNumber
+                        "; timeout="
+                        timeout
+                        "; max="
+                        maxNotifications)))
+    (when (> startSequenceNumber (.nextSequenceNumber this))
+      (let [msg (java-str "Start sequence number too big: "
+                          startSequenceNumber
+                          " > "
+                          (.nextSequenceNumber this))]
+        (.trace logger "fetchNotifications" msg)
+        (throw (IllegalArgumentException. msg))))
+    (let [^:mutable endTime (unchecked-add (System/currentTimeMillis) timeout)]
+      (when (< endTime 0) (set! endTime Long/MAX_VALUE))
+      (when (.debugOn logger) (.debug logger "fetchNotifications" (java-str "endTime=" endTime)))
+      (let [^:mutable earliestSeq -1
+            ^:mutable nextSeq startSequenceNumber
+            ^{:tag (List TargetedNotification)} notifs (ArrayList.)]
+        (while true
+          (.debug logger "fetchNotifications" "main loop starts")
+          (let [^:mutable ^NamedNotification candidate nil]
+            (locking this
+              (if (< earliestSeq 0)
+                  (do
+                    (set! earliestSeq (.earliestSequenceNumber this))
+                    (when (.debugOn logger)
+                      (.debug logger "fetchNotifications" (java-str "earliestSeq=" earliestSeq)))
+                    (when (< nextSeq earliestSeq)
+                      (set! nextSeq earliestSeq)
+                      (.debug logger "fetchNotifications" "nextSeq=earliestSeq")))
+                  (set! earliestSeq (.earliestSequenceNumber this)))
+              (when (< nextSeq earliestSeq)
+                (.trace logger
+                        "fetchNotifications"
+                        (java-str "nextSeq="
+                                  nextSeq
+                                  " < earliestSeq="
+                                  earliestSeq
+                                  " so may have lost notifs"))
+                (break))
+              (if (< nextSeq (.nextSequenceNumber this))
+                  (do
+                    (set! candidate (.notificationAt this nextSeq))
+                    (when (.debugOn logger)
+                      (.debug logger "fetchNotifications" (java-str "candidate: " candidate))
+                      (.debug logger "fetchNotifications" (java-str "nextSeq now " nextSeq))))
+                  (do
+                    (when (> (.size notifs) 0)
+                      (.debug logger
+                              "fetchNotifications"
+                              "no more notifs but have some so don't wait")
+                      (break))
+                    (let [toWait (unchecked-subtract endTime (System/currentTimeMillis))]
+                      (when (<= toWait 0) (.debug logger "fetchNotifications" "timeout") (break))
+                      (when (.isDisposed this)
+                        (when (.debugOn logger)
+                          (.debug logger "fetchNotifications" "dispose called, no wait"))
+                        (return (NotificationResult.
+                                  (.earliestSequenceNumber this)
+                                  (.nextSequenceNumber this)
+                                  (new TargetedNotification/1 0))))
+                      (when (.debugOn logger)
+                        (.debug logger "fetchNotifications" (java-str "wait(" toWait ")")))
+                      (.wait this toWait)
+                      (continue)))))
+            (let [name (.getObjectName candidate)
+                  notif (.getNotification candidate)
+                  ^{:tag (List TargetedNotification)} matchedNotifs (ArrayList.)]
+              (.debug logger "fetchNotifications" "applying filter to candidate")
+              (.apply filter matchedNotifs name notif)
+              (when (> (.size matchedNotifs) 0)
+                (when (<= maxNotifications 0)
+                  (.debug logger "fetchNotifications" "reached maxNotifications")
+                  (break))
+                (set! maxNotifications (unchecked-dec-int maxNotifications))
+                (when (.debugOn logger)
+                  (.debug logger "fetchNotifications" (java-str "add: " matchedNotifs)))
+                (.addAll notifs matchedNotifs))
+              (set! nextSeq (unchecked-inc nextSeq)))))
+        (let [nnotifs (.size notifs)
+              resultNotifs (new TargetedNotification/1 nnotifs)]
+          (.toArray notifs resultNotifs)
+          (let [nr (NotificationResult. earliestSeq nextSeq resultNotifs)]
+            (when (.debugOn logger) (.debug logger "fetchNotifications" (.toString nr)))
+            (.trace logger "fetchNotifications" "ends")
+            nr)))))
+
+  (method ^:synchronized earliestSequenceNumber ^long [this]
+    earliestSequenceNumber)
+
+  (method ^:synchronized nextSequenceNumber ^long [this]
+    nextSequenceNumber)
+
+  (method ^:synchronized addNotification ^void [this ^NamedNotification notif]
+    (when (.traceOn logger) (.trace logger "addNotification" (.toString notif)))
+    (while (>= (.size queue) queueSize)
+      (.dropNotification this)
+      (when (.debugOn logger)
+        (.debug logger
+                "addNotification"
+                (java-str "dropped oldest notif, earliestSeq=" earliestSequenceNumber))))
+    (.add queue notif)
+    (set! nextSequenceNumber (unchecked-inc nextSequenceNumber))
+    (when (.debugOn logger)
+      (.debug logger "addNotification" (java-str "nextSeq=" nextSequenceNumber)))
+    (.notifyAll this))
+
+  (method ^:private dropNotification ^void [this]
+    (^[int] ArrayQueue/.remove queue 0)
+    (set! earliestSequenceNumber (unchecked-inc earliestSequenceNumber)))
+
+  (method ^:synchronized notificationAt ^NamedNotification [this ^long seqNo]
+    (let [index (unchecked-subtract seqNo earliestSequenceNumber)]
+      (when (or (< index 0) (> index Integer/MAX_VALUE))
+        (let [msg (java-str "Bad sequence number: " seqNo " (earliest " earliestSequenceNumber ")")]
+          (.trace logger "notificationAt" msg)
+          (throw (IllegalArgumentException. msg))))
+      (cast NamedNotification (.get queue (unchecked-int index)))))
+
+  (defclass ^:private ^:static NamedNotification
+    (constructor [this ^ObjectName sender ^Notification notif]
+      (set! (.-sender this) sender)
+      (set! (.-notification this) notif))
+
+    (method getObjectName ^ObjectName [this] sender)
+
+    (method getNotification ^Notification [this] notification)
+
+    (method ^:public toString ^String [this]
+      (java-str "NamedNotification(" sender ", " notification ")"))
+
+    (field ^:private ^:final ^ObjectName sender)
+
+    (field ^:private ^:final ^Notification notification))
+
+  (method ^:private createListeners ^void [this]
+    (.debug logger "createListeners" "starts")
+    (locking this (set! createdDuringQuery (HashSet.)))
+    (try
+      (.addNotificationListener this
+                                MBeanServerDelegate/DELEGATE_NAME
+                                creationListener
+                                creationFilter
+                                nil)
+      (.debug logger "createListeners" "added creationListener")
+      (catch Exception e
+        (let [^:const msg "Can't add listener to MBean server delegate: "]
+          (.fine logger "createListeners" (java-str msg e))
+          (.debug logger "createListeners" e)
+          (throw (IllegalArgumentException. (java-str msg e) e)))))
+    (let [^:mutable ^{:tag (Set ObjectName)} names (.queryNames this nil broadcasterQuery)]
+      (set! names (HashSet. names))
+      (locking this (.addAll names createdDuringQuery) (set! createdDuringQuery nil))
+      (for-each [^ObjectName name names] (.addBufferListener this name))
+      (.debug logger "createListeners" "ends")))
+
+  (method ^:private addBufferListener ^void [this ^ObjectName name]
+    (.checkNoLocks this)
+    (when (.debugOn logger) (.debug logger "addBufferListener" (.toString name)))
+    (try
+      (.addNotificationListener this name bufferListener nil name)
+      (catch Exception e (.trace logger "addBufferListener" e))))
+
+  (method ^:private removeBufferListener ^void [this ^ObjectName name]
+    (.checkNoLocks this)
+    (when (.debugOn logger) (.debug logger "removeBufferListener" (.toString name)))
+    (try
+      (.removeNotificationListener this name bufferListener)
+      (catch Exception e (.trace logger "removeBufferListener" e))))
+
+  (method ^:private addNotificationListener :throws [Exception] ^void [this ^:final ^ObjectName name
+                                                                       ^:final ^NotificationListener listener
+                                                                       ^:final ^NotificationFilter filter
+                                                                       ^:final handback]
+    (.addNotificationListener mBeanServer name listener filter handback))
+
+  (method ^:private removeNotificationListener :throws [Exception] ^void [this
+                                                                          ^:final ^ObjectName name
+                                                                          ^:final ^NotificationListener listener]
+    (.removeNotificationListener mBeanServer name listener))
+
+  (method ^:private queryNames ^{:tag (Set ObjectName)} [this ^:final ^ObjectName name
+                                                         ^:final ^QueryExp query]
+    (try
+      (.queryNames mBeanServer name query)
+      (catch RuntimeException e
+        (.fine logger "queryNames" (java-str "Failed to query names: " e))
+        (.debug logger "queryNames" e)
+        (throw e))))
+
+  (method ^:private ^:static isInstanceOf ^boolean [^:final ^MBeanServer mbs
+                                                    ^:final ^ObjectName name
+                                                    ^:final ^String className]
+    (try
+      (.isInstanceOf mbs name className)
+      (catch Exception e
+        (.fine logger "isInstanceOf" (java-str "failed: " e))
+        (.debug logger "isInstanceOf" e)
+        false)))
+
+  (method ^:private createdNotification ^void [this ^MBeanServerNotification n]
+    (let [^:const shouldEqual MBeanServerNotification/REGISTRATION_NOTIFICATION]
+      (if (not (.equals (.getType n) shouldEqual))
+          (.warning logger "createNotification" (java-str "bad type: " (.getType n)))
+          (let [name (.getMBeanName n)]
+            (when (.debugOn logger) (.debug logger "createdNotification" (java-str "for: " name)))
+            (locking this (when (some? createdDuringQuery) (.add createdDuringQuery name) (return)))
+            (when (ArrayNotificationBuffer/isInstanceOf mBeanServer name broadcasterClass)
+              (.addBufferListener this name)
+              (when (.isDisposed this) (.removeBufferListener this name)))))))
+
+  (defclass ^:private BufferListener
+    :implements [NotificationListener]
+
+    (method ^:public handleNotification ^void [this ^Notification notif handback]
+      (when (.debugOn logger)
+        (.debug logger
+                "BufferListener.handleNotification"
+                (java-str "notif=" notif "; handback=" handback)))
+      (let [name (cast ObjectName handback)]
+        (.addNotification ArrayNotificationBuffer/this (NamedNotification. name notif)))))
+
+  (field ^:private ^:final ^NotificationListener bufferListener (BufferListener.))
+
+  (defclass ^:private ^:static BroadcasterQuery
+    :extends QueryEval
+    :implements [QueryExp]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 7378487660587592048)
+
+    (method ^:public apply ^boolean [this ^:final ^ObjectName name]
+      (let [mbs (QueryEval/getMBeanServer)]
+        (ArrayNotificationBuffer/isInstanceOf mbs name broadcasterClass))))
+
+  (field ^:private ^:static ^:final ^QueryExp broadcasterQuery (BroadcasterQuery.))
+
+  (field ^:private ^:static ^:final ^NotificationFilter creationFilter)
+
+  (static-initializer
+    (let [nfs (NotificationFilterSupport.)]
+      (.enableType nfs MBeanServerNotification/REGISTRATION_NOTIFICATION)
+      (set! creationFilter nfs)))
+
+  (field ^:private ^:final ^NotificationListener creationListener
+    (anon NotificationListener []
+      (method ^:public handleNotification ^void [this ^Notification notif handback]
+        (.debug logger "creationListener" "handleNotification called")
+        (.createdNotification ArrayNotificationBuffer/this (cast MBeanServerNotification notif)))))
+
+  (method ^:private destroyListeners ^void [this]
+    (.checkNoLocks this)
+    (.debug logger "destroyListeners" "starts")
+    (try
+      (.removeNotificationListener this MBeanServerDelegate/DELEGATE_NAME creationListener)
+      (catch Exception e (.warning logger "remove listener from MBeanServer delegate" e)))
+    (let [^{:tag (Set ObjectName)} names (.queryNames this nil broadcasterQuery)]
+      (for-each [^ObjectName name names]
+        (when (.debugOn logger)
+          (.debug logger "destroyListeners" (java-str "remove listener from " name)))
+        (.removeBufferListener this name))
+      (.debug logger "destroyListeners" "ends")))
+
+  (method ^:private checkNoLocks ^void [this]
+    (when (or (Thread/holdsLock this) (Thread/holdsLock globalLock))
+      (.warning logger "checkNoLocks" "lock protocol violation")))
+
+  (field ^:private ^:static ^:final ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.misc" "ArrayNotificationBuffer"))
+
+  (field ^:private ^:final ^MBeanServer mBeanServer)
+
+  (field ^:private ^:final ^{:tag (ArrayQueue NamedNotification)} queue)
+
+  (field ^:private ^int queueSize)
+
+  (field ^:private ^long earliestSequenceNumber)
+
+  (field ^:private ^long nextSequenceNumber)
+
+  (field ^:private ^{:tag (Set ObjectName)} createdDuringQuery)
+
+  (field ^:static ^:final ^String broadcasterClass (.getName NotificationBroadcaster)))

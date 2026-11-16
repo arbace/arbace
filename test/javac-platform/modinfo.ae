@@ -1,0 +1,180 @@
+;; The own platform's module descriptors (JCS359 (a)(3), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS359 stages
+;; 2-3 (day)"): a module-info.class extended as the JDK build extends javac's, byte for byte, on the tools' host (no javac,
+;; no JVM, no java.lang.classfile), run as
+;;
+;;   EXE test/javac-platform/modinfo.ae IN OUT [--packages-file F] [--version V] [--main-class C] [--target T]
+;;                                          [--resolution N]
+;;
+;; The build extends a descriptor twice with jdk.internal.module.ModuleInfoExtender (jdk26u's
+;; src/java.base/share/classes/jdk/internal/module/ModuleInfoExtender.java, at baf63fb): make/ModuleTools.gmk's
+;; build.tools.jigsaw.AddPackagesAttribute gives javac's output the module's packages (the exploded image's
+;; descriptor), then jmod create (make/CreateJmods.gmk) the module version, its main class, the target platform, its
+;; resolution flags and, for java.base, the tied modules' hashes (JCS364 (a): not written here). The extender transforms
+;; the class with java.lang.classfile's defaults; what that writes, as its documentation and the JVMS give it, is
+;; done here:
+;;
+;; - the constant pool is the input's, shared: an entry the output needs is the input's equal entry when there is one,
+;;   else appended, in the order the class is written;
+;; - the Module attribute, given a version, is rebuilt in its place with the version's UTF-8 entry (made as the
+;;   transform meets it, before anything the end adds); its other entries are the input's;
+;; - the attributes the end adds (ModuleMainClass, ModulePackages, ModuleTarget, ModuleResolution, in that order)
+;;   replace an input attribute of their kind and follow the input's others; each one's name, then its entries, are
+;;   interned as it is written: a class or a package or a module as its UTF-8 (internal form) then itself; the packages
+;;   sorted by name.
+;;
+;;   EXE test/javac-platform/modinfo.ae --packages IN
+;;
+;; prints IN's ModulePackages, one package a line (dotted), in the attribute's order.
+;;
+;; --packages-file F: one package a line (dotted). --resolution N: ModuleResolution's flags (jmod's
+;; --do-not-resolve-by-default 0x1, --warn-if-resolved=incubating 0x8).
+(ns javac.modinfo
+  (:require [arbace.string :as str])
+  (:import (java.io ByteArrayOutputStream DataOutputStream File)
+           (java.nio.file Files)))
+
+(defn- u1 [^bytes b i] (bit-and (aget b (int i)) 0xff))
+(defn- u2 [^bytes b i] (bit-or (bit-shift-left (u1 b i) 8) (u1 b (inc i))))
+(defn- u4 [^bytes b i] (bit-or (bit-shift-left (u2 b i) 16) (u2 b (+ i 2))))
+
+(defn- parse-pool
+  "[entries end]: entries a vector indexed from 1 (nil at 0 and after a long or double) of [tag value raw], value a
+  string for UTF-8, an index for a class, module or package, nil otherwise; raw the entry's bytes after its tag."
+  [^bytes b]
+  (let [n (u2 b 8)]
+    (loop [i 1 p 10 acc [nil]]
+      (if (>= i n)
+        [acc p]
+        (let [t (u1 b p)
+              len (case (int t)
+                    1 (+ 2 (u2 b (inc p)))
+                    (3 4 9 10 11 12 17 18) 4
+                    (5 6) 8
+                    15 3
+                    (7 8 16 19 20) 2
+                    (throw (ex-info (str "constant pool tag " t) {})))
+              raw (java.util.Arrays/copyOfRange b (int (inc p)) (int (+ p 1 len)))
+              v (case (int t)
+                  1 (String. ^bytes (java.util.Arrays/copyOfRange b (int (+ p 3)) (int (+ p 1 len))) "UTF-8")
+                  (7 19 20) (u2 b (inc p))
+                  nil)
+              e [t v raw]]
+          (if (#{5 6} t)
+            (recur (+ i 2) (+ p 1 len) (conj acc e nil))
+            (recur (inc i) (+ p 1 len) (conj acc e))))))))
+
+(defn- parse
+  [^bytes b]
+  (let [[pool p] (parse-pool b)
+        access (u2 b p) this (u2 b (+ p 2)) super (u2 b (+ p 4)) ni (u2 b (+ p 6))
+        p (+ p 8 (* 2 ni))
+        _ (when (or (pos? ni) (pos? (u2 b p)) (pos? (u2 b (+ p 2))))
+            (throw (ex-info "not a module descriptor: interfaces, fields or methods" {})))
+        p (+ p 4)
+        na (u2 b p)]
+    (loop [k 0 q (+ p 2) attrs []]
+      (if (= k na)
+        {:pool pool :access access :this this :super super :head (java.util.Arrays/copyOfRange b 0 8) :attrs attrs}
+        (let [nm (u2 b q) l (u4 b (+ q 2))]
+          (recur (inc k) (+ q 6 l) (conj attrs [nm (java.util.Arrays/copyOfRange b (int (+ q 6)) (int (+ q 6 l)))])))))))
+
+(defn- modified-utf8 ^bytes [^String s]
+  (let [o (ByteArrayOutputStream.) d (DataOutputStream. o)]
+    (.writeUTF d s)
+    (.toByteArray o)))
+
+(defn- interner
+  "An atom of the pool and the function (intern kind value) giving the index of an equal entry, appending one (its
+  UTF-8 first for a class, module or package) when there is none."
+  [pool]
+  (let [a (atom pool)]
+    [a (fn intern [kind v]
+         (let [find (fn [t pred] (first (keep-indexed (fn [i e] (when (and e (= t (first e)) (pred e)) i)) @a)))]
+           (case kind
+             :utf8 (or (find 1 #(= v (second %)))
+                       (let [i (count @a)] (swap! a conj [1 v (modified-utf8 v)]) i))
+             (let [t ({:class 7 :module 19 :package 20} kind)
+                   u (intern :utf8 v)]
+               (or (find t #(= u (second %)))
+                   (let [i (count @a)
+                         raw (byte-array [(unchecked-byte (bit-shift-right u 8)) (unchecked-byte u)])]
+                     (swap! a conj [t u raw])
+                     i))))))]))
+
+(defn- be2 [^DataOutputStream d x] (.writeShort d (int x)))
+
+(defn- attr-bytes ^bytes [f]
+  (let [o (ByteArrayOutputStream.) d (DataOutputStream. o)] (f d) (.toByteArray o)))
+
+(defn extend-descriptor
+  "The descriptor b extended by opts {:version :main-class :packages :target :resolution}, as ModuleInfoExtender writes it."
+  ^bytes [^bytes b {:keys [version main-class packages target resolution]}]
+  (let [{:keys [pool attrs] :as c} (parse b)
+        [pa intern] (interner pool)
+        name-of (fn [i] (second (nth pool i)))
+        added (cond-> [] main-class (conj "ModuleMainClass") packages (conj "ModulePackages")
+                target (conj "ModuleTarget") resolution (conj "ModuleResolution"))
+        ;; the transform's pass: Module rebuilt with the version (interned now), the added kinds dropped
+        kept (vec (for [[nm ^bytes body] attrs
+                        :let [n (name-of nm)]
+                        :when (not (some #{n} added))]
+                    (if (and version (= n "Module"))
+                      (let [v (intern :utf8 version) nb (aclone body)]
+                        (aset nb 4 (unchecked-byte (bit-shift-right v 8)))
+                        (aset nb 5 (unchecked-byte v))
+                        [nm nb])
+                      [nm body])))
+        ;; the end's attributes, written (and interned) in order: the name, then the entries
+        new (vec (for [n added]
+                   (let [nm (intern :utf8 n)]
+                     [nm (case n
+                           "ModuleMainClass" (let [ci (intern :class (str/replace main-class "." "/"))]
+                                               (attr-bytes #(be2 % ci)))
+                           "ModulePackages" (let [ps (sort packages)
+                                                  is (mapv #(intern :package (str/replace % "." "/")) ps)]
+                                              (attr-bytes (fn [d] (be2 d (count is)) (doseq [i is] (be2 d i)))))
+                           "ModuleTarget" (let [ti (intern :utf8 target)] (attr-bytes #(be2 % ti)))
+                           "ModuleResolution" (attr-bytes #(be2 % resolution)))])))
+        all (into kept new)
+        pool @pa
+        o (ByteArrayOutputStream.) d (DataOutputStream. o)]
+    (.write d ^bytes (:head c))
+    (be2 d (count pool))
+    (doseq [e (rest pool) :when e]
+      (.writeByte d (int (first e)))
+      (.write d ^bytes (nth e 2)))
+    (be2 d (:access c)) (be2 d (:this c)) (be2 d (:super c))
+    (be2 d 0) (be2 d 0) (be2 d 0)
+    (be2 d (count all))
+    (doseq [[nm ^bytes body] all]
+      (be2 d nm) (.writeInt d (alength body)) (.write d body))
+    (.toByteArray o)))
+
+(defn packages-of
+  "The packages of the descriptor b's ModulePackages, dotted, in its order (nil without one)."
+  [^bytes b]
+  (let [{:keys [pool attrs]} (parse b)]
+    (some (fn [[nm ^bytes body]]
+            (when (= "ModulePackages" (second (nth pool nm)))
+              (vec (for [k (range (u2 body 0))]
+                     (str/replace (second (nth pool (second (nth pool (u2 body (+ 2 (* 2 k))))))) "/" ".")))))
+          attrs)))
+
+(defn -main [in out & opts]
+  (let [m (loop [m {} [k v & more] opts]
+            (if-not k
+              m
+              (recur (case k
+                       "--packages-file" (assoc m :packages (vec (remove str/blank? (str/split-lines (slurp v)))))
+                       "--version" (assoc m :version v)
+                       "--main-class" (assoc m :main-class v)
+                       "--target" (assoc m :target v)
+                       "--resolution" (assoc m :resolution (Long/decode v))
+                       (throw (ex-info (str "modinfo: unknown option " k) {})))
+                     more)))
+        b (Files/readAllBytes (.toPath (File. ^String in)))]
+    (Files/write (.toPath (File. ^String out)) (extend-descriptor b m) (make-array java.nio.file.OpenOption 0))))
+
+(if (= "--packages" (first *command-line-args*))
+  (doseq [p (packages-of (Files/readAllBytes (.toPath (File. ^String (second *command-line-args*)))))] (println p))
+  (apply -main *command-line-args*))

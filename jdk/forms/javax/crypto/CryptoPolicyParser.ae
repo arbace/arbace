@@ -1,0 +1,308 @@
+;; Converted from jdk26u src/java.base/share/classes/javax/crypto/CryptoPolicyParser.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.crypto)
+
+(import '(java.io BufferedReader IOException Reader StreamTokenizer)
+        '(java.lang.reflect Constructor)
+        '(java.security GeneralSecurityException)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(java.util ArrayList Hashtable Locale Objects Vector))
+
+(defclass ^:final CryptoPolicyParser
+  (field ^:private ^:final ^{:tag (Vector GrantEntry)} grantEntries)
+
+  (field ^:private ^StreamTokenizer st)
+
+  (field ^:private ^int lookahead)
+
+  (field ^:private ^boolean allPermEntryFound false)
+
+  (constructor [this] (set! grantEntries (Vector.)))
+
+  (method read :throws [ParsingException IOException] ^void [this ^:mutable ^Reader policy]
+    (when-not (instance? BufferedReader policy) (set! policy (BufferedReader. policy)))
+    (set! st (StreamTokenizer. policy))
+    (.resetSyntax st)
+    (.wordChars st \a \z)
+    (.wordChars st \A \Z)
+    (.wordChars st \. \.)
+    (.wordChars st \0 \9)
+    (.wordChars st \_ \_)
+    (.wordChars st \$ \$)
+    (.wordChars st (unchecked-add-int 128 32) 255)
+    (.whitespaceChars st 0 \space)
+    (.commentChar st \/)
+    (.quoteChar st \')
+    (.quoteChar st \")
+    (.lowerCaseMode st false)
+    (.ordinaryChar st \/)
+    (.slashSlashComments st true)
+    (.slashStarComments st true)
+    (.parseNumbers st)
+    (let [^{:tag (Hashtable String (Vector String))} processedPermissions (Hashtable.)]
+      (set! lookahead (.nextToken st))
+      (while (not (== lookahead StreamTokenizer/TT_EOF))
+        (if (.peek this "grant")
+            (let [ge (.parseGrantEntry this processedPermissions)] (.addElement grantEntries ge))
+            (throw (ParsingException. (.lineno st) "expected grant statement")))
+        (.match this ";"))))
+
+  (method ^:private parseGrantEntry :throws [ParsingException IOException] ^GrantEntry [this
+                                                                                        ^{:tag (Hashtable String (Vector String))} processedPermissions]
+    (let [e (GrantEntry.)]
+      (.match this "grant")
+      (.match this "{")
+      (while (not (.peek this "}"))
+        (if (.peek this "Permission")
+            (let [pe (.parsePermissionEntry this processedPermissions)]
+              (.add e pe)
+              (.match this ";"))
+            (throw (ParsingException. (.lineno st) "expected permission entry"))))
+      (.match this "}")
+      e))
+
+  (method ^:private parsePermissionEntry :throws [ParsingException IOException] ^CryptoPermissionEntry [this
+                                                                                                        ^{:tag (Hashtable String (Vector String))} processedPermissions]
+    (let [e (CryptoPermissionEntry.)]
+      (.match this "Permission")
+      (set! (.-cryptoPermission e) (.match this "permission type"))
+      (if (.equals (.-cryptoPermission e) "javax.crypto.CryptoAllPermission")
+          (do
+            (when-not (.isEmpty processedPermissions)
+              (throw (ParsingException. (.lineno st) "Inconsistent policy")))
+            (set! allPermEntryFound true)
+            (set! (.-alg e) CryptoAllPermission/ALG_NAME)
+            (set! (.-maxKeySize e) Integer/MAX_VALUE)
+            e)
+          (do
+            (cond
+              (.peek this "\"")
+                (set! (.-alg e) (.toUpperCase (.match this "quoted string") Locale/ENGLISH))
+              (.peek this "*")
+                (do (.match this "*") (set! (.-alg e) CryptoPermission/ALG_NAME_WILDCARD))
+              :else (throw (ParsingException. (.lineno st) "Missing the algorithm name")))
+            (.peekAndMatch this ",")
+            (when (.peek this "\"")
+              (set! (.-exemptionMechanism e)
+                    (.toUpperCase (.match this "quoted string") Locale/ENGLISH)))
+            (.peekAndMatch this ",")
+            (when-not (.isConsistent this (.-alg e) (.-exemptionMechanism e) processedPermissions)
+              (throw (ParsingException. (.lineno st) "Inconsistent policy")))
+            (cond
+              (.peek this "number") (set! (.-maxKeySize e) (.match this))
+              (.peek this "*") (do (.match this "*") (set! (.-maxKeySize e) Integer/MAX_VALUE))
+              (not (.peek this ";"))
+                (throw (ParsingException. (.lineno st) "Missing the maximum allowable key size"))
+              :else (set! (.-maxKeySize e) Integer/MAX_VALUE))
+            (.peekAndMatch this ",")
+            (when (.peek this "\"")
+              (let [algParamSpecClassName (.match this "quoted string")
+                    ^{:tag (ArrayList Integer)} paramsV (ArrayList. 1)]
+                (while (.peek this ",")
+                  (.match this ",")
+                  (cond
+                    (.peek this "number") (.add paramsV (.match this))
+                    (.peek this "*") (do (.match this "*") (.add paramsV Integer/MAX_VALUE))
+                    :else (throw (ParsingException. (.lineno st) "Expecting an integer"))))
+                (let [params (cast Integer/1 (.toArray paramsV (new Integer/1 0)))]
+                  (set! (.-checkParam e) true)
+                  (set! (.-algParamSpec e)
+                        (CryptoPolicyParser/getInstance algParamSpecClassName params)))))
+            e))))
+
+  (method ^:private ^:static getInstance :throws [ParsingException] ^AlgorithmParameterSpec [^String type
+                                                                                             ^Integer/1 params]
+    (let [^:mutable ^AlgorithmParameterSpec ret nil]
+      (try
+        (let [^{:tag (Class ?)} apsClass (Class/forName type)
+              ^{:tag (array (Class ?))} paramClasses (new Class/1 (alength params))]
+          (loop [^int i 0]
+            (when (< i (alength params))
+              (aset paramClasses i Integer/TYPE)
+              (recur (unchecked-inc-int i))))
+          (let [^{:tag (Constructor ?)} c (.getConstructor apsClass paramClasses)]
+            (set! ret (cast AlgorithmParameterSpec (.newInstance c (cast Object/1 params))))))
+        (catch Exception e
+          (throw (ParsingException. (java-str "Cannot call the constructor of " type e)))))
+      ret))
+
+  (method ^:private peekAndMatch :throws [ParsingException IOException] ^boolean [this
+                                                                                  ^String expect]
+    (if (.peek this expect) (do (.match this expect) true) false))
+
+  (method ^:private peek ^boolean [this ^String expect]
+    (let [^:mutable found false]
+      (switch lookahead
+        StreamTokenizer/TT_WORD (when (.equalsIgnoreCase expect (.-sval st)) (set! found true))
+        StreamTokenizer/TT_NUMBER (when (.equalsIgnoreCase expect "number") (set! found true))
+        \, (when (.equals expect ",") (set! found true))
+        \{ (when (.equals expect "{") (set! found true))
+        \} (when (.equals expect "}") (set! found true))
+        \" (when (.equals expect "\"") (set! found true))
+        \* (when (.equals expect "*") (set! found true))
+        \; (when (.equals expect ";") (set! found true))
+        nil)
+      found))
+
+  (method ^:private match :throws [ParsingException IOException] ^int [this]
+    (let [^:mutable ^int value -1
+          lineno (.lineno st)
+          ^:mutable ^String sValue nil]
+      (switch lookahead
+        StreamTokenizer/TT_NUMBER
+          (do
+            (set! value (unchecked-int (.-nval st)))
+            (when (< value 0) (set! sValue (String/valueOf (.-nval st))))
+            (set! lookahead (.nextToken st)))
+        (set! sValue (.-sval st)))
+      (when (<= value 0) (throw (ParsingException. lineno "a non-negative number" sValue)))
+      value))
+
+  (method ^:private match :throws [ParsingException IOException] ^String [this ^String expect]
+    (let [^:mutable ^String value nil]
+      (switch lookahead
+        StreamTokenizer/TT_NUMBER
+          (throw (ParsingException. (.lineno st) expect (java-str "number " (.-nval st))))
+        StreamTokenizer/TT_EOF
+          (throw (ParsingException. (java-str "expected " expect ", read end of file")))
+        StreamTokenizer/TT_WORD
+          (cond
+            (.equalsIgnoreCase expect (.-sval st)) (set! lookahead (.nextToken st))
+            (.equalsIgnoreCase expect "permission type")
+              (do (set! value (.-sval st)) (set! lookahead (.nextToken st)))
+            :else (throw (ParsingException. (.lineno st) expect (.-sval st))))
+        \"
+          (cond
+            (.equalsIgnoreCase expect "quoted string")
+              (do (set! value (.-sval st)) (set! lookahead (.nextToken st)))
+            (.equalsIgnoreCase expect "permission type")
+              (do (set! value (.-sval st)) (set! lookahead (.nextToken st)))
+            :else (throw (ParsingException. (.lineno st) expect (.-sval st))))
+        \,
+          (if (.equals expect ",")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect ",")))
+        \{
+          (if (.equals expect "{")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect "{")))
+        \}
+          (if (.equals expect "}")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect "}")))
+        \;
+          (if (.equals expect ";")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect ";")))
+        \*
+          (if (.equals expect "*")
+              (set! lookahead (.nextToken st))
+              (throw (ParsingException. (.lineno st) expect "*")))
+        (throw (ParsingException. (.lineno st) expect (String/valueOf (unchecked-char lookahead)))))
+      value))
+
+  (method getPermissions ^CryptoPermission/1 [this]
+    (let [^{:tag (ArrayList CryptoPermission)} result (ArrayList.)]
+      (for-each [^GrantEntry ge grantEntries]
+        (for-each [^CryptoPermissionEntry pe (.-permissionEntries ge)]
+          (cond
+            (.equals (.-cryptoPermission pe) "javax.crypto.CryptoAllPermission")
+              (.add result CryptoAllPermission/INSTANCE)
+            (.-checkParam pe)
+              (.add result
+                    (CryptoPermission. (.-alg pe)
+                                       (.-maxKeySize pe)
+                                       (.-algParamSpec pe)
+                                       (.-exemptionMechanism pe)))
+            :else
+              (.add result
+                    (CryptoPermission. (.-alg pe) (.-maxKeySize pe) (.-exemptionMechanism pe))))))
+      (cast CryptoPermission/1 (.toArray result (new CryptoPermission/1 0)))))
+
+  (method ^:private isConsistent ^boolean [this ^String alg ^String exemptionMechanism
+                                           ^{:tag (Hashtable String (Vector String))} processedPermissions]
+    (let [^String thisExemptionMechanism (if (nil? exemptionMechanism) "none" exemptionMechanism)]
+      (cond
+        allPermEntryFound false
+        (.isEmpty processedPermissions)
+          (let [^{:tag (Vector String)} exemptionMechanisms (Vector. 1)]
+            (.addElement exemptionMechanisms thisExemptionMechanism)
+            (.put processedPermissions alg exemptionMechanisms)
+            true)
+        :else
+          (let [^:mutable ^{:tag (Vector String)} exemptionMechanisms nil]
+            (if (.containsKey processedPermissions alg)
+                (do
+                  (set! exemptionMechanisms (cast Vector (.get processedPermissions alg)))
+                  (when (.contains exemptionMechanisms thisExemptionMechanism) (return false)))
+                (set! exemptionMechanisms (Vector. 1)))
+            (.addElement exemptionMechanisms thisExemptionMechanism)
+            (.put processedPermissions alg exemptionMechanisms)
+            true))))
+
+  (defclass ^:private ^:static GrantEntry
+    (field ^:private ^:final ^{:tag (Vector CryptoPermissionEntry)} permissionEntries)
+
+    (constructor [this] (set! permissionEntries (Vector.)))
+
+    (method add ^void [this ^CryptoPermissionEntry pe]
+      (.addElement permissionEntries pe)))
+
+  (defclass ^:private ^:static CryptoPermissionEntry
+    (field ^String cryptoPermission)
+
+    (field ^String alg)
+
+    (field ^String exemptionMechanism)
+
+    (field ^int maxKeySize)
+
+    (field ^boolean checkParam)
+
+    (field ^AlgorithmParameterSpec algParamSpec)
+
+    (constructor [this]
+      (set! maxKeySize 0)
+      (set! alg nil)
+      (set! exemptionMechanism nil)
+      (set! checkParam false)
+      (set! algParamSpec nil))
+
+    (method ^:public hashCode ^int [this]
+      (bit-xor-int (bit-xor-int (bit-xor-int (bit-xor-int
+                                               (bit-xor-int
+                                                 (.hashCode cryptoPermission)
+                                                 (Objects/hashCode alg))
+                                               (Objects/hashCode exemptionMechanism))
+                                             maxKeySize)
+                                (if checkParam 100 0))
+                   (Objects/hashCode algParamSpec)))
+
+    (method ^:public equals ^boolean [this obj]
+      (if (identical? obj this)
+          true
+          (if-instance [^CryptoPermissionEntry that obj]
+            (if (not (Objects/equals (.-cryptoPermission this) (.-cryptoPermission that)))
+                false
+                (do
+                  (if (nil? (.-alg this))
+                      (when (some? (.-alg that)) (return false))
+                      (when-not (.equalsIgnoreCase (.-alg this) (.-alg that)) (return false)))
+                  (cond
+                    (not (== (.-maxKeySize this) (.-maxKeySize that))) false
+                    (not (= (.-checkParam this) (.-checkParam that))) false
+                    :else (Objects/equals (.-algParamSpec this) (.-algParamSpec that)))))
+            false))))
+
+  (defclass ^:static ^:final ParsingException
+    :extends GeneralSecurityException
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 7147241245566588374)
+
+    (constructor [this ^String msg] (super. msg))
+
+    (constructor [this ^int line ^String msg]
+      (super. (java-str "line " line ": " msg)))
+
+    (constructor [this ^int line ^String expect ^String actual]
+      (super. (java-str "line " line ": expected '" expect "', found '" actual "'")))))

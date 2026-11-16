@@ -1,0 +1,125 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/security/ntlm/Client.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.security.ntlm)
+
+(import '(java.util Arrays Date Locale))
+
+(defclass ^:public ^:final Client
+  :extends NTLM
+
+  (field ^:private ^:final ^String hostname)
+
+  (field ^:private ^:final ^String username)
+
+  (field ^:private ^String domain)
+
+  (field ^:private ^byte/1 pw1)
+
+  (field ^:private ^byte/1 pw2)
+
+  (constructor :throws [NTLMException] ^:public [this ^String version ^String hostname
+                                                 ^String username ^String domain ^char/1 password]
+    (super. version)
+    (when (or (nil? username) (nil? password))
+      (throw (NTLMException. NTLMException/PROTOCOL "username/password cannot be null")))
+    (set! (.-hostname this) hostname)
+    (set! (.-username this) username)
+    (set! (.-domain this) (if (nil? domain) "" domain))
+    (set! (.-pw1 this) (Client/getP1 password))
+    (set! (.-pw2 this) (Client/getP2 password))
+    (.debug this
+            "NTLM Client: (h,u,t,version(v)) = (%s,%s,%s,%s(%s))\n"
+            (new Object/1 [hostname username domain version (.toString (.-v this))])))
+
+  (method ^:public type1 ^byte/1 [this]
+    (let [p (NTLM$Writer. 1 32)
+          ^:mutable ^int flags 0x8207]
+      (when-not (identical? (.-v this) Version/NTLM) (set! flags (bit-or-int flags 0x80000)))
+      (.writeInt p 12 flags)
+      (.debug this "NTLM Client: Type 1 created\n" (new Object/1 []))
+      (.debug this (.getBytes p))
+      (.getBytes p)))
+
+  (method ^:public type3 :throws [NTLMException] ^byte/1 [this ^byte/1 type2 ^byte/1 nonce]
+    (when (or (or (nil? type2) (and (not (identical? (.-v this) Version/NTLM)) (nil? nonce)))
+              (and (some? nonce) (not (== (alength nonce) 8))))
+      (throw (NTLMException. NTLMException/PROTOCOL
+                             "type2 cannot be null, and nonce must be 8-byte long")))
+    (.debug this "NTLM Client: Type 2 received\n" (new Object/1 []))
+    (.debug this type2)
+    (let [r (NTLM$Reader. type2)
+          challenge (.readBytes r 24 8)
+          inputFlags (.readInt r 20)
+          unicode (== (bit-and-int inputFlags 1) 1)
+          flags (bit-or-int 0x88200 (bit-and-int inputFlags 3))
+          p (NTLM$Writer. 3 64)
+          ^:mutable ^byte/1 lm nil
+          ^:mutable ^byte/1 ntlm nil]
+      (.writeSecurityBuffer p 28 domain unicode)
+      (.writeSecurityBuffer p 36 username unicode)
+      (.writeSecurityBuffer p 44 hostname unicode)
+      (cond
+        (identical? (.-v this) Version/NTLM)
+          (let [lmhash (.calcLMHash this pw1)
+                nthash (.calcNTHash this pw2)]
+            (when (.-writeLM this) (set! lm (.calcResponse this lmhash challenge)))
+            (when (.-writeNTLM this) (set! ntlm (.calcResponse this nthash challenge))))
+        (identical? (.-v this) Version/NTLM2)
+          (let [nthash (.calcNTHash this pw2)]
+            (set! lm (Client/ntlm2LM nonce))
+            (set! ntlm (.ntlm2NTLM this nthash nonce challenge)))
+        :else
+          (let [nthash (.calcNTHash this pw2)]
+            (when (.-writeLM this)
+              (set! lm
+                    (.calcV2 this
+                             nthash
+                             (java-str (.toUpperCase username Locale/US) domain)
+                             nonce
+                             challenge)))
+            (when (.-writeNTLM this)
+              (let [^byte/1 alist (if (not (== (bit-and-int inputFlags 0x800000) 0))
+                                      (.readSecurityBuffer r 40)
+                                      (new byte/1 0))
+                    blob (new byte/1 (unchecked-add-int 32 (alength alist)))]
+                (System/arraycopy (new byte/1 [1 1 0 0 0 0 0 0]) 0 blob 0 8)
+                (let [time (.toByteArray (.multiply
+                                           (.add
+                                             (BigInteger/valueOf (.getTime (Date.)))
+                                             (BigInteger. "11644473600000"))
+                                           (BigInteger/valueOf 10000)))]
+                  (loop [^int i 0]
+                    (when (< i (alength time))
+                      (aset blob
+                            (unchecked-subtract-int
+                              (unchecked-subtract-int (unchecked-add-int 8 (alength time)) i)
+                              1)
+                            (aget time i))
+                      (recur (unchecked-inc-int i))))
+                  (System/arraycopy nonce 0 blob 16 8)
+                  (System/arraycopy (new byte/1 [0 0 0 0]) 0 blob 24 4)
+                  (System/arraycopy alist 0 blob 28 (alength alist))
+                  (System/arraycopy (new byte/1 [0 0 0 0])
+                                    0
+                                    blob
+                                    (unchecked-add-int 28 (alength alist))
+                                    4)
+                  (set! ntlm
+                        (.calcV2 this
+                                 nthash
+                                 (java-str (.toUpperCase username Locale/US) domain)
+                                 blob
+                                 challenge)))))))
+      (.writeSecurityBuffer p 12 lm)
+      (.writeSecurityBuffer p 20 ntlm)
+      (.writeSecurityBuffer p 52 (new byte/1 0))
+      (.writeInt p 60 flags)
+      (.debug this "NTLM Client: Type 3 created\n" (new Object/1 []))
+      (.debug this (.getBytes p))
+      (.getBytes p)))
+
+  (method ^:public getDomain ^String [this] domain)
+
+  (method ^:public dispose ^void [this]
+    (Arrays/fill pw1 (unchecked-byte 0))
+    (Arrays/fill pw2 (unchecked-byte 0))))

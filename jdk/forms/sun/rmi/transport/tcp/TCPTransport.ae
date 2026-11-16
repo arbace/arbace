@@ -1,0 +1,403 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/tcp/TCPTransport.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport.tcp)
+
+(import '(java.io BufferedInputStream
+                  BufferedOutputStream
+                  DataInputStream
+                  DataOutputStream
+                  IOException
+                  InputStream)
+        '(java.lang.ref Reference WeakReference)
+        '(java.lang.reflect InvocationTargetException UndeclaredThrowableException)
+        '(java.net BindException ServerSocket Socket)
+        '(java.rmi RemoteException)
+        '(java.rmi.server ExportException
+                          LogStream
+                          RMISocketFactory
+                          RemoteCall
+                          ServerNotActiveException
+                          UID)
+        '(java.util ArrayList LinkedList List Map WeakHashMap)
+        '(java.util.concurrent ExecutorService
+                               RejectedExecutionException
+                               SynchronousQueue
+                               ThreadFactory
+                               ThreadPoolExecutor
+                               TimeUnit)
+        '(java.util.concurrent.atomic AtomicInteger)
+        '(java.util.logging Level)
+        '(sun.rmi.runtime Log RuntimeUtil)
+        '(sun.rmi.transport Connection
+                            DGCAckHandler
+                            Endpoint
+                            StreamRemoteCall
+                            Target
+                            Transport
+                            TransportConstants))
+
+(defclass ^:public TCPTransport
+  :extends Transport
+
+  (field ^:static ^:final ^Log tcpLog
+    (Log/getLog "sun.rmi.transport.tcp"
+                "tcp"
+                (LogStream/parseLevel (System/getProperty "sun.rmi.transport.tcp.logLevel"))))
+
+  (field ^:private ^:static ^:final ^int maxConnectionThreads
+    (Integer/getInteger "sun.rmi.transport.tcp.maxConnectionThreads" Integer/MAX_VALUE))
+
+  (field ^:private ^:static ^:final ^long threadKeepAliveTime
+    (Long/getLong "sun.rmi.transport.tcp.threadKeepAliveTime" 60000))
+
+  (field ^:private ^:static ^:final ^ExecutorService connectionThreadPool
+    (ThreadPoolExecutor. 0
+                         maxConnectionThreads
+                         threadKeepAliveTime
+                         TimeUnit/MILLISECONDS
+                         (SynchronousQueue.)
+                         (anon ThreadFactory []
+                           (method ^:public newThread ^Thread [this ^Runnable runnable]
+                             (RuntimeUtil/newUserThread runnable "TCP Connection(idle)" true)))))
+
+  (field ^:private ^:static ^:final ^AtomicInteger connectionCount (AtomicInteger.))
+
+  (field ^:private ^:static ^:final ^{:tag (ThreadLocal ConnectionHandler)} threadConnectionHandler
+    (ThreadLocal.))
+
+  (field ^:private ^:final ^{:tag (LinkedList TCPEndpoint)} epList)
+
+  (field ^:private ^int exportCount 0)
+
+  (field ^:private ^ServerSocket server nil)
+
+  (field ^:private ^:final ^{:tag (Map TCPEndpoint (Reference TCPChannel))} channelTable
+    (WeakHashMap.))
+
+  (field ^:static ^:final ^RMISocketFactory defaultSocketFactory
+    (RMISocketFactory/getDefaultSocketFactory))
+
+  (field ^:private ^:static ^:final ^int connectionReadTimeout
+    (Integer/getInteger "sun.rmi.transport.tcp.readTimeout"
+                        (unchecked-multiply-int (unchecked-multiply-int 2 3600) 1000)))
+
+  (constructor [this ^{:tag (LinkedList TCPEndpoint)} epList]
+    (set! (.-epList this) epList)
+    (when (.isLoggable tcpLog Log/BRIEF)
+      (.log tcpLog
+            Log/BRIEF
+            (java-str (java-str (java-str "Version = " TransportConstants/Version) ", ep = ")
+                      (.getEndpoint this)))))
+
+  (method ^:public shedConnectionCaches ^void [this]
+    (let [^:mutable ^{:tag (List TCPChannel)} channels nil]
+      (locking channelTable
+        (set! channels (ArrayList. (.size (.values channelTable))))
+        (for-each [^{:tag (Reference TCPChannel)} ref (.values channelTable)]
+          (let [ch (cast TCPChannel (.get ref))] (when (some? ch) (.add channels ch)))))
+      (for-each [^TCPChannel channel channels] (.shedCache channel))))
+
+  (method ^:public getChannel ^TCPChannel [this ^Endpoint ep]
+    (let [^:mutable ^TCPChannel ch nil]
+      (when (instance? TCPEndpoint ep)
+        (locking channelTable
+          (let [^{:tag (Reference TCPChannel)} ref (cast Reference (.get channelTable ep))]
+            (when (some? ref) (set! ch (cast TCPChannel (.get ref))))
+            (when (nil? ch)
+              (let [tcpEndpoint (cast TCPEndpoint ep)]
+                (set! ch (TCPChannel. this tcpEndpoint))
+                (.put channelTable tcpEndpoint (WeakReference. ch)))))))
+      ch))
+
+  (method ^:public free ^void [this ^Endpoint ep]
+    (when (instance? TCPEndpoint ep)
+      (locking channelTable
+        (let [^{:tag (Reference TCPChannel)} ref (cast Reference (.remove channelTable ep))]
+          (when (some? ref)
+            (let [channel (cast TCPChannel (.get ref))] (when (some? channel) (.shedCache channel))))))))
+
+  (method ^:public exportObject :throws [RemoteException] ^void [this ^Target target]
+    (locking this (.listen this) (set! exportCount (unchecked-inc-int exportCount)))
+    (let [^:mutable ok false]
+      (try
+        (.exportObject super target)
+        (set! ok true)
+        (finally (when-not ok (locking this (.decrementExportCount this)))))))
+
+  (method ^:protected ^:synchronized targetUnexported ^void [this]
+    (.decrementExportCount this))
+
+  (method ^:private decrementExportCount ^void [this]
+    (java-assert (Thread/holdsLock this))
+    (set! exportCount (unchecked-dec-int exportCount))
+    (when (.isLoggable tcpLog Log/VERBOSE)
+      (.log tcpLog Log/VERBOSE (java-str "server socket: " server ", exportCount: " exportCount)))
+    (when (and (== exportCount 0) (not (== (.getListenPort (.getEndpoint this)) 0)))
+      (let [ss server]
+        (set! server nil)
+        (try
+          (when (.isLoggable tcpLog Log/BRIEF)
+            (.log tcpLog Log/BRIEF (java-str "server socket close: " ss)))
+          (.close ss)
+          (catch IOException e
+            (when (.isLoggable tcpLog Log/BRIEF)
+              (.log tcpLog Log/BRIEF (java-str "server socket close throws: " e))))))))
+
+  (method ^:private getEndpoint ^TCPEndpoint [this]
+    (locking epList (cast TCPEndpoint (.getLast epList))))
+
+  (method ^:private listen :throws [RemoteException] ^void [this]
+    (java-assert (Thread/holdsLock this))
+    (let [ep (.getEndpoint this)
+          port (.getPort ep)]
+      (when (nil? server)
+        (when (.isLoggable tcpLog Log/BRIEF)
+          (.log tcpLog Log/BRIEF (java-str "(port " port ") create server socket")))
+        (try
+          (set! server (.newServerSocket ep))
+          (let [t (RuntimeUtil/newSystemThread (AcceptLoop. server)
+                                               (java-str "TCP Accept-" port)
+                                               true)]
+            (.start t))
+          (catch BindException e
+            (throw (ExportException. (java-str "Port already in use: " port) e)))
+          (catch IOException e
+            (throw (ExportException. (java-str "Listen failed on port: " port) e)))))))
+
+  (defclass ^:private AcceptLoop
+    :implements [Runnable]
+
+    (field ^:private ^:final ^ServerSocket serverSocket)
+
+    (field ^:private ^long lastExceptionTime 0)
+
+    (field ^:private ^int recentExceptionCount)
+
+    (constructor [this ^ServerSocket serverSocket]
+      (set! (.-serverSocket this) serverSocket))
+
+    (method ^:public run ^void [this]
+      (try
+        (.executeAcceptLoop this)
+        (finally
+          (try
+            (when (.isLoggable tcpLog Log/BRIEF)
+              (.log tcpLog Log/BRIEF (java-str "server socket close: " serverSocket)))
+            (.close serverSocket)
+            (catch IOException e
+              (when (.isLoggable tcpLog Log/BRIEF)
+                (.log tcpLog Log/BRIEF (java-str "server socket close throws: " e))))))))
+
+    (method ^:private executeAcceptLoop ^void [this]
+      (when (.isLoggable tcpLog Log/BRIEF)
+        (.log tcpLog
+              Log/BRIEF
+              (java-str "listening on port " (.getPort (.getEndpoint TCPTransport/this)))))
+      (while true
+        (let [^:mutable ^Socket socket nil]
+          (try
+            (set! socket (.accept serverSocket))
+            (let [clientAddr (.getInetAddress socket)
+                  ^String clientHost (if (some? clientAddr) (.getHostAddress clientAddr) "0.0.0.0")]
+              (try
+                (.execute connectionThreadPool (ConnectionHandler. socket clientHost))
+                (catch RejectedExecutionException e
+                  (TCPTransport/closeSocket socket)
+                  (.log tcpLog Log/BRIEF (java-str "rejected connection from " clientHost)))))
+            (catch Throwable t
+              (try
+                (when (.isClosed serverSocket) (break))
+                (try
+                  (when (.isLoggable tcpLog Level/WARNING)
+                    (.log tcpLog
+                          Level/WARNING
+                          (java-str "accept loop for " serverSocket " throws")
+                          t))
+                  (catch Throwable tt))
+                (finally (when (some? socket) (TCPTransport/closeSocket socket))))
+              (when-not (instance? SecurityException t)
+                (try (TCPEndpoint/shedConnectionCaches) (catch Throwable tt)))
+              (cond
+                (or (or (instance? Exception t) (instance? OutOfMemoryError t))
+                    (instance? NoClassDefFoundError t))
+                  (when-not (.continueAfterAcceptFailure this t) (return))
+                (instance? Error t) (throw (cast Error t))
+                :else (throw (UndeclaredThrowableException. t))))))))
+
+    (method ^:private continueAfterAcceptFailure ^boolean [this ^Throwable t]
+      (let [fh (RMISocketFactory/getFailureHandler)]
+        (if (some? fh)
+            (.failure fh
+                      ^Exception (if (instance? Exception t)
+                                     (cast Exception t)
+                                     ^Exception (InvocationTargetException. t)))
+            (do (.throttleLoopOnException this) true))))
+
+    (method ^:private throttleLoopOnException ^void [this]
+      (let [now (System/currentTimeMillis)]
+        (cond
+          (or (== lastExceptionTime 0) (> (unchecked-subtract now lastExceptionTime) 5000))
+            (do (set! lastExceptionTime now) (set! recentExceptionCount 0))
+          (>= (set! recentExceptionCount (unchecked-inc-int recentExceptionCount)) 10)
+            (try (Thread/sleep 10000) (catch InterruptedException ignore))))))
+
+  (method ^:private ^:static closeSocket ^void [^Socket sock]
+    (try
+      (when (.isLoggable tcpLog Log/BRIEF) (.log tcpLog Log/BRIEF (java-str "socket close: " sock)))
+      (.close sock)
+      (catch IOException ex
+        (when (.isLoggable tcpLog Log/BRIEF)
+          (.log tcpLog Log/BRIEF (java-str "socket close throws: " ex))))))
+
+  (method handleMessages ^void [this ^Connection conn ^boolean persistent]
+    (let [port (.getPort (.getEndpoint this))]
+      (try
+        (let [in (DataInputStream. (.getInputStream conn))]
+          (loop []
+            (let [op (.read in)]
+              (when (== op -1)
+                (when (.isLoggable tcpLog Log/BRIEF)
+                  (.log tcpLog Log/BRIEF (java-str "(port " port ") connection closed")))
+                (break))
+              (when (.isLoggable tcpLog Log/BRIEF)
+                (.log tcpLog Log/BRIEF (java-str "(port " port ") op = " op)))
+              (switch op
+                TransportConstants/Call
+                  (let [^RemoteCall call (StreamRemoteCall. conn)]
+                    (when (= (.serviceCall this call) false) (return)))
+                TransportConstants/Ping
+                  (let [out (DataOutputStream. (.getOutputStream conn))]
+                    (.writeByte out TransportConstants/PingAck)
+                    (.releaseOutputStream conn))
+                TransportConstants/DGCAck (DGCAckHandler/received (UID/read in))
+                (throw (IOException. (java-str "unknown transport op " op)))))
+            (when persistent (recur))))
+        (catch IOException e
+          (when (.isLoggable tcpLog Log/BRIEF)
+            (.log tcpLog Log/BRIEF (java-str "(port " port ") exception: ") e)))
+        (finally
+          (try
+            (.close conn)
+            (catch IOException ex
+              (when (.isLoggable tcpLog Log/BRIEF)
+                (.log tcpLog Log/BRIEF (java-str "Connection close throws " ex)))))))))
+
+  (method ^:public ^:static getClientHost :throws [ServerNotActiveException] ^String []
+    (let [h (cast ConnectionHandler (.get threadConnectionHandler))]
+      (if (some? h) (.getClientHost h) (throw (ServerNotActiveException. "not in a remote call")))))
+
+  (defclass ^:private ConnectionHandler
+    :implements [Runnable]
+
+    (field ^:private ^:static ^:final ^int POST 0x504f5354)
+
+    (field ^:private ^Socket socket)
+
+    (field ^:private ^String remoteHost)
+
+    (constructor [this ^Socket socket ^String remoteHost]
+      (set! (.-socket this) socket)
+      (set! (.-remoteHost this) remoteHost))
+
+    (method getClientHost ^String [this] remoteHost)
+
+    (method ^:public run ^void [this]
+      (let [t (Thread/currentThread)
+            name (.getName t)]
+        (try
+          (.setName t
+                    (java-str "RMI TCP Connection("
+                              (.incrementAndGet connectionCount)
+                              ")-"
+                              remoteHost))
+          (.run0 this)
+          (finally (.setName t name)))))
+
+    (method ^:private run0 ^void [this]
+      (let [endpoint (.getEndpoint TCPTransport/this)
+            port (.getPort endpoint)]
+        (.set threadConnectionHandler this)
+        (try (.setTcpNoDelay socket true) (catch Exception e))
+        (try
+          (when (> connectionReadTimeout 0) (.setSoTimeout socket connectionReadTimeout))
+          (catch Exception e))
+        (try
+          (let [sockIn (.getInputStream socket)
+                ^InputStream bufIn (if (.markSupported sockIn)
+                                       sockIn
+                                       ^InputStream (BufferedInputStream. sockIn))
+                in (DataInputStream. bufIn)
+                magic (.readInt in)
+                version (.readShort in)]
+            (if (or (not (== magic TransportConstants/Magic))
+                    (not (== version TransportConstants/Version)))
+                (do
+                  (when (.isLoggable tcpLog Log/BRIEF)
+                    (.log tcpLog
+                          Log/BRIEF
+                          (java-str "magic or version not match: " magic ", " version)))
+                  (TCPTransport/closeSocket socket))
+                (let [sockOut (.getOutputStream socket)
+                      bufOut (BufferedOutputStream. sockOut)
+                      out (DataOutputStream. bufOut)
+                      remotePort (.getPort socket)]
+                  (when (.isLoggable tcpLog Log/BRIEF)
+                    (.log tcpLog
+                          Log/BRIEF
+                          (java-str "accepted socket from [" remoteHost ":" remotePort "]")))
+                  (let [^:mutable ^TCPEndpoint ep nil
+                        ^:mutable ^TCPChannel ch nil
+                        ^:mutable ^TCPConnection conn nil
+                        protocol (.readByte in)]
+                    (switch protocol
+                      TransportConstants/SingleOpProtocol
+                        (do
+                          (set! ep
+                                (TCPEndpoint. remoteHost
+                                              (.getLocalPort socket)
+                                              (.getClientSocketFactory endpoint)
+                                              (.getServerSocketFactory endpoint)))
+                          (set! ch (TCPChannel. TCPTransport/this ep))
+                          (set! conn (TCPConnection. ch socket bufIn bufOut))
+                          (.handleMessages TCPTransport/this conn false))
+                      TransportConstants/StreamProtocol
+                        (do
+                          (.writeByte out TransportConstants/ProtocolAck)
+                          (when (.isLoggable tcpLog Log/VERBOSE)
+                            (.log
+                              tcpLog
+                              Log/VERBOSE
+                              (java-str "(port " port ") suggesting " remoteHost ":" remotePort)))
+                          (.writeUTF out remoteHost)
+                          (.writeInt out remotePort)
+                          (.flush out)
+                          (let [clientHost (.readUTF in)
+                                clientPort (.readInt in)]
+                            (when (.isLoggable tcpLog Log/VERBOSE)
+                              (.log tcpLog
+                                    Log/VERBOSE
+                                    (java-str "(port "
+                                              port
+                                              ") client using "
+                                              clientHost
+                                              ":"
+                                              clientPort)))
+                            (set! ep
+                                  (TCPEndpoint. remoteHost
+                                                (.getLocalPort socket)
+                                                (.getClientSocketFactory endpoint)
+                                                (.getServerSocketFactory endpoint)))
+                            (set! ch (TCPChannel. TCPTransport/this ep))
+                            (set! conn (TCPConnection. ch socket bufIn bufOut))
+                            (.handleMessages TCPTransport/this conn true)))
+                      TransportConstants/MultiplexProtocol
+                        (do
+                          (when (.isLoggable tcpLog Log/VERBOSE)
+                            (.log tcpLog
+                                  Log/VERBOSE
+                                  (java-str "(port " port ") rejecting multiplex protocol")))
+                          (.writeByte out TransportConstants/ProtocolNack)
+                          (.flush out))
+                      (do (.writeByte out TransportConstants/ProtocolNack) (.flush out)))))))
+          (catch IOException e (.log tcpLog Log/BRIEF "terminated with exception:" e))
+          (finally (TCPTransport/closeSocket socket)))))))

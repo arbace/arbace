@@ -1,0 +1,223 @@
+(ns jrt.deflate
+  "Deflater's bytes against the JDK's (A9 of the Ghidra case study's G1 plan, doc/go/JRT-NOTES.md, \"Deflater's
+  bytes\"): a deterministic corpus of Arbace's own (text, zeros, incompressible bytes, packed small integers as a
+  compiled table writes them, runs, the sizes around the window's 32 KiB and the stored block's 64 KiB, 1 MB of
+  text) deflated through java.util.zip in several ways (DeflaterOutputStream at the default level as a program
+  writes it: whole arrays, byte by byte, in chunks, a small buffer; levels 1 and 9; nowrap; the filtered and
+  Huffman-only strategies; a sync flush midway; GZIPOutputStream), one row a pair: the input's size and SHA-256,
+  the output's size and SHA-256, and whether it inflates back to the input (its own verdict).
+  On the frozen JVM (bin/jrt deflate --record) the JDK's Deflater, which is the host's zlib 1.3.2
+  (jdk26u's libzip links the system's libz), writes test/jrt/deflate-jdk26.edn; on an executable of the
+  Go build (bin/jrt deflate [EXE], stage 0 by default) jrt's Deflater, zlib 1.3.2's deflate ported
+  (overlay/jdk/java.base/java/util/zip/Deflater.java), is held to it byte for byte.
+  Usage: -main record OUT | check RECORD [--control]"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io ByteArrayOutputStream ByteArrayInputStream OutputStream)
+           (java.security MessageDigest)
+           (java.util.zip Deflater DeflaterOutputStream Inflater InflaterInputStream GZIPOutputStream GZIPInputStream)))
+
+;; ---------------------------------------------------------------------------------------------------------
+;; the corpus: each input made by a 31-bit linear congruential generator from its seed, so that the JVM and
+;; the Go build make the same bytes
+
+(defn- lcg
+  "The generator's next state (glibc's constants, 31 bits)."
+  ^long [^long s]
+  (bit-and (unchecked-add (unchecked-multiply s 1103515245) 12345) 0x7fffffff))
+
+(defn- gen-bytes
+  "n bytes from seed by f, called with the state and returning [byte-value next-state]."
+  [n seed f]
+  (let [b (byte-array n)]
+    (loop [i 0 s (long seed)]
+      (if (< i n)
+        (let [[v s2] (f s)]
+          (aset-byte b i (unchecked-byte v))
+          (recur (inc i) (long s2)))
+        b))))
+
+(def ^:private words
+  ["the" "of" "and" "a" "to" "in" "is" "it" "that" "for" "on" "with" "as" "was" "by" "this" "be" "are" "from" "or"
+   "arbace" "forms" "class" "method" "field" "return" "static" "final" "public" "private" "void" "int" "long"
+   "String" "deflate" "inflate" "window" "match" "length" "distance" "huffman" "block" "stored" "literal"
+   "sleigh" "pcode" "varnode" "constructor" "operand" "token" "context" "symbol" "table" "pattern"])
+
+(defn- text
+  "n bytes of words from the list and separators (a space, sometimes a newline or a comma)."
+  ^bytes [n seed]
+  (let [sb (StringBuilder.)]
+    (loop [s (long seed)]
+      (when (< (.length sb) n)
+        (let [s1 (lcg s) s2 (lcg s1)
+              w (nth words (mod (quot s1 16) (count words)))
+              sep (case (int (mod (quot s2 16) 12)) 0 "\n" 1 ", " " ")]
+          (.append sb ^String w)
+          (.append sb ^String sep)
+          (recur s2))))
+    (let [b (.getBytes (.toString sb) "UTF-8") out (byte-array n)]
+      (System/arraycopy b 0 out 0 n)
+      out)))
+
+(defn- random-bytes ^bytes [n seed] (gen-bytes n seed (fn [s] (let [s2 (lcg s)] [(bit-and (quot s2 128) 255) s2]))))
+
+(defn- packed
+  "n bytes as a compiled table's packed encoding writes them: an element's id, an attribute id and a small
+  integer, the ids from a few dozen, the values mostly small."
+  ^bytes [n seed]
+  (gen-bytes n seed (fn [s] (let [s2 (lcg s) r (quot s2 256)
+                                  v (case (int (mod r 4)) 0 (+ 0x40 (mod (quot r 4) 24)) 1 (+ 0xc0 (mod (quot r 4) 40))
+                                          2 (mod (quot r 4) 16) (mod (quot r 4) 256))]
+                              [v s2]))))
+
+(defn- runs
+  "n bytes of runs, each a byte repeated 1 to 300 times (the matches of length 258 and the lazy evaluation)."
+  ^bytes [n seed]
+  (let [b (byte-array n)]
+    (loop [i 0 s (long seed)]
+      (when (< i n)
+        (let [s1 (lcg s) s2 (lcg s1)
+              len (inc (mod (quot s1 64) 300))
+              v (bit-and (quot s2 64) 255)
+              e (min n (+ i len))]
+          (loop [j i] (when (< j e) (aset-byte b j (unchecked-byte v)) (recur (inc j))))
+          (recur e s2))))
+    b))
+
+(defn- mixed
+  "Text with incompressible stretches and runs, cut to n."
+  ^bytes [n seed]
+  (let [o (ByteArrayOutputStream.)]
+    (loop [s (long seed)]
+      (when (< (.size o) n)
+        (let [s1 (lcg s) k (mod (quot s1 64) 3) m (+ 200 (mod (quot s1 16) 3000))
+              ^bytes b (case (int k) 0 (text m s1) 1 (random-bytes (quot m 4) s1) (runs m s1))]
+          (.write o b 0 (alength b))
+          (recur (lcg s1)))))
+    (let [out (byte-array n)] (System/arraycopy (.toByteArray o) 0 out 0 n) out)))
+
+(defn corpus
+  "[name bytes] pairs, in order."
+  []
+  [["empty" (byte-array 0)]
+   ["one" (byte-array [(byte 65)])]
+   ["alphabet" (.getBytes "abcdefghijklmnopqrstuvwxyz" "UTF-8")]
+   ["zeros-100000" (byte-array 100000)]
+   ["text-200000" (text 200000 1)]
+   ["random-70000" (random-bytes 70000 2)]
+   ["packed-300000" (packed 300000 3)]
+   ["runs-120000" (runs 120000 4)]
+   ["mixed-32767" (mixed 32767 5)]
+   ["mixed-32768" (mixed 32768 5)]
+   ["mixed-32769" (mixed 32769 5)]
+   ["mixed-65535" (mixed 65535 6)]
+   ["mixed-65536" (mixed 65536 6)]
+   ["mixed-65537" (mixed 65537 6)]
+   ["random-65537" (random-bytes 65537 7)]
+   ["text-1000000" (text 1000000 8)]])
+
+;; ---------------------------------------------------------------------------------------------------------
+;; the ways of deflating
+
+(defn- dos-write
+  "The input written to os in chunks of chunk bytes (0: the whole array at once; 1: byte by byte, write(int))."
+  [^OutputStream os ^bytes in chunk]
+  (let [n (alength in) chunk (long chunk)]
+    (cond (zero? chunk) (.write os in 0 n)
+          (= 1 chunk) (loop [i 0] (when (< i n) (.write os (int (aget in i))) (recur (inc i))))
+          :else (loop [i 0] (when (< i n) (.write os in i (int (min chunk (- n i)))) (recur (+ i chunk)))))))
+
+(defn- deflate-with
+  "[out-bytes kind] for a mode."
+  [mode ^bytes in]
+  (let [bo (ByteArrayOutputStream.)
+        dos (fn [^Deflater d buf] (if d (DeflaterOutputStream. bo d (int buf)) (DeflaterOutputStream. bo)))
+        run (fn [^OutputStream os chunk] (dos-write os in chunk) (.close os))
+        level (fn [l nowrap] (let [d (Deflater. (int l) (boolean nowrap))] (run (dos d 512) 0) (.end d)))
+        strategy (fn [st] (let [d (Deflater.)] (.setStrategy d (int st)) (run (dos d 512) 0) (.end d)))]
+    (case mode
+      :default (run (DeflaterOutputStream. bo) 0)
+      :default-bytewise (run (DeflaterOutputStream. bo) 1)
+      :default-chunks-1000 (run (DeflaterOutputStream. bo) 1000)
+      :default-buffer-64 (let [d (Deflater.)] (run (dos d 64) 0) (.end d))
+      :level-1 (level 1 false)
+      :level-9 (level 9 false)
+      :nowrap (level Deflater/DEFAULT_COMPRESSION true)
+      :filtered (strategy Deflater/FILTERED)
+      :huffman-only (strategy Deflater/HUFFMAN_ONLY)
+      :sync-flush (let [os (DeflaterOutputStream. bo true) h (quot (alength in) 2)]
+                    (.write os in 0 (int h)) (.flush os)
+                    (.write os in (int h) (int (- (alength in) h))) (.close os))
+      :gzip (run (GZIPOutputStream. bo) 0))
+    (.toByteArray bo)))
+
+(def modes [:default :default-bytewise :default-chunks-1000 :default-buffer-64 :level-1 :level-9 :nowrap
+            :filtered :huffman-only :sync-flush :gzip])
+
+(defn- inflate
+  ^bytes [mode ^bytes z]
+  (let [is (case mode
+             :gzip (GZIPInputStream. (ByteArrayInputStream. z))
+             :nowrap (InflaterInputStream. (ByteArrayInputStream. z) (Inflater. true))
+             (InflaterInputStream. (ByteArrayInputStream. z)))
+        bo (ByteArrayOutputStream.) buf (byte-array 8192)]
+    (loop [] (let [n (.read ^java.io.InputStream is buf)] (when (pos? n) (.write bo buf 0 n) (recur))))
+    (.toByteArray bo)))
+
+(defn- sha256 [^bytes b]
+  (let [d (.digest (MessageDigest/getInstance "SHA-256") b)]
+    (apply str (map #(let [s (Integer/toHexString (bit-and (int %) 255))] (if (= 1 (count s)) (str "0" s) s)) d))))
+
+(defn rows
+  "One row a pair, in the corpus's order then the modes': byte by byte only for the inputs up to 70,000 bytes."
+  []
+  (vec (for [[nm ^bytes in] (corpus)
+             mode modes
+             :when (or (not= mode :default-bytewise) (<= (alength in) 70000))]
+         (let [z (deflate-with mode in)]
+           {:input nm :mode mode :in-bytes (alength in) :in-sha256 (sha256 in)
+            :out-bytes (alength ^bytes z) :out-sha256 (sha256 z)
+            :inflates (java.util.Arrays/equals ^bytes (inflate mode z) in)}))))
+
+(defn- record! [out]
+  (let [rs (rows)]
+    (spit out (str ";; Deflater's bytes on the JDK (A9 of the Ghidra case study's G1 plan): test/jrt/deflate.ae's corpus deflated\n"
+                   ";; by the frozen JVM's java.util.zip (jdk26u's libzip over the host's zlib 1.3.2), one map a pair.\n"
+                   ";; Written by bin/jrt deflate --record; bin/jrt deflate holds an executable's jrt to it.\n"
+                   "{:java-version " (pr-str (System/getProperty "java.version")) "\n :rows\n ["
+                   (str/join "\n  " (map pr-str rs)) "]}\n"))
+    (println (str "deflate: " (count rs) " rows recorded in " out
+                  (let [bad (remove :inflates rs)] (when (seq bad) (str "; " (count bad) " do not inflate back"))))))
+  0)
+
+(defn- check [rec control?]
+  (let [want (:rows (read-string (slurp rec)))
+        want (if control?
+               ;; the negative control: each row held to the next row's output digest (a crossed pair), which must fail
+               (map (fn [a b] (assoc a :out-sha256 (:out-sha256 b))) want (concat (rest want) [(first want)]))
+               want)
+        got (rows)
+        by (into {} (for [r got] [[(:input r) (:mode r)] r]))
+        bad (for [w want
+                  :let [g (by [(:input w) (:mode w)])]
+                  :when (not (and g (= (:in-sha256 w) (:in-sha256 g)) (= (:out-bytes w) (:out-bytes g))
+                                  (= (:out-sha256 w) (:out-sha256 g)) (:inflates g)))]
+              [w g])
+        extra (remove (set (map (juxt :input :mode) want)) (map (juxt :input :mode) got))]
+    (doseq [[w g] (take 20 bad)]
+      (println (str "deflate: differs: " (:input w) " " (:mode w) ": want " (:out-bytes w) " bytes " (subs (:out-sha256 w) 0 16)
+                    (if g (str ", got " (:out-bytes g) " bytes " (subs (:out-sha256 g) 0 16) (when-not (:inflates g) " (does not inflate back)")
+                            (when (not= (:in-sha256 w) (:in-sha256 g)) " (the input differs: the corpus changed, record again)"))
+                        ", no row"))))
+    (println (str "deflate: " (- (count want) (count bad)) " of " (count want) " rows equal to the JDK's"
+                  (when (seq extra) (str ", " (count extra) " rows not recorded"))
+                  (when control? " (the control: crossed digests)")))
+    (if (or (seq bad) (seq extra)) 1 0)))
+
+(defn -main [& [verb arg flag]]
+  (let [st (case verb
+             "record" (record! arg)
+             "check" (check arg (= flag "--control"))
+             (do (println "usage: jrt.deflate record OUT | check RECORD [--control]") 2))]
+    (shutdown-agents)
+    (System/exit st)))

@@ -1,0 +1,97 @@
+;; Converted from overlay/jdk/java.base/sun/rmi/transport/GC.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport)
+
+(import '(java.util SortedSet TreeSet)
+        '(jdk.internal.misc InnocuousThread))
+
+(defclass GC
+  (constructor ^:private [this])
+
+  (field ^:private ^:static ^:final ^long NO_TARGET Long/MAX_VALUE)
+
+  (field ^:private ^:static ^long latencyTarget NO_TARGET)
+
+  (field ^:private ^:static ^Thread daemon nil)
+
+  (defclass ^:private ^:static LatencyLock
+    :extends Object)
+
+  (field ^:private ^:static lock (LatencyLock.))
+
+  (method ^:public ^:static ^:native maxObjectInspectionAge ^long [])
+
+  (defclass ^:private ^:static Daemon
+    :implements [Runnable]
+
+    (method ^:public run ^void [this]
+      (while true
+        (let [^:mutable ^long l 0]
+          (locking lock
+            (set! l latencyTarget)
+            (when (== l NO_TARGET) (set! GC/daemon nil) (return))
+            (let [^:mutable d (GC/maxObjectInspectionAge)]
+              (when (>= d l) (System/gc) (set! d 0))
+              (try (.wait lock (unchecked-subtract l d)) (catch InterruptedException x)))))))
+
+    (method ^:public ^:static create ^void []
+      (let [t (InnocuousThread/newSystemThread "RMI GC Daemon" (Daemon.))]
+        (java-assert (nil? (.getContextClassLoader t)))
+        (.setDaemon t true)
+        (.setPriority t (unchecked-add-int Thread/MIN_PRIORITY 1))
+        (.start t)
+        (set! GC/daemon t))))
+
+  (method ^:private ^:static setLatencyTarget ^void [^long ms]
+    (set! latencyTarget ms)
+    (if (nil? daemon) (Daemon/create) (.notify lock)))
+
+  (defclass ^:public ^:static LatencyRequest
+    :implements [(Comparable LatencyRequest)]
+
+    (field ^:private ^:static ^long counter 0)
+
+    (field ^:private ^:static ^{:tag (SortedSet LatencyRequest)} requests nil)
+
+    (method ^:private ^:static adjustLatencyIfNeeded ^void []
+      (if (or (nil? requests) (.isEmpty requests))
+          (when-not (== latencyTarget NO_TARGET) (GC/setLatencyTarget NO_TARGET))
+          (let [r (cast LatencyRequest (.first requests))]
+            (when-not (== (.-latency r) latencyTarget) (GC/setLatencyTarget (.-latency r))))))
+
+    (field ^:private ^long latency)
+
+    (field ^:private ^long id)
+
+    (constructor ^:private [this ^long ms]
+      (when (<= ms 0) (throw (IllegalArgumentException. (java-str "Non-positive latency: " ms))))
+      (set! (.-latency this) ms)
+      (locking lock
+        (set! (.-id this) (set! counter (unchecked-inc counter)))
+        (when (nil? requests) (set! requests (TreeSet.)))
+        (.add requests this)
+        (LatencyRequest/adjustLatencyIfNeeded)))
+
+    (method ^:public cancel ^void [this]
+      (locking lock
+        (when (== (.-latency this) NO_TARGET)
+          (throw (IllegalStateException. "Request already cancelled")))
+        (when-not (.remove requests this)
+          (throw (InternalError. (java-str "Latency request " this " not found"))))
+        (when (.isEmpty requests) (set! requests nil))
+        (set! (.-latency this) NO_TARGET)
+        (LatencyRequest/adjustLatencyIfNeeded)))
+
+    (method ^:public compareTo ^int [this ^LatencyRequest r]
+      (let [^:mutable d (unchecked-subtract (.-latency this) (.-latency r))]
+        (when (== d 0) (set! d (unchecked-subtract (.-id this) (.-id r))))
+        (cond (< d 0) -1 (> d 0) 1 :else 0)))
+
+    (method ^:public toString ^String [this]
+      (java-str (.getName LatencyRequest) "[" latency "," id "]")))
+
+  (method ^:public ^:static requestLatency ^LatencyRequest [^long latency]
+    (LatencyRequest. latency))
+
+  (method ^:public ^:static currentLatencyTarget ^long []
+    (let [t latencyTarget] (if (== t NO_TARGET) 0 t))))

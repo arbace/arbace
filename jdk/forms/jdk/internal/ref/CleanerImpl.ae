@@ -1,0 +1,141 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/ref/CleanerImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.ref)
+
+(import '(java.lang.ref Cleaner Cleaner$Cleanable ReferenceQueue)
+        '(java.util.concurrent ThreadFactory)
+        '(java.util.concurrent.atomic AtomicInteger)
+        '(java.util.function Function)
+        '(jdk.internal.misc InnocuousThread))
+
+(defclass ^:public ^:final CleanerImpl
+  :implements [Runnable]
+
+  (field ^:private ^:static ^{:tag (Function Cleaner CleanerImpl)} cleanerImplAccess nil)
+
+  (field ^:final ^CleanableList activeList)
+
+  (field ^:final ^{:tag (ReferenceQueue Object)} queue)
+
+  (method ^:public ^:static setCleanerImplAccess ^void [^{:tag (Function Cleaner CleanerImpl)} access]
+    (if (nil? cleanerImplAccess)
+        (set! cleanerImplAccess access)
+        (throw (InternalError. "cleanerImplAccess"))))
+
+  (method ^:static getCleanerImpl ^CleanerImpl [^Cleaner cleaner]
+    (cast CleanerImpl (.apply cleanerImplAccess cleaner)))
+
+  (constructor ^:public [this]
+    (set! queue (ReferenceQueue.))
+    (set! activeList (CleanableList.)))
+
+  (method ^:public start ^void [this ^Cleaner cleaner ^:mutable ^ThreadFactory threadFactory]
+    (when-not (identical? (CleanerImpl/getCleanerImpl cleaner) this)
+      (throw (AssertionError. "wrong cleaner")))
+    (CleanerCleanable. cleaner)
+    (when (nil? threadFactory) (set! threadFactory (InnocuousThreadFactory/factory)))
+    (let [thread (.newThread threadFactory this)] (.setDaemon thread true) (.start thread)))
+
+  (method ^:public run ^void [this]
+    (let [t (Thread/currentThread)
+          ^InnocuousThread mlThread (when (instance? InnocuousThread t) (cast InnocuousThread t))]
+      (while (not (.isEmpty activeList))
+        (when (some? mlThread) (.eraseThreadLocals mlThread))
+        (try
+          (let [ref (cast Cleaner$Cleanable (.remove queue (unchecked-multiply 60 1000)))]
+            (when (some? ref) (.clean ref)))
+          (catch Throwable e)))))
+
+  (defclass ^:public ^:static ^:final PhantomCleanableRef
+    :extends (PhantomCleanable Object)
+
+    (field ^:private ^:final ^Runnable action)
+
+    (constructor ^:public [this obj ^Cleaner cleaner ^Runnable action]
+      (super. obj cleaner)
+      (set! (.-action this) action))
+
+    (method ^:protected performCleanup ^void [this] (.run action))
+
+    (method ^:public get [this]
+      (throw (UnsupportedOperationException. "get")))
+
+    (method ^:public clear ^void [this]
+      (throw (UnsupportedOperationException. "clear"))))
+
+  (defclass ^:static ^:final InnocuousThreadFactory
+    :implements [ThreadFactory]
+
+    (field ^:static ^:final ^ThreadFactory factory (InnocuousThreadFactory.))
+
+    (method ^:static factory ^ThreadFactory [] factory)
+
+    (field ^:final ^AtomicInteger cleanerThreadNumber (AtomicInteger.))
+
+    (method ^:public newThread ^Thread [this ^Runnable r]
+      (InnocuousThread/newThread (java-str "Cleaner-" (.getAndIncrement cleanerThreadNumber))
+                                 r
+                                 (unchecked-subtract-int Thread/MAX_PRIORITY 2))))
+
+  (defclass ^:static ^:final CleanerCleanable
+    :extends (PhantomCleanable Cleaner)
+
+    (constructor [this ^Cleaner cleaner] (super. cleaner cleaner))
+
+    (method ^:protected performCleanup ^void [this]))
+
+  (defclass ^:static ^:final CleanableList
+    (field ^:static ^:final ^int NODE_CAPACITY 4096)
+
+    (field ^:private ^Node head)
+
+    (field ^:private ^Node cache)
+
+    (constructor ^:public [this] (.reset this))
+
+    (method ^:synchronized reset ^void [this] (set! (.-head this) (Node.)))
+
+    (method ^:public ^:synchronized isEmpty ^boolean [this]
+      (== (.-size head) 0))
+
+    (method ^:public ^:synchronized insert ^void [this ^{:tag (PhantomCleanable ?)} phc]
+      (when (== (.-size head) NODE_CAPACITY)
+        (let [^:mutable ^Node newHead nil]
+          (if (some? cache) (do (set! newHead cache) (set! cache nil)) (set! newHead (Node.)))
+          (set! (.-next newHead) head)
+          (set! head newHead)))
+      (java-assert (< (.-size head) NODE_CAPACITY))
+      (let [lastIndex (.-size head)]
+        (set! (.-node phc) head)
+        (set! (.-index phc) lastIndex)
+        (aset (.-arr head) lastIndex phc)
+        (set! (.-size head) (unchecked-inc-int (.-size head)))))
+
+    (method ^:public ^:synchronized remove ^boolean [this ^{:tag (PhantomCleanable ?)} phc]
+      (if (nil? (.-node phc))
+          false
+          (do
+            (java-assert (identical? (aget (.-arr (.-node phc)) (.-index phc)) phc))
+            (let [lastIndex (unchecked-subtract-int (.-size head) 1)]
+              (java-assert (>= lastIndex 0))
+              (when (or (not (identical? head (.-node phc))) (not (== (.-index phc) lastIndex)))
+                (let [^{:tag (PhantomCleanable ?)} mover (aget (.-arr head) lastIndex)]
+                  (set! (.-node mover) (.-node phc))
+                  (set! (.-index mover) (.-index phc))
+                  (aset (.-arr (.-node phc)) (.-index phc) mover)))
+              (set! (.-node phc) nil)
+              (aset (.-arr head) lastIndex nil)
+              (set! (.-size head) (unchecked-dec-int (.-size head)))
+              (when (and (== (.-size head) 0) (some? (.-next head)))
+                (let [newHead (.-next head)]
+                  (when (nil? cache) (set! cache head) (set! (.-next cache) nil))
+                  (set! head newHead)))
+              true))))
+
+    (defclass ^:static Node
+      (field ^:final ^{:tag (array (PhantomCleanable ?))} arr
+        (new PhantomCleanable/1 NODE_CAPACITY))
+
+      (field ^int size)
+
+      (field ^Node next))))

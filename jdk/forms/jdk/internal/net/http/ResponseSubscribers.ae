@@ -1,0 +1,673 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/ResponseSubscribers.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io BufferedReader IOException InputStream InputStreamReader)
+        '(java.net.http HttpResponse$BodySubscriber)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels FileChannel)
+        '(java.nio.charset Charset StandardCharsets)
+        '(java.nio.file OpenOption Path)
+        '(java.util ArrayList Iterator List Objects Optional)
+        '(java.util.concurrent ArrayBlockingQueue
+                               BlockingQueue
+                               CompletableFuture
+                               CompletionStage
+                               Executor
+                               Flow$Publisher
+                               Flow$Subscriber
+                               Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicBoolean AtomicReference)
+        '(java.util.function BiConsumer Consumer Function IntFunction Supplier)
+        '(jdk.internal.net.http.common Log Logger MinimalFuture Utils))
+
+(defclass ^:public ResponseSubscribers
+  (defclass ^:public ^:interface TrustedSubscriber
+    :extends [(HttpResponse$BodySubscriber T)]
+    :type-params [T]
+
+    (method ^:default needsExecutor ^boolean [this] false)
+
+    (method ^:static needsExecutor ^boolean [^{:tag (HttpResponse$BodySubscriber ?)} bs]
+      (if (instance? TrustedSubscriber bs) (.needsExecutor (cast TrustedSubscriber bs)) true)))
+
+  (defclass ^:public ^:static ConsumerSubscriber
+    :implements [(TrustedSubscriber Void)]
+
+    (field ^:private ^:final ^{:tag (Consumer (Optional byte/1))} consumer)
+
+    (field ^:private ^Flow$Subscription subscription)
+
+    (field ^:private ^:final ^{:tag (CompletableFuture Void)} result (MinimalFuture.))
+
+    (field ^:private ^:final ^AtomicBoolean subscribed (AtomicBoolean.))
+
+    (constructor ^:public [this ^{:tag (Consumer (Optional byte/1))} consumer]
+      (set! (.-consumer this) (cast Consumer (Objects/requireNonNull consumer))))
+
+    (method ^:public getBody ^{:tag (CompletionStage Void)} [this] result)
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (Objects/requireNonNull subscription)
+      (if (not (.compareAndSet subscribed false true))
+          (.cancel subscription)
+          (do (set! (.-subscription this) subscription) (.request subscription 1))))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} items]
+      (Objects/requireNonNull items)
+      (for-each [^ByteBuffer item items]
+        (let [buf (new byte/1 (.remaining item))]
+          (.get item buf)
+          (.accept consumer (Optional/of buf))))
+      (.request subscription 1))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (Objects/requireNonNull throwable)
+      (.completeExceptionally result throwable))
+
+    (method ^:public onComplete ^void [this]
+      (.accept consumer (Optional/empty))
+      (.complete result nil)))
+
+  (defclass ^:public ^:static PathSubscriber
+    :implements [(TrustedSubscriber Path)]
+
+    (field ^:private ^:final ^Path file)
+
+    (field ^:private ^:final ^OpenOption/1 options)
+
+    (field ^:private ^:final ^{:tag (CompletableFuture Path)} result (MinimalFuture.))
+
+    (field ^:private ^:final ^AtomicBoolean subscribed (AtomicBoolean.))
+
+    (field ^:private ^:volatile ^Flow$Subscription subscription)
+
+    (field ^:private ^:volatile ^FileChannel out)
+
+    (method ^:public ^:static create ^PathSubscriber [^Path file ^{:tag (List OpenOption)} options]
+      (PathSubscriber. file options))
+
+    (constructor [this ^Path file ^{:tag (List OpenOption)} options]
+      (set! (.-file this) file)
+      (set! (.-options this)
+            (cast OpenOption/1
+                  (.toArray (.stream options)
+                            (lambda IntFunction ^OpenOption/1 ^:method-ref [^int n-1]
+                              (new OpenOption/1 n-1))))))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (Objects/requireNonNull subscription)
+      (if (not (.compareAndSet subscribed false true))
+          (.cancel subscription)
+          (do
+            (set! (.-subscription this) subscription)
+            (try
+              (set! out (FileChannel/open file options))
+              (catch IOException ioe
+                (.completeExceptionally result ioe)
+                (.cancel subscription)
+                (return)))
+            (.request subscription 1))))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} items]
+      (try
+        (let [buffers (cast ByteBuffer/1 (.toArray items Utils/EMPTY_BB_ARRAY))]
+          (loop [] (.write out buffers) (when (Utils/hasRemaining buffers) (recur))))
+        (catch IOException ex
+          (.close this)
+          (.cancel subscription)
+          (.completeExceptionally result ex)))
+      (.request subscription 1))
+
+    (method ^:public onError ^void [this ^Throwable e]
+      (.completeExceptionally result e)
+      (.close this))
+
+    (method ^:public onComplete ^void [this]
+      (.close this)
+      (.complete result file))
+
+    (method ^:public getBody ^{:tag (CompletionStage Path)} [this] result)
+
+    (method ^:private close ^void [this] (Utils/close out)))
+
+  (defclass ^:public ^:static ByteArraySubscriber
+    :implements [(TrustedSubscriber T)]
+    :type-params [T]
+
+    (field ^:private ^:final ^{:tag (Function byte/1 T)} finisher)
+
+    (field ^:private ^:final ^{:tag (CompletableFuture T)} result (MinimalFuture.))
+
+    (field ^:private ^:final ^{:tag (List ByteBuffer)} received (ArrayList.))
+
+    (field ^:private ^:volatile ^Flow$Subscription subscription)
+
+    (constructor ^:public [this ^{:tag (Function byte/1 T)} finisher]
+      (set! (.-finisher this) finisher))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (if (some? (.-subscription this))
+          (.cancel subscription)
+          (do (set! (.-subscription this) subscription) (.request subscription Long/MAX_VALUE))))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} items]
+      (Objects/requireNonNull items)
+      (java-assert (Utils/hasRemaining items))
+      (.addAll received items))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (.clear received)
+      (.completeExceptionally result throwable))
+
+    (method ^:private ^:static join ^byte/1 [^{:tag (List ByteBuffer)} bytes]
+      (let [size (Utils/remaining bytes Integer/MAX_VALUE)
+            res (new byte/1 size)
+            ^:mutable ^int from 0]
+        (for-each [^ByteBuffer b bytes]
+          (let [l (.remaining b)] (.get b res from l) (set! from (unchecked-add-int from l))))
+        res))
+
+    (method ^:public onComplete ^void [this]
+      (try
+        (.complete result (.apply finisher (ByteArraySubscriber/join received)))
+        (.clear received)
+        (catch IllegalArgumentException e (.completeExceptionally result e))))
+
+    (method ^:public getBody ^{:tag (CompletionStage T)} [this] result))
+
+  (defclass ^:public ^:static HttpResponseInputStream
+    :extends InputStream
+    :implements [(TrustedSubscriber InputStream)]
+
+    (field ^:static ^:final ^int MAX_BUFFERS_IN_QUEUE 1)
+
+    (field ^:private ^:static ^:final ^ByteBuffer LAST_BUFFER (ByteBuffer/wrap (new byte/1 0)))
+
+    (field ^:private ^:static ^:final ^{:tag (List ByteBuffer)} LAST_LIST (List/of LAST_BUFFER))
+
+    (field ^:private ^:static ^:final ^Logger debug
+      (Utils/getDebugLogger
+        (method-ref Supplier ^String [] "HttpResponseInputStream" String/.toString)
+        Utils/DEBUG))
+
+    (field ^:private ^:final ^{:tag (BlockingQueue (List ByteBuffer))} buffers)
+
+    (field ^:private ^:volatile ^Flow$Subscription subscription)
+
+    (field ^:private ^:volatile ^boolean closed)
+
+    (field ^:private ^:volatile ^Throwable failed)
+
+    (field ^:private ^:volatile ^{:tag (Iterator ByteBuffer)} currentListItr)
+
+    (field ^:private ^:volatile ^ByteBuffer currentBuffer)
+
+    (field ^:private ^:final ^AtomicBoolean subscribed (AtomicBoolean.))
+
+    (constructor ^:public [this] (this. MAX_BUFFERS_IN_QUEUE))
+
+    (constructor [this ^int maxBuffers]
+      (let [^int capacity (if (<= maxBuffers 0) MAX_BUFFERS_IN_QUEUE maxBuffers)]
+        (set! (.-buffers this) (ArrayBlockingQueue. (unchecked-add-int capacity 1)))))
+
+    (method ^:public getBody ^{:tag (CompletionStage InputStream)} [this]
+      (CompletableFuture/completedStage this))
+
+    (method ^:private current :throws [IOException] ^ByteBuffer [this]
+      (while (or (nil? currentBuffer) (not (.hasRemaining currentBuffer)))
+        (when (or closed (some? failed)) (throw (IOException. "closed" failed)))
+        (when (identical? currentBuffer LAST_BUFFER) (break))
+        (try
+          (when (or (nil? currentListItr) (not (.hasNext currentListItr)))
+            (when (.on debug) (.log debug "Taking list of Buffers"))
+            (let [^{:tag (List ByteBuffer)} lb (cast List (.take buffers))]
+              (set! currentListItr (.iterator lb))
+              (when (.on debug) (.log debug "List of Buffers Taken"))
+              (when (or closed (some? failed)) (throw (IOException. "closed" failed)))
+              (when (identical? lb LAST_LIST)
+                (set! currentListItr nil)
+                (set! currentBuffer LAST_BUFFER)
+                (break))
+              (let [s subscription]
+                (when (some? s)
+                  (when (.on debug) (.log debug "Increased demand by 1"))
+                  (.request s 1))
+                (java-assert (some? currentListItr))
+                (when (.isEmpty lb) (continue)))))
+          (java-assert (some? currentListItr))
+          (java-assert (.hasNext currentListItr))
+          (when (.on debug) (.log debug "Next Buffer"))
+          (set! currentBuffer (cast ByteBuffer (.next currentListItr)))
+          (catch InterruptedException ex
+            (try (.close this) (catch IOException ignored))
+            (.interrupt (Thread/currentThread))
+            (throw (IOException. ex)))))
+      (java-assert (or (identical? currentBuffer LAST_BUFFER) (.hasRemaining currentBuffer)))
+      currentBuffer)
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 bytes ^int off ^int len]
+      (Objects/checkFromIndexSize off len (alength bytes))
+      (if (== len 0)
+          0
+          (let [^:mutable ^ByteBuffer buffer nil]
+            (if (identical? (set! buffer (.current this)) LAST_BUFFER)
+                -1
+                (let [read (Math/min (.remaining buffer) len)]
+                  (java-assert (and (> read 0) (<= read (.remaining buffer))))
+                  (.get buffer bytes off read)
+                  read)))))
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (let [^:mutable ^ByteBuffer buffer nil]
+        (if (identical? (set! buffer (.current this)) LAST_BUFFER)
+            -1
+            (bit-and-int (.get buffer) 0xFF))))
+
+    (method ^:public available :throws [IOException] ^int [this]
+      (if closed
+          0
+          (let [^:mutable ^int available 0
+                current currentBuffer]
+            (if (identical? current LAST_BUFFER)
+                0
+                (do
+                  (when (some? current) (set! available (.remaining current)))
+                  (if (not (== available 0))
+                      available
+                      (let [^{:tag (Iterator ?)} iterator currentListItr]
+                        (cond
+                          (and (some? iterator) (.hasNext iterator)) 1
+                          (and (not (.isEmpty buffers))
+                               (not (identical? (.peek buffers) LAST_LIST)))
+                            1
+                          :else available))))))))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription s]
+      (Objects/requireNonNull s)
+      (when (.on debug) (.log debug "onSubscribe called"))
+      (try
+        (if (not (.compareAndSet subscribed false true))
+            (do (when (.on debug) (.log debug "Already subscribed: canceling")) (.cancel s))
+            (let [^:mutable ^boolean closed false]
+              (locking this
+                (set! closed (.-closed this))
+                (when-not closed
+                  (set! (.-subscription this) s)
+                  (java-assert (or (> (.remainingCapacity buffers) 1) (some? failed))
+                    (java-str "buffers capacity: "
+                              (.remainingCapacity buffers)
+                              ", closed: "
+                              closed
+                              ", terminated: "
+                              (.contains buffers LAST_LIST)
+                              ", failed: "
+                              failed))))
+              (if closed
+                  (do (when (.on debug) (.log debug "Already closed: canceling")) (.cancel s))
+                  (do
+                    (when (.on debug)
+                      (.log debug
+                            (java-str "onSubscribe: requesting "
+                                      (^[int int] Math/max
+                                        1
+                                        (unchecked-subtract-int (.remainingCapacity buffers) 1)))))
+                    (.request s
+                              (^[int int] Math/max
+                                1
+                                (unchecked-subtract-int (.remainingCapacity buffers) 1)))))))
+        (catch Throwable t
+          (set! failed t)
+          (when (.on debug) (.log debug "onSubscribe failed" t))
+          (try (.close this) (catch IOException x) (finally (.onError this t))))))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} t]
+      (Objects/requireNonNull t)
+      (try
+        (when (.on debug) (.log debug "next item received"))
+        (when-not (.offer buffers t) (throw (IllegalStateException. "queue is full")))
+        (when (.on debug) (.log debug "item offered"))
+        (catch Throwable ex
+          (set! failed ex)
+          (try (.close this) (catch IOException ex1) (finally (.onError this ex))))))
+
+    (method ^:public onError ^void [this ^Throwable thrwbl]
+      (when (.on debug) (.log debug "onError called" thrwbl))
+      (set! subscription nil)
+      (set! failed (cast Throwable (Objects/requireNonNull thrwbl)))
+      (.offer buffers LAST_LIST))
+
+    (method ^:public onComplete ^void [this]
+      (when (.on debug) (.log debug "onComplete called"))
+      (set! subscription nil)
+      (.onNext this LAST_LIST))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (let [^:mutable ^Flow$Subscription s nil]
+        (locking this
+          (when closed (return))
+          (set! closed true)
+          (set! s subscription)
+          (set! subscription nil))
+        (when (.on debug) (.log debug "close called"))
+        (try (when (some? s) (.cancel s)) (finally (.offer buffers LAST_LIST) (.close super))))))
+
+  (method ^:public ^:static createLineStream ^{:tag (HttpResponse$BodySubscriber (java.util.stream.Stream String))} []
+    (ResponseSubscribers/createLineStream StandardCharsets/UTF_8))
+
+  (method ^:public ^:static createLineStream ^{:tag (HttpResponse$BodySubscriber (java.util.stream.Stream String))} [^Charset charset]
+    (Objects/requireNonNull charset)
+    (let [^{:tag (HttpResponse$BodySubscriber InputStream)} s (HttpResponseInputStream.)]
+      (MappingSubscriber. s
+                          (lambda Function ^java.util.stream.Stream [^InputStream stream]
+                            (cast java.util.stream.Stream
+                                  (.onClose (.lines
+                                              (BufferedReader. (InputStreamReader. stream charset)))
+                                            (lambda Runnable ^void [] (Utils/close stream)))))
+                          true)))
+
+  (defclass ^:public ^:static NullSubscriber
+    :implements [(TrustedSubscriber T)]
+    :type-params [T]
+
+    (field ^:private ^:final ^{:tag (CompletableFuture T)} cf (MinimalFuture.))
+
+    (field ^:private ^:final ^{:tag (Optional T)} result)
+
+    (field ^:private ^:final ^AtomicBoolean subscribed (AtomicBoolean.))
+
+    (constructor ^:public [this ^{:tag (Optional T)} result]
+      (set! (.-result this) result))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (Objects/requireNonNull subscription)
+      (if (not (.compareAndSet subscribed false true))
+          (.cancel subscription)
+          (.request subscription Long/MAX_VALUE)))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} items]
+      (Objects/requireNonNull items))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (Objects/requireNonNull throwable)
+      (.completeExceptionally cf throwable))
+
+    (method ^:public onComplete ^void [this]
+      (if (.isPresent result) (.complete cf (.get result)) (.complete cf nil)))
+
+    (method ^:public getBody ^{:tag (CompletionStage T)} [this] cf))
+
+  (defclass ^:public ^:static ^:final SubscriberAdapter
+    :implements [(TrustedSubscriber R)]
+    :type-params [(S extends (Flow$Subscriber (? super (List ByteBuffer)))) R]
+
+    (field ^:private ^:final ^{:tag (CompletableFuture R)} cf (MinimalFuture.))
+
+    (field ^:private ^:final ^S subscriber)
+
+    (field ^:private ^:final ^{:tag (Function (? super S) (? extends R))} finisher)
+
+    (field ^:private ^:volatile ^Flow$Subscription subscription)
+
+    (constructor ^:public [this ^S subscriber ^{:tag (Function (? super S) (? extends R))} finisher]
+      (set! (.-subscriber this) (cast Flow$Subscriber (Objects/requireNonNull subscriber)))
+      (set! (.-finisher this) (cast Function (Objects/requireNonNull finisher))))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (Objects/requireNonNull subscription)
+      (if (some? (.-subscription this))
+          (.cancel subscription)
+          (do (set! (.-subscription this) subscription) (.onSubscribe subscriber subscription))))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (Objects/requireNonNull item)
+      (try
+        (.onNext subscriber item)
+        (catch Throwable throwable (.cancel subscription) (.onError this throwable))))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (Objects/requireNonNull throwable)
+      (try (.onError subscriber throwable) (finally (.completeExceptionally cf throwable))))
+
+    (method ^:public onComplete ^void [this]
+      (try
+        (.onComplete subscriber)
+        (finally
+          (try
+            (.completeAsync cf (lambda Supplier [] (.apply finisher subscriber)))
+            (catch Throwable throwable (.completeExceptionally cf throwable))))))
+
+    (method ^:public getBody ^{:tag (CompletionStage R)} [this] cf))
+
+  (defclass ^:public ^:static MappingSubscriber
+    :implements [(TrustedSubscriber U)]
+    :type-params [T U]
+
+    (field ^:private ^:final ^{:tag (HttpResponse$BodySubscriber T)} upstream)
+
+    (field ^:private ^:final ^{:tag (Function (? super T) (? extends U))} mapper)
+
+    (field ^:private ^:final ^boolean trusted)
+
+    (constructor ^:public [this ^{:tag (HttpResponse$BodySubscriber T)} upstream
+                           ^{:tag (Function (? super T) (? extends U))} mapper]
+      (this. upstream mapper false))
+
+    (constructor [this ^{:tag (HttpResponse$BodySubscriber T)} upstream
+                  ^{:tag (Function (? super T) (? extends U))} mapper ^boolean trusted]
+      (set! (.-upstream this) (cast HttpResponse$BodySubscriber (Objects/requireNonNull upstream)))
+      (set! (.-mapper this) (cast Function (Objects/requireNonNull mapper)))
+      (set! (.-trusted this) trusted))
+
+    (method ^:public needsExecutor ^boolean [this]
+      (or (not trusted) (TrustedSubscriber/needsExecutor upstream)))
+
+    (method ^:public getBody ^{:tag (CompletionStage U)} [this]
+      (.thenApply (.getBody upstream) mapper))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (.onSubscribe upstream subscription))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (.onNext upstream item))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (.onError upstream throwable))
+
+    (method ^:public onComplete ^void [this] (.onComplete upstream)))
+
+  (defclass ^:static PublishingBodySubscriber
+    :implements [(TrustedSubscriber (Flow$Publisher (List ByteBuffer)))]
+
+    (field ^:private ^:final ^{:tag (MinimalFuture Flow$Subscription)} subscriptionCF
+      (MinimalFuture.))
+
+    (field ^:private ^:final ^{:tag (MinimalFuture SubscriberRef)} subscribedCF (MinimalFuture.))
+
+    (field ^:private ^{:tag (AtomicReference SubscriberRef)} subscriberRef (AtomicReference.))
+
+    (field ^:private ^:final ^{:tag (CompletionStage (Flow$Publisher (List ByteBuffer)))} body
+      (.thenCompose subscriptionCF
+                    (lambda Function ^CompletionStage [^Flow$Subscription s]
+                      (MinimalFuture/completedFuture
+                        (method-ref Flow$Publisher this PublishingBodySubscriber/.subscribe)))))
+
+    (field ^:private ^:final ^{:tag (MinimalFuture Void)} completionCF)
+
+    (constructor ^:private [this]
+      (set! completionCF (MinimalFuture.))
+      (.whenComplete
+        completionCF
+        (lambda BiConsumer ^void [^Void r ^Throwable t]
+          (.thenAccept subscribedCF (lambda Consumer ^void [^SubscriberRef s] (.complete this s t))))))
+
+    (defclass ^:static ^:final SubscriberRef
+      (field ^:volatile ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} ref)
+
+      (constructor [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber]
+        (set! ref subscriber))
+
+      (method get ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} [this]
+        ref)
+
+      (method clear ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} [this]
+        (let [^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} res ref] (set! ref nil) res)))
+
+    (defclass ^:static ^:final SubscriptionRef
+      :implements [Flow$Subscription]
+
+      (field ^:final ^Flow$Subscription subscription)
+
+      (field ^:final ^SubscriberRef subscriberRef)
+
+      (constructor [this ^Flow$Subscription subscription ^SubscriberRef subscriberRef]
+        (set! (.-subscription this) subscription)
+        (set! (.-subscriberRef this) subscriberRef))
+
+      (method ^:public request ^void [this ^long n]
+        (when (some? (.get subscriberRef)) (.request subscription n)))
+
+      (method ^:public cancel ^void [this]
+        (.cancel subscription)
+        (.clear subscriberRef))
+
+      (method subscribe ^void [this]
+        (let [^{:tag (Flow$Subscriber ?)} subscriber (.get subscriberRef)]
+          (when (some? subscriber) (.onSubscribe subscriber this))))
+
+      (method ^:public toString ^String [this]
+        (java-str "SubscriptionRef/"
+                  (.getName (.getClass subscription))
+                  "@"
+                  (System/identityHashCode subscription))))
+
+    (method ^:private complete ^void [this ^SubscriberRef ref ^Throwable t]
+      (java-assert (some? ref))
+      (let [^{:tag (Flow$Subscriber ?)} s (.clear ref)]
+        (when (some? s)
+          (if (nil? t) (try (.onComplete s) (catch Throwable x (.onError s x))) (.onError s t)))))
+
+    (method ^:private signalError ^void [this ^:mutable ^Throwable err]
+      (when (nil? err) (set! err (NullPointerException. "null throwable")))
+      (.completeExceptionally completionCF err))
+
+    (method ^:private signalComplete ^void [this]
+      (.complete completionCF nil))
+
+    (method ^:private subscribe ^void [this
+                                       ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber]
+      (Objects/requireNonNull subscriber "subscriber must not be null")
+      (let [ref (SubscriberRef. subscriber)]
+        (if (.compareAndSet subscriberRef nil ref)
+            (.thenAccept subscriptionCF
+                         (lambda Consumer ^void [^Flow$Subscription s]
+                           (let [subscription (SubscriptionRef. s ref)]
+                             (try
+                               (.subscribe subscription)
+                               (.complete subscribedCF ref)
+                               (catch Throwable t
+                                 (when (Log/errors)
+                                   (Log/logError
+                                     (java-str
+                                       "Failed to call onSubscribe: cancelling subscription: "
+                                       t)
+                                     (new Object/1 []))
+                                   (Log/logError t))
+                                 (.cancel subscription))))))
+            (do
+              (.onSubscribe subscriber
+                            (anon Flow$Subscription []
+                              (method ^:public request ^void [this ^long n])
+
+                              (method ^:public cancel ^void [this])))
+              (.onError subscriber
+                        (IllegalStateException. "This publisher has already one subscriber"))))))
+
+    (field ^:private ^:final ^AtomicBoolean subscribed (AtomicBoolean.))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (Objects/requireNonNull subscription)
+      (if (not (.compareAndSet subscribed false true))
+          (.cancel subscription)
+          (.complete subscriptionCF subscription)))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (Objects/requireNonNull item)
+      (try
+        (java-assert (.isDone subscriptionCF))
+        (let [ref (cast SubscriberRef (.get subscriberRef))]
+          (java-assert (some? ref))
+          (let [^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber (.get ref)]
+            (when (some? subscriber) (.onNext subscriber item))))
+        (catch Throwable err
+          (.signalError this err)
+          (.thenAccept subscriptionCF (lambda Consumer ^void [^Flow$Subscription s] (.cancel s))))))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (java-assert (.suppress this
+                              (.isDone subscriptionCF)
+                              "onError called before onSubscribe"
+                              throwable))
+      (.signalError this throwable)
+      (Objects/requireNonNull throwable))
+
+    (method ^:public onComplete ^void [this]
+      (if (not (.isDone subscriptionCF))
+          (.signalError this (InternalError. "onComplete called before onSubscribed"))
+          (.signalComplete this)))
+
+    (method ^:public getBody ^{:tag (CompletionStage (Flow$Publisher (List ByteBuffer)))} [this]
+      body)
+
+    (method ^:private suppress ^boolean [this ^boolean condition ^String assertion
+                                         ^Throwable carrier]
+      (when-not condition
+        (cond
+          (some? carrier) (.addSuppressed carrier (AssertionError. assertion))
+          (Log/errors) (Log/logError (AssertionError. assertion))))
+      true))
+
+  (method ^:public ^:static createPublisher ^{:tag (HttpResponse$BodySubscriber (Flow$Publisher (List ByteBuffer)))} []
+    (PublishingBodySubscriber.))
+
+  (method ^:public ^:static getBodyAsync :type-params [T] ^{:tag (CompletionStage T)} [^Executor e
+                                                                                       ^{:tag (HttpResponse$BodySubscriber T)} bs]
+    (if (TrustedSubscriber/needsExecutor bs)
+        (ResponseSubscribers/getBodyAsync e bs (MinimalFuture.))
+        (.getBody bs)))
+
+  (method ^:public ^:static getBodyAsync :type-params [T] ^{:tag (CompletableFuture T)} [^Executor e
+                                                                                         ^{:tag (HttpResponse$BodySubscriber T)} bs
+                                                                                         ^{:tag (CompletableFuture T)} cf]
+    (ResponseSubscribers/getBodyAsync e
+                                      bs
+                                      cf
+                                      (method-ref
+                                        Consumer
+                                        [Throwable]
+                                        cf
+                                        CompletableFuture/.completeExceptionally)))
+
+  (method ^:public ^:static getBodyAsync :type-params [T] ^{:tag (CompletableFuture T)} [^:mutable ^Executor e
+                                                                                         ^{:tag (HttpResponse$BodySubscriber T)} bs
+                                                                                         ^{:tag (CompletableFuture T)} cf
+                                                                                         ^{:tag (Consumer Throwable)} errorHandler]
+    (java-assert (some? errorHandler))
+    (try
+      (java-assert (some? e))
+      (java-assert (some? cf))
+      (when (TrustedSubscriber/needsExecutor bs)
+        (set! e
+              (if-instance [^HttpClientImpl$DelegatingExecutor exec e]
+                (method-ref Executor exec HttpClientImpl$DelegatingExecutor/.ensureExecutedAsync)
+                e)))
+      (.execute e
+                (lambda Runnable ^void []
+                  (try
+                    (.whenComplete (.getBody bs)
+                                   (lambda BiConsumer ^void [r ^Throwable t]
+                                     (if (some? t) (.completeExceptionally cf t) (.complete cf r))))
+                    (catch Throwable t (.accept errorHandler t)))))
+      (return cf)
+      (catch Throwable t (.accept errorHandler t)))
+    cf))

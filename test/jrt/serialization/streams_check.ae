@@ -1,0 +1,53 @@
+;; JCS167 slices 2-3's night check (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 slices 2-3
+;; (write-ahead)"): jrt's hand-written serializable classes written by the world's ObjectOutputStream (jdk26u's,
+;; translated) to the bytes jdk26u's JDK writes (jdk-streams.txt, SerialRecord.java's cases), and the JDK's bytes
+;; read back by ObjectInputStream to an object that shows the same. On an executable whose world has the streams:
+;;   EXE -e '(load-file "test/jrt/serialization/streams_check.ae")'
+;; prints a line per case and "streams-check: N of M", exit 1 on a mismatch.
+(import '(java.io ByteArrayOutputStream ObjectOutputStream ObjectInputStream ByteArrayInputStream)
+        '(java.util Date) '(java.util.concurrent.atomic AtomicInteger AtomicLong AtomicBoolean AtomicReference))
+(defn hex [^bytes b] (apply str (map #(format "%02x" (bit-and (long %) 0xff)) b)))
+(defn unhex [^String s] (byte-array (map #(unchecked-byte (Integer/parseInt (subs s % (+ % 2)) 16)) (range 0 (count s) 2))))
+(defn write [x] (let [b (ByteArrayOutputStream.)] (with-open [o (ObjectOutputStream. b)] (.writeObject o x)) (hex (.toByteArray b))))
+(defn read [s] (.readObject (ObjectInputStream. (ByteArrayInputStream. (unhex s)))))
+(defn trace [& fs] (into-array StackTraceElement (for [f fs :let [[c m fl l] (arbace.string/split f #" ")]]
+                                                    (StackTraceElement. c m (when (not= fl "-") fl) (Integer/parseInt l)))))
+(defn show [x]
+  (cond
+    (instance? Throwable x) (str x " trace=" (vec (map str (.getStackTrace ^Throwable x))) " cause=" (some-> (.getCause ^Throwable x) show)
+                                 " suppressed=" (vec (map show (.getSuppressed ^Throwable x))))
+    (instance? StringBuilder x) (str x " cap=" (.capacity ^StringBuilder x))
+    (instance? StringBuffer x) (str x " cap=" (.capacity ^StringBuffer x))
+    (instance? Date x) (str (.getTime ^Date x))
+    (instance? AtomicReference x) (str "ref " (.get ^AtomicReference x))
+    (instance? StackTraceElement x) (str x " hash=" (.hashCode x))
+    :else (str x)))
+(def cases
+  (let [t1 (doto (Throwable. "boom") (.setStackTrace (trace "a.B m B.java 7" "a.C n - -1")))
+        inner (doto (Throwable. "inner") (.setStackTrace (trace "a.D p D.java 3")))
+        t2 (doto (Throwable. "outer" inner) (.setStackTrace (trace "a.B m B.java 8")))
+        sup (doto (Throwable. ^String (identity nil)) (.setStackTrace (trace)))
+        k (doto (.getDeclaredConstructor Throwable (into-array Class [String Throwable Boolean/TYPE Boolean/TYPE])) (.setAccessible true))
+        sb2 (StringBuilder.)]
+    (.addSuppressed t2 sup)
+    (dotimes [i 20] (.append sb2 (char (+ 97 i))))
+    (.append sb2 €)
+    {"throwable" t1 "throwable-cause-suppressed" t2
+     "throwable-immutable" (.newInstance k (object-array ["fixed" nil false false]))
+     "throwable-null-cause" (doto (Throwable. "nc" nil) (.setStackTrace (trace)))
+     "ste" (StackTraceElement. "a.B" "m" "B.java" 12)
+     "ste-module" (StackTraceElement. "app" "m.mod" "1.0" "a.B" "m" nil -2)
+     "date" (Date. 1234567890123) "date-negative" (Date. -1)
+     "stringbuilder" (StringBuilder. "hello") "stringbuilder-grown" sb2 "stringbuffer" (StringBuffer. "abc")
+     "atomicinteger" (AtomicInteger. 42) "atomiclong" (AtomicLong. -5) "atomicboolean" (AtomicBoolean. true)
+     "atomicreference" (AtomicReference. "x") "atomicreference-null" (AtomicReference.)}))
+(def bad (atom 0))
+(def lines (arbace.string/split-lines (slurp "test/jrt/serialization/jdk-streams.txt")))
+(doseq [l lines :let [[n want] (arbace.string/split l #" ") x (cases n)
+                      got (try (write x) (catch Throwable e (str "ERR " e)))
+                      back (try (show (read want)) (catch Throwable e (str "ERR " e)))
+                      ok (and (= got want) (= back (show x)))]]
+  (when-not ok (swap! bad inc))
+  (println (if ok "ok  " "BAD ") n (if ok "" (str "\n  written " got "\n  want    " want "\n  read    " back "\n  made    " (show x)))))
+(println "streams-check:" (- (count lines) @bad) "of" (count lines))
+(when (pos? @bad) (System/exit 1))

@@ -1,0 +1,398 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/AltServicesRegistry.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.net URI)
+        '(java.util HashMap LinkedHashMap List Map Map$Entry Objects Optional)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function BiFunction Consumer Predicate Supplier)
+        '(javax.net.ssl SNIServerName)
+        '(jdk.internal.net.http.common Deadline Log Logger TimeSource Utils))
+
+(defclass ^:public ^:final AltServicesRegistry
+  (field ^:private ^:final ^long id)
+
+  (field ^:private ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this AltServicesRegistry/.dbgString)))
+
+  (field ^:private ^:final ^{:tag (Map Origin (List AltService))} altServices (HashMap.))
+
+  (field ^:private ^:final ^InvalidAltServices invalidAltServices (InvalidAltServices.))
+
+  (field ^:private ^:final ^ReentrantLock registryLock (ReentrantLock.))
+
+  (constructor ^:public [this ^long id] (set! (.-id this) id))
+
+  (method dbgString ^String [this]
+    (java-str "AltServicesRegistry(" id ")"))
+
+  (defclass ^:public ^:static ^:final AltService
+    (defclass ^:public ^:record Identity [^String alpn ^String host ^int port]
+      (constructor ^:public ^:compact [this]
+        (Objects/requireNonNull alpn)
+        (Objects/requireNonNull host)
+        (when (<= port 0) (throw (IllegalArgumentException. (java-str "Invalid port: " port)))))
+
+      (method ^:public matches ^boolean [this ^AltService service]
+        (.equals this (.identity service)))
+
+      (method ^:public toString ^String [this]
+        (java-str alpn "=\"" (Origin/toAuthority host port) "\"")))
+
+    (defclass ^:private ^:record AltServiceData [^Identity id ^Origin origin ^Deadline deadline
+                                                 ^boolean persist ^boolean advertised
+                                                 ^String authority ^boolean sameAuthorityAsOrigin]
+      (method ^:public pretty ^String [this]
+        (java-str "AltSvc: "
+                  id
+                  "; origin=\""
+                  origin
+                  "\"; deadline="
+                  deadline
+                  "; persist="
+                  persist
+                  "; advertised="
+                  advertised
+                  "; sameAuthorityAsOrigin="
+                  sameAuthorityAsOrigin
+                  \;)))
+
+    (field ^:private ^:final ^AltServiceData svc)
+
+    (constructor ^:private [this ^:final ^Identity id ^:final ^Origin origin
+                            ^:mutable ^Deadline deadline ^:final ^boolean persist
+                            ^:final ^boolean advertised]
+      (Objects/requireNonNull id)
+      (Objects/requireNonNull origin)
+      (java-assert (.isSecure origin) (java-str "origin " origin " is not secure"))
+      (set! deadline (if (nil? deadline) Deadline/MAX deadline))
+      (let [authority (Origin/toAuthority (.-host id) (.-port id))
+            originAuthority (Origin/toAuthority (.host origin) (.port origin))
+            sameAuthorityAsOrigin (.equals authority originAuthority)]
+        (set! svc
+              (AltServiceData. id
+                               origin
+                               deadline
+                               persist
+                               advertised
+                               authority
+                               sameAuthorityAsOrigin))))
+
+    (method ^:public identity ^Identity [this] (.-id svc))
+
+    (method ^:public authority ^String [this] (.-authority svc))
+
+    (method ^:public host ^String [this] (.-host (.-id svc)))
+
+    (method ^:public port ^int [this] (.-port (.-id svc)))
+
+    (method ^:public isPersist ^boolean [this] (.-persist svc))
+
+    (method ^:public wasAdvertised ^boolean [this] (.-advertised svc))
+
+    (method ^:public alpn ^String [this] (.-alpn (.-id svc)))
+
+    (method ^:public origin ^Origin [this] (.-origin svc))
+
+    (method ^:public deadline ^Deadline [this] (.-deadline svc))
+
+    (method ^:public originHasSameAuthority ^boolean [this]
+      (.-sameAuthorityAsOrigin svc))
+
+    (method ^:public equals ^boolean [this o]
+      (if (identical? this o)
+          true
+          (if-instance [^AltService service o] (.equals svc (.-svc service)) false)))
+
+    (method ^:public hashCode ^int [this] (.hashCode svc))
+
+    (method ^:public toString ^String [this] (.pretty svc))
+
+    (method ^:public ^:static create ^{:tag (Optional AltService)} [^:final ^Identity id
+                                                                    ^:final ^Origin origin
+                                                                    ^:final ^Deadline deadline
+                                                                    ^:final ^boolean persist]
+      (Objects/requireNonNull id)
+      (Objects/requireNonNull origin)
+      (if (not (.isSecure origin))
+          (Optional/empty)
+          (Optional/of (AltService. id origin deadline persist true))))
+
+    (method ^:private ^:static createUnadvertised ^{:tag (Optional AltService)} [^:final ^Logger debug
+                                                                                 ^:final ^Identity id
+                                                                                 ^:final ^Origin origin
+                                                                                 ^:final ^HttpConnection conn
+                                                                                 ^:final ^Deadline deadline
+                                                                                 ^:final ^boolean persist]
+      (Objects/requireNonNull id)
+      (Objects/requireNonNull origin)
+      (if (not (.isSecure origin))
+          (Optional/empty)
+          (let [^{:tag (List SNIServerName)} sniServerNames (AltSvcProcessor/getSNIServerNames conn)]
+            (if (or (nil? sniServerNames) (.isEmpty sniServerNames))
+                (do
+                  (when (.on debug)
+                    (.log
+                      debug
+                      "Skipping unadvertised altsvc creation of %s because connection %s didn't use SNI during connection establishment"
+                      (new Object/1 [id conn])))
+                  (Optional/empty))
+                (Optional/of (AltService. id origin deadline persist false)))))))
+
+  (defclass ^:private ^:static ^:final InvalidAltServices
+    :extends (LinkedHashMap InvalidAltSvc Void)
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 2772562283544644819)
+
+    (field ^:private ^:static ^:final ^int MAX_TRACKED_INVALID_ALT_SVCS 20)
+
+    (method ^:protected removeEldestEntry ^boolean [this
+                                                    ^:final ^{:tag (Map$Entry InvalidAltSvc Void)} eldest]
+      (> (.size this) MAX_TRACKED_INVALID_ALT_SVCS))
+
+    (method ^:private contains ^boolean [this ^:final ^InvalidAltSvc invalidAltSvc]
+      (.containsKey this invalidAltSvc))
+
+    (method ^:private addUnique ^boolean [this ^:final ^InvalidAltSvc invalidAltSvc]
+      (if (.contains this invalidAltSvc) false (do (.put this invalidAltSvc nil) true))))
+
+  (defclass ^:private ^:record InvalidAltSvc [^Origin origin
+                                              ^AltServicesRegistry$AltService$Identity id])
+
+  (method ^:private keepAltServiceFor ^boolean [this ^Origin origin ^AltService svc]
+    (if (.isMarkedInvalid this origin (.identity svc))
+        (do
+          (when (.on debug)
+            (.log
+              debug
+              (java-str "Not registering alt-service which was previously marked invalid: " svc)))
+          (when (Log/altsvc)
+            (Log/logAltSvc (java-str "AltService skipped (was previously marked invalid): " svc)))
+          false)
+        true))
+
+  (method ^:public replace ^void [this ^:final ^Origin origin
+                                  ^:final ^{:tag (List AltService)} services]
+    (Objects/requireNonNull origin)
+    (Objects/requireNonNull services)
+    (let [^:mutable ^{:tag (List AltService)} added nil]
+      (.lock registryLock)
+      (try
+        (set!
+          added
+          (cast
+            List
+            (.compute
+              altServices
+              origin
+              (lambda BiFunction ^List [^Origin key ^List list]
+                (let [^{:tag (java.util.stream.Stream AltService)} svcs (.filter
+                                                                          (.filter
+                                                                            (.stream services)
+                                                                            (method-ref
+                                                                              Predicate
+                                                                              [AltService]
+                                                                              AltService
+                                                                              Class/.isInstance))
+                                                                          (lambda Predicate ^boolean [^AltService s]
+                                                                            (.keepAltServiceFor
+                                                                              this
+                                                                              origin
+                                                                              s)))
+                      ^{:tag (List AltService)} newList (.toList svcs)]
+                  (when-not (.isEmpty newList) newList))))))
+        (finally (.unlock registryLock)))
+      (when (.on debug)
+        (.log debug "parsed services: %s" (new Object/1 [services]))
+        (.log debug "resulting services: %s" (new Object/1 [added])))
+      (when (Log/altsvc)
+        (when (some? added)
+          (.forEach added
+                    (lambda Consumer ^void [^AltService svc]
+                      (Log/logAltSvc "AltService registry updated: {0}" svc)))))))
+
+  (method ^:private isMarkedInvalid ^boolean [this ^:final ^Origin origin
+                                              ^:final ^AltServicesRegistry$AltService$Identity id]
+    (java-assert (.isHeldByCurrentThread registryLock) "Thread isn't holding registry lock")
+    (.contains (.-invalidAltServices this) (InvalidAltSvc. origin id)))
+
+  (method registerUnadvertised ^{:tag (Optional AltService)} [this
+                                                              ^:final ^AltServicesRegistry$AltService$Identity id
+                                                              ^:final ^Origin origin
+                                                              ^:final ^HttpConnection conn]
+    (Objects/requireNonNull id)
+    (Objects/requireNonNull origin)
+    (.lock registryLock)
+    (try
+      (.remove (.-invalidAltServices this) (InvalidAltSvc. origin id))
+      (let [^:const ^long defaultMaxAgeInSecs (unchecked-multiply-int 3600 24)
+            deadline (.plusSeconds (TimeSource/now) defaultMaxAgeInSecs)
+            ^{:tag (Optional AltService)} created (AltService/createUnadvertised
+                                                    debug
+                                                    id
+                                                    origin
+                                                    conn
+                                                    deadline
+                                                    true)]
+        (if (.isEmpty created)
+            (Optional/empty)
+            (let [altSvc (cast AltService (.get created))]
+              (.compute
+                altServices
+                origin
+                (lambda BiFunction ^List [^Origin key ^List list]
+                  (let [^{:tag (java.util.stream.Stream AltService)} old (if (nil? list)
+                                                                             (java.util.stream.Stream/empty)
+                                                                             (.stream list))
+                        ^{:tag (List AltService)} newList (.toList
+                                                            (java.util.stream.Stream/concat
+                                                              old
+                                                              (java.util.stream.Stream/of altSvc)))]
+                    (when-not (.isEmpty newList) newList))))
+              (when (.on debug)
+                (.log debug "Added unadvertised AltService: %s" (new Object/1 [created])))
+              (when (Log/altsvc) (Log/logAltSvc "Added unadvertised AltService: {0}" created))
+              created)))
+      (finally (.unlock registryLock))))
+
+  (method ^:public clear ^void [this ^:final ^Origin origin]
+    (Objects/requireNonNull origin)
+    (.lock registryLock)
+    (try
+      (when (Log/altsvc) (Log/logAltSvc (java-str "Clearing AltServices for: " origin)))
+      (.remove altServices origin)
+      (finally (.unlock registryLock))))
+
+  (method ^:public markInvalid ^void [this ^:final ^AltService altService]
+    (Objects/requireNonNull altService)
+    (.markInvalid this (.origin altService) (.identity altService)))
+
+  (method ^:private markInvalid ^void [this ^:final ^Origin origin
+                                       ^:final ^AltServicesRegistry$AltService$Identity id]
+    (Objects/requireNonNull origin)
+    (Objects/requireNonNull id)
+    (.lock registryLock)
+    (try
+      (.computeIfPresent
+        (.-altServices this)
+        origin
+        (lambda BiFunction ^List [^Origin key ^List currentActive]
+          (java-assert (some? currentActive))
+          (let [^{:tag (List AltService)} newList (.toList
+                                                    (.filter
+                                                      (.stream currentActive)
+                                                      (Predicate/not
+                                                        (method-ref
+                                                          Predicate
+                                                          [AltService]
+                                                          id
+                                                          AltServicesRegistry$AltService$Identity/.matches))))]
+            (when-not (.isEmpty newList) newList))))
+      (.addUnique (.-invalidAltServices this) (InvalidAltSvc. origin id))
+      (when (.on debug)
+        (.log debug (java-str "AltService marked invalid: " id " for origin " origin)))
+      (when (Log/altsvc)
+        (Log/logAltSvc (java-str "AltService marked invalid: " id " for origin " origin)))
+      (finally (.unlock registryLock))))
+
+  (method ^:public lookup ^{:tag (java.util.stream.Stream AltService)} [this ^:final ^URI uri
+                                                                        ^:final ^String alpn]
+    (let [^:mutable ^Origin origin nil]
+      (try
+        (set! origin (Origin/from uri))
+        (catch IllegalArgumentException iae (return (java.util.stream.Stream/empty))))
+      (.lookup this origin alpn)))
+
+  (method ^:public lookup ^{:tag (java.util.stream.Stream AltService)} [this ^:final ^Origin origin
+                                                                        ^:final ^String alpn]
+    (.lookup this origin (Predicate/isEqual alpn)))
+
+  (method ^:public lookup ^{:tag (java.util.stream.Stream AltService)} [this ^:final ^URI uri
+                                                                        ^:final ^{:tag (Predicate (? super String))} alpnMatcher]
+    (let [^:mutable ^Origin origin nil]
+      (try
+        (set! origin (Origin/from uri))
+        (catch IllegalArgumentException iae (return (java.util.stream.Stream/empty))))
+      (.lookup this origin alpnMatcher)))
+
+  (method ^:private isExpired ^boolean [this ^AltService service ^Deadline now]
+    (let [deadline (.deadline service)]
+      (if (or (.equals now deadline) (.isAfter now deadline))
+          (do
+            (when (.on debug) (.log debug (java-str "Removing expired alt-service " service)))
+            (when (Log/altsvc) (Log/logAltSvc "AltService has expired: {0}" service))
+            true)
+          false)))
+
+  (method ^:private lookup ^{:tag (java.util.stream.Stream AltService)} [this ^:final ^Origin origin
+                                                                         ^:final ^{:tag (Predicate (? super String))} alpnMatcher]
+    (when (.on debug) (.log debug "looking up alt-service for: %s" (new Object/1 [origin])))
+    (let [^:mutable ^{:tag (List AltService)} services nil]
+      (.lock registryLock)
+      (try
+        (let [now (TimeSource/now)]
+          (set!
+            services
+            (cast
+              List
+              (.compute
+                altServices
+                origin
+                (lambda BiFunction ^List [^Origin key ^List list]
+                  (when (some? list)
+                    (let [^{:tag (List AltService)} newList (.toList
+                                                              (.filter
+                                                                (.stream list)
+                                                                (lambda Predicate ^boolean [^AltService s]
+                                                                  (not (.isExpired this s now)))))]
+                      (when-not (.isEmpty newList) newList))))))))
+        (finally (.unlock registryLock)))
+      (if (nil? services)
+          (java.util.stream.Stream/empty)
+          (.filter (cast java.util.stream.Stream (.sequential (.stream services)))
+                   (lambda Predicate ^boolean [^AltService s]
+                     (.test alpnMatcher (.alpn (.identity s))))))))
+
+  (method ^:public isActive ^boolean [this ^:final ^AltService altService]
+    (Objects/requireNonNull altService)
+    (.isActive this (.origin altService) (.identity altService)))
+
+  (method ^:private isActive ^boolean [this ^:final ^Origin origin
+                                       ^:final ^AltServicesRegistry$AltService$Identity id]
+    (Objects/requireNonNull origin)
+    (Objects/requireNonNull id)
+    (.lock registryLock)
+    (try
+      (let [^{:tag (List AltService)} currentActive (cast List (.get (.-altServices this) origin))]
+        (if (nil? currentActive)
+            false
+            (let [^:mutable ^AltService svc nil]
+              (for-each [^AltService s currentActive]
+                (when (.equals (.identity s) id) (set! svc s) (break)))
+              (if (nil? svc)
+                  false
+                  (let [now (TimeSource/now)
+                        deadline (.deadline svc)
+                        expired (or (.equals now deadline) (.isAfter now deadline))]
+                    (if expired
+                        (do
+                          (.put altServices
+                                origin
+                                (.toList (.filter
+                                           (.stream currentActive)
+                                           (Predicate/not
+                                             (method-ref
+                                               Predicate
+                                               [AltService]
+                                               svc
+                                               AltService/.equals)))))
+                          (when (.on debug)
+                            (.log debug
+                                  (java-str "Removed expired alt-service "
+                                            svc
+                                            " for origin "
+                                            origin)))
+                          (when (Log/altsvc) (Log/logAltSvc "Removed AltService: {0}" svc))
+                          false)
+                        true))))))
+      (finally (.unlock registryLock)))))

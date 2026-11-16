@@ -1,0 +1,337 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/websocket/Frame.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.websocket)
+
+(import '(java.nio ByteBuffer ByteOrder)
+        '(jdk.internal.net.http.common Utils))
+
+(defclass ^:public ^:final Frame
+  (constructor ^:private [this])
+
+  (field ^:static ^:final ^int MAX_HEADER_SIZE_BYTES (unchecked-add-int (unchecked-add-int 2 8) 4))
+
+  (field ^:public ^:static ^:final ^int MAX_CONTROL_FRAME_PAYLOAD_LENGTH 125)
+
+  (defclass ^:public ^:enum Opcode
+    (constants
+      (CONTINUATION [0x0])
+      (TEXT [0x1])
+      (BINARY [0x2])
+      (NON_CONTROL_0x3 [0x3])
+      (NON_CONTROL_0x4 [0x4])
+      (NON_CONTROL_0x5 [0x5])
+      (NON_CONTROL_0x6 [0x6])
+      (NON_CONTROL_0x7 [0x7])
+      (CLOSE [0x8])
+      (PING [0x9])
+      (PONG [0xA])
+      (CONTROL_0xB [0xB])
+      (CONTROL_0xC [0xC])
+      (CONTROL_0xD [0xD])
+      (CONTROL_0xE [0xE])
+      (CONTROL_0xF [0xF]))
+
+    (field ^:private ^:static ^:final ^Opcode/1 opcodes)
+
+    (static-initializer
+      (let [values (Opcode/values)]
+        (set! opcodes (new Opcode/1 (alength values)))
+        (for-each [^Opcode c values] (aset opcodes (.-code c) c))))
+
+    (field ^:private ^:final ^byte code)
+
+    (constructor [this ^int code]
+      (set! (.-code this) (unchecked-byte code)))
+
+    (method isControl ^boolean [this] (not (== (bit-and-int code 0x8) 0)))
+
+    (method ^:static ofCode ^Opcode [^int code]
+      (aget opcodes (bit-and-int code 0xF))))
+
+  (defclass ^:public ^:static ^:final Masker
+    (field ^:private ^:final ^ByteBuffer acc (ByteBuffer/allocate 8))
+
+    (field ^:private ^:final ^byte/1 maskBytes (new byte/1 4))
+
+    (field ^:private ^int offset)
+
+    (field ^:private ^long maskLongBe)
+
+    (field ^:private ^long maskLongLe)
+
+    (method ^:static applyMask ^void [^ByteBuffer src ^ByteBuffer dst ^int mask]
+      (when (> (.remaining src) (.remaining dst))
+        (throw (IllegalArgumentException. (Utils/dump src dst))))
+      (.applyMask (.setMask (Masker.) mask) src dst))
+
+    (method ^:public setMask ^Masker [this ^int mask]
+      (.flip (.putInt (.putInt (.clear acc) mask) mask))
+      (loop [^int i 0]
+        (when (< i (alength maskBytes))
+          (aset maskBytes i (.get acc i))
+          (recur (unchecked-inc-int i))))
+      (set! offset 0)
+      (set! maskLongBe (.getLong acc 0))
+      (set! maskLongLe (Long/reverseBytes maskLongBe))
+      this)
+
+    (method ^:public applyMask ^void [this ^ByteBuffer src ^ByteBuffer dst]
+      (when (Masker/canVectorMask src dst)
+        (.initVectorMask this src dst)
+        (.applyVectorMask this src dst))
+      (.applyPlainMask this src dst))
+
+    (method ^:private ^:static canVectorMask ^boolean [^ByteBuffer src ^ByteBuffer dst]
+      (and (identical? (.order src) (.order dst))
+           (>= (Math/min (.remaining src) (.remaining dst)) 8)))
+
+    (method ^:private initVectorMask ^void [this ^ByteBuffer src ^ByteBuffer dst]
+      (java-assert (identical? (.order src) (.order dst))
+        "vectorized masking is only allowed on matching byte orders")
+      (when-not (== offset 0)
+        (let [^:mutable i (.position src)
+              ^:mutable j (.position dst)
+              srcLim (.limit src)
+              dstLim (.limit dst)]
+          (while (and (and (< offset 4) (< i srcLim)) (< j dstLim))
+            (.put dst j (unchecked-byte (bit-xor-int (.get src i) (aget maskBytes offset))))
+            (set! i (unchecked-inc-int i))
+            (set! j (unchecked-inc-int j))
+            (set! offset (unchecked-inc-int offset)))
+          (set! offset (bit-and-int offset 3))
+          (.position src i)
+          (.position dst j))))
+
+    (method ^:private applyVectorMask ^void [this ^ByteBuffer src ^ByteBuffer dst]
+      (java-assert (identical? (.order src) (.order dst))
+        "vectorized masking is only allowed on matching byte orders")
+      (let [maskLong (if (identical? ByteOrder/LITTLE_ENDIAN (.order src)) maskLongLe maskLongBe)
+            ^:mutable i (.position src)
+            ^:mutable j (.position dst)
+            srcLongLim (unchecked-subtract-int (.limit src) 7)
+            dstLongLim (unchecked-subtract-int (.limit dst) 7)]
+        (java-assert (or (not (and (< i srcLongLim) (< j dstLongLim))) (== offset 0))
+          "offset must have been positioned at 0")
+        (while (and (< i srcLongLim) (< j dstLongLim))
+          (.putLong dst j (bit-xor (.getLong src i) maskLong))
+          (set! i (unchecked-add-int i 8))
+          (set! j (unchecked-add-int j 8)))
+        (if (> i (.limit src)) (.position src (unchecked-subtract-int i 8)) (.position src i))
+        (if (> j (.limit dst)) (.position dst (unchecked-subtract-int j 8)) (.position dst j))))
+
+    (method ^:private applyPlainMask ^void [this ^ByteBuffer src ^ByteBuffer dst]
+      (let [srcLim (.limit src)
+            dstLim (.limit dst)
+            ^:mutable i (.position src)
+            ^:mutable j (.position dst)]
+        (while (and (< i srcLim) (< j dstLim))
+          (.put dst j (unchecked-byte (bit-xor-int (.get src i) (aget maskBytes offset))))
+          (set! i (unchecked-inc-int i))
+          (set! j (unchecked-inc-int j))
+          (set! offset (bit-and-int (unchecked-add-int offset 1) 3)))
+        (.position src i)
+        (.position dst j))))
+
+  (defclass ^:public ^:static ^:final HeaderWriter
+    (field ^:private ^char firstChar)
+
+    (field ^:private ^long payloadLen)
+
+    (field ^:private ^int maskingKey)
+
+    (field ^:private ^boolean mask)
+
+    (method ^:public fin ^HeaderWriter [this ^boolean value]
+      (if value
+          (set! firstChar (unchecked-char (bit-or-int firstChar 2r1000000000000000)))
+          (set! firstChar
+                (unchecked-char
+                  (bit-and-int firstChar (unchecked-char (bit-not-int 2r1000000000000000))))))
+      this)
+
+    (method rsv1 ^HeaderWriter [this ^boolean value]
+      (if value
+          (set! firstChar (unchecked-char (bit-or-int firstChar 2r0100000000000000)))
+          (set! firstChar
+                (unchecked-char
+                  (bit-and-int firstChar (unchecked-char (bit-not-int 2r0100000000000000))))))
+      this)
+
+    (method rsv2 ^HeaderWriter [this ^boolean value]
+      (if value
+          (set! firstChar (unchecked-char (bit-or-int firstChar 2r0010000000000000)))
+          (set! firstChar
+                (unchecked-char
+                  (bit-and-int firstChar (unchecked-char (bit-not-int 2r0010000000000000))))))
+      this)
+
+    (method rsv3 ^HeaderWriter [this ^boolean value]
+      (if value
+          (set! firstChar (unchecked-char (bit-or-int firstChar 2r0001000000000000)))
+          (set! firstChar
+                (unchecked-char
+                  (bit-and-int firstChar (unchecked-char (bit-not-int 2r0001000000000000))))))
+      this)
+
+    (method ^:public opcode ^HeaderWriter [this ^Opcode value]
+      (set! firstChar
+            (unchecked-char
+              (bit-or-int (bit-and-int firstChar 0xF0FF) (bit-shift-left-int (.-code value) 8))))
+      this)
+
+    (method ^:public payloadLen ^HeaderWriter [this ^long value]
+      (when (< value 0) (throw (IllegalArgumentException. (java-str "Negative: " value))))
+      (set! payloadLen value)
+      (set! firstChar (unchecked-char (bit-and-int firstChar 2r1111111110000000)))
+      (cond
+        (< payloadLen 126)
+          (set! firstChar (unchecked-char (bit-or-int firstChar (unchecked-char payloadLen))))
+        (< payloadLen 65536) (set! firstChar (unchecked-char (bit-or-int firstChar 126)))
+        :else (set! firstChar (unchecked-char (bit-or-int firstChar 127))))
+      this)
+
+    (method mask ^HeaderWriter [this ^int value]
+      (set! firstChar (unchecked-char (bit-or-int firstChar 2r0000000010000000)))
+      (set! maskingKey value)
+      (set! mask true)
+      this)
+
+    (method ^:public noMask ^HeaderWriter [this]
+      (set! firstChar
+            (unchecked-char
+              (bit-and-int firstChar (unchecked-char (bit-not-int 2r0000000010000000)))))
+      (set! mask false)
+      this)
+
+    (method ^:public write ^void [this ^ByteBuffer buffer]
+      (.putChar buffer firstChar)
+      (when (>= payloadLen 126)
+        (if (< payloadLen 65536)
+            (.putChar buffer (unchecked-char payloadLen))
+            (.putLong buffer payloadLen)))
+      (when mask (.putInt buffer maskingKey))))
+
+  (defclass ^:public ^:interface Consumer
+    (method fin ^void [this ^boolean value])
+
+    (method rsv1 ^void [this ^boolean value])
+
+    (method rsv2 ^void [this ^boolean value])
+
+    (method rsv3 ^void [this ^boolean value])
+
+    (method opcode ^void [this ^Opcode value])
+
+    (method mask ^void [this ^boolean value])
+
+    (method payloadLen ^void [this ^long value])
+
+    (method maskingKey ^void [this ^int value])
+
+    (method payloadData ^void [this ^ByteBuffer data])
+
+    (method endFrame ^void [this]))
+
+  (defclass ^:public ^:static ^:final Reader
+    (field ^:private ^:static ^:final ^int AWAITING_FIRST_BYTE 1)
+
+    (field ^:private ^:static ^:final ^int AWAITING_SECOND_BYTE 2)
+
+    (field ^:private ^:static ^:final ^int READING_16_LENGTH 4)
+
+    (field ^:private ^:static ^:final ^int READING_64_LENGTH 8)
+
+    (field ^:private ^:static ^:final ^int READING_MASK 16)
+
+    (field ^:private ^:static ^:final ^int READING_PAYLOAD 32)
+
+    (field ^:private ^:final ^ByteBuffer accumulator (ByteBuffer/allocate 8))
+
+    (field ^:private ^int state AWAITING_FIRST_BYTE)
+
+    (field ^:private ^boolean mask)
+
+    (field ^:private ^long remainingPayloadLength)
+
+    (method ^:public readFrame ^void [this ^ByteBuffer input ^Consumer consumer]
+      (while true
+        (let [^:mutable ^byte b 0]
+          (switch state
+            AWAITING_FIRST_BYTE
+              (do
+                (when-not (.hasRemaining input) (break))
+                (set! b (.get input))
+                (.fin consumer (not (== (bit-and-int b 2r10000000) 0)))
+                (.rsv1 consumer (not (== (bit-and-int b 2r01000000) 0)))
+                (.rsv2 consumer (not (== (bit-and-int b 2r00100000) 0)))
+                (.rsv3 consumer (not (== (bit-and-int b 2r00010000) 0)))
+                (.opcode consumer (Opcode/ofCode b))
+                (set! state AWAITING_SECOND_BYTE))
+            AWAITING_SECOND_BYTE
+              (do
+                (when-not (.hasRemaining input) (break))
+                (set! b (.get input))
+                (.mask consumer (set! mask (not (== (bit-and-int b 2r10000000) 0))))
+                (let [p1 (unchecked-byte (bit-and-int b 2r01111111))]
+                  (cond
+                    (< p1 126)
+                      (do
+                        (java-assert (>= p1 0) p1)
+                        (.payloadLen consumer (set! remainingPayloadLength p1))
+                        (set! state (if mask READING_MASK READING_PAYLOAD)))
+                    (< p1 127) (set! state READING_16_LENGTH)
+                    :else (set! state READING_64_LENGTH))))
+            READING_16_LENGTH
+              (do
+                (when-not (.hasRemaining input) (break))
+                (set! b (.get input))
+                (when-not (< (.position (.put accumulator b)) 2)
+                  (set! remainingPayloadLength (.getChar (.flip accumulator)))
+                  (when (< remainingPayloadLength 126)
+                    (throw (Reader/notMinimalEncoding remainingPayloadLength)))
+                  (.payloadLen consumer remainingPayloadLength)
+                  (.clear accumulator)
+                  (set! state (if mask READING_MASK READING_PAYLOAD))))
+            READING_64_LENGTH
+              (do
+                (when-not (.hasRemaining input) (break))
+                (set! b (.get input))
+                (when-not (< (.position (.put accumulator b)) 8)
+                  (set! remainingPayloadLength (.getLong (.flip accumulator)))
+                  (cond
+                    (< remainingPayloadLength 0)
+                      (throw (Reader/negativePayload remainingPayloadLength))
+                    (< remainingPayloadLength 65536)
+                      (throw (Reader/notMinimalEncoding remainingPayloadLength)))
+                  (.payloadLen consumer remainingPayloadLength)
+                  (.clear accumulator)
+                  (set! state (if mask READING_MASK READING_PAYLOAD))))
+            READING_MASK
+              (do
+                (when-not (.hasRemaining input) (break))
+                (set! b (.get input))
+                (when-not (not (== (.position (.put accumulator b)) 4))
+                  (.maskingKey consumer (.getInt (.flip accumulator)))
+                  (.clear accumulator)
+                  (set! state READING_PAYLOAD)))
+            READING_PAYLOAD
+              (let [deliverable (unchecked-int (Math/min remainingPayloadLength (.remaining input)))
+                    oldLimit (.limit input)]
+                (.limit input (unchecked-add-int (.position input) deliverable))
+                (when (or (not (== deliverable 0)) (== remainingPayloadLength 0))
+                  (.payloadData consumer input))
+                (let [consumed (unchecked-subtract-int deliverable (.remaining input))]
+                  (when (< consumed 0) (throw (InternalError.)))
+                  (.limit input oldLimit)
+                  (set! remainingPayloadLength (unchecked-subtract remainingPayloadLength consumed))
+                  (when (== remainingPayloadLength 0)
+                    (.endFrame consumer)
+                    (set! state AWAITING_FIRST_BYTE))
+                  (break)))
+            (throw (InternalError. (String/valueOf state)))))))
+
+    (method ^:private ^:static negativePayload ^FailWebSocketException [^long payloadLength]
+      (FailWebSocketException. (java-str "Negative payload length: " payloadLength)))
+
+    (method ^:private ^:static notMinimalEncoding ^FailWebSocketException [^long payloadLength]
+      (FailWebSocketException. (java-str "Not minimally-encoded payload length:" payloadLength)))))

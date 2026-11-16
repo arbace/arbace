@@ -1,14 +1,153 @@
-;; Converted from overlay/jdk/java.base/sun/security/util/ManifestEntryVerifier.java by arbace.repr.java. Regenerate rather than edit.
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/ManifestEntryVerifier.java by arbace.repr.java. Regenerate rather than edit.
 
 (in-ns 'sun.security.util)
 
-(import '(java.util.jar Manifest))
+(import '(java.io IOException)
+        '(java.security CodeSigner
+                        GeneralSecurityException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        Provider)
+        '(java.util ArrayList Base64 HashMap Hashtable HexFormat Locale Map Map$Entry)
+        '(java.util.jar JarEntry JarException JarFile Manifest)
+        '(sun.security.jca Providers))
 
 (defclass ^:public ManifestEntryVerifier
-  (field ^:private ^:final ^Manifest man)
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "jar"))
+
+  (defclass ^:private ^:static SunProviderHolder
+    (field ^:private ^:static ^:final ^Provider instance (Providers/getSunProvider)))
+
+  (field ^{:tag (HashMap String MessageDigest)} createdDigests)
+
+  (field ^{:tag (ArrayList MessageDigest)} digests)
+
+  (field ^{:tag (ArrayList byte/1)} manifestHashes)
+
+  (field ^:private ^String name nil)
 
   (field ^:private ^:final ^String manifestFileName)
 
+  (field ^:private ^:final ^Manifest man)
+
+  (field ^:private ^boolean skip true)
+
+  (field ^:private ^JarEntry entry)
+
+  (field ^:private ^CodeSigner/1 signers nil)
+
   (constructor ^:public [this ^Manifest man ^String manifestFileName]
-    (set! (.-man this) man)
-    (set! (.-manifestFileName this) manifestFileName)))
+    (set! createdDigests (HashMap. 11))
+    (set! digests (ArrayList.))
+    (set! manifestHashes (ArrayList.))
+    (set! (.-manifestFileName this) manifestFileName)
+    (set! (.-man this) man))
+
+  (method ^:public setEntry :throws [IOException] ^void [this ^String name ^JarEntry entry]
+    (.clear digests)
+    (.clear manifestHashes)
+    (set! (.-name this) name)
+    (set! (.-entry this) entry)
+    (set! skip true)
+    (set! signers nil)
+    (when-not (or (nil? man) (nil? name))
+      (set! skip false)
+      (let [^:mutable attr (.getAttributes man name)]
+        (when (nil? attr)
+          (set! attr (.getAttributes man (java-str "./" name)))
+          (when (nil? attr)
+            (set! attr (.getAttributes man (java-str "/" name)))
+            (when (nil? attr) (return))))
+        (for-each [^{:tag (Map$Entry Object Object)} se (.entrySet attr)]
+          (let [key (.toString (.getKey se))]
+            (when (.endsWith (.toUpperCase key Locale/ENGLISH) "-DIGEST")
+              (let [algorithm (.substring key 0 (unchecked-subtract-int (.length key) 7))
+                    ^:mutable digest (cast MessageDigest (.get createdDigests algorithm))]
+                (when (nil? digest)
+                  (try
+                    (set! digest (MessageDigest/getInstance algorithm SunProviderHolder/instance))
+                    (.put createdDigests algorithm digest)
+                    (catch NoSuchAlgorithmException nsae)))
+                (when (some? digest)
+                  (.reset digest)
+                  (.add digests digest)
+                  (.add manifestHashes
+                        (.decode (Base64/getMimeDecoder) (cast String (.getValue se))))))))))))
+
+  (method ^:public update ^void [this ^byte buffer]
+    (when-not skip
+      (loop [^int i 0]
+        (when (< i (.size digests))
+          (.update (cast MessageDigest (.get digests i)) buffer)
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:public update ^void [this ^byte/1 buffer ^int off ^int len]
+    (when-not skip
+      (loop [^int i 0]
+        (when (< i (.size digests))
+          (.update (cast MessageDigest (.get digests i)) buffer off len)
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:public getEntry ^JarEntry [this] entry)
+
+  (method ^:public verify :throws [JarException] ^CodeSigner/1 [this
+                                                                ^{:tag (Hashtable String CodeSigner/1)} verifiedSigners
+                                                                ^{:tag (Hashtable String CodeSigner/1)} sigFileSigners
+                                                                ^{:tag (Map CodeSigner/1 (Map String Boolean))} signersToAlgs]
+    (when-not skip
+      (when (.isEmpty digests) (throw (SecurityException. (java-str "digest missing for " name))))
+      (if (some? signers)
+          signers
+          (let [entrySigners (cast CodeSigner/1 (.get sigFileSigners name))
+                ^{:tag (Map String Boolean)} algsPermittedStatus
+                  (ManifestEntryVerifier/algsPermittedStatusForSigners signersToAlgs entrySigners)
+                ^:mutable disabledAlgs true
+                ^:mutable ^JarConstraintsParameters params nil]
+            (loop [^int i 0]
+              (when (< i (.size digests))
+                (let [digest (cast MessageDigest (.get digests i))
+                      digestAlg (.getAlgorithm digest)]
+                  (when (some? algsPermittedStatus)
+                    (let [permitted (cast Boolean (.get algsPermittedStatus digestAlg))]
+                      (if (nil? permitted)
+                          (do
+                            (when (nil? params)
+                              (set! params (JarConstraintsParameters. entrySigners)))
+                            (if (not (.checkConstraints this digestAlg params))
+                                (do
+                                  (.put algsPermittedStatus digestAlg Boolean/FALSE)
+                                  (continue (unchecked-inc-int i)))
+                                (.put algsPermittedStatus digestAlg Boolean/TRUE)))
+                          (when-not (.booleanValue permitted) (continue (unchecked-inc-int i))))))
+                  (set! disabledAlgs false)
+                  (let [manHash (cast byte/1 (.get manifestHashes i))
+                        theHash (.digest digest)]
+                    (when (some? debug)
+                      (.println debug (java-str "Manifest Entry: " name " digest=" digestAlg))
+                      (.println debug (java-str "  manifest " (.formatHex (HexFormat/of) manHash)))
+                      (.println debug (java-str "  computed " (.formatHex (HexFormat/of) theHash)))
+                      (.println debug))
+                    (if (not (MessageDigest/isEqual theHash manHash))
+                        (throw (SecurityException. (java-str digestAlg " digest error for " name)))
+                        (recur (unchecked-inc-int i)))))))
+            (when-not disabledAlgs
+              (set! signers (cast CodeSigner/1 (.remove sigFileSigners name)))
+              (when (some? signers) (.put verifiedSigners name signers))
+              signers)))))
+
+  (method ^:private ^:static algsPermittedStatusForSigners ^{:tag (Map String Boolean)} [^{:tag (Map CodeSigner/1 (Map String Boolean))} signersToAlgs
+                                                                                         ^CodeSigner/1 signers]
+    (when (some? signers)
+      (let [^:mutable ^{:tag (Map String Boolean)} algs (cast Map (.get signersToAlgs signers))]
+        (when (nil? algs) (set! algs (HashMap.)) (.put signersToAlgs signers algs))
+        algs)))
+
+  (method ^:private checkConstraints ^boolean [this ^String algorithm
+                                               ^JarConstraintsParameters params]
+    (try
+      (.setExtendedExceptionMsg params JarFile/MANIFEST_NAME (java-str name " entry"))
+      (.permits (DisabledAlgorithmConstraints/jarConstraints) algorithm params false)
+      true
+      (catch GeneralSecurityException e
+        (when (some? debug) (.println debug (java-str "Digest algorithm is restricted: " e)))
+        false))))

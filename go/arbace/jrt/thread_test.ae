@@ -3,7 +3,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "thread_test.go"
-  :imports [[io "io"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"] [testing "testing"] [time "time"]])
+  :imports [[io "io"] [strconv "strconv"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"] [testing "testing"] [time "time"]])
 
 (go/func TestCurrentThreadPerGoroutine
   "Each goroutine has its own Thread, found again on every call; Go's goroutines get adopted
@@ -197,6 +197,55 @@ daemon Threads; the numbers are distinct among live threads and small.\n"
       (when (< (time/Since t0) (* 4 time/Millisecond))
         (.Error t "parkNanos returned early")))))
 
+;; JCS162: a thread's blocker (sun.nio.ch.Interruptible's methods), called by another thread's interrupt
+(go/type nioTestBlocker (struct ^{:tag atomic/Int32} interrupts ^{:tag atomic/Int32} posts ^{:tag (atomic/Pointer Thread)} target))
+(go/method Interrupt_Thread__V [^{:tag (* nioTestBlocker)} b ^Thread_I th]
+  (.Add (.-interrupts b) 1)
+  (.Store (.-target b) (.Self_Thread th)))
+(go/method PostInterrupt__V [^{:tag (* nioTestBlocker)} b] (.Add (.-posts b) 1))
+
+(go/func TestInterruptBlocker
+  "JCS162: Thread.interrupt from another thread calls the blocker's interrupt(Thread), under the interrupt lock,
+then postInterrupt, as jdk26u's; a thread interrupting itself, or a thread without a blocker, calls neither; the
+status is set either way; an object without Interruptible's methods is a ClassCastException.\n"
+  [^{:tag (* testing/T)} t]
+  (let [b (new nioTestBlocker)
+        ready (make (chan (struct)))
+        release (make (chan (struct)))
+        cleared (make (chan (struct)))
+        done (make (chan (struct)))
+        ^int32 selfCalls -1
+        th (Thread_New_Runnable (RunnableOf (fn []
+                                              ;; a self-interrupt with a blocker: not called (this == currentThread)
+                                              (HostThreads_BlockedOn_O__V_native b)
+                                              (.Interrupt__V (CurrentThread))
+                                              (set! selfCalls (+ (.Load (.-interrupts b)) (.Load (.-posts b))))
+                                              (Thread_Interrupted__Z)
+                                              (close ready)
+                                              (<! release)
+                                              (HostThreads_BlockedOn_O__V_native nil)
+                                              (close cleared)
+                                              (<! done))))]
+    (.Start__V th)
+    (<! ready)
+    (when (!= selfCalls 0)
+      (.Errorf t "a self-interrupt called the blocker %d times" selfCalls))
+    (.Interrupt__V th)
+    (when (or (!= (.Load (.-interrupts b)) 1) (!= (.Load (.-posts b)) 1) (!= (.Load (.-target b)) th)
+              (not (.IsInterrupted__Z th)))
+      (.Errorf t "interrupt: %d interrupts, %d posts, the target %v, interrupted %v" (.Load (.-interrupts b))
+               (.Load (.-posts b)) (== (.Load (.-target b)) th) (.IsInterrupted__Z th)))
+    (close release)
+    (<! cleared)
+    (.Interrupt__V th)
+    (when (or (!= (.Load (.-interrupts b)) 1) (!= (.Load (.-posts b)) 1))
+      (.Errorf t "after blockedOn(null): %d interrupts, %d posts" (.Load (.-interrupts b)) (.Load (.-posts b))))
+    (close done)
+    (.Join__V th))
+  (let [got (res (fn ^string [] (HostThreads_BlockedOn_O__V_native (Str "x")) "set"))]
+    (when (!= got "!java.lang.ClassCastException: not a sun.nio.ch.Interruptible")
+      (.Errorf t "blockedOn of a string: %s" got))))
+
 (go/type testHandler (struct Object ^{:tag (func [Thread_I Throwable_I])} f))
 (go/method UncaughtException_Thread_Throwable__V [^{:tag (* testHandler)} h ^Thread_I th ^Throwable_I e] ((.-f h) th e))
 (go/method Is_Thread_UncaughtExceptionHandler [^{:tag (* testHandler)} h])
@@ -329,3 +378,66 @@ non-daemon threads, not for daemons.\n"
       (let [th (Thread_New_Runnable r)]
         (.Start__V th)
         (.Join__V th)))))
+
+(go/func TestThreadGroups
+  "Thread groups (JCS322 (a)): system > main > the user's; a thread's group from its creator or constructor,
+null once terminated; activeCount and enumerate over the live platform threads; subgroups; the priority within the
+group's maximum; toString; Thread(group, task, name, 0, false) inherits no inheritable thread locals.\n"
+  [^{:tag (* testing/T)} t]
+  (let [me (CurrentThread)
+        mg (.GetThreadGroup__ThreadGroup me)]
+    (when (or (!= mg mainThreadGroup) (!= (.GetParent__ThreadGroup mg) systemThreadGroup)
+              (!= (.GetParent__ThreadGroup systemThreadGroup) nil))
+      (.Errorf t "the groups: %v" mg))
+    (when (!= (.String (.ToString__String mg)) "java.lang.ThreadGroup[name=main,maxpri=10]")
+      (.Errorf t "toString: %s" (.String (.ToString__String mg))))
+    (let [g (ThreadGroup_New_String (Str "Flaky"))
+          sub (ThreadGroup_New_ThreadGroup_String g (Str "sub"))
+          release (make (chan (struct)))
+          started (make (chan (struct)) 2)
+          run (RunnableOf (fn [] (>! started (lit (struct))) (<! release)))
+          t1 (Thread_New_ThreadGroup_Runnable g run)
+          t2 (Thread_New_ThreadGroup_Runnable_String sub run (Str "in-sub"))]
+      (when (or (!= (.GetParent__ThreadGroup g) mg) (not (.ParentOf_ThreadGroup__Z mg sub)) (.ParentOf_ThreadGroup__Z sub g))
+        (.Error t "parents"))
+      (.Start__V t1)
+      (.Start__V t2)
+      (<! started)
+      (<! started)
+      (when (or (!= (.ActiveCount__I g) 2) (!= (.ActiveCount__I sub) 1) (!= (.ActiveGroupCount__I mg) 2))
+        (.Errorf t "counts: %d %d %d" (.ActiveCount__I g) (.ActiveCount__I sub) (.ActiveGroupCount__I mg)))
+      (let [a (NewRefArray Thread_class 4)
+            n (.Enumerate_Thread1_Z__I g a false)]
+        (when (or (!= n 1) (!= (aget (.-A a) 0) (conv any t1)))
+          (.Errorf t "enumerate without recursion: %d" n)))
+      (let [ga (NewRefArray ThreadGroup_class 4)]
+        (when (!= (.Enumerate_ThreadGroup1__I systemThreadGroup ga) (.ActiveGroupCount__I systemThreadGroup))
+          (.Error t "enumerate of the groups")))
+      (when (< (.ActiveCount__I systemThreadGroup) 3)
+        (.Error t "the system group's count"))
+      (when (!= (.String (.Impl_ToString__String t2 t2)) (+ "Thread[#" (strconv/FormatInt (.-tid t2) 10) ",in-sub,5,sub]"))
+        (.Errorf t "Thread.toString: %s" (.String (.Impl_ToString__String t2 t2))))
+      (close release)
+      (.Join__V t1)
+      (.Join__V t2)
+      (when (or (!= (.GetThreadGroup__ThreadGroup t1) nil) (!= (.ActiveCount__I g) 0))
+        (.Error t "a terminated thread's group")))
+    (let [g (ThreadGroup_New_String (Str "low"))]
+      (.SetMaxPriority_I__V g 3)
+      (let [th (Thread_New_ThreadGroup_String g (Str "low-1"))]
+        (when (!= (.Load (.-priority th)) 3)
+          (.Errorf t "a priority above the group's maximum: %d" (.Load (.-priority th))))
+        (.Impl_SetPriority_I__V th th 9)
+        (when (!= (.Load (.-priority th)) 3)
+          (.Error t "setPriority above the group's maximum"))))
+    ;; inheritInheritableThreadLocals (ITLConstructor)
+    (let [itl (InheritableThreadLocal_New)
+          seen (make (chan any) 2)]
+      (.Set_O__V itl (Str "parent"))
+      (range [_ inherit (lit (slice bool) true false)]
+        (let [th (Thread_New_ThreadGroup_Runnable_String_J_Z nil (RunnableOf (fn [] (>! seen (.Get__O itl)))) (Str "itl") 0 inherit)]
+          (.Start__V th)
+          (.Join__V th)))
+      (let [a (<! seen) b (<! seen)]
+        (when (or (== a nil) (!= b nil))
+          (.Errorf t "inheritance: %v %v" a b))))))

@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-# CDR10 (doc/CLOJURE-DESIGN-REVIEW.md; doc/go/JRT-NOTES.md, "Serialization"): jrt's variants of jdk26u's
+# CDR10 (doc/CLOJURE-DESIGN-REVIEW.md; doc/go/JRT-NOTES.md, "Serialization") and JCS167 (doc/classes/
+# JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 (write-ahead)"): jrt's variants of jdk26u's
 # java.io.ObjectStreamClass and ObjectInputStream (openjdk/jdk26u at baf63fb), made from jdk26u's text by
-# these edits, so that they are replayed on jdk26u's next revision:
-#   python3 test/jrt/serialization/variants.py JDK OUT   (JDK: jdk26u's checkout; OUT: a java.base tree)
-# ObjectStreamClass: the serializable constructor is jrt's allocation (jdk.internal.jrt.SerialAlloc,
+# these edits, so that they are replayed on jdk26u's next revision (JCS166 (a): to be ported to Arbace,
+# bin/jrt-convert derive):
+#   python3 test/jrt/serialization/variants.py JDK OUT   (JDK: jdk26u's checkout; OUT: a java.base tree,
+#   overlay/jdk/java.base for the committed overlays)
+# ObjectStreamClass: computeDefaultSUID returns the value computed ahead of time when there is one
+# (SerialAlloc.defaultSUID, JCS168); the serializable constructor is jrt's allocation (jdk.internal.jrt.SerialAlloc,
 # ReflectionFactory.newConstructorForSerialization's), the field reflector reads and writes fields by
 # java.lang.reflect.Field (Unsafe's offsets are not in the world), a record is made by its canonical
-# Constructor from the stream's values (RecordSupport.Ctr, method handles are not in the world), the
-# misdeclaration event is not raised (JFR is not in the world). ObjectInputStream: readRecord calls
-# RecordSupport.Ctr, freeze's fence is VarHandle.storeStoreFence's absence: Go's memory model publishes a
-# value through the synchronization that hands the graph over (jrt has no Unsafe).
+# Constructor from the stream's values (RecordSupport.Ctr, method handles are not in the world), a record's
+# components are its instance fields in declaration order (java.lang.reflect.RecordComponent is not in the
+# world; JLS 8.10.3: a record's instance fields are its components'), the misdeclaration event is not raised
+# (JFR is not in the world). ObjectInputStream: readRecord calls RecordSupport.Ctr, no DeserializationEvent,
+# freeze's fence is Unsafe.storeFence's absence: Go's memory model publishes a value through the
+# synchronization that hands the graph over (jrt has no Unsafe). JavaLangAccess (jrt's has countPositives,
+# inflateBytesToChars, countNonZeroAscii) and SharedSecrets' serialization accessors (j2g's, m/j2g-static?)
+# stay jdk26u's; ObjectOutputStream is jdk26u's unchanged.
 import re, sys, os
 jdk, out = sys.argv[1], sys.argv[2]
 src = jdk + '/src/java.base/share/classes/java/io/'
 HDR = '''/*
- * Arbace (CDR10, doc/CLOJURE-DESIGN-REVIEW.md, the user's decision of 2026-11-06): jrt's variant of
+ * Arbace (CDR10, doc/CLOJURE-DESIGN-REVIEW.md, the user's decision of 2026-11-06; JCS167 (a), the user's
+ * decision of 2026-11-07, doc/classes/JAVA-DEFERRED-TRIAGE.md): jrt's variant of
  * jdk26u's java.io.%s (openjdk/jdk26u at baf63fb, src/java.base/share/classes/java/io/%s.java),
  * made by test/jrt/serialization/variants.py from jdk26u's text (doc/go/JRT-NOTES.md, "Serialization");
  * otherwise jdk26u's text, under its notice below.
@@ -58,7 +67,8 @@ def replace_member(s, head, new):
 # ------------------------------------------------------------------- ObjectStreamClass
 s = open(src + 'ObjectStreamClass.java').read()
 for imp in ['import java.lang.invoke.MethodHandle;\n', 'import java.lang.invoke.MethodHandles;\n',
-            'import java.lang.invoke.MethodType;\n', 'import jdk.internal.event.SerializationMisdeclarationEvent;\n',
+            'import java.lang.invoke.MethodType;\n', 'import java.lang.reflect.RecordComponent;\n',
+            'import jdk.internal.event.SerializationMisdeclarationEvent;\n',
             'import jdk.internal.misc.Unsafe;\n', 'import jdk.internal.reflect.ReflectionFactory;\n']:
     s = sub(s, imp, '')
 s = sub(s, 'import jdk.internal.util.ByteArray;\n', 'import jdk.internal.jrt.SerialAlloc;\nimport jdk.internal.util.ByteArray;\n')
@@ -85,11 +95,28 @@ s = sub(s, '''        if (SerializationMisdeclarationEvent.enabled() && serializ
             SerializationMisdeclarationChecker.checkMisdeclarations(cl);
         }
 ''', '')
-s = replace_member(s, '    private static MethodHandle canonicalRecordCtr(Class<?> cls) {', '''    private static Constructor<?> canonicalRecordCtr(Class<?> cls) {
+s = replace_member(s, '    private static MethodHandle canonicalRecordCtr(Class<?> cls) {', '''    /**
+     * Arbace: the components of record class cls, as its instance fields in declaration order
+     * (java.lang.reflect.RecordComponent is not in the Go build's world; JLS 8.10.3: a record
+     * class's instance fields are its components').
+     */
+    static Field[] recordComponentFields(Class<?> cls) {
+        ArrayList<Field> fs = new ArrayList<>();
+        for (Field f : cls.getDeclaredFields()) {
+            if (!Modifier.isStatic(f.getModifiers())) {
+                fs.add(f);
+            }
+        }
+        return fs.toArray(new Field[0]);
+    }
+
+    private static Constructor<?> canonicalRecordCtr(Class<?> cls) {
         assert cls.isRecord() : "Expected record, got: " + cls;
-        Class<?>[] paramTypes = Arrays.stream(cls.getRecordComponents())
-                                      .map(RecordComponent::getType)
-                                      .toArray(Class<?>[]::new);
+        Field[] components = recordComponentFields(cls);
+        Class<?>[] paramTypes = new Class<?>[components.length];
+        for (int i = 0; i < components.length; i++) {
+            paramTypes[i] = components[i].getType();
+        }
         try {
             Constructor<?> ctr = cls.getDeclaredConstructor(paramTypes);
             ctr.setAccessible(true);
@@ -269,9 +296,10 @@ s = s.replace('            MethodHandle oldMh = putIfAbsent(key, mh);', '       
 # RecordSupport: the canonical constructor called with each component's stream value
 s = replace_member(s, '    static final class RecordSupport {', '''    static final class RecordSupport {
 
-        /** A record's construction from the stream's primitive and object field values. */
+        /** A record's construction from the stream's primitive and object field values (its
+         *  canonical constructor's own exception thrown as the JDK's method handle throws it). */
         interface Ctr {
-            Object construct(byte[] primValues, Object[] objValues) throws ReflectiveOperationException;
+            Object construct(byte[] primValues, Object[] objValues) throws Throwable;
         }
 
         /** The values' place of a component: a primitive at an offset, an object at an index, or none. */
@@ -289,7 +317,7 @@ s = replace_member(s, '    static final class RecordSupport {', '''    static fi
             mh = desc.deserializationCtrs.get(desc.getFields(false));
             if (mh != null) return desc.deserializationCtr = mh;
 
-            RecordComponent[] recordComponents = desc.forClass().getRecordComponents();
+            Field[] recordComponents = recordComponentFields(desc.forClass());
             Constructor<?> ctr = desc.getRecordConstructor();
             Arg[] args = new Arg[recordComponents.length];
             for (int i = 0; i < recordComponents.length; i++) {
@@ -302,7 +330,12 @@ s = replace_member(s, '    static final class RecordSupport {', '''    static fi
                           : args[i].prim() ? primValue(args[i].type(), primValues, args[i].at())
                           : objValues[args[i].at()];
                 }
-                return ctr.newInstance(vs);
+                try {
+                    return ctr.newInstance(vs);
+                } catch (InvocationTargetException e) {
+                    // the canonical constructor's own exception, as invokeExact throws it
+                    throw e.getCause();
+                }
             };
             return desc.deserializationCtr =
                 desc.deserializationCtrs.putIfAbsentAndGet(desc.getFields(false), mh);
@@ -367,6 +400,22 @@ s = replace_member(s, '    static final class RecordSupport {', '''    static fi
             return 0d;
         }
     }''')
+# the default serialVersionUID computed ahead of time (JCS168: ClassInfo.SerialUID, arbace.classes.suid)
+s = sub(s, '''        if (!Serializable.class.isAssignableFrom(cl) || Proxy.isProxyClass(cl))
+        {
+            return 0L;
+        }
+''', '''        if (!Serializable.class.isAssignableFrom(cl) || Proxy.isProxyClass(cl))
+        {
+            return 0L;
+        }
+        // Arbace (JCS168): the value computed ahead of time from the class's declaration as javac
+        // compiles it (j2g's, the Java forms' host's): reflection over a class of the Go build sees the
+        // members its table lists, not every member javac wrote
+        if (SerialAlloc.hasDefaultSUID(cl)) {
+            return SerialAlloc.defaultSUID(cl);
+        }
+''')
 os.makedirs(out + '/java/io', exist_ok=True)
 open(out + '/java/io/ObjectStreamClass.java', 'w').write(HDR % ('ObjectStreamClass', 'ObjectStreamClass') + s)
 
@@ -385,53 +434,9 @@ s = sub(s, '    private static final Unsafe UNSAFE = Unsafe.getUnsafe();\n', '')
 s = sub(s, '''        UNSAFE.storeFence();''', '''        // Arbace: no fence; Go's memory model publishes the graph through the synchronization
         // that hands it to another goroutine (jrt has no Unsafe)''')
 s = sub(s, 'import jdk.internal.event.DeserializationEvent;\n', '')
-s = sub(s, 'import jdk.internal.access.JavaLangAccess;\nimport jdk.internal.access.SharedSecrets;\n', '')
 i = s.index('        DeserializationEvent event = new DeserializationEvent();')
 j = s.index('        if (serialFilter != null && (status == null', i)
 s = s[:i] + '        // Arbace: no DeserializationEvent (JFR is not in the world)\n' + s[j:]
-s = sub(s, '''        /** access to internal methods to count ASCII and inflate latin1/ASCII bytes to char */
-        private static final JavaLangAccess JLA = SharedSecrets.getJavaLangAccess();
-''', '''        /** Arbace: JavaLangAccess's countPositives and inflateBytesToChars (SharedSecrets is not in the world) */
-        private static int countPositives(byte[] ba, int off, int len) {
-            int limit = off + len;
-            for (int i = off; i < limit; i++) {
-                if (ba[i] < 0) {
-                    return i - off;
-                }
-            }
-            return len;
-        }
-
-        private static void inflateBytesToChars(byte[] src, int srcOff, char[] dst, int dstOff, int len) {
-            for (int i = 0; i < len; i++) {
-                dst[dstOff + i] = (char) (src[srcOff + i] & 0xff);
-            }
-        }
-''')
-s = sub(s, 'JLA.countPositives(', 'countPositives(')
-s = sub(s, 'JLA.inflateBytesToChars(', 'inflateBytesToChars(')
-s = sub(s, '''    static {
-        SharedSecrets.setJavaObjectInputStreamAccess(ObjectInputStream::checkArray);
-        SharedSecrets.setJavaObjectInputStreamReadString(ObjectInputStream::readString);
-    }
-''', "    // Arbace: ObjectInputStream's SharedSecrets accessors are not set (SharedSecrets is not in the world)\n")
 open(out + '/java/io/ObjectInputStream.java', 'w').write(HDR % ('ObjectInputStream', 'ObjectInputStream') + s)
 
-# ------------------------------------------------------------------- ObjectOutputStream
-s = open(src + 'ObjectOutputStream.java').read()
-s = sub(s, 'import jdk.internal.access.JavaLangAccess;\nimport jdk.internal.access.SharedSecrets;\n', '')
-s = sub(s, '    private static final JavaLangAccess JLA = SharedSecrets.getJavaLangAccess();\n', '''    /** Arbace: JavaLangAccess's countNonZeroAscii (SharedSecrets is not in the world) */
-    private static int countNonZeroAscii(String s) {
-        int n = s.length();
-        for (int i = 0; i < n; i++) {
-            char c = s.charAt(i);
-            if (c == 0 || c >= 0x80) {
-                return i;
-            }
-        }
-        return n;
-    }
-''')
-s = sub(s, 'JLA.countNonZeroAscii(str)', 'countNonZeroAscii(str)')
-open(out + '/java/io/ObjectOutputStream.java', 'w').write(HDR % ('ObjectOutputStream', 'ObjectOutputStream') + s)
-print('variants.py: ObjectStreamClass, ObjectInputStream, ObjectOutputStream written into', out)
+print('variants.py: ObjectStreamClass, ObjectInputStream written into', out)

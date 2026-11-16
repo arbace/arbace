@@ -1,0 +1,317 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/security/ntlm/NTLM.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.security.ntlm)
+
+(import '(java.io IOException)
+        '(java.nio.charset Charset StandardCharsets)
+        '(java.security InvalidKeyException MessageDigest NoSuchAlgorithmException)
+        '(java.security.spec InvalidKeySpecException)
+        '(java.util Arrays Locale)
+        '(javax.crypto BadPaddingException
+                       Cipher
+                       IllegalBlockSizeException
+                       Mac
+                       NoSuchPaddingException
+                       SecretKeyFactory)
+        '(javax.crypto.spec DESKeySpec SecretKeySpec)
+        '(sun.security.provider MD4)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass NTLM
+  (field ^:private ^:final ^SecretKeyFactory fac)
+
+  (field ^:private ^:final ^Cipher cipher)
+
+  (field ^:private ^:final ^MessageDigest md4)
+
+  (field ^:private ^:final ^Mac hmac)
+
+  (field ^:private ^:final ^MessageDigest md5)
+
+  (field ^:private ^:static ^:final ^boolean DEBUG (Boolean/getBoolean "ntlm.debug"))
+
+  (field ^:final ^Version v)
+
+  (field ^:final ^boolean writeLM)
+
+  (field ^:final ^boolean writeNTLM)
+
+  (constructor :throws [NTLMException] ^:protected [this ^:mutable ^String version]
+    (when (nil? version) (set! version "LMv2/NTLMv2"))
+    (switch version
+      "LM" (do (set! v Version/NTLM) (set! writeLM true) (set! writeNTLM false))
+      "NTLM" (do (set! v Version/NTLM) (set! writeLM false) (set! writeNTLM true))
+      "LM/NTLM" (do (set! v Version/NTLM) (set! writeLM (set! writeNTLM true)))
+      "NTLM2" (do (set! v Version/NTLM2) (set! writeLM (set! writeNTLM true)))
+      "LMv2" (do (set! v Version/NTLMv2) (set! writeLM true) (set! writeNTLM false))
+      "NTLMv2" (do (set! v Version/NTLMv2) (set! writeLM false) (set! writeNTLM true))
+      "LMv2/NTLMv2" (do (set! v Version/NTLMv2) (set! writeLM (set! writeNTLM true)))
+      (throw (NTLMException. NTLMException/BAD_VERSION (java-str "Unknown version " version))))
+    (try
+      (set! fac (SecretKeyFactory/getInstance "DES"))
+      (set! cipher (Cipher/getInstance "DES/ECB/NoPadding"))
+      (set! md4 (MD4/getInstance))
+      (set! hmac (Mac/getInstance "HmacMD5"))
+      (set! md5 (MessageDigest/getInstance "MD5"))
+      (catch [NoSuchPaddingException NoSuchAlgorithmException] e (throw (AssertionError.)))))
+
+  (method ^:public debug ^void [this ^String format & ^Object/1 args]
+    (when DEBUG (.printf System/out format args)))
+
+  (method ^:public debug ^void [this ^byte/1 bytes]
+    (when DEBUG (try (.encodeBuffer (HexDumpEncoder.) bytes System/out) (catch IOException ioe))))
+
+  (defclass ^:static Reader
+    (field ^:private ^:final ^byte/1 internal)
+
+    (constructor [this ^byte/1 data] (set! internal data))
+
+    (method readInt :throws [NTLMException] ^int [this ^int offset]
+      (try
+        (unchecked-add-int
+          (unchecked-add-int
+            (unchecked-add-int (bit-and-int (aget internal offset) 0xff)
+                               (bit-shift-left-int
+                                 (bit-and-int (aget internal (unchecked-add-int offset 1)) 0xff)
+                                 8))
+            (bit-shift-left-int (bit-and-int (aget internal (unchecked-add-int offset 2)) 0xff) 16))
+          (bit-shift-left-int (bit-and-int (aget internal (unchecked-add-int offset 3)) 0xff) 24))
+        (catch ArrayIndexOutOfBoundsException ex
+          (throw (NTLMException. NTLMException/PACKET_READ_ERROR "Input message incorrect size")))))
+
+    (method readShort :throws [NTLMException] ^int [this ^int offset]
+      (try
+        (unchecked-add-int (bit-and-int (aget internal offset) 0xff)
+                           (bit-shift-left-int
+                             (bit-and-int (aget internal (unchecked-add-int offset 1)) 0xff)
+                             8))
+        (catch ArrayIndexOutOfBoundsException ex
+          (throw (NTLMException. NTLMException/PACKET_READ_ERROR "Input message incorrect size")))))
+
+    (method readBytes :throws [NTLMException] ^byte/1 [this ^int offset ^int len]
+      (try
+        (Arrays/copyOfRange internal offset (unchecked-add-int offset len))
+        (catch ArrayIndexOutOfBoundsException ex
+          (throw (NTLMException. NTLMException/PACKET_READ_ERROR "Input message incorrect size")))))
+
+    (method readSecurityBuffer :throws [NTLMException] ^byte/1 [this ^int offset]
+      (let [pos (.readInt this (unchecked-add-int offset 4))]
+        (if (== pos 0)
+            (new byte/1 0)
+            (try
+              (Arrays/copyOfRange internal pos (unchecked-add-int pos (.readShort this offset)))
+              (catch ArrayIndexOutOfBoundsException ex
+                (throw (NTLMException. NTLMException/PACKET_READ_ERROR
+                                       "Input message incorrect size")))))))
+
+    (method readSecurityBuffer :throws [NTLMException] ^String [this ^int offset ^boolean unicode]
+      (let [raw (.readSecurityBuffer this offset)]
+        (when (some? raw)
+          (String. raw ^Charset (if unicode StandardCharsets/UTF_16LE StandardCharsets/ISO_8859_1))))))
+
+  (defclass ^:static Writer
+    (field ^:private ^byte/1 internal)
+
+    (field ^:private ^int current)
+
+    (constructor [this ^int type ^int len]
+      (java-assert (< len 256))
+      (set! internal (new byte/1 256))
+      (set! current len)
+      (System/arraycopy
+        (new byte/1
+             [(unchecked-byte \N)
+              (unchecked-byte \T)
+              (unchecked-byte \L)
+              (unchecked-byte \M)
+              (unchecked-byte \S)
+              (unchecked-byte \S)
+              (unchecked-byte \P)
+              0
+              (unchecked-byte type)])
+        0
+        internal
+        0
+        9))
+
+    (method writeShort ^void [this ^int offset ^int number]
+      (aset internal offset (unchecked-byte number))
+      (aset internal (unchecked-add-int offset 1) (unchecked-byte (bit-shift-right-int number 8))))
+
+    (method writeInt ^void [this ^int offset ^int number]
+      (aset internal offset (unchecked-byte number))
+      (aset internal (unchecked-add-int offset 1) (unchecked-byte (bit-shift-right-int number 8)))
+      (aset internal (unchecked-add-int offset 2) (unchecked-byte (bit-shift-right-int number 16)))
+      (aset internal (unchecked-add-int offset 3) (unchecked-byte (bit-shift-right-int number 24))))
+
+    (method writeBytes ^void [this ^int offset ^byte/1 data]
+      (System/arraycopy data 0 internal offset (alength data)))
+
+    (method writeSecurityBuffer :throws [NTLMException] ^void [this ^int offset ^byte/1 data]
+      (if (nil? data)
+          (.writeInt this (unchecked-add-int offset 4) current)
+          (let [len (alength data)]
+            (when (> len 65535)
+              (throw (NTLMException. NTLMException/INVALID_INPUT
+                                     (java-str "Invalid data length " len))))
+            (when (> (unchecked-add-int current len) (alength internal))
+              (set!
+                internal
+                (Arrays/copyOf internal (unchecked-add-int (unchecked-add-int current len) 256))))
+            (.writeShort this offset len)
+            (.writeShort this (unchecked-add-int offset 2) len)
+            (.writeInt this (unchecked-add-int offset 4) current)
+            (System/arraycopy data 0 internal current len)
+            (set! current (unchecked-add-int current len)))))
+
+    (method writeSecurityBuffer :throws [NTLMException] ^void [this ^int offset ^String str
+                                                               ^boolean unicode]
+      (.writeSecurityBuffer this
+                            offset
+                            ^byte/1 (when (some? str)
+                                      (.getBytes
+                                        str
+                                        ^Charset (if unicode
+                                                     StandardCharsets/UTF_16LE
+                                                     StandardCharsets/ISO_8859_1)))))
+
+    (method getBytes ^byte/1 [this] (Arrays/copyOf internal current)))
+
+  (method makeDesKey ^byte/1 [this ^byte/1 input ^int off]
+    (let [in (new int/1 (alength input))]
+      (loop [^int i 0]
+        (when (< i (alength in))
+          (aset in
+                i
+                (if (< (aget input i) 0)
+                    (unchecked-add-int (aget input i) 256)
+                    (int (aget input i))))
+          (recur (unchecked-inc-int i))))
+      (let [out (new byte/1 8)]
+        (aset out 0 (unchecked-byte (aget in (unchecked-add-int off 0))))
+        (aset out
+              1
+              (unchecked-byte
+                (bit-or-int (bit-and-int (bit-shift-left-int (aget in (unchecked-add-int off 0)) 7)
+                                         0xFF)
+                            (bit-shift-right-int (aget in (unchecked-add-int off 1)) 1))))
+        (aset out
+              2
+              (unchecked-byte
+                (bit-or-int (bit-and-int (bit-shift-left-int (aget in (unchecked-add-int off 1)) 6)
+                                         0xFF)
+                            (bit-shift-right-int (aget in (unchecked-add-int off 2)) 2))))
+        (aset out
+              3
+              (unchecked-byte
+                (bit-or-int (bit-and-int (bit-shift-left-int (aget in (unchecked-add-int off 2)) 5)
+                                         0xFF)
+                            (bit-shift-right-int (aget in (unchecked-add-int off 3)) 3))))
+        (aset out
+              4
+              (unchecked-byte
+                (bit-or-int (bit-and-int (bit-shift-left-int (aget in (unchecked-add-int off 3)) 4)
+                                         0xFF)
+                            (bit-shift-right-int (aget in (unchecked-add-int off 4)) 4))))
+        (aset out
+              5
+              (unchecked-byte
+                (bit-or-int (bit-and-int (bit-shift-left-int (aget in (unchecked-add-int off 4)) 3)
+                                         0xFF)
+                            (bit-shift-right-int (aget in (unchecked-add-int off 5)) 5))))
+        (aset out
+              6
+              (unchecked-byte
+                (bit-or-int (bit-and-int (bit-shift-left-int (aget in (unchecked-add-int off 5)) 2)
+                                         0xFF)
+                            (bit-shift-right-int (aget in (unchecked-add-int off 6)) 6))))
+        (aset out
+              7
+              (unchecked-byte
+                (bit-and-int (bit-shift-left-int (aget in (unchecked-add-int off 6)) 1) 0xFF)))
+        out)))
+
+  (method calcLMHash ^byte/1 [this ^byte/1 pwb]
+    (let [magic (new byte/1 [0x4b 0x47 0x53 0x21 0x40 0x23 0x24 0x25])
+          pwb1 (new byte/1 14)
+          ^:mutable len (alength pwb)]
+      (when (> len 14) (set! len 14))
+      (System/arraycopy pwb 0 pwb1 0 len)
+      (try
+        (let [dks1 (DESKeySpec. (.makeDesKey this pwb1 0))
+              dks2 (DESKeySpec. (.makeDesKey this pwb1 7))
+              key1 (.generateSecret fac dks1)
+              key2 (.generateSecret fac dks2)]
+          (.init cipher Cipher/ENCRYPT_MODE key1)
+          (let [out1 (.doFinal cipher magic 0 8)]
+            (.init cipher Cipher/ENCRYPT_MODE key2)
+            (let [out2 (.doFinal cipher magic 0 8)
+                  result (new byte/1 21)]
+              (System/arraycopy out1 0 result 0 8)
+              (System/arraycopy out2 0 result 8 8)
+              (return result))))
+        (catch InvalidKeyException ive (java-assert false))
+        (catch InvalidKeySpecException ikse (java-assert false))
+        (catch IllegalBlockSizeException ibse (java-assert false))
+        (catch BadPaddingException bpe (java-assert false)))
+      nil))
+
+  (method calcNTHash ^byte/1 [this ^byte/1 pw]
+    (let [out (.digest md4 pw) result (new byte/1 21)] (System/arraycopy out 0 result 0 16) result))
+
+  (method calcResponse ^byte/1 [this ^byte/1 key ^byte/1 text]
+    (try
+      (java-assert (== (alength key) 21))
+      (let [dks1 (DESKeySpec. (.makeDesKey this key 0))
+            dks2 (DESKeySpec. (.makeDesKey this key 7))
+            dks3 (DESKeySpec. (.makeDesKey this key 14))
+            key1 (.generateSecret fac dks1)
+            key2 (.generateSecret fac dks2)
+            key3 (.generateSecret fac dks3)]
+        (.init cipher Cipher/ENCRYPT_MODE key1)
+        (let [out1 (.doFinal cipher text 0 8)]
+          (.init cipher Cipher/ENCRYPT_MODE key2)
+          (let [out2 (.doFinal cipher text 0 8)]
+            (.init cipher Cipher/ENCRYPT_MODE key3)
+            (let [out3 (.doFinal cipher text 0 8)
+                  result (new byte/1 24)]
+              (System/arraycopy out1 0 result 0 8)
+              (System/arraycopy out2 0 result 8 8)
+              (System/arraycopy out3 0 result 16 8)
+              (return result)))))
+      (catch IllegalBlockSizeException ex (java-assert false))
+      (catch [BadPaddingException InvalidKeyException InvalidKeySpecException] ex
+        (java-assert false)))
+    nil)
+
+  (method hmacMD5 ^byte/1 [this ^byte/1 key ^byte/1 text]
+    (try
+      (let [skey (SecretKeySpec. (Arrays/copyOf key 16) "HmacMD5")]
+        (.init hmac skey)
+        (return (.doFinal hmac text)))
+      (catch [InvalidKeyException RuntimeException] e (java-assert false)))
+    nil)
+
+  (method calcV2 ^byte/1 [this ^byte/1 nthash ^String text ^byte/1 blob ^byte/1 challenge]
+    (let [ntlmv2hash (.hmacMD5 this nthash (.getBytes text StandardCharsets/UTF_16LE))
+          cn (new byte/1 (unchecked-add-int (alength blob) 8))]
+      (System/arraycopy challenge 0 cn 0 8)
+      (System/arraycopy blob 0 cn 8 (alength blob))
+      (let [result (new byte/1 (unchecked-add-int 16 (alength blob)))]
+        (System/arraycopy (.hmacMD5 this ntlmv2hash cn) 0 result 0 16)
+        (System/arraycopy blob 0 result 16 (alength blob))
+        result)))
+
+  (method ^:static ntlm2LM ^byte/1 [^byte/1 nonce]
+    (Arrays/copyOf nonce 24))
+
+  (method ntlm2NTLM ^byte/1 [this ^byte/1 ntlmHash ^byte/1 nonce ^byte/1 challenge]
+    (let [b (Arrays/copyOf challenge 16)]
+      (System/arraycopy nonce 0 b 8 8)
+      (let [sesshash (Arrays/copyOf (.digest md5 b) 8)] (.calcResponse this ntlmHash sesshash))))
+
+  (method ^:static getP1 ^byte/1 [^char/1 password]
+    (.getBytes (.toUpperCase (String. password) Locale/ENGLISH) StandardCharsets/ISO_8859_1))
+
+  (method ^:static getP2 ^byte/1 [^char/1 password]
+    (.getBytes (String. password) StandardCharsets/UTF_16LE)))

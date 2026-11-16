@@ -1,0 +1,161 @@
+;; Converted from overlay/jdk/java.base/sun/nio/fs/UnixChannelFactory.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io FileDescriptor)
+        '(java.nio.channels AsynchronousFileChannel FileChannel)
+        '(java.nio.file LinkOption OpenOption StandardOpenOption)
+        '(java.util Set)
+        '(jdk.internal.jrt HostFiles)
+        '(sun.nio.ch FileChannelImpl SimpleAsynchronousFileChannelImpl ThreadPool))
+
+(defclass UnixChannelFactory
+  (constructor ^:protected [this])
+
+  (defclass ^:protected ^:static Flags
+    (field ^boolean read)
+
+    (field ^boolean write)
+
+    (field ^boolean append)
+
+    (field ^boolean truncateExisting)
+
+    (field ^boolean noFollowLinks)
+
+    (field ^boolean create)
+
+    (field ^boolean createNew)
+
+    (field ^boolean deleteOnClose)
+
+    (field ^boolean sync)
+
+    (field ^boolean dsync)
+
+    (field ^boolean direct)
+
+    (method ^:static toFlags ^Flags [^{:tag (Set (? extends OpenOption))} options]
+      (let [flags (Flags.)]
+        (for-each [^OpenOption option options]
+          (cond
+            (instance? StandardOpenOption option)
+              (switch (cast StandardOpenOption option)
+                READ (set! (.-read flags) true)
+                WRITE (set! (.-write flags) true)
+                APPEND (set! (.-append flags) true)
+                TRUNCATE_EXISTING (set! (.-truncateExisting flags) true)
+                CREATE (set! (.-create flags) true)
+                CREATE_NEW (set! (.-createNew flags) true)
+                DELETE_ON_CLOSE (set! (.-deleteOnClose flags) true)
+                SPARSE nil
+                SYNC (set! (.-sync flags) true)
+                DSYNC (set! (.-dsync flags) true)
+                (throw (UnsupportedOperationException.)))
+            (and (identical? option LinkOption/NOFOLLOW_LINKS)
+                 (not (== UnixConstants/O_NOFOLLOW 0)))
+              (set! (.-noFollowLinks flags) true)
+            (.matches ExtendedOptions/DIRECT option) (set! (.-direct flags) true)
+            :else
+              (do
+                (when (nil? option) (throw (NullPointerException.)))
+                (throw (UnsupportedOperationException. (java-str option " not supported"))))))
+        flags)))
+
+  (method ^:static newFileChannel :throws [UnixException] ^FileChannel [^int dfd ^UnixPath path
+                                                                        ^{:tag (Set (? extends OpenOption))} options
+                                                                        ^int mode]
+    (let [flags (Flags/toFlags options)]
+      (when (and (not (.-read flags)) (not (.-write flags)))
+        (if (.-append flags) (set! (.-write flags) true) (set! (.-read flags) true)))
+      (when (and (.-read flags) (.-append flags))
+        (throw (IllegalArgumentException. "READ + APPEND not allowed")))
+      (when (and (.-append flags) (.-truncateExisting flags))
+        (throw (IllegalArgumentException. "APPEND + TRUNCATE_EXISTING not allowed")))
+      (let [fdObj (UnixChannelFactory/open dfd path flags mode)]
+        (if (.-append flags)
+            (FileChannelImpl/open fdObj (.toString path) (.-read flags) (.-write flags) true nil)
+            (FileChannelImpl/open fdObj
+                                  (.toString path)
+                                  (.-read flags)
+                                  (.-write flags)
+                                  (or (.-sync flags) (.-dsync flags))
+                                  (.-direct flags)
+                                  nil)))))
+
+  (method ^:static newFileChannel :throws [UnixException] ^FileChannel [^UnixPath path
+                                                                        ^{:tag (Set (? extends OpenOption))} options
+                                                                        ^int mode]
+    (UnixChannelFactory/newFileChannel -1 path options mode))
+
+  (method ^:static newAsynchronousFileChannel :throws [UnixException] ^AsynchronousFileChannel [^UnixPath path
+                                                                                                ^{:tag (Set (? extends OpenOption))} options
+                                                                                                ^int mode
+                                                                                                ^ThreadPool pool]
+    (let [flags (Flags/toFlags options)]
+      (when (and (not (.-read flags)) (not (.-write flags))) (set! (.-read flags) true))
+      (when (.-append flags) (throw (UnsupportedOperationException. "APPEND not allowed")))
+      (let [fdObj (UnixChannelFactory/open -1 path flags mode)]
+        (SimpleAsynchronousFileChannelImpl/open fdObj
+                                                (.toString path)
+                                                (.-read flags)
+                                                (.-write flags)
+                                                pool))))
+
+  (method ^:protected ^:static open :throws [UnixException] ^FileDescriptor [^int dfd ^UnixPath path
+                                                                             ^Flags flags ^int mode]
+    (let [^:mutable ^int oflags (cond
+                                  (and (.-read flags) (.-write flags)) UnixConstants/O_RDWR
+                                  (.-write flags) UnixConstants/O_WRONLY
+                                  :else UnixConstants/O_RDONLY)]
+      (when (.-write flags)
+        (when (.-truncateExisting flags) (set! oflags (bit-or-int oflags UnixConstants/O_TRUNC)))
+        (when (.-append flags) (set! oflags (bit-or-int oflags UnixConstants/O_APPEND)))
+        (cond
+          (.-createNew flags)
+            (let [pathForSysCall (.getByteArrayForSysCalls path)]
+              (when (and (== (aget pathForSysCall
+                                   (unchecked-subtract-int (alength pathForSysCall) 1))
+                             \.)
+                         (or (== (alength pathForSysCall) 1)
+                             (== (aget pathForSysCall
+                                       (unchecked-subtract-int (alength pathForSysCall) 2))
+                                 \/)))
+                (throw (UnixException. UnixConstants/EEXIST)))
+              (set! oflags
+                    (bit-or-int oflags (bit-or-int UnixConstants/O_CREAT UnixConstants/O_EXCL))))
+          (.-create flags) (set! oflags (bit-or-int oflags UnixConstants/O_CREAT))))
+      (let [^:mutable followLinks true]
+        (when (and (not (.-createNew flags)) (or (.-noFollowLinks flags) (.-deleteOnClose flags)))
+          (when (and (.-deleteOnClose flags) (== UnixConstants/O_NOFOLLOW 0))
+            (try
+              (when (.isSymbolicLink (UnixFileAttributes/get path false))
+                (throw (UnixException. "DELETE_ON_CLOSE specified and file is a symbolic link")))
+              (catch UnixException x
+                (when (or (not (.-create flags)) (not (== (.errno x) UnixConstants/ENOENT)))
+                  (throw x)))))
+          (set! followLinks false)
+          (set! oflags (bit-or-int oflags UnixConstants/O_NOFOLLOW)))
+        (when (.-dsync flags) (set! oflags (bit-or-int oflags UnixConstants/O_DSYNC)))
+        (when (.-sync flags) (set! oflags (bit-or-int oflags UnixConstants/O_SYNC)))
+        (when (.-direct flags) (set! oflags (bit-or-int oflags UnixConstants/O_DIRECT)))
+        (let [^:mutable ^int fd 0]
+          (try
+            (if (>= dfd 0)
+                (set! fd (UnixNativeDispatcher/openat dfd (.asByteArray path) oflags mode))
+                (set! fd (UnixNativeDispatcher/open path oflags mode)))
+            (catch UnixException ^:mutable x
+              (when (and (.-createNew flags) (== (.errno x) UnixConstants/EISDIR))
+                (.setError x UnixConstants/EEXIST))
+              (when (and (not followLinks) (== (.errno x) UnixConstants/ELOOP))
+                (set! x (UnixException. (java-str (.getMessage x) " (NOFOLLOW_LINKS specified)"))))
+              (throw x)))
+          (when (.-deleteOnClose flags)
+            (try
+              (if (>= dfd 0)
+                  (UnixNativeDispatcher/unlinkat dfd (.asByteArray path) 0)
+                  (UnixNativeDispatcher/unlink path))
+              (catch UnixException ignore)))
+          (let [fdObj (FileDescriptor.)]
+            (HostFiles/setHandle fdObj (HostFiles/adopt fd (.toString path)))
+            fdObj))))))

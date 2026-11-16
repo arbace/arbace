@@ -1,0 +1,125 @@
+;; Converted from overlay/jdk/java.base/com/sun/jmx/remote/internal/ClientCommunicatorAdmin.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.remote.internal)
+
+(import '(com.sun.jmx.remote.util ClassLogger EnvHelp)
+        '(java.io IOException InterruptedIOException))
+
+(defclass ^:public ^:abstract ClientCommunicatorAdmin
+  (field ^:private ^:static ^:volatile ^long threadNo 1)
+
+  (constructor ^:public [this ^long period]
+    (set! (.-period this) period)
+    (if (> period 0)
+        (do
+          (set! checker (Checker.))
+          (let [t (Thread. checker
+                           (java-str "JMX client heartbeat "
+                                     (set! threadNo (unchecked-inc threadNo))))]
+            (.setDaemon t true)
+            (.start t)))
+        (set! checker nil)))
+
+  (method ^:public gotIOException :throws [IOException] ^void [this ^IOException ioe]
+    (.restart this ioe))
+
+  (method ^:protected ^:abstract checkConnection :throws [IOException] ^void [this])
+
+  (method ^:protected ^:abstract doStart :throws [IOException] ^void [this])
+
+  (method ^:protected ^:abstract doStop ^void [this])
+
+  (method ^:public terminate ^void [this]
+    (locking lock
+      (when-not (== state TERMINATED)
+        (set! state TERMINATED)
+        (.notifyAll lock)
+        (when (some? checker) (.stop checker)))))
+
+  (method ^:private restart :throws [IOException] ^void [this ^IOException ioe]
+    (locking lock
+      (cond
+        (== state TERMINATED) (throw (IOException. "The client has been closed."))
+        (== state FAILED) (throw ioe)
+        (== state RE_CONNECTING)
+          (do
+            (while (== state RE_CONNECTING)
+              (try
+                (.wait lock)
+                (catch InterruptedException ire
+                  (let [iioe (InterruptedIOException. (.toString ire))]
+                    (EnvHelp/initCause iioe ire)
+                    (throw iioe)))))
+            (if (== state TERMINATED)
+                (throw (IOException. "The client has been closed."))
+                (when-not (== state CONNECTED) (throw ioe)))
+            (return))
+        :else (do (set! state RE_CONNECTING) (.notifyAll lock))))
+    (try
+      (.doStart this)
+      (locking lock
+        (when (== state TERMINATED) (throw (IOException. "The client has been closed.")))
+        (set! state CONNECTED)
+        (.notifyAll lock))
+      (catch Exception e
+        (.warning logger "restart" (java-str "Failed to restart: " e))
+        (.debug logger "restart" e)
+        (locking lock
+          (when (== state TERMINATED) (throw (IOException. "The client has been closed.")))
+          (set! state FAILED)
+          (.notifyAll lock))
+        (try (.doStop this) (catch Exception eee))
+        (.terminate this)
+        (throw ioe))))
+
+  (defclass ^:private Checker
+    :implements [Runnable]
+
+    (method ^:public run ^void [this]
+      (set! myThread (Thread/currentThread))
+      (while (and (not (== state TERMINATED)) (not (.isInterrupted myThread)))
+        (try (Thread/sleep period) (catch InterruptedException ire))
+        (when (or (== state TERMINATED) (.isInterrupted myThread)) (break))
+        (try
+          (.checkConnection ClientCommunicatorAdmin/this)
+          (catch Exception ^:mutable e
+            (locking lock (when (or (== state TERMINATED) (.isInterrupted myThread)) (break)))
+            (set! e (cast Exception (EnvHelp/getCause e)))
+            (if (and (instance? IOException e) (not (instance? InterruptedIOException e)))
+                (try
+                  (.gotIOException ClientCommunicatorAdmin/this (cast IOException e))
+                  (catch Exception ee
+                    (.warning logger "Checker-run" (java-str "Failed to check connection: " e))
+                    (.warning logger "Checker-run" "stopping")
+                    (.debug logger "Checker-run" e)
+                    (break)))
+                (do
+                  (.warning logger "Checker-run" (java-str "Failed to check the connection: " e))
+                  (.debug logger "Checker-run" e)
+                  (break))))))
+      (when (.traceOn logger) (.trace logger "Checker-run" "Finished.")))
+
+    (method ^:private stop ^void [this]
+      (when (and (some? myThread) (not (identical? myThread (Thread/currentThread))))
+        (.interrupt myThread)))
+
+    (field ^:private ^Thread myThread))
+
+  (field ^:private ^:final ^Checker checker)
+
+  (field ^:private ^long period)
+
+  (field ^:private ^:static ^:final ^int CONNECTED 0)
+
+  (field ^:private ^:static ^:final ^int RE_CONNECTING 1)
+
+  (field ^:private ^:static ^:final ^int FAILED 2)
+
+  (field ^:private ^:static ^:final ^int TERMINATED 3)
+
+  (field ^:private ^int state CONNECTED)
+
+  (field ^:private ^:final ^int/1 lock (new int/1 0))
+
+  (field ^:private ^:static ^:final ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.misc" "ClientCommunicatorAdmin")))

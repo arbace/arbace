@@ -1,0 +1,566 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/net/http/Exchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net ProtocolException)
+        '(java.net.http HttpClient$Version
+                        HttpResponse
+                        HttpResponse$BodyHandler
+                        HttpResponse$BodySubscriber
+                        HttpResponse$BodySubscribers
+                        HttpResponse$ResponseInfo
+                        HttpTimeoutException)
+        '(java.nio ByteBuffer)
+        '(java.time Duration)
+        '(java.util Optional)
+        '(java.util.concurrent CompletableFuture CompletionStage TimeUnit)
+        '(java.util.concurrent.atomic AtomicInteger AtomicReference)
+        '(java.util.function BiConsumer BiFunction Function Supplier)
+        '(jdk.internal.net.http.common Log Logger MinimalFuture Utils))
+
+(defclass ^:final Exchange
+  :type-params [T]
+
+  (field ^:static ^:final ^int MAX_NON_FINAL_RESPONSES
+    (Utils/getIntegerNetProperty "jdk.httpclient.maxNonFinalResponses" 8))
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this Exchange/.dbgString) Utils/DEBUG))
+
+  (field ^:final ^HttpRequestImpl request)
+
+  (field ^:final ^HttpClientImpl client)
+
+  (field ^:volatile ^{:tag (ExchangeImpl T)} exchImpl)
+
+  (field ^:volatile ^{:tag (CompletableFuture (? extends (ExchangeImpl T)))} exchangeCF)
+
+  (field ^:volatile ^{:tag (CompletableFuture Void)} bodyIgnored)
+
+  (field ^:volatile ^boolean streamLimitReached)
+
+  (field ^:private ^:final ^{:tag (AtomicReference IOException)} failed (AtomicReference.))
+
+  (field ^:final ^{:tag (MultiExchange T)} multi)
+
+  (field ^:final ^HttpClientImpl$DelegatingExecutor parentExecutor)
+
+  (field ^:volatile ^boolean upgrading)
+
+  (field ^:volatile ^boolean upgraded)
+
+  (field ^:final ^{:tag (PushGroup T)} pushGroup)
+
+  (field ^:final ^String dbgTag)
+
+  (field ^:final ^ConnectionAborter connectionAborter (ConnectionAborter.))
+
+  (field ^:final ^AtomicInteger nonFinalResponses (AtomicInteger.))
+
+  (field ^:private ^:volatile ^boolean unprocessedByPeer)
+
+  (constructor [this ^HttpRequestImpl request ^{:tag (MultiExchange T)} multi]
+    (set! (.-request this) request)
+    (set! (.-upgrading this) false)
+    (set! (.-client this) (.client multi))
+    (set! (.-multi this) multi)
+    (set! (.-parentExecutor this) (.-executor multi))
+    (set! (.-pushGroup this) (.-pushGroup multi))
+    (set! (.-dbgTag this) "Exchange"))
+
+  (method getPushGroup ^{:tag (PushGroup T)} [this] pushGroup)
+
+  (method executor ^HttpClientImpl$DelegatingExecutor [this]
+    parentExecutor)
+
+  (method ^:public request ^HttpRequestImpl [this] request)
+
+  (method ^:public remainingConnectTimeout ^{:tag (Optional Duration)} [this]
+    (.remainingConnectTimeout multi))
+
+  (method client ^HttpClientImpl [this] client)
+
+  (defclass ^:final ConnectionAborter
+    (field ^:private ^:volatile ^HttpConnection connection)
+
+    (field ^:private ^:volatile ^HttpConnection quicConnection)
+
+    (field ^:private ^:volatile ^boolean closeRequested)
+
+    (field ^:private ^:volatile ^Throwable cause)
+
+    (method connection ^void [this ^HttpConnection connection]
+      (let [^:mutable ^boolean closeRequested false]
+        (locking this
+          (set! closeRequested (.-closeRequested this))
+          (when-not closeRequested (set! (.-connection this) connection)))
+        (when closeRequested (.closeConnection this connection cause))))
+
+    (method closeConnection ^void [this ^Throwable error]
+      (let [^:mutable ^HttpConnection connection nil
+            ^:mutable ^HttpConnection quicConnection nil
+            ^:mutable ^Throwable cause nil]
+        (locking this
+          (set! cause (.-cause this))
+          (when (nil? cause) (set! cause error))
+          (set! connection (.-connection this))
+          (set! quicConnection (.-quicConnection this))
+          (if (or (nil? connection) (nil? quicConnection))
+              (do (set! closeRequested true) (set! (.-cause this) cause))
+              (do
+                (set! (.-quicConnection this) nil)
+                (set! (.-connection this) nil)
+                (set! (.-cause this) nil))))
+        (.closeConnection this connection cause)
+        (.closeConnection this quicConnection cause)))
+
+    (method disable ^HttpConnection [this]
+      (let [^:mutable ^HttpConnection connection nil]
+        (locking this
+          (set! connection (.-connection this))
+          (set! (.-connection this) nil)
+          (set! (.-quicConnection this) nil)
+          (set! (.-closeRequested this) false)
+          (set! (.-cause this) nil))
+        connection))
+
+    (method clear ^void [this ^HttpConnection connection]
+      (locking this
+        (let [c (.-connection this)]
+          (when (identical? connection c) (set! (.-connection this) nil))
+          (let [qc (.-quicConnection this)]
+            (when (identical? connection qc) (set! (.-quicConnection this) nil))))))
+
+    (method ^:private closeConnection ^void [this ^HttpConnection connection ^Throwable cause]
+      (when (some? connection)
+        (try
+          (.close connection cause)
+          (catch Throwable t
+            (when (.on debug)
+              (.log debug
+                    (java-str "ignoring exception that occurred during closing of connection: "
+                              connection)
+                    t)))))))
+
+  (method ^:public hasReachedStreamLimit ^boolean [this]
+    streamLimitReached)
+
+  (method streamLimitReached ^void [this ^boolean streamLimitReached]
+    (set! (.-streamLimitReached this) streamLimitReached))
+
+  (method nullBody ^void [this ^{:tag (HttpResponse T)} resp ^Throwable t]
+    (.nullBody exchImpl resp t))
+
+  (method ^:public readBodyAsync ^{:tag (CompletableFuture T)} [this
+                                                                ^{:tag (HttpResponse$BodyHandler T)} handler]
+    (if (some? bodyIgnored)
+        (MinimalFuture/completedFuture nil)
+        (.whenComplete (.readBodyAsync exchImpl handler (not (.isWebSocket request)) parentExecutor)
+                       (lambda BiConsumer ^void [r ^Throwable t] (.completed exchImpl)))))
+
+  (method ^:public ignoreBody ^{:tag (CompletableFuture Void)} [this]
+    (if (some? bodyIgnored) bodyIgnored (.ignoreBody exchImpl)))
+
+  (method ^:public released ^void [this]
+    (let [^{:tag (ExchangeImpl ?)} impl exchImpl] (when (some? impl) (.released impl))))
+
+  (method ^:public cancel ^void [this]
+    (if (some? exchImpl) (.cancel exchImpl) (.cancel this (IOException. "Request cancelled"))))
+
+  (method ^:public cancel ^void [this ^IOException cause]
+    (when (.on debug)
+      (.log debug "cancel exchImpl: %s, with \"%s\"" (new Object/1 [exchImpl cause])))
+    (let [^:mutable ^{:tag (ExchangeImpl ?)} impl nil
+          ^:mutable ^IOException closeReason nil]
+      (locking this (set! impl exchImpl) (when (nil? impl) (.compareAndSet failed nil cause)))
+      (if (some? impl)
+          (do
+            (when (.on debug) (.log debug "Cancelling exchImpl: %s" (new Object/1 [exchImpl])))
+            (.cancel impl cause))
+          (do
+            (set! closeReason (cast IOException (.get failed)))
+            (when (some? closeReason) (.closeConnection connectionAborter closeReason))
+            (.checkCancelled this)))))
+
+  (method ^:private checkCancelled ^void [this]
+    (let [^:mutable ^{:tag (ExchangeImpl ?)} impl nil
+          ^:mutable ^IOException cause nil
+          ^:mutable ^{:tag (CompletableFuture (? extends (ExchangeImpl T)))} cf nil]
+      (when (some? (.get failed))
+        (locking this
+          (set! cause (cast IOException (.get failed)))
+          (set! impl exchImpl)
+          (set! cf exchangeCF)))
+      (when (and (and (.requestCancelled multi) (some? impl)) (nil? cause))
+        (set! cause (IOException. "Request cancelled")))
+      (when (some? cause)
+        (if (some? impl)
+            (do
+              (when (.on debug) (.log debug "Cancelling exchImpl: %s" (new Object/1 [impl])))
+              (.cancel impl cause)
+              (locking this (when (identical? impl exchImpl) (.compareAndSet failed cause nil))))
+            (do
+              (Log/logTrace
+                "Exchange: request [{0}/timeout={1}ms] no impl is set.\n\tCan''t cancel yet with {2}"
+                (.uri request)
+                (Long/valueOf (if (.isPresent (.timeout request))
+                                  (unchecked-add
+                                    (unchecked-multiply
+                                      (.getSeconds (cast Duration (.get (.timeout request))))
+                                      1000)
+                                    (unchecked-divide-int
+                                      (.getNano (cast Duration (.get (.timeout request))))
+                                      1000000))
+                                  -1))
+                cause)
+              (when (some? cf) (.completeExceptionally cf cause)))))))
+
+  (method checkCancelled :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                         ^{:tag (CompletableFuture U)} cf
+                                                                         ^HttpConnection connection]
+    (.thenCompose (.handle
+                    cf
+                    (lambda BiFunction ^CompletableFuture [r ^:mutable ^Throwable t]
+                      (when (nil? t)
+                        (when (.requestCancelled multi)
+                          (when-not upgraded
+                            (set! t (.getCancelCause this))
+                            (when (nil? t) (set! t (IOException. "Request cancelled")))
+                            (when (.on debug)
+                              (.log debug (java-str "exchange cancelled during connect: " t)))
+                            (try
+                              (.close connection t)
+                              (catch Throwable x
+                                (when (.on debug) (.log debug "Failed to close connection" x))))
+                            (return (MinimalFuture/failedFuture t)))))
+                      cf))
+                  (Function/identity)))
+
+  (method ^:public h2Upgrade ^void [this]
+    (set! upgrading true)
+    (.setH2Upgrade request this))
+
+  (method ^:synchronized failed ^IOException [this ^IOException io]
+    (let [cause (cast IOException (.compareAndExchange failed nil io))] (if (nil? cause) io cause)))
+
+  (method ^:synchronized getCancelCause ^IOException [this]
+    (cast IOException (.get failed)))
+
+  (method ^:private establishExchange ^{:tag (CompletableFuture (? extends (ExchangeImpl T)))} [this
+                                                                                                ^HttpConnection connection]
+    (when (.on debug)
+      (.log debug
+            "establishing exchange for %s #%s,%n\t proxy=%s"
+            (new Object/1 [request (.-id multi) (.proxy request)])))
+    (let [^Throwable t (.getCancelCause this)]
+      (.checkCancelled this)
+      (if (some? t)
+          (do
+            (when (.on debug)
+              (.log debug
+                    "exchange was cancelled: returned failed cf (%s)"
+                    (new Object/1 [(String/valueOf t)])))
+            (set! exchangeCF (MinimalFuture/failedFuture t)))
+          (let [^:mutable ^{:tag (CompletableFuture (? extends (ExchangeImpl T)))} cf nil
+                ^:mutable ^{:tag (CompletableFuture (? extends (ExchangeImpl T)))} res nil]
+            (set! cf
+                  (.copy (.thenApply (ExchangeImpl/get this connection)
+                                     (lambda Function ^ExchangeImpl [^ExchangeImpl eimpl]
+                                       (locking this (set! exchImpl eimpl))
+                                       (.checkCancelled this)
+                                       eimpl))))
+            (locking this (set! exchangeCF cf))
+            (set! res
+                  (.whenComplete cf
+                                 (let [cf cf]
+                                   (lambda BiConsumer ^void [^ExchangeImpl r ^Throwable x]
+                                     (locking this
+                                       (when (identical? exchangeCF cf) (set! exchangeCF nil)))))))
+            (.checkCancelled this)
+            (.thenCompose res
+                          (lambda Function ^CompletionStage [^ExchangeImpl eimpl]
+                            (set! exchImpl eimpl)
+                            (let [tt (.getCancelCause this)]
+                              (.checkCancelled this)
+                              (if (some? tt)
+                                  (MinimalFuture/failedFuture tt)
+                                  (MinimalFuture/completedFuture eimpl)))))))))
+
+  (method ^:public responseAsync ^{:tag (CompletableFuture Response)} [this]
+    (.responseAsyncImpl this nil))
+
+  (method ^:private checkFor407 ^{:tag (CompletableFuture Response)} [this
+                                                                      ^{:tag (ExchangeImpl T)} ex
+                                                                      ^:mutable ^Throwable t
+                                                                      ^{:tag (Function (ExchangeImpl T) (CompletableFuture Response))} andThen]
+    (set! t (Utils/getCompletionCause t))
+    (cond
+      (instance? ProxyAuthenticationRequired t)
+        (do
+          (when (.on debug)
+            (.log debug "checkFor407: ProxyAuthenticationRequired: building synthetic response"))
+          (set! bodyIgnored (MinimalFuture/completedFuture nil))
+          (let [proxyResponse (.-proxyResponse (cast ProxyAuthenticationRequired t))
+                ^HttpConnection c (when (some? ex) (.connection ex))
+                syntheticResponse (Response. request
+                                             this
+                                             (.-headers proxyResponse)
+                                             c
+                                             (.-statusCode proxyResponse)
+                                             (.-version proxyResponse)
+                                             true)]
+            (MinimalFuture/completedFuture syntheticResponse)))
+      (some? t)
+        (do
+          (when (.on debug) (.log debug "checkFor407: no response - %s" (new Object/1 [^Object t])))
+          (MinimalFuture/failedFuture t))
+      :else
+        (do
+          (when (.on debug) (.log debug "checkFor407: all clear"))
+          (cast CompletableFuture (.apply andThen ex)))))
+
+  (method ^:private startSendingBody ^{:tag (CompletableFuture Response)} [this
+                                                                           ^HttpClientImpl$DelegatingExecutor executor]
+    (.thenCompose (.sendBodyAsync exchImpl)
+                  (lambda Function ^CompletionStage [^ExchangeImpl exIm]
+                    (.getResponseAsync exIm executor))))
+
+  (method ^:private expectContinue ^{:tag (CompletableFuture Response)} [this
+                                                                         ^{:tag (ExchangeImpl T)} ex]
+    (java-assert (.expectContinue request))
+    (let [^:mutable responseTimeoutMillis 5000]
+      (when (.isPresent (.timeout request))
+        (let [timeoutMillis (.toMillis (cast Duration (.get (.timeout request))))]
+          (set! responseTimeoutMillis (Math/min responseTimeoutMillis timeoutMillis))))
+      (.thenCompose
+        (.completeOnTimeout (.getResponseAsync ex parentExecutor)
+                            nil
+                            responseTimeoutMillis
+                            TimeUnit/MILLISECONDS)
+        (lambda Function ^CompletionStage [^Response r1]
+          (if (nil? r1)
+              (do
+                (when (.on debug)
+                  (.log debug "Setting ExpectTimeoutRaised and sending request body"))
+                (.setExpectTimeoutRaised exchImpl)
+                (let [^:mutable ^{:tag (CompletableFuture Response)} cf (.startSendingBody
+                                                                          this
+                                                                          parentExecutor)]
+                  (set! cf (.wrapForUpgrade this cf))
+                  (set! cf (.wrapForLog this cf))
+                  cf))
+              (do
+                (Log/logResponse (method-ref Supplier ^String [] r1 Response/.toString))
+                (let [rcode (.statusCode r1)]
+                  (if (== rcode 100)
+                      (do
+                        (.incrementAndGet nonFinalResponses)
+                        (Log/logTrace "Received 100-Continue: sending body")
+                        (when (.on debug)
+                          (.log debug "Received 100-Continue for %s" (new Object/1 [r1])))
+                        (let [^:mutable ^{:tag (CompletableFuture Response)} cf (.startSendingBody
+                                                                                  this
+                                                                                  parentExecutor)]
+                          (set! cf (.wrapForUpgrade this cf))
+                          (set! cf (.wrapForLog this cf))
+                          cf))
+                      (do
+                        (Log/logTrace "Expectation failed: Received {0}" rcode)
+                        (when (.on debug)
+                          (.log debug
+                                "Expect-Continue failed (%d) for: %s"
+                                (new Object/1 [rcode r1])))
+                        (if (and upgrading (== rcode 101))
+                            (let [failed (IOException. "Unable to handle 101 while waiting for 100")]
+                              (MinimalFuture/failedFuture failed))
+                            (do
+                              (.expectContinueFailed exchImpl rcode)
+                              (MinimalFuture/completedFuture r1))))))))))))
+
+  (method ^:private sendRequestBody ^{:tag (CompletableFuture Response)} [this
+                                                                          ^{:tag (ExchangeImpl T)} ex]
+    (java-assert (not (.expectContinue request)))
+    (when (.on debug) (.log debug "sendRequestBody"))
+    (let [^:mutable ^{:tag (CompletableFuture Response)} cf (.startSendingBody this parentExecutor)]
+      (set! cf (.wrapForUpgrade this cf))
+      (set! cf
+            (.thenCompose cf
+                          (method-ref Function
+                                      ^CompletionStage [Response]
+                                      this
+                                      Exchange/.ignore1xxResponse)))
+      (set! cf (.wrapForLog this cf))
+      cf))
+
+  (method ^:private ignore1xxResponse ^{:tag (CompletableFuture Response)} [this
+                                                                            ^:final ^Response rsp]
+    (let [statusCode (.statusCode rsp)]
+      (if (or (and (>= statusCode 102) (<= statusCode 199))
+              (and (== statusCode 100) (not (.-expectContinue request))))
+          (do
+            (Log/logTrace "Ignoring (1xx informational) response code {0}" (.statusCode rsp))
+            (when (.on debug)
+              (.log debug
+                    (java-str "Ignoring (1xx informational) response code " (.statusCode rsp))))
+            (java-assert (some? exchImpl) "Illegal state - current exchange isn't set")
+            (let [count (.incrementAndGet nonFinalResponses)]
+              (if (and (> MAX_NON_FINAL_RESPONSES 0)
+                       (or (< count 0) (> count MAX_NON_FINAL_RESPONSES)))
+                  (MinimalFuture/failedFuture
+                    (ProtocolException.
+                      (String/format "Too many interim responses received: %s > %s"
+                                     (new Object/1 [count MAX_NON_FINAL_RESPONSES]))))
+                  (let [^{:tag (CompletableFuture Response)} cf (.getResponseAsync
+                                                                  exchImpl
+                                                                  parentExecutor)]
+                    (.thenCompose cf
+                                  (method-ref Function
+                                              ^CompletionStage [Response]
+                                              this
+                                              Exchange/.ignore1xxResponse))))))
+          (MinimalFuture/completedFuture rsp))))
+
+  (method responseAsyncImpl ^{:tag (CompletableFuture Response)} [this ^HttpConnection connection]
+    (let [^:mutable ^{:tag (Function (ExchangeImpl T) (CompletableFuture Response))} after407Check
+            nil]
+      (set! bodyIgnored nil)
+      (if (.expectContinue request)
+          (do
+            (.setSystemHeader request "Expect" "100-Continue")
+            (Log/logTrace "Sending Expect: 100-Continue")
+            (set! after407Check
+                  (method-ref Function
+                              ^CompletableFuture [ExchangeImpl]
+                              this
+                              Exchange/.expectContinue)))
+          (set! after407Check
+                (method-ref Function
+                            ^CompletableFuture [ExchangeImpl]
+                            this
+                            Exchange/.sendRequestBody)))
+      (let [^{:tag (Function (ExchangeImpl T) (CompletableFuture Response))} afterExch407Check
+              (let [after407Check after407Check]
+                (lambda Function ^CompletableFuture [^ExchangeImpl ex]
+                  (.thenCompose (.handle (.sendHeadersAsync ex)
+                                         (let [after407Check after407Check]
+                                           (lambda BiFunction ^CompletableFuture [^ExchangeImpl r
+                                                                                  ^Throwable t]
+                                             (.checkFor407 this r t after407Check))))
+                                (Function/identity))))]
+        (.thenCompose (.handle (.establishExchange this connection)
+                               (lambda BiFunction ^CompletableFuture [^ExchangeImpl r ^Throwable t]
+                                 (.checkFor407 this r t afterExch407Check)))
+                      (Function/identity)))))
+
+  (method ^:private wrapForUpgrade ^{:tag (CompletableFuture Response)} [this
+                                                                         ^{:tag (CompletableFuture Response)} cf]
+    (cond
+      upgrading
+        (.thenCompose cf
+                      (lambda Function ^CompletionStage [^Response r]
+                        (.checkForUpgradeAsync this r exchImpl)))
+      (.isWebSocket request) cf
+      :else
+        (.thenCompose cf
+                      (lambda Function ^CompletionStage [^Response r]
+                        (if (== (.-statusCode r) 101)
+                            (let [protoEx (ProtocolException.
+                                            "Unexpected 101 response, when not upgrading")]
+                              (java-assert (some? exchImpl)
+                                "Illegal state - current exchange isn't set")
+                              (try (.onProtocolError exchImpl protoEx) (catch Throwable ignore))
+                              (MinimalFuture/failedFuture protoEx))
+                            (MinimalFuture/completedFuture r))))))
+
+  (method ^:private wrapForLog ^{:tag (CompletableFuture Response)} [this
+                                                                     ^{:tag (CompletableFuture Response)} cf]
+    (if (Log/requests)
+        (.thenApply cf
+                    (lambda Function ^Response [^Response response]
+                      (Log/logResponse (method-ref Supplier ^String [] response Response/.toString))
+                      response))
+        cf))
+
+  (method ignoreBody ^{:tag (HttpResponse$BodySubscriber T)} [this ^HttpResponse$ResponseInfo hdrs]
+    (HttpResponse$BodySubscribers/replacing nil))
+
+  (method ^:private checkForUpgradeAsync ^{:tag (CompletableFuture Response)} [this ^Response resp
+                                                                               ^{:tag (ExchangeImpl T)} ex]
+    (let [rcode (.statusCode resp)]
+      (if (and upgrading (== rcode 101))
+          (let [^{:tag (Http1Exchange T)} e (cast Http1Exchange ex)]
+            (when (.on debug) (.log debug "Upgrading async %s" (new Object/1 [(.connection e)])))
+            (.thenCompose (.readBodyAsync e
+                                          (method-ref
+                                            HttpResponse$BodyHandler
+                                            this
+                                            Exchange/.ignoreBody)
+                                          false
+                                          parentExecutor)
+                          (lambda Function ^CompletionStage [v]
+                            (.log debug "Ignored body")
+                            (.upgraded ex)
+                            (set! upgraded true)
+                            (.thenCompose
+                              (Http2Connection/createAsync
+                                (.connection e)
+                                (.client2 client)
+                                this
+                                (method-ref Supplier
+                                            ^ByteBuffer []
+                                            e
+                                            Http1Exchange/.drainLeftOverBytes))
+                              (lambda Function ^CompletionStage [^Http2Connection c]
+                                (let [connection (.disable connectionAborter)
+                                      cached (.offerConnection c)]
+                                  (when (and (not cached) (some? connection))
+                                    (.connection connectionAborter connection))
+                                  (let [^{:tag (Stream T)} s (.getInitialStream c)]
+                                    (if (nil? s)
+                                        (let [tc (.getTerminationCause c)
+                                              ^IOException ioe (if (some? tc)
+                                                                   (IOException.
+                                                                     "Can't get stream 1"
+                                                                     (.getCloseCause tc))
+                                                                   (IOException.
+                                                                     "Can't get stream 1"))]
+                                          (MinimalFuture/failedFuture ioe))
+                                        (do
+                                          (.released exchImpl)
+                                          (let [^:mutable ^Throwable t nil]
+                                            (locking this
+                                              (set! exchImpl s)
+                                              (set! t (cast Throwable (.get failed))))
+                                            (when (nil? t) (set! t (.getCancelCause e)))
+                                            (if (or
+                                                  (instance? HttpTimeoutException t)
+                                                  (.requestCancelled multi))
+                                                (do
+                                                  (when (nil? t)
+                                                    (set! t (IOException. "Request cancelled")))
+                                                  (.cancelImpl s t)
+                                                  (MinimalFuture/failedFuture t))
+                                                (do
+                                                  (when (.on debug)
+                                                    (.log
+                                                      debug
+                                                      "Getting response async %s"
+                                                      (new Object/1 [s])))
+                                                  (.getResponseAsync s nil)))))))))))))
+          (MinimalFuture/completedFuture resp))))
+
+  (method version ^HttpClient$Version [this] (.version multi))
+
+  (method pushEnabled ^boolean [this] (some? pushGroup))
+
+  (method h2cSettingsStrings ^String [this]
+    (.getSettingsString (.client2 client) (.pushEnabled this)))
+
+  (method dbgString ^String [this] dbgTag)
+
+  (method ^:final isUnprocessedByPeer ^boolean [this]
+    (.-unprocessedByPeer this))
+
+  (method ^:final markUnprocessedByPeer ^void [this]
+    (set! (.-unprocessedByPeer this) true)))

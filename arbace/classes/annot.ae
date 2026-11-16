@@ -1,0 +1,356 @@
+(ns arbace.classes.annot
+  "The run-time annotations' data (F14's first slice; doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As
+  built: F14 (first slice, write-ahead)\"; J2G-SPEC §12, amendment R16's note): a class's
+  RUNTIME-visible declaration annotations, its members' and its parameters', and an annotation
+  type's element defaults, as the text jrt decodes (go/arbace/jrt/annotation.ae, its format in the
+  header there). Its two writers: j2g for the classes it translates (ClassInfo.Annots, j2g's
+  out/class-registration), the interpreter for the classes it makes (Compiler$CF$Host.annotations,
+  arbace.classes.interp). Each annotation is resolved alone (arbace.classes.analyze/*lenient*):
+  one whose type or values the world cannot resolve is left out, as AnnotationParser skips an
+  annotation of a type it cannot load."
+  (:require [arbace.string :as str]
+            [arbace.classes.types :as t]
+            [arbace.classes.analyze :as a]))
+
+;; arbace.classes.analyze/*lenient* bound when the analyzer has it: a host whose embedded analyzer
+;; predates F14 (stage 0 until the re-seed that carries F14) has none, and its first j2g run
+;; (a bootstrap: the build's second run, by an executable with this analyzer compiled, makes the
+;; program) records each class's annotations whole or not at all (the catches below)
+(def ^:private lenient-var (ns-resolve 'arbace.classes.analyze '*lenient*))
+
+(defmacro ^:private lenient [& body]
+  `(if lenient-var (with-bindings {lenient-var true} ~@body) (do ~@body)))
+
+;; and arbace.classes.analyze/element-default likewise (F14's too): on such a host no default is recorded
+(def ^:private element-default
+  (if-let [v (ns-resolve 'arbace.classes.analyze 'element-default)] @v (fn [_] nil)))
+
+(defn- bin "A descriptor with binary names." [d] (str/replace d "/" "."))
+
+(defn enc-string
+  "\"TEXT\": \\\" and \\\\ escaped, every code unit outside printable ASCII as \\uXXXX."
+  [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (dotimes [i (.length s)]
+      (let [c (.charAt s i)
+            ci (int c)]
+        (cond
+          (= c \") (.append sb "\\\"")
+          (= c \\) (.append sb "\\\\")
+          (and (>= ci 32) (<= ci 126)) (.append sb c)
+          :else (.append sb (str "\\u" (subs (Integer/toHexString (+ 0x10000 ci)) 1))))))
+    (.append sb "\"")
+    (.toString sb)))
+
+(declare enc-annotation)
+
+(defn enc-value
+  "A VALUE of the data: v as arbace.classes.analyze's ann-value gives it."
+  [v]
+  (cond
+    (contains? v :array)
+    (let [xs (:array v)]
+      (apply str "[" (bin (:desc v)) " " (count xs) (map #(str " " (enc-value %)) xs)))
+    (contains? v :annotation) (enc-annotation (:annotation v))
+    (contains? v :class) (str "c" (bin (:class v)))
+    (contains? v :enum) (str "e" (bin (:enum v)) (:name v))
+    (contains? v :const)
+    (let [c (:const v)
+          x (:val c)]
+      (case (:type c)
+        "Z" (if x "Z1" "Z0")
+        "B" (str "B" (long x))
+        "S" (str "S" (long x))
+        "C" (str "C" (int (if (char? x) (int x) x)))
+        "I" (str "I" (long x))
+        "J" (str "J" (long x))
+        "F" (str "F" (Float/floatToRawIntBits (float x)))
+        "D" (str "D" (Double/doubleToRawLongBits (double x)))
+        (enc-string (str x))))
+    :else (throw (ex-info (str "annot: no value " (pr-str v)) {:value v}))))
+
+(defn enc-annotation
+  "An ANN: @DESC N NAME VALUE ..."
+  [an]
+  (let [vs (:values an)]
+    (apply str "@" (bin (:type an)) " " (count vs)
+           (for [[k v] vs] (str " " k " " (enc-value v))))))
+
+(defn- visible
+  "The RUNTIME-visible annotations of an analyzed list (a delay), each encoded, in the source's
+  order; an annotation that does not encode is left out. The source's order is the list's
+  reversed: repr/java writes one ^{A ...} a declaration annotation, and the reader assocs each
+  outer ^ map onto the inner one's (LispReader's MetaReader), so the last written comes first."
+  [anns]
+  (keep #(when (:visible %) (try (enc-annotation %) (catch Exception _ nil)))
+        (reverse (lenient
+                   (try (force anns) (catch Exception _ nil))))))
+
+(defn- safe-ctor-desc
+  "The descriptor of constructor mm of class n with its implicit parameters (the class file's,
+  which jrt's Constructor has: an inner class's outer instance, an enum's name and ordinal), else
+  its own."
+  [n mm]
+  (try (a/ctor-real-desc n mm) (catch Exception _ (:desc mm))))
+
+(defn- ctor-lead
+  "JCS351 (a): the count of constructor mm's leading implicit parameters (the outer instance, a superclass's outer
+  instance, an enum's name and ordinal), by which the JDK's Constructor.getParameterAnnotations shifts the class
+  file's (handleParameterNumberMismatch: a member class's one, an enum's two); the trailing captured values come
+  after the declared parameters and shift nothing."
+  [n mm]
+  (let [d (a/decl n)
+        cnt #(count (first (t/parse-method-desc %)))
+        caps (if (#{:local :anon} (:nesting d)) (count (:captures @(:state d))) 0)]
+    (max 0 (- (cnt (safe-ctor-desc n mm)) (cnt (:desc mm)) caps))))
+
+(defn- reflected-member?
+  "A method or constructor whose Signature and annotations the class file keeps: a declared one, or a record's derived
+  accessor (JCS383 (a): javac writes the accessor it derives with its Signature and the component's METHOD
+  annotations, as arbace.classes.analyze derives it)."
+  [mm]
+  (or (#{:method :ctor} (:kind mm)) (= :record-accessor (:derived mm))))
+
+(declare throws-lines)
+
+(defn attribute-lines
+  "F25 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F25 (write-ahead)\"): the class file
+  attributes reflection reads, as data lines beside the annotations' (go/arbace/jrt/classdata.ae
+  decodes them; jdk26u's Class, Method, Constructor and Field read the same attributes through
+  the VM): the class's Signature (S), its InnerClasses entry and EnclosingMethod (K, Q), and with
+  members its methods', constructors' and fields' Signatures (G) and Exceptions (E)."
+  [n d members]
+  (concat
+    (when-let [s (:signature d)] [(str "S " s)])
+    (when (#{:member :local :anon} (:nesting d))
+      (concat
+        [(str "K " (or (:inner-flags d) 0) " " (case (:nesting d) :member "m" :local "l" :anon "a")
+              " " (bin (or (:outer d) "-")) " " (if (= :anon (:nesting d)) "-" (or (:simple d) "-")))]
+        (when (#{:local :anon} (:nesting d))
+          (when-let [em (:enclosing-method d)]
+            (when-let [m (:method em)]
+              (when-not (#{"<clinit>"} (:name em))
+                (let [ctor (= "<init>" (:name em))
+                      desc (if ctor (safe-ctor-desc (or (:owner m) (:outer d)) m) (:desc m))]
+                  (when desc
+                    [(str "Q " (:name em) " " (bin desc))]))))))))
+    ;; JCS383 (a), serialization's slice 5 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by day)"): a record
+    ;; class's Record attribute, its components in order (R), which jrt's Class.getRecordComponents reads
+    ;; (go/arbace/jrt/record.ae), for every record, as the JVM keeps it for every record class
+    (when (= :record (:kind d))
+      (for [c (:components d)]
+        (str "R " (:name c) " " (bin (:desc c)) (when-let [s (:sig c)] (str " " s)))))
+    (when members
+      (concat
+        (for [mm (:methods d)
+              :when (reflected-member? mm)
+              :let [sig (:sig mm)]
+              :when sig]
+          (if (= :ctor (:kind mm))
+            (str "G C " (bin (safe-ctor-desc n mm)) " " sig)
+            (str "G M " (:name mm) " " (bin (:desc mm)) " " sig)))
+        (for [f (:fields d)
+              :let [sig (:sig f)]
+              :when sig]
+          (str "G F " (:name f) " " sig))
+        (throws-lines n d)))))
+
+(defn throws-lines
+  "The E records of class n (analyzed: d): its methods' and constructors' Exceptions attributes. Written with the
+  members' data (attribute-lines) and, since F27 (JCS240 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F27
+  (write-ahead)\"), alone for every other class j2g translates (class-data's :throws): RMI's remote interfaces are the
+  JDK's (Registry, DGC, JMX's RMIServer and RMIConnection), and sun.rmi.server.Util.checkMethod requires each of their
+  methods to declare RemoteException, as RemoteObjectInvocationHandler rethrows only what the method declares."
+  [n d]
+  (for [mm (:methods d)
+        :when (#{:method :ctor} (:kind mm))
+        :let [ts (seq (:throws mm))]
+        :when ts]
+    (str "E " (if (= :ctor (:kind mm))
+                (str "C " (bin (safe-ctor-desc n mm)))
+                (str "M " (:name mm) " " (bin (:desc mm))))
+         (apply str (map #(str " " (bin %)) ts)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; JCS271 (b): type annotations as the class file holds them (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+;; JCS271 (b) (write-ahead)"): each RuntimeVisibleTypeAnnotations attribute's bytes (JVMS 4.7.20) and the constant
+;; pool entries they index, so that jdk26u's TypeAnnotationParser and AnnotationParser read them unchanged through a
+;; jdk.internal.reflect.ConstantPool over the recorded entries (go/arbace/jrt/classdata.ae's header has the format).
+
+(defn- pool-index!
+  "The index of constant pool entry [tag value] in pool (an atom: {:next i :index {} :entries []}), added when
+  new: tag :u (CONSTANT_Utf8), :i (Integer), :j (Long), :f (Float, raw int bits), :d (Double, raw long bits);
+  a Long or a Double takes two indices, as in a class file (JVMS 4.4.5)."
+  [pool tag v]
+  (or (get-in @pool [:index [tag v]])
+      (let [i (:next @pool)]
+        (swap! pool #(-> %
+                         (update :entries conj [tag v])
+                         (assoc-in [:index [tag v]] i)
+                         (assoc :next (+ i (if (#{:j :d} tag) 2 1)))))
+        i)))
+
+(defn- u1 [^java.io.ByteArrayOutputStream out v] (.write out (int (bit-and (long v) 0xFF))))
+(defn- u2 [out v] (u1 out (bit-shift-right (long v) 8)) (u1 out v))
+
+(declare type-ann-body)
+
+(defn- element-value
+  "element_value (JVMS 4.7.16.1) of value v as arbace.classes.analyze's ann-value gives it."
+  [out pool v]
+  (cond
+    (contains? v :array)
+    (do (u1 out (int \[)) (u2 out (count (:array v)))
+        (doseq [x (:array v)] (element-value out pool x)))
+    (contains? v :annotation) (do (u1 out (int \@)) (type-ann-body out pool (:annotation v)))
+    (contains? v :class) (do (u1 out (int \c)) (u2 out (pool-index! pool :u (:class v))))
+    (contains? v :enum) (do (u1 out (int \e)) (u2 out (pool-index! pool :u (:enum v))) (u2 out (pool-index! pool :u (:name v))))
+    (contains? v :const)
+    (let [c (:const v) x (:val c) t (:type c)]
+      (case t
+        "Z" (do (u1 out (int \Z)) (u2 out (pool-index! pool :i (if x 1 0))))
+        ("B" "S" "I") (do (u1 out (int (.charAt ^String t 0))) (u2 out (pool-index! pool :i (long x))))
+        "C" (do (u1 out (int \C)) (u2 out (pool-index! pool :i (long (if (char? x) (int x) x)))))
+        "J" (do (u1 out (int \J)) (u2 out (pool-index! pool :j (long x))))
+        "F" (do (u1 out (int \F)) (u2 out (pool-index! pool :f (long (Float/floatToRawIntBits (float x))))))
+        "D" (do (u1 out (int \D)) (u2 out (pool-index! pool :d (Double/doubleToRawLongBits (double x)))))
+        (do (u1 out (int \s)) (u2 out (pool-index! pool :u (str x))))))
+    :else (throw (ex-info (str "annot: no element value " (pr-str v)) {:value v}))))
+
+(defn- type-ann-body
+  "An annotation's type_index and element_value_pairs (JVMS 4.7.16)."
+  [out pool an]
+  (u2 out (pool-index! pool :u (:type an)))
+  (u2 out (count (:values an)))
+  (doseq [[k v] (:values an)]
+    (u2 out (pool-index! pool :u k))
+    (element-value out pool v)))
+
+(defn- target-info
+  "target_type and target_info (JVMS 4.7.20.1) of an ASM type reference value ref (arbace.classes.go)."
+  [out ref]
+  (let [ref (bit-and (long ref) 0xFFFFFFFF)
+        sort (bit-shift-right ref 24)]
+    (u1 out sort)
+    (case (int sort)
+      (0x00 0x01 0x16) (u1 out (bit-and (bit-shift-right ref 16) 0xFF))
+      (0x10 0x17) (u2 out (bit-and (bit-shift-right ref 8) 0xFFFF))
+      (0x11 0x12) (do (u1 out (bit-and (bit-shift-right ref 16) 0xFF)) (u1 out (bit-and (bit-shift-right ref 8) 0xFF)))
+      (0x13 0x14 0x15) nil
+      (throw (ex-info (str "annot: no declaration target " sort) {:ref ref})))))
+
+(defn- type-path
+  "type_path (JVMS 4.7.20.2) of an ASM type path string: [ array, . nested, * wildcard bound, N; type argument N."
+  [out ^String path]
+  (let [steps (loop [i 0 acc []]
+                (if (>= i (count path))
+                  acc
+                  (case (.charAt path i)
+                    \[ (recur (inc i) (conj acc [0 0]))
+                    \. (recur (inc i) (conj acc [1 0]))
+                    \* (recur (inc i) (conj acc [2 0]))
+                    (let [j (.indexOf path ";" i)]
+                      (recur (inc j) (conj acc [3 (Long/parseLong (subs path i j))]))))))]
+    (u1 out (count steps))
+    (doseq [[k a] steps] (u1 out k) (u1 out a))))
+
+(defn type-annotations-bytes
+  "The RuntimeVisibleTypeAnnotations attribute's info (num_annotations, then each type_annotation) of the analyzed
+  type annotations anns (a delay of [{:type :visible :values :ref :path}]), its constants in pool, as hex; nil when
+  none is RUNTIME-visible or one does not encode (an annotation the world cannot resolve is left out, as
+  analyze's *lenient* leaves it out of the declaration annotations)."
+  [pool anns]
+  (let [vs (filter :visible (lenient (try (force anns) (catch Exception _ nil))))]
+    (when (seq vs)
+      (try
+        (let [out (java.io.ByteArrayOutputStream.)]
+          (u2 out (count vs))
+          (doseq [an vs]
+            (target-info out (:ref an))
+            (type-path out (or (:path an) ""))
+            (type-ann-body out pool an))
+          (let [bs (.toByteArray out) sb (StringBuilder.)]
+            (doseq [b bs] (.append sb (subs (Integer/toHexString (+ 0x100 (bit-and (long b) 0xFF))) 1)))
+            (.toString sb)))
+        (catch Exception _ nil)))))
+
+(defn type-annotation-lines
+  "JCS271 (b): the Y records (a class's, its methods', constructors' and fields' RuntimeVisibleTypeAnnotations, as
+  hex) and the N records of the constant pool entries they index (in index order, from 1)."
+  [n d members]
+  (let [pool (atom {:next 1 :index {} :entries []})
+        ys (doall
+             (concat
+               (when-let [h (type-annotations-bytes pool (:type-annotations d))] [(str "Y T " h)])
+               (when members
+                 (concat
+                   (for [mm (:methods d)
+                         :when (#{:method :ctor} (:kind mm))
+                         :let [h (type-annotations-bytes pool (:type-annotations mm))]
+                         :when h]
+                     (if (= :ctor (:kind mm))
+                       (str "Y C " (bin (safe-ctor-desc n mm)) " " h)
+                       (str "Y M " (:name mm) " " (bin (:desc mm)) " " h)))
+                   (for [f (:fields d)
+                         :let [h (type-annotations-bytes pool (:type-annotations f))]
+                         :when h]
+                     (str "Y F " (:name f) " " h))))))]
+    (when (seq ys)
+      (concat
+        (for [[tag v] (:entries @pool)]
+          (str "N " (name tag) " " (if (= :u tag) (enc-string v) v)))
+        ys))))
+
+(defn class-data
+  "The data of class n (internal name, analyzed: arbace.classes.analyze/decl): its own
+  annotations and its element defaults (an annotation type's), and with :members its methods',
+  constructors', fields' and parameters'; since F25 the reflected attributes beside them
+  (attribute-lines); with :throws (F27, JCS240 (a)) the Exceptions records (E) of a class whose other members' data is
+  not written. nil when there is none."
+  [n & {:keys [members throws]}]
+  (when-let [d (a/decl n)]
+    (lenient
+      (let [lines (concat
+                    (try (doall (attribute-lines n d members)) (catch Exception _ nil))
+                    (when (and throws (not members))
+                      (try (doall (throws-lines n d)) (catch Exception _ nil)))
+                    (try (doall (type-annotation-lines n d members)) (catch Exception _ nil))
+                    (for [x (visible (:annotations d))] (str "T " x))
+                    (when (= :annotation (:kind d))
+                      (for [mm (:methods d)
+                            :when (and (= :method (:kind mm)) (:has-default mm))
+                            :let [v (try (enc-value (element-default mm)) (catch Exception _ nil))]
+                            :when v]
+                        (str "D " (:name mm) " " v)))
+                    (when members
+                      (concat
+                        (for [mm (:methods d)
+                              :when (reflected-member? mm)
+                              :let [ctor (= :ctor (:kind mm))
+                                    head (if ctor
+                                           ;; JCS351 (a): javac's descriptor, as jrt's Constructor has it
+                                           (str "C " (bin (safe-ctor-desc n mm)))
+                                           (str "M " (:name mm) " " (bin (:desc mm))))]
+                              x (visible (:annotations mm))]
+                          (str head " " x))
+                        (for [mm (:methods d)
+                              :when (#{:method :ctor} (:kind mm))
+                              :let [ctor (= :ctor (:kind mm))
+                                    ;; JCS351 (a): a constructor's by javac's descriptor, its indices after the
+                                    ;; leading implicit parameters (the JDK's getParameterAnnotations)
+                                    desc (if ctor (safe-ctor-desc n mm) (:desc mm))
+                                    lead (if ctor (try (ctor-lead n mm) (catch Exception _ 0)) 0)]
+                              [i pa] (map-indexed vector (:param-annotations mm))
+                              x (visible pa)]
+                          (str "P " (if ctor "<init>" (:name mm)) " " (bin desc) " " (+ lead i) " " x))
+                        (for [f (:fields d)
+                              x (visible (:annotations f))]
+                          (str "F " (:name f) " " x))
+                        ;; JCS383 (a): a record component's annotations, those javac keeps in the Record
+                        ;; attribute (applicable to RECORD_COMPONENT: arbace.classes.analyze/for-target)
+                        (when (= :record (:kind d))
+                          (for [c (:components d)
+                                x (visible (a/for-target (:annotations c) "RECORD_COMPONENT"))]
+                            (str "A " (:name c) " " x))))))]
+        (when (seq lines)
+          (str/join "\n" lines))))))

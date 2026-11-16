@@ -1,0 +1,341 @@
+;; Converted from overlay/jdk/java.base/sun/net/httpserver/ExchangeImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.httpserver)
+
+(import '(com.sun.net.httpserver Headers HttpExchange HttpPrincipal)
+        '(java.io ByteArrayOutputStream IOException InputStream OutputStream)
+        '(java.net InetSocketAddress URI)
+        '(java.time Instant ZoneId)
+        '(java.time.format DateTimeFormatter)
+        '(java.util List Locale Map Map$Entry Objects Optional Set)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function Function Predicate)
+        '(java.util.stream Stream)
+        '(javax.net.ssl SSLSession)
+        '(jdk.internal.jrt SystemLoggers$Logger$Level))
+
+(defclasses
+  (defclass ExchangeImpl
+    (field ^Headers reqHdrs)
+
+    (field ^Headers rspHdrs)
+
+    (field ^Request req)
+
+    (field ^String method)
+
+    (field ^boolean writefinished)
+
+    (field ^URI uri)
+
+    (field ^HttpConnection connection)
+
+    (field ^long reqContentLen)
+
+    (field ^long rspContentLen)
+
+    (field ^InputStream ris)
+
+    (field ^OutputStream ros)
+
+    (field ^Thread thread)
+
+    (field ^boolean close)
+
+    (field ^boolean closed)
+
+    (field ^boolean http10 false)
+
+    (field ^:private ^:static ^:final ^DateTimeFormatter FORMATTER)
+
+    (field ^:private ^:static ^:final ^boolean perExchangeAttributes
+      (not (.equals (System/getProperty "jdk.httpserver.attributes" "") "context")))
+
+    (static-initializer
+      (let [pattern "EEE, dd MMM yyyy HH:mm:ss zzz"]
+        (set! FORMATTER
+              (.withZone (DateTimeFormatter/ofPattern pattern Locale/US) (ZoneId/of "GMT")))))
+
+    (field ^:private ^:static ^:final ^String HEAD "HEAD")
+
+    (field ^InputStream uis)
+
+    (field ^OutputStream uos)
+
+    (field ^LeftOverInputStream uis_orig)
+
+    (field ^PlaceholderOutputStream uos_orig)
+
+    (field ^boolean sentHeaders)
+
+    (field ^:final ^{:tag (Map String Object)} attributes)
+
+    (field ^int rcode -1)
+
+    (field ^HttpPrincipal principal)
+
+    (field ^ServerImpl server)
+
+    (constructor :throws [IOException] [this ^String m ^URI u ^Request req ^long len
+                                        ^HttpConnection connection]
+      (set! (.-req this) req)
+      (set! (.-reqHdrs this) (Headers/of (.headers req)))
+      (set! (.-rspHdrs this) (Headers.))
+      (set! (.-method this) m)
+      (set! (.-uri this) u)
+      (set! (.-connection this) connection)
+      (set! (.-reqContentLen this) len)
+      (set! (.-attributes this)
+            (if perExchangeAttributes
+                ^Map (ConcurrentHashMap.)
+                (.getAttributes (.getHttpContext this))))
+      (set! (.-ros this) (.outputStream req))
+      (set! (.-ris this) (.inputStream req))
+      (set! server (.getServerImpl this))
+      (.startExchange server))
+
+    (method ^:public getRequestHeaders ^Headers [this] reqHdrs)
+
+    (method ^:public getResponseHeaders ^Headers [this] rspHdrs)
+
+    (method ^:public getRequestURI ^URI [this] uri)
+
+    (method ^:public getRequestMethod ^String [this] method)
+
+    (method ^:public getHttpContext ^HttpContextImpl [this]
+      (.getHttpContext connection))
+
+    (method ^:private isHeadRequest ^boolean [this]
+      (.equals HEAD (.getRequestMethod this)))
+
+    (method ^:public close ^void [this]
+      (when-not closed
+        (set! closed true)
+        (try
+          (cond
+            (or (nil? uis_orig) (nil? uos)) (.close connection)
+            (not (.isWrapped uos_orig)) (.close connection)
+            :else (do (when-not (.isClosed uis_orig) (.close uis_orig)) (.close uos)))
+          (catch IOException e (.close connection)))))
+
+    (method ^:public getRequestBody ^InputStream [this]
+      (if (some? uis)
+          uis
+          (do
+            (if (== reqContentLen -1)
+                (do (set! uis_orig (ChunkedInputStream. this ris)) (set! uis uis_orig))
+                (do
+                  (set! uis_orig (FixedLengthInputStream. this ris reqContentLen))
+                  (set! uis uis_orig)))
+            uis)))
+
+    (method getOriginalInputStream ^LeftOverInputStream [this] uis_orig)
+
+    (method ^:public getResponseCode ^int [this] rcode)
+
+    (method ^:public getResponseBody ^OutputStream [this]
+      (when (nil? uos) (set! uos_orig (PlaceholderOutputStream. nil)) (set! uos uos_orig))
+      uos)
+
+    (method getPlaceholderResponseBody ^PlaceholderOutputStream [this]
+      (.getResponseBody this)
+      uos_orig)
+
+    (field ^:private ^:static ^:final ^byte/1 CRLF (new byte/1 [0x0D 0x0A]))
+
+    (method ^:public sendResponseHeaders :throws [IOException] ^void [this ^int rCode
+                                                                      ^:mutable ^long contentLen]
+      (let [logger (.getLogger server)]
+        (when sentHeaders (throw (IOException. "headers already sent")))
+        (set! (.-rcode this) rCode)
+        (let [statusLine (java-str "HTTP/1.1 " rCode (Code/msg rCode))
+              tmpout (ByteArrayOutputStream.)
+              o (.getPlaceholderResponseBody this)]
+          (.write tmpout (.bytes this statusLine false 0) 0 (.length statusLine))
+          (.write tmpout CRLF)
+          (let [^:mutable noContentToSend false
+                ^:mutable noContentLengthHeader false]
+            (.set rspHdrs "Date" (.format FORMATTER (Instant/now)))
+            (when (or (or (and (>= rCode 100) (< rCode 200)) (== rCode 204)) (== rCode 304))
+              (when-not (== contentLen HttpExchange/RSPBODY_EMPTY)
+                (let [msg (java-str "sendResponseHeaders: rCode = "
+                                    rCode
+                                    ": forcing contentLen = RSPBODY_EMPTY")]
+                  (.log logger SystemLoggers$Logger$Level/WARNING msg)))
+              (set! contentLen HttpExchange/RSPBODY_EMPTY)
+              (set! noContentLengthHeader (not (== rCode 304))))
+            (cond
+              (or (.isHeadRequest this) (== rCode 304))
+                (do
+                  (when (>= contentLen 0)
+                    (let [msg
+                            "sendResponseHeaders: being invoked with a content length for a HEAD request"]
+                      (.log logger SystemLoggers$Logger$Level/WARNING msg)))
+                  (set! noContentToSend true)
+                  (set! contentLen 0)
+                  (.setWrappedStream o (FixedLengthOutputStream. this ros contentLen)))
+              (== contentLen HttpExchange/RSPBODY_CHUNKED)
+                (if http10
+                    (do (.setWrappedStream o (UndefLengthOutputStream. this ros)) (set! close true))
+                    (do
+                      (.set rspHdrs "Transfer-encoding" "chunked")
+                      (.setWrappedStream o (ChunkedOutputStream. this ros))))
+              :else
+                (do
+                  (when (== contentLen HttpExchange/RSPBODY_EMPTY)
+                    (set! noContentToSend true)
+                    (set! contentLen 0))
+                  (when-not noContentLengthHeader
+                    (.set rspHdrs "Content-length" (Long/toString contentLen)))
+                  (.setWrappedStream o (FixedLengthOutputStream. this ros contentLen))))
+            (when-not close
+              (let [^{:tag (Stream String)} conheader (cast
+                                                        Stream
+                                                        (.orElse
+                                                          (.map
+                                                            (Optional/ofNullable
+                                                              (.get rspHdrs "Connection"))
+                                                            (method-ref
+                                                              Function
+                                                              ^Stream [List]
+                                                              List/.stream))
+                                                          (Stream/empty)))]
+                (when (.anyMatch conheader
+                                 (method-ref Predicate [String] "close" String/.equalsIgnoreCase))
+                  (.log logger
+                        SystemLoggers$Logger$Level/DEBUG
+                        "Connection: close requested by handler")
+                  (set! close true))))
+            (.write this rspHdrs tmpout)
+            (set! (.-rspContentLen this) contentLen)
+            (.writeTo tmpout ros)
+            (set! sentHeaders true)
+            (.log logger
+                  SystemLoggers$Logger$Level/TRACE
+                  (java-str "Sent headers: noContentToSend=" noContentToSend))
+            (when noContentToSend (.flush ros) (.close this))
+            (.logReply server rCode (.requestLine req) nil)))))
+
+    (method write :throws [IOException] ^void [this ^Headers map ^OutputStream os]
+      (let [^{:tag (Set (Map$Entry String (List String)))} entries (.entrySet map)]
+        (for-each [^{:tag (Map$Entry String (List String))} entry entries]
+          (let [key (cast String (.getKey entry))
+                ^:mutable ^byte/1 buf nil
+                ^{:tag (List String)} values (cast List (.getValue entry))]
+            (for-each [^String val values]
+              (let [^:mutable i (.length key)]
+                (set! buf (.bytes this key true 2))
+                (aset buf i (unchecked-byte \:))
+                (set! i (unchecked-inc-int i))
+                (aset buf i (unchecked-byte \space))
+                (set! i (unchecked-inc-int i))
+                (.write os buf 0 i)
+                (set! buf (.bytes this val false 2))
+                (set! i (.length val))
+                (aset buf i (unchecked-byte \return))
+                (set! i (unchecked-inc-int i))
+                (aset buf i (unchecked-byte \newline))
+                (set! i (unchecked-inc-int i))
+                (.write os buf 0 i)))))
+        (.write os \return)
+        (.write os \newline)))
+
+    (field ^:private ^byte/1 rspbuf (new byte/1 128))
+
+    (method ^:private bytes :throws [IOException] ^byte/1 [this ^String s ^boolean isKey ^int extra]
+      (Utils/checkHeader s (not isKey))
+      (let [slen (.length s)]
+        (when (> (unchecked-add-int slen extra) (alength rspbuf))
+          (let [diff (unchecked-subtract-int (unchecked-add-int slen extra) (alength rspbuf))]
+            (set! rspbuf
+                  (new byte/1 (unchecked-multiply-int 2 (unchecked-add-int (alength rspbuf) diff))))))
+        (let [c (.toCharArray s)]
+          (loop [^int i 0]
+            (when (< i (alength c))
+              (aset rspbuf i (unchecked-byte (aget c i)))
+              (recur (unchecked-inc-int i))))
+          rspbuf)))
+
+    (method ^:public getRemoteAddress ^InetSocketAddress [this]
+      (let [s (.socket (.getChannel connection))
+            ia (.getInetAddress s)
+            port (.getPort s)]
+        (InetSocketAddress. ia port)))
+
+    (method ^:public getLocalAddress ^InetSocketAddress [this]
+      (let [s (.socket (.getChannel connection))
+            ia (.getLocalAddress s)
+            port (.getLocalPort s)]
+        (InetSocketAddress. ia port)))
+
+    (method ^:public getProtocol ^String [this]
+      (let [reqline (.requestLine req)
+            index (.lastIndexOf reqline \space)]
+        (.substring reqline (unchecked-add-int index 1))))
+
+    (method ^:public getSSLSession ^SSLSession [this]
+      (let [e (.getSSLEngine connection)] (when (some? e) (.getSession e))))
+
+    (method ^:public getAttribute [this ^String name]
+      (.get attributes (Objects/requireNonNull name "null name parameter")))
+
+    (method ^:public setAttribute ^void [this ^String name value]
+      (let [key (cast String (Objects/requireNonNull name "null name parameter"))]
+        (if (some? value) (.put attributes key value) (.remove attributes key))))
+
+    (method ^:public setStreams ^void [this ^InputStream i ^OutputStream o]
+      (java-assert (some? uis))
+      (when (some? i) (set! uis i))
+      (when (some? o) (set! uos o)))
+
+    (method getConnection ^HttpConnection [this] connection)
+
+    (method getServerImpl ^ServerImpl [this]
+      (.getServerImpl (.getHttpContext this)))
+
+    (method ^:public getPrincipal ^HttpPrincipal [this] principal)
+
+    (method setPrincipal ^void [this ^HttpPrincipal principal]
+      (set! (.-principal this) principal))
+
+    (method ^:static get ^ExchangeImpl [^HttpExchange t]
+      (if (instance? HttpExchangeImpl t)
+          (.getExchangeImpl (cast HttpExchangeImpl t))
+          (do
+            (java-assert (instance? HttpsExchangeImpl t))
+            (.getExchangeImpl (cast HttpsExchangeImpl t))))))
+
+  (defclass PlaceholderOutputStream
+    :extends OutputStream
+
+    (field ^OutputStream wrapped)
+
+    (constructor [this ^OutputStream os] (set! wrapped os))
+
+    (method setWrappedStream ^void [this ^OutputStream os]
+      (set! wrapped os))
+
+    (method isWrapped ^boolean [this] (some? wrapped))
+
+    (method ^:private checkWrap :throws [IOException] ^void [this]
+      (when (nil? wrapped) (throw (IOException. "response headers not sent yet"))))
+
+    (method ^:public write :throws [IOException] ^void [this ^int b]
+      (.checkWrap this)
+      (.write wrapped b))
+
+    (method ^:public write :throws [IOException] ^void [this ^byte/1 b]
+      (.checkWrap this)
+      (.write wrapped b))
+
+    (method ^:public write :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+      (.checkWrap this)
+      (.write wrapped b off len))
+
+    (method ^:public flush :throws [IOException] ^void [this]
+      (.checkWrap this)
+      (.flush wrapped))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (.checkWrap this)
+      (.close wrapped))))

@@ -1,0 +1,110 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/WindowUpdateSender.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function Supplier)
+        '(jdk.internal.net.http.common Logger Utils)
+        '(jdk.internal.net.http.frame SettingsFrame WindowUpdateFrame))
+
+(defclass ^:abstract WindowUpdateSender
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this WindowUpdateSender/.dbgString)
+                          Utils/DEBUG))
+
+  (field ^:final ^int limit)
+
+  (field ^:final ^int windowSize)
+
+  (field ^:final ^Http2Connection connection)
+
+  (field ^:final ^AtomicLong received (AtomicLong.))
+
+  (field ^:final ^AtomicLong unprocessed (AtomicLong.))
+
+  (field ^:final ^ReentrantLock sendLock (ReentrantLock.))
+
+  (constructor [this ^Http2Connection connection]
+    (this. connection
+           (.getParameter (.-clientSettings connection) SettingsFrame/INITIAL_WINDOW_SIZE)))
+
+  (constructor [this ^Http2Connection connection ^int initWindowSize]
+    (this. connection (.getMaxReceiveFrameSize connection) initWindowSize))
+
+  (constructor [this ^Http2Connection connection ^int maxFrameSize ^int initWindowSize]
+    (set! (.-connection this) connection)
+    (set! (.-windowSize this) initWindowSize)
+    (let [v0 (^[int int] Math/max 0 (unchecked-subtract-int initWindowSize maxFrameSize))
+          ^:mutable v1 (unchecked-divide-int
+                         (unchecked-add-int initWindowSize (unchecked-subtract-int maxFrameSize 1))
+                         maxFrameSize)]
+      (set! v1 (unchecked-divide-int (unchecked-multiply-int v1 maxFrameSize) 2))
+      (set! limit (Math/min v0 v1))
+      (when (.on debug)
+        (.log debug
+              "maxFrameSize=%d, initWindowSize=%d, limit=%d"
+              (new Object/1 [maxFrameSize initWindowSize limit])))))
+
+  (method ^:abstract getStreamId ^int [this])
+
+  (method canBufferUnprocessedBytes ^boolean [this ^int len]
+    (let [^:mutable ^long buffered 0
+          ^:mutable ^long processed 0]
+      (set! processed (.get received))
+      (set! buffered (.addAndGet unprocessed len))
+      (not (.checkWindowSizeExceeded this processed buffered))))
+
+  (method ^:private checkWindowSizeExceeded ^boolean [this ^long processed ^long len]
+    (let [rcv (unchecked-add processed len)]
+      (and (> rcv windowSize) (.windowSizeExceeded this rcv))))
+
+  (method processed ^void [this ^int delta]
+    (java-assert (>= delta 0) delta)
+    (let [rest (.addAndGet unprocessed (unchecked-negate-int delta))]
+      (java-assert (>= rest 0))
+      (.update this delta)))
+
+  (method released ^long [this ^int delta]
+    (java-assert (>= delta 0) delta)
+    (let [rest (.addAndGet unprocessed (unchecked-negate-int delta))]
+      (java-assert (>= rest 0))
+      rest))
+
+  (method update ^void [this ^int delta]
+    (let [rcv (.addAndGet received delta)]
+      (when (.on debug)
+        (.log debug "update: %d, received: %d, limit: %d" (new Object/1 [delta rcv limit])))
+      (when-not (and (> rcv windowSize) (.windowSizeExceeded this rcv))
+        (when (> rcv limit)
+          (.lock sendLock)
+          (try
+            (let [tosend (unchecked-int (Math/min (.get received) Integer/MAX_VALUE))]
+              (when (> tosend limit)
+                (.addAndGet received (unchecked-negate-int tosend))
+                (.sendWindowUpdate this tosend)))
+            (finally (.unlock sendLock)))))))
+
+  (method sendWindowUpdate ^void [this ^int delta]
+    (when (.on debug) (.log debug "sending window update: %d" (new Object/1 [delta])))
+    (java-assert (> delta 0) (java-str "illegal window update delta: " delta))
+    (.sendUnorderedFrame connection (WindowUpdateFrame. (.getStreamId this) delta)))
+
+  (field ^:volatile ^String dbgString)
+
+  (method dbgString ^String [this]
+    (let [^:mutable dbg dbgString]
+      (if (some? dbg)
+          dbg
+          (let [tube (.getConnectionFlow (.-connection connection))]
+            (if (nil? tube)
+                (java-str "WindowUpdateSender(stream: " (.getStreamId this) ")")
+                (let [streamId (.getStreamId this)]
+                  (set! dbg
+                        (java-str (.dbgString connection)
+                                  ":WindowUpdateSender(stream: "
+                                  streamId
+                                  ")"))
+                  (if (== streamId 0) dbg (set! dbgString dbg))))))))
+
+  (method ^:protected ^:abstract windowSizeExceeded ^boolean [this ^long received]))

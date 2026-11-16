@@ -1,0 +1,269 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/server/UnicastServerRef.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.server)
+
+(import '(java.io IOException ObjectInput ObjectInputFilter ObjectInputStream ObjectOutput)
+        '(java.lang.reflect InvocationTargetException Method)
+        '(java.rmi AccessException
+                   MarshalException
+                   Remote
+                   RemoteException
+                   ServerError
+                   ServerException
+                   UnmarshalException)
+        '(java.rmi.server ExportException
+                          RemoteCall
+                          RemoteRef
+                          RemoteStub
+                          ServerNotActiveException
+                          ServerRef
+                          Skeleton
+                          SkeletonNotFoundException)
+        '(java.util Collections Date HashMap Map WeakHashMap)
+        '(sun.rmi.runtime Log)
+        '(sun.rmi.transport LiveRef StreamRemoteCall Target)
+        '(sun.rmi.transport.tcp TCPTransport))
+
+(defclass ^:public UnicastServerRef
+  :extends UnicastRef
+  :implements [ServerRef Dispatcher]
+
+  (field ^:public ^:static ^:final ^boolean logCalls
+    (Boolean/getBoolean "java.rmi.server.logCalls"))
+
+  (field ^:public ^:static ^:final ^Log callLog (Log/getLog "sun.rmi.server.call" "RMI" logCalls))
+
+  (field ^:private ^:static ^:final ^long serialVersionUID -7384275867073752268)
+
+  (field ^:private ^:static ^:final ^boolean wantExceptionLog
+    (Boolean/getBoolean "sun.rmi.server.exceptionTrace"))
+
+  (field ^:private ^boolean forceStubUse false)
+
+  (field ^:private ^:static ^:final ^boolean suppressStackTraces
+    (Boolean/getBoolean "sun.rmi.server.suppressStackTraces"))
+
+  (field ^:private ^:transient ^Skeleton skel)
+
+  (field ^:private ^:final ^:transient ^ObjectInputFilter filter)
+
+  (field ^:private ^:transient ^{:tag (Map Long Method)} hashToMethod_Map nil)
+
+  (field ^:private ^:static ^:final ^{:tag (WeakClassHashMap (Map Long Method))} hashToMethod_Maps
+    (HashToMethod_Maps.))
+
+  (field ^:private ^:static ^:final ^{:tag (Map (Class ?) ?)} withoutSkeletons
+    (Collections/synchronizedMap (WeakHashMap.)))
+
+  (constructor ^:public [this] (set! (.-filter this) nil))
+
+  (constructor ^:public [this ^LiveRef ref]
+    (super. ref)
+    (set! (.-filter this) nil))
+
+  (constructor ^:public [this ^LiveRef ref ^ObjectInputFilter filter]
+    (super. ref)
+    (set! (.-filter this) filter))
+
+  (constructor ^:public [this ^int port]
+    (super. (LiveRef. port))
+    (set! (.-filter this) nil))
+
+  (constructor ^:public [this ^boolean forceStubUse]
+    (this. 0)
+    (set! (.-forceStubUse this) forceStubUse))
+
+  (method ^:public exportObject :throws [RemoteException] ^RemoteStub [this ^Remote impl data]
+    (set! forceStubUse true)
+    (cast RemoteStub (.exportObject this impl data false)))
+
+  (method ^:public exportObject :throws [RemoteException] ^Remote [this ^Remote impl data
+                                                                   ^boolean permanent]
+    (let [^{:tag (Class ?)} implClass (.getClass impl)
+          ^:mutable ^Remote stub nil]
+      (try
+        (set! stub (Util/createProxy implClass (.getClientRef this) forceStubUse))
+        (catch IllegalArgumentException e
+          (throw (ExportException. "remote object implements illegal remote interface" e))))
+      (when (instance? RemoteStub stub) (.setSkeleton this impl))
+      (let [target (Target. impl this stub (.getObjID (.-ref this)) permanent)]
+        (.exportObject (.-ref this) target)
+        (set! hashToMethod_Map (cast Map (.get hashToMethod_Maps implClass)))
+        stub)))
+
+  (method ^:public getClientHost :throws [ServerNotActiveException] ^String [this]
+    (TCPTransport/getClientHost))
+
+  (method ^:public setSkeleton :throws [RemoteException] ^void [this ^Remote impl]
+    (when-not (.containsKey withoutSkeletons (.getClass impl))
+      (try
+        (set! skel (Util/createSkeleton impl))
+        (catch SkeletonNotFoundException e (.put withoutSkeletons (.getClass impl) nil)))))
+
+  (method ^:public dispatch :throws [IOException] ^void [this ^Remote obj ^RemoteCall call]
+    (let [^:mutable ^int num 0
+          ^:mutable ^long op 0]
+      (try
+        (let [^:mutable ^ObjectInput in nil]
+          (try
+            (set! in (.getInputStream call))
+            (set! num (.readInt in))
+            (catch Exception readEx
+              (throw (UnmarshalException. "error unmarshalling call header" readEx))))
+          (if (some? skel)
+              (.oldDispatch this obj call num)
+              (do
+                (when (>= num 0)
+                  (throw (UnmarshalException.
+                           "skeleton class not found but required for client version")))
+                (try
+                  (set! op (.readLong in))
+                  (catch Exception readEx
+                    (throw (UnmarshalException. "error unmarshalling call header" readEx))))
+                (let [marshalStream (cast MarshalInputStream in)]
+                  (.skipDefaultResolveClass marshalStream)
+                  (let [method (cast Method (.get hashToMethod_Map op))]
+                    (when (nil? method)
+                      (throw (UnmarshalException.
+                               "unrecognized method hash: method not supported by remote object")))
+                    (.logCall this obj method)
+                    (let [^{:tag (array (Class ?))} types (.getParameterTypes method)
+                          params (new Object/1 (alength types))]
+                      (try
+                        (.unmarshalCustomCallData this in)
+                        (loop [^int i 0]
+                          (when (< i (alength types))
+                            (aset params i (UnicastServerRef/unmarshalValue (aget types i) in))
+                            (recur (unchecked-inc-int i))))
+                        (catch AccessException aex
+                          (.discardPendingRefs (cast StreamRemoteCall call))
+                          (throw aex))
+                        (catch [IOException ClassNotFoundException] e
+                          (.discardPendingRefs (cast StreamRemoteCall call))
+                          (throw (UnmarshalException. "error unmarshalling arguments" e)))
+                        (finally (.releaseInputStream call)))
+                      (let [^:mutable ^Object result nil]
+                        (try
+                          (set! result (.invoke method obj params))
+                          (catch InvocationTargetException e (throw (.getTargetException e))))
+                        (try
+                          (let [out (.getResultStream call true)
+                                ^{:tag (Class ?)} rtype (.getReturnType method)]
+                            (when-not (identical? rtype Void/TYPE)
+                              (UnicastServerRef/marshalValue rtype result out)))
+                          (catch IOException ex
+                            (throw (MarshalException. "error marshalling return" ex)))))))))))
+        (catch Throwable ^:mutable e
+          (let [origEx e]
+            (.logCallException this e)
+            (let [out (.getResultStream call false)]
+              (cond
+                (instance? Error e)
+                  (set! e (ServerError. "Error occurred in server thread" (cast Error e)))
+                (instance? RemoteException e)
+                  (set! e
+                        (ServerException. "RemoteException occurred in server thread"
+                                          (cast Exception e))))
+              (when suppressStackTraces (UnicastServerRef/clearStackTraces e))
+              (.writeObject out e)
+              (when (instance? AccessException origEx)
+                (throw (IOException. "Connection is not reusable" origEx))))))
+        (finally (.releaseInputStream call) (.releaseOutputStream call)))))
+
+  (method ^:protected unmarshalCustomCallData :throws [IOException ClassNotFoundException] ^void [this
+                                                                                                  ^ObjectInput in]
+    (when (some? filter)
+      (when-instance [^ObjectInputStream ois in] (.setObjectInputFilter ois filter))))
+
+  (method ^:private oldDispatch :throws [Exception] ^void [this ^Remote obj ^RemoteCall call ^int op]
+    (let [^:mutable ^long hash 0
+          ^:mutable ^ObjectInput in nil]
+      (set! in (.getInputStream call))
+      (try
+        (let [^{:tag (Class ?)} clazz (Class/forName "sun.rmi.transport.DGCImpl_Skel")]
+          (when (.isAssignableFrom clazz (.getClass skel))
+            (.useCodebaseOnly (cast MarshalInputStream in))))
+        (catch ClassNotFoundException ignore))
+      (try
+        (set! hash (.readLong in))
+        (catch Exception ioe (throw (UnmarshalException. "error unmarshalling call header" ioe))))
+      (let [operations (.getOperations skel)]
+        (.logCall this
+                  obj
+                  (if (and (>= op 0) (< op (alength operations)))
+                      ^Object (aget operations op)
+                      ^Object (java-str "op: " op)))
+        (.unmarshalCustomCallData this in)
+        (.dispatch skel obj call op hash))))
+
+  (method ^:public ^:static clearStackTraces ^void [^:mutable ^Throwable t]
+    (let [empty (new StackTraceElement/1 0)]
+      (while (some? t) (.setStackTrace t empty) (set! t (.getCause t)))))
+
+  (method ^:private logCall ^void [this ^Remote obj method]
+    (when (.isLoggable callLog Log/VERBOSE)
+      (let [^:mutable ^String clientHost nil]
+        (try
+          (set! clientHost (.getClientHost this))
+          (catch ServerNotActiveException snae (set! clientHost "(local)")))
+        (.log callLog
+              Log/VERBOSE
+              (java-str "["
+                        clientHost
+                        ": "
+                        (.getName (.getClass obj))
+                        (.toString (.getObjID (.-ref this)))
+                        ": "
+                        method
+                        "]")))))
+
+  (method ^:private logCallException ^void [this ^Throwable e]
+    (when (.isLoggable callLog Log/BRIEF)
+      (let [^:mutable clientHost ""]
+        (try
+          (set! clientHost (java-str "[" (.getClientHost this) "] "))
+          (catch ServerNotActiveException snae))
+        (.log callLog Log/BRIEF (java-str clientHost "exception: ") e)))
+    (when wantExceptionLog
+      (let [log System/err]
+        (locking log
+          (.println log)
+          (.println log
+                    (java-str "Exception dispatching call to "
+                              (.getObjID (.-ref this))
+                              " in thread \""
+                              (.getName (Thread/currentThread))
+                              "\" at "
+                              (Date.)
+                              ":"))
+          (.printStackTrace e log)))))
+
+  (method ^:public getRefClass ^String [this ^ObjectOutput out]
+    "UnicastServerRef")
+
+  (method ^:protected getClientRef ^RemoteRef [this]
+    (UnicastRef. (.-ref this)))
+
+  (method ^:public writeExternal :throws [IOException] ^void [this ^ObjectOutput out])
+
+  (method ^:public readExternal :throws [IOException ClassNotFoundException] ^void [this
+                                                                                    ^ObjectInput in]
+    (set! (.-ref this) nil)
+    (set! skel nil))
+
+  (defclass ^:private ^:static HashToMethod_Maps
+    :extends (WeakClassHashMap (Map Long Method))
+
+    (constructor [this])
+
+    (method ^:protected computeValue ^{:tag (Map Long Method)} [this ^{:tag (Class ?)} remoteClass]
+      (let [^{:tag (Map Long Method)} map (HashMap.)]
+        (loop [^{:tag (Class ?)} cl remoteClass]
+          (when (some? cl)
+            (for-each [^{:tag (Class ?)} intf (.getInterfaces cl)]
+              (when (.isAssignableFrom Remote intf)
+                (for-each [^Method method (.getMethods intf)]
+                  (.setAccessible method true)
+                  (.put map (Util/computeMethodHash method) method))))
+            (recur (.getSuperclass cl))))
+        map))))

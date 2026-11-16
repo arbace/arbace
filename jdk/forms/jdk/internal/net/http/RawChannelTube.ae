@@ -1,0 +1,294 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/net/http/RawChannelTube.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io EOFException IOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels SelectionKey)
+        '(java.util ArrayList List)
+        '(java.util.concurrent ConcurrentLinkedQueue Flow$Subscriber Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicBoolean AtomicReference)
+        '(java.util.function Supplier)
+        '(jdk.internal.jrt SystemLoggers$Logger SystemLoggers$Logger$Level)
+        '(jdk.internal.net.http.common Demand
+                                       FlowTube
+                                       FlowTube$TubePublisher
+                                       FlowTube$TubeSubscriber
+                                       Logger
+                                       Utils)
+        '(jdk.internal.net.http.websocket RawChannel RawChannel$RawEvent))
+
+(defclass ^:public RawChannelTube
+  :implements [RawChannel]
+
+  (field ^:final ^HttpConnection connection)
+
+  (field ^:final ^FlowTube tube)
+
+  (field ^:final ^WritePublisher writePublisher)
+
+  (field ^:final ^ReadSubscriber readSubscriber)
+
+  (field ^:final ^{:tag (Supplier ByteBuffer)} initial)
+
+  (field ^:final ^AtomicBoolean inited (AtomicBoolean.))
+
+  (field ^:final ^AtomicBoolean outputClosed (AtomicBoolean.))
+
+  (field ^:final ^AtomicBoolean inputClosed (AtomicBoolean.))
+
+  (field ^:final ^AtomicBoolean closed (AtomicBoolean.))
+
+  (field ^:final ^String dbgTag)
+
+  (field ^:final ^Logger debug)
+
+  (constructor [this ^HttpConnection connection ^{:tag (Supplier ByteBuffer)} initial]
+    (set! (.-connection this) connection)
+    (set! (.-tube this) (.getConnectionFlow connection))
+    (set! (.-initial this) initial)
+    (set! (.-writePublisher this) (WritePublisher.))
+    (set! (.-readSubscriber this) (ReadSubscriber.))
+    (set! dbgTag (java-str "[WebSocket] RawChannelTube(" tube ")"))
+    (set! debug (Utils/getWebSocketLogger (method-ref Supplier ^String [] dbgTag String/.toString)))
+    (.webSocketOpen (.client connection))
+    (.connectFlows this))
+
+  (defclass ^:static ^:final CleanupChecker
+    :implements [Runnable]
+
+    (field ^:final ^AtomicBoolean closed)
+
+    (field ^:final ^SystemLoggers$Logger debug)
+
+    (constructor [this ^AtomicBoolean closed ^SystemLoggers$Logger debug]
+      (set! (.-closed this) closed)
+      (set! (.-debug this) debug))
+
+    (method ^:public run ^void [this]
+      (when-not (.get closed)
+        (.log debug
+              SystemLoggers$Logger$Level/DEBUG
+              "RawChannelTube was not closed before being released"))))
+
+  (method ^:private connectFlows ^void [this]
+    (when (.on debug) (.log debug "connectFlows"))
+    (.connectFlows tube writePublisher readSubscriber))
+
+  (defclass WriteSubscription
+    :implements [Flow$Subscription]
+
+    (field ^:final ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber)
+
+    (field ^:final ^Demand demand (Demand.))
+
+    (field ^:volatile ^boolean cancelled)
+
+    (constructor [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber]
+      (set! (.-subscriber this) subscriber))
+
+    (method ^:public request ^void [this ^long n]
+      (when (.on debug) (.log debug "WriteSubscription::request %d" (new Object/1 [n])))
+      (.increase demand n)
+      (let [^:mutable ^RawChannel$RawEvent event nil]
+        (while (some? (set! event (cast RawChannel$RawEvent (.poll (.-events writePublisher)))))
+          (when (.on debug) (.log debug "WriteSubscriber: handling event"))
+          (.handle event)
+          (when (.isFulfilled demand) (break)))))
+
+    (method ^:public cancel ^void [this]
+      (set! cancelled true)
+      (when (.on debug) (.log debug "WriteSubscription::cancel"))
+      (.shutdownOutput RawChannelTube/this)
+      (let [^:mutable ^RawChannel$RawEvent event nil]
+        (while (some? (set! event (cast RawChannel$RawEvent (.poll (.-events writePublisher)))))
+          (when (.on debug) (.log debug "WriteSubscriber: handling event"))
+          (.handle event)))))
+
+  (defclass WritePublisher
+    :implements [FlowTube$TubePublisher]
+
+    (field ^:final ^{:tag (ConcurrentLinkedQueue RawChannel$RawEvent)} events
+      (ConcurrentLinkedQueue.))
+
+    (field ^:volatile ^WriteSubscription writeSubscription)
+
+    (method ^:public subscribe ^void [this
+                                      ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber]
+      (when (.on debug) (.log debug "WritePublisher::subscribe"))
+      (let [subscription (WriteSubscription. subscriber)]
+        (.onSubscribe subscriber subscription)
+        (set! writeSubscription subscription))))
+
+  (defclass ReadSubscriber
+    :implements [FlowTube$TubeSubscriber]
+
+    (field ^:volatile ^Flow$Subscription readSubscription)
+
+    (field ^:volatile ^boolean completed)
+
+    (field ^long initialRequest)
+
+    (field ^:final ^{:tag (ConcurrentLinkedQueue RawChannel$RawEvent)} events
+      (ConcurrentLinkedQueue.))
+
+    (field ^:final ^{:tag (ConcurrentLinkedQueue ByteBuffer)} buffers (ConcurrentLinkedQueue.))
+
+    (field ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+    (method checkEvents ^void [this]
+      (let [subscription readSubscription]
+        (when (some? subscription)
+          (let [error (cast Throwable (.get errorRef))]
+            (while (or (or (or (not (.isEmpty buffers)) (some? error)) (.get closed)) completed)
+              (let [event (cast RawChannel$RawEvent (.poll events))]
+                (when (nil? event) (break))
+                (when (.on debug) (.log debug "ReadSubscriber: handling event"))
+                (.handle event)))))))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (let [^:mutable ^long n 0]
+        (locking this
+          (set! readSubscription subscription)
+          (set! n initialRequest)
+          (set! initialRequest 0))
+        (when (.on debug) (.log debug "ReadSubscriber::onSubscribe"))
+        (when (> n 0)
+          (let [error (cast Throwable (.get errorRef))]
+            (when (and (and (nil? error) (not (.get closed))) (not completed))
+              (when (.on debug) (.log debug (java-str "readSubscription: requesting " n)))
+              (.request subscription n))))
+        (.checkEvents this)))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (when (.on debug)
+        (.log debug
+              (lambda Supplier ^String []
+                (java-str "ReadSubscriber::onNext " (Utils/remaining item) " bytes"))))
+      (.addAll buffers item)
+      (.checkEvents this))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (when (or (.get closed) (.compareAndSet errorRef nil throwable))
+        (when (.on debug) (.log debug "ReadSubscriber::onError" throwable))
+        (when (.isEmpty buffers) (.checkEvents this) (.shutdownInput RawChannelTube/this))))
+
+    (method ^:public onComplete ^void [this]
+      (when (.on debug) (.log debug "ReadSubscriber::onComplete"))
+      (set! completed true)
+      (when (.isEmpty buffers) (.checkEvents this) (.shutdownInput RawChannelTube/this))))
+
+  (method ^:public registerEvent :throws [IOException] ^void [this
+                                                              ^:mutable ^RawChannel$RawEvent event]
+    (let [interestOps (.interestOps event)]
+      (when-not (== (bit-and-int interestOps SelectionKey/OP_WRITE) 0)
+        (when (.on debug) (.log debug "register write event"))
+        (when (.get outputClosed) (throw (IOException. "closed output")))
+        (.add (.-events writePublisher) event)
+        (let [writeSubscription (.-writeSubscription writePublisher)]
+          (when (some? writeSubscription)
+            (while (not (.isFulfilled (.-demand writeSubscription)))
+              (set! event (cast RawChannel$RawEvent (.poll (.-events writePublisher))))
+              (when (nil? event) (break))
+              (.handle event)))))
+      (when-not (== (bit-and-int interestOps SelectionKey/OP_READ) 0)
+        (when (.on debug) (.log debug "register read event"))
+        (when (.get inputClosed) (throw (IOException. "closed input")))
+        (.add (.-events readSubscriber) event)
+        (.checkEvents readSubscriber)
+        (when (and (.isEmpty (.-buffers readSubscriber)) (not (.isEmpty (.-events readSubscriber))))
+          (let [^:mutable readSubscription (.-readSubscription readSubscriber)]
+            (when (nil? readSubscription)
+              (locking readSubscriber
+                (set! readSubscription (.-readSubscription readSubscriber))
+                (when (nil? readSubscription) (set! (.-initialRequest readSubscriber) 1) (return))))
+            (java-assert (some? readSubscription))
+            (when (.on debug) (.log debug "readSubscription: requesting 1"))
+            (.request readSubscription 1))))))
+
+  (method ^:public initialByteBuffer :throws [IllegalStateException] ^ByteBuffer [this]
+    (if (.compareAndSet inited false true)
+        (cast ByteBuffer (.get initial))
+        (throw (IllegalStateException. "initial buffer already drained"))))
+
+  (method ^:public read :throws [IOException] ^ByteBuffer [this]
+    (when (.on debug) (.log debug "read"))
+    (let [readSubscription (.-readSubscription readSubscriber)]
+      (if (nil? readSubscription)
+          Utils/EMPTY_BYTEBUFFER
+          (let [buffer (cast ByteBuffer (.poll (.-buffers readSubscriber)))]
+            (if (some? buffer)
+                (do (when (.on debug) (.log debug (java-str "read: " (.remaining buffer)))) buffer)
+                (let [^:mutable error (cast Throwable (.get (.-errorRef readSubscriber)))]
+                  (when (some? error) (set! error (Utils/getIOException error)))
+                  (if (instance? EOFException error)
+                      (do
+                        (when (.on debug) (.log debug "read: EOFException"))
+                        (.shutdownInput this)
+                        nil)
+                      (do
+                        (when (some? error)
+                          (when (.on debug) (.log debug (java-str "read: " error)))
+                          (when (.get closed) (return nil))
+                          (.shutdownInput this)
+                          (throw (Utils/getIOException error)))
+                        (if (.-completed readSubscriber)
+                            (do
+                              (when (.on debug) (.log debug "read: EOF"))
+                              (.shutdownInput this)
+                              nil)
+                            (do
+                              (when (.get inputClosed)
+                                (when (.on debug) (.log debug "read: CLOSED"))
+                                (throw (IOException. "closed output")))
+                              (when (.on debug) (.log debug "read: nothing to read"))
+                              Utils/EMPTY_BYTEBUFFER))))))))))
+
+  (method ^:public write :throws [IOException] ^long [this ^ByteBuffer/1 srcs ^int offset
+                                                      ^int length]
+    (when (.get outputClosed)
+      (when (.on debug) (.log debug "write: CLOSED"))
+      (throw (IOException. "closed output")))
+    (let [writeSubscription (.-writeSubscription writePublisher)]
+      (if (nil? writeSubscription)
+          (do (when (.on debug) (.log debug "write: unsubscribed: 0")) 0)
+          (do
+            (when (.-cancelled writeSubscription)
+              (when (.on debug) (.log debug "write: CANCELLED"))
+              (.shutdownOutput this)
+              (throw (IOException. "closed output")))
+            (if (.tryDecrement (.-demand writeSubscription))
+                (let [^{:tag (List ByteBuffer)} buffers (RawChannelTube/copy srcs offset length)
+                      res (Utils/remaining buffers)]
+                  (when (.on debug) (.log debug "write: writing %d" (new Object/1 [res])))
+                  (.onNext (.-subscriber writeSubscription) buffers)
+                  res)
+                (do (when (.on debug) (.log debug "write: no demand: 0")) 0))))))
+
+  (method ^:public shutdownInput ^void [this]
+    (when (.compareAndSet inputClosed false true) (when (.on debug) (.log debug "shutdownInput"))))
+
+  (method ^:public shutdownOutput ^void [this]
+    (when (.compareAndSet outputClosed false true) (when (.on debug) (.log debug "shutdownOutput"))))
+
+  (method ^:public close ^void [this]
+    (when (.compareAndSet closed false true)
+      (when (.on debug) (.log debug "close"))
+      (.webSocketClose (.client connection))
+      (.close connection)))
+
+  (method ^:private ^:static copy ^{:tag (List ByteBuffer)} [^ByteBuffer/1 src ^int offset ^int len]
+    (let [count (Math/min len (unchecked-subtract-int (alength src) offset))]
+      (cond
+        (<= count 0) Utils/EMPTY_BB_LIST
+        (== count 1) (List/of (Utils/copy (aget src offset)))
+        (== count 2)
+          (List/of (Utils/copy (aget src offset))
+                   (Utils/copy (aget src (unchecked-add-int offset 1))))
+        :else
+          (let [^{:tag (List ByteBuffer)} list (ArrayList. count)]
+            (loop [^int i 0]
+              (when (< i count)
+                (.add list (Utils/copy (aget src (unchecked-add-int offset i))))
+                (recur (unchecked-inc-int i))))
+            list)))))

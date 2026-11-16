@@ -4,8 +4,24 @@
 
 (import '(com.sun.management UnixOperatingSystemMXBean)
         '(com.sun.management.internal HotSpotThreadImpl JrtPlatformBeans)
+        '(java.io IOException)
         '(java.util ArrayList Collections HashSet List Set)
+        '(javax.management DynamicMBean
+                           InstanceAlreadyExistsException
+                           InstanceNotFoundException
+                           JMX
+                           MBeanRegistrationException
+                           MBeanServer
+                           MBeanServerConnection
+                           MBeanServerFactory
+                           MalformedObjectNameException
+                           NotCompliantMBeanException
+                           NotificationEmitter
+                           ObjectName
+                           StandardEmitterMBean
+                           StandardMBean)
         '(jdk.internal.jrt HostManagement)
+        '(jdk.internal.misc VM)
         '(sun.management ManagementFactoryHelper))
 
 (defclass ^:public ManagementFactory
@@ -82,6 +98,8 @@
         (or (.equals n "java.lang.management.ThreadMXBean")
             (.equals n "com.sun.management.ThreadMXBean"))
           (ManagementFactory/threadBean)
+        (.equals n "java.lang.management.PlatformLoggingMXBean")
+          (ManagementFactoryHelper/getPlatformLoggingMXBean)
         (.equals n "java.lang.management.RuntimeMXBean") (ManagementFactoryHelper/getRuntimeMXBean)
         (or (or (.equals n "java.lang.management.OperatingSystemMXBean")
                 (.equals n "com.sun.management.OperatingSystemMXBean"))
@@ -102,6 +120,69 @@
     (when (nil? osImpl)
       (set! osImpl (JrtPlatformBeans/operatingSystem (ManagementFactoryHelper/getVMManagement))))
     osImpl)
+
+  (field ^:private ^:static ^MBeanServer platformMBeanServer)
+
+  (method ^:public ^:static ^:synchronized getPlatformMBeanServer ^MBeanServer []
+    (when (nil? platformMBeanServer)
+      (set! platformMBeanServer (MBeanServerFactory/createMBeanServer))
+      (let [beans (new PlatformManagedObject/1
+                       [(ManagementFactory/threadBean)
+                        (ManagementFactoryHelper/getRuntimeMXBean)
+                        (ManagementFactory/osBean)
+                        (ManagementFactoryHelper/getPlatformLoggingMXBean)])]
+        (for-each [^PlatformManagedObject pmo beans]
+          (ManagementFactory/addMXBean platformMBeanServer
+                                       (.getCanonicalName (.getObjectName pmo))
+                                       pmo))))
+    platformMBeanServer)
+
+  (method ^:public ^:static newPlatformMXBeanProxy :type-params [T] :throws [IOException] ^T [^MBeanServerConnection connection
+                                                                                              ^String mxbeanName
+                                                                                              ^{:tag (Class T)} mxbeanInterface]
+    (let [^{:tag (Class ?)} cls mxbeanInterface
+          loader (.getClassLoader cls)]
+      (when-not (VM/isSystemDomainLoader loader)
+        (throw (IllegalArgumentException. (java-str mxbeanName " is not a platform MXBean"))))
+      (try
+        (let [objName (ObjectName. mxbeanName)
+              intfName (.getName mxbeanInterface)]
+          (when-not (ManagementFactory/isInstanceOf connection objName intfName)
+            (throw (IllegalArgumentException.
+                     (java-str mxbeanName " is not an instance of " mxbeanInterface))))
+          (let [emitter (.isInstanceOf connection objName NOTIF_EMITTER)]
+            (JMX/newMXBeanProxy connection objName mxbeanInterface emitter)))
+        (catch [InstanceNotFoundException MalformedObjectNameException] e
+          (throw (IllegalArgumentException. e))))))
+
+  (method ^:private ^:static isInstanceOf :throws [InstanceNotFoundException IOException] ^boolean [^MBeanServerConnection connection
+                                                                                                    ^ObjectName objName
+                                                                                                    ^String intfName]
+    (when (.equals "java.util.logging.LoggingMXBean" intfName)
+      (when (.isInstanceOf connection objName (.getName PlatformLoggingMXBean)) (return true)))
+    (.isInstanceOf connection objName intfName))
+
+  (field ^:private ^:static ^:final ^String NOTIF_EMITTER "javax.management.NotificationEmitter")
+
+  (method ^:private ^:static addMXBean ^void [^:final ^MBeanServer mbs ^String name ^:final pmo]
+    (try
+      (let [oname (ObjectName/getInstance name)
+            ^DynamicMBean dmbean (cond
+                                   (instance? DynamicMBean pmo)
+                                     (cast DynamicMBean (.cast DynamicMBean pmo))
+                                   (instance? NotificationEmitter pmo)
+                                     (StandardEmitterMBean.
+                                       pmo
+                                       nil
+                                       true
+                                       (cast NotificationEmitter pmo))
+                                   :else (StandardMBean. pmo nil true))]
+        (.registerMBean mbs dmbean oname))
+      (catch [MalformedObjectNameException
+              InstanceAlreadyExistsException
+              MBeanRegistrationException
+              NotCompliantMBeanException] e
+        (throw (IllegalArgumentException. e)))))
 
   (method ^:private ^:static notYet ^UnsupportedOperationException [^{:tag (Class ?)} intf]
     (UnsupportedOperationException.
@@ -127,6 +208,35 @@
         (.add l (cast PlatformManagedObject (.cast mxbeanInterface o)))
         l)))
 
+  (method ^:public ^:static getPlatformMXBean :type-params [(T extends PlatformManagedObject)] :throws [IOException] ^T [^MBeanServerConnection connection
+                                                                                                                         ^{:tag (Class T)} mxbeanInterface]
+    (when-not (ManagementFactory/isPlatformInterface mxbeanInterface)
+      (throw (IllegalArgumentException.
+               (java-str (.getName mxbeanInterface) " is not a platform management interface"))))
+    (let [o (ManagementFactory/singleton mxbeanInterface)]
+      (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
+      (cast PlatformManagedObject
+            (ManagementFactory/newPlatformMXBeanProxy
+              connection
+              (.getCanonicalName (.getObjectName o))
+              mxbeanInterface))))
+
+  (method ^:public ^:static getPlatformMXBeans :type-params [(T extends PlatformManagedObject)] :throws [IOException] ^{:tag (List T)} [^MBeanServerConnection connection
+                                                                                                                                        ^{:tag (Class T)} mxbeanInterface]
+    (when-not (ManagementFactory/isPlatformInterface mxbeanInterface)
+      (throw (IllegalArgumentException.
+               (java-str (.getName mxbeanInterface) " is not a platform management interface"))))
+    (let [o (ManagementFactory/singleton mxbeanInterface)]
+      (when (nil? o) (throw (ManagementFactory/notYet mxbeanInterface)))
+      (let [^{:tag (List T)} l (ArrayList.)]
+        (.add l
+              (cast PlatformManagedObject
+                    (ManagementFactory/newPlatformMXBeanProxy
+                      connection
+                      (.getCanonicalName (.getObjectName o))
+                      mxbeanInterface)))
+        l)))
+
   (method ^:public ^:static getPlatformManagementInterfaces ^{:tag (Set (Class (? extends PlatformManagedObject)))} []
     (let [^{:tag (Set (Class (? extends PlatformManagedObject)))} s (HashSet.)]
       (.add s ThreadMXBean)
@@ -135,4 +245,5 @@
       (.add s OperatingSystemMXBean)
       (.add s com.sun.management.OperatingSystemMXBean)
       (.add s UnixOperatingSystemMXBean)
+      (.add s PlatformLoggingMXBean)
       (Collections/unmodifiableSet s))))

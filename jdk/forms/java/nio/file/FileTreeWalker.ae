@@ -1,0 +1,175 @@
+;; Converted from jdk26u src/java.base/share/classes/java/nio/file/FileTreeWalker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.nio.file)
+
+(import '(java.io Closeable IOException)
+        '(java.nio.file.attribute BasicFileAttributes)
+        '(java.util ArrayDeque Collection Iterator)
+        '(sun.nio.fs BasicFileAttributesHolder))
+
+(defclass FileTreeWalker
+  :implements [Closeable]
+
+  (field ^:private ^:final ^boolean followLinks)
+
+  (field ^:private ^:final ^LinkOption/1 linkOptions)
+
+  (field ^:private ^:final ^int maxDepth)
+
+  (field ^:private ^:final ^{:tag (ArrayDeque DirectoryNode)} stack (ArrayDeque.))
+
+  (field ^:private ^boolean closed)
+
+  (defclass ^:private ^:static DirectoryNode
+    (field ^:private ^:final ^Path dir)
+
+    (field ^:private ^:final key)
+
+    (field ^:private ^:final ^{:tag (DirectoryStream Path)} stream)
+
+    (field ^:private ^:final ^{:tag (Iterator Path)} iterator)
+
+    (field ^:private ^boolean skipped)
+
+    (constructor [this ^Path dir key ^{:tag (DirectoryStream Path)} stream]
+      (set! (.-dir this) dir)
+      (set! (.-key this) key)
+      (set! (.-stream this) stream)
+      (set! (.-iterator this) (.iterator stream)))
+
+    (method directory ^Path [this] dir)
+
+    (method key [this] key)
+
+    (method stream ^{:tag (DirectoryStream Path)} [this] stream)
+
+    (method iterator ^{:tag (Iterator Path)} [this] iterator)
+
+    (method skip ^void [this] (set! skipped true))
+
+    (method skipped ^boolean [this] skipped))
+
+  (defclass ^:static ^:enum EventType
+    (constants START_DIRECTORY END_DIRECTORY ENTRY))
+
+  (defclass ^:static Event
+    (field ^:private ^:final ^EventType type)
+
+    (field ^:private ^:final ^Path file)
+
+    (field ^:private ^:final ^BasicFileAttributes attrs)
+
+    (field ^:private ^:final ^IOException ioe)
+
+    (constructor ^:private [this ^EventType type ^Path file ^BasicFileAttributes attrs
+                            ^IOException ioe]
+      (set! (.-type this) type)
+      (set! (.-file this) file)
+      (set! (.-attrs this) attrs)
+      (set! (.-ioe this) ioe))
+
+    (constructor [this ^EventType type ^Path file ^BasicFileAttributes attrs]
+      (this. type file attrs nil))
+
+    (constructor [this ^EventType type ^Path file ^IOException ioe]
+      (this. type file nil ioe))
+
+    (method type ^EventType [this] type)
+
+    (method file ^Path [this] file)
+
+    (method attributes ^BasicFileAttributes [this] attrs)
+
+    (method ioeException ^IOException [this] ioe))
+
+  (constructor [this ^{:tag (Collection FileVisitOption)} options ^int maxDepth]
+    (let [^:mutable fl false]
+      (for-each [^FileVisitOption option options]
+        (switch option FOLLOW_LINKS (set! fl true) (throw (AssertionError. "Should not get here"))))
+      (when (< maxDepth 0) (throw (IllegalArgumentException. "'maxDepth' is negative")))
+      (set! (.-followLinks this) fl)
+      (set! (.-linkOptions this)
+            (if fl (new LinkOption/1 0) (new LinkOption/1 [LinkOption/NOFOLLOW_LINKS])))
+      (set! (.-maxDepth this) maxDepth)))
+
+  (method ^:private getAttributes :throws [IOException] ^BasicFileAttributes [this ^Path file
+                                                                              ^boolean canUseCached]
+    (when canUseCached
+      (when-instance [^BasicFileAttributesHolder bfah file]
+        (let [cached (.get bfah)]
+          (when (and (some? cached) (or (not followLinks) (not (.isSymbolicLink cached))))
+            (return cached)))))
+    (let [^:mutable ^BasicFileAttributes attrs nil]
+      (try
+        (set! attrs (Files/readAttributes file BasicFileAttributes linkOptions))
+        (catch IOException ioe
+          (when-not followLinks (throw ioe))
+          (set! attrs
+                (Files/readAttributes file
+                                      BasicFileAttributes
+                                      (new LinkOption/1 [LinkOption/NOFOLLOW_LINKS])))))
+      attrs))
+
+  (method ^:private wouldLoop ^boolean [this ^Path dir key]
+    (for-each [^DirectoryNode ancestor stack]
+      (let [ancestorKey (.key ancestor)]
+        (if (and (some? key) (some? ancestorKey))
+            (when (.equals key ancestorKey) (return true))
+            (try
+              (when (Files/isSameFile dir (.directory ancestor)) (return true))
+              (catch IOException e)))))
+    false)
+
+  (method ^:private visit ^Event [this ^Path entry ^boolean canUseCached]
+    (let [^:mutable ^BasicFileAttributes attrs nil]
+      (try
+        (set! attrs (.getAttributes this entry canUseCached))
+        (catch IOException ioe (return (Event. EventType/ENTRY entry ioe))))
+      (let [depth (.size stack)]
+        (cond
+          (or (>= depth maxDepth) (not (.isDirectory attrs))) (Event. EventType/ENTRY entry attrs)
+          (and followLinks (.wouldLoop this entry (.fileKey attrs)))
+            (Event. EventType/ENTRY entry (FileSystemLoopException. (.toString entry)))
+          :else
+            (let [^:mutable ^{:tag (DirectoryStream Path)} stream nil]
+              (try
+                (set! stream (Files/newDirectoryStream entry))
+                (catch IOException ioe (return (Event. EventType/ENTRY entry ioe))))
+              (.push stack (DirectoryNode. entry (.fileKey attrs) stream))
+              (Event. EventType/START_DIRECTORY entry attrs))))))
+
+  (method walk ^Event [this ^Path file]
+    (when closed (throw (IllegalStateException. "Closed")))
+    (let [ev (.visit this file false)] (java-assert (some? ev)) ev))
+
+  (method next ^Event [this]
+    (let [top (cast DirectoryNode (.peek stack))]
+      (when (some? top)
+        (let [^:mutable ^Path entry nil
+              ^:mutable ^IOException ioe nil]
+          (when-not (.skipped top)
+            (let [^{:tag (Iterator Path)} iterator (.iterator top)]
+              (try
+                (when (.hasNext iterator) (set! entry (cast Path (.next iterator))))
+                (catch DirectoryIteratorException x (set! ioe (.getCause x))))))
+          (if (nil? entry)
+              (do
+                (try
+                  (.close (.stream top))
+                  (catch IOException e (if (nil? ioe) (set! ioe e) (.addSuppressed ioe e))))
+                (.pop stack)
+                (Event. EventType/END_DIRECTORY (.directory top) ioe))
+              (.visit this entry true))))))
+
+  (method pop ^void [this]
+    (when-not (.isEmpty stack)
+      (let [node (cast DirectoryNode (.pop stack))]
+        (try (.close (.stream node)) (catch IOException ignore)))))
+
+  (method skipRemainingSiblings ^void [this]
+    (when-not (.isEmpty stack) (.skip (cast DirectoryNode (.peek stack)))))
+
+  (method isOpen ^boolean [this] (not closed))
+
+  (method ^:public close ^void [this]
+    (when-not closed (while (not (.isEmpty stack)) (.pop this)) (set! closed true))))

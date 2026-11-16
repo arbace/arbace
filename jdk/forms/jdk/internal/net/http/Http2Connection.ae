@@ -1,0 +1,1372 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/Http2Connection.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io Closeable EOFException IOException UncheckedIOException)
+        '(java.net InetSocketAddress ProtocolException)
+        '(java.net.http HttpClient$Version HttpHeaders)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels ClosedChannelException)
+        '(java.nio.charset StandardCharsets)
+        '(java.time Duration)
+        '(java.util ArrayList Iterator List Locale Map$Entry Objects)
+        '(java.util.concurrent CompletableFuture
+                               CompletionStage
+                               ConcurrentHashMap
+                               ConcurrentLinkedQueue
+                               Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference)
+        '(java.util.concurrent.locks Lock ReentrantLock)
+        '(java.util.function BiConsumer Consumer Function Supplier)
+        '(javax.net.ssl SSLException)
+        '(jdk.internal.net.http.common Alpns
+                                       FlowTube$TubeSubscriber
+                                       HeaderDecoder
+                                       Log
+                                       Logger
+                                       MinimalFuture
+                                       MinimalFuture$ExceptionalSupplier
+                                       SequentialScheduler
+                                       Utils
+                                       ValidatingHeadersConsumer
+                                       ValidatingHeadersConsumer$Context)
+        '(jdk.internal.net.http.frame AltSvcFrame
+                                      ContinuationFrame
+                                      DataFrame
+                                      ErrorFrame
+                                      FramesDecoder
+                                      FramesDecoder$FrameProcessor
+                                      FramesEncoder
+                                      GoAwayFrame
+                                      HeaderFrame
+                                      HeadersFrame
+                                      Http2Frame
+                                      MalformedFrame
+                                      OutgoingHeaders
+                                      PingFrame
+                                      PushPromiseFrame
+                                      ResetFrame
+                                      SettingsFrame
+                                      WindowUpdateFrame)
+        '(jdk.internal.net.http.hpack Decoder DecodingCallback Encoder))
+
+(defclass Http2Connection
+  :implements [Closeable]
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this Http2Connection/.dbgString)))
+
+  (field ^:static ^:final ^Logger DEBUG_LOGGER
+    (Utils/getDebugLogger (method-ref Supplier ^String [] "Http2Connection" String/.toString)))
+
+  (field ^:private ^:final ^Logger debugHpack
+    (Utils/getHpackLogger (method-ref Supplier ^String [] this Http2Connection/.dbgString)))
+
+  (field ^:static ^:final ^ByteBuffer EMPTY_TRIGGER (ByteBuffer/allocate 0))
+
+  (field ^:private ^:static ^:final ^int MAX_CLIENT_STREAM_ID Integer/MAX_VALUE)
+
+  (field ^:private ^:static ^:final ^int MAX_SERVER_STREAM_ID
+    (unchecked-subtract-int Integer/MAX_VALUE 1))
+
+  (field ^:private ^IdleConnectionTimeoutEvent idleConnectionTimeoutEvent)
+
+  (field ^:private ^:final ^AtomicBoolean goAwaySent (AtomicBoolean.))
+
+  (field ^:private ^:final ^AtomicBoolean goAwayRecvd (AtomicBoolean.))
+
+  (field ^:private ^:volatile ^boolean finalStream)
+
+  (defclass ^:final IdleConnectionTimeoutEvent
+    :extends TimeoutEvent
+
+    (field ^:private ^boolean cancelled)
+
+    (constructor [this ^Duration duration] (super. duration))
+
+    (method ^:public handle ^void [this]
+      (.lock stateLock)
+      (try
+        (when cancelled
+          (when (.on debug)
+            (.log debug
+                  "Idle timeout event already cancelled, not initiating idle connection close"))
+          (return))
+        (.markForIdleTermination connTerminator)
+        (finally (.unlock stateLock)))
+      (.idleTimedOut connTerminator))
+
+    (method cancel ^void [this]
+      (java-assert (.isHeldByCurrentThread stateLock)
+        (java-str "Current thread doesn't hold " stateLock))
+      (set! (.-cancelled this) true)
+      (.cancelTimer (.client Http2Connection/this) this))
+
+    (method ^:public toString ^String [this]
+      (java-str "IdleConnectionTimeoutEvent, " (.toString super))))
+
+  (defclass ^:private ^:final FramesController
+    (field ^:volatile ^boolean prefaceSent)
+
+    (field ^:volatile ^{:tag (List ByteBuffer)} pending)
+
+    (method processReceivedData :throws [IOException] ^boolean [this ^FramesDecoder decoder
+                                                                ^ByteBuffer buf]
+      (when-not prefaceSent
+        (when (.on debug)
+          (.log debug "Preface not sent: buffering %d" (new Object/1 [(.remaining buf)])))
+        (.lock stateLock)
+        (try
+          (when-not prefaceSent
+            (when (nil? pending) (set! pending (ArrayList.)))
+            (.add pending buf)
+            (when (.on debug)
+              (.log debug
+                    (java-str "there are now %d bytes buffered waiting for preface to be sent"
+                              (Utils/remaining pending))))
+            (return false))
+          (finally (.unlock stateLock))))
+      (let [^{:tag (List ByteBuffer)} pending (.-pending this)]
+        (set! (.-pending this) nil)
+        (when (some? pending)
+          (when (.on debug)
+            (.log debug
+                  (lambda Supplier ^String []
+                    (java-str "Processing buffered data: " (Utils/remaining pending)))))
+          (for-each [^ByteBuffer b pending] (.decode decoder b)))
+        (when-not (identical? buf EMPTY_TRIGGER)
+          (when (.on debug) (.log debug "Processing %d" (new Object/1 [(.remaining buf)])))
+          (.decode decoder buf))
+        true))
+
+    (method markPrefaceSent ^void [this]
+      (java-assert (not prefaceSent))
+      (.lock stateLock)
+      (try (set! prefaceSent true) (finally (.unlock stateLock)))))
+
+  (defclass ^:private ^:final PushPromiseDecoder
+    :extends HeaderDecoder
+    :implements [DecodingCallback]
+
+    (field ^:final ^int parentStreamId)
+
+    (field ^:final ^int pushPromiseStreamId)
+
+    (field ^:final ^{:tag (Stream ?)} parent)
+
+    (field ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+    (constructor [this ^int parentStreamId ^int pushPromiseStreamId ^{:tag (Stream ?)} parent]
+      (super. ValidatingHeadersConsumer$Context/REQUEST)
+      (set! (.-parentStreamId this) parentStreamId)
+      (set! (.-pushPromiseStreamId this) pushPromiseStreamId)
+      (set! (.-parent this) parent))
+
+    (method ^:protected addHeader ^void [this ^String name ^String value]
+      (when (nil? (.get errorRef)) (.addHeader super name value)))
+
+    (method ^:public onMaxHeaderListSizeReached :throws [ProtocolException] ^void [this ^long size
+                                                                                   ^int maxHeaderListSize]
+      (try
+        (.onMaxHeaderListSizeReached DecodingCallback/super size maxHeaderListSize)
+        (catch ProtocolException pe
+          (if (some? parent)
+              (when (.compareAndSet errorRef nil pe)
+                (.resetStream Http2Connection/this pushPromiseStreamId ResetFrame/REFUSED_STREAM)
+                (.onProtocolError parent pe))
+              (throw pe))))))
+
+  (field ^:private ^:final ^ReentrantLock stateLock (ReentrantLock.))
+
+  (field ^:final ^HttpConnection connection)
+
+  (field ^:private ^:final ^Http2ClientImpl client2)
+
+  (field ^:private ^:final ^{:tag (ConcurrentHashMap Integer (Stream ?))} streams
+    (ConcurrentHashMap.))
+
+  (field ^:private ^int nextstreamid)
+
+  (field ^:private ^int nextPushStream 2)
+
+  (field ^:private ^int lastReservedClientStreamid 1)
+
+  (field ^:private ^int lastReservedServerStreamid 0)
+
+  (field ^:private ^int numReservedClientStreams 0)
+
+  (field ^:private ^int numReservedServerStreams 0)
+
+  (field ^:private ^:final ^Encoder hpackOut)
+
+  (field ^:private ^:final ^Decoder hpackIn)
+
+  (field ^:final ^SettingsFrame clientSettings)
+
+  (field ^:private ^:volatile ^SettingsFrame serverSettings)
+
+  (defclass ^:private ^:record PushContinuationState [^PushPromiseDecoder pushContDecoder
+                                                      ^PushPromiseFrame pushContFrame])
+
+  (field ^:private ^:volatile ^PushContinuationState pushContinuationState)
+
+  (field ^:private ^:final ^String key)
+
+  (field ^:private ^:final ^FramesDecoder framesDecoder)
+
+  (field ^:private ^:final ^FramesEncoder framesEncoder (FramesEncoder.))
+
+  (field ^:private ^:final ^AtomicLong lastProcessedStreamInGoAway (AtomicLong. -1))
+
+  (field ^:private ^:final ^WindowController windowController (WindowController.))
+
+  (field ^:private ^:final ^FramesController framesController (FramesController.))
+
+  (field ^:private ^:final ^Http2TubeSubscriber subscriber)
+
+  (field ^:final ^ConnectionWindowUpdateSender windowUpdater)
+
+  (field ^:private ^:final ^Terminator connTerminator (Terminator.))
+
+  (field ^:private ^:volatile ^{:tag (Supplier ByteBuffer)} initial)
+
+  (field ^:private ^:volatile ^{:tag (Stream ?)} initialStream)
+
+  (field ^:private ^ValidatingHeadersConsumer orphanedConsumer)
+
+  (field ^:private ^:final ^AtomicInteger orphanedHeaders (AtomicInteger.))
+
+  (field ^:static ^:final ^int DEFAULT_FRAME_SIZE (unchecked-multiply-int 16 1024))
+
+  (field ^:static ^:final ^int MAX_LITERAL_WITH_INDEXING
+    (Utils/getIntegerNetProperty "jdk.httpclient.maxLiteralWithIndexing" 512))
+
+  (field ^:static ^:final ^int MAX_ORPHANED_HEADERS 1024)
+
+  (constructor ^:private [this ^HttpConnection connection ^Http2ClientImpl client2 ^int nextstreamid
+                          ^String key ^boolean defaultServerPush]
+    (set! (.-connection this) connection)
+    (set! (.-client2 this) client2)
+    (set! (.-subscriber this) (Http2TubeSubscriber. (.client client2)))
+    (set! (.-nextstreamid this) nextstreamid)
+    (set! (.-key this) key)
+    (set! (.-clientSettings this) (.getClientSettings (.-client2 this) defaultServerPush))
+    (set! (.-framesDecoder this)
+          (FramesDecoder.
+            (method-ref FramesDecoder$FrameProcessor this Http2Connection/.processFrame)
+            (.getParameter clientSettings SettingsFrame/MAX_FRAME_SIZE)))
+    (set! (.-serverSettings this) (SettingsFrame/defaultRFCSettings))
+    (set! (.-hpackOut this)
+          (Encoder. (.getParameter serverSettings SettingsFrame/HEADER_TABLE_SIZE)))
+    (set! (.-hpackIn this)
+          (Decoder. (.getParameter clientSettings SettingsFrame/HEADER_TABLE_SIZE)
+                    (.getParameter clientSettings SettingsFrame/MAX_HEADER_LIST_SIZE)
+                    MAX_LITERAL_WITH_INDEXING))
+    (when (.on debugHpack)
+      (.log debugHpack (java-str "For the record:" (.toString super)))
+      (.log debugHpack "Decoder created: %s" (new Object/1 [hpackIn]))
+      (.log debugHpack "Encoder created: %s" (new Object/1 [hpackOut])))
+    (set! (.-windowUpdater this)
+          (ConnectionWindowUpdateSender. this (.getConnectionWindowSize client2 clientSettings))))
+
+  (constructor :throws [IOException InterruptedException] ^:private [this ^HttpConnection connection
+                                                                     ^Http2ClientImpl client2
+                                                                     ^{:tag (Exchange ?)} exchange
+                                                                     ^{:tag (Supplier ByteBuffer)} initial
+                                                                     ^boolean defaultServerPush]
+    (this. connection client2 3 (Http2Connection/keyFor connection) defaultServerPush)
+    (.reserveStream this true (.getFlag clientSettings SettingsFrame/ENABLE_PUSH))
+    (Log/logTrace "Connection send window size {0} " (.connectionWindowSize windowController))
+    (let [^{:tag (Stream ?)} initialStream (.createStream this exchange)
+          opened (.registerStream initialStream 1 true)]
+      (set! (.-initialStream this) initialStream)
+      (when (and (.on debug) (not opened))
+        (.log
+          debug
+          "Initial stream was cancelled - but connection is maintained: reset frame will need to be sent later"))
+      (.registerStream windowController 1 (.getInitialSendWindowSize this))
+      (.requestSent initialStream)
+      (set! (.-initial this) initial)
+      (.connectFlows this connection)
+      (.sendConnectionPreface this)
+      (when-not opened
+        (.log debug "ensure reset frame is sent to cancel initial stream")
+        (.sendResetStreamFrame initialStream ResetFrame/CANCEL))))
+
+  (method ^:static createAsync ^{:tag (CompletableFuture Http2Connection)} [^HttpConnection connection
+                                                                            ^Http2ClientImpl client2
+                                                                            ^{:tag (Exchange ?)} exchange
+                                                                            ^{:tag (Supplier ByteBuffer)} initial]
+    (MinimalFuture/supply
+      (lambda MinimalFuture$ExceptionalSupplier ^Http2Connection []
+        (Http2Connection. connection client2 exchange initial (.pushEnabled exchange)))))
+
+  (method ^:static createAsync ^{:tag (CompletableFuture Http2Connection)} [^HttpRequestImpl request
+                                                                            ^Http2ClientImpl h2client
+                                                                            ^{:tag (Exchange ?)} exchange]
+    (java-assert (.secure request))
+    (let [connection (cast AbstractAsyncSSLConnection
+                           (HttpConnection/getConnection
+                             (.getAddress request)
+                             (.client h2client)
+                             exchange
+                             request
+                             HttpClient$Version/HTTP_2))]
+      (.connection (.-connectionAborter exchange) connection)
+      (.thenCompose (.thenCompose (.thenCompose (.connectAsync connection exchange)
+                                                (lambda Function ^CompletionStage [^Void unused]
+                                                  (.finishConnect connection)))
+                                  (lambda Function ^CompletionStage [^Void unused]
+                                    (Http2Connection/checkSSLConfig connection)))
+                    (lambda Function ^CompletionStage [notused]
+                      (let [^{:tag (CompletableFuture Http2Connection)} cf (MinimalFuture.)]
+                        (try
+                          (let [hc (Http2Connection.
+                                     request
+                                     h2client
+                                     connection
+                                     (.pushEnabled exchange))]
+                            (.complete cf hc))
+                          (catch IOException e (.completeExceptionally cf e)))
+                        cf)))))
+
+  (constructor :throws [IOException] ^:private [this ^HttpRequestImpl request
+                                                ^Http2ClientImpl h2client ^HttpConnection connection
+                                                ^boolean defaultServerPush]
+    (this. connection h2client 1 (Http2Connection/keyFor request) defaultServerPush)
+    (Log/logTrace "Connection send window size {0} " (.connectionWindowSize windowController))
+    (.connectFlows this connection)
+    (.sendConnectionPreface this))
+
+  (method ^:private connectFlows ^void [this ^HttpConnection connection]
+    (let [tube (.getConnectionFlow connection)]
+      (.connectFlows tube (.publisher connection) subscriber)))
+
+  (method ^:final client ^HttpClientImpl [this] (.client client2))
+
+  (method reserveStream :throws [IOException] ^boolean [this ^boolean clientInitiated
+                                                        ^boolean pushEnabled]
+    (.lock stateLock)
+    (try (.reserveStream0 this clientInitiated pushEnabled) (finally (.unlock stateLock))))
+
+  (method ^:private reserveStream0 :throws [IOException] ^boolean [this ^boolean clientInitiated
+                                                                   ^boolean pushEnabled]
+    (if (.finalStream this)
+        false
+        (let [pushCompatible (or (or (or (not clientInitiated) (not pushEnabled))
+                                     (.serverPushEnabled this))
+                                 (.serverPushDisabled client2))]
+          (cond
+            (and clientInitiated
+                 (or (>= lastReservedClientStreamid (unchecked-subtract-int MAX_CLIENT_STREAM_ID 2))
+                     (not pushCompatible)))
+              (do (.setFinalStream this) (.removeFromPool client2 this) false)
+            (and (not clientInitiated)
+                 (>= lastReservedServerStreamid (unchecked-subtract-int MAX_SERVER_STREAM_ID 2)))
+              (do (.setFinalStream this) (.removeFromPool client2 this) false)
+            :else
+              (do
+                (if clientInitiated
+                    (set! lastReservedClientStreamid
+                          (unchecked-add-int lastReservedClientStreamid 2))
+                    (set! lastReservedServerStreamid
+                          (unchecked-add-int lastReservedServerStreamid 2)))
+                (java-assert (>= numReservedClientStreams 0))
+                (java-assert (>= numReservedServerStreams 0))
+                (cond
+                  (and clientInitiated
+                       (>= numReservedClientStreams (.maxConcurrentClientInitiatedStreams this)))
+                    (throw (IOException. "too many concurrent streams"))
+                  clientInitiated
+                    (set! numReservedClientStreams (unchecked-inc-int numReservedClientStreams)))
+                (if (and (not clientInitiated)
+                         (>= numReservedServerStreams (.maxConcurrentServerInitiatedStreams this)))
+                    false
+                    (do
+                      (when-not clientInitiated
+                        (set! numReservedServerStreams (unchecked-inc-int numReservedServerStreams)))
+                      true)))))))
+
+  (method abandonStream ^void [this]
+    (.lock stateLock)
+    (try
+      (let [^long reserved (set! numReservedClientStreams
+                                 (unchecked-dec-int numReservedClientStreams))]
+        (java-assert (>= reserved 0)))
+      (catch Throwable t (.close this (Http2TerminationCause/forException t)))
+      (finally (.unlock stateLock)))
+    (when (.shouldClose this) (.close this (Http2TerminationCause/noErrorTermination))))
+
+  (method ^:final shouldClose ^boolean [this]
+    (.lock stateLock)
+    (try
+      (and (and (.finalStream this) (.isEmpty streams)) (== numReservedClientStreams 0))
+      (finally (.unlock stateLock))))
+
+  (method ^:private ^:static checkSSLConfig ^{:tag (CompletableFuture ?)} [^AbstractAsyncSSLConnection aconn]
+    (java-assert (.isSecure aconn))
+    (let [^{:tag (Function String (CompletableFuture Void))} checkAlpnCF
+            (lambda Function ^CompletableFuture [^:mutable ^String alpn]
+              (let [^{:tag (CompletableFuture Void)} cf (MinimalFuture.)
+                    engine (.getEngine aconn)
+                    engineAlpn (.getApplicationProtocol engine)]
+                (.log DEBUG_LOGGER
+                      "checkSSLConfig: alpn: '%s', engine: '%s'"
+                      (new Object/1 [alpn engineAlpn]))
+                (when (and (nil? alpn) (some? engineAlpn)) (set! alpn engineAlpn))
+                (.log DEBUG_LOGGER "checkSSLConfig: alpn: '%s'" (new Object/1 [alpn]))
+                (if (or (nil? alpn) (not (.equals alpn Alpns/H2)))
+                    (let [^:mutable ^String msg nil]
+                      (if (nil? alpn)
+                          (do
+                            (Log/logSSL "ALPN not supported" (new Object/1 []))
+                            (set! msg "ALPN not supported"))
+                          (switch alpn
+                            "" (Log/logSSL (set! msg "No ALPN negotiated") (new Object/1 []))
+                            Alpns/HTTP_1_1
+                              (Log/logSSL (set! msg "HTTP/1.1 ALPN returned") (new Object/1 []))
+                            (do
+                              (Log/logSSL (set! msg (java-str "Unexpected ALPN: " alpn))
+                                          (new Object/1 []))
+                              (.completeExceptionally cf (IOException. msg)))))
+                      (.completeExceptionally cf (ALPNException. msg aconn))
+                      cf)
+                    (do
+                      (java-assert (Objects/equals alpn engineAlpn)
+                        (.formatted "alpn: %s, engine: %s" alpn engineAlpn))
+                      (.complete cf nil)
+                      cf))))]
+      (.thenCompose (.whenComplete (.getALPN aconn)
+                                   (lambda BiConsumer ^void [^String r ^Throwable t]
+                                     (when (and (some? t) (instance? SSLException t))
+                                       (.close aconn t))))
+                    checkAlpnCF)))
+
+  (method finalStream ^boolean [this] finalStream)
+
+  (method setFinalStream ^void [this] (set! finalStream true))
+
+  (method ^:static keyFor ^String [^HttpConnection connection]
+    (let [isProxy (.isProxied connection)
+          isSecure (.isSecure connection)
+          addr (.address connection)
+          proxyAddr (.proxy connection)]
+      (java-assert (= isProxy (some? proxyAddr)))
+      (Http2Connection/keyString isSecure proxyAddr (.getHostString addr) (.getPort addr))))
+
+  (method ^:static keyFor ^String [^:final ^HttpRequestImpl request]
+    (let [targetAddr (.getAddress request)
+          proxy (.proxy request)
+          secure (.secure request)]
+      (Http2Connection/keyString secure proxy (.getHostString targetAddr) (.getPort targetAddr))))
+
+  (method ^:static keyString ^String [^boolean secure ^InetSocketAddress proxy ^String host
+                                      ^:mutable ^int port]
+    (cond (and secure (== port -1)) (set! port 443) (and (not secure) (== port -1)) (set! port 80))
+    (let [^:mutable ^String key (if secure "S:" "C:")]
+      (cond
+        (and (some? proxy) (not secure))
+          (set! key (java-str key "P:" (.getHostString proxy) ":" (.getPort proxy)))
+        (nil? proxy) (set! key (java-str key "H:" host ":" port))
+        :else
+          (set! key
+                (java-str key
+                          "T:H:"
+                          host
+                          ":"
+                          port
+                          ";P:"
+                          (.getHostString proxy)
+                          ":"
+                          (.getPort proxy))))
+      key))
+
+  (method key ^String [this] (.-key this))
+
+  (method ^:public serverPushEnabled ^boolean [this]
+    (== (.getParameter clientSettings SettingsFrame/ENABLE_PUSH) 1))
+
+  (method offerConnection ^boolean [this] (.offerConnection client2 this))
+
+  (method ^:private publisher ^HttpConnection$HttpPublisher [this]
+    (.publisher connection))
+
+  (method ^:private decodeHeaders :throws [IOException] ^void [this ^HeaderFrame frame
+                                                               ^DecodingCallback decoder]
+    (when (.on debugHpack) (.log debugHpack "decodeHeaders(%s)" (new Object/1 [decoder])))
+    (let [endOfHeaders (.getFlag frame HeaderFrame/END_HEADERS)
+          ^{:tag (List ByteBuffer)} buffers (.getHeaderBlock frame)
+          len (.size buffers)]
+      (loop [^int i 0]
+        (when (< i len)
+          (let [b (cast ByteBuffer (.get buffers i))]
+            (.decode hpackIn b (and endOfHeaders (== i (unchecked-subtract-int len 1))) decoder)
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:final getInitialSendWindowSize ^int [this]
+    (.getParameter serverSettings SettingsFrame/INITIAL_WINDOW_SIZE))
+
+  (method ^:final maxConcurrentClientInitiatedStreams ^int [this]
+    (.getParameter serverSettings SettingsFrame/MAX_CONCURRENT_STREAMS))
+
+  (method ^:final maxConcurrentServerInitiatedStreams ^int [this]
+    (.getParameter clientSettings SettingsFrame/MAX_CONCURRENT_STREAMS))
+
+  (field ^long count)
+
+  (method ^:final asyncReceive ^void [this ^ByteBuffer buffer]
+    (try
+      (let [^{:tag (Supplier ByteBuffer)} bs initial]
+        (when (some? bs)
+          (set! initial nil)
+          (let [b (cast ByteBuffer (.get bs))]
+            (when (.hasRemaining b)
+              (let [c (set! count (unchecked-inc count))]
+                (when (.on debug)
+                  (.log debug
+                        (lambda Supplier ^String []
+                          (java-str "H2 Receiving Initial(" c "): " (.remaining b)))))
+                (.processReceivedData framesController framesDecoder b)))))
+        (let [b buffer]
+          (if (identical? b EMPTY_TRIGGER)
+              (do
+                (when (.on debug) (.log debug "H2 Received EMPTY_TRIGGER"))
+                (let [prefaceSent (.-prefaceSent framesController)]
+                  (java-assert prefaceSent)
+                  (.processReceivedData framesController framesDecoder buffer)
+                  (when (.on debug) (.log debug "H2 processed buffered data"))))
+              (let [c (set! count (unchecked-inc count))]
+                (when (.on debug)
+                  (.log debug "H2 Receiving(%d): %d" (new Object/1 [c (.remaining b)])))
+                (.processReceivedData framesController framesDecoder buffer)
+                (when (.on debug) (.log debug "H2 processed(%d)" (new Object/1 [c])))))))
+      (catch Throwable e
+        (let [msg (Utils/stackTrace e)]
+          (Log/logTrace msg)
+          (.close this (Http2TerminationCause/forException e))))))
+
+  (method ^:public ^:final close ^void [this]
+    (.close this (Http2TerminationCause/noErrorTermination)))
+
+  (method ^:final close ^void [this ^:final ^Http2TerminationCause tc]
+    (Objects/requireNonNull tc "termination cause cannot be null")
+    (.terminate (.-connTerminator this) tc))
+
+  (method ^:private ^:static ^:final isServerInitiatedStream ^boolean [^int streamid]
+    (== (bit-and-int streamid 0x1) 0))
+
+  (method processFrame :throws [IOException] ^void [this ^Http2Frame frame]
+    (Log/logFrames frame "IN")
+    (let [streamid (.streamid frame)]
+      (cond
+        (instance? MalformedFrame frame)
+          (do
+            (Log/logError (.getMessage (cast MalformedFrame frame)) (new Object/1 []))
+            (if (== streamid 0)
+                (do
+                  (.close framesDecoder "Malformed frame on stream 0")
+                  (.protocolError this
+                                  (.getErrorCode (cast MalformedFrame frame))
+                                  (.getMessage (cast MalformedFrame frame))))
+                (do
+                  (when (.on debug)
+                    (.log debug
+                          (lambda Supplier ^String []
+                            (java-str "Reset stream: " (.getMessage (cast MalformedFrame frame))))))
+                  (.resetStream this streamid (.getErrorCode (cast MalformedFrame frame))))))
+        (== streamid 0) (.handleConnectionFrame this frame)
+        (instance? SettingsFrame frame)
+          (.protocolError this
+                          ErrorFrame/PROTOCOL_ERROR
+                          "The stream identifier for a SETTINGS frame MUST be zero")
+        (and (instance? PushPromiseFrame frame) (not (.serverPushEnabled this)))
+          (let [protocolError "received a PUSH_PROMISE when SETTINGS_ENABLE_PUSH is 0"]
+            (.protocolError this ErrorFrame/PROTOCOL_ERROR protocolError))
+        :else
+          (let [^{:tag (Stream ?)} stream (.getStream this streamid)
+                nextstreamid (.-nextstreamid this)]
+            (if (and (and (nil? stream) (== (bit-and-int streamid 0x01) 0x01))
+                     (>= streamid nextstreamid))
+                (let [protocolError (String/format
+                                      "received a frame for a non existing streamid(%s) >= nextstreamid(%s)"
+                                      (new Object/1 [streamid nextstreamid]))]
+                  (.protocolError this ResetFrame/PROTOCOL_ERROR protocolError))
+                (let [pcs pushContinuationState]
+                  (cond
+                    (and (nil? stream) (nil? pcs))
+                      (do
+                        (when-instance [^HeaderFrame hf frame]
+                          (let [protocolError (.checkMaxOrphanedHeadersExceeded this hf)]
+                            (when (some? protocolError)
+                              (.protocolError this ResetFrame/PROTOCOL_ERROR protocolError)
+                              (return))
+                            (when (or (nil? orphanedConsumer)
+                                      (not (identical? (.getClass frame) ContinuationFrame)))
+                              (set!
+                                orphanedConsumer
+                                (ValidatingHeadersConsumer.
+                                  ^ValidatingHeadersConsumer$Context (if (instance?
+                                                                           PushPromiseFrame
+                                                                           frame)
+                                                                         ValidatingHeadersConsumer$Context/REQUEST
+                                                                         ValidatingHeadersConsumer$Context/RESPONSE))))
+                            (let [decoder (method-ref
+                                            DecodingCallback
+                                            orphanedConsumer
+                                            ValidatingHeadersConsumer/.onDecoded)]
+                              (try
+                                (.decodeHeaders this hf decoder)
+                                (catch [IOException UncheckedIOException] e
+                                  (.protocolError this ResetFrame/PROTOCOL_ERROR (.getMessage e))
+                                  (return))))))
+                        (when-not (instance? ResetFrame frame)
+                          (when-instance [^DataFrame df frame] (.dropDataFrame this df))
+                          (cond
+                            (Http2Connection/isServerInitiatedStream streamid)
+                              (if (< streamid nextPushStream)
+                                  (Log/logTrace (java-str
+                                                  "Ignoring cancelled push promise frame "
+                                                  frame))
+                                  (.resetStream this streamid ResetFrame/PROTOCOL_ERROR))
+                            (>= streamid nextstreamid)
+                              (.resetStream this streamid ResetFrame/PROTOCOL_ERROR))))
+                    (some? pcs)
+                      (if-instance [^ContinuationFrame cf frame]
+                        (do
+                          (when (nil? stream)
+                            (let [protocolError (.checkMaxOrphanedHeadersExceeded this cf)]
+                              (when (some? protocolError)
+                                (.protocolError this ResetFrame/PROTOCOL_ERROR protocolError)
+                                (return))))
+                          (try
+                            (if (== streamid (.streamid (.-pushContFrame pcs)))
+                                (.handlePushContinuation this pcs stream cf)
+                                (let [protocolError (java-str
+                                                      "Received a CONTINUATION with unexpected stream id: "
+                                                      streamid
+                                                      " != "
+                                                      (.streamid (.-pushContFrame pcs)))]
+                                  (.protocolError this ErrorFrame/PROTOCOL_ERROR protocolError)))
+                            (catch [IOException UncheckedIOException] e
+                              (.log debug
+                                    (java-str "Error handling Push Promise with Continuation: "
+                                              (.getMessage e))
+                                    e)
+                              (.protocolError this ErrorFrame/PROTOCOL_ERROR (.getMessage e)))))
+                        (do
+                          (set! pushContinuationState nil)
+                          (let [protocolError (java-str
+                                                "Expected a CONTINUATION frame but received "
+                                                frame)]
+                            (.protocolError this ErrorFrame/PROTOCOL_ERROR protocolError))))
+                    :else
+                      (if-instance [^PushPromiseFrame pp frame]
+                        (try
+                          (.handlePushPromise this stream pp)
+                          (catch [IOException UncheckedIOException] e
+                            (.protocolError this ErrorFrame/PROTOCOL_ERROR (.getMessage e))))
+                        (if-instance [^HeaderFrame hf frame]
+                          (do
+                            (try
+                              (.decodeHeaders this hf (.rspHeadersConsumer stream))
+                              (catch [IOException UncheckedIOException] e
+                                (.log debug (java-str "Error decoding headers: " (.getMessage e)) e)
+                                (.protocolError this ErrorFrame/PROTOCOL_ERROR (.getMessage e))
+                                (return)))
+                            (.incoming stream frame))
+                          (.incoming stream frame))))))))))
+
+  (method ^:private checkMaxOrphanedHeadersExceeded ^String [this ^HeaderFrame hf]
+    (when (> MAX_ORPHANED_HEADERS 0)
+      (let [orphaned (.incrementAndGet orphanedHeaders)]
+        (when (or (< orphaned 0) (> orphaned MAX_ORPHANED_HEADERS))
+          (return "Too many orphaned header frames received on connection"))))
+    nil)
+
+  (method ^:final releaseUnconsumed ^void [this ^DataFrame df]
+    (.released windowUpdater (.payloadLength df))
+    (.dropDataFrame this df))
+
+  (method ^:final dropDataFrame ^void [this ^DataFrame df]
+    (when-not (not (.isOpen this))
+      (when (.on debug)
+        (.log debug
+              "Dropping data frame for stream %d (%d payload bytes)"
+              (new Object/1 [(.streamid df) (.payloadLength df)])))
+      (.ensureWindowUpdated this df)))
+
+  (method ^:final ensureWindowUpdated ^void [this ^DataFrame df]
+    (try
+      (when-not (not (.isOpen this))
+        (let [length (.payloadLength df)] (when (> length 0) (.update windowUpdater length))))
+      (catch Throwable t
+        (Log/logError "Unexpected exception while updating window: {0}" (new Object/1 [^Object t])))))
+
+  (method ^:private handlePushPromise :type-params [T] :throws [IOException] ^void [this
+                                                                                    ^{:tag (Stream T)} parent
+                                                                                    ^PushPromiseFrame pp]
+    (let [promisedStreamid (.getPromisedStream pp)]
+      (when-not (== (bit-and-int promisedStreamid 0x01) 0x00)
+        (throw (ProtocolException. (java-str "Received PUSH_PROMISE for stream " promisedStreamid))))
+      (let [streamId (.streamid pp)]
+        (when-not (== (bit-and-int streamId 0x01) 0x01)
+          (throw (ProtocolException. (java-str "Received PUSH_PROMISE on stream " streamId))))
+        (java-assert (nil? pushContinuationState))
+        (let [decoder (PushPromiseDecoder. streamId promisedStreamid parent)]
+          (.decodeHeaders this pp decoder)
+          (if (.endHeaders pp)
+              (when (nil? (.get (.-errorRef decoder)))
+                (.completePushPromise this promisedStreamid parent (.headers decoder)))
+              (set! pushContinuationState (PushContinuationState. decoder pp)))))))
+
+  (method ^:private handlePushContinuation :type-params [T] :throws [IOException] ^void [this
+                                                                                         ^PushContinuationState pcs
+                                                                                         ^{:tag (Stream T)} parent
+                                                                                         ^ContinuationFrame cf]
+    (java-assert (== (.streamid (.-pushContFrame pcs)) (.streamid cf))
+      (String/format "Received CONTINUATION on a different stream %s != %s"
+                     (new Object/1 [(.streamid cf) (.streamid (.-pushContFrame pcs))])))
+    (.decodeHeaders this cf (.-pushContDecoder pcs))
+    (when (.endHeaders cf)
+      (when (nil? (.get (.-errorRef (.-pushContDecoder pcs))))
+        (.completePushPromise this
+                              (.getPromisedStream (.-pushContFrame pcs))
+                              parent
+                              (.headers (.-pushContDecoder pcs))))
+      (set! pushContinuationState nil)))
+
+  (method ^:private completePushPromise :type-params [T] :throws [IOException] ^void [this
+                                                                                      ^int promisedStreamid
+                                                                                      ^{:tag (Stream T)} parent
+                                                                                      ^HttpHeaders headers]
+    (if (nil? parent)
+        (.resetStream this promisedStreamid ResetFrame/REFUSED_STREAM)
+        (let [parentReq (.-request parent)]
+          (cond
+            (< promisedStreamid nextPushStream)
+              (.protocolError this
+                              ResetFrame/PROTOCOL_ERROR
+                              (String/format "Unexpected stream identifier: %s < %s"
+                                             (new Object/1 [promisedStreamid nextPushStream])))
+            (not (== promisedStreamid nextPushStream))
+              (.resetStream this promisedStreamid ResetFrame/PROTOCOL_ERROR)
+            (not (.reserveStream this false true))
+              (.resetStream this promisedStreamid ResetFrame/REFUSED_STREAM)
+            :else
+              (do
+                (set! nextPushStream (unchecked-add-int nextPushStream 2))
+                (let [pushReq (HttpRequestImpl/createPushRequest parentReq headers)
+                      ^{:tag (Exchange T)} pushExch (Exchange.
+                                                      pushReq
+                                                      (.-multi (.-exchange parent)))
+                      ^{:tag (Stream$PushedStream T)} pushStream (.createPushStream
+                                                                   this
+                                                                   parent
+                                                                   pushExch)]
+                  (set! (.-exchImpl pushExch) pushStream)
+                  (.registerStream pushStream promisedStreamid true)
+                  (.incoming_pushPromise parent pushReq pushStream)))))))
+
+  (method ^:private handleConnectionFrame :throws [IOException] ^void [this ^Http2Frame frame]
+    (switch (.type frame)
+      SettingsFrame/TYPE (.handleSettings this (cast SettingsFrame frame))
+      PingFrame/TYPE (.handlePing this (cast PingFrame frame))
+      GoAwayFrame/TYPE (.handleGoAway this (cast GoAwayFrame frame))
+      WindowUpdateFrame/TYPE (.handleWindowUpdate this (cast WindowUpdateFrame frame))
+      AltSvcFrame/TYPE
+        (AltSvcProcessor/processAltSvcFrame 0
+                                            (cast AltSvcFrame frame)
+                                            connection
+                                            (.client connection))
+      (.protocolError this ErrorFrame/PROTOCOL_ERROR (java-str "unknown frame: " frame))))
+
+  (method ^:final isOpen ^boolean [this]
+    (and (nil? (.get (.-terminationCause (.-connTerminator this)))) (.isOpen (.channel connection))))
+
+  (method resetStream ^void [this ^int streamid ^int code]
+    (try
+      (cond
+        (.isOpen (.channel connection))
+          (do
+            (Log/logError "Resetting stream {0,number,integer} with error code {1,number,integer}"
+                          (new Object/1 [streamid code]))
+            (.markStream this streamid code)
+            (let [frame (ResetFrame. streamid code)] (.sendFrame this frame)))
+        (.on debug)
+          (.log debug
+                "Channel already closed, no need to reset stream %d"
+                (new Object/1 [streamid])))
+      (finally (.decrementStreamsCount this streamid) (.closeStream this streamid))))
+
+  (method ^:private markStream ^void [this ^int streamid ^int code]
+    (let [^{:tag (Stream ?)} s (cast Stream (.get streams streamid))]
+      (when (some? s) (.markStream s code))))
+
+  (method decrementStreamsCount ^void [this ^int streamid]
+    (.lock stateLock)
+    (try (.decrementStreamsCount0 this streamid) (finally (.unlock stateLock))))
+
+  (method ^:private decrementStreamsCount0 ^void [this ^int streamid]
+    (let [^{:tag (Stream ?)} s (cast Stream (.get streams streamid))]
+      (when-not (or (nil? s) (not (.deRegister s)))
+        (if (== (unchecked-remainder-int streamid 2) 1)
+            (do
+              (set! numReservedClientStreams (unchecked-dec-int numReservedClientStreams))
+              (java-assert (>= numReservedClientStreams 0)
+                (java-str "negative client stream count for stream=" streamid)))
+            (do
+              (set! numReservedServerStreams (unchecked-dec-int numReservedServerStreams))
+              (java-assert (>= numReservedServerStreams 0)
+                (java-str "negative server stream count for stream=" streamid)))))))
+
+  (method closeAllStreams ^void [this]
+    (when (.on debug) (.log debug "Close all streams"))
+    (for-each [^Integer streamId (.keySet streams)]
+      (.decrementStreamsCount this streamId)
+      (.closeStream this streamId)))
+
+  (method closeStream ^void [this ^int streamid]
+    (when (.on debug) (.log debug "Closed stream %d" (new Object/1 [streamid])))
+    (let [^:mutable ^{:tag (Stream ?)} s nil]
+      (.lock stateLock)
+      (try
+        (set! s (cast Stream (.remove streams streamid)))
+        (when (some? s) (.streamUnreference (.client this)))
+        (finally (.unlock stateLock)))
+      (when (and (some? s) (not (instance? Stream$PushedStream s)))
+        (.removeStream windowController streamid))
+      (if (.shouldClose this)
+          (.close this)
+          (do
+            (.lock stateLock)
+            (try
+              (when (and (.isEmpty streams) (nil? idleConnectionTimeoutEvent))
+                (let [version HttpClient$Version/HTTP_2]
+                  (set! idleConnectionTimeoutEvent
+                        (cast IdleConnectionTimeoutEvent
+                              (.orElse (.map (.idleConnectionTimeout (.client this) version)
+                                             (method-ref
+                                               Function
+                                               ^IdleConnectionTimeoutEvent [Duration]
+                                               IdleConnectionTimeoutEvent/new))
+                                       nil)))
+                  (when (some? idleConnectionTimeoutEvent)
+                    (.registerTimer (.client this) idleConnectionTimeoutEvent))))
+              (finally (.unlock stateLock)))))))
+
+  (method ^:private handleWindowUpdate ^void [this ^WindowUpdateFrame f]
+    (let [amount (.getUpdate f)]
+      (when-not (<= amount 0)
+        (let [success (.increaseConnectionWindow windowController amount)]
+          (when-not success (.protocolError this ErrorFrame/FLOW_CONTROL_ERROR nil))))))
+
+  (method ^:private protocolError ^void [this ^:final ^int errorCode ^:final ^String msg]
+    (let [terminationCause (Http2TerminationCause/forH2Error errorCode msg)]
+      (.close framesDecoder (.getLogMsg terminationCause))
+      (.close this terminationCause)))
+
+  (method ^:private handleSettings ^void [this ^SettingsFrame frame]
+    (java-assert (== (.streamid frame) 0))
+    (when-not (.getFlag frame SettingsFrame/ACK)
+      (let [newWindowSize (.getParameter frame SettingsFrame/INITIAL_WINDOW_SIZE)]
+        (when-not (== newWindowSize -1)
+          (let [oldWindowSize (.getParameter serverSettings SettingsFrame/INITIAL_WINDOW_SIZE)
+                diff (unchecked-subtract-int newWindowSize oldWindowSize)]
+            (when-not (== diff 0) (.adjustActiveStreams windowController diff))))
+        (.update serverSettings frame)
+        (.sendFrame this (SettingsFrame. SettingsFrame/ACK)))))
+
+  (method ^:private handlePing ^void [this ^PingFrame frame]
+    (.setFlag frame PingFrame/ACK)
+    (.sendUnorderedFrame this frame))
+
+  (method ^:private handleGoAway ^void [this ^:final ^GoAwayFrame frame]
+    (let [^long lastProcessedStream (.getLastStream frame)]
+      (java-assert (>= lastProcessedStream 0)
+        (java-str "unexpected last stream id: " lastProcessedStream " in GOAWAY frame"))
+      (.set goAwayRecvd true)
+      (.setFinalStream this)
+      (when (.on debug)
+        (.log debug
+              "processing incoming GOAWAY with last processed stream id:%s in frame %s"
+              (new Object/1 [lastProcessedStream frame])))
+      (let [^:mutable prevLastProcessed (.get lastProcessedStreamInGoAway)]
+        (while (or (== prevLastProcessed -1) (< lastProcessedStream prevLastProcessed))
+          (when (.compareAndSet lastProcessedStreamInGoAway prevLastProcessed lastProcessedStream)
+            (break))
+          (set! prevLastProcessed (.get lastProcessedStreamInGoAway)))
+        (.handlePeerUnprocessedStreams this (.get lastProcessedStreamInGoAway)))))
+
+  (method ^:private handlePeerUnprocessedStreams ^void [this ^:final ^long lastProcessedStream]
+    (let [numClosed (AtomicInteger.)]
+      (.forEach streams
+                (lambda BiConsumer ^void [^Integer id ^Stream exchange]
+                  (when (> id lastProcessedStream)
+                    (.ensureExecutedAsync (.theExecutor (.client client2))
+                                          (method-ref Runnable exchange Stream/.closeAsUnprocessed))
+                    (.incrementAndGet numClosed))))
+      (when (.on debug)
+        (.log debug
+              (java-str (.get numClosed)
+                        " stream(s), with id greater than "
+                        lastProcessedStream
+                        ", will be closed as unprocessed")))))
+
+  (method ^:public getMaxSendFrameSize ^int [this]
+    (let [^:mutable param (.getParameter serverSettings SettingsFrame/MAX_FRAME_SIZE)]
+      (when (== param -1) (set! param DEFAULT_FRAME_SIZE))
+      param))
+
+  (method ^:public getMaxReceiveFrameSize ^int [this]
+    (.getParameter clientSettings SettingsFrame/MAX_FRAME_SIZE))
+
+  (field ^:private ^:static ^:final ^String CLIENT_PREFACE "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+
+  (field ^:private ^:static ^:final ^byte/1 PREFACE_BYTES
+    (.getBytes CLIENT_PREFACE StandardCharsets/ISO_8859_1))
+
+  (method ^:private sendConnectionPreface :throws [IOException] ^void [this]
+    (Log/logTrace "{0}: start sending connection preface to {1}"
+                  (.getLocalAddress (.channel connection))
+                  (.address connection))
+    (let [sf (SettingsFrame. clientSettings)
+          buf (.encodeConnectionPreface framesEncoder PREFACE_BYTES sf)]
+      (Log/logFrames sf "OUT")
+      (let [publisher (.publisher this)]
+        (.enqueueUnordered publisher (List/of buf))
+        (.signalEnqueued publisher)
+        (.markPrefaceSent framesController)
+        (Log/logTrace "PREFACE_BYTES sent")
+        (Log/logTrace "Settings Frame sent")
+        (let [len (unchecked-subtract-int (.-initialWindowSize windowUpdater)
+                                          SettingsFrame/INITIAL_CONNECTION_WINDOW_SIZE)]
+          (java-assert (>= len 0))
+          (when (> len 0)
+            (when (Log/channel)
+              (Log/logChannel "Sending initial connection window update frame: {0} ({1} - {2})"
+                              (new Object/1
+                                   [len
+                                    (.-initialWindowSize windowUpdater)
+                                    SettingsFrame/INITIAL_CONNECTION_WINDOW_SIZE])))
+            (.sendWindowUpdate windowUpdater len))
+          (Log/logTrace "finished sending connection preface")
+          (when (.on debug)
+            (.log debug "Triggering processing of buffered data after sending connection preface"))
+          (.onNext subscriber (List/of EMPTY_TRIGGER))))))
+
+  (method getInitialStream :type-params [T] ^{:tag (Stream T)} [this]
+    (let [s initialStream] (set! initialStream nil) s))
+
+  (method getStream :type-params [T] ^{:tag (Stream T)} [this ^int streamid]
+    (cast Stream (.get streams streamid)))
+
+  (method ^:final createStream :type-params [T] ^{:tag (Stream T)} [this
+                                                                    ^{:tag (Exchange T)} exchange]
+    (let [^{:tag (Stream T)} stream (Stream. this exchange windowController)] stream))
+
+  (method createPushStream :type-params [T] ^{:tag (Stream$PushedStream T)} [this
+                                                                             ^{:tag (Stream T)} parent
+                                                                             ^{:tag (Exchange T)} pushEx]
+    (let [^{:tag (PushGroup T)} pg (.getPushGroup (.-exchange parent))]
+      (Stream$PushedStream. parent pg this pushEx)))
+
+  (method tryReserveForPoolCheckout ^boolean [this]
+    (.lock stateLock)
+    (try
+      (.cancelIdleCloseEvent this)
+      (and (not (.isMarkedForIdleTermination (.-connTerminator this))) (.isOpen this))
+      (finally (.unlock stateLock))))
+
+  (method ^:private cancelIdleCloseEvent ^void [this]
+    (java-assert (.isHeldByCurrentThread stateLock)
+      (java-str "Current thread doesn't hold " stateLock))
+    (when (some? idleConnectionTimeoutEvent)
+      (.cancel idleConnectionTimeoutEvent)
+      (set! idleConnectionTimeoutEvent nil)))
+
+  (method putStream :type-params [T] ^void [this ^{:tag (Stream T)} stream ^int streamid]
+    (.lock stateLock)
+    (try
+      (when (and (.isOpen this) (not (.isMarkedForIdleTermination (.-connTerminator this))))
+        (when (.on debug) (.log debug "Opened stream %d" (new Object/1 [streamid])))
+        (.streamReference (.client this))
+        (.put streams streamid stream)
+        (.cancelIdleCloseEvent this)
+        (return))
+      (finally (.unlock stateLock)))
+    (when (.on debug) (.log debug "connection closed: closing stream %d" (new Object/1 [stream])))
+    (let [terminationCause (.getTerminationCause this)]
+      (java-assert (some? terminationCause) "termination cause is null")
+      (.cancel stream
+               (IOException. (java-str "Stream " streamid " cancelled")
+                             (.getCloseCause terminationCause)))))
+
+  (method ^:private encodeHeaders ^{:tag (List HeaderFrame)} [this
+                                                              ^{:tag (OutgoingHeaders (Stream ?))} frame]
+    (let [bufferSize (Math/min (^[int int] Math/max (.getMaxSendFrameSize this) 1024)
+                               DEFAULT_FRAME_SIZE)
+          ^{:tag (List ByteBuffer)} buffers (.encodeHeadersImpl
+                                              this
+                                              bufferSize
+                                              (.getRequestPseudoHeaders
+                                                (cast Stream (.getAttachment frame)))
+                                              (.getUserHeaders frame)
+                                              (.getSystemHeaders frame))
+          ^{:tag (List HeaderFrame)} frames (ArrayList. (.size buffers))
+          ^{:tag (Iterator ByteBuffer)} bufIterator (.iterator buffers)
+          ^:mutable ^HeaderFrame oframe (HeadersFrame.
+                                          (.streamid frame)
+                                          (.getFlags frame)
+                                          (cast ByteBuffer (.next bufIterator)))]
+      (.add frames oframe)
+      (while (.hasNext bufIterator)
+        (set! oframe (ContinuationFrame. (.streamid frame) (cast ByteBuffer (.next bufIterator))))
+        (.add frames oframe))
+      (.setFlag oframe HeaderFrame/END_HEADERS)
+      frames))
+
+  (method ^:private getHeaderBuffer ^ByteBuffer [this ^int size]
+    (let [buf (ByteBuffer/allocate size)] (.limit buf size) buf))
+
+  (method ^:private encodeHeadersImpl ^{:tag (List ByteBuffer)} [this ^int bufferSize &
+                                                                 ^HttpHeaders/1 headers]
+    (let [^:mutable buffer (.getHeaderBuffer this bufferSize)
+          ^{:tag (List ByteBuffer)} buffers (ArrayList.)]
+      (for-each [^HttpHeaders header headers]
+        (for-each [^{:tag (Map$Entry String (List String))} e (.entrySet (.map header))]
+          (let [lKey (.toLowerCase (cast String (.getKey e)) Locale/US)
+                ^{:tag (List String)} values (cast List (.getValue e))]
+            (for-each [^String value values]
+              (.header hpackOut lKey value)
+              (while (not (.encode hpackOut buffer))
+                (when-not (.hasRemaining buffer)
+                  (.flip buffer)
+                  (.add buffers buffer)
+                  (set! buffer (.getHeaderBuffer this bufferSize))))))))
+      (.flip buffer)
+      (.add buffers buffer)
+      buffers))
+
+  (method ^:private encodeHeaders ^{:tag (List ByteBuffer)} [this
+                                                             ^{:tag (OutgoingHeaders (Stream ?))} oh
+                                                             ^{:tag (Stream ?)} stream]
+    (.streamid oh (.-streamid stream))
+    (when (Log/headers)
+      (let [sb (StringBuilder. (.formatted "HEADERS FRAME (streamid=%s):\n" (.-streamid stream)))]
+        (.append sb (.formatted "  %s %s\n" (.method (.-request stream)) (.uri (.-request stream))))
+        (Log/dumpHeaders sb "    " (.getRequestPseudoHeaders (cast Stream (.getAttachment oh))))
+        (Log/dumpHeaders sb "    " (.getSystemHeaders oh))
+        (Log/dumpHeaders sb "    " (.getUserHeaders oh))
+        (Log/logHeaders (.toString sb))))
+    (let [^{:tag (List HeaderFrame)} frames (.encodeHeaders this oh)] (.encodeFrames this frames)))
+
+  (method ^:private encodeFrames ^{:tag (List ByteBuffer)} [this ^{:tag (List HeaderFrame)} frames]
+    (when (Log/frames)
+      (.forEach frames (lambda Consumer ^void [^HeaderFrame f] (Log/logFrames f "OUT"))))
+    (.encodeFrames framesEncoder frames))
+
+  (method ^:private registerNewStream ^{:tag (Stream ?)} [this
+                                                          ^{:tag (OutgoingHeaders (Stream ?))} oh]
+    (let [^{:tag (Stream ?)} stream (cast Stream (.getAttachment oh))]
+      (java-assert (== (.-streamid stream) 0))
+      (let [streamid nextstreamid
+            ^:mutable ^Throwable cause nil]
+        (locking this
+          (when-not (.isOpen this)
+            (let [terminationCause (.getTerminationCause this)]
+              (java-assert (some? terminationCause) "termination cause is null")
+              (set! cause (.getCloseCause terminationCause)))))
+        (cond
+          (some? cause) (do (.cancelImpl stream cause) nil)
+          (.registerStream stream streamid false)
+            (do
+              (set! nextstreamid (unchecked-add-int nextstreamid 2))
+              (.registerStream windowController streamid (.getInitialSendWindowSize this))
+              stream)
+          :else
+            (do
+              (.cancelImpl stream (IOException. "Request cancelled"))
+              (when (.shouldClose this) (.close this))
+              nil)))))
+
+  (field ^:private ^:final ^Lock sendlock (ReentrantLock.))
+
+  (method sendFrame ^void [this ^Http2Frame frame]
+    (try
+      (when (.on debug) (.log debug (java-str "sending frame: " frame)))
+      (let [publisher (.publisher this)]
+        (.lock sendlock)
+        (try
+          (if (instance? OutgoingHeaders frame)
+              (let [^{:tag (OutgoingHeaders (Stream ?))} oh (cast OutgoingHeaders frame)
+                    ^{:tag (Stream ?)} stream (.registerNewStream this oh)]
+                (when (some? stream)
+                  (.set orphanedHeaders 0)
+                  (.enqueue publisher (.encodeHeaders this oh stream))))
+              (.enqueue publisher (.encodeFrame this frame)))
+          (finally (.unlock sendlock)))
+        (.signalEnqueued publisher))
+      (catch IOException e
+        (cond
+          (not (.stopping client2)) (Log/logError e)
+          (.on debug) (.log debug "Failed to send %s while stopping: %s" (new Object/1 [frame e])))
+        (.close this (Http2TerminationCause/forException e)))))
+
+  (method ^:private encodeFrame ^{:tag (List ByteBuffer)} [this ^Http2Frame frame]
+    (Log/logFrames frame "OUT")
+    (.encodeFrame framesEncoder frame))
+
+  (method sendDataFrame ^void [this ^DataFrame frame]
+    (try
+      (let [publisher (.publisher this)]
+        (.enqueue publisher (.encodeFrame this frame))
+        (.signalEnqueued publisher))
+      (catch IOException e
+        (cond
+          (not (.stopping client2)) (Log/logError e)
+          (.on debug) (.log debug "Failed to send %s while stopping: %s" (new Object/1 [frame e])))
+        (.close this (Http2TerminationCause/forException e)))))
+
+  (method sendUnorderedFrame ^void [this ^Http2Frame frame]
+    (try
+      (let [publisher (.publisher this)]
+        (.enqueueUnordered publisher (.encodeFrame this frame))
+        (.signalEnqueued publisher))
+      (catch IOException e
+        (cond
+          (not (.stopping client2)) (Log/logError e)
+          (.on debug) (.log debug "Failed to send %s while stopping: %s" (new Object/1 [frame e])))
+        (.close this (Http2TerminationCause/forException e)))))
+
+  (defclass ^:final Http2TubeSubscriber
+    :implements [FlowTube$TubeSubscriber]
+
+    (field ^:private ^:volatile ^Flow$Subscription subscription)
+
+    (field ^:private ^:volatile ^boolean completed)
+
+    (field ^:private ^:volatile ^boolean dropped)
+
+    (field ^:private ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+    (field ^:private ^:final ^{:tag (ConcurrentLinkedQueue ByteBuffer)} queue
+      (ConcurrentLinkedQueue.))
+
+    (field ^:private ^:final ^SequentialScheduler scheduler
+      (SequentialScheduler/lockingScheduler
+        (method-ref Runnable this Http2TubeSubscriber/.processQueue)))
+
+    (field ^:private ^:final ^HttpClientImpl client)
+
+    (constructor [this ^HttpClientImpl client]
+      (set! (.-client this) (cast HttpClientImpl (Objects/requireNonNull client))))
+
+    (method ^:final processQueue ^void [this]
+      (try
+        (while (and (not (.isEmpty queue)) (not (.isStopped scheduler)))
+          (let [buffer (cast ByteBuffer (.poll queue))]
+            (java-assert (some? buffer) "null buffer obtained from non-empty queue")
+            (when (.on debug)
+              (.log debug
+                    "sending %d to Http2Connection.asyncReceive"
+                    (new Object/1 [(.remaining buffer)])))
+            (.asyncReceive Http2Connection/this buffer)))
+        (catch Throwable t (.compareAndSet errorRef nil t))
+        (finally
+          (let [x (cast Throwable (.get errorRef))]
+            (when (or (some? x) completed)
+              (.stop scheduler)
+              (cond
+                (.stopping client2) (when (.on debug) (.log debug "Stopping scheduler"))
+                (.on debug) (.log debug "Stopping scheduler" x))
+              (let [^Http2TerminationCause tc (if (some? x)
+                                                  (Http2TerminationCause/forException x)
+                                                  (Http2TerminationCause/noErrorTermination))]
+                (.close Http2Connection/this tc)))))))
+
+    (method ^:private ^:final runOrSchedule ^void [this]
+      (if (.isSelectorThread client)
+          (.runOrSchedule scheduler (.theExecutor client))
+          (.runOrSchedule scheduler)))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (java-assert (or (nil? (.-subscription this)) (= dropped false)))
+      (set! (.-subscription this) subscription)
+      (set! dropped false)
+      (cond
+        (not completed)
+          (do
+            (when (.on debug) (.log debug "onSubscribe: requesting Long.MAX_VALUE for reading"))
+            (.request subscription Long/MAX_VALUE))
+        (.on debug) (.log debug "onSubscribe: already completed")))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (when-not completed
+        (when (.on debug)
+          (.log debug
+                (lambda Supplier ^String []
+                  (java-str "onNext: got "
+                            (Utils/remaining item)
+                            " bytes in "
+                            (.size item)
+                            " buffers"))))
+        (.addAll queue item)
+        (.runOrSchedule this)))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (when-not completed
+        (when (.on debug)
+          (.log debug (lambda Supplier ^String [] (java-str "onError: " throwable))))
+        (.compareAndSet errorRef nil throwable)
+        (set! completed true)
+        (.runOrSchedule this)))
+
+    (method ^:public onComplete ^void [this]
+      (when-not completed
+        (cond
+          (.isActive Http2Connection/this)
+            (let [^:const msg "EOF reached while reading"]
+              (.compareAndSet errorRef nil (EOFException. msg))
+              (when (.on debug) (.log debug msg)))
+          (.on debug) (.log debug "HTTP/2 connection (with no active streams) closed by peer"))
+        (set! completed true)
+        (.runOrSchedule this)))
+
+    (method ^:public dropSubscription ^void [this]
+      (when (.on debug) (.log debug "dropSubscription"))
+      (set! dropped true))
+
+    (method ^:private close ^void [this]
+      (.stop scheduler)
+      (.clear queue)
+      (when (some? subscription) (.cancel subscription))
+      (.clear queue)))
+
+  (method isActive ^boolean [this]
+    (.lock stateLock)
+    (try
+      (or (> numReservedClientStreams 0) (> numReservedServerStreams 0))
+      (finally (.unlock stateLock))))
+
+  (method ^:public ^:final toString ^String [this] (.dbgString this))
+
+  (method ^:final dbgString ^String [this]
+    (java-str "Http2Connection(" (.getConnectionFlow connection) ")"))
+
+  (defclass ^:static ^:final ConnectionWindowUpdateSender
+    :extends WindowUpdateSender
+
+    (field ^:final ^int initialWindowSize)
+
+    (constructor ^:public [this ^Http2Connection connection ^int initialWindowSize]
+      (super. connection initialWindowSize)
+      (set! (.-initialWindowSize this) initialWindowSize))
+
+    (method getStreamId ^int [this] 0)
+
+    (method ^:protected windowSizeExceeded ^boolean [this ^long received]
+      (when (.isOpen (.-connection this))
+        (.protocolError (.-connection this)
+                        ErrorFrame/FLOW_CONTROL_ERROR
+                        (.formatted "connection window exceeded (%s > %s)"
+                                    received
+                                    (.-windowSize this))))
+      true))
+
+  (defclass ^:static ^:final ALPNException
+    :extends IOException
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (field ^:final ^:transient ^AbstractAsyncSSLConnection connection)
+
+    (constructor [this ^String msg ^AbstractAsyncSSLConnection connection]
+      (super. msg)
+      (set! (.-connection this) connection))
+
+    (method getConnection ^AbstractAsyncSSLConnection [this] connection))
+
+  (method ^:private sendGoAway ^void [this ^:final ^GoAwayFrame goAway]
+    (when-not (not (.compareAndSet goAwaySent false true))
+      (cond
+        (Log/trace) (Log/logTrace "{0} sending GOAWAY {1}" connection goAway)
+        (.on debug) (.log debug (java-str "sending GOAWAY " goAway)))
+      (.sendFrame this goAway)))
+
+  (method ^:final getTerminationCause ^Http2TerminationCause [this]
+    (.determineTerminationCause (.-connTerminator this)))
+
+  (defclass ^:private ^:final Terminator
+    (field ^:private ^:final ^{:tag (AtomicReference Http2TerminationCause)} terminationCause
+      (AtomicReference.))
+
+    (field ^:private ^boolean chosenForIdleTermination)
+
+    (method ^:private terminate ^void [this ^:final ^Http2TerminationCause terminationCause]
+      (Objects/requireNonNull terminationCause "termination cause cannot be null")
+      (.lock stateLock)
+      (try
+        (let [success (.compareAndSet (.-terminationCause this) nil terminationCause)]
+          (when-not success (return))
+          (.cancelIdleCloseEvent Http2Connection/this))
+        (finally (.unlock stateLock)))
+      (.doTerminate this))
+
+    (method ^:private doTerminate ^void [this]
+      (let [tc (cast Http2TerminationCause (.get terminationCause))]
+        (java-assert (some? tc) "missing termination cause")
+        (when-not (.get (.-goAwayRecvd Http2Connection/this))
+          (let [^:const ^int lastStream 0
+                peerVisibleReason (.getPeerVisibleReason tc)
+                ^GoAwayFrame goAway (if (nil? peerVisibleReason)
+                                        (GoAwayFrame. lastStream (.getCloseCode tc))
+                                        (GoAwayFrame.
+                                          lastStream
+                                          (.getCloseCode tc)
+                                          (.getBytes peerVisibleReason StandardCharsets/UTF_8)))]
+            (.sendGoAway Http2Connection/this goAway)))
+        (when (or (Log/errors) (.on debug))
+          (let [stateStr (java-str "Abnormal close="
+                                   (.isAbnormalClose tc)
+                                   ", has active streams="
+                                   (.isActive Http2Connection/this)
+                                   ", GOAWAY received="
+                                   (.get goAwayRecvd)
+                                   ", GOAWAY sent="
+                                   (.get goAwaySent))]
+            (if (Log/errors)
+                (Log/logError "Closing connection {0} ({1}) due to: {2}"
+                              (new Object/1 [connection stateStr tc]))
+                (.log debug (java-str "Closing connection (" stateStr ") due to: " tc)))))
+        (.close subscriber)
+        (.removeFromPool client2 Http2Connection/this)
+        (for-each [^{:tag (Stream ?)} s (.values streams)]
+          (try
+            (.connectionClosing s (.getCloseCause tc))
+            (catch Throwable e
+              (Log/logError "Failed to close stream {0}: {1}" (new Object/1 [(.-streamid s) e])))))
+        (.close connection (.getCloseCause tc))))
+
+    (method ^:private markForIdleTermination ^void [this]
+      (java-assert (.isHeldByCurrentThread stateLock)
+        (java-str (Thread/currentThread) " not holding stateLock"))
+      (set! (.-chosenForIdleTermination this) true))
+
+    (method ^:private isMarkedForIdleTermination ^boolean [this]
+      (java-assert (.isHeldByCurrentThread stateLock)
+        (java-str (Thread/currentThread) " not holding stateLock"))
+      (.-chosenForIdleTermination this))
+
+    (method ^:private idleTimedOut ^void [this]
+      (when (.on debug) (.log debug "closing connection due to being idle"))
+      (.terminate this (Http2TerminationCause/idleTimedOut)))
+
+    (method ^:private determineTerminationCause ^Http2TerminationCause [this]
+      (let [tc (cast Http2TerminationCause (.get (.-terminationCause this)))]
+        (if (some? tc)
+            tc
+            (when-not (.isOpen (.channel connection))
+              (.terminate this (Http2TerminationCause/forException (ClosedChannelException.)))
+              (let [terminated (cast Http2TerminationCause (.get (.-terminationCause this)))]
+                (java-assert (some? terminated) "missing termination cause")
+                terminated)))))))

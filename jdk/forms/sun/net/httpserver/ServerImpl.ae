@@ -1,0 +1,828 @@
+;; Converted from overlay/jdk/java.base/sun/net/httpserver/ServerImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.httpserver)
+
+(import '(com.sun.net.httpserver Filter
+                                 Filter$Chain
+                                 HttpContext
+                                 HttpExchange
+                                 HttpHandler
+                                 HttpServer
+                                 HttpsConfigurator)
+        '(java.io BufferedInputStream BufferedOutputStream IOException InputStream OutputStream)
+        '(java.net BindException InetSocketAddress URI URISyntaxException)
+        '(java.nio.channels CancelledKeyException
+                            SelectionKey
+                            Selector
+                            ServerSocketChannel
+                            SocketChannel)
+        '(java.nio.charset StandardCharsets)
+        '(java.util ArrayList Collections HashSet List Set Timer TimerTask)
+        '(java.util.concurrent CountDownLatch Executor TimeUnit)
+        '(java.util.function Consumer IntFunction)
+        '(javax.net.ssl SSLContext SSLEngine)
+        '(jdk.internal.jrt SystemLoggers SystemLoggers$Logger SystemLoggers$Logger$Level))
+
+(defclass ServerImpl
+  (field ^:private ^String protocol)
+
+  (field ^:private ^boolean https)
+
+  (field ^:private ^Executor executor)
+
+  (field ^:private ^HttpsConfigurator httpsConfig)
+
+  (field ^:private ^SSLContext sslContext)
+
+  (field ^:private ^ContextList contexts)
+
+  (field ^:private ^InetSocketAddress address)
+
+  (field ^:private ^ServerSocketChannel schan)
+
+  (field ^:private ^Selector selector)
+
+  (field ^:private ^SelectionKey listenerKey)
+
+  (field ^:private ^:final ^{:tag (Set HttpConnection)} idleConnections)
+
+  (field ^:private ^:final ^{:tag (Set HttpConnection)} newlyAcceptedConnections)
+
+  (field ^:private ^:final ^{:tag (Set HttpConnection)} allConnections)
+
+  (field ^:private ^:final ^{:tag (Set HttpConnection)} reqConnections)
+
+  (field ^:private ^:final ^{:tag (Set HttpConnection)} rspConnections)
+
+  (field ^:private ^{:tag (List Event)} events)
+
+  (field ^:private ^:final lolock (Object.))
+
+  (field ^:private ^:final ^CountDownLatch finishedLatch (CountDownLatch. 1))
+
+  (field ^:private ^:volatile ^boolean terminating false)
+
+  (field ^:private ^boolean bound false)
+
+  (field ^:private ^boolean started false)
+
+  (field ^:private ^HttpServer wrapper)
+
+  (field ^:static ^:final ^long IDLE_TIMER_TASK_SCHEDULE (ServerConfig/getIdleTimerScheduleMillis))
+
+  (field ^:static ^:final ^int MAX_CONNECTIONS (ServerConfig/getMaxConnections))
+
+  (field ^:static ^:final ^int MAX_IDLE_CONNECTIONS (ServerConfig/getMaxIdleConnections))
+
+  (field ^:static ^:final ^long REQ_RSP_TIMER_SCHEDULE (ServerConfig/getReqRspTimerScheduleMillis))
+
+  (field ^:static ^:final ^long MAX_REQ_TIME
+    (ServerImpl/getTimeMillis (ServerConfig/getMaxReqTime)))
+
+  (field ^:static ^:final ^long MAX_RSP_TIME
+    (ServerImpl/getTimeMillis (ServerConfig/getMaxRspTime)))
+
+  (field ^:static ^:final ^boolean reqRspTimeoutEnabled
+    (or (not (== MAX_REQ_TIME -1)) (not (== MAX_RSP_TIME -1))))
+
+  (field ^:static ^:final ^long IDLE_INTERVAL (ServerConfig/getIdleIntervalMillis))
+
+  (field ^:static ^:final ^long NEWLY_ACCEPTED_CONN_IDLE_INTERVAL)
+
+  (static-initializer
+    (set! NEWLY_ACCEPTED_CONN_IDLE_INTERVAL
+          (if (> MAX_REQ_TIME 0) (Math/min IDLE_INTERVAL MAX_REQ_TIME) IDLE_INTERVAL)))
+
+  (field ^:private ^Timer timer)
+
+  (field ^:private ^Timer timer1)
+
+  (field ^:private ^:final ^SystemLoggers$Logger logger)
+
+  (field ^:private ^Thread dispatcherThread)
+
+  (constructor :throws [IOException] [this ^HttpServer wrapper ^String protocol
+                                      ^InetSocketAddress addr ^int backlog]
+    (set! (.-protocol this) protocol)
+    (set! (.-wrapper this) wrapper)
+    (set! (.-logger this) (SystemLoggers/getLogger "com.sun.net.httpserver"))
+    (ServerConfig/checkLegacyProperties logger)
+    (set! https (.equalsIgnoreCase protocol "https"))
+    (set! (.-address this) addr)
+    (set! contexts (ContextList.))
+    (set! schan (ServerSocketChannel/open))
+    (when (some? addr) (let [socket (.socket schan)] (.bind socket addr backlog) (set! bound true)))
+    (set! selector (Selector/open))
+    (.configureBlocking schan false)
+    (set! listenerKey (.register schan selector SelectionKey/OP_ACCEPT))
+    (set! dispatcher (Dispatcher.))
+    (set! idleConnections (Collections/synchronizedSet (HashSet.)))
+    (set! allConnections (Collections/synchronizedSet (HashSet.)))
+    (set! reqConnections (Collections/synchronizedSet (HashSet.)))
+    (set! rspConnections (Collections/synchronizedSet (HashSet.)))
+    (set! newlyAcceptedConnections (Collections/synchronizedSet (HashSet.)))
+    (set! timer (Timer. "idle-timeout-task" true))
+    (.schedule timer (IdleTimeoutTask.) IDLE_TIMER_TASK_SCHEDULE IDLE_TIMER_TASK_SCHEDULE)
+    (when reqRspTimeoutEnabled
+      (set! timer1 (Timer. "req-rsp-timeout-task" true))
+      (.schedule timer1 (ReqRspTimeoutTask.) REQ_RSP_TIMER_SCHEDULE REQ_RSP_TIMER_SCHEDULE)
+      (.log logger
+            SystemLoggers$Logger$Level/DEBUG
+            "HttpServer request/response timeout task schedule ms: "
+            (new Object/1 [REQ_RSP_TIMER_SCHEDULE]))
+      (.log logger SystemLoggers$Logger$Level/DEBUG (java-str "MAX_REQ_TIME:  " MAX_REQ_TIME))
+      (.log logger SystemLoggers$Logger$Level/DEBUG (java-str "MAX_RSP_TIME:  " MAX_RSP_TIME)))
+    (set! events (ArrayList.))
+    (.log logger
+          SystemLoggers$Logger$Level/DEBUG
+          (java-str "HttpServer created " protocol " " addr)))
+
+  (method ^:public bind :throws [IOException] ^void [this ^InetSocketAddress addr ^int backlog]
+    (when bound (throw (BindException. "HttpServer already bound")))
+    (when (nil? addr) (throw (NullPointerException. "null address")))
+    (let [socket (.socket schan)] (.bind socket addr backlog) (set! bound true)))
+
+  (method ^:public start ^void [this]
+    (when (or (or (not bound) started) (.finished this))
+      (throw (IllegalStateException. "server in wrong state")))
+    (when (nil? executor) (set! executor (DefaultExecutor.)))
+    (set! dispatcherThread (Thread. dispatcher "HTTP-Dispatcher"))
+    (set! started true)
+    (.start dispatcherThread))
+
+  (method ^:public setExecutor ^void [this ^Executor executor]
+    (when started (throw (IllegalStateException. "server already started")))
+    (set! (.-executor this) executor))
+
+  (defclass ^:private ^:static DefaultExecutor
+    :implements [Executor]
+
+    (method ^:public execute ^void [this ^Runnable task] (.run task)))
+
+  (method ^:public getExecutor ^Executor [this] executor)
+
+  (method ^:public setHttpsConfigurator ^void [this ^HttpsConfigurator config]
+    (when (nil? config) (throw (NullPointerException. "null HttpsConfigurator")))
+    (when started (throw (IllegalStateException. "server already started")))
+    (set! (.-httpsConfig this) config)
+    (set! sslContext (.getSSLContext config)))
+
+  (method ^:public getHttpsConfigurator ^HttpsConfigurator [this]
+    httpsConfig)
+
+  (method ^:private ^:final finished ^boolean [this]
+    (== (.getCount finishedLatch) 0))
+
+  (method ^:public ^:final isFinishing ^boolean [this] (.finished this))
+
+  (method ^:public stop ^void [this ^int delay]
+    (when (< delay 0) (throw (IllegalArgumentException. "negative delay parameter")))
+    (.log logger SystemLoggers$Logger$Level/TRACE "stopping")
+    (set! terminating true)
+    (.addEvent this (Event$StopRequested.))
+    (try (.close schan) (catch IOException e))
+    (.wakeup selector)
+    (try
+      (.await finishedLatch delay TimeUnit/SECONDS)
+      (catch InterruptedException e
+        (.log logger SystemLoggers$Logger$Level/TRACE "Error in awaiting the delay"))
+      (finally
+        (.log logger SystemLoggers$Logger$Level/TRACE "closing connections")
+        (.countDown finishedLatch)
+        (.wakeup selector)
+        (locking allConnections (for-each [^HttpConnection c allConnections] (.close c)))
+        (.clear allConnections)
+        (.clear idleConnections)
+        (.clear newlyAcceptedConnections)
+        (.cancel timer)
+        (when reqRspTimeoutEnabled (.cancel timer1))
+        (.log logger SystemLoggers$Logger$Level/TRACE "connections closed")
+        (when (and (some? dispatcherThread)
+                   (not (identical? dispatcherThread (Thread/currentThread))))
+          (.log logger SystemLoggers$Logger$Level/TRACE "waiting for dispatcher thread")
+          (try
+            (.join dispatcherThread)
+            (catch InterruptedException e
+              (.interrupt (Thread/currentThread))
+              (.log logger SystemLoggers$Logger$Level/TRACE "ServerImpl.stop: " e))))
+        (.log logger SystemLoggers$Logger$Level/TRACE "server stopped"))))
+
+  (field ^Dispatcher dispatcher)
+
+  (method ^:public ^:synchronized createContext ^HttpContextImpl [this ^String path
+                                                                  ^HttpHandler handler]
+    (when (or (nil? handler) (nil? path))
+      (throw (NullPointerException. "null handler, or path parameter")))
+    (let [context (HttpContextImpl. protocol path handler this)]
+      (.add contexts context)
+      (.log logger SystemLoggers$Logger$Level/DEBUG (java-str "context created: " path))
+      context))
+
+  (method ^:public ^:synchronized createContext ^HttpContextImpl [this ^String path]
+    (when (nil? path) (throw (NullPointerException. "null path parameter")))
+    (let [context (HttpContextImpl. protocol path nil this)]
+      (.add contexts context)
+      (.log logger SystemLoggers$Logger$Level/DEBUG (java-str "context created: " path))
+      context))
+
+  (method ^:public ^:synchronized removeContext :throws [IllegalArgumentException] ^void [this
+                                                                                          ^String path]
+    (when (nil? path) (throw (NullPointerException. "null path parameter")))
+    (.remove contexts protocol path)
+    (.log logger SystemLoggers$Logger$Level/DEBUG (java-str "context removed: " path)))
+
+  (method ^:public ^:synchronized removeContext :throws [IllegalArgumentException] ^void [this
+                                                                                          ^HttpContext context]
+    (when-not (instance? HttpContextImpl context)
+      (throw (IllegalArgumentException. "wrong HttpContext type")))
+    (.remove contexts (cast HttpContextImpl context))
+    (.log logger SystemLoggers$Logger$Level/DEBUG (java-str "context removed: " (.getPath context))))
+
+  (method ^:public getAddress ^InetSocketAddress [this]
+    (cast InetSocketAddress (.getLocalSocketAddress (.socket schan))))
+
+  (method addEvent ^void [this ^Event r]
+    (locking lolock (.add events r) (.wakeup selector)))
+
+  (defclass Dispatcher
+    :implements [Runnable]
+
+    (method ^:private handleEvent ^void [this ^Event r]
+      (if (instance? Event$StopRequested r)
+          (do
+            (.log logger SystemLoggers$Logger$Level/TRACE "Handling Stop Requested Event")
+            (let [terminatingCopy terminating]
+              (java-assert terminatingCopy)
+              (if (and (== (.getExchangeCount ServerImpl/this) 0) (.isEmpty reqConnections))
+                  (.countDown finishedLatch)
+                  (.log logger SystemLoggers$Logger$Level/TRACE "Some requests are still pending"))))
+          (let [t (.-exchange r)
+                c (.getConnection t)]
+            (try
+              (when (instance? Event$WriteFinished r)
+                (.log logger SystemLoggers$Logger$Level/TRACE "Write Finished")
+                (let [exchanges (.endExchange ServerImpl/this)]
+                  (when (and (and terminating (== exchanges 0)) (.isEmpty reqConnections))
+                    (.countDown finishedLatch))
+                  (let [is (.getOriginalInputStream t)]
+                    (when-not (.isEOF is)
+                      (set! (.-close t) true)
+                      (when (identical? (.getState c) HttpConnection$State/REQUEST)
+                        (.requestCompleted ServerImpl/this c)))
+                    (.responseCompleted ServerImpl/this c)
+                    (cond
+                      (.-close t) (do (.close c) (.remove allConnections c))
+                      (.isDataBuffered is)
+                        (do (.requestStarted ServerImpl/this c) (.handle this (.getChannel c) c))
+                      :else (.add connsToRegister c)))))
+              (catch IOException e
+                (.log logger SystemLoggers$Logger$Level/TRACE "Dispatcher (1)" e)
+                (.close c))))))
+
+    (field ^:final ^{:tag (ArrayList HttpConnection)} connsToRegister (ArrayList.))
+
+    (method reRegister ^void [this ^HttpConnection c]
+      (try
+        (let [chan (.getChannel c)]
+          (.configureBlocking chan false)
+          (let [key (.register chan selector SelectionKey/OP_READ)]
+            (.attach key c)
+            (set! (.-selectionKey c) key)
+            (.markIdle ServerImpl/this c)))
+        (catch IOException e
+          (ServerImpl/dprint e)
+          (.log logger SystemLoggers$Logger$Level/TRACE "Dispatcher(8)" e)
+          (.close c))))
+
+    (method ^:public run ^void [this]
+      (while (not (.finished ServerImpl/this))
+        (try
+          (let [^:mutable ^{:tag (List Event)} list nil]
+            (locking lolock
+              (when-not (.isEmpty events) (set! list events) (set! events (ArrayList.))))
+            (when (some? list) (for-each [^Event r list] (.handleEvent this r)))
+            (for-each [^HttpConnection c connsToRegister] (.reRegister this c))
+            (.clear connsToRegister)
+            (.select selector 1000)
+            (let [^{:tag (Set SelectionKey)} selected (.selectedKeys selector)]
+              (for-each [^SelectionKey key (cast
+                                             SelectionKey/1
+                                             (.toArray
+                                               selected
+                                               (lambda IntFunction ^SelectionKey/1 ^:method-ref [^int n-1]
+                                                 (new SelectionKey/1 n-1))))]
+                (.remove selected key)
+                (if (.equals key listenerKey)
+                    (when-not terminating
+                      (let [chan (.accept schan)]
+                        (when (some? chan)
+                          (if (and (> MAX_CONNECTIONS 0)
+                                   (>= (.size allConnections) MAX_CONNECTIONS))
+                              (try (.close chan) (catch IOException ignore))
+                              (do
+                                (when (ServerConfig/noDelay) (.setTcpNoDelay (.socket chan) true))
+                                (.configureBlocking chan false)
+                                (let [newkey (.register chan selector SelectionKey/OP_READ)
+                                      c (HttpConnection.)]
+                                  (set! (.-selectionKey c) newkey)
+                                  (.setChannel c chan)
+                                  (.attach newkey c)
+                                  (.markNewlyAccepted ServerImpl/this c)
+                                  (.add allConnections c)))))))
+                    (try
+                      (if (.isReadable key)
+                          (let [chan (cast SocketChannel (.channel key))
+                                conn (cast HttpConnection (.attachment key))]
+                            (.cancel key)
+                            (.configureBlocking chan true)
+                            (when (or (.remove newlyAcceptedConnections conn)
+                                      (.remove idleConnections conn))
+                              (.requestStarted ServerImpl/this conn)
+                              (.handle this chan conn)))
+                          (java-assert false (java-str "Unexpected non-readable key:" key)))
+                      (catch CancelledKeyException e (.handleException this key nil))
+                      (catch IOException e (.handleException this key e)))))
+              (.selectNow selector)))
+          (catch IOException e (.log logger SystemLoggers$Logger$Level/TRACE "Dispatcher (4)" e))
+          (catch Exception e (.log logger SystemLoggers$Logger$Level/TRACE "Dispatcher (7)" e))))
+      (try (.close selector) (catch Exception e)))
+
+    (method ^:private handleException ^void [this ^SelectionKey key ^Exception e]
+      (let [conn (cast HttpConnection (.attachment key))]
+        (when (some? e) (.log logger SystemLoggers$Logger$Level/TRACE "Dispatcher (2)" e))
+        (.closeConnection ServerImpl/this conn)))
+
+    (method ^:public handle ^void [this ^SocketChannel chan ^HttpConnection conn]
+      (try
+        (let [t (Exchange. chan protocol conn)] (.execute executor t))
+        (catch HttpError e1
+          (.log logger SystemLoggers$Logger$Level/TRACE "Dispatcher (4)" e1)
+          (.closeConnection ServerImpl/this conn))
+        (catch IOException e
+          (.log logger SystemLoggers$Logger$Level/TRACE "Dispatcher (5)" e)
+          (.closeConnection ServerImpl/this conn))
+        (catch Throwable e
+          (.log logger SystemLoggers$Logger$Level/TRACE "Dispatcher (6)" e)
+          (.closeConnection ServerImpl/this conn)))))
+
+  (field ^:static ^boolean debug (ServerConfig/debugEnabled))
+
+  (method ^:static ^:synchronized dprint ^void [^String s]
+    (when debug (.println System/out s)))
+
+  (method ^:static ^:synchronized dprint ^void [^Exception e]
+    (when debug (.println System/out e) (.printStackTrace e)))
+
+  (method getLogger ^SystemLoggers$Logger [this] logger)
+
+  (method ^:private closeConnection ^void [this ^HttpConnection conn]
+    (.close conn)
+    (.remove allConnections conn)
+    (switch (.getState conn)
+      REQUEST (.remove reqConnections conn)
+      RESPONSE (.remove rspConnections conn)
+      IDLE (.remove idleConnections conn)
+      NEWLY_ACCEPTED (.remove newlyAcceptedConnections conn))
+    (java-assert (not (.remove reqConnections conn)))
+    (java-assert (not (.remove rspConnections conn)))
+    (java-assert (not (.remove idleConnections conn)))
+    (java-assert (not (.remove newlyAcceptedConnections conn))))
+
+  (defclass Exchange
+    :implements [Runnable]
+
+    (field ^SocketChannel chan)
+
+    (field ^HttpConnection connection)
+
+    (field ^HttpContextImpl context)
+
+    (field ^InputStream rawin)
+
+    (field ^OutputStream rawout)
+
+    (field ^String protocol)
+
+    (field ^ExchangeImpl tx)
+
+    (field ^HttpContextImpl ctx)
+
+    (field ^boolean rejected false)
+
+    (constructor :throws [IOException] [this ^SocketChannel chan ^String protocol
+                                        ^HttpConnection conn]
+      (set! (.-chan this) chan)
+      (set! (.-connection this) conn)
+      (set! (.-protocol this) protocol))
+
+    (method ^:public run ^void [this]
+      (.log logger SystemLoggers$Logger$Level/TRACE "exchange started")
+      (when (identical? dispatcherThread (Thread/currentThread))
+        (try
+          (.selectNow selector)
+          (catch IOException ioe
+            (.log logger
+                  SystemLoggers$Logger$Level/DEBUG
+                  "processing of cancelled keys failed: closing")
+            (.closeConnection ServerImpl/this connection)
+            (return))))
+      (set! context (.getHttpContext connection))
+      (let [^:mutable ^boolean newconnection false
+            ^:mutable ^SSLEngine engine nil
+            ^:mutable ^String requestLine nil
+            ^:mutable ^SSLStreams sslStreams nil]
+        (try
+          (if (some? context)
+              (do
+                (set! (.-rawin this) (.getInputStream connection))
+                (set! (.-rawout this) (.getRawOutputStream connection))
+                (set! newconnection false))
+              (do
+                (set! newconnection true)
+                (if https
+                    (do
+                      (when (nil? sslContext)
+                        (.log logger
+                              SystemLoggers$Logger$Level/WARNING
+                              "SSL connection received. No https context created")
+                        (throw (HttpError. "No SSL context established")))
+                      (set! sslStreams (SSLStreams. ServerImpl/this sslContext chan))
+                      (set! rawin (.getInputStream sslStreams))
+                      (set! rawout (.getOutputStream sslStreams))
+                      (set! engine (.getSSLEngine sslStreams))
+                      (set! (.-sslStreams connection) sslStreams))
+                    (do
+                      (set! rawin (BufferedInputStream. (Request$ReadStream. ServerImpl/this chan)))
+                      (set! rawout (Request$WriteStream. ServerImpl/this chan))))
+                (set! rawout (BufferedOutputStream. rawout))
+                (set! (.-raw connection) rawin)
+                (set! (.-rawout connection) rawout)))
+          (let [req (Request. rawin rawout)]
+            (set! requestLine (.requestLine req))
+            (if (nil? requestLine)
+                (do
+                  (.log logger SystemLoggers$Logger$Level/DEBUG "no request line: closing")
+                  (.closeConnection ServerImpl/this connection))
+                (do
+                  (.log logger
+                        SystemLoggers$Logger$Level/DEBUG
+                        "Exchange request line: {0}"
+                        (new Object/1 [requestLine]))
+                  (let [^:mutable space (.indexOf requestLine \space)]
+                    (if (== space -1)
+                        (.reject this Code/HTTP_BAD_REQUEST requestLine "Bad request line")
+                        (let [method (.substring requestLine 0 space)
+                              ^:mutable start (unchecked-add-int space 1)]
+                          (set! space (.indexOf requestLine \space start))
+                          (if (== space -1)
+                              (.reject this Code/HTTP_BAD_REQUEST requestLine "Bad request line")
+                              (let [uriStr (.substring requestLine start space)]
+                                (if (.startsWith uriStr "//")
+                                    (.reject this
+                                             Code/HTTP_BAD_REQUEST
+                                             requestLine
+                                             "Bad request URI")
+                                    (let [^:mutable ^URI uri nil]
+                                      (try
+                                        (set! uri (URI. uriStr))
+                                        (catch URISyntaxException e3
+                                          (.reject
+                                            this
+                                            Code/HTTP_BAD_REQUEST
+                                            requestLine
+                                            "Bad request URI")
+                                          (return)))
+                                      (set! start (unchecked-add-int space 1))
+                                      (let [version (.substring requestLine start)
+                                            headers (.headers req)]
+                                        (for-each [^String k (.keySet headers)]
+                                          (when-not (Utils/isValidName k)
+                                            (.reject
+                                              this
+                                              Code/HTTP_BAD_REQUEST
+                                              requestLine
+                                              "Header key contains illegal characters")
+                                            (return)))
+                                        (if (and
+                                              (.containsKey headers "Content-Length")
+                                              (or
+                                                (.containsKey headers "Transfer-encoding")
+                                                (> (.size (.get headers "Content-Length")) 1)))
+                                            (.reject
+                                              this
+                                              Code/HTTP_BAD_REQUEST
+                                              requestLine
+                                              "Conflicting or malformed headers detected")
+                                            (let [^:mutable clen 0
+                                                  ^:mutable ^String headerValue nil
+                                                  ^{:tag (List String)} teValueList (.get
+                                                                                      headers
+                                                                                      "Transfer-encoding")]
+                                              (when (and
+                                                      (some? teValueList)
+                                                      (not (.isEmpty teValueList)))
+                                                (set!
+                                                  headerValue
+                                                  (cast String (.get teValueList 0))))
+                                              (if (some? headerValue)
+                                                  (if (and
+                                                        (.equalsIgnoreCase headerValue "chunked")
+                                                        (== (.size teValueList) 1))
+                                                      (set! clen -1)
+                                                      (do
+                                                        (.reject
+                                                          this
+                                                          Code/HTTP_NOT_IMPLEMENTED
+                                                          requestLine
+                                                          "Unsupported Transfer-Encoding value")
+                                                        (return)))
+                                                  (do
+                                                    (set!
+                                                      headerValue
+                                                      (.getFirst headers "Content-Length"))
+                                                    (when (some? headerValue)
+                                                      (try
+                                                        (set! clen (Long/parseLong headerValue))
+                                                        (catch NumberFormatException e2
+                                                          (.reject
+                                                            this
+                                                            Code/HTTP_BAD_REQUEST
+                                                            requestLine
+                                                            "NumberFormatException thrown")
+                                                          (return)))
+                                                      (when (< clen 0)
+                                                        (.reject
+                                                          this
+                                                          Code/HTTP_BAD_REQUEST
+                                                          requestLine
+                                                          "Illegal Content-Length value")
+                                                        (return)))
+                                                    (when (== clen 0)
+                                                      (.requestCompleted ServerImpl/this connection))))
+                                              (set!
+                                                ctx
+                                                (.findContext contexts protocol (.getPath uri)))
+                                              (if (nil? ctx)
+                                                  (.reject
+                                                    this
+                                                    Code/HTTP_NOT_FOUND
+                                                    requestLine
+                                                    "No context found for request")
+                                                  (do
+                                                    (.setContext connection ctx)
+                                                    (if (nil? (.getHandler ctx))
+                                                        (.reject
+                                                          this
+                                                          Code/HTTP_INTERNAL_ERROR
+                                                          requestLine
+                                                          "No handler for context")
+                                                        (do
+                                                          (set!
+                                                            tx
+                                                            (ExchangeImpl.
+                                                              method
+                                                              uri
+                                                              req
+                                                              clen
+                                                              connection))
+                                                          (let [chdr (.getFirst
+                                                                       headers
+                                                                       "Connection")
+                                                                rheaders (.getResponseHeaders tx)]
+                                                            (when (and
+                                                                    (some? chdr)
+                                                                    (.equalsIgnoreCase chdr "close"))
+                                                              (set! (.-close tx) true))
+                                                            (when (.equalsIgnoreCase
+                                                                    version
+                                                                    "http/1.0")
+                                                              (set! (.-http10 tx) true)
+                                                              (if (nil? chdr)
+                                                                  (do
+                                                                    (set! (.-close tx) true)
+                                                                    (.set
+                                                                      rheaders
+                                                                      "Connection"
+                                                                      "close"))
+                                                                  (when (.equalsIgnoreCase
+                                                                          chdr
+                                                                          "keep-alive")
+                                                                    (.set
+                                                                      rheaders
+                                                                      "Connection"
+                                                                      "keep-alive")
+                                                                    (let [idleSeconds (unchecked-int
+                                                                                        (unchecked-divide
+                                                                                          (ServerConfig/getIdleIntervalMillis)
+                                                                                          1000))
+                                                                          val (java-str
+                                                                                "timeout="
+                                                                                idleSeconds)]
+                                                                      (.set
+                                                                        rheaders
+                                                                        "Keep-Alive"
+                                                                        val)))))
+                                                            (when newconnection
+                                                              (.setParameters
+                                                                connection
+                                                                rawin
+                                                                rawout
+                                                                chan
+                                                                engine
+                                                                sslStreams
+                                                                sslContext
+                                                                protocol
+                                                                ctx
+                                                                rawin))
+                                                            (let [exp (.getFirst headers "Expect")]
+                                                              (when (and
+                                                                      (some? exp)
+                                                                      (.equalsIgnoreCase
+                                                                        exp
+                                                                        "100-continue"))
+                                                                (.logReply
+                                                                  ServerImpl/this
+                                                                  100
+                                                                  requestLine
+                                                                  nil)
+                                                                (.sendReply
+                                                                  this
+                                                                  Code/HTTP_CONTINUE
+                                                                  false
+                                                                  nil))
+                                                              (let [^{:tag (List Filter)} sf
+                                                                      (.getSystemFilters ctx)
+                                                                    ^{:tag (List Filter)} uf
+                                                                      (.getFilters ctx)
+                                                                    sc (Filter$Chain.
+                                                                         sf
+                                                                         (.getHandler ctx))
+                                                                    uc (Filter$Chain.
+                                                                         uf
+                                                                         (LinkHandler. sc))]
+                                                                (.getRequestBody tx)
+                                                                (.getResponseBody tx)
+                                                                (if https
+                                                                    (.doFilter
+                                                                      uc
+                                                                      (HttpsExchangeImpl. tx))
+                                                                    (.doFilter
+                                                                      uc
+                                                                      (HttpExchangeImpl. tx)))))))))))))))))))))))
+          (catch Exception e
+            (.log logger SystemLoggers$Logger$Level/TRACE "ServerImpl.Exchange" e)
+            (when (or (nil? tx) (not (.-writefinished tx)))
+              (.closeConnection ServerImpl/this connection)))
+          (catch Throwable t
+            (.log logger SystemLoggers$Logger$Level/TRACE "ServerImpl.Exchange (5)" t)
+            (throw t)))))
+
+    (defclass LinkHandler
+      :implements [HttpHandler]
+
+      (field ^Filter$Chain nextChain)
+
+      (constructor [this ^Filter$Chain nextChain]
+        (set! (.-nextChain this) nextChain))
+
+      (method ^:public handle :throws [IOException] ^void [this ^HttpExchange exchange]
+        (.doFilter nextChain exchange)))
+
+    (method reject ^void [this ^int code ^String requestStr ^String message]
+      (set! rejected true)
+      (.logReply ServerImpl/this code requestStr message)
+      (.sendReply this code true (java-str "<h1>" code (Code/msg code) "</h1>" message)))
+
+    (method sendReply ^void [this ^int code ^boolean closeNow ^:mutable ^String text]
+      (try
+        (let [builder (StringBuilder. 512)]
+          (.append (.append (.append (.append builder "HTTP/1.1 ") code) (Code/msg code)) "\r\n")
+          (if (and (some? text) (not (== (.length text) 0)))
+              (.append (.append (.append (.append builder "Content-Length: ") (.length text))
+                                "\r\n")
+                       "Content-Type: text/html\r\n")
+              (do (.append builder "Content-Length: 0\r\n") (set! text "")))
+          (when closeNow (.append builder "Connection: close\r\n"))
+          (.append (.append builder "\r\n") text)
+          (let [s (.toString builder)
+                b (.getBytes s StandardCharsets/ISO_8859_1)]
+            (.write rawout b)
+            (.flush rawout)
+            (when closeNow (.closeConnection ServerImpl/this connection))))
+        (catch IOException e
+          (.log logger SystemLoggers$Logger$Level/TRACE "ServerImpl.sendReply" e)
+          (.closeConnection ServerImpl/this connection)))))
+
+  (method logReply ^void [this ^int code ^String requestStr ^:mutable ^String text]
+    (when-not (not (.isLoggable logger SystemLoggers$Logger$Level/DEBUG))
+      (when (nil? text) (set! text ""))
+      (let [^String r (if (> (.length requestStr) 80)
+                          (java-str (.substring requestStr 0 80) "<TRUNCATED>")
+                          requestStr)]
+        (let [message (java-str r " [" code " " (Code/msg code) "] (" text ")")]
+          (.log logger SystemLoggers$Logger$Level/DEBUG message)))))
+
+  (field ^:private ^int exchangeCount 0)
+
+  (method ^:synchronized startExchange ^void [this]
+    (set! exchangeCount (unchecked-inc-int exchangeCount)))
+
+  (method ^:synchronized getExchangeCount ^int [this] exchangeCount)
+
+  (method ^:synchronized endExchange ^int [this]
+    (set! exchangeCount (unchecked-dec-int exchangeCount))
+    (java-assert (>= exchangeCount 0))
+    exchangeCount)
+
+  (method getWrapper ^HttpServer [this] wrapper)
+
+  (method requestStarted ^void [this ^HttpConnection c]
+    (set! (.-reqStartedTime c) (System/currentTimeMillis))
+    (.setState c HttpConnection$State/REQUEST)
+    (.add reqConnections c))
+
+  (method markIdle ^void [this ^HttpConnection c]
+    (let [^:mutable close false]
+      (locking idleConnections
+        (if (>= (.size idleConnections) MAX_IDLE_CONNECTIONS)
+            (set! close true)
+            (do
+              (set! (.-idleStartTime c) (System/currentTimeMillis))
+              (.setState c HttpConnection$State/IDLE)
+              (.add idleConnections c))))
+      (when close (.close c) (.remove allConnections c))))
+
+  (method markNewlyAccepted ^void [this ^HttpConnection c]
+    (set! (.-idleStartTime c) (System/currentTimeMillis))
+    (.setState c HttpConnection$State/NEWLY_ACCEPTED)
+    (.add newlyAcceptedConnections c))
+
+  (method requestCompleted ^void [this ^HttpConnection c]
+    (let [s (.getState c)]
+      (java-assert (identical? s HttpConnection$State/REQUEST)
+        (java-str "State is not REQUEST (" s ")"))
+      (.remove reqConnections c)
+      (set! (.-rspStartedTime c) (System/currentTimeMillis))
+      (.add rspConnections c)
+      (.setState c HttpConnection$State/RESPONSE)))
+
+  (method responseCompleted ^void [this ^HttpConnection c]
+    (let [s (.getState c)]
+      (java-assert (identical? s HttpConnection$State/RESPONSE)
+        (java-str "State is not RESPONSE (" s ")"))
+      (.remove rspConnections c)
+      (.setState c HttpConnection$State/IDLE)))
+
+  (defclass IdleTimeoutTask
+    :extends TimerTask
+
+    (method ^:public run ^void [this]
+      (.closeConnections this idleConnections IDLE_INTERVAL)
+      (.closeConnections this newlyAcceptedConnections NEWLY_ACCEPTED_CONN_IDLE_INTERVAL))
+
+    (method ^:private closeConnections ^void [this ^{:tag (Set HttpConnection)} connections
+                                              ^long idleInterval]
+      (let [currentTime (System/currentTimeMillis)
+            ^{:tag (ArrayList HttpConnection)} toClose (ArrayList.)]
+        (.forEach connections
+                  (lambda Consumer ^void [^HttpConnection c]
+                    (when (>= (unchecked-subtract currentTime (.-idleStartTime c)) idleInterval)
+                      (.add toClose c))))
+        (for-each [^HttpConnection c toClose]
+          (when (and (>= (unchecked-subtract currentTime (.-idleStartTime c)) idleInterval)
+                     (.remove connections c))
+            (.remove allConnections c)
+            (.close c)
+            (when (.isLoggable logger SystemLoggers$Logger$Level/TRACE)
+              (.log logger SystemLoggers$Logger$Level/TRACE (java-str "Closed idle connection " c))))))))
+
+  (defclass ReqRspTimeoutTask
+    :extends TimerTask
+
+    (method ^:public run ^void [this]
+      (let [^:mutable ^{:tag (ArrayList HttpConnection)} toClose (ArrayList.)
+            currentTime (System/currentTimeMillis)]
+        (locking reqConnections
+          (when-not (== MAX_REQ_TIME -1)
+            (for-each [^HttpConnection c reqConnections]
+              (when (>= (unchecked-subtract currentTime (.-reqStartedTime c)) MAX_REQ_TIME)
+                (.add toClose c)))
+            (for-each [^HttpConnection c toClose]
+              (.log logger SystemLoggers$Logger$Level/DEBUG (java-str "closing: no request: " c))
+              (.remove reqConnections c)
+              (.remove allConnections c)
+              (.close c))))
+        (set! toClose (ArrayList.))
+        (locking rspConnections
+          (when-not (== MAX_RSP_TIME -1)
+            (for-each [^HttpConnection c rspConnections]
+              (when (>= (unchecked-subtract currentTime (.-rspStartedTime c)) MAX_RSP_TIME)
+                (.add toClose c)))
+            (for-each [^HttpConnection c toClose]
+              (.log logger SystemLoggers$Logger$Level/DEBUG (java-str "closing: no response: " c))
+              (.remove rspConnections c)
+              (.remove allConnections c)
+              (.close c)))))))
+
+  (method ^:private ^:static getTimeMillis ^long [^long secs]
+    (if (<= secs 0) -1 (let [milli (unchecked-multiply secs 1000)] (if (> milli 0) milli -1)))))

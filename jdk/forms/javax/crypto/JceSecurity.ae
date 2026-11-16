@@ -2,12 +2,40 @@
 
 (in-ns 'javax.crypto)
 
-(import '(java.security NoSuchAlgorithmException NoSuchProviderException Provider Provider$Service)
+(import '(java.io BufferedInputStream InputStream)
+        '(java.nio.file DirectoryIteratorException DirectoryStream Files Path Paths)
+        '(java.security NoSuchAlgorithmException
+                        NoSuchProviderException
+                        Provider
+                        Provider$Service
+                        Security)
         '(java.util Iterator)
-        '(sun.security.jca GetInstance GetInstance$Instance))
+        '(jdk.internal.util StaticProperty)
+        '(sun.security.jca GetInstance GetInstance$Instance)
+        '(sun.security.util Debug))
 
 (defclass ^:final JceSecurity
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "jca"))
+
+  (field ^:private ^:static ^CryptoPermissions defaultPolicy nil)
+
+  (field ^:private ^:static ^CryptoPermissions exemptPolicy nil)
+
+  (field ^:private ^:static ^:final ^boolean isRestricted)
+
   (constructor ^:private [this])
+
+  (static-initializer
+    (try
+      (let [javaHome (StaticProperty/javaHome)]
+        (if (or (nil? javaHome) (.isEmpty javaHome))
+            (set! isRestricted false)
+            (do
+              (JceSecurity/setupJurisdictionPolicies)
+              (set! isRestricted
+                    (if (.implies defaultPolicy CryptoAllPermission/INSTANCE) false true)))))
+      (catch Exception e
+        (throw (SecurityException. "Can not initialize cryptographic mechanism" e)))))
 
   (method ^:static getInstance :throws [NoSuchAlgorithmException NoSuchProviderException] ^GetInstance$Instance [^String type
                                                                                                                  ^{:tag (Class ?)} clazz
@@ -38,4 +66,79 @@
 
   (method ^:static canUseProvider ^boolean [^Provider p] true)
 
-  (method ^:static isRestricted ^boolean [] false))
+  (method ^:private ^:static setupJurisdictionPolicies :throws [Exception] ^void []
+    (let [^:mutable cryptoPolicyProperty (Security/getProperty "crypto.policy")]
+      (when (nil? cryptoPolicyProperty)
+        (set! cryptoPolicyProperty "unlimited")
+        (when (some? debug)
+          (.println debug
+                    (java-str "Security Property 'crypto.policy' not found: using '"
+                              cryptoPolicyProperty
+                              "' as fallback"))))
+      (let [cpPath (Paths/get cryptoPolicyProperty (new String/1 []))]
+        (when (or (not (== (.getNameCount cpPath) 1))
+                  (not (== (.compareTo cpPath (.getFileName cpPath)) 0)))
+          (throw (SecurityException.
+                   (java-str "Invalid policy directory name format: " cryptoPolicyProperty))))
+        (let [javaHomeProperty (StaticProperty/javaHome)
+              javaHomePolicyPath (.normalize (Paths/get
+                                               javaHomeProperty
+                                               (new String/1 ["conf" "security" "policy"])))
+              cryptoPolicyPath (.normalize (Paths/get
+                                             javaHomeProperty
+                                             (new
+                                               String/1
+                                               ["conf" "security" "policy" cryptoPolicyProperty])))]
+          (when-not (== (.compareTo (.getParent cryptoPolicyPath) javaHomePolicyPath) 0)
+            (throw (SecurityException.
+                     (java-str "Invalid cryptographic jurisdiction policy directory path: "
+                               cryptoPolicyProperty))))
+          (when (or (not (Files/isDirectory cryptoPolicyPath))
+                    (not (Files/isReadable cryptoPolicyPath)))
+            (throw (SecurityException.
+                     (java-str "Can't read cryptographic policy directory: " cryptoPolicyProperty))))
+          (try
+            (with-resources [^{:tag (DirectoryStream Path)} stream (Files/newDirectoryStream
+                                                                     cryptoPolicyPath
+                                                                     "{default,exempt}_*.policy")]
+              (for-each [^Path entry stream]
+                (try
+                  (with-resources [^InputStream is (BufferedInputStream.
+                                                     (Files/newInputStream entry))]
+                    (let [filename (.toString (.getFileName entry))
+                          tmpPerms (CryptoPermissions.)]
+                      (.load tmpPerms is)
+                      (cond
+                        (.startsWith filename "default_")
+                          (set! defaultPolicy
+                                (if (nil? defaultPolicy)
+                                    tmpPerms
+                                    (.getMinimum defaultPolicy tmpPerms)))
+                        (.startsWith filename "exempt_")
+                          (set! exemptPolicy
+                                (if (nil? exemptPolicy)
+                                    tmpPerms
+                                    (.getMinimum exemptPolicy tmpPerms)))
+                        :else
+                          (throw (SecurityException.
+                                   (java-str "Unexpected jurisdiction policy files in : "
+                                             cryptoPolicyProperty))))))
+                  (catch Exception e
+                    (throw (SecurityException.
+                             (java-str "Couldn't parse jurisdiction policy files in: "
+                                       cryptoPolicyProperty)))))))
+            (catch DirectoryIteratorException ex
+              (throw (SecurityException.
+                       (java-str "Couldn't iterate through the jurisdiction policy files: "
+                                 cryptoPolicyProperty)))))
+          (when (or (nil? defaultPolicy) (.isEmpty defaultPolicy))
+            (throw
+              (SecurityException.
+                (java-str "Missing mandatory jurisdiction policy files: " cryptoPolicyProperty))))
+          (when (and (some? exemptPolicy) (.isEmpty exemptPolicy)) (set! exemptPolicy nil))))))
+
+  (method ^:static getDefaultPolicy ^CryptoPermissions [] defaultPolicy)
+
+  (method ^:static getExemptPolicy ^CryptoPermissions [] exemptPolicy)
+
+  (method ^:static isRestricted ^boolean [] isRestricted))

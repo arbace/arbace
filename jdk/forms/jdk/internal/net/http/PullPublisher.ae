@@ -1,0 +1,107 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/PullPublisher.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.util.concurrent Flow$Publisher Flow$Subscriber Flow$Subscription)
+        '(jdk.internal.net.http.common Demand
+                                       SequentialScheduler
+                                       SequentialScheduler$CompleteRestartableTask))
+
+(defclass PullPublisher
+  :implements [(Flow$Publisher T)]
+  :type-params [T]
+
+  (field ^:private ^:final ^{:tag (CheckedIterable T)} iterable)
+
+  (field ^:private ^:final ^Throwable throwable)
+
+  (constructor [this ^{:tag (CheckedIterable T)} iterable ^Throwable throwable]
+    (when (= (nil? iterable) (nil? throwable))
+      (let [message (String/format
+                      "only one of `iterable` or `throwable` should be null, and the other non-null, but %s are null"
+                      (new Object/1 [(if (nil? throwable) "both" "none")]))]
+        (throw (IllegalArgumentException. message))))
+    (set! (.-iterable this) iterable)
+    (set! (.-throwable this) throwable))
+
+  (constructor [this ^{:tag (CheckedIterable T)} iterable]
+    (this. iterable nil))
+
+  (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super T))} subscriber]
+    (let [^:mutable failure throwable
+          ^:mutable ^{:tag (CheckedIterator T)} iterator nil]
+      (when (nil? failure)
+        (try
+          (set! iterator (.iterator iterable))
+          (catch Exception exception (set! failure exception))))
+      (let [^Subscription sub (if (some? failure)
+                                  (Subscription. subscriber nil failure)
+                                  (Subscription. subscriber iterator nil))]
+        (.onSubscribe subscriber sub)
+        (when (some? failure) (.runOrSchedule (.-pullScheduler sub))))))
+
+  (defclass ^:private Subscription
+    :implements [Flow$Subscription]
+
+    (field ^:private ^:final ^{:tag (Flow$Subscriber (? super T))} subscriber)
+
+    (field ^:private ^:final ^{:tag (CheckedIterator T)} iter)
+
+    (field ^:private ^:volatile ^boolean completed)
+
+    (field ^:private ^:volatile ^boolean cancelled)
+
+    (field ^:private ^:volatile ^Throwable error)
+
+    (field ^:final ^SequentialScheduler pullScheduler (SequentialScheduler. (PullTask.)))
+
+    (field ^:private ^:final ^Demand demand (Demand.))
+
+    (constructor [this ^{:tag (Flow$Subscriber (? super T))} subscriber
+                  ^{:tag (CheckedIterator T)} iter ^Throwable throwable]
+      (set! (.-subscriber this) subscriber)
+      (set! (.-iter this) iter)
+      (set! (.-error this) throwable))
+
+    (defclass ^:final PullTask
+      :extends SequentialScheduler$CompleteRestartableTask
+
+      (method ^:protected run ^void [this]
+        (when-not (or completed cancelled)
+          (let [t error]
+            (if (some? t)
+                (do (set! completed true) (.stop pullScheduler) (.onError subscriber t))
+                (do
+                  (while (and (.tryDecrement demand) (not cancelled))
+                    (let [^:mutable ^T next nil]
+                      (try
+                        (when-not (.hasNext iter) (break))
+                        (set! next (.next iter))
+                        (catch Throwable t1
+                          (set! completed true)
+                          (.stop pullScheduler)
+                          (.onError subscriber t1)
+                          (return)))
+                      (.onNext subscriber next)))
+                  (let [^:mutable ^boolean hasNext false]
+                    (try
+                      (set! hasNext (.hasNext iter))
+                      (catch Exception e
+                        (set! completed true)
+                        (.stop pullScheduler)
+                        (.onError subscriber e)
+                        (return)))
+                    (when (and (not hasNext) (not cancelled))
+                      (set! completed true)
+                      (.stop pullScheduler)
+                      (.onComplete subscriber)))))))))
+
+    (method ^:public request ^void [this ^long n]
+      (when-not cancelled
+        (if (<= n 0)
+            (set! error
+                  (IllegalArgumentException. (java-str "non-positive subscription request: " n)))
+            (.increase demand n))
+        (.runOrSchedule pullScheduler)))
+
+    (method ^:public cancel ^void [this] (set! cancelled true))))

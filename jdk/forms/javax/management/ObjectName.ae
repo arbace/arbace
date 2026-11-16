@@ -1,13 +1,764 @@
-;; Converted from overlay/jdk/java.base/javax/management/ObjectName.java by arbace.repr.java. Regenerate rather than edit.
+;; Converted from jdk26u src/java.management/share/classes/javax/management/ObjectName.java by arbace.repr.java. Regenerate rather than edit.
 
 (in-ns 'javax.management)
 
-(defclass ^:public ObjectName
-  (method ^:private ^:static unsupported ^UnsupportedOperationException []
-    (UnsupportedOperationException. "JMX is not in the Go build (javax.management.ObjectName)"))
+(import '(com.sun.jmx.mbeanserver Util)
+        '(java.io IOException InvalidObjectException ObjectInputStream ObjectOutputStream)
+        '(java.util Arrays Collections HashMap Hashtable Map Map$Entry))
 
-  (method ^:public ^:static getInstance :throws [MalformedObjectNameException] ^ObjectName [^String name]
-    (throw (ObjectName/unsupported)))
+(defclass ^:public ObjectName
+  :implements [(Comparable ObjectName) QueryExp]
+
+  (field ^:private ^:static ^:final ^int DOMAIN_PATTERN (unchecked-int 0x80000000))
+
+  (field ^:private ^:static ^:final ^int PROPLIST_PATTERN 0x40000000)
+
+  (field ^:private ^:static ^:final ^int PROPVAL_PATTERN 0x20000000)
+
+  (field ^:private ^:static ^:final ^int FLAG_MASK
+    (bit-or-int (bit-or-int DOMAIN_PATTERN PROPLIST_PATTERN) PROPVAL_PATTERN))
+
+  (field ^:private ^:static ^:final ^int DOMAIN_LENGTH_MASK (bit-not-int FLAG_MASK))
+
+  (defclass ^:private ^:static Property
+    (field ^int _key_index)
+
+    (field ^int _key_length)
+
+    (field ^int _value_length)
+
+    (constructor [this ^int key_index ^int key_length ^int value_length]
+      (set! _key_index key_index)
+      (set! _key_length key_length)
+      (set! _value_length value_length))
+
+    (method setKeyIndex ^void [this ^int key_index]
+      (set! _key_index key_index))
+
+    (method getKeyString ^String [this ^String name]
+      (.substring name _key_index (unchecked-add-int _key_index _key_length)))
+
+    (method getValueString ^String [this ^String name]
+      (let [in_begin (unchecked-add-int (unchecked-add-int _key_index _key_length) 1)
+            out_end (unchecked-add-int in_begin _value_length)]
+        (.substring name in_begin out_end))))
+
+  (defclass ^:private ^:static PatternProperty
+    :extends Property
+
+    (constructor [this ^int key_index ^int key_length ^int value_length]
+      (super. key_index key_length value_length)))
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 1081892073854801359)
+
+  (field ^:private ^:static ^:final ^Property/1 _Empty_property_array (new Property/1 0))
+
+  (field ^:private ^:transient ^String _canonicalName)
+
+  (field ^:private ^:transient ^Property/1 _kp_array)
+
+  (field ^:private ^:transient ^Property/1 _ca_array)
+
+  (field ^:private ^:transient ^{:tag (Map String String)} _propertyList)
+
+  (field ^:private ^:transient ^int _compressed_storage 0x0)
+
+  (method ^:private construct :throws [MalformedObjectNameException] ^void [this ^String name]
+    (when (nil? name) (throw (NullPointerException. "name cannot be null")))
+    (if (== (.length name) 0)
+        (do
+          (set! _canonicalName "*:*")
+          (set! _kp_array _Empty_property_array)
+          (set! _ca_array _Empty_property_array)
+          (.setDomainLength this 1)
+          (set! _propertyList nil)
+          (.setDomainPattern this true)
+          (.setPropertyListPattern this true)
+          (.setPropertyValuePattern this false))
+        (let [name_chars (.toCharArray name)
+              len (alength name_chars)
+              canonical_chars (new char/1 len)
+              ^:mutable ^int cname_index 0
+              ^:mutable ^int index 0
+              ^:mutable ^char c (unchecked-char 0)
+              ^:mutable ^char c1 (unchecked-char 0)]
+          (while (< index len)
+            (switch (aget name_chars index)
+              \: (do (.setDomainLength this index) (set! index (unchecked-inc-int index)) (break))
+              \=
+                (let [^:mutable i (set! index (unchecked-inc-int index))]
+                  (while (and (< i len)
+                              (not (== (aget name_chars
+                                             (let [old-1 i] (set! i (unchecked-inc-int i)) old-1))
+                                       \:)))
+                    (when (== i len)
+                      (throw (MalformedObjectNameException. "Domain part must be specified")))))
+              \newline
+                (throw (MalformedObjectNameException. "Invalid character '\\n' in domain name"))
+              (\* \?) (do (.setDomainPattern this true) (set! index (unchecked-inc-int index)))
+              (set! index (unchecked-inc-int index))))
+          (when (== index len)
+            (throw (MalformedObjectNameException. "Key properties cannot be empty")))
+          (let [_domain_length (.getDomainLength this)]
+            (System/arraycopy name_chars 0 canonical_chars 0 _domain_length)
+            (aset canonical_chars _domain_length \:)
+            (set! cname_index (unchecked-add-int _domain_length 1))
+            (let [^:mutable ^Property prop nil
+                  ^{:tag (Map String Property)} keys_map (HashMap.)
+                  ^:mutable ^String/1 keys nil
+                  ^:mutable ^String key_name nil
+                  ^:mutable ^boolean quoted_value false
+                  ^:mutable ^int property_index 0
+                  ^:mutable ^int in_index 0
+                  ^:mutable ^int key_index 0
+                  ^:mutable ^int key_length 0
+                  ^:mutable ^int value_index 0
+                  ^:mutable ^int value_length 0]
+              (set! keys (new String/1 10))
+              (set! _kp_array (new Property/1 10))
+              (.setPropertyListPattern this false)
+              (.setPropertyValuePattern this false)
+              (while (< index len)
+                (set! c (aget name_chars index))
+                (when (== c \*)
+                  (if (.isPropertyListPattern this)
+                      (throw (MalformedObjectNameException.
+                               "Cannot have several '*' characters in pattern property list"))
+                      (do
+                        (.setPropertyListPattern this true)
+                        (cond
+                          (and (< (set! index (unchecked-inc-int index)) len)
+                               (not (== (aget name_chars index) \,)))
+                            (throw
+                              (MalformedObjectNameException.
+                                "Invalid character found after '*': end of name or ',' expected"))
+                          (== index len)
+                            (do
+                              (when (== property_index 0)
+                                (set! _kp_array _Empty_property_array)
+                                (set! _ca_array _Empty_property_array)
+                                (set! _propertyList (Collections/emptyMap)))
+                              (break))
+                          :else (do (set! index (unchecked-inc-int index)) (continue))))))
+                (set! in_index index)
+                (set! key_index in_index)
+                (when (== (aget name_chars in_index) \=)
+                  (throw (MalformedObjectNameException. "Invalid key (empty)")))
+                (while (and (< in_index len)
+                            (not (== (set! c1
+                                           (aget
+                                             name_chars
+                                             (let [old-2 in_index]
+                                               (set! in_index (unchecked-inc-int in_index))
+                                               old-2)))
+                                     \=)))
+                  (switch c1
+                    (\* \? \, \: \newline)
+                      (let [^String ichar (if (== c1 \newline) "\\n" (java-str "" c1))]
+                        (throw
+                          (MalformedObjectNameException.
+                            (java-str "Invalid character '" ichar "' in key part of property"))))))
+                (when-not (== (aget name_chars (unchecked-subtract-int in_index 1)) \=)
+                  (throw (MalformedObjectNameException. "Unterminated key property part")))
+                (set! value_index in_index)
+                (set! key_length
+                      (unchecked-subtract-int (unchecked-subtract-int value_index key_index) 1))
+                (let [^:mutable value_pattern false]
+                  (if (and (< in_index len) (== (aget name_chars in_index) \"))
+                      (do
+                        (set! quoted_value true)
+                        (while (and (< (set! in_index (unchecked-inc-int in_index)) len)
+                                    (not (== (set! c1 (aget name_chars in_index)) \")))
+                          (cond
+                            (== c1 \\)
+                              (do
+                                (when (== (set! in_index (unchecked-inc-int in_index)) len)
+                                  (throw
+                                    (MalformedObjectNameException. "Unterminated quoted value")))
+                                (switch (set! c1 (aget name_chars in_index))
+                                  (\\ \" \? \* \n) nil
+                                  (throw (MalformedObjectNameException.
+                                           (java-str
+                                             "Invalid escape sequence '\\"
+                                             c1
+                                             "' in quoted value")))))
+                            (== c1 \newline)
+                              (throw (MalformedObjectNameException. "Newline in quoted value"))
+                            :else (switch c1 (\? \*) (set! value_pattern true))))
+                        (if (== in_index len)
+                            (throw (MalformedObjectNameException. "Unterminated quoted value"))
+                            (set! value_length
+                                  (unchecked-subtract-int
+                                    (set! in_index (unchecked-inc-int in_index))
+                                    value_index))))
+                      (do
+                        (set! quoted_value false)
+                        (while (and (< in_index len)
+                                    (not (== (set! c1 (aget name_chars in_index)) \,)))
+                          (switch c1
+                            (\* \?)
+                              (do
+                                (set! value_pattern true)
+                                (set! in_index (unchecked-inc-int in_index)))
+                            (\= \: \" \newline)
+                              (let [^String ichar (if (== c1 \newline) "\\n" (java-str "" c1))]
+                                (throw (MalformedObjectNameException.
+                                         (java-str
+                                           "Invalid character '"
+                                           ichar
+                                           "' in value part of property"))))
+                            (set! in_index (unchecked-inc-int in_index))))
+                        (set! value_length (unchecked-subtract-int in_index value_index))))
+                  (if (== in_index (unchecked-subtract-int len 1))
+                      (if quoted_value
+                          (throw (MalformedObjectNameException.
+                                   (java-str "Invalid ending character `"
+                                             (aget name_chars in_index)
+                                             "'")))
+                          (throw (MalformedObjectNameException. "Invalid ending comma")))
+                      (set! in_index (unchecked-inc-int in_index)))
+                  (if (not value_pattern)
+                      (set! prop (Property. key_index key_length value_length))
+                      (do
+                        (.setPropertyValuePattern this true)
+                        (set! prop (PatternProperty. key_index key_length value_length))))
+                  (set! key_name
+                        (.substring name key_index (unchecked-add-int key_index key_length)))
+                  (when (== property_index (alength keys))
+                    (let [tmp_string_array (new String/1 (unchecked-add-int property_index 10))]
+                      (System/arraycopy keys 0 tmp_string_array 0 property_index)
+                      (set! keys tmp_string_array)))
+                  (aset keys property_index key_name)
+                  (.addProperty this prop property_index keys_map key_name)
+                  (set! property_index (unchecked-inc-int property_index))
+                  (set! index in_index)))
+              (.setCanonicalName this
+                                 name_chars
+                                 canonical_chars
+                                 keys
+                                 keys_map
+                                 cname_index
+                                 property_index))))))
+
+  (method ^:private construct :throws [MalformedObjectNameException] ^void [this ^String domain
+                                                                            ^{:tag (Map String String)} props]
+    (when (nil? domain) (throw (NullPointerException. "domain cannot be null")))
+    (when (nil? props) (throw (NullPointerException. "key property list cannot be null")))
+    (when (.isEmpty props)
+      (throw (MalformedObjectNameException. "key property list cannot be empty")))
+    (when-not (.isDomain this domain)
+      (throw (MalformedObjectNameException. (java-str "Invalid domain: " domain))))
+    (let [sb (StringBuilder.)]
+      (.append (.append sb domain) \:)
+      (.setDomainLength this (.length domain))
+      (let [nb_props (.size props)]
+        (set! _kp_array (new Property/1 nb_props))
+        (let [keys (new String/1 nb_props)
+              ^{:tag (Map String Property)} keys_map (HashMap.)
+              ^:mutable ^Property prop nil
+              ^:mutable ^int key_index 0
+              ^:mutable ^int i 0]
+          (for-each [^{:tag (Map$Entry String String)} entry (.entrySet props)]
+            (when (> (.length sb) 0) (.append sb ","))
+            (let [key (cast String (.getKey entry))
+                  ^:mutable ^String value nil]
+              (try
+                (set! value (cast String (.getValue entry)))
+                (catch ClassCastException e (throw (MalformedObjectNameException. (.getMessage e)))))
+              (set! key_index (.length sb))
+              (ObjectName/checkKey key)
+              (.append sb key)
+              (aset keys i key)
+              (.append sb "=")
+              (let [value_pattern (ObjectName/checkValue value)]
+                (.append sb value)
+                (if (not value_pattern)
+                    (set! prop (Property. key_index (.length key) (.length value)))
+                    (do
+                      (.setPropertyValuePattern this true)
+                      (set! prop (PatternProperty. key_index (.length key) (.length value)))))
+                (.addProperty this prop i keys_map key)
+                (set! i (unchecked-inc-int i)))))
+          (let [len (.length sb)
+                initial_chars (new char/1 len)]
+            (.getChars sb 0 len initial_chars 0)
+            (let [canonical_chars (new char/1 len)
+                  copyLen (unchecked-add-int (.getDomainLength this) 1)]
+              (System/arraycopy initial_chars 0 canonical_chars 0 copyLen)
+              (.setCanonicalName this
+                                 initial_chars
+                                 canonical_chars
+                                 keys
+                                 keys_map
+                                 copyLen
+                                 (alength _kp_array))))))))
+
+  (method ^:private addProperty :throws [MalformedObjectNameException] ^void [this ^Property prop
+                                                                              ^int index
+                                                                              ^{:tag (Map String Property)} keys_map
+                                                                              ^String key_name]
+    (when (.containsKey keys_map key_name)
+      (throw (MalformedObjectNameException. (java-str "key `" key_name "' already defined"))))
+    (when (== index (alength _kp_array))
+      (let [tmp_prop_array (new Property/1 (unchecked-add-int index 10))]
+        (System/arraycopy _kp_array 0 tmp_prop_array 0 index)
+        (set! _kp_array tmp_prop_array)))
+    (aset _kp_array index prop)
+    (.put keys_map key_name prop))
+
+  (method ^:private setCanonicalName ^void [this ^char/1 specified_chars ^char/1 canonical_chars
+                                            ^:mutable ^String/1 keys
+                                            ^{:tag (Map String Property)} keys_map
+                                            ^:mutable ^int prop_index ^int nb_props]
+    (when-not (identical? _kp_array _Empty_property_array)
+      (let [tmp_keys (new String/1 nb_props)
+            tmp_props (new Property/1 nb_props)]
+        (System/arraycopy keys 0 tmp_keys 0 nb_props)
+        (Arrays/sort tmp_keys)
+        (set! keys tmp_keys)
+        (System/arraycopy _kp_array 0 tmp_props 0 nb_props)
+        (set! _kp_array tmp_props)
+        (set! _ca_array (new Property/1 nb_props))
+        (loop [^int i 0]
+          (when (< i nb_props)
+            (aset _ca_array i (cast Property (.get keys_map (aget keys i))))
+            (recur (unchecked-inc-int i))))
+        (let [last_index (unchecked-subtract-int nb_props 1)
+              ^:mutable ^int prop_len 0
+              ^:mutable ^Property prop nil]
+          (loop [^int i 0]
+            (when (<= i last_index)
+              (set! prop (aget _ca_array i))
+              (set! prop_len
+                    (unchecked-add-int
+                      (unchecked-add-int (.-_key_length prop) (.-_value_length prop))
+                      1))
+              (System/arraycopy specified_chars
+                                (.-_key_index prop)
+                                canonical_chars
+                                prop_index
+                                prop_len)
+              (.setKeyIndex prop prop_index)
+              (set! prop_index (unchecked-add-int prop_index prop_len))
+              (if (not (== i last_index))
+                  (do
+                    (aset canonical_chars prop_index \,)
+                    (set! prop_index (unchecked-inc-int prop_index))
+                    (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i))))))))
+    (when (.isPropertyListPattern this)
+      (when-not (identical? _kp_array _Empty_property_array)
+        (aset canonical_chars prop_index \,)
+        (set! prop_index (unchecked-inc-int prop_index)))
+      (aset canonical_chars prop_index \*)
+      (set! prop_index (unchecked-inc-int prop_index)))
+    (set! _canonicalName (.intern (String. canonical_chars 0 prop_index))))
+
+  (method ^:private ^:static parseKey :throws [MalformedObjectNameException] ^int [^:final ^char/1 s
+                                                                                   ^:final ^int startKey]
+    (let [^:mutable next startKey
+          ^:mutable endKey startKey
+          len (alength s)]
+      (while (< next len)
+        (let [k (aget s (let [old-3 next] (set! next (unchecked-inc-int next)) old-3))]
+          (switch k
+            (\* \? \, \: \newline)
+              (let [^String ichar (if (== k \newline) "\\n" (java-str "" k))]
+                (throw (MalformedObjectNameException.
+                         (java-str "Invalid character in key: `" ichar "'"))))
+            \= (set! endKey (unchecked-subtract-int next 1))
+            (if (< next len) (continue) (set! endKey next)))
+          (break)))
+      endKey))
+
+  (method ^:private ^:static parseValue :throws [MalformedObjectNameException] ^int/1 [^:final ^char/1 s
+                                                                                       ^:final ^int startValue]
+    (let [^:mutable value_pattern false
+          ^:mutable next startValue
+          ^:mutable endValue startValue
+          len (alength s)
+          q (aget s startValue)]
+      (if (== q \")
+          (do
+            (when (== (set! next (unchecked-inc-int next)) len)
+              (throw (MalformedObjectNameException. "Invalid quote")))
+            (while (< next len)
+              (let [^:mutable last (aget s next)]
+                (cond
+                  (== last \\)
+                    (do
+                      (when (== (set! next (unchecked-inc-int next)) len)
+                        (throw (MalformedObjectNameException.
+                                 "Invalid unterminated quoted character sequence")))
+                      (set! last (aget s next))
+                      (switch last
+                        (\\ \? \* \n) nil
+                        \"
+                          (when (== (unchecked-add-int next 1) len)
+                            (throw (MalformedObjectNameException. "Missing termination quote")))
+                        (throw (MalformedObjectNameException.
+                                 (java-str "Invalid quoted character sequence '\\" last "'")))))
+                  (== last \newline)
+                    (throw (MalformedObjectNameException. "Newline in quoted value"))
+                  (== last \") (do (set! next (unchecked-inc-int next)) (break))
+                  :else (switch last (\? \*) (set! value_pattern true)))
+                (set! next (unchecked-inc-int next))
+                (when (and (>= next len) (not (== last \")))
+                  (throw (MalformedObjectNameException. "Missing termination quote")))))
+            (set! endValue next)
+            (when (< next len)
+              (when-not (== (aget s (let [old-4 next] (set! next (unchecked-inc-int next)) old-4))
+                            \,)
+                (throw (MalformedObjectNameException. "Invalid quote")))))
+          (while (< next len)
+            (let [v (aget s (let [old-5 next] (set! next (unchecked-inc-int next)) old-5))]
+              (switch v
+                (\* \?)
+                  (do (set! value_pattern true) (if (< next len) (continue) (set! endValue next)))
+                (\= \: \newline)
+                  (let [^String ichar (if (== v \newline) "\\n" (java-str "" v))]
+                    (throw (MalformedObjectNameException.
+                             (java-str "Invalid character `" ichar "' in value"))))
+                \, (set! endValue (unchecked-subtract-int next 1))
+                (if (< next len) (continue) (set! endValue next)))
+              (break))))
+      (new int/1 [endValue (if value_pattern 1 0)])))
+
+  (method ^:private ^:static checkValue :throws [MalformedObjectNameException] ^boolean [^String val]
+    (when (nil? val) (throw (NullPointerException. "Invalid value (null)")))
+    (let [len (.length val)]
+      (if (== len 0)
+          false
+          (let [s (.toCharArray val)
+                result (ObjectName/parseValue s 0)
+                endValue (aget result 0)
+                value_pattern (== (aget result 1) 1)]
+            (when (< endValue len)
+              (throw (MalformedObjectNameException.
+                       (java-str "Invalid character in value: `" (aget s endValue) "'"))))
+            value_pattern))))
+
+  (method ^:private ^:static checkKey :throws [MalformedObjectNameException] ^void [^String key]
+    (when (nil? key) (throw (NullPointerException. "Invalid key (null)")))
+    (let [len (.length key)]
+      (when (== len 0) (throw (MalformedObjectNameException. "Invalid key (empty)")))
+      (let [k (.toCharArray key)
+            endKey (ObjectName/parseKey k 0)]
+        (when (< endKey len)
+          (throw (MalformedObjectNameException.
+                   (java-str "Invalid character in value: `" (aget k endKey) "'")))))))
+
+  (method ^:private isDomain ^boolean [this ^String domain]
+    (if (nil? domain)
+        true
+        (let [len (.length domain)
+              ^:mutable ^int next 0]
+          (while (< next len)
+            (let [c (.charAt domain (let [old-6 next] (set! next (unchecked-inc-int next)) old-6))]
+              (switch c (\: \newline) (return false) (\* \?) (.setDomainPattern this true))))
+          true)))
+
+  (method ^:private getDomainLength ^int [this]
+    (bit-and-int _compressed_storage DOMAIN_LENGTH_MASK))
+
+  (method ^:private setDomainLength :throws [MalformedObjectNameException] ^void [this ^int length]
+    (when-not (== (bit-and-int length FLAG_MASK) 0)
+      (throw (MalformedObjectNameException.
+               (java-str "Domain name too long. Maximum allowed domain name length is:"
+                         DOMAIN_LENGTH_MASK))))
+    (set! _compressed_storage (bit-or-int (bit-and-int _compressed_storage FLAG_MASK) length)))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream in]
+    (let [^:mutable ^String cn nil]
+      (.defaultReadObject in)
+      (set! cn (cast String (.readObject in)))
+      (try
+        (.construct this cn)
+        (catch [NullPointerException MalformedObjectNameException] e
+          (throw (InvalidObjectException. (.toString e)))))))
+
+  (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream out]
+    (.defaultWriteObject out)
+    (.writeObject out (.getSerializedNameString this)))
+
+  (method ^:public ^:static getInstance :throws [MalformedObjectNameException NullPointerException] ^ObjectName [^String name]
+    (ObjectName. name))
+
+  (method ^:public ^:static getInstance :throws [MalformedObjectNameException] ^ObjectName [^String domain
+                                                                                            ^String key
+                                                                                            ^String value]
+    (ObjectName. domain key value))
+
+  (method ^:public ^:static getInstance :throws [MalformedObjectNameException] ^ObjectName [^String domain
+                                                                                            ^{:tag (Hashtable String String)} table]
+    (ObjectName. domain table))
+
+  (method ^:public ^:static getInstance ^ObjectName [^ObjectName name]
+    (if (.equals (.getClass name) ObjectName)
+        name
+        (sun.management.Util/newObjectName (.getSerializedNameString name))))
 
   (constructor :throws [MalformedObjectNameException] ^:public [this ^String name]
-    (throw (ObjectName/unsupported))))
+    (.construct this name))
+
+  (constructor :throws [MalformedObjectNameException] ^:public [this ^String domain ^String key
+                                                                ^String value]
+    (let [^{:tag (Map String String)} table (Collections/singletonMap key value)]
+      (.construct this domain table)))
+
+  (constructor :throws [MalformedObjectNameException] ^:public [this ^String domain
+                                                                ^{:tag (Hashtable String String)} table]
+    (.construct this domain table))
+
+  (method ^:public isPattern ^boolean [this]
+    (not (== (bit-and-int _compressed_storage FLAG_MASK) 0)))
+
+  (method ^:public isDomainPattern ^boolean [this]
+    (not (== (bit-and-int _compressed_storage DOMAIN_PATTERN) 0)))
+
+  (method ^:private setDomainPattern ^void [this ^boolean value]
+    (if value
+        (set! _compressed_storage (bit-or-int _compressed_storage DOMAIN_PATTERN))
+        (set! _compressed_storage (bit-and-int _compressed_storage (bit-not-int DOMAIN_PATTERN)))))
+
+  (method ^:public isPropertyPattern ^boolean [this]
+    (not (== (bit-and-int _compressed_storage (bit-or-int PROPVAL_PATTERN PROPLIST_PATTERN)) 0)))
+
+  (method ^:public isPropertyListPattern ^boolean [this]
+    (not (== (bit-and-int _compressed_storage PROPLIST_PATTERN) 0)))
+
+  (method ^:private setPropertyListPattern ^void [this ^boolean value]
+    (if value
+        (set! _compressed_storage (bit-or-int _compressed_storage PROPLIST_PATTERN))
+        (set! _compressed_storage (bit-and-int _compressed_storage (bit-not-int PROPLIST_PATTERN)))))
+
+  (method ^:public isPropertyValuePattern ^boolean [this]
+    (not (== (bit-and-int _compressed_storage PROPVAL_PATTERN) 0)))
+
+  (method ^:private setPropertyValuePattern ^void [this ^boolean value]
+    (if value
+        (set! _compressed_storage (bit-or-int _compressed_storage PROPVAL_PATTERN))
+        (set! _compressed_storage (bit-and-int _compressed_storage (bit-not-int PROPVAL_PATTERN)))))
+
+  (method ^:public isPropertyValuePattern ^boolean [this ^String property]
+    (when (nil? property) (throw (NullPointerException. "key property can't be null")))
+    (loop [^int i 0]
+      (when (< i (alength _ca_array))
+        (let [prop (aget _ca_array i)
+              key (.getKeyString prop _canonicalName)]
+          (if (.equals key property)
+              (return (instance? PatternProperty prop))
+              (recur (unchecked-inc-int i))))))
+    (throw (IllegalArgumentException. "key property not found")))
+
+  (method ^:public getCanonicalName ^String [this] _canonicalName)
+
+  (method ^:public getDomain ^String [this]
+    (.substring _canonicalName 0 (.getDomainLength this)))
+
+  (method ^:public getKeyProperty ^String [this ^String property]
+    (cast String (.get (._getKeyPropertyList this) property)))
+
+  (method ^:private _getKeyPropertyList ^{:tag (Map String String)} [this]
+    (locking this
+      (when (nil? _propertyList)
+        (set! _propertyList (HashMap.))
+        (let [len (alength _ca_array)
+              ^:mutable ^Property prop nil]
+          (loop [^int i (unchecked-subtract-int len 1)]
+            (when (>= i 0)
+              (set! prop (aget _ca_array i))
+              (.put _propertyList
+                    (.getKeyString prop _canonicalName)
+                    (.getValueString prop _canonicalName))
+              (recur (unchecked-dec-int i)))))))
+    _propertyList)
+
+  (method ^:public getKeyPropertyList ^{:tag (Hashtable String String)} [this]
+    (Hashtable. (._getKeyPropertyList this)))
+
+  (method ^:public getKeyPropertyListString ^String [this]
+    (if (== (alength _kp_array) 0)
+        ""
+        (let [total_size (unchecked-subtract-int
+                           (unchecked-subtract-int
+                             (unchecked-subtract-int
+                               (.length _canonicalName)
+                               (.getDomainLength this))
+                             1)
+                           (if (.isPropertyListPattern this) 2 0))
+              dest_chars (new char/1 total_size)
+              value (.toCharArray _canonicalName)]
+          (.writeKeyPropertyListString this value dest_chars 0)
+          (String. dest_chars))))
+
+  (method ^:private getSerializedNameString ^String [this]
+    (let [total_size (.length _canonicalName)
+          dest_chars (new char/1 total_size)
+          value (.toCharArray _canonicalName)
+          offset (unchecked-add-int (.getDomainLength this) 1)]
+      (System/arraycopy value 0 dest_chars 0 offset)
+      (let [end (.writeKeyPropertyListString this value dest_chars offset)]
+        (when (.isPropertyListPattern this)
+          (if (== end offset)
+              (aset dest_chars end \*)
+              (do (aset dest_chars end \,) (aset dest_chars (unchecked-add-int end 1) \*))))
+        (String. dest_chars))))
+
+  (method ^:private writeKeyPropertyListString ^int [this ^char/1 canonicalChars ^char/1 data
+                                                     ^int offset]
+    (if (== (alength _kp_array) 0)
+        offset
+        (let [dest_chars data
+              value canonicalChars
+              ^:mutable index offset
+              len (alength _kp_array)
+              last (unchecked-subtract-int len 1)]
+          (loop [^int i 0]
+            (when (< i len)
+              (let [prop (aget _kp_array i)
+                    prop_len (unchecked-add-int
+                               (unchecked-add-int (.-_key_length prop) (.-_value_length prop))
+                               1)]
+                (System/arraycopy value (.-_key_index prop) dest_chars index prop_len)
+                (set! index (unchecked-add-int index prop_len))
+                (if (< i last)
+                    (do
+                      (aset dest_chars index \,)
+                      (set! index (unchecked-inc-int index))
+                      (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i))))))
+          index)))
+
+  (method ^:public getCanonicalKeyPropertyListString ^String [this]
+    (if (== (alength _ca_array) 0)
+        ""
+        (let [^:mutable len (.length _canonicalName)]
+          (when (.isPropertyListPattern this) (set! len (unchecked-subtract-int len 2)))
+          (.substring _canonicalName (unchecked-add-int (.getDomainLength this) 1) len))))
+
+  (method ^:public toString ^String [this]
+    (.getSerializedNameString this))
+
+  (method ^:public equals ^boolean [this object]
+    (cond
+      (identical? this object) true
+      (not (instance? ObjectName object)) false
+      :else
+        (let [on (cast ObjectName object)
+              on_string (.-_canonicalName on)]
+          (if (identical? _canonicalName on_string) true false))))
+
+  (method ^:public hashCode ^int [this] (.hashCode _canonicalName))
+
+  (method ^:public ^:static quote ^String [^String s]
+    (let [buf (StringBuilder. "\"")
+          len (.length s)]
+      (loop [^int i 0]
+        (when (< i len)
+          (let [^:mutable c (.charAt s i)]
+            (switch c \newline (do (set! c \n) (.append buf \\)) (\\ \" \* \?) (.append buf \\))
+            (.append buf c)
+            (recur (unchecked-inc-int i)))))
+      (.append buf \")
+      (.toString buf)))
+
+  (method ^:public ^:static unquote ^String [^String q]
+    (let [buf (StringBuilder.)
+          len (.length q)]
+      (when (or (or (< len 2) (not (== (.charAt q 0) \")))
+                (not (== (.charAt q (unchecked-subtract-int len 1)) \")))
+        (throw (IllegalArgumentException. "Argument not quoted")))
+      (let [^:mutable ^int i 1]
+        (while (< i (unchecked-subtract-int len 1))
+          (let [^:mutable c (.charAt q i)]
+            (if (== c \\)
+                (do
+                  (when (== i (unchecked-subtract-int len 2))
+                    (throw (IllegalArgumentException. "Trailing backslash")))
+                  (set! c (.charAt q (set! i (unchecked-inc-int i))))
+                  (switch c
+                    \n (set! c \newline)
+                    (\\ \" \* \?) nil
+                    (throw (IllegalArgumentException.
+                             (java-str "Bad character '" c "' after backslash")))))
+                (switch c
+                  (\* \? \" \newline)
+                    (throw (IllegalArgumentException.
+                             (java-str "Invalid unescaped character '"
+                                       c
+                                       "' in the string to unquote")))))
+            (.append buf c))
+          (set! i (unchecked-inc-int i))))
+      (.toString buf)))
+
+  (field ^:public ^:static ^:final ^ObjectName WILDCARD (sun.management.Util/newObjectName "*:*"))
+
+  (method ^:public apply ^boolean [this ^ObjectName name]
+    (when (nil? name) (throw (NullPointerException.)))
+    (cond
+      (.isPattern name) false
+      (not (.isPattern this)) (.equals _canonicalName (.-_canonicalName name))
+      :else (and (.matchDomains this name) (.matchKeys this name))))
+
+  (method ^:private ^:final matchDomains ^boolean [this ^ObjectName name]
+    (let [useOptimized (and (identical? (.getClass this) ObjectName)
+                            (identical? (.getClass name) ObjectName))]
+      (cond
+        (.isDomainPattern this)
+          (if useOptimized
+              (Util/wildmatch (.-_canonicalName name)
+                              _canonicalName
+                              0
+                              (.getDomainLength name)
+                              0
+                              (.getDomainLength this))
+              (Util/wildmatch (.getDomain name) (.getDomain this)))
+        useOptimized
+          (and (== (.getDomainLength this) (.getDomainLength name))
+               (.regionMatches _canonicalName 0 (.-_canonicalName name) 0 (.getDomainLength this)))
+        :else (.equals (.getDomain this) (.getDomain name)))))
+
+  (method ^:private ^:final matchKeys ^boolean [this ^ObjectName name]
+    (cond
+      (and (and (.isPropertyValuePattern this) (not (.isPropertyListPattern this)))
+           (not (== (alength (.-_ca_array name)) (alength _ca_array))))
+        false
+      (.isPropertyPattern this)
+        (let [^{:tag (Map String String)} nameProps (._getKeyPropertyList name)
+              props _ca_array
+              cn _canonicalName]
+          (loop [^int i (unchecked-subtract-int (alength props) 1)]
+            (when (>= i 0)
+              (let [p (aget props i)
+                    k (.getKeyString p cn)
+                    v (cast String (.get nameProps k))]
+                (when (nil? v) (return false))
+                (when (and (.isPropertyValuePattern this) (instance? PatternProperty p))
+                  (if (Util/wildmatch v (.getValueString p cn))
+                      (continue (unchecked-dec-int i))
+                      (return false)))
+                (if (.equals v (.getValueString p cn)) (recur (unchecked-dec-int i)) (return false)))))
+          true)
+      :else
+        (let [p1 (.getCanonicalKeyPropertyListString name)
+              p2 (.getCanonicalKeyPropertyListString this)]
+          (.equals p1 p2))))
+
+  (method ^:public setMBeanServer ^void [this ^MBeanServer mbs])
+
+  (method ^:public compareTo ^int [this ^ObjectName name]
+    (if (identical? name this)
+        0
+        (let [domainValue (.compareTo (.getDomain this) (.getDomain name))]
+          (if (not (== domainValue 0))
+              domainValue
+              (let [^:mutable thisTypeKey (.getKeyProperty this "type")
+                    ^:mutable anotherTypeKey (.getKeyProperty name "type")]
+                (when (nil? thisTypeKey) (set! thisTypeKey ""))
+                (when (nil? anotherTypeKey) (set! anotherTypeKey ""))
+                (let [typeKeyValue (.compareTo thisTypeKey anotherTypeKey)]
+                  (if (not (== typeKeyValue 0))
+                      typeKeyValue
+                      (.compareTo (.getCanonicalName this) (.getCanonicalName name))))))))))

@@ -1,0 +1,603 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/net/http/Http1Response.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io EOFException)
+        '(java.lang.invoke MethodHandles VarHandle)
+        '(java.net.http HttpClient$Version
+                        HttpHeaders
+                        HttpResponse
+                        HttpResponse$BodySubscriber
+                        HttpResponse$BodySubscribers)
+        '(java.nio ByteBuffer)
+        '(java.util.concurrent CompletableFuture Executor)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.function BiConsumer Consumer Function Supplier)
+        '(jdk.internal.jrt SystemLoggers$Logger$Level)
+        '(jdk.internal.net.http.common Log Logger MinimalFuture Utils))
+
+(defclass Http1Response
+  :type-params [T]
+
+  (field ^:private ^:volatile ^ResponseContent content)
+
+  (field ^:private ^:final ^HttpRequestImpl request)
+
+  (field ^:private ^Response response)
+
+  (field ^:private ^:final ^HttpConnection connection)
+
+  (field ^:private ^HttpHeaders headers)
+
+  (field ^:private ^int responseCode)
+
+  (field ^:private ^:final ^{:tag (Http1Exchange T)} exchange)
+
+  (field ^:private ^boolean return2Cache)
+
+  (field ^:private ^:final ^HeadersReader headersReader)
+
+  (field ^:private ^:final ^BodyReader bodyReader)
+
+  (field ^:private ^:final ^Http1AsyncReceiver asyncReceiver)
+
+  (field ^:private ^:volatile ^EOFException eof)
+
+  (field ^:private ^:volatile ^ResponseContent$BodyParser bodyParser)
+
+  (field ^:private ^:volatile ^boolean closeWhenFinished)
+
+  (field ^:private ^:static ^:final ^int MAX_IGNORE 1024)
+
+  (defclass ^:enum State
+    (constants INITIAL READING_HEADERS READING_BODY DONE))
+
+  (field ^:private ^:volatile ^State readProgress State/INITIAL)
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this Http1Response/.dbgString)
+                          Utils/DEBUG))
+
+  (field ^:static ^:final ^AtomicLong responseCount (AtomicLong.))
+
+  (field ^:final ^long id (.incrementAndGet responseCount))
+
+  (field ^:private ^Http1HeaderParser hd)
+
+  (constructor [this ^HttpConnection conn ^{:tag (Http1Exchange T)} exchange
+                ^Http1AsyncReceiver asyncReceiver]
+    (set! (.-readProgress this) State/INITIAL)
+    (set! (.-request this) (.request exchange))
+    (set! (.-exchange this) exchange)
+    (set! (.-connection this) conn)
+    (set! (.-asyncReceiver this) asyncReceiver)
+    (set! headersReader (HeadersReader. (method-ref Consumer [State] this Http1Response/.advance)))
+    (set! bodyReader (BodyReader. (method-ref Consumer [State] this Http1Response/.advance)))
+    (set! hd (Http1HeaderParser.))
+    (set! readProgress State/READING_HEADERS)
+    (.start headersReader hd)
+    (.subscribe asyncReceiver headersReader))
+
+  (field ^String dbgTag)
+
+  (method ^:private dbgString ^String [this]
+    (let [^:mutable dbg dbgTag]
+      (when (nil? dbg)
+        (let [cdbg (.-dbgTag connection)]
+          (if (some? cdbg)
+              (set! dbgTag (set! dbg (java-str "Http1Response(id=" id ", " cdbg ")")))
+              (set! dbg (java-str "Http1Response(id=" id ")")))))
+      dbg))
+
+  (defclass ^:private ^:static ^:final ClientRefCountTracker
+    (field ^:final ^HttpClientImpl client)
+
+    (field ^:final ^Logger debug)
+
+    (field ^:volatile ^byte state)
+
+    (constructor [this ^HttpClientImpl client ^Logger logger]
+      (set! (.-client this) client)
+      (set! (.-debug this) logger))
+
+    (method ^:public acquire ^boolean [this]
+      (if ^boolean (^[ClientRefCountTracker byte byte] VarHandle/.compareAndSet
+                     STATE
+                     this
+                     (unchecked-byte 0)
+                     (unchecked-byte 0x01))
+          (do
+            (when (.on debug)
+              (.log debug
+                    "Operation started: incrementing ref count for %s"
+                    (new Object/1 [client])))
+            (.reference client)
+            true)
+          (do
+            (when (.on debug)
+              (.log debug
+                    "Operation ref count for %s is already %s"
+                    (new Object/1
+                         [client (if (== (bit-and-int state 0x2) 0x2) "released." "incremented!")])))
+            (java-assert (== (bit-and-int state 0x01) 0) "reference count already incremented")
+            false)))
+
+    (method ^:public tryRelease ^void [this]
+      (cond
+        ^boolean (^[ClientRefCountTracker byte byte] VarHandle/.compareAndSet
+                   STATE
+                   this
+                   (unchecked-byte 0x01)
+                   (unchecked-byte 0x03))
+          (do
+            (when (.on debug)
+              (.log debug
+                    "Operation finished: decrementing ref count for %s"
+                    (new Object/1 [client])))
+            (.unreference client))
+        (== state 0)
+          (when (.on debug)
+            (.log debug "Operation not started: releasing ref count for %s" (new Object/1 [client])))
+        (== (bit-and-int state 0x02) 0x02)
+          (when (.on debug)
+            (.log debug "ref count for %s already released" (new Object/1 [client])))))
+
+    (field ^:private ^:static ^:final ^VarHandle STATE)
+
+    (static-initializer
+      (try
+        (set! STATE (.findVarHandle (MethodHandles/lookup) ClientRefCountTracker "state" Byte/TYPE))
+        (catch [NoSuchFieldException IllegalAccessException] e
+          (throw (ExceptionInInitializerError. e))))))
+
+  (field ^:private ^:volatile ^boolean firstTimeAround true)
+
+  (method ^:public readHeadersAsync ^{:tag (CompletableFuture Response)} [this ^Executor executor]
+    (when (.on debug)
+      (.log debug
+            (java-str "Reading Headers: (remaining: " (.remaining asyncReceiver) ") " readProgress)))
+    (if firstTimeAround
+        (do (when (.on debug) (.log debug "First time around")) (set! firstTimeAround false))
+        (do
+          (.unsubscribe asyncReceiver bodyReader)
+          (.reset bodyReader)
+          (set! hd (Http1HeaderParser.))
+          (set! readProgress State/READING_HEADERS)
+          (.reset headersReader)
+          (.start headersReader hd)
+          (.subscribe asyncReceiver headersReader)))
+    (let [^{:tag (CompletableFuture State)} cf (.completion headersReader)]
+      (java-assert (some? cf) "parsing not started")
+      (when (.on debug)
+        (.log debug
+              "headersReader is %s"
+              (new Object/1
+                   [(cond
+                      (nil? cf) "not yet started"
+                      (.isDone cf) "already completed"
+                      :else "not yet completed")])))
+      (let [^{:tag (Function State Response)} lambda (lambda Function ^Response [^State completed]
+                                                       (java-assert (identical?
+                                                                      completed
+                                                                      State/READING_HEADERS))
+                                                       (when (.on debug)
+                                                         (.log
+                                                           debug
+                                                           (java-str
+                                                             "Reading Headers: creating Response object; state is now "
+                                                             readProgress)))
+                                                       (.unsubscribe asyncReceiver headersReader)
+                                                       (set! responseCode (.responseCode hd))
+                                                       (set! headers (.headers hd))
+                                                       (set!
+                                                         response
+                                                         (Response.
+                                                           request
+                                                           (.getExchange exchange)
+                                                           headers
+                                                           connection
+                                                           responseCode
+                                                           HttpClient$Version/HTTP_1_1))
+                                                       (when (Log/headers)
+                                                         (let [sb (StringBuilder.
+                                                                    "RESPONSE HEADERS:\n")]
+                                                           (.append
+                                                             sb
+                                                             (.formatted
+                                                               "  %s %s %s\n"
+                                                               (.method request)
+                                                               (.uri request)
+                                                               responseCode))
+                                                           (Log/dumpHeaders sb "    " headers)
+                                                           (Log/logHeaders (.toString sb))))
+                                                       response)]
+        (if (some? executor) (.thenApplyAsync cf lambda executor) (.thenApply cf lambda)))))
+
+  (field ^:private ^boolean finished)
+
+  (method ^:synchronized completed ^void [this] (set! finished true))
+
+  (method ^:synchronized finished ^boolean [this] finished)
+
+  (method fixupContentLen ^long [this ^long clen]
+    (cond
+      (or (.equalsIgnoreCase (.method request) "HEAD")
+          (== responseCode RedirectFilter/HTTP_NOT_MODIFIED))
+        0
+      (== clen -1)
+        (cond
+          (.equalsIgnoreCase (cast String (.orElse (.firstValue headers "Transfer-encoding") ""))
+                             "chunked")
+            -1
+          (== responseCode 101) 0
+          :else -2)
+      :else clen))
+
+  (method ^:public ignoreBody ^{:tag (CompletableFuture Void)} [this ^Executor executor]
+    (let [clen (unchecked-int (.orElse (.firstValueAsLong headers "Content-Length") -1))]
+      (if (or (== clen -1) (> clen MAX_IGNORE))
+          (do (.close connection) (MinimalFuture/completedFuture nil))
+          (.readBody this
+                     (HttpResponse$BodySubscribers/discarding)
+                     (not (.isWebSocket request))
+                     executor))))
+
+  (method ^:public nullBody ^void [this ^{:tag (HttpResponse T)} resp ^Throwable t]
+    (if (some? t)
+        (.close connection t)
+        (do (set! return2Cache (not (.isWebSocket request))) (.onFinished this))))
+
+  (method ^:public readBody :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                            ^{:tag (HttpResponse$BodySubscriber U)} p
+                                                                            ^boolean return2Cache
+                                                                            ^Executor executor]
+    (when (.on debug)
+      (.log debug (java-str "readBody: return2Cache: " return2Cache))
+      (when (and (and (.isWebSocket request) return2Cache) (some? connection))
+        (.log debug
+              (java-str "websocket connection will be returned to cache: "
+                        (.getClass connection)
+                        "/"
+                        connection))))
+    (java-assert (or (not return2Cache) (not (.isWebSocket request))))
+    (set! (.-return2Cache this) return2Cache)
+    (let [^{:tag (HttpResponse$BodySubscriber U)} subscriber p
+          ^{:tag (CompletableFuture U)} cf (MinimalFuture.)
+          clen0 (.orElse (.firstValueAsLong headers "Content-Length") -1)
+          clen (.fixupContentLen this clen0)]
+      (.unsubscribe asyncReceiver headersReader)
+      (.reset headersReader)
+      (let [refCountTracker (ClientRefCountTracker. (.client connection) debug)]
+        (.reference (.client connection))
+        (.execute
+          executor
+          (lambda Runnable ^void []
+            (let [^:mutable acquired false]
+              (try
+                (set! content
+                      (ResponseContent. connection
+                                        clen
+                                        headers
+                                        subscriber
+                                        (method-ref Runnable this Http1Response/.onFinished)))
+                (if (.isCompletedExceptionally cf)
+                    (.close connection (Utils/exceptionNow cf))
+                    (do
+                      (set! acquired (.acquire refCountTracker))
+                      (java-assert (= acquired true))
+                      (set! bodyParser
+                            (.getBodyParser content
+                                            (lambda Consumer ^void [^Throwable t]
+                                              (try
+                                                (when (some? t)
+                                                  (try
+                                                    (.onError subscriber t)
+                                                    (finally (.completeExceptionally cf t))))
+                                                (finally
+                                                  (.onComplete bodyReader t)
+                                                  (when (some? t) (.close connection t)))))))
+                      (.start bodyReader bodyParser)
+                      (let [^{:tag (CompletableFuture State)} bodyReaderCF (.completion bodyReader)]
+                        (.subscribe asyncReceiver bodyReader)
+                        (java-assert (some? bodyReaderCF) "parsing not started")
+                        (let [^{:tag (CompletableFuture ?)} trailingOp (.whenComplete
+                                                                         bodyReaderCF
+                                                                         (lambda BiConsumer ^void [^State s
+                                                                                                   ^:mutable ^Throwable t]
+                                                                           (set!
+                                                                             t
+                                                                             (Utils/getCompletionCause
+                                                                               t))
+                                                                           (try
+                                                                             (when (nil? t)
+                                                                               (when (.on debug)
+                                                                                 (.log
+                                                                                   debug
+                                                                                   (java-str
+                                                                                     "Finished reading body: "
+                                                                                     s)))
+                                                                               (java-assert (identical?
+                                                                                              s
+                                                                                              State/READING_BODY)))
+                                                                             (when (some? t)
+                                                                               (.onError
+                                                                                 subscriber
+                                                                                 t)
+                                                                               (.completeExceptionally
+                                                                                 cf
+                                                                                 t))
+                                                                             (catch Throwable x
+                                                                               (.onReadError
+                                                                                 asyncReceiver
+                                                                                 x))
+                                                                             (finally
+                                                                               (.tryRelease
+                                                                                 refCountTracker)))))]
+                          (.addTrailingOperation connection trailingOp)))))
+                (catch Throwable t
+                  (when (.on debug) (.log debug (java-str "Failed reading body: " t)))
+                  (try
+                    (.onError subscriber t)
+                    (.completeExceptionally cf t)
+                    (finally
+                      (when acquired (.tryRelease refCountTracker))
+                      (.onReadError asyncReceiver t))))
+                (finally (.unreference (.client connection)))))))
+        (ResponseSubscribers/getBodyAsync executor
+                                          p
+                                          cf
+                                          (lambda Consumer ^void [^Throwable t]
+                                            (.onError subscriber t)
+                                            (.completeExceptionally cf t)
+                                            (.setRetryOnError asyncReceiver false)
+                                            (.onReadError asyncReceiver t)))
+        (.whenComplete cf
+                       (lambda BiConsumer ^void [s ^Throwable t]
+                         (when (some? t) (.tryRelease refCountTracker)))))))
+
+  (method ^:private onFinished ^void [this]
+    (.clear asyncReceiver)
+    (if closeWhenFinished
+        (do (when (.on debug) (.log debug "Closing Connection when finished")) (.close connection))
+        (when return2Cache
+          (Log/logTrace "Attempting to return connection to the pool: {0}" connection)
+          (when (.on debug)
+            (.log debug (java-str (.getConnectionFlow connection) ": return to HTTP/1.1 pool")))
+          (.closeOrReturnToCache connection ^HttpHeaders (when (nil? eof) headers)))))
+
+  (method closeWhenFinished ^void [this] (set! closeWhenFinished true))
+
+  (method responseHeaders ^HttpHeaders [this] headers)
+
+  (method responseCode ^int [this] responseCode)
+
+  (method onReadError ^void [this ^Throwable t]
+    (Log/logError t)
+    (let [^{:tag (Receiver ?)} receiver (.receiver this readProgress)]
+      (when (instance? EOFException t)
+        (.log debug SystemLoggers$Logger$Level/DEBUG "onReadError: received EOF")
+        (set! eof (cast EOFException t)))
+      (let [^{:tag (CompletableFuture ?)} cf (when (some? receiver) (.completion receiver))]
+        (.log debug
+              SystemLoggers$Logger$Level/DEBUG
+              (lambda Supplier ^String []
+                (java-str "onReadError: cf is "
+                          (cond
+                            (nil? cf) "null"
+                            (.isDone cf) "already completed"
+                            :else "not yet completed"))))
+        (if (some? cf)
+            (.completeExceptionally cf t)
+            (.log debug SystemLoggers$Logger$Level/DEBUG "onReadError" t))
+        (.log debug
+              SystemLoggers$Logger$Level/DEBUG
+              (lambda Supplier ^String [] (java-str "closing connection: cause is " t)))
+        (.close connection t))))
+
+  (method ^:private advance ^State [this ^State previous]
+    (java-assert (identical? readProgress previous))
+    (switch previous
+      READING_HEADERS
+        (do (.unsubscribe asyncReceiver headersReader) (set! readProgress State/READING_BODY))
+      READING_BODY (do (.unsubscribe asyncReceiver bodyReader) (set! readProgress State/DONE))
+      (throw (InternalError. (java-str "can't advance from " previous)))))
+
+  (method receiver ^{:tag (Receiver ?)} [this ^State state]
+    (switch state READING_HEADERS headersReader READING_BODY bodyReader nil))
+
+  (defclass ^:abstract ^:static Receiver
+    :implements [Http1AsyncReceiver$Http1AsyncDelegate]
+    :type-params [T]
+
+    (method ^:abstract start ^void [this ^T parser])
+
+    (method ^:abstract completion ^{:tag (CompletableFuture State)} [this])
+
+    (method ^:public ^:abstract tryAsyncReceive ^boolean [this ^ByteBuffer buffer])
+
+    (method ^:public ^:abstract onReadError ^void [this ^Throwable t])
+
+    (method ^:abstract handle ^void [this ^ByteBuffer buf ^T parser
+                                     ^{:tag (CompletableFuture State)} cf])
+
+    (method ^:abstract reset ^void [this])
+
+    (method ^:final accept ^boolean [this ^ByteBuffer buf ^T parser
+                                     ^{:tag (CompletableFuture State)} cf]
+      (if (or (or (nil? cf) (nil? parser)) (.isDone cf))
+          false
+          (do (.handle this buf parser cf) (not (.isDone cf)))))
+
+    (method ^:public ^:abstract onSubscribe ^void [this ^AbstractSubscription s])
+
+    (method ^:public ^:abstract subscription ^AbstractSubscription [this]))
+
+  (defclass ^:final HeadersReader
+    :extends (Receiver Http1HeaderParser)
+
+    (field ^:final ^{:tag (Consumer State)} onComplete)
+
+    (field ^:volatile ^Http1HeaderParser parser)
+
+    (field ^:volatile ^{:tag (CompletableFuture State)} cf)
+
+    (field ^:volatile ^long count)
+
+    (field ^:volatile ^AbstractSubscription subscription)
+
+    (constructor [this ^{:tag (Consumer State)} onComplete]
+      (set! (.-onComplete this) onComplete))
+
+    (method ^:public subscription ^AbstractSubscription [this] subscription)
+
+    (method ^:public onSubscribe ^void [this ^AbstractSubscription s]
+      (set! (.-subscription this) s)
+      (.request s 1))
+
+    (method reset ^void [this]
+      (set! cf nil)
+      (set! parser nil)
+      (set! count 0)
+      (set! subscription nil))
+
+    (method ^:final start ^void [this ^Http1HeaderParser hp]
+      (set! count 0)
+      (set! cf (MinimalFuture.))
+      (set! parser hp))
+
+    (method completion ^{:tag (CompletableFuture State)} [this] cf)
+
+    (method ^:public ^:final tryAsyncReceive ^boolean [this ^ByteBuffer ref]
+      (let [hasDemand (.tryDecrement (.demand subscription))]
+        (java-assert hasDemand)
+        (let [needsMore (.accept this ref parser cf)]
+          (when needsMore (.request subscription 1))
+          needsMore)))
+
+    (method ^:public ^:final onReadError ^void [this ^:mutable ^Throwable t]
+      (set! t
+            (Utils/wrapWithExtraDetail t
+                                       (method-ref
+                                         Supplier
+                                         ^String []
+                                         parser
+                                         Http1HeaderParser/.currentStateMessage)))
+      (.onReadError Http1Response/this t))
+
+    (method ^:final handle ^void [this ^ByteBuffer b ^Http1HeaderParser parser
+                                  ^{:tag (CompletableFuture State)} cf]
+      (java-assert (some? cf) "parsing not started")
+      (java-assert (some? parser) "no parser")
+      (try
+        (set! count (unchecked-add count (.remaining b)))
+        (when (.on debug)
+          (.log debug
+                (java-str "Sending " (.remaining b) "/" (.capacity b) " bytes to header parser")))
+        (when (.parse parser b)
+          (set! count (unchecked-subtract count (.remaining b)))
+          (when (.on debug) (.log debug (java-str "Parsing headers completed. bytes=" count)))
+          (.accept onComplete State/READING_HEADERS)
+          (.complete cf State/READING_HEADERS))
+        (catch Throwable t
+          (when (.on debug) (.log debug (java-str "Header parser failed to handle buffer: " t)))
+          (.completeExceptionally cf t))))
+
+    (method ^:public close ^void [this ^Throwable error]
+      (when (some? error)
+        (let [^{:tag (CompletableFuture State)} cf (.-cf this)]
+          (when (some? cf)
+            (when (.on debug)
+              (.log debug (java-str "close: completing header parser CF with " error)))
+            (.completeExceptionally cf error))))))
+
+  (defclass ^:final BodyReader
+    :extends (Receiver ResponseContent$BodyParser)
+
+    (field ^:final ^{:tag (Consumer State)} onComplete)
+
+    (field ^:volatile ^ResponseContent$BodyParser parser)
+
+    (field ^:volatile ^{:tag (CompletableFuture State)} cf)
+
+    (field ^:volatile ^AbstractSubscription subscription)
+
+    (constructor [this ^{:tag (Consumer State)} onComplete]
+      (set! (.-onComplete this) onComplete))
+
+    (method reset ^void [this]
+      (set! parser nil)
+      (set! cf nil)
+      (set! subscription nil))
+
+    (method ^:final start ^void [this ^ResponseContent$BodyParser parser]
+      (set! cf (MinimalFuture.))
+      (set! (.-parser this) parser))
+
+    (method completion ^{:tag (CompletableFuture State)} [this] cf)
+
+    (method ^:public ^:final tryAsyncReceive ^boolean [this ^ByteBuffer b]
+      (.accept this b parser cf))
+
+    (method ^:public ^:final onReadError ^void [this ^:mutable ^Throwable t]
+      (let [parser bodyParser]
+        (when (and (instance? EOFException t) (some? parser))
+          (when-instance [^ResponseContent$UnknownLengthBodyParser ulBodyParser parser]
+            (.complete ulBodyParser)
+            (return)))
+        (set! t
+              (Utils/wrapWithExtraDetail t
+                                         (method-ref
+                                           Supplier
+                                           ^String []
+                                           parser
+                                           ResponseContent$BodyParser/.currentStateMessage)))
+        (.onError parser t)
+        (.onReadError Http1Response/this t)))
+
+    (method ^:public subscription ^AbstractSubscription [this] subscription)
+
+    (method ^:public onSubscribe ^void [this ^AbstractSubscription s]
+      (set! (.-subscription this) s)
+      (try (.onSubscribe parser s) (catch Throwable t (.completeExceptionally cf t) (throw t))))
+
+    (method ^:final handle ^void [this ^ByteBuffer b ^ResponseContent$BodyParser parser
+                                  ^{:tag (CompletableFuture State)} cf]
+      (java-assert (some? cf) "parsing not started")
+      (java-assert (some? parser) "no parser")
+      (try
+        (when (.on debug)
+          (.log debug
+                (java-str "Sending " (.remaining b) "/" (.capacity b) " bytes to body parser")))
+        (.accept parser b)
+        (catch Throwable t
+          (when (.on debug) (.log debug (java-str "Body parser failed to handle buffer: " t)))
+          (when-not (.isDone cf) (.completeExceptionally cf t)))))
+
+    (method ^:final onComplete ^void [this ^Throwable closedExceptionally]
+      (when-not (.isDone cf)
+        (if (some? closedExceptionally)
+            (.completeExceptionally cf closedExceptionally)
+            (do (.accept onComplete State/READING_BODY) (.complete cf State/READING_BODY)))))
+
+    (method ^:public ^:final close ^void [this ^Throwable error]
+      (let [^{:tag (CompletableFuture State)} cf (.-cf this)]
+        (when (and (some? cf) (not (.isDone cf)))
+          (if (some? error)
+              (do
+                (when (.on debug)
+                  (.log debug (java-str "close: completing body parser CF with " error)))
+                (.completeExceptionally cf error))
+              (do
+                (when (.on debug) (.log debug "close: completing body parser CF"))
+                (.complete cf State/READING_BODY))))
+        (when (some? error)
+          (let [parser (.-parser this)]
+            (cond
+              (some? parser)
+                (do
+                  (when (.on debug) (.log debug (java-str "propagating error to parser: " error)))
+                  (.onError parser error))
+              (.on debug) (.log debug (java-str "no parser - error not propagated: " error)))))))
+
+    (method ^:public toString ^String [this]
+      (java-str (.toString super) "/parser=" parser))))

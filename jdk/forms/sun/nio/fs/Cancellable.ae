@@ -1,0 +1,52 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/fs/Cancellable.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.util.concurrent ExecutionException)
+        '(jdk.internal.misc InnocuousThread Unsafe))
+
+(defclass ^:abstract Cancellable
+  :implements [Runnable]
+
+  (field ^:private ^:static ^:final ^Unsafe unsafe (Unsafe/getUnsafe))
+
+  (field ^:private ^:final ^long pollingAddress)
+
+  (field ^:private ^:final lock (Object.))
+
+  (field ^:private ^boolean completed)
+
+  (field ^:private ^Throwable exception)
+
+  (constructor ^:protected [this]
+    (set! pollingAddress (.allocateMemory unsafe 4))
+    (.putIntVolatile unsafe nil pollingAddress 0))
+
+  (method ^:protected addressToPollForCancel ^long [this] pollingAddress)
+
+  (method ^:protected cancelValue ^int [this] Integer/MAX_VALUE)
+
+  (method ^:final cancel ^void [this]
+    (locking lock
+      (when-not completed (.putIntVolatile unsafe nil pollingAddress (.cancelValue this)))))
+
+  (method ^:private exception ^Throwable [this] (locking lock exception))
+
+  (method ^:public ^:final run ^void [this]
+    (try
+      (.implRun this)
+      (catch Throwable t (locking lock (set! exception t)))
+      (finally (locking lock (set! completed true) (.freeMemory unsafe pollingAddress)))))
+
+  (method ^:abstract implRun :throws [Throwable] ^void [this])
+
+  (method ^:static runInterruptibly :throws [ExecutionException] ^void [^Cancellable task]
+    (let [t (InnocuousThread/newThread "CancellableOp" task)]
+      (.start t)
+      (let [^:mutable cancelledByInterrupt false]
+        (while (.isAlive t)
+          (try
+            (.join t)
+            (catch InterruptedException e (set! cancelledByInterrupt true) (.cancel task))))
+        (when cancelledByInterrupt (.interrupt (Thread/currentThread)))
+        (let [exc (.exception task)] (when (some? exc) (throw (ExecutionException. exc))))))))

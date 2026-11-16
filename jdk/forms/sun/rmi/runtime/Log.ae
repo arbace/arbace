@@ -1,0 +1,226 @@
+;; Converted from overlay/jdk/java.base/sun/rmi/runtime/Log.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.runtime)
+
+(import '(java.io ByteArrayOutputStream OutputStream PrintStream)
+        '(java.rmi.server LogStream)
+        '(java.util.logging Handler Level LogRecord Logger SimpleFormatter StreamHandler))
+
+(defclass ^:public ^:abstract Log
+  (field ^:public ^:static ^:final ^Level BRIEF Level/FINE)
+
+  (field ^:public ^:static ^:final ^Level VERBOSE Level/FINER)
+
+  (field ^:private ^:static ^:final ^LogFactory logFactory)
+
+  (static-initializer
+    (let [useOld (Boolean/getBoolean "sun.rmi.log.useOld")]
+      (set! logFactory
+            (if useOld ^LogFactory (LogStreamLogFactory.) ^LogFactory (LoggerLogFactory.)))))
+
+  (method ^:public ^:abstract isLoggable ^boolean [this ^Level level])
+
+  (method ^:public ^:abstract log ^void [this ^Level level ^String message])
+
+  (method ^:public ^:abstract log ^void [this ^Level level ^String message ^Throwable thrown])
+
+  (method ^:public ^:abstract setOutputStream ^void [this ^OutputStream stream])
+
+  (method ^:public ^:abstract getPrintStream ^PrintStream [this])
+
+  (defclass ^:private ^:static ^:interface LogFactory
+    (method createLog ^Log [this ^String loggerName ^String oldLogName ^Level level]))
+
+  (method ^:public ^:static getLog ^Log [^String loggerName ^String oldLogName ^int override]
+    (let [^Level level (when-not (< override 0)
+                         (cond
+                           (== override LogStream/SILENT) Level/OFF
+                           (and (> override LogStream/SILENT) (<= override LogStream/BRIEF)) BRIEF
+                           (and (> override LogStream/BRIEF) (<= override LogStream/VERBOSE))
+                             VERBOSE
+                           :else Level/FINEST))]
+      (.createLog logFactory loggerName oldLogName level)))
+
+  (method ^:public ^:static getLog ^Log [^String loggerName ^String oldLogName ^boolean override]
+    (let [^Level level (when override VERBOSE)] (.createLog logFactory loggerName oldLogName level)))
+
+  (defclass ^:private ^:static LoggerLogFactory
+    :implements [LogFactory]
+
+    (constructor [this])
+
+    (method ^:public createLog ^Log [this ^:final ^String loggerName ^String oldLogName
+                                     ^:final ^Level level]
+      (let [logger (Logger/getLogger loggerName)] (LoggerLog. logger level))))
+
+  (defclass ^:private ^:static LoggerLog
+    :extends Log
+
+    (field ^:private ^:static ^:final ^Handler alternateConsole)
+
+    (static-initializer
+      (let [alternate (InternalStreamHandler. System/err)]
+        (.setLevel alternate Level/ALL)
+        (set! alternateConsole alternate)))
+
+    (field ^:private ^InternalStreamHandler copyHandler nil)
+
+    (field ^:private ^:final ^Logger logger)
+
+    (field ^:private ^LoggerPrintStream loggerSandwich)
+
+    (constructor ^:private [this ^:final ^Logger logger ^:final ^Level level]
+      (set! (.-logger this) logger)
+      (when (some? level)
+        (when-not (.isLoggable logger level) (.setLevel logger level))
+        (.addHandler logger alternateConsole)))
+
+    (method ^:public isLoggable ^boolean [this ^Level level]
+      (.isLoggable logger level))
+
+    (method ^:public log ^void [this ^Level level ^String message]
+      (when (.isLoggable this level)
+        (let [sourceFrame (Log/getSource)]
+          (.logp logger
+                 level
+                 (.getClassName sourceFrame)
+                 (.getMethodName sourceFrame)
+                 (java-str (.getName (Thread/currentThread)) ": " message)))))
+
+    (method ^:public log ^void [this ^Level level ^String message ^Throwable thrown]
+      (when (.isLoggable this level)
+        (let [sourceFrame (Log/getSource)]
+          (.logp logger
+                 level
+                 (.getClassName sourceFrame)
+                 (.getMethodName sourceFrame)
+                 (java-str (.getName (Thread/currentThread)) ": " message)
+                 thrown))))
+
+    (method ^:public toString ^String [this]
+      (java-str (.toString logger) ", level: " (.getLevel logger) ", name: " (.getName logger)))
+
+    (method ^:public ^:synchronized setOutputStream ^void [this ^OutputStream out]
+      (if (some? out)
+          (do
+            (when-not (.isLoggable logger LoggerLog/VERBOSE) (.setLevel logger LoggerLog/VERBOSE))
+            (set! copyHandler (InternalStreamHandler. out))
+            (.setLevel copyHandler Log/VERBOSE)
+            (.addHandler logger copyHandler))
+          (do (when (some? copyHandler) (.removeHandler logger copyHandler)) (set! copyHandler nil))))
+
+    (method ^:public ^:synchronized getPrintStream ^PrintStream [this]
+      (when (nil? loggerSandwich) (set! loggerSandwich (LoggerPrintStream. logger)))
+      loggerSandwich))
+
+  (defclass ^:private ^:static InternalStreamHandler
+    :extends StreamHandler
+
+    (constructor [this ^OutputStream out] (super. out (SimpleFormatter.)))
+
+    (method ^:public publish ^void [this ^LogRecord record]
+      (.publish super record)
+      (.flush this))
+
+    (method ^:public close ^void [this] (.flush this)))
+
+  (defclass ^:private ^:static LoggerPrintStream
+    :extends PrintStream
+
+    (field ^:private ^:final ^Logger logger)
+
+    (field ^:private ^int last -1)
+
+    (field ^:private ^:final ^ByteArrayOutputStream bufOut)
+
+    (constructor ^:private [this ^Logger logger]
+      (super. (ByteArrayOutputStream.))
+      (set! bufOut (cast ByteArrayOutputStream (.-out super)))
+      (set! (.-logger this) logger))
+
+    (method ^:public write ^void [this ^int b]
+      (if (and (== last \return) (== b \newline))
+          (set! last -1)
+          (do
+            (if (or (== b \newline) (== b \return))
+                (try
+                  (let [message (java-str (.getName (Thread/currentThread)) ": " (.toString bufOut))]
+                    (.logp logger Level/INFO "LogStream" "print" message))
+                  (finally (.reset bufOut)))
+                (.write super b))
+            (set! last b))))
+
+    (method ^:public write ^void [this ^byte/1 b ^int off ^int len]
+      (when (< len 0) (throw (ArrayIndexOutOfBoundsException. len)))
+      (loop [^int i 0]
+        (when (< i len)
+          (.write this (aget b (unchecked-add-int off i)))
+          (recur (unchecked-inc-int i)))))
+
+    (method ^:public toString ^String [this] "RMI"))
+
+  (defclass ^:private ^:static LogStreamLogFactory
+    :implements [LogFactory]
+
+    (constructor [this])
+
+    (method ^:public createLog ^Log [this ^String loggerName ^String oldLogName ^Level level]
+      (let [^:mutable ^LogStream stream nil]
+        (when (some? oldLogName) (set! stream (LogStream/log oldLogName)))
+        (LogStreamLog. stream level))))
+
+  (defclass ^:private ^:static LogStreamLog
+    :extends Log
+
+    (field ^:private ^:final ^LogStream stream)
+
+    (field ^:private ^int levelValue (.intValue Level/OFF))
+
+    (constructor ^:private [this ^LogStream stream ^Level level]
+      (when (and (some? stream) (some? level)) (set! levelValue (.intValue level)))
+      (set! (.-stream this) stream))
+
+    (method ^:public ^:synchronized isLoggable ^boolean [this ^Level level]
+      (>= (.intValue level) levelValue))
+
+    (method ^:public log ^void [this ^Level messageLevel ^String message]
+      (when (.isLoggable this messageLevel)
+        (let [sourceFrame (Log/getSource)]
+          (.println stream
+                    (java-str (LogStreamLog/unqualifiedName (.getClassName sourceFrame))
+                              "."
+                              (.getMethodName sourceFrame)
+                              ": "
+                              message)))))
+
+    (method ^:public log ^void [this ^Level level ^String message ^Throwable thrown]
+      (when (.isLoggable this level)
+        (locking stream
+          (let [sourceFrame (Log/getSource)]
+            (.println stream
+                      (java-str (LogStreamLog/unqualifiedName (.getClassName sourceFrame))
+                                "."
+                                (.getMethodName sourceFrame)
+                                ": "
+                                message))
+            (.printStackTrace thrown stream)))))
+
+    (method ^:public getPrintStream ^PrintStream [this] stream)
+
+    (method ^:public ^:synchronized setOutputStream ^void [this ^OutputStream out]
+      (if (some? out)
+          (do
+            (when (< (.intValue LogStreamLog/VERBOSE) levelValue)
+              (set! levelValue (.intValue LogStreamLog/VERBOSE)))
+            (.setOutputStream stream out))
+          (set! levelValue (.intValue Level/OFF))))
+
+    (method ^:private ^:static unqualifiedName ^String [^:mutable ^String name]
+      (let [lastDot (.lastIndexOf name \.)]
+        (when (>= lastDot 0) (set! name (.substring name (unchecked-add-int lastDot 1))))
+        (set! name (.replace name \$ \.))
+        name)))
+
+  (method ^:private ^:static getSource ^StackTraceElement []
+    (let [st (.getStackTrace (Throwable.))]
+      (if (> (alength st) 3) (aget st 3) (StackTraceElement. "sun.rmi.runtime.Log" "log" nil -1)))))
