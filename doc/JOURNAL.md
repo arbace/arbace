@@ -7736,3 +7736,40 @@ fabrication; re-splicing cpp.edn whole, which would duplicate steps.
 - **cpp-dg.dg-error-own** (subagent). This was a real regression from cpp-s14: ref-conv-for took the first conversion candidate. `556e44df7` picks the best candidate per [over.match.best] and reports ambiguity when none is best. ambig2.C passes, and the whole part gives 823 own passes (822 at the gate).
 - **oi-check.run** (subagent). The record was stale after OC219 (a). `4b2a4ff13` exports OI_SELECTED on the native path, and `0dbc015a2` re-records three lib-runtime-events rows. The step's command and ocaml-judges pass. oi-aot and oi-suite-aot were not rerun because the disk was at 87%.
 - **haskell-lib-stg, hsi-check** (subagent, in progress at this entry). `6dad48dd1` adds unlit for literate programs, `af9d14ce2` wraps Int#/Word# literal keys, `808faefbb` covers own-verdicts' empty stdout and ManyUbxSums, and `3df7fa0b0` re-records two pack rows. Further uncommitted work on typecheck.ae and divergences-own.edn is still the agent's.
+
+## 2026-11-16: OCaml's REAP records re-recorded on the native path, OC185 (a) applied (branch `rec-ocaml`, from `revisit-b1` `f0f5871e8`)
+
+The audit of 2026-11-09 (test/crops/independence.edn's :ocaml) scored OCaml's four stages 0.5 each. Every stage already ran natively, but
+the records the REAP cells read had been made on ocdump's oracle path. This entry re-records them on the native path, with no toolchain,
+all on stage 0 (`ARBACE_HOST_EXE` the `next` worktree's) under a heavy lane of its own:
+- **read/print**: `bin/repr-ocaml roundtrip --record-results all` (`REPR_OCAML_JOBS=12`, the native reader, the default). All 16 corpora
+  pass. The read rows of test/ocaml/read-results.edn are unchanged row for row (only the header now names the native reader):
+  3,143 of 3,162, the 19 by design. In print-results.edn, newlines.ml passes (OC214 (a)), and test_pcre.ml is mode :full's not-utf8 rejection
+  (`:full-not-utf8`, deferred). The emptied class `:string-bytes` is retired from divergences-print.edn.
+- **eval**: `bin/oi check --record` (`OI_JOBS=12`; 382 of 545 pass, 0 failing) and `bin/oi suite check --record` (110 of 131). On the
+  native path these write check-oi-native.edn and check-suite-oi-native.edn, beside the oracle path's records. lazy/lazy7 timed out on the
+  loaded host and passed when rerun alone (`--only-list`; note that `--only RE` already anchors its regex with `^[^\t]*(RE)`, so `^...$`
+  selects nothing).
+- **AOT**: `bin/oi check --aot --record` (`O2J_JOBS=16`; 326 of 545) and `bin/oi suite check --aot --record` (102 of 131), into
+  check-aot-native.edn and check-suite-aot-native.edn. misc/taku used 146.6 s of CPU against 140 on the loaded host. The cause is
+  translcore.ae's transl-function, which translates as ocamlc does: Translcore makes a function with a tuple parameter Tupled only under
+  native_code, so every tak call allocates its tuple. The oracle path's Lambda was ocamlopt's. Taken by day: list taku in aot-slow.edn (the
+  light level's speed). It passed when rerun alone. Porting transl_tupled_function for the AOT dump is the alternative, left open. The stale
+  aot-known.edn entry lib-systhreads/boundscheck (it passes on both paths) is removed.
+- **The principled form** (taken by day): the native path's `--record` writes the `*-native.edn` records beside the oracle twins, as TY19 (b)
+  and suite_results designed it, and the cells read those files (OC185 (a), as prepared in test/reap/cells.edn's comment). The alternative,
+  making `--record` overwrite the cells' old files, was not taken: it would lose the oracle tier's records. `bin/oi reap-switch`
+  confirms OC185's condition (native/oracle passes 382/377, 110/110, 326/326, 102/102). Its `--apply` could not edit independence.edn,
+  whose eval score was no longer 0.880, so the four sources were switched by hand with the tool's exact text, and the read/print sources
+  were renamed for the native reader.
+- **The judge's remaining cases**: `bin/oi own-verdicts --check` over the native records shows run 423 + suite 107 own at oi's level and
+  426 + 110 at AOT, with 0 differing. The 19 eval and 13 AOT cases left on recorded runs were checked one by one, and none has a verdict
+  of its own:
+  - the four backtraces: their .reference is ocamltest's per-backend processing, neither ocamlc's output nor ocamlopt's as run here;
+  - the four native-only tests at oi's level: they count ocamlopt's allocations, or ocamlc does not compile them (OC209 (a));
+  - the opam set's 11 demonstrations: no test of their package runs them (OC211 (a), the user's decision to keep them on the recorded run;
+    classing them as by design, OC211 (c), would undo that decision and drop 11 passes a level).
+  They are marked by design in independence.edn's :cases (`:eval-recorded-by-design`, `:aot-recorded-by-design`) and stay at 0.5.
+- **Scores** (`bin/crops-score`): OCaml completeness 85.3 → 85.6 (without by design 96.1 → 96.0), maturity 100, independence 51.5 →
+  **100.0** (read, eval, AOT, print 0.5 → 1; judge 0.576 → 0.998). Cells: eval 487/149/7 → 492/143/8, AOT 424/149/70 → 428/144/71, print
+  3,080/0/2 → 3,081/0/1. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`: 14 crops, 0 problems.

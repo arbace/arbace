@@ -3801,3 +3801,18 @@ path).
 `check-oi-native.edn` (the speed class), and the judgment takes a recorded slow program that finishes with its known result as no
 change, as it took one that passes (`test/ocaml/oi_check.ae`'s `near-limit?`). The four again, as the step runs them: 2 pass (lazy7
 92 s, lib-bytes-utf 89 s), darkening_work its known gc (115 s), churn slow; 0 failing, no change, exit 0.
+
+## As built: OC185 (a) applied, the cells' records native (2026-11-16, branch `rec-ocaml`, from `revisit-b1` `f0f5871e8`)
+
+The six records REAP's OCaml cells read are now the native path's, each recorded whole on stage 0 with no toolchain:
+- read-results.edn and print-results.edn: `bin/repr-ocaml roundtrip --record-results all`, on the native reader.
+- check-oi-native.edn and check-suite-oi-native.edn: `bin/oi check --record` and `suite check --record`.
+- check-aot-native.edn and check-suite-aot-native.edn: `check --aot --record` and `suite check --aot --record`.
+
+test/reap/cells.edn reads them (OC185 (a)). The oracle path's check-oi.edn, check-suite-oi.edn, check-aot.edn and check-suite-aot.edn
+stay beside them as the oracle tier's records (`--ocdump`). `bin/oi reap-switch` still compares each pair. The native path's
+`--record` keeps writing the `*-native.edn` files. misc/taku is in aot-slow.edn: the native typer translates as ocamlc does, with no
+tupled functions (Translcore's transl_tupled_function runs only under native_code), and on a loaded host that put taku just over the
+light level's CPU limit. A `--native-code` mode of the typer for o2j's dump would remove the cause; it is not done. The judge's
+remaining 19 eval and 13 AOT cases have no verdict of their own (OC209 (a), OC210 (a), OC211 (a)) and are counted by design at 0.5.
+Independence is 51.5% → 100.0% (judge 0.998); completeness is 85.6%. The journal's entry of the day has the runs.
