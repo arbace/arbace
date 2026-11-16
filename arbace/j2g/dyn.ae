@@ -413,6 +413,38 @@ boxed, through its invoke of that arity.\n"
                (when ok (return (.-F_body r))))
              nil))))
 
+(defn- dyn-convert-form
+  "The function dynConvert of j2g_dyn.go (a fn of its own: forms' constants are near the JVM's
+  limit of a static initializer, which the frozen JVM's j2g-edge compiles them into)."
+  []
+  (list 'go/func 'dynConvert
+        "dynConvert is a method's result r as the Go value of its return class (reflection's
+Invoke): Clojure's conversion to a primitive, as compiled deftype methods convert; a reference
+class's r as it is, before its descriptor is made (a string built at every call of a protocol's
+method: doc/go/EVAL-SPEED.md).\n"
+        (with-meta [(tag 'c '(* jrt/Class)) (tag 'r 'any)] {:tag 'any})
+        '(when (not (.IsPrimitive__Z c)) (return r))
+        (apply list 'switch '(.Descriptor c)
+               (concat
+                 (for [[d nme] (sort rt-casts)]
+                   (list 'case [d] (list 'return (list (m/class-sym :lang "arbace/lang/RT" (str "_" (nm/method-base nme (str "(Ljava/lang/Object;)" d)))) 'r))))
+                 ['(case ["Z" "C"] (return (dynUnbox c r)))
+                  '(case ["V"] (return nil))]))
+        'r))
+
+(defn- method-impl-native
+  "Compiler$Dyn.methodImpl: the fn of the method of key on o's class (ByKey), o an object of a
+  deftype, defrecord or reify made at run time (a Dyn: not a proxy, nor an interpreted Java
+  class's, whose members may be published again); else nil (the evaluator's CodeImplEntry,
+  doc/go/EVAL-SPEED.md, round 2)."
+  []
+  (list 'go/func (symbol (native-name "methodImpl" "(Ljava/lang/Object;Ljava/lang/String;)Larbace/lang/IFn;"))
+        (with-meta [(tag 'o 'any) (tag 'key '(* jrt/String))] {:tag 'IFn})
+        '(let [(values d ok) (assert (* Dyn) o)]
+           (when (or (not ok) (!= (.-CF (.-D d)) nil) (.-Proxy (.-D d)))
+             (return nil))
+           (aget (.-ByKey (.-D d)) (.String (jrt/NN key))))))
+
 (defn- core-forms
   "The types, variables and Object's methods of j2g_dyn.go: the first of forms's parts."
   [ifaces ks n]
@@ -459,17 +491,7 @@ interfaces made at run time).\n"
           (when (== x nil) (panic (jrt/Thrown (jrt/NPE))))
           (panic (jrt/ClassCast x c)))
         v))
-   (list 'go/func 'dynConvert
-         "dynConvert is a method's result r as the Go value of its return class (reflection's
-Invoke): Clojure's conversion to a primitive, as compiled deftype methods convert.\n"
-         (with-meta [(tag 'c '(* jrt/Class)) (tag 'r 'any)] {:tag 'any})
-         (apply list 'switch '(.Descriptor c)
-                (concat
-                  (for [[d nme] (sort rt-casts)]
-                    (list 'case [d] (list 'return (list (m/class-sym :lang "arbace/lang/RT" (str "_" (nm/method-base nme (str "(Ljava/lang/Object;)" d)))) 'r))))
-                  ['(case ["Z" "C"] (return (dynUnbox c r)))
-                   '(case ["V"] (return nil))]))
-         'r)
+   (dyn-convert-form)
    '(go/func dynAbstract ^any [^dynObject t ^string m]
       (jrt/Thrown (jrt/AbstractMethodError_New_String
                     (jrt/Str (+ "Receiver class " (.-Name (.Info (.-Cls (.DynClassOf t))))
@@ -551,7 +573,7 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                (dyn-serial-new-form)
                '(let [c (jrt/DefineDynamic info)]
                   (set! (.-Cls dc) c)
-                  (set! (.-IsInstance info) (fn ^bool [^any x] (let [(values d ok) (assert dynObject x)] (and ok (== (.DynClassOf d) dc)))))
+                  (set! (.-IsInstance info) (fn ^bool [^any x] (let [(values d ok) (assert (* Dyn) x)] (and ok (== (.-D d) dc)))))
                   (.Lock dynMu)
                   (aset dynClasses c dc)
                   (.Unlock dynMu)
@@ -629,6 +651,8 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                 c (jrt/DefineDynamic info)]
             (set! (.-IsInstance info)
                   (fn ^bool [^any x]
+                    (let [(values d ok) (assert (* Dyn) x)]
+                      (when ok (return (aget (.-Ifaces (.-D d)) c))))
                     (let [(values d ok) (assert dynObject x)]
                       (and ok (.DynImplements d c)))))
             c))
@@ -657,6 +681,7 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                                         :Go "arbace/lang.Compiler_EvalFn (fn)"))))
    (fn-field-native)
    (aot-fn-fields-native)
+   (method-impl-native)
    '(go/func dynTypeName "dynTypeName: Class.getTypeName (int, java.lang.Object, byte[])." ^string [^{:tag (* jrt/Class)} c]
       (when (.IsArray__Z c)
         (return (+ (dynTypeName (.GetComponentType__Class c)) "[]")))
@@ -700,6 +725,8 @@ arguments, boxed.\n"
             d))
    (list 'go/func (symbol (native-name "getField" "(Ljava/lang/Object;I)Ljava/lang/Object;"))
          (with-meta [(tag 'o 'any) (tag 'i 'int32)] {:tag 'any})
+         '(let [(values d ok) (assert (* Dyn) o)]
+            (when ok (return (aget (.-F d) i))))
          '(aget (arbace.core/deref (.DynFields (dynOf o))) i))
    (list 'go/func (symbol (native-name "setField" "(Ljava/lang/Object;ILjava/lang/Object;)V"))
          [(tag 'o 'any) (tag 'i 'int32) (tag 'v 'any)]
