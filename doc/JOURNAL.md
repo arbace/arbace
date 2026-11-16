@@ -9185,3 +9185,59 @@ the spinning volatile reader against the striped locks), the 24 essential tests 
 
 Keys (first 12 hex, unhosted): on b2-1115 9e3d05d2b's base W1 moved gate 141350b87f49 -> 68a27212a1a0, runtime 912878e8eaae ->
 2ecb7b044b69, javac d0842fdc3ebf -> 610533f1f22a (all three, as planned); seed d5548e72 unchanged.
+
+## 2026-11-16: W2's candidate prepared by day (branches `window-w2e` and `w2-1116`, on `w1-1116`; the consolidation plan's B4)
+
+The embedding replayed for the user's new order (every unit merged onto next with an essential gate after each, the re-seed last,
+then one `--full`): `window-w2e` = `w1-1116` + `mac/w-retire-3`'s six embedding commits (999a74178, 696ad1240, cfe7d1a32,
+99339f807, 964d5bbb0, 62eb140f8, cherry-picked with `-x`) + the lists' refresh + goi's table without a program package's
+`_test.go` files (below); `w2-1116` = `window-w2e` + embed-gaps' survey texts (U5 (a)) + this entry. No re-seed (the main
+session's, last). 696ad1240's replay is Queue 214's goi table listing (`arbace/ci`, `crt`, `libm`, `py` in gotable.edn,
+`program-path?`; mac/312-python-on-next ac8db4273's, with `arbace/oi` beside them) and j2g's copy of go/arbace/py and libm into
+the program, so the module holds the packages the table lists (the main session's request: the stack's revert cf0c61c66 had
+taken the listing out for "package arbace/py is not in std"); cfe7d1a32's replay is 312's checker half, empty on the stack.
+
+Conflicts: 99339f807 in `bin/lib/version.bash`, `test/gate/audit.ae`, `test/gate/gate-key-crops-test.bash` and
+`test/gate/steps.edn`: next added the Wasm crop (`arbace/repr/wasm`, `arbace/wasm`, `go/arbace/wai`, `bin/lib/{repr-wasm,wai}`)
+and pyctypes beside the lines W2 rewrites; resolved as W2's lists plus Wasm's paths staying out (as asm), next's here-string
+greps kept in the test, `:tools`' comment naming rust, llvm, repr/asm and asm. 964d5bbb0 in `doc/JOURNAL.md`: both entries kept
+(its 2026-11-09 entry where the pick put it). 62eb140f8: next carries pyctypes in the list and crop-rules since (queue 244), so
+the pick kept only the test's excluded list (its message rewritten to say so). Then aa08b9593: Wasm's and wai's files in the
+test's fabricated lists. A sweep of the top-level namespaces and Go packages since window-w2d's base found Wasm alone new;
+`go/arbace/oi/ext_runtime_events.ae` is a new file of an embedded package. embed-gaps' sections ("As built: the embedding's
+preparation" and "gaps", CPP-SURVEY's E.1-E.6; 0c711daa6, ad0165745, 012dc86a1) appended to the three surveys as written, after
+a note naming what was redone and which decisions changed them; its code not carried (oi table-check's 2500MiB default among it).
+
+Checks (light, on main's stage 0 d5548e72): `gate-key-crops-test.bash` PASS (372); `crops-test.bash` ok; `audited-test.bash` 19
+of 19; `make check-makefile` ok; `bin/gate --plan` (essential) 61 run, 3 skip, 1 after; `bin/j2g-unit` all passed;
+`bin/repr-scheme c2j-check` ok (23 of 23, 1.7 GB); `bin/ci c2j-check` ok (27 sources, 3,212 classes); `bin/pyi c2j-check` ok (21
+namespaces, the control refused; 3.1 GB); `bin/pyi table-check` ok (9 min). Failed, none the embedding's:
+- `bin/repr-cpp c2j-check`: `arbace.repr.llvm.expect` not loaded, `arbace/classes/interp.ae` failing to load on the old stage 0. On
+  a scratch tree without jcs127 it fails the same way at `Compiler$CF$Rt/serialPlan` (interp.ae:1634, java-night's JCS167): B2's
+  interp.ae calls runtime classes the seed lacks (jcs127's `CF$VolField` a second). `cpp-c2j` is an essential step on stage 0, so
+  it should fail on b2-1115 itself; it passes only on a stage 0 that carries B2's runtime (the re-seed).
+- `bin/oi table-check`: one goi checker error in the four configurations, `ext_runtime_events.go:81`, `(<< 1 e)` without the
+  `int` tag the checker gives it (OC219 (a), ba04a1320, on next since 11-11): OCaml's owner's fix, or W-D13 (b) (oi out of goi's
+  table) at W2; with oi listed it is a build error at W2's step 03.
+- `bin/repr-ocaml c2j-check`: a reflection warning at `arbace/repr/ocaml.ae:73` (`Files/write`), unchanged since next, no step
+  (repr/ocaml stays out, W-D5 (a)).
+Keys (first 12 hex, `bin/arbace-go --gate-key` unhosted, `arbace_runtime_key`, `arbace_javac_key`; on b2-1115 71f9d2f7b):
+b2-1115 gate 08bfa5c8cefc, runtime 44a467746160, javac 789786d620d4; w1-1116 490adc05e578, 35b496b3e214, fe3399b4d0ac (all three
+moved by W1); window-w2e and w2-1116 e0ab36503612, 2c8cfc5a6a89, b1a164b301c0 (all three moved again by the embedding: the
+runtime key by SchemeInterp.ae and RT.ae); seed d5548e72 throughout.
+Not done here: GD4's three W items (round 33: at W; they need a run), `bin/gate --loads-update`, `bin/j2g-edge verify` (the frozen
+JVM, under the big lock), the rebase onto B2's final head.
+
+## 2026-11-16: R re-picked as `w-retire-4` (on `w2-1116`; the consolidation plan's B4)
+
+R (`mac/w-retire-3` 9d7323ec8) cherry-picked onto `w2-1116`, still one commit (w2.sh's step 11 picks R_REF's tip alone, after
+`bin/seed --verify`). Conflict: `doc/C23-SURVEY.md`, both sections kept (gf-misc's night 12 C failures, then CS281 (a)). A caller
+added since 11-11 was found by the plan's grep: cpp-threads (946a9bff4, 2026-11-15) builds C++'s node programs through
+`bin/lib/cppi/ci-fresh.bash`, which sourced `bin/lib/ci/fresh.bash` unguarded and wrapped them in `c_ci_fresh`, and
+`test/cpp/selftest/tls.sh` called `c_ci_fresh` for a `CI_FRESH=0` build control. Folded into R: `cppi_ci` a plain run (kept for
+its five callers), tls.sh's build control retired (the judge's control stays), doc/W-WINDOW.md's "As built: R" extended.
+Considered: a guarded source (`[ -f ]`, as llvmi had) instead; rejected, R (a) retires every caller. Proof: `git grep` finds no
+`lenient-var` outside the docs, no `classes_stale`, and in `bin/`, `test/`, `tools/` no `c_ci_fresh` call and no
+`lib/ci/fresh.bash` source line (w2.sh step 11's own grep over `bin/` finds nothing); `bash -n` of bin/ci, arbace-go, rust-front,
+llvmi, rsi, `bin/lib/cppi/ci-fresh.bash`, `test/cpp/selftest/tls.sh`, `test/c/musl-lock-test.bash`. Keys: gate 4a8e8730d688 and
+javac ffd7b22efe0b move (annot.ae, bin/arbace-go), the runtime key does not (2c8cfc5a6a89). It lands only after the new seed.
