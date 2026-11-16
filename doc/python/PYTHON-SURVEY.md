@@ -6855,6 +6855,47 @@ GOGC=50 PYI_AOT_LIB_JOBS=4 PYI_LIB_TEST_JOBS=4 PYI_AOT_LIB_BATCH=40 \
   PROCESS_VM_READV_SUPPORTED, 5 that unwind a pyi child) and 2 free-threading skips equal to CPython's; test_cmd_line's
   test_isolatedmode passes (out of `:pyi-command-line`); test_utf8_mode and test_faulthandler unchanged.
 
+## As built: 297, a suspended generator closed at its call's return (2026-11-15, the Mac VM, queue 297)
+
+293's DECISION 2 (a), the user's (round 37). CPython's reference counting closes a generator that a call leaves
+suspended (`any(gen())`, `next(f())`) as the call drops its arguments: GeneratorExit is thrown in, and its finally
+blocks and a monitor's events run there, with its frame's locals freed too. pyi gives it that moment without any
+collection (in `go/arbace/py/finalize.go`: stampGen, freshGen, dropGen; and their call sites). The first build used
+222's collection and was replaced after review 307: its candidates still held by a global or attribute each cost a
+collection and a 20 ms wait, so the budget ran out and later deaths closed late.
+- **The proof that the value stack was its only holder.**
+  - At its making, a generator is stamped with the calling frame's address, its instruction (`Lasti`), and `callSeq`,
+    which every call (callStack, AotCallV, AotCallMethodV) increments.
+  - A generator counts as fresh if it has not run yet, was made by the instruction just before this call in the same
+    frame, no call ran in between, and it was never handed out (`f_generator` marks it `exposed`).
+  - No instruction ran between its making and this call, so nothing could have stored it. A walrus, a store or an
+    attribute is an instruction of its own, so the pattern does not match.
+- **The consumer.** The fresh generator must be the last argument of a built-in that keeps no reference to its
+  arguments once it returns (`Builtin.dropsArg`: next, any, all, min, max, sum, sorted).
+- **The close.** At the consumer's return (after C_RETURN, as in CPython's CALL), a generator that is still suspended
+  and not exposed during the run is closed by `finalizeGen`. Then:
+  - its frame's locals are cleared unless a frame object was handed out before (`escaped`);
+  - the locals with a finalizer due get 222's del moment (`finDeleted`), preceded by `scrubSlots`, because stage 0's
+    goi keeps a returned call's slots above its stack's top (c9047d52 is not in stage 0).
+- **Cost.** One increment per call, and one flag test per built-in call (plus a type test of its last argument for the
+  seven consumers). The close itself is the generator's resume with GeneratorExit, which CPython runs too.
+- **What it does not cover.** These still close at a later collection, as at the base:
+  - a generator made elsewhere, or passed through a name, then dropped;
+  - a generator a frame holds when it returns;
+  - a consumer outside the seven (list(), str.join, ...);
+  - coroutines.
+
+- **A hazard it exposed, fixed.** A throw into a generator is held in `genThrow` until the resumed frame takes it. A
+  finalizer drained at that frame's start could close another generator and clear the slot, so the first generator
+  resumed as if sent None ("generator ignored GeneratorExit": 6 of 12 runs of `.tmp/q297/t/mb.py` before the fix).
+  resume now restores the throw it found when its own is done.
+
+Measured on the VM (the probes of `.tmp/q297/t/check297.sh`, 10 runs each, compiled and on goi): review 307's g1
+(3,000 `next(gen())`: late 0), its t1 E and F, the stored cases (s1: KEEP, an attribute, `make()`, a walrus,
+f_generator: none closed), p13, pug and g13 (the five target methods). All 10 of 10, except t1 E's local
+`__del__` in a generator with a handler on goi, 6 of 10: that check is 222's del moment, with its timing on the
+loaded VM and stage 0's goi slots. `bin/pyi lib-test-all --fresh`: see the report of queue 297.
+
 ## As built: 298, _pyrepl on a terminal, and pyi's start on a pty (2026-11-15, the Mac VM, queue 298)
 
 293's DECISION 3 (a): on a terminal CPython 3.14 runs _pyrepl, pyi ran its basic REPL; and pyi's start under a pty was
