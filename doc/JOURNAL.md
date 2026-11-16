@@ -9117,3 +9117,19 @@ send java-night back to build alone. **Decided (the user, 2026-11-16): (b).** `c
 it compile). jdk/ converted again without it (6df319ee1: 276 paths, F26's forms deleted), every step of the conversion and
 both verifies passing; the remaining errors are fixed in build rounds (`bin/arbace-go --gate-build`, heavy commands in their
 own lane, `ARBACE_HEAVY_LOCK=.tmp/big-b.lock`), a slice reverted (`.tmp/javanight/revert-slice.sh`) only if it resists.
+
+## 2026-11-16: B2's build rounds and essential gate (branch `b2-1115`)
+
+Without F26 (6df319ee1) package jrt had 28 compile errors (`go build -gcflags=-e`); two rounds of `bin/arbace-go
+--gate-build` in lane B (`ARBACE_HEAVY_LOCK=.tmp/big-b.lock`) fixed them at their roots: ef5ea225d (MethodHandles.lookup()'s
+nil of the lookup's Go type since F15; Executable_I an AnnotatedElement; ClassFormatError a nonleaf stand-in, `bin/jrt
+standins`, for F14's GenericSignatureFormatError; ReentrantLock's Ctor for ConcurrentHashMap's Segment; an unbound method
+reference to a private method of a non-leaf class through Self_ and Impl_, as the bound one), 71f9d2f7b (the lookup's nil a
+conversion, repr/go taking zero only in a var binding; jrt's Member_Cast for j2g_dyn's reflectAs). The third build passed
+(.tmp/gate-exe/08bfa5c8cefc). No helper agents were needed. The essential gate then failed diffcheck (FxVarHandles' twelve
+cases: since F15 the interpreter loads the fixture and stops at findVarHandle, the known limit, recorded in known.edn in :12's
+place, 326ebffc3), caches-table (java-night's .tmp/maven and .tmp/provides.txt.new given rows) and reap (the Java eval cell's
+interp-world-limits 2 -> 13, re-recorded, c1accdf8a). On c1accdf8a the gate fails only cpp-c2j and scheme-c2j after it:
+`arbace.repr.llvm.expect` does not load on the old stage 0 ("Syntax error compiling arbace.lang.Compiler$CF$Rt/serialPlan at
+(arbace/classes/interp.ae:1634:23)", JCS167), a step that can pass only after W2's re-seed; the main session decides the
+stack's handling. Keys at c1accdf8a: gate_key 08bfa5c8cefc (B1's ac3b447b4583), runtime 44a467746160, javac 789786d620d4.
