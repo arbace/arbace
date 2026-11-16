@@ -9638,3 +9638,20 @@ and fixtures' updates, then this branch's four commits (cherry-picked: they are 
 - **Waiting for a build**: `test/programs/outside`'s build and runs (`bin/arbace-go --build-program --check outside`) need the gate
   build at this branch's key (j2g changed: the key moved from B2's `08bfa5c8`); the runs' exit code 1 and stderr prefix are as
   jrt's uncaught exception prints them, to confirm there.
+
+## 2026-11-16: A8 over the Ghidra demo's SleighCompile, and a fix (branch `ghidra-a8`)
+
+- The demo's `bin/run-g1 analyze` (arbace-ghidra `g1f` `c8e5e58`: `plan/softwaremodeling.edn` `:outside [:platform
+  :class-path]`; main's stage 0, javac's tool `javac-f70d1a9d900eb07a9afc` with `REPR_JAVA_STALE_OK=1`, `J2G_MISSING` over the
+  23 classes): 14,474 classes analyzed, 20 failing (B2's world without A8: 1,835), none of them loaded by the JDK's runs (was
+  23); 52 min 46 s, peak 5.4 GiB; 769 classes declared outside the world (417 of the platform's modules, 341 java.desktop's;
+  352 of 25 jars). The 20 left: the world's own java.awt.Color (jrt's overlay) is no java.awt.Paint (9), java.base outside the
+  world (java.lang.foreign, SecurityManager: 7), two java.base edge classes recorded without generics (3), an overload (1).
+- The first run gave 310 failures, 286 of them `No matching clause`: a generic interface's Signature names Object as its super,
+  which outside/generics-data dropped as nil and `tnode` refused (guava's BiMap). Fixed in `b7a8ac6a6`, with test-outside's
+  checks of javax.swing.ListModel's and DefaultListModel's generics (16 of 16).
+- Two of the 23 keep a stub on the run's path, by design of A8 (a declaration has no code): log4j-core's
+  `LoggerContext.setConfiguration` makes a java.beans.PropertyChangeEvent (the only java.desktop class the JDK's runs load), and
+  SourceFileIndexer uses guava's HashBiMap, declared from guava's binary jar. The first needs a decision (GH5 (iii)'s headless
+  subset into the world, as java.awt.Point is, or GH5 (i)); the second guava's sources module, which needs jsr305 3.0.2 and
+  checker-qual 3.37.0 pinned (A3's closure of BiMap fails at its root on javax.annotation's absence): a fetch to approve.
