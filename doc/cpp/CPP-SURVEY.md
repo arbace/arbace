@@ -8147,3 +8147,130 @@ through `cppi_ci` too, so the weekly run should find it passing ("now passes", a
   5.7 GB at the default 3 threads and 6 GiB (`:mem-gib 3` declared). (a) cpp-check's command takes the essential's `CPPI_THREADS=2
   CPPI_CI_MEMLIMIT=2GiB`; (b) `:mem-gib 6`; (c) leave it (the lane flags the peak). **Recommended: (a)** (the essential's settings, proven
   below), with (b) if its peak stays above 3.
+
+## Carried from `embed-gaps` (2026-11-16, the consolidation's U5 (a)): the embedding's preparation and its E.6, the gaps
+
+The section below was written on the branch `embed-gaps` (012dc86a1, 2026-11-04, on that day's next) and reached no other
+branch; they are kept as written, with their 2026-11-04 measurements. Their code was redone since, and the commits they cite
+(0c711daa6, ad0165745, 16fac1462) are superseded: D-W2a's `window-w2b` (2026-11-09, on next c2536d182), then `window-w2c`
+(11-10), `window-w2d` (11-11) and `window-w2e` (2026-11-16, on B2's `b2-1115` with W1: the replays of 999a74178, the gaps, and
+99339f807, the embedding; doc/W-WINDOW.md, "As built: D-W2a"). What changed from the text: pyi is embedded with the crops (W-D1
+(a)), `arbace/classes/` joins `RT.toolSource` (W-D3 (a)), llvmi, rsi, repr/ocaml, the assembly and Wasm crops stay out (W-D4 (a),
+W-P5 (a), W-D5 (a)), and the embedded crops' Go forms stay out of the runtime key alone (`arbace_runtime_not`, W-P3 (a)).
+
+## As built: the embedding's preparation (CP180 (a); 2026-11-04)
+
+On `embed-crops` from main `01d3ce9f`, in the light tier (no Go build, no gate run). CP180 (a) is decided (the user, 2026-11-03): `arbace/repr/llvm`,
+`arbace/cpp` and `arbace/repr/cpp` embedded at the first re-seed after `arbace-reaps-4-crops-v1`, as C9.1 did for C (doc/C23-SURVEY.md, "As built:
+C9 (preparation)"), with a `cpp-c2j` step first. Scheme's line is SC230 (a) (doc/scheme/SCHEME-SURVEY.md, the section of this name), OCaml's OC165 (a)
+(doc/ocaml/OCAML-SURVEY.md, likewise): the three are one branch, one re-seed.
+
+### E.1 The commits
+
+1. **The checks** (`6412f205`). `bin/lib/crops/c2j-check cpp|scheme|ocaml`, run by `bin/repr-cpp c2j-check`, `bin/repr-scheme c2j-check` and
+   `bin/repr-ocaml c2j-check` (Makefile `repr-cpp-c2j-check`, `repr-scheme-c2j-check`, `repr-ocaml-c2j-check`): bin/ci c2j-check's flow (the crop's
+   namespaces required on the tools' host with `ARBACE_COMPILE`, `ARBACE_NO_AOT`, `ARBACE_PATH_FIRST`, `ARBACE_NO_IMAGE`, then `arbace.c2j.main/run` over
+   the crop's own sources; no j2g, no Go build), stricter: every `.ae` of the crop with an `(ns)` line must load and compile (the count is the crop's,
+   not a floor), and `*warn-on-reflection*` is bound over the loads, a reflection warning in a crop's own file failing the check (a reflective call
+   resolves in the Go build only inside the closed world). The essential steps `cpp-c2j` and `scheme-c2j` (chain `crops-c2j`, stage 0, about 30 and
+   20 s, 2 GB; inputs c-c2j's plus the crop's sources, from `ARBACE_LOADED_LOG`; in `:crops :shared` until the rows' merges add `:cpp` and
+   `:scheme`, which `test/gate/costs.ae` does not know yet). `bin/lib/crops/` is out of `gate_key`, `gate_rest_key` and the audit's `:gate`
+   and `:prog` as `bin/lib/ci/` is.
+2. **The fixes** (`e6f88eb3`). On the seed's stage 0 (2026-11-02) C++ compiled 12 of 12 sources (1,188 classes, 0 failed) but had 22
+   reflection warnings of its own: `arbace.cpp.lower`'s `big` (now `^BigInteger`: int-lit's and index-expr's mod, compareTo, shiftRight, testBit,
+   subtract, longValue), mangle's `isLetterOrDigit` (`(char c)`), `-main`'s `File.` of a tagged `or` (a tag on a macro form is dropped: `(str ...)`);
+   `arbace.repr.cpp.convert`'s operator name (tag at the binding) and the quote splitter's `(= c q)` (`(char q)`); `arbace.repr.cpp`'s print-cpp
+   `StringBuilder.`; `arbace.repr.cpp.rtcheck`'s `bytes-of` (`^bytes`, 8 `String.` calls). After: 12 of 12, 0 warnings, 24 s. No top-level side
+   effect, refused interop or code resource needed a change: `arbace/cpp/rt/eh.c.ae` is an `in-ns` file of C forms (not a namespace: j2g's
+   `namespaces.txt` and the check skip it), embedded as a resource, and the lowering reads the runtime from the path its command line names; the
+   checks read the checkout's test data as before. The JDK classes the crop names beyond the embedded tree's (`java.math.MathContext`,
+   `java.util.Locale`, `StringBuilder`) are in jrt's world (`jdk/sources.txt`, overlay), so `jdk/edge.edn` should hold (the night's `j2g-edge verify`).
+3. **The embedding** (the commit that adds this section): `arbace/j2g/embed.ae`'s exclusions of `arbace/repr/cpp{.ae,/}`, `arbace/repr/llvm{.ae,/}`,
+   `arbace/cpp/` (and Scheme's) lifted; `bin/lib/version.bash`'s `arbace_embedded_sources`, `test/gate/steps.edn`'s `:tools` and the audit's `:gate`
+   follow (so `gate_key` and `arbace_aot_key` hash them); `RT.toolSource` reloads `arbace/cpp/`, `arbace/scheme/` and ci's `arbace/c`, `arbace/c/` from
+   the checkout when they differ from the embedded copy (repr/'s are `arbace/repr/`'s already); `test/gate/gate-key-crops-test.bash` moves the paths
+   to the kept side (passes). `arbace.j2g.embed/sources` then holds 187 sources, 30 of them the crops' (29 namespaces: C++'s 12, Scheme's 17, and
+   `eh.c.ae`); `bin/repr-ocaml embed-check`: every embedded source keyed, none repr/ocaml's.
+
+**Effect of commit 3 (why it is separate and last).** `gate_key` and `arbace_aot_key` hash the 30 files: every C++ or Scheme change then rebuilds the
+gate's executables (about 8 minutes) and reruns the steps on `:gate`/`:prog`, as OC165 (b) warned for OCaml; and `RT.ae` is the runtime
+(`arbace_runtime_key` moves), so the first build takes the two-run path (stage 0's runtime is not the checkout's: the first program compiles
+everything). `bin/diffcheck` and `bin/clojure-tests --aot` list the runtime's namespaces through `embed/sources` and compile the 29 too (seconds more).
+Merge commits 1 and 2 at once (they change no key but `bin/arbace-go`'s bytes); commit 3 at the window, after the rows' branches.
+
+**Checks run** (all on `ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`). The three c2j checks (ok after commit 2; OCaml 6 of 6 from the start).
+Differentials against main (a worktree at `01d3ce9f`) for the hints: the lowering (`arbace.cpp.lower lower-list`) of 35 IR files (runtime units
+of libstdc++/libsupc++ and the samples, taken from `cpp-cx10`'s scratch) byte for byte, 0 refused; `bin/repr-cpp roundtrip` of `test/cpp/samples`
+(forms, print and results equal: 8 pass, 1 known). The held branches (`cpp-cx8`, `cpp-cx9`, `cpp-cx10`, `scheme-sm9`, `ocaml-o8`, merged into a probe
+tree by `git merge-tree`, not committed; no conflict under `arbace/`): C++ 14 of 14 sources (`run.ae`, `dg.ae` new), the same 22 warnings at shifted
+lines and no new one; with commit 2's patch applied (cleanly) 14 of 14, 0 warnings. `test/gate/gate-key-crops-test.bash`, `costs-test.bash`,
+`audited-test.bash` (the table validates and plans), `claude-md-test.bash`, `bin/gate-tests` (34 of 34, on the tree with commit 3, 18.5 min), `make check-makefile`.
+
+### E.2 What stage 0 does, before and after the re-seed
+
+- **Before** (the committed seed, 2026-11-02): its stage 0 embeds none of the 29; `RT.load` finds them by `ARBACE_PATH` in the checkout and evaluates
+  them, as today. Its `toolSource` is the old one (no `arbace/cpp/`, `arbace/scheme/`), which does not matter while they are not embedded.
+- **After** (the seed whose G3 is built from this tree): stage 0 embeds them compiled; an unchanged source runs compiled (the lowering's 14 s a
+  file evaluated, CP87, should drop), a changed one is reloaded from the checkout by `toolSource`. Hazard: a namespace reloaded alone redefines its
+  types (`arbace.scheme.rt`'s `definterface`/`deftype`), while the compiled namespaces that use them keep the old ones; a step that must judge the
+  tree's sources as a whole runs with `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`, as C's steps do today (their comment in
+  `steps.edn`, "until the re-seed ... then removed": with `toolSource` now covering `arbace/c`, C's steps may drop them after this re-seed, unless
+  they reload types; the user's call). The c2j checks need no change (they set those three already).
+- **Not built here**: SC61's shipped path for Scheme (`arbace.lang.SchemeInterp`, `go/arbace/scm` copied into the program, psyntax embedded) and
+  OC165 (a)'s oi listing (see their surveys); C++ needs no runtime class (the lowering is Arbace, its output C runs on ci).
+
+### E.3 Proposals (CP190 onward; none decided)
+
+- **CP190 Where the c2j steps' crop is.** (a) `:shared` now, `:cpp`/`:scheme` when the rows add those crops to `costs.ae`; (b) add the crops to
+  `costs.ae` with this branch. *Recommended: (a)*, the rows' merges own their crops.
+- **CP191 ci in `toolSource`.** (a) as built (`arbace/c`, `arbace/c/` reloaded when changed, the C9 trap closed); (b) left out, C's steps keep
+  `ARBACE_PATH_FIRST`. *Recommended: (a)*. **Decided (2026-11-04, the user): (a).**
+
+### E.4 The night's commands (the re-seed window after the tag; in order, on main with the rows and this branch merged)
+
+| # | command | proves |
+|---|---|---|
+| 1 | `bin/seed --build` | stage 0 current |
+| 2 | `bin/repr-cpp c2j-check && bin/repr-scheme c2j-check && bin/repr-ocaml c2j-check && bin/ci c2j-check && test/gate/gate-key-crops-test.bash && bin/repr-ocaml embed-check` | the merged rows' code still compiles, no reflection warning; the keys |
+| 3 | `bin/j2g-edge verify` (frozen JVM; on a difference `bin/j2g-edge update`, committed before 4) | the edge holds for the 29 |
+| 4 | `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build 2>&1 \| tee .tmp/crops-build.log` (heavy lock) | the two-run path; the log's `aot:` line reports 29 more sources than the last build's and 0 failed, and no `image: not prepared: arbace.cpp`/`arbace.scheme`/`arbace.repr.cpp`/`arbace.repr.llvm`/`arbace.repr.scheme` line |
+| 5 | `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke`; then on it, the compiled copies: `ARBACE_HOST_EXE=$PWD/target/arbace-go/amd64/arbace bin/si test`, `... bin/si check --aot`, `... bin/repr-scheme roundtrip`, `... bin/repr-cpp roundtrip LIST WORK` (the samples' list, as E.1), `... bin/cppi lower-check` over `bin/cppi list samples` | the compiled crops behave as evaluated |
+| 6 | `bin/gate` (essential; new key: the go-build, diffcheck and suite-aot-essential rerun, cpp-c2j and scheme-c2j run) | the gate |
+| 7 | C9.2's rows 8-11: clean tree, `rm -rf .tmp/jrt-go/overlay`, `bin/arbace-go --fixpoint` (`G2 = G3`), `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make` (committed), `bin/seed --verify`, `bin/seed --build`, step 2 again on the new stage 0, `bin/reap` | the seed carries the crops |
+
+### E.5 Rule slips, scratch
+
+- One read-only `find ... 2>/dev/null` (a probe of `.tmp/cppi`), against the conventions; no other.
+- Scratch (in the worktree's `.tmp/`): `c2j-{cpp,scheme,ocaml}/` (the checks' logs), `lower-diff/`, `rt-diff/`, `edge-probe/`, `loaded-*.log`,
+  `si/aot/`; the probe tree `.tmp/worktrees/crops-probe` (detached at the probe merge `1efc3c2c`) and the reference `.tmp/worktrees/embed-crops-ref`
+  (detached at `01d3ce9f`), both removable.
+
+### E.6 The gaps closed (branch `embed-gaps`, 2026-11-04): what the night adds
+
+`embed-gaps`, from `embed-crops` (`ad016574`), closes the two gaps E.2 left: SC61's shipped path for Scheme (SC240 taken as (a);
+doc/scheme/SCHEME-SURVEY.md, "As built: the embedding's gaps": `arbace.lang.SchemeInterp`, `go/arbace/scm` and `go/arbace/scminterp` copied into
+the program, psyntax's boot text generated into its resources from `scheme/psyntax/psyntax.pp.ae`, `arbace.scheme.interp`) and oi's listing
+(OC170 taken as (a); doc/ocaml/OCAML-SURVEY.md, the same section: `arbace/oi` in goi's table, copied by j2g, its Linux-only system calls behind
+build constraints). Light checks only; it is merged with `embed-crops` (after it) and the night runs E.4 with these rows:
+
+| # | where in E.4 | command | proves |
+|---|---|---|---|
+| 2a | after 2 | `bin/oi table-check && bin/si interp-check && test/gate/gate-key-crops-test.bash` | on the merged tree and stage 0: oi listed, checked in the four configurations and tabled; psyntax's resource made, loaded by the rule, si's natives built with a stand-in jrt, the 64 samples through them; the keys |
+| 4 | the build | as E.4's row 4; the log also shows `goi table` listing one package more (`report.edn`'s `:packages`), j2g copying `scm`, `scminterp` and `oi`, and the second pass compiling `arbace.scheme.interp` (no `aot: not loaded: arbace.scheme.interp` line after it) | the program carries scm, scminterp, oi and the resource |
+| 5a | after 5 | `bin/goi table --size` (oi's cost: record it in `go/arbace/gotable.edn`'s comment, committed before 7) | the size the list's rule asks for |
+| 5b | after 5 | `bin/si interp-check --exe target/arbace-go/amd64/arbace` | the executable's own resource and SchemeInterp: the samples judged as `bin/si test --si` (61 of 64, 3 known, 0 failing, as on stage 0) |
+| 5c | after 5 | `target/arbace-go/amd64/arbace -e '(require (quote arbace.scheme.resource)) (println (second (arbace.scheme.resource/load-text)))'` run from `.tmp` with `ARBACE_PATH` unset | `:embedded`: the resource is the program's |
+| 6 | the gate | as E.4's row 6 (`go/arbace/{scm,scminterp,oi}` and `scheme/psyntax/psyntax.pp.ae` now in `gate_key`) | |
+| 7 | the seed | as E.4's row 7, then 2a again on the new stage 0 | the seed carries them |
+
+If 4 fails in `go build` on `arbace/oi` or `arbace/scminterp`, drop that package's copy (`arbace/j2g/main.ae`'s list) and, for oi, its line in
+`gotable.edn`, and go on: each gap is separable (Scheme's namespace then fails to load as before the re-seed, OCaml's listing waits).
+
+Checks run on the branch (stage 0 of the committed seed): `bin/oi table-check` (ok, 17 min 50 s at load 30-40, peak 3.97 GB), `bin/si
+interp-check` (ok: 61 of 64, 3 known, 0 failing, each sample's output and status those of the light driver's `bin/si test --si`), `bin/oi test`
+and oi's printed package built with `GOOS=tamago` (amd64, arm64), `bin/repr-scheme c2j-check` (18 of 18), `bin/repr-ocaml embed-check`,
+gate-key-crops-test, audited-test, costs-test, claude-md-test, `make check-makefile`. Not run: any build of Arbace, the gate, `bin/j2g-edge verify`.
+
+Rule slips: the waits on the checks' logs used `grep -q ... 2>/dev/null` (read-only) and one `git stash list` (a listing, nothing stashed);
+`ps -eo rss,...` (no grep) to see that a stopped check's process was gone. Scratch (the worktree's `.tmp/`): `oi-list/` (logs, the oi-only
+lists), `oi/table/`, `si/interp/`, `goi-table/8a66635705fc1650` (a link to the main checkout's cached linux std forms, same key), removable.

@@ -4560,3 +4560,103 @@ off the library path, failed): `eval` saw a second instance with its own state a
 
 Keys: the changes are `arbace/scheme/` and `go/arbace/scm/` (both in `arbace_crop_paths`) and `test/scheme/`: no gate_key, runtime
 key or seed key moves (`test/gate/gate-key-crops-test.bash` passes). Only a program that links psyntax installs its libraries.
+
+## Carried from `embed-gaps` (2026-11-16, the consolidation's U5 (a)): the embedding's preparation and gaps
+
+The two sections below were written on the branch `embed-gaps` (012dc86a1, 2026-11-04, on that day's next) and reached no other
+branch; they are kept as written, with their 2026-11-04 measurements. Their code was redone since, and the commits they cite
+(0c711daa6, ad0165745, 16fac1462) are superseded: D-W2a's `window-w2b` (2026-11-09, on next c2536d182), then `window-w2c`
+(11-10), `window-w2d` (11-11) and `window-w2e` (2026-11-16, on B2's `b2-1115` with W1: the replays of 999a74178, the gaps, and
+99339f807, the embedding; doc/W-WINDOW.md, "As built: D-W2a"). What changed from the text: pyi is embedded with the crops (W-D1
+(a)), `arbace/classes/` joins `RT.toolSource` (W-D3 (a)), llvmi, rsi, repr/ocaml, the assembly and Wasm crops stay out (W-D4 (a),
+W-P5 (a), W-D5 (a)), and the embedded crops' Go forms stay out of the runtime key alone (`arbace_runtime_not`, W-P3 (a)).
+
+## As built: the embedding's preparation (SC230 (a); 2026-11-04)
+
+On `embed-crops` from main `01d3ce9f`, light tier, with C++'s (CP180 (a)) and OCaml's (OC165 (a)) on the same branch: the shared parts, the
+differentials' method and **the night's commands are doc/cpp/CPP-SURVEY.md's section of this name, E.1-E.4**. SC230 (a) is decided (the user,
+2026-11-03): Scheme embeds at the first re-seed after `arbace-reaps-4-crops-v1`, batched with C++ and OCaml (CS250 (a)'s batching).
+
+- **The check** (`6412f205`): `bin/repr-scheme c2j-check` (`bin/lib/crops/c2j-check scheme`; Makefile `repr-scheme-c2j-check`), the essential step
+  `scheme-c2j` (chain `crops-c2j`, after `cpp-c2j`; stage 0, 20 s, 1.3 GB): `arbace/repr/scheme{.ae,/}` and `arbace/scheme/` (17 sources) loaded and
+  compiled by c2j alone, no reflection warning of their own. On the seed's stage 0: 17 of 17 compiled (1,175 classes, 0 failed), 9 reflection warnings.
+- **The fixes** (`e6f88eb3`): `arbace.scheme.rt`'s hashtables (a `deftype`'s `^java.util.HashMap` field is an Object field: each `(.-m t)` tagged at its
+  use, 6 warnings), `arbace.scheme.aot`'s frame-fn (`more` `^java.util.List`), `arbace.scheme.check`'s `File.` of `^String (ref-file)`,
+  `arbace.scheme.corpora`'s rewrite-for-chez (`indexOf` at `(int i)`). After: 17 of 17, 0 warnings. The same behaviour: `bin/si test` 60 of 64, 4 known, 0
+  failing; `bin/si check --aot` on this tree and on main's (a worktree at `01d3ce9f`): the compiled IR (`.tmp/si/aot/ir`) and Go module (`mod/`) of the
+  45 programs byte for byte, the runs' outputs equal (only `.time` files differ), both ending on main's record's lack of `si/ports-pushback` (which
+  `scheme-sm9` records) and "no interpreted runs to compare with" (no `bin/si check` before: the same on main). No top-level side effect needed a
+  change (`arbace.scheme.core`'s and `expand`'s `swap!` into the primitives' atom run at load, harmless in the build's prepare); the expander reads
+  `scheme/psyntax/psyntax.pp.ae` by `ARBACE_ROOT` at `boot-default!`, a run's, not a load's (a shipped REPL needs it embedded: SC61's).
+- **The embedding** (the commit with this section): `embed.ae`'s, `arbace_embedded_sources`', `:tools`' and the audit's `:gate` exclusions of
+  `arbace/repr/scheme{.ae,/}` and `arbace/scheme/` lifted; `RT.toolSource` reloads `arbace/scheme/` when changed (repr/scheme is `arbace/repr/`'s); 17
+  namespaces in `embed/sources`. `bin/repr-scheme`'s header says so. `scheme-sm9`'s steps and its `bin/si`, `bin/repr-scheme` are unchanged by it (they
+  run on stage 0 and evaluate the checkout until the re-seed; after it the compiled copies, a changed source reloaded).
+- **Not built (SC61 (a)'s shipped path, the window's or after):** `go/arbace/scm` copied into the program by j2g (`arbace/j2g/main.ae`'s package list,
+  as ci's), the natives `arbace.lang.SchemeInterp` (a runtime class, as `CInterp`: on stage 0 its namespace is not prepared and the build's second pass
+  compiles it), `arbace.scheme`'s `scm/eval` over forms, `psyntax.pp.ae` as an embedded resource, `gate_key`'s `!go/arbace/scm` lifted, the steps moved
+  to `:prog` and the records remade on it. SC230 (a) puts it "until Scheme's heavy window": this branch embeds the namespaces only, so the row's light
+  path (si's light driver) stays its reference.
+
+**Proposals (SC240 onward; none decided)**
+
+- **SC240 SC61's shipped path at this re-seed.** (a) a second branch before the window, built and tested as C9.1's CInterp was (`bin/ci cinterp-check`'s
+  stand-in jrt: a `bin/si interp-check`), then batched into the same re-seed; (b) the next re-seed. *Recommended: (b)*: the row needs only the
+  light path, and a runtime class untested on an executable is the window's largest risk.
+- **SC241 Reloading `arbace.scheme.rt` alone** (CPP-SURVEY E.2's hazard: its `definterface`s and `deftype`s). (a) si's steps keep stage 0 evaluating the
+  whole tree (`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`) when `arbace/scheme/rt.ae` differs from the embedded copy; (b) always, as C's
+  steps; (c) nothing until a failure. *Recommended: (a)*.
+
+## As built: the embedding's gaps (SC240 (a); 2026-11-04)
+
+On `embed-gaps` from `embed-crops` (`ad016574`), light tier (no Go build of Arbace, no gate), with OCaml's gap (OC170, doc/ocaml/OCAML-SURVEY.md,
+the section of this name); **the night's commands are doc/cpp/CPP-SURVEY.md's E.4, extended there (E.6)**. SC240 is taken as (a): SC61's shipped
+path built before the window and batched into the same re-seed, checked as C9.1's CInterp was (a stand-in jrt), plus a check of the resource.
+
+- **The runtime class** (SC61 (a)): `arbace/lang/SchemeInterp.ae`, one static native `runProgram(String pp, String[] libs, String file,
+  String[] args, int flags) int` (flags 1 the driver's `--case`, 2 `--r7rs`, 4 `--core`); its Go side `go/arbace/scminterp` (`natives.ae`:
+  `SchemeInterp_RunProgram_String_String1_String_String1_I__I_native`, test/scheme/si-driver's main as a function: psyntax booted from the text,
+  the library path, `(command-line)` the file then the arguments, `scm/Report`'s status; the package's globals, `ReportData`, `OnRun`,
+  `CommandLine`, `R7RS`, set on every run, since they are the process's). j2g's rule (`arbace/j2g/decls.ae`: SchemeInterp's natives are
+  `scminterp`'s; `out.ae`'s import path) and the copy of `go/arbace/scm` and `go/arbace/scminterp` into the program (`arbace/j2g/main.ae`, beside
+  ci's); `gate_key`'s and the audit's `!go/arbace/scm` lifted. `RT.ae` is untouched by this (SchemeInterp is a class of its own), but
+  `arbace/lang` is the runtime: the first build takes the two-run path, as commit 3 of the preparation already makes it.
+- **The namespace** `arbace.scheme.interp` (`run`, `-main`: `arbace -m arbace.scheme.interp [--lib DIR]... [--r7rs] [--case|--core] FILE
+  [ARG]...`): the class's call with psyntax from the resource. It imports the class, so it loads only on an executable built with it (as
+  `arbace.c.cinterp` without CInterp); `bin/lib/crops/c2j-check` leaves it out (`needs_class`), the build's second pass compiles it.
+- **The resource** (`arbace.scheme.resource`): **made** from the checkout's `scheme/psyntax/psyntax.pp.ae`, the committed forms, its only source:
+  a header comment naming the .ae's SHA-256, then each form printed by repr/scheme on a line (bin/si light's `psyntax.pp.ss`, which `bin/repr-scheme
+  print` makes, is the same text without the header); `arbace.j2g.embed/generated` gives it to `j2g --program` (not to javac's tool, `--embed`),
+  which embeds it with the resource data at `scheme/psyntax/psyntax.pp.ss` (compressed as the other resources). **Keyed**:
+  `bin/lib/version.bash`'s new `arbace_embedded_resources` lists the .ae, `gate_key` hashes it beside the embedded sources (the generator is an
+  embedded source already), `arbace_aot_key` not (no namespace is compiled from it); the audit's `:gate` names it; gate-key-crops-test checks
+  both. **Loaded** by `text`, RT.load's rule for a tool's source (RT.toolSource) carried over: the copy the checkout would give, generated afresh
+  from the first `scheme/psyntax/psyntax.pp.ae` on `ARBACE_PATH`, when the embedded copy's header names another SHA-256 or there is no embedded
+  copy (stage 0 before the re-seed); else the embedded copy, which is all an executable without the checkout has. Only public RT calls
+  (`resourceAsStream`), so the namespace loads on stage 0 as it is. The bootstrap host's expander (`arbace.scheme.expand`) keeps reading the .ae
+  by `ARBACE_ROOT`: it is a tool of the checkout, the shipped evaluator is si.
+- **The check: `bin/si interp-check`** (Makefile `si-interp-check`): (1) the program's resource tree as `j2g --program` embeds it,
+  `arbace.j2g.embed`'s sources and generated, written into `.tmp/si/interp/res`; (2) `psyntax.pp.ss` loaded from it on the tools' host by
+  `arbace.scheme.resource` with `ARBACE_PATH` at the tree alone and `ARBACE_ROOT` an empty directory (no checkout: "embedded"), with the checkout
+  after it (the same SHA-256: "embedded"), and with a changed `psyntax.pp.ae` before it ("checkout", the text ending with the change), and the
+  loaded text equal to bin/si light's `psyntax.pp.ss` but the header; (3) `go/arbace/scm` and `go/arbace/scminterp` printed by repr/go with a
+  stand-in jrt and a main calling the native, built by TamaGo's go (bin/ci cinterp-check's method); (4) bin/si test's samples
+  (`test/scheme/expand/cases`, 64) run through it in case mode with the loaded text, judged as `bin/si test --si` judges the light driver.
+  `--exe EXE` (the window's): each sample run by `EXE -m arbace.scheme.interp --case FILE` without `ARBACE_PATH`, nothing built. **Run** (stage 0 of the
+  committed seed, `ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`, 2026-11-04): the tree 189 sources and 1 generated resource; loaded
+  "embedded", "embedded" and "checkout" as wanted, the checkout's copy ending with the changed form; the text the light driver's but the header;
+  scminterp built; the samples **61 of 64 pass (1 with Chez's form our subform), 3 known, 0 failing**, and every sample's stdout and status byte
+  for byte those of `bin/si test --si` run beside it on the light driver (which judges the same: 61, 3 known; the "60 of 64, 4 known" of the
+  preparation's section is older). About 2 minutes with Go's build cache warm.
+- **Not run** (the window's): the build (`go build` of the program with scm and scminterp, the two-run path compiling `arbace.scheme.interp`),
+  `bin/si interp-check --exe`, `bin/j2g-edge verify`, the gate. si's other entry points (`bin/si run`, `check`, `srfi`) stay on the light driver;
+  moving them to the executable (SC61's heavy list item 2) is SC245.
+
+**Proposals (SC245 onward; none decided)**
+
+- **SC245 `bin/si`'s runs on the executable.** (a) after the re-seed, `bin/si run`, `check` and `test --si` take `SI_EXE` (an executable with
+  SchemeInterp) as `bin/ci` takes `CIRUN` and run `EXE -m arbace.scheme.interp`, the light driver kept (SC62 (a)); (b) only `interp-check --exe`.
+  *Recommended: (a)*, judged against the same records; the light driver stays the reference until the tag.
+- **SC246 One boot text or two.** (a) as built: the shipped resource is the Scheme text si boots from; the bootstrap host reads the .ae from the
+  checkout; (b) embed the .ae too, so that `arbace.scheme.expand` runs without the checkout (about the same size again). *Recommended: (a)*: the
+  expander's verbs (test, expand, fixpoint) are the checkout's tools.
