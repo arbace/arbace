@@ -7717,3 +7717,34 @@ the rest was skipped at their passes from 59b3ad30b and f5ad46ea2. gate_key is a
 `--record` (by hand; `--only` refuses it), after which `test/records/accepted.edn` drains. The `--full` is the main session's, at night.
 Considered: hand-merging matrix.edn and scores.edn, which the plan forbids; re-recording the 36 rows without a run, which would be
 fabrication; re-splicing cpp.edn whole, which would duplicate steps.
+
+## 2026-11-16: queue 312, the Python line onto next (branch `312-python-on-next`, from `mac/201-python-py7-py11` `df2607ea0`)
+
+`origin/next` `9da791cd4` merged into the Python line's `df2607ea0` (201 with 289, 286, 290, 287, 293, 296 and 298) as
+`0c668c5cc`, the merge base `1ead003e3`. Fifteen files conflicted. The Go forms were never merged by hand: py and pyctypes were
+printed at the base, at ours and at theirs by the merge tree's repr/go, each `.go` merged with `git merge-file`, and read back
+(`bin/pyi runtime read`). One hunk conflicted, in world.go (ours' `isSmallInt`, theirs' `goMap`/`mapGo`), and both were kept. Ours'
+capi_getargs.go (queue 270) was moved to `ExtFloatAsDouble`, as 261 moved the rest of pyctypes. `arbace/go/repl.ae`'s `complete!`
+kept both sides. `bin/pyi`'s exec kept 296's flags with next's `bin/gate-policy mem 3GiB`. The survey kept every As built section.
+The divergences files took the union of `:finalization-collect`'s tests. `go/arbace/clib/ctypestest` was rebuilt
+(`bin/pyi-clib build ctypestest`, `6c650d9bc`).
+
+A defect of next's merge `ef8c43eec` (201 into next, 2026-11-11) was found and repaired here. That merge took next's side of goi's
+table and checker and dropped queue 214's work:
+- arbace/py, arbace/libm, arbace/ci and arbace/crt from `go/arbace/gotable.edn`'s `:packages` and its comment;
+- `arbace.go.table/program-path?` and `program-root` in `arbace/go/table.ae`;
+- the checker's restriction of a package's `:init-order` to the files a configuration keeps (`:excluded` in
+  `arbace/go/check/load.ae`, `say-here` in `arbace/go/check.ae`).
+
+As a result `bin/pyi table-check` failed on next's line: 16 failures, then 2 (`:init-order` under tamago/amd64 and tamago/arm64)
+once the list was back. By the user's decision (round 46, 312's DECISION 2: restore the table), all of it is restored as 201 had it, next's
+additions kept (runtime's frames overrides, go/build's matchTag and `// +build`). `bin/goi table` regenerates the table, and
+`bin/pyi table-check --configs tamago/amd64,tamago/arm64` passes (0 failures).
+
+pyi starts in 54-58 s on the merge, against 28 s on `df2607ea0` (`tools/pyi/python3 -I -c pass`, back to back on the VM). The
+cause is next's goi (its checker, and escape.ae over the runtime package): it differs from stage 0's embedded copy, so it is
+loaded from the checkout and evaluated. test_pyrepl's pty sessions then time out waiting for output: TestMain's 19 rows and
+TestDumbTerminal's test_dumb_terminal_exits_cleanly (one of the 20, test_inspect_keeps_globals_from_inspected_file, also timed out
+once on the base under load). By the user's decision (round 46, 312's DECISION 1: class the rows) they are classed `:speed` (deferred) in both
+divergences files, their timeout not raised, to be rechecked after W2's re-seed (B4) embeds next's goi compiled. Considered:
+merging as is with the rows failing, and holding the merge for the re-seed; the user chose the class.
