@@ -9261,3 +9261,21 @@ all on stage 0 (`ARBACE_HOST_EXE` the `next` worktree's) under a heavy lane of i
 - **Scores** (`bin/crops-score`): OCaml completeness 85.3 → 85.6 (without by design 96.1 → 96.0), maturity 100, independence 51.5 →
   **100.0** (read, eval, AOT, print 0.5 → 1; judge 0.576 → 0.998). Cells: eval 487/149/7 → 492/143/8, AOT 424/149/70 → 428/144/71, print
   3,080/0/2 → 3,081/0/1. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`: 14 crops, 0 problems.
+## 2026-11-16: LLVM's rt families and C++'s whole dg-error corpus recorded (branch `rec-llvm-cpp`, from `f0f5871e8`)
+
+Two record jobs that lift crop scores, run on stage 0 of the next worktree (`ARBACE_HOST_EXE`), each tool at 8 to 14 threads.
+
+- **LLVM (LLS31 (a), LLS33 (b), LLS36 (a)).** `bin/repr-llvm check FAMILY --record` for verify-rt-heldout, verify-rt, roundtrip-rt and
+  text-rt, under `ARBACE_HEAVY_LOCK=.tmp/big-e.lock bin/heavy-lock`, `REPR_LLVM_THREADS=14`. The records came out byte for byte as the
+  committed ones: 1,101 rows (1,096 pass), 905 (904), 252 (252), 252 (252), every negative control failing as it must. The cells already
+  carried the families (no `:role :beside` source was left, test/reap/cells.edn), so nothing moved there. What changed is the judge's
+  count in `test/crops/independence.edn`, from the runs' own.tsv: verify-rt 637 of 905 rows have an own verdict from the mutator's rule
+  (268 opt's record), verify-rt-heldout 1,069 of 1,101 (32); roundtrip-rt and text-rt 252 + 252 own. `:cases {:self 4346 :recorded 1180}`
+  (was 2136 and 880), judge 0.8933, independence 97.08 to 97.86. The read fact's `:why` names the pack rt.
+- **C++ (CX12).** `bin/repr-cpp dg --corpus dg-error --front native --record` (`REPR_CPP_THREADS=8`, no clang run): 4,564 of the 4,597
+  files (33 unsupported), own pass 823 (was 64 to 125 of the every-10th sample's 454), 3,741 fail; read 3,823 s. The `:read` fact's
+  `:cases` is `{:tokens [1934 1] :dg-own [823 1] :dg-clang [3774 0.5]}`, independence 71.30 to 72.36. The new non-passes need no new
+  class file entry: the cell's `:own-for` judges them and its class `syntax-own` goes from 15 to 128 files (deferred), so completeness
+  goes from 91.34 to 91.24 and the meant share from 96.40 to 95.88, the honest cost of judging by Arbace's own parser.
+- `bin/reap --record` and `bin/crops-score --record` (the recorded matrix also takes the OCaml AOT rows that the base's records had moved),
+  `bin/crops-score --judge --strict`: 0 problems.
