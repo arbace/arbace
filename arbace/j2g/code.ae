@@ -1186,7 +1186,9 @@
     (cond
       ;; VarHandles (§8.5): fences, the lookup, access modes on constant handles
       (vh/fence? node) (v (list (jsym "VhFence")) "V")
-      (lookup-call? node) (v (list 'conv 'any nil) r)
+      ;; the nil of the lookup's Go type (B2, 2026-11-16: since F15 MethodHandles.Lookup is a Go type of its own,
+      ;; *MethodHandles_Lookup, which an untyped (conv any nil) does not initialize)
+      (lookup-call? node) (v (list 'zero (gotype r)) r)
       (vh-op node) (vh-val node (vh-op node))
 
       ;; an array's clone
@@ -2498,9 +2500,18 @@
                                (apply list (symbol (str "." base)) rx args)))
                     :unbound (let [od (str "L" owner ";")
                                    rx (convert-ref-or-prim (first psyms) (first ps) od)]
-                               (if (object-like? od)
-                                 (apply list (jsym (object-helpers [(:name node) (:desc node)])) rx args)
-                                 (apply list (symbol (str "." base)) (if (m/pointer-desc? od) (list (jsym "NN") rx) rx) args))))))
+                               (let [mm (m/find-method owner (:name node) (:desc node))]
+                                 (cond
+                                   (object-like? od)
+                                   (apply list (jsym (object-helpers [(:name node) (:desc node)])) rx args)
+                                   ;; an unbound reference to a private method of a non-leaf class, its Impl_ as the
+                                   ;; bound case's (B2, 2026-11-16: ObjectInputStream::checkArray, ::readString,
+                                   ;; SharedSecrets' accessors; the class interface has no private method)
+                                   (and mm (m/private? mm) (m/translated? owner) (not (m/leaf? owner)))
+                                   (apply list (symbol (str ".Impl_" base))
+                                          (list (symbol (str ".Self_" (m/go-name owner))) rx) rx args)
+                                   :else
+                                   (apply list (symbol (str "." base)) (if (m/pointer-desc? od) (list (jsym "NN") rx) rx) args)))))))
         ret-d (if (= kind :new) (str "L" owner ";") mr)
         fnf (concat (list 'fn (cond-> (vec (map (fn [s d] (tag s (gotype d))) psyms ps))
                                 (not= "V" r) (vary-meta assoc :tag (gotype r))))
