@@ -9105,3 +9105,15 @@ edge run, jdk/edge.edn already written, skipped it: `:jdk-edge` stale); the fixt
 `bin/reap --record` and `bin/crops-score --record`: no change (53 of 56 cells, 0 problems). Considered: copying UnixConstants
 from the build tree (the no-copied-gensrc rule forbids it); renaming the old side of a pair (jrt's code and records name it).
 Left for the Java night (the main session's `--full`): the Java levels' re-record over the new world.
+
+## 2026-11-16: B2, F26 out of the world (the user's (b)), and the build rounds (branch `b2-1115`)
+
+B2's essential gate failed at go-build twice, and the fixes it led to (c0661d323 dyn.ae's Go `if` in a binding, 21c97370e
+`unaccess` of an inherited protected static, 9e3d05d2b TypeAnnotationSupport's call names, inheritedChannel's null check,
+Module as an AnnotatedElement) left package jrt with 206 errors under `go build -gcflags=-e`, 173 of them in F26's class-file
+API. The options put to the user: (a) fix all in B2, (b) take F26 out and fix the rest, (c) revert the failing slices, (d)
+send java-night back to build alone. **Decided (the user, 2026-11-16): (b).** `classfile-sources` leaves
+`test/jrt/jrt_sources.ae`'s closure; **F26 returns later as a slice of its own** (branch `f26-classfile`, another agent making
+it compile). jdk/ converted again without it (6df319ee1: 276 paths, F26's forms deleted), every step of the conversion and
+both verifies passing; the remaining errors are fixed in build rounds (`bin/arbace-go --gate-build`, heavy commands in their
+own lane, `ARBACE_HEAVY_LOCK=.tmp/big-b.lock`), a slice reverted (`.tmp/javanight/revert-slice.sh`) only if it resists.
