@@ -2841,11 +2841,13 @@
   "cpp-s14: the conversion function of class `id` whose result the reference type `t` binds to directly ([dcl.init.ref]
   /5.1.2 for an lvalue reference: an lvalue of a type `t` is reference-compatible with; /5.3.2 for an rvalue reference:
   an xvalue of one; [over.match.ref]), a conversion function template's specialization deduced for the reference
-  ([temp.deduct.conv]/4) among them; an exact type before a base's; or nil. (A prvalue result binds through a
-  temporary as before.)"
+  ([temp.deduct.conv]/4) among them; an exact type before a base's; or nil; :ambiguous when no candidate is better
+  than every other ([over.match.best], [over.ics.rank]/4.4.4: two results of unrelated classes derived from the
+  reference's, PR c++/57948's g++.dg/conversion/ambig2.C). (A prvalue result binds through a temporary as before.)"
   [id t & [obj-c]]
   (let [pt (:to t)
-        cands (for [fid (concat (conv-fns id) (conv-specs id t))
+        tmpl (set (conv-specs id t))
+        cands (for [fid (distinct (concat (conv-fns id) (conv-specs id t)))
                     :let [f (fnd fid) r (:ret (:ty f)) rt (:to r)]
                     :when (and (not (:explicit f)) (or (not obj-c) (:cq f) (:cq (:ty f)))
                                (= (if (= :ref (:k t)) :ref :rref) (:k r)))
@@ -2854,8 +2856,22 @@
                     :when (and (or same derived)
                                (or (:c (arr-cv pt)) (not (:c (arr-cv rt))))
                                (or (:v (arr-cv pt)) (not (:v (arr-cv rt)))))]
-                [(if same 0 1) fid])]
-    (second (first (sort-by first cands)))))
+                {:r (if same 0 1) :fid fid :cls (class-id rt) :tmpl (contains? tmpl fid) :cq (boolean (or (:cq f) (:cq (:ty f))))})
+        ;; (gate b1-1115: the first of the sorted candidates was taken, so an ambiguous binding was accepted.) X is better
+        ;; than Y: an identity before a derived-to-base conversion; of two derived-to-base, the result's class nearer the
+        ;; reference's ([over.ics.rank]/4.4.4); else of the same result a function before a template's specialization
+        ;; ([over.match.best]/2.5) and, for a non-const object, a non-const function before a const one (/2.1, the implicit
+        ;; object parameter's binding, [over.ics.rank]/3.2.6)
+        better? (fn [x y]
+                  (or (< (:r x) (:r y))
+                      (and (= 1 (:r x) (:r y)) (not= (:cls x) (:cls y)) (abi/derived-from? (:cls y) (:cls x)))
+                      (and (= (:r x) (:r y)) (= (:cls x) (:cls y))
+                           (or (and (not (:tmpl x)) (:tmpl y))
+                               (and (= (:tmpl x) (:tmpl y)) (not obj-c) (not (:cq x)) (:cq y))))))
+        best (filter (fn [x] (every? #(or (= % x) (better? x %)) cands)) cands)]
+    (cond (empty? cands) nil
+          (= 1 (count best)) (:fid (first best))
+          :else :ambiguous)))
 
 (def ^:dynamic *no-user* false) ; inside a user-defined conversion: standard conversions only ([over.best.ics]/4)
 (def ^:dynamic *conv-tmpl-cache* nil) ; atom {[class arg-type cat value op] bool}: a converting constructor template converts
@@ -3532,6 +3548,7 @@
           ;; specialization deduced for the reference, [temp.deduct.conv]/4, CP389 (a))
           (and (class-id at) (not (or same derived)) (ref-conv-for (class-id at) t (:c at)))
           (let [fid (ref-conv-for (class-id at) t (:c at))
+                _ (when (= :ambiguous fid) (fail :init "reference initialization is ambiguous (two conversion functions bind it, neither better)"))
                 c (method-call ctx fid (if (= :pr (:cat e)) (materialize e) e) [] true)
                 rt (:ty c)
                 d (not= (class-id rt) (class-id pt))]

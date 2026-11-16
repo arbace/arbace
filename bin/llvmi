@@ -312,19 +312,39 @@ only_filter() { # WORK LIST: keep the ids of LIST in WORK/modules.tsv
   mv "$1/modules.tsv.new" "$1/modules.tsv"
 }
 
-# run1 ID EXE [ARG...]: one run in a scratch directory (empty stdin, 10 s): ID STATUS OUT-SHA OUT-BYTES ERR-SHA ERR-BYTES ERR-FIRST
+# run_budget ID: the CPU seconds of a C++ program bin/cppi check budgets (test/cpp/check-budget.edn's entry for the same program:
+# cpp.runtime.N is runtime/N.cpp, cpp.samples.N samples/N.cpp; its :cpu, else its seconds), nothing for any other module. The
+# programs are the same and so is their cost on ci: runtime/atomics.cpp's four spinning threads take 14-35 s where lli's
+# recording and llvmi's default give 10 (gate b1-1115's llvmi-check timed it out), and the inherited GOMEMLIMIT=1500MiB under its
+# 2.8 GB heap makes the collector run without end (bin/lib/cppi/runprog.bash)
+run_budget() {
+  local p
+  case $1 in cpp.runtime.*) p=runtime/${1#cpp.runtime.}.cpp ;; cpp.samples.*) p=samples/${1#cpp.samples.}.cpp ;; *) return 0 ;; esac
+  sed -n "s|^[{ ]*\"$p\" *\\([0-9][0-9]*\\)\\( *:cpu *\\([0-9][0-9]*\\)\\)\\{0,1\\}.*|\\1 \\3|p" "$root/test/cpp/check-budget.edn" 2>"$TMPDIR/llvmi-budget.$$.err" |
+    head -1 | awk '{ print ($2 != "") ? $2 : $1 }'
+  rm -f "$TMPDIR/llvmi-budget.$$.err"
+}
+# run1 ID EXE [ARG...]: one run in a scratch directory (empty stdin, 10 s; a program run_budget names: bin/cppi check's run, its CPU
+# seconds under bin/lib/cppi/runprog.bash's cppi_run_prog, its own memory cap and no inherited GOMEMLIMIT): ID STATUS OUT-SHA
+# OUT-BYTES ERR-SHA ERR-BYTES ERR-FIRST
 run1() {
-  local id=$1 rd st; shift
+  local id=$1 rd st b; shift
   rd=$(mktemp -d "$TMPDIR/llvmi-run.XXXXXX")
   : > "$rd/in"
-  { (cd "$rd" && timeout 10 "$@" < in > out 2> err); } 2> "$rd/sh"; st=$?
+  b=$(run_budget "$id")
+  if [ -n "$b" ]; then
+    . "$root/bin/lib/cppi/runprog.bash"
+    (cd "$rd" && cppi_run_prog "$b" 0 "$rd/st" "$@" < in > out 2> err); st=$(cat "$rd/st")
+  else
+    { (cd "$rd" && timeout 10 "$@" < in > out 2> err); } 2> "$rd/sh"; st=$?
+  fi
   [ $st = 124 ] && st=timeout
   [ -n "${LLVMI_RUN_OUT:-}" ] && head -c 65536 "$rd/out" > "$LLVMI_RUN_OUT/$id.out"  # the own verdicts' CHECK lines read it
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$rd/out" | cut -d' ' -f1)" "$(wc -c < "$rd/out")" \
     "$(sha256sum < "$rd/err" | cut -d' ' -f1)" "$(wc -c < "$rd/err")" "$(head -1 "$rd/err" | cut -c1-200 | tr '\t' ' ')"
   rm -rf "$rd"
 }
-export -f run1
+export -f run1 run_budget; export root
 
 # musl_prepare: ci's libc (bin/ci musl prepare) without a compiler. ci's prepare configures musl with the host's gcc
 # (CC=gcc ./configure) when its tree is absent; llvmi makes configure's products first as musl's Makefile makes them

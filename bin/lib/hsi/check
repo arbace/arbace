@@ -271,8 +271,12 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: a single module of the library'
   # -fdefer-type-errors: a program GHC compiles with a type error raised at run time, in GHC's words; RULES: rewrite rules,
   # which the front end does not apply, as GHC's -O0 does for a rule of the module's own, tcrun022)
   if [ "$flags" != - ]; then for f in $flags; do case $f in *.c|*.o|*.cmm|*.s|*.S|-optc*|-cpp|-XCPP|-fdefer-type-errors|-fdefer-typed-holes) return 1 ;; esac; done; fi
-  ! grep -qE 'foreign +export|"wrapper"|foreign +import +capi|^ *\{-# *LANGUAGE[^#]*CPP|\{-# *OPTIONS(_GHC)?[^#]*(-cpp|-XCPP)|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$src/$main" || return 1
-  for m in $(sed -n 's/^import *\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\3/p' "$src/$main" | sort -u); do
+  # a literate module's code (gate B1): its bird-tracked lines without the track (a \begin{code} block's lines are plain), so
+  # that its imports and pragmas are scanned as the front end reads them after unlit
+  local txt=$src/$main
+  case $main in *.lhs) txt=$TMPDIR/hsi-front-unbird.$BASHPID; sed 's/^>[ \t]*//' "$src/$main" > "$txt" ;; esac
+  ! grep -qE 'foreign +export|"wrapper"|foreign +import +capi|^ *\{-# *LANGUAGE[^#]*CPP|\{-# *OPTIONS(_GHC)?[^#]*(-cpp|-XCPP)|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$txt" || return 1
+  for m in $(sed -n 's/^import *\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\3/p' "$txt" | sort -u); do
     # a library's module: its interface, or a package's reexport of one (GHC.Prim is ghc-internal's GHC.Internal.Prim)
     [ -f "$ifs/$m.iface.edn" ] || grep -qF "\"$m\" " "$ifs/reexports.edn" || return 1
   done
@@ -401,9 +405,10 @@ own_ref() {
   esac
   e=$(printf '' | sha256sum | cut -c1-64)
   if [ -n "$pending" ]; then
-    echo "$ex $(awk 1 "$d/$so" | sha256sum | cut -c1-64) $(if [ "$se" = - ]; then echo "$e"; else awk 1 "$d/$se" | sha256sum | cut -c1-64; fi) pending"
+    # (an expected stdout of "-": none shipped, an empty one, as for stderr; gate B1's unpack_sums_3)
+    echo "$ex $(if [ "$so" = - ]; then echo "$e"; else awk 1 "$d/$so" | sha256sum | cut -c1-64; fi) $(if [ "$se" = - ]; then echo "$e"; else awk 1 "$d/$se" | sha256sum | cut -c1-64; fi) pending"
   else
-    echo "$ex $(sha256sum < "$d/$so" | cut -c1-64) $(if [ "$se" = - ]; then echo "$e"; else sha256sum < "$d/$se" | cut -c1-64; fi)"
+    echo "$ex $(if [ "$so" = - ]; then echo "$e"; else sha256sum < "$d/$so" | cut -c1-64; fi) $(if [ "$se" = - ]; then echo "$e"; else sha256sum < "$d/$se" | cut -c1-64; fi)"
   fi
 }
 export -f own_ref
@@ -783,17 +788,26 @@ while IFS= read -r line; do
   # record passes, the class of divergences-own.edn's :light-cap)
   if [ "$libs_set" = own ] && [[ $line == *":libs :"* ]]; then
     pl=$(grep -F "{:id \"$id\" " "$packrec" || true)
+    # (gate B1: a program the pack's record has no row of, check-hsi-aot.edn's partial set, has no pack outcome to differ
+    # from: it is in an own class when one names it, else judged by the pack's classes below, as the pack's check judges it)
     if [ "$(outcome "$line")" != "$(outcome "$pl")" ]; then
       IFS=$'\t' read -r c cout cmsg < <(awk -v id="\"$id\"" '
         /^ *\{:id :/ {cls=$2; out=""; msg=""}
         /^ *:outcome "/ {out=$0; sub(/.*:outcome "/, "", out); sub(/".*/, "", out)}
+        /^ *:outcomes \[/ {out=$0; sub(/.*:outcomes \[ *"/, "", out); sub(/" *\].*/, "", out); gsub(/" +"/, "|", out)}
         /^ *:message "/ {msg=$0; sub(/.*:message "/, "", msg); sub(/".*/, "", msg)}
         index($0, id) {printf "%s\t%s\t%s\n", cls, (out == "" ? "-" : out), (msg == "" ? "-" : msg); exit}' "$divs_own") || true
       [ "$cmsg" = - ] && cmsg=""
-      if [ -z "$c" ]; then echo "hsi check: $id fails on the own libraries otherwise than on the pack ($(outcome "$line"); pack: $(outcome "$pl")), in no class of test/haskell/divergences-own.edn"; unclassed=$((unclassed + 1)); continue; fi
-      if [ "$cout" != "$(outcome "$line")" ]; then echo "hsi check: $id in own class $c, but its outcome $(outcome "$line") is not the class's ($cout)"; unclassed=$((unclassed + 1)); continue; fi
-      if [ -n "$cmsg" ] && [[ $line != *"$cmsg"* ]]; then echo "hsi check: $id in own class $c, but its message is not the class's (\"$cmsg\")"; unclassed=$((unclassed + 1)); continue; fi
-      echo "hsi check: $id in own class $c (pack: $(outcome "$pl"))"; continue
+      # (no pack row and an own class whose outcome is not this run's: the pack's classes judge it, AtomicPrimops at the
+      # CPU limit in the AOT run as divergences.edn's :speed)
+      [ -n "$c" ] && [ -z "$pl" ] && [[ "|$cout|" != *"|$(outcome "$line")|"* ]] && c=""
+      if [ -n "$c" ] || [ -n "$pl" ]; then
+        if [ -z "$c" ]; then echo "hsi check: $id fails on the own libraries otherwise than on the pack ($(outcome "$line"); pack: $(outcome "$pl")), in no class of test/haskell/divergences-own.edn"; unclassed=$((unclassed + 1)); continue; fi
+        # (a class's :outcomes: any of them, "|"-joined here; gate B1: a run at the CPU limit or the light cap fails either way)
+        if [[ "|$cout|" != *"|$(outcome "$line")|"* ]]; then echo "hsi check: $id in own class $c, but its outcome $(outcome "$line") is not the class's ($cout)"; unclassed=$((unclassed + 1)); continue; fi
+        if [ -n "$cmsg" ] && [[ $line != *"$cmsg"* ]]; then echo "hsi check: $id in own class $c, but its message is not the class's (\"$cmsg\")"; unclassed=$((unclassed + 1)); continue; fi
+        echo "hsi check: $id in own class $c (pack: $(outcome "$pl"))"; continue
+      fi
     fi
   fi
   IFS=$'\t' read -r c cres cmsg crsn < <(awk -v id="\"$id\"" '

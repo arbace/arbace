@@ -762,6 +762,7 @@
       :else nil)))
 
 (declare ^:dynamic *ltypes*)
+(declare unlifted-ty?)
 (defn- wrap-ev-binds [binds c] (reduce (fn [acc [x t]] (list 'let [(list 'bind x t)] acc)) c (reverse binds)))
 (def ^:dynamic *ev-binds* nil) ; atom [[lv term]...]: a binding's superclass evidence, bound once after its dictionary
                                ; lambdas (GHC's evidence bindings, dsEvBinds: $dApplicative = $p1Alternative $dAlternative)
@@ -1456,6 +1457,16 @@
 (def ^:dynamic *abs-binds* (not= "0" (System/getenv "REPR_HASKELL_SIMPL"))) ; dsAbsBinds' letrec for one unsigned binder
 (def ^:dynamic *ltypes* nil)   ; atom {(lv ...) type}: the local binders' types, zonked into :ltypes (tostg's PrimReps)
 (defn- note-type! [x t] (when *ltypes* (swap! *ltypes* assoc x t)))
+
+(defn- force-strict-binds
+  "A let's banged bindings (*strict-binds*' [pn pattern]...) forced around its body c, innermost last (dsStrictBind's
+  seq). A banged variable of an unlifted type is not forced: GHC's ds_val_bind takes an unlifted binding to
+  dsUnliftedBind (a case at the binding, or an ok-for-speculation let) with no seq, so the bindings are evaluated in
+  the groups' order (bigNatTestBit#'s `!sz = wordArraySize# a` after `!nw`, as GHC's -O0 STG has it; gate B1: BigNat's
+  bindings equal 81 -> 80 since HF10-P32 noted the local binders' types, the extra forces putting sz first)"
+  [c sb]
+  (let [sb (remove (fn [[pn pc]] (and (= pc '(pbang (pwild))) (some-> *ltypes* deref (get (lv pn)) unlifted-ty?))) sb)]
+    (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse sb))))
 (def ^:dynamic *uniq* nil)
 (defn- fresh-lv [o] (list 'lv o (str "u" (fresh-id))))
 
@@ -2347,7 +2358,7 @@
                   [env1 binds] (binding [*strict-binds* {:atom sb :level (inc *level*)}] (tc-local-binds env (arg v 2)))
                   [t c] (with-ips env1 (infer env1 (arg v 3)))
                   ;; the banged pattern bindings' matches around the body, innermost last
-                  c (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse @sb))]
+                  c (force-strict-binds c @sb)]
               [t (wrap-lets binds c)])
       HsDo (let [fl (arg v 2)]
              (case (if (seq? fl) (first fl) fl)
@@ -2583,7 +2594,7 @@
       HsLet (let [sb (atom [])
                   [env1 binds] (binding [*strict-binds* {:atom sb :level (inc *level*)}] (tc-local-binds env (arg v 2)))
                   c (with-ips env1 (check-expr env1 (arg v 3) t))
-                  c (reduce (fn [c [pn pc]] (list 'match [(lv pn)] [(list 'clause [pc] c)])) c (reverse @sb))]
+                  c (force-strict-binds c @sb)]
               (wrap-lets binds c))
       HsMultiIf (infer-grhss env (list 'GRHSs nil (arg v 2) (list 'EmptyLocalBinds 'NoExtField)) t)
       HsLam (let [[t1 c] (infer-matches env (arg v 3) nil t)] (unify t1 t) c)
@@ -4534,8 +4545,13 @@
         ;; context's superclasses (GHC.Tc.Solver.Dict's prohibitedSuperClassSolve, Note [Solving superclass constraints]):
         ;; T21973b's Def (D c) not by ClassLedger c's superclass ClassDecode (D c)'s, the dictionary being defined (a
         ;; loop), but by Def (D a)'s instance
+        ;; (the head met with its families reduced: T21973a's ClassLedger (MyLedger c)'s superclass ClassDecode
+        ;; (Tx (MyLedger c)) is ClassDecode (MyTx c), the instance's own head; compared unreduced it was missed and
+        ;; Monoid [c] solved through it, $cp1ClassDecode calling itself: <<loop>> on the own libraries, gate B1)
         sc-givens (let [cl (super-closure (mapv vector ctx params))
-                        heads (set (keep (fn [[p t]] (when (= p [cls ts]) t)) cl))]
+                        nf (fn [[c xs]] [c (mapv (comp deep-expand zonk) xs)])
+                        own-head (nf [cls ts])
+                        heads (set (keep (fn [[p t]] (when (= (nf p) own-head) t)) cl))]
                     (if (empty? heads)
                       cl
                       (filterv (fn [[_ t]] (not-any? #(contains? heads %) (tree-seq coll? seq t))) cl)))
