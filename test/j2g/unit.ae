@@ -8,6 +8,7 @@
             [arbace.classes.env :as env]
             [arbace.classes.analyze :as a]
             [arbace.classes.annot :as annot]
+            [arbace.j2g.access :as access]
             [arbace.j2g.checks :as chk]
             [arbace.j2g.code :as code]
             [arbace.j2g.edge :as edge]
@@ -439,6 +440,29 @@
            (= #{"sysStatx"} (names (chk/collisions {[:jrt "j2g_cut.go"] ['(go/const [sysStatx 1])]}
                                                     (scan ["x_amd64.ae" "sysStatx"])))))))
 
+;; B2 (2026-11-15): an accessor of an inherited protected static (DigestMD5Base's nested classes calling
+;; AbstractSaslImpl.traceOutput): j2g's unaccess gives the call of the declaring class, the one with a Go function
+
+(defn test-inherited-static-accessor []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/access" :tree true}] :variant-files []))
+        body (fn [cls nm] (w/with-world world
+                            (some (fn [[[n _] b]] (when (= n nm) b)) (:bodies @(:state (a/decl cls))))))
+        call (fn [cls nm] (first (filter #(= :invoke (:op %)) (nodes-of (body cls nm)))))
+        via (call "b/Sub$In" "viaOuter")
+        un (w/with-world world (access/unaccess via))
+        direct (call "b/Sub" "direct")]
+    (check "accessor: the fixture analyzes, In's call is an accessor of Sub"
+           (and (= "b/Sub" (:owner via)) (str/starts-with? (str (:name via)) "access$"))
+           (pr-str (select-keys via [:owner :name]) (:failed world)))
+    (check "accessor: unaccess calls Base.trace, the declaring class (the JVM's resolution), not Sub.trace"
+           (and (= "a/Base" (:owner un)) (= "trace" (:name un)) (= "a/Base" (:owner (:method un))))
+           (pr-str (select-keys un [:owner :name])))
+    (check "accessor: control: Sub's own call of Base.shown needs no accessor"
+           (and (= "a/Base" (:owner direct)) (= "shown" (:name direct)))
+           (pr-str (select-keys direct [:owner :name])))))
+
 (defn -main [& _]
   (test-support-tables)
   (test-unresolved-cause)
@@ -454,6 +478,7 @@
   (test-reflective-sites)
   (test-properties)
   (test-arch-collisions)
+  (test-inherited-static-accessor)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
   (shutdown-agents)
   (System/exit (if (zero? @failures) 0 1)))
