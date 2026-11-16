@@ -2996,3 +2996,40 @@ M2's kernel's answer (the probe `.tmp/q314/pr/g.c`, 148 lines, raw arm64 system 
   pwriteInPlace, hostAlloc, hostZero beside sysUtimens; the lockstep's pwrite64 beside the four calls). a64i check --record: 140
   programs, 980 rows (+7, linux-at-calls's); x86i's records the main host's, unchanged (crt's change reaches x86i: to be rerecorded
   there). The second control `sys-3` (signal-kill alu:c) renamed `sys-5`.
+
+## As built: queue 303, a64i's speed (2026-11-16; branch `303-asm-arm64-speed`, from `8aba666ff`; the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, 8 cores, load 10-16 from other jobs, at most 4 processes of this task's); every time
+below is CPU time (user + sys) unless named wall, base and head run back to back.
+
+- **The profile** (Go's pprof on a64i's process, `A64I_CPUPROFILE` in a copy of the printed driver; cmd/link's run of go-check's
+  compile, 545 M instructions, and goroot-check's gcgort.go and fixedbugs/issue16249.go): exec's dispatch 33% flat; Fetch 28% (its
+  map by PC 14%, AS.Fetch's TLB walk and copy 11%); the loads and stores 19% (AS.Read, Write, entry 8%); AESE/AESMC's aesMix 7% (Go's
+  map hash); system calls under 1%, Go's collector none; the lockstep's ptrace is the check's, not a run's.
+- **The decoded instructions a page's array** (cpu.ae's Fetch): `pages`, a `codePage` of 1,024 decoded instructions a code page,
+  and the last fetched page (its bytes, its array) kept while the address space's new `emu.AS.Gen` is unchanged: Gen counts every TLB
+  flush (Map, Unmap, Protect, the loader) and entry invalidation (MarkCode, ClearCode), so the bytes `AS.ExecPage` handed out are the
+  page's own as long as the TLB's would be. The word is still read and compared at every fetch, as before, so a store into code
+  (self-modifying code, a JIT, MADV_DONTNEED's zeros) is seen at the next fetch whatever the page; no assumption about Go's runtime
+  (which writes no code) is needed. Step takes the hit inline. x86i is unchanged (emu's Gen and ExecPage unused by it).
+- **aesMix's products from a table** (`gmulTab`, gmul's own products for the factors 0-15, made at init): equal to the loop's on
+  4,000,000 random states both ways (probed).
+- **Results unchanged**: `bin/a64i check --record` (980 rows) and `goroot-check --record` (1,178 rows) write the committed files
+  byte for byte; go-check 10 of 10, `--tools gofmt vet` 2 of 2, `--tools compile` 1 of 1 (every run's out, err, status and files as
+  wanted), table-check ok; every control fails as it must (a64i check's 175, go-check's, goroot-1..5).
+- **The control** (test/asm/a64i-go/smc, go-check copies a program's other .go and .s files now): code written into an RWX page and
+  run (call_arm64.s: BLR, dc cvau / ic ivau), the word rewritten and run, code that rewrites its own next instruction three times, the
+  page unmapped and mapped again, made writable only and executable again, and a file mapped over the running page by its own mmap
+  system call (the next instruction the file's); the M2's run its want. Injected faults `w` (Fetch runs a decoded instruction
+  whatever the word) and `g` (the last page's bytes kept across a flush): u303-go-1 (smc under sys:w: every result 1), u303-go-2
+  (sys:g: the file mapped over itself runs the old page's #10, not #9), u303-go-3 (smc judged by hello's): fail as they must.
+
+| run (CPU seconds) | base 8aba666ff | head | |
+|---|---|---|---|
+| cmd/link on a64i (545 M instructions) | 23.6 | 10.1 | 2.3x |
+| cmd/compile -S (listing, 340 M) | 17.1 | 6.8 | 2.5x |
+| go-check --tools compile (16 runs) | 95.0 (125 s wall) | 39.4 (45 s wall) | 2.4x |
+| go-check --tools gofmt vet | 58.8 (65 s wall) | 32.9 (29 s wall) | 1.8x |
+| goroot-check, a64i's runs summed (1,141 passing) | 303 | 141 | 2.15x |
+| goroot-check whole (--record, 3 jobs) | 382 (308 s wall in 4 pieces) | 206 (174 s wall) | 1.85x |
+| bin/a64i check | 113 (117 s wall) | 111 (117 s wall) | the eval's builds on stage 0 and the lockstep's ptrace |
