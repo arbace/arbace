@@ -6887,3 +6887,40 @@ past test_pyrepl's run_repl wait (30 s of silence: `:repl-console`'s 20 pty sess
   file's loads evaluate them (arbace/go/repl.ae's `start-read-ahead!`, `load-ahead`: arbace.core/load, :redef, takes
   the forms read ahead while a package file loads). `-c pass`: 34 s -> 25 s under the same load. The check itself is
   the rest; it is not cut here.
+
+## As built: 313, review 307's findings 3-6: built-in types' __dict__, getattr's suppress, C events, the REPL's start (2026-11-15, the Mac VM, queue 313)
+
+Review 307 (of 286-298) found four medium gaps; each is fixed as CPython 3.14.10 behaves.
+
+- **A built-in type's `__dict__` is one mapping** (descr.go's `builtinTypeDict`, finding 3): 286 moved int's and float's
+  `real`, `imag`, `numerator`, `denominator` out of the dict into getsets, and the slot wrappers were never in it; `in`,
+  `[]` and `.get` found them (`ownSlot`), `keys()`, `values()`, `items()`, `copy()`, `len()`, iteration, `==`, `|` and the
+  repr did not. The proxy of a static type's dict now reads a merged dict, in `type_ready_fill_dict`'s order: the own
+  slots' wrappers in slotdefs' order (`__new__` first, `slotdefOrder`), the dict's own entries (pyi's methods), the
+  getsets and members in their declaration order (attr.go's `getsetOrder`), `__doc__` last; kept per type while the
+  dict's version and the types' epoch stand. A heap type's dict and `mappingproxy(d)` are as before.
+- **getattr's default suppresses one lookup** (func.go's `moduleGetAttr`, lazyimport.go's `getAttrSuppressed`, finding
+  4): 293's global `lazySuppress` counter made every module error under `getattr(o, n, d)` or `hasattr` the short one,
+  in a property or a module `__getattr__` the lookup ran and in other threads. `suppress` is now module_getattro's
+  argument (`_Py_module_getattro_impl(m, name, 1)` from `_PyObject_LookupAttr`): `getAttrSuppressed` passes it for a
+  module whose class keeps module_getattro (no `__getattribute__` or `__getattr__` of a subclass's own), every other
+  lookup is plain `GetAttr`; 3.15's lazy submodule load takes the same argument.
+- **The code that stands for C fires C events at its caller** (monitoring.go, aot.go, with.go, finding 5): 293 silenced
+  every event inside `_pyio`'s and `_py_warnings`' frames, so a profiler saw no `c_call`/`c_return` for io's methods
+  (cProfile lost `{method 'read' of '_io.BufferedReader' objects}`). A call from a frame that does not stand for C of a
+  function that does (`cImplCalled`; of `_py_warnings` only what CPython's warnings takes from `_warnings`: warn,
+  warn_explicit, the lock functions) runs as a C callable's at the call sites with monitoring on (`monCallSite`,
+  `callStackMon`, `AotCallMethod`, `AotCallMethodV`): CALL, the call, C_RETURN or C_RAISE, its events naming a stand-in
+  `Builtin` (`cImplStandIn`: the method descriptor of the class in its first argument's MRO whose method it is, which
+  the profiler binds to that argument, `BufferedReader.read`; or a module function of the C module, `_io`). cProfile's
+  label names the C type (`_io.BufferedReader`, `_io._IOBase` for IOBase's methods); `open`'s module is `_io`
+  (`<built-in method _io.open>`); a `with` statement's `__enter__` call fires CALL and its C events (LOAD_SPECIAL then
+  CALL: a lock's `__enter__` had no `c_call`). Nothing fires inside those frames, as before (test_bdb's test_skip: its
+  trace function's events are CPython's, now with the profiler's C events at the caller as CPython has them).
+- **The REPL's start** (bin/pyi's cmd_python, interp.go, finding 6): with no code (or `-`) and stdin a terminal, without
+  -i, CPython's pymain_run_stdin runs the REPL (stdin_is_interactive), PYTHONSTARTUP and `sys.__interactivehook__` first;
+  bin/pyi read the terminal to its end as a script. It now starts the REPL (`PYI_INSPECT=tty`, `tty-quiet`: the run's
+  REPL with sys.flags' inspect and interactive 0). A piped no-code run's `sys.argv` is `['']` (was `['-']`), `-`'s
+  `['-']`. The hook in every REPL path and PYTHONSTARTUP after `-i FILE` on a terminal (_pyrepl's
+  `interactive_console(pythonstartup=True)`) were 298's already; `.tmp/q313/t/check6.sh`'s eight start paths
+  equal python3's.
