@@ -2992,3 +2992,7 @@ M2's kernel's answer (the probe `.tmp/q314/pr/g.c`, 148 lines, raw arm64 system 
 - Left: fchmod and fchown (52, 55; Go's File.Chmod and File.Chown) stay ENOSYS on a64i; a descriptor's path is its name at its open
   (futimens or AT_EMPTY_PATH of a file renamed or removed since acts on the name, Linux on the inode); select with no descriptor and no
   timeout returns 0 where Linux blocks.
+- Merged onto 311's 5286f3df4 (with 310's write-back and x86i's lockstep fix): both sides' crt and emu kept (sys_linux.ae's
+  pwriteInPlace, hostAlloc, hostZero beside sysUtimens; the lockstep's pwrite64 beside the four calls). a64i check --record: 140
+  programs, 980 rows (+7, linux-at-calls's); x86i's records the main host's, unchanged (crt's change reaches x86i: to be rerecorded
+  there). The second control `sys-3` (signal-kill alu:c) renamed `sys-5`.
