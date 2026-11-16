@@ -41,7 +41,8 @@ go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.a
 jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
 arbace/repr/cpp/ncheck.ae arbace/repr/cpp/tcheck.ae arbace/repr/llvm/mutate.ae arbace/rust.ae arbace/rust/x.ae arbace/llvm/run.ae
 arbace/repr/ocaml.ae arbace/repr/ocaml/print.ae arbace/repr/haskell.ae arbace/repr/rust/x.ae
-go/arbace/x86i.ae go/arbace/x86i/cpu.ae go/arbace/emu.ae go/arbace/emu/as.ae go/arbace/a64i.ae go/arbace/a64i/exec.ae"
+go/arbace/x86i.ae go/arbace/x86i/cpu.ae go/arbace/emu.ae go/arbace/emu/as.ae go/arbace/a64i.ae go/arbace/a64i/exec.ae
+arbace/repr/wasm.ae arbace/repr/wasm/x.ae arbace/wasm/x.ae go/arbace/wai.ae go/arbace/wai/x.ae bin/lib/repr-wasm/x bin/lib/wai/x"
 kept="go/arbace/ci.ae go/arbace/ci/expr.ae go/arbace/cinterp.ae go/arbace/cinterp/natives.ae go/arbace/crt.ae go/arbace/crt/mem.ae
 arbace/c.ae arbace/c/build.ae arbace/c/cinterp.ae arbace/repr/c.ae arbace/repr/c/lex.ae arbace/lang/CInterp.ae
 arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/repr/llvm/read.ae arbace/cpp/lower.ae arbace/cpp/rt/eh.c.ae
@@ -111,7 +112,7 @@ grep -q '^arbace_runtime_key() {' "$d/keys.bash" && grep -q '^arbace_javac_key()
   || { echo "FAIL: arbace_runtime_key or arbace_javac_key not found"; exit 1; }
 crop_go="go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/scminterp.ae
 go/arbace/scminterp/natives.ae go/arbace/py.ae go/arbace/py/frame.ae go/arbace/libm.ae go/arbace/libm/libm.ae"
-out_go="go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae"
+out_go="go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae go/arbace/wai.ae go/arbace/wai/x.ae go/arbace/pyctypes/x.ae"
 for f in seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 \
          bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi bin/javac-vendor; do
   mkdir -p "$r/$(dirname "$f")"; echo x > "$r/$f"
