@@ -9511,3 +9511,59 @@ check of an OCaml, a new crop, at most 3 by GTS215), goi-check (8.5 once, 2 of 1
 suite-aot-essential (1 percent over), cpp-builtins (a 3 s step, peak 2.3 with tree 0.0: a sampler artefact; the table says 3).
 Checked: `test/gate/crops-test.bash` (gate.crops check on steps.edn included) ok. Step keys: `:mem-gib` is outside the keys
 (crops.ae header), so none moves; only the lanes' admission changes.
+
+## 2026-11-16: F26's slice, the class-file API compiled in the Go build (branch `f26-classfile`, from `b2-1115` 9e3d05d2b)
+
+B2's joint world (java-night's slices, converted at 9e3d05d2b) did not compile: `go build ./jrt` gave 206 errors, 173 of them
+F26's (172 in `ClassPrinterImpl`, 1 in `ClassReaderImpl`). The user decided B2 ships without F26 and F26 returns as its own
+slice; this is that slice's work, on top of 9e3d05d2b (whose world still holds F26). Three root causes:
+
+- **String is not a ConstantDesc.** With F26 the world translates ConstantDesc with its `resolveConstantDesc(Lookup)` (Lookup is
+  translated since F15), so its Go interface has `ResolveConstantDesc_MethodHandles_Lookup__O`, which jrt's hand-written String
+  lacked: ClassPrinterImpl passes string literals as ConstantDescs (172 errors) and j2g_up's `Up_String_ConstantDesc` failed.
+- **Class is not a TypeDescriptor.OfField (nor a Constable).** F26 brings `java.lang.invoke.TypeDescriptor`; MethodType's
+  bridges `parameterType`/`returnType` return Classes as OfFields (`Up_Class_TypeDescriptor_OfField`). jrt's Class had
+  `descriptorString`, `isArray`, `isPrimitive`, `componentType` and `arrayType` but not the markers or the bridges.
+- **A switch's lub.** `ClassReaderImpl.entryByIndex` assigns a switch of AbstractPoolEntry's subclasses (each a PoolEntry) to
+  a PoolEntry. javac's type is the intersection AbstractPoolEntry & PoolEntry; the analyzer's `convert-node` converted each tail
+  but kept the tails' unified type (the class part), so j2g declared an `AbstractPoolEntry_I` temporary and assigned it to the
+  PoolEntry.
+
+Fixes: a32a1401c (j2g's support code, `arbace/j2g/out.ae`, as for String.describeConstable: String's `resolveConstantDesc` and
+its bridge; Class's `Is_TypeDescriptor`, `Is_TypeDescriptor_OfField`, the `componentType`/`arrayType` OfField bridges,
+`Is_Constable` and `describeConstable` as `Optional.of(ClassDesc.ofDescriptor(descriptorString()))`, each written only when
+its interfaces are in the world and jrt does not define it); 0ba1d5de3 (`arbace.classes.analyze/converted-type`: the switch,
+if and if-instance cases of `convert-node` type the node `to` when the tails' unified type does not convert to it; and, because
+the tools' host evaluates `arbace/classes` from its embedded copy (RT.toolSource names j2g's, not the front end's) until a
+re-seed, j2g's `coerce` takes an abstract class or interface to an interface it is not a subtype of by jrt's `As`: in the
+world's translation that changes one assignment, no other file's `As` count). Considered: jrt's manifest and hand-written
+String/Class (jrt's own build has no Lookup, ClassDesc or TypeDescriptor types, so the methods cannot live in `go/arbace/jrt`;
+the support code is where such members already are); a variant of ClassReaderImpl (the defect is the analyzer's, any such
+switch would meet it).
+
+After them, `go build -gcflags=-e ./jrt` at the gate build of 0ba1d5de3 (`bin/heavy-lock bin/arbace-go --gate-build` on the
+next worktree's stage 0) reports **no F26 error**; 26 remain, all B2's non-F26 ones (ObjectInputStream's and SealedObject's
+private accessors, GenericSignatureFormatError's and ConcurrentHashMap$Segment's super constructors, eleven `any(nil)` Lookups,
+TypeAnnotationSupport/TypeAnnotationParser's Executable as an AnnotatedElement, HttpConnection's `Id__J`). None of them shares a
+root cause with F26's. `bin/j2g-unit` on stage 0 passes; with the checkout's analyzer loaded over it (`J2G_UNIT_SOURCES`) its
+six invokers tests fail the same with and without 0ba1d5de3 (the checkout's analyzer over the seed's world, not this change).
+
+The run-time smoke `test/jrt/classfile/cfsmoke/ClassFileSmoke.java` (03739ada5; its expected output `ClassFileSmoke.out` from
+jdk26u's JDK 26): builds a class (a branch, a loop, a field, stack maps by the default resolver), parses it element by element,
+verifies and transforms it, and asks the String and Class contracts above. It is run by hand (its header), not a corpus test.
+
+A fourth commit, 149432655: the interpreter reads a hand-written class's member table, so Class.describeConstable and
+String.resolveConstantDesc also get table entries (j2g's support-table-forms, as String.describeConstable has); without
+them the smoke stopped at "No accessible method describeConstable in java.lang.Class".
+
+**The smoke ran.** B2's 26 non-F26 errors (and four more in package lang: `jrt.Member_Cast` undefined, MethodHandleInfo's
+reflectAs in j2g_dyn; `any(nil)` Lookups in KeywordInvokeSite and ReflectorCallSite; `jrt.NN(any(nil))`) were stubbed by sed
+in the gate build's generated module only (`.tmp/f26/scratch-hacks.sh` in the worktree, nothing committed), the executable
+built from it (`.tmp/f26/scratch-build.sh`), and `test/java/run.ae --load files` ran the smoke's forms on it: **its output is
+the JDK's byte for byte** (`ClassFileSmoke.out`). So once B2's own fixes land, F26 compiles and the API works on the runtime.
+
+**Landing F26 on top of B2** (which removes it from the world): re-add `classfile-sources` to `test/jrt/jrt_sources.ae`'s world
+(and the java.lang.constant/invoke/reflect parts B2 takes out with it), `bin/jrt-convert update` (35 GiB) and `bin/j2g-edge
+update` (MethodHandleInfo's REF_ constants, Enum$EnumDesc, VarHandle$VarHandleDesc, as in F26's night commands), the forms'
+and fixtures' updates, then this branch's four commits (cherry-picked: they are no-ops in a world without F26, each guarded by
+`m/translated?`), a gate build, the smoke by its header's commands, and Java's levels on F26's 44 corpus tests.
