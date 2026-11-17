@@ -212,8 +212,10 @@
   ;; weekly step runs, not what it checks), :weekly (its phase as the table declares it: a weekly step's key is the same
   ;; in the weekly tier and on a night its :also-changed files changed)
   ;; GD4 (GDS12 (a)): :disk-gib (the runner's disk floor beside it, never what passes)
+  ;; the crops tier (doc/GATE-DIET-SURVEY.md, "As built: the crops tier"): :essential-when-changed and :crop-rules (when a crop's
+  ;; subset runs in the essential gate, not what it checks; the crop's files are the key's file lines)
   #{:doc :summary :mem-gib :disk-gib :heavy :audit-cmd :rotate :list :failed-re :failed-as :rotated-part :whole-list :judges
-    :closure :also-changed :weekly-why :weekly :keyed :universe-n})
+    :closure :also-changed :weekly-why :weekly :keyed :universe-n :essential-when-changed :crop-rules})
 
 ;; ---- GD3 (doc/GATE-DIET-SURVEY.md, GDS9 (a), GDS11 (a), GDS4 (b), "As built: GD3"): the epoch, the load closures, the
 ;; weekly phase
@@ -314,7 +316,10 @@
         sel (sort (distinct (concat (filter #(in-closure? step %) (matching cache (keys files) (into (vec rules) (never-rules (:never-loads step)))))
                                     ;; GD3: a weekly step's :also-changed files (expanded rules) are its key's too, so that its
                                     ;; latest pass's material names them (also-why)
-                                    (when-let [a (:also-changed step)] (matching cache (keys files) a)))))]
+                                    (when-let [a (:also-changed step)] (matching cache (keys files) a))
+                                    ;; the crops tier: the crop's own paths (its :crop-paths rules) are its key's too, so that its
+                                    ;; latest pass's material names them (crop-why)
+                                    (when-let [c (:crop-rules step)] (matching cache (keys files) c)))))]
     (concat
      [(str "step " (:name step))
       (str "decl " (pr-str decl))]
@@ -395,8 +400,9 @@
 (defn- validate
   "the problems of the table, as strings: a duplicate step, a :needs or :start-after naming no step,
   a host absent from hosts.edn, an unknown group, an input rule or pin matching no file, a :cmd's bin/
-  script missing, an unknown :phase or :kind"
-  [groups steps files hosts cache]
+  script missing, an unknown :phase or :kind; the crops tier's :essential-when-changed on a step that is not essential or
+  naming no :crop-paths entry, a :crop-paths rule matching no file"
+  [groups steps files hosts cache crop-paths]
   (let [names (map (comp str :name) steps)
         known (set names)
         paths (keys files)
@@ -412,6 +418,12 @@
             ;; GD3: :also-changed (input rules: a :weekly step runs on another night when the files they select changed since
             ;; its latest pass) on a :weekly step alone
             (when (and (:also-changed s) (not= :weekly (:phase s))) [(str nm ": :also-changed on a step that is not :phase :weekly")])
+            ;; the crops tier: :essential-when-changed CROP on an essential check, CROP a key of the table's :crop-paths
+            (when-let [c (:essential-when-changed s)]
+              (concat
+               (when-not (and (= :essential (:phase s)) (contains? #{nil :check} (:kind s)))
+                 [(str nm ": :essential-when-changed on a step that is not an essential check")])
+               (when-not (contains? crop-paths c) [(str nm ": :essential-when-changed " c " names no :crop-paths entry")])))
             (when-not (contains? #{nil :check :build :always} (:kind s)) [(str nm ": unknown :kind " (:kind s))])
             (for [x (:needs s) :when (not (known (str x)))] (str nm ": :needs names no step: " x))
             ;; night 7 (crops-score ran beside reap and found no status): the essential phase runs its chains at once and
@@ -468,7 +480,8 @@
             (check-rules groups nm (:inputs s) paths cache)
             (check-rules groups (str nm "'s :also-changed") (:also-changed s) paths cache))))
        steps)
-      (mapcat (fn [[g rules]] (check-rules groups (str "group " g) rules paths cache)) groups)))))
+      (mapcat (fn [[g rules]] (check-rules groups (str "group " g) rules paths cache)) groups)
+      (mapcat (fn [[c rules]] (check-rules groups (str ":crop-paths " c) rules paths cache)) crop-paths)))))
 
 (defn- budget
   "three times the longest of the step's last three passes (seconds, at least 120), or nil (GTS17 (a))"
@@ -733,6 +746,41 @@
                 (str "weekly, run tonight: its :also-changed files changed since its pass at " (subs (str (:key p)) 0 12)
                      " (" (:date p) "): " (short-list (distinct (map subject diff)))))))))
 
+;; ---- the crops tier (the user, 2026-11-17; doc/GATE-DIET-SURVEY.md, "As built: the crops tier")
+
+(defn crop-tier?
+  "is the crops tier in force: the essential gate (MODE essential), not --rerun, not the clean run's inner gate, and not
+  GATE_CROP_DEFER=0 (every crop's subset keyed as before)"
+  [mode rerun?]
+  (and (= mode "essential") (not rerun?) (not= "0" (System/getenv "GATE_CROP_DEFER"))
+       (str/blank? (System/getenv "GATE_CLEAN_INNER"))))
+
+(defn crop-why
+  "the crops tier: a crop's essential subset (:essential-when-changed CROP, its :crop-rules the table's :crop-paths CROP) runs in
+  the essential gate only when the crop's own paths changed since its latest pass, at any key: its declaration (the decl line),
+  its environment's values, and the files and pins of its key that the crop's rules select, against the latest pass's material
+  (KEY.inputs). A change elsewhere (stage 0, the runtime, gate_key, the shared libraries) moves its key and defers it to the
+  night's gate, which keys it as before. Returns {:run WHY} or {:defer PASS :then LINES}"
+  [store step lines]
+  (let [rules (:crop-rules step)
+        path (fn [^String l] (last (str/split l #" " 3)))
+        own (fn [ls]
+              (let [fl (filter #(re-find #"^(file|pin) " %) ls)
+                    ps (matching (atom {}) (map path fl) rules)]
+                (set (concat (filter #(re-find #"^(decl|env) " %) ls) (filter #(ps (path %)) fl)))))
+        now (own lines)
+        p (first (passes store (str (:name step))))
+        then (when p (try (str/split-lines (slurp (str/replace (:file p) #"\.edn$" ".inputs"))) (catch Throwable _ nil)))]
+    (cond
+      (nil? p) {:run "it never passed"}
+      (nil? then) {:run "its latest pass has no material"}
+      :else (let [was (own then)
+                  diff (concat (remove was now) (remove now was))]
+              (if (seq diff)
+                {:run (str "its crop's paths changed since its pass at " (subs (str (:key p)) 0 12) " (" (:date p) "): "
+                           (short-list (distinct (map subject diff))))}
+                {:defer p :then then})))))
+
 ;; ---- GD4 (doc/GATE-DIET-SURVEY.md, GDS13 (a), "As built: GD4"): admission by the recorded peak
 
 (def under-margin
@@ -768,7 +816,8 @@
 
 (defn plan [root logs store mode rerun? & [rotation weekly?]]
   (set-counted! (str logs "/ancestors.txt"))
-  (let [{:keys [groups steps host-ids]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
+  (let [{:keys [groups steps host-ids crop-paths]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
+        crops? (crop-tier? mode rerun?)
         steps (expand-parts steps)
         files (files-table (str logs "/files.sha256"))
         hosts (read-file (str logs "/hosts.edn"))
@@ -779,7 +828,7 @@
                  (#{"oracle" "full-oracle"} mode) (conj :oracle))
         full? (#{"full" "nightly" "full-oracle"} mode)
         cache (atom {})
-        problems (validate groups steps files hosts cache)
+        problems (validate groups steps files hosts cache crop-paths)
         _ (when (seq problems)
             (println (str "gate plan: " root "/test/gate/steps.edn has " (count problems) " problem(s):"))
             (doseq [p problems] (println (str "   " p)))
@@ -789,7 +838,9 @@
         memo (atom {})
         loads (read-loads root)
         steps (map #(cond-> (with-loads root files memo loads %)
-                      (:also-changed %) (update :also-changed (fn [a] (expand groups a))))
+                      (:also-changed %) (update :also-changed (fn [a] (expand groups a)))
+                      ;; the crops tier: the crop's rules, expanded (in every mode: they are the key's file lines)
+                      (:essential-when-changed %) (assoc :crop-rules (expand groups (get crop-paths (:essential-when-changed %)))))
                    steps)
         weekly-names (set (for [s steps :when (= :weekly (:phase s))] (str (:name s))))
         ;; GD3 (GDS4 (b)): the weekly phase, --full's steps of the weekly tier (bin/gate --weekly, the clean run, --audit:
@@ -909,7 +960,19 @@
                                                      (short-list (changes lines then)))
                                                 (str "no pass at this key (the latest " (subs (str (:key p)) 0 12) ")")))))})
                      d (merge {:step s :name nm :kind kind :budget bud :admit (admission (:mem-gib s) ps)} d)
-                     d (if-let [w (:weekly-why s)] (update d :why #(str w "; " %)) d)]
+                     d (if-let [w (:weekly-why s)] (update d :why #(str w "; " %)) d)
+                     ;; the crops tier: a crop's subset whose key moved runs only when its crop's own paths changed since its
+                     ;; latest pass; else it is deferred to the night's gate (the decision night: no run, no failure, no pass)
+                     d (if (and crops? (:crop-rules s) (= "run" (:decision d)) (not (:provisional d)))
+                         (let [{:keys [run defer then]} (crop-why store s lines)
+                               c (name (:essential-when-changed s))]
+                           (if defer
+                             (assoc d :decision "night" :night-run d
+                                    :why (str "deferred to the night's gate: no change to the crop's paths (" c ") since its pass at "
+                                              (subs (str (:key defer)) 0 12) " (" (:date defer) "); its key moved by "
+                                              (short-list (changes lines then))))
+                             (update d :why #(str "crops tier (" c "): " run "; " %))))
+                         d)]
                  (-> acc (update :v conj d) (assoc-in [:by nm] d))))))
          {:v [] :by {}} steps)
         decided (:v decided)
@@ -919,7 +982,9 @@
         ;; use (their decisions were made on its pass)
         canary (when-not (or rerun? (= "0" (System/getenv "GATE_CANARY")))
                  (->> decided
+                      ;; (the crops tier: not a crop's subset, which the night's gate runs)
                       (filter #(and (= "skip" (:decision %)) (not (:heavy (:step %))) (not (used (:name %)))
+                                    (not (and crops? (:crop-rules (:step %))))
                                     (<= (or (:secs (:hit %)) 0) 300)))
                       (sort-by #(str (:date (:hit %))))
                       first))
@@ -930,9 +995,21 @@
                                            "), run again to prove it still holds (GATE_CANARY=0: not)"))
                           d))
                       decided)
-        by-name (into {} (map (juxt :name identity) decided))
         needs-of (fn [s] (distinct (concat (map str (:needs s)) (map producer (:uses s)))))
         runs? #{"run" "after"}
+        ;; the crops tier: a step deferred to the night that a step which runs needs (or uses) runs too, as it was decided
+        decided (loop [ds decided]
+                  (let [by (into {} (map (juxt :name identity) ds))
+                        wake (set (for [d ds :when (runs? (:decision d)) n (needs-of (:step d))
+                                        :when (= "night" (:decision (by n)))]
+                                    n))]
+                    (if (empty? wake)
+                      ds
+                      (recur (mapv (fn [d] (if (wake (:name d))
+                                             (update (:night-run d) :why #(str "crops tier: a step that runs needs it; " %))
+                                             d))
+                                   ds)))))
+        by-name (into {} (map (juxt :name identity) decided))
         ;; the builds: needed by a check that runs (or may: after), or by a needed build
         needed (loop [need (set (mapcat #(needs-of (:step %)) (filter #(runs? (:decision %)) decided)))]
                  (let [more (into need (mapcat #(needs-of (:step (by-name %))) need))]
@@ -968,8 +1045,15 @@
                         "\n"))))
     (let [freq (frequencies (map :decision decided))]
       (println (str "gate plan (" mode "): " (count decided) " steps; "
-                    (str/join ", " (for [k ["always" "build" "run" "after" "skip" "absent" "none"] :when (freq k)]
+                    (str/join ", " (for [k ["always" "build" "run" "after" "skip" "night" "absent" "none"] :when (freq k)]
                                      (str (freq k) " " k))))))
+    ;; the crops tier: the crops' subsets in this plan, deferred and run
+    (when crops?
+      (let [cs (filter #(:crop-rules (:step %)) decided)
+            f (frequencies (map :decision cs))]
+        (when (seq cs)
+          (println (str "   crops tier: " (count cs) " crop subsets, " (get f "night" 0) " deferred to the night's gate (no change to"
+                        " their crop's paths), " (get f "run" 0) " run, " (get f "skip" 0) " skipped (GATE_CROP_DEFER=0: keyed as before)")))))
     (when (some #(:rotation (:step %)) decided)
       (println (str "   rotation (GT8.4): " (if (integer? rotation) (str "night " rotation ", slices of " period) "the subsets alone (the clean run)")
                     "; " (str/join ", " (for [d decided :let [s (:step d)] :when (:rotation s)]

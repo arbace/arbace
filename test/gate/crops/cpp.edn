@@ -30,30 +30,18 @@
    ;; cpp-indep (CP240 (a)): the units' IR from the pack cpp-runtime-ir, no gcc (ORS27: the lowered C read by repr/c and checked by ci)
    :hosts [:stage0] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :cpp :c]
    :pins ["test/cpp/corpora.edn" "test/cpp/records/cpp-runtime-ir.sha256"]}
-  {:name cpp-read-essential :mem-gib 2 :phase :essential :chain cpp-essential
-   :cmd "bin/repr-cpp target verify && bin/repr-cpp pp-check --essential"
-   ;; cpp-indep (CP241 (b)): libstdc++'s headers from the pinned tarball (bin/repr-cpp target), the C library's from musl's: no host header;
-   ;; cpp-target (CP244 (b)): the predefined macros, option deltas, __has_ answers and search list Arbace's own C++ target's (cpp/target/host,
-   ;; verified as test/cpp/predef.ae makes it from c/target/abi.edn and cpp/target/dialect.edn), no g++ record read
+  ;; the crops tier: C++'s read, print and lowering subsets as one step (one declaration before: :cpp and :c on stage 0), the runtime's
+  ;; build first; cpp-check-essential apart (ci's back end and TamaGo's go beside, its 5 GiB)
+  {:name cpp-essential :mem-gib 3 :phase :essential :chain cpp-essential :needs [cpp-runtime] :essential-when-changed :cpp
+   :cmd "bin/repr-cpp target verify && bin/repr-cpp pp-check --essential && bin/repr-cpp roundtrip-corpus gxx-dg-essential --judge own && bin/repr-cpp roundtrip-corpus samples --judge own && bin/cppi lower-essential"
    :hosts [:stage0] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn" "test/c/corpora.edn"]
    :inputs [:lib-tools :tools :cpp :c]
-   :summary ["^(cpp-lexical|gxx-dg|libstdcxx-headers): [0-9]+ files,|failing|stale" 4]}
-  {:name cpp-print-essential :mem-gib 2 :phase :essential :chain cpp-essential :needs [cpp-read-essential]
-   :cmd "bin/repr-cpp roundtrip-corpus gxx-dg-essential --judge own && bin/repr-cpp roundtrip-corpus samples --judge own"
-   :hosts [:stage0] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
-   :inputs [:lib-tools :tools :cpp :c]
-   :summary ["^\\{:files|failing|control|^rtcheck: the run" 4]}
+   :summary ["^(cpp-lexical|gxx-dg|libstdcxx-headers): [0-9]+ files,|failing|stale|^\\{:files|control|^rtcheck: the run|^lower-check|pass|FAIL" 12]}
   ;; ORS27, ORS28 (b) (the user, 2026-11-06; mac/oracle-records-cpp2, batch 4): no gcc and no clang here (bin/cppi's cpr_gcc and cpr_live):
   ;; the IR from the packs, the lowering stopping at the lowered C, read by repr/c and checked by ci's checker; gcc's compile and the
   ;; lowered run are cpp-lower-oracle's, ci's run of io.cpp cpp-check-essential's, of hello.cpp and library.cpp cpp-check's
-  {:name cpp-lower-essential :mem-gib 3 :phase :essential :chain cpp-essential :needs [cpp-print-essential cpp-runtime]
-   :cmd "bin/cppi lower-essential"
-   :hosts [:stage0] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
-   :inputs [:lib-tools :tools :cpp :c]
-   :summary ["^lower-check|pass|failing|FAIL" 4]}
-  {:name cpp-check-essential :mem-gib 5 :phase :essential :chain cpp-essential :needs [cpp-lower-essential]
-   ;; cpp-gatefix: ci's builder's GOMEMLIMIT 2GiB, not 4GiB (night 12's 4.1 GiB peak was that soft limit's heap, above :mem-gib 3);
-   ;; this entry as steps.edn's (it had kept cppi-check's first command)
+  {:name cpp-check-essential :mem-gib 5 :phase :essential :chain cpp-essential :needs [cpp-essential] :essential-when-changed :cpp
+   ;; cpp-gatefix: ci's builder's GOMEMLIMIT 2GiB, not 4GiB (night 12's 4.1 GiB peak was that soft limit's heap, above :mem-gib 3)
    :cmd "env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt"
    ;; cpp-indep (CP240 (a)): the programs' IR from the pack cpp-ir-samples (UNRECORDED fails), no clang
    :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn" "test/cpp/records/cpp-ir-samples.sha256"]
@@ -61,7 +49,7 @@
    :summary ["programs:|REGRESSION|control|FAIL" 4]}
   ;; ORS12 (a) (mac/oracle-records-cpp, batch 4): the selftests that name no compiler or LLVM tool (test/cpp/selftest/toolchain.txt lists
   ;; the others, the oracle tier's cpp-selftest-oracle)
-  {:name cpp-selftest :mem-gib 3 :phase :full :chain cpp-full
+  {:name cpp-selftest :mem-gib 1 :phase :full :chain cpp-full
    :cmd "bin/cppi selftest --no-toolchain"
    :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
    :inputs [:lib-tools :tools :cpp :c]
@@ -86,7 +74,14 @@
    ;; CX12 (doc/cpp/CPP-SURVEY.md, "As built: CX12 (first slice)"): dg-error-own, the same files by Arbace's own front end's errors
    ;; (bin/repr-cpp dg --front native: the native parser's syntax errors, Sema's checks, the code generator's Sema), no clang, no pack,
    ;; judged by the test's own dg-error lines against test/cpp/check-dg-own-linux-amd64.edn (a recorded own pass that fails, fails)
-   :parts [{:part preprocess} {:part dg-error} {:part dg-error-own :cmd "bin/repr-cpp dg --corpus dg-error --front native"}
+   ;; GD2 (GDS6 (a), doc/GATE-DIET-SURVEY.md "As built: GD2"): dg-error-own (48 min) rotates, --only over the dg-error part's files (clang's
+   ;; record's rows but :unsupported, the files the own run judges), its subset test/cpp/subsets.edn's :subset-dg (bin/gate-subsets cpp), the
+   ;; control's two files :always; preprocess (20 s) and dg-error (seconds) run whole
+   :parts [{:part preprocess :mem-gib 1} {:part dg-error :mem-gib 1}
+           {:part dg-error-own :cmd "bin/repr-cpp dg --corpus dg-error --front native"
+            :rotate {:only "--only {list}" :universe "test/cpp/check-dg-linux-amd64.edn" :id-re "^\\[\"([^\"]+)\" :(?:pass|fail) "
+                     :subset "test/cpp/subsets.edn" :subset-key :subset-dg :always ["gxx-dg/DRs/dr1423.C" "gxx-dg/DRs/dr2082.C"]
+                     :failed-re "^FAIL (gxx-dg/[^ ]+) .*$"}}
            {:part modules :clean-only true}]
    :summary ["pass|class|FAIL|stale" 4]}
   ;; CP302 (a): the code generator's light half, no clang, gcc or run (codegen-check's, which needs them, is the night's by hand):
@@ -99,7 +94,7 @@
    :summary ["^codegen-gen|^FAIL|control" 4]}
   ;; CX12, CP283 (a): clang's identifier table (cpp/target/clang-builtins.edn, the undeclared check's __ names) made again from the
   ;; pinned llvm-project tarball's Builtins*.td and TokenKinds.def and compared (bin/repr-cpp target builtins verify, seconds)
-  {:name cpp-builtins :mem-gib 1 :phase :full :chain cpp-full
+  {:name cpp-builtins :mem-gib 3 :phase :full :chain cpp-full
    :cmd "bin/repr-cpp target builtins verify"
    :hosts [:stage0] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
    :inputs [:lib-tools :tools :cpp]
@@ -111,7 +106,16 @@
    :cmd "bin/repr-cpp roundtrip-corpus {part} --judge own"
    :hosts [:stage0] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
    :inputs [:lib-tools :tools :cpp :c]
-   :parts [{:part gxx-old-deja-every-10} {:part c-c++-common-every-10} {:part libstdcxx-testsuite-every-40} {:part samples}]
+   ;; GDS4 (a), GD1: libstdcxx-testsuite-every-40 weekly (54 min); GD3 (GDS4 (b), doc/GATE-DIET-SURVEY.md, "As built: GD3"): a :phase :weekly part
+   ;; GD2 (GDS6 (a)): the two every-10 lists rotate as cpp-roundtrip-dg's, --only-list over their own records, the subsets
+   ;; test/cpp/subsets.edn's :subset-roundtrip (bin/gate-subsets cpp); samples (no record) runs whole
+   :parts [{:part gxx-old-deja-every-10
+            :rotate {:only "--only-list {list}" :universe "test/repr/cpp/roundtrip-results/own/gxx-old-deja-every-10.edn" :id-re "^\\s+\"([^\"]+)\" "
+                     :subset "test/cpp/subsets.edn" :subset-key :subset-roundtrip :failed-re "^FAIL (.+)$"}}
+           {:part c-c++-common-every-10
+            :rotate {:only "--only-list {list}" :universe "test/repr/cpp/roundtrip-results/own/c-c++-common-every-10.edn" :id-re "^\\s+\"([^\"]+)\" "
+                     :subset "test/cpp/subsets.edn" :subset-key :subset-roundtrip :failed-re "^FAIL (.+)$"}}
+           {:part libstdcxx-testsuite-every-40 :phase :weekly} {:part samples}]
    :summary ["^\\{:files|failing|control|^rtcheck: the run|^roundtrip:" 4]}
   {:name cpp-roundtrip-dg :mem-gib 3 :phase :full :chain cpp-full
    :cmd "bin/repr-cpp roundtrip-corpus {part} --judge own"
@@ -133,24 +137,23 @@
             :subset "test/cpp/subsets.edn" :subset-key :subset-lower :failed-re "^  failing: ([^ ]+) .*$"}}
   ;; CP397 (a) (2026-11-15): as steps.edn's (spliced at batch 1 and edited there since): the essential step's environment, :mem-gib 6
   {:name cpp-check :mem-gib 6 :phase :full :chain cpp-full :needs [cpp-runtime]
-   :cmd "env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --corpus {part}"
-   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
-   :inputs [:lib-tools :tools :cpp :c-run]
-   :parts [{:part samples} {:part runtime}]
-   :summary ["programs|pass|FAIL|control" 4]}
-  {:name cpp-aot :mem-gib 4 :phase :full :chain cpp-full :needs [cpp-check]
-   :cmd "bin/cppi check --aot --corpus {part}"
-   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn"]
-   :inputs [:lib-tools :tools :cpp :c-run]
-   :parts [{:part samples} {:part runtime :clean-only true}]
-   :summary ["programs|pass|FAIL|control" 4]}
+   :cmd "env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check {part}"
+   ;; cpp-indep (CP240 (a)): from the packs, no clang; the sampling gxx-dg-run-every-25 waits for its pack (cpp-ir-gxx-dg-run, ORS26 (b),
+   ;; the night's record-ir --corpus gxx-dg-run --every 25) in test/gate/crops/cpp-oracle.edn's live parts
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn" "test/cpp/records/cpp-ir-samples.sha256"]
+   :inputs [:lib-tools :tools :cpp :c :c-run]
+   :parts [{:part samples-runtime :cmd "env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check"}]
+   :summary ["programs:|REGRESSION|control|FAIL" 4]}
+  {:name cpp-aot :mem-gib 7 :phase :full :chain cpp-full :needs [cpp-check]
+   :cmd "env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=4GiB bin/cppi check --aot {part}"
+   :hosts [:stage0 :go] :never-loads [arbace.j2g] :pins ["test/cpp/corpora.edn" "test/cpp/records/cpp-ir-samples.sha256"]
+   :inputs [:lib-tools :tools :cpp :c :c-run]
+   :parts [{:part samples-runtime :cmd "env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=4GiB bin/cppi check --aot"}]
+   :summary ["programs:|compiled against|REGRESSION|control|FAIL" 4]}
 ;;@ crops
-         :cpp [cpp-runtime cpp-read-essential cpp-print-essential cpp-lower-essential cpp-check-essential cpp-selftest cpp-tokens cpp-dg
-               cpp-roundtrip cpp-roundtrip-dg cpp-lower cpp-check cpp-aot cpp-builtins cpp-codegen-gen]
+         :cpp [cpp-runtime cpp-essential cpp-check-essential cpp-selftest cpp-tokens cpp-dg cpp-roundtrip cpp-roundtrip-dg cpp-lower cpp-check cpp-aot cpp-builtins cpp-codegen-gen]
 ;;@ controls
-  cpp-read-essential {:waived "the token oracle's comparison against g++ -E and clang (GT9.8 \"Not covered\": pp-check; GTS242)"}
-  cpp-print-essential "test/repr/cpp/roundtrip-controls.edn"
-  cpp-lower-essential "test/cpp/controls.edn"
+  cpp-essential [{:waived "the token oracle's comparison against g++ -E and clang (GT9.8 \"Not covered\": pp-check; GTS242)"} "test/repr/cpp/roundtrip-controls.edn" "test/cpp/controls.edn"]
   cpp-check-essential "test/cpp/controls.edn"
   cpp-selftest {:waived "the checks' own tests: each a negative case (review 007's)"}
   cpp-tokens {:waived "as cpp-read-essential (GTS242)"}

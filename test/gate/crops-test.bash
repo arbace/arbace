@@ -130,17 +130,19 @@ cat > "$w/rules.edn" <<'F'
 {:groups {:oc ["test/ocaml/" "!test/ocaml/other.edn"]}
  :steps [{:name e1 :phase :essential :cmd "true" :mem-gib 4 :inputs [:oc]}
          {:name e2 :phase :essential :cmd "true" :mem-gib 2 :heavy true :inputs [:oc]}
+         {:name e3 :phase :essential :cmd "true" :mem-gib 2 :inputs [:oc] :essential-when-changed :rust}
+         {:name e4 :phase :essential :cmd "true" :mem-gib 2 :inputs [:oc] :essential-when-changed :ocaml}
          {:name f1 :phase :full :cmd "true" :inputs [:oc]}
          {:name f2 :phase :full :cmd "true" :mem-gib 2 :inputs [:oc]}
          {:name f3 :phase :full :cmd "true" :mem-gib 2 :inputs [:oc]}
          {:name f4 :phase :full :cmd "true" :mem-gib 2 :inputs [:oc]}
          {:name b :phase :build :kind :build :cmd "true"}
          {:name four :phase :full :cmd "true"}]
- :crops {:ocaml [e1 e2 f1 f2 f3 f4 b] :c [four]}
+ :crops {:ocaml [e1 e2 e3 e4 f1 f2 f3 f4 b] :c [four]}
  :budgets {:crops 10 :new-crops [:ocaml :rust] :shares {:rust 0.5 :zz 1} :essential-mem-gib-by {:ocmal 4 :rust "x"}}
  :host-ids {:h1 [[:frob "x"]] :h2 [[:digest-list "test/none.sha256"]] :h3 [[:version]]}
  :crop-pins [[:ocaml "w" "c"] [:java "w" "c"] [:rust "a \"q\"" "c"]]
- :controls {e1 "test/ocaml/controls.edn" e2 {:waived "judges records"} f2 "test/ocaml/other.edn" f3 "test/ocaml/nothing.edn" f4 {:why "x"} gone "x"}}
+ :controls {e1 "test/ocaml/controls.edn" e2 {:waived "judges records"} e3 ["test/ocaml/controls.edn" "test/ocaml/gone.edn"] e4 ["test/ocaml/controls.edn" {:waived "a judgment"}] f2 "test/ocaml/other.edn" f3 "test/ocaml/nothing.edn" f4 {:why "x"} gone "x"}}
 F
 crops check "$w/r" "$w/rules.edn" > "$w/rules.out" 2>&1; st=$?
 [ $st = 1 ] && ok "gate.crops check fails on a bad table" || bad "check's status $st"
@@ -149,9 +151,12 @@ for p in 'ocaml e1: an essential check of 4 GiB' 'ocaml e2: an essential check :
          ':controls: gone is no step' ':host-ids :h1: unknown op :frob' ':host-ids :h2: :digest-list test/none.sha256 is no file' ':host-ids :h3: :version without an argument' \
          ':crop-pins :java: crop :java is not in :budgets :new-crops' ':crop-pins :rust: a tab, newline or double quote' ':budgets :shares: :zz is not in :new-crops' \
          'weights sum to 5.5, not :crops 10' ':budgets :essential-mem-gib-by: :ocmal is not in :new-crops' \
-         ':budgets :essential-mem-gib-by: :rust'"'"'s "x" is not a positive number of GiB'; do
+         ':budgets :essential-mem-gib-by: :rust'"'"'s "x" is not a positive number of GiB' \
+         'ocaml e1: :essential-when-changed missing' 'ocaml e3: :essential-when-changed :rust is not its crop' \
+         'ocaml e3: :controls: test/ocaml/gone.edn is no file'; do
   grep -qF -- "$p" "$w/rules.out" && ok "rule: $p" || { bad "rule not found: $p"; }
 done
+grep -q 'ocaml e4:' "$w/rules.out" && bad "the crops tier's merged step e4 (a vector of controls, in the tier) refused" || ok "a merged step's vector of controls, each one good, and its :essential-when-changed its crop: no problem"
 grep -q ' four:' "$w/rules.out" && bad "a step of the four judged by GT9's rules" || ok "the four crops' steps are not GT9's rules' (no control or :mem-gib asked)"
 grep -q 'ocaml b: no negative' "$w/rules.out" && bad "a build asked for a control" || ok "a :build step needs no control"
 [ $fail = 0 ] || sed 's/^/     /' "$w/rules.out"

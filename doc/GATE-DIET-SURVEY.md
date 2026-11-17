@@ -1035,3 +1035,85 @@ Also decided in round 33:
   passes), with CPU-second limits. Built after GD3 and GD4 merge, on a branch of its own (gate-gd5).
 - **GD4's three window-W items** (j2g's and repr/go's hosts shared by key; `gocache.bash`'s rule outside the gate; `bin/j2g`'s 20 GiB
   default through `bin/gate-policy`): all three at W, as they move `gate_key`; not in batch B1.
+
+## As built: the crops tier (branch `gate-ess-diet`, from `next` `cf8268ebf`, 2026-11-17)
+
+The user's decision (2026-11-17): shrink the essential gate. Before, it had 71 steps and about 113 minutes of serial work when
+its keys moved (a re-seed, a runtime change): 29.5 minutes of core and 83.5 minutes of the crops' 42 essential subsets (the
+measures of 2026-11-17, `.tmp/goal/ess-steps.txt`; a64i-table and a64i-go about 1.7 minutes more). The crops' subsets are on
+stage 0, so they reran whenever stage 0 or the runtime moved, though no key of theirs is a crop's.
+
+**The mechanism.** A step attribute and a table:
+- `:crop-paths {CROP [RULES]}` in `test/gate/steps.edn` (beside `:crops`; in no fragment, as `:host-ids` and `:crop-pins`): each
+  crop's own paths as `:inputs` rules: its namespaces, Go forms, scripts and libraries, records, corpora and fragment. Not the core
+  it runs on (stage 0, the runtime, `gate_key`, `:tools`, the gate's and the oracle records' libraries, repr/go, the build's
+  scripts), nor another crop's (C's ci under C++, LLVM IR, Rust, OCaml's C API and hsi). The rules' files join the step's key
+  (as GD3's `:also-changed` do), so the latest pass's material names them.
+- `:essential-when-changed CROP` on an essential check (unkeyed). In the essential gate (`bin/gate`, `bin/gate --plan`; not
+  `--rerun`, not the clean run's inner gate, not `GATE_CROP_DEFER=0`) a step whose key moved runs only when its crop's paths
+  changed since its latest pass, at any key: the `decl` line, the `env` lines and the `file`/`pin` lines the rules select,
+  against the pass's `KEY.inputs` (`gate.plan/crop-why`). Else its decision is `night`: "deferred to the night's gate: no change
+  to the crop's paths (CROP) since its pass at KEY (DATE); its key moved by host stage0, ...". A step that never passed runs.
+  A deferred step that a running step needs (or uses) is woken and runs as decided. A night step is no canary.
+- The runner: status `night`, reported `night  NAME (why)`, a need that holds (`ok_status`), no pass recorded, no failure; the
+  summary counts "N crop subsets deferred to the night's gate"; the clean record reads it `:night`. `GATE_CROP_DEFER` is kept by
+  the environment's scrub (scheduling only).
+- `--nightly`, `--weekly`, `--full` and the clean run ignore the attribute: they key the subsets as before, and their passes are
+  the next day's reference.
+- The rules: the planner refuses the attribute on a step that is not an essential check, a crop missing from `:crop-paths`, a
+  `:crop-paths` rule matching no file; `gate.crops check` refuses a new crop's essential check without the attribute and an
+  attribute that is not the step's crop (`:crops`).
+
+**The core** (the essential gate when no crop changed): makefile, seed, stage0, go-build, go-smoke, suite-go, oracle-go,
+diffcheck, goi-check, goi-aot-essential, java-check, java-check-judge, java-compiled, suite-aot-essential, programs, generated,
+jrt-deflate, arm64-host (absent off arm64), claude-md, j2g-edge, reap, crops-score, records-check, caches-table,
+repr-java-closure, provenance, jrt-derive (and bin/gate's pre-step outside). reap and crops-score stay: they judge every crop's
+records by day. C's five subsets are in the tier too (C is one of the four crops, but its subsets are crop work on stage 0).
+
+**The merges** (within a chain, which already ran serially, and only where the keys agree or nearly):
+- asm-amd64-essential ← asm-amd64-read-, -run-, -object-essential (one declaration before).
+- asm-arm64-essential ← asm-arm64-read-, -print-, -object-, -objverdict-, -run-essential (`:asm`; the round trip's `box/`,
+  TamaGo's go and qemu-aarch64 the union).
+- a64i-essential ← a64i-essential, a64i-table, a64i-go. Not merged into asm-arm64-essential: `:a64i` holds the emulator's driver
+  sources (repr/go's printer, the build's scripts, crt, godump), which the assembler's checks never read.
+- wasm-essential ← wasm-read-, wai-, wai-go-, wasm-aot-, wai-js-essential (`:wasm` within `:wai`; `:wai-go` adds goi's record,
+  `:wai-js` the shim and demo: small steps, 2.7 minutes together).
+- llvm-essential ← llvm-read-, llvm-print-, llvmi-essential, llvm-controls-test (C's ci for llvmi the union; the read and print
+  are 11 s).
+- cpp-essential ← cpp-read-, cpp-print-, cpp-lower-essential (one declaration, `:cpp :c` on stage 0; the runtime's build first).
+- si-essential ← si-essential, si-aot-essential; oi-essential ← oi-essential, oi-divergences; rust-read-essential ←
+  rust-read-essential, rsi-judge-test (the same or narrower inputs).
+- Not merged: C's five (GDS10 (a) keys each level by its own records), cpp-check-essential (ci's back end, `:go`, 5 GiB),
+  rust-front- and rust-core-essential (6.5 minutes each; core's key lacks C's), haskell-read- and hsi-essential (hsi's runtime
+  would rerun the 4.6-minute read), cpp-c2j and scheme-c2j (two crops), scheme-read- and ocaml-read-essential (chains of their
+  own, run beside the others).
+- Every command and negative control is kept (the merged commands joined by `&&`, in the old order; 128 control entries before
+  and after): a merged step's `:controls` is a vector, one entry a check (`gate.crops check` holds each as before). `:mem-gib`
+  the largest of the merged (all within GTS215's 3 GiB). No merged step had `:outputs` or was a `:uses` producer. The `:full`
+  steps' `:needs` on the old names name the merged ones; `test/crops/independence.edn`'s `:steps` likewise (crops-score: 0
+  problems, the scores unchanged).
+
+**The fragments.** Synced from `steps.edn` (authoritative): every step, group and control a fragment and the table both hold is
+the table's text now (the drift memdecl-fix found: asm's a64i mem, C++'s seven steps, Haskell's groups, Rust's six steps and two
+groups, natives' two, OCaml's oi-check, Scheme's three). The fragments' steps that wait for a batch (cpp-native, ocaml-native,
+llvm-roundtrip, Python's) are untouched.
+
+### Before and after
+
+| plan | steps | serial (measured, 2026-11-17) | `--plan`'s simulated serial sum (a re-seed) |
+|---|---|---|---|
+| essential, keys moved | 71 → 51 (28 core + cpp-runtime + 23 crop subsets, 20 fewer) | 113 min → 29.5 min (core) | 2:35 → 1:08 |
+| essential, one crop changed | | its subsets only (e.g. C++ 13.4 min, asm-arm64 8 min) | |
+
+The simulation: a store whose every check passed at a key differing only by the host lines (stage 0, gate, prog), the
+durations the measured ones (`.tmp/ess/sim.py`); `GATE_CROP_DEFER=0` gives the keyed plan (42 run), the tier 19 run and 23
+night. The first essential gates after the merge run the subsets once: their keys move (the crop paths join them, the merged
+steps never passed), and the passes before hold no crop file the rules add; from the night's passes on, the tier defers.
+
+### Checks run on the branch
+
+`test/gate/crop-tier-test.bash` (new, 20 of 20: the re-seed, a crop's change, a fragment's, --full, --rerun,
+`GATE_CROP_DEFER=0`, the wake, the rules, the runner, the checkout's table), `test/gate/crops-test.bash` (with the tier's and the
+vector controls' rules), `costs-test`, `lanes-test`, `chain-needs-test`, `arm64-host-test`, `plan-logic-test`,
+`needs-wait-test`, `weekly-test`, `bin/gate-tests`, `gate.crops check` (0 problems), `bin/crops-score --judge --strict`,
+`test/docs/claude-md-test.bash`, `bin/gate --plan` (51 steps), `bin/gate --full --plan` (338 steps, 358 before less the 20 merged away; no `night` decision: the full tier keys every subset as before). No build, no gate run.
