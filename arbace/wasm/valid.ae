@@ -197,6 +197,8 @@
 (defn- addr [m] (if (:i64 m) 'i64 'i32))
 
 (defn- check-memtype [m]
+  ;; a shared memory (threads, queue 326) has a maximum
+  (when (:shared m) (require! (some? (:max m)) "shared memory must have maximum"))
   ;; a custom page size (queue 326, beyond Wasm 3.0): 1 or 64 KiB, the bounds in its pages
   (when-let [p (:page m)] (require! (#{0 16} (long p)) "invalid custom page size"))
   (cond
@@ -324,6 +326,22 @@
     (cond (nil? t) [[] []]
           (vector? t) (let [v (vt (first t))] (check-val c v) [[] [v]])
           :else (func-type c t))))
+
+(defn- atomic-sig
+  "An atomic instruction's [SIZE INS OUTS] over a memory of address type at (threads, queue 326), or nil."
+  [^String nm at]
+  (let [t (when (re-find #"^i(32|64)\.atomic\." nm) (symbol (subs nm 0 3)))]
+    (cond
+      (= nm "memory.atomic.notify") [4 [at 'i32] '[i32]]
+      (= nm "memory.atomic.wait32") [4 [at 'i32 'i64] '[i32]]
+      (= nm "memory.atomic.wait64") [8 [at 'i64 'i64] '[i32]]
+      t (let [size (if-let [[_ k] (re-find #"^i(?:32|64)\.atomic\.(?:load|store|rmw)(\d+)" nm)]
+                     (quot (Long/parseLong k) 8)
+                     (quot (Long/parseLong (subs nm 1 3)) 8))]
+          (cond (re-find #"\.atomic\.load" nm) [size [at] [t]]
+                (re-find #"\.atomic\.store" nm) [size [at t] []]
+                (re-find #"cmpxchg" nm) [size [at t t] [t]]
+                :else [size [at t] [t]])))))
 
 (defn- check-memop
   "valid.ml's check_memop, with the testsuite's rule for the offset: its bound is the accessed memory's address type (wg-3.0's
@@ -458,6 +476,8 @@
                    (sig [(:at t1) 'i32 'i32] []))
       elem.drop (do (elem c a1) (sig [] []))
       memory.size (let [m (memory c a1)] (sig [] [(addr m)]))
+      ;; threads (queue 326): a fence, the atomic accesses (natural alignment exactly)
+      atomic.fence (sig [] [])
       memory.grow (let [m (memory c a1)] (sig [(addr m)] [(addr m)]))
       memory.fill (let [m (memory c a1)] (sig [(addr m) 'i32 (addr m)] []))
       memory.copy (let [m1 (memory c a1) m2 (memory c (nth e 2))
@@ -536,6 +556,12 @@
       i8x16.shuffle (do (require! (every? #(< (long %) 32) a1) "invalid lane index") (sig '[v128 v128] '[v128]))
       ;; the rest: numeric and vector instructions, memory accesses, lanes
       (let [s-nm (str nm) k (.indexOf s-nm ".") shape (subs s-nm 0 (max k 0)) op (subs s-nm (inc k))]
+        (if (atomic-sig s-nm 'i32)
+          (let [mm (memory c (long (:memory a1 0)))
+                [size ins outs] (atomic-sig s-nm (addr mm))]
+            (check-memop mm a1 size)
+            (require! (= (long (:align a1)) (Long/numberOfTrailingZeros (long size))) "atomic alignment must be natural")
+            (sig ins outs))
         (if-let [[size store? lane?] (when (pos? k) (mem-size shape op))]
           (let [m (if lane? a1 a1)
                 mi (long (:memory m 0))
@@ -555,7 +581,7 @@
             :else
             (if-let [[ins outs] (sigs nm)]
               (sig ins outs)
-              (invalid (str "unknown instruction " s-nm)))))))))
+              (invalid (str "unknown instruction " s-nm))))))))))
 
 (defn- init-locals [c xs]
   (if (seq xs)

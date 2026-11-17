@@ -11,14 +11,21 @@ by repr/go's native reader (`bin/repr-go read --goos linux --goarch amd64`, one 
 
 ## 1. Breadth
 
-Wasm 3.0 and the legacy exceptions (WA8), but threads: the MVP, sign extension, saturating conversions, multi-value, bulk memory and tables,
+Wasm 3.0 and the legacy exceptions (WA8), and since queue 326 threads (one thread, below): the MVP, sign extension, saturating conversions, multi-value, bulk memory and tables,
 reference types, multiple tables and memories, memory64 and table64, SIMD128 and relaxed SIMD, tail calls, exceptions (`try_table`,
 `throw`, `throw_ref`, `exnref`), typed function references, extended constant expressions, GC (structs, arrays, `i31`, casts,
 `any.convert_extern`, the subtyping of iso-recursive canonical types), and since WA8 the legacy exceptions (`try`, `catch`,
 `catch_all`, `delegate`, `rethrow`; §3), and since queue 326 the wide arithmetic proposal (`i64.add128`, `i64.sub128`, `i64.mul_wide_s`,
 `i64.mul_wide_u`: 0xfc 19-22, two i64 results, the low half first; `math/bits`' `Add64`, `Sub64`, `Mul64`), the compact import
 section (both encodings, decoded and validated as the imports they stand for) and custom page sizes (`Limits.CustomPage` and
-`PageExp`, `PageSize`: 1 byte or 64 KiB, `memory.size` and `memory.grow` in its pages, an import's page size matched exactly). A module using what is not built (a shared memory, an atomic) is refused at decoding as
+`PageExp`, `PageSize`: 1 byte or 64 KiB, `memory.size` and `memory.grow` in its pages, an import's page size matched exactly).
+
+Threads (queue 326, round 2; `proposals/threads`): shared memories (`Limits.Shared`, a maximum required, an import's sharing matched
+exactly, spectest's `shared_memory`), the atomic accesses (0xfe: loads, stores, the read-modify-writes and `cmpxchg` over
+`atomicAt`, which traps "unaligned atomic" at an address not aligned to the access, their alignment immediate exactly natural),
+`memory.atomic.notify` (0 woken), `memory.atomic.wait32`/`wait64` ("expected shared memory" on another, else 1 not-equal or 2
+timed-out: wai runs one thread, so nothing can wake a wait) and `atomic.fence`. With one thread an atomic access is a plain one; the
+scripts have no `thread` command. A module using what is not built (a shared memory, an atomic) is refused at decoding as
 `unimplemented: FEATURE (WHAT)`, not as malformed.
 
 Since WA5 wai validates every module before it decodes it (`valid.go`, §7; WAS30 (a)): the driver runs no module its own validator

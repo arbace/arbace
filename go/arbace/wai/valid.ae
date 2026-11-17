@@ -358,6 +358,10 @@
 
 ^{:go/end 333} (go/method memType ^Limits [^{:tag (* validator)} v]
   (let [l (.limits v)]
+    ;; a shared memory has a maximum (threads, queue 326)
+    (when (and (.-Shared l) (not (.-HasMax l)))
+      (invalid "shared memory must have maximum"))
+
     ;; a custom page size (queue 326, beyond Wasm 3.0): 1 or 64 KiB, the bounds in its pages
     (when (and (.-CustomPage l) (!= (.-PageExp l) 0) (!= (.-PageExp l) 16))
       (invalid "invalid custom page size"))
@@ -1010,9 +1014,6 @@
       (switch b
         (case [0xfb 0xfc 0xfd 0xfe]
           (let [x (.u32 r)]
-            (when (== b 0xfe)
-              (panic (addr (lit Unimplemented "threads" (fmt/Sprintf "atomic 0x%x" x)))))
-
             (set! op (aget prefixed (bit-or (<< (conv uint32 b) 24) x)))))
         (default
           (set! op (aget oneByte b))))
@@ -1145,6 +1146,31 @@
   (let [s (addr (lit opSig))
       ^{:line 1104} nm (.-name (aget opInfos op))
       ^{:line 1105} k (strings/IndexByte nm \.)]
+    ;; the atomic accesses (threads, queue 326): their size, the address type the caller pops
+    (when [n (aget atomicSize op)] (> n 0)
+      (let [t i32T]
+        (when (strings/HasPrefix nm "i64.")
+          (set! t i64T))
+
+        (switch
+          (case [(== nm "memory.atomic.notify")]
+            (set! @s (lit opSig :in (lit (slice ValType) i32T) :out (lit (slice ValType) i32T) :mem 4 :ok true)))
+          (case [(== nm "memory.atomic.wait32")]
+            (set! @s (lit opSig :in (lit (slice ValType) i32T i64T) :out (lit (slice ValType) i32T) :mem 4 :ok true)))
+          (case [(== nm "memory.atomic.wait64")]
+            (set! @s (lit opSig :in (lit (slice ValType) i64T i64T) :out (lit (slice ValType) i32T) :mem 8 :ok true)))
+          (case [(strings/Contains nm ".atomic.load")]
+            (set! @s (lit opSig :out (lit (slice ValType) t) :mem (conv uint64 n) :ok true)))
+          (case [(strings/Contains nm ".atomic.store")]
+            (set! @s (lit opSig :in (lit (slice ValType) t) :mem (conv uint64 n) :store true :ok true)))
+          (case [(strings/Contains nm "cmpxchg")]
+            (set! @s (lit opSig :in (lit (slice ValType) t t) :out (lit (slice ValType) t) :mem (conv uint64 n) :ok true)))
+          (default
+            (set! @s (lit opSig :in (lit (slice ValType) t) :out (lit (slice ValType) t) :mem (conv uint64 n) :ok true))))
+
+        (aset sigCache op s)
+        (return s)))
+
     (when (> k 0)
       (let [(values shape o) (values (subslice nm _ k) (subslice nm (+ k 1)))
           (values t isNum) (shapeType shape)
@@ -1745,9 +1771,23 @@
 
               (return)))
 
+          (when (== op OpAtomicFence)
+            (when (!= (.u8 r) 0)
+              (panic (addr (lit Malformed "zero byte expected"))))
+
+            (return))
+
           (let [s (sigOf op)]
             (when (not (.-ok s))
               (panic (addr (lit Unimplemented "validation" nm))))
+
+            ;; an atomic access (threads, queue 326): its alignment exactly natural
+            (when (> (aget atomicSize op) 0)
+              (let [p (.-p r)
+                  f (.u32 r)]
+                (set! (.-p r) p)
+                (when (!= (<< (conv uint64 1) (bit-and-not f 0x40)) (.-mem s))
+                  (invalid "atomic alignment must be natural"))))
 
             (when (> (.-mem s) 0)
               (let [l (.memarg v (.-mem s))]

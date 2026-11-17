@@ -190,13 +190,13 @@
   ([r] (limits r false))
   ([r mem?]
    (let [at (pos r) flags (u8 r)]
-     ;; a memory's flag 0x08: a custom page size's log2 after the limits (queue 326, beyond Wasm 3.0)
-     (when-not (zero? (bit-and flags (if mem? 0xf2 0xfa))) (malformed "malformed limits flags" at))
+     ;; a memory's flag 0x08: a custom page size's log2 after the limits, 0x02: shared (queue 326, beyond Wasm 3.0)
+     (when-not (zero? (bit-and flags (if mem? 0xf0 0xfa))) (malformed "malformed limits flags" at))
      (let [i64? (= 4 (bit-and flags 4))
            mn (if i64? (u64 r) (u64 r))
            mx (when (= 1 (bit-and flags 1)) (u64 r))
            p (when (= 8 (bit-and flags 8)) (let [at (pos r) p (u32 r)] (when (>= p 64) (malformed "invalid custom page size" at)) p))]
-       (cond-> {:min mn} mx (assoc :max mx) i64? (assoc :i64 true) p (assoc :page p))))))
+       (cond-> {:min mn} mx (assoc :max mx) i64? (assoc :i64 true) (= 2 (bit-and flags 2)) (assoc :shared true) p (assoc :page p))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; instructions
@@ -242,6 +242,8 @@
 (defn- imm [r nm kind]
   (case kind
     :none (nullary nm)
+    ;; a reserved zero byte (threads' atomic.fence, queue 326)
+    :zero (let [at (pos r)] (when-not (zero? (u8 r)) (malformed "zero byte expected" at)) (list nm))
     :idx (list nm (u32 r))
     :idx2 (let [x (u32 r) y (u32 r)] (list nm x y))
     :idx2-rev (let [y (u32 r) x (u32 r)] (list nm x y))
@@ -655,7 +657,7 @@
     (wcomp w t)))
 
 (defn- wlimits [w l]
-  (w8 w (+ (if (:max l) 1 0) (if (:i64 l) 4 0) (if (:page l) 8 0)))
+  (w8 w (+ (if (:max l) 1 0) (if (:shared l) 2 0) (if (:i64 l) 4 0) (if (:page l) 8 0)))
   (wuleb w (:min l))
   (when (:max l) (wuleb w (:max l)))
   (when (:page l) (wuleb w (:page l))))
@@ -720,6 +722,7 @@
         (wop w p c)
         (case kind
           :none nil
+          :zero (w8 w 0)
           :idx (wuleb w (nth x 1))
           :idx2 (do (wuleb w (nth x 1)) (wuleb w (nth x 2)))
           :idx2-rev (do (wuleb w (nth x 2)) (wuleb w (nth x 1)))

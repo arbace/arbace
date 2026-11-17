@@ -110,15 +110,30 @@
    "array.new_data" [:type :data false] "array.new_elem" [:type :elem false] "array.init_data" [:type :data false]
    "array.init_elem" [:type :elem false] "memory.init" [:memory :data true] "table.init" [:table :elem true]})
 
+(defn atomic-size
+  "An atomic instruction's access size in bytes (threads, queue 326), or nil: memory.atomic.notify and wait32 4, wait64 8,
+  iN.atomic.loadK, storeK, rmwK K/8, else N/8."
+  [^String nm]
+  (cond
+    (= nm "memory.atomic.notify") 4
+    (= nm "memory.atomic.wait32") 4
+    (= nm "memory.atomic.wait64") 8
+    (re-find #"^i(32|64)\.atomic\." nm)
+    (if-let [[_ k] (re-find #"^i(?:32|64)\.atomic\.(?:load|store|rmw)(\d+)" nm)]
+      (quot (Long/parseLong k) 8)
+      (quot (Long/parseLong (subs nm 1 3)) 8))))
+
 (defn- natural-align
   "The natural alignment exponent of a load or store."
   ^long [^String nm]
+  (if-let [n (atomic-size nm)]
+    (Long/numberOfTrailingZeros (long n))
   (let [[_ a _ b] (re-find #"(?:load|store)(\d+)(x(\d+))?" nm)
         bits (cond b (* (Long/parseLong a) (Long/parseLong b))
                    a (Long/parseLong a)
                    (.startsWith nm "v128") 128
                    :else (Long/parseLong (subs nm 1 3)))]
-    (Long/numberOfTrailingZeros (quot bits 8))))
+    (Long/numberOfTrailingZeros (quot bits 8)))))
 
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; the context: index spaces and their identifiers
@@ -263,6 +278,11 @@
                    (let [i (count @(:types ctx))] (swap! (:types ctx) conj ft) (swap! (:implicit ctx) conj ft) i))
                ids more])))))
 
+(defn- shared
+  "A memory's `shared` at the head of xs (threads, queue 326): [shared? rest]."
+  [xs]
+  (if (lex/kw? (first xs) "shared") [true (rest xs)] [false xs]))
+
 (defn- pagesize
   "A memory's `(pagesize N)` at the head of xs (the custom page sizes proposal, queue 326, beyond Wasm 3.0): [LOG2 rest],
   LOG2 nil when there is none; N a power of two, else malformed."
@@ -379,6 +399,7 @@
                   [(list nmsym) xs]))
               [(list nmsym) xs])
       :select-t [(list nmsym []) xs]
+      :zero [(list nmsym) xs]
       :idx (let [sp (idx-space nm)]
              (if (and (#{:table :memory} sp) (not (idx? (first xs))))
                [(list nmsym 0) xs]
@@ -732,9 +753,9 @@
                 :global (let [[g more] [(first ds) (rest ds)]]
                           (when (or (nil? g) (seq more)) (malformed "unexpected token" d))
                           ['global (if (lex/list-of? g "mut") {:type (valtype ctx (second (:xs g))) :mut true} {:type (valtype ctx g) :mut false})])
-                :memory (let [[l more] (limits ctx ds d) [p more] (pagesize more)]
+                :memory (let [[l more] (limits ctx ds d) [sh more] (shared more) [p more] (pagesize more)]
                           (when (seq more) (malformed "unexpected token" (first more)))
-                          ['memory (cond-> l p (assoc :page p))])
+                          ['memory (cond-> l sh (assoc :shared true) p (assoc :page p))])
                 :table (let [[l more] (limits ctx ds d)]
                          (when-not (= 1 (count more)) (malformed "unexpected token" d))
                          ['table (assoc l :type (valtype ctx (first more)))]))]
@@ -831,7 +852,7 @@
                              di (next! :data)]
                          (add! :memory (list 'wasm/memory i (cond-> {:min pages :max pages} i64? (assoc :i64 true) p (assoc :page p))))
                          (add! :data (list 'wasm/data di {:active {:memory i :offset [(list (if i64? 'i64.const 'i32.const) 0)]}} bs)))
-                       (let [[l more] (limits ctx ys f) [p more] (pagesize more) l (cond-> l p (assoc :page p))]
+                       (let [[l more] (limits ctx ys f) [sh more] (shared more) [p more] (pagesize more) l (cond-> l sh (assoc :shared true) p (assoc :page p))]
                          (when (seq more) (malformed "unexpected token" (first more)))
                          (if imp
                            (add! :import (list 'wasm/import (first imp) (second imp) (list 'memory i l)))
