@@ -1,6 +1,6 @@
 /*
  * jrt's own java.util.GregorianCalendar for the Go build (doc/go/JRT-NOTES.md, phase 2B "Dates"). Parts of its code
- * (computeTime and its field resolution, add, roll, getWeekYear, setWeekDate, getWeeksInWeekYear, the week numbering, getActualMaximum, the field tables, the fields' states after computeTime and computeFields) are transcribed from openjdk/jdk26u at baf63fb,
+ * (the empty instance of Calendar.Builder, computeTime and its field resolution, add, roll, getWeekYear, setWeekDate, getWeeksInWeekYear, the week numbering, getActualMaximum, the field tables, the fields' states after computeTime and computeFields) are transcribed from openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/java/util/GregorianCalendar.java, Copyright (c) Oracle and/or its affiliates,
  * under the GNU General Public License version 2 with the Classpath Exception (LICENSE.md);
  * the rest is Arbace's own.
@@ -71,6 +71,12 @@ public class GregorianCalendar extends Calendar {
         super(zone, aLocale);
         setCutover(DEFAULT_GREGORIAN_CUTOVER);
         setTimeInMillis(System.currentTimeMillis());
+    }
+
+    /** jdk26u's empty instance (Calendar.Builder's): no time and no field set. */
+    GregorianCalendar(TimeZone zone, Locale locale, boolean flag) {
+        super(zone, locale);
+        setCutover(DEFAULT_GREGORIAN_CUTOVER);
     }
 
     public GregorianCalendar(int year, int month, int dayOfMonth) {

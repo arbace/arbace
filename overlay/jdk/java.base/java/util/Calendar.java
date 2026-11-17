@@ -2,7 +2,7 @@
  * jrt's own java.util.Calendar for the Go build (doc/go/JRT-NOTES.md, phase 2B "Dates" and "Text
  * and locales"). Parts of its code (the field resolution of selectFields, the stamps,
  * adjustStamp, equals, hashCode, toString; the week parameters by locale, setWeekCountData; the
- * fields' states, getSetStateFields, setFieldsComputed, setFieldsNormalized; the display names, getDisplayName, getDisplayNames and their helpers) are transcribed from openjdk/jdk26u at baf63fb,
+ * fields' states, getSetStateFields, setFieldsComputed, setFieldsNormalized; the display names, getDisplayName, getDisplayNames and their helpers; Calendar.Builder and defaultTimeZone) are transcribed from openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/java/util/Calendar.java, Copyright (c) Oracle and/or its affiliates,
  * under the GNU General Public License version 2 with the Classpath Exception (LICENSE.md);
  * the rest is Arbace's own.
@@ -145,6 +145,268 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
 
     public static Calendar getInstance(TimeZone zone, Locale aLocale) {
         return new GregorianCalendar(zone, aLocale);
+    }
+
+    // jdk26u's defaultTimeZone: the locale's "tz" extension's zone, else the default
+    private static TimeZone defaultTimeZone(Locale l) {
+        TimeZone defaultTZ = TimeZone.getDefault();
+        String shortTZID = l.getUnicodeLocaleType("tz");
+        return shortTZID != null ?
+            sun.util.locale.provider.TimeZoneNameUtility.convertLDMLShortID(shortTZID)
+                .map(TimeZone::getTimeZone)
+                .orElse(defaultTZ) :
+            defaultTZ;
+    }
+
+    /**
+     * jdk26u's Calendar.Builder. jrt's calendars are Gregorian only: the types "gregory" (also
+     * "gregorian") and "iso8601" are built, any other, the JDK's "buddhist" and "japanese" among
+     * them, is refused with the JDK's IllegalArgumentException for an unknown type.
+     */
+    public static class Builder {
+        private static final int NFIELDS = FIELD_COUNT + 1; // +1 for WEEK_YEAR
+        private static final int WEEK_YEAR = FIELD_COUNT;
+
+        private long instant;
+        // Calendar.stamp[] (lower half) and Calendar.fields[] (upper half) combined
+        private int[] fields;
+        // Pseudo timestamp starting from MINIMUM_USER_STAMP.
+        // (COMPUTED is used to indicate that the instant has been set.)
+        private int nextStamp;
+        // maxFieldIndex keeps the max index of fields which have been set.
+        // (WEEK_YEAR is never included.)
+        private int maxFieldIndex;
+        private String type;
+        private TimeZone zone;
+        private boolean lenient = true;
+        private Locale locale;
+        private int firstDayOfWeek, minimalDaysInFirstWeek;
+
+        public Builder() {
+        }
+
+        public Builder setInstant(long instant) {
+            if (fields != null) {
+                throw new IllegalStateException();
+            }
+            this.instant = instant;
+            nextStamp = COMPUTED;
+            return this;
+        }
+
+        public Builder setInstant(Date instant) {
+            return setInstant(instant.getTime()); // NPE if instant == null
+        }
+
+        public Builder set(int field, int value) {
+            // Note: WEEK_YEAR can't be set with this method.
+            if (field < 0 || field >= FIELD_COUNT) {
+                throw new IllegalArgumentException("field is invalid");
+            }
+            if (isInstantSet()) {
+                throw new IllegalStateException("instant has been set");
+            }
+            allocateFields();
+            internalSet(field, value);
+            return this;
+        }
+
+        public Builder setFields(int... fieldValuePairs) {
+            int len = fieldValuePairs.length;
+            if ((len % 2) != 0) {
+                throw new IllegalArgumentException();
+            }
+            if (isInstantSet()) {
+                throw new IllegalStateException("instant has been set");
+            }
+            if ((nextStamp + len / 2) < 0) {
+                throw new IllegalStateException("stamp counter overflow");
+            }
+            allocateFields();
+            for (int i = 0; i < len; ) {
+                int field = fieldValuePairs[i++];
+                // Note: WEEK_YEAR can't be set with this method.
+                if (field < 0 || field >= FIELD_COUNT) {
+                    throw new IllegalArgumentException("field is invalid");
+                }
+                internalSet(field, fieldValuePairs[i++]);
+            }
+            return this;
+        }
+
+        public Builder setDate(int year, int month, int dayOfMonth) {
+            return setFields(YEAR, year, MONTH, month, DAY_OF_MONTH, dayOfMonth);
+        }
+
+        public Builder setTimeOfDay(int hourOfDay, int minute, int second) {
+            return setTimeOfDay(hourOfDay, minute, second, 0);
+        }
+
+        public Builder setTimeOfDay(int hourOfDay, int minute, int second, int millis) {
+            return setFields(HOUR_OF_DAY, hourOfDay, MINUTE, minute,
+                             SECOND, second, MILLISECOND, millis);
+        }
+
+        public Builder setWeekDate(int weekYear, int weekOfYear, int dayOfWeek) {
+            allocateFields();
+            internalSet(WEEK_YEAR, weekYear);
+            internalSet(WEEK_OF_YEAR, weekOfYear);
+            internalSet(DAY_OF_WEEK, dayOfWeek);
+            return this;
+        }
+
+        public Builder setTimeZone(TimeZone zone) {
+            if (zone == null) {
+                throw new NullPointerException();
+            }
+            this.zone = zone;
+            return this;
+        }
+
+        public Builder setLenient(boolean lenient) {
+            this.lenient = lenient;
+            return this;
+        }
+
+        public Builder setCalendarType(String type) {
+            if (type.equals("gregorian")) { // NPE if type == null
+                type = "gregory";
+            }
+            if (!Calendar.getAvailableCalendarTypes().contains(type)
+                    && !type.equals("iso8601")) {
+                throw new IllegalArgumentException("unknown calendar type: " + type);
+            }
+            if (this.type == null) {
+                this.type = type;
+            } else {
+                if (!this.type.equals(type)) {
+                    throw new IllegalStateException("calendar type override");
+                }
+            }
+            return this;
+        }
+
+        public Builder setLocale(Locale locale) {
+            if (locale == null) {
+                throw new NullPointerException();
+            }
+            this.locale = locale;
+            return this;
+        }
+
+        public Builder setWeekDefinition(int firstDayOfWeek, int minimalDaysInFirstWeek) {
+            if (!isValidWeekParameter(firstDayOfWeek)
+                    || !isValidWeekParameter(minimalDaysInFirstWeek)) {
+                throw new IllegalArgumentException();
+            }
+            this.firstDayOfWeek = firstDayOfWeek;
+            this.minimalDaysInFirstWeek = minimalDaysInFirstWeek;
+            return this;
+        }
+
+        public Calendar build() {
+            if (locale == null) {
+                locale = Locale.getDefault();
+            }
+            if (zone == null) {
+                zone = defaultTimeZone(locale);
+            }
+            if (type == null) {
+                type = locale.getUnicodeLocaleType("ca");
+            }
+            if (type == null) {
+                // jdk26u compares the interned strings by identity
+                if ("TH".equals(locale.getCountry())
+                    && "th".equals(locale.getLanguage())) {
+                    type = "buddhist";
+                } else {
+                    type = "gregory";
+                }
+            }
+            final Calendar cal = switch (type) {
+                case "gregory" -> new GregorianCalendar(zone, locale, true);
+                case "iso8601" -> {
+                    GregorianCalendar gcal = new GregorianCalendar(zone, locale, true);
+                    // make gcal a proleptic Gregorian
+                    gcal.setGregorianChange(new Date(Long.MIN_VALUE));
+                    // and week definition to be compatible with ISO 8601
+                    setWeekDefinition(MONDAY, 4);
+                    yield gcal;
+                }
+                // jrt has no Buddhist or Japanese calendar
+                default -> throw new IllegalArgumentException("unknown calendar type: " + type);
+            };
+            cal.setLenient(lenient);
+            if (firstDayOfWeek != 0) {
+                cal.setFirstDayOfWeek(firstDayOfWeek);
+                cal.setMinimalDaysInFirstWeek(minimalDaysInFirstWeek);
+            }
+            if (isInstantSet()) {
+                cal.setTimeInMillis(instant);
+                cal.complete();
+                return cal;
+            }
+
+            if (fields != null) {
+                boolean weekDate = isSet(WEEK_YEAR)
+                                       && fields[WEEK_YEAR] > fields[YEAR];
+                if (weekDate && !cal.isWeekDateSupported()) {
+                    throw new IllegalArgumentException("week date is unsupported by " + type);
+                }
+
+                // Set the fields from the min stamp to the max stamp so that
+                // the fields resolution works in the Calendar.
+                for (int stamp = MINIMUM_USER_STAMP; stamp < nextStamp; stamp++) {
+                    for (int index = 0; index <= maxFieldIndex; index++) {
+                        if (fields[index] == stamp) {
+                            cal.set(index, fields[NFIELDS + index]);
+                            break;
+                        }
+                    }
+                }
+
+                if (weekDate) {
+                    int weekOfYear = isSet(WEEK_OF_YEAR) ? fields[NFIELDS + WEEK_OF_YEAR] : 1;
+                    int dayOfWeek = isSet(DAY_OF_WEEK)
+                                    ? fields[NFIELDS + DAY_OF_WEEK] : cal.getFirstDayOfWeek();
+                    cal.setWeekDate(fields[NFIELDS + WEEK_YEAR], weekOfYear, dayOfWeek);
+                }
+                cal.complete();
+            }
+
+            return cal;
+        }
+
+        private void allocateFields() {
+            if (fields == null) {
+                fields = new int[NFIELDS * 2];
+                nextStamp = MINIMUM_USER_STAMP;
+                maxFieldIndex = -1;
+            }
+        }
+
+        private void internalSet(int field, int value) {
+            fields[field] = nextStamp++;
+            if (nextStamp < 0) {
+                throw new IllegalStateException("stamp counter overflow");
+            }
+            fields[NFIELDS + field] = value;
+            if (field > maxFieldIndex && field < WEEK_YEAR) {
+                maxFieldIndex = field;
+            }
+        }
+
+        private boolean isInstantSet() {
+            return nextStamp == COMPUTED;
+        }
+
+        private boolean isSet(int index) {
+            return fields != null && fields[index] > UNSET;
+        }
+
+        private boolean isValidWeekParameter(int value) {
+            return value > 0 && value <= 7;
+        }
     }
 
     public static synchronized Locale[] getAvailableLocales() {
