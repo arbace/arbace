@@ -10384,3 +10384,24 @@ definition whose declarator is not a function's (tried: the checker then runs an
 tail; not kept); eval-depth's five limits-*.c rows: the parse stops at MAX-NEST 4000 by design and the converter never sees those
 trees, so no converter change helps without moving the cap (a DECISION for the user: an explicit stack in the parser's nesting
 productions and every tree walker after it, or the rows kept deferred).
+
+## 2026-11-17: gc's -m of generic instances, goi's `gc-m` 4 to 1 (branch `n-go-gcm`, night round 52, from `next` `42bf8614b` with `n-review-a`)
+
+The four `-m` programs of `gc-m` were about generic instances: `arbace.go.escape` left out every declaration that was generic or
+used generics, so `typeparam/pragma.go` and `typeparam/issue54497.go` lost all their lines and `devirtualization.go` its generic
+type's. Studied gc's unified IR stenciling (TamaGo's go1.27.1, `src/cmd/compile/internal/noder/reader.go`: `objIdx`, `Shapify`,
+`shapeSig`, `syntheticBody`, `callShaped`; `escape/escape.go`'s `paramTag`, which reports nothing for Wrapper and DUPOK functions;
+`cmd/internal/testdir`'s errorCheck, which drops other files' lines). Built (`arbace/go/escape.ae`'s `stencil`): for each
+instantiation the package's code reaches, the shaped function `f[go.shape.T]` (the generic body at the shapes) and the wrapper
+`f[T]` (a tail call of it), both with the generic declaration's pragmas; a generic type's instances' methods likewise, the
+devirtualized call to the wrapper; calls from non-generic code to the shaped function directly; instance names with types2's
+`uint8`/`int32`. A type assertion to `any` printed `(any)` again (the form is `(assert T x)`). Not modelled: the `.dict`
+parameter (only `-m=2`'s costs see it). The tags' cache version moved to `escape-9` (standard packages' own generic uses now
+analyzed). Proof, light (the gate's executable `e8e0d017243dca8a9f9f`, the checkout's goi, each process under 1 GiB): the three
+pass; `--list` of the 76 `-m` programs 59 pass, no regression; Go eval 1759 / 70 / 5 to 1762 / 70 / 2, reap and crops-score
+re-recorded. `escape_unique.go` stays in `gc-m` (deferred), narrowed: another package's generic instances, which gc stencils in
+the importer, and an executable whose table has `unique`. Decisions taken overnight (round 52): keep it deferred (Proposed 1, (a)
+recommended for goi's next generics round, 1-2 days); the `.dict` parameter not modelled (Proposed 2). Alternatives considered:
+dropping only generic declarations and keeping their users (their calls then an unknown callee's: wrong tags and no instance
+lines); substituting named generic types in the shaped receivers through the checker's `instantiate` (needs the checker's
+context; the receiver keeps its generic type instead). doc/go/GOI-SPEC.md "Since v1: gc's -m of generic instances".

@@ -5218,6 +5218,67 @@ object and nil once collected; unique's handles equal per value and type, `any`'
 in `any` panicking, an entry made again after collection. The records: weak.go `:pass`, issue11614 `:pass`, escape_unique
 `:known`; issue68415 waits for an executable built with the table (the main host), `:std-weak-unique` kept for it until then.
 
+## Since v1: gc's -m of generic instances (2026-11-17, branch `n-go-gcm`, night round 52)
+
+The class `gc-m` (deferred: "generic functions' instances, with goi's next round of generics", Decided 2026-11-06) held four
+programs: `typeparam/pragma.go`, `typeparam/issue54497.go`, `devirtualization.go` and `escape_unique.go`. All four are about the
+instances gc compiles of generic code: `arbace.go.escape` left out every declaration that was generic or used generics (the
+checker's `:generic`), so `pragma.go` lost even `can inline main` and `issue54497.go` all five of its lines.
+
+**What gc does** (Go 1.27.1, `cmd/compile/internal/noder/reader.go`: `objIdx`, `objDictIdx`, `Shapify`, `shapeSig`,
+`syntheticBody`, `callShaped`; `inline/inl.go`; `escape/escape.go`'s `paramTag`). Unified IR stencils each instantiation that the
+package's code reaches into two functions: the shaped function `f[go.shape.T]` (the generic body at the type arguments' shapes,
+their underlying types, a pointer's `*uint8` under a basic interface constraint, with a leading `.dict` parameter; DUPOK) and the
+wrapper `f[T]` (a synthetic tail call of the shaped function with `&.dict.f[T]`; a Wrapper), both with the generic function's
+pragmas (so `go:noinline` reaches both, `pragma.go`'s point). A call `f(x)` in non-generic code calls the shaped function
+directly; a function value is the wrapper. An instance of a generic type gets each method's shaped `T[go.shape.U].M` and wrapper
+`T[U].M`; a devirtualized call goes to the wrapper. `paramTag` reports nothing for a Wrapper's or a DUPOK function's parameters;
+the inliner reports both (`can inline isAligned[uint]`, `can inline isAligned[go.shape.uint]`, and in the wrapper `inlining call
+to isAligned[go.shape.uint]` at the declaration's line). An instance's name spells its type arguments as types2 links them
+(`GenericAImpl[uint8]`, not `byte`).
+
+**As built** (`arbace/go/escape.ae`, `stencil` and its helpers before `analyze-package`). Before the analysis the package's function
+declarations are stenciled: a generic function (or a generic type's methods, all of them or none) is covered when its body's types
+hold no instance of another package's generic type and its type parameters are never the operand of a selection, a method call or
+a type assertion (gc's dictionary calls, not ported); a non-generic declaration that uses generics is kept when every instance it
+names is covered (else it is left out, as before). Each instantiation reached from kept code, then transitively from the
+instances' bodies, makes the shaped function (the generic body copied, its local objects fresh, every type parameter replaced by
+its shape, `isubst`) and, from non-generic code or a function value, the wrapper (a synthetic tail call, a method's through its
+receiver); each instance type the kept code's types name makes its methods' pair (`:minst`, which `dv-call`'s devirtualization
+consults). The shaped functions and wrappers are records with `:wrapper` (no parameter diagnostics) and the generic declaration's
+pragmas. Not modelled: the `.dict` parameter and argument (their inlining cost, a node or two: a `-m=2` cost line would differ),
+shapes of struct types written by `type-str` rather than `LinkString`, and the shaped receiver's type (it keeps the generic type,
+`T[U]` with U a type parameter). Two message fixes on the way: a type assertion to `any` printed as `any` (the form is
+`(assert T x)`: the check read its last element), and type arguments' `byte` and `rune` as `uint8` and `int32` in instances' names.
+
+The tags' cache version (`tag-version`) moves to `escape-9`: a standard package's non-generic functions that use its own generic
+functions are now analyzed (they were left out, their calls an unknown callee's), so the cached tags are made again by the next
+`bin/goi check`'s warm-up (about 22 minutes from an empty cache, its processes up to 1.5 GB: the main host's night).
+
+**Results** (`bin/goi check --only`, the gate's executable `e8e0d017243dca8a9f9f`, the checkout's goi by `ARBACE_PATH`, each process
+under 1 GiB): `typeparam/pragma.go`, `typeparam/issue54497.go` and `devirtualization.go` pass (devirtualization's composite literal at
+its brace, check-known's other reason, passes since the errorcheck programs run on mode `:full`'s forms); the class `gc-m` keeps
+`escape_unique.go` alone, narrowed to its cause: the instances of another package's generic functions and types (`unique.Make[T]`,
+`unique.Handle[T]`), which gc stencils in the importing package from the export data's bodies (the lines they make are in
+`unique`'s files, which errorcheck filters out, but the tags they give `f1`..`f6a` are the program's lines), and which goi's run
+cannot import before an executable built with the weak and unique table (the main host's build). `bin/goi check --list` of the 76 `-m` programs (65 recorded ids; two jobs, the std tags of `escape-8` from
+h-go-noforms' cache, since the new version's are the night's): 59 pass (56 before), 0 fail, 5 unsupported and 1 known as recorded,
+no regression. `bin/goi divergences`: linux/amd64 1,762 of 1,837 pass (1,759 before), `gc-m` 1 (4); reap's Go eval 1759 / 70 / 5
+to 1762 / 70 / 2; crops-score's Go completeness 99 (meant 100). `arbace/go/escape.ae` is embedded: gate_key moves.
+
+### Proposed
+
+1. **`escape_unique.go`: other packages' generic instances.** (a) Stencil an imported generic function or type in the importing
+   package from its forms (the std forms, `*import-root*`), as gc does from export data: its body checked by goi's checker in the
+   escape session (as the tags' loads do), copied at the shapes, its callees' instances transitively (unique's `Make` reaches
+   `internal/sync`'s `HashTrieMap[...]`, `internal/abi`'s `Escape` and unique's clone): 1-2 days, 1 program, after the main
+   host's build makes `unique` importable; memory bounded by the session's (the instances' packages are among the tags' already).
+   (b) Keep it deferred in `gc-m`. *Recommended: (a)*, in goi's next generics round. Taken overnight (round 52): the class kept
+   deferred, narrowed to (a)'s scope, until the user picks.
+2. **The `.dict` parameter.** Model it (a leading `*[N]uintptr` parameter of the shaped function, `&.dict.f[T]` at the wrapper's
+   and the call sites): only `-m=2`'s costs see it; no program of the check needs it. *Recommended: not now.* Taken overnight
+   (round 52).
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,
