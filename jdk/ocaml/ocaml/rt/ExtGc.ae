@@ -41,11 +41,23 @@
   (field ^:static ^long majorAsked 0)
   (field ^:static ^long compactions 0)
   (field ^:static ^long cycles 0)
-  (field ^:static ^WeakReference canary (WeakReference. (Object.)))
+  ;; The canary is never read by get: a get while Go's collector marks makes the referent strong for that cycle, so a program that
+  ;; reads Gc's counters in a loop (weaklifetime: until 20 major collections) kept the canary alive through every one of Go's
+  ;; collections and its count at zero (queue 323: 100 of Go's collections, none counted). Its collection is seen on its queue
+  ;; instead (jrt's cleanup enqueues it: nothing touches the referent), and only the current canary's counts: the one an asked
+  ;; collection cleared, replaced after it, is left on the queue and ignored. The referent is an array holding a reference, not a
+  ;; bare Object (one pointer-free word, which Go's tiny allocator may share with other small values, so that its block outlives it).
+  (field ^:static ^ReferenceQueue canaryQ (ReferenceQueue.))
+  (method ^:static canaryRef ^WeakReference [] (WeakReference. (new Object/1 1) canaryQ))
+  (field ^:static ^WeakReference canary (ExtGc/canaryRef))
   (method ^:static gcCycles ^long []
-    (when (nil? (.get canary))
-      (set! cycles (unchecked-add cycles 1))
-      (set! canary (WeakReference. (Object.))))
+    (loop []
+      (let [r (.poll canaryQ)]
+        (when (some? r)
+          (when (identical? r canary)
+            (set! cycles (unchecked-add cycles 1))
+            (set! canary (ExtGc/canaryRef)))
+          (recur))))
     cycles)
   (method ^:static gcAsked ^void [^long minors ^long majors ^long compacts ^long forced]
     (ExtGc/gcCycles)
@@ -55,7 +67,7 @@
     (set! forcedMajorCount (unchecked-add forcedMajorCount forced))
     (ExtGc/weakCollect)
     (ExtGc/finCollect)
-    (when (nil? (.get canary)) (set! canary (WeakReference. (Object.)))))
+    (set! canary (ExtGc/canaryRef)))
 
   (method ^:static gcStat []
     (let [rt (Runtime/getRuntime)
