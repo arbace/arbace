@@ -4660,3 +4660,63 @@ path built before the window and batched into the same re-seed, checked as C9.1'
 - **SC246 One boot text or two.** (a) as built: the shipped resource is the Scheme text si boots from; the bootstrap host reads the .ae from the
   checkout; (b) embed the .ae too, so that `arbace.scheme.expand` runs without the checkout (about the same size again). *Recommended: (a)*: the
   expander's verbs (test, expand, fixpoint) are the checkout's tools.
+
+## As built: the deferred eval rows and the AOT cell widened (2026-11-17, branch `h-scheme`, from next `3c55fb7bc`)
+
+The host burst's Scheme task (the user, 2026-11-17): the eval cell's 6 deferred, the by-design classes audited, and the AOT cell, which
+checked only `bin/si check --aot`'s 51 programs (+2 `:aot-only`) against eval's 2,838 cases.
+
+**Why the AOT cell had 51 cases.** Its one source was `bin/si check --aot`, the compiled twin of eval's first source (`test/scheme/si/programs.edn`,
+51 programs). Eval's other sources had no compiled record: `bin/si srfi --aot` existed (SM7) but printed pass/FAIL only, unjudged and
+unrecorded; ecraven compiled was on SC109's heavy list; Chibi's R7RS suite was never compiled (SM8's "`bin/si aot --r7rs` does not exist").
+Two gaps stood in the way of an R7RS program compiled: the compiled `main` never set the runtime's R7RS mode (the interpreted run has it
+from `ReadProgram`), and `ReadAOT` read the constants in R6RS's lexical mode, which refuses Chez's bar symbols `WriteValue` writes (`||`:
+r7rs-tests.scm was refused, "a constant that does not read back: ||").
+
+**What changed.**
+- SCS27 (a), narrowed (the brief's "fix the deferred rows"; SCS27 was proposed with (b) recommended, undecided): `R7RSExpSign`
+  (`go/arbace/scm/numtext.ae`), set by `ReadProgram` when a program's mode is R7RS by its own text and its first datum imports neither
+  `(chezscheme)` nor `(rnrs ...)`: a flonum's positive exponent is written `e+N` (Chibi's form, the R7RS corpora's reference). The
+  `(chezscheme)` programs that made SMR5's trial differ from Chez keep `e308`, as R6RS programs, the mats (`--r7rs`) and Chibi's tests
+  (`--r7rs`) do. `bin/si r7rs`: 1,230 of 1,232 -> **1,234 of 1,234** (the two `test-precision` sites pass, and each runs its second
+  assertion, eqv?, so 2 tests more); `r7rs --chibi-test` (beside) the same; `r7rs-float-printing` matches nothing (kept for a
+  regression). Unit test: `TestReadProgram`'s new cases.
+- SCS28 (a): `chibi-optional-fallback` `:na` (the test library's own one-expression `test-error` called with two: no Scheme but Chibi and
+  Gauche can pass it; as `:suite-ill-formed`).
+- The AOT of R7RS programs: the light driver's `--aot-dump` writes the mode (`:r7rs`, `:exp-sign`) into the IR, `arbace.scheme.aot`'s
+  `main` sets `scm/R7RS` and `scm/R7RSExpSign` from it; `ReadAOT` reads in R7RS's lexical mode (a superset for what `WriteValue`
+  writes; `konst` still checks every constant reads back the same).
+- `bin/si srfi --aot [--record]`, `r7rs --aot [--record]`, `ecraven --aot [--record] [NAME...|--only LIST]` (`aot_run`): each corpus
+  compiled and run as its interpreted run, stamped, judged by the same judge (`arbace.scheme.corpora ... --aot`: the records
+  `test/scheme/check-{srfi,r7rs,ecraven}-aot-linux-amd64.edn`, `test/scheme/divergences-aot.edn`'s classes before the corpora's);
+  `SI_AOT_SAME=1` keeps srfi's comparison with si's interpreted stdout. Three sources more in `[:scheme :aot]` (test/reap/cells.edn,
+  `:same-cases` the interpreted records); ecraven's with `:until` (the main host's whole run). Not Chibi's own tests of the vendored
+  libraries: `test/scheme/chibi/split-run.sps` evaluates every test form at run time, so compiled it would compile only the harness.
+  The gate's `si-aot` runs `r7rs --aot` too.
+
+**Measured** (light driver, stage 0 `next`'s; one build at a time, the largest process 0.91 GiB RSS, `/usr/bin/time -v`):
+`bin/si srfi --aot` 11 of 11 programs, **1,231 checks pass, 0 fail** (compile 10 to 53 s each); `bin/si r7rs --aot` **1,234 of 1,234**
+(compile 84 s, run 0.5 s), its per-test body equal to the interpreted record's; `bin/si check --only test/scheme/essential-check.txt` and
+`check --aot --only test/scheme/essential-aot.txt` (13 of 14, the known 5 items): no regression; `bin/si unit`, `chibi-tests`, `srfi`,
+`corpora files`, `records-check`: pass. The ecraven sample compiled (`SI_TIMEOUT=300 bin/si ecraven --aot` over 20 benchmarks, 36 minutes on a host at load 16 to 37, the
+largest process 1.78 GiB): **16 of 20 pass**, the 4 non-passes the interpreted record's own (`ecraven-too-slow`: takl, ntakl, earley;
+`ecraven-reader-corners`: read0), none in no class; compiled seconds fib 42.6, tak 106.5, ack 142.2, cpstak 222.1, nboyer 175.9, sboyer
+153.5, graphs 109.2, gcbench 66.7, lattice 55.6, nqueens 25.7, the rest under 10 (compile 3 to 12 s each). The whole record is the main
+host's: `env SI_TIMEOUT=300 bin/si ecraven --aot --record`, expected 54 of 58 as the interpreted record (the same 3 + 1), about 1.5 hours
+serial. The three `ecraven-too-slow` benchmarks do not finish compiled either (takl, ntakl, earley over
+300 s each), nor takl interpreted at 900 s (Chez 3.9 s): they stay deferred, the evaluator's speed.
+
+**Scores** (`bin/reap --record`, `bin/crops-score --record`): eval 2,828 / 4 / 6 -> **2,832 / 4 / 3** (3 n/a); AOT 48 / 3 / 0 ->
+**2,513 / 3 / 0**; completeness 98 -> **99.9** (meant 99.97).
+
+**The by-design classes, audited.** eval's 4 and AOT's 3: `chez-exact-zero` (5 items, one case), `chez-console-port` (2, one case),
+`chez-condition-message` (1): SCS4 (a), the user 2026-11-08, si's tower and ports are Chez's; each item matches exactly the tests the
+class names and Chez's recorded run fails the same tests (`bin/si own`). `ecraven-reader-corners` (read0): the benchmark's error branch
+is disabled by `(and #f ...)`, so its 13 error cases fail on every implementation (Chibi 0.12.0 prints INCORRECT); every other case of
+read0 passes on si. Kept as decided (SC120); a candidate for `:na` (below).
+
+**Proposals (h-scheme, none decided)**
+- **SCS31 read0.** (a) `:na`, a benchmark no implementation passes (as `:suite-ill-formed`); (b) keep `:design`. *Recommended: (a)*.
+- **SCS32 ecraven compiled in the gate.** (a) a `--full` step `si-ecraven-aot` (`env SI_TIMEOUT=300 bin/si ecraven --aot`, rotated as
+  si-ecraven over test/scheme/subsets.edn once the record exists); (b) at the weekly run alone. *Recommended: (b)*: 58 Go builds and the
+  slow benchmarks' limits, about an hour.

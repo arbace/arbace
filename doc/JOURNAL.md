@@ -9825,3 +9825,25 @@ world's protected methods) added `gc-world-protected-methods`, which uses both, 
 executables compile arbace.core from their embedded copy, so only a load from the checkout (the host compile, the image prepare)
 showed it. Fixed as 080c5ec64 did: `(reduce1 conj acc (for ...))` and `(vec (map ...))`, the same values. prepare-fail-test: 4 of 4
 on next's stage 0. Moves `gate_key` (arbace/genclass.ae is embedded), as 729785948 already did.
+
+## 2026-11-17: Scheme's deferred eval rows, the by-design classes audited, the AOT cell widened to eval's corpora (branch `h-scheme`, from `next` `3c55fb7bc`)
+
+The host burst's Scheme task. doc/scheme/SCHEME-SURVEY.md, "As built: the deferred eval rows and the AOT cell widened" holds the detail.
+Eval's 6 deferred: `r7rs-float-printing` 2 fixed by SCS27 (a) narrowed (`R7RSExpSign`, go/arbace/scm/numtext.ae and read.ae: `e+N`
+for a positive exponent in a program of R7RS's libraries alone, Chibi's form; `(chezscheme)` and R6RS programs keep Chez's `e308`, the
+objection SMR5's trial met; SCS27 had been proposed with (b) recommended and was undecided: taken under the brief, reversible);
+`chibi-optional-fallback` 1 made `:na` (SCS28 (a): the test library's own macro is ill-formed outside Chibi and Gauche); `ecraven-too-slow`
+3 left deferred, measured: takl interpreted over 900 s (Chez 3.9 s), and takl, ntakl, earley compiled over 300 s each. Alternatives
+considered: a longer limit (no limit under an hour makes takl pass interpreted), reclassing the float tests `:design` (SCS27 (b)).
+The by-design classes (SCS4 (a)'s three Chez classes, SC120's read0) checked against their items and decisions: kept; read0 proposed `:na`
+(SCS31).
+The AOT cell checked only `bin/si check --aot`'s programs because no other eval source had a compiled record: `srfi --aot` was unjudged,
+ecraven compiled on SC109's heavy list, the R7RS suite never compiled (the compiled `main` did not set the R7RS mode, and `ReadAOT`
+refused `||`). Now `bin/si srfi|r7rs|ecraven --aot [--record]` judge by the interpreted judges into `check-*-aot-linux-amd64.edn`, the
+dump carries the mode, `ReadAOT` reads R7RS's syntax. Recorded here (small, new records, the runs the proof): srfi --aot 11 of 11,
+1,231 checks; r7rs --aot 1,234 of 1,234. ecraven compiled sampled (20 benchmarks: 16 pass, the interpreted record's 4 non-passes) and
+left to the main host (`:until` in test/reap/cells.edn). Scores: eval 2,828 / 4 / 6 -> 2,832 / 4 / 3, AOT 48 / 3 / 0 -> 2,513 / 3 / 0,
+Scheme's completeness 98 -> 99.9. Checks: `bin/si unit`, `r7rs`, `r7rs --chibi-test` (re-recorded), `srfi`, `chibi-tests`, `check --only
+test/scheme/essential-check.txt`, `check --aot --only test/scheme/essential-aot.txt` (no regression, the controls found), `corpora files`,
+`records-check`, test/gate/crops-test.bash, `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`. Not run: the gate,
+`bin/si check --aot` whole, ecraven whole (interpreted or compiled), the mats, the shipped path (`bin/si interp-check --exe`).
