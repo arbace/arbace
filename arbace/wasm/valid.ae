@@ -367,6 +367,19 @@
 
 (defn- diff-ref [[_ n1 h1] [_ n2 _]] [:ref (if n2 false n1) h1])
 
+(defn- desc-of
+  "The descriptor type of heap type h's defined type (custom descriptors, queue 327), or the invalid `type H does not have a
+  descriptor`."
+  [c h]
+  (let [x (if (exact? h) (second h) h)]
+    (or (when (integer? x) (:descriptor (type-def c x)))
+        (invalid (str "type " (ht-str x) " does not have a descriptor")))))
+
+(defn- desc-ref
+  "The reference type a descriptor operand of a cast to rt takes: (ref null (exact D)) when rt is exact, else (ref null D)."
+  [c [_ _ h]]
+  (let [d (desc-of c h)] [:ref true (if (exact? h) (list 'exact d) d)]))
+
 (declare check-block check-instrs)
 
 (defn- results-match! [c ts2]
@@ -445,16 +458,23 @@
                        (let [t1 (peek l) ts0 (pop l)]
                          (require! (reft? t1) #(str "type mismatch: instruction requires reference type but label has " (t-str t1)))
                          (sig (conj ts0 [:ref true (nth t1 2)]) ts0)))
-      (br_on_cast br_on_cast_fail)
-      (let [x a1 rt1 (vt (nth e 2)) rt2 (vt (nth e 3))]
+      (br_on_cast br_on_cast_fail br_on_cast_desc_eq br_on_cast_desc_eq_fail)
+      (let [x a1 rt1 (vt (nth e 2)) rt2 (vt (nth e 3))
+            desc? ('#{br_on_cast_desc_eq br_on_cast_desc_eq_fail} nm)
+            nm (case nm br_on_cast_desc_eq 'br_on_cast br_on_cast_desc_eq_fail 'br_on_cast_fail nm)]
         (check-val c rt1) (check-val c rt2)
-        (require! (match-ref c rt2 rt1) #(str "type mismatch on cast: type " (rt-str rt2) " does not match " (rt-str rt1)))
+        ;; the descriptor casts' rule (custom descriptors, queue 327): the target in the source's hierarchy
+        (require! (if desc?
+                    (match-heap c (nth rt2 2) (top-of-heap c (nth rt1 2)))
+                    (match-ref c rt2 rt1))
+                  #(str "type mismatch on cast: type " (rt-str rt2) " does not match " (rt-str rt1)))
         (let [want (if (= nm 'br_on_cast) rt2 (diff-ref rt1 rt2))
               l (lbl c x)]
           (require! (seq l) #(str "type mismatch: instruction requires type " (rt-str want) " but label has " (ts-str l)))
           (let [t1 (peek l) ts0 (pop l)]
             (require! (match-val c want t1) #(str "type mismatch: instruction requires type " (rt-str want) " but label has " (ts-str l)))
-            (sig (conj ts0 rt1) (conj ts0 (if (= nm 'br_on_cast) (diff-ref rt1 rt2) rt2))))))
+            ;; the descriptor operand (custom descriptors, queue 327): after the value
+            (sig (cond-> (conj ts0 rt1) desc? (conj (desc-ref c rt2))) (conj ts0 (if (= nm 'br_on_cast) (diff-ref rt1 rt2) rt2))))))
       return (sig* (:results c) [])
       call (let [[ts1 ts2] (func-type c (func c a1))] (sig ts1 ts2))
       call_ref (let [[ts1 ts2] (func-type c a1)] (sig (conj ts1 [:ref true a1]) ts2))
@@ -507,14 +527,27 @@
       ref.as_non_null (let [[_ _ h] (peek-ref 0 s)] (sig [[:ref true h]] [[:ref false h]]))
       ref.test (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))]] '[i32]))
       ref.cast (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))]] [rt]))
+      ;; custom descriptors (queue 327): a cast by the descriptor's identity, a descriptor's read
+      ref.cast_desc_eq (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))] (desc-ref c rt)] [rt]))
+      ref.get_desc (let [d (or (:descriptor (type-def c a1)) (invalid "type without descriptor"))
+                         [_ _ h] (peek-ref 0 s)
+                         exact (or (#{:bot 'none} h) (and (exact? h) (= (canon c (second h)) (canon c a1))))]
+                     (sig [[:ref true a1]] [[:ref false (if exact (list 'exact d) d)]]))
       ref.eq (sig [[:ref true 'eq] [:ref true 'eq]] '[i32])
       ref.i31 (sig '[i32] [[:ref false 'i31]])
       (i31.get_s i31.get_u) (sig [[:ref true 'i31]] '[i32])
-      (struct.new struct.new_default)
-      (let [fts (struct-type c a1)]
-        (require! (or (= nm 'struct.new) (every? (fn [[s]] (defaultable? (unpacked s))) fts)) "field type is not defaultable")
-        ;; an allocation's reference is exact (custom descriptors, queue 327)
-        (sig (if (= nm 'struct.new) (mapv (fn [[s]] (unpacked s)) fts) []) [[:ref false (list 'exact a1)]]))
+      (struct.new struct.new_default struct.new_desc struct.new_default_desc)
+      (let [fts (struct-type c a1)
+            desc? ('#{struct.new_desc struct.new_default_desc} nm)
+            d (:descriptor (type-def c a1))]
+        ;; a type with a descriptor is allocated with one, a type without one without (custom descriptors, queue 327)
+        (when (and d (not desc?)) (invalid "type with descriptor requires descriptor allocation"))
+        (when (and desc? (not d)) (invalid "type without descriptor requires non-descriptor allocation"))
+        (require! (or ('#{struct.new struct.new_desc} nm) (every? (fn [[s]] (defaultable? (unpacked s))) fts)) "field type is not defaultable")
+        ;; an allocation's reference is exact
+        (sig (cond-> (if ('#{struct.new struct.new_desc} nm) (mapv (fn [[s]] (unpacked s)) fts) [])
+               desc? (conj [:ref true (list 'exact d)]))
+             [[:ref false (list 'exact a1)]]))
       (struct.get struct.get_s struct.get_u)
       (let [fts (struct-type c a1) i (long (nth e 2))]
         (require! (< i (count fts)) #(str "unknown field " (u-str i)))
@@ -622,7 +655,7 @@
 (defn- const-instr? [c e]
   (case (first e)
     (i32.const i64.const f32.const f64.const v128.const i32.add i32.sub i32.mul i64.add i64.sub i64.mul
-     ref.null ref.func ref.i31 struct.new struct.new_default array.new array.new_default array.new_fixed
+     ref.null ref.func ref.i31 struct.new struct.new_default struct.new_desc struct.new_default_desc array.new array.new_default array.new_fixed
      any.convert_extern extern.convert_any) true
     global.get (not (:mut (global c (second e))))
     false))

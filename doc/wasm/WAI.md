@@ -32,7 +32,10 @@ matched only by the same canonical type or a bottom; an allocation's and a defin
 an exact cast's target in an instruction's E with `hExactBit`, `refTest` comparing the dynamic type itself; an exact function import,
 0x20, linked to a function of that very type; descriptor types (`rawSub.readClauses`, `CType.Describes` and `Descriptor`, part of the canonical
 key; the validator's rules as arbace.wasm.valid's: in the rec group, describes earlier, structs of one finality, a subtype's described
-type and descriptor its supertype's subtypes). A module using what is not built (a shared memory, an atomic) is refused at decoding as
+type and descriptor its supertype's subtypes); the instructions (`Struct.Desc`; `struct.new_desc`, `struct.new_default_desc`
+and `ref.get_desc` ("null descriptor reference", "null reference"), `ref.cast_desc_eq` by the descriptor's identity
+(`descTest`: "descriptor cast failure"), `br_on_cast_desc_eq` and `_fail` compiled to that test and `br_if`, so w2g writes them
+as it writes any case). A module using what is not built (a shared memory, an atomic) is refused at decoding as
 `unimplemented: FEATURE (WHAT)`, not as malformed.
 
 Since WA5 wai validates every module before it decodes it (`valid.go`, §7; WAS30 (a)): the driver runs no module its own validator

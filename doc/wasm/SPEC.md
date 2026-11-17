@@ -30,6 +30,7 @@ the binary numbers them).
 | `(wasm/memory I {:min N :max N :i64 true :page P})` | a memory (`:page`: the custom page sizes proposal's page size, its log2, when the text or the binary states one; queue 326) |
 | `(exact X)` | an exact heap type (custom descriptors, queue 327): in `(ref (exact X))`, `(ref null (exact X))`, the casts' and `ref.null`'s heap types; an exact function import `(func I {:type T :exact true})` (binary kind 0x20) |
 | `(sub {:final B :supers [I...] :describes X :descriptor Y} COMP)` | the descriptor clauses (custom descriptors, queue 327): text `(type $t (describes X)? (descriptor Y)? COMP)` or in a `sub`, binary 0x4c X and 0x4d Y before the composite type (a final type of no supertype written with its clauses alone) |
+| `(struct.new_desc X)`, `(struct.new_default_desc X)`, `(ref.get_desc X)`, `(ref.cast_desc_eq RT)`, `(br_on_cast_desc_eq L RT1 RT2)`, `(br_on_cast_desc_eq_fail L RT1 RT2)` | custom descriptors' instructions, 0xfb 0x20-0x26 (0x22 confirmed by the pin's binary module, the rest in its order) |
 | `(wasm/tag I {:type T})` | an exception tag |
 | `(wasm/global I {:type V :mut B} EXPR)` | a global and its initializer |
 | `(wasm/export "NAME" (KIND I))` | KIND `func`, `table`, `memory`, `global`, `tag` |

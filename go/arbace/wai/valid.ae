@@ -989,7 +989,7 @@
       (.code v))))
 
 
-(go/var constOps (lit (map uint16 bool) [OpI32Const true] [OpI64Const true] [OpF32Const true] [OpF64Const true] [OpV128Const true]
+(go/var constOps (lit (map uint16 bool) [OpStructNewDesc true] [OpStructNewDefaultDesc true] [OpI32Const true] [OpI64Const true] [OpF32Const true] [OpF64Const true] [OpV128Const true]
     ^{:line 878} [OpI32Add true] [OpI32Sub true] [OpI32Mul true] [OpI64Add true] [OpI64Sub true] [OpI64Mul true] [OpRefNull true]
     ^{:line 879} [OpRefFunc true] [OpRefI31 true] [OpStructNew true] [OpStructNewDefault true] [OpArrayNew true] [OpArrayNewDefault true]
     ^{:line 880} [OpArrayNewFixed true] [OpAnyConvertExtern true] [OpExternConvertAny true] [OpGlobalGet true]))
@@ -1356,6 +1356,13 @@
 
 ^{:go/end 1215} (go/func refT ^ValType [^bool null ^int32 h] (lit ValType :K tRef :Null null :H h))
 
+
+(go/method descRef "descRef is the descriptor operand's type of a cast to rt (custom descriptors, queue 327): (ref null (exact D)) when rt is\nexact, else (ref null D), D rt's type's descriptor.\n" ^ValType [^{:tag (* validator)} v ^ValType rt]
+  (when (or (< (.-H rt) 0) (< (.-Descriptor (aget ctypes (.-H rt))) 0))
+    (invalid "type %s does not have a descriptor" (heapName (.-H rt))))
+
+  (lit ValType :K tRef :Null true :H (conv int32 (.-Descriptor (aget ctypes (.-H rt)))) :Exact (.-Exact rt)))
+
 ^{:go/end 1721} (go/method op [^{:tag (* validator)} v ^uint16 op]
   (let [r (.-r v)
       ^{:line 1219} in (aget opInfos op)]
@@ -1406,8 +1413,9 @@
             (.popT v (refT true (.-H t1)))
             (.pops v ts0)
             (.pushs v ts0))))
-      (case [OpBrOnCast OpBrOnCastFail]
-        (let [f (.u8 r)]
+      (case [OpBrOnCast OpBrOnCastFail OpBrOnCastDescEq OpBrOnCastDescEqFail]
+        (let [f (.u8 r)
+            desc (or (== op OpBrOnCastDescEq) (== op OpBrOnCastDescEqFail))]
           (when (> f 3)
             (panic (addr (lit Malformed "malformed br_on_cast flags"))))
 
@@ -1416,12 +1424,20 @@
               ^{:line 1274} (values h2 e2) (.heapE v)
               rt1 (lit ValType :K tRef :Null (!= (bit-and f 1) 0) :H h1 :Exact e1)
               rt2 (lit ValType :K tRef :Null (!= (bit-and f 2) 0) :H h2 :Exact e2)]
-            (when (not (match rt2 rt1))
-              (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1))
+            ;; the descriptor casts (custom descriptors, queue 327): the target in the source's hierarchy, a descriptor operand
+            (if desc
+              (when (!= (topOf (.-H rt2)) (topOf (.-H rt1)))
+                (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1))
+
+              (when (not (match rt2 rt1))
+                (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1)))
+
+            (when desc
+              (.popT v (.descRef v rt2)))
 
             (let [diff (lit ValType :K tRef :Null (and (.-Null rt1) (not (.-Null rt2))) :H (.-H rt1) :Exact (.-Exact rt1))
                 (values want rest) (values rt2 diff)]
-              (when (== op OpBrOnCastFail)
+              (when (or (== op OpBrOnCastFail) (== op OpBrOnCastDescEqFail))
                 (set! (values want rest) (values diff rt2)))
 
               (let [lt (.labelTypes v (.label v l))]
@@ -1639,6 +1655,24 @@
         (.popT v (refT true hEq))
         (.popT v (refT true hEq))
         (.push v i32T))
+      (case [OpRefCastDescEq OpRefCastDescEqNull]
+        ;; a cast by descriptor (custom descriptors, queue 327)
+        (let [(values h e) (.heapE v)
+            rt (lit ValType :K tRef :Null (== op OpRefCastDescEqNull) :H h :Exact e)]
+          (.popT v (.descRef v rt))
+          (.popT v (refT true (topOf h)))
+          (.push v rt)))
+      (case [OpRefGetDesc]
+        (let [x (.u32 r)
+            id (.typeIdx v (conv uint64 x))
+            d (.-Descriptor (aget ctypes id))]
+          (when (< d 0)
+            (invalid "type without descriptor"))
+
+          (let [t (.peek v 0)
+              exact (or (== (.-K t) 0) (== (.-H t) hBot) (== (.-H t) hNone) (and (.-Exact t) (== (conv int (.-H t)) id)))]
+            (.popT v (refT true (conv int32 id)))
+            (.push v (lit ValType :K tRef :H (conv int32 d) :Exact exact)))))
       (case [OpRefTest OpRefTestNull OpRefCast OpRefCastNull]
         (let [(values h e) (.heapE v)]
           (.popT v (refT true (topOf h)))
@@ -1653,10 +1687,21 @@
       (case [OpI31GetS OpI31GetU]
         (.popT v (refT true hI31))
         (.push v i32T))
-      (case [OpStructNew OpStructNewDefault]
+      (case [OpStructNew OpStructNewDefault OpStructNewDesc OpStructNewDefaultDesc]
         (let [x (.u32 r)
-            ^{:line 1512} st (.structType v x)]
-          (if (== op OpStructNew)
+            ^{:line 1512} st (.structType v x)
+            desc (or (== op OpStructNewDesc) (== op OpStructNewDefaultDesc))]
+          ;; a type with a descriptor is allocated with one (custom descriptors, queue 327)
+          (when (and (>= (.-Descriptor st) 0) (not desc))
+            (invalid "type with descriptor requires descriptor allocation"))
+
+          (when (and (< (.-Descriptor st) 0) desc)
+            (invalid "type without descriptor requires non-descriptor allocation"))
+
+          (when desc
+            (.popT v (lit ValType :K tRef :Null true :H (conv int32 (.-Descriptor st)) :Exact true)))
+
+          (if (or (== op OpStructNew) (== op OpStructNewDesc))
             (for [i (- (len (.-Fields st)) 1)] (>= i 0) (dec! i)
               (.popT v (unpack (.-T (aget (.-Fields st) i)))))
 
