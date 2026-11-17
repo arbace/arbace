@@ -9402,3 +9402,20 @@ Considered: a guarded source (`[ -f ]`, as llvmi had) instead; rejected, R (a) r
 `lib/ci/fresh.bash` source line (w2.sh step 11's own grep over `bin/` finds nothing); `bash -n` of bin/ci, arbace-go, rust-front,
 llvmi, rsi, `bin/lib/cppi/ci-fresh.bash`, `test/cpp/selftest/tls.sh`, `test/c/musl-lock-test.bash`. Keys: gate 4a8e8730d688 and
 javac ffd7b22efe0b move (annot.ae, bin/arbace-go), the runtime key does not (2c8cfc5a6a89). It lands only after the new seed.
+
+## 2026-11-17: llvm-controls-test's failure on stack-w2 (the gate's cheap prune of TMPDIR took llvmi's pinned IR)
+
+stack-w2's post-seed essential gate failed `llvm-controls-test` (`test/repr/llvm/controls-test.bash`): its `bin/llvmi check
+--essential` under `LLVMI_WORK=$TMPDIR/llvm-controls-test.XXXXXX/li` lost the seven torture and C modules (one "refused read" of
+its `.ll`, the rest "recorded as a pass, does not pass"), the `ee.*` modules (read from the checkout) passing. Not W2's code nor
+the seed: the same step passes alone on the same stage 0. Cause: `bin/llvmi`'s `pinned` extracts the packs `test/llvm/ir/{tx,c}.tar.xz`,
+whose entries are dated 1970, keeping their mtimes; GD4's `gate_cache_cap` (`bin/lib/gate-run.bash`, the caches' table's cheap rules
+before a step, at most every 5 minutes) prunes `.tmp/tmp` by `[:age 2]` (`find -mtime +2`), so a cap run by a step started meanwhile
+removed the freshly extracted modules: stack-w2's `.tmp/gate/cache-cap.log` names 3216 entries of `.tmp/tmp`, the two packs' count.
+The `llvmi-essential` step's own work, `.tmp/llvmi/eval`, is not under the rule; stack-w1 passed by timing. Reproduced (the work's
+`find -mtime +2 -delete` once the packs are extracted: 3216 files, the same failures), fixed in `bin/llvmi` by `tar -xm` (the files
+dated at extraction) for the packs, and for `ir-make rt --mutants`' extraction; the reproduction then finds 0 old files and passes,
+and the step's command passes. Considered: the prune skipping a live step's scratch (a rule change in the runner, every gate's), or
+the test's work out of TMPDIR; rejected for now, the extraction's dates are the fault, and other tools extracting old-dated archives
+into TMPDIR would share it (none found in llvmi). No key moves (`bin/arbace-go --gate-key` 33877df89355 before and after; bin/llvmi
+is in no runtime or javac key).
