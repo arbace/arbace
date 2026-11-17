@@ -11,7 +11,8 @@
     ^{:line 11} [time "time"]
     [sync "sync"]
     [atomic "sync/atomic"]
-    [weak "weak"]])
+    [weak "weak"]
+    [math "math"]])
 
 
 ;; The system interface of OCaml's runtime: sys.c, signals.c, gc_ctrl.c, backtrace.c, weak.c,
@@ -117,7 +118,7 @@
   (let [m (memStats)
       ^{:line 113} words ^{:go/end 113} (fn ^int [^uint64 b] (conv int (/ b 8)))]
     (addr (lit Block :Tag 0 :F (lit (slice Value)
-          ^{:line 115} allocWords (conv float64 0) (conv float64 0)
+          ^{:line 115} (conv float64 minorWords) (conv float64 0) (conv float64 majorWords)
           (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMinorAsked) (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMajorAsked)
           (words (.-HeapSys m)) 1 (words (.-HeapAlloc m)) (conv int (- (.-Mallocs m) (.-Frees m)))
           (words (.-HeapIdle m)) 0 0 0 gcCompactions (words (.-HeapSys m)) 0 forcedMajorCount 0)))))
@@ -548,11 +549,15 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
           ;; gc_ctrl.c, gc_stats.c
           (r "caml_gc_stat" ^{:go/end 437} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (gcStat)))
           (r "caml_gc_quick_stat" ^{:go/end 438} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (gcStat)))
-          (r "caml_gc_counters" ^{:go/end 442} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
-              (let [w allocWords]
-                (Tuple w 0.0 0.0))))
+          (r "caml_gc_counters" ^{:go/end 442} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+              (let [mi (conv float64 minorWords) ma (conv float64 majorWords)]
+                ;; the triple and its three boxed floats, after the counters are read (gc_ctrl.c's caml_gc_counters)
+                (countWordsT th 3) (countWordsT th 1) (countWordsT th 1) (countWordsT th 1)
+                (Tuple mi 0.0 ma))))
 
-          (r "caml_gc_minor_words" ^{:go/end 443} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] allocWords))
+          ;; caml_gc_minor_words reads the counter, then boxes it (caml_copy_double: 2 words)
+          (r "caml_gc_minor_words" ^{:go/end 443} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+              (let [w (conv float64 minorWords)] (countWordsT th 1) w)))
           (r "caml_gc_get" ^{:go/end 444} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag 0 :F (append (conv (slice Value) nil) (spread gcControl))))))
           (r "caml_gc_set" ^{:go/end 453} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
               (let [b (AsBlock (aget a 0))]
@@ -724,8 +729,8 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
 
                     (r "caml_raw_backtrace_next_slot" ^{:go/end 601} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] None))
 
-                    ;; memprof.c: sampling never fires
-                    (r "caml_memprof_start" ^{:go/end 614} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                    ;; memprof.c (the sampling: countWords, memprofRun)
+                    (r "caml_memprof_start" ^{:go/end 614} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
                         (let [(values lambda ok) (assert float64 (aget a 0))]
                           (when (or (not ok) (< (AsInt (aget a 1)) 0) (not (and (>= lambda 0) (<= lambda 1))))
                             (InvalidArg "Gc.Memprof.start"))
@@ -734,14 +739,22 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
                             (Failwith "Gc.Memprof.start: profile already running."))
 
                           (set! memprofSampling true)
+                          (set! memprofTracker (aget a 2))
+                          (inc! memprofGen)
+                          (set! memprofLambda lambda)
+                          (set! (.-mpQ th) nil)
+                          (when (== memprofRng 0) (set! memprofRng 42))
+                          (when (< memprofLambda 1) (set! memprofNext (memprofGeom)))
                           (addr (lit Custom :Name "_memprof")))))
 
                     (r "caml_memprof_is_sampling" ^{:go/end 615} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool memprofSampling)))
-                    (r "caml_memprof_stop" ^{:go/end 622} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                    (r "caml_memprof_stop" ^{:go/end 622} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
                         (when (not memprofSampling)
                           (Failwith "Gc.Memprof.stop: no profile running."))
-
+                        ;; the samples taken before the stop get their callbacks first
+                        (.memprofRun th)
                         (set! memprofSampling false)
+                        (set! memprofTracker nil)
                         ^{:line 621} Unit))
 
                     (r "caml_memprof_discard" ^{:go/end 623} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
@@ -758,4 +771,90 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
 
 
 
-(go/const ^{:val 0.0 :doc "allocWords is the words allocated as Gc's counters give them: oi does not count an OCaml\nprogram's allocations (its values are Go's, with Go's sizes and escape analysis), so the\ncounters stay at zero: a program that checks that a computation does not allocate sees none, one\nthat measures an allocation sees none either (a class, OC64).\n"} allocWords (conv float64 0))
+(go/var ^{:tag int :doc "minorWords is the words allocated in OCaml's minor heap as Gc's counters give them (OC218 (a), queue 331): each
+block, string, float array and boxed float an allocation of OCaml's bytecode makes counted at its making by its wosize plus its header,
+as the minor heap would take it (one of more than Max_young_wosize, 256, words goes to the major heap: majorWords); the allocations
+counted are the Lambda's blocks (makeblock, makemutable, the lazy and forward blocks) and the externals of allocCounted, not yet the
+closures, the boxed numbers of arithmetic or the runtime's own blocks.\n"} minorWords)
+
+(go/var ^{:tag int :doc "majorWords is the words allocated directly in the major heap (an allocation above Max_young_wosize).\n"} majorWords)
+
+(go/func countWords "countWords counts an allocation of wosize words (and its header; an atom, wosize 0, is static).\n" [^int wosize]
+  (when (> wosize 256)
+    (set! majorWords + (+ wosize 1))
+    (return))
+  (when (> wosize 0)
+    (set! minorWords + (+ wosize 1))))
+
+(go/func countWordsT "countWordsT is countWords by the thread th, which samples it for Gc.Memprof when a profile runs.\n" [^{:tag (* Thread)} th ^int wosize]
+  (countWords wosize)
+  (when (and memprofSampling (> wosize 0) (!= th nil) (not (.-mpInCb th)))
+    (memprofSample th wosize)))
+
+;; Gc.Memprof (memprof.c; OC218 (a), queue 331): a profile samples the counted words at its rate (each word with probability lambda:
+;; the distance to the next sampled word drawn from the geometric distribution, as memprof.c's rand_geom), and an allocation with
+;; samples calls the tracker's alloc_minor (alloc_major above Max_young_wosize) with its allocation record {n_samples; size; source;
+;; callstack} in the allocating thread (its queue, Thread.mpQ), at its next poll point (tick) or when the profile stops; the tracked values' promote and dealloc callbacks
+;; are not called (no simulated heap yet), callbacks' own allocations are not sampled, and the callstack is empty (no backtraces).
+
+(go/type memprofSampleT (struct ^int n ^int size ^bool major ^int gen))
+
+(go/var
+  [^{:tag Value} memprofTracker]
+  [^int memprofGen]
+  [^float64 memprofLambda]
+  [^float64 memprofNext]
+  [^uint64 memprofRng]
+  )
+
+(go/func memprofGeom "memprofGeom is the distance in words to the next sampled word (at least 1).\n" ^float64 []
+  (set! memprofRng (+ (* memprofRng 6364136223846793005) 1442695040888963407))
+  (let [u (/ (+ (conv float64 (>> memprofRng 11)) 0.5) 9007199254740992.0)]
+    (+ (math/Floor (/ (math/Log u) (math/Log1p (- memprofLambda)))) 1)))
+
+(go/func memprofSample "memprofSample draws the samples of an allocation of wosize words by th and queues its callback.\n" [^{:tag (* Thread)} th ^int wosize]
+  (let [words (conv float64 (+ wosize 1)) n 0]
+    (when (>= memprofLambda 1)
+      (set! n (+ wosize 1)))
+    (when (and (> memprofLambda 0) (< memprofLambda 1))
+      (set! memprofNext - words)
+      (while (<= memprofNext 0)
+        (inc! n)
+        (set! memprofNext + (memprofGeom))))
+    (when (> n 0)
+      (set! (.-mpQ th) (append (.-mpQ th) (lit memprofSampleT :n n :size wosize :major (> wosize 256) :gen memprofGen))))))
+
+(go/method memprofRun "memprofRun calls the tracker's callbacks of the queued samples (a callback's exception is raised here).\n" [^{:tag (* Thread)} th]
+  (when (or (== (len (.-mpQ th)) 0) (.-mpInCb th))
+    (return))
+  (do
+    (set! (.-mpInCb th) true)
+    (defer ((fn [] (set! (.-mpInCb th) false))))
+    ;; the queue taken whole: a callback's exception drops the samples after it, as the allocations after a raising callback
+    ;; are never made in OCaml (its callback runs at the allocation)
+    (let [q (.-mpQ th)]
+      (set! (.-mpQ th) nil)
+      ;; a sample of a profile since stopped (in a callback: stop, discard, a new start) gets no callback
+      (range [_ smp q]
+        (when (and memprofSampling (== (.-gen smp) memprofGen) (!= memprofTracker nil))
+          (let [info (addr (lit Block :Tag 0 :F (lit (slice Value) (.-n smp) (.-size smp) 0 (addr (lit Block :Tag 0)))))
+                k 0]
+            (when (.-major smp) (set! k 1))
+            (.Apply th (aget (.-F (AsBlock memprofTracker)) k) info)))))))
+
+(go/func countValue "countValue counts the allocation of v by th, a value just made (a block, a float array, a string, a boxed float).\n" [^{:tag (* Thread)} th ^Value v]
+  (type-switch [x v]
+    (case [(* Block)] (countWordsT th (len (.-F x))))
+    (case [(* FloatArray)] (countWordsT th (len (.-F x))))
+    (case [(* Bytes)] (countWordsT th (+ (/ (len (.-B x)) 8) 1)))
+    (case [float64] (countWordsT th 1))))
+
+(go/func allocCounted "allocCounted reports whether the external cname allocates its result as OCaml's runtime does (counted by countValue).\n" ^bool [^string cname]
+  (switch cname
+    (case ["caml_make_vect" "caml_array_make" "caml_make_float_vect" "caml_floatarray_create" "caml_floatarray_make"
+           "caml_uniform_array_make" "caml_array_create_float" "caml_array_sub" "caml_array_append" "caml_array_concat"
+           "caml_floatarray_sub" "caml_floatarray_append" "caml_floatarray_concat" "caml_uniform_array_sub"
+           "caml_uniform_array_append" "caml_uniform_array_concat" "caml_obj_block" "caml_obj_with_tag" "caml_obj_dup"
+           "caml_create_bytes" "caml_create_string"]
+      (return true)))
+  false)

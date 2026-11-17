@@ -21,7 +21,7 @@
 (defclass ^:public ^:final ExtGc
   (field ^:static ^boolean runtimeWarnings false)
   (field ^:static ^boolean backtraceActive false)
-  (field ^:static ^boolean memprofSampling false)
+  (field ^:public ^:static ^boolean memprofSampling false)
   (field ^:static ^long forcedMajorCount 0)
   (field ^:static ^:final ^Object/1 gcControl
     (new Object/1 [(Long/valueOf 262144) (Long/valueOf 0) (Long/valueOf 120) (Long/valueOf 0) (Long/valueOf 0)
@@ -75,7 +75,7 @@
           used (unchecked-divide (unchecked-subtract (.totalMemory rt) (.freeMemory rt)) 8)
           free (unchecked-divide (.freeMemory rt) 8)]
       (Block. 0 (new Object/1
-                  [(Double/valueOf 0.0) (Double/valueOf 0.0) (Double/valueOf 0.0)
+                  [(Double/valueOf (double Rt/minorWords)) (Double/valueOf 0.0) (Double/valueOf (double Rt/majorWords))
                    (Long/valueOf (unchecked-add (ExtGc/gcCycles) minorAsked)) (Long/valueOf (unchecked-add (ExtGc/gcCycles) majorAsked))
                    (Long/valueOf total) (Long/valueOf 1) (Long/valueOf used) (Long/valueOf 0)
                    (Long/valueOf free) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf compactions)
@@ -83,9 +83,13 @@
 
   (method ^:public ^:static caml_gc_stat [u] (ExtGc/gcStat))
   (method ^:public ^:static caml_gc_quick_stat [u] (ExtGc/gcStat))
+  ;; the counters read, then their triple counted (ocamlopt: the floats in it boxed by the caller, unboxed here)
   (method ^:public ^:static caml_gc_counters [u]
-    (Block. 0 (new Object/1 [(Double/valueOf 0.0) (Double/valueOf 0.0) (Double/valueOf 0.0)])))
-  (method ^:public ^:static caml_gc_minor_words [u] (Double/valueOf 0.0))
+    (let [mi (Double/valueOf (double Rt/minorWords)) ma (Double/valueOf (double Rt/majorWords))]
+      (Rt/words 3)
+      (Block. 0 (new Object/1 [mi (Double/valueOf 0.0) ma]))))
+  (method ^:public ^:static caml_gc_minor_words [u]
+    (Double/valueOf (double Rt/minorWords)))
   (method ^:public ^:static caml_gc_get [u] (Block. 0 (.clone gcControl)))
   (method ^:public ^:static caml_gc_set [c]
     (let [f (.-f (cast Block c))
@@ -385,17 +389,89 @@
       (aget f (unchecked-int i))))
   (method ^:public ^:static caml_raw_backtrace_next_slot [s] Rt/NONE)
 
-  ;; memprof.c: sampling never fires
+  ;; memprof.c (OC218 (a), queue 331; oi's ext_sys.go memprofSample, memprofRun): the counted words (Rt/words) sampled at the
+  ;; profile's rate, an allocation with samples calling the tracker's alloc_minor (alloc_major above 256 words) with its record
+  ;; {n_samples; size; source; callstack} at the next Rt/tick or the stop; no promote or dealloc calls, an empty callstack, the
+  ;; callbacks' own allocations not sampled
+  (field ^:static memprofTracker nil)
+  (field ^:static ^long memprofGen 0)
+  (field ^:static ^double memprofLambda 0.0)
+  (field ^:static ^double memprofNext 0.0)
+  (field ^:static ^long memprofRng 42)
+  ;; memprofPending: the samples queued in all threads; each thread's queue and in-callback flag its own (a ThreadLocal of
+  ;; [queue inCallback]), as memprof.c's thread states: a callback that blocks leaves the other threads' callbacks running
+  (field ^:public ^:static ^int memprofPending 0)
+  (field ^:static ^:final ^ThreadLocal memprofTL (ThreadLocal.))
+  (method ^:static mpState ^Object/1 []
+    (let [x (.get memprofTL)]
+      (if (nil? x)
+        (let [st (new Object/1 [(ArrayList.) Boolean/FALSE])] (.set memprofTL st) st)
+        (cast Object/1 x))))
+  (method ^:static memprofGeom ^double []
+    (set! memprofRng (unchecked-add (unchecked-multiply memprofRng 6364136223846793005) 1442695040888963407))
+    (let [u (/ (+ (double (unsigned-bit-shift-right memprofRng 11)) 0.5) 9007199254740992.0)]
+      (+ (Math/floor (/ (Math/log u) (Math/log1p (- memprofLambda)))) 1.0)))
+  (method ^:public ^:static memprofSample ^void [^long wosize]
+    (when (not (.booleanValue (cast Boolean (aget (ExtGc/mpState) 1))))
+      (let [^:mutable n 0]
+        (if (>= memprofLambda 1.0)
+          (set! n (unchecked-inc wosize))
+          (when (> memprofLambda 0.0)
+            (set! memprofNext (- memprofNext (double (unchecked-inc wosize))))
+            (loop []
+              (when (<= memprofNext 0.0)
+                (set! n (unchecked-inc n))
+                (set! memprofNext (+ memprofNext (ExtGc/memprofGeom)))
+                (recur)))))
+        (when (> n 0)
+          (.add (cast ArrayList (aget (ExtGc/mpState) 0)) (new long/1 [n wosize (if (> wosize 256) 1 0) memprofGen]))
+          (set! memprofPending (unchecked-inc-int memprofPending))))))
+  (method ^:public ^:static memprofRun ^void []
+    (let [st (ExtGc/mpState) mq (cast ArrayList (aget st 0))]
+     (when (and (> (.size mq) 0) (not (.booleanValue (cast Boolean (aget st 1)))))
+      (aset st 1 Boolean/TRUE)
+      (try
+        ;; the queue taken whole: a callback's exception drops the samples after it (oi's memprofRun)
+        (let [q (ArrayList. mq)]
+         (.clear mq)
+         (set! memprofPending (unchecked-subtract-int memprofPending (.size q)))
+         (loop [^int i 0]
+          (when (< i (.size q))
+            (let [s (cast long/1 (.get q i))
+                  info (Block. 0 (new Object/1 [(Long/valueOf (aget s 0)) (Long/valueOf (aget s 1)) (Long/valueOf 0)
+                                                (Block. 0 (new Object/1 0))]))]
+              ;; a sample of a profile since stopped (in a callback) gets no callback (oi's memprofRun)
+              (when (and memprofSampling (== (aget s 3) memprofGen) (some? memprofTracker))
+                (Rt/ap1 (aget (.-f (cast Block memprofTracker)) (unchecked-int (aget s 2))) info))
+              (recur (unchecked-inc-int i))))))
+        (finally
+          (aset st 1 Boolean/FALSE))))))
+  ;; Main/reset's part: no profile, no samples, the words counted from zero (a batch's next program)
+  (method ^:public ^:static memprofReset ^void []
+    (set! memprofSampling false)
+    (set! memprofTracker nil)
+    (set! memprofPending 0)
+    (.clear (cast ArrayList (aget (ExtGc/mpState) 0)))
+    (set! Rt/minorWords 0)
+    (set! Rt/majorWords 0))
   (method ^:public ^:static caml_memprof_start [lambda csize tracker]
     (when (or (not (instance? Double lambda)) (< (Rt/l csize) 0)
               (not (and (>= (Rt/d lambda) 0.0) (<= (Rt/d lambda) 1.0))))
       (throw (Rt/invalidArg "Gc.Memprof.start")))
     (when memprofSampling (throw (Rt/failwith "Gc.Memprof.start: profile already running.")))
+    (set! memprofTracker tracker)
+    (set! memprofGen (unchecked-inc memprofGen))
+    (set! memprofLambda (Rt/d lambda))
+    (.clear (cast ArrayList (aget (ExtGc/mpState) 0)))
+    (when (< memprofLambda 1.0) (set! memprofNext (ExtGc/memprofGeom)))
     (set! memprofSampling true)
     (Custom. "_memprof" nil))
   (method ^:public ^:static caml_memprof_is_sampling [u] (Rt/b memprofSampling))
   (method ^:public ^:static caml_memprof_stop [u]
     (when (not memprofSampling) (throw (Rt/failwith "Gc.Memprof.stop: no profile running.")))
+    ;; the samples taken before the stop get their callbacks first
+    (ExtGc/memprofRun)
     (set! memprofSampling false)
+    (set! memprofTracker nil)
     Rt/UNIT)
   (method ^:public ^:static caml_memprof_discard [t] Rt/UNIT))
