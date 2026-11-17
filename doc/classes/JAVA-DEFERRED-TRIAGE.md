@@ -7468,3 +7468,13 @@ the owner. Recommended (a). RP3: t03434 and t06032 are the converter's losses of
 unused local's float): (a) fix in convert.ae for the night (javac's tool rebuilt; `bin/repr-java roundtrip` and `check --jdk`
 records may move); (b) deferred. Recommended (a). arbace/repr/java/roundtrip.ae's class-differences has the same sets' rule
 (the round trip's classes level); its counted form waits for a whole round trip's record at night.
+
+### Decided (the user, 2026-11-17, round 51): RP1 (a), RP2 (a), RP3 (a); as built
+
+RP1 (a) and RP2 (a): `java.print/counted-kinds` names three more kinds, in `class-kinds` and in `:print-classes`'s pattern (by
+design): *a static member's pure qualifier* (the original's extra `pop`, with the loads, constants and static reads it pops),
+*a compound assignment written out or not* (`aload` against `dup` alone) and *a static member's owner* (an invokestatic,
+getstatic or putstatic of the same member through another class: the lines compared without their owners). The 20 rows
+re-recorded alone: Java print 3,236 / 29 / 60 → **3,256 / 29 / 40**, completeness 88 → 88 (0.8765 → 0.8780; meant 90). Left in
+`:print-classes-unnamed`: t05125 (a local's slot), t03567 and t06072 (mixed), t03434 and t06032 (RP3 (a), below). c00001 still
+differs at print.

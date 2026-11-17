@@ -9906,3 +9906,12 @@ round 51)"). SCS31 (a): `ecraven-reader-corners` (read0, INCORRECT on every impl
 steps.edn alike: `bin/gate --weekly --plan` runs it, `bin/gate --plan` and `--nightly --plan` do not list it. Alternative not taken:
 SCS32 (a), a rotated `--full` step. Checks: `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`, `bin/records-check`,
 test/gate/crops-test.bash, crop-tier-test.bash (20 of 20). The ecraven AOT record stays the main host's first weekly (or by-hand) run.
+
+## 2026-11-17: the print level's by-design kinds RP1 (a), RP2 (a) (branch `h-java-readprint`, after next `cc5766d95`)
+
+The user's round 51: the converter's dropped pure qualifier of a static member, a String compound assignment written out and
+a static member named through its inheriting class are by-design class-file kinds (test/java/print.ae's counted-kinds,
+class-kinds; test/java/divergences.edn's :print-classes pattern). 20 rows re-recorded alone: Java print 3,236 / 29 / 60 →
+3,256 / 29 / 40. A conditional branch's sense beside another kind's instructions now counts as control flow too (t06347).
+Alternatives considered: one kind "the converter's shapes" for the three (less precise for a later audit); the converter keeping
+the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of meaning).

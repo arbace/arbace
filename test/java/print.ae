@@ -228,6 +228,10 @@
 (def ^:private kind-flow "a value's control flow: ?: or a switch expression on one side, if or a switch statement on the other")
 (def ^:private kind-inc "an increment's place (i++ in an expression or as a statement)")
 (def ^:private kind-init "a local's initializer (Java's default value written or not)")
+;; the user's RP1 (a) and RP2 (a) (2026-11-17, round 51; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-readprint")
+(def ^:private kind-qual "a static member's pure qualifier (a local, this or a literal, evaluated and dropped, or not written)")
+(def ^:private kind-compound "a compound assignment written out or not (s = s + x against s += x)")
+(def ^:private kind-owner "a static member's owner (named through the class that inherits it or the class that declares it)")
 
 (defn- counted-kinds
   "h-java-readprint (2026-11-17): the kinds of the differences of the method code lines a and b counted, each
@@ -237,24 +241,43 @@
   flow, the branches, goto and the returns, when a goto or a return differs or only conditional branches do (a test's
   sense and its arms swapped); an increment, iinc (also wide) and the
   int arithmetic of i = i + n, when an iinc differs; a local's initializer, a default value's constant and a local's
-  store, when such a constant differs. None differing: the order of the code."
+  store, when such a constant differs; RP1 (a), a static member's pure qualifier, the original's extra pop with the loads,
+  constants and static reads it pops; RP2 (a), a compound assignment, aload against dup alone, and a static member's owner, an
+  invokestatic, getstatic or putstatic of the same member through another class. None differing: the order of the code."
   [a b]
   (let [norm (fn [l] (str/replace l #": (if[a-z_]*|goto|goto_w) L\d+$" ": $1"))
-        fa (frequencies (map norm a)) fb (frequencies (map norm b))
-        ds (vec (for [k (distinct (concat (keys fa) (keys fb)))
-                      :when (not= (get fa k 0) (get fb k 0))]
-                  (str/trim (second (re-find #": (.*)$" k)))))
+        unowned (fn [l] (str/replace l #": (invokestatic|getstatic|putstatic) [^ .]+\.([^.: ]+:[^ ]+)$" ": $1 $2"))
+        diff (fn [f] (let [fa (frequencies (map f a)) fb (frequencies (map f b))]
+                       (vec (for [k (distinct (concat (keys fa) (keys fb)))
+                                  :let [na (get fa k 0) nb (get fb k 0)]
+                                  :when (not= na nb)]
+                              [(str/trim (second (re-find #": (.*)$" k))) (- na nb)]))))
+        d1 (diff norm)
+        d2 (diff (comp unowned norm))
+        owner? (< (count d2) (count d1))
+        dn (if owner? d2 d1)
+        ds (mapv first dn)
+        more (into {} dn)
         has (fn [re] (some #(re-find re %) ds))
+        ;; RP1 (a): the original evaluates a pure qualifier and pops it (more pops on the original's side)
+        qual? (pos? (get more "pop" 0))
+        compound? (and (some #{"dup"} ds) (every? #(re-find #"^(dup|aload(_\d| \d+))$" %) ds))
         branch? (fn [i] (re-find #"^if[a-z_]*$" i))
-        flow? (or (has #"^(goto|goto_w|[ailfd]?return)$") (every? branch? ds))
         inc? (has #"^(wide )?iinc ")
         init? (has #"^([ailfd]const_0|aconst_null)$")
-        ok? (fn [i] (or (and flow? (re-find #"^(if[a-z_]*|goto|goto_w|[ailfd]?return)$" i))
-                        (and inc? (re-find #"^((wide )?iinc .*|iload(_\d| \d+)|istore(_\d| \d+)|iadd|isub|iconst_m?\d|bipush .*|sipush .*)$" i))
-                        (and init? (re-find #"^([ailfd]const_0|aconst_null|[ailfd]store(_\d| \d+))$" i))))]
+        other-ok? (fn [i] (or (and inc? (re-find #"^((wide )?iinc .*|iload(_\d| \d+)|istore(_\d| \d+)|iadd|isub|iconst_m?\d|bipush .*|sipush .*)$" i))
+                        (and init? (re-find #"^([ailfd]const_0|aconst_null|[ailfd]store(_\d| \d+))$" i))
+                        (and qual? (re-find #"^(pop|[ailfd]load(_\d| \d+)|ldc.*|ldc_w .*|ldc2_w .*|getstatic .*|[il]const_\d|bipush .*|sipush .*)$" i))
+                        (and compound? (re-find #"^(dup|aload(_\d| \d+))$" i))))
+        ;; a goto or a return differing, or conditional branches alone beside the other kinds' instructions
+        flow? (or (has #"^(goto|goto_w|[ailfd]?return)$")
+                  (and (some branch? ds) (every? #(or (branch? %) (other-ok? %)) ds)))
+        ok? (fn [i] (or (and flow? (re-find #"^(if[a-z_]*|goto|goto_w|[ailfd]?return)$" i)) (other-ok? i)))]
     (cond
+      (and (empty? ds) owner?) [kind-owner]
       (empty? ds) ["the order of the code (the same instructions)"]
-      (every? ok? ds) (cond-> [] flow? (conj kind-flow) inc? (conj kind-inc) init? (conj kind-init)))))
+      (every? ok? ds) (cond-> [] flow? (conj kind-flow) inc? (conj kind-inc) init? (conj kind-init)
+                        qual? (conj kind-qual) compound? (conj kind-compound) owner? (conj kind-owner)))))
 
 (defn class-differences
   "Short reasons for the differences of class file c in the trees c1 and c2, named as
@@ -283,7 +306,10 @@
     "a local's initializer (Java's default value written or not)"
     "a switch's arms (fall-through repeated)"
     "the constant pool's order or an attribute (the same code)"
-    "the order of the code (the same instructions)"})
+    "the order of the code (the same instructions)"
+    "a static member's pure qualifier (a local, this or a literal, evaluated and dropped, or not written)"
+    "a compound assignment written out or not (s = s + x against s += x)"
+    "a static member's owner (named through the class that inherits it or the class that declares it)"})
 
 (defn classes-note?
   "JCV11 (b) (the user, 2026-11-08; RPS9 (a) reopened): whether the classes step's reason WHY is a sub-level note,
