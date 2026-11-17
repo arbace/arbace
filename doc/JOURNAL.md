@@ -9475,3 +9475,17 @@ Operations: the disk reached 85-91% four times; freed each time by removing merg
 at 2 h had broken stack-py's java-compiled on 11-16). Two operational mistakes, both harmless: the fixpoint on stack-w2 got an
 empty `--g1` (`bin/lib/gate-cache.bash` is sourced, not run), so it built G1 itself (20 min more); and the heavy lanes
 (`ARBACE_HEAVY_LOCK=.tmp/big-{b..h}.lock`) were used for the stack's gates beside each other, which the memory check admitted.
+
+## 2026-11-17: the other extractions of old-dated archives into TMPDIR (tmpdates-fix; the sweep after 2455fa2be)
+
+After llvmi's fix (the gate's cheap prune of `.tmp/tmp` by `[:age 2]` removing a pack's 1970-dated files mid-run), every extraction
+site of `bin/`, `bin/lib/`, `test/`, `tools/` and the Arbace/Go code was checked against the age rules of `test/gate/caches.edn`
+(`.tmp/tmp` 2 days, `.tmp/shared` 30 days, the tests' `.tmp/*-test*` by the path's own mtime). Fixed with `tar -xm` (files dated at
+extraction; what is extracted and every pin unchanged): `bin/lib/ci/musl`'s `pack_tree` and `verify-derived` (musl-1.2.6's upstream
+tarball into `$TMPDIR/ci-musl-*.$$`), `bin/oracle-records`' controls (the 1970 tampered pack into `$TMPDIR/oracle-controls.$$`) and
+`test/oracle-records/oracle.bash`'s `oracle_unpack` (a store under `$TMPDIR` when `ARBACE_ORACLE_PACKS` names one, as the control does).
+Judged safe: every other extraction lands in `.tmp/<tool>/` names no age rule covers (repr-*, cppi, hsi, pyi, llvmi's own dirs,
+`.tmp/ci-musl`, `.tmp/frozen`, `.tmp/seed-*`, the oracle store) or in a test's work dir whose own mtime moves as it is written;
+`cp -a` copies in scripts read the checkout into those same dirs; the `setLastModified`/`Chtimes` uses are syscall layers or set
+"now"; `unzip` (Info-ZIP 6.00, no `-D`) sites extract into `.tmp/java-project-test`, `.tmp/repr-clojure-check`, `lib-arbace`: not pruned.
+`bin/arbace-go --gate-key` unchanged (f60652fb7fb9) before and after (bin/lib/ci/ and test/ are outside it).
