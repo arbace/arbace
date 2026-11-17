@@ -2401,3 +2401,33 @@ fractions): a = 0x1.fb64e2p+0, b = 0x1.78ee6p+0, c = 0x1.e80002p-37: twice round
 builds; T22296 (the testsuite's SIMD test) passes alone; hsi-essential's command below. The vector fma's result itself is not run by any
 recorded program (no test of the corpora uses `fmadd*FloatX*#`).
 hsi-essential's command: 123 programs, 0 not passing in no class, the controls fail as they must (24 min, 0.4 GB).
+
+## As built: queue 325g, DECISION 2 (a): the samples' and the synthetic corpus's golden files
+
+(The user's choice of 2026-11-17, queue 325's DECISION 2 (a).) The samples (`test/haskell/eval/samples`, 26) and the synthetic
+corpus (`test/haskell/eval/synthetic`, 37) were judged only by GHC's recorded run (`ref-ghc914.edn`, 0.5). Each program now has
+its expected output committed beside it: `NAME.stdout`, `NAME.stderr` (none: an empty one) and `NAME.exit` (none: 0), the
+synthetic corpus's written by its generator. `bin/hsi own-verdicts` lists a program in `own-verdicts.tsv` when its golden files
+are GHC's recorded -O0 run (the testsuite's rule); one that is not is a review left open: reported, and `--check` fails.
+`bin/lib/hsi/check`'s `own_ref` reads them at -O0 (at -O1 the -O1 record judges: five synthetic programs print otherwise at
+-O1, GHC's optimiser's choices). `bin/hsi record-ref --keep DIR` keeps each run's outputs (the text the review reads).
+
+The samples' review (26 of 26). Each program read against its output, line by line, from the program's own logic and the
+Haskell report's semantics (and the libraries' source where the text is theirs: GHC 9.14.1's tarball by its pin), then checked
+against GHC's recorded run by the record's SHA-256s. The text is GHC 9.14.1's run on linux/arm64 (the VM's ghc, `record-ref
+--keep`): 22 programs equal the amd64 record as they are; four differ, each by one line whose amd64 form was derived and proved
+by the record's hash:
+- LibMisc: `System.Info.arch` is the compiling host's machine (`"x86_64"`, not `"aarch64"`): base's STG in the pack is amd64's,
+  so hsi prints `"x86_64"` on any host.
+- Exc and Trace: the uncaught `Map.!` error's backtrace names containers' unit id, the installation's (`containers-0.8-b42e`,
+  `test/haskell/target/installation.edn`), not the VM's (`containers-0.8-8666`).
+- LibSystem: `listDirectory` lists in the file system's order (unspecified by the directory package): the amd64 host's gives
+  `["b","f.txt"]`, the VM's `["f.txt","b"]` (hsi prints the VM's there, as GHC does: an unclassed failure on that host before
+  and after; the program would sort to be host-independent).
+Checked by hand: the arithmetic (sums, factorials, 2^100 `div` 3, the squares' sums, nfib 32 = 2 fib 33 - 1 = 7049155, the
+UTF-8 byte counts, the Float fma's rounding at the halfway case: 1 + 2^-11 + 2^-24 ties to even, 0x3F801000, and 2^-80 above
+it rounds up, 0x3F801001), the libraries' messages against their source (`control0#`'s in GHC.Internal.Control.Exception.Base,
+the RTS's "atomically was nested", text's decode error, the uncaught-exception layout), the scheduling the programs fix by their
+delays and MVars (Conc, MVarOrder, ThrowMasked, Weak's newest-first finalizers), and two facts of the host: LibPosix's mode 33124
+(0o100544: `setPermissions` sets the owner's bits and keeps 0o044 of the umask 022 file) and LibIO's stdin and stdout not
+terminals. AsyncRerun's golden is GHC's semantics (the frozen thunk resumed: counter 1); hsi's known divergence is its class.
