@@ -3127,6 +3127,68 @@
         (recur)))
     seen))
 
+(defn- check-md-locs
+  "visitMDNode's AreDebugLocsAllowed (queue 335): the nodes a function's attachments reach, in the Verifier's order (a
+  definition's !dbg, then its other attachments; each instruction's !dbg location, then its attachments, !dbg and !llvm.loop
+  allowing locations; a declaration's all allowing), each node once (MDNodes): a DILocation operand of a node reached where
+  locations are not allowed is `DILocation not allowed within this metadata node`, and that node's walk ends. `stripped?`:
+  the module after StripDebugInfo (no !dbg, no debug records or intrinsics, a loop id without its locations)."
+  [forms stripped?]
+  (let [seen (java.util.HashSet.)
+        loc? (fn [r] (= "DILocation" (di-kind (get *meta* r))))
+        walk (fn [base allow? loop?]
+               (when (and (md-ref? base) (.add seen base))
+                 (let [work (java.util.ArrayDeque.)]
+                   (.add work base)
+                   (loop []
+                     (when-let [cur (.poll work)]
+                       (let [ops (remove #(and stripped? loop? (= cur base) (loc? %)) (filter md-ref? (md-refs-in (get *meta* cur))))
+                             bad (when-not allow? (first (filter loc? ops)))]
+                         (if bad
+                           (visiting (binding [*ctx* {:md cur}] (verr :di/node "DILocation not allowed within this metadata node" [:md cur] [:mdv bad])))
+                           (do (doseq [o ops] (when (.add seen o) (.add work o)))
+                               (recur)))))))))
+        attach (fn [md decl?]
+                 (doseq [[k v] (partition 2 md) :when (not (and stripped? (= k '!dbg)))]
+                   (walk v (or decl? (= k '!dbg) (= k '!llvm.loop)) (= k '!llvm.loop))))]
+    (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
+      (let [o (apply hash-map (drop 4 f)) decl? (= 'llvm/declare (first f))
+            md (:md o)
+            ;; a definition's !dbg first (visitFunction's attachments in their order, the subprogram among them)
+            md (if decl? md (vec (mapcat identity (sort-by #(if (= '!dbg (first %)) 0 1) (partition 2 md)))))]
+        (attach md decl?)
+        (doseq [[_ _ & items] (:body o) x items
+                :let [b (body x) c (callee-of b)]
+                :when (not (dbg-record? b))
+                :when (not (and c (global? c) (re-find #"^llvm\.dbg\." (global-key c))))]
+          (attach (:md (nth (split-inst b) 2)) false))))))
+
+(declare strip-md-pairs)
+
+(defn- strip-debug-forms
+  "The forms as StripDebugInfo leaves them, for the slot tracker's numbering of opt's second verification (queue 335): no
+  llvm.dbg.* or llvm.gcov named metadata, no !dbg attachments, debug records or debug intrinsics' calls."
+  [forms]
+  (let [drop-dbg (fn [x] (let [v (vec x) i (.indexOf ^java.util.List v :md)]
+                           (if (neg? i) x (apply list (assoc v (inc i) (strip-md-pairs (nth v (inc i))))))))
+        inst (fn [x] (if (= (first x) '=) (list '= (second x) (drop-dbg (nth x 2))) (drop-dbg x)))]
+    (vec (keep (fn [f]
+                 (case (first f)
+                   llvm/named-meta (when-not (or (str/starts-with? (name (second f)) "!llvm.dbg.") (= (second f) '!llvm.gcov)) f)
+                   (llvm/define llvm/declare)
+                   (let [v (vec (drop-dbg f)) bi (.indexOf ^java.util.List v :body)]
+                     (if (and (>= bi 0) (nth v (inc bi)))
+                       (apply list (assoc v (inc bi)
+                                          (mapv (fn [blk] (apply list (concat (take 2 blk)
+                                                                              (map inst (remove #(let [b (body %) c (callee-of b)]
+                                                                                                   (or (dbg-record? b) (and c (global? c) (re-find #"^llvm\.dbg\." (global-key c)))))
+                                                                                                (drop 2 blk))))))
+                                                (nth v (inc bi)))))
+                       (apply list v)))
+                   llvm/global (drop-dbg f)
+                   f))
+               forms))))
+
 (defn- strip-md-pairs [md] (vec (mapcat identity (remove #(= '!dbg (first %)) (partition 2 md)))))
 
 (defn- stripped-reachable-md
@@ -3201,6 +3263,7 @@
   "The DI nodes still reachable after StripDebugInfo, checked with their errors hard (into *errs2*)."
   [forms]
   (binding [*errs* *errs2*]
+    (check-md-locs forms true)
     (let [left (stripped-reachable-md forms)]
       (doseq [f forms :when (= (first f) 'llvm/meta) :let [id (second f) n (nth f 2)] :when (and (di-kind n) (.contains ^java.util.Set left id))]
         (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
@@ -3248,6 +3311,7 @@
                 (let [e (.get *errs* i)] (.set *errs* (int i) (ex-info (.getMessage ^Throwable e) (assoc (ex-data e) :llvm/verify :verifier/di))))))
             (throw (ex-info "stripped" {::stripped true})))
           (do
+            (check-md-locs forms false)
             (binding [*inst-locs* (reduce (fn [m [l lf lx]] (if (contains? m l) m (assoc m l [lf lx])))
                                           ;; visitFunction's walk (Verifier.cpp:3313-3335): a function with a subprogram, its
                                           ;; instructions' locations; a call of an old debug intrinsic is a debug record by then
@@ -4490,8 +4554,10 @@
                            (when-not ver (apply str (map #(error-text % metaforms slots) dis))))
             ;; after the warning and the stripping, opt verifies again: what is left of the debug info fails hard
             again (when (and (empty? broken) (not ver) (seq dis) (seq es2)) es2)
+            ;; the second verification's slot tracker numbers the stripped module (queue 335)
+            slots2 (when again (try (diag/md-slots (strip-debug-forms forms)) (catch Throwable _ slots)))
             body-text (if again
-                        (str body-text "warning: ignoring invalid debug info in " file "\n" (apply str (map #(error-text % metaforms slots) again)))
+                        (str body-text "warning: ignoring invalid debug info in " file "\n" (apply str (map #(error-text % metaforms slots2) again)))
                         body-text)
             broken (if again (vec again) broken)
             tail (cond
