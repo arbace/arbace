@@ -9715,3 +9715,20 @@ pick an equal module with no class. Nothing committed but the documents; no key 
 heavy chain in the night slot as planned (not needed: under a memory limit every module fits the light tier); a forms-level
 proof now (needs the platform dir of `bin/repr-java` swapped, a stage 4 switch, which the brief excludes). Evidence and scripts:
 `.tmp/worktrees/h-java-platform/.tmp/poc/`.
+
+## 2026-11-17: the own platform's switch prepared by day (JOP1-JOP8 (a), the user; branch `h-java-platform`)
+
+The user approved JOP1-JOP8, all (a), and asked for the transition night (round 51). By day, light (no platform build, no
+re-read), on `h-java-platform` with next `8049a4359` merged: the known file's 48 `:param-names` entries (JOP8); the build tree's
+other reads behind the pin's kind (JOP5: `bin/lib/repr-java/platform.bash`, front-check, parse-check, `bin/jrt-convert`,
+`jrt.derive`; jdk/'s two build-tree inputs recorded in `jdk/javac/platform-records/`); `bin/javac-vendor platform-own`,
+`platform-cache` (built on a miss by javac-tool's step), `platform-rebuild` (weekly step `javac-platform-rebuild`), `platform-oracle`
+(oracle step `javac-platform-oracle`) and the audit's build-tree rule (JOP2-JOP4, JOP6; logic in `test/javac-platform/own.bash`); the
+two `bin/javac-vendor` bugs fixed with `test/gate/javac-platform-test.bash` (21 checks); the facts staged in
+`test/javac-platform/switch.patch` (JOP7); the night's script `.tmp/goal/java-platform-night.sh` (`--dry-run`). Proven on three modules
+by hand: the own build's java.logging and jdk.unsupported have the build pin's module hashes, java.prefs its known class; seed,
+platform and oracle as designed. Found: the generators need a platform, so a cold clone needs the generated sources committed (JOP9,
+proposed: a 3 MB pack, as built); jdk/'s conversion takes CaseFolding.java and cacerts from the build tree (JOP10, proposed: recorded
+copies as built); JCS365's pin out of the javac key needs a `gate_key` move (JOP11). Keys: `gate_key` and the runtime key unchanged,
+`arbace_javac_key` moved (and again at the switch). Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the own platform's
+tooling, for the switch night".
