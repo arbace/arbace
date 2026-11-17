@@ -26,7 +26,7 @@
 (defmacro ^:private with-types [& body]
   `(binding [chk/*cx* (merge {:ldouble-size 8} *cfg*)] ~@body))
 
-(declare cparts cmake complex? seq-node temp-i frame-temp new-slot! var-size? vmem-of dyn-member dyn-copy ex-neg)
+(declare cparts cmake complex? seq-node temp-i frame-temp new-slot! var-size? vmem-of dyn-member dyn-copy ex-neg vec-type? vec-binary vec-unary held vec-build lane-node vec-shape vec-as-array)
 
 (defn- refuse [cls & msg]
   (throw (ex-info (apply str msg) {:ci/refused cls})))
@@ -70,7 +70,8 @@
                    (and (chk/int-type? pt) (not (wide? pt))) :m
                    :else (refuse :complex "the complex type " (chk/tstr t) " (deferred)")))
       (:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
-      :vector (refuse :by-design "GNU vector types (SPEC §14)")
+      ;; GNU vector types (CS320 (a)): lanes in memory, an aggregate's address
+      :vector :m
       :fn :i
       (if (wide? t) :w :i))))
 
@@ -348,24 +349,33 @@
         [:w :w] {:k :w :t t :n (if (= (wty t) (wty ft)) n (list 'w2w (wty t) (wty ft) n))}
         [:w :f] {:k :f :t t :n (list 'w2f (wty ft) (if (f32? t) 1 0) n)}
         [:f :w] {:k :w :t t :n (list 'f2w (wty t) n)}
+        ;; a vector cast to a vector or a scalar of its size, or a scalar to a vector: its bits (GNU's rule)
         [:m :m] (assoc x :t t)
-        [:i :m] (if (= :union (:k (under t)))
+        [:m :i] (if (vec-type? ft)
+                  {:k :i :t t :n (list 'ld (ity t) n)}
+                  {:k :i :t t :n n}) ; an array's address
+        [:m :f] (if (vec-type? ft) {:k :f :t t :n (list 'fld (fty t) n)} (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
+        [:m :w] (if (vec-type? ft) {:k :w :t t :n (list 'wld (wty t) n)} (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
+        [:i :m] (if (vec-type? t)
+                  (let [tmp (frame-temp t)] {:k :m :t t :n (list 'seq [(list 'ei (list 'zero tmp (size-of t))) (list 'ei (list 'st (ity ft) tmp n))] tmp)})
+                  (if (= :union (:k (under t)))
                   ;; GNU's cast to a union: the member of the operand's type
                   (let [m (or (first (filter #(with-types (chk/compatible? (unq (:t %)) (unq ft))) (:members (into {} (:rec (under t))))))
                               (refuse :conversion "a cast to a union without a member of type " (chk/tstr ft)))
                         tmp (frame-temp t)]
                     {:k :m :t t :n (list 'seq [(list 'ei (list 'zero tmp (size-of t))) (list 'ei (list 'st (ity (:t m)) tmp n))] tmp)})
-                  (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
+                  (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t))))
         [:f :m] (if (= :union (:k (under t)))
                   (let [m (or (first (filter #(with-types (chk/compatible? (unq (:t %)) (unq ft))) (:members (into {} (:rec (under t))))))
                               (refuse :conversion "a cast to a union without a member of type " (chk/tstr ft)))
                         tmp (frame-temp t)]
                     {:k :m :t t :n (list 'seq [(list 'ei (list 'zero tmp (size-of t))) (list 'ef (list 'fst (fty (:t m)) tmp n))] tmp)})
                   (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
-        [:m :i] {:k :i :t t :n n} ; an array's address
         (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t))))))
 
 (defn- complex? [t] (= :complex (:k (under t))))
+
+(defn vec-type? [t] (= :vector (:k (unq t))))
 
 (declare temp-i frame-temp seq-node)
 
@@ -858,7 +868,7 @@
   "The place a[i] of element type t (i[a] too)."
   [a i t]
   (let [ra (res-of a) ta (chk/decay (unq (:t ra)))
-        [base idx] (if (ptr? ta) [a i] [i a])
+        [base idx] (if (or (ptr? ta) (vec-type? ta)) [a i] [i a])
         bn (ex base)
         in (conv (ex idx) chk/t-long)
         d (when (vm? t) (rt-dscale (rtt-of base)))]
@@ -1026,9 +1036,87 @@
               :f (list 'fcmp o (:n a) (:n b))
               :w (list 'wcmp o (wty ot) (:n a) (:n b)))}))))))
 
+;; ---------------------------------------------------------------------------------------------
+;; GNU vector types (CS320 (a), the user 2026-11-17; doc/C23-SURVEY.md, "As built: GNU vector types"): a vector is an
+;; aggregate of lanes in memory (kind :m, its address), its operators lane by lane into a temporary of the result type,
+;; a scalar operand broadcast to every lane; comparisons give each lane 0 or -1 in the signed integer of the lane's size.
+
+
+(defn- vec-shape
+  "A vector type's [lane type, lane size, lane count]."
+  [t]
+  (let [t (unq t) et (under (:of t)) es (size-of et)]
+    [et es (quot (size-of t) es)]))
+
+(defn- lane-place [a et es i] {:mode :mem :t et :a (if (zero? i) a (list 'adds a (list 'i i) es))})
+
+(defn- held
+  "A node evaluated once: [effects node-to-use]; an aggregate's address or a scalar into a slot."
+  [x]
+  (case (:k x)
+    (:i :m) (let [s (temp-i)] [[(list 'ei (list 'is s (:n x)))] (assoc x :n (list 'il s))])
+    :f (let [s (new-slot! :f)] [[(list 'ef (list 'fs s (:n x)))] (assoc x :n (list 'fl s))])
+    :w (let [tmp (frame-temp (:t x))] [[(list 'ew (list 'wst (wty (:t x)) tmp (:n x)))] (assoc x :n (list 'wld (wty (:t x)) tmp))])))
+
+(defn- lane-node
+  "Lane i of the held operand x (a vector's address), or x itself broadcast (a scalar)."
+  [x i]
+  (if (vec-type? (:t x))
+    (let [[et es] (vec-shape (:t x))] (place-load (lane-place (:n x) et es i)))
+    x))
+
+(defn- vec-build
+  "A vector of type vt whose lane i is (lane-fn i) (a node of the lane's type or convertible to it), after effects pre."
+  [vt pre lane-fn]
+  (let [[et es n] (vec-shape vt)
+        tmp (frame-temp vt)
+        sts (for [i (range n)]
+              (let [x (conv (lane-fn i) et)
+                    pl (lane-place tmp et es i)]
+                (effect (place-store pl x))))]
+    {:k :m :t vt :n (list 'seq (vec (concat pre sts)) tmp)}))
+
+(defn- cmp-lane-type
+  "The lane type of a vector comparison's result: the signed integer of the lane's size."
+  [es]
+  (case (long es) 1 {:k :schar} 2 {:k :short} 4 chk/t-int 8 chk/t-long))
+
+(defn- vec-binary
+  "The operator h over x and y, one of them a vector, the result of type rt (the checker's)."
+  [h x y rt]
+  (let [vt (if (vec-type? (:t x)) (unq (:t x)) (unq (:t y)))
+        [et es n] (vec-shape vt)
+        [px hx] (held x) [py hy] (held y)
+        pet (promoted {:t et})
+        cmp? (#{'== '!= '< '<= '> '>=} h)
+        rt (if (and cmp? (not (vec-type? rt))) {:k :vector :of (cmp-lane-type es) :n (size-of vt)} (unq rt))
+        rt (if (and cmp? (not= (size-of (:of (unq rt))) es)) {:k :vector :of (cmp-lane-type es) :n (size-of vt)} rt)
+        [ret] (vec-shape rt)]
+    (vec-build rt (vec (concat px py))
+               (fn [i]
+                 (let [a (conv (lane-node hx i) et) b (lane-node hy i)]
+                   (cond
+                     cmp? (let [c (compare-nodes h a (conv b et) {:t et} {:t et})]
+                            {:k :i :t ret :n (list 'neg (ity ret) (:n (conv c ret)))})
+                     (#{'<< '>>} h) (shift h (conv a pet) (conv b chk/t-long))
+                     :else (arith h a (conv b et) pet)))))))
+
+(defn- vec-unary
+  "A unary operator over a vector: -, ~, +."
+  [h x]
+  (let [vt (unq (:t x)) [et] (vec-shape vt) [px hx] (held x) pet (promoted {:t et})]
+    (vec-build vt px
+               (fn [i]
+                 (let [a (conv (lane-node hx i) pet)]
+                   (case h
+                     - (case (:k a) :f {:k :f :t pet :n (list 'fneg (:n a))} (ex-neg a))
+                     bit-not {:k :i :t pet :n (list 'bnot (ity pet) (:n a))}
+                     a))))))
+
 (defn- binary [h x y rx ry rt]
   (let [tx (chk/decay (unq (:t x))) ty (chk/decay (unq (:t y)))]
     (cond
+      (or (vec-type? tx) (vec-type? ty)) (vec-binary h x y rt)
       (#{'== '!= '< '<= '> '>=} h) (compare-nodes h x y rx ry)
       (#{'<< '>>} h) (shift h (conv x (promoted rx)) y)
       ;; a pointer to a variably modified type steps by its run-time size (:rtt, with-rtt's; queue 165)
@@ -1105,6 +1193,7 @@
                        [pl rpre])
             old (place-load pl)
             nv (cond
+                 (or (vec-type? pt) (vec-type? (:t ev))) (vec-binary op old ev pt)
                  (and (ptr? pt) (#{'+ '-} op))
                  (let [i (:n (conv (if (= op '-) (ex-neg (conv ev chk/t-long)) ev) chk/t-long))]
                    {:k :i :t pt :n (if-let [d (rt-dscale (rtt-of pl-f))] (adds-dyn (:n old) i d) (list 'adds (:n old) i (ptr-target-size pt)))})
@@ -1261,13 +1350,14 @@
             (+ - * / % << >> bit-and bit-or bit-xor)
             (if (= 1 n)
               (let [x (ex (first args)) pt (promoted (res-of (first args)))]
+                (if (vec-type? (:t x)) (vec-unary h x)
                 (case h
                   + (conv x pt)
                   - (let [x (conv x pt)]
                       (if (complex? pt)
                         (let [[p re im] (cparts x)] (cmake pt (part-neg re) (part-neg im) p))
                         (case (:k x) :f {:k :f :t pt :n (list 'fneg (:n x))} (ex-neg x))))
-                  (refuse :forms "unary " h)))
+                  (refuse :forms "unary " h))))
               (loop [acc (with-rtt (first args) (ex (first args))) racc (res-of (first args)) xs (next args)]
                 (if xs
                   (let [y (with-rtt (first xs) (ex (first xs))) ry (res-of (first xs))
@@ -1281,7 +1371,8 @@
                        {:k :i :t chk/t-int :n (list 'cv "b" (truth (ex (first args))))} (rest args))
             not {:k :i :t chk/t-int :n (list 'lnot (truth (ex (first args))))}
             bit-not (let [x (conv (ex (first args)) t)]
-                      (case (if (complex? t) :c (:k x))
+                      (case (cond (vec-type? t) :vec (complex? t) :c :else (:k x))
+                        :vec (vec-unary 'bit-not x)
                         :c (let [[p re im] (cparts x)] (cmake t re (part-neg im) p))
                         :i {:k :i :t t :n (list 'bnot (ity t) (:n x))}
                         :w {:k :w :t t :n (list 'wnot (wty t) (:n x))}))
@@ -1320,7 +1411,7 @@
             aset (let [[a i v] args
                        ra (res-of a) ri (res-of i)
                        ta (chk/decay (unq (:t ra))) ti (chk/decay (unq (:t ri)))
-                       et (unq (:to (if (ptr? ta) ta ti)))
+                       et (cond (vec-type? ta) (unq (:of ta)) (vec-type? ti) (unq (:of ti)) :else (unq (:to (if (ptr? ta) ta ti))))
                        pl (aget-place a i et)]
                    (place-store pl (conv (ex v) et)))
             (inc! dec! pre-inc! pre-dec!) (incdec f)
@@ -1409,7 +1500,9 @@
                                      [v chk/t-double])
                             t (if (complex? t) t {:k :complex :of ft})]
                         (cmake t {:k :f :t chk/t-double :n '(f 0)} {:k :f :t chk/t-double :n (list 'f (fbits (double v)))} []))
-            convertvector (refuse :by-design "GNU vector types (SPEC §14)")
+            ;; __builtin_convertvector (CS320 (a)): each lane converted to the result's lane type
+            convertvector (let [x (ex (first args)) [px hx] (held x)]
+                            (vec-build t px (fn [i] (lane-node hx i))))
             bit-cast (let [[_ e] args x (ex e)
                            tmp (frame-temp t)]
                        (refuse :builder "__builtin_bit_cast"))
@@ -1561,6 +1654,26 @@
     {:k :v :t chk/t-void
      :n (list 'ei (list 'seq (vec (cons (list 'ei (list 'is s (:n (ex-as p :i)))) sts)) '(i 0)))}))
 
+(defn- vec-shuffle
+  "GNU's __builtin_shuffle (a, [b,] mask) and __builtin_shufflevector (a, b, i...) (CS320 (a)): the inputs copied side
+  by side into one temporary, each result lane loaded from it at its index (modulo the lanes there, as gcc does)."
+  [nm args t]
+  (let [sv (= nm "__builtin_shufflevector")
+        ins (if sv (take 2 args) (if (= 3 (count args)) (take 2 args) (take 1 args)))
+        xs (mapv ex ins)
+        vt (unq (:t (first xs)))
+        [et es n] (vec-shape vt)
+        total (* n (count xs))
+        both (frame-temp {:k :vector :of et :n (* es total)})
+        copies (map-indexed (fn [j x] (list 'ei (list 'copy (if (zero? j) both (list 'adds both (list 'i (* j n)) es)) (:n x) (* es n)))) xs)
+        [pm hm] (if sv [[] nil] (held (ex (last args))))
+        idx (fn [i]
+              (if sv
+                (let [v (:v (res-of (nth args (+ 2 i))))] (list 'i (mod (long (or v 0)) total)))
+                (list 'bin "and" "i64" (:n (conv (lane-node hm i) chk/t-long)) (list 'i (dec total)))))]
+    (vec-build t (vec (concat copies pm))
+               (fn [i] (place-load {:mode :mem :t et :a (list 'adds both (idx i) es)})))))
+
 (defn- builtin-call
   "A call of a builtin by name, or nil when it is an ordinary call."
   [^String nm args r]
@@ -1597,6 +1710,20 @@
       ("__builtin_nans" "__builtin_nansf" "__builtin_nansl") {:k :f :t t :n (list 'f (fbits Double/NaN))}
       ;; queue 126: its operand's value at its operand's type (the checker's); reassociation is not the builder's
       "__builtin_assoc_barrier" (conv (ex (first args)) t)
+      ("__builtin_shuffle" "__builtin_shufflevector") (vec-shuffle nm args t)
+      ;; CS320 (a): SSE2's cmp*pd (each lane all ones where the comparison holds, in the operands' type) and movmskp[ds] (the
+      ;; lanes' sign bits, lane 0 the lowest)
+      ("__builtin_ia32_cmplepd" "__builtin_ia32_cmpltpd" "__builtin_ia32_cmpeqpd")
+      (let [[a b] (mapv ex args) [es] (rest (vec-shape (:t a)))
+            m (vec-binary (case nm "__builtin_ia32_cmplepd" '<= "__builtin_ia32_cmpltpd" '< '==) a b
+                          {:k :vector :of (cmp-lane-type es) :n (size-of (:t a))})]
+        (assoc m :t t))
+      ("__builtin_ia32_movmskpd" "__builtin_ia32_movmskps")
+      (let [x (ex (first args)) [px hx] (held x) [_ es n] (vec-shape (:t x)) it (cmp-lane-type es)
+            bits (for [i (range n)]
+                   (let [l (conv (place-load (lane-place (:n hx) it es i)) chk/t-long)]
+                     (list 'bin "shl" "i64" (list 'bin "and" "i64" (list 'bin "shr" "u64" (:n l) '(i 63)) '(i 1)) (list 'i i))))]
+        {:k :i :t chk/t-int :n (:n (conv {:k :i :t chk/t-long :n (list 'seq px (reduce (fn [acc b] (list 'bin "or" "i64" acc b)) bits))} chk/t-int))})
       ;; queue 126: always the checker's constant; __atomic_is_lock_free's when it folded, else the native's call
       "__atomic_always_lock_free" {:k :i :t chk/t-bool :n (list 'i (or (:v r) 0))}
       "__builtin_clear_padding" (clear-padding-call (first args))
@@ -1954,7 +2081,7 @@
   "The stores of a braced list els into the object of type t at a: [stores rest]. braced: the list is
   this object's own braces (designators apply here); else elided (a designator ends it)."
   [t a els braced]
-  (let [t (unq t)
+  (let [t (vec-as-array (unq t))
         ;; each subobject's stores as one entry [key stores] (key: the element's index, the member's, a union's 0; nil for a
         ;; write into a part of it): a later whole write of the same subobject drops the earlier entry, its side effects
         ;; with it, as gcc's c-typeck.cc does (output_init_element's "initialized field with side-effects overwritten";
@@ -2041,6 +2168,9 @@
       ;; a scalar in braces: its first element
       (let [[st rst] (fill t a els false)] [st rst]))))
 
+;; CS320 (a): a vector's initializer is its lanes', as an array's
+(defn- vec-as-array [t] (if (vec-type? t) (let [[et _ n] (vec-shape t)] {:k :array :of et :n n}) t))
+
 (defn- anon-members
   "A record type's members, an anonymous member's own members among them."
   [t]
@@ -2051,7 +2181,7 @@
 (defn- fill-designated
   "A designator path's rest `ds` into the object of type t at a, given the value v: [stores]."
   [t a ds v]
-  (let [d (first ds) t (unq t)]
+  (let [d (first ds) t (vec-as-array (unq t))]
     (cond
       (empty? ds) (fill t a [v] true)
       (keyword? d) (let [subs (subobjects t)
@@ -2087,7 +2217,9 @@
       (= :m k)
       (let [rx (res-of x)
             xt (unq (:t rx))]
-        (if (and (#{:struct :union} (:k xt)) (with-types (chk/compatible? (unq xt) t)))
+        (if (or (and (#{:struct :union} (:k xt)) (with-types (chk/compatible? (unq xt) t)))
+                ;; a vector from a vector expression (CS320 (a)): its bits
+                (and (vec-type? t) (vec-type? xt)))
           [[(list 'ei (list 'copy a (:n (ex-as x :i)) (size-of t)))] (rest els)]
           (fill-list t a els false)))
       :else [(elem-store t a x nil) (rest els)])))

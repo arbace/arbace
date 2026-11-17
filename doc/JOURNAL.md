@@ -9804,3 +9804,14 @@ report had estimated 27) and `:gcc-own-rules` (by design, 64 files by name after
 their messages: GNU extensions', GCC's ABI and runtime interface, its limits and IFNDR diagnoses). C++ read 5,309 / 1,083 / 103 to 5,309 /
 243 / 943; completeness 91 unchanged, without by design 96 to 93 (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-read (2)"). Not yet: the
 file-by-file review of the other four former classes' files.
+
+## 2026-11-17: GNU vector types in ci (CS320 (a), branch `h-c-run`)
+
+Built in `arbace/c/build.ae` (and the checker's result types of the shuffles, SSE2's cmp*pd and movmskp[ds], and of a floating
+vector comparison): vectors as aggregates of lanes in memory, the operators lane by lane into a temporary with a scalar operand
+broadcast, comparisons to 0 / -1, subscripts, initializers, bit conversions, `__builtin_convertvector`, `__builtin_shuffle`,
+`__builtin_shufflevector`. No back-end change (scalar nodes only), so cf2g compiles them unchanged. The 41 programs pass at eval and
+AOT; 268 programs at eval move only those 41, the controls differ. C eval 2,214 / 34 / 31, AOT 2,222 / 26 / 31 (completeness 97).
+Alternatives: vectors as a node kind of their own in go/arbace/ci (faster, but a back-end and cf2g change for no case that needs
+speed), left; the `_mm_*` functions of Arbace's headers as builtins, left (no check reaches them: benchmarksgame's SSE programs are
+recorded faulting without their argument; mandelbrot.c, -3, -4 run by hand with 200 print mandelbrot-2.c's image).
