@@ -1474,3 +1474,19 @@ messages, the custom sections' own checks: 69 read and 12 eval rows), branch hin
 target checks), custom descriptors (descriptor types, exact references and their casts on top of GC: 215 read, 500 eval rows) and
 threads (WA13, WAS26 (a): 73 read, 259 eval rows). With the first two built completeness would be about 0.986; 100 needs threads and
 custom descriptors.
+
+## As built: queue 326, round 2 (2026-11-17, branch `326-wasm-deferred`; the user's D326-1 (a), D326-2 (a))
+
+Three more groups built and recorded, a commit each: **branch hints** (the annotations checked, a function's instruction's one:
+'duplicate annotation', 'not in a function', the custom check's 'invalid target'; not kept in the forms), **the extended name
+section** (`@name` at every binding's place with the proposal's messages; a `@custom "name"` decoded as the reference's name section,
+subsections 0-13, `arbace.repr.wasm.binary/check-names`: malformed or a custom check; the names beyond the module's and the
+functions' not kept) and **threads** (WAS26 (a)'s ordering lifted by the user: shared memories, the 67 atomics with a new kind `:zero`
+for `atomic.fence`, wai on one thread: 'unaligned atomic', 'expected shared memory', wait 1 or 2, notify 0; w2g's cases regenerated).
+The threads scripts' rules of Wasm 1.0 (one memory, one table, i32 limits) classed by design, `:threads-before-wasm-3.0`.
+
+wasm's cells: read 7,934 -> 8,068 pass (by design 0 -> 11, deferred 360 -> 215), eval 62,288 -> 62,559 and AOT 62,291 -> 62,562
+(deferred 771 -> 500), print 2,838 -> 2,871; completeness 0.9830 -> 0.9892.
+
+**Not done**: custom descriptors (215 read, 500 eval rows): descriptor and describes clauses, exact references, their subtyping and
+casts, six instructions, exact function imports; to derive from its 14 scripts (its Overview not pinned).
