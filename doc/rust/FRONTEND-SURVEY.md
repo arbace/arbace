@@ -4026,3 +4026,31 @@ The main host's night, after RIND4's `bin/heavy-lock bin/rsi runtime-ci`: `RF11_
 --record` (now `--front own`: rsi-build inside it, about 35 minutes for core's attributes then a few minutes a program at 2.3 GB a
 process; `RF11_BATCH=1` keeps one process at that), which writes the record and the case inputs; `bin/reap`, `bin/crops-score
 --record`. Independence stays 80 until C2, C3, C4 and C6 are own (RFP53 (a)).
+
+## As built: RIND5's vectors, the shuffle and the arithmetic (2026-11-17, evening)
+
+The user decided (round 51): `simd_shuffle` (a), then `simd_mul`, `_div`, `_rem`, `_neg`, `_saturating_add` and `simd_select`, so
+that vectors builds on the own front end. Built in `arbace/rust/back/codegen.ae`, each after rustc_codegen_llvm's
+generic_simd_intrinsic (1.99.1):
+
+- `simd_shuffle`: the index is a constant of M `u32` lanes (`SimdShuffleIdx<M>`); its value is the evaluated allocation the body
+  carries (`(const .. (indirect ALLOC OFF))`, the bytes little-endian), the shufflevector's mask `<M x i32>`. The body that holds
+  it is std's `Swizzle::concat_swizzle::<T, N>` at `main::Impl`, whose MIR (with rustc's CTFE of `<Impl as Swizzle<4>>::INDEX`
+  in it) is the record's today (C2): the constant evaluation of the impl's associated `INDEX` at its arguments is needed when that
+  body is Arbace's own (RFP55 (a), RUST-90's S4), not before; it is not written here.
+- `simd_mul`, `simd_div`, `simd_rem` (fmul, fdiv, frem; sdiv, srem for signed lanes, udiv, urem else), `simd_neg` (fneg, or sub from
+  zero), `simd_saturating_add` and `_sub` (llvm.[su](add|sub).sat.vNiK), `simd_select` (the mask's lanes made `<N x i1>`, select).
+- The float reductions: `simd_reduce_add_ordered` (llvm.vector.reduce.fadd from the accumulator, ordered), `simd_reduce_max`, `_min`
+  (fmax, fmin); `simd_as`'s saturating float-to-integer names its lanes' type as LLVM does (`.v4f32`, which rsi's lowering
+  scalarizes).
+- build-run's refusal lines carry the refusal's data (`a path [..]`, cut to 300 characters).
+
+`bin/rust-front rsi-build vectors` (1.97 GB): the module is **ready** (codegen and rsi's lowering accept every body, std's SIMD
+instances through the new intrinsics), but the sample stays on the pack: its own `main` is not built, `record main (a path
+"[nil ["Impl" "concat_swizzle"] false :unknown]")`. The cause is `simd_swizzle!(a, b, [7, 0, 5, 2])`, a macro 2.0 of core
+(swizzle.rs) that expands to a block with `use $crate::simd::Swizzle; struct Impl; impl Swizzle<{$index.len()}> for Impl { const
+INDEX: .. = $index; } Impl::concat_swizzle($first, $second)`: the type-relative path `Impl::concat_swizzle` (a block-local struct
+of the expansion's def-site context, the trait's provided method through the block's `use`, the trait's argument the anonymous
+constant `{[7, 0, 5, 2].len()}`) has no resolution. Next: resolve's lexical lookup of a def-site item in the expansion's block
+and the const argument's evaluation (a `len()` of an array literal, CTFE's first step), then `main` built. `bin/rust-front essential`
+equals its known summary after the changes (run-built 7 of 7, 1.73 GB). The cell: 4 of 5 own, unchanged.

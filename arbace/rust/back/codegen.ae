@@ -1720,7 +1720,9 @@
                                      ("simd_splat" "simd_eq" "simd_ne" "simd_lt" "simd_le" "simd_gt" "simd_ge" "simd_or" "simd_and" "simd_xor"
                                       "simd_add" "simd_sub" "simd_bitmask"
                                       "simd_reduce_all" "simd_reduce_any" "simd_reduce_and" "simd_reduce_or" "simd_reduce_xor"
-                                      "simd_reduce_max" "simd_reduce_min" "simd_reduce_add_ordered" "simd_cast" "simd_as")
+                                      "simd_reduce_max" "simd_reduce_min" "simd_reduce_add_ordered" "simd_cast" "simd_as"
+                                      "simd_mul" "simd_div" "simd_rem" "simd_neg" "simd_saturating_add" "simd_saturating_sub" "simd_select"
+                                      "simd_shuffle")
                                      (let [vty (fn [l] (let [v (or (:vector l) (unsupported (str intrinsic " of a non-vector")))]
                                                          (list 'vector (:n v) (symbol (:imm (:elem v))))))
                                            load-vec (fn [o] (let [l (layout lt (ty-of o)) v (operand! bb o)
@@ -1756,6 +1758,52 @@
                                          (let [[l a] (load-vec (first args)) [_ b] (load-vec (second args)) r (fresh!)]
                                            (emit! bb (list '= r (list (symbol (subs intrinsic 5)) (vty l) a b)))
                                            (store-vec! r))
+                                         ;; RIND5 (the user, 2026-11-17): generic_simd_intrinsic's arithmetic: mul, div and rem by the
+                                         ;; elements' kind (fmul, fdiv, frem; sdiv, srem for signed lanes, udiv, urem else), neg (fneg, or sub
+                                         ;; from zero), the saturating ones as llvm.[su](add|sub).sat
+                                         ("simd_mul" "simd_div" "simd_rem")
+                                         (let [[l a] (load-vec (first args)) [_ b] (load-vec (second args)) el (:elem (:vector l)) r (fresh!)
+                                               fl? (= :float (:prim el)) sg (:signed el)
+                                               op (case intrinsic
+                                                    "simd_mul" (if fl? 'fmul 'mul)
+                                                    "simd_div" (cond fl? 'fdiv sg 'sdiv :else 'udiv)
+                                                    "simd_rem" (cond fl? 'frem sg 'srem :else 'urem))]
+                                           (emit! bb (list '= r (list op (vty l) a b)))
+                                           (store-vec! r))
+                                         "simd_neg"
+                                         (let [[l a] (load-vec (first args)) el (:elem (:vector l)) r (fresh!)]
+                                           (emit! bb (list '= r (if (= :float (:prim el)) (list 'fneg (vty l) a) (list 'sub (vty l) 'zeroinitializer a))))
+                                           (store-vec! r))
+                                         ("simd_saturating_add" "simd_saturating_sub")
+                                         (let [[l a] (load-vec (first args)) [_ b] (load-vec (second args)) el (:elem (:vector l)) n (:n (:vector l)) r (fresh!)
+                                               _ (when (= :float (:prim el)) (unsupported (str intrinsic " of floats")))
+                                               iname (symbol "g" (str "llvm." (if (:signed el) "s" "u") (if (= intrinsic "simd_saturating_add") "add" "sub") ".sat.v" n (:imm el)))]
+                                           (declare! gl iname (vty l) [[(vty l)] [(vty l)]])
+                                           (emit! bb (list '= r (list 'call (vty l) iname [[(vty l) a] [(vty l) b]])))
+                                           (store-vec! r))
+                                         ;; simd_select: the mask's lanes made <N x i1> (trunc), then select
+                                         "simd_select"
+                                         (let [[ml m] (load-vec (first args)) [l a] (load-vec (second args)) [_ b] (load-vec (nth args 2))
+                                               n (:n (:vector ml)) tr (fresh!) r (fresh!)]
+                                           (emit! bb (list '= tr (list 'trunc (vty ml) m (list 'vector n 'i1))))
+                                           (emit! bb (list '= r (list 'select [(list 'vector n 'i1) tr] [(vty l) a] [(vty l) b])))
+                                           (store-vec! r))
+                                         ;; simd_shuffle: the index a constant of M u32 lanes (SimdShuffleIdx<M>, or an array), read from its
+                                         ;; evaluated allocation in the body (`(indirect ALLOC OFF)`: the record's CTFE, or ours, RIND6's
+                                         ;; constant evaluation of the impl's associated INDEX), then shufflevector over the two vectors
+                                         "simd_shuffle"
+                                         (let [[l a] (load-vec (first args)) [_ b] (load-vec (second args))
+                                               c (nth args 2) v (when (and (seq? c) (= 'const (first c))) (nth c 3 nil))
+                                               _ (when-not (and (seq? v) (= "indirect" (name (first v)))) (unsupported "simd_shuffle: an index not an evaluated constant"))
+                                               [_ id off] v
+                                               hex (or (:bytes (get allocs (str id))) (unsupported "simd_shuffle: the index's allocation"))
+                                               m (:n (:vector dl))
+                                               idx (for [i (range m) :let [o (* 2 (+ off (* 4 i)))]]
+                                                     (reduce (fn [acc k] (+ (* acc 256) (Long/parseLong (subs hex (+ o (* 2 k)) (+ o (* 2 k) 2)) 16))) 0 [3 2 1 0]))
+                                               r (fresh!)]
+                                           (emit! bb (list '= r (list 'shufflevector [(vty l) a] [(vty l) b]
+                                                                      [(list 'vector m 'i32) (apply list 'vector (for [i idx] ['i32 i]))])))
+                                           (store-vec! r))
                                          ;; RIND5: simd_cast and simd_as (generic_simd_intrinsic's casts): lane by lane, the integer widths by
                                          ;; trunc, sext (a signed source) or zext, integers and floats by the conversions (simd_as saturating
                                          ;; float to integer as `as` does: fpto[su]i.sat)
@@ -1774,7 +1822,7 @@
                                                              (store-vec! a)
                                                              (do (emit! bb (list '= r (list (if (< (:bits fe) (:bits te)) 'fpext 'fptrunc) from a to))) (store-vec! r)))
                                              (= intrinsic "simd_cast") (do (emit! bb (list '= r (list (if (:signed te) 'fptosi 'fptoui) from a to))) (store-vec! r))
-                                             :else (let [iname (symbol "g" (str "llvm.fpto" (if (:signed te) "s" "u") "i.sat.v" n (:imm te) ".v" n (:imm fe)))]
+                                             :else (let [iname (symbol "g" (str "llvm.fpto" (if (:signed te) "s" "u") "i.sat.v" n (:imm te) ".v" n "f" (:bits fe)))]
                                                      (declare! gl iname to [[from]])
                                                      (emit! bb (list '= r (list 'call to iname [[from a]])))
                                                      (store-vec! r))))
@@ -1789,8 +1837,23 @@
                                            (emit! bb (list '= r (list 'call 'i1 iname [[(list 'vector n 'i1) tr]])))
                                            (assign! bb dest {:ty "i1" :v r}))
                                          ("simd_reduce_and" "simd_reduce_or" "simd_reduce_xor" "simd_reduce_max" "simd_reduce_min" "simd_reduce_add_ordered")
+                                         (if (= :float (:prim (:elem (:vector (layout lt (ty-of (first args)))))))
+                                           ;; floats: arith_red!'s ordered fadd from the accumulator (llvm.vector.reduce.fadd, no fast
+                                           ;; flags), minmax_red!'s fmax and fmin
+                                           (let [[l a] (load-vec (first args)) el (:elem (:vector l)) n (:n (:vector l)) ety (symbol (:imm el)) r (fresh!)
+                                                 fx (str "v" n "f" (:bits el))]
+                                             (case intrinsic
+                                               "simd_reduce_add_ordered"
+                                               (let [iname (symbol "g" (str "llvm.vector.reduce.fadd." fx)) acc (operand! bb (second args))]
+                                                 (declare! gl iname ety [[ety] [(vty l)]])
+                                                 (emit! bb (list '= r (list 'call ety iname [[ety (:v acc)] [(vty l) a]]))))
+                                               ("simd_reduce_max" "simd_reduce_min")
+                                               (let [iname (symbol "g" (str "llvm.vector.reduce." (if (= intrinsic "simd_reduce_max") "fmax" "fmin") "." fx))]
+                                                 (declare! gl iname ety [[(vty l)]])
+                                                 (emit! bb (list '= r (list 'call ety iname [[(vty l) a]]))))
+                                               (unsupported (str intrinsic " of floats")))
+                                             (assign! bb dest {:ty (:imm el) :v r}))
                                          (let [[l a] (load-vec (first args)) el (:elem (:vector l)) n (:n (:vector l))
-                                               _ (when (= :float (:prim el)) (unsupported (str intrinsic " of floats")))
                                                ety (symbol (:imm el)) r (fresh!)
                                                op (case intrinsic
                                                     "simd_reduce_and" "and" "simd_reduce_or" "or" "simd_reduce_xor" "xor" "simd_reduce_add_ordered" "add"
@@ -1802,7 +1865,7 @@
                                              (let [acc (operand! bb (second args)) s2 (fresh!)]
                                                (emit! bb (list '= s2 (list 'add ety (:v acc) r)))
                                                (assign! bb dest {:ty (:imm el) :v s2}))
-                                             (assign! bb dest {:ty (:imm el) :v r})))
+                                             (assign! bb dest {:ty (:imm el) :v r}))))
                                          ;; each element's most significant bit (lshr by its width less one, trunc to <N x i1>) as an
                                          ;; N-bit integer, widened or narrowed to the result's
                                          "simd_bitmask"

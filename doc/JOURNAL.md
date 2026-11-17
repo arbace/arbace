@@ -9943,3 +9943,12 @@ the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of
   the C target). The record itself is the night's (ci needs runtime-ci at c/target). Alternative: keep the packs the record's default
   until the night proves the own cases (RFP42 (a)'s letter); the user's RIND5 (a) makes the own path the record's, the pack the
   fallback per case.
+
+## 2026-11-17: RIND5's vectors: the shuffle and the SIMD arithmetic in codegen (branch `h-rust-indep`, after next `55e8c0ae7`)
+
+- The user decided `simd_shuffle` (a) and the arithmetic intrinsics. Codegen now emits simd_shuffle (the index from the body's
+  evaluated allocation), simd_mul, div, rem, neg, saturating add and sub, select, the float reductions, after rustc_codegen_llvm's
+  generic_simd_intrinsic. The vectors sample's module is ready (codegen and lowering), but its `main` is not built: the
+  `simd_swizzle!` expansion's `Impl::concat_swizzle` is unresolved (a def-site block item, a trait's provided method, the const
+  argument `{$index.len()}`); the CTFE of `Swizzle::INDEX` is the record's while concat_swizzle's body is std's (C2). Alternative
+  considered: evaluating INDEX now (no body of ours needs it yet; nothing would test it).
