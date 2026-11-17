@@ -7270,7 +7270,11 @@ stage 0 still refuses them: `lex-check lib-test` on module_koi8_r.py gives "refu
 So on next's stage 0, `Lib/test/encoded_modules/module_koi8_r.py` passes lex-check, parse-check (:lines and :full) and
 roundtrip --text, and the syntax-errors case `test_exceptions-0012.py` (coding cp1251) passes parse-check in both modes. Only
 `test_exceptions-0043.py` (iso8859-7) is still :charset. Without a fix, the non-record runs on 201 merged onto next fail
-those files as GONE. The fix is to drop the entries from the four known files.
+those files as GONE. The entries were dropped by hand on 318's merge of 317 (lex-check-known, parse-check-known's :lines
+and :full, full-known), the same entries a slice record drops. The five judged runs of the slice then pass (no GONE), with
+29 controls failing as they must. test/reap/matrix.edn and test/crops/scores.edn were recorded again: read design 66 -> 64,
+print 5 -> 4, the passes still unrecorded. The :charset class texts still name KOI8-R; the whole record keeps them, and
+only iso8859-7 is left.
 
 **The main host's whole record** (amd64, a host with python3 3.14.10, the live oracle; the order matters: parse-check's rows
 are :pending until both modes ran):
