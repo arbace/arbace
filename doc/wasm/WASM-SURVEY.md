@@ -1490,3 +1490,17 @@ wasm's cells: read 7,934 -> 8,068 pass (by design 0 -> 11, deferred 360 -> 215),
 
 **Not done**: custom descriptors (215 read, 500 eval rows): descriptor and describes clauses, exact references, their subtyping and
 casts, six instructions, exact function imports; to derive from its 14 scripts (its Overview not pinned).
+
+## As built: queue 327, custom descriptors (2026-11-17, branch `327-wasm-custom-descriptors`; the user's D326-4 (a))
+
+Derived from the pinned testsuite's 14 scripts of `proposals/custom-descriptors/` (92a3d806; the proposal's Overview not pinned),
+in three parts, a commit each: **exact references** (`(ref null? (exact X))`, 0x62; matched only by the same type or a bottom; an
+allocation's and a defined or exactly imported function's reference exact; exact casts by the dynamic type itself; exact function
+imports, 0x20), **descriptor types** (the describes and descriptor clauses, 0x4c and 0x4d, part of the types' identity, their rules
+of placement, kind, finality and subtyping with the scripts' messages) and **the instructions** (`struct.new_desc`,
+`struct.new_default_desc`, `ref.get_desc`, `ref.cast_desc_eq`, `br_on_cast_desc_eq` and `_fail`, 0xfb 0x20-0x26: 0x22 from the pin's
+binary module, the rest in its order). The proposal's relaxation of `br_on_cast`'s rule conflicts with Wasm 3.0's own scripts: Wasm
+3.0's kept, the proposal's two rows by design (the descriptor casts take the proposal's rule, which no Wasm 3.0 script contradicts).
+
+wasm's cells: read 8,068 -> 8,281 pass (deferred 215 -> 0), eval 62,559 -> 63,057 and AOT 62,562 -> 63,060 (deferred 500 -> 0),
+print 2,871 -> 2,935; completeness 0.9892 -> 0.9996 (meant 1.0000): every deferred row of the crop built.
