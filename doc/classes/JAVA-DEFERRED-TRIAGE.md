@@ -7991,3 +7991,59 @@ printf 't04724\nt04735\nt04738\nt04740\nt04741\nt04742\n' > .tmp/njra.txt
 bin/java-check --levels read,interp --list .tmp/njra.txt --save .tmp/njra
 bin/java-check --judge --partial --record .tmp/njra/...               # the six rows alone; divergences.edn's :reflection rows
 ```
+
+## As built: n-java-serial (write-ahead), 2026-11-17 (round 52, overnight)
+
+Branch `n-java-serial` (from mac/n-review-c `6ff92621f`), under the night's rules (each process under 1 GiB): the interp cell's
+`:serialization` rows outside the stack's triage, 21 by n-java-defer's count. 12 of them (t04377 t04402 t04412 t04419-t04424
+t04426-t04428) are h-java-deferred's ObjectInputFilter `System$Logger` cause (n-java-defer's finding; not touched here). The other 9
+run at interp on next `42bf8614b`'s gate executable (`e8e0d017243dca8a9f9f`, read on javac's tool `javac-8526ceb9d1ea3ff0bd68`,
+`bin/java-check --levels read,interp --list`, each run under 0.75 GB), all differently from their record (`ClassNotFoundException:
+java.io.ObjectOutputStream` / `java.rmi.MarshalledObject`, from before the object streams), so all 9 re-recorded
+(`--judge --partial --record`):
+
+- **t04291 ReadParams, t04707 SuppressedExceptions, t05550 Hashtable/SimpleSerialization pass** (the stack's serialization slices).
+  They stay in `:serialization`'s `:tests`, which classes their compiled rows.
+- **t04389 ClearHandleTable: the interpreter's frame keeps a dead local** (not the stream's handle table: the test without
+  writeObject leaves the same one WeakReference uncleared). The Java forms interpreter gave every local of a method its own frame
+  slot, so the loop's last `String` stayed reachable from its slot after the loop; javac reuses a block's slots after it, which is
+  why the JDK passes. Fixed in **arbace/classes/interp.ae** (`release!`): after a let's body its slots, and those of everything in
+  it, are free again; the frame's sizes are the most slots in use at once (`:mr`, `:mp`); not when a pattern binding was made inside
+  the let (its scope may flow out of a while's or a for's condition, JLS 6.3.2). Proof, light: t04389 passes with the checkout on
+  ARBACE_PATH (status 0; without it status 1); `bin/java-check --essential` with the checkout on ARBACE_PATH (the gate's executable
+  behind a wrapper): 428 of 428 pass, the controls c00001 c00003 c00004 fail as they must. Reaches the record with the next build
+  (java-check runs the executable's embedded arbace/classes).
+- **t04433 proxy/replace, t04440 resolveProxyClass/NonPublicInterface: a proxy is not Serializable to the nominal check.** The proxy
+  class (Compiler$Dyn.defineJavaProxy) gets Proxy as its superclass after defineClass computed its interfaces, so DynImplements
+  lacks Proxy's Serializable: `(instance? java.io.Serializable p)` is false while `Serializable.class.isAssignableFrom` is true, and
+  ObjectOutputStream throws NotSerializableException. Fixed in **arbace/j2g/dyn.ae** (j2g_dyn.go's defineJavaProxy adds Proxy's
+  interfaces): **built tomorrow**; what the two tests ask after it (writeReplace/readResolve through the handler, a non-public
+  interface's proxy) shows then. Both added to `:serialization`'s `:tests`.
+- **t04623 String/CaseInsensitiveComparator** (`:util-classes` since h-java-deferred): jrt's own
+  `jdk.internal.jrt.CaseInsensitiveComparator` is registered as `java.lang.String$CaseInsensitiveComparator` (j2g's java-names) but
+  its member table named its field INSTANCE's type by the internal name, so reflection's decoding panicked; and it had no readResolve
+  (the test checks the restored value is the one instance). Fixed in **overlay/jdk** (INSTANCE typed `Comparator<String>`, jdk26u's
+  `readResolve`), its forms converted from it (`bin/repr-java read-jdk --no-javac`, the file alone, as `bin/jrt-convert`'s read
+  gives it): **built tomorrow**.
+- **t05237 RemoteException/chaining, t05251 Unmarshal/PrimitiveClasses** (`:rmi` by the new reason): MarshalInputStream's
+  initializer does `Class.forName` of a local holding `"sun.rmi.registry.RegistryImpl_Stub"`, which roots nothing in j2g's closed
+  world; the stub is not in the build and every MarshalInputStream's initialization throws `NoClassDefFoundError: Missing system
+  class`. Fixed by a **derived overlay** (test/jrt/derive.ae's rmi derivations: the name taken from the class literal), its forms
+  converted as above: **built tomorrow**. `bin/jrt-convert derive --check`: 87 overlays, 0 not as derived.
+
+Records: test/java/check-interp.edn's 9 rows, test/reap/matrix.edn (Java eval 2,720 pass, 440 deferred), test/crops/scores.edn
+(Java completeness 89, meant 92); `bin/reap` 0 problems, `bin/crops-score --judge --strict` and `bin/records-check` pass.
+Decisions taken overnight (round 52): slots released per let with the pattern guard (the alternative, nulling a dead slot by a
+liveness pass, is larger); the stub rooted by its class literal in a derived overlay (rather than a j2g rule for `Class.forName` of a
+constant local, which would move the whole world's reachability); CaseInsensitiveComparator's field retyped in the overlay (rather
+than j2g renaming member-table descriptors by java-names). Keys: arbace/classes and arbace/j2g move `gate_key`; overlay/jdk and
+jdk/forms move `gate_key` and the runtime key.
+
+The day's commands (after `bin/arbace-go --gate-build`; then, for the jdk/ forms, `bin/jrt-convert verify` in the night's `--full`):
+
+```sh
+printf 't04389\nt04433\nt04440\nt04623\nt05237\nt05251\n' > .tmp/njs.txt
+bin/java-check --levels interp --list .tmp/njs.txt --save .tmp/njs
+bin/java-check --judge --partial --record .tmp/njs/results.tsv      # the rows that run differently
+bin/reap --record && bin/crops-score --record
+```
