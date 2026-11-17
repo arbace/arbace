@@ -122,7 +122,7 @@ work=$root/.tmp/hsi/check
 # non-pass's class looked up in test/haskell/divergences-O1.edn first (the classes only -O1 has: :eval-order), then in
 # test/haskell/divergences.edn. The compiled level's runs at -O1 (--aot --opt O1); hsi's own level stays at -O0.
 case $opt in O0) sfx="" ;; O1) sfx=-O1 ;; *) echo "hsi check: --opt O0 or O1" >&2; exit 2 ;; esac
-ref=$root/test/haskell/ref-ghc914$sfx.edn
+ref=${HSI_REF:-$root/test/haskell/ref-ghc914$sfx.edn} # HSI_REF: another record (a scratch reference: queue 332's arm64 probes)
 divs=$root/test/haskell/divergences.edn divs1=$root/test/haskell/divergences$sfx.edn
 work=$work$sfx
 # --aot (HE8, the first slice): each program built by bin/hsi aot build (its modules and the library closures a first
@@ -439,12 +439,13 @@ one() {
   if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$divs" | grep -qF "\"$id\""; then
     echo "{:id \"$id\" :result :skipped :dump 0 :run 0}" > "$res"; return 0
   fi
-  # a Cmm main (all.T's cmm_src, T17920; HES92 (a)): the helper dumps the Haskell's STG alone, so there is none (the class :test-cmm)
-  case $main in *.cmm) echo "{:id \"$id\" :result :no-dump :error \"a Cmm main (all.T's cmm_src): no Haskell, no STG\"}" > "$res"; return 0 ;; esac
+  # a Cmm main (all.T's cmm_src, T17920; HES92 (a)): no Haskell, no STG; since queue 332 (HES67's design) the .cmm read by
+  # arbace.repr.haskell.cmm and run by hsi (hsi run --cmm FORMS --cmm-main), the dump and the records skipped
+  local cmm_main=""; case $main in *.cmm) cmm_main=1 ;; esac
   # the dump's flags: all.T's, less a test's own C, Cmm, assembly and objects (the helper compiles Haskell only); its
   # C files built by ci into a node program hsi loads (HES64 (a), bin/hsi cnodes), with the flags the C reads (-I, -D)
   # (an extra Haskell source of all.T's, multi_compile_and_run's ManyUbxSums_Addr.hs, given the helper as a file: HES92 (a))
-  local fl=() f cfiles=() cflags=() optc="" hsf=(); if [ "$flags" != - ]; then for f in $flags; do
+  local fl=() f cfiles=() cflags=() cmmfiles=() optc="" hsf=(); if [ "$flags" != - ]; then for f in $flags; do
     # -optcX: X for the C compiler, a lone -D, -I or -U joined to the next one's (-optc-D -optcFOO is -DFOO)
     if [[ $f == -optc* ]]; then
       f=${f#-optc}
@@ -452,9 +453,14 @@ one() {
       case $f in -D|-I|-U) optc=$f ;; -D*|-I*|-U*) cflags+=("$f") ;; esac
       continue
     fi
-    case $f in *.c) cfiles+=("$f") ;; *.o) [ -f "$src/${f%.o}.c" ] && cfiles+=("${f%.o}.c") ;; *.cmm|*.s|*.S|*.h|*.cpp|*.cc) ;; *.hs|*.lhs) hsf+=("$f") ;; -I*|-D*|-U*) fl+=("$f"); cflags+=("$f") ;; *) fl+=("$f") ;; esac; done; fi
+    case $f in *.c) cfiles+=("$f") ;; *.o) [ -f "$src/${f%.o}.c" ] && cfiles+=("${f%.o}.c") ;; *.cmm) cmmfiles+=("$f") ;; *.s|*.S|*.h|*.cpp|*.cc) ;; *.hs|*.lhs) hsf+=("$f") ;; -I*|-D*|-U*) fl+=("$f"); cflags+=("$f") ;; *) fl+=("$f") ;; esac; done; fi
   # the dump's key: the main file, the flags, the helper; a test of several modules: its directory's sources too
-  local key prog
+  local key prog stg="" srcs="" td=0
+  if [ -n "$cmm_main" ]; then
+    cmmfiles+=("$main"); prog=$root/.tmp/hsi/progs$sfx/$id/cmm-main; mkdir -p "$prog"; srcs=":stg :none"
+    local plibs=$libs pimages=$images la=() l
+    [ -z "$dump_only" ] || { echo "{:id \"$id\" :result :dumped :dump 0}" > "$res"; return 0; }
+  else
   key=$(prog_key "$src" "$main" "$flags" "$kind" "$id")
   prog=$root/.tmp/hsi/progs$sfx/$id/$key
   local td=0 t0 t1
@@ -528,6 +534,7 @@ one() {
     touch "$prog/stubs.ok"
   fi
   [ -z "$dump_only" ] || { echo "{:id \"$id\" :result :dumped :dump $td}" > "$res"; return 0; }
+  fi
   local sf; for sf in "$prog"/stubs/*_stub.c; do [ -f "$sf" ] && cfiles+=("$sf"); done
   # a wrapper's stub whose parameters hold the x86-64 adjustor's original_return_addr: its name and that parameter's
   # index (the stable pointer's 0), for hsi's createAdjustor (NODES.adjust, read beside the node program)
@@ -553,6 +560,22 @@ one() {
     # a -no-hs-main program: its C's main is the entry (hsi run --c-main)
     [[ " $flags " == *" -no-hs-main "* ]] && la+=(--c-main)
   fi
+  # the test's own Cmm (queue 332, HES67's design): its .cmm files read into Cmm forms by arbace.repr.haskell.cmm (bin/hsi cmm, the
+  # flags' -D), kept by the files', the reader's and its headers' digests, loaded by hsi run --cmm
+  if [ ${#cmmfiles[@]} -gt 0 ]; then
+    local ck; ck=$( { (cd "$src" && sha256sum "${cmmfiles[@]}"); printf '%s\n' ${cflags[@]+"${cflags[@]}"}
+                      sha256sum "$root/arbace/repr/haskell/cmm.ae" "$root"/test/haskell/eval/cmm/*.h; } | sha256sum | cut -c1-64)
+    if [ ! -f "$prog/cmm.key" ] || [ "$(cat "$prog/cmm.key")" != "$ck" ]; then
+      rm -f "$prog/cmm.key"
+      if ! (cd "$src" && "$root/bin/hsi" cmm "$prog/cmm.ae" $(printf '%s\n' ${cflags[@]+"${cflags[@]}"} | grep '^-D' || true) "${cmmfiles[@]}") > "$prog/cmm.log" 2>&1; then
+        local e; e=$(grep -m1 '^cmm: ' "$prog/cmm.log" | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g')
+        echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi: ${e:-cmm: the reader failed}\" :reason :cmm-read :dump $td :run 0}" > "$res"; return 0
+      fi
+      echo "$ck" > "$prog/cmm.key"
+    fi
+    la+=(--cmm "$prog/cmm.ae")
+    [ -z "$cmm_main" ] || la+=(--cmm-main)
+  fi
   IFS=: read -r -a dirs <<< "$plibs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
   [ "$pimages" != none ] && la+=(--image "$pimages")
@@ -573,7 +596,7 @@ one() {
     # arguments), then the program's executable built with them compiled (bin/hsi aot build, kept by key)
     local pw=$w.profile pcmd
     rm -rf "${pw:?}"; mkdir -p "$pw"; cp -r "$src"/. "$pw"/ 2> "$pw.cp.log" || true; rm -f "$pw.cp.log"; : > "$pw/.empty"
-    pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$stg" --name "$name" --) $ro"
+    pcmd="exec $(printf '%q ' "$hsi" run "${la[@]}" ${stg:+--prog "$stg"} --name "$name" --) $ro"
     # (its run is hsi's: kept to compare the compiled run with, :vs-hsi, and its seconds, :hsi-run)
     local pt0 pt1; pt0=$(date +%s.%N); pst=0
     (cd "$pw" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$pw" HSI_AOT_MODULES="$prog/aot-closures.txt" \
@@ -589,7 +612,7 @@ one() {
       rm -rf "$w"; echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi aot: $e\" :dump $td :run 0}" > "$res"; return 0; }
     t3=$(date +%s.%N); ab=$(printf '%.2f' "$(echo "$t3 - $t2" | bc)")
   fi
-  local cmd; cmd="exec $(printf '%q ' "$exe" run "${la[@]}" --prog "$stg" --name "$name" --) $ro"
+  local cmd; cmd="exec $(printf '%q ' "$exe" run "${la[@]}" ${stg:+--prog "$stg"} --name "$name" --) $ro"
   local o=$work/out/${id//\//_} st=0
   # the memory cap (bin/lib/limit.bash's ARBACE_MEM_GIB, default 16 GiB: ulimit -v at it, GOMEMLIMIT at three
   # quarters), so a leaking program fails alone; the deep-stack programs name their own (HSI_MEM_CAPS, ID=GIB)

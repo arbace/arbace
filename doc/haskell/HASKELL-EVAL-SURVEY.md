@@ -2562,3 +2562,23 @@ crop's (repr/asm, x86i): out of this design.
   undefined behaviour (its `writeByteArray#` steps by 8 elements, past a 3-element array); (b) hsi drops a byte array's write past
   its end, as GHC's heap absorbs it unseen. **Recommended: (a)**: (b) would hide hsi's bounds checks from every other program.
 
+## As built: HES67's design, the first stage (queue 332, 2026-11-17, branch `332-haskell-cmm`)
+
+On the Mac VM (linux/arm64), stage 0 next's seed 3c48859d. The Cmm runs from the checkout: stage 0 embeds pyi's Go (`arbace/py.`
+symbols) but none of `arbace/hs.` (0 symbols), and hsi is `bin/hsi build`'s driver printed from `go/arbace/hs` (its key the
+forms' digest). The reader reads all nine `.cmm` files of the class (33 procedures in cgrun069's). `bin/hsi check --only` the
+eleven tests and the controls' programs (the haskell-stg-progs entries of 6cc1ea87f's pack, equal to next's for these tests;
+next's pack is not on the VM's mirror): **T17920, T24598, T24598b, T24598c and T24818 pass** against the committed record (the
+last four by their own verdicts; T24818 with its C on ci), and **MulMayOflo_full, PopCnt, T5149 and cgrun069 pass** against GHC
+9.14.1's arm64 builds of them (`HSI_REF`, a scratch record by `bin/hsi record-ref --only`: their recorded references predate the
+plan's extra sources). CallConv (assembly) and T21305 (its own out-of-bounds writes; its Cmm's three results checked on a copy of
+its STG with the writes in bounds: `[9,80,300,770000]`) stay in `:test-cmm`. The controls fail as they must, with a new one
+(T24598 against T24598c's own verdict). MulMayOflo's 64 `ASSERT`s hold; with one inverted, hsi prints barf's message and status 134;
+MulMayOflo's widths 8 and 16 were checked against the exact product for every pair of 8 bits and one in 8 of 16 bits.
+The images: a Cmm primcall a library makes (ghc-internal's stack decoder's `getStackClosurezh` and the others hsi lacks) is written
+by its label and results and read back to the same code (a unit test of the encoding, and `hsi image` over the 1,320 modules of
+haskell-stg-libs); a first `hsi image` crashed once on the compiler's parallel jobs writing the primcalls' table, now under a lock
+(five runs since, 0 errors). hsi-essential's command on the VM: 117 pass, 1 `:threaded-way`, the 5 synthetic programs of arm64's
+NaN sign in no class (queue 325's arm64 reference is not on next), the same as before the branch. The classes stay as recorded
+(`:test-cmm`'s `:results` take `:fail` for the four whose references predate their sources) until the main host's records
+(HES95 (a)); `bin/hsi divergences` over the committed record: 909 programs, 812 pass, 0 unclassed.

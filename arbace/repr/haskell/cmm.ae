@@ -1,0 +1,722 @@
+;; Ported from GHC 9.14.1's Cmm reader (the source tarball, the pin of tools/repr-haskell's corpus:
+;; compiler/GHC/Cmm/Lexer.x.source, compiler/GHC/Cmm/Parser.y.source, compiler/GHC/Cmm/MachOp.hs's machOpResultType,
+;; compiler/GHC/Cmm/CallConv.hs), Copyright The University Court of the University of Glasgow, under the Glasgow Haskell
+;; Compiler License (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"). The forms and their elaboration are Arbace's own,
+;; under the Eclipse Public License 1.0.
+
+(ns arbace.repr.haskell.cmm
+  "Cmm's reader (doc/haskell/HASKELL-EVAL-SURVEY.md, \"HES67's design: Cmm on hsi\"): a .cmm file of GHC's testsuite
+  preprocessed by repr/c's preprocessor (arbace.repr.c.pp) over hsi's own Cmm.h (test/haskell/eval/cmm/), lexed as GHC's
+  Lexer.x lexes it and parsed by Parser.y's grammar, elaborated as its semantic actions build a CmmGroup (names resolved
+  to locals, labels and constants; each MachOp's width from its first argument's type, machOpResultType; if, else and the
+  boolean operators lowered to labels and branches, emitCond's way; a string literal an anonymous rodata datum), and
+  written as Cmm forms, one file, which hsi's back end (go/arbace/hs/cmm.ae) loads (hsi run --cmm FILE). The forms:
+
+    (cmm FILE TOP...)
+    TOP   (data SECTION LABEL [STATIC...])   STATIC (string [BYTE...]) | (uninit N) | (lit TYPE LIT)
+          (closure LABEL INFO-LABEL [LIT...])
+          (proc LABEL {:conv :node|:return :info nil|{...} :formals [[NAME TYPE]...] :locals {NAME TYPE}} [STMT...])
+    STMT  (label L) (assign (local N)|(global R) E) (store TYPE E E) (goto L) (cbranch E L L)
+          (switch E LO HI [[INT L]...] L-or-nil) (ccall CONV E [[E HINT]...] [[N HINT]...] NEVER)
+          (prim NAME ALIGN [N...] [E...]) (macro NAME [E...]) (return [E...]) (jump E [R...])
+          (jump-args E [E...] [E...]) (call E [N...] [E...])
+    E     (int V TYPE) (float BITS TYPE) (label NAME) (local N) (global R) (load TYPE E) (op MACHOP [W...] E...)
+    TYPE  bits8 bits16 bits32 bits64 float32 float64 gcptr; HINT :ptr :signed nil
+
+  V an integer's low 64 bits as a signed long, BITS a float's IEEE bits, W a width in bits; a code or data label by its
+  name (the back end resolves it: the file's own, else the RTS's or C's). Evaluated from the checkout (repr/haskell is not
+  embedded), on stage 0 (bin/hsi cmm).
+
+    -m arbace.repr.haskell.cmm read OUT INCLUDE-DIR [-DNAME[=V]...] FILE...   the files read into OUT (one cmm form each)"
+  (:require [arbace.repr.c.pp :as pp]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- fail [line & msg] (throw (ex-info (apply str "cmm: " (when line (str "line " line ": ")) msg) {:cmm true})))
+
+;; -------------------------------------------------------------------------------------------------------------------
+;; Types (CmmType: a width, float or not, a GC pointer or not)
+
+(def ^:private type-kws {"bits8" 'bits8 "bits16" 'bits16 "bits32" 'bits32 "bits64" 'bits64 "float32" 'float32
+                         "float64" 'float64 "gcptr" 'gcptr "vec128" 'vec128 "vec256" 'vec256 "vec512" 'vec512})
+
+(defn- width [ty] (case ty bits8 8 bits16 16 bits32 32 bits64 64 float32 32 float64 64 gcptr 64 vec128 128 vec256 256 vec512 512))
+(defn- float-ty? [ty] (contains? '#{float32 float64} ty))
+(defn- bits [w] (case (long w) 8 'bits8 16 'bits16 32 'bits32 64 'bits64 128 'vec128))
+(defn- fty [w] (case (long w) 32 'float32 64 'float64))
+
+;; -------------------------------------------------------------------------------------------------------------------
+;; The lexer (Lexer.x): over the preprocessor's text
+
+(def ^:private reserved
+  {"CLOSURE" "CLOSURE" "INFO_TABLE" "INFO_TABLE" "INFO_TABLE_RET" "INFO_TABLE_RET" "INFO_TABLE_FUN" "INFO_TABLE_FUN"
+   "INFO_TABLE_CONSTR" "INFO_TABLE_CONSTR" "INFO_TABLE_SELECTOR" "INFO_TABLE_SELECTOR" "else" "else" "export" "export"
+   "section" "section" "goto" "goto" "if" "if" "call" "call" "jump" "jump" "foreign" "foreign" "never" "never" "prim" "prim"
+   "reserve" "reserve" "return" "return" "returns" "returns" "import" "import" "switch" "switch" "case" "case"
+   "default" "default" "push" "push" "unwind" "unwind" "bits8" "bits8" "bits16" "bits16" "bits32" "bits32"
+   "bits64" "bits64" "vec128" "vec128" "vec256" "vec256" "vec512" "vec512" "float32" "float32" "float64" "float64"
+   "b8" "bits8" "b16" "bits16" "b32" "bits32" "b64" "bits64" "f32" "float32" "f64" "float64" "gcptr" "gcptr"
+   "likely" "likely" "True" "True" "False" "False"})
+
+(def ^:private plain-regs #{"Sp" "SpLim" "Hp" "HpLim" "CCCS" "CurrentTSO" "CurrentNursery" "HpAlloc" "BaseReg" "MachSp"
+                            "UnwindReturnReg"})
+(def ^:private arg-regs #{"GP_ARG_REGS" "SCALAR_ARG_REGS" "V16_ARG_REGS" "V32_ARG_REGS" "V64_ARG_REGS"})
+
+(defn- name-begin? [c] (or (Character/isLetter (char c)) (= c \_) (= c \.) (= c \$) (= c \@)))
+(defn- name-char? [c] (or (name-begin? c) (Character/isDigit (char c))))
+(defn- digit? [c] (and c (Character/isDigit (char c))))
+
+(def ^:private puncts2 ["::" ".." ">>" "<<" ">=" "<=" "==" "!=" "&&" "||"])
+(def ^:private specials (set ":;{}[]()=`~/*%-+&^|><,!"))
+
+(defn- unescape
+  "A string token's text (its quotes stripped) as Haskell's read gives it, one char per byte (Lexer.x's @escape)."
+  [^String s line]
+  (let [b (StringBuilder.) n (count s)]
+    (loop [i 0]
+      (if (>= i n)
+        (str b)
+        (let [c (.charAt s i)]
+          (if (not= c \\)
+            (do (.append b c) (recur (inc i)))
+            (let [e (.charAt s (inc i))]
+              (case e
+                \a (do (.append b (char 7)) (recur (+ i 2)))
+                \b (do (.append b (char 8)) (recur (+ i 2)))
+                \f (do (.append b (char 12)) (recur (+ i 2)))
+                \n (do (.append b (char 10)) (recur (+ i 2)))
+                \r (do (.append b (char 13)) (recur (+ i 2)))
+                \t (do (.append b (char 9)) (recur (+ i 2)))
+                (\\ \' \" \?) (do (.append b e) (recur (+ i 2)))
+                \x (let [j (loop [j (+ i 2)] (if (and (< j n) (< j (+ i 4)) (re-matches #"[0-9A-Fa-f]" (str (.charAt s j)))) (recur (inc j)) j))]
+                     (.append b (char (Long/parseLong (subs s (+ i 2) j) 16))) (recur j))
+                (if (re-matches #"[0-7]" (str e))
+                  (let [j (loop [j (inc i)] (if (and (< j n) (< j (+ i 4)) (re-matches #"[0-7]" (str (.charAt s j)))) (recur (inc j)) j))]
+                    (.append b (char (Long/parseLong (subs s (inc i) j) 8))) (recur j))
+                  (fail line "bad escape \\" e))))))))))
+
+(defn lex
+  "The tokens of the preprocessed text `s`: [{:k KIND :v VALUE :line N}...], the eof last. KIND :p a special character or
+  operator, :kw a reserved word (its canonical spelling), :greg a global register, :aregs an argument register set,
+  :name, :str, :int (a BigInteger), :float (a double)."
+  [^String s]
+  (let [n (count s) out (transient [])]
+    (loop [i 0 line 1 bol true]
+      (if (>= i n)
+        (persistent! (conj! out {:k :eof :line line}))
+        (let [c (.charAt s i)]
+          (cond
+            (= c \newline) (recur (inc i) (inc line) true)
+            (Character/isWhitespace c) (recur (inc i) line bol)
+            ;; a line of the preprocessor's own (# N "file", #pragma): skipped
+            (and bol (= c \#)) (let [j (or (str/index-of s "\n" i) n)] (recur j line true))
+            :else
+            (let [rest (subs s i (min n (+ i 64)))
+                  fl (re-find #"^-?(?:[0-9]+\.[0-9]+(?:[eE][-+]?[0-9]+)?|[0-9]+[eE][-+]?[0-9]+)" rest)]
+              (cond
+                fl (do (conj! out {:k :float :v (Double/parseDouble fl) :line line}) (recur (+ i (count fl)) line false))
+                (= c \") (let [j (loop [j (inc i)] (cond (>= j n) (fail line "unclosed string")
+                                                          (= (.charAt s j) \\) (recur (+ j 2))
+                                                          (= (.charAt s j) \") j
+                                                          :else (recur (inc j))))]
+                           (conj! out {:k :str :v (unescape (subs s (inc i) j) line) :line line})
+                           (recur (inc j) line false))
+                (digit? c) (let [hex (re-find #"^0[xX][0-9A-Fa-f]+" rest)
+                                 dec (re-find #"^[0-9]+" (subs s i (min n (+ i 128))))
+                                 oct (re-find #"^0[0-7]+" dec)
+                                 ;; Alex's longest match, the earlier rule on a tie: 0 @octal before @decimal
+                                 [t v] (cond hex [hex (BigInteger. ^String (subs hex 2) 16)]
+                                             (and oct (= (count oct) (count dec))) [oct (BigInteger. ^String (subs oct 1) 8)]
+                                             :else [dec (BigInteger. ^String dec)])]
+                             (conj! out {:k :int :v v :line line}) (recur (+ i (count t)) line false))
+                (and (= c \%) (re-find #"^%(relaxed|acquire|release|seq_cst)(?![A-Za-z0-9_.$@])" rest))
+                (let [w (second (re-find #"^%(relaxed|acquire|release|seq_cst)" rest))]
+                  (conj! out {:k :kw :v w :line line}) (recur (+ i 1 (count w)) line false))
+                (name-begin? c) (let [j (loop [j (inc i)] (if (and (< j n) (name-char? (.charAt s j))) (recur (inc j)) j))
+                                      w (subs s i j)]
+                                  (conj! out (cond (or (plain-regs w) (re-matches #"(?:[PRFDL]|XMM|YMM|ZMM)[0-9]+" w)) {:k :greg :v w :line line}
+                                                   (arg-regs w) {:k :aregs :v w :line line}
+                                                   (reserved w) {:k :kw :v (reserved w) :line line}
+                                                   :else {:k :name :v w :line line}))
+                                  (recur j line false))
+                :else (let [p2 (when (< (inc i) n) (subs s i (+ i 2)))]
+                        (cond (some #{p2} puncts2) (do (conj! out {:k :p :v p2 :line line}) (recur (+ i 2) line false))
+                              (specials c) (do (conj! out {:k :p :v (str c) :line line}) (recur (inc i) line false))
+                              :else (fail line "lexical error at " (pr-str (str c)))))))))))))
+
+;; -------------------------------------------------------------------------------------------------------------------
+;; The parser (Parser.y's grammar, by recursive descent; the raw tree, names unresolved)
+
+(deftype P [toks ^longs pos])
+(defn- tok [^P p] (nth (.-toks p) (aget (.-pos p) 0)))
+(defn- tok-at [^P p k] (nth (.-toks p) (min (+ k (aget (.-pos p) 0)) (dec (count (.-toks p))))))
+(defn- adv! [^P p] (let [t (tok p)] (aset (.-pos p) 0 (inc (aget (.-pos p) 0))) t))
+(defn- is? [t k & [v]] (and (= (:k t) k) (or (nil? v) (= (:v t) v))))
+(defn- p? [t v] (is? t :p v))
+(defn- kw? [t v] (is? t :kw v))
+(defn- unexpected [t] (fail (:line t) "parse error at " (if (= :eof (:k t)) "the end" (pr-str (:v t)))))
+(defn- expect! [^P p k & [v]] (let [t (tok p)] (if (is? t k v) (adv! p) (unexpected t))))
+(defn- punct! [^P p v] (expect! p :p v))
+
+(defn- type-tok? [t] (and (= :kw (:k t)) (contains? type-kws (:v t))))
+(defn- parse-type [^P p] (let [t (tok p)] (if (type-tok? t) (do (adv! p) (type-kws (:v t))) (unexpected t))))
+
+(declare parse-expr parse-body)
+
+(defn- parse-exprs0
+  "exprs0 between the parentheses already opened, the closing one taken."
+  [^P p]
+  (if (p? (tok p) ")") (do (adv! p) [])
+      (loop [acc [(parse-expr p)]]
+        (cond (p? (tok p) ",") (do (adv! p) (recur (conj acc (parse-expr p))))
+              :else (do (punct! p ")") acc)))))
+
+(defn- parse-maybe-ty [^P p] (if (p? (tok p) "::") (do (adv! p) (parse-type p)) nil))
+
+(defn- parse-expr0 [^P p]
+  (let [t (tok p)]
+    (cond
+      (is? t :int) (do (adv! p) [:int (:v t) (parse-maybe-ty p)])
+      (is? t :float) (do (adv! p) [:float (:v t) (parse-maybe-ty p)])
+      (is? t :str) (do (adv! p) [:str (:v t)])
+      (is? t :name) (do (adv! p) [:name (:v t) (:line t)])
+      (is? t :greg) (do (adv! p) [:greg (:v t)])
+      (type-tok? t) (let [ty (parse-type p)]
+                      (cond (p? (tok p) "!") (do (adv! p) (punct! p "[") (let [e (parse-expr p)] (punct! p "]") [:op-raw "MO_RelaxedRead" [(width ty)] [e]]))
+                            (p? (tok p) "^") (do (adv! p) (punct! p "[") (let [e (parse-expr p)] (punct! p "]") [:load ty e]))
+                            :else (do (punct! p "[") (let [e (parse-expr p)] (punct! p "]") [:load ty e]))))
+      (p? t "%") (do (adv! p) (let [n (expect! p :name)] (punct! p "(") [:pct (:v n) (parse-exprs0 p) (:line n)]))
+      (p? t "(") (do (adv! p) (let [e (parse-expr p)] (punct! p ")") e))
+      :else (unexpected t))))
+
+;; the precedences of Parser.y's %left/%nonassoc lines, low to high (|| && ! are bool_expr's, not expr's)
+(def ^:private binops {"==" 1 "!=" 1 ">=" 1 ">" 1 "<=" 1 "<" 1 "|" 2 "^" 3 "&" 4 ">>" 5 "<<" 5 "-" 6 "+" 6 "/" 7 "*" 7 "%" 7})
+
+(defn- parse-binary [^P p min]
+  (let [lhs (let [t (tok p)]
+              (cond (p? t "~") (do (adv! p) [:not (parse-binary p 8)])
+                    ;; '-' expr has '-''s precedence (Happy: the rule's last terminal): its operand reaches past * / %
+                    (p? t "-") (do (adv! p) [:neg (parse-binary p 7)])
+                    :else (let [a (parse-expr0 p)]
+                            (if (p? (tok p) "`")
+                              (do (adv! p) (let [n (expect! p :name)] (punct! p "`") [:bq (:v n) a (parse-expr0 p) (:line n)]))
+                              a))))]
+    (loop [lhs lhs]
+      (let [t (tok p) pr (when (= :p (:k t)) (binops (:v t)))]
+        (if (and pr (>= pr min))
+          (do (adv! p)
+              (let [rhs (parse-binary p (inc pr))]
+                (when (and (= pr 1) (when-let [pr2 (when (= :p (:k (tok p))) (binops (:v (tok p))))] (= pr2 1)))
+                  (unexpected (tok p))) ; the comparisons are %nonassoc
+                (recur [:bin (:v t) lhs rhs])))
+          lhs)))))
+
+(defn parse-expr [^P p] (parse-binary p 1))
+
+(defn- save [^P p] (aget (.-pos p) 0))
+(defn- restore! [^P p k] (aset (.-pos p) 0 k))
+
+(declare parse-bool)
+(defn- parse-bool-atom [^P p]
+  (let [t (tok p)]
+    (cond
+      (p? t "!") (do (adv! p) [:bnot (parse-bool-atom p)])
+      (p? t "(")
+      ;; '(' bool_op ')' or an expression in parentheses: the expression first, else the boolean operation
+      (let [k (save p)
+            e (try (let [e (parse-expr p)] (when (#{"&&" "||" ")" "{"} (:v (tok p))) e)) (catch Exception _ nil))]
+        (if e
+          [:btest e]
+          (do (restore! p k) (adv! p) (let [b (parse-bool p)] (punct! p ")") b))))
+      :else [:btest (parse-expr p)])))
+
+(defn- parse-bool-and [^P p] (let [a (parse-bool-atom p)] (if (p? (tok p) "&&") (do (adv! p) [:band a (parse-bool-and p)]) a)))
+(defn parse-bool [^P p] (let [a (parse-bool-and p)] (if (p? (tok p) "||") (do (adv! p) [:bor a (parse-bool p)]) a)))
+
+(defn- parse-cond-likely [^P p]
+  (if (and (p? (tok p) "(") (kw? (tok-at p 1) "likely"))
+    (do (adv! p) (adv! p) (punct! p ":") (let [t (adv! p)] (punct! p ")") (if (kw? t "True") true (if (kw? t "False") false (unexpected t)))))
+    nil))
+
+(defn- parse-names [^P p] (loop [acc [(:v (expect! p :name))]] (if (p? (tok p) ",") (do (adv! p) (recur (conj acc (:v (expect! p :name))))) acc)))
+
+(defn- parse-import-names [^P p]
+  (loop [acc []]
+    (let [t (tok p)
+          nm (cond (kw? t "CLOSURE") (do (adv! p) [:closure (:v (expect! p :name))])
+                   (is? t :str) (do (adv! p) [:unit (:v (expect! p :name)) (:v t)])
+                   :else [:fn (:v (expect! p :name))])
+          acc (conj acc nm)]
+      (if (p? (tok p) ",") (do (adv! p) (recur acc)) acc))))
+
+(defn- parse-decl
+  "decl, or nil when the next tokens are not one"
+  [^P p]
+  (let [t (tok p)]
+    (cond
+      (and (type-tok? t) (is? (tok-at p 1) :name)) (let [ty (parse-type p) ns (parse-names p)] (punct! p ";") [:decl ty ns (:line t)])
+      (kw? t "import") (do (adv! p) (let [ns (parse-import-names p)] (punct! p ";") [:import ns]))
+      (kw? t "export") (do (adv! p) (parse-names p) (punct! p ";") [:export])
+      :else nil)))
+
+(defn- parse-hint [^P p] (let [t (expect! p :str)] (case (:v t) "ptr" :ptr "signed" :signed (fail (:line t) "unrecognised hint " (pr-str (:v t))))))
+
+(defn- parse-foreign-formals [^P p]
+  ;; '(' foreign_formals ')' '=' : [STRING] NAME, ... (a trailing comma allowed)
+  (loop [acc []]
+    (if (p? (tok p) ")") (do (adv! p) acc)
+        (let [h (when (is? (tok p) :str) (parse-hint p)) n (expect! p :name) acc (conj acc [(:v n) h])]
+          (when (p? (tok p) ",") (adv! p))
+          (recur acc)))))
+
+(defn- parse-hint-exprs [^P p]
+  (if (p? (tok p) ")") (do (adv! p) [])
+      (loop [acc []]
+        (let [e (parse-expr p) h (when (is? (tok p) :str) (parse-hint p)) acc (conj acc [e h])]
+          (if (p? (tok p) ",") (do (adv! p) (recur acc)) (do (punct! p ")") acc))))))
+
+(defn- parse-foreign [^P p results line]
+  ;; 'foreign' STRING foreignLabel '(' cmm_hint_exprs0 ')' safety opt_never_returns ';'
+  (expect! p :kw "foreign")
+  (let [conv (:v (expect! p :str)) target (expect! p :name)]
+    (punct! p "(")
+    (let [args (parse-hint-exprs p)
+          safety (when (is? (tok p) :str) (:v (adv! p)))
+          never (when (kw? (tok p) "never") (adv! p) (expect! p :kw "returns") true)]
+      (punct! p ";")
+      (when-not (#{"C" "stdcall"} conv) (fail line "unknown calling convention " (pr-str conv)))
+      (when (and safety (not (#{"safe" "unsafe" "interruptible"} safety))) (fail line "unrecognised safety " (pr-str safety)))
+      [:ccall results conv (:v target) args (boolean never) line])))
+
+(defn- parse-prim [^P p results line]
+  (expect! p :kw "prim") (punct! p "%")
+  (let [n (:v (expect! p :name))] (punct! p "(") (let [args (parse-exprs0 p)] (punct! p ";") [:prim results n args line])))
+
+(defn- parse-vols [^P p]
+  (let [t (tok p)]
+    (cond (is? t :aregs) (do (adv! p) [:set (:v t)])
+          (p? t "[") (do (adv! p) (if (p? (tok p) "]") (do (adv! p) [])
+                                      (loop [acc [(:v (expect! p :greg))]]
+                                        (if (p? (tok p) ",") (do (adv! p) (recur (conj acc (:v (expect! p :greg)))))
+                                            (do (punct! p "]") acc)))))
+          :else (unexpected t))))
+
+(defn- parse-block [^P p] (punct! p "{") (let [b (parse-body p)] (punct! p "}") b))
+
+(defn- parse-stmt [^P p]
+  (let [t (tok p) line (:line t)]
+    (cond
+      (p? t ";") (do (adv! p) nil)
+      (and (is? t :name) (p? (tok-at p 1) ":")) (do (adv! p) (adv! p) [:label (:v t)])
+      (and (is? t :name) (p? (tok-at p 1) "(")) (do (adv! p) (adv! p) (let [as (parse-exprs0 p)] (punct! p ";") [:macro (:v t) as line]))
+      (and (or (is? t :name) (is? t :greg)) (p? (tok-at p 1) "="))
+      (do (adv! p) (adv! p)
+          (if (#{"relaxed" "acquire" "release" "seq_cst"} (when (= :kw (:k (tok p))) (:v (tok p))))
+            (let [ord (:v (adv! p)) ty (parse-type p)] (punct! p "[") (let [e (parse-expr p)] (punct! p "]") (punct! p ";") [:atomic-read [(:k t) (:v t)] ord ty e line]))
+            (let [e (parse-expr p)] (punct! p ";") [:assign [(:k t) (:v t)] e line])))
+      (and (= :kw (:k t)) (#{"relaxed" "acquire" "release" "seq_cst"} (:v t)))
+      (let [ord (:v (adv! p)) ty (parse-type p)] (punct! p "[") (let [a (parse-expr p)] (punct! p "]") (punct! p "=") (let [e (parse-expr p)] (punct! p ";") [:store ty a e ord line])))
+      (and (type-tok? t) (p? (tok-at p 1) "["))
+      (let [ty (parse-type p)] (punct! p "[") (let [a (parse-expr p)] (punct! p "]") (punct! p "=") (let [e (parse-expr p)] (punct! p ";") [:store ty a e nil line])))
+      (kw? t "foreign") (parse-foreign p [] line)
+      (kw? t "prim") (parse-prim p [] line)
+      (p? t "(")
+      (if (type-tok? (tok-at p 1))
+        ;; '(' formals ')' '=' 'call' expr '(' exprs0 ')' ';'
+        (do (adv! p)
+            (let [fs (loop [acc []] (if (p? (tok p) ")") (do (adv! p) acc)
+                                        (let [ty (parse-type p) n (:v (expect! p :name))] (when (p? (tok p) ",") (adv! p)) (recur (conj acc [n ty])))))]
+              (punct! p "=") (expect! p :kw "call")
+              (let [f (parse-expr p)] (punct! p "(") (let [as (parse-exprs0 p)] (punct! p ";") [:call f (mapv first fs) as fs line]))))
+        (do (adv! p)
+            (let [rs (parse-foreign-formals p)]
+              (punct! p "=")
+              (if (kw? (tok p) "prim") (parse-prim p rs line) (parse-foreign p rs line)))))
+      (kw? t "switch")
+      (do (adv! p)
+          (let [rng (when (p? (tok p) "[") (adv! p) (let [lo (:v (expect! p :int))] (punct! p "..") (let [hi (:v (expect! p :int))] (punct! p "]") [lo hi])))
+                e (parse-expr p)]
+            (punct! p "{")
+            (let [arms (loop [acc []]
+                         (if (kw? (tok p) "case")
+                           (do (adv! p)
+                               (let [ints (loop [acc [(:v (expect! p :int))]] (if (p? (tok p) ",") (do (adv! p) (recur (conj acc (:v (expect! p :int))))) acc))]
+                                 (punct! p ":")
+                                 (if (kw? (tok p) "goto")
+                                   (do (adv! p) (let [n (:v (expect! p :name))] (punct! p ";") (recur (conj acc [ints [:goto n]]))))
+                                   (recur (conj acc [ints [:body (parse-block p)]])))))
+                           acc))
+                  dflt (when (kw? (tok p) "default") (adv! p) (punct! p ":") (parse-block p))]
+              (punct! p "}")
+              [:switch rng e arms dflt line])))
+      (kw? t "goto") (do (adv! p) (let [n (:v (expect! p :name))] (punct! p ";") [:goto n line]))
+      (kw? t "return") (do (adv! p) (punct! p "(") (let [es (parse-exprs0 p)] (punct! p ";") [:return es]))
+      (kw? t "jump")
+      (do (adv! p)
+          (let [f (parse-expr p)]
+            (if (p? (tok p) "(")
+              (do (adv! p)
+                  (let [a (parse-exprs0 p)]
+                    (if (p? (tok p) "(") (do (adv! p) (let [b (parse-exprs0 p)] (punct! p ";") [:jump-args f a b]))
+                        (do (punct! p ";") [:jump-args f [] a]))))
+              (let [v (parse-vols p)] (punct! p ";") [:jump f v]))))
+      (kw? t "call") (do (adv! p) (let [f (parse-expr p)] (punct! p "(") (let [as (parse-exprs0 p)] (punct! p ";") [:call f [] as [] line])))
+      (kw? t "if")
+      (do (adv! p)
+          (let [c (parse-bool p) lk (parse-cond-likely p)]
+            (if (kw? (tok p) "goto")
+              (do (adv! p) (let [n (:v (expect! p :name))] [:if-goto c n line]))
+              (let [th (parse-block p) el (when (kw? (tok p) "else") (adv! p) (parse-block p))] [:if c th el line]))))
+      (#{"push" "reserve" "unwind"} (when (= :kw (:k t)) (:v t))) (fail line "hsi's Cmm has no " (:v t) " (a stack frame's layout)")
+      :else (unexpected t))))
+
+(defn- parse-body [^P p]
+  (loop [acc []]
+    (let [t (tok p)]
+      (if (or (p? t "}") (is? t :eof)) acc
+          (if-let [d (parse-decl p)] (recur (conj acc d))
+                  (let [s (parse-stmt p)] (recur (if s (conj acc s) acc))))))))
+
+(defn- parse-lits [^P p] (loop [acc []] (if (p? (tok p) ",") (do (adv! p) (recur (conj acc (parse-expr p)))) acc)))
+
+(defn- parse-formals0 [^P p]
+  ;; after '(': formals0 ')'
+  (loop [acc []]
+    (if (p? (tok p) ")") (do (adv! p) acc)
+        (let [ty (parse-type p) n (:v (expect! p :name))] (when (p? (tok p) ",") (adv! p)) (recur (conj acc [n ty]))))))
+
+(defn- ints! [^P p n] (vec (for [i (range n)] (do (when (pos? i) (punct! p ",")) (:v (expect! p :int))))))
+
+(defn- parse-info [^P p]
+  (let [t (tok p)]
+    (if (is? t :name)
+      (do (adv! p) {:name (:v t)})
+      (let [k (:v (expect! p :kw))]
+        (punct! p "(")
+        (let [nm (:v (expect! p :name))]
+          (punct! p ",")
+          (let [r (case k
+                    "INFO_TABLE" (let [[ptrs nptrs ty] (ints! p 3)] (punct! p ",") (let [d (:v (expect! p :str))] (punct! p ",") (expect! p :str) {:kind :info :ptrs ptrs :nptrs nptrs :type ty :desc d}))
+                    "INFO_TABLE_FUN" (let [[ptrs nptrs ty] (ints! p 3)] (punct! p ",") (let [d (:v (expect! p :str))] (punct! p ",") (expect! p :str) (punct! p ",") (let [[ar ft] (ints! p 2)] {:kind :fun :ptrs ptrs :nptrs nptrs :type ty :desc d :arity ar :fun-type ft})))
+                    "INFO_TABLE_CONSTR" (let [[ptrs nptrs tag ty] (ints! p 4)] (punct! p ",") (let [d (:v (expect! p :str))] (punct! p ",") (expect! p :str) {:kind :constr :ptrs ptrs :nptrs nptrs :tag tag :type ty :desc d}))
+                    "INFO_TABLE_SELECTOR" (let [[sel ty] (ints! p 2)] (punct! p ",") (let [d (:v (expect! p :str))] (punct! p ",") (expect! p :str) {:kind :selector :sel sel :type ty :desc d}))
+                    "INFO_TABLE_RET" (let [[ty] (ints! p 1)] (if (p? (tok p) ",") (do (adv! p) (let [ls (parse-formals0 p)] (restore! p (dec (save p))) {:kind :ret :type ty :live ls})) {:kind :ret :type ty}))
+                    (unexpected t))]
+            (punct! p ")")
+            (assoc r :name nm)))))))
+
+(defn- parse-static [^P p]
+  (let [t (tok p)]
+    (cond
+      (kw? t "CLOSURE") (do (adv! p) (punct! p "(") (let [n (:v (expect! p :name)) ls (parse-lits p)] (punct! p ")") [:closure n ls]))
+      (and (kw? t "bits8") (p? (tok-at p 1) "[") (p? (tok-at p 2) "]")) (do (adv! p) (adv! p) (adv! p) (let [s (:v (expect! p :str))] (punct! p ";") [:string s]))
+      (and (type-tok? t) (p? (tok-at p 1) "[")) (let [ty (parse-type p)] (punct! p "[") (let [n (:v (expect! p :int))] (punct! p "]") (punct! p ";") [:uninit (* (quot (width ty) 8) n)]))
+      (and (type-tok? t) (p? (tok-at p 1) ";")) (let [ty (parse-type p)] (punct! p ";") [:uninit (quot (width ty) 8)])
+      :else (let [ty (parse-type p) e (parse-expr p)] (punct! p ";") [:lit ty e]))))
+
+(defn- parse-top [^P p]
+  (let [t (tok p)]
+    (cond
+      (kw? t "section") (do (adv! p) (let [sec (:v (expect! p :str))] (punct! p "{")
+                                       (let [lbl (:v (expect! p :name))] (punct! p ":")
+                                         (let [ss (loop [acc []] (if (p? (tok p) "}") acc (recur (conj acc (parse-static p)))))] (punct! p "}") [:data sec lbl ss]))))
+      (and (kw? t "CLOSURE") (p? (tok-at p 1) "("))
+      (do (adv! p) (adv! p) (let [lbl (:v (expect! p :name))] (punct! p ",") (let [info (:v (expect! p :name)) ls (parse-lits p)] (punct! p ")") (punct! p ";") [:closure lbl info ls])))
+      :else
+      (or (parse-decl p)
+          (let [info (parse-info p)
+                conv (if (kw? (tok p) "return") (do (adv! p) :return) :node)
+                formals (when (p? (tok p) "(") (adv! p) (parse-formals0 p))
+                body (if (p? (tok p) ";") (do (adv! p) nil) (parse-block p))]
+            [:proc info conv formals body (:line t)])))))
+
+(defn parse
+  "The raw tree of the tokens' file: [TOP...]."
+  [toks]
+  (let [p (P. toks (long-array 1))]
+    (loop [acc []] (if (is? (tok p) :eof) acc (recur (conj acc (parse-top p)))))))
+
+;; -------------------------------------------------------------------------------------------------------------------
+;; Elaboration (the semantic actions: names, types, MachOps, control)
+
+(def ^:private machops
+  ;; Parser.y's machOps: name -> [MachOp kind]; :w (the first argument's width), :conv (from the argument's width to N)
+  {"add" ["MO_Add" :w] "sub" ["MO_Sub" :w] "eq" ["MO_Eq" :w] "ne" ["MO_Ne" :w] "mul" ["MO_Mul" :w]
+   "mulmayoflo" ["MO_S_MulMayOflo" :w] "neg" ["MO_S_Neg" :w] "quot" ["MO_S_Quot" :w] "rem" ["MO_S_Rem" :w]
+   "divu" ["MO_U_Quot" :w] "modu" ["MO_U_Rem" :w] "ge" ["MO_S_Ge" :w] "le" ["MO_S_Le" :w] "gt" ["MO_S_Gt" :w] "lt" ["MO_S_Lt" :w]
+   "geu" ["MO_U_Ge" :w] "leu" ["MO_U_Le" :w] "gtu" ["MO_U_Gt" :w] "ltu" ["MO_U_Lt" :w]
+   "and" ["MO_And" :w] "or" ["MO_Or" :w] "xor" ["MO_Xor" :w] "com" ["MO_Not" :w] "shl" ["MO_Shl" :w] "shrl" ["MO_U_Shr" :w]
+   "shra" ["MO_S_Shr" :w] "fadd" ["MO_F_Add" :w] "fsub" ["MO_F_Sub" :w] "fneg" ["MO_F_Neg" :w] "fmul" ["MO_F_Mul" :w]
+   "fquot" ["MO_F_Quot" :w] "fmin" ["MO_F_Min" :w] "fmax" ["MO_F_Max" :w]
+   "fmadd" ["MO_FMA_FMAdd" :w] "fmsub" ["MO_FMA_FMSub" :w] "fnmadd" ["MO_FMA_FNMAdd" :w] "fnmsub" ["MO_FMA_FNMSub" :w]
+   "feq" ["MO_F_Eq" :w] "fne" ["MO_F_Ne" :w] "fge" ["MO_F_Ge" :w] "fle" ["MO_F_Le" :w] "fgt" ["MO_F_Gt" :w] "flt" ["MO_F_Lt" :w]
+   "lobits8" ["MO_UU_Conv" 8] "lobits16" ["MO_UU_Conv" 16] "lobits32" ["MO_UU_Conv" 32] "lobits64" ["MO_UU_Conv" 64]
+   "zx16" ["MO_UU_Conv" 16] "zx32" ["MO_UU_Conv" 32] "zx64" ["MO_UU_Conv" 64]
+   "sx16" ["MO_SS_Conv" 16] "sx32" ["MO_SS_Conv" 32] "sx64" ["MO_SS_Conv" 64]
+   "f2f32" ["MO_FF_Conv" 32] "f2f64" ["MO_FF_Conv" 64] "f2i8" ["MO_FS_Truncate" 8] "f2i16" ["MO_FS_Truncate" 16]
+   "f2i32" ["MO_FS_Truncate" 32] "f2i64" ["MO_FS_Truncate" 64] "i2f32" ["MO_SF_Round" 32] "i2f64" ["MO_SF_Round" 64]
+   "w2f_bitcast" ["MO_WF_Bitcast" :w] "f2w_bitcast" ["MO_FW_Bitcast" :w]})
+
+(def ^:private binop-machops
+  {"/" "MO_U_Quot" "*" "MO_Mul" "%" "MO_U_Rem" "-" "MO_Sub" "+" "MO_Add" ">>" "MO_U_Shr" "<<" "MO_Shl" "&" "MO_And"
+   "^" "MO_Xor" "|" "MO_Or" ">=" "MO_U_Ge" ">" "MO_U_Gt" "<=" "MO_U_Le" "<" "MO_U_Lt" "!=" "MO_Ne" "==" "MO_Eq"})
+
+(def ^:private callish
+  ;; Parser.y's callishMachOps (prim %NAME); the memcpy family's last argument its alignment, a constant
+  (into #{"pow64f" "sin64f" "cos64f" "tan64f" "sinh64f" "cosh64f" "tanh64f" "asin64f" "acos64f" "atan64f" "asinh64f" "acosh64f"
+          "log64f" "log1p64f" "exp64f" "expM164f" "fabs64f" "sqrt64f" "pow32f" "sin32f" "cos32f" "tan32f" "sinh32f" "cosh32f"
+          "tanh32f" "asin32f" "acos32f" "atan32f" "asinh32f" "acosh32f" "log32f" "log1p32f" "exp32f" "expM132f" "fabs32f"
+          "sqrt32f" "fence_acquire" "fence_release" "fence_seq_cst" "memcpy" "memset" "memmove" "memcmp" "suspendThread"
+          "resumeThread" "prefetch0" "prefetch1" "prefetch2" "prefetch3" "bswap16" "bswap32" "bswap64"}
+        (for [n ["popcnt" "pdep" "pext" "cmpxchg" "xchg" "load_relaxed" "load_acquire" "load_seqcst" "store_release"
+                 "store_seqcst" "fetch_add" "fetch_sub" "fetch_and" "fetch_nand" "fetch_or" "fetch_xor" "mul2_" "mul2u_"]
+              w [8 16 32 64]] (str n w))))
+
+(def ^:private stmt-macros
+  #{"CCS_ALLOC" "ENTER_CCS_THUNK" "CLOSE_NURSERY" "OPEN_NURSERY" "HP_CHK_GEN" "STK_CHK_GEN" "STK_CHK_GEN_N" "STK_CHK_NP"
+    "LOAD_THREAD_STATE" "SAVE_THREAD_STATE" "SAVE_GP_ARG_REGS" "RESTORE_GP_ARG_REGS" "SAVE_SCALAR_ARG_REGS"
+    "RESTORE_SCALAR_ARG_REGS" "SAVE_V16_ARG_REGS" "RESTORE_V16_ARG_REGS" "SAVE_V32_ARG_REGS" "RESTORE_V32_ARG_REGS"
+    "SAVE_V64_ARG_REGS" "RESTORE_V64_ARG_REGS" "PUSH_SCALAR_ARG_REGS" "POP_SCALAR_ARG_REGS" "LDV_ENTER"
+    "PROF_HEADER_CREATE" "PUSH_UPD_FRAME" "PUSH_BH_UPD_FRAME" "SET_HDR" "TICK_ALLOC_PRIM" "TICK_ALLOC_PAP"
+    "TICK_ALLOC_UP_THK" "UPD_BH_UPDATABLE"})
+
+(def ^:private two64 (.shiftLeft BigInteger/ONE 64))
+(defn- lo64
+  "An integer's low 64 bits as a signed long (CmmInt's Integer, the width applied by the back end)."
+  [^BigInteger v] (.longValue (.mod v two64)))
+
+(defn- greg-type [r]
+  (cond (re-matches #"P[0-9]+" r) 'gcptr (re-matches #"F[0-9]+" r) 'float32 (re-matches #"D[0-9]+" r) 'float64
+        (= r "Hp") 'gcptr :else 'bits64))
+
+(defn- etype
+  "cmmExprType of an elaborated expression, `locals` the procedure's {NAME TYPE}."
+  [locals e]
+  (case (first e)
+    (int float) (nth e 2)
+    label 'bits64
+    local (or (locals (second e)) 'bits64)
+    global (greg-type (second e))
+    load (second e)
+    op (let [[_ mo ws a] e w (first ws)]
+         (case mo
+           ("MO_Add" "MO_Sub" "MO_And" "MO_Or" "MO_Xor") (etype locals a)
+           ("MO_Eq" "MO_Ne" "MO_S_Ge" "MO_S_Le" "MO_S_Gt" "MO_S_Lt" "MO_U_Ge" "MO_U_Le" "MO_U_Gt" "MO_U_Lt"
+            "MO_F_Eq" "MO_F_Ne" "MO_F_Ge" "MO_F_Le" "MO_F_Gt" "MO_F_Lt") 'bits64
+           ("MO_F_Add" "MO_F_Sub" "MO_F_Mul" "MO_F_Quot" "MO_F_Neg" "MO_F_Min" "MO_F_Max" "MO_FMA_FMAdd" "MO_FMA_FMSub"
+            "MO_FMA_FNMAdd" "MO_FMA_FNMSub" "MO_WF_Bitcast") (fty w)
+           ("MO_FF_Conv" "MO_SF_Round") (fty (second ws))
+           ("MO_SS_Conv" "MO_UU_Conv" "MO_FS_Truncate") (bits (second ws))
+           (bits w)))))
+
+(defn- new-label! [st] (str "%L" (swap! (:gen st) inc)))
+
+(defn- strlit!
+  "newStringCLit: a string literal's anonymous rodata datum, its label."
+  [st s]
+  (let [l (str "%str" (swap! (:gen st) inc))]
+    (swap! (:tops st) conj (list 'data "rodata" l [(list 'string (mapv #(bit-and (long %) 255) s))]))
+    (list 'label l)))
+
+(defn- elab-expr [st env e]
+  (let [ex #(elab-expr st env %)
+        mk (fn [mo args] (let [as (mapv ex args)] (apply list 'op mo [(width (etype (:locals env) (first as)))] as)))]
+    (case (first e)
+      :int (list 'int (lo64 (second e)) (or (nth e 2) 'bits64))
+      :float (list 'float (Double/doubleToRawLongBits (double (second e))) (or (nth e 2) 'float64))
+      :str (strlit! st (second e))
+      :name (let [n (second e)]
+              (cond ((:locals env) n) (list 'local n)
+                    ((:consts st) n) ((:consts st) n)
+                    :else (list 'label n)))
+      :greg (list 'global (second e))
+      :load (list 'load (second e) (ex (nth e 2)))
+      :op-raw (let [[_ mo ws args] e] (apply list 'op mo ws (map ex args)))
+      :neg (mk "MO_S_Neg" [(second e)])
+      :not (mk "MO_Not" [(second e)])
+      :bin (mk (binop-machops (second e)) [(nth e 2) (nth e 3)])
+      :bq (let [[_ n a b line] e [mo k] (or (machops n) (fail line "unknown primitive " n))]
+            (if (= k :w) (mk mo [a b]) (fail line "unknown primitive " n)))
+      :pct (let [[_ n args line] e as (mapv ex args)]
+             (case n
+               ;; Parser.y's exprMacros, tables next to code (x86_64's GHC)
+               "ENTRY_CODE" (first as)
+               "INFO_PTR" (list 'load 'bits64 (first as))
+               "GET_ENTRY" (list 'load 'bits64 (first as))
+               ("STD_INFO" "FUN_INFO" "GET_STD_INFO" "GET_FUN_INFO" "INFO_TYPE" "INFO_PTRS" "INFO_NPTRS")
+               (fail line "hsi's Cmm has no info tables to read (%" n ")")
+               (let [[mo k] (or (machops n) (fail line "unknown primitive %" n))
+                     w (width (etype (:locals env) (first as)))]
+                 (apply list 'op mo (if (= k :w) [w] [w k]) as)))))))
+
+(defn- elab-lreg [env [k n] line]
+  (if (= k :greg) (list 'global n)
+      (if ((:locals env) n) (list 'local n) (fail line n " not a register"))))
+
+(defn- emit-cond!
+  "emitCond: branches to `then-l` when the boolean holds, falls through otherwise."
+  [st env out b then-l]
+  (case (first b)
+    :btest (let [else-l (new-label! st)]
+             (conj! out (list 'cbranch (elab-expr st env (second b)) then-l else-l))
+             (conj! out (list 'label else-l)))
+    :bnot (let [else-l (new-label! st)]
+            (emit-cond! st env out (second b) else-l)
+            (conj! out (list 'goto then-l))
+            (conj! out (list 'label else-l)))
+    :bor (do (emit-cond! st env out (second b) then-l) (emit-cond! st env out (nth b 2) then-l))
+    :band (let [and-l (new-label! st) else-l (new-label! st)]
+            (emit-cond! st env out (second b) and-l)
+            (conj! out (list 'goto else-l))
+            (conj! out (list 'label and-l))
+            (emit-cond! st env out (nth b 2) then-l)
+            (conj! out (list 'label else-l)))))
+
+(declare elab-body!)
+
+(defn- elab-stmt! [st env out s]
+  (let [ex #(elab-expr st env %)]
+    (case (first s)
+      (:decl :import :export) nil
+      :label (conj! out (list 'label (second s)))
+      :assign (let [[_ r e line] s] (conj! out (list 'assign (elab-lreg env r line) (ex e))))
+      :atomic-read (let [[_ r ord ty e line] s] (conj! out (list 'assign (elab-lreg env r line) (list 'load ty (ex e)))))
+      :store (let [[_ ty a e] s v (ex e) vw (width (etype (:locals env) v))
+                   ;; doStore: a value of another width than the store's coerced (MO_UU_Conv)
+                   v (if (= vw (width ty)) v (list 'op "MO_UU_Conv" [vw (width ty)] v))]
+               (conj! out (list 'store ty (ex a) v)))
+      :ccall (let [[_ rs conv target args never line] s
+                   hint (fn [e h] (or h (when (= 'label (first e)) :ptr)
+                                      (when (and (= 'global (first e)) (#{"Sp" "SpLim" "Hp" "HpLim" "CCCS" "CurrentTSO" "CurrentNursery"} (second e))) :ptr)))]
+               (doseq [[n _] rs] (when-not ((:locals env) n) (fail line n " not a local register")))
+               (conj! out (list 'ccall conv (list 'label target) (mapv (fn [[e h]] (let [e (ex e)] [e (hint e h)])) args)
+                                (mapv (fn [[n h]] [n h]) rs) never)))
+      :prim (let [[_ rs n args line] s]
+              (when-not (callish n) (fail line "unknown primitive %" n))
+              (doseq [[r _] rs] (when-not ((:locals env) r) (fail line r " not a local register")))
+              (let [as (mapv ex args)
+                    [as align] (if (#{"memcpy" "memset" "memmove" "memcmp"} n)
+                                 (let [a (peek as)]
+                                   (when-not (= 'int (first a)) (fail line "Non-constant alignment in memcpy-like function"))
+                                   [(pop as) (second a)])
+                                 [as nil])]
+                (conj! out (list 'prim n align (mapv first rs) as))))
+      :macro (let [[_ n args line] s]
+               (when-not (stmt-macros n) (fail line "unknown macro " n))
+               (conj! out (list 'macro n (mapv ex args))))
+      :switch (let [[_ rng e arms dflt] s
+                    dl (when dflt (new-label! st))
+                    join (new-label! st)
+                    tbl (vec (for [[ints a] arms] [ints (if (= :goto (first a)) (second a) (new-label! st)) a]))]
+                (conj! out (list 'switch (ex e) (some-> (first rng) lo64) (some-> (second rng) lo64)
+                                 (vec (for [[ints l] tbl i ints] [(lo64 i) l])) dl))
+                ;; the arms' bodies out of line, each falling to the switch's end (forkLabelledCode)
+                (doseq [[_ l a] tbl :when (= :body (first a))]
+                  (conj! out (list 'label l)) (elab-body! st env out (second a)) (conj! out (list 'goto join)))
+                (when dflt (conj! out (list 'label dl)) (elab-body! st env out dflt) (conj! out (list 'goto join)))
+                (conj! out (list 'label join)))
+      :goto (let [[_ n line] s] (when-not ((:labels env) n) (fail line "label " n " not defined")) (conj! out (list 'goto n)))
+      :return (conj! out (list 'return (mapv ex (second s))))
+      :jump (let [[_ f v] s] (conj! out (list 'jump (ex f) (if (= :set (first v)) [(second v)] v))))
+      :jump-args (let [[_ f a b] s] (conj! out (list 'jump-args (ex f) (mapv ex a) (mapv ex b))))
+      :call (let [[_ f rs as _ line] s]
+              (doseq [r rs] (when-not ((:locals env) r) (fail line r " not a local register")))
+              (conj! out (list 'call (ex f) rs (mapv ex as))))
+      :if-goto (let [[_ c n line] s] (when-not ((:labels env) n) (fail line "label " n " not defined")) (emit-cond! st env out c n))
+      :if (let [[_ c th el] s then-l (new-label! st) join (new-label! st)]
+            ;; cmmIfThenElse: the condition branches to the then part, the else part falls through to the join
+            (emit-cond! st env out c then-l)
+            (when el (elab-body! st env out el))
+            (conj! out (list 'goto join))
+            (conj! out (list 'label then-l))
+            (elab-body! st env out th)
+            (conj! out (list 'label join))))))
+
+(defn- elab-body! [st env out body] (doseq [s body] (elab-stmt! st env out s)))
+
+(defn- scan-decls
+  "The procedure's declarations (loopDecls: visible throughout it): {:locals {NAME TYPE} :labels #{NAME}}."
+  [body]
+  (let [acc (atom {:locals {} :labels #{}})]
+    (letfn [(walk [b] (doseq [s b]
+                        (case (first s)
+                          :decl (let [[_ ty ns] s] (doseq [n ns] (swap! acc assoc-in [:locals n] ty)))
+                          :label (swap! acc update :labels conj (second s))
+                          :if (do (walk (nth s 2)) (walk (nth s 3)))
+                          :switch (do (doseq [[_ a] (nth s 3)] (when (= :body (first a)) (walk (second a)))) (walk (nth s 4)))
+                          nil)))]
+      (walk body))
+    @acc))
+
+(defn- lit-of
+  "getLit: a static's literal (a negated integer too)."
+  [st e line]
+  (let [x (elab-expr st {:locals {}} e)]
+    (cond (#{'int 'float 'label} (first x)) x
+          (and (= 'op (first x)) (= "MO_S_Neg" (second x)) (= 'int (first (nth x 3))))
+          (let [[_ v ty] (nth x 3)] (list 'int (- v) ty))
+          :else (fail line "invalid literal"))))
+
+(defn elaborate
+  "The raw tree's Cmm forms: (cmm FILE TOP...)."
+  [file tree]
+  (let [st {:gen (atom 0) :tops (atom [])
+            ;; Parser.y's initEnv
+            :consts {"SIZEOF_StgHeader" (list 'int 8 'bits64) "SIZEOF_StgInfoTable" (list 'int 16 'bits64)}}]
+    (doseq [top tree]
+      (case (first top)
+        :data (let [[_ sec lbl ss] top]
+                (swap! (:tops st) conj
+                       (list 'data sec lbl (vec (for [s ss]
+                                                  (case (first s)
+                                                    :string (list 'string (mapv #(bit-and (long %) 255) (second s)))
+                                                    :uninit (list 'uninit (long (second s)))
+                                                    :lit (list 'lit (second s) (lit-of st (nth s 2) nil))
+                                                    :closure (fail nil "a static closure inside a section (CHARLIKE, INTLIKE)")))))))
+        :closure (let [[_ lbl info ls] top]
+                   (swap! (:tops st) conj (list 'closure lbl (str info "_info") (mapv #(lit-of st % nil) ls))))
+        (:decl :import :export) nil
+        :proc (let [[_ info conv formals body line] top
+                    {:keys [locals labels]} (scan-decls body)
+                    locals (into locals (for [[n ty] formals] [n ty]))
+                    env {:locals locals :labels labels}
+                    out (transient [])]
+                (elab-body! st env out body)
+                (let [nm (:name info)
+                      label (if (:kind info) (str nm (if (= :ret (:kind info)) "_info" "_info")) nm)]
+                  (swap! (:tops st) conj
+                         (list 'proc label {:conv conv :name nm
+                                            :info (when (:kind info) (dissoc info :name :live))
+                                            :formals (when formals (vec formals))
+                                            :locals locals}
+                               (persistent! out)))))))
+    (apply list 'cmm file @(:tops st))))
+
+;; -------------------------------------------------------------------------------------------------------------------
+;; The driver
+
+(defn read-file
+  "The file `f` preprocessed (repr/c's preprocessor over hsi's Cmm.h in `include`, `defines` as -D gives them), lexed,
+  parsed and elaborated: its cmm form."
+  [^String f ^String include defines]
+  (let [file (File. f)
+        pre (apply str "#define __GLASGOW_HASKELL__ 914\n"
+                   (for [d defines :let [[n v] (str/split (subs d 2) #"=" 2)]] (str "#define " n " " (or v "1") "\n")))
+        cfg {:predefined pre :include [include] :iquote [] :sys [] :std :gnu17 :has {} :base (or (.getParent file) ".")}
+        r (pp/preprocess cfg (.getName file))]
+    (when (seq (:errors r)) (fail nil f ": " (str/join "; " (:errors r))))
+    (elaborate (.getName file) (parse (lex (pp/text r))))))
+
+(defn -main [& args]
+  (let [[cmd out include & more] args]
+    (when-not (= cmd "read") (binding [*out* *err*] (println "usage: -m arbace.repr.haskell.cmm read OUT INCLUDE-DIR [-DNAME[=V]...] FILE...")) (System/exit 2))
+    (let [defines (filter #(str/starts-with? % "-D") more)
+          files (remove #(str/starts-with? % "-") more)]
+      (try
+        (let [forms (mapv #(read-file % include defines) files)]
+          (spit out (str/join "\n" (map pr-str forms)))
+          (println "cmm:" (count files) "files," (reduce + (map #(count (filter (fn [t] (= 'proc (first t))) (drop 2 %))) forms)) "procedures"))
+        (catch arbace.lang.ExceptionInfo e
+          (if (:cmm (ex-data e))
+            (do (binding [*out* *err*] (println (ex-message e))) (System/exit 1))
+            (throw e)))))))
