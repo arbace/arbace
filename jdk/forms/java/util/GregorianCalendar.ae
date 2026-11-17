@@ -137,6 +137,9 @@
           (.internalSet this GregorianCalendar/AM_PM GregorianCalendar/PM)
           (.internalSet this GregorianCalendar/HOUR (unchecked-subtract-int hourOfDay 12)))
         (.internalSet this GregorianCalendar/HOUR hourOfDay))
+    (.setFieldsComputed this
+                        (bit-or-int (bit-shift-left-int 1 GregorianCalendar/HOUR)
+                                    (bit-shift-left-int 1 GregorianCalendar/AM_PM)))
     (.set this GregorianCalendar/HOUR_OF_DAY hourOfDay)
     (.set this GregorianCalendar/MINUTE minute)
     (.set this GregorianCalendar/SECOND second)
@@ -306,17 +309,34 @@
             (unchecked-add-int (^[int int] Math/floorDiv normalized 7) 1)))))
 
   (method ^:protected computeFields ^void [this]
+    (let [^:mutable ^int tzMask 0]
+      (when (.isPartiallyNormalized this)
+        (set! tzMask
+              (bit-and-int (.getSetStateFields this)
+                           (bit-or-int (bit-shift-left-int 1 GregorianCalendar/ZONE_OFFSET)
+                                       (bit-shift-left-int 1 GregorianCalendar/DST_OFFSET)))))
+      (.computeFields this tzMask)
+      (.setFieldsComputed this GregorianCalendar/ALL_FIELDS)))
+
+  (method ^:private computeFields ^void [this ^int tzMask]
     (let [tz (.getTimeZone this)
           ^:mutable ^int zoneOffset 0
           ^:mutable ^int dstOffset 0]
-      (if-instance [^ZoneInfo zi tz]
-        (let [offsets (new int/1 2)]
-          (.getOffsets zi (.-time this) offsets)
-          (set! zoneOffset (aget offsets 0))
-          (set! dstOffset (aget offsets 1)))
-        (do
-          (set! zoneOffset (.getRawOffset tz))
-          (set! dstOffset (unchecked-subtract-int (.getOffset tz (.-time this)) zoneOffset))))
+      (when-not (== tzMask
+                    (bit-or-int (bit-shift-left-int 1 GregorianCalendar/ZONE_OFFSET)
+                                (bit-shift-left-int 1 GregorianCalendar/DST_OFFSET)))
+        (if-instance [^ZoneInfo zi tz]
+          (let [offsets (new int/1 2)]
+            (.getOffsets zi (.-time this) offsets)
+            (set! zoneOffset (aget offsets 0))
+            (set! dstOffset (aget offsets 1)))
+          (do
+            (set! zoneOffset (.getRawOffset tz))
+            (set! dstOffset (unchecked-subtract-int (.getOffset tz (.-time this)) zoneOffset)))))
+      (when (GregorianCalendar/isFieldSet tzMask GregorianCalendar/ZONE_OFFSET)
+        (set! zoneOffset (.internalGet this GregorianCalendar/ZONE_OFFSET)))
+      (when (GregorianCalendar/isFieldSet tzMask GregorianCalendar/DST_OFFSET)
+        (set! dstOffset (.internalGet this GregorianCalendar/DST_OFFSET)))
       (let [local (unchecked-add (unchecked-add (.-time this) zoneOffset) dstOffset)
             days (Math/floorDiv local ONE_DAY)
             tod (unchecked-int (Math/floorMod local ONE_DAY))
@@ -376,8 +396,37 @@
                             GregorianCalendar/MILLISECOND
                             (unchecked-remainder-int tod ONE_SECOND))
               (.internalSet this GregorianCalendar/ZONE_OFFSET zoneOffset)
-              (.internalSet this GregorianCalendar/DST_OFFSET dstOffset)
-              (set! (.-areFieldsSet this) (set! (.-areAllFieldsSet this) true))))))))
+              (.internalSet this GregorianCalendar/DST_OFFSET dstOffset)))))))
+
+  (method ^:private ^:static computedMask ^int [^int fieldMask]
+    (let [^:mutable mask (bit-or-int (bit-or-int
+                                       fieldMask
+                                       (bit-shift-left-int 1 GregorianCalendar/ERA))
+                                     (bit-shift-left-int 1 GregorianCalendar/YEAR))
+          date (bit-or-int (bit-or-int (bit-shift-left-int 1 GregorianCalendar/MONTH)
+                                       (bit-shift-left-int 1 GregorianCalendar/DAY_OF_MONTH))
+                           (bit-shift-left-int 1 GregorianCalendar/DAY_OF_WEEK))
+          tod (bit-or-int (bit-or-int (bit-or-int
+                                        (bit-or-int
+                                          (bit-or-int
+                                            (bit-shift-left-int 1 GregorianCalendar/HOUR_OF_DAY)
+                                            (bit-shift-left-int 1 GregorianCalendar/AM_PM))
+                                          (bit-shift-left-int 1 GregorianCalendar/HOUR))
+                                        (bit-shift-left-int 1 GregorianCalendar/MINUTE))
+                                      (bit-shift-left-int 1 GregorianCalendar/SECOND))
+                          (bit-shift-left-int 1 GregorianCalendar/MILLISECOND))
+          tz (bit-or-int (bit-shift-left-int 1 GregorianCalendar/ZONE_OFFSET)
+                         (bit-shift-left-int 1 GregorianCalendar/DST_OFFSET))
+          weeks (bit-or-int (bit-or-int (bit-or-int
+                                          (bit-shift-left-int 1 GregorianCalendar/DAY_OF_YEAR)
+                                          (bit-shift-left-int 1 GregorianCalendar/WEEK_OF_YEAR))
+                                        (bit-shift-left-int 1 GregorianCalendar/WEEK_OF_MONTH))
+                            (bit-shift-left-int 1 GregorianCalendar/DAY_OF_WEEK_IN_MONTH))]
+      (when-not (== (bit-and-int fieldMask date) 0) (set! mask (bit-or-int mask date)))
+      (when-not (== (bit-and-int fieldMask tod) 0) (set! mask (bit-or-int mask tod)))
+      (when-not (== (bit-and-int fieldMask tz) 0) (set! mask (bit-or-int mask tz)))
+      (when-not (== (bit-and-int fieldMask weeks) 0) (set! mask (bit-or-int mask weeks)))
+      mask))
 
   (method ^:protected computeTime ^void [this]
     (let [^:mutable ^int/1 originalFields nil]
@@ -396,7 +445,7 @@
           (when (< field GregorianCalendar/FIELD_COUNT)
             (aset userSet field (.isExternallySet this field))
             (recur (unchecked-inc-int field))))
-        (let [fieldMask (.selectFields this)
+        (let [^:mutable fieldMask (.selectFields this)
               ^:mutable ^long year (if (.isSet this GregorianCalendar/YEAR)
                                        (.internalGet this GregorianCalendar/YEAR)
                                        1970)
@@ -406,6 +455,9 @@
           (if (== era BCE)
               (set! year (unchecked-subtract 1 year))
               (when-not (== era CE) (throw (IllegalArgumentException. "Invalid era"))))
+          (when (and (<= year 0) (not (.isSet this GregorianCalendar/ERA)))
+            (set! fieldMask (bit-or-int fieldMask (bit-shift-left-int 1 GregorianCalendar/ERA)))
+            (.setFieldsComputed this (bit-shift-left-int 1 GregorianCalendar/ERA)))
           (let [^:mutable timeOfDay 0]
             (if (GregorianCalendar/isFieldSet fieldMask GregorianCalendar/HOUR_OF_DAY)
                 (set! timeOfDay
@@ -487,25 +539,35 @@
                         (unchecked-subtract local
                                             (unchecked-add-int (aget offsets 0) (aget offsets 1))))
                   (set! (.-time this) t)
-                  (.computeFields this)
-                  (when (some? originalFields)
-                    (loop [^int field 0]
-                      (if (< field GregorianCalendar/FIELD_COUNT)
-                          (if (and (aget userSet field)
-                                   (not (== (aget originalFields field) (.internalGet this field))))
-                              (let [s (java-str (aget originalFields field)
-                                                " -> "
-                                                (.internalGet this field))]
-                                (System/arraycopy
-                                  originalFields
-                                  0
-                                  (.-fields this)
-                                  0
-                                  (alength (.-fields this)))
-                                (throw (IllegalArgumentException.
-                                         (java-str (GregorianCalendar/getFieldName field) ": " s))))
-                              (recur (unchecked-inc-int field)))
-                          nil)))))))))))
+                  (let [tzMask (bit-and-int fieldMask
+                                            (bit-or-int
+                                              (bit-shift-left-int 1 GregorianCalendar/ZONE_OFFSET)
+                                              (bit-shift-left-int 1 GregorianCalendar/DST_OFFSET)))
+                        mask (GregorianCalendar/computedMask
+                               (bit-or-int fieldMask (.getSetStateFields this)))]
+                    (.computeFields this tzMask)
+                    (when (some? originalFields)
+                      (loop [^int field 0]
+                        (if (< field GregorianCalendar/FIELD_COUNT)
+                            (if (and (aget userSet field)
+                                     (not
+                                       (== (aget originalFields field) (.internalGet this field))))
+                                (let [s (java-str
+                                          (aget originalFields field)
+                                          " -> "
+                                          (.internalGet this field))]
+                                  (System/arraycopy
+                                    originalFields
+                                    0
+                                    (.-fields this)
+                                    0
+                                    (alength (.-fields this)))
+                                  (throw
+                                    (IllegalArgumentException.
+                                      (java-str (GregorianCalendar/getFieldName field) ": " s))))
+                                (recur (unchecked-inc-int field)))
+                            nil)))
+                    (.setFieldsNormalized this mask))))))))))
 
   (method ^:private dateOfFields ^long [this ^boolean gregorian ^:mutable ^long year ^int fieldMask]
     (let [^:mutable ^long month GregorianCalendar/JANUARY]
@@ -714,13 +776,60 @@
                         (set! fd (unchecked-dec fd))
                         (set! timeOfDay (unchecked-add timeOfDay ONE_DAY))))
                   (set! fd (unchecked-add fd delta))
-                  (let [zoneOffset (unchecked-add-int
-                                     (.internalGet this GregorianCalendar/ZONE_OFFSET)
-                                     (.internalGet this GregorianCalendar/DST_OFFSET))]
+                  (let [^:mutable zoneOffset (unchecked-add-int
+                                               (.internalGet this GregorianCalendar/ZONE_OFFSET)
+                                               (.internalGet this GregorianCalendar/DST_OFFSET))]
                     (.setTimeInMillis this
                                       (unchecked-subtract
                                         (unchecked-add (unchecked-multiply fd ONE_DAY) timeOfDay)
-                                        zoneOffset)))))))))
+                                        zoneOffset))
+                    (set! zoneOffset
+                          (unchecked-subtract-int
+                            zoneOffset
+                            (unchecked-add-int (.internalGet this GregorianCalendar/ZONE_OFFSET)
+                                               (.internalGet this GregorianCalendar/DST_OFFSET))))
+                    (when-not (== zoneOffset 0)
+                      (.setTimeInMillis this (unchecked-add (.-time this) zoneOffset))
+                      (let [fd2 (.currentDay this)]
+                        (when-not (== fd2 fd)
+                          (.setTimeInMillis this (unchecked-subtract (.-time this) zoneOffset))))))))))))
+
+  (method ^:private zoneOffsets ^int/1 [this ^long t]
+    (let [tz (.getTimeZone this)
+          offsets (new int/1 2)]
+      (if-instance [^ZoneInfo zi tz]
+        (.getOffsets zi t offsets)
+        (do
+          (aset offsets 0 (.getRawOffset tz))
+          (aset offsets 1 (unchecked-subtract-int (.getOffset tz t) (aget offsets 0)))))
+      offsets))
+
+  (method ^:private wallTime ^long [this ^long fd ^int hourOfDay]
+    (let [ms (unchecked-add
+               (unchecked-add (unchecked-multiply fd ONE_DAY)
+                              (unchecked-multiply
+                                (unchecked-add
+                                  (unchecked-multiply
+                                    (unchecked-add
+                                      (unchecked-multiply hourOfDay 60)
+                                      (.internalGet this GregorianCalendar/MINUTE))
+                                    60)
+                                  (.internalGet this GregorianCalendar/SECOND))
+                                1000))
+               (.internalGet this GregorianCalendar/MILLISECOND))
+          tz (.getTimeZone this)
+          ^int zoneOffset (if-instance [^ZoneInfo zi tz]
+                            (.getOffsetsByWall zi ms (new int/1 2))
+                            (.getOffset tz (unchecked-subtract ms (.getRawOffset tz))))]
+      (unchecked-subtract ms zoneOffset)))
+
+  (method ^:private hourOfTime ^int [this ^long t]
+    (let [offsets (.zoneOffsets this t)]
+      (unchecked-int
+        (unchecked-divide
+          (Math/floorMod (unchecked-add (unchecked-add t (aget offsets 0)) (aget offsets 1))
+                         ONE_DAY)
+          ONE_HOUR))))
 
   (method ^:private currentDay ^long [this]
     (Math/floorDiv
@@ -789,24 +898,33 @@
                            (== (.internalGet this GregorianCalendar/AM_PM) GregorianCalendar/PM))
                   (set! hourOfDay (unchecked-add-int hourOfDay 12)))
                 (let [fd (.currentDay this)
-                      tod (unchecked-add
-                            (unchecked-multiply
-                              (unchecked-add
-                                (unchecked-multiply
-                                  (unchecked-add
-                                    (unchecked-multiply hourOfDay 60)
-                                    (.internalGet this GregorianCalendar/MINUTE))
-                                  60)
-                                (.internalGet this GregorianCalendar/SECOND))
-                              1000)
-                            (.internalGet this GregorianCalendar/MILLISECOND))]
-                  (.setTimeInMillis this
-                                    (unchecked-subtract
-                                      (unchecked-subtract
-                                        (unchecked-add (unchecked-multiply fd ONE_DAY) tod)
-                                        (.internalGet this GregorianCalendar/ZONE_OFFSET))
-                                      (.internalGet this GregorianCalendar/DST_OFFSET)))
-                  (return)))
+                      ^:mutable t (.wallTime this fd hourOfDay)
+                      ^:mutable newHour (.hourOfTime this t)]
+                  (when (and (or (and (== field GregorianCalendar/HOUR_OF_DAY)
+                                      (not (== (unchecked-remainder-int amount 24) 0)))
+                                 (and (== field GregorianCalendar/HOUR)
+                                      (not (== (unchecked-remainder-int amount 12) 0))))
+                             (== (.internalGet this GregorianCalendar/HOUR_OF_DAY) newHour))
+                    (set! hourOfDay
+                          (GregorianCalendar/getRolledValue
+                            rolledValue
+                            (if (> amount 0) 1 -1)
+                            min
+                            max))
+                    (when (and
+                            (== field GregorianCalendar/HOUR)
+                            (== (.internalGet this GregorianCalendar/AM_PM) GregorianCalendar/PM))
+                      (set! hourOfDay (unchecked-add-int hourOfDay 12)))
+                    (set! t (.wallTime this fd hourOfDay))
+                    (set! newHour (.hourOfTime this t)))
+                  (set! (.-time this) t)
+                  (.internalSet this GregorianCalendar/HOUR_OF_DAY newHour)
+                  (.internalSet this GregorianCalendar/AM_PM (unchecked-divide-int newHour 12))
+                  (.internalSet this GregorianCalendar/HOUR (unchecked-remainder-int newHour 12))
+                  (let [offsets (.zoneOffsets this t)]
+                    (.internalSet this GregorianCalendar/ZONE_OFFSET (aget offsets 0))
+                    (.internalSet this GregorianCalendar/DST_OFFSET (aget offsets 1))
+                    (return))))
             GregorianCalendar/MONTH
               (do
                 (if (not (.isCutoverYear this ny))
@@ -1065,6 +1183,56 @@
         (or (>= day startDay) (<= day endDay))))
 
   (method ^:public isWeekDateSupported ^boolean [this] true)
+
+  (method ^:public setWeekDate ^void [this ^int weekYear ^int weekOfYear ^int dayOfWeek]
+    (when (or (< dayOfWeek GregorianCalendar/SUNDAY) (> dayOfWeek GregorianCalendar/SATURDAY))
+      (throw (IllegalArgumentException. (java-str "invalid dayOfWeek: " dayOfWeek))))
+    (let [gc (cast GregorianCalendar (.clone this))]
+      (.setLenient gc true)
+      (let [era (.get gc GregorianCalendar/ERA)]
+        (.clear gc)
+        (.setTimeZone gc (TimeZone/getTimeZone "GMT"))
+        (.set gc GregorianCalendar/ERA era)
+        (.set gc GregorianCalendar/YEAR weekYear)
+        (.set gc GregorianCalendar/WEEK_OF_YEAR 1)
+        (.set gc GregorianCalendar/DAY_OF_WEEK (.getFirstDayOfWeek this))
+        (let [^:mutable days (unchecked-subtract-int dayOfWeek (.getFirstDayOfWeek this))]
+          (when (< days 0) (set! days (unchecked-add-int days 7)))
+          (set!
+            days
+            (unchecked-add-int days
+                               (unchecked-multiply-int 7 (unchecked-subtract-int weekOfYear 1))))
+          (if (not (== days 0)) (.add gc GregorianCalendar/DAY_OF_YEAR days) (.complete gc))
+          (when (and (not (.isLenient this))
+                     (or (or (not (== (.getWeekYear gc) weekYear))
+                             (not (== (.internalGet gc GregorianCalendar/WEEK_OF_YEAR) weekOfYear)))
+                         (not (== (.internalGet gc GregorianCalendar/DAY_OF_WEEK) dayOfWeek))))
+            (throw (IllegalArgumentException.)))
+          (.set this GregorianCalendar/ERA (.internalGet gc GregorianCalendar/ERA))
+          (.set this GregorianCalendar/YEAR (.internalGet gc GregorianCalendar/YEAR))
+          (.set this GregorianCalendar/MONTH (.internalGet gc GregorianCalendar/MONTH))
+          (.set this
+                GregorianCalendar/DAY_OF_MONTH
+                (.internalGet gc GregorianCalendar/DAY_OF_MONTH))
+          (.internalSet this GregorianCalendar/WEEK_OF_YEAR weekOfYear)
+          (.complete this)))))
+
+  (method ^:public getWeeksInWeekYear ^int [this]
+    (let [^:mutable gc (.getNormalizedCalendar this)
+          weekYear (.getWeekYear gc)]
+      (if (== weekYear (.internalGet gc GregorianCalendar/YEAR))
+          (.getActualMaximum gc GregorianCalendar/WEEK_OF_YEAR)
+          (do
+            (when (identical? gc this) (set! gc (cast GregorianCalendar (.clone gc))))
+            (.setWeekDate gc weekYear 2 (.internalGet this GregorianCalendar/DAY_OF_WEEK))
+            (.getActualMaximum gc GregorianCalendar/WEEK_OF_YEAR)))))
+
+  (method ^:private getNormalizedCalendar ^GregorianCalendar [this]
+    (let [^:mutable ^GregorianCalendar gc nil]
+      (if (and (.-areFieldsSet this) (.-areAllFieldsSet this))
+          (set! gc this)
+          (do (set! gc (cast GregorianCalendar (.clone this))) (.setLenient gc true) (.complete gc)))
+      gc))
 
   (method ^:public getWeekYear ^int [this]
     (let [^:mutable year (.get this GregorianCalendar/YEAR)]
