@@ -1530,6 +1530,24 @@
                  nil))
     :exn-ptr (:exn-adj @*f*)
     :alloca (val! (list 'alloca 'i8 :count ['i64 (emit-rv (:e e))] :align 16))
+    ;; GCC's __builtin_shuffle (n-cpp-eval): the operands stored side by side, each lane loaded at its mask lane's index
+    ;; (modulo the lanes) and stored into the result, which is loaded as the vector's value
+    :vshuffle (let [vt (abi/unq (:ty e)) mt (abi/unq (:ty (:m e))) et (:of vt) mte (:of mt)
+                    n (long (:n vt)) es (abi/size-of et) sz (abi/size-of vt) two (some? (:b e))
+                    src (alloca! (list 'array (* (if two 2 1) sz) 'i8) sz)
+                    msk (alloca! (list 'array sz 'i8) sz)
+                    res (alloca! (list 'array sz 'i8) sz)
+                    ml (abi/llvm-type mte)]
+                (store! vt (emit-rv (:a e)) src)
+                (when two (store! vt (emit-rv (:b e)) (offset! src sz)))
+                (store! mt (emit-rv (:m e)) msk)
+                (doseq [i (range n)]
+                  (let [mi (load! mte (offset! msk (* i es)))
+                        k (val! (list 'and ml mi (dec (* (if two 2 1) n))))
+                        k (if (= ml 'i64) k (val! (list 'zext ml k 'i64)))
+                        p (val! (list 'getelementptr :inbounds (abi/llvm-type et) ['ptr src] ['i64 k]))]
+                    (store! et (load! et p) (offset! res (* i es)))))
+                (load! vt res))
     :clear-padding (emit-clear-padding! e)
     :atomic (emit-atomic! e)
     :bitop (emit-bitop! e)
@@ -1793,6 +1811,10 @@
       :complex (let [et (:of tu) es (abi/size-of et) [a b] (:items init)]
                  (store! et (if a (emit-rv a) (zero-of et)) addr)
                  (store! et (if b (emit-rv b) (zero-of et)) (offset! addr es)))
+      ;; a GNU vector's lanes (n-cpp-eval), those not written zero
+      :vec (let [et (:of tu) es (abi/size-of et) items (:items init)]
+             (doseq [i (range (:n tu))]
+               (store! et (if-let [x (get items i)] (emit-rv x) (zero-of et)) (offset! addr (* i es)))))
       :string (if-let [us (:units (:e init))]
                 (let [w (long (:w (:e init))) n (long (or (:n init) (inc (count us))))]
                   (memcpy! addr (gsym (wide-global (vec (take (dec n) (concat us (repeat 0)))) w)) (* n w)))
@@ -2829,6 +2851,10 @@
                 (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
                   (vec (map-indexed (fn [i ch] [(+ off i) 'i8 (long (int ch))]) (subs (str s (apply str (repeat n (char 0)))) 0 n)))))
       :zero-then (const-leaves t (:then init) off)
+      ;; a GNU vector's lanes (n-cpp-eval): each a constant, those not written zero
+      :vec (let [et (:of tu) es (abi/size-of et)
+                 ls (map-indexed (fn [i x] (const-leaves et {:i :expr :e x} (+ off (* i es)))) (:items init))]
+             (when (every? some? ls) (vec (apply concat ls))))
       ;; an implicit or defaulted default constructor that only stores constants (constexpr: clang initializes the
       ;; object as a constant, its vptrs included)
       :ctor (let [f (sema/fnd (:fn init)) cid (:cls f) ti (:tinits f)]

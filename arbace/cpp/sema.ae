@@ -621,14 +621,26 @@
 (defn resolve-type
   "The semantic type of clang's spelling `s` in `scope`."
   [scope ^String s0]
-  ;; GNU's vector types (vector_size, clang's VectorType): not modelled; the attribute is no type attribute strip-type-attrs may drop
-  ;; (g++.dg's ext/is_aggregate.C read a vector typedef as its element type: a wrong answer, cpp-90), so the type is refused
-  (when (re-find #"vector_size__\s*\(" s0) (fail :type "a GNU vector type (" s0 ")"))
+  ;; GNU's vector types (vector_size, clang's VectorType): the attribute is no type attribute strip-type-attrs may drop (g++.dg's
+  ;; ext/is_aggregate.C read a vector typedef as its element type: a wrong answer, cpp-90). For the code generator (n-cpp-eval)
+  ;; `__attribute__((__vector_size__(BYTES))) T`, BYTES a literal, is {:k :vec :n LANES :of T}: held, copied, initialized from a
+  ;; list and given its size and alignment; its lanes' operators are refused where they are met. The checker still refuses the
+  ;; type (its traits and conversions are not modelled)
+  (when (re-find #"vector_size__\s*\(" s0)
+    (let [[_ b et] (re-find #"^\s*__attribute__\(\(__vector_size__\((\d+)\)\)\)\s+(.*)$" s0)]
+      (when (or (checking?) (nil? b)) (fail :type "a GNU vector type (" s0 ")"))))
+  (if-let [[_ b et] (when-not (checking?) (re-find #"^\s*__attribute__\(\(__vector_size__\((\d+)\)\)\)\s+(.*)$" s0))]
+    (let [e (abi/unq (resolve-type scope et))
+          es (when (or (abi/integral? e) (abi/floating? e)) (abi/size-of e))
+          n (Long/parseLong b)]
+      (when (or (nil? es) (not (pos? n)) (pos? (rem n (long es))) (not= 1 (Long/bitCount (quot n (long es)))))
+        (fail :type "a GNU vector type (" s0 ")"))
+      {:k :vec :n (quot n (long es)) :of e})
   (let [s (strip-type-attrs s0)]
   (if (re-find #"\((unnamed|anonymous) (union|struct|class|enum) at " s)
     (let [t @*last-anon*] (cond-> t (re-find #"^const " s) (assoc :c true)))
   (try (resolve-type-form scope (ct/parse-type s))
-       (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e))))))))
+       (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e)))))))))
 
 ;; CP311 (a): class template argument deduction ([dcl.type.class.deduct]): a placeholder for a deduced class type, a
 ;; template-name with no argument list, deduced from the initializer by arbace.cpp.template/ctad (the :ctad hook)
@@ -787,6 +799,19 @@
   [n]
   (let [f (:file (loc-of (get-in n [:range :begin])))]
     (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (located-file f))))))))
+
+(defn main-fn-node?
+  "Whether a node is the program's `main` (a FunctionDecl named main, not a member): n-cpp-eval, g++.dg's torture/vshuf-*.C define
+  main in a quoted include beside the test (vshuf-main.inc), a header's file by header-node?, whose definitions are analyzed only
+  when used and dropped when refused: such a main was never emitted (an empty module), or its refusal hidden. main is the
+  program's however it is included ([basic.start.main]: one definition the program has), so it is neither."
+  [n]
+  (and (= "FunctionDecl" (:kind n)) (= "main" (:name n))))
+
+(defn- lazy-header-node?
+  "header-node?, but the program's main for the code generator (the checker's reading of the headers unchanged)."
+  [n]
+  (and (header-node? n) (not (and (not (checking?)) (main-fn-node? n)))))
 
 (defn- node-text ^String [n]
   (let [bl (loc-of (get-in n [:range :begin])) el (loc-of (get-in n [:range :end]))
@@ -1248,10 +1273,10 @@
                             body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
                                         :inline (or (:inline g) (boolean (:inline n))))
                             ;; a header's definition: analyzed when used (G4), as clang emits an inline function
-                            (and body (header-node? n) (not (or (:used f) (:used g)))) (assoc :lazy true))))
+                            (and body (lazy-header-node? n) (not (or (:used f) (:used g)))) (assoc :lazy true))))
       (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
                                       (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})
-                                      (when (and (or body (:explicitlyDefaulted n)) (header-node? n) (not (:used f))) {:lazy true})))
+                                      (when (and (or body (:explicitlyDefaulted n)) (lazy-header-node? n) (not (:used f))) {:lazy true})))
           (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)})
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
@@ -1281,9 +1306,16 @@
         ;; [dcl.array]/7, as a local's is at its initialization: <bits/unicode-data.h>'s `inline constexpr char32_t
         ;; __width_edges[] = {...}` given to std::end(T (&)[N]), whose N had been nil)
         ty (let [i (init-kid n)]
-             (if (and (abi/arr? ty) (nil? (:n ty)) (abi/scalar? (abi/unq (:of ty))) (= "InitListExpr" (:kind i)))
+             (cond
+               (and (abi/arr? ty) (nil? (:n ty)) (abi/scalar? (abi/unq (:of ty))) (= "InitListExpr" (:kind i)))
                (assoc ty :n (count (kids i)))
-               ty))
+               ;; (n-cpp-eval: of GNU vectors, each element its own braced list: g++.dg's torture/vshuf-*.inc `constexpr V in1[] =
+               ;; { {...}, ... }`, whose sizeof had been 0; a vector's lanes with their braces elided refused)
+               (and (abi/arr? ty) (nil? (:n ty)) (= :vec (:k (abi/unq (:of ty)))) (= "InitListExpr" (:kind i)))
+               (if (every? #(= "InitListExpr" (:kind %)) (kids i))
+                 (assoc ty :n (count (kids i)))
+                 (fail :init "an array of unknown bound of vectors with their braces elided"))
+               :else ty))
         home (if (seq q)
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
@@ -1534,7 +1566,7 @@
   "Enters a declaration node of namespace or class scope. A header's declaration that the analysis refuses is dropped
   (G4: a use of it fails later as an unknown name; CPP_HDR_TRACE=1 prints each)."
   [scope n]
-  (if (header-node? n)
+  (if (lazy-header-node? n)
     (try (let [r (declare-node*! scope n)]
            (when *header-drops* (swap! *header-drops* dissoc (drop-key n)))
            r)
@@ -3911,6 +3943,12 @@
         :else {:i :none})
       ;; a complex object from a list of its real and imaginary parts (cpp-s3: complex(long double __r, long double __i) :
       ;; _M_value{ __r, __i }; GCC's extension, [dcl.init.list] taking it as an aggregate of two)
+      ;; a GNU vector from a list of its lanes (n-cpp-eval; GCC's vector initializer, the lanes not written zero)
+      (and (= :init-list (:op src)) (= :vec (:k tu)))
+      (let [items (:items src) et (:of tu)]
+        (when (> (count items) (long (:n tu))) (fail :init "too many initializers for a vector"))
+        (when (some #(or (= :init-list (:op %)) (not (abi/arith? (abi/unq (:ty %))))) items) (fail :init "a vector's lane from a non-arithmetic value"))
+        {:i :vec :items (mapv #(convert-scalar (rv %) et false) items)})
       (and (= :init-list (:op src)) (= :complex (:k tu)))
       (let [items (:items src) et (:of tu)]
         (when (> (count items) 2) (fail :init "too many initializers for a complex"))
@@ -4768,6 +4806,8 @@
    "__builtin_signbit" :signbit "__builtin_isfinite" :isfinite
    "__builtin_alloca" :alloca
    "__builtin_clear_padding" :clear-padding
+   ;; (n-cpp-eval: GCC's __builtin_shuffle of GNU vectors, g++.dg's torture/vshuf-*.C)
+   "__builtin_shuffle" :shuffle
    "__atomic_always_lock_free" :lock-free "__atomic_is_lock_free" :lock-free
    "__builtin_va_start" :va-start "__builtin_c23_va_start" :va-start "__builtin_va_end" :va-end "__builtin_va_copy" :va-copy
    "__builtin_add_overflow" :add-overflow "__builtin_sub_overflow" :sub-overflow "__builtin_mul_overflow" :mul-overflow
@@ -5738,6 +5778,18 @@
                      (when-not (and (number? nv) pp (some? pv) (zero? (long (or (:v pv) 0))))
                        (fail :expr "a lock-free query not folded"))
                      {:op :int :v (if (#{1 2 4 8} (long nv)) 1 0) :ty abi/bool* :cat :pr})
+        ;; (n-cpp-eval: GCC's __builtin_shuffle(a, mask) and (a, b, mask), GCC's manual "Using Vector Instructions through
+        ;; Built-in Functions": lane i of the result is lane mask[i] of a, or of a and b taken as one vector of 2N lanes, the
+        ;; mask's lanes taken modulo N, or 2N; the mask an integer vector of as many lanes of the same width; clang has no such
+        ;; builtin, its __builtin_shufflevector takes constant indices)
+        :shuffle (let [as (mapv #(rv (analyze ctx %)) (rest (kids n)))
+                       _ (when-not (#{2 3} (count as)) (fail :expr "__builtin_shuffle with " (count as) " arguments"))
+                       [a b m] (if (= 2 (count as)) [(first as) nil (second as)] as)
+                       vt (abi/unq (:ty a)) mt (abi/unq (:ty m))]
+                   (when-not (and (= :vec (:k vt)) (= :vec (:k mt)) (abi/integral? (:of mt)) (= (:n vt) (:n mt))
+                                  (= (abi/size-of (:of vt)) (abi/size-of (:of mt))) (or (nil? b) (= vt (abi/unq (:ty b)))))
+                     (fail :expr "__builtin_shuffle of " (pr-str (mapv :ty as))))
+                   {:op :vshuffle :a a :b b :m m :ty vt :cat :pr})
         :alloca {:op :alloca :e (convert-scalar (rv (analyze ctx (second (kids n)))) abi/ulong* false) :ty (abi/ptr abi/void) :cat :pr}
         ;; __builtin_{add,sub,mul}_overflow(a, b, &r): r = a op b in r's type; the overflow flag false (a divergence
         ;; when it overflows: no wider arithmetic yet; G4: <bits/stl_vector.h>'s size computations)
