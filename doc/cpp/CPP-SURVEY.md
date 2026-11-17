@@ -8440,3 +8440,31 @@ error at the first constrained declaration: a cheap first step for the concepts 
 `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 243 / 943 to
 5,309 / 328 / 858 (36 n/a); the crop's completeness 91 (0.9137, unchanged), without by design 93 (0.9274 to 0.9303; the read cell's
 85 to 86). No key moves (a record and its classes, and a data file no tool reads).
+
+### 336 round 2: -fconcepts read as GCC reads it (D336-1 (a), D336-2 (a), the user, 2026-11-17)
+
+- arbace/repr/cpp/parse.ae's `keywords` takes `concepts`: under -fconcepts, `concept` and `requires` are keywords at any standard (GCC's
+  D_CXX_CONCEPTS); without it they stay identifiers before C++20. native.ae passes it (the predefined macros those of the options
+  without -fconcepts, as before), and the dg check's own front end (arbace.repr.cpp.dg's read-own) adds the file's -fconcepts to the
+  options it gives, which `:clang` drops (clang takes no -fconcepts).
+- Reading the constraints exposed three of their rules, which the parser had met by accident with its syntax errors: a trailing
+  requires-clause on a function that is not templated ([dcl.decl.general]/4, GCC's "constraints on a non-templated function": no
+  enclosing template parameters, no `this`-dependent class, no placeholder parameter making an abbreviated template), a parameter pack
+  named in a trailing requires-clause with no `...` ([temp.variadic]/5), and a type-constraint whose concept takes another number of
+  arguments ([temp.param]/4, "wrong number of template arguments"; a concept's entity now holds its parameter count and whether the
+  last is a pack; a constrained type parameter pack is declared a pack, as an unconstrained one), each a `soft-diag!`.
+- Checked on this VM (nx's stage 0), interleaved on the same 100 files (the 93 dg-error files whose text names -fconcepts, the
+  control's two, five C++20 files the checks touch): own passes 23 at the base, 32 after: 10 new (concepts/decl-diagnose.C, fn4.C,
+  locations1.C, placeholder3.C, placeholder4.C, var-concept2.C, var-concept4.C, var-concept7.C, variadic2.C, cpp23/auto-fncast11.C), one
+  lost, concepts/pr84330.C (its pass was the accident: its expected "bool" is an atomic constraint's type, [temp.constr.atomic]/3, a Sema
+  check not written). Of the 40 reviewed files at C++17 with -fconcepts, `[syntax]` failures 35 to 0; their kinds both 20, extra 15,
+  accepted 4, missed 1 before; accepted 24, missed 9, pass 5, both 1, crash 1 after. 43 rows moved; recorded the 42 but
+  concepts/dr1430.C, whose crash (StringIndexOutOfBoundsException, Range [9923, ...)) is this VM's: the base gives it on
+  cpp0x/udlit-suffix-neg.C too, with no -fconcepts; left for the main host.
+- The C++20 files that use concepts without -fconcepts (266, with the control): no recorded own pass lost to the change (the five
+  regressions the run reports are the same VM crash, reproduced at the base); `bin/repr-cpp read --reader native cpp2a/keywords1.C
+  --std gnu++17` reads `int requires;` and `int concept;` as variables, and declines them with -fconcepts; `roundtrip-corpus samples
+  --judge own` 9 of 9 and `gxx-dg-essential` 33 of 33 (their controls failing), `native-check samples` 9 same.
+- `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 328 / 858 to
+  5,314 / 328 / 853; completeness 91 (0.9137 to 0.9139), without by design 93 (0.9303 to 0.9305). test/cpp/own-diag-review.edn's
+  `:own` follows the record. Keys: `gate_key` and `arbace_javac_key` move (repr/cpp is embedded since W2).

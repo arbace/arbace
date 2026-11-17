@@ -56,12 +56,15 @@
     "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr" "__declspec"})
 
 (defn keywords
-  "The keywords of the standard of year `year` (`gnu`: a GNU mode, `typeof` a keyword)."
-  [^long year gnu]
-  (cond-> (into kws98 kws-ext)
-    (>= year 2011) (into kws11)
-    (>= year 2020) (into kws20)
-    gnu (conj "typeof")))
+  "The keywords of the standard of year `year` (`gnu`: a GNU mode, `typeof` a keyword; `concepts`: -fconcepts, which makes
+  `concept` and `requires` keywords at any standard, as GCC's D_CXX_CONCEPTS keywords; queue 336, D336-1 (a))."
+  ([^long year gnu] (keywords year gnu false))
+  ([^long year gnu concepts]
+   (cond-> (into kws98 kws-ext)
+     (>= year 2011) (into kws11)
+     (>= year 2020) (into kws20)
+     concepts (into #{"concept" "requires"})
+     gnu (conj "typeof"))))
 
 (def ^:private digraphs {"<:" "[" ":>" "]" "<%" "{" "%>" "}" "%:" "#" "%:%:" "##"})
 
@@ -3386,7 +3389,25 @@
                   _ (skip-asm-label! p)
                   virts (virt-specifiers p)
                   as2 (attr-nodes p)
-                  rc (when (is? p "requires") (requires-clause! p))
+                  rb (ix p)
+                  rq (is? p "requires")
+                  rc (when rq (requires-clause! p))
+                  ;; (queue 336: a trailing requires-clause's rules, the concepts that -fconcepts now reads below C++20:
+                  ;; [dcl.decl.general]/4, only a templated function's declarator takes one, GCC's "constraints on a
+                  ;; non-templated function" (no enclosing template parameters, no placeholder parameter making it an
+                  ;; abbreviated template); [temp.variadic]/5, a parameter pack named in it with no ... is not expanded,
+                  ;; GCC's "parameter packs not expanded")
+                  _ (when rq
+                      (let [re (ix p)]
+                        (when (and (not (in-template? p)) (not (dep-this? p))
+                                   (not-any? #(t= (tok-at p %) "auto") (range (long (:b d)) (long (:e d)))))
+                          (soft-diag! p rb "constraints on a non-templated function"))
+                        (when (not-any? #(t= (tok-at p %) "...") (range rb re))
+                          (when-let [i (first (filter (fn [i] (let [^T t (tok-at p i)]
+                                                                (and (identical? :id (.-k t))
+                                                                     (let [en (sc/lookup (scope p) (.-s t))] (and (:tparam en) (:pack en))))))
+                                                      (range rb re)))]
+                            (soft-diag! p i (str "parameter packs not expanded with '...': '" (ts (tok-at p i)) "'"))))))
                   ev (if (seq virts) (ne (peek virts)) (long (:e d)))
                   [pure dflt del] (when (is? p "=")
                                     (cond (let [^T n (nxt p 1)] (and (identical? :num (.-k n)) (= "0" (.-s n)))) (do (adv! p) (adv! p) [true nil nil])
@@ -3633,7 +3654,17 @@
                     nm (when (id? p) (ts (cur p)))
                     ni (if nm (let [i (ix p)] (adv! p) i) (ix p))
                     dflt (when (accept! p "=") (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-type-id p :targ))))]
-                (when nm (sc/declare! (scope p) {:k :type :name nm :tparam true}))
+                (when nm (sc/declare! (scope p) (cond-> {:k :type :name nm :tparam true} pack (assoc :pack true))))
+                ;; (queue 336: [temp.param]/4, the type-constraint's concept takes the parameter and its own arguments: as
+                ;; many as the concept's parameters unless its last is a pack, GCC's "wrong number of template arguments")
+                (when (and (map? tc) (not (skim? p)))
+                  (let [ce (:ent tc) lp (peek (:parts tc)) as (:args lp)]
+                    (when (and (pos? (long (or (:nparams ce) 0))) (not (:vpack ce)) (or (nil? as) (vector? as))
+                               ;; (an argument's pack expansion: its count unknown here)
+                               (not (and as (:ab lp) (:ae lp) (some #(t= (tok-at p %) "...") (range (long (:ab lp)) (inc (long (:ae lp))))))))
+                      (let [n (inc (count as))]
+                        (when (not= n (long (:nparams ce)))
+                          (soft-diag! p b (str "wrong number of template arguments (" n ", should be " (:nparams ce) ")")))))))
                 [(node p "TemplateTypeParmDecl" b (last-ix p)
                        (cond-> {:tagUsed "typename" :loc (loc p ni)
                                 :inner (into [{:kind "ConceptSpecializationExpr"}] (when dflt [{:kind "TemplateArgument" :type {:qualType (qt dflt)}}]))}
@@ -3838,7 +3869,9 @@
                                (when (map? x) x)))
                         e (last-ix p)]
                     (expect! p ";")
-                    (sc/declare! (sc/decl-scope (scope p)) {:k :concept :name nm})
+                    ;; (queue 336: its parameters' count and whether the last is a pack, for a type-constraint's arguments)
+                    (sc/declare! (sc/decl-scope (scope p)) {:k :concept :name nm :nparams (count ps)
+                                                            :vpack (boolean (:isParameterPack (peek ps)))})
                     [(node p "ConceptDecl" hb e (cond-> {:name nm :loc (loc p ni) :inner ps} cx (assoc :constraintExpr cx)))])))
             :else
             (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps})
