@@ -4464,6 +4464,89 @@
       item (diag/offset-of src (first item) (second item) hint)
       :else 0)))
 
+(defn- replace-md-refs
+  "The forms with the metadata references of `m` (old id -> new id) replaced."
+  [forms m]
+  (letfn [(walk [y] (cond (and (symbol? y) (contains? m y)) (get m y)
+                          (seq? y) (apply list (map walk y))
+                          (vector? y) (mapv walk y)
+                          (map? y) (into (empty y) (map (fn [[k v]] [k (walk v)]) y))
+                          :else y))]
+    (mapv (fn [f] (if (= (first f) 'llvm/meta) (apply list (first f) (second f) (map walk (drop 2 f))) (walk f))) forms)))
+
+(defn unique-md
+  "The forms with equal metadata tuples one node, as LLParser's MDTuple::get makes them (queue 335): two numbered tuples, not
+  distinct and in no cycle, whose operands are the same once their own tuples are, are the first one (the text's order); the
+  references to the others are to it, their definitions dropped."
+  [forms]
+  (let [order (vec (keep #(when (= (first %) 'llvm/meta) (second %)) forms))
+        pos (into {} (map-indexed (fn [i id] [id i]) order))
+        tup (into {} (keep (fn [f] (let [n (nth f 2)]
+                                     (when (and (md-ref? (second f)) (not (:distinct (apply hash-map (drop 3 f))))
+                                                (seq? n) (= (first n) '!) (vector? (second n)))
+                                       [(second f) (second n)])))
+                           forms))
+        state (java.util.HashMap.)   ; id -> :visiting, :cyclic or :done
+        cyclic? (fn cyc [id]
+                  (case (.get state id)
+                    :visiting true :cyclic true :done false
+                    (do (.put state id :visiting)
+                        (let [c (boolean (some #(and (contains? tup %) (cyc %)) (filter md-ref? (md-refs-in (get tup id)))))]
+                          (.put state id (if c :cyclic :done)) c))))
+        _ (doseq [id (keys tup)] (cyclic? id))
+        ok (set (filter #(= :done (.get state %)) (keys tup)))
+        height (java.util.HashMap.)
+        h (fn hh [id] (or (.get height id)
+                          (let [v (reduce max 0 (map #(inc (long (hh %))) (filter ok (filter md-ref? (md-refs-in (get tup id))))))]
+                            (.put height id v) v)))
+        reps (java.util.HashMap.)]
+    (doseq [id ok] (h id))
+    (doseq [lvl (sort (distinct (vals height)))]
+      (let [ids (sort-by pos (filter #(= lvl (.get height %)) ok))
+            claimed (java.util.HashMap.)]
+        (doseq [id ids]
+          (let [k (replace-md-refs [(get tup id)] (into {} reps))
+                k (first k)]
+            (if-let [r (.get claimed k)] (.put reps id r) (.put claimed k id))))))
+    (if (.isEmpty reps)
+      forms
+      (let [m (into {} reps)]
+        (replace-md-refs (vec (remove #(and (= (first %) 'llvm/meta) (contains? m (second %))) forms)) m)))))
+
+(defn upgrade-tbaa
+  "LLParser's UpgradeTBAANode at the module's end (queue 335): an instruction's !tbaa tag that is not struct-path aware (its
+  first operand no node, or fewer than three operands) replaced by <MD, MD, i64 0> (three operands: <S, S, i64 0, const>, S
+  the node of the first two), each new node uniqued against the module's (MDNode::get)."
+  [forms]
+  (let [nodes (java.util.HashMap.)   ; content -> id of the non-distinct nodes
+        _ (doseq [f forms :when (and (= (first f) 'llvm/meta) (md-ref? (second f)) (not (:distinct (apply hash-map (drop 3 f)))))]
+            (.putIfAbsent nodes (nth f 2) (second f)))
+        nxt (volatile! (inc (reduce max -1 (keep #(when (and (= (first %) 'llvm/meta) (md-ref? (second %))) (Long/parseLong (subs (name (second %)) 1))) forms))))
+        added (java.util.ArrayList.)
+        get! (fn [ops] (let [c (list '! ops)]
+                         (or (.get nodes c)
+                             (let [id (symbol (str "!" @nxt))] (vswap! nxt inc) (.put nodes c id) (.add added (list 'llvm/meta id c)) id))))
+        meta (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
+        up (fn [x] (let [n (get meta x) ops (when (and (seq? n) (= (first n) '!) (vector? (second n))) (second n))]
+                     (cond (or (nil? ops) (empty? ops)) x
+                           (and (md-ref? (first ops)) (>= (count ops) 3)) x
+                           (= 3 (count ops)) (let [sc (get! [(nth ops 0) (nth ops 1)])] (get! [sc sc '[i64 0] (nth ops 2)]))
+                           :else (get! [x x '[i64 0]]))))
+        inst (fn [x] (let [b (body x) v (vec b) i (.indexOf ^java.util.List v :md)]
+                       (if (or (dbg-record? b) (neg? i)) x
+                           (let [md (nth v (inc i))
+                                 md2 (vec (mapcat (fn [[k t]] [k (if (and (= k '!tbaa) (md-ref? t)) (up t) t)]) (partition 2 md)))]
+                             (if (= md md2) x
+                                 (let [b2 (apply list (assoc v (inc i) md2))] (if (= (first x) '=) (list '= (second x) b2) b2)))))))
+        out (mapv (fn [f] (if (= (first f) 'llvm/define)
+                            (let [v (vec f) bi (.indexOf ^java.util.List v :body)]
+                              (if (and (>= bi 0) (nth v (inc bi)))
+                                (apply list (assoc v (inc bi) (mapv (fn [blk] (apply list (concat (take 2 blk) (map inst (drop 2 blk))))) (nth v (inc bi)))))
+                                f))
+                            f))
+                  forms)]
+    (if (.isEmpty added) (if (= out forms) forms out) (into out added))))
+
 (defn hoist-inline-md
   "The forms with their inline metadata nodes (tuples and specialized nodes but DIExpression and DIArgList) numbered, as
   LLParser makes them nodes and the slot tracker numbers them: a node of the same contents and not distinct is one node,
@@ -4516,7 +4599,7 @@
   [forms ^String src spans ^String file]
   (let [[pe es renames es2] (run-phases forms)
         ;; past the parser, the Verifier sees the inline nodes as numbered ones
-        hoisted (when-not pe (try (hoist-inline-md forms) (catch Throwable _ forms)))
+        hoisted (when-not pe (try (upgrade-tbaa (unique-md (hoist-inline-md forms))) (catch Throwable _ forms)))
         [es renames es2 forms] (if (and hoisted (not (identical? hoisted forms)))
                                  (let [[_ es* r* e2*] (run-phases hoisted)] [es* r* e2* hoisted])
                                  [es renames es2 forms])
