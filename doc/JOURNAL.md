@@ -10594,3 +10594,21 @@ a driver: the old forms give the error indexes one short (t05396's "Bad error in
 itself cannot run on tonight's executable with new forms: the runtime's classes cannot be redefined (go/arbace/jrt/dyn.ae's
 DefineDynamic). jdk/forms: SimpleDateFormat's four statements; a sample, 0 of 155 java.base files and 1 of 59 likely ones
 (ArrayBlockingQueue), so about 5 to 15 files of java.base. The day reconverts.
+
+## 2026-11-17: n-java-net, the interp cell's 13 `:net` rows outside the stack's triage (round 52, overnight)
+
+Branch `n-java-net` from mac/n-review-c `6ff92621f`. The 13 rows run at interp on next's gate executable `e8e0d017243dca8a9f9f`
+(read on javac's tool `javac-8526ceb9d1ea3ff0bd68`); ten ran otherwise than recorded and are re-recorded alone (with
+test/reap/matrix.edn's Java eval classes). Causes and fixes, all jrt's (the next build carries them): DatagramChannelImpl's holder
+DatagramPackets reached DatagramPacket's fields through a private lookup's VarHandles (nil lookup in the Go build): a variant over
+public accessors DatagramPacket's new variant adds (4 rows); jrt's chanSockaddr wrote the IPv4 wildcard on an IPv6 socket as
+`::ffff:0.0.0.0`, which locks the address, so DatagramChannelImpl.disconnect's repair took macOS' branch: now `::`, as
+NET_InetAddressToSockaddr (1 row); AtomicInteger's and AtomicLong's updates and accumulations added, their functions four new
+stand-ins of java.util.function, the stand-ins, manifest and member tables regenerated on the frozen JVM (heap capped) (5 rows,
+java.net.http's Demand); InetAddress.isReachable as the JDK's TCP echo fallback (1 row); Socket.sendUrgentData over a new
+HostNet.sendUrgent0, MSG_OOB on the descriptor (1 row); t04983 (NetworkInterface's order, scopes and broadcasts, the host's own
+output) left deferred. Proved on jdk26u's JDK with the Java equivalents patched into java.base (loopback only) and by small Go
+programs over the printed Go (the wildcard's disconnect sequence, SendUrgent, the atomics' test with a negative control); no build
+tonight. Alternatives: teaching j2g private lookups (rejected: the variant pattern of F10b), `any` parameters for the atomics'
+functions (rejected: the generated tables name the classes), an ICMP echo (rejected: needs a raw socket). Details and the day's
+commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-net".

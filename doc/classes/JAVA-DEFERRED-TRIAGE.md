@@ -8264,3 +8264,84 @@ printf 't05396\n' > .tmp/nh.txt
 bin/java-check --levels read,interp,compiled --list .tmp/nh.txt --save .tmp/nh && bin/java-check --judge --partial --record .tmp/nh/results.tsv
 bin/reap --record && bin/crops-score --record
 ```
+
+## As built: n-java-net (write-ahead), 2026-11-17 (round 52, overnight)
+
+Branch `n-java-net` (from mac/n-review-c `6ff92621f`), under the night's rules (each process under 1 GiB, loopback only): the
+interp cell's 13 `:net` rows outside the stack's triage (n-java-defer's 145 left, "As built: n-java-defer"): t04935 t04967 t04983
+t04989 t05073 t05075 t05076 t05077 t05078 t05109 t05110 t05168 t05199. Run at interp on next's gate executable
+`e8e0d017243dca8a9f9f`, read on javac's tool `javac-8526ceb9d1ea3ff0bd68` (`bin/java-check --levels read,interp --list`, one at a time,
+each run under 0.6 GB). Ten ran otherwise than recorded (the world grew datagram channels and java.net.http since the record) and are
+re-recorded (`--judge --partial --record` of those ten alone; test/reap/matrix.edn's Java eval classes re-recorded: net 34 to 30,
+threads 11 to 15: t05075-t05078 now "jrt lacks java.util.concurrent.atomic...", the concurrency class's; t05109 added to `:net`'s
+`:tests`, its reason an ExecutionException that no pattern of `:net` matches). Their causes, and the fixes (all jrt's: they reach the record with the next build):
+
+- **DatagramChannelImpl$DatagramPackets** (t04935 t04989 t05109 t05199: ExceptionInInitializerError, a NullPointerException): the holder
+  sets a DatagramPacket's `length` and reads its `bufLength` through VarHandles of `MethodHandles.privateLookupIn(DatagramPacket.class,
+  MethodHandles.lookup())`; in a JDK class of the Go build `lookup()` is nil (J2G-SPEC §8.5) and findVarHandle is not in it. Fixed as
+  F10b fixed DatagramSocketAdaptor's holders: the variant `DatagramChannelImpl$DatagramPackets` (overlay/jdk/variants/DatagramChannelImpl.ae)
+  cuts the initializer and the two handles and calls `java.net.DatagramPacket/jrtSetLength` and `jrtBufLength`, public accessors the
+  new variant overlay/jdk/variants/DatagramPacket.ae adds. Proof on jdk26u's JDK, the same change as Java (DatagramPacket and
+  DatagramChannelImpl patched into java.base): AddressNotSet, Concurrent, AdaptorConcurrentIO and AdaptorCloseAndInterrupt status 0
+  patched and plain, their outputs equal but for ports and timing.
+- **The IPv4 wildcard on an IPv6 socket** (t05110: UnsupportedOperationException from NativeDispatcher.dup): jrt's `chanSockaddr`
+  (go/arbace/jrt/channels_linux.ae) wrote 0.0.0.0 on an AF_INET6 socket as `::ffff:0.0.0.0`, where NET_InetAddressToSockaddr writes `::`.
+  A socket bound to the mapped wildcard keeps its address locked: a disconnect after a connect leaves the connected address, the
+  local address is neither the bound one nor port 0, and DatagramChannelImpl.disconnect's repair takes macOS' branch (dup, jrt's
+  refusal) on its second disconnect (strace of the run: bind `::ffff:0.0.0.0`, the JDK's bind `::`). Now the IPv4 wildcard is `::`.
+  Proof, a small Go program (.tmp/nn/gdis in the worktree's scratch): ChangingAddress's sequence on an AF_INET6 socket, the old
+  conversion reaching macOS' branch in its second round, the new one the equal addresses. The local address of such a socket reads
+  `[::]` now, as the JDK's (it read 0.0.0.0).
+- **AtomicLong's and AtomicInteger's updates and accumulations** (t05075 t05076 t05077 t05078: "jrt lacks
+  java.util.concurrent.atomic.AtomicLong.getAndAccumulate"; t05073's timeout, the client's response never completed: java.net.http's
+  Demand.increase calls getAndAccumulate, SSLFlowDelegate AtomicInteger's getAndAccumulate and accumulateAndGet): jrt's hand-written
+  atomics (go/arbace/jrt/atomic.ae) had none of getAndUpdate, updateAndGet, getAndAccumulate, accumulateAndGet. Added on both, jdk26u's loop
+  (the function called again only when the value changed meanwhile, a null function a NullPointerException), their functions
+  java.util.function's IntUnaryOperator, IntBinaryOperator, LongUnaryOperator and LongBinaryOperator as four new stand-ins
+  (test/jrt/standins.ae; every stand-in is a root, so they are translated into every program: they were in the world already), the
+  stand-ins, manifest, its test and the member tables regenerated (`bin/jrt standins`, `bin/jrt manifest`'s two generators, on the
+  frozen JVM with its heap capped at 448 MB: only the new members and stand-ins change). Test `TestAtomicUpdates`
+  (go/arbace/jrt/concurrent_test.ae); proof tonight: the printed methods and the test compiled with stubs of jrt's types and run
+  (pass; the control, getAndAccumulate returning the next value, fails). AtomicReference's four are not added (no row needs them).
+- **InetAddress.isReachable** (t04967: "not in the Go build"): the variants of Inet4AddressImpl and Inet6AddressImpl now do the JDK's
+  fallback (tcp_ping4, tcp_ping6): a TCP connection to the echo port 7 within the timeout, from the interface's address when one is
+  given, reachable when it connects or is refused (`jrtTcpEcho`). Not the JDK's ICMP echo first, nor IP_TTL: a host that answers ICMP
+  but drops TCP's port 7 differs. Proof on jdk26u's JDK, the same change as Java: IsReachable status 0 patched and plain; 127.0.0.1, ::1,
+  localhost and 127.0.0.2, with and without `lo`, the same answers (loopback only).
+- **Socket.sendUrgentData** (t05168: "Urgent data not supported"): jrt's HostSocketImpl refused it. Now NioSocketImpl's sendUrgentData
+  over a new native `HostNet.sendUrgent0` (go/arbace/jrt/net.ae; `urgentHost`, an optional NetHost interface OSHost implements in
+  net_linux.ae: send(2) with MSG_OOB on the connection's descriptor; the box's host and TLS connections refuse with jdk26u's message).
+  The forms of HostNet and HostSocketImpl converted by `bin/repr-java read-jdk --check --no-javac --origins` on the two files with their
+  package (HEAD's sources so converted give the committed forms byte for byte). Proof, a small Go program: the printed SendUrgent on a
+  loopback connection, the receiver reading `"ab\xffcd"` with SO_OOBINLINE and the byte by recv(MSG_OOB) without it; a connection with
+  no descriptor refused. Whether the test passes needs the selector's handling of the urgent byte (jrt's Selector, untested here).
+- **t04983** NetworkInterface's parameters (left, its causes recorded): the JDK's natives list the interfaces and each one's addresses
+  in the reverse of their enumeration (IPv4 by ioctl, then /proc/net/if_inet6), give every IPv6 address the interface's scope and name
+  (`%eth0`, `%lo` on ::1; jrt only link-local ones, and by index: Inet6Address's variant keeps no NetworkInterface) and an IPv4
+  address the kernel's broadcast of the interface (SIOCGIFBRDADDR: `0.0.0.0` on this host's eth0; jrt computes the subnet's). Its
+  output is the host's own (the record is this host's), so the row stays deferred.
+
+Expected after the build: t04935 t04967 t05075 t05076 t05077 t05078 t05109 t05110 t05199 pass; t05073 t04989 likely (t04989's
+output is timing-dependent); t05168 possible. No arbace/ change: `bin/java-check --essential` with the checkout on ARBACE_PATH (a
+wrapper) 428 of 428, the controls failing as they must (no proof of the changes, which are the executable's; no regression).
+
+Decisions taken overnight (round 52): (1) the DatagramPackets holder through public accessors added by a variant (as F10b's holders;
+rather than teaching j2g privateLookupIn's handles); (2) the four functional interfaces as stand-ins (rather than `any` parameters
+asserted at the call: the member tables and the manifest name their classes); (3) isReachable by the JDK's TCP fallback alone (rather
+than an ICMP echo, which needs a raw or ping socket); (4) t04983 left deferred (its output is the host's). Keys: go/arbace/jrt,
+overlay/jdk and jdk/forms move `gate_key` and the runtime key; test/java/check-interp.edn and test/reap/matrix.edn the judging steps'.
+
+The day's commands (after `bin/arbace-go --gate-build`):
+
+```sh
+bin/jrt test --arch amd64 --package jrt -run 'TestAtomic|TestReflect|TestSocket|TestChannel|TestDatagrams|TestInterfaces|TestLookup|TestNoNetwork' -count=1
+printf 't04935\nt04967\nt04983\nt04989\nt05073\nt05075\nt05076\nt05077\nt05078\nt05109\nt05110\nt05168\nt05199\n' > .tmp/nnet.txt
+bin/java-check --levels interp --list .tmp/nnet.txt --save .tmp/nnet
+bin/java-check --judge --partial --record .tmp/nnet/results.tsv          # the rows that run differently
+# no regression among the passing networking rows (139 at interp):
+grep -E 'java/nio/channels/|java/net/(DatagramSocket|MulticastSocket|Socket/|InetAddress|DatagramPacket|PortUnreachable|NetworkInterface)' \
+  test/java/check-interp.edn | grep ':pass' | sed 's/^ *\["\(t[0-9]*\)".*/\1/' > .tmp/nnet-pass.txt
+bin/java-check --levels interp --list .tmp/nnet-pass.txt --save .tmp/nnet-pass && bin/java-check --judge --partial .tmp/nnet-pass/results.tsv
+bin/reap --record && bin/crops-score --record
+# then the night's --full: bin/jrt-convert verify (jdk/forms' two files), the compiled level's rows of the same tests
+```

@@ -379,6 +379,12 @@ build, **the stand-in files are deleted**, and the translated classes define the
 Their leafness may change in the bigger closed world; jrt's core uses only the constructors and
 the interfaces, so it is not affected.
 
+Since n-java-net (2026-11-17, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-net") the stand-ins include
+java.util.function's `IntUnaryOperator`, `IntBinaryOperator`, `LongUnaryOperator` and `LongBinaryOperator`, the functions of
+`AtomicInteger`'s and `AtomicLong`'s `getAndUpdate`, `updateAndGet`, `getAndAccumulate` and `accumulateAndGet` (java.net.http's
+`Demand` and `SSLFlowDelegate` call them): a hand-written method's parameter of a translated interface is a stand-in, so that the
+member tables and the manifest name its class, as `ThreadLocal.withInitial`'s `Supplier`.
+
 **`standin_character.ae`** gives `String` the parts of `Character` it needs, as unexported
 functions over Go's `unicode`: `charToUpper`, `charToLower`, `charToUpperEx`,
 `charToUpperArray`, `charIsWhitespace` and `isCased`. They are later rewritten to call the
