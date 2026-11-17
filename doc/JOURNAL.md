@@ -10331,3 +10331,29 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   alone. C++ read 5,309 / 243 / 943 to 5,357 / 243 / 895; crop completeness 91 to 92. Source: the standard's [expr.const] and
   gcc-15.2.0's g++.dg tests (the pinned tarball); no GCC code read. gate_key moves. Alternative: a separate constant evaluator for
   the checker (not taken: the code generator's folds share these semantics, and the checker's rules are gated by `checking?`).
+
+## 2026-11-17/18: n-cpp-concepts, C++'s concept diagnostics in the own front end (branch `n-cpp-concepts` from next 42bf8614b)
+
+- Merged h-cpp-consteval (d36d4e385, the same evaluator) and 336 round 2 (d2af54311, -fconcepts read as GCC); the journal's,
+  the survey's, scores.edn's and matrix.edn's conflicts resolved by keeping both entries and recording reap and crops-score again.
+- The concepts group of the read cell's :own-diag (76 files, test/cpp/own-diag-review.edn) taken rule by rule, R1-R16
+  (doc/cpp/CPP-SURVEY.md, "As built: n-cpp-concepts"): requirements' and atomic constraints' sure substitution failures,
+  constrained placeholders' deduced types, a type-constraint's type concept and a bare concept as a type in the grammar, class and
+  variable template-ids' constraints, partial specializations more constrained than the primary, atoms of type bool,
+  return-type-requirements, block-scope requires-clauses, inherited constructors, redeclarations' and out-of-line members'
+  constraints, void parameters of a requires-expression, `this` in members' constraints. In arbace/cpp/sema.ae and template.ae
+  (gated by `checking?`: the code generator unchanged), arbace/repr/cpp/parse.ae, diag.ae and types.ae. Source: the standard's
+  [temp.constr], [expr.prim.req], [temp.param], [dcl.spec.auto], [temp.names], [temp.spec.partial] and gcc-15.2.0's g++.dg tests
+  (the pinned tarball); no GCC code read.
+- 23 of the 76 to pass (5 to 28), every one of the 913 recorded own passes still passing and the dg control failing, read in nine
+  lists of about 100 (one process each, under 1 GiB: the night's rules); two more outside the 76 (concepts/diagnostic14.C,
+  cpp0x/inh-ctor15.C) from a first list of the related files, stopped at its first part (1.48 GB, over the night's limit). The 25
+  rows recorded alone in
+  test/cpp/check-dg-own-linux-amd64.edn, the review's `:own` following them. C++ read 5,362 / 328 / 805 to 5,385 / 328 / 782;
+  completeness 92 (0.9157 to 0.9166), without by design 93 (0.9325 to 0.9334).
+- Unit cases test/cpp/selftest/concepts/ (a rule each and a negative control), `bin/cppi selftest concepts-diag`, 0.92 GB.
+- Taken overnight (round 52): CP400 (a) (an abbreviated template and a template of the same constraints are two templates, GCC's
+  reading), CP401 (a) (an inheriting class's initialization judged when every inherited base is known), CP402 (a) (a member's
+  constraint unsatisfied with a doubt keeps the function in the checker). Alternatives: the standard's reading of CP400 (one
+  template; concepts/equiv.C's "not equivalent" is GCC's), and leaving CP323 (a)'s not-judged rule for every inheriting class.
+- gate_key and arbace_javac_key move (arbace/cpp and repr/cpp are embedded since W2); no runtime key.

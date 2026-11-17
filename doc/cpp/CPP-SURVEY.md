@@ -8512,3 +8512,75 @@ error at the first constrained declaration: a cheap first step for the concepts 
 - `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 328 / 858 to
   5,314 / 328 / 853; completeness 91 (0.9137 to 0.9139), without by design 93 (0.9303 to 0.9305). test/cpp/own-diag-review.edn's
   `:own` follows the record. Keys: `gate_key` and `arbace_javac_key` move (repr/cpp is embedded since W2).
+
+## As built: n-cpp-concepts (2026-11-17/18; branch `n-cpp-concepts` from next 42bf8614b with h-cpp-consteval d36d4e385 and 336 round 2 d2af54311 merged; night round 52, memory-free tier)
+
+The concepts group of the read cell's `:own-diag` (76 files, test/cpp/own-diag-review.edn, mac/336-cpp-own-diag) taken rule by rule in
+the own front end: arbace/cpp/sema.ae and arbace/cpp/template.ae (the code generator's Sema as a checker, every rule gated by
+`checking?`, so the code generator's behaviour is unchanged), arbace/repr/cpp/parse.ae (the grammar's rules, `soft-diag!`) and
+arbace/repr/cpp/diag.ae (the refusals' rules, `sema-rules`). Clean-room from the standard's [temp.constr], [expr.prim.req],
+[temp.param], [dcl.spec.auto], [temp.names], [temp.spec.partial] and the tests' dg-error lines (gcc-15.2.0's g++.dg, the pinned
+tarball); no GCC code read. Each rule's error is reported only where the program's own operation decides it; anything the slice
+cannot analyze still judges nothing (a doubt).
+
+| rule | where | files moved to pass |
+|---|---|---|
+| R1-R3: a requirement or atomic constraint whose substitution fails by the program's own error is false with no doubt ([temp.constr.atomic]/3, [expr.prim.req.simple]/1, [expr.prim.req.type]/1): the errors the checker reports at a statement (no member, an inaccessible or deleted function, no viable or an ambiguous call, no operator, an undeclared name, ...: sema's `sure-failure?`), a qualified name a complete class without bases does not declare, a private member type named in a concept, a nested-name-specifier naming a type that is no class | sema.ae: `sure-failure?`, constraint-satisfied?, RequiresExpr; name-expr | concepts/expression2.C, expression3.C, nested-diagnostics-1.C, nested-diagnostics-1-truncated.C, nested-diagnostics-2.C, template-parm11.C (6) |
+| R4: the grammar's: a type-constraint's concept a type concept ("does not constrain a type", [temp.concept]/7); a concept's name where a type stands wants `auto` ("expected 'auto' or 'decltype(auto)'", the declaration kept as the placeholder's: no decline); `template<C auto N>` read as a non-type parameter | parse.ae | none whole: cpp2a/concepts-p1141.C 24 to 1 line missed, template-parm2/3/4.C, generic-fn-err.C their declaration lines |
+| R5: a constrained placeholder's deduced type satisfies its constraint ([dcl.type.auto.deduct]/2: variables, structured bindings, return types, a body with no return's void), "placeholder constraints not satisfied" at the declaration | sema.ae: resolve-type-form's `constrained`, placeholder-check!, deduce-auto; types.ae keeps the constraint's text | concepts/abbrev5.C, abbrev9.C, cpp2a/concepts-lambda18.C, concepts-placeholder10.C (4) |
+| R6: an abbreviated template and a template of the same constraints are two templates (CP400 (a)) | template.ae: constraint-spelling | concepts/equiv.C, equiv2.C (2) |
+| R7: a constrained class or variable template's simple-template-id satisfies its constraints ([temp.names]/7), "template constraint failure" (a sure drop in a deduction); a constrained pack's arguments each its concept | template.ae: class-constraints-check!, type-constraints-satisfied? | concepts/fn5.C, var-templ1.C (2) |
+| R8: a partial specialization of the primary's own arguments is more constrained than the primary ([temp.spec.partial.general]/9.2), a constrained pack's fold an atom of its own | template.ae: identity-partial-check! | concepts/class6.C (with R7), variadic4.C (2) |
+| R9: an atomic constraint has type bool ([temp.constr.atomic]/3: class type, or a call's non-bool result) | sema.ae: atom-types-check | cpp2a/concepts-requires2.C (1) |
+| R10: a return-type-requirement is `-> type-constraint` ([expr.prim.req.compound]/1) | parse.ae | concepts/pr71385.C (1) |
+| R11: a block-scope function declaration takes no requires-clause, in a template too ([dcl.decl.general]/4) | parse.ae | concepts/local-extern.C (1) |
+| R12: an inherited constructor whose constraints are not satisfied is no candidate, the initialization judged when every inherited base is known (CP401 (a)) | sema.ae: ctor-init | concepts/inherit-ctor1.C (1) |
+| R13: a class template's redeclaration has the same constraints ([temp.over.link]/7) | template.ae: class-redecl-constraints! | none whole: cpp2a/concepts-class.C to 1 line missed (114) |
+| R14: an out-of-line member of a class template repeats its template-head's constraints ([temp.mem.func]/1) | template.ae: outer-head, ool-head-check! | cpp2a/concepts-class5.C (1) |
+| R15: a requires-expression's parameter of type void fails its substitution, "invalid parameter type" | sema.ae: RequiresExpr | cpp2a/concepts-pr66844.C (1) |
+| R16: a member's trailing requires-clause (and a member template's) names the class's members through `this` ([expr.prim.this]/2); one not satisfied with a doubt keeps the function (CP402 (a)) | sema.ae: *constraint-this*, declare-fn!, trailing-ok?; template.ae: instantiate-fn | cpp2a/concepts-this1.C (1) |
+
+Unit cases, one a rule (R1-R16) and a negative control (R1's expectations moved, which must fail): test/cpp/selftest/concepts/*.C,
+run by `bin/cppi selftest concepts-diag` (test/cpp/selftest/concepts-diag.sh, .ae: each case's own read judged by the dg verdict
+against its dg-error lines), one process, 0.92 GB peak.
+
+Not done (the rest of the 76, by what they need): GCC's satisfaction explanations as errors at -fconcepts-diagnostics-depth=2/3
+(diagnostic1.C, diagnostic10.C, concepts-iconv1.C, concepts-pr97093.C); checks in templates' definitions before instantiation
+(fn2.C, fn10.C, concepts-memtmpl6.C, concepts-placeholder9.C); a constrained placeholder's non-type template parameter (the
+argument's type is not kept: p1141.C's f5<0>, concepts-placeholder3.C's i<int, true>); CWG 2789's using-declarations
+(concepts-memfun4.C); pack expansions into a concept's non-pack parameters (dr1430.C, concepts-dr1430.C); access in atomic
+constraints (concepts-access2.C), constant evaluation of atoms (concepts-pr98644.C, pr67595.C), lambdas (concepts-lambda2.C),
+template template parameters' constraints (concepts-ttp6.C, template-parm12.C), friends (concepts-friend2.C, concepts-friend6.C),
+the rest of template-parm2/3/4.C (the uses of an erroneous parameter).
+
+### Decided (taken overnight, round 52)
+
+- **CP400 (a): an abbreviated template and a template of the same constraints are two templates** in the checker (GCC 15's reading
+  of [temp.over.link]/6, concepts/equiv.C's "functionally equivalent but not equivalent"); (b) the code generator's spelling, one
+  template, kept for the code generator (its headers' redeclarations never mix the two forms).
+- **CP401 (a): an initialization of a class inheriting constructors is judged** when every class its using-declarations name is a
+  direct, non-virtual base that inherits none itself (the candidates then all known); else not judged, as CP323 (a).
+- **CP402 (a): a member's trailing requires-clause that is not satisfied with a doubt keeps the function in the checker** (declared,
+  its constraint deferred to overload resolution, where a doubt keeps it viable); before, it was dropped and its calls said "no
+  member" (cpp2a/concepts-this1.C).
+
+### Checked (one process at a time beside the night's gate, each under 1 GiB: busybox `time -v` peaks 0.87-1.04 GB)
+
+- The 76 files' own read (the dg check's lists made for the list alone, `.tmp/tools/lists.ae` of the branch's scratch: the corpus'
+  18,066 texts are not read, 0.9 GB against lists' 2.5 GB; then `arbace.repr.cpp.dg read` and `own`, REPR_CPP_FRONT=native,
+  REPR_CPP_THREADS=1, GOMEMLIMIT=800MiB): own passes 5 to 28.
+- The 913 recorded own passes in nine lists of about 100, each with the control's two files: 913 of 913 still pass, the control
+  `_control/dg/dr2082-vs-dr1423` failing as it must in each list.
+- Beyond the 76, a first list of 67 of the 269 dg-error files outside them that name `concept`, `requires` or a using-declaration
+  (not the recorded passes): two more own passes, concepts/diagnostic14.C (R1) and cpp0x/inh-ctor15.C (R12), recorded too (both
+  already passing in clang's record, so the read cell's count does not move); five files the main host's record has as timeouts
+  read within the cap here, no new extra error from these rules. The run was stopped there: its read peaked 1.48 GB (header-heavy
+  files), over the night's 1 GiB, so the other 202 are left for the day.
+- Recorded the 25 rows alone (test/cpp/check-dg-own-linux-amd64.edn), the review's `:own`; `bin/reap --record`, `bin/crops-score
+  --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,362 / 328 / 805 to 5,385 / 328 / 782; completeness 92
+  (0.9157 to 0.9166), without by design 93 (0.9325 to 0.9334).
+- Not run here (memory-free tier): the code generator's users of the changed code (`cpp-essential`, `cpp-check-essential`), every
+  change gated by `checking?` but the parser's (R4's placeholder reading of `template<C auto N>` and a bare concept, R10, R11:
+  diagnostics and recoveries where the parser had declined); the whole dg-error part's own read.
+- Keys: `gate_key` and `arbace_javac_key` move (arbace/cpp, repr/cpp embedded since W2); the runtime key does not.
+
