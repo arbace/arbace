@@ -10532,3 +10532,19 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   alone); not (b) a larger `MAX_DEPTH` (the runtime's key, every build) or (c) repr/rust embedded and compiled (every key).
 - **Found.** `roundtrip --pretty --only REGEX`'s print step matches the regex against the forms' paths (`rs/core/hint.ae`), so it
   prints nothing for a regex of source paths (pre-existing; the pretty trees checked by hand instead).
+
+## 2026-11-17: Rust's scores read; C5's judge stated among the facts; rustc 1.100.0's breakage (branch `n-rust-mat`, round 52)
+
+- `bin/crops-score --judge --strict` on `next` `42bf8614b`: Rust's maturity 96 is the `:cells` item alone (the AOT cell has no
+  record); independence 80 is eval and AOT at 0.5 (RFP53 (a): 0 of 5 cases own in C1-C7; C5, C7 own, C1 buildable own since RIND5's
+  swizzle, C2, C3, C4, C6 rustc's). Nothing light moves a score: the AOT record (task 322) moves completeness (75 to (3 + p) / 4,
+  100 if its five pass) and maturity (to 100); independence waits for RIND stage 5.
+- `test/crops/independence.edn`: `rsi-shim-essential` among eval's and AOT's `:steps`, C5's, C7's and C1's code in eval's
+  `:evidence`, C1's state in `:why` (no score moves; the record unchanged). Alternatives not taken: RIND10 (a)'s core-attrs lines
+  (an unproven 35-minute, 2.3 GB rebuild in `rust-front-essential`), RIND8 (a) (an accounting choice, the user's).
+- The host's rustc is 1.100.0 since 2026-11-15 (pin 1.99.1): `bin/repr-rust pins check` refuses, so `bin/gate --pins` and the clean
+  run's first step fail, and the oracle tier's five `:rustc` steps run on a new identity and refuse; no essential or `--full` step
+  needs rustc. RIND11 proposed (doc/rust/FRONTEND-SURVEY.md, "As built: Rust's scores read ..."): (a) the pinned rustc the oracle's,
+  another the `:rustc` host absent, then a pinned 1.99.1 outside apk for the oracle tier (a fetch); (b) re-pin to 1.100.0 (weeks).
+- Checks (each under 1 GiB): `bin/crops-score --self-test` ok, `--judge --strict` exit 0 (972 MB), `bin/reap` 0 problems,
+  `bin/records-check` 0 problems.
