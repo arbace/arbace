@@ -1644,6 +1644,10 @@ hand-written `Date`; the other classes join the world around it.
   zone offsets the caller set kept), `add` of a day field and `roll` of an hour follow a zone's
   offset changes as jdk26u's, and Go's `Date.UTC` wraps its year as Java's int and compares the
   cutover's sides as day counts; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-dates".)
+  (Since n-java-calb, 2026-11-18: `Calendar.Builder` is jdk26u's, building the types "gregory" and
+  "iso8601" from an empty `GregorianCalendar`; any other type, Buddhist and Japanese among them,
+  throws the JDK's IllegalArgumentException for an unknown type; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+  "As built: n-java-calb".)
 - `String.format`'s `%t` conversions now work over a `Calendar`, a `Date` or a `long` (the
   translated `Formatter`'s `printDateTime` reaches `Calendar.getInstance`, `get`,
   `getTimeZone`), except those that need `DateFormatSymbols` (month and day names, AM/PM:

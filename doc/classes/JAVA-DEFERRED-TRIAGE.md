@@ -8112,3 +8112,46 @@ bin/java-check --judge --partial --record .tmp/njd/results.tsv      # the rows t
 bin/reap --record && bin/crops-score --record
 # the compiled level's rows of the same tests at the night's compiled shard; :jrt-dates' :tests then the rows left
 ```
+
+## As built: n-java-calb (write-ahead), 2026-11-18 (round 52, overnight)
+
+Branch `n-java-calb` (from mac/n-java-dates `667665e41`), under the night's rules (each process under 1 GiB): the two rows of
+`java.util.Calendar$Builder` (t05460 Bug8176847, t05461 Calendar/Builder/BuilderTest; `:util-classes` at interp, refused at compiled).
+jrt's own Calendar (overlay/jdk/java.base/java/util/Calendar.java) takes jdk26u's `Calendar.Builder` (openjdk/jdk26u `baf63fb`,
+src/java.base/share/classes/java/util/Calendar.java, with `defaultTimeZone(Locale)`, the "tz" extension's zone through jrt's
+`TimeZoneNameUtility.convertLDMLShortID`), and GregorianCalendar the JDK's empty instance (`GregorianCalendar(TimeZone, Locale, boolean)`:
+no time, no field set). The adaptations: `build`'s switch builds "gregory" and "iso8601" only, any other type (the JDK's "buddhist" and
+"japanese", F18's) the JDK's `IllegalArgumentException("unknown calendar type: " + type)`, which `setCalendarType` already throws since
+`getAvailableCalendarTypes` is `{gregory}`; th_TH's default type stays the JDK's "buddhist" (so refused); the locale's country and
+language compared by `equals` (jdk26u compares the interned strings by identity). The forms by `bin/repr-java read-jdk --check
+--no-javac --origins` on the two files (2 converted, 2 native, 0 fallbacks, 0.9 GB).
+
+Proof on the JVM (jrt's two classes compiled into jdk26u's JDK with `--patch-module java.base`, HEAD's and the branch's):
+- t05460 Bug8176847: status 1 (NoSuchMethodError, the JDK's Builder over jrt's Calendar) → 0.
+- t05461 BuilderTest: fails at its Thai Buddhist case (`unknown calendar type: buddhist`, uncaught), as F18 leaves it; the test with its
+  Buddhist and Japanese cases cut (and its `iso8601`/`japanese` override as `iso8601`/`gregory`) passes: the instant, zones, `set` and
+  `setFields`, the field resolution, `setDate`/`setTimeOfDay`, ISO 8601's week date, the 1970 default, the empty build and the
+  exceptions all equal the JDK's.
+- The 99 mains of n-java-dates' regression check (java/util/Calendar, java/text/Format/DateFormat, java/util/Date, java/util/TimeZone,
+  java/util/Formatter, java/net/CookieHandler, java/net/HttpCookie): 1 fail → pass (Bug8176847), 0 pass → fail. (HEAD's Bug8141243
+  hit the harness's 60 s cap under the night gate's load; run again alone it passes on both, 83 s and 59 s.)
+
+`bin/java-check --essential` on next's gate executable (`e8e0d017243dca8a9f9f`) with the checkout on ARBACE_PATH: 428 of 428, the
+controls c00001 c00003 c00004 fail as they must (the executable's jrt: no proof of the change). test/java/divergences.edn: `:jrt-dates`'
+`:match` takes `unknown calendar type: (buddhist|japanese)` (t05461's reason after the build), comments in `:util-classes` and
+`:jrt-dates`; no row re-recorded. `bin/reap` 0 problems; `bin/crops-score --judge --strict` passes.
+
+Decisions taken overnight (round 52): transcribe jdk26u's Builder and refuse the non-Gregorian types with its unknown-type exception
+(rather than map them to Gregorian, which would build a calendar of other dates than the JDK's); keep th_TH's default "buddhist" (refused,
+as the type asked for explicitly) rather than default it to "gregory" as jrt's `getInstance(th_TH)` does. Keys: overlay/jdk and jdk/forms
+move `gate_key` and the runtime key; no arbace/ change.
+
+The day's commands (after `bin/arbace-go --gate-build`; then `bin/jrt-convert verify` in the night's `--full`):
+
+```sh
+printf 't05460\nt05461\n' > .tmp/ncb.txt
+bin/java-check --levels interp --list .tmp/ncb.txt --save .tmp/ncb
+bin/java-check --judge --partial --record .tmp/ncb/results.tsv   # t05460 pass; t05461 to :jrt-dates (Buddhist)
+bin/reap --record && bin/crops-score --record
+# the compiled level's rows at the night's compiled shard (shard2: t05460; t05461 stays refused on its Locale field initializer)
+```

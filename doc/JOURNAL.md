@@ -10543,3 +10543,18 @@ statement that throws; DECISION, recommended: hoist before in a try's body), t08
 (mac/n-clojure-cdr `8a3d28662`: es, fr, it, sv's zone names), t05398 and t05462 need the Japanese and Buddhist calendars (F18).
 Decisions taken overnight (round 52): transcribe the field-state machinery rather than replace jrt's calendar by jdk26u's; fix
 Date.UTC in Go in place. Keys: gate_key and the runtime key (overlay/jdk, jdk/forms, go/arbace/jrt). Nothing built.
+
+## 2026-11-18: n-java-calb, jrt's Calendar.Builder (round 52, overnight)
+
+Branch `n-java-calb` from mac/n-java-dates `667665e41`, under the night's rules (each process under 1 GiB). t05460 (Bug8176847) and
+t05461 (Calendar/Builder/BuilderTest) failed on `java.util.Calendar$Builder`, missing from jrt's own Calendar. overlay/jdk/java.base/
+java/util/Calendar.java takes jdk26u's `Calendar.Builder` and `defaultTimeZone` (openjdk/jdk26u `baf63fb`,
+src/java.base/share/classes/java/util/Calendar.java, GPL 2 with the Classpath Exception, already in LICENSE.md), GregorianCalendar.java
+the JDK's empty instance; `build` builds "gregory" and "iso8601", any other type the JDK's unknown-type IllegalArgumentException (Buddhist
+and Japanese stay F18's). Forms by `bin/repr-java read-jdk --check --no-javac --origins` on the two files. Proof on jdk26u's JDK with
+the two classes patched in: Bug8176847 1 → 0; BuilderTest fails only at its Buddhist case (its Gregorian and ISO cases and exceptions
+pass, cut to them); the 99 date mains 1 fail → pass, 0 pass → fail; `bin/java-check --essential` with the checkout on ARBACE_PATH
+428 of 428, controls failing; `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes. `:jrt-dates` matches t05461's new reason.
+Decisions taken overnight (round 52): the JDK's exception for non-Gregorian types rather than a Gregorian stand-in; th_TH's default stays
+"buddhist". Keys: gate_key and the runtime key (overlay/jdk, jdk/forms). Nothing built (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-calb").
