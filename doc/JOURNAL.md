@@ -9751,3 +9751,16 @@ AOT; 268 programs at eval move only those 41, the controls differ. C eval 2,214 
 Alternatives: vectors as a node kind of their own in go/arbace/ci (faster, but a back-end and cf2g change for no case that needs
 speed), left; the `_mm_*` functions of Arbace's headers as builtins, left (no check reaches them: benchmarksgame's SSE programs are
 recorded faulting without their argument; mandelbrot.c, -3, -4 run by hand with 200 print mandelbrot-2.c's image).
+
+## 2026-11-17: GNU nested functions in ci (CS321 (a), branch `h-c-run`)
+
+Built in `arbace/c/build.ae` (doc/C23-SURVEY.md, "As built: GNU nested functions"): a nested function a code command of its own
+(named PARENT$NAME$N, printed after its parent's, each its own line of the link so cf2g's prebuilt items keep their lines), its
+static chain a static word per nested function that a direct call and taking its address set to the parent's frame base and the
+function copies into its frame at entry, the parent's locals its nested functions name kept in frame memory (a VLA's address
+mirrored), a non-local goto a longjmp to a jmp_buf the label's function sets at entry (its body an sjbody), `&&label` of an
+enclosing label, a function type's variably modified result; in `arbace/c/cf2g.ae` a computed goto's dispatch inside a branch.
+The 31 programs pass at eval and AOT; 296 programs at eval move only those; essential AOT 0 failing. C eval 2,245 / 34 / 0, AOT
+2,253 / 26 / 0 (completeness 98). Alternatives: trampolines per activation (closures in go/arbace/ci and cf2g: an address that
+carries its chain) for an address taken in one activation and called under another, left (no case needs it; a back-end change);
+lambda lifting in C forms before the checker, rejected (the captured variables' places need the builder's frames anyway).

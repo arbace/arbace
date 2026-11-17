@@ -1303,7 +1303,7 @@ CS3 (a): what the reader reads and the printer prints, but ci and cf2g refuse by
 
 | construct | why out |
 |---|---|
-| ~~GNU nested functions (`c/defn` in a block)~~ | deferred since 2026-11-17 (CS321 (a), the user): a gap ci builds (a static chain, closures), the class `nested-fn` |
+| ~~GNU nested functions (`c/defn` in a block)~~ | in since 2026-11-17 (CS321 (a), the user; doc/C23-SURVEY.md, "As built: GNU nested functions"): a command of their own, a static chain through a global per nested function, the enclosing locals in frame memory, a non-local goto as a longjmp to a jmp_buf set at the enclosing function's entry |
 | ~~`__real__`, `__imag__` (`real`, `imag`)~~ | in since 2026-11-17 (h-c-run, doc/C23-SURVEY.md, "As built: h-c-run"): a complex operand's part, an lvalue of a complex object's |
 | inline assembly (`c/asm` in a function, extended `asm`) with a template | the target's instructions; musl's are natives in `crt`. An empty template is in (h-c-run, 2026-11-17): its operands parsed from the text, a tied output given its input's value converted, the operands' side effects evaluated |
 | ~~GNU vector types (`vector_size`, `__builtin_shufflevector`, `__builtin_convertvector`)~~ | in since 2026-11-17 (CS320 (a), the user; doc/C23-SURVEY.md, "As built: GNU vector types"): lanes in memory, element-wise operators, comparisons, subscripts, broadcast, the shuffles, `convertvector`, SSE2's `cmp*pd` and `movmskp[ds]`; the `_mm_*` functions of Arbace's headers still declared only |
