@@ -1,7 +1,8 @@
 (ns repr.llvm.expect-test
   "The own verdicts' unit tests for LLS38 (the module flags, llvm.ident), LLS39 (visitCallBase's immarg check and
   visitIntrinsicCall's cases; AutoUpgrade's ctlz over a non-integer), LLS40 (the debug info's scopes and fields) and LLS42
-  (AutoUpgrade's memory intrinsics with an alignment, the declaration visited before its calls): each case a small module, the kind's context as
+  (AutoUpgrade's memory intrinsics with an alignment, the declaration visited before its calls) and round 52 (a getelementptr's flags in
+  StripDebugInfo's walk; ex-type's LLParser errors before the Verifier's unknowns, null and globals as scalars): each case a small module, the kind's context as
   arbace.repr.llvm.mutate attaches it, the verdict and the message fragment arbace.repr.llvm.expect must give (LLS43 (a): the fragments' sizes; the texts of
   llvm-project 23.1.5's Verifier.cpp, Module.cpp and AutoUpgrade.cpp). The negative controls cross one case's verdict with
   another's expectation by the same judge (verdict equal, the fragment in the message): each must fail.
@@ -83,6 +84,28 @@
        "!23 = distinct !DIGlobalVariable(name: \"h\", scope: !0, file: !1, line: 1, type: !24, isLocal: false, isDefinition: true)\n"
        "!24 = !DIBasicType(name: \"int\", size: 32, encoding: DW_ATE_signed)\n"))
 
+(defn- gep-module
+  "Round 52: loop-module's f with a getelementptr whose flags (`inbounds nuw`) come before its type and a !dbg after its
+  operands: StripDebugInfo's walk reads that instruction's attachments (the expectation threw on it before)."
+  []
+  (str/replace (loop-module false) "  br label %l\nl:" "  %q = getelementptr inbounds nuw i8, ptr @h, i64 0, !dbg !5\n  br label %l\nl:"))
+
+(def ^:private type-load-text
+  "Round 52: ex-type's load with an attachment: the load's type changed to i64 (the mutant), its use reads i32."
+  "define i32 @f(ptr %p) {\n  %a = load i64, ptr %p, align 4, !tbaa !0\n  %b = add i32 %a, 1\n  ret i32 %b\n}\n!0 = !{!\"x\"}\n")
+
+(def ^:private type-load-alone-text
+  "Round 52: the same load with no use: no LLParser error, the attachment's check the Verifier's (left to opt)."
+  "define void @f(ptr %p) {\n  %a = load i64, ptr %p, align 4, !tbaa !0\n  ret void\n}\n!0 = !{!\"x\"}\n")
+
+(defn- first-inst
+  "The first definition's index and the first instruction of `text`'s first definition (ex-type's :orig)."
+  [text]
+  (let [forms (vec (rd/read-module text))
+        fi (first (keep-indexed (fn [i f] (when (= 'llvm/define (first f)) i)) forms))
+        f (vec (nth forms fi)) blocks (nth f (inc (.indexOf ^java.util.List f :body)))]
+    (nth (vec (first blocks)) 2)))
+
 (defn- md-index [forms id] (first (keep-indexed (fn [i f] (when (and (= 'llvm/meta (first f)) (= (symbol id) (second f))) i)) forms)))
 
 (defn- with-field
@@ -157,6 +180,16 @@
      ["frag-artificial" :di-retarget frag-module (fn [forms] (with-field forms "!11" "type" "!30")) :valid nil]
      ["frag-global-first" :di-retarget frag-module (fn [forms] (with-field forms "!7" "baseType" "!30")) :debug "fragment covers entire variable"]
      ["frag-record-var" :di-record frag-module (fn [forms] (with-record-var forms "!12")) :debug "fragment covers entire variable"]
+     ;; round 52: a getelementptr's flags before its type (StripDebugInfo's walk); ex-type's Verifier-level unknowns after LLParser's
+     ;; errors, and the constants LLParser converts (null, a global's name) to a scalar type
+     ["retarget-gv-file-gep-nuw" :di-retarget (gep-module) (fn [forms] (with-field forms "!23" "file" "!5")) :debug "invalid file"]
+     ["type-load-md-use" :type type-load-text (fn [forms] {:fi 0 :bi 0 :ii 0}) :invalid "'%a' defined with type 'i64' but expected 'i32'"]
+     ["type-load-md-alone" :type type-load-alone-text (fn [forms] {:fi 0 :bi 0 :ii 0}) :unknown nil]
+     ["type-ret-null" :type "define i64 @f() {\n  ret i64 null\n}\n" (fn [forms] {:fi 0 :bi 0 :ii 0}) :invalid "null must be a pointer type"]
+     ["type-ret-int" :type "define i64 @f() {\n  ret i64 0\n}\n" (fn [forms] {:fi 0 :bi 0 :ii 0}) :valid nil]
+     ["type-call-global" :type "@x = global i32 0\ndeclare void @g(i64)\ndefine void @f() {\n  call void @g(i64 @x)\n  ret void\n}\n"
+      (fn [forms] {:fi 2 :bi 0 :ii 0 :orig (first-inst "@x = global i32 0\ndeclare void @g(ptr)\ndefine void @f() {\n  call void @g(ptr @x)\n  ret void\n}\n")})
+      :invalid "global variable reference must have pointer type"]
      ;; LLS42 (a): AutoUpgrade's memory intrinsics with an alignment and the declaration visited before its calls
      ["decl-mem5" :intr-decl
       "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg, i32)\ndefine void @f(ptr %p, ptr %q) {\n  call void @llvm.memcpy.p0.p0.i64(ptr %p, ptr %q, i64 4, i1 false)\n  ret void\n}\n"
@@ -177,7 +210,7 @@
    ["arg-memset-size" "arg-memset-immarg"] ["arg-lifetime" "arg-va-start"] ["rename-ctlz-ptr" "rename-fpclass-i1-mask"]
    ["retarget-derived-base" "retarget-set-base"] ["retarget-var-scope-file" "retarget-var-scope-other"]
    ["decl-mem5" "decl-mem5-call-type"] ["decl-before-calls-sig" "decl-before-calls-attr"]
-   ["retarget-gv-file-loop" "retarget-gv-file-kept"] ["frag-var-type-small" "frag-var-type-equal"] ["frag-var-type-big" "frag-global-first"]])
+   ["retarget-gv-file-loop" "retarget-gv-file-kept"] ["type-load-md-alone" "type-load-md-use"] ["type-ret-int" "type-ret-null"] ["frag-var-type-small" "frag-var-type-equal"] ["frag-var-type-big" "frag-global-first"]])
 
 (defn- judge [e verdict frag]
   (and (= (:verdict e) verdict) (or (nil? frag) (str/includes? (str (:msg e)) frag))))
