@@ -25,19 +25,41 @@
 
 (defn- msg [^Throwable e] (str/replace (str (.getName (class e)) ": " (ex-message e)) #"\s+" " "))
 
+(def ^:dynamic *inst*
+  "HF10-P63 (a): the GHC installation a CPP module is preprocessed with, a delay of [sysroot installation]
+  (arbace.repr.haskell.driver/installation of -main's --libdir, read under its --sysroot: the derived tree's, as repr/haskell's
+  native reads take it), or nil: a CPP module read as it stands, as before"
+  nil)
+
+(defn- cpp-text
+  "HF10-P63 (a): a module's text as GHC's driver preprocesses it when its flags or header pragmas turn CPP on
+  (arbace.repr.haskell.native/preprocess: OPTIONS_GHC among CPP's flags, unlit first for a literate module; GHC's doCpp's
+  arguments, -D, -U, -I and -optP of the flags, ghcversion.h's __GLASGOW_HASKELL__, the platform's macros, MIN_VERSION_pkg of
+  the units in scope), the file named REL as GHC's command line names it, relative to the program's directory DIR: the
+  preprocessing ({:text :cpp ...}) or nil (no installation, or no CPP)"
+  [dir rel flags]
+  (when-let [d *inst*]
+    (let [[sysroot inst] @d
+          pre (binding [cpp/*sysroot* sysroot cpp/*cwd* dir] (native/preprocess inst flags rel))]
+      (when (:cpp pre) pre))))
+
 (defn- read-module
-  "One module's file F (a File; nm the name the reader is given) read natively into DUMP (a path): nil, or [:read message]"
-  [^File f nm flags dump]
+  "One module's file F (a File; nm the name the reader is given; DIR and REL the program's directory and the file's path
+  relative to it, as GHC's command line names it) read natively into DUMP (a path): nil, or [:read message]"
+  [^File f nm flags dump & [dir rel]]
   (try (let [;; a literate module (.lhs) is unlit's output, as GHC's driver runs unlit before the parse
              ;; (arbace.repr.haskell.driver/preprocess, the file named as GHC's command line names it,
-             ;; its directory the cwd; the plan's programs need no CPP). Read as plain text its code is
-             ;; all comments, the module empty and main missing (gate B1's sixteen nofib programs:
-             ;; "no binding of main::Main/main")
+             ;; its directory the cwd). Read as plain text its code is all comments, the module empty and main
+             ;; missing (gate B1's sixteen nofib programs: "no binding of main::Main/main"). A CPP module (HF10-P63 (a))
+             ;; is the preprocessor's output (cpp-text), its line markers naming REL
              lit (drv/literate? nm)
-             text (if lit (:text (binding [cpp/*cwd* (.getParent (.getAbsoluteFile f))] (drv/preprocess nil flags (.getName f) false))) (slurp f))
+             pre (cpp-text (or dir (.getParent (.getAbsoluteFile f))) (or rel (.getName f)) flags)
+             text (cond pre (:text pre)
+                        lit (:text (binding [cpp/*cwd* (.getParent (.getAbsoluteFile f))] (drv/preprocess nil flags (.getName f) false)))
+                        :else (slurp f))
              r (native/read-text text nm flags)
-             cfg (native/config flags (if lit (java.nio.file.Files/readAllBytes (.toPath f)) (.getBytes ^String text "UTF-8"))
-                                :pre {:unlit lit})]
+             cfg (native/config flags (if (or lit pre) (java.nio.file.Files/readAllBytes (.toPath f)) (.getBytes ^String text "UTF-8"))
+                                :pre (if pre (select-keys pre [:cpp :unlit]) {:unlit lit}))]
          (spit dump (str (str/join "\n" (map pr-str (native/dump-forms r cfg))) "\n"))
          nil)
        (catch Throwable e [:read (msg e)])))
@@ -153,12 +175,12 @@
         pool (str w "/pool")]
     (.mkdirs (File. ^String nd))
     (let [main-dump (str nd "/" nm ".edn")
-          read-ok (read-module f nm flags main-dump)]
+          read-ok (read-module f nm flags main-dump dir nm)]
       (or read-ok
           (let [mo (module-order (into [dir] search) main-dump
                                  (fn [^File lf rel]
                                    (let [d (str nd "/" (str/replace (str/replace rel #"^[./]+" "") "/" ".") ".edn")]
-                                     (or (read-module lf (.getName lf) flags d) d))))]
+                                     (or (read-module lf (.getName lf) flags d dir rel) d))))]
             (if (:stop mo)
               (:stop mo)
               (let [own (butlast (:order mo))
@@ -178,7 +200,7 @@
                   (finally (swap! tostg/lib-data #(apply dissoc % @locals)))))))))))
 
 (defn -main
-  "build --ifaces DIR,... --libs DIR,... -o OUT [--flags \"-XHaskell2010 ...\"] [--plan FILE] FILE.hs[@NAME]...: each program
+  "build --ifaces DIR,... --libs DIR,... [--libdir DIR [--sysroot DIR]] -o OUT [--flags \"-XHaskell2010 ...\"] [--plan FILE] FILE.hs[@NAME]...: each program
   through the front end into OUT/stg/NAME (default the file's name), one line a program: NAME ok|STAGE MESSAGE; --plan's
   lines FILE.hs[@NAME] TAB FLAGS, each program with its own flags"
   [& args]
@@ -187,7 +209,12 @@
         ifaces (vec (remove empty? (str/split (or (get opts "--ifaces") "") #",")))
         units (tostg/units-of (remove empty? (str/split (or (get opts "--libs") "") #",")))
         flags (vec (remove empty? (str/split (or (get opts "--flags") "-XHaskell2010") #"\s+")))
-        out (get opts "-o" ".tmp/repr-haskell/front")]
+        out (get opts "-o" ".tmp/repr-haskell/front")
+        ;; HF10-P63 (a): --libdir DIR [--sysroot DIR], the installation a CPP module is preprocessed with (read once, when
+        ;; a module needs it)
+        inst (when-let [ld (get opts "--libdir")]
+               (let [sr (get opts "--sysroot")]
+                 (delay [sr (binding [cpp/*sysroot* sr] (drv/installation ld))])))]
     (case verb
       "build" (do (doseq [[f flags] (concat (for [f pos] [f flags])
                                            ;; --plan FILE (bin/hsi check --front native, HFS-I1 (a)): a program a line,
@@ -197,7 +224,7 @@
                                                    :let [[f fl] (str/split l #"\t" 2)]]
                                                [f (vec (remove empty? (str/split (or fl "") #"\s+")))])))]
                     (let [t0 (System/currentTimeMillis)
-                          [st m] (try (build-one f out ifaces units flags) (catch Throwable e [:crash (msg e)]))
+                          [st m] (try (binding [*inst* inst] (build-one f out ifaces units flags)) (catch Throwable e [:crash (msg e)]))
                           nm (or (second (str/split f #"@" 2)) (str/replace (.getName (File. ^String f)) #"\.l?hs$" ""))]
                       (println nm (name st) (if (= st :ok) "" m) (str "(" (quot (- (System/currentTimeMillis) t0) 100) "ds)"))
                       (flush)))

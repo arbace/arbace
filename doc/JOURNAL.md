@@ -10376,3 +10376,22 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   overnight (round 52); P63 (CPP in the front end) proposed. doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P59 (a) and the search
   path". Alternatives considered: refusing `-main-is` until a round of its own (P59 (b)); a hard-coded NofibUtils source instead of
   the search path.
+
+## 2026-11-18: Haskell, HF10-P63 (a) CPP in the front end (round 52, branch `n-hs-cpp`)
+
+- Base: `mac/n-hs-p59` `1c4c29575`. Its dry plan refused 77 programs as `cpp` (NofibUtils' 29, T5462Yes1's GEnum/Enum.hs, 47 others).
+- Which preprocessor: the survey's `driver/preprocess` is the driver around repr/haskell's own clean-room traditional cpp
+  (`arbace/repr/haskell/cpp.ae`; GHC's doCpp's arguments from the installation read as data). The native reads use it
+  (`native/preprocess`), so the front end takes the same path. There is one preprocessor.
+- Built: `arbace/repr/haskell/front.ae` preprocesses a module of a program (main file and own modules) when its flags or header
+  pragmas turn CPP on, `build --libdir DIR --sysroot DIR` naming the installation (read once). The macros are GHC's: ghcversion.h's
+  `__GLASGOW_HASKELL__` 914, the platform's, MIN_VERSION_pkg, all.T's -D/-U/-I/-optP and OPTIONS_GHC's. `bin/lib/hsi/check` refuses
+  `cpp` no more, passes all.T's CPP flags in the plan and gives the front end the derived tree (`bin/repr-haskell native-libdir`, which
+  it already ran). The dry plan over 950: tried own 677 to 739, `cpp` 77 to 0, `import` 54 to 67, `pragma` 19 to 21.
+- Checked light (`HSI_JOBS=1`, `ARBACE_MEM_GIB=1`, `HSI_FRONT_MEM=900MiB`, a 1.15 GB watcher): samples/Hello, CheckBoundsOK, cgrun072,
+  T12136 pass own from native STG; T1735 stops at the elaborator (a `Data` context; runs on the pack, passes); T5462Yes1's front
+  process went over the light cap (oracle-pending anyway); NofibUtils.hs takes its `__GLASGOW_HASKELL__` branch; bernouilli
+  compiles and runs own against GHC's `:no-build` reference (status 0 once, then Go's out of memory at the light 1 GiB cap on a rerun). The 29 NofibUtils programs are classed in divergences-own.edn's
+  `:no-reference-own` until HF10-P64 (HF10-P65 (a)). HF10-P63 (a), P65 (a) taken overnight (round 52). doc/haskell/FRONTEND-SURVEY.md,
+  "As built: HF10-P63 (a)". Alternatives considered: a second preprocessor (none needed); own-fallback.txt for the 29, or refusing
+  programs whose reference is `:no-build` (P65 (b), (c)).
