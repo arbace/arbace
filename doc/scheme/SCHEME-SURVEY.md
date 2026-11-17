@@ -4720,3 +4720,11 @@ read0 passes on si. Kept as decided (SC120); a candidate for `:na` (below).
 - **SCS32 ecraven compiled in the gate.** (a) a `--full` step `si-ecraven-aot` (`env SI_TIMEOUT=300 bin/si ecraven --aot`, rotated as
   si-ecraven over test/scheme/subsets.edn once the record exists); (b) at the weekly run alone. *Recommended: (b)*: 58 Go builds and the
   slow benchmarks' limits, about an hour.
+
+## Decided (the user, 2026-11-17, round 51): SCS27 (a), SCS28 (a), SCS31 (a), SCS32 (b)
+
+SCS27 (a) and SCS28 (a) as built above (`R7RSExpSign` in a program of R7RS's libraries alone; `chibi-optional-fallback` `:na`). SCS31 (a):
+`ecraven-reader-corners` (read0) `:na`, was `:design`: eval's by design 4 -> 3, n/a 3 -> 4, and the AOT's ecraven source the same once
+recorded. SCS32 (b): ecraven compiled in the weekly tier alone, the step `si-ecraven-aot` (`:phase :weekly`, chain scheme-full,
+`env SI_TIMEOUT=300 bin/si ecraven --aot`; test/gate/crops/scheme.edn and steps.edn), in `bin/gate --weekly`'s plan and not in the
+nightly's or `--full`'s; its record stays the main host's first whole run (`--record`), then the `:until` of test/reap/cells.edn goes.

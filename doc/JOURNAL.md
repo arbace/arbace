@@ -9896,3 +9896,13 @@ The 31 programs pass at eval and AOT; 296 programs at eval move only those; esse
 2,253 / 26 / 0 (completeness 98). Alternatives: trampolines per activation (closures in go/arbace/ci and cf2g: an address that
 carries its chain) for an address taken in one activation and called under another, left (no case needs it; a back-end change);
 lambda lifting in C forms before the checker, rejected (the captured variables' places need the builder's frames anyway).
+
+## 2026-11-17: Scheme's round-51 decisions applied: SCS31 (a), SCS32 (b) (branch `h-scheme`, merged with `next` `cc5766d95`)
+
+The user decided SCS27 (a) and SCS28 (a) as built, SCS31 (a) and SCS32 (b) (doc/scheme/SCHEME-SURVEY.md, "Decided (the user, 2026-11-17,
+round 51)"). SCS31 (a): `ecraven-reader-corners` (read0, INCORRECT on every implementation) `:na`, was `:design`: Scheme's eval 2,832 / 4 / 3
+-> 2,832 / 3 / 3 (n/a 4), completeness 99.91 -> 99.92. SCS32 (b): the step `si-ecraven-aot` (`env SI_TIMEOUT=300 bin/si ecraven --aot`,
+`:phase :weekly`, chain scheme-full, the ecraven family's controls waived as run by its judge), in test/gate/crops/scheme.edn and
+steps.edn alike: `bin/gate --weekly --plan` runs it, `bin/gate --plan` and `--nightly --plan` do not list it. Alternative not taken:
+SCS32 (a), a rotated `--full` step. Checks: `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`, `bin/records-check`,
+test/gate/crops-test.bash, crop-tier-test.bash (20 of 20). The ecraven AOT record stays the main host's first weekly (or by-hand) run.
