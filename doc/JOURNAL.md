@@ -9565,3 +9565,366 @@ test/gate/crops/python.edn as is makes the planner refuse the table (56 pins and
 main host's records come first (DECISION F1 of the review, (a) recommended); 320 needs 318's known-file fix on next's runtime
 (the koi8-r and cp1251 entries GONE, reproduced). Alternatives considered for F1: splicing only the steps whose files exist, or
 a planner exception for a :full step's missing files (rejected: weakens a check every crop relies on).
+
+## 2026-11-17: Clojure's stale deferred rows recorded, gen-class's exposer, Go's by-design audit (branch `h-clojure-go`, from `next` `e4a7a30f3`)
+
+The host burst (light checks only). Clojure: the eval level's deferred classes `:q1-typing`, `:desktop` and `:javadoc-url` were
+built on `clojure-cdr` (CDR2, CDR4 (b)) and merged, but their rows were never re-recorded. Run alone on next's test build
+(`.tmp/gate-exe/f60652fb7fb9568e76b1/amd64/arbace-tests`, `bin/clojure-tests --no-generative` with the namespaces named, the
+macros/vars control failing as it must): compilation 124 of 124, java-interop 43 tests 334 assertions (test-dot and test-bean
+unskipped), java.javadoc 5 of 5. Recorded in `test/arbace-go-results.edn` (those rows only), the three classes removed from
+`test/clojure/divergences.edn`, `bin/reap --record` and `bin/crops-score --record`: eval 21,060 / 24 / 50 to 21,065 / 24 / 45.
+genclass's `protected-final-access` still errs after CDR11: `ClassLoader` is extendable, but jrt's reflection lists only its
+public members, so gen-class's `:exposes-methods` found no `findSystemClass`. `arbace/genclass.ae` now also takes the world's
+protected methods (`arbace.classes.go/protected-members`, as the Java forms' analysis does; doc/VENDOR-NOTES.md, hand change
+33); proven by loading the file over the embedded copy (`superFindSystemClass` answers String, the reflective `findSystemClass`
+throws IllegalArgumentException as upstream's test wants). It moves `gate_key` (not the runtime key); the genclass row and the
+AOT level's rows (desktop, javadoc-url, q1-evaluated, gen-class: the AOT program is a 32 GiB j2g build) wait for the main host.
+Alternatives considered: adding ClassLoader's protected methods to jrt's member tables (`test/jrt/tables.ae`, a jrt change and
+`bin/jrt manifest` on the frozen JVM, and reflection would then list them for every caller) rather than gen-class reading the
+world's signatures as `arbace.classes.go/generics` already does. Not done (not cheap): the locales (CDR1), SAX and StAX (CDR5).
+Go: the by-design classes audited against doc/go/GOI-SPEC.md ("v1's divergences", §1.1) and the surveys; no class changed, the
+candidates reported for the user's decision (weak and unique, GPS43's two types2 programs, the abridged interface spelling as
+feature gaps; gc's failed references, the compile-only directory tests, unsafe and the other boards' goos packages as n/a).
+
+## 2026-11-17: Go's by-design classes reclassified (round 51, the user's DECISION A (a) and B (a); branch `h-clojure-go`)
+
+The audit of the entry above, decided by the user. A (a), feature gaps made deferred: `test/goi/divergences.edn`'s new
+`:std-weak-unique` (weak.go, escape_unique.go, fixedbugs/issue68415.go; `:std-out-of-scope` keeps escape_runtime_atomic, the
+internal-package rule), `:no-forms` (issue50372, slice3err: types2's checks on syntax's tree, GPS43's alternative) and the new
+`:abridged-type-literal` (issue11614: goi's interface{…}; `:spellings` keeps bug217). peano's call depth stays by design (S23, GC42).
+B (a), no reference or no level made `:na` as `divergences-aot.edn`'s `:no-forms`: `:gc-reference` (3 eval, 4 AOT),
+`test/repr/go/divergences-print.edn`'s `:compile-only-dirtests` (127) and `:unsafe` (2), `divergences-read.edn`'s
+`:goos-other-boards` (67). No record changed; `bin/goi divergences` (and `--aot`) classify as before under the new kinds;
+`bin/reap --record`, `bin/crops-score --record`. Go: read 12,158 / 204 / 0 to 12,158 / 137 / 0 (67 n/a), eval 1,755 / 79 / 3 to
+1,755 / 70 / 9 (3 n/a), AOT 1,691 / 9 / 0 (137 n/a) to 1,691 / 5 / 0 (141 n/a), print 2,584 / 141 / 0 to 2,584 / 12 / 0 (129 n/a);
+completeness 0.9705 to 0.9846, without by design 0.9996 to 0.9987.
+
+## 2026-11-17: the judges of C, C++ and LLVM IR audited, rows moved to their own verdict (branch `h-judges`, from `next` `e4a7a30f3`)
+
+The judge stage's rows still on a host toolchain's recorded runs (doc/CROPS-SCORE.md, "Independence"; the user's rule of
+2026-11-07), each crop's listed with its reason in `test/crops/independence.edn` and the surveys' "As built: h-judges".
+- C: mir/andrewchambers_c's 67 execute tests (Andrew Chambers' C compiler's test/execute, their README.md; self-checking by
+  status, no output) judged by exit 0 in `test/c/selfref.ae`, at eval and AOT; a control (`_control/ptr-sub-unsigned-vs-execute`).
+  The fact recounted on today's cells: judge 0.985 to 0.989.
+- LLVM IR: `section_verdict` takes split-file's directory as named (`%t.dir`) and strips CR: cfi-icall-alias's section by its own
+  verdict; the verify-llvmtest count measured (756/50 before, not 758/48; 757/49 after); a control (`_control/dir-section-vs-reject`).
+  Judge 0.893 unchanged. The rest stays for stated reasons (LLS30's probes, Arbace's output-only programs, the pack's modules,
+  the mutants whose verdict line is the pack's).
+- C++: nothing movable (the token check states no stream; the samples print; the 2 dg-output tests need -fsanitize). The read
+  and judge facts leave the 36 n/a out as the matrix does: read 0.711 to 0.712, judge 0.907.
+Alternatives considered: own expected values for synth-c23 and the probes (a DECISION: LLS30's reasoning, the expected output
+would be written by us and checked against the toolchain); MIR's default status for its new/ tests (not established without its
+runner, which ccorpus2 does not carry); fixing the 4 mutants whose expectation throws (needs a re-made pack, night work).
+
+## 2026-11-17: Rust's independence, the RIND design and its first stage, the allocator shim (branch `h-rust-indep`, from `next` `e4a7a30f3`)
+
+- Studied what rsi consumes (`bin/rsi`, `bin/lib/rsi/check`, `bin/lib/rsi/link-ir`, the IR packs `test/rust/ir/`, the records
+  `test/rust/records/`, `test/rust/eval-inputs-linux-amd64.edn`, `.tmp/plans/RUST-90-PLAN.md`, doc/rust/FRONTEND-SURVEY.md through RF20):
+  the front end is complete for a program (66 of 67 synthetic programs own their bodies); the cell's five cases take all seven inputs
+  C1-C7 from rustc's products. Wrote doc/rust/FRONTEND-SURVEY.md, "RIND: eval and AOT on Arbace's own lowering, the design": the
+  inputs' table, RIND1-RIND7 proposed (the order by input, cheapest first; the shim; its gate step; ci on `c/target`; C1 on the cell's
+  cases; the compiler's identity a constant of Arbace's target; the library closure), six stages, 25-34 days and 5-6 nights to 90.
+- Built stage 1 (RIND2 (a), C5): `arbace/rust/back/shim.ae`, the default allocator's shim as LLVM forms with the allocator CGU's mangled
+  name (the StableCrateId in hex without leading zeros, `-crate.allocator`, SipHasher128, base 36) and LLVM's MD5 GUIDs, written after
+  rustc 1.99.1 (`58cf8f9c3`: `compiler/rustc_codegen_llvm/src/allocator.rs`, `rustc_ast/src/expand/allocator.rs`,
+  `rustc_middle/src/mir/mono.rs`, `rustc_data_structures/src/base_n.rs`, as recalled: the compiler's sources not on this host) and held
+  to rustc's 73 recorded `shim.ll`; `bin/rsi shim-check` (73 of 73 equal as forms and as lowered C, the crossed control differing, a
+  mutated record failing); `bin/lib/rsi/check` takes our shim on the pack path by default (`RSI_SHIM=pack` the old one, `shims.tsv`);
+  the five cases' C5 `:own`. Independence stays 80 (RFP53 (a): no case has all seven). Alternatives: the shim only on `--front own`'s
+  cases (gains nothing), keeping `shim.ll`; byte equality of the text (repr/llvm's print drops the comments, so the forms and the
+  lowered C are the level).
+- Not run: the whole `bin/rsi check` (8 GiB declared; its runs unchanged by construction). Crop paths only: no key moves.
+
+## 2026-11-17: x86-64 assembly's deferred rows, the cheap groups (branch `h-asm-deferred`, from `next` `e4a7a30f3`)
+
+The read cell's 32 and the print cell's 400 deferred rows (test/crops/scores.edn) grouped by cause: the error tests' refusals (24 +
+1 input, read and print), `--mdis`'s markup (4, read), llvm-mc's lexer options (3 + 11 texts), the comments (119), the streamer's
+lines (102), LFI (61), --defsym and the other options (13), a local label (1 + 1), a fixup (1). Fixed: the printer's markup
+(AXS66 (a), `arbace.asm.amd64.print/*markup*`), the lexer options (AXS35 (a) taken over its recommended (b): the header's
+`:masm-integers`, `:motorola-integers`, LLVM's LexDigit ported, `bin/repr-asm`'s list flags and check.ae's runs), the shuffle and
+immediate comments (X86InstComments.cpp's EmitAnyX86InstComments for PALIGNR, PSHUFD, PUNPCK*, SHUFP*, UNPCK*P*, INSERTPS without a
+mask, X86ShuffleDecode.cpp's decoders, printOperand's `imm =`; llvm-project 23.1.5, written again from their behaviour, the judge
+holding a comment text to the printed line with its comment), --defsym's conditionals at the print level. Proven on the touched
+files alone (encode-check `--only` 29 files with every control's, round trip of the three lexer files, decode-check of the two markup
+tests, 25 musl and 31 arm64 files' round trip unchanged); the rows re-recorded alone (`encode-check --record --only`, new). Read
+25,229 / 1 / 25 (was 25,222 / 1 / 32), print 194,722 / 1,536 / 256 (was 194,582 / 1,532 / 400): 4 texts of two --defsym runs are
+warnings and fall under the existing by-design `:diagnostic`. Alternatives: a whole streamer (AXS30 (b)) for the directives, left; the
+comments printed into every line (rejected: it would change the judging of every file, unprovable without the whole corpus).
+Proposed AXS95-AXS97 (doc/asm/AMD64-SURVEY.md): the 655 `:other-tool` texts of objects no check judges, the error tests' judge,
+the matcher's debug trace.
+
+## 2026-11-17: review of next's gate changes before the night (branch `h-review-diet`)
+
+A review of gate-ess-diet's merge (next `e4a7a30f3`: 1e54f3d1b against cf8268ebf), memdecl-fix (d6bec3790), tmpdates-fix
+(2a21f8148) and javac-tool's `:mem-gib` (105b0d832), by reading and by light checks on stage 0 (no gate run): every old step's
+command, inputs, hosts, env, pins and never-loads found in the new steps (the 25 removed steps' commands in the 9 merged ones, in
+their order; `.tmp/rev/` on the branch's worktree); the controls the same multiset (128 entries, 83 distinct); no `:needs`,
+`:uses`, `:start-after`, `:crops` or `test/crops/independence.edn` name left on a removed step; the spliced fragments' steps,
+controls and groups equal to steps.edn's; the planner on a store made from the checkout's own material with only stage 0's
+identity moved: the 23 crop subsets `night`, the core run, cpp-runtime not needed; one scheme file changed: scheme-c2j run and
+cpp-c2j (its need) woken. `bin/gate --full --concurrent --plan`: 338 steps, the largest admission 57.5 GiB (java-compiled, 1.1 x
+its 52.0 GiB tree peak), none that cannot start (the free rule admits a step alone when nothing runs). The gate's light tests
+(crop-tier, crops, costs, lanes, caches --coverage, claude-md, records-check) and `bin/crops-score --judge --strict` pass.
+One change: diffcheck's `:mem-gib` 43 to 50 (its pass of 11:46 on seed 3c48859d peaked at 49.2 GiB, one process, after
+memdecl-fix's measures; `bin/gate --mem-check` listed it UNDER). The admission already took 1.1 x that peak, so no decision of
+tonight's run moves, and `:mem-gib` is in no key. java-compiled's 52.0 GiB (memdecl-fix's one-off, not followed on purpose)
+still fails `--mem-check`: left to the main session.
+
+## 2026-11-17: LLVM IR's read and eval deferred groups; Haskell's deferred rows and design classes audited (branch `h-haskell-deferred`)
+
+From next `e4a7a30f3`, light (one process at a time, under 2.5 GB), no gate. LLVM IR (doc/llvm/LLVM-CROP-SURVEY.md, "As built: the
+read and eval cells' cheap deferred groups"): repr/llvm's verifier holds a `getelementptr` constant's and a defined function's
+`blockaddress`'s own type to the expected one, checks a global's initializer before its redefinition (LLParser::parseGlobal's order)
+and binds the data layout's address spaces for a module the reader stopped in; layouts.g0.type.1122 and Bitcode-blockaddress-addrspace
+pass (verify-check over every rt and llvm/test module with a constant getelementptr, a quarter of them, and every one with a blockaddress
+or a recorded redefinition: 126 of 126 as the references; verify-llvmtest and verify-probes essential pass, their controls failing).
+The 13 modules that unwind, run since llvm-eh but still recorded refused, recorded by `bin/llvmi check --only ... --record` (which now
+keeps a subset's other rows): 10 pass, 3 in `:abort-report` and `:cpp-threads`; llvmi gives an unlisted C++ program bin/cppi check's
+30 s of CPU (runtime/threads.cpp timed out at the flat 10 s on the loaded host). Read 3,828 / 1 / 17 to 3,830 / 1 / 15, eval 537 / 10 /
+15 to 547 / 12 / 3; LLVM's completeness 98 (meant 99). Haskell (doc/haskell/HASKELL-EVAL-SURVEY.md, the audit of 2026-11-17): no cheap
+group left (kahan alone needs 119 s of CPU against the 60 s limit); callback002 misplaced in `:no-reference`, three references record-ref
+could build, the print cell's 14 byte-identical rows: HES91-HES93 proposed. Alternatives considered: running the whole `bin/llvmi check
+--record` (refused by the day's rules: a subset's record instead), raising the C++ budget in test/cpp/check-budget.edn for threads alone
+(the default for every C++ program keeps llvmi and cppi equal).
+
+## 2026-11-17: AXS95 (a), AXS96 (a), AXS97 (a) built (branch `h-asm-deferred`, from `next` `af41f0944`)
+
+The user's round 51 decisions on the x86-64 cells (doc/asm/AMD64-SURVEY.md, "As built: AXS95 (a), AXS96 (a), AXS97 (a)"). AXS95 (a):
+the other-tool texts of files whose objects object-check does not judge are `:object-unjudged`, deferred: 406, not the proposal's
+655 (its count missed `apx/*-reloc.s` judged under their base names; 366 stay by design). AXS97 (a): `:debug-trace`, by design (57).
+AXS96 (a): an error test's read goes on after a refused statement (`(asm/unread TEXT MESSAGE)`), its round trip then judged as any
+file's, and each refusal held to a line the test states an error at (a `[[#@LINE]]` or `NAME.s:N:` place, else the statements beside
+the CHECK line); elsewhere `:error-misplaced`, deferred, since a test need not state every error llvm-mc reports. The messages are not
+judged. The judge serves both arches' round trips: amd64's 24 error tests pass, arm64's 6 of 8. New controls
+`test/asm/controls-error.txt` (4). Rows re-recorded alone (encode-check `--record --only` 64 files; the 24 + 8 round-trip rows).
+Scores: x86-64 read 25,253 / 1 / 1 (was 25,229 / 1 / 25), print 194,746 / 1,187 / 581 (was 194,722 / 1,536 / 256): the print
+cell's deferred rose by AXS95's reclassification; arm64 read 6,654 / 0 / 2 (was 6,648 / 0 / 8), print 12,664 / 5 / 2 (was 12,658 /
+5 / 8). Alternative considered for the misplaced refusals: pending (a failure), rejected since llvm-mc may refuse them too.
+
+## 2026-11-17: Java's own platform: the survey "Own platform" (JOP1-JOP8) and the light proof (branch `h-java-platform`, from `next` `e4a7a30f3`)
+
+Asked: Java's independence is 60 because javac on Arbace attributes against jdk26u's build tree's class files
+(`jdk/javac/platform.sha256`); design the own platform for the user and prove it lightly. Found that the route was decided on
+2026-11-10 (JCS359 (a) staged, JCS360 (a), JCS362-JCS369; doc/classes/JAVA-CONFORMANCE-SURVEY.md) and stages 1-3's tooling
+built, but stage 1's 68-module measure (night 15) never ran. So the survey section (doc/classes/JAVA-FRONTEND-SURVEY.md, "Own
+platform") restates the route against the alternative of natively made declarations (JOP1) and puts the open parts of stages
+4-5 to the user as JOP2-JOP8: what the platform and its pin hold, where it is built and how it is kept honest (a content pin
+built on a miss, a weekly rebuild by the current tool), the switch night's bootstrap proof, the build tree's other reads
+(`support/gensrc` in the jdk corpora), the oracle tier and an audit rule against `$JDK/build/`, when the facts move.
+
+The proof (by day, javac's tool `javac-f70d1a9d900e` of 2026-11-15: none at `next`'s key existed, the F26 agent's build had
+failed; jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259`; `bin/javac-vendor classes modules`, `GOMEMLIMIT=2GiB`, serial, a 3 GiB
+watchdog that never fired): java.logging and jdk.unsupported equal, java.prefs known, controls failing as they must; then the 24
+modules stage 1 had not measured, java.base, java.desktop, java.xml, jdk.localedata, jdk.hotspot.agent and jdk.compiler among
+them: 23,406 classes in 1,143 s, every process at most 2.07 GB, 15 modules equal, 9 differing in 36 classes, each (javap -v -p
+of both, by hand) only an anonymous class's LocalVariableTable parameter names (`arg0` in the build, the source's on Arbace),
+JCS360's `:param-names`. All 68 modules are now measured: 27,530 class files, 50 modules byte for byte, 48 classes in 18
+modules `:param-names`, no other kind. The own chain end to end on two modules (own generated sources, classes, descriptors; a
+platform with them in place of the build's) compiles the module sample to the same 4 class files; the declarations
+`arbace.repr.java.classfile` reads (`parse`, `strip`) of all 37 differing pairs are equal. Two small bugs of `bin/javac-vendor`
+found, not fixed here (it is in `arbace_javac_key`): `pb_modules | grep -qx` under `pipefail` refuses java.base; control 2 may
+pick an equal module with no class. Nothing committed but the documents; no key moves. Alternatives considered: running the
+heavy chain in the night slot as planned (not needed: under a memory limit every module fits the light tier); a forms-level
+proof now (needs the platform dir of `bin/repr-java` swapped, a stage 4 switch, which the brief excludes). Evidence and scripts:
+`.tmp/worktrees/h-java-platform/.tmp/poc/`.
+
+## 2026-11-17: C's run cells, the by-design classes audited (branch `h-c-run`)
+
+The eval cell's 123 by-design non-passes (AOT 115) read class by class against their programs (doc/C23-SURVEY.md, "As built:
+h-c-run"). Gaps built in ci (`arbace/c/build.ae`, `check.ae`, `run.ae`): empty asm templates with operands lowered to C forms
+before the checker (`arbace.c.build/lower-asms`: the operands parsed from the c/asm's text, a tied output given its input
+converted, the operands' calls evaluated once; 11 programs: 20030222-1 twice, 990130-1, pr38533, pr40657, pr43560, pr45695, pr49279,
+pr52286, stkalign, ...); GNU's `__real__` and `__imag__` as values and places, with the complex builtins' prototypes (5 programs);
+an unsigned `_BitInt(N)` bit-field read back signed (`unsigned-ty?` missed `uN`: bitint-34, whose class said `-funsigned-bitfields`).
+95_bitfields_ms's `-mms-bitfields` entry was stale (it passes since CS296's `ms_struct`). Proven by `bin/ci check --only` and
+`check --aot --only` on the 25 programs touched and 188 with an asm, `__real__`/`__imag__` or a `_BitInt` (gcc-bitint-run), the
+essential lists with their controls and `bin/ci dg --essential`; the 18 record rows edited in place from those runs. C eval 2,156 /
+123 to 2,173 / 106, AOT 2,164 / 115 to 2,181 / 98; completeness 96 (0.9599 to 0.9636). Genuinely by design and left: no software
+floating point (`_Float16`, `_Float128`, decimal), the target's instructions (x87 asm, a file-scope asm function,
+`__builtin_apply`), speed, long double, the reference's undefined behaviour, signaling NaNs, a redefined `llabs`. Alternatives: the
+asm operands structured by repr/c's converter (CS76 (b)), left (another branch owns repr/c's read; the text holds them); giving
+`-funsigned-bitfields` a model, not needed (the test checks it does not apply). Proposed CS320 (GNU vector types, 41 programs) and
+CS321 (GNU nested functions, 31): gaps ci could build, not cheap; reclassifying them as deferred waits for the user.
+
+## 2026-11-17: CS320 (a), CS321 (a): GNU vector types and nested functions deferred (branch `h-c-run`)
+
+The user's decision (round 51): the 41 programs refused for GNU vector types and the 31 for GNU nested functions move from the
+class `by-design` to the deferred classes `vector` and `nested-fn` (test/c/divergences.edn, matched on the refusals' text, so no
+record row moves); doc/c/SPEC.md §14's rows struck. C eval 2,173 / 34 / 72, AOT 2,181 / 26 / 72 (`bin/reap --record`,
+`bin/crops-score --record`, `--judge --strict`). Both are to be built in ci next, on this branch.
+
+## 2026-11-17: HES92, HES93 and LLS54 as built, HES91 prepared (branch `h-hes-lls`, from `next` `35a98986e`; the user's round 51, each (a))
+
+Light, no gate. HES93 (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES92 (a), HES93 (a)"): the print cell judged by the native
+reader's verdict, the text byte for byte, which the 14 module-view modules meet; the helper's trees of mode `:full` moved to their own
+known file (`roundtrip-ghc-9.14.1-text-tree-known.edn`, the oracle's), a source beside the cell; the text level's controls skip a
+pair of modules whose references are one text (ReadInt.hs and ReadNat.hs). Print 1,331 / 14 / 0 to 1,345 / 0 / 0, proved on the 14
+and the controls' pair. HES92: the plan finds T17920's Cmm main and ManyUbxSums's generated main (`hsi_pre_gen`: all.T's pre_cmd
+`{compiler} --run ./GenManyUbxSums.hs` run before the build and the dump); their references recorded by hand with GHC 9.14.1
+(record-ref `--only`), ManyUbxSums's STG packed (haskell-stg-progs `d2c8c4c0`), its own verdict listed, hsi's rows by `--only`:
+ManyUbxSums passes, T17920 in `:test-cmm` (a Cmm main has no STG). T24809 cannot be built here: `req_profiling`, and this GHC has no
+profiled libraries; it is `:skipped` now (the testsuite's verdict on this GHC) rather than referenced: a deviation from the decision's
+premise, reported as a decision. Eval 811 / 63 / 34 to 812 / 62 / 35. HES91: its class change waits on the branch `h-hes-lls-hes91` with
+the night's command (the survey's section). LLS54 (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS54 (a)"): `bin/llvmi ir-make tx` passes
+each torture test's dg-options (`tx_dg_options`); the pack made again with clang 23.1.5 by hand: 61 modules' IR differs, all with
+options, the other 2,979 by the clang version in `!llvm.ident` alone; the five changed modules the records hold re-run by `--only`
+at eval and AOT, all pass; `:dg-options` gone; heldout-check passes on the new pack. LLVM eval 547 / 12 / 3 to 549 / 12 / 1, AOT 537 /
+10 / 15 to 539 / 10 / 13. Completeness: Haskell 97 (meant 99), LLVM 98 (meant 99). Alternatives considered: building T24809 without
+`-prof` (not the test's way), a pack mixing the old clang's modules with the 61 new ones (not reproducible by ir-make), a guard in the
+classes for HES91 (no judge reads one; a commit of its own instead).
+
+## 2026-11-17: C++'s read cell audited, 33 syntax files and a fatal Sema recursion fixed (branch `h-cpp-read`, from `next` `e4a7a30f3`)
+
+The host burst (light checks). The read cell's 1,083 by design audited (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-read"): musl-libc (4)
+and gxx-only-rules (2) stand; the clang-* classes (1,077) rest on CP2 (a)'s "repr/cpp has no Sema", stale since CX12 and CP344 (a):
+each is a file neither clang nor Arbace's own front end meets, 150 of them in dialects Arbace does not take (OpenMP/OpenACC, GNU TM,
+GCC's contracts, -fpermissive, -fms-extensions), 927 the own front end's unported diagnostics. No class changed: CP398 (the 927 as a
+deferred own-diagnostics class) and CP399 (the 150 as a GCC-dialect class by design) proposed. Of the 136 deferred, syntax-own's cheap
+groups closed in arbace/repr/cpp/parse.ae (a lexical pass for digit separators and identifiers' UCNs; literal operators, linkage
+specs with a ud-suffix, = delete's reason, asm strings, attribute arguments, stray commas, template enums, template template keys,
+friend destructors, template names as bases, lambda specifiers, noexcept(), decltype(), casts to auto, new's placement and bounds, a
+missing typename before C++20) and native.ae (-fno-gnu-keywords): syntax-own 128 to 95, the own record's 33 rows re-recorded, C++
+read 5,276 / 1,083 / 136 to 5,309 / 1,083 / 103, completeness 91 and 96 without by design (unchanged as integers). Found: since W2's
+re-seed stage 0 runs arbace.cpp.sema compiled, and Sema's unbounded recursion (cpp1y/constexpr-recursion1.C's enum calling its own
+function) overflowed Go's 1 GB stack, a fatal error that ended the whole own dg run; arbace/cpp/sema.ae now refuses a self-call before
+the body is analyzed (*ce-analyzing*) and, under diag's Sema, throws StackOverflowError past 4,000 nested analyze calls, as the
+interpreter does (proved evaluated only: the compiled guard waits for the gate's executable at the new key). Alternatives: a depth
+limit in the interpreter's terms only (Rt/MAX_DEPTH is the evaluator's; compiled code has none), or catching the Go fatal error
+(impossible). Not done: OpenMP's parse errors (27 gomp/goacc syntax files; CP399), named UCNs (a Unicode name table), the
+parser's recovery lines (extra errors after a decline), #embed and line-directive pedantry (the shared C preprocessor, gate-wide).
+
+## 2026-11-17: C's read and print deferred rows (branch `h-c-deferred`, from `next` `e4a7a30f3`)
+
+The host burst's task: C's deferred rows of the read (33) and print (44) cells, by cause. Fixed in repr/c's converter,
+printer, preprocessor, the token check's digest and the round trip's judge; recorded row by row from listed runs (the results
+files merged by id, levels 3-4 fresh under gcc's judge by hand); doc/C23-SURVEY.md, "As built: the read and print levels'
+deferred rows", lists each cause and file. Read 5221 / 221 / 33 to 5225 / 223 / 27 (embed-11.c's `:absolute-name` and
+c23-ucnid-2.c's `:undiagnosed` closed: by design now, as `:embed` and `:ucn-identifier`); print 4775 / 3 / 44 to 4798 / 3 / 22;
+C's completeness 96 (100 without by design). Two judge rules are new: the round trip's acceptance takes a test's own dg-error
+verdict for a rejection on its line in its words (`own-rejects?`), and the print's directory gets the original's named
+resources by symbolic links instead of the original's directory as an `--embed-dir` (which found angle-bracketed names too).
+Alternatives considered: reclassifying the gcc-only rejections by hand (rejected: the test's own verdict is the user's rule
+of 2026-11-07); balanced tokens for every unknown attribute outside `*recover*` (left: it would change cc-equal trees of the
+tree check; c23-attr-syntax-5.c stays deferred); raising the read budget for the limits-*.c files (rejected, as GTS-B did).
+
+## 2026-11-17: C++'s dg classes after the user's CP398 (a) then (c) and CP399 (a) (branch `h-cpp-read`, after next 77630727b)
+
+The user's round 51 on the read audit: test/cpp/divergences-dg.edn's six clang-* classes (by design under CP2 (a)) became `:own-diag`,
+deferred (863 files neither clang nor Arbace's own front end meets), `:gcc-dialect` (by design, 173 files by name: the 150 of OpenMP,
+OpenACC, GNU TM, GCC's contracts, -fpermissive and -fms-extensions, and the 23 syntax-only files of gomp/, goacc/ and contracts/; the
+report had estimated 27) and `:gcc-own-rules` (by design, 64 files by name after reviewing clang-accepts' and clang-pedantic's 206 by
+their messages: GNU extensions', GCC's ABI and runtime interface, its limits and IFNDR diagnoses). C++ read 5,309 / 1,083 / 103 to 5,309 /
+243 / 943; completeness 91 unchanged, without by design 96 to 93 (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-read (2)"). Not yet: the
+file-by-file review of the other four former classes' files.
+
+## 2026-11-17: GNU vector types in ci (CS320 (a), branch `h-c-run`)
+
+Built in `arbace/c/build.ae` (and the checker's result types of the shuffles, SSE2's cmp*pd and movmskp[ds], and of a floating
+vector comparison): vectors as aggregates of lanes in memory, the operators lane by lane into a temporary with a scalar operand
+broadcast, comparisons to 0 / -1, subscripts, initializers, bit conversions, `__builtin_convertvector`, `__builtin_shuffle`,
+`__builtin_shufflevector`. No back-end change (scalar nodes only), so cf2g compiles them unchanged. The 41 programs pass at eval and
+AOT; 268 programs at eval move only those 41, the controls differ. C eval 2,214 / 34 / 31, AOT 2,222 / 26 / 31 (completeness 97).
+Alternatives: vectors as a node kind of their own in go/arbace/ci (faster, but a back-end and cf2g change for no case that needs
+speed), left; the `_mm_*` functions of Arbace's headers as builtins, left (no check reaches them: benchmarksgame's SSE programs are
+recorded faulting without their argument; mandelbrot.c, -3, -4 run by hand with 200 print mandelbrot-2.c's image).
+
+## 2026-11-17: genclass.ae: no fn defined after it in arbace.core again (`into`, `mapv`; branch `h-prepare-fail`)
+
+`test/gate/prepare-fail-test.bash` failed on next (`c36f7366f`) with next's own stage 0: its host-compile control (prepfix.ok
+alone) could not load arbace.core from the checkout, "Unable to resolve symbol: into" at arbace/genclass.ae:167. arbace.core loads
+genclass.ae at core.ae:6927, before `into` (7105) and `mapv` (7133); 729785948 (CDR11, gen-class's `:exposes-methods` over the
+world's protected methods) added `gc-world-protected-methods`, which uses both, the same kind of break as 080c5ec64 fixed. The
+executables compile arbace.core from their embedded copy, so only a load from the checkout (the host compile, the image prepare)
+showed it. Fixed as 080c5ec64 did: `(reduce1 conj acc (for ...))` and `(vec (map ...))`, the same values. prepare-fail-test: 4 of 4
+on next's stage 0. Moves `gate_key` (arbace/genclass.ae is embedded), as 729785948 already did.
+
+## 2026-11-17: Scheme's deferred eval rows, the by-design classes audited, the AOT cell widened to eval's corpora (branch `h-scheme`, from `next` `3c55fb7bc`)
+
+The host burst's Scheme task. doc/scheme/SCHEME-SURVEY.md, "As built: the deferred eval rows and the AOT cell widened" holds the detail.
+Eval's 6 deferred: `r7rs-float-printing` 2 fixed by SCS27 (a) narrowed (`R7RSExpSign`, go/arbace/scm/numtext.ae and read.ae: `e+N`
+for a positive exponent in a program of R7RS's libraries alone, Chibi's form; `(chezscheme)` and R6RS programs keep Chez's `e308`, the
+objection SMR5's trial met; SCS27 had been proposed with (b) recommended and was undecided: taken under the brief, reversible);
+`chibi-optional-fallback` 1 made `:na` (SCS28 (a): the test library's own macro is ill-formed outside Chibi and Gauche); `ecraven-too-slow`
+3 left deferred, measured: takl interpreted over 900 s (Chez 3.9 s), and takl, ntakl, earley compiled over 300 s each. Alternatives
+considered: a longer limit (no limit under an hour makes takl pass interpreted), reclassing the float tests `:design` (SCS27 (b)).
+The by-design classes (SCS4 (a)'s three Chez classes, SC120's read0) checked against their items and decisions: kept; read0 proposed `:na`
+(SCS31).
+The AOT cell checked only `bin/si check --aot`'s programs because no other eval source had a compiled record: `srfi --aot` was unjudged,
+ecraven compiled on SC109's heavy list, the R7RS suite never compiled (the compiled `main` did not set the R7RS mode, and `ReadAOT`
+refused `||`). Now `bin/si srfi|r7rs|ecraven --aot [--record]` judge by the interpreted judges into `check-*-aot-linux-amd64.edn`, the
+dump carries the mode, `ReadAOT` reads R7RS's syntax. Recorded here (small, new records, the runs the proof): srfi --aot 11 of 11,
+1,231 checks; r7rs --aot 1,234 of 1,234. ecraven compiled sampled (20 benchmarks: 16 pass, the interpreted record's 4 non-passes) and
+left to the main host (`:until` in test/reap/cells.edn). Scores: eval 2,828 / 4 / 6 -> 2,832 / 4 / 3, AOT 48 / 3 / 0 -> 2,513 / 3 / 0,
+Scheme's completeness 98 -> 99.9. Checks: `bin/si unit`, `r7rs`, `r7rs --chibi-test` (re-recorded), `srfi`, `chibi-tests`, `check --only
+test/scheme/essential-check.txt`, `check --aot --only test/scheme/essential-aot.txt` (no regression, the controls found), `corpora files`,
+`records-check`, test/gate/crops-test.bash, `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`. Not run: the gate,
+`bin/si check --aot` whole, ecraven whole (interpreted or compiled), the mats, the shipped path (`bin/si interp-check --exe`).
+
+## 2026-11-17: Java's read and print cells triaged (branch `h-java-readprint`, from `next` `77630727b`)
+
+The read cell's 96 deferred rows and the print cell's 139 non-passing rows run again, light, on next's gate executable
+`f60652fb7fb9568e76b1` and javac's tool `javac-f70d1a9d900eb07a9afc` (stale-ok): read's 96 (read 1, classes 2, diagnostics 93)
+fail as recorded, each a limit of javac on Arbace (JCS50-JCS53: --release's ct.sym, processors from class files, doclint, its
+Main and file manager; javac's tool rebuilt with more world); three print rows were stale (t05276, t05749 recorded before JCV11
+(b), t04728 now equal). The print level's class-file namer (test/java/print.ae) took the sets of code lines, so an early return
+or a loop's goto also met elsewhere in a method named nothing: `counted-kinds` counts the lines (branches without targets) where
+the sets name nothing and names the kinds only when every instruction differing in number is one of theirs. 47 rows re-recorded
+alone: Java print 3,186 / 32 / 107 → 3,236 / 29 / 60, Java completeness 87 → 88. The 25 left unnamed are the converter's (a
+static member's pure qualifier dropped 16, a String compound assignment 3, an inherited static's owner 1, a local's slot 1, a
+long literal's and a float local's type 2, mixed 2): proposals RP1-RP3 in doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+h-java-readprint". The 29 by-design rows audited (print-shapes 18, print-erasure 11). Alternatives considered: naming the
+counted kinds for every row (stricter than the sets' rule for rows that pass now: a whole print run would be needed to see
+none regresses, so the counted rule is only the sets' fallback); fixing the printer for the 25 (the forms do not carry what they
+differ by: the converter's rules).
+
+## 2026-11-17: pyi runs the checkout's runtime when stage 0's is older (branch `h-pyi-runtime`, from `next` `8049a4359`)
+
+The user's decision (round 51, Mac task 317's DECISION 2): since seed 3c48859d (W2's embedding) stage 0 lists pyi's runtime
+go/arbace/py and libm in goi's table, so `bin/pyi` on stage 0 ran the seed's compiled runtime and a runtime change was not
+exercised until the next re-seed. Built (doc/python/PYTHON-SURVEY.md, "As built: pyi runs the checkout's runtime when stage
+0's is older"; doc/go/GOI-SPEC.md §6.6): goi's `ARBACE_GOI_FROM_SOURCE` (arbace.go.repl's `from-source`,
+`require-source!`: a table package treated as unlisted and loaded from its forms on ARBACE_PATH, bypassing RT.load's
+table), `arbace.python.run/require-runtime!`, and bin/pyi's `runtime_from_source` (the executable's commit from its version
+map against `git diff` of go/arbace/py and libm; equal: compiled; else the checkout's interpreted, with a one-line message;
+`PYI_RUNTIME` overrides), plus `bin/pyi runtime programs` (the 145 programs and their controls alone). Proved lightly on
+stage 0: a scratch change to sys.version seen by `bin/pyi run`; no change, the compiled path; the 145 programs compiled 143
+equal (two host differences against this host's live CPython, on the unchanged runtime), the controls failing; a slice of 6
+interpreted 6 equal, controls failing; libm's change runs both from source. Alternatives considered: renaming the checkout's
+copy to another import path (as repr/go's gcsyntaxsrc; every lazy package's import of arbace/py would need renaming too);
+a source digest embedded at build time (only after the next re-seed, and a gate_key change for every build); a runtime
+change in RT.load or GoInterp.loadTable (compiled into stage 0: inert until a re-seed). Keys: gate_key moves (arbace/go/repl.ae,
+arbace/python.ae, arbace/python/run.ae are embedded sources); Python's steps' keys (:python's bin/pyi and arbace/python) and
+the goi steps keyed by arbace/go move.
+
+## 2026-11-17: GNU nested functions in ci (CS321 (a), branch `h-c-run`)
+
+Built in `arbace/c/build.ae` (doc/C23-SURVEY.md, "As built: GNU nested functions"): a nested function a code command of its own
+(named PARENT$NAME$N, printed after its parent's, each its own line of the link so cf2g's prebuilt items keep their lines), its
+static chain a static word per nested function that a direct call and taking its address set to the parent's frame base and the
+function copies into its frame at entry, the parent's locals its nested functions name kept in frame memory (a VLA's address
+mirrored), a non-local goto a longjmp to a jmp_buf the label's function sets at entry (its body an sjbody), `&&label` of an
+enclosing label, a function type's variably modified result; in `arbace/c/cf2g.ae` a computed goto's dispatch inside a branch.
+The 31 programs pass at eval and AOT; 296 programs at eval move only those; essential AOT 0 failing. C eval 2,245 / 34 / 0, AOT
+2,253 / 26 / 0 (completeness 98). Alternatives: trampolines per activation (closures in go/arbace/ci and cf2g: an address that
+carries its chain) for an address taken in one activation and called under another, left (no case needs it; a back-end change);
+lambda lifting in C forms before the checker, rejected (the captured variables' places need the builder's frames anyway).
+
+## 2026-11-17: Scheme's round-51 decisions applied: SCS31 (a), SCS32 (b) (branch `h-scheme`, merged with `next` `cc5766d95`)
+
+The user decided SCS27 (a) and SCS28 (a) as built, SCS31 (a) and SCS32 (b) (doc/scheme/SCHEME-SURVEY.md, "Decided (the user, 2026-11-17,
+round 51)"). SCS31 (a): `ecraven-reader-corners` (read0, INCORRECT on every implementation) `:na`, was `:design`: Scheme's eval 2,832 / 4 / 3
+-> 2,832 / 3 / 3 (n/a 4), completeness 99.91 -> 99.92. SCS32 (b): the step `si-ecraven-aot` (`env SI_TIMEOUT=300 bin/si ecraven --aot`,
+`:phase :weekly`, chain scheme-full, the ecraven family's controls waived as run by its judge), in test/gate/crops/scheme.edn and
+steps.edn alike: `bin/gate --weekly --plan` runs it, `bin/gate --plan` and `--nightly --plan` do not list it. Alternative not taken:
+SCS32 (a), a rotated `--full` step. Checks: `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`, `bin/records-check`,
+test/gate/crops-test.bash, crop-tier-test.bash (20 of 20). The ecraven AOT record stays the main host's first weekly (or by-hand) run.
+
+## 2026-11-17: the print level's by-design kinds RP1 (a), RP2 (a) (branch `h-java-readprint`, after next `cc5766d95`)
+
+The user's round 51: the converter's dropped pure qualifier of a static member, a String compound assignment written out and
+a static member named through its inheriting class are by-design class-file kinds (test/java/print.ae's counted-kinds,
+class-kinds; test/java/divergences.edn's :print-classes pattern). 20 rows re-recorded alone: Java print 3,236 / 29 / 60 →
+3,256 / 29 / 40. A conditional branch's sense beside another kind's instructions now counts as control flow too (t06347).
+Alternatives considered: one kind "the converter's shapes" for the three (less precise for a later audit); the converter keeping
+the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of meaning).

@@ -26,7 +26,9 @@ A file's `.ae` text is a header form, then one item a line, then in mode `:full`
 The header is `asm/unit`, not the survey's `asm/file`: `.file` is a directive, `(asm/file ...)` its item (AXS18). Its map is the
 text's dialect, which reading the `.ae` back and printing it take from it: `{:arch :amd64 :syntax :att}` (AX1), `{:arch :arm64
 :syntax :gnu}` (ELF and COFF), `:syntax :apple` (Darwin's spelling: `;` comments), `:syntax :plan9` (Go's assembler), with `:cpp true`
-for a text of the C preprocessor (a `.S` file; Plan 9's always: §4's `asm/cpp-line` and `asm/cpp-invoke`). The items are not
+for a text of the C preprocessor (a `.S` file; Plan 9's always: §4's `asm/cpp-line` and `asm/cpp-invoke`). Two keys name llvm-mc's lexer options
+(2026-11-17, AXS35 (a)): `:masm-integers true` (-masm-integers: MASM's radix suffixes, `0B0h`, `10h`, `0x10h`) and
+`:motorola-integers true` (-motorola-integers: `$aBcD` hexadecimal, `%0101` binary). The items are not
 nested in the header, so a file is a sequence of top-level forms like repr/llvm's. A text is read as ISO-8859-1 (a character a
 byte) and written back the same way.
 

@@ -132,6 +132,46 @@
                                      (not (Modifier/isStatic mods))))))]
     (gc-filter-methods c not-exposable?)))
 
+(defn- gc-desc-class
+  "The class of the field descriptor d (I, [I, Ljava/lang/String;)."
+  ^Class [^String d]
+  (case (.charAt d 0)
+    \Z Boolean/TYPE \B Byte/TYPE \C Character/TYPE \S Short/TYPE \I Integer/TYPE
+    \J Long/TYPE \F Float/TYPE \D Double/TYPE \V Void/TYPE
+    \[ (arbace.lang.RT/classForName (.replace d \/ \.))
+    \L (arbace.lang.RT/classForName (.replace (subs d 1 (dec (count d))) \/ \.))))
+
+(defn- gc-desc-types
+  "The parameters' descriptors of method descriptor d, and its return's."
+  [^String d]
+  (let [close (.indexOf d ")")]
+    (loop [i 1 ps []]
+      (if (= i close)
+        [ps (subs d (inc close))]
+        (let [j (loop [j i] (if (= \[ (.charAt d j)) (recur (inc j)) j))
+              end (if (= \L (.charAt d j)) (inc (.indexOf d ";" j)) (inc j))]
+          (recur end (conj ps (subs d i end))))))))
+
+(defn- gc-world-protected-methods
+  "The protected instance methods of c and its superclasses that jrt's reflection does not
+  list ([name pclasses rclass]): those of jrt's hand-written classes (ClassLoader's
+  findSystemClass: their member tables hold the public members), from the world's signatures'
+  :protected, as the Java forms' analysis reads them (arbace.classes.go/protected-members,
+  JC4b; CDR11), for :exposes-methods."
+  [^Class c]
+  (let [pm (requiring-resolve 'arbace.classes.go/protected-members)]
+    (loop [c c acc []]
+      (if (or (nil? c) (= c Object))
+        acc
+        (recur (.getSuperclass c)
+               (reduce1 conj acc (for [[nm desc flags] (:methods (pm (.replace (.getName c) \. \/)))
+                                       :when (zero? (bit-and (long flags) 0x1008))
+                                       :let [[ps r] (gc-desc-types desc)
+                                             cs (try [(vec (map gc-desc-class ps)) (gc-desc-class r)]
+                                                     (catch Throwable _ nil))]
+                                       :when cs]
+                                   [nm (first cs) (second cs)])))))))
+
 (defn- gc-instance-methods [^Class c]
   (remove (fn [^java.lang.reflect.Method meth]
             (Modifier/isStatic (.getModifiers meth)))
@@ -333,14 +373,20 @@
                                             [mname]))}))])
         extra-methods (for [[mname pclasses rclass :as msig] methods]
                         (forwarding-method mname pclasses rclass (:static (meta msig)) unsupported-gen))
-        exposers (for [[local-mname ^java.lang.reflect.Method m]
-                       (reduce1 (fn [ms [[name _ _] m]]
+        ;; the exposable methods [name pclasses rclass]: reflection's, then the world's protected
+        ;; methods reflection does not list (gc-world-protected-methods)
+        exposable (let [ms (map (fn [^java.lang.reflect.Method m]
+                                  [(.getName m) (vec (.getParameterTypes m)) (.getReturnType m)])
+                                (concat (vals mm) (vals (gc-protected-final-methods super))))
+                        have (set (map (fn [[n ps]] [n ps]) ms))]
+                    (concat ms (when (seq exposes-methods)
+                                 (remove (fn [[n ps]] (have [n ps])) (gc-world-protected-methods super)))))
+        exposers (for [[local-mname mname pcs rclass]
+                       (reduce1 (fn [ms [name pcs rclass]]
                                   (if (contains? exposes-methods (symbol name))
-                                    (conj ms [((symbol name) exposes-methods) m])
-                                    ms)) [] (concat (seq mm) (seq (gc-protected-final-methods super))))]
-                   (let [pcs (.getParameterTypes m)
-                         rclass (.getReturnType m)
-                         call (apply list (symbol (str "." (.getName m))) 'super (args pcs))]
+                                    (conj ms [((symbol name) exposes-methods) name pcs rclass])
+                                    ms)) [] exposable)]
+                   (let [call (apply list (symbol (str "." mname)) 'super (args pcs))]
                      (list 'method (with-meta (symbol (str local-mname)) {:public true})
                            (with-meta (vec (cons 'this (params pcs))) {:tag (gc-type rclass)})
                            (if (= rclass Void/TYPE) call (list 'return call)))))

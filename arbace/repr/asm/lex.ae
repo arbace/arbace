@@ -13,7 +13,9 @@
   `*dialect*` (doc/asm/SPEC.md §2, §10) changes the rules for the other dialects, nil being AX1's x86 ELF: {:hash :start}
   (AArch64's ELF and Darwin, LLVM's AArch64MCAsmInfo: `#` a line comment only at the start of a statement, else the
   punctuator `#` of an immediate), {:semi :comment :sep \"%%\"} (Darwin: `;` a line comment, `%%` the separator), {:high
-  true} (Plan 9: a byte above 127 an identifier's character, Go's `·` and `∕` in UTF-8; `@>` a punctuator).")
+  true} (Plan 9: a byte above 127 an identifier's character, Go's `·` and `∕` in UTF-8; `@>` a punctuator). llvm-mc's two lexer
+  options merge into it: {:masm-int true} (-masm-integers: MASM's radix suffixes `10h`, `17o`, `101y`, `99t`, `0B0h`, LexDigit's
+  LexMasmIntegers branch, and `0x10h`), {:motorola true} (-motorola-integers: `$aBcD` hexadecimal and `%0101` binary).")
 
 (set! *warn-on-reflection* true)
 
@@ -53,11 +55,37 @@
         (skip-while s j digit?))
       i)))
 
+(defn- lex-masm
+  "[KIND END VALUE] of a MASM integer at `i` (AsmLexer::LexDigit's LexMasmIntegers branch: hex digits up to a radix suffix
+  h, t, o or q, y, or a last d or b), else nil (the default rules)."
+  [^String s ^long i]
+  (let [c0 (ch s i)
+        [j fnd fnb] (loop [j (inc i) fnd nil fnb (when-not (contains? #{48 49} c0) i)]
+                      (let [c (ch s j)]
+                        (if (hex-digit? c)
+                          (recur (inc j) (if (and (nil? fnd) (not (digit? c))) j fnd)
+                                 (if (and (nil? fnb) (not (contains? #{48 49} c))) j fnb))
+                          [j fnd fnb])))
+        c (ch s j)
+        [radix e] (cond (= c 46) nil
+                        (contains? #{104 72} c) [16 (inc j)]
+                        (contains? #{116 84} c) [10 (inc j)]
+                        (contains? #{111 79 113 81} c) [8 (inc j)]
+                        (contains? #{121 89} c) [2 (inc j)]
+                        (and fnd (= (inc (long fnd)) j) (contains? #{100 68} (ch s fnd))) [10 j]
+                        (and fnb (= (inc (long fnb)) j) (contains? #{98 66} (ch s fnb))) [2 j]
+                        :else nil)]
+    (when radix
+      [:int (int-suffix s e) (big (subs s (int i) (int (dec (long e)))) radix)])))
+
 (defn- lex-number
   "[KIND END VALUE] of a number (or a local label's reference) at `i`."
   [^String s ^long i]
-  (let [c0 (ch s i) c1 (ch s (inc i))]
+  (let [c0 (ch s i) c1 (ch s (inc i))
+        masm? (:masm-int *dialect*)]
     (cond
+      (and masm? (lex-masm s i)) (lex-masm s i)
+
       (and (= c0 48) (contains? #{120 88} c1))
       (let [j (skip-while s (+ i 2) hex-digit?)]
         (if (or (= (ch s j) 46) (contains? #{112 80} (ch s j)))
@@ -68,7 +96,7 @@
             [:float j (subs s (int i) (int j))])
           (if (= j (+ i 2))
             [:other (inc i) "0"]
-            [:int (int-suffix s j) (big (subs s (int (+ i 2)) (int j)) 16)])))
+            [:int (int-suffix s (if (and masm? (contains? #{104 72} (ch s j))) (inc j) j)) (big (subs s (int (+ i 2)) (int j)) 16)])))
 
       (and (= c0 48) (contains? #{98 66} c1) (contains? #{48 49} (ch s (+ i 2))))
       (let [j (skip-while s (+ i 2) #(contains? #{48 49} %))]
@@ -189,6 +217,12 @@
                            (catch arbace.lang.ExceptionInfo _
                              (let [e (skip-while s i ident-char?)] [:other e (subs s (int i) (int e))])))]
           (recur (long e) false (conj! toks [k i e v ws]) cc))
+        (and (:motorola d) (= c 36) (hex-digit? (ch s (inc i))))
+        (let [e (skip-while s (inc i) hex-digit?)]
+          (recur (long e) false (conj! toks [:int i e (big (subs s (int (inc i)) (int e)) 16) ws]) cc))
+        (and (:motorola d) (= c 37) (contains? #{48 49} (ch s (inc i))))
+        (let [e (skip-while s (inc i) #(contains? #{48 49} %))]
+          (recur (long e) false (conj! toks [:int i e (big (subs s (int (inc i)) (int e)) 2) ws]) cc))
         (= c 34)
         (let [[e v] (lex-string s i)]
           (recur (long e) false (conj! toks (if v [:string i e v ws] [:other i e "\"" ws])) cc))

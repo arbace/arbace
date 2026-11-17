@@ -885,6 +885,17 @@
     (let [h (first v)
           ct (cond (cast-ops h) (norm-type (nth (strip-flags (rest v)) 2 nil))
                    (bin-ops h) (norm-type (first (strip-flags (rest v))))
+                   ;; a getelementptr's own type: its base's pointer type (the address space kept) when neither the base nor an
+                   ;; index is a vector (GetElementPtrInst::getGEPReturnType; a vector GEP's left unchecked here)
+                   (= h 'getelementptr)
+                   (let [[_ base & idxs] (strip-flags (rest v)) bt (when (vector? base) (norm-type (first base)))]
+                     (when (and bt (ptr-type? bt) (every? #(and (vector? %) (not (vec-type? (norm-type (first %))))) idxs)) bt))
+                   ;; a blockaddress of a function defined already: a pointer in the function's address space (LLParser's
+                   ;; BlockAddress::get; a forward-referenced function takes the expected type's, left unchecked)
+                   (= h 'blockaddress)
+                   (let [f (second v) d (when (global? f) (.get *gdefs* (global-key f)))]
+                     (when (and d (= :function (:kind d)) (:form d))
+                       (norm-type (list 'ptr (or (:addrspace (apply hash-map (drop 4 (:form d)))) *prog-as*)))))
                    :else nil)]
       (when (and ct (not= ct (norm-type t)))
         (verr :parser/constant-type (str "constant expression type mismatch: got type '" (tstr ct) "' but expected '" (tstr (norm-type t)) "'")
@@ -1267,11 +1278,13 @@
     (let [rt (resolve-type (norm-type t))]
       (when (or (and (seq? rt) (= 'fn (first rt))) (#{'void 'label 'metadata 'token 'x86_amx} rt))
         (verr :parser/global-type "invalid type for global variable" {:at [:after (if (:constant o) "constant" "global")]})))
+    ;; LLParser::parseGlobal parses the initializer before it looks the name up (h-haskell-deferred, 2026-11-17: opt's first
+    ;; message on Bitcode/blockaddress-addrspace.ll is the initializer's type mismatch, not the redefinition after it)
+    (when (some? init) (use-value nil init (norm-type t)))
     (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]}))
     (when-let [ft (.get *gfwd* k)]
       (when (and (not= ft true) (not= (addrspace (resolve-type (norm-type ft))) (or (:addrspace o) 0)))
         (verr :parser/forward-type "forward reference and definition of global have different types" {:at [:after (if (:constant o) "constant" "global")]})))
-    (when (some? init) (use-value nil init (norm-type t)))
     (check-align (:align o))
     (note-md! (:md o))
     (.put *gdefs* k {:kind :global :type (norm-type t) :form f})
@@ -3791,6 +3804,11 @@
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
+            ;; the data layout's address spaces as run-phases binds them (h-haskell-deferred, 2026-11-17: a module the reader
+            ;; stopped in had its functions in address space 0 here)
+            *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
+            *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
+            *dl-str* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
             *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
             *errs* (java.util.ArrayList.)]
     (try (phase-parser forms) [nil]

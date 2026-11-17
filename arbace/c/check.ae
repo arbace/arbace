@@ -1528,7 +1528,12 @@
       (and np? (contains? '#{+ - * / % << >> bit-and bit-or bit-xor} op)
            (not (#{:invalid :vector} (:k ta))) (not (#{:invalid :vector} (:k tb))))
       (do (err! (str "invalid operands to binary " op)) (res t-int))
-      (or (= :vector (:k ta)) (= :vector (:k tb))) (res (if (= :vector (:k ta)) ta tb))
+      (or (= :vector (:k ta)) (= :vector (:k tb)))
+      (let [vt (if (= :vector (:k ta)) ta tb)]
+        ;; CS320 (a): a comparison's lanes are the signed integers of the lanes' size (0 or -1), gcc's opaque vector type
+        (if (and (cmp-ops op) (not (int-type? (unq (:of vt)))))
+          (res {:k :vector :of (case (long (size-of (:of vt))) 1 {:k :schar} 2 {:k :short} 4 t-int t-long) :n (:n vt)})
+          (res vt)))
       (cmp-ops op)
       (res t-int :v (when (and (arith-type? ta) (arith-type? tb))
                       (let [t (eval-type (usual pa pb))
@@ -1780,13 +1785,17 @@
                                [["ilogb"] :f-int]
                                [["lround" "lrint"] :f-long]
                                [["llround" "llrint"] :f-llong]
-                               [["scalbn"] :fi-f]]
+                               [["scalbn"] :fi-f]
+                               ;; h-c-run: <complex.h>'s (20020411-1's __builtin_conjf), C23 7.3
+                               [["conj" "cproj"] :z-z]
+                               [["creal" "cimag" "cabs" "carg"] :z-f]]
                 n names
                 [sfx ft] [["" t-double] ["f" t-float] ["l" ld]]]
             [(str "__builtin_" n sfx)
              (let [[ret ps] (case shape
                               :f-f [ft [ft]] :ff-f [ft [ft ft]] :fff-f [ft [ft ft ft]] :f-int [t-int [ft]]
-                              :f-long [t-long [ft]] :f-llong [t-llong [ft]] :fi-f [ft [ft t-int]])]
+                              :f-long [t-long [ft]] :f-llong [t-llong [ft]] :fi-f [ft [ft t-int]]
+                              :z-z [{:k :complex :of ft} [{:k :complex :of ft}]] :z-f [ft [{:k :complex :of ft}]])]
                {:k :fn :ret ret :params ps :variadic false :proto true})]))))
 
 (defn- call
@@ -1850,6 +1859,18 @@
     ("__builtin_nans" "__builtin_nansf" "__builtin_nansl")
     (let [k (case b "__builtin_nans" :double "__builtin_nansf" :float :ldouble)]
       (res {:k k} :snan k))
+    ;; CS320 (a): GNU's vector shuffles: __builtin_shuffle (a, [b,] mask) has a's lanes, as many as the mask's;
+    ;; __builtin_shufflevector (a, b, i...) a's lane type, one lane an index
+    "__builtin_shuffle" (let [a (unq (:t (first ras))) m (unq (:t (last ras)))]
+                          (when (and (= :vector (:k a)) (= :vector (:k m)))
+                            (let [es (size-of (:of a)) ms (size-of (:of m))]
+                              (res {:k :vector :of (:of a) :n (* es (quot (:n m) ms))}))))
+    ;; SSE2's two the benchmarks game's mandelbrot programs call (CS320 (a)): a lane mask of the operands' type, its sign bits
+    ("__builtin_ia32_cmplepd" "__builtin_ia32_cmpltpd" "__builtin_ia32_cmpeqpd") (let [a (unq (:t (first ras)))] (when (= :vector (:k a)) (res a)))
+    ("__builtin_ia32_movmskpd" "__builtin_ia32_movmskps") (res t-int)
+    "__builtin_shufflevector" (let [a (unq (:t (first ras)))]
+                                (when (= :vector (:k a))
+                                  (res {:k :vector :of (:of a) :n (* (size-of (:of a)) (- (count ras) 2))})))
     "__builtin_complex" (when (= 2 (count ras))
                           (res {:k :complex :of (unq (:t (first ras)))} :parts (vec ras)))
     ("__builtin_inf" "__builtin_huge_val") (res t-double :v Double/POSITIVE_INFINITY)

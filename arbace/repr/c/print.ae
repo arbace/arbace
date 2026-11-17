@@ -167,10 +167,15 @@
   (when (some? v)
    (if (empty? v)
     "[[]]"
-    (let [parts (partition-by #(and (seq? %) (= (first %) '__attribute__)) v)]
+    (let [gnu? #(and (seq? %) ('#{__attribute__ __declspec} (first %)))
+          parts (partition-by gnu? v)]
       (str/join " " (mapcat (fn [run]
-                              (if (and (seq? (first run)) (= (first (first run)) '__attribute__))
-                                (map #(str "__attribute__((" (str/join ", " (map attr-one (rest %))) "))") run)
+                              (if (gnu? (first run))
+                                ;; (__declspec "TEXT"): Microsoft's specifier, its tokens as written (the converter's)
+                                (map #(if (= '__declspec (first %))
+                                        (str "__declspec(" (second %) ")")
+                                        (str "__attribute__((" (str/join ", " (map attr-one (rest %))) "))"))
+                                     run)
                                 [(str "[[" (str/join ", " (map attr-one run)) "]]")]))
                             parts))))))
 
@@ -191,6 +196,8 @@
 
 (declare struct-spec enum-spec params-str)
 
+(defn- c23-typeof? [t] (and (#{:c23 :gnu23 :c2y :gnu2y} *std*) (not (:c/gnu (meta t)))))
+
 (defn- base-spec ^String [t base]
   (cond
     (= t 'c/base) (or base (fail "c/base outside a group" t))
@@ -203,10 +210,11 @@
       complex (str "_Complex " (base-spec (second t) base))
       bit-int (str "_BitInt(" (expr-str (second t) 15 (meta t) 1) ")")
       unsigned-bit-int (str "unsigned _BitInt(" (expr-str (second t) 15 (meta t) 1) ")")
-      typeof (str "__typeof__(" (expr-str (second t) 16 nil nil) ")")
-      typeof-unqual (str (if (#{:c23 :gnu23 :c2y :gnu2y} *std*) "typeof_unqual(" "__typeof_unqual__(") (expr-str (second t) 16 nil nil) ")")
-      typeof-type (str "__typeof__(" (type-name (second t)) ")")
-      typeof-unqual-type (str (if (#{:c23 :gnu23 :c2y :gnu2y} *std*) "typeof_unqual(" "__typeof_unqual__(") (type-name (second t)) ")")
+      ;; C23's spelling at C23 and later unless the converter marked GNU's (:c/gnu: gcc's __typeof__ keeps _Noreturn)
+      typeof (str (if (c23-typeof? t) "typeof(" "__typeof__(") (expr-str (second t) 16 nil nil) ")")
+      typeof-unqual (str (if (c23-typeof? t) "typeof_unqual(" "__typeof_unqual__(") (expr-str (second t) 16 nil nil) ")")
+      typeof-type (str (if (c23-typeof? t) "typeof(" "__typeof__(") (type-name (second t)) ")")
+      typeof-unqual-type (str (if (c23-typeof? t) "typeof_unqual(" "__typeof_unqual__(") (type-name (second t)) ")")
       atomic (str "_Atomic(" (type-name (second t)) ")")
       (fail "type form" t))
     :else (fail "type" t)))
@@ -241,6 +249,11 @@
         (and (or (symbol? u) (and (seq? u) (= (first u) 'c/id))) (not-any? #{"_BitInt"} words)) (str/join " " words)
         :else nil))))
 
+(defn- qual-head?
+  "Whether a type form begins with a qualifier: const, volatile, ... or an (atomic T) whose T does (the qualifier _Atomic)."
+  [t]
+  (and (seq? t) (or (contains? quals (first t)) (and (= 'atomic (first t)) (qual-head? (second t))))))
+
 (defn split-type
   "A type form around the declarator text `inner`: [specifiers declarator] (no type: implicit int); with `words` (a
   declared name's :c/bad-specs) the base's specifiers as written (words-spec)."
@@ -248,16 +261,18 @@
   ([t ^String inner base words]
   (loop [t (if (nil? t) 'int t) inner inner]
     (cond
-      ;; qualifiers: on a pointer after its *, else before the base
-      (and (seq? t) (quals (first t)))
-      (let [[qs x] (loop [t t qs []] (if (and (seq? t) (quals (first t))) (recur (second t) (conj qs (first t))) [qs t]))]
+      ;; qualifiers: on a pointer after its *, else before the base; an (atomic T) of a qualified T is the qualifier _Atomic
+      ;; (`_Atomic const volatile int`: _Atomic(T) of a qualified T is a constraint violation, 6.7.3.5)
+      (qual-head? t)
+      (let [[qs x] (loop [t t qs []] (if (qual-head? t) (recur (second t) (conj qs (first t))) [qs t]))
+            qname #(if (= 'atomic %) "_Atomic" (name %))]
         (if (and (seq? x) (= (first x) '*))
-          (let [ptr (str "*" (when-let [a (:c/attrs (meta x))] (str (attrs-str a) " ")) (str/join " " (map name qs)) (when (seq inner) " "))
+          (let [ptr (str "*" (when-let [a (:c/attrs (meta x))] (str (attrs-str a) " ")) (str/join " " (map qname qs)) (when (seq inner) " "))
                 [_ u] x
                 in (str ptr inner)
                 in (if (and (seq? u) ('#{array fn} (first u))) (str "(" in ")") in)]
             (recur u in))
-          (let [[s d] (split-type x inner base words)] [(str (str/join " " (map name qs)) " " s) d])))
+          (let [[s d] (split-type x inner base words)] [(str (str/join " " (map qname qs)) " " s) d])))
       (and (seq? t) (= (first t) '*))
       (let [[_ u] t
             in (str "*" (when-let [a (:c/attrs (meta t))] (str (attrs-str a) " ")) inner)
@@ -664,6 +679,11 @@
           parts (map #(var-str % nil) fs)]
       (str (first (first parts)) " " (str/join ", " (map second parts)) ";"))))
 
+(defn- sel-init
+  "A C2y selection statement's declaration, `int i = 42; ` (the let block's bindings the print made it from), or \"\"."
+  ^String [m]
+  (if-let [i (::sel-init m)] (str i " ") ""))
+
 (defn- stmt! [^StringBuilder b s nxt]
   (let [m (meta s)]
     (cond
@@ -677,11 +697,18 @@
         (when (and attr (not (label? s))) (line b (str/trim attr)))
         (case h
           do (block! b args)
-          let (do (doseq [f (binding-forms (first args))]
-                    (if (directive? f) (stmt! b f nil) (line b (decl-str f))))
-                  (stmts-str b (rest args)))
-          when (do (line b (str "if (" (expr-str (first args) 16 m 1) ")")) (block! b (rest args) (:c/bare m)))
-          if (do (line b (str "if (" (expr-str (first args) 16 m 1) ")"))
+          let (let [[v & body] args
+                    sel (first body)]
+                (if (and (:c/sel-decl m) (= 1 (count body)) (seq? sel) ('#{when if cond switch} (first sel))
+                         (not-any? directive? (binding-forms v)))
+                  ;; CS194 (a): the block a C2y selection statement's declaration made, printed as that statement
+                  ;; (`if (int i = 42; i > 10)`), which the read makes the same block again
+                  (stmt! b (vary-meta sel assoc ::sel-init (for-init v)) nxt)
+                  (do (doseq [f (binding-forms v)]
+                        (if (directive? f) (stmt! b f nil) (line b (decl-str f))))
+                      (stmts-str b body))))
+          when (do (line b (str "if (" (sel-init m) (expr-str (first args) 16 m 1) ")")) (block! b (rest args) (:c/bare m)))
+          if (do (line b (str "if (" (sel-init m) (expr-str (first args) 16 m 1) ")"))
                  (branch! b (second args) (contains? (:c/bare m) 2))
                  (line b "else")
                  (branch! b (nth args 2) (contains? (:c/bare m) 3)))
@@ -690,10 +717,10 @@
                    (let [[c s] cl]
                      (if (= c :else)
                        (do (line b "else") (branch! b s (contains? (:c/bare m) (inc i))))
-                       (do (line b (str (if first? "if (" "else if (") (expr-str c 16 m i) ")"))
+                       (do (line b (str (if first? (str "if (" (sel-init m)) "else if (") (expr-str c 16 m i) ")"))
                            (branch! b s (contains? (:c/bare m) (inc i)))
                            (recur (nnext cl) false (+ i 2)))))))
-          switch (do (line b (str "switch (" (expr-str (first args) 16 m 1) ")")) (block! b (rest args) (:c/bare m)))
+          switch (do (line b (str "switch (" (sel-init m) (expr-str (first args) 16 m 1) ")")) (block! b (rest args) (:c/bare m)))
           while (do (line b (str "while (" (expr-str (first args) 16 m 1) ")")) (block! b (rest args) (:c/bare m)))
           do-while (do (line b "do") (block! b (rest args) (:c/bare m)) (line b (str "while (" (expr-str (first args) 16 m 1) ");")))
           for (let [[init c st & body] args
@@ -701,8 +728,14 @@
                     ss (if (= st '_) "" (str " " (expr-str st 16 m 3)))]
                 (line b (str "for (" (for-init init) cs ";" ss ")"))
                 (block! b body (:c/bare m)))
-          label (outdent b (str attr (name (first args)) ":" (when (or (nil? nxt) (and (seq? nxt) (= 'let (first nxt)))) " ;")))
-          case (outdent b (str attr "case " (expr-str (first args) 15 m 1) (when (second args) (str " ... " (expr-str (second args) 15 m 2))) ":"
+          label (let [as (:c/attrs m)]
+                  (if (and (nil? nxt) (seq as) (every? #(and (seq? %) (= '__attribute__ (first %))) as))
+                    ;; GNU's attributes of a label stand after its colon: a label ending its block (C23 6.8.2) with them
+                    ;; (c23-labels-3.c's `e: __attribute__((unused))`), no null statement after it, which would take them
+                    (outdent b (str (name (first args)) ": " (attrs-str as)))
+                    (outdent b (str attr (name (first args)) ":" (when (or (nil? nxt) (and (seq? nxt) (= 'let (first nxt)))) " ;")))))
+          ;; a range's end may be nullptr, nil (c23-nullptr-6.c's `case 1 ... nullptr:`): the form's length tells a range
+          case (outdent b (str attr "case " (expr-str (first args) 15 m 1) (when (next args) (str " ... " (expr-str (second args) 15 m 2))) ":"
                                (when (or (nil? nxt) (and (seq? nxt) (= 'let (first nxt)))) " ;")))
           default (outdent b (str attr "default:" (when (or (nil? nxt) (and (seq? nxt) (= 'let (first nxt)))) " ;")))
           goto (line b (str "goto " (name (first args)) ";"))

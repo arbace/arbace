@@ -26,7 +26,7 @@
 (defmacro ^:private with-types [& body]
   `(binding [chk/*cx* (merge {:ldouble-size 8} *cfg*)] ~@body))
 
-(declare cparts cmake complex? seq-node temp-i frame-temp new-slot! var-size? vmem-of dyn-member dyn-copy ex-neg)
+(declare build-nested cparts cmake complex? seq-node temp-i frame-temp new-slot! var-size? vmem-of dyn-member dyn-copy ex-neg vec-type? vec-binary vec-unary held vec-build lane-node vec-shape vec-as-array)
 
 (defn- refuse [cls & msg]
   (throw (ex-info (apply str msg) {:ci/refused cls})))
@@ -70,7 +70,8 @@
                    (and (chk/int-type? pt) (not (wide? pt))) :m
                    :else (refuse :complex "the complex type " (chk/tstr t) " (deferred)")))
       (:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
-      :vector (refuse :by-design "GNU vector types (SPEC §14)")
+      ;; GNU vector types (CS320 (a)): lanes in memory, an aggregate's address
+      :vector :m
       :fn :i
       (if (wide? t) :w :i))))
 
@@ -102,7 +103,11 @@
 (defn- fty [t] (if (f32? t) "f32" "f64"))
 
 (defn- ptr? [t] (#{:ptr :nullptr} (:k (under t))))
-(defn- unsigned-ty? [^String s] (#{"u8" "u16" "u32" "u64" "b" "p"} s))
+(defn- unsigned-ty?
+  "Whether a machine name (ity's) is unsigned: an unsigned _BitInt(N)'s uN too (a bit-field of one read back sign-extended
+  before, bitint-34.c)."
+  [^String s]
+  (boolean (or (#{"u8" "u16" "u32" "u64" "b" "p"} s) (re-matches #"u\d+" s))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The program being built
@@ -158,6 +163,11 @@
 
 (def ^:dynamic *u* nil)       ; the unit: {:idx :results :std}
 (def ^:dynamic *f* nil)       ; the function: its state (an atom)
+;; GNU nested functions (CS321 (a)): the enclosing functions' states (atoms, outermost first), the nested functions of the
+;; top-level function being built (an atom: name -> {:key :name :depth :g}), and their code commands (an ArrayList)
+(def ^:dynamic *outer* [])
+(def ^:dynamic *nested* nil)
+(def ^:dynamic *nested-out* nil)
 
 (defn- emit! [cmd] (.add ^ArrayList (:out *p*) cmd))
 
@@ -344,24 +354,33 @@
         [:w :w] {:k :w :t t :n (if (= (wty t) (wty ft)) n (list 'w2w (wty t) (wty ft) n))}
         [:w :f] {:k :f :t t :n (list 'w2f (wty ft) (if (f32? t) 1 0) n)}
         [:f :w] {:k :w :t t :n (list 'f2w (wty t) n)}
+        ;; a vector cast to a vector or a scalar of its size, or a scalar to a vector: its bits (GNU's rule)
         [:m :m] (assoc x :t t)
-        [:i :m] (if (= :union (:k (under t)))
+        [:m :i] (if (vec-type? ft)
+                  {:k :i :t t :n (list 'ld (ity t) n)}
+                  {:k :i :t t :n n}) ; an array's address
+        [:m :f] (if (vec-type? ft) {:k :f :t t :n (list 'fld (fty t) n)} (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
+        [:m :w] (if (vec-type? ft) {:k :w :t t :n (list 'wld (wty t) n)} (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
+        [:i :m] (if (vec-type? t)
+                  (let [tmp (frame-temp t)] {:k :m :t t :n (list 'seq [(list 'ei (list 'zero tmp (size-of t))) (list 'ei (list 'st (ity ft) tmp n))] tmp)})
+                  (if (= :union (:k (under t)))
                   ;; GNU's cast to a union: the member of the operand's type
                   (let [m (or (first (filter #(with-types (chk/compatible? (unq (:t %)) (unq ft))) (:members (into {} (:rec (under t))))))
                               (refuse :conversion "a cast to a union without a member of type " (chk/tstr ft)))
                         tmp (frame-temp t)]
                     {:k :m :t t :n (list 'seq [(list 'ei (list 'zero tmp (size-of t))) (list 'ei (list 'st (ity (:t m)) tmp n))] tmp)})
-                  (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
+                  (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t))))
         [:f :m] (if (= :union (:k (under t)))
                   (let [m (or (first (filter #(with-types (chk/compatible? (unq (:t %)) (unq ft))) (:members (into {} (:rec (under t))))))
                               (refuse :conversion "a cast to a union without a member of type " (chk/tstr ft)))
                         tmp (frame-temp t)]
                     {:k :m :t t :n (list 'seq [(list 'ei (list 'zero tmp (size-of t))) (list 'ef (list 'fst (fty (:t m)) tmp n))] tmp)})
                   (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
-        [:m :i] {:k :i :t t :n n} ; an array's address
         (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t))))))
 
 (defn- complex? [t] (= :complex (:k (under t))))
+
+(defn vec-type? [t] (= :vector (:k (unq t))))
 
 (declare temp-i frame-temp seq-node)
 
@@ -530,7 +549,10 @@
               (:static (:m e)) {:loc :static :idx (static-idx [:local (:id e)] (size-of t) (obj-align e t)
                                                                 (let [c (contains? (chk/quals t) :const)]
                                                                   (if (and (:thread_local (:m e)) (not c)) :tls c)))}
-              (or (and (= :array (:k (unq t))) (:vla (unq t))) (var-size? t)) {:loc :vla :slot (new-slot! :i) :size (new-slot! :i)}
+              (or (and (= :array (:k (unq t))) (:vla (unq t))) (var-size? t))
+              (cond-> {:loc :vla :slot (new-slot! :i) :size (new-slot! :i)}
+                ;; a VLA a nested function uses (CS321 (a)): its address mirrored in the frame's memory
+                (contains? (:addressed @*f*) (:name e)) (assoc :mirror (frame-alloc! 8 8)))
               (addressed? (:name e) t) (let [al (obj-align e t)]
                                          ;; the frame's base is 16-aligned (go/arbace/ci's Enter and Call): an object aligned
                                          ;; more takes al - 16 bytes more and its address is rounded up at run time (queue 173)
@@ -558,8 +580,56 @@
         n (max 1 (or (try (size-of t) (catch Exception _ nil)) 1))]
     (try [n (obj-align e t)] (catch Exception x [nil nil (str (.getName (class x)) ": " (.getMessage x))]))))
 
+(defn- nested-of
+  "The nested function an entry names (CS321 (a)), or nil."
+  [e]
+  (when (and *nested* e (= :fn (:kind e)) (false? (:file-scope e)))
+    (get @*nested* (:name e))))
+
 (defn- fn-ref [e]
-  (fn-id (global-key e) (:name e)))
+  (if-let [nf (nested-of e)]
+    (fn-id (:key nf) (:name nf))
+    (fn-id (global-key e) (:name e))))
+
+(defn- chain-to
+  "The frame base of the enclosing function at depth d (0 the top-level one) as the current function reaches it: its own
+  frame, else up the static chain (each nested function's frame keeps its parent's base at its :chain-off)."
+  [d]
+  (let [states (conj (vec *outer*) *f*)
+        dc (dec (count states))]
+    (when (> d dc) (refuse :builder "a static chain to a deeper function"))
+    (loop [lvl dc node '(fp 0)]
+      (if (= lvl d)
+        node
+        (let [off (:chain-off @(nth states lvl))]
+          (recur (dec lvl) (list 'ld "u64" (if (= node '(fp 0)) (list 'fp off) (list 'adds node (list 'i off) 1)))))))))
+
+(defn- chain-store
+  "The effect giving the nested function nf its static chain (its parent's frame base) before a call or its address."
+  [nf]
+  (list 'ei (list 'st "u64" (list 'g (:g nf)) (chain-to (dec (long (:depth nf)))))))
+
+(defn- outer-place
+  "An enclosing function's local (CS321 (a)) as the current, nested function reaches it: in that frame's memory."
+  [e t]
+  (let [states (vec *outer*)]
+    (first (keep
+            (fn [d]
+              (when-let [loc (get (:locals @(nth states d)) (:id e))]
+                (case (:loc loc)
+                  :static {:mode :mem :a (list 'g (:idx loc)) :t t}
+                  :mem (let [base (chain-to d)
+                             a (if (= base '(fp 0)) (list 'fp (:off loc)) (list 'adds base (list 'i (:off loc)) 1))
+                             a (if-let [al (:align-up loc)]
+                                 (list 'bin "and" "u64" (list 'bin "add" "u64" a (list 'i (dec (long al)))) (list 'i (- (long al))))
+                                 a)]
+                         {:mode :mem :a a :t t})
+                  :vla (if-let [m (:mirror loc)]
+                         (let [base (chain-to d)]
+                           {:mode :mem :t t :a (list 'ld "u64" (if (= base '(fp 0)) (list 'fp m) (list 'adds base (list 'i m) 1)))})
+                         (refuse :builder "an enclosing function's VLA without its mirror: " (:name e)))
+                  (refuse :builder "an enclosing function's local kept outside memory: " (:name e)))))
+            (reverse (range (count states)))))))
 
 (defn- global-obj-idx
   "A file-scope object's (or a block-scope extern's) static index: allocated by the program's linking
@@ -639,6 +709,8 @@
       :array (boolean (or (:vla t) (vm? (:of t))))
       :ptr (vm? (:to t))
       (:struct :union) (boolean (#'chk/vm-type? t))
+      ;; a nested function returning a variably modified type (CS321 (a), gnu23-varmod-2)
+      :fn (vm? (:ret t))
       false)))
 
 (defn- var-size? "Whether a type's size is the run time's (a VLA, a structure holding one)." [t] (chk/var-size? t))
@@ -854,7 +926,7 @@
   "The place a[i] of element type t (i[a] too)."
   [a i t]
   (let [ra (res-of a) ta (chk/decay (unq (:t ra)))
-        [base idx] (if (ptr? ta) [a i] [i a])
+        [base idx] (if (or (ptr? ta) (vec-type? ta)) [a i] [i a])
         bn (ex base)
         in (conv (ex idx) chk/t-long)
         d (when (vm? t) (rt-dscale (rtt-of base)))]
@@ -890,7 +962,8 @@
                     :static {:mode :mem :a (list 'g (:idx loc)) :t t}
                     :vla {:mode :mem :a (list 'il (:slot loc)) :t t})
               (#{:x :i} (:linkage e)) {:mode :mem :a (list 'g (global-obj-idx e)) :t t}
-              :else (refuse :checker "a local outside its function: " nm)))))
+              :else (or (when (seq *outer*) (outer-place e t))
+                        (refuse :checker "a local outside its function: " nm))))))
       (seq? f)
       (let [[h & args] f]
         (cond
@@ -904,7 +977,13 @@
                 mm (if (:voff mm) (dyn-member mm (rtt-of base)) mm)]
             (member-place bp mm t))
           (= h 'compound-lit) (compound-lit-place f)
-          (#{'real 'imag} h) (refuse :by-design "__real__ and __imag__ (SPEC §14)")
+          ;; GNU's __real__ and __imag__ as lvalues (h-c-run): a complex object's parts, the real part first (C23 6.2.5)
+          (#{'real 'imag} h)
+          (let [bt (:t (res-of (first args)))
+                bp (when (complex? bt) (place (first args)))]
+            (if (= :mem (:mode bp))
+              {:mode :mem :t t :a (if (= h 'real) (:a bp) (list 'adds (:a bp) '(i 1) (size-of (under (:of (under bt))))))}
+              (refuse :builder "__real__ or __imag__ of a non-complex place")))
           (string-form? f) {:mode :mem :t t :a (:n (ex f))}
           (= h 'c/expr) (place (first args))
           (= h '?) {:mode :mem :t t :a (:n (ex f))} ; GNU's lvalue conditional of aggregates
@@ -1016,9 +1095,87 @@
               :f (list 'fcmp o (:n a) (:n b))
               :w (list 'wcmp o (wty ot) (:n a) (:n b)))}))))))
 
+;; ---------------------------------------------------------------------------------------------
+;; GNU vector types (CS320 (a), the user 2026-11-17; doc/C23-SURVEY.md, "As built: GNU vector types"): a vector is an
+;; aggregate of lanes in memory (kind :m, its address), its operators lane by lane into a temporary of the result type,
+;; a scalar operand broadcast to every lane; comparisons give each lane 0 or -1 in the signed integer of the lane's size.
+
+
+(defn- vec-shape
+  "A vector type's [lane type, lane size, lane count]."
+  [t]
+  (let [t (unq t) et (under (:of t)) es (size-of et)]
+    [et es (quot (size-of t) es)]))
+
+(defn- lane-place [a et es i] {:mode :mem :t et :a (if (zero? i) a (list 'adds a (list 'i i) es))})
+
+(defn- held
+  "A node evaluated once: [effects node-to-use]; an aggregate's address or a scalar into a slot."
+  [x]
+  (case (:k x)
+    (:i :m) (let [s (temp-i)] [[(list 'ei (list 'is s (:n x)))] (assoc x :n (list 'il s))])
+    :f (let [s (new-slot! :f)] [[(list 'ef (list 'fs s (:n x)))] (assoc x :n (list 'fl s))])
+    :w (let [tmp (frame-temp (:t x))] [[(list 'ew (list 'wst (wty (:t x)) tmp (:n x)))] (assoc x :n (list 'wld (wty (:t x)) tmp))])))
+
+(defn- lane-node
+  "Lane i of the held operand x (a vector's address), or x itself broadcast (a scalar)."
+  [x i]
+  (if (vec-type? (:t x))
+    (let [[et es] (vec-shape (:t x))] (place-load (lane-place (:n x) et es i)))
+    x))
+
+(defn- vec-build
+  "A vector of type vt whose lane i is (lane-fn i) (a node of the lane's type or convertible to it), after effects pre."
+  [vt pre lane-fn]
+  (let [[et es n] (vec-shape vt)
+        tmp (frame-temp vt)
+        sts (for [i (range n)]
+              (let [x (conv (lane-fn i) et)
+                    pl (lane-place tmp et es i)]
+                (effect (place-store pl x))))]
+    {:k :m :t vt :n (list 'seq (vec (concat pre sts)) tmp)}))
+
+(defn- cmp-lane-type
+  "The lane type of a vector comparison's result: the signed integer of the lane's size."
+  [es]
+  (case (long es) 1 {:k :schar} 2 {:k :short} 4 chk/t-int 8 chk/t-long))
+
+(defn- vec-binary
+  "The operator h over x and y, one of them a vector, the result of type rt (the checker's)."
+  [h x y rt]
+  (let [vt (if (vec-type? (:t x)) (unq (:t x)) (unq (:t y)))
+        [et es n] (vec-shape vt)
+        [px hx] (held x) [py hy] (held y)
+        pet (promoted {:t et})
+        cmp? (#{'== '!= '< '<= '> '>=} h)
+        rt (if (and cmp? (not (vec-type? rt))) {:k :vector :of (cmp-lane-type es) :n (size-of vt)} (unq rt))
+        rt (if (and cmp? (not= (size-of (:of (unq rt))) es)) {:k :vector :of (cmp-lane-type es) :n (size-of vt)} rt)
+        [ret] (vec-shape rt)]
+    (vec-build rt (vec (concat px py))
+               (fn [i]
+                 (let [a (conv (lane-node hx i) et) b (lane-node hy i)]
+                   (cond
+                     cmp? (let [c (compare-nodes h a (conv b et) {:t et} {:t et})]
+                            {:k :i :t ret :n (list 'neg (ity ret) (:n (conv c ret)))})
+                     (#{'<< '>>} h) (shift h (conv a pet) (conv b chk/t-long))
+                     :else (arith h a (conv b et) pet)))))))
+
+(defn- vec-unary
+  "A unary operator over a vector: -, ~, +."
+  [h x]
+  (let [vt (unq (:t x)) [et] (vec-shape vt) [px hx] (held x) pet (promoted {:t et})]
+    (vec-build vt px
+               (fn [i]
+                 (let [a (conv (lane-node hx i) pet)]
+                   (case h
+                     - (case (:k a) :f {:k :f :t pet :n (list 'fneg (:n a))} (ex-neg a))
+                     bit-not {:k :i :t pet :n (list 'bnot (ity pet) (:n a))}
+                     a))))))
+
 (defn- binary [h x y rx ry rt]
   (let [tx (chk/decay (unq (:t x))) ty (chk/decay (unq (:t y)))]
     (cond
+      (or (vec-type? tx) (vec-type? ty)) (vec-binary h x y rt)
       (#{'== '!= '< '<= '> '>=} h) (compare-nodes h x y rx ry)
       (#{'<< '>>} h) (shift h (conv x (promoted rx)) y)
       ;; a pointer to a variably modified type steps by its run-time size (:rtt, with-rtt's; queue 165)
@@ -1095,6 +1252,7 @@
                        [pl rpre])
             old (place-load pl)
             nv (cond
+                 (or (vec-type? pt) (vec-type? (:t ev))) (vec-binary op old ev pt)
                  (and (ptr? pt) (#{'+ '-} op))
                  (let [i (:n (conv (if (= op '-) (ex-neg (conv ev chk/t-long)) ev) chk/t-long))]
                    {:k :i :t pt :n (if-let [d (rt-dscale (rtt-of pl-f))] (adds-dyn (:n old) i d) (list 'adds (:n old) i (ptr-target-size pt)))})
@@ -1230,7 +1388,8 @@
         (some? (:v r)) (if (and e (= :obj (:kind e)) (not (:constexpr (:m e))))
                          (place-load (place f))
                          {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r))})
-        (and e (= :fn (:kind e))) {:k :i :t (chk/ptr (:t r)) :n (list 'fa (fn-ref e))}
+        (and e (= :fn (:kind e))) (let [x {:k :i :t (chk/ptr (:t r)) :n (list 'fa (fn-ref e))}]
+                                    (if-let [nf (nested-of e)] (seq-node [(chain-store nf)] x) x))
         (and (nil? e) (:builtin r)) (refuse :builtin "the builtin " (:builtin r) " as a value")
         :else (let [pl (place f)
                     x (place-load pl)]
@@ -1251,13 +1410,14 @@
             (+ - * / % << >> bit-and bit-or bit-xor)
             (if (= 1 n)
               (let [x (ex (first args)) pt (promoted (res-of (first args)))]
+                (if (vec-type? (:t x)) (vec-unary h x)
                 (case h
                   + (conv x pt)
                   - (let [x (conv x pt)]
                       (if (complex? pt)
                         (let [[p re im] (cparts x)] (cmake pt (part-neg re) (part-neg im) p))
                         (case (:k x) :f {:k :f :t pt :n (list 'fneg (:n x))} (ex-neg x))))
-                  (refuse :forms "unary " h)))
+                  (refuse :forms "unary " h))))
               (loop [acc (with-rtt (first args) (ex (first args))) racc (res-of (first args)) xs (next args)]
                 (if xs
                   (let [y (with-rtt (first xs) (ex (first xs))) ry (res-of (first xs))
@@ -1271,7 +1431,8 @@
                        {:k :i :t chk/t-int :n (list 'cv "b" (truth (ex (first args))))} (rest args))
             not {:k :i :t chk/t-int :n (list 'lnot (truth (ex (first args))))}
             bit-not (let [x (conv (ex (first args)) t)]
-                      (case (if (complex? t) :c (:k x))
+                      (case (cond (vec-type? t) :vec (complex? t) :c :else (:k x))
+                        :vec (vec-unary 'bit-not x)
                         :c (let [[p re im] (cparts x)] (cmake t re (part-neg im) p))
                         :i {:k :i :t t :n (list 'bnot (ity t) (:n x))}
                         :w {:k :w :t t :n (list 'wnot (wty t) (:n x))}))
@@ -1279,7 +1440,8 @@
                        ra (res-of a)]
                    (cond
                      (and (or (symbol? a) (and (seq? a) (= 'c/id (first a)))) (= :fn (:kind (:entry ra))))
-                     {:k :i :t t :n (list 'fa (fn-ref (:entry ra)))}
+                     (let [x {:k :i :t t :n (list 'fa (fn-ref (:entry ra)))}]
+                       (if-let [nf (nested-of (:entry ra))] (seq-node [(chain-store nf)] x) x))
                      (and (seq? a) (= 'arbace.core/deref (first a))) (assoc (ex-as (second a) :i) :t t)
                      :else (let [pl (if (and (seq? a) (= '-> (first a))) (arrow-place a) (place a))]
                              (when-not (= :mem (:mode pl)) (refuse :builder "the address of a register place " (pr-str a)))
@@ -1310,7 +1472,7 @@
             aset (let [[a i v] args
                        ra (res-of a) ri (res-of i)
                        ta (chk/decay (unq (:t ra))) ti (chk/decay (unq (:t ri)))
-                       et (unq (:to (if (ptr? ta) ta ti)))
+                       et (cond (vec-type? ta) (unq (:of ta)) (vec-type? ti) (unq (:of ti)) :else (unq (:to (if (ptr? ta) ta ti))))
                        pl (aget-place a i et)]
                    (place-store pl (conv (ex v) et)))
             (inc! dec! pre-inc! pre-dec!) (incdec f)
@@ -1382,11 +1544,20 @@
                          slot {:k :i :t t :n (list 'vaarg aa (cond vs 8 (= :m (kind t)) (size-of t) :else (max 8 (size-of t))))}]
                      ;; a type of variable size arrives by reference (arg-node, CS106)
                      (place-load {:mode :mem :a (if vs (list 'ld "u64" (:n slot)) (:n slot)) :t t}))
-            label-addr {:k :i :t t :n (list 'labaddr (label-code! (first args)))}
+            label-addr (let [l (first args)
+                             ;; an enclosing function's label (CS321 (a)): its code there, a label value of that function
+                             owner (when (and (seq *outer*) (not (contains? (:own-labels @*f*) l)))
+                                     (first (filter #(contains? (:own-labels @%) l) (rseq (vec *outer*)))))]
+                         {:k :i :t t :n (list 'labaddr (if owner (binding [*f* owner] (label-code! l)) (label-code! l)))})
             c/call (call-node f (first args) (rest args) r)
             c/expr (ex (first args))
             c/effect {:k :v :t chk/t-void :n (first args)}
-            (real imag) (refuse :by-design "__real__ and __imag__ (SPEC §14)")
+            ;; GNU's __real__ and __imag__ (h-c-run): a complex operand's part; of a real operand, the operand itself and 0
+            (real imag) (let [x (ex (first args))]
+                          (cond
+                            (complex? (:t x)) (let [[pre re im] (cparts x)] (seq-node pre (if (= h 'real) re im)))
+                            (= h 'real) x
+                            :else (seq-node [(effect x)] (conv {:k :i :t chk/t-int :n '(i 0)} t))))
             imaginary (let [v (first args)
                             ;; (imaginary 2.0), (imaginary (lit float 2.0)): 2.0i, 2.0fi
                             [v ft] (if (and (seq? v) (= 'lit (first v)))
@@ -1394,7 +1565,9 @@
                                      [v chk/t-double])
                             t (if (complex? t) t {:k :complex :of ft})]
                         (cmake t {:k :f :t chk/t-double :n '(f 0)} {:k :f :t chk/t-double :n (list 'f (fbits (double v)))} []))
-            convertvector (refuse :by-design "GNU vector types (SPEC §14)")
+            ;; __builtin_convertvector (CS320 (a)): each lane converted to the result's lane type
+            convertvector (let [x (ex (first args)) [px hx] (held x)]
+                            (vec-build t px (fn [i] (lane-node hx i))))
             bit-cast (let [[_ e] args x (ex e)
                            tmp (frame-temp t)]
                        (refuse :builder "__builtin_bit_cast"))
@@ -1437,7 +1610,9 @@
     "log2f" "log2l" "exp2f" "exp2l" "truncl" "roundl" "rintf" "rintl" "nearbyintf" "nearbyintl" "cbrtf" "cbrtl" "expm1f"
     "expm1l" "log1pf" "log1pl" "logbf" "logbl" "fminl" "fmaxl" "hypotf" "hypotl" "fdimf" "fdiml" "remainderf" "remainderl"
     "fmaf" "fmal" "ilogbf" "ilogbl" "lroundf" "lroundl" "lrintf" "lrintl" "llroundf" "llroundl" "llrintf" "llrintl"
-    "scalbnf" "scalbnl"})
+    "scalbnf" "scalbnl"
+    ;; h-c-run: the complex functions' float and long double spellings (20020411-1's __builtin_conjf)
+    "conjf" "conjl" "crealf" "creall" "cimagf" "cimagl" "cabsf" "cabsl" "cproj" "cprojf" "cprojl" "carg" "cargf" "cargl"})
 
 (def ^:private builtin-natives
   ;; builtins whose meaning is the machine's: natives of tools' natives table (go/arbace/ci/builtins.ae)
@@ -1544,6 +1719,26 @@
     {:k :v :t chk/t-void
      :n (list 'ei (list 'seq (vec (cons (list 'ei (list 'is s (:n (ex-as p :i)))) sts)) '(i 0)))}))
 
+(defn- vec-shuffle
+  "GNU's __builtin_shuffle (a, [b,] mask) and __builtin_shufflevector (a, b, i...) (CS320 (a)): the inputs copied side
+  by side into one temporary, each result lane loaded from it at its index (modulo the lanes there, as gcc does)."
+  [nm args t]
+  (let [sv (= nm "__builtin_shufflevector")
+        ins (if sv (take 2 args) (if (= 3 (count args)) (take 2 args) (take 1 args)))
+        xs (mapv ex ins)
+        vt (unq (:t (first xs)))
+        [et es n] (vec-shape vt)
+        total (* n (count xs))
+        both (frame-temp {:k :vector :of et :n (* es total)})
+        copies (map-indexed (fn [j x] (list 'ei (list 'copy (if (zero? j) both (list 'adds both (list 'i (* j n)) es)) (:n x) (* es n)))) xs)
+        [pm hm] (if sv [[] nil] (held (ex (last args))))
+        idx (fn [i]
+              (if sv
+                (let [v (:v (res-of (nth args (+ 2 i))))] (list 'i (mod (long (or v 0)) total)))
+                (list 'bin "and" "i64" (:n (conv (lane-node hm i) chk/t-long)) (list 'i (dec total)))))]
+    (vec-build t (vec (concat copies pm))
+               (fn [i] (place-load {:mode :mem :t et :a (list 'adds both (idx i) es)})))))
+
 (defn- builtin-call
   "A call of a builtin by name, or nil when it is an ordinary call."
   [^String nm args r]
@@ -1580,6 +1775,20 @@
       ("__builtin_nans" "__builtin_nansf" "__builtin_nansl") {:k :f :t t :n (list 'f (fbits Double/NaN))}
       ;; queue 126: its operand's value at its operand's type (the checker's); reassociation is not the builder's
       "__builtin_assoc_barrier" (conv (ex (first args)) t)
+      ("__builtin_shuffle" "__builtin_shufflevector") (vec-shuffle nm args t)
+      ;; CS320 (a): SSE2's cmp*pd (each lane all ones where the comparison holds, in the operands' type) and movmskp[ds] (the
+      ;; lanes' sign bits, lane 0 the lowest)
+      ("__builtin_ia32_cmplepd" "__builtin_ia32_cmpltpd" "__builtin_ia32_cmpeqpd")
+      (let [[a b] (mapv ex args) [es] (rest (vec-shape (:t a)))
+            m (vec-binary (case nm "__builtin_ia32_cmplepd" '<= "__builtin_ia32_cmpltpd" '< '==) a b
+                          {:k :vector :of (cmp-lane-type es) :n (size-of (:t a))})]
+        (assoc m :t t))
+      ("__builtin_ia32_movmskpd" "__builtin_ia32_movmskps")
+      (let [x (ex (first args)) [px hx] (held x) [_ es n] (vec-shape (:t x)) it (cmp-lane-type es)
+            bits (for [i (range n)]
+                   (let [l (conv (place-load (lane-place (:n hx) it es i)) chk/t-long)]
+                     (list 'bin "shl" "i64" (list 'bin "and" "i64" (list 'bin "shr" "u64" (:n l) '(i 63)) '(i 1)) (list 'i i))))]
+        {:k :i :t chk/t-int :n (:n (conv {:k :i :t chk/t-long :n (list 'seq px (reduce (fn [acc b] (list 'bin "or" "i64" acc b)) bits))} chk/t-int))})
       ;; queue 126: always the checker's constant; __atomic_is_lock_free's when it folded, else the native's call
       "__atomic_always_lock_free" {:k :i :t chk/t-bool :n (list 'i (or (:v r) 0))}
       "__builtin_clear_padding" (clear-padding-call (first args))
@@ -1879,8 +2088,9 @@
                                     args))
             callee (or direct (list 'ei (:n (ex-as h :i))))
             callee (if direct callee (:n (ex-as h :i)))
-            rk (kind t)]
-        (case rk
+            rk (kind t)
+            nf (when (and direct e (not lib)) (nested-of e))]
+        (cond->> (case rk
           ;; LLS21 (a), abi-punning: a call through a function pointer reads the result at the pointer's return type, as the
           ;; register holds it (gcc's code reads eax whatever the callee's own type): the callee's wider or other-signed
           ;; result is truncated to that width
@@ -1891,7 +2101,9 @@
           :w {:k :w :t t :n (list 'wcall callee argns)}
           :v {:k :v :t t :n (list 'ecall callee argns)}
           :m (let [tmp (frame-alloc! (size-of t) (align-of t))]
-               {:k :m :t t :n (list 'call callee argns 1 tmp)}))))))
+               {:k :m :t t :n (list 'call callee argns 1 tmp)}))
+          ;; a nested function's static chain set before its call (CS321 (a))
+          nf (seq-node [(chain-store nf)]))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Initializers (6.7.11): the stores that give an object its initial value
@@ -1937,7 +2149,7 @@
   "The stores of a braced list els into the object of type t at a: [stores rest]. braced: the list is
   this object's own braces (designators apply here); else elided (a designator ends it)."
   [t a els braced]
-  (let [t (unq t)
+  (let [t (vec-as-array (unq t))
         ;; each subobject's stores as one entry [key stores] (key: the element's index, the member's, a union's 0; nil for a
         ;; write into a part of it): a later whole write of the same subobject drops the earlier entry, its side effects
         ;; with it, as gcc's c-typeck.cc does (output_init_element's "initialized field with side-effects overwritten";
@@ -2024,6 +2236,9 @@
       ;; a scalar in braces: its first element
       (let [[st rst] (fill t a els false)] [st rst]))))
 
+;; CS320 (a): a vector's initializer is its lanes', as an array's
+(defn- vec-as-array [t] (if (vec-type? t) (let [[et _ n] (vec-shape t)] {:k :array :of et :n n}) t))
+
 (defn- anon-members
   "A record type's members, an anonymous member's own members among them."
   [t]
@@ -2034,7 +2249,7 @@
 (defn- fill-designated
   "A designator path's rest `ds` into the object of type t at a, given the value v: [stores]."
   [t a ds v]
-  (let [d (first ds) t (unq t)]
+  (let [d (first ds) t (vec-as-array (unq t))]
     (cond
       (empty? ds) (fill t a [v] true)
       (keyword? d) (let [subs (subobjects t)
@@ -2070,7 +2285,9 @@
       (= :m k)
       (let [rx (res-of x)
             xt (unq (:t rx))]
-        (if (and (#{:struct :union} (:k xt)) (with-types (chk/compatible? (unq xt) t)))
+        (if (or (and (#{:struct :union} (:k xt)) (with-types (chk/compatible? (unq xt) t)))
+                ;; a vector from a vector expression (CS320 (a)): its bits
+                (and (vec-type? t) (vec-type? xt)))
           [[(list 'ei (list 'copy a (:n (ex-as x :i)) (size-of t)))] (rest els)]
           (fill-list t a els false)))
       :else [(elem-store t a x nil) (rest els)])))
@@ -2113,12 +2330,14 @@
 (defn- vla-alloc [vsize loc]
   ;; the VLA's size in bytes (its type elaborated: elab's :vsize) on the stack; the storage of the declaration's
   ;; previous execution, and of its block's previous entry, freed (CS106: ci's VlaAlloc, VlaMark)
-  (let [size (list 'is (:size loc) vsize)]
+  (let [size (list 'is (:size loc) vsize)
+        set (fn [x] (let [st (list 'is (:slot loc) x)]
+                      (list 'x (list 'ei (if-let [m (:mirror loc)] (list 'st "u64" (list 'fp m) st) st)))))]
     (if *vla-block*
       (let [[_ l] (or @*vla-block* (reset! *vla-block* [(new-slot! :i) (new-slot! :i)]))
             md (new-slot! :i) ed (new-slot! :i)]
-        (list 'x (list 'ei (list 'is (:slot loc) (list 'vlalloc md ed l size)))))
-      (list 'x (list 'ei (list 'is (:slot loc) (list 'alloca size)))))))
+        (set (list 'vlalloc md ed l size)))
+      (set (list 'alloca size)))))
 
 (defn- local-decl
   "A block's declaration: the statements it runs."
@@ -2186,16 +2405,195 @@
     c/group (let [base (second d)
                   pre (if-let [[kind r] (struct-def base)] (first (elab base {:k kind :rec r} false)) [])]
               (into pre (mapcat local-decl (drop 2 d))))
-    c/defn (refuse :by-design "GNU nested functions (SPEC §14)")
+    ;; GNU nested functions (CS321 (a)): its code built where it stands, a command of its own (*nested-out*)
+    c/defn (do (.add ^ArrayList *nested-out* (build-nested d)) [])
     []))
 
 (defn- empty-asm?
-  "An asm statement whose template is empty (a compiler barrier: __asm__(\"\" : \"+r\"(x) : : \"memory\"))."
+  "An asm statement whose template is empty (a compiler barrier: __asm__(\"\" : \"+r\"(x) : : \"memory\")), or one
+  lower-asms made into C forms (:ci/lowered)."
   [f]
   (let [t (str (second f))]
     ;; an empty template with an output (\"=r\") may move a value: not a barrier
-    (boolean (and (re-find #"^\s*(__asm__|__asm|asm)\s*(__volatile__|volatile|__volatile)?\s*\(\s*\"\"" t)
-                  (not (re-find #"\"=" t))))))
+    (boolean (or (:ci/lowered (meta f))
+                 (and (re-find #"^\s*(__asm__|__asm|asm)\s*(__volatile__|volatile|__volatile)?\s*\(\s*\"\"" t)
+                      (not (re-find #"\"=" t)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Empty asm templates with operands as C forms (h-c-run, 2026-11-17; doc/C23-SURVEY.md, "As built: empty asm
+;; operands"): an asm statement whose template is empty runs no instruction, so its meaning is its operands' alone,
+;; gcc's register allocation made explicit: each input and each output's place evaluated once, an output tied to an
+;; input (\"=r\"(i) : \"0\"(x)) given that input's value converted to the output's type (the low part of a wider
+;; register, 20030222-1), a read-write (\"+r\") or untied output left as it is (gcc's -O0 leaves the memory, the
+;; register's value is no one's). The operands are the c/asm's text (CS76 (a): the forms keep the statement as text),
+;; so their expressions are parsed here, a small grammar (names, integer constants, calls, members, subscripts,
+;; unary & * - ! ~, binary + - * / %, parentheses); a statement outside it (a cast, asm goto, two outputs tied, a
+;; non-empty template) stays the refusal it was. The c/asm itself is kept, marked :ci/lowered, for the checker's
+;; operand checks (CS160).
+
+(def ^:private asm-tok-re
+  #"\s+|\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[A-Za-z_]\w*|\.?\d(?:[eEpP][+-]|[\w.])*|->|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||::|[-+*/%&|^!~<>=?:;,.()\[\]{}]")
+
+(defn- asm-tokens
+  "The text's tokens (`::` split into two colons, the operands' separator), or nil on a character outside them."
+  [^String t]
+  (let [m (re-matcher asm-tok-re t)]
+    (loop [pos 0 out []]
+      (if (= pos (count t))
+        out
+        (when (and (.find m pos) (= pos (.start m)))
+          (let [x (.group m)]
+            (recur (.end m) (cond (str/blank? x) out (= x "::") (conj out ":" ":") :else (conj out x)))))))))
+
+(defn- asm-int
+  "An integer constant token's form: a number when it has no suffix and int holds it, else (lit TYPE v); nil otherwise."
+  [^String x]
+  (when-let [[_ body suf] (re-matches #"(?i)(0x[0-9a-f]+|0[0-7]*|[1-9]\d*)(u|l|ul|lu|ll|ull|llu)?" x)]
+    (let [v (cond (re-find #"^(?i)0x" body) (Long/parseLong (subs body 2) 16)
+                  (and (> (count body) 1) (= \0 (first body))) (Long/parseLong (subs body 1) 8)
+                  :else (Long/parseLong body))
+          suf (some-> suf str/lower-case)
+          ty (case suf nil nil "u" 'unsigned ("l") 'long ("ul" "lu") 'unsigned-long "ll" 'long-long ("ull" "llu") 'unsigned-long-long)]
+      (cond ty (list 'lit ty v)
+            (<= v Integer/MAX_VALUE) v
+            :else nil))))
+
+(defn- asm-expr
+  "The operand expression of tokens ts: [form effect?] (effect? when it calls a function), or nil outside the grammar."
+  [ts]
+  (let [ts (vec ts) n (count ts) pos (volatile! 0) calls (volatile! false)
+        peek* (fn [] (when (< @pos n) (nth ts @pos)))
+        next* (fn [] (let [x (peek*)] (vswap! pos inc) x))
+        ident? (fn [x] (and x (re-matches #"[A-Za-z_]\w*" x) (not (#{"sizeof" "_Alignof" "alignof" "__alignof__" "typeof"} x))))]
+    (letfn [(fail [] (throw (ex-info "asm operand" {::asm true})))
+            (expect [x] (when-not (= x (next*)) (fail)))
+            (primary []
+              (let [x (next*)]
+                (cond
+                  (= x "(") (let [e (expr)] (expect ")") e)
+                  (ident? x) (symbol x)
+                  (and x (re-matches #"\.?\d.*" x)) (or (asm-int x) (fail))
+                  :else (fail))))
+            (postfix []
+              (loop [e (primary)]
+                (case (peek*)
+                  "(" (do (next*)
+                          (when-not (symbol? e) (fail))
+                          (let [args (if (= ")" (peek*)) [] (loop [as [(expr)]] (if (= "," (peek*)) (do (next*) (recur (conj as (expr)))) as)))]
+                            (expect ")")
+                            (vreset! calls true)
+                            (recur (apply list e args))))
+                  "[" (do (next*) (let [i (expr)] (expect "]") (recur (list 'aget e i))))
+                  "." (do (next*) (let [m (next*)] (when-not (ident? m) (fail)) (recur (list (symbol (str ".-" m)) e))))
+                  "->" (do (next*) (let [m (next*)] (when-not (ident? m) (fail)) (recur (list '-> e (symbol m)))))
+                  e)))
+            (unary []
+              (case (peek*)
+                "&" (do (next*) (list 'addr (unary)))
+                "*" (do (next*) (list 'arbace.core/deref (unary)))
+                "-" (do (next*) (let [e (unary)] (if (and (number? e) (pos? e)) (- e) (list '- e))))
+                "+" (do (next*) (unary))
+                "!" (do (next*) (list 'not (unary)))
+                "~" (do (next*) (list 'bit-not (unary)))
+                (postfix)))
+            (binary [ops sub]
+              (loop [e (sub)]
+                (if-let [op (ops (peek*))]
+                  (do (next*) (recur (list op e (sub))))
+                  e)))
+            (mult [] (binary {"*" '* "/" '/ "%" 'rem} unary))
+            (expr [] (binary {"+" '+ "-" '-} mult))]
+      (try
+        (let [e (expr)]
+          (when (= @pos n) [e @calls]))
+        (catch arbace.lang.ExceptionInfo x
+          (if (::asm (ex-data x)) nil (throw x)))))))
+
+(defn- asm-operands
+  "An asm statement's text parsed: {:outputs [{:c constraint :name n :ts tokens}] :inputs [...]} when its template is
+  empty and it is no asm goto, else nil."
+  [^String text]
+  (when-let [[_ quals rest*] (re-find #"^\s*(?:__asm__|__asm|asm)\s*((?:(?:__volatile__|volatile|__volatile|__inline__|__inline|inline|goto)\s*)*)\((.*)$" text)]
+    (when-not (re-find #"goto" quals)
+      (when-let [ts (asm-tokens rest*)]
+        (let [;; the sections at depth 0 up to the statement's closing parenthesis
+              secs (loop [ts ts depth 0 cur [] out []]
+                     (if-let [x (first ts)]
+                       (cond
+                         (and (= x ")") (zero? depth)) (when (empty? (rest ts)) (conj out cur))
+                         (and (= x ":") (zero? depth)) (recur (rest ts) depth [] (conj out cur))
+                         (#{"(" "["} x) (recur (rest ts) (inc depth) (conj cur x) out)
+                         (#{")" "]"} x) (recur (rest ts) (dec depth) (conj cur x) out)
+                         :else (recur (rest ts) depth (conj cur x) out))
+                       nil))
+              [tmpl outs ins & more] secs
+              ;; one operand: [name] "constraint" ( expr )
+              operand (fn [ts]
+                        (let [[nm ts] (if (= "[" (first ts)) [(second ts) (drop 3 ts)] [nil ts])
+                              [cs ts] (split-with #(str/starts-with? % "\"") ts)]
+                          (when (and (seq cs) (= "(" (first ts)) (= ")" (last ts)))
+                            {:name nm :c (apply str (map #(subs % 1 (dec (count %))) cs)) :ts (butlast (rest ts))})))
+              ;; a section's operands split at depth-0 commas
+              split (fn [sec] (if (empty? sec) []
+                                  (loop [ts sec depth 0 cur [] out []]
+                                    (if-let [x (first ts)]
+                                      (cond (and (= x ",") (zero? depth)) (recur (rest ts) depth [] (conj out cur))
+                                            (#{"(" "["} x) (recur (rest ts) (inc depth) (conj cur x) out)
+                                            (#{")" "]"} x) (recur (rest ts) (dec depth) (conj cur x) out)
+                                            :else (recur (rest ts) depth (conj cur x) out))
+                                      (conj out cur)))))
+              ops (fn [sec] (let [xs (mapv operand (split sec))] (when (every? some? xs) xs)))]
+          (when (and secs (seq tmpl) (every? #(= "\"\"" %) tmpl) (<= (count more) 1))
+            (let [o (ops (or outs [])) i (ops (or ins []))]
+              (when (and o i) {:outputs o :inputs i}))))))))
+
+(defn lower-asm
+  "The statement an empty-template asm statement f (c/asm TEXT) is (see above): (do (c/asm TEXT) STMT...), the c/asm
+  marked :ci/lowered, or nil when f is outside what is lowered (its refusal or barrier stays)."
+  [f]
+  (let [text (second f)]
+    (when (and (string? text) (re-find #"\"=|\"\+" text))
+      (when-let [{:keys [outputs inputs]} (asm-operands text)]
+        (let [parse (fn [op] (asm-expr (:ts op)))
+              tie (fn [{:keys [c]}]
+                    (cond (re-matches #"\d+" c) (Long/parseLong c)
+                          (re-matches #"\[(\w+)\]" c) (let [nm (second (re-matches #"\[(\w+)\]" c))]
+                                                          (first (keep-indexed (fn [k o] (when (= nm (:name o)) k)) outputs)))
+                          :else nil))
+              ties (into {} (keep-indexed (fn [k in] (when-let [j (tie in)] [j k])) inputs))
+              parsed-in (mapv parse inputs)
+              parsed-out (mapv parse outputs)]
+          (when (and (every? some? parsed-in) (every? some? parsed-out)
+                     (<= (count ties) 1)
+                     (every? #(< % (count outputs)) (keys ties))
+                     ;; a tied output is a write-only one
+                     (every? (fn [j] (str/starts-with? (:c (nth outputs j)) "=")) (keys ties)))
+            (let [stmts (vec (concat
+                              ;; the untied inputs' effects, then the outputs' places'
+                              (keep-indexed (fn [k [e eff]] (when (and eff (not (some #{k} (vals ties)))) e)) parsed-in)
+                              (keep-indexed (fn [j [e eff]] (when (and eff (not (contains? ties j))) e)) parsed-out)
+                              (for [[j k] ties]
+                                (let [[out] (parse (nth outputs j))
+                                      [out2] (parse (nth outputs j))
+                                      [in] (parse (nth inputs k))]
+                                  (list 'set! out (list 'conv (list 'typeof out2) in))))))]
+              ;; a read-write operand's barrier with nothing to evaluate stays the barrier it was (musl's __libc_start_main)
+              (when (or (seq stmts) (re-find #"\"=" text))
+                (with-meta (apply list 'do (vary-meta f assoc :ci/lowered true) stmts) (meta f))))))))))
+
+(defn lower-asms
+  "The forms with each statement-level empty-template asm lowered (lower-asm); a file-scope c/asm is left. Forms that
+  hold no lowered asm are kept identical."
+  [forms]
+  (letfn [(walk [x]
+            (cond
+              (and (seq? x) (= 'c/asm (first x))) (or (lower-asm x) x)
+              (seq? x) (let [ys (map walk x)]
+                         (if (every? true? (map identical? x ys)) x (with-meta (apply list ys) (meta x))))
+              (vector? x) (let [ys (mapv walk x)]
+                            (if (every? true? (map identical? x ys)) x (with-meta ys (meta x))))
+              :else x))]
+    (mapv (fn [f] (if (and (seq? f) (= 'c/asm (first f))) f (walk f))) forms)))
 
 (defn- asm-body?
   "A function body that is inline assembly (musl's arch/x86_64 inline functions): natives of ci's."
@@ -2299,7 +2697,18 @@
                   (swap! (:cases *switch*) assoc :default c)
                   (list 'lab c))
         label (list 'lab (label-code! (first args)))
-        goto (list 'jmp (label-code! (first args)))
+        goto (let [l (first args)]
+               (if (or (empty? *outer*) (contains? (:own-labels @*f*) l))
+                 (list 'jmp (label-code! l))
+                 ;; a nested function's goto to an enclosing function's label (CS321 (a)): a longjmp to the jmp_buf that
+                 ;; function set at its entry for the label
+                 (or (first (keep (fn [d]
+                                    (when-let [off (get (:nl-labels @(nth *outer* d)) l)]
+                                      (let [base (chain-to d)
+                                            buf (if (= base '(fp 0)) (list 'fp off) (list 'adds base (list 'i off) 1))]
+                                        (list 'x (list 'ecall (list 'fnref (fn-id "longjmp" "longjmp")) [(list 'ai buf) '(ai (i 1))])))))
+                                  (reverse (range (count *outer*)))))
+                     (list 'jmp (label-code! l)))))
         goto* (list 'igoto (:n (conv (ex (first args)) chk/t-ulong)))
         break (vla-leave *vla-brk* '(jmp 2))
         continue (vla-leave *vla-cont* '(jmp 3))
@@ -2381,15 +2790,82 @@
     "a_barrier" "a_spin" "a_crash" "a_ctz_64" "a_clz_64" "__get_tp" "__syscall0" "__syscall1" "__syscall2"
     "__syscall3" "__syscall4" "__syscall5" "__syscall6"})
 
+(defn- nested-defns
+  "The c/defn forms of a function body's blocks, not those inside them (CS321 (a))."
+  [body]
+  (let [acc (ArrayList.)]
+    (letfn [(walk [x] (cond (and (seq? x) (= 'c/defn (first x))) (.add acc x)
+                            (seq? x) (doseq [y x] (walk y))
+                            (vector? x) (doseq [y x] (walk y))
+                            :else nil))]
+      (doseq [x body] (walk x)))
+    (vec acc)))
+
+(defn- nested-names
+  "Every name the nested functions of a body use (their parent keeps its locals of those names in memory, CS321 (a))."
+  [body]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [x]
+              ;; a type's sizes in metadata too (a VLA's bound, int a[N])
+              (when-let [m (and (instance? arbace.lang.IObj x) (meta x))] (walk (vals (dissoc m :line :column))))
+              (cond (symbol? x) (.add acc (name x))
+                    (and (seq? x) (= 'c/id (first x)) (string? (second x))) (.add acc (second x))
+                    (or (seq? x) (vector? x)) (doseq [y x] (walk y))
+                    :else nil))]
+      (doseq [d (nested-defns body)] (walk (drop 2 d))))
+    (set acc)))
+
+(defn- body-labels
+  "The labels a body defines, not those of its nested functions."
+  [body]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [x] (cond (and (seq? x) (= 'c/defn (first x))) nil
+                            (and (seq? x) (= 'label (first x))) (do (.add acc (second x)) (doseq [y x] (walk y)))
+                            (or (seq? x) (vector? x)) (doseq [y x] (walk y))
+                            :else nil))]
+      (doseq [x body] (walk x)))
+    (set acc)))
+
+(defn- nested-gotos
+  "The labels the gotos of a body's nested functions name (deep)."
+  [body]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [x] (cond (and (seq? x) (= 'goto (first x))) (.add acc (second x))
+                            (or (seq? x) (vector? x)) (doseq [y x] (walk y))
+                            :else nil))]
+      (doseq [d (nested-defns body)] (walk (drop 3 d))))
+    (set acc)))
+
+(declare build-code)
+
+(defn- build-nested
+  "A nested function's code command (CS321 (a)), built with the enclosing functions' states as *outer*."
+  [d]
+  (let [e (or (ex-res (second d)) (refuse :checker "no entry for the nested function " (second d)))
+        nf (or (nested-of e) (refuse :builder "an unregistered nested function " (:name e)))]
+    (binding [*outer* (conj *outer* *f*)
+              *switch* nil *vla-block* nil *vla-stack* [] *vla-brk* 0 *vla-cont* 0 *static-init* false]
+      (build-code d nf))))
+
 (defn build-fn
-  "A c/defn: its (code ...) command, or (native ...) for a body of inline assembly."
+  "A c/defn: its (code ...) command, or (native ...) for a body of inline assembly; its nested functions' code commands
+  (CS321 (a)) in its metadata's :ci/extra."
   [f]
+  (binding [*nested* (atom {}) *nested-out* (ArrayList.) *outer* []]
+    (let [cmd (build-code f nil)]
+      (if (pos? (.size ^ArrayList *nested-out*))
+        (with-meta cmd {:ci/extra (vec *nested-out*)})
+        cmd))))
+
+(defn- build-code
+  "A c/defn's (code ...) command (nf: a nested function's {:key :name :depth :g}, else nil)."
+  [f nf]
   (let [[_ nm ps & body] f
         body* body
         e (or (ex-res nm) (refuse :checker "no entry for the function " nm))
         ft (unq (:t e))
         rt (:ret ft)
-        id (fn-ref e)
+        id (if nf (fn-id (:key nf) (:name nf)) (fn-ref e))
         kr (:c/kr (meta ps))]
     (if (asm-body? body)
       (if (asm-natives (:name e))
@@ -2397,9 +2873,32 @@
         (refuse :by-design (:name e) ": inline assembly (SPEC §14)"))
     (try
     (binding [*f* (atom {:ni 0 :nf 0 :frame 0 :labels {} :locals {} :fn-ret rt :fn-name (:name e)
-                         :addressed (addressed-names body) :rtts (IdentityHashMap.) :vmrecs (IdentityHashMap.)})
+                         :addressed (into (addressed-names body) (nested-names body)) :rtts (IdentityHashMap.) :vmrecs (IdentityHashMap.)})
               *vm-typedefs* (atom {})]
-      (let [sret (when (= :m (kind rt)) (new-slot! :i))
+      (let [;; a nested function keeps its static chain (its parent's frame base, set by the caller in its global) in its frame
+            chain-pro (when nf
+                        (let [off (frame-alloc! 8 8)]
+                          (swap! *f* assoc :chain-off off :uname (:name nf))
+                          [(list 'x (list 'ei (list 'st "u64" (list 'fp off) (list 'ld "u64" (list 'g (:g nf))))))]))
+            ;; this function's own nested functions, registered before its body is built (a call may precede the definition
+            ;; through an `auto` declaration)
+            _ (doseq [d (nested-defns body)]
+                (when-let [de (ex-res (second d))]
+                  (let [n (count @*nested*)
+                        un (str (or (:uname @*f*) (:fn-name @*f*)) "$" (:name de) "$" n)]
+                    (swap! *nested* assoc (:name de) {:key [(:idx *u*) un] :name un :depth (inc (count *outer*))
+                                                      :g (static-idx [:chain un] 8 8 false)}))))
+            ;; CS321 (a): the labels its nested functions jump to: a jmp_buf each in the frame, set at entry (a longjmp to it
+            ;; resumes at the setjmp statement, which jumps to the label)
+            own (body-labels body)
+            _ (swap! *f* assoc :own-labels own)
+            nl (into {} (for [l (filter own (nested-gotos body))] [l (frame-alloc! 200 8)]))
+            _ (swap! *f* assoc :nl-labels nl)
+            nl-pro (vec (for [[l off] nl]
+                          (list 'sj (fresh-code!)
+                                (list 'when (list 'cmp "ne" "i64" (list 'call (list 'fnref (fn-id "setjmp" "setjmp")) [(list 'ai (list 'fp off))]) '(i 0))
+                                      (list 'jmp (label-code! l)) '(do [])))))
+            sret (when (= :m (kind rt)) (new-slot! :i))
             ;; an unnamed parameter (C23) still takes its argument: a place of its own, its type the checker's function
             ;; type's (queue 165)
             pts (when-not kr (:params (ex-res ps)))
@@ -2434,8 +2933,8 @@
             st @*f*]
         (list 'code id (:ni st) (:nf st) (:frame st) (if (:variadic ft) 1 0) (if (f32? rt) 1 0)
               (vec (if sret (cons (list 'pi sret) pspecs) pspecs))
-              (let [body (list 'do (-> (vec kr-convs) (into pvla) (into b)))]
-                (if (calls-setjmp? body*) (list 'sjbody body) body)))))
+              (let [body (list 'do (-> (vec chain-pro) (into nl-pro) (into kr-convs) (into pvla) (into b)))]
+                (if (or (calls-setjmp? body*) (seq nl)) (list 'sjbody body) body)))))
       (catch arbace.lang.ExceptionInfo x
         (throw (ex-info (str (:name e) ": " (.getMessage x)) (ex-data x))))))))
 
@@ -2546,7 +3045,9 @@
     (binding [*item* {:ev-list ev :seen (java.util.HashSet.)}]
       (try
         (let [cmd (thunk)
-              text (binding [*print-length* nil *print-level* nil] (pr-str cmd))]
+              ;; a function's nested functions' commands (CS321 (a)) on the lines after its own
+              text (binding [*print-length* nil *print-level* nil]
+                     (str/join "\n" (map pr-str (cons cmd (:ci/extra (meta cmd))))))]
           {:ev (vec ev) :text text})
         (catch Exception x {:ex (ex-of x)})))))
 
@@ -2740,10 +3241,14 @@
                       a (ob (:e c))
                       b (ob (:te c))]
                   (.add aliases (list 'alias a b 0)))))
-            (let [text (replay i (:item c))]
+            (let [text (replay i (:item c))
+                  ;; a function's nested functions' commands (CS321 (a)) on lines of their own after its code: each an entry
+                  ;; of out, so that the trace's line numbers stay the program's (cf2g's prebuilt items are by line)
+                  [text & extra] (str/split text #"\n")]
               ;; the line is the code's own, after the commands its replay emitted
               (when *link-trace* (.put tr-items (.size out) [i :f (:j c)]))
-              (.add out text)))))
+              (.add out text)
+              (doseq [x extra] (.add out x))))))
       (doseq [a undefined] (emit! a))
       (doseq [a aliases] (emit! a))
       (let [base (.size out)]
@@ -2846,7 +3351,9 @@
                   ;; a weak alias of an object another unit defines is not taken
                   (when (and te (not (and (.containsKey defs k) (not (:alias (.get defs k))))))
                     (.add ^ArrayList (:aliases *p*) (list 'alias (global-obj-idx e) (global-obj-idx te) 0)))))
-              (emit! (build-fn f))))))
+              (let [cmd (build-fn f)]
+                (emit! cmd)
+                (doseq [x (:ci/extra (meta cmd))] (emit! x)))))))
       ;; the undefined weak objects are at address 0
       (doseq [a (:undefined *p*)] (emit! a))
       (doseq [a (:aliases *p*)] (emit! a))

@@ -334,7 +334,7 @@ external object are a link error).
 | `struct s { ... }`, `struct { ... }` | `(struct s [members])`, `(struct [members])` (§5.4) |
 | `enum e { ... }`, `enum e : long { ... }` | `(enum e [enumerators])`, `^{:c/underlying long} (enum e [...])` (§5.5) |
 | a typedef name `T` | `T` |
-| `typeof(e)`, `typeof(T)`, `typeof_unqual(e)`, `typeof_unqual(T)` | `(typeof e)`, `(typeof-type T)`, `(typeof-unqual e)`, `(typeof-unqual-type T)` (GNU's `__typeof__` the same, N2) |
+| `typeof(e)`, `typeof(T)`, `typeof_unqual(e)`, `typeof_unqual(T)` | `(typeof e)`, `(typeof-type T)`, `(typeof-unqual e)`, `(typeof-unqual-type T)` (GNU's `__typeof__` the same, N2; at C23 and later GNU's spelling marked `^:c/gnu`, which gcc reads keeping a function's `_Noreturn`, and printed back so) |
 | the type of `nullptr` | `(typeof nil)` (`nullptr_t` is a typedef name of `<stddef.h>`, §13.4) |
 
 - **Type symbols are never C identifiers.** Every base type symbol is a keyword of every standard
@@ -354,7 +354,8 @@ external object are a link error).
 - **Function types** are `(fn [params] R)` (§5.3); `R` is a type form. GNU's `__attribute__((mode(DI)))`
   and vector types are attributes (§5.6, §14).
 - **Address spaces, `_Nonnull`, `__ptr32` and Microsoft's `__declspec`** are read and printed only, as
-  `:c/gnu-attrs` or `:c/quals` entries (§14).
+  `:c/gnu-attrs` or `:c/quals` entries (§14); `__declspec(T...)` as a declaration's attribute `(__declspec "T...")` in
+  `:c/decl-attrs`, its tokens as written (2026-11-17).
 
 ### 5.2 Where types are written
 
@@ -1303,10 +1304,10 @@ CS3 (a): what the reader reads and the printer prints, but ci and cf2g refuse by
 
 | construct | why out |
 |---|---|
-| GNU nested functions (`c/defn` in a block) | trampolines on an executable stack; no corpus needs them beyond c-torture's tests of them |
-| `__real__`, `__imag__` (`real`, `imag`) | the survey's CS3 (a) lists them; `creal`, `cimag` (musl's functions) serve the same need |
-| inline assembly (`c/asm` in a function, extended `asm`) | the target's instructions; musl's are natives in `crt` |
-| GNU vector types (`vector_size`, `__builtin_shufflevector`, `__builtin_convertvector`) | SIMD semantics of their own (24 c-torture/execute files) |
+| ~~GNU nested functions (`c/defn` in a block)~~ | in since 2026-11-17 (CS321 (a), the user; doc/C23-SURVEY.md, "As built: GNU nested functions"): a command of their own, a static chain through a global per nested function, the enclosing locals in frame memory, a non-local goto as a longjmp to a jmp_buf set at the enclosing function's entry |
+| ~~`__real__`, `__imag__` (`real`, `imag`)~~ | in since 2026-11-17 (h-c-run, doc/C23-SURVEY.md, "As built: h-c-run"): a complex operand's part, an lvalue of a complex object's |
+| inline assembly (`c/asm` in a function, extended `asm`) with a template | the target's instructions; musl's are natives in `crt`. An empty template is in (h-c-run, 2026-11-17): its operands parsed from the text, a tied output given its input's value converted, the operands' side effects evaluated |
+| ~~GNU vector types (`vector_size`, `__builtin_shufflevector`, `__builtin_convertvector`)~~ | in since 2026-11-17 (CS320 (a), the user; doc/C23-SURVEY.md, "As built: GNU vector types"): lanes in memory, element-wise operators, comparisons, subscripts, broadcast, the shuffles, `convertvector`, SSE2's `cmp*pd` and `movmskp[ds]`; the `_mm_*` functions of Arbace's headers still declared only |
 | `__int128` beyond `+ - * / % << >> & \| ^ ~`, comparisons and conversions | the survey's CS3 (a): `__int128` arithmetic is in, its library (`printf` has none) and atomics out |
 | `_Decimal32/64/128` arithmetic and conversions | BID arithmetic is libgcc's; musl's `printf` cannot print them; clang 23 rejects them on the target (measured) |
 | `_Float16`, `_Float128`, `_Float32x`, `_Float64x`, `__bf16` arithmetic | libgcc's soft-float routines; `_Float32` and `_Float64` are `float` and `double` and are in |

@@ -8,6 +8,7 @@
   (test/repr/c/roundtrip-known.edn), or fails. Also the reference's acceptance of every file (CS61 (a),
   test/repr/c/parse-gcc.tsv) against the reader's."
   (:require [arbace.repr.c :as rc]
+            [arbace.c.dg :as dg]
             [arbace.repr.c.host :as host]
             [arbace.repr.c.layout :as layout]
             [arbace.repr.c.lex :as lex]
@@ -34,6 +35,30 @@
     (-> fc
         (update :inc #(vec (concat extra (map abs %))))
         (update :args #(vec (map (fn [^String a] (if (and (.startsWith a "-I") (not (.startsWith a "-I/"))) (str "-I" (abs (subs a 2))) a)) %))))))
+
+(defn link-resources!
+  "The print's directory given the original's resources its text names (gcc-embed: `#embed \"x\"`, `__has_embed (E1 ...)`
+  with `#define E1 \"embed-1.c\"`): each string literal of the print naming a file or directory beside the original (a
+  relative name, inside the print's directory), symbolically linked beside the print when the print's directory lacks it. A quoted #embed
+  searches the current file's directory first (6.10.4), as the original found them; the original's directory as an
+  --embed-dir would answer an angle-bracketed name too (embed-1.c's `__has_embed (<embed-1.c>)`, which must not be found)."
+  [^String pdir ^String nm ^String odir ^String text]
+  (let [pd (dir-of (str pdir "/" nm))
+        ;; a file the print #includes is found by -iquote in the original's directory, where its own relative names hold
+        ;; (embed-1.c's \"../empty.h\", included by embed-2.c): not linked
+        incs (set (map second (re-seq #"(?m)^\s*#\s*include(?:_next)?\s*\"([^\"]+)\"" text)))]
+    (doseq [[_ s] (re-seq #"\"((?:[^\"\\\n]|\\.)+)\"" text)
+            :when (and (not (incs s)) (not (.startsWith ^String s "/")) (re-matches #"[A-Za-z0-9_./+-]+" s))
+            :let [src (java.io.File. (str odir "/" s))
+                  dst (.toFile (.normalize (.toPath (java.io.File. (str pd "/" s)))))]
+            ;; a name with .. stays inside the print's directory (embed-1.c's "../empty.h": print/NAME.d/c-c++-common/empty.h)
+            :when (and (.startsWith (.getPath dst) (str (.getPath (.toFile (.normalize (.toPath (java.io.File. pdir))))) "/"))
+                       (.exists src) (not (.exists dst)))]
+      (try
+        (.mkdirs (.getParentFile dst))
+        (java.nio.file.Files/createSymbolicLink (.toPath dst) (.toPath (.getAbsoluteFile src))
+                                                (make-array java.nio.file.attribute.FileAttribute 0))
+        (catch Exception _ nil)))))
 
 (def ^:private strip-keys #{:line :column :c/grouped})
 
@@ -122,7 +147,8 @@
           [nm "ok" "print-crash" "-" (one-line (subs pr 1))]
           (let [pdir (str d "/print/" nm ".d") ; a directory a file: another print is not the original
                 _ (spit-bytes (str pdir "/" nm) (.getBytes ^String pr "UTF-8"))
-                fc2 (update (abs-incs fc base [(dir-of (str base "/" nm))]) :embed-dirs #(vec (concat % [(dir-of (str base "/" nm))])))
+                _ (link-resources! pdir nm (dir-of (str base "/" nm)) pr)
+                fc2 (abs-incs fc base [(dir-of (str base "/" nm))])
                 ;; the print reread by the kind of name the original was read by (the own target's triage, night 7): an
                 ;; original read by its absolute name (gcc's testsuite, as DejaGnu names it) is reread by the print's absolute
                 ;; name, so that a directive about the file itself (gcc-embed's `#if __has_embed (__FILE__ ...)`, which the
@@ -232,6 +258,27 @@
   []
   (if (host/gcc-judge?) (load-gcc) (merge (load-gcc) (load-cc))))
 
+(def ^:dynamic *base*
+  "The directory of the corpus judge-row judges (WORK/ID/base.txt; bound by judge), for own-rejects?; nil elsewhere (the
+  controls)."
+  nil)
+
+(defn own-rejects?
+  "The test's own verdict on a file the reader rejects (the user's decision of 2026-11-07: each test judged by its own
+  verdict): the read's first error, `detail` (FILE:LINE:COL: MESSAGE, or LINE:COL: MESSAGE), is on a line of the main file
+  `path` whose dg-error directives (arbace.c.dg/analyze: the selectors evaluated on the reference host) expect an error there,
+  and one of their regexps finds the message: the file is an error test and the reader rejects it for the reason it states.
+  A rejection on another line or in other words (a parser's gap: c23-attr-syntax-5.c's balanced tokens) is not."
+  [^String path ^String detail]
+  (boolean
+    (when (and path detail (.exists (java.io.File. path)))
+      (let [[f l] (if-let [[_ l] (re-find #"^(\d+):\d+: " detail)] [nil (Long/parseLong l)] (dg/error-line detail))
+            msg (second (re-find #"^(?:.*?:)?\d+:(?:\d+:)? (.*)$" detail))
+            res (get (:msgs (dg/analyze (String. ^bytes (lex/read-bytes path) "ISO-8859-1"))) l)]
+        (and l msg (seq res)
+             (or (nil? f) (= f path) (.endsWith path (str "/" f)))
+             (some (fn [^String re] (try (re-find (re-pattern re) msg) (catch Exception _ nil))) res))))))
+
 (defn- judge-row
   "A file's status at each level and overall: {:status pass|known|fail :levels {...} :class k}."
   [[nm read l1 l2 detail] obj run gcc known run?]
@@ -243,7 +290,9 @@
                  (not= ps "0") "print-rejected"
                  :else cmp)
         l4 (cond (not run?) "-" (not= read "ok") "-" (nil? same) "-" :else same)
-        accept (cond (= read "error") (if (= gcc "0") "port-only-rejects" "both-reject")
+        accept (cond (= read "error") (cond (not= gcc "0") "both-reject"
+                                            (own-rejects? (when *base* (str *base* "/" nm)) detail) "own-rejects"
+                                            :else "port-only-rejects")
                      (nil? gcc) "unrecorded"
                      (= gcc "0") "agree"
                      :else "gcc-only-rejects")
@@ -320,7 +369,9 @@
         ;; GT8: a partial run (--only) holds the known entries of its files alone to account for them
         names (results/partial-names work id)
         known (results/in-run (get-in known-all [:roundtrip (keyword id)] {}) names)
-        js (mapv (fn [r] (judge-row r (get obj (first r)) (get run (first r)) (get gcc [id (first r)]) (get known (first r)) run?)) rows)
+        base (let [f (java.io.File. (str d "/base.txt"))] (when (.exists f) (str/trim (slurp f))))
+        js (binding [*base* base]
+             (mapv (fn [r] (judge-row r (get obj (first r)) (get run (first r)) (get gcc [id (first r)]) (get known (first r)) run?)) rows))
         ;; CS282 (a): a file of no recorded level 3 (not read when the oracle tier recorded it) whose entry's class only levels 3
         ;; and 4 give stays known by it, as the driver's no-gcc judgment defers it: the oracle tier's to judge again
         js (if-not rec js

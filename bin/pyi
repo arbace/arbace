@@ -120,7 +120,7 @@
 #                                  of the runtime (go/arbace/py), each module on its loop with its GOCOVERDIR (run: the main
 #                                  host's night); blocks: tools/covsubset's block sets per module; subset: the modules of every
 #                                  covered block, one per class, the controls (bin/cover subset); --write: corpora.edn's :subset
-#   bin/pyi runtime print|read|vet|check|tables|gen-tables
+#   bin/pyi runtime print|read|vet|check|programs|tables|gen-tables
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
 #                                  read back into go/arbace/py (read; go/arbace/libm, go/arbace/expat and go/arbace/pyexpat,
@@ -258,46 +258,112 @@ arbace_exe() {
   if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
   die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
 }
-# runtime_state: which pyi runtime `bin/pyi run` runs on the tools' host (queue 321). Since W2 (seed 3c48859d) an executable may
-# list arbace/py in goi's table: RT.load makes a listed package's namespace from the table before any source, so such an
-# executable runs the runtime it was built from (its *arbace-version*'s :commit), never the checkout's go/arbace/py. Prints
-#   interpreted       arbace/py not listed: goi interprets the checkout's runtime
-#   compiled COMMIT   listed, and the checkout's runtime packages (go/arbace/{py,libm,ci,crt}) are COMMIT's
-#   stale COMMIT N    listed at COMMIT, whose runtime packages differ from the checkout's in N files (or N "?": COMMIT not
-#                     in this repository, or a build of a dirty tree): what runs is not the checkout's runtime
+
+# runtime_from_source (the user's DECISION of 2026-11-17, Mac task 317's DECISION 2): pyi's runtime, go/arbace/py, and the
+# libm port it imports are compiled into the executable since W2's re-seed (goi's table lists them), so a run on stage 0
+# ran the seed's runtime, not the checkout's, until the next re-seed. Here the executable's commit (its version map,
+# *arbace-version*, kept in WORK/exe-version by the executable's path, size and time) is compared with the checkout's
+# go/arbace/py{.ae,/} and go/arbace/libm{.ae,/} (git diff against that commit, the working tree's changes included): equal,
+# the compiled runtime runs (ARBACE_GOI_FROM_SOURCE empty); else goi interprets the checkout's (ARBACE_GOI_FROM_SOURCE
+# arbace/py, with arbace/libm when libm differs: arbace.go.repl/from-source, arbace.python.run/require-runtime!), about
+# 50 s more a start. An executable of no commit of this repository or built dirty: the checkout's. The namespaces
+# (arbace/python, arbace/repr/python, goi's arbace/go) need none of this: RT.toolSource loads a changed one from the
+# checkout. Decided once by the outermost bin/pyi and exported, so its children (sys.executable, the checks' runs)
+# inherit it; PYI_RUNTIME=compiled|checkout overrides; the decision is printed once on stderr (PYI_RUNTIME_NOTED), but not
+# by bin/pyi python (sys.executable) nor, when the compiled runtime runs, by run and repl (the program's stderr).
+pyi_runtime_paths=(go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm)
+exe_version() {
+  local exe=$1 k f
+  k=$(stat -L -c '%n %s %Y %i' "$exe" | sha256sum | cut -c1-16)
+  f="$WORK/exe-version/$k"
+  if [ ! -s "$f" ]; then
+    mkdir -p "$WORK/exe-version"
+    env -u ARBACE_PATH "$exe" -e '(print (System/getProperty "arbace.version"))' > "$f.$$" 2>"$f.$$.err" || true
+    mv -f "$f.$$" "$f"; rm -f "$f.$$.err"
+  fi
+  cat "$f"
+}
+runtime_from_source() {
+  local verb=${1:-} exe v commit set="" why
+  if [ -z "${ARBACE_GOI_FROM_SOURCE+x}" ]; then
+    exe=$(arbace_exe 2>&1) || return 0   # no stage 0: the verb's own run says so
+    case ${PYI_RUNTIME:-auto} in
+      compiled) why="PYI_RUNTIME=compiled" ;;
+      checkout) set=arbace/libm,arbace/py; why="PYI_RUNTIME=checkout" ;;
+      auto)
+        v=$(exe_version "$exe")
+        commit=$(sed -n 's/.*:commit "\([0-9a-f]*\)".*/\1/p' <<< "$v")
+        if [ -z "$commit" ] || ! git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null; then
+          set=arbace/libm,arbace/py; why="the executable's commit ${commit:-(none)} is none of this repository's"
+        elif grep -q ':dirty true' <<< "$v"; then
+          set=arbace/libm,arbace/py; why="the executable was built from a dirty tree at ${commit:0:12}"
+        elif ! git -C "$root" diff --quiet "$commit" -- go/arbace/libm.ae go/arbace/libm; then
+          set=arbace/libm,arbace/py; why="go/arbace/libm differs from the executable's ${commit:0:12}"
+        elif ! git -C "$root" diff --quiet "$commit" -- go/arbace/py.ae go/arbace/py; then
+          set=arbace/py; why="go/arbace/py differs from the executable's ${commit:0:12}"
+        else why="go/arbace/py and libm are the executable's ${commit:0:12}"; fi ;;
+      *) die "PYI_RUNTIME: compiled, checkout or auto, not ${PYI_RUNTIME}" ;;
+    esac
+    export ARBACE_GOI_FROM_SOURCE=$set
+    if [ -z "${PYI_RUNTIME_NOTED:-}" ] && [ "$verb" != python ] && { [ -n "$set" ] || { [ "$verb" != run ] && [ "$verb" != repl ]; }; }; then
+      if [ -n "$set" ]; then echo "pyi: the checkout's runtime (${set//,/ and }) interpreted by goi: $why" >&2
+      else echo "pyi: the compiled runtime of ${exe#$root/}: $why" >&2; fi
+    fi
+  fi
+  export PYI_RUNTIME_NOTED=1
+}
+# runtime_state (queue 321, on runtime_from_source since the merge with next's h-pyi-runtime): which pyi runtime the
+# tools' host runs here, after runtime_from_source decided (ARBACE_GOI_FROM_SOURCE). Prints
+#   interpreted       the executable lists no arbace/py (before W2): goi interprets the checkout's runtime
+#   compiled COMMIT   listed, none from source, and the checkout's runtime packages (go/arbace/{py,libm,ci,crt}) are COMMIT's
+#   checkout COMMIT   listed at COMMIT, the checkout's go/arbace/py (and libm) interpreted from source (runtime_from_source):
+#                     the checkout's runtime, at goi's speed and with goi's own divergences
+#   stale COMMIT N    what runs compiled is not the checkout's: N files of the packages not loaded from source differ from
+#                     COMMIT's (PYI_RUNTIME=compiled on an older executable, or ci and crt, which runtime_from_source leaves
+#                     compiled), or N "?": an executable of no commit here or built dirty
 RUNTIME_PKGS=(go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/ci.ae go/arbace/ci go/arbace/crt.ae go/arbace/crt)
 runtime_state() {
-  local out listed commit dirty n s
+  local out listed v commit n src=",${ARBACE_GOI_FROM_SOURCE:-}," p pkgs=()
   mkdir -p "$WORK/tmp"
-  out=$(cd "$WORK/tmp" && ARBACE_PATH= "$(arbace_exe)" -e '(println (boolean (some #{"arbace/py"} (arbace.lang.GoInterp/paths))) (or (:commit *arbace-version*) "-") (boolean (:dirty *arbace-version*)))' 2>/dev/null | tail -1) || true
-  read -r listed commit dirty <<< "$out"
-  case $listed in
-    false) s=interpreted ;;
-    true)
-      if [ "$dirty" = false ] && git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null; then
-        n=$( { git -C "$root" diff --name-only "$commit" -- "${RUNTIME_PKGS[@]}"; git -C "$root" ls-files --others --exclude-standard -- "${RUNTIME_PKGS[@]}"; } | wc -l)
-        if [ "$n" = 0 ]; then s="compiled $commit"; else s="stale $commit $n"; fi
-      else s="stale $commit ?"; fi ;;
-    *) die "runtime_state: the tools' host $(arbace_exe) did not answer (${out:-no output})" ;;
-  esac
-  echo "$s"
+  out=$(cd "$WORK/tmp" && ARBACE_PATH= "$(arbace_exe)" -e '(println (boolean (some #{"arbace/py"} (arbace.lang.GoInterp/paths))))' 2>/dev/null | tail -1) || true
+  case $out in false) echo interpreted; return ;; true) ;; *) die "runtime_state: the tools' host $(arbace_exe) did not answer (${out:-no output})" ;; esac
+  v=$(exe_version "$(arbace_exe)"); commit=$(sed -n 's/.*:commit "\([0-9a-f]*\)".*/\1/p' <<< "$v")
+  if [ -z "$commit" ] || grep -q ':dirty true' <<< "$v" || ! git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null; then
+    case $src in *,arbace/py,*) echo "checkout ${commit:--}" ;; *) echo "stale ${commit:--} ?" ;; esac; return
+  fi
+  for p in py libm ci crt; do case $src in *",arbace/$p,"*) ;; *) pkgs+=("go/arbace/$p.ae" "go/arbace/$p") ;; esac; done
+  n=$( { git -C "$root" diff --name-only "$commit" -- "${pkgs[@]}"; git -C "$root" ls-files --others --exclude-standard -- "${pkgs[@]}"; } | wc -l)
+  if [ "$n" != 0 ]; then echo "stale $commit $n"
+  else case $src in *,arbace/py,*) echo "checkout $commit" ;; *) echo "compiled $commit" ;; esac; fi
 }
-# runtime_guard WHAT RECORD: before a check that runs pyi on the tools' host (WHAT names it). A stale runtime (runtime_state)
-# refuses a --record (RECORD non-empty; PYI_RUNTIME_STALE=1 records anyway: a dry run's tooling and timing, never a record
-# to commit) and is said on every other run; the executable that runs the checkout's runtime is the gate's build at the
-# checkout's key (bin/arbace-go --gate-build; ARBACE_HOST_EXE=its amd64/arbace) or an executable of no listed arbace/py
+# runtime_guard WHAT RECORD (queue 321): before a check that runs pyi on the tools' host (WHAT names it), after
+# runtime_from_source. A record (RECORD non-empty) is the checkout's runtime compiled, as the gate's checks that judge
+# against it run it (DECISION 1 (a), the user 2026-11-17: pyi-check, pyi-check-aot-goi, pyi-runtime on the gate's
+# executable at the checkout's key): any other state refuses it, the checkout's interpreted too (goi's speed moves the
+# timeouts and goi has divergences of its own: queue 321's slice, 1 h 54 min against 31 min, test_manager's 82 and three
+# more failing on goi alone); PYI_RUNTIME_STALE=1 records anyway (a dry run's record, never one to commit).
+# PYI_RUNTIME_REQUIRE=compiled (the gate's steps) fails any state but compiled. Otherwise a stale runtime fails (it is not
+# the checkout's), unless PYI_RUNTIME=compiled asked for it (then a warning). The executable that runs the checkout's runtime
+# compiled is the gate's build at the checkout's key (bin/arbace-go --gate-build; bin/pyi records takes it).
 runtime_guard() {
   local what=$1 record=$2 s; s=$(runtime_state)
+  local hint="the checkout's runtime compiled is the gate's build at its key: ARBACE_HOST_EXE=\$(. bin/lib/gate-cache.bash; arbace_gate_cache \"\$PWD\")/amd64/arbace after bin/arbace-go --gate-build (bin/pyi records takes it)"
+  case $s in compiled*) return 0 ;; esac
+  local msg="$what: pyi's runtime on $(arbace_exe) is '$s'"
   case $s in
-    interpreted|compiled*) return 0 ;;
+    stale*) msg="$msg: what runs compiled is not the checkout's go/arbace/{py,libm,ci,crt}" ;;
+    checkout*) msg="$msg: the checkout's runtime interpreted by goi (runtime_from_source)" ;;
+    interpreted) msg="$msg: an executable with no compiled runtime, goi interprets the checkout's" ;;
   esac
-  local _st commit n; read -r _st commit n <<< "$s"
-  local msg="$what: the tools' host $(arbace_exe) runs pyi's runtime as compiled at $commit, not the checkout's go/arbace/py ($n of its runtime packages' files differ; goi's table is taken before any source)"
-  if [ -n "$record" ] && [ "${PYI_RUNTIME_STALE:-}" != 1 ]; then
-    die "$msg: --record refused. Run it on an executable built from the checkout: ARBACE_HOST_EXE=\$(. bin/lib/gate-cache.bash; arbace_gate_cache \"\$PWD\")/amd64/arbace after bin/arbace-go --gate-build (bin/pyi records picks it)"
+  if [ -n "$record" ]; then
+    if [ "${PYI_RUNTIME_STALE:-}" != 1 ]; then die "$msg: --record refused (a record is the checkout's runtime compiled); $hint"; fi
+    echo "pyi: WARNING $msg (PYI_RUNTIME_STALE=1: recorded anyway, a dry run's record, never one to commit)" >&2; return 0
   fi
-  local tail=""; [ -z "$record" ] || tail=" (PYI_RUNTIME_STALE=1: recorded anyway, a dry run's record, never one to commit)"
-  echo "pyi: WARNING $msg$tail" >&2
+  if [ "${PYI_RUNTIME_REQUIRE:-}" = compiled ]; then die "$msg: PYI_RUNTIME_REQUIRE=compiled; $hint"; fi
+  case $s in
+    stale*) if [ "${PYI_RUNTIME:-}" = compiled ]; then echo "pyi: WARNING $msg (PYI_RUNTIME=compiled)" >&2; else die "$msg; $hint"; fi ;;
+  esac
+  return 0
 }
 # the oracle, CPython (queue 213): looked for only when a verb runs it (the records, the native read and the AOT need none;
 # doc/ORACLE-RECORDS-SURVEY.md, ORS14 (a)); a call through env, timeout or a list (smoke_run, run_one) checks first
@@ -1774,22 +1840,14 @@ cmd_runtime() {
         echo "runtime: builtins_cjk_table.go DIFFERS from cjkcodecs_table.py's"; rc=1
       fi
       pa_arbace runtime-ops || rc=1
-      local n=0 bad=0 b
-      local -A gots=()
-      for p in "$root"/test/python/pyi/*.py; do
-        b=$(basename "$p")
-        # PYI_SMOKE_ONLY=REGEX: the programs (and sessions) whose names match, a sample (queue 213); the controls'
-        # subjects run with every selection (queue 235)
-        [[ $b =~ ${PYI_SMOKE_ONLY:-.} ]] || smoke_control_subject smoke "$b" || continue
-        n=$((n + 1))
-        local want got
-        want=$(smoke_want "$p") || { echo "  FAIL $b: no reference (the oracle's records)"; bad=$((bad + 1)); continue; }
-        got=$(cd "$(dirname "$p")" && smoke_run "$root/bin/pyi" run "$b"); gots[$b]=$got
-        smoke_verdict "$b" "$want" "$got" smoke || bad=$((bad + 1))
-      done
-      echo "runtime: $n programs of test/python/pyi run by pyi as by the oracle: $((n - bad)) equal"
-      smoke_controls smoke gots || bad=$((bad + 1))
-      [ $bad -eq 0 ] || rc=1
+      runtime_programs || rc=1
+      repl_check || rc=1
+      return $rc ;;
+    programs)
+      # the programs of test/python/pyi and their controls, then repl --check, without check's print, read and tables: a light
+      # proof of the runtime a run loads (runtime_from_source)
+      local rc=0
+      runtime_programs || rc=1
       repl_check || rc=1
       return $rc ;;
     tables)
@@ -1823,8 +1881,29 @@ cmd_runtime() {
       done
       return $rc ;;
     gen-tables) shift; runtime_gen_tables "$@" ;;
-    *) die "usage: bin/pyi runtime print|read|vet|check|tables|gen-tables" ;;
+    *) die "usage: bin/pyi runtime print|read|vet|check|programs|tables|gen-tables" ;;
   esac
+}
+
+# runtime_programs (runtime check's and runtime programs'): the programs of test/python/pyi run by bin/pyi run against the
+# oracle's recorded runs (PYI_SMOKE_ONLY=REGEX a sample), then their controls (smoke_controls)
+runtime_programs() {
+  local n=0 bad=0 b p
+  local -A gots=()
+  for p in "$root"/test/python/pyi/*.py; do
+    b=$(basename "$p")
+    # PYI_SMOKE_ONLY=REGEX: the programs (and sessions) whose names match, a sample (queue 213); the controls'
+    # subjects run with every selection (queue 235)
+    [[ $b =~ ${PYI_SMOKE_ONLY:-.} ]] || smoke_control_subject smoke "$b" || continue
+    n=$((n + 1))
+    local want got
+    want=$(smoke_want "$p") || { echo "  FAIL $b: no reference (the oracle's records)"; bad=$((bad + 1)); continue; }
+    got=$(cd "$(dirname "$p")" && smoke_run "$root/bin/pyi" run "$b"); gots[$b]=$got
+    smoke_verdict "$b" "$want" "$got" smoke || bad=$((bad + 1))
+  done
+  echo "runtime: $n programs of test/python/pyi run by pyi as by the oracle: $((n - bad)) equal"
+  smoke_controls smoke gots || bad=$((bad + 1))
+  [ $bad -eq 0 ]
 }
 
 # musl_src: musl 1.2.6's release tarball (test/c/corpora.edn's :musl-1.2.6, the C crop's pin) checked by its SHA-256 and
@@ -2515,19 +2594,20 @@ cmd_records() {
     dir=${dir:-$WORK/records-slice}
   fi
   mkdir -p "$dir"
-  # the host
-  s=$(runtime_state)
+  # the host: the state its checks will run in (each bin/pyi check decides by runtime_from_source, auto unless PYI_RUNTIME)
+  s=$(records_state)
   case $s in
-    stale*)
+    stale*|checkout*|interpreted)
       local g; g="$(. "$root/bin/lib/gate-cache.bash"; arbace_gate_cache "$root" 2>/dev/null)/amd64/arbace"
       if [ "$arch" = amd64 ] && [ -x "$g" ]; then
-        echo "records: the tools' host $(arbace_exe) runs pyi's runtime of another commit ($s): the gate's build at the checkout's key instead, $g"
-        export ARBACE_HOST_EXE=$g; s=$(runtime_state)
+        echo "records: the tools' host $(arbace_exe) runs pyi's runtime as '$s', not the checkout's compiled: the gate's build at the checkout's key instead, $g"
+        export ARBACE_HOST_EXE=$g; s=$(records_state)
       fi ;;
   esac
   case $s in
-    stale*) if [ -n "$slice" ] && [ "${PYI_RUNTIME_STALE:-}" = 1 ]; then echo "records: WARNING a stale host ($s): the slice's outcomes are that runtime's"
-            else die "records: the tools' host $(arbace_exe) runs pyi's runtime of another commit ($s), not the checkout's: bin/arbace-go --gate-build, then again (it takes the gate's build at the checkout's key)"; fi ;;
+    compiled*) ;;
+    *) if [ -n "$slice" ] && [ "${PYI_RUNTIME_STALE:-}" = 1 ]; then echo "records: WARNING the host's runtime is '$s', not the checkout's compiled: the slice's outcomes are that runtime's"
+       else die "records: the tools' host $(arbace_exe) runs pyi's runtime as '$s', not the checkout's compiled (a record's): bin/arbace-go --gate-build, then again (it takes the gate's build at the checkout's key)"; fi ;;
   esac
   echo "records: host $(arbace_exe) ($s), $(nproc) cores, PYI_LIB_TEST_JOBS=${PYI_LIB_TEST_JOBS:-2}, GOGC=${GOGC:-}${slice:+, slice 1/$slice}"
   local aot_rec lib_rec aot_args=() lib_args=()
@@ -2578,6 +2658,8 @@ cmd_records() {
   if [ -n "$slice" ]; then echo "records: logs and the slice's records in $dir (not for commit)"; else echo "records: logs in $dir"; fi
   return $rc
 }
+# records_state: runtime_state as a bin/pyi check started now would see it (its own runtime_from_source decision)
+records_state() { ( unset ARBACE_GOI_FROM_SOURCE PYI_RUNTIME_NOTED; runtime_from_source records 2>/dev/null; runtime_state ); }
 # records_step DIR NAME CMD...: CMD under busybox time (DIR/NAME.time), its log DIR/NAME.log, the peak of its processes'
 # summed resident memory sampled every 5 s (DIR/NAME.mem, MB)
 records_step() {
@@ -2614,6 +2696,10 @@ records_overlay() {
   echo "$o"
 }
 
+# the verbs that run pyi on goi decide its runtime first (runtime_from_source), for their children too
+case "${1:-}" in
+  run|ir|repl|lib-test|python|lib-test-all|runtime|aot|bench|check|cover|wheels|runner|script) mkdir -p "$WORK"; runtime_from_source "$1" ;;
+esac
 case "${1:-}" in
   gen) shift; cmd_gen "$@" ;;
   golden) shift; cmd_golden "$@" ;;
