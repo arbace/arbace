@@ -333,6 +333,18 @@ lines, and `CellParams` (a cell that is a parameter, copied in on entry). An ins
 owner (`opOwners`, §9); `bin/pyi runtime check` requires the two lists equal. Constants PY5b0 does not load (doubles,
 `{:imag}`, `{:bytes}`, `{:joined}`, ints beyond 64 bits) go through `loadConstHook`, PY5b's to replace.
 
+**The binary IR** (`irbin.go`, queue 329): `ReadIR` also reads a code object as bytes, the text beginning
+`"\x02pyi-ir-1\n"` (`irBinMagic`; another version of `"\x02pyi-ir-"` refused by its name): a string table (a count,
+then each string's byte length and bytes), then the module's code object, its fields in the order `loadCode` reads them
+(name, qualname, kind, flags, argcount, posonly, kwonly, locals, cells, frees, names, docstring, consts, threaded, the
+instructions as an operation's name and its ARG, handlers, firstlineno, warnings, lines, positions), counts and indices
+unsigned varints, integers zigzag varints, a constant tagged as `loadConst`'s cases and the rest of the IR's values as
+generic tagged values. It reads to the code objects the text reads to, in the same order (the interned names, the
+codes' creation events). Two writers make the same bytes: `arbace.python.aot`'s `ir-binary` (the packages compiled
+ahead, §10) and `irBinaryOf` (the host's IR cache's answers, §10); a code object with a key `loadCode` does not read
+(`irCodeKeys`, `ir-code-keys`) or a shape they do not mirror keeps its text. `isIR` admits both forms where a compiler's
+answer is checked (`compileSource`, `RunModule`).
+
 The view of CPython's bytecode (`bytecode.go`, `bytecode_flow.go`, `bytecode_asm.go`, `bytecode_table.go`; queue 229): made from
 the IR the first time `co_code`, `co_consts`, `co_linetable`, `co_exceptiontable`, `co_positions`, `co_lines`, `co_stacksize`,
 `f_lasti` or `tb_lasti` is asked, cached on the `Code`. The machine never reads it. `marshal` keeps pyi's own `co_code`.
@@ -493,14 +505,17 @@ forms over `go/arbace/py`, a compiled interpreter (the survey's §7):
   submodule), found on the run's `sys.path` (the program's directory, the pinned tarball's `Lib`) as `import.go` finds
   them, compiled by `arbace.python.run/compile-source` (the compiler pyi's imports use) and each translated into a package
   `arbace/pyaot/mHASH` (HASH of its IR text; a module compiled once is the same package for every program, printed once
-  and kept by `bin/pyi`): the IR text, its functions in the loader's pre-order (the code object, then its nested code
+  and kept by `bin/pyi`): the IR as the binary IR (§7.2; queue 329: the text when a shape keeps it,
+  `PYI_AOT_BINARY_IR=0` every module), its functions in the loader's pre-order (the code object, then its nested code
   objects in constant order), `Register` (`AotRegister` by the source's `AotKey`, the SHA-256 of the mode and the
   source). The main package calls each `Register` and `AotMain`: `sys.argv` (the process's arguments, else the file),
   `sys.path`, the compiler (`SetCompiler`: a source compiled ahead by its key, else the host's) and `RunModule`.
 - **Source compiled at run time** (`exec`, `eval`, `compile`, an import not found statically) goes to the host's
   compiler: the command `PYI_AOT_COMPILER` names, started once (`arbace.python.aot compile-server` on stage 0, requests
   and answers by length on its stdin and stdout), and runs on the loop. `PYI_AOT_STATS` names a file for the counts (code
-  objects compiled and on the loop, the host's compiles), `PYI_AOT_LOOP` runs every code object on the loop (the check's
+  objects compiled and on the loop, the host's compiles); an answer of the host's IR cache (`irCacheRead`) is read from
+  its binary IR beside it, `KEY.b` stamped with the runtime's key (`compiler.sh`'s `# ir-bin:` line), which the first
+  compiled program of that runtime to read the text writes (queue 329); `PYI_AOT_LOOP` runs every code object on the loop (the check's
   interpreted reference on the same runtime, the speed's baseline), `PYI_CPUPROFILE` writes Go's CPU profile.
 - **The checks**: `bin/pyi aot FILE [ARGS]` (one program compiled and run), `bin/pyi check --aot [--record] [--no-pyi]
   [--only ID]` (§11 of the survey's PY8: the synthetic corpus and the samples against 177's references, the loop and pyi;

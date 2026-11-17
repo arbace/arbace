@@ -604,6 +604,12 @@
 
 (defn- long-val? [x] (instance? Long x))
 
+(def ^:private ir-code-keys
+  "The keys of a code object's map the loader reads (load.go's loadCode); a code object with another key keeps the module's
+  text: a key the compiler adds is read by loadCode before the binary IR carries it (queue 329)"
+  #{:name :qualname :kind :flags :argcount :posonly :kwonly :locals :cells :frees :names :docstring :consts :threaded :code
+    :handlers :firstlineno :warnings :lines :positions})
+
 (defn- big-val? [x] (or (instance? arbace.lang.BigInt x) (instance? java.math.BigInteger x)))
 
 (defn ir-binary
@@ -654,7 +660,7 @@
                        (string? x) (do (tag! 6) (s! x))
                        (= :ellipsis x) (tag! 7)
                        (and (map? x) (map? (:code x))) (do (tag! 8) (code! (:code x)))
-                       (and (map? x) (seqv? (:tuple x)) (not (set? (:tuple x))))
+                       (and (map? x) (seqv? (:tuple x)))
                        (do (tag! 9) (bin-uint body (count (:tuple x))) (doseq [e (:tuple x)] (const! code! e)))
                        (and (map? x) (= 1 (count x)) (keyword? (key (first x))))
                        (do (tag! 10) (s! (kw-name (key (first x)))) (value! (val (first x))))
@@ -676,6 +682,7 @@
                      :else (bin-refuse (str "an argument of " op) a)))
         code! (fn code! [c]
                 (when-not (map? c) (bin-refuse "a code object" c))
+                (when-let [k (first (remove ir-code-keys (keys c)))] (bin-refuse "a code object's key" k))
                 (s! (str-of (:name c))) (s! (str-of (:qualname c)))
                 (s! (if (keyword? (:kind c)) (kw-name (:kind c)) ""))
                 (let [fs (filter keyword? (if (seqv? (:flags c)) (:flags c) []))]
@@ -692,18 +699,19 @@
                 (let [ins (if (seqv? (:code c)) (:code c) [])]
                   (bin-uint body (count ins))
                   (doseq [i ins]
-                    (when-not (and (seqv? i) (not (set? i)) (= 2 (count i)) (keyword? (first i))) (bin-refuse "an instruction" i))
-                    (let [[op a] i] (s! (kw-name op)) (arg! op a))))
+                    (when-not (and (seqv? i) (= 2 (count i)) (keyword? (first i))) (bin-refuse "an instruction" i))
+                    (let [[op a] (vec i)] (s! (kw-name op)) (arg! op a))))
                 (let [hs (if (seqv? (:handlers c)) (:handlers c) [])]
                   (bin-uint body (count hs))
                   (doseq [h hs]
-                    (when-not (and (vector? h) (>= (count h) 4)) (bin-refuse "a handler" h))
-                    (dotimes [i 4] (bin-int body (int-of (nth h i))))
-                    (tag! (if (and (> (count h) 4) (true? (nth h 4))) 1 0))))
+                    (when-not (and (seqv? h) (>= (count h) 4)) (bin-refuse "a handler" h))
+                    (let [h (vec h)]
+                      (dotimes [i 4] (bin-int body (int-of (nth h i))))
+                      (tag! (if (and (> (count h) 4) (true? (nth h 4))) 1 0)))))
                 (bin-int body (int-of (:firstlineno c)))
-                (let [ws (filter #(and (seqv? %) (not (set? %)) (= 5 (count %))) (if (seqv? (:warnings c)) (:warnings c) []))]
+                (let [ws (filter #(and (seqv? %) (= 5 (count %))) (if (seqv? (:warnings c)) (:warnings c) []))]
                   (bin-uint body (count ws))
-                  (doseq [[m l o el eo] ws] (s! (str-of m)) (doseq [n [l o el eo]] (bin-int body (int-of n)))))
+                  (doseq [[m l o el eo] (map vec ws)] (s! (str-of m)) (doseq [n [l o el eo]] (bin-int body (int-of n)))))
                 (ints! (:lines c))
                 (if (string? (:positions c)) (do (tag! 1) (s! (:positions c))) (tag! 0)))]
     (code! code)
