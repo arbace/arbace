@@ -9640,3 +9640,20 @@ warnings and fall under the existing by-design `:diagnostic`. Alternatives: a wh
 comments printed into every line (rejected: it would change the judging of every file, unprovable without the whole corpus).
 Proposed AXS95-AXS97 (doc/asm/AMD64-SURVEY.md): the 655 `:other-tool` texts of objects no check judges, the error tests' judge,
 the matcher's debug trace.
+
+## 2026-11-17: review of next's gate changes before the night (branch `h-review-diet`)
+
+A review of gate-ess-diet's merge (next `e4a7a30f3`: 1e54f3d1b against cf8268ebf), memdecl-fix (d6bec3790), tmpdates-fix
+(2a21f8148) and javac-tool's `:mem-gib` (105b0d832), by reading and by light checks on stage 0 (no gate run): every old step's
+command, inputs, hosts, env, pins and never-loads found in the new steps (the 25 removed steps' commands in the 9 merged ones, in
+their order; `.tmp/rev/` on the branch's worktree); the controls the same multiset (128 entries, 83 distinct); no `:needs`,
+`:uses`, `:start-after`, `:crops` or `test/crops/independence.edn` name left on a removed step; the spliced fragments' steps,
+controls and groups equal to steps.edn's; the planner on a store made from the checkout's own material with only stage 0's
+identity moved: the 23 crop subsets `night`, the core run, cpp-runtime not needed; one scheme file changed: scheme-c2j run and
+cpp-c2j (its need) woken. `bin/gate --full --concurrent --plan`: 338 steps, the largest admission 57.5 GiB (java-compiled, 1.1 x
+its 52.0 GiB tree peak), none that cannot start (the free rule admits a step alone when nothing runs). The gate's light tests
+(crop-tier, crops, costs, lanes, caches --coverage, claude-md, records-check) and `bin/crops-score --judge --strict` pass.
+One change: diffcheck's `:mem-gib` 43 to 50 (its pass of 11:46 on seed 3c48859d peaked at 49.2 GiB, one process, after
+memdecl-fix's measures; `bin/gate --mem-check` listed it UNDER). The admission already took 1.1 x that peak, so no decision of
+tonight's run moves, and `:mem-gib` is in no key. java-compiled's 52.0 GiB (memdecl-fix's one-off, not followed on purpose)
+still fails `--mem-check`: left to the main session.
