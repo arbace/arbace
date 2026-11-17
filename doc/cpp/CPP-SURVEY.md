@@ -8238,6 +8238,23 @@ bin/cppi runtime-inputs --record                           # unchanged while the
 bin/reap --record && bin/crops-score --record && bin/crops-score --judge --strict
 ```
 
+Reviewed on the main host (2026-11-17, branch `h-review-mac-crops-cpp` from `324-cpp-own-ir` 260f3777f, round 2): the record's wiring read against
+`bin/lib/cppi/route.bash` (`cppi_ir_route` writes `WORK/files/ID/route`, `ir.status` and, for a program ours refused before clang's IR,
+`gen.refused` put back beside it; `bin/lib/cppi/check-aot` the same through the same function, its `x.ll` deleted after the run but the
+route files kept), `ir-input`'s four cases as the route writes them, `runtime-build` always rebuilding (so `runtime-inputs OUT` finds a
+fresh `OUT/inputs.edn` after one), `score.ae`'s `with-part` (the case count only in the note) and `case-inputs` (the stated 0.5 until the
+programs' record): no correctness bug. `bin/cppi selftest case-inputs`, `bin/crops-score --self-test`, `--judge --strict` (0 problems, C++
+72), `bin/records-check` (9 pairs, 0 problems) pass here. Fixed: `bin/lib/cppi/check`'s header named clang the default route (auto since
+night 11), and the eval and AOT facts' `:evidence` now name the route, `ir-input` and the inputs records. Round 2's Sema fix (`located-file` through the tree, the rule of `arbace.repr.c.pp`'s `sysroot-file`) proved here: `bin/cppi selftest
+sysroot-text` passes, and `bin/cppi codegen-gen` under `strace -f -e open,openat` (155 samples, 155 pass, both controls failing, 13 min)
+opened no `/usr/include` file from any Arbace process: the trace's 24 opens of `/usr/include` are the sysroot builds' shell copies
+with their digests checked (`c/target/libraries.txt`'s gmp.h and pcre2.h, `c_gcc_sysroot`'s fortify headers staged when the store
+lacks the pack), none under `c++/`; no other path of `arbace/cpp` or `arbace/repr/cpp` opens a location's file by name (the others read
+the main file, records or the work directory). Not run here: `bin/cppi check`
+(no lowered runtime at this checkout's key on the host: next's `.tmp/cppi/runtime` was built by the previous seed's stage 0; the
+records-mode `runtime-build` declares 8 GiB, over the day's per-process budget), so the commands above stay the main host's, after
+`bin/cppi runtime-build` and `runtime-ci` at the merged branch's key.
+
 ## Carried from `embed-gaps` (2026-11-16, the consolidation's U5 (a)): the embedding's preparation and its E.6, the gaps
 
 The section below was written on the branch `embed-gaps` (012dc86a1, 2026-11-04, on that day's next) and reached no other

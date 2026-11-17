@@ -9552,3 +9552,16 @@ Alternatives considered: moving the subsets to `:phase :full` (simplest, but a c
 crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
+
+## 2026-11-17: queue 324 (C++'s eval and AOT inputs records) reviewed on the main host (branch `h-review-mac-crops-cpp`)
+
+The Mac VM's `324-cpp-own-ir` 07ce58856 and its round 2 260f3777f (CP356 (a), CP333 (b); the user's DECISIONs 1 (a), 2 (a); round 2:
+Sema's header text from the target tree, CP241 (b)) read against next: the inputs
+record's wiring to `bin/lib/cppi/route.bash` (which writes each program's `route`, `ir.status`, `gen.refused`), `ir-input`, the
+runtime's `inputs.edn`, crops-score's `:mean-with`. No correctness bug found. `bin/cppi selftest case-inputs`, `bin/crops-score
+--self-test`, `--judge --strict` (0 problems, C++ independence 72 until the programs' record), `bin/records-check` pass on this host.
+Round 2 proved: `selftest sysroot-text`, and `bin/cppi codegen-gen` under strace (155 of 155, no `/usr/include` file opened by an Arbace
+process). Fixed: `bin/lib/cppi/check`'s header (auto, not clang, the default route since night 11) and the eval and AOT facts' `:evidence`. Not
+run: `bin/cppi check` (no lowered runtime at the key here; its records-mode build declares 8 GiB): the records stay the night's, as
+doc/cpp/CPP-SURVEY.md's "As built: queue 324" lists. Alternative considered: rebuilding the runtime at one job to run two samples
+(rejected: over the day's 2 GiB a process, and the night's record runs the same path whole).
