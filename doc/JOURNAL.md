@@ -10569,3 +10569,28 @@ same form of jdk/ or the same row of check-interp.edn. Light proof: reap and cro
 records-check, the planner, java-check --essential 428 of 428 on next's gate executable with the checkout on ARBACE_PATH,
 javac-platform-test. Still running, to merge on top tomorrow: n-java-hoist, n-java-net. The day's list:
 doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-night".
+
+## 2026-11-18: n-java-hoist, a postfix increment hoisted past a throw (repr/java, round 52, overnight)
+
+Branch n-java-hoist from mac/n-java-conv 92eabf1b7. n-java-dates (mac/n-java-dates 667665e41, doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-dates") found t05396's cause in the converter: `c = text.charAt(index++);` in SimpleDateFormat's
+subParseNumericZone was converted `(set! c (.charAt text index)) (set! index ...)` (with-hoisting :after), so when charAt threw
+the catch saw the old index (JLS 15.14.2: the variable is incremented when the increment is evaluated). Decision (a), taken
+overnight (round 52), in its narrowest correct form: an increment whose variable is observable when the statement completes
+abruptly, a field or a local a catch or finally of an enclosing try sees (one in scope at the try: lambdas cannot mutate a
+captured local, and a local declared in the body is dead in the handlers, so neither loops nor lambdas need more), moves :after
+only when nothing after it can throw (`x = i++` into a local or a field of `this`), else :before when nothing evaluated before it
+can (literals, types, `this`, locals, fields of `this` by simple name, a call's target, an array element's array and index), else
+it stays in place, `(let [old-N i] ...)`. Found on the way: plain :before (decision (a) as worded, and the return statements' and
+fields' existing :before) is wrong too when something before the increment throws (`c = at(s.substring(5), i++)`), and fields
+were exposed the same way (only through returns, an assignment statement disables the field path): both covered by the rule.
+The printer folds `s; i++` back into `s` for such a local only for `x = i`. arbace/repr/java/convert.ae (hoistable-increments,
+with-hoisting, hoist-mode, try-stmt's :guarded), print.ae (fold-increment, try-lines), CONVERTER-NOTES.md, PRINTER-NOTES.md.
+Proof, light (each process under 1 GiB but two estimate batches at 1.04 and 1.07 GiB): a test file of 16 cases (i++, ++i, a[i++],
+i--, finally, return, a throwing left operand, a local declared in the try, a lambda, fields, a qualified static call) read by
+both fronts, equal; printed, read again, equal; javac on Arbace's class files equal to the original's; at interp on the gate's
+e8e0d017243dca8a9f9f equal to the JDK's output (the old forms: 3 of 16 wrong). SimpleDateFormat's subParseNumericZone verbatim in
+a driver: the old forms give the error indexes one short (t05396's "Bad error index=1, expected=2"), the new the JDK's. t05396
+itself cannot run on tonight's executable with new forms: the runtime's classes cannot be redefined (go/arbace/jrt/dyn.ae's
+DefineDynamic). jdk/forms: SimpleDateFormat's four statements; a sample, 0 of 155 java.base files and 1 of 59 likely ones
+(ArrayBlockingQueue), so about 5 to 15 files of java.base. The day reconverts.

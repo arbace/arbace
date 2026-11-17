@@ -8201,3 +8201,66 @@ bin/reap --record && bin/crops-score --record && bin/crops-score --judge --stric
 The rows by branch: n-java-defer t04717 t04729; n-java-conv t04727 t04740 t04741 (read, interp, compiled, print); n-jrt-aih t04724
 t04735 t04738 t04740 t04741 t04742 (read, interp); n-java-serial t04389 t04433 t04440 t04623 t05237 t05251; n-java-dates t04927
 t05398 t05450 t05451 t05453 t05459 t05467 t05468 t05506 t05507; n-java-calb t05460 t05461 (t05461 expected in :jrt-dates, Buddhist).
+
+## As built: n-java-hoist (write-ahead), 2026-11-18 (round 52, overnight)
+
+Branch `n-java-hoist` (from mac/n-java-conv `92eabf1b7`), under the night's rules: t05396's cause, found by n-java-dates
+(mac/n-java-dates `667665e41`, "As built: n-java-dates"), is in repr/java's converter. `c = text.charAt(index++);` inside a try
+became `(set! c (.charAt text index)) (set! index (unchecked-inc-int index))`; when charAt throws, the catch sees the old index.
+
+**Decided, taken overnight (round 52): (a), in its narrowest correct form.** An increment is *observable* when its variable can
+be read after the statement completes abruptly: a field, or a local a `catch` or `finally` of an enclosing `try` sees (a local in
+scope at the `try`; `try-stmt` puts them in the env's `:guarded`). Checked and not needed beyond that: a `finally` alone counts as
+a catch does; a lambda cannot capture a mutated local, and its own try is handled inside it; a loop's body inside the try is
+covered by the same scope; a local declared in the try's body is dead in its handlers. For an observable increment
+(`hoist-mode`):
+
+- **:after** only when nothing after it can throw: the increment is the whole right side of an assignment to a local or a field
+  of `this` (`x = i++`);
+- else **:before** (the old value bound, the variable incremented, the bound value used) when nothing evaluated before it can
+  throw: literals, types, `this`, locals, fields of `this` by simple name, a call's target (its null check comes after the
+  arguments, JLS 15.12.4), an array element's array and index (their checks come after the right side, JLS 15.26.1);
+- else it stays in place, `(let [old-N i] (set! i ...) old-N)`.
+
+The wording "hoist `:before` inside a try" alone would be wrong for `c = at(text.substring(5), index++)` (substring throws first:
+Java leaves index alone); so were the existing `:before` of return statements and the field path (`return a.b[pos++]`, a field
+`pos`). The rule covers them. Unobservable increments are hoisted as before. The printer (`fold-increment`) folds `s; i++;` into
+`s` for an observable local only for `x = i`, so a round trip reads back the same forms.
+
+**Proof** (each process under 1 GiB but two of the estimate's batches, 1.04 and 1.07 GiB; stage 0 of next, javac's tool
+`javac-8526ceb9d1ea3ff0bd68`, the gate's executable `e8e0d017243dca8a9f9f`):
+
+- a test file of 16 cases (`i++`, `++i`, `a[i++]`, `i--`, a finally, a return, a throwing left operand, a local declared in
+  the try, a lambda, fields, a qualified static call, `x = i++`, two statements `c = s.charAt(i); i++;`): read by
+  `read --front native --no-javac` and by javac's front, equal; printed, read again by both, equal; javac on Arbace's class
+  files of the printed file equal to the original's byte for byte; run at interp (`test/java/run.ae --load files`), its
+  output equal to the JDK's (with HEAD's forms 3 of 16 lines wrong: post 3, array 3, fin 3 for 4, 4, 4);
+- SimpleDateFormat's `subParseNumericZone` verbatim (jdk26u lines 1848-1909, CalendarBuilder a stub) on 15 of the test's
+  inputs: HEAD's forms give each failing parse's error index one short (`X +1 -> -1`: t05396's "Bad error index=1,
+  expected=2"), the new forms the JDK's, at interp; both fronts equal; printed and read again, equal (the class files differ by
+  the printer's labeled-break restructuring, the same Java text as HEAD's printer gives);
+- `test/repr/java/java`'s 20 samples by both fronts: equal to `test/repr/java/expected` (unchanged);
+- t05396 itself cannot run tonight with the new SimpleDateFormat: the executable's runtime classes cannot be redefined at
+  interp (`DefineDynamic`, go/arbace/jrt/dyn.ae: "a class of the runtime or the JDK cannot be replaced"), so it waits for the
+  build of the reconverted jdk/forms.
+
+**jdk/ forms that change (estimate).** `read-jdk --check --no-javac` with HEAD's and the new converter: SimpleDateFormat, its
+four `charAt(index++)` statements (nothing else of the file); a uniform sample of 155 of java.base's 2,322 shared files, none;
+59 of the 291 files that hold both a catch or finally and a postfix increment in an argument or index, one
+(ArrayBlockingQueue: `items[i++] = Objects.requireNonNull(e)`, and a renumbered temporary later in the file). About 5 to 15
+files of jdk/forms, a few in jdk/javac/forms, the fixtures and test/java/forms possibly none.
+
+**Keys.** The reader's hash moves (convert.ae; already stale on the stack); `arbace_javac_key` (javac's tool embeds repr/java);
+not `gate_key` (repr/java is not embedded in the executable). After the day's reconversion: `gate_key` and the runtime key
+(jdk/forms).
+
+The day's commands (on the stack's merged worktree, after its build of javac's tool):
+
+```sh
+bin/jrt-convert update && bin/javac-vendor convert && bin/clojure-tests --java-fixtures update && bin/java-check --forms update
+bin/provenance-check
+bin/arbace-go --gate-build      # the reconverted jdk/forms
+printf 't05396\n' > .tmp/nh.txt
+bin/java-check --levels read,interp,compiled --list .tmp/nh.txt --save .tmp/nh && bin/java-check --judge --partial --record .tmp/nh/results.tsv
+bin/reap --record && bin/crops-score --record
+```
