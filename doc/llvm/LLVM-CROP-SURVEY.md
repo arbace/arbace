@@ -2582,3 +2582,24 @@ Light, one process at a time, no gate. The REAP cells' deferred rows taken by ca
 - **LLS54 The torture pack's dg-options.** (a) `bin/llvmi ir-make tx` passes each test's `dg-options`/`dg-additional-options` (by hand,
   clang 23.1.5, the pack's pin moves; the other modules' IR byte for byte the same), tx-O0.restrict-1 and tx-O2.20040409-3w judged on
   their own program; (b) keep the class. **Recommended: (a)** at the next oracle-tier recording.
+
+## Decided (the user, 2026-11-17, round 51): LLS54 (a)
+
+## As built: LLS54 (a), the torture pack's dg-options (2026-11-17, branch `h-hes-lls`)
+
+`bin/llvmi ir-make tx` compiles each torture test with its own `dg-options` and `dg-additional-options` after the level's (gcc's order:
+an `-O2` of them wins over tx-O0's `-O0`): `tx_dg_options FILE` takes a directive without a target selector, or whose selector names
+`x86_64-*-*` (not with `ia32`), or `fpic`, and of its options `-f*`, `-std=*`, `-O*`, `-D*`, `-m*` that clang accepts (`-mpc64` is
+not), never `-W*` (the build is `-w`) nor `-Wl,*`; 39 of the 52 tests with a directive get options (`-fgnu89-inline` 14, `-fwrapv` 9,
+...), listed per module in `test/llvm/ir/tx.cmd`. The pack made again by hand with the host's clang 23.1.5 (the oracle tier's), 3,040
+modules as before: 61 modules' IR differs (all of them modules with options; 17 others, `-fno-common`, `-std=c99`, `-fno-ipa-cp` and the
+like at one level or both, give the same IR), the other 2,979 differ from the old pack (clang 23.1.4) by `!llvm.ident`'s version alone,
+compared with that line normalized. The pin moves (`tx.tar.xz.sha256`), every module's IR digest with it (lli's recorded runs in
+ref-lli23.edn name the old digests: every torture module is judged by its own verdict, exit 0, so none reads them). Also fixed:
+`tx.cmd`'s `corpora:` line named the first corpus alone. The records' rows of the five changed modules in the sample (tx-O0.20040409-3w,
+tx-O0.pr68532, tx-O0.restrict-1, tx-O2.20040409-3w, tx-O2.restrict-1) re-run by `bin/llvmi check [--aot] --only ... --record`: all five
+pass at both levels, so tx-O0.restrict-1 and tx-O2.20040409-3w left `:dg-options`, which is gone (no member); a run with
+c-O0.run.ptr-sub-unsigned and tx-O0.20000121-1 judged the negative control, which fails as it must. `bin/repr-llvm heldout-check`
+(its 21 tx bases from the pack, none of the 61) on the new pack: 900 mutants, 886 own verdicts, all met, 2 negative controls failing. Eval 547 / 12 / 3 to 549 / 12 / 1, AOT 537 / 10 / 15 to 539 / 10
+/ 13. For the main host's whole night run: `LLVMI_TX_ALL=1 bin/llvmi check` and `--aot` judge the whole 3,040 on the new pack (not
+recorded: the records are the sample's).

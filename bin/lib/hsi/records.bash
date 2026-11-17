@@ -144,3 +144,14 @@ nofib_c_srcs() {
   done
   return 0
 }
+
+# hsi_pre_gen ID (HES92 (a); record-ref and bin/hsi check): GEN.hs when all.T runs `pre_cmd('{compiler} --run ./GEN.hs')`
+# before the testsuite test ID (unboxedsums/ManyUbxSums: GEN writes the test's main module, which the plan names,
+# test/haskell/eval/run_plan.ae), else nothing; its users run `ghc --run ./GEN.hs` in the test's directory first (live only)
+hsi_pre_gen() {
+  case $1 in testsuite/*) ;; *) return 0 ;; esac
+  local id=${1#testsuite/} dir name
+  dir=${id%/*}; name=${id##*/}
+  grep -F ":dir \"$dir\", :name \"$name\"," "$root/test/haskell/eval/testsuite-run.edn" |
+    sed -n 's|.*(pre_cmd "{compiler} --run \./\([^" ]*\.l\{0,1\}hs\)").*|\1|p' | head -1
+}

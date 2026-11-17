@@ -2433,3 +2433,48 @@ The design classes (eval 63, print 14):
 - **HES93 the print cell's module-view rows.** (a) a module printed back byte for byte passes the text level, the mode `:full` tree's
   difference outside the module view reported beside it (print 1,345 / 0); (b) as now, by design. **Recommended: (a)**: the cell's
   criterion is the text printed back byte for byte, which all 14 meet.
+
+## Decided (the user, 2026-11-17, round 51): HES91 (a), HES92 (a), HES93 (a)
+
+## As built: HES92 (a), HES93 (a); HES91 (a) prepared (2026-11-17, branch `h-hes-lls`)
+
+- **HES93 (a), the print cell's 14 module-view rows as passes.** The cell's criterion is the native reader's verdict, the printed text
+  byte for byte (`bin/repr-haskell roundtrip --text`, `compare-text --bytes-only`, no tree made), which every module meets: the 14
+  modules (`:module-view-comments` 3, `:module-view-include` 11) pass it. The old known file, whose 14 reasons are the helper's trees of
+  mode `:full` (GHC's hsdump, outside the module view), is now `test/haskell/roundtrip-ghc-9.14.1-text-tree-known.edn`, the known file
+  of `REPR_HASKELL_READER=helper` (the oracle's; `bin/repr-haskell`'s `text_level` picks it by the reader);
+  `roundtrip-ghc-9.14.1-text-known.edn` is the native verdict's, empty (with the native reader the old one's 14 entries had become
+  "fixed": a whole native `--text` run would have failed on them). `test/reap/cells.edn`: the helper's tree verdict is a source
+  `:role :beside` of the print cell, its 14 in `test/haskell/divergences-print.edn`'s two classes, out of the counts. Print 1,331 / 14 / 0
+  to 1,345 / 0 / 0. The text level's negative control: a pair of modules whose references are the same text is no control
+  (`arbace/repr/haskell.ae`'s `cmd-compare-text`: bytestring's `Data/ByteString/ReadInt.hs` and `ReadNat.hs`, one `#include` of the same
+  Haskell source, have equal module views, and the adjacency pair of a run of the 14 judged them equal). Proved:
+  `bin/repr-haskell roundtrip --text-only --only-list` the 14 and array's `Data/Array.hs`, `Data/Array/IArray.hs` (the controls file's
+  pair): 16 modules, 16 byte-identical, 0 differ, 6 control pairs differ as they must. Not run: the helper's verdict over the 14 (it reads
+  the recorded `haskell-dumps-full` and `haskell-trees-full` packs, which have no entry for these packages here: the oracle tier's).
+- **HES92 (a), the buildable references.** `test/haskell/eval/run_plan.ae` plans a `cmm_src` test's `NAME.cmm` (T17920, whose `.cmm`
+  defines Main's closure) and the main a `pre_cmd('{compiler} --run ./GEN.hs')` writes (ManyUbxSums.hs, the only such pre_cmd); the
+  plan's other 1,709 rows are unchanged. `bin/lib/hsi/records.bash`'s `hsi_pre_gen ID` names the generator; record-ref runs it in the
+  program's copy first, and `bin/hsi check` (live, and `--verify-progs`) runs it in the test's directory before the helper's dump and
+  removes the file after; its key (`prog_key`) hashes the generator in the generated main's place, so a non-live check needs no GHC.
+  A multi-module test's extra Haskell source (ManyUbxSums_Addr.hs) goes to the helper as a file, not a flag. Recorded by hand with the
+  host's GHC 9.14.1: `bin/hsi record-ref --corpus testsuite-core --only testsuite/codeGen/should_run/T17920,testsuite/unboxedsums/ManyUbxSums`
+  (T17920 status 0, its stdout "Test" and puts' newline, `:expected :differs` by that newline; ManyUbxSums status 0, `:expected :same`),
+  `bin/hsi check --live --dump-only --record-progs --only testsuite/unboxedsums/ManyUbxSums` (the pack haskell-stg-progs, 1,128
+  members, its pin `d2c8c4c0`), `bin/hsi own-verdicts --record` (ManyUbxSums from own-verdicts-pending.tsv to own-verdicts.tsv). hsi's
+  rows by `bin/hsi check --only ... --record` (with samples/Hello, samples/Echo and arr001 for the controls, which fail as they must):
+  ManyUbxSums passes by its own verdict; T17920 is `:no-dump` "a Cmm main" (the check no longer asks the helper for a `.cmm`: no Haskell,
+  no STG) in `:test-cmm` (deferred: a Cmm interpreter, HES67), whose `:results` take `:no-dump`.
+  **T24809 is not buildable here**: all.T gives it `req_profiling` and `-forig-thunk-info -prof`, and this GHC has no profiled libraries
+  (`ghc --info`'s "GHC Profiled" NO, no `.p_hi`), so GHC rejects it (GHC-88719) and the testsuite itself skips it; it moved to
+  `:skipped` (design, the testsuite's own verdict on this GHC), and the check now decides a `:skipped` test before its dump (its row
+  `:skipped`). Eval 811 / 63 / 34 to 812 / 62 / 35 (909 programs: ManyUbxSums had no row); `:no-reference` 60 to 58 (callback002 and
+  nofib's 57; 57 after HES91's record).
+- **HES91 (a), prepared.** The class change (callback002 out of `:no-reference`) is a commit of its own on the branch `h-hes-lls-hes91`
+  (on `h-hes-lls`), not on `h-hes-lls`: before the record its committed row (`:fail`, `:reason :limit`, the 2 GiB light cap) would be in
+  no class and `bin/hsi divergences` and `bin/reap` would fail. The main host's night command, in a checkout of that branch:
+  `ARBACE_MEM_GIB=16 bin/hsi check --corpus nofib --only nofib/smp/callback002 --record` (HES85: 0.7 GB resident, 9 s), then
+  `bin/hsi divergences`, `bin/reap --record`, `bin/crops-score --record`, `bin/crops-score --judge --strict`, `bin/records-check`, and
+  the records amended into that commit (expected eval 813 / 61 / 35). With it, rts_clearMemory's row (HES83's night command).
+- **Found beside.** `bin/hsi pins --check` reports testsuite-core's run-tests 743 against the recorded 722 (eval-corpora.edn, last
+  changed at 829eb1d4e): not this branch's (the old run_plan.ae gives 743 too).
