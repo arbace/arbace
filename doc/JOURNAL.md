@@ -10332,3 +10332,22 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: the Mac's integrated Python line reviewed onto next (branch `n-review-f`, from next `42bf8614b`)
+
+- Merged mac/python-1117-on-next `85a0b5096` (317's merge of 201, 318-321, 329's binary IR, 330's generator chains,
+  h-review-mac-py) into next `42bf8614b` (`53963579d`). Next changed nothing of Python since the line's base `d694a2f7e`
+  (bin/pyi identical), so 321's guard on runtime_from_source merges as built; conflicts only in test/crops/scores.edn and
+  test/reap/matrix.edn, next's side taken and both re-recorded (Python 0 / 0 / 83 / 98, every other crop next's).
+- 329's go/arbace/py/irbin.go printed from the forms and read against load.go's ReadIR, loadCode, loadConst and decodeArg case
+  by case (the same code objects in the same order; the Go writer's map order and string table are free, the cache files only);
+  `gofmt -l`, `go vet ./py` and `go test -run IR ./py` by TamaGo's go: clean, under 1 GiB.
+- Fixed: `bin/pyi records` took the gate's build by `arbace_gate_cache` with ARBACE_HOST_EXE as the caller set it, and
+  gate_key hashes that executable's bytes, so a caller with ARBACE_HOST_EXE set (a worktree's habit) missed the build and stopped;
+  the key is now computed without it, as the gate does.
+- Found, not fixed (the splice is after the records): 317-python-splice `f7fd30b40` was spliced from the fragment before 321's
+  DECISION 1 (a); merged onto this line it conflicts in python.edn and puts pyi-runtime into steps.edn with its old command
+  (stage 0, no PYI_RUNTIME_REQUIRE), python-night.edn holding the old pyi-check and pyi-check-aot-goi. It is to be redone by
+  `gate.crops splice` on this line after the records, not merged.
+- reap 0 problems; crops-score --judge --strict rc 0; records-check 9 pairs 0; `bin/gate --plan` rc 0. gate_key moves (the
+  embedded py runtime and arbace/python): next `e8e0d017...`, this line `485a184c...`.
