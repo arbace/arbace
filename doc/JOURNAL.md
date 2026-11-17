@@ -9603,3 +9603,22 @@ The judge stage's rows still on a host toolchain's recorded runs (doc/CROPS-SCOR
 Alternatives considered: own expected values for synth-c23 and the probes (a DECISION: LLS30's reasoning, the expected output
 would be written by us and checked against the toolchain); MIR's default status for its new/ tests (not established without its
 runner, which ccorpus2 does not carry); fixing the 4 mutants whose expectation throws (needs a re-made pack, night work).
+
+## 2026-11-17: Rust's independence, the RIND design and its first stage, the allocator shim (branch `h-rust-indep`, from `next` `e4a7a30f3`)
+
+- Studied what rsi consumes (`bin/rsi`, `bin/lib/rsi/check`, `bin/lib/rsi/link-ir`, the IR packs `test/rust/ir/`, the records
+  `test/rust/records/`, `test/rust/eval-inputs-linux-amd64.edn`, `.tmp/plans/RUST-90-PLAN.md`, doc/rust/FRONTEND-SURVEY.md through RF20):
+  the front end is complete for a program (66 of 67 synthetic programs own their bodies); the cell's five cases take all seven inputs
+  C1-C7 from rustc's products. Wrote doc/rust/FRONTEND-SURVEY.md, "RIND: eval and AOT on Arbace's own lowering, the design": the
+  inputs' table, RIND1-RIND7 proposed (the order by input, cheapest first; the shim; its gate step; ci on `c/target`; C1 on the cell's
+  cases; the compiler's identity a constant of Arbace's target; the library closure), six stages, 25-34 days and 5-6 nights to 90.
+- Built stage 1 (RIND2 (a), C5): `arbace/rust/back/shim.ae`, the default allocator's shim as LLVM forms with the allocator CGU's mangled
+  name (the StableCrateId in hex without leading zeros, `-crate.allocator`, SipHasher128, base 36) and LLVM's MD5 GUIDs, written after
+  rustc 1.99.1 (`58cf8f9c3`: `compiler/rustc_codegen_llvm/src/allocator.rs`, `rustc_ast/src/expand/allocator.rs`,
+  `rustc_middle/src/mir/mono.rs`, `rustc_data_structures/src/base_n.rs`, as recalled: the compiler's sources not on this host) and held
+  to rustc's 73 recorded `shim.ll`; `bin/rsi shim-check` (73 of 73 equal as forms and as lowered C, the crossed control differing, a
+  mutated record failing); `bin/lib/rsi/check` takes our shim on the pack path by default (`RSI_SHIM=pack` the old one, `shims.tsv`);
+  the five cases' C5 `:own`. Independence stays 80 (RFP53 (a): no case has all seven). Alternatives: the shim only on `--front own`'s
+  cases (gains nothing), keeping `shim.ll`; byte equality of the text (repr/llvm's print drops the comments, so the forms and the
+  lowered C are the level).
+- Not run: the whole `bin/rsi check` (8 GiB declared; its runs unchanged by construction). Crop paths only: no key moves.
