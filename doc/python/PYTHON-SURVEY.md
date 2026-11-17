@@ -7004,3 +7004,238 @@ Review 307 (of 286-298) found four medium gaps; each is fixed as CPython 3.14.10
   `['-']`. The hook in every REPL path and PYTHONSTARTUP after `-i FILE` on a terminal (_pyrepl's
   `interactive_console(pythonstartup=True)`) were 298's already; `.tmp/q313/t/check6.sh`'s eight start paths
   equal python3's.
+
+## As built: 305, pyi's speed, round three (2026-11-16, the Mac VM, queue 305)
+
+The brief: profile pyi compiled and interpreted on the bench and on slow Lib/test modules, find where the time goes,
+and cut it without changing any result. Go's profile (`PYI_CPUPROFILE`) was taken on the compiled executables of 20
+benchmarks (4 to 8 runs each, merged) and of an import probe (`import unittest, argparse, json, re, typing,
+dataclasses, asyncio, ...`). A heap profile and `GODEBUG=gctrace=1` were taken at Py_FinalizeEx's start, on a build
+instrumented for the purpose and not kept.
+
+**Where the time goes (compiled; % of a benchmark's CPU, cumulative):**
+
+| item | where it shows | weight |
+|---|---|---|
+| attribute load (loadAttrAt, typeGetAttr for a class's attributes) | deltablue 20% + 7.6%, richards 14%, float 14%, mdp 14%, go 13% | the largest call-heavy item |
+| frames (newFrame, freeFrame) | richards 6% + 12%, spectral_norm 7% + 6%, coroutines 3% + 7%, raytrace 5% + 7% | `*f = Frame{...}` was 7% of richards |
+| store-attr into a new instance's dict (insertNew: growslice, the index's map) | raytrace 18% | `__init__`'s stores grew the entries 1, 2, 4, 8 |
+| int and float operations (numberFast, NewFloat) | nbody 47%, spectral_norm 35%, base64 14% | every number is a heap object |
+| generator resumption (resume, run, guardedStep, AotExec's yield-from) | coroutines 72%, nqueens 76%, generators 59% | a nested run per level of `yield from` |
+| Go's collector (gcBgMarkWorker) | async_tree 30%, hexiom 22%, go 17%, json_dumps 15%, 5-8% elsewhere | the live heap: 25 MB at a benchmark's end, a quarter of it attribute caches |
+| reading the modules' IR text (ReadIR, the EDN reader) | hexiom 31%, chaos 12%, go 11%, nbody 10%, the import probe 21% | every import of a compiled module parses its IR |
+| code run on the loop at start (step) | hexiom 60%, chaos 31%, go 27%, richards 12% | about 1,300 code objects of 41 sources compiled at run time (below) |
+| the interpreter's end (Py_FinalizeEx's collections) | richards 25-73 ms, hexiom 18-83 ms, the import probe 200-240 ms of a process | 3 to 9 forced Go collections, each with a quiet wait of 3 ms or more |
+
+An empty compiled program starts and ends in 5 ms. A benchmark's process is mostly its start and end when it is
+short (hexiom: about 150 ms, CPython 63 ms).
+
+**The changes (go/arbace/py; no IR, generator or bin/pyi change):**
+- attr.go: an instruction's attribute cache (4 ways, 192 bytes) is made at its first lookup, and the code keeps an
+  array of pointers. Before, it was made for every instruction of any code that ran one attribute instruction. That
+  was a quarter of richards' heap. The live heap at the last collection went 29 -> 21 MB (raytrace), 25 -> 18
+  (richards), 25 -> 20 (deltablue), 43 -> 35 (float), 48 -> 27 (the import probe), so every Go collection marks
+  less, Py_FinalizeEx's forced ones too.
+- attr.go: load-attr of a class whose metatype is type is answered from the instruction's cache entry for the class
+  itself (CPython 3.14's LOAD_ATTR_CLASS). This applies when the attribute was found on a class statement's class
+  of its MRO and type has no data descriptor of that name. The answer is d, or d's `__get__(None, cls)`, as
+  typeGetAttr gives it. The entry is valid while typeEpoch holds, as every entry of the cache, and it is not used
+  while a type watcher is set. The entry is marked only after typeGetAttr returned and only if the entry still holds
+  the class's answer.
+- frame.go: freeFrame zeroes the frame and then puts back Code, Fast and Stack. That takes half the time of
+  assigning the literal (a micro-benchmark: 22 -> 11 ns). The value stack is cleared up to SP only, because its slots
+  above SP are already nil: every pop, AotDrop and truncation clears what it leaves. This was checked with a panic on
+  a stale slot, over the 20 benchmarks.
+- type.go, class.go, dict.go: a class remembers the most entries store-attr gave one of its instances' dicts (at
+  most 32). A new instance's dict is made with that room.
+- registry.go, abstract.go: isNumberDunder compares `r`+name and `i`+name without building the strings (they were 5%
+  of an import's start). binaryOp1's reflected method name is made once.
+
+**The table** (the compiled process: the median wall and CPU milliseconds of 15 interleaved rounds, base 288fc7dc7
+and head, B H then H B per benchmark; the VM's load 7.6-18.7, task 304 running beside it: single-run swings of 2x,
+so the CPU columns are the readable ones; CPython 3.14.10's milliseconds from test/python/bench-aot-linux-arm64.edn):
+
+| benchmark | CPython | base wall | head wall | base CPU | head CPU | CPU change | CPU / CPython |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| raytrace | 306 | 960 | 720 | 787 | 700 | -11.1% | 2.6x -> 2.3x |
+| deltablue | 180 | 719 | 599 | 564 | 466 | -17.4% | 3.1x -> 2.6x |
+| fannkuch | 319 | 999 | 901 | 804 | 806 | +0.2% | 2.5x -> 2.5x |
+| generators | 296 | 1007 | 970 | 857 | 837 | -2.3% | 2.9x -> 2.8x |
+| nqueens | 357 | 838 | 804 | 732 | 735 | +0.4% | 2.1x -> 2.1x |
+| go | 112 | 373 | 380 | 340 | 328 | -3.5% | 3.0x -> 2.9x |
+| richards | 358 | 756 | 672 | 666 | 632 | -5.1% | 1.9x -> 1.8x |
+| chaos | 139 | 359 | 325 | 310 | 290 | -6.5% | 2.2x -> 2.1x |
+| json_dumps | 67 | 411 | 317 | 310 | 289 | -6.8% | 4.6x -> 4.3x |
+| spectral_norm | 367 | 986 | 881 | 777 | 752 | -3.2% | 2.1x -> 2.0x |
+| unpack_sequence | 263 | 948 | 896 | 767 | 724 | -5.6% | 2.9x -> 2.8x |
+| coroutines | 517 | 1193 | 1234 | 1027 | 999 | -2.7% | 2.0x -> 1.9x |
+| float | 378 | 748 | 683 | 591 | 593 | +0.3% | 1.6x -> 1.6x |
+| nbody | 376 | 615 | 512 | 460 | 445 | -3.3% | 1.2x -> 1.2x |
+| hexiom | 63 | 221 | 191 | 174 | 161 | -7.5% | 2.8x -> 2.6x |
+| base64 | 1797 | 3766 | 3774 | 3317 | 3412 | +2.9% | 1.8x -> 1.9x |
+| bpe_tokeniser | 3461 | 7871 | 7863 | 7063 | 7148 | +1.2% | 2.0x -> 2.1x |
+| async_tree | 266 | 1217 | 1334 | 1290 | 1244 | -3.6% | 4.8x -> 4.7x |
+| mdp | 948 | 4335 | 4028 | 3872 | 3569 | -7.8% | 4.1x -> 3.8x |
+| pprint | 1536 | 5611 | 5620 | 5165 | 5191 | +0.5% | 3.4x -> 3.4x |
+| the import probe | - | 461 | 412 | 428 | 416 | -2.8% | - |
+
+Over the 20: CPU 29.9 s -> 29.3 s (-1.8%), wall 33.9 s -> 32.7 s (-3.6%), CPU against CPython's recorded run 2.47x ->
+2.42x. A third run of 6 rounds (load 12-17) gave deltablue -12%, raytrace -8%, richards -6%, base64 -4% and
+bpe_tokeniser +1.5%: the gains of deltablue, raytrace, richards, mdp and hexiom hold in all three runs, and the rest
+is within the VM's noise. On goi, 8 interleaved rounds of a class's calls and attribute loads (30,000 iterations)
+gave medians of 2.80 s at base and 2.62 s at head, and `python -c pass` took 31-35 s at both: no difference beyond
+the noise.
+
+**Lib/test** (`bin/pyi check --aot --lib-test --fresh` over 16 modules, every method's outcome the same at base and
+head; the modules' run seconds as the check reports them): 6 runs, interleaved H B B H B H (load 11-15), all of
+them with every one of the 4,195 methods' outcomes identical (3,621 pass, 572 classed, the same 2 failing at base
+and head: test_functools' test_update_type_wrapper, a base failure from 313's type `__dict__`, below). The 16
+modules' run seconds summed: base 584, 331 and 381, head 484, 403 and 419. That is no measurable difference: the
+wall moves by up to 1.8x with the load between runs of the same tree. On goi, `bin/pyi lib-test-all --fresh
+test_class test_scope test_list test_generators` took 772 s at head (load 17-18) and 657 s at base (load 15-16),
+with the same outcomes (0 failing).
+
+**Not changed, and why:** generator resumption, a design change (CPython's SEND_GEN in the caller's loop). The
+numbers stay boxed: 202b and 210 already took the exact int and float paths. The dict's Go-map index stays: 202b's
+open addressing was decided for after the re-seed. Py_FinalizeEx's collections stay: their rounds and quiet waits are
+218's, 241's and 253's semantics (DECISION 1 of report 305).
+
+**Found, not this task's:** test_functools' TestUpdateWrapper and TestWraps test_update_type_wrapper fail compiled at
+base 288fc7dc7 too. `update_wrapper(wrapper, type)` copies `type.__dict__`, which since 313 holds type's getsets, into
+the wrapper's `__dict__`, and `wrapper.__annotations__` then answers type's `__annotations__` getset. CPython answers
+the function's own (a data descriptor ahead of the dict). The AOT lib-test record for arm64 does not exist yet, so the
+check does not judge regressions.
+
+**The next steps, by measured gain:**
+1. The interpreter's end: Py_FinalizeEx runs finCollect and the two exitCollects. Each finRounds is one forced Go
+   collection per wave plus one that finds nothing, and each round waits at least 3 ms for Go's finalizer goroutine
+   to go quiet. That is 3-9 collections, 20-240 ms of every compiled process: hexiom 18-83 of about 200, the import
+   probe about 200 of 450. Every Lib/test child pays it too.
+2. The IR read at import: an AOT module's IR is EDN text, parsed into generic values and then into code objects at
+   every import. That is 11-12% of go and chaos and 31% of hexiom. Emitting the code objects as Go data, or a binary
+   form, would remove most of it.
+3. The startup modules compiled ahead. 41 sources are compiled at run time and run on the loop in every benchmark:
+   importlib's bootstrap, io, codecs, encodings, and argparse's lazy `_colorize`, which brings dataclasses, inspect,
+   dis, ast and tokenize, plus 5 dataclass and 12 namedtuple execs. Probed by importing them at the top of hexiom's
+   main module (1,296 -> 72 code objects interpreted), the CPU fell by only about 5%. Most of their cost is the IR
+   read and the collections, not the loop.
+
+## As built: 304, the next deferred classes (round 4): memoryview's formats, _bisect, property, struct_time, the seeds, the built-ins' checks (2026-11-16, the Mac VM, queue 304)
+
+Night 12's partial eval record (181 modules) judged with 288fc7dc7's classes keeps only `:runner-limits` (252: whole modules
+past the night's cap), `:testcapi` (53, by design since 244-4 (a)), `:finalization-collect` (27), `:memoryview-formats` (22,
+286's Barrier rows: the record not run since) and single digits as deferred rows; the deferred classes with the most rows
+are named by `:tests` from later runs of modules outside the record: `:multiprocessing-children` 95, `:finalization-goi`
+82, `:memoryview-formats` 63 (41 named), `:capi-port` 63, `:regrtest-children` 58, `:io-c-checks` 48, `:pyi-command-line`
+40, `:pydoc-builtins` 38, `:builtin-functions-core` 36, `:core-objects-287` 34, `:ordered-dict-c` 31 and below them
+`:c-bisect` 23, `:property-core` 21, `:hash-algorithm` 17, `:structseq-protocol` 15, `:set-core` 14. The ones closed here by
+fixes in pyi, the largest pyi-fixable first (the forkserver's and the C API's are not pyi code; goi's finalization is W2):
+
+- **memoryview's formats** (`memoryview.ae`, `builtins_array.ae`, `bytes.ae`, `bytearray.ae`): an exporter's 1-D format
+  (`BufferFormatter`: an array's typecode, as array_buffer_getbuf gives it; 'u' and 'w' stay byte views), so a view of an
+  array('i') is a view of ints (len, items, slices by item, strides, tobytes, tolist, count, index); memory_richcompare's
+  item comparison for native formats other than a byte format on both sides ('?' by truth, 'i' against 'B' by value, a NaN
+  unequal to itself); BASE_INACCESSIBLE (a released view equals itself only); CHECK_RELEASED at `bytes(m)`,
+  `bytearray(m)`, `with m:` and after an index's, a value's or a slice's conversion (gh-92888: a `__index__`, `__float__`
+  or `__bool__` that releases the view); the tuple keys of a 1-D view (is_multiindex, is_multislice: an index's 1-tuple,
+  NotImplementedError for slices, TypeError past one index); pack_single's TypeError for a value of no int ('B');
+  `hex(sep, bytes_per_sep)` as bytes.hex's, the view exported meanwhile (gh-143195); `__buffer__` and
+  `__release_buffer__` (wrap_releasebuffer's "memoryview's buffer is not this object"); the repr's address; a strided
+  wider view's strides in bytes.
+- **_bisect** (`builtins_bisect.ae`, new): Modules/_bisectmodule.c's four functions, so `bisect.py`'s `from _bisect import *`
+  takes them: lo and hi as Py_ssize_t (hi None or -1 the length), the unsigned midpoint (issue 13496), get_sq_item's
+  refusals, key, an exact list inserted into directly, anything else by its insert method.
+- **property** (`descr.ae`, `attr.ae`, `class.ae`, `finalize.ae`): property_init_impl's subclass rule (the doc stored as the
+  instance's own `__doc__`, gh-41287; a `__slots__` subclass without `__doc__` drops the getter's silently, raises for an
+  explicit one), so a property subclass's instance has its `__dict__` and slots; getter_doc; property_copy as
+  `type(old)(get, set, del, doc)` keeping the name; `__name__` with None a name (unset is NULL); the getter's
+  `__isabstractmethod__` errors propagated; "property %R of %R object has no getter" with the owner's `__qualname__`;
+  `__set_name__`'s argument count message.
+- **struct_time and the struct sequences** (`builtins_time.ae`, `posix_structseq.ae`): `time.struct_time` is a struct
+  sequence of 11 fields, 9 visible (n_fields, n_sequence_fields, n_unnamed_fields, `__match_args__`, `__replace__`,
+  `__reduce__` with tm_zone and tm_gmtoff, copy and deepcopy); structseq_new_impl's "got duplicate or unexpected field
+  name(s)" and `dict=None` refused; concatenation with a tuple and repetition by an int (a tuple's: its visible items);
+  structseq_replace's messages. Not a tuple subclass still (`isinstance(t, tuple)`: test_tuple).
+- **PYTHONHASHSEED** (`hash.ae`): `HashKey` is a package-level initializer, so every hash at the package's init is under
+  it: an integer seed N keys siphash13 by lcg_urandom(N) (CPython's `_PyRandom_Init`), "random" by the system's random
+  bytes; unset, 0, under -E or -I, or not a seed: the zero key, deterministic (CPython randomizes when unset: the
+  DECISION of 304's report).
+- **The built-ins' checks** (`sys.ae`, `builtins.ae`, `core.ae`, `class.ae`, `containers.ae`, `list.ae`, `dict.ae`,
+  `set.ae`, `range.ae`, `slice.ae`, `descr.ae`): `sys.breakpointhook` and `sys.__breakpointhook__` (sys_breakpointhook:
+  `$PYTHONBREAKPOINT`, "0", a builtin name, an unimportable one warned of), `breakpoint()`; NotImplemented has no truth
+  (GH-79893); chr's overflow a ValueError; `__repr__ = None` blocks repr; a `__len__` past ssize_t an OverflowError;
+  `None.__ne__(None)` is False (object's NE through EQ); PyObject_LengthHint's `__len__` errors propagate from list(),
+  list.extend and bytearray.extend (issue 1242657); the dict iterators' `__length_hint__`; set_unhashable_type's message
+  for any TypeError of a hash, set.discard's too; `set().difference(123)` iterates (issue 37219); the classes'
+  `__dict__` and `__weakref__` descriptors' docs; a built-in exception's built-in subclasses in `__subclasses__()` (pydoc's
+  "Built-in subclasses"); range's and slice's start, stop, step member descriptors.
+
+Measured (`bin/pyi lib-test-all --fresh`, each test's own verdict, base 288fc7dc7 in a worktree of its own -> head, pass of
+methods): test_memoryview 105 -> 146 of 171, test_bisect 23 -> 46 of 46, test_property 8 -> 29 of 31, test_builtin 83 -> 100
+of 147, test_iterlen 14 -> 21 of 22, test_set 612 -> 620 of 630, test_structseq 10 -> 22 of 25 (rerun alone, `bin/pyi check
+--only`), test_hash 13 -> 26 of 30, test.test_pydoc.test_pydoc 92 -> 99 of 121; test_array, test_buffer, test_bytes,
+test_memoryio, test_fileio, test_struct, test_abc, test_enum, test_list, test_dict, test_inspect, test_pdb, test_time,
+test_strptime unchanged method for method; test_io's two test_read_byteslike now refused as CPython's array.frombytes
+refuses an 'i' view (_pyio's BytesIO.read1 calls the subclass's read: `:pyio`), its garbage-collection rows failing under
+the VM's load pass alone (PyIOTest's fails alone at the base too). Classes (rows named), before -> after: `:memoryview-formats`
+41 -> retired (40 pass, test_buffer_reference_loop to `:finalization-collect`), `:c-bisect` 23 -> retired,
+`:property-core` 21 -> retired, `:builtin-functions-core` 36 -> 18, `:pydoc-builtins` 38 -> 11 (8 by these fixes, 19 that
+passed since 290), `:hash-algorithm` 17 -> 4, `:structseq-protocol` 15 -> 3, `:set-core` 14 -> 5, `:core-objects-287` 34 ->
+27. Judged with the head's classes, night 12's record has 22 more rows in no class (386 -> 408): its Barrier rows'
+"memoryview: assignment to format 'i'", a message pyi has not raised since 286. Queue 304's report:
+`.tmp/q304/304-python-deferred-classes-4.md` (the VM).
+
+## As built: 316, the exit collections with less waiting (2026-11-17, the Mac VM, queue 316; 305's DECISION 1 (b), the user's)
+
+Py_FinalizeEx's collections (finCollect, then exitCollect after the modules' removal and after their clearing) are 218's,
+241's and 253's rounds unchanged: the same Go collections, the same drains, the same cycle probes in the same order. Two
+things changed, both in `go/arbace/py/finalize.go` and `pylifecycle.go`.
+
+- **A barrier in place of the quiet waits** (`finBarrier`). After `runtime.GC()` every round waited until Go's finalizer
+  goroutine had run nothing for 3 ms (polled each millisecond, at most 500), there being no public barrier. There is one:
+  `runtime.GC` returns with its sweep done, so every finalizer of its collection is queued by then, and runtime/metrics'
+  `/gc/finalizers/queued:finalizers` and `/gc/finalizers/executed:finalizers` (the second counted once a block of
+  finalizers has run) are equal once all of them ran. The wait now ends at that point, or when the caller's condition
+  holds (finVerify's record moved, cyProbe's probes all fired), and is polled by Gosched and 20 us sleeps. A finalizer that
+  does not return (no run counted for 3 ms) still ends it as 218's wait did. finRound, finVerify (222's moment at a
+  deletion) and cyProbe use it. runtime/metrics is in goi's table, so the interpreted runtime reads the same counts.
+- **The exit's last empty round skipped** (`finExitRounds`, `finDueLocked`). A round can only queue a dead object with
+  work (`__del__`, a generator's close, a socket's warning, a tp_finalize) or with weak callbacks. When no tracked record
+  has either and the queue is empty, the round's only effect is the Go finalizers of plain records: the record dropped and
+  its plain weak references cleared. At the interpreter's end the next collection does that before any Python code of the
+  end runs (that code runs in drains, each after a collection), so such a round is skipped there: in Py_FinalizeEx's
+  finCollect when gc.callbacks is empty, and in exitCollect. Before a cycle collection the skipped round is owed
+  (`finExitOwe`, `finRoundOwed`): a dead object still under its Go finalizer would hold what it reaches through the probe's
+  collection, so cyCollect runs the owed round first when its graph has anything to probe (or passed `cyMaxNodes`,
+  `cyGraphFull`), and nothing when it does not. exitCollect with dead module dictionaries always probes, so its first
+  rounds keep every round. gc.collect() keeps every round: a program reads its weak references right after it (an object
+  only a callback-only object held is freed in the round after the callback's).
+- **What it leaves**: the residual skipped round is observable only to Python code of the end outside a drain that reads
+  a plain weak reference to such an object: a user's `sys.__stdout__` whose `flush` does so. gc.callbacks at the end keep
+  every round. The other empty rounds at the end (a record with work alive, `due` true) still run: the import probe's 9
+  collections are 9.
+
+**Measured** (the VM, base e892ff58b against head, compiled, interleaved B H / H B; Finalize timed by an instrument in
+the AOT module's printed copy, not committed; `.tmp/q316/ab/`):
+- Finalize, median ms (20 rounds, load 6.9-7.4): richards 39.3 -> 17.1 (Go collections 2-3 -> 2), hexiom 30.6 -> 11.1
+  (3 -> 2), the import probe 118 -> 81 (9 -> 9); an earlier round with the barrier alone (15 rounds, load 6.6-7.4):
+  richards 27.2 -> 12.4, hexiom 22.0 -> 12.0, the import probe 90.4 -> 44.5. Finalize's share of the process's wall:
+  hexiom 21.9% -> 8.3%, the import probe 35.4% -> 25.7%, richards 6.6% -> 3.0%.
+- The benchmarks (30 interleaved rounds, two runs of 15, load 6.9-10.0, warm): CPU median change richards -2.9%,
+  deltablue -2.0%, raytrace -1.7%, mdp +0.2%, hexiom -5.5%, float -3.2%, base64 +1.0%, the import probe -1.1%; the wall's
+  medians move by up to 15% either way between the two runs at this load (the gain is a few to 40 ms of wait per process).
+  Every run's stdout the same at base and head.
+
+**Order unchanged** (the VM): 218's, 241's and 253's own cases are gone with their scratch; six cases written anew
+(`.tmp/q316/cases/`: rounds and waves of `__del__`, weak callbacks' list order, a plain reference held by a callback-only
+object, resurrection, generators closed, the moment at `del`, gc.callbacks, WeakValueDictionary and WeakSet; cycles with
+`__del__` and callbacks, PEP 442's order, a `__del__` that breaks its cycle; the end with module globals' `__del__`, a
+wave at exit, cycles, callbacks, gc.callbacks, atexit, a suspended generator; the end without gc.callbacks, where the skip
+applies; SystemExit; synth/datamodel/del.py): compiled, every output equal at base and head (the moment at `del` in the
+rounds case moves at base too from run to run under load: 222's time budget; 6 of 6 pairs agree). On goi the rounds and
+cycles cases are not stable at base itself (3 base runs, 3 outputs: goi's registers, `:finalization-goi`), and head's
+outputs are among base's; the four end cases equal. Lib/test compiled (`bin/pyi check --aot --lib-test --fresh`, 12
+modules: test_weakref, test_gc, test_finalization, test_module, test_atexit, test_threading_local, test_struct, test_sys,
+test_coroutines, test_queue, test_generators, test_threading): 985 methods, every outcome the same (806 pass, 178 classed,
+test_threading's test_can_interrupt_tight_loops failing at both; base's first run had 20 more child-process failures in
+test_threading and test_gc, a rerun of the two modules alone at base gave head's outcomes).
