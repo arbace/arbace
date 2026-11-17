@@ -65,10 +65,172 @@
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the instructions, relaxed (MCObjectStreamer::emitInstruction, MCAssembler::relaxFragment)
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the run's options (queue 337): llvm-mc's -mcpu, --x86-align-branch-boundary, --x86-align-branch, -x86-pad-max-prefix-size,
+;; -x86-pad-for-align and --mc-relax-all, as X86AsmBackend's constructor reads them
+
+(def ^:dynamic *opts*
+  "{:cpu NAME :boundary N :kinds #{:fused :jcc :jmp :call :ret :indirect} :prefix-max N :pad-for-align BOOL :relax-all BOOL}."
+  {})
+
+(def ^:private backend-facts
+  ;; asm/amd64/backend.edn beside the table (REPR_ASM_TABLE's directory, else the working directory's asm/amd64)
+  (delay (let [t (System/getenv "REPR_ASM_TABLE")
+               f (if t (str (.getParentFile (.getAbsoluteFile (java.io.File. ^String t))) "/backend.edn") "asm/amd64/backend.edn")]
+           (read-string (slurp f)))))
+
+(defn cpu-features
+  "The processor's features X86AsmBackend reads (asm/amd64/backend.edn), nil for a name X86.td does not define."
+  [^String cpu]
+  (get (:cpus @backend-facts) (or cpu "generic")))
+
+(defn- insn-flags [^String inst] (get (:insns @backend-facts) inst #{}))
+
+(defn nop-max
+  "X86AsmBackend::getMaximumNopSize in `mode` for the run's processor."
+  ^long [^long mode]
+  (let [fs (or (cpu-features (:cpu *opts*)) #{})]
+    (cond (= mode 16) 4
+          (and (not (contains? fs "FeatureNOPL")) (not= mode 64)) 1
+          (contains? fs "TuningFast7ByteNOP") 7
+          (contains? fs "TuningFast15ByteNOP") 15
+          (contains? fs "TuningFast11ByteNOP") 11
+          :else 10)))
+
+(defn- auto-padding?
+  "X86AsmBackend's AllowAutoPadding: a boundary and a kind of branch to align."
+  []
+  (and (pos? (long (:boundary *opts* 0))) (seq (:kinds *opts*))))
+
+(defn- enhanced-relaxation? [] (and (auto-padding?) (pos? (long (:prefix-max *opts* 0)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the branch alignment (X86AsmBackend's emitInstructionBegin, emitInstructionEnd, canPadInst, needAlign, isMacroFused;
+;; X86BaseInfo.h's macro fusion)
+
+(def ^:private first-fusion
+  (merge (zipmap ["TEST16i16" "TEST16mr" "TEST16ri" "TEST16rr" "TEST32i32" "TEST32mr" "TEST32ri" "TEST32rr" "TEST64i32" "TEST64mr"
+                  "TEST64ri32" "TEST64rr" "TEST8i8" "TEST8mr" "TEST8ri" "TEST8rr"] (repeat :test))
+         (zipmap ["AND16i16" "AND16ri" "AND16ri8" "AND16rm" "AND16rr" "AND32i32" "AND32ri" "AND32ri8" "AND32rm" "AND32rr" "AND64i32"
+                  "AND64ri32" "AND64ri8" "AND64rm" "AND64rr" "AND8i8" "AND8ri" "AND8ri8" "AND8rm" "AND8rr"] (repeat :and))
+         (zipmap ["CMP16i16" "CMP16mr" "CMP16ri" "CMP16ri8" "CMP16rm" "CMP16rr" "CMP32i32" "CMP32mr" "CMP32ri" "CMP32ri8" "CMP32rm"
+                  "CMP32rr" "CMP64i32" "CMP64mr" "CMP64ri32" "CMP64ri8" "CMP64rm" "CMP64rr" "CMP8i8" "CMP8mr" "CMP8ri" "CMP8ri8"
+                  "CMP8rm" "CMP8rr"] (repeat :cmp))
+         (zipmap ["ADD16i16" "ADD16ri" "ADD16ri8" "ADD16rm" "ADD16rr" "ADD32i32" "ADD32ri" "ADD32ri8" "ADD32rm" "ADD32rr" "ADD64i32"
+                  "ADD64ri32" "ADD64ri8" "ADD64rm" "ADD64rr" "ADD8i8" "ADD8ri" "ADD8ri8" "ADD8rm" "ADD8rr" "SUB16i16" "SUB16ri"
+                  "SUB16ri8" "SUB16rm" "SUB16rr" "SUB32i32" "SUB32ri" "SUB32ri8" "SUB32rm" "SUB32rr" "SUB64i32" "SUB64ri32"
+                  "SUB64ri8" "SUB64rm" "SUB64rr" "SUB8i8" "SUB8ri" "SUB8ri8" "SUB8rm" "SUB8rr"] (repeat :add-sub))
+         (zipmap ["INC16r" "INC16r_alt" "INC32r" "INC32r_alt" "INC64r" "INC8r" "DEC16r" "DEC16r_alt" "DEC32r" "DEC32r_alt" "DEC64r"
+                  "DEC8r"] (repeat :inc-dec))))
+
+(defn- insn-info [^String inst] (get-in (obj-table) [:insns inst]))
+
+(defn- mem-operand
+  "X86II::getMemoryOperandNo plus the operand bias: the MCInst index of the instruction's memory reference (its five
+  operands), or nil."
+  [^String inst]
+  (loop [ops (:ops (insn-info inst)) i 0]
+    (when-let [[_ _ n] (first ops)]
+      (if (= 5 (long n)) i (recur (rest ops) (+ i (long n)))))))
+
+(defn- rip-relative? [r] (when-let [m (mem-operand (:inst r))] (= "RIP" (:reg (nth (:mi r) m nil)))))
+
+(defn- first-fusible? [r] (and (not (rip-relative? r)) (contains? first-fusion (:inst r))))
+
+(defn- conditional-branch? [r] (let [f (insn-flags (:inst r))] (and (:isBranch f) (not (:isBarrier f)) (not (:isIndirectBranch f)))))
+
+(defn- macro-fused?
+  "isMacroFused: the conditional branch `jcc` fused with the instruction before it."
+  [cmp jcc]
+  (and cmp (conditional-branch? jcc) (first-fusible? cmp)
+       (let [cc (when (= "JCC_1" (:inst jcc)) (:imm (last (:mi jcc))))
+             second (case (long (or cc -1)) (4 5 12 13 14 15) :elg (2 3 6 7) :ab (0 1 8 9 10 11) :spo nil)]
+         (case (first-fusion (:inst cmp))
+           (:test :and) (some? second)
+           (:cmp :add-sub) (contains? #{:ab :elg} second)
+           :inc-dec (= :elg second)
+           false))))
+
+(defn- need-align?
+  "needAlign: the instruction is a branch of a kind the run aligns."
+  [r]
+  (let [f (insn-flags (:inst r)) k (:kinds *opts*)]
+    (boolean (or (and (:isBranch f) (not (:isBarrier f)) (not (:isIndirectBranch f)) (k :jcc))
+                 (and (:isBranch f) (:isBarrier f) (not (:isIndirectBranch f)) (k :jmp))
+                 (and (:isCall f) (k :call))
+                 (and (:isReturn f) (k :ret))
+                 (and (:isIndirectBranch f) (k :indirect))))))
+
+(defn- prefix? [^String inst] (= "PrefixByte" (:form (insn-info inst))))
+
+(defn- variant-symbol? [r] (some (fn [o] (let [e (:expr o)] (and (seq? e) (= 'at (first e))))) (:mi r)))
+
+(def ^:private interrupt-delay #{"POPSS16" "POPSS32" "STI" "MOV16sr" "MOV32sr" "MOV64sr" "MOV16sm"})
+
+(def ^:dynamic ^:private *st* nil)
+
+(defn- frag-start
+  "The first chunk of LLVM's current fragment in the section: the chunk after its last that is not data."
+  ^long [sec]
+  (let [^java.util.ArrayList cs (:chunks @sec)]
+    (loop [i (dec (.size cs))] (if (or (neg? i) (not= :data (:kind @(.get cs i)))) (inc i) (recur (dec i))))))
+
+(defn- frag-pos
+  "[SECTION START FIXED-SIZE]: LLVM's current fragment and its size."
+  [sec]
+  (let [^java.util.ArrayList cs (:chunks @sec) st (frag-start sec)]
+    [(:index @sec) st (reduce + 0 (for [i (range st (.size cs))] (o/chunk-size (.get cs (int i)))))]))
+
+(defn- can-pad-inst? [ctx r]
+  (let [{:keys [prev-op prev-pos]} @*st*
+        [_ _ size :as pos] (frag-pos (o/cur-sec ctx))]
+    (not (or (variant-symbol? r)
+             (and prev-op (interrupt-delay prev-op))
+             (and prev-op (prefix? prev-op))
+             (prefix? (:inst r))
+             (and (pos? (long size)) (not= pos prev-pos))))))
+
+(defn- can-pad-branches? [ctx]
+  (and (auto-padding?) (o/code-section? (o/cur-sec ctx)) (#{32 64} @(:mode ctx))))
+
+(defn- begin-insn!
+  "emitInstructionBegin: the fragment marked for padding when the instruction can be padded; a boundary alignment before an
+  instruction to align or the first of a fusible pair."
+  [ctx r]
+  (let [can (can-pad-inst? ctx r) sec (o/cur-sec ctx)]
+    (when can (swap! *st* update :allow conj (vec (take 2 (frag-pos sec)))))
+    (when (can-pad-branches? ctx)
+      (when-not (macro-fused? (:prev-inst @*st*) r) (swap! *st* assoc :pending nil))
+      (when (and can (nil? (:pending @*st*))
+                 (or (need-align? r) (and ((:kinds *opts*) :fused) (first-fusible? r))))
+        (swap! *st* assoc :pending (o/add-chunk! sec (o/new-chunk :boundary {:align (:boundary *opts*) :mode @(:mode ctx)})))))))
+
+(defn- end-insn!
+  "emitInstructionEnd: the aligned instruction tied to the pending boundary alignment, the data after it in a new chunk."
+  [ctx r]
+  (let [sec (o/cur-sec ctx)]
+    ;; PrevInstOpcode and PrevInstPosition, whatever the run aligns (PrevInst only when it pads branches)
+    (swap! *st* assoc :prev-pos (frag-pos sec) :prev-op (:inst r))
+    (when (can-pad-branches? ctx)
+      (swap! *st* assoc :prev-inst r)
+      (when-let [ba (:pending @*st*)]
+        (when (need-align? r)
+          (let [^java.util.ArrayList cs (:chunks @sec)]
+            (swap! ba assoc :last (dec (.size cs)))
+            (swap! *st* assoc :pending nil)
+            (o/add-chunk! sec (o/data-chunk))
+            (o/ensure-align! sec (long (:boundary *opts*)))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the instructions, relaxed (MCObjectStreamer::emitInstruction, MCAssembler::relaxFragment)
+
+(declare relax-enc)
+
 (defn- emit-insn! [ctx f]
   (let [f (o/resolve-expr ctx f)
         mode @(:mode ctx)
-        rs (binding [x/*intel* @(:intel ctx)] (x/assemble-insn f mode @(:syms ctx)))]
+        rs (binding [x/*intel* @(:intel ctx) x/*gcc* (boolean (:gcc @*st*))] (x/assemble-insn f mode @(:syms ctx)))
+        hooks (or (auto-padding?) (:pad-for-align *opts*))]
     (doseq [r rs]
       (cond
         (:error r) (o/fail (:error r))
@@ -76,13 +238,20 @@
         :else
         (do (doseq [op (:mi r)] (when-let [e (:expr op)] (o/visit-syms! ctx e)))
             (when (:wait r) (o/bytes! ctx [0x9b]))
-            (if (may-relax? (:inst r) (:mi r))
-              (do (o/add-chunk! (o/cur-sec ctx) (o/new-chunk :relax {:inst (:inst r) :mi (:mi r) :mode mode :flags (:pflags r) :enc r :pos @(:pos ctx)}))
-                  nil)
-              (let [ch (o/cur-data! ctx) ^java.util.ArrayList b (:bytes @ch) base (.size b)]
-                (doseq [v (:bytes r)] (.add b (if (= v :fixup) 0 v)))
-                (doseq [[off size e kind pcrel adj] (:fixups r)]
-                  (.add ^java.util.ArrayList (:fixups @ch) (o/with-pos ctx [(+ base (long off)) size e kind pcrel adj]))))))))))
+            (when hooks (begin-insn! ctx r))
+            (let [may (may-relax? (:inst r) (:mi r))
+                  ;; X86_MC::emitInstruction: with --mc-relax-all the instruction relaxed in full and written as data
+                  r (if (and may (:relax-all *opts*)) (relax-enc r mode) r)]
+              (if (and (or may (enhanced-relaxation?)) (not (:relax-all *opts*)))
+                (let [sec (o/cur-sec ctx)
+                      allow (and hooks (contains? (:allow @*st*) (vec (take 2 (frag-pos sec)))))]
+                  (o/add-chunk! sec (o/new-chunk :relax {:inst (:inst r) :mi (:mi r) :mode mode :flags (:pflags r) :enc r :pos @(:pos ctx)
+                                                         :allow-pad allow})))
+                (let [ch (o/cur-data! ctx) ^java.util.ArrayList b (:bytes @ch) base (.size b)]
+                  (doseq [v (:bytes r)] (.add b (if (= v :fixup) 0 v)))
+                  (doseq [[off size e kind pcrel adj] (:fixups r)]
+                    (.add ^java.util.ArrayList (:fixups @ch) (o/with-pos ctx [(+ base (long off)) size e kind pcrel adj]))))))
+            (when hooks (end-insn! ctx r)))))))
 
 (defn- needs-relax? [ctx c ^long stretch]
   (let [m @c]
@@ -98,6 +267,134 @@
   (let [m @c inst (relaxed-opcode (:inst m) (:mode m))
         enc (binding [x/*t* (obj-table)] (x/encode inst (:mi m) (:mode m) (disj (set (:flags m)) :use-vex :use-vex2 :use-evex)))]
     (swap! c assoc :inst inst :enc enc)))
+
+(defn- relax-enc
+  "The instruction `r` relaxed until it needs no relaxation (MCObjectStreamer::emitInstruction under RelaxAll)."
+  [r ^long mode]
+  (loop [r r]
+    (if (may-relax? (:inst r) (:mi r))
+      (let [inst (relaxed-opcode (:inst r) mode)
+            enc (binding [x/*t* (obj-table)] (x/encode inst (:mi r) mode (disj (set (:pflags r)) :use-vex :use-vex2 :use-evex)))]
+        (recur (assoc enc :inst inst :mi (:mi r) :pflags (:pflags r))))
+      r)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; finishLayout (X86AsmBackend::finishLayout, padInstructionEncoding, padInstructionViaRelaxation, padInstructionViaPrefix,
+;; determinePaddingPrefix): the bytes an alignment would fill given to the relaxable instructions before it
+
+(defn- prefix-length
+  "The bytes X86_MC::emitPrefix writes before the instruction's opcode: its legacy prefixes, REX or REX2, the VEX, XOP or
+  EVEX prefix, else the opcode map's escape."
+  ^long [bs ^long mode ^String inst]
+  (let [i (loop [i 0] (if (contains? #{0xf0 0xf2 0xf3 0x2e 0x36 0x3e 0x26 0x64 0x65 0x66 0x67} (nth bs i nil)) (recur (inc i)) i))
+        b (nth bs i nil)
+        i (cond (and (= mode 64) (number? b) (<= 0x40 (long b) 0x4f)) (inc i)
+                (and (= mode 64) (= b 0xd5)) (+ i 2)
+                :else i)
+        {:keys [enc map]} (insn-info inst)]
+    (+ i (case enc
+           "EncVEX" (if (= 0xc5 (nth bs i nil)) 2 3)
+           "EncXOP" 3
+           "EncEVEX" 4
+           (case map ("TB" "ThreeDNow") 1 ("T8" "TA") 2 0)))))
+
+(def ^:private seg-prefix {"ES" 0x26 "CS" 0x2e "SS" 0x36 "DS" 0x3e "FS" 0x64 "GS" 0x65})
+
+(defn- padding-prefix
+  "determinePaddingPrefix: the instruction's own segment override, else CS in 64-bit mode, else SS for an ESP or EBP base,
+  else DS."
+  ^long [m]
+  (let [mi (:mi m) mem (mem-operand (:inst m))
+        seg (when mem (:reg (nth mi (+ (long mem) 4) nil)))
+        form (:form (insn-info (:inst m)))
+        seg (case form
+              "RawFrmDstSrc" (let [s (:reg (nth mi 2 nil))] (if (not= s "DS") s seg))
+              "RawFrmSrc" (let [s (:reg (nth mi 1 nil))] (if (not= s "DS") s seg))
+              "RawFrmMemOffs" (:reg (nth mi 1 nil))
+              seg)]
+    (cond seg (long (seg-prefix seg))
+          (= 64 (long (:mode m))) 0x2e
+          (and mem (#{"ESP" "EBP"} (:reg (nth mi mem nil)))) 0x36
+          :else 0x3e)))
+
+(defn- pad-via-relaxation!
+  "padInstructionViaRelaxation: the instruction relaxed when the bytes it grows by are left to fill; the bytes left."
+  ^long [c ^long remaining]
+  (let [m @c]
+    (if-not (may-relax? (:inst m) (:mi m))
+      remaining
+      (let [inst (relaxed-opcode (:inst m) (:mode m))
+            enc (binding [x/*t* (obj-table)] (x/encode inst (:mi m) (:mode m) (disj (set (:flags m)) :use-vex :use-vex2 :use-evex)))
+            delta (- (count (:bytes enc)) (count (:bytes (:enc m))))]
+        (if (> delta remaining)
+          remaining
+          (do (swap! c assoc :inst inst :enc enc) (- remaining delta)))))))
+
+(defn- pad-via-prefix!
+  "padInstructionViaPrefix: prefixes added to an instruction marked for padding, at most 15 bytes in all and the run's
+  -x86-pad-max-prefix-size prefixes; the bytes left."
+  ^long [c ^long remaining]
+  (let [m @c bs (:bytes (:enc m)) old (count bs)]
+    (if (or (not (:allow-pad m)) (may-relax? (:inst m) (:mi m)) (= old 15))
+      remaining
+      (let [max-pad (min (- 15 old) remaining)
+            existing (prefix-length bs (:mode m) (:inst m))
+            pmax (long (:prefix-max *opts* 0))
+            room (if (<= pmax existing) 0 (- pmax existing))
+            add (min max-pad room)]
+        (if (zero? add)
+          remaining
+          (let [p (padding-prefix m)]
+            (swap! c update :enc (fn [e] (-> e
+                                             (assoc :bytes (vec (concat (repeat add p) (:bytes e))))
+                                             (assoc :fixups (mapv (fn [fx] (with-meta (assoc (vec fx) 0 (+ (long (first fx)) add)) (meta fx))) (:fixups e))))))
+            (- remaining add)))))))
+
+(defn- fragments
+  "The section's chunks as LLVM's fragments: [{:kind KIND :chunks [CHUNK...] :tail CHUNK}], a fragment's data chunks and the
+  instruction or alignment that ends it (a relaxable instruction, an alignment), a boundary alignment, a fill, an org or a
+  .nops a fragment of its own, data alone a :data fragment."
+  [sec]
+  (loop [cs (seq (:chunks @sec)) acc [] out []]
+    (if (empty? cs)
+      (if (seq acc) (conj out {:kind :data :chunks acc}) out)
+      (let [c (first cs) k (:kind @c)]
+        (case k
+          :data (recur (rest cs) (conj acc c) out)
+          (:relax :align) (recur (rest cs) [] (conj out {:kind k :chunks (conj acc c) :tail c}))
+          (recur (rest cs) [] (cond-> out (seq acc) (conj {:kind :data :chunks acc}) true (conj {:kind k :chunks [c] :tail c}))))))))
+
+(defn- finish-layout!
+  "X86AsmBackend::finishLayout over each code section: the relaxable instructions since the last label (an unhandled fragment
+  clears them too) padded, nearest first, into each boundary alignment (and with -x86-pad-for-align each alignment); a
+  boundary alignment keeps the bytes left, and the instructions it aligns are not padded for a later one. True."
+  [ctx]
+  (when (or (auto-padding?) (:pad-for-align *opts*))
+  (let [labeled (java.util.IdentityHashMap.)]
+    (doseq [s (.values ^java.util.LinkedHashMap (:symbols ctx))] (when-let [c (:chunk @s)] (.put labeled c true)))
+    (doseq [sec (:sections ctx) :when (o/code-section? sec)]
+      (loop [fs (fragments sec) relaxable []]
+        (when-let [f (first fs)]
+          (let [relaxable (if (some #(.containsKey labeled %) (:chunks f)) [] relaxable)]
+            (case (:kind f)
+              :data (recur (rest fs) relaxable)
+              :relax (recur (rest fs) (conj relaxable (:tail f)))
+              (if-not (or (= :boundary (:kind f)) (and (= :align (:kind f)) (:pad-for-align *opts*)))
+                (recur (rest fs) [])
+                (let [remaining (loop [rs relaxable remaining (long (:size @(:tail f) 0))]
+                                  (if (or (empty? rs) (zero? remaining))
+                                    remaining
+                                    (let [c (peek rs)
+                                          remaining (pad-via-relaxation! c remaining)
+                                          remaining (if (zero? remaining) remaining (pad-via-prefix! c remaining))]
+                                      (if (may-relax? (:inst @c) (:mi @c)) remaining (recur (pop rs) remaining)))))]
+                  (if (= :boundary (:kind f))
+                    (let [b (:tail f) last-i (:last @b)]
+                      (swap! b assoc :size remaining)
+                      ;; the fragments it aligns skipped
+                      (recur (if last-i (rest (drop-while #(< (long (:order @(last (:chunks %)))) (long last-i)) (rest fs))) (rest fs)) []))
+                    (recur (rest fs) []))))))))))
+  true))
 
 ;; x86-64's DWARF register numbers for EH (X86RegisterInfo.td's DwarfRegNum, flavour 0)
 (def ^:private dwarf-regs
@@ -146,7 +443,7 @@
   (let [n32 [[0x90] [0x66 0x90] [0x0f 0x1f 0x00] [0x0f 0x1f 0x40 0x00] [0x0f 0x1f 0x44 0x00 0x00] [0x66 0x0f 0x1f 0x44 0x00 0x00]
              [0x0f 0x1f 0x80 0 0 0 0] [0x0f 0x1f 0x84 0 0 0 0 0] [0x66 0x0f 0x1f 0x84 0 0 0 0 0] [0x66 0x2e 0x0f 0x1f 0x84 0 0 0 0 0]]
         n16 [[0x90] [0x66 0x90] [0x8d 0x74 0x00] [0x8d 0xb4 0x00 0x00]]
-        mx (if (= mode 16) 4 15)
+        mx (nop-max mode)
         out (java.util.ArrayList.)]
     (loop [n n]
       (when (pos? n)
@@ -162,8 +459,12 @@
   (let [cv (fn [e] (let [e (o/resolve-expr ctx e)] (or (x/const-value e @(:syms ctx)) (o/unsupported :expression (str "." h " " (pr-str e))))))]
     (case h
       "nops" (let [[n ctl] args]
-               (o/add-chunk! (o/cur-sec ctx) (o/new-chunk :nops {:size (long (cv n)) :ctl (long (if ctl (cv ctl) 0)) :mode @(:mode ctx)})))
-      "code16" (vreset! (:mode ctx) 16) "code32" (vreset! (:mode ctx) 32) "code64" (vreset! (:mode ctx) 64)
+               (o/add-chunk! (o/cur-sec ctx) (o/new-chunk :nops {:size (long (cv n)) :ctl (long (if ctl (cv ctl) 0)) :mode @(:mode ctx) :pos @(:pos ctx)})))
+      "code16" (do (vreset! (:mode ctx) 16) (swap! *st* assoc :gcc false))
+      "code32" (do (vreset! (:mode ctx) 32) (swap! *st* assoc :gcc false))
+      "code64" (do (vreset! (:mode ctx) 64) (swap! *st* assoc :gcc false))
+      ;; .code16gcc: 16-bit mode, the instructions matched as 32-bit (X86AsmParser's Code16GCC; queue 337)
+      "code16gcc" (do (vreset! (:mode ctx) 16) (swap! *st* assoc :gcc true))
       "intel_syntax" (vreset! (:intel ctx) true) "att_syntax" (vreset! (:intel ctx) false)
       ;; .reloc OFFSET, TYPE[, EXPR] (AX11; X86AsmBackend::getFixupKind at ELF: R_X86_64_* by name, BFD_RELOC_NONE/8/16/32/64)
       "reloc" (let [[off t e] args
@@ -186,7 +487,15 @@
    :relax! relax!
    ;; X86's fixups are relative to the field's end (the immediate's size, 4 for a 64-bit field)
    :pcrel-bias (fn [size] (case (long size) 1 1 2 2 4))
-   :put-fixup! (fn [^java.util.ArrayList bs off size _kind ^long x _reloc? _spec]
+   :put-fixup! (fn [^java.util.ArrayList bs off size _kind ^long x reloc? _spec]
+                 ;; X86AsmBackend::applyFixup's overflow check (queue 337): a resolved PC-relative value signed, any other of
+                 ;; either signedness
+                 (let [size (long size)]
+                   (when (< 0 size 8)
+                     (let [signed (and (not reloc?) o/*fixup-pcrel*)
+                           mask (bit-shift-left -1 (- (* size 8) (if signed 1 0)))]
+                       (when (and (not (zero? (bit-and x mask))) (if signed (not= (bit-and x mask) mask) (not (zero? (bit-and (- x) mask)))))
+                         (o/fail (str "value of " x " is too large for field of " size (if (= size 1) " byte" " bytes")))))))
                  (dotimes [i size] (.set bs (+ (long off) i) (bit-and (bit-shift-right x (* 8 i)) 0xff))))
    :reloc-type reloc-type
    :keep-symbol? #{"GOT" "PLT" "GOTPCREL" "GOTPCREL_NORELAX"}
@@ -198,16 +507,21 @@
    ;; an instruction's form printed back (a macro's invocation the reader did not know)
    :insn-text (fn [ctx f] (asm/print-text [f] {:arch :amd64 :syntax (if @(:intel ctx) :intel :att)}))
    :nops nops
-   :nops-max (fn [mode] (if (= 16 (long mode)) 4 15))
+   :nops-max nop-max
+   :finish-layout finish-layout!
    :dwarf-regs dwarf-regs
    ;; the CIE: data alignment -8, return address rip (16), DW_CFA_def_cfa rsp+8 and DW_CFA_offset rip at cfa-8
    :cie {:ra 16 :data-align -8 :init [0x0c 7 8 0x90 1] :cfa 8}})
 
 (defn assemble
   "The ELF64 object of the forms `items` ([FORM START END] as arbace.repr.asm/read-items gives them): {:bytes BYTES}, or
-  {:unsupported CLASS :what TEXT}, or {:error MESSAGE}."
-  [items & opts]
-  (binding [o/*arch* arch] (apply o/assemble items opts)))
+  {:unsupported CLASS :what TEXT}, or {:error MESSAGE}. OPTIONS beside arbace.asm.obj/assemble's (:mode, :defsym): :backend,
+  the run's X86AsmBackend options (*opts*), and :rel? (i386's REL relocations: each addend kept in its field) (queue 337)."
+  [items & [opts]]
+  (binding [o/*arch* (cond-> arch (:rel? opts) (assoc :rel? true))
+            *opts* (or (:backend opts) {})
+            *st* (atom {:allow #{}})]
+    (o/assemble items (dissoc opts :backend :rel?))))
 
 (defn assemble-file
   "The object of the file at PATH; OPTIONS {:defsym [[SYM VALUE]...]}: llvm-mc's --defsym (AXS94 (a)), by keyword as arm64's

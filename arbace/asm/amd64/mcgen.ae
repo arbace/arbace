@@ -1,0 +1,78 @@
+(ns arbace.asm.amd64.mcgen
+  "The facts of X86's assembler back end that are TableGen records (queue 337; doc/asm/AMD64-SURVEY.md, \"As built: queue
+  337\"), generated from llvm/lib/Target/X86/X86.td (llvm-project 23.1.5, Apache-2.0 WITH LLVM-exception) by
+  arbace.asm.tablegen, no llvm-tblgen: each processor's features that X86AsmBackend reads (FeatureNOPL and the NOP tunings
+  TuningFast7ByteNOP, TuningFast11ByteNOP, TuningFast15ByteNOP, its Features' and TuneFeatures' Implies closed) and each
+  instruction's MCInstrDesc flags that X86AsmBackend's branch alignment reads (isBranch, isIndirectBranch, isBarrier, isCall,
+  isReturn). `-main` writes asm/amd64/backend.edn or checks the committed one (`bin/repr-asm backend gen|check`)."
+  (:require [arbace.asm.tablegen :as tg]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private drop-classes
+  ["Intrinsic" "Pattern" "InstRW" "ProcResourceKind" "ItinRW" "SchedAlias" "SchedVar" "WriteRes" "ReadAdvance"
+   "SchedPredicateBase" "MCInstPredicate" "SDNode" "PatFrags" "SDNodeXForm" "ComplexPattern" "GINodeEquiv" "GICombineRule"
+   "InstAlias"])
+
+(def ^:private insn-flags ["isBranch" "isIndirectBranch" "isBarrier" "isCall" "isReturn"])
+
+(defn load-x86 [^String llvm]
+  (tg/load-td "X86.td" [(str llvm "/lib/Target/X86") (str llvm "/include")] drop-classes
+              [["ProcessorModel" ["Name" "Features" "TuneFeatures"]] ["SubtargetFeature" ["Name" "Implies"]]
+               ["Instruction" (conj insn-flags "isCodeGenOnly" "isPseudo")]]))
+
+(defn- closure
+  "The features `fs` and every feature they imply (SubtargetFeature's Implies), by record name."
+  [fs]
+  (loop [todo (vec fs) seen (sorted-set)]
+    (if (empty? todo)
+      seen
+      (let [f (peek todo) todo (pop todo) n (tg/rec-name f)]
+        (if (contains? seen n) (recur todo seen) (recur (into todo (tg/fv f "Implies")) (conj seen n)))))))
+
+(def ^:private read-features #{"FeatureNOPL" "TuningFast7ByteNOP" "TuningFast11ByteNOP" "TuningFast15ByteNOP"})
+
+(defn generate
+  "{:cpus {NAME #{FEATURE...}} :insns {INST #{FLAG...}}}: the processors by name with the features of `read-features` they
+  have, the instructions with any of `insn-flags`."
+  [w]
+  (tg/with-world w
+    (let [rs (tg/records)]
+      {:cpus (into (sorted-map)
+                   (for [r rs :when (tg/subclass? r "ProcessorModel")]
+                     [(tg/fv r "Name") (into (sorted-set) (filter read-features)
+                                             (closure (concat (tg/fv r "Features") (tg/fv r "TuneFeatures"))))]))
+       :insns (into (sorted-map)
+                    (for [r rs :when (tg/subclass? r "Instruction")
+                          :let [fl (into (sorted-set) (for [f insn-flags :let [v (tg/fv r f)]
+                                                            :when (and (not= v tg/unset) (= 1 (long (tg/as-int v))))]
+                                                        (keyword f)))]
+                          :when (seq fl)]
+                      [(tg/rec-name r) fl]))})))
+
+(defn text [m]
+  (str ";; X86's assembler back end's TableGen facts (bin/repr-asm backend gen; arbace.asm.amd64.mcgen): llvm-project 23.1.5's\n"
+       ";; X86.td read by arbace.asm.tablegen. :cpus each processor's features X86AsmBackend reads (FeatureNOPL and the NOP\n"
+       ";; tunings, Implies closed); :insns the MCInstrDesc flags its branch alignment reads. Generated; do not edit. Read with\n"
+       ";; the Clojure reader.\n"
+       "{:cpus\n {"
+       (str/join "\n  " (for [[k v] (:cpus m)] (str (pr-str k) " " (pr-str v))))
+       "}\n :insns\n {"
+       (str/join "\n  " (for [[k v] (:insns m)] (str (pr-str k) " " (pr-str v))))
+       "}}\n"))
+
+(defn -main
+  "gen LLVM-DIR OUT | check LLVM-DIR FILE."
+  [verb llvm out]
+  (let [t0 (System/currentTimeMillis)
+        t (text (generate (load-x86 llvm)))]
+    (binding [*out* *err*] (println (str "repr-asm backend: X86.td read and the facts made in " (quot (- (System/currentTimeMillis) t0) 1000) " s")))
+    (case verb
+      "gen" (do (spit out t) (println (str "repr-asm backend: " out " written (" (count (str/split-lines t)) " lines)")))
+      "check" (if (= t (slurp out))
+                (println (str "repr-asm backend: " out " is the generator's, byte for byte"))
+                (do (spit (str out ".regen") t)
+                    (println (str "FAIL: repr-asm backend: " out " differs from the generator's (" out ".regen)"))
+                    (System/exit 1))))
+    (shutdown-agents)))

@@ -1996,3 +1996,61 @@ register, a `.byte` value, a `.elseif` register, a fixup's value) each `:mismatc
 After: x86-64 print 194,746 pass / 1,187 design / 581 deferred to 194,796 / 1,187 / 531 (CHECK texts 107,588 to 107,637 met,
 `:directive`, `:local-label` and `:fixup` empty; the cross judge 86,350 to 86,351); arm64 unchanged. Left deferred in the cell: the 406
 `:object-unjudged` (the Mac's task 337), the LFI rewriter's 61, the 63 unread texts and the cross judge's classes.
+
+## As built: queue 337, the object verdict (2026-11-17; branch `337-asm-object-unjudged`, from `next` `d23b2215c`; the Mac VM)
+
+AXS95 (a) left 406 print texts `:object-unjudged`: llvm-objdump's and llvm-readobj's CHECK lines over objects no check judged, the
+runs object-check's corpus mc-x86-obj leaves out (branch alignment, prefix padding, relaxation, -mcpu, CREL, i386 and other
+triples). Queue 337 judges them by the tests' own verdicts, as AR4's arm64 verdict does MC/AArch64's, no LLVM tool at check time.
+
+- **The corpus** `mc-x86-objverdict` (`bin/repr-asm object-verdict`): MC/X86's files with an object run that mc-x86-obj leaves out
+  (by path), and those it takes whose object runs are all Mach-O's or COFF's: 68 files. Each RUN line that assembles with
+  -filetype=obj, its object piped to a viewer or written to `%t` and viewed by a later RUN line, is a run.
+- **The object** (`arbace.asm.amd64.obj`, `arbace.asm.obj`): the run's X86AsmBackend options, after llvm-project 23.1.5's
+  X86AsmBackend.cpp, MCAssembler.cpp and MCObjectStreamer.cpp (Apache-2.0 WITH LLVM-exception, written again in Arbace):
+  -mcpu's NOPs (getMaximumNopSize over `asm/amd64/backend.edn`: each processor's FeatureNOPL and NOP tunings, Implies closed, and
+  the instructions' branch flags, generated from X86.td by arbace.asm.tablegen, `bin/repr-asm backend gen|check`,
+  `arbace.asm.amd64.mcgen`; the 32-bit generic CPU's one-byte NOPs, which the fixed 15 got wrong); the branch alignment
+  (emitInstructionBegin/End, canPadInst, needAlign, X86BaseInfo.h's macro fusion, a `:boundary` chunk sized by relaxBoundaryAlign);
+  finishLayout's padding (padInstructionViaRelaxation, padInstructionViaPrefix, determinePaddingPrefix, the relaxable chunks since
+  the last label, LLVM's fragments rebuilt from the chunks); the enhanced relaxation (every instruction a fragment when a prefix
+  maximum is given); --mc-relax-all; `.code16gcc` (16-bit mode matched as 32-bit, check.ae's `*gcc*`); i386's REL addends kept in
+  their fields; X86AsmBackend::applyFixup's overflow error; FT_Nops' "illegal NOP size"; and relaxOnce over every section again when
+  one moved (a fill sized by another section's labels: relax-offset).
+- **The view** (`arbace.asm.amd64.objcheck`): llvm-objdump -d as llvm-objdump.cpp prints it: the file format, each code section's
+  symbols as SymbolInfoTy sorts them (a section-name label when none is at its start, the last code symbol of an address shown),
+  each instruction decoded by `arbace.asm.amd64.decode` and printed by `arbace.asm.amd64.print` (PrintBranchImmAsAddress:
+  `*branch-address*`), its bytes unless --no-show-raw-insn, --no-print-imm-hex, a branch's ` <SYM+0xOFF>`, a RIP-relative operand's
+  address; `--headers`; arm64's llvm-readobj and llvm-readelf views with x86-64's names (`arbace.asm.arm64.objcheck/*target*`). The
+  CHECK lines are held to it by decode-check's FileCheck subset; an error run by the diagnostics.
+- **Classes** (test/asm/divergences-object.edn): `:other-format` (a Mach-O or COFF triple: another object writer, by design,
+  DECISION AXS99), `:elf32` (an i386 view beyond the disassembly and --headers: Arbace writes ELF64), `:x32`, `:options` (an llvm-mc
+  option not taken: -relax-relocations=false, -g), `:stats` (--stats' counters, by design), `:split-file`, `:message`,
+  `:error-accepted`, the views not made. Controls `test/asm/controls-objverdict.txt`: five tests against themselves assembled without
+  their options (the alignment, padding, relaxation and -mcpu undone) and two against another test's lines, each failing as it must.
+- **The print level** (`arbace.asm.amd64.check`): another tool's text of a file object-check does not hold takes the verdict's result
+  for its line: met, `:pass` (the object's view, its disassembly Arbace's decoder's and printer's text); `:other-format` (by design,
+  new in divergences-print.edn), `:elf32` (deferred, new), `:mismatch` when the verdict fails it, `:debug-trace` for --stats', else
+  `:object-unjudged`.
+- **The matrix**: the AOT cell of x86-64 assembly gains the source "bin/repr-asm object-verdict" (CHECK lines), `:until` the main
+  host's record `test/asm/objverdict-results-amd64.edn`; the gate's `asm-amd64-objverdict` (`--full`, chain asm-amd64-full) and
+  `bin/repr-asm backend check` in `asm-amd64-table`.
+- **Proof** (the Mac VM, stage 0 of next's seed; records in scratch, the main host records): the verdict over the whole corpus,
+  68 files, 1,251 CHECK lines, 798 met, the rest `:other-format` 338, `:options` 53, `:elf32` 32, `:split-file` 16, `:x32` 7,
+  `:message` 4, `:unsupported-directive` 2, `:stats` 1, none failing; its seven controls failing as they must. encode-check `--only`
+  over the 36 files of the 406 texts: 362 pass, 43 `:other-format`, 1 `:debug-trace`, none `:object-unjudged` (the 5 `:directive`
+  beside unchanged); the cross-syntax judge 276 of 276. Unchanged by the shared layout's changes: object-check musl 32 of 32,
+  synthetic 8 of 8 with obj-err 3 of 3, mc-x86-obj 49 of 49, arm64's a64-synthetic 3 of 3 and object-verdict ok; `backend check`
+  byte for byte. Projected with the slice's and the verdict's records: x86-64 print 194,746 / 1,187 / 581 to 195,108 / 1,231 / 175.
+
+### Proposed (queue 337)
+
+- **AXS99 Mach-O and COFF runs.** 338 CHECK lines of the verdict (43 print texts) read a Mach-O or COFF object's dump. (a) by design,
+  `:other-format`: Arbace's object writer is ELF's, x86_64-linux-musl's target; (b) deferred until Arbace writes those formats.
+  *Recommended: (a)*.
+- **AXS100 The verdict in the AOT cell.** (a) `:role :beside` (as built): the CHECK lines shown beside object-check's files, not in
+  the cell's sum, until `:elf32` and `:options` close; (b) counted: the cell's 108 files would sum with 1,251 CHECK lines, 453 of them
+  non-passes (its completeness 100 to about 67, 89 without by design). *Recommended: (a)*.
+- **AXS101 ELF32.** 32 lines (i386's relocations, symbols, section headers; R_386_* in .reloc) and the x32 runs' 7 wait for an ELF32
+  writer: (a) an ELF32 i386 writer in arbace.asm.elf with X86ELFObjectWriter's R_386 types (the i386 runs then judged whole);
+  (b) keep `:elf32` deferred. *Recommended: (b)* until a crop needs i386 objects.

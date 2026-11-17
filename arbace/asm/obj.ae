@@ -813,11 +813,24 @@
     (case (:kind m)
       :data (.size ^java.util.ArrayList (:bytes m))
       :relax (count (:bytes (:enc m)))
-      (:align :fill :nops :org) (long (:size m 0)))))
+      (:align :fill :nops :org :boundary) (long (:size m 0)))))
 
 (defn relax-align! [c ^long offset]
   (let [m @c a (long (:align m)) pad (mod (- a (mod offset a)) a)]
     (swap! c assoc :size (if (> pad (long (:max m))) 0 pad))))
+
+(defn relax-boundary!
+  "MCAssembler::relaxBoundaryAlign (queue 337): a boundary alignment's padding, the distance to its boundary when the chunks it
+  aligns (the next one through its :last) would cross the boundary or end against it (mayCrossBoundary, isAgainstBoundary),
+  else none; one that aligns nothing (no :last) keeps its size."
+  [^java.util.ArrayList cs c]
+  (let [m @c]
+    (when-let [last-i (:last m)]
+      (let [off (long (:offset m)) a (long (:align m))
+            size (reduce + 0 (map #(chunk-size (.get cs (int %))) (range (inc (long (:order m))) (inc (long last-i)))))
+            end (+ off size)
+            pad? (or (not= (quot off a) (quot (dec end) a)) (zero? (mod end a)))]
+        (swap! c assoc :size (if pad? (mod (- a (mod off a)) a) 0))))))
 
 (declare defined?)
 ;; MCSymbolELF::getBinding: the binding set, else LOCAL when defined (a label, a section, a variable whose value is), else GLOBAL
@@ -881,31 +894,52 @@
                    (and (nil? (:add v)) (nil? (:sub v))))]
     [val resolved v]))
 
+(defn layout-section!
+  "MCAssembler::layoutSection: each chunk's offset, the alignments' padding at it."
+  [ctx sec]
+  (let [^java.util.ArrayList cs (:chunks @sec)]
+    (loop [o 0 i 0] (when (< i (.size cs)) (let [c (.get cs i)] (swap! c assoc :offset o) (case (:kind @c) :align (relax-align! c o) :fill (relax-fill! ctx c) :org (relax-org! ctx c o) nil)
+                                              (recur (+ o (chunk-size c)) (inc i)))))))
+
+(defn- relax-section!
+  "relaxOnce's pass over one section until no offset moves: whether any chunk's offset or size moved."
+  [ctx sec]
+  (let [^java.util.ArrayList cs (:chunks @sec)]
+    (loop [iters 0 any false]
+      (let [changed (volatile! false)]
+        (loop [o 0 i 0]
+          (when (< i (.size cs))
+            (let [c (.get cs i) old (long (:offset @c)) stretch (- o old) old-size (chunk-size c)]
+              (when-not (= o old) (vreset! changed true))
+              (swap! c assoc :offset o)
+              (case (:kind @c)
+                :align (relax-align! c o)
+                :relax (when ((:needs-relax? *arch*) ctx c stretch) ((:relax! *arch*) c))
+                :boundary (relax-boundary! cs c)
+                :fill (relax-fill! ctx c)
+                :org (relax-org! ctx c o)
+                nil)
+              (when-not (= old-size (chunk-size c)) (vreset! changed true))
+              (recur (+ o (chunk-size c)) (inc i)))))
+        (if (and @changed (< iters (+ 2 (.size cs))))
+          (recur (inc iters) true)
+          (or any @changed))))))
+
 (defn layout! [ctx]
-  (doseq [sec (:sections ctx)]
-    (let [^java.util.ArrayList cs (:chunks @sec)]
-      ;; layoutSection, then relaxOnce until no offset moves
-      (loop [o 0 i 0] (when (< i (.size cs)) (let [c (.get cs i)] (swap! c assoc :offset o) (case (:kind @c) :align (relax-align! c o) :fill (relax-fill! ctx c) :org (relax-org! ctx c o) nil)
-                                                (recur (+ o (chunk-size c)) (inc i)))))
-      (loop [iters 0]
-        (let [changed (volatile! false)]
-          (loop [o 0 i 0]
-            (when (< i (.size cs))
-              (let [c (.get cs i) old (long (:offset @c)) stretch (- o old)]
-                (when-not (= o old) (vreset! changed true))
-                (swap! c assoc :offset o)
-                (case (:kind @c)
-                  :align (relax-align! c o)
-                  :relax (when ((:needs-relax? *arch*) ctx c stretch) ((:relax! *arch*) c))
-                  :fill (relax-fill! ctx c)
-                  :org (relax-org! ctx c o)
-                  nil)
-                (recur (+ o (chunk-size c)) (inc i)))))
-          (when (and @changed (< iters (+ 2 (.size cs)))) (recur (inc iters))))))))
+  ;; layoutSection, then relaxOnce until no offset moves; a section that moved has every section relaxed again, as its symbols'
+  ;; offsets may size another section's fill or org (MCAssembler::relaxOnce's FirstStable; queue 337: MC/X86's relax-offset)
+  (doseq [sec (:sections ctx)] (layout-section! ctx sec))
+  (loop [passes 0]
+    (let [moved (reduce (fn [m sec] (or (relax-section! ctx sec) m)) false (:sections ctx))]
+      (when (and moved (< passes (+ 2 (count (:sections ctx))))) (recur (inc passes))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the relocations (X86ELFObjectWriter::getRelocType, ELFObjectWriter::recordRelocation); REX2's fixups give the CODE_4
 ;; relocations and EVEX's ADD (NDD, NF) GOTTPOFF's CODE_6, as llvm-mc 23.1.5 does
+
+(def ^:dynamic *fixup-pcrel*
+  "While an arch's :put-fixup! runs: whether the fixup is PC-relative (X86AsmBackend::applyFixup's overflow check, queue 337)."
+  false)
 
 (defn apply-fixups!
   "Each chunk's fixups evaluated at the final layout: the resolved ones written into its bytes, the rest relocations
@@ -924,7 +958,7 @@
                               (or (nil? (:spec v)) (boolean (when-let [f (:resolve-spec? *arch*)] (f (:spec v)))))
                               (not (when-let [f (:force-reloc? *arch*)] (f kind))))
                 foff (+ (long (:offset m)) (long off))
-                put! (fn [^long x reloc?] ((:put-fixup! *arch*) bs off size kind x reloc? (:spec v)))]
+                put! (fn [^long x reloc?] (binding [*fixup-pcrel* (boolean pcrel)] ((:put-fixup! *arch*) bs off size kind x reloc? (:spec v))))]
             (when (and (:add v) ((:tls-specs *arch*) (:spec v))) (swap! (:add v) assoc :type elf/STT_TLS))
             (if resolved
               (put! val false)
@@ -957,7 +991,8 @@
                                        add [(:name am) addend]
                                        :else [nil addend])]
                 (when key (swap! (symbol! ctx key) assoc :used-in-reloc true))
-                (put! 0 true)
+                ;; an arch of REL relocations (i386's, queue 337: :rel?) keeps the addend in the field (the implicit addend)
+                (put! (if (:rel? *arch*) addend 0) true)
                 (.put relocs (:sec m) (conj (vec (.get relocs (:sec m))) {:offset foff :sym key :type type :addend addend})))))
           ;; ARS43 (a): a fixup's error reported at its item, the next fixup evaluated still (MCAssembler's reportError); an
           ;; expression MCValue cannot hold is LLVM's "expected relocatable expression"
@@ -1021,6 +1056,8 @@
         :org (let [n (long (:size m))]
                (when (> n 0x4000000) (unsupported :large-fill (str n)))
                (dotimes [_ n] (.write o (int (bit-and (long (:value m)) 0xff)))))
+        ;; a boundary alignment's padding: NOPs (MCAssembler's FT_BoundaryAlign, writeNopData)
+        :boundary (doseq [b ((:nops *arch*) (long (:size m 0)) (:mode m))] (.write o (int b)))
         :align (let [n (long (:size m 0))]
                  (if (:nops m)
                    (doseq [b ((:nops *arch*) n (:mode m))] (.write o (int b)))
@@ -1324,11 +1361,18 @@
         (when (errors? ctx) (throw (ex-info "errors" {:obj/errors true})))
         (when-let [f (:finish *arch*)] (f ctx))
         (layout! ctx)
+        ;; MCAsmBackend::finishLayout (X86's padding of instructions into the alignments, queue 337), then layoutSection again
+        (when-let [f (:finish-layout *arch*)] (when (f ctx) (doseq [sec (:sections ctx)] (layout-section! ctx sec))))
         ;; the instructions' places at the layout (arm64's eval, arbace.asm.arm64.eval: AR5)
         (when-let [f (:after-layout *arch*)] (f ctx))
         (emit-frames! ctx)
         (emit-debug-line! ctx)
         (let [relocs (apply-fixups! ctx)
+              ;; MCAssembler's writeFragment for FT_Nops: a .nops's controlled length above the maximum NOP size (queue 337)
+              _ (doseq [sec (:sections ctx) c (:chunks @sec) :let [m @c] :when (= :nops (:kind m))]
+                  (let [mx (long ((:nops-max *arch*) (:mode m)))]
+                    (when (> (long (:ctl m)) mx)
+                      (report! ctx (:pos m) (str "illegal NOP size " (:ctl m) ". (expected within [0, " mx "])") nil))))
               ;; the symbol table's evaluation of the assignments (ELFObjectWriter, MCAssembler::getSymbolOffset's errors), each
               ;; at its .set
               _ (doseq [n (:order ctx) :let [m @(symbol! ctx n)] :when (and (:var m) (not (:chunk m)) (not (:section-sym m)))]
