@@ -25,10 +25,21 @@
 
 ;;; The table and the digest (§6)
 
-(def ^:private listed (delay (set (GoInterp/paths))))
+(def from-source
+  "The table's packages goi loads from source instead, interpreted (ARBACE_GOI_FROM_SOURCE: import paths separated by
+  commas): an executable whose compiled copy of a package is older than the checkout's (stage 0 until the next re-seed,
+  pyi's runtime go/arbace/py: bin/pyi's runtime_from_source, the user's DECISION of 2026-11-17, Mac task 317), as RT.load
+  loads a tool's changed namespace from the checkout (RT.toolSource). Such a path is neither listed nor interpretable
+  here, so its importers, interpreted, check against and call its interpreted copy; a listed package that imports it
+  keeps the compiled copy, so a path belongs here with the listed packages that import it."
+  (delay (set (remove str/blank? (some-> (System/getenv "ARBACE_GOI_FROM_SOURCE") (str/split #","))))))
+
+(defn from-source? "Whether import path p is a table's package loaded from source (from-source)." [p] (contains? @from-source p))
+
+(def ^:private listed (delay (set (remove @from-source (GoInterp/paths)))))
 
 (defn listed?
-  "Whether import path p is a package of the table of compiled packages (§6.6)."
+  "Whether import path p is a package of the table of compiled packages (§6.6), less from-source's."
   [p]
   (contains? @listed p))
 
@@ -57,7 +68,8 @@
   "Whether import path p is an interpretable package of the digest (§9.3, GR8a): its forms there
   whole, goi's to interpret under its std path."
   [p]
-  (boolean (and (not (listed? p)) (not (str/starts-with? p "goi:")) (some-> @digest-index :index (contains? p)))))
+  (boolean (and (not (listed? p)) (not (from-source? p)) (not (str/starts-with? p "goi:"))
+                (some-> @digest-index :index (contains? p)))))
 
 (def ^:private out-of-scope
   "The std packages out of scope (GR8a): path -> the reason they are refused at the import."
@@ -905,6 +917,33 @@
                  st)
                (catch Throwable ex (swap! packages dissoc path) (throw ex)))))))
 
+(defn require-source!
+  "Requires the namespace of from-source's package path from its source on ARBACE_PATH, interpreted, as RT.load loads
+  a source that is not embedded: RT.load would make it from the table (GoInterp.loadTable), which still lists it. Once:
+  the namespace is then among the loaded libs, so a require of it after this one loads nothing. Throws
+  FileNotFoundException when ARBACE_PATH has no source of it."
+  [path]
+  (let [ns-sym (path->ns path)]
+    (locking from-source
+      (when-not (contains? @@#'arbace.core/*loaded-libs* ns-sym)
+        (when (find-ns ns-sym)
+          (throw (ex-info (str "goi: " path " is to be loaded from source (ARBACE_GOI_FROM_SOURCE), but its namespace "
+                               ns-sym " was made from the table first") {:path path})))
+        (let [scriptfile (str "go/" path ".ae")
+              ^File f (some (fn [^String d] (let [g (File. d scriptfile)] (when (.isFile g) g)))
+                            (remove #(str/starts-with? % "store:") (some-> (System/getenv "ARBACE_PATH") (str/split #":"))))]
+          (when (nil? f)
+            (throw (java.io.FileNotFoundException. (str "goi: no source " scriptfile " on ARBACE_PATH (ARBACE_GOI_FROM_SOURCE)"))))
+          (with-open [r (java.io.InputStreamReader. (java.io.FileInputStream. f) "UTF-8")]
+            (let [ok (volatile! false)]
+              (try
+                (arbace.lang.Compiler/load r scriptfile (last (str/split scriptfile #"/")))
+                (vreset! ok true)
+                ;; the package completed (checked, defined, initialized) as arbace.core/load's hooks complete it
+                (finally (after-load (str "go/" path) @ok)))))
+          (dosync (commute @#'arbace.core/*loaded-libs* conj ns-sym)))))
+    ns-sym))
+
 (defn load-import
   "The state of interpreted package path, loaded from ARBACE_PATH (its namespace) when it is
   not yet (§2.3), or from the digest for an interpretable package (§9.3), or nil."
@@ -914,7 +953,7 @@
       (when-not (listed? path)
         (let [ns-sym (path->ns path)]
           (try
-            (require ns-sym)
+            (if (from-source? path) (require-source! path) (require ns-sym))
             (catch java.io.FileNotFoundException _ nil))
           (when-let [st (get @packages path)]
             (when-not (:loading @st) st))))))
