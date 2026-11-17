@@ -136,6 +136,29 @@ expect "A15 :classes: the set itself, no cut: Locator and Location read, nothing
     && [ -f "$1/jc/forms.all/javax/xml/stream/Location.ae" ] && [ -f "$1/jc/forms.all/org/xml/sax/Locator.ae" ] \
     && [ "$(find "$1/jc/forms.all" -name "*.ae" | grep -vc demo/)" = 4 ]' _ "$w" "$jp" "$w/jx-classes.edn" "${jxo[@]}"
 
+# round 53 (1): Clojure's suite's java.xml (test/clojure/jdk-extra/java-xml.edn: a plan of :jdk-extra alone, :classes the
+# measured SAX and StAX set test/clojure/jdk-extra/java-xml-classes.txt, javac's tool world's two variants)
+cx=$root/test/clojure/jdk-extra/java-xml.edn
+expect "round 53: the suite's plan: java.xml alone, of kind jdk, 246 :classes, two variants, no other module" \
+  bash -c '"$2" plan "$3" > "$1/cx.plan" 2>&1 && [ "$(grep -c "^module" "$1/cx.plan")" = 1 ] && grep -qx "$(printf "module\tjava.xml")" "$1/cx.plan" \
+    && grep -qx "$(printf "kind\tjdk")" "$1/cx.plan" && [ "$(grep "^classes" "$1/cx.plan" | tr "\t" "\n" | tail -n +2 | wc -l)" = 246 ] \
+    && [ "$(grep "^variants" "$1/cx.plan" | tr "\t" "\n" | tail -n +2 | sed "s|.*/||" | tr "\n" " ")" = "SecuritySupport.ae JdkXmlConfig.ae " ]' _ "$w" "$jp" "$cx"
+expect "round 53: the class set: 246 files, javac's tool world's 221 java.xml files (overlay/jdk/javac/closure.txt) and StAX's 25" \
+  bash -c '"$2" sources "$3" "$1/cx" > "$1/cx-sources.log" 2>&1 && [ "$(wc -l < "$1/cx/closure/java.xml/kept.txt")" = 246 ] \
+    && grep "^java.xml " "$4/overlay/jdk/javac/closure.txt" | cut -d" " -f2 | LC_ALL=C sort > "$1/cx-tool.txt" \
+    && [ "$(LC_ALL=C comm -23 "$1/cx-tool.txt" "$1/cx/closure/java.xml/kept.txt" | wc -l)" = 0 ] \
+    && [ "$(LC_ALL=C comm -13 "$1/cx-tool.txt" "$1/cx/closure/java.xml/kept.txt" | wc -l)" = 25 ] \
+    && grep -qx com/sun/xml/internal/stream/XMLInputFactoryImpl.java "$1/cx/closure/java.xml/kept.txt"' _ "$w" "$jp" "$cx" "$root"
+expect "round 53: read --chunk 20: every read process under 1 GiB, 246 forms, the tool world's 221 byte for byte jdk/javac/forms'" \
+  bash -c '"$2" read "$3" "$1/cx" --no-classes --chunk 20 > "$1/cx-read.log" 2>&1 || exit 1
+    pk=$(cat "$1"/cx/chunks/java.xml/*.read.time | sed -n "s/.*Maximum resident set size (kbytes): //p" | sort -n | tail -1)
+    echo "  (the peak: $pk kB, $(ls "$1"/cx/chunks/java.xml/*.list | wc -l) chunks)"; [ "$pk" -lt 1048576 ] || exit 1
+    [ "$(cd "$1/cx/forms.all" && find . -name "*.ae" | while read -r f; do b=${f%.ae}; [ -f "$1/cx/closure/java.xml/src/$b.java" ] && echo "$f"; done | wc -l)" = 246 ] || exit 1
+    sed "s/\.java\$/.ae/" "$1/cx-tool.txt" | while read -r f; do cmp -s "$1/cx/forms.all/$f" "$4/jdk/javac/forms/$f" || { echo "  differs: $f"; exit 1; }; done' \
+  _ "$w" "$jp" "$cx" "$root"
+expect "round 53: outside.args: the two variants' directory alone (no :outside)" \
+  bash -c '[ "$(wc -l < "$1/outside.args")" = 2 ] && [ "$(sed -n 1p "$1/outside.args")" = --variants ] && [ "$(ls "$(sed -n 2p "$1/outside.args")" | tr "\n" " ")" = "JdkXmlConfig.ae SecuritySupport.ae " ]' _ "$w/cx"
+
 echo "controls:"
 sed 's/:closure {:roots/:classes ["org.xml.sax.Locator"] :closure {:roots/' "$jx" > "$w/jx-both.edn"
 must_fail "A15: :jdk-extra with both :closure and :classes" "$w/c19.log" "$jp" plan "$w/jx-both.edn" "${jxo[@]}"
@@ -156,6 +179,9 @@ expect "  (its message names the pin)" has "$w/c17.log" "is not jdk26u at the pl
 sed 's/org.xml.sax.SAXParseException/org.xml.sax.NoSuchType/' "$jx" > "$w/jx-absent.edn"
 must_fail "A15: a :jdk-extra root the module lacks" "$w/c18.log" "$jp" sources "$w/jx-absent.edn" "$w/c18" "${jxo[@]}"
 expect "  (its message names the root)" has "$w/c18.log" "roots with no file (or left out): org.xml.sax.NoSuchType"
+printf '{:java {:outside [:platform]}}\n' > "$w/cx-none.edn"
+must_fail "round 53: a plan with neither :modules nor :jdk-extra" "$w/c21.log" "$jp" plan "$w/cx-none.edn"
+expect "  (its message names :jdk-extra)" has "$w/c21.log" "absent only beside :jdk-extra"
 must_fail ":outside with a value neither :platform nor :class-path" "$w/c10.log" "$jp" plan "$ctl/outside-bad.edn" --base "$fx"
 must_fail "a resource outside META-INF in two modules, differing" "$w/c9.log" \
   "$jp" read "$ctl/res-dup.edn" "$w/c9" --base "$fx" --root "controls=$ctl" --no-classes

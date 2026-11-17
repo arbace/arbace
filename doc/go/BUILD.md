@@ -526,6 +526,12 @@ data, `:java`:
   `test/programs/`. Measured: the cut from `javax.xml.namespace.QName` alone keeps 1,493 of java.xml's 1,855 files
   (JAXP's FactoryFinder, jdk.xml.internal's security and catalog code reach most of Xerces and Xalan), where the
   JDK's runs load 171 java.xml classes for SAX and 97 for StAX: hence `:classes` for a measured set.
+  Clojure's suite takes java.xml this way (round 53 (1), 2026-11-17, write-ahead): `test/clojure/jdk-extra/java-xml.edn`,
+  a plan of `:jdk-extra` alone (no `:modules`: the suite's Java is its committed fixtures' forms), `:classes`
+  `java-xml-classes.txt` (javac's tool world's 221 java.xml files, `overlay/jdk/javac/closure.txt`, and StAX's stream reader's 25:
+  246), the tool world's two variants, no `:outside`; `bin/clojure-tests` reads it for `--aot`'s program when it compiles a
+  namespace of `test/clojure/jdk-extra/namespaces.txt` (clojure-xml, reflect) and for the eval level's extended test executable
+  (`--jdk-extra-build`, `CLOJURE_TESTS_GO_EXTRA`); the test build, `bin/arbace-go` and `bin/lib` unchanged, so `gate_key` too.
 - **The commands.** `bin/java-project plan|sources|classes|read MODEL WORK` (MODEL a program's
   directory or a plan file holding the same map; `--root`, `--repository`, `--only M,...`, `--check
   front|nread`: each module also read from the native trees, the forms equal to javac's trees' as
