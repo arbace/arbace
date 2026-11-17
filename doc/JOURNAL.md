@@ -10396,3 +10396,20 @@ tooling, for the switch night".
 The generated sources' pack committed (as built), the two recorded inputs kept until a Java night generates them, the pin out of
 the javac key with the next `gate_key` move. Recorded in doc/classes/JAVA-FRONTEND-SURVEY.md, "Decided (the user, 2026-11-17, round
 51)". No code or key change.
+
+## 2026-11-17: the held Java branches stacked for review (branch `n-review-c`, on next `42bf8614b`)
+
+Merged in order h-java-members (`2aa918480`), h-java-aot-triage (`13536ac10`), h-java-readprint (RP3, `fd7c2b261`, `a511f218d`),
+h-java-platform (`9175b7e94`). One code conflict: arbace/j2g/out.ae's support `init`, next's F26 `cls-ms` (Class.describeConstable)
+beside h-java-members' `string-transform?` and `object-finalize?` (both kept, the `when` testing all three); the rest docs (each
+branch's sections and entries kept, RP3's paragraph inside "As built: h-java-readprint") and test/crops/scores.edn (re-recorded:
+Java print 3,258 / 29 / 38, completeness 89, meant 92). The finalize interaction read: AT10 (compiled: an instance call resolved
+to Object.finalize() is `jrt.NN` of the receiver) and h-java-members' Object table entry (interp: `finalize`, protected, an empty
+Invoke) agree: `super.finalize()` and `C.this.finalize()` of a class whose supertypes declare no finalize run Object's empty body at
+both levels; a class declaring finalize keeps its own (AT10's control; the interpreter's own klass method or the class's table
+first). Both share one divergence from the JVM: a virtual call resolved to Object's is not dispatched to an override in a subclass
+of the receiver's static type (none of the corpus's tests needs it). Checked light (each process under 1.1 GB): bin/j2g-unit on
+next's gate executable with arbace.classes.env and analyze from the checkout, 135 pass and the same 7 failures as next's own tree
+(type annotations' known rows, invokers' fixture); test/gate/javac-platform-test.bash 21 of 21; bin/reap 0 problems; crops-score
+--record, --judge --strict; records-check 0 problems; bin/gate --plan exits 0. Keys: gate_key (arbace/j2g, arbace/classes),
+arbace_javac_key (the platform's tooling) and the reader's key (convert.ae) move. Nothing built.
