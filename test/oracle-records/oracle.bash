@@ -109,7 +109,7 @@ oracle_unpack() {  # PIN: prints the directory holding NAME/
     got=$(sha256sum < "$pack" | cut -c1-64)
     [ "$got" = "$sha" ] || { echo "oracle: $pack is $got, $pin pins $sha: refused" >&2; return 1; }
     rm -rf "$u.$$"; mkdir -p "$u.$$"
-    xz -dc "$pack" | tar -C "$u.$$" -xf - || { rm -rf "$u.$$"; echo "oracle: cannot unpack $pack" >&2; return 1; }
+    xz -dc "$pack" | tar -C "$u.$$" -xmf - || { rm -rf "$u.$$"; echo "oracle: cannot unpack $pack" >&2; return 1; }
     mkdir -p "$u"; [ -d "$u/$name" ] || mv "$u.$$/$name" "$u/$name"; rm -rf "$u.$$"
   fi
   # the members checked at every unpack (a tampered member, one byte flipped, is refused: ORS7 (a), the control
