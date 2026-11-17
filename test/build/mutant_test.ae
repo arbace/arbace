@@ -1,0 +1,123 @@
+(ns build.mutant-test
+  "The unit tests of bin/build-go's mutant (--mutant, arbace.build.go's read-mutant, apply-mutant and
+  print-module; doc/go/BUILD.md, \"A mutant\"): no Go build. Run by bin/build-go mutant-test
+  (bin/lib/build-go/mutant-test), which then builds test/build/go/hello and its mutants with Go
+  alone (--build) and runs them against hello's runs: the original passes, each mutant fails."
+  (:require [arbace.build.go :as b]
+            [arbace.repr.go.print :as p]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(def ^:private results (atom []))
+
+(defn- check [what ok?]
+  (swap! results conj [what (boolean ok?)])
+  (println (if ok? "ok  " "FAIL") what))
+
+(defn- refuses [what f]
+  (let [msg (try (f) nil (catch Throwable e (or (.getMessage e) (str e))))]
+    (check (str what (when msg (str " (" (first (str/split-lines msg)) ")"))) msg)
+    msg))
+
+(defn- record-file [^File dir n m]
+  (let [f (File. dir (str n ".edn"))]
+    (spit f (binding [*print-meta* false] (pr-str m)))
+    f))
+
+(def ^:private forms
+  "A package in memory: a function, two methods named String on two receivers, an extern."
+  '[(ns go.m (:require [arbace.go :as go]))
+    (go/package m :path "example.com/m" :files ["a.go" "b.go"])
+    (go/file "a.go" :imports [[fmt "fmt"]])
+    (go/func Twice ^int [^int x] (* 2 x))
+    (go/method String ^string [^{:tag (* P)} p] (fmt/Sprintf "P%d" (.-X p)))
+    (go/file "b.go" :imports [[fmt "fmt"]])
+    (go/method String "String is Q's name.\n" ^string [^{:tag (Q T)} q] (fmt/Sprint "Q"))
+    (go/func Divmod [^int a ^int b] :results [^int q ^int r] (set! q (/ a b)) (set! r (% a b)) (return))
+    (go/func ^:extern memmove [^int n])])
+
+(defn- mem-prog []
+  (let [pkg (assoc (p/collect-forms forms) :path "example.com/m" :file (File. "m.ae"))]
+    {:module "example.com/m" :go "1.27" :packages [(assoc pkg :dir "")] :modules []}))
+
+(defn- decls [prog]
+  (vec (for [f (:files (first (:packages prog))) d (:decls f)] d)))
+
+(defn -main [& args]
+  (let [root (File. (or (first args) "."))
+        tmp (File. (or (second args) ".tmp/build-go-mutant"))
+        _ (.mkdirs tmp)
+        rec (fn [n m] (b/read-mutant (record-file tmp n m)))
+        base {:name "t" :package "example.com/m"}]
+    ;; the record format
+    (refuses "a record without :name is refused" #(rec "r1" {:package "p" :func "f" :rewrite :panic}))
+    (refuses "an unknown :rewrite is refused" #(rec "r2" (assoc base :func "f" :rewrite :negate)))
+    (refuses ":prepend without :forms is refused" #(rec "r3" (assoc base :func "f" :rewrite :prepend)))
+    (refuses "two maps in a record are refused"
+             #(b/read-mutant (doto (File. tmp "r4.edn") (spit "{:name \"a\"} {:name \"b\"}"))))
+    (check "a :panic record reads" (= :panic (:rewrite (rec "r5" (assoc base :func "f" :rewrite :panic)))))
+    ;; finding the declaration
+    (let [prog (mem-prog)
+          ap (fn [m] (b/apply-mutant prog (rec "x" (merge base m)) (File. ".")))]
+      (refuses "a missing function is refused" #(ap {:func "Thrice" :rewrite :panic}))
+      (refuses "a method named without :receiver is refused (no go/func String)" #(ap {:func "String" :rewrite :panic}))
+      (refuses "a wrong receiver is refused" #(ap {:func "String" :receiver "R" :rewrite :panic}))
+      (refuses "an ^:extern function is refused" #(ap {:func "memmove" :rewrite :panic}))
+      (refuses "another package is refused" #(b/apply-mutant prog (rec "y" {:name "t" :package "example.com/n" :func "Twice" :rewrite :panic}) (File. ".")))
+      (refuses "a function in another :file is refused" #(ap {:func "Twice" :file "b.go" :rewrite :panic}))
+      (let [[prog' a] (ap {:func "String" :receiver "Q" :rewrite :replace-body :forms '[(fmt/Sprint "R")]})
+            ds (decls prog') ds0 (decls prog)]
+        (check "the receiver (Q T) picks b.go's String" (= "b.go" (:go-file a)))
+        (check ":replace-body keeps the head (doc, results tag) and replaces the body"
+               (= '(go/method String "String is Q's name.\n" [q] (fmt/Sprint "R")) (nth ds 2)))
+        (check "the result tag survives on the parameter vector" (= 'string (:tag (meta (nth (nth ds 2) 3)))))
+        (check "every other declaration is unchanged" (= (map pr-str (keep-indexed #(when (not= 2 %1) %2) ds0))
+                                                         (map pr-str (keep-indexed #(when (not= 2 %1) %2) ds))))
+        (check "the package is marked :mutant" (= "t" (:mutant (first (:packages prog')))))
+        (check "the applied record has both digests, different" (and (= 64 (count (:before-sha256 a)))
+                                                                     (not= (:before-sha256 a) (:after-sha256 a))))
+        (refuses "a record's :sha256 that differs is refused"
+                 #(ap {:func "String" :receiver "Q" :rewrite :panic :sha256 (apply str (repeat 64 "0"))}))
+        (check "a record's :sha256 that agrees applies"
+               (second (ap {:func "String" :receiver "Q" :rewrite :panic :sha256 (:before-sha256 a)}))))
+      (let [[prog' _] (ap {:func "Divmod" :rewrite :prepend :forms '[(when (== b 0) (return 0 0))]})
+            d (nth (decls prog') 3)]
+        (check ":prepend keeps :results and the original body after the forms"
+               (= '(go/func Divmod [a b] :results [q r] (when (== b 0) (return 0 0)) (set! q (/ a b)) (set! r (% a b)) (return)) d)))
+      (let [pkg (first (:packages prog))
+            indexed (assoc prog :packages [(assoc (select-keys pkg [:package :name :path :file :read :dir])
+                                                  :collected (delay (dissoc pkg :dir)))])
+            [prog' _] (b/apply-mutant indexed (rec "z" (merge base {:func "Twice" :rewrite :panic})) (File. "."))
+            pkg' (first (:packages prog'))]
+        (check "a package from the collect index is collected, its :dir kept and :collected dropped"
+               (and (= "" (:dir pkg')) (not (contains? pkg' :collected)) (seq (:files pkg')))))
+      (let [[prog' _] (ap {:func "Twice" :rewrite :panic})]
+        (check ":panic puts the named panic first, the body kept"
+               (= '(go/func Twice [x] (panic "arbace mutant: t") (* 2 x)) (first (decls prog'))))))
+    ;; the printed module: test/build/go/hello with its mutants
+    (let [hello (File. root "test/build/go/hello")
+          goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")
+          prog (b/program hello goroot {:go "1.27"})
+          main-go (fn [prog' n] (let [out (File. tmp n)]
+                                  (b/print-module prog' hello out {:line-file true})
+                                  (slurp (File. out "main.go"))))
+          orig (main-go prog "orig")
+          greet (b/read-mutant (File. root "test/build/mutants/hello-greeting.edn"))
+          [g ga] (b/apply-mutant prog greet hello)
+          gtext (main-go g "greeting")
+          [pn _] (b/apply-mutant prog (b/read-mutant (File. root "test/build/mutants/hello-panic.edn")) hello)
+          ptext (main-go pn "panic")]
+      (check "hello-greeting's :sha256 is hello's main as committed" (= (:sha256 greet) (:before-sha256 ga)))
+      (check "the applied record names the forms file" (= "go/hello/main.ae" (:forms-file ga)))
+      (check "the original prints hello, world" (str/includes? orig "\"hello, world\""))
+      (check "the greeting mutant prints its greeting, not the original's"
+             (and (str/includes? gtext "fmt.Println(\"hello, mutant\")") (not (str/includes? gtext "hello, world"))))
+      (check "the panic mutant prints the panic first and keeps the body"
+             (and (str/includes? ptext "panic(\"arbace mutant: hello-panic\")") (str/includes? ptext "\"hello, world\"")
+                  (< (str/index-of ptext "panic(") (str/index-of ptext "hello, world"))))
+      (check "the mutant's file keeps its //line directive" (str/starts-with? gtext "//line "))
+      (check "the original's text is unchanged by applying a mutant" (= orig (main-go prog "orig-again"))))
+    (let [fails (remove second @results)]
+      (println (str "mutant-test: " (- (count @results) (count fails)) " of " (count @results) " pass"))
+      (shutdown-agents)
+      (System/exit (if (seq fails) 1 0)))))

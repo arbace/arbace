@@ -10319,3 +10319,27 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: A20, a program's sensitivity control: `bin/build-go --mutant` (branch `n-g2-a20`, round 52)
+
+- **What.** The Ghidra demo's G2 item A20 (`/root/arbace-ghidra.git` `g2-light:plan/G2.md`, row A20, L8, M4; the user's GH20 (a);
+  the case study's §3.5 seeded mutant, `.tmp/plans/GHIDRA-CASE-STUDY.md`): one function's body rewritten by a named, recorded
+  rewrite in a program's Go forms, Go rebuilt alone, no j2g run. `arbace.build.go`'s `read-mutant`, `apply-mutant` (before
+  `print-module`; the mutated package printed past the print cache) and `bin/build-go --mutant FILE`, the applied record
+  `OUT.mutant.edn`; `bin/arbace-go --build-program DIR --mutant FILE` (`make program-mutant`) over the kept program's
+  `programs/NAME/j2g/prog` (`ARBACE_PROGRAM_KEEP=1`) with the program build's own flags. The rewrites `:panic`, `:prepend`,
+  `:replace-body`; the record pins the original declaration by `:sha256`. doc/go/BUILD.md, "A mutant".
+- **Tests.** `bin/build-go mutant-test` (`test/build/mutant_test.ae`, 29 of 29, no Go build, 350 MB); `--build` (`make
+  build-go-mutant-test`): test/build/go/hello passes its 2 runs, its mutants `hello-greeting` and `hello-panic`
+  (`test/build/mutants/`) fail 2 of 2 each (12 s, 350 MB). On `test/programs/hello-go` with
+  `test/programs-mutants/hello-go-wc-string.edn` (a method, `(Counts).String`): `noargs` passes, `args` fails. A first run found
+  a bug the unit tests then covered: a package from the print cache's collect index lost its `:dir` when collected for the rewrite.
+- **Decisions taken overnight (round 52)**, each the brief's recommended one: the hook at the Go forms, not the printed text (a
+  rewrite repr/go prints, named as the forms name a declaration; the text's hook was fragile by line and unchecked); the record a
+  map of the Clojure reader's with a digest pin; three named rewrites, `:panic` keeping the body unreachable so imports stay used;
+  the applied record beside the executable; the light unit tests plus one tiny Go build under 1 GiB.
+- **By day** (M4): G2's kept program built once (`ARBACE_PROGRAM_KEEP=1 bin/arbace-go --build-program DIR`), then its mutant
+  (`bin/heavy-lock bin/arbace-go --build-program DIR --mutant RECORD`, about 5-10 GiB, 10-20 min) run over the classes that reach
+  the rewritten method; the record (which method, `:replace-body`) chosen against R2's class logs.
+- Moves `gate_key` (`arbace/build/go.ae` is embedded; `bin/arbace-go` is a build script): the next gate builds the executables
+  afresh.

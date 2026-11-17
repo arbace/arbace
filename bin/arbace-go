@@ -57,6 +57,11 @@
 #                                      a --build first), into target/arbace-go/programs/NAME/
 #                                      ARCH/NAME (and OUT), cached by key; prints where it is.
 #                                      j2g runs under J2G_LOCK when set (bin/j2g)
+#        bin/arbace-go --build-program DIR --mutant FILE [--arch ARCH[,ARCH]]
+#                                      the kept program's mutant (doc/go/BUILD.md, "A mutant"):
+#                                      its forms (ARBACE_PROGRAM_KEEP=1's j2g/prog) built by
+#                                      bin/build-go --mutant FILE alone, no j2g run, into
+#                                      programs/NAME/mutant-ARCH/NAME with NAME.mutant.edn
 #        bin/arbace-go --build-program --check [NAME...]
 #                                      test/programs' samples built and run against their
 #                                      runs/ (stdout, exit code, stderr; each namespace compiled)
@@ -148,7 +153,9 @@
 #   ARBACE_PROGRAM_BASE  --build-program: a shipped build to reuse (a --build's directory, or one
 #                     holding arbace, aot/ and aot.key, as ARBACE_GATE_EXES/KEY20/amd64), when its
 #                     compiled namespaces' key is the checkout's; ARBACE_PROGRAM_KEEP=1 keeps the
-#                     program's intermediate trees (c2j's, j2g's, the work modules)
+#                     program's intermediate trees (c2j's, j2g's, the work modules), which
+#                     --build-program DIR --mutant FILE builds again with one function rewritten
+#                     (doc/go/BUILD.md, "A mutant")
 #   ARBACE_PROGRAM_JAVA_ARGS  --build-program of a program.edn with :java: bin/java-project's options (its
 #                     --root NAME=DIR and --repository DIR); its read needs javac's tool (REPR_JAVA_EXE)
 #   ARBACE_HOST_EXE   the executable that runs the build's Arbace tools, j2g and repr/go (bin/lib/
@@ -536,12 +543,13 @@ program_key() {
 
 # build_program DIR [--arch ARCH[,ARCH]] [-o OUT]
 build_program() {
-  local src="" out="" parch main cls name roots w t0 t1 a nss jnss usrc go_prog
+  local src="" out="" parch main cls name roots w t0 t1 a nss jnss usrc go_prog mutant=""
   parch=$(host_arch)
   while [ $# -gt 0 ]; do
     case $1 in
       --arch) parch=$2; shift 2 ;;
       -o) out=$2; shift 2 ;;
+      --mutant) mutant=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); [ -f "$mutant" ] || { echo "arbace-go --build-program: no mutant record $2" >&2; return 2; }; shift 2 ;;
       -*) echo "arbace-go --build-program: unknown option $1" >&2; return 2 ;;
       *) [ -z "$src" ] || { echo "arbace-go --build-program: one DIR" >&2; return 2; }; src=$1; shift ;;
     esac
@@ -570,18 +578,42 @@ build_program() {
     done
     [ -z "$javap" ] || { echo "arbace-go --build-program: $src: :java needs :main or :main-class (program.edn)" >&2; return 1; }
     for a in ${parch//,/ }; do
-      mkdir -p "$w/$a"
-      echo "== bin/build-go $a (a Go program: $src)" >&2
-      (cd "$root" && bin/build-go --line-file --arch "$a" --work "$w/work-$a" -o "$w/$a/$name" \
-         --print-cache "$root/.tmp/repr-go-print-cache" --go-flag "-ldflags=-s -w" "$src") > "$w/build-$a.log" 2>&1 \
-        || { grep -v '^==' "$w/build-$a.log" | tail -20 >&2; echo "arbace-go: $name: $a: the build failed ($w/build-$a.log)" >&2; return 1; }
-      program_done "$a" ""
+      local mw="" mo=$w/$a/$name mf=()
+      [ -z "$mutant" ] || { mw=mutant-; mo=$w/mutant-$a/$name; mf=(--mutant "$mutant"); }
+      mkdir -p "$(dirname "$mo")"
+      echo "== bin/build-go $a (a Go program: $src)${mutant:+ --mutant $mutant}" >&2
+      (cd "$root" && bin/build-go --line-file --arch "$a" --work "$w/${mw}work-$a" -o "$mo" \
+         --print-cache "$root/.tmp/repr-go-print-cache" --go-flag "-ldflags=-s -w" ${mf[@]+"${mf[@]}"} "$src") > "$w/${mw}build-$a.log" 2>&1 \
+        || { grep -v '^==' "$w/${mw}build-$a.log" | tail -20 >&2; echo "arbace-go: $name: $a: the build failed ($w/${mw}build-$a.log)" >&2; return 1; }
+      if [ -n "$mutant" ]; then grep '^build-go: mutant' "$w/${mw}build-$a.log" >&2 || true; echo "arbace-go: the mutant of $name ($a): $mo"
+      else program_done "$a" ""; fi
     done
     return 0
   fi
   # an Arbace program: the shipped build's compiled namespaces, the program's compiled by c2j,
   # its Go packages compiled through a goi table of its own, j2g, bin/build-go
   program_base || return 1
+  # --mutant FILE (doc/go/BUILD.md, "A mutant"; a program's sensitivity control, the Ghidra demo's A20):
+  # the kept program's forms (ARBACE_PROGRAM_KEEP=1: j2g's $w/j2g/prog) built again by bin/build-go
+  # with one function's body rewritten by the record FILE, into $w/mutant-ARCH/NAME (its applied
+  # record NAME.mutant.edn beside it); no c2j, no goi table, no j2g run: Go's build alone
+  if [ -n "$mutant" ]; then
+    [ -d "$w/j2g/prog/go" ] || { echo "arbace-go --build-program --mutant: no kept program $w/j2g/prog (build it first with ARBACE_PROGRAM_KEEP=1)" >&2; return 1; }
+    local mroot=()
+    [ ! -d "$src/go" ] || mroot=(--root "$src")
+    for a in ${parch//,/ }; do
+      t1=$(date +%s)
+      mkdir -p "$w/mutant-$a"
+      echo "== bin/build-go $a --mutant $mutant $w/j2g/prog (the kept program, key $(cut -c1-12 "$w/key" 2>"$discard" || echo none))" >&2
+      program_build_go "$base_exe" "$a" "$w/mutant-work-$a" "$w/mutant-$a/$name" "$w/mutant-build-$a.log" "$w/j2g/prog" \
+         ${mroot[@]+"${mroot[@]}"} --go-flag "${ldflags[0]}" --mutant "$mutant" \
+        || { grep -v '^==' "$w/mutant-build-$a.log" | tail -20 >&2; echo "arbace-go: $name: $a: the mutant's build failed ($w/mutant-build-$a.log)" >&2; return 1; }
+      grep '^build-go: mutant' "$w/mutant-build-$a.log" >&2 || true
+      echo "   build-go $a: $(since "$t1")" >&2
+      echo "arbace-go: the mutant of $name ($a): $w/mutant-$a/$name"
+    done
+    return 0
+  fi
   # src/'s .clj and .cljc sources translated into .ae by repr/clojure first (RPS94 (c), as
   # bin/clojure-tests translates the suite): the tree compiled and embedded is then
   # programs/NAME/src

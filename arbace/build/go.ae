@@ -57,8 +57,13 @@
                   their import paths, as GOROOT/src holds them, without go.mod
     --goos-dir DIR  with --goos tamago: TamaGo's goos module is DIR (go.mod replaces it by
                   DIR), not Go's module cache: the module printed from its Go forms
-                  (bin/tamago-vendor print)"
+                  (bin/tamago-vendor print)
+    --mutant FILE a program's sensitivity control (doc/go/BUILD.md, \"A mutant\"): one function's
+                  body rewritten in the forms before printing by the named rewrite FILE records
+                  (read-mutant), the package printed past the print cache; what was done
+                  recorded in OUT.mutant.edn (--print-only: WORK/mutant.edn)"
   (:require [arbace.repr.go.print :as p]
+            [arbace.repr.go.print-code :as code]
             [arbace.string :as str])
   (:import [java.io File]
            [java.nio.file Files CopyOption StandardCopyOption]
@@ -387,6 +392,161 @@
      :main (first (filter #(= "main" (str (:name %))) pkgs))})))
 
 ;; ---------------------------------------------------------------------------------------
+;; The mutant (--mutant FILE; doc/go/BUILD.md, "A mutant"): one function's body rewritten in
+;; the program's forms by a named, recorded rewrite, before printing; a program's sensitivity
+;; control (the Ghidra demo's A20, GH20 (a)): the mutant built from a kept program's forms
+;; (ARBACE_PROGRAM_KEEP=1, j2g's out/prog) by Go alone, no j2g run, must fail a test
+
+(def mutant-rewrites
+  "The named rewrites: :panic, (panic \"arbace mutant: NAME\") before the body (the original
+  body kept, unreachable: its imports and variables stay used); :prepend, the record's :forms
+  before the body; :replace-body, the body replaced by the record's :forms (which may use only
+  the file's imports, and must use the parameters Go requires used: none)."
+  #{:panic :prepend :replace-body})
+
+(defn read-mutant
+  "The mutant record in file f (one map, the Clojure reader's), checked:
+    {:name \"NAME\"            the rewrite's name, in the panic's message and the applied record
+     :package \"PATH\"         the Go package's import path
+     :func \"NAME\"            the function's or method's name, as the forms spell it
+     :receiver \"TYPE\"        a go/method's receiver type (without * and type arguments);
+                               absent: a go/func
+     :file \"NAME.go\"         optional: the go/file holding it, when the name is not enough
+     :rewrite :panic | :prepend | :replace-body
+     :forms [FORM ...]        :prepend's and :replace-body's forms, Go forms of the file's context
+     :sha256 \"HEX\"           optional: the original declaration's digest (the applied record's
+                               :before-sha256); another one is an error (the kept program changed)
+     :why \"...\"}             free text: what the rewrite breaks and which tests reach it"
+  [f]
+  (let [forms (p/read-forms f)
+        m (first forms)
+        bad #(fail (str (str f) ": a mutant record " %))]
+    (when-not (and (= 1 (count forms)) (map? m)) (bad "holds one map"))
+    (doseq [k [:name :package :func]]
+      (when-not (and (string? (get m k)) (seq (get m k))) (bad (str "needs " k ", a string"))))
+    (when-not (mutant-rewrites (:rewrite m))
+      (bad (str ":rewrite is one of " (str/join " " (sort mutant-rewrites)) ", not " (pr-str (:rewrite m)))))
+    (when (and (#{:prepend :replace-body} (:rewrite m)) (not (vector? (:forms m))))
+      (bad (str (:rewrite m) " needs :forms, a vector of Go forms")))
+    (doseq [k [:receiver :file :sha256 :why]]
+      (when (and (contains? m k) (not (string? (get m k)))) (bad (str k " is a string"))))
+    m))
+
+(defn- func-split
+  "[head body] of a go/func or go/method form: head everything up to the body (the name, the
+  doc, :type-params, the parameters and :results), as arbace.repr.go.print-code/func-decl reads it."
+  [f]
+  (let [[h nm & xs] f
+        [doc tps xs] (code/parse-decl-head xs)
+        [params & more] xs
+        [results body] (if (= (first more) :results) [(second more) (nnext more)] [nil more])
+        head (concat [h nm] (when doc [doc]) (when tps [:type-params tps]) [params]
+                     (when (= (first more) :results) [:results results]))]
+    [head body]))
+
+(defn- receiver-type
+  "The base name of a go/method's receiver type: (* T), (T A) and (* (T A)) give \"T\"."
+  [f]
+  (let [[_ _ & xs] f
+        [_ _ xs] (code/parse-decl-head xs)
+        r (first (first xs))
+        t (if (symbol? r) (:tag (meta r)) r)
+        t (if (and (seq? t) (= "*" (str (first t)))) (second t) t)
+        t (if (seq? t) (first t) t)]
+    (when t (p/name-text t))))
+
+(defn- form-sha
+  "The SHA-256 of a form printed with its metadata (Go forms' types are metadata)."
+  [f]
+  (let [s (binding [*print-meta* true *print-length* nil *print-level* nil] (pr-str f))]
+    (hex (.digest (MessageDigest/getInstance "SHA-256") (.getBytes ^String s "UTF-8")))))
+
+(defn- mutant-target?
+  [rec f]
+  (let [o (code/op f)]
+    (and (= (p/name-text (second f)) (:func rec))
+         (if (:receiver rec)
+           (and (= o "go/method") (= (receiver-type f) (:receiver rec)))
+           (= o "go/func")))))
+
+(defn mutate-decl
+  "The declaration f rewritten by the mutant record rec (its metadata kept)."
+  [rec f]
+  (let [[head body] (func-split f)]
+    (when (:extern (meta (second f)))
+      (fail (str (:package rec) ": " (:func rec) " is ^:extern: it has no body to rewrite")))
+    (with-meta
+      (apply list (concat head (case (:rewrite rec)
+                                 :panic (cons (list 'panic (str "arbace mutant: " (:name rec))) body)
+                                 :prepend (concat (:forms rec) body)
+                                 :replace-body (:forms rec))))
+      (meta f))))
+
+(defn apply-mutant
+  "The program prog with the declaration the mutant record rec names rewritten: [prog' applied],
+  the package marked :mutant (print-module prints it afresh, past the print cache), applied the
+  record of what was done (written beside the build, bin/build-go --mutant). Exactly one
+  declaration must match."
+  [prog rec ^File dir]
+  (let [idx (keep-indexed (fn [i pkg] (when (= (:path pkg) (:package rec)) i)) (:packages prog))
+        _ (when-not (= 1 (count idx))
+            (fail (str "mutant " (:name rec) ": " (count idx) " packages " (:package rec) " in the program")))
+        i (first idx)
+        ;; from the collect index (--print-cache), the package's forms read now; the program's
+        ;; keys (:dir, :module, :other-root) kept
+        pkg (let [pkg (nth (:packages prog) i)] (merge (dissoc pkg :collected) (collected-package pkg)))
+        hits (for [[fi file] (map-indexed vector (:files pkg))
+                   :when (or (nil? (:file rec)) (= (str (:name file)) (:file rec)))
+                   [di d] (map-indexed vector (:decls file))
+                   :when (mutant-target? rec d)]
+               [fi di])
+        what (str (when (:receiver rec) (str "(" (:receiver rec) ").")) (:func rec))
+        _ (when-not (= 1 (count hits))
+            (fail (str "mutant " (:name rec) ": " (count hits) " declarations " what " in " (:package rec)
+                       (when (:file rec) (str " (" (:file rec) ")")))))
+        [fi di] (first hits)
+        file (nth (:files pkg) fi)
+        before (nth (:decls file) di)
+        sha (form-sha before)
+        _ (when (and (:sha256 rec) (not= (:sha256 rec) sha))
+            (fail (str "mutant " (:name rec) ": " what " has sha256 " sha ", the record says " (:sha256 rec)
+                       " (the program changed since the rewrite was recorded)")))
+        after (mutate-decl rec before)
+        pkg' (-> pkg
+                 (assoc-in [:files fi :decls di] after)
+                 (assoc :mutant (:name rec))
+                 (dissoc :collected))]
+    [(assoc-in prog [:packages i] pkg')
+     {:mutant rec
+      :package (:package rec) :go-file (str (:name file))
+      :forms-file (when (:src file) (rel-path dir (File. (str (:src file)))))
+      :decl (str (code/op before) " " what)
+      :before-sha256 sha :after-sha256 (form-sha after)
+      :before before :after after}]))
+
+(defn- write-applied!
+  "The applied mutant's record into f (printed without metadata, one key a line)."
+  [^File f applied]
+  (.mkdirs (.getAbsoluteFile (.getParentFile (.getAbsoluteFile f))))
+  (spit f (binding [*print-length* nil *print-level* nil]
+            (str "{" (str/join "\n " (for [[k v] applied] (str (pr-str k) " " (pr-str v)))) "}\n")))
+  (binding [*out* *err*]
+    (println (str "build-go: mutant " (:name (:mutant applied)) " (" (name (:rewrite (:mutant applied))) "): "
+                  (:package applied) " " (:decl applied) " in " (:go-file applied)
+                  ", sha256 " (subs (:before-sha256 applied) 0 12) " -> " (subs (:after-sha256 applied) 0 12)
+                  "; " (.getPath f)))))
+
+(defn- with-mutant
+  "The program with opts' :mutant (a record file) applied, its applied record written to
+  record-file; the program itself without one."
+  [prog ^File dir opts ^File record-file]
+  (if-let [m (:mutant opts)]
+    (let [[prog' applied] (apply-mutant prog (read-mutant (File. (str m))) dir)]
+      (write-applied! record-file (assoc applied :record (str m)))
+      prog')
+    prog))
+
+;; ---------------------------------------------------------------------------------------
 ;; Printing the module
 
 (defn- sha256 [^File f]
@@ -495,7 +655,9 @@
                                  %
                                  (update % :files (fn [fs] (filterv (fn [f] (not (test-files (str (:name f))))) fs))))
                     host-id (System/getenv "REPR_GO_HOST_ID")
-                    entry (when (and print-cache (seq host-id))
+                    ;; a mutant's package (--mutant) is printed afresh and never cached: its
+                    ;; forms files are the original's, the cache's key would be theirs
+                    entry (when (and print-cache (seq host-id) (not (:mutant pkg)))
                             (let [k (print-cache-key host-id pkg dir opts tests)]
                               (File. (File. (str print-cache) (subs k 0 2)) k)))
                     texts (or (when entry (cached-texts entry))
@@ -542,7 +704,7 @@
   "Builds the program in dir for linux/arch into out (a File); returns go build's exit
   status, its output on the JVM's."
   [^File dir arch ^File out {:keys [work goroot] :as opts}]
-  (let [prog (program dir goroot opts)
+  (let [prog (with-mutant (program dir goroot opts) dir opts (File. (str (.getPath out) ".mutant.edn")))
         main (:main prog)
         config (:config (:package main))
         tmp? (nil? work)
@@ -573,8 +735,8 @@
 
 (defn -main [& argv]
   (let [goroot (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")
-        usage (str "usage: bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines|full] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--go-flag FLAG]... [--root ROOT]... [--goos-dir DIR] [--main PATH] DIR\n"
-                   "       bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines|full] [--line-file] SRC")]
+        usage (str "usage: bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines|full] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--go-flag FLAG]... [--root ROOT]... [--goos-dir DIR] [--main PATH] [--mutant FILE] DIR\n"
+                   "       bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines|full] [--line-file] [--mutant FILE] SRC")]
     (loop [as argv opts {:arch "amd64" :goroot goroot}]
       (case (first as)
         "--arch" (recur (nnext as) (assoc opts :arch (second as)))
@@ -593,6 +755,7 @@
         "--main" (recur (nnext as) (assoc opts :main-path (second as)))
         "--goos-dir" (recur (nnext as) (assoc opts :goos-dir (second as)))
         "--print-cache" (recur (nnext as) (assoc opts :print-cache (second as)))
+        "--mutant" (recur (nnext as) (assoc opts :mutant (second as)))
         (do
           (when-not (and (= 1 (count as)) (not (str/starts-with? (first as) "-"))
                          (#{"amd64" "arm64"} (:arch opts))
@@ -604,7 +767,8 @@
           (let [dir (File. ^String (first as))
                 status (try
                          (if (:print-only opts)
-                           (let [prog (program dir goroot {:library? true :module (:module opts) :roots (:roots opts)})
+                           (let [prog (with-mutant (program dir goroot {:library? true :module (:module opts) :roots (:roots opts)})
+                                                   dir opts (File. (File. (str (:work opts))) "mutant.edn"))
                                  mod (File. (File. (str (:work opts))) "mod")]
                              (when (.exists mod) (delete-tree mod))
                              (print-module prog dir mod opts)
