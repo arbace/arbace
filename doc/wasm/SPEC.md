@@ -27,7 +27,7 @@ the binary numbers them).
 | `(wasm/import "MOD" "NAME" DESC)` | DESC `(func I {:type T})`, `(table I {:type R :min N :max N :i64 true})`, `(memory I {:min N :max N :i64 true})`, `(global I {:type V :mut B})`, `(tag I {:type T})` |
 | `(wasm/func I {:type T :locals [V...]} INSTR...)` | a function: its type index, its locals (flat, the binary's grouping in the layer) and its body |
 | `(wasm/table I {:type R :min N :max N :i64 true :init EXPR})` | a table (`:init`: Wasm 3.0's initializer) |
-| `(wasm/memory I {:min N :max N :i64 true})` | a memory |
+| `(wasm/memory I {:min N :max N :i64 true :page P})` | a memory (`:page`: the custom page sizes proposal's page size, its log2, when the text or the binary states one; queue 326) |
 | `(wasm/tag I {:type T})` | an exception tag |
 | `(wasm/global I {:type V :mut B} EXPR)` | a global and its initializer |
 | `(wasm/export "NAME" (KIND I))` | KIND `func`, `table`, `memory`, `global`, `tag` |
@@ -109,7 +109,7 @@ What the forms do not say and the binary does, so that the original prints back 
   and function body sizes to 5 bytes and its relocated `call` and `i32.const` operands to 5 (P2).
 - `:name-widths`: the same for the name section's own LEB128s (its ordinals its own).
 - `:empty [S...]`: sections present with no entries.
-- `:flags {[:elem I] F, [:data I] F, [:locals FUNC] [[N V]...]}`: an element or data segment's flags when not the canonical encoding
+- `:flags {[:elem I] F, [:data I] F, [:locals FUNC] [[N V]...], [:imports] [[ENC N]...]}`: an element or data segment's flags when not the canonical encoding; `[:imports]` the compact import section's groups (queue 326: ENC 0 one import, 0x7f or 0x7e N of them; a group of none also its module's name, 0x7e's its description), when one is compact
   of its form, a function's local declarations when not grouped canonically (runs of one type).
 
 Canonical encoding: minimal LEB128s, the sections in the specification's order (type, import, function, table, memory, tag, global,

@@ -186,13 +186,17 @@
     0x4f (do (u8 r) (let [s (vec-of r u32)] (list 'sub {:final true :supers s} (comptype r))))
     (comptype r)))
 
-(defn- limits [r]
-  (let [at (pos r) flags (u8 r)]
-    (when-not (zero? (bit-and flags 0xfa)) (malformed "malformed limits flags" at))
-    (let [i64? (= 4 (bit-and flags 4))
-          mn (if i64? (u64 r) (u64 r))
-          mx (when (= 1 (bit-and flags 1)) (u64 r))]
-      (cond-> {:min mn} mx (assoc :max mx) i64? (assoc :i64 true)))))
+(defn- limits
+  ([r] (limits r false))
+  ([r mem?]
+   (let [at (pos r) flags (u8 r)]
+     ;; a memory's flag 0x08: a custom page size's log2 after the limits (queue 326, beyond Wasm 3.0)
+     (when-not (zero? (bit-and flags (if mem? 0xf2 0xfa))) (malformed "malformed limits flags" at))
+     (let [i64? (= 4 (bit-and flags 4))
+           mn (if i64? (u64 r) (u64 r))
+           mx (when (= 1 (bit-and flags 1)) (u64 r))
+           p (when (= 8 (bit-and flags 8)) (let [at (pos r) p (u32 r)] (when (>= p 64) (malformed "invalid custom page size" at)) p))]
+       (cond-> {:min mn} mx (assoc :max mx) i64? (assoc :i64 true) p (assoc :page p))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; instructions
@@ -322,7 +326,7 @@
     (case (u8 r)
       0x00 [:func (u32 r)]
       0x01 [:table (let [t (reftype r) l (limits r)] (assoc l :type t))]
-      0x02 [:memory (limits r)]
+      0x02 [:memory (limits r true)]
       0x03 [:global (let [t (valtype r) m (mutability r)] {:type t :mut m})]
       0x04 [:tag (do (when-not (zero? (u8 r)) (malformed "zero byte expected" (dec (pos r)))) (u32 r))]
       (malformed "malformed import kind" at))))
@@ -456,7 +460,7 @@
                                       (let [t (reftype r) l (limits r)] [t l (const-expr r)]))
                                   (let [t (reftype r) l (limits r)] [t l nil])))))))
     :memory (let [base (get @(:imports state) :memory 0)]
-              (vec (map-indexed (fn [i l] (list 'wasm/memory (+ base i) l)) (vec-of r limits))))
+              (vec (map-indexed (fn [i l] (list 'wasm/memory (+ base i) l)) (vec-of r #(limits % true)))))
     :tag (let [base (get @(:imports state) :tag 0)]
            (vec (map-indexed (fn [i t] (list 'wasm/tag (+ base i) {:type t}))
                              (vec-of r (fn [r] (when-not (zero? (u8 r)) (malformed "zero byte expected" (dec (pos r)))) (u32 r))))))
@@ -651,9 +655,10 @@
     (wcomp w t)))
 
 (defn- wlimits [w l]
-  (w8 w (+ (if (:max l) 1 0) (if (:i64 l) 4 0)))
+  (w8 w (+ (if (:max l) 1 0) (if (:i64 l) 4 0) (if (:page l) 8 0)))
   (wuleb w (:min l))
-  (when (:max l) (wuleb w (:max l))))
+  (when (:max l) (wuleb w (:max l)))
+  (when (:page l) (wuleb w (:page l))))
 
 (declare winstrs)
 

@@ -16,7 +16,9 @@ reference types, multiple tables and memories, memory64 and table64, SIMD128 and
 `throw`, `throw_ref`, `exnref`), typed function references, extended constant expressions, GC (structs, arrays, `i31`, casts,
 `any.convert_extern`, the subtyping of iso-recursive canonical types), and since WA8 the legacy exceptions (`try`, `catch`,
 `catch_all`, `delegate`, `rethrow`; §3), and since queue 326 the wide arithmetic proposal (`i64.add128`, `i64.sub128`, `i64.mul_wide_s`,
-`i64.mul_wide_u`: 0xfc 19-22, two i64 results, the low half first; `math/bits`' `Add64`, `Sub64`, `Mul64`). A module using what is not built (a shared memory, an atomic) is refused at decoding as
+`i64.mul_wide_u`: 0xfc 19-22, two i64 results, the low half first; `math/bits`' `Add64`, `Sub64`, `Mul64`), the compact import
+section (both encodings, decoded and validated as the imports they stand for) and custom page sizes (`Limits.CustomPage` and
+`PageExp`, `PageSize`: 1 byte or 64 KiB, `memory.size` and `memory.grow` in its pages, an import's page size matched exactly). A module using what is not built (a shared memory, an atomic) is refused at decoding as
 `unimplemented: FEATURE (WHAT)`, not as malformed.
 
 Since WA5 wai validates every module before it decodes it (`valid.go`, §7; WAS30 (a)): the driver runs no module its own validator

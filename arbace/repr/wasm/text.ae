@@ -262,6 +262,18 @@
                    (let [i (count @(:types ctx))] (swap! (:types ctx) conj ft) (swap! (:implicit ctx) conj ft) i))
                ids more])))))
 
+(defn- pagesize
+  "A memory's `(pagesize N)` at the head of xs (the custom page sizes proposal, queue 326, beyond Wasm 3.0): [LOG2 rest],
+  LOG2 nil when there is none; N a power of two, else malformed."
+  [xs]
+  (if (lex/list-of? (first xs) "pagesize")
+    (let [[_ n & more] (:xs (first xs))]
+      (when (or (nil? n) more (not= :num (:t n))) (malformed "unexpected token" (first xs)))
+      (let [v (long (nat64 n))]
+        (when (or (zero? v) (not (zero? (bit-and v (dec v))))) (malformed "invalid custom page size" (first xs)))
+        [(Long/numberOfTrailingZeros v) (rest xs)]))
+    [nil xs]))
+
 (defn- limits [ctx xs x]
   (let [i64? (lex/kw? (first xs) "i64")
         xs (if (or i64? (lex/kw? (first xs) "i32")) (rest xs) xs)
@@ -719,7 +731,9 @@
                 :global (let [[g more] [(first ds) (rest ds)]]
                           (when (or (nil? g) (seq more)) (malformed "unexpected token" d))
                           ['global (if (lex/list-of? g "mut") {:type (valtype ctx (second (:xs g))) :mut true} {:type (valtype ctx g) :mut false})])
-                :memory (let [[l more] (limits ctx ds d)] (when (seq more) (malformed "unexpected token" (first more))) ['memory l])
+                :memory (let [[l more] (limits ctx ds d) [p more] (pagesize more)]
+                          (when (seq more) (malformed "unexpected token" (first more)))
+                          ['memory (cond-> l p (assoc :page p))])
                 :table (let [[l more] (limits ctx ds d)]
                          (when-not (= 1 (count more)) (malformed "unexpected token" d))
                          ['table (assoc l :type (valtype ctx (first more)))]))]
@@ -808,13 +822,15 @@
                      (export! names 'memory i)
                      (if (and (not imp) (some #(lex/list-of? % "data") ys))
                        (let [i64? (lex/kw? (first ys) "i64") ys (if i64? (rest ys) ys)
+                             [p ys] (pagesize ys)
                              bs (strings->hex (rest (:xs (first ys))))
                              len (quot (count (second bs)) 2)
-                             pages (quot (+ len 65535) 65536)
+                             ps (if p (bit-shift-left 1 (long p)) 65536)
+                             pages (quot (+ len (dec ps)) ps)
                              di (next! :data)]
-                         (add! :memory (list 'wasm/memory i (cond-> {:min pages :max pages} i64? (assoc :i64 true))))
+                         (add! :memory (list 'wasm/memory i (cond-> {:min pages :max pages} i64? (assoc :i64 true) p (assoc :page p))))
                          (add! :data (list 'wasm/data di {:active {:memory i :offset [(list (if i64? 'i64.const 'i32.const) 0)]}} bs)))
-                       (let [[l more] (limits ctx ys f)]
+                       (let [[l more] (limits ctx ys f) [p more] (pagesize more) l (cond-> l p (assoc :page p))]
                          (when (seq more) (malformed "unexpected token" (first more)))
                          (if imp
                            (add! :import (list 'wasm/import (first imp) (second imp) (list 'memory i l)))
