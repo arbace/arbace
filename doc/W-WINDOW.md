@@ -413,6 +413,60 @@ The fixes are the crops' owners' (OCaml's, C's, Python's), by day before W2 (W-D
 - java-night (33d04049c, `arbace.classes.annot`) is not on next yet: when it merges, `window-w2b` is refreshed onto next (by day,
   W-WINDOW risk 7), and R (§5.3 of PLAN.md) is written on `w-retire` off it.
 
+## As built: R, the retirement commit (`w-retire`, 2026-11-09, write-ahead)
+
+**When it applies: W2's step 11 only** (W-D6 (a)), after `bin/seed --verify` (step 09) and stage 0 from the new seed (step
+10), before step 12's light checks and step 14's gate, by `git cherry-pick` of R's commit (the tip of `w-retire`) onto
+`reseed-w2`. Never before the new seed exists: the old stage 0 (`d5548e72`) has neither F14's analyzer nor `arbace/classes/`
+and `arbace/c/` in `RT.toolSource`, so the fixpoint's G1 (built by it) needs both stopgaps. `w-retire` is pushed to `mac`
+only and merged nowhere.
+
+`w-retire` is `mac/window-w2b` (884c3c346) with java-night (a7160b35e) merged in (a scaffold, so that the stopgaps R removes
+exist in its tree; not for merging: `window-w2`'s refresh onto next by day is the real one; its resolutions: the journal's
+two appends kept, java-night's first; `go/arbace/crt.ae` and `go/arbace/oi.ae`, where both sides split files by build tag,
+the union of `:files` and loads, java-night's `:init-order`), then R:
+
+- `arbace/classes/annot.ae`: 33d04049c's annot half reverted (`git apply -R` of its hunks, clean): `lenient-var`, the
+  `lenient` macro and the `element-default` fallback removed, `(binding [a/*lenient* true] ...)` (three places) and
+  `(a/element-default mm)` back.
+- `bin/arbace-go`: 33d04049c's other half reverted: `build()`'s `classes_stale` test (and its comment) removed; the older
+  `RT.ID_SPACE` test (SA143) and `host2` stay, byte for byte the text before night 10.
+- `bin/lib/ci/fresh.bash` removed; its callers: `bin/ci` (sourced it and ran `c_ci_fresh` for every verb but `cirun-build`,
+  `c2j-check`, `cinterp-check`, `synth`, `selfref`) and `bin/rust-front`'s ci batch session (`c_ci_fresh` before `bin/ci musl
+  prepare`). `git grep` finds no other caller (steps.edn, the crops' fragments, `test/gate/audit.ae`, the Makefile, `bin/`
+  and `test/` scripts: none name it; `bin/lib/fresh.bash`, the box's freshness rules, is another file and stays).
+- Docs: doc/C23-SURVEY.md "As built: CS281 (a)", doc/classes/JAVA-DEFERRED-TRIAGE.md's F14 note (stage 0 and the
+  stopgaps). CLAUDE.md's seed pin, its toolSource sentence and crops paragraph, AGENDA and the journal: the main session's,
+  at step 11.
+
+Checks (light, no build): `bash -n` of `bin/ci`, `bin/rust-front`, `bin/arbace-go`; `git grep` for `lenient-var`,
+`classes_stale`, `ci/fresh.bash`, `c_ci_fresh`, `CI_FRESH` (only history: the journal, the surveys' past sections and
+`test/c/divergences.edn`'s `:decided` text). On the old stage 0 the plain annot cannot load (`a/*lenient*` unresolved, night
+10's failure): `bin/gate --plan` on a copy of this tree is expected to fail to load `arbace.classes.annot` until the new
+seed. Step 11's own check: `grep` finds no `lenient-var`, no `classes_stale`, and `bin/ci` sources no `fresh.bash`; step 12
+proves `arbace.classes.annot` loads on the new stage 0.
+
+Not retired by R (left as they are, a decision for the main session): `test/gate/steps.edn`'s rsi steps (`rsi-essential`,
+`rsi-check` and the AOT one) run under `env ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1` (the same trio, for ci's
+lowering run on stage 0).
+
+Replayed 2026-11-11 as `w-retire-3` onto `window-w2d-jn` (`window-w2d`, the embedding replayed onto next adf65b4fd, with
+java-night adba65cea merged: W-D16 (a)). With the user's R (a) of 2026-11-11 it also drops the two later guarded callers of
+`fresh.bash`: `bin/llvmi`'s (llvm-compl2 b60d9d0f3: `[ -f ]`, then `c_ci_fresh` for run, lower, check, modules) and `bin/rsi`'s
+(79c4e60c6: `[ -f ]`, then `c_ci_fresh` for every verb but list, sets, runtime-keys), their comments naming RT.toolSource
+(CS281 (a)) in its place, and `test/c/musl-lock-test.bash`'s comment. `bin/rust-front`'s session line went with R's own hunk
+(its context, next's, applied cleanly). `git grep -n 'ci/fresh.bash' bin/` then finds only history comments (bin/ci, llvmi,
+rsi), no `.` line and no `c_ci_fresh`; `bin/lib/fresh.bash`, the box's, is another file.
+
+Replayed 2026-11-16 as `w-retire-4` onto `w2-1116` (`window-w2e`, the embedding replayed onto B2's `b2-1115` with W1, and
+embed-gaps' survey texts). One more caller had come since: cpp-threads (946a9bff4, 2026-11-15) built C++'s node programs through
+`bin/lib/cppi/ci-fresh.bash`, which sourced `fresh.bash` unguarded and wrapped them in `c_ci_fresh`, and
+`test/cpp/selftest/tls.sh` called `c_ci_fresh` for a build control under `CI_FRESH=0`. R now makes `cppi_ci` a plain run (kept as
+a function for its five callers) and retires tls.sh's build control (the host's ci is the checkout's after the seed); the judge's
+control stays. `doc/C23-SURVEY.md`'s conflict: both sections (gf-misc's night 12 C failures, then CS281 (a)). The proof on
+`w-retire-4`: `git grep` finds no `lenient-var` outside the docs, no `classes_stale`, no `c_ci_fresh` call and no
+`lib/ci/fresh.bash` source line in `bin/`, `test/` or `tools/` (comments only); `bash -n` of every script it changes.
+
 ## Proposed (2026-11-09, D-W2a)
 
 - **W-D10 The embedded crops and the planner's `:tools`.** `:tools` (119 uses) is "the checkout's namespaces a tool on stage 0 loads

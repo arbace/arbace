@@ -5805,3 +5805,17 @@ pre-change key copied from another worktree with its key file rewritten (no read
 `bin/ci musl read` (or the first C step's ensure; about an hour, under 2 GB at `CI_THREADS=2`), then the gate's C steps; `bin/ci check
 --aot --corpus ci-run` (whole, expected 22 of 22); after the merge, the Python line's `bin/pyi-clib build ctypestest` on next
 (test_generated_data should leave `:ctypes-port`) and pyconfig.h's `__atomic` macros and `bin/pyi-clib`'s `inline=` workaround dropped.
+
+## As built: CS281 (a) (write-ahead: R of the re-seed window W, branch `w-retire`)
+
+Decided: CS281 (a) (`arbace/c.ae` and `arbace/c/` in `RT.toolSource`), built on `window-w2b` (8803e5b2e, doc/W-WINDOW.md,
+"As built: D-W2a") and effective at W2's re-seed. Its stopgap, the triage's `bin/lib/ci/fresh.bash` (`c_ci_fresh`: the
+`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1` trio whenever a ci source differed from the host's embedded copy, "As
+built: the own target's triage", T.1), is retired by R (the commit on `w-retire` after its base merge): the file removed, its
+two callers (`bin/ci`'s `c_ci_fresh` for every verb but `cirun-build`, `c2j-check`, `cinterp-check`, `synth` and `selfref`; `bin/rust-front`'s
+ci batch session) no longer source it, and `CI_FRESH`/`CI_FRESH_SAID` are gone. After the re-seed stage 0 embeds ci compiled
+and `RT.toolSource` makes `RT.load` evaluate only a ci namespace that differs from its embedded copy, the rest compiled: no
+musl reread, no evaluated checker at the first ci commit after W, which `fresh.bash` would otherwise have turned into the
+trio. R applies only at W2's step 11 (after `bin/seed --verify`): before the seed, stage 0 (`d5548e72`) has no `arbace/c/` in
+`toolSource`, and without `fresh.bash` a checkout's changed ci would run the seed's checker and builder again (night 7's and
+8's failures). The `:c` inputs hold `bin/lib/ci/`, so the C steps rerun at step 14's gate, which reruns everything anyway.

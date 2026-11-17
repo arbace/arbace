@@ -4062,6 +4062,16 @@ sun.reflect.generics parser, factory and reflective objects translated over them
 type annotations after them (TypeAnnotationParser over recorded data), Proxy (JCS210, with serialization's JCS170), and
 the metadata row (local and anonymous classes, the enclosing method, InnerClasses' modifiers: the analysis knows them).
 
+**Stage 0 and F14's analyzer (night 10's stopgap, retired by W's R).** Night 10 (java-night 33d04049c) met stage 0
+(seed `d5548e72`), whose embedded `arbace.classes.analyze` predates F14 (no `*lenient*`, no `element-default`), failing to
+load `arbace.j2g.out` through `arbace.classes.annot`. Two stopgaps followed: `arbace.classes.annot` resolved both vars with
+`ns-resolve` (`lenient-var`, the `lenient` macro, an `element-default` fallback that records no default), and
+`bin/arbace-go`'s `build()` sent the second j2g run to the first program while the host's embedded `arbace/classes/`
+differed from the checkout's (`classes_stale`). Both are retired by R (doc/W-WINDOW.md, "As built: R"; branch
+`w-retire`), which applies at W2's step 11, after the new seed's verify: with `arbace/classes/` in `RT.toolSource` (W-D3
+(a)) and the new seed carrying F14's analyzer, `annot` binds `a/*lenient*` and calls `a/element-default` directly again,
+and the second run goes to the first program only for a host without `RT.ID_SPACE` (SA143), as before night 10.
+
 ## Proposed (F14)
 
 ### JCS210 Annotations as proxies, or jrt's annotation classes

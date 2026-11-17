@@ -1,12 +1,12 @@
 # needs-host
 # cpp-threads (2026-11-15; doc/cpp/CPP-SURVEY.md, "As built: cpp-threads"): bin/cppi builds a C++ node program with the checkout's
-# ci when it differs from the tools' host's embedded copy (bin/lib/cppi/ci-fresh.bash's cppi_ci, bin/lib/ci/fresh.bash's c_ci_fresh),
+# ci when it differs from the tools' host's embedded copy (RT.toolSource since W2's re-seed; bin/lib/ci/fresh.bash's c_ci_fresh before),
 # so a _Thread_local of the lowered runtime is a thread-local static of the node program (`(static N SIZE ALIGN 2 NAME)`, ci's
 # threads) and each thread has its own pending flag and in-flight exception. tls.cpp (our route's IR, no clang) built as bin/cppi
 # check builds it: cx$pending, cx$cur and the program's thread_local are thread-local statics, and the program passes (four threads
 # throwing and catching at once, 1500 each). Controls: the judge of the statics rejects the same node text with cx$pending's RO 0
-# (always), and while the host's embedded ci is older than the checkout's, the build under CI_FRESH=0 (the host's ci on purpose,
-# the old bin/cppi's) has cx$pending not thread-local.
+# (always). The build's control (under CI_FRESH=0 the host's embedded ci, older than the checkout's, made cx$pending not
+# thread-local) left with bin/lib/ci/fresh.bash at W2's R: stage 0's ci is the checkout's since the re-seed.
 . "$(dirname "$0")/lib.bash"
 . "$root/bin/lib/cppi/ci-fresh.bash"
 rt=$("$root/bin/cppi" runtime-ci 2> "$t/rt.log") || die "no lowered runtime for ci: $(tail -2 "$t/rt.log")"
@@ -38,13 +38,6 @@ done
 # the judge's control: the same node text with the pending flag one object for every thread
 sed -E 's/^\(static ([0-9]+) 4 4 2 "cx\$pending"\)/(static \1 4 4 0 "cx$pending")/' "$t/good.nodes" > "$t/bad.nodes"
 tl_statics "$t/bad.nodes" && bad "control: the judge accepts cx\$pending not thread-local" || ok "control: the judge rejects cx\$pending not thread-local"
-# the build's control, while the host's ci is older than the checkout's (until the next re-seed)
-if (c_ci_fresh 2> "$t/fresh.err"; [ -n "${ARBACE_NO_AOT:-}" ]); then
-  build "$t/old.nodes" CI_FRESH=0
-  [ -s "$t/old.nodes" ] || die "the control's build failed: $(tail -3 "$t/old.nodes.log")"
-  tl_statics "$t/old.nodes" && bad "control: the host's own ci (CI_FRESH=0) made them thread-local: the fix is not what makes them so" \
-    || ok "control: under CI_FRESH=0 (the host's embedded ci) cx\$pending is not thread-local"
-else
-  ok "the host's ci is the checkout's: no build control (after a re-seed)"
-fi
+# the build's control (CI_FRESH=0, the host's older embedded ci) retired with bin/lib/ci/fresh.bash at W2's R: no host ci is older
+ok "the host's ci is the checkout's (RT.toolSource, since W2's re-seed): no build control"
 finish
