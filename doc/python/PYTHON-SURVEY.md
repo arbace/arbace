@@ -7200,3 +7200,51 @@ modules: test_weakref, test_gc, test_finalization, test_module, test_atexit, tes
 test_coroutines, test_queue, test_generators, test_threading): 985 methods, every outcome the same (806 pass, 178 classed,
 test_threading's test_can_interrupt_tight_loops failing at both; base's first run had 20 more child-process failures in
 test_threading and test_gc, a rerun of the two modules alone at base gave head's outcomes).
+
+## As built: 320, the read checks judged from the records (2026-11-17, the Mac VM, queue 320)
+
+The task (Python judge independence 0 to 1) read independence.edn's fact of 2026-11-09: "the read cell's lex-check,
+parse-check and the round trip compare with CPython live". The scripts were past it: since 213, 240 and 257 every gate step
+of repr/python runs in records mode by default (`tools/pydump/records.bash`, `test/oracle-records/oracle.bash`), python3
+only in the oracle tier (`test/gate/crops/python-oracle.edn`). A stub run proves it: python-read-essential's command
+(spec-check, samples, both round trips, lex-check and parse-check --full over samples and lex-errors) with python3,
+python and python3.14 first on PATH as stubs exiting 99: rc 0 in 11 s, the stubs' log empty. What 320 changed:
+
+- **Level 5 implied by level 4** (`arbace/repr/python.ae` judge-text). `roundtrip --text` reaches level 5 (marshal of the
+  code compiled from each file, positions included) only for a print whose bytes passed level 4, the original's bytes under
+  the original's name, which compile to the same code: in records mode it is judged so ("level 5 (marshal) N (implied by
+  level 4: the original's bytes)"), not left to the oracle tier. Live, it stays CPython's compile of both.
+- **verify of an unpinned print** (`bin/repr-python` roundtrip_one). In verify mode the print's rows were checked against
+  python-pydump-printed-CORPUS even when no such pack is pinned, every row then counted as differing: `records verify
+  samples` said "6 of 12 entries differ", a failure on the host whose identity the records name (python-records-verify's
+  essential part, the oracle tier). It verifies the print once its pack is pinned, and says so before.
+- **A record keeps the pin's members** (`tools/pydump/records.bash` pyrec_flush). A record merged this run's members into
+  the pinned pack's taken from the store; where the store lacked it (a scratch `ARBACE_ORACLE_PACKS`, a fresh clone) the
+  pin was rewritten with this run's members alone. On the VM `lex-check --mutants 20 samples` in record mode dropped
+  samples' tree and scopes members, 42 to 12. The earlier members now come from the essential corpus's committed copy
+  (checked against its manifest), else the store, else the record is refused.
+- **`records record --sample N`**: a slice's pack, as verify's `--sample`, to test the tooling (not for commit).
+
+The proofs on the VM (CPython 3.14.10, apk python3-3.14.10-r1, aarch64, `:python` 252f2d87114360e8; the records' are
+the main host's, amd64, c94aabf8e8b16934):
+- `bin/repr-python records verify samples lex-errors`: every pack "all equal" (samples' 12, 6, 6, 6, 16, 9 entries,
+  lex-errors' 62 three times), the crossed pairs differ; the VM's CPython answers as the main host's.
+- samples re-recorded on the VM (in the mutants' run): the pack 2d289d7d68cc1d5d, the pinned one byte for byte; only the
+  manifest's header (identity, verb, date) differs.
+- a stdlib slice (40 files evenly spread, and the two of its control pair: 42) recorded into a scratch store
+  (`python-pydump-stdlib`, 252 members, 1.47 MB xz; `python-pydump-printed-stdlib`, 42 rows, 7.5 KB): lex-check, parse-check,
+  parse-check --full, roundtrip and roundtrip --text over it in records mode with the stubs (no call) and live: every rc 0,
+  out/files.tsv and results.edn byte for byte equal, the verdicts the same (roundtrip: level 3 41 of 42, Lib/pdb.py known
+  :code-lines; --text 42 of 42), every negative control failing as it must (the levels 2 and 3 control too); records 38.9 s
+  user, live 30.5 s, 0.48 GB peak.
+- the controls on that pack: its bytes one byte off (refused at unpack), an unpacked member one byte off (refused by the
+  members' check), a manifest key changed (STALE), each failing lex-check; a member replaced by another file's dump with the
+  manifest made to match (pins pass): lex-check "differ 1", rc 1.
+- mutants: `lex-check --mutants 20 samples` and `parse-check --full --mutants 20 samples` recorded (mutants-lex,
+  mutants-parse, 24 members each), then in records mode with the stubs: the same verdicts as live.
+
+What is left is the main host's: the packs of the big corpora (stdlib, site-packages, lib-test: about 100 MB xz in all,
+from the slice's 35 KB a file), the mutants' (2,000 files) and the prints' (python-pydump-printed-CORPUS, samples' members
+committed under `essential/printed-samples`), recorded by `bin/repr-python records record samples stdlib site-packages
+lib-test mutants` and pinned; until then the full gate's python-roundtrip and python-native parts of those corpora fail
+UNRECORDED in records mode, and the essential round trip leaves levels 2 and 3 of samples to the oracle tier.
