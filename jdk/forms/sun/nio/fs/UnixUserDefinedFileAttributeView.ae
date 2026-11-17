@@ -1,0 +1,245 @@
+;; Converted from overlay/jdk/java.base/sun/nio/fs/UnixUserDefinedFileAttributeView.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.file FileSystemException)
+        '(java.util ArrayList List)
+        '(java.util.function Function Predicate)
+        '(jdk.internal.access JavaNioAccess)
+        '(jdk.internal.misc Unsafe))
+
+(defclass ^:abstract UnixUserDefinedFileAttributeView
+  :extends AbstractUserDefinedFileAttributeView
+
+  (field ^:private ^:static ^:final ^Unsafe unsafe (Unsafe/getUnsafe))
+
+  (field ^:private ^:static ^:final ^JavaNioAccess NIO_ACCESS nil)
+
+  (field ^:private ^:static ^:final ^String USER_NAMESPACE "user.")
+
+  (field ^:private ^:static ^:final ^int MIN_LISTXATTR_BUF_SIZE 1024)
+
+  (field ^:private ^:static ^:final ^int MAX_LISTXATTR_BUF_SIZE (unchecked-multiply-int 32 1024))
+
+  (field ^:private ^:final ^UnixPath file)
+
+  (field ^:private ^:final ^boolean followLinks)
+
+  (constructor [this ^UnixPath file ^boolean followLinks]
+    (set! (.-file this) file)
+    (set! (.-followLinks this) followLinks))
+
+  (method ^:private nameAsBytes :throws [IOException] ^byte/1 [this ^UnixPath file
+                                                               ^:mutable ^String name]
+    (when (nil? name) (throw (NullPointerException. "'name' is null")))
+    (set! name (java-str USER_NAMESPACE name))
+    (let [bytes (Util/toBytes name)]
+      (when (> (alength bytes) (.maxNameLength this))
+        (throw (FileSystemException. (.getPathForExceptionMessage file)
+                                     nil
+                                     (java-str "'" name "' is too big"))))
+      bytes))
+
+  (method ^:protected ^:abstract maxNameLength ^int [this])
+
+  (method ^:private ^:static asList ^{:tag (List String)} [^long address ^int size]
+    (let [^{:tag (List String)} list (ArrayList.)
+          ^:mutable ^int start 0
+          ^:mutable ^int pos 0]
+      (while (< pos size)
+        (when (== (.getByte unsafe (unchecked-add address pos)) 0)
+          (let [len (unchecked-subtract-int pos start)
+                value (new byte/1 len)]
+            (.copyMemory unsafe
+                         nil
+                         (unchecked-add address start)
+                         value
+                         Unsafe/ARRAY_BYTE_BASE_OFFSET
+                         len)
+            (let [s (Util/toString value)] (.add list s) (set! start (unchecked-add-int pos 1)))))
+        (set! pos (unchecked-inc-int pos)))
+      list))
+
+  (method ^:private ^:static list :throws [UnixException] ^{:tag (List String)} [^int fd
+                                                                                 ^int bufSize]
+    (try
+      (with-resources [buffer (NativeBuffers/getNativeBuffer bufSize)]
+        (let [n (UnixNativeDispatcher/flistxattr fd (.address buffer) bufSize)]
+          (UnixUserDefinedFileAttributeView/asList (.address buffer) n)))
+      (catch UnixException x
+        (if (and (== (.errno x) UnixConstants/ERANGE) (< bufSize MAX_LISTXATTR_BUF_SIZE))
+            (UnixUserDefinedFileAttributeView/list fd (unchecked-multiply-int bufSize 2))
+            (throw x)))))
+
+  (method ^:public list :throws [IOException] ^{:tag (List String)} [this]
+    (let [^:mutable ^int fd -1]
+      (try
+        (set! fd (.openForAttributeAccess file followLinks))
+        (catch UnixException x (.rethrowAsIOException x file)))
+      (try
+        (let [^{:tag (List String)} attrNames (UnixUserDefinedFileAttributeView/list
+                                                fd
+                                                MIN_LISTXATTR_BUF_SIZE)]
+          (.toList (.map (.filter (.stream attrNames)
+                                  (lambda Predicate ^boolean [^String s]
+                                    (.startsWith s USER_NAMESPACE)))
+                         (lambda Function ^String [^String s]
+                           (.substring s (.length USER_NAMESPACE))))))
+        (catch UnixException x
+          (throw (FileSystemException. (.getPathForExceptionMessage file)
+                                       nil
+                                       (java-str
+                                         "Unable to get list of extended attributes: "
+                                         (.getMessage x)))))
+        (finally
+          (UnixNativeDispatcher/close fd (lambda Function ^RuntimeException [^UnixException e] nil))))))
+
+  (method ^:public size :throws [IOException] ^int [this ^String name]
+    (let [^:mutable ^int fd -1]
+      (try
+        (set! fd (.openForAttributeAccess file followLinks))
+        (catch UnixException x (.rethrowAsIOException x file)))
+      (try
+        (UnixNativeDispatcher/fgetxattr fd (.nameAsBytes this file name) 0 0)
+        (catch UnixException x
+          (throw (FileSystemException. (.getPathForExceptionMessage file)
+                                       nil
+                                       (java-str
+                                         "Unable to get size of extended attribute '"
+                                         name
+                                         "': "
+                                         (.getMessage x)))))
+        (finally
+          (UnixNativeDispatcher/close fd (lambda Function ^RuntimeException [^UnixException e] nil))))))
+
+  (method ^:public read :throws [IOException] ^int [this ^String name ^ByteBuffer dst]
+    (when (.isReadOnly dst) (throw (IllegalArgumentException. "Read-only buffer")))
+    (let [pos (.position dst)
+          lim (.limit dst)]
+      (java-assert (<= pos lim))
+      (let [^int rem (if (<= pos lim) (unchecked-subtract-int lim pos) 0)]
+        (if (.isDirect dst)
+            (do
+              (.acquireSession NIO_ACCESS dst)
+              (try
+                (let [address (unchecked-add (.getBufferAddress NIO_ACCESS dst) pos)
+                      n (.read this name address rem)]
+                  (.position dst (unchecked-add-int pos n))
+                  n)
+                (finally (.releaseSession NIO_ACCESS dst))))
+            (with-resources [nb (NativeBuffers/getNativeBuffer rem)]
+              (let [address (.address nb)
+                    n (.read this name address rem)
+                    off (unchecked-add (unchecked-add-int (.arrayOffset dst) pos)
+                                       Unsafe/ARRAY_BYTE_BASE_OFFSET)]
+                (.copyMemory unsafe nil address (.array dst) off n)
+                (.position dst (unchecked-add-int pos n))
+                n))))))
+
+  (method ^:private read :throws [IOException] ^int [this ^String name ^long address ^int rem]
+    (let [^:mutable ^int fd -1]
+      (try
+        (set! fd (.openForAttributeAccess file followLinks))
+        (catch UnixException x (.rethrowAsIOException x file)))
+      (try
+        (let [n (UnixNativeDispatcher/fgetxattr fd (.nameAsBytes this file name) address rem)]
+          (if (== rem 0) (do (when (> n 0) (throw (UnixException. UnixConstants/ERANGE))) 0) n))
+        (catch UnixException x
+          (let [^String msg (if (== (.errno x) UnixConstants/ERANGE)
+                                "Insufficient space in buffer"
+                                (.getMessage x))]
+            (throw (FileSystemException. (.getPathForExceptionMessage file)
+                                         nil
+                                         (java-str
+                                           "Error reading extended attribute '"
+                                           name
+                                           "': "
+                                           msg)))))
+        (finally
+          (UnixNativeDispatcher/close fd (lambda Function ^RuntimeException [^UnixException e] nil))))))
+
+  (method ^:public write :throws [IOException] ^int [this ^String name ^ByteBuffer src]
+    (let [pos (.position src)
+          lim (.limit src)]
+      (java-assert (<= pos lim))
+      (let [^int rem (if (<= pos lim) (unchecked-subtract-int lim pos) 0)]
+        (if (.isDirect src)
+            (do
+              (.acquireSession NIO_ACCESS src)
+              (try
+                (let [address (unchecked-add (.getBufferAddress NIO_ACCESS src) pos)]
+                  (.write this name address rem)
+                  (.position src (unchecked-add-int pos rem))
+                  rem)
+                (finally (.releaseSession NIO_ACCESS src))))
+            (with-resources [nb (NativeBuffers/getNativeBuffer rem)]
+              (let [address (.address nb)]
+                (if (.hasArray src)
+                    (let [off (unchecked-add (unchecked-add-int (.arrayOffset src) pos)
+                                             Unsafe/ARRAY_BYTE_BASE_OFFSET)]
+                      (.copyMemory unsafe (.array src) off nil address rem))
+                    (let [tmp (new byte/1 rem)]
+                      (.get src tmp)
+                      (.position src pos)
+                      (.copyMemory unsafe tmp Unsafe/ARRAY_BYTE_BASE_OFFSET nil address rem)))
+                (.write this name address rem)
+                (.position src (unchecked-add-int pos rem))
+                rem))))))
+
+  (method ^:private write :throws [IOException] ^void [this ^String name ^long address ^int rem]
+    (let [^:mutable ^int fd -1]
+      (try
+        (set! fd (.openForAttributeAccess file followLinks))
+        (catch UnixException x (.rethrowAsIOException x file)))
+      (try
+        (UnixNativeDispatcher/fsetxattr fd (.nameAsBytes this file name) address rem)
+        (catch UnixException x
+          (throw (FileSystemException. (.getPathForExceptionMessage file)
+                                       nil
+                                       (java-str
+                                         "Error writing extended attribute '"
+                                         name
+                                         "': "
+                                         (.getMessage x)))))
+        (finally
+          (UnixNativeDispatcher/close fd (lambda Function ^RuntimeException [^UnixException e] nil))))))
+
+  (method ^:public delete :throws [IOException] ^void [this ^String name]
+    (let [^:mutable ^int fd -1]
+      (try
+        (set! fd (.openForAttributeAccess file followLinks))
+        (catch UnixException x (.rethrowAsIOException x file)))
+      (try
+        (UnixNativeDispatcher/fremovexattr fd (.nameAsBytes this file name))
+        (catch UnixException x
+          (throw (FileSystemException. (.getPathForExceptionMessage file)
+                                       nil
+                                       (java-str
+                                         "Unable to delete extended attribute '"
+                                         name
+                                         "': "
+                                         (.getMessage x)))))
+        (finally
+          (UnixNativeDispatcher/close fd (lambda Function ^RuntimeException [^UnixException e] nil))))))
+
+  (method ^:static copyExtendedAttributes ^void [^int ofd ^int nfd]
+    (try
+      (let [^{:tag (List String)} attrNames (UnixUserDefinedFileAttributeView/list
+                                              ofd
+                                              MIN_LISTXATTR_BUF_SIZE)]
+        (for-each [^String name attrNames]
+          (try
+            (UnixUserDefinedFileAttributeView/copyExtendedAttribute ofd (Util/toBytes name) nfd)
+            (catch UnixException ignore))))
+      (catch UnixException e)))
+
+  (method ^:private ^:static copyExtendedAttribute :throws [UnixException] ^void [^int ofd
+                                                                                  ^byte/1 name
+                                                                                  ^int nfd]
+    (let [^:mutable size (UnixNativeDispatcher/fgetxattr ofd name 0 0)]
+      (with-resources [buffer (NativeBuffers/getNativeBuffer size)]
+        (let [address (.address buffer)]
+          (set! size (UnixNativeDispatcher/fgetxattr ofd name address size))
+          (UnixNativeDispatcher/fsetxattr nfd name address size))))))

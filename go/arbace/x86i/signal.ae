@@ -1,0 +1,322 @@
+(in-ns 'go.arbace.x86i) (go/file "signal.go" :imports [
+
+
+    ^{:line 4} [binary "encoding/binary"]])
+
+
+;; Signals with handlers (AX5.4; AX5-DESIGN §1): x86i's own layer over crt (AXS52 (a)): rt_sigaction, rt_sigprocmask,
+;; sigaltstack and rt_sigreturn, and the frame Linux builds for a handler on x86-64, its layout from the psABI and musl's
+;; arch/x86_64/bits/signal.h (MIT; the kernel's source not read), held to the native's by the lockstep:
+;;
+;;	frame+0    the restorer's address (the handler's return address)
+;;	frame+8    ucontext: uc_flags, uc_link, uc_stack (ss_sp, ss_flags, ss_size)
+;;	frame+48   mcontext: gregs[23] (R8-R15, RDI, RSI, RBP, RBX, RDX, RAX, RCX, RSP, RIP, EFL, CSGSFS, ERR, TRAPNO, OLDMASK, CR2),
+;;	           the fpstate's address (frame+232), eight reserved words
+;;	frame+304  uc_sigmask (the kernel's eight bytes)
+;;	frame+312  siginfo (128 bytes)
+;;
+;; the fpstate (an XSAVE image: the FXSAVE area, its software-reserved words naming the extended area, the XSAVE header)
+;; above it, 64-aligned, below the red zone's 128 bytes (or the alternate stack's top); the frame 16-aligned less 8, as at a
+;; function's entry. RDI the signal, RSI the siginfo, RDX the ucontext, RAX 0; DF and TF cleared.
+
+
+(go/type SigAction "SigAction is a signal's action (the kernel's struct sigaction on x86-64: handler, flags, restorer, mask).\n" (struct ^uint64 Handler ^uint64 Flags ^uint64 Restorer ^uint64 Mask))
+
+(go/const
+  ^{:line 26} [^{:val 134217728} saOnStack 0x08000000]
+  ^{:line 27} [^{:val 67108864} saRestorer 0x04000000]
+  ^{:line 28} [^{:val 1073741824} saNoDefer 0x40000000]
+  ^{:line 29} [^{:val 2147483648} saResetHand 0x80000000]
+  ^{:line 30} [^{:val 1} ssOnStack 1]
+  ^{:line 31} [^{:val 2} ssDisable 2]
+  ^{:line 32} [^{:val 2048} minSigStk 2048]
+  ^{:line 33} [^{:val 9} sigKill 9]
+  ^{:line 34} [^{:val 19} sigStop 19]
+
+  ^{:line 36} [^{:val 440} frameSize 440]
+
+
+  ^{:line 39} [^{:val 580 :doc "XSaveModel is the fpstate's size in x86i's model's frames (the FXSAVE area, the XSAVE header and the end's magic word):\na native run's frames are the host's size, which the lockstep gives x86i at the first delivery\n"} XSaveModel (+ 512 64 4)])
+
+
+
+(go/type sigInfo "sigInfo is what the frame's siginfo says of the signal beside its number: si_code, si_addr or a kill's sender.\n" (struct
+    ^{:line 44 :tag bool} fault ; a fault-class exception: the RFLAGS image saved with RF set (the SDM, vol. 3 §6.6)
+    ^{:line 45 :tag int32} code
+    ^{:line 46 :tag uint64} addr
+    ^{:line 47 :tag uint64} pid)) ; a kill's sender (si_pid, si_uid as one word)
+
+
+
+(go/type trapState "trapState is the thread's last trap: its number, its error code, the last page fault's address (CR2).\n" (struct ^uint64 trapno ^uint64 err ^uint64 cr2))
+
+
+
+^{:go/end 61} (go/method setInfo "setInfo sets the siginfo of a trap's signal and the thread's trap state: the trap's number and error code, and CR2 for a\npage fault only; the thread keeps them, so a later signal's frame (a kill's, another trap's CR2) shows them as Linux does.\n" [^{:tag (* CPU)} c ^int32 code ^uint64 addr ^uint64 trapno ^uint64 err ^uint64 cr2]
+  (set! (.-info c) (lit sigInfo :code code :addr addr :fault (!= trapno 3)))
+  (set! (values (.-trapno (.-trap c)) (.-err (.-trap c))) (values trapno err))
+  (when (== trapno 14)
+    (set! (.-cr2 (.-trap c)) cr2)))
+
+
+
+^{:go/end 63} (go/func bit ^uint64 [^int sig] ^uint64 (<< 1 (- sig 1)))
+
+
+
+^{:go/end 70} (go/method Deliverable "Deliverable reports whether the signal raised (Signal) goes to a handler: one installed and the signal not blocked (a\nblocked or ignored fault kills the process, as the kernel's forced signal does).\n" ^bool [^{:tag (* CPU)} c]
+  (let [sig (.-Signal c)]
+    (and (> sig 0) (<= sig 64) (> (.-Handler (aget (.-Act c) sig)) 1) (== (bit-and (.-Mask c) (bit sig)) 0))))
+
+
+
+^{:go/end 81} (go/method PendingSignal "PendingSignal is the lowest pending signal not blocked (0: none).\n" ^int [^{:tag (* CPU)} c]
+  ^{:go/breaks [[3 80]]} (let [p (bit-and-not (.-Pending c) (.-Mask c))]
+    (when (== p 0) ; queue 315: none, the common case (Step asks after every instruction)
+      (return 0))
+
+    (for [sig 1] (<= sig 64) (inc! sig)
+      (when (!= (bit-and p (bit sig)) 0)
+        (return sig)))
+
+
+    0))
+
+
+
+^{:go/end 88} (go/method TakePending "TakePending makes the pending signal sig the one to deliver (a kill's: si_code SI_USER, its sender's pid and uid).\n" [^{:tag (* CPU)} c ^int sig]
+  (set! (.-Pending c) bit-and-not (bit sig))
+  (set! (values (.-Signal c) (.-Reason c)) (values sig "kill"))
+  (set! (.-info c) (lit sigInfo :code 0 :pid (.-Pid c))))
+
+
+^{:go/end 90} (go/method w64 ^bool [^{:tag (* CPU)} c ^uint64 a ^uint64 v] (.Write (.-AS c) a 8 v))
+
+
+^{:go/end 100} (go/method FrameBase "FrameBase is where the frame of the signal about to be delivered goes: below the red zone, or the alternate stack's top.\n" ^uint64 [^{:tag (* CPU)} c]
+  (let [sp (aget (.-R c) 4)
+      ^{:line 95} a (aget (.-Act c) (.-Signal c))]
+    (when (and (!= (bit-and (.-Flags a) saOnStack) 0) (!= (.-altSize c) 0) (not (.onAlt c sp)))
+      (return (+ (.-altSP c) (.-altSize c))))
+
+    (- sp 128)))
+
+
+
+
+^{:go/end 178} (go/method Deliver "Deliver builds the handler's frame for Signal with an fpstate of xsave bytes and enters the handler: false when the frame\ncannot be written (the process then dies by SIGSEGV, as Linux kills it).\n" ^bool [^{:tag (* CPU)} c ^uint64 xsave]
+  (let [sig (.-Signal c)
+      ^{:line 106} a (aget (.-Act c) sig)
+      ^{:line 107} fl (.Get (.-F c))
+      ^{:line 108} sp (.FrameBase c)
+      ^{:line 109} efl fl]
+    (when (.-fault (.-info c))
+      (set! efl bit-or (<< 1 16))) ; RF
+
+    (let [fp (bit-and-not (- sp xsave) 63)
+        ^{:line 114} frame (- (bit-and-not (- fp frameSize) 15) 8)]
+      (when (not (.Probe (.-AS c) frame (conv int (- (+ fp xsave) frame))))
+        (set! (values (.-Signal c) (.-Reason c)) (values SIGSEGV "the signal frame cannot be written"))
+        (aset (.-Act c) SIGSEGV (lit SigAction))
+        (return false))
+
+      (let [log (.-Log (.-AS c))]
+        (set! (.-Log (.-AS c)) false)
+        (defer (^{:go/end 122} (fn [] (set! (.-Log (.-AS c)) log))))
+        ;; zero the frame and the fpstate
+        (for [p frame] (< p (+ fp xsave)) (set! p + 8)
+          (.w64 c p 0))
+
+        (.w64 c frame (.-Restorer a))
+        (.w64 c (+ frame 8) 7) ; UC_FP_XSTATE | UC_SIGCONTEXT_SS | UC_STRICT_RESTORE_SS
+        (.w64 c (+ frame 24) (.-altSP c))
+        (.w64 c (+ frame 32) (.-altFlags c)) ; the flags sigaltstack stored, not whether the stack is in use
+        (.w64 c (+ frame 40) (.-altSize c))
+        (let [g (lit (array 23 uint64) (aget (.-R c) 8) (aget (.-R c) 9) (aget (.-R c) 10) (aget (.-R c) 11) (aget (.-R c) 12) (aget (.-R c) 13) (aget (.-R c) 14) (aget (.-R c) 15) (aget (.-R c) 7) (aget (.-R c) 6) (aget (.-R c) 5) (aget (.-R c) 3)
+              (aget (.-R c) 2) (aget (.-R c) 0) (aget (.-R c) 1) (aget (.-R c) 4) (.-RIP c) efl (bit-or 0x33 (<< 0x2b 48)) (.-err (.-trap c)) (.-trapno (.-trap c)) (.-Mask c) (.-cr2 (.-trap c)))]
+          (range [i v g]
+            (.w64 c (+ frame 48 (* 8 (conv uint64 i))) v))
+
+          (.w64 c (+ frame 232) fp)
+          (.w64 c (+ frame 304) (.-Mask c))
+          ^{:go/breaks [25]} (let [si (+ frame 312)]
+            (.Write (.-AS c) si 4 (conv uint64 sig))
+            (.Write (.-AS c) (+ si 8) 4 (conv uint64 (conv uint32 (.-code (.-info c)))))
+            (if (!= (.-pid (.-info c)) 0)
+              (.w64 c (+ si 16) (.-pid (.-info c)))
+
+              (.w64 c (+ si 16) (.-addr (.-info c))))
+
+            ;; the fpstate: FXSAVE's control word, MXCSR, its mask, the XMM registers; the software-reserved words (FP_XSTATE_MAGIC1,
+            ;; the extended size, the features x87|SSE, the XSAVE size); the header's XSTATE_BV; FP_XSTATE_MAGIC2 at the end
+            (.Write (.-AS c) fp 2 0x37f)
+            (.Write (.-AS c) (+ fp 24) 4 (conv uint64 (.-MXCSR c)))
+            (.Write (.-AS c) (+ fp 28) 4 0xffff)
+            (for [i (conv uint64 0)] (< i 16) (inc! i)
+              (.w64 c (+ fp 160 (* 16 i)) (aget (aget (.-X c) i) 0))
+              (.w64 c (+ fp 168 (* 16 i)) (aget (aget (.-X c) i) 1)))
+
+            (.Write (.-AS c) (+ fp 464) 4 0x46505853)
+            (.Write (.-AS c) (+ fp 468) 4 xsave)
+            (.w64 c (+ fp 472) 3)
+            (.Write (.-AS c) (+ fp 480) 4 (- xsave 4))
+            (.w64 c (+ fp 512) 3)
+            (.Write (.-AS c) (- (+ fp xsave) 4) 4 0x46505845)
+            ;; the handler's entry
+            (set! (values (aget (.-R c) 7) (aget (.-R c) 6) (aget (.-R c) 2) (aget (.-R c) 0)) (values (conv uint64 sig) si (+ frame 8) 0))
+            (aset (.-R c) 4 frame)
+            (set! (.-RIP c) (.-Handler a))
+            (.Put (.-F c) (bit-and-not fl (bit-or DF TF)) (bit-or DF TF))
+            (set! (.-Mask c) bit-or (.-Mask a))
+            (when (== (bit-and (.-Flags a) saNoDefer) 0)
+              (set! (.-Mask c) bit-or (bit sig)))
+
+            (set! (.-Mask c) bit-and-not (bit-or (bit sigKill) (bit sigStop)))
+            (when (!= (bit-and (.-Flags a) saResetHand) 0)
+              (aset (.-Act c) sig (lit SigAction)))
+
+            (set! (values (.-Signal c) (.-Reason c) (.-SigAddr c)) (values 0 "" 0))
+            (inc! (.-Delivered c))
+            true))))))
+
+
+
+
+^{:go/end 209} (go/method sigreturn "sigreturn restores the context of the frame below RSP (the restorer's rt_sigreturn, the frame's return address popped):\nthe registers, the user-writable flags, the mask, MXCSR and XMM from the fpstate, the alternate stack.\n" ^int [^{:tag (* CPU)} c]
+  (let [frame (- (aget (.-R c) 4) 8)
+      (values b ok) (.ReadBytes (.-AS c) frame frameSize)]
+    (when (or (not ok) (== (bit-and (.Perm (.-AS c) frame) 1) 0) (== (bit-and (.Perm (.-AS c) (- (+ frame frameSize) 1)) 1) 0))
+      (return (.raise c SIGSEGV 0 "rt_sigreturn's frame")))
+
+    (let [at ^{:go/end 188} (fn ^uint64 [^int o] (.Uint64 binary/LittleEndian (subslice b o)))
+        ^{:line 189} gi ^{:go/end 189} (fn ^uint64 [^int i] (at (+ 48 (* 8 i))))
+        ^{:line 190} order (lit (array 16 int) 8 9 10 11 12 13 14 15 7 6 5 3 2 0 1 4)]
+      (for [i 0] (< i 16) (inc! i)
+        (aset (.-R c) (aget order i) (gi i)))
+
+      (set! (.-RIP c) (gi 16))
+      (.Put (.-F c) (gi 17) (bit-or CF PF AF ZF SF TF DF OF AC))
+      (set! (.-Mask c) (bit-and-not (at 304) (bit-or (bit sigKill) (bit sigStop))))
+      (when [fp (at 232)] (!= fp 0)
+        (when [(values v ok) (.Read (.-AS c) (+ fp 24) 4)] ok
+          (set! (.-MXCSR c) (conv uint32 v)))
+
+        (for [i (conv uint64 0)] (< i 16) (inc! i)
+          (set! (values (aget (aget (.-X c) i) 0) _) (.Read (.-AS c) (+ fp 160 (* 16 i)) 8))
+          (set! (values (aget (aget (.-X c) i) 1) _) (.Read (.-AS c) (+ fp 168 (* 16 i)) 8))))
+
+
+      ;; the alternate stack, as sigaltstack would set it from the frame's uc_stack (its errors ignored)
+      (.setAltStack c (at 24) (bit-and (at 32) 0xffffffff) (at 40))
+      ^{:line 208} stepOK)))
+
+
+
+^{:go/end 298} (go/method sigSyscall "sigSyscall answers the signal calls x86i's layer owns: handled, with the result.\n" [^{:tag (* CPU)} c ^uint64 n ^{:tag (array 6 uint64)} a] :results [int64 bool]
+  (switch n
+    (case [13] ; rt_sigaction(sig, act, old, sigsetsize)
+      (let [sig (conv int (aget a 0))]
+        (when (or (< sig 1) (> sig 64) (!= (aget a 3) 8) ^:go/paren (and (!= (aget a 1) 0) ^:go/paren (or (== sig sigKill) (== sig sigStop))))
+          (return -22 true))
+
+        (let [^SigAction act (zero SigAction)]
+          (when (!= (aget a 1) 0)
+            (let [(values b ok) (.ReadBytes (.-AS c) (aget a 1) 32)]
+              (when (not ok)
+                (return -14 true))
+
+              (set! act (lit SigAction (.Uint64 binary/LittleEndian b) (.Uint64 binary/LittleEndian (subslice b 8)) (.Uint64 binary/LittleEndian (subslice b 16))
+                  (bit-and-not (.Uint64 binary/LittleEndian (subslice b 24)) (bit-or (bit sigKill) (bit sigStop)))))))
+
+          (when (!= (aget a 2) 0)
+            (let [o (aget (.-Act c) sig)]
+              (range [i v (lit (slice uint64) (.-Handler o) (.-Flags o) (.-Restorer o) (.-Mask o))]
+                (when (not (.w64 c (+ (aget a 2) (* 8 (conv uint64 i))) v))
+                  (return -14 true)))))
+
+
+
+          (when (!= (aget a 1) 0)
+            (aset (.-Act c) sig act)
+            ;; crt's table too: its kill of the program itself calls x86i's Handler hook for an installed handler
+            (.Syscall (.-K c) 13 (aget a 0) (aget a 1) 0 8 0 0))
+
+          (return 0 true))))
+    (case [14] ; rt_sigprocmask(how, set, old, sigsetsize)
+      (when (!= (aget a 3) 8)
+        (return -22 true))
+
+      (let [^uint64 set (zero uint64)]
+        (when (!= (aget a 1) 0)
+          (let [(values v ok) (.Read (.-AS c) (aget a 1) 8)]
+            (when (not ok)
+              (return -14 true))
+
+            (set! set v)
+            (when (> (aget a 0) 2)
+              (return -22 true))))
+
+
+        (when (and (!= (aget a 2) 0) (not (.w64 c (aget a 2) (.-Mask c))))
+          (return -14 true))
+
+        (when (!= (aget a 1) 0)
+          (switch (aget a 0)
+            (case [0]
+              (set! (.-Mask c) bit-or set))
+            (case [1]
+              (set! (.-Mask c) bit-and-not set))
+            (case [2]
+              (set! (.-Mask c) set)))
+
+          (set! (.-Mask c) bit-and-not (bit-or (bit sigKill) (bit sigStop)))
+          (.Syscall (.-K c) 14 (aget a 0) (aget a 1) 0 8 0 0))
+
+        (return 0 true)))
+    (case [131] ; sigaltstack(ss, old)
+      (when (!= (aget a 1) 0)
+        (let [fl (bit-and-not (.-altFlags c) (bit-or ssDisable ssOnStack))]
+          (switch
+            (case [(== (.-altSize c) 0)]
+              (set! fl bit-or ssDisable))
+            (case [(.onAlt c (aget (.-R c) 4))]
+              (set! fl bit-or ssOnStack)))
+
+          (when (or (not (.w64 c (aget a 1) (.-altSP c))) (not (.w64 c (+ (aget a 1) 8) fl)) (not (.w64 c (+ (aget a 1) 16) (.-altSize c))))
+            (return -14 true))))
+
+
+      (when (!= (aget a 0) 0)
+        (let [(values b ok) (.ReadBytes (.-AS c) (aget a 0) 24)]
+          (when (not ok)
+            (return -14 true))
+
+          (when [r (.setAltStack c (.Uint64 binary/LittleEndian b) (conv uint64 (.Uint32 binary/LittleEndian (subslice b 8))) (.Uint64 binary/LittleEndian (subslice b 16)))] (!= r 0)
+            (return r true))))
+
+
+      (return 0 true)))
+
+  (return 0 false))
+
+
+^{:go/end 300} (go/method onAlt ^bool [^{:tag (* CPU)} c ^uint64 sp] (and (!= (.-altSize c) 0) (< (- sp (.-altSP c)) (.-altSize c))))
+
+
+
+^{:go/end 320} (go/method setAltStack "setAltStack is sigaltstack's change: refused (EPERM) on the alternate stack, EINVAL for unknown flags, ENOMEM below\nMINSIGSTKSZ; SS_DISABLE clears it; the flags kept (SS_AUTODISARM's bit among them).\n" ^int64 [^{:tag (* CPU)} c ^uint64 sp ^uint64 fl ^uint64 size]
+  (when (.onAlt c (aget (.-R c) 4))
+    (return -1))
+
+  ^{:go/breaks [[3 319]]} (let [mode (bit-and-not fl 0x80000000)]
+    (switch
+      (case [(and (!= mode 0) (!= mode ssDisable) (!= mode ssOnStack))]
+        (return -22))
+      (case [(== mode ssDisable)]
+        (set! (values (.-altSP c) (.-altSize c) (.-altFlags c)) (values 0 0 fl)))
+      (case [(< size minSigStk)]
+        (return -12))
+      (default
+        (set! (values (.-altSP c) (.-altSize c) (.-altFlags c)) (values sp size (bit-and fl 0x80000000)))))
+
+    0))

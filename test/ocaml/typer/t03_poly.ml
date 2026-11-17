@@ -1,0 +1,9 @@
+let id x = x
+let k x _ = x
+let a = id 3
+let b = id "three"
+let pair x y = (x, y)
+let swap (x, y) = (y, x)
+let () = print_string b; print_int (k a b); print_newline ()
+let p = swap (pair 1 "one")
+let () = print_string (fst p); print_int (snd p); print_newline ()

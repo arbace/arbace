@@ -1,0 +1,473 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/StatusResponseManager.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.net URI URISyntaxException)
+        '(java.security.cert Extension X509Certificate)
+        '(java.util ArrayList Collections Date HashMap List Map Objects Optional)
+        '(java.util.concurrent ExecutionException
+                               Executors
+                               Future
+                               ScheduledThreadPoolExecutor
+                               ThreadFactory
+                               ThreadPoolExecutor$DiscardPolicy
+                               TimeUnit)
+        '(sun.security.provider.certpath CertId
+                                         OCSP
+                                         OCSPResponse
+                                         OCSPResponse$ResponseStatus
+                                         OCSPResponse$SingleResponse
+                                         ResponderId)
+        '(sun.security.util Cache Debug)
+        '(sun.security.x509 PKIXExtensions SerialNumber))
+
+(defclass ^:final StatusResponseManager
+  (field ^:private ^:static ^:final ^int DEFAULT_CORE_THREADS 8)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_CACHE_SIZE 256)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_CACHE_LIFETIME 3600)
+
+  (field ^:private ^:final ^ScheduledThreadPoolExecutor threadMgr)
+
+  (field ^:private ^:final ^{:tag (Cache CertId ResponseCacheEntry)} responseCache)
+
+  (field ^:private ^:final ^URI defaultResponder)
+
+  (field ^:private ^:final ^boolean respOverride)
+
+  (field ^:private ^:final ^int cacheCapacity)
+
+  (field ^:private ^:final ^int cacheLifetime)
+
+  (field ^:private ^:final ^boolean ignoreExtensions)
+
+  (constructor [this]
+    (let [^int cap (Integer/getInteger "jdk.tls.stapling.cacheSize" DEFAULT_CACHE_SIZE)]
+      (set! cacheCapacity (if (> cap 0) cap 0))
+      (let [^int life (Integer/getInteger "jdk.tls.stapling.cacheLifetime" DEFAULT_CACHE_LIFETIME)]
+        (set! cacheLifetime (if (> life 0) life 0))
+        (let [uriStr (System/getProperty "jdk.tls.stapling.responderURI")
+              ^:mutable ^URI tmpURI nil]
+          (try
+            (set! tmpURI (when (and (some? uriStr) (not (.isEmpty uriStr))) (URI. uriStr)))
+            (catch URISyntaxException urise (set! tmpURI nil)))
+          (set! defaultResponder tmpURI)
+          (set! respOverride (Boolean/getBoolean "jdk.tls.stapling.responderOverride"))
+          (set! ignoreExtensions (Boolean/getBoolean "jdk.tls.stapling.ignoreExtensions"))
+          (set! threadMgr
+                (ScheduledThreadPoolExecutor. DEFAULT_CORE_THREADS
+                                              (lambda ThreadFactory ^Thread [^Runnable r]
+                                                (let [t (.newThread
+                                                          (Executors/defaultThreadFactory)
+                                                          r)]
+                                                  (.setDaemon t true)
+                                                  t))
+                                              (ThreadPoolExecutor$DiscardPolicy.)))
+          (.setExecuteExistingDelayedTasksAfterShutdownPolicy threadMgr false)
+          (.setContinueExistingPeriodicTasksAfterShutdownPolicy threadMgr false)
+          (.setKeepAliveTime threadMgr 5000 TimeUnit/MILLISECONDS)
+          (.allowCoreThreadTimeOut threadMgr true)
+          (set! responseCache (Cache/newSoftMemoryCache cacheCapacity cacheLifetime))))))
+
+  (method getURI ^URI [this ^X509Certificate cert]
+    (Objects/requireNonNull cert)
+    (cond
+      (some? (.getExtensionValue cert (.toString PKIXExtensions/OCSPNoCheck_Id)))
+        (do
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+            (SSLLogger/fine "OCSP NoCheck extension found.  OCSP will be skipped"))
+          nil)
+      (and (some? defaultResponder) respOverride)
+        (do
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+            (SSLLogger/fine (java-str "Responder override: URI is " defaultResponder)))
+          defaultResponder)
+      :else
+        (let [certURI (OCSP/getResponderURI cert)] (if (some? certURI) certURI defaultResponder))))
+
+  (method get ^{:tag (Map X509Certificate byte/1)} [this
+                                                    ^CertStatusExtension$CertStatusRequestType type
+                                                    ^CertStatusExtension$CertStatusRequest request
+                                                    ^X509Certificate/1 chain ^long delay
+                                                    ^TimeUnit unit]
+    (let [^{:tag (Map X509Certificate byte/1)} responseMap (HashMap.)
+          ^{:tag (List OCSPFetchCall)} requestList (ArrayList.)]
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+        (SSLLogger/fine
+          (java-str "Beginning check: Type = " type ", Chain length = " (alength chain))))
+      (if (< (alength chain) 2)
+          (Collections/emptyMap)
+          (do
+            (cond
+              (identical? type CertStatusExtension$CertStatusRequestType/OCSP)
+                (try
+                  (let [ocspReq (cast CertStatusExtension$OCSPStatusRequest request)
+                        cid (CertId. (aget chain 1)
+                                     (SerialNumber. (.getSerialNumber (aget chain 0))))
+                        cacheEntry (.getFromCache this cid ocspReq)]
+                    (if (some? cacheEntry)
+                        (.put responseMap (aget chain 0) (.-ocspBytes cacheEntry))
+                        (let [sInfo (StatusInfo. (aget chain 0) cid)]
+                          (.add requestList (OCSPFetchCall. sInfo ocspReq)))))
+                  (catch IOException exc
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+                      (SSLLogger/fine "Exception during CertId creation: " exc))))
+              (identical? type CertStatusExtension$CertStatusRequestType/OCSP_MULTI)
+                (let [ocspReq (cast CertStatusExtension$OCSPStatusRequest request)
+                      ^:mutable ^int ctr 0]
+                  (set! ctr 0)
+                  (while (< ctr (unchecked-subtract-int (alength chain) 1))
+                    (try
+                      (let [cid (CertId. (aget chain (unchecked-add-int ctr 1))
+                                         (SerialNumber. (.getSerialNumber (aget chain ctr))))
+                            cacheEntry (.getFromCache this cid ocspReq)]
+                        (if (some? cacheEntry)
+                            (.put responseMap (aget chain ctr) (.-ocspBytes cacheEntry))
+                            (let [sInfo (StatusInfo. (aget chain ctr) cid)]
+                              (.add requestList (OCSPFetchCall. sInfo ocspReq)))))
+                      (catch IOException exc
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+                          (SSLLogger/fine "Exception during CertId creation: " exc))))
+                    (set! ctr (unchecked-inc-int ctr))))
+              (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+                (SSLLogger/fine (java-str "Unsupported status request type: " type)))
+            (when-not (.isEmpty requestList)
+              (try
+                (let [^{:tag (List (Future StatusInfo))} resultList (.invokeAll
+                                                                      threadMgr
+                                                                      requestList
+                                                                      delay
+                                                                      unit)]
+                  (for-each [^{:tag (Future StatusInfo)} task resultList]
+                    (when-not (not (.isDone task))
+                      (cond
+                        (not (.isCancelled task))
+                          (let [^:mutable ^StatusInfo info nil]
+                            (try
+                              (set! info (cast StatusInfo (.get task)))
+                              (catch ExecutionException exc
+                                (let [cause (cast
+                                              Throwable
+                                              (.orElse (Optional/ofNullable (.getCause exc)) exc))]
+                                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+                                    (SSLLogger/fine
+                                      (java-str "Exception during OCSP fetch: " cause)))
+                                  (continue))))
+                            (cond
+                              (and (some? info) (some? (.-responseData info)))
+                                (.put responseMap (.-cert info) (.-ocspBytes (.-responseData info)))
+                              (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+                                (SSLLogger/fine "Completed task had no response data")))
+                        (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+                          (SSLLogger/fine "Found cancelled task")))))
+                (catch InterruptedException intex
+                  (.interrupt (Thread/currentThread))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+                    (SSLLogger/fine (java-str "Interrupt occurred while fetching: " intex))))))
+            (Collections/unmodifiableMap responseMap)))))
+
+  (method ^:private getFromCache ^ResponseCacheEntry [this ^CertId cid
+                                                      ^CertStatusExtension$OCSPStatusRequest ocspRequest]
+    (for-each [^Extension ext (.-extensions ocspRequest)]
+      (when (.equals (.getId ext) (.toString PKIXExtensions/OCSPNonce_Id))
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+          (SSLLogger/fine "Nonce extension found, skipping cache check"))
+        (return nil)))
+    (let [^:mutable respEntry (cast ResponseCacheEntry (.get responseCache cid))]
+      (when (and (and (some? respEntry) (some? (.-nextUpdate respEntry)))
+                 (.before (.-nextUpdate respEntry) (Date.)))
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+          (SSLLogger/fine "nextUpdate threshold exceeded, purging from cache"))
+        (set! respEntry nil))
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+        (SSLLogger/fine
+          (java-str "Check cache for SN"
+                    (Debug/toString (.getSerialNumber cid))
+                    ": "
+                    (if (some? respEntry) "HIT" "MISS"))))
+      respEntry))
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder. "StatusResponseManager: ")]
+      (.append (.append sb "Core threads: ") (.getCorePoolSize threadMgr))
+      (.append sb ", Cache timeout: ")
+      (if (> cacheLifetime 0)
+          (.append (.append sb cacheLifetime) " seconds")
+          (.append sb " indefinite"))
+      (.append sb ", Cache MaxSize: ")
+      (if (> cacheCapacity 0)
+          (.append (.append sb cacheCapacity) " items")
+          (.append sb " unbounded"))
+      (.append sb ", Default URI: ")
+      (if (some? defaultResponder) (.append sb defaultResponder) (.append sb "NONE"))
+      (.toString sb)))
+
+  (defclass StatusInfo
+    (field ^:final ^X509Certificate cert)
+
+    (field ^:final ^CertId cid)
+
+    (field ^:final ^URI responder)
+
+    (field ^ResponseCacheEntry responseData)
+
+    (constructor [this ^X509Certificate subjectCert ^CertId certId]
+      (set! cert subjectCert)
+      (set! cid certId)
+      (set! responder (.getURI StatusResponseManager/this cert))
+      (set! responseData nil))
+
+    (method ^:public toString ^String [this]
+      (java-str "StatusInfo:\n\tCert: "
+                (.getSubjectX500Principal (.-cert this))
+                "\n\tSerial: "
+                (Debug/toString (.getSerialNumber (.-cert this)))
+                "\n\tResponder: "
+                (.-responder this)
+                "\n\tResponse data: "
+                (if (some? (.-responseData this))
+                    (java-str (alength (.-ocspBytes (.-responseData this))) " bytes")
+                    "<NULL>"))))
+
+  (defclass ^:static ResponseCacheEntry
+    (field ^:final ^OCSPResponse$ResponseStatus status)
+
+    (field ^:final ^byte/1 ocspBytes)
+
+    (field ^:final ^Date nextUpdate)
+
+    (field ^:final ^OCSPResponse$SingleResponse singleResp)
+
+    (field ^:final ^ResponderId respId)
+
+    (constructor :throws [IOException] [this ^byte/1 responseBytes ^CertId cid]
+      (Objects/requireNonNull responseBytes "Non-null responseBytes required")
+      (Objects/requireNonNull cid "Non-null Cert ID required")
+      (set! ocspBytes (.clone responseBytes))
+      (let [oResp (OCSPResponse. ocspBytes)]
+        (set! status (.getResponseStatus oResp))
+        (set! respId (.getResponderId oResp))
+        (set! singleResp (.getSingleResponse oResp cid))
+        (if (identical? status OCSPResponse$ResponseStatus/SUCCESSFUL)
+            (if (some? singleResp)
+                (set! nextUpdate (.getNextUpdate singleResp))
+                (throw (IOException. (java-str "Unable to find SingleResponse for SN "
+                                               (Debug/toString (.getSerialNumber cid))))))
+            (set! nextUpdate nil)))))
+
+  (defclass OCSPFetchCall
+    :implements [(Callable StatusInfo)]
+
+    (field ^StatusInfo statInfo)
+
+    (field ^CertStatusExtension$OCSPStatusRequest ocspRequest)
+
+    (field ^{:tag (List Extension)} extensions)
+
+    (field ^{:tag (List ResponderId)} responderIds)
+
+    (constructor ^:public [this ^StatusInfo info ^CertStatusExtension$OCSPStatusRequest request]
+      (set! statInfo (cast StatusInfo (Objects/requireNonNull info "Null StatusInfo not allowed")))
+      (set! ocspRequest
+            (cast CertStatusExtension$OCSPStatusRequest
+                  (Objects/requireNonNull request "Null OCSPStatusRequest not allowed")))
+      (set! extensions (.-extensions ocspRequest))
+      (set! responderIds (.-responderIds ocspRequest)))
+
+    (method ^:public call ^StatusInfo [this]
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+        (SSLLogger/fine
+          (java-str "Starting fetch for SN " (Debug/toString (.getSerialNumber (.-cid statInfo))))))
+      (try
+        (let [^:mutable ^ResponseCacheEntry cacheEntry nil
+              ^:mutable ^{:tag (List Extension)} extsToSend nil]
+          (cond
+            (nil? (.-responder statInfo))
+              (do
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+                  (SSLLogger/fine "Null URI detected, OCSP fetch aborted"))
+                (return statInfo))
+            (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+              (SSLLogger/fine (java-str "Attempting fetch from " (.-responder statInfo))))
+          (set! extsToSend
+                (if (or ignoreExtensions (not (.isEmpty responderIds)))
+                    (Collections/emptyList)
+                    extensions))
+          (let [respBytes (OCSP/getOCSPBytes (Collections/singletonList (.-cid statInfo))
+                                             (.-responder statInfo)
+                                             extsToSend)]
+            (set! cacheEntry (ResponseCacheEntry. respBytes (.-cid statInfo)))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+              (SSLLogger/fine
+                (java-str "OCSP Status: " (.-status cacheEntry) " (" (alength respBytes) " bytes)")))
+            (when (identical? (.-status cacheEntry) OCSPResponse$ResponseStatus/SUCCESSFUL)
+              (set! (.-responseData statInfo) cacheEntry)
+              (.addToCache this (.-cid statInfo) cacheEntry))))
+        (catch IOException ioe
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+            (SSLLogger/fine "Caught exception: " ioe))))
+      statInfo)
+
+    (method ^:private addToCache ^void [this ^CertId certId ^ResponseCacheEntry entry]
+      (if (and (nil? (.-nextUpdate entry)) (== cacheLifetime 0))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+            (SSLLogger/fine "Not caching this OCSP response"))
+          (do
+            (.put responseCache certId entry)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "respmgr"))
+              (SSLLogger/fine
+                (java-str "Added response for SN "
+                          (Debug/toString (.getSerialNumber certId))
+                          " to cache")))))))
+
+  (method ^:static processStapling ^StaplingParameters [^ServerHandshakeContext shc]
+    (let [^:mutable ^StaplingParameters params nil
+          ^:mutable ^SSLExtension ext nil
+          ^:mutable ^CertStatusExtension$CertStatusRequestType type nil
+          ^:mutable ^CertStatusExtension$CertStatusRequest req nil
+          ^:mutable ^{:tag (Map X509Certificate byte/1)} responses nil]
+      (if (or (not (.isStaplingEnabled (.-sslContext shc) false)) (.-isResumption shc))
+          (do
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Staping disabled or is a resumed session"))
+            nil)
+          (let [^{:tag (Map SSLExtension SSLExtension$SSLExtensionSpec)} exts (.-handshakeExtensions
+                                                                                shc)
+                statReq (cast CertStatusExtension$CertStatusRequestSpec
+                              (.get exts SSLExtension/CH_STATUS_REQUEST))
+                statReqV2 (cast CertStatusExtension$CertStatusRequestV2Spec
+                                (.get exts SSLExtension/CH_STATUS_REQUEST_V2))]
+            (when (and (some? statReqV2) (not (.useTLS13PlusSpec (.-negotiatedProtocol shc))))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake,verbose"))
+                (SSLLogger/fine "SH Processing status_request_v2 extension"))
+              (set! ext SSLExtension/CH_STATUS_REQUEST_V2)
+              (let [^:mutable ^int ocspIdx -1
+                    ^:mutable ^int ocspMultiIdx -1
+                    reqItems (.-certStatusRequests statReqV2)]
+                (loop [^int pos 0]
+                  (when (and (< pos (alength reqItems)) (or (== ocspIdx -1) (== ocspMultiIdx -1)))
+                    (let [item (aget reqItems pos)
+                          curType (CertStatusExtension$CertStatusRequestType/valueOf
+                                    (.-statusType item))]
+                      (cond
+                        (and (< ocspIdx 0)
+                             (identical? curType CertStatusExtension$CertStatusRequestType/OCSP))
+                          (let [ocspReq (cast CertStatusExtension$OCSPStatusRequest item)]
+                            (if (.isEmpty (.-responderIds ocspReq))
+                                (do (set! ocspIdx pos) (recur (unchecked-inc-int pos)))
+                                (recur (unchecked-inc-int pos))))
+                        (and (< ocspMultiIdx 0)
+                             (identical? curType
+                                         CertStatusExtension$CertStatusRequestType/OCSP_MULTI))
+                          (let [ocspReq (cast CertStatusExtension$OCSPStatusRequest item)]
+                            (if (.isEmpty (.-responderIds ocspReq))
+                                (do (set! ocspMultiIdx pos) (recur (unchecked-inc-int pos)))
+                                (recur (unchecked-inc-int pos))))
+                        :else (recur (unchecked-inc-int pos))))))
+                (cond
+                  (>= ocspMultiIdx 0)
+                    (do
+                      (set! req (aget reqItems ocspMultiIdx))
+                      (set! type
+                            (CertStatusExtension$CertStatusRequestType/valueOf (.-statusType req))))
+                  (>= ocspIdx 0)
+                    (do
+                      (set! req (aget reqItems ocspIdx))
+                      (set! type
+                            (CertStatusExtension$CertStatusRequestType/valueOf (.-statusType req))))
+                  (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                    (SSLLogger/finest
+                      "Warning: No suitable request found in the status_request_v2 extension."))))
+            (when (and (some? statReq) (or (or (nil? ext) (nil? type)) (nil? req)))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake,verbose"))
+                (SSLLogger/fine "SH Processing status_request extension"))
+              (set! ext SSLExtension/CH_STATUS_REQUEST)
+              (set! type
+                    (CertStatusExtension$CertStatusRequestType/valueOf
+                      (.-statusType (.-statusRequest statReq))))
+              (when (identical? type CertStatusExtension$CertStatusRequestType/OCSP)
+                (let [ocspReq (cast CertStatusExtension$OCSPStatusRequest (.-statusRequest statReq))]
+                  (cond
+                    (.isEmpty (.-responderIds ocspReq)) (set! req ocspReq)
+                    (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/finest
+                        "Warning: No suitable request found in the status_request extension.")))))
+            (if (or (or (nil? type) (nil? req)) (nil? ext))
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                    (SSLLogger/fine
+                      "No suitable status_request or status_request_v2, stapling is disabled"))
+                  nil)
+                (let [^:mutable ^X509Authentication$X509Possession x509Possession nil]
+                  (for-each [^SSLPossession possession (.-handshakePossessions shc)]
+                    (when (instance? X509Authentication$X509Possession possession)
+                      (set! x509Possession (cast X509Authentication$X509Possession possession))
+                      (break)))
+                  (if (nil? x509Possession)
+                      (do
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                          (SSLLogger/finest
+                            "Warning: no X.509 certificates found.  Stapling is disabled."))
+                        nil)
+                      (let [certs (.-popCerts x509Possession)
+                            statRespMgr (.getStatusResponseManager (.-sslContext shc))]
+                        (cond
+                          (some? statRespMgr)
+                            (let [^CertStatusExtension$CertStatusRequestType fetchType
+                                    (if (.useTLS13PlusSpec (.-negotiatedProtocol shc))
+                                        CertStatusExtension$CertStatusRequestType/OCSP_MULTI
+                                        type)]
+                              (set! responses
+                                    (.get statRespMgr
+                                          fetchType
+                                          req
+                                          certs
+                                          (.-statusRespTimeout shc)
+                                          TimeUnit/MILLISECONDS))
+                              (cond
+                                (not (.isEmpty responses))
+                                  (do
+                                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                                      (SSLLogger/finest
+                                        (java-str
+                                          "Response manager returned "
+                                          (.size responses)
+                                          " entries.")))
+                                    (when (identical?
+                                            type
+                                            CertStatusExtension$CertStatusRequestType/OCSP)
+                                      (let [respDER (cast byte/1 (.get responses (aget certs 0)))]
+                                        (when (or (nil? respDER) (== (alength respDER) 0))
+                                          (when (and
+                                                  (SSLLogger/isOn)
+                                                  (SSLLogger/isOn "ssl,handshake"))
+                                            (SSLLogger/finest
+                                              "Warning: Null or zero-length response found for leaf certificate. Stapling is disabled."))
+                                          (return nil))))
+                                    (set! params (StaplingParameters. ext type req responses)))
+                                (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                                  (SSLLogger/finest
+                                    "Warning: no OCSP responses obtained.  Stapling is disabled.")))
+                          (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/finest
+                              "Warning: lazy initialization of the StatusResponseManager failed.  Stapling is disabled."))
+                        params))))))))
+
+  (defclass ^:static ^:final StaplingParameters
+    (field ^:final ^SSLExtension statusRespExt)
+
+    (field ^:final ^CertStatusExtension$CertStatusRequestType statReqType)
+
+    (field ^:final ^CertStatusExtension$CertStatusRequest statReqData)
+
+    (field ^:final ^{:tag (Map X509Certificate byte/1)} responseMap)
+
+    (constructor [this ^SSLExtension ext ^CertStatusExtension$CertStatusRequestType type
+                  ^CertStatusExtension$CertStatusRequest req
+                  ^{:tag (Map X509Certificate byte/1)} responses]
+      (set! statusRespExt ext)
+      (set! statReqType type)
+      (set! statReqData req)
+      (set! responseMap responses))))

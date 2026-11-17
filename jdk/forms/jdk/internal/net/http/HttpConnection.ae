@@ -1,0 +1,386 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/net/http/HttpConnection.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io Closeable IOException)
+        '(java.net InetSocketAddress)
+        '(java.net.http HttpClient$Version HttpHeaders)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels NetworkChannel SocketChannel)
+        '(java.util Comparator IdentityHashMap List Map)
+        '(java.util.concurrent CompletableFuture
+                               CompletionStage
+                               ConcurrentLinkedDeque
+                               Flow$Subscriber
+                               Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.function BiConsumer BiPredicate Function Supplier ToIntFunction)
+        '(javax.net.ssl SNIServerName)
+        '(jdk.internal.net.http.common Alpns
+                                       Demand
+                                       FlowTube
+                                       FlowTube$TubePublisher
+                                       Log
+                                       Logger
+                                       SequentialScheduler
+                                       SequentialScheduler$DeferredCompleter
+                                       SequentialScheduler$RestartableTask
+                                       Utils
+                                       Utils$ProxyHeaders))
+
+(defclass ^:abstract HttpConnection
+  :implements [Closeable]
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this HttpConnection/.dbgString)
+                          Utils/DEBUG))
+
+  (field ^:static ^:final ^Logger DEBUG_LOGGER
+    (Utils/getDebugLogger (lambda Supplier ^String [] "HttpConnection") Utils/DEBUG))
+
+  (field ^:public ^:static ^:final ^{:tag (Comparator HttpConnection)} COMPARE_BY_ID
+    (Comparator/comparing (method-ref Function ^Long [HttpConnection] HttpConnection/.id)))
+
+  (field ^:private ^:static ^:final ^AtomicLong LABEL_COUNTER (AtomicLong.))
+
+  (field ^:final ^InetSocketAddress address)
+
+  (field ^:private ^:final ^HttpClientImpl client)
+
+  (field ^:private ^:final ^TrailingOperations trailingOperations)
+
+  (field ^:private ^:final ^long id)
+
+  (field ^:private ^:final ^String label)
+
+  (field ^:private ^:final ^Origin originServer)
+
+  (constructor [this ^Origin originServer ^InetSocketAddress address ^HttpClientImpl client
+                ^String label]
+    (set! (.-originServer this) originServer)
+    (set! (.-address this) address)
+    (set! (.-client this) client)
+    (set! trailingOperations (TrailingOperations.))
+    (set! (.-id this) (.newConnectionId this client))
+    (set! (.-label this) label))
+
+  (method ^:private ^:static nextLabel ^String [^String prefix]
+    (java-str prefix (.incrementAndGet LABEL_COUNTER)))
+
+  (method ^:public ^:final label ^String [this] label)
+
+  (method newConnectionId ^long [this ^HttpClientImpl client]
+    (.newConnectionId client))
+
+  (method ^:private id ^long [this] id)
+
+  (defclass ^:private ^:static ^:final TrailingOperations
+    (field ^:private ^:final ^{:tag (Map (CompletionStage ?) Boolean)} operations
+      (IdentityHashMap.))
+
+    (method add ^void [this ^{:tag (CompletionStage ?)} cf]
+      (locking operations
+        (.put operations cf Boolean/TRUE)
+        (.whenComplete cf (lambda BiConsumer ^void [r ^Throwable t] (.remove this cf)))))
+
+    (method remove ^boolean [this ^{:tag (CompletionStage ?)} cf]
+      (locking operations (.booleanValue (cast Boolean (.remove operations cf))))))
+
+  (method ^:final addTrailingOperation ^void [this ^{:tag (CompletionStage ?)} cf]
+    (.add trailingOperations cf))
+
+  (method ^:final client ^HttpClientImpl [this] client)
+
+  (method ^:public ^:abstract connectAsync ^{:tag (CompletableFuture Void)} [this
+                                                                             ^{:tag (Exchange ?)} exchange])
+
+  (method ^:public ^:abstract finishConnect ^{:tag (CompletableFuture Void)} [this])
+
+  (method ^:abstract connected ^boolean [this])
+
+  (method ^:abstract isSecure ^boolean [this])
+
+  (method ^:abstract isProxied ^boolean [this])
+
+  (method ^:abstract proxy ^InetSocketAddress [this])
+
+  (method isOpen ^boolean [this]
+    (and (.isOpen (.channel this)) (if (.connected this) (not (.isFlowFinished this)) true)))
+
+  (method isFlowFinished ^boolean [this]
+    (.isFinished (.getConnectionFlow this)))
+
+  (method checkOpen ^boolean [this]
+    (when (.isOpen this)
+      (try
+        (if-instance [^SocketChannel channel (.channel this)]
+          (let [read (.read channel (ByteBuffer/allocate 1))]
+            (when (== read 0) (return true))
+            (.close this))
+          (return (.isOpen (.channel this))))
+        (catch IOException x
+          (.log debug
+                "Pooled connection is no longer operational: %s"
+                (new Object/1 [(.toString x)]))
+          (return false))))
+    false)
+
+  (method ^:final getOriginServer ^Origin [this] (.-originServer this))
+
+  (defclass ^:interface HttpPublisher
+    :extends [FlowTube$TubePublisher]
+
+    (method enqueue :throws [IOException] ^void [this ^{:tag (List ByteBuffer)} buffers])
+
+    (method enqueueUnordered :throws [IOException] ^void [this ^{:tag (List ByteBuffer)} buffers])
+
+    (method signalEnqueued :throws [IOException] ^void [this]))
+
+  (method ^:abstract publisher ^HttpPublisher [this])
+
+  (method ^:public ^:static getConnection ^HttpConnection [^InetSocketAddress addr
+                                                           ^HttpClientImpl client
+                                                           ^{:tag (Exchange ?)} exchange
+                                                           ^HttpRequestImpl request
+                                                           ^HttpClient$Version version]
+    (let [proxy (Utils/resolveAddress (.proxy request))
+          ^:mutable ^HttpConnection c nil
+          secure (.secure request)
+          pool (.connectionPool client)]
+      (if (not secure)
+          (do
+            (set! c (.getConnection pool false addr proxy))
+            (if (and (some? c) (.checkOpen c))
+                (let [conn c]
+                  (when (.on DEBUG_LOGGER)
+                    (.log DEBUG_LOGGER
+                          (java-str (.getConnectionFlow conn)
+                                    ": plain connection retrieved from HTTP/1.1 pool")))
+                  c)
+                (HttpConnection/getPlainConnection addr proxy request client)))
+          (do
+            (when (identical? version HttpClient$Version/HTTP_1_1)
+              (set! c (.getConnection pool true addr proxy)))
+            (if (and (some? c) (.isOpen c))
+                (do
+                  (when (.on DEBUG_LOGGER)
+                    (.log DEBUG_LOGGER
+                          (java-str (.getConnectionFlow c)
+                                    ": SSL connection retrieved from HTTP/1.1 pool")))
+                  c)
+                (do
+                  (java-assert (not (.isHttp3Only request version)))
+                  (let [^:mutable ^String/1 alpn nil]
+                    (when (and (identical? version HttpClient$Version/HTTP_2)
+                               (.hasRequiredHTTP2TLSVersion client))
+                      (set! alpn (new String/1 [Alpns/H2 Alpns/HTTP_1_1])))
+                    (HttpConnection/getSSLConnection addr proxy alpn request client))))))))
+
+  (method ^:private ^:static getSSLConnection ^HttpConnection [^InetSocketAddress addr
+                                                               ^InetSocketAddress proxy
+                                                               ^String/1 alpn
+                                                               ^HttpRequestImpl request
+                                                               ^HttpClientImpl client]
+    (let [label (HttpConnection/nextLabel "tls:")
+          ^:mutable ^Origin originServer nil]
+      (try
+        (set! originServer (Origin/from (.uri request)))
+        (catch IllegalArgumentException iae
+          (throw (AssertionError. "failed to determine origin server from request URI" iae))))
+      (if (some? proxy)
+          (AsyncSSLTunnelConnection. originServer
+                                     addr
+                                     client
+                                     alpn
+                                     proxy
+                                     (HttpConnection/proxyTunnelHeaders request)
+                                     label)
+          (AsyncSSLConnection. originServer addr client alpn label))))
+
+  (method headerFilter ^{:tag (BiPredicate String String)} [this ^HttpRequestImpl request]
+    (cond
+      (.isTunnel this) (do (java-assert (not (.isConnect request))) Utils/NO_PROXY_HEADERS_FILTER)
+      (.isConnect request) (do (java-assert (nil? (.proxy request))) Utils/PROXY_TUNNEL_FILTER)
+      (some? (.proxy request)) Utils/PROXY_FILTER
+      :else Utils/NO_PROXY_HEADERS_FILTER))
+
+  (method contextRestricted ^{:tag (BiPredicate String String)} [this ^HttpRequestImpl request]
+    (if (and (not (.isTunnel this)) (.isConnect request))
+        (do (java-assert (nil? (.proxy request))) (Utils/PROXY_TUNNEL_RESTRICTED))
+        Utils/ACCEPT_ALL))
+
+  (method ^:private ^:static proxyTunnelHeaders ^Utils$ProxyHeaders [^HttpRequestImpl request]
+    (let [userHeaders (HttpHeaders/of (.map (.headers request)) Utils/PROXY_TUNNEL_FILTER)
+          systemHeaders (HttpHeaders/of (.map (.getSystemHeadersBuilder request))
+                                        Utils/PROXY_TUNNEL_FILTER)]
+      (Utils$ProxyHeaders. userHeaders systemHeaders)))
+
+  (method ^:private ^:static getPlainConnection ^HttpConnection [^InetSocketAddress addr
+                                                                 ^InetSocketAddress proxy
+                                                                 ^HttpRequestImpl request
+                                                                 ^HttpClientImpl client]
+    (let [label (HttpConnection/nextLabel "tcp:")
+          ^:mutable ^Origin originServer nil]
+      (try
+        (set! originServer (Origin/from (.uri request)))
+        (catch IllegalArgumentException iae
+          (throw (AssertionError. "failed to determine origin server from request URI" iae))))
+      (cond
+        (and (.isWebSocket request) (some? proxy))
+          (PlainTunnelingConnection. originServer
+                                     addr
+                                     proxy
+                                     client
+                                     (HttpConnection/proxyTunnelHeaders request)
+                                     label)
+        (nil? proxy) (PlainHttpConnection. originServer addr client label)
+        :else (PlainProxyConnection. proxy client label))))
+
+  (method closeOrReturnToCache ^void [this ^HttpHeaders hdrs]
+    (if (nil? hdrs)
+        (do (Log/logTrace "Cannot return connection to pool: closing {0}" this) (.close this))
+        (let [client (.client this)]
+          (if (nil? client)
+              (do (Log/logTrace "Client released: closing {0}" this) (.close this))
+              (let [pool (.connectionPool client)
+                    keepAlive (.booleanValue
+                                (cast Boolean
+                                      (.orElse (.map
+                                                 (.firstValue hdrs "Connection")
+                                                 (lambda Function ^Boolean [^String s]
+                                                   (not (.equalsIgnoreCase s "close"))))
+                                               true)))]
+                (if (and keepAlive (.isOpen this))
+                    (do
+                      (Log/logTrace "Returning connection to the pool: {0}" this)
+                      (.returnToPool pool this))
+                    (do
+                      (Log/logTrace "Closing connection (keepAlive={0}, isOpen={1}): {2}"
+                                    keepAlive
+                                    (.isOpen this)
+                                    this)
+                      (.close this))))))))
+
+  (method isTunnel ^boolean [this] false)
+
+  (method ^:abstract channel ^NetworkChannel [this])
+
+  (method ^:final address ^InetSocketAddress [this] address)
+
+  (method ^:public getSNIServerNames ^{:tag (List SNIServerName)} [this]
+    (List/of))
+
+  (method ^:abstract cacheKey ^ConnectionPool$CacheKey [this])
+
+  (method ^:public ^:abstract close ^void [this])
+
+  (method ^:abstract close ^void [this ^Throwable cause])
+
+  (method ^:abstract getConnectionFlow ^FlowTube [this])
+
+  (defclass ^:final PlainHttpPublisher
+    :implements [HttpPublisher]
+
+    (field ^:final reading)
+
+    (constructor [this] (this. (Object.)))
+
+    (constructor [this readingLock] (set! (.-reading this) readingLock))
+
+    (field ^:final ^{:tag (ConcurrentLinkedDeque (List ByteBuffer))} queue (ConcurrentLinkedDeque.))
+
+    (field ^:final ^{:tag (ConcurrentLinkedDeque (List ByteBuffer))} priority
+      (ConcurrentLinkedDeque.))
+
+    (field ^:volatile ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber)
+
+    (field ^:volatile ^HttpWriteSubscription subscription)
+
+    (field ^:final ^SequentialScheduler writeScheduler
+      (SequentialScheduler.
+        (method-ref SequentialScheduler$RestartableTask this PlainHttpPublisher/.flushTask)))
+
+    (method ^:public subscribe ^void [this
+                                      ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber]
+      (locking reading
+        (when (nil? subscription) (set! subscription (HttpWriteSubscription.)))
+        (set! (.-subscriber this) subscriber))
+      (.onSubscribe subscriber subscription)
+      (.signal this))
+
+    (method flushTask ^void [this ^SequentialScheduler$DeferredCompleter completer]
+      (try (let [sub subscription] (when (some? sub) (.flush sub))) (finally (.complete completer))))
+
+    (method signal ^void [this] (.runOrSchedule writeScheduler))
+
+    (defclass ^:final HttpWriteSubscription
+      :implements [Flow$Subscription]
+
+      (field ^:final ^Demand demand (Demand.))
+
+      (method ^:public request ^void [this ^long n]
+        (when (<= n 0) (throw (IllegalArgumentException. "non-positive request")))
+        (.increase demand n)
+        (when (.on debug)
+          (.log debug
+                (java-str "HttpPublisher: got request of "
+                          n
+                          " from "
+                          (.getConnectionFlow HttpConnection/this))))
+        (.runOrSchedule writeScheduler))
+
+      (method ^:public cancel ^void [this]
+        (when (.on debug)
+          (.log debug
+                (java-str "HttpPublisher: cancelled by " (.getConnectionFlow HttpConnection/this)))))
+
+      (method ^:private isEmpty ^boolean [this]
+        (and (.isEmpty queue) (.isEmpty priority)))
+
+      (method ^:private poll ^{:tag (List ByteBuffer)} [this]
+        (let [^{:tag (List ByteBuffer)} elem (cast List (.poll priority))]
+          (if (nil? elem) (cast List (.poll queue)) elem)))
+
+      (method flush ^void [this]
+        (while (and (not (.isEmpty this)) (.tryDecrement demand))
+          (let [^{:tag (List ByteBuffer)} elem (.poll this)]
+            (when (.on debug)
+              (.log debug
+                    (java-str "HttpPublisher: sending "
+                              (Utils/remaining elem)
+                              " bytes ("
+                              (.size elem)
+                              " buffers) to "
+                              (.getConnectionFlow HttpConnection/this))))
+            (.onNext subscriber elem)))))
+
+    (method ^:public enqueue :throws [IOException] ^void [this ^{:tag (List ByteBuffer)} buffers]
+      (.add queue buffers)
+      (let [bytes (.sum (.mapToInt (.stream buffers)
+                                   (method-ref ToIntFunction [ByteBuffer] ByteBuffer/.remaining)))]
+        (.log debug "added %d bytes to the write queue" (new Object/1 [bytes]))))
+
+    (method ^:public enqueueUnordered :throws [IOException] ^void [this
+                                                                   ^{:tag (List ByteBuffer)} buffers]
+      (let [bytes (.sum (.mapToInt (.stream buffers)
+                                   (method-ref ToIntFunction [ByteBuffer] ByteBuffer/.remaining)))]
+        (.add priority buffers)
+        (.log debug "added %d bytes in the priority write queue" (new Object/1 [bytes]))))
+
+    (method ^:public signalEnqueued :throws [IOException] ^void [this]
+      (.log debug "signalling the publisher of the write queue")
+      (.signal this)))
+
+  (field ^String dbgTag)
+
+  (method ^:final dbgString ^String [this]
+    (let [flow (.getConnectionFlow this)
+          ^:mutable tag dbgTag]
+      (cond
+        (and (nil? tag) (some? flow))
+          (set! dbgTag (set! tag (java-str (.getSimpleName (.getClass this)) "(" flow ")")))
+        (nil? tag) (set! tag (java-str (.getSimpleName (.getClass this)) "(?)")))
+      tag))
+
+  (method ^:public toString ^String [this]
+    (java-str "HttpConnection: " (.toString (.channel this)))))

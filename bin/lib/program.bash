@@ -75,24 +75,35 @@ host_compile() {
   echo "== the namespaces compiled by the host (arbace.c2j; its runtime is the checkout's)" >&2
   mkdir -p "$dir"
   # the embedded namespaces as j2g lists them (namespaces.txt)
-  nss=$(cd "$root" && ARBACE_PATH=$root "$host" -e '(require (quote arbace.j2g.embed) (quote arbace.string))
+  # HOST_COMPILE_NSS, HOST_COMPILE_PATH: other namespaces and a source root before the checkout (bin/arbace-go --host-compile-check)
+  nss=${HOST_COMPILE_NSS:-}
+  [ -n "$nss" ] || nss=$(cd "$root" && ARBACE_PATH=$root "$host" -e '(require (quote arbace.j2g.embed) (quote arbace.string))
 (doseq [[p text] (sort (arbace.j2g.embed/sources "."))
         :when (and (arbace.string/starts-with? p "arbace/") (arbace.string/ends-with? p ".ae") (re-find #"(?m)^\(ns( |$)" text))]
   (println (-> (subs p 0 (- (count p) 3)) (arbace.string/replace "/" ".") (arbace.string/replace "_" "-"))))' | tr '
 ' ' ') || return 1
   rm -rf "$out"
-  printf '(doseq [n (quote [%s])]
-  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))
+  # a namespace that does not load, or a source c2j does not compile, fails the compiling (status 2): jcs127's day test (2026-11-15),
+  # a syntax error at arbace/classes/interp.ae:537 left arbace.classes.interp and arbace.classes.native out ("159 sources compiled
+  # ... 0 failed") of a build that exited 0
+  printf '(def prepare-bad (atom []))
+(doseq [n (quote [%s])]
+  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)) (swap! prepare-bad conj n))))
+(when (seq @prepare-bad) (println "image:" (count @prepare-bad) "namespaces not prepared") (shutdown-agents) (System/exit 1))
 (require (quote arbace.c2j.main))
 (let [r (arbace.c2j.main/run "%s" nil)]
   (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")
-  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m)))
+  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))
+  (when (seq (:failed r)) (shutdown-agents) (System/exit 1)))
 ' "$nss" "$out"     > "$dir/host-compile$variant.ae"
   (cd "$root" && GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 \
-     ARBACE_PATH=$root ARBACE_AOT_ROOT=$root ARBACE_PREPARE=$dir/host-compile$variant.image \
+     ARBACE_PATH=${HOST_COMPILE_PATH:+$HOST_COMPILE_PATH:}$root ARBACE_AOT_ROOT=$root ARBACE_PREPARE=$dir/host-compile$variant.image \
      "$host" "$dir/host-compile$variant.ae") > "$dir/host-compile$variant.log" 2>&1 \
     || { tail -20 "$dir/host-compile$variant.log" >&2; echo "arbace-go: the host's compilation failed" >&2; return 2; }
   grep '^aot:' "$dir/host-compile$variant.log" >&2
+  if grep -q '^image: not prepared:\|^aot: not compiled:' "$dir/host-compile$variant.log"; then
+    echo "arbace-go: the host's compilation failed: a namespace not prepared or not compiled ($dir/host-compile$variant.log)" >&2; return 2
+  fi
   [ -f "$out/packages.edn" ] || { echo "arbace-go: the host compiled nothing ($dir/host-compile$variant.log)" >&2; return 2; }
   echo "   compiled: $(since "$t0")" >&2
 }

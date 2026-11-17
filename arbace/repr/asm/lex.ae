@@ -1,0 +1,212 @@
+(ns arbace.repr.asm.lex
+  "repr/asm's lexer (doc/asm/SPEC.md §2; doc/asm/AMD64-SURVEY.md §4, AX1): GNU as's tokens as LLVM's AsmLexer
+  (llvm-project 23.1.5, llvm/lib/MC/MCParser/AsmLexer.cpp, Apache-2.0 WITH LLVM-exception) makes them for an ELF target
+  of x86: `#` a line comment anywhere outside a string, `//` and `/* */` the additional comments, `;`, a newline and a
+  carriage return (with its newline) the ends of a statement. A text is read as ISO-8859-1, a character a byte.
+
+  A token is a vector [KIND START END VALUE WS]: KIND :ident, :int (VALUE the integer; a character literal too),
+  :local (a local label's reference `1f` or `2b`, VALUE [N :f]), :float (VALUE its text), :string (VALUE its bytes, the
+  escapes decoded), :punct (VALUE the punctuator's text: `,` `(` `<<` ...), :dot (`.` alone), :other (a character no
+  token starts with: VALUE it); WS true when white space or a comment precedes it inside its statement. START and END
+  are the offsets of its text.
+
+  `*dialect*` (doc/asm/SPEC.md §2, §10) changes the rules for the other dialects, nil being AX1's x86 ELF: {:hash :start}
+  (AArch64's ELF and Darwin, LLVM's AArch64MCAsmInfo: `#` a line comment only at the start of a statement, else the
+  punctuator `#` of an immediate), {:semi :comment :sep \"%%\"} (Darwin: `;` a line comment, `%%` the separator), {:high
+  true} (Plan 9: a byte above 127 an identifier's character, Go's `·` and `∕` in UTF-8; `@>` a punctuator).")
+
+(set! *warn-on-reflection* true)
+
+(def ^:dynamic *dialect* nil)
+
+(defn- ch ^long [^String s ^long i] (if (< i (.length s)) (long (int (.charAt s (int i)))) -1))
+
+(defn alpha? [^long c] (or (<= 97 c 122) (<= 65 c 90)))
+(defn digit? [^long c] (<= 48 c 57))
+(defn hex-digit? [^long c] (or (digit? c) (<= 97 c 102) (<= 65 c 70)))
+(defn ident-start? [^long c] (or (alpha? c) (= c 95) (= c 46)))
+(defn ident-char? [^long c] (or (alpha? c) (digit? c) (= c 95) (= c 46) (= c 36) (= c 63)))
+
+(defn- skip-while ^long [^String s ^long i pred]
+  (loop [i i] (if (pred (ch s i)) (recur (inc i)) i)))
+
+(defn- big
+  "The integer of the digits `t` in `radix`: a long when it fits."
+  [^String t radix]
+  (let [b (try (BigInteger. t (int radix))
+               (catch NumberFormatException _
+                 (throw (ex-info (str "invalid number " t " in base " radix) {:asm/refused :syntax}))))]
+    (if (< (.bitLength ^BigInteger b) 64) (.longValue ^BigInteger b) (bigint b))))
+
+(defn- int-suffix ^long [^String s ^long i]
+  ;; the darwin/x86 assembler's ignored suffixes (U, L, LL, UL, ULL), as SkipIgnoredIntegerSuffix
+  (let [j (if (contains? #{85 117} (ch s i)) (inc i) i)
+        k (skip-while s j #(contains? #{76 108} %))]
+    (if (or (= k i) (ident-char? (ch s k)) (and (= j i) (= k i))) i k)))
+
+(defn- float-end
+  "The end of a decimal float's text from `i` (after its integer digits)."
+  ^long [^String s ^long i]
+  (let [i (if (= (ch s i) 46) (skip-while s (inc i) digit?) i)]
+    (if (contains? #{101 69} (ch s i))
+      (let [j (if (contains? #{43 45} (ch s (inc i))) (+ i 2) (inc i))]
+        (skip-while s j digit?))
+      i)))
+
+(defn- lex-number
+  "[KIND END VALUE] of a number (or a local label's reference) at `i`."
+  [^String s ^long i]
+  (let [c0 (ch s i) c1 (ch s (inc i))]
+    (cond
+      (and (= c0 48) (contains? #{120 88} c1))
+      (let [j (skip-while s (+ i 2) hex-digit?)]
+        (if (or (= (ch s j) 46) (contains? #{112 80} (ch s j)))
+          (let [j (if (= (ch s j) 46) (skip-while s (inc j) hex-digit?) j)
+                j (if (contains? #{112 80} (ch s j))
+                    (skip-while s (if (contains? #{43 45} (ch s (inc j))) (+ j 2) (inc j)) digit?)
+                    j)]
+            [:float j (subs s (int i) (int j))])
+          (if (= j (+ i 2))
+            [:other (inc i) "0"]
+            [:int (int-suffix s j) (big (subs s (int (+ i 2)) (int j)) 16)])))
+
+      (and (= c0 48) (contains? #{98 66} c1) (contains? #{48 49} (ch s (+ i 2))))
+      (let [j (skip-while s (+ i 2) #(contains? #{48 49} %))]
+        [:int (int-suffix s j) (big (subs s (int (+ i 2)) (int j)) 2)])
+
+      :else
+      (let [j (skip-while s i digit?)
+                cj (ch s j)]
+        (cond
+          (and (contains? #{98 102} cj) (not (ident-char? (ch s (inc j)))))
+          [:local (inc j) [(big (subs s (int i) (int j)) 10) (if (= cj 98) :b :f)]]
+
+          (and (or (= cj 46) (contains? #{101 69} cj))
+               (not (and (= c0 48) (> j (inc i)))))
+          (let [k (float-end s j)]
+            (if (and (contains? #{101 69} cj) (= k j))
+              [:int j (big (subs s (int i) (int j)) 10)]
+              [:float k (subs s (int i) (int k))]))
+
+          (and (= c0 48) (> j (inc i)))
+          [:int (int-suffix s j) (big (subs s (int (inc i)) (int j)) 8)]
+
+          :else
+          [:int (int-suffix s j) (big (subs s (int i) (int j)) 10)])))))
+
+(defn- octal? [^long c] (<= 48 c 55))
+
+(defn lex-string
+  "[END VALUE] of the string whose `\"` is at `i`: GNU as's escapes decoded (\\b \\f \\n \\r \\t \\\" \\\\, \\ooo octal, \\xhh
+  hex, any other character itself), as LLVM's parseEscapedString. An unterminated string ends at the line's end."
+  [^String s ^long i]
+  (let [b (StringBuilder.)]
+    (loop [j (inc i)]
+      (let [c (ch s j)]
+        (cond
+          (or (= c -1) (= c 10)) [j nil]
+          (= c 34) [(inc j) (str b)]
+          (= c 92)
+          (let [d (ch s (inc j))]
+            (cond
+              (octal? d)
+              (let [e (loop [k (inc j) n 0] (if (and (< n 3) (octal? (ch s k))) (recur (inc k) (inc n)) k))]
+                (.append b (char (bit-and (Long/parseLong (subs s (int (inc j)) (int e)) 8) 255)))
+                (recur (long e)))
+              (and (contains? #{120 88} d) (hex-digit? (ch s (+ j 2))))
+              (let [e (skip-while s (+ j 2) hex-digit?)]
+                (.append b (char (bit-and (.longValue (BigInteger. (subs s (int (+ j 2)) (int e)) 16)) 255)))
+                (recur (long e)))
+              (= d -1) [(inc j) nil]
+              :else
+              (do (.append b (char (case (int d) 98 8, 102 12, 110 10, 114 13, 116 9, d)))
+                  (recur (+ j 2)))))
+          :else (do (.append b (char c)) (recur (inc j))))))))
+
+(defn- lex-char
+  "[END VALUE] of a character literal at `i` (`'a`, `'a'`, `'\\n'`)."
+  [^String s ^long i]
+  (let [c (ch s (inc i))]
+    (cond
+      (= c -1) [(inc i) nil]
+      (= c 92)
+      (let [d (ch s (+ i 2))
+            v (case (int d) 98 8, 102 12, 110 10, 114 13, 116 9, 39 39, 34 34, 92 92, d)
+            e (+ i 3)]
+        [(if (= (ch s e) 39) (inc e) e) v])
+      :else
+      (let [e (+ i 2)] [(if (= (ch s e) 39) (inc e) e) c]))))
+
+(def ^:private puncts2 #{"<<" ">>" "<=" ">=" "<>" "==" "!=" "&&" "||" "->"})
+
+(defn line-comment-end
+  "The offset of the newline (or carriage return, or the end) that ends a line comment at `i`."
+  ^long [^String s ^long i]
+  (skip-while s i #(not (or (= % 10) (= % 13) (= % -1)))))
+
+(defn lex-statement
+  "The tokens of the statement from `i`: {:toks [TOKEN ...] :eos E :next N}, E the offset of the statement's end (its
+  `;`, newline, carriage return, or the text's end), N the offset after it. Comments and white space are skipped,
+  marking the next token's WS. A `/* */` comment may span lines."
+  [^String s ^long i]
+  (let [d *dialect*
+        hash-start? (= :start (:hash d))
+        semi-comment? (= :comment (:semi d))
+        sep2 (:sep d)
+        high? (:high d)
+        ident-start? (if high? (fn [^long c] (or (ident-start? c) (> c 127))) ident-start?)
+        ident-char? (if high? (fn [^long c] (or (ident-char? c) (> c 127))) ident-char?)]
+  (loop [i i ws false toks (transient []) cc false]
+    (let [c (ch s i)]
+      (cond
+        (= c -1) {:toks (persistent! toks) :eos i :next i}
+        (= c 10) {:toks (persistent! toks) :eos i :next (inc i)}
+        (= c 13) {:toks (persistent! toks) :eos i :next (if (= (ch s (inc i)) 10) (+ i 2) (inc i))}
+        (and (= c 59) semi-comment?) (recur (long (line-comment-end s i)) true toks cc)
+        (= c 59) {:toks (persistent! toks) :eos i :next (inc i)}
+        (and sep2 (.startsWith s ^String sep2 (int i))) {:toks (persistent! toks) :eos i :next (+ i (count sep2))}
+        (or (= c 32) (= c 9) (= c 0) (= c 12) (= c 11)) (recur (inc i) true toks cc)
+        (and (= c 35) hash-start? (or cc (pos? (count toks)))) (recur (inc i) false (conj! toks [:punct i (inc i) "#" ws]) cc)
+        (= c 35) (recur (long (line-comment-end s i)) true toks cc)
+        (and (= c 47) (= (ch s (inc i)) 47)) (recur (long (line-comment-end s i)) true toks cc)
+        (and (= c 47) (= (ch s (inc i)) 42))
+        (let [k (.indexOf s "*/" (int (+ i 2)))]
+          (if (neg? k)
+            (recur (.length s) true (conj! toks [:other i (.length s) "/*" ws]) true)
+            (recur (+ k 2) true toks true)))
+        (ident-start? c)
+        (if (and (= c 46) (digit? (ch s (inc i))))
+          (let [j (skip-while s (inc i) digit?)]
+            (if (or (not (ident-char? (ch s j))) (contains? #{101 69} (ch s j)))
+              (let [k (float-end s j)] (recur (long k) false (conj! toks [:float i k (subs s (int i) (int k)) ws]) cc))
+              (let [k (skip-while s j ident-char?)] (recur (long k) false (conj! toks [:ident i k (subs s (int i) (int k)) ws]) cc))))
+          (let [j (skip-while s (inc i) ident-char?)]
+            (if (and (= c 46) (= j (inc i)))
+              (recur (long j) false (conj! toks [:dot i j "." ws]) cc)
+              (recur (long j) false (conj! toks [:ident i j (subs s (int i) (int j)) ws]) cc))))
+        (digit? c)
+        (let [[k e v] (try (lex-number s i)
+                           (catch arbace.lang.ExceptionInfo _
+                             (let [e (skip-while s i ident-char?)] [:other e (subs s (int i) (int e))])))]
+          (recur (long e) false (conj! toks [k i e v ws]) cc))
+        (= c 34)
+        (let [[e v] (lex-string s i)]
+          (recur (long e) false (conj! toks (if v [:string i e v ws] [:other i e "\"" ws])) cc))
+        (= c 39)
+        (let [[e v] (lex-char s i)]
+          (recur (long e) false (conj! toks (if v [:int i e (long v) ws] [:other i e "'" ws])) cc))
+        :else
+        (let [two (when (< (inc i) (.length s)) (subs s (int i) (int (+ i 2))))]
+          (if (or (contains? puncts2 two) (and high? (= two "@>")))
+            (recur (+ i 2) false (conj! toks [:punct i (+ i 2) two ws]) cc)
+            (let [p (str (char c))]
+              (if (contains? #{"," "(" ")" "[" "]" "{" "}" "$" "%" "*" "+" "-" "/" ":" "~" "!" "=" "<" ">" "|" "&" "^" "@" "\\"} p)
+                (recur (inc i) false (conj! toks [:punct i (inc i) p ws]) cc)
+                (recur (inc i) false (conj! toks [:other i (inc i) p ws]) cc))))))))))
+
+(defn kind [t] (nth t 0))
+(defn start ^long [t] (nth t 1))
+(defn end ^long [t] (nth t 2))
+(defn value [t] (nth t 3))
+(defn ws? [t] (nth t 4))
+(defn punct? [t p] (and t (= (nth t 0) :punct) (= (nth t 3) p)))

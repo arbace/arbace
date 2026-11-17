@@ -1,0 +1,66 @@
+(ns asm.table-oracle-arm64
+  "The oracle tier's check of arm64's LLVM table (bin/repr-asm --arch arm64 table oracle; AR2's second slice, by hand): the
+  host's llvm-tblgen 23.1.5 prints AArch64.td's records (-print-records); every instruction the assembler can match there
+  (Namespace AArch64, isPseudo and isCodeGenOnly 0, an AsmString, a 32-bit Inst) is in asm/arm64/table.edn and no other, each
+  with the same AsmString and the same encoding (Inst's fixed bits, and each bit an operand field's, by field and bit). The
+  records' text is read line by line; any difference fails."
+  (:require [arbace.string :as str]))
+
+(defn- unquote-str ^String [^String s]
+  (-> s (str/replace "\\\"" "\"") (str/replace "\\\\" "\\")))
+
+(defn- inst-bits
+  "`{ 1, 0, Rs{4}, imm, ? ... }` (bit 31 first) as 32 entries bit 0 first: 0, 1, nil or [FIELD BIT]."
+  [^String body]
+  (let [xs (map str/trim (str/split body #","))]
+    (vec (reverse (for [x xs]
+                    (cond (= x "0") 0 (= x "1") 1 (= x "?") nil
+                          :else (if-let [[_ f b] (re-matches #"(\w+)\{(\d+)\}" x)] [f (Long/parseLong b)] [x 0])))))))
+
+(defn- encoding [bits]
+  (let [mask (reduce (fn [m i] (if (integer? (nth bits i)) (bit-or m (bit-shift-left 1 i)) m)) 0 (range 32))
+        value (reduce (fn [m i] (if (= 1 (nth bits i)) (bit-or m (bit-shift-left 1 i)) m)) 0 (range 32))
+        runs (reduce (fn [acc i]
+                       (let [b (nth bits i)]
+                         (if (vector? b)
+                           (let [[fl fb] b [pf plo pilo pw :as prev] (peek acc)]
+                             (if (and prev (= pf fl) (= (+ plo pw) fb) (= (+ pilo pw) i))
+                               (conj (pop acc) [pf plo pilo (inc pw)])
+                               (conj acc [fl fb i 1])))
+                           acc)))
+                     [] (range 32))]
+    [mask value runs]))
+
+(defn records
+  "{NAME {:asm S :inst BITS :pseudo B :cg B :ns S}} of the defs of records.txt that have an Inst."
+  [^String path]
+  (with-open [r (java.io.BufferedReader. (java.io.FileReader. path))]
+    (loop [cur nil m (transient {}) acc {}]
+      (let [l (.readLine r)]
+        (if (nil? l)
+          (persistent! (if (and cur (:inst acc)) (assoc! m cur acc) m))
+          (if-let [[_ n] (re-matches #"def (\S+) \{.*" l)]
+            (recur n (if (and cur (:inst acc)) (assoc! m cur acc) m) {})
+            (let [acc (cond
+                        (str/starts-with? l "  field bits<32> Inst = {") (assoc acc :inst (inst-bits (subs l (inc (.indexOf l "{")) (.lastIndexOf l "}"))))
+                        (str/starts-with? l "  string AsmString = \"") (assoc acc :asm (unquote-str (subs l (inc (.indexOf l "\"")) (.lastIndexOf l "\""))))
+                        (str/starts-with? l "  bit isPseudo = ") (assoc acc :pseudo (str/includes? l "= 1;"))
+                        (str/starts-with? l "  bit isCodeGenOnly = ") (assoc acc :cg (str/includes? l "= 1;"))
+                        (str/starts-with? l "  string Namespace = ") (assoc acc :ns (second (re-find #"\"(.*)\"" l)))
+                        :else acc)]
+              (recur cur m acc))))))))
+
+(defn main [table-path records-path]
+  (let [t (:insns (read-string (slurp table-path)))
+        rs (records records-path)
+        want (into {} (for [[n r] rs :when (and (= "AArch64" (:ns r)) (not (:pseudo r)) (not (:cg r)) (seq (:asm r)))] [n r]))
+        fails (atom [])]
+    (doseq [n (sort (remove (set (keys t)) (keys want)))] (swap! fails conj (str "llvm-tblgen's " n " not in the table")))
+    (doseq [n (sort (remove (set (keys want)) (keys t)))] (swap! fails conj (str "the table's " n " not llvm-tblgen's")))
+    (doseq [[n m] (sort-by key t) :let [r (want n)] :when r]
+      (when-not (= (:asm m) (:asm r)) (swap! fails conj (str n ": AsmString " (pr-str (:asm m)) ", llvm-tblgen's " (pr-str (:asm r)))))
+      (when-not (= (:enc m) (encoding (:inst r))) (swap! fails conj (str n ": encoding " (pr-str (:enc m)) ", llvm-tblgen's " (pr-str (encoding (:inst r)))))))
+    (doseq [f (take 40 @fails)] (println (str "FAIL: " f)))
+    (println (str "repr-asm table oracle (arm64): " (count t) " instructions against llvm-tblgen's " (count want) ", "
+                  (count @fails) " differences"))
+    (when (seq @fails) (System/exit 1))))

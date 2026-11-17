@@ -1,0 +1,88 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/fs/MimeTypesFileTypeDetector.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.charset Charset)
+        '(java.nio.file Files Path)
+        '(java.util Collections HashMap List Map)
+        '(java.util.regex Pattern))
+
+(defclass MimeTypesFileTypeDetector
+  :extends AbstractFileTypeDetector
+
+  (field ^:private ^:final ^Path mimeTypesFile)
+
+  (field ^:private ^{:tag (Map String String)} mimeTypeMap)
+
+  (field ^:private ^:volatile ^boolean loaded)
+
+  (constructor ^:public [this ^Path filePath]
+    (set! mimeTypesFile filePath))
+
+  (method ^:protected implProbeContentType ^String [this ^Path path]
+    (let [fn (.getFileName path)]
+      (when (some? fn)
+        (let [^:mutable ext (.getExtension this (.toString fn))]
+          (when-not (.isEmpty ext)
+            (.loadMimeTypes this)
+            (when-not (or (nil? mimeTypeMap) (.isEmpty mimeTypeMap))
+              (let [^:mutable ^String mimeType nil]
+                (loop []
+                  (set! mimeType (cast String (.get mimeTypeMap ext)))
+                  (when (nil? mimeType) (set! ext (.getExtension this ext)))
+                  (when (and (nil? mimeType) (not (.isEmpty ext))) (recur)))
+                mimeType)))))))
+
+  (method ^:private loadMimeTypes ^void [this]
+    (when-not loaded
+      (locking this
+        (when-not loaded
+          (let [^:mutable ^{:tag (List String)} lines nil]
+            (try
+              (set! lines (Files/readAllLines mimeTypesFile (Charset/defaultCharset)))
+              (catch IOException ignore (set! lines (Collections/emptyList))))
+            (set! mimeTypeMap (HashMap/newHashMap (.size lines)))
+            (let [^:mutable entry ""]
+              (for-each [^String line lines]
+                (set! entry (java-str entry line))
+                (if (.endsWith entry "\\")
+                    (set! entry (.substring entry 0 (unchecked-subtract-int (.length entry) 1)))
+                    (do (.parseMimeEntry this entry) (set! entry ""))))
+              (when-not (.isEmpty entry) (.parseMimeEntry this entry))
+              (set! loaded true)))))))
+
+  (method ^:private parseMimeEntry ^void [this ^:mutable ^String entry]
+    (set! entry (.trim entry))
+    (when-not (or (.isEmpty entry) (== (.charAt entry 0) \#))
+      (set! entry (.replaceAll entry "\\s*#.*" ""))
+      (let [equalIdx (.indexOf entry \=)]
+        (if (> equalIdx 0)
+            (let [^:const TYPEEQUAL "type="
+                  typeRegex (java-str (java-str "\\b" TYPEEQUAL)
+                                      "(\"\\p{Graph}+?/\\p{Graph}+?\"|\\p{Graph}+/\\p{Graph}+\\b)")
+                  typePattern (Pattern/compile typeRegex)
+                  typeMatcher (.matcher typePattern entry)]
+              (when (.find typeMatcher)
+                (let [^:mutable type (.substring (.group typeMatcher) (.length TYPEEQUAL))]
+                  (when (== (.charAt type 0) \")
+                    (set! type (.substring type 1 (unchecked-subtract-int (.length type) 1))))
+                  (let [^:const EXTEQUAL "exts="
+                        extRegex (java-str (java-str "\\b" EXTEQUAL)
+                                           "(\"[\\p{Graph}\\p{Blank}]+?\"|\\p{Graph}+\\b)")
+                        extPattern (Pattern/compile extRegex)
+                        extMatcher (.matcher extPattern entry)]
+                    (when (.find extMatcher)
+                      (let [^:mutable exts (.substring (.group extMatcher) (.length EXTEQUAL))]
+                        (when (== (.charAt exts 0) \")
+                          (set! exts (.substring exts 1 (unchecked-subtract-int (.length exts) 1))))
+                        (let [extList (.split exts "[\\p{Blank}\\p{Punct}]+")]
+                          (for-each [^String ext extList] (.putIfAbsent this ext type)))))))))
+            (let [elements (.split entry "\\s+")
+                  ^:mutable ^int i 1]
+              (while (< i (alength elements))
+                (.putIfAbsent this (aget elements i) (aget elements 0))
+                (set! i (unchecked-inc-int i))))))))
+
+  (method ^:private putIfAbsent ^void [this ^String key ^String value]
+    (when (and (not (.isEmpty key)) (not (.isEmpty value))) (.putIfAbsent mimeTypeMap key value))))

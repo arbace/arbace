@@ -1,0 +1,778 @@
+(in-ns 'go.arbace.oicapi) (go/file "capi.go" :doc "Package oicapi runs a program's own C stubs beside oi (doc/ocaml/OCAML-SURVEY.md, \"As built: the C API on ci\"): the stubs,\noi's C runtime (test/ocaml/capi/runtime.c) and what they need of musl, one node program (bin/oi cnodes), loaded into\nci over an address space of its own. An external oi does not implement is the stubs' C function of its name; its\narguments cross as OCaml's words: an integer tagged, a block a copy in ci's memory (its header the word before, OCaml's\nlayout), made when the stub is called and read back when it returns, around a callback and when it raises. The copies of a\ncall live in the boundary's memory until the outermost stub returns; a custom block the C allocates is static, kept for the\nrun. No collector moves them, so the C's roots need no registration.\n" :imports [
+    [fmt "fmt"]
+    [math "math"]
+    [os "os"]
+    [strconv "strconv"]
+    [strings "strings"]
+    [syscall "syscall"]
+    [ci "arbace/ci"]
+    [crt "arbace/crt"]
+    [oi "arbace/oi"]])
+
+(go/const "The tags of mlvalues.h the boundary writes.\n"
+  [tagClosure 247]
+  [tagAbstract 251]
+  [tagString 252]
+  [tagDouble 253]
+  [tagDoubleArray 254]
+  [tagCustom 255]
+  [chunkSize (<< 1 20)])
+
+(go/type CBlock "CBlock is a custom block the C allocated (caml_alloc_custom): its address in ci's static memory, kept for the run.\n"
+  (struct ^uint64 Addr))
+
+(go/type capi "capi is the loaded C program and the boundary's state.\n" (struct
+    ^{:tag (* ci/Prog)} p
+    ^{:tag (* crt/Mem)} m
+    ^{:tag (* oi/Thread)} th
+    ^int depth
+    ;; the boundary's memory: chunks of chunkSize, the current one's free part [cur, end)
+    ^{:tag (slice uint64)} chunks
+    ^int chunk
+    ^uint64 cur
+    ^uint64 end
+    ^{:tag (slice (slice uint64))} big
+    ;; the static memory (custom blocks, named values' slots, operations' records)
+    ^uint64 scur
+    ^uint64 send
+    ;; the call's copies: each value's address and back, in the order made
+    ^{:tag (map any uint64)} toC
+    ^{:tag (map uint64 oi/Value)} toGo
+    ^{:tag (slice uint64)} order
+    ^{:tag (map uint64 int)} seen
+    ^int pass
+    ;; the run's: the C's custom blocks, the named values' slots, the operations' records by identifier
+    ^{:tag (map uint64 oi/Value)} statics
+    ^{:tag (map string uint64)} named
+    ^{:tag (map string uint64)} customOps
+    ^{:tag (array 4 uint64)} ops
+    ^{:tag (* ci/Func)} flush
+    ;; two words of static memory a helper's results are written into
+    ^uint64 scratch))
+
+(go/var ^{:tag (* capi)} the)
+
+;; The AOT runtime's boundary (OC215 (a), doc/ocaml/OCAML-SURVEY.md "As built: OC215"): the compiled level's main
+;; (test/ocaml/o2j/capi) holds the program's values as oi's values (mirrors of the Java runtime's) and calls a stub through
+;; Call; a callback and a named value are then the Java runtime's, through these two hooks (nil: oi's own).
+
+(go/var ^{:tag (func [oi/Value (slice oi/Value)] [oi/Value oi/Value]) :doc "Apply, when set, applies a callback's closure f to vs in place of oi's thread: its result, or the OCaml exception it\nraised (exn, else nil).\n"}
+  Apply)
+
+(go/var ^{:tag (func [string] [oi/Value bool]) :doc "Named, when set, is caml_named_value in place of oi's table.\n"}
+  Named)
+
+(go/func namedValue "namedValue is caml_named_value: Named's, else oi's.\n" [^string name] :results [oi/Value bool]
+  (when (!= Named nil)
+    (return (Named name)))
+  (return (oi/NamedValue name)))
+
+(go/func Has "Has tells whether the loaded stubs define the C function name.\n" ^bool [^string name]
+  (when (== the nil)
+    (return false))
+  (let [f (aget (.-ByName (.-p the)) name)]
+    (return (and (!= f nil) (!= (.-Code f) nil)))))
+
+(go/func CallRaw "CallRaw calls the stubs' native function name with the representations reprs (Primitive's native_repr, one a\nletter: v a value, I an unboxed int64, i an unboxed int32, n an unboxed nativeint, F an unboxed float, t an untagged int; the\narguments' then the result's: OC199 (a)), its arguments oi's values: a value as Call passes it, the others as the words or\nfloats themselves.\n"
+  ^oi/Value [^string name ^string reprs ^{:tag (slice oi/Value)} a]
+  (.callRaw the (aget (.-ByName (.-p the)) name) reprs a))
+
+(go/func Call "Call calls the stubs' function name with the arguments a (oi's values) outside oi's thread: Load first, and Has(name).\nIt raises (a panic of *oi.Exn) what the C raises; a callback is Apply's.\n"
+  ^oi/Value [^string name ^{:tag (slice oi/Value)} a]
+  (.call the nil (aget (.-ByName (.-p the)) name) a))
+
+(go/func Load "Load loads the node program at path: its commands, the natives of the boundary, its static initializers, musl initialized\nas __libc_start_main would (__init_libc), the runtime's own initialization; then oi's externals fall back on its functions.\n"
+  ^error [^string path ^{:tag (slice string)} argv]
+  (let [(values text err) (os/ReadFile path)]
+    (when (!= err nil)
+      (return err))
+    (let [(values tops err) (ci/Parse (conv string text))]
+      (when (!= err nil)
+        (return err))
+      (let [m (crt/NewMem)
+            sys (crt/NewSys m os/Stdin os/Stdout os/Stderr)
+            p (ci/NewProg sys)
+            l (ci/NewLoader p)
+            objs (lit (map string int))
+            c (addr (lit capi :p p :m m :toC (lit (map any uint64)) :toGo (lit (map uint64 oi/Value)) :seen (lit (map uint64 int))
+                      :statics (lit (map uint64 oi/Value)) :named (lit (map string uint64)) :customOps (lit (map string uint64))))]
+        (set! (.-StdFiles sys) (lit (array 3 (* os/File)) os/Stdin os/Stdout os/Stderr))
+        (range [_ t tops]
+          (when [(values x ok) (assert (slice any) t)] (and ok (> (len x) 5) (== (fmt/Sprint (aget x 0)) "static"))
+            (when [(values s ok) (assert string (aget x 5))] (and ok (not (strings/HasPrefix s "[")))
+              (when [(values i e) (strconv/Atoi (fmt/Sprint (aget x 1)))] (== e nil)
+                (aset objs s i))))
+          (.Top l t))
+        (let [natives (.natives c)]
+          (range [_ f (.-Funcs p)]
+            (when (and (!= f nil) (== (.-Code f) nil) (== (.-Native f) nil))
+              (when [n (aget natives (.-Name f))] (!= n nil)
+                (set! (.-Native f) n))))
+          ;; the process's own: its pid and its signals are the host's, which oi's handlers (Sys.signal) see, not ci's emulated ones
+          (range [name n (.hostNatives c)]
+            (when [f (aget (.-ByName p) name)] (!= f nil)
+              (set! (.-Native f) n))))
+        (let [t (.-Main p)]
+          (range [_ in (.-Inits p)]
+            (let [fr (addr (lit ci/Frame :T t :Base (- (.-SP t) 4096) :I (make (slice int64) (.-NI in)) :F (make (slice float64) (.-NF in))))]
+              (.Run (.-S in) fr)))
+          (when [il (aget (.-ByName p) "__init_libc")] (and (!= il nil) (!= (.-Code il) nil))
+            (let [(values envp pn) (.stack c argv (os/Environ))]
+              (.Call p t il (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 envp)) (lit ci/Arg :K \i :I (conv int64 pn))))))
+          (when [i (aget (.-ByName p) "__oi_c_init")] (!= i nil)
+            (.Call p t i nil)))
+        (when [(values i ok) (aget objs "__oi_ops")] (and ok (< i (len (.-Statics p))))
+          (let [a (aget (.-Statics p) i)]
+            (for [k 0] (< k 4) (inc! k)
+              (aset (.-ops c) k (.Load64 m (+ a (conv uint64 (* 8 k))))))))
+        (set! (.-flush c) (aget (.-ByName p) "__oi_c_flush"))
+        (set! the c)
+        (set! oi/ExternalFallback (fn ^oi/Ext [^string name ^int nargs] (.external c name nargs)))
+        (set! (.-scratch c) (.allocStatic c 2 tagAbstract))
+        (set! oi/CustomSerialize (fn [^{:tag (* oi/Custom)} x] :results [(slice byte) uint64 uint64 bool] (.serialize c x)))
+        (set! oi/CustomDeserialize (fn [^string name ^{:tag (slice byte)} data ^uint64 expected] :results [oi/Value int int bool]
+                                     (.deserialize c name data expected)))
+        nil))))
+
+(go/func Flush "Flush flushes C's stdio (libc's exit, after the OCaml channels' flush at the program's end).\n" []
+  (when (and (!= the nil) (!= (.-flush the) nil))
+    (defer ((fn [] (recover))))
+    (.Call (.-p the) (.-Main (.-p the)) (.-flush the) nil)))
+
+(go/func RunMain "RunMain runs a C program of its own on ci (a test's helper program, OC201 (a), doc/ocaml/OCAML-SURVEY.md \"As built:\nOC199-OC201\"): the node program at path loaded as Load loads the stubs (musl initialized, the process's getpid, kill and\nraise the host's: a helper's kill of another process reaches it, which ci's own emulation, crt's, refuses), then its main\ncalled with argv and the environment; main's status, C's stdio flushed.\n"
+  [^string path ^{:tag (slice string)} argv] :results [int error]
+  (when [err (Load path argv)] (!= err nil)
+    (return 0 err))
+  (let [c the
+        f (aget (.-ByName (.-p c)) "main")]
+    (when (or (== f nil) (== (.-Code f) nil))
+      (return 0 (fmt/Errorf "%s: no main" path)))
+    (let [env (os/Environ)
+          (values envp _) (.stack c argv env)
+          av (- envp (conv uint64 (* 8 (+ (len argv) 1))))
+          r (.Call (.-p c) (.-Main (.-p c)) f (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 (len argv))) (lit ci/Arg :K \i :I (conv int64 av))
+                                                (lit ci/Arg :K \i :I (conv int64 envp))))]
+      (Flush)
+      (return (conv int (conv int32 (.-I r))) nil))))
+
+(go/method stack "stack is an initial stack's vector as Linux's: argv's pointers, 0, the environment's, 0, the auxiliary vector\n(AT_PAGESZ, AT_RANDOM); the environment's address and argv[0]'s.\n"
+  [^{:tag (* capi)} c ^{:tag (slice string)} argv ^{:tag (slice string)} env] :results [uint64 uint64]
+  (let [m (.-m c)
+        str (fn ^uint64 [^string s]
+              (let [b (append (conv (slice byte) s) 0)
+                    a (.Static m (conv uint64 (len b)) 1)]
+                (copy (.W m a (conv uint64 (len b))) b)
+                a))
+        ^{:tag (slice uint64)} vec (zero (slice uint64))]
+    (range [_ a argv]
+      (set! vec (append vec (str a))))
+    (set! vec (append vec 0))
+    (let [ne (len vec)]
+      (range [_ e env]
+        (set! vec (append vec (str e))))
+      (let [rnd (.Static m 16 16)]
+        (set! vec (append vec 0 6 crt/PageSize 25 rnd 0 0))
+        (let [av (.Static m (conv uint64 (* 8 (len vec))) 16)]
+          (range [i v vec]
+            (.Store64 m (+ av (conv uint64 (* 8 i))) v))
+          (return (+ av (conv uint64 (* 8 ne))) (aget vec 0)))))))
+
+;; ---- memory ----
+
+(go/method alloc "alloc is a block of wosize words and tag in the boundary's memory (the header written, the fields zero).\n"
+  ^uint64 [^{:tag (* capi)} c ^uint64 wosize ^int tag]
+  (let [n (* 8 (+ wosize 1))]
+    (when (> n (/ chunkSize 4))
+      (let [a (.Mmap (.-m c) 0 n)]
+        (set! (.-big c) (append (.-big c) (lit (slice uint64) a n)))
+        (.Store64 (.-m c) a (bit-or (<< wosize 10) (conv uint64 tag)))
+        (return (+ a 8))))
+    (when (> (+ (.-cur c) n) (.-end c))
+      (when (>= (.-chunk c) (len (.-chunks c)))
+        (set! (.-chunks c) (append (.-chunks c) (.Mmap (.-m c) 0 chunkSize))))
+      (set! (.-cur c) (aget (.-chunks c) (.-chunk c)))
+      (set! (.-end c) (+ (.-cur c) chunkSize))
+      (inc! (.-chunk c)))
+    (let [a (.-cur c)]
+      (set! (.-cur c) (+ a n))
+      (.Fill (.-m c) a 0 n)
+      (.Store64 (.-m c) a (bit-or (<< wosize 10) (conv uint64 tag)))
+      (+ a 8))))
+
+(go/method allocStatic "allocStatic is a block of wosize words and tag in the static memory, kept for the run.\n"
+  ^uint64 [^{:tag (* capi)} c ^uint64 wosize ^int tag]
+  (let [n (* 8 (+ wosize 1))]
+    (when (> (+ (.-scur c) n) (.-send c))
+      (let [size (max n (conv uint64 chunkSize))]
+        (set! (.-scur c) (.Mmap (.-m c) 0 size))
+        (set! (.-send c) (+ (.-scur c) size))))
+    (let [a (.-scur c)]
+      (set! (.-scur c) (+ a n))
+      (.Store64 (.-m c) a (bit-or (<< wosize 10) (conv uint64 tag)))
+      (+ a 8))))
+
+(go/method reset "reset ends the outermost call: the boundary's memory free again, the call's copies forgotten.\n" [^{:tag (* capi)} c]
+  (range [_ b (.-big c)]
+    (.Unmap (.-m c) (aget b 0) (aget b 1)))
+  (set! (.-big c) nil)
+  (set! (.-chunk c) 0)
+  (set! (.-cur c) 0)
+  (set! (.-end c) 0)
+  (set! (.-toC c) (lit (map any uint64)))
+  (set! (.-toGo c) (lit (map uint64 oi/Value)))
+  (set! (.-seen c) (lit (map uint64 int)))
+  (set! (.-order c) nil))
+
+(go/method opsFor "opsFor is the address of a custom operations' record whose identifier is name (static, one a name).\n"
+  ^uint64 [^{:tag (* capi)} c ^string name]
+  (when [(values a ok) (aget (.-customOps c) name)] ok
+    (return a))
+  (let [b (append (conv (slice byte) name) 0)
+        s (.allocStatic c (conv uint64 (/ (+ (len b) 7) 8)) tagAbstract)
+        r (.allocStatic c 8 tagAbstract)]
+    (copy (.W (.-m c) s (conv uint64 (len b))) b)
+    (.Store64 (.-m c) r s)
+    (aset (.-customOps c) name r)
+    r))
+
+;; ---- values: oi's to the C's ----
+
+(go/method remember [^{:tag (* capi)} c ^oi/Value v ^uint64 a]
+  (aset (.-toC c) v a)
+  (aset (.-toGo c) a v)
+  (aset (.-seen c) a (.-pass c))
+  (set! (.-order c) (append (.-order c) a)))
+
+(go/method encode "encode is v as the C's word: an integer tagged, a block its copy (made, or brought up to date once a pass).\n"
+  ^uint64 [^{:tag (* capi)} c ^oi/Value v]
+  (let [m (.-m c)]
+    (type-switch [x v]
+      (case [int]
+        (return (bit-or (<< (conv uint64 x) 1) 1)))
+      (case [nil]
+        (return 1))
+      (case [float64]
+        (let [a (.alloc c 1 tagDouble)]
+          (.StoreF64 m a x)
+          (return a)))
+      (case [int32]
+        (let [a (.alloc c 2 tagCustom)]
+          (.Store64 m a (aget (.-ops c) 0))
+          (.Store32 m (+ a 8) (conv uint32 x))
+          (return a)))
+      (case [int64]
+        (let [a (.alloc c 2 tagCustom)]
+          (.Store64 m a (aget (.-ops c) 1))
+          (.Store64 m (+ a 8) (conv uint64 x))
+          (return a)))
+      (case [oi/Nativeint]
+        (let [a (.alloc c 2 tagCustom)]
+          (.Store64 m a (aget (.-ops c) 2))
+          (.Store64 m (+ a 8) (conv uint64 x))
+          (return a)))
+      (case [(* oi/Custom)]
+        (when [(values cb ok) (assert (* CBlock) (.-V x))] ok
+          (return (.-Addr cb)))))
+    (when [(values a ok) (aget (.-toC c) v)] ok
+      (when (!= (aget (.-seen c) a) (.-pass c))
+        (aset (.-seen c) a (.-pass c))
+        (.write c a v))
+      (return a))
+    (let [a (.fresh c v)]
+      (.remember c v a)
+      (.write c a v)
+      a)))
+
+(go/method fresh "fresh is a new copy's block for the value v (its size and tag; write fills it).\n" ^uint64 [^{:tag (* capi)} c ^oi/Value v]
+  (type-switch [x v]
+    (case [(* oi/Block)]
+      (return (.alloc c (conv uint64 (len (.-F x))) (.-Tag x))))
+    (case [(* oi/Bytes)]
+      (return (.alloc c (conv uint64 (/ (+ (len (.-B x)) 8) 8)) tagString)))
+    (case [(* oi/FloatArray)]
+      (when (== (len (.-F x)) 0)
+        (return (.alloc c 0 0)))
+      (return (.alloc c (conv uint64 (len (.-F x))) tagDoubleArray)))
+    (case [(* oi/Closure)]
+      (return (.alloc c 2 tagClosure)))
+    (case [(* oi/Custom)]
+      (when [(values _ _ dims _ ok) (oi/BigarrayParts v)] ok
+        (return (.alloc c (conv uint64 (+ 5 (len dims))) tagCustom)))
+      (return (.alloc c 2 tagCustom))))
+  (.alloc c 1 tagAbstract))
+
+(go/method write "write writes v's contents into its copy at a.\n" [^{:tag (* capi)} c ^uint64 a ^oi/Value v]
+  (let [m (.-m c)]
+    (type-switch [x v]
+      (case [(* oi/Block)]
+        (range [i f (.-F x)]
+          (.Store64 m (+ a (conv uint64 (* 8 i))) (.encode c f))))
+      (case [(* oi/Bytes)]
+        (let [w (/ (+ (len (.-B x)) 8) 8)
+              last (- (* 8 w) 1)]
+          (.Store64 m (+ a (conv uint64 (* 8 (- w 1)))) 0)
+          (when (> (len (.-B x)) 0)
+            (copy (.W m a (conv uint64 (len (.-B x)))) (.-B x)))
+          (.Store8 m (+ a (conv uint64 last)) (conv uint8 (- last (len (.-B x)))))))
+      (case [(* oi/FloatArray)]
+        (range [i f (.-F x)]
+          (.StoreF64 m (+ a (conv uint64 (* 8 i))) f)))
+      (case [(* oi/Custom)]
+        (when [(values kind layout dims data ok) (oi/BigarrayParts v)] ok
+          (.Store64 m a (aget (.-ops c) 3))
+          (let [es (elemSize kind)
+                n (len data)
+                d (.Load64 m (+ a 8))]
+            (when (== d 0)
+              (set! d (.alloc c (conv uint64 (/ (+ (* n es) 7) 8)) tagAbstract))
+              (.Store64 m (+ a 8) d))
+            (.Store64 m (+ a 16) (conv uint64 (len dims)))
+            (.Store64 m (+ a 24) (conv uint64 (bit-or kind (bit-or (<< layout 8) 0x200))))
+            (.Store64 m (+ a 32) 0)
+            (range [i dm dims]
+              (.Store64 m (+ a (conv uint64 (+ 40 (* 8 i)))) (conv uint64 dm)))
+            (range [i e data]
+              (storeElem m kind (+ d (conv uint64 (* i es))) e)))
+          (return))
+        (.Store64 m a (.opsFor c (.-Name x)))))))
+
+(go/func elemSize "elemSize is caml_ba_element_size of a kind.\n" ^int [^int kind]
+  (aget (lit (slice int) 4 8 1 1 2 2 4 8 8 8 8 16 1 2) kind))
+
+(go/func storeElem "storeElem stores a bigarray element of the kind at a.\n" [^{:tag (* crt/Mem)} m ^int kind ^uint64 a ^oi/Value e]
+  (switch kind
+    (case [0] (.StoreF32 m a (conv float32 (oi/AsFloat e))))
+    (case [1] (.StoreF64 m a (oi/AsFloat e)))
+    (case [2 3 12] (.Store8 m a (conv uint8 (oi/AsInt e))))
+    (case [4 5] (.Store16 m a (conv uint16 (oi/AsInt e))))
+    (case [6] (.Store32 m a (conv uint32 (assert int32 e))))
+    (case [7] (.Store64 m a (conv uint64 (assert int64 e))))
+    (case [8] (.Store64 m a (conv uint64 (oi/AsInt e))))
+    (case [9] (.Store64 m a (conv uint64 (assert oi/Nativeint e))))
+    (case [10]
+      (let [f (.-F (assert (* oi/FloatArray) e))]
+        (.StoreF32 m a (conv float32 (aget f 0)))
+        (.StoreF32 m (+ a 4) (conv float32 (aget f 1)))))
+    (case [11]
+      (let [f (.-F (assert (* oi/FloatArray) e))]
+        (.StoreF64 m a (aget f 0))
+        (.StoreF64 m (+ a 8) (aget f 1))))
+    (case [13] (.Store16 m a (f16Bits (oi/AsFloat e))))))
+
+(go/func loadElem "loadElem is the bigarray element of the kind at a.\n" ^oi/Value [^{:tag (* crt/Mem)} m ^int kind ^uint64 a]
+  (switch kind
+    (case [0] (return (conv float64 (.LoadF32 m a))))
+    (case [1] (return (.LoadF64 m a)))
+    (case [2] (return (conv int (conv int8 (.Load8 m a)))))
+    (case [3 12] (return (conv int (.Load8 m a))))
+    (case [4] (return (conv int (conv int16 (.Load16 m a)))))
+    (case [5] (return (conv int (.Load16 m a))))
+    (case [6] (return (conv int32 (.Load32 m a))))
+    (case [7] (return (conv int64 (.Load64 m a))))
+    (case [8] (return (oi/Int (conv int (.Load64 m a)))))
+    (case [9] (return (conv oi/Nativeint (.Load64 m a))))
+    (case [10] (return (addr (lit oi/FloatArray :F (lit (slice float64) (conv float64 (.LoadF32 m a)) (conv float64 (.LoadF32 m (+ a 4))))))))
+    (case [11] (return (addr (lit oi/FloatArray :F (lit (slice float64) (.LoadF64 m a) (.LoadF64 m (+ a 8))))))))
+  (f16Value (.Load16 m a)))
+
+(go/func f16Bits "f16Bits is a float as IEEE half precision's bits (rounded to nearest even; the element already holds a half's value).\n"
+  ^uint16 [^float64 f]
+  (let [b (math/Float32bits (conv float32 f))
+        sign (conv uint16 (bit-and (>> b 16) 0x8000))
+        e (- (conv int (bit-and (>> b 23) 0xff)) 112)
+        mant (bit-and b 0x7fffff)]
+    (switch
+      (case [(== (bit-and (>> b 23) 0xff) 0xff)]
+        (if (!= mant 0)
+          (return (bit-or sign 0x7e00))
+          (return (bit-or sign 0x7c00))))
+      (case [(>= e 31)]
+        (return (bit-or sign 0x7c00)))
+      (case [(<= e 0)]
+        (when (< e -10)
+          (return sign))
+        (let [mm (bit-or mant 0x800000)
+              shift (conv uint (- 14 e))]
+          (return (bit-or sign (conv uint16 (>> mm shift)))))))
+    (bit-or sign (bit-or (<< (conv uint16 e) 10) (conv uint16 (>> mant 13))))))
+
+(go/func f16Value ^float64 [^uint16 h]
+  (let [sign 1.0
+        e (conv int (bit-and (>> h 10) 0x1f))
+        mant (conv float64 (bit-and h 0x3ff))]
+    (when (!= (bit-and h 0x8000) 0)
+      (set! sign -1.0))
+    (switch
+      (case [(== e 0)] (return (* sign (math/Ldexp mant -24))))
+      (case [(== e 31)]
+        (when (!= mant 0)
+          (return (math/NaN)))
+        (return (math/Inf (conv int sign)))))
+    (* sign (math/Ldexp (+ 1024 mant) (- e 25)))))
+
+;; ---- values: the C's to oi's ----
+
+(go/method decode "decode is the C's word w as oi's value: an integer, a copy's value (read once a pass), or a block the C made.\n"
+  ^oi/Value [^{:tag (* capi)} c ^uint64 w]
+  (when (== (bit-and w 1) 1)
+    (return (conv int (>> (conv int64 w) 1))))
+  (when (== w 0)
+    (oi/Internalf "a C stub's value is a null pointer"))
+  (when [(values v ok) (aget (.-statics c) w)] ok
+    (return v))
+  (when [(values v ok) (aget (.-toGo c) w)] ok
+    (when (!= (aget (.-seen c) w) (.-pass c))
+      (aset (.-seen c) w (.-pass c))
+      (.read c w v))
+    (return v))
+  (let [m (.-m c)
+        hd (.Load64 m (- w 8))
+        wosize (>> hd 10)
+        tag (conv int (bit-and hd 0xff))]
+    (switch tag
+      (case [tagDouble]
+        (return (.LoadF64 m w)))
+      (case [tagString]
+        (let [last (- (* 8 wosize) 1)
+              n (- last (conv uint64 (.Load8 m (+ w last))))
+              v (addr (lit oi/Bytes :B (make (slice byte) n)))]
+          (when (> n 0)
+            (copy (.-B v) (.R m w n)))
+          (.remember c v w)
+          (return v)))
+      (case [tagDoubleArray]
+        (let [v (addr (lit oi/FloatArray :F (make (slice float64) wosize)))]
+          (.remember c v w)
+          (.read c w v)
+          (return v)))
+      (case [tagCustom]
+        (let [ops (.Load64 m w)
+              id (.CString m (.Load64 m ops))]
+          (switch id
+            (case ["_i"] (return (conv int32 (.Load32 m (+ w 8)))))
+            (case ["_j"] (return (conv int64 (.Load64 m (+ w 8)))))
+            (case ["_n"] (return (conv oi/Nativeint (.Load64 m (+ w 8)))))
+            (case ["_bigarr02"]
+              (let [nd (conv int (.Load64 m (+ w 16)))
+                    flags (conv int (.Load64 m (+ w 24)))
+                    dims (make (slice int) nd)
+                    n 1]
+                (for [i 0] (< i nd) (inc! i)
+                  (aset dims i (conv int (.Load64 m (+ w (conv uint64 (+ 40 (* 8 i)))))))
+                  (set! n (* n (aget dims i))))
+                (let [v (oi/NewBigarray (bit-and flags 0xff) (bit-and (>> flags 8) 1) dims (make (slice oi/Value) n))]
+                  (.remember c v w)
+                  (.read c w v)
+                  (return v)))))
+          (let [v (addr (lit oi/Custom :Name id :V (addr (lit CBlock :Addr w))))]
+            (aset (.-statics c) w v)
+            (return v))))
+      (case [tagClosure]
+        (oi/Internalf "a C stub returned a closure oi did not give it")))
+    (let [b (addr (lit oi/Block :Tag tag :F (make (slice oi/Value) wosize)))]
+      (when (>= tag tagAbstract)
+        (oi/Internalf "a C stub's block of tag %d" tag))
+      (.remember c b w)
+      (.read c w b)
+      b)))
+
+(go/method read "read reads the copy at a into its value v (the C may have stored into it).\n" [^{:tag (* capi)} c ^uint64 a ^oi/Value v]
+  (let [m (.-m c)]
+    (type-switch [x v]
+      (case [(* oi/Block)]
+        (range [i _ (.-F x)]
+          (aset (.-F x) i (.decode c (.Load64 m (+ a (conv uint64 (* 8 i))))))))
+      (case [(* oi/Bytes)]
+        (when (> (len (.-B x)) 0)
+          (copy (.-B x) (.R m a (conv uint64 (len (.-B x)))))))
+      (case [(* oi/FloatArray)]
+        (range [i _ (.-F x)]
+          (aset (.-F x) i (.LoadF64 m (+ a (conv uint64 (* 8 i)))))))
+      (case [(* oi/Custom)]
+        (when [(values kind _ _ data ok) (oi/BigarrayParts v)] ok
+          (let [d (.Load64 m (+ a 8))
+                es (elemSize kind)]
+            (range [i _ data]
+              (aset data i (loadElem m kind (+ d (conv uint64 (* i es))))))))))))
+
+(go/method toCAll "toCAll brings every copy of the call up to date with its value (after a callback: OCaml may have stored into one).\n"
+  [^{:tag (* capi)} c]
+  (inc! (.-pass c))
+  (for [i 0] (< i (len (.-order c))) (inc! i)
+    (let [a (aget (.-order c) i)]
+      (when (!= (aget (.-seen c) a) (.-pass c))
+        (aset (.-seen c) a (.-pass c))
+        (.write c a (aget (.-toGo c) a)))))
+  (range [name slot (.-named c)]
+    (when [(values v ok) (namedValue name)] ok
+      (.Store64 (.-m c) slot (.encode c v)))))
+
+(go/method fromCAll "fromCAll reads every copy of the call into its value (the C returned, raised or calls back).\n" [^{:tag (* capi)} c]
+  (inc! (.-pass c))
+  (for [i 0] (< i (len (.-order c))) (inc! i)
+    (let [a (aget (.-order c) i)]
+      (when (!= (aget (.-seen c) a) (.-pass c))
+        (aset (.-seen c) a (.-pass c))
+        (.read c a (aget (.-toGo c) a))))))
+
+;; ---- calls ----
+
+(go/method external "external is the call of the stubs' function name with nargs arguments, nil when they define none: up to five\nthe words themselves, more an array and its length (the bytecode's convention, as ocamlc calls an external's first name).\n"
+  ^oi/Ext [^{:tag (* capi)} c ^string name ^int nargs]
+  (let [f (aget (.-ByName (.-p c)) name)]
+    (when (or (== f nil) (== (.-Code f) nil))
+      (return nil))
+    (fn ^oi/Value [^{:tag (* oi/Thread)} th ^{:tag (slice oi/Value)} a]
+      (.call c th f a))))
+
+(go/method call "call calls the C function f with oi's arguments a on ci's main thread.\n"
+  ^oi/Value [^{:tag (* capi)} c ^{:tag (* oi/Thread)} th ^{:tag (* ci/Func)} f ^{:tag (slice oi/Value)} a]
+  (let [t (.-Main (.-p c))
+        sp (.-SP t)
+        top (.-Top t)
+        depth (.-Depth t)
+        prev (.-th c)]
+    (set! (.-th c) th)
+    (inc! (.-depth c))
+    (when (== (.-depth c) 1)
+      (.toCAll c))
+    (defer ((fn []
+              (let [r (recover)]
+                (set! (.-SP t) sp)
+                (set! (.-Top t) top)
+                (set! (.-Depth t) depth)
+                (dec! (.-depth c))
+                (when (== (.-depth c) 0)
+                  (.reset c))
+                (set! (.-th c) prev)
+                (when (!= r nil)
+                  (when [(values flt ok) (assert (* crt/Fault) r)] ok
+                    (oi/Internalf "a C stub's fault: %s at %#x" (.-Msg flt) (.-Addr flt)))
+                  (when [(values ex ok) (assert (* crt/Exit) r)] ok
+                    (panic (addr (lit oi/ExitSignal :Code (.-Code ex)))))
+                  (panic r))))))
+    (inc! (.-pass c))
+    (let [^{:tag (slice ci/Arg)} args (zero (slice ci/Arg))]
+      (if (<= (len a) 5)
+        (range [_ v a]
+          (set! args (append args (lit ci/Arg :K \i :I (conv int64 (.encode c v))))))
+        (let [ws (make (slice uint64) (len a))]
+          (range [i v a]
+            (aset ws i (.encode c v)))
+          (let [arr (.alloc c (conv uint64 (len a)) 0)]
+            (range [i w ws]
+              (.Store64 (.-m c) (+ arr (conv uint64 (* 8 i))) w))
+            (set! args (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 arr)) (lit ci/Arg :K \i :I (conv int64 (len a))))))))
+      (let [r (.Call (.-p c) t f args)]
+        (.fromCAll c)
+        (.decode c (conv uint64 (.-I r)))))))
+
+(go/method callRaw "callRaw is call with the representations reprs (CallRaw's): a value encoded, an unboxed or untagged argument as\nitself, the result likewise.\n"
+  ^oi/Value [^{:tag (* capi)} c ^{:tag (* ci/Func)} f ^string reprs ^{:tag (slice oi/Value)} a]
+  (let [t (.-Main (.-p c))
+        sp (.-SP t)
+        top (.-Top t)
+        depth (.-Depth t)]
+    (inc! (.-depth c))
+    (when (== (.-depth c) 1)
+      (.toCAll c))
+    (defer ((fn []
+              (let [r (recover)]
+                (set! (.-SP t) sp)
+                (set! (.-Top t) top)
+                (set! (.-Depth t) depth)
+                (dec! (.-depth c))
+                (when (== (.-depth c) 0)
+                  (.reset c))
+                (when (!= r nil)
+                  (when [(values flt ok) (assert (* crt/Fault) r)] ok
+                    (oi/Internalf "a C stub's fault: %s at %#x" (.-Msg flt) (.-Addr flt)))
+                  (when [(values ex ok) (assert (* crt/Exit) r)] ok
+                    (panic (addr (lit oi/ExitSignal :Code (.-Code ex)))))
+                  (panic r))))))
+    (inc! (.-pass c))
+    (let [args (make (slice ci/Arg) (len a))]
+      (range [i v a]
+        (switch (aget reprs i)
+          (case [\F] (aset args i (lit ci/Arg :K \f :F (oi/AsFloat v))))
+          (case [\I] (aset args i (lit ci/Arg :K \i :I (assert int64 v))))
+          (case [\n] (aset args i (lit ci/Arg :K \i :I (conv int64 (assert oi/Nativeint v)))))
+          (case [\i] (aset args i (lit ci/Arg :K \i :I (conv int64 (assert int32 v)))))
+          (case [\t] (aset args i (lit ci/Arg :K \i :I (conv int64 (oi/AsInt v)))))
+          (default (aset args i (lit ci/Arg :K \i :I (conv int64 (.encode c v)))))))
+      (let [r (.Call (.-p c) t f args)]
+        (.fromCAll c)
+        (switch (aget reprs (len a))
+          (case [\F] (return (.-F r)))
+          (case [\I] (return (.-I r)))
+          (case [\n] (return (conv oi/Nativeint (.-I r))))
+          (case [\i] (return (conv int32 (.-I r))))
+          (case [\t] (return (conv int (.-I r)))))
+        (.decode c (conv uint64 (.-I r)))))))
+
+(go/method callback "callback is caml_callbackN_exn: the closure applied to the n arguments at args on oi's thread; the result, or\nthe exception raised marked as caml_callback_exn marks it.\n"
+  ^uint64 [^{:tag (* capi)} c ^uint64 clos ^int n ^uint64 args]
+  (.fromCAll c)
+  (let [f (.decode c clos)
+        vs (make (slice oi/Value) n)]
+    (for [i 0] (< i n) (inc! i)
+      (aset vs i (.decode c (.Load64 (.-m c) (+ args (conv uint64 (* 8 i)))))))
+    (let [(values r exn) (.apply c f vs)]
+      (.toCAll c)
+      (when (!= exn nil)
+        (return (bit-or (.encode c exn) 2)))
+      (.encode c r))))
+
+(go/method apply "apply applies f to vs; exn is the OCaml exception it raised, else nil.\n"
+  [^{:tag (* capi)} c ^oi/Value f ^{:tag (slice oi/Value)} vs] :results [^oi/Value r ^oi/Value exn]
+  (defer ((fn []
+            (when [x (recover)] (!= x nil)
+              (when [(values e ok) (assert (* oi/Exn) x)] ok
+                (set! exn (.-V e))
+                (return))
+              (panic x)))))
+  (when (!= Apply nil)
+    (return (Apply f vs)))
+  (set! r (.ApplyCallback (.-th c) f vs))
+  (return r nil))
+
+(go/method predef "predef is the predefined exception of fail.h's index i.\n" ^oi/Value [^{:tag (* capi)} c ^int i]
+  (aget (lit (slice oi/Value) oi/ExnOutOfMemory oi/ExnSysError oi/ExnFailure oi/ExnInvalidArgument oi/ExnEndOfFile
+          oi/ExnDivisionByZero oi/ExnNotFound oi/ExnMatchFailure oi/ExnStackOverflow oi/ExnSysBlockedIO oi/ExnAssertFailure
+          oi/ExnUndefinedRecursiveModule) i))
+
+(go/method natives "natives are the functions runtime.c declares and oi gives, by name.\n"
+  ^{:tag (map string (func [(* ci/Thread) (slice ci/Arg)] [ci/Arg]))} [^{:tag (* capi)} c]
+  (let [ai (fn ^ci/Arg [^uint64 v] (lit ci/Arg :K \i :I (conv int64 v)))
+        arg (fn ^uint64 [^{:tag (slice ci/Arg)} a ^int i]
+              (when (>= i (len a))
+                (return 0))
+              (conv uint64 (.-I (aget a i))))]
+    (lit (map string (func [(* ci/Thread) (slice ci/Arg)] [ci/Arg]))
+      ["__oi_alloc" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                      (when (== (.-depth c) 0)
+                        (return (ai (.allocStatic c (arg a 0) (conv int (arg a 1))))))
+                      (ai (.alloc c (arg a 0) (conv int (arg a 1)))))]
+      ["__oi_alloc_static" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                             (ai (.allocStatic c (arg a 0) (conv int (arg a 1)))))]
+      ["__oi_predef" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                       (ai (.encode c (.predef c (conv int (arg a 0))))))]
+      ["caml_callbackN_exn" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                              (ai (.callback c (arg a 0) (conv int (conv int32 (arg a 1))) (arg a 2))))]
+      ["caml_raise" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                      (.fromCAll c)
+                      (oi/Raise (.decode c (arg a 0)))
+                      (lit ci/Arg))]
+      ["caml_named_value" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                            (let [name (.CString (.-m c) (arg a 0))
+                                  (values v ok) (namedValue name)]
+                              (when (not ok)
+                                (return (ai 0)))
+                              (let [slot (aget (.-named c) name)]
+                                (when (== slot 0)
+                                  (set! slot (.allocStatic c 1 tagAbstract))
+                                  (aset (.-named c) name slot))
+                                (.Store64 (.-m c) slot (.encode c v))
+                                (ai slot))))]
+      ["caml_output_value_to_block" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                                      (.fromCAll c)
+                                      (let [b (oi/MarshalValue (.decode c (arg a 0)) (.decode c (arg a 1)))
+                                            n (arg a 3)]
+                                        (when (> (conv uint64 (len b)) n)
+                                          (oi/Failwith "Marshal.to_buffer: buffer overflow"))
+                                        (copy (.W (.-m c) (arg a 2) (conv uint64 (len b))) b)
+                                        (ai (conv uint64 (len b)))))]
+      ["caml_input_value_from_block" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                                       (let [b (append (lit (slice byte)) (spread (.R (.-m c) (arg a 0) (arg a 1))))
+                                             (values v _) (oi/UnmarshalValue b 0)]
+                                         (ai (.encode c v))))])))
+
+;; ---- custom blocks' serialization (oi's Marshal: ext_capi.go's CustomSerialize, CustomDeserialize) ----
+
+(go/method ccall "ccall calls runtime.c's helper name with integer arguments on ci's main thread, its state put back however it ends.\n"
+  ^uint64 [^{:tag (* capi)} c ^string name & ^{:tag (slice uint64)} args]
+  (let [f (aget (.-ByName (.-p c)) name)
+        t (.-Main (.-p c))
+        sp (.-SP t)
+        top (.-Top t)
+        depth (.-Depth t)
+        as (make (slice ci/Arg) (len args))]
+    (when (or (== f nil) (== (.-Code f) nil))
+      (oi/Internalf "the C runtime has no %s" name))
+    (defer ((fn []
+              (set! (.-SP t) sp)
+              (set! (.-Top t) top)
+              (set! (.-Depth t) depth))))
+    (range [i a args]
+      (aset as i (lit ci/Arg :K \i :I (conv int64 a))))
+    (conv uint64 (.-I (.Call (.-p c) t f as)))))
+
+(go/method serialize "serialize is a C custom block's bytes and sizes by its operations' serialize; ok false when it has none.\n"
+  [^{:tag (* capi)} c ^{:tag (* oi/Custom)} x] :results [(slice byte) uint64 uint64 bool]
+  (let [(values cb ok) (assert (* CBlock) (.-V x))]
+    (when (not ok)
+      (return nil 0 0 false))
+    (let [n (conv int64 (.ccall c "__oi_custom_serialize" (.-Addr cb) (.-scratch c)))]
+      (when (< n 0)
+        (return nil 0 0 false))
+      (let [data (make (slice byte) n)]
+        (when (> n 0)
+          (copy data (.R (.-m c) (.ccall c "__oi_custom_buffer") (conv uint64 n))))
+        (return data (.Load64 (.-m c) (.-scratch c)) (.Load64 (.-m c) (+ (.-scratch c) 8)) true)))))
+
+(go/method staticBytes "staticBytes is b copied into the static memory, NUL-terminated: its address.\n" ^uint64 [^{:tag (* capi)} c ^{:tag (slice byte)} b]
+  (let [a (.allocStatic c (conv uint64 (+ (/ (len b) 8) 1)) tagAbstract)]
+    (when (> (len b) 0)
+      (copy (.W (.-m c) a (conv uint64 (len b))) b))
+    a))
+
+(go/method deserialize "deserialize is a custom block of the operations the C registered under name, read from data by their deserialize\n(expected bytes reserved for it): the block, the size deserialize returned, the bytes it read; ok false when none is registered.\n"
+  [^{:tag (* capi)} c ^string name ^{:tag (slice byte)} data ^uint64 expected] :results [oi/Value int int bool]
+  (let [na (.staticBytes c (conv (slice byte) name))
+        da (.staticBytes c data)
+        r (.ccall c "__oi_custom_deserialize" na da expected (.-scratch c))]
+    (when (== r 0)
+      (return nil 0 0 false))
+    (return (.decode c r) (conv int (.Load64 (.-m c) (.-scratch c))) (conv int (.Load64 (.-m c) (+ (.-scratch c) 8))) true)))
+
+(go/method hostNatives "hostNatives are musl's functions the stubs call that act on the process itself: getpid, kill and raise, fstat and\nclose, as the host's\n(a stub's kill of Unix.getpid's pid, a raise, reach the signal handlers oi installed).\n"
+  ^{:tag (map string (func [(* ci/Thread) (slice ci/Arg)] [ci/Arg]))} [^{:tag (* capi)} c]
+  (let [res (fn ^ci/Arg [^error err]
+              (when (!= err nil)
+                (return (lit ci/Arg :K \i :I -1)))
+              (lit ci/Arg :K \i :I 0))]
+    (lit (map string (func [(* ci/Thread) (slice ci/Arg)] [ci/Arg]))
+      ["getpid" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a] (lit ci/Arg :K \i :I (conv int64 (os/Getpid))))]
+      ["kill" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                (res (oi/SignalProcess (conv int (conv int32 (.-I (aget a 0)))) (conv int (conv int32 (.-I (aget a 1)))))))]
+      ["raise" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                 (res (oi/SignalProcess (os/Getpid) (conv int (conv int32 (.-I (aget a 0)))))))]
+      ;; the process's descriptors (OC201 (a)): a stub's fstat and close of a descriptor are the host's, as OCaml's Unix.file_descr
+      ;; oi gives it is (ci's own table, crt's, holds the standard streams alone); errno set as musl's wrapper sets it
+      ["fstat" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a]
+                 (let [^syscall/Stat_t st (zero syscall/Stat_t)]
+                   (when [err (syscall/Fstat (conv int (conv int32 (.-I (aget a 0)))) (addr st))] (!= err nil)
+                     (return (.failErrno c t err)))
+                   (let [m (.-m c)
+                         b (conv uint64 (.-I (aget a 1)))]
+                     (.Store64 m b (.-Dev st)) (.Store64 m (+ b 8) (.-Ino st)) (.Store64 m (+ b 16) (.-Nlink st))
+                     (.Store32 m (+ b 24) (.-Mode st)) (.Store32 m (+ b 28) (.-Uid st)) (.Store32 m (+ b 32) (.-Gid st)) (.Store32 m (+ b 36) 0)
+                     (.Store64 m (+ b 40) (.-Rdev st)) (.Store64 m (+ b 48) (conv uint64 (.-Size st)))
+                     (.Store64 m (+ b 56) (conv uint64 (.-Blksize st))) (.Store64 m (+ b 64) (conv uint64 (.-Blocks st)))
+                     (.Store64 m (+ b 72) (conv uint64 (.-Sec (.-Atim st)))) (.Store64 m (+ b 80) (conv uint64 (.-Nsec (.-Atim st))))
+                     (.Store64 m (+ b 88) (conv uint64 (.-Sec (.-Mtim st)))) (.Store64 m (+ b 96) (conv uint64 (.-Nsec (.-Mtim st))))
+                     (.Store64 m (+ b 104) (conv uint64 (.-Sec (.-Ctim st)))) (.Store64 m (+ b 112) (conv uint64 (.-Nsec (.-Ctim st))))
+                     (lit ci/Arg :K \i :I 0))))]
+      ["close" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a]
+                 (when [err (syscall/Close (conv int (conv int32 (.-I (aget a 0)))))] (!= err nil)
+                   (return (.failErrno c t err)))
+                 (lit ci/Arg :K \i :I 0))])))
+
+(go/method failErrno "failErrno is a host native's failure as musl's wrappers return one: errno (its thread's, __errno_location's) set\nto err's number, -1.\n"
+  ^ci/Arg [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t ^error err]
+  (let [n (conv uint32 22)]
+    (when [(values e ok) (assert syscall/Errno err)] ok
+      (set! n (conv uint32 e)))
+    (when [f (aget (.-ByName (.-p c)) "__errno_location")] (and (!= f nil) (!= (.-Code f) nil))
+      (.Store32 (.-m c) (conv uint64 (.-I (.Call (.-p c) t f nil))) n))
+    (lit ci/Arg :K \i :I -1)))

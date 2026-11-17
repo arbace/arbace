@@ -1,0 +1,183 @@
+(ns j2g.typeann
+  "JCS282 (b) (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS282 (b)\"): the type annotations' encoder
+  (arbace.classes.annot's Y and N records, JCS271 (b)) checked against javac's class files without javac at check
+  time. A sample (test/j2g/unit/typeann/p/TA.java, every declaration target, path step and element value kind) has
+  its javac RuntimeVisibleTypeAnnotations recorded once, by hand, with the JDK (record: its class files read, each
+  attribute decoded and its constant pool indices resolved) into test/j2g/unit/typeann.edn; the check (bin/j2g-unit's
+  test-type-annotations) decodes the encoder's records of the sample's committed forms the same way and compares the
+  two sets. Each annotation is [OWNER [TARGET-TYPE INFO PATH ANNOTATION]]: OWNER [\"T\"], [\"F\" name], [\"C\" desc],
+  [\"M\" name desc] (descriptors with dots, as the records write them); ANNOTATION [type [[name value]...]], a value
+  [tag constant], [\"e\" type name], [\"c\" desc], [\"@\" annotation] or [\"[\" [value...]]; an Integer, Long or Double
+  constant as its signed value, a Float as its raw bits unsigned (a record writes them signed).
+
+    arbace_tool -p test -m j2g.typeann record CLASSES-DIR OUT   javac's class files (javac -d CLASSES-DIR of the sample)"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.analyze :as a]
+            [arbace.classes.env :as env]
+            [arbace.classes.parse :as p]
+            [arbace.classes.annot :as annot]
+            [arbace.j2g.world :as w]))
+
+;; ---------------------------------------------------------------------------------------
+;; an attribute's bytes (JVMS 4.7.20, 4.7.16), the pool a map from index to constant
+
+(defn- decode
+  "The annotations of a RuntimeVisibleTypeAnnotations attribute's info b (a byte array), pool resolving its indices."
+  [^bytes b pool]
+  (let [i (volatile! 0)
+        u1 (fn [] (let [v (bit-and (aget b @i) 0xff)] (vswap! i inc) v))
+        u2 (fn [] (let [h (u1) l (u1)] (bit-or (bit-shift-left h 8) l)))
+        c (fn [k] (if (contains? pool k) (get pool k) (throw (ex-info (str "j2g.typeann: no pool entry " k) {}))))]
+    (letfn [(ev []
+              (let [t (str (char (u1)))]
+                (cond
+                  (str/includes? "BCIJSZDFs" t) [t (c (u2))]
+                  (= t "e") (let [ty (c (u2))] ["e" ty (c (u2))])
+                  (= t "c") ["c" (c (u2))]
+                  (= t "@") ["@" (ann)]
+                  (= t "[") (let [n (u2)] ["[" (vec (repeatedly n ev))])
+                  :else (throw (ex-info (str "j2g.typeann: element value tag " t) {})))))
+            (ann []
+              (let [ty (c (u2)) n (u2)]
+                [ty (vec (repeatedly n (fn [] (let [nm (c (u2))] [nm (ev)]))))]))]
+      (let [n (u2)
+            out (vec (repeatedly n
+                       (fn []
+                         (let [tt (u1)
+                               info (cond (#{0x00 0x01 0x16} tt) [(u1)]
+                                          (#{0x10 0x17} tt) [(u2)]
+                                          (#{0x11 0x12} tt) (let [a (u1)] [a (u1)])
+                                          (#{0x13 0x14 0x15} tt) []
+                                          :else (throw (ex-info (str "j2g.typeann: target type " tt) {})))
+                               pl (u1)
+                               path (vec (repeatedly pl (fn [] (let [a (u1)] [a (u1)]))))]
+                           [(str "0x" (Integer/toHexString tt)) info path (ann)]))))]
+        (when (not= @i (alength b))
+          (throw (ex-info (str "j2g.typeann: " (- (alength b) @i) " bytes left") {})))
+        out))))
+
+(defn- hex-bytes ^bytes [^String h]
+  (let [n (quot (count h) 2) b (byte-array n)]
+    (dotimes [k n]
+      (aset b k (unchecked-byte (Integer/parseInt (subs h (* 2 k) (+ 2 (* 2 k))) 16))))
+    b))
+
+(defn- unquote-str
+  "A record's string constant, written as pr-str writes a string."
+  [^String s]
+  (read-string s))
+
+(defn records
+  "The annotations of the encoder's lines (arbace.classes.annot/class-data's text of one class): its N records
+  the pool from index 1 (a Long or Double taking two), its Y records decoded."
+  [text]
+  (let [ls (str/split-lines text)
+        pool (loop [ls (filter #(str/starts-with? % "N ") ls) k 1 pool {}]
+               (if-let [l (first ls)]
+                 (let [[_ t v] (str/split l #" " 3)
+                       x (case t
+                           "u" (unquote-str v)
+                           "f" (bit-and (Long/parseLong v) 0xffffffff)
+                           (Long/parseLong v))]
+                   (recur (rest ls) (if (#{"j" "d"} t) (+ k 2) (inc k)) (assoc pool k x)))
+                 pool))]
+    (vec (for [l ls :when (str/starts-with? l "Y ")
+               :let [w (str/split l #" ")
+                     [owner h] (case (nth w 1)
+                                 "T" [["T"] (nth w 2)]
+                                 "F" [["F" (nth w 2)] (nth w 3)]
+                                 "C" [["C" (nth w 2)] (nth w 3)]
+                                 [["M" (nth w 2) (nth w 3)] (nth w 4)])]
+               a (decode (hex-bytes h) pool)]
+           [owner a]))))
+
+;; ---------------------------------------------------------------------------------------
+;; a class file's (javac's): the pool, the fields', methods' and class's attributes
+
+(defn classfile
+  "The annotations of the RuntimeVisibleTypeAnnotations attributes of class file bytes b."
+  [^bytes b]
+  (let [p (volatile! 8)
+        u1 (fn [] (let [v (bit-and (aget b @p) 0xff)] (vswap! p inc) v))
+        u2 (fn [] (let [h (u1) l (u1)] (bit-or (bit-shift-left h 8) l)))
+        u4 (fn [] (let [h (u2) l (u2)] (bit-or (bit-shift-left h 16) l)))
+        s4 (fn [] (.intValue ^Long (long (u4))))
+        n (u2)
+        pool (loop [k 1 pool {}]
+               (if (>= k n)
+                 pool
+                 (let [tag (u1)]
+                   (case (int tag)
+                     1 (let [l (u2) s (String. b (int @p) (int l) "UTF-8")] (vswap! p + l) (recur (inc k) (assoc pool k s)))
+                     3 (recur (inc k) (assoc pool k (long (s4))))
+                     4 (recur (inc k) (assoc pool k (long (u4))))
+                     (5 6) (let [h (u4) l (u4)] (recur (+ k 2) (assoc pool k (bit-or (bit-shift-left (long h) 32) (long l)))))
+                     (7 8 16 19 20) (do (vswap! p + 2) (recur (inc k) pool))
+                     (9 10 11 12 17 18) (do (vswap! p + 4) (recur (inc k) pool))
+                     15 (do (vswap! p + 3) (recur (inc k) pool))
+                     (throw (ex-info (str "j2g.typeann: constant tag " tag) {}))))))
+        _ (vswap! p + 6)
+        ni (u2)
+        _ (vswap! p + (* 2 ni))
+        res (volatile! [])
+        attrs (fn [owner]
+                (dotimes [_ (u2)]
+                  (let [nm (get pool (u2)) l (u4)]
+                    (when (= nm "RuntimeVisibleTypeAnnotations")
+                      (doseq [a (decode (java.util.Arrays/copyOfRange b (int @p) (int (+ @p l))) pool)]
+                        (vswap! res conj [owner a])))
+                    (vswap! p + l))))]
+    (doseq [kind ["F" "M"]]
+      (dotimes [_ (u2)]
+        (vswap! p + 2)
+        (let [nm (get pool (u2)) ds (str/replace (get pool (u2)) "/" ".")]
+          (attrs (cond (= kind "F") ["F" nm] (= nm "<init>") ["C" ds] :else ["M" nm ds])))))
+    (attrs ["T"])
+    @res))
+
+(defn encoder
+  "The encoder's annotations of forms file f's classes: its classes declared and analyzed in a unit of their own on the
+  tools' host (the JDK's classes the host's, as the analysis finds them without j2g's edge), each class's data
+  (annot/class-data with :members) decoded by records: {internal-name annotations}."
+  [f]
+  (let [forms (w/read-forms f)
+        unit {:order (atom []) :counters (atom {}) :switch-maps (atom {}) :switch-holders (atom {})
+              :source-tried (atom #{}) :assert-holders (atom {}) :holder-first (atom {})}
+        decl (fn [x] (a/declare-class! {:nesting :top} (p/parse-class {:ns *ns* :nesting :top} (rest x))))]
+    (binding [env/*compile-set* (atom {}) a/*unit* unit *ns* *ns*]
+      (doseq [x forms]
+        (cond (and (seq? x) (= 'defclasses (first x))) (doseq [y (rest x)] (decl y))
+              (and (seq? x) (= 'defclass (first x))) (decl x)
+              :else (do (eval (if (and (seq? x) (symbol? (first x)) (nil? (namespace (first x))))
+                                (cons (symbol "arbace.core" (name (first x))) (rest x)) x))
+                        (when (and (seq? x) (= "in-ns" (name (first x)))) (arbace.core/refer 'arbace.core)))))
+      (a/process-classes! 0)
+      (into (sorted-map) (for [n @(:order unit)
+                               :let [d (annot/class-data n :members true)]
+                               :when d]
+                           [n (records d)])))))
+
+(defn sorted-set-of
+  "The annotations as the record holds them: each class's, its internal name first, sorted by their printed forms."
+  [by-class]
+  (vec (sort-by pr-str (for [[cls as] by-class a as] (into [cls] a)))))
+
+(defn record
+  "javac's annotations of the class files under dir (javac -d dir of the sample), written to out."
+  [dir out]
+  (let [fs (sort-by str (filter #(str/ends-with? (str %) ".class") (file-seq (io/file dir))))
+        rel (fn [f] (let [s (str f) r (str (.getCanonicalPath (io/file dir)) "/")]
+                      (str/replace (subs (.getCanonicalPath (io/file s)) (count r)) ".class" "")))
+        rows (sorted-set-of (for [f fs] [(rel f) (classfile (java.nio.file.Files/readAllBytes (.toPath (io/file (str f)))))]))]
+    (spit out (str ";; JCS282 (b): javac's RuntimeVisibleTypeAnnotations of test/j2g/unit/typeann/p/TA.java (the JDK's javac,\n"
+                   ";; javac -d DIR p/TA.java), decoded by j2g.typeann/record (test/j2g/typeann.ae): [class owner target-type\n"
+                   ";; info path annotation] a row. Recorded by hand: arbace_tool -p test -m j2g.typeann record DIR FILE.\n"
+                   "[\n" (str/join "\n" (map #(str " " (pr-str %)) rows)) "\n]\n"))
+    (println (str "j2g.typeann: " (count rows) " annotations of " (count fs) " class files written to " out))))
+
+(defn -main [& [verb & args]]
+  (case verb
+    "record" (apply record args)
+    (do (println "usage: j2g.typeann record CLASSES-DIR OUT") (System/exit 2)))
+  (shutdown-agents))

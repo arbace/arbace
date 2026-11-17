@@ -1,0 +1,190 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/server/UnicastRef.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.server)
+
+(import '(java.io IOException ObjectInput ObjectInputStream ObjectOutput)
+        '(java.lang.reflect Method)
+        '(java.rmi MarshalException Remote RemoteException UnmarshalException)
+        '(java.rmi.server Operation RemoteCall RemoteObject RemoteRef)
+        '(jdk.internal.access SharedSecrets)
+        '(sun.rmi.runtime Log)
+        '(sun.rmi.transport LiveRef StreamRemoteCall))
+
+(defclass ^:public UnicastRef
+  :implements [RemoteRef]
+
+  (field ^:public ^:static ^:final ^Log clientRefLog
+    (Log/getLog "sun.rmi.client.ref" "transport" Util/logLevel))
+
+  (field ^:public ^:static ^:final ^Log clientCallLog
+    (Log/getLog "sun.rmi.client.call" "RMI" (Boolean/getBoolean "sun.rmi.client.logCalls")))
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 8258372400816541186)
+
+  (field ^:protected ^LiveRef ref)
+
+  (constructor ^:public [this])
+
+  (constructor ^:public [this ^LiveRef liveRef] (set! ref liveRef))
+
+  (method ^:public getLiveRef ^LiveRef [this] ref)
+
+  (method ^:public invoke :throws [Exception] [this ^Remote obj ^Method method ^Object/1 params
+                                               ^long opnum]
+    (when (.isLoggable clientRefLog Log/VERBOSE)
+      (.log clientRefLog Log/VERBOSE (java-str "method: " method)))
+    (when (.isLoggable clientCallLog Log/VERBOSE) (.logClientCall this obj method))
+    (let [conn (.newConnection (.getChannel ref))
+          ^:mutable ^RemoteCall call nil
+          ^:mutable reuse true
+          ^:mutable alreadyFreed false]
+      (try
+        (when (.isLoggable clientRefLog Log/VERBOSE)
+          (.log clientRefLog Log/VERBOSE (java-str "opnum = " opnum)))
+        (set! call (StreamRemoteCall. conn (.getObjID ref) -1 opnum))
+        (try
+          (let [out (.getOutputStream call)]
+            (.marshalCustomCallData this out)
+            (let [^{:tag (array (Class ?))} types (.getParameterTypes method)]
+              (loop [^int i 0]
+                (when (< i (alength types))
+                  (UnicastRef/marshalValue (aget types i) (aget params i) out)
+                  (recur (unchecked-inc-int i))))))
+          (catch IOException e
+            (.log clientRefLog Log/BRIEF "IOException marshalling arguments: " e)
+            (throw (MarshalException. "error marshalling arguments" e))))
+        (.executeCall call)
+        (try
+          (let [^{:tag (Class ?)} rtype (.getReturnType method)]
+            (when-not (identical? rtype Void/TYPE)
+              (let [in (.getInputStream call)
+                    returnValue (UnicastRef/unmarshalValue rtype in)]
+                (set! alreadyFreed true)
+                (.log clientRefLog Log/BRIEF "free connection (reuse = true)")
+                (.free (.getChannel ref) conn true)
+                returnValue)))
+          (catch [IOException ClassNotFoundException] e
+            (.discardPendingRefs (cast StreamRemoteCall call))
+            (.log clientRefLog
+                  Log/BRIEF
+                  (java-str (.getName (.getClass e)) " unmarshalling return: ")
+                  e)
+            (throw (UnmarshalException. "error unmarshalling return" e)))
+          (finally (try (.done call) (catch IOException e (set! reuse false)))))
+        (catch RuntimeException e
+          (when (or (nil? call)
+                    (not (identical? (.getServerException (cast StreamRemoteCall call)) e)))
+            (set! reuse false))
+          (throw e))
+        (catch RemoteException e (set! reuse false) (throw e))
+        (catch Error e (set! reuse false) (throw e))
+        (finally
+          (when-not alreadyFreed
+            (when (.isLoggable clientRefLog Log/BRIEF)
+              (.log clientRefLog Log/BRIEF (java-str "free connection (reuse = " reuse ")")))
+            (.free (.getChannel ref) conn reuse))))))
+
+  (method ^:protected marshalCustomCallData :throws [IOException] ^void [this ^ObjectOutput out])
+
+  (method ^:protected ^:static marshalValue :throws [IOException] ^void [^{:tag (Class ?)} type
+                                                                         value ^ObjectOutput out]
+    (if (.isPrimitive type)
+        (cond
+          (identical? type Integer/TYPE) (.writeInt out (.intValue (cast Integer value)))
+          (identical? type Boolean/TYPE) (.writeBoolean out (.booleanValue (cast Boolean value)))
+          (identical? type Byte/TYPE) (.writeByte out (.byteValue (cast Byte value)))
+          (identical? type Character/TYPE) (.writeChar out (.charValue (cast Character value)))
+          (identical? type Short/TYPE) (.writeShort out (.shortValue (cast Short value)))
+          (identical? type Long/TYPE) (.writeLong out (.longValue (cast Long value)))
+          (identical? type Float/TYPE) (.writeFloat out (.floatValue (cast Float value)))
+          (identical? type Double/TYPE) (.writeDouble out (.doubleValue (cast Double value)))
+          :else (throw (Error. (java-str "Unrecognized primitive type: " type))))
+        (.writeObject out value)))
+
+  (method ^:protected ^:static unmarshalValue :throws [IOException ClassNotFoundException] [^{:tag (Class ?)} type
+                                                                                            ^ObjectInput in]
+    (cond
+      (.isPrimitive type)
+        (cond
+          (identical? type Integer/TYPE) (Integer/valueOf (.readInt in))
+          (identical? type Boolean/TYPE) (Boolean/valueOf (.readBoolean in))
+          (identical? type Byte/TYPE) (Byte/valueOf (.readByte in))
+          (identical? type Character/TYPE) (Character/valueOf (.readChar in))
+          (identical? type Short/TYPE) (Short/valueOf (.readShort in))
+          (identical? type Long/TYPE) (Long/valueOf (.readLong in))
+          (identical? type Float/TYPE) (Float/valueOf (.readFloat in))
+          (identical? type Double/TYPE) (Double/valueOf (.readDouble in))
+          :else (throw (Error. (java-str "Unrecognized primitive type: " type))))
+      (and (identical? type String) (instance? ObjectInputStream in))
+        (.readString (SharedSecrets/getJavaObjectInputStreamReadString) (cast ObjectInputStream in))
+      :else (.readObject in)))
+
+  (method ^:public newCall :throws [RemoteException] ^RemoteCall [this ^RemoteObject obj
+                                                                  ^Operation/1 ops ^int opnum
+                                                                  ^long hash]
+    (.log clientRefLog Log/BRIEF "get connection")
+    (let [conn (.newConnection (.getChannel ref))]
+      (try
+        (.log clientRefLog Log/VERBOSE "create call context")
+        (when (.isLoggable clientCallLog Log/VERBOSE) (.logClientCall this obj (aget ops opnum)))
+        (let [^RemoteCall call (StreamRemoteCall. conn (.getObjID ref) opnum hash)]
+          (try
+            (.marshalCustomCallData this (.getOutputStream call))
+            (catch IOException e (throw (MarshalException. "error marshaling custom call data"))))
+          call)
+        (catch RemoteException e (.free (.getChannel ref) conn false) (throw e)))))
+
+  (method ^:public invoke :throws [Exception] ^void [this ^RemoteCall call]
+    (try
+      (.log clientRefLog Log/VERBOSE "execute call")
+      (.executeCall call)
+      (catch RemoteException e
+        (.log clientRefLog Log/BRIEF "exception: " e)
+        (.free this call false)
+        (throw e))
+      (catch Error e (.log clientRefLog Log/BRIEF "error: " e) (.free this call false) (throw e))
+      (catch RuntimeException e
+        (.log clientRefLog Log/BRIEF "exception: " e)
+        (.free this call false)
+        (throw e))
+      (catch Exception e
+        (.log clientRefLog Log/BRIEF "exception: " e)
+        (.free this call true)
+        (throw e))))
+
+  (method ^:private free :throws [RemoteException] ^void [this ^RemoteCall call ^boolean reuse]
+    (let [conn (.getConnection (cast StreamRemoteCall call))] (.free (.getChannel ref) conn reuse)))
+
+  (method ^:public done :throws [RemoteException] ^void [this ^RemoteCall call]
+    (.log clientRefLog Log/BRIEF "free connection (reuse = true)")
+    (.free this call true)
+    (try (.done call) (catch IOException e)))
+
+  (method logClientCall ^void [this obj method]
+    (.log clientCallLog
+          Log/VERBOSE
+          (java-str "outbound call: "
+                    ref
+                    " : "
+                    (.getName (.getClass obj))
+                    (.toString (.getObjID ref))
+                    ": "
+                    method)))
+
+  (method ^:public getRefClass ^String [this ^ObjectOutput out]
+    "UnicastRef")
+
+  (method ^:public writeExternal :throws [IOException] ^void [this ^ObjectOutput out]
+    (.write ref out false))
+
+  (method ^:public readExternal :throws [IOException ClassNotFoundException] ^void [this
+                                                                                    ^ObjectInput in]
+    (set! ref (LiveRef/read in false)))
+
+  (method ^:public remoteToString ^String [this]
+    (java-str (Util/getUnqualifiedName (.getClass this)) " [liveRef: " ref "]"))
+
+  (method ^:public remoteHashCode ^int [this] (.hashCode ref))
+
+  (method ^:public remoteEquals ^boolean [this ^RemoteRef sub]
+    (if (instance? UnicastRef sub) (.remoteEquals ref (.-ref (cast UnicastRef sub))) false)))

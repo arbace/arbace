@@ -1,0 +1,1080 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLContextImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io FileInputStream)
+        '(java.net Socket)
+        '(java.security AlgorithmConstraints
+                        CryptoPrimitive
+                        KeyManagementException
+                        KeyStore
+                        Principal
+                        PrivateKey
+                        SecureRandom)
+        '(java.security.cert CertPathValidatorException CertificateException X509Certificate)
+        '(java.util ArrayList
+                    Arrays
+                    Collection
+                    Collections
+                    EnumSet
+                    HashMap
+                    HashSet
+                    LinkedHashSet
+                    List
+                    Map
+                    Objects)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function Supplier)
+        '(javax.net.ssl KeyManager
+                        KeyManagerFactory
+                        SSLContextSpi
+                        SSLEngine
+                        SSLParameters
+                        SSLServerSocketFactory
+                        SSLSessionContext
+                        SSLSocket
+                        SSLSocketFactory
+                        TrustManager
+                        TrustManagerFactory
+                        X509ExtendedKeyManager
+                        X509ExtendedTrustManager
+                        X509KeyManager
+                        X509TrustManager)
+        '(sun.security.provider.certpath AlgorithmChecker)
+        '(sun.security.validator Validator))
+
+(defclasses
+  (defclass ^:public ^:abstract SSLContextImpl
+    :extends SSLContextSpi
+
+    (field ^:private ^:final ^EphemeralKeyManager ephemeralKeyManager)
+
+    (field ^:private ^:final ^SSLSessionContextImpl clientCache)
+
+    (field ^:private ^:final ^SSLSessionContextImpl serverCache)
+
+    (field ^:private ^boolean isInitialized)
+
+    (field ^:private ^X509ExtendedKeyManager keyManager)
+
+    (field ^:private ^X509TrustManager trustManager)
+
+    (field ^:private ^SecureRandom secureRandom)
+
+    (field ^:private ^:volatile ^HelloCookieManager$Builder helloCookieManagerBuilder)
+
+    (field ^:private ^:final ^boolean clientEnableStapling
+      (Utilities/getBooleanProperty "jdk.tls.client.enableStatusRequestExtension" true))
+
+    (field ^:private ^:final ^boolean serverEnableStapling
+      (Utilities/getBooleanProperty "jdk.tls.server.enableStatusRequestExtension" false))
+
+    (field ^:private ^:static ^:final ^{:tag (Collection CipherSuite)} clientCustomizedCipherSuites
+      (SSLContextImpl/getCustomizedCipherSuites "jdk.tls.client.cipherSuites"))
+
+    (field ^:private ^:static ^:final ^{:tag (Collection CipherSuite)} serverCustomizedCipherSuites
+      (SSLContextImpl/getCustomizedCipherSuites "jdk.tls.server.cipherSuites"))
+
+    (field ^:private ^:volatile ^StatusResponseManager statusResponseManager)
+
+    (field ^:private ^:final ^ReentrantLock contextLock (ReentrantLock.))
+
+    (constructor [this]
+      (set! ephemeralKeyManager (EphemeralKeyManager.))
+      (set! clientCache (SSLSessionContextImpl. false))
+      (set! serverCache (SSLSessionContextImpl. true)))
+
+    (method ^:protected engineInit :throws [KeyManagementException] ^void [this ^KeyManager/1 km
+                                                                           ^:mutable ^TrustManager/1 tm
+                                                                           ^SecureRandom sr]
+      (set! isInitialized false)
+      (set! keyManager (.chooseKeyManager this km))
+      (when (nil? tm)
+        (try
+          (let [tmf (TrustManagerFactory/getInstance (TrustManagerFactory/getDefaultAlgorithm))]
+            (.init tmf (cast KeyStore nil))
+            (set! tm (.getTrustManagers tmf)))
+          (catch Exception e)))
+      (set! trustManager (.chooseTrustManager this tm))
+      (set! secureRandom
+            (cast SecureRandom
+                  (Objects/requireNonNullElseGet
+                    sr
+                    (method-ref Supplier ^SecureRandom [] SecureRandom/new))))
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,sslctx"))
+        (SSLLogger/finest "trigger seeding of SecureRandom"))
+      (.nextInt secureRandom)
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,sslctx"))
+        (SSLLogger/finest "done seeding of SecureRandom"))
+      (set! isInitialized true))
+
+    (method ^:private chooseTrustManager ^X509TrustManager [this ^TrustManager/1 tm]
+      (loop [^int i 0]
+        (if (and (some? tm) (< i (alength tm)))
+            (if (instance? X509TrustManager (aget tm i))
+                (if (instance? X509ExtendedTrustManager (aget tm i))
+                    (return (cast X509TrustManager (aget tm i)))
+                    (return (AbstractTrustManagerWrapper. (cast X509TrustManager (aget tm i)))))
+                (recur (unchecked-inc-int i)))
+            nil))
+      DummyX509TrustManager/INSTANCE)
+
+    (method ^:private chooseKeyManager ^X509ExtendedKeyManager [this ^KeyManager/1 kms]
+      (loop [^int i 0]
+        (when (and (some? kms) (< i (alength kms)))
+          (let [km (aget kms i)]
+            (if (not (instance? X509KeyManager km))
+                (recur (unchecked-inc-int i))
+                (do
+                  (when (instance? X509ExtendedKeyManager km)
+                    (return (cast X509ExtendedKeyManager km)))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,sslctx"))
+                    (SSLLogger/warning
+                      "X509KeyManager passed to SSLContext.init():  need an X509ExtendedKeyManager for SSLEngine use"))
+                  (return (AbstractKeyManagerWrapper. (cast X509KeyManager km))))))))
+      DummyX509KeyManager/INSTANCE)
+
+    (method ^:abstract createSSLEngineImpl ^SSLEngine [this])
+
+    (method ^:abstract createSSLEngineImpl ^SSLEngine [this ^String host ^int port])
+
+    (method ^:protected engineCreateSSLEngine ^SSLEngine [this]
+      (when-not isInitialized (throw (IllegalStateException. "SSLContext is not initialized")))
+      (.createSSLEngineImpl this))
+
+    (method ^:protected engineCreateSSLEngine ^SSLEngine [this ^String host ^int port]
+      (when-not isInitialized (throw (IllegalStateException. "SSLContext is not initialized")))
+      (.createSSLEngineImpl this host port))
+
+    (method ^:protected engineGetSocketFactory ^SSLSocketFactory [this]
+      (when-not isInitialized (throw (IllegalStateException. "SSLContext is not initialized")))
+      (when (.isDTLS this)
+        (throw (UnsupportedOperationException. "DTLS not supported with SSLSocket")))
+      (SSLSocketFactoryImpl. this))
+
+    (method ^:protected engineGetServerSocketFactory ^SSLServerSocketFactory [this]
+      (when-not isInitialized (throw (IllegalStateException. "SSLContext is not initialized")))
+      (when (.isDTLS this)
+        (throw (UnsupportedOperationException. "DTLS not supported with SSLServerSocket")))
+      (SSLServerSocketFactoryImpl. this))
+
+    (method ^:protected engineGetClientSessionContext ^SSLSessionContext [this]
+      clientCache)
+
+    (method ^:protected engineGetServerSessionContext ^SSLSessionContext [this]
+      serverCache)
+
+    (method getSecureRandom ^SecureRandom [this] secureRandom)
+
+    (method getX509KeyManager ^X509ExtendedKeyManager [this] keyManager)
+
+    (method getX509TrustManager ^X509TrustManager [this] trustManager)
+
+    (method getEphemeralKeyManager ^EphemeralKeyManager [this]
+      ephemeralKeyManager)
+
+    (method getHelloCookieManager ^HelloCookieManager [this ^ProtocolVersion protocolVersion]
+      (when (nil? helloCookieManagerBuilder)
+        (.lock contextLock)
+        (try
+          (when (nil? helloCookieManagerBuilder)
+            (set! helloCookieManagerBuilder (HelloCookieManager$Builder. secureRandom)))
+          (finally (.unlock contextLock))))
+      (.valueOf helloCookieManagerBuilder protocolVersion))
+
+    (method getStatusResponseManager ^StatusResponseManager [this]
+      (when (and serverEnableStapling (nil? statusResponseManager))
+        (.lock contextLock)
+        (try
+          (when (nil? statusResponseManager)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,sslctx"))
+              (SSLLogger/finest "Initializing StatusResponseManager"))
+            (set! statusResponseManager (StatusResponseManager.)))
+          (finally (.unlock contextLock))))
+      statusResponseManager)
+
+    (method ^:abstract getSupportedProtocolVersions ^{:tag (List ProtocolVersion)} [this])
+
+    (method ^:abstract getServerDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this])
+
+    (method ^:abstract getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this])
+
+    (method ^:abstract getSupportedCipherSuites ^{:tag (List CipherSuite)} [this])
+
+    (method ^:abstract getServerDefaultCipherSuites ^{:tag (List CipherSuite)} [this])
+
+    (method ^:abstract getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this])
+
+    (method ^:abstract isDTLS ^boolean [this])
+
+    (method getDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this ^boolean roleIsServer]
+      (if roleIsServer
+          (.getServerDefaultProtocolVersions this)
+          (.getClientDefaultProtocolVersions this)))
+
+    (method getDefaultCipherSuites ^{:tag (List CipherSuite)} [this ^boolean roleIsServer]
+      (if roleIsServer (.getServerDefaultCipherSuites this) (.getClientDefaultCipherSuites this)))
+
+    (method isDefaultProtocolVersions ^boolean [this ^{:tag (List ProtocolVersion)} protocols]
+      (or (identical? protocols (.getServerDefaultProtocolVersions this))
+          (identical? protocols (.getClientDefaultProtocolVersions this))))
+
+    (method isDefaultCipherSuiteList ^boolean [this ^{:tag (List CipherSuite)} cipherSuites]
+      (or (identical? cipherSuites (.getServerDefaultCipherSuites this))
+          (identical? cipherSuites (.getClientDefaultCipherSuites this))))
+
+    (method isStaplingEnabled ^boolean [this ^boolean isClient]
+      (if isClient clientEnableStapling serverEnableStapling))
+
+    (method ^:private ^:static getApplicableSupportedCipherSuites ^{:tag (List CipherSuite)} [^{:tag (List ProtocolVersion)} protocols]
+      (SSLContextImpl/getApplicableCipherSuites (CipherSuite/allowedCipherSuites) protocols))
+
+    (method ^:private ^:static getApplicableEnabledCipherSuites ^{:tag (List CipherSuite)} [^{:tag (List ProtocolVersion)} protocols
+                                                                                            ^boolean isClient]
+      (if isClient
+          (when-not (.isEmpty clientCustomizedCipherSuites)
+            (return (SSLContextImpl/getApplicableCipherSuites
+                      clientCustomizedCipherSuites
+                      protocols)))
+          (when-not (.isEmpty serverCustomizedCipherSuites)
+            (return (SSLContextImpl/getApplicableCipherSuites
+                      serverCustomizedCipherSuites
+                      protocols))))
+      (SSLContextImpl/getApplicableCipherSuites (CipherSuite/defaultCipherSuites) protocols))
+
+    (method ^:private ^:static getApplicableCipherSuites ^{:tag (List CipherSuite)} [^{:tag (Collection CipherSuite)} allowedCipherSuites
+                                                                                     ^{:tag (List ProtocolVersion)} protocols]
+      (let [^{:tag (LinkedHashSet CipherSuite)} suites (LinkedHashSet.)]
+        (when (and (some? protocols) (not (.isEmpty protocols)))
+          (for-each [^CipherSuite suite allowedCipherSuites]
+            (when-not (not (.isAvailable suite))
+              (let [^:mutable isSupported false]
+                (for-each [^ProtocolVersion protocol protocols]
+                  (when-not (or (not (.supports suite protocol))
+                                (not (.isAvailable (.-bulkCipher suite))))
+                    (cond
+                      (.permits SSLAlgorithmConstraints/DEFAULT
+                                (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                                (.-name suite)
+                                nil)
+                        (do (.add suites suite) (set! isSupported true))
+                      (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,sslctx,verbose"))
+                        (SSLLogger/fine (java-str "Ignore disabled cipher suite: " (.-name suite))))
+                    (break)))
+                (when (and (and (not isSupported) (SSLLogger/isOn))
+                           (SSLLogger/isOn "ssl,sslctx,verbose"))
+                  (SSLLogger/finest (java-str "Ignore unsupported cipher suite: " suite)))))))
+        (ArrayList. suites)))
+
+    (method ^:private ^:static getCustomizedCipherSuites ^{:tag (Collection CipherSuite)} [^String propertyName]
+      (let [^:mutable property (System/getProperty propertyName)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,sslctx"))
+          (SSLLogger/fine (java-str "System property " propertyName " is set to '" property "'")))
+        (when (and (some? property) (not (.isEmpty property)))
+          (when (and (and (> (.length property) 1) (== (.charAt property 0) \"))
+                     (== (.charAt property (unchecked-subtract-int (.length property) 1)) \"))
+            (set! property (.substring property 1 (unchecked-subtract-int (.length property) 1)))))
+        (if (and (some? property) (not (.isEmpty property)))
+            (let [cipherSuiteNames (.split property ",")
+                  ^{:tag (Collection CipherSuite)} cipherSuites (ArrayList.
+                                                                  (alength cipherSuiteNames))]
+              (loop [^int i 0]
+                (when (< i (alength cipherSuiteNames))
+                  (aset cipherSuiteNames i (.trim (aget cipherSuiteNames i)))
+                  (if (.isEmpty (aget cipherSuiteNames i))
+                      (recur (unchecked-inc-int i))
+                      (let [^:mutable ^CipherSuite suite nil]
+                        (try
+                          (set! suite (CipherSuite/nameOf (aget cipherSuiteNames i)))
+                          (catch IllegalArgumentException iae
+                            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,sslctx"))
+                              (SSLLogger/fine
+                                (java-str "Unknown or unsupported cipher suite name: "
+                                          (aget cipherSuiteNames i))))
+                            (continue (unchecked-inc-int i))))
+                        (cond
+                          (and (some? suite) (.isAvailable suite))
+                            (do (.add cipherSuites suite) (recur (unchecked-inc-int i)))
+                          (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,sslctx"))
+                            (do
+                              (SSLLogger/fine
+                                (java-str
+                                  "The current installed providers do not support cipher suite: "
+                                  (aget cipherSuiteNames i)))
+                              (recur (unchecked-inc-int i)))
+                          :else (recur (unchecked-inc-int i)))))))
+              cipherSuites)
+            (Collections/emptyList))))
+
+    (method ^:private ^:static getAvailableProtocols ^{:tag (List ProtocolVersion)} [^ProtocolVersion/1 protocolCandidates]
+      (let [^:mutable ^{:tag (List ProtocolVersion)} availableProtocols (Collections/emptyList)]
+        (when (and (some? protocolCandidates) (not (== (alength protocolCandidates) 0)))
+          (set! availableProtocols (ArrayList. (alength protocolCandidates)))
+          (for-each [^ProtocolVersion p protocolCandidates]
+            (when (.-isAvailable p) (.add availableProtocols p))))
+        availableProtocols))
+
+    (method ^:public isUsableWithQuic ^boolean [this]
+      (instance? X509TrustManagerImpl trustManager))
+
+    (defclass ^:private ^:abstract ^:static AbstractTLSContext
+      :extends SSLContextImpl
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} supportedProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} serverDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} supportedCipherSuites)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} serverDefaultCipherSuites)
+
+      (static-initializer
+        (set! supportedProtocols
+              (Arrays/asList
+                (new ProtocolVersion/1
+                     [ProtocolVersion/TLS13
+                      ProtocolVersion/TLS12
+                      ProtocolVersion/TLS11
+                      ProtocolVersion/TLS10
+                      ProtocolVersion/SSL30
+                      ProtocolVersion/SSL20Hello])))
+        (set! serverDefaultProtocols
+              (SSLContextImpl/getAvailableProtocols
+                (new ProtocolVersion/1
+                     [ProtocolVersion/TLS13
+                      ProtocolVersion/TLS12
+                      ProtocolVersion/TLS11
+                      ProtocolVersion/TLS10])))
+        (set! supportedCipherSuites
+              (SSLContextImpl/getApplicableSupportedCipherSuites supportedProtocols))
+        (set! serverDefaultCipherSuites
+              (SSLContextImpl/getApplicableEnabledCipherSuites serverDefaultProtocols false)))
+
+      (method getSupportedProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        supportedProtocols)
+
+      (method getSupportedCipherSuites ^{:tag (List CipherSuite)} [this]
+        supportedCipherSuites)
+
+      (method getServerDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        serverDefaultProtocols)
+
+      (method getServerDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        serverDefaultCipherSuites)
+
+      (method createSSLEngineImpl ^SSLEngine [this] (SSLEngineImpl. this))
+
+      (method createSSLEngineImpl ^SSLEngine [this ^String host ^int port]
+        (SSLEngineImpl. this host port))
+
+      (method isDTLS ^boolean [this] false))
+
+    (defclass ^:public ^:static ^:final TLS10Context
+      :extends AbstractTLSContext
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} clientDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} clientDefaultCipherSuites)
+
+      (static-initializer
+        (set!
+          clientDefaultProtocols
+          (SSLContextImpl/getAvailableProtocols (new ProtocolVersion/1 [ProtocolVersion/TLS10])))
+        (set! clientDefaultCipherSuites
+              (SSLContextImpl/getApplicableEnabledCipherSuites clientDefaultProtocols true)))
+
+      (method getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        clientDefaultProtocols)
+
+      (method getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        clientDefaultCipherSuites))
+
+    (defclass ^:public ^:static ^:final TLS11Context
+      :extends AbstractTLSContext
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} clientDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} clientDefaultCipherSuites)
+
+      (static-initializer
+        (set! clientDefaultProtocols
+              (SSLContextImpl/getAvailableProtocols
+                (new ProtocolVersion/1 [ProtocolVersion/TLS11 ProtocolVersion/TLS10])))
+        (set! clientDefaultCipherSuites
+              (SSLContextImpl/getApplicableEnabledCipherSuites clientDefaultProtocols true)))
+
+      (method getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        clientDefaultProtocols)
+
+      (method getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        clientDefaultCipherSuites))
+
+    (defclass ^:public ^:static ^:final TLS12Context
+      :extends AbstractTLSContext
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} clientDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} clientDefaultCipherSuites)
+
+      (static-initializer
+        (set! clientDefaultProtocols
+              (SSLContextImpl/getAvailableProtocols
+                (new ProtocolVersion/1
+                     [ProtocolVersion/TLS12 ProtocolVersion/TLS11 ProtocolVersion/TLS10])))
+        (set! clientDefaultCipherSuites
+              (SSLContextImpl/getApplicableEnabledCipherSuites clientDefaultProtocols true)))
+
+      (method getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        clientDefaultProtocols)
+
+      (method getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        clientDefaultCipherSuites))
+
+    (defclass ^:public ^:static ^:final TLS13Context
+      :extends AbstractTLSContext
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} clientDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} clientDefaultCipherSuites)
+
+      (static-initializer
+        (set! clientDefaultProtocols
+              (SSLContextImpl/getAvailableProtocols
+                (new ProtocolVersion/1
+                     [ProtocolVersion/TLS13
+                      ProtocolVersion/TLS12
+                      ProtocolVersion/TLS11
+                      ProtocolVersion/TLS10])))
+        (set! clientDefaultCipherSuites
+              (SSLContextImpl/getApplicableEnabledCipherSuites clientDefaultProtocols true)))
+
+      (method getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        clientDefaultProtocols)
+
+      (method getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        clientDefaultCipherSuites))
+
+    (defclass ^:private ^:static CustomizedSSLProtocols
+      (field ^:private ^:static ^:final ^String JDK_TLS_CLIENT_PROTOCOLS "jdk.tls.client.protocols")
+
+      (field ^:private ^:static ^:final ^String JDK_TLS_SERVER_PROTOCOLS "jdk.tls.server.protocols")
+
+      (field ^:static ^IllegalArgumentException reservedException nil)
+
+      (field ^:static ^:final ^{:tag (ArrayList ProtocolVersion)} customizedClientProtocols
+        (ArrayList.))
+
+      (field ^:static ^:final ^{:tag (ArrayList ProtocolVersion)} customizedServerProtocols
+        (ArrayList.))
+
+      (static-initializer
+        (CustomizedSSLProtocols/populate JDK_TLS_CLIENT_PROTOCOLS customizedClientProtocols)
+        (CustomizedSSLProtocols/populate JDK_TLS_SERVER_PROTOCOLS customizedServerProtocols))
+
+      (method ^:private ^:static populate ^void [^String propname
+                                                 ^{:tag (ArrayList ProtocolVersion)} arrayList]
+        (let [^:mutable property (System/getProperty propname)]
+          (when (some? property)
+            (when-not (.isEmpty property)
+              (when (and (and (> (.length property) 1) (== (.charAt property 0) \"))
+                         (== (.charAt property (unchecked-subtract-int (.length property) 1)) \"))
+                (set! property
+                      (.substring property 1 (unchecked-subtract-int (.length property) 1)))))
+            (when-not (.isEmpty property)
+              (let [protocols (.split property ",")]
+                (loop [^int i 0]
+                  (when (< i (alength protocols))
+                    (aset protocols i (.trim (aget protocols i)))
+                    (let [pv (ProtocolVersion/nameOf (aget protocols i))]
+                      (when (nil? pv)
+                        (set! reservedException
+                              (IllegalArgumentException.
+                                (java-str propname
+                                          ": "
+                                          (aget protocols i)
+                                          " is not a supported SSL protocol name"))))
+                      (if (not (.contains arrayList pv))
+                          (do (.add arrayList pv) (recur (unchecked-inc-int i)))
+                          (recur (unchecked-inc-int i))))))))))))
+
+    (defclass ^:private ^:static CustomizedTLSContext
+      :extends AbstractTLSContext
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} clientDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} serverDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} clientDefaultCipherSuites)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} serverDefaultCipherSuites)
+
+      (field ^:private ^:static ^:final ^IllegalArgumentException reservedException)
+
+      (static-initializer
+        (set! reservedException CustomizedSSLProtocols/reservedException)
+        (if (nil? reservedException)
+            (do
+              (set! clientDefaultProtocols
+                    (CustomizedTLSContext/customizedProtocols
+                      true
+                      CustomizedSSLProtocols/customizedClientProtocols))
+              (set! serverDefaultProtocols
+                    (CustomizedTLSContext/customizedProtocols
+                      false
+                      CustomizedSSLProtocols/customizedServerProtocols))
+              (set! clientDefaultCipherSuites
+                    (SSLContextImpl/getApplicableEnabledCipherSuites clientDefaultProtocols true))
+              (set! serverDefaultCipherSuites
+                    (SSLContextImpl/getApplicableEnabledCipherSuites serverDefaultProtocols false)))
+            (do
+              (set! clientDefaultProtocols nil)
+              (set! serverDefaultProtocols nil)
+              (set! clientDefaultCipherSuites nil)
+              (set! serverDefaultCipherSuites nil))))
+
+      (method ^:private ^:static customizedProtocols ^{:tag (List ProtocolVersion)} [^boolean client
+                                                                                     ^{:tag (List ProtocolVersion)} customized]
+        (let [^{:tag (List ProtocolVersion)} refactored (ArrayList.)]
+          (for-each [^ProtocolVersion pv customized] (when-not (.-isDTLS pv) (.add refactored pv)))
+          (let [^ProtocolVersion/1 candidates (if (.isEmpty refactored)
+                                                  (new
+                                                    ProtocolVersion/1
+                                                    [ProtocolVersion/TLS13
+                                                     ProtocolVersion/TLS12
+                                                     ProtocolVersion/TLS11
+                                                     ProtocolVersion/TLS10])
+                                                  (cast
+                                                    ProtocolVersion/1
+                                                    (.toArray refactored (new ProtocolVersion/1 0))))]
+            (SSLContextImpl/getAvailableProtocols candidates))))
+
+      (constructor ^:protected [this]
+        (when (some? reservedException) (throw reservedException)))
+
+      (method getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        clientDefaultProtocols)
+
+      (method getServerDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        serverDefaultProtocols)
+
+      (method getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        clientDefaultCipherSuites)
+
+      (method getServerDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        serverDefaultCipherSuites))
+
+    (defclass ^:public ^:static ^:final TLSContext
+      :extends CustomizedTLSContext)
+
+    (defclass ^:private ^:static ^:final DefaultManagersHolder
+      (field ^:private ^:static ^:final ^String NONE "NONE")
+
+      (field ^:private ^:static ^:final ^String P11KEYSTORE "PKCS11")
+
+      (field ^:private ^:static ^:final ^TrustManager/1 trustManagers)
+
+      (field ^:private ^:static ^:final ^KeyManager/1 keyManagers)
+
+      (field ^:private ^:static ^:final ^Exception reservedException)
+
+      (static-initializer
+        (let [^:mutable ^Exception reserved nil
+              ^:mutable ^TrustManager/1 tmMediator nil]
+          (try
+            (set! tmMediator (DefaultManagersHolder/getTrustManagers))
+            (catch Exception e
+              (set! reserved e)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,defaultctx"))
+                (SSLLogger/warning "Failed to load default trust managers" e))))
+          (let [^:mutable ^KeyManager/1 kmMediator nil]
+            (when (nil? reserved)
+              (try
+                (set! kmMediator (DefaultManagersHolder/getKeyManagers))
+                (catch Exception e
+                  (set! reserved e)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,defaultctx"))
+                    (SSLLogger/warning "Failed to load default key managers" e)))))
+            (if (some? reserved)
+                (do
+                  (set! trustManagers (new TrustManager/1 0))
+                  (set! keyManagers (new KeyManager/1 0))
+                  (set! reservedException (KeyManagementException. (.getMessage reserved))))
+                (do
+                  (set! trustManagers tmMediator)
+                  (set! keyManagers kmMediator)
+                  (set! reservedException nil))))))
+
+      (method ^:private ^:static getTrustManagers :throws [Exception] ^TrustManager/1 []
+        (let [tmf (TrustManagerFactory/getInstance (TrustManagerFactory/getDefaultAlgorithm))]
+          (if (.equals "SunJSSE" (.getName (.getProvider tmf)))
+              (.init tmf (cast KeyStore nil))
+              (let [ks (TrustStoreManager/getTrustedKeyStore)] (.init tmf ks)))
+          (.getTrustManagers tmf)))
+
+      (method ^:private ^:static getKeyManagers :throws [Exception] ^KeyManager/1 []
+        (let [^{:tag (Map String String)} props (HashMap.)]
+          (.put props "keyStore" (System/getProperty "javax.net.ssl.keyStore" ""))
+          (.put props
+                "keyStoreType"
+                (System/getProperty "javax.net.ssl.keyStoreType" (KeyStore/getDefaultType)))
+          (.put props "keyStoreProvider" (System/getProperty "javax.net.ssl.keyStoreProvider" ""))
+          (.put props "keyStorePasswd" (System/getProperty "javax.net.ssl.keyStorePassword" ""))
+          (let [defaultKeyStore (cast String (.get props "keyStore"))
+                defaultKeyStoreType (cast String (.get props "keyStoreType"))
+                defaultKeyStoreProvider (cast String (.get props "keyStoreProvider"))]
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,defaultctx"))
+              (SSLLogger/fine (java-str "keyStore is : " defaultKeyStore))
+              (SSLLogger/fine (java-str "keyStore type is : " defaultKeyStoreType))
+              (SSLLogger/fine (java-str "keyStore provider is : " defaultKeyStoreProvider)))
+            (when (and (.equals P11KEYSTORE defaultKeyStoreType)
+                       (not (.equals NONE defaultKeyStore)))
+              (throw (IllegalArgumentException.
+                       (java-str (java-str (java-str "if keyStoreType is " P11KEYSTORE)
+                                           ", then keyStore must be ")
+                                 NONE))))
+            (let [^:mutable ^FileInputStream fs nil
+                  ^:mutable ^KeyStore ks nil
+                  ^:mutable ^char/1 passwd nil]
+              (try
+                (when (and (not (.isEmpty defaultKeyStore)) (not (.equals NONE defaultKeyStore)))
+                  (set! fs (FileInputStream. defaultKeyStore)))
+                (let [defaultKeyStorePassword (cast String (.get props "keyStorePasswd"))]
+                  (when-not (.isEmpty defaultKeyStorePassword)
+                    (set! passwd (.toCharArray defaultKeyStorePassword)))
+                  (when-not (== (.length defaultKeyStoreType) 0)
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,defaultctx"))
+                      (SSLLogger/finest "init keystore"))
+                    (if (.isEmpty defaultKeyStoreProvider)
+                        (set! ks (KeyStore/getInstance defaultKeyStoreType))
+                        (set! ks (KeyStore/getInstance defaultKeyStoreType defaultKeyStoreProvider)))
+                    (.load ks fs passwd)))
+                (finally (when (some? fs) (.close fs) (set! fs nil))))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,defaultctx"))
+                (SSLLogger/fine
+                  (java-str "init keymanager of type " (KeyManagerFactory/getDefaultAlgorithm))))
+              (let [kmf (KeyManagerFactory/getInstance (KeyManagerFactory/getDefaultAlgorithm))]
+                (if (.equals P11KEYSTORE defaultKeyStoreType)
+                    (.init kmf ks nil)
+                    (.init kmf ks passwd))
+                (.getKeyManagers kmf)))))))
+
+    (defclass ^:private ^:static ^:final DefaultSSLContextHolder
+      (field ^:private ^:static ^:final ^SSLContextImpl sslContext)
+
+      (field ^:private ^:static ^:final ^Exception reservedException)
+
+      (static-initializer
+        (let [^:mutable ^Exception reserved nil
+              ^:mutable ^SSLContextImpl mediator nil]
+          (if (some? DefaultManagersHolder/reservedException)
+              (set! reserved DefaultManagersHolder/reservedException)
+              (try
+                (set! mediator (DefaultSSLContext.))
+                (catch Exception e
+                  (set! reserved (KeyManagementException. (.getMessage e)))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,defaultctx"))
+                    (SSLLogger/warning "Failed to load default SSLContext" e)))))
+          (set! sslContext mediator)
+          (set! reservedException reserved))))
+
+    (defclass ^:public ^:static ^:final DefaultSSLContext
+      :extends CustomizedTLSContext
+
+      (constructor :throws [Exception] ^:public [this]
+        (when (some? DefaultManagersHolder/reservedException)
+          (throw DefaultManagersHolder/reservedException))
+        (try
+          (.engineInit super
+                       DefaultManagersHolder/keyManagers
+                       DefaultManagersHolder/trustManagers
+                       nil)
+          (catch Exception e
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,defaultctx"))
+              (SSLLogger/fine "default context init failed: " e))
+            (throw e))))
+
+      (method ^:protected engineInit :throws [KeyManagementException] ^void [this ^KeyManager/1 km
+                                                                             ^TrustManager/1 tm
+                                                                             ^SecureRandom sr]
+        (throw (KeyManagementException. "Default SSLContext is initialized automatically")))
+
+      (method ^:static getDefaultImpl :throws [Exception] ^SSLContextImpl []
+        (when (some? DefaultSSLContextHolder/reservedException)
+          (throw DefaultSSLContextHolder/reservedException))
+        DefaultSSLContextHolder/sslContext))
+
+    (defclass ^:private ^:abstract ^:static AbstractDTLSContext
+      :extends SSLContextImpl
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} supportedProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} serverDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} supportedCipherSuites)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} serverDefaultCipherSuites)
+
+      (static-initializer
+        (set! supportedProtocols
+              (Arrays/asList
+                (new ProtocolVersion/1 [ProtocolVersion/DTLS12 ProtocolVersion/DTLS10])))
+        (set! serverDefaultProtocols
+              (SSLContextImpl/getAvailableProtocols
+                (new ProtocolVersion/1 [ProtocolVersion/DTLS12 ProtocolVersion/DTLS10])))
+        (set! supportedCipherSuites
+              (SSLContextImpl/getApplicableSupportedCipherSuites supportedProtocols))
+        (set! serverDefaultCipherSuites
+              (SSLContextImpl/getApplicableEnabledCipherSuites serverDefaultProtocols false)))
+
+      (method ^:protected engineGetDefaultSSLParameters ^SSLParameters [this]
+        (let [engine (.createSSLEngineImpl this)]
+          (.setUseClientMode engine true)
+          (.getSSLParameters engine)))
+
+      (method ^:protected engineGetSupportedSSLParameters ^SSLParameters [this]
+        (let [engine (.createSSLEngineImpl this)
+              params (SSLParameters.)]
+          (.setCipherSuites params (.getSupportedCipherSuites engine))
+          (.setProtocols params (.getSupportedProtocols engine))
+          params))
+
+      (method getSupportedProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        supportedProtocols)
+
+      (method getSupportedCipherSuites ^{:tag (List CipherSuite)} [this]
+        supportedCipherSuites)
+
+      (method getServerDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        serverDefaultProtocols)
+
+      (method getServerDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        serverDefaultCipherSuites)
+
+      (method createSSLEngineImpl ^SSLEngine [this] (SSLEngineImpl. this))
+
+      (method createSSLEngineImpl ^SSLEngine [this ^String host ^int port]
+        (SSLEngineImpl. this host port))
+
+      (method isDTLS ^boolean [this] true))
+
+    (defclass ^:public ^:static ^:final DTLS10Context
+      :extends AbstractDTLSContext
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} clientDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} clientDefaultCipherSuites)
+
+      (static-initializer
+        (set! clientDefaultProtocols
+              (SSLContextImpl/getAvailableProtocols
+                (new ProtocolVersion/1 [ProtocolVersion/DTLS10])))
+        (set! clientDefaultCipherSuites
+              (SSLContextImpl/getApplicableEnabledCipherSuites clientDefaultProtocols true)))
+
+      (method getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        clientDefaultProtocols)
+
+      (method getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        clientDefaultCipherSuites))
+
+    (defclass ^:public ^:static ^:final DTLS12Context
+      :extends AbstractDTLSContext
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} clientDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} clientDefaultCipherSuites)
+
+      (static-initializer
+        (set! clientDefaultProtocols
+              (SSLContextImpl/getAvailableProtocols
+                (new ProtocolVersion/1 [ProtocolVersion/DTLS12 ProtocolVersion/DTLS10])))
+        (set! clientDefaultCipherSuites
+              (SSLContextImpl/getApplicableEnabledCipherSuites clientDefaultProtocols true)))
+
+      (method getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        clientDefaultProtocols)
+
+      (method getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        clientDefaultCipherSuites))
+
+    (defclass ^:private ^:static CustomizedDTLSContext
+      :extends AbstractDTLSContext
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} clientDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List ProtocolVersion)} serverDefaultProtocols)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} clientDefaultCipherSuites)
+
+      (field ^:private ^:static ^:final ^{:tag (List CipherSuite)} serverDefaultCipherSuites)
+
+      (field ^:private ^:static ^:final ^IllegalArgumentException reservedException)
+
+      (static-initializer
+        (set! reservedException CustomizedSSLProtocols/reservedException)
+        (if (nil? reservedException)
+            (do
+              (set! clientDefaultProtocols
+                    (CustomizedDTLSContext/customizedProtocols
+                      true
+                      CustomizedSSLProtocols/customizedClientProtocols))
+              (set! serverDefaultProtocols
+                    (CustomizedDTLSContext/customizedProtocols
+                      false
+                      CustomizedSSLProtocols/customizedServerProtocols))
+              (set! clientDefaultCipherSuites
+                    (SSLContextImpl/getApplicableEnabledCipherSuites clientDefaultProtocols true))
+              (set! serverDefaultCipherSuites
+                    (SSLContextImpl/getApplicableEnabledCipherSuites serverDefaultProtocols false)))
+            (do
+              (set! clientDefaultProtocols nil)
+              (set! serverDefaultProtocols nil)
+              (set! clientDefaultCipherSuites nil)
+              (set! serverDefaultCipherSuites nil))))
+
+      (method ^:private ^:static customizedProtocols ^{:tag (List ProtocolVersion)} [^boolean client
+                                                                                     ^{:tag (List ProtocolVersion)} customized]
+        (let [^{:tag (List ProtocolVersion)} refactored (ArrayList.)]
+          (for-each [^ProtocolVersion pv customized] (when (.-isDTLS pv) (.add refactored pv)))
+          (let [^:mutable ^ProtocolVersion/1 candidates nil]
+            (if (.isEmpty refactored)
+                (set! candidates
+                      (new ProtocolVersion/1 [ProtocolVersion/DTLS12 ProtocolVersion/DTLS10]))
+                (do
+                  (set! candidates (new ProtocolVersion/1 (.size customized)))
+                  (set! candidates (cast ProtocolVersion/1 (.toArray refactored candidates)))))
+            (SSLContextImpl/getAvailableProtocols candidates))))
+
+      (constructor ^:protected [this]
+        (when (some? reservedException) (throw reservedException)))
+
+      (method getClientDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        clientDefaultProtocols)
+
+      (method getServerDefaultProtocolVersions ^{:tag (List ProtocolVersion)} [this]
+        serverDefaultProtocols)
+
+      (method getClientDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        clientDefaultCipherSuites)
+
+      (method getServerDefaultCipherSuites ^{:tag (List CipherSuite)} [this]
+        serverDefaultCipherSuites))
+
+    (defclass ^:public ^:static ^:final DTLSContext
+      :extends CustomizedDTLSContext))
+
+  (defclass ^:final AbstractTrustManagerWrapper
+    :extends X509ExtendedTrustManager
+    :implements [X509TrustManager]
+
+    (field ^:private ^:final ^X509TrustManager tm)
+
+    (constructor [this ^X509TrustManager tm] (set! (.-tm this) tm))
+
+    (method ^:public checkClientTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType]
+      (.checkClientTrusted tm chain authType))
+
+    (method ^:public checkServerTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType]
+      (.checkServerTrusted tm chain authType))
+
+    (method ^:public getAcceptedIssuers ^X509Certificate/1 [this]
+      (.getAcceptedIssuers tm))
+
+    (method ^:public checkClientTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType
+                                                                              ^Socket socket]
+      (.checkClientTrusted tm chain authType)
+      (.checkAdditionalTrust this chain authType socket true))
+
+    (method ^:public checkServerTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType
+                                                                              ^Socket socket]
+      (.checkServerTrusted tm chain authType)
+      (.checkAdditionalTrust this chain authType socket false))
+
+    (method ^:public checkClientTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType
+                                                                              ^SSLEngine engine]
+      (.checkClientTrusted tm chain authType)
+      (.checkAdditionalTrust this chain authType engine true))
+
+    (method ^:public checkServerTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType
+                                                                              ^SSLEngine engine]
+      (.checkServerTrusted tm chain authType)
+      (.checkAdditionalTrust this chain authType engine false))
+
+    (method ^:private checkAdditionalTrust :throws [CertificateException] ^void [this
+                                                                                 ^X509Certificate/1 chain
+                                                                                 ^String authType
+                                                                                 ^Socket socket
+                                                                                 ^boolean checkClientTrusted]
+      (when (and (some? socket) (.isConnected socket))
+        (when-instance [^SSLSocket sslSocket socket]
+          (let [session (.getHandshakeSession sslSocket)]
+            (when (nil? session) (throw (CertificateException. "No handshake session")))
+            (let [identityAlg (.getEndpointIdentificationAlgorithm (.getSSLParameters sslSocket))]
+              (when (and (some? identityAlg) (not (.isEmpty identityAlg)))
+                (X509TrustManagerImpl/checkIdentity session chain identityAlg checkClientTrusted))
+              (let [^AlgorithmConstraints constraints (SSLAlgorithmConstraints/forSocket
+                                                        sslSocket
+                                                        SSLAlgorithmConstraints$SIGNATURE_CONSTRAINTS_MODE/LOCAL
+                                                        true)]
+                (.checkAlgorithmConstraints this chain constraints checkClientTrusted)))))))
+
+    (method ^:private checkAdditionalTrust :throws [CertificateException] ^void [this
+                                                                                 ^X509Certificate/1 chain
+                                                                                 ^String authType
+                                                                                 ^SSLEngine engine
+                                                                                 ^boolean checkClientTrusted]
+      (when (some? engine)
+        (let [session (.getHandshakeSession engine)]
+          (when (nil? session) (throw (CertificateException. "No handshake session")))
+          (let [identityAlg (.getEndpointIdentificationAlgorithm (.getSSLParameters engine))]
+            (when (and (some? identityAlg) (not (.isEmpty identityAlg)))
+              (X509TrustManagerImpl/checkIdentity session chain identityAlg checkClientTrusted))
+            (let [^AlgorithmConstraints constraints (SSLAlgorithmConstraints/forEngine
+                                                      engine
+                                                      SSLAlgorithmConstraints$SIGNATURE_CONSTRAINTS_MODE/LOCAL
+                                                      true)]
+              (.checkAlgorithmConstraints this chain constraints checkClientTrusted))))))
+
+    (method ^:private checkAlgorithmConstraints :throws [CertificateException] ^void [this
+                                                                                      ^X509Certificate/1 chain
+                                                                                      ^AlgorithmConstraints constraints
+                                                                                      ^boolean checkClientTrusted]
+      (try
+        (let [^:mutable checkedLength (unchecked-subtract-int (alength chain) 1)
+              ^{:tag (Collection X509Certificate)} trustedCerts (HashSet.)
+              certs (.getAcceptedIssuers tm)]
+          (when (and (some? certs) (> (alength certs) 0)) (Collections/addAll trustedCerts certs))
+          (when (.contains trustedCerts (aget chain checkedLength))
+            (set! checkedLength (unchecked-dec-int checkedLength)))
+          (when (>= checkedLength 0)
+            (let [checker (AlgorithmChecker. constraints
+                                             ^String (if checkClientTrusted
+                                                         Validator/VAR_TLS_CLIENT
+                                                         Validator/VAR_TLS_SERVER))]
+              (.init checker false)
+              (loop [^int i checkedLength]
+                (when (>= i 0)
+                  (let [cert (aget chain i)]
+                    (.check checker cert (Collections/emptySet))
+                    (recur (unchecked-dec-int i))))))))
+        (catch CertPathValidatorException cpve
+          (throw
+            (CertificateException. "Certificates do not conform to algorithm constraints" cpve))))))
+
+  (defclass ^:final DummyX509TrustManager
+    :extends X509ExtendedTrustManager
+    :implements [X509TrustManager]
+
+    (field ^:static ^:final ^X509TrustManager INSTANCE (DummyX509TrustManager.))
+
+    (constructor ^:private [this])
+
+    (method ^:public checkClientTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType]
+      (throw (CertificateException. "No X509TrustManager implementation available")))
+
+    (method ^:public checkServerTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType]
+      (throw (CertificateException. "No X509TrustManager implementation available")))
+
+    (method ^:public getAcceptedIssuers ^X509Certificate/1 [this]
+      (new X509Certificate/1 0))
+
+    (method ^:public checkClientTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType
+                                                                              ^Socket socket]
+      (throw (CertificateException. "No X509TrustManager implementation available")))
+
+    (method ^:public checkServerTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType
+                                                                              ^Socket socket]
+      (throw (CertificateException. "No X509TrustManager implementation available")))
+
+    (method ^:public checkClientTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType
+                                                                              ^SSLEngine engine]
+      (throw (CertificateException. "No X509TrustManager implementation available")))
+
+    (method ^:public checkServerTrusted :throws [CertificateException] ^void [this
+                                                                              ^X509Certificate/1 chain
+                                                                              ^String authType
+                                                                              ^SSLEngine engine]
+      (throw (CertificateException. "No X509TrustManager implementation available"))))
+
+  (defclass ^:final AbstractKeyManagerWrapper
+    :extends X509ExtendedKeyManager
+
+    (field ^:private ^:final ^X509KeyManager km)
+
+    (constructor [this ^X509KeyManager km] (set! (.-km this) km))
+
+    (method ^:public getClientAliases ^String/1 [this ^String keyType ^Principal/1 issuers]
+      (.getClientAliases km keyType issuers))
+
+    (method ^:public chooseClientAlias ^String [this ^String/1 keyType ^Principal/1 issuers
+                                                ^Socket socket]
+      (.chooseClientAlias km keyType issuers socket))
+
+    (method ^:public getServerAliases ^String/1 [this ^String keyType ^Principal/1 issuers]
+      (.getServerAliases km keyType issuers))
+
+    (method ^:public chooseServerAlias ^String [this ^String keyType ^Principal/1 issuers
+                                                ^Socket socket]
+      (.chooseServerAlias km keyType issuers socket))
+
+    (method ^:public getCertificateChain ^X509Certificate/1 [this ^String alias]
+      (.getCertificateChain km alias))
+
+    (method ^:public getPrivateKey ^PrivateKey [this ^String alias]
+      (.getPrivateKey km alias)))
+
+  (defclass ^:final DummyX509KeyManager
+    :extends X509ExtendedKeyManager
+
+    (field ^:static ^:final ^X509ExtendedKeyManager INSTANCE (DummyX509KeyManager.))
+
+    (constructor ^:private [this])
+
+    (method ^:public getClientAliases ^String/1 [this ^String keyType ^Principal/1 issuers]
+      nil)
+
+    (method ^:public chooseClientAlias ^String [this ^String/1 keyTypes ^Principal/1 issuers
+                                                ^Socket socket]
+      nil)
+
+    (method ^:public chooseEngineClientAlias ^String [this ^String/1 keyTypes ^Principal/1 issuers
+                                                      ^SSLEngine engine]
+      nil)
+
+    (method ^:public getServerAliases ^String/1 [this ^String keyType ^Principal/1 issuers]
+      nil)
+
+    (method ^:public chooseServerAlias ^String [this ^String keyType ^Principal/1 issuers
+                                                ^Socket socket]
+      nil)
+
+    (method ^:public chooseEngineServerAlias ^String [this ^String keyType ^Principal/1 issuers
+                                                      ^SSLEngine engine]
+      nil)
+
+    (method ^:public getCertificateChain ^X509Certificate/1 [this ^String alias]
+      nil)
+
+    (method ^:public getPrivateKey ^PrivateKey [this ^String alias] nil)))

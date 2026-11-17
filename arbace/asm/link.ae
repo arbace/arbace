@@ -1,0 +1,1009 @@
+(ns arbace.asm.link
+  "Arbace's static linker for x86-64 ELF (doc/asm/AMD64-SURVEY.md §7.3, AX4's second slice; doc/asm/AMD64.md §8): ELF64
+  relocatable objects (Arbace's own, arbace.asm.amd64.obj's) linked into a static executable (ET_EXEC) for x86-64 Linux as
+  lld lays one out with no linker script, written again in Arbace from llvm-project 23.1.5's lld/ELF (Driver, InputFiles'
+  initializeSymbols and the COMDAT rule, SymbolTable and Symbol::resolve, LinkerScript::getOutputSectionName and
+  assignAddresses, Writer's getSectionRank, createPhdrs, fixSectionAlignments, assignFileOffsets and setPhdrs, the synthetic
+  .eh_frame, .got, .got.plt and .relro_padding, MergeInputSection's pieces, Arch/X86_64's relocate, adjustGotPcExpr, relaxGot
+  and relaxTlsIeToLe), Apache-2.0 WITH LLVM-exception; no code copied.
+
+  What it does, in lld's order: the objects read (arbace.asm.elf); COMDAT groups kept by their first signature, the later
+  members discarded; the global symbols resolved (defined over common over undefined, strong over weak, two strong
+  definitions an error), commons allocated into .bss; the sections named into output sections (.text.*, .data.*,
+  .rodata.*, .bss.*, ... by prefix), the mergeable ones split into pieces and deduplicated, .eh_frame's CIEs deduplicated
+  and its dead FDEs dropped; the relocations scanned (GOTPCRELX relaxed as lld relaxes it, a .got entry for the rest); the
+  output sections sorted by lld's rank, the program headers made (PT_PHDR, the PT_LOADs by permission, PT_TLS,
+  PT_GNU_RELRO, PT_GNU_STACK), the addresses assigned from 0x200000 (a segment's first section on the next page at the
+  same page offset), the file offsets made congruent, the relocations applied, the symbol table written (the locals by file,
+  hidden globals made local), the entry `_start`.
+
+  Not yet (each its class): archives, shared objects and dynamic linking (AXS11), TLS GD/LD/TLSDESC (relaxed to LE by lld),
+  relocations inside mergeable sections, --gc-sections, ICF, linker scripts, static PIE."
+  (:require [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def SHT_NOTE 7) (def SHT_REL 9) (def SHT_INIT_ARRAY 14) (def SHT_FINI_ARRAY 15) (def SHT_PREINIT_ARRAY 16)
+(def SHF_MERGE 0x10) (def SHF_STRINGS 0x20) (def SHF_LINK_ORDER 0x80) (def SHF_EXCLUDE 0x80000000)
+(def STV_DEFAULT 0) (def STV_INTERNAL 1) (def STV_HIDDEN 2) (def STV_PROTECTED 3)
+(def PT_LOAD 1) (def PT_PHDR 6) (def PT_TLS 7) (def PT_GNU_STACK 0x6474e551) (def PT_GNU_RELRO 0x6474e552)
+(def PF_X 1) (def PF_W 2) (def PF_R 4)
+
+(def ^:dynamic *arch*
+  "The target (lld's TargetInfo): :machine, :name, :image-base (defaultImageBase), :max-page (defaultMaxPageSize), :common-page,
+  :trap (the fill of a code section's gaps, trapInstr). x86-64's by default; AArch64's (AR4) `aarch64`."
+  {:machine 62 :name "x86-64" :image-base 0x200000 :max-page 4096 :common-page 4096 :trap 0xcc})
+
+(def aarch64
+  "AArch64's TargetInfo (lld/ELF/Arch/AArch64.cpp): defaultImageBase 0x200000 (a 2 MiB superpage), defaultMaxPageSize 64 KiB,
+  trapInstr 0xd4d4d4d4."
+  {:machine 183 :name "AArch64" :image-base 0x200000 :max-page 65536 :common-page 4096 :trap 0xd4})
+(def link-comment "the linker's line in .comment (lld's is its version)" "Linker: Arbace (arbace.asm.link)")
+
+(def ^:private a64-reloc-names (delay @(requiring-resolve 'arbace.asm.arm64.obj/reloc-names)))
+(defn- fail [msg] (throw (ex-info (str msg) {:link/error (str msg)})))
+(defn- unsupported [cls what] (throw (ex-info (str what) {:link/unsupported cls})))
+
+(defn- align-up ^long [^long x ^long a] (if (<= a 1) x (* a (quot (+ x (dec a)) a))))
+(defn- u32 ^long [^bytes b ^long at]
+  (bit-or (bit-and (long (aget b at)) 0xff) (bit-shift-left (bit-and (long (aget b (+ at 1))) 0xff) 8)
+          (bit-shift-left (bit-and (long (aget b (+ at 2))) 0xff) 16) (bit-shift-left (bit-and (long (aget b (+ at 3))) 0xff) 24)))
+(defn- put! [^bytes b ^long at ^long v ^long n]
+  (dotimes [i n] (aset-byte b (+ at i) (unchecked-byte (bit-shift-right v (* 8 i))))))
+(defn- s32? [^long v] (and (>= v -2147483648) (<= v 2147483647)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the inputs (ObjFile::parse, initializeSections, the COMDAT rule)
+
+(defn- ignored?
+  "A section that never reaches the output: the object's own tables, the groups, `.note.GNU-stack` (read for the stack's
+  permission), SHF_EXCLUDE."
+  [s]
+  (or (contains? #{elf/SHT_NULL elf/SHT_SYMTAB elf/SHT_STRTAB elf/SHT_RELA SHT_REL elf/SHT_GROUP} (:type s))
+      (= ".note.GNU-stack" (:name s))
+      (not (zero? (bit-and (long (:flags s)) SHF_EXCLUDE)))))
+
+(defn- read-input [^long fi ^String path ^bytes b]
+  (when (and (>= (alength b) 8) (= "!<arch>\n" (String. b 0 8 "ISO-8859-1")))
+    (unsupported :archive (str path ": an archive")))
+  (let [o (try (elf/read-object b) (catch Exception _ (fail (str path ": not an ELF64 object"))))
+        h (:header o)]
+    (when-not (= 1 (:type h)) (if (= 3 (:type h)) (unsupported :shared (str path ": a shared object")) (fail (str path ": not a relocatable object"))))
+    (when-not (= (:machine *arch*) (:machine h)) (fail (str path ": not an " (:name *arch*) " object")))
+    {:idx fi :path path :o o
+     :relocs (group-by :target (:relocs o))}))
+
+(defn- groups
+  "The object's groups: [SIGNATURE COMDAT? [MEMBER-INDEX...]]."
+  [f]
+  (let [o (:o f)]
+    (vec (for [s (:sections o) :when (= elf/SHT_GROUP (:type s))]
+           (let [d ^bytes (:data s) n (quot (alength d) 4)]
+             [(:name (nth (:symbols o) (:info s))) (= 1 (bit-and (u32 d 0) 1)) (mapv #(u32 d (* 4 %)) (range 1 n))])))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the symbols (initializeSymbols, Symbol::resolve)
+
+(defn- vis ^long [s] (bit-and (long (or (:other s) 0)) 3))
+(defn- min-vis
+  "Symbol::mergeProperties: the most constraining visibility of all references."
+  ^long [^long a ^long b]
+  (cond (zero? a) b (zero? b) a :else (min a b)))
+
+(defn- resolve-symbols!
+  "The global symbol table (in the order names are first seen), each name {:state :undef|:common|:defined :weak :file
+  :sym S :size :align :vis}, and each file's symbol index → [:local fi i] or [:global NAME]."
+  [files live?]
+  (let [table (java.util.LinkedHashMap.)]
+    (doseq [f files [i s] (map-indexed vector (:symbols (:o f))) :when (and (pos? (long i)) (not= elf/STB_LOCAL (:bind s)))]
+      (let [n (:name s) fi (:idx f) shndx (long (:shndx s))
+            old (.get table n)
+            kind (cond (= shndx elf/SHN_UNDEF) :undef
+                       (= shndx elf/SHN_COMMON) :common
+                       (= shndx elf/SHN_ABS) :defined
+                       (live? fi shndx) :defined
+                       :else :undef)
+            weak (= elf/STB_WEAK (:bind s))
+            v (if old (min-vis (long (:vis old)) (vis s)) (vis s))
+            new {:state kind :weak weak :file fi :sym s :size (:size s) :align (:value s) :vis v :name n}]
+        (.put table n
+              (if (nil? old)
+                new
+                (let [old (assoc old :vis v)]
+                  (case [(:state old) kind]
+                    [:undef :undef] (if (and (:weak old) (not weak)) (assoc old :weak false) old)
+                    [:undef :common] new
+                    [:undef :defined] new
+                    [:common :undef] old
+                    [:common :common] (assoc (if (> (long (:size s)) (long (:size old))) new old)
+                                             :align (max (long (:value s)) (long (:align old))) :vis v)
+                    [:common :defined] new
+                    [:defined :undef] old
+                    [:defined :common] old
+                    [:defined :defined] (cond weak old
+                                              (:weak old) new
+                                              :else (fail (str "duplicate symbol: " n)))))))))
+    table))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; output sections (getOutputSectionName, getSectionRank)
+
+(def ^:private prefixes
+  [".data.rel.ro" ".data" ".rodata" ".bss.rel.ro" ".bss" ".ldata" ".lrodata" ".lbss" ".gcc_except_table" ".init_array"
+   ".fini_array" ".tbss" ".tdata" ".ARM.exidx" ".ARM.extab" ".ctors" ".dtors" ".sbss" ".sdata" ".srodata"
+   ".gnu.build.attributes"])
+
+(defn- prefix? [^String p ^String n] (or (= n p) (and (.startsWith n p) (= \. (.charAt n (.length p))))))
+
+(defn out-name
+  "LinkerScript::getOutputSectionName with no SECTIONS: `.text.*` into `.text`, the other GNU prefixes likewise."
+  [^String n]
+  (cond (= n "COMMON") ".bss"
+        (prefix? ".text" n) ".text"
+        (prefix? ".ltext" n) ".ltext"
+        :else (or (first (filter #(prefix? % n) prefixes)) n)))
+
+(defn- relro? [o]
+  (let [fl (long (:flags o)) n (:name o)]
+    (and (not (zero? (bit-and fl elf/SHF_ALLOC))) (not (zero? (bit-and fl elf/SHF_WRITE)))
+         (or (not (zero? (bit-and fl elf/SHF_TLS)))
+             (contains? #{SHT_INIT_ARRAY SHT_FINI_ARRAY SHT_PREINIT_ARRAY} (:type o))
+             (contains? #{".got" ".relro_padding" ".dynamic" ".data.rel.ro" ".bss.rel.ro" ".ctors" ".dtors" ".jcr" ".eh_frame"
+                          ".fini_array" ".init_array" ".preinit_array"} n)))))
+
+(defn- rank
+  "Writer's getSectionRank for x86-64 (no -T, no large sections): R, RX, RW TLS, RW RELRO, RW; NOBITS after PROGBITS."
+  ^long [o]
+  (let [fl (long (:flags o)) x (not (zero? (bit-and fl elf/SHF_EXECINSTR))) w (not (zero? (bit-and fl elf/SHF_WRITE)))
+        r (bit-shift-left 1 27)]
+    (if (zero? (bit-and fl elf/SHF_ALLOC))
+      (bit-or r (bit-shift-left 1 26))
+      (let [r (cond (and (not w) (not x)) (bit-or r (bit-shift-left 1 9)
+                                                 (cond (= (:name o) ".interp") 1 (= (:type o) SHT_NOTE) 2
+                                                       (not= (:type o) elf/SHT_PROGBITS) 3 :else (bit-shift-left 1 11)))
+                    x (bit-or r (if w (bit-shift-left 1 13) (bit-shift-left 1 12)))
+                    :else (bit-or r (bit-shift-left 1 14)
+                                  (if (zero? (bit-and fl elf/SHF_TLS)) (bit-shift-left 1 7) 0)
+                                  (if (relro? o) 0 (bit-shift-left 1 8))))]
+        (if (= (:type o) elf/SHT_NOBITS) (bit-or r (bit-shift-left 1 6)) r)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; mergeable sections (MergeInputSection::splitIntoPieces, MergeNoTailSection)
+
+(defn- pieces
+  "The pieces of a mergeable section: [IN-OFFSET SIZE KEY]."
+  [s]
+  (let [^bytes d (:data s) n (alength d) es (long (max 1 (long (:entsize s))))
+        strings (not (zero? (bit-and (long (:flags s)) SHF_STRINGS)))]
+    (when-not (zero? (rem n es)) (fail (str (:name s) ": SHF_MERGE section size must be a multiple of sh_entsize")))
+    (if strings
+      (loop [at (long 0) acc []]
+        (if (>= at n)
+          acc
+          (let [end (loop [e at] (cond (> (+ e es) n) (fail (str (:name s) ": string is not null terminated"))
+                                       (every? #(zero? (aget d (+ e (long %)))) (range es)) (+ e es)
+                                       :else (recur (+ e es))))]
+            (recur (long end) (conj acc [at (- end at) (String. d (int at) (int (- end at)) "ISO-8859-1")])))))
+      (vec (for [at (range 0 n es)] [at es (String. d (int at) (int es) "ISO-8859-1")])))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; .eh_frame (EhInputSection::split, EhFrameSection)
+
+(defn- eh-records
+  "The records of an input .eh_frame: [IN-OFFSET SIZE CIE?]; a zero length ends it."
+  [^bytes d]
+  (let [n (alength d)]
+    (loop [at (long 0) acc []]
+      (if (> (+ at 4) n)
+        acc
+        (let [len (u32 d at)]
+          (cond (zero? len) acc
+                (= len 0xffffffff) (unsupported :eh-frame "a 64-bit .eh_frame record")
+                (> (+ at 4 len) n) (fail "corrupted .eh_frame: CIE/FDE too large")
+                :else (recur (long (+ at 4 len)) (conj acc [at (+ 4 len) (zero? (u32 d (+ at 4)))]))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the link
+
+(defn- sec-of [files ^long fi ^long i] (nth (:sections (:o (nth files fi))) i))
+
+(defn link
+  "The static executable of the objects `inputs` ([PATH BYTES]...): {:bytes BYTES} (and :layout with the option :layout), or {:error MESSAGE}, or
+  {:unsupported CLASS :what TEXT}."
+  [inputs & [{:keys [entry layout] :or {entry "_start"}}]]
+  (try
+    (let [image-base (:image-base *arch*) max-page (:max-page *arch*) common-page (:common-page *arch*)
+          aarch64? (= 183 (:machine *arch*))
+          files (vec (map-indexed (fn [i [p b]] (read-input i p b)) inputs))
+          ;; COMDAT: the first group of a signature kept, the members of a later one discarded
+          seen (java.util.HashSet.)
+          discarded (java.util.HashSet.)
+          _ (doseq [f files [sig comdat members] (groups f)]
+              (when comdat
+                (if (.contains seen sig)
+                  (doseq [m members] (.add discarded [(:idx f) m]))
+                  (.add seen sig))))
+          live? (fn [fi i] (let [i (long i)]
+                             (and (pos? i) (< i 0xff00) (not (.contains discarded [fi i]))
+                                  (not (ignored? (sec-of files fi i))))))
+          table (resolve-symbols! files live?)
+          gsym (fn [n] (.get ^java.util.LinkedHashMap table n))
+          ;; the input sections into output sections, in creation order
+          osecs (java.util.LinkedHashMap.)
+          osec! (fn [n type flags]
+                  (or (.get osecs n)
+                      (let [o (volatile! {:name n :type type :flags 0 :align 1 :entsize nil :items []})] (.put osecs n o) o)))
+          add-item! (fn [o item s]
+                      (vswap! o (fn [m]
+                                  (let [t (:type m)]
+                                    (-> m
+                                        (update :items conj item)
+                                        (assoc :type (if (or (= t (:type s)) (not= t elf/SHT_NOBITS)) (if (= t elf/SHT_NOBITS) (:type s) t) (:type s)))
+                                        (update :flags bit-or (bit-and (long (:flags s)) (bit-not (bit-or elf/SHF_GROUP elf/SHF_INFO_LINK))))
+                                        (update :align max (long (max 1 (long (:align s)))))
+                                        (assoc :entsize (if (or (nil? (:entsize m)) (= (:entsize m) (:entsize s))) (:entsize s) 0)))))))
+          eh-inputs (java.util.ArrayList.)
+          _ (doseq [f files [i s] (map-indexed vector (:sections (:o f))) :when (live? (:idx f) i)]
+              (let [n (out-name (:name s))]
+                (if (and (= ".eh_frame" (:name s)) (not (zero? (bit-and (long (:flags s)) elf/SHF_ALLOC))))
+                  (.add eh-inputs [(:idx f) i])
+                  (let [o (osec! n (:type s) (:flags s))]
+                    (when (and (not (zero? (bit-and (long (:flags s)) SHF_MERGE))) (seq (get (:relocs f) i)))
+                      (unsupported :merge-relocs (str (:name s) ": relocations in a mergeable section")))
+                    (add-item! o {:kind :isec :key [(:idx f) i]} s)))))
+          ;; commons: a BSS section of each, in the symbol table's order
+          _ (doseq [[n g] table :when (= :common (:state g))]
+              (add-item! (osec! ".bss" elf/SHT_NOBITS 0) {:kind :common :name n}
+                         {:type elf/SHT_NOBITS :flags (bit-or elf/SHF_ALLOC elf/SHF_WRITE) :align (max 1 (long (:align g))) :entsize 0}))
+          ;; the linker's line in .comment
+          _ (add-item! (osec! ".comment" elf/SHT_PROGBITS 0) {:kind :comment}
+                       {:type elf/SHT_PROGBITS :flags (bit-or SHF_MERGE SHF_STRINGS) :align 1 :entsize 1})
+          ;; symbols by file index
+          symref (fn [^long fi ^long si]
+                   (let [s (nth (:symbols (:o (nth files fi))) si)]
+                     (if (= elf/STB_LOCAL (:bind s)) [:local fi si] [:global (:name s)])))
+          ;; the relocations scanned: the GOT's entries and GOTPCRELX's relaxation (RelocScan::process, adjustGotPcExpr)
+          got (java.util.LinkedHashMap.)
+          tls-got (java.util.HashSet.)
+          decisions (java.util.HashMap.)
+          flags (volatile! #{})
+          absolute-or-tls? (fn [[k a b]]
+                             (if (= k :local)
+                               (let [s (nth (:symbols (:o (nth files a))) b)]
+                                 (or (= (:shndx s) elf/SHN_ABS) (= (:type s) elf/STT_TLS)))
+                               (let [g (gsym a)]
+                                 (or (nil? g) (and (= :undef (:state g)) (:weak g))
+                                     (and (= :defined (:state g)) (= (:shndx (:sym g)) elf/SHN_ABS))
+                                     (= (:type (:sym g)) elf/STT_TLS)))))
+          _ (when-let [g (gsym "_GLOBAL_OFFSET_TABLE_")] (when (= :undef (:state g)) (vswap! flags conj :gotplt)))
+          _ (doseq [f files [i rs] (:relocs f) :when (and (live? (:idx f) i) (not= ".eh_frame" (:name (sec-of files (:idx f) i))))
+                    [ri r] (map-indexed vector rs)]
+              (let [t (long (:type r)) fi (:idx f) ref (symref fi (:sym r))
+                    ^bytes d (:data (sec-of files fi i)) off (long (:offset r))]
+                (if aarch64?
+                  ;; AArch64 (RelocScan for AArch64::getRelExpr): a GOT entry for the GOT's relocations and initial exec's (kept,
+                  ;; not relaxed to local exec: the entry holds the offset from the thread pointer)
+                  (case t
+                    (0x135 0x137 0x138 0x139) (when-not (.containsKey got ref) (.put got ref (.size got)))
+                    (0x21d 0x21e 0x21f) (do (when-not (.containsKey got ref) (.put got ref (.size got))) (.add tls-got ref))
+                    (0x200 0x201 0x202 0x203 0x204 0x205 0x206 0x207 0x208 0x209 0x20a 0x230 0x231 0x232 0x233 0x234 0x235 0x236 0x237 0x238 0x239)
+                    (unsupported :tls-gd-ld (str (get @a64-reloc-names t t) " (TLS GD/LD/TLSDESC)"))
+                    nil)
+                (case t
+                  (9 41 42) ;; GOTPCREL, GOTPCRELX, REX_GOTPCRELX
+                  (let [op (when (>= off 2) (bit-and (long (aget d (- off 2))) 0xff))
+                        modrm (when (>= off 1) (bit-and (long (aget d (- off 1))) 0xff))
+                        e (cond (or (absolute-or-tls? ref) (not= -4 (long (:addend r))) (= t 9)) :got
+                                (= op 0x8b) :relax
+                                (and (= op 0xff) (or (= modrm 0x15) (= modrm 0x25))) :relax
+                                (= t 41) :got
+                                :else :relax-nopic)]
+                    (.put decisions [fi i ri] e)
+                    (if (= e :got) (when-not (.containsKey got ref) (.put got ref (.size got))) (vswap! flags conj :got)))
+                  (3 27) (do (when-not (.containsKey got ref) (.put got ref (.size got))) (vswap! flags conj :gotplt))
+                  (25 26 29 31) (vswap! flags conj :gotplt)
+                  (19 20 34 35 36) (unsupported :tls-gd-ld (str "R_X86_64_" (get elf/reloc-names t t) " (TLS GD/LD/TLSDESC to LE)"))
+                  nil))))
+          _ (when (or (pos? (.size got)) (contains? @flags :got))
+              (add-item! (osec! ".got" elf/SHT_PROGBITS 0) {:kind :got} {:type elf/SHT_PROGBITS :flags (bit-or elf/SHF_ALLOC elf/SHF_WRITE) :align 8 :entsize 0}))
+          _ (when (contains? @flags :gotplt)
+              (add-item! (osec! ".got.plt" elf/SHT_PROGBITS 0) {:kind :gotplt} {:type elf/SHT_PROGBITS :flags (bit-or elf/SHF_ALLOC elf/SHF_WRITE) :align 8 :entsize 0}))
+          ;; .eh_frame: CIEs deduplicated by contents and personality, the FDEs of dead functions dropped
+          eh (when (pos? (.size eh-inputs))
+               (let [cies (java.util.LinkedHashMap.) out-of (java.util.HashMap.)]
+                 (doseq [[fi i] eh-inputs]
+                   (let [s (sec-of files fi i) ^bytes d (:data s) rs (sort-by :offset (get (:relocs (nth files fi)) i))
+                         recs (eh-records d)
+                         first-rel (fn [at size] (first (filter #(and (>= (long (:offset %)) (long at)) (< (long (:offset %)) (+ (long at) (long size)))) rs)))
+                         local-cie (java.util.HashMap.)]
+                     (doseq [[at size cie?] recs :when cie?]
+                       (let [r (first-rel at size)
+                             k [(String. d (int at) (int size) "ISO-8859-1") (when r (symref fi (:sym r)))]]
+                         (when-not (.containsKey cies k) (.put cies k (volatile! {:src [fi i at size] :fdes []})))
+                         (.put local-cie at (.get cies k))))
+                     (doseq [[at size cie?] recs :when (not cie?)]
+                       (let [cie (.get local-cie (- (+ (long at) 4) (u32 d (+ (long at) 4))))
+                             r (first-rel at size)
+                             ref (when r (symref fi (:sym r)))
+                             fn-live (when ref
+                                       (if (= :local (first ref))
+                                         (let [s (nth (:symbols (:o (nth files fi))) (nth ref 2))] (live? fi (:shndx s)))
+                                         (= :defined (:state (gsym (second ref))))))]
+                         (when-not cie (fail "invalid CIE reference"))
+                         (when fn-live (vswap! cie update :fdes conj [fi i at size]))))))
+                 (let [o (java.io.ByteArrayOutputStream.) offs (java.util.HashMap.)]
+                   (doseq [[_ c] cies]
+                     (let [[fi i at size] (:src @c) ^bytes d (:data (sec-of files fi i)) cie-off (.size o)]
+                       (.put offs [fi i at] cie-off)
+                       (.write o d (int at) (int size))
+                       (doseq [[fi i at size] (:fdes @c)]
+                         (let [^bytes d (:data (sec-of files fi i)) p (.size o) b (java.util.Arrays/copyOfRange d (int at) (int (+ (long at) (long size))))]
+                           (put! b 4 (- (+ p 4) cie-off) 4)
+                           (.put offs [fi i at] p)
+                           (.write o b 0 (alength b))))))
+                   {:bytes (.toByteArray o) :offs offs
+                    :align (reduce max 1 (map (fn [[fi i]] (long (:align (sec-of files fi i)))) eh-inputs))})))
+          _ (when eh (add-item! (osec! ".eh_frame" elf/SHT_PROGBITS 0) {:kind :eh}
+                                {:type elf/SHT_PROGBITS :flags elf/SHF_ALLOC :align (:align eh) :entsize 0}))
+          _ (add-item! (osec! ".relro_padding" elf/SHT_NOBITS 0) {:kind :relro-pad} {:type elf/SHT_NOBITS :flags (bit-or elf/SHF_ALLOC elf/SHF_WRITE) :align 1 :entsize 0})
+          ;; the order: lld's rank, stably
+          order0 (vec (sort-by rank (map deref (vals osecs))))
+          ;; .relro_padding only after a RELRO section that has a PT_LOAD
+          order (let [seen-relro (volatile! false)]
+                  (vec (for [o order0
+                             :let [keep (or (not= ".relro_padding" (:name o)) @seen-relro)]
+                             :when keep]
+                         (do (when (and (relro? o) (not (and (= (:type o) elf/SHT_NOBITS) (not (zero? (bit-and (long (:flags o)) elf/SHF_TLS))))))
+                               (vreset! seen-relro true))
+                             o))))
+          ;; each output section's items laid out: the mergeable inputs as one synthetic section at the first one's place
+          place (java.util.HashMap.)  ;; [fi i] -> [osec-name offset] or [osec-name {in-off out-off}]
+          commons (java.util.HashMap.)
+          contents (java.util.HashMap.) ;; osec name -> {:size :parts [[off bytes]]}
+          got-off (volatile! nil) gotplt-off (volatile! nil) eh-off (volatile! nil)
+          order (vec (for [o order]
+                       (let [n (:name o) exec (not (zero? (bit-and (long (:flags o)) elf/SHF_EXECINSTR)))
+                             merges (java.util.LinkedHashMap.)
+                             items (vec (reduce (fn [acc it]
+                                                  (if (and (= :isec (:kind it)) (let [[fi i] (:key it) s (sec-of files fi i)] (not (zero? (bit-and (long (:flags s)) SHF_MERGE)))))
+                                                    (let [[fi i] (:key it) s (sec-of files fi i)
+                                                          k [(:flags s) (:entsize s) (if (zero? (bit-and (long (:flags s)) SHF_STRINGS)) 0 (:align s))]]
+                                                      (if-let [m (.get merges k)]
+                                                        (do (vswap! m conj it) acc)
+                                                        (let [m (volatile! [it])] (.put merges k m) (conj acc {:kind :merge :members m}))))
+                                                    (if (= :comment (:kind it))
+                                                      (let [k [(bit-or SHF_MERGE SHF_STRINGS) 1 1]]
+                                                        (if-let [m (.get merges k)]
+                                                          (do (vswap! m conj it) acc)
+                                                          (let [m (volatile! [it])] (.put merges k m) (conj acc {:kind :merge :members m}))))
+                                                      (conj acc it))))
+                                                [] (:items o)))
+                             parts (java.util.ArrayList.)
+                             size (reduce
+                                   (fn [^long at it]
+                                     (case (:kind it)
+                                       :isec (let [[fi i] (:key it) s (sec-of files fi i) a (max 1 (long (:align s))) p (align-up at a)]
+                                               (.put place [fi i] [n p])
+                                               (when-not (= elf/SHT_NOBITS (:type s)) (.add parts [p (:data s)]))
+                                               (+ p (long (:size s))))
+                                       :common (let [g (gsym (:name it)) p (align-up at (max 1 (long (:align g))))]
+                                                 (.put commons (:name it) [n p]) (+ p (long (:size g))))
+                                       :merge (let [ms @(:members it)
+                                                    a (reduce max 1 (for [m ms] (if (= :comment (:kind m)) 1 (let [[fi i] (:key m)] (long (:align (sec-of files fi i)))))))
+                                                    base (align-up at a)
+                                                    seen (java.util.HashMap.)
+                                                    o (java.io.ByteArrayOutputStream.)]
+                                                (doseq [m ms]
+                                                  (let [ps (if (= :comment (:kind m))
+                                                             (let [b (.getBytes (str link-comment "\u0000") "ISO-8859-1")] [[0 (alength b) (String. b "ISO-8859-1")]])
+                                                             (pieces (let [[fi i] (:key m)] (sec-of files fi i))))
+                                                        mp (java.util.TreeMap.)]
+                                                    (doseq [[in-off sz k] ps]
+                                                      (let [out (or (.get seen k)
+                                                                    (let [q (align-up (.size o) a)]
+                                                                      (dotimes [_ (- q (.size o))] (.write o 0))
+                                                                      (.write o (.getBytes ^String k "ISO-8859-1") 0 (int sz))
+                                                                      (.put seen k q) q))]
+                                                        (.put mp (long in-off) (+ base (long out)))))
+                                                    (when (= :isec (:kind m)) (.put place (:key m) [n mp]))))
+                                                (.add parts [base (.toByteArray o)])
+                                                (+ base (.size o)))
+                                       :eh (let [p (align-up at (long (:align eh)))] (vreset! eh-off [n p]) (.add parts [p (:bytes eh)]) (+ p (alength ^bytes (:bytes eh))))
+                                       :got (let [p (align-up at 8)] (vreset! got-off [n p]) (+ p (* 8 (.size got))))
+                                       :gotplt (let [p (align-up at 8)] (vreset! gotplt-off [n p]) (+ p 24))
+                                       :relro-pad at))
+                                   0 items)]
+                         (.put contents n {:parts (vec parts) :exec exec})
+                         (assoc o :size size :entsize (or (:entsize o) 0)))))
+          ;; the program headers (createPhdrs)
+          alloc? (fn [o] (not (zero? (bit-and (long (:flags o)) elf/SHF_ALLOC))))
+          tbss? (fn [o] (and (= (:type o) elf/SHT_NOBITS) (not (zero? (bit-and (long (:flags o)) elf/SHF_TLS)))))
+          pflags (fn [o] (bit-or PF_R (if (zero? (bit-and (long (:flags o)) elf/SHF_WRITE)) 0 PF_W)
+                                 (if (zero? (bit-and (long (:flags o)) elf/SHF_EXECINSTR)) 0 PF_X)))
+          loads (let [acc (java.util.ArrayList.) cur (volatile! {:flags PF_R :secs [:headers] :last-nobits false})
+                      relro-end (let [v (volatile! nil) active (volatile! false)]
+                                  (doseq [o order :when (and (alloc? o) (not (tbss? o)))]
+                                    (if (relro? o) (vreset! active true) (when (and @active (nil? @v)) (vreset! v (:name o)) (vreset! active false))))
+                                  @v)]
+                  (doseq [o order :when (and (alloc? o) (not (tbss? o)))]
+                    (let [f (pflags o) c @cur]
+                      (if (and (= f (:flags c)) (not= (:name o) relro-end)
+                               (or (= (:type o) elf/SHT_NOBITS) (not (:last-nobits c))))
+                        (vswap! cur #(-> % (update :secs conj (:name o)) (assoc :last-nobits (= (:type o) elf/SHT_NOBITS))))
+                        (do (.add acc @cur) (vreset! cur {:flags f :secs [(:name o)] :last-nobits (= (:type o) elf/SHT_NOBITS)})))))
+                  (.add acc @cur)
+                  (vec acc))
+          tls-secs (vec (for [o order :when (and (alloc? o) (not (zero? (bit-and (long (:flags o)) elf/SHF_TLS))))] (:name o)))
+          relro-secs (vec (for [o order :when (and (alloc? o) (not (tbss? o)) (relro? o))] (:name o)))
+          nphdr (+ 1 (count loads) (if (seq tls-secs) 1 0) (if (seq relro-secs) 1 0) 1)
+          hdr-size (+ 64 (* 56 nphdr))
+          first-of (into {} (for [l loads :let [s (first (:secs l))] :when (string? s)] [s l]))
+          tls-first (first tls-secs)
+          tls-align (reduce max 1 (for [o order :when (some #{(:name o)} tls-secs)] (long (:align o))))
+          ;; the addresses (assignAddresses, fixSectionAlignments)
+          addr (java.util.HashMap.)
+          _ (loop [os order dot (+ image-base hdr-size)]
+              (when-let [o (first os)]
+                (if (not (alloc? o))
+                  (do (.put addr (:name o) 0) (recur (rest os) dot))
+                  (let [dot (cond (and (first-of (:name o)) (= (:name o) tls-first))
+                                  (+ (align-up dot max-page) (align-up (rem dot max-page) tls-align))
+                                  (first-of (:name o)) (+ (align-up dot max-page) (rem dot max-page))
+                                  :else dot)
+                        a (align-up dot (long (:align o)))
+                        size (if (= ".relro_padding" (:name o)) (- (align-up a common-page) a) (long (:size o)))]
+                    (.put addr (:name o) a)
+                    (recur (rest os) (if (tbss? o) dot (+ a size)))))))
+          order (vec (for [o order] (if (= ".relro_padding" (:name o)) (assoc o :size (- (align-up (long (.get addr ".relro_padding")) common-page) (long (.get addr ".relro_padding")))) o)))
+          by-name (into {} (map (juxt :name identity) order))
+          ;; the empty PT_LOADs removed (removeEmptyPTLoad)
+          loads (vec (filter (fn [l] (let [ss (remove keyword? (:secs l))]
+                                       (or (some keyword? (:secs l))
+                                           (and (seq ss) (let [f (by-name (first ss)) z (by-name (last ss))]
+                                                           (not= (+ (long (.get addr (:name z))) (long (:size z))) (long (.get addr (:name f)))))))))
+                             loads))
+          load-of (into {} (for [l loads s (:secs l) :when (string? s)] [s l]))
+          ;; the file offsets (assignFileOffsets, computeFileOffset)
+          offset (java.util.HashMap.)
+          end-off (loop [os order off hdr-size]
+                    (if-let [o (first os)]
+                      (let [n (:name o) l (load-of n) a (long (.get addr n))
+                            fo (cond (and l (= n (first (:secs l)))) (+ off (mod (- (rem a max-page) (rem off max-page)) max-page))
+                                     (and (= (:type o) elf/SHT_NOBITS) (not (and tls-first (= n tls-first)))) off
+                                     (nil? l) (align-up off (long (:align o)))
+                                     :else (let [f (first (:secs l))] (if (keyword? f) a
+                                                                           (+ (long (.get offset f)) (- a (long (.get addr f)))))))
+                            fo (if (and l (keyword? (first (:secs l))) (not= n (first (:secs l)))) (- a image-base) fo)]
+                        (.put offset n fo)
+                        (recur (rest os) (long (if (= (:type o) elf/SHT_NOBITS) fo (+ (long fo) (long (:size o)))))))
+                      off))
+          ;; the symbols' addresses
+          tls-start (when tls-first (long (.get addr tls-first)))
+          tls-memsz (when tls-first (let [z (by-name (last tls-secs))] (- (+ (long (.get addr (:name z))) (long (:size z))) (long tls-start))))
+          sec-va (fn [fi shndx value addend-in?]
+                   (let [[n p] (.get place [fi shndx])]
+                     (when (nil? n) (fail "a symbol in a discarded section"))
+                     (if (instance? java.util.TreeMap p)
+                       (let [^java.util.TreeMap p p e (.floorEntry p (long value))
+                             s (sec-of files fi shndx)]
+                         (when-not e (fail (str (:name s) ": entry is past the end of the section")))
+                         (+ (long (.get addr n)) (long (.getValue e)) (- (long value) (long (.getKey e)))))
+                       (+ (long (.get addr n)) (long p) (long value)))))
+          defined-syms (java.util.HashMap.)
+          ;; linker-defined symbols (addOptionalRegular): only when referenced and undefined
+          reserved (let [first-load (first loads)
+                         ro-loads (filter #(zero? (bit-and (long (:flags %)) PF_W)) loads)
+                         last-sec (fn [l] (by-name (last (filter string? (:secs l)))))
+                         end-of (fn [o] (+ (long (.get addr (:name o))) (long (:size o))))
+                         last-load (last loads)]
+                     (cond-> {"__ehdr_start" image-base "__executable_start" image-base}
+                       (seq ro-loads) (assoc "_etext" (when-let [o (last-sec (last ro-loads))] (end-of o)))
+                       last-load (assoc "_end" (end-of (last-sec last-load))
+                                        "_edata" (let [o (last (filter #(not= elf/SHT_NOBITS (:type %)) (map by-name (filter string? (:secs last-load)))))]
+                                                   (when o (end-of o))))
+                       (by-name ".bss") (assoc "__bss_start" (long (.get addr ".bss")))
+                       @gotplt-off (assoc "_GLOBAL_OFFSET_TABLE_" (+ (long (.get addr (first @gotplt-off))) (long (second @gotplt-off))))
+                       true (into (for [o order :when (re-matches #"[A-Za-z_][A-Za-z0-9_]*" (:name o)) :when (alloc? o)
+                                        [k v] [[(str "__start_" (:name o)) (long (.get addr (:name o)))]
+                                               [(str "__stop_" (:name o)) (+ (long (.get addr (:name o))) (long (:size o)))]]]
+                                    [k v]))
+                       true (into (for [[a o] [["__init_array" ".init_array"] ["__fini_array" ".fini_array"] ["__preinit_array" ".preinit_array"]]
+                                        [k v] (if-let [s (by-name o)]
+                                                [[(str a "_start") (long (.get addr o))] [(str a "_end") (+ (long (.get addr o)) (long (:size s)))]]
+                                                [[(str a "_start") image-base] [(str a "_end") image-base]])]
+                                    [k v]))))
+          reserved (into {} (for [[k v] reserved :let [v (cond (= k "_etext") v (= k "_end") v :else v)] :when v] [k v]))
+          reserved (merge reserved (into {} (for [[a b] [["etext" "_etext"] ["edata" "_edata"] ["end" "_end"]] :when (reserved b)] [a (reserved b)])))
+          made (java.util.HashMap.)
+          _ (doseq [[n g] table :when (and (= :undef (:state g)) (contains? reserved n))]
+              (.put made n (reserved n)))
+          sym-va (fn sym-va [ref addend]
+                   (let [[k a b] ref]
+                     (if (= k :local)
+                       (let [s (nth (:symbols (:o (nth files a))) b) shndx (long (:shndx s))]
+                         (cond (= shndx elf/SHN_ABS) (long (:value s))
+                               (= (:type s) elf/STT_SECTION) (sec-va a shndx (+ (long (:value s)) (long addend)) true)
+                               (= (:type s) elf/STT_TLS) (- (long (sec-va a shndx (:value s) false)) (long tls-start))
+                               :else (sec-va a shndx (:value s) false)))
+                       (let [g (gsym a)]
+                         (case (:state g)
+                           :defined (let [s (:sym g) shndx (long (:shndx s))]
+                                      (cond (= shndx elf/SHN_ABS) (long (:value s))
+                                            ;; a TLS symbol's address is its offset in the TLS segment (getSymVA)
+                                            (= (:type s) elf/STT_TLS) (- (long (sec-va (:file g) shndx (:value s) false)) (long tls-start))
+                                            :else (sec-va (:file g) shndx (:value s) false)))
+                           :common (let [[n p] (.get commons a)] (+ (long (.get addr n)) (long p)))
+                           :undef (cond (.containsKey made a) (long (.get made a))
+                                        (:weak g) 0
+                                        :else (fail (str "undefined symbol: " a))))))))
+          ;; the section addend folded for a section symbol (getSymVA: a merge section's offset includes the addend)
+          target-va (fn [ref ^long addend]
+                      (let [[k a b] ref
+                            sect? (and (= k :local) (let [s (nth (:symbols (:o (nth files a))) b)]
+                                                      (and (= (:type s) elf/STT_SECTION)
+                                                           (instance? java.util.TreeMap (second (.get place [a (:shndx s)]))))))]
+                        (if sect? (sym-va ref addend) (+ (long (sym-va ref 0)) addend))))
+          sym-size (fn [ref] (let [[k a b] ref] (if (= k :local) (long (:size (nth (:symbols (:o (nth files a))) b))) (long (or (:size (gsym a)) 0)))))
+          got-va (fn [ref] (+ (long (.get addr (first @got-off))) (long (second @got-off)) (* 8 (long (.get got ref)))))
+          gotplt-va (fn [] (+ (long (.get addr (first @gotplt-off))) (long (second @gotplt-off))))
+          ;; getTlsTpOffset for x86-64 (variant II): the offset in the segment, less its size and the alignment's padding
+          tp-off (if aarch64?
+                   ;; variant I (AArch64): the offset in the segment after the TCB's two words, aligned to the segment
+                   (fn [^long off] (+ off (align-up 16 (long tls-align))))
+                   (fn [^long off] (- off (long tls-memsz) (bit-and (- (- (long tls-start)) (long tls-memsz)) (dec (long tls-align))))))
+          ;; the output sections' bytes
+          buf (fn [o] (let [b (byte-array (long (:size o)))]
+                        (when (:exec (.get contents (:name o))) (java.util.Arrays/fill b (unchecked-byte (:trap *arch*))))
+                        (doseq [[p ^bytes d] (:parts (.get contents (:name o)))] (System/arraycopy d 0 b (int p) (alength d)))
+                        b))
+          bufs (into {} (for [o order :when (not= elf/SHT_NOBITS (:type o))] [(:name o) (buf o)]))
+          ;; the GOT's entries: S (no dynamic relocation in a static executable)
+          _ (when @got-off
+              (doseq [[ref i] got]
+                (put! (bufs (first @got-off)) (+ (long (second @got-off)) (* 8 (long i)))
+                      (if (.contains tls-got ref) (tp-off (sym-va ref 0)) (sym-va ref 0)) 8)))
+          ;; the relocations applied (X86_64::relocate)
+          apply! (fn [^bytes b ^long at ^long p r ref decision]
+                   (let [t (long (:type r)) a (long (:addend r)) tname (get elf/reloc-names t t)
+                         chk32 (fn [^long v] (when-not (s32? v) (fail (str "relocation " tname " out of range: " v " is not in [-2147483648, 2147483647]"))) v)]
+                     (case t
+                       0 nil
+                       1 (put! b at (target-va ref a) 8)
+                       10 (let [v (target-va ref a)] (when-not (and (>= v 0) (<= v 0xffffffff)) (fail (str "relocation R_X86_64_32 out of range: " v))) (put! b at v 4))
+                       11 (put! b at (chk32 (target-va ref a)) 4)
+                       12 (let [v (target-va ref a)] (when-not (and (>= v -32768) (<= v 65535)) (fail (str "relocation R_X86_64_16 out of range: " v))) (put! b at v 2))
+                       14 (let [v (target-va ref a)] (when-not (and (>= v -128) (<= v 255)) (fail (str "relocation R_X86_64_8 out of range: " v))) (put! b at v 1))
+                       (2 4) (put! b at (chk32 (- (long (target-va ref a)) p)) 4)
+                       24 (put! b at (- (long (target-va ref a)) p) 8)
+                       13 (let [v (- (long (target-va ref a)) p)] (when-not (and (>= v -32768) (<= v 32767)) (fail (str "relocation R_X86_64_PC16 out of range: " v))) (put! b at v 2))
+                       15 (let [v (- (long (target-va ref a)) p)] (when-not (and (>= v -128) (<= v 127)) (fail (str "relocation R_X86_64_PC8 out of range: " v))) (put! b at v 1))
+                       (9 41 42)
+                       (case decision
+                         :got (put! b at (chk32 (- (+ (long (got-va ref)) a) p)) 4)
+                         :relax (let [v (chk32 (- (long (target-va ref a)) p)) op (bit-and (long (aget b (- at 2))) 0xff) modrm (bit-and (long (aget b (- at 1))) 0xff)]
+                                  (cond (= op 0x8b) (do (aset-byte b (- at 2) (unchecked-byte 0x8d)) (put! b at v 4))
+                                        (= modrm 0x15) (do (aset-byte b (- at 2) (unchecked-byte 0x67)) (aset-byte b (- at 1) (unchecked-byte 0xe8)) (put! b at v 4))
+                                        :else (do (aset-byte b (- at 2) (unchecked-byte 0xe9)) (aset-byte b (+ at 3) (unchecked-byte 0x90)) (put! b (- at 1) (inc v) 4))))
+                         :relax-nopic (let [v (chk32 (+ (long (target-va ref a)) 4)) op (bit-and (long (aget b (- at 2))) 0xff)
+                                            modrm (bit-and (long (aget b (- at 1))) 0xff) rex (bit-and (long (aget b (- at 3))) 0xff)]
+                                        (if (= op 0x85)
+                                          (do (aset-byte b (- at 1) (unchecked-byte (bit-or 0xc0 (bit-shift-right (bit-and modrm 0x38) 3))))
+                                              (aset-byte b (- at 2) (unchecked-byte 0xf7)))
+                                          (do (aset-byte b (- at 1) (unchecked-byte (bit-or 0xc0 (bit-shift-right (bit-and modrm 0x38) 3) (bit-and op 0x3c))))
+                                              (aset-byte b (- at 2) (unchecked-byte 0x81))))
+                                        (aset-byte b (- at 3) (unchecked-byte (bit-or (bit-and rex (bit-not 4)) (bit-shift-right (bit-and rex 4) 2))))
+                                        (put! b at v 4)))
+                       3 (put! b at (chk32 (- (+ (long (got-va ref)) a) (long (gotplt-va)))) 4)
+                       27 (put! b at (- (+ (long (got-va ref)) a) (long (gotplt-va))) 8)
+                       25 (put! b at (- (long (target-va ref a)) (long (gotplt-va))) 8)
+                       31 (put! b at (- (long (target-va ref a)) (long (gotplt-va))) 8)
+                       26 (put! b at (chk32 (- (+ (long (gotplt-va)) a) p)) 4)
+                       29 (put! b at (- (+ (long (gotplt-va)) a) p) 8)
+                       32 (put! b at (chk32 (+ (long (sym-size ref)) a)) 4)
+                       33 (put! b at (+ (long (sym-size ref)) a) 8)
+                       (23 21) (put! b at (chk32 (+ (long (tp-off (sym-va ref 0))) a)) 4)
+                       (18 17) (put! b at (+ (long (tp-off (sym-va ref 0))) a) 8)
+                       22 (let [v (chk32 (+ (long (tp-off (sym-va ref 0))) a)) i0 (bit-and (long (aget b (- at 3))) 0xff)
+                                i1 (bit-and (long (aget b (- at 2))) 0xff) m (bit-and (long (aget b (- at 1))) 0xff) reg (bit-shift-right m 3)
+                                set3 (fn [x y z] (aset-byte b (- at 3) (unchecked-byte x)) (aset-byte b (- at 2) (unchecked-byte y)) (aset-byte b (- at 1) (unchecked-byte z)))]
+                            (cond (and (= i0 0x48) (= i1 0x03) (= m 0x25)) (set3 0x48 0x81 0xc4)
+                                  (and (= i0 0x4c) (= i1 0x03) (= m 0x25)) (set3 0x49 0x81 0xc4)
+                                  (and (= i0 0x4c) (= i1 0x03)) (set3 0x4d 0x8d (bit-or 0x80 (bit-shift-left reg 3) reg))
+                                  (and (= i0 0x48) (= i1 0x03)) (set3 0x48 0x8d (bit-or 0x80 (bit-shift-left reg 3) reg))
+                                  (and (= i0 0x4c) (= i1 0x8b)) (set3 0x49 0xc7 (bit-or 0xc0 reg))
+                                  (and (= i0 0x48) (= i1 0x8b)) (set3 0x48 0xc7 (bit-or 0xc0 reg))
+                                  :else (fail "R_X86_64_GOTTPOFF must be used in MOVQ or ADDQ instructions only"))
+                            (put! b at (+ v 4) 4))
+                       (unsupported :reloc (str "relocation " tname)))))
+          ;; AArch64::relocate: the value into the instruction's field, with lld's range and alignment checks
+          a64-apply! (fn [^bytes b ^long at ^long p r ref _decision]
+                       (let [t (long (:type r)) a (long (:addend r)) tname (get @a64-reloc-names t t)
+                             range! (fn [^long v ^long lo ^long hi] (when-not (<= lo v hi) (fail (str "relocation " tname " out of range: " v " is not in [" lo ", " hi "]"))) v)
+                             align! (fn [^long v ^long n] (when-not (zero? (mod v n)) (fail (str "improper alignment for relocation " tname ": 0x" (Long/toHexString v) " is not aligned to " n " bytes"))) v)
+                             set-w! (fn [^long mask ^long bits] (put! b at (bit-or (bit-and (u32 b at) (bit-not mask)) (bit-and bits mask)) 4))
+                             imm19! (fn [^long v] (set-w! 0xffffe0 (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5)))
+                             adr! (fn [^long v] (set-w! 0x60ffffe0 (bit-or (bit-shift-left (bit-and v 3) 29) (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5))))
+                             page (fn [^long x] (bit-and x (bit-not 0xfff)))
+                             s+a (fn [] (long (target-va ref a)))
+                             imm12! (fn [^long v] (set-w! 0x3ffc00 (bit-shift-left (bit-and v 0xfff) 10)))
+                             ldst! (fn [^long v ^long sh] (set-w! 0x3ffc00 (bit-shift-left (bit-shift-right (bit-and v 0xfff) sh) 10)))
+                             movw! (fn [^long v ^long g] (set-w! 0x1fffe0 (bit-shift-left (bit-and (bit-shift-right v (* 16 g)) 0xffff) 5)))
+                             ;; writeSMovWImm: a signed group's MOVZ, or MOVN of the inverted value when negative
+                             smovw! (fn [^long v ^long g]
+                                      (let [imm (bit-shift-right v (* 16 g)) w (u32 b at)]
+                                        (when-not (<= -4294967296 (bit-shift-right v (* 16 (max 0 (dec g)))) 4294967295)
+                                          (fail (str "relocation " tname " out of range: " v)))
+                                        (if (bit-test w 30)
+                                          (movw! v g)
+                                          (let [neg (bit-test imm 16)
+                                                imm (if neg (bit-xor imm 0xffff) imm)
+                                                w (if neg (bit-and w (bit-not 0x40000000)) (bit-or w 0x40000000))]
+                                            (put! b at (bit-or (bit-and w (bit-not 0x1fffe0)) (bit-shift-left (bit-and imm 0xffff) 5)) 4)))))
+                             tp (fn [] (+ (long (tp-off (sym-va ref 0))) a))]
+                         (case t
+                           0 nil
+                           0x101 (put! b at (s+a) 8)
+                           0x102 (put! b at (range! (s+a) -2147483648 4294967295) 4)
+                           0x103 (put! b at (range! (s+a) -32768 65535) 2)
+                           0x104 (put! b at (- (s+a) p) 8)
+                           0x105 (put! b at (range! (- (s+a) p) -2147483648 4294967295) 4)
+                           0x106 (put! b at (range! (- (s+a) p) -32768 65535) 2)
+                           (0x11a 0x11b) (set-w! 0x3ffffff (bit-shift-right (align! (range! (- (s+a) p) -134217728 134217727) 4) 2))
+                           (0x111 0x118) (imm19! (align! (range! (- (s+a) p) -1048576 1048575) 4))
+                           0x117 (set-w! 0x7ffe0 (bit-shift-left (bit-and (bit-shift-right (align! (range! (- (s+a) p) -32768 32767) 4) 2) 0x3fff) 5))
+                           0x112 (adr! (range! (- (s+a) p) -1048576 1048575))
+                           (0x113 0x114) (adr! (bit-shift-right (cond-> (- (page (s+a)) (page p)) (= t 0x113) (range! -4294967296 4294967295)) 12))
+                           0x115 (imm12! (s+a))
+                           0x116 (ldst! (s+a) 0) 0x11c (ldst! (align! (s+a) 2) 1) 0x11d (ldst! (align! (s+a) 4) 2)
+                           0x11e (ldst! (align! (s+a) 8) 3) 0x12b (ldst! (align! (s+a) 16) 4)
+                           (0x107 0x108) (movw! (s+a) 0) (0x109 0x10a) (movw! (s+a) 1) (0x10b 0x10c) (movw! (s+a) 2) 0x10d (movw! (s+a) 3)
+                           ;; the GOT's: the entry's address
+                           (0x137 0x21d) (adr! (bit-shift-right (range! (- (page (+ (long (got-va ref)) a)) (page p)) -4294967296 4294967295) 12))
+                           (0x138 0x21e) (ldst! (align! (+ (long (got-va ref)) a) 8) 3)
+                           (0x135 0x21f) (imm19! (align! (range! (- (+ (long (got-va ref)) a) p) -1048576 1048575) 4))
+                           ;; local exec
+                           0x225 (imm12! (bit-shift-right (range! (tp) 0 0xffffff) 12))
+                           0x226 (imm12! (range! (tp) 0 4095))
+                           0x227 (imm12! (tp))
+                           0x220 (smovw! (tp) 2) 0x221 (smovw! (tp) 1) 0x222 (movw! (tp) 1) 0x223 (smovw! (tp) 0) 0x224 (movw! (tp) 0)
+                           0x10e (smovw! (s+a) 0) 0x10f (smovw! (s+a) 1) 0x110 (smovw! (s+a) 2)
+                           (0x228 0x229) (ldst! (tp) 0) (0x22a 0x22b) (ldst! (tp) 1) (0x22c 0x22d) (ldst! (tp) 2) (0x22e 0x22f) (ldst! (tp) 3)
+                           (0x23a 0x23b) (ldst! (tp) 4)
+                           (unsupported :reloc (str "relocation " tname)))))
+          _ (doseq [f files [i rs] (:relocs f) :when (live? (:idx f) i)
+                    :let [fi (:idx f) s (sec-of files fi i)]
+                    :when (and (not (zero? (bit-and (long (:flags s)) elf/SHF_ALLOC))) (not= elf/SHT_NOBITS (:type s)))
+                    [ri r] (map-indexed vector rs)]
+              (let [ref (symref fi (:sym r))
+                    ;; a reference to a symbol of a discarded section (InputFiles' discarded-section rule)
+                    _ (when (and (= :local (first ref)) (pos? (long (:sym r))))
+                        (let [ls (nth (:symbols (:o f)) (:sym r)) sh (long (:shndx ls))]
+                          (when (and (pos? sh) (< sh 0xff00) (not (live? fi sh)))
+                            (fail (str "relocation refers to a discarded section: " (:name (sec-of files fi sh)))))))
+                    eh? (= ".eh_frame" (:name s))]
+                (if eh?
+                  (let [recs (eh-records (:data s))
+                        rec (first (filter (fn [[at size]] (and (>= (long (:offset r)) (long at)) (< (long (:offset r)) (+ (long at) (long size))))) recs))
+                        out (when rec (.get ^java.util.HashMap (:offs eh) [fi i (first rec)]))]
+                    (when out
+                      (let [at (+ (long (second @eh-off)) (long out) (- (long (:offset r)) (long (first rec))))]
+                        ((if aarch64? a64-apply! apply!) (bufs (first @eh-off)) at (+ (long (.get addr (first @eh-off))) at) r ref nil))))
+                  (let [[n p] (.get place [fi i])
+                        at (+ (long p) (long (:offset r)))]
+                    ((if aarch64? a64-apply! apply!) (bufs n) at (+ (long (.get addr n)) at) r ref (.get decisions [fi i ri]))))))
+          ;; the symbol table (demoteAndCopyLocalSymbols, finalizeSections, sortSymTabSymbols)
+          shidx (into {} (map-indexed (fn [i o] [(:name o) (inc (long i))]) order))
+          out-shndx (fn [fi shndx] (let [[n] (.get place [fi shndx])] (long (shidx n))))
+          local-entries (vec (for [f files [i s] (map-indexed vector (:symbols (:o f)))
+                                   :when (and (pos? (long i)) (= elf/STB_LOCAL (:bind s)) (not= elf/STT_SECTION (:type s)))
+                                   :let [sh (long (:shndx s)) fi (:idx f)]
+                                   :when (or (= sh elf/SHN_ABS) (zero? sh) (and (< sh 0xff00) (live? fi sh)
+                                                                                 ;; a local of .eh_frame (AArch64's $d) has no place: dropped
+                                                                                 (some? (.get place [fi sh]))))
+                                   :when (not (and (.startsWith ^String (:name s) ".L") (< 0 sh 0xff00)
+                                                   (not (zero? (bit-and (long (:flags (sec-of files fi sh))) SHF_MERGE)))))]
+                               {:file fi :name (:name s) :bind elf/STB_LOCAL :type (:type s) :other (:other s)
+                                :shndx (cond (= sh elf/SHN_ABS) elf/SHN_ABS (zero? sh) 0 :else (out-shndx fi sh))
+                                :value (cond (= sh elf/SHN_ABS) (:value s) (zero? sh) 0 :else (sym-va [:local fi i] 0)) :size (:size s)}))
+          internal (count files)
+          global-entries (vec (for [[n g] table
+                                    :let [st (:state g) s (:sym g) v (long (:vis g))
+                                          madev (.get made n)]
+                                    :when (or (not= :undef st) true)]
+                                (let [hidden (or (= v STV_HIDDEN) (= v STV_INTERNAL) (some? madev))
+                                      [shndx value file]
+                                      (cond (some? madev) [(or (some (fn [o] (when (and (alloc? o) (<= (long (.get addr (:name o))) (long madev))
+                                                                                      (<= (long madev) (+ (long (.get addr (:name o))) (long (:size o)))))
+                                                                             (long (shidx (:name o)))))
+                                                                  (reverse order))
+                                                            elf/SHN_ABS)
+                                                        madev internal]
+                                            (= st :defined) (let [sh (long (:shndx s))]
+                                                              (if (= sh elf/SHN_ABS) [elf/SHN_ABS (:value s) (:file g)]
+                                                                  [(out-shndx (:file g) sh) (sym-va [:global n] 0) (:file g)]))
+                                            (= st :common) [(long (shidx (first (.get commons n)))) (sym-va [:global n] 0) (:file g)]
+                                            :else [0 0 (:file g)])]
+                                  {:file file :name n
+                                   :bind (cond hidden elf/STB_LOCAL (and (= st :undef) (some? madev)) elf/STB_GLOBAL (:weak g) elf/STB_WEAK :else elf/STB_GLOBAL)
+                                   :type (if (some? madev) elf/STT_NOTYPE (if (= st :common) elf/STT_OBJECT (:type s)))
+                                   :other (if (some? madev) STV_HIDDEN v)
+                                   :shndx shndx :value value :size (if (some? madev) 0 (or (:size g) 0))})))
+          all (concat local-entries global-entries)
+          locals (let [ls (filter #(= elf/STB_LOCAL (:bind %)) all) groups (java.util.LinkedHashMap.)]
+                   (doseq [s ls] (.put groups (:file s) (conj (vec (.get groups (:file s))) s)))
+                   (apply concat (vals groups)))
+          globals (remove #(= elf/STB_LOCAL (:bind %)) global-entries)
+          symtab (vec (concat locals globals))
+          ;; the string tables: .strtab in the symbols' order of addition, .shstrtab deduplicated
+          strtab-o (java.io.ByteArrayOutputStream.)
+          _ (.write strtab-o 0)
+          str-off (java.util.HashMap.)
+          _ (doseq [s all] (let [p (.size strtab-o) b (.getBytes ^String (:name s) "ISO-8859-1")]
+                             (.put str-off s p) (.write strtab-o b 0 (alength b)) (.write strtab-o 0)))
+          names (concat (map :name order) [".symtab" ".shstrtab" ".strtab"])
+          shstr-o (java.io.ByteArrayOutputStream.)
+          _ (.write shstr-o 0)
+          shstr-off (java.util.HashMap.)
+          _ (doseq [n names :when (not (.containsKey shstr-off n))]
+              (let [b (.getBytes ^String n "ISO-8859-1")] (.put shstr-off n (.size shstr-o)) (.write shstr-o b 0 (alength b)) (.write shstr-o 0)))
+          symtab-bytes (let [b (byte-array (* 24 (inc (count symtab))))]
+                         (doseq [[i s] (map-indexed vector symtab)]
+                           (let [h (* 24 (inc (long i)))]
+                             (put! b h (long (.get str-off s)) 4)
+                             (aset-byte b (+ h 4) (unchecked-byte (bit-or (bit-shift-left (long (:bind s)) 4) (long (:type s)))))
+                             (aset-byte b (+ h 5) (unchecked-byte (bit-and (long (or (:other s) 0)) 3)))
+                             (put! b (+ h 6) (long (:shndx s)) 2) (put! b (+ h 8) (long (:value s)) 8) (put! b (+ h 16) (long (:size s)) 8)))
+                         b)
+          strtab-bytes (.toByteArray strtab-o)
+          shstr-bytes (.toByteArray shstr-o)
+          symtab-off (align-up end-off 8)
+          shstr-off* (+ symtab-off (alength symtab-bytes))
+          strtab-off (+ shstr-off* (alength shstr-bytes))
+          shoff (align-up (+ strtab-off (alength strtab-bytes)) 8)
+          nsec (+ 1 (count order) 3)
+          out (byte-array (+ shoff (* 64 nsec)))
+          ;; the program headers' values (setPhdrs)
+          seg (fn [type flags secs align]
+                (let [os (map by-name secs) f (first os) z (last os)
+                      off (long (.get offset (:name f))) a (long (.get addr (:name f)))]
+                  [type flags off a (- (+ (long (.get offset (:name z))) (if (= elf/SHT_NOBITS (:type z)) 0 (long (:size z)))) off)
+                   (- (+ (long (.get addr (:name z))) (long (:size z))) a) align]))
+          phdrs (vec (concat
+                      [[PT_PHDR PF_R 64 (+ image-base 64) (* 56 nphdr) (* 56 nphdr) 8]]
+                      (for [l loads]
+                        (let [ss (filter string? (:secs l))]
+                          (if (keyword? (first (:secs l)))
+                            (let [z (when (seq ss) (by-name (last ss)))
+                                  fend (if z (+ (long (.get offset (:name z))) (if (= elf/SHT_NOBITS (:type z)) 0 (long (:size z)))) hdr-size)
+                                  mend (if z (+ (long (.get addr (:name z))) (long (:size z))) (+ image-base hdr-size))]
+                              [PT_LOAD (:flags l) 0 image-base fend (- mend image-base) max-page])
+                            (seg PT_LOAD (:flags l) ss max-page))))
+                      (when (seq tls-secs) [(seg PT_TLS PF_R tls-secs tls-align)])
+                      (when (seq relro-secs) [(seg PT_GNU_RELRO PF_R relro-secs 1)])
+                      [[PT_GNU_STACK (bit-or PF_R PF_W) 0 0 0 0 0]]))
+          entry-va (let [g (gsym entry)]
+                     (if (and g (= :defined (:state g))) (sym-va [:global entry] 0)
+                         (do (binding [*out* *err*] (println (str "repr-asm link: warning: cannot find entry symbol " entry "; not setting start address"))) 0)))]
+      ;; the ELF header (writeEhdr, writeHeader)
+      (System/arraycopy (byte-array [0x7f 0x45 0x4c 0x46 2 1 1 0]) 0 out 0 8)
+      (put! out 16 2 2) (put! out 18 (:machine *arch*) 2) (put! out 20 1 4) (put! out 24 entry-va 8) (put! out 32 64 8) (put! out 40 shoff 8)
+      (put! out 48 0 4) (put! out 52 64 2) (put! out 54 56 2) (put! out 56 (count phdrs) 2) (put! out 58 64 2) (put! out 60 nsec 2)
+      (put! out 62 (+ (count order) 2) 2)
+      (doseq [[i [type fl off va fs ms al]] (map-indexed vector phdrs)]
+        (let [h (+ 64 (* 56 (long i)))]
+          (put! out h type 4) (put! out (+ h 4) fl 4) (put! out (+ h 8) off 8) (put! out (+ h 16) va 8) (put! out (+ h 24) va 8)
+          (put! out (+ h 32) fs 8) (put! out (+ h 40) ms 8) (put! out (+ h 48) al 8)))
+      (doseq [o order :when (not= elf/SHT_NOBITS (:type o))]
+        (let [^bytes b (bufs (:name o))] (System/arraycopy b 0 out (int (.get offset (:name o))) (alength b))))
+      (System/arraycopy symtab-bytes 0 out (int symtab-off) (alength symtab-bytes))
+      (System/arraycopy shstr-bytes 0 out (int shstr-off*) (alength shstr-bytes))
+      (System/arraycopy strtab-bytes 0 out (int strtab-off) (alength strtab-bytes))
+      (let [shdr! (fn [^long i nm type fl a off size link info al es]
+                    (let [h (+ shoff (* 64 i))]
+                      (put! out h nm 4) (put! out (+ h 4) type 4) (put! out (+ h 8) fl 8) (put! out (+ h 16) a 8) (put! out (+ h 24) off 8)
+                      (put! out (+ h 32) size 8) (put! out (+ h 40) link 4) (put! out (+ h 44) info 4) (put! out (+ h 48) al 8) (put! out (+ h 56) es 8)))
+            k (count order)]
+        (doseq [[i o] (map-indexed vector order)]
+          (shdr! (inc (long i)) (.get shstr-off (:name o)) (:type o) (:flags o) (.get addr (:name o)) (.get offset (:name o)) (:size o)
+                 0 0 (:align o) (:entsize o)))
+        (shdr! (+ k 1) (.get shstr-off ".symtab") elf/SHT_SYMTAB 0 0 symtab-off (alength symtab-bytes) (+ k 3) (inc (count locals)) 8 24)
+        (shdr! (+ k 2) (.get shstr-off ".shstrtab") elf/SHT_STRTAB 0 0 shstr-off* (alength shstr-bytes) 0 0 1 0)
+        (shdr! (+ k 3) (.get shstr-off ".strtab") elf/SHT_STRTAB 0 0 strtab-off (alength strtab-bytes) 0 0 1 0))
+      ;; with :layout, the places for arm64's eval (arbace.asm.arm64.eval, AR5): each input section's address ([FILE SECTION]),
+      ;; and a global symbol's address by name
+      (cond-> {:bytes out}
+        layout (assoc :layout {:local (fn [fi sh off] (when (.get place [fi sh]) (sec-va fi sh off false)))
+                               :tp (fn [va] (tp-off (- (long va) (long tls-start))))
+                               :got (fn [nm] (when (.get got [:global nm]) (got-va [:global nm])))
+                               ;; a local symbol's entry by its place in its object: the GOT keys a local by its symbol
+                               :got-local (fn [fi sh off]
+                                            (first (for [k (keys (into {} got))
+                                                         :when (and (= :local (first k)) (= fi (second k)))
+                                                         :let [ls (nth (:symbols (:o (nth files fi))) (nth k 2))]
+                                                         :when (and (= (long sh) (long (:shndx ls))) (= (long off) (long (:value ls))))]
+                                                     (got-va k))))
+                               :global (fn [nm] (cond (gsym nm) (sym-va [:global nm] 0) (contains? reserved nm) (reserved nm) :else (fail (str "undefined symbol: " nm))))})))
+    (catch arbace.lang.ExceptionInfo ex
+      (let [d (ex-data ex)]
+        (cond (:link/unsupported d) {:unsupported (:link/unsupported d) :what (.getMessage ex)}
+              (:link/error d) {:error (:link/error d)}
+              :else (throw ex))))))
+
+(defn link-files
+  "The executable of the object files at `paths`."
+  [paths & [opts]]
+  (link (vec (for [p paths] [p (java.nio.file.Files/readAllBytes (.toPath (java.io.File. ^String p)))])) opts))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the run check (bin/repr-asm run-check): each test's sources assembled (arbace.asm.amd64.obj), linked, run by the CPU (the
+;; script, under a timeout) and judged by the verdict its header states
+
+(defn- write-bytes [^String path ^bytes b]
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) b ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn verdict
+  "A test's own verdict from its header lines: `# exit: N`, `# stdout: \"...\"` (a string as the reader reads it, the lines
+  joined), `# with: FILE...` (the other sources linked after it: relative to the test's directory, or `musl:PATH` in musl
+  1.2.6's tree), `# before: FILE...` (linked before it, as crti is), `# link-error: TEXT` (the link must fail with an error
+  that holds TEXT, lld's words). {:exit N :stdout S :with [...] :before [...] :link-error TEXT}."
+  [^String text]
+  (reduce (fn [m l]
+            (if-let [[_ k v] (re-matches #"#\s*(exit|stdout|with|before|link-error):\s*(.*)" l)]
+              (case k
+                "exit" (assoc m :exit (Long/parseLong (str/trim v)))
+                "stdout" (update m :stdout str (read-string v))
+                "with" (update m :with into (remove empty? (str/split (str/trim v) #"\s+")))
+                "link-error" (assoc m :link-error (str/trim v))
+                "before" (update m :before into (remove empty? (str/split (str/trim v) #"\s+"))))
+              m))
+          {:exit 0 :stdout "" :with [] :before []}
+          (take-while #(str/starts-with? % "#") (str/split-lines text))))
+
+(defn- hexs ^String [^bytes b] (apply str (map #(format "%02x" (bit-and (long %) 0xff)) b)))
+
+(defn build-tests
+  "Each NAME<tab>PATH of LIST: its sources assembled and linked into WORK/NAME; WORK/build.tsv: NAME RESULT DETAIL (built,
+  else the class of what failed), WORK/want.tsv: NAME EXIT STDOUT-HEX."
+  [lst work musl & [arch]]
+  (let [assemble (requiring-resolve (if (= arch "arm64") 'arbace.asm.arm64.obj/assemble-file 'arbace.asm.amd64.obj/assemble-file))
+        rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
+        res (vec (for [[n p] rows]
+                   (let [v (verdict (slurp p))
+                         dir (.getParent (java.io.File. ^String p))
+                         src (fn [w] (if (str/starts-with? w "musl:") (str musl "/" (subs w 5)) (str dir "/" w)))
+                         srcs (concat (map src (:before v)) [p] (map src (:with v)))
+                         objs (reduce (fn [acc s]
+                                        (if (map? acc) acc
+                                            (let [r (try (assemble s) (catch Throwable e {:unsupported :crash :what (str e)}))]
+                                              (cond (:bytes r) (conj acc [s (:bytes r)])
+                                                    (:error r) {:class :assemble-error :what (str s ": " (:error r))}
+                                                    :else {:class (keyword (str "assemble-" (name (:unsupported r)))) :what (str s ": " (:what r))}))))
+                                      [] srcs)
+                         r (if (map? objs) objs
+                               (let [l (try (link objs) (catch Throwable e {:unsupported :crash :what (str e)}))]
+                                 (cond (and (:link-error v) (:error l) (str/includes? (:error l) (:link-error v))) {:class :pass :what (str "refused: " (:error l))}
+                                       (and (:link-error v) (:bytes l)) {:class :link-accepted :what (str "linked, stated: " (:link-error v))}
+                                       (:bytes l) (do (write-bytes (str work "/" n) (:bytes l)) {:class :built :what ""})
+                                       (:error l) {:class :link-error :what (:error l)}
+                                       :else {:class (keyword (str "link-" (name (:unsupported l)))) :what (:what l)})))]
+                     [n (:class r) (:what r) v])))]
+    (spit (str work "/build.tsv") (apply str (for [[n c d] res] (str n "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))))
+    (spit (str work "/want.tsv") (apply str (for [[n _ _ v] res] (str n "\t" (:exit v) "\t" (hexs (.getBytes ^String (:stdout v) "ISO-8859-1")) "\n"))))
+    (println (str "repr-asm run-check: " (count (filter #(= :built (second %)) res)) " of " (count res) " tests assembled and linked"))))
+
+(defn- read-tsv [path] (into {} (for [l (str/split-lines (slurp path)) :when (seq l) :let [[n & r] (str/split l #"\t" -1)]] [n (vec r)])))
+
+(defn- judge-one
+  "A run (STATUS, stdout's bytes as hex) against a verdict (EXIT, STDOUT-HEX): [RESULT DETAIL]."
+  [status out [want-exit want-out]]
+  (cond (= status "124") [:timeout "killed after the time limit"]
+        (not= status want-exit) [:exit (str "exit " status ", stated " want-exit)]
+        (not= out want-out) [:stdout (str "stdout " (subs out 0 (min 64 (count out))) ", stated " (subs want-out 0 (min 64 (count want-out))))]
+        :else [:pass ""]))
+
+(defn- run-of [work n]
+  (let [st (str work "/" n ".status") o (java.io.File. (str work "/" n ".out"))]
+    (when (.exists (java.io.File. st))
+      [(str/trim (slurp st)) (hexs (java.nio.file.Files/readAllBytes (.toPath o)))])))
+
+(defn verdicts
+  "WORK/run.tsv: each test's row (NAME RESULT DETAIL), its run (WORK/NAME.status, WORK/NAME.out) judged by its verdict."
+  [work]
+  (let [built (read-tsv (str work "/build.tsv")) want (read-tsv (str work "/want.tsv"))
+        rows (for [[n [c d]] (sort-by key built)]
+               (if (not= c "built") [n c (str/replace d "\t" " ")]
+                   (let [[st out] (run-of work n)] (into [n] (map str (update (judge-one st out (want n)) 0 name))))))]
+    (spit (str work "/run.tsv") (apply str (for [[n c d] rows] (str n "\t" c "\t" d "\n"))))))
+
+(defn control
+  "A negative control: SUBJECT's run judged by REFERENCE's verdict: `differs` as it must, else `same`; `left` (a failing control)
+  when the subject did not run or the reference has no verdict, so a broken or misspelled control never passes vacuously."
+  [work subj ref]
+  (let [want (read-tsv (str work "/want.tsv")) [st out] (run-of work subj)]
+    (cond (or (nil? st) (nil? (want ref))) "left"
+          (= :pass (first (judge-one st out (want ref)))) "same"
+          :else "differs")))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the canonical view (the oracle's comparison, by hand) and the dump
+
+(defn canonical
+  "An executable read back as the comparison sees it, addresses made relative: the entry as SECTION+OFFSET; the segments
+  [TYPE FLAGS [SECTION...]]; the allocated sections [NAME TYPE FLAGS SIZE]; the symbols but the null and the STT_FILE ones,
+  sorted, [NAME BIND TYPE SECTION OFFSET SIZE] (OFFSET within the section, or the value of an absolute or a TLS symbol: its
+  offset in the TLS segment)."
+  [^bytes b]
+  (let [o (elf/read-object b)
+        u (fn [^long at ^long n] (loop [i (dec n) v 0] (if (neg? i) v (recur (dec i) (bit-or (bit-shift-left v 8) (bit-and (long (aget b (+ at i))) 0xff))))))
+        secs (:sections o)
+        sec-addr (fn [s] (u (+ (u 40 8) (* 64 (long (:index s))) 16) 8))
+        alloc (filter #(not (zero? (bit-and (long (:flags %)) elf/SHF_ALLOC))) secs)
+        where (fn [^long va] (if-let [s (last (filter #(and (<= (long (sec-addr %)) va) (< va (+ (long (sec-addr %)) (max 1 (long (:size %)))))) alloc))]
+                               [(:name s) (- va (long (sec-addr s)))] ["?" va]))
+        phoff (u 32 8) phnum (u 56 2)
+        ptname {1 "LOAD" 6 "PHDR" 7 "TLS" 0x6474e551 "GNU_STACK" 0x6474e552 "GNU_RELRO" 0x6474e550 "GNU_EH_FRAME" 0x6474e553 "GNU_PROPERTY" 4 "NOTE"}]
+    {:entry (where (u 24 8))
+     :segments (vec (for [i (range phnum) :let [h (+ phoff (* 56 (long i))) t (u h 4) va (u (+ h 16) 8) ms (u (+ h 40) 8)]]
+                      [(get ptname t t) (u (+ h 4) 4)
+                       (vec (for [s alloc :let [a (long (sec-addr s))] :when (and (pos? ms) (<= va a) (< a (+ va ms))
+                                                                                  ;; PT_TLS holds the TLS sections, the others no .tbss
+                                                                                  (let [tls (not (zero? (bit-and (long (:flags s)) elf/SHF_TLS)))]
+                                                                                    (if (= t 7) tls (not (and tls (= (:type s) elf/SHT_NOBITS))))))]
+                              (:name s)))]))
+     :sections (vec (for [s alloc] [(:name s) (:type s) (:flags s) (:size s)]))
+     :symbols (vec (sort (for [s (rest (:symbols o)) :when (not= elf/STT_FILE (:type s))]
+                           (let [sh (long (:shndx s))]
+                             (if (or (= sh elf/SHN_ABS) (zero? sh) (= (:type s) elf/STT_TLS))
+                               [(:name s) (:bind s) (:type s) (cond (zero? sh) "*UND*" (= sh elf/SHN_ABS) "*ABS*" :else (:name (nth secs sh))) (:value s) (:size s)]
+                               (let [sec (nth secs sh) off (- (long (:value s)) (long (sec-addr sec)))]
+                                 [(:name s) (:bind s) (:type s) (:name sec) off (:size s)]))))))}))
+
+(defn- slurp-bytes ^bytes [^String p] (java.nio.file.Files/readAllBytes (.toPath (java.io.File. p))))
+
+(defn compare-exes
+  "Arbace's executable against the oracle's, at the canonical level: each part's differences printed."
+  [ours theirs]
+  (let [a (canonical (slurp-bytes ours)) b (canonical (slurp-bytes theirs))]
+    (doseq [k [:entry :segments :sections]]
+      (when (not= (k a) (k b)) (println (str "  " (name k) ": ours " (pr-str (k a)) "\n  " (name k) ": theirs " (pr-str (k b))))))
+    (let [sa (set (:symbols a)) sb (set (:symbols b))]
+      (doseq [s (sort (remove sb sa))] (println (str "  symbol only ours: " (pr-str s))))
+      (doseq [s (sort (remove sa sb))] (println (str "  symbol only theirs: " (pr-str s)))))))
+
+(defn oracle-objects
+  "Each test's sources assembled into OUT/NAME-K.o for the oracle's linker; OUT/objects.tsv: NAME OBJ...."
+  [lst out musl]
+  (let [assemble (requiring-resolve 'arbace.asm.amd64.obj/assemble-file)
+        rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))]
+    (spit (str out "/objects.tsv")
+          (apply str (for [[n p] rows]
+                       (let [v (verdict (slurp p)) dir (.getParent (java.io.File. ^String p))
+                             src (fn [w] (if (str/starts-with? w "musl:") (str musl "/" (subs w 5)) (str dir "/" w)))
+                             srcs (concat (map src (:before v)) [p] (map src (:with v)))
+                             objs (for [[k s] (map-indexed vector srcs) :let [r (assemble s) o (str out "/" n "-" k ".o")]
+                                        :when (:bytes r)]
+                                    (do (write-bytes o (:bytes r)) o))]
+                         (str n "\t" (str/join " " objs) "\n")))))))
+
+(defn -main
+  "link OUT OBJ...: the executable written (exit 1 with the class); build LIST WORK MUSL; verdicts WORK; control WORK SUBJECT
+  REFERENCE."
+  [verb & args]
+  (case verb
+    "link" (let [[out & objs] args
+                 [objs arch] (if (= "--arm64" (first objs)) [(rest objs) aarch64] [objs *arch*])
+                 r (binding [*arch* arch] (link-files objs))]
+             (if-let [bs (:bytes r)]
+               (write-bytes out bs)
+               (do (binding [*out* *err*] (println (str "repr-asm link: " (if (:error r) (str "error: " (:error r)) (str (name (:unsupported r)) ": " (:what r))))))
+                   (System/exit 1))))
+    "build" (let [[lst work musl arch] args] (binding [*arch* (if (= arch "arm64") aarch64 *arch*)] (build-tests lst work musl arch)))
+    "verdicts" (apply verdicts args)
+    "control" (println (apply control args))
+    "compare" (apply compare-exes args)
+    "oracle-objects" (apply oracle-objects args)
+    "dump" (let [c (canonical (slurp-bytes (first args)))]
+             (println "entry" (pr-str (:entry c)))
+             (doseq [k [:segments :sections :symbols] r (k c)] (println (name k) (pr-str r)))))
+  (shutdown-agents))

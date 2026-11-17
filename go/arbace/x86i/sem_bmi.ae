@@ -1,0 +1,316 @@
+(in-ns 'go.arbace.x86i) (go/file "sem_bmi.go" :imports [
+
+
+    ^{:line 4} [bits "math/bits"]
+    ^{:line 5} [rand "math/rand/v2"]])
+
+
+;; AX5.5's integer extensions (AXS59 (a); from the Intel SDM vol. 2 and the AMD APM vol. 3 as references), each behind its
+;; CPUID bit in x86i's model: BMI1 (andn bextr blsi blsmsk blsr, tzcnt already), BMI2 (bzhi mulx pdep pext rorx sarx shlx
+;; shrx), ADX (adcx adox), CMPXCHG16B (and cmpxchg8b), RDRAND, RDSEED and RDPID.
+
+^{:go/end 25} (go/func init []
+  (def famBMI andn "andn")
+  (def famBMI bextr "bextr")
+  (def famBMI blsx "blsi" "blsmsk" "blsr")
+  (def famBMI bzhi "bzhi")
+  (def famBMI mulx "mulx")
+  (def famBMI pdepext "pdep" "pext")
+  (def famBMI rorx "rorx")
+  (def famBMI shiftx "sarx" "shlx" "shrx")
+  (def famBMI adx "adcx" "adox")
+  (def famAtomic cmpxchgDouble "cmpxchg8b" "cmpxchg16b")
+  (def famMisc rdrand "rdrand" "rdseed")
+  (def famMisc rdpid "rdpid"))
+
+
+
+
+^{:go/end 32} (go/method setLogic "setLogic sets the flags as a logical operation's from the result (CF OF 0, ZF SF PF from it, AF undefined), und the\nfurther bits the instruction leaves undefined.\n" [^{:tag (* CPU)} c ^uint8 w ^uint64 r ^uint64 und]
+  (.set (.-F c) fLogic w r 0 r)
+  (set! (.-und (.-F c)) und))
+
+
+
+^{:go/end 47} (go/func andn "andn: dest = ~src1 & src2 (VEX.vvvv the first source); SF ZF from the result, CF OF cleared, AF PF undefined.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s1 s2) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1) (aget (.-Ops in) 2))
+      ^{:line 37} w (.-Size d)
+      ^{:line 38} a (.reg c (.-Reg s1) w)
+      (values b ok) (.load c in (addr s2) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [r (bit-and (bit-not a) b (mask w))]
+      (.setReg c (.-Reg d) w r)
+      (.setLogic c w r PF)
+      (.done c))))
+
+
+
+
+^{:go/end 70} (go/func bextr "bextr: the field of src1 that src2's bits 7:0 (start) and 15:8 (length) name, zero-extended; ZF from it, CF OF cleared,\nAF SF PF undefined.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s1 s2) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1) (aget (.-Ops in) 2))
+      ^{:line 53} w (.-Size d)
+      (values v ok) (.load c in (addr s1) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [ctl (.reg c (.-Reg s2) w)
+        (values start n) (values (conv uint (bit-and ctl 0xff)) (conv uint (bit-and (>> ctl 8) 0xff)))
+        ^{:line 60 :tag uint64} r (zero uint64)]
+      (when (< start (* (conv uint w) 8))
+        (set! r (>> v start))
+        (when (< n 64)
+          (set! r bit-and (- ^uint64 (<< 1 n) 1))))
+
+
+      (.setReg c (.-Reg d) w r)
+      (.setLogic c w r (bit-or SF PF))
+      (.done c))))
+
+
+
+
+
+^{:go/end 111} (go/func blsx "blsi (the lowest set bit), blsmsk (the mask up to it), blsr (the source without it): dest is VEX.vvvv. SF from the\nresult, ZF from it (blsmsk: cleared), CF set when the source is not zero (blsi) or is zero (blsmsk, blsr), OF cleared,\nAF PF undefined.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 77} w (.-Size d)
+      (values v ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [(values ^uint64 r ^uint64 fl) (zero uint64)]
+      (switch (.-Mnem in)
+        (case ["blsi"]
+          (set! r (bit-and (- v) v))
+          (when (!= v 0)
+            (set! fl bit-or CF)))
+
+        (case ["blsmsk"]
+          (set! r (bit-xor (- v 1) v))
+          (when (== v 0)
+            (set! fl bit-or CF)))
+
+        (default
+          (set! r (bit-and (- v 1) v))
+          (when (== v 0)
+            (set! fl bit-or CF))))
+
+
+      (set! r bit-and (mask w))
+      (when (and (== r 0) (!= (.-Mnem in) "blsmsk"))
+        (set! fl bit-or ZF))
+
+      (when (!= (bit-and r (signBit w)) 0)
+        (set! fl bit-or SF))
+
+      (.setReg c (.-Reg d) w r)
+      (.Put (.-F c) fl arith)
+      (set! (.-und (.-F c)) (bit-or AF PF))
+      (.done c))))
+
+
+
+
+^{:go/end 140} (go/func bzhi "bzhi: src1 with its bits from the index (src2's bits 7:0) up cleared; CF set when the index exceeds the operand's last bit,\nZF SF from the result, OF cleared, AF PF undefined.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s1 s2) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1) (aget (.-Ops in) 2))
+      ^{:line 117} w (.-Size d)
+      (values v ok) (.load c in (addr s1) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [n (conv uint (bit-and (.reg c (.-Reg s2) w) 0xff))
+        ^{:line 123} r v
+        ^{:line 124 :tag uint64} fl (zero uint64)]
+      (if (< n (* (conv uint w) 8))
+        (set! r bit-and (- ^uint64 (<< 1 n) 1))
+
+        (set! fl bit-or CF))
+
+      (when (== r 0)
+        (set! fl bit-or ZF))
+
+      (when (!= (bit-and r (signBit w)) 0)
+        (set! fl bit-or SF))
+
+      (.setReg c (.-Reg d) w r)
+      (.Put (.-F c) fl arith)
+      (set! (.-und (.-F c)) (bit-or AF PF))
+      (.done c))))
+
+
+
+
+^{:go/end 161} (go/func mulx "mulx: EDX/RDX times the source, unsigned, the high half into the first destination (ModRM.reg) and the low half into the\nsecond (VEX.vvvv), the low first (the same register: the high half); the flags unchanged.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values hiD loD s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1) (aget (.-Ops in) 2))
+      ^{:line 146} w (.-Size hiD)
+      (values v ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [(values ^uint64 hi ^uint64 lo) (zero uint64)]
+      (if (== w 8)
+        (set! (values hi lo) (bits/Mul64 (aget (.-R c) 2) v))
+
+        (let [p (* (bit-and (aget (.-R c) 2) 0xffffffff) (bit-and v 0xffffffff))]
+          (set! (values hi lo) (values (>> p 32) (bit-and p 0xffffffff)))))
+
+      (.setReg c (.-Reg loD) w lo)
+      (.setReg c (.-Reg hiD) w hi)
+      (.done c))))
+
+
+
+
+^{:go/end 188} (go/func pdepext "pdep: the source's low bits deposited at the mask's set bits; pext: the source's bits at the mask's set bits gathered low.\nThe source is VEX.vvvv, the mask the ModRM r/m; the flags unchanged.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s m) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1) (aget (.-Ops in) 2))
+      ^{:line 167} w (.-Size d)
+      ^{:line 168} src (.reg c (.-Reg s) w)
+      (values msk ok) (.load c in (addr m) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [^uint64 r (zero uint64)
+        ^{:line 174} k (conv uint 0)]
+      (for [i (conv uint 0)] (< i (* (conv uint w) 8)) (inc! i)
+        (when (== (bit-and (>> msk i) 1) 0)
+          (continue))
+
+        (if (== (.-Mnem in) "pdep")
+          (set! r bit-or (<< (bit-and (>> src k) 1) i))
+
+          (set! r bit-or (<< (bit-and (>> src i) 1) k)))
+
+        (inc! k))
+
+      (.setReg c (.-Reg d) w r)
+      (.done c))))
+
+
+
+^{:go/end 207} (go/func rorx "rorx: the source rotated right by the immediate (modulo the operand's size); the flags unchanged.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 193} w (.-Size d)
+      (values v ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [n (conv int (bit-and (conv uint64 (.-Imm (aget (.-Ops in) 2))) (- (* (conv uint64 w) 8) 1)))
+        ^{:line 199 :tag uint64} r (zero uint64)]
+      (if (== w 8)
+        (set! r (bits/RotateLeft64 v (- n)))
+
+        (set! r (conv uint64 (bits/RotateLeft32 (conv uint32 v) (- n)))))
+
+      (.setReg c (.-Reg d) w r)
+      (.done c))))
+
+
+
+^{:go/end 229} (go/func shiftx "sarx, shlx, shrx: the source shifted by VEX.vvvv's count (masked to 5 or 6 bits); the flags unchanged.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s cnt) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1) (aget (.-Ops in) 2))
+      ^{:line 212} w (.-Size d)
+      (values v ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [n (bit-and (.reg c (.-Reg cnt) w) (- (* (conv uint64 w) 8) 1))
+        ^{:line 218 :tag uint64} r (zero uint64)]
+      (switch (.-Mnem in)
+        (case ["shlx"]
+          (set! r (<< v n)))
+        (case ["shrx"]
+          (set! r (>> v n)))
+        (default
+          (set! r (conv uint64 (>> (conv int64 (sx v w)) n)))))
+
+      (.setReg c (.-Reg d) w (bit-and r (mask w)))
+      (.done c))))
+
+
+
+^{:go/end 260} (go/func adx "adcx, adox: an unsigned add with CF (adcx) or OF (adox) as the carry in and out; the other flags unchanged.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 234} w (.-Size d)
+      ^{:line 235} a (.reg c (.-Reg d) w)
+      (values b ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [f (conv uint64 CF)]
+      (when (== (.-Mnem in) "adox")
+        (set! f OF))
+
+      (let [u (.Undef (.-F c))
+          ^{:line 245 :tag uint64} cin (zero uint64)]
+        (when (!= (bit-and (.Get (.-F c)) f) 0)
+          (set! cin 1))
+
+        (let [(values ^uint64 r ^uint64 cout) (zero uint64)]
+          (if (== w 8)
+            (set! (values r cout) (bits/Add64 a b cin))
+
+            (let [s (+ (bit-and a 0xffffffff) (bit-and b 0xffffffff) cin)]
+              (set! (values r cout) (values (bit-and s 0xffffffff) (>> s 32)))))
+
+          (.setReg c (.-Reg d) w r)
+          (.Put (.-F c) (* cout f) f)
+          (set! (.-und (.-F c)) (bit-and-not u f))
+          (.done c))))))
+
+
+
+
+
+^{:go/end 302} (go/func cmpxchgDouble "cmpxchg8b, cmpxchg16b: EDX:EAX (RDX:RAX) against the memory operand; equal: ZF set and ECX:EBX (RCX:RBX) stored; else ZF\ncleared, the operand loaded into EDX:EAX (RDX:RAX) and written back unchanged (the write is always made: a read-only page\nfaults either way). cmpxchg16b's operand must be 16-byte aligned (#GP). The other flags unchanged.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [o (aget (.-Ops in) 0)
+      ^{:line 267} a (.ea c in (addr o))
+      ^{:line 268} n 8]
+    (when (== (.-Mnem in) "cmpxchg16b")
+      (set! n 16)
+      (when (!= (bit-and a 15) 0)
+        (return (.raise c SIGSEGV 0 "cmpxchg16b: a misaligned operand (#GP)"))))
+
+
+    (when (not (.Probe (.-AS c) a n))
+      (return (.fault c (.-FaultAddr (.-AS c)))))
+
+    (let [(values ^uint64 lo ^uint64 hi) (zero uint64)
+        ^{:line 279 :tag bool} ok (zero bool)
+        ^{:line 280} h (/ n 2)]
+      (when [(set! (values lo ok) (.Read (.-AS c) a h))] (not ok)
+        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+      (when [(set! (values hi ok) (.Read (.-AS c) (+ a (conv uint64 h)) h))] (not ok)
+        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+      (let [m (mask (conv uint8 h))
+          ^{:line 288} u (.Undef (.-F c))]
+        (if (and (== lo (bit-and (aget (.-R c) 0) m)) (== hi (bit-and (aget (.-R c) 2) m))) (do
+            (.Write (.-AS c) a h (bit-and (aget (.-R c) 3) m))
+            (.Write (.-AS c) (+ a (conv uint64 h)) h (bit-and (aget (.-R c) 1) m))
+            (.Put (.-F c) ZF ZF))
+          (do
+            (.Write (.-AS c) a h lo)
+            (.Write (.-AS c) (+ a (conv uint64 h)) h hi)
+            (.setReg c 0 (conv uint8 h) lo)
+            (.setReg c 2 (conv uint8 h) hi)
+            (.Put (.-F c) 0 ZF)))
+
+        (set! (.-und (.-F c)) (bit-and-not u ZF))
+        (.done c)))))
+
+
+
+
+^{:go/end 311} (go/func rdrand "rdrand, rdseed: a random value (in the lockstep the native's, copied: the world's); CF set (a value delivered), OF SF ZF\nAF PF cleared.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (aget (.-Ops in) 0)]
+    (.setReg c (.-Reg d) (.-Size d) (rand/Uint64))
+    (.Put (.-F c) CF arith)
+    (.done c)))
+
+
+
+^{:go/end 317} (go/func rdpid "rdpid: IA32_TSC_AUX (Linux: the CPU's number; x86i's one CPU is 0; in the lockstep the native's, copied).\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (.setReg c (.-Reg (aget (.-Ops in) 0)) 8 0)
+  (.done c))

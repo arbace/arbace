@@ -1,0 +1,208 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/common/HttpBodySubscriberWrapper.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.common)
+
+(import '(java.net.http HttpResponse$BodySubscriber)
+        '(java.nio ByteBuffer)
+        '(java.util Comparator List Objects)
+        '(java.util.concurrent CompletionStage Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function Function)
+        '(jdk.internal.net.http ResponseSubscribers$TrustedSubscriber))
+
+(defclass ^:public HttpBodySubscriberWrapper
+  :implements [(ResponseSubscribers$TrustedSubscriber T)]
+  :type-params [T]
+
+  (field ^:public ^:static ^:final ^{:tag (Comparator (HttpBodySubscriberWrapper ?))} COMPARE_BY_ID
+    (Comparator/comparing
+      (method-ref Function ^Long [HttpBodySubscriberWrapper] HttpBodySubscriberWrapper/.id)))
+
+  (field ^:public ^:static ^:final ^Flow$Subscription NOP
+    (anon Flow$Subscription []
+      (method ^:public request ^void [this ^long n])
+
+      (method ^:public cancel ^void [this])))
+
+  (field ^:static ^:final ^int SUBSCRIBED 1)
+
+  (field ^:static ^:final ^int REGISTERED 2)
+
+  (field ^:static ^:final ^int COMPLETED 4)
+
+  (field ^:static ^:final ^int CANCELLED 8)
+
+  (field ^:static ^:final ^int UNREGISTERED 16)
+
+  (field ^:static ^:final ^AtomicLong IDS (AtomicLong.))
+
+  (field ^:final ^long id (.incrementAndGet IDS))
+
+  (field ^:final ^{:tag (HttpResponse$BodySubscriber T)} userSubscriber)
+
+  (field ^:private ^:volatile ^int state)
+
+  (field ^:final ^ReentrantLock subscriptionLock (ReentrantLock.))
+
+  (field ^:volatile ^SubscriptionWrapper subscription)
+
+  (field ^:volatile ^Throwable withError)
+
+  (constructor ^:public [this ^{:tag (HttpResponse$BodySubscriber T)} userSubscriber]
+    (set! (.-userSubscriber this) userSubscriber))
+
+  (method ^:protected onTermination ^void [this])
+
+  (defclass ^:private ^:final SubscriptionWrapper
+    :implements [Flow$Subscription]
+
+    (field ^:final ^Flow$Subscription subscription)
+
+    (constructor [this ^Flow$Subscription s]
+      (set! (.-subscription this) (cast Flow$Subscription (Objects/requireNonNull s))))
+
+    (method ^:public request ^void [this ^long n] (.request subscription n))
+
+    (method ^:public cancel ^void [this]
+      (try
+        (try
+          (.cancel subscription)
+          (finally
+            (when (.markCancelled HttpBodySubscriberWrapper/this)
+              (.onTermination HttpBodySubscriberWrapper/this)
+              (.onCancel HttpBodySubscriberWrapper/this))))
+        (catch Throwable t (.onError HttpBodySubscriberWrapper/this t)))))
+
+  (method ^:private ^:final markState ^boolean [this ^:final ^int flag]
+    (let [^:mutable state (.-state this)]
+      (if (== (bit-and-int state flag) flag)
+          false
+          (do
+            (locking this
+              (set! state (.-state this))
+              (when (== (bit-and-int state flag) flag) (return false))
+              (set! state (set! (.-state this) (bit-or-int state flag))))
+            (java-assert (== (bit-and-int state flag) flag))
+            true))))
+
+  (method ^:private markSubscribed ^boolean [this]
+    (.markState this SUBSCRIBED))
+
+  (method ^:private markCancelled ^boolean [this]
+    (.markState this CANCELLED))
+
+  (method ^:private markCompleted ^boolean [this]
+    (.markState this COMPLETED))
+
+  (method ^:private markRegistered ^boolean [this]
+    (.markState this REGISTERED))
+
+  (method ^:private markUnregistered ^boolean [this]
+    (.markState this UNREGISTERED))
+
+  (method ^:final id ^long [this] id)
+
+  (method ^:public needsExecutor ^boolean [this]
+    (ResponseSubscribers$TrustedSubscriber/needsExecutor userSubscriber))
+
+  (method ^:private propagateError ^void [this ^Throwable t]
+    (let [state (.-state this)]
+      (java-assert (some? t))
+      (java-assert (not (== (bit-and-int state COMPLETED) 0)))
+      (try
+        (.lock subscriptionLock)
+        (try
+          (when (.markSubscribed this) (.onSubscribe userSubscriber NOP))
+          (finally (.unlock subscriptionLock)))
+        (finally (.onError userSubscriber t)))))
+
+  (method ^:protected ^:final tryRegister ^boolean [this]
+    (.lock subscriptionLock)
+    (try
+      (let [state (.-state this)]
+        (when-not (== (bit-and-int state
+                                   (bit-or-int (bit-or-int
+                                                 (bit-or-int REGISTERED UNREGISTERED)
+                                                 CANCELLED)
+                                               COMPLETED))
+                      0)
+          (return false))
+        (when (.markRegistered this) (.register this) (return true)))
+      (finally (.unlock subscriptionLock)))
+    false)
+
+  (method ^:protected ^:final tryUnregister ^boolean [this]
+    (.lock subscriptionLock)
+    (try
+      (let [state (.-state this)]
+        (when (== (bit-and-int state REGISTERED) 0) (.markUnregistered this) (return false))
+        (when (.markUnregistered this) (.unregister this) (return true)))
+      (finally (.unlock subscriptionLock)))
+    false)
+
+  (method ^:protected register ^void [this]
+    (java-assert (.isHeldByCurrentThread subscriptionLock)))
+
+  (method ^:protected unregister ^void [this]
+    (java-assert (.isHeldByCurrentThread subscriptionLock)))
+
+  (method ^:protected onCancel ^void [this] (.tryUnregister this))
+
+  (method ^:public ^:final complete ^void [this ^:mutable ^Throwable t]
+    (when (.markCompleted this)
+      (.onTermination this)
+      (.logComplete this t)
+      (.tryUnregister this)
+      (set! t (set! withError (Utils/getCompletionCause t)))
+      (if (nil? t)
+          (try
+            (let [state (.-state this)]
+              (java-assert (not (== (bit-and-int state SUBSCRIBED) 0)))
+              (.onComplete userSubscriber))
+            (catch Throwable x
+              (.propagateError this (set! t (set! withError (Utils/getCompletionCause x))))))
+          (.propagateError this t))))
+
+  (method ^:protected logComplete ^void [this ^Throwable error])
+
+  (method ^:public ^:final completed ^boolean [this]
+    (let [state (.-state this)] (not (== (bit-and-int state COMPLETED) 0))))
+
+  (method ^:public ^:final subscribed ^boolean [this]
+    (let [state (.-state this)] (not (== (bit-and-int state SUBSCRIBED) 0))))
+
+  (method ^:public ^:final registered ^boolean [this]
+    (let [state (.-state this)] (not (== (bit-and-int state REGISTERED) 0))))
+
+  (method ^:public ^:final unregistered ^boolean [this]
+    (let [state (.-state this)] (not (== (bit-and-int state UNREGISTERED) 0))))
+
+  (method ^:public ^:final cancelled ^boolean [this]
+    (let [state (.-state this)] (not (== (bit-and-int state CANCELLED) 0))))
+
+  (method ^:public getBody ^{:tag (CompletionStage T)} [this]
+    (.getBody userSubscriber))
+
+  (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+    (.lock subscriptionLock)
+    (try
+      (.tryRegister this)
+      (if (.markSubscribed this)
+          (let [^SubscriptionWrapper wrapped (SubscriptionWrapper. subscription)]
+            (.onSubscribe userSubscriber (set! (.-subscription this) wrapped)))
+          (.cancel subscription))
+      (finally (.unlock subscriptionLock))))
+
+  (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+    (let [state (.-state this)]
+      (java-assert (not (== (bit-and-int state SUBSCRIBED) 0)))
+      (if (not (== (bit-and-int state COMPLETED) 0))
+          (let [^SubscriptionWrapper subscription (.-subscription this)]
+            (when (some? subscription) (.cancel (.-subscription subscription))))
+          (.onNext userSubscriber item))))
+
+  (method ^:public onError ^void [this ^Throwable throwable]
+    (.complete this throwable))
+
+  (method ^:public onComplete ^void [this] (.complete this nil)))

@@ -1,0 +1,772 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/HSS.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.io ByteArrayOutputStream
+                  InvalidObjectException
+                  ObjectInputStream
+                  ObjectStreamException
+                  Serializable)
+        '(java.security AlgorithmParameters
+                        DigestException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        InvalidParameterException
+                        Key
+                        KeyFactorySpi
+                        KeyRep
+                        KeyRep$Type
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        ProviderException
+                        PublicKey
+                        SignatureException
+                        SignatureSpi)
+        '(java.security.spec AlgorithmParameterSpec
+                             InvalidKeySpecException
+                             KeySpec
+                             X509EncodedKeySpec)
+        '(java.util Arrays)
+        '(sun.security.util BitArray DerValue HexDumpEncoder KnownOIDs ObjectIdentifier RawKeySpec)
+        '(sun.security.x509 AlgorithmId X509Key))
+
+(defclass ^:public ^:final HSS
+  :extends SignatureSpi
+
+  (field ^:private ^HSSPublicKey pubKey)
+
+  (field ^:private ^ByteArrayOutputStream messageStream)
+
+  (method ^:protected ^{Deprecated true} engineSetParameter ^void [this ^String param value]
+    (throw (InvalidParameterException. "No settable parameters exist for HSS/LMS")))
+
+  (method ^:protected ^{Deprecated true} engineGetParameter ^AlgorithmParameters [this ^String param]
+    (throw (InvalidParameterException. "No parameters exist for HSS/LMS")))
+
+  (method ^:protected engineInitSign :throws [InvalidKeyException] ^void [this
+                                                                          ^PrivateKey privateKey]
+    (throw (InvalidKeyException. "HSS/LMS signing is not supported")))
+
+  (method ^:protected engineInitSign :throws [InvalidKeyException] ^void [this ^PrivateKey prk
+                                                                          ^java.security.SecureRandom sr]
+    (throw (InvalidKeyException. "HSS/LMS signing is not supported")))
+
+  (method ^:protected engineSign :throws [SignatureException] ^byte/1 [this]
+    (throw (SignatureException. "HSS/LMS signing is not supported")))
+
+  (method ^:protected engineInitVerify :throws [InvalidKeyException] ^void [this
+                                                                            ^PublicKey publicKey]
+    (let [^:mutable ^HSSPublicKey pub nil]
+      (if-instance [^HSSPublicKey p publicKey]
+        (set! pub p)
+        (let [factory (KeyFactoryImpl.)
+              pk (.engineTranslateKey factory publicKey)]
+          (set! pub (cast HSSPublicKey pk))))
+      (set! pubKey pub)
+      (set! messageStream (ByteArrayOutputStream.))))
+
+  (method ^:protected engineUpdate ^void [this ^byte data]
+    (.write messageStream data))
+
+  (method ^:protected engineUpdate ^void [this ^byte/1 data ^int off ^int len]
+    (.write messageStream data off len))
+
+  (method ^:protected engineVerify :throws [SignatureException] ^boolean [this ^byte/1 signature]
+    (let [^:mutable result true]
+      (try
+        (let [sig (HSSSignature. signature pubKey)
+              ^:mutable lmsPubKey (.-lmsPublicKey pubKey)]
+          (loop [^int i 0]
+            (when (< i (.-Nspk sig))
+              (let [keyArr (.keyArray (aget (.-pubList sig) i))]
+                (set! result
+                      (let [a-1 result
+                            b-2 (LMSUtils/lmsVerify lmsPubKey (aget (.-siglist sig) i) keyArr)]
+                        (and a-1 b-2)))
+                (set! lmsPubKey (aget (.-pubList sig) i))
+                (recur (unchecked-inc-int i)))))
+          (set! result
+                (let [a-3 result
+                      b-4 (LMSUtils/lmsVerify lmsPubKey
+                                              (aget (.-siglist sig) (.-Nspk sig))
+                                              (.toByteArray messageStream))]
+                  (and a-3 b-4))))
+        (finally (.reset messageStream)))
+      result))
+
+  (method ^:protected engineSetParameter :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                             ^AlgorithmParameterSpec params]
+    (when (some? params) (throw (InvalidAlgorithmParameterException. "No parameters accepted"))))
+
+  (method ^:protected engineGetParameters ^AlgorithmParameters [this] nil)
+
+  (defclass ^:static LMSPublicKey
+    (field ^:final ^int type)
+
+    (field ^:final ^int otsType)
+
+    (field ^:final ^LMSParams lmsParams)
+
+    (field ^:private ^:final ^byte/1 I)
+
+    (field ^:private ^:final ^byte/1 T1)
+
+    (constructor :throws [InvalidKeyException] [this ^byte/1 keyArray ^int offset
+                                                ^boolean checkExactLength]
+      (let [inLen (unchecked-subtract-int (alength keyArray) offset)]
+        (when (< inLen 8) (throw (InvalidKeyException. "LMS public key is too short")))
+        (set! type (LMSUtils/fourBytesToInt keyArray offset))
+        (set! otsType (LMSUtils/fourBytesToInt keyArray (unchecked-add-int offset 4)))
+        (let [^:mutable ^LMOTSParams lmotsParams nil]
+          (try
+            (set! lmsParams (LMSParams/of type))
+            (set! lmotsParams (LMOTSParams/of otsType))
+            (catch IllegalArgumentException e (throw (InvalidKeyException. (.getMessage e)))))
+          (let [m (.-m lmsParams)]
+            (when (or (or (< inLen (unchecked-add-int 24 m))
+                          (and checkExactLength (not (== inLen (unchecked-add-int 24 m)))))
+                      (not (.hasSameHash lmsParams lmotsParams)))
+              (throw (InvalidKeyException. "Wrong LMS public key length")))
+            (set! I
+                  (Arrays/copyOfRange keyArray
+                                      (unchecked-add-int offset 8)
+                                      (unchecked-add-int (unchecked-add-int offset 8) 16)))
+            (set! T1
+                  (Arrays/copyOfRange keyArray
+                                      (unchecked-add-int offset 24)
+                                      (unchecked-add-int (unchecked-add-int offset 24) m)))))))
+
+    (method getI ^void [this ^byte/1 arr ^int pos]
+      (System/arraycopy I 0 arr pos 16))
+
+    (method isT1 ^boolean [this ^byte/1 arr ^int pos]
+      (let [m (.-m lmsParams)
+            ^:mutable ^int diff 0]
+        (loop [^int i 0]
+          (when (< i m)
+            (set! diff
+                  (bit-or-int diff (bit-xor-int (aget T1 i) (aget arr (unchecked-add-int pos i)))))
+            (recur (unchecked-inc-int i))))
+        (== diff 0)))
+
+    (method keyArray ^byte/1 [this]
+      (let [result (new byte/1 (.keyArrayLength this))]
+        (LMSUtils/intToFourBytes type result 0)
+        (LMSUtils/intToFourBytes otsType result 4)
+        (System/arraycopy I 0 result 8 16)
+        (System/arraycopy T1 0 result 24 (.-m lmsParams))
+        result))
+
+    (method keyArrayLength ^int [this]
+      (unchecked-add-int 24 (.-m lmsParams))))
+
+  (defclass ^:static LMSUtils
+    (field ^:static ^:final ^int LMS_RESERVED 0)
+
+    (field ^:static ^:final ^int LMS_SHA256_M32_H5 5)
+
+    (field ^:static ^:final ^int LMS_SHA256_M32_H10 6)
+
+    (field ^:static ^:final ^int LMS_SHA256_M32_H15 7)
+
+    (field ^:static ^:final ^int LMS_SHA256_M32_H20 8)
+
+    (field ^:static ^:final ^int LMS_SHA256_M32_H25 9)
+
+    (method ^:static lmsType ^String [^int type]
+      (let [^:mutable ^String typeStr nil]
+        (switch type
+          LMS_RESERVED (set! typeStr "LMS_RESERVED")
+          LMS_SHA256_M32_H5 (set! typeStr "LMS_SHA256_M32_H5")
+          LMS_SHA256_M32_H10 (set! typeStr "LMS_SHA256_M32_H10")
+          LMS_SHA256_M32_H15 (set! typeStr "LMS_SHA256_M32_H15")
+          LMS_SHA256_M32_H20 (set! typeStr "LMS_SHA256_M32_H20")
+          LMS_SHA256_M32_H25 (set! typeStr "LMS_SHA256_M32_H25")
+          (set! typeStr "unrecognized"))
+        typeStr))
+
+    (field ^:static ^:final ^int LMOTS_RESERVED 0)
+
+    (field ^:static ^:final ^int LMOTS_SHA256_N32_W1 1)
+
+    (field ^:static ^:final ^int LMOTS_SHA256_N32_W2 2)
+
+    (field ^:static ^:final ^int LMOTS_SHA256_N32_W4 3)
+
+    (field ^:static ^:final ^int LMOTS_SHA256_N32_W8 4)
+
+    (method ^:static lmotsType ^String [^int type]
+      (let [^:mutable ^String typeStr nil]
+        (switch type
+          LMOTS_RESERVED (set! typeStr "LMOTS_RESERVED")
+          LMOTS_SHA256_N32_W1 (set! typeStr "LMOTS_SHA256_N32_W1")
+          LMOTS_SHA256_N32_W2 (set! typeStr "LMOTS_SHA256_N32_W2")
+          LMOTS_SHA256_N32_W4 (set! typeStr "LMOTS_SHA256_N32_W4")
+          LMOTS_SHA256_N32_W8 (set! typeStr "LMOTS_SHA256_N32_W8")
+          (set! typeStr "unrecognized"))
+        typeStr))
+
+    (method ^:static fourBytesToInt ^int [^byte/1 arr ^int i]
+      (bit-or-int (bit-or-int (bit-or-int (bit-shift-left-int (bit-and-int (aget arr i) 0xff) 24)
+                                          (bit-shift-left-int
+                                            (bit-and-int (aget arr (unchecked-add-int i 1)) 0xff)
+                                            16))
+                              (bit-shift-left-int
+                                (bit-and-int (aget arr (unchecked-add-int i 2)) 0xff)
+                                8))
+                  (bit-and-int (aget arr (unchecked-add-int i 3)) 0xff)))
+
+    (method ^:static intToFourBytes ^void [^int i ^byte/1 arr ^int pos]
+      (aset arr pos (unchecked-byte (bit-shift-right-int i 24)))
+      (aset arr (unchecked-add-int pos 1) (unchecked-byte (bit-shift-right-int i 16)))
+      (aset arr (unchecked-add-int pos 2) (unchecked-byte (bit-shift-right-int i 8)))
+      (aset arr (unchecked-add-int pos 3) (unchecked-byte i)))
+
+    (method ^:static lmsVerify :throws [SignatureException] ^boolean [^LMSPublicKey lmsPublicKey
+                                                                      ^LMSignature sig
+                                                                      ^byte/1 message]
+      (if (or (not (== (.-sigOtsType sig) (.-otsType lmsPublicKey)))
+              (not (== (.-sigLmType sig) (.-type lmsPublicKey))))
+          false
+          (let [lmotSig (.-lmotSig sig)
+                lmotsParams (.-lmotsParams lmotSig)
+                q (.-q sig)
+                m (.-m (.-lmsParams lmsPublicKey))
+                hashAlg_m (.-hashAlg_m (.-lmsParams lmsPublicKey))
+                n (.-n lmotsParams)]
+            (try
+              (let [otsPkCandidate (.lmotsPubKeyCandidate lmotsParams sig message lmsPublicKey)
+                    ^:mutable nodeNum (unchecked-add-int (.-twoPowh (.-lmsParams lmsPublicKey)) q)
+                    tmp0MsgLen (unchecked-add-int 22 n)
+                    tmpLoopMsgLen (unchecked-add-int (unchecked-add-int 22 m) hashAlg_m)
+                    tmpMsg (new byte/1 (Integer/max tmp0MsgLen tmpLoopMsgLen))]
+                (.getI lmsPublicKey tmpMsg 0)
+                (let [md (MessageDigest/getInstance (.-hashAlgStr (.-lmsParams lmsPublicKey)))]
+                  (LMSUtils/intToFourBytes nodeNum tmpMsg 16)
+                  (aset tmpMsg 20 (unchecked-byte 0x82))
+                  (aset tmpMsg 21 (unchecked-byte 0x82))
+                  (System/arraycopy otsPkCandidate 0 tmpMsg 22 n)
+                  (.update md tmpMsg 0 tmp0MsgLen)
+                  (if (== (bit-and-int nodeNum 1) 1)
+                      (.digest md tmpMsg (unchecked-add-int 22 m) hashAlg_m)
+                      (.digest md tmpMsg 22 hashAlg_m))
+                  (aset tmpMsg 20 (unchecked-byte 0x83))
+                  (aset tmpMsg 21 (unchecked-byte 0x83))
+                  (let [^:mutable ^int i 0]
+                    (while (> nodeNum 1)
+                      (LMSUtils/intToFourBytes (unchecked-divide-int nodeNum 2) tmpMsg 16)
+                      (if (== (bit-and-int nodeNum 1) 1)
+                          (.getPath sig i tmpMsg 22)
+                          (.getPath sig i tmpMsg (unchecked-add-int 22 m)))
+                      (.update md tmpMsg 0 (unchecked-add-int 22 (unchecked-multiply-int 2 m)))
+                      (set! nodeNum (unchecked-divide-int nodeNum 2))
+                      (if (== (bit-and-int nodeNum 1) 1)
+                          (.digest md tmpMsg (unchecked-add-int 22 m) hashAlg_m)
+                          (.digest md tmpMsg 22 hashAlg_m))
+                      (set! i (unchecked-inc-int i)))
+                    (.isT1 lmsPublicKey tmpMsg (unchecked-add-int 22 m)))))
+              (catch [NoSuchAlgorithmException DigestException] e (throw (ProviderException. e))))))))
+
+  (defclass ^:static LMOTSignature
+    (field ^:final ^int otSigType)
+
+    (field ^:final ^LMOTSParams lmotsParams)
+
+    (field ^:private ^:final ^int n)
+
+    (field ^:private ^:final ^byte/1 C)
+
+    (field ^:private ^:final ^byte/2 y)
+
+    (constructor :throws [InvalidParameterException] [this ^byte/1 sigArray ^LMOTSParams lmotsParams]
+      (let [inLen (alength sigArray)]
+        (when (< inLen 4) (throw (InvalidParameterException. "OTS signature is too short")))
+        (set! otSigType (.-lmotSigType lmotsParams))
+        (set! (.-lmotsParams this) lmotsParams)
+        (set! n (.-n lmotsParams))
+        (let [p (.-p lmotsParams)]
+          (when-not (== inLen
+                        (unchecked-add-int 4 (unchecked-multiply-int n (unchecked-add-int p 1))))
+            (throw (InvalidParameterException. "OTS signature has incorrect length")))
+          (set! C (Arrays/copyOfRange sigArray 4 (unchecked-add-int 4 n)))
+          (let [^:mutable pStart (unchecked-add-int 4 n)]
+            (set! y (new byte/2 p n))
+            (loop [^int i 0]
+              (when (< i p)
+                (aset y i (Arrays/copyOfRange sigArray pStart (unchecked-add-int pStart n)))
+                (set! pStart (unchecked-add-int pStart n))
+                (recur (unchecked-inc-int i))))))))
+
+    (method getC ^void [this ^byte/1 arr ^int pos]
+      (System/arraycopy C 0 arr pos n))
+
+    (method getY ^void [this ^int i ^byte/1 arr ^int pos]
+      (System/arraycopy (aget y i) 0 arr pos n)))
+
+  (defclass ^:static LMSParams
+    (field ^:final ^int m)
+
+    (field ^:final ^int hashAlg_m 32)
+
+    (field ^:final ^int h)
+
+    (field ^:final ^int twoPowh)
+
+    (field ^:final ^String hashAlgStr)
+
+    (constructor [this ^int m ^int h ^String hashAlgStr]
+      (set! (.-m this) m)
+      (set! (.-h this) h)
+      (set! (.-hashAlgStr this) hashAlgStr)
+      (set! twoPowh (bit-shift-left-int 1 h)))
+
+    (method ^:static of ^LMSParams [^int type]
+      (let [^:mutable ^int m 0
+            ^:mutable ^int h 0
+            ^:mutable ^String hashAlgStr nil]
+        (switch type
+          LMSUtils/LMS_SHA256_M32_H5 (do (set! m 32) (set! h 5) (set! hashAlgStr "SHA-256"))
+          LMSUtils/LMS_SHA256_M32_H10 (do (set! m 32) (set! h 10) (set! hashAlgStr "SHA-256"))
+          LMSUtils/LMS_SHA256_M32_H15 (do (set! m 32) (set! h 15) (set! hashAlgStr "SHA-256"))
+          LMSUtils/LMS_SHA256_M32_H20 (do (set! m 32) (set! h 20) (set! hashAlgStr "SHA-256"))
+          LMSUtils/LMS_SHA256_M32_H25 (do (set! m 32) (set! h 25) (set! hashAlgStr "SHA-256"))
+          (throw (IllegalArgumentException. "Unsupported or bad LMS type")))
+        (LMSParams. m h hashAlgStr)))
+
+    (method hasSameHash ^boolean [this ^LMSParams other]
+      (and (.equals (.-hashAlgStr other) hashAlgStr) (== (.-m other) m)))
+
+    (method hasSameHash ^boolean [this ^LMOTSParams lmotsParams]
+      (and (.equals (.-hashAlgName lmotsParams) hashAlgStr) (== (.-n lmotsParams) m))))
+
+  (defclass ^:static LMSignature
+    (field ^:final ^int sigLmType)
+
+    (field ^:final ^int sigOtsType)
+
+    (field ^:private ^:final ^byte/1 qArr)
+
+    (field ^:final ^int q)
+
+    (field ^:final ^LMOTSignature lmotSig)
+
+    (field ^:final ^int n)
+
+    (field ^:final ^int p)
+
+    (field ^:final ^int m)
+
+    (field ^:final ^int h)
+
+    (field ^:private ^:final ^byte/2 path)
+
+    (constructor :throws [SignatureException] [this ^byte/1 sigArray ^int offset
+                                               ^boolean checkExactLen]
+      (let [inLen (unchecked-subtract-int (alength sigArray) offset)]
+        (when (< inLen 8) (throw (SignatureException. "LMS signature is too short")))
+        (let [^:mutable ^LMOTSParams lmotsParams nil]
+          (set! q (LMSUtils/fourBytesToInt sigArray offset))
+          (set! qArr (Arrays/copyOfRange sigArray offset (unchecked-add-int offset 4)))
+          (set! sigOtsType (LMSUtils/fourBytesToInt sigArray (unchecked-add-int offset 4)))
+          (try
+            (set! lmotsParams (LMOTSParams/of sigOtsType))
+            (catch IllegalArgumentException e (throw (SignatureException. e))))
+          (set! n (.-n lmotsParams))
+          (set! p (.-p lmotsParams))
+          (when (< inLen (unchecked-add-int 12 (unchecked-multiply-int n (unchecked-add-int p 1))))
+            (throw (SignatureException. "LMS signature is too short")))
+          (let [otsSigLen (unchecked-add-int 4 (unchecked-multiply-int n (unchecked-add-int p 1)))
+                otSigArr (Arrays/copyOfRange sigArray
+                                             (unchecked-add-int offset 4)
+                                             (unchecked-add-int
+                                               (unchecked-add-int offset 4)
+                                               otsSigLen))]
+            (set! lmotSig (LMOTSignature. otSigArr lmotsParams))
+            (let [sigTypePos (unchecked-add-int (unchecked-add-int offset 4) otsSigLen)]
+              (set! sigLmType (LMSUtils/fourBytesToInt sigArray sigTypePos))
+              (let [^:mutable ^LMSParams lmsParams nil]
+                (try
+                  (set! lmsParams (LMSParams/of sigLmType))
+                  (catch IllegalArgumentException e (throw (SignatureException. e))))
+                (set! m (.-m lmsParams))
+                (set! h (.-h lmsParams))
+                (let [sigArrLen (unchecked-add-int
+                                  (unchecked-add-int
+                                    12
+                                    (unchecked-multiply-int n (unchecked-add-int p 1)))
+                                  (unchecked-multiply-int m h))]
+                  (when (or (or (>= q (bit-shift-left-int 1 h)) (< inLen sigArrLen))
+                            (and checkExactLen (not (== inLen sigArrLen))))
+                    (throw (SignatureException. "LMS signature length is incorrect")))
+                  (let [^:mutable pStart (unchecked-add-int
+                                           (unchecked-add-int offset 12)
+                                           (unchecked-multiply-int n (unchecked-add-int p 1)))]
+                    (set! path (new byte/2 h m))
+                    (loop [^int i 0]
+                      (when (< i h)
+                        (aset path
+                              i
+                              (Arrays/copyOfRange sigArray pStart (unchecked-add-int pStart m)))
+                        (set! pStart (unchecked-add-int pStart m))
+                        (recur (unchecked-inc-int i))))))))))))
+
+    (method sigArrayLength ^int [this]
+      (unchecked-add-int (unchecked-add-int 12 (unchecked-multiply-int n (unchecked-add-int p 1)))
+                         (unchecked-multiply-int m h)))
+
+    (method getQArr ^void [this ^byte/1 arr ^int pos]
+      (System/arraycopy qArr 0 arr pos 4))
+
+    (method getPath ^void [this ^int i ^byte/1 arr ^int pos]
+      (System/arraycopy (aget path i) 0 arr pos m)))
+
+  (defclass ^:static LMOTSParams
+    (field ^:final ^int lmotSigType)
+
+    (field ^:final ^int n)
+
+    (field ^:final ^int hashAlg_n 32)
+
+    (field ^:final ^int w)
+
+    (field ^:final ^int twoPowWMinus1)
+
+    (field ^:final ^int ls)
+
+    (field ^:final ^int p)
+
+    (field ^:final ^String hashAlgName)
+
+    (field ^:final ^byte/1 hashBuf)
+
+    (field ^:private ^:static ^:final ^byte/1 hashbufSha256_32
+      (new byte/1
+           [0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            0
+            (unchecked-byte 0x80)
+            0
+            0
+            0
+            0
+            0
+            0
+            1
+            (unchecked-byte 0xb8)]))
+
+    (constructor ^:private [this ^int lmotSigType ^int hLen ^int w ^int ls ^int p
+                            ^String hashAlgName]
+      (set! (.-lmotSigType this) lmotSigType)
+      (set! (.-n this) hLen)
+      (set! (.-w this) w)
+      (set! (.-ls this) ls)
+      (set! (.-p this) p)
+      (set! twoPowWMinus1 (unchecked-subtract-int (bit-shift-left-int 1 w) 1))
+      (set! (.-hashAlgName this) hashAlgName)
+      (set! hashBuf hashbufSha256_32))
+
+    (method ^:static of ^LMOTSParams [^int lmotsType]
+      (let [^:mutable ^LMOTSParams params nil]
+        (switch lmotsType
+          LMSUtils/LMOTS_SHA256_N32_W1 (set! params (LMOTSParams. lmotsType 32 1 7 265 "SHA-256"))
+          LMSUtils/LMOTS_SHA256_N32_W2 (set! params (LMOTSParams. lmotsType 32 2 6 133 "SHA-256"))
+          LMSUtils/LMOTS_SHA256_N32_W4 (set! params (LMOTSParams. lmotsType 32 4 4 67 "SHA-256"))
+          LMSUtils/LMOTS_SHA256_N32_W8 (set! params (LMOTSParams. lmotsType 32 8 0 34 "SHA-256"))
+          (throw (IllegalArgumentException. "Unsupported or bad OTS Algorithm Identifier.")))
+        params))
+
+    (method coef ^int [this ^byte/1 S ^int i]
+      (bit-and-int twoPowWMinus1
+                   (bit-shift-right-int
+                     (aget S (unchecked-divide-int (unchecked-multiply-int i w) 8))
+                     (unchecked-subtract-int 8
+                                             (unchecked-add-int
+                                               (unchecked-multiply-int
+                                                 w
+                                                 (unchecked-remainder-int
+                                                   i
+                                                   (unchecked-divide-int 8 w)))
+                                               w)))))
+
+    (method ^:private addCksm ^void [this ^byte/1 S]
+      (let [len n
+            ^:mutable ^int sum 0
+            numSlices (unchecked-divide-int (unchecked-multiply-int len 8) w)]
+        (loop [^int i 0]
+          (when (< i numSlices)
+            (set! sum
+                  (unchecked-add-int sum (unchecked-subtract-int twoPowWMinus1 (.coef this S i))))
+            (recur (unchecked-inc-int i))))
+        (set! sum (bit-shift-left-int sum ls))
+        (aset S len (unchecked-byte (bit-shift-right-int sum 8)))
+        (aset S (unchecked-add-int len 1) (unchecked-byte (bit-and-int sum 0xff)))))
+
+    (method digestFixedLengthPreprocessed ^void [this ^SHA2$SHA256 sha256 ^byte/1 input ^int inLen
+                                                 ^byte/1 output ^int outOffset ^int outLen]
+      (.implDigestFixedLengthPreprocessed sha256 input inLen output outOffset outLen))
+
+    (method lmotsPubKeyCandidate :throws [SignatureException] ^byte/1 [this ^LMSignature lmSig
+                                                                       ^byte/1 message
+                                                                       ^LMSPublicKey pKey]
+      (let [lmOtSig (.-lmotSig lmSig)]
+        (when-not (== (.-otSigType lmOtSig) (.-otsType pKey))
+          (throw (SignatureException. "OTS public key type and OTS signature type do not match")))
+        (let [preQ (new byte/1 (unchecked-add-int 22 hashAlg_n))]
+          (.getI pKey preQ 0)
+          (.getQArr lmSig preQ 16)
+          (aset preQ 20 (unchecked-byte 0x81))
+          (aset preQ 21 (unchecked-byte 0x81))
+          (.getC lmOtSig preQ 22)
+          (let [^:mutable ^MessageDigest md nil]
+            (try
+              (set! md (MessageDigest/getInstance hashAlgName))
+              (catch NoSuchAlgorithmException e
+                (throw (ProviderException. "Digest implementation not found" e))))
+            (let [^:mutable ^byte/1 result nil]
+              (try
+                (.update md preQ 0 (unchecked-add-int 22 n))
+                (.update md message)
+                (let [QWithChecksum (new byte/1 (unchecked-add-int hashAlg_n 2))]
+                  (.digest md QWithChecksum 0 hashAlg_n)
+                  (.addCksm this QWithChecksum)
+                  (let [preCandidate (new byte/1
+                                          (unchecked-add-int
+                                            (unchecked-add-int
+                                              22
+                                              (unchecked-multiply-int
+                                                (unchecked-subtract-int p 1)
+                                                n))
+                                            hashAlg_n))]
+                    (.getI pKey preCandidate 0)
+                    (.getQArr lmSig preCandidate 16)
+                    (aset preCandidate 20 (unchecked-byte 0x80))
+                    (aset preCandidate 21 (unchecked-byte 0x80))
+                    (let [preZi (.clone hashBuf)
+                          hashLen (alength hashBuf)
+                          sha256 (SHA2$SHA256.)]
+                      (.getI pKey preZi 0)
+                      (.getQArr lmSig preZi 16)
+                      (let [twoPowWMinus2 (unchecked-subtract-int twoPowWMinus1 1)]
+                        (loop [^int i 0]
+                          (when (< i p)
+                            (let [a (.coef this QWithChecksum i)]
+                              (if (== a twoPowWMinus1)
+                                  (.getY lmOtSig
+                                         i
+                                         preCandidate
+                                         (unchecked-add-int 22 (unchecked-multiply-int i n)))
+                                  (do
+                                    (aset preZi 20 (unchecked-byte (bit-shift-right-int i 8)))
+                                    (aset preZi 21 (unchecked-byte i))
+                                    (.getY lmOtSig i preZi 23)))
+                              (loop [^int j a]
+                                (when (< j twoPowWMinus1)
+                                  (aset preZi 22 (unchecked-byte j))
+                                  (if (< j twoPowWMinus2)
+                                      (do
+                                        (.digestFixedLengthPreprocessed
+                                          this
+                                          sha256
+                                          preZi
+                                          hashLen
+                                          preZi
+                                          23
+                                          n)
+                                        (recur (unchecked-inc-int j)))
+                                      (do
+                                        (.digestFixedLengthPreprocessed
+                                          this
+                                          sha256
+                                          preZi
+                                          hashLen
+                                          preCandidate
+                                          (unchecked-add-int 22 (unchecked-multiply-int i n))
+                                          n)
+                                        (recur (unchecked-inc-int j))))))
+                              (recur (unchecked-inc-int i)))))
+                        (.update md
+                                 preCandidate
+                                 0
+                                 (unchecked-add-int 22 (unchecked-multiply-int p n)))
+                        (set! result (.digest md))))))
+                (catch DigestException e (throw (ProviderException. "Digest failed" e))))
+              (when-not (== n hashAlg_n) (set! result (Arrays/copyOfRange result 0 n)))
+              result))))))
+
+  (defclass ^:public ^:static KeyFactoryImpl
+    :extends KeyFactorySpi
+
+    (method ^:protected engineGeneratePublic :throws [InvalidKeySpecException] ^PublicKey [this
+                                                                                           ^KeySpec keySpec]
+      (if-instance [^X509EncodedKeySpec x509Spec keySpec]
+        (try
+          (return (HSSPublicKey. (.getEncoded x509Spec) true))
+          (catch InvalidKeyException e (throw (InvalidKeySpecException. e))))
+        (when-instance [^RawKeySpec rawSpec keySpec]
+          (try
+            (return (HSSPublicKey. (.getKeyArr rawSpec) false))
+            (catch InvalidKeyException e (throw (InvalidKeySpecException. e))))))
+      (throw (InvalidKeySpecException. "Unrecognized KeySpec")))
+
+    (method ^:protected engineGeneratePrivate :throws [InvalidKeySpecException] ^PrivateKey [this
+                                                                                             ^KeySpec keySpec]
+      (throw (InvalidKeySpecException. "Private key generation is not supported")))
+
+    (method ^:protected engineGetKeySpec :type-params [(T extends KeySpec)] :throws [InvalidKeySpecException] ^T [this
+                                                                                                                  ^Key key
+                                                                                                                  ^{:tag (Class T)} keySpec]
+      (when (nil? key) (throw (InvalidKeySpecException. "key should not be null")))
+      (when (and (.equals (.getFormat key) "X.509")
+                 (.equalsIgnoreCase (.getAlgorithm key) "HSS/LMS"))
+        (when (.isAssignableFrom keySpec X509EncodedKeySpec)
+          (return (cast KeySpec (.cast keySpec (X509EncodedKeySpec. (.getEncoded key))))))
+        (throw (InvalidKeySpecException. "keySpec is not an X509EncodedKeySpec")))
+      (throw (InvalidKeySpecException. "Wrong key format or key algorithm")))
+
+    (method ^:protected engineTranslateKey :throws [InvalidKeyException] ^Key [this ^Key key]
+      (when (nil? key) (throw (InvalidKeyException. "key cannot be null")))
+      (let [^:mutable ^PublicKey pKey nil]
+        (try
+          (when (instance? HSSPublicKey key) (return key))
+          (let [x509EncodedKeySpec (cast X509EncodedKeySpec
+                                         (.engineGetKeySpec this key X509EncodedKeySpec))]
+            (set! pKey (.engineGeneratePublic this x509EncodedKeySpec)))
+          (catch InvalidKeySpecException e (throw (InvalidKeyException. e))))
+        pKey)))
+
+  (defclass ^:static HSSPublicKey
+    :extends X509Key
+    :implements [Serializable]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 21)
+
+    (field ^:private ^:transient ^int L)
+
+    (field ^:private ^:transient ^LMSPublicKey lmsPublicKey)
+
+    (constructor :throws [InvalidKeyException] [this ^byte/1 keyArray ^boolean x509Encoded]
+      (if x509Encoded
+          (do
+            (.decode this keyArray)
+            (when (or (not (.equals (.value KnownOIDs/HSSLMS) (.toString (.getOID (.-algid this)))))
+                      (some? (.getParameters (.-algid this))))
+              (throw (InvalidKeyException. "X509Key is not an HSS key"))))
+          (let [inLen (alength keyArray)]
+            (when (< inLen 4) (throw (InvalidKeyException. "HSS public key too short")))
+            (set! L (LMSUtils/fourBytesToInt keyArray 0))
+            (set! lmsPublicKey
+                  (LMSPublicKey. (Arrays/copyOfRange keyArray 4 (alength keyArray)) 0 true))
+            (set! (.-algid this) (AlgorithmId. (ObjectIdentifier/of KnownOIDs/HSSLMS)))
+            (.setKey this (BitArray. (unchecked-multiply-int 8 (alength keyArray)) keyArray)))))
+
+    (method ^:public toString ^String [this]
+      (let [encoder (HexDumpEncoder.)]
+        (java-str "HSS/LMS public key, number of layers: "
+                  L
+                  ", LMS type: "
+                  (LMSUtils/lmsType (.-type lmsPublicKey))
+                  ",\nOTS type: "
+                  (LMSUtils/lmotsType (.-otsType lmsPublicKey))
+                  ", byte array representation:\n"
+                  (.encode encoder (.toByteArray (.getKey this))))))
+
+    (method ^:protected parseKeyBits :throws [InvalidKeyException] ^void [this]
+      (let [^:mutable keyArray (.toByteArray (.getKey this))]
+        (when (< (alength keyArray) 12)
+          (throw (InvalidKeyException. "LMS public key is too short")))
+        (when (and (== (aget keyArray 0) DerValue/tag_OctetString)
+                   (== (aget keyArray 1) (unchecked-subtract-int (alength keyArray) 2)))
+          (set! keyArray (Arrays/copyOfRange keyArray 2 (alength keyArray)))
+          (.setKey this (BitArray. (unchecked-multiply-int (alength keyArray) 8) keyArray)))
+        (set! L (LMSUtils/fourBytesToInt keyArray 0))
+        (set! lmsPublicKey (LMSPublicKey. keyArray 4 true))))
+
+    (method ^:private writeReplace :throws [ObjectStreamException] [this]
+      (KeyRep. KeyRep$Type/PUBLIC (.getAlgorithm this) (.getFormat this) (.getEncoded this)))
+
+    (method ^:private readObject :throws [ObjectStreamException] ^void [this ^ObjectInputStream s]
+      (throw (InvalidObjectException. "HSS public keys are not directly deserializable"))))
+
+  (defclass ^:static HSSSignature
+    (field ^:private ^:final ^int Nspk)
+
+    (field ^:private ^:final ^LMSignature/1 siglist)
+
+    (field ^:private ^:final ^LMSPublicKey/1 pubList)
+
+    (constructor :throws [SignatureException] [this ^byte/1 sigArr ^HSSPublicKey pubKey]
+      (when (< (alength sigArr) 4) (throw (SignatureException. "HSS signature is too short")))
+      (set! Nspk (LMSUtils/fourBytesToInt sigArr 0))
+      (when-not (== (unchecked-add-int Nspk 1) (.-L pubKey))
+        (throw (SignatureException. "HSS signature and public key have different tree heights")))
+      (set! siglist (new LMSignature/1 (unchecked-add-int Nspk 1)))
+      (set! pubList (new LMSPublicKey/1 Nspk))
+      (let [^:mutable ^int index 4]
+        (try
+          (loop [^int i 0]
+            (when (< i Nspk)
+              (aset siglist i (LMSignature. sigArr index false))
+              (set! index (unchecked-add-int index (.sigArrayLength (aget siglist i))))
+              (aset pubList i (LMSPublicKey. sigArr index false))
+              (when-not (.hasSameHash (.-lmsParams (.-lmsPublicKey pubKey))
+                                      (.-lmsParams (aget pubList i)))
+                (throw (SignatureException.
+                         "Digest algorithm in public key and Signature do not match")))
+              (set! index (unchecked-add-int index (.keyArrayLength (aget pubList i))))
+              (recur (unchecked-inc-int i))))
+          (aset siglist Nspk (LMSignature. sigArr index true))
+          (catch InvalidKeyException e
+            (throw (SignatureException. "Invalid key in HSS signature" e))))))))

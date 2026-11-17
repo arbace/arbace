@@ -1,0 +1,1096 @@
+(in-ns 'go.arbace.x86i) (go/file "sem.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [bits "math/bits"]
+    ^{:line 6} [strings "strings"]
+    ^{:line 7} [time "time"]])
+
+
+;; The families (AXS54 (a)): each mnemonic's meaning written once from the Intel SDM (vol. 2) and the AMD APM (vol. 3) as
+;; references, for every size and operand kind the decoder gives; bind chooses an instruction's family by its Intel
+;; mnemonic (the table's printer string, dgen's).
+
+
+(go/const "Families, for the coverage counts.\n"
+  ^{:line 16} [^{:val 0} famNone iota]
+  ^{:line 17} [^{:val 1} famALU]
+  ^{:line 18} [^{:val 2} famUnary]
+  ^{:line 19} [^{:val 3} famMov]
+  ^{:line 20} [^{:val 4} famStack]
+  ^{:line 21} [^{:val 5} famBranch]
+  ^{:line 22} [^{:val 6} famMulDiv]
+  ^{:line 23} [^{:val 7} famShift]
+  ^{:line 24} [^{:val 8} famString]
+  ^{:line 25} [^{:val 9} famConv]
+  ^{:line 26} [^{:val 10} famAtomic]
+  ^{:line 27} [^{:val 11} famMisc]
+  ^{:line 28} [^{:val 12} famBit]
+  ^{:line 29} [^{:val 13} famBMI]
+  ^{:line 30} [^{:val 14} famSSE]
+  ^{:line 31} [^{:val 15} famSSEInt]
+  ^{:line 32} [^{:val 16} famSSEFP]
+  ^{:line 33} [^{:val 17} famSSECvt])
+
+
+
+(go/var ^{:doc "FamilyNames are the families' names, by number.\n"} FamilyNames ^{:go/breaks [18]} (lit (slice string) "unimplemented" "alu" "unary" "mov" "stack" "branch" "muldiv" "shift" "string" "conv" "atomic" "misc" "bit" "bmi" "sse" "sseint"
+    "ssefp" "ssecvt"))
+
+(go/type ^:alias execFn (func [^{:tag (* CPU)} c ^{:tag (* Inst)} in] [int]))
+
+(go/var families (lit (map string (struct
+        ^{:line 43 :tag uint8} fam
+        ^{:line 44 :tag execFn} fn))))
+
+
+^{:go/end 54} (go/func def [^uint8 fam ^execFn fn & ^{:tag (slice string)} mnems]
+  (range [_ m mnems]
+    (aset families m (lit (struct
+          ^{:line 50 :tag uint8} fam
+          ^{:line 51 :tag execFn} fn)
+        ^{:line 52} fam fn))))
+
+
+
+^{:go/end 58} (go/func unimplemented ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (.raise c SIGILL (.-RIP c) (fmt/Sprintf ":unimplemented %s at %#x" (.-Name in) (.-RIP c))))
+
+
+
+
+
+^{:go/end 81} (go/func bind "bind gives the instruction its family's routine: an instruction with an XMM operand SSE's by its mnemonic (movsd and\ncmpsd are also the string instructions'), the others the integer families'; an operand of a register file x86i does not\nmodel (MMX, x87, YMM, mask, segment, debug, control) none.\n" [^{:tag (* Inst)} in]
+  (set! (values (.-exec in) (.-fam in)) (values unimplemented famNone))
+  (let [xmm false]
+    (range [_ o (.-Ops in)]
+      (switch (.-K o)
+        (case [OOther OSeg]
+          (return))
+        (case [OXMM]
+          (set! xmm true))))
+
+
+    (let [tab families]
+      (when xmm
+        (set! tab sseFamilies))
+
+      (when [(values f ok) (aget tab (.-Mnem in))] ok
+        (set! (values (.-exec in) (.-fam in)) (values (.-fn f) (.-fam f)))))))
+
+
+
+
+^{:go/end 92} (go/func Claimed "Claimed are the decode tables' instructions a family claims (bind's rule over their operands' kinds): NAME, FAMILY.\n" ^{:tag (slice (array 2 string))} []
+  (let [^{:tag (slice (array 2 string))} out (zero (slice (array 2 string)))]
+    (for [id 1] (< id (len insns)) (inc! id)
+      (when [f (FamilyOf (conv uint16 id))] (!= f "")
+        (set! out (append out (lit (array 2 string) (.-name (aget insns id)) f)))))
+
+
+    ^{:line 91} out))
+
+
+
+^{:go/breaks [[5 119]] :go/end 120} (go/func FamilyOf "FamilyOf is the family that claims the instruction ID (\"\" none).\n" ^string [^uint16 id]
+  (do
+    (let [ins (addr (aget insns id))]
+      (when (.-bad ins)
+        (return ""))
+
+      (let [in (addr (lit Inst :Name (.-name ins) :Mnem (.-mnem ins)))]
+        (range [_ s (.-specs ins)]
+          (switch (.-typ s)
+            (case [tyXMM]
+              (set! (.-Ops in) (append (.-Ops in) (lit Opnd :K OXMM))))
+            (case [tyMM64 tyYMM tyZMM tyST tyVK tyVKPair tyTMM tyBNDR tySegReg tyDebugReg tyControlReg tyMVSIBX tyMVSIBY
+                ^{:line 107} tyMVSIBZ]
+              (set! (.-Ops in) (append (.-Ops in) (lit Opnd :K OOther)))))
+
+          (when (== (.-enc s) encFP)
+            (set! (.-Ops in) (append (.-Ops in) (lit Opnd :K OOther)))))
+
+
+        (bind in)
+        (when (!= (.-fam in) famNone)
+          (return (aget FamilyNames (.-fam in)))))))
+
+
+  "")
+
+
+
+^{:go/end 123} (go/method Family "Family is the instruction's family's name.\n" ^string [^{:tag (* Inst)} in] (aget FamilyNames (.-fam in)))
+
+^{:go/end 159} (go/func init []
+  (def famALU alu "add" "or" "adc" "sbb" "and" "sub" "xor" "cmp" "test")
+  (def famUnary unary "inc" "dec" "neg" "not")
+  (def famMov mov "mov" "movabs")
+  (def famMov movx "movzx" "movsx" "movsxd")
+  (def famMov lea "lea")
+  (def famMov xchg "xchg")
+  (def famMov bswap "bswap")
+  (def famMov cmov "cmov")
+  (def famMov setcc "set")
+  (def famStack push "push")
+  (def famStack pop "pop")
+  (def famStack pushf "pushfq")
+  (def famStack popf "popfq")
+  (def famStack leave "leave")
+  (def famBranch jmp "jmp")
+  (def famBranch jcc "j")
+  (def famBranch call "call")
+  (def famBranch ret "ret")
+  (def famBranch loop "loop" "loope" "loopne" "jrcxz" "jecxz")
+  (def famMulDiv mul "mul" "imul")
+  (def famMulDiv div "div" "idiv")
+  (def famShift shift "shl" "sal" "shr" "sar" "rol" "ror")
+  ^{:go/breaks [15]} (def famString str "movsb" "movsw" "movsd" "movsq" "stosb" "stosw" "stosd" "stosq" "lodsb" "lodsw" "lodsd" "lodsq"
+    "scasb" "scasw" "scasd" "scasq" "cmpsb" "cmpsw" "cmpsd" "cmpsq")
+  (def famConv conv "cbw" "cwde" "cdqe" "cwd" "cdq" "cqo")
+  (def famAtomic cmpxchg "cmpxchg")
+  (def famAtomic xadd "xadd")
+  (def famMisc nop "nop" "pause" "lfence" "mfence" "sfence" "lock" "rep" "repne" "xacquire" "xrelease" "data16" "endbr64")
+  (def famMisc flagOp "clc" "stc" "cmc" "cld" "std" "lahf" "sahf")
+  (def famMisc syscall "syscall")
+  (def famMisc trap "ud2" "int3" "hlt" "ud1" "ud0")
+  (def famMisc cpuid "cpuid")
+  (def famMisc rdtsc "rdtsc"))
+
+
+^{:go/end 161} (go/method done ^int [^{:tag (* CPU)} c] (set! (.-RIP c) (.-next c)) stepOK)
+
+
+^{:go/end 164} (go/func acc "acc is the accumulator of the size as an operand.\n" ^Opnd [^uint8 size] (lit Opnd :K OReg :Size size :Reg 0))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; alu: add or adc sbb and sub xor cmp test
+
+^{:go/end 223} (go/func alu ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values ^Opnd d ^Opnd s) (zero Opnd)]
+    (if (== (len (.-Ops in)) 1) (do ; the accumulator forms: AL/AX/EAX/RAX, imm
+        (set! s (aget (.-Ops in) 0))
+        (set! d (acc (.-Size s))))
+
+      (set! (values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) (- (len (.-Ops in)) 1)))))
+
+    (let [w (.-Size d)
+        (values a ok) (.load c in (addr d) w)]
+      (when (not ok)
+        (return stopSignal))
+
+      (let [(values b ^:assign ok) (.load c in (addr s) w)]
+        (when (not ok)
+          (return stopSignal))
+
+        (set! b bit-and (mask w))
+        (let [^uint64 r (zero uint64)
+            ^{:line 188 :tag uint8} op (zero uint8)
+            ^{:line 189 :tag uint64} cin (zero uint64)
+            ^{:line 190} write true]
+          (switch (.-Mnem in)
+            (case ["add"]
+              (set! (values r op) (values (+ a b) fAdd)))
+            (case ["adc"]
+              (when (.cf (.-F c))
+                (set! cin 1))
+
+              (set! (values r op) (values (+ a b cin) fAdc)))
+            (case ["sub"]
+              (set! (values r op) (values (- a b) fSub)))
+            (case ["sbb"]
+              (when (.cf (.-F c))
+                (set! cin 1))
+
+              (set! (values r op) (values (- a b cin) fSbb)))
+            (case ["cmp"]
+              (set! (values r op write) (values (- a b) fSub false)))
+            (case ["and"]
+              (set! (values r op) (values (bit-and a b) fLogic)))
+            (case ["test"]
+              (set! (values r op write) (values (bit-and a b) fLogic false)))
+            (case ["or"]
+              (set! (values r op) (values (bit-or a b) fLogic)))
+            (case ["xor"]
+              (set! (values r op) (values (bit-xor a b) fLogic))))
+
+          (when (and write (not (.store c in (addr d) w r)))
+            (return stopSignal))
+
+          (.set (.-F c) op w a b r)
+          (set! (.-cin (.-F c)) cin)
+          (.done c))))))
+
+
+;; unary: inc dec neg not
+
+^{:go/end 262} (go/func unary ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (aget (.-Ops in) 0)
+      ^{:line 229} w (.-Size d)
+      (values a ok) (.load c in (addr d) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [^uint64 cin (zero uint64)]
+      (when (.cf (.-F c))
+        (set! cin 1))
+
+      (switch (.-Mnem in)
+        (case ["inc"]
+          (when (not (.store c in (addr d) w (+ a 1)))
+            (return stopSignal))
+
+          (.set (.-F c) fInc w a 1 (+ a 1))
+          (set! (.-cin (.-F c)) cin))
+        (case ["dec"]
+          (when (not (.store c in (addr d) w (- a 1)))
+            (return stopSignal))
+
+          (.set (.-F c) fDec w a 1 (- a 1))
+          (set! (.-cin (.-F c)) cin))
+        (case ["neg"]
+          (when (not (.store c in (addr d) w (- a)))
+            (return stopSignal))
+
+          (.set (.-F c) fSub w 0 a (- a)))
+        (case ["not"]
+          (when (not (.store c in (addr d) w (bit-not a)))
+            (return stopSignal))))
+
+
+      (.done c))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; mov family
+
+
+^{:go/end 271} (go/func accLoad "accLoad: a MOV*ao* name (the accumulator loaded from a moffs), not MOV*o*a (stored)\n" ^bool [^string name]
+  (let [i (strings/LastIndexByte name \o)]
+    (and (> i 0) (== (aget name (- i 1)) \a))))
+
+
+^{:go/end 300} (go/func mov ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (== (len (.-Ops in)) 1) ; moffs forms: MOV*ao* loads the accumulator, MOV*o*a stores it
+    (let [m (aget (.-Ops in) 0)
+        ^{:line 276} w (.-Size m)
+        ^{:line 277} a (acc w)]
+      (cond (accLoad (.-Name in))
+        (let [(values v ok) (.load c in (addr m) w)]
+          (when (not ok)
+            (return stopSignal))
+
+          (.setReg c 0 w v))
+        (not (.store c in (addr m) w (.reg c 0 w)))
+        (return stopSignal))
+
+      (set! _ a)
+      (return (.done c))))
+
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 291} w (.-Size d)
+      (values v ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (when (not (.store c in (addr d) w v))
+      (return stopSignal))
+
+    (.done c)))
+
+
+^{:go/end 313} (go/func movx ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      (values v ok) (.load c in (addr s) (.-Size s))]
+    (when (not ok)
+      (return stopSignal))
+
+    (when (!= (.-Mnem in) "movzx")
+      (set! v (sx v (.-Size s))))
+
+    (.setReg c (.-Reg d) (.-Size d) (bit-and v (mask (.-Size d))))
+    (.done c)))
+
+
+^{:go/end 320} (go/func lea ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))]
+    (set! (.-Seg s) 0)
+    (.setReg c (.-Reg d) (.-Size d) (bit-and (.ea c in (addr s)) (mask (.-Size d))))
+    (.done c)))
+
+
+^{:go/end 344} (go/func xchg ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values ^Opnd x ^Opnd y) (zero Opnd)]
+    (if (== (len (.-Ops in)) 1)
+      (set! (values x y) (values (aget (.-Ops in) 0) (acc (.-Size (aget (.-Ops in) 0)))))
+
+      (set! (values x y) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))))
+
+    (let [w (.-Size x)
+        (values a ok) (.load c in (addr x) w)]
+      (when (not ok)
+        (return stopSignal))
+
+      (let [(values b ^:assign ok) (.load c in (addr y) w)]
+        (when (not ok)
+          (return stopSignal))
+
+        (when (or (not (.probe c in (addr x) w)) (not (.probe c in (addr y) w)))
+          (return stopSignal))
+
+        (.store c in (addr x) w b)
+        (.store c in (addr y) w a)
+        (.done c)))))
+
+
+^{:go/end 357} (go/func bswap ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (aget (.-Ops in) 0)]
+    (switch (.-Size d)
+      (case [8]
+        (.setReg c (.-Reg d) 8 (bits/ReverseBytes64 (.reg c (.-Reg d) 8))))
+      (case [4]
+        (.setReg c (.-Reg d) 4 (conv uint64 (bits/ReverseBytes32 (conv uint32 (.reg c (.-Reg d) 4))))))
+      (default ; undefined (SDM); zero, as both vendors give
+        (.setReg c (.-Reg d) 2 0)))
+
+    (.done c)))
+
+
+^{:go/end 371} (go/func cmov ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) (- (len (.-Ops in)) 1)))
+      (values v ok) (.load c in (addr s) (.-Size d))]
+    (when (not ok)
+      (return stopSignal))
+
+    (cond (.cond (.-F c) (.-CC in))
+      (.setReg c (.-Reg d) (.-Size d) v)
+      (== (.-Size d) 4)
+      (.setReg c (.-Reg d) 4 (.reg c (.-Reg d) 4)))
+
+    (.done c)))
+
+
+^{:go/end 383} (go/func setcc ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (aget (.-Ops in) 0)
+      ^{:line 375 :tag uint64} v (zero uint64)]
+    (when (.cond (.-F c) (.-CC in))
+      (set! v 1))
+
+    (when (not (.store c in (addr d) 1 v))
+      (return stopSignal))
+
+    (.done c)))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; stack
+
+^{:go/end 409} (go/func push ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [s (aget (.-Ops in) 0)
+      ^{:line 390} w (.-Size s)]
+    (when (== (.-K s) OImm)
+      (if (== w 2)
+        (set! w 2)
+
+        (set! w 8)))
+
+
+    (let [(values v ok) (.load c in (addr s) w)]
+      (when (not ok)
+        (return stopSignal))
+
+      (when (== (.-K s) OImm)
+        (set! v (bit-and (conv uint64 (.-Imm s)) (mask w))))
+
+      (when (not (.push c v w))
+        (return stopSignal))
+
+      (.done c))))
+
+
+^{:go/end 424} (go/func pop ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (aget (.-Ops in) 0)
+      ^{:line 413} w (.-Size d)
+      ^{:line 414} sp (aget (.-R c) 4)
+      (values v ok) (.pop c w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (when (not (.store c in (addr d) w v)) ; a memory destination's address after RSP moved
+      (aset (.-R c) 4 sp)
+      (return stopSignal))
+
+    (.done c)))
+
+
+(go/const ^{:val 2362837} flagsWritable (bit-or CF PF AF ZF SF TF DF OF AC ID))
+
+^{:go/end 433} (go/func pushf ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (not (.push c (.Get (.-F c)) 8))
+    (return stopSignal))
+
+  (.done c))
+
+
+^{:go/end 442} (go/func popf ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values v ok) (.pop c 8)]
+    (when (not ok)
+      (return stopSignal))
+
+    (.Put (.-F c) v (bit-and-not flagsWritable TF))
+    (.done c)))
+
+
+^{:go/end 452} (go/func leave ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values v ok) (.Read (.-AS c) (aget (.-R c) 5) 8)]
+    (when (not ok)
+      (return (.fault c (.-FaultAddr (.-AS c)))))
+
+    (aset (.-R c) 4 (+ (aget (.-R c) 5) 8))
+    (aset (.-R c) 5 v)
+    (.done c)))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; branch
+
+^{:go/end 462} (go/func target [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^{:tag (* Opnd)} o] :results [uint64 bool]
+  (when (== (.-K o) ORel)
+    (return (+ (.-next c) (conv uint64 (.-Imm o))) true))
+
+  (.load c in o 8))
+
+
+^{:go/end 471} (go/func jmp ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values t ok) (target c in (addr (aget (.-Ops in) 0)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (set! (.-RIP c) t)
+    ^{:line 470} stepOK))
+
+
+^{:go/end 480} (go/func jcc ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (if (.cond (.-F c) (.-CC in))
+    (set! (.-RIP c) (+ (.-next c) (conv uint64 (.-Imm (aget (.-Ops in) 0)))))
+
+    (set! (.-RIP c) (.-next c)))
+
+  ^{:line 479} stepOK)
+
+
+^{:go/end 492} (go/func call ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values t ok) (target c in (addr (aget (.-Ops in) 0)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (when (not (.push c (.-next c) 8))
+      (return stopSignal))
+
+    (set! (.-RIP c) t)
+    ^{:line 491} stepOK))
+
+
+^{:go/end 504} (go/func ret ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values t ok) (.pop c 8)]
+    (when (not ok)
+      (return stopSignal))
+
+    (when (== (len (.-Ops in)) 1) ; ret imm16
+      (set! (aget (.-R c) 4) + (bit-and (conv uint64 (.-Imm (aget (.-Ops in) 0))) 0xffff)))
+
+    (set! (.-RIP c) t)
+    ^{:line 503} stepOK))
+
+
+^{:go/end 531} (go/func loop ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [w (conv uint8 8)]
+    (when (or (.-AdSize32 in) (== (.-Mnem in) "jecxz"))
+      (set! w 4))
+
+    (let [^bool take (zero bool)]
+      (switch (.-Mnem in)
+        (case ["jrcxz" "jecxz"]
+          (set! take (== (.reg c 1 w) 0)))
+        (default
+          (let [n (bit-and (- (.reg c 1 w) 1) (mask w))]
+            (.setReg c 1 w n)
+            (set! take (!= n 0))
+            (cond (== (.-Mnem in) "loope")
+              (set! take (and take (.zf (.-F c))))
+              (== (.-Mnem in) "loopne")
+              (set! take (and take (not (.zf (.-F c)))))))))
+
+
+      (if take
+        (set! (.-RIP c) (+ (.-next c) (conv uint64 (.-Imm (aget (.-Ops in) 0)))))
+
+        (set! (.-RIP c) (.-next c)))
+
+      ^{:line 530} stepOK)))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; mul, imul, div, idiv
+
+^{:go/end 630} (go/func mul ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (and (== (.-Mnem in) "imul") (> (len (.-Ops in)) 1))
+    (let [d (aget (.-Ops in) 0)
+        ^{:line 539} w (.-Size d)
+        (values ^uint64 a ^uint64 b) (zero uint64)
+        ^{:line 541 :tag bool} ok (zero bool)]
+      (if (== (len (.-Ops in)) 3) (do
+          (when [(set! (values a ok) (.load c in (addr (aget (.-Ops in) 1)) w))] (not ok)
+            (return stopSignal))
+
+          (set! b (conv uint64 (.-Imm (aget (.-Ops in) 2)))))
+        (do
+          (when [(set! (values a ok) (.load c in (addr d) w))] (not ok)
+            (return stopSignal))
+
+          (when [(set! (values b ok) (.load c in (addr (aget (.-Ops in) 1)) w))] (not ok)
+            (return stopSignal))))
+
+
+      (let [(values hi lo) (bits/Mul64 (sx a w) (sx b w))
+          (values sa sb) (values (conv int64 (sx a w)) (conv int64 (sx b w)))]
+        (when (< sa 0)
+          (set! hi - (conv uint64 sb)))
+
+        (when (< sb 0)
+          (set! hi - (conv uint64 sa)))
+
+        (let [r (bit-and lo (mask w))
+            ^{:line 564 :tag uint64} over (zero uint64)]
+          (cond (== w 8)
+            (when (!= hi (conv uint64 (>> (conv int64 lo) 63)))
+              (set! over 1))
+
+            (!= (sx lo w) lo)
+            (set! over 1))
+
+          (.setReg c (.-Reg d) w r)
+          (.set (.-F c) fMul w a b r)
+          (set! (.-cin (.-F c)) over)
+          (return (.done c))))))
+
+  (let [s (aget (.-Ops in) 0)
+      ^{:line 578} w (.-Size s)
+      (values b ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [a (.reg c 0 w)
+        (values ^uint64 hi ^uint64 lo) (zero uint64)
+        ^{:line 585} signed (== (.-Mnem in) "imul")]
+      (if signed
+        (let [(values x y) (values (conv int64 (sx a w)) (conv int64 (sx b w)))]
+          (if (== w 8)
+            (let [(values h l) (bits/Mul64 (conv uint64 x) (conv uint64 y))]
+              (when (< x 0)
+                (set! h - (conv uint64 y)))
+
+              (when (< y 0)
+                (set! h - (conv uint64 x)))
+
+              (set! (values hi lo) (values h l)))
+
+            (let [p (conv uint64 (* x y))]
+              (set! (values lo hi) (values (bit-and p (mask w)) (bit-and (>> p (* 8 (conv uint w))) (mask w)))))))
+
+        (do
+          (if (== w 8)
+            (set! (values hi lo) (bits/Mul64 a b))
+
+            (let [p (* a b)]
+              (set! (values lo hi) (values (bit-and p (mask w)) (bit-and (>> p (* 8 (conv uint w))) (mask w))))))))
+
+
+      (let [^uint64 over (zero uint64)]
+        (cond signed
+          (cond (!= (>> (sx lo w) 63) 0)
+            (when (!= hi (mask w))
+              (set! over 1))
+
+            (!= hi 0)
+            (set! over 1))
+
+          (!= hi 0)
+          (set! over 1))
+
+        (if (== w 1)
+          (.setReg c 0 2 (bit-or (<< hi 8) lo))
+          (do
+            (.setReg c 0 w lo)
+            (.setReg c 2 w hi)))
+
+        (.set (.-F c) fMul w a b lo)
+        (set! (.-cin (.-F c)) over)
+        (.done c)))))
+
+
+^{:go/end 717} (go/func div ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [s (aget (.-Ops in) 0)
+      ^{:line 634} w (.-Size s)
+      (values d ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (when (== d 0)
+      (return (.raise c SIGFPE (.-RIP c) "divide error")))
+
+    (let [(values ^uint64 hi ^uint64 lo) (zero uint64)]
+      (if (== w 1)
+        (let [ax (.reg c 0 2)]
+          (set! (values hi lo) (values (>> ax 8) (bit-and ax 0xff))))
+
+        (set! (values hi lo) (values (.reg c 2 w) (.reg c 0 w))))
+
+      (let [(values ^uint64 q ^uint64 r) (zero uint64)]
+        (if (== (.-Mnem in) "div")
+          (if (== w 8) (do
+              (when (>= hi d)
+                (return (.raise c SIGFPE (.-RIP c) "divide error")))
+
+              (set! (values q r) (bits/Div64 hi lo d)))
+
+            (let [n (bit-or (<< hi (* 8 (conv uint w))) lo)]
+              (set! (values q r) (values (/ n d) (% n d)))
+              (when (> q (mask w))
+                (return (.raise c SIGFPE (.-RIP c) "divide error")))))
+
+
+
+          (let [neg false
+              ^{:line 665} dv (conv int64 (sx d w))]
+            (if (== w 8)
+              (let [nneg (< (conv int64 hi) 0)
+                  (values nh nl) (values hi lo)]
+                (when nneg ; |n|
+                  (set! nl (+ (bit-not nl) 1))
+                  (set! nh (bit-not nh))
+                  (when (== nl 0)
+                    (inc! nh)))
+
+
+                (let [ad (conv uint64 dv)]
+                  (when (< dv 0)
+                    (set! ad (conv uint64 (- dv))))
+
+                  (when (>= nh ad)
+                    (return (.raise c SIGFPE (.-RIP c) "divide error")))
+
+                  (let [(values uq ur) (bits/Div64 nh nl ad)]
+                    (set! neg (!= nneg (< dv 0)))
+                    (if neg (do
+                        (when (> uq (<< 1 63))
+                          (return (.raise c SIGFPE (.-RIP c) "divide error")))
+
+                        (set! q (- uq)))
+                      (do
+                        (when (> uq (- (<< 1 63) 1))
+                          (return (.raise c SIGFPE (.-RIP c) "divide error")))
+
+                        (set! q uq)))
+
+                    (set! r ur)
+                    (when nneg
+                      (set! r (- ur))))))
+
+
+              (let [n (conv int64 (sx (bit-or (<< hi (* 8 (conv uint w))) lo) (* w 2)))
+                  (values qq rr) (values (/ n dv) (% n dv))]
+                (when (!= qq (conv int64 (sx (bit-and (conv uint64 qq) (mask w)) w)))
+                  (return (.raise c SIGFPE (.-RIP c) "divide error")))
+
+                (set! (values q r) (values (conv uint64 qq) (conv uint64 rr)))))))
+
+
+        (if (== w 1)
+          (.setReg c 0 2 (bit-or (<< (bit-and r 0xff) 8) (bit-and q 0xff)))
+          (do
+            (.setReg c 0 w q)
+            (.setReg c 2 w r)))
+
+        (set! (.-und (.-F c)) arith) ; undefined after a divide (SDM); x86i leaves them as they were
+        (.done c)))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; shifts and rotates (rcl, rcr at AX5.4)
+
+^{:go/end 808} (go/func shift ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (aget (.-Ops in) 0)
+      ^{:line 724} w (.-Size d)
+      ^{:line 725 :tag uint64} n (zero uint64)]
+    (switch
+      (case [(== (len (.-Ops in)) 2)]
+        (set! n (conv uint64 (.-Imm (aget (.-Ops in) 1)))))
+      (case [(strings/HasSuffix (.-Name in) "CL")]
+        (set! n (bit-and (aget (.-R c) 1) 0xff)))
+      (default
+        (set! n 1)))
+
+    (if (== w 8)
+      (set! n bit-and 63)
+
+      (set! n bit-and 31))
+
+    (let [(values a ok) (.load c in (addr d) w)]
+      (when (not ok)
+        (return stopSignal))
+
+      (when (== n 0) ; no flag changes; a 32-bit register is still written (its upper half zeroed)
+        (when (and (== (.-K d) OReg) (== w 4))
+          (.setReg c (.-Reg d) 4 a))
+
+        (return (.done c)))
+
+      (let [bitsW (* (conv uint64 w) 8)
+          ^{:line 750 :tag uint64} r (zero uint64)]
+        (switch (.-Mnem in)
+          (case ["shl" "sal"]
+            (if (>= n 64)
+              (set! r 0)
+
+              (set! r (<< a n)))
+
+            (when (not (.store c in (addr d) w r))
+              (return stopSignal))
+
+            (.set (.-F c) fShl w a n r))
+          (case ["shr"]
+            (set! r (>> (bit-and a (mask w)) n))
+            (when (not (.store c in (addr d) w r))
+              (return stopSignal))
+
+            (.set (.-F c) fShr w a n r))
+          (case ["sar"]
+            (set! r (conv uint64 (>> (conv int64 (sx a w)) n)))
+            (when (not (.store c in (addr d) w r))
+              (return stopSignal))
+
+            (.set (.-F c) fSar w a n r))
+          (case ["rol" "ror"]
+            (let [k (% n bitsW)]
+              (set! a bit-and (mask w))
+              (if (== (.-Mnem in) "rol")
+                (set! r (bit-and (bit-or (<< a k) (>> a (% (- bitsW k) bitsW))) (mask w)))
+
+                (set! r (bit-and (bit-or (>> a k) (<< a (% (- bitsW k) bitsW))) (mask w))))
+
+              (when (== k 0)
+                (set! r a))
+
+              (when (not (.store c in (addr d) w r))
+                (return stopSignal))
+
+              (let [fl (bit-and-not (.Get (.-F c)) (bit-or CF OF))
+                  ^{:line 789} msb (bit-and (>> r (- bitsW 1)) 1)]
+                (if (== (.-Mnem in) "rol")
+                  (let [cf (bit-and r 1)]
+                    (set! fl bit-or (* cf CF))
+                    (when (!= (bit-xor msb cf) 0)
+                      (set! fl bit-or OF)))
+
+                  (do
+                    (set! fl bit-or (* msb CF))
+                    (when (!= (bit-xor msb (bit-and (>> r (- bitsW 2)) 1)) 0)
+                      (set! fl bit-or OF))))
+
+
+                (.Put (.-F c) fl (bit-or CF OF))
+                (when (!= n 1)
+                  (set! (.-und (.-F c)) OF))))))
+
+
+        (.done c)))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; string instructions, with rep, repe and repne
+
+^{:go/end 910} (go/func str ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [kind (subslice (.-Mnem in) _ 4)
+      ^{:line 815 :tag uint8} w (zero uint8)]
+    (switch (aget (.-Mnem in) 4)
+      (case [\b]
+        (set! w 1))
+      (case [\w]
+        (set! w 2))
+      (case [\d]
+        (set! w 4))
+      (default
+        (set! w 8)))
+
+    (let [aw (conv uint8 8)]
+      (when (.-AdSize32 in)
+        (set! aw 4))
+
+      (let [step (conv uint64 w)]
+        (when (!= (bit-and (.-raw (.-F c)) DF) 0)
+          (set! step (- step)))
+
+        (let [^uint8 srcSeg (zero uint8)]
+          (range [_ o (.-Ops in)]
+            (when (== (.-K o) OSI)
+              (set! srcSeg (.-Seg o))))
+
+
+          (let [segBase ^{:go/breaks [[3 847]] :go/end 848} (fn ^uint64 [^uint8 s]
+                (switch s
+                  (case [5]
+                    (return (.-FS c)))
+                  (case [6]
+                    (return (.-GS c))))
+
+                0)
+
+              ^{:line 849} rep (!= (.-Rep in) 0)]
+            (while true
+              (when (and rep (== (.reg c 1 aw) 0))
+                (break))
+
+              (let [(values si di) (values (.reg c 6 aw) (.reg c 7 aw))]
+                (switch kind
+                  (case ["movs"]
+                    (let [(values v ok) (.Read (.-AS c) (+ si (segBase srcSeg)) (conv int w))]
+                      (when (not ok)
+                        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+                      (when (not (.Write (.-AS c) di (conv int w) v))
+                        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+                      (.setReg c 6 aw (+ si step))
+                      (.setReg c 7 aw (+ di step))))
+                  (case ["stos"]
+                    (when (not (.Write (.-AS c) di (conv int w) (.reg c 0 w)))
+                      (return (.fault c (.-FaultAddr (.-AS c)))))
+
+                    (.setReg c 7 aw (+ di step)))
+                  (case ["lods"]
+                    (let [(values v ok) (.Read (.-AS c) (+ si (segBase srcSeg)) (conv int w))]
+                      (when (not ok)
+                        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+                      (.setReg c 0 w v)
+                      (.setReg c 6 aw (+ si step))))
+                  (case ["scas"]
+                    (let [(values v ok) (.Read (.-AS c) di (conv int w))]
+                      (when (not ok)
+                        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+                      (let [a (.reg c 0 w)]
+                        (.set (.-F c) fSub w a v (- a v))
+                        (.setReg c 7 aw (+ di step)))))
+                  (case ["cmps"]
+                    (let [(values a ok) (.Read (.-AS c) (+ si (segBase srcSeg)) (conv int w))]
+                      (when (not ok)
+                        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+                      (let [(values b ^:assign ok) (.Read (.-AS c) di (conv int w))]
+                        (when (not ok)
+                          (return (.fault c (.-FaultAddr (.-AS c)))))
+
+                        (.set (.-F c) fSub w a b (- a b))
+                        (.setReg c 6 aw (+ si step))
+                        (.setReg c 7 aw (+ di step))))))
+
+                (when (not rep)
+                  (break))
+
+                (.setReg c 1 aw (- (.reg c 1 aw) 1))
+                (when (or (== kind "scas") (== kind "cmps"))
+                  (when (or (and (== (.-Rep in) 0xf3) (not (.zf (.-F c)))) (and (== (.-Rep in) 0xf2) (.zf (.-F c))))
+                    (break)))))
+
+
+
+            (.done c)))))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; conversions
+
+^{:go/end 931} (go/func conv ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (switch (.-Mnem in)
+    (case ["cbw"]
+      (.setReg c 0 2 (sx (.reg c 0 1) 1)))
+    (case ["cwde"]
+      (.setReg c 0 4 (sx (.reg c 0 2) 2)))
+    (case ["cdqe"]
+      (.setReg c 0 8 (sx (.reg c 0 4) 4)))
+    (case ["cwd"]
+      (.setReg c 2 2 (>> (sx (.reg c 0 2) 2) 16)))
+    (case ["cdq"]
+      (.setReg c 2 4 (>> (sx (.reg c 0 4) 4) 32)))
+    (case ["cqo"]
+      (.setReg c 2 8 (conv uint64 (>> (conv int64 (aget (.-R c) 0)) 63)))))
+
+  (.done c))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; cmpxchg, xadd (one thread: lock changes nothing)
+
+^{:go/end 955} (go/func cmpxchg ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 938} w (.-Size d)
+      (values v ok) (.load c in (addr d) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [a (.reg c 0 w)]
+      (when (not (.probe c in (addr d) w))
+        (return stopSignal))
+
+      (if (== a v)
+        (.store c in (addr d) w (.reg c (.-Reg s) w))
+        (do
+          (.store c in (addr d) w v) ; the processor writes the destination back
+          (.setReg c 0 w v)))
+
+      (.set (.-F c) fSub w a v (- a v))
+      (.done c))))
+
+
+^{:go/end 974} (go/func xadd ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))]
+    (when (== (.-K s) OMem) ; XADD*rm: the register first, the memory destination after it
+      (set! (values d s) (values s d)))
+
+    (let [w (.-Size d)
+        (values a ok) (.load c in (addr d) w)]
+      (when (not ok)
+        (return stopSignal))
+
+      (let [b (.reg c (.-Reg s) w)]
+        (when (not (.store c in (addr d) w (+ a b)))
+          (return stopSignal))
+
+        (.setReg c (.-Reg s) w a)
+        (.set (.-F c) fAdd w a b (+ a b))
+        (.done c)))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; misc
+
+^{:go/end 979} (go/func nop ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in] (.done c))
+
+^{:go/end 1000} (go/func flagOp ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [fl (.Get (.-F c))]
+    (switch (.-Mnem in)
+      (case ["clc"]
+        (.Put (.-F c) 0 CF))
+      (case ["stc"]
+        (.Put (.-F c) CF CF))
+      (case ["cmc"]
+        (.Put (.-F c) (bit-xor fl CF) CF))
+      (case ["cld"]
+        (set! (.-raw (.-F c)) bit-and-not DF))
+      (case ["std"]
+        (set! (.-raw (.-F c)) bit-or DF))
+      (case ["lahf"]
+        (.setReg c 16 1 (bit-and fl 0xff)))
+      (case ["sahf"]
+        (.Put (.-F c) (bit-or (.reg c 16 1) 2) (bit-or CF PF AF ZF SF))))
+
+    (.done c)))
+
+
+^{:go/end 1011} (go/func trap ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (switch (.-Mnem in)
+    (case ["int3"]
+      (set! (.-RIP c) (.-next c))
+      (return (.raise c SIGTRAP (.-RIP c) "int3")))
+    (case ["hlt"] ; privileged: #GP
+      (return (.raise c SIGSEGV 0 "hlt"))))
+
+  (.raise c SIGILL (.-RIP c) (.-Mnem in)))
+
+
+
+^{:go/end 1038} (go/func cpuid "cpuid answers with x86i's model (AXS59): a vendor of its own, leaf 1's features those x86i runs.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values ^uint32 a ^uint32 b ^uint32 cc ^uint32 d) (zero uint32)]
+    (switch (conv uint32 (aget (.-R c) 0))
+      (case [0]
+        (set! (values a b d cc) (values 7 0x61627241 0x38586563 0x4d566936))) ; "ArbaceX86iVM", the highest leaf 7
+      (case [1]
+        (set! (values a d) (values 0 0x178bfbff)) ; EDX: x86-64-v1's, SSE and SSE2 among them (AT_HWCAP)
+        (set! cc (bit-or (<< 1 30) (<< 1 23) (<< 1 22) (<< 1 13)))) ; RDRAND, POPCNT, MOVBE, CMPXCHG16B
+      (case [7]
+        (when (== (conv uint32 (aget (.-R c) 1)) 0)
+          (set! b (bit-or (<< 1 3) (<< 1 8) (<< 1 18) (<< 1 19))) ; BMI1, BMI2, RDSEED, ADX
+          (set! cc (<< 1 22)))) ; RDPID
+
+      (case [0x80000000]
+        (set! a 0x80000001))
+      (case [0x80000001]
+        (set! cc (<< 1 5)) ; LZCNT (ABM)
+        (set! d (bit-or (<< 1 11) (<< 1 20) (<< 1 29))))) ; SYSCALL, NX, LM
+
+    (.setReg c 0 4 (conv uint64 a))
+    (.setReg c 3 4 (conv uint64 b))
+    (.setReg c 1 4 (conv uint64 cc))
+    (.setReg c 2 4 (conv uint64 d))
+    (.done c)))
+
+
+^{:go/end 1045} (go/func rdtsc ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [t (conv uint64 (.UnixNano (time/Now)))]
+    (.setReg c 0 4 (bit-and t 0xffffffff))
+    (.setReg c 2 4 (>> t 32))
+    (.done c)))
+
+
+^{:go/end 1097} (go/func syscall ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [n (aget (.-R c) 0)]
+    (aset (.-R c) 1 (.-next c))
+    (aset (.-R c) 11 (.Get (.-F c)))
+    (let [^int64 ret (zero int64)]
+      (switch n
+        (case [158] ; arch_prctl
+          (switch (aget (.-R c) 7)
+            (case [0x1001]
+              (set! (values (.-GS c) ret) (values (aget (.-R c) 6) 0)))
+            (case [0x1002]
+              (set! (values (.-FS c) ret) (values (aget (.-R c) 6) 0)))
+            (case [0x1003 0x1004]
+              (let [v (.-FS c)]
+                (when (== (aget (.-R c) 7) 0x1004)
+                  (set! v (.-GS c)))
+
+                (when (not (.Write (.-AS c) (aget (.-R c) 6) 8 v))
+                  (set! ret -14))))
+
+            (default
+              (set! ret -22))))
+
+        (case [15] ; rt_sigreturn
+          (return (.sigreturn c)))
+        (default
+          (when [(values r ok) (.sigSyscall c n (lit (array 6 uint64) (aget (.-R c) 7) (aget (.-R c) 6) (aget (.-R c) 2) (aget (.-R c) 10) (aget (.-R c) 8) (aget (.-R c) 9)))] ok
+            (aset (.-R c) 0 (conv uint64 r))
+            (return (.done c)))
+
+          (when (!= (.-SysHook c) nil)
+            (when [(values r ok) ((.-SysHook c) n (lit (array 6 uint64) (aget (.-R c) 7) (aget (.-R c) 6) (aget (.-R c) 2) (aget (.-R c) 10) (aget (.-R c) 8) (aget (.-R c) 9)))] ok
+              (aset (.-R c) 0 (conv uint64 r))
+              (return (.done c))))
+
+
+          (let [(values r exit) (.Syscall (.-K c) n (aget (.-R c) 7) (aget (.-R c) 6) (aget (.-R c) 2) (aget (.-R c) 10) (aget (.-R c) 8) (aget (.-R c) 9))]
+            (when (!= exit nil)
+              (set! (.-RIP c) (.-next c))
+              (when (and (> (.-Code exit) 128) (< (.-Code exit) (+ 128 65)) (!= n 60) (!= n 231))
+                (set! (values (.-Signal c) (.-Reason c)) (values (- (.-Code exit) 128) "signal"))
+                (return stopSignal))
+
+              (set! (.-ExitCode c) (.-Code exit))
+              (return stopExit))
+
+            (set! ret r))))
+
+      (aset (.-R c) 0 (conv uint64 ret))
+      (.done c))))

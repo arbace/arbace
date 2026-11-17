@@ -1,0 +1,111 @@
+;; Converted from jdk26u src/java.base/share/classes/java/nio/file/CopyMoveHelper.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.nio.file)
+
+(import '(java.io IOException)
+        '(java.nio.file.attribute BasicFileAttributeView
+                                  BasicFileAttributes
+                                  PosixFileAttributeView
+                                  PosixFileAttributes))
+
+(defclass CopyMoveHelper
+  (constructor ^:private [this])
+
+  (defclass ^:private ^:static CopyOptions
+    (field ^boolean replaceExisting false)
+
+    (field ^boolean copyAttributes false)
+
+    (field ^boolean followLinks true)
+
+    (constructor ^:private [this])
+
+    (method ^:static parse ^CopyOptions [& ^CopyOption/1 options]
+      (let [result (CopyOptions.)]
+        (for-each [^CopyOption option options]
+          (cond
+            (identical? option StandardCopyOption/REPLACE_EXISTING)
+              (set! (.-replaceExisting result) true)
+            (identical? option LinkOption/NOFOLLOW_LINKS) (set! (.-followLinks result) false)
+            (identical? option StandardCopyOption/COPY_ATTRIBUTES)
+              (set! (.-copyAttributes result) true)
+            :else
+              (do
+                (when (nil? option) (throw (NullPointerException.)))
+                (throw (UnsupportedOperationException.
+                         (java-str "'" option "' is not a recognized copy option"))))))
+        result)))
+
+  (method ^:private ^:static convertMoveToCopyOptions :throws [AtomicMoveNotSupportedException] ^CopyOption/1 [&
+                                                                                                               ^CopyOption/1 options]
+    (let [len (alength options)
+          newOptions (new CopyOption/1 (unchecked-add-int len 2))]
+      (loop [^int i 0]
+        (when (< i len)
+          (let [option (aget options i)]
+            (when (identical? option StandardCopyOption/ATOMIC_MOVE)
+              (throw (AtomicMoveNotSupportedException.
+                       nil
+                       nil
+                       "Atomic move between providers is not supported")))
+            (aset newOptions i option)
+            (recur (unchecked-inc-int i)))))
+      (aset newOptions len LinkOption/NOFOLLOW_LINKS)
+      (aset newOptions (unchecked-add-int len 1) StandardCopyOption/COPY_ATTRIBUTES)
+      newOptions))
+
+  (method ^:static copyToForeignTarget :throws [IOException] ^void [^Path source ^Path target &
+                                                                    ^CopyOption/1 options]
+    (let [opts (CopyOptions/parse options)
+          ^LinkOption/1 linkOptions (if (.-followLinks opts)
+                                        (new LinkOption/1 0)
+                                        (new LinkOption/1 [LinkOption/NOFOLLOW_LINKS]))
+          sourceSupportsPosixAttributes (some? (Files/getFileAttributeView
+                                                 source
+                                                 PosixFileAttributeView))
+          ^:mutable ^BasicFileAttributes sourceAttrs nil]
+      (if sourceSupportsPosixAttributes
+          (set! sourceAttrs (Files/readAttributes source PosixFileAttributes linkOptions))
+          (set! sourceAttrs (Files/readAttributes source BasicFileAttributes linkOptions)))
+      (java-assert (some? sourceAttrs))
+      (when (.isSymbolicLink sourceAttrs)
+        (throw (IOException. "Copying of symbolic links not supported")))
+      (let [provider (.provider (.getFileSystem source))]
+        (.checkAccess provider source AccessMode/READ)
+        (cond
+          (.-replaceExisting opts) (Files/deleteIfExists target)
+          (Files/exists target) (throw (FileAlreadyExistsException. (.toString target))))
+        (if (.isDirectory sourceAttrs)
+            (Files/createDirectory target)
+            (with-resources [in (Files/newInputStream source)]
+              (Files/copy in target (new CopyOption/1 []))))
+        (when (.-copyAttributes opts)
+          (let [^:mutable ^BasicFileAttributeView targetView nil]
+            (when sourceSupportsPosixAttributes
+              (set! targetView
+                    (cast BasicFileAttributeView
+                          (Files/getFileAttributeView target PosixFileAttributeView))))
+            (when (nil? targetView)
+              (set! targetView
+                    (cast BasicFileAttributeView
+                          (Files/getFileAttributeView target BasicFileAttributeView))))
+            (try
+              (.setTimes targetView
+                         (.lastModifiedTime sourceAttrs)
+                         (.lastAccessTime sourceAttrs)
+                         (.creationTime sourceAttrs))
+              (when-instance [^PosixFileAttributes sourcePosixAttrs sourceAttrs]
+                (when-instance [^PosixFileAttributeView targetPosixView targetView]
+                  (.setPermissions targetPosixView (.permissions sourcePosixAttrs))))
+              (catch Throwable x
+                (try
+                  (Files/delete target)
+                  (catch Throwable suppressed (.addSuppressed x suppressed)))
+                (throw x))))))))
+
+  (method ^:static moveToForeignTarget :throws [IOException] ^void [^Path source ^Path target &
+                                                                    ^CopyOption/1 options]
+    (CopyMoveHelper/copyToForeignTarget source
+                                        target
+                                        (CopyMoveHelper/convertMoveToCopyOptions options))
+    (Files/delete source)))

@@ -1,0 +1,161 @@
+;; jrt: native memory for jdk.internal.misc.Unsafe (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9
+;; (write-ahead)"): allocateMemory's blocks as Go byte slices, each named by an address that is a token, the
+;; block's number in the high 32 bits and the byte's offset in the low 32, so Java's arithmetic on an address
+;; (address + i) holds within a block, as on the JVM's. Unsafe's absolute accesses (getByte(long), putInt(long, int),
+;; copyMemory(long, long, long) ...) and its (Object, long) accesses with a null base (copyMemory(null, address, ...),
+;; putIntVolatile(null, address, v): unsafe.ae's arrayBytes, intSlot and longSlot) read and write the block; the
+;; natives that take an address (sun.nio.fs's paths, read and write buffers, the cancellation flag:
+;; nio_fs_linux.ae) reach it through nativeBytes and nativeCString. The JDK's sun.nio.fs keeps its NativeBuffer,
+;; NativeBuffers and Cancellable as they are. There is no address of a Java array or of a direct buffer (jrt's are
+;; heap buffers, F7): only allocateMemory's blocks. An access outside every block is an InternalError (on the JVM a
+;; fault). Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'go.arbace.jrt)
+
+(go/file "nativemem.go"
+  :imports [[binary "encoding/binary"] [sync "sync"] [unsafe "unsafe"]])
+
+(go/var ^{:tag sync/Mutex :doc "nativeMu guards nativeBlocks and nativeNext.\n"} nativeMu)
+(go/var ^{:tag (map int64 (slice byte)) :doc "nativeBlocks are the live blocks by number.\n"}
+  nativeBlocks (make (map int64 (slice byte))))
+(go/var ^{:tag int64 :doc "nativeNext is the next block's number (from 1: no address is 0).\n"} nativeNext 1)
+
+(go/const ^{:tag int64 :val 4294967295} nativeOffMask 4294967295)
+
+(go/func nativeBlock
+  "nativeBlock is the block of address a and a's offset in it, or an InternalError.\n"
+  [^int64 a] :results [(slice byte) int64]
+  (let [id (>> a 32)
+        off (bit-and a nativeOffMask)]
+    (.Lock nativeMu)
+    (let [(values b ok) (aget nativeBlocks id)]
+      (.Unlock nativeMu)
+      (when (or (not ok) (<= a 0))
+        (panic (InternalError_New_String (Str "Unsafe: an address outside native memory"))))
+      (return b off))))
+
+(go/func nativeBytes
+  "nativeBytes is the n bytes of native memory at address a (shared, not copied); n = 0 is an empty slice, of
+any address.\n"
+  ^{:tag (slice byte)} [^int64 a ^int64 n]
+  (when (== n 0)
+    (return nil))
+  (let [(values b off) (nativeBlock a)]
+    (when (or (< n 0) (> (+ off n) (conv int64 (len b))))
+      (panic (InternalError_New_String (Str "Unsafe: an access beyond its native block"))))
+    (subslice b off (+ off n))))
+
+(go/func nativeCString
+  "nativeCString is the C string at address a: its bytes up to the first NUL (without it).\n"
+  ^{:tag (slice byte)} [^int64 a]
+  (let [(values b off) (nativeBlock a)]
+    (for [i off] (< i (conv int64 (len b))) (inc! i)
+      (when (== (aget b i) 0)
+        (return (subslice b off i))))
+    (panic (InternalError_New_String (Str "Unsafe: a C string without its NUL")))))
+
+(go/func nativeAligned
+  "nativeAligned is the address of the n (4 or 8) bytes at native address a, aligned to n: an atomic int or
+long (putIntVolatile(null, address, v)).\n"
+  ^unsafe/Pointer [^int64 a ^int64 n]
+  (when (!= (% (bit-and a nativeOffMask) n) 0)
+    (panic (InternalError_New_String (Str "Unsafe: a misaligned native access"))))
+  (conv unsafe/Pointer (addr (aget (nativeBytes a n) 0))))
+
+(go/func nativeAllocate
+  "nativeAllocate is a new block of size bytes, zeroed (malloc's are not: Java reads none before writing): its
+address; 0 for size 0, as Unsafe.allocateMemory.\n"
+  ^int64 [^int64 size]
+  (when (< size 0)
+    (panic (IllegalArgumentException_New)))
+  (when (== size 0)
+    (return 0))
+  (when (> size nativeOffMask)
+    (panic (OutOfMemoryError_New_String (Str (+ "Unable to allocate " (.String (StrOfLong size)) " bytes")))))
+  ;; at least 8 bytes, so that every block is 8-aligned (Go's size classes): the atomic accesses
+  (let [n size]
+    (when (< n 8)
+      (set! n 8))
+    (let [b (subslice (make (slice byte) n) 0 size)]
+      (.Lock nativeMu)
+      (let [id nativeNext]
+        (inc! nativeNext)
+        (aset nativeBlocks id b)
+        (.Unlock nativeMu)
+        (<< id 32)))))
+
+(go/func nativeFree
+  "nativeFree frees the block at address a (0: nothing), as Unsafe.freeMemory; a later access is an
+InternalError.\n"
+  [^int64 a]
+  (when (== a 0)
+    (return))
+  (let [(values _ off) (nativeBlock a)]
+    (when (!= off 0)
+      (panic (InternalError_New_String (Str "Unsafe: freeMemory of an address inside a block"))))
+    (.Lock nativeMu)
+    (delete nativeBlocks (>> a 32))
+    (.Unlock nativeMu)))
+
+(go/method AllocateMemory_J__J "AllocateMemory_J__J is allocateMemory: a native block (nativemem.ae).\n"
+  ^int64 [^{:tag (* Unsafe)} u ^int64 size]
+  (nativeAllocate size))
+
+(go/method FreeMemory_J__V "FreeMemory_J__V is freeMemory.\n" [^{:tag (* Unsafe)} u ^int64 a]
+  (nativeFree a))
+
+(go/method ReallocateMemory_J_J__J
+  "ReallocateMemory_J_J__J is reallocateMemory: a new block with the old one's first bytes, the old one freed
+(0: allocateMemory; size 0: freed, 0).\n"
+  ^int64 [^{:tag (* Unsafe)} u ^int64 a ^int64 size]
+  (when (== a 0)
+    (return (nativeAllocate size)))
+  (let [(values old _) (nativeBlock a)
+        n (nativeAllocate size)]
+    (when (> size 0)
+      (copy (nativeBytes n size) old))
+    (nativeFree a)
+    n))
+
+(go/method SetMemory_J_J_B__V "SetMemory_J_J_B__V is setMemory(address, bytes, value).\n"
+  [^{:tag (* Unsafe)} u ^int64 a ^int64 n ^int8 v]
+  (let [b (nativeBytes a n)]
+    (for [i 0] (< i (len b)) (inc! i)
+      (aset b i (conv byte v)))))
+
+(go/method SetMemory_O_J_J_B__V
+  "SetMemory_O_J_J_B__V is setMemory(base, offset, bytes, value): native memory (a null base) or a primitive
+array's bytes.\n"
+  [^{:tag (* Unsafe)} u ^any o ^int64 off ^int64 n ^int8 v]
+  (when (== n 0)
+    (return))
+  (let [b (unalignedBytes o off n)]
+    (for [i 0] (< i (len b)) (inc! i)
+      (aset b i (conv byte v)))))
+
+(go/method CopyMemory_J_J_J__V "CopyMemory_J_J_J__V is copyMemory(srcAddress, destAddress, bytes).\n"
+  [^{:tag (* Unsafe)} u ^int64 src ^int64 dst ^int64 n]
+  (when (== n 0)
+    (return))
+  (copy (nativeBytes dst n) (nativeBytes src n)))
+
+(go/method GetByte_J__B ^int8 [^{:tag (* Unsafe)} u ^int64 a] (conv int8 (aget (nativeBytes a 1) 0)))
+(go/method PutByte_J_B__V [^{:tag (* Unsafe)} u ^int64 a ^int8 x] (aset (nativeBytes a 1) 0 (conv byte x)))
+(go/method GetShort_J__S ^int16 [^{:tag (* Unsafe)} u ^int64 a]
+  (conv int16 (.Uint16 binary/LittleEndian (nativeBytes a 2))))
+(go/method PutShort_J_S__V [^{:tag (* Unsafe)} u ^int64 a ^int16 x]
+  (.PutUint16 binary/LittleEndian (nativeBytes a 2) (conv uint16 x)))
+(go/method GetChar_J__C ^uint16 [^{:tag (* Unsafe)} u ^int64 a] (.Uint16 binary/LittleEndian (nativeBytes a 2)))
+(go/method PutChar_J_C__V [^{:tag (* Unsafe)} u ^int64 a ^uint16 x] (.PutUint16 binary/LittleEndian (nativeBytes a 2) x))
+(go/method GetInt_J__I ^int32 [^{:tag (* Unsafe)} u ^int64 a]
+  (conv int32 (.Uint32 binary/LittleEndian (nativeBytes a 4))))
+(go/method PutInt_J_I__V [^{:tag (* Unsafe)} u ^int64 a ^int32 x]
+  (.PutUint32 binary/LittleEndian (nativeBytes a 4) (conv uint32 x)))
+(go/method GetLong_J__J ^int64 [^{:tag (* Unsafe)} u ^int64 a]
+  (conv int64 (.Uint64 binary/LittleEndian (nativeBytes a 8))))
+(go/method PutLong_J_J__V [^{:tag (* Unsafe)} u ^int64 a ^int64 x]
+  (.PutUint64 binary/LittleEndian (nativeBytes a 8) (conv uint64 x)))
+(go/method GetAddress_J__J "GetAddress_J__J is getAddress: an 8-byte address (ADDRESS_SIZE).\n"
+  ^int64 [^{:tag (* Unsafe)} u ^int64 a]
+  (conv int64 (.Uint64 binary/LittleEndian (nativeBytes a 8))))
+(go/method PutAddress_J_J__V [^{:tag (* Unsafe)} u ^int64 a ^int64 x]
+  (.PutUint64 binary/LittleEndian (nativeBytes a 8) (conv uint64 x)))

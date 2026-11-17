@@ -1,0 +1,264 @@
+;; Converted from jdk26u src/java.management/share/classes/com/sun/jmx/remote/internal/ServerNotifForwarder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.remote.internal)
+
+(import '(com.sun.jmx.remote.security NotificationAccessController)
+        '(com.sun.jmx.remote.util ClassLogger EnvHelp)
+        '(java.io IOException)
+        '(java.util ArrayList Collections HashMap HashSet List Map Set)
+        '(javax.management InstanceNotFoundException
+                           ListenerNotFoundException
+                           MBeanServer
+                           MBeanServerDelegate
+                           MBeanServerNotification
+                           MalformedObjectNameException
+                           Notification
+                           NotificationBroadcaster
+                           NotificationFilter
+                           ObjectName)
+        '(javax.management.remote NotificationResult TargetedNotification)
+        '(javax.security.auth Subject))
+
+(defclass ^:public ServerNotifForwarder
+  (constructor ^:public [this ^MBeanServer mbeanServer ^{:tag (Map String ?)} env
+                         ^NotificationBuffer notifBuffer ^String connectionId]
+    (set! (.-mbeanServer this) mbeanServer)
+    (set! (.-notifBuffer this) notifBuffer)
+    (set! (.-connectionId this) connectionId)
+    (set! connectionTimeout (EnvHelp/getServerConnectionTimeout env))
+    (let [stringBoolean (cast String (.get env "jmx.remote.x.check.notification.emission"))]
+      (set! checkNotificationEmission (EnvHelp/computeBooleanFromString stringBoolean))
+      (set! notificationAccessController (EnvHelp/getNotificationAccessController env))))
+
+  (method ^:public addNotificationListener :throws [InstanceNotFoundException IOException] ^Integer [this
+                                                                                                     ^:final ^ObjectName name
+                                                                                                     ^:final ^NotificationFilter filter]
+    (when (.traceOn logger)
+      (.trace logger "addNotificationListener" (java-str "Add a listener at " name)))
+    (.checkState this)
+    (when (some? notificationAccessController)
+      (.addNotificationListener notificationAccessController connectionId name (.getSubject this)))
+    (let [instanceOf (.isInstanceOf mbeanServer name broadcasterClass)]
+      (when-not instanceOf
+        (throw (IllegalArgumentException.
+                 (java-str "The specified MBean ["
+                           name
+                           "] is not a NotificationBroadcaster object."))))
+      (let [id (.getListenerID this)
+            ^:mutable nn name]
+        (when (or (nil? (.getDomain name)) (.isEmpty (.getDomain name)))
+          (try
+            (set! nn
+                  (ObjectName/getInstance (.getDefaultDomain mbeanServer)
+                                          (.getKeyPropertyList name)))
+            (catch MalformedObjectNameException mfoe (throw (IOException. (.getMessage mfoe) mfoe)))))
+        (locking listenerMap
+          (let [idaf (IdAndFilter. id filter)
+                ^:mutable ^{:tag (Set IdAndFilter)} set (cast Set (.get listenerMap nn))]
+            (if (nil? set)
+                (set! set (Collections/singleton idaf))
+                (do (when (== (.size set) 1) (set! set (HashSet. set))) (.add set idaf)))
+            (.put listenerMap nn set)))
+        id)))
+
+  (method ^:public removeNotificationListener :throws [Exception] ^void [this ^ObjectName name
+                                                                         ^Integer/1 listenerIDs]
+    (when (.traceOn logger)
+      (.trace logger "removeNotificationListener" (java-str "Remove some listeners from " name)))
+    (.checkState this)
+    (when (some? notificationAccessController)
+      (.removeNotificationListener notificationAccessController
+                                   connectionId
+                                   name
+                                   (.getSubject this)))
+    (let [^:mutable nn name]
+      (when (or (nil? (.getDomain name)) (.isEmpty (.getDomain name)))
+        (try
+          (set! nn
+                (ObjectName/getInstance (.getDefaultDomain mbeanServer) (.getKeyPropertyList name)))
+          (catch MalformedObjectNameException mfoe (throw (IOException. (.getMessage mfoe) mfoe)))))
+      (let [^:mutable ^Exception re nil]
+        (loop [^int i 0]
+          (when (< i (alength listenerIDs))
+            (try
+              (.removeNotificationListener this nn (aget listenerIDs i))
+              (catch Exception e (when (nil? re) (set! re e))))
+            (recur (unchecked-inc-int i))))
+        (when (some? re) (throw re)))))
+
+  (method ^:public removeNotificationListener :throws [InstanceNotFoundException
+                                                       ListenerNotFoundException
+                                                       IOException] ^void [this ^ObjectName name
+                                                                           ^Integer listenerID]
+    (when (.traceOn logger)
+      (.trace logger
+              "removeNotificationListener"
+              (java-str "Remove the listener " listenerID " from " name)))
+    (.checkState this)
+    (when (and (some? name) (not (.isPattern name)))
+      (when-not (.isRegistered mbeanServer name)
+        (throw (InstanceNotFoundException. (java-str "The MBean " name " is not registered.")))))
+    (locking listenerMap
+      (let [^{:tag (Set IdAndFilter)} set (cast Set (.get listenerMap name))
+            idaf (IdAndFilter. listenerID nil)]
+        (when (or (nil? set) (not (.contains set idaf)))
+          (throw (ListenerNotFoundException. "Listener not found")))
+        (if (== (.size set) 1) (.remove listenerMap name) (.remove set idaf)))))
+
+  (field ^:private ^:final ^NotifForwarderBufferFilter bufferFilter (NotifForwarderBufferFilter.))
+
+  (defclass ^:final NotifForwarderBufferFilter
+    :implements [NotificationBufferFilter]
+
+    (method ^:public apply ^void [this ^{:tag (List TargetedNotification)} targetedNotifs
+                                  ^ObjectName source ^Notification notif]
+      (let [^:mutable ^IdAndFilter/1 candidates nil]
+        (locking listenerMap
+          (let [^{:tag (Set IdAndFilter)} set (cast Set (.get listenerMap source))]
+            (when (nil? set) (.debug logger "bufferFilter" "no listeners for this name") (return))
+            (set! candidates (new IdAndFilter/1 (.size set)))
+            (.toArray set candidates)))
+        (for-each [^IdAndFilter idaf candidates]
+          (let [nf (.getFilter idaf)]
+            (when (or (nil? nf) (.isNotificationEnabled nf notif))
+              (.debug logger "bufferFilter" "filter matches")
+              (let [tn (TargetedNotification. notif (.getId idaf))]
+                (when (.allowNotificationEmission ServerNotifForwarder/this source tn)
+                  (.add targetedNotifs tn)))))))))
+
+  (method ^:public fetchNotifs ^NotificationResult [this ^long startSequenceNumber ^long timeout
+                                                    ^int maxNotifications]
+    (when (.traceOn logger)
+      (.trace logger
+              "fetchNotifs"
+              (java-str "Fetching notifications, the startSequenceNumber is "
+                        startSequenceNumber
+                        ", the timeout is "
+                        timeout
+                        ", the maxNotifications is "
+                        maxNotifications)))
+    (let [^:mutable ^NotificationResult nr nil
+          t (Math/min connectionTimeout timeout)]
+      (try
+        (set! nr
+              (.fetchNotifications notifBuffer bufferFilter startSequenceNumber t maxNotifications))
+        (.snoopOnUnregister this nr)
+        (catch InterruptedException ire
+          (set! nr (NotificationResult. 0 0 (new TargetedNotification/1 0)))))
+      (when (.traceOn logger) (.trace logger "fetchNotifs" (java-str "Forwarding the notifs: " nr)))
+      nr))
+
+  (method ^:private snoopOnUnregister ^void [this ^NotificationResult nr]
+    (let [^:mutable ^{:tag (List IdAndFilter)} copy nil]
+      (locking listenerMap
+        (let [^{:tag (Set IdAndFilter)} delegateSet (cast
+                                                      Set
+                                                      (.get
+                                                        listenerMap
+                                                        MBeanServerDelegate/DELEGATE_NAME))]
+          (when (or (nil? delegateSet) (.isEmpty delegateSet)) (return))
+          (set! copy (ArrayList. delegateSet))))
+      (for-each [^TargetedNotification tn (.getTargetedNotifications nr)]
+        (let [id (.getListenerID tn)]
+          (for-each [^IdAndFilter idaf copy]
+            (when (identical? (.-id idaf) id)
+              (let [n (.getNotification tn)]
+                (when (and (instance? MBeanServerNotification n)
+                           (.equals (.getType n)
+                                    MBeanServerNotification/UNREGISTRATION_NOTIFICATION))
+                  (let [mbsn (cast MBeanServerNotification n)
+                        gone (.getMBeanName mbsn)]
+                    (locking listenerMap (.remove listenerMap gone)))))))))))
+
+  (method ^:public terminate ^void [this]
+    (when (.traceOn logger) (.trace logger "terminate" "Be called."))
+    (locking terminationLock
+      (when terminated (return))
+      (set! terminated true)
+      (locking listenerMap (.clear listenerMap)))
+    (when (.traceOn logger) (.trace logger "terminate" "Terminated.")))
+
+  (method ^:private getSubject ^Subject [this] (Subject/current))
+
+  (method ^:private checkState :throws [IOException] ^void [this]
+    (locking terminationLock
+      (when terminated (throw (IOException. "The connection has been terminated.")))))
+
+  (method ^:private getListenerID ^Integer [this]
+    (locking listenerCounterLock
+      (let [listenerCounter-1 listenerCounter]
+        (set! listenerCounter (unchecked-inc-int listenerCounter))
+        listenerCounter-1)))
+
+  (method ^:private allowNotificationEmission ^boolean [this ^ObjectName name
+                                                        ^TargetedNotification tn]
+    (try
+      (when (some? notificationAccessController)
+        (.fetchNotification notificationAccessController
+                            connectionId
+                            name
+                            (.getNotification tn)
+                            (.getSubject this)))
+      true
+      (catch SecurityException e
+        (when (.debugOn logger)
+          (.debug logger
+                  "fetchNotifs"
+                  (java-str "Notification "
+                            (.getNotification tn)
+                            " not forwarded: the caller didn't have the required access rights")))
+        false)
+      (catch Exception e
+        (when (.debugOn logger)
+          (.debug logger
+                  "fetchNotifs"
+                  (java-str "Notification "
+                            (.getNotification tn)
+                            " not forwarded: got an unexpected exception: "
+                            e)))
+        false)))
+
+  (defclass ^:private ^:static IdAndFilter
+    (field ^:private ^Integer id)
+
+    (field ^:private ^NotificationFilter filter)
+
+    (constructor [this ^Integer id ^NotificationFilter filter]
+      (set! (.-id this) id)
+      (set! (.-filter this) filter))
+
+    (method getId ^Integer [this] (.-id this))
+
+    (method getFilter ^NotificationFilter [this] (.-filter this))
+
+    (method ^:public hashCode ^int [this] (.hashCode id))
+
+    (method ^:public equals ^boolean [this o]
+      (and (instance? IdAndFilter o) (.equals (.getId (cast IdAndFilter o)) (.getId this)))))
+
+  (field ^:private ^MBeanServer mbeanServer)
+
+  (field ^:private ^:final ^String connectionId)
+
+  (field ^:private ^:final ^long connectionTimeout)
+
+  (field ^:private ^:static ^int listenerCounter 0)
+
+  (field ^:private ^:static ^:final ^int/1 listenerCounterLock (new int/1 0))
+
+  (field ^:private ^NotificationBuffer notifBuffer)
+
+  (field ^:private ^:final ^{:tag (Map ObjectName (Set IdAndFilter))} listenerMap (HashMap.))
+
+  (field ^:private ^boolean terminated false)
+
+  (field ^:private ^:final ^int/1 terminationLock (new int/1 0))
+
+  (field ^:static ^:final ^String broadcasterClass (.getName NotificationBroadcaster))
+
+  (field ^:private ^:final ^boolean checkNotificationEmission)
+
+  (field ^:private ^:final ^NotificationAccessController notificationAccessController)
+
+  (field ^:private ^:static ^:final ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.misc" "ServerNotifForwarder")))

@@ -1,0 +1,489 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/websocket/TransportImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.websocket)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.channels SelectionKey)
+        '(java.util.concurrent CompletableFuture)
+        '(java.util.concurrent.atomic AtomicLong AtomicReference)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function BiConsumer Supplier)
+        '(jdk.internal.net.http.common Demand
+                                       Logger
+                                       MinimalFuture
+                                       SequentialScheduler
+                                       SequentialScheduler$CompleteRestartableTask
+                                       Utils))
+
+(defclass ^:public TransportImpl
+  :implements [Transport]
+
+  (field ^:private ^:static ^:final ^Logger debug
+    (Utils/getWebSocketLogger (method-ref Supplier ^String [] "[Transport]" String/.toString)))
+
+  (field ^:private ^:final ^AtomicLong counter (AtomicLong.))
+
+  (field ^:private ^:final ^SequentialScheduler sendScheduler (SequentialScheduler. (SendTask.)))
+
+  (field ^:private ^:final ^MessageQueue queue)
+
+  (field ^:private ^:final ^MessageEncoder encoder (MessageEncoder.))
+
+  (field ^:private ^:final ^ByteBuffer dst (.limit (.position (.createWriteBuffer this) 0) 0))
+
+  (field ^:private ^:final ^ByteBuffer/1 dstArray (new ByteBuffer/1 [dst]))
+
+  (field ^:private ^:final ^MessageStreamConsumer messageConsumer)
+
+  (field ^:private ^:final ^MessageDecoder decoder)
+
+  (field ^:private ^:final ^Frame$Reader reader (Frame$Reader.))
+
+  (field ^:private ^:final ^Demand demand (Demand.))
+
+  (field ^:private ^:final ^SequentialScheduler receiveScheduler)
+
+  (field ^:private ^:final ^RawChannel channel)
+
+  (field ^:private ^:final ^ReentrantLock closeLock (ReentrantLock.))
+
+  (field ^:private ^:final ^RawChannel$RawEvent writeEvent (WriteEvent.))
+
+  (field ^:private ^:final ^RawChannel$RawEvent readEvent (ReadEvent.))
+
+  (field ^:private ^:final ^{:tag (AtomicReference ChannelState)} writeState
+    (AtomicReference. ChannelState/UNREGISTERED))
+
+  (field ^:private ^ByteBuffer data)
+
+  (field ^:private ^:volatile ^ChannelState readState ChannelState/UNREGISTERED)
+
+  (field ^:private ^boolean inputClosed)
+
+  (field ^:private ^boolean outputClosed)
+
+  (constructor ^:public [this ^MessageQueue queue ^MessageStreamConsumer consumer
+                         ^RawChannel channel]
+    (set! (.-queue this) queue)
+    (set! (.-messageConsumer this) consumer)
+    (set! (.-channel this) channel)
+    (set! (.-decoder this) (MessageDecoder. (.-messageConsumer this)))
+    (set! (.-data this) (.initialByteBuffer channel))
+    (set! receiveScheduler (SequentialScheduler. (ReceiveTask.))))
+
+  (method ^:private createWriteBuffer ^ByteBuffer [this]
+    (let [name "jdk.httpclient.websocket.writeBufferSize"
+          capacity (Utils/getIntegerNetProperty name 16384)]
+      (when (.on debug) (.log debug "write buffer capacity %s" (new Object/1 [capacity])))
+      (ByteBuffer/allocate capacity)))
+
+  (method ^:private write :throws [IOException] ^boolean [this]
+    (when (.on debug) (.log debug "writing to the channel"))
+    (let [count (.write channel dstArray 0 (alength dstArray))]
+      (when (.on debug) (.log debug "%s bytes written" (new Object/1 [count])))
+      (for-each [^ByteBuffer b dstArray] (when (.hasRemaining b) (return false)))
+      true))
+
+  (method ^:public sendText :type-params [T] ^{:tag (CompletableFuture T)} [this
+                                                                            ^CharSequence message
+                                                                            ^boolean isLast
+                                                                            ^T attachment
+                                                                            ^{:tag (BiConsumer (? super T) (? super Throwable))} action]
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet counter))
+        (.log debug
+              "enter send text %s message.length=%s last=%s"
+              (new Object/1 [id (.length message) isLast])))
+      (let [text (CharBuffer/wrap message)
+            ^{:tag (MinimalFuture T)} f (MinimalFuture.)]
+        (try
+          (.addText queue text isLast attachment action f)
+          (.runOrSchedule sendScheduler)
+          (catch IOException e (.accept action nil e) (.completeExceptionally f e)))
+        (when (.on debug) (.log debug "exit send text %s returned %s" (new Object/1 [id f])))
+        f)))
+
+  (method ^:public sendBinary :type-params [T] ^{:tag (CompletableFuture T)} [this
+                                                                              ^ByteBuffer message
+                                                                              ^boolean isLast
+                                                                              ^T attachment
+                                                                              ^{:tag (BiConsumer (? super T) (? super Throwable))} action]
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet counter))
+        (.log debug
+              "enter send binary %s message.remaining=%s last=%s"
+              (new Object/1 [id (.remaining message) isLast])))
+      (let [^{:tag (MinimalFuture T)} f (MinimalFuture.)]
+        (try
+          (.addBinary queue message isLast attachment action f)
+          (.runOrSchedule sendScheduler)
+          (catch IOException e (.accept action nil e) (.completeExceptionally f e)))
+        (when (.on debug) (.log debug "exit send binary %s returned %s" (new Object/1 [id f])))
+        f)))
+
+  (method ^:public sendPing :type-params [T] ^{:tag (CompletableFuture T)} [this ^ByteBuffer message
+                                                                            ^T attachment
+                                                                            ^{:tag (BiConsumer (? super T) (? super Throwable))} action]
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet counter))
+        (.log debug
+              "enter send ping %s message.remaining=%s"
+              (new Object/1 [id (.remaining message)])))
+      (let [^{:tag (MinimalFuture T)} f (MinimalFuture.)]
+        (try
+          (.addPing queue message attachment action f)
+          (.runOrSchedule sendScheduler)
+          (catch IOException e (.accept action nil e) (.completeExceptionally f e)))
+        (when (.on debug) (.log debug "exit send ping %s returned %s" (new Object/1 [id f])))
+        f)))
+
+  (method ^:public sendPong :type-params [T] ^{:tag (CompletableFuture T)} [this ^ByteBuffer message
+                                                                            ^T attachment
+                                                                            ^{:tag (BiConsumer (? super T) (? super Throwable))} action]
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet counter))
+        (.log debug
+              "enter send pong %s message.remaining=%s"
+              (new Object/1 [id (.remaining message)])))
+      (let [^{:tag (MinimalFuture T)} f (MinimalFuture.)]
+        (try
+          (.addPong queue message attachment action f)
+          (.runOrSchedule sendScheduler)
+          (catch IOException e (.accept action nil e) (.completeExceptionally f e)))
+        (when (.on debug) (.log debug "exit send pong %s returned %s" (new Object/1 [id f])))
+        f)))
+
+  (method ^:public sendPong :type-params [T] ^{:tag (CompletableFuture T)} [this
+                                                                            ^{:tag (Supplier (? extends ByteBuffer))} message
+                                                                            ^T attachment
+                                                                            ^{:tag (BiConsumer (? super T) (? super Throwable))} action]
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet counter))
+        (.log debug "enter send pong %s supplier=%s" (new Object/1 [id message])))
+      (let [^{:tag (MinimalFuture T)} f (MinimalFuture.)]
+        (try
+          (.addPong queue message attachment action f)
+          (.runOrSchedule sendScheduler)
+          (catch IOException e (.accept action nil e) (.completeExceptionally f e)))
+        (when (.on debug) (.log debug "exit send pong %s returned %s" (new Object/1 [id f])))
+        f)))
+
+  (method ^:public sendClose :type-params [T] ^{:tag (CompletableFuture T)} [this ^int statusCode
+                                                                             ^String reason
+                                                                             ^T attachment
+                                                                             ^{:tag (BiConsumer (? super T) (? super Throwable))} action]
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet counter))
+        (.log debug
+              "enter send close %s statusCode=%s reason.length=%s"
+              (new Object/1 [id statusCode (.length reason)])))
+      (let [^{:tag (MinimalFuture T)} f (MinimalFuture.)]
+        (try
+          (.addClose queue statusCode (CharBuffer/wrap reason) attachment action f)
+          (.runOrSchedule sendScheduler)
+          (catch IOException e (.accept action nil e) (.completeExceptionally f e)))
+        (when (.on debug) (.log debug "exit send close %s returned %s" (new Object/1 [id f])))
+        f)))
+
+  (method ^:public request ^void [this ^long n]
+    (when (.on debug) (.log debug "request %s" (new Object/1 [n])))
+    (when (.increase demand n) (.runOrSchedule receiveScheduler)))
+
+  (method ^:public acknowledgeReception ^void [this]
+    (let [decremented (.tryDecrement demand)] (when-not decremented (throw (InternalError.)))))
+
+  (method ^:public closeOutput :throws [IOException] ^void [this]
+    (when (.on debug) (.log debug "closeOutput"))
+    (.lock closeLock)
+    (try
+      (when-not outputClosed
+        (set! outputClosed true)
+        (try
+          (.shutdownOutput channel)
+          (finally (.set writeState ChannelState/CLOSED) (when inputClosed (.close channel)))))
+      (finally (.unlock closeLock)))
+    (let [s (cast ChannelState (.get writeState))]
+      (java-assert (identical? s ChannelState/CLOSED) s)
+      (.runOrSchedule sendScheduler)))
+
+  (method ^:public closeInput :throws [IOException] ^void [this]
+    (when (.on debug) (.log debug "closeInput"))
+    (.lock closeLock)
+    (try
+      (when-not inputClosed
+        (set! inputClosed true)
+        (try
+          (.stop receiveScheduler)
+          (.shutdownInput channel)
+          (finally
+            (when outputClosed
+              (let [s (cast ChannelState (.get writeState))]
+                (java-assert (identical? s ChannelState/CLOSED) s)
+                (.close channel))))))
+      (finally (.unlock closeLock))))
+
+  (defclass ^:enum ChannelState
+    (constants UNREGISTERED AVAILABLE WAITING CLOSED))
+
+  (defclass ^:private SendTask
+    :extends SequentialScheduler$CompleteRestartableTask
+
+    (field ^:private ^:final ^{:tag (MessageQueue$QueueCallback Boolean IOException)} encodingCallback
+      (anon ^:diamond (MessageQueue$QueueCallback Boolean IOException) []
+        (method ^:public onText :type-params [T] :throws [IOException] ^Boolean [this
+                                                                                 ^CharBuffer message
+                                                                                 ^boolean isLast
+                                                                                 ^T attachment
+                                                                                 ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                                                 ^{:tag (CompletableFuture (? super T))} future]
+          (.encodeText encoder message isLast dst))
+
+        (method ^:public onBinary :type-params [T] :throws [IOException] ^Boolean [this
+                                                                                   ^ByteBuffer message
+                                                                                   ^boolean isLast
+                                                                                   ^T attachment
+                                                                                   ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                                                   ^{:tag (CompletableFuture (? super T))} future]
+          (.encodeBinary encoder message isLast dst))
+
+        (method ^:public onPing :type-params [T] :throws [IOException] ^Boolean [this
+                                                                                 ^ByteBuffer message
+                                                                                 ^T attachment
+                                                                                 ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                                                 ^{:tag (CompletableFuture (? super T))} future]
+          (.encodePing encoder message dst))
+
+        (method ^:public onPong :type-params [T] :throws [IOException] ^Boolean [this
+                                                                                 ^ByteBuffer message
+                                                                                 ^T attachment
+                                                                                 ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                                                 ^{:tag (CompletableFuture (? super T))} future]
+          (.encodePong encoder message dst))
+
+        (method ^:public onPong :type-params [T] :throws [IOException] ^Boolean [this
+                                                                                 ^{:tag (Supplier (? extends ByteBuffer))} message
+                                                                                 ^T attachment
+                                                                                 ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                                                 ^{:tag (CompletableFuture (? super T))} future]
+          (.encodePong encoder (cast ByteBuffer (.get message)) dst))
+
+        (method ^:public onClose :type-params [T] :throws [IOException] ^Boolean [this
+                                                                                  ^int statusCode
+                                                                                  ^CharBuffer reason
+                                                                                  ^T attachment
+                                                                                  ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                                                  ^{:tag (CompletableFuture (? super T))} future]
+          (.encodeClose encoder statusCode reason dst))
+
+        (method ^:public onEmpty ^Boolean [this] false)))
+
+    (field ^:private ^boolean firstPass true)
+
+    (field ^:private ^boolean encoded)
+
+    (field ^:private attachment)
+
+    (field ^:private ^BiConsumer action)
+
+    (field ^:private ^CompletableFuture future)
+
+    (field ^:private ^:final ^{:tag (MessageQueue$QueueCallback Boolean RuntimeException)} loadCallback
+      (anon (MessageQueue$QueueCallback Boolean RuntimeException) []
+        (method ^:public onText :type-params [T] ^Boolean [this ^CharBuffer message ^boolean isLast
+                                                           ^T attachment
+                                                           ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                           ^{:tag (CompletableFuture (? super T))} future]
+          (set! (.-attachment SendTask/this) attachment)
+          (set! (.-action SendTask/this) action)
+          (set! (.-future SendTask/this) future)
+          true)
+
+        (method ^:public onBinary :type-params [T] ^Boolean [this ^ByteBuffer message
+                                                             ^boolean isLast ^T attachment
+                                                             ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                             ^{:tag (CompletableFuture (? super T))} future]
+          (set! (.-attachment SendTask/this) attachment)
+          (set! (.-action SendTask/this) action)
+          (set! (.-future SendTask/this) future)
+          true)
+
+        (method ^:public onPing :type-params [T] ^Boolean [this ^ByteBuffer message ^T attachment
+                                                           ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                           ^{:tag (CompletableFuture (? super T))} future]
+          (set! (.-attachment SendTask/this) attachment)
+          (set! (.-action SendTask/this) action)
+          (set! (.-future SendTask/this) future)
+          true)
+
+        (method ^:public onPong :type-params [T] ^Boolean [this ^ByteBuffer message ^T attachment
+                                                           ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                           ^{:tag (CompletableFuture (? super T))} future]
+          (set! (.-attachment SendTask/this) attachment)
+          (set! (.-action SendTask/this) action)
+          (set! (.-future SendTask/this) future)
+          true)
+
+        (method ^:public onPong :type-params [T] ^Boolean [this
+                                                           ^{:tag (Supplier (? extends ByteBuffer))} message
+                                                           ^T attachment
+                                                           ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                           ^{:tag (CompletableFuture (? super T))} future]
+          (set! (.-attachment SendTask/this) attachment)
+          (set! (.-action SendTask/this) action)
+          (set! (.-future SendTask/this) future)
+          true)
+
+        (method ^:public onClose :type-params [T] ^Boolean [this ^int statusCode ^CharBuffer reason
+                                                            ^T attachment
+                                                            ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                            ^{:tag (CompletableFuture (? super T))} future]
+          (set! (.-attachment SendTask/this) attachment)
+          (set! (.-action SendTask/this) action)
+          (set! (.-future SendTask/this) future)
+          true)
+
+        (method ^:public onEmpty ^Boolean [this] false)))
+
+    (method ^:public run ^void [this]
+      (when (.on debug) (.log debug "enter send task"))
+      (while (not (.isEmpty queue))
+        (try
+          (cond
+            (.hasRemaining dst)
+              (do
+                (when (.on debug)
+                  (.log debug
+                        "%s bytes remaining in buffer %s"
+                        (new Object/1 [(.remaining dst) dst])))
+                (when-not (.tryCompleteWrite this) (break)))
+            (not encoded)
+              (do
+                (when firstPass
+                  (set! firstPass false)
+                  (.peek queue loadCallback)
+                  (when (.on debug) (.log debug "load message")))
+                (.clear dst)
+                (set! encoded (.booleanValue (cast Boolean (.peek queue encodingCallback))))
+                (.flip dst)
+                (when-not (.tryCompleteWrite this) (break)))
+            :else (do (.reset encoder) (.removeAndComplete this nil)))
+          (catch Throwable t
+            (when (.on debug) (.log debug "send task exception %s" (new Object/1 [^Object t])))
+            (.position dst (.limit dst))
+            (.reset encoder)
+            (.removeAndComplete this t))))
+      (when (.on debug) (.log debug "exit send task")))
+
+    (method ^:private tryCompleteWrite :throws [IOException] ^boolean [this]
+      (when (.on debug) (.log debug "enter writing"))
+      (let [^:mutable finished false]
+        (while true
+          (let [ws (cast ChannelState (.get writeState))]
+            (when (.on debug) (.log debug "write state: %s" (new Object/1 [ws])))
+            (switch ws
+              WAITING (break)
+              UNREGISTERED
+                (do
+                  (when (.on debug) (.log debug "registering write event"))
+                  (.registerEvent channel writeEvent)
+                  (.compareAndSet writeState ChannelState/UNREGISTERED ChannelState/WAITING)
+                  (when (.on debug) (.log debug "registered write event"))
+                  (break))
+              AVAILABLE
+                (let [written (.write TransportImpl/this)]
+                  (if written
+                      (do
+                        (when (.on debug) (.log debug "finished writing to the channel"))
+                        (set! finished true)
+                        (break))
+                      (.compareAndSet writeState ChannelState/AVAILABLE ChannelState/UNREGISTERED)))
+              CLOSED (throw (IOException. "Output closed"))
+              (throw (InternalError. (String/valueOf ws))))))
+        (when (.on debug) (.log debug "exit writing"))
+        finished))
+
+    (method ^:private removeAndComplete ^void [this ^Throwable error]
+      (when (.on debug) (.log debug "removeAndComplete error=%s" (new Object/1 [^Object error])))
+      (.remove queue)
+      (if (some? error)
+          (try (.accept action nil error) (finally (.completeExceptionally future error)))
+          (try (.accept action attachment nil) (finally (.complete future attachment))))
+      (set! encoded false)
+      (set! firstPass true)
+      (set! attachment nil)
+      (set! action nil)
+      (set! future nil)))
+
+  (defclass ^:private ReceiveTask
+    :extends SequentialScheduler$CompleteRestartableTask
+
+    (method ^:public run ^void [this]
+      (when (.on debug) (.log debug "enter receive task"))
+      (while (not (.isStopped receiveScheduler))
+        (let [^:mutable rs readState]
+          (when (.hasRemaining data)
+            (when (.on debug)
+              (.log debug "remaining bytes received %s" (new Object/1 [(.remaining data)])))
+            (when-not (.isFulfilled demand)
+              (try
+                (let [oldPos (.position data)]
+                  (.readFrame reader data decoder)
+                  (let [newPos (.position data)] (java-assert (not (== oldPos newPos)) data)))
+                (catch Throwable e (.stop receiveScheduler) (.onError messageConsumer e)))
+              (when-not (.hasRemaining data) (set! rs (set! readState ChannelState/UNREGISTERED)))
+              (continue))
+            (break))
+          (when (.on debug) (.log debug "receive state: %s" (new Object/1 [rs])))
+          (switch rs
+            WAITING (break)
+            UNREGISTERED
+              (do
+                (try
+                  (set! rs (set! readState ChannelState/WAITING))
+                  (.registerEvent channel readEvent)
+                  (catch Throwable e (.stop receiveScheduler) (.onError messageConsumer e)))
+                (break))
+            AVAILABLE
+              (do
+                (try
+                  (set! data (.read channel))
+                  (catch Throwable e (.stop receiveScheduler) (.onError messageConsumer e) (break)))
+                (if (nil? data)
+                    (do (.stop receiveScheduler) (.onComplete messageConsumer) (break))
+                    (when-not (.hasRemaining data)
+                      (set! rs (set! readState ChannelState/UNREGISTERED)))))
+            (throw (InternalError. (String/valueOf rs))))))
+      (when (.on debug) (.log debug "exit receive task"))))
+
+  (defclass ^:private WriteEvent
+    :implements [RawChannel$RawEvent]
+
+    (method ^:public interestOps ^int [this] SelectionKey/OP_WRITE)
+
+    (method ^:public handle ^void [this]
+      (when (.on debug) (.log debug "write event"))
+      (let [^:mutable ^ChannelState s nil]
+        (loop []
+          (set! s (cast ChannelState (.get writeState)))
+          (when (identical? s ChannelState/CLOSED)
+            (when (.on debug) (.log debug "write state %s" (new Object/1 [s])))
+            (break))
+          (when-not (.compareAndSet writeState s ChannelState/AVAILABLE) (recur)))
+        (.runOrSchedule sendScheduler))))
+
+  (defclass ^:private ReadEvent
+    :implements [RawChannel$RawEvent]
+
+    (method ^:public interestOps ^int [this] SelectionKey/OP_READ)
+
+    (method ^:public handle ^void [this]
+      (when (.on debug) (.log debug "read event"))
+      (set! readState ChannelState/AVAILABLE)
+      (.runOrSchedule receiveScheduler))))

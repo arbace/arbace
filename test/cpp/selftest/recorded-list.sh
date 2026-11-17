@@ -12,7 +12,8 @@ mkwork() { # mkwork DIR NAME...: a judged work directory whose files all pass; l
     d=$w/files/$n; mkdir -p "$d"; printf '%s\tc++23\t\tP\n' "$n" >> "$w/list.tsv"
     for f in ir.status orig-link.status gcc.status; do echo 0 > "$d/$f"; done
     printf 'ok\t\n' > "$d/rt.status"; echo same > "$d/object"; echo 0 > "$d/orig.status"; echo 0 > "$d/low.status"
-    : > "$d/orig.out"; : > "$d/low.out"; : > "$d/orig.err"; : > "$d/low.err"
+    # each file's output its own name: the negative control (test/cpp/controls.edn, one sample's run against another's) differs
+    printf '%s' "$n" > "$d/orig.out"; printf '%s' "$n" > "$d/low.out"; : > "$d/orig.err"; : > "$d/low.err"
   done
 }
 judge() { arbace_tool -m arbace.cpp.check judge "$1" "$root/test/cpp/lower-known.edn" "$rec" ${2:+"$2"} > "$1.log" 2>&1; }

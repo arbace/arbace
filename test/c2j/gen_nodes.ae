@@ -6,10 +6,12 @@
 ;;
 ;; The static-call kind's evaluator half is a switch per arity over the listed methods (until
 ;; F7, test/j2g/eval_ops.ae's CompilerOps.ae; doc/go/SPEED-NOTES.md, "The evaluator"): the
-;; public static methods of arbace.lang.Numbers, RT and Util, and of java.lang.Math those jrt
-;; has (go/arbace/jrt/math.ae), whose parameters are long, int, double, boolean or a reference
-;; type of java.lang or arbace.lang (or an array of a primitive or of Object), whose return type
-;; is one of those or void, with at most 3 parameters. The program's reflection lists them, so
+;; public static methods of arbace.lang.Numbers, RT and Util, of java.lang.Character, Long,
+;; Integer, Double, Boolean and String, and of java.lang.Math those jrt has
+;; (go/arbace/jrt/math.ae), whose parameters are of a primitive type or a reference type of
+;; java.lang or arbace.lang (or an array of a primitive or of Object), whose return type is one
+;; of those or void, with at most 3 parameters (byte, short, char and float since
+;; doc/go/EVAL-SPEED.md: RT's aget and aset of their arrays, the casts to them). The program's reflection lists them, so
 ;; it runs on an executable built from the checkout's Numbers, RT, Util and Math (the tools'
 ;; host when they are unchanged), with the checkout's arbace.c2j:
 ;;   . bin/lib/tools.bash; arbace_tool -s arbace.c2j.node -s arbace.c2j.emit test/c2j/gen_nodes.ae \
@@ -19,19 +21,29 @@
             [arbace.c2j.node :as node]
             [arbace.c2j.emit :as emit]))
 
-(def classes [arbace.lang.Numbers arbace.lang.RT arbace.lang.Util java.lang.Math])
+(def classes [arbace.lang.Numbers arbace.lang.RT arbace.lang.Util java.lang.Math
+              ;; the JDK's static methods the evaluated code calls most (doc/go/EVAL-SPEED.md):
+              ;; Character's tests, Long's, Integer's and Double's parsing and printing,
+              ;; String's valueOf
+              java.lang.Character java.lang.Long java.lang.Integer java.lang.Double
+              java.lang.Boolean java.lang.String])
 
 (def jrt-math
   (set (map second (re-seq #"go/func (Math_[A-Za-z0-9_]+)" (slurp "go/arbace/jrt/math.ae")))))
 
 (defn kind
-  "The kind of a parameter or return class: J I D Z V, O for a usable reference, nil otherwise."
+  "The kind of a parameter or return class: J I D Z B S C F V, O for a usable reference, nil
+  otherwise."
   [^Class c]
   (cond
     (= c Long/TYPE) "J"
     (= c Integer/TYPE) "I"
     (= c Double/TYPE) "D"
     (= c Boolean/TYPE) "Z"
+    (= c Byte/TYPE) "B"
+    (= c Short/TYPE) "S"
+    (= c Character/TYPE) "C"
+    (= c Float/TYPE) "F"
     (= c Void/TYPE) "V"
     (.isPrimitive c) nil
     (.isArray c) (let [k (.getComponentType c)]
@@ -85,17 +97,73 @@
        (sort-by sig)
        vec))
 
+;; The instance-call kind's evaluator half (doc/go/EVAL-SPEED.md) is a switch per arity over the
+;; listed instance methods: by class, the methods of those names the class itself declares (the
+;; ones the evaluated code calls most: the crops' lexers, parsers and printers), public, not
+;; varargs, declaring no checked exception, with at most 3 parameters of usable kinds and a
+;; usable return (as the static calls'), not java.lang.Boolean (prepRet's)
+(def instance-names
+  {java.lang.String #{"length" "charAt" "indexOf" "lastIndexOf" "startsWith" "endsWith" "substring"
+                      "equals" "hashCode" "isEmpty" "contains" "codePointAt" "compareTo" "trim"
+                      "toLowerCase" "toUpperCase" "concat" "replace" "toString" "equalsIgnoreCase"
+                      "toCharArray" "intern" "strip" "isBlank" "repeat" "getBytes"}
+   java.lang.StringBuilder #{"append" "length" "charAt" "toString" "setLength" "appendCodePoint"
+                             "deleteCharAt" "setCharAt" "insert" "reverse" "indexOf" "lastIndexOf"
+                             "substring" "delete" "replace"}
+   java.lang.CharSequence #{"length" "charAt" "toString" "subSequence"}
+   java.lang.Character #{"charValue"}
+   java.lang.Number #{"longValue" "intValue" "doubleValue"}
+   java.util.ArrayList #{"get" "set" "add" "size" "isEmpty" "remove" "clear" "contains" "indexOf"}
+   java.util.HashMap #{"get" "put" "containsKey" "remove" "size" "isEmpty" "getOrDefault" "clear"}
+   java.util.List #{"get" "set" "add" "size" "isEmpty"}
+   java.util.Map #{"get" "put" "containsKey" "size" "isEmpty" "getOrDefault"}
+   java.util.Collection #{"size" "isEmpty" "add" "contains"}
+   java.util.Iterator #{"hasNext" "next"}
+   java.util.Set #{"contains" "add" "size" "isEmpty"}
+   java.util.HashSet #{"contains" "add" "size" "remove" "isEmpty"}
+   java.util.IdentityHashMap #{"get" "put" "containsKey" "remove" "size" "isEmpty"}
+   java.util.ArrayDeque #{"push" "pop" "peek" "add" "addFirst" "addLast" "pollFirst" "pollLast"
+                          "peekFirst" "peekLast" "removeFirst" "removeLast" "isEmpty" "size"}
+   ;; a protocol fn's dispatch (core_deftype.ae's emit-method-builder), vswap! and vreset!
+   arbace.lang.MethodImplCache #{"fnFor"}
+   arbace.lang.Volatile #{"deref" "reset"}})
+
+(defn instance-usable? [^Class c ^java.lang.reflect.Method m]
+  (let [mods (.getModifiers m)]
+    (and (= (.getDeclaringClass m) c)
+         (contains? (instance-names c) (.getName m))
+         (not (java.lang.reflect.Modifier/isStatic mods))
+         (java.lang.reflect.Modifier/isPublic mods)
+         (java.lang.reflect.Modifier/isPublic (.getModifiers c))
+         (not (.isSynthetic m))
+         (not (.isBridge m))
+         (not (.isVarArgs m))
+         (zero? (count (.getExceptionTypes m)))
+         (<= (.getParameterCount m) 3)
+         (every? kind (.getParameterTypes m))
+         (kind (.getReturnType m))
+         (not= (.getReturnType m) Boolean))))
+
+(def instance-listed
+  (->> (keys instance-names)
+       (mapcat (fn [^Class c] (filter #(instance-usable? c %) (.getMethods c))))
+       distinct
+       (sort-by sig)
+       vec))
+
 (def helpers
   {:box @#'emit/box
    :type-sym emit/type-sym
    :call-static (fn [m args gs]
                   (or (emit/numbers-fast m (fn [sig] (vec (repeat (count sig) nil))) gs (constantly args))
-                      (emit/static-call-form m args)))})
+                      (emit/static-call-form m args)))
+   :call-instance emit/instance-call-form})
 
 (def forms
   (node/code-forms helpers
-                   {'static-call (group-by #(.getParameterCount ^java.lang.reflect.Method %) listed)}
-                   {'static-call sig}))
+                   {'static-call (group-by #(.getParameterCount ^java.lang.reflect.Method %) listed)
+                    'instance-call (group-by #(.getParameterCount ^java.lang.reflect.Method %) instance-listed)}
+                   {'static-call sig 'instance-call sig}))
 
 ;; printing: a form on one line when it fits in the width, else its head and first arguments
 ;; with the rest below them, a let's bindings and a cond's, case's or switch's clauses in pairs
@@ -153,8 +221,10 @@
       :else s)))
 
 (println ";; Generated by test/c2j/gen_nodes.ae from the node kinds arbace.c2j.emit defines (defnode,")
-(println ";; arbace.c2j.node; Futamura F7) and the JVM's arbace.lang.Numbers, RT, Util and java.lang.Math")
-(println (str ";; (those of jrt's Math, " (count listed) " methods called directly): the evaluator's half of those"))
+(println ";; arbace.c2j.node; Futamura F7) and the JVM's arbace.lang.Numbers, RT, Util, java.lang.Math, Character,")
+(println ";; Long, Integer, Double, Boolean and String")
+(println (str ";; (those of jrt's Math, " (count listed) " methods called directly), and the instance methods of"))
+(println (str ";; String, StringBuilder and the collections it lists (" (count instance-listed) "): the evaluator's half of those"))
 (println ";; kinds, a Go-build variant of arbace.lang.Compiler read by j2g only. Regenerate rather than edit.")
 (println "(in-ns 'arbace.lang)")
 (println)

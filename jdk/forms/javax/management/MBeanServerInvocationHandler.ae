@@ -1,0 +1,191 @@
+;; Converted from jdk26u src/java.management/share/classes/javax/management/MBeanServerInvocationHandler.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.management)
+
+(import '(com.sun.jmx.mbeanserver MXBeanProxy)
+        '(java.lang.ref WeakReference)
+        '(java.lang.reflect InvocationHandler Method Proxy)
+        '(java.util Arrays WeakHashMap))
+
+(defclass ^:public MBeanServerInvocationHandler
+  :implements [InvocationHandler]
+
+  (constructor ^:public [this ^MBeanServerConnection connection ^ObjectName objectName]
+    (this. connection objectName false))
+
+  (constructor ^:public [this ^MBeanServerConnection connection ^ObjectName objectName
+                         ^boolean isMXBean]
+    (when (nil? connection) (throw (IllegalArgumentException. "Null connection")))
+    (when (Proxy/isProxyClass (.getClass connection))
+      (when (.isAssignableFrom MBeanServerInvocationHandler
+                               (.getClass (Proxy/getInvocationHandler connection)))
+        (throw (IllegalArgumentException. "Wrapping MBeanServerInvocationHandler"))))
+    (when (nil? objectName) (throw (IllegalArgumentException. "Null object name")))
+    (set! (.-connection this) connection)
+    (set! (.-objectName this) objectName)
+    (set! (.-isMXBean this) isMXBean))
+
+  (method ^:public getMBeanServerConnection ^MBeanServerConnection [this]
+    connection)
+
+  (method ^:public getObjectName ^ObjectName [this] objectName)
+
+  (method ^:public isMXBean ^boolean [this] isMXBean)
+
+  (method ^:public ^:static newProxyInstance :type-params [T] ^T [^MBeanServerConnection connection
+                                                                  ^ObjectName objectName
+                                                                  ^{:tag (Class T)} interfaceClass
+                                                                  ^boolean notificationBroadcaster]
+    (JMX/newMBeanProxy connection objectName interfaceClass notificationBroadcaster))
+
+  (method ^:public invoke :throws [Throwable] [this proxy ^Method method ^Object/1 args]
+    (let [^{:tag (Class ?)} methodClass (.getDeclaringClass method)]
+      (cond
+        (or (.equals methodClass NotificationBroadcaster) (.equals methodClass NotificationEmitter))
+          (.invokeBroadcasterMethod this proxy method args)
+        (.shouldDoLocally this proxy method) (.doLocally this proxy method args)
+        :else
+          (try
+            (if (.isMXBean this)
+                (let [p (MBeanServerInvocationHandler/findMXBeanProxy methodClass)]
+                  (.invoke p connection objectName method args))
+                (let [methodName (.getName method)
+                      ^{:tag (array (Class ?))} paramTypes (.getParameterTypes method)
+                      ^{:tag (Class ?)} returnType (.getReturnType method)
+                      ^int nargs (if (nil? args) 0 (alength args))]
+                  (cond
+                    (and (and (and (.startsWith methodName "get") (> (.length methodName) 3))
+                              (== nargs 0))
+                         (not (.equals returnType Void/TYPE)))
+                      (.getAttribute connection objectName (.substring methodName 3))
+                    (and (and (and (.startsWith methodName "is") (> (.length methodName) 2))
+                              (== nargs 0))
+                         (or (.equals returnType Boolean/TYPE) (.equals returnType Boolean)))
+                      (.getAttribute connection objectName (.substring methodName 2))
+                    (and (and (and (.startsWith methodName "set") (> (.length methodName) 3))
+                              (== nargs 1))
+                         (.equals returnType Void/TYPE))
+                      (let [attr (Attribute. (.substring methodName 3) (aget args 0))]
+                        (.setAttribute connection objectName attr)
+                        nil)
+                    :else
+                      (let [signature (new String/1 (alength paramTypes))]
+                        (loop [^int i 0]
+                          (when (< i (alength paramTypes))
+                            (aset signature i (.getName (aget paramTypes i)))
+                            (recur (unchecked-inc-int i))))
+                        (.invoke connection objectName methodName args signature)))))
+            (catch MBeanException e (throw (.getTargetException e)))
+            (catch RuntimeMBeanException re (throw (.getTargetException re)))
+            (catch RuntimeErrorException rre (throw (.getTargetError rre)))))))
+
+  (method ^:private ^:static findMXBeanProxy ^MXBeanProxy [^{:tag (Class ?)} mxbeanInterface]
+    (locking mxbeanProxies
+      (let [^{:tag (WeakReference MXBeanProxy)} proxyRef (cast
+                                                           WeakReference
+                                                           (.get mxbeanProxies mxbeanInterface))
+            ^:mutable ^MXBeanProxy p (when (some? proxyRef) (cast MXBeanProxy (.get proxyRef)))]
+        (when (nil? p)
+          (try
+            (set! p (MXBeanProxy. mxbeanInterface))
+            (catch IllegalArgumentException e
+              (let [msg (java-str "Cannot make MXBean proxy for "
+                                  (.getName mxbeanInterface)
+                                  ": "
+                                  (.getMessage e))
+                    iae (IllegalArgumentException. msg (.getCause e))]
+                (.setStackTrace iae (.getStackTrace e))
+                (throw iae))))
+          (.put mxbeanProxies mxbeanInterface (WeakReference. p)))
+        p)))
+
+  (field ^:private ^:static ^:final ^{:tag (WeakHashMap (Class ?) (WeakReference MXBeanProxy))} mxbeanProxies
+    (WeakHashMap.))
+
+  (method ^:private invokeBroadcasterMethod :throws [Exception] [this proxy ^Method method
+                                                                 ^Object/1 args]
+    (let [methodName (.getName method)
+          ^int nargs (if (nil? args) 0 (alength args))]
+      (cond
+        (.equals methodName "addNotificationListener")
+          (do
+            (when-not (== nargs 3)
+              (let [msg (java-str "Bad arg count to addNotificationListener: " nargs)]
+                (throw (IllegalArgumentException. msg))))
+            (let [listener (cast NotificationListener (aget args 0))
+                  filter (cast NotificationFilter (aget args 1))
+                  handback (aget args 2)]
+              (.addNotificationListener connection objectName listener filter handback)
+              nil))
+        (.equals methodName "removeNotificationListener")
+          (let [listener (cast NotificationListener (aget args 0))]
+            (switch nargs
+              1 (do (.removeNotificationListener connection objectName listener) nil)
+              3
+                (let [filter (cast NotificationFilter (aget args 1))
+                      handback (aget args 2)]
+                  (.removeNotificationListener connection objectName listener filter handback)
+                  nil)
+              (let [msg (java-str "Bad arg count to removeNotificationListener: " nargs)]
+                (throw (IllegalArgumentException. msg)))))
+        (.equals methodName "getNotificationInfo")
+          (do
+            (when (some? args) (throw (IllegalArgumentException. "getNotificationInfo has args")))
+            (let [info (.getMBeanInfo connection objectName)] (.getNotifications info)))
+        :else (throw (IllegalArgumentException. (java-str "Bad method name: " methodName))))))
+
+  (method ^:private shouldDoLocally ^boolean [this proxy ^Method method]
+    (let [methodName (.getName method)]
+      (cond
+        (and (and (or (.equals methodName "hashCode") (.equals methodName "toString"))
+                  (== (alength (.getParameterTypes method)) 0))
+             (MBeanServerInvocationHandler/isLocal proxy method))
+          true
+        (and (and (.equals methodName "equals")
+                  (Arrays/equals (.getParameterTypes method) (new Class/1 [Object])))
+             (MBeanServerInvocationHandler/isLocal proxy method))
+          true
+        (and (.equals methodName "finalize") (== (alength (.getParameterTypes method)) 0)) true
+        :else false)))
+
+  (method ^:private doLocally [this proxy ^Method method ^Object/1 args]
+    (let [methodName (.getName method)]
+      (cond
+        (.equals methodName "equals")
+          (cond
+            (identical? this (aget args 0)) true
+            (not (instance? Proxy (aget args 0))) false
+            :else
+              (let [ihandler (Proxy/getInvocationHandler (aget args 0))]
+                (if (or (nil? ihandler) (not (instance? MBeanServerInvocationHandler ihandler)))
+                    false
+                    (let [handler (cast MBeanServerInvocationHandler ihandler)]
+                      (and (and (.equals connection (.-connection handler))
+                                (.equals objectName (.-objectName handler)))
+                           (.equals (.getClass proxy) (.getClass (aget args 0))))))))
+        (.equals methodName "toString")
+          (java-str (if (.isMXBean this) "MX" "M") "BeanProxy(" connection "[" objectName "])")
+        (.equals methodName "hashCode")
+          (unchecked-add-int (.hashCode objectName) (.hashCode connection))
+        :else
+          (when-not (.equals methodName "finalize")
+            (throw (RuntimeException. (java-str "Unexpected method name: " methodName)))))))
+
+  (method ^:private ^:static isLocal ^boolean [proxy ^Method method]
+    (let [^{:tag (array (Class ?))} interfaces (.getInterfaces (.getClass proxy))]
+      (if (nil? interfaces)
+          true
+          (let [methodName (.getName method)
+                ^{:tag (array (Class ?))} params (.getParameterTypes method)]
+            (for-each [^{:tag (Class ?)} intf interfaces]
+              (try
+                (.getMethod intf methodName params)
+                (return false)
+                (catch NoSuchMethodException nsme)))
+            true))))
+
+  (field ^:private ^:final ^MBeanServerConnection connection)
+
+  (field ^:private ^:final ^ObjectName objectName)
+
+  (field ^:private ^:final ^boolean isMXBean))

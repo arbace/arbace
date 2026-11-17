@@ -1,0 +1,171 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/DHKeyAgreement.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        ProviderException
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(java.util Arrays)
+        '(javax.crypto KeyAgreementSpi SecretKey ShortBufferException)
+        '(javax.crypto.spec DHParameterSpec SecretKeySpec)
+        '(sun.security.util KeyUtil))
+
+(defclass ^:public ^:final DHKeyAgreement
+  :extends KeyAgreementSpi
+
+  (field ^:private ^boolean generateSecret false)
+
+  (field ^:private ^BigInteger init_p nil)
+
+  (field ^:private ^BigInteger init_g nil)
+
+  (field ^:private ^BigInteger x BigInteger/ZERO)
+
+  (field ^:private ^BigInteger y BigInteger/ZERO)
+
+  (defclass ^:private ^:static AllowKDF
+    (field ^:private ^:static ^:final ^boolean VALUE
+      (Boolean/getBoolean "jdk.crypto.KeyAgreement.legacyKDF")))
+
+  (constructor ^:public [this])
+
+  (method ^:protected engineInit :throws [InvalidKeyException] ^void [this ^Key key
+                                                                      ^SecureRandom random]
+    (try (.engineInit this key nil random) (catch InvalidAlgorithmParameterException e)))
+
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^Key key
+                                                                                                         ^AlgorithmParameterSpec params
+                                                                                                         ^SecureRandom random]
+    (set! generateSecret false)
+    (set! init_p nil)
+    (set! init_g nil)
+    (when (and (some? params) (not (instance? DHParameterSpec params)))
+      (throw (InvalidAlgorithmParameterException. "Diffie-Hellman parameters expected")))
+    (when-not (instance? javax.crypto.interfaces.DHPrivateKey key)
+      (throw (InvalidKeyException. "Diffie-Hellman private key expected")))
+    (let [^:mutable ^javax.crypto.interfaces.DHPrivateKey dhPrivKey nil]
+      (set! dhPrivKey (cast javax.crypto.interfaces.DHPrivateKey key))
+      (when (some? params)
+        (set! init_p (.getP (cast DHParameterSpec params)))
+        (set! init_g (.getG (cast DHParameterSpec params))))
+      (let [priv_p (.getP (.getParams dhPrivKey))
+            priv_g (.getG (.getParams dhPrivKey))]
+        (when (and (and (some? init_p) (some? priv_p)) (not (.equals init_p priv_p)))
+          (throw (InvalidKeyException. "Incompatible parameters")))
+        (when (and (and (some? init_g) (some? priv_g)) (not (.equals init_g priv_g)))
+          (throw (InvalidKeyException. "Incompatible parameters")))
+        (when (or (and (nil? init_p) (nil? priv_p)) (and (nil? init_g) (nil? priv_g)))
+          (throw (InvalidKeyException. "Missing parameters")))
+        (set! init_p priv_p)
+        (set! init_g priv_g)
+        (set! (.-x this) (.getX dhPrivKey)))))
+
+  (method ^:protected engineDoPhase :throws [InvalidKeyException IllegalStateException] ^Key [this
+                                                                                              ^Key key
+                                                                                              ^boolean lastPhase]
+    (when-not (instance? javax.crypto.interfaces.DHPublicKey key)
+      (throw (InvalidKeyException. "Diffie-Hellman public key expected")))
+    (let [^:mutable ^javax.crypto.interfaces.DHPublicKey dhPubKey nil]
+      (set! dhPubKey (cast javax.crypto.interfaces.DHPublicKey key))
+      (when (or (nil? init_p) (nil? init_g)) (throw (IllegalStateException. "Not initialized")))
+      (let [pub_p (.getP (.getParams dhPubKey))
+            pub_g (.getG (.getParams dhPubKey))]
+        (when (and (some? pub_p) (not (.equals init_p pub_p)))
+          (throw (InvalidKeyException. "Incompatible parameters")))
+        (when (and (some? pub_g) (not (.equals init_g pub_g)))
+          (throw (InvalidKeyException. "Incompatible parameters")))
+        (KeyUtil/validate dhPubKey)
+        (set! (.-y this) (.getY dhPubKey))
+        (set! generateSecret true)
+        (when-not lastPhase
+          (let [intermediate (.engineGenerateSecret this)]
+            (DHPublicKey. (BigInteger. 1 intermediate) init_p init_g))))))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException] ^byte/1 [this]
+    (let [expectedLen (unsigned-bit-shift-right-int (unchecked-add-int (.bitLength init_p) 7) 3)
+          result (new byte/1 expectedLen)]
+      (try (.engineGenerateSecret this result 0) (catch ShortBufferException sbe))
+      result))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException ShortBufferException] ^int [this
+                                                                                                      ^byte/1 sharedSecret
+                                                                                                      ^int offset]
+    (when-not generateSecret
+      (throw (IllegalStateException. "Key agreement has not been completed yet")))
+    (when (nil? sharedSecret)
+      (throw (ShortBufferException. "No buffer provided for shared secret")))
+    (let [modulus init_p
+          expectedLen (unsigned-bit-shift-right-int (unchecked-add-int (.bitLength modulus) 7) 3)]
+      (when (< (unchecked-subtract-int (alength sharedSecret) offset) expectedLen)
+        (throw (ShortBufferException. "Buffer too short for shared secret")))
+      (set! generateSecret false)
+      (let [z (.modPow (.-y this) (.-x this) modulus)]
+        (when (or (<= (.compareTo z BigInteger/ONE) 0)
+                  (.equals z (.subtract modulus BigInteger/ONE)))
+          (throw (ProviderException. "Generated secret is out-of-range of (1, p -1)")))
+        (let [secret (.toByteArray z)]
+          (cond
+            (== (alength secret) expectedLen)
+              (System/arraycopy secret 0 sharedSecret offset (alength secret))
+            (< (alength secret) expectedLen)
+              (do
+                (Arrays/fill sharedSecret
+                             offset
+                             (unchecked-add-int offset
+                                                (unchecked-subtract-int
+                                                  expectedLen
+                                                  (alength secret)))
+                             (unchecked-byte 0))
+                (System/arraycopy secret
+                                  0
+                                  sharedSecret
+                                  (unchecked-add-int
+                                    offset
+                                    (unchecked-subtract-int expectedLen (alength secret)))
+                                  (alength secret)))
+            (and (== (alength secret) (unchecked-add-int expectedLen 1)) (== (aget secret 0) 0))
+              (System/arraycopy secret 1 sharedSecret offset expectedLen)
+            :else (throw (ProviderException. "Generated secret is out-of-range")))
+          expectedLen))))
+
+  (method ^:protected engineGenerateSecret :throws [IllegalStateException
+                                                    NoSuchAlgorithmException
+                                                    InvalidKeyException] ^SecretKey [this
+                                                                                     ^String algorithm]
+    (when (nil? algorithm) (throw (NoSuchAlgorithmException. "null algorithm")))
+    (when (and (not (KeyUtil/isSupportedKeyAgreementOutputAlgorithm algorithm))
+               (not AllowKDF/VALUE))
+      (throw (NoSuchAlgorithmException. (java-str "Unsupported secret key algorithm: " algorithm))))
+    (let [secret (.engineGenerateSecret this)]
+      (cond
+        (.equalsIgnoreCase algorithm "DES") (DESKey. secret)
+        (or (.equalsIgnoreCase algorithm "DESede") (.equalsIgnoreCase algorithm "TripleDES"))
+          (DESedeKey. secret)
+        (.equalsIgnoreCase algorithm "Blowfish")
+          (let [^:mutable keysize (alength secret)]
+            (when (>= keysize BlowfishConstants/BLOWFISH_MAX_KEYSIZE)
+              (set! keysize BlowfishConstants/BLOWFISH_MAX_KEYSIZE))
+            (SecretKeySpec. secret 0 keysize "Blowfish"))
+        (.equalsIgnoreCase algorithm "AES")
+          (let [^:mutable keysize (alength secret)
+                ^:mutable ^SecretKeySpec skey nil
+                ^:mutable idx (unchecked-subtract-int (alength AESConstants/AES_KEYSIZES) 1)]
+            (while (and (nil? skey) (>= idx 0))
+              (when (>= keysize (aget AESConstants/AES_KEYSIZES idx))
+                (set! keysize (aget AESConstants/AES_KEYSIZES idx))
+                (set! skey (SecretKeySpec. secret 0 keysize "AES")))
+              (set! idx (unchecked-dec-int idx)))
+            (when (nil? skey) (throw (InvalidKeyException. "Key material is too short")))
+            skey)
+        (KeyUtil/isSupportedKeyAgreementOutputAlgorithm algorithm)
+          (if (.equalsIgnoreCase algorithm "TlsPremasterSecret")
+              (SecretKeySpec. (KeyUtil/trimZeroes secret) "TlsPremasterSecret")
+              (SecretKeySpec. secret algorithm))
+        :else
+          (throw (NoSuchAlgorithmException.
+                   (java-str "Unsupported secret key algorithm: " algorithm)))))))

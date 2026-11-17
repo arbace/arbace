@@ -1,0 +1,1139 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/DTLSInputRecord.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security GeneralSecurityException)
+        '(java.util Arrays Collections HashMap Iterator LinkedList List Set TreeSet)
+        '(javax.crypto BadPaddingException)
+        '(javax.net.ssl SSLException SSLProtocolException))
+
+(defclass ^:final DTLSInputRecord
+  :extends InputRecord
+  :implements [DTLSRecord]
+
+  (field ^:private ^DTLSReassembler reassembler nil)
+
+  (field ^:private ^int readEpoch)
+
+  (field ^:private ^SSLContextImpl sslContext)
+
+  (constructor [this ^HandshakeHash handshakeHash]
+    (super. handshakeHash (SSLCipher$SSLReadCipher/nullDTlsReadCipher))
+    (set! (.-readEpoch this) 0))
+
+  (method ^:public setTransportContext ^void [this ^TransportContext tc]
+    (set! (.-tc this) tc))
+
+  (method ^:public setSSLContext ^void [this ^SSLContextImpl sslContext]
+    (set! (.-sslContext this) sslContext))
+
+  (method changeReadCiphers ^void [this ^SSLCipher$SSLReadCipher readCipher]
+    (set! (.-readCipher this) readCipher)
+    (set! (.-readEpoch this) (unchecked-inc-int (.-readEpoch this))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when-not (.-isClosed this) (.close super)))
+
+  (method isEmpty ^boolean [this]
+    (or (nil? reassembler) (.isEmpty reassembler)))
+
+  (method estimateFragmentSize ^int [this ^int packetSize]
+    (if (> packetSize 0)
+        (.estimateFragmentSize (.-readCipher this) packetSize DTLSInputRecord/headerSize)
+        Record/maxDataSize))
+
+  (method expectingFinishFlight ^void [this]
+    (when (some? reassembler) (.expectingFinishFlight reassembler)))
+
+  (method finishHandshake ^void [this] (set! reassembler nil))
+
+  (method acquirePlaintext :throws [SSLProtocolException] ^Plaintext [this]
+    (when (some? reassembler) (.acquirePlaintext reassembler)))
+
+  (method decode :throws [IOException BadPaddingException] ^Plaintext/1 [this ^ByteBuffer/1 srcs
+                                                                         ^int srcsOffset
+                                                                         ^int srcsLength]
+    (cond
+      (or (or (nil? srcs) (== (alength srcs) 0)) (== srcsLength 0))
+        (let [pt (.acquirePlaintext this)]
+          (if (nil? pt) (new Plaintext/1 0) (new Plaintext/1 [pt])))
+      (== srcsLength 1) (.decode this (aget srcs srcsOffset))
+      :else
+        (let [packet (DTLSInputRecord/extract srcs srcsOffset srcsLength DTLSRecord/headerSize)]
+          (.decode this packet))))
+
+  (method decode :throws [SSLProtocolException] ^Plaintext/1 [this ^ByteBuffer packet]
+    (when-not (.-isClosed this)
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet")) (SSLLogger/fine "Raw read" packet))
+      (let [srcPos (.position packet)
+            srcLim (.limit packet)
+            ^:mutable contentType (.get packet)
+            majorVersion (.get packet)
+            minorVersion (.get packet)
+            recordEnS (new byte/1 8)]
+        (.get packet recordEnS)
+        (let [recordEpoch (bit-or-int (bit-shift-left-int (bit-and-int (aget recordEnS 0) 0xFF) 8)
+                                      (bit-and-int (aget recordEnS 1) 0xFF))
+              recordSeq (bit-or (bit-or (bit-or (bit-or
+                                                  (bit-or
+                                                    (bit-shift-left
+                                                      (bit-and (aget recordEnS 2) 0xFF)
+                                                      40)
+                                                    (bit-shift-left
+                                                      (bit-and (aget recordEnS 3) 0xFF)
+                                                      32))
+                                                  (bit-shift-left
+                                                    (bit-and (aget recordEnS 4) 0xFF)
+                                                    24))
+                                                (bit-shift-left
+                                                  (bit-and (aget recordEnS 5) 0xFF)
+                                                  16))
+                                        (bit-shift-left (bit-and (aget recordEnS 6) 0xFF) 8))
+                                (bit-and (aget recordEnS 7) 0xFF))
+              contentLen (bit-or-int (bit-shift-left-int (bit-and-int (.get packet) 0xFF) 8)
+                                     (bit-and-int (.get packet) 0xFF))]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+            (SSLLogger/fine
+              (java-str "READ: "
+                        (ProtocolVersion/nameOf majorVersion minorVersion)
+                        " "
+                        (ContentType/nameOf contentType)
+                        ", length = "
+                        contentLen)))
+          (let [recLim (Math/addExact srcPos (unchecked-add-int DTLSRecord/headerSize contentLen))]
+            (cond
+              (> (.-readEpoch this) recordEpoch)
+                (do
+                  (.position packet recLim)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+                    (SSLLogger/fine "READ: discard this old record" recordEnS))
+                  nil)
+              (< (.-readEpoch this) recordEpoch)
+                (if (or (or (and (not (== contentType (.-id ContentType/HANDSHAKE)))
+                                 (not (== contentType (.-id ContentType/CHANGE_CIPHER_SPEC))))
+                            (and (nil? reassembler)
+                                 (not (== contentType (.-id ContentType/HANDSHAKE)))))
+                        (< (.-readEpoch this) (unchecked-subtract-int recordEpoch 1)))
+                    (do
+                      (.position packet recLim)
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                        (SSLLogger/fine "Premature record (epoch), discard it."))
+                      nil)
+                    (let [fragment (new byte/1 contentLen)]
+                      (.get packet fragment)
+                      (let [buffered (RecordFragment.
+                                       fragment
+                                       contentType
+                                       majorVersion
+                                       minorVersion
+                                       recordEnS
+                                       recordEpoch
+                                       recordSeq
+                                       true)]
+                        (when (nil? reassembler) (set! reassembler (DTLSReassembler. recordEpoch)))
+                        (.queueUpFragment reassembler buffered)
+                        (.position packet recLim)
+                        (let [pt (.acquirePlaintext reassembler)]
+                          (when (some? pt) (new Plaintext/1 [pt]))))))
+              :else
+                (do
+                  (.limit packet recLim)
+                  (.position packet (unchecked-add-int srcPos DTLSRecord/headerSize))
+                  (let [^:mutable ^ByteBuffer plaintextFragment nil]
+                    (try
+                      (let [plaintext (.decrypt (.-readCipher this) contentType packet recordEnS)]
+                        (set! plaintextFragment (.-fragment plaintext))
+                        (set! contentType (.-contentType plaintext)))
+                      (catch GeneralSecurityException gse
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                          (SSLLogger/fine (java-str "Discard invalid record: " gse)))
+                        (return nil))
+                      (finally (.limit packet srcLim) (.position packet recLim)))
+                    (if (and (not (== contentType (.-id ContentType/CHANGE_CIPHER_SPEC)))
+                             (not (== contentType (.-id ContentType/HANDSHAKE))))
+                        (do
+                          (when (and (some? reassembler)
+                                     (< (.-handshakeEpoch reassembler) recordEpoch))
+                            (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                              (SSLLogger/fine "Cleanup the handshake reassembler"))
+                            (set! reassembler nil))
+                          (new Plaintext/1
+                               [(Plaintext. contentType
+                                            majorVersion
+                                            minorVersion
+                                            recordEpoch
+                                            (Authenticator/toLong recordEnS)
+                                            plaintextFragment)]))
+                        (do
+                          (if (== contentType (.-id ContentType/CHANGE_CIPHER_SPEC))
+                              (do
+                                (when (nil? reassembler)
+                                  (set! reassembler (DTLSReassembler. recordEpoch)))
+                                (.queueUpChangeCipherSpec
+                                  reassembler
+                                  (RecordFragment.
+                                    plaintextFragment
+                                    contentType
+                                    majorVersion
+                                    minorVersion
+                                    recordEnS
+                                    recordEpoch
+                                    recordSeq
+                                    false)))
+                              (while (> (.remaining plaintextFragment) 0)
+                                (let [hsFrag (DTLSInputRecord/parseHandshakeMessage
+                                               contentType
+                                               majorVersion
+                                               minorVersion
+                                               recordEnS
+                                               recordEpoch
+                                               recordSeq
+                                               plaintextFragment)]
+                                  (when (nil? hsFrag)
+                                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                                      (SSLLogger/fine "Invalid handshake message, discard it."))
+                                    (return nil))
+                                  (when (nil? reassembler)
+                                    (set! reassembler (DTLSReassembler. recordEpoch)))
+                                  (.queueUpHandshake reassembler hsFrag))))
+                          (if (some? reassembler)
+                              (let [pt (.acquirePlaintext reassembler)]
+                                (when (some? pt) (new Plaintext/1 [pt])))
+                              (do
+                                (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                                  (SSLLogger/fine "The reassembler is not initialized yet."))
+                                nil))))))))))))
+
+  (method bytesInCompletePacket :throws [IOException] ^int [this ^ByteBuffer/1 srcs ^int srcsOffset
+                                                            ^int srcsLength]
+    (.bytesInCompletePacket this (aget srcs srcsOffset)))
+
+  (method ^:private bytesInCompletePacket :throws [SSLException] ^int [this ^ByteBuffer packet]
+    (if (< (.remaining packet) DTLSInputRecord/headerSize)
+        -1
+        (let [pos (.position packet)
+              contentType (.get packet pos)]
+          (when (nil? (ContentType/valueOf contentType))
+            (throw (SSLException. "Unrecognized SSL message, plaintext connection?")))
+          (let [majorVersion (.get packet (unchecked-add-int pos 1))
+                minorVersion (.get packet (unchecked-add-int pos 2))]
+            (when-not (ProtocolVersion/isNegotiable majorVersion minorVersion true false)
+              (throw (SSLException.
+                       (java-str "Unrecognized record version "
+                                 (ProtocolVersion/nameOf majorVersion minorVersion)
+                                 " , plaintext connection?"))))
+            (let [fragLen (unchecked-add-int
+                            (unchecked-add-int
+                              (bit-shift-left-int
+                                (bit-and-int (.get packet (unchecked-add-int pos 11)) 0xFF)
+                                8)
+                              (bit-and-int (.get packet (unchecked-add-int pos 12)) 0xFF))
+                            DTLSInputRecord/headerSize)]
+              (when (> fragLen Record/maxFragmentSize)
+                (throw (SSLException.
+                         (java-str "Record overflow, fragment length ("
+                                   fragLen
+                                   ") MUST not exceed "
+                                   Record/maxFragmentSize))))
+              fragLen)))))
+
+  (method ^:private ^:static parseHandshakeMessage :throws [SSLProtocolException] ^HandshakeFragment [^byte contentType
+                                                                                                      ^byte majorVersion
+                                                                                                      ^byte minorVersion
+                                                                                                      ^byte/1 recordEnS
+                                                                                                      ^int recordEpoch
+                                                                                                      ^long recordSeq
+                                                                                                      ^ByteBuffer plaintextFragment]
+    (let [remaining (.remaining plaintextFragment)]
+      (if (< remaining DTLSInputRecord/handshakeHeaderSize)
+          (do
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+              (SSLLogger/fine
+                "Discard invalid record: too small record to hold a handshake fragment"))
+            nil)
+          (let [handshakeType (.get plaintextFragment)]
+            (if (not (SSLHandshake/isKnown handshakeType))
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                    (SSLLogger/fine
+                      (java-str
+                        "Discard invalid record: unknown handshake type size, Handshake.msg_type = "
+                        (bit-and-int handshakeType 0xFF))))
+                  nil)
+                (let [messageLength (bit-or-int (bit-or-int
+                                                  (bit-shift-left-int
+                                                    (bit-and-int (.get plaintextFragment) 0xFF)
+                                                    16)
+                                                  (bit-shift-left-int
+                                                    (bit-and-int (.get plaintextFragment) 0xFF)
+                                                    8))
+                                                (bit-and-int (.get plaintextFragment) 0xFF))]
+                  (when (> messageLength SSLConfiguration/maxHandshakeMessageSize)
+                    (throw (SSLProtocolException.
+                             (java-str "The size of the handshake message ("
+                                       messageLength
+                                       ") exceeds the maximum allowed size ("
+                                       SSLConfiguration/maxHandshakeMessageSize
+                                       ")"))))
+                  (let [messageSeq (bit-or-int (bit-shift-left-int
+                                                 (bit-and-int (.get plaintextFragment) 0xFF)
+                                                 8)
+                                               (bit-and-int (.get plaintextFragment) 0xFF))
+                        fragmentOffset (bit-or-int
+                                         (bit-or-int
+                                           (bit-shift-left-int
+                                             (bit-and-int (.get plaintextFragment) 0xFF)
+                                             16)
+                                           (bit-shift-left-int
+                                             (bit-and-int (.get plaintextFragment) 0xFF)
+                                             8))
+                                         (bit-and-int (.get plaintextFragment) 0xFF))
+                        fragmentLength (bit-or-int
+                                         (bit-or-int
+                                           (bit-shift-left-int
+                                             (bit-and-int (.get plaintextFragment) 0xFF)
+                                             16)
+                                           (bit-shift-left-int
+                                             (bit-and-int (.get plaintextFragment) 0xFF)
+                                             8))
+                                         (bit-and-int (.get plaintextFragment) 0xFF))]
+                    (if (< (unchecked-subtract-int remaining DTLSInputRecord/handshakeHeaderSize)
+                           fragmentLength)
+                        (do
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                            (SSLLogger/fine
+                              "Discard invalid record: not a complete handshake fragment in the record"))
+                          nil)
+                        (let [fragment (new byte/1 fragmentLength)]
+                          (.get plaintextFragment fragment)
+                          (HandshakeFragment. fragment
+                                              contentType
+                                              majorVersion
+                                              minorVersion
+                                              recordEnS
+                                              recordEpoch
+                                              recordSeq
+                                              handshakeType
+                                              messageLength
+                                              messageSeq
+                                              fragmentOffset
+                                              fragmentLength))))))))))
+
+  (defclass ^:private ^:static RecordFragment
+    :implements [(Comparable RecordFragment)]
+
+    (field ^boolean isCiphertext)
+
+    (field ^byte contentType)
+
+    (field ^byte majorVersion)
+
+    (field ^byte minorVersion)
+
+    (field ^int recordEpoch)
+
+    (field ^long recordSeq)
+
+    (field ^byte/1 recordEnS)
+
+    (field ^byte/1 fragment)
+
+    (constructor [this ^ByteBuffer fragBuf ^byte contentType ^byte majorVersion ^byte minorVersion
+                  ^byte/1 recordEnS ^int recordEpoch ^long recordSeq ^boolean isCiphertext]
+      (this. (cast byte/1 nil)
+             contentType
+             majorVersion
+             minorVersion
+             recordEnS
+             recordEpoch
+             recordSeq
+             isCiphertext)
+      (set! (.-fragment this) (new byte/1 (.remaining fragBuf)))
+      (.get fragBuf (.-fragment this)))
+
+    (constructor [this ^byte/1 fragment ^byte contentType ^byte majorVersion ^byte minorVersion
+                  ^byte/1 recordEnS ^int recordEpoch ^long recordSeq ^boolean isCiphertext]
+      (set! (.-isCiphertext this) isCiphertext)
+      (set! (.-contentType this) contentType)
+      (set! (.-majorVersion this) majorVersion)
+      (set! (.-minorVersion this) minorVersion)
+      (set! (.-recordEpoch this) recordEpoch)
+      (set! (.-recordSeq this) recordSeq)
+      (set! (.-recordEnS this) recordEnS)
+      (set! (.-fragment this) fragment))
+
+    (method ^:public compareTo ^int [this ^RecordFragment o]
+      (cond
+        (== (.-contentType this) (.-id ContentType/CHANGE_CIPHER_SPEC))
+          (cond
+            (== (.-contentType o) (.-id ContentType/CHANGE_CIPHER_SPEC))
+              (return (Integer/compare (.-recordEpoch this) (.-recordEpoch o)))
+            (and (== (.-recordEpoch this) (.-recordEpoch o))
+                 (== (.-contentType o) (.-id ContentType/HANDSHAKE)))
+              (return 1))
+        (== (.-contentType o) (.-id ContentType/CHANGE_CIPHER_SPEC))
+          (if (and (== (.-recordEpoch this) (.-recordEpoch o))
+                   (== (.-contentType this) (.-id ContentType/HANDSHAKE)))
+              (return -1)
+              (return (.compareToSequence this (.-recordEpoch o) (.-recordSeq o)))))
+      (.compareToSequence this (.-recordEpoch o) (.-recordSeq o)))
+
+    (method compareToSequence ^int [this ^int epoch ^long seq]
+      (cond
+        (> (.-recordEpoch this) epoch) 1
+        (== (.-recordEpoch this) epoch) (Long/compare (.-recordSeq this) seq)
+        :else -1)))
+
+  (defclass ^:private ^:static ^:final HandshakeFragment
+    :extends RecordFragment
+
+    (field ^byte handshakeType)
+
+    (field ^int messageSeq)
+
+    (field ^int messageLength)
+
+    (field ^int fragmentOffset)
+
+    (field ^int fragmentLength)
+
+    (constructor [this ^byte/1 fragment ^byte contentType ^byte majorVersion ^byte minorVersion
+                  ^byte/1 recordEnS ^int recordEpoch ^long recordSeq ^byte handshakeType
+                  ^int messageLength ^int messageSeq ^int fragmentOffset ^int fragmentLength]
+      (super. fragment contentType majorVersion minorVersion recordEnS recordEpoch recordSeq false)
+      (set! (.-handshakeType this) handshakeType)
+      (set! (.-messageSeq this) messageSeq)
+      (set! (.-messageLength this) messageLength)
+      (set! (.-fragmentOffset this) fragmentOffset)
+      (set! (.-fragmentLength this) fragmentLength))
+
+    (method ^:public compareTo ^int [this ^RecordFragment o]
+      (if-instance [^HandshakeFragment other o]
+        (cond
+          (not (== (.-messageSeq this) (.-messageSeq other)))
+            (unchecked-subtract-int (.-messageSeq this) (.-messageSeq other))
+          (not (== (.-fragmentOffset this) (.-fragmentOffset other)))
+            (unchecked-subtract-int (.-fragmentOffset this) (.-fragmentOffset other))
+          (== (.-fragmentLength this) (.-fragmentLength other)) 0
+          :else (.compareToSequence this (.-recordEpoch o) (.-recordSeq o)))
+        (.compareTo super o))))
+
+  (method ^:private ^:static truncateChFragment ^HandshakeFragment [^HandshakeFragment srcFrag
+                                                                    ^int limit]
+    (HandshakeFragment. (Arrays/copyOf (.-fragment srcFrag) limit)
+                        (.-contentType srcFrag)
+                        (.-majorVersion srcFrag)
+                        (.-minorVersion srcFrag)
+                        (.-recordEnS srcFrag)
+                        (.-recordEpoch srcFrag)
+                        (.-recordSeq srcFrag)
+                        (.-handshakeType srcFrag)
+                        limit
+                        (.-messageSeq srcFrag)
+                        (.-fragmentOffset srcFrag)
+                        limit))
+
+  (defclass ^:private ^:static ^:final HoleDescriptor
+    (field ^int offset)
+
+    (field ^int limit)
+
+    (constructor [this ^int offset ^int limit]
+      (set! (.-offset this) offset)
+      (set! (.-limit this) limit)))
+
+  (defclass ^:private ^:static ^:final HandshakeFlight
+    :implements [Cloneable]
+
+    (field ^:static ^:final ^byte HF_UNKNOWN (.-id SSLHandshake/NOT_APPLICABLE))
+
+    (field ^byte handshakeType)
+
+    (field ^int flightEpoch)
+
+    (field ^int minMessageSeq)
+
+    (field ^int maxMessageSeq)
+
+    (field ^int maxRecordEpoch)
+
+    (field ^long maxRecordSeq)
+
+    (field ^{:tag (HashMap Byte (List HoleDescriptor))} holesMap)
+
+    (field ^{:tag (HashMap Byte Integer)} messageSeqMap)
+
+    (constructor [this]
+      (set! (.-handshakeType this) HF_UNKNOWN)
+      (set! (.-flightEpoch this) 0)
+      (set! (.-minMessageSeq this) 0)
+      (set! (.-maxMessageSeq this) 0)
+      (set! (.-maxRecordEpoch this) 0)
+      (set! (.-maxRecordSeq this) -1)
+      (set! (.-holesMap this) (HashMap. 5))
+      (set! (.-messageSeqMap this) (HashMap. 5)))
+
+    (method isRetransmitOf ^boolean [this ^HandshakeFlight hs]
+      (and (and (some? hs) (== (.-handshakeType this) (.-handshakeType hs)))
+           (== (.-minMessageSeq this) (.-minMessageSeq hs))))
+
+    (method ^:public clone [this]
+      (let [hf (HandshakeFlight.)]
+        (set! (.-handshakeType hf) (.-handshakeType this))
+        (set! (.-flightEpoch hf) (.-flightEpoch this))
+        (set! (.-minMessageSeq hf) (.-minMessageSeq this))
+        (set! (.-maxMessageSeq hf) (.-maxMessageSeq this))
+        (set! (.-maxRecordEpoch hf) (.-maxRecordEpoch this))
+        (set! (.-maxRecordSeq hf) (.-maxRecordSeq this))
+        (set! (.-holesMap hf) (HashMap. (.-holesMap this)))
+        (set! (.-messageSeqMap hf) (HashMap. (.-messageSeqMap this)))
+        hf)))
+
+  (defclass ^:final DTLSReassembler
+    (field ^:final ^int handshakeEpoch)
+
+    (field ^{:tag (TreeSet RecordFragment)} bufferedFragments (TreeSet.))
+
+    (field ^HandshakeFlight handshakeFlight (HandshakeFlight.))
+
+    (field ^HandshakeFlight precedingFlight nil)
+
+    (field ^int nextRecordEpoch)
+
+    (field ^long nextRecordSeq 0)
+
+    (field ^boolean expectCCSFlight false)
+
+    (field ^boolean flightIsReady false)
+
+    (field ^boolean needToCheckFlight false)
+
+    (constructor [this ^int handshakeEpoch]
+      (set! (.-handshakeEpoch this) handshakeEpoch)
+      (set! (.-nextRecordEpoch this) handshakeEpoch)
+      (set! (.-flightEpoch (.-handshakeFlight this)) handshakeEpoch))
+
+    (method expectingFinishFlight ^void [this] (set! expectCCSFlight true))
+
+    (method queueUpHandshake :throws [SSLProtocolException] ^void [this
+                                                                   ^:mutable ^HandshakeFragment hsf]
+      (when-not (not (.isDesirable this hsf))
+        (when (== (.-handshakeType hsf) (.-id SSLHandshake/CLIENT_HELLO))
+          (when (nil? (set! hsf (.valHello this hsf (== (.-messageSeq hsf) 0)))) (return)))
+        (.cleanUpRetransmit this hsf)
+        (let [^:mutable isMinimalFlightMessage false]
+          (cond
+            (== (.-minMessageSeq handshakeFlight) (.-messageSeq hsf))
+              (set! isMinimalFlightMessage true)
+            (and (some? precedingFlight) (== (.-minMessageSeq precedingFlight) (.-messageSeq hsf)))
+              (set! isMinimalFlightMessage true))
+          (when (and (and isMinimalFlightMessage (== (.-fragmentOffset hsf) 0))
+                     (not (== (.-handshakeType hsf) (.-id SSLHandshake/FINISHED))))
+            (set! (.-handshakeType handshakeFlight) (.-handshakeType hsf))
+            (set! (.-flightEpoch handshakeFlight) (.-recordEpoch hsf))
+            (set! (.-minMessageSeq handshakeFlight) (.-messageSeq hsf)))
+          (if (== (.-handshakeType hsf) (.-id SSLHandshake/FINISHED))
+              (do
+                (set! (.-maxMessageSeq handshakeFlight) (.-messageSeq hsf))
+                (set! (.-maxRecordEpoch handshakeFlight) (.-recordEpoch hsf))
+                (set! (.-maxRecordSeq handshakeFlight) (.-recordSeq hsf)))
+              (do
+                (when (< (.-maxMessageSeq handshakeFlight) (.-messageSeq hsf))
+                  (set! (.-maxMessageSeq handshakeFlight) (.-messageSeq hsf)))
+                (let [n (unchecked-subtract-int (.-recordEpoch hsf)
+                                                (.-maxRecordEpoch handshakeFlight))]
+                  (cond
+                    (> n 0)
+                      (do
+                        (set! (.-maxRecordEpoch handshakeFlight) (.-recordEpoch hsf))
+                        (set! (.-maxRecordSeq handshakeFlight) (.-recordSeq hsf)))
+                    (== n 0)
+                      (when (< (.-maxRecordSeq handshakeFlight) (.-recordSeq hsf))
+                        (set! (.-maxRecordSeq handshakeFlight) (.-recordSeq hsf)))))))
+          (let [fragmented (or (not (== (.-fragmentOffset hsf) 0))
+                               (not (== (.-fragmentLength hsf) (.-messageLength hsf))))
+                ^:mutable ^{:tag (List HoleDescriptor)} holes (cast
+                                                                List
+                                                                (.get
+                                                                  (.-holesMap handshakeFlight)
+                                                                  (.-handshakeType hsf)))]
+            (if (nil? holes)
+                (do
+                  (if (not fragmented)
+                      (set! holes (Collections/emptyList))
+                      (do
+                        (set! holes (LinkedList.))
+                        (.add holes (HoleDescriptor. 0 (.-messageLength hsf)))))
+                  (.put (.-holesMap handshakeFlight) (.-handshakeType hsf) holes)
+                  (.put (.-messageSeqMap handshakeFlight) (.-handshakeType hsf) (.-messageSeq hsf)))
+                (when (.isEmpty holes)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine "Have got the full message, discard it."))
+                  (return)))
+            (when fragmented
+              (let [fragmentLimit (unchecked-add-int (.-fragmentOffset hsf) (.-fragmentLength hsf))]
+                (loop [^int i 0]
+                  (when (< i (.size holes))
+                    (let [hole (cast HoleDescriptor (.get holes i))]
+                      (if (or (<= (.-limit hole) (.-fragmentOffset hsf))
+                              (>= (.-offset hole) fragmentLimit))
+                          (recur (unchecked-inc-int i))
+                          (do
+                            (when (or (> (.-offset hole) (.-fragmentOffset hsf))
+                                      (< (.-limit hole) fragmentLimit))
+                              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                                (SSLLogger/fine
+                                  "Discard invalid record: handshake fragment ranges are overlapping"))
+                              (return))
+                            (.remove holes i)
+                            (when (> (.-fragmentOffset hsf) (.-offset hole))
+                              (.add holes (HoleDescriptor. (.-offset hole) (.-fragmentOffset hsf))))
+                            (when (< fragmentLimit (.-limit hole))
+                              (.add holes (HoleDescriptor. fragmentLimit (.-limit hole)))))))))))
+            (if (== (.-handshakeType hsf) (.-id SSLHandshake/FINISHED))
+                (when (> (.-recordEpoch hsf) handshakeEpoch)
+                  (.add bufferedFragments hsf)
+                  (set! flightIsReady (.isEmpty holes)))
+                (.bufferFragment this hsf))))))
+
+    (method ^:private valHello ^HandshakeFragment [this ^HandshakeFragment hsf ^boolean firstHello]
+      (let [shc (cast ServerHandshakeContext (.-handshakeContext (.-tc DTLSInputRecord/this)))]
+        (if (or (nil? shc) (not (.-acceptCliHelloFragments shc)))
+            (do
+              (when-not (== (.-fragmentOffset hsf) 0) (return nil))
+              (try
+                (let [fragmentData (ByteBuffer/wrap (.-fragment hsf))
+                      pv (ProtocolVersion/valueOf (Record/getInt16 fragmentData))]
+                  (when-not (not (.-isDTLS pv))
+                    (if (< (.remaining fragmentData) 32)
+                        (do
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                            (SSLLogger/fine
+                              (java-str "Rejected client hello fragment (bad random len) fo="
+                                        (.-fragmentOffset hsf)
+                                        " fl="
+                                        (.-fragmentLength hsf))))
+                          nil)
+                        (do
+                          (.position fragmentData (unchecked-add-int (.position fragmentData) 32))
+                          (let [sessId (Record/getBytes8 fragmentData)]
+                            (if (and (> (alength sessId) 0)
+                                     (not SSLConfiguration/enableDtlsResumeCookie))
+                                hsf
+                                (let [cookie (Record/getBytes8 fragmentData)]
+                                  (if (and firstHello (not (== (alength cookie) 0)))
+                                      (do
+                                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                                          (SSLLogger/fine
+                                            (java-str
+                                              "Rejected initial client hello fragment (bad cookie len) fo="
+                                              (.-fragmentOffset hsf)
+                                              " fl="
+                                              (.-fragmentLength hsf))))
+                                        nil)
+                                      (do
+                                        (Record/getBytes16 fragmentData)
+                                        (Record/getBytes8 fragmentData)
+                                        (if firstHello
+                                            (DTLSInputRecord/truncateChFragment
+                                              hsf
+                                              (.position fragmentData))
+                                            (let [hcMgr (.getHelloCookieManager
+                                                          sslContext
+                                                          ProtocolVersion/DTLS10)
+                                                  msgFragBuf (ByteBuffer/wrap
+                                                               (.-fragment hsf)
+                                                               0
+                                                               (.position fragmentData))
+                                                  chMsg (ClientHello$ClientHelloMessage.
+                                                          shc
+                                                          msgFragBuf
+                                                          nil)]
+                                              (if (not (.isCookieValid hcMgr shc chMsg cookie))
+                                                  (DTLSInputRecord/truncateChFragment
+                                                    hsf
+                                                    (.position fragmentData))
+                                                  (do
+                                                    (set! (.-acceptCliHelloFragments shc) true)
+                                                    hsf)))))))))))))
+                (catch IOException ioe
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine
+                      (java-str "Rejected client hello fragment fo="
+                                (.-fragmentOffset hsf)
+                                " fl="
+                                (.-fragmentLength hsf))))
+                  nil)))
+            hsf)))
+
+    (method queueUpChangeCipherSpec :throws [SSLProtocolException] ^void [this ^RecordFragment rf]
+      (when-not (not (.isDesirable this rf))
+        (.cleanUpRetransmit this rf)
+        (when expectCCSFlight
+          (set! (.-handshakeType handshakeFlight) HandshakeFlight/HF_UNKNOWN)
+          (set! (.-flightEpoch handshakeFlight) (.-recordEpoch rf)))
+        (when (< (.-maxRecordSeq handshakeFlight) (.-recordSeq rf))
+          (set! (.-maxRecordSeq handshakeFlight) (.-recordSeq rf)))
+        (.bufferFragment this rf)))
+
+    (method queueUpFragment :throws [SSLProtocolException] ^void [this ^RecordFragment rf]
+      (when-not (not (.isDesirable this rf)) (.cleanUpRetransmit this rf) (.bufferFragment this rf)))
+
+    (method ^:private bufferFragment ^void [this ^RecordFragment rf]
+      (.add bufferedFragments rf)
+      (when flightIsReady (set! flightIsReady false))
+      (when-not needToCheckFlight (set! needToCheckFlight true)))
+
+    (method ^:private cleanUpRetransmit ^void [this ^RecordFragment rf]
+      (let [^:mutable isNewFlight false]
+        (when (some? precedingFlight)
+          (if (< (.-flightEpoch precedingFlight) (.-recordEpoch rf))
+              (set! isNewFlight true)
+              (if-instance [^HandshakeFragment hsf rf]
+                (when (< (.-maxMessageSeq precedingFlight) (.-messageSeq hsf))
+                  (set! isNewFlight true))
+                (when-not (== (.-contentType rf) (.-id ContentType/CHANGE_CIPHER_SPEC))
+                  (when (< (.-maxRecordEpoch precedingFlight) (.-recordEpoch rf))
+                    (set! isNewFlight true))))))
+        (when-not (not isNewFlight)
+          (loop [^{:tag (Iterator RecordFragment)} it (.iterator bufferedFragments)]
+            (when (.hasNext it)
+              (let [frag (cast RecordFragment (.next it))
+                    ^:mutable isOld false]
+                (cond
+                  (< (.-recordEpoch frag) (.-maxRecordEpoch precedingFlight)) (set! isOld true)
+                  (== (.-recordEpoch frag) (.-maxRecordEpoch precedingFlight))
+                    (when (<= (.-recordSeq frag) (.-maxRecordSeq precedingFlight))
+                      (set! isOld true)))
+                (when-not isOld
+                  (when-instance [^HandshakeFragment hsf frag]
+                    (set! isOld (<= (.-messageSeq hsf) (.-maxMessageSeq precedingFlight)))))
+                (when isOld (.remove it) (recur it)))))
+          (set! precedingFlight nil))))
+
+    (method ^:private isDesirable :throws [SSLProtocolException] ^boolean [this ^RecordFragment rf]
+      (let [previousEpoch (unchecked-subtract-int nextRecordEpoch 1)]
+        (if (< (.-recordEpoch rf) previousEpoch)
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                (SSLLogger/fine "Too old epoch to use this record, discard it."))
+              false)
+            (do
+              (if (== (.-recordEpoch rf) previousEpoch)
+                  (let [^:mutable isDesired true]
+                    (if (nil? precedingFlight)
+                        (set! isDesired false)
+                        (if-instance [^HandshakeFragment hsf rf]
+                          (when (> (.-minMessageSeq precedingFlight) (.-messageSeq hsf))
+                            (set! isDesired false))
+                          (cond
+                            (== (.-contentType rf) (.-id ContentType/CHANGE_CIPHER_SPEC))
+                              (when-not (== (.-flightEpoch precedingFlight) (.-recordEpoch rf))
+                                (set! isDesired false))
+                            (or (< (.-recordEpoch rf) (.-maxRecordEpoch precedingFlight))
+                                (and (== (.-recordEpoch rf) (.-maxRecordEpoch precedingFlight))
+                                     (<= (.-recordSeq rf) (.-maxRecordSeq precedingFlight))))
+                              (set! isDesired false))))
+                    (when-not isDesired
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                        (SSLLogger/fine "Too old retransmission to use, discard it."))
+                      (return false)))
+                  (when (and (== (.-recordEpoch rf) nextRecordEpoch)
+                             (> nextRecordSeq (.-recordSeq rf)))
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                      (SSLLogger/fine "Lagging behind record (sequence), discard it."))
+                    (return false)))
+              (when (== (.-recordEpoch rf) handshakeEpoch)
+                (when-instance [^HandshakeFragment hsf rf]
+                  (when (.containsKey (.-holesMap handshakeFlight) (.-handshakeType hsf))
+                    (let [cachedMsgSeq (cast Integer
+                                             (.get
+                                               (.-messageSeqMap handshakeFlight)
+                                               (.-handshakeType hsf)))]
+                      (when (and (some? cachedMsgSeq) (not (== cachedMsgSeq (.-messageSeq hsf))))
+                        (throw
+                          (SSLProtocolException.
+                            (java-str
+                              "Two message sequence numbers are used for the same handshake message ("
+                              (SSLHandshake/nameOf (.-handshakeType hsf))
+                              ")"))))))))
+              true))))
+
+    (method ^:private isEmpty ^boolean [this]
+      (or (or (.isEmpty bufferedFragments) (and (not flightIsReady) (not needToCheckFlight)))
+          (and needToCheckFlight (not (.flightIsReady this)))))
+
+    (method acquirePlaintext :throws [SSLProtocolException] ^Plaintext [this]
+      (if (.isEmpty bufferedFragments)
+          (do
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+              (SSLLogger/fine "No received handshake messages"))
+            nil)
+          (do
+            (when (and (not flightIsReady) needToCheckFlight)
+              (set! flightIsReady (.flightIsReady this))
+              (when flightIsReady
+                (when (.isRetransmitOf handshakeFlight precedingFlight)
+                  (.clear bufferedFragments)
+                  (.resetHandshakeFlight this precedingFlight)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine "Received a retransmission flight."))
+                  (return Plaintext/PLAINTEXT_NULL)))
+              (set! needToCheckFlight false))
+            (if (not flightIsReady)
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine
+                      (java-str "The handshake flight is not ready to use: "
+                                (.-handshakeType handshakeFlight))))
+                  nil)
+                (let [rFrag (cast RecordFragment (.first bufferedFragments))
+                      ^:mutable ^Plaintext plaintext nil]
+                  (if (not (.-isCiphertext rFrag))
+                      (do
+                        (set! plaintext (.acquireHandshakeMessage this))
+                        (when (.isEmpty bufferedFragments)
+                          (.clear (.-holesMap handshakeFlight))
+                          (set! precedingFlight (cast HandshakeFlight (.clone handshakeFlight)))
+                          (.resetHandshakeFlight this precedingFlight)
+                          (when (and expectCCSFlight
+                                     (== (.-handshakeType precedingFlight)
+                                         HandshakeFlight/HF_UNKNOWN))
+                            (set! expectCCSFlight false))))
+                      (set! plaintext (.acquireCachedMessage this)))
+                  plaintext)))))
+
+    (method ^:private resetHandshakeFlight ^void [this ^HandshakeFlight prev]
+      (set! (.-handshakeType handshakeFlight) HandshakeFlight/HF_UNKNOWN)
+      (set! (.-flightEpoch handshakeFlight) (.-maxRecordEpoch prev))
+      (if (not (== (.-flightEpoch prev) (.-maxRecordEpoch prev)))
+          (set! (.-minMessageSeq handshakeFlight) 0)
+          (set! (.-minMessageSeq handshakeFlight) (unchecked-add-int (.-maxMessageSeq prev) 1)))
+      (set! (.-maxMessageSeq handshakeFlight) 0)
+      (set! (.-maxRecordEpoch handshakeFlight) (.-flightEpoch handshakeFlight))
+      (set! (.-maxRecordSeq handshakeFlight) (unchecked-add (.-maxRecordSeq prev) 1))
+      (.clear (.-holesMap handshakeFlight))
+      (.clear (.-messageSeqMap handshakeFlight))
+      (set! flightIsReady false)
+      (set! needToCheckFlight false))
+
+    (method ^:private acquireCachedMessage :throws [SSLProtocolException] ^Plaintext [this]
+      (let [rFrag (cast RecordFragment (.first bufferedFragments))]
+        (if (not (== readEpoch (.-recordEpoch rFrag)))
+            (do
+              (when (> readEpoch (.-recordEpoch rFrag))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                  (SSLLogger/fine "Discard old buffered ciphertext fragments."))
+                (.remove bufferedFragments rFrag))
+              (when flightIsReady (set! flightIsReady false))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                (SSLLogger/fine "Not yet ready to decrypt the cached fragments."))
+              nil)
+            (do
+              (.remove bufferedFragments rFrag)
+              (let [fragment (ByteBuffer/wrap (.-fragment rFrag))
+                    ^:mutable ^ByteBuffer plaintextFragment nil]
+                (try
+                  (let [plaintext (.decrypt (.-readCipher DTLSInputRecord/this)
+                                            (.-contentType rFrag)
+                                            fragment
+                                            (.-recordEnS rFrag))]
+                    (set! plaintextFragment (.-fragment plaintext))
+                    (set! (.-contentType rFrag) (.-contentType plaintext)))
+                  (catch GeneralSecurityException gse
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                      (SSLLogger/fine "Discard invalid record: " gse))
+                    (return nil)))
+                (if (== (.-contentType rFrag) (.-id ContentType/HANDSHAKE))
+                    (do
+                      (while (> (.remaining plaintextFragment) 0)
+                        (let [hsFrag (DTLSInputRecord/parseHandshakeMessage
+                                       (.-contentType rFrag)
+                                       (.-majorVersion rFrag)
+                                       (.-minorVersion rFrag)
+                                       (.-recordEnS rFrag)
+                                       (.-recordEpoch rFrag)
+                                       (.-recordSeq rFrag)
+                                       plaintextFragment)]
+                          (when (nil? hsFrag)
+                            (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                              (SSLLogger/fine "Invalid handshake fragment, discard it"
+                                              plaintextFragment))
+                            (return nil))
+                          (.queueUpHandshake this hsFrag)
+                          (when-not (== (.-handshakeType hsFrag) (.-id SSLHandshake/FINISHED))
+                            (set! flightIsReady false)
+                            (set! needToCheckFlight true))))
+                      (.acquirePlaintext this))
+                    (Plaintext. (.-contentType rFrag)
+                                (.-majorVersion rFrag)
+                                (.-minorVersion rFrag)
+                                (.-recordEpoch rFrag)
+                                (Authenticator/toLong (.-recordEnS rFrag))
+                                plaintextFragment)))))))
+
+    (method ^:private acquireHandshakeMessage ^Plaintext [this]
+      (let [^:mutable rFrag (cast RecordFragment (.first bufferedFragments))]
+        (if (== (.-contentType rFrag) (.-id ContentType/CHANGE_CIPHER_SPEC))
+            (do
+              (set! (.-nextRecordEpoch this) (unchecked-add-int (.-recordEpoch rFrag) 1))
+              (set! (.-nextRecordSeq this) 0)
+              (.remove bufferedFragments rFrag)
+              (Plaintext. (.-contentType rFrag)
+                          (.-majorVersion rFrag)
+                          (.-minorVersion rFrag)
+                          (.-recordEpoch rFrag)
+                          (Authenticator/toLong (.-recordEnS rFrag))
+                          (ByteBuffer/wrap (.-fragment rFrag))))
+            (let [hsFrag (cast HandshakeFragment rFrag)]
+              (if (and (== (.-messageLength hsFrag) (.-fragmentLength hsFrag))
+                       (== (.-fragmentOffset hsFrag) 0))
+                  (do
+                    (.remove bufferedFragments rFrag)
+                    (set! (.-nextRecordSeq this) (unchecked-add (.-recordSeq hsFrag) 1))
+                    (let [recordFrag (new byte/1 (unchecked-add-int (.-messageLength hsFrag) 4))
+                          plaintext (Plaintext. (.-contentType hsFrag)
+                                                (.-majorVersion hsFrag)
+                                                (.-minorVersion hsFrag)
+                                                (.-recordEpoch hsFrag)
+                                                (Authenticator/toLong (.-recordEnS hsFrag))
+                                                (ByteBuffer/wrap recordFrag))]
+                      (aset recordFrag 0 (.-handshakeType hsFrag))
+                      (aset recordFrag
+                            1
+                            (unchecked-byte
+                              (bit-and-int (unsigned-bit-shift-right-int
+                                             (.-messageLength hsFrag)
+                                             16)
+                                           0xFF)))
+                      (aset recordFrag
+                            2
+                            (unchecked-byte
+                              (bit-and-int (unsigned-bit-shift-right-int (.-messageLength hsFrag) 8)
+                                           0xFF)))
+                      (aset recordFrag
+                            3
+                            (unchecked-byte (bit-and-int (.-messageLength hsFrag) 0xFF)))
+                      (System/arraycopy (.-fragment hsFrag)
+                                        0
+                                        recordFrag
+                                        4
+                                        (.-fragmentLength hsFrag))
+                      (.handshakeHashing this hsFrag plaintext)
+                      plaintext))
+                  (let [recordFrag (new byte/1 (unchecked-add-int (.-messageLength hsFrag) 4))
+                        plaintext (Plaintext. (.-contentType hsFrag)
+                                              (.-majorVersion hsFrag)
+                                              (.-minorVersion hsFrag)
+                                              (.-recordEpoch hsFrag)
+                                              (Authenticator/toLong (.-recordEnS hsFrag))
+                                              (ByteBuffer/wrap recordFrag))]
+                    (aset recordFrag 0 (.-handshakeType hsFrag))
+                    (aset recordFrag
+                          1
+                          (unchecked-byte
+                            (bit-and-int (unsigned-bit-shift-right-int (.-messageLength hsFrag) 16)
+                                         0xFF)))
+                    (aset recordFrag
+                          2
+                          (unchecked-byte
+                            (bit-and-int (unsigned-bit-shift-right-int (.-messageLength hsFrag) 8)
+                                         0xFF)))
+                    (aset recordFrag 3 (unchecked-byte (bit-and-int (.-messageLength hsFrag) 0xFF)))
+                    (let [msgSeq (.-messageSeq hsFrag)
+                          ^:mutable maxRecodeSN (.-recordSeq hsFrag)
+                          ^:mutable hmFrag hsFrag]
+                      (loop []
+                        (System/arraycopy (.-fragment hmFrag)
+                                          0
+                                          recordFrag
+                                          (unchecked-add-int (.-fragmentOffset hmFrag) 4)
+                                          (.-fragmentLength hmFrag))
+                        (.remove bufferedFragments rFrag)
+                        (when (< maxRecodeSN (.-recordSeq hmFrag))
+                          (set! maxRecodeSN (.-recordSeq hmFrag)))
+                        (when-not (.isEmpty bufferedFragments)
+                          (set! rFrag (cast RecordFragment (.first bufferedFragments)))
+                          (if (not (== (.-contentType rFrag) (.-id ContentType/HANDSHAKE)))
+                              (break)
+                              (set! hmFrag (cast HandshakeFragment rFrag))))
+                        (when (and (not (.isEmpty bufferedFragments))
+                                   (== msgSeq (.-messageSeq hmFrag)))
+                          (recur)))
+                      (.handshakeHashing this hsFrag plaintext)
+                      (set! (.-nextRecordSeq this) (unchecked-add maxRecodeSN 1))
+                      plaintext)))))))
+
+    (method flightIsReady ^boolean [this]
+      (let [flightType (.-handshakeType handshakeFlight)]
+        (cond
+          (== flightType HandshakeFlight/HF_UNKNOWN)
+            (if expectCCSFlight
+                (let [isReady (.hasFinishedMessage this)]
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine (java-str "Has the final flight been received? " isReady)))
+                  isReady)
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine "No flight is received yet."))
+                  false))
+          (or (or (== flightType (.-id SSLHandshake/CLIENT_HELLO))
+                  (== flightType (.-id SSLHandshake/HELLO_REQUEST)))
+              (== flightType (.-id SSLHandshake/HELLO_VERIFY_REQUEST)))
+            (let [isReady (.hasCompleted this flightType)]
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                (SSLLogger/fine (java-str "Is the handshake message completed? " isReady)))
+              isReady)
+          (== flightType (.-id SSLHandshake/SERVER_HELLO))
+            (cond
+              (not (.hasCompleted this flightType))
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine "The ServerHello message is not completed yet."))
+                  false)
+              (.hasFinishedMessage this)
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine "It's an abbreviated handshake."))
+                  true)
+              :else
+                (let [^{:tag (List HoleDescriptor)} holes (cast
+                                                            List
+                                                            (.get
+                                                              (.-holesMap handshakeFlight)
+                                                              (.-id SSLHandshake/SERVER_HELLO_DONE)))]
+                  (if (or (nil? holes) (not (.isEmpty holes)))
+                      (do
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                          (SSLLogger/fine "Not yet got the ServerHelloDone message"))
+                        false)
+                      (let [isReady (.hasCompleted
+                                      this
+                                      bufferedFragments
+                                      (.-minMessageSeq handshakeFlight)
+                                      (.-maxMessageSeq handshakeFlight))]
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                          (SSLLogger/fine
+                            (java-str "Is the ServerHello flight (message "
+                                      (.-minMessageSeq handshakeFlight)
+                                      "-"
+                                      (.-maxMessageSeq handshakeFlight)
+                                      ") completed? "
+                                      isReady)))
+                        isReady))))
+          (or (== flightType (.-id SSLHandshake/CERTIFICATE))
+              (== flightType (.-id SSLHandshake/CLIENT_KEY_EXCHANGE)))
+            (if (not (.hasCompleted this flightType))
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                    (SSLLogger/fine
+                      "The ClientKeyExchange or client Certificate message is not completed yet."))
+                  false)
+                (do
+                  (when (== flightType (.-id SSLHandshake/CERTIFICATE))
+                    (when (and (.needClientVerify this bufferedFragments)
+                               (not (.hasCompleted this (.-id SSLHandshake/CERTIFICATE_VERIFY))))
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                        (SSLLogger/fine "Not yet have the CertificateVerify message"))
+                      (return false)))
+                  (if (not (.hasFinishedMessage this))
+                      (do
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                          (SSLLogger/fine "Not yet have the ChangeCipherSpec and Finished messages"))
+                        false)
+                      (let [isReady (.hasCompleted
+                                      this
+                                      bufferedFragments
+                                      (.-minMessageSeq handshakeFlight)
+                                      (.-maxMessageSeq handshakeFlight))]
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                          (SSLLogger/fine
+                            (java-str "Is the ClientKeyExchange flight (message "
+                                      (.-minMessageSeq handshakeFlight)
+                                      "-"
+                                      (.-maxMessageSeq handshakeFlight)
+                                      ") completed? "
+                                      isReady)))
+                        isReady))))
+          :else
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "verbose"))
+                (SSLLogger/fine "Need to receive more handshake messages"))
+              false))))
+
+    (method ^:private hasFinishedMessage ^boolean [this]
+      (let [^:mutable hasCCS false
+            ^:mutable hasFin false]
+        (for-each [^RecordFragment fragment bufferedFragments]
+          (cond
+            (== (.-contentType fragment) (.-id ContentType/CHANGE_CIPHER_SPEC)) (set! hasCCS true)
+            (and (== (.-contentType fragment) (.-id ContentType/HANDSHAKE))
+                 (.-isCiphertext fragment))
+              (set! hasFin true)))
+        (and (and hasCCS hasFin)
+             (or (or (not (.-isClientMode (.-sslConfig (.-tc DTLSInputRecord/this))))
+                     (not (.-statelessResumption (.-handshakeContext (.-tc DTLSInputRecord/this)))))
+                 (.hasCompleted this (.-id SSLHandshake/NEW_SESSION_TICKET))))))
+
+    (method ^:private needClientVerify ^boolean [this ^{:tag (Set RecordFragment)} fragments]
+      (for-each [^RecordFragment rFrag fragments]
+        (when (or (not (== (.-contentType rFrag) (.-id ContentType/HANDSHAKE)))
+                  (.-isCiphertext rFrag))
+          (break))
+        (let [hsFrag (cast HandshakeFragment rFrag)]
+          (when-not (not (== (.-handshakeType hsFrag) (.-id SSLHandshake/CERTIFICATE)))
+            (return (and (some? (.-fragment rFrag))
+                         (> (alength (.-fragment rFrag)) DTLSRecord/minCertPlaintextSize))))))
+      false)
+
+    (method ^:private hasCompleted ^boolean [this ^byte handshakeType]
+      (let [^{:tag (List HoleDescriptor)} holes (cast
+                                                  List
+                                                  (.get (.-holesMap handshakeFlight) handshakeType))]
+        (if (nil? holes) false (.isEmpty holes))))
+
+    (method ^:private hasCompleted ^boolean [this ^{:tag (Set RecordFragment)} fragments
+                                             ^:mutable ^int presentMsgSeq ^int endMsgSeq]
+      (for-each [^RecordFragment rFrag fragments]
+        (when (or (not (== (.-contentType rFrag) (.-id ContentType/HANDSHAKE)))
+                  (.-isCiphertext rFrag))
+          (break))
+        (let [hsFrag (cast HandshakeFragment rFrag)]
+          (when-not (== (.-messageSeq hsFrag) presentMsgSeq)
+            (if (== (.-messageSeq hsFrag) (unchecked-add-int presentMsgSeq 1))
+                (do
+                  (when-not (.hasCompleted this (.-handshakeType hsFrag)) (return false))
+                  (set! presentMsgSeq (.-messageSeq hsFrag)))
+                (break)))))
+      (>= presentMsgSeq endMsgSeq))
+
+    (method ^:private handshakeHashing ^void [this ^HandshakeFragment hsFrag ^Plaintext plaintext]
+      (let [hsType (.-handshakeType hsFrag)]
+        (when-not (not (.isHashable (.-handshakeHash DTLSInputRecord/this) hsType))
+          (.position (.-fragment plaintext) 4)
+          (let [temporary (new byte/1 (unchecked-add-int (.remaining (.-fragment plaintext)) 12))]
+            (aset temporary 0 (.-handshakeType hsFrag))
+            (aset temporary
+                  1
+                  (unchecked-byte
+                    (bit-and-int (bit-shift-right-int (.-messageLength hsFrag) 16) 0xFF)))
+            (aset temporary
+                  2
+                  (unchecked-byte
+                    (bit-and-int (bit-shift-right-int (.-messageLength hsFrag) 8) 0xFF)))
+            (aset temporary 3 (unchecked-byte (bit-and-int (.-messageLength hsFrag) 0xFF)))
+            (aset temporary
+                  4
+                  (unchecked-byte (bit-and-int (bit-shift-right-int (.-messageSeq hsFrag) 8) 0xFF)))
+            (aset temporary 5 (unchecked-byte (bit-and-int (.-messageSeq hsFrag) 0xFF)))
+            (aset temporary 6 0)
+            (aset temporary 7 0)
+            (aset temporary 8 0)
+            (aset temporary 9 (aget temporary 1))
+            (aset temporary 10 (aget temporary 2))
+            (aset temporary 11 (aget temporary 3))
+            (.get (.-fragment plaintext) temporary 12 (.remaining (.-fragment plaintext)))
+            (.receive (.-handshakeHash DTLSInputRecord/this) temporary)
+            (.position (.-fragment plaintext) 0)))))))

@@ -2,12 +2,18 @@
  * Arbace (overlay/jdk, doc/go/JRT-NOTES.md "Phase 2C"): jrt's java.io.FileInputStream,
  * written for jrt in place of jdk26u's (which needs file channels, events and the VM's
  * natives), over jrt's file table (jdk.internal.jrt.HostFiles); bytes read from the host, unbuffered.
+ * Since F7 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F7 (write-ahead)") its channel, jrt's
+ * FileChannelImpl, by jdk26u's getChannel, and the channel closed with the stream as jdk26u's close
+ * closes it (https://github.com/openjdk/jdk26u at baf63fb, src/java.base/share/classes/java/io/FileInputStream.java;
+ * Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package java.io;
 
+import java.nio.channels.FileChannel;
 import java.util.Objects;
 import jdk.internal.jrt.HostFiles;
+import sun.nio.ch.FileChannelImpl;
 
 /** An input stream reading a file or the standard input of the host. */
 public class FileInputStream extends InputStream {
@@ -20,6 +26,9 @@ public class FileInputStream extends InputStream {
     private final Object closeLock = new Object();
 
     private volatile boolean closed;
+
+    /** The channel, made by getChannel. */
+    private volatile FileChannel channel;
 
     /** Opens the file name for reading. */
     public FileInputStream(String name) throws FileNotFoundException {
@@ -90,11 +99,41 @@ public class FileInputStream extends InputStream {
             }
             closed = true;
         }
+        FileChannel fc = channel;
+        if (fc != null) {
+            // possible race with getChannel(), benign since
+            // FileChannel.close is final and idempotent
+            fc.close();
+        }
         fd.close();
     }
 
     /** The descriptor of this stream. */
     public final FileDescriptor getFD() throws IOException {
         return fd;
+    }
+
+    /** The unique FileChannel of this stream (jdk26u's). */
+    public FileChannel getChannel() {
+        FileChannel fc = this.channel;
+        if (fc == null) {
+            synchronized (this) {
+                fc = this.channel;
+                if (fc == null) {
+                    fc = FileChannelImpl.open(fd, path, true, false, false, false, this);
+                    this.channel = fc;
+                    if (closed) {
+                        try {
+                            // possible race with close(), benign since
+                            // FileChannel.close is final and idempotent
+                            fc.close();
+                        } catch (IOException ioe) {
+                            throw new InternalError(ioe); // should not happen
+                        }
+                    }
+                }
+            }
+        }
+        return fc;
     }
 }

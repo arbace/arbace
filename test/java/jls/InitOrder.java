@@ -2,7 +2,8 @@
  * @test
  * @summary JLS 12.4, 12.5: class initialization when first used, superclass first; instance
  *          creation: the super constructor (calling an overridden method that sees the defaults),
- *          then field initializers and instance initializers in text order, then the body
+ *          then field initializers and instance initializers in text order, then the body;
+ *          15.10.2, 15.8.2: neither an array creation nor a class literal initializes the class
  */
 public class InitOrder {
     static StringBuilder log = new StringBuilder();
@@ -35,6 +36,10 @@ public class InitOrder {
     static class C implements I {
         static { p("C.static"); }
     }
+    static class Unused {
+        static { p("Unused.static"); }
+        static void touch() { }
+    }
     static int mark(String s) { p(s); return 3; }
 
     public static void main(String[] args) {
@@ -50,7 +55,12 @@ public class InitOrder {
         System.out.println("C: " + log); log.setLength(0);
         k = I.X;
         System.out.println("I.X " + k + ": " + log); log.setLength(0);
-        Object[] arr = new Lazy[2];
-        System.out.println("array of Lazy: " + arr.length + " [" + log + "]");
+        Object[] arr = new Unused[2];
+        Object[][] grid = new Unused[2][3];
+        System.out.println("arrays of Unused: " + arr.length + " " + grid[1].length + " [" + log + "]"); log.setLength(0);
+        Class<?> c = Unused.class;
+        System.out.println("Unused.class: " + (arr.getClass().getComponentType() == c) + " [" + log + "]"); log.setLength(0);
+        Unused.touch();
+        System.out.println("Unused.touch: " + log);
     }
 }

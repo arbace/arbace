@@ -1,0 +1,207 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/KeyUpdate.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security GeneralSecurityException)
+        '(java.text MessageFormat)
+        '(java.util Locale)
+        '(javax.crypto.spec IvParameterSpec))
+
+(defclass ^:final KeyUpdate
+  (field ^:static ^:final ^SSLProducer kickstartProducer (KeyUpdateKickstartProducer.))
+
+  (field ^:static ^:final ^SSLConsumer handshakeConsumer (KeyUpdateConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer handshakeProducer (KeyUpdateProducer.))
+
+  (defclass ^:static ^:final KeyUpdateMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^KeyUpdateRequest status)
+
+    (constructor [this ^PostHandshakeContext context ^KeyUpdateRequest status]
+      (super. context)
+      (set! (.-status this) status))
+
+    (constructor :throws [IOException] [this ^PostHandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (when-not (== (.remaining m) 1)
+        (throw (.fatal (.-conContext context)
+                       Alert/ILLEGAL_PARAMETER
+                       (java-str "KeyUpdate has an unexpected length of " (.remaining m)))))
+      (let [request (.get m)]
+        (set! (.-status this) (KeyUpdateRequest/valueOf request))
+        (when (nil? status)
+          (throw (.fatal (.-conContext context)
+                         Alert/ILLEGAL_PARAMETER
+                         (java-str "Invalid KeyUpdate message value: "
+                                   (KeyUpdateRequest/nameOf request)))))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/KEY_UPDATE)
+
+    (method ^:public messageLength ^int [this] 1)
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream s]
+      (.putInt8 s (.-id status)))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat. "\"KeyUpdate\": '{'\n  \"request_update\": {0}\n'}'"
+                                          Locale/ENGLISH)
+            messageFields (new Object/1 [(.-name status)])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:enum KeyUpdateRequest
+    (constants
+      (NOTREQUESTED [(unchecked-byte 0) "update_not_requested"])
+      (REQUESTED [(unchecked-byte 1) "update_requested"]))
+
+    (field ^:final ^byte id)
+
+    (field ^:final ^String name)
+
+    (constructor [this ^byte id ^String name]
+      (set! (.-id this) id)
+      (set! (.-name this) name))
+
+    (method ^:static valueOf ^KeyUpdateRequest [^byte id]
+      (for-each [^KeyUpdateRequest kur (KeyUpdateRequest/values)]
+        (when (== (.-id kur) id) (return kur)))
+      nil)
+
+    (method ^:static nameOf ^String [^byte id]
+      (for-each [^KeyUpdateRequest kur (KeyUpdateRequest/values)]
+        (when (== (.-id kur) id) (return (.-name kur))))
+      (java-str "<UNKNOWN KeyUpdateRequest TYPE: " (bit-and-int id 0x0FF) ">")))
+
+  (defclass ^:private ^:static ^:final KeyUpdateKickstartProducer
+    :implements [SSLProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context]
+      (let [hc (cast PostHandshakeContext context)]
+        (.produce handshakeProducer
+                  context
+                  (KeyUpdateMessage. hc
+                                     ^KeyUpdateRequest (if (.isInboundClosed (.-conContext hc))
+                                                           KeyUpdateRequest/NOTREQUESTED
+                                                           KeyUpdateRequest/REQUESTED))))))
+
+  (defclass ^:private ^:static ^:final KeyUpdateConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [hc (cast PostHandshakeContext context)
+            km (KeyUpdateMessage. hc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming KeyUpdate post-handshake message" km))
+        (let [kdg (SSLTrafficKeyDerivation/valueOf (.-protocolVersion (.-conContext hc)))]
+          (when (nil? kdg)
+            (throw (.fatal (.-conContext hc)
+                           Alert/INTERNAL_ERROR
+                           (java-str "Not supported key derivation: "
+                                     (.-protocolVersion (.-conContext hc))))))
+          (let [skd (.createKeyDerivation kdg
+                                          hc
+                                          (.-baseSecret
+                                            (.-readCipher (.-inputRecord (.-conContext hc)))))]
+            (when (nil? skd)
+              (throw (.fatal (.-conContext hc) Alert/INTERNAL_ERROR "no key derivation")))
+            (let [nplus1 (.deriveKey skd "TlsUpdateNplus1")
+                  kd (.createKeyDerivation kdg hc nplus1)
+                  key (.deriveKey kd "TlsKey")
+                  ivSpec (IvParameterSpec. (.deriveData kd "TlsIv"))]
+              (try
+                (let [rc (.createReadCipher (.-bulkCipher (.-negotiatedCipherSuite hc))
+                                            (Authenticator/valueOf
+                                              (.-protocolVersion (.-conContext hc)))
+                                            (.-protocolVersion (.-conContext hc))
+                                            key
+                                            ivSpec
+                                            (.getSecureRandom (.-sslContext hc)))]
+                  (when (nil? rc)
+                    (throw (.fatal (.-conContext hc)
+                                   Alert/ILLEGAL_PARAMETER
+                                   (java-str "Illegal cipher suite ("
+                                             (.-negotiatedCipherSuite hc)
+                                             ") and protocol version ("
+                                             (.-negotiatedProtocol hc)
+                                             ")"))))
+                  (set! (.-baseSecret rc) nplus1)
+                  (.changeReadCiphers (.-inputRecord (.-conContext hc)) rc)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                    (SSLLogger/fine "KeyUpdate: read key updated")))
+                (catch GeneralSecurityException gse
+                  (throw (.fatal (.-conContext hc)
+                                 Alert/INTERNAL_ERROR
+                                 "Failure to derive read secrets"
+                                 gse))))
+              (if (identical? (.-status km) KeyUpdateRequest/REQUESTED)
+                  (.produce handshakeProducer
+                            hc
+                            (KeyUpdateMessage. hc KeyUpdateRequest/NOTREQUESTED))
+                  (.finishPostHandshake (.-conContext hc)))))))))
+
+  (defclass ^:private ^:static ^:final KeyUpdateProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [hc (cast PostHandshakeContext context)]
+        (when-not (.-isQuic (.-sslConfig hc))
+          (let [km (cast KeyUpdateMessage message)]
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Produced KeyUpdate post-handshake message" km))
+            (let [kdg (SSLTrafficKeyDerivation/valueOf (.-protocolVersion (.-conContext hc)))]
+              (when (nil? kdg)
+                (throw (.fatal (.-conContext hc)
+                               Alert/INTERNAL_ERROR
+                               (java-str "Not supported key derivation: "
+                                         (.-protocolVersion (.-conContext hc))))))
+              (let [skd (.createKeyDerivation kdg
+                                              hc
+                                              (.-baseSecret
+                                                (.-writeCipher (.-outputRecord (.-conContext hc)))))]
+                (when (nil? skd)
+                  (throw (.fatal (.-conContext hc) Alert/INTERNAL_ERROR "no key derivation")))
+                (let [nplus1 (.deriveKey skd "TlsUpdateNplus1")
+                      kd (.createKeyDerivation kdg hc nplus1)
+                      key (.deriveKey kd "TlsKey")
+                      ivSpec (IvParameterSpec. (.deriveData kd "TlsIv"))
+                      ^:mutable ^SSLCipher$SSLWriteCipher wc nil]
+                  (try
+                    (set! wc
+                          (.createWriteCipher (.-bulkCipher (.-negotiatedCipherSuite hc))
+                                              (Authenticator/valueOf
+                                                (.-protocolVersion (.-conContext hc)))
+                                              (.-protocolVersion (.-conContext hc))
+                                              key
+                                              ivSpec
+                                              (.getSecureRandom (.-sslContext hc))))
+                    (catch GeneralSecurityException gse
+                      (throw (.fatal (.-conContext hc)
+                                     Alert/INTERNAL_ERROR
+                                     "Failure to derive write secrets"
+                                     gse))))
+                  (when (nil? wc)
+                    (throw (.fatal (.-conContext hc)
+                                   Alert/ILLEGAL_PARAMETER
+                                   (java-str "Illegal cipher suite ("
+                                             (.-negotiatedCipherSuite hc)
+                                             ") and protocol version ("
+                                             (.-negotiatedProtocol hc)
+                                             ")"))))
+                  (set! (.-baseSecret wc) nplus1)
+                  (.changeWriteCiphers (.-outputRecord (.-conContext hc)) wc (.-id (.-status km)))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+                    (SSLLogger/fine "KeyUpdate: write key updated"))
+                  (.finishPostHandshake (.-conContext hc))
+                  nil)))))))))

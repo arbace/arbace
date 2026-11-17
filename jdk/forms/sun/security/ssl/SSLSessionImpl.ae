@@ -1,0 +1,822 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLSessionImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.net InetAddress UnknownHostException)
+        '(java.nio ByteBuffer)
+        '(java.nio.charset StandardCharsets)
+        '(java.security InvalidAlgorithmParameterException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        Principal
+                        PrivateKey
+                        ProviderException)
+        '(java.security.cert Certificate X509Certificate)
+        '(java.util ArrayList Arrays Collection Collections List Objects Queue)
+        '(java.util.concurrent ConcurrentHashMap ConcurrentLinkedQueue)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.zip Adler32)
+        '(javax.crypto KDF KeyGenerator SecretKey)
+        '(javax.crypto.spec HKDFParameterSpec SecretKeySpec)
+        '(javax.net.ssl ExtendedSSLSession
+                        SNIHostName
+                        SNIServerName
+                        SSLKeyException
+                        SSLPeerUnverifiedException
+                        SSLSessionBindingEvent
+                        SSLSessionBindingListener
+                        SSLSessionContext)
+        '(sun.security.internal.spec TlsPrfParameterSpec)
+        '(sun.security.provider X509Factory)
+        '(sun.security.util KeyUtil))
+
+(defclass ^:final SSLSessionImpl
+  :extends ExtendedSSLSession
+
+  (field ^:private ^:final ^ProtocolVersion protocolVersion)
+
+  (field ^:private ^:final ^SessionId sessionId)
+
+  (field ^:private ^X509Certificate/1 peerCerts)
+
+  (field ^:private ^CipherSuite cipherSuite)
+
+  (field ^:private ^SecretKey masterSecret)
+
+  (field ^:final ^boolean useExtendedMasterSecret)
+
+  (field ^:private ^:final ^long creationTime)
+
+  (field ^:private ^long lastUsedTime 0)
+
+  (field ^:private ^:final ^String host)
+
+  (field ^:private ^:final ^int port)
+
+  (field ^:private ^SSLSessionContextImpl context)
+
+  (field ^:private ^boolean invalidated)
+
+  (field ^:private ^X509Certificate/1 localCerts)
+
+  (field ^:private ^PrivateKey localPrivateKey)
+
+  (field ^:private ^:final ^{:tag (Collection SignatureScheme)} localSupportedSignAlgs)
+
+  (field ^:private ^{:tag (Collection SignatureScheme)} peerSupportedSignAlgs)
+
+  (field ^:private ^boolean useDefaultPeerSignAlgs false)
+
+  (field ^:private ^{:tag (List byte/1)} statusResponses)
+
+  (field ^:private ^SecretKey exporterMasterSecret)
+
+  (field ^:private ^RandomCookie clientRandom)
+
+  (field ^:private ^RandomCookie serverRandom)
+
+  (field ^:private ^SecretKey resumptionMasterSecret)
+
+  (field ^:private ^SecretKey preSharedKey)
+
+  (field ^:private ^byte/1 pskIdentity)
+
+  (field ^:private ^:final ^long ticketCreationTime (System/currentTimeMillis))
+
+  (field ^:private ^int ticketAgeAdd)
+
+  (field ^:private ^int negotiatedMaxFragLen -1)
+
+  (field ^:private ^int maximumPacketSize)
+
+  (field ^:private ^:final ^{:tag (Queue SSLSessionImpl)} childSessions (ConcurrentLinkedQueue.))
+
+  (field ^:private ^boolean isSessionResumption false)
+
+  (field ^:private ^:static ^:final ^boolean defaultRejoinable true)
+
+  (field ^:final ^SNIServerName serverNameIndication)
+
+  (field ^:private ^:final ^{:tag (List SNIServerName)} requestedServerNames)
+
+  (field ^:private ^byte ticketNonceCounter 1)
+
+  (field ^boolean updateNST false)
+
+  (field ^:private ^:final ^String identificationProtocol)
+
+  (field ^:private ^:final ^ReentrantLock sessionLock (ReentrantLock.))
+
+  (constructor [this]
+    (set! (.-protocolVersion this) ProtocolVersion/NONE)
+    (set! (.-cipherSuite this) CipherSuite/C_NULL)
+    (set! (.-sessionId this) (SessionId. false nil))
+    (set! (.-host this) nil)
+    (set! (.-port this) -1)
+    (set! (.-localSupportedSignAlgs this) (Collections/emptySet))
+    (set! (.-serverNameIndication this) nil)
+    (set! (.-requestedServerNames this) (Collections/emptyList))
+    (set! (.-useExtendedMasterSecret this) false)
+    (set! (.-creationTime this) (System/currentTimeMillis))
+    (set! (.-identificationProtocol this) nil)
+    (set! (.-boundValues this) (ConcurrentHashMap.)))
+
+  (constructor [this ^HandshakeContext hc ^CipherSuite cipherSuite]
+    (this. hc cipherSuite (SessionId. defaultRejoinable (.getSecureRandom (.-sslContext hc)))))
+
+  (constructor [this ^HandshakeContext hc ^CipherSuite cipherSuite ^SessionId id]
+    (this. hc cipherSuite id (System/currentTimeMillis)))
+
+  (constructor [this ^HandshakeContext hc ^CipherSuite cipherSuite ^SessionId id ^long creationTime]
+    (set! (.-protocolVersion this) (.-negotiatedProtocol hc))
+    (set! (.-cipherSuite this) cipherSuite)
+    (set! (.-sessionId this) id)
+    (set! (.-host this) (.getPeerHost (.-transport (.-conContext hc))))
+    (set! (.-port this) (.getPeerPort (.-transport (.-conContext hc))))
+    (set! (.-localSupportedSignAlgs this)
+          (if (nil? (.-localSupportedCertSignAlgs hc))
+              ^Collection (Collections/emptySet)
+              (Collections/unmodifiableCollection (ArrayList. (.-localSupportedCertSignAlgs hc)))))
+    (set! (.-serverNameIndication this) (.-negotiatedServerName hc))
+    (set! (.-requestedServerNames this) (List/copyOf (.getRequestedServerNames hc)))
+    (if (.-isClientMode (.-sslConfig hc))
+        (set!
+          (.-useExtendedMasterSecret this)
+          (and (some? (.get (.-handshakeExtensions hc) SSLExtension/CH_EXTENDED_MASTER_SECRET))
+               (some? (.get (.-handshakeExtensions hc) SSLExtension/SH_EXTENDED_MASTER_SECRET))))
+        (set! (.-useExtendedMasterSecret this)
+              (and (some? (.get (.-handshakeExtensions hc) SSLExtension/CH_EXTENDED_MASTER_SECRET))
+                   (not (.useTLS13PlusSpec (.-negotiatedProtocol hc))))))
+    (set! (.-creationTime this) creationTime)
+    (set! (.-identificationProtocol this) (.-identificationProtocol (.-sslConfig hc)))
+    (set! (.-boundValues this) (ConcurrentHashMap.))
+    (when (and (SSLLogger/isOn) (SSLLogger/isOn "session"))
+      (SSLLogger/finest (java-str "Session initialized:  " this))))
+
+  (constructor [this ^SSLSessionImpl baseSession ^SessionId newId]
+    (set! (.-protocolVersion this) (.getProtocolVersion baseSession))
+    (set! (.-cipherSuite this) (.-cipherSuite baseSession))
+    (set! (.-sessionId this) newId)
+    (set! (.-host this) (.getPeerHost baseSession))
+    (set! (.-port this) (.getPeerPort baseSession))
+    (set! (.-localSupportedSignAlgs this)
+          (if (nil? (.-localSupportedSignAlgs baseSession))
+              ^Collection (Collections/emptySet)
+              (.-localSupportedSignAlgs baseSession)))
+    (set! (.-peerSupportedSignAlgs this)
+          (if (nil? (.-peerSupportedSignAlgs baseSession))
+              ^Collection (Collections/emptySet)
+              (.-peerSupportedSignAlgs baseSession)))
+    (set! (.-serverNameIndication this) (.-serverNameIndication baseSession))
+    (set! (.-requestedServerNames this) (.getRequestedServerNames baseSession))
+    (set! (.-masterSecret this) (.getMasterSecret baseSession))
+    (set! (.-useExtendedMasterSecret this) (.-useExtendedMasterSecret baseSession))
+    (set! (.-creationTime this) (.getCreationTime baseSession))
+    (set! (.-lastUsedTime this) (System/currentTimeMillis))
+    (set! (.-identificationProtocol this) (.getIdentificationProtocol baseSession))
+    (set! (.-localCerts this) (.-localCerts baseSession))
+    (set! (.-peerCerts this) (.-peerCerts baseSession))
+    (set! (.-statusResponses this) (.-statusResponses baseSession))
+    (set! (.-resumptionMasterSecret this) (.-resumptionMasterSecret baseSession))
+    (set! (.-context this) (.-context baseSession))
+    (set! (.-negotiatedMaxFragLen this) (.-negotiatedMaxFragLen baseSession))
+    (set! (.-maximumPacketSize this) (.-maximumPacketSize baseSession))
+    (set! (.-boundValues this) (.-boundValues baseSession))
+    (when (and (SSLLogger/isOn) (SSLLogger/isOn "session"))
+      (SSLLogger/finest (java-str "Session initialized:  " this))))
+
+  (constructor :throws [IOException] [this ^HandshakeContext hc ^ByteBuffer buf]
+    (let [^:mutable ^int len 0
+          ^:mutable ^byte/1 b nil]
+      (set! boundValues (ConcurrentHashMap.))
+      (set! (.-protocolVersion this) (ProtocolVersion/valueOf (Record/getInt16 buf)))
+      (set! (.-sessionId this) (SessionId. true (.getSecureRandom (.-sslContext hc))))
+      (set! (.-cipherSuite this) (CipherSuite/valueOf (Record/getInt16 buf)))
+      (let [^{:tag (List SignatureScheme)} list (ArrayList.)]
+        (set! len (Record/getInt8 buf))
+        (while (> (let [old-1 len] (set! len (unchecked-dec-int len)) old-1) 0)
+          (.add list (SignatureScheme/valueOf (Record/getInt16 buf))))
+        (set! (.-localSupportedSignAlgs this) (Collections/unmodifiableCollection list))
+        (if (.useTLS13PlusSpec protocolVersion)
+            (do
+              (set! b (Record/getBytes16 buf))
+              (if (> (alength b) 0)
+                  (set! (.-preSharedKey this) (SecretKeySpec. b "TlsMasterSecret"))
+                  (set! (.-preSharedKey this) nil))
+              (set! (.-useExtendedMasterSecret this) false))
+            (do
+              (set! b (Record/getBytes16 buf))
+              (if (> (alength b) 0)
+                  (set! (.-masterSecret this) (SecretKeySpec. b "TlsMasterSecret"))
+                  (set! (.-masterSecret this) nil))
+              (set! (.-useExtendedMasterSecret this) (not (== (Record/getInt8 buf) 0)))))
+        (set! b (Record/getBytes8 buf))
+        (if (== (alength b) 0)
+            (set! identificationProtocol nil)
+            (set! identificationProtocol (String. b)))
+        (set! b (Record/getBytes8 buf))
+        (if (== (alength b) 0)
+            (set! serverNameIndication nil)
+            (set! serverNameIndication (SNIHostName. b)))
+        (set! len (Record/getInt16 buf))
+        (if (== len 0)
+            (set! (.-requestedServerNames this) (Collections/emptyList))
+            (do
+              (set! requestedServerNames (ArrayList.))
+              (while (> len 0)
+                (set! b (Record/getBytes8 buf))
+                (.add requestedServerNames (SNIHostName. (String. b)))
+                (set! len (unchecked-dec-int len)))))
+        (set! maximumPacketSize (.getInt buf))
+        (set! negotiatedMaxFragLen (.getInt buf))
+        (set! (.-creationTime this) (.getLong buf))
+        (set! b (Record/getBytes8 buf))
+        (if (== (alength b) 0) (set! (.-host this) "") (set! (.-host this) (String. b)))
+        (set! (.-port this) (Record/getInt16 buf))
+        (set! len (Record/getInt8 buf))
+        (if (== len 0)
+            (set! (.-peerCerts this) nil)
+            (do
+              (set! (.-peerCerts this) (new X509Certificate/1 len))
+              (loop [^int i 0]
+                (when (> len i)
+                  (set! b (new byte/1 (.getInt buf)))
+                  (.get buf b)
+                  (try
+                    (aset (.-peerCerts this) i (X509Factory/cachedGetX509Cert b))
+                    (catch Exception e (throw (IOException. e))))
+                  (recur (unchecked-inc-int i))))))
+        (set! len (Record/getInt8 buf))
+        (if (== len 0)
+            (set! (.-localCerts this) nil)
+            (let [certAlgs (new String/1 len)
+                  certCheckSums (new int/1 len)]
+              (loop [^int i 0]
+                (when (> len i)
+                  (aset certAlgs i (String. (Record/getBytes8 buf)))
+                  (aset certCheckSums i (Record/getInt32 buf))
+                  (recur (unchecked-inc-int i))))
+              (let [pos (X509Authentication/createPossession hc certAlgs)
+                    ^:mutable same false]
+                (when-instance [^X509Authentication$X509Possession x509Pos pos]
+                  (when (some? (.-popCerts x509Pos))
+                    (when (== (alength (.-popCerts x509Pos)) len)
+                      (loop [^int i 0]
+                        (when (< i (alength (.-popCerts x509Pos)))
+                          (try
+                            (let [encoded (.getEncoded (aget (.-popCerts x509Pos) i))
+                                  popAlg (.getAlgorithm
+                                           (.getPublicKey (aget (.-popCerts x509Pos) i)))]
+                              (if (and (== (aget certCheckSums i)
+                                           (SSLSessionImpl/getChecksum encoded))
+                                       (.equals (aget certAlgs i) popAlg))
+                                  (do
+                                    (aset (.-popCerts x509Pos)
+                                          i
+                                          (X509Factory/cachedGetX509Cert encoded))
+                                    (set! same true))
+                                  (do (set! same false) (break))))
+                            (catch Exception e (throw (IOException. e))))
+                          (recur (unchecked-inc-int i)))))))
+                (if same
+                    (do
+                      (set! (.-localCerts this)
+                            (.-popCerts (cast X509Authentication$X509Possession pos)))
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,session"))
+                        (SSLLogger/fine
+                          (java-str "Restored "
+                                    len
+                                    " local certificates from session ticket for algorithms "
+                                    (Arrays/toString certAlgs)))))
+                    (do
+                      (set! (.-localCerts this) nil)
+                      (set! (.-invalidated this) true)
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,session"))
+                        (SSLLogger/warning
+                          (java-str
+                            "Local certificates can not be restored from session ticket for algorithms "
+                            (Arrays/toString certAlgs)))))))))
+        (set! (.-context this)
+              (cast SSLSessionContextImpl (.engineGetServerSessionContext (.-sslContext hc))))
+        (set! (.-lastUsedTime this) (System/currentTimeMillis)))))
+
+  (method isStatelessable ^boolean [this]
+    (cond
+      (and (not (.useTLS13PlusSpec protocolVersion)) (nil? (.getEncoded (.getMasterSecret this))))
+        (do
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/finest "No MasterSecret, cannot make stateless ticket"))
+          false)
+      (and (some? boundValues) (> (.size boundValues) 0))
+        (do
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/finest "There are boundValues, cannot make stateless ticket"))
+          false)
+      :else true))
+
+  (method write :throws [Exception] ^byte/1 [this]
+    (let [^:mutable ^byte/1 b nil
+          hos (HandshakeOutStream. nil)]
+      (.putInt16 hos (.-id protocolVersion))
+      (.putInt16 hos (.-id cipherSuite))
+      (.putInt8 hos (.size localSupportedSignAlgs))
+      (for-each [^SignatureScheme s localSupportedSignAlgs] (.putInt16 hos (.-id s)))
+      (if (.useTLS13PlusSpec protocolVersion)
+          (if (nil? preSharedKey) (.putInt16 hos 0) (.putBytes16 hos (.getEncoded preSharedKey)))
+          (do
+            (if (nil? (.getMasterSecret this))
+                (.putInt16 hos 0)
+                (.putBytes16 hos (.getEncoded masterSecret)))
+            (.putInt8 hos (if useExtendedMasterSecret 1 0))))
+      (if (nil? identificationProtocol)
+          (.putInt8 hos 0)
+          (do
+            (.putInt8 hos (.length identificationProtocol))
+            (.write hos (.getBytes identificationProtocol) 0 (.length identificationProtocol))))
+      (if (nil? serverNameIndication)
+          (.putInt8 hos 0)
+          (do
+            (set! b (.getEncoded serverNameIndication))
+            (.putInt8 hos (alength b))
+            (.write hos b 0 (alength b))))
+      (.putInt16 hos (.size requestedServerNames))
+      (when (> (.size requestedServerNames) 0)
+        (for-each [^SNIServerName sn requestedServerNames]
+          (set! b (.getEncoded sn))
+          (.putInt8 hos (alength b))
+          (.write hos b 0 (alength b))))
+      (.putInt32 hos maximumPacketSize)
+      (.putInt32 hos negotiatedMaxFragLen)
+      (let [buffer (ByteBuffer/allocate Long/BYTES)]
+        (.writeBytes hos (.array (.putLong buffer creationTime)))
+        (if (or (nil? host) (== (.length host) 0))
+            (.putInt8 hos 0)
+            (do (.putInt8 hos (.length host)) (.writeBytes hos (.getBytes host))))
+        (.putInt16 hos port)
+        (if (or (nil? peerCerts) (== (alength peerCerts) 0))
+            (.putInt8 hos 0)
+            (do
+              (.putInt8 hos (alength peerCerts))
+              (for-each [^X509Certificate c peerCerts]
+                (set! b (.getEncoded c))
+                (.putInt32 hos (alength b))
+                (.writeBytes hos b))))
+        (if (or (nil? localCerts) (== (alength localCerts) 0))
+            (.putInt8 hos 0)
+            (do
+              (.putInt8 hos (alength localCerts))
+              (for-each [^X509Certificate c localCerts]
+                (.putBytes8 hos (.getBytes (.getAlgorithm (.getPublicKey c))))
+                (.putInt32 hos (SSLSessionImpl/getChecksum (.getEncoded c))))))
+        (.toByteArray hos))))
+
+  (method ^:private ^:static getChecksum ^int [^byte/1 input]
+    (let [adler32 (Adler32.)] (.update adler32 input) (unchecked-int (.getValue adler32))))
+
+  (method setMasterSecret ^void [this ^SecretKey secret]
+    (set! masterSecret secret))
+
+  (method setExporterMasterSecret ^void [this ^SecretKey secret]
+    (set! exporterMasterSecret secret))
+
+  (method setRandoms ^void [this ^RandomCookie client ^RandomCookie server]
+    (set! clientRandom client)
+    (set! serverRandom server))
+
+  (method setResumptionMasterSecret ^void [this ^SecretKey secret]
+    (set! resumptionMasterSecret secret))
+
+  (method setPreSharedKey ^void [this ^SecretKey key]
+    (set! preSharedKey key))
+
+  (method addChild ^void [this ^SSLSessionImpl session]
+    (.add childSessions session))
+
+  (method setTicketAgeAdd ^void [this ^int ticketAgeAdd]
+    (set! (.-ticketAgeAdd this) ticketAgeAdd))
+
+  (method setPskIdentity ^void [this ^byte/1 pskIdentity]
+    (set! (.-pskIdentity this) pskIdentity))
+
+  (method incrTicketNonceCounter ^byte/1 [this]
+    (let [ticketNonceCounter-2 ticketNonceCounter]
+      (set! ticketNonceCounter (unchecked-byte (unchecked-inc-int ticketNonceCounter)))
+      (new byte/1 [ticketNonceCounter-2])))
+
+  (method isPSKable ^boolean [this] (> ticketNonceCounter 0))
+
+  (method getMasterSecret ^SecretKey [this] masterSecret)
+
+  (method getResumptionMasterSecret ^SecretKey [this]
+    resumptionMasterSecret)
+
+  (method getPreSharedKey ^SecretKey [this]
+    (.lock sessionLock)
+    (try preSharedKey (finally (.unlock sessionLock))))
+
+  (method consumePreSharedKey ^SecretKey [this]
+    (.lock sessionLock)
+    (try preSharedKey (finally (set! preSharedKey nil) (.unlock sessionLock))))
+
+  (method getTicketAgeAdd ^int [this] ticketAgeAdd)
+
+  (method getIdentificationProtocol ^String [this]
+    (.-identificationProtocol this))
+
+  (method consumePskIdentity ^byte/1 [this]
+    (.lock sessionLock)
+    (try pskIdentity (finally (set! pskIdentity nil) (.unlock sessionLock))))
+
+  (method getPskIdentity ^byte/1 [this] pskIdentity)
+
+  (method ^:public isPSK ^boolean [this]
+    (and (some? pskIdentity) (> (alength pskIdentity) 0)))
+
+  (method setPeerCertificates ^void [this ^X509Certificate/1 peer]
+    (when (nil? peerCerts) (set! peerCerts peer)))
+
+  (method setLocalCertificates ^void [this ^X509Certificate/1 local]
+    (set! localCerts local))
+
+  (method setLocalPrivateKey ^void [this ^PrivateKey privateKey]
+    (set! localPrivateKey privateKey))
+
+  (method setPeerSupportedSignatureAlgorithms ^void [this
+                                                     ^{:tag (Collection SignatureScheme)} signatureSchemes]
+    (set! peerSupportedSignAlgs signatureSchemes))
+
+  (field ^:private ^:static ^:final ^{:tag (ArrayList SignatureScheme)} defaultPeerSupportedSignAlgs
+    (ArrayList. (Arrays/asList
+                  (new SignatureScheme/1
+                       [SignatureScheme/RSA_PKCS1_SHA1
+                        SignatureScheme/DSA_SHA1
+                        SignatureScheme/ECDSA_SHA1]))))
+
+  (method setUseDefaultPeerSignAlgs ^void [this]
+    (set! useDefaultPeerSignAlgs true)
+    (set! peerSupportedSignAlgs defaultPeerSupportedSignAlgs))
+
+  (method finish ^SSLSessionImpl [this]
+    (when useDefaultPeerSignAlgs (set! peerSupportedSignAlgs (Collections/emptySet)))
+    this)
+
+  (method setStatusResponses ^void [this ^{:tag (List byte/1)} responses]
+    (if (and (some? responses) (not (.isEmpty responses)))
+        (set! statusResponses responses)
+        (set! statusResponses (Collections/emptyList))))
+
+  (method isRejoinable ^boolean [this]
+    (if (.useTLS13PlusSpec protocolVersion)
+        (and (not invalidated) (.isLocalAuthenticationValid this))
+        (and (and (and (some? sessionId) (not (== (.length sessionId) 0))) (not invalidated))
+             (.isLocalAuthenticationValid this))))
+
+  (method ^:public isValid ^boolean [this]
+    (.lock sessionLock)
+    (try (.isRejoinable this) (finally (.unlock sessionLock))))
+
+  (method ^:private isLocalAuthenticationValid ^boolean [this]
+    (when (some? localPrivateKey)
+      (try (.getAlgorithm localPrivateKey) (catch Exception e (.invalidate this) (return false))))
+    true)
+
+  (method ^:public getId ^byte/1 [this] (.getId sessionId))
+
+  (method ^:public getSessionContext ^SSLSessionContext [this] context)
+
+  (method getSessionId ^SessionId [this] sessionId)
+
+  (method getSuite ^CipherSuite [this] cipherSuite)
+
+  (method setSuite ^void [this ^CipherSuite suite]
+    (set! cipherSuite suite)
+    (when (and (SSLLogger/isOn) (SSLLogger/isOn "session"))
+      (SSLLogger/finest (java-str "Negotiating session:  " this))))
+
+  (method isSessionResumption ^boolean [this] isSessionResumption)
+
+  (method setAsSessionResumption ^void [this ^boolean flag]
+    (set! isSessionResumption flag))
+
+  (method ^:public getCipherSuite ^String [this]
+    (.-name (.getSuite this)))
+
+  (method getProtocolVersion ^ProtocolVersion [this] protocolVersion)
+
+  (method ^:public getProtocol ^String [this]
+    (.-name (.getProtocolVersion this)))
+
+  (method ^:public hashCode ^int [this] (.hashCode sessionId))
+
+  (method ^:public equals ^boolean [this obj]
+    (if (identical? obj this)
+        true
+        (if-instance [^SSLSessionImpl other obj]
+          (if (some? sessionId) (.equals sessionId (.getSessionId other)) false)
+          false)))
+
+  (method ^:public getPeerCertificates :throws [SSLPeerUnverifiedException] ^Certificate/1 [this]
+    (when (nil? peerCerts) (throw (SSLPeerUnverifiedException. "peer not authenticated")))
+    (.clone peerCerts))
+
+  (method ^:public getLocalCertificates ^Certificate/1 [this]
+    (when (some? localCerts) ^Certificate/1 (.clone localCerts)))
+
+  (method ^:public getCertificateChain :throws [SSLPeerUnverifiedException] ^X509Certificate/1 [this]
+    (if (some? peerCerts)
+        (.clone peerCerts)
+        (throw (SSLPeerUnverifiedException. "peer not authenticated"))))
+
+  (method ^:public getStatusResponses ^{:tag (List byte/1)} [this]
+    (if (or (nil? statusResponses) (.isEmpty statusResponses))
+        (Collections/emptyList)
+        (let [^{:tag (List byte/1)} responses (ArrayList. (.size statusResponses))]
+          (for-each [^byte/1 respBytes statusResponses] (.add responses ^byte/1 (.clone respBytes)))
+          (Collections/unmodifiableList responses))))
+
+  (method ^:public getPeerPrincipal :throws [SSLPeerUnverifiedException] ^Principal [this]
+    (when (nil? peerCerts) (throw (SSLPeerUnverifiedException. "peer not authenticated")))
+    (.getSubjectX500Principal (aget peerCerts 0)))
+
+  (method ^:public getLocalPrincipal ^Principal [this]
+    (when-not (or (nil? localCerts) (== (alength localCerts) 0))
+      ^Principal (.getSubjectX500Principal (aget localCerts 0))))
+
+  (method ^:public getTicketCreationTime ^long [this] ticketCreationTime)
+
+  (method ^:public getCreationTime ^long [this] creationTime)
+
+  (method ^:public getLastAccessedTime ^long [this]
+    (if (not (== lastUsedTime 0)) lastUsedTime creationTime))
+
+  (method setLastAccessedTime ^void [this ^long time]
+    (set! lastUsedTime time))
+
+  (method ^:public getPeerAddress ^InetAddress [this]
+    (try (InetAddress/getByName host) (catch UnknownHostException e nil)))
+
+  (method ^:public getPeerHost ^String [this] host)
+
+  (method ^:public getPeerPort ^int [this] port)
+
+  (method setContext ^void [this ^SSLSessionContextImpl ctx]
+    (when (nil? context) (set! context ctx)))
+
+  (method ^:public invalidate ^void [this]
+    (.lock sessionLock)
+    (try
+      (when (some? context) (.remove context sessionId) (set! context nil))
+      (when-not invalidated
+        (set! invalidated true)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "session"))
+          (SSLLogger/finest (java-str "Invalidated session:  " this)))
+        (for-each [^SSLSessionImpl child childSessions] (.invalidate child)))
+      (finally (.unlock sessionLock))))
+
+  (field ^:private ^:final ^{:tag (ConcurrentHashMap String Object)} boundValues)
+
+  (method ^:public putValue ^void [this ^String key value]
+    (when (or (nil? key) (nil? value))
+      (throw (IllegalArgumentException. "arguments can not be null")))
+    (let [oldValue (.put boundValues key value)]
+      (when (instance? SSLSessionBindingListener oldValue)
+        (let [^:mutable ^SSLSessionBindingEvent e nil]
+          (set! e (SSLSessionBindingEvent. this key))
+          (.valueUnbound (cast SSLSessionBindingListener oldValue) e)))
+      (when (instance? SSLSessionBindingListener value)
+        (let [^:mutable ^SSLSessionBindingEvent e nil]
+          (set! e (SSLSessionBindingEvent. this key))
+          (.valueBound (cast SSLSessionBindingListener value) e)))
+      (when (.useTLS13PlusSpec protocolVersion) (set! updateNST true))))
+
+  (method ^:public getValue [this ^String key]
+    (when (nil? key) (throw (IllegalArgumentException. "argument can not be null")))
+    (.get boundValues key))
+
+  (method ^:public removeValue ^void [this ^String key]
+    (when (nil? key) (throw (IllegalArgumentException. "argument can not be null")))
+    (let [value (.remove boundValues key)]
+      (when (instance? SSLSessionBindingListener value)
+        (let [^:mutable ^SSLSessionBindingEvent e nil]
+          (set! e (SSLSessionBindingEvent. this key))
+          (.valueUnbound (cast SSLSessionBindingListener value) e)))
+      (when (.useTLS13PlusSpec protocolVersion) (set! updateNST true))))
+
+  (method ^:public getValueNames ^String/1 [this]
+    (cast String/1 (.toArray (.keySet boundValues) (new String/1 0))))
+
+  (field ^:private ^boolean acceptLargeFragments
+    (Utilities/getBooleanProperty "jsse.SSLEngine.acceptLargeFragments" false))
+
+  (method expandBufferSizes ^void [this]
+    (.lock sessionLock)
+    (try (set! acceptLargeFragments true) (finally (.unlock sessionLock))))
+
+  (method ^:public getPacketBufferSize ^int [this]
+    (.lock sessionLock)
+    (try
+      (let [^:mutable ^int packetSize 0]
+        (when (> negotiatedMaxFragLen 0)
+          (set! packetSize
+                (.calculatePacketSize cipherSuite
+                                      negotiatedMaxFragLen
+                                      protocolVersion
+                                      (.-isDTLS protocolVersion))))
+        (cond
+          (> maximumPacketSize 0) (Math/max maximumPacketSize packetSize)
+          (not (== packetSize 0)) packetSize
+          (.-isDTLS protocolVersion) DTLSRecord/maxRecordSize
+          acceptLargeFragments SSLRecord/maxLargeRecordSize
+          :else SSLRecord/maxRecordSize))
+      (finally (.unlock sessionLock))))
+
+  (method ^:public getApplicationBufferSize ^int [this]
+    (.lock sessionLock)
+    (try
+      (let [^:mutable ^int fragmentSize 0]
+        (when (> maximumPacketSize 0)
+          (set! fragmentSize
+                (.calculateFragSize cipherSuite
+                                    maximumPacketSize
+                                    protocolVersion
+                                    (.-isDTLS protocolVersion))))
+        (cond
+          (> negotiatedMaxFragLen 0) (Math/max negotiatedMaxFragLen fragmentSize)
+          (not (== fragmentSize 0)) fragmentSize
+          (.-isDTLS protocolVersion) Record/maxDataSize
+          :else
+            (let [^int maxPacketSize (if acceptLargeFragments
+                                         SSLRecord/maxLargeRecordSize
+                                         SSLRecord/maxRecordSize)]
+              (unchecked-subtract-int maxPacketSize SSLRecord/headerSize))))
+      (finally (.unlock sessionLock))))
+
+  (method setNegotiatedMaxFragSize ^void [this ^int negotiatedMaxFragLen]
+    (.lock sessionLock)
+    (try (set! (.-negotiatedMaxFragLen this) negotiatedMaxFragLen) (finally (.unlock sessionLock))))
+
+  (method getNegotiatedMaxFragSize ^int [this]
+    (.lock sessionLock)
+    (try negotiatedMaxFragLen (finally (.unlock sessionLock))))
+
+  (method setMaximumPacketSize ^void [this ^int maximumPacketSize]
+    (.lock sessionLock)
+    (try (set! (.-maximumPacketSize this) maximumPacketSize) (finally (.unlock sessionLock))))
+
+  (method getMaximumPacketSize ^int [this]
+    (.lock sessionLock)
+    (try maximumPacketSize (finally (.unlock sessionLock))))
+
+  (method ^:public getLocalSupportedSignatureAlgorithms ^String/1 [this]
+    (SignatureScheme/getAlgorithmNames localSupportedSignAlgs))
+
+  (method getLocalSupportedSignatureSchemes ^{:tag (Collection SignatureScheme)} [this]
+    localSupportedSignAlgs)
+
+  (method ^:public getPeerSupportedSignatureAlgorithms ^String/1 [this]
+    (SignatureScheme/getAlgorithmNames peerSupportedSignAlgs))
+
+  (method getPeerSupportedSignatureSchemes ^{:tag (Collection SignatureScheme)} [this]
+    peerSupportedSignAlgs)
+
+  (method ^:public getRequestedServerNames ^{:tag (List SNIServerName)} [this]
+    requestedServerNames)
+
+  (method ^:public exportKeyingMaterial :throws [SSLKeyException] [this ^String keyAlg ^String label
+                                                                   ^:mutable ^byte/1 context
+                                                                   ^int length]
+    (Objects/requireNonNull label "label can not be null")
+    (when (< length 1) (throw (IllegalArgumentException. "length must be positive")))
+    (cond
+      (.useTLS13PlusSpec protocolVersion)
+        (do
+          (when (nil? exporterMasterSecret)
+            (throw (IllegalStateException. "Exporter master secret not captured")))
+          (when (> length (unchecked-multiply-int 255 (.-hashLength (.-hashAlg cipherSuite))))
+            (throw (IllegalArgumentException. "length is too large")))
+          (let [hkdfInfoLabel (.getBytes (java-str "tls13 " label) StandardCharsets/UTF_8)]
+            (when (or (< (alength hkdfInfoLabel) 7) (> (alength hkdfInfoLabel) 255))
+              (throw (IllegalArgumentException. "label length outside range")))
+            (set! context (if (some? context) context (new byte/1 0)))
+            (when (> (alength context) 255)
+              (throw (IllegalArgumentException. "context length outside range")))
+            (try
+              (let [hashAlg (.-hashAlg cipherSuite)
+                    hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))
+                    ^:mutable ^MessageDigest md nil
+                    ^:mutable ^byte/1 emptyHash nil]
+                (try
+                  (set! md (MessageDigest/getInstance (.toString hashAlg)))
+                  (set! emptyHash (.digest md))
+                  (catch NoSuchAlgorithmException nsae
+                    (throw (ProviderException.
+                             (java-str "Hash algorithm "
+                                       (.-name (.-hashAlg cipherSuite))
+                                       " is not available")
+                             nsae))))
+                (let [^:mutable hkdfInfo (SSLSecretDerivation/createHkdfInfo
+                                           hkdfInfoLabel
+                                           emptyHash
+                                           (.-hashLength hashAlg))
+                      derivedSecret (.deriveKey hkdf
+                                                "TlsKey"
+                                                (HKDFParameterSpec/expandOnly
+                                                  exporterMasterSecret
+                                                  hkdfInfo
+                                                  (.-hashLength hashAlg)))]
+                  (try
+                    (let [^byte/1 hash (if (> (alength context) 0) (.digest md context) emptyHash)]
+                      (set! hkdfInfo
+                            (SSLSecretDerivation/createHkdfInfo
+                              (.getBytes "tls13 exporter" StandardCharsets/UTF_8)
+                              hash
+                              length))
+                      (if (some? keyAlg)
+                          ^Object (.deriveKey hkdf
+                                              keyAlg
+                                              (HKDFParameterSpec/expandOnly
+                                                derivedSecret
+                                                hkdfInfo
+                                                length))
+                          ^Object (.deriveData hkdf
+                                               (HKDFParameterSpec/expandOnly
+                                                 derivedSecret
+                                                 hkdfInfo
+                                                 length))))
+                    (finally (KeyUtil/destroySecretKeys derivedSecret)))))
+              (catch Exception e (throw (SSLKeyException. "Couldn't generate Exporter/HKDF" e))))))
+      (.useTLS10PlusSpec protocolVersion)
+        (do
+          (when (or (nil? clientRandom) (nil? serverRandom))
+            (throw (IllegalStateException. "Random nonces not captured")))
+          (when-not useExtendedMasterSecret
+            (throw (SSLKeyException. "Exporters require extended master secrets")))
+          (when (.isEmpty label) (throw (IllegalArgumentException. "label length outside range")))
+          (when (and (some? context) (> (alength context) 0xFFFF))
+            (throw (IllegalArgumentException. "Only 16-bit context lengths supported")))
+          (let [^:mutable ^String prfAlg nil
+                ^:mutable ^CipherSuite$HashAlg hashAlg nil]
+            (if (identical? protocolVersion ProtocolVersion/TLS12)
+                (do (set! prfAlg "SunTls12Prf") (set! hashAlg (.-hashAlg cipherSuite)))
+                (do (set! prfAlg "SunTlsPrf") (set! hashAlg CipherSuite$HashAlg/H_NONE)))
+            (let [clientRandomBytes (.-randomBytes clientRandom)
+                  serverRandomBytes (.-randomBytes serverRandom)
+                  seed (new byte/1
+                            (unchecked-add-int
+                              (unchecked-add-int
+                                (alength clientRandomBytes)
+                                (alength serverRandomBytes))
+                              (if (some? context) (unchecked-add-int 2 (alength context)) 0)))
+                  ^:mutable ^int pos 0]
+              (System/arraycopy clientRandomBytes 0 seed pos (alength clientRandomBytes))
+              (set! pos (unchecked-add-int pos (alength clientRandomBytes)))
+              (System/arraycopy serverRandomBytes 0 seed pos (alength serverRandomBytes))
+              (set! pos (unchecked-add-int pos (alength serverRandomBytes)))
+              (when (some? context)
+                (aset seed
+                      pos
+                      (unchecked-byte (bit-and-int (bit-shift-right-int (alength context) 8) 0xFF)))
+                (set! pos (unchecked-inc-int pos))
+                (aset seed pos (unchecked-byte (bit-and-int (alength context) 0xFF)))
+                (set! pos (unchecked-inc-int pos))
+                (System/arraycopy context 0 seed pos (alength context)))
+              (try
+                (let [spec (TlsPrfParameterSpec.
+                             masterSecret
+                             ^String (if (nil? keyAlg) "TlsKey" keyAlg)
+                             label
+                             seed
+                             length
+                             (.-name hashAlg)
+                             (.-hashLength hashAlg)
+                             (.-blockSize hashAlg))
+                      kg (KeyGenerator/getInstance prfAlg)]
+                  (.init kg spec)
+                  (let [key (.generateKey kg)]
+                    (if (some? keyAlg)
+                        key
+                        (let [b (.getEncoded key)]
+                          (when (nil? b)
+                            (throw (UnsupportedOperationException.
+                                     "Could not extract encoding from SecretKey")))
+                          b))))
+                (catch [NoSuchAlgorithmException InvalidAlgorithmParameterException] e
+                  (throw (SSLKeyException. "Could not generate Exporter/PRF" e)))))))
+      :else (throw (SSLKeyException. (java-str "Exporters not supported in " protocolVersion)))))
+
+  (method ^:public exportKeyingMaterialKey :throws [SSLKeyException] ^SecretKey [this ^String keyAlg
+                                                                                 ^String label
+                                                                                 ^byte/1 context
+                                                                                 ^int length]
+    (Objects/requireNonNull keyAlg "keyAlg can not be null")
+    (when (.isEmpty keyAlg) (throw (IllegalArgumentException. "keyAlg is empty")))
+    (cast SecretKey (.exportKeyingMaterial this keyAlg label context length)))
+
+  (method ^:public exportKeyingMaterialData :throws [SSLKeyException] ^byte/1 [this ^String label
+                                                                               ^byte/1 context
+                                                                               ^int length]
+    (cast byte/1 (.exportKeyingMaterial this nil label context length)))
+
+  (method ^:public toString ^String [this]
+    (java-str "Session(" creationTime "|" (.getCipherSuite this) ")")))

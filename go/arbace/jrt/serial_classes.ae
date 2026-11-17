@@ -1,0 +1,511 @@
+;; Ported in part from jdk26u (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259),
+;; src/java.base/share/classes/java/lang/{Throwable,StringBuilder,StringBuffer}.java and
+;; java/util/Date.java (their serialization hooks and serial forms), whose notice follows
+;; (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1994, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+;; jrt: the serial forms of jrt's hand-written serializable classes (JCS167's second slice, the user's
+;; decision of 2026-11-07; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 slices 2-3
+;; (write-ahead)"). jdk26u's object streams (java.io.ObjectStreamClass's variant) find a class's serial
+;; form by reflection: serialVersionUID and serialPersistentFields by getDeclaredField, the serial fields
+;; by getDeclaredFields (the non-static, non-transient ones), the hooks writeObject, readObject,
+;; readObjectNoData, writeReplace and readResolve by getDeclaredMethod; the object to fill by
+;; ClassInfo.SerialNew (serial.ae). j2g lists them for the classes it translates (arbace.j2g.model/
+;; serial-field?, serial-hook?); for the classes jrt writes by hand this file does, as each class's
+;; member table of its private serial members (a MemberTable, decoded on reflection's first use beside
+;; the public members reflect_tables.ae lists, so that its descriptors name the stream classes j2g
+;; translates). Each class's serial form is jdk26u's (openjdk/jdk26u at baf63fb, src/java.base/share/
+;; classes), byte for byte: its serialVersionUID, its fields' names, types and modifiers, its hooks with
+;; the bodies of jdk26u's, written over jrt's own state. The hooks call the streams by reflection over
+;; their translated classes' tables (serialCall): jrt cannot name a translated class's Go type.
+;;   java.lang.Throwable          detailMessage, cause (the exception itself when no cause was set),
+;;                                stackTrace (the sentinel [StackTraceElement("", "", null, MIN_VALUE)]
+;;                                when it is not writable), suppressedExceptions (Collections.emptyList()
+;;                                when none, null when suppression is disabled, else an ArrayList);
+;;                                writeObject, readObject (jdk26u's validation)
+;;   java.lang.StackTraceElement  format, lineNumber, classLoaderName, declaringClass, fileName,
+;;                                methodName, moduleName, moduleVersion (no hooks)
+;;   java.util.Date               no fields; writeObject writes the time as a long, readObject reads it
+;;   java.lang.StringBuilder      no fields; writeObject writes the count and a char[] of the capacity
+;;   java.lang.StringBuffer       serialPersistentFields value, count, shared; writeObject by putFields
+;;   java.util.concurrent.atomic  AtomicInteger, AtomicLong, AtomicBoolean (an int), AtomicReference:
+;;                                value (no hooks)
+;;   java.lang.reflect.Proxy      h, a proxy's handler (no hooks; JCS170)
+;; Checked by serial_test.ae against the bytes jdk26u's ObjectOutputStream writes
+;; (test/jrt/serialization/SerialRecord.java).
+(in-ns 'go.arbace.jrt)
+
+(go/file "serial_classes.go"
+  :imports [[math "math"] [strings "strings"] [sync "sync"]])
+
+;; ---------------------------------------------------------------------------------------
+;; The tables and the streams' calls
+
+(go/func serialTable
+  "serialTable is a member table of serial members: data in MemberTable's lines (\"M mods name
+desc\", \"F mods name desc\", \"G ...\" a field without Set), ms the methods' invokers, gets and sets the
+fields' accessors, in the order of their lines (a G line's set nil).\n"
+  ^{:tag (* MemberTable)}
+  [^string data ^{:tag (slice (func [any (slice any)] [any]))} ms
+   ^{:tag (slice (func [any] [any]))} gets ^{:tag (slice (func [any any]))} sets]
+  (addr (lit MemberTable :DataFn (fn ^string [] (return (serialLines data)))
+             :Invoke (fn ^any [^int32 k ^any this ^{:tag (slice any)} args] (return ((aget ms k) this args)))
+             :New (fn ^any [^int32 k ^{:tag (slice any)} args] (panic "jrt: a serial table has no constructors"))
+             :Get (fn ^any [^int32 k ^any o] (return ((aget gets k) o)))
+             :Set (fn [^int32 k ^any o ^any v] ((aget sets k) o v)))))
+
+(go/func serialLines
+  "serialLines are data's lines, without the hooks' (the M lines, which follow the fields') when the
+world has not the object streams their descriptors name (a program without serialization: its hooks are
+never called).\n"
+  ^string [^string data]
+  (when (and (!= (ForName serialOOS) nil) (!= (ForName serialOIS) nil))
+    (return data))
+  (let [out ""]
+    (range [_ line (strings/SplitAfter data "\n")]
+      (when (not (strings/HasPrefix line "M"))
+        (set! out (+ out line))))
+    (return out)))
+
+(go/func serialClass
+  "serialClass gives the class c its serial members t and its deserialization allocation alloc
+(ClassInfo.SerialNew: the object as ReflectionFactory's serialization constructor makes it, Object's
+constructor run on the zero object).\n"
+  [^{:tag (* Class)} c ^{:tag (* MemberTable)} t ^{:tag (func [] [any])} alloc]
+  (set! (.-Table (.Info c)) t)
+  (set! (.-SerialNew (.Info c)) alloc))
+
+(go/func serialClassNamed
+  "serialClassNamed is the class of the world named name, which serialization's hooks need (the
+streams, their PutField and GetField, the collections): InternalError when the world has none.\n"
+  ^{:tag (* Class)} [^string name]
+  (let [c (ForName name)]
+    (when (== c nil)
+      (panic (InternalError_New_String (Str (+ "jrt: serialization needs " name ", which the Go build has not")))))
+    c))
+
+(go/func serialCall
+  "serialCall calls the public method name(params) that the class named cls declares on recv
+(virtually: recv may be a subclass's object; nil for a static method) with args, the convention of
+the member tables' invokers (a primitive as its Go value); an exception it throws propagates.\n"
+  ^any [^any recv ^string cls ^string name ^{:tag (slice (* Class))} params ^{:tag (slice any)} args]
+  ;; a stream of jrt's tests (serial_test.ae's serOut and serIn, their PutField and GetField: JCS193 (b)), which
+  ;; also stands in for the translated streams when the world has them (bin/jrt test --prog)
+  (let [(values ts ok) (assert serialTestStream recv)]
+    (when ok
+      (return (.serialStreamCall ts name args))))
+  (let [c (serialClassNamed cls)
+        m (.declaredMethodInfo c name params true)]
+    (when (== m nil)
+      (panic (InternalError_New_String (Str (+ "jrt: serialization needs " (.-Name (.Info c)) "." name)))))
+    (return ((.-Invoke m) recv args))))
+
+(go/type serialTestStream
+  "serialTestStream is a stream of jrt's tests (serial_test.ae, JCS193 (b)): the stream methods the hooks call, by
+name, with the members' convention.\n"
+  (interface (serialStreamCall ^any [^string name ^{:tag (slice any)} args])))
+
+(go/func serialNewObject
+  "serialNewObject is new C(args) of the class named cls by its public constructor of params.\n"
+  ^any [^string cls ^{:tag (slice (* Class))} params ^{:tag (slice any)} args]
+  (let [c (serialClassNamed cls)]
+    (EnsureMembers (.-info c))
+    (range [i _ (.-Ctors (.-info c))]
+      (let [k (addr (aget (.-Ctors (.-info c)) i))]
+        (when (sameParams (.-Params k) params)
+          (return ((.-New k) args)))))
+    (panic (InternalError_New_String (Str (+ "jrt: serialization needs a constructor of " cls))))))
+
+(go/func serialThrow
+  "serialThrow throws new C(msg) of the stream exception class named cls
+(java.io.StreamCorruptedException...).\n"
+  [^string cls ^string msg]
+  (panic (serialNewObject cls (lit (slice (* Class)) String_class) (lit (slice any) (Str msg)))))
+
+(go/var ^{:doc "the streams' classes, as the hooks' descriptors name them\n"} serialOOS "java.io.ObjectOutputStream")
+(go/var serialOIS "java.io.ObjectInputStream")
+
+(go/func serialDefaultWrite "serialDefaultWrite is s.defaultWriteObject().\n" [^any s]
+  (serialCall s serialOOS "defaultWriteObject" nil nil))
+(go/func serialDefaultRead "serialDefaultRead is s.defaultReadObject().\n" [^any s]
+  (serialCall s serialOIS "defaultReadObject" nil nil))
+
+(go/func serialWriteObject "serialWriteObject is s.writeObject(x).\n" [^any s ^any x]
+  (serialCall s serialOOS "writeObject" (lit (slice (* Class)) Object_class) (lit (slice any) x)))
+(go/func serialReadObject "serialReadObject is s.readObject().\n" ^any [^any s]
+  (return (serialCall s serialOIS "readObject" nil nil)))
+
+;; ---------------------------------------------------------------------------------------
+;; java.lang.Throwable
+
+(go/func throwableOf ^{:tag (* Throwable)} [^any o] (return (.Self_Throwable (assert Throwable_I o))))
+
+(go/var ^{:doc "Throwable's SentinelHolder.STACK_TRACE_ELEMENT_SENTINEL: new StackTraceElement(\"\", \"\",
+null, Integer.MIN_VALUE), its class and method names the one interned \"\" (the JDK's stream holds it once)\n"
+          :tag (* StackTraceElement)} steSentinel
+  ((fn ^{:tag (* StackTraceElement)} []
+     (let [e (Str "")]
+       (return (StackTraceElement_New_String_String_String_I e e nil math/MinInt32))))))
+
+(go/method serialStackTrace
+  "serialStackTrace is the stackTrace field as Throwable.writeObject writes it: the trace
+(getOurStackTrace), or when it is not writable null, the sentinel trace while writeObject writes.\n"
+  ^any [^{:tag (* Throwable)} t]
+  (when (.-notWritable t)
+    (when (.-serialOut t)
+      (return (RefArrayOf StackTraceElement_class steSentinel)))
+    (return nil))
+  (return (.ourStackTrace t)))
+
+(go/method serialSuppressed
+  "serialSuppressed is the suppressedExceptions field: null when suppression is disabled,
+Collections.emptyList() (Throwable's SUPPRESSED_SENTINEL) when there are none, else an ArrayList of
+them (addSuppressed's list).\n"
+  ^any [^{:tag (* Throwable)} t]
+  (when (.-noSuppression t)
+    (return nil))
+  (when (== (len (.-suppressed t)) 0)
+    (return (serialCall nil "java.util.Collections" "emptyList" nil nil)))
+  (let [l (serialNewObject "java.util.ArrayList" nil nil)]
+    (range [_ e (.-suppressed t)]
+      (serialCall l "java.util.ArrayList" "add" (lit (slice (* Class)) Object_class) (lit (slice any) e)))
+    (return l)))
+
+(go/func throwableWriteObject
+  "throwableWriteObject is Throwable.writeObject (synchronized): the stack trace made, the sentinel
+in place of a trace that is not writable, s.defaultWriteObject().\n"
+  [^any o ^any s]
+  (let [t (throwableOf o)]
+    (.monitorEnter (addr (.-Object t)))
+    (defer (.monitorExit (addr (.-Object t))))
+    (.ourStackTrace t)
+    (set! (.-serialOut t) true)
+    (defer ((fn [] (set! (.-serialOut t) false))))
+    (serialDefaultWrite s)))
+
+(go/func throwableReadObject
+  "throwableReadObject is Throwable.readObject: the fields read, then the suppressed exceptions
+validated (an ArrayList of the non-null ones, none the exception itself; the list's class in
+java.base, StreamCorruptedException otherwise) and the stack trace (a clone, its elements non-null,
+the sentinel making it not writable, empty when the stream has none).\n"
+  [^any o ^any s]
+  (let [t (throwableOf o)]
+    (set! (.-serialList t) nil)
+    (serialDefaultRead s)
+    (let [l (.-serialList t)
+          trace (.-stackTrace t)]
+      (set! (.-serialList t) nil)
+      (set! (.-suppressed t) nil)
+      (set! (.-noSuppression t) false)
+      (set! (.-pcs t) nil)
+      (set! (.-evalTrace t) nil)
+      (set! (.-goiTrace t) nil)
+      (set! (.-stackTrace t) (NewRefArray StackTraceElement_class 0))
+      ;; a stream without the field (an older JDK's) leaves it null, as on the JDK: suppression disabled
+      (cond
+        (== l nil) (set! (.-noSuppression t) true)
+        :else
+        (do
+          (when (!= (.GetModule__Module (GetClass l)) (.GetModule__Module Object_class))
+            (serialThrow "java.io.StreamCorruptedException" "List implementation not in base module."))
+          (let [n (assert int32 (serialCall l "java.util.List" "size" nil nil))]
+            (when (< n 0)
+              (serialThrow "java.io.StreamCorruptedException" "Negative list size reported."))
+            (when (> n 0)
+              (let [a (assert (* RefArray) (serialCall l "java.util.List" "toArray" nil nil))]
+                (range [_ e (.-A a)]
+                  (when (== e nil)
+                    (panic (NullPointerException_New_String (Str "Cannot suppress a null exception."))))
+                  (when (== e o)
+                    (panic (IllegalArgumentException_New_String (Str "Self-suppression not permitted"))))
+                  (set! (.-suppressed t) (append (.-suppressed t) (assert Throwable_I e)))))))))
+      (when (and (!= trace nil) (>= (len (.-A trace)) 1))
+        (let [c (.Copy trace)]
+          (if (and (== (len (.-A c)) 1) (.Equals_O__Z steSentinel (aget (.-A c) 0)))
+            (do
+              (set! (.-stackTrace t) nil)
+              (set! (.-notWritable t) true))
+            (do
+              (range [_ e (.-A c)]
+                (when (== e nil)
+                  (panic (NullPointerException_New_String (Str "null StackTraceElement in serial stream.")))))
+              (set! (.-stackTrace t) c))))))))
+
+(go/func init
+  []
+  (serialClass Throwable_class
+    (serialTable
+      (+ "G26 serialVersionUID J\n"
+         "F2 detailMessage Ljava.lang.String;\n"
+         "F2 cause Ljava.lang.Throwable;\n"
+         "F2 stackTrace [Ljava.lang.StackTraceElement;\n"
+         "F2 suppressedExceptions Ljava.util.List;\n"
+         "M34 writeObject (Ljava.io.ObjectOutputStream;)V\n"
+         "M2 readObject (Ljava.io.ObjectInputStream;)V\n")
+      (lit (slice (func [any (slice any)] [any]))
+        (fn ^any [^any o ^{:tag (slice any)} args] (throwableWriteObject o (aget args 0)) (return nil))
+        (fn ^any [^any o ^{:tag (slice any)} args] (throwableReadObject o (aget args 0)) (return nil)))
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 -3042686055658047285)))
+        (fn ^any [^any o] (return (.Ref (.-detailMessage (throwableOf o)))))
+        (fn ^any [^any o]
+          (let [t (throwableOf o)]
+            (when (not (.-causeSet t))
+              (return o))
+            (return (.-cause t))))
+        (fn ^any [^any o] (return (.serialStackTrace (throwableOf o))))
+        (fn ^any [^any o] (return (.serialSuppressed (throwableOf o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (set! (.-detailMessage (throwableOf o)) ((inst As (* String)) v)))
+        (fn [^any o ^any v]
+          (let [t (throwableOf o)]
+            (if (== v o)
+              (do (set! (.-cause t) nil) (set! (.-causeSet t) false))
+              (do (set! (.-cause t) ((inst As Throwable_I) v)) (set! (.-causeSet t) true)))))
+        (fn [^any o ^any v]
+          (let [t (throwableOf o)]
+            (set! (.-stackTrace t) ((inst As (* RefArray)) v))
+            (set! (.-pcs t) nil)
+            (set! (.-evalTrace t) nil)
+            (set! (.-goiTrace t) nil)))
+        (fn [^any o ^any v]
+          (let [t (throwableOf o)]
+            (set! (.-serialList t) v)))))
+    (fn ^any [] (return (addr (lit Throwable)))))
+
+  ;; java.lang.StackTraceElement
+  (serialClass StackTraceElement_class
+    (serialTable
+      (+ "F2 classLoaderName Ljava.lang.String;\n"
+         "F2 moduleName Ljava.lang.String;\n"
+         "F2 moduleVersion Ljava.lang.String;\n"
+         "F2 declaringClass Ljava.lang.String;\n"
+         "F2 methodName Ljava.lang.String;\n"
+         "F2 fileName Ljava.lang.String;\n"
+         "F2 lineNumber I\n"
+         "F2 format B\n"
+         "G26 serialVersionUID J\n")
+      nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (.Ref (.-classLoaderName (assert (* StackTraceElement) o)))))
+        (fn ^any [^any o] (return (.Ref (.-moduleName (assert (* StackTraceElement) o)))))
+        (fn ^any [^any o] (return (.Ref (.-moduleVersion (assert (* StackTraceElement) o)))))
+        (fn ^any [^any o] (return (.Ref (.-declaringClass (assert (* StackTraceElement) o)))))
+        (fn ^any [^any o] (return (.Ref (.-methodName (assert (* StackTraceElement) o)))))
+        (fn ^any [^any o] (return (.Ref (.-fileName (assert (* StackTraceElement) o)))))
+        (fn ^any [^any o] (return (.-lineNumber (assert (* StackTraceElement) o))))
+        (fn ^any [^any o] (return (.-format (assert (* StackTraceElement) o))))
+        (fn ^any [^any o] (return (conv int64 6992337162326171013))))
+      (lit (slice (func [any any]))
+        (fn [^any o ^any v] (set! (.-classLoaderName (assert (* StackTraceElement) o)) ((inst As (* String)) v)))
+        (fn [^any o ^any v] (set! (.-moduleName (assert (* StackTraceElement) o)) ((inst As (* String)) v)))
+        (fn [^any o ^any v] (set! (.-moduleVersion (assert (* StackTraceElement) o)) ((inst As (* String)) v)))
+        (fn [^any o ^any v] (set! (.-declaringClass (assert (* StackTraceElement) o)) ((inst As (* String)) v)))
+        (fn [^any o ^any v] (set! (.-methodName (assert (* StackTraceElement) o)) ((inst As (* String)) v)))
+        (fn [^any o ^any v] (set! (.-fileName (assert (* StackTraceElement) o)) ((inst As (* String)) v)))
+        (fn [^any o ^any v] (set! (.-lineNumber (assert (* StackTraceElement) o)) (assert int32 v)))
+        (fn [^any o ^any v] (set! (.-format (assert (* StackTraceElement) o)) (assert int8 v)))
+        nil))
+    (fn ^any [] (return (addr (lit StackTraceElement)))))
+
+  ;; java.util.Date: writeObject's s.writeLong(getTimeImpl()), readObject's fastTime = s.readLong()
+  (serialClass Date_class
+    (serialTable
+      (+ "G26 serialVersionUID J\n"
+         "M2 writeObject (Ljava.io.ObjectOutputStream;)V\n"
+         "M2 readObject (Ljava.io.ObjectInputStream;)V\n")
+      (lit (slice (func [any (slice any)] [any]))
+        (fn ^any [^any o ^{:tag (slice any)} args]
+          (let [s (aget args 0)]
+            (serialDefaultWrite s)
+            (serialCall s serialOOS "writeLong" (lit (slice (* Class)) Prim_long)
+                        (lit (slice any) (.-F_fastTime (.Self_Date (assert Date_I o))))))
+          (return nil))
+        (fn ^any [^any o ^{:tag (slice any)} args]
+          (let [s (aget args 0)]
+            (serialDefaultRead s)
+            (set! (.-F_fastTime (.Self_Date (assert Date_I o))) (assert int64 (serialCall s serialOIS "readLong" nil nil))))
+          (return nil)))
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 7523967970034938905))))
+      (lit (slice (func [any any])) nil))
+    (fn ^any [] (return (addr (lit Date)))))
+
+  ;; java.lang.StringBuilder: writeObject's count and char[capacity()], readObject's initBytes
+  (serialClass StringBuilder_class
+    (serialTable
+      (+ "G24 serialVersionUID J\n"
+         "M2 writeObject (Ljava.io.ObjectOutputStream;)V\n"
+         "M2 readObject (Ljava.io.ObjectInputStream;)V\n")
+      (lit (slice (func [any (slice any)] [any]))
+        (fn ^any [^any o ^{:tag (slice any)} args]
+          (let [s (aget args 0)
+                b (addr (.-sbuf (assert (* StringBuilder) o)))]
+            (serialDefaultWrite s)
+            (serialCall s serialOOS "writeInt" (lit (slice (* Class)) Prim_int)
+                        (lit (slice any) (conv int32 (len (.-value b)))))
+            (serialWriteObject s (.serialChars b)))
+          (return nil))
+        (fn ^any [^any o ^{:tag (slice any)} args]
+          (let [s (aget args 0)]
+            (serialDefaultRead s)
+            (let [c (assert int32 (serialCall s serialOIS "readInt" nil nil))
+                  v (CharArray_Cast (serialReadObject s))]
+              (.serialInit (addr (.-sbuf (assert (* StringBuilder) o))) (NN v) c)))
+          (return nil)))
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 4383685877147921099))))
+      (lit (slice (func [any any])) nil))
+    (fn ^any []
+      (let [t (addr (lit StringBuilder))]
+        (set! (.-value t) (subslice (.-init t) _ 0))
+        (return t))))
+
+  ;; java.lang.StringBuffer: serialPersistentFields value, count, shared; putFields and readFields
+  (serialClass StringBuffer_class
+    (serialTable
+      (+ "G24 serialVersionUID J\n"
+         "G26 serialPersistentFields [Ljava.io.ObjectStreamField;\n"
+         "M34 writeObject (Ljava.io.ObjectOutputStream;)V\n"
+         "M2 readObject (Ljava.io.ObjectInputStream;)V\n")
+      (lit (slice (func [any (slice any)] [any]))
+        (fn ^any [^any o ^{:tag (slice any)} args]
+          (let [s (aget args 0)
+                t (assert (* StringBuffer) o)
+                b (addr (.-sbuf t))]
+            (.monitorEnter (addr (.-Object t)))
+            (defer (.monitorExit (addr (.-Object t))))
+            (let [pf (serialCall s serialOOS "putFields" nil nil)
+                  put "java.io.ObjectOutputStream$PutField"]
+              (serialCall pf put "put" (lit (slice (* Class)) String_class Object_class) (lit (slice any) (Str "value") (.serialChars b)))
+              (serialCall pf put "put" (lit (slice (* Class)) String_class Prim_int) (lit (slice any) (Str "count") (conv int32 (len (.-value b)))))
+              (serialCall pf put "put" (lit (slice (* Class)) String_class Prim_boolean) (lit (slice any) (Str "shared") false))
+              (serialCall s serialOOS "writeFields" nil nil)))
+          (return nil))
+        (fn ^any [^any o ^{:tag (slice any)} args]
+          (let [s (aget args 0)
+                gf (serialCall s serialOIS "readFields" nil nil)
+                get "java.io.ObjectInputStream$GetField"
+                v (CharArray_Cast (serialCall gf get "get" (lit (slice (* Class)) String_class Object_class) (lit (slice any) (Str "value") nil)))
+                c (assert int32 (serialCall gf get "get" (lit (slice (* Class)) String_class Prim_int) (lit (slice any) (Str "count") (conv int32 0))))]
+            (.serialInit (addr (.-sbuf (assert (* StringBuffer) o))) (NN v) c))
+          (return nil)))
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 3388685877147921107)))
+        (fn ^any [^any o] (return (stringBufferSerialFields))))
+      (lit (slice (func [any any])) nil nil))
+    (fn ^any [] (return (addr (lit StringBuffer)))))
+
+  ;; the atomics: value, their serialVersionUIDs (AtomicBoolean's value an int, 1 for true)
+  (serialClass AtomicInteger_class
+    (serialTable "G26 serialVersionUID J\nF66 value I\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 6214790243416807050)))
+        (fn ^any [^any o] (return (.Load (.-v (assert (* AtomicInteger) o))))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (.Store (.-v (assert (* AtomicInteger) o)) (assert int32 v)))))
+    (fn ^any [] (return (addr (lit AtomicInteger)))))
+  (serialClass AtomicLong_class
+    (serialTable "G26 serialVersionUID J\nF66 value J\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 1927816293512124184)))
+        (fn ^any [^any o] (return (.Load (.-v (assert (* AtomicLong) o))))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (.Store (.-v (assert (* AtomicLong) o)) (assert int64 v)))))
+    (fn ^any [] (return (addr (lit AtomicLong)))))
+  (serialClass AtomicBoolean_class
+    (serialTable "G26 serialVersionUID J\nF66 value I\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 4654671469794556979)))
+        (fn ^any [^any o]
+          (when (.Load (.-v (assert (* AtomicBoolean) o)))
+            (return (conv int32 1)))
+          (return (conv int32 0))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (.Store (.-v (assert (* AtomicBoolean) o)) (!= (assert int32 v) 0)))))
+    (fn ^any [] (return (addr (lit AtomicBoolean)))))
+  (serialClass AtomicReference_class
+    (serialTable "G26 serialVersionUID J\nF66 value Ljava.lang.Object;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 -1848883965231344442)))
+        (fn ^any [^any o] (return (.Load (.-v (.Self_AtomicReference (assert AtomicReference_I o)))))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (.Store (.-v (.Self_AtomicReference (assert AtomicReference_I o))) v))))
+    (fn ^any [] (return (addr (lit AtomicReference)))))
+  ;; java.lang.reflect.Proxy (JCS170): its protected field h, the handler of a proxy's object (its
+  ;; first field, reflect.ae's proxyHandlerField); never allocated itself (a proxy class's SerialNew is
+  ;; j2g_dyn.go's)
+  (serialClass Proxy_class
+    (serialTable "G26 serialVersionUID J\nF4 h Ljava.lang.reflect.InvocationHandler;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 -2222568056686623797)))
+        (fn ^any [^any o] (return (deref (proxyHandlerField o)))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (set! (deref (proxyHandlerField o)) v))))
+    nil))
+
+;; ---------------------------------------------------------------------------------------
+;; AbstractStringBuilder's serial state
+
+(go/method serialChars
+  "serialChars is writeObject's char[capacity()]: the characters, then zeros up to the capacity.\n"
+  ^{:tag (* CharArray)} [^{:tag (* sbuf)} b]
+  (let [a (NewCharArray (conv int32 (cap (.-value b))))]
+    (copy (.-A a) (.-value b))
+    (return a)))
+
+(go/method serialInit
+  "serialInit is readObject's initBytes(val, 0, val.length) and count = c: the capacity
+val.length, StreamCorruptedException(\"count value invalid\") for a count outside it.\n"
+  [^{:tag (* sbuf)} b ^{:tag (* CharArray)} v ^int32 c]
+  (when (or (< c 0) (> (conv int c) (len (.-A v))))
+    (serialThrow "java.io.StreamCorruptedException" "count value invalid"))
+  (let [u (make (slice uint16) c (len (.-A v)))]
+    (copy u (.-A v))
+    (set! (.-value b) u)))
+
+(go/var ^{:tag sync/Once} stringBufferFieldsOnce)
+(go/var ^{:tag (* RefArray)} stringBufferFields)
+
+(go/func stringBufferSerialFields
+  "stringBufferSerialFields is StringBuffer.serialPersistentFields: value (char[]), count (int),
+shared (boolean), as jdk26u declares them (made once, ObjectStreamField being a translated class).\n"
+  ^{:tag (* RefArray)} []
+  (.Do stringBufferFieldsOnce
+       (fn []
+         (let [osf "java.io.ObjectStreamField"
+               ps (lit (slice (* Class)) String_class Class_class)
+               a (NewRefArray (serialClassNamed osf) 3)]
+           (aset (.-A a) 0 (serialNewObject osf ps (lit (slice any) (Str "value") (.ArrayClass Prim_char))))
+           (aset (.-A a) 1 (serialNewObject osf ps (lit (slice any) (Str "count") Prim_int)))
+           (aset (.-A a) 2 (serialNewObject osf ps (lit (slice any) (Str "shared") Prim_boolean)))
+           (set! stringBufferFields a))))
+  (return stringBufferFields))

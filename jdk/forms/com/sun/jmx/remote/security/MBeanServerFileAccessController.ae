@@ -1,0 +1,242 @@
+;; Converted from jdk26u src/java.management/share/classes/com/sun/jmx/remote/security/MBeanServerFileAccessController.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.remote.security)
+
+(import '(java.io FileInputStream IOException)
+        '(java.security Principal)
+        '(java.util ArrayList HashMap List Map Map$Entry Properties Set StringTokenizer)
+        '(java.util.regex Pattern)
+        '(javax.management MBeanServer ObjectName)
+        '(javax.security.auth Subject))
+
+(defclass ^:public MBeanServerFileAccessController
+  :extends MBeanServerAccessController
+
+  (field ^:static ^:final ^String READONLY "readonly")
+
+  (field ^:static ^:final ^String READWRITE "readwrite")
+
+  (field ^:static ^:final ^String CREATE "create")
+
+  (field ^:static ^:final ^String UNREGISTER "unregister")
+
+  (defclass ^:private ^:enum AccessType
+    (constants READ WRITE CREATE UNREGISTER))
+
+  (defclass ^:private ^:static Access
+    (field ^:final ^boolean write)
+
+    (field ^:final ^String/1 createPatterns)
+
+    (field ^:private ^boolean unregister)
+
+    (constructor [this ^boolean write ^boolean unregister ^{:tag (List String)} createPatternList]
+      (set! (.-write this) write)
+      (let [^int npats (if (nil? createPatternList) 0 (.size createPatternList))]
+        (if (== npats 0)
+            (set! (.-createPatterns this) NO_STRINGS)
+            (set! (.-createPatterns this)
+                  (cast String/1 (.toArray createPatternList (new String/1 npats)))))
+        (set! (.-unregister this) unregister)))
+
+    (field ^:private ^:final ^String/1 NO_STRINGS (new String/1 0)))
+
+  (constructor :throws [IOException] ^:public [this ^String accessFileName]
+    (super.)
+    (set! (.-accessFileName this) accessFileName)
+    (let [props (MBeanServerFileAccessController/propertiesFromFile accessFileName)]
+      (.parseProperties this props)))
+
+  (constructor :throws [IOException] ^:public [this ^String accessFileName ^MBeanServer mbs]
+    (this. accessFileName)
+    (.setMBeanServer this mbs))
+
+  (constructor :throws [IOException] ^:public [this ^Properties accessFileProps]
+    (super.)
+    (when (nil? accessFileProps) (throw (IllegalArgumentException. "Null properties")))
+    (set! originalProps accessFileProps)
+    (.parseProperties this accessFileProps))
+
+  (constructor :throws [IOException] ^:public [this ^Properties accessFileProps ^MBeanServer mbs]
+    (this. accessFileProps)
+    (.setMBeanServer this mbs))
+
+  (method ^:public checkRead ^void [this]
+    (.checkAccess this AccessType/READ nil))
+
+  (method ^:public checkWrite ^void [this]
+    (.checkAccess this AccessType/WRITE nil))
+
+  (method ^:public checkCreate ^void [this ^String className]
+    (.checkAccess this AccessType/CREATE className))
+
+  (method ^:public checkUnregister ^void [this ^ObjectName name]
+    (.checkAccess this AccessType/UNREGISTER nil))
+
+  (method ^:public ^:synchronized refresh :throws [IOException] ^void [this]
+    (let [^Properties props (if (nil? accessFileName)
+                                originalProps
+                                (MBeanServerFileAccessController/propertiesFromFile accessFileName))]
+      (.parseProperties this props)))
+
+  (method ^:private ^:static propertiesFromFile :throws [IOException] ^Properties [^String fname]
+    (let [fin (FileInputStream. fname)]
+      (try (let [p (Properties.)] (.load p fin) p) (finally (.close fin)))))
+
+  (method ^:private ^:synchronized checkAccess ^void [this ^AccessType requiredAccess ^String arg]
+    (let [s (Subject/current)]
+      (when (some? s)
+        (let [^{:tag (Set Principal)} principals (.getPrincipals s)
+              ^:mutable ^String newPropertyValue nil]
+          (for-each [^Principal p principals]
+            (let [access (cast Access (.get accessMap (.getName p)))]
+              (when (some? access)
+                (let [^:mutable ^boolean ok false]
+                  (switch requiredAccess
+                    READ (set! ok true)
+                    WRITE (set! ok (.-write access))
+                    UNREGISTER
+                      (do
+                        (set! ok (.-unregister access))
+                        (when (and (not ok) (.-write access)) (set! newPropertyValue "unregister")))
+                    CREATE
+                      (do
+                        (set! ok (MBeanServerFileAccessController/checkCreateAccess access arg))
+                        (when (and (not ok) (.-write access))
+                          (set! newPropertyValue (java-str "create " arg))))
+                    (throw (AssertionError.)))
+                  (when ok (return))))))
+          (let [se (SecurityException.
+                     "Access denied! Invalid access level for requested MBeanServer operation.")]
+            (when (some? newPropertyValue)
+              (let [se2 (SecurityException.
+                          (java-str (java-str
+                                      (java-str
+                                        "Access property for this identity should be similar to: "
+                                        READWRITE)
+                                      " ")
+                                    newPropertyValue))]
+                (.initCause se se2)))
+            (throw se))))))
+
+  (method ^:private ^:static checkCreateAccess ^boolean [^Access access ^String className]
+    (for-each [^String classNamePattern (.-createPatterns access)]
+      (when (MBeanServerFileAccessController/classNameMatch classNamePattern className)
+        (return true)))
+    false)
+
+  (method ^:private ^:static classNameMatch ^boolean [^String pattern ^String className]
+    (let [sb (StringBuilder.)
+          stok (StringTokenizer. pattern "*" true)]
+      (while (.hasMoreTokens stok)
+        (let [tok (.nextToken stok)]
+          (if (.equals tok "*") (.append sb "[^.]*") (.append sb (Pattern/quote tok)))))
+      (.matches className (.toString sb))))
+
+  (method ^:private parseProperties ^void [this ^Properties props]
+    (set! (.-accessMap this) (HashMap.))
+    (for-each [^{:tag (Map$Entry Object Object)} entry (.entrySet props)]
+      (let [identity (cast String (.getKey entry))
+            accessString (cast String (.getValue entry))
+            access (Parser/parseAccess identity accessString)]
+        (.put accessMap identity access))))
+
+  (defclass ^:private ^:static Parser
+    (field ^:private ^:static ^:final ^int EOS -1)
+
+    (static-initializer (java-assert (not (Character/isWhitespace EOS))))
+
+    (field ^:private ^:final ^String identity)
+
+    (field ^:private ^:final ^String s)
+
+    (field ^:private ^:final ^int len)
+
+    (field ^:private ^int i)
+
+    (field ^:private ^int c)
+
+    (constructor ^:private [this ^String identity ^String s]
+      (set! (.-identity this) identity)
+      (set! (.-s this) s)
+      (set! (.-len this) (.length s))
+      (set! (.-i this) 0)
+      (if (< i len) (set! (.-c this) (.codePointAt s i)) (set! (.-c this) EOS)))
+
+    (method ^:static parseAccess ^Access [^String identity ^String s]
+      (.parseAccess (Parser. identity s)))
+
+    (method ^:private parseAccess ^Access [this]
+      (.skipSpace this)
+      (let [type (.parseWord this)
+            ^:mutable ^Access access nil]
+        (cond
+          (.equals type READONLY) (set! access (Access. false false nil))
+          (.equals type READWRITE) (set! access (.parseReadWrite this))
+          :else
+            (throw (.syntax this
+                            (java-str (java-str (java-str
+                                                  (java-str (java-str "Expected " READONLY) " or ")
+                                                  READWRITE)
+                                                ": ")
+                                      type))))
+        (when-not (== c EOS) (throw (.syntax this "Extra text at end of line")))
+        access))
+
+    (method ^:private parseReadWrite ^Access [this]
+      (let [^{:tag (List String)} createClasses (ArrayList.)
+            ^:mutable unregister false]
+        (while true
+          (.skipSpace this)
+          (when (== c EOS) (break))
+          (let [type (.parseWord this)]
+            (cond
+              (.equals type UNREGISTER) (set! unregister true)
+              (.equals type CREATE) (.parseCreate this createClasses)
+              :else (throw (.syntax this (java-str "Unrecognized keyword " type))))))
+        (Access. true unregister createClasses)))
+
+    (method ^:private parseCreate ^void [this ^{:tag (List String)} createClasses]
+      (while true
+        (.skipSpace this)
+        (.add createClasses (.parseClassName this))
+        (.skipSpace this)
+        (if (== c \,) (.next this) (break))))
+
+    (method ^:private parseClassName ^String [this]
+      (let [start i
+            ^:mutable dotOK false]
+        (while true
+          (cond
+            (== c \.)
+              (do (when-not dotOK (throw (.syntax this "Bad . in class name"))) (set! dotOK false))
+            (or (== c \*) (Character/isJavaIdentifierPart c)) (set! dotOK true)
+            :else (break))
+          (.next this))
+        (let [className (.substring s start i)]
+          (when-not dotOK (throw (.syntax this (java-str "Bad class name " className))))
+          className)))
+
+    (method ^:private next ^void [this]
+      (when-not (== c EOS)
+        (set! i (unchecked-add-int i (Character/charCount c)))
+        (if (< i len) (set! c (.codePointAt s i)) (set! c EOS))))
+
+    (method ^:private skipSpace ^void [this]
+      (while (Character/isWhitespace c) (.next this)))
+
+    (method ^:private parseWord ^String [this]
+      (.skipSpace this)
+      (when (== c EOS) (throw (.syntax this "Expected word at end of line")))
+      (let [start i]
+        (while (and (not (== c EOS)) (not (Character/isWhitespace c))) (.next this))
+        (let [word (.substring s start i)] (.skipSpace this) word)))
+
+    (method ^:private syntax ^IllegalArgumentException [this ^String msg]
+      (IllegalArgumentException. (java-str msg " [" identity " " s "]"))))
+
+  (field ^:private ^{:tag (Map String Access)} accessMap)
+
+  (field ^:private ^Properties originalProps)
+
+  (field ^:private ^String accessFileName))

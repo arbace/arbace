@@ -1,0 +1,127 @@
+#!/bin/bash
+# bin/hsi own-verdicts [--record | --check]: which programs of hsi's run corpora carry a verdict of their own (the user's
+# decision of 2026-11-07: a test's own verdict is a judge no toolchain made), as test/haskell/own-verdicts.tsv lists them:
+#   ID<TAB>EXIT<TAB>STDOUT<TAB>STDERR      EXIT the status the test expects (all.T's exit_code, default 0; nofib 0), STDOUT
+#                                           and STDERR the expected outputs shipped with it, relative to its directory
+#                                           (GHC's testsuite: NAME.stdout and NAME.stderr, a missing .stderr an empty one, as
+#                                           the testsuite driver takes it; nofib: NAME.faststdout or NAME.stdout and
+#                                           NAME.stderr), "-" for an expected empty output
+# A program is listed when its shipped expectations are exactly what GHC 9.14.1's recorded -O0 run gave
+# (test/haskell/ref-ghc914.edn: the status, the SHA-256 of stdout and of stderr): then bin/hsi check judges it by the
+# shipped files alone (its verdict the test's own, the record not read) and the verdict is the same either way. The
+# others keep the recorded run (0.5: a toolchain's record). No run: the trees and the record are read.
+#   --record   writes the list (by hand, beside a new record-ref)
+#   --check    the list against a fresh computation (exit 1 on a difference); default: prints the counts
+# HF10-P35 (a): beside it, test/haskell/own-verdicts-pending.tsv (the same columns): the run tests of eval-corpora.edn's
+# :testsuite-core directories that GHC's record does not have yet (generics/, added before the oracle window records its runs),
+# each with its shipped NAME.stdout (- when none is shipped: an expected empty stdout, as the testsuite driver reads it): bin/hsi check judges them by these files alone, as the testsuite driver compares (its
+# modify_lines: the last line's newline not compared), and a run that needs GHC's STG (haskell-stg-progs) is :oracle-pending,
+# not run. The list empties when record-ref records them (then they are own-verdicts.tsv's, or the record's).
+# HES87 (a): beside it, test/haskell/threaded-way.tsv (ID<TAB>WAYS): the testsuite's tests all.T runs only in threaded ways
+# (only_ways, every way a threaded one: threaded1, threaded2, nonmoving_thr, profthreaded) whose recorded normal-way run is not
+# their own verdict (its status not all.T's, or its stdout or stderr not the shipped file, a missing one empty): the
+# non-threaded RTS's refusal (an uncaught exception, "requires -threaded", another output). bin/hsi check records hsi's match
+# of such a run :threaded-way (deferred), not a pass, until HES84 (a)'s threaded references. --record and --check take it too.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+mode=${1:-}
+ref=$root/test/haskell/ref-ghc914.edn list=$root/test/haskell/own-verdicts.tsv pend=$root/test/haskell/own-verdicts-pending.tsv
+tests=$root/.tmp/hsi/ghc-9.14.1/testsuite/tests nofib=$root/.tmp/hsi/nofib
+[ -d "$tests" ] || "$root/bin/hsi" pins --fetch >&2
+work=$root/.tmp/hsi/own-verdicts; rm -rf "$work"; mkdir -p "$work"
+ae() { ARBACE_PATH=$root "$("$root/bin/hsi" exe)" "$@"; }
+# the testsuite's tests with their expected status (run_plan's EXIT)
+ae "$root/test/haskell/eval/run_plan.ae" "$root/test/haskell/eval/testsuite-run.edn" "$tests" - 2> "$work/plan.notes" |
+  awk -F'\t' '{print $1 "\t" $2 "\t" $7 "\t" $8}' > "$work/testsuite.tsv"
+empty=$(printf '' | sha256sum | cut -c1-64)
+sha() { if [ -f "$1" ]; then sha256sum < "$1" | cut -c1-64; else echo "$empty"; fi; }
+: > "$work/new.tsv"
+n=0 own=0
+while IFS= read -r line; do
+  id=$(sed -n 's/^{:id "\([^"]*\)".*/\1/p' <<< "$line"); [ -n "$id" ] || continue
+  n=$((n + 1))
+  rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$line")
+  rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$line"); rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$line")
+  [ -n "$rso" ] || continue
+  case $id in
+    testsuite/*)
+      IFS=$'\t' read -r _ dir exit name <<< "$(awk -F'\t' -v i="$id" '$1 == i' "$work/testsuite.tsv")"
+      [ -n "${dir:-}" ] || continue
+      d=$tests/$dir; so=$name.stdout; se=$name.stderr
+      [ -f "$d/$so" ] || continue ;;
+    nofib/*)
+      d=$nofib/${id#nofib/}; name=$(basename "$d"); exit=0; so=""
+      for f in "$name.faststdout" "$name.stdout"; do [ -f "$d/$f" ] && { so=$f; break; }; done
+      [ -n "$so" ] || continue; se=$name.stderr ;;
+    *) continue ;;
+  esac
+  [ "$rst" = "$exit" ] && [ "$(sha "$d/$so")" = "$rso" ] && [ "$(sha "$d/$se")" = "$rse" ] || continue
+  [ -f "$d/$se" ] || se=-
+  printf '%s\t%s\t%s\t%s\n' "$id" "$exit" "$so" "$se" >> "$work/new.tsv"
+  own=$((own + 1))
+done < <(grep '^{' "$ref")
+LC_ALL=C sort -o "$work/new.tsv" "$work/new.tsv"
+# HF10-P35 (a): the testsuite-core tests without a recorded run, by their shipped files
+dirs=$(ae -e "(println (apply str (interpose \",\" (get-in (some #(when (= :testsuite-core (:id %)) %) (:corpora (read-string (slurp \"$root/test/haskell/eval-corpora.edn\")))) [:where :dirs]))))")
+ae "$root/test/haskell/eval/run_plan.ae" "$root/test/haskell/eval/testsuite-run.edn" "$tests" "$dirs" 2>> "$work/plan.notes" |
+  awk -F'\t' '{print $1 "\t" $2 "\t" $7 "\t" $8}' > "$work/core.tsv"
+grep -o '^{:id "[^"]*"' "$ref" | sed 's/^{:id "//; s/"$//' | LC_ALL=C sort -u > "$work/recorded.txt"
+: > "$work/pend.tsv"
+while IFS=$'\t' read -r id dir exit name; do
+  grep -qxF "$id" "$work/recorded.txt" && continue
+  # (gate B1: a test that ships no NAME.stdout expects an empty one, as the testsuite driver reads a missing expected
+  # file: unpack_sums_3, which the front end compiles, was :no-ref, in no class)
+  d=$tests/$dir; so=$name.stdout; [ -f "$d/$so" ] || so=-
+  se=$name.stderr; [ -f "$d/$se" ] || se=-
+  printf '%s\t%s\t%s\t%s\n' "$id" "$exit" "$so" "$se" >> "$work/pend.tsv"
+done < "$work/core.tsv"
+LC_ALL=C sort -o "$work/pend.tsv" "$work/pend.tsv"
+pendhdr() {
+  echo "# HF10-P35 (a) (bin/hsi own-verdicts): the run tests of eval-corpora.edn's :testsuite-core directories without GHC's recorded run"
+  echo "# (test/haskell/ref-ghc914.edn), judged by their own verdict until the oracle window records them: ID, the expected status, the"
+  echo "# shipped expected stdout and stderr (- an empty one), compared as the testsuite driver compares (the last newline not compared)"
+}
+# HES87 (a): the threaded-only tests whose recorded run is not their own verdict
+tw=$root/test/haskell/threaded-way.tsv
+grep -o ':dir "[^"]*", :name "[^"]*", .*(only_ways \[[^]]*\])' "$root/test/haskell/eval/testsuite-run.edn" |
+  sed 's/^:dir "\([^"]*\)", :name "\([^"]*\)".*(only_ways \[\([^]]*\)\])$/\1\t\2\t\3/' > "$work/ways.tsv" || true
+: > "$work/tw.tsv"
+while IFS=$'\t' read -r dir name ways; do
+  thr=1; for w in $ways; do case $w in *thr*) ;; *) thr=0 ;; esac; done
+  [ "$thr" = 1 ] || continue
+  id=testsuite/$dir/$name
+  line=$(grep -F "{:id \"$id\" " "$ref" || true); [ -n "$line" ] || continue
+  exit=$(awk -F'\t' -v i="$id" '$1 == i {print $3}' "$work/testsuite.tsv"); [ -n "$exit" ] || continue
+  rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$line")
+  rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$line"); rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$line")
+  d=$tests/$dir
+  [ "$rst" = "$exit" ] && [ "$(sha "$d/$name.stdout")" = "$rso" ] && [ "$(sha "$d/$name.stderr")" = "$rse" ] && continue
+  printf '%s\t%s\n' "$id" "$(echo $ways | tr -d '"' | tr ' ' ',')" >> "$work/tw.tsv"
+done < "$work/ways.tsv"
+LC_ALL=C sort -o "$work/tw.tsv" "$work/tw.tsv"
+twhdr() {
+  echo "# HES87 (a) (bin/hsi own-verdicts): the tests all.T runs only in threaded ways whose recorded normal-way run (test/haskell/ref-ghc914.edn)"
+  echo "# is not their own verdict: hsi's match of it is :threaded-way (deferred), not a pass. ID, all.T's only_ways"
+}
+hdr() {
+  echo "# hsi's programs judged by their own verdict (bin/hsi own-verdicts; the user's decision of 2026-11-07): ID, the expected"
+  echo "# status, the shipped expected stdout and stderr (relative to the test's directory; - an empty one); made from the trees and"
+  echo "# test/haskell/ref-ghc914.edn, each listed one's shipped expectations equal to GHC 9.14.1's recorded run"
+}
+case $mode in
+  --record) { hdr; cat "$work/new.tsv"; } > "$list"; echo "own-verdicts: $own of $n programs recorded in $list"
+    { twhdr; cat "$work/tw.tsv"; } > "$tw"; echo "own-verdicts: $(wc -l < "$work/tw.tsv") threaded-only tests without their own verdict recorded in $tw"
+    { pendhdr; cat "$work/pend.tsv"; } > "$pend"; echo "own-verdicts: $(wc -l < "$work/pend.tsv") tests without a recorded run, by their own verdict, recorded in $pend" ;;
+  --check)
+    grep -v '^#' "$list" > "$work/old.tsv" || true
+    if cmp -s "$work/old.tsv" "$work/new.tsv"; then echo "own-verdicts: $own of $n programs by their own verdict, the list current"
+    else echo "own-verdicts: the list differs from the trees and the record:"; diff "$work/old.tsv" "$work/new.tsv" | head -10; exit 1; fi
+    grep -v '^#' "$tw" > "$work/tw-old.tsv" 2> "$work/tw.err" || true
+    if cmp -s "$work/tw-old.tsv" "$work/tw.tsv"; then echo "own-verdicts: $(wc -l < "$work/tw.tsv") threaded-only tests without their own verdict, $tw current"
+    else echo "own-verdicts: $tw differs from the trees and the record:"; diff "$work/tw-old.tsv" "$work/tw.tsv" | head -10; exit 1; fi
+    grep -v '^#' "$pend" > "$work/pend-old.tsv" 2> "$work/pend.err" || true
+    if cmp -s "$work/pend-old.tsv" "$work/pend.tsv"; then echo "own-verdicts: $(wc -l < "$work/pend.tsv") tests without a recorded run, by their own verdict, $pend current"
+    else echo "own-verdicts: $pend differs from the trees and the record:"; diff "$work/pend-old.tsv" "$work/pend.tsv" | head -10; exit 1; fi ;;
+  *) echo "own-verdicts: $own of $n programs would be judged by their own verdict (--record writes $list)" ;;
+esac

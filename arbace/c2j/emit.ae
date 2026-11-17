@@ -49,6 +49,14 @@
 (defn- fail [msg & [data]]
   (throw (ex-info (str "aot: " msg) (or data {}))))
 
+(defn- dup-str
+  "v printed for the reader (*print-dup*), or \"#<CLASS>\" when print-dup has no method for it (an
+  Object a macro left in code: print-dup's own error came before c2j's \"can't embed unreadable object\";
+  queue 206's low)."
+  [v]
+  (try (binding [*print-dup* true] (pr-str v))
+       (catch Exception _ (str "#<" (.getName (class v)) ">"))))
+
 ;; ---------------------------------------------------------------------------------------
 ;; class names and types
 
@@ -255,7 +263,7 @@
                                        (str v))
                                  true]
           :else
-          (let [s (binding [*print-dup* true] (pr-str v))]
+          (let [s (dup-str v)]
             (when (or (empty? s) (str/starts-with? s "#<"))
               (fail (str "can't embed unreadable object in code: " s)))
             [(list (with-meta 'arbace.lang.RT/readString {:param-tags '[java.lang.String]}) s) false]))
@@ -361,7 +369,7 @@
         :set (if (empty? v) (.append sb \E) (arr \S (vec (seq v))))
         :list (arr \L (vec v))
         :pattern (do (.append sb \p) (pool-str sb (str v)))
-        :read (let [s (if (instance? IType v) (type-literal v) (binding [*print-dup* true] (pr-str v)))]
+        :read (let [s (if (instance? IType v) (type-literal v) (dup-str v))]
                 (when (or (empty? s) (str/starts-with? s "#<"))
                   (fail (str "can't embed unreadable object in code: " s)))
                 (.append sb \r) (pool-str sb s)))
@@ -1231,6 +1239,13 @@
   (list* (with-meta (symbol (str (type-sym (.getDeclaringClass m))) (.getName m)) (param-tags (.getParameterTypes m)))
          args))
 
+(defn instance-call-form
+  "The direct (virtual) call of instance method m on target form t, of m's class, with argument
+  forms args (method-call's form; the evaluator's instance-call, test/c2j/gen_nodes.ae)."
+  [^java.lang.reflect.Method m t args]
+  (list* (with-meta (symbol (str (type-sym (.getDeclaringClass m))) (str "." (.getName m))) (param-tags (.getParameterTypes m)))
+         t args))
+
 (defn- call-static
   "The direct call of static method m on the arguments as (a delay of their forms, typed-args
   of the children xs), with Numbers' fast paths (F3) when m is one of its boxed operations."
@@ -1638,6 +1653,23 @@
     (static-if (many? xs)
       (.applyTo g (^{:param-tags [java.lang.Object/1]} arbace.lang.ArraySeq/create (array-of as)))
       (.invoke g (splice as)))))
+
+(defnode instance-call
+  "A call of a resolved instance method the evaluator calls directly (InstanceMethodExpr), one of
+  the JDK's the evaluated code calls most (String's, StringBuilder's, the collections':
+  test/c2j/gen_nodes.ae): the target cast to the method's class, its arguments converted to the
+  parameters' classes and bound in order, then the call (virtual), its value in the channel asked
+  (boxed as its return's), in the compiled call's order (InstanceMethodExpr.emit). The evaluator's
+  alone (the back end compiles every resolved call, emit-instance-method); the others go through
+  the method's invoker (CodeHostInstance). (doc/go/EVAL-SPEED.md)"
+  {:exprs [InstanceMethodExpr] :fields [method target args line] :class "CodeCall" :eval-only true
+   :domain {:index (if (nil? method) -1 (Compiler$CodeRun/op method))}}
+  [m (static java.lang.reflect.Method method)
+   tx (child target)
+   xs (children args 3 :convert (.getParameterTypes method))
+   line (static int line)]
+  (call-site line [t (cast-target m (run :o tx)) as (run-args m xs)]
+    (box-as ch m (call-instance m t as))))
 
 (defn- qualified-method-expr
   "A qualified method as a value (String/.length, String/new, Math/abs: QualifiedMethodExpr)
@@ -2409,8 +2441,12 @@
         ;; the lines its forms carry (J2G-SPEC §4.3), so lines that go back and forth pad it
         kids (group-by parent (sort-by (fn [n] [(or (:line (recs n)) 0) n]) all))
         children-of (fn [n] (map recs (get kids n)))]
+    ;; a constant c2j cannot embed (pool-encode's fail) names the top-level class whose pool holds it,
+    ;; so the build's error names the namespace (queue 206's low)
     (for [top (sort (get kids nil))]
-      (class-form (recs top) children-of true pools))))
+      (try (class-form (recs top) children-of true pools)
+           (catch arbace.lang.ExceptionInfo e
+             (throw (ex-info (str (ex-message e) " (in the class " top ")") (assoc (ex-data e) :class top) e)))))))
 
 (defn interface-record
   "The record of an interface made by gen-interface (events iface and imethod): name, the

@@ -1,0 +1,320 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/fs/UnixSecureDirectoryStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.channels SeekableByteChannel)
+        '(java.nio.file AtomicMoveNotSupportedException
+                        ClosedDirectoryStreamException
+                        DirectoryNotEmptyException
+                        DirectoryStream$Filter
+                        LinkOption
+                        NotDirectoryException
+                        OpenOption
+                        Path
+                        ProviderMismatchException
+                        SecureDirectoryStream)
+        '(java.nio.file.attribute BasicFileAttributeView
+                                  BasicFileAttributes
+                                  FileAttribute
+                                  FileAttributeView
+                                  FileOwnerAttributeView
+                                  FileTime
+                                  GroupPrincipal
+                                  PosixFileAttributeView
+                                  PosixFileAttributes
+                                  PosixFilePermission
+                                  UserPrincipal)
+        '(java.util Iterator Set)
+        '(java.util.concurrent TimeUnit)
+        '(java.util.function Function))
+
+(defclass UnixSecureDirectoryStream
+  :implements [(SecureDirectoryStream Path)]
+
+  (field ^:private ^:final ^UnixDirectoryStream ds)
+
+  (field ^:private ^:final ^int dfd)
+
+  (constructor [this ^UnixPath dir ^long dp ^int dfd
+                ^{:tag (DirectoryStream$Filter (? super Path))} filter]
+    (set! (.-ds this) (UnixDirectoryStream. dir dp filter))
+    (set! (.-dfd this) dfd))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (.lock (.writeLock ds))
+    (try
+      (when (.closeImpl ds)
+        (UnixNativeDispatcher/close dfd
+                                    (lambda Function ^IOException [^UnixException e]
+                                      (.asIOException e (.directory ds)))))
+      (finally (.unlock (.writeLock ds)))))
+
+  (method ^:public iterator ^{:tag (Iterator Path)} [this]
+    (.iterator ds this))
+
+  (method ^:private getName ^UnixPath [this ^Path obj]
+    (when (nil? obj) (throw (NullPointerException.)))
+    (when-not (instance? UnixPath obj) (throw (ProviderMismatchException.)))
+    (cast UnixPath obj))
+
+  (method ^:public newDirectoryStream :throws [IOException] ^{:tag (SecureDirectoryStream Path)} [this
+                                                                                                  ^Path obj
+                                                                                                  &
+                                                                                                  ^LinkOption/1 options]
+    (let [file (.getName this obj)
+          child (.resolve (.directory ds) file)
+          followLinks (Util/followLinks options)]
+      (.lock (.readLock ds))
+      (try
+        (when-not (.isOpen ds) (throw (ClosedDirectoryStreamException.)))
+        (let [^:mutable ^int newdfd1 -1
+              ^:mutable ^int newdfd2 -1
+              ^:mutable ptr 0]
+          (try
+            (let [^:mutable flags UnixConstants/O_RDONLY]
+              (when-not followLinks (set! flags (bit-or-int flags UnixConstants/O_NOFOLLOW)))
+              (set! newdfd1 (UnixNativeDispatcher/openat dfd (.asByteArray file) flags 0))
+              (set! newdfd2 (UnixNativeDispatcher/dup newdfd1))
+              (set! ptr (UnixNativeDispatcher/fdopendir newdfd1)))
+            (catch UnixException x
+              (let [^IOException ioe (if (== (.errno x) UnixConstants/ENOTDIR)
+                                         ^IOException (NotDirectoryException. (.toString file))
+                                         (.asIOException x file))]
+                (when-not (== newdfd1 -1)
+                  (UnixNativeDispatcher/close newdfd1
+                                              (lambda Function ^RuntimeException [^UnixException e]
+                                                nil)))
+                (when-not (== newdfd2 -1)
+                  (UnixNativeDispatcher/close newdfd1
+                                              (lambda Function ^RuntimeException [^UnixException e]
+                                                nil)))
+                (throw ioe))))
+          (UnixSecureDirectoryStream. child ptr newdfd2 nil))
+        (finally (.unlock (.readLock ds))))))
+
+  (method ^:public newByteChannel :throws [IOException] ^SeekableByteChannel [this ^Path obj
+                                                                              ^{:tag (Set (? extends OpenOption))} options
+                                                                              &
+                                                                              ^{:tag (array (FileAttribute ?))} attrs]
+    (let [file (.getName this obj)
+          mode (UnixFileModeAttribute/toUnixMode UnixFileModeAttribute/ALL_READWRITE attrs)]
+      (.lock (.readLock ds))
+      (try
+        (when-not (.isOpen ds) (throw (ClosedDirectoryStreamException.)))
+        (try
+          (UnixChannelFactory/newFileChannel dfd file options mode)
+          (catch UnixException x (.rethrowAsIOException x file) nil))
+        (finally (.unlock (.readLock ds))))))
+
+  (method ^:private implDelete :throws [IOException] ^void [this ^Path obj ^int flags]
+    (let [file (.getName this obj)]
+      (.lock (.readLock ds))
+      (try
+        (when-not (.isOpen ds) (throw (ClosedDirectoryStreamException.)))
+        (try
+          (UnixNativeDispatcher/unlinkat dfd (.asByteArray file) flags)
+          (catch UnixException x
+            (when-not (== (bit-and-int flags UnixConstants/AT_REMOVEDIR) 0)
+              (when (or (== (.errno x) UnixConstants/EEXIST)
+                        (== (.errno x) UnixConstants/ENOTEMPTY))
+                (throw (DirectoryNotEmptyException. nil))))
+            (.rethrowAsIOException x file)))
+        (finally (.unlock (.readLock ds))))))
+
+  (method ^:public deleteFile :throws [IOException] ^void [this ^Path file]
+    (.implDelete this file 0))
+
+  (method ^:public deleteDirectory :throws [IOException] ^void [this ^Path dir]
+    (.implDelete this dir UnixConstants/AT_REMOVEDIR))
+
+  (method ^:public move :throws [IOException] ^void [this ^Path fromObj
+                                                     ^{:tag (SecureDirectoryStream Path)} dir
+                                                     ^Path toObj]
+    (let [from (.getName this fromObj)
+          to (.getName this toObj)]
+      (when (nil? dir) (throw (NullPointerException.)))
+      (when-not (instance? UnixSecureDirectoryStream dir) (throw (ProviderMismatchException.)))
+      (let [that (cast UnixSecureDirectoryStream dir)]
+        (.lock (.readLock (.-ds this)))
+        (try
+          (.lock (.readLock (.-ds that)))
+          (try
+            (when (or (not (.isOpen (.-ds this))) (not (.isOpen (.-ds that))))
+              (throw (ClosedDirectoryStreamException.)))
+            (try
+              (UnixNativeDispatcher/renameat (.-dfd this)
+                                             (.asByteArray from)
+                                             (.-dfd that)
+                                             (.asByteArray to))
+              (catch UnixException x
+                (when (== (.errno x) UnixConstants/EXDEV)
+                  (throw (AtomicMoveNotSupportedException.
+                           (.toString from)
+                           (.toString to)
+                           (.errorString x))))
+                (.rethrowAsIOException x from to)))
+            (finally (.unlock (.readLock (.-ds that)))))
+          (finally (.unlock (.readLock (.-ds this))))))))
+
+  (method ^:private getFileAttributeViewImpl :type-params [(V extends FileAttributeView)] ^V [this
+                                                                                              ^UnixPath file
+                                                                                              ^{:tag (Class V)} type
+                                                                                              ^boolean followLinks]
+    (when (nil? type) (throw (NullPointerException.)))
+    (let [^{:tag (Class ?)} c type]
+      (cond
+        (identical? c BasicFileAttributeView)
+          ^FileAttributeView (BasicFileAttributeViewImpl. file followLinks)
+        (or (identical? c PosixFileAttributeView) (identical? c FileOwnerAttributeView))
+          ^FileAttributeView (PosixFileAttributeViewImpl. file followLinks)
+        :else (cast FileAttributeView nil))))
+
+  (method ^:public getFileAttributeView :type-params [(V extends FileAttributeView)] ^V [this
+                                                                                         ^{:tag (Class V)} type]
+    (.getFileAttributeViewImpl this nil type false))
+
+  (method ^:public getFileAttributeView :type-params [(V extends FileAttributeView)] ^V [this
+                                                                                         ^Path obj
+                                                                                         ^{:tag (Class V)} type
+                                                                                         &
+                                                                                         ^LinkOption/1 options]
+    (let [file (.getName this obj)
+          followLinks (Util/followLinks options)]
+      (.getFileAttributeViewImpl this file type followLinks)))
+
+  (defclass ^:private BasicFileAttributeViewImpl
+    :implements [BasicFileAttributeView]
+
+    (field ^:final ^UnixPath file)
+
+    (field ^:final ^boolean followLinks)
+
+    (constructor [this ^UnixPath file ^boolean followLinks]
+      (set! (.-file this) file)
+      (set! (.-followLinks this) followLinks))
+
+    (method open :throws [IOException] ^int [this]
+      (let [^:mutable oflags UnixConstants/O_RDONLY]
+        (when-not followLinks (set! oflags (bit-or-int oflags UnixConstants/O_NOFOLLOW)))
+        (try
+          (UnixNativeDispatcher/openat dfd (.asByteArray file) oflags 0)
+          (catch UnixException x (.rethrowAsIOException x file) -1))))
+
+    (method ^:public name ^String [this] "basic")
+
+    (method ^:public readAttributes :throws [IOException] ^BasicFileAttributes [this]
+      (.lock (.readLock ds))
+      (try
+        (when-not (.isOpen ds) (throw (ClosedDirectoryStreamException.)))
+        (try
+          (let [^UnixFileAttributes attrs (if (nil? file)
+                                              (UnixFileAttributes/get dfd)
+                                              (UnixFileAttributes/get dfd file followLinks))]
+            (.asBasicFileAttributes attrs))
+          (catch UnixException x (.rethrowAsIOException x file) nil))
+        (finally (.unlock (.readLock ds)))))
+
+    (method ^:public setTimes :throws [IOException] ^void [this ^:mutable ^FileTime lastModifiedTime
+                                                           ^:mutable ^FileTime lastAccessTime
+                                                           ^FileTime createTime]
+      (.lock (.readLock ds))
+      (try
+        (when-not (.isOpen ds) (throw (ClosedDirectoryStreamException.)))
+        (let [^int fd (if (nil? file) dfd (.open this))]
+          (try
+            (when (or (nil? lastModifiedTime) (nil? lastAccessTime))
+              (try
+                (let [attrs (UnixFileAttributes/get fd)]
+                  (when (nil? lastModifiedTime) (set! lastModifiedTime (.lastModifiedTime attrs)))
+                  (when (nil? lastAccessTime) (set! lastAccessTime (.lastAccessTime attrs))))
+                (catch UnixException x (.rethrowAsIOException x file))))
+            (try
+              (UnixNativeDispatcher/futimens fd
+                                             (.to lastAccessTime TimeUnit/NANOSECONDS)
+                                             (.to lastModifiedTime TimeUnit/NANOSECONDS))
+              (catch UnixException x (.rethrowAsIOException x file)))
+            (finally
+              (when (some? file)
+                (UnixNativeDispatcher/close fd
+                                            (lambda Function ^RuntimeException [^UnixException e]
+                                              nil))))))
+        (finally (.unlock (.readLock ds))))))
+
+  (defclass ^:private PosixFileAttributeViewImpl
+    :extends BasicFileAttributeViewImpl
+    :implements [PosixFileAttributeView]
+
+    (constructor [this ^UnixPath file ^boolean followLinks]
+      (super. file followLinks))
+
+    (method ^:public name ^String [this] "posix")
+
+    (method ^:public readAttributes :throws [IOException] ^PosixFileAttributes [this]
+      (.lock (.readLock ds))
+      (try
+        (when-not (.isOpen ds) (throw (ClosedDirectoryStreamException.)))
+        (try
+          (let [^UnixFileAttributes attrs (if (nil? (.-file this))
+                                              (UnixFileAttributes/get dfd)
+                                              (UnixFileAttributes/get
+                                                dfd
+                                                (.-file this)
+                                                (.-followLinks this)))]
+            attrs)
+          (catch UnixException x (.rethrowAsIOException x (.-file this)) nil))
+        (finally (.unlock (.readLock ds)))))
+
+    (method ^:public setPermissions :throws [IOException] ^void [this
+                                                                 ^{:tag (Set PosixFilePermission)} perms]
+      (.lock (.readLock ds))
+      (try
+        (when-not (.isOpen ds) (throw (ClosedDirectoryStreamException.)))
+        (let [mode (UnixFileModeAttribute/toUnixMode perms)]
+          (cond
+            (nil? (.-file this)) (UnixNativeDispatcher/fchmod dfd mode)
+            (.-followLinks this) (UnixNativeDispatcher/fchmodat dfd (.-file this) mode 0)
+            (UnixNativeDispatcher/fchmodatNoFollowSupported)
+              (UnixNativeDispatcher/fchmodat dfd
+                                             (.-file this)
+                                             mode
+                                             UnixConstants/AT_SYMLINK_NOFOLLOW)
+            :else
+              (let [fd (.open this)]
+                (try
+                  (UnixNativeDispatcher/fchmod fd mode)
+                  (finally
+                    (when (>= fd 0)
+                      (UnixNativeDispatcher/close
+                        fd
+                        (lambda Function ^RuntimeException [^UnixException e] nil))))))))
+        (catch UnixException x (.rethrowAsIOException x (.-file this)))
+        (finally (.unlock (.readLock ds)))))
+
+    (method ^:private setOwners :throws [IOException] ^void [this ^int uid ^int gid]
+      (.lock (.readLock ds))
+      (try
+        (when-not (.isOpen ds) (throw (ClosedDirectoryStreamException.)))
+        (let [^int fd (if (nil? (.-file this)) dfd (.open this))]
+          (try
+            (UnixNativeDispatcher/fchown fd uid gid)
+            (catch UnixException x (.rethrowAsIOException x (.-file this)))
+            (finally
+              (when (and (some? (.-file this)) (>= fd 0))
+                (UnixNativeDispatcher/close fd
+                                            (lambda Function ^RuntimeException [^UnixException e]
+                                              nil))))))
+        (finally (.unlock (.readLock ds)))))
+
+    (method ^:public getOwner :throws [IOException] ^UserPrincipal [this]
+      (.owner (.readAttributes this)))
+
+    (method ^:public setOwner :throws [IOException] ^void [this ^UserPrincipal owner]
+      (when-not (instance? UnixUserPrincipals$User owner) (throw (ProviderMismatchException.)))
+      (when (instance? UnixUserPrincipals$Group owner)
+        (throw (IOException. "'owner' parameter can't be a group")))
+      (let [uid (.uid (cast UnixUserPrincipals$User owner))] (.setOwners this uid -1)))
+
+    (method ^:public setGroup :throws [IOException] ^void [this ^GroupPrincipal group]
+      (when-not (instance? UnixUserPrincipals$Group group) (throw (ProviderMismatchException.)))
+      (let [gid (.gid (cast UnixUserPrincipals$Group group))] (.setOwners this -1 gid)))))

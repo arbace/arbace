@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+# bin/lib/repr-rust/rustc-errors EDITION OUT FILE...: rustc's first parse error of each file, as
+# bin/repr-rust native-errors compares them (doc/rust/NATIVE-READER.md, "Errors"): the host's rustc
+# (the pin tools/rsdump/RUSTC_VERSION) run with -Z parse-crate-root-only --error-format=json, its
+# first diagnostic of level error, one line per file: FILE, ok|err, l1:c1-l2:c2 (its first primary
+# span), its code or -, its message (newlines and tabs escaped)
+import concurrent.futures, json, os, subprocess, sys
+
+ed, out, files = sys.argv[1], sys.argv[2], sys.argv[3:]
+env = dict(os.environ, RUSTC_BOOTSTRAP='1')
+scratch = os.path.join(env.get('TMPDIR', '.'), 'rustc-errors.out')
+
+def first_error(f):
+    p = subprocess.run(['rustc', '-Z', 'parse-crate-root-only', '--error-format=json', '--edition', ed,
+                        f, '-o', scratch], env=env, capture_output=True, text=True)
+    for line in p.stderr.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get('level') != 'error' or d['message'].startswith('aborting due to'):
+            continue
+        prim = [s for s in d['spans'] if s['is_primary']]
+        loc = '%d:%d-%d:%d' % (prim[0]['line_start'], prim[0]['column_start'],
+                               prim[0]['line_end'], prim[0]['column_end']) if prim else '-'
+        code = (d.get('code') or {}).get('code') or '-'
+        msg = d['message'].replace('\n', '\\n').replace('\t', '\\t')
+        return '%s\terr\t%s\t%s\t%s' % (f, loc, code, msg)
+    return '%s\tok\t-\t-\t-' % f
+
+with concurrent.futures.ThreadPoolExecutor(int(os.environ.get('REPR_RUST_RUSTC_JOBS', '8'))) as ex:
+    lines = list(ex.map(first_error, files))
+with open(out, 'w') as o:
+    o.write(''.join(l + '\n' for l in lines))

@@ -1,0 +1,214 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/TrustStoreManager.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io BufferedInputStream File FileInputStream FileNotFoundException)
+        '(java.lang.ref WeakReference)
+        '(java.security KeyStore)
+        '(java.security.cert X509Certificate)
+        '(java.util Collections Date Objects Set)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(sun.security.util FilePaths)
+        '(sun.security.validator TrustStoreUtil))
+
+(defclass ^:final TrustStoreManager
+  (field ^:private ^:static ^:final ^TrustAnchorManager tam (TrustAnchorManager.))
+
+  (constructor ^:private [this])
+
+  (method ^:public ^:static getTrustedCerts :throws [Exception] ^{:tag (Set X509Certificate)} []
+    (.getTrustedCerts tam (TrustStoreDescriptor/createInstance)))
+
+  (method ^:public ^:static getTrustedKeyStore :throws [Exception] ^KeyStore []
+    (.getKeyStore tam (TrustStoreDescriptor/createInstance)))
+
+  (defclass ^:private ^:static ^:final TrustStoreDescriptor
+    (field ^:private ^:static ^:final ^String fileSep File/separator)
+
+    (field ^:private ^:static ^:final ^String defaultStorePath
+      (java-str (System/getProperty "java.home") fileSep "lib" fileSep "security"))
+
+    (field ^:private ^:static ^:final ^String defaultStore (FilePaths/cacerts))
+
+    (field ^:private ^:static ^:final ^String jsseDefaultStore
+      (java-str defaultStorePath fileSep "jssecacerts"))
+
+    (field ^:private ^:final ^String storeName)
+
+    (field ^:private ^:final ^String storeType)
+
+    (field ^:private ^:final ^String storeProvider)
+
+    (field ^:private ^:final ^String storePassword)
+
+    (field ^:private ^:final ^File storeFile)
+
+    (field ^:private ^:final ^long lastModified)
+
+    (constructor ^:private [this ^String storeName ^String storeType ^String storeProvider
+                            ^String storePassword ^File storeFile ^long lastModified]
+      (set! (.-storeName this) storeName)
+      (set! (.-storeType this) storeType)
+      (set! (.-storeProvider this) storeProvider)
+      (set! (.-storePassword this) storePassword)
+      (set! (.-storeFile this) storeFile)
+      (set! (.-lastModified this) lastModified)
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "trustmanager"))
+        (SSLLogger/fine
+          (java-str "trustStore is: "
+                    storeName
+                    "\ntrustStore type is: "
+                    storeType
+                    "\ntrustStore provider is: "
+                    (if (.isEmpty storeProvider) "unspecified" storeProvider)
+                    "\nthe last modified time is: "
+                    (Date. lastModified)))))
+
+    (method ^:static createInstance ^TrustStoreDescriptor []
+      (let [storePropName (System/getProperty "javax.net.ssl.trustStore" jsseDefaultStore)
+            storePropType (System/getProperty "javax.net.ssl.trustStoreType"
+                                              (KeyStore/getDefaultType))
+            storePropProvider (System/getProperty "javax.net.ssl.trustStoreProvider" "")
+            storePropPassword (System/getProperty "javax.net.ssl.trustStorePassword" "")
+            ^:mutable temporaryName ""
+            ^:mutable ^File temporaryFile nil
+            ^:mutable temporaryTime 0]
+        (if (not (.equals "NONE" storePropName))
+            (let [fileNames (new String/1 [storePropName defaultStore])]
+              (for-each [^String fileName fileNames]
+                (let [f (File. fileName)]
+                  (when (and (.isFile f) (.canRead f))
+                    (set! temporaryName fileName)
+                    (set! temporaryFile f)
+                    (set! temporaryTime (.lastModified f))
+                    (break))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "trustmanager"))
+                    (SSLLogger/fine (java-str "Inaccessible trust store: " fileName))))))
+            (set! temporaryName storePropName))
+        (TrustStoreDescriptor. temporaryName
+                               storePropType
+                               storePropProvider
+                               storePropPassword
+                               temporaryFile
+                               temporaryTime)))
+
+    (method ^:public equals ^boolean [this obj]
+      (if (identical? obj this)
+          true
+          (if-instance [^TrustStoreDescriptor that obj]
+            (and (and (and (== (.-lastModified this) (.-lastModified that))
+                           (Objects/equals (.-storeName this) (.-storeName that)))
+                      (Objects/equals (.-storeType this) (.-storeType that)))
+                 (Objects/equals (.-storeProvider this) (.-storeProvider that)))
+            false)))
+
+    (method ^:public hashCode ^int [this]
+      (let [^:mutable ^int result 17]
+        (when (and (some? storeName) (not (.isEmpty storeName)))
+          (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode storeName))))
+        (when (and (some? storeType) (not (.isEmpty storeType)))
+          (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode storeType))))
+        (when (and (some? storeProvider) (not (.isEmpty storeProvider)))
+          (set! result
+                (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode storeProvider))))
+        (when (some? storeFile)
+          (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode storeFile))))
+        (when-not (== lastModified 0)
+          (set! result
+                (unchecked-int (unchecked-add (unchecked-multiply-int 31 result) lastModified))))
+        result)))
+
+  (defclass ^:private ^:static ^:final TrustAnchorManager
+    (field ^:private ^TrustStoreDescriptor descriptor)
+
+    (field ^:private ^{:tag (WeakReference KeyStore)} ksRef)
+
+    (field ^:private ^{:tag (WeakReference (Set X509Certificate))} csRef)
+
+    (field ^:private ^:final ^ReentrantLock tamLock (ReentrantLock.))
+
+    (constructor ^:private [this]
+      (set! (.-descriptor this) nil)
+      (set! (.-ksRef this) (WeakReference. nil))
+      (set! (.-csRef this) (WeakReference. nil)))
+
+    (method getKeyStore :throws [Exception] ^KeyStore [this ^TrustStoreDescriptor descriptor]
+      (let [temporaryDesc (.-descriptor this)
+            ^:mutable ks (cast KeyStore (.get ksRef))]
+        (if (and (some? ks) (.equals descriptor temporaryDesc))
+            ks
+            (do
+              (.lock tamLock)
+              (try
+                (set! ks (cast KeyStore (.get ksRef)))
+                (when (and (some? ks) (.equals descriptor temporaryDesc)) (return ks))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "trustmanager"))
+                  (SSLLogger/fine "Reload the trust store"))
+                (set! ks (TrustAnchorManager/loadKeyStore descriptor))
+                (set! (.-descriptor this) descriptor)
+                (set! (.-ksRef this) (WeakReference. ks))
+                (finally (.unlock tamLock)))
+              ks))))
+
+    (method getTrustedCerts :throws [Exception] ^{:tag (Set X509Certificate)} [this
+                                                                               ^TrustStoreDescriptor descriptor]
+      (let [^:mutable ^KeyStore ks nil
+            ^:mutable temporaryDesc (.-descriptor this)
+            ^:mutable ^{:tag (Set X509Certificate)} certs (cast Set (.get csRef))]
+        (if (and (some? certs) (.equals descriptor temporaryDesc))
+            certs
+            (do
+              (.lock tamLock)
+              (try
+                (set! temporaryDesc (.-descriptor this))
+                (set! certs (cast Set (.get csRef)))
+                (cond
+                  (some? certs)
+                    (if (.equals descriptor temporaryDesc)
+                        (return certs)
+                        (set! (.-descriptor this) descriptor))
+                  (.equals descriptor temporaryDesc) (set! ks (cast KeyStore (.get ksRef)))
+                  :else (set! (.-descriptor this) descriptor))
+                (when (nil? ks)
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "trustmanager"))
+                    (SSLLogger/fine "Reload the trust store"))
+                  (set! ks (TrustAnchorManager/loadKeyStore descriptor))
+                  (set! (.-ksRef this) (WeakReference. ks)))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "trustmanager"))
+                  (SSLLogger/fine "Reload trust certs"))
+                (set! certs (TrustAnchorManager/loadTrustedCerts ks))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "trustmanager"))
+                  (SSLLogger/fine (java-str "Reloaded " (.size certs) " trust certs")))
+                (set! (.-csRef this) (WeakReference. certs))
+                (finally (.unlock tamLock)))
+              certs))))
+
+    (method ^:private ^:static loadKeyStore :throws [Exception] ^KeyStore [^TrustStoreDescriptor descriptor]
+      (if (and (not (.equals "NONE" (.-storeName descriptor))) (nil? (.-storeFile descriptor)))
+          (do
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "trustmanager"))
+              (SSLLogger/fine "No available key store"))
+            nil)
+          (let [^KeyStore ks (if (.isEmpty (.-storeProvider descriptor))
+                                 (KeyStore/getInstance (.-storeType descriptor))
+                                 (KeyStore/getInstance
+                                   (.-storeType descriptor)
+                                   (.-storeProvider descriptor)))]
+            (let [^:mutable ^char/1 password nil]
+              (when-not (.isEmpty (.-storePassword descriptor))
+                (set! password (.toCharArray (.-storePassword descriptor))))
+              (if (not (.equals "NONE" (.-storeName descriptor)))
+                  (try
+                    (with-resources [bis (BufferedInputStream.
+                                           (FileInputStream. (.-storeFile descriptor)))]
+                      (.load ks bis password))
+                    (catch FileNotFoundException fnfe
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "trustmanager"))
+                        (SSLLogger/fine
+                          (java-str "Not available key store: " (.-storeName descriptor))))
+                      (return nil)))
+                  (.load ks nil password))
+              ks))))
+
+    (method ^:private ^:static loadTrustedCerts ^{:tag (Set X509Certificate)} [^KeyStore ks]
+      (if (nil? ks) (Collections/emptySet) (TrustStoreUtil/getTrustedCerts ks)))))

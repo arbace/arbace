@@ -1,0 +1,837 @@
+;; Converted from jdk26u src/java.base/share/classes/javax/crypto/Cipher.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.crypto)
+
+(import '(java.nio ByteBuffer ReadOnlyBufferException)
+        '(java.security AlgorithmParameters
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        InvalidParameterException
+                        Key
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        Provider
+                        Provider$Service
+                        ProviderException
+                        PublicKey
+                        SecureRandom
+                        Security)
+        '(java.security.cert Certificate X509Certificate)
+        '(java.security.spec AlgorithmParameterSpec InvalidParameterSpecException)
+        '(java.util ArrayList Iterator List Locale Set)
+        '(java.util.concurrent ConcurrentHashMap ConcurrentMap)
+        '(java.util.regex Pattern)
+        '(javax.crypto.spec IvParameterSpec PBEParameterSpec RC2ParameterSpec RC5ParameterSpec)
+        '(sun.security.jca GetInstance JCAUtil ServiceId)
+        '(sun.security.util CryptoAlgorithmConstraints Debug KnownOIDs))
+
+(defclass ^:public Cipher
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "jca" "Cipher"))
+
+  (field ^:private ^:static ^:final ^Debug pdebug (Debug/getInstance "provider" "Provider"))
+
+  (field ^:private ^:static ^:final ^boolean skipDebug
+    (and (Debug/isOn "engine=") (not (Debug/isOn "cipher"))))
+
+  (field ^:public ^:static ^:final ^int ENCRYPT_MODE 1)
+
+  (field ^:public ^:static ^:final ^int DECRYPT_MODE 2)
+
+  (field ^:public ^:static ^:final ^int WRAP_MODE 3)
+
+  (field ^:public ^:static ^:final ^int UNWRAP_MODE 4)
+
+  (field ^:public ^:static ^:final ^int PUBLIC_KEY 1)
+
+  (field ^:public ^:static ^:final ^int PRIVATE_KEY 2)
+
+  (field ^:public ^:static ^:final ^int SECRET_KEY 3)
+
+  (field ^:private ^Provider provider)
+
+  (field ^:private ^CipherSpi spi)
+
+  (field ^:private ^:final ^String transformation)
+
+  (field ^:private ^CryptoPermission cryptoPerm)
+
+  (field ^:private ^ExemptionMechanism exmech)
+
+  (field ^:private ^boolean initialized false)
+
+  (field ^:private ^int opmode 0)
+
+  (field ^:private ^CipherSpi firstSpi)
+
+  (field ^:private ^Provider$Service firstService)
+
+  (field ^:private ^{:tag (Iterator Provider$Service)} serviceIterator)
+
+  (field ^:private ^{:tag (List Transform)} transforms)
+
+  (field ^:private ^:final lock)
+
+  (constructor ^:protected [this ^CipherSpi cipherSpi ^Provider provider ^String transformation]
+    (when-not (.isCallerTrusted JceSecurityManager/INSTANCE
+                                (.getCallerClass JceSecurityManager/WALKER)
+                                provider)
+      (throw (IllegalArgumentException. "Cannot construct cipher")))
+    (set! (.-spi this) cipherSpi)
+    (set! (.-provider this) provider)
+    (set! (.-transformation this) transformation)
+    (set! (.-cryptoPerm this) CryptoAllPermission/INSTANCE)
+    (set! (.-lock this) nil))
+
+  (constructor [this ^CipherSpi cipherSpi ^String transformation]
+    (set! (.-spi this) cipherSpi)
+    (set! (.-transformation this) transformation)
+    (set! (.-cryptoPerm this) CryptoAllPermission/INSTANCE)
+    (set! (.-lock this) nil))
+
+  (constructor ^:private [this ^CipherSpi firstSpi ^Provider$Service firstService
+                          ^{:tag (Iterator Provider$Service)} serviceIterator ^String transformation
+                          ^{:tag (List Transform)} transforms]
+    (set! (.-firstSpi this) firstSpi)
+    (set! (.-firstService this) firstService)
+    (set! (.-serviceIterator this) serviceIterator)
+    (set! (.-transforms this) transforms)
+    (set! (.-transformation this) transformation)
+    (set! (.-lock this) (Object.)))
+
+  (method ^:static indexOfRealSlash ^int [^String s ^:mutable ^int fromIndex]
+    (while true
+      (let [pos (.indexOf s \/ fromIndex)]
+        (if (and (and (and (and (and (> pos 3) (< (unchecked-add-int pos 1) (.length s)))
+                                (== (.charAt s (unchecked-subtract-int pos 3)) \5))
+                           (== (.charAt s (unchecked-subtract-int pos 2)) \1))
+                      (== (.charAt s (unchecked-subtract-int pos 1)) \2))
+                 (== (.charAt s (unchecked-add-int pos 1)) \2))
+            (set! fromIndex (unchecked-add-int pos 1))
+            (return pos)))))
+
+  (method ^:static reqNonEmpty :throws [NoSuchAlgorithmException] ^String [^:mutable ^String in
+                                                                           ^String msg]
+    (set! in (.trim in))
+    (when (.isEmpty in) (throw (NoSuchAlgorithmException. msg)))
+    in)
+
+  (method ^:private ^:static tokenizeTransformation :throws [NoSuchAlgorithmException] ^String/1 [^String transformation]
+    (when (nil? transformation) (throw (NoSuchAlgorithmException. "No transformation given")))
+    (let [^:mutable endIdx (Cipher/indexOfRealSlash transformation 0)]
+      (if (== endIdx -1)
+          (new String/1
+               [(Cipher/reqNonEmpty transformation
+                                    "Invalid transformation: algorithm not specified")])
+          (let [algo (Cipher/reqNonEmpty (.substring transformation 0 endIdx)
+                                         "Invalid transformation: algorithm not specified")
+                ^:mutable startIdx (unchecked-add-int endIdx 1)]
+            (set! endIdx (Cipher/indexOfRealSlash transformation startIdx))
+            (when (== endIdx -1)
+              (throw (NoSuchAlgorithmException.
+                       (java-str "Invalid transformation format: " transformation))))
+            (let [mode (Cipher/reqNonEmpty (.substring transformation startIdx endIdx)
+                                           "Invalid transformation: missing mode")]
+              (set! startIdx (unchecked-add-int endIdx 1))
+              (set! endIdx (Cipher/indexOfRealSlash transformation startIdx))
+              (if (== endIdx -1)
+                  (new String/1
+                       [algo
+                        mode
+                        (Cipher/reqNonEmpty (.substring transformation startIdx)
+                                            "Invalid transformation: missing padding")])
+                  (throw (NoSuchAlgorithmException.
+                           (java-str "Invalid transformation format: " transformation)))))))))
+
+  (field ^:private ^:static ^:final ^String ATTR_MODE "SupportedModes")
+
+  (field ^:private ^:static ^:final ^String ATTR_PAD "SupportedPaddings")
+
+  (field ^:private ^:static ^:final ^int S_NO 0)
+
+  (field ^:private ^:static ^:final ^int S_MAYBE 1)
+
+  (field ^:private ^:static ^:final ^int S_YES 2)
+
+  (defclass ^:private ^:static Transform
+    (field ^:final ^String transform)
+
+    (field ^:final ^String suffix)
+
+    (field ^:final ^String mode)
+
+    (field ^:final ^String pad)
+
+    (constructor [this ^String alg ^String suffix ^String mode ^String pad]
+      (set! (.-transform this) (java-str alg suffix))
+      (set! (.-suffix this) (.toUpperCase suffix Locale/ENGLISH))
+      (set! (.-mode this) mode)
+      (set! (.-pad this) pad))
+
+    (method setModePadding :throws [NoSuchAlgorithmException NoSuchPaddingException] ^void [this
+                                                                                            ^CipherSpi spi]
+      (when (some? mode) (.engineSetMode spi mode))
+      (when (some? pad) (.engineSetPadding spi pad)))
+
+    (method supportsModePadding ^int [this ^Provider$Service s]
+      (let [smode (.supportsMode this s)]
+        (if (== smode S_NO) smode (let [spad (.supportsPadding this s)] (Math/min smode spad)))))
+
+    (method supportsMode ^int [this ^Provider$Service s]
+      (Transform/supports s ATTR_MODE mode))
+
+    (method supportsPadding ^int [this ^Provider$Service s]
+      (Transform/supports s ATTR_PAD pad))
+
+    (method ^:private ^:static supports ^int [^Provider$Service s ^String attrName ^String value]
+      (if (nil? value)
+          S_YES
+          (let [regexp (.getAttribute s attrName)]
+            (cond (nil? regexp) S_MAYBE (Transform/matches regexp value) S_YES :else S_NO))))
+
+    (field ^:private ^:static ^:final ^{:tag (ConcurrentMap String Pattern)} patternCache
+      (ConcurrentHashMap.))
+
+    (method ^:private ^:static matches ^boolean [^String regexp ^String str]
+      (let [^:mutable pattern (cast Pattern (.get patternCache regexp))]
+        (when (nil? pattern)
+          (set! pattern (Pattern/compile regexp))
+          (.putIfAbsent patternCache regexp pattern))
+        (.matches (.matcher pattern (.toUpperCase str Locale/ENGLISH))))))
+
+  (method ^:private ^:static getTransforms :throws [NoSuchAlgorithmException] ^{:tag (List Transform)} [^String transformation]
+    (let [parts (Cipher/tokenizeTransformation transformation)]
+      (if (== (alength parts) 1)
+          (List/of (Transform. (aget parts 0) "" nil nil))
+          (List/of (Transform. (aget parts 0)
+                               (java-str "/" (aget parts 1) "/" (aget parts 2))
+                               nil
+                               nil)
+                   (Transform. (aget parts 0) (java-str "/" (aget parts 1)) nil (aget parts 2))
+                   (Transform. (aget parts 0) (java-str "//" (aget parts 2)) (aget parts 1) nil)
+                   (Transform. (aget parts 0) "" (aget parts 1) (aget parts 2))))))
+
+  (method ^:private ^:static getTransform ^Transform [^Provider$Service s
+                                                      ^{:tag (List Transform)} transforms]
+    (let [alg (.toUpperCase (.getAlgorithm s) Locale/ENGLISH)]
+      (for-each [^Transform tr transforms] (when (.endsWith alg (.-suffix tr)) (return tr)))
+      nil))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException
+                                                         NoSuchPaddingException] ^Cipher [^String transformation]
+    (when (or (nil? transformation) (.isEmpty transformation))
+      (throw (NoSuchAlgorithmException. "Null or empty transformation")))
+    (when-not (CryptoAlgorithmConstraints/permits "Cipher" transformation)
+      (throw (NoSuchAlgorithmException. (java-str transformation " is disabled"))))
+    (let [^{:tag (List Transform)} transforms (Cipher/getTransforms transformation)
+          ^{:tag (List ServiceId)} cipherServices (ArrayList. (.size transforms))]
+      (for-each [^Transform transform transforms]
+        (.add cipherServices (ServiceId. "Cipher" (.-transform transform))))
+      (let [^{:tag (Iterator Provider$Service)} t (GetInstance/getServices cipherServices)
+            ^:mutable ^Exception failure nil]
+        (while (.hasNext t)
+          (let [s (cast Provider$Service (.next t))]
+            (when-not (= (JceSecurity/canUseProvider (.getProvider s)) false)
+              (let [tr (Cipher/getTransform s transforms)]
+                (when (some? tr)
+                  (let [canuse (.supportsModePadding tr s)]
+                    (when-not (== canuse S_NO)
+                      (try
+                        (let [spi (cast CipherSpi (.newInstance s nil))]
+                          (.setModePadding tr spi)
+                          (return (Cipher. nil s t transformation transforms)))
+                        (catch Exception e (set! failure e))))))))))
+        (when-instance [^NoSuchPaddingException nspe failure] (throw nspe))
+        (throw (NoSuchAlgorithmException.
+                 (java-str "Cannot find any provider supporting " transformation)
+                 failure)))))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException
+                                                         NoSuchProviderException
+                                                         NoSuchPaddingException] ^Cipher [^String transformation
+                                                                                          ^String provider]
+    (when (or (nil? transformation) (.isEmpty transformation))
+      (throw (NoSuchAlgorithmException. "Null or empty transformation")))
+    (when (or (nil? provider) (.isEmpty provider))
+      (throw (IllegalArgumentException. "Missing provider")))
+    (let [p (Security/getProvider provider)]
+      (when (nil? p) (throw (NoSuchProviderException. (java-str "No such provider: " provider))))
+      (Cipher/getInstance transformation p)))
+
+  (method ^:private getProviderName ^String [this]
+    (if (nil? provider) "(no provider)" (.getName provider)))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException
+                                                         NoSuchPaddingException] ^Cipher [^String transformation
+                                                                                          ^Provider provider]
+    (when (or (nil? transformation) (.isEmpty transformation))
+      (throw (NoSuchAlgorithmException. "Null or empty transformation")))
+    (when (nil? provider) (throw (IllegalArgumentException. "Missing provider")))
+    (when-not (CryptoAlgorithmConstraints/permits "Cipher" transformation)
+      (throw (NoSuchAlgorithmException. (java-str transformation " is disabled"))))
+    (let [^:mutable ^Exception failure nil
+          ^{:tag (List Transform)} transforms (Cipher/getTransforms transformation)
+          ^:mutable providerChecked false
+          ^:mutable ^String paddingError nil]
+      (for-each [^Transform tr transforms]
+        (let [s (.getService provider "Cipher" (.-transform tr))]
+          (when (some? s)
+            (when (= providerChecked false)
+              (let [ve (JceSecurity/getVerificationResult provider)]
+                (when (some? ve)
+                  (let [msg (java-str "JCE cannot authenticate the provider " (.getName provider))]
+                    (throw (SecurityException. msg ve))))
+                (set! providerChecked true)))
+            (when-not (== (.supportsMode tr s) S_NO)
+              (if (== (.supportsPadding tr s) S_NO)
+                  (set! paddingError (.-pad tr))
+                  (try
+                    (let [spi (cast CipherSpi (.newInstance s nil))]
+                      (.setModePadding tr spi)
+                      (let [cipher (Cipher. spi transformation)]
+                        (set! (.-provider cipher) (.getProvider s))
+                        (.initCryptoPermission cipher)
+                        (return cipher)))
+                    (catch Exception e (set! failure e))))))))
+      (when (instance? NoSuchPaddingException failure)
+        (throw (cast NoSuchPaddingException failure)))
+      (when (some? paddingError)
+        (throw (NoSuchPaddingException. (java-str "Padding not supported: " paddingError))))
+      (throw (NoSuchAlgorithmException. (java-str "No such algorithm: " transformation) failure))))
+
+  (method ^:private initCryptoPermission :throws [NoSuchAlgorithmException] ^void [this]
+    (if (= (JceSecurity/isRestricted) false)
+        (do (set! cryptoPerm CryptoAllPermission/INSTANCE) (set! exmech nil))
+        (do
+          (set! cryptoPerm (Cipher/getConfiguredPermission transformation))
+          (let [exmechName (.getExemptionMechanism cryptoPerm)]
+            (when (some? exmechName) (set! exmech (ExemptionMechanism/getInstance exmechName)))))))
+
+  (field ^:private ^:static ^int warnCount 10)
+
+  (method chooseFirstProvider ^void [this]
+    (when-not (some? spi)
+      (locking lock
+        (when-not (some? spi)
+          (when (some? debug)
+            (let [w (set! warnCount (unchecked-dec-int warnCount))]
+              (when (>= w 0)
+                (.println
+                  debug
+                  "Cipher.init() not first method called, disabling delayed provider selection")
+                (when (== w 0) (.println debug "Further warnings of this type will be suppressed"))
+                (.printStackTrace (Exception. "Call trace")))))
+          (let [^:mutable ^Exception lastException nil]
+            (while (or (some? firstService) (.hasNext serviceIterator))
+              (let [^:mutable ^Provider$Service s nil
+                    ^:mutable ^CipherSpi thisSpi nil]
+                (if (some? firstService)
+                    (do
+                      (set! s firstService)
+                      (set! thisSpi firstSpi)
+                      (set! firstService nil)
+                      (set! firstSpi nil))
+                    (do (set! s (cast Provider$Service (.next serviceIterator))) (set! thisSpi nil)))
+                (when-not (= (JceSecurity/canUseProvider (.getProvider s)) false)
+                  (let [tr (Cipher/getTransform s transforms)]
+                    (when (some? tr)
+                      (when-not (== (.supportsModePadding tr s) S_NO)
+                        (try
+                          (when (nil? thisSpi)
+                            (let [obj (.newInstance s nil)]
+                              (when (= (instance? CipherSpi obj) false) (continue))
+                              (set! thisSpi (cast CipherSpi obj))))
+                          (.setModePadding tr thisSpi)
+                          (.initCryptoPermission this)
+                          (set! spi thisSpi)
+                          (set! provider (.getProvider s))
+                          (set! firstService nil)
+                          (set! serviceIterator nil)
+                          (set! transforms nil)
+                          (return)
+                          (catch Exception e (set! lastException e)))))))))
+            (let [e (ProviderException. "Could not construct CipherSpi instance")]
+              (when (some? lastException) (.initCause e lastException))
+              (throw e)))))))
+
+  (field ^:private ^:static ^:final ^int I_KEY 1)
+
+  (field ^:private ^:static ^:final ^int I_PARAMSPEC 2)
+
+  (field ^:private ^:static ^:final ^int I_PARAMS 3)
+
+  (field ^:private ^:static ^:final ^int I_CERT 4)
+
+  (method ^:private implInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                     ^CipherSpi thisSpi
+                                                                                                     ^int type
+                                                                                                     ^int opmode
+                                                                                                     ^Key key
+                                                                                                     ^AlgorithmParameterSpec paramSpec
+                                                                                                     ^AlgorithmParameters params
+                                                                                                     ^SecureRandom random]
+    (switch type
+      I_KEY (do (.checkCryptoPerm this thisSpi key) (.engineInit thisSpi opmode key random))
+      I_PARAMSPEC
+        (do
+          (.checkCryptoPerm this thisSpi key paramSpec)
+          (.engineInit thisSpi opmode key paramSpec random))
+      I_PARAMS
+        (do
+          (.checkCryptoPerm this thisSpi key params)
+          (.engineInit thisSpi opmode key params random))
+      I_CERT (do (.checkCryptoPerm this thisSpi key) (.engineInit thisSpi opmode key random))
+      (throw (AssertionError. (java-str "Internal Cipher error: " type)))))
+
+  (method ^:private chooseProvider :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                           ^int initType
+                                                                                                           ^int opmode
+                                                                                                           ^Key key
+                                                                                                           ^AlgorithmParameterSpec paramSpec
+                                                                                                           ^AlgorithmParameters params
+                                                                                                           ^SecureRandom random]
+    (locking lock
+      (if (some? spi)
+          (.implInit this spi initType opmode key paramSpec params random)
+          (let [^:mutable ^Exception lastException nil]
+            (while (or (some? firstService) (.hasNext serviceIterator))
+              (let [^:mutable ^Provider$Service s nil
+                    ^:mutable ^CipherSpi thisSpi nil]
+                (if (some? firstService)
+                    (do
+                      (set! s firstService)
+                      (set! thisSpi firstSpi)
+                      (set! firstService nil)
+                      (set! firstSpi nil))
+                    (do (set! s (cast Provider$Service (.next serviceIterator))) (set! thisSpi nil)))
+                (when-not (= (.supportsParameter s key) false)
+                  (when-not (= (JceSecurity/canUseProvider (.getProvider s)) false)
+                    (let [tr (Cipher/getTransform s transforms)]
+                      (when (some? tr)
+                        (when-not (== (.supportsModePadding tr s) S_NO)
+                          (try
+                            (when (nil? thisSpi)
+                              (set! thisSpi (cast CipherSpi (.newInstance s nil))))
+                            (.setModePadding tr thisSpi)
+                            (.initCryptoPermission this)
+                            (.implInit this thisSpi initType opmode key paramSpec params random)
+                            (set! provider (.getProvider s))
+                            (set! (.-spi this) thisSpi)
+                            (set! firstService nil)
+                            (set! serviceIterator nil)
+                            (set! transforms nil)
+                            (return)
+                            (catch Exception e (when (nil? lastException) (set! lastException e)))))))))))
+            (when (instance? InvalidKeyException lastException)
+              (throw (cast InvalidKeyException lastException)))
+            (when (instance? InvalidAlgorithmParameterException lastException)
+              (throw (cast InvalidAlgorithmParameterException lastException)))
+            (when (instance? RuntimeException lastException)
+              (throw (cast RuntimeException lastException)))
+            (let [^String kName (if (some? key) (.getName (.getClass key)) "(null)")]
+              (throw (InvalidKeyException.
+                       (java-str "No installed provider supports this key: " kName)
+                       lastException)))))))
+
+  (method ^:public ^:final getProvider ^Provider [this]
+    (.chooseFirstProvider this)
+    (.-provider this))
+
+  (method ^:public ^:final getAlgorithm ^String [this]
+    (.-transformation this))
+
+  (method ^:public ^:final getBlockSize ^int [this]
+    (.chooseFirstProvider this)
+    (.engineGetBlockSize spi))
+
+  (method ^:public ^:final getOutputSize ^int [this ^int inputLen]
+    (when (and (not initialized) (not (instance? NullCipher this)))
+      (throw (IllegalStateException. "Cipher not initialized")))
+    (when (< inputLen 0)
+      (throw (IllegalArgumentException. "Input size must be equal to or greater than zero")))
+    (.chooseFirstProvider this)
+    (.engineGetOutputSize spi inputLen))
+
+  (method ^:public ^:final getIV ^byte/1 [this]
+    (.chooseFirstProvider this)
+    (.engineGetIV spi))
+
+  (method ^:public ^:final getParameters ^AlgorithmParameters [this]
+    (.chooseFirstProvider this)
+    (.engineGetParameters spi))
+
+  (method ^:public ^:final getExemptionMechanism ^ExemptionMechanism [this]
+    (.chooseFirstProvider this)
+    exmech)
+
+  (method ^:private checkCryptoPerm :throws [InvalidKeyException] ^void [this ^CipherSpi checkSpi
+                                                                         ^Key key]
+    (when-not (identical? cryptoPerm CryptoAllPermission/INSTANCE)
+      (let [^:mutable ^AlgorithmParameterSpec params nil]
+        (try
+          (set! params (.getAlgorithmParameterSpec this (.engineGetParameters checkSpi)))
+          (catch InvalidParameterSpecException ipse
+            (throw (InvalidKeyException. "Unsupported default algorithm parameters"))))
+        (when-not (.passCryptoPermCheck this checkSpi key params)
+          (throw (InvalidKeyException. "Illegal key size or default parameters"))))))
+
+  (method ^:private checkCryptoPerm :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                            ^CipherSpi checkSpi
+                                                                                                            ^Key key
+                                                                                                            ^AlgorithmParameterSpec params]
+    (when-not (identical? cryptoPerm CryptoAllPermission/INSTANCE)
+      (when-not (.passCryptoPermCheck this checkSpi key nil)
+        (throw (InvalidKeyException. "Illegal key size")))
+      (when (and (some? params) (not (.passCryptoPermCheck this checkSpi key params)))
+        (throw (InvalidAlgorithmParameterException. "Illegal parameters")))))
+
+  (method ^:private checkCryptoPerm :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                            ^CipherSpi checkSpi
+                                                                                                            ^Key key
+                                                                                                            ^AlgorithmParameters params]
+    (when-not (identical? cryptoPerm CryptoAllPermission/INSTANCE)
+      (let [^:mutable ^AlgorithmParameterSpec pSpec nil]
+        (try
+          (set! pSpec (.getAlgorithmParameterSpec this params))
+          (catch InvalidParameterSpecException ipse
+            (throw (InvalidAlgorithmParameterException.
+                     "Failed to retrieve algorithm parameter specification"))))
+        (.checkCryptoPerm this checkSpi key pSpec))))
+
+  (method ^:private passCryptoPermCheck :throws [InvalidKeyException] ^boolean [this
+                                                                                ^CipherSpi checkSpi
+                                                                                ^Key key
+                                                                                ^AlgorithmParameterSpec params]
+    (let [em (.getExemptionMechanism cryptoPerm)
+          keySize (.engineGetKeySize checkSpi key)
+          ^:mutable ^String algComponent nil
+          index (.indexOf transformation \/)]
+      (if (not (== index -1))
+          (set! algComponent (.substring transformation 0 index))
+          (set! algComponent transformation))
+      (let [checkPerm (CryptoPermission. algComponent keySize params em)]
+        (cond
+          (not (.implies cryptoPerm checkPerm))
+            (do
+              (when (some? debug)
+                (.println debug "Crypto Permission check failed")
+                (.println debug (java-str "granted: " cryptoPerm))
+                (.println debug (java-str "requesting: " checkPerm)))
+              false)
+          (nil? exmech) true
+          :else
+            (do
+              (try
+                (when-not (.isCryptoAllowed exmech key)
+                  (when (some? debug)
+                    (.println debug (java-str (.getName exmech) " isn't enforced")))
+                  (return false))
+                (catch ExemptionMechanismException eme
+                  (when (some? debug)
+                    (.println debug
+                              (java-str "Cannot determine whether "
+                                        (.getName exmech)
+                                        " has been enforced"))
+                    (.printStackTrace eme))
+                  (return false)))
+              true)))))
+
+  (method ^:private ^:static checkOpmode ^void [^int opmode]
+    (when (or (< opmode ENCRYPT_MODE) (> opmode UNWRAP_MODE))
+      (throw (InvalidParameterException. "Invalid operation mode"))))
+
+  (method ^:public ^:final init :throws [InvalidKeyException] ^void [this ^int opmode ^Key key]
+    (.init this opmode key (JCAUtil/getDefSecureRandom)))
+
+  (method ^:public ^:final init :throws [InvalidKeyException] ^void [this ^int opmode ^Key key
+                                                                     ^SecureRandom random]
+    (set! initialized false)
+    (Cipher/checkOpmode opmode)
+    (if (some? spi)
+        (do (.checkCryptoPerm this spi key) (.engineInit spi opmode key random))
+        (try
+          (.chooseProvider this I_KEY opmode key nil nil random)
+          (catch InvalidAlgorithmParameterException e (throw (InvalidKeyException. e)))))
+    (set! initialized true)
+    (set! (.-opmode this) opmode)
+    (when (and (not skipDebug) (some? pdebug)) (.println pdebug (.toString this))))
+
+  (method ^:public ^:final init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                        ^int opmode
+                                                                                                        ^Key key
+                                                                                                        ^AlgorithmParameterSpec params]
+    (.init this opmode key params (JCAUtil/getDefSecureRandom)))
+
+  (method ^:public ^:final init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                        ^int opmode
+                                                                                                        ^Key key
+                                                                                                        ^AlgorithmParameterSpec params
+                                                                                                        ^SecureRandom random]
+    (set! initialized false)
+    (Cipher/checkOpmode opmode)
+    (if (some? spi)
+        (do (.checkCryptoPerm this spi key params) (.engineInit spi opmode key params random))
+        (.chooseProvider this I_PARAMSPEC opmode key params nil random))
+    (set! initialized true)
+    (set! (.-opmode this) opmode)
+    (when (and (not skipDebug) (some? pdebug)) (.println pdebug (.toString this))))
+
+  (method ^:public ^:final init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                        ^int opmode
+                                                                                                        ^Key key
+                                                                                                        ^AlgorithmParameters params]
+    (.init this opmode key params (JCAUtil/getDefSecureRandom)))
+
+  (method ^:public ^:final init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                        ^int opmode
+                                                                                                        ^Key key
+                                                                                                        ^AlgorithmParameters params
+                                                                                                        ^SecureRandom random]
+    (set! initialized false)
+    (Cipher/checkOpmode opmode)
+    (if (some? spi)
+        (do (.checkCryptoPerm this spi key params) (.engineInit spi opmode key params random))
+        (.chooseProvider this I_PARAMS opmode key nil params random))
+    (set! initialized true)
+    (set! (.-opmode this) opmode)
+    (when (and (not skipDebug) (some? pdebug)) (.println pdebug (.toString this))))
+
+  (method ^:public ^:final init :throws [InvalidKeyException] ^void [this ^int opmode
+                                                                     ^Certificate certificate]
+    (.init this opmode certificate (JCAUtil/getDefSecureRandom)))
+
+  (method ^:public ^:final init :throws [InvalidKeyException] ^void [this ^int opmode
+                                                                     ^Certificate certificate
+                                                                     ^SecureRandom random]
+    (set! initialized false)
+    (Cipher/checkOpmode opmode)
+    (when (instance? X509Certificate certificate)
+      (let [cert (cast X509Certificate certificate)
+            ^{:tag (Set String)} critSet (.getCriticalExtensionOIDs cert)]
+        (when (and (and (some? critSet) (not (.isEmpty critSet)))
+                   (.contains critSet (.value KnownOIDs/KeyUsage)))
+          (let [keyUsageInfo (.getKeyUsage cert)]
+            (when (and (some? keyUsageInfo)
+                       (or (and (and (== opmode Cipher/ENCRYPT_MODE) (> (alength keyUsageInfo) 3))
+                                (= (aget keyUsageInfo 3) false))
+                           (and (and (== opmode Cipher/WRAP_MODE) (> (alength keyUsageInfo) 2))
+                                (= (aget keyUsageInfo 2) false))))
+              (throw (InvalidKeyException. "Wrong key usage")))))))
+    (let [^PublicKey publicKey (when (some? certificate) (.getPublicKey certificate))]
+      (if (some? spi)
+          (do (.checkCryptoPerm this spi publicKey) (.engineInit spi opmode publicKey random))
+          (try
+            (.chooseProvider this I_CERT opmode publicKey nil nil random)
+            (catch InvalidAlgorithmParameterException e (throw (InvalidKeyException. e)))))
+      (set! initialized true)
+      (set! (.-opmode this) opmode)
+      (when (and (not skipDebug) (some? pdebug)) (.println pdebug (.toString this)))))
+
+  (method ^:private checkCipherState ^void [this]
+    (when-not (instance? NullCipher this)
+      (when-not initialized (throw (IllegalStateException. "Cipher not initialized")))
+      (when (and (not (== opmode Cipher/ENCRYPT_MODE)) (not (== opmode Cipher/DECRYPT_MODE)))
+        (throw (IllegalStateException. "Cipher not initialized for encryption/decryption")))))
+
+  (method ^:public ^:final update ^byte/1 [this ^byte/1 input]
+    (.checkCipherState this)
+    (when (nil? input) (throw (IllegalArgumentException. "Null input buffer")))
+    (.chooseFirstProvider this)
+    (when-not (== (alength input) 0) (.engineUpdate spi input 0 (alength input))))
+
+  (method ^:public ^:final update ^byte/1 [this ^byte/1 input ^int inputOffset ^int inputLen]
+    (.checkCipherState this)
+    (when (or (or (or (nil? input) (< inputOffset 0))
+                  (> inputLen (unchecked-subtract-int (alength input) inputOffset)))
+              (< inputLen 0))
+      (throw (IllegalArgumentException. "Bad arguments")))
+    (.chooseFirstProvider this)
+    (when-not (== inputLen 0) (.engineUpdate spi input inputOffset inputLen)))
+
+  (method ^:public ^:final update :throws [ShortBufferException] ^int [this ^byte/1 input
+                                                                       ^int inputOffset
+                                                                       ^int inputLen ^byte/1 output]
+    (.checkCipherState this)
+    (when (or (or (or (nil? input) (< inputOffset 0))
+                  (> inputLen (unchecked-subtract-int (alength input) inputOffset)))
+              (< inputLen 0))
+      (throw (IllegalArgumentException. "Bad arguments")))
+    (.chooseFirstProvider this)
+    (if (== inputLen 0) 0 (.engineUpdate spi input inputOffset inputLen output 0)))
+
+  (method ^:public ^:final update :throws [ShortBufferException] ^int [this ^byte/1 input
+                                                                       ^int inputOffset
+                                                                       ^int inputLen ^byte/1 output
+                                                                       ^int outputOffset]
+    (.checkCipherState this)
+    (when (or (or (or (or (nil? input) (< inputOffset 0))
+                      (> inputLen (unchecked-subtract-int (alength input) inputOffset)))
+                  (< inputLen 0))
+              (< outputOffset 0))
+      (throw (IllegalArgumentException. "Bad arguments")))
+    (.chooseFirstProvider this)
+    (if (== inputLen 0) 0 (.engineUpdate spi input inputOffset inputLen output outputOffset)))
+
+  (method ^:public ^:final update :throws [ShortBufferException] ^int [this ^ByteBuffer input
+                                                                       ^ByteBuffer output]
+    (.checkCipherState this)
+    (when (or (nil? input) (nil? output))
+      (throw (IllegalArgumentException. "Buffers must not be null")))
+    (when (identical? input output)
+      (throw
+        (IllegalArgumentException.
+          "Input and output buffers must not be the same object, consider using buffer.duplicate()")))
+    (when (.isReadOnly output) (throw (ReadOnlyBufferException.)))
+    (.chooseFirstProvider this)
+    (.engineUpdate spi input output))
+
+  (method ^:public ^:final doFinal :throws [IllegalBlockSizeException BadPaddingException] ^byte/1 [this]
+    (.checkCipherState this)
+    (.chooseFirstProvider this)
+    (.engineDoFinal spi nil 0 0))
+
+  (method ^:public ^:final doFinal :throws [IllegalBlockSizeException
+                                            ShortBufferException
+                                            BadPaddingException] ^int [this ^byte/1 output
+                                                                       ^int outputOffset]
+    (.checkCipherState this)
+    (when (or (nil? output) (< outputOffset 0)) (throw (IllegalArgumentException. "Bad arguments")))
+    (.chooseFirstProvider this)
+    (.engineDoFinal spi nil 0 0 output outputOffset))
+
+  (method ^:public ^:final doFinal :throws [IllegalBlockSizeException BadPaddingException] ^byte/1 [this
+                                                                                                    ^byte/1 input]
+    (.checkCipherState this)
+    (when (nil? input) (throw (IllegalArgumentException. "Null input buffer")))
+    (.chooseFirstProvider this)
+    (.engineDoFinal spi input 0 (alength input)))
+
+  (method ^:public ^:final doFinal :throws [IllegalBlockSizeException BadPaddingException] ^byte/1 [this
+                                                                                                    ^byte/1 input
+                                                                                                    ^int inputOffset
+                                                                                                    ^int inputLen]
+    (.checkCipherState this)
+    (when (or (or (or (nil? input) (< inputOffset 0))
+                  (> inputLen (unchecked-subtract-int (alength input) inputOffset)))
+              (< inputLen 0))
+      (throw (IllegalArgumentException. "Bad arguments")))
+    (.chooseFirstProvider this)
+    (.engineDoFinal spi input inputOffset inputLen))
+
+  (method ^:public ^:final doFinal :throws [ShortBufferException
+                                            IllegalBlockSizeException
+                                            BadPaddingException] ^int [this ^byte/1 input
+                                                                       ^int inputOffset
+                                                                       ^int inputLen ^byte/1 output]
+    (.checkCipherState this)
+    (when (or (or (or (nil? input) (< inputOffset 0))
+                  (> inputLen (unchecked-subtract-int (alength input) inputOffset)))
+              (< inputLen 0))
+      (throw (IllegalArgumentException. "Bad arguments")))
+    (.chooseFirstProvider this)
+    (.engineDoFinal spi input inputOffset inputLen output 0))
+
+  (method ^:public ^:final doFinal :throws [ShortBufferException
+                                            IllegalBlockSizeException
+                                            BadPaddingException] ^int [this ^byte/1 input
+                                                                       ^int inputOffset
+                                                                       ^int inputLen ^byte/1 output
+                                                                       ^int outputOffset]
+    (.checkCipherState this)
+    (when (or (or (or (or (nil? input) (< inputOffset 0))
+                      (> inputLen (unchecked-subtract-int (alength input) inputOffset)))
+                  (< inputLen 0))
+              (< outputOffset 0))
+      (throw (IllegalArgumentException. "Bad arguments")))
+    (.chooseFirstProvider this)
+    (.engineDoFinal spi input inputOffset inputLen output outputOffset))
+
+  (method ^:public ^:final doFinal :throws [ShortBufferException
+                                            IllegalBlockSizeException
+                                            BadPaddingException] ^int [this ^ByteBuffer input
+                                                                       ^ByteBuffer output]
+    (.checkCipherState this)
+    (when (or (nil? input) (nil? output))
+      (throw (IllegalArgumentException. "Buffers must not be null")))
+    (when (identical? input output)
+      (throw
+        (IllegalArgumentException.
+          "Input and output buffers must not be the same object, consider using buffer.duplicate()")))
+    (when (.isReadOnly output) (throw (ReadOnlyBufferException.)))
+    (.chooseFirstProvider this)
+    (.engineDoFinal spi input output))
+
+  (method ^:public ^:final wrap :throws [IllegalBlockSizeException InvalidKeyException] ^byte/1 [this
+                                                                                                 ^Key key]
+    (when-not (instance? NullCipher this)
+      (when-not initialized (throw (IllegalStateException. "Cipher not initialized")))
+      (when-not (== opmode Cipher/WRAP_MODE)
+        (throw (IllegalStateException. "Cipher not initialized for wrapping keys"))))
+    (.chooseFirstProvider this)
+    (.engineWrap spi key))
+
+  (method ^:public ^:final unwrap :throws [InvalidKeyException NoSuchAlgorithmException] ^Key [this
+                                                                                               ^byte/1 wrappedKey
+                                                                                               ^String wrappedKeyAlgorithm
+                                                                                               ^int wrappedKeyType]
+    (when-not (instance? NullCipher this)
+      (when-not initialized (throw (IllegalStateException. "Cipher not initialized")))
+      (when-not (== opmode Cipher/UNWRAP_MODE)
+        (throw (IllegalStateException. "Cipher not initialized for unwrapping keys"))))
+    (when (and (and (not (== wrappedKeyType SECRET_KEY)) (not (== wrappedKeyType PRIVATE_KEY)))
+               (not (== wrappedKeyType PUBLIC_KEY)))
+      (throw (InvalidParameterException. "Invalid key type")))
+    (.chooseFirstProvider this)
+    (.engineUnwrap spi wrappedKey wrappedKeyAlgorithm wrappedKeyType))
+
+  (method ^:private getAlgorithmParameterSpec :throws [InvalidParameterSpecException] ^AlgorithmParameterSpec [this
+                                                                                                               ^AlgorithmParameters params]
+    (when (some? params)
+      (let [alg (.toUpperCase (.getAlgorithm params) Locale/ENGLISH)]
+        (cond
+          (.equalsIgnoreCase alg "RC2") (.getParameterSpec params RC2ParameterSpec)
+          (.equalsIgnoreCase alg "RC5") (.getParameterSpec params RC5ParameterSpec)
+          (.startsWith alg "PBE") (.getParameterSpec params PBEParameterSpec)
+          (.startsWith alg "DES") (.getParameterSpec params IvParameterSpec)))))
+
+  (method ^:private ^:static getConfiguredPermission :throws [NullPointerException
+                                                              NoSuchAlgorithmException] ^CryptoPermission [^String transformation]
+    (when (nil? transformation) (throw (NullPointerException.)))
+    (let [parts (Cipher/tokenizeTransformation transformation)]
+      (.getCryptoPermission JceSecurityManager/INSTANCE (aget parts 0))))
+
+  (method ^:public ^:static ^:final getMaxAllowedKeyLength :throws [NoSuchAlgorithmException] ^int [^String transformation]
+    (let [cp (Cipher/getConfiguredPermission transformation)] (.getMaxKeySize cp)))
+
+  (method ^:public ^:static ^:final getMaxAllowedParameterSpec :throws [NoSuchAlgorithmException] ^AlgorithmParameterSpec [^String transformation]
+    (let [cp (Cipher/getConfiguredPermission transformation)] (.getAlgorithmParameterSpec cp)))
+
+  (method ^:public ^:final updateAAD ^void [this ^byte/1 src]
+    (when (nil? src) (throw (IllegalArgumentException. "src buffer is null")))
+    (.updateAAD this src 0 (alength src)))
+
+  (method ^:public ^:final updateAAD ^void [this ^byte/1 src ^int offset ^int len]
+    (.checkCipherState this)
+    (when (or (or (or (nil? src) (< offset 0)) (< len 0))
+              (> len (unchecked-subtract-int (alength src) offset)))
+      (throw (IllegalArgumentException. "Bad arguments")))
+    (.chooseFirstProvider this)
+    (when-not (== len 0) (.engineUpdateAAD spi src offset len)))
+
+  (method ^:public ^:final updateAAD ^void [this ^ByteBuffer src]
+    (.checkCipherState this)
+    (when (nil? src) (throw (IllegalArgumentException. "src ByteBuffer is null")))
+    (.chooseFirstProvider this)
+    (when-not (== (.remaining src) 0) (.engineUpdateAAD spi src)))
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append (.append (.append sb "Cipher.") transformation) ", mode: ")
+      (switch opmode
+        0 (.append sb "not initialized")
+        ENCRYPT_MODE (.append sb "encryption")
+        DECRYPT_MODE (.append sb "decryption")
+        WRAP_MODE (.append sb "key wrapping")
+        UNWRAP_MODE (.append sb "key unwrapping")
+        (.append (.append sb "error:") opmode))
+      (.append (.append sb ", algorithm from: ") (.getProviderName this))
+      (.toString sb))))

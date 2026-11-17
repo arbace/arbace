@@ -22,7 +22,7 @@ import (
 
 // version is part of every cache key: a change of the filter's output, or of the statuses a run is cached with, changes it
 // (cxxdump-8: review 007's fixes cached a clang that was killed as "rejected" before; those entries are not served any more).
-const version = "cxxdump-8"
+const version = "cxxdump-9" // 9: the ids renumbered by first appearance (renumber)
 
 // normVersion is the normal form's own part of the key of a -norm run: a change of norm.go (CP77 (b): no FullComment) changes it and
 // only the .norm entries, not the dumps', are rebuilt.
@@ -428,12 +428,57 @@ func fileDigest(p string) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
+// recordsOnly (ORS12 (a), -records): the cache is a pack of recorded entries read without clang: a miss is an error (unrecorded), clangID names the
+// recorded clang line in place of `clang --version`'s (the key's one clang part), and a dependency that is not on the host is not a stale entry (the
+// host has no such header or file: the record stands) while one that is there with another digest is.
+var (
+	recordsOnly bool
+	clangID     string
+)
+
 func clangVersion(clang string) string {
+	if clangID != "" {
+		return clangID
+	}
 	out, err := exec.Command(clang, "--version").Output()
 	if err != nil {
 		return "unknown"
 	}
 	return strings.SplitN(string(out), "\n", 2)[0]
+}
+
+// The checkout's root (CXXDUMP_ROOT, set by bin/lib/repr-cpp's scripts): an argument or a dependency's path under it is keyed and kept as
+// @ROOT@/..., so that a cache entry, and a pack of them (bin/repr-cpp record-dumps), is the same in every checkout and worktree and a
+// recorded dependency under the root is checked where the reading checkout has it (ORS12 (a); before, the absolute -iquote and source
+// paths made a pack's keys the recording worktree's alone).
+func cxxRoot() string { return strings.TrimRight(os.Getenv("CXXDUMP_ROOT"), "/") }
+
+// cxxTree (CXXDUMP_TREE, set by bin/lib/repr-cpp/dg: the g++.dg tree it reads, which lives in the main checkout's .tmp/ or the
+// worktree's or the clean clone's) is keyed and kept as @TREE@/..., for the reason CXXDUMP_ROOT is (CP247 (a): the dg-error part's
+// records are found wherever the pinned tarball was extracted). It is replaced before the root, which may hold it.
+func cxxTree() string { return strings.TrimRight(os.Getenv("CXXDUMP_TREE"), "/") }
+
+func rootRel(s string) string {
+	if t := cxxTree(); t != "" {
+		s = strings.ReplaceAll(s, t+"/", "@TREE@/")
+		if s == t {
+			s = "@TREE@"
+		}
+	}
+	if r := cxxRoot(); r != "" {
+		return strings.ReplaceAll(s, r+"/", "@ROOT@/")
+	}
+	return s
+}
+
+func rootAbs(p string) string {
+	if t := cxxTree(); t != "" && strings.HasPrefix(p, "@TREE@/") {
+		return t + p[len("@TREE@"):]
+	}
+	if r := cxxRoot(); r != "" && strings.HasPrefix(p, "@ROOT@/") {
+		return r + p[len("@ROOT@"):]
+	}
+	return p
 }
 
 func (j job) key() (string, error) {
@@ -444,7 +489,7 @@ func (j job) key() (string, error) {
 	}
 	fmt.Fprintf(h, "%s\x00%s\x00%v %v %v %v %v %v\x00", version, clangVersion(j.clang), j.opts.implicit, j.opts.edn, norm, j.layouts, j.opts.instances, j.opts.main)
 	for _, a := range j.args {
-		h.Write([]byte(a))
+		h.Write([]byte(rootRel(a)))
 		h.Write([]byte{0})
 	}
 	b, err := os.ReadFile(j.args[len(j.args)-1])
@@ -494,7 +539,10 @@ func depsValid(depsFile string) bool {
 		if len(f) != 2 {
 			return false
 		}
-		d, err := fileDigest(f[1])
+		d, err := fileDigest(rootAbs(f[1]))
+		if err != nil && recordsOnly && os.IsNotExist(err) {
+			continue
+		}
 		if err != nil || d != f[0] {
 			return false
 		}
@@ -544,6 +592,12 @@ func cached(dir string, j job, outName string) (stats, bool, error) {
 		}
 		return st, true, nil
 	}
+	if recordsOnly {
+		if _, err := os.Stat(base + ".status"); err == nil {
+			return st, false, fmt.Errorf("stale record %s: a file the unit read has another digest than the record's (bin/repr-cpp record-dumps, by hand)", k)
+		}
+		return st, false, fmt.Errorf("unrecorded: no record %s in the packs (bin/repr-cpp record-dumps, by hand on a host with clang)", k)
+	}
 	tmp := fmt.Sprintf("%s.%d.tmp", base, os.Getpid())
 	fh, err := os.Create(tmp)
 	if err != nil {
@@ -576,7 +630,7 @@ func cached(dir string, j job, outName string) (stats, bool, error) {
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(&deps, "%s\t%s\n", d, p)
+		fmt.Fprintf(&deps, "%s\t%s\n", d, rootRel(p))
 	}
 	os.WriteFile(base+".deps", []byte(deps.String()), 0o644)
 	os.WriteFile(base+".err", errb.Bytes(), 0o644)

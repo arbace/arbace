@@ -1,0 +1,134 @@
+(ns arbace.repr.haskell.parse
+  "GHC 9.14.1's parser (doc/haskell/NATIVE.md): Happy's LR driver, as its template in GHC's
+  generated Parser.hs runs it (happyDoAction, happyShift, happyReduce, happyFail: a token without
+  an action is retried as the error token in the same state, the original token kept on the value
+  stack; shifting the error token goes on with the original token; a reduction with the error
+  token as lookahead fails), over the LALR(1) tables generated from Parser.y.source
+  (arbace.repr.haskell.tables, by arbace.repr.haskell.happy) and Parser.y's actions
+  (arbace.repr.haskell.rules-module, -decl, -expr, registered by rule in
+  arbace.repr.haskell.ast/actions). Parser.y's single error production, close : error
+  {% popContext }, is the layout algorithm's parse-error(t) rule.
+
+  (parse ps start) runs the parser named start (parseModuleNoHaddock, parseSignatureNoHaddock...)
+  over the lexer state ps; a parse error throws ex-info with the message (:ps-message, the
+  error srcParseErr makes: happyError is srcParseFail)."
+  (:require [arbace.repr.haskell.ast :as a]
+            [arbace.repr.haskell.lex :as lx]
+            [arbace.repr.haskell.post :as pp]
+            [arbace.repr.haskell.tables :as tb]
+            [arbace.repr.haskell.rules-module]
+            [arbace.repr.haskell.rules-decl]
+            [arbace.repr.haskell.rules-expr]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private grammar
+  (delay
+    (let [t (tb/tables)
+          prods (:productions t)
+          missing (java.util.ArrayList.)
+          acts (object-array (count prods))]
+      (doseq [[i p] (map-indexed vector prods)]
+        (when-not (= :start (:kind p))
+          (let [k (a/rule-key (:rule-lhs p) (:rule-rhs p))
+                f (.get ^java.util.HashMap a/actions k)]
+            (if f (aset acts (int i) f) (.add missing k)))))
+      ;; terminals: a token kind to its number (ITproj by its value)
+      (let [by-kind (java.util.HashMap.)]
+        (doseq [[i {:keys [pattern]}] (map-indexed vector (:tokens t))]
+          (let [[_ k v] (re-find #"^L _ \(?(IT\w+)(?: (True|False))?" pattern)]
+            (if v
+              (.put by-kind [(keyword k) (= v "True")] (int (inc i)))
+              (.put by-kind (keyword k) (int (inc i))))))
+        (assoc t :acts acts :missing (vec (distinct missing)) :by-kind by-kind
+               :rule-lhs (int-array (map first (:rules t))) :rule-len (int-array (map second (:rules t)))
+               :eof (dec (long (:n-terms t))))))))
+
+(defn missing-actions
+  "The rules without an action (the grammar's coverage)"
+  []
+  (:missing @grammar))
+
+(defn- terminal
+  "The terminal number of a token"
+  ^long [^java.util.HashMap m ^long eof tok]
+  (let [k (nth tok 0)]
+    (if (identical? k :ITeof)
+      eof
+      (let [n (or (.get m k) (when (identical? k :ITproj) (.get m [k (boolean (nth tok 1))])))]
+        (if n (long n) (throw (ex-info (str "parse error: unexpected token " k) {:span (nth tok 2) :error "token"})))))))
+
+(defn- call-action
+  "Applies the action fn f to ps and the len values of vals ending at n"
+  [f ps ^objects vals ^long n ^long len]
+  (case len
+    0 (f ps)
+    1 (f ps (aget vals (- n 1)))
+    2 (f ps (aget vals (- n 2)) (aget vals (- n 1)))
+    3 (f ps (aget vals (- n 3)) (aget vals (- n 2)) (aget vals (- n 1)))
+    4 (f ps (aget vals (- n 4)) (aget vals (- n 3)) (aget vals (- n 2)) (aget vals (- n 1)))
+    (apply f ps (vec (java.util.Arrays/copyOfRange vals (int (- n len)) (int n))))))
+
+(defn- grow-ints ^ints [^ints a] (java.util.Arrays/copyOf a (int (* 2 (alength a)))))
+(defn- grow-objects ^objects [^objects a] (java.util.Arrays/copyOf a (int (* 2 (alength a)))))
+
+(defn parse
+  "Runs the parser start (a %name of Parser.y) over the lexer state ps; its value"
+  [ps ^String start]
+  (let [g @grammar
+        ^ints action (:action g) ^ints gotos (:goto g)
+        nt (long (:n-terms g)) nn (long (:n-nonterms g))
+        ^ints rule-lhs (:rule-lhs g) ^ints rule-len (:rule-len g) ^objects acts (:acts g)
+        ^java.util.HashMap by-kind (:by-kind g) eof (long (:eof g))
+        start-state (or (get (:starts g) start) (throw (ex-info (str "no parser " start) {})))
+        sts0 (int-array 256) vals0 (object-array 256)]
+    (aset sts0 0 (int start-state))
+    ;; sts: the states, stop of them; vals: the values, vtop of them (a failing token's number is on vals
+    ;; without a state, while the error token is tried)
+    (binding [pp/*ps* ps]
+      (let [tok0 (lx/lex-token ps)]
+        (loop [tok tok0
+               i (terminal by-kind eof tok0)
+               stop 1 vtop 0 ^ints sts sts0 ^objects vals vals0]
+          (if (>= (+ (max stop vtop) 8) (alength sts))
+            (recur tok i stop vtop (grow-ints sts) (grow-objects vals))
+            (let [st (aget sts (dec stop))
+                  act (aget action (int (+ (* st nt) i)))]
+              (cond
+                ;; fail: enter error recovery (the token number saved on the value stack, the error
+                ;; token tried in the same state), or fail when already recovering
+                (zero? act)
+                (if (zero? i)
+                  (lx/fatal! (lx/src-parse-err ps))
+                  (do (aset vals vtop (Long/valueOf (long i)))
+                      (recur tok 0 stop (inc vtop) sts vals)))
+                ;; accept (a %partial parser\'s on the error token: the saved token number dropped)
+                (= act -1)
+                (aget vals (- vtop (if (zero? i) 2 1)))
+                ;; reduce
+                (neg? act)
+                (if (zero? i)
+                  (lx/fatal! (lx/src-parse-err ps))
+                  (let [r (- (inc act))
+                        len (aget rule-len r)
+                        f (aget acts r)
+                        _ (when (nil? f) (throw (ex-info (str "no action for production " r) {:production r})))
+                        v (call-action f ps vals vtop len)
+                        stop2 (- stop len)
+                        vtop2 (- vtop len)
+                        s2 (aget gotos (int (+ (* (aget sts (dec stop2)) nn) (aget rule-lhs r))))]
+                    (aset sts stop2 (int s2))
+                    (aset vals vtop2 v)
+                    (recur tok i (inc stop2) (inc vtop2) sts vals)))
+                ;; shift
+                :else
+                (let [s2 (dec act)]
+                  (aset sts stop (int s2))
+                  (if (zero? i)
+                    ;; the error token shifted: its value is the saved token number, and the parse
+                    ;; goes on with that token
+                    (recur tok (long (aget vals (dec vtop))) (inc stop) vtop sts vals)
+                    (do (aset vals vtop tok)
+                        (let [t2 (lx/lex-token ps)]
+                          (recur t2 (terminal by-kind eof t2) (inc stop) (inc vtop) sts vals)))))))))))))

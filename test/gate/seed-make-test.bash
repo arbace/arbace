@@ -82,7 +82,7 @@ git -C "$P" checkout -q doc/n.md
 
 # a vouched G3 of a clean checkout: packed into the committed seed
 make && [ -s "$P/seed/arbace-seed-go.tar.xz" ] && ok "a vouched G3 packed into the committed seed" || bad "a vouched G3: $(tail -3 "$T/make.log")"
-xz -dc "$P/seed/arbace-seed-go.tar.xz" | tar -xOf - arbace-seed-go/SEED.edn | grep -qF ":version $version" && ok "SEED.edn records the version" || bad "SEED.edn's version"
+grep -qF ":version $version" <<< "$(xz -dc "$P/seed/arbace-seed-go.tar.xz" | tar -xOf - arbace-seed-go/SEED.edn)" && ok "SEED.edn records the version" || bad "SEED.edn's version"
 git -C "$P" checkout -q seed; git -C "$P" clean -qfd seed
 
 # finding 5: a setgid .tmp gives the same tar

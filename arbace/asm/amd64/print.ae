@@ -1,0 +1,417 @@
+(ns arbace.asm.amd64.print
+  "amd64's printer (doc/asm/AMD64.md §4, AX2's third slice): a machine instruction as the matcher makes it (the table's
+  instruction, its MCInst operands {:reg R} {:imm V} {:expr E}, the statement's flags) printed in AT&T syntax as llvm-mc
+  prints it, after llvm-project 23.1.5's X86ATTInstPrinter.cpp (printInst, printVecCompareInstr, printOperand,
+  printMemReference, printSrcIdx, printDstIdx, printMemOffset, printU8Imm, printSTiRegOperand), X86InstPrinterCommon.cpp
+  (printInstFlags, printCondCode, printCondFlags, printSSEAVXCC, printCMPMnemonic, printVPCOMMnemonic, printVPCMPMnemonic,
+  printRoundingControl, printPCRelImm, printOptionalSegReg, printVKPair), MCInstPrinter.cpp (formatImm, formatHex,
+  matchAliasPatterns), MCExpr.cpp's MCExpr::print and MCSymbol::print, and the generated printInstruction and
+  printAliasInstr (AsmWriterEmitter.cpp) read from the table's :print and :print-aliases (arbace.asm.amd64.gen), Apache-2.0
+  WITH LLVM-exception, written again in Arbace.
+
+  `print-inst` gives the line llvm-mc's asm streamer writes for the instruction (without the encoding's comment), e.g.
+  \"\\tlock\\t\\taddl\\t$1, (%rax)\"; an operand it cannot print yet throws {:print/unsupported CLASS}."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:dynamic *t* nil)
+;; llvm-mc's --print-imm-hex (MCInstPrinter's PrintImmHex, the C style)
+(def ^:dynamic *imm-hex* false)
+;; the output variant: X86IntelInstPrinter (-output-asm-variant=1) when true (AX3)
+(def ^:dynamic *intel* false)
+
+(defn unsupported [cls msg] (throw (ex-info msg {:print/unsupported cls})))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; numbers (MCInstPrinter::formatImm, formatHex)
+
+(defn- hex ^String [v]
+  (let [v (long v)]
+    (cond (= v Long/MIN_VALUE) "-0x8000000000000000"
+          (neg? v) (str "-0x" (Long/toHexString (- v)))
+          :else (str "0x" (Long/toHexString v)))))
+
+(defn fmt-imm ^String [v] (if *imm-hex* (hex v) (str (long v))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; expressions (MCExpr::print; the forms of doc/asm/SPEC.md §3)
+
+(defn- acceptable? [c] (let [c (char c)] (or (<= (int \a) (int c) (int \z)) (<= (int \A) (int c) (int \Z))
+                                             (<= (int \0) (int c) (int \9)) (#{\_ \$ \.} c))))
+
+;; X86's reserved identifiers (populateReservedIdentifiers): in Intel output a symbol of such a name is quoted
+(def ^:private intel-keywords
+  #{"byte" "word" "dword" "fword" "qword" "mmword" "tbyte" "oword" "xmmword" "ymmword" "zmmword" "offset" "flat" "near" "far"
+    "short" "and" "eq" "ge" "gt" "le" "lt" "mod" "ne" "not" "or" "shl" "shr" "xor"})
+
+(def ^:private reg-names (memoize (fn [t] (set (map first (vals (:regs t)))))))
+
+(defn- sym-text
+  "MCSymbol::print: the name, quoted when a character is not acceptable unquoted (in Intel output also a register's name or
+  a keyword, isValidX86UnquotedName)."
+  ^String [^String n]
+  (if (and (seq n) (every? acceptable? n)
+           (not (and *intel* (let [l (str/lower-case n)] (or (intel-keywords l) (contains? (reg-names *t*) l))))))
+    n
+    (str "\"" (str/replace (str/replace (str/replace n "\\" "\\\\") "\"" "\\\"") "\n" "\\n") "\"")))
+
+(defn- spec-name
+  "A relocation specifier as X86MCAsmInfo's atSpecifiers spell it: upper case, tlscall and tlsdesc lower."
+  ^String [s]
+  (let [l (str/lower-case (str s))] (if (#{"tlscall" "tlsdesc"} l) l (str/upper-case l))))
+
+(def ^:private bin-ops
+  {'+ "+" '- "-" '* "*" '/ "/" '% "%" '<< "<<" '>> ">>" '| "|" '& "&" 'xor "^" 'ornot "!" '== "==" '!= "!="
+   '< "<" '<= "<=" '> ">" '>= ">=" '&& "&&" '|| "||"})
+
+;; the GNU precedence the source was read with (AsmParser's getGNUBinOpPrecedence): a constant subexpression that needed
+;; parentheses in the text was folded by parseParenExpr's parseExpression
+(def ^:private gnu-prec
+  {'|| 1 '&& 2 '== 3 '!= 3 '< 3 '<= 3 '> 3 '>= 3 '+ 4 '- 4 '| 5 'ornot 5 'xor 5 '& 5 '* 6 '/ 6 '% 6 '<< 6 '>> 6})
+
+(declare const-of)
+
+(defn- const-of
+  "The value of a constant expression form, else nil."
+  [e]
+  (cond
+    (integer? e) (long e)
+    (and (seq? e) (= 2 (count e)) (#{'- '+ 'bnot 'lnot} (first e)))
+    (when-let [x (const-of (second e))] (case (first e) - (- (long x)) + x bnot (bit-not (long x)) lnot (if (zero? (long x)) 1 0)))
+    (and (seq? e) (= 3 (count e)) (bin-ops (first e)))
+    (let [x (const-of (nth e 1)) y (const-of (nth e 2))]
+      (when (and x y)
+        (let [x (long x) y (long y)]
+          (case (first e)
+            + (+ x y) - (- x y) * (* x y) / (when-not (zero? y) (quot x y)) % (when-not (zero? y) (rem x y))
+            << (bit-shift-left x y) >> (bit-shift-right x y) | (bit-or x y) & (bit-and x y) xor (bit-xor x y)
+            ornot (bit-or x (bit-not y)) == (if (= x y) -1 0) != (if (= x y) 0 -1) < (if (< x y) -1 0)
+            <= (if (<= x y) -1 0) > (if (> x y) -1 0) >= (if (>= x y) -1 0)
+            && (if (and (not (zero? x)) (not (zero? y))) 1 0) || (if (or (not (zero? x)) (not (zero? y))) 1 0)))))
+    :else nil))
+
+(defn- binary? [e] (and (seq? e) (= 3 (count e)) (bin-ops (first e))))
+
+(defn- folded
+  "The form as LLVM's parser left it: a binary constant subexpression that needed parentheses in its place (`side` :lhs or
+  :rhs of the operator `parent`, or under a unary operator) folded to its value."
+  [e parent side]
+  (if (and (binary? e) parent (const-of e)
+           (or (= parent :unary)
+               (let [p (long (gnu-prec parent)) q (long (gnu-prec (first e)))] (if (= side :lhs) (< q p) (<= q p)))))
+    (const-of e)
+    e))
+
+(defn expr-text
+  "MCExpr::print of the expression form `e` at the surrounding precedence `sp` (0 at the top)."
+  (^String [e] (expr-text e 0))
+  (^String [e ^long sp]
+   (let [prec* sp]
+   (cond
+     ;; a negative integer of the text is a unary minus over its magnitude (`-4`, `foo+-4`); a folded one is a constant
+     (integer? e) (str e)
+     (symbol? e) (sym-text (str e))
+     (string? e) (sym-text e)
+     (and (seq? e) (= 'sym (first e))) (sym-text (second e))
+     (and (seq? e) (= 'at (first e)) (= 3 (count e)) (or (symbol? (second e)) (and (seq? (second e)) (= 'sym (first (second e))))))
+     (str (expr-text (second e) 9) "@" (spec-name (nth e 2)))
+     ;; a specifier after an expression: AsmParser's applyModifierToExpr puts it on each symbol inside
+     (and (seq? e) (= 'at (first e)) (= 3 (count e)))
+     (let [sp (nth e 2)
+           push (fn push [x] (cond (or (symbol? x) (and (seq? x) (= 'sym (first x)))) (list 'at x sp)
+                                   (and (seq? x) (or (bin-ops (first x)) (#{'- '+ 'bnot 'lnot} (first x))))
+                                   (apply list (first x) (map push (rest x)))
+                                   :else x))]
+       (expr-text (push (second e)) prec*))
+     (and (seq? e) (= 'local (first e))) (unsupported :local-label "a directional local label (1f, 1b): its .Ltmp name")
+     (and (seq? e) (= 'asm/dot (first e))) (unsupported :dot "the location counter: its .Ltmp name")
+     (and (seq? e) (= 2 (count e)) (#{'- '+ 'bnot 'lnot} (first e)))
+     (str ({'- "-" '+ "+" 'bnot "~" 'lnot "!"} (first e)) (expr-text (folded (second e) :unary nil) 9))
+     (binary? e)
+     (let [[op a b] e
+           a (folded a op :lhs) b (folded b op :rhs)
+           prec (if (#{'+ '-} op) 1 0)
+           paren (< prec sp)
+           sub (if (zero? prec) 9 prec)
+           lhs (expr-text (if (and (integer? a) (neg? (long a))) (list '- (- (long a))) a) sub)
+           rhs-neg? (and (integer? b) (neg? (long b)))]
+       (str (when paren "(") lhs
+            (if (and (= op '+) rhs-neg? (not (integer? (nth e 2))))
+              ;; Add of a negative constant: "X-42"
+              (str b)
+              (str (bin-ops op) (expr-text (if rhs-neg? (list '- (- (long b))) b) (inc sub))))
+            (when paren ")")))
+     :else (unsupported :expr (str "an expression " (pr-str e)))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; operands
+
+(defn- reg-name ^String [r]
+  (or (first (get (:regs *t*) r)) (unsupported :register (str "a register without an AsmName: " r))))
+
+(defn- reg-text ^String [r] (if *intel* (reg-name r) (str "%" (reg-name r))))
+
+(defn- expr-operand
+  "X86ATTInstPrinter::printExprOperand: an expression in parentheses when it starts with `$` (Intel's, X86InstPrinterCommon's:
+  the expression as it is)."
+  ^String [e]
+  (let [s (expr-text e)] (if (and (not *intel*) (.startsWith s "$")) (str "(" s ")") s)))
+
+(defn- op-text
+  "printOperand."
+  ^String [mi ^long i]
+  (let [o (nth mi i)]
+    (cond (contains? o :reg) (if (:reg o) (reg-text (:reg o)) (unsupported :no-register "printOperand of no register"))
+          *intel* (if (contains? o :imm) (fmt-imm (:imm o)) (str "offset " (expr-text (:expr o))))
+          (contains? o :imm) (str "$" (fmt-imm (:imm o)))
+          :else (str "$" (expr-text (:expr o))))))
+
+(defn- seg-text [mi ^long i] (when-let [r (:reg (nth mi i))] (str (reg-text r) ":")))
+
+(declare mem-text*)
+
+(defn- intel-mem-text
+  "X86IntelInstPrinter::printMemReference: segment, then [base + scale*index + disp]."
+  ^String [mi ^long op]
+  (let [base (:reg (nth mi op)) scale (long (:imm (nth mi (inc op)))) index (:reg (nth mi (+ op 2))) d (nth mi (+ op 3))]
+    (str (seg-text mi (+ op 4)) "["
+         (when base (reg-text base))
+         (when index (str (when base " + ") (when (or (not= 1 scale) (nil? base)) (str scale "*")) (reg-text index)))
+         (if (contains? d :imm)
+           (let [v (long (:imm d))]
+             (when (or (not= 0 v) (and (nil? index) (nil? base)))
+               (if (or base index)
+                 (if (pos? v) (str " + " (fmt-imm v)) (str " - " (fmt-imm (- v))))
+                 (fmt-imm v))))
+           (str (when (or base index) " + ") (expr-text (:expr d))))
+         "]")))
+
+(defn- mem-text
+  "printMemReference: segment, displacement, (base,index,scale)."
+  ^String [mi ^long op]
+  (if *intel* (intel-mem-text mi op) (mem-text* mi op)))
+
+(defn- mem-text*
+  ^String [mi ^long op]
+  (let [base (:reg (nth mi op)) scale (:imm (nth mi (inc op))) index (:reg (nth mi (+ op 2))) d (nth mi (+ op 3))]
+    (str (seg-text mi (+ op 4))
+         (if (contains? d :imm)
+           (when (or (not= 0 (long (:imm d))) (and (nil? index) (nil? base))) (fmt-imm (:imm d)))
+           (expr-operand (:expr d)))
+         (when (or index base)
+           (str "(" (when base (reg-text base))
+                (when index (str "," (reg-text index) (when (not= 1 (long scale)) (str "," scale))))
+                ")")))))
+
+(def ^:private cond-codes ["o" "no" "b" "ae" "e" "ne" "be" "a" "s" "ns" "p" "np" "l" "ge" "le" "g"])
+(def ^:private ccmp-codes (assoc cond-codes 10 "t" 11 "f"))
+(def ^:private sse-cc ["eq" "lt" "le" "unord" "neq" "nlt" "nle" "ord" "eq_uq" "nge" "ngt" "false" "neq_oq" "ge" "gt" "true"
+                       "eq_os" "lt_oq" "le_oq" "unord_s" "neq_us" "nlt_uq" "nle_uq" "ord_s" "eq_us" "nge_uq" "ngt_uq" "false_os"
+                       "neq_os" "ge_oq" "gt_oq" "true_us"])
+
+(defn- pcrel-text
+  "printPCRelImm (no symbolizing, no address): an immediate as formatImm, an expression as printExprOperand."
+  ^String [mi ^long i]
+  (let [o (nth mi i)]
+    (if (contains? o :imm) (fmt-imm (:imm o)) (expr-operand (:expr o)))))
+
+(def ^:private intel-size-words
+  {"printbytemem" "byte" "printwordmem" "word" "printdwordmem" "dword" "printqwordmem" "qword" "printxmmwordmem" "xmmword"
+   "printymmwordmem" "ymmword" "printzmmwordmem" "zmmword" "printtbytemem" "tbyte"})
+
+(defn- intel-operand-by
+  "X86IntelInstPrinter's print methods that differ from AT&T's: the memory references with their size word, the string
+  instructions' indexes, the offsets, printU8Imm's expression, printSTiRegOperand."
+  [^String pm mi ^long i]
+  (let [sized (fn [w s] (str w " ptr " s))
+        sz (fn [^String m] ({"8" "byte" "16" "word" "32" "dword" "64" "qword"} (re-find #"\d+$" m)))]
+    (cond
+      (intel-size-words pm) (sized (intel-size-words pm) (intel-mem-text mi i))
+      (= pm "printMemReference") (intel-mem-text mi i)
+      (.startsWith pm "printSrcIdx") (let [s (str (seg-text mi (inc i)) "[" (op-text mi i) "]")] (if-let [w (sz pm)] (sized w s) s))
+      (.startsWith pm "printDstIdx") (let [s (str "es:[" (op-text mi i) "]")] (if-let [w (sz pm)] (sized w s) s))
+      (or (.startsWith pm "printMemOffs") (= pm "printMemOffset"))
+      (let [d (nth mi i)
+            s (str (seg-text mi (inc i)) "[" (if (contains? d :imm) (fmt-imm (:imm d)) (expr-text (:expr d))) "]")]
+        (if-let [w (when (.startsWith pm "printMemOffs") (sz pm))] (sized w s) s))
+      (= pm "printU8Imm") (let [o (nth mi i)] (if (contains? o :imm) (fmt-imm (bit-and (long (:imm o)) 0xff)) (expr-text (:expr o))))
+      (= pm "printSTiRegOperand") (if (= "ST0" (:reg (nth mi i))) "st(0)" (op-text mi i))
+      :else nil)))
+
+(defn- operand-by
+  "The print method `pm` of the operand `i` of the instruction `inst`."
+  ^String [^String pm ^String inst mi ^long i]
+  (or (when *intel* (intel-operand-by pm mi i))
+  (case pm
+    "printOperand" (op-text mi i)
+    ("printMemReference" "printbytemem" "printwordmem" "printdwordmem" "printqwordmem" "printxmmwordmem" "printymmwordmem"
+     "printzmmwordmem" "printtbytemem" "printf32mem" "printf64mem" "printf80mem" "printf128mem" "printf256mem" "printf512mem")
+    (mem-text mi i)
+    ("printSrcIdx" "printSrcIdx8" "printSrcIdx16" "printSrcIdx32" "printSrcIdx64")
+    (str (seg-text mi (inc i)) "(" (op-text mi i) ")")
+    ("printDstIdx" "printDstIdx8" "printDstIdx16" "printDstIdx32" "printDstIdx64")
+    (str "%es:(" (op-text mi i) ")")
+    ("printMemOffset" "printMemOffs8" "printMemOffs16" "printMemOffs32" "printMemOffs64")
+    (let [d (nth mi i)] (str (seg-text mi (inc i)) (if (contains? d :imm) (fmt-imm (:imm d)) (expr-operand (:expr d)))))
+    "printU8Imm" (let [o (nth mi i)] (if (contains? o :imm) (str "$" (fmt-imm (bit-and (long (:imm o)) 0xff))) (op-text mi i)))
+    "printSTiRegOperand" (if (= "ST0" (:reg (nth mi i))) "%st(0)" (op-text mi i))
+    "printCondCode" (let [v (long (:imm (nth mi i)))]
+                      (nth (if (re-matches #"(CCMP|CTEST).*" inst) ccmp-codes cond-codes) v))
+    "printCondFlags" (let [v (long (:imm (nth mi i)))]
+                       (str "{dfv=" (str/join "," (keep (fn [[b n]] (when (pos? (bit-and v b)) n)) [[8 "of"] [4 "sf"] [2 "zf"] [1 "cf"]])) "}"))
+    "printRoundingControl" (nth ["{rn-sae}" "{rd-sae}" "{ru-sae}" "{rz-sae}"] (long (:imm (nth mi i))))
+    "printPCRelImm" (pcrel-text mi i)
+    ;; a pair printed by its even register (the matcher renders K0_K1 ... as K0, K2, K4, K6)
+    "printVKPair" (op-text mi i)
+    (unsupported :print-method (str "the print method " pm)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the instruction
+
+(defn- info [inst] (get (:insns *t*) inst))
+
+(defn- flags-text
+  "printInstFlags: lock, notrack, rep/repne, {nf}, {vex} {vex2} {vex3} {evex}, {disp8} {disp32}."
+  ^String [inst flags]
+  (let [i (info inst) fl (set (:flags i))]
+    (str (when (or (fl :lock) (flags :lock)) "\tlock\t")
+         (when (or (fl :notrack) (flags :notrack)) "\tnotrack\t")
+         (cond (flags :repne) "\trepne\t" (flags :rep) "\trep\t")
+         (when (and (fl :nf) (not (re-matches #"CFCMOV.*" inst))) "\t{nf}")
+         (cond (or (flags :use-vex) (= "ExplicitVEX" (:explicit i))) "\t{vex}"
+               (flags :use-vex2) "\t{vex2}"
+               (flags :vex3) "\t{vex3}"
+               (or (flags :use-evex) (= "ExplicitEVEX" (:explicit i))) "\t{evex}")
+         (cond (flags :disp8) "\t{disp8}" (flags :disp32) "\t{disp32}")
+         ;; the decoder's address-size prefix its operands do not need (IP_HAS_AD_SIZE, AX4's third slice)
+         (cond (flags :addr32) "\taddr32\t" (flags :addr16) "\taddr16\t"))))
+
+(defn- frag-text [inst mi frags]
+  (apply str (map (fn [x] (if (string? x) x (operand-by (or (second x) "printOperand") inst mi (first x)))) frags)))
+
+(defn- alias-text
+  "printAliasInstr: the first of the instruction's alias patterns whose operand count and conditions hold."
+  [inst mi]
+  (when-let [ps (get (if *intel* (:print-aliases-intel *t*) (:print-aliases *t*)) inst)]
+    (let [p (first ps)]
+      ;; matchAliasPatterns gives up at the first pattern of another operand count
+      (when (= (count mi) (long (second p)))
+        (when-let [[frags] (first (filter (fn [[_ n conds]]
+                                            (and (= (count mi) (long n))
+                                                 (every? (fn [[k c]]
+                                                           (let [o (nth mi k)]
+                                                             (case (first c)
+                                                               :ignore true
+                                                               :imm (= (:imm o) (second c))
+                                                               :reg (and (contains? o :reg) (= (:reg o) (second c)))
+                                                               :tied (and (contains? o :reg) (= (:reg o) (:reg (nth mi (second c)))))
+                                                               :rc (and (:reg o) (contains? (set (nth c 2)) (:reg o)))
+                                                               :custom (unsupported :alias-predicate (str "MCOperandPredicate " (second c))))))
+                                                         (map-indexed vector conds))))
+                                          ps))]
+          (let [s (frag-text inst mi frags)
+                k (or (first (keep-indexed (fn [i c] (when (#{\space \tab} c) i)) s)) (count s))]
+            ;; the mnemonic, a tab for the first blank, the rest as it is
+            (str "\t" (subs s 0 k) (when (< k (count s)) (str "\t" (subs s (inc k)))))))))))
+
+(defn- vec-cmp-text
+  "printVecCompareInstr: the comparisons whose predicate immediate is printed in the mnemonic."
+  [^String inst mi]
+  (when (and (seq mi) (contains? (peek mi) :imm))
+    (let [imm (long (:imm (peek mi)))
+          i (info inst) fl (set (:flags i))
+          mem? (= "MRMSrcMem" (:form i))
+          ta? (= "TA" (:map i))
+          suffix (fn [] (some (fn [[re s]] (when (re-find re inst) s))
+                              [[#"^V?CMPPD" "pd"] [#"^V?CMPPS" "ps"] [#"^V?CMPSD" "sd"] [#"^V?CMPSS" "ss"] [#"^VCMPPH" "ph"]
+                               [#"^VCMPSH" "sh"] [#"^VCMPBF16" "bf16"]]))
+          ;; the operands after the mnemonic: src (memory or register), src1, dst, then a mask
+          tail (fn [cur first-text]
+                 (let [cur (long cur)]
+                   (str first-text ", " (op-text mi (dec cur)) ", " (op-text mi 0)
+                        (when (> (dec cur) 1) (str " {" (op-text mi (- cur 2)) "}")))))
+          nelts (fn [] (let [n (cond (fl :l2) (if (fl :w) 8 16) (fl :l) (if (fl :w) 4 8) :else (if (fl :w) 2 4))] (if ta? (* 2 n) n)))]
+      (cond
+        (and (re-matches #"CMP(PD|PS|SD|SS)r[mr]i(_Int)?" inst) (<= 0 imm 7))
+        (str "\tcmp" (nth sse-cc imm) (suffix) "\t" (if mem? (mem-text mi 2) (op-text mi 2)) ", " (op-text mi 0))
+        (and (re-matches #"VCMP(PD|PS)(Y|Z128|Z256|Z)?r[mr]i|VCMP(PD|PS|PH|BF16)(Z128|Z256|Z)r(mik|rik|mbi|mbik)|VCMP(PD|PS|PH)Zr(rib|ribk)|VCMP(PH|BF16)(Z128|Z256|Z)r[mr]i|VCMP(SD|SS)Z?r[mr]i(_Int)?|VCMP(SD|SS|SH)Zr(mik|rik|rib|ribk)_Int|VCMPSHZr[mr]i(_Int)?" inst)
+             (<= 0 imm 31))
+        (let [cur (if (fl :k) 3 2)]
+          (str "\tvcmp" (nth sse-cc imm) (suffix) "\t"
+               (tail cur (if mem?
+                           (if (fl :b) (str (mem-text mi cur) "{1to" (nelts) "}") (mem-text mi cur))
+                           (str (when (fl :b) "{sae}, ") (op-text mi cur))))))
+        (and (re-matches #"VPCOMU?[BWDQ][mr]i" inst) (<= 0 imm 7))
+        (str "\tvpcom" (nth ["lt" "le" "gt" "ge" "eq" "neq" "false" "true"] imm)
+             (str/lower-case (second (re-matches #"VPCOM(U?[BWDQ]).*" inst))) "\t"
+             (if mem? (mem-text mi 2) (op-text mi 2)) ", " (op-text mi 1) ", " (op-text mi 0))
+        (and (re-matches #"VPCMPU?[BWDQ]Z(128|256)?r[mr]ik?|VPCMPU?[DQ]Z(128|256)?rmbik?" inst) (or (<= 0 imm 2) (<= 4 imm 6)))
+        (let [cur (if (fl :k) 3 2)
+              n (cond (fl :l2) (if (fl :w) 8 16) (fl :l) (if (fl :w) 4 8) :else (if (fl :w) 2 4))]
+          (str "\tvpcmp" (nth sse-cc imm) (str/lower-case (second (re-matches #"VPCMP(U?[BWDQ]).*" inst))) "\t"
+               (tail cur (if mem?
+                           (if (fl :b) (str (mem-text mi cur) "{1to" n "}") (mem-text mi cur))
+                           (op-text mi cur)))))
+        :else nil))))
+
+(def ^:private vcmp-re
+  #"VCMP(PD|PS)(Y|Z128|Z256|Z)?r[mr]i|VCMP(PD|PS|PH|BF16)(Z128|Z256|Z)r(mik|rik|mbi|mbik)|VCMP(PD|PS|PH)Zr(rib|ribk)|VCMP(PH|BF16)(Z128|Z256|Z)r[mr]i|VCMP(SD|SS)Z?r[mr]i(_Int)?|VCMP(SD|SS|SH)Zr(mik|rik|rib|ribk)_Int|VCMPSHZr[mr]i(_Int)?")
+
+(defn- intel-vec-cmp-text
+  "X86IntelInstPrinter::printVecCompareInstr: the predicate in the mnemonic, the destination (and mask) first, the memory
+  operand with the size word its encoding implies."
+  [^String inst mi]
+  (when (and (seq mi) (contains? (peek mi) :imm))
+    (let [imm (long (:imm (peek mi)))
+          i (info inst) fl (set (:flags i))
+          mem? (= "MRMSrcMem" (:form i))
+          ta? (= "TA" (:map i))
+          sized (fn [w k] (str w " ptr " (intel-mem-text mi k)))
+          suffix (some (fn [[re s]] (when (re-find re inst) s))
+                       [[#"^V?CMPPD" "pd"] [#"^V?CMPPS" "ps"] [#"^V?CMPSD" "sd"] [#"^V?CMPSS" "ss"] [#"^VCMPPH" "ph"]
+                        [#"^VCMPSH" "sh"] [#"^VCMPBF16" "bf16"]])
+          nelts (fn [] (let [n (cond (fl :l2) (if (fl :w) 8 16) (fl :l) (if (fl :w) 4 8) :else (if (fl :w) 2 4))] (if ta? (* 2 n) n)))
+          head (fn [] (let [k? (fl :k)]
+                        [(str (op-text mi 0) (when k? (str " {" (op-text mi 1) "}")) ", " (op-text mi (if k? 2 1)) ", ")
+                         (if k? 3 2)]))]
+      (cond
+        (and (re-matches #"CMP(PD|PS|SD|SS)r[mr]i(_Int)?" inst) (<= 0 imm 7))
+        (str "\tcmp" (nth sse-cc imm) suffix "\t" (op-text mi 0) ", "
+             (if mem? (sized (case (:prefix i) "XS" "dword" "XD" "qword" "xmmword") 2) (op-text mi 2)))
+        (and (re-matches vcmp-re inst) (<= 0 imm 31))
+        (let [[h cur] (head)]
+          (str "\tvcmp" (nth sse-cc imm) suffix "\t" h
+               (if mem?
+                 (if (fl :b)
+                   (str (sized (cond ta? "word" (fl :w) "qword" :else "dword") cur) "{1to" (nelts) "}")
+                   (sized (cond (= "XS" (:prefix i)) (if ta? "word" "dword")
+                                (and (= "XD" (:prefix i)) (not ta?)) "qword"
+                                (fl :l2) "zmmword" (fl :l) "ymmword" :else "xmmword")
+                          cur))
+                 (str (op-text mi cur) (when (fl :b) ", {sae}")))))
+        (and (re-matches #"VPCOMU?[BWDQ][mr]i" inst) (<= 0 imm 7))
+        (str "\tvpcom" (nth ["lt" "le" "gt" "ge" "eq" "neq" "false" "true"] imm)
+             (str/lower-case (second (re-matches #"VPCOM(U?[BWDQ]).*" inst))) "\t"
+             (op-text mi 0) ", " (op-text mi 1) ", " (if mem? (sized "xmmword" 2) (op-text mi 2)))
+        (and (re-matches #"VPCMPU?[BWDQ]Z(128|256)?r[mr]ik?|VPCMPU?[DQ]Z(128|256)?rmbik?" inst) (or (<= 0 imm 2) (<= 4 imm 6)))
+        (let [[h cur] (head)
+              n (cond (fl :l2) (if (fl :w) 8 16) (fl :l) (if (fl :w) 4 8) :else (if (fl :w) 2 4))]
+          (str "\tvpcmp" (nth sse-cc imm) (str/lower-case (second (re-matches #"VPCMP(U?[BWDQ]).*" inst))) "\t" h
+               (if mem?
+                 (if (fl :b)
+                   (str (sized (if (fl :w) "qword" "dword") cur) "{1to" n "}")
+                   (sized (cond (fl :l2) "zmmword" (fl :l) "ymmword" :else "xmmword") cur))
+                 (op-text mi cur))))
+        :else nil))))
+
+(defn print-inst
+  "The line llvm-mc prints for the instruction `inst` with the MCInst operands `mi` and `flags` in `mode` (printInst)."
+  ^String [^String inst mi flags ^long mode]
+  (let [i (or (info inst) (unsupported :instruction (str "no table entry " inst)))]
+    (str (flags-text inst flags)
+         (cond
+           (and (= inst "DATA16_PREFIX") (= mode 16)) "\tdata32"
+           *intel* (or (alias-text inst mi) (intel-vec-cmp-text inst mi) (str "\t" (frag-text inst mi (:print-intel i))))
+           (and (= inst "CALLpcrel32") (= mode 64)) (str "\tcallq\t" (pcrel-text mi 0))
+           :else (or (alias-text inst mi) (vec-cmp-text inst mi) (str "\t" (frag-text inst mi (:print i))))))))

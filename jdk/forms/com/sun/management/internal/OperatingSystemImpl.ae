@@ -1,0 +1,218 @@
+;; Converted from overlay/jdk/java.base/com/sun/management/internal/OperatingSystemImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.management.internal)
+
+(import '(com.sun.management UnixOperatingSystemMXBean)
+        '(java.util.concurrent TimeUnit)
+        '(java.util.function DoubleSupplier LongSupplier ToDoubleFunction)
+        '(jdk.internal.jrt HostManagement)
+        '(jdk.internal.platform Metrics)
+        '(sun.management BaseOperatingSystemImpl VMManagement))
+
+(defclass OperatingSystemImpl
+  :extends BaseOperatingSystemImpl
+  :implements [UnixOperatingSystemMXBean]
+
+  (field ^:private ^:static ^:final ^int MAX_ATTEMPTS_NUMBER 10)
+
+  (field ^:private ^:final ^Metrics containerMetrics)
+
+  (field ^:private ^ContainerCpuTicks systemLoadTicks (SystemCpuTicks.))
+
+  (field ^:private ^ContainerCpuTicks processLoadTicks (ProcessCpuTicks.))
+
+  (defclass ^:private ^:abstract ContainerCpuTicks
+    (field ^:private ^:volatile ^long usageTicks)
+
+    (field ^:private ^:volatile ^long totalTicks)
+
+    (method ^:private getUsageDividesTotal ^double [this ^long usageTicks ^long totalTicks]
+      (if (or (< usageTicks 0) (<= totalTicks 0))
+          -1.0
+          (let [distance (unchecked-subtract usageTicks (.-usageTicks this))]
+            (set! (.-usageTicks this) usageTicks)
+            (let [totalDistance (unchecked-subtract totalTicks (.-totalTicks this))]
+              (set! (.-totalTicks this) totalTicks)
+              (let [^:mutable systemLoad 0.0]
+                (when (and (> distance 0) (> totalDistance 0))
+                  (set! systemLoad (unchecked-divide (double distance) totalDistance)))
+                (set! systemLoad (Math/max 0.0 systemLoad))
+                (set! systemLoad (Math/min 1.0 systemLoad))
+                systemLoad)))))
+
+    (method ^:public getContainerCpuLoad ^double [this]
+      (java-assert (some? containerMetrics))
+      (let [quota (.getCpuQuota containerMetrics)
+            share (.getCpuShares containerMetrics)]
+        (cond
+          (> quota 0)
+            (let [numPeriods (.getCpuNumPeriods containerMetrics)
+                  quotaNanos (.toNanos TimeUnit/MICROSECONDS (unchecked-multiply quota numPeriods))]
+              (.getUsageDividesTotal this (.getAsLong (.cpuUsageSupplier this)) quotaNanos))
+          (.isCpuSetSameAsHostCpuSet OperatingSystemImpl/this)
+            (.getAsDouble (.defaultCpuLoadSupplier this))
+          :else
+            (let [^:mutable cpuSet (.getEffectiveCpuSetCpus containerMetrics)]
+              (when (or (nil? cpuSet) (<= (alength cpuSet) 0))
+                (set! cpuSet (.getCpuSetCpus containerMetrics)))
+              (cond
+                (nil? cpuSet) (.getAsDouble (.defaultCpuLoadSupplier this))
+                (> (alength cpuSet) 0) (.applyAsDouble (.cpuSetCalc this) cpuSet)
+                :else -1.0)))))
+
+    (method ^:protected ^:abstract defaultCpuLoadSupplier ^DoubleSupplier [this])
+
+    (method ^:protected ^:abstract cpuSetCalc ^{:tag (ToDoubleFunction int/1)} [this])
+
+    (method ^:protected ^:abstract cpuUsageSupplier ^LongSupplier [this]))
+
+  (defclass ^:private ProcessCpuTicks
+    :extends ContainerCpuTicks
+
+    (method ^:protected defaultCpuLoadSupplier ^DoubleSupplier [this]
+      (lambda DoubleSupplier ^double [] (.getProcessCpuLoad0 OperatingSystemImpl/this)))
+
+    (method ^:protected cpuSetCalc ^{:tag (ToDoubleFunction int/1)} [this]
+      (lambda ToDoubleFunction ^double [^int/1 cpuSet]
+        (let [totalCPUs (.getHostOnlineCpuCount0 OperatingSystemImpl/this)
+              containerCPUs (.getAvailableProcessors OperatingSystemImpl/this)]
+          (Math/min 1.0
+                    (unchecked-divide
+                      (unchecked-multiply (.getProcessCpuLoad0 OperatingSystemImpl/this) totalCPUs)
+                      containerCPUs)))))
+
+    (method ^:protected cpuUsageSupplier ^LongSupplier [this]
+      (lambda LongSupplier ^long [] (.getProcessCpuTime OperatingSystemImpl/this))))
+
+  (defclass ^:private SystemCpuTicks
+    :extends ContainerCpuTicks
+
+    (method ^:protected defaultCpuLoadSupplier ^DoubleSupplier [this]
+      (lambda DoubleSupplier ^double [] (.getCpuLoad0 OperatingSystemImpl/this)))
+
+    (method ^:protected cpuSetCalc ^{:tag (ToDoubleFunction int/1)} [this]
+      (lambda ToDoubleFunction ^double [^int/1 cpuSet]
+        (let [^:mutable systemLoad 0.0]
+          (for-each [^int cpu cpuSet]
+            (let [cpuLoad (.getSingleCpuLoad0 OperatingSystemImpl/this cpu)]
+              (when (< cpuLoad 0.0) (return -1.0))
+              (set! systemLoad (unchecked-add systemLoad cpuLoad))))
+          (unchecked-divide systemLoad (alength cpuSet)))))
+
+    (method ^:protected cpuUsageSupplier ^LongSupplier [this]
+      (lambda LongSupplier ^long [] (.getCpuUsage containerMetrics))))
+
+  (constructor [this ^VMManagement vm]
+    (super. vm)
+    (set! (.-containerMetrics this) nil))
+
+  (method ^:public getCommittedVirtualMemorySize ^long [this]
+    (.getCommittedVirtualMemorySize0 this))
+
+  (method ^:public getTotalSwapSpaceSize ^long [this]
+    (when (some? containerMetrics)
+      (let [limit (.getMemoryAndSwapLimit containerMetrics)
+            memLimit (.getMemoryLimit containerMetrics)]
+        (when (and (>= limit 0) (>= memLimit 0)) (return (unchecked-subtract limit memLimit)))))
+    (.getTotalSwapSpaceSize0 this))
+
+  (method ^:public getFreeSwapSpaceSize ^long [this]
+    (when (some? containerMetrics)
+      (let [memSwapLimit (.getMemoryAndSwapLimit containerMetrics)
+            memLimit (.getMemoryLimit containerMetrics)]
+        (when (and (>= memSwapLimit 0) (>= memLimit 0))
+          (let [deltaLimit (unchecked-subtract memSwapLimit memLimit)]
+            (when (<= deltaLimit 0) (return 0))
+            (loop [^int attempt 0]
+              (when (< attempt MAX_ATTEMPTS_NUMBER)
+                (let [memSwapUsage (.getMemoryAndSwapUsage containerMetrics)
+                      memUsage (.getMemoryUsage containerMetrics)]
+                  (if (and (> memSwapUsage 0) (> memUsage 0))
+                      (let [deltaUsage (unchecked-subtract memSwapUsage memUsage)]
+                        (if (>= deltaUsage 0)
+                            (let [freeSwap (unchecked-subtract deltaLimit deltaUsage)]
+                              (if (>= freeSwap 0)
+                                  (return freeSwap)
+                                  (recur (unchecked-inc-int attempt))))
+                            (recur (unchecked-inc-int attempt))))
+                      (recur (unchecked-inc-int attempt))))))))))
+    (.getFreeSwapSpaceSize0 this))
+
+  (method ^:public getProcessCpuTime ^long [this]
+    (.getProcessCpuTime0 this))
+
+  (method ^:public getFreeMemorySize ^long [this]
+    (when (some? containerMetrics)
+      (let [usage (.getMemoryUsage containerMetrics)
+            limit (.getMemoryLimit containerMetrics)]
+        (when (and (> usage 0) (>= limit 0)) (return (unchecked-subtract limit usage)))))
+    (.getFreeMemorySize0 this))
+
+  (method ^:public getTotalMemorySize ^long [this]
+    (when (some? containerMetrics)
+      (let [limit (.getMemoryLimit containerMetrics)] (when (>= limit 0) (return limit))))
+    (.getTotalMemorySize0 this))
+
+  (method ^:public getOpenFileDescriptorCount ^long [this]
+    (.getOpenFileDescriptorCount0 this))
+
+  (method ^:public getMaxFileDescriptorCount ^long [this]
+    (.getMaxFileDescriptorCount0 this))
+
+  (method ^:public getCpuLoad ^double [this]
+    (if (some? containerMetrics) (.getContainerCpuLoad systemLoadTicks) (.getCpuLoad0 this)))
+
+  (method ^:public getProcessCpuLoad ^double [this]
+    (if (some? containerMetrics) (.getContainerCpuLoad processLoadTicks) (.getProcessCpuLoad0 this)))
+
+  (method ^:private isCpuSetSameAsHostCpuSet ^boolean [this]
+    (when (some? containerMetrics)
+      (let [cpuSetCpus (.getCpuSetCpus containerMetrics)]
+        (when (some? cpuSetCpus) (return (== (alength cpuSetCpus) (.getHostOnlineCpuCount0 this))))))
+    false)
+
+  (method ^:private getCommittedVirtualMemorySize0 ^long [this]
+    (HostManagement/os0 0))
+
+  (method ^:private getFreeMemorySize0 ^long [this]
+    (HostManagement/os0 1))
+
+  (method ^:private getFreeSwapSpaceSize0 ^long [this]
+    (HostManagement/os0 3))
+
+  (method ^:private getMaxFileDescriptorCount0 ^long [this]
+    (HostManagement/os0 7))
+
+  (method ^:private getOpenFileDescriptorCount0 ^long [this]
+    (HostManagement/os0 6))
+
+  (method ^:private getProcessCpuTime0 ^long [this]
+    (HostManagement/os0 5))
+
+  (method ^:private getProcessCpuLoad0 ^double [this]
+    (HostManagement/processCpuLoad0))
+
+  (method ^:private getCpuLoad0 ^double [this]
+    (HostManagement/cpuLoad0 -1))
+
+  (method ^:private getTotalMemorySize0 ^long [this]
+    (HostManagement/os0 2))
+
+  (method ^:private getTotalSwapSpaceSize0 ^long [this]
+    (HostManagement/os0 4))
+
+  (method ^:private getSingleCpuLoad0 ^double [this ^int cpuNum]
+    (HostManagement/cpuLoad0 cpuNum))
+
+  (method ^:private getHostConfiguredCpuCount0 ^int [this]
+    (unchecked-int (HostManagement/os0 8)))
+
+  (method ^:private getHostOnlineCpuCount0 ^int [this]
+    (unchecked-int (HostManagement/os0 9)))
+
+  (method ^:private getHostTotalCpuTicks0 ^long [this]
+    (HostManagement/os0 10))
+
+  (static-initializer (OperatingSystemImpl/initialize0))
+
+  (method ^:private ^:static initialize0 ^void []))

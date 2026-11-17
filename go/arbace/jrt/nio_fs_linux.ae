@@ -1,0 +1,884 @@
+;; jrt: the natives of java.nio.file's default provider on Linux (doc/classes/JAVA-DEFERRED-TRIAGE.md, F9, "As built:
+;; F9 (write-ahead)"): jdk26u's sun.nio.fs.UnixNativeDispatcher, LinuxNativeDispatcher, LinuxWatchService and
+;; UnixFileSystem (their Java unchanged but for what the overlays and variants name) declare them, and j2g calls these
+;; Go functions by their mangled names (J2G-SPEC §9.1). Ports of jdk26u's (baf63fb)
+;; src/java.base/unix/native/libnio/fs/{UnixNativeDispatcher,UnixFileSystem}.c and
+;; src/java.base/linux/native/libnio/fs/{LinuxNativeDispatcher,LinuxWatchService}.c, rule for rule: the same system
+;; calls with the same flags (statx preferred over stat, as on Linux with statx; copy_file_range then sendfile; the
+;; RESTARTABLE loops on EINTR), results and errors. As in the JDK:
+;; - a path or a name is a C string in native memory at an address (NativeBuffers', nativemem.ae), a buffer is native
+;;   memory too (read0, write0, the xattrs, the copy's buffer; the cancellation flag Cancellable writes);
+;; - a descriptor is the kernel's (open0's, openat0's, dup's), a DIR* and a FILE* are numbers of the tables below;
+;; - a stat or statvfs fills the Java object's fields (UnixFileAttributes, UnixFileStoreAttributes, UnixMountEntry) as
+;;   JNI's Set*Field does, by Go's reflection on the translated class's F_ fields (jrt cannot name a translated type);
+;; - a failure throws sun.nio.fs.UnixException(errno), made by the factory UnixNativeDispatcher's static initializer
+;;   registers (overlay/jdk/variants/UnixNativeDispatcher.ae: jrtExceptions);
+;; - the C library's user and group database (getpwuid_r ...) is Go's os/user over /etc/passwd and /etc/group (no
+;;   NSS: Arbace has no C library), setmntent's FILE* a buffered file, getmntent_r's parse (fields by blanks and tabs,
+;;   the \ooo escapes) Go's below.
+;; The port's parts: Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception (LICENSE.md); the
+;; rest Copyright (c) the Arbace authors; Eclipse Public License 1.0. Off Linux nio_fs_other.ae.
+(in-ns 'go.arbace.jrt)
+
+(go/file "nio_fs_linux.go"
+  :build ["//go:build linux"]
+  :imports [[bufio "bufio"] [errors "errors"] [os "os"] [user "os/user"] [filepath "path/filepath"]
+            [reflect "reflect"] [strconv "strconv"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"]
+            [syscall "syscall"] [unsafe "unsafe"]])
+
+;; ---------------------------------------------------------------------------------------
+;; UnixException, and the errors
+
+(go/type unixExceptionFactory
+  "unixExceptionFactory is java.util.function.IntFunction's Go method set (UnixException::new).\n"
+  (interface (Apply_I__O ^any [^int32 errno])))
+
+(go/var ^{:tag (atomic/Pointer unixExceptionFactory) :doc "newUnixException makes sun.nio.fs.UnixException(errno),
+once UnixNativeDispatcher's static initializer registered it.\n"} newUnixException)
+
+(go/func UnixNativeDispatcher_JrtExceptions_O__V_native
+  "UnixNativeDispatcher_JrtExceptions_O__V_native registers the factory of UnixException (an IntFunction), which
+the natives throw as JNU_NewObjectByName(\"sun/nio/fs/UnixException\", \"(I)V\", errno) does.\n"
+  [^any f]
+  (let [(values v ok) (assert unixExceptionFactory f)]
+    (when (not ok)
+      (panic (ClassCastException_New_String (Str "not an IntFunction"))))
+    (.Store newUnixException (addr v))))
+
+(go/func throwUnix
+  "throwUnix throws sun.nio.fs.UnixException(errno) (the C's throwUnixException).\n"
+  [^int32 errno]
+  (let [f (.Load newUnixException)]
+    (when (== f nil)
+      (panic (InternalError_New_String (Str "sun.nio.fs.UnixException's factory not registered"))))
+    (panic (.Apply_I__O @f errno))))
+
+(go/func fsErrno "fsErrno is err's error number (EIO when it has none).\n" ^int32 [^error err]
+  (let [^syscall/Errno e 0]
+    (when (errors/As err (addr e))
+      (return (conv int32 e))))
+  (conv int32 syscall/EIO))
+
+(go/func throwErr "throwErr throws UnixException with err's number.\n" [^error err]
+  (throwUnix (fsErrno err)))
+
+(go/func cPath "cPath is the C string at native address a, as Go's string (a system call's path).\n"
+  ^string [^int64 a]
+  (conv string (nativeCString a)))
+
+(go/func cPtr "cPtr is a pointer to the NUL-terminated C string at native address a (raw system calls).\n"
+  ^uintptr [^int64 a]
+  (nativeCString a)
+  (conv uintptr (conv unsafe/Pointer (addr (aget (nativeBytes a 1) 0)))))
+
+(go/func bufPtr "bufPtr is a pointer to n bytes of native memory at a (nil for n = 0).\n"
+  ^uintptr [^int64 a ^int64 n]
+  (when (== n 0)
+    (return 0))
+  (conv uintptr (conv unsafe/Pointer (addr (aget (nativeBytes a n) 0)))))
+
+(go/func fsBytesOf "fsBytesOf is a new byte[] of b's bytes (NewByteArray and SetByteArrayRegion).\n"
+  ^{:tag (* ByteArray)} [^{:tag (slice byte)} b]
+  (let [r (NewByteArray (conv int32 (len b)))]
+    (for [i 0] (< i (len b)) (inc! i)
+      (aset (.-A r) i (conv int8 (aget b i))))
+    r))
+
+;; ---------------------------------------------------------------------------------------
+;; JNI's Set*Field: a translated object's field F_name by reflection
+
+(go/var ^{:tag sync/Map :doc "jfieldIDs caches a field's index path by \"type.name\".\n"} jfieldIDs)
+
+(go/func jfield "jfield is the field name of the Java object o (a pointer to its Go struct).\n"
+  ^reflect/Value [^any o ^string name]
+  (when (== o nil)
+    (panic (NPE)))
+  (let [v (.Elem (reflect/ValueOf o))
+        t (.Type v)
+        key (+ (.String t) "." name)]
+    (let [(values idx ok) (.Load jfieldIDs key)]
+      (when ok
+        (return (.FieldByIndex v (assert (slice int) idx)))))
+    (let [(values sf found) (.FieldByName t (+ "F_" name))]
+      (when (not found)
+        (panic (InternalError_New_String (Str (+ "no field " name " in " (.String t))))))
+      (.Store jfieldIDs key (.-Index sf))
+      (.FieldByIndex v (.-Index sf)))))
+
+(go/func setInt "setInt is SetIntField.\n" [^any o ^string name ^int32 x] (.SetInt (jfield o name) (conv int64 x)))
+(go/func setLong "setLong is SetLongField.\n" [^any o ^string name ^int64 x] (.SetInt (jfield o name) x))
+(go/func setBool "setBool is SetBooleanField.\n" [^any o ^string name ^bool x] (.SetBool (jfield o name) x))
+(go/func setBytes "setBytes is SetObjectField of a byte[].\n" [^any o ^string name ^{:tag (slice byte)} b]
+  (.Set (jfield o name) (reflect/ValueOf (fsBytesOf b))))
+
+;; ---------------------------------------------------------------------------------------
+;; stat: statx, as the JDK on Linux with statx (copy_statx_attributes)
+
+(go/const
+  [^{:val -100} atFdcwd -100]
+  [^{:val 256} atSymlinkNofollow 0x100]
+  [^{:val 4096} atEmptyPath 0x1000]
+  [^{:tag uint32 :val 2047} statxBasicStats 0x7ff]
+  [^{:tag uint32 :val 2048} statxBtime 0x800])
+
+(go/func le32 ^uint32 [^{:tag (slice byte)} b ^int i]
+  (bit-or (conv uint32 (aget b i)) (<< (conv uint32 (aget b (+ i 1))) 8) (<< (conv uint32 (aget b (+ i 2))) 16)
+          (<< (conv uint32 (aget b (+ i 3))) 24)))
+(go/func le64 ^uint64 [^{:tag (slice byte)} b ^int i]
+  (bit-or (conv uint64 (le32 b i)) (<< (conv uint64 (le32 b (+ i 4))) 32)))
+
+(go/func makedev "makedev is glibc's makedev(major, minor).\n" ^uint64 [^uint32 major ^uint32 minor]
+  (let [ma (conv uint64 major)
+        mi (conv uint64 minor)]
+    (bit-or (<< (bit-and ma 0xfffff000) 32) (<< (bit-and ma 0xfff) 8) (<< (bit-and mi 0xffffff00) 12)
+            (bit-and mi 0xff))))
+
+(go/func statx "statx is statx(2) of dfd and path with flags: struct statx's 256 bytes and the error number.\n"
+  [^int dfd ^string path ^int flags] :results [(slice byte) syscall/Errno]
+  (let [buf (make (slice byte) 256)
+        (values p err) (syscall/BytePtrFromString path)]
+    (when (!= err nil)
+      (return nil syscall/EINVAL))
+    (while true
+      (let [(values _ _ e) (syscall/Syscall6 sysStatx (conv uintptr dfd) (conv uintptr (conv unsafe/Pointer p))
+                                             (conv uintptr flags) (conv uintptr (bit-or statxBasicStats statxBtime))
+                                             (conv uintptr (conv unsafe/Pointer (addr (aget buf 0)))) 0)]
+        (when (!= e syscall/EINTR)
+          (return buf e))))))
+
+(go/func copyStatx "copyStatx is copy_statx_attributes: struct statx into a UnixFileAttributes.\n"
+  [^{:tag (slice byte)} b ^any attrs]
+  (setInt attrs "st_mode" (conv int32 (bit-and (le32 b 28) 0xffff)))
+  (setLong attrs "st_ino" (conv int64 (le64 b 32)))
+  (setInt attrs "st_nlink" (conv int32 (le32 b 16)))
+  (setInt attrs "st_uid" (conv int32 (le32 b 20)))
+  (setInt attrs "st_gid" (conv int32 (le32 b 24)))
+  (setLong attrs "st_size" (conv int64 (le64 b 40)))
+  (setLong attrs "st_atime_sec" (conv int64 (le64 b 64)))
+  (setLong attrs "st_mtime_sec" (conv int64 (le64 b 112)))
+  (setLong attrs "st_ctime_sec" (conv int64 (le64 b 96)))
+  ;; the birth time is filled in if and only if STATX_BTIME is set in the mask
+  (if (!= (bit-and (le32 b 0) statxBtime) 0)
+    (do
+      (setBool attrs "birthtime_available" true)
+      (setLong attrs "st_birthtime_sec" (conv int64 (le64 b 80)))
+      (setLong attrs "st_birthtime_nsec" (conv int64 (le32 b 88))))
+    (setBool attrs "birthtime_available" false))
+  (setLong attrs "st_atime_nsec" (conv int64 (le32 b 72)))
+  (setLong attrs "st_mtime_nsec" (conv int64 (le32 b 120)))
+  (setLong attrs "st_ctime_nsec" (conv int64 (le32 b 104)))
+  (setLong attrs "st_dev" (conv int64 (makedev (le32 b 136) (le32 b 140))))
+  (setLong attrs "st_rdev" (conv int64 (makedev (le32 b 128) (le32 b 132)))))
+
+(go/func UnixNativeDispatcher_Stat0_J_UnixFileAttributes__I_native
+  "UnixNativeDispatcher_Stat0_J_UnixFileAttributes__I_native is stat0: 0, or the error number.\n"
+  ^int32 [^int64 path ^any attrs]
+  (let [(values b e) (statx atFdcwd (cPath path) 0)]
+    (when (!= e 0)
+      (return (conv int32 e)))
+    (copyStatx b attrs)
+    0))
+
+(go/func UnixNativeDispatcher_Lstat0_J_UnixFileAttributes__V_native
+  "UnixNativeDispatcher_Lstat0_J_UnixFileAttributes__V_native is lstat0.\n"
+  [^int64 path ^any attrs]
+  (let [(values b e) (statx atFdcwd (cPath path) atSymlinkNofollow)]
+    (when (!= e 0)
+      (throwUnix (conv int32 e)))
+    (copyStatx b attrs)))
+
+(go/func UnixNativeDispatcher_Fstat0_I_UnixFileAttributes__V_native
+  "UnixNativeDispatcher_Fstat0_I_UnixFileAttributes__V_native is fstat0: statx of the descriptor (AT_EMPTY_PATH).\n"
+  [^int32 fd ^any attrs]
+  (let [(values b e) (statx (conv int fd) "" atEmptyPath)]
+    (when (!= e 0)
+      (throwUnix (conv int32 e)))
+    (copyStatx b attrs)))
+
+(go/func UnixNativeDispatcher_Fstatat0_I_J_I_UnixFileAttributes__I_native
+  "UnixNativeDispatcher_Fstatat0_I_J_I_UnixFileAttributes__I_native is fstatat0: 0, or the error number.\n"
+  ^int32 [^int32 dfd ^int64 path ^int32 flag ^any attrs]
+  (let [flags 0]
+    (when (> (bit-and (conv int flag) atSymlinkNofollow) 0)
+      (set! flags (bit-or flags atSymlinkNofollow)))
+    (let [(values b e) (statx (conv int dfd) (cPath path) flags)]
+      (when (!= e 0)
+        (return (conv int32 e)))
+      (copyStatx b attrs)
+      0)))
+
+(go/func UnixNativeDispatcher_Statvfs0_J_UnixFileStoreAttributes__V_native
+  "UnixNativeDispatcher_Statvfs0_J_UnixFileStoreAttributes__V_native is statvfs0 (statvfs(3) is statfs(2) on Linux,
+f_frsize f_bsize when it is 0).\n"
+  [^int64 path ^any attrs]
+  (let [^{:tag syscall/Statfs_t} st (lit syscall/Statfs_t)
+        name (cPath path)]
+    (while true
+      (let [err (syscall/Statfs name (addr st))]
+        (when (!= err syscall/EINTR)
+          (when (!= err nil)
+            (throwErr err))
+          (break))))
+    (let [fr (conv int64 (.-Frsize st))]
+      (when (== fr 0)
+        (set! fr (conv int64 (.-Bsize st))))
+      (setLong attrs "f_frsize" fr))
+    (setLong attrs "f_blocks" (conv int64 (.-Blocks st)))
+    (setLong attrs "f_bfree" (conv int64 (.-Bfree st)))
+    (setLong attrs "f_bavail" (conv int64 (.-Bavail st)))))
+
+;; ---------------------------------------------------------------------------------------
+;; init and the simple calls
+
+(go/func UnixNativeDispatcher_Init__I_native
+  "UnixNativeDispatcher_Init__I_native is init's capabilities on Linux: openat and the rest (SUPPORTS_OPENAT), statx's
+birth time (SUPPORTS_BIRTHTIME), extended attributes (SUPPORTS_XATTR).\n"
+  ^int32 []
+  (bit-or (<< 1 1) (<< 1 3) (<< 1 16)))
+
+(go/func UnixNativeDispatcher_FchmodatNoFollowSupported0__Z_native
+  "UnixNativeDispatcher_FchmodatNoFollowSupported0__Z_native: Linux recognizes but does not support AT_SYMLINK_NOFOLLOW.\n"
+  ^bool []
+  false)
+
+(go/func UnixNativeDispatcher_Getcwd__B1_native "UnixNativeDispatcher_Getcwd__B1_native is getcwd.\n"
+  ^{:tag (* ByteArray)} []
+  (let [buf (make (slice byte) 4097)
+        (values n err) (syscall/Getcwd buf)]
+    (when (!= err nil)
+      (throwErr err))
+    ;; the kernel's length counts the NUL
+    (when (and (> n 0) (== (aget buf (- n 1)) 0))
+      (dec! n))
+    (fsBytesOf (subslice buf 0 n))))
+
+(go/func UnixNativeDispatcher_Strerror_I__B1_native
+  "UnixNativeDispatcher_Strerror_I__B1_native is strerror's text (the C library's, as HostChannels' strerror0). jdk26u's
+C reads errno where it means its argument (getErrorString((int)errno, ...)): the argument here.\n"
+  ^{:tag (* ByteArray)} [^int32 errnum]
+  (fsBytesOf (conv (slice byte) (.String (HostChannels_Strerror0_I__String_native errnum)))))
+
+(go/func UnixNativeDispatcher_Dup_I__I_native "UnixNativeDispatcher_Dup_I__I_native is dup.\n" ^int32 [^int32 fd]
+  (while true
+    (let [(values r err) (syscall/Dup (conv int fd))]
+      (when (!= err syscall/EINTR)
+        (when (!= err nil)
+          (throwErr err))
+        (return (conv int32 r))))))
+
+(go/func UnixNativeDispatcher_Open0_J_I_I__I_native "UnixNativeDispatcher_Open0_J_I_I__I_native is open0.\n"
+  ^int32 [^int64 path ^int32 flags ^int32 mode]
+  (let [name (cPath path)]
+    (while true
+      (let [(values fd err) (syscall/Open name (conv int flags) (conv uint32 mode))]
+        (when (!= err syscall/EINTR)
+          (when (!= err nil)
+            (throwErr err))
+          (return (conv int32 fd)))))))
+
+(go/func UnixNativeDispatcher_Openat0_I_J_I_I__I_native "UnixNativeDispatcher_Openat0_I_J_I_I__I_native is openat0.\n"
+  ^int32 [^int32 dfd ^int64 path ^int32 flags ^int32 mode]
+  (let [name (cPath path)]
+    (while true
+      (let [(values fd err) (syscall/Openat (conv int dfd) name (conv int flags) (conv uint32 mode))]
+        (when (!= err syscall/EINTR)
+          (when (!= err nil)
+            (throwErr err))
+          (return (conv int32 fd)))))))
+
+(go/func UnixNativeDispatcher_Close0_I__V_native "UnixNativeDispatcher_Close0_I__V_native is close0 (EINTR ignored).\n"
+  [^int32 fd]
+  (let [err (syscall/Close (conv int fd))]
+    (when (and (!= err nil) (!= err syscall/EINTR))
+      (throwErr err))))
+
+(go/func UnixNativeDispatcher_Read0_I_J_I__I_native "UnixNativeDispatcher_Read0_I_J_I__I_native is read0 into native memory.\n"
+  ^int32 [^int32 fd ^int64 buf ^int32 n]
+  (let [b (nativeBytes buf (conv int64 n))]
+    (while true
+      (let [(values r err) (syscall/Read (conv int fd) b)]
+        (when (!= err syscall/EINTR)
+          (when (!= err nil)
+            (throwErr err))
+          (return (conv int32 r)))))))
+
+(go/func UnixNativeDispatcher_Write0_I_J_I__I_native "UnixNativeDispatcher_Write0_I_J_I__I_native is write0 from native memory.\n"
+  ^int32 [^int32 fd ^int64 buf ^int32 n]
+  (let [b (nativeBytes buf (conv int64 n))]
+    (while true
+      (let [(values r err) (syscall/Write (conv int fd) b)]
+        (when (!= err syscall/EINTR)
+          (when (!= err nil)
+            (throwErr err))
+          (return (conv int32 r)))))))
+
+(go/func restartable "restartable runs f again while it fails with EINTR, then throws its error (RESTARTABLE, then
+throwUnixException).\n"
+  [^{:tag (func [] [error])} f]
+  (while true
+    (let [err (f)]
+      (when (!= err syscall/EINTR)
+        (when (!= err nil)
+          (throwErr err))
+        (return)))))
+
+(go/func once "once throws f's error (a call without RESTARTABLE: \"EINTR not listed as a possible error\").\n"
+  [^error err]
+  (when (!= err nil)
+    (throwErr err)))
+
+(go/func UnixNativeDispatcher_Link0_J_J__V_native "UnixNativeDispatcher_Link0_J_J__V_native is link0.\n"
+  [^int64 existing ^int64 newname]
+  (let [a (cPath existing) b (cPath newname)]
+    (restartable (fn ^error [] (syscall/Link a b)))))
+
+(go/func UnixNativeDispatcher_Unlink0_J__V_native "UnixNativeDispatcher_Unlink0_J__V_native is unlink0.\n" [^int64 path]
+  (once (syscall/Unlink (cPath path))))
+
+(go/func UnixNativeDispatcher_Unlinkat0_I_J_I__V_native "UnixNativeDispatcher_Unlinkat0_I_J_I__V_native is unlinkat0.\n"
+  [^int32 dfd ^int64 path ^int32 flags]
+  (let [(values _ _ e) (syscall/Syscall syscall/SYS_UNLINKAT (conv uintptr (conv int dfd)) (cPtr path) (conv uintptr flags))]
+    (when (!= e 0)
+      (throwUnix (conv int32 e)))))
+
+(go/func UnixNativeDispatcher_Mknod0_J_I_J__V_native "UnixNativeDispatcher_Mknod0_J_I_J__V_native is mknod0.\n"
+  [^int64 path ^int32 mode ^int64 dev]
+  (let [name (cPath path)]
+    (restartable (fn ^error [] (syscall/Mknod name (conv uint32 mode) (conv int dev))))))
+
+(go/func UnixNativeDispatcher_Rename0_J_J__V_native "UnixNativeDispatcher_Rename0_J_J__V_native is rename0.\n"
+  [^int64 from ^int64 to]
+  (once (syscall/Rename (cPath from) (cPath to))))
+
+(go/func UnixNativeDispatcher_Renameat0_I_J_I_J__V_native "UnixNativeDispatcher_Renameat0_I_J_I_J__V_native is renameat0.\n"
+  [^int32 fromfd ^int64 from ^int32 tofd ^int64 to]
+  (once (syscall/Renameat (conv int fromfd) (cPath from) (conv int tofd) (cPath to))))
+
+(go/func UnixNativeDispatcher_Mkdir0_J_I__V_native "UnixNativeDispatcher_Mkdir0_J_I__V_native is mkdir0.\n"
+  [^int64 path ^int32 mode]
+  (once (syscall/Mkdir (cPath path) (conv uint32 mode))))
+
+(go/func UnixNativeDispatcher_Rmdir0_J__V_native "UnixNativeDispatcher_Rmdir0_J__V_native is rmdir0.\n" [^int64 path]
+  (once (syscall/Rmdir (cPath path))))
+
+(go/func UnixNativeDispatcher_Readlink0_J__B1_native
+  "UnixNativeDispatcher_Readlink0_J__B1_native is readlink0: ENAMETOOLONG when the target fills PATH_MAX+1 bytes.\n"
+  ^{:tag (* ByteArray)} [^int64 path]
+  (let [target (make (slice byte) 4097)
+        (values n err) (syscall/Readlink (cPath path) target)]
+    (once err)
+    (when (== n (len target))
+      (throwUnix (conv int32 syscall/ENAMETOOLONG)))
+    ;; strlen of the target, NUL-terminated at n
+    (let [s (subslice target 0 n)
+          i (strings/IndexByte (conv string s) 0)]
+      (when (>= i 0)
+        (set! s (subslice s 0 i)))
+      (fsBytesOf s))))
+
+(go/func UnixNativeDispatcher_Realpath0_J__B1_native
+  "UnixNativeDispatcher_Realpath0_J__B1_native is realpath0: the absolute path, every link resolved, of a file that
+exists (realpath(3); ENOENT, ENOTDIR, EACCES, ELOOP as the walk meets them).\n"
+  ^{:tag (* ByteArray)} [^int64 path]
+  (let [name (cPath path)]
+    (when (== name "")
+      (throwUnix (conv int32 syscall/ENOENT)))
+    (when (not (strings/HasPrefix name "/"))
+      (let [buf (make (slice byte) 4097)
+            (values n err) (syscall/Getcwd buf)]
+        (once err)
+        (when (and (> n 0) (== (aget buf (- n 1)) 0))
+          (dec! n))
+        (set! name (+ (conv string (subslice buf 0 n)) "/" name))))
+    (let [(values r err) (filepath/EvalSymlinks name)]
+      (once err)
+      ;; EvalSymlinks does not stat the last component when it is no link
+      (let [^{:tag syscall/Stat_t} st (lit syscall/Stat_t)]
+        (once (syscall/Stat r (addr st))))
+      (fsBytesOf (conv (slice byte) r)))))
+
+(go/func UnixNativeDispatcher_Symlink0_J_J__V_native "UnixNativeDispatcher_Symlink0_J_J__V_native is symlink0.\n"
+  [^int64 target ^int64 link]
+  (once (syscall/Symlink (cPath target) (cPath link))))
+
+(go/func UnixNativeDispatcher_Chown0_J_I_I__V_native "UnixNativeDispatcher_Chown0_J_I_I__V_native is chown0.\n"
+  [^int64 path ^int32 uid ^int32 gid]
+  (let [name (cPath path)]
+    (restartable (fn ^error [] (syscall/Chown name (conv int uid) (conv int gid))))))
+
+(go/func UnixNativeDispatcher_Lchown0_J_I_I__V_native "UnixNativeDispatcher_Lchown0_J_I_I__V_native is lchown0.\n"
+  [^int64 path ^int32 uid ^int32 gid]
+  (let [name (cPath path)]
+    (restartable (fn ^error [] (syscall/Lchown name (conv int uid) (conv int gid))))))
+
+(go/func UnixNativeDispatcher_Fchown0_I_I_I__V_native "UnixNativeDispatcher_Fchown0_I_I_I__V_native is fchown0.\n"
+  [^int32 fd ^int32 uid ^int32 gid]
+  (restartable (fn ^error [] (syscall/Fchown (conv int fd) (conv int uid) (conv int gid)))))
+
+(go/func UnixNativeDispatcher_Chmod0_J_I__V_native "UnixNativeDispatcher_Chmod0_J_I__V_native is chmod0.\n"
+  [^int64 path ^int32 mode]
+  (let [name (cPath path)]
+    (restartable (fn ^error [] (syscall/Chmod name (conv uint32 mode))))))
+
+(go/func UnixNativeDispatcher_Fchmod0_I_I__V_native "UnixNativeDispatcher_Fchmod0_I_I__V_native is fchmod0.\n"
+  [^int32 fd ^int32 mode]
+  (restartable (fn ^error [] (syscall/Fchmod (conv int fd) (conv uint32 mode)))))
+
+(go/func UnixNativeDispatcher_Fchmodat0_I_J_I_I__V_native "UnixNativeDispatcher_Fchmodat0_I_J_I_I__V_native is fchmodat0.\n"
+  [^int32 fd ^int64 path ^int32 mode ^int32 flag]
+  (let [p (cPtr path)]
+    (while true
+      (let [(values _ _ e) (syscall/Syscall6 syscall/SYS_FCHMODAT (conv uintptr (conv int fd)) p (conv uintptr mode)
+                                             (conv uintptr flag) 0 0)]
+        (when (!= e syscall/EINTR)
+          (when (!= e 0)
+            (throwUnix (conv int32 e)))
+          (return))))))
+
+(go/func timespecs "timespecs is struct timespec[2] of two times in nanoseconds.\n"
+  ^{:tag (array 2 syscall/Timespec)} [^int64 t0 ^int64 t1]
+  (let [^{:tag (array 2 syscall/Timespec)} ts (lit (array 2 syscall/Timespec))]
+    (set! (aget ts 0) (lit syscall/Timespec :Sec (/ t0 1000000000) :Nsec (% t0 1000000000)))
+    (set! (aget ts 1) (lit syscall/Timespec :Sec (/ t1 1000000000) :Nsec (% t1 1000000000)))
+    ts))
+
+(go/func utimensat "utimensat is utimensat(2), RESTARTABLE (a zero path pointer: futimens).\n"
+  [^int fd ^uintptr path ^int64 t0 ^int64 t1 ^int flags]
+  (let [ts (timespecs t0 t1)]
+    (while true
+      (let [(values _ _ e) (syscall/Syscall6 syscall/SYS_UTIMENSAT (conv uintptr fd) path
+                                             (conv uintptr (conv unsafe/Pointer (addr (aget ts 0)))) (conv uintptr flags) 0 0)]
+        (when (!= e syscall/EINTR)
+          (when (!= e 0)
+            (throwUnix (conv int32 e)))
+          (return))))))
+
+(go/func UnixNativeDispatcher_Futimens0_I_J_J__V_native "UnixNativeDispatcher_Futimens0_I_J_J__V_native is futimens0.\n"
+  [^int32 fd ^int64 t0 ^int64 t1]
+  (utimensat (conv int fd) 0 t0 t1 0))
+
+(go/func UnixNativeDispatcher_Utimensat0_I_J_J_J_I__V_native "UnixNativeDispatcher_Utimensat0_I_J_J_J_I__V_native is utimensat0.\n"
+  [^int32 fd ^int64 path ^int64 t0 ^int64 t1 ^int32 flags]
+  (utimensat (conv int fd) (cPtr path) t0 t1 (conv int flags)))
+
+(go/func UnixNativeDispatcher_Access0_J_I__I_native "UnixNativeDispatcher_Access0_J_I__I_native is access0: 0 or errno.\n"
+  ^int32 [^int64 path ^int32 amode]
+  (let [name (cPath path)]
+    (while true
+      (let [err (syscall/Access name (conv uint32 amode))]
+        (when (!= err syscall/EINTR)
+          (when (!= err nil)
+            (return (fsErrno err)))
+          (return 0))))))
+
+;; ---------------------------------------------------------------------------------------
+;; directories: a DIR* is a number of dirTable, its descriptor and getdents64's buffer
+
+(go/type fsDir "fsDir is a DIR*: the directory's descriptor, getdents64's buffer and what is left of it.\n"
+  (struct ^int fd ^{:tag (slice byte)} buf ^int pos ^int end))
+
+(go/var ^{:tag sync/Mutex} fsMu)
+(go/var ^{:tag (map int64 (* fsDir))} dirTable (make (map int64 (* fsDir))))
+(go/var ^int64 dirNext 1)
+
+(go/func addDir ^int64 [^int fd]
+  (.Lock fsMu)
+  (defer (.Unlock fsMu))
+  (let [id dirNext]
+    (inc! dirNext)
+    (aset dirTable id (addr (lit fsDir :fd fd :buf (make (slice byte) 32768))))
+    id))
+
+(go/func getDir ^{:tag (* fsDir)} [^int64 id]
+  (.Lock fsMu)
+  (defer (.Unlock fsMu))
+  (let [d (aget dirTable id)]
+    (when (== d nil)
+      (throwUnix (conv int32 syscall/EBADF)))
+    d))
+
+(go/func UnixNativeDispatcher_Opendir0_J__J_native "UnixNativeDispatcher_Opendir0_J__J_native is opendir0.\n"
+  ^int64 [^int64 path]
+  (let [(values fd err) (syscall/Open (cPath path) (bit-or syscall/O_RDONLY syscall/O_DIRECTORY syscall/O_CLOEXEC) 0)]
+    (once err)
+    (addDir fd)))
+
+(go/func UnixNativeDispatcher_Fdopendir_I__J_native
+  "UnixNativeDispatcher_Fdopendir_I__J_native is fdopendir: the DIR owns the descriptor (closedir closes it); ENOTDIR
+for one that is not a directory, as glibc's.\n"
+  ^int64 [^int32 dfd]
+  (let [^{:tag syscall/Stat_t} st (lit syscall/Stat_t)]
+    (once (syscall/Fstat (conv int dfd) (addr st)))
+    (when (!= (bit-and (.-Mode st) syscall/S_IFMT) syscall/S_IFDIR)
+      (throwUnix (conv int32 syscall/ENOTDIR))))
+  (addDir (conv int dfd)))
+
+(go/func UnixNativeDispatcher_Closedir_J__V_native "UnixNativeDispatcher_Closedir_J__V_native is closedir.\n"
+  [^int64 id]
+  (let [d (getDir id)]
+    (.Lock fsMu)
+    (delete dirTable id)
+    (.Unlock fsMu)
+    (let [err (syscall/Close (.-fd d))]
+      (when (and (!= err nil) (!= err syscall/EINTR))
+        (throwErr err)))))
+
+(go/func UnixNativeDispatcher_Readdir0_J__B1_native
+  "UnixNativeDispatcher_Readdir0_J__B1_native is readdir0: the next entry's name (\".\" and \"..\" among them), null at
+the end.\n"
+  ^{:tag (* ByteArray)} [^int64 id]
+  (let [d (getDir id)]
+    (while true
+      (when (>= (.-pos d) (.-end d))
+        (let [(values n err) (syscall/Getdents (.-fd d) (.-buf d))]
+          (once err)
+          (when (<= n 0)
+            (return nil))
+          (set! (.-pos d) 0)
+          (set! (.-end d) n)))
+      ;; struct linux_dirent64: d_ino u64, d_off s64, d_reclen u16, d_type u8, d_name
+      (let [b (.-buf d)
+            p (.-pos d)
+            reclen (bit-or (conv int (aget b (+ p 16))) (<< (conv int (aget b (+ p 17))) 8))
+            name (subslice b (+ p 19) (+ p reclen))
+            i (strings/IndexByte (conv string name) 0)]
+        (set! (.-pos d) (+ p reclen))
+        (when (>= i 0)
+          (set! name (subslice name 0 i)))
+        (when (!= (le64 b p) 0)
+          (return (fsBytesOf name)))))))
+
+;; ---------------------------------------------------------------------------------------
+;; users and groups: Go's os/user over /etc/passwd and /etc/group
+
+(go/func UnixNativeDispatcher_Getpwuid_I__B1_native
+  "UnixNativeDispatcher_Getpwuid_I__B1_native is getpwuid's name: ENOENT when there is none.\n"
+  ^{:tag (* ByteArray)} [^int32 uid]
+  (let [(values u err) (user/LookupId (strconv/Itoa (conv int (conv uint32 uid))))]
+    (when (or (!= err nil) (== (.-Username u) ""))
+      (throwUnix (conv int32 syscall/ENOENT)))
+    (fsBytesOf (conv (slice byte) (.-Username u)))))
+
+(go/func UnixNativeDispatcher_Getgrgid_I__B1_native
+  "UnixNativeDispatcher_Getgrgid_I__B1_native is getgrgid's name: ENOENT when there is none.\n"
+  ^{:tag (* ByteArray)} [^int32 gid]
+  (let [(values g err) (user/LookupGroupId (strconv/Itoa (conv int (conv uint32 gid))))]
+    (when (or (!= err nil) (== (.-Name g) ""))
+      (throwUnix (conv int32 syscall/ENOENT)))
+    (fsBytesOf (conv (slice byte) (.-Name g)))))
+
+(go/func UnixNativeDispatcher_Getpwnam0_J__I_native
+  "UnixNativeDispatcher_Getpwnam0_J__I_native is getpwnam's uid: -1 when there is none.\n"
+  ^int32 [^int64 name]
+  (let [(values u err) (user/Lookup (cPath name))]
+    (when (!= err nil)
+      (return -1))
+    (let [(values n err2) (strconv/ParseUint (.-Uid u) 10 32)]
+      (when (!= err2 nil)
+        (return -1))
+      (conv int32 (conv uint32 n)))))
+
+(go/func UnixNativeDispatcher_Getgrnam0_J__I_native
+  "UnixNativeDispatcher_Getgrnam0_J__I_native is getgrnam's gid: -1 when there is none.\n"
+  ^int32 [^int64 name]
+  (let [(values g err) (user/LookupGroup (cPath name))]
+    (when (!= err nil)
+      (return -1))
+    (let [(values n err2) (strconv/ParseUint (.-Gid g) 10 32)]
+      (when (!= err2 nil)
+        (return -1))
+      (conv int32 (conv uint32 n)))))
+
+;; ---------------------------------------------------------------------------------------
+;; extended attributes
+
+(go/func xattrCall "xattrCall is a raw system call: its result, or UnixException.\n"
+  ^int32 [^uintptr trap ^uintptr a1 ^uintptr a2 ^uintptr a3 ^uintptr a4 ^uintptr a5]
+  (let [(values r _ e) (syscall/Syscall6 trap a1 a2 a3 a4 a5 0)]
+    (when (!= e 0)
+      (throwUnix (conv int32 e)))
+    (conv int32 r)))
+
+(go/func UnixNativeDispatcher_Fgetxattr0_I_J_J_I__I_native "UnixNativeDispatcher_Fgetxattr0_I_J_J_I__I_native is fgetxattr0.\n"
+  ^int32 [^int32 fd ^int64 name ^int64 value ^int32 n]
+  (xattrCall syscall/SYS_FGETXATTR (conv uintptr (conv int fd)) (cPtr name) (bufPtr value (conv int64 n)) (conv uintptr n) 0))
+
+(go/func UnixNativeDispatcher_Fsetxattr0_I_J_J_I__V_native "UnixNativeDispatcher_Fsetxattr0_I_J_J_I__V_native is fsetxattr0.\n"
+  [^int32 fd ^int64 name ^int64 value ^int32 n]
+  (xattrCall syscall/SYS_FSETXATTR (conv uintptr (conv int fd)) (cPtr name) (bufPtr value (conv int64 n)) (conv uintptr n) 0))
+
+(go/func UnixNativeDispatcher_Fremovexattr0_I_J__V_native "UnixNativeDispatcher_Fremovexattr0_I_J__V_native is fremovexattr0.\n"
+  [^int32 fd ^int64 name]
+  (xattrCall syscall/SYS_FREMOVEXATTR (conv uintptr (conv int fd)) (cPtr name) 0 0 0))
+
+(go/func UnixNativeDispatcher_Flistxattr_I_J_I__I_native "UnixNativeDispatcher_Flistxattr_I_J_I__I_native is flistxattr.\n"
+  ^int32 [^int32 fd ^int64 list ^int32 n]
+  (xattrCall syscall/SYS_FLISTXATTR (conv uintptr (conv int fd)) (bufPtr list (conv int64 n)) (conv uintptr n) 0 0))
+
+;; ---------------------------------------------------------------------------------------
+;; FILE* streams: setmntent's, rewind's and getlinelen's (a number of streamTable)
+
+(go/type fsStream "fsStream is a FILE*: the file and its reader.\n"
+  (struct ^{:tag (* os/File)} f ^{:tag (* bufio/Reader)} r))
+
+(go/var ^{:tag (map int64 (* fsStream))} streamTable (make (map int64 (* fsStream))))
+
+(go/func getStream ^{:tag (* fsStream)} [^int64 id]
+  (.Lock fsMu)
+  (defer (.Unlock fsMu))
+  (let [s (aget streamTable id)]
+    (when (== s nil)
+      (throwUnix (conv int32 syscall/EBADF)))
+    s))
+
+(go/func LinuxNativeDispatcher_Setmntent0_J_J__J_native
+  "LinuxNativeDispatcher_Setmntent0_J_J__J_native is setmntent0: the mount table opened for reading (its mode \"r\").\n"
+  ^int64 [^int64 path ^int64 mode]
+  (let [name (cPath path)
+        ^{:tag (* os/File)} f nil]
+    (cPath mode)
+    (while true
+      (let [(values g err) (os/Open name)]
+        (when (not (errors/Is err syscall/EINTR))
+          (once err)
+          (set! f g)
+          (break))))
+    (.Lock fsMu)
+    (defer (.Unlock fsMu))
+    (let [id dirNext]
+      (inc! dirNext)
+      (aset streamTable id (addr (lit fsStream :f f :r (bufio/NewReader f))))
+      id)))
+
+(go/func LinuxNativeDispatcher_Endmntent_J__V_native "LinuxNativeDispatcher_Endmntent_J__V_native is endmntent.\n"
+  [^int64 id]
+  (.Lock fsMu)
+  (let [s (aget streamTable id)]
+    (delete streamTable id)
+    (.Unlock fsMu)
+    (when (!= s nil)
+      (.Close (.-f s)))))
+
+(go/func UnixNativeDispatcher_Rewind_J__V_native "UnixNativeDispatcher_Rewind_J__V_native is rewind.\n" [^int64 id]
+  (let [s (getStream id)
+        (values _ err) (.Seek (.-f s) 0 0)]
+    (once err)
+    (.Reset (.-r s) (.-f s))))
+
+(go/func UnixNativeDispatcher_Getlinelen_J__I_native
+  "UnixNativeDispatcher_Getlinelen_J__I_native is getlinelen: the next line's length without the NUL (its newline
+counted, as getline's), -1 at the end.\n"
+  ^int32 [^int64 id]
+  (let [s (getStream id)
+        (values line err) (.ReadString (.-r s) 10)]
+    (when (and (!= err nil) (== (len line) 0))
+      (return -1))
+    (conv int32 (len line))))
+
+(go/func mntUnescape "mntUnescape is getmntent's decoding of a field: \\ooo octal escapes (\\040 a blank ...).\n"
+  ^string [^string s]
+  (when (< (strings/IndexByte s 92) 0)
+    (return s))
+  (let [^{:tag strings/Builder} b (lit strings/Builder)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (if (and (== (aget s i) 92) (<= (+ i 3) (- (len s) 1))
+               (>= (aget s (+ i 1)) 48) (<= (aget s (+ i 1)) 51) (>= (aget s (+ i 2)) 48) (<= (aget s (+ i 2)) 55)
+               (>= (aget s (+ i 3)) 48) (<= (aget s (+ i 3)) 55))
+        (do
+          (.WriteByte b (conv byte (+ (* 64 (- (aget s (+ i 1)) 48)) (* 8 (- (aget s (+ i 2)) 48)) (- (aget s (+ i 3)) 48))))
+          (set! i (+ i 3)))
+        (.WriteByte b (aget s i))))
+    (.String b)))
+
+(go/func LinuxNativeDispatcher_Getmntent0_J_UnixMountEntry_J_I__I_native
+  "LinuxNativeDispatcher_Getmntent0_J_UnixMountEntry_J_I__I_native is getmntent0: the next entry's name, dir, type
+and options into the UnixMountEntry (getmntent_r's: blank and comment lines skipped, fields split at blanks and tabs,
+the options \"rw\" when missing), 0; -1 at the end.\n"
+  ^int32 [^int64 id ^any entry ^int64 buffer ^int32 buflen]
+  (let [s (getStream id)]
+    (while true
+      (let [(values line err) (.ReadString (.-r s) 10)]
+        (when (and (!= err nil) (== (len line) 0))
+          (return -1))
+        (let [t (strings/TrimLeft line " \t")]
+          (when (and (!= (len t) 0) (!= (aget t 0) 35) (!= (aget t 0) 10))
+            (let [fs (strings/FieldsFunc t (fn ^bool [^rune r] (or (== r 32) (== r 9) (== r 10))))]
+              (when (>= (len fs) 3)
+                (let [opts "rw"]
+                  (when (>= (len fs) 4)
+                    (set! opts (aget fs 3)))
+                  (setBytes entry "name" (conv (slice byte) (mntUnescape (aget fs 0))))
+                  (setBytes entry "dir" (conv (slice byte) (mntUnescape (aget fs 1))))
+                  (setBytes entry "fstype" (conv (slice byte) (mntUnescape (aget fs 2))))
+                  (setBytes entry "opts" (conv (slice byte) (mntUnescape opts)))
+                  (return 0))))))))))
+
+(go/func LinuxNativeDispatcher_Init__V_native "LinuxNativeDispatcher_Init__V_native: nothing to look up.\n" [])
+
+(go/func LinuxNativeDispatcher_Posix_fadvise_I_J_J_I__I_native
+  "LinuxNativeDispatcher_Posix_fadvise_I_J_J_I__I_native is posix_fadvise: 0, or the error number.\n"
+  ^int32 [^int32 fd ^int64 offset ^int64 n ^int32 advice]
+  (let [(values _ _ e) (syscall/Syscall6 syscall/SYS_FADVISE64 (conv uintptr (conv int fd)) (conv uintptr offset)
+                                         (conv uintptr n) (conv uintptr advice) 0 0)]
+    (conv int32 e)))
+
+;; ---------------------------------------------------------------------------------------
+;; copies
+
+(go/const
+  [^{:tag int32 :val -2} fsIosUnavailable -2]
+  [^{:tag int32 :val -6} fsIosUnsupportedCase -6]
+  [^{:tag int32 :val -5} fsIosThrown -5])
+
+(go/func cancelled "cancelled is whether the cancellation flag at native address a (0: none) is set.\n"
+  ^bool [^int64 a]
+  (when (== a 0)
+    (return false))
+  (!= (atomic/LoadInt32 (conv (* int32) (nativeAligned a 4))) 0))
+
+(go/func LinuxNativeDispatcher_DirectCopy0_I_I_J__I_native
+  "LinuxNativeDispatcher_DirectCopy0_I_I_J__I_native is directCopy0: copy_file_range, then sendfile; 0 when copied,
+IOStatus.UNAVAILABLE or UNSUPPORTED_CASE as the C's, an IOException \"Copy failed\" or a UnixException.\n"
+  ^int32 [^int32 dst ^int32 src ^int64 cancel]
+  (let [count (conv uintptr 0x7ffff000)
+        ^int sent 0]
+    (when (!= cancel 0)
+      (set! count 1048576))
+    (do
+      (while true
+        (let [(values r _ e) (syscall/Syscall6 sysCopyFileRange (conv uintptr (conv int src)) 0 (conv uintptr (conv int dst)) 0 count 0)]
+          (if (== e syscall/EINTR)
+            (continue)
+            (do
+              (set! sent (conv int r))
+              (when (!= e 0)
+                (set! sent -1)
+                (when (not (or (== e syscall/EINVAL) (== e syscall/ENOSYS) (== e syscall/EXDEV) (== e syscall/EOPNOTSUPP)))
+                  (panic (IOException_New_String (Str (lastErrorText e))))))))
+          (when (cancelled cancel)
+            (throwUnix (conv int32 syscall/ECANCELED)))
+          (when (<= sent 0)
+            (break))))
+      (when (== sent 0)
+        (return 0)))
+    (while true
+      (let [(values r _ e) (syscall/Syscall6 syscall/SYS_SENDFILE (conv uintptr (conv int dst)) (conv uintptr (conv int src)) 0 count 0 0)]
+        (when (== e syscall/EINTR)
+          (continue))
+        (when (!= e 0)
+          (when (== e syscall/EAGAIN)
+            (return fsIosUnavailable))
+          (when (or (== e syscall/EINVAL) (== e syscall/ENOSYS))
+            (return fsIosUnsupportedCase))
+          (throwUnix (conv int32 e)))
+        (when (cancelled cancel)
+          (throwUnix (conv int32 syscall/ECANCELED)))
+        (when (<= (conv int r) 0)
+          (return 0))))))
+
+(go/func Fs_UnixFileSystem_BufferedCopy0_I_I_J_I_J__V_native
+  "Fs_UnixFileSystem_BufferedCopy0_I_I_J_I_J__V_native is bufferedCopy0: read and write through the buffer at address
+(native memory: UnixFileSystem's overlay gives a NativeBuffer, jrt having no direct buffer's address).\n"
+  [^int32 dst ^int32 src ^int64 address ^int32 size ^int64 cancel]
+  (let [buf (nativeBytes address (conv int64 size))]
+    (while true
+      (let [^int n 0]
+        (while true
+          (let [(values r err) (syscall/Read (conv int src) buf)]
+            (when (!= err syscall/EINTR)
+              (when (!= err nil)
+                (throwErr err))
+              (set! n r)
+              (break))))
+        (when (<= n 0)
+          (return))
+        (when (cancelled cancel)
+          (throwUnix (conv int32 syscall/ECANCELED)))
+        (let [pos 0]
+          (while (< pos n)
+            (let [(values w err) (syscall/Write (conv int dst) (subslice buf pos n))]
+              (when (!= err syscall/EINTR)
+                (when (!= err nil)
+                  (throwErr err))
+                (set! pos (+ pos w))))))))))
+
+;; ---------------------------------------------------------------------------------------
+;; LinuxWatchService: inotify
+
+(go/func LinuxWatchService_EventSize__I_native "LinuxWatchService_EventSize__I_native: sizeof(struct inotify_event).\n"
+  ^int32 [] 16)
+
+(go/func LinuxWatchService_EventOffsets__I1_native
+  "LinuxWatchService_EventOffsets__I1_native: the offsets of wd, mask, cookie, len and name.\n"
+  ^{:tag (* IntArray)} []
+  (let [r (NewIntArray 5)]
+    (aset (.-A r) 0 0)
+    (aset (.-A r) 1 4)
+    (aset (.-A r) 2 8)
+    (aset (.-A r) 3 12)
+    (aset (.-A r) 4 16)
+    r))
+
+(go/func LinuxWatchService_InotifyInit__I_native "LinuxWatchService_InotifyInit__I_native is inotify_init.\n" ^int32 []
+  (let [(values fd err) (syscall/InotifyInit1 0)]
+    (once err)
+    (conv int32 fd)))
+
+(go/func LinuxWatchService_InotifyAddWatch_I_J_I__I_native
+  "LinuxWatchService_InotifyAddWatch_I_J_I__I_native is inotify_add_watch.\n"
+  ^int32 [^int32 fd ^int64 path ^int32 mask]
+  (let [(values w err) (syscall/InotifyAddWatch (conv int fd) (cPath path) (conv uint32 mask))]
+    (once err)
+    (conv int32 w)))
+
+(go/func LinuxWatchService_InotifyRmWatch_I_I__V_native "LinuxWatchService_InotifyRmWatch_I_I__V_native is inotify_rm_watch.\n"
+  [^int32 fd ^int32 wd]
+  (let [(values _ err) (syscall/InotifyRmWatch (conv int fd) (conv uint32 wd))]
+    (once err)))
+
+(go/func LinuxWatchService_ConfigureBlocking_I_Z__V_native
+  "LinuxWatchService_ConfigureBlocking_I_Z__V_native sets or clears O_NONBLOCK (fcntl's F_GETFL, F_SETFL).\n"
+  [^int32 fd ^bool blocking]
+  (let [(values fl _ _) (syscall/Syscall syscall/SYS_FCNTL (conv uintptr (conv int fd)) syscall/F_GETFL 0)
+        flags (conv int fl)]
+    (cond
+      (and (not blocking) (== (bit-and flags syscall/O_NONBLOCK) 0))
+      (syscall/Syscall syscall/SYS_FCNTL (conv uintptr (conv int fd)) syscall/F_SETFL (conv uintptr (bit-or flags syscall/O_NONBLOCK)))
+      (and blocking (!= (bit-and flags syscall/O_NONBLOCK) 0))
+      (syscall/Syscall syscall/SYS_FCNTL (conv uintptr (conv int fd)) syscall/F_SETFL (conv uintptr (bit-and-not flags syscall/O_NONBLOCK))))))
+
+(go/func LinuxWatchService_Socketpair_I1__V_native
+  "LinuxWatchService_Socketpair_I1__V_native is socketpair(PF_UNIX, SOCK_STREAM): its two descriptors in sv.\n"
+  [^{:tag (* IntArray)} sv]
+  (let [(values fds err) (syscall/Socketpair syscall/AF_UNIX syscall/SOCK_STREAM 0)]
+    (once err)
+    (aset (.-A sv) 0 (conv int32 (aget fds 0)))
+    (aset (.-A sv) 1 (conv int32 (aget fds 1)))))
+
+(go/func LinuxWatchService_Poll_I_I__I_native
+  "LinuxWatchService_Poll_I_I__I_native is poll of the two descriptors for POLLIN, no time limit: the count, 0 on
+EINTR.\n"
+  ^int32 [^int32 fd1 ^int32 fd2]
+  (let [fds (lit (slice pollFD) (lit pollFD :fd fd1 :events pollIn) (lit pollFD :fd fd2 :events pollIn))
+        (values n e) (ppoll fds -1)]
+    (when (!= e 0)
+      (when (== e syscall/EINTR)
+        (return 0))
+      (throwUnix (conv int32 e)))
+    (conv int32 n)))
+
+;; ---------------------------------------------------------------------------------------
+;; jrt's file table: a kernel descriptor of sun.nio.fs adopted (UnixChannelFactory's overlay)
+
+(go/func HostFiles_Adopt0_I_String__I_native
+  "HostFiles_Adopt0_I_String__I_native enters the kernel's descriptor fd (opened by UnixNativeDispatcher.open, as
+UnixChannelFactory does) into jrt's file table as an os.File named path, which owns it from then on: its handle, the
+FileDescriptor jrt's FileChannelImpl reads and writes.\n"
+  ^int32 [^int32 fd ^{:tag (* String)} path]
+  (let [f (os/NewFile (conv uintptr (conv int fd)) (.String path))]
+    (.Lock filesMu)
+    (defer (.Unlock filesMu))
+    (let [h nextFile]
+      (inc! nextFile)
+      (aset openFiles h f)
+      h)))

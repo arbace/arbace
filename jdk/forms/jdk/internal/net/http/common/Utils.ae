@@ -1,0 +1,1020 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/net/http/common/Utils.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.common)
+
+(import '(java.io ByteArrayOutputStream Closeable IOException PrintStream UncheckedIOException)
+        '(java.net Authenticator$RequestorType
+                   ConnectException
+                   Inet6Address
+                   InetSocketAddress
+                   Proxy
+                   SocketAddress
+                   StandardSocketOptions)
+        '(java.net.http HttpHeaders HttpRequest HttpTimeoutException)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.channels CancelledKeyException NetworkChannel SelectionKey)
+        '(java.nio.charset CharacterCodingException Charset CodingErrorAction StandardCharsets)
+        '(java.text Normalizer Normalizer$Form)
+        '(java.time Instant)
+        '(java.time.temporal ChronoUnit)
+        '(java.util Arrays Collection Collections HexFormat Iterator List Set TreeSet)
+        '(java.util.concurrent CancellationException
+                               CompletableFuture
+                               CompletionException
+                               ConcurrentHashMap
+                               ExecutionException
+                               Executor
+                               ExecutorService
+                               Future
+                               RejectedExecutionException
+                               TimeUnit
+                               TimeoutException)
+        '(java.util.function BiConsumer BiFunction BiPredicate Consumer Function Predicate Supplier)
+        '(java.util.stream Collectors Stream)
+        '(javax.net.ssl ExtendedSSLSession
+                        SSLException
+                        SSLHandshakeException
+                        SSLParameters
+                        SSLSession)
+        '(jdk.internal.jrt SystemLoggers$Logger$Level)
+        '(jdk.internal.net.http HttpRequestImpl)
+        '(sun.net NetProperties)
+        '(sun.net.www HeaderParser))
+
+(defclass ^:public ^:final Utils
+  (field ^:public ^:static ^:final ^boolean ASSERTIONSENABLED)
+
+  (static-initializer
+    (let [^:mutable enabled false]
+      (java-assert (set! enabled true))
+      (set! ASSERTIONSENABLED enabled)))
+
+  (field ^:public ^:static ^:final ^DebugLogger$LoggerConfig DEBUG_CONFIG
+    (Utils/getLoggerConfig DebugLogger/HTTP_NAME DebugLogger$LoggerConfig/OFF))
+
+  (field ^:public ^:static ^:final ^DebugLogger$LoggerConfig DEBUG_WS_CONFIG
+    (Utils/getLoggerConfig DebugLogger/WS_NAME DebugLogger$LoggerConfig/OFF))
+
+  (field ^:public ^:static ^:final ^DebugLogger$LoggerConfig DEBUG_HPACK_CONFIG
+    (Utils/getLoggerConfig DebugLogger/HPACK_NAME DebugLogger$LoggerConfig/OFF))
+
+  (field ^:public ^:static ^:final ^boolean DEBUG (.on DEBUG_CONFIG))
+
+  (field ^:public ^:static ^:final ^boolean DEBUG_WS (.on DEBUG_WS_CONFIG))
+
+  (field ^:public ^:static ^:final ^boolean TESTING DEBUG)
+
+  (field ^:public ^:static ^:final ^boolean isHostnameVerificationDisabled
+    (Utils/hostnameVerificationDisabledValue))
+
+  (method ^:private ^:static getLoggerConfig ^DebugLogger$LoggerConfig [^String loggerName
+                                                                        ^DebugLogger$LoggerConfig def]
+    (let [prop (System/getProperty loggerName)]
+      (if (nil? prop)
+          def
+          (let [^:mutable config DebugLogger$LoggerConfig/OFF]
+            (for-each [^:mutable ^String s (.split prop ",")]
+              (set! s (.trim s))
+              (when-not (.isEmpty s)
+                (let [len (.length s)]
+                  (switch len
+                    3
+                      (cond
+                        (.regionMatches s true 0 "err" 0 3)
+                          (set! config (.withErrLevel config SystemLoggers$Logger$Level/ALL))
+                        (.regionMatches s true 0 "out" 0 3)
+                          (set! config (.withOutLevel config SystemLoggers$Logger$Level/ALL))
+                        (.regionMatches s true 0 "log" 0 3)
+                          (set! config (.withLogLevel config SystemLoggers$Logger$Level/ALL)))
+                    4
+                      (when (.regionMatches s true 0 "true" 0 4)
+                        (set! config
+                              (.withLogLevel (.withErrLevel config SystemLoggers$Logger$Level/ALL)
+                                             SystemLoggers$Logger$Level/ALL)))
+                    nil))))
+            config))))
+
+  (method ^:private ^:static hostnameVerificationDisabledValue ^boolean []
+    (let [prop (Utils/getProperty "jdk.internal.httpclient.disableHostnameVerification")]
+      (cond (nil? prop) false (.isEmpty prop) true :else (Boolean/parseBoolean prop))))
+
+  (field ^:public ^:static ^:final ^int SLICE_THRESHOLD 32)
+
+  (field ^:public ^:static ^:final ^int BUFSIZE
+    (Utils/getIntegerNetProperty "jdk.httpclient.bufsize"
+                                 1
+                                 (bit-shift-left-int 1 14)
+                                 (bit-shift-left-int 1 14)
+                                 true))
+
+  (field ^:public ^:static ^:final ^{:tag (BiPredicate String String)} ACCEPT_ALL
+    (lambda BiPredicate ^boolean [^String x ^String y] true))
+
+  (field ^:private ^:static ^:final ^{:tag (Set String)} DISALLOWED_HEADERS_SET
+    (Utils/getDisallowedHeaders))
+
+  (method ^:private ^:static getDisallowedHeaders ^{:tag (Set String)} []
+    (let [^{:tag (Set String)} headers (TreeSet. String/CASE_INSENSITIVE_ORDER)]
+      (.addAll headers (Set/of "connection" "content-length" "expect" "host" "upgrade" "alt-used"))
+      (let [v (Utils/getNetProperty "jdk.httpclient.allowRestrictedHeaders")]
+        (if (some? v)
+            (let [tokens (.split (.trim v) ",")]
+              (for-each [^String token tokens] (.remove headers token))
+              (Collections/unmodifiableSet headers))
+            (Collections/unmodifiableSet headers)))))
+
+  (field ^:public ^:static ^:final ^{:tag (BiPredicate String String)} ALLOWED_HEADERS
+    (lambda BiPredicate ^boolean [^String header ^String unused]
+      (not (.contains DISALLOWED_HEADERS_SET header))))
+
+  (field ^:private ^:static ^:final ^{:tag (Set String)} DISALLOWED_REDIRECT_HEADERS_SET
+    (Utils/getDisallowedRedirectHeaders))
+
+  (method ^:private ^:static getDisallowedRedirectHeaders ^{:tag (Set String)} []
+    (let [^{:tag (Set String)} headers (TreeSet. String/CASE_INSENSITIVE_ORDER)]
+      (.addAll headers (Set/of "Authorization" "Cookie" "Origin" "Referer" "Host"))
+      (Collections/unmodifiableSet headers)))
+
+  (field ^:public ^:static ^:final ^{:tag (BiPredicate String String)} ALLOWED_REDIRECT_HEADERS
+    (lambda BiPredicate ^boolean [^String header ^String _]
+      (not (.contains DISALLOWED_REDIRECT_HEADERS_SET header))))
+
+  (field ^:public ^:static ^:final ^{:tag (BiPredicate String String)} VALIDATE_USER_HEADER
+    (lambda BiPredicate ^boolean [^String name ^String value]
+      (java-assert (some? name) "null header name")
+      (java-assert (some? value) "null header value")
+      (when-not (Utils/isValidName name) (throw (Utils/newIAE "invalid header name: \"%s\"" name)))
+      (when-not (.test Utils/ALLOWED_HEADERS name nil)
+        (throw (Utils/newIAE "restricted header name: \"%s\"" name)))
+      (when-not (Utils/isValidValue value)
+        (throw (Utils/newIAE "invalid header value for %s: \"%s\"" name value)))
+      true))
+
+  (defclass ^:public ^:enum UseVTForSelector
+    (constants ALWAYS NEVER DEFAULT))
+
+  (method ^:public ^:static useVTForSelector ^UseVTForSelector [^String property ^String defval]
+    (let [useVtForSelector (System/getProperty property defval)]
+      (cast UseVTForSelector
+            (.orElse (.findFirst (.filter (Stream/of (UseVTForSelector/values))
+                                          (lambda Predicate ^boolean [^UseVTForSelector v]
+                                            (.equalsIgnoreCase (.name v) useVtForSelector))))
+                     UseVTForSelector/DEFAULT))))
+
+  (method ^:public ^:static addSuppressed :type-params [(T extends Throwable)] ^T [^T x
+                                                                                   ^Throwable suppressed]
+    (when (and (not (identical? x suppressed)) (some? suppressed))
+      (let [^:mutable sup (.getSuppressed x)]
+        (when (and (some? sup) (> (alength sup) 0))
+          (when (.contains (Arrays/asList sup) suppressed) (return x)))
+        (set! sup (.getSuppressed suppressed))
+        (when (and (some? sup) (> (alength sup) 0))
+          (when (.contains (Arrays/asList sup) x) (return x)))
+        (.addSuppressed x suppressed)))
+    x)
+
+  (method ^:public ^:static debugDeadline ^String [^Deadline now ^Deadline deadline]
+    (let [isDue (<= (.compareTo deadline now) 0)]
+      (try
+        (cond
+          isDue
+            (if (.equals deadline Deadline/MIN)
+                "due (Deadline.MIN)"
+                (java-str "due since " (.until deadline now ChronoUnit/MILLIS) "ms"))
+          (.equals deadline Deadline/MAX) "not scheduled (Deadline.MAX)"
+          :else (java-str "due in " (.until now deadline ChronoUnit/MILLIS) "ms"))
+        (catch ArithmeticException x (if isDue "due since too long" "due in the far future")))))
+
+  (defclass ^:public ^:record ProxyHeaders [^HttpHeaders userHeaders ^HttpHeaders systemHeaders])
+
+  (method ^:public ^:static ^:final PROXY_TUNNEL_RESTRICTED ^{:tag (BiPredicate String String)} []
+    (lambda BiPredicate ^boolean [^String k ^String v] (not (.equalsIgnoreCase "host" k))))
+
+  (field ^:private ^:static ^:final ^{:tag (Predicate String)} IS_HOST
+    (method-ref Predicate [String] "host" String/.equalsIgnoreCase))
+
+  (field ^:private ^:static ^:final ^{:tag (Predicate String)} IS_PROXY_HEADER
+    (lambda Predicate ^boolean [^String k]
+      (and (and (some? k) (> (.length k) 6)) (.equalsIgnoreCase "proxy-" (.substring k 0 6)))))
+
+  (field ^:private ^:static ^:final ^{:tag (Predicate String)} NO_PROXY_HEADER
+    (.negate IS_PROXY_HEADER))
+
+  (field ^:private ^:static ^:final ^{:tag (Predicate String)} ALL_HEADERS
+    (lambda Predicate ^boolean [^String s] true))
+
+  (field ^:private ^:static ^:final ^{:tag (Set String)} PROXY_AUTH_DISABLED_SCHEMES)
+
+  (field ^:private ^:static ^:final ^{:tag (Set String)} PROXY_AUTH_TUNNEL_DISABLED_SCHEMES)
+
+  (static-initializer
+    (let [proxyAuthDisabled (Utils/getNetProperty "jdk.http.auth.proxying.disabledSchemes")
+          proxyAuthTunnelDisabled (Utils/getNetProperty "jdk.http.auth.tunneling.disabledSchemes")]
+      (set! PROXY_AUTH_DISABLED_SCHEMES
+            (if (nil? proxyAuthDisabled)
+                (Set/of)
+                (cast Set
+                      (.collect (.filter (.map (Stream/of (.split proxyAuthDisabled ","))
+                                               (method-ref Function ^String [String] String/.trim))
+                                         (lambda Predicate ^boolean [^String s] (not (.isEmpty s))))
+                                (Collectors/toUnmodifiableSet)))))
+      (set! PROXY_AUTH_TUNNEL_DISABLED_SCHEMES
+            (if (nil? proxyAuthTunnelDisabled)
+                (Set/of)
+                (cast Set
+                      (.collect (.filter (.map (Stream/of (.split proxyAuthTunnelDisabled ","))
+                                               (method-ref Function ^String [String] String/.trim))
+                                         (lambda Predicate ^boolean [^String s] (not (.isEmpty s))))
+                                (Collectors/toUnmodifiableSet)))))))
+
+  (method ^:public ^:static wrapForDebug :type-params [T] ^{:tag (CompletableFuture T)} [^Logger logger
+                                                                                         ^String name
+                                                                                         ^{:tag (CompletableFuture T)} cf]
+    (if (.on logger)
+        (.thenCompose (.handle cf
+                               (lambda BiFunction ^CompletableFuture [r ^Throwable t]
+                                 (.log logger
+                                       "%s completed %s"
+                                       (new Object/1 [name (if (nil? t) "successfully" ^Object t)]))
+                                 cf))
+                      (Function/identity))
+        cf))
+
+  (field ^:private ^:static ^:final ^String WSPACES " \t\r\n")
+
+  (method ^:private ^:static ^:final isAllowedForProxy ^boolean [^String name ^String value
+                                                                 ^{:tag (Set String)} disabledSchemes
+                                                                 ^{:tag (Predicate String)} allowedKeys]
+    (cond
+      (not (.test allowedKeys name)) false
+      (.isEmpty disabledSchemes) true
+      :else
+        (do
+          (when (.equalsIgnoreCase name "proxy-authorization")
+            (when (.isEmpty value) (return false))
+            (for-each [^String scheme disabledSchemes]
+              (let [slen (.length scheme)
+                    vlen (.length value)]
+                (cond
+                  (== vlen slen) (when (.equalsIgnoreCase value scheme) (return false))
+                  (> vlen slen)
+                    (when (.equalsIgnoreCase (.substring value 0 slen) scheme)
+                      (let [c (.codePointAt value slen)]
+                        (when (or (or (> (.indexOf WSPACES c) -1) (Character/isSpaceChar c))
+                                  (Character/isWhitespace c))
+                          (return false))))))))
+          true)))
+
+  (field ^:public ^:static ^:final ^{:tag (BiPredicate String String)} PROXY_TUNNEL_FILTER
+    (lambda BiPredicate ^boolean [^String s ^String v]
+      (Utils/isAllowedForProxy s v PROXY_AUTH_TUNNEL_DISABLED_SCHEMES (.or IS_PROXY_HEADER IS_HOST))))
+
+  (field ^:public ^:static ^:final ^{:tag (BiPredicate String String)} PROXY_FILTER
+    (lambda BiPredicate ^boolean [^String s ^String v]
+      (Utils/isAllowedForProxy s v PROXY_AUTH_DISABLED_SCHEMES ALL_HEADERS)))
+
+  (field ^:public ^:static ^:final ^{:tag (BiPredicate String String)} NO_PROXY_HEADERS_FILTER
+    (lambda BiPredicate ^boolean [^String n ^String v] (.test Utils/NO_PROXY_HEADER n)))
+
+  (method ^:public ^:static setUserAuthFlags ^void [^HttpRequestImpl request
+                                                    ^HttpHeaders userHeaders]
+    (when (.isPresent (.firstValue userHeaders "Authorization"))
+      (.setUserSetAuthFlag request Authenticator$RequestorType/SERVER true))
+    (when (.isPresent (.firstValue userHeaders "Proxy-Authorization"))
+      (.setUserSetAuthFlag request Authenticator$RequestorType/PROXY true)))
+
+  (method ^:public ^:static proxyHasDisabledSchemes ^boolean [^boolean tunnel]
+    (if tunnel
+        (not (.isEmpty PROXY_AUTH_TUNNEL_DISABLED_SCHEMES))
+        (not (.isEmpty PROXY_AUTH_DISABLED_SCHEMES))))
+
+  (method ^:public ^:static copyProxy ^Proxy [^Proxy proxy]
+    (if (or (nil? proxy) (identical? (.getClass proxy) Proxy))
+        proxy
+        (Proxy. (.type proxy) (.address proxy))))
+
+  (field ^:private ^:static ^:final ^String HEADER_CONNECTION "Connection")
+
+  (field ^:private ^:static ^:final ^String HEADER_UPGRADE "Upgrade")
+
+  (method ^:public ^:static ^:final setWebSocketUpgradeHeaders ^void [^HttpRequestImpl request]
+    (.setSystemHeader request HEADER_UPGRADE "websocket")
+    (.setSystemHeader request HEADER_CONNECTION "Upgrade"))
+
+  (field ^:private ^:static ^:final ^{:tag (ConcurrentHashMap Integer String)} opsMap
+    (ConcurrentHashMap.))
+
+  (static-initializer (.put opsMap (Integer/valueOf 0) "None"))
+
+  (method ^:public ^:static interestOps ^String [^SelectionKey key]
+    (if (nil? key)
+        "null-key"
+        (try (Utils/describeOps (.interestOps key)) (catch CancelledKeyException x "cancelled-key"))))
+
+  (method ^:public ^:static readyOps ^String [^SelectionKey key]
+    (if (nil? key)
+        "null-key"
+        (try (Utils/describeOps (.readyOps key)) (catch CancelledKeyException x "cancelled-key"))))
+
+  (method ^:public ^:static describeOps ^String [^int interestOps]
+    (let [^:mutable ops (cast String (.get opsMap interestOps))]
+      (if (some? ops)
+          ops
+          (let [opsb (StringBuilder.)
+                mask (bit-or-int (bit-or-int (bit-or-int SelectionKey/OP_READ SelectionKey/OP_WRITE)
+                                             SelectionKey/OP_CONNECT)
+                                 SelectionKey/OP_ACCEPT)]
+            (when (== (bit-and-int interestOps SelectionKey/OP_READ) SelectionKey/OP_READ)
+              (.append opsb "R"))
+            (when (== (bit-and-int interestOps SelectionKey/OP_WRITE) SelectionKey/OP_WRITE)
+              (.append opsb "W"))
+            (when (== (bit-and-int interestOps SelectionKey/OP_ACCEPT) SelectionKey/OP_ACCEPT)
+              (.append opsb "A"))
+            (when (== (bit-and-int interestOps SelectionKey/OP_CONNECT) SelectionKey/OP_CONNECT)
+              (.append opsb "C"))
+            (when-not (== (bit-or-int interestOps mask) mask)
+              (.append opsb (java-str "(" interestOps ")")))
+            (set! ops (.toString opsb))
+            (.put opsMap interestOps ops)
+            ops))))
+
+  (method ^:public ^:static newIAE ^IllegalArgumentException [^String message & ^Object/1 args]
+    (IllegalArgumentException. (String/format message args)))
+
+  (method ^:public ^:static getBuffer ^ByteBuffer []
+    (ByteBuffer/allocate BUFSIZE))
+
+  (method ^:public ^:static getBufferWithAtMost ^ByteBuffer [^long maxCapacity]
+    (when (< maxCapacity 0)
+      (throw (IllegalArgumentException. (.formatted "capacity < 0: (%s < 0)" maxCapacity))))
+    (let [effectiveCapacity (unchecked-int (Math/min maxCapacity BUFSIZE))]
+      (ByteBuffer/allocate effectiveCapacity)))
+
+  (method ^:public ^:static getCompletionCause ^Throwable [^Throwable x]
+    (let [^:mutable cause x]
+      (while (or (instance? CompletionException cause) (instance? ExecutionException cause))
+        (set! cause (.getCause cause)))
+      (when (and (nil? cause) (not (identical? cause x)))
+        (throw (InternalError. "Unexpected null cause" x)))
+      cause))
+
+  (method ^:public ^:static getCancelCause ^Throwable [^Throwable x]
+    (let [^:mutable cause (Utils/getCompletionCause x)]
+      (when (instance? ConnectionExpiredException cause) (set! cause (.getCause cause)))
+      cause))
+
+  (method ^:public ^:static toIOException ^IOException [^:mutable ^Throwable cause]
+    (when (some? cause)
+      (if-instance [^CompletionException ce cause]
+        (set! cause (.getCause ce))
+        (when-instance [^ExecutionException ee cause] (set! cause (.getCause ee))))
+      (if-instance [^IOException io cause]
+        io
+        (if-instance [^UncheckedIOException uio cause]
+          (.getCause uio)
+          (IOException. (.getMessage cause) cause)))))
+
+  (method ^:public ^:static getIOException ^IOException [^Throwable t]
+    (if (instance? IOException t)
+        (cast IOException t)
+        (let [cause (.getCause t)] (if (some? cause) (Utils/getIOException cause) (IOException. t)))))
+
+  (method ^:public ^:static wrapWithExtraDetail ^Throwable [^:mutable ^Throwable t
+                                                            ^{:tag (Supplier String)} messageSupplier]
+    (cond
+      (not (instance? IOException t)) t
+      (instance? SSLHandshakeException t) t
+      :else
+        (let [msg (cast String (.get messageSupplier))]
+          (if (nil? msg)
+              t
+              (do
+                (if (instance? ConnectionExpiredException t)
+                    (do
+                      (when (instance? SSLHandshakeException (.getCause t)) (return t))
+                      (let [ioe (IOException. msg (.getCause t))]
+                        (set! t (ConnectionExpiredException. ioe))))
+                    (let [ioe (IOException. msg t)] (set! t ioe)))
+                t)))))
+
+  (constructor ^:private [this])
+
+  (field ^:private ^:static ^:final ^boolean/1 LOWER_CASE_CHARS (new boolean/1 128))
+
+  (field ^:private ^:static ^:final ^boolean/1 tchar (new boolean/1 256))
+
+  (field ^:private ^:static ^:final ^boolean/1 fieldvchar (new boolean/1 256))
+
+  (static-initializer
+    (let [lcase (.toCharArray "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz")]
+      (for-each [^char c lcase] (aset tchar c true) (aset LOWER_CASE_CHARS c true))
+      (let [ucase (.toCharArray "ABCDEFGHIJKLMNOPQRSTUVWXYZ")]
+        (for-each [^char c ucase] (aset tchar c true))
+        (loop [^char c 0x21]
+          (when (<= c 0xFF) (aset fieldvchar c true) (recur (unchecked-char (unchecked-inc-int c)))))
+        (aset fieldvchar 0x7F false))))
+
+  (method ^:public ^:static isValidLowerCaseName ^boolean [^String token]
+    (loop [^int i 0]
+      (when (< i (.length token))
+        (let [c (.charAt token i)]
+          (if (or (> c 255) (not (aget LOWER_CASE_CHARS c)))
+              (return false)
+              (recur (unchecked-inc-int i))))))
+    (not (.isEmpty token)))
+
+  (method ^:public ^:static isValidName ^boolean [^String token]
+    (loop [^int i 0]
+      (when (< i (.length token))
+        (let [c (.charAt token i)]
+          (if (or (> c 255) (not (aget tchar c))) (return false) (recur (unchecked-inc-int i))))))
+    (not (.isEmpty token)))
+
+  (method ^:public ^:static isValidValue ^boolean [^String token]
+    (loop [^int i 0]
+      (when (< i (.length token))
+        (let [c (.charAt token i)]
+          (when (> c 255) (return false))
+          (cond
+            (or (== c \space) (== c \tab)) (recur (unchecked-inc-int i))
+            (not (aget fieldvchar c)) (return false)
+            :else (recur (unchecked-inc-int i))))))
+    true)
+
+  (method ^:public ^:static getIntegerNetProperty ^int [^String name ^int defaultValue]
+    (NetProperties/getInteger name defaultValue))
+
+  (method ^:public ^:static getNetProperty ^String [^String name]
+    (NetProperties/get name))
+
+  (method ^:public ^:static getBooleanProperty ^boolean [^String name ^boolean def]
+    (Boolean/parseBoolean (System/getProperty name (String/valueOf def))))
+
+  (method ^:public ^:static getProperty ^String [^String name]
+    (System/getProperty name))
+
+  (method ^:public ^:static getIntegerProperty ^int [^String name ^int defaultValue]
+    (Integer/parseInt (System/getProperty name (String/valueOf defaultValue))))
+
+  (method ^:public ^:static getLongProperty ^long [^String name ^long defaultValue]
+    (Long/parseLong (System/getProperty name (String/valueOf defaultValue))))
+
+  (method ^:public ^:static getIntegerNetProperty ^int [^String property ^int min ^int max
+                                                        ^int defaultValue ^boolean log]
+    (let [^:mutable value (Utils/getIntegerNetProperty property defaultValue)]
+      (when (or (< value min) (> value max))
+        (when (and log (Log/errors))
+          (Log/logError "Property value for {0}={1} not in [{2}..{3}]: using default={4}"
+                        (new Object/1 [property value min max defaultValue])))
+        (set! value defaultValue))
+      value))
+
+  (method ^:public ^:static copySSLParameters ^SSLParameters [^SSLParameters p]
+    (let [p1 (SSLParameters.)]
+      (.setAlgorithmConstraints p1 (.getAlgorithmConstraints p))
+      (.setCipherSuites p1 (.getCipherSuites p))
+      (.setEnableRetransmissions p1 (.getEnableRetransmissions p))
+      (.setMaximumPacketSize p1 (.getMaximumPacketSize p))
+      (.setEndpointIdentificationAlgorithm p1 (.getEndpointIdentificationAlgorithm p))
+      (when (.getNeedClientAuth p) (.setNeedClientAuth p1 true))
+      (when (.getWantClientAuth p) (.setWantClientAuth p1 true))
+      (let [protocols (.getProtocols p)]
+        (when (some? protocols) (.setProtocols p1 ^String/1 (.clone protocols)))
+        (.setSNIMatchers p1 (.getSNIMatchers p))
+        (.setServerNames p1 (.getServerNames p))
+        (.setUseCipherSuitesOrder p1 (.getUseCipherSuitesOrder p))
+        (.setSignatureSchemes p1 (.getSignatureSchemes p))
+        (.setNamedGroups p1 (.getNamedGroups p))
+        p1)))
+
+  (method ^:public ^:static flipToMark ^void [^ByteBuffer buffer ^int mark]
+    (.limit buffer (.position buffer))
+    (.position buffer mark))
+
+  (method ^:public ^:static stackTrace ^String [^Throwable t]
+    (let [bos (ByteArrayOutputStream.)
+          p (PrintStream. bos true StandardCharsets/US_ASCII)]
+      (.printStackTrace t p)
+      (.toString bos StandardCharsets/US_ASCII)))
+
+  (method ^:public ^:static copy ^int [^ByteBuffer src ^ByteBuffer dst]
+    (let [srcLen (.remaining src)
+          dstLen (.remaining dst)]
+      (if (> srcLen dstLen)
+          (let [diff (unchecked-subtract-int srcLen dstLen)
+                limit (.limit src)]
+            (.limit src (unchecked-subtract-int limit diff))
+            (.put dst src)
+            (.limit src limit))
+          (.put dst src))
+      (unchecked-subtract-int srcLen (.remaining src))))
+
+  (field ^:private ^:static ^:final ^int COPY_THRESHOLD 8192)
+
+  (method ^:public ^:static accumulateBuffers ^long [^{:tag (List ByteBuffer)} currentList
+                                                     ^{:tag (List ByteBuffer)} buffersToAdd]
+    (let [^:mutable accumulatedBytes 0]
+      (for-each [^ByteBuffer bufferToAdd buffersToAdd]
+        (let [remaining (.remaining bufferToAdd)]
+          (when-not (<= remaining 0)
+            (let [listSize (.size currentList)]
+              (if (== listSize 0)
+                  (do (.add currentList bufferToAdd) (set! accumulatedBytes remaining))
+                  (let [lastBuffer (cast ByteBuffer
+                                         (.get currentList (unchecked-subtract-int listSize 1)))
+                        freeSpace (unchecked-subtract-int
+                                    (.capacity lastBuffer)
+                                    (.limit lastBuffer))]
+                    (if (and (<= remaining COPY_THRESHOLD) (>= freeSpace remaining))
+                        (let [position (.position lastBuffer)
+                              limit (.limit lastBuffer)]
+                          (.position lastBuffer limit)
+                          (.limit lastBuffer (unchecked-add-int limit remaining))
+                          (.put lastBuffer bufferToAdd)
+                          (.position lastBuffer position))
+                        (.add currentList bufferToAdd))
+                    (set! accumulatedBytes (unchecked-add accumulatedBytes remaining))))))))
+      accumulatedBytes))
+
+  (method ^:public ^:static copy ^ByteBuffer [^ByteBuffer src]
+    (let [dst (ByteBuffer/allocate (.remaining src))] (.put dst src) (.flip dst) dst))
+
+  (method ^:public ^:static copyAligned ^ByteBuffer [^ByteBuffer src]
+    (let [len (.remaining src)
+          size (bit-shift-left-int (bit-shift-right-int (unchecked-add-int len 7) 3) 3)]
+      (java-assert (>= size len))
+      (let [dst (ByteBuffer/allocate size)] (.put dst src) (.flip dst) dst)))
+
+  (method ^:public ^:static dump ^String [& ^Object/1 objects]
+    (Arrays/toString objects))
+
+  (method ^:public ^:static stringOf ^String [^{:tag (Collection ?)} source]
+    (Arrays/toString (.toArray source)))
+
+  (method ^:public ^:static remaining ^long [^ByteBuffer/1 bufs]
+    (if (nil? bufs)
+        0
+        (let [^:mutable remain 0]
+          (for-each [^ByteBuffer buf bufs] (set! remain (unchecked-add remain (.remaining buf))))
+          remain)))
+
+  (method ^:public ^:static hasRemaining ^boolean [^{:tag (List ByteBuffer)} bufs]
+    (if (nil? bufs)
+        false
+        (do (for-each [^ByteBuffer buf bufs] (when (.hasRemaining buf) (return true))) false)))
+
+  (method ^:public ^:static hasRemaining ^boolean [^ByteBuffer/1 bufs]
+    (if (nil? bufs)
+        false
+        (do (for-each [^ByteBuffer buf bufs] (when (.hasRemaining buf) (return true))) false)))
+
+  (method ^:public ^:static remaining ^long [^{:tag (List ByteBuffer)} bufs]
+    (if (nil? bufs)
+        0
+        (let [^:mutable remain 0]
+          (for-each [^ByteBuffer buf bufs] (set! remain (unchecked-add remain (.remaining buf))))
+          remain)))
+
+  (method ^:public ^:static read ^int [^{:tag (List ByteBuffer)} bufs ^byte/1 data ^int offset]
+    (let [^:mutable pos offset]
+      (for-each [^ByteBuffer buf bufs]
+        (when (>= pos (alength data)) (break))
+        (let [read (Math/min (.remaining buf) (unchecked-subtract-int (alength data) pos))]
+          (when-not (<= read 0) (.get buf data pos read) (set! pos (unchecked-add-int pos read)))))
+      (unchecked-subtract-int pos offset)))
+
+  (method ^:public ^:static next ^ByteBuffer [^{:tag (Iterator ByteBuffer)} iterator]
+    (let [^:mutable ^ByteBuffer next nil]
+      (while (and (.hasNext iterator)
+                  (not (.hasRemaining (set! next (cast ByteBuffer (.next iterator)))))))
+      (when-not (or (nil? next) (not (.hasRemaining next))) next)))
+
+  (method ^:public ^:static mismatch ^long [^{:tag (List ByteBuffer)} these
+                                            ^{:tag (List ByteBuffer)} those]
+    (cond
+      (.isEmpty these) (if (.isEmpty those) -1 0)
+      (.isEmpty those) 0
+      :else
+        (let [^{:tag (Iterator ByteBuffer)} lefti (.iterator these)
+              ^{:tag (Iterator ByteBuffer)} righti (.iterator those)
+              ^:mutable left (Utils/next lefti)
+              ^:mutable right (Utils/next righti)
+              ^:mutable parsed 0]
+          (while (or (some? left) (some? right))
+            (let [^int m (if (or (nil? left) (nil? right)) 0 (.mismatch left right))]
+              (when (== m -1)
+                (set! parsed (unchecked-add parsed (.remaining left)))
+                (java-assert (== (.remaining right) (.remaining left)))
+                (when (some? (set! left (Utils/next lefti)))
+                  (when (some? (set! right (Utils/next righti))) (continue))
+                  (return parsed))
+                (return (if (some? (set! right (Utils/next righti))) parsed -1)))
+              (when (== m 0) (return parsed))
+              (set! parsed (unchecked-add parsed m))
+              (when (< m (.remaining left))
+                (when (< m (.remaining right)) (return parsed))
+                (when (some? (set! right (Utils/next righti)))
+                  (set! left (.slice left m (unchecked-subtract-int (.remaining left) m)))
+                  (continue))
+                (return parsed))
+              (java-assert (< m (.remaining right)))
+              (if (some? (set! left (Utils/next lefti)))
+                  (set! right (.slice right m (unchecked-subtract-int (.remaining right) m)))
+                  (return parsed))))
+          -1)))
+
+  (method ^:public ^:static synchronizedRemaining ^long [^{:tag (List ByteBuffer)} bufs]
+    (if (nil? bufs) 0 (locking bufs (Utils/remaining bufs))))
+
+  (method ^:public ^:static remaining ^long [^{:tag (List ByteBuffer)} bufs ^long max]
+    (if (nil? bufs)
+        0
+        (let [^:mutable remain 0]
+          (for-each [^ByteBuffer buf bufs]
+            (let [size (.remaining buf)]
+              (when (< (unchecked-subtract max remain) size)
+                (throw (IllegalArgumentException. "too many bytes")))
+              (set! remain (unchecked-add remain size))))
+          remain)))
+
+  (method ^:public ^:static remaining ^int [^{:tag (List ByteBuffer)} bufs ^int max]
+    (unchecked-int (Utils/remaining bufs (long max))))
+
+  (method ^:public ^:static remaining ^long [^ByteBuffer/1 refs ^long max]
+    (if (nil? refs)
+        0
+        (let [^:mutable remain 0]
+          (for-each [^ByteBuffer b refs]
+            (let [size (.remaining b)]
+              (when (< (unchecked-subtract max remain) size)
+                (throw (IllegalArgumentException. "too many bytes")))
+              (set! remain (unchecked-add remain size))))
+          remain)))
+
+  (method ^:public ^:static remaining ^int [^ByteBuffer/1 refs ^int max]
+    (unchecked-int (Utils/remaining refs (long max))))
+
+  (method ^:public ^:static close ^void [& ^Closeable/1 closeables]
+    (for-each [^Closeable c closeables] (try (.close c) (catch IOException ignored))))
+
+  (field ^:public ^:static ^:final ^ByteBuffer EMPTY_BYTEBUFFER (ByteBuffer/allocate 0))
+
+  (field ^:public ^:static ^:final ^ByteBuffer/1 EMPTY_BB_ARRAY (new ByteBuffer/1 0))
+
+  (field ^:public ^:static ^:final ^{:tag (List ByteBuffer)} EMPTY_BB_LIST (List/of))
+
+  (method ^:public ^:static sliceWithLimitedCapacity ^ByteBuffer [^ByteBuffer buffer ^int amount]
+    (let [index (unchecked-add-int (.position buffer) amount)
+          limit (.limit buffer)]
+      (if (not (== index limit)) (.limit buffer index) (.limit buffer (.capacity buffer)))
+      (let [newb (.slice buffer)]
+        (.position buffer index)
+        (.limit buffer limit)
+        (.limit newb amount)
+        newb)))
+
+  (method ^:public ^:static sliceOrCopy ^ByteBuffer [^ByteBuffer src ^int start ^int len]
+    (Utils/sliceOrCopy src start len SLICE_THRESHOLD))
+
+  (method ^:public ^:static sliceOrCopy ^ByteBuffer [^ByteBuffer src ^int start ^int len
+                                                     ^int threshold]
+    (java-assert (.hasArray src))
+    (let [cap (alength (.array src))]
+      (if (< (unchecked-subtract-int cap len) threshold)
+          (.slice src start len)
+          (let [b (new byte/1 len)] (when (> len 0) (.get src start b 0 len)) (ByteBuffer/wrap b)))))
+
+  (method ^:public ^:static charsetFrom ^Charset [^HttpHeaders headers]
+    (let [^:mutable type (cast String
+                               (.orElse (.firstValue headers "Content-type")
+                                        "text/html; charset=utf-8"))
+          i (.indexOf type ";")]
+      (when (>= i 0) (set! type (.substring type (unchecked-add-int i 1))))
+      (try
+        (let [parser (HeaderParser. type)
+              value (.findValue parser "charset")]
+          (if (nil? value) StandardCharsets/UTF_8 (Charset/forName value)))
+        (catch Throwable x
+          (when (Log/trace) (Log/logTrace "Can't find charset in \"{0}\" ({1})" type x))
+          StandardCharsets/UTF_8))))
+
+  (method ^:public ^:static unchecked ^UncheckedIOException [^IOException e]
+    (UncheckedIOException. e))
+
+  (method ^:public ^:static getDebugLogger ^Logger [^{:tag (Supplier String)} dbgTag]
+    (DebugLogger/createHttpLogger dbgTag DEBUG_CONFIG))
+
+  (method ^:public ^:static getDebugLogger ^Logger [^{:tag (Supplier String)} dbgTag ^boolean on]
+    (let [^DebugLogger$LoggerConfig config (if on DEBUG_CONFIG DebugLogger$LoggerConfig/OFF)]
+      (DebugLogger/createHttpLogger dbgTag config)))
+
+  (method ^:public ^:static getHpackLogger ^Logger [^{:tag (Supplier String)} dbgTag
+                                                    ^SystemLoggers$Logger$Level errLevel]
+    (DebugLogger/createHpackLogger dbgTag (.withErrLevel DEBUG_HPACK_CONFIG errLevel)))
+
+  (method ^:public ^:static getHpackLogger ^Logger [^{:tag (Supplier String)} dbgTag]
+    (DebugLogger/createHpackLogger dbgTag DEBUG_HPACK_CONFIG))
+
+  (method ^:public ^:static getWebSocketLogger ^Logger [^{:tag (Supplier String)} dbgTag]
+    (DebugLogger/createWebSocketLogger dbgTag DEBUG_WS_CONFIG))
+
+  (method ^:public ^:static immutableSession ^SSLSession [^SSLSession session]
+    (if (instance? ExtendedSSLSession session)
+        (ImmutableExtendedSSLSession. (cast ExtendedSSLSession session))
+        (ImmutableSSLSession. session)))
+
+  (method ^:public ^:static isHostnameVerificationDisabled ^boolean []
+    isHostnameVerificationDisabled)
+
+  (method ^:public ^:static resolveAddress ^InetSocketAddress [^:mutable ^InetSocketAddress address]
+    (when (and (some? address) (.isUnresolved address))
+      (set! address (InetSocketAddress. (.getHostString address) (.getPort address))))
+    address)
+
+  (method ^:public ^:static toConnectException ^Throwable [^:mutable ^Throwable e]
+    (when (some? e)
+      (set! e (Utils/getCompletionCause e))
+      (cond
+        (instance? ConnectException e) e
+        (instance? SecurityException e) e
+        (instance? SSLException e) e
+        (instance? Error e) e
+        (instance? HttpTimeoutException e) e
+        :else (let [cause e] (set! e (ConnectException. (.getMessage e))) (.initCause e cause) e))))
+
+  (method ^:public ^:static pow2Size ^int [^int n]
+    (cond
+      (< n 0) (throw (IllegalArgumentException.))
+      (== n 0) 1
+      (>= n (bit-shift-left-int 1 30)) (bit-shift-left-int 1 30)
+      :else
+        (bit-shift-left-int 1
+                            (unchecked-subtract-int
+                              32
+                              (Integer/numberOfLeadingZeros (unchecked-subtract-int n 1))))))
+
+  (method ^:public ^:static createPseudoHeaders ^HttpHeaders [^HttpRequest request]
+    (let [hdrs (HttpHeadersBuilder.)
+          method (.method request)]
+      (.setHeader hdrs ":method" method)
+      (let [uri (.uri request)]
+        (.setHeader hdrs ":scheme" (.getScheme uri))
+        (let [host (.getHost uri)
+              port (.getPort uri)]
+          (java-assert (some? host))
+          (if (not (== port -1))
+              (.setHeader hdrs ":authority" (java-str host ":" port))
+              (.setHeader hdrs ":authority" host))
+          (let [query (.getRawQuery uri)
+                ^:mutable path (.getRawPath uri)]
+            (when (or (nil? path) (.isEmpty path))
+              (if (.equalsIgnoreCase method "OPTIONS") (set! path "*") (set! path "/")))
+            (when (some? query) (set! path (java-str path (java-str "?" query))))
+            (.setHeader hdrs ":path" (Utils/encode path))
+            (.build hdrs))))))
+
+  (method ^:public ^:static encode ^String [^String s]
+    (let [n (.length s)]
+      (if (== n 0)
+          s
+          (do
+            (let [^:mutable ^int i 0]
+              (while true
+                (when (>= (.charAt s i) \u0080) (break))
+                (when (>= (set! i (unchecked-inc-int i)) n) (return s))))
+            (let [ns (Normalizer/normalize s Normalizer$Form/NFC)
+                  ^:mutable ^ByteBuffer bb nil]
+              (try
+                (set! bb
+                      (.encode (.onUnmappableCharacter
+                                 (.onMalformedInput
+                                   (.newEncoder StandardCharsets/UTF_8)
+                                   CodingErrorAction/REPORT)
+                                 CodingErrorAction/REPORT)
+                               (CharBuffer/wrap ns)))
+                (catch CharacterCodingException x (java-assert false x)))
+              (let [format (.withUpperCase (HexFormat/of))
+                    sb (StringBuilder.)]
+                (while (.hasRemaining bb)
+                  (let [b (bit-and-int (.get bb) 0xff)]
+                    (if (>= b 0x80)
+                        (do (.append sb \%) (.toHexDigits format sb (unchecked-byte b)))
+                        (.append sb (unchecked-char b)))))
+                (.toString sb)))))))
+
+  (method ^:public ^:static asHexString ^String [^ByteBuffer buffer]
+    (if (not (.hasRemaining buffer))
+        ""
+        (let [bytes (new byte/1 (.remaining buffer))]
+          (.get buffer (.position buffer) bytes)
+          (.formatHex (HexFormat/of) bytes))))
+
+  (method ^:public ^:static asString ^String [^ByteBuffer buffer ^Charset charset]
+    (let [decoded (.decode charset buffer)
+          chars (new char/1 (.length decoded))]
+      (.get decoded chars)
+      (String. chars)))
+
+  (method ^:public ^:static asString ^String [^ByteBuffer buffer]
+    (Utils/asString buffer StandardCharsets/UTF_8))
+
+  (method ^:public ^:static millis ^String [^Instant now ^Instant deadline]
+    (if (.equals Instant/MAX deadline)
+        "not scheduled"
+        (try
+          (let [delay (.until now deadline ChronoUnit/MILLIS)] (java-str delay " ms"))
+          (catch ArithmeticException a "too far away"))))
+
+  (method ^:public ^:static millis ^String [^Deadline now ^Deadline deadline]
+    (Utils/millis (.asInstant now) (.asInstant deadline)))
+
+  (method ^:public ^:static safeExecutor ^ExecutorService [^ExecutorService delegate
+                                                           ^{:tag (BiConsumer Runnable Throwable)} errorHandler]
+    (let [overflow (.defaultExecutor (CompletableFuture.))]
+      (SafeExecutorService. delegate overflow errorHandler)))
+
+  (defclass ^:public ^:static ^:sealed SafeExecutor
+    :implements [Executor]
+    :permits [SafeExecutorService]
+    :type-params [(E extends Executor)]
+
+    (field ^:final ^E delegate)
+
+    (field ^:final ^{:tag (BiConsumer Runnable Throwable)} errorHandler)
+
+    (field ^:final ^Executor overflow)
+
+    (constructor ^:public [this ^E delegate ^Executor overflow
+                           ^{:tag (BiConsumer Runnable Throwable)} errorHandler]
+      (set! (.-delegate this) delegate)
+      (set! (.-overflow this) overflow)
+      (set! (.-errorHandler this) errorHandler))
+
+    (method ^:public execute ^void [this ^Runnable command]
+      (.ensureExecutedAsync this command))
+
+    (method ^:private ensureExecutedAsync ^void [this ^Runnable command]
+      (try
+        (.execute delegate command)
+        (catch RejectedExecutionException t
+          (.accept errorHandler command t)
+          (.execute overflow command)))))
+
+  (defclass ^:public ^:static ^:final SafeExecutorService
+    :extends (SafeExecutor ExecutorService)
+    :implements [ExecutorService]
+
+    (constructor ^:public [this ^ExecutorService delegate ^Executor overflow
+                           ^{:tag (BiConsumer Runnable Throwable)} errorHandler]
+      (super. delegate overflow errorHandler))
+
+    (method ^:public shutdown ^void [this]
+      (.shutdown (cast ExecutorService (.-delegate this))))
+
+    (method ^:public shutdownNow ^{:tag (List Runnable)} [this]
+      (.shutdownNow (cast ExecutorService (.-delegate this))))
+
+    (method ^:public isShutdown ^boolean [this]
+      (.isShutdown (cast ExecutorService (.-delegate this))))
+
+    (method ^:public isTerminated ^boolean [this]
+      (.isTerminated (cast ExecutorService (.-delegate this))))
+
+    (method ^:public awaitTermination :throws [InterruptedException] ^boolean [this ^long timeout
+                                                                               ^TimeUnit unit]
+      (.awaitTermination (cast ExecutorService (.-delegate this)) timeout unit))
+
+    (method ^:public submit :type-params [T] ^{:tag (Future T)} [this ^{:tag (Callable T)} task]
+      (.submit (cast ExecutorService (.-delegate this)) task))
+
+    (method ^:public submit :type-params [T] ^{:tag (Future T)} [this ^Runnable task ^T result]
+      (.submit (cast ExecutorService (.-delegate this)) task result))
+
+    (method ^:public submit ^{:tag (Future ?)} [this ^Runnable task]
+      (.submit (cast ExecutorService (.-delegate this)) task))
+
+    (method ^:public invokeAll :type-params [T] :throws [InterruptedException] ^{:tag (List (Future T))} [this
+                                                                                                          ^{:tag (Collection (? extends (Callable T)))} tasks]
+      (.invokeAll (cast ExecutorService (.-delegate this)) tasks))
+
+    (method ^:public invokeAll :type-params [T] :throws [InterruptedException] ^{:tag (List (Future T))} [this
+                                                                                                          ^{:tag (Collection (? extends (Callable T)))} tasks
+                                                                                                          ^long timeout
+                                                                                                          ^TimeUnit unit]
+      (.invokeAll (cast ExecutorService (.-delegate this)) tasks timeout unit))
+
+    (method ^:public invokeAny :type-params [T] :throws [InterruptedException ExecutionException] ^T [this
+                                                                                                      ^{:tag (Collection (? extends (Callable T)))} tasks]
+      (.invokeAny (cast ExecutorService (.-delegate this)) tasks))
+
+    (method ^:public invokeAny :type-params [T] :throws [InterruptedException
+                                                         ExecutionException
+                                                         TimeoutException] ^T [this
+                                                                               ^{:tag (Collection (? extends (Callable T)))} tasks
+                                                                               ^long timeout
+                                                                               ^TimeUnit unit]
+      (.invokeAny (cast ExecutorService (.-delegate this)) tasks)))
+
+  (method ^:public ^:static configureChannelBuffers :type-params [(T extends NetworkChannel)] ^T [^{:tag (Consumer String)} logSink
+                                                                                                  ^T chan
+                                                                                                  ^int receiveBufSize
+                                                                                                  ^int sendBufSize]
+    (when (some? logSink)
+      (let [^:mutable bufsize (Utils/getSoReceiveBufferSize logSink chan)]
+        (.accept logSink (.formatted "Initial receive buffer size is: %d" bufsize))
+        (set! bufsize (Utils/getSoSendBufferSize logSink chan))
+        (.accept logSink (.formatted "Initial send buffer size is: %d" bufsize))))
+    (when (Utils/trySetReceiveBufferSize logSink chan receiveBufSize)
+      (when (some? logSink)
+        (let [bufsize (Utils/getSoReceiveBufferSize logSink chan)]
+          (.accept logSink (.formatted "Receive buffer size configured: %d" bufsize)))))
+    (when (Utils/trySetSendBufferSize logSink chan sendBufSize)
+      (when (some? logSink)
+        (let [bufsize (Utils/getSoSendBufferSize logSink chan)]
+          (.accept logSink (.formatted "Send buffer size configured: %d" bufsize)))))
+    chan)
+
+  (method ^:public ^:static trySetReceiveBufferSize ^boolean [^{:tag (Consumer String)} logSink
+                                                              ^NetworkChannel chan ^int bufsize]
+    (try
+      (when (> bufsize 0) (.setOption chan StandardSocketOptions/SO_RCVBUF bufsize) (return true))
+      (catch IOException x
+        (when (some? logSink)
+          (.accept logSink
+                   (.formatted "Failed to set receive buffer size to %d on %s" bufsize chan)))))
+    false)
+
+  (method ^:public ^:static trySetSendBufferSize ^boolean [^{:tag (Consumer String)} logSink
+                                                           ^NetworkChannel chan ^int bufsize]
+    (try
+      (when (> bufsize 0) (.setOption chan StandardSocketOptions/SO_SNDBUF bufsize) (return true))
+      (catch IOException x
+        (when (some? logSink)
+          (.accept logSink (.formatted "Failed to set send buffer size to %d on %s" bufsize chan)))))
+    false)
+
+  (method ^:public ^:static getSoReceiveBufferSize ^int [^{:tag (Consumer String)} logSink
+                                                         ^NetworkChannel chan]
+    (try
+      (return (.intValue (cast Integer (.getOption chan StandardSocketOptions/SO_RCVBUF))))
+      (catch IOException x
+        (when (some? logSink)
+          (.accept logSink (.formatted "Failed to get initial receive buffer size on %s" chan)))))
+    0)
+
+  (method ^:public ^:static getSoSendBufferSize ^int [^{:tag (Consumer String)} logSink
+                                                      ^NetworkChannel chan]
+    (try
+      (return (.intValue (cast Integer (.getOption chan StandardSocketOptions/SO_SNDBUF))))
+      (catch IOException x
+        (when (some? logSink)
+          (.accept logSink (.formatted "Failed to get initial receive buffer size on %s" chan)))))
+    0)
+
+  (method ^:public ^:static addressConflict ^String [^SocketAddress local ^SocketAddress peer]
+    (when-not (or (nil? local) (nil? peer))
+      (if (.equals local peer)
+          "local endpoint and remote endpoint are bound to the same IP address and port"
+          (when-instance [^InetSocketAddress li local]
+            (when-instance [^InetSocketAddress pi peer]
+              (let [laddr (.getAddress li)
+                    paddr (.getAddress pi)]
+                (when (and (not (.isAnyLocalAddress laddr)) (not (.isAnyLocalAddress paddr)))
+                  (when-not (identical? (.getClass laddr) (.getClass paddr))
+                    (if-instance [^Inet6Address laddr6 laddr]
+                      (if (not (.isIPv4CompatibleAddress laddr6))
+                          (return (.formatted
+                                    "local endpoint IP (%s) and remote endpoint IP (%s) don't match"
+                                    (.getSimpleName (.getClass laddr))
+                                    (.getSimpleName (.getClass paddr))))
+                          (when-instance [^Inet6Address paddr6 paddr]
+                            (when-not (.isIPv4CompatibleAddress paddr6)
+                              (return
+                                (.formatted
+                                  "local endpoint IP (%s) and remote endpoint IP (%s) don't match"
+                                  (.getSimpleName (.getClass laddr))
+                                  (.getSimpleName (.getClass paddr)))))))
+                      (when-instance [^Inet6Address paddr6 paddr]
+                        (when-not (.isIPv4CompatibleAddress paddr6)
+                          (return (.formatted
+                                    "local endpoint IP (%s) and remote endpoint IP (%s) don't match"
+                                    (.getSimpleName (.getClass laddr))
+                                    (.getSimpleName (.getClass paddr)))))))))
+                (when-not (not (== (.getPort li) (.getPort pi)))
+                  (cond
+                    (and (.isAnyLocalAddress (.getAddress li))
+                         (.isLoopbackAddress (.getAddress pi)))
+                      "local endpoint (wildcard) and remote endpoint (loopback) ports conflict"
+                    (and (.isAnyLocalAddress (.getAddress pi))
+                         (.isLoopbackAddress (.getAddress li)))
+                      "local endpoint (loopback) and remote endpoint (wildcard) ports conflict"))))))))
+
+  (method ^:public ^:static exceptionNow ^Throwable [^{:tag (CompletableFuture ?)} cf]
+    (when (.isCompletedExceptionally cf)
+      (if (.isCancelled cf)
+          (try
+            (.join cf)
+            (catch CancellationException x (return x))
+            (catch CompletionException x (return (.getCause x))))
+          (return (.exceptionNow cf))))
+    (throw (IllegalArgumentException. "cf is not completed exceptionally"))))

@@ -1,0 +1,836 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/CertificateMessage.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io ByteArrayInputStream IOException)
+        '(java.nio ByteBuffer)
+        '(java.security.cert CertPathValidatorException
+                             CertPathValidatorException$BasicReason
+                             CertificateEncodingException
+                             CertificateException
+                             CertificateFactory
+                             CertificateParsingException
+                             X509Certificate)
+        '(java.text MessageFormat)
+        '(java.util ArrayList Arrays Collection Collections HashSet LinkedList List Locale)
+        '(java.util.function Function IntFunction Predicate)
+        '(javax.net.ssl SSLEngine
+                        SSLException
+                        SSLProtocolException
+                        SSLSocket
+                        X509ExtendedTrustManager))
+
+(defclass ^:final CertificateMessage
+  (field ^:static ^:final ^SSLConsumer t12HandshakeConsumer (T12CertificateConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer t12HandshakeProducer (T12CertificateProducer.))
+
+  (field ^:static ^:final ^SSLConsumer t13HandshakeConsumer (T13CertificateConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer t13HandshakeProducer (T13CertificateProducer.))
+
+  (defclass ^:static ^:final T12CertificateMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:final ^{:tag (List byte/1)} encodedCertChain)
+
+    (constructor :throws [SSLException] [this ^HandshakeContext handshakeContext
+                                         ^X509Certificate/1 certChain]
+      (super. handshakeContext)
+      (let [^{:tag (List byte/1)} encodedCerts (ArrayList. (alength certChain))]
+        (for-each [^X509Certificate cert certChain]
+          (try
+            (.add encodedCerts (.getEncoded cert))
+            (catch CertificateEncodingException cee
+              (throw (.fatal (.-conContext handshakeContext)
+                             Alert/INTERNAL_ERROR
+                             (java-str "Could not encode certificate ("
+                                       (.getSubjectX500Principal cert)
+                                       ")")
+                             cee)))))
+        (set! (.-encodedCertChain this) encodedCerts)))
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext ^ByteBuffer m]
+      (super. handshakeContext)
+      (let [^:mutable listLen (Record/getInt24 m)]
+        (when (> listLen (.remaining m))
+          (throw (.fatal (.-conContext handshakeContext)
+                         Alert/ILLEGAL_PARAMETER
+                         "Error parsing certificate message:no sufficient data")))
+        (if (> listLen 0)
+            (let [^{:tag (List byte/1)} encodedCerts (LinkedList.)]
+              (while (> listLen 0)
+                (let [encodedCert (Record/getBytes24 m)]
+                  (set!
+                    listLen
+                    (unchecked-subtract-int listLen (unchecked-add-int 3 (alength encodedCert))))
+                  (.add encodedCerts encodedCert)
+                  (let [^int maxAllowedChainLength (if (.-isClientMode
+                                                         (.-sslConfig handshakeContext))
+                                                       SSLConfiguration/maxInboundServerCertChainLen
+                                                       SSLConfiguration/maxInboundClientCertChainLen)]
+                    (when (> (.size encodedCerts) maxAllowedChainLength)
+                      (throw (SSLProtocolException.
+                               (java-str "The certificate chain length ("
+                                         (.size encodedCerts)
+                                         ") exceeds the maximum allowed length ("
+                                         maxAllowedChainLength
+                                         ")")))))))
+              (set! (.-encodedCertChain this) encodedCerts))
+            (set! (.-encodedCertChain this) (Collections/emptyList)))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CERTIFICATE)
+
+    (method ^:public messageLength ^int [this]
+      (let [^:mutable ^int msgLen 3]
+        (for-each [^byte/1 encodedCert encodedCertChain]
+          (set! msgLen (unchecked-add-int msgLen (unchecked-add-int (alength encodedCert) 3))))
+        msgLen))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (let [^:mutable ^int listLen 0]
+        (for-each [^byte/1 encodedCert encodedCertChain]
+          (set! listLen (unchecked-add-int listLen (unchecked-add-int (alength encodedCert) 3))))
+        (.putInt24 hos listLen)
+        (for-each [^byte/1 encodedCert encodedCertChain] (.putBytes24 hos encodedCert))))
+
+    (method ^:public toString ^String [this]
+      (if (.isEmpty encodedCertChain)
+          "\"Certificates\": <empty list>"
+          (let [x509Certs (new Object/1 (.size encodedCertChain))]
+            (try
+              (let [cf (CertificateFactory/getInstance "X.509")
+                    ^:mutable ^int i 0]
+                (for-each [^byte/1 encodedCert encodedCertChain]
+                  (let [^:mutable ^Object obj nil]
+                    (try
+                      (set! obj (.generateCertificate cf (ByteArrayInputStream. encodedCert)))
+                      (catch CertificateException ce (set! obj encodedCert)))
+                    (aset x509Certs i obj)
+                    (set! i (unchecked-inc-int i)))))
+              (catch CertificateException ce
+                (let [^:mutable ^int i 0]
+                  (for-each [^byte/1 encodedCert encodedCertChain]
+                    (aset x509Certs i encodedCert)
+                    (set! i (unchecked-inc-int i))))))
+            (let [messageFormat (MessageFormat. "\"Certificates\": [\n{0}\n]" Locale/ENGLISH)
+                  messageFields (new Object/1 [(SSLLogger/toString x509Certs)])]
+              (.format messageFormat messageFields))))))
+
+  (defclass ^:private ^:static ^:final T12CertificateProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [hc (cast HandshakeContext context)]
+        (if (.-isClientMode (.-sslConfig hc))
+            (.onProduceCertificate this (cast ClientHandshakeContext context) message)
+            (.onProduceCertificate this (cast ServerHandshakeContext context) message))))
+
+    (method ^:private onProduceCertificate :throws [IOException] ^byte/1 [this
+                                                                          ^ServerHandshakeContext shc
+                                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions shc)]
+          (when (instance? X509Authentication$X509Possession possession)
+            (set! x509Possession (cast X509Authentication$X509Possession possession))
+            (break)))
+        (when (nil? x509Possession)
+          (throw (.fatal (.-conContext shc)
+                         Alert/INTERNAL_ERROR
+                         "No expected X.509 certificate for server authentication")))
+        (.setLocalPrivateKey (.-handshakeSession shc) (.-popPrivateKey x509Possession))
+        (.setLocalCertificates (.-handshakeSession shc) (.-popCerts x509Possession))
+        (let [cm (T12CertificateMessage. shc (.-popCerts x509Possession))]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Produced server Certificate handshake message" cm))
+          (.write cm (.-handshakeOutput shc))
+          (.flush (.-handshakeOutput shc))
+          nil)))
+
+    (method ^:private onProduceCertificate :throws [IOException] ^byte/1 [this
+                                                                          ^ClientHandshakeContext chc
+                                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions chc)]
+          (when (instance? X509Authentication$X509Possession possession)
+            (set! x509Possession (cast X509Authentication$X509Possession possession))
+            (break)))
+        (when (nil? x509Possession)
+          (if (.useTLS10PlusSpec (.-negotiatedProtocol chc))
+              (do
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine
+                    "No X.509 certificate for client authentication, use empty Certificate message instead"))
+                (set! x509Possession
+                      (X509Authentication$X509Possession. nil (new X509Certificate/1 0))))
+              (do
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine
+                    "No X.509 certificate for client authentication, send a no_certificate alert"))
+                (.warning (.-conContext chc) Alert/NO_CERTIFICATE)
+                (return nil))))
+        (.setLocalPrivateKey (.-handshakeSession chc) (.-popPrivateKey x509Possession))
+        (if (and (some? (.-popCerts x509Possession))
+                 (not (== (alength (.-popCerts x509Possession)) 0)))
+            (.setLocalCertificates (.-handshakeSession chc) (.-popCerts x509Possession))
+            (.setLocalCertificates (.-handshakeSession chc) nil))
+        (let [cm (T12CertificateMessage. chc (.-popCerts x509Possession))]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Produced client Certificate handshake message" cm))
+          (.write cm (.-handshakeOutput chc))
+          (.flush (.-handshakeOutput chc))
+          nil))))
+
+  (defclass ^:static ^:final T12CertificateConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [hc (cast HandshakeContext context)]
+        (.remove (.-handshakeConsumers hc) (.-id SSLHandshake/CERTIFICATE))
+        (let [cm (T12CertificateMessage. hc message)]
+          (if (.-isClientMode (.-sslConfig hc))
+              (do
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine "Consuming server Certificate handshake message" cm))
+                (.onCertificate this (cast ClientHandshakeContext context) cm))
+              (do
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine "Consuming client Certificate handshake message" cm))
+                (.onCertificate this (cast ServerHandshakeContext context) cm))))))
+
+    (method ^:private onCertificate :throws [IOException] ^void [this ^ServerHandshakeContext shc
+                                                                 ^T12CertificateMessage certificateMessage]
+      (let [^{:tag (List byte/1)} encodedCerts (.-encodedCertChain certificateMessage)]
+        (when (or (nil? encodedCerts) (.isEmpty encodedCerts))
+          (.remove (.-handshakeConsumers shc) (.-id SSLHandshake/CERTIFICATE_VERIFY))
+          (if (not (identical? (.-clientAuthType (.-sslConfig shc))
+                               ClientAuthType/CLIENT_AUTH_REQUESTED))
+              (throw (.fatal (.-conContext shc)
+                             Alert/HANDSHAKE_FAILURE
+                             "Empty client certificate chain"))
+              (return)))
+        (let [x509Certs (new X509Certificate/1 (.size encodedCerts))]
+          (try
+            (let [cf (CertificateFactory/getInstance "X.509")
+                  ^:mutable ^int i 0]
+              (for-each [^byte/1 encodedCert encodedCerts]
+                (aset x509Certs
+                      i
+                      (cast X509Certificate
+                            (.generateCertificate cf (ByteArrayInputStream. encodedCert))))
+                (set! i (unchecked-inc-int i))))
+            (catch CertificateException ce
+              (throw (.fatal (.-conContext shc)
+                             Alert/BAD_CERTIFICATE
+                             "Failed to parse client certificates"
+                             ce))))
+          (T12CertificateConsumer/checkClientCerts shc x509Certs)
+          (.add (.-handshakeCredentials shc)
+                (X509Authentication$X509Credentials. (.getPublicKey (aget x509Certs 0)) x509Certs))
+          (.setPeerCertificates (.-handshakeSession shc) x509Certs))))
+
+    (method ^:private onCertificate :throws [IOException] ^void [this ^ClientHandshakeContext chc
+                                                                 ^T12CertificateMessage certificateMessage]
+      (let [^{:tag (List byte/1)} encodedCerts (.-encodedCertChain certificateMessage)]
+        (when (or (nil? encodedCerts) (.isEmpty encodedCerts))
+          (throw (.fatal (.-conContext chc) Alert/BAD_CERTIFICATE "Empty server certificate chain")))
+        (let [x509Certs (new X509Certificate/1 (.size encodedCerts))]
+          (try
+            (let [cf (CertificateFactory/getInstance "X.509")
+                  ^:mutable ^int i 0]
+              (for-each [^byte/1 encodedCert encodedCerts]
+                (aset x509Certs
+                      i
+                      (cast X509Certificate
+                            (.generateCertificate cf (ByteArrayInputStream. encodedCert))))
+                (set! i (unchecked-inc-int i))))
+            (catch CertificateException ce
+              (throw (.fatal (.-conContext chc)
+                             Alert/BAD_CERTIFICATE
+                             "Failed to parse server certificates"
+                             ce))))
+          (when (and (some? (.-reservedServerCerts chc))
+                     (not (.-useExtendedMasterSecret (.-handshakeSession chc))))
+            (let [identityAlg (.-identificationProtocol (.-sslConfig chc))]
+              (when (and (or (nil? identityAlg) (.isEmpty identityAlg))
+                         (not (T12CertificateConsumer/isIdentityEquivalent
+                                (aget x509Certs 0)
+                                (aget (.-reservedServerCerts chc) 0))))
+                (throw (.fatal (.-conContext chc)
+                               Alert/BAD_CERTIFICATE
+                               "server certificate change is restricted during renegotiation")))))
+          (if (.-staplingActive chc)
+              (set! (.-deferredCerts chc) x509Certs)
+              (T12CertificateConsumer/checkServerCerts chc x509Certs))
+          (.add (.-handshakeCredentials chc)
+                (X509Authentication$X509Credentials. (.getPublicKey (aget x509Certs 0)) x509Certs))
+          (.setPeerCertificates (.-handshakeSession chc) x509Certs))))
+
+    (method ^:private ^:static isIdentityEquivalent ^boolean [^X509Certificate thisCert
+                                                              ^X509Certificate prevCert]
+      (if (.equals thisCert prevCert)
+          true
+          (let [^:mutable ^{:tag (Collection (List ?))} thisSubjectAltNames nil]
+            (try
+              (set! thisSubjectAltNames (.getSubjectAlternativeNames thisCert))
+              (catch CertificateParsingException cpe
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "handshake"))
+                  (SSLLogger/fine "Attempt to obtain subjectAltNames extension failed!"))))
+            (let [^:mutable ^{:tag (Collection (List ?))} prevSubjectAltNames nil]
+              (try
+                (set! prevSubjectAltNames (.getSubjectAlternativeNames prevCert))
+                (catch CertificateParsingException cpe
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "handshake"))
+                    (SSLLogger/fine "Attempt to obtain subjectAltNames extension failed!"))))
+              (when (and (some? thisSubjectAltNames) (some? prevSubjectAltNames))
+                (let [^{:tag (Collection String)} thisSubAltIPAddrs
+                        (T12CertificateConsumer/getSubjectAltNames thisSubjectAltNames 7)
+                      ^{:tag (Collection String)} prevSubAltIPAddrs
+                        (T12CertificateConsumer/getSubjectAltNames prevSubjectAltNames 7)]
+                  (when (and (and (some? thisSubAltIPAddrs) (some? prevSubAltIPAddrs))
+                             (T12CertificateConsumer/isEquivalent
+                               thisSubAltIPAddrs
+                               prevSubAltIPAddrs))
+                    (return true))
+                  (let [^{:tag (Collection String)} thisSubAltDnsNames
+                          (T12CertificateConsumer/getSubjectAltNames thisSubjectAltNames 2)
+                        ^{:tag (Collection String)} prevSubAltDnsNames
+                          (T12CertificateConsumer/getSubjectAltNames prevSubjectAltNames 2)]
+                    (when (and (and (some? thisSubAltDnsNames) (some? prevSubAltDnsNames))
+                               (T12CertificateConsumer/isEquivalent
+                                 thisSubAltDnsNames
+                                 prevSubAltDnsNames))
+                      (return true)))))
+              (let [thisSubject (.getSubjectX500Principal thisCert)
+                    prevSubject (.getSubjectX500Principal prevCert)
+                    thisIssuer (.getIssuerX500Principal thisCert)
+                    prevIssuer (.getIssuerX500Principal prevCert)]
+                (and (and (and (not (.isEmpty (.getName thisSubject)))
+                               (not (.isEmpty (.getName prevSubject))))
+                          (.equals thisSubject prevSubject))
+                     (.equals thisIssuer prevIssuer)))))))
+
+    (method ^:private ^:static getSubjectAltNames ^{:tag (Collection String)} [^{:tag (Collection (List ?))} subjectAltNames
+                                                                               ^int type]
+      (let [^:mutable ^{:tag (HashSet String)} subAltDnsNames nil]
+        (for-each [^{:tag (List ?)} subjectAltName subjectAltNames]
+          (let [^int subjectAltNameType (cast Integer (.get subjectAltName 0))]
+            (when (== subjectAltNameType type)
+              (let [subAltDnsName (cast String (.get subjectAltName 1))]
+                (when (and (some? subAltDnsName) (not (.isEmpty subAltDnsName)))
+                  (when (nil? subAltDnsNames)
+                    (set! subAltDnsNames (HashSet/newHashSet (.size subjectAltNames))))
+                  (.add subAltDnsNames subAltDnsName))))))
+        subAltDnsNames))
+
+    (method ^:private ^:static isEquivalent ^boolean [^{:tag (Collection String)} thisSubAltNames
+                                                      ^{:tag (Collection String)} prevSubAltNames]
+      (for-each [^String thisSubAltName thisSubAltNames]
+        (for-each [^String prevSubAltName prevSubAltNames]
+          (when (.equalsIgnoreCase thisSubAltName prevSubAltName) (return true))))
+      false)
+
+    (method ^:static checkServerCerts :throws [IOException] ^void [^ClientHandshakeContext chc
+                                                                   ^X509Certificate/1 certs]
+      (let [tm (.getX509TrustManager (.-sslContext chc))
+            ^String keyExchangeString (if (or (identical?
+                                                (.-keyExchange (.-negotiatedCipherSuite chc))
+                                                CipherSuite$KeyExchange/K_RSA_EXPORT)
+                                              (identical?
+                                                (.-keyExchange (.-negotiatedCipherSuite chc))
+                                                CipherSuite$KeyExchange/K_DHE_RSA_EXPORT))
+                                          (.-name CipherSuite$KeyExchange/K_RSA)
+                                          (.-name (.-keyExchange (.-negotiatedCipherSuite chc))))]
+        (try
+          (if (instance? X509ExtendedTrustManager tm)
+              (if-instance [^SSLEngine engine (.-transport (.-conContext chc))]
+                (.checkServerTrusted (cast X509ExtendedTrustManager tm)
+                                     ^X509Certificate/1 (.clone certs)
+                                     keyExchangeString
+                                     engine)
+                (let [socket (cast SSLSocket (.-transport (.-conContext chc)))]
+                  (.checkServerTrusted (cast X509ExtendedTrustManager tm)
+                                       ^X509Certificate/1 (.clone certs)
+                                       keyExchangeString
+                                       socket)))
+              (throw (CertificateException. "Improper X509TrustManager implementation")))
+          (.setPeerCertificates (.-handshakeSession chc) certs)
+          (catch CertificateException ce
+            (throw (.fatal (.-conContext chc) (CertificateMessage/getCertificateAlert chc ce) ce))))))
+
+    (method ^:private ^:static checkClientCerts :throws [IOException] ^void [^ServerHandshakeContext shc
+                                                                             ^X509Certificate/1 certs]
+      (let [tm (.getX509TrustManager (.-sslContext shc))
+            key (.getPublicKey (aget certs 0))
+            keyAlgorithm (.getAlgorithm key)
+            ^:mutable ^String authType nil]
+        (switch keyAlgorithm
+          ("RSA" "DSA" "EC" "RSASSA-PSS") (set! authType keyAlgorithm)
+          (set! authType "UNKNOWN"))
+        (try
+          (if (instance? X509ExtendedTrustManager tm)
+              (if-instance [^SSLEngine engine (.-transport (.-conContext shc))]
+                (.checkClientTrusted (cast X509ExtendedTrustManager tm)
+                                     ^X509Certificate/1 (.clone certs)
+                                     authType
+                                     engine)
+                (let [socket (cast SSLSocket (.-transport (.-conContext shc)))]
+                  (.checkClientTrusted (cast X509ExtendedTrustManager tm)
+                                       ^X509Certificate/1 (.clone certs)
+                                       authType
+                                       socket)))
+              (throw (CertificateException. "Improper X509TrustManager implementation")))
+          (catch CertificateException ce
+            (throw (.fatal (.-conContext shc) Alert/CERTIFICATE_UNKNOWN ce)))))))
+
+  (defclass ^:static ^:final CertificateEntry
+    (field ^:final ^byte/1 encoded)
+
+    (field ^:private ^:final ^SSLExtensions extensions)
+
+    (constructor [this ^byte/1 encoded ^SSLExtensions extensions]
+      (set! (.-encoded this) encoded)
+      (set! (.-extensions this) extensions))
+
+    (method ^:private getEncodedSize ^int [this]
+      (let [^:mutable extLen (.length extensions)]
+        (when (== extLen 0) (set! extLen 2))
+        (unchecked-add-int (unchecked-add-int 3 (alength encoded)) extLen)))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat. "\n'{'\n{0}\n  \"extensions\": '{'\n{1}\n  '}'\n'}',"
+                                          Locale/ENGLISH)
+            ^:mutable ^Object x509Certs nil]
+        (try
+          (let [cf (CertificateFactory/getInstance "X.509")]
+            (set! x509Certs (.generateCertificate cf (ByteArrayInputStream. encoded))))
+          (catch CertificateException ce (set! x509Certs encoded)))
+        (let [messageFields (new Object/1
+                                 [(SSLLogger/toString (new Object/1 [x509Certs]))
+                                  (Utilities/indent (.toString extensions) "    ")])]
+          (.format messageFormat messageFields)))))
+
+  (defclass ^:static ^:final T13CertificateMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^byte/1 requestContext)
+
+    (field ^:private ^:final ^{:tag (List CertificateEntry)} certEntries)
+
+    (constructor :throws [SSLException CertificateException] [this ^HandshakeContext context
+                                                              ^byte/1 requestContext
+                                                              ^X509Certificate/1 certificates]
+      (super. context)
+      (set! (.-requestContext this) (.clone requestContext))
+      (set! (.-certEntries this) (LinkedList.))
+      (for-each [^X509Certificate cert certificates]
+        (let [encoded (.getEncoded cert)
+              extensions (SSLExtensions. this)]
+          (.add certEntries (CertificateEntry. encoded extensions)))))
+
+    (constructor [this ^HandshakeContext handshakeContext ^byte/1 requestContext
+                  ^{:tag (List CertificateEntry)} certificates]
+      (super. handshakeContext)
+      (set! (.-requestContext this) (.clone requestContext))
+      (set! (.-certEntries this) certificates))
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext ^ByteBuffer m]
+      (super. handshakeContext)
+      (when (< (.remaining m) 4)
+        (throw (SSLProtocolException.
+                 (java-str "Invalid Certificate message: insufficient data (length="
+                           (.remaining m)
+                           ")"))))
+      (set! (.-requestContext this) (Record/getBytes8 m))
+      (when (< (.remaining m) 3)
+        (throw (SSLProtocolException.
+                 (java-str
+                   "Invalid Certificate message: insufficient certificate entries data (length="
+                   (.remaining m)
+                   ")"))))
+      (let [listLen (Record/getInt24 m)]
+        (when-not (== listLen (.remaining m))
+          (throw (SSLProtocolException.
+                   (java-str "Invalid Certificate message: incorrect list length (length="
+                             listLen
+                             ")"))))
+        (let [enabledExtensions (.getEnabledExtensions
+                                  (.-sslConfig handshakeContext)
+                                  SSLHandshake/CERTIFICATE)
+              ^{:tag (List CertificateEntry)} certList (LinkedList.)]
+          (while (.hasRemaining m)
+            (let [encodedCert (Record/getBytes24 m)]
+              (when (== (alength encodedCert) 0)
+                (throw (SSLProtocolException. "Invalid Certificate message: empty cert_data")))
+              (let [extensions (SSLExtensions. this m enabledExtensions)]
+                (.add certList (CertificateEntry. encodedCert extensions))
+                (let [^int maxAllowedChainLength (if (.-isClientMode (.-sslConfig handshakeContext))
+                                                     SSLConfiguration/maxInboundServerCertChainLen
+                                                     SSLConfiguration/maxInboundClientCertChainLen)]
+                  (when (> (.size certList) maxAllowedChainLength)
+                    (throw (SSLProtocolException.
+                             (java-str "The certificate chain length ("
+                                       (.size certList)
+                                       ") exceeds the maximum allowed length ("
+                                       maxAllowedChainLength
+                                       ")"))))))))
+          (set! (.-certEntries this) (Collections/unmodifiableList certList)))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/CERTIFICATE)
+
+    (method ^:public messageLength ^int [this]
+      (let [^:mutable msgLen (unchecked-add-int 4 (alength requestContext))]
+        (for-each [^CertificateEntry entry certEntries]
+          (set! msgLen (unchecked-add-int msgLen (.getEncodedSize entry))))
+        msgLen))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (let [^:mutable ^int entryListLen 0]
+        (for-each [^CertificateEntry entry certEntries]
+          (set! entryListLen (unchecked-add-int entryListLen (.getEncodedSize entry))))
+        (.putBytes8 hos requestContext)
+        (.putInt24 hos entryListLen)
+        (for-each [^CertificateEntry entry certEntries]
+          (.putBytes24 hos (.-encoded entry))
+          (if (== (.length (.-extensions entry)) 0)
+              (.putInt16 hos 0)
+              (.send (.-extensions entry) hos)))))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"Certificate\": '{'\n  \"certificate_request_context\": \"{0}\",\n  \"certificate_list\": [{1}\n]\n'}'"
+                            Locale/ENGLISH)
+            builder (StringBuilder. 512)]
+        (for-each [^CertificateEntry entry certEntries] (.append builder (.toString entry)))
+        (let [messageFields (new Object/1
+                                 [(Utilities/toHexString requestContext)
+                                  (Utilities/indent (.toString builder))])]
+          (.format messageFormat messageFields)))))
+
+  (defclass ^:private ^:static ^:final T13CertificateProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [hc (cast HandshakeContext context)]
+        (if (.-isClientMode (.-sslConfig hc))
+            (.onProduceCertificate this (cast ClientHandshakeContext context) message)
+            (.onProduceCertificate this (cast ServerHandshakeContext context) message))))
+
+    (method ^:private onProduceCertificate :throws [IOException] ^byte/1 [this
+                                                                          ^ServerHandshakeContext shc
+                                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [clientHello (cast ClientHello$ClientHelloMessage message)
+            pos (T13CertificateProducer/choosePossession shc clientHello)]
+        (when (nil? pos)
+          (throw (.fatal (.-conContext shc)
+                         Alert/HANDSHAKE_FAILURE
+                         "No available authentication scheme")))
+        (if-instance [^X509Authentication$X509Possession x509Possession pos]
+          (let [localCerts (.-popCerts x509Possession)]
+            (when (or (nil? localCerts) (== (alength localCerts) 0))
+              (throw (.fatal (.-conContext shc)
+                             Alert/HANDSHAKE_FAILURE
+                             "No X.509 certificate for server authentication")))
+            (.add (.-handshakePossessions shc) x509Possession)
+            (.setLocalPrivateKey (.-handshakeSession shc) (.-popPrivateKey x509Possession))
+            (.setLocalCertificates (.-handshakeSession shc) localCerts)
+            (let [^:mutable ^T13CertificateMessage cm nil]
+              (try
+                (set! cm (T13CertificateMessage. shc (new byte/1 0) localCerts))
+                (catch [SSLException CertificateException] ce
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/HANDSHAKE_FAILURE
+                                 "Failed to produce server Certificate message"
+                                 ce))))
+              (set! (.-stapleParams shc) (StatusResponseManager/processStapling shc))
+              (set! (.-staplingActive shc) (some? (.-stapleParams shc)))
+              (let [enabledCTExts (.getEnabledExtensions
+                                    (.-sslConfig shc)
+                                    SSLHandshake/CERTIFICATE
+                                    (Arrays/asList ProtocolVersion/PROTOCOLS_OF_13))]
+                (for-each [^CertificateEntry certEnt (.-certEntries cm)]
+                  (set! (.-currentCertEntry shc) certEnt)
+                  (.produce (.-extensions certEnt) shc enabledCTExts))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine "Produced server Certificate message" cm))
+                (.write cm (.-handshakeOutput shc))
+                (.flush (.-handshakeOutput shc))
+                nil)))
+          (throw (.fatal (.-conContext shc)
+                         Alert/HANDSHAKE_FAILURE
+                         "No X.509 certificate for server authentication")))))
+
+    (method ^:private ^:static choosePossession ^SSLPossession [^HandshakeContext hc
+                                                                ^ClientHello$ClientHelloMessage clientHello]
+      (if (or (nil? (.-peerRequestedCertSignSchemes hc))
+              (.isEmpty (.-peerRequestedCertSignSchemes hc)))
+          (do
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/warning "No signature_algorithms(_cert) in ClientHello"))
+            nil)
+          (let [supportedKeyTypes (cast
+                                    String/1
+                                    (.toArray
+                                      (.filter
+                                        (.filter
+                                          (.distinct
+                                            (.map
+                                              (.stream (.-peerRequestedCertSignSchemes hc))
+                                              (lambda Function ^String [^SignatureScheme ss]
+                                                (.-keyAlgorithm ss))))
+                                          (lambda Predicate ^boolean [^String ka]
+                                            (or
+                                              (some?
+                                                (SignatureScheme/getPreferableAlgorithm
+                                                  (.-algorithmConstraints hc)
+                                                  (.-peerRequestedSignatureSchemes hc)
+                                                  ka
+                                                  (.-negotiatedProtocol hc)))
+                                              (SSLLogger/logWarning
+                                                "ssl,handshake"
+                                                (java-str
+                                                  "Unable to produce CertificateVerify for key algorithm: "
+                                                  ka)))))
+                                        (lambda Predicate ^boolean [^String ka]
+                                          (or (some? (X509Authentication/valueOfKeyAlgorithm ka))
+                                              (SSLLogger/logWarning
+                                                "ssl,handshake"
+                                                (java-str "Unsupported key algorithm: " ka)))))
+                                      (lambda IntFunction ^String/1 ^:method-ref [^int n-1]
+                                        (new String/1 n-1))))
+                pos (X509Authentication/createPossession hc supportedKeyTypes)]
+            (when (nil? pos)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/warning "No available authentication scheme")))
+            pos)))
+
+    (method ^:private onProduceCertificate :throws [IOException] ^byte/1 [this
+                                                                          ^ClientHandshakeContext chc
+                                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [clientHello (cast ClientHello$ClientHelloMessage message)
+            pos (T13CertificateProducer/choosePossession chc clientHello)
+            ^:mutable ^X509Certificate/1 localCerts nil]
+        (if (nil? pos)
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "No available client authentication scheme"))
+              (set! localCerts (new X509Certificate/1 0)))
+            (do
+              (.add (.-handshakePossessions chc) pos)
+              (if-instance [^X509Authentication$X509Possession x509Possession pos]
+                (do
+                  (set! localCerts (.-popCerts x509Possession))
+                  (.setLocalPrivateKey (.-handshakeSession chc) (.-popPrivateKey x509Possession)))
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                    (SSLLogger/fine "No X.509 certificate for client authentication"))
+                  (set! localCerts (new X509Certificate/1 0))))))
+        (if (and (some? localCerts) (not (== (alength localCerts) 0)))
+            (.setLocalCertificates (.-handshakeSession chc) localCerts)
+            (.setLocalCertificates (.-handshakeSession chc) nil))
+        (let [^:mutable ^T13CertificateMessage cm nil]
+          (try
+            (set! cm (T13CertificateMessage. chc (.-certRequestContext chc) localCerts))
+            (catch [SSLException CertificateException] ce
+              (throw (.fatal (.-conContext chc)
+                             Alert/HANDSHAKE_FAILURE
+                             "Failed to produce client Certificate message"
+                             ce))))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Produced client Certificate message" cm))
+          (.write cm (.-handshakeOutput chc))
+          (.flush (.-handshakeOutput chc))
+          nil))))
+
+  (defclass ^:private ^:static ^:final T13CertificateConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [hc (cast HandshakeContext context)]
+        (.remove (.-handshakeConsumers hc) (.-id SSLHandshake/CERTIFICATE))
+        (when (.containsKey (.-handshakeConsumers hc) (.-id SSLHandshake/ENCRYPTED_EXTENSIONS))
+          (throw (.fatal (.-conContext hc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected Certificate handshake message")))
+        (let [cm (T13CertificateMessage. hc message)]
+          (if (.-isClientMode (.-sslConfig hc))
+              (do
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine "Consuming server Certificate handshake message" cm))
+                (.onConsumeCertificate this (cast ClientHandshakeContext context) cm))
+              (do
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine "Consuming client Certificate handshake message" cm))
+                (.onConsumeCertificate this (cast ServerHandshakeContext context) cm))))))
+
+    (method ^:private onConsumeCertificate :throws [IOException] ^void [this
+                                                                        ^ServerHandshakeContext shc
+                                                                        ^T13CertificateMessage certificateMessage]
+      (when (or (nil? (.-certEntries certificateMessage))
+                (.isEmpty (.-certEntries certificateMessage)))
+        (.remove (.-handshakeConsumers shc) (.-id SSLHandshake/CERTIFICATE_VERIFY))
+        (if (identical? (.-clientAuthType (.-sslConfig shc)) ClientAuthType/CLIENT_AUTH_REQUIRED)
+            (throw (.fatal (.-conContext shc)
+                           Alert/CERTIFICATE_REQUIRED
+                           "Empty client certificate chain"))
+            (return)))
+      (let [cliCerts (T13CertificateConsumer/checkClientCerts
+                       shc
+                       (.-certEntries certificateMessage))]
+        (.add (.-handshakeCredentials shc)
+              (X509Authentication$X509Credentials. (.getPublicKey (aget cliCerts 0)) cliCerts))
+        (.setPeerCertificates (.-handshakeSession shc) cliCerts)))
+
+    (method ^:private onConsumeCertificate :throws [IOException] ^void [this
+                                                                        ^ClientHandshakeContext chc
+                                                                        ^T13CertificateMessage certificateMessage]
+      (when (or (nil? (.-certEntries certificateMessage))
+                (.isEmpty (.-certEntries certificateMessage)))
+        (throw (.fatal (.-conContext chc) Alert/DECODE_ERROR "Empty server certificate chain")))
+      (let [enabledExtensions (.getEnabledExtensions (.-sslConfig chc) SSLHandshake/CERTIFICATE)]
+        (for-each [^CertificateEntry certEnt (.-certEntries certificateMessage)]
+          (.consumeOnLoad (.-extensions certEnt) chc enabledExtensions))
+        (let [srvCerts (T13CertificateConsumer/checkServerCerts
+                         chc
+                         (.-certEntries certificateMessage))]
+          (.add (.-handshakeCredentials chc)
+                (X509Authentication$X509Credentials. (.getPublicKey (aget srvCerts 0)) srvCerts))
+          (.setPeerCertificates (.-handshakeSession chc) srvCerts))))
+
+    (method ^:private ^:static checkClientCerts :throws [IOException] ^X509Certificate/1 [^ServerHandshakeContext shc
+                                                                                          ^{:tag (List CertificateEntry)} certEntries]
+      (let [certs (new X509Certificate/1 (.size certEntries))]
+        (try
+          (let [cf (CertificateFactory/getInstance "X.509")
+                ^:mutable ^int i 0]
+            (for-each [^CertificateEntry entry certEntries]
+              (aset certs
+                    i
+                    (cast X509Certificate
+                          (.generateCertificate cf (ByteArrayInputStream. (.-encoded entry)))))
+              (set! i (unchecked-inc-int i))))
+          (catch CertificateException ce
+            (throw (.fatal (.-conContext shc)
+                           Alert/BAD_CERTIFICATE
+                           "Failed to parse client certificates"
+                           ce))))
+        (let [keyAlgorithm (.getAlgorithm (.getPublicKey (aget certs 0)))
+              ^:mutable ^String authType nil]
+          (switch keyAlgorithm
+            ("RSA" "DSA" "EC" "RSASSA-PSS") (set! authType keyAlgorithm)
+            (set! authType "UNKNOWN"))
+          (try
+            (let [tm (.getX509TrustManager (.-sslContext shc))]
+              (if (instance? X509ExtendedTrustManager tm)
+                  (if-instance [^SSLEngine engine (.-transport (.-conContext shc))]
+                    (.checkClientTrusted (cast X509ExtendedTrustManager tm)
+                                         ^X509Certificate/1 (.clone certs)
+                                         authType
+                                         engine)
+                    (if-instance [^SSLSocket socket (.-transport (.-conContext shc))]
+                      (.checkClientTrusted (cast X509ExtendedTrustManager tm)
+                                           ^X509Certificate/1 (.clone certs)
+                                           authType
+                                           socket)
+                      (when-instance [^QuicTLSEngineImpl qtlse (.-transport (.-conContext shc))]
+                        (if-instance [^X509TrustManagerImpl tmImpl tm]
+                          (.checkClientTrusted tmImpl
+                                               ^X509Certificate/1 (.clone certs)
+                                               authType
+                                               qtlse)
+                          (throw
+                            (CertificateException. "QUIC only supports SunJSSE trust managers"))))))
+                  (throw (CertificateException. "Improper X509TrustManager implementation")))
+              (.setPeerCertificates (.-handshakeSession shc) certs))
+            (catch CertificateException ce
+              (throw (.fatal (.-conContext shc) Alert/CERTIFICATE_UNKNOWN ce))))
+          certs)))
+
+    (method ^:private ^:static checkServerCerts :throws [IOException] ^X509Certificate/1 [^ClientHandshakeContext chc
+                                                                                          ^{:tag (List CertificateEntry)} certEntries]
+      (let [certs (new X509Certificate/1 (.size certEntries))]
+        (try
+          (let [cf (CertificateFactory/getInstance "X.509")
+                ^:mutable ^int i 0]
+            (for-each [^CertificateEntry entry certEntries]
+              (aset certs
+                    i
+                    (cast X509Certificate
+                          (.generateCertificate cf (ByteArrayInputStream. (.-encoded entry)))))
+              (set! i (unchecked-inc-int i))))
+          (catch CertificateException ce
+            (throw (.fatal (.-conContext chc)
+                           Alert/BAD_CERTIFICATE
+                           "Failed to parse server certificates"
+                           ce))))
+        (let [authType "UNKNOWN"]
+          (try
+            (let [tm (.getX509TrustManager (.-sslContext chc))]
+              (if-instance [^X509ExtendedTrustManager x509ExtTm tm]
+                (if-instance [^SSLEngine engine (.-transport (.-conContext chc))]
+                  (.checkServerTrusted x509ExtTm ^X509Certificate/1 (.clone certs) authType engine)
+                  (if-instance [^SSLSocket socket (.-transport (.-conContext chc))]
+                    (.checkServerTrusted x509ExtTm
+                                         ^X509Certificate/1 (.clone certs)
+                                         authType
+                                         socket)
+                    (if-instance [^QuicTLSEngineImpl qtlse (.-transport (.-conContext chc))]
+                      (if-instance [^X509TrustManagerImpl tmImpl x509ExtTm]
+                        (.checkServerTrusted tmImpl
+                                             ^X509Certificate/1 (.clone certs)
+                                             authType
+                                             qtlse)
+                        (throw (CertificateException. "QUIC only supports SunJSSE trust managers")))
+                      (throw (AssertionError. "Unexpected transport type")))))
+                (throw (CertificateException. "Improper X509TrustManager implementation")))
+              (.setPeerCertificates (.-handshakeSession chc) certs))
+            (catch CertificateException ce
+              (throw (.fatal (.-conContext chc) (CertificateMessage/getCertificateAlert chc ce) ce))))
+          certs))))
+
+  (method ^:private ^:static getCertificateAlert ^Alert [^ClientHandshakeContext chc
+                                                         ^CertificateException cexc]
+    (let [^:mutable alert Alert/CERTIFICATE_UNKNOWN
+          baseCause (.getCause cexc)]
+      (when-instance [^CertPathValidatorException cpve baseCause]
+        (let [reason (.getReason cpve)]
+          (cond
+            (identical? reason CertPathValidatorException$BasicReason/REVOKED)
+              (set! alert
+                    (if (.-staplingActive chc)
+                        Alert/BAD_CERT_STATUS_RESPONSE
+                        Alert/CERTIFICATE_REVOKED))
+            (identical? reason
+                        CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS)
+              (set! alert
+                    (if (.-staplingActive chc)
+                        Alert/BAD_CERT_STATUS_RESPONSE
+                        Alert/CERTIFICATE_UNKNOWN))
+            (identical? reason CertPathValidatorException$BasicReason/EXPIRED)
+              (set! alert Alert/CERTIFICATE_EXPIRED)
+            (or (identical? reason CertPathValidatorException$BasicReason/INVALID_SIGNATURE)
+                (identical? reason CertPathValidatorException$BasicReason/NOT_YET_VALID))
+              (set! alert Alert/BAD_CERTIFICATE)
+            :else
+              (when (identical? reason CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED)
+                (set! alert Alert/UNSUPPORTED_CERTIFICATE)
+                (when (and (some? (.-negotiatedProtocol chc))
+                           (.useTLS13PlusSpec (.-negotiatedProtocol chc)))
+                  (let [exMsg (.toUpperCase (.getMessage cexc))]
+                    (when (or (.contains exMsg "MD5WITH") (.contains exMsg "SHA1WITH"))
+                      (set! alert Alert/BAD_CERTIFICATE))))))))
+      alert)))

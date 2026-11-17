@@ -1,0 +1,161 @@
+;; jrt's tests: datagram channels and multicast (channels_linux.ae's F10b natives; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+;; "As built: F10b"), through HostChannels' natives as the overlays of sun.nio.ch's Net and DatagramDispatcher and
+;; the variant of DatagramChannelImpl call them, a socket address as NativeSocketAddress's 28 bytes.
+(in-ns 'go.arbace.jrt)
+
+(go/file "datagrams_test.go"
+  :build ["//go:build linux"]
+  :imports [[testing "testing"] [time "time"]])
+
+(go/func dgSocket "dgSocket is a blocking IPv4 datagram socket bound to 127.0.0.1 on a free port: fd, port.\n"
+  [^{:tag (* testing/T)} t] :results [int32 int32]
+  (let [e (chErr)
+        fd (HostChannels_Socket0_Z_Z_Z_I1__I_native false false false e)]
+    (when (< fd 0)
+      (.Fatalf t "socket: %d errno %d" fd (aget (.-A e) 0)))
+    (when (!= (HostChannels_Bind0_I_B1_I_I_I1__I_native fd (loopback4) 0 0 e) 0)
+      (.Fatalf t "bind: errno %d" (aget (.-A e) 0)))
+    (let [addr (NewRefArray (.ArrayClass Prim_byte) 1)
+          port (NewIntArray 2)]
+      (when (!= (HostChannels_Address0_I_Z_B2_I1_I1__I_native fd true addr port e) 0)
+        (.Fatalf t "address: errno %d" (aget (.-A e) 0)))
+      (return fd (aget (.-A port) 0)))))
+
+(go/func sockaddr4
+  "sockaddr4 is NativeSocketAddress's encoding of 127.0.0.1:port (a struct sockaddr_in, the family in the native
+order, little-endian on linux-amd64 and linux-arm64) in its 28 bytes.\n"
+  ^{:tag (* ByteArray)} [^int32 port]
+  (let [b (NewByteArray 28)]
+    (aset (.-A b) 0 2)
+    (aset (.-A b) 2 (conv int8 (conv byte (bit-and (>> port 8) 0xff))))
+    (aset (.-A b) 3 (conv int8 (conv byte (bit-and port 0xff))))
+    (aset (.-A b) 4 127)
+    (aset (.-A b) 7 1)
+    b))
+
+(go/func sockaddrPort "sockaddrPort is the port of a struct sockaddr's bytes (network order at 2).\n"
+  ^int32 [^{:tag (* ByteArray)} b]
+  (+ (* 256 (conv int32 (conv byte (aget (.-A b) 2)))) (conv int32 (conv byte (aget (.-A b) 3)))))
+
+(go/func TestChannelDatagram
+  "Datagrams between two bound sockets: a send to a socket address, a receive with the sender's address; a
+non-blocking receive with nothing to receive; a truncated datagram; a connected socket's send to a port nobody
+listens on refused on the next receive (ECONNREFUSED), an unconnected socket's retried; a disconnect; a receive
+blocked in Go's poller woken by preClose.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (chErr)
+        (values a pa) (dgSocket t)
+        (values b pb) (dgSocket t)]
+    (defer (HostChannels_Close0_I_I1__I_native a nil))
+    (defer (HostChannels_Close0_I_I1__I_native b nil))
+    (when (!= (HostChannels_Send0_I_B1_I_I_B1_I_I1__I_native a (javaBytes "hello") 0 5 (sockaddr4 pb) 16 e) 5)
+      (.Fatalf t "send: errno %d" (aget (.-A e) 0)))
+    (let [buf (NewByteArray 16)
+          sender (NewByteArray 28)
+          n (HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native b buf 0 16 sender false e)]
+      (when (or (!= n 5) (!= (stringOf buf n) "hello"))
+        (.Errorf t "receive %d %q errno %d" n (stringOf buf n) (aget (.-A e) 0)))
+      (when (or (!= (aget (.-A sender) 0) 2) (!= (sockaddrPort sender) pa) (!= (aget (.-A sender) 4) 127))
+        (.Errorf t "sender family %d port %d, want 2 %d" (aget (.-A sender) 0) (sockaddrPort sender) pa)))
+    ;; non-blocking: nothing to receive is UNAVAILABLE
+    (HostChannels_ConfigureBlocking0_I_Z_I1__I_native b false e)
+    (let [n (HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native b (NewByteArray 4) 0 4 (NewByteArray 28) false e)]
+      (when (!= n iosUnavailable)
+        (.Errorf t "non-blocking receive %d, want %d" n iosUnavailable)))
+    ;; a datagram longer than the buffer: its first bytes, the rest discarded
+    (HostChannels_Send0_I_B1_I_I_B1_I_I1__I_native a (javaBytes "truncated") 0 9 (sockaddr4 pb) 16 e)
+    (HostChannels_Poll0_I_I_J_I1__I_native b (conv int32 pollIn) 2000 e)
+    (let [buf (NewByteArray 4)
+          n (HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native b buf 0 4 (NewByteArray 28) false e)]
+      (when (or (!= n 4) (!= (stringOf buf n) "trun"))
+        (.Errorf t "truncated receive %d %q" n (stringOf buf n))))
+    ;; a connected socket refused: a port nobody listens on
+    (let [(values c pc) (dgSocket t)]
+      (HostChannels_Close0_I_I1__I_native c nil)
+      (when (!= (HostChannels_Connect0_I_B1_I_I_I1__I_native a (loopback4) 0 pc e) 1)
+        (.Fatalf t "connect: errno %d" (aget (.-A e) 0)))
+      (HostChannels_Write0_I_B1_I_I_I1__I_native a (javaBytes "x") 0 1 e)
+      (HostChannels_Poll0_I_I_J_I1__I_native a (conv int32 pollIn) 500 e)
+      (HostChannels_ConfigureBlocking0_I_Z_I1__I_native a false e)
+      (let [n (HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native a (NewByteArray 4) 0 4 (NewByteArray 28) true e)]
+        (when (or (!= n iosThrown) (!= (aget (.-A e) 0) 111))
+          (.Errorf t "connected receive after a refusal %d errno %d, want THROWN 111" n (aget (.-A e) 0))))
+      ;; disconnected: AF_UNSPEC; then unconnected, a refusal is retried (nothing pending: UNAVAILABLE)
+      (when (!= (HostChannels_Disconnect0_I_Z_I1__I_native a false e) 0)
+        (.Errorf t "disconnect: errno %d" (aget (.-A e) 0)))
+      (HostChannels_Send0_I_B1_I_I_B1_I_I1__I_native a (javaBytes "y") 0 1 (sockaddr4 pc) 16 e)
+      (time/Sleep (* 50 time/Millisecond))
+      (let [n (HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native a (NewByteArray 4) 0 4 (NewByteArray 28) false e)]
+        (when (!= n iosUnavailable)
+          (.Errorf t "unconnected receive after a refusal %d errno %d, want UNAVAILABLE" n (aget (.-A e) 0)))))
+    ;; a blocked receive woken by preClose: 0, as the dup2'd socket's
+    (HostChannels_ConfigureBlocking0_I_Z_I1__I_native b true e)
+    (let [done (make (chan int32) 1)]
+      (go ((fn [] (>! done (HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native b (NewByteArray 4) 0 4 (NewByteArray 28)
+                                                                             false (chErr))))))
+      (time/Sleep (* 50 time/Millisecond))
+      (HostChannels_PreClose0_I__V_native b)
+      (select
+        (case [n (<! done)]
+          (when (!= n 0)
+            (.Errorf t "blocked receive after preClose %d" n)))
+        (case (<! (time/After (* 2 time/Second)))
+          (.Errorf t "a blocked receive not woken by preClose")))
+      (when (!= (HostChannels_Send0_I_B1_I_I_B1_I_I1__I_native b (javaBytes "z") 0 1 (sockaddr4 pa) 16 e) iosThrown)
+        (.Errorf t "a send after preClose did not fail")))))
+
+(go/func TestChannelMulticast
+  "Multicast's options: IP_MULTICAST_IF set to 127.0.0.1 and read back in host order; a join of 239.255.0.1 on the
+loopback interface and a datagram sent to the group received by the member (skipped when the host routes no
+multicast there), a block of a source, its unblock, the drop; IPV6_MULTICAST_IF by index when the host has IPv6.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (chErr)
+        (values a _) (dgSocket t)
+        v (NewIntArray 1)
+        lo (conv int32 0x7f000001)
+        group (conv int32 -268500991)]
+    (defer (HostChannels_Close0_I_I1__I_native a nil))
+    (when (!= (HostChannels_SetInterface0_I_Z_I_I1__I_native a false lo e) 0)
+      (.Fatalf t "IP_MULTICAST_IF: errno %d" (aget (.-A e) 0)))
+    (when (or (!= (HostChannels_GetInterface0_I_Z_I1_I1__I_native a false v e) 0) (!= (aget (.-A v) 0) lo))
+      (.Errorf t "IP_MULTICAST_IF read back %x, want %x" (aget (.-A v) 0) lo))
+    ;; a member bound to the group's port on the wildcard address
+    (let [m (HostChannels_Socket0_Z_Z_Z_I1__I_native false false true e)]
+      (defer (HostChannels_Close0_I_I1__I_native m nil))
+      (when (!= (HostChannels_Bind0_I_B1_I_I_I1__I_native m (NewByteArray 4) 0 0 e) 0)
+        (.Fatalf t "bind: errno %d" (aget (.-A e) 0)))
+      (let [addr (NewRefArray (.ArrayClass Prim_byte) 1)
+            port (NewIntArray 2)]
+        (HostChannels_Address0_I_Z_B2_I1_I1__I_native m true addr port e)
+        (let [r (HostChannels_JoinOrDrop40_I_Z_I_I_I_I1__I_native m true group lo 0 e)]
+          (when (!= r 0)
+            (.Skipf t "join 239.255.0.1 on lo: %d errno %d" r (aget (.-A e) 0)))
+          ;; a second join of the same group fails (EADDRINUSE), as the kernel's
+          (when (!= (HostChannels_JoinOrDrop40_I_Z_I_I_I_I1__I_native m true group lo 0 e) iosThrown)
+            (.Errorf t "a second join did not fail"))
+          (let [ga (sockaddr4 (aget (.-A port) 0))]
+            (aset (.-A ga) 4 -17)
+            (aset (.-A ga) 5 -1)
+            (aset (.-A ga) 6 0)
+            (aset (.-A ga) 7 1)
+            (HostChannels_Send0_I_B1_I_I_B1_I_I1__I_native a (javaBytes "group") 0 5 ga 16 e)
+            (if (== (HostChannels_Poll0_I_I_J_I1__I_native m (conv int32 pollIn) 1000 e) 0)
+              (.Logf t "no multicast datagram on lo within 1 s (the host's routes)")
+              (let [buf (NewByteArray 8)
+                    n (HostChannels_Receive0_I_B1_I_I_B1_Z_I1__I_native m buf 0 8 (NewByteArray 28) false e)]
+                (when (or (!= n 5) (!= (stringOf buf n) "group"))
+                  (.Errorf t "group receive %d %q" n (stringOf buf n))))))
+          ;; a source blocked and unblocked, then the membership dropped
+          (when (!= (HostChannels_BlockOrUnblock40_I_Z_I_I_I_I1__I_native m true group lo lo e) 0)
+            (.Errorf t "block source: errno %d" (aget (.-A e) 0)))
+          (when (!= (HostChannels_BlockOrUnblock40_I_Z_I_I_I_I1__I_native m false group lo lo e) 0)
+            (.Errorf t "unblock source: errno %d" (aget (.-A e) 0)))
+          (when (!= (HostChannels_JoinOrDrop40_I_Z_I_I_I_I1__I_native m false group lo 0 e) 0)
+            (.Errorf t "drop: errno %d" (aget (.-A e) 0))))))
+    (when (HostChannels_Ipv6Available0__Z_native)
+      (let [s (HostChannels_Socket0_Z_Z_Z_I1__I_native true false false e)]
+        (defer (HostChannels_Close0_I_I1__I_native s nil))
+        (when (!= (HostChannels_SetInterface0_I_Z_I_I1__I_native s true 1 e) 0)
+          (.Fatalf t "IPV6_MULTICAST_IF: errno %d" (aget (.-A e) 0)))
+        (when (or (!= (HostChannels_GetInterface0_I_Z_I1_I1__I_native s true v e) 0) (!= (aget (.-A v) 0) 1))
+          (.Errorf t "IPV6_MULTICAST_IF read back %d, want 1" (aget (.-A v) 0)))))))

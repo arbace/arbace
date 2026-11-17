@@ -1,0 +1,535 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/reflect/annotation/AnnotationParser.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.reflect.annotation)
+
+(import '(java.lang.annotation Annotation AnnotationFormatError RetentionPolicy)
+        '(java.lang.reflect Array GenericSignatureFormatError Method Proxy)
+        '(java.nio BufferUnderflowException ByteBuffer)
+        '(java.util ArrayList Collections LinkedHashMap List Map)
+        '(java.util.function Supplier)
+        '(jdk.internal.reflect ConstantPool)
+        '(sun.invoke.util BytecodeDescriptor))
+
+(defclass ^:public AnnotationParser
+  (method ^:public ^:static parseAnnotations ^{:tag (Map (Class (? extends Annotation)) Annotation)} [^byte/1 rawAnnotations
+                                                                                                      ^ConstantPool constPool
+                                                                                                      ^{:tag (Class ?)} container]
+    (if (nil? rawAnnotations)
+        (Collections/emptyMap)
+        (try
+          (AnnotationParser/parseAnnotations2 rawAnnotations constPool container nil)
+          (catch BufferUnderflowException e
+            (throw (AnnotationFormatError. "Unexpected end of annotations.")))
+          (catch IllegalArgumentException e (throw (AnnotationFormatError. e))))))
+
+  (method ^:public ^:static ^{SafeVarargs true} parseSelectAnnotations ^{:tag (Map (Class (? extends Annotation)) Annotation)} [^byte/1 rawAnnotations
+                                                                                                                                ^ConstantPool constPool
+                                                                                                                                ^{:tag (Class ?)} container
+                                                                                                                                &
+                                                                                                                                ^{:tag (array (Class (? extends Annotation)))} selectAnnotationClasses]
+    (if (nil? rawAnnotations)
+        (Collections/emptyMap)
+        (try
+          (AnnotationParser/parseAnnotations2 rawAnnotations
+                                              constPool
+                                              container
+                                              selectAnnotationClasses)
+          (catch BufferUnderflowException e
+            (throw (AnnotationFormatError. "Unexpected end of annotations.")))
+          (catch IllegalArgumentException e (throw (AnnotationFormatError. e))))))
+
+  (method ^:private ^:static parseAnnotations2 ^{:tag (Map (Class (? extends Annotation)) Annotation)} [^byte/1 rawAnnotations
+                                                                                                        ^ConstantPool constPool
+                                                                                                        ^{:tag (Class ?)} container
+                                                                                                        ^{:tag (array (Class (? extends Annotation)))} selectAnnotationClasses]
+    (let [^{:tag (Map (Class (? extends Annotation)) Annotation)} result (LinkedHashMap.)
+          buf (ByteBuffer/wrap rawAnnotations)
+          numAnnotations (bit-and-int (.getShort buf) 0xFFFF)]
+      (loop [^int i 0]
+        (when (< i numAnnotations)
+          (let [a (AnnotationParser/parseAnnotation2
+                    buf
+                    constPool
+                    container
+                    false
+                    selectAnnotationClasses)]
+            (if (some? a)
+                (let [^{:tag (Class (? extends Annotation))} klass (.annotationType a)]
+                  (if (and (identical? (.retention (AnnotationType/getInstance klass))
+                                       RetentionPolicy/RUNTIME)
+                           (some? (.put result klass a)))
+                      (throw (AnnotationFormatError.
+                               (java-str "Duplicate annotation " klass " in " container)))
+                      (recur (unchecked-inc-int i))))
+                (recur (unchecked-inc-int i))))))
+      result))
+
+  (method ^:public ^:static parseParameterAnnotations ^Annotation/2 [^byte/1 rawAnnotations
+                                                                     ^ConstantPool constPool
+                                                                     ^{:tag (Class ?)} container]
+    (try
+      (AnnotationParser/parseParameterAnnotations2 rawAnnotations constPool container)
+      (catch BufferUnderflowException e
+        (throw (AnnotationFormatError. "Unexpected end of parameter annotations.")))
+      (catch IllegalArgumentException e (throw (AnnotationFormatError. e)))))
+
+  (method ^:private ^:static parseParameterAnnotations2 ^Annotation/2 [^byte/1 rawAnnotations
+                                                                       ^ConstantPool constPool
+                                                                       ^{:tag (Class ?)} container]
+    (let [buf (ByteBuffer/wrap rawAnnotations)
+          numParameters (bit-and-int (.get buf) 0xFF)
+          result (new Annotation/2 numParameters)]
+      (loop [^int i 0]
+        (when (< i numParameters)
+          (let [numAnnotations (bit-and-int (.getShort buf) 0xFFFF)
+                ^{:tag (List Annotation)} annotations (ArrayList. numAnnotations)]
+            (loop [^int j 0]
+              (when (< j numAnnotations)
+                (let [a (AnnotationParser/parseAnnotation buf constPool container false)]
+                  (if (some? a)
+                      (let [type (AnnotationType/getInstance (.annotationType a))]
+                        (if (identical? (.retention type) RetentionPolicy/RUNTIME)
+                            (do (.add annotations a) (recur (unchecked-inc-int j)))
+                            (recur (unchecked-inc-int j))))
+                      (recur (unchecked-inc-int j))))))
+            (aset result i (cast Annotation/1 (.toArray annotations EMPTY_ANNOTATIONS_ARRAY)))
+            (recur (unchecked-inc-int i)))))
+      result))
+
+  (field ^:private ^:static ^:final ^Annotation/1 EMPTY_ANNOTATIONS_ARRAY (new Annotation/1 0))
+
+  (method ^:static parseAnnotation ^Annotation [^ByteBuffer buf ^ConstantPool constPool
+                                                ^{:tag (Class ?)} container
+                                                ^boolean exceptionOnMissingAnnotationClass]
+    (AnnotationParser/parseAnnotation2 buf
+                                       constPool
+                                       container
+                                       exceptionOnMissingAnnotationClass
+                                       nil))
+
+  (method ^:private ^:static parseAnnotation2 ^Annotation [^ByteBuffer buf ^ConstantPool constPool
+                                                           ^{:tag (Class ?)} container
+                                                           ^boolean exceptionOnMissingAnnotationClass
+                                                           ^{:tag (array (Class (? extends Annotation)))} selectAnnotationClasses]
+    (let [typeIndex (bit-and-int (.getShort buf) 0xFFFF)
+          ^:mutable ^{:tag (Class (? extends Annotation))} annotationClass nil
+          ^:mutable sig "[unknown]"]
+      (try
+        (set! sig (.getUTF8At constPool typeIndex))
+        (set! annotationClass (AnnotationParser/parseSig sig container))
+        (catch NoClassDefFoundError e
+          (when exceptionOnMissingAnnotationClass (throw (TypeNotPresentException. sig e)))
+          (AnnotationParser/skipAnnotation buf false)
+          (return nil))
+        (catch TypeNotPresentException e
+          (when exceptionOnMissingAnnotationClass (throw e))
+          (AnnotationParser/skipAnnotation buf false)
+          (return nil)))
+      (if (and (some? selectAnnotationClasses)
+               (not (AnnotationParser/contains selectAnnotationClasses annotationClass)))
+          (do (AnnotationParser/skipAnnotation buf false) nil)
+          (let [^:mutable ^AnnotationType type nil]
+            (try
+              (set! type (AnnotationType/getInstance annotationClass))
+              (catch IllegalArgumentException e
+                (AnnotationParser/skipAnnotation buf false)
+                (return nil)))
+            (let [^{:tag (Map String (Class ?))} memberTypes (.memberTypes type)
+                  ^{:tag (Map String Object)} memberValues (LinkedHashMap. (.memberDefaults type))
+                  numMembers (bit-and-int (.getShort buf) 0xFFFF)]
+              (loop [^int i 0]
+                (when (< i numMembers)
+                  (let [memberNameIndex (bit-and-int (.getShort buf) 0xFFFF)
+                        memberName (.getUTF8At constPool memberNameIndex)
+                        ^{:tag (Class ?)} memberType (cast Class (.get memberTypes memberName))]
+                    (if (nil? memberType)
+                        (do (AnnotationParser/skipMemberValue buf) (recur (unchecked-inc-int i)))
+                        (let [value (AnnotationParser/parseMemberValue
+                                      memberType
+                                      buf
+                                      constPool
+                                      container)]
+                          (when-instance [^AnnotationTypeMismatchExceptionProxy exceptProxy value]
+                            (.setMember exceptProxy (cast Method (.get (.members type) memberName))))
+                          (.put memberValues memberName value)
+                          (recur (unchecked-inc-int i)))))))
+              (AnnotationParser/annotationForMap annotationClass memberValues))))))
+
+  (method ^:public ^:static annotationForMap ^Annotation [^:final ^{:tag (Class (? extends Annotation))} type
+                                                          ^:final ^{:tag (Map String Object)} memberValues]
+    (cast Annotation
+          (Proxy/newProxyInstance (.getClassLoader type)
+                                  (new Class/1 [type])
+                                  (AnnotationInvocationHandler. type memberValues))))
+
+  (method ^:public ^:static parseMemberValue [^{:tag (Class ?)} memberType ^ByteBuffer buf
+                                              ^ConstantPool constPool ^{:tag (Class ?)} container]
+    (let [^:mutable ^Object result nil
+          ^int tag (.get buf)]
+      (switch tag
+        \e (return (AnnotationParser/parseEnumValue memberType buf constPool container))
+        \c (set! result (AnnotationParser/parseClassValue buf constPool container))
+        \@ (set! result (AnnotationParser/parseAnnotation buf constPool container true))
+        \[ (return (AnnotationParser/parseArray memberType buf constPool container))
+        (set! result (AnnotationParser/parseConst tag buf constPool)))
+      (cond
+        (nil? result)
+          (set! result
+                (AnnotationTypeMismatchExceptionProxy.
+                  ^String (if (Proxy/isProxyClass memberType)
+                              (.getName (aget (.getInterfaces memberType) 0))
+                              (.getName memberType))))
+        (and (not (instance? ExceptionProxy result)) (not (.isInstance memberType result)))
+          (if (instance? Annotation result)
+              (set! result (AnnotationTypeMismatchExceptionProxy. (.toString result)))
+              (set! result
+                    (AnnotationTypeMismatchExceptionProxy.
+                      (java-str (.getName (.getClass result)) "[" result "]")))))
+      result))
+
+  (method ^:private ^:static parseConst [^int tag ^ByteBuffer buf ^ConstantPool constPool]
+    (let [constIndex (bit-and-int (.getShort buf) 0xFFFF)]
+      (switch tag
+        \B (Byte/valueOf (unchecked-byte (.getIntAt constPool constIndex)))
+        \C (Character/valueOf (unchecked-char (.getIntAt constPool constIndex)))
+        \D (Double/valueOf (.getDoubleAt constPool constIndex))
+        \F (Float/valueOf (.getFloatAt constPool constIndex))
+        \I (Integer/valueOf (.getIntAt constPool constIndex))
+        \J (Long/valueOf (.getLongAt constPool constIndex))
+        \S (Short/valueOf (unchecked-short (.getIntAt constPool constIndex)))
+        \Z (Boolean/valueOf (not (== (.getIntAt constPool constIndex) 0)))
+        \s (.getUTF8At constPool constIndex)
+        (throw (AnnotationFormatError. (java-str "Invalid member-value tag in annotation: " tag))))))
+
+  (method ^:private ^:static parseClassValue [^ByteBuffer buf ^ConstantPool constPool
+                                              ^{:tag (Class ?)} container]
+    (let [classIndex (bit-and-int (.getShort buf) 0xFFFF)]
+      (try
+        (let [sig (.getUTF8At constPool classIndex)] (AnnotationParser/parseSig sig container))
+        (catch NoClassDefFoundError e (TypeNotPresentExceptionProxy. "[unknown]" e))
+        (catch TypeNotPresentException e
+          (TypeNotPresentExceptionProxy. (.typeName e) (.getCause e))))))
+
+  (method ^:private ^:static parseSig ^{:tag (Class ?)} [^String sig ^{:tag (Class ?)} container]
+    (try
+      (BytecodeDescriptor/parseClass sig (.getClassLoader container))
+      (catch IllegalArgumentException ex (throw (GenericSignatureFormatError. (.getMessage ex))))))
+
+  (method ^:private ^:static parseEnumValue [^{:tag (Class (? extends Enum))} enumType
+                                             ^ByteBuffer buf ^ConstantPool constPool
+                                             ^{:tag (Class ?)} container]
+    (let [typeNameIndex (bit-and-int (.getShort buf) 0xFFFF)
+          typeName (.getUTF8At constPool typeNameIndex)
+          constNameIndex (bit-and-int (.getShort buf) 0xFFFF)
+          constName (.getUTF8At constPool constNameIndex)]
+      (if (or (not (.isEnum enumType))
+              (not (identical? enumType (AnnotationParser/parseSig typeName container))))
+          (AnnotationTypeMismatchExceptionProxy.
+            (java-str (.replace (.substring typeName
+                                            1
+                                            (unchecked-subtract-int (.length typeName) 1))
+                                \/
+                                \.)
+                      "."
+                      constName))
+          (try
+            (Enum/valueOf enumType constName)
+            (catch IllegalArgumentException e
+              (EnumConstantNotPresentExceptionProxy. enumType constName))))))
+
+  (method ^:private ^:static parseArray [^{:tag (Class ?)} arrayType ^ByteBuffer buf
+                                         ^ConstantPool constPool ^{:tag (Class ?)} container]
+    (let [length (bit-and-int (.getShort buf) 0xFFFF)]
+      (if (not (.isArray arrayType))
+          (AnnotationParser/parseUnknownArray length buf)
+          (let [^{:tag (Class ?)} componentType (.getComponentType arrayType)]
+            (cond
+              (identical? componentType Byte/TYPE)
+                (AnnotationParser/parseByteArray length buf constPool)
+              (identical? componentType Character/TYPE)
+                (AnnotationParser/parseCharArray length buf constPool)
+              (identical? componentType Double/TYPE)
+                (AnnotationParser/parseDoubleArray length buf constPool)
+              (identical? componentType Float/TYPE)
+                (AnnotationParser/parseFloatArray length buf constPool)
+              (identical? componentType Integer/TYPE)
+                (AnnotationParser/parseIntArray length buf constPool)
+              (identical? componentType Long/TYPE)
+                (AnnotationParser/parseLongArray length buf constPool)
+              (identical? componentType Short/TYPE)
+                (AnnotationParser/parseShortArray length buf constPool)
+              (identical? componentType Boolean/TYPE)
+                (AnnotationParser/parseBooleanArray length buf constPool)
+              (identical? componentType String)
+                (AnnotationParser/parseStringArray length buf constPool)
+              (identical? componentType Class)
+                (AnnotationParser/parseClassArray length buf constPool container)
+              (.isEnum componentType)
+                (AnnotationParser/parseEnumArray length componentType buf constPool container)
+              (.isAnnotation componentType)
+                (AnnotationParser/parseAnnotationArray length componentType buf constPool container)
+              :else (AnnotationParser/parseUnknownArray length buf))))))
+
+  (method ^:private ^:static parseByteArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new byte/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \B)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (unchecked-byte (.getIntAt constPool index)))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseCharArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new char/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^byte tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \C)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (unchecked-char (.getIntAt constPool index)))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseDoubleArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new double/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \D)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (.getDoubleAt constPool index))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseFloatArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new float/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \F)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (.getFloatAt constPool index))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseIntArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new int/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \I)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (.getIntAt constPool index))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseLongArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new long/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \J)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (.getLongAt constPool index))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseShortArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new short/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \S)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (unchecked-short (.getIntAt constPool index)))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseBooleanArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new boolean/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \Z)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (not (== (.getIntAt constPool index) 0)))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseStringArray [^int length ^ByteBuffer buf ^ConstantPool constPool]
+    (let [result (new String/1 length)
+          ^:mutable typeMismatch false
+          ^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (if (== tag \s)
+              (let [index (bit-and-int (.getShort buf) 0xFFFF)]
+                (aset result i (.getUTF8At constPool index))
+                (recur (unchecked-inc-int i)))
+              (do
+                (AnnotationParser/skipMemberValue tag buf)
+                (set! typeMismatch true)
+                (recur (unchecked-inc-int i))))))
+      (if typeMismatch ^Object (AnnotationParser/exceptionProxy tag) ^Object result)))
+
+  (method ^:private ^:static parseClassArray [^int length ^ByteBuffer buf ^ConstantPool constPool
+                                              ^{:tag (Class ?)} container]
+    (AnnotationParser/parseArrayElements (new Class/1 length)
+                                         buf
+                                         \c
+                                         (lambda Supplier []
+                                           (AnnotationParser/parseClassValue
+                                             buf
+                                             constPool
+                                             container))))
+
+  (method ^:private ^:static parseEnumArray [^int length
+                                             ^{:tag (Class (? extends (Enum ?)))} enumType
+                                             ^ByteBuffer buf ^ConstantPool constPool
+                                             ^{:tag (Class ?)} container]
+    (AnnotationParser/parseArrayElements (cast Object/1 (Array/newInstance enumType length))
+                                         buf
+                                         \e
+                                         (lambda Supplier []
+                                           (AnnotationParser/parseEnumValue
+                                             enumType
+                                             buf
+                                             constPool
+                                             container))))
+
+  (method ^:private ^:static parseAnnotationArray [^int length
+                                                   ^{:tag (Class (? extends Annotation))} annotationType
+                                                   ^ByteBuffer buf ^ConstantPool constPool
+                                                   ^{:tag (Class ?)} container]
+    (AnnotationParser/parseArrayElements (cast Object/1 (Array/newInstance annotationType length))
+                                         buf
+                                         \@
+                                         (lambda Supplier []
+                                           (AnnotationParser/parseAnnotation
+                                             buf
+                                             constPool
+                                             container
+                                             true))))
+
+  (method ^:private ^:static parseArrayElements [^Object/1 result ^ByteBuffer buf ^int expectedTag
+                                                 ^{:tag (Supplier Object)} parseElement]
+    (let [^:mutable ^Object exceptionProxy nil]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (let [^int tag (.get buf)]
+            (if (== tag expectedTag)
+                (let [value (.get parseElement)]
+                  (if-instance [^ExceptionProxy proxyValue value]
+                    (if (nil? exceptionProxy)
+                        (do (set! exceptionProxy proxyValue) (recur (unchecked-inc-int i)))
+                        (recur (unchecked-inc-int i)))
+                    (do (aset result i value) (recur (unchecked-inc-int i)))))
+                (do
+                  (AnnotationParser/skipMemberValue tag buf)
+                  (if (nil? exceptionProxy)
+                      (do
+                        (set! exceptionProxy (AnnotationParser/exceptionProxy tag))
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i))))))))
+      (if (some? exceptionProxy) exceptionProxy ^Object result)))
+
+  (method ^:private ^:static parseUnknownArray [^int length ^ByteBuffer buf]
+    (let [^:mutable ^int tag 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (set! tag (.get buf))
+          (AnnotationParser/skipMemberValue tag buf)
+          (recur (unchecked-inc-int i))))
+      (AnnotationParser/exceptionProxy tag)))
+
+  (method ^:private ^:static exceptionProxy ^ExceptionProxy [^int tag]
+    (AnnotationTypeMismatchExceptionProxy.
+      (java-str "Array with component tag: "
+                (if (== tag 0) "0" (Character/valueOf (unchecked-char tag))))))
+
+  (method ^:private ^:static skipAnnotation ^void [^ByteBuffer buf ^boolean complete]
+    (when complete (.getShort buf))
+    (let [numMembers (bit-and-int (.getShort buf) 0xFFFF)]
+      (loop [^int i 0]
+        (when (< i numMembers)
+          (.getShort buf)
+          (AnnotationParser/skipMemberValue buf)
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:private ^:static skipMemberValue ^void [^ByteBuffer buf]
+    (let [^int tag (.get buf)] (AnnotationParser/skipMemberValue tag buf)))
+
+  (method ^:private ^:static skipMemberValue ^void [^int tag ^ByteBuffer buf]
+    (switch tag
+      \e (.getInt buf)
+      \@ (AnnotationParser/skipAnnotation buf true)
+      \[ (AnnotationParser/skipArray buf)
+      (.getShort buf)))
+
+  (method ^:private ^:static skipArray ^void [^ByteBuffer buf]
+    (let [length (bit-and-int (.getShort buf) 0xFFFF)]
+      (loop [^int i 0]
+        (when (< i length) (AnnotationParser/skipMemberValue buf) (recur (unchecked-inc-int i))))))
+
+  (method ^:private ^:static contains ^boolean [^Object/1 array element]
+    (for-each [e array] (when (identical? e element) (return true)))
+    false)
+
+  (field ^:private ^:static ^:final ^Annotation/1 EMPTY_ANNOTATION_ARRAY (new Annotation/1 0))
+
+  (method ^:public ^:static toArray ^Annotation/1 [^{:tag (Map (Class (? extends Annotation)) Annotation)} annotations]
+    (cast Annotation/1 (.toArray (.values annotations) EMPTY_ANNOTATION_ARRAY)))
+
+  (method ^:static getEmptyAnnotationArray ^Annotation/1 []
+    EMPTY_ANNOTATION_ARRAY))

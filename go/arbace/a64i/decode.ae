@@ -1,0 +1,633 @@
+(in-ns 'go.arbace.a64i) (go/file "decode.go" :imports [
+
+    ^{:line 3} [bits "math/bits"]])
+
+^{:go/end 5} (go/func bf ^uint32 [^uint32 w ^uint hi ^uint lo] (bit-and (>> w lo) (- ^uint32 (<< 1 (+ (- hi lo) 1)) 1)))
+
+^{:go/end 7} (go/func sext ^int64 [^uint64 v ^uint n] (>> (conv int64 (<< v (- 64 n))) (- 64 n)))
+
+
+
+^{:go/end 43} (go/func DecodeBitMasks "DecodeBitMasks is the Arm ARM's DecodeBitMasks for a logical immediate (immediate true): the mask, false when the\nencoding is reserved.\n" [^uint32 n ^uint32 imms ^uint32 immr ^bool sf] :results [uint64 bool]
+  (let [x (bit-or (<< n 6) (bit-and (bit-not imms) 0x3f))]
+    (when (== x 0)
+      (return 0 false))
+
+    (let [l (conv uint (- 31 (bits/LeadingZeros32 x)))]
+      (when (or (< l 1) ^:go/paren (and (not sf) (> l 5)))
+        (return 0 false))
+
+      (let [size (<< (conv uint 1) l)
+          ^{:line 21} levels (conv uint32 (- size 1))
+          (values s r) (values (bit-and imms levels) (bit-and immr levels))]
+        (when (== s levels)
+          (return 0 false))
+
+        (let [welem (- (<< (conv uint64 1) (+ s 1)) 1)
+            ^{:line 27} emask (- (<< (conv uint64 1) size) 1)]
+          (when (== size 64)
+            (set! emask (bit-not (conv uint64 0))))
+
+          (let [elem (bit-and (bit-or (>> welem r) (<< welem (% (- (conv uint32 size) r) (conv uint32 size)))) emask)]
+            (when (== r 0)
+              (set! elem welem))
+
+            (let [out (conv uint64 0)]
+              (for [i (conv uint 0)] (< i 64) (set! i + size)
+                (set! out bit-or (<< elem i)))
+
+              (when (not sf)
+                (set! out bit-and 0xffffffff))
+
+              (return out true))))))))
+
+
+
+
+^{:go/end 63} (go/func Decode "Decode is the instruction word w at pc: its Inst, or OpInvalid with the reason (\":undefined\" for an unallocated\nencoding, \":unimplemented NAME\" for one a64i does not run: SIMD and floating point, SVE, pointer authentication, ...).\n" [^uint32 w ^uint64 pc] :results [Inst string]
+  (switch
+    (case [(== (bf w 28 26) 4)]
+      (return (decodeDPImm w pc)))
+    (case [(== (bf w 28 26) 5)]
+      (return (decodeBranch w pc)))
+    (case [(and (== (bf w 27 27) 1) (== (bf w 25 25) 0))]
+      (return (overlaps (decodeLdSt w pc))))
+    (case [(== (bf w 27 25) 5)]
+      (return (decodeDPReg w)))
+    (case [(== (bf w 27 25) 7)]
+      (return (decodeFP w)))
+    (case [(== (>> w 16) 0)]
+      (return (lit Inst :Op OpUDF :Imm (conv int64 (bit-and w 0xffff))) "")))
+
+  (return (lit Inst) ":undefined"))
+
+
+(go/var undef ":undefined")
+
+^{:go/end 132} (go/func decodeDPImm [^uint32 w ^uint64 pc] :results [Inst string]
+  (let [sf (== (bf w 31 31) 1)
+      (values rd rn) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)))]
+    (switch (bf w 25 23)
+      (case [0 1]
+        (let [imm (sext (conv uint64 (bit-or (<< (bf w 23 5) 2) (bf w 30 29))) 21)]
+          (when (== (bf w 31 31) 0)
+            (return (lit Inst :Op OpADR :Sf true :Rd rd :Target (+ pc (conv uint64 imm))) ""))
+
+          (return (lit Inst :Op OpADRP :Sf true :Rd rd :Target (+ (bit-and-not pc 0xfff) (conv uint64 (<< imm 12)))) "")))
+      (case [2]
+        (let [imm (<< (conv int64 (bf w 21 10)) (* 12 (bf w 22 22)))
+            ^{:line 79} op OpADDI]
+          (when (== (bf w 30 30) 1)
+            (set! op OpSUBI))
+
+          (return (lit Inst :Op op :Sf sf :S (== (bf w 29 29) 1) :Rd rd :Rn rn :Imm imm) "")))
+      (case [3]
+        (return (lit Inst) ":unimplemented addg"))
+      (case [4]
+        (let [(values m ok) (DecodeBitMasks (bf w 22 22) (bf w 15 10) (bf w 21 16) sf)]
+          (when (not ok)
+            (return (lit Inst) undef))
+
+          (let [in (lit Inst :Sf sf :Rd rd :Rn rn :Imm (conv int64 m))]
+            (switch (bf w 30 29)
+              (case [0]
+                (set! (.-Op in) OpANDI))
+              (case [1]
+                (set! (.-Op in) OpORRI))
+              (case [2]
+                (set! (.-Op in) OpEORI))
+              (case [3]
+                (set! (values (.-Op in) (.-S in)) (values OpANDI true))))
+
+            (return in ""))))
+      (case [5]
+        (let [hw (bf w 22 21)]
+          (when (and (not sf) (>= hw 2))
+            (return (lit Inst) undef))
+
+          (let [in (lit Inst :Sf sf :Rd rd :Imm (conv int64 (bf w 20 5)) :Amount (conv uint8 (* hw 16)))]
+            (switch (bf w 30 29)
+              (case [0]
+                (set! (.-Op in) OpMOVN))
+              (case [2]
+                (set! (.-Op in) OpMOVZ))
+              (case [3]
+                (set! (.-Op in) OpMOVK))
+              (default
+                (return (lit Inst) undef)))
+
+            (return in ""))))
+      (case [6]
+        (when (or (!= (bf w 22 22) (bf w 31 31)) (== (bf w 30 29) 3) ^:go/paren (and (not sf) ^:go/paren (or (>= (bf w 21 16) 32) (>= (bf w 15 10) 32))))
+          (return (lit Inst) undef))
+
+        (return (lit Inst :Op (aget (lit (slice Op) OpSBFM OpBFM OpUBFM) (bf w 30 29)) :Sf sf :Rd rd :Rn rn :Imm (conv int64 (bf w 21 16)) :Imm2 (conv int64 (bf w 15 10))) ""))
+      (case [7]
+        (when (or (!= (bf w 30 29) 0) (!= (bf w 22 22) (bf w 31 31)) (!= (bf w 21 21) 0) ^:go/paren (and (not sf) (== (bf w 15 15) 1)))
+          (return (lit Inst) undef))
+
+        (return (lit Inst :Op OpEXTR :Sf sf :Rd rd :Rn rn :Rm (conv uint8 (bf w 20 16)) :Imm (conv int64 (bf w 15 10))) "")))
+
+    (return (lit Inst) undef)))
+
+
+^{:go/end 188} (go/func decodeBranch [^uint32 w ^uint64 pc] :results [Inst string]
+  (let [rt (conv uint8 (bf w 4 0))]
+    (switch
+      (case [(== (bf w 31 24) 0x54)]
+        (when (!= (bf w 4 4) 0)
+          (return (lit Inst) ":unimplemented bc.cond"))
+
+        (return (lit Inst :Op OpBCOND :Cond (conv uint8 (bf w 3 0)) :Target (+ pc (conv uint64 (sext (<< (conv uint64 (bf w 23 5)) 2) 21)))) ""))
+      (case [(== (bf w 31 24) 0xd4)]
+        (let [(values opc ll imm) (values (bf w 23 21) (bf w 1 0) (conv int64 (bf w 20 5)))]
+          (switch
+            (case [(and (== opc 0) (== ll 1) (== (bf w 4 2) 0))]
+              (return (lit Inst :Op OpSVC :Imm imm) ""))
+            (case [(and (== opc 1) (== ll 0) (== (bf w 4 2) 0))]
+              (return (lit Inst :Op OpBRK :Imm imm) "")))
+
+          (return (lit Inst) ":unimplemented exception")))
+      (case [(== (bf w 31 22) 0x354)]
+        (return (decodeSystem w)))
+      (case [(== (bf w 31 25) 0x6b)]
+        (let [(values opc op2 op3 op4 rn) (values (bf w 24 21) (bf w 20 16) (bf w 15 10) (bf w 4 0) (conv uint8 (bf w 9 5)))]
+          (when (or (!= op2 31) (!= op3 0) (!= op4 0))
+            (return (lit Inst) ":unimplemented branch-register"))
+
+          (switch opc
+            (case [0]
+              (return (lit Inst :Op OpBR :Rn rn) ""))
+            (case [1]
+              (return (lit Inst :Op OpBLR :Rn rn) ""))
+            (case [2]
+              (return (lit Inst :Op OpRET :Rn rn) "")))
+
+          (return (lit Inst) ":unimplemented branch-register")))
+      (case [(== (bf w 30 26) 5)]
+        (let [op OpB]
+          (when (== (bf w 31 31) 1)
+            (set! op OpBL))
+
+          (return (lit Inst :Op op :Target (+ pc (conv uint64 (sext (<< (conv uint64 (bf w 25 0)) 2) 28)))) "")))
+      (case [(== (bf w 30 25) 0x1a)]
+        (let [op OpCBZ]
+          (when (== (bf w 24 24) 1)
+            (set! op OpCBNZ))
+
+          (return (lit Inst :Op op :Sf (== (bf w 31 31) 1) :Rd rt :Target (+ pc (conv uint64 (sext (<< (conv uint64 (bf w 23 5)) 2) 21)))) "")))
+      (case [(== (bf w 30 25) 0x1b)]
+        (let [op OpTBZ]
+          (when (== (bf w 24 24) 1)
+            (set! op OpTBNZ))
+
+          (let [b (bit-or (<< (bf w 31 31) 5) (bf w 23 19))]
+            (return (lit Inst :Op op :Sf (>= b 32) :Rd rt :Imm (conv int64 b) :Target (+ pc (conv uint64 (sext (<< (conv uint64 (bf w 18 5)) 2) 16)))) "")))))
+
+    (return (lit Inst) undef)))
+
+
+^{:go/end 211} (go/func decodeSystem [^uint32 w] :results [Inst string]
+  (let [(values l op0 op1 crn crm op2 rt) (values (bf w 21 21) (bf w 20 19) (bf w 18 16) (bf w 15 12) (bf w 11 8) (bf w 7 5) (conv uint8 (bf w 4 0)))]
+    (switch
+      (case [(and (== l 0) (== op0 0) (== op1 3) (== crn 2) (== rt 31))]
+        (return (lit Inst :Op OpHINT :Sys (bit-or (<< crm 3) op2)) ""))
+      (case [(and (== l 0) (== op0 0) (== op1 3) (== crn 3) (== rt 31))]
+        (switch op2
+          (case [2]
+            (return (lit Inst :Op OpCLREX :Sys crm) ""))
+          (case [4 5 6]
+            (return (lit Inst :Op OpBARRIER :Sys (bit-or (<< op2 4) crm)) ""))
+          (case [7]
+            ;; AR19: FEAT_SB's sb (CRm 0000; the M2 raises SIGILL for the others)
+            (when (== crm 0)
+              (return (lit Inst :Op OpBARRIER :Sys (<< op2 4)) ""))))
+
+        (return (lit Inst) ":unimplemented barrier"))
+      (case [(and (== l 0) (== op0 0) (== op1 0) (== crn 4) (<= op2 2) (== rt 31))]
+        ;; AR18: MSR (immediate)'s PSTATE forms of FEAT_FlagM (cfinv, op2 000) and FEAT_FlagM2 (xaflag 001, axflag 010); CRm,
+        ;; (0)(0)(0)(0) in the Arm ARM, ignored as the M2 ignores it (each of its 16 values runs the instruction there)
+        (return (lit Inst :Op OpFLAGM :Sys op2) ""))
+      (case [(and (== l 0) (== op0 0) (== op1 3) (== crn 4) (or (== op2 1) (== op2 2)) (== rt 31))]
+        ;; AR19: MSR (immediate) of PSTATE.SSBS (op2 001) and PSTATE.DIT (010): the bit CRm<0> (the M2 runs every CRm)
+        (let [^uint32 sys SysSSBS]
+          (when (== op2 2)
+            (set! sys SysDIT))
+
+          (return (lit Inst :Op OpMSR :Rm 255 :Imm (conv int64 (bit-and crm 1)) :Sys sys) "")))
+      (case [(and (== l 0) (== op0 1) (== op1 3) (== crn 7) (== op2 1))]
+        ;; AR19: SYS's dc zva, ic ivau, dc cvac, cvau, cvap, cvadp and civac, the M2's at EL0 (the other DC and IC
+        ;; operations, TLBI and AT are EL1's: SIGILL)
+        (when [(values _ ok) (aget sysOpNames crm)] ok
+          (return (lit Inst :Op OpSYS :Rd rt :Sys crm) "")))
+      (case [(>= op0 2)]
+        ;; the system registers EL0 reads and writes under Linux on the M2 (AR19; AR20: Linux's emulated ID registers, IDReg's;
+        ;; the others UNDEFINED)
+        (let [(values op sys) (values OpMSR (bit-or (<< op0 14) (<< op1 11) (<< crn 7) (<< crm 3) op2))]
+          (when (== l 1)
+            (set! op OpMRS))
+
+          (switch sys
+            (case [SysNZCV SysFPCR SysFPSR SysTPIDR SysDIT SysSSBS]
+              (return (lit Inst :Op op :Rd rt :Sys sys) ""))
+            (case [SysTPIDRRO SysCNTFRQ SysCNTVCT SysCNTVCTSS SysDCZID SysCTR]
+              (when (== l 1)
+                (return (lit Inst :Op op :Rd rt :Sys sys) ""))))
+
+          ;; AR20 (ARS85 (a)): the ID registers Linux emulates for EL0, read (MRS only)
+          (when [(values _ ok) (IDReg sys)] (and ok (== l 1))
+            (return (lit Inst :Op op :Rd rt :Sys sys) ""))
+
+          (return (lit Inst) undef))))
+
+    (return (lit Inst) ":unimplemented system")))
+
+
+(go/func overlaps "overlaps makes UNDEFINED the loads and stores whose registers overlap where the Arm ARM says CONSTRAINED UNPREDICTABLE and\nthe M2 resolves it so (AR19, ARS82 (a); queue 288's sweep of 226 words, every one as the M2 runs it): a general register's\nwriteback with Rt or Rt2 the base (Rn not SP), and a load pair, general or SIMD&FP, plain, exclusive or acquire, into one\nregister twice (Rt = Rt2). The store-exclusives' status register equal to Rt, Rt2 or Rn runs on the M2 and here.\n" [^Inst in ^string r] :results [Inst string]
+  (when (!= r "")
+    (return in r))
+
+  (let [pair (or (== (.-Op in) OpLDP) (== (.-Op in) OpSTP))]
+    (when (and (or (== (.-Mode in) ModePre) (== (.-Mode in) ModePost)) (not (.-Vreg in)) (!= (.-Rn in) 31)
+            ^:go/paren (or (== (.-Op in) OpLDR) (== (.-Op in) OpSTR) pair)
+            ^:go/paren (or (== (.-Rd in) (.-Rn in)) (and pair (== (.-Ra in) (.-Rn in)))))
+      (return (lit Inst) undef))
+
+    (when (and (== (.-Rd in) (.-Ra in)) ^:go/paren (or (== (.-Op in) OpLDP) (and (== (.-Op in) OpLDXR) (.-Pair in))))
+      (return (lit Inst) undef))
+
+    (return in "")))
+
+
+^{:go/end 373} (go/func decodeLdSt [^uint32 w ^uint64 pc] :results [Inst string]
+  (let [size (conv uint8 (bf w 31 30))
+      (values rt rn) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)))
+      ^{:line 216} v (== (bf w 26 26) 1)]
+    (switch
+      (case [(== (bf w 29 24) 0x08)]
+        (let [(values o2 l o1 rs o0 rt2) (values (bf w 23 23) (bf w 22 22) (bf w 21 21) (conv uint8 (bf w 20 16)) (bf w 15 15) (conv uint8 (bf w 14 10)))]
+          (switch
+            (case [(and (== o2 0) (== o1 0))]
+              (when (== l 1)
+                (return (lit Inst :Op OpLDXR :Size size :Rd rt :Rn rn :Acq (== o0 1)) ""))
+
+              (return (lit Inst :Op OpSTXR :Size size :Rm rs :Rd rt :Rn rn :Rel (== o0 1)) ""))
+            (case [(and (== o2 0) (== o1 1) (>= size 2))]
+              (when (== l 1)
+                (return (lit Inst :Op OpLDXR :Size size :Rd rt :Ra rt2 :Rn rn :Pair true :Acq (== o0 1)) ""))
+
+              (return (lit Inst :Op OpSTXR :Size size :Rm rs :Rd rt :Ra rt2 :Rn rn :Pair true :Rel (== o0 1)) ""))
+            (case [(and (== o2 0) (== o1 1) (== rt2 31))]
+              ;; AR18: an odd Rs or Rt is UNDEFINED (the Arm ARM's CASP; the M2 raises SIGILL)
+              (when (or (== (bit-and rs 1) 1) (== (bit-and rt 1) 1))
+                (return (lit Inst) undef))
+
+              (return (lit Inst :Op OpCASP :Size (+ size 2) :Rm rs :Rd rt :Rn rn :Acq (== l 1) :Rel (== o0 1)) ""))
+            (case [(and (== o2 1) (== o1 0))]
+              ;; o0 0: AR19's FEAT_LOR ldlar and stllr, run as ldar and stlr (LORegions order nothing a single thread sees)
+              (when (== l 1)
+                (return (lit Inst :Op OpLDAR :Size size :Rd rt :Rn rn :Acq true) ""))
+
+              (return (lit Inst :Op OpSTLR :Size size :Rd rt :Rn rn :Rel true) ""))
+            (case [(and (== o2 1) (== o1 1) (== rt2 31))]
+              (return (lit Inst :Op OpCAS :Size size :Rm rs :Rd rt :Rn rn :Acq (== l 1) :Rel (== o0 1)) "")))
+
+          (return (lit Inst) ":unimplemented ldst-ordered")))
+      (case [(and (== (bf w 29 27) 1) v)]
+        (return (decodeSIMDMem w)))
+      (case [(and (== (bf w 29 24) 0x19) (== (bf w 21 21) 0) (== (bf w 11 10) 0))]
+        ;; AR18: FEAT_LRCPC2's LDAPR/STLR (unscaled immediate): stlur (opc 00), ldapur (01), ldapurs to x (10), to w (11)
+        (let [in (lit Inst :Size size :Sf (== size 3) :Rd rt :Rn rn :Imm (sext (conv uint64 (bf w 20 12)) 9))]
+          (switch (bf w 23 22)
+            (case [0]
+              (set! (values (.-Op in) (.-Rel in)) (values OpSTLUR true)))
+            (case [1]
+              (set! (values (.-Op in) (.-Acq in)) (values OpLDAPUR true)))
+            (case [2]
+              (when (== size 3)
+                (return (lit Inst) undef))
+
+              (set! (values (.-Op in) (.-Acq in) (.-Sf in) (.-Signed in) (.-Wide in)) (values OpLDAPUR true true true true)))
+            (default
+              (when (>= size 2)
+                (return (lit Inst) undef))
+
+              (set! (values (.-Op in) (.-Acq in) (.-Signed in)) (values OpLDAPUR true true))))
+
+          (return in "")))
+      (case [(and (== (bf w 29 27) 3) (== (bf w 25 24) 0))]
+        (let [t (+ pc (conv uint64 (sext (<< (conv uint64 (bf w 23 5)) 2) 21)))]
+          (when v
+            (when (== (bf w 31 30) 3)
+              (return (lit Inst) undef))
+
+            (return (lit Inst :Op OpLDRLIT :Vreg true :Size (+ (conv uint8 (bf w 31 30)) 2) :Rd rt :Target t) ""))
+
+          (switch (bf w 31 30)
+            (case [0]
+              (return (lit Inst :Op OpLDRLIT :Size 2 :Rd rt :Target t) ""))
+            (case [1]
+              (return (lit Inst :Op OpLDRLIT :Size 3 :Sf true :Rd rt :Target t) ""))
+            (case [2]
+              (return (lit Inst :Op OpLDRLIT :Size 2 :Sf true :Signed true :Wide true :Rd rt :Target t) "")))
+
+          (return (lit Inst :Op OpPRFM :Rd rt :Target t :Size 3) "")))
+      (case [(== (bf w 29 27) 5)]
+        (let [(values opc mode l) (values (bf w 31 30) (bf w 25 23) (bf w 22 22))
+            ^{:line 261} in (lit Inst :Rd rt :Ra (conv uint8 (bf w 14 10)) :Rn rn)]
+          (switch
+            (case [(and v (< opc 3))]
+              (set! (values (.-Size in) (.-Vreg in)) (values (+ (conv uint8 opc) 2) true)))
+            (case [(== opc 0)]
+              (set! (.-Size in) 2))
+            (case [(== opc 2)]
+              (set! (values (.-Size in) (.-Sf in)) (values 3 true)))
+            (case [(and (== opc 1) (== l 1))]
+              (set! (values (.-Size in) (.-Sf in) (.-Signed in) (.-Wide in)) (values 2 true true true)))
+            (default
+              (return (lit Inst) ":unimplemented stgp")))
+
+          (set! (.-Imm in) (<< (sext (conv uint64 (bf w 21 15)) 7) (.-Size in)))
+          (switch mode
+            (case [0 2]
+              (set! (.-Mode in) ModeOff))
+            (case [1]
+              (set! (.-Mode in) ModePost))
+            (case [3]
+              (set! (.-Mode in) ModePre))
+            (default
+              (return (lit Inst) undef)))
+
+          (set! (.-Op in) OpSTP)
+          (when (== l 1)
+            (set! (.-Op in) OpLDP))
+
+          (return in "")))
+      (case [(== (bf w 29 27) 7)]
+        (let [opc (bf w 23 22)
+            ^{:line 292} in (lit Inst :Rd rt :Rn rn :Size size)]
+          (when v
+            (when (and (== (bf w 25 24) 0) (== (bf w 21 21) 1) (!= (bf w 11 10) 2))
+              (return (lit Inst) undef))
+
+            (set! (.-Vreg in) true)
+            (when (>= opc 2)
+              (when (!= size 0)
+                (return (lit Inst) undef))
+
+              (set! (.-Size in) 4))
+
+            (set! (.-Op in) OpSTR)
+            (when (== (bit-and opc 1) 1)
+              (set! (.-Op in) OpLDR))
+
+            (set! size (.-Size in)))
+
+          (when (and (== (bf w 25 24) 0) (== (bf w 21 21) 1) (== (bf w 11 10) 0))
+            (let [(values a r rs o3 op) (values (== (bf w 23 23) 1) (== (bf w 22 22) 1) (conv uint8 (bf w 20 16)) (bf w 15 15) (bf w 14 12))]
+              (switch
+                (case [(== o3 0)]
+                  (return (lit Inst :Op OpLDOP :Size size :Rm rs :Rd rt :Rn rn :Acq a :Rel r :Sys op) ""))
+                (case [(== op 0)]
+                  (return (lit Inst :Op OpSWP :Size size :Rm rs :Rd rt :Rn rn :Acq a :Rel r) ""))
+                (case [(and (== op 4) a (not r) (== rs 31))]
+                  (return (lit Inst :Op OpLDAR :Size size :Rd rt :Rn rn :Acq true) "")))
+
+              (return (lit Inst) ":unimplemented atomic")))
+
+          ;; the operation by size and opc
+          (switch
+            (case [v])
+            (case [(== opc 0)]
+              (set! (.-Op in) OpSTR))
+            (case [(== opc 1)]
+              (set! (.-Op in) OpLDR))
+            (case [(and (== size 3) (== opc 2))]
+              (set! (.-Op in) OpPRFM))
+            (case [(and (== opc 2) (<= size 2))]
+              (set! (values (.-Op in) (.-Signed in) (.-Wide in)) (values OpLDR true true)))
+            (case [(and (== opc 3) (<= size 1))]
+              (set! (values (.-Op in) (.-Signed in)) (values OpLDR true)))
+            (default
+              (return (lit Inst) undef)))
+
+          (set! (.-Sf in) (and (not v) ^:go/paren (or (== size 3) (.-Wide in))))
+          (switch
+            (case [(== (bf w 25 24) 1)]
+              (set! (values (.-Mode in) (.-Imm in)) (values ModeOff (<< (conv int64 (bf w 21 10)) size))))
+            (case [(== (bf w 21 21) 0)]
+              (set! (.-Imm in) (sext (conv uint64 (bf w 20 12)) 9))
+              (switch (bf w 11 10)
+                (case [0 2]
+                  (set! (.-Mode in) ModeOff))
+                (case [1]
+                  (set! (.-Mode in) ModePost))
+                (case [3]
+                  (set! (.-Mode in) ModePre)))
+
+              (when (and (== (.-Op in) OpPRFM) (!= (.-Mode in) ModeOff))
+                (return (lit Inst) undef)))
+
+            (case [(== (bf w 11 10) 2)]
+              (let [opt (bf w 15 13)]
+                (when (== (bit-and opt 2) 0)
+                  (return (lit Inst) undef))
+
+                (set! (values (.-Mode in) (.-Rm in) (.-Ext in)) (values ModeReg (conv uint8 (bf w 20 16)) (conv uint8 opt)))
+                (when (== (bf w 12 12) 1)
+                  (set! (.-Amount in) size))))
+
+            (default
+              (return (lit Inst) ":unimplemented ldst-pac")))
+
+          (when (== (.-Op in) OpPRFM)
+            (set! (values (.-Size in) (.-Sf in)) (values 3 false)))
+
+          (return in ""))))
+
+    (return (lit Inst) ":unimplemented ldst")))
+
+
+^{:go/end 530} (go/func decodeDPReg [^uint32 w] :results [Inst string]
+  (let [sf (== (bf w 31 31) 1)
+      (values rd rn rm) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)) (conv uint8 (bf w 20 16)))
+      ^{:line 378} op1 (bf w 28 28)
+      ^{:line 379} op2 (bf w 24 21)]
+    (when (== op1 0)
+      (switch
+        (case [(== (bit-and op2 8) 0)]
+          (when (and (not sf) (== (bf w 15 15) 1))
+            (return (lit Inst) undef))
+
+          (let [in (lit Inst :Sf sf :Rd rd :Rn rn :Rm rm :Shift (conv uint8 (bf w 23 22)) :Amount (conv uint8 (bf w 15 10)) :N (== (bf w 21 21) 1))]
+            (switch (bf w 30 29)
+              (case [0]
+                (set! (.-Op in) OpAND))
+              (case [1]
+                (set! (.-Op in) OpORR))
+              (case [2]
+                (set! (.-Op in) OpEOR))
+              (case [3]
+                (set! (values (.-Op in) (.-S in)) (values OpAND true))))
+
+            (return in "")))
+        (case [(== (bit-and op2 1) 0)]
+          (when (or (== (bf w 23 22) 3) ^:go/paren (and (not sf) (== (bf w 15 15) 1)))
+            (return (lit Inst) undef))
+
+          (let [op OpADDR]
+            (when (== (bf w 30 30) 1)
+              (set! op OpSUBR))
+
+            (return (lit Inst :Op op :Sf sf :S (== (bf w 29 29) 1) :Rd rd :Rn rn :Rm rm :Shift (conv uint8 (bf w 23 22)) :Amount (conv uint8 (bf w 15 10))) "")))
+        (default
+          (when (or (!= (bf w 23 22) 0) (> (bf w 12 10) 4))
+            (return (lit Inst) undef))
+
+          (let [op OpADDX]
+            (when (== (bf w 30 30) 1)
+              (set! op OpSUBX))
+
+            (return (lit Inst :Op op :Sf sf :S (== (bf w 29 29) 1) :Rd rd :Rn rn :Rm rm :Ext (conv uint8 (bf w 15 13)) :Amount (conv uint8 (bf w 12 10))) "")))))
+
+
+    (switch
+      (case [(== op2 0)]
+        (when (!= (bf w 15 10) 0)
+          ;; AR18: rotate right into flags and evaluate into flags (FEAT_FlagM)
+          (return (decodeFlagM w)))
+
+        (let [op OpADC]
+          (when (== (bf w 30 30) 1)
+            (set! op OpSBC))
+
+          (return (lit Inst :Op op :Sf sf :S (== (bf w 29 29) 1) :Rd rd :Rn rn :Rm rm) "")))
+      (case [(== op2 2)]
+        (when (or (!= (bf w 29 29) 1) (!= (bf w 10 10) 0) (!= (bf w 4 4) 0))
+          (return (lit Inst) undef))
+
+        (let [in (lit Inst :Op OpCCMP :Sf sf :S true :N (== (bf w 30 30) 0) :Rn rn :Cond (conv uint8 (bf w 15 12)) :Imm2 (conv int64 (bf w 3 0)))]
+          (if (== (bf w 11 11) 1)
+            (set! (values (.-Rm in) (.-Imm in)) (values 255 (conv int64 rm)))
+
+            (set! (.-Rm in) rm))
+
+          (return in "")))
+      (case [(== op2 4)]
+        (when (or (!= (bf w 29 29) 0) (!= (bf w 11 11) 0))
+          (return (lit Inst) undef))
+
+        (return (lit Inst :Op (aget (lit (slice Op) OpCSEL OpCSINC OpCSINV OpCSNEG) (bit-or (<< (bf w 30 30) 1) (bf w 10 10))) :Sf sf :Rd rd :Rn rn :Rm rm :Cond (conv uint8 (bf w 15 12))) ""))
+      (case [(== op2 6)]
+        (when (!= (bf w 29 29) 0)
+          (return (lit Inst) undef))
+
+        (let [opc (bf w 15 10)]
+          (when (== (bf w 30 30) 1)
+            (when (!= rm 0)
+              (return (lit Inst) ":unimplemented dp1"))
+
+            (let [in (lit Inst :Sf sf :Rd rd :Rn rn)]
+              (switch opc
+                (case [0]
+                  (set! (.-Op in) OpRBIT))
+                (case [1]
+                  (set! (.-Op in) OpREV16))
+                (case [2]
+                  (if sf
+                    (set! (.-Op in) OpREV32)
+
+                    (set! (.-Op in) OpREV)))
+
+                (case [3]
+                  (when (not sf)
+                    (return (lit Inst) undef))
+
+                  (set! (.-Op in) OpREV))
+                (case [4]
+                  (set! (.-Op in) OpCLZ))
+                (case [5]
+                  (set! (.-Op in) OpCLS))
+                (default
+                  (return (lit Inst) ":unimplemented dp1")))
+
+              (return in "")))
+
+          (when (and (>= opc 16) (<= opc 23))
+            ;; AR18: FEAT_CRC32's crc32b/h/w/x and crc32cb/h/w/x (opcode 010 C sz): sf 1 with sz 11 only
+            (let [sz (bit-and opc 3)]
+              (when (!= sf (== sz 3))
+                (return (lit Inst) undef))
+
+              (return (lit Inst :Op OpCRC32 :Sf sf :Rd rd :Rn rn :Rm rm :Size (conv uint8 sz) :Sys (bf w 12 12)) "")))
+
+          (let [in (lit Inst :Sf sf :Rd rd :Rn rn :Rm rm)]
+            (switch opc
+              (case [2]
+                (set! (.-Op in) OpUDIV))
+              (case [3]
+                (set! (.-Op in) OpSDIV))
+              (case [8]
+                (set! (.-Op in) OpLSLV))
+              (case [9]
+                (set! (.-Op in) OpLSRV))
+              (case [10]
+                (set! (.-Op in) OpASRV))
+              (case [11]
+                (set! (.-Op in) OpRORV))
+              (default
+                (return (lit Inst) ":unimplemented dp2")))
+
+            (return in ""))))
+      (case [(== (bit-and op2 8) 8)]
+        (when (!= (bf w 30 29) 0)
+          (return (lit Inst) undef))
+
+        (let [ra (conv uint8 (bf w 14 10))
+            ^{:line 502} in (lit Inst :Sf sf :Rd rd :Rn rn :Rm rm :Ra ra)
+            ^{:line 503} k (bit-or (<< (bf w 23 21) 1) (bf w 15 15))]
+          (switch k
+            (case [0]
+              (set! (.-Op in) OpMADD))
+            (case [1]
+              (set! (.-Op in) OpMSUB))
+            (case [2]
+              (set! (.-Op in) OpSMADDL))
+            (case [3]
+              (set! (.-Op in) OpSMSUBL))
+            (case [4]
+              (set! (.-Op in) OpSMULH))
+            (case [10]
+              (set! (.-Op in) OpUMADDL))
+            (case [11]
+              (set! (.-Op in) OpUMSUBL))
+            (case [12]
+              (set! (.-Op in) OpUMULH))
+            (default
+              (return (lit Inst) undef)))
+
+          (when (and (!= k 0) (!= k 1) (not sf))
+            (return (lit Inst) undef))
+
+          (return in ""))))
+
+    (return (lit Inst) ":unimplemented dp-reg")))
+
+
+
+(go/func decodeFlagM "decodeFlagM is FEAT_FlagM's data-processing words (AR18): rmif (sf 1, op 0, S 1, bits 14-10 00001, o2 0; imm6 the\nrotation, the mask bits 3-0) and setf8, setf16 (sf 0, op 0, S 1, opcode2 0, sz bit 14, bits 13-10 0010, o3 0, mask 1101); the\nclass's other words are unallocated.\n" [^uint32 w] :results [Inst string]
+  (let [rn (conv uint8 (bf w 9 5))
+      (values sf op s) (values (bf w 31 31) (bf w 30 30) (bf w 29 29))]
+    (switch
+      (case [(== (bf w 14 10) 1)]
+        (when (or (!= sf 1) (!= op 0) (!= s 1) (!= (bf w 4 4) 0))
+          (return (lit Inst) undef))
+
+        (return (lit Inst :Op OpFLAGM :Sf true :Rn rn :Imm (conv int64 (bf w 20 15)) :Imm2 (conv int64 (bf w 3 0)) :Sys 3) ""))
+      (case [(== (bf w 13 10) 2)]
+        (when (or (!= sf 0) (!= op 0) (!= s 1) (!= (bf w 20 15) 0) (!= (bf w 4 0) 13))
+          (return (lit Inst) undef))
+
+        (return (lit Inst :Op OpFLAGM :Rn rn :Sys (+ 4 (bf w 14 14))) "")))
+
+    (return (lit Inst) undef)))

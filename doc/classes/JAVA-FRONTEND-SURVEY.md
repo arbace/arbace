@@ -6817,3 +6817,91 @@ The helper's re-review (report 019) left two of the four partly closed; each fix
   Tested on a copy of the functions under joker with the enum stubbed from those forms: no difference as committed, and a tag
   added to the enum is reported. Its run on javac's tool (the assertion at the first read) is JN10p.5's, with the rest of the
   half; `javac_tree.ae` is in the reader hash and the tool's key, so this edit joins the batched rewrite.
+
+## As built: JN9 fixes from G1 (2026-11-10)
+
+Ghidra's G1 read proof (the Ghidra demo's read of its Java by `bin/repr-java read --no-javac`, against javac's read) found two
+places where the native provider's forms differ from javac's. Its repros hold no Ghidra code; each case is now a sample of
+Arbace's own (`test/repr/java/java/sample/`), with a control, and each fix ports javac's rule (jdk26u at `baf63fb`).
+
+- **A void method's reference against a value descriptor** (`MrefVoid.java`). `run(Runnable)` and `<T> T run(Supplier<T>)`
+  called with `this::work`, `work` void: javac picks `run(Runnable)`, the provider picked `run(Supplier)`. The rule,
+  `Attr.checkReferenceCompatible` (`src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Attr.java:3830-3849`):
+  `incompatibleReturnType` starts as the referent's return type, is cleared when the descriptor returns void, or when both
+  return a value and the referent's (captured) is compatible with the descriptor's; else the reference is reported
+  incompatible. A void referent against a value descriptor is therefore an error (JLS 15.13.2), which in the overload phase
+  (the reference is exact, not stuck, so pertinent to applicability) makes `run(Supplier)` inapplicable. The provider's
+  `mref-check` (`arbace/repr/java/expr.ae`) skipped the check when the referent was void; it now errors as javac does. The
+  control, `run(this::value)` with a `String` method: both apply, and `Supplier<T>` is the more specific (JLS 15.12.2.5, the
+  other descriptor's return void): javac and the provider pick `run(Supplier)`.
+- **An inherited static field reached through two static on-demand imports** (`StarBase`, `StarSub`, `StarImports`,
+  `StarImportsBase`). With `import static sample.StarBase.*; import static sample.StarSub.*;` javac names `MASK` (declared by
+  `StarBase`, inherited by `StarSub`) `StarSub/MASK`; the provider named it `StarBase/MASK`, and the other way round in the
+  control. The rule, `Resolve.findVar` (`comp/Resolve.java:1551-1569`): the field found in the star import scope is cloned with
+  `sc.getOrigin(sym).owner` as its owner; `StarImportScope.importAll` prepends each import's `FilterImportScope`
+  (`code/Scope.java:897`) and `CompoundScope.getOrigin` answers the first sub-scope that includes the symbol
+  (`Scope.java:1102-1108`), so the origin is the last static on-demand import in the source that includes the field. The single
+  imports' scope appends (`NamedImportScope.appendScope`, `Scope.java:809-810`): the first single import, as the provider
+  already did. `decls/find-var` (`arbace/repr/java/decls.ae`) now walks the static on-demand imports last first. The control,
+  `StarImportsBase` (the imports the other way round): `StarBase/MASK`. Static methods were already javac's in both orders
+  (`find-fun`'s select-best keeps the later clone where javac's `mostSpecific` keeps the first of the same base symbol over the
+  prepended scopes, `Resolve.java:2077-2089`): the samples' `twice` holds them to it.
+
+Checks (stage 0, javac's tool `javac-5ad357331dbcd7cfb0fd` with the checkout's repr/java evaluated, light, one at a time):
+before the fix the new samples differ in `MrefVoid`, `StarImports` and `StarImportsBase` (the negative control:
+`nojavac-check --corpus samples` FAILED with the fix reverted); after it `attr-check --corpus samples` 4,079 facts equal, 0
+different, 3 declined (the known ones), `nojavac-check --corpus samples` 24 files, 21 native, 3 fallbacks (the known ones),
+`nojavac-check --corpus baseline` 183 of 183 native, every file equal (1.9 GB peak), `front-check --corpus samples,baseline`
+equal; the repros' six files read without javac equal javac's. `bin/repr-java check --update` wrote the five samples' expected
+forms (the baseline's unchanged) and `roundtrip --corpus samples --text --record` their round trip: forms, ae, text, anew pass;
+the classes level of `StarImports` and `StarImportsBase` differs in the constant pool's order alone (the original's static
+imports enter `StarSub` first; the same code), recorded in `samples-known.edn`; the judging run then passes. A hazard met: the
+round trip's reasons come from `javap` on the PATH (`roundtrip.ae`'s `javap-code`); the host's `/usr/bin/javap` does not read
+Java 26's class files, so a `--record` under it rewrote every known reason as "the constant pool's order": recorded again with
+jdk26u's image's `bin` first on the PATH.
+
+Not run (over the light lane's 2 GiB a process; the night's): `nojavac-check` and `attr-check` over `jdk` (7.6 GB) and `javac`
+(3.6 GB) and `jdk26u`; and, the reader hash moved (`expr.ae`, `decls.ae`), the four provenance writers (`bin/jrt-convert update`,
+`bin/javac-vendor convert`, `bin/clojure-tests --java-fixtures update`, `bin/java-check --forms update`), until which the
+essential `provenance` step fails on this branch, with GTS137 (a)'s `bin/repr-java check --jdk` at this reader change.
+
+## As built: the jdk parts' memory and round trip (java-jdk, 2026-11-13)
+
+Night 13 parked two jdk parts by the user's decision (`:clean-only`): `repr-java-roundtrip.jdk` (classes 1,081 fail, 858
+unexpected) and `repr-java-attr.jdk` (61.4 GiB, OOM-killed on the 54.7 GiB host). Both investigated on slices, at most 2.6
+GiB a run, beside the serial rerun of 2026-11-13.
+
+**The round trip is not a regression of the tools.** No commit touched `arbace/repr/java/` since its last pass (59f546ada,
+11-05). The corpus grew: b6a6093af (11-07, night step 0) converted jdk/ afresh for the merged areas, 906 files to 2,277,
+and the references `test/repr/java/roundtrip/jdk{,-known,-text,-text-known}.edn` were never recorded again. Of night 13's 839
+unexpected entries 784 are files new to the corpus; the 30 read failures of 11-05 fail identically (Stream.java:128 and
+Map.java:299, javac's inference on the printed Java whose casts the forms do not keep, were there on 11-05 too), the 9 new
+ones are new files. The other 55 come from `compile_printed`'s loop (`bin/lib/repr-java/roundtrip`): javac reports a phase's
+errors at a time, so the rejected printed files are replaced by their originals round by round, and six rounds no longer
+sufficed: the seventh round's errors (sun/security/pkcs12/PKCS12KeyStore.java:268, the forms' initialized locals breaking a
+lambda's effectively final capture) were left in the tree, which compiled to 3,858 of 4,942 classes, so whole packages'
+printed classes were missing ("only in the original, () only in the printed"). Fixed: the loop runs until javac accepts the
+tree, at most 20 rounds, and stops with a failure when a round rejects no new file (tested on a two-file sample: one round
+converges, an original that javac rejects too stops with status 1). What remains: the whole run with `--record` on the fixed
+loop (night command below), which records the 2,277 files' references; its new entries are the known reasons the tool
+computes.
+
+**The attr part's memory is the collector's slack, not retention.** Slices of `read-jdk --check --front both --split --attr
+native` on javac's tool (one thread, java/util/stream's 39 files and up to 144 files; a probe variable, not committed, put the
+whole java.base source tree in each chunk's patch path as `REPR_JAVA_PATCH_ALL` gives the full run): the heap profile at the
+end holds no javac objects (4 MB of 468: no chunk's Context or registry outlives it; the units' forms are about 0.85 MB a
+file and front, about 3.9 GiB for the corpus's two fronts); the native provider's side parses (`decls/source-file-class`)
+grow with the sources a chunk sees (+0.36 GiB over javac's alone with 174 visible files, +0.8 GiB with java/'s 1,067); and the
+live heap (gctrace) is 0.28 of the RSS (642 MB live, 2.27 GiB RSS): the tool runs at GOGC 200. With the whole tree visible one
+39-file chunk passed 2.6 GiB unlimited, and ran in 2.08 GiB (live at most 780 MB, 78 s, 30 collections) under
+`GOMEMLIMIT=2000MiB`. A limit too close to the live heap thrashes (1 GiB on a 642 MB live heap: 4,682 CPU seconds against 100).
+Estimate for the whole part (four chunks at once): live about 0.35 + 4 x 1 + 3.9, under 10 GiB, so `GOMEMLIMIT=26GiB` keeps it
+near 27-28 GiB, as jrt-convert's read went from 47.6 to 31.4 GiB under 28GiB (night 7). Built: `bin/lib/repr-java/front-check`'s
+`jdk_read` (attr-check's, front-check's and nojavac-check's module reads: jdk, javac, jdk26u) and the round trip's two jdk reads
+run under `GOMEMLIMIT=${GOMEMLIMIT:-26GiB}`. Not built: a shared parse cache of the side sources across a run's chunks and a
+bounded check read in `finish` (pmap's 66 at once): both change `arbace/repr/java`, so javac's tool's key, and the slices
+measured no gain from the second.
+
+What remains, after the rerun and with the main session's go-ahead: the whole parts (night commands in the journal entry),
+then `:clean-only` lifted and `:mem-gib` set from their peaks. No key moves (gate_key the same; bin/lib/repr-java is out of
+the javac key). No proposals (JFS161 none).

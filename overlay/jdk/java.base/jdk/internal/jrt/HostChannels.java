@@ -1,0 +1,379 @@
+/*
+ * Arbace (overlay/jdk, doc/go/JRT-NOTES.md "Channels"; F10 of doc/classes/JAVA-DEFERRED-TRIAGE.md):
+ * the host's descriptors under java.nio's selectable channels. jdk26u's sun.nio.ch classes call
+ * their natives (Net, IOUtil, SocketDispatcher, UnixDispatcher, PollSelectorImpl) on a
+ * FileDescriptor; jrt's overlays of those classes keep their Java and call these natives on the
+ * descriptor's number instead (IOUtil.fdVal). The natives are jrt's Go (go/arbace/jrt/channels.ae,
+ * channels_linux.ae), ports of jdk26u's src/java.base/unix/native/libnio/ch/{Net,IOUtil,
+ * SocketDispatcher,UnixDispatcher,PollSelectorImpl}.c: the same system calls, flags and results.
+ *
+ * Two departures, both below the natives' interface: every descriptor is non-blocking in the
+ * kernel, and a descriptor configured blocking (configureBlocking0) waits in Go's poller, so that
+ * an asynchronous close (UnixDispatcher.preClose, the JDK's dup2 and signal) wakes a thread blocked
+ * in it (preClose0); and the JDK's IOStatus.THROWN, an exception raised by the native, is THROWN
+ * here with the error number in err[0], which exception() turns into the JDK's exception (the
+ * natives' JNU_Throw... calls, Net.c's handleSocketError).
+ * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ */
+package jdk.internal.jrt;
+
+import java.io.IOException;
+import java.net.BindException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.net.ProtocolException;
+import java.net.SocketException;
+
+/** The host's descriptors: sockets, pipes and poll, by number. */
+public final class HostChannels {
+
+    /** sun.nio.ch.IOStatus's values, as the natives return them. */
+    public static final int EOF = -1;
+    public static final int UNAVAILABLE = -2;
+    public static final int INTERRUPTED = -3;
+    /** An error: its number in err[0]. */
+    public static final int THROWN = -5;
+
+    /** The error numbers the exceptions are chosen by (Linux's, the same on amd64 and arm64). */
+    public static final int EPIPE = 32;
+    public static final int EACCES = 13;
+    public static final int EPROTO = 71;
+    public static final int EOPNOTSUPP = 95;
+    public static final int EADDRINUSE = 98;
+    public static final int EADDRNOTAVAIL = 99;
+    public static final int ECONNRESET = 104;
+    public static final int ENOTCONN = 107;
+    public static final int ETIMEDOUT = 110;
+    public static final int ECONNREFUSED = 111;
+    public static final int EHOSTUNREACH = 113;
+    public static final int EINPROGRESS = 115;
+    /** ENOPROTOOPT (JCS200: LinuxSocketOptions.c's handleError). */
+    public static final int ENOPROTOOPT = 92;
+    /** jrt's own: the host has no descriptors (a host without channels, the box's). */
+    public static final int ENOHOST = -1;
+
+    /** nio_util.h's MAX_UNIX_DOMAIN_PATH_LEN: sizeof(sockaddr_un.sun_path) - 2, Linux's 108 - 2. */
+    public static final int MAX_UNIX_DOMAIN_PATH_LEN = 106;
+
+    private HostChannels() {
+    }
+
+    /** The host's text of error number errno (the C library's strerror). */
+    public static String text(int errno) {
+        if (errno == ENOHOST)
+            return "Channels not available";
+        return strerror0(errno);
+    }
+
+    /**
+     * Net.c's handleSocketErrorWithMessage: the java.net exception of a socket call's errno,
+     * with message (null: the error's text alone, else "message: text").
+     */
+    public static IOException socketException(int errno, String message) {
+        String text = message == null ? text(errno) : message + ": " + text(errno);
+        switch (errno) {
+            case EPROTO:
+                return new ProtocolException(text);
+            case ECONNREFUSED:
+            case ETIMEDOUT:
+            case ENOTCONN:
+                return new ConnectException(text);
+            case EHOSTUNREACH:
+                return new NoRouteToHostException(text);
+            case EADDRINUSE:
+            case EADDRNOTAVAIL:
+            case EACCES:
+                return new BindException(text);
+            default:
+                return new SocketException(text);
+        }
+    }
+
+    /** JNU_ThrowByNameWithLastError(env, "java/net/SocketException", message). */
+    public static SocketException plainSocketException(int errno, String message) {
+        return new SocketException(message + ": " + text(errno));
+    }
+
+    /** JNU_ThrowIOExceptionWithLastError(env, message): the error's text, else message. */
+    public static IOException ioException(int errno, String message) {
+        String text = text(errno);
+        return new IOException(text == null || text.isEmpty() ? message : text);
+    }
+
+    /** IOUtil.c's convertReturnVal for a read or a write that failed (err[0] set). */
+    public static IOException readWriteException(int errno, boolean reading) {
+        return ioException(errno, reading ? "Read failed" : "Write failed");
+    }
+
+    // -- the natives; each answers THROWN with the error number in err[0] when it fails --
+
+    /** strerror(errno). */
+    static native String strerror0(int errno);
+
+    /** ipv6_available(): the host has IPv6 (a socket of AF_INET6 can be made). */
+    public static native boolean ipv6Available0();
+
+    /** Net.socket0: a socket (AF_INET6 when ipv6, stream or datagram), SO_REUSEADDR when reuse. */
+    public static native int socket0(boolean ipv6, boolean stream, boolean reuse, int[] err);
+
+    /**
+     * Net.bind0: binds fd to address addr (4 or 16 bytes; on an AF_INET6 socket a 4-byte address
+     * is mapped), scope id scope, port: 0 or THROWN.
+     */
+    public static native int bind0(int fd, byte[] addr, int scope, int port, int[] err);
+
+    /** Net.listen: 0 or THROWN. */
+    public static native int listen0(int fd, int backlog, int[] err);
+
+    /** Net.connect0: 1, UNAVAILABLE (in progress), INTERRUPTED or THROWN. */
+    public static native int connect0(int fd, byte[] addr, int scope, int port, int[] err);
+
+    /**
+     * Net.accept: 1 with the new descriptor in newfd[0] and the peer's address in addr[0] (4 or
+     * 16 bytes) and port, scope in port[0], port[1]; UNAVAILABLE, INTERRUPTED or THROWN.
+     */
+    public static native int accept0(int fd, int[] newfd, byte[][] addr, int[] port, int[] err);
+
+    /** Net.shutdown (how: 0 read, 1 write, 2 both; ENOTCONN ignored): 0 or THROWN. */
+    public static native int shutdown0(int fd, int how, int[] err);
+
+    /**
+     * Net.localInetAddress and localPort (local) or remoteInetAddress and remotePort: 0 with the
+     * address in addr[0] and port, scope in port[0], port[1], or THROWN.
+     */
+    public static native int address0(int fd, boolean local, byte[][] addr, int[] port, int[] err);
+
+    /**
+     * Net.getIntOption0: the option's value into value[0] (IP_MULTICAST_TTL and _LOOP as a byte,
+     * SO_LINGER's seconds or -1; with conversion: NET_GetSockOpt's halved buffer sizes): 0 or THROWN.
+     */
+    public static native int getIntOption0(int fd, boolean mayNeedConversion, int level, int opt,
+                                           int[] value, int[] err);
+
+    /** Net.setIntOption0 (with conversion: NET_SetSockOpt's IP_TOS and SO_RCVBUF): 0 or THROWN. */
+    public static native int setIntOption0(int fd, boolean mayNeedConversion, int level, int opt,
+                                           int arg, boolean isIPv6, int[] err);
+
+    /**
+     * Net.poll: the events of fd among events within timeout ms (0: now, -1: no limit), 0 when
+     * none (or when fd was pre-closed), or THROWN.
+     */
+    public static native int poll0(int fd, int events, long timeout, int[] err);
+
+    /** Net.pollConnect: 1 connected, 0 not yet, or THROWN (the connection's error in err[0]). */
+    public static native int pollConnect0(int fd, long timeout, int[] err);
+
+    /** Net.available (FIONREAD): the count or THROWN. */
+    public static native int available0(int fd, int[] err);
+
+    /** Net.sendOOB: 1, UNAVAILABLE, INTERRUPTED or THROWN. */
+    public static native int sendOOB0(int fd, byte b, int[] err);
+
+    /**
+     * SocketDispatcher.read0 (and FileDispatcherImpl's for a pipe): up to len bytes of fd into b
+     * at off: a count, EOF, UNAVAILABLE, INTERRUPTED or THROWN (ECONNRESET and EPIPE as ECONNRESET
+     * when socket).
+     */
+    public static native int read0(int fd, byte[] b, int off, int len, boolean socket, int[] err);
+
+    /** SocketDispatcher.write0: len bytes of b from off: a count, UNAVAILABLE, INTERRUPTED or THROWN. */
+    public static native int write0(int fd, byte[] b, int off, int len, int[] err);
+
+    /** UnixDispatcher.close0: 0 or THROWN. */
+    public static native int close0(int fd, int[] err);
+
+    /**
+     * UnixDispatcher.preClose0: from now on fd reads its end, writes fail with EPIPE and polls
+     * answer at once, as the JDK's dup2 of a closed socket over fd; a thread blocked in fd wakes.
+     */
+    public static native void preClose0(int fd);
+
+    /** IOUtil.configureBlocking: 0 or THROWN. */
+    public static native int configureBlocking0(int fd, boolean blocking, int[] err);
+
+    /** IOUtil.makePipe: 0 with the read and write ends in fds[0], fds[1], or THROWN. */
+    public static native int makePipe0(boolean blocking, int[] fds, int[] err);
+
+    /** IOUtil.write1: 1, UNAVAILABLE, INTERRUPTED or THROWN. */
+    public static native int writeOne0(int fd, byte b, int[] err);
+
+    /** IOUtil.drain: 1 when something was read, 0 when not, or THROWN. */
+    public static native int drain0(int fd, int[] err);
+
+    /** IOUtil.drain1: 1 a byte read, 0 none (EAGAIN), or THROWN. */
+    public static native int drainOne0(int fd, int[] err);
+
+    /** IOUtil.fdLimit: RLIMIT_NOFILE's soft limit (Integer.MAX_VALUE when unlimited). */
+    public static native int fdLimit0();
+
+    /**
+     * PollSelectorImpl.poll: poll(2) of n descriptors fds[i] with events[i] (shorts), their
+     * revents into revents[i]: the count, INTERRUPTED or THROWN.
+     */
+    public static native int poll1(int[] fds, int[] events, int[] revents, int n, int timeout, int[] err);
+
+    /** EPoll.create: epoll_create1(EPOLL_CLOEXEC), or THROWN. */
+    public static native int epollCreate0(int[] err);
+
+    /** EPoll.ctl: epoll_ctl of fd with events (the event's data its descriptor): 0 or the error number. */
+    public static native int epollCtl0(int epfd, int opcode, int fd, int events);
+
+    /**
+     * EPoll.wait: epoll_wait for at most n events within timeout ms (negative: no limit), each event's
+     * descriptor and events into fds[i], events[i]: the count, INTERRUPTED or THROWN.
+     */
+    public static native int epollWait0(int epfd, int[] fds, int[] events, int n, int timeout, int[] err);
+
+    /** EventFD.eventfd0: eventfd(0, 0), non-blocking to the channels as jdk26u's makes it: the descriptor or THROWN. */
+    public static native int eventfd0(int[] err);
+
+    /** EventFD.set0: the counter's one added (an 8-byte write), as convertReturnVal. */
+    public static native int eventfdSet0(int efd, int[] err);
+
+    // -- datagrams and multicast (F10b: DatagramChannelImpl.c's and Net.c's natives) --
+
+    /**
+     * DatagramChannelImpl.receive0: one datagram of fd, at most len bytes of it into b at off
+     * (recvfrom; MAX_PACKET_LEN at most), the sender's struct sockaddr into sender (28 bytes,
+     * NativeSocketAddress's), ECONNREFUSED retried when not connected (a blocking descriptor waits
+     * for one): the count, UNAVAILABLE, INTERRUPTED or THROWN (ECONNREFUSED when connected: a
+     * PortUnreachableException).
+     */
+    public static native int receive0(int fd, byte[] b, int off, int len, byte[] sender,
+                                      boolean connected, int[] err);
+
+    /**
+     * DatagramChannelImpl.send0: len bytes of b from off as one datagram to the struct sockaddr
+     * of target's first targetLen bytes (sendto; MAX_PACKET_LEN at most; a blocking descriptor
+     * waits for room): the count, UNAVAILABLE, INTERRUPTED or THROWN (ECONNREFUSED: a
+     * PortUnreachableException).
+     */
+    public static native int send0(int fd, byte[] b, int off, int len, byte[] target, int targetLen,
+                                   int[] err);
+
+    /** DatagramChannelImpl.disconnect0: connect(2) to AF_UNSPEC: 0 or THROWN. */
+    public static native int disconnect0(int fd, boolean isIPv6, int[] err);
+
+    /**
+     * Net.joinOrDrop4: IP_ADD_MEMBERSHIP or IP_DROP_MEMBERSHIP (source 0), else
+     * IP_ADD_SOURCE_MEMBERSHIP or IP_DROP_SOURCE_MEMBERSHIP, of group, interf, source (host order):
+     * 0, UNAVAILABLE (a join the host does not support) or THROWN.
+     */
+    public static native int joinOrDrop40(int fd, boolean join, int group, int interf, int source, int[] err);
+
+    /** Net.blockOrUnblock4: IP_BLOCK_SOURCE or IP_UNBLOCK_SOURCE: 0, UNAVAILABLE or THROWN. */
+    public static native int blockOrUnblock40(int fd, boolean block, int group, int interf, int source,
+                                              int[] err);
+
+    /**
+     * Net.joinOrDrop6: IPV6_ADD_MEMBERSHIP or IPV6_DROP_MEMBERSHIP (no source), else
+     * MCAST_JOIN_SOURCE_GROUP or MCAST_LEAVE_SOURCE_GROUP, of group (16 bytes), interface index,
+     * source (16 bytes or null): 0, UNAVAILABLE or THROWN.
+     */
+    public static native int joinOrDrop60(int fd, boolean join, byte[] group, int index, byte[] source,
+                                          int[] err);
+
+    /** Net.blockOrUnblock6: MCAST_BLOCK_SOURCE or MCAST_UNBLOCK_SOURCE: 0, UNAVAILABLE or THROWN. */
+    public static native int blockOrUnblock60(int fd, boolean block, byte[] group, int index, byte[] source,
+                                              int[] err);
+
+    /**
+     * Net.setInterface4 (IP_MULTICAST_IF of interf, host order; v6: IPV6_MULTICAST_IF of an
+     * interface index): 0 or THROWN.
+     */
+    public static native int setInterface0(int fd, boolean v6, int value, int[] err);
+
+    /**
+     * Net.getInterface4 (IP_MULTICAST_IF, host order) and getInterface6 (IPV6_MULTICAST_IF): 0
+     * with the value in value[0], or THROWN.
+     */
+    public static native int getInterface0(int fd, boolean v6, int[] value, int[] err);
+
+    // -- UnixDomainSockets.c's natives (JCS164; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS164") --
+
+    /** UnixDomainSockets.socket0: socket(PF_UNIX, SOCK_STREAM, 0), blocking: the descriptor or THROWN. */
+    public static native int unixSocket0(int[] err);
+
+    /**
+     * UnixDomainSockets.bind0: binds fd to path (the sockaddr_un of path's bytes, its length
+     * offsetof(sun_path) + the bytes + 1; at most MAX_UNIX_DOMAIN_PATH_LEN bytes): 0 or THROWN.
+     */
+    public static native int unixBind0(int fd, byte[] path, int[] err);
+
+    /** UnixDomainSockets.connect0: 1, UNAVAILABLE (EINPROGRESS), INTERRUPTED or THROWN; a blocking socket waits. */
+    public static native int unixConnect0(int fd, byte[] path, int[] err);
+
+    /**
+     * UnixDomainSockets.accept0: 1 with the new descriptor (blocking) in newfd[0] and the peer's
+     * name in path[0] (sockaddrToUnixAddressBytes: empty when unnamed); UNAVAILABLE, INTERRUPTED or THROWN.
+     */
+    public static native int unixAccept0(int fd, int[] newfd, byte[][] path, int[] err);
+
+    /** UnixDomainSockets.localAddress0: 0 with getsockname's name in path[0] (null: not AF_UNIX), or THROWN. */
+    public static native int unixLocalAddress0(int fd, byte[][] path, int[] err);
+
+    // -- InheritedChannel.c's natives (JCS201 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS201"):
+    //    jdk26u's sun.nio.ch.InheritedChannel, derived over these (test/jrt/derive.ae) --
+
+    /** InheritedChannel.dup: dup(2) of fd, not entered into the table: the new descriptor or THROWN. */
+    public static native int inheritedDup0(int fd, int[] err);
+
+    /** InheritedChannel.dup2: dup2(2) of fd onto fd2: 0 or THROWN. */
+    public static native int inheritedDup20(int fd, int fd2, int[] err);
+
+    /** InheritedChannel.open0: open(2) of path's bytes with oflag (0 O_RDONLY, 1 O_WRONLY, 2 O_RDWR): the descriptor or THROWN. */
+    public static native int inheritedOpen0(byte[] path, int oflag, int[] err);
+
+    /** InheritedChannel.soType0: SO_TYPE: 1 SOCK_STREAM, 2 SOCK_DGRAM, -1 another type or not a socket. */
+    public static native int inheritedSoType0(int fd);
+
+    /** InheritedChannel.addressFamily: getsockname(2)'s family: 1 AF_INET, 2 AF_INET6, 3 AF_UNIX, -1 another or none. */
+    public static native int inheritedFamily0(int fd);
+
+    /** InheritedChannel.isConnected: whether getpeername(2) succeeds. */
+    public static native boolean inheritedConnected0(int fd);
+
+    /**
+     * InheritedChannel.inetPeerAddress0 and peerPort0: 1 with getpeername(2)'s address in addr[0] (4 or 16 bytes, a
+     * v4-mapped address its 4) and its port and scope in port[0], port[1] (an AF_INET or AF_INET6 peer), else 0.
+     */
+    public static native int inheritedPeer0(int fd, byte[][] addr, int[] port);
+
+    /** InheritedChannel.unixPeerAddress0: getpeername(2)'s AF_UNIX name in path[0] (left null for another family or none). */
+    public static native void inheritedUnixPeer0(int fd, byte[][] path);
+
+    /** The inherited descriptor entered into the table as a blocking channel's (non-blocking in the kernel): 0 or THROWN. */
+    public static native int inheritedAdopt0(int fd, int[] err);
+
+    // -- jdk.net's LinuxSocketOptions.c natives (JCS200 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS200"):
+    //    jdk.net.LinuxSocketOptions, derived over these (test/jrt/derive.ae) --
+
+    /**
+     * LinuxSocketOptions.c's handleError: ENOPROTOOPT an UnsupportedOperationException "unsupported socket
+     * option", else JNU_ThrowByNameWithLastError's SocketException (the error's text, else detail).
+     */
+    public static RuntimeException extUnsupported(int errno) {
+        return errno == ENOPROTOOPT ? new UnsupportedOperationException("unsupported socket option") : null;
+    }
+
+    /** The SocketException of handleError (when extUnsupported is null). */
+    public static SocketException extException(int errno, String detail) {
+        String text = text(errno);
+        return new SocketException(text == null || text.isEmpty() ? detail : text);
+    }
+
+    /** getsockopt(2) of an int at level, opt: 0 with the value in value[0], or THROWN. */
+    public static native int extGetInt0(int fd, int level, int opt, int[] value, int[] err);
+
+    /** setsockopt(2) of the int value at level, opt: 0 or THROWN. */
+    public static native int extSetInt0(int fd, int level, int opt, int value, int[] err);
+
+    /**
+     * socketOptionSupported: whether a TCP socket (IPv6, else IPv4) answers getsockopt(2) of level, opt
+     * with anything but ENOPROTOOPT (false when no socket can be made).
+     */
+    public static native boolean extSupported0(int level, int opt);
+
+    /** SO_PEERCRED: 0 with the peer's uid and gid in ids[0], ids[1], or THROWN. */
+    public static native int extPeerCred0(int fd, int[] ids, int[] err);
+}

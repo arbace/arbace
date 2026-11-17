@@ -1,0 +1,263 @@
+;; The C API at the compiled level (OC215 (a), the user 2026-11-10; doc/ocaml/OCAML-SURVEY.md, "As built: OC215"): an external the
+;; runtime does not implement is the test's C stub of that name, run by ci in the compiled program's main (test/ocaml/o2j/capi,
+;; through arbace/oicapi's boundary, as oi runs a program's stubs). The runtime drives: each message is written to the file the main
+;; serves (capiPath) and its reply read back; the main answers a call with its end, or with a callback or a named value the C asks for
+;; ('K', 'Q'), which this class answers with its next message ('A'). The wire form and the ops are capi.ae's (test/ocaml/o2j/capi).
+;; At the light level (stage 0's interpreter) no host serves capiPath: the open fails and the external is missing, as before.
+;;
+;; The session: the values that crossed in an outermost call, by id (the order both sides gave them) and back; a C custom block the
+;; C allocated (kept for the run) is one Custom by its address.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io ByteArrayOutputStream RandomAccessFile IOException) '(java.util ArrayList HashMap IdentityHashMap))
+
+(defclass ^:public ^:final CApi
+
+  (field ^:static ^:final ^String capiPath "/proc/self/ocaml-capi")
+  ;; the channel (opened once; nil and failed when no host serves it)
+  (field ^:static ^RandomAccessFile chan)
+  (field ^:static ^boolean failed false)
+  ;; the session's nodes and their ids; the depth of calls in it
+  (field ^:static ^ArrayList nodes)
+  (field ^:static ^IdentityHashMap ids)
+  (field ^:static ^int depth 0)
+  ;; the C's custom blocks by address, kept for the run
+  (field ^:static ^HashMap cblocks (HashMap.))
+  ;; a Java throwable a callback raised, rethrown when the C call has unwound
+  (field ^:static ^Throwable pending)
+
+  ;; ---- writing
+
+  (method ^:static u8 ^void [^ByteArrayOutputStream o ^long b] (.write o (unchecked-int (bit-and b 255))))
+  (method ^:static u32 ^void [^ByteArrayOutputStream o ^long v]
+    (CApi/u8 o (bit-shift-right v 24)) (CApi/u8 o (bit-shift-right v 16)) (CApi/u8 o (bit-shift-right v 8)) (CApi/u8 o v))
+  (method ^:static u64 ^void [^ByteArrayOutputStream o ^long v]
+    (CApi/u32 o (bit-shift-right v 32)) (CApi/u32 o v))
+  (method ^:static bytes ^void [^ByteArrayOutputStream o ^byte/1 b]
+    (CApi/u32 o (alength b))
+    (.write o b 0 (alength b)))
+
+  (method ^:static add ^void [x]
+    (.put ids x (Integer/valueOf (.size nodes)))
+    (.add nodes x))
+
+  ;; v in the wire form
+  (method ^:static put ^void [^ByteArrayOutputStream o v]
+    (cond
+      (instance? Long v) (do (CApi/u8 o 105) (CApi/u64 o (.longValue (cast Long v))))
+      (instance? Double v) (do (CApi/u8 o 100) (CApi/u64 o (Double/doubleToRawLongBits (.doubleValue (cast Double v)))))
+      (instance? Integer v) (do (CApi/u8 o 108) (CApi/u32 o (long (.intValue (cast Integer v)))))
+      (instance? I64 v) (do (CApi/u8 o 106) (CApi/u64 o (.-v (cast I64 v))))
+      (instance? NInt v) (do (CApi/u8 o 110) (CApi/u64 o (.-v (cast NInt v))))
+      (nil? v) (do (CApi/u8 o 105) (CApi/u64 o 0))
+      (.containsKey ids v) (do (CApi/u8 o 114) (CApi/u32 o (long (.intValue (cast Integer (.get ids v))))))
+      (instance? Block v)
+      (let [b (cast Block v) f (.-f b)]
+        (CApi/add v)
+        (CApi/u8 o 98) (CApi/u32 o (long (.-tag b))) (CApi/u32 o (alength f))
+        (loop [^int i 0] (when (< i (alength f)) (CApi/put o (aget f i)) (recur (unchecked-inc-int i)))))
+      (instance? byte/1 v) (do (CApi/add v) (CApi/u8 o 115) (CApi/bytes o (cast byte/1 v)))
+      (instance? double/1 v)
+      (let [d (cast double/1 v)]
+        (CApi/add v)
+        (CApi/u8 o 102) (CApi/u32 o (alength d))
+        (loop [^int i 0] (when (< i (alength d)) (CApi/u64 o (Double/doubleToRawLongBits (aget d i))) (recur (unchecked-inc-int i)))))
+      (and (instance? Custom v) (instance? BigArray (.-v (cast Custom v))))
+      (let [ba (cast BigArray (.-v (cast Custom v))) dims (.-dims ba) n (.size ba)]
+        (CApi/add v)
+        (CApi/u8 o 66) (CApi/u32 o (long (.-kind ba))) (CApi/u32 o (long (.-layout ba))) (CApi/u32 o (alength dims))
+        (loop [^int i 0] (when (< i (alength dims)) (CApi/u32 o (long (aget dims i))) (recur (unchecked-inc-int i))))
+        (CApi/u32 o n)
+        (loop [^int i 0] (when (< i n) (CApi/put o (aget (.-data ba) (unchecked-add-int (.-off ba) i))) (recur (unchecked-inc-int i)))))
+      (and (instance? Custom v) (instance? CBlock (.-v (cast Custom v))))
+      (let [c (cast Custom v)]
+        (CApi/u8 o 99) (CApi/bytes o (cast byte/1 (Rt/ofUtf8 (.-id c)))) (CApi/u64 o (.-addr (cast CBlock (.-v c)))))
+      (instance? Closure v) (do (CApi/add v) (CApi/u8 o 107))
+      :else (do (CApi/add v) (CApi/u8 o 104))))
+
+  ;; the contents of the nodes known now
+  (method ^:static putUpdates ^void [^ByteArrayOutputStream o]
+    (let [n (.size nodes)]
+      (CApi/u32 o n)
+      (loop [^int k 0]
+        (when (< k n)
+          (let [v (.get nodes k)]
+            (cond
+              (instance? Block v)
+              (let [f (.-f (cast Block v))]
+                (loop [^int i 0] (when (< i (alength f)) (CApi/put o (aget f i)) (recur (unchecked-inc-int i)))))
+              (instance? byte/1 v) (.write o (cast byte/1 v) 0 (alength (cast byte/1 v)))
+              (instance? double/1 v)
+              (let [d (cast double/1 v)]
+                (loop [^int i 0] (when (< i (alength d)) (CApi/u64 o (Double/doubleToRawLongBits (aget d i))) (recur (unchecked-inc-int i)))))
+              (and (instance? Custom v) (instance? BigArray (.-v (cast Custom v))))
+              (let [ba (cast BigArray (.-v (cast Custom v))) n (.size ba)]
+                (loop [^int i 0] (when (< i n) (CApi/put o (aget (.-data ba) (unchecked-add-int (.-off ba) i))) (recur (unchecked-inc-int i)))))
+              :else nil))
+          (recur (unchecked-inc-int k))))))
+
+  ;; ---- reading: a message and its position
+
+  (field ^byte/1 msg)
+  (field ^int pos)
+  (constructor [this ^byte/1 msg] (set! (.-msg this) msg) (set! (.-pos this) 0))
+
+  (method rd8 ^long [this]
+    (let [b (long (bit-and (long (aget msg pos)) 255))] (set! pos (unchecked-inc-int pos)) b))
+  (method rd32 ^long [this]
+    (let [a (.rd8 this) b (.rd8 this) c (.rd8 this) d (.rd8 this)]
+      (bit-or (bit-shift-left a 24) (bit-or (bit-shift-left b 16) (bit-or (bit-shift-left c 8) d)))))
+  (method rd64 ^long [this]
+    (let [h (.rd32 this) l (.rd32 this)] (bit-or (bit-shift-left h 32) l)))
+  (method rdBytes ^byte/1 [this ^int n]
+    (let [b (java.util.Arrays/copyOfRange msg pos (unchecked-add-int pos n))] (set! pos (unchecked-add-int pos n)) b))
+
+;; a value in the wire form
+  (method get [this]
+    (let [op (unchecked-int (.rd8 this))]
+      (switch op
+        105 (Long/valueOf (.rd64 this))
+        100 (Double/valueOf (Double/longBitsToDouble (.rd64 this)))
+        108 (Integer/valueOf (unchecked-int (.rd32 this)))
+        106 (I64. (.rd64 this))
+        110 (NInt. (.rd64 this))
+        114 (.get nodes (unchecked-int (.rd32 this)))
+        112 (CApi/predef (unchecked-int (.rd32 this)))
+        98 (let [tag (unchecked-int (.rd32 this)) n (unchecked-int (.rd32 this)) f (new Object/1 n) b (Block. tag f)]
+             (CApi/add b)
+             (loop [^int i 0] (when (< i n) (aset f i (.get this)) (recur (unchecked-inc-int i))))
+             b)
+        115 (let [b (.rdBytes this (unchecked-int (.rd32 this)))] (CApi/add b) b)
+        102 (let [n (unchecked-int (.rd32 this)) d (new double/1 n)]
+              (loop [^int i 0] (when (< i n) (aset d i (Double/longBitsToDouble (.rd64 this))) (recur (unchecked-inc-int i))))
+              (CApi/add d)
+              d)
+        66 (let [kind (unchecked-int (.rd32 this)) layout (unchecked-int (.rd32 this)) nd (unchecked-int (.rd32 this)) dims (new int/1 nd)]
+             (loop [^int i 0] (when (< i nd) (aset dims i (unchecked-int (.rd32 this))) (recur (unchecked-inc-int i))))
+             (let [n (unchecked-int (.rd32 this)) data (new Object/1 n) c (BigArray/custom (BigArray. kind layout dims data 0))]
+               (CApi/add c)
+               (loop [^int i 0] (when (< i n) (aset data i (.get this)) (recur (unchecked-inc-int i))))
+               c))
+        99 (let [id (Rt/utf8 (.rdBytes this (unchecked-int (.rd32 this)))) a (.rd64 this) k (Long/valueOf a) c (.get cblocks k)]
+             (if (some? c)
+               c
+               (let [nc (Custom. id (CBlock. a))] (.put cblocks k nc) nc)))
+        (throw (Rt/internal (java-str "the C API: a value of the wire form " op))))))
+
+  ;; fail.h's predefined exception i
+  (method ^:static predef [^int i]
+    (switch i
+      0 Rt/Out_of_memory 1 Rt/Sys_error 2 Rt/Failure 3 Rt/Invalid_argument 4 Rt/End_of_file 5 Rt/Division_by_zero
+      6 Rt/Not_found 7 Rt/Match_failure 8 Rt/Stack_overflow 9 Rt/Sys_blocked_io 10 Rt/Assert_failure
+      Rt/Undefined_recursive_module))
+
+  ;; the contents of the nodes the sender knew, into them
+  (method getUpdates ^void [this]
+    (let [n (unchecked-int (.rd32 this))]
+      (loop [^int k 0]
+        (when (< k n)
+          (let [v (.get nodes k)]
+            (cond
+              (instance? Block v)
+              (let [f (.-f (cast Block v))]
+                (loop [^int i 0] (when (< i (alength f)) (aset f i (.get this)) (recur (unchecked-inc-int i)))))
+              (instance? byte/1 v)
+              (let [b (cast byte/1 v)]
+                (System/arraycopy msg pos b 0 (alength b))
+                (set! pos (unchecked-add-int pos (alength b))))
+              (instance? double/1 v)
+              (let [d (cast double/1 v)]
+                (loop [^int i 0] (when (< i (alength d)) (aset d i (Double/longBitsToDouble (.rd64 this))) (recur (unchecked-inc-int i)))))
+              (and (instance? Custom v) (instance? BigArray (.-v (cast Custom v))))
+              (let [ba (cast BigArray (.-v (cast Custom v))) m (.size ba)]
+                (loop [^int i 0] (when (< i m) (aset (.-data ba) (unchecked-add-int (.-off ba) i) (.get this)) (recur (unchecked-inc-int i)))))
+              :else nil))
+          (recur (unchecked-inc-int k))))))
+
+  ;; ---- the channel
+
+  ;; message o (its op, the updates and the payload) sent, its reply read: the reader after the reply's op (op) and updates (none
+  ;; with 'N')
+  (field ^int op)
+  (method ^:static exchange ^CApi [^ByteArrayOutputStream o]
+    (let [b (.toByteArray o)]
+      (.write chan b 0 (alength b))
+      (let [n (.readInt chan) r (new byte/1 n)]
+        (.readFully chan r)
+        (let [rd (CApi. r)]
+          (set! (.-op rd) (unchecked-int (.rd8 rd)))
+          (when (not (== (.-op rd) 78)) (.getUpdates rd))
+          rd))))
+
+  (method ^:static open ^boolean []
+    (when (and (nil? chan) (not failed))
+      (try (set! chan (RandomAccessFile. capiPath "rw"))
+           (catch IOException e (set! failed true))))
+    (some? chan))
+
+  ;; ---- the call
+
+  ;; external name applied to args: the stub's result; with no stub of that name, the runtime's missing external (call) or
+  ;; unsupported primitive (prim: a name not caml_..., the translator's message before OC215)
+  (method ^:public ^:static call [^String name ^Object/1 args] (CApi/call3 name "" args false))
+  (method ^:public ^:static prim [^String name ^Object/1 args] (CApi/call3 name "" args true))
+  ;; OC199 (a): an external with no bytecode name, its native function called with the representations reprs (env/prim-native's
+  ;; letters, the arguments' then the result's)
+  (method ^:public ^:static nativeCall [^String name ^String reprs ^Object/1 args] (CApi/call3 name reprs args false))
+  (method ^:static none ^RuntimeException [^String name ^boolean prim] (if prim (Rt/unsupported name) (Rt/missing name)))
+
+  (method ^:static call3 [^String name ^String reprs ^Object/1 args ^boolean prim]
+    (when (not (CApi/open)) (throw (CApi/none name prim)))
+    (when (== depth 0)
+      (set! nodes (ArrayList.))
+      (set! ids (IdentityHashMap.)))
+    (set! depth (unchecked-inc-int depth))
+    (try
+      (let [o (ByteArrayOutputStream.)]
+        (CApi/u8 o 67)
+        (CApi/putUpdates o)
+        (CApi/bytes o (cast byte/1 (Rt/ofUtf8 name)))
+        (CApi/bytes o (cast byte/1 (Rt/ofUtf8 reprs)))
+        (CApi/u32 o (alength args))
+        (loop [^int i 0] (when (< i (alength args)) (CApi/put o (aget args i)) (recur (unchecked-inc-int i))))
+        (CApi/serve (CApi/exchange o) name prim))
+      (finally
+        (set! depth (unchecked-dec-int depth))
+        (when (== depth 0)
+          (set! nodes nil)
+          (set! ids nil)))))
+
+  ;; the main's replies until the call's end: callbacks and named values answered, the end returned or raised
+  (method ^:static serve [^CApi rd ^String name ^boolean prim]
+    (switch (.-op rd)
+      82 (.get rd)
+      69 (throw (Exn. (.get rd)))
+      88 (throw (Exit. (unchecked-int (.rd32 rd))))
+      78 (throw (CApi/none name prim))
+      70 (throw (Fatal. (Rt/utf8 (.rdBytes rd (unchecked-int (.rd32 rd)))) 125))
+      84 (let [t pending] (set! pending nil) (throw (if (some? t) t (Rt/internal "the C API: an unwound call"))))
+      75 (let [f (.get rd) n (unchecked-int (.rd32 rd)) a (new Object/1 n)]
+           (loop [^int i 0] (when (< i n) (aset a i (.get rd)) (recur (unchecked-inc-int i))))
+           (CApi/serve (CApi/apply f a) name prim))
+      81 (let [v (.get Rt/named (Rt/utf8 (.rdBytes rd (unchecked-int (.rd32 rd)))))]
+           (CApi/serve (if (nil? v) (CApi/answer 78 nil) (CApi/answer 82 v)) name prim))
+      (throw (Rt/internal (java-str "the C API: a reply " (.-op rd))))))
+
+  ;; a callback: f applied to a, the answer its result ('R'), the OCaml exception it raised ('E') or, for another throwable, kept for
+  ;; the call's end ('T')
+  (method ^:static apply ^CApi [f ^Object/1 a]
+    (let [^:mutable ^int k 82 ^:mutable r nil]
+      (try (set! r (Rt/ap f a))
+           (catch Exn e (set! k 69) (set! r (.-v e)))
+           (catch Throwable t (set! pending t) (set! k 84)))
+      (CApi/answer k r)))
+
+  ;; the answer 'A': K and its value (R and E carry one)
+  (method ^:static answer ^CApi [^int k v]
+    (let [o (ByteArrayOutputStream.)]
+      (CApi/u8 o 65)
+      (CApi/putUpdates o)
+      (CApi/u8 o k)
+      (when (or (== k 82) (== k 69)) (CApi/put o v))
+      (CApi/exchange o))))

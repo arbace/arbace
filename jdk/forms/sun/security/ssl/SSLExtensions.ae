@@ -1,0 +1,227 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLExtensions.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.text MessageFormat)
+        '(java.util LinkedHashMap Locale Map Map$Entry)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final SSLExtensions
+  (field ^:private ^:final ^SSLHandshake$HandshakeMessage handshakeMessage)
+
+  (field ^:private ^:final ^{:tag (Map SSLExtension byte/1)} extMap (LinkedHashMap.))
+
+  (field ^:private ^int encodedLength)
+
+  (field ^:private ^:final ^{:tag (Map Integer byte/1)} logMap
+    (when (SSLLogger/isOn) ^Map (LinkedHashMap.)))
+
+  (constructor [this ^SSLHandshake$HandshakeMessage handshakeMessage]
+    (set! (.-handshakeMessage this) handshakeMessage)
+    (set! (.-encodedLength this) 2))
+
+  (constructor :throws [IOException] [this ^SSLHandshake$HandshakeMessage hm ^ByteBuffer m
+                                      ^SSLExtension/1 extensions]
+    (set! (.-handshakeMessage this) hm)
+    (when (< (.remaining m) 2)
+      (throw (.fatal (.-conContext (.-handshakeContext hm))
+                     Alert/DECODE_ERROR
+                     "Incorrect extensions: no length field")))
+    (let [^:mutable len (Record/getInt16 m)]
+      (when (> len (.remaining m))
+        (throw (.fatal (.-conContext (.-handshakeContext hm))
+                       Alert/DECODE_ERROR
+                       "Insufficient extensions data")))
+      (set! encodedLength (unchecked-add-int len 2))
+      (while (> len 0)
+        (let [extId (Record/getInt16 m)
+              extLen (Record/getInt16 m)]
+          (when (> extLen (.remaining m))
+            (throw (.fatal (.-conContext (.-handshakeContext hm))
+                           Alert/DECODE_ERROR
+                           (java-str "Error parsing extension (" extId "): no sufficient data"))))
+          (let [^:mutable isSupported true
+                handshakeType (.handshakeType hm)]
+            (when (and (SSLExtension/isConsumable extId)
+                       (nil? (SSLExtension/valueOf handshakeType extId)))
+              (cond
+                (and (== extId (.-id SSLExtension/CH_SUPPORTED_GROUPS))
+                     (identical? handshakeType SSLHandshake/SERVER_HELLO))
+                  (do
+                    (set! isSupported false)
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/warning
+                        "Received buggy supported_groups extension in the ServerHello handshake message")))
+                (identical? handshakeType SSLHandshake/SERVER_HELLO)
+                  (throw (.fatal (.-conContext (.-handshakeContext hm))
+                                 Alert/UNSUPPORTED_EXTENSION
+                                 (java-str "extension ("
+                                           extId
+                                           ") should not be presented in "
+                                           (.-name handshakeType))))
+                :else (set! isSupported false)))
+            (when isSupported
+              (set! isSupported false)
+              (for-each [^SSLExtension extension extensions]
+                (when-not (or (not (== (.-id extension) extId)) (nil? (.-onLoadConsumer extension)))
+                  (when-not (identical? (.-handshakeType extension) handshakeType)
+                    (throw (.fatal (.-conContext (.-handshakeContext hm))
+                                   Alert/UNSUPPORTED_EXTENSION
+                                   (java-str "extension ("
+                                             extId
+                                             ") should not be presented in "
+                                             (.-name handshakeType)))))
+                  (let [extData (new byte/1 extLen)]
+                    (.get m extData)
+                    (.put extMap extension extData)
+                    (when (some? logMap) (.put logMap extId extData))
+                    (set! isSupported true)
+                    (break)))))
+            (when-not isSupported
+              (if (some? logMap)
+                  (let [extData (new byte/1 extLen)]
+                    (.get m extData)
+                    (.put logMap extId extData)
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "Ignore unknown or unsupported extension"
+                                      (SSLExtensions/toString extId extData))))
+                  (let [pos (unchecked-add-int (.position m) extLen)] (.position m pos))))
+            (set! len (unchecked-subtract-int len (unchecked-add-int extLen 4))))))))
+
+  (method get ^byte/1 [this ^SSLExtension ext]
+    (cast byte/1 (.get extMap ext)))
+
+  (method consumeOnLoad :throws [IOException] ^void [this ^HandshakeContext context
+                                                     ^SSLExtension/1 extensions]
+    (for-each [^SSLExtension extension extensions]
+      (cond
+        (and (some? (.-negotiatedProtocol context))
+             (not (.isAvailable extension (.-negotiatedProtocol context))))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine (java-str "Ignore unsupported extension: " (.-name extension))))
+        (not (.containsKey extMap extension))
+          (cond
+            (some? (.-onLoadAbsence extension)) (.absentOnLoad extension context handshakeMessage)
+            (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine (java-str "Ignore unavailable extension: " (.-name extension))))
+        (nil? (.-onLoadConsumer extension))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/warning (java-str "Ignore unsupported extension: " (.-name extension))))
+        :else
+          (let [m (ByteBuffer/wrap (cast byte/1 (.get extMap extension)))]
+            (.consumeOnLoad extension context handshakeMessage m)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine (java-str "Consumed extension: " (.-name extension))))))))
+
+  (method consumeOnTrade :throws [IOException] ^void [this ^HandshakeContext context
+                                                      ^SSLExtension/1 extensions]
+    (for-each [^SSLExtension extension extensions]
+      (cond
+        (not (.containsKey extMap extension))
+          (cond
+            (some? (.-onTradeAbsence extension)) (.absentOnTrade extension context handshakeMessage)
+            (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine (java-str "Ignore unavailable extension: " (.-name extension))))
+        (nil? (.-onTradeConsumer extension))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/warning
+              (java-str "Ignore impact of unsupported extension: " (.-name extension))))
+        :else
+          (do
+            (.consumeOnTrade extension context handshakeMessage)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine (java-str "Populated with extension: " (.-name extension))))))))
+
+  (method produce :throws [IOException] ^void [this ^HandshakeContext context
+                                               ^SSLExtension/1 extensions]
+    (for-each [^SSLExtension extension extensions]
+      (cond
+        (.containsKey extMap extension)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine (java-str "Ignore, duplicated extension: " (.-name extension))))
+        (nil? (.-networkProducer extension))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/warning
+              (java-str "Ignore, no extension producer defined: " (.-name extension))))
+        :else
+          (let [encoded (.produce extension context handshakeMessage)]
+            (cond
+              (some? encoded)
+                (do
+                  (.put extMap extension encoded)
+                  (set! encodedLength
+                        (unchecked-add-int encodedLength (unchecked-add-int (alength encoded) 4))))
+              (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine
+                  (java-str "Ignore, context unavailable extension: " (.-name extension))))))))
+
+  (method reproduce :throws [IOException] ^void [this ^HandshakeContext context
+                                                 ^SSLExtension/1 extensions]
+    (for-each [^SSLExtension extension extensions]
+      (if (nil? (.-networkProducer extension))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/warning
+              (java-str "Ignore, no extension producer defined: " (.-name extension))))
+          (let [encoded (.produce extension context handshakeMessage)]
+            (cond
+              (some? encoded)
+                (do
+                  (if (.containsKey extMap extension)
+                      (let [old (cast byte/1 (.replace extMap extension encoded))]
+                        (when (some? old)
+                          (set! encodedLength
+                                (unchecked-subtract-int
+                                  encodedLength
+                                  (unchecked-add-int (alength old) 4)))))
+                      (.put extMap extension encoded))
+                  (set! encodedLength
+                        (unchecked-add-int encodedLength (unchecked-add-int (alength encoded) 4))))
+              (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine
+                  (java-str "Ignore, context unavailable extension: " (.-name extension))))))))
+
+  (method length ^int [this] (if (.isEmpty extMap) 0 encodedLength))
+
+  (method send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+    (let [extsLen (.length this)]
+      (when-not (== extsLen 0)
+        (.putInt16 hos (unchecked-subtract-int extsLen 2))
+        (for-each [^SSLExtension ext (SSLExtension/values)]
+          (let [extData (cast byte/1 (.get extMap ext))]
+            (when (some? extData) (.putInt16 hos (.-id ext)) (.putBytes16 hos extData)))))))
+
+  (method ^:public toString ^String [this]
+    (if (and (.isEmpty extMap) (or (nil? logMap) (.isEmpty logMap)))
+        "<no extension>"
+        (let [builder (StringBuilder. 512)]
+          (if (and (some? logMap) (not (.isEmpty logMap)))
+              (for-each [^{:tag (Map$Entry Integer byte/1)} en (.entrySet logMap)]
+                (let [ext (SSLExtension/valueOf (.handshakeType handshakeMessage)
+                                                (.intValue (cast Integer (.getKey en))))]
+                  (when-not (== (.length builder) 0) (.append builder ",\n"))
+                  (if (some? ext)
+                      (.append builder
+                               (.toString ext
+                                          (.-handshakeContext handshakeMessage)
+                                          (ByteBuffer/wrap (cast byte/1 (.getValue en)))))
+                      (.append builder
+                               (SSLExtensions/toString
+                                 (.intValue (cast Integer (.getKey en)))
+                                 (cast byte/1 (.getValue en)))))))
+              (for-each [^{:tag (Map$Entry SSLExtension byte/1)} en (.entrySet extMap)]
+                (when-not (== (.length builder) 0) (.append builder ",\n"))
+                (.append builder
+                         (.toString (cast SSLExtension (.getKey en))
+                                    (.-handshakeContext handshakeMessage)
+                                    (ByteBuffer/wrap (cast byte/1 (.getValue en)))))))
+          (.toString builder))))
+
+  (method ^:private ^:static toString ^String [^int extId ^byte/1 extData]
+    (let [extName (SSLExtension/nameOf extId)
+          messageFormat (MessageFormat. "\"{0} ({1})\": '{'\n{2}\n'}'" Locale/ENGLISH)
+          hexEncoder (HexDumpEncoder.)
+          encoded (.encodeBuffer hexEncoder extData)
+          messageFields (new Object/1 [extName extId (Utilities/indent encoded)])]
+      (.format messageFormat messageFields))))

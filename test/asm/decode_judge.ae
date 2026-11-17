@@ -1,0 +1,50 @@
+(ns asm.decode-judge
+  "bin/repr-asm decode-check's judgment (doc/asm/AMD64.md §9, AX4's third slice): a run's rows (WORK/{dis,rt,obj}.tsv: NAME
+  ROW, ROW {:stated :met :by}) against the record test/asm/decode-results-amd64.edn ([ID ROW], ID dis/NAME, rt/NAME or
+  obj/NAME): every file of the run recorded and every recorded file run, no file meeting fewer than recorded, every unmet
+  check in a class of test/asm/divergences-decode.edn and none of a failing class; with RECORD the rows are rewritten from the
+  run (refused when it holds a failure)."
+  (:require [arbace.string :as str]))
+
+(def header
+  (str ";; repr/asm's decode check (bin/repr-asm decode-check; doc/asm/AMD64.md §9, AX4's third slice): the decoder judged with no\n"
+       ";; llvm-mc: dis/NAME, MC/Disassembler/X86's tests, their CHECK lines held to the decoded and printed output as FileCheck holds\n"
+       ";; them; rt/NAME, the encodings encode-check meets in MC/X86's file decoded back to the matcher's instruction; obj/NAME, musl\n"
+       ";; 1.2.6's objects as Arbace writes them, their code decoded back to the file's instructions. :stated, :met, the rest by class\n"
+       ";; (:by, test/asm/divergences-decode.edn). Written by `bin/repr-asm decode-check --record`. Read with the Clojure reader.\n"))
+
+(def failing #{:mismatch :crash :unpaired :extra :missing :assemble-error})
+
+(defn main [results work classes-path record]
+  (let [run (vec (for [k ["dis" "rt" "obj"]
+                       :let [f (java.io.File. (str work "/" k ".tsv"))]
+                       :when (.exists f)
+                       l (str/split-lines (slurp f)) :when (seq l)
+                       :let [[n r] (str/split l #"\t" 2)]]
+                   [(str k "/" n) (read-string r)]))
+        kinds (set (map #(first (str/split (first %) #"/")) run))
+        old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
+        oldm (into {} old)
+        classes (set (map :id (read-string (slurp classes-path))))
+        problems (atom [])]
+    (doseq [k (sort kinds)]
+      (let [rs (filter #(.startsWith ^String (first %) (str k "/")) run)]
+        (println (str "repr-asm decode-check: " k ": " (reduce + (map (comp :met second) rs)) " of "
+                      (reduce + (map (comp :stated second) rs)) " met in " (count rs) " files; the rest "
+                      (pr-str (into (sorted-map) (apply merge-with + {} (map (comp :by second) rs))))))))
+    (doseq [[i r] run [c n] (:by r)]
+      (cond (failing c) (swap! problems conj (str "failing: " i " " n " " (name c)))
+            (not (classes c)) (swap! problems conj (str "unclassed: " i " " n " " (name c)))))
+    (if (and (seq record) (empty? @problems))
+      (let [keep (remove (fn [[i]] (kinds (first (str/split i #"/")))) old)
+            rows (sort-by first (concat keep run))]
+        (spit results (str header "[\n" (apply str (map (fn [[i r]] (str (pr-str [i (into (sorted-map) (update r :by #(into (sorted-map) %)))]) "\n")) rows)) "]\n"))
+        (println (str "repr-asm: recorded " (count run) " rows into " results)))
+      (do (doseq [[i r] run :let [o (oldm i)]]
+            (cond (nil? o) (swap! problems conj (str "not recorded: " i))
+                  (< (long (:met r)) (long (:met o))) (swap! problems conj (str i ": " (:met r) " met, recorded " (:met o)))))
+          (doseq [[i] old :when (and (kinds (first (str/split i #"/"))) (not (some #(= i (first %)) run)))]
+            (swap! problems conj (str "recorded, not run: " i)))))
+    (doseq [p @problems] (println (str "FAIL: " p)))
+    (when (empty? @problems) (println "repr-asm decode-check: ok"))
+    (when (seq @problems) (System/exit 1))))

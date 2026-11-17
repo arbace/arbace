@@ -1,0 +1,806 @@
+(in-ns 'go.arbace.a64i) (go/file "exec.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [bits "math/bits"]])
+
+
+^{:go/breaks [[4 12]] :go/end 13} (go/func mask ^uint64 [^bool sf]
+  (when sf
+    (return (bit-not (conv uint64 0))))
+
+  0xffffffff)
+
+
+
+^{:go/end 31} (go/func addWithCarry "addWithCarry is the Arm ARM's AddWithCarry: the result and N, Z, C, V.\n" [^uint64 x ^uint64 y ^bool carry ^bool sf] :results [uint64 bool bool bool bool]
+  (let [^uint64 ci (zero uint64)]
+    (when carry
+      (set! ci 1))
+
+    (when sf
+      (let [(values r c) (bits/Add64 x y ci)
+          ^{:line 23} v (== (>> (bit-and (bit-xor x r) (bit-xor y r)) 63) 1)]
+        (return r (== (>> r 63) 1) (== r 0) (== c 1) v)))
+
+    (set! (values x y) (values (bit-and x 0xffffffff) (bit-and y 0xffffffff)))
+    (let [s (+ x y ci)
+        ^{:line 28} r (bit-and s 0xffffffff)
+        ^{:line 29} v (== (bit-and (>> (bit-and (bit-xor x r) (bit-xor y r)) 31) 1) 1)]
+      (return r (== (>> r 31) 1) (== r 0) (== (>> s 32) 1) v))))
+
+
+^{:go/end 55} (go/func shiftReg ^uint64 [^uint64 v ^uint8 typ ^uint8 amt ^bool sf]
+  (let [sz (conv uint 32)]
+    (when sf
+      (set! sz 64))
+
+    (set! v bit-and (mask sf))
+    (let [a (% (conv uint amt) sz)]
+      (switch typ
+        (case [ShLSL]
+          (return (bit-and (<< v a) (mask sf))))
+        (case [ShLSR]
+          (return (>> v a)))
+        (case [ShASR]
+          (when sf
+            (return (conv uint64 (>> (conv int64 v) a))))
+
+          (return (conv uint64 (conv uint32 (>> (conv int32 (conv uint32 v)) a))))))
+
+      (when (== a 0)
+        (return v))
+
+      (bit-and (bit-or (>> v a) (<< v (- sz a))) (mask sf)))))
+
+
+^{:go/end 73} (go/func extendReg ^uint64 [^uint64 v ^uint8 ext ^uint8 shift ^bool sf]
+  (switch ext
+    (case [ExtUXTB]
+      (set! v bit-and 0xff))
+    (case [ExtUXTH]
+      (set! v bit-and 0xffff))
+    (case [ExtUXTW]
+      (set! v bit-and 0xffffffff))
+    (case [ExtSXTB]
+      (set! v (conv uint64 (conv int64 (conv int8 v)))))
+    (case [ExtSXTH]
+      (set! v (conv uint64 (conv int64 (conv int16 v)))))
+    (case [ExtSXTW]
+      (set! v (conv uint64 (conv int64 (conv int32 v))))))
+
+  (bit-and (<< v shift) (mask sf)))
+
+
+^{:go/end 84} (go/func ror ^uint64 [^uint64 v ^uint r ^uint size]
+  (when (== r 0)
+    (return v))
+
+  (let [m (- (<< (conv uint64 1) size) 1)]
+    (when (== size 64)
+      (set! m (bit-not (conv uint64 0))))
+
+    (bit-and (bit-or (>> v r) (<< v (- size r))) m)))
+
+
+^{:go/end 91} (go/func ones ^uint64 [^uint n]
+  (when (>= n 64)
+    (return (bit-not (conv uint64 0))))
+
+  (- (<< (conv uint64 1) n) 1))
+
+
+
+^{:go/end 97} (go/func bfmMasks "the bitfield masks (DecodeBitMasks with immediate false, the element the register)\n" [^uint immr ^uint imms ^uint size] :results [uint64 uint64]
+  (let [d (bit-and (- imms immr) (- size 1))]
+    (return (ror (ones (+ imms 1)) immr size) (ones (+ d 1)))))
+
+
+^{:go/end 99} (go/method setFlags [^{:tag (* CPU)} c ^bool n ^bool z ^bool cy ^bool v] (set! (values (.-N c) (.-Z c) (.-C c) (.-V c)) (values n z cy v)))
+
+^{:go/end 107} (go/method logicFlags [^{:tag (* CPU)} c ^uint64 r ^bool sf]
+  (let [top (conv uint 31)]
+    (when sf
+      (set! top 63))
+
+    (.setFlags c (== (bit-and (>> r top) 1) 1) (== (bit-and r (mask sf)) 0) false false)))
+
+
+
+^{:go/end 126} (go/method address "address computes a load's or store's address and its base's writeback.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in] :results [^uint64 addr ^uint64 wb ^bool ok]
+  (let [base (.reg c (.-Rn in) true)]
+    (when (and (== (.-Rn in) 31) (!= (bit-and base 15) 0))
+      (set! (.-FaultAddr c) base)
+      (.raise c SIGBUS ":sp-alignment")
+      (return 0 0 false))
+
+    (switch (.-Mode in)
+      (case [ModeOff]
+        (return (+ base (conv uint64 (.-Imm in))) 0 true))
+      (case [ModePre]
+        (return (+ base (conv uint64 (.-Imm in))) (+ base (conv uint64 (.-Imm in))) true))
+      (case [ModePost]
+        (return base (+ base (conv uint64 (.-Imm in))) true)))
+
+    (return (+ base (extendReg (.reg c (.-Rm in) false) (.-Ext in) (.-Amount in) true)) 0 true)))
+
+
+^{:go/end 138} (go/method loadValue ^uint64 [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint64 v]
+  (when (not (.-Signed in))
+    (return v))
+
+  (let [sh (- 64 ^int (<< 8 (.-Size in)))
+      ^{:line 133} s (conv uint64 (>> (conv int64 (<< v sh)) sh))]
+    (when (not (.-Wide in))
+      (set! s bit-and 0xffffffff))
+
+    ^{:line 137} s))
+
+
+^{:go/end 584} (go/method exec [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [pc (.-PC c)]
+    (set! (.-PC c) + 4)
+    (let [sf (.-Sf in)]
+      (switch (.-Op in)
+        (case [OpADDI OpSUBI]
+          (let [(values x y ci) (values (.reg c (.-Rn in) true) (conv uint64 (.-Imm in)) false)]
+            (when (== (.-Op in) OpSUBI)
+              (set! (values y ci) (values (bit-not y) true)))
+
+            (let [(values r n z cy v) (addWithCarry x y ci sf)]
+              (when (.-S in)
+                (.setFlags c n z cy v))
+
+              (.set c (.-Rd in) r sf (not (.-S in))))))
+        (case [OpADDR OpSUBR OpADDX OpSUBX]
+          (let [(values ^uint64 x ^uint64 y) (zero uint64)]
+            (if (or (== (.-Op in) OpADDR) (== (.-Op in) OpSUBR))
+              (set! (values x y) (values (.reg c (.-Rn in) false) (shiftReg (.reg c (.-Rm in) false) (.-Shift in) (.-Amount in) sf)))
+
+              (set! (values x y) (values (.reg c (.-Rn in) true) (extendReg (.reg c (.-Rm in) false) (.-Ext in) (.-Amount in) sf))))
+
+            (let [ci false]
+              (when (or (== (.-Op in) OpSUBR) (== (.-Op in) OpSUBX))
+                (set! (values y ci) (values (bit-not y) true)))
+
+              (let [(values r n z cy v) (addWithCarry x y ci sf)]
+                (when (.-S in)
+                  (.setFlags c n z cy v))
+
+                (.set c (.-Rd in) r sf (and (not (.-S in)) ^:go/paren (or (== (.-Op in) OpADDX) (== (.-Op in) OpSUBX))))))))
+        (case [OpADC OpSBC]
+          (let [y (.reg c (.-Rm in) false)]
+            (when (== (.-Op in) OpSBC)
+              (set! y (bit-not y)))
+
+            (let [(values r n z cy v) (addWithCarry (.reg c (.-Rn in) false) y (.-C c) sf)]
+              (when (.-S in)
+                (.setFlags c n z cy v))
+
+              (.set c (.-Rd in) r sf false))))
+        (case [OpANDI OpORRI OpEORI OpAND OpORR OpEOR]
+          (let [x (.reg c (.-Rn in) false)
+              ^{:line 183 :tag uint64} y (zero uint64)]
+            (if (<= (.-Op in) OpEORI)
+              (set! y (conv uint64 (.-Imm in)))
+              (do
+                (set! y (shiftReg (.reg c (.-Rm in) false) (.-Shift in) (.-Amount in) sf))
+                (when (.-N in)
+                  (set! y (bit-not y)))))
+
+
+            (let [^uint64 r (zero uint64)]
+              (switch (.-Op in)
+                (case [OpANDI OpAND]
+                  (set! r (bit-and x y)))
+                (case [OpORRI OpORR]
+                  (set! r (bit-or x y)))
+                (default
+                  (set! r (bit-xor x y))))
+
+              (set! r bit-and (mask sf))
+              (when (.-S in)
+                (.logicFlags c r sf))
+
+              (.set c (.-Rd in) r sf (and (not (.-S in)) (<= (.-Op in) OpEORI))))))
+        (case [OpMOVZ]
+          (.set c (.-Rd in) (<< (conv uint64 (.-Imm in)) (.-Amount in)) sf false))
+        (case [OpMOVN]
+          (.set c (.-Rd in) (bit-not (<< (conv uint64 (.-Imm in)) (.-Amount in))) sf false))
+        (case [OpMOVK]
+          (.set c (.-Rd in) (bit-or (bit-and-not (.reg c (.-Rd in) false) ^uint64 (<< 0xffff (.-Amount in))) (<< (conv uint64 (.-Imm in)) (.-Amount in))) sf false))
+        (case [OpSBFM OpBFM OpUBFM]
+          (let [size (conv uint 32)]
+            (when sf
+              (set! size 64))
+
+            (let [(values r s) (values (conv uint (.-Imm in)) (conv uint (.-Imm2 in)))
+                (values wmask tmask) (bfmMasks r s size)
+                ^{:line 219} src (bit-and (.reg c (.-Rn in) false) (mask sf))
+                ^{:line 220} bot (bit-and (ror src r size) wmask)
+                ^{:line 221 :tag uint64} res (zero uint64)]
+              (switch (.-Op in)
+                (case [OpSBFM]
+                  (let [^uint64 top (zero uint64)]
+                    (when (== (bit-and (>> src s) 1) 1)
+                      (set! top (mask sf)))
+
+                    (set! res (bit-or (bit-and-not top tmask) (bit-and bot tmask)))))
+                (case [OpBFM]
+                  (let [dst (.reg c (.-Rd in) false)]
+                    (set! bot (bit-or (bit-and-not dst wmask) (bit-and (ror src r size) wmask)))
+                    (set! res (bit-or (bit-and-not dst tmask) (bit-and bot tmask)))))
+                (default
+                  (set! res (bit-and bot tmask))))
+
+              (.set c (.-Rd in) res sf false))))
+        (case [OpEXTR]
+          (let [size (conv uint 32)]
+            (when sf
+              (set! size 64))
+
+            (let [(values hi lo l) (values (bit-and (.reg c (.-Rn in) false) (mask sf)) (bit-and (.reg c (.-Rm in) false) (mask sf)) (conv uint (.-Imm in)))
+                ^{:line 243} r lo]
+              (when (!= l 0)
+                (set! r (bit-and (bit-or (>> lo l) (<< hi (- size l))) (mask sf))))
+
+              (.set c (.-Rd in) r sf false))))
+        (case [OpADR OpADRP]
+          (.set c (.-Rd in) (.-Target in) true false))
+        (case [OpB]
+          (set! (.-PC c) (.-Target in)))
+        (case [OpBL]
+          (aset (.-X c) 30 (+ pc 4))
+          (set! (.-PC c) (.-Target in)))
+        (case [OpBCOND]
+          (when (.cond c (.-Cond in))
+            (set! (.-PC c) (.-Target in))))
+
+        (case [OpCBZ OpCBNZ]
+          (let [z (== (bit-and (.reg c (.-Rd in) false) (mask sf)) 0)]
+            (when (== z (== (.-Op in) OpCBZ))
+              (set! (.-PC c) (.-Target in)))))
+
+        (case [OpTBZ OpTBNZ]
+          (let [b (== (bit-and (>> (.reg c (.-Rd in) false) (conv uint (.-Imm in))) 1) 1)]
+            (when (== b (== (.-Op in) OpTBNZ))
+              (set! (.-PC c) (.-Target in)))))
+
+        (case [OpBR OpRET]
+          (set! (.-PC c) (.reg c (.-Rn in) false)))
+        (case [OpBLR]
+          (let [t (.reg c (.-Rn in) false)]
+            (aset (.-X c) 30 (+ pc 4))
+            (set! (.-PC c) t)))
+        (case [OpCSEL OpCSINC OpCSINV OpCSNEG]
+          (let [^uint64 r (zero uint64)]
+            (if (.cond c (.-Cond in))
+              (set! r (.reg c (.-Rn in) false))
+              (do
+                (set! r (.reg c (.-Rm in) false))
+                (switch (.-Op in)
+                  (case [OpCSINC]
+                    (inc! r))
+                  (case [OpCSINV]
+                    (set! r (bit-not r)))
+                  (case [OpCSNEG]
+                    (set! r (- r))))))
+
+
+            (.set c (.-Rd in) r sf false)))
+        (case [OpCCMP]
+          (if (.cond c (.-Cond in))
+            (let [y (conv uint64 (.-Imm in))]
+              (when (!= (.-Rm in) 255)
+                (set! y (.reg c (.-Rm in) false)))
+
+              (let [ci false]
+                (when (not (.-N in))
+                  (set! (values y ci) (values (bit-not y) true)))
+
+                (let [(values _ n z cy v) (addWithCarry (.reg c (.-Rn in) false) y ci sf)]
+                  (.setFlags c n z cy v))))
+
+            (.SetNZCV c (<< (conv uint64 (.-Imm2 in)) 28))))
+
+        (case [OpRBIT OpREV16 OpREV32 OpREV OpCLZ OpCLS]
+          (let [x (bit-and (.reg c (.-Rn in) false) (mask sf))
+              ^{:line 308 :tag uint64} r (zero uint64)]
+            (switch (.-Op in)
+              (case [OpRBIT]
+                (if sf
+                  (set! r (bits/Reverse64 x))
+
+                  (set! r (conv uint64 (bits/Reverse32 (conv uint32 x))))))
+
+              (case [OpREV16]
+                (set! r (bit-or (<< (bit-and x 0x00ff00ff00ff00ff) 8) (bit-and (>> x 8) 0x00ff00ff00ff00ff))))
+              (case [OpREV32]
+                (set! r (bit-or (conv uint64 (bits/ReverseBytes32 (conv uint32 x))) (<< (conv uint64 (bits/ReverseBytes32 (conv uint32 (>> x 32)))) 32))))
+              (case [OpREV]
+                (if sf
+                  (set! r (bits/ReverseBytes64 x))
+
+                  (set! r (conv uint64 (bits/ReverseBytes32 (conv uint32 x))))))
+
+              (case [OpCLZ]
+                (if sf
+                  (set! r (conv uint64 (bits/LeadingZeros64 x)))
+
+                  (set! r (conv uint64 (bits/LeadingZeros32 (conv uint32 x))))))
+
+              (case [OpCLS]
+                (let [size 32]
+                  (when sf
+                    (set! size 64))
+
+                  (let [t (bit-and (bit-xor (>> x 1) x) (ones (conv uint (- size 1))))]
+                    (set! r (conv uint64 (- size 1 (bits/Len64 t))))))))
+
+            (.set c (.-Rd in) r sf false)))
+        (case [OpUDIV OpSDIV OpLSLV OpLSRV OpASRV OpRORV]
+          (let [(values x y) (values (bit-and (.reg c (.-Rn in) false) (mask sf)) (bit-and (.reg c (.-Rm in) false) (mask sf)))
+              ^{:line 343 :tag uint64} r (zero uint64)]
+            (switch (.-Op in)
+              (case [OpUDIV]
+                (when (!= y 0)
+                  (set! r (/ x y))))
+
+              (case [OpSDIV]
+                (when (!= y 0)
+                  (if sf
+                    (let [(values a b) (values (conv int64 x) (conv int64 y))]
+                      (if (and (== a (<< -1 63)) (== b -1))
+                        (set! r x)
+
+                        (set! r (conv uint64 (/ a b)))))
+
+
+                    (let [(values a b) (values (conv int32 (conv uint32 x)) (conv int32 (conv uint32 y)))]
+                      (if (and (== a (<< -1 31)) (== b -1))
+                        (set! r x)
+
+                        (set! r (conv uint64 (conv uint32 (/ a b)))))))))
+
+
+
+              (default
+                (set! r (shiftReg x (conv uint8 (- (.-Op in) OpLSLV)) (conv uint8 (% y (conv uint64 (aget (lit (map bool int) [true 64] [false 32]) sf)))) sf))))
+
+            (.set c (.-Rd in) r sf false)))
+        (case [OpMADD OpMSUB]
+          (let [p (* (.reg c (.-Rn in) false) (.reg c (.-Rm in) false))
+              ^{:line 373} a (.reg c (.-Ra in) false)]
+            (if (== (.-Op in) OpMADD)
+              (.set c (.-Rd in) (+ a p) sf false)
+
+              (.set c (.-Rd in) (- a p) sf false))))
+
+        (case [OpSMADDL OpSMSUBL OpUMADDL OpUMSUBL]
+          (let [^uint64 p (zero uint64)]
+            (if (or (== (.-Op in) OpSMADDL) (== (.-Op in) OpSMSUBL))
+              (set! p (conv uint64 (* (conv int64 (conv int32 (conv uint32 (.reg c (.-Rn in) false)))) (conv int64 (conv int32 (conv uint32 (.reg c (.-Rm in) false)))))))
+
+              (set! p (* (bit-and (.reg c (.-Rn in) false) 0xffffffff) (bit-and (.reg c (.-Rm in) false) 0xffffffff))))
+
+            (let [a (.reg c (.-Ra in) false)]
+              (if (or (== (.-Op in) OpSMADDL) (== (.-Op in) OpUMADDL))
+                (.set c (.-Rd in) (+ a p) true false)
+
+                (.set c (.-Rd in) (- a p) true false)))))
+
+        (case [OpSMULH OpUMULH]
+          (let [(values x y) (values (.reg c (.-Rn in) false) (.reg c (.-Rm in) false))
+              (values hi _) (bits/Mul64 x y)]
+            (when (== (.-Op in) OpSMULH)
+              (when (< (conv int64 x) 0)
+                (set! hi - y))
+
+              (when (< (conv int64 y) 0)
+                (set! hi - x)))
+
+
+            (.set c (.-Rd in) hi true false)))
+        (case [OpLDR OpSTR OpLDP OpSTP OpLDRLIT]
+          (.ldst c in))
+        (case [OpPRFM]
+          (.address c in))
+        (case [OpLDXR OpLDAR OpLDAPUR]
+          (.exclLoad c in))
+        (case [OpSTXR OpSTLR OpSTLUR]
+          (.exclStore c in))
+        (case [OpLDOP OpSWP OpCAS]
+          (.atomic c in))
+        (case [OpCASP]
+          (.atomicPair c in))
+        (case [OpCRC32]
+          (.set c (.-Rd in) (crc32 (.reg c (.-Rn in) false) (.reg c (.-Rm in) false) (<< (conv uint 8) (.-Size in)) (== (.-Sys in) 1)) false false))
+        (case [OpFLAGM]
+          (.flagM c in))
+        (case [OpSVC]
+          (.svc c))
+        (case [OpHINT OpBARRIER])
+        (case [OpCLREX]
+          (set! (.-exclValid c) false))
+        (case [OpMRS]
+          (let [^uint64 v (zero uint64)]
+            (switch (.-Sys in)
+              (case [SysNZCV]
+                (set! v (.NZCV c)))
+              (case [SysTPIDR]
+                (set! v (.-TPIDR c)))
+              (case [SysFPCR]
+                (set! v (.-FPCR c)))
+              (case [SysFPSR]
+                (set! v (.-FPSR c)))
+              (case [SysTPIDRRO]
+                ;; AR19: Linux leaves it 0 for a user thread
+                (set! v 0))
+              (case [SysCNTFRQ]
+                (set! v CNTFRQ))
+              (case [SysCNTVCT SysCNTVCTSS]
+                (set! v (.Counter c)))
+              (case [SysDCZID]
+                (set! v DCZID))
+              (case [SysCTR]
+                (set! v CTR))
+              (case [SysDIT]
+                (when (.-DIT c)
+                  (set! v (<< 1 24))))
+              (case [SysSSBS]
+                (when (.-SSBS c)
+                  (set! v (<< 1 12))))
+              (default
+                (let [(values id ok) (IDReg (.-Sys in))]
+                  (when (not ok)
+                    (set! (.-PC c) pc)
+                    (.raise c SIGILL (fmt/Sprintf ":unimplemented mrs %#x" (.-Sys in)))
+                    (return))
+
+                  (set! v id))))
+
+            (.set c (.-Rd in) v true false)))
+        (case [OpMSR]
+          (let [v (.reg c (.-Rd in) false)]
+            (when (== (.-Rm in) 255)
+              ;; AR19: MSR (immediate): the bit in the register's place
+              (set! v 0)
+              (when (!= (.-Imm in) 0)
+                (set! v (aget (lit (map uint32 uint64) [SysDIT (<< 1 24)] [SysSSBS (<< 1 12)]) (.-Sys in)))))
+
+            (switch (.-Sys in)
+              (case [SysDIT]
+                (set! (.-DIT c) (!= (bit-and v (<< 1 24)) 0)))
+              (case [SysSSBS]
+                (set! (.-SSBS c) (!= (bit-and v (<< 1 12)) 0)))
+              (case [SysNZCV]
+                (.SetNZCV c v))
+              (case [SysTPIDR]
+                (set! (.-TPIDR c) v))
+              (case [SysFPCR]
+                (set! (.-FPCR c) (bit-and v 0x07ff9f00)))
+              (case [SysFPSR]
+                (set! (.-FPSR c) (bit-and v 0x0800009f))) ; AR19: N, Z, C, V (bits 31-28) are AArch32's, RES0 here (the M2 keeps QC and the cumulative flags)
+              (default
+                (set! (.-PC c) pc)
+                (.raise c SIGILL (fmt/Sprintf ":unimplemented msr %#x" (.-Sys in)))))))
+
+        (case [OpSYS]
+          (.sysOp c in))
+        (case [OpBRK]
+          (set! (.-PC c) pc)
+          (.raise c SIGTRAP ":brk"))
+        (case [OpUDF]
+          (set! (.-PC c) pc)
+          (.raise c SIGILL ":udf"))
+        (default
+          (when (isFPOp (.-Op in))
+            (.execFP c in)
+            (return))
+
+          (set! (.-PC c) pc)
+          (.raise c SIGILL (+ ":unimplemented " (.String (.-Op in))))))
+
+      (when (and (.-Done c) ^:go/paren (or (== (.-Signal c) SIGSEGV) (== (.-Signal c) SIGBUS)) (!= (.-Op in) OpSVC))
+        (set! (.-PC c) pc)))))
+
+
+
+
+^{:go/end 598} (go/method elemLoad "elemLoad reads one element of a load (Size 4: 16 bytes, two words).\n" [^{:tag (* CPU)} c ^uint64 addr ^uint8 size] :results [uint64 uint64 bool]
+  (when (== size 4)
+    (let [(values lo ok) (.load c addr 3)]
+      (when (not ok)
+        (return 0 0 false))
+
+      (let [(values hi ^:assign ok) (.load c (+ addr 8) 3)]
+        (return lo hi ok))))
+
+  (let [(values v ok) (.load c addr size)]
+    (return v 0 ok)))
+
+
+
+^{:go/end 607} (go/method ldWrite "the register a load writes: a general register (sign-extended as the load says), or a SIMD&FP register (the rest zeroed)\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint8 r ^uint64 lo ^uint64 hi]
+  (when (.-Vreg in)
+    (aset (.-Q c) r (lit (array 2 uint64) lo hi))
+    (return))
+
+  (.set c r (.loadValue c in lo) true false))
+
+
+^{:go/end 614} (go/method stValue [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint8 r] :results [uint64 uint64]
+  (when (.-Vreg in)
+    (return (aget (aget (.-Q c) r) 0) (aget (aget (.-Q c) r) 1)))
+
+  (return (.reg c r false) 0))
+
+
+^{:go/end 671} (go/method ldst [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [n (<< (conv uint64 1) (.-Size in))
+      (values ^uint64 addr ^uint64 wb) (zero uint64)]
+    (if (== (.-Op in) OpLDRLIT)
+      (set! addr (.-Target in))
+
+      (let [^bool ok (zero bool)]
+        (when [(set! (values addr wb ok) (.address c in))] (not ok)
+          (return))))
+
+
+    (let [pair (or (== (.-Op in) OpLDP) (== (.-Op in) OpSTP))]
+      (switch (.-Op in)
+        (case [OpLDR OpLDRLIT OpLDP]
+          (let [(values lo hi ok) (.elemLoad c addr (.-Size in))]
+            (when (not ok)
+              (return))
+
+            (let [(values ^uint64 lo2 ^uint64 hi2) (zero uint64)]
+              (when pair
+                (when [(set! (values lo2 hi2 ok) (.elemLoad c (+ addr n) (.-Size in)))] (not ok)
+                  (return)))
+
+
+              (.ldWrite c in (.-Rd in) lo hi)
+              (when pair
+                (.ldWrite c in (.-Ra in) lo2 hi2)))))
+
+        (default
+          (let [total n]
+            (when pair
+              (set! total * 2))
+
+            (when (not (.Probe (.-AS c) addr (conv int total)))
+              (.segvW c (.-FaultAddr (.-AS c)))
+              (return))
+
+            (let [regs (lit (slice uint8) (.-Rd in))]
+              (when pair
+                (set! regs (append regs (.-Ra in))))
+
+              (range [i r regs]
+                (let [(values lo hi) (.stValue c in r)
+                    ^{:line 659} a (+ addr (* (conv uint64 i) n))]
+                  (if (== (.-Size in) 4) (do
+                      (.store c a 3 lo)
+                      (.store c (+ a 8) 3 hi))
+
+                    (.store c a (.-Size in) lo))))))))
+
+
+
+      (when (or (== (.-Mode in) ModePre) (== (.-Mode in) ModePost))
+        (aset (.-X c) (.-Rn in) wb)))))
+
+
+
+(go/method atomAddr "atomAddr is the address of an exclusive, an acquire or release, or an atomic access of total bytes (AR18): Rn|SP plus\nImm (LDAPUR's and STLUR's offset, else 0), SP's alignment checked as for every access with it as the base, and the access\nchecked by aligned: SIGBUS when either fails.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint64 total] :results [uint64 bool]
+  (let [base (.reg c (.-Rn in) true)]
+    (when (and (== (.-Rn in) 31) (!= (bit-and base 15) 0))
+      (set! (.-FaultAddr c) base)
+      (.raise c SIGBUS ":sp-alignment")
+      (return 0 false))
+
+    (let [addr (+ base (conv uint64 (.-Imm in)))]
+      (return addr (.aligned c addr total)))))
+
+
+(go/func crc32 "crc32 is CRC32's and CRC32C's step (FEAT_CRC32, AR18): the pseudocode's BitReverse(Poly32Mod2(BitReverse(acc):Zeros(size)\nEOR BitReverse(val):Zeros(32), poly)) as the division in reflected bit order, val's n bits from the lowest; the polynomial\n0x04C11DB7 (CRC32) or 0x1EDC6F41 (CRC32C), reflected.\n" ^uint64 [^uint64 acc ^uint64 val ^uint n ^bool castagnoli]
+  (let [poly (conv uint64 0xedb88320)]
+    (when castagnoli
+      (set! poly 0x82f63b78))
+
+    (set! acc bit-and 0xffffffff)
+    (for [i (conv uint 0)] (< i n) (inc! i)
+      (let [b (bit-and (bit-xor acc (>> val i)) 1)]
+        (set! acc (>> acc 1))
+        (when (== b 1)
+          (set! acc bit-xor poly))))
+
+    acc))
+
+
+(go/method flagM "flagM executes FEAT_FlagM's and FEAT_FlagM2's flag manipulation (AR18), the Arm ARM's CFINV, XAFLAG, AXFLAG, RMIF, SETF8\nand SETF16: Sys 0-5.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (switch (.-Sys in)
+    (case [0]
+      (set! (.-C c) (not (.-C c))))
+    (case [1]
+      (let [(values z cy) (values (.-Z c) (.-C c))]
+        (.setFlags c (and (not cy) (not z)) (and z cy) (or cy z) (and (not cy) z))))
+    (case [2]
+      (.setFlags c false (or (.-Z c) (.-V c)) (and (.-C c) (not (.-V c))) false))
+    (case [3]
+      (let [t (ror (.reg c (.-Rn in) false) (conv uint (.-Imm in)) 64)
+          m (.-Imm2 in)]
+        (when (!= (bit-and m 8) 0)
+          (set! (.-N c) (== (bit-and (>> t 3) 1) 1)))
+
+        (when (!= (bit-and m 4) 0)
+          (set! (.-Z c) (== (bit-and (>> t 2) 1) 1)))
+
+        (when (!= (bit-and m 2) 0)
+          (set! (.-C c) (== (bit-and (>> t 1) 1) 1)))
+
+        (when (!= (bit-and m 1) 0)
+          (set! (.-V c) (== (bit-and t 1) 1)))))
+    (default
+      (let [x (.reg c (.-Rn in) false)
+          top (conv uint 7)]
+        (when (== (.-Sys in) 5)
+          (set! top 15))
+
+        (set! (.-N c) (== (bit-and (>> x top) 1) 1))
+        (set! (.-Z c) (== (bit-and x (ones (+ top 1))) 0))
+        (set! (.-V c) (!= (bit-and (>> x (+ top 1)) 1) (bit-and (>> x top) 1)))))))
+
+
+(go/method exclLoad "exclLoad is LDXR, LDXP, LDAR, LDAPR and LDAPUR (AR18: a method, so that its faults return to exec, which puts PC back).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [n (<< (conv uint64 1) (.-Size in))
+      ^{:line 411} total n]
+    (when (.-Pair in)
+      (set! total (* 2 n)))
+
+    (let [(values addr ok) (.atomAddr c in total)]
+      (when (not ok)
+        (return))
+
+    (let [(values v1 ^:assign ok) (.load c addr (.-Size in))]
+      (when (not ok)
+        (return))
+
+      (when (.-Pair in)
+        (let [(values v2 ok) (.load c (+ addr n) (.-Size in))]
+          (when (not ok)
+            (return))
+
+          (.set c (.-Ra in) v2 true false)))
+
+      (.set c (.-Rd in) (.loadValue c in v1) true false)
+      (when (== (.-Op in) OpLDXR)
+        (set! (values (.-exclValid c) (.-exclAddr c) (.-exclSize c)) (values true addr total)))))))
+
+
+(go/method exclStore "exclStore is STXR, STXP, STLR and STLUR (AR18: a method, as exclLoad).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [n (<< (conv uint64 1) (.-Size in))
+      ^{:line 436} total n]
+    (when (.-Pair in)
+      (set! total (* 2 n)))
+
+    (let [(values addr ok) (.atomAddr c in total)]
+      (when (not ok)
+        (return))
+
+    (when (== (.-Op in) OpSTXR)
+      (let [pass (and (.-exclValid c) (== (.-exclAddr c) addr) (== (.-exclSize c) total))]
+        (set! (.-exclValid c) false)
+        (when (not pass)
+          (.set c (.-Rm in) 1 false false)
+          (return))
+
+        (when (not (.Probe (.-AS c) addr (conv int total)))
+          (.segvW c (.-FaultAddr (.-AS c)))
+          (return))))
+
+
+    (when (not (.store c addr (.-Size in) (.reg c (.-Rd in) false)))
+      (return))
+
+    (when (.-Pair in)
+      (.store c (+ addr n) (.-Size in) (.reg c (.-Ra in) false)))
+
+    (when (== (.-Op in) OpSTXR)
+      (.set c (.-Rm in) 0 false false)))))
+
+
+(go/method atomic "atomic is LSE's LD<op>, ST<op>, SWP and CAS (AR18: a method, as exclLoad).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values addr aok) (.atomAddr c in ^uint64 (<< 1 (.-Size in)))]
+    (when (not aok)
+      (return))
+
+    (let [(values old ok) (.load c addr (.-Size in))]
+      (when (not ok)
+        (return))
+
+      (let [m (ones ^uint (<< 8 (.-Size in)))
+          ^{:line 474} s (bit-and (.reg c (.-Rm in) false) m)
+          (values nw write) (values old true)]
+        (switch (.-Op in)
+          (case [OpSWP]
+            (set! nw s))
+          (case [OpCAS]
+            (set! (values nw write) (values (bit-and (.reg c (.-Rd in) false) m) (== old s))))
+          (default
+            (let [sh (- 64 ^int (<< 8 (.-Size in)))
+                (values so ss) (values (>> (conv int64 (<< old sh)) sh) (>> (conv int64 (<< s sh)) sh))]
+              (switch (.-Sys in)
+                (case [AtomADD]
+                  (set! nw (+ old s)))
+                (case [AtomCLR]
+                  (set! nw (bit-and-not old s)))
+                (case [AtomEOR]
+                  (set! nw (bit-xor old s)))
+                (case [AtomSET]
+                  (set! nw (bit-or old s)))
+                (case [AtomSMAX]
+                  (set! nw (conv uint64 (max so ss))))
+                (case [AtomSMIN]
+                  (set! nw (conv uint64 (min so ss))))
+                (case [AtomUMAX]
+                  (set! nw (max old s)))
+                (case [AtomUMIN]
+                  (set! nw (min old s))))
+
+              (set! nw bit-and m))))
+
+        (when (and write (not (.store c addr (.-Size in) nw)))
+          (return))
+
+        (if (== (.-Op in) OpCAS)
+          (.set c (.-Rm in) old (== (.-Size in) 3) false)
+
+          (.set c (.-Rd in) old (== (.-Size in) 3) false))))))
+
+
+(go/method atomicPair "atomicPair is CASP (AR18: a method, as exclLoad).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [n (<< (conv uint64 1) (.-Size in))
+      (values addr aok) (.atomAddr c in (* 2 n))]
+    (when (not aok)
+      (return))
+
+    (let [(values o1 ok1) (.load c addr (.-Size in))
+        (values o2 ok2) (.load c (+ addr n) (.-Size in))]
+      (when (or (not ok1) (not ok2))
+        (return))
+
+      (let [m (ones ^uint (<< 8 (.-Size in)))]
+        (when (and (== o1 (bit-and (.reg c (.-Rm in) false) m)) (== o2 (bit-and (.reg c (+ (.-Rm in) 1) false) m)))
+          (when (not (.Probe (.-AS c) addr (conv int (* 2 n))))
+            (.segvW c (.-FaultAddr (.-AS c)))
+            (return))
+
+          (.store c addr (.-Size in) (.reg c (.-Rd in) false))
+          (.store c (+ addr n) (.-Size in) (.reg c (+ (.-Rd in) 1) false)))
+
+        (.set c (.-Rm in) o1 (== (.-Size in) 3) false)
+        (.set c (+ (.-Rm in) 1) o2 (== (.-Size in) 3) false)))))
+
+
+(go/method sysOp "sysOp is SYS's dc and ic at EL0 (AR19, as the M2 runs them under Linux): dc zva zeroes the DCZID-sized block (64 bytes)
+holding Xt, each byte writable or SIGSEGV at Xt; the cache maintenance (ic ivau, dc cvac, cvau, cvap, cvadp, civac) has no effect
+on a single memory with no caches (a64i's decoded instructions are checked against their bytes at each fetch) but faults
+(SIGSEGV at Xt) when Xt's page is not mapped or PROT_NONE; read-only and execute-only pages pass, as on the M2.
+" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [x (.reg c (.-Rd in) false)]
+    (when (== (.-Sys in) 4)
+      (let [base (bit-and-not x (- dczBlock 1))]
+        (when (not (.Probe (.-AS c) base (conv int dczBlock)))
+          (.segvW c x)
+          (return))
+
+        (for [a base] (< a (+ base dczBlock)) (set! a + 8)
+          (.store c a 3 0))
+
+        (return)))
+
+    (when (== (.Perm (.-AS c) x) 0)
+      (.segv c x)
+      (set! (.-faultISS c) 0x140)))) ; CM and WnR, as the M2 reports a cache maintenance's fault

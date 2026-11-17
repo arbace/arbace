@@ -1,0 +1,324 @@
+(ns arbace.repr.cpp.lit
+  "C++ literals as the oracle's AST gives them (doc/cpp/NATIVE.md, \"Literals\"; doc/cpp/CPP-SURVEY.md, CX11): the
+  native parser (arbace.repr.cpp.parse) writes each literal as clang 23.1.4's -ast-dump=json does, so that the
+  converter (arbace.repr.cpp.convert) reads both alike: an integer literal's value in decimal and its type by
+  [lex.icon]'s table on LP64 (`1z` is clang's `__signed_size_t`, `1uz` its `__size_t`); a character literal's value
+  as clang's CharacterLiteral holds it (a narrow one sign-extended from char, a multicharacter one an int); a string
+  literal's code units after concatenation, written as clang prints them (escaped, the prefix kept); a floating
+  literal's value as LLVM's APFloat::toString prints it (FormatPrecision 0, FormatMaxPadding 3: 9 significant digits
+  for a float, 21 for an x87 long double; a double's any spelling that reads back to the same double)."
+  (:require [arbace.string :as str])
+  (:import [java.math BigInteger BigDecimal]))
+
+(set! *warn-on-reflection* true)
+
+(defn- fail [^String msg] (throw (ex-info (str "cpp literal: " msg) {:cpp/parse true :literal true})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Integers ([lex.icon], LP64: int 32 bits, long and long long 64)
+
+(def ^:private ^BigInteger two32 (.shiftLeft BigInteger/ONE 32))
+(def ^:private ^BigInteger two31 (.shiftLeft BigInteger/ONE 31))
+(def ^:private ^BigInteger two63 (.shiftLeft BigInteger/ONE 63))
+(def ^:private ^BigInteger two64 (.shiftLeft BigInteger/ONE 64))
+
+(defn- fits? [^BigInteger v ^String t]
+  (case t
+    "int" (< (.compareTo v two31) 0)
+    "unsigned int" (< (.compareTo v two32) 0)
+    ("long" "long long" "__signed_size_t") (< (.compareTo v two63) 0)
+    ("unsigned long" "unsigned long long" "__size_t") (< (.compareTo v two64) 0)))
+
+(defn int-literal
+  "A pp-number's integer literal: [value type] (the value's decimal text, clang's type name), or nil when the
+  number is not an integer literal (a floating one, a user-defined literal)."
+  [^String s]
+  (let [s (str/replace s "'" "")
+        [radix digits suffix]
+        (cond
+          (re-matches #"(?i)0x[0-9a-f]+[a-z]*" s) (let [[_ d sf] (re-matches #"(?i)0x([0-9a-f]+)([a-z]*)" s)] [16 d sf])
+          (re-matches #"(?i)0b[01]+[a-z]*" s) (let [[_ d sf] (re-matches #"(?i)0b([01]+)([a-z]*)" s)] [2 d sf])
+          (re-matches #"0[0-7]*[a-zA-Z]*" s) (let [[_ d sf] (re-matches #"(0[0-7]*)([a-zA-Z]*)" s)] [8 d sf])
+          (re-matches #"[1-9][0-9]*[a-zA-Z]*" s) (let [[_ d sf] (re-matches #"([1-9][0-9]*)([a-zA-Z]*)" s)] [10 d sf])
+          :else nil)]
+    (when radix
+      (let [sf (str/lower-case suffix)
+            u (str/includes? sf "u")
+            z (str/includes? sf "z")
+            l (cond (str/includes? sf "ll") 2 (str/includes? sf "l") 1 :else 0)
+            ok (re-matches #"(u?(l|ll|z)?|(l|ll|z)u)" sf)]
+        (when ok
+          (let [v (BigInteger. ^String digits (int radix))
+                dec? (= radix 10)
+                cands (cond
+                        z (if u ["__size_t"] (if dec? ["__signed_size_t"] ["__signed_size_t" "__size_t"]))
+                        (and u (= l 0)) ["unsigned int" "unsigned long" "unsigned long long"]
+                        (and u (= l 1)) ["unsigned long" "unsigned long long"]
+                        u ["unsigned long long"]
+                        (= l 0) (if dec? ["int" "long" "long long"] ["int" "unsigned int" "long" "unsigned long" "long long" "unsigned long long"])
+                        (= l 1) (if dec? ["long" "long long"] ["long" "unsigned long" "long long" "unsigned long long"])
+                        :else (if dec? ["long long"] ["long long" "unsigned long long"]))
+                t (or (first (filter #(fits? v %) cands))
+                      ;; clang: too large for a signed type, read as unsigned
+                      (when (< (.compareTo v two64) 0) "unsigned long long")
+                      (fail (str "an integer literal too large: " s)))]
+            [(.toString v) t]))))))
+
+(defn int-print
+  "An integer literal as clang's StmtPrinter writes it (in a printed type: a template argument, an array bound): the
+  value and the suffix of its type."
+  ^String [^String v ^String t]
+  (str v (case t "unsigned int" "U" "long" "L" "unsigned long" "UL" "long long" "LL" "unsigned long long" "ULL" "")))
+
+;; ---------------------------------------------------------------------------------------------
+;; Escapes and code units
+
+(defn- utf8-units
+  "The UTF-8 bytes of a code point."
+  [^long cp]
+  (cond
+    (< cp 0x80) [cp]
+    (< cp 0x800) [(bit-or 0xc0 (bit-shift-right cp 6)) (bit-or 0x80 (bit-and cp 0x3f))]
+    (< cp 0x10000) [(bit-or 0xe0 (bit-shift-right cp 12)) (bit-or 0x80 (bit-and (bit-shift-right cp 6) 0x3f)) (bit-or 0x80 (bit-and cp 0x3f))]
+    :else [(bit-or 0xf0 (bit-shift-right cp 18)) (bit-or 0x80 (bit-and (bit-shift-right cp 12) 0x3f))
+           (bit-or 0x80 (bit-and (bit-shift-right cp 6) 0x3f)) (bit-or 0x80 (bit-and cp 0x3f))]))
+
+(defn- utf16-units [^long cp]
+  (if (< cp 0x10000) [cp] (let [c (- cp 0x10000)] [(+ 0xd800 (bit-shift-right c 10)) (+ 0xdc00 (bit-and c 0x3ff))])))
+
+(defn- decode-utf8
+  "The code point of the UTF-8 sequence at i of `s` (one char a byte): [cp next-i]; a byte that starts no sequence is itself."
+  [^String s ^long i]
+  (let [b0 (long (int (.charAt s (int i))))
+        n (cond (< b0 0x80) 1 (= (bit-and b0 0xe0) 0xc0) 2 (= (bit-and b0 0xf0) 0xe0) 3 (= (bit-and b0 0xf8) 0xf0) 4 :else 1)]
+    (if (or (= n 1) (> (+ i n) (.length s)))
+      [b0 (inc i)]
+      (let [cp (loop [k 1 cp (bit-and b0 (case n 2 0x1f 3 0x0f 0x07))]
+                 (if (< k n) (recur (inc k) (bit-or (bit-shift-left cp 6) (bit-and (long (int (.charAt s (int (+ i k))))) 0x3f))) cp))]
+        [cp (+ i n)]))))
+
+(defn- hexval ^long [c] (Character/digit (char c) 16))
+
+(defn- escape
+  "The escape sequence at i of `s` (its backslash): [kind value next-i], kind :unit (a code unit's value: octal, hex)
+  or :cp (a code point: a universal character name, or a simple escape's character)."
+  [^String s ^long i]
+  (let [n (.length s)
+        c (.charAt s (int (inc i)))]
+    (case c
+      \n [:cp 10 (+ i 2)] \t [:cp 9 (+ i 2)] \v [:cp 11 (+ i 2)] \b [:cp 8 (+ i 2)] \r [:cp 13 (+ i 2)]
+      \f [:cp 12 (+ i 2)] \a [:cp 7 (+ i 2)] \e [:cp 27 (+ i 2)] \E [:cp 27 (+ i 2)]
+      \\ [:cp 92 (+ i 2)] \? [:cp 63 (+ i 2)] \' [:cp 39 (+ i 2)] \" [:cp 34 (+ i 2)]
+      \x (if (and (< (+ i 2) n) (= \{ (.charAt s (int (+ i 2)))))
+           (let [e (.indexOf s "}" (int (+ i 3)))] [:unit (Long/parseLong (subs s (int (+ i 3)) e) 16) (inc e)])
+           (let [j (loop [j (+ i 2)] (if (and (< j n) (>= (hexval (.charAt s (int j))) 0)) (recur (inc j)) j))]
+             (when (= j (+ i 2)) (fail "an empty \\x escape"))
+             [:unit (.longValue (BigInteger. (subs s (int (+ i 2)) (int j)) 16)) j]))
+      \o (let [e (.indexOf s "}" (int (+ i 3)))] [:unit (Long/parseLong (subs s (int (+ i 3)) e) 8) (inc e)])
+      (\u \U) (if (and (< (+ i 2) n) (= \{ (.charAt s (int (+ i 2)))))
+                (let [e (.indexOf s "}" (int (+ i 3)))] [:cp (Long/parseLong (subs s (int (+ i 3)) e) 16) (inc e)])
+                (let [w (if (= c \u) 4 8)] [:cp (Long/parseLong (subs s (int (+ i 2)) (int (+ i 2 w))) 16) (+ i 2 w)]))
+      (if (<= 48 (int c) 55)
+        (let [j (loop [j (inc i)] (if (and (< j n) (< (- j i) 4) (<= 48 (int (.charAt s (int j))) 55)) (recur (inc j)) j))]
+          [:unit (Long/parseLong (subs s (int (inc i)) (int j)) 8) j])
+        ;; an unknown escape: clang warns and keeps the character
+        [:cp (long (int c)) (+ i 2)]))))
+
+(defn- units
+  "The code units of a literal body (between its quotes; raw: no escapes) for the encoding `enc` (:narrow, :utf8,
+  :utf16, :utf32)."
+  [^String body enc raw]
+  (let [n (.length body)
+        out (java.util.ArrayList.)
+        add-cp (fn [^long cp]
+                 (doseq [u (case enc (:narrow :utf8) (utf8-units cp) :utf16 (utf16-units cp) :utf32 [cp])] (.add out (long u))))]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt body (int i))]
+          (cond
+            (and (= c \\) (not raw)) (let [[k v j] (escape body i)]
+                                       (if (and (= k :cp) (not (#{:utf16 :utf32} enc)) (> (long v) 127)) (add-cp v)
+                                           (if (= k :cp) (add-cp v) (.add out (long v))))
+                                       (recur (long j)))
+            ;; the source's bytes: UTF-8 kept as bytes in a narrow literal, decoded for a wide one
+            (#{:narrow :utf8} enc) (do (.add out (long (int c))) (recur (inc i)))
+            :else (let [[cp j] (decode-utf8 body i)] (add-cp cp) (recur (long j)))))))
+    (vec out)))
+
+(defn- split-literal
+  "A string or character literal token's text: [prefix raw? body]."
+  [^String s]
+  (let [q (if (re-find #"^[A-Za-z0-9]*'" s) \' \")
+        i (.indexOf s (str q))
+        prefix (subs s 0 i)
+        raw (str/ends-with? prefix "R")
+        prefix (if raw (subs prefix 0 (dec (count prefix))) prefix)
+        e (.lastIndexOf s (str q))]
+    (if raw
+      (let [o (.indexOf s "(" (int i))
+            d (subs s (inc i) o)
+            close (.lastIndexOf s (str ")" d "\""))]
+        [prefix true (subs s (inc o) close)])
+      [prefix false (subs s (inc i) e)])))
+
+(defn- enc-of [^String prefix ^long year]
+  (case prefix "" :narrow "u8" :utf8 "u" :utf16 "U" :utf32 "L" :utf32 (fail (str "a literal prefix " prefix))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Characters
+
+(defn char-literal
+  "A character literal token's text: [value type] as clang's CharacterLiteral holds them (`year`: the standard's year,
+  for u8'a''s type)."
+  [^String s ^long year]
+  (let [[prefix _ body] (split-literal s)
+        enc (enc-of prefix year)
+        us (units body enc false)]
+    (case prefix
+      "" (cond
+           (= 1 (count us)) (let [v (long (first us))]
+                              ;; a narrow char is signed: clang keeps its value sign-extended, as an unsigned int
+                              [(if (> v 127) (- 4294967296 (- 256 v)) v) "char"])
+           :else [(reduce (fn [a u] (bit-and (bit-or (bit-shift-left (long a) 8) (bit-and (long u) 0xff)) 0xffffffff)) 0 us) "int"])
+      "u8" [(long (first us)) (if (>= year 2020) "char8_t" "char")]
+      "u" [(long (first us)) "char16_t"]
+      "U" [(long (first us)) "char32_t"]
+      "L" [(long (first us)) "wchar_t"])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Strings: the units of the pieces of one literal, clang's printing of them
+
+(defn string-literal
+  "The adjacent string literal tokens' texts `ss` as one literal: [clang's value text, its element type name, the count
+  of its code units with the terminating zero]."
+  [ss ^long year]
+  (let [parts (mapv split-literal ss)
+        prefix (or (first (remove #(= "" %) (map first parts))) "")
+        enc (enc-of prefix year)
+        us (vec (mapcat (fn [[_ raw body]] (units body enc raw)) parts))
+        b (StringBuilder.)]
+    (.append b prefix)
+    (.append b "\"")
+    (doseq [u us]
+      (let [u (long u)]
+        (cond
+          (= u 92) (.append b "\\\\")
+          (= u 34) (.append b "\\\"")
+          (and (>= u 32) (< u 127)) (.append b (char u))
+          (#{:narrow :utf8} enc) (.append b (format "\\%03o" (bit-and u 0xff)))
+          :else (.append b (format "\\U%08x" u)))))
+    (.append b "\"")
+    [(str b) (case enc :narrow "char" :utf8 (if (>= year 2020) "char8_t" "char") :utf16 "char16_t" :utf32 (if (= prefix "L") "wchar_t" "char32_t"))
+     (inc (count us))]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Floating literals: APFloat's toString (llvm/lib/Support/APFloat.cpp, IEEEFloat::toString with FormatPrecision 0,
+;; FormatMaxPadding 3, TruncateZero true, and its AdjustToPrecision)
+
+(defn- exact-value
+  "A floating literal's text (no suffix) as an exact rational: [numerator denominator] (BigIntegers, the value
+  numerator/denominator), hexadecimal floats too."
+  [^String s]
+  (let [s (str/replace s "'" "")]
+    (if (re-find #"^0[xX]" s)
+      (let [[_ m e] (re-matches #"0[xX]([0-9a-fA-F]*\.?[0-9a-fA-F]*)[pP]([+-]?[0-9]+)" s)
+            [ip fp] (let [k (.indexOf ^String m ".")] (if (neg? k) [m ""] [(subs m 0 k) (subs m (inc k))]))
+            n (BigInteger. (str (if (= "" ip) "0" ip) fp) 16)
+            e2 (- (Long/parseLong (str/replace e "+" "")) (* 4 (count fp)))]
+        (if (neg? e2) [n (.shiftLeft BigInteger/ONE (int (- e2)))] [(.shiftLeft n (int e2)) BigInteger/ONE]))
+      (let [bd (BigDecimal. s)
+            sc (.scale bd)
+            u (.unscaledValue bd)]
+        (if (pos? sc) [u (.pow BigInteger/TEN sc)] [(.multiply u (.pow BigInteger/TEN (int (- sc)))) BigInteger/ONE])))))
+
+(defn- round-to
+  "The rational n/d (positive) rounded to `prec` significant bits, ties to even: [significand exponent], the value
+  significand * 2^exponent."
+  [^BigInteger n ^BigInteger d ^long prec]
+  (if (zero? (.signum n))
+    [BigInteger/ZERO 0]
+    (let [;; e such that 2^(prec-1) <= n/d * 2^-e < 2^prec
+          e0 (- (- (.bitLength n) (.bitLength d)) prec)
+          q (fn [^long e] (if (neg? e) [(.shiftLeft n (int (- e))) d] [n (.shiftLeft d (int e))]))
+          e (loop [e e0]
+              (let [[^BigInteger a ^BigInteger b] (q e)
+                    m (.divide a b)]
+                (cond (>= (.bitLength m) (inc prec)) (recur (inc e))
+                      (< (.bitLength m) prec) (recur (dec e))
+                      :else e)))
+          [^BigInteger a ^BigInteger b] (q e)
+          qr (.divideAndRemainder a b)
+          ^BigInteger m (aget qr 0)
+          ^BigInteger r (aget qr 1)
+          c (.compareTo (.shiftLeft r 1) b)
+          m (if (or (pos? c) (and (zero? c) (.testBit m 0))) (.add m BigInteger/ONE) m)]
+      (if (> (.bitLength m) prec) [(.shiftRight m 1) (inc e)] [m e]))))
+
+(defn- adjust-to-precision
+  "APFloat's AdjustToPrecision: the digits (most significant first) cut to `fp` significant ones, rounding half up:
+  [digits exp]."
+  [^String ds ^long exp ^long fp]
+  (let [n (count ds)]
+    (if (<= n fp)
+      [ds exp]
+      (let [keep (subs ds 0 fp)
+            dropped (- n fp)]
+        (if (< (int (.charAt ds (int fp))) (int \5))
+          (let [k (str/replace keep #"0+$" "")] [k (+ exp dropped (- (count keep) (count k)))])
+          (let [up (.toString (.add (BigInteger. keep) BigInteger/ONE))]
+            (if (> (count up) (count keep))
+              ["1" (+ exp dropped (count keep))]
+              (let [k (str/replace up #"0+$" "")] [k (+ exp dropped (- (count up) (count k)))]))))))))
+
+(defn- apfloat-string
+  "APFloat::toString of significand*2^e2 with `prec` significand bits."
+  ^String [^BigInteger sig ^long e2 ^long prec]
+  (if (zero? (.signum sig))
+    "0"
+    (let [fp (+ 2 (quot (* prec 59) 196))
+          tz (.getLowestSetBit sig)
+          sig (.shiftRight sig tz)
+          e2 (+ e2 tz)
+          [^BigInteger sig exp] (if (>= e2 0) [(.shiftLeft sig (int e2)) 0] [(.multiply sig (.pow (BigInteger/valueOf 5) (int (- e2)))) e2])
+          ;; the APInt AdjustToPrecision: the significand cut (truncated) to the bits the precision needs, before the digits
+          bits (.bitLength sig)
+          need (quot (+ (* fp 196) 58) 59)
+          tens (if (> bits need) (quot (* (- bits need) 59) 196) 0)
+          [^BigInteger sig exp] (if (pos? tens) [(.divide sig (.pow BigInteger/TEN (int tens))) (+ (long exp) tens)] [sig exp])
+          ds (.toString sig)
+          k (str/replace ds #"0+$" "")
+          exp (+ (long exp) (- (count ds) (count k)))
+          [^String ds exp] (adjust-to-precision k exp fp)
+          exp (long exp)
+          nd (count ds)
+          sci (if (>= exp 0)
+                (or (> exp 3) (> (+ nd exp) fp))
+                (let [msd (+ exp (dec nd))] (if (>= msd 0) false (> (- msd) 3))))]
+      (cond
+        sci (let [e (+ exp (dec nd))]
+              (str (subs ds 0 1) "." (if (= nd 1) "0" (subs ds 1)) "E" (if (>= e 0) "+" "-") (Math/abs e)))
+        (>= exp 0) (str ds (apply str (repeat exp "0")))
+        :else (let [whole (+ exp nd)]
+                (if (pos? whole)
+                  (str (subs ds 0 whole) "." (subs ds whole))
+                  (str "0." (apply str (repeat (- whole) "0")) ds)))))))
+
+(defn float-literal
+  "A floating pp-number's literal: [value type] as clang prints them, or nil when it is not a floating literal."
+  [^String s]
+  (let [s (str/replace s "'" "")
+        [_ body sf] (or (re-matches #"(0[xX][0-9a-fA-F]*\.?[0-9a-fA-F]*[pP][+-]?[0-9]+)([a-zA-Z0-9]*)" s)
+                        (re-matches #"([0-9]*\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)([a-zA-Z0-9]*)" s))]
+    (when (and body (re-find #"[0-9]" body))
+      (let [sf (str/lower-case sf)
+            t (case sf "" "double" "f" "float" "l" "long double" "f16" "_Float16" "bf16" "__bf16" "f128" "__float128" "q" "__float128" "w" "long double" nil)]
+        (when t
+          (let [[n d] (exact-value body)]
+            (case t
+              "double" [(let [v (.doubleValue (BigDecimal. ^BigInteger n))
+                              x (if (= d BigInteger/ONE) v (Double/parseDouble (if (re-find #"^0[xX]" body) body body)))]
+                          (str x))
+                        "double"]
+              "float" (let [[m e] (round-to n d 24)] [(apfloat-string m e 24) "float"])
+              "long double" (let [[m e] (round-to n d 64)] [(apfloat-string m e 64) "long double"])
+              (let [[m e] (round-to n d 113)] [(apfloat-string m e 113) t]))))))))

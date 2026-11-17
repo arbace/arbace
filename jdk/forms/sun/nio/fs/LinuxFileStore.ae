@@ -1,0 +1,73 @@
+;; Converted from jdk26u src/java.base/linux/classes/sun/nio/fs/LinuxFileStore.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.file.attribute DosFileAttributeView
+                                  FileAttributeView
+                                  PosixFileAttributeView
+                                  UserDefinedFileAttributeView)
+        '(java.util Arrays List))
+
+(defclass LinuxFileStore
+  :extends UnixFileStore
+
+  (field ^:private ^:volatile ^boolean xattrChecked)
+
+  (field ^:private ^:volatile ^boolean xattrEnabled)
+
+  (constructor :throws [IOException] [this ^UnixPath file] (super. file))
+
+  (constructor :throws [IOException] [this ^UnixFileSystem fs ^UnixMountEntry entry]
+    (super. fs entry))
+
+  (method findMountEntry :throws [IOException] ^UnixMountEntry [this]
+    (let [fs (cast LinuxFileSystem (.getFileSystem (.file this)))
+          ^:mutable ^UnixPath path nil]
+      (try
+        (let [rp (UnixNativeDispatcher/realpath (.file this))] (set! path (UnixPath. fs rp)))
+        (catch UnixException x (.rethrowAsIOException x (.file this))))
+      (let [^{:tag (List UnixMountEntry)} procMountsEntries (.getMountEntries fs "/proc/mounts")
+            ^:mutable parent (.getParent path)]
+        (while (some? parent)
+          (let [^:mutable ^UnixFileAttributes attrs nil]
+            (try
+              (set! attrs (UnixFileAttributes/get parent true))
+              (catch UnixException x (.rethrowAsIOException x parent)))
+            (when-not (== (.dev attrs) (.dev this))
+              (let [dir (.asByteArray path)]
+                (for-each [^UnixMountEntry entry procMountsEntries]
+                  (when (Arrays/equals dir (.dir entry)) (return entry)))))
+            (set! path parent)
+            (set! parent (.getParent parent))))
+        (let [dir (.asByteArray path)]
+          (for-each [^UnixMountEntry entry procMountsEntries]
+            (when (Arrays/equals dir (.dir entry)) (return entry)))
+          (throw (IOException. "Mount point not found"))))))
+
+  (method ^:public supportsFileAttributeView ^boolean [this
+                                                       ^{:tag (Class (? extends FileAttributeView))} type]
+    (cond
+      (or (identical? type DosFileAttributeView) (identical? type UserDefinedFileAttributeView))
+        (let [status (.checkIfFeaturePresent this "user_xattr")]
+          (cond
+            (identical? status UnixFileStore$FeatureStatus/PRESENT) true
+            (identical? status UnixFileStore$FeatureStatus/NOT_PRESENT) false
+            (.hasOption (.entry this) "user_xattr") true
+            (.hasOption (.entry this) "nouser_xattr") false
+            (.equals (.fstype (.entry this)) "ext4") true
+            :else
+              (do
+                (when-not xattrChecked
+                  (let [dir (UnixPath. (.getFileSystem (.file this)) (.dir (.entry this)))]
+                    (set! xattrEnabled (.isExtendedAttributesEnabled this dir))
+                    (set! xattrChecked true)))
+                xattrEnabled)))
+      (and (identical? type PosixFileAttributeView) (.equals (.fstype (.entry this)) "vfat")) false
+      :else (.supportsFileAttributeView super type)))
+
+  (method ^:public supportsFileAttributeView ^boolean [this ^String name]
+    (cond
+      (.equals name "dos") (.supportsFileAttributeView this DosFileAttributeView)
+      (.equals name "user") (.supportsFileAttributeView this UserDefinedFileAttributeView)
+      :else (.supportsFileAttributeView super name))))

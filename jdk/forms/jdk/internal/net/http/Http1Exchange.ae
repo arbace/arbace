@@ -1,0 +1,701 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/Http1Exchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net.http HttpClient$Version
+                        HttpResponse
+                        HttpResponse$BodyHandler
+                        HttpResponse$BodySubscriber
+                        HttpResponse$ResponseInfo)
+        '(java.nio ByteBuffer)
+        '(java.time Duration)
+        '(java.util LinkedList List Objects)
+        '(java.util.concurrent CompletableFuture
+                               CompletionStage
+                               ConcurrentLinkedDeque
+                               Executor
+                               Flow$Subscriber
+                               Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicReference)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function BiConsumer Consumer Function Supplier)
+        '(jdk.internal.net.http.common Demand
+                                       FlowTube$TubePublisher
+                                       HttpBodySubscriberWrapper
+                                       Log
+                                       Logger
+                                       MinimalFuture
+                                       SequentialScheduler
+                                       Utils))
+
+(defclass Http1Exchange
+  :extends (ExchangeImpl T)
+  :type-params [T]
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this Http1Exchange/.dbgString)
+                          Utils/DEBUG))
+
+  (field ^:final ^HttpRequestImpl request)
+
+  (field ^:final ^Http1Request requestAction)
+
+  (field ^:private ^:volatile ^{:tag (Http1Response T)} response)
+
+  (field ^:final ^HttpConnection connection)
+
+  (field ^:final ^HttpClientImpl client)
+
+  (field ^:final ^HttpClientImpl$DelegatingExecutor executor)
+
+  (field ^:private ^:final ^Http1AsyncReceiver asyncReceiver)
+
+  (field ^:private ^:volatile ^boolean upgraded)
+
+  (field ^:private ^:final ^{:tag (AtomicReference Throwable)} failedRef (AtomicReference.))
+
+  (field ^:private ^:final ^{:tag (ConcurrentLinkedDeque (CompletableFuture ?))} operations
+    (ConcurrentLinkedDeque.))
+
+  (field ^:private ^:final ^ReentrantLock lock (ReentrantLock.))
+
+  (field ^:final ^{:tag (ConcurrentLinkedDeque DataPair)} outgoing (ConcurrentLinkedDeque.))
+
+  (field ^:private ^:final ^Http1Publisher writePublisher (Http1Publisher.))
+
+  (field ^:private ^:final ^{:tag (CompletableFuture (ExchangeImpl T))} headersSentCF
+    (MinimalFuture.))
+
+  (field ^:private ^:final ^{:tag (CompletableFuture (ExchangeImpl T))} bodySentCF (MinimalFuture.))
+
+  (field ^:private ^:volatile ^Http1RequestBodySubscriber bodySubscriber)
+
+  (field ^:private ^:volatile ^{:tag (HttpResponse$BodySubscriber T)} responseSubscriber)
+
+  (defclass ^:enum State
+    (constants INITIAL HEADERS BODY ERROR COMPLETING COMPLETED))
+
+  (field ^:private ^State state State/INITIAL)
+
+  (defclass ^:static DataPair
+    (field ^Throwable throwable)
+
+    (field ^{:tag (List ByteBuffer)} data)
+
+    (constructor [this ^{:tag (List ByteBuffer)} data ^Throwable throwable]
+      (set! (.-data this) data)
+      (set! (.-throwable this) throwable))
+
+    (method ^:public toString ^String [this]
+      (java-str "DataPair [data=" data ", throwable=" throwable "]")))
+
+  (defclass ^:abstract ^:static Http1RequestBodySubscriber
+    :implements [(Flow$Subscriber ByteBuffer)]
+
+    (field ^:final ^{:tag (MinimalFuture Flow$Subscription)} whenSubscribed (MinimalFuture.))
+
+    (field ^:private ^:volatile ^Flow$Subscription subscription)
+
+    (field ^:volatile ^boolean complete)
+
+    (field ^:private ^:final ^Logger debug)
+
+    (constructor [this ^Logger debug]
+      (java-assert (some? debug))
+      (set! (.-debug this) debug))
+
+    (field ^:static ^:final ^{:tag (List ByteBuffer)} COMPLETED (List/of (ByteBuffer/allocate 0)))
+
+    (method ^:final request ^void [this ^long n]
+      (when (.on debug)
+        (.log debug "Http1BodySubscriber requesting %d, from %s" (new Object/1 [n subscription])))
+      (.request subscription n))
+
+    (method ^:abstract currentStateMessage ^String [this])
+
+    (method ^:final isSubscribed ^boolean [this] (some? subscription))
+
+    (method ^:final setSubscription ^void [this ^Flow$Subscription subscription]
+      (let [^:mutable ^Flow$Subscription sub nil]
+        (locking this
+          (when (nil? (set! sub (.-subscription this)))
+            (set! (.-subscription this) (set! sub subscription))))
+        (if (identical? sub subscription)
+            (.complete whenSubscribed subscription)
+            (.cancel subscription))))
+
+    (method ^:final cancelSubscription ^void [this]
+      (try
+        (let [^:mutable ^Flow$Subscription sub nil]
+          (locking this
+            (when (nil? (set! sub (.-subscription this)))
+              (set! (.-subscription this) (set! sub HttpBodySubscriberWrapper/NOP))))
+          (.cancel sub))
+        (catch Throwable t
+          (let [msg "Ignoring exception raised when canceling BodyPublisher subscription"]
+            (when (.on debug) (.log debug "%s: %s" (new Object/1 [msg t])))
+            (Log/logError "{0}: {1}" (new Object/1 [msg ^Object t]))))))
+
+    (method ^:static completeSubscriber ^Http1RequestBodySubscriber [^Logger debug]
+      (anon Http1RequestBodySubscriber [debug]
+        (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+          (.error this))
+
+        (method ^:public onNext ^void [this ^ByteBuffer item] (.error this))
+
+        (method ^:public onError ^void [this ^Throwable throwable]
+          (.error this))
+
+        (method ^:public onComplete ^void [this] (.error this))
+
+        (method currentStateMessage ^String [this] nil)
+
+        (method ^:private error ^void [this]
+          (throw (InternalError. "should not reach here"))))))
+
+  (defclass ^:static ^:final Http1ResponseBodySubscriber
+    :extends (HttpBodySubscriberWrapper U)
+    :type-params [U]
+
+    (field ^:final ^{:tag (Http1Exchange U)} exchange)
+
+    (field ^:private ^:final ^boolean cancelTimerOnTermination)
+
+    (constructor [this ^{:tag (HttpResponse$BodySubscriber U)} userSubscriber
+                  ^boolean cancelTimerOnTermination ^{:tag (Http1Exchange U)} exchange]
+      (super. userSubscriber)
+      (set! (.-cancelTimerOnTermination this) cancelTimerOnTermination)
+      (set! (.-exchange this) exchange))
+
+    (method ^:protected register ^void [this]
+      (.registerResponseSubscriber exchange this))
+
+    (method ^:protected unregister ^void [this]
+      (.unregisterResponseSubscriber exchange this))
+
+    (method ^:protected onTermination ^void [this]
+      (when cancelTimerOnTermination (.cancelTimer (.-multi (.-exchange exchange))))))
+
+  (method ^:public toString ^String [this]
+    (java-str "HTTP/1.1 " (.toString request)))
+
+  (method request ^HttpRequestImpl [this] request)
+
+  (constructor :throws [IOException] [this ^{:tag (Exchange T)} exchange ^HttpConnection connection]
+    (super. exchange)
+    (set! (.-request this) (.request exchange))
+    (set! (.-client this) (.client exchange))
+    (set! (.-executor this) (.executor exchange))
+    (.add operations headersSentCF)
+    (.add operations bodySentCF)
+    (if (some? connection)
+        (set! (.-connection this) connection)
+        (let [addr (.getAddress request)]
+          (set! (.-connection this)
+                (HttpConnection/getConnection addr
+                                              client
+                                              exchange
+                                              request
+                                              HttpClient$Version/HTTP_1_1))))
+    (set! (.-requestAction this) (Http1Request. request this))
+    (set! (.-asyncReceiver this) (Http1AsyncReceiver. executor this)))
+
+  (method connection ^HttpConnection [this] connection)
+
+  (method ^:private connectFlows ^void [this ^HttpConnection connection]
+    (let [tube (.getConnectionFlow connection)]
+      (when (.on debug) (.log debug "%s connecting flows %s" (new Object/1 [tube writePublisher])))
+      (.connectFlows tube writePublisher (.subscriber asyncReceiver))))
+
+  (method ^:private registerResponseSubscriber ^boolean [this
+                                                         ^{:tag (Http1ResponseBodySubscriber T)} subscriber]
+    (let [^:mutable ^Throwable failed nil]
+      (.lock lock)
+      (try
+        (set! failed (cast Throwable (.get failedRef)))
+        (when (nil? failed) (set! (.-responseSubscriber this) subscriber))
+        (finally (.unlock lock)))
+      (if (some? failed)
+          (do (.onError subscriber failed) false)
+          (.registerSubscriber client subscriber))))
+
+  (method ^:private unregisterResponseSubscriber ^boolean [this
+                                                           ^{:tag (Http1ResponseBodySubscriber T)} subscriber]
+    (.unregisterSubscriber client subscriber))
+
+  (method sendHeadersAsync ^{:tag (CompletableFuture (ExchangeImpl T))} [this]
+    (when (.on debug) (.log debug "Sending headers only"))
+    (.setRetryOnError asyncReceiver true)
+    (when (nil? response) (set! response (Http1Response. connection this asyncReceiver)))
+    (when (.on debug) (.log debug "response created in advance"))
+    (let [^:mutable ^{:tag (CompletableFuture Void)} connectCF nil]
+      (if (not (.connected connection))
+          (do
+            (when (.on debug) (.log debug "initiating connect async"))
+            (set! connectCF
+                  (.thenCompose (.connectAsync connection (.-exchange this))
+                                (lambda Function ^CompletionStage [^Void unused]
+                                  (.finishConnect connection))))
+            (let [^:mutable ^Throwable cancelled nil]
+              (.lock lock)
+              (try
+                (when (nil? (set! cancelled (cast Throwable (.get failedRef))))
+                  (.add operations connectCF))
+                (finally (.unlock lock)))
+              (when (some? cancelled)
+                (if (.isSelectorThread client)
+                    (.execute executor
+                              (let [connectCF connectCF
+                                    cancelled cancelled]
+                                (lambda Runnable ^void []
+                                  (.completeExceptionally connectCF cancelled))))
+                    (.completeExceptionally connectCF cancelled)))))
+          (do (set! connectCF (MinimalFuture.)) (.complete connectCF nil)))
+      (.thenCompose (.thenCompose connectCF
+                                  (lambda Function ^CompletionStage [^Void unused]
+                                    (let [^{:tag (CompletableFuture Void)} cf (MinimalFuture.)]
+                                      (try
+                                        (.whenComplete
+                                          (.-whenFinished asyncReceiver)
+                                          (lambda BiConsumer ^void [^Void r ^Throwable t]
+                                            (when (some? t)
+                                              (when (.on debug)
+                                                (.log
+                                                  debug
+                                                  "asyncReceiver finished (failed=%s)"
+                                                  (new Object/1 [^Object t])))
+                                              (when-not (.isDone headersSentCF)
+                                                (.completeAsync
+                                                  headersSentCF
+                                                  (lambda Supplier ^ExchangeImpl [] this)
+                                                  executor)))))
+                                        (.connectFlows this connection)
+                                        (when (.on debug) (.log debug "requestAction.headers"))
+                                        (let [^{:tag (List ByteBuffer)} data (.headers
+                                                                               requestAction)]
+                                          (.switchState this State/HEADERS)
+                                          (when (.on debug)
+                                            (.log debug "setting outgoing with headers"))
+                                          (java-assert (.isEmpty outgoing)
+                                            (java-str "Unexpected outgoing:" outgoing))
+                                          (.appendToOutgoing this data)
+                                          (.complete cf nil)
+                                          cf)
+                                        (catch Throwable t
+                                          (when (.on debug)
+                                            (.log debug "Failed to send headers: %s" t))
+                                          (.completeExceptionally headersSentCF t)
+                                          (.completeExceptionally bodySentCF t)
+                                          (.close connection t)
+                                          (.completeExceptionally cf t)
+                                          cf)))))
+                    (lambda Function ^CompletionStage [^Void unused] headersSentCF))))
+
+  (method ^:private cancelIfFailed ^void [this ^Flow$Subscription s]
+    (.whenCompleteAsync (.-whenFinished asyncReceiver)
+                        (lambda BiConsumer ^void [^Void r ^Throwable t]
+                          (when (.on debug)
+                            (.log debug
+                                  "asyncReceiver finished (failed=%s)"
+                                  (new Object/1 [^Object t])))
+                          (when (some? t) (.cancel s) (.complete bodySentCF this)))
+                        executor))
+
+  (method sendBodyAsync ^{:tag (CompletableFuture (ExchangeImpl T))} [this]
+    (java-assert (.isDone headersSentCF))
+    (when (.on debug) (.log debug "sendBodyAsync"))
+    (try
+      (set! bodySubscriber (.continueRequest requestAction))
+      (when (.on debug)
+        (.log debug
+              "bodySubscriber is %s"
+              (new Object/1 [(when (some? bodySubscriber) ^Object (.getClass bodySubscriber))])))
+      (if (nil? bodySubscriber)
+          (do
+            (set! bodySubscriber (Http1RequestBodySubscriber/completeSubscriber debug))
+            (.appendToOutgoing this Http1RequestBodySubscriber/COMPLETED))
+          (.thenAccept (.thenAccept (.-whenSubscribed bodySubscriber)
+                                    (method-ref Consumer
+                                                [Flow$Subscription]
+                                                this
+                                                Http1Exchange/.cancelIfFailed))
+                       (lambda Consumer ^void [^Void s] (.requestMoreBody this))))
+      (catch Throwable t (.cancelImpl this t) (.completeExceptionally bodySentCF t)))
+    (Utils/wrapForDebug debug "sendBodyAsync" bodySentCF))
+
+  (method getResponseAsync ^{:tag (CompletableFuture Response)} [this ^Executor executor]
+    (when (.on debug) (.log debug "reading headers"))
+    (let [^{:tag (CompletableFuture Response)} cf (.readHeadersAsync response executor)
+          ^:mutable ^Throwable cause nil]
+      (.lock lock)
+      (try
+        (.add operations cf)
+        (set! cause (cast Throwable (.get failedRef)))
+        (finally (.unlock lock)))
+      (when (some? cause)
+        (Log/logTrace
+          "Http1Exchange: request [{0}/timeout={1}ms]\n\tCompleting exceptionally with {2}\n"
+          (.uri request)
+          (Long/valueOf (if (.isPresent (.timeout request))
+                            (unchecked-add
+                              (unchecked-multiply
+                                (.getSeconds (cast Duration (.get (.timeout request))))
+                                1000)
+                              (unchecked-divide-int
+                                (.getNano (cast Duration (.get (.timeout request))))
+                                1000000))
+                            -1))
+          cause)
+        (let [acknowledged (.completeExceptionally cf cause)]
+          (when (.on debug)
+            (.log debug
+                  ^String (if acknowledged
+                              (java-str "completed response with " cause)
+                              (java-str "response already completed, ignoring " cause))))))
+      (Utils/wrapForDebug debug "getResponseAsync" cf)))
+
+  (method readBodyAsync ^{:tag (CompletableFuture T)} [this
+                                                       ^{:tag (HttpResponse$BodyHandler T)} handler
+                                                       ^boolean returnConnectionToPool
+                                                       ^Executor executor]
+    (let [responseInfo (ResponseInfoImpl. (.responseCode response)
+                                          (.responseHeaders response)
+                                          HttpClient$Version/HTTP_1_1)
+          ^{:tag (HttpResponse$BodySubscriber T)} bs (.createResponseSubscriber
+                                                       this
+                                                       handler
+                                                       responseInfo)
+          ^{:tag (CompletableFuture T)} bodyCF (.readBody
+                                                 response
+                                                 bs
+                                                 returnConnectionToPool
+                                                 executor)]
+      bodyCF))
+
+  (method createResponseSubscriber ^{:tag (Http1ResponseBodySubscriber T)} [this
+                                                                            ^{:tag (HttpResponse$BodyHandler T)} handler
+                                                                            ^HttpResponse$ResponseInfo response]
+    (let [^{:tag (HttpResponse$BodySubscriber T)} subscriber (.apply handler response)
+          cancelTimerOnTermination (Http1Exchange/cancelTimerOnResponseBodySubscriberTermination
+                                     (.isWebSocket (.request (.-exchange this)))
+                                     (.statusCode response))]
+      (Http1ResponseBodySubscriber. subscriber cancelTimerOnTermination this)))
+
+  (method ignoreBody ^{:tag (CompletableFuture Void)} [this]
+    (.ignoreBody response executor))
+
+  (method ^:public nullBody ^void [this ^{:tag (HttpResponse T)} resp ^Throwable t]
+    (.nullBody response resp t))
+
+  (method drainLeftOverBytes ^ByteBuffer [this]
+    (.lock lock)
+    (try
+      (.stop asyncReceiver)
+      (.drain asyncReceiver Utils/EMPTY_BYTEBUFFER)
+      (finally (.unlock lock))))
+
+  (method released ^void [this]
+    (let [^{:tag (Http1Response T)} resp (.-response this)]
+      (when (some? resp) (.completed resp))
+      (.clear asyncReceiver)))
+
+  (method completed ^void [this]
+    (let [^{:tag (Http1Response T)} resp (.-response this)] (when (some? resp) (.completed resp))))
+
+  (method cancel ^void [this]
+    (.cancelImpl this (IOException. "Request cancelled")))
+
+  (method cancel ^void [this ^IOException cause] (.cancelImpl this cause))
+
+  (method onProtocolError ^void [this ^:final ^IOException cause]
+    (when (.on debug)
+      (.log debug
+            "cancelling exchange due to protocol error: %s"
+            (new Object/1 [(.getMessage cause)])))
+    (Log/logError "cancelling exchange due to protocol error: {0}\n" (new Object/1 [cause]))
+    (.cancelImpl this cause))
+
+  (method ^:private cancelImpl ^void [this ^Throwable cause]
+    (let [^:mutable ^{:tag (LinkedList (CompletableFuture ?))} toComplete nil
+          ^:mutable ^int count 0
+          ^:mutable ^Throwable error nil
+          ^:mutable ^{:tag (HttpResponse$BodySubscriber ?)} subscriber nil]
+      (.lock lock)
+      (try
+        (set! subscriber responseSubscriber)
+        (.compareAndSet failedRef nil cause)
+        (set! error (cast Throwable (.get failedRef)))
+        (when (.on debug) (.log debug (java-str (.uri request) ": " error)))
+        (when (and (and (and (some? requestAction) (.finished requestAction)) (some? response))
+                   (.finished response))
+          (return))
+        (.stop (.-writeScheduler writePublisher))
+        (if (.isEmpty operations)
+            (Log/logTrace
+              "Http1Exchange: request [{0}/timeout={1}ms] no pending operation.\n\tCan''t cancel yet with {2}"
+              (.uri request)
+              (Long/valueOf (if (.isPresent (.timeout request))
+                                (unchecked-add
+                                  (unchecked-multiply
+                                    (.getSeconds (cast Duration (.get (.timeout request))))
+                                    1000)
+                                  (unchecked-divide-int
+                                    (.getNano (cast Duration (.get (.timeout request))))
+                                    1000000))
+                                -1))
+              cause)
+            (do
+              (for-each [^{:tag (CompletableFuture ?)} cf operations]
+                (when-not (.isDone cf)
+                  (when (nil? toComplete) (set! toComplete (LinkedList.)))
+                  (.add toComplete cf)
+                  (set! count (unchecked-inc-int count))))
+              (.clear operations)))
+        (finally (.unlock lock)))
+      (when (and (some? subscriber) (some? error))
+        (let [failure error]
+          (if (.isSelectorThread client)
+              (.execute executor
+                        (let [subscriber subscriber]
+                          (lambda Runnable ^void [] (.onError subscriber failure))))
+              (.onError subscriber failure))))
+      (try
+        (Log/logError (java-str "Http1Exchange.cancel: count=" count) (new Object/1 []))
+        (when (some? toComplete)
+          (let [^Executor exec (if (.isSelectorThread client)
+                                   ^Executor executor
+                                   (method-ref Executor this Http1Exchange/.runInline))
+                x error]
+            (while (not (.isEmpty toComplete))
+              (let [^{:tag (CompletableFuture ?)} cf (cast CompletableFuture (.poll toComplete))]
+                (.execute exec
+                          (lambda Runnable ^void []
+                            (when (.completeExceptionally cf x)
+                              (when (.on debug)
+                                (.log debug
+                                      "%s: completed cf with %s"
+                                      (new Object/1 [(.uri request) x]))))))))))
+        (finally (when-not upgraded (.close connection error))))))
+
+  (method upgraded ^void [this] (set! upgraded true))
+
+  (method ^:private runInline ^void [this ^Runnable run]
+    (java-assert (not (.isSelectorThread client)))
+    (.run run))
+
+  (method isCanceled ^boolean [this] (some? (.get failedRef)))
+
+  (method getCancelCause ^Throwable [this]
+    (cast Throwable (.get failedRef)))
+
+  (method appendToOutgoing ^void [this ^Throwable throwable]
+    (.appendToOutgoing this (DataPair. nil throwable)))
+
+  (method appendToOutgoing ^void [this ^{:tag (List ByteBuffer)} item]
+    (.appendToOutgoing this (DataPair. item nil)))
+
+  (method ^:private appendToOutgoing ^void [this ^DataPair dp]
+    (when (.on debug) (.log debug (java-str "appending to outgoing " dp)))
+    (.add outgoing dp)
+    (.runOrSchedule (.-writeScheduler writePublisher)))
+
+  (method ^:private hasOutgoing ^boolean [this] (not (.isEmpty outgoing)))
+
+  (method ^:private requestMoreBody ^void [this]
+    (try
+      (when (.on debug) (.log debug "requesting more request body from the subscriber"))
+      (.request bodySubscriber 1)
+      (catch Throwable t
+        (when (.on debug) (.log debug "Subscription::request failed" t))
+        (.cancelImpl this t)
+        (.completeExceptionally bodySentCF t))))
+
+  (method ^:private cancelUpstreamSubscription ^void [this]
+    (when (.on debug) (.log debug "cancelling upstream publisher"))
+    (cond
+      (some? bodySubscriber)
+        (.execute executor
+                  (method-ref Runnable
+                              bodySubscriber
+                              Http1RequestBodySubscriber/.cancelSubscription))
+      (.on debug) (.log debug "bodySubscriber is null")))
+
+  (method ^:private getOutgoing ^DataPair [this]
+    (let [^Executor exec executor
+          dp (cast DataPair (.pollFirst outgoing))]
+      (cond
+        (.-cancelled writePublisher)
+          (do
+            (.cancelUpstreamSubscription this)
+            (.completeAsync headersSentCF (lambda Supplier ^ExchangeImpl [] this) exec)
+            (.completeAsync bodySentCF (lambda Supplier ^ExchangeImpl [] this) exec)
+            nil)
+        (some? dp)
+          (if (some? (.-throwable dp))
+              (do
+                (.switchState this State/ERROR)
+                (.execute exec
+                          (lambda Runnable ^void []
+                            (.completeExceptionally headersSentCF (.-throwable dp))
+                            (.completeExceptionally bodySentCF (.-throwable dp))
+                            (.close connection (.-throwable dp))))
+                dp)
+              (do
+                (switch state
+                  HEADERS
+                    (do
+                      (.switchState this State/BODY)
+                      (when (.on debug) (.log debug "initiating completion of headersSentCF"))
+                      (.completeAsync headersSentCF (lambda Supplier ^ExchangeImpl [] this) exec))
+                  BODY
+                    (if (identical? (.-data dp) Http1RequestBodySubscriber/COMPLETED)
+                        (do
+                          (.switchState this State/COMPLETING)
+                          (when (.on debug) (.log debug "initiating completion of bodySentCF"))
+                          (.completeAsync bodySentCF (lambda Supplier ^ExchangeImpl [] this) exec))
+                        (.execute exec (method-ref Runnable this Http1Exchange/.requestMoreBody)))
+                  (java-assert false (java-str "Unexpected state:" state)))
+                dp)))))
+
+  (method switchState ^State [this ^State newState]
+    (.lock lock)
+    (try (set! state newState) (finally (.unlock lock))))
+
+  (method switchAssertState ^State [this ^State expected ^State newState]
+    (.lock lock)
+    (try
+      (java-assert (identical? state expected)
+        (java-str "Unexpected state:" state ", expected: " expected))
+      (set! state newState)
+      (finally (.unlock lock))))
+
+  (defclass ^:final Http1Publisher
+    :implements [FlowTube$TubePublisher]
+
+    (field ^:final ^Logger debug
+      (Utils/getDebugLogger (method-ref Supplier ^String [] this Http1Publisher/.dbgString)))
+
+    (field ^:volatile ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber)
+
+    (field ^:volatile ^boolean cancelled)
+
+    (field ^:final ^Http1WriteSubscription subscription (Http1WriteSubscription.))
+
+    (field ^:final ^Demand demand (Demand.))
+
+    (field ^:final ^SequentialScheduler writeScheduler
+      (SequentialScheduler/lockingScheduler (WriteTask.)))
+
+    (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} s]
+      (java-assert (identical? state State/INITIAL))
+      (Objects/requireNonNull s)
+      (java-assert (nil? subscriber))
+      (set! subscriber s)
+      (when (.on debug) (.log debug "got subscriber: %s" (new Object/1 [s])))
+      (.onSubscribe s subscription))
+
+    (field ^:volatile ^String dbgTag)
+
+    (method dbgString ^String [this]
+      (let [^:mutable tag dbgTag
+            ^Object flow (.getConnectionFlow connection)]
+        (cond
+          (and (nil? tag) (some? flow))
+            (set! dbgTag (set! tag (java-str "Http1Publisher(" flow ")")))
+          (nil? tag) (set! tag "Http1Publisher(?)"))
+        tag))
+
+    (method ^:private checkRequestCancelled ^boolean [this]
+      (when (.requestCancelled (.-multi (.-exchange Http1Exchange/this)))
+        (when (.on debug) (.log debug "request cancelled"))
+        (when (nil? subscriber) (when (.on debug) (.log debug "no subscriber yet")) (return true))
+        (switch state
+          BODY
+            (do
+              (.cancelUpstreamSubscription Http1Exchange/this)
+              (let [^:mutable cause (.getCancelCause Http1Exchange/this)]
+                (when (nil? cause) (set! cause (IOException. "Request cancelled")))
+                (.onError subscriber cause)
+                (.stop writeScheduler)
+                (return true)))
+          HEADERS
+            (let [^:mutable cause (.getCancelCause Http1Exchange/this)]
+              (when (nil? cause) (set! cause (IOException. "Request cancelled")))
+              (.onError subscriber cause)
+              (.stop writeScheduler)
+              (return true))))
+      false)
+
+    (defclass ^:final WriteTask
+      :implements [Runnable]
+
+      (method ^:public run ^void [this]
+        (java-assert (not (identical? state State/COMPLETED)) (java-str "Unexpected state:" state))
+        (when (.on debug) (.log debug (java-str "WriteTask for " request)))
+        (if cancelled
+            (do
+              (when (.on debug) (.log debug "handling cancellation"))
+              (.stop writeScheduler)
+              (.getOutgoing Http1Exchange/this))
+            (when-not (.checkRequestCancelled Http1Publisher/this)
+              (if (nil? subscriber)
+                  (when (.on debug) (.log debug "no subscriber yet"))
+                  (do
+                    (when (.on debug)
+                      (.log debug
+                            (lambda Supplier ^String []
+                              (java-str "hasOutgoing = "
+                                        (.hasOutgoing Http1Exchange/this)
+                                        ", demand = "
+                                        (.get demand)))))
+                    (while (and (.hasOutgoing Http1Exchange/this) (.tryDecrement demand))
+                      (let [dp (.getOutgoing Http1Exchange/this)]
+                        (when (.on debug) (.log debug (java-str "outgoing: " dp)))
+                        (when (nil? dp) (break))
+                        (if (some? (.-throwable dp))
+                            (do (when (.on debug) (.log debug "onError")) (.stop writeScheduler))
+                            (let [^{:tag (List ByteBuffer)} data (.-data dp)]
+                              (if (identical? data Http1RequestBodySubscriber/COMPLETED)
+                                  (do
+                                    (.switchAssertState
+                                      Http1Exchange/this
+                                      State/COMPLETING
+                                      State/COMPLETED)
+                                    (when (.on debug)
+                                      (.log debug
+                                            "completed, stopping %s"
+                                            (new Object/1 [writeScheduler])))
+                                    (.stop writeScheduler))
+                                  (do
+                                    (when (.checkRequestCancelled Http1Publisher/this)
+                                      (when (.on debug) (.log debug "Request cancelled!"))
+                                      (return))
+                                    (when (.on debug)
+                                      (.log debug
+                                            (java-str
+                                              "onNext with "
+                                              (Utils/remaining data)
+                                              " bytes")))
+                                    (.onNext subscriber data)))))))))))))
+
+    (defclass ^:final Http1WriteSubscription
+      :implements [Flow$Subscription]
+
+      (method ^:public request ^void [this ^long n]
+        (when-not cancelled
+          (.increase demand n)
+          (when (.on debug)
+            (.log debug "subscription request(%d), demand=%s" (new Object/1 [n demand])))
+          (.runOrSchedule writeScheduler executor)))
+
+      (method ^:public cancel ^void [this]
+        (when (.on debug) (.log debug (java-str "subscription cancelled for " request)))
+        (when-not cancelled (set! cancelled true) (.runOrSchedule writeScheduler executor)))))
+
+  (method ^:final client ^HttpClientImpl [this] client)
+
+  (method dbgString ^String [this] "Http1Exchange")
+
+  (method expectContinueFailed ^void [this ^int rcode]
+    (let [response (.-response this)] (when (some? response) (.closeWhenFinished response)))))

@@ -1,0 +1,362 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/ECDHServerKeyExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security CryptoPrimitive
+                        GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        PublicKey
+                        Signature
+                        SignatureException)
+        '(java.text MessageFormat)
+        '(java.util EnumSet Locale Map$Entry)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final ECDHServerKeyExchange
+  (field ^:static ^:final ^SSLConsumer ecdheHandshakeConsumer (ECDHServerKeyExchangeConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer ecdheHandshakeProducer
+    (ECDHServerKeyExchangeProducer.))
+
+  (defclass ^:private ^:static ^:final ECDHServerKeyExchangeMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:static ^:final ^byte CURVE_NAMED_CURVE (unchecked-byte 0x03))
+
+    (field ^:private ^:final ^NamedGroup namedGroup)
+
+    (field ^:private ^:final ^byte/1 publicPoint)
+
+    (field ^:private ^:final ^byte/1 paramsSignature)
+
+    (field ^:private ^:final ^boolean useExplicitSigAlgorithm)
+
+    (field ^:private ^:final ^SignatureScheme signatureScheme)
+
+    (field ^:private ^SSLCredentials sslCredentials)
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext]
+      (super. handshakeContext)
+      (let [shc (cast ServerHandshakeContext handshakeContext)
+            ^:mutable ^NamedGroupPossession namedGroupPossession nil
+            ^:mutable ^X509Authentication$X509Possession x509Possession nil]
+        (for-each [^SSLPossession possession (.-handshakePossessions shc)]
+          (if (instance? NamedGroupPossession possession)
+              (do
+                (set! namedGroupPossession (cast NamedGroupPossession possession))
+                (when (some? x509Possession) (break)))
+              (when (instance? X509Authentication$X509Possession possession)
+                (set! x509Possession (cast X509Authentication$X509Possession possession))
+                (when (some? namedGroupPossession) (break)))))
+        (when (nil? namedGroupPossession)
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         "No ECDHE credentials negotiated for server key exchange")))
+        (set! namedGroup (.getNamedGroup namedGroupPossession))
+        (when (or (nil? namedGroup) (not (.-isAvailable namedGroup)))
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         (java-str "Missing or improper named group: " namedGroup))))
+        (set! publicPoint (.encodePossessionPublicKey namedGroup namedGroupPossession))
+        (when (nil? publicPoint)
+          (throw (.fatal (.-conContext shc)
+                         Alert/ILLEGAL_PARAMETER
+                         (java-str "Missing public point for named group: " namedGroup))))
+        (if (nil? x509Possession)
+            (do
+              (set! paramsSignature nil)
+              (set! signatureScheme nil)
+              (set! useExplicitSigAlgorithm false))
+            (do
+              (set! useExplicitSigAlgorithm (.useTLS12PlusSpec (.-negotiatedProtocol shc)))
+              (let [^:mutable ^Signature signer nil]
+                (if useExplicitSigAlgorithm
+                    (let [^{:tag (Map$Entry SignatureScheme Signature)} schemeAndSigner
+                            (SignatureScheme/getSignerOfPreferableAlgorithm
+                              (.-sslConfig shc)
+                              (.-algorithmConstraints shc)
+                              (.-peerRequestedSignatureSchemes shc)
+                              x509Possession
+                              (.-negotiatedProtocol shc))]
+                      (if (nil? schemeAndSigner)
+                          (throw (.fatal (.-conContext shc)
+                                         Alert/INTERNAL_ERROR
+                                         (java-str
+                                           "No supported signature algorithm for "
+                                           (.getAlgorithm (.-popPrivateKey x509Possession))
+                                           "  key")))
+                          (do
+                            (set! signatureScheme (cast SignatureScheme (.getKey schemeAndSigner)))
+                            (set! signer (cast Signature (.getValue schemeAndSigner))))))
+                    (do
+                      (set! signatureScheme nil)
+                      (try
+                        (set! signer
+                              (ECDHServerKeyExchangeMessage/getSignature
+                                (.getAlgorithm (.-popPrivateKey x509Possession))
+                                (.-popPrivateKey x509Possession)))
+                        (catch [NoSuchAlgorithmException InvalidKeyException] e
+                          (throw (.fatal (.-conContext shc)
+                                         Alert/INTERNAL_ERROR
+                                         (java-str
+                                           "Unsupported signature algorithm: "
+                                           (.getAlgorithm (.-popPrivateKey x509Possession)))
+                                         e))))))
+                (let [^:mutable ^byte/1 signature nil]
+                  (try
+                    (ECDHServerKeyExchangeMessage/updateSignature
+                      signer
+                      (.-randomBytes (.-clientHelloRandom shc))
+                      (.-randomBytes (.-serverHelloRandom shc))
+                      (.-id namedGroup)
+                      publicPoint)
+                    (set! signature (.sign signer))
+                    (catch SignatureException ex
+                      (throw (.fatal (.-conContext shc)
+                                     Alert/INTERNAL_ERROR
+                                     (java-str "Failed to sign ecdhe parameters: "
+                                               (.getAlgorithm (.-popPrivateKey x509Possession)))
+                                     ex))))
+                  (set! paramsSignature signature)))))))
+
+    (constructor :throws [IOException] [this ^HandshakeContext handshakeContext ^ByteBuffer m]
+      (super. handshakeContext)
+      (let [chc (cast ClientHandshakeContext handshakeContext)
+            curveType (unchecked-byte (Record/getInt8 m))]
+        (when-not (== curveType CURVE_NAMED_CURVE)
+          (throw (.fatal (.-conContext chc)
+                         Alert/ILLEGAL_PARAMETER
+                         (java-str "Unsupported ECCurveType: " curveType))))
+        (let [namedGroupId (Record/getInt16 m)]
+          (set! (.-namedGroup this) (NamedGroup/valueOf namedGroupId))
+          (when (nil? namedGroup)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           (java-str "Unknown named group ID: " namedGroupId))))
+          (when-not (NamedGroup/isEnabled (.-sslConfig chc) namedGroup)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           (java-str "Unsupported named group: " namedGroup))))
+          (set! publicPoint (Record/getBytes8 m))
+          (when (== (alength publicPoint) 0)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           (java-str "Insufficient Point data: " namedGroup))))
+          (try
+            (set! sslCredentials (.decodeCredentials namedGroup publicPoint))
+            (when (some? (.-algorithmConstraints handshakeContext))
+              (when-instance [^NamedGroupCredentials namedGroupCredentials sslCredentials]
+                (when-not (.permits (.-algorithmConstraints handshakeContext)
+                                    (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                                    (.getPublicKey namedGroupCredentials))
+                  (.fatal (.-conContext chc)
+                          Alert/INSUFFICIENT_SECURITY
+                          (java-str "ServerKeyExchange for "
+                                    namedGroup
+                                    " does not comply with algorithm constraints")))))
+            (catch GeneralSecurityException ex
+              (throw (.fatal (.-conContext chc)
+                             Alert/UNEXPECTED_MESSAGE
+                             (java-str "Cannot decode named group: "
+                                       (NamedGroup/nameOf namedGroupId))))))
+          (let [^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+            (for-each [^SSLCredentials cd (.-handshakeCredentials chc)]
+              (when (instance? X509Authentication$X509Credentials cd)
+                (set! x509Credentials (cast X509Authentication$X509Credentials cd))
+                (break)))
+            (if (nil? x509Credentials)
+                (do
+                  (when (.hasRemaining m)
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/HANDSHAKE_FAILURE
+                                   "Invalid DH ServerKeyExchange: unknown extra data")))
+                  (set! (.-signatureScheme this) nil)
+                  (set! (.-paramsSignature this) nil)
+                  (set! (.-useExplicitSigAlgorithm this) false))
+                (do
+                  (set! (.-useExplicitSigAlgorithm this)
+                        (.useTLS12PlusSpec (.-negotiatedProtocol chc)))
+                  (if useExplicitSigAlgorithm
+                      (let [ssid (Record/getInt16 m)]
+                        (set! signatureScheme (SignatureScheme/valueOf ssid))
+                        (when (nil? signatureScheme)
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/HANDSHAKE_FAILURE
+                                         (java-str
+                                           "Invalid signature algorithm ("
+                                           ssid
+                                           ") used in ECDH ServerKeyExchange handshake message"))))
+                        (when-not (.contains (.-localSupportedSignAlgs chc) signatureScheme)
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/HANDSHAKE_FAILURE
+                                         (java-str
+                                           "Unsupported signature algorithm ("
+                                           (.-name signatureScheme)
+                                           ") used in ECDH ServerKeyExchange handshake message")))))
+                      (set! signatureScheme nil))
+                  (set! paramsSignature (Record/getBytes16 m))
+                  (let [^:mutable ^Signature signer nil]
+                    (if useExplicitSigAlgorithm
+                        (try
+                          (set! signer
+                                (.getVerifier signatureScheme (.-popPublicKey x509Credentials)))
+                          (catch [NoSuchAlgorithmException
+                                  InvalidKeyException
+                                  InvalidAlgorithmParameterException] nsae
+                            (throw (.fatal (.-conContext chc)
+                                           Alert/INTERNAL_ERROR
+                                           (java-str
+                                             "Unsupported signature algorithm: "
+                                             (.-name signatureScheme))
+                                           nsae))))
+                        (try
+                          (set! signer
+                                (ECDHServerKeyExchangeMessage/getSignature
+                                  (.getAlgorithm (.-popPublicKey x509Credentials))
+                                  (.-popPublicKey x509Credentials)))
+                          (catch [NoSuchAlgorithmException InvalidKeyException] e
+                            (throw (.fatal (.-conContext chc)
+                                           Alert/INTERNAL_ERROR
+                                           (java-str
+                                             "Unsupported signature algorithm: "
+                                             (.getAlgorithm (.-popPublicKey x509Credentials)))
+                                           e)))))
+                    (try
+                      (ECDHServerKeyExchangeMessage/updateSignature
+                        signer
+                        (.-randomBytes (.-clientHelloRandom chc))
+                        (.-randomBytes (.-serverHelloRandom chc))
+                        (.-id namedGroup)
+                        publicPoint)
+                      (when-not (.verify signer paramsSignature)
+                        (throw (.fatal (.-conContext chc)
+                                       Alert/HANDSHAKE_FAILURE
+                                       "Invalid ECDH ServerKeyExchange signature")))
+                      (catch SignatureException ex
+                        (throw (.fatal (.-conContext chc)
+                                       Alert/HANDSHAKE_FAILURE
+                                       "Cannot verify ECDH ServerKeyExchange signature"
+                                       ex)))))))))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/SERVER_KEY_EXCHANGE)
+
+    (method ^:public messageLength ^int [this]
+      (let [^:mutable ^int sigLen 0]
+        (when (some? paramsSignature)
+          (set! sigLen (unchecked-add-int 2 (alength paramsSignature)))
+          (when useExplicitSigAlgorithm
+            (set! sigLen (unchecked-add-int sigLen (SignatureScheme/sizeInRecord)))))
+        (unchecked-add-int (unchecked-add-int 4 (alength publicPoint)) sigLen)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putInt8 hos CURVE_NAMED_CURVE)
+      (.putInt16 hos (.-id namedGroup))
+      (.putBytes8 hos publicPoint)
+      (when (some? paramsSignature)
+        (when useExplicitSigAlgorithm (.putInt16 hos (.-id signatureScheme)))
+        (.putBytes16 hos paramsSignature)))
+
+    (method ^:public toString ^String [this]
+      (cond
+        useExplicitSigAlgorithm
+          (let [messageFormat (MessageFormat.
+                                "\"ECDH ServerKeyExchange\": '{'\n  \"parameters\": '{'\n    \"named group\": \"{0}\"\n    \"ecdh public\": '{'\n{1}\n    '}',\n  '}',\n  \"digital signature\":  '{'\n    \"signature algorithm\": \"{2}\"\n    \"signature\": '{'\n{3}\n    '}',\n  '}'\n'}'"
+                                Locale/ENGLISH)
+                hexEncoder (HexDumpEncoder.)
+                messageFields (new Object/1
+                                   [(.-name namedGroup)
+                                    (Utilities/indent
+                                      (.encodeBuffer hexEncoder publicPoint)
+                                      "      ")
+                                    (.-name signatureScheme)
+                                    (Utilities/indent
+                                      (.encodeBuffer hexEncoder paramsSignature)
+                                      "      ")])]
+            (.format messageFormat messageFields))
+        (some? paramsSignature)
+          (let [messageFormat (MessageFormat.
+                                "\"ECDH ServerKeyExchange\": '{'\n  \"parameters\":  '{'\n    \"named group\": \"{0}\"\n    \"ecdh public\": '{'\n{1}\n    '}',\n  '}',\n  \"signature\": '{'\n{2}\n  '}'\n'}'"
+                                Locale/ENGLISH)
+                hexEncoder (HexDumpEncoder.)
+                messageFields (new Object/1
+                                   [(.-name namedGroup)
+                                    (Utilities/indent
+                                      (.encodeBuffer hexEncoder publicPoint)
+                                      "      ")
+                                    (Utilities/indent
+                                      (.encodeBuffer hexEncoder paramsSignature)
+                                      "    ")])]
+            (.format messageFormat messageFields))
+        :else
+          (let [messageFormat (MessageFormat.
+                                "\"ECDH ServerKeyExchange\": '{'\n  \"parameters\":  '{'\n    \"named group\": \"{0}\"\n    \"ecdh public\": '{'\n{1}\n    '}',\n  '}'\n'}'"
+                                Locale/ENGLISH)
+                hexEncoder (HexDumpEncoder.)
+                messageFields (new Object/1
+                                   [(.-name namedGroup)
+                                    (Utilities/indent
+                                      (.encodeBuffer hexEncoder publicPoint)
+                                      "      ")])]
+            (.format messageFormat messageFields))))
+
+    (method ^:private ^:static getSignature :throws [NoSuchAlgorithmException InvalidKeyException] ^Signature [^String keyAlgorithm
+                                                                                                               ^Key key]
+      (let [^:mutable ^Signature signer nil]
+        (switch keyAlgorithm
+          "EC" (set! signer (Signature/getInstance JsseJce/SIGNATURE_ECDSA))
+          "EdDSA" (set! signer (Signature/getInstance JsseJce/SIGNATURE_EDDSA))
+          "RSA" (set! signer (RSASignature/getInstance))
+          (throw
+            (NoSuchAlgorithmException. (java-str "neither an RSA or a EC key : " keyAlgorithm))))
+        (if (instance? PublicKey key)
+            (.initVerify signer (cast PublicKey key))
+            (.initSign signer (cast PrivateKey key)))
+        signer))
+
+    (method ^:private ^:static updateSignature :throws [SignatureException] ^void [^Signature sig
+                                                                                   ^byte/1 clntNonce
+                                                                                   ^byte/1 svrNonce
+                                                                                   ^int namedGroupId
+                                                                                   ^byte/1 publicPoint]
+      (.update sig clntNonce)
+      (.update sig svrNonce)
+      (.update sig CURVE_NAMED_CURVE)
+      (.update sig (unchecked-byte (bit-and-int (bit-shift-right-int namedGroupId 8) 0xFF)))
+      (.update sig (unchecked-byte (bit-and-int namedGroupId 0xFF)))
+      (.update sig (unchecked-byte (alength publicPoint)))
+      (.update sig publicPoint)))
+
+  (defclass ^:private ^:static ^:final ECDHServerKeyExchangeProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            skem (ECDHServerKeyExchangeMessage. shc)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Produced ECDH ServerKeyExchange handshake message" skem))
+        (.write skem (.-handshakeOutput shc))
+        (.flush (.-handshakeOutput shc))
+        nil)))
+
+  (defclass ^:private ^:static ^:final ECDHServerKeyExchangeConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [chc (cast ClientHandshakeContext context)
+            skem (ECDHServerKeyExchangeMessage. chc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming ECDH ServerKeyExchange handshake message" skem))
+        (.add (.-handshakeCredentials chc) (.-sslCredentials skem))))))

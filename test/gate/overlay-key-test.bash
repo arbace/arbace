@@ -75,7 +75,7 @@ run > /dev/null; expect 10 "the toolchain's VERSION changed: printed again"
 rm -f "$T/work/overlay/overlay.key"
 run > /dev/null; expect 12 "no key beside the overlay (an interrupted print): printed again"
 run > /dev/null; expect 12 "and then reused"
-ls "$T/work/overlay" | grep -q '\.new$' && bad "a temporary file left" || ok "no temporary file left"
+grep -q '\.new$' <<< "$(ls "$T/work/overlay")" && bad "a temporary file left" || ok "no temporary file left"
 
 [ "$fail" = 0 ] && echo "PASS overlay-key-test" || echo "FAIL overlay-key-test"
 exit "$fail"

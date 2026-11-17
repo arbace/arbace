@@ -61,7 +61,7 @@ col() { awk -F'\t' -v n="$2" -v c="$3" '$1 == n {print $c}' "$1/plan.tsv"; }
 # 1. --full: whole parts, {only} gone, no list
 plan "$t/full" full || no "the full plan: $(cat "$t/full.out")"
 if [ "$(names "$t/full")" = "toy.toy toy.whole after-toy " ]; then ok "--full: the parts whole"; else no "--full: $(names "$t/full")"; fi
-if [ "$(col "$t/full" toy.toy 18)" = "bin/tool --corpus toy" ]; then ok "--full: the command without --only"; else no "--full's command: $(col "$t/full" toy.toy 18)"; fi
+if [ "$(col "$t/full" toy.toy 20)" = "bin/tool --corpus toy" ]; then ok "--full: the command without --only"; else no "--full's command: $(col "$t/full" toy.toy 20)"; fi
 
 # 2. the slices: a function of the name alone (SHA-256's first 8 hex digits mod 7), every file in one slice
 plan "$t/n0" nightly --night 0 || no "the nightly plan: $(cat "$t/n0.out")"
@@ -78,7 +78,7 @@ for k in 0 1 2 3 4 5 6; do
   [ -f "$f" ] && total=$((total + $(wc -l < "$f")))
 done
 if [ "$total" = 36 ]; then ok "the seven nights' slices cover the rest, 36 files, once each"; else no "the slices cover $total of 36"; fi
-if grep -q 'bin/tool --corpus toy --only "\$GATE_LIST"' "$t/n0/plan.tsv"; then ok "a rotated check's command takes \"\$GATE_LIST\""; else no "the rotated command: $(col "$t/n0" toy.toy.s0 18)"; fi
+if grep -q 'bin/tool --corpus toy --only "\$GATE_LIST"' "$t/n0/plan.tsv"; then ok "a rotated check's command takes \"\$GATE_LIST\""; else no "the rotated command: $(col "$t/n0" toy.toy.s0 20)"; fi
 if [ "$(col "$t/n0" after-toy 6)" = "toy.toy.sub,toy.toy.s0,toy.whole" ]; then ok ":needs naming the step names its rotated checks"; else no ":needs: $(col "$t/n0" after-toy 6)"; fi
 
 # 3. keys: over the list (a line list SHA N); the same list, the same key; another list, another key
@@ -284,7 +284,8 @@ cat > "$r3/test/steps.edn" <<'STEPS'
             :subset "test/corp.edn" :subset-key :subset-rd :always ["cc/d/f3.c" "oo/g.c"] :failed-re "CFAILRE"}}]}
 STEPS
 # every C step's :failed-re (the user, 2026-11-03: the id up to the tab of FAIL ID<tab>WHY), the same one
-cre=$(grep -o ':failed-re "^FAIL [^"]*"' "$here/test/gate/steps.edn" | sort -u)
+# (C's steps only: the crops' fragments, batch 1 on, read their own FAIL lines with their own patterns)
+cre=$(awk 'match($0, /\{:name [^ ]+/) {n = substr($0, RSTART + 7, RLENGTH - 7)} n ~ /^c-/ && match($0, /:failed-re "\^FAIL [^"]*"/) {print substr($0, RSTART, RLENGTH)}' "$here/test/gate/steps.edn" | sort -u)
 [ "$(echo "$cre" | wc -l)" = 1 ] && ok "every C step's :failed-re is one pattern" || no "C's :failed-re differ: $cre"
 cre=${cre#:failed-re \"}; cre=${cre%\"}
 sed -i "s|CFAILRE|$cre|" "$r3/test/steps.edn"
@@ -304,6 +305,52 @@ for k in 0 1 2 3 4 5 6; do grep -qx 'cc/main with args.c' "$t/k$k/rotation/rc.cc
 logs=$t/k$ks; key[rc.cc.s$ks]=$(col "$t/k$ks" rc.cc.s$ks 3)
 printf 'FAIL cc/main with args.c\tdiffer stdout (status 0)\nFAIL _control/x\tcontrol passed\n' > "$t/k$ks/rc.cc.s$ks.log"; rotation_note rc.cc.s$ks fail
 if [ "$(cut -f3 "$store/_rotation/rc.cc.failed" 2>&1)" = "cc/main with args.c" ]; then ok "C's :failed-re: a name with spaces read up to the tab, noted whole (the control's line not in the list)"; else no "the spaced name: $(cat "$store/_rotation/rc.cc.failed" 2>&1)"; fi
+
+# review 181 L5: a :subset name outside the record fails the plan (no longer dropped silently); an empty subset is no check
+r5=$t/root3; rm -rf "$r5"; cp -a "$r" "$r5"
+plan5() { local d=$1; shift; rm -rf "$d"; mkdir -p "$d"
+  (cd "$r5" && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) > "$d/files.sha256"; cp "$t/hosts.edn" "$t/ancestors.txt" "$d/"
+  (cd "$here" && GATE_STEPS=$r5/test/steps.edn arbace_tool -p "$here/test" -m gate.plan plan "$r5" "$d" "$t/store6" "$@") > "$d.out" 2>&1; }
+mkdir -p "$t/store6"
+sed -i 's/"p4.c"/"p4.c" "nope.c"/' "$r5/test/corpora.edn"
+if ! plan5 "$t/u0" nightly --night 0 && grep -q 'toy.toy: test/corpora.edn.s :subset of toy names 1 file(s) not in test/record.edn: toy/nope.c' "$t/u0.out"; then ok "a :subset name not in the record fails the plan, named"; else no "an unknown :subset name: $(cat "$t/u0.out")"; fi
+if ! plan5 "$t/u1" full && grep -q 'nope.c' "$t/u1.out"; then ok "... in --full too (the clean run's subsets)"; else no "an unknown :subset name in --full: $(head -3 "$t/u1.out")"; fi
+echo '{:corpora [{:id :toy :subset []} {:id :whole}]}' > "$r5/test/corpora.edn"
+plan5 "$t/u2" nightly --night 0 || no "the empty subset's plan: $(cat "$t/u2.out")"
+case $(names "$t/u2") in "toy.toy.s0 toy.whole after-toy ") ok "an empty :subset: no subset check, the night's slice alone" ;; *) no "an empty subset: $(names "$t/u2")" ;; esac
+plan5 "$t/u3" full --rotation subset
+case $(names "$t/u3") in "toy.whole after-toy ") ok "an empty :subset in the clean run: nothing of the part" ;; *) no "an empty subset, clean: $(names "$t/u3")" ;; esac
+
+# review 181 L7: --prune trims the runs (the last 50 and the 30 days' kept) and leaves the record's .seq and .lock
+store=$t/store7; mkdir -p "$store/_rotation"
+old=$(( $(date +%s) - 40 * 86400 ))
+{ for i in $(seq 1 80); do printf '%s\td\tpass\tk\tl\tc0ffee\t/w\t%s\tfalse\n' "$old" "$i"; done
+  for i in 81 82 83; do printf '%s\td\tpass\tk\tl\tc0ffee\t/w\t%s\tfalse\n' "$(date +%s)" "$i"; done; } > "$store/_rotation/toy.toy.s1.runs"
+{ for i in $(seq 1 60); do printf '%s\td\tpass\tk\tl\tc0ffee\t/w\t%s\tfalse\n' "$(date +%s)" "$i"; done; } > "$store/_rotation/toy.toy.s2.runs"
+echo 83 > "$store/_rotation/.seq"; : > "$store/_rotation/.lock"; touch -d '2 days ago' "$store/_rotation/.seq" "$store/_rotation/.lock"
+printf '1\t%s\ttoy/p9.c\tfail\tc0ffee\tfalse\n' "$old" > "$store/_rotation/toy.toy.failed"
+mkdir -p "$t/exes"; exes=$t/exes
+gate_prune --dry-run > "$t/prune-dry.out" 2>&1
+[ "$(wc -l < "$store/_rotation/toy.toy.s1.runs")" = 83 ] && grep -q 'would trim _rotation/toy.toy.s1.runs (83 runs, 50 kept)' "$t/prune-dry.out" \
+  && ok "--prune --dry-run: the runs to trim named, none trimmed" || no "--prune --dry-run: $(cat "$t/prune-dry.out")"
+gate_prune > "$t/prune.out" 2>&1
+if [ "$(wc -l < "$store/_rotation/toy.toy.s1.runs")" = 50 ] && [ "$(tail -1 "$store/_rotation/toy.toy.s1.runs" | cut -f8)" = 83 ] \
+   && [ "$(head -1 "$store/_rotation/toy.toy.s1.runs" | cut -f8)" = 34 ] && [ "$(wc -l < "$store/_rotation/toy.toy.s2.runs")" = 60 ]; then
+  ok "--prune: a check's runs trimmed to the last 50, those of the last 30 days kept"; else no "--prune's runs: $(wc -l "$store"/_rotation/*.runs; cat "$t/prune.out")"; fi
+if [ "$(cat "$store/_rotation/.seq" 2>&1)" = 83 ] && [ -e "$store/_rotation/.lock" ] && [ -s "$store/_rotation/toy.toy.failed" ]; then ok "--prune: the record's .seq, .lock and failed events kept"; else no "--prune removed the record's files: $(ls -A "$store/_rotation")"; fi
+store=$t/store
+
+# review 181 L3: the judge's every failure line (GATE_FAIL_LINES, LOGS/NAME.fail-lines) read with the log, where the
+# log prints the first 40: every failing file of the slice joins the subset in one run
+store=$t/store5; mkdir -p "$store"; logs=$t/n0; key[toy.toy.s0]=$(col "$t/n0" toy.toy.s0 3)
+v1=$(sed -n 1p "$t/n0/rotation/toy.toy.s0.list") v2=$(sed -n 2p "$t/n0/rotation/toy.toy.s0.list")
+printf 'ci judge: ...\nFAIL %s differs\n' "$v1" > "$t/n0/toy.toy.s0.log"
+printf 'FAIL %s differs\nFAIL %s differs\n' "$v1" "$v2" > "$t/n0/toy.toy.s0.fail-lines"
+rotation_note toy.toy.s0 fail
+if [ "$(failed_now)" = "$(printf '%s\n%s' "$v1" "$v2" | LC_ALL=C sort)" ]; then ok "the judge's GATE_FAIL_LINES read with the log: a file past the log's 40 FAIL lines joins the subset too"; else no "GATE_FAIL_LINES: $(cat "$store/_rotation/toy.toy.failed" 2>&1)"; fi
+rm -f "$t/n0/toy.toy.s0.fail-lines"
+if grep -q 'GATE_FAIL_LINES=$logs/$n.fail-lines step ' "$here/bin/lib/gate-run.bash"; then ok "the runner names GATE_FAIL_LINES for each step's run"; else no "the runner sets no GATE_FAIL_LINES"; fi
+store=$t/store
 
 echo "$((n - bad)) of $n passed"
 [ "$bad" = 0 ]

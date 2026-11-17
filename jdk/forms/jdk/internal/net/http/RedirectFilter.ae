@@ -1,0 +1,106 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/RedirectFilter.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException UncheckedIOException)
+        '(java.net URI)
+        '(java.net.http HttpClient$Redirect HttpHeaders)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function Function Supplier)
+        '(jdk.internal.net.http.common Log Utils))
+
+(defclass RedirectFilter
+  :implements [HeaderFilter]
+
+  (field ^:private ^:final ^ReentrantLock stateLock (ReentrantLock.))
+
+  (field ^HttpRequestImpl request)
+
+  (field ^HttpClientImpl client)
+
+  (field ^HttpClient$Redirect policy)
+
+  (field ^String method)
+
+  (field ^{:tag (MultiExchange ?)} exchange)
+
+  (field ^:static ^:final ^int DEFAULT_MAX_REDIRECTS 5)
+
+  (field ^URI uri)
+
+  (field ^:static ^:final ^int HTTP_NOT_MODIFIED 304)
+
+  (field ^:static ^:final ^int max_redirects
+    (Utils/getIntegerNetProperty "jdk.httpclient.redirects.retrylimit" DEFAULT_MAX_REDIRECTS))
+
+  (constructor ^:public [this])
+
+  (method ^:public request :throws [IOException] ^void [this ^HttpRequestImpl r
+                                                        ^{:tag (MultiExchange ?)} e]
+    (.lock stateLock)
+    (try
+      (set! (.-request this) r)
+      (set! (.-client this) (.client e))
+      (set! (.-policy this) (.followRedirects client))
+      (set! (.-method this) (.method r))
+      (set! (.-uri this) (.uri r))
+      (set! (.-exchange this) e)
+      (finally (.unlock stateLock))))
+
+  (method ^:public response :throws [IOException] ^HttpRequestImpl [this ^Response r]
+    (.lock stateLock)
+    (try (.handleResponse this r) (finally (.unlock stateLock))))
+
+  (method ^:private ^:static redirectedMethod ^String [^int statusCode ^String orig]
+    (switch statusCode
+      (301 302) (if (.equals orig "POST") "GET" orig)
+      303 "GET"
+      (307 308) orig
+      orig))
+
+  (method ^:private ^:static isRedirecting ^boolean [^int statusCode]
+    (cond
+      (< statusCode 300) false
+      (> statusCode 308) false
+      :else (switch statusCode (300 304 305 306) false true)))
+
+  (method ^:private handleResponse ^HttpRequestImpl [this ^Response r]
+    (let [rcode (.statusCode r)]
+      (when-not (or (== rcode 200) (identical? policy HttpClient$Redirect/NEVER))
+        (when-not (== rcode HTTP_NOT_MODIFIED)
+          (when (RedirectFilter/isRedirecting rcode)
+            (let [redir (.getRedirectedURI this (.headers r))
+                  newMethod (RedirectFilter/redirectedMethod rcode method)]
+              (Log/logTrace "response code: {0}, redirected URI: {1}" rcode redir)
+              (if (and (.canRedirect this redir)
+                       (< (set! (.-numberOfRedirects exchange)
+                                (unchecked-inc-int (.-numberOfRedirects exchange)))
+                          max_redirects))
+                  (do
+                    (Log/logTrace "redirect to: {0} with method: {1}" redir newMethod)
+                    (HttpRequestImpl/newInstanceForRedirection
+                      redir
+                      newMethod
+                      request
+                      (not (== rcode 303))))
+                  (do (Log/logTrace "not redirecting") nil))))))))
+
+  (method ^:private getRedirectedURI ^URI [this ^HttpHeaders headers]
+    (let [^:mutable ^URI redirectedURI nil]
+      (set! redirectedURI
+            (cast URI
+                  (.orElseThrow (.map (.firstValue headers "Location")
+                                      (method-ref Function ^URI [String] URI/create))
+                                (lambda Supplier ^UncheckedIOException []
+                                  (UncheckedIOException. (IOException. "Invalid redirection"))))))
+      (set! redirectedURI (.resolve uri redirectedURI))
+      redirectedURI))
+
+  (method ^:private canRedirect ^boolean [this ^URI redir]
+    (let [newScheme (.getScheme redir)
+          oldScheme (.getScheme uri)]
+      (switch policy
+        ALWAYS true
+        NEVER false
+        NORMAL (or (.equalsIgnoreCase newScheme oldScheme) (.equalsIgnoreCase newScheme "https"))
+        (throw (MatchException. nil nil))))))

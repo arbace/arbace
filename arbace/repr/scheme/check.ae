@@ -5,7 +5,9 @@
   (:require [arbace.string :as str]
             [arbace.repr.scheme.forms :as fm]
             [arbace.repr.scheme.read :as rd]
-            [arbace.repr.scheme.print :as pr]))
+            [arbace.repr.scheme.print :as pr]
+            [arbace.repr.scheme.report :as rep]
+            [arbace.repr.scheme.category :as uc]))
 
 (def chez-classes
   "Chez's messages (position taken off) to the reader's error classes, first match."
@@ -19,7 +21,7 @@
    [#"found in bytevector" :bad-bytevector]
    [#"symbol syntax is not allowed|symbol escape|delimiter . is not allowed|open brace|close brace|symbol hex escape|invalid .*symbol" :bad-symbol]])
 
-(declare first-diff-path char-or-nil)
+(declare first-diff-path char-or-nil compare-file)
 
 (defn chez-class [^String msg]
   (or (some (fn [[re k]] (when (re-find re msg) k)) chez-classes) :other))
@@ -49,6 +51,81 @@
                 ca {:kind :error-missing :chez (chez-class (:message ca)) :chez-message (:message ca) :at (:at ca)})))))
 
 (defn- first-diff-path [a b] (fm/first-difference a b))
+
+;; ---- the probes' own verdict (SCS5 (b), the user 2026-11-08; doc/scheme/SCHEME-SURVEY.md, "As built: SCS5"): the report's
+;; grammar (arbace.repr.scheme.report) in place of Chez's dump, for every probe it decides and test/scheme/report-chez.edn does not
+;; name; the properties: the same data (numbers by exact arithmetic), the same offsets, an error where the grammar has no
+;; production (of the class the grammar gives; a run that is no lexeme any of the token classes), and each datum written and read
+;; back the same
+
+(def token-classes
+  "The reader's classes of a run that is no lexeme (the report's :token: which one names it is Chez's taxonomy, an end of file
+  too where more text could have made the run a lexeme, as #e before the end and its whitespace)."
+  #{:bad-number :bad-symbol :invalid-sharp :bad-char-name :unexpected-eof})
+
+(defn report-exceptions [root] (read-string (slurp (str root "/test/scheme/report-chez.edn"))))
+
+(defn chez-past-classes
+  "SCS18 (b) (the user 2026-11-09): test/scheme/choices.edn's classes that name probes (:ids) where Chez reads past R6RS's grammar and
+  both readers refuse as the report does, as rules of report-chez.edn's shape ({:id CLASS :ids [...] :match RE :why TITLE}), for
+  bin/repr-scheme report-check (the probes they name must differ from Chez's dump); the check judges them by the report."
+  [root]
+  (vec (for [[k c] (:classes (read-string (slurp (str root "/test/scheme/choices.edn")))) :when (:ids c)]
+         {:id k :ids (:ids c) :match (:match c) :why (:title c)})))
+
+(defn report-exception
+  "The rule of test/scheme/report-chez.edn that names the probe id (Chez's R6RS mode reads past the report there), or nil."
+  [rules ^String id]
+  (some #(when (some #{id} (:ids %)) %) rules))
+
+(defn- class-ok? [rep-err mine-class]
+  (if (= :token (:class rep-err))
+    (contains? token-classes mine-class)
+    (= (:class rep-err) mine-class)))
+
+(defn report-diff
+  "The first way Arbace's reading `mine` ({:data :error}) of a text differs from the report's reading `r` (rep/read-all, decided),
+  or nil: E-tree, E-off, the count, E-error (presence and class) and E-write's property (each datum written by Arbace's writer
+  and read back the same datum, alone)."
+  [mine r]
+  (let [md (:data mine) rd* (:data r) n (min (count md) (count rd*))]
+    (or (some (fn [i]
+                (let [a (nth md i) b (nth rd* i)]
+                  (cond (not (fm/tree= (:form a) (:form b))) {:kind :tree :index i :at (first-diff-path (:form a) (:form b)) :off (:off b)}
+                        (not= (:off a) (:off b)) {:kind :off :index i :mine (:off a) :report (:off b)})))
+              (range n))
+        (when (not= (count md) (count rd*)) {:kind :count :mine (count md) :report (count rd*)})
+        (let [ma (:error mine) ra (:error r)]
+          (cond (and ma ra) (when-not (class-ok? ra (:class ma)) {:kind :error-class :mine (:class ma) :report (:class ra) :report-message (:message ra)})
+                ma {:kind :error-extra :mine (:class ma) :message (:message ma) :at (:at ma)}
+                ra {:kind :error-missing :report (:class ra) :report-message (:message ra) :at (:at ra)}))
+        (some (fn [[i a]]
+                (let [w (pr/write-form (:form a)) back (rd/read-all w {})]
+                  (when-not (and (nil? (:error back)) (== 1 (count (:data back))) (fm/tree= (:form a) (:form (first (:data back)))))
+                    {:kind :write :index i :mine w :back (mapv :form (:data back))})))
+              (map vector (range) md)))))
+
+(defn judge-probe
+  "A probe's text judged: [judge diff-or-nil], judge :report (the report's grammar decides it), :choice (SCS10 (b): the report with
+  si's stated choices, doc/scheme/SPEC.md 12, decides it: no dump read either) or :dump (Chez's dump: the report leaves it to the
+  implementation and no choice is stated, or a rule of report-chez.edn names it; dump nil, a :no-dump difference; since SCS14 (b) a
+  polar number is a choice, :polar)."
+  [rules ^String id ^String text dump]
+  (let [r (rep/read-all text)]
+    (if (or (:undecided r) (report-exception rules id))
+      [:dump (if dump (compare-file text dump) {:kind :no-dump})]
+      [(if (:choices r) :choice :report) (report-diff (rd/read-all text {}) r)])))
+
+(defn judge-file
+  "SCS7 (c) (the user 2026-11-08; doc/scheme/SCHEME-SURVEY.md, \"As built: SCS7 (c), SCS8 (b)\"): a corpus file's text judged as a probe
+  is: [judge diff-or-nil], :report where the report's grammar decides the whole text (report-diff, the dump not read), :dump where
+  it leaves a part of it to the implementation (the first :undecided datum: the file's reading is Chez's) or a rule of
+  report-chez.edn names the file's key (dump nil, a :no-dump difference)."
+  [rules ^String k ^String text dump]
+  (let [r (rep/read-all text)]
+    (if (or (:undecided r) (report-exception rules k))
+      [:dump (if dump (compare-file text dump) {:kind :no-dump})]
+      [(if (:choices r) :choice :report) (report-diff (rd/read-all text {}) r)])))
 
 (defn compare-file
   "Compare the text of a file with its dump: nil when they agree, else the first difference."
@@ -87,16 +164,105 @@
 
 (defn- char-or-nil [n] (if (< n 0x10000) (char n) \a))
 
+(declare report-scan-classes)
+
+(def report-scans
+  "SCS9 (c) (the user 2026-11-08): the three reading scans, judged by the report's character classes over the Unicode Character
+  Database 16.0.0 (report-scan-classes), no dump read; since SCS17 (c) (the user 2026-11-09) the four printing scans too, by si's
+  printer's rules (doc/scheme/SPEC.md 7, stated in arbace.repr.scheme.report: `write`'s choices are the implementation's, stated)."
+  #{:whitespace :ident-initial :ident-subsequent :string-escaped :char-hex :symbol-escaped-first :symbol-escaped-rest})
+
 (defn scan-diffs
-  "For a scan dump {:scan KIND :ranges ...}: [] when Arbace's predicate gives the same ranges, else the
-  differing ranges (symmetric difference as ranges, at most 20)."
-  [{:keys [scan ranges]}]
-  (let [mine (ranges-of (scan-predicates scan))
+  "For a scan {:scan KIND :ranges ...} (Chez's dump) or {:scan KIND :judge :report} (SCS9 (c): one of report-scans, judged by the
+  report's classes): {:scan :judge :ranges :n-only-mine :n-only-judge ...}, the judge's ranges against Arbace's predicate's, the
+  differing code points counted (at most 20 of each shown)."
+  [{:keys [scan ranges judge]}]
+  (let [by-report (= judge :report)
+        mine (ranges-of (scan-predicates scan))
+        theirs (if by-report (ranges-of (report-scan-classes scan)) (map vec ranges))
         set-of (fn [rs] (into (sorted-set) (mapcat (fn [[lo hi]] (range lo (inc hi))) rs)))
+        a (set-of mine) b (set-of theirs)
+        only-mine (remove b a) only-judge (remove a b)]
+    {:scan scan :judge (if by-report :report :dump) :ranges (count theirs) :only-mine (take 20 only-mine) :only-judge (take 20 only-judge)
+     :n-only-mine (count only-mine) :n-only-judge (count only-judge)}))
+
+;; ---- the lexical scans by the report (SCS7 (c) measured them; since SCS9 (c) the report's classes judge the three reading scans,
+;; scan-diffs): dump.ss's three reading scans with the report's grammar in place of Chez's reader, the same texts (a<c>b reads as a
+;; and b; <c>a and a<c> as one identifier of those characters); the report's categories are the Unicode Character Database
+;; 16.0.0's (arbace.repr.scheme.category; before SCS9 (c) Character/getType's, jrt's tables from jdk26u, Unicode 17.0), Chez's are
+;; its own Unicode data
+
+(def report-scan-readings
+  "dump.ss's three reading scans with the report's grammar reading the texts: slow (a read a scalar value), so the measurement
+  takes the report's character classes (report-scan-classes) and confirms them by these where they matter (report-scan-diffs)."
+  {:whitespace (fn [n] (let [r (rep/read-all (str "a" (cp-string n) "b"))]
+                         (and (nil? (:undecided r)) (nil? (:error r)) (= '[a b] (mapv :form (:data r))))))
+   :ident-initial (fn [n] (let [s (str (cp-string n) "a") r (rep/read-all s)]
+                            (and (nil? (:undecided r)) (nil? (:error r)) (== 1 (count (:data r)))
+                                 (fm/tree= (fm/sym s) (:form (first (:data r)))))))
+   :ident-subsequent (fn [n] (let [s (str "a" (cp-string n)) r (rep/read-all s)]
+                               (and (nil? (:undecided r)) (nil? (:error r)) (== 1 (count (:data r)))
+                                    (fm/tree= (fm/sym s) (:form (first (:data r)))))))})
+
+(def report-scan-classes
+  "The same scans as the report's character classes: <c> between a and b reads as two identifiers exactly when it is <whitespace>
+  (any other delimiter opens a datum or a comment, a constituent joins the identifier); <c>a is one identifier exactly when <c> is an
+  <initial> (the peculiar identifiers +, -, ... and ->... are no <c>a); a<c> exactly when <c> is a <subsequent>."
+  {:whitespace (fn [n] (rep/whitespace? n)) :ident-initial (fn [n] (rep/initial? n)) :ident-subsequent (fn [n] (rep/subsequent? n))
+   ;; SCS17 (c): the printing scans by SPEC 7's rules
+   :string-escaped (fn [n] (rep/written-escaped-in-string? n)) :char-hex (fn [n] (rep/written-hex-char? n))
+   :symbol-escaped-first (fn [n] (rep/written-escaped-symbol-first? n)) :symbol-escaped-rest (fn [n] (rep/written-escaped-symbol-rest? n))})
+
+(defn- cp-class [^long n]
+  [(uc/category n)
+   (if-let [b (java.lang.Character$UnicodeBlock/of (int n))] (str b) "NO_BLOCK")])
+
+(defn report-scan-diffs
+  "A reading scan's dump {:scan KIND :ranges ...} against the report's reading of the same texts: {:scan K :chez N :report M
+  :only-report {[category block] count} :only-chez {...} :n-only-report :n-only-chez :examples-...} (the category UCD 16.0.0's,
+  arbace.repr.scheme.category; the block Java's, Character.UnicodeBlock, a label only)."
+  [{:keys [scan ranges]}]
+  (let [mine (ranges-of (report-scan-classes scan))
+        set-of (fn [rs] (into #{} (mapcat (fn [[lo hi]] (range lo (inc hi))) rs)))
         a (set-of mine) b (set-of (map vec ranges))
-        only-mine (remove b a) only-chez (remove a b)]
-    {:scan scan :ranges (count ranges) :only-mine (take 20 only-mine) :only-chez (take 20 only-chez)
-     :n-only-mine (count only-mine) :n-only-chez (count only-chez)}))
+        only-r (sort (remove b a)) only-c (sort (remove a b))
+        group (fn [xs] (into (sorted-map) (frequencies (map cp-class xs))))
+        ;; the classes confirmed by the report's reading: on every differing scalar value, and on every 97th of the others
+        reading (report-scan-readings scan)
+        sample (concat only-r only-c (filter #(and (zero? (mod % 97)) (not (<= 0xD800 % 0xDFFF))) (range 0 0x110000)))
+        unconfirmed (vec (take 20 (remove #(= (boolean (reading %)) (contains? a %)) sample)))]
+    {:scan scan :chez (count b) :report (count a) :n-only-report (count only-r) :n-only-chez (count only-c)
+     :confirmed-by-reading (count sample) :unconfirmed unconfirmed
+     :only-report (group only-r) :only-chez (group only-c)
+     :ranges-only-report (count (ranges-of (set only-r))) :ranges-only-chez (count (ranges-of (set only-c)))}))
+
+(def print-scan-writes
+  "SCS17 (c): the texts the printing scans write (dump.ss's), by repr/scheme's printer, with the datum each must read back as."
+  {:string-escaped (fn [n] [(pr/write-string (cp-string n)) (cp-string n)])
+   :char-hex (fn [n] [(pr/write-char n) (fm/char-form n)])
+   :symbol-escaped-first (fn [n] [(pr/write-symbol (cp-string n)) (fm/sym (cp-string n))])
+   :symbol-escaped-rest (fn [n] [(pr/write-symbol (str "a" (cp-string n))) (fm/sym (str "a" (cp-string n)))])})
+
+(defn report-print-scan-diffs
+  "SCS17 (c) (by hand, the oracle tier's): a printing scan's dump {:scan KIND :ranges ...} (Chez's `write`) against SPEC 7's rule
+  (report-scan-classes): {:scan K :chez N :report M :n-only-report :n-only-chez :examples-...}, and each sampled text as repr/scheme's
+  printer writes it read back by the report's grammar to the same datum (every differing scalar value, every escaped one when they
+  are fewer than 1,000, the strings' and the characters', and every 97th of all; :unconfirmed, at most 20 that do not)."
+  [{:keys [scan ranges]}]
+  (let [rule (report-scan-classes scan)
+        mine (ranges-of rule)
+        set-of (fn [rs] (into #{} (mapcat (fn [[lo hi]] (range lo (inc hi))) rs)))
+        a (set-of mine) b (set-of (map vec ranges))
+        only-r (sort (remove b a)) only-c (sort (remove a b))
+        wr (print-scan-writes scan)
+        sample (distinct (concat only-r only-c (when (< (count a) 1000) (sort a))
+                                 (filter #(and (zero? (mod % 97)) (not (<= 0xD800 % 0xDFFF))) (range 0 0x110000))))
+        back (fn [n] (let [[text want] (wr n) r (rep/read-all text)]
+                       (and (nil? (:undecided r)) (nil? (:error r)) (== 1 (count (:data r))) (fm/tree= want (:form (first (:data r)))))))
+        unconfirmed (vec (take 20 (remove back sample)))]
+    {:scan scan :chez (count b) :report (count a) :n-only-report (count only-r) :n-only-chez (count only-c)
+     :examples-only-report (vec (take 20 only-r)) :examples-only-chez (vec (take 20 only-c))
+     :read-back (count sample) :unconfirmed unconfirmed}))
 
 ;; ---- the check
 
@@ -132,23 +298,44 @@
 
 (defn check-dumps
   "Compare every dump in DIR (dump-ID.edn, dump-probes.edn, scan-*.edn) with Arbace's reading. Returns
-  {:results {key diff-or-nil} :scans [...] :counts {...}}."
-  [root dir]
+  {:results {key diff-or-nil} :scans [...] :dumps {key dump} :judges {key :report|:dump}} (SCS5 (b): a probe the report's grammar
+  decides is judged by it, arbace.repr.scheme.check/judge-probe, its dump not read; SCS7 (c): a corpus file too, judge-file); :dumps holds the dumps of the keys in KEEP only (the negative controls'
+  files, GT9), none by default."
+  [root dir & [keep]]
   (let [corpora (remove #(false? (:check %)) (:corpora (load-edn (str root "/test/scheme/corpora.edn"))))
         keyed (into {} (mapcat (fn [c] (map (fn [[k p]] [p k]) (corpus-files root c))) corpora))
         probe-dir (str dir "/probes/")
-        results (atom (sorted-map))]
+        results (atom (sorted-map))
+        judges (atom (sorted-map))
+        dumps (atom {})
+        probe-dumps (atom {})
+        rules (delay (report-exceptions root))
+        probe-key (fn [^String p] (when (.startsWith p probe-dir) (str "probe/" (subs p (count probe-dir) (- (count p) 3)))))]
     (doseq [f (cons "probes" (map (comp name :id) corpora))
             :let [path (str dir "/dump-" f ".edn")]
             :when (.exists (java.io.File. ^String path))]
       (doseq [d (read-dumps path)]
         (let [p (:file d)
-              k (or (keyed p) (when (.startsWith ^String p probe-dir) (str "probe/" (subs p (count probe-dir) (- (count p) 3)))) p)
-              text (slurp p)]
-          (swap! results assoc k (compare-file text d)))))
+              k (or (keyed p) (probe-key p) p)]
+          (when (contains? keep k) (swap! dumps assoc k d))
+          (if (probe-key p)
+            (swap! probe-dumps assoc k d)
+            ;; SCS7 (c): a corpus file by the report's grammar where it decides the whole text, else by its dump
+            (let [[j df] (judge-file @rules k (slurp p) d)]
+              (swap! judges assoc k j) (swap! results assoc k df))))))
+    ;; SCS5 (b): each probe by the report's grammar where it decides, else by its dump; the probes are judged when their unit was
+    ;; selected (DIR/dump-probes.edn: the dumps of the undecided ones are read from it)
+    (when (.exists (java.io.File. (str dir "/dump-probes.edn")))
+      (let [rules @rules]
+        (doseq [f (sort (.list (java.io.File. ^String probe-dir)))
+                :let [p (str probe-dir f) k (probe-key p)]]
+          (let [[j d] (judge-probe rules (subs k 6) (slurp p) (@probe-dumps k))]
+            (when (contains? keep k) (when-let [x (@probe-dumps k)] (swap! dumps assoc k x)))
+            (swap! judges assoc k j)
+            (swap! results assoc k d)))))
     (let [scans (vec (for [f (sort (.list (java.io.File. ^String dir))) :when (.startsWith ^String f "scan-")]
                        (scan-diffs (load-edn (str dir "/" f)))))]
-      {:results @results :scans scans})))
+      {:results @results :scans scans :dumps @dumps :judges @judges})))
 
 (defn judge
   "Results against the known differences (a map key -> {:kind K ...}): [unlisted gone] lists."

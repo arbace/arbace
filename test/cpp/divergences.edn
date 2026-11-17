@@ -1,0 +1,78 @@
+;; cppi's divergences from g++ 15.2 (doc/cpp/CPP-SURVEY.md, "As built: CX8 (write-ahead)"; doc/cpp/LLVM.md §11): the classes every
+;; program of bin/cppi check that does not pass falls into, each with why and where it was decided, in test/goi/divergences.edn's
+;; format. A program's class is the first whose :match finds its result and reason ("RESULT REASON", as
+;; test/cpp/check-linux-amd64.edn writes them). bin/cppi divergences judges the recorded check against them. Read with the
+;; Clojure reader.
+[
+ {:id :threads
+  :title "threads (deferred: ci runs no threads)"
+  :kind :deferred
+  :why "std::thread starts a thread by musl's pthread_create, whose clone is assembly: ci's back end has no threads (C's class threads, doc/c/SPEC.md §6.5); CP1 left threads out of v1"
+  :decided "CP1; C's §6.5, CS264 (a)"
+  ;; since rust-re6 (batch 2) ci has __clone and runs threads (go/arbace/crt's scheduler); a C++ thread's start then reaches the
+  ;; pending-flag layer's cx$uncaught in cx$thread_start and std::terminate: the layer's per-thread exception state on ci's threads
+  ;; is not proven (re6's "not yet proven on ci"), the same deferred class until it is. (Threads do start and run on ci:
+  ;; runtime/atomics.cpp's four threads pass at both levels; threads.cpp's fault is :thread-exceptions, review 1111 #4.)
+  :match [#"^fail differ status 139 .*undefined function __clone"
+          #"^fail differ status 139 .*a_crash \(thread \d+: abort < .*_ZSt9terminatev < cx\$uncaught < cx\$thread_start"]}
+ {:id :thread-exceptions
+  :title "throw and catch on ci's threads: runtime/threads.cpp's workers fault in their try/catch (CP367)"
+  :kind :deferred
+  :why "since the default route auto (cpp-route, 0a38cd982) runtime/threads.cpp's started threads fault inside work(), in its throw and catch, after the thread started (atomics.cpp's threads, a guarded static and shared_ptr counts on four threads, pass at both levels): per-thread exception state on ci's threads, or the route-auto codegen of try/catch, not yet diagnosed (CP367)"
+  :decided "review 1111 #4; CP367 (open)"
+  ;; anchored on threads.cpp's own frames, its work(int) called from one of main's lambdas (any of the four threads may fault
+  ;; first): no other program's fault on a thread falls in here. cpp-threads (2026-11-15): the cause was bin/cppi building node programs
+  ;; with stage 0's embedded ci, older than ci's threads (the runtime's _Thread_local pending flag one object for all threads); fixed by
+  ;; bin/lib/cppi/ci-fresh.bash, threads.cpp passes at the eval level and no recorded row is in this class (kept until the weekly AOT
+  ;; runtime part confirms it: CP396 (b), proposed)
+  :match [#"^fail differ status 139 .*segmentation fault \(thread \d+: _ZL4worki < g\$_ZZ4mainENK3\$24_\d+clEv < "]}
+ {:id :long-double
+  :title "the IR's x86_fp80 layout against ci's 8-byte long double (CS35, CP84 (a))"
+  :kind :design
+  :why "the lowering keeps the IR's 16-byte x86_fp80 in its structs' static assertions (CP84 (a)); ci's long double is double (CS35). Since cppi-deferred an x86_fp80 member is held in a slot union of the IR's layout (LLVM.md §7), so the static assertions hold in ci; a program that computes in long double differs from g++'s x87. The check-error shapes stay for a layout the slot union does not cover"
+  :decided "CS35, CP84 (a)"
+  ;; only the failures CS35 and CP84 (a) explain (review 191, F1): the static assertions of a layout holding an x86_fp80 (the
+  ;; program's, or a runtime unit's it links), and C's two differ shapes of a computation in long double
+  :match [#"^check-error (\d+: static assertion failed(; )?)+ uses-long-double$"
+          #"^refused runtime-check: .*static assertion failed.* uses-long-double$"
+          #"^fail differ (status 134 \(g\+\+ 0\)|stdout) uses-long-double$"]}
+ {:id :speed
+  :title "speed: programs beyond the check's budget"
+  :kind :design
+  :why "an interpreter of nodes is 10 to 100 times slower than g++'s code (C's and goi's class of the same name)"
+  :decided "C's CS107 (a); GOI-SPEC §11.1's rule"
+  :match [#"^fail differ status timeout"]}
+ {:id :oracle-text
+  :title "text the compiler writes into the program: the oracle's, not g++'s"
+  :kind :design
+  :why "__PRETTY_FUNCTION__, __FUNCTION__'s decorations and similar compiler-made strings come from clang, which the lowered program is compiled by (CP11's split: g++ judges, clang compiles); a test that compares them with g++'s spelling differs"
+  :decided "CP2, CP11"
+  :match [#"^fail known oracle-text: "]}
+ {:id :atomic-generic
+  :title "an atomic long double (deferred)"
+  :kind :deferred
+  :why "the lowering writes gcc's generic __atomic_load, __atomic_store and __atomic_exchange for an x86_fp80 atomic (LLVM.md §7; a float's or double's are the _n forms on its bits since cppi-deferred); repr/c's <builtin> source declares them without parameters, so ci's check refuses the calls (\"too many arguments\")"
+  :decided "CX8 (this record)"
+  ;; flagged by the program's own calls (review 191, F3): ci's message names no function
+  :match [#"^check-error .*too many arguments to function.* uses-atomic-generic( uses-long-double)?$"]}
+ {:id :va-arg
+  :title "a lowered function that reads a va_list argument of alignment 16 (a gap)"
+  :kind :gap
+  :why "clang writes va_arg for x86-64 at -O0 inline, reading the __va_list_tag's gp_offset and reg_save_area; on ci the storage holds ci's own va_list, so until cppi-deferred the function read garbage and faulted (queue 191's va3.cpp: a vsum(int, va_list) with va_arg faults at 0x28). Since cppi-deferred the fields are the macros cx$va_fK, which ci's read defines over ci's va_list (the overflow path, LLVM.md §11); left: an argument clang aligns to 16 in the overflow area (long double, __int128). The lowering marks the program's functions whose IR does so (va-arg=NAME in the build's flags) and the judge classes a fault in one of them. Passing a va_list on (vsnprintf, va_copy, a lowered forwarder) works; libstdc++'s one such function, __snprintf_lite, has ci's override (test/cpp/runtime/ci/)"
+  :decided "the user, 2026-11-03 (queue 191's DECISION (a)): a class now; ci's x86-64 va_list with C++'s next round"
+  :match [#"^fail differ status 139 .* uses-va-arg( uses-long-double)?$"]}
+ ;; CP263 (a) (the user, 2026-11-08; cpp-props): once CPPI_ROUTE=auto is bin/cppi's default (CP240 (b), after the night's comparison)
+ ;; a program our route refuses and clang rejects is our route's gap; oracle-rejected keeps the programs our route does not try
+ {:id :ours-refused
+  :title "our route refuses a program clang rejects too"
+  :kind :deferred
+  :why "under CPPI_ROUTE=auto our route (Arbace's front end and code generator) is tried first; it refused the program (its class in the reason) and clang, the fallback, rejects it as well: the program has no IR, and it is our route's gap, not the oracle's by design (CP263 (a))"
+  :decided "CP263 (a) (the user, 2026-11-08), with CP240 (b)'s switch"
+  :match [#"^ours-refused "]}
+ {:id :oracle-rejected
+  :title "clang rejects a program g++ builds"
+  :kind :design
+  :why "the oracle (clang 23) refuses a GNU extension or a g++-only construct the test uses; the program has no IR to lower (CP11: g++ the judge, clang the oracle)"
+  :decided "CP2, CP11"
+  :match [#"^oracle-rejected "]}
+]

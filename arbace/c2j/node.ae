@@ -10,6 +10,8 @@
   opts: :exprs, the analyzed node's classes (Compiler$IfExpr ...; the evaluator's dispatch);
   :fields, the node's fields the static forms read (besides the children's); :chans, the
   evaluator's channels (:o run, :j runLong, :d runDouble, :z runBool; all four by default);
+  :eval-only, a kind the evaluator alone has (no emitter: the back end's own code compiles
+  these nodes);
   :class, the evaluator's class name (CodeKIND); :emit-first, a fn of [ctx n unboxed?] the
   emitter tries first (a refinement of the back end's own: F5's linked calls), nil when it does
   not apply; :domain {:index form}, a static of finite domain (a method): the evaluator makes one
@@ -38,6 +40,8 @@
   case, for a static boolean, (many? xs), (clears? at)); (static-case ch :o a :j b ...);
   (box-as ch m form) a method's value boxed in channel :o; (call-static m as) the direct call
   (with F3's fast paths for Numbers' boxed operations: one builder for both halves);
+  (cast-target m x) x cast to method m's class, (call-instance m t as) m's call on t (the
+  evaluator's alone: an :eval-only kind's);
   (get-place at CH), (set-place at x); (at-line line x) x's value, the evaluator's frame's line
   set after x; let. Any other form is copied: the emitter quotes it,
   the evaluator runs it."
@@ -236,7 +240,7 @@
   (let [d (parse kind doc opts bindings template)]
     (list 'do
           (list 'arbace.c2j.node/register! (list 'quote d))
-          (emit-fn d))))
+          (when-not (:eval-only (:opts d)) (emit-fn d)))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; the evaluator: the template as Code classes (Java forms of Compiler's Go build)
@@ -277,14 +281,18 @@
     :else f))
 
 (defn- arg-kind
-  "The evaluator's channel of a parameter of class c (:i an int, through runLong)."
+  "The evaluator's channel of a parameter of class c (:i an int, :b a byte, :s a short, :c a
+  char, through runLong; :f a float, through runDouble)."
   [^Class c]
-  (cond (= c Long/TYPE) :j (= c Integer/TYPE) :i (= c Double/TYPE) :d (= c Boolean/TYPE) :z :else :o))
+  (cond (= c Long/TYPE) :j (= c Integer/TYPE) :i (= c Double/TYPE) :d (= c Boolean/TYPE) :z
+        (= c Byte/TYPE) :b (= c Short/TYPE) :s (= c Character/TYPE) :c (= c Float/TYPE) :f :else :o))
 
 (defn- ret-chans
-  "The channels a method returning class c is made in: :o, and its primitive's."
+  "The channels a method returning class c is made in: :o, and its primitive's (a byte's,
+  short's and char's runLong, widened; a float's runDouble)."
   [^Class c]
-  (cond (or (= c Long/TYPE) (= c Integer/TYPE)) #{:o :j} (= c Double/TYPE) #{:o :d} (= c Boolean/TYPE) #{:o :z} :else #{:o}))
+  (cond (or (= c Long/TYPE) (= c Integer/TYPE) (= c Byte/TYPE) (= c Short/TYPE) (= c Character/TYPE)) #{:o :j}
+        (or (= c Double/TYPE) (= c Float/TYPE)) #{:o :d} (= c Boolean/TYPE) #{:o :z} :else #{:o}))
 
 (declare qe)
 
@@ -317,6 +325,10 @@
                                     (case (arg-kind p)
                                       :j (list '.runLong a 'f)
                                       :i (list 'unchecked-int (list '.runLong a 'f))
+                                      :b (list 'unchecked-byte (list '.runLong a 'f))
+                                      :s (list 'unchecked-short (list '.runLong a 'f))
+                                      :c (list 'unchecked-char (list '.runLong a 'f))
+                                      :f (list 'unchecked-float (list '.runDouble a 'f))
                                       :d (list '.runDouble a 'f)
                                       :z (list '.runBool a 'f)
                                       :o (if (= p Object) (list '.run a 'f) (list 'cast (ts p) (list '.run a 'f))))))
@@ -363,6 +375,11 @@
                         b (env a)
                         g (atom 0)]
                     ((:call-static (:helpers v)) (:m v) (:temps b) (fn [base] (symbol (str base (swap! g inc))))))
+      cast-target (let [[_ x] as
+                        ^java.lang.reflect.Method m (:m v)]
+                    (list 'cast ((:type-sym (:helpers v)) (.getDeclaringClass m)) (qe env v x)))
+      call-instance (let [[_ t a] as]
+                      ((:call-instance (:helpers v)) (:m v) (:temp (env t)) (:temps (env a))))
       array-of (let [b (env (first as))]
                  (case (:k b)
                    :cs-array (:temp b)
@@ -557,8 +574,8 @@
   "The evaluator's half of every definition, as Java forms of Compiler: the Code classes, and
   CodeNodes (compile, the nodes' construction for CodeCompiler.compile, nil when the node is
   not of these kinds; table, the domains' cases by key). helpers: {:box :call-static
-  :type-sym}, the back end's builders the two halves share; domains: {kind {arity [Method
-  ...]}}; keys: {kind (fn [Method] key)}. Returns [[comment class-form] ...]."
+  :call-instance :type-sym}, the back end's builders the two halves share; domains: {kind
+  {arity [Method ...]}}; keys: {kind (fn [Method] key)}. Returns [[comment class-form] ...]."
   [helpers domains keys]
   (let [per (for [d @registry]
               {:d d :vs (mapv (fn [v] (let [v (assoc v :helpers helpers)

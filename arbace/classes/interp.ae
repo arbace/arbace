@@ -13,7 +13,9 @@
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.parse :as p]
-            [arbace.classes.analyze :as a])
+            [arbace.classes.analyze :as a]
+            [arbace.classes.suid :as suid]
+            [arbace.classes.annot :as annot])
   (:import (arbace.lang Compiler$CF$Rt Compiler$CF$Klass Compiler$CF$Meth Compiler$CF$Node
                         Compiler$CF$Const Compiler$CF$Local Compiler$CF$SetLocal
                         Compiler$CF$SelfField Compiler$CF$OuterPath Compiler$CF$ArithJ
@@ -26,7 +28,7 @@
                         Compiler$CF$VarDeref Compiler$CF$VarInvoke Compiler$CF$FiAdapter
                         Compiler$CF$NewI Compiler$CF$CtorCall Compiler$CF$NewR Compiler$CF$GetField
                         Compiler$CF$SetField Compiler$CF$GetStatic Compiler$CF$SetStatic
-                        Compiler$CF$FieldR Compiler$CF$NewArray Compiler$CF$ArrayInit
+                        Compiler$CF$FieldR Compiler$CF$VolField Compiler$CF$NewArray Compiler$CF$ArrayInit
                         Compiler$CF$Aget Compiler$CF$Aset Compiler$CF$Alength Compiler$CF$ArrayClone
                         Compiler$CF$JavaStr Compiler$CF$ForEach Compiler$CF$Pat Compiler$CF$Switch
                         Compiler$CF$IfInstance Compiler$CF$MakeLambda Compiler$CF$RecordOp
@@ -529,10 +531,18 @@
 (defn- ptypes [desc] (char-array (map tc (first (t/parse-method-desc desc)))))
 
 (defn- has? [flags f] (not (zero? (bit-and (or flags 0) f))))
+
 (def ^:private ACC_STATIC 0x0008)
 (def ^:private ACC_PRIVATE 0x0002)
 (def ^:private ACC_ABSTRACT 0x0400)
 (def ^:private ACC_INTERFACE 0x0200)
+(def ^:private ACC_VOLATILE 0x0040)
+
+(defn- volatile-field?
+  "Is field f (an analyzed field's map) volatile? Its accesses are then CF$VolField's,
+  sequentially consistent (JCS127), and the other fields' stay GetField's and the others'."
+  [f]
+  (has? (:flags f) ACC_VOLATILE))
 
 (defn method-of
   "The Meth of interpreted class k declaring or inheriting method key (non-virtual lookup:
@@ -679,7 +689,9 @@
       (= fname "$assertionsDisabled") (konst "Z" true)
       (klass owner) (let [[sk i] (or (find-static (klass owner) fname)
                                      (fail (str "No static field " fname " in " owner)))]
-                      (arbace.lang.Compiler$CF$GetStatic. (char (tc ty)) sk (int i)))
+                      (if (volatile-field? f)
+                        (arbace.lang.Compiler$CF$VolField. (char (tc ty)) sk nil (int i) nil)
+                        (arbace.lang.Compiler$CF$GetStatic. (char (tc ty)) sk (int i))))
       :else (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) fname)
                                                     (fail (str "No field " owner "." fname)))
                                  nil nil))))
@@ -691,7 +703,9 @@
         ty (:desc f)]
     (if (klass owner)
       (let [[sk i] (or (find-static (klass owner) fname) (fail (str "No static field " fname " in " owner)))]
-        (arbace.lang.Compiler$CF$SetStatic. (char (tc ty)) sk (int i) (coerce ctx (:val an) ty)))
+        (if (volatile-field? f)
+          (arbace.lang.Compiler$CF$VolField. (char (tc ty)) sk nil (int i) (coerce ctx (:val an) ty))
+          (arbace.lang.Compiler$CF$SetStatic. (char (tc ty)) sk (int i) (coerce ctx (:val an) ty))))
       (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) fname)
                                               (fail (str "No field " owner "." fname)))
                            nil (coerce ctx (:val an) ty)))))
@@ -713,7 +727,9 @@
         tn (coerce ctx (:target an) (t/internal->desc owner))]
     (if-let [k (klass owner)]
       (if-let [i (field-index k (:name f))]
-        (arbace.lang.Compiler$CF$GetField. (char (tc ty)) tn (int i))
+        (if (volatile-field? f)
+          (arbace.lang.Compiler$CF$VolField. (char (tc ty)) nil tn (int i) nil)
+          (arbace.lang.Compiler$CF$GetField. (char (tc ty)) tn (int i)))
         (super-field ctx k f ty tn nil))
       (if-let [fd (find-field (internal->class owner) (:name f))]
         (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) fd tn nil)
@@ -727,7 +743,9 @@
         v (coerce ctx (:val an) ty)]
     (if-let [k (klass owner)]
       (if-let [i (field-index k (:name f))]
-        (arbace.lang.Compiler$CF$SetField. (char (tc ty)) tn (int i) v)
+        (if (volatile-field? f)
+          (arbace.lang.Compiler$CF$VolField. (char (tc ty)) nil tn (int i) v)
+          (arbace.lang.Compiler$CF$SetField. (char (tc ty)) tn (int i) v))
         (super-field ctx k f ty tn v))
       (if-let [fd (find-field (internal->class owner) (:name f))]
         (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) fd tn v)
@@ -927,6 +945,8 @@
                                                 (:methods d)))))
     (set! (.-fnClass k) (boolean (and (:clojure-fn (:meta d))
                                       (#{(t/lang-class "AFunction") (t/lang-class "RestFn")} (:super d)))))
+    ;; a record class (Class.isRecord: the host's kind 3; JCS167)
+    (set! (.-record k) (= :record (:kind d)))
     k))
 
 (defn- layout!
@@ -1305,6 +1325,17 @@
     (set! (.-info k) {:fields [] :field-index {} :statics [] :static-index {} :lambda true})
     k))
 
+(defn- lambda-markers
+  "The marker interfaces of a lambda's class: the intersection's, and Serializable for a serializable
+  lambda whose interface does not extend it ((IntSupplier & Serializable) () -> 1: the analyzer keeps it
+  out of :markers, LambdaMetafactory's altMetafactory makes the class implement it; JCS169), as j2g's
+  arbace.j2g.code/lambda-markers."
+  [an]
+  (vec (distinct (concat (:markers an)
+                         (when (and (:serializable an)
+                                    (not (env/assignable? (t/internal->desc (:fi an)) "Ljava/io/Serializable;")))
+                           ["java/io/Serializable"])))))
+
 (declare publish! publish-members!)
 
 (defn- lambda-done!
@@ -1335,12 +1366,47 @@
   (publish! k)
   k)
 
+(def ^:private serial-lambdas-class
+  "jdk.internal.jrt.SerialLambdas when the world has it (JCS169), else nil."
+  (delay (try (Class/forName "jdk.internal.jrt.SerialLambdas") (catch Throwable _ nil))))
+
+(defn- serial-lambda!
+  "JCS169 (a) (the user's decision of 2026-11-08; doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS169
+  (write-ahead)\"): a serializable lambda's or method reference's class k (its objects' n fields the captured
+  values, the receiver first) registered with SerialLambdas as javac's $deserializeLambda$ would find it (the
+  capturing class, the functional interface's method, the implementation [kind class name signature]), its
+  factory making an object of k from captured values; and k's writeReplace (private final, as
+  InnerClassLambdaMetafactory's class has it) answering the SerializedLambda of an object's fields. Nothing
+  when the node is not serializable or the world has not SerialLambdas."
+  [^arbace.lang.Compiler$CF$Klass k an n [kind icls iname isig]]
+  (when-let [sl (and (:serializable an) @serial-lambdas-class)]
+    (let [sam (:sam an)
+          site (arbace.lang.Reflector/invokeStaticMethod
+                 ^Class sl "register"
+                 (object-array [(internal->class (:class an)) (:fi an) (:name sam) (:desc sam) (int kind)
+                                icls iname isig (:inst-desc an)
+                                (fn [^objects caps]
+                                  (let [o (.alloc (host) k)]
+                                    (dotimes [i n] (.setField (host) o (int i) (aget caps i)))
+                                    o))]))]
+      ;; the Go host's member table entry (Compiler$CFGo.setMethod: a virtual method by key), by name as
+      ;; interp.ae names the Go host
+      (arbace.lang.Reflector/invokeStaticMethod
+        (Class/forName "arbace.lang.Compiler$CFGo") "setMethod"
+        (object-array [(.-cls k) "writeReplace" (make-array Class 0) Object (int 0x12)
+        (fn [this]
+          (arbace.lang.Reflector/invokeStaticMethod
+            ^Class sl "replace"
+            (object-array [(arbace.lang.Reflector/invokeStaticMethod
+                             ^Class sl "instance"
+                             (object-array [site (object-array (map #(.field (host) this (int %)) (range n)))]))])))])))))
+
 (defmethod build-op :lambda [ctx an]
   (let [b (:boundary an)
         inst? (boolean @(:uses-this b))
         caps @(:captures b)
         sam (:sam an)
-        k (new-lambda-klass (:class ctx) (:fi an) (:markers an) (+ (count caps) (if inst? 1 0)))
+        k (new-lambda-klass (:class ctx) (:fi an) (lambda-markers an) (+ (count caps) (if inst? 1 0)))
         lctx (new-ctx (:class ctx) (:ret an))
         self (when inst? (slot! lctx "Ljava/lang/Object;"))
         lctx (assoc lctx :self (if inst? self -1) :klass (:klass ctx))
@@ -1353,6 +1419,9 @@
     (set! (.-ctypes mt) (char-array (concat (when inst? [\L]) (map #(tc (:type %)) caps))))
     (finish! lctx mt body)
     (lambda-done! k mt (:bridges sam))
+    (serial-lambda! k an (+ (count caps) (if inst? 1 0))
+                    [(if inst? 7 6) (:class ctx) (:name an)
+                     (t/method-desc (concat (map :type caps) (map :type (:params an))) (:ret an))])
     (arbace.lang.Compiler$CF$MakeLambda. k (nodes (concat (when inst? [(arbace.lang.Compiler$CF$Local. \L (int (:self ctx)))])
                                               (map #(local-node ctx %) caps))))))
 
@@ -1362,7 +1431,7 @@
         [ips iret] (t/parse-method-desc (:inst-desc an))
         [mps mret] (t/parse-method-desc desc)
         bound? (= kind :bound)
-        k (new-lambda-klass (:class ctx) (:fi an) (:markers an) (if bound? 1 0))
+        k (new-lambda-klass (:class ctx) (:fi an) (lambda-markers an) (if bound? 1 0))
         lctx (new-ctx (:class ctx) iret)
         recv (when bound? (slot! lctx "Ljava/lang/Object;"))
         pslots (mapv #(slot! lctx %) ips)
@@ -1406,6 +1475,8 @@
     (finish! lctx mt body)
     (set! (.-self mt) (int -1))
     (lambda-done! k mt (:bridges sam))
+    (serial-lambda! k an (if bound? 1 0)
+                    [(case kind :static 6 :new 8 (if (env/interface? owner) 9 5)) owner name desc])
     (arbace.lang.Compiler$CF$MakeLambda. k (nodes (when bound?
                                         [(let [r (node ctx (:recv an))]
                                            (if (:null-check an) (arbace.lang.Compiler$CF$NullChecked. r) r))])))))
@@ -1482,6 +1553,25 @@
                           (set! (.-cslots d) (.-cslots m)) (set! (.-ctypes d) (.-ctypes m))))
     d))
 
+(defn- implicit-params!
+  "JCS351 (a): constructor m of k as reflection sees it, javac's descriptor (Lower: the enclosing instance's
+  parameter first, the captured values' last, JLS 13.1's mandated and synthetic parameters): for an inner or a
+  local or anonymous class, m's Class parameters with those of this$0 and the captured fields around them, and
+  m's implicit the fields they set (Compiler$CF$Rt/construct), as the interpreter's new sets them
+  (implicit-fields)."
+  [^arbace.lang.Compiler$CF$Klass k ^arbace.lang.Compiler$CF$Meth m]
+  (let [info (.-info k)
+        fdesc (into {} (map (juxt :name :desc) (:fields info)))
+        i0 (get (:field-index info) "this$0")
+        caps (:captures info)
+        cis (vec (for [b caps] (get (:capture-index info) (:id b))))]
+    (when (or i0 (seq caps))
+      (let [lead (if i0 [i0] [])
+            lead-cls (for [_ lead] (sig-class (fdesc "this$0")))
+            trail-cls (for [b caps] (sig-class (:type b)))]
+        (set! (.-params m) (into-array Class (concat lead-cls (seq (.-params m)) trail-cls)))
+        (set! (.-implicit m) (int-array (concat [(count lead) (count cis)] lead cis)))))))
+
 (defn- publish-members!
   [^arbace.lang.Compiler$CF$Klass k]
   (let [h (host)
@@ -1490,19 +1580,27 @@
             :when (.add seen key)
             :when (not= key "doInvoke")]
       (meth-classes m)
-      (if (and (:lambda (.-info k)) (not (identical? (.-k m) k)))
+      (if (not (identical? (.-k m) k))
         ;; a lambda's class inherits its interfaces' default methods (javac's bridges in an
         ;; interface among them) for dispatch only: getDeclaredMethods lists its method and its
         ;; bridges, as LambdaMetafactory's class (bit 30, not the JVM's: the host's slot without
-        ;; a member table entry, arbace.j2g.dyncf; JCS116 (a), "As built: JC4c")
+        ;; a member table entry, arbace.j2g.dyncf; JCS116 (a), "As built: JC4c"); so does any
+        ;; class the virtual methods it inherits from interpreted classes and their interfaces'
+        ;; defaults (JCS167's third slice: getDeclaredMethods lists the class's own, as the JVM's,
+        ;; which computeDefaultSUID and the tests that print a class's methods read)
         (.method h k (dispatch-only m))
         (.method h k m)))
     (doseq [[_ ^arbace.lang.Compiler$CF$Meth m] (.-ctors k)]
       (meth-classes m)
+      (implicit-params! k m)
       (.ctor h k m))
     (let [info (.-info k)]
       (doseq [f (:own-fields info)]
         (.addField h k (:name f) (sig-class (:desc f)) (int (:flags f)) (int (field-index k (:name f))) false))
+      ;; javac's synthetic instance fields: the enclosing instance's this$0 and the captured locals'
+      ;; (final, synthetic: getDeclaredFields lists them, as the JVM's; JCS167's third slice)
+      (doseq [f (drop (count (:own-fields info)) (:fields info))]
+        (.addField h k (:name f) (sig-class (:desc f)) (int 0x1010) (int (field-index k (:name f))) false))
       (doseq [[i f] (map-indexed vector (:statics info))]
         (.addField h k (:name f) (sig-class (:desc f)) (int (:flags f)) (int i) true)))))
 
@@ -1536,6 +1634,37 @@
                       (let [[ctx body] (build)] (finish! ctx mt body)))))
             (set! (.-clinit k) (arbace.lang.Compiler$CF$CallI. \V mt nil (nodes [])))))))))
 
+(defn- serial-new!
+  "JCS167 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS167 (write-ahead)\"): the allocation
+  for deserialization of k (class n) when it is a concrete Serializable class, neither an enum nor a
+  record (ObjectStreamClass makes those by name and by the canonical constructor):
+  Compiler$CF$Rt.serialPlan's constructor (ReflectionFactory.newConstructorForSerialization's
+  rule), handed to the host as the class's SerialNew; none when the rule finds no constructor
+  (ObjectStreamClass's \"no valid constructor\")."
+  [^arbace.lang.Compiler$CF$Klass k n]
+  (let [d (a/decl n)]
+    (when (and (.-cls k) (not (.-iface k)) (not (.-fnClass k)) (not (.-record k))
+               (not (has? (.-flags k) ACC_ABSTRACT))
+               (not (#{:enum} (:kind d))) (not (:enum-body d))
+               (.implementsClass k java.io.Serializable))
+      (when-let [plan (arbace.lang.Compiler$CF$Rt/serialPlan k)]
+        (.setSerialNew (host) k (fn [] (arbace.lang.Compiler$CF$Rt/serialNew k plan)))))))
+
+(defn- serial-uid!
+  "JCS168 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS167 slices 2-3 (write-ahead)\"): the
+  default serialVersionUID of k (class n) when it is Serializable without a declared one (a static
+  serialVersionUID field), neither an enum nor a record (ObjectStreamClass gives those 0), computed from
+  its declaration as javac compiles it (arbace.classes.suid) and handed to the host as the class's
+  ClassInfo.SerialUID: computeDefaultSUID's reflection over an interpreted class sees the members the
+  interpreter publishes, not javac's synthetic ones."
+  [^arbace.lang.Compiler$CF$Klass k n]
+  (let [d (a/decl n)]
+    (when (and (.-cls k) (not (.-fnClass k)) (not (.-record k))
+               (not (#{:enum :record} (:kind d))) (not (:enum-body d))
+               (.implementsClass k java.io.Serializable)
+               (not (some #(and (= "serialVersionUID" (:name %)) (has? (:flags %) ACC_STATIC)) (:fields d))))
+      (.setSerialUID (host) k (long (suid/default-suid n))))))
+
 (defn define!
   "Compiles Java forms (each the rest of a defclass form) in namespace ns as one compilation,
   the sibling Java forms entered as declarations, into interpreted classes. Returns [[dotted-name
@@ -1557,6 +1686,8 @@
             (let [^arbace.lang.Compiler$CF$Klass k (ks n)]
               (set! (.-cls k) (.define (host) k))
               (set! (.-info k) (assoc (.-info k) :compile-set @env/*compile-set* :klasses ks))))
+          (doseq [n sorted] (serial-new! (ks n) n))
+          (doseq [n sorted] (serial-uid! (ks n) n))
           (doseq [n sorted] (vtable! (ks n)))
           ;; fn classes: their variadic arity by name (CF$FnObj)
           (doseq [n order
@@ -1583,6 +1714,13 @@
                   :let [o (ks (:outer d))]
                   :when (and o (.-cls ^arbace.lang.Compiler$CF$Klass o))]
             (.outer (host) (ks n) (.-cls ^arbace.lang.Compiler$CF$Klass o) (str (:simple d))))
+          ;; the classes' RUNTIME-visible annotations (F14), jrt's to decode on first use
+          (doseq [n sorted
+                  :let [^arbace.lang.Compiler$CF$Klass k (ks n)]
+                  :when (.-cls k)
+                  :let [data (try (annot/class-data n :members true) (catch Exception _ nil))]
+                  :when data]
+            (.annotations (host) k data))
           (doseq [n sorted
                   :let [^arbace.lang.Compiler$CF$Klass k (ks n)]
                   :when (= :enum (:kind (a/decl n)))]
