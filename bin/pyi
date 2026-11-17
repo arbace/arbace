@@ -105,6 +105,13 @@
 #                                  test/python/universe.ae on stage 0, no python3; record-ref writes it after Lib/test's
 #                                  references): check's inventory (libtest_judge.ae --universe, no outcome read), refused when
 #                                  its key is not its inputs'; --check: written afresh, compared byte for byte, a control
+#   bin/pyi records [--slice N] [--dir DIR] [--only aot|lib-test]
+#                                  queue 321: the eval and AOT cells' records night in one command (the main host's, linux/amd64):
+#                                  the host checked to run the checkout's runtime (the gate's build at the checkout's key taken for
+#                                  a stale stage 0), check --aot --record, check --fresh --record, each timed with its peak memory,
+#                                  the recorded sources' :until dropped from test/reap/cells.edn, bin/reap --record, bin/crops-score
+#                                  --record; --slice N: the dry run, every Nth program and module, the records under DIR, read by
+#                                  bin/reap and bin/crops-score through an overlay of the checkout (nothing of it written)
 #   bin/pyi divergences [--table | --methods] [--results FILE...]
 #                                  PY7: the record's non-passes classified by test/python/divergences.edn, no run (GR10, as
 #                                  bin/goi divergences): a non-pass in no class, or a :tests name another class takes first, fails
@@ -250,6 +257,47 @@ arbace_exe() {
   main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
   if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
   die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
+}
+# runtime_state: which pyi runtime `bin/pyi run` runs on the tools' host (queue 321). Since W2 (seed 3c48859d) an executable may
+# list arbace/py in goi's table: RT.load makes a listed package's namespace from the table before any source, so such an
+# executable runs the runtime it was built from (its *arbace-version*'s :commit), never the checkout's go/arbace/py. Prints
+#   interpreted       arbace/py not listed: goi interprets the checkout's runtime
+#   compiled COMMIT   listed, and the checkout's runtime packages (go/arbace/{py,libm,ci,crt}) are COMMIT's
+#   stale COMMIT N    listed at COMMIT, whose runtime packages differ from the checkout's in N files (or N "?": COMMIT not
+#                     in this repository, or a build of a dirty tree): what runs is not the checkout's runtime
+RUNTIME_PKGS=(go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/ci.ae go/arbace/ci go/arbace/crt.ae go/arbace/crt)
+runtime_state() {
+  local out listed commit dirty n s
+  mkdir -p "$WORK/tmp"
+  out=$(cd "$WORK/tmp" && ARBACE_PATH= "$(arbace_exe)" -e '(println (boolean (some #{"arbace/py"} (arbace.lang.GoInterp/paths))) (or (:commit *arbace-version*) "-") (boolean (:dirty *arbace-version*)))' 2>/dev/null | tail -1) || true
+  read -r listed commit dirty <<< "$out"
+  case $listed in
+    false) s=interpreted ;;
+    true)
+      if [ "$dirty" = false ] && git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null; then
+        n=$( { git -C "$root" diff --name-only "$commit" -- "${RUNTIME_PKGS[@]}"; git -C "$root" ls-files --others --exclude-standard -- "${RUNTIME_PKGS[@]}"; } | wc -l)
+        if [ "$n" = 0 ]; then s="compiled $commit"; else s="stale $commit $n"; fi
+      else s="stale $commit ?"; fi ;;
+    *) die "runtime_state: the tools' host $(arbace_exe) did not answer (${out:-no output})" ;;
+  esac
+  echo "$s"
+}
+# runtime_guard WHAT RECORD: before a check that runs pyi on the tools' host (WHAT names it). A stale runtime (runtime_state)
+# refuses a --record (RECORD non-empty; PYI_RUNTIME_STALE=1 records anyway: a dry run's tooling and timing, never a record
+# to commit) and is said on every other run; the executable that runs the checkout's runtime is the gate's build at the
+# checkout's key (bin/arbace-go --gate-build; ARBACE_HOST_EXE=its amd64/arbace) or an executable of no listed arbace/py
+runtime_guard() {
+  local what=$1 record=$2 s; s=$(runtime_state)
+  case $s in
+    interpreted|compiled*) return 0 ;;
+  esac
+  local _st commit n; read -r _st commit n <<< "$s"
+  local msg="$what: the tools' host $(arbace_exe) runs pyi's runtime as compiled at $commit, not the checkout's go/arbace/py ($n of its runtime packages' files differ; goi's table is taken before any source)"
+  if [ -n "$record" ] && [ "${PYI_RUNTIME_STALE:-}" != 1 ]; then
+    die "$msg: --record refused. Run it on an executable built from the checkout: ARBACE_HOST_EXE=\$(. bin/lib/gate-cache.bash; arbace_gate_cache \"\$PWD\")/amd64/arbace after bin/arbace-go --gate-build (bin/pyi records picks it)"
+  fi
+  local tail=""; [ -z "$record" ] || tail=" (PYI_RUNTIME_STALE=1: recorded anyway, a dry run's record, never one to commit)"
+  echo "pyi: WARNING $msg$tail" >&2
 }
 # the oracle, CPython (queue 213): looked for only when a verb runs it (the records, the native read and the AOT need none;
 # doc/ORACLE-RECORDS-SURVEY.md, ORS14 (a)); a call through env, timeout or a list (smoke_run, run_one) checks first
@@ -838,6 +886,7 @@ cmd_lib_test() {
   while [ $# -gt 0 ]; do case $1 in --oracle) oracle=1; shift ;; --record) record=1; shift ;; --aot) aot=1; shift ;;
     --corpus) corpus=$2; shift 2 ;; --judge) judge=$2; shift 2 ;; --verdict) verdict=$2; shift 2 ;; *) mods+=("$1"); shift ;; esac; done
   verdict=${verdict:-$(judge_verdict "$oracle")}
+  [ -n "$oracle$aot$judge" ] || runtime_guard "lib-test" "$record"
   if [ ${#mods[@]} -eq 0 ]; then
     if [ -n "$corpus" ]; then IFS=, read -ra mods <<< "$(corpus_modules "$corpus")"; else IFS=, read -ra mods <<< "$(core_modules)"; fi
   fi
@@ -1048,7 +1097,9 @@ pyi_key() {
   { (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat go/arbace/pyexpat.ae go/arbace/pyexpat arbace/python arbace/python.ae \
        go/arbace/clib.ae go/arbace/clib go/arbace/pybz2.ae go/arbace/pybz2 go/arbace/pylzma.ae go/arbace/pylzma go/arbace/pyzstd.ae go/arbace/pyzstd go/arbace/pysqlite3.ae go/arbace/pysqlite3 \
        go/arbace/pyctypes.ae go/arbace/pyctypes \
-       arbace/repr/python tools/pydump/pydump.py -type f | LC_ALL=C sort | xargs sha256sum); sha256sum < "$1"; } | sha256sum | cut -c1-24
+       arbace/repr/python tools/pydump/pydump.py -type f | LC_ALL=C sort | xargs sha256sum); sha256sum < "$1"
+    # queue 321: and the runtime that runs (runtime_state: a stale executable's runs are not the checkout's runtime's)
+    echo "${2:-}"; } | sha256sum | cut -c1-24
 }
 
 cmd_check_aot() {
@@ -1061,6 +1112,7 @@ cmd_check_aot() {
                  [ ${#ids[@]} -gt "$n0" ] || die "check --aot: no id in $2"; shift 2 ;;
     *) die "check --aot: unknown $1" ;; esac; done
   [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(aot_list)
+  local rstate=""; if [ -n "$pyi" ]; then runtime_guard "check --aot (pyi's runs)" "$record"; rstate=$(runtime_state); fi
   aot_module
   local d="$AOT/check" pc="$AOT/pyi-runs"; mkdir -p "$d" "$pc"
   : > "$d/runs.tsv"
@@ -1082,7 +1134,7 @@ cmd_check_aot() {
     fi
     local pk="" pyo=$'-\t-\t-'
     if [ -n "$pyi" ]; then
-      pk=$(pyi_key "$f")
+      pk=$(pyi_key "$f" "$rstate")
       if [ ! -f "$pc/$pk.rc" ]; then run_one "$pc" "$pk" "$root/bin/pyi" run "$f"; fi
       pyo=$(outcome "$pc" "$pk")
     fi
@@ -1215,6 +1267,7 @@ cmd_lib_test_all() {
   while [ $# -gt 0 ]; do case $1 in --oracle) oracle=1; shift ;; --record) record=1; shift ;; --fresh) fresh=1; shift ;; --all) all=1; shift ;;
     --judge) judge=$2; shift 2 ;; --verdict) verdict=$2; shift 2 ;; *) mods+=("$1"); shift ;; esac; done
   verdict=${verdict:-$(judge_verdict "$oracle")}; [ -z "$oracle" ] || runner=pyall
+  [ -n "$oracle$judge" ] || runtime_guard "lib-test-all" "$record"
   [ -f "$REF_ALL" ] || die "no $REF_ALL (bin/pyi record-ref lib-test-all)"
   local owners="$root/test/python/lib-test-all-owners.tsv" refmods="$WORK/lib-test-all/ref-modules.txt"
   mkdir -p "$WORK/lib-test-all"; sed -n 's/^{:id "\([^"/]*\)" :module true.*/\1/p' "$REF_ALL" > "$refmods"
@@ -1350,6 +1403,8 @@ cmd_check_lib() {
     rec="${PYI_CHECK_AOT_LIB_RECORD:-$root/test/python/check-aot-lib-test-linux-$arch$RECS.edn}"
   fi
   verdict=${verdict:-$(judge_verdict "$oracle")}
+  # queue 321: pyi on the tools' host must be the checkout's runtime for a record (the compiled drivers carry the checkout's)
+  [ -n "$oracle$cover$aot$judge" ] || runtime_guard "check" "$record"
   # the oracle's runs and the cover run (its own AOT module, WORK/aot-cover) keep python3's runner
   [ -z "$oracle$cover" ] || runner=pyall
   local refs=(--ref "$REF_LT"); local r; for r in "$root"/test/python/ref-cpython$RECV-lib-test-*.edn; do refs+=(--ref "$r"); done
@@ -2430,6 +2485,133 @@ cmd_wheels() {
   esac
 }
 
+# records [--slice N] [--dir DIR] [--only aot|lib-test] (queue 321): the main host's records night for the eval and AOT
+# cells in one command. The host first: the checkout's runtime must be what pyi runs (runtime_state; a stale stage 0, a
+# W2 seed older than the checkout's go/arbace/py, is replaced by the gate's build at the checkout's key when there is one,
+# else refused with the command that builds it). Then, each under busybox time with a 5 s sampler of its processes' summed
+# memory (DIR/STEP.time, DIR/STEP.mem: the night's wall and peak), bin/pyi check --aot --record (the 151 programs, pyi's runs
+# too: test/python/check-aot-linux-amd64.edn, reap's :pyi-aot, the AOT cell and the eval cell's loop and goi columns) and
+# bin/pyi check --fresh --record (Lib/test's every module, each method by its own verdict: check-lib-test-linux-amd64.edn,
+# reap's :results); then the :until of each source whose record is written dropped from test/reap/cells.edn, bin/reap
+# --record and bin/crops-score --record (where it is). Night mode is linux/amd64's and writes the checkout's files; its
+# outcome is to commit (the records, cells.edn, matrix.edn, scores.edn).
+# --slice N: the dry run. Every Nth program of aot_list and every Nth module of the check's universe, the records under
+# DIR (default WORK/records-slice; named as the cells name them, never to commit), then read through an overlay of the
+# checkout (DIR/overlay: links to the checkout but test/python's two records, a reference of the slice's programs alone
+# and cells.edn without the :until and with that reference) by bin/reap --record and bin/crops-score --crop python. Nothing
+# of the checkout is written. PYI_RUNTIME_STALE=1 lets a slice run on a stale host (its outcomes then the stale runtime's).
+cmd_records() {
+  local slice="" dir="" only="" arch rc=0 s
+  while [ $# -gt 0 ]; do case $1 in --slice) slice=$2; shift 2 ;; --dir) dir=$(cd "$caller_pwd" && mkdir -p "$2" && cd "$2" && pwd); shift 2 ;;
+    --only) only=$2; shift 2 ;; *) die "usage: bin/pyi records [--slice N] [--dir DIR] [--only aot|lib-test]" ;; esac; done
+  case $only in ""|aot|lib-test) ;; *) die "records: --only aot or lib-test" ;; esac
+  [ -z "$slice" ] || [ "$slice" -ge 1 ] 2>/dev/null || die "records: --slice N, N a positive number"
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  if [ -z "$slice" ]; then
+    [ "$arch" = amd64 ] || die "records: the records are linux/amd64's (the main host's); --slice N for a dry run here"
+    [ -z "$dir" ] || die "records: --dir is the slice's"
+    dir="$WORK/records"
+  else
+    dir=${dir:-$WORK/records-slice}
+  fi
+  mkdir -p "$dir"
+  # the host
+  s=$(runtime_state)
+  case $s in
+    stale*)
+      local g; g="$(. "$root/bin/lib/gate-cache.bash"; arbace_gate_cache "$root" 2>/dev/null)/amd64/arbace"
+      if [ "$arch" = amd64 ] && [ -x "$g" ]; then
+        echo "records: the tools' host $(arbace_exe) runs pyi's runtime of another commit ($s): the gate's build at the checkout's key instead, $g"
+        export ARBACE_HOST_EXE=$g; s=$(runtime_state)
+      fi ;;
+  esac
+  case $s in
+    stale*) if [ -n "$slice" ] && [ "${PYI_RUNTIME_STALE:-}" = 1 ]; then echo "records: WARNING a stale host ($s): the slice's outcomes are that runtime's"
+            else die "records: the tools' host $(arbace_exe) runs pyi's runtime of another commit ($s), not the checkout's: bin/arbace-go --gate-build, then again (it takes the gate's build at the checkout's key)"; fi ;;
+  esac
+  echo "records: host $(arbace_exe) ($s), $(nproc) cores, PYI_LIB_TEST_JOBS=${PYI_LIB_TEST_JOBS:-2}, GOGC=${GOGC:-}${slice:+, slice 1/$slice}"
+  local aot_rec lib_rec aot_args=() lib_args=()
+  if [ -n "$slice" ]; then
+    aot_rec="$dir/check-aot-linux-amd64.edn" lib_rec="$dir/check-lib-test-linux-amd64.edn"
+    aot_list | awk -v n="$slice" 'NR % n == 1 || n == 1' > "$dir/aot-slice.txt"
+    check_universe | cut -f1 | awk -v n="$slice" 'NR % n == 1 || n == 1' > "$dir/lib-slice.txt"
+    aot_args=(--only-list "$dir/aot-slice.txt"); mapfile -t lib_args < "$dir/lib-slice.txt"
+    [ "$only" = lib-test ] || rm -f "$aot_rec"
+    [ "$only" = aot ] || rm -f "$lib_rec"
+    echo "records: the slice: $(wc -l < "$dir/aot-slice.txt") programs, $(wc -l < "$dir/lib-slice.txt") modules ($dir/*-slice.txt)"
+  else
+    aot_rec="$root/test/python/check-aot-linux-amd64.edn" lib_rec="$CHECK_RECORD"
+  fi
+  if [ "$only" != lib-test ]; then
+    records_step "$dir" aot env PYI_CHECK_AOT_RECORD="$aot_rec" "$root/bin/pyi" check --aot ${aot_args[@]+"${aot_args[@]}"} --record || rc=1
+  fi
+  if [ "$only" != aot ]; then
+    records_step "$dir" lib-test env PYI_CHECK_RECORD="$lib_rec" "$root/bin/pyi" check --fresh --record ${lib_args[@]+"${lib_args[@]}"} || rc=1
+  fi
+  # the cells: the sources whose records are written lose their :until; then the matrix and the scores
+  local tree=$root
+  if [ -n "$slice" ]; then tree=$(records_overlay "$dir" "$aot_rec" "$lib_rec"); fi
+  [ ! -f "$aot_rec" ] || sed -i 's/ :until "PY8 (the main host'"'"'s record)"//' "$tree/test/reap/cells.edn"
+  [ ! -f "$lib_rec" ] || sed -i 's/ :until "PY7 (the main host'"'"'s record)"//' "$tree/test/reap/cells.edn"
+  echo "== bin/reap --record${slice:+ (the overlay $tree)}"
+  "$tree/bin/reap" --record > "$dir/reap.log" 2>&1 || rc=1
+  sed -n '/^Python /,/^   [^ ]/p; /^reap: /,$p' "$dir/reap.log" | grep -v '^          ' | head -60
+  if [ -x "$tree/bin/crops-score" ]; then
+    echo "== bin/crops-score ${slice:+--crop python}${slice:---record}"
+    if [ -n "$slice" ]; then "$tree/bin/crops-score" --crop python > "$dir/crops-score.log" 2>&1 || rc=1
+    else "$tree/bin/crops-score" --record > "$dir/crops-score.log" 2>&1 || rc=1; fi
+    grep -i 'python' "$dir/crops-score.log" | head -20
+  fi
+  echo "records: the steps' wall and peak:"
+  local st
+  for st in aot lib-test; do
+    [ -f "$dir/$st.time" ] || continue
+    printf '  %-9s %s s wall, %s s CPU, peak %s MB summed (%s MB the largest process)%s\n' "$st" \
+      "$(sed -n 's/.*Elapsed (wall clock) time (h:mm:ss or m:ss): //p' "$dir/$st.time")" \
+      "$(awk -F': ' '/User time|System time/ {s += $2} END {printf "%.0f", s}' "$dir/$st.time")" \
+      "$(cat "$dir/$st.mem" 2>/dev/null || echo ?)" \
+      "$(awk -F': ' '/Maximum resident/ {printf "%.0f", $2 / 1024}' "$dir/$st.time")" \
+      "${slice:+; the whole run about $slice times the wall at the same jobs}"
+  done
+  if [ -n "$slice" ]; then echo "records: logs and the slice's records in $dir (not for commit)"; else echo "records: logs in $dir"; fi
+  return $rc
+}
+# records_step DIR NAME CMD...: CMD under busybox time (DIR/NAME.time), its log DIR/NAME.log, the peak of its processes'
+# summed resident memory sampled every 5 s (DIR/NAME.mem, MB)
+records_step() {
+  local dir=$1 nm=$2; shift 2
+  echo "== $nm: $*"
+  busybox time -v -o "$dir/$nm.time" "$@" > "$dir/$nm.log" 2>&1 &
+  local pid=$! peak=0 now
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(ps -eo pid=,ppid=,rss= | awk -v root="$pid" '{p[$1] = $2; r[$1] = $3} END {
+            n = 0; for (k in p) { q = k; while (q != "" && q != 0 && q != 1) { if (q == root) { n += r[k]; break } q = p[q] } } print int(n / 1024) }')
+    [ "$now" -le "$peak" ] || peak=$now
+    echo "$peak" > "$dir/$nm.mem"; sleep 5
+  done
+  local rc=0; wait "$pid" || rc=$?
+  grep -E '^check --aot: |^pyi check: [0-9]+ modules|^pyi check: |control|written' "$dir/$nm.log" | tail -8
+  echo "== $nm: exit $rc"
+  return $rc
+}
+# records_overlay DIR AOT LIB: DIR/overlay, the checkout's top level as links but test/, test/python and test/reap real
+# directories of links, the two records and test/python/ref-cpython314-slice.edn (the slice's programs' references) in
+# test/python, cells.edn and matrix.edn copies (the cells' :pyi-aot sources on the slice's reference); prints its path
+records_overlay() {
+  local dir=$1 aot=$2 lib=$3 o="$1/overlay" f
+  rm -rf "$o"; mkdir -p "$o/test/python" "$o/test/reap"
+  for f in "$root"/* "$root"/.[!.]*; do case ${f##*/} in .git|test) ;; *) ln -s "$f" "$o/${f##*/}" ;; esac; done
+  for f in "$root"/test/*; do case ${f##*/} in python|reap) ;; *) ln -s "$f" "$o/test/${f##*/}" ;; esac; done
+  for f in "$root"/test/python/*; do ln -s "$f" "$o/test/python/${f##*/}"; done
+  for f in "$root"/test/reap/*; do ln -s "$f" "$o/test/reap/${f##*/}"; done
+  rm -f "$o/test/reap/cells.edn" "$o/test/reap/matrix.edn"; cp "$root/test/reap/cells.edn" "$root/test/reap/matrix.edn" "$o/test/reap/"
+  for f in "$aot" "$lib"; do [ ! -f "$f" ] || { rm -f "$o/test/python/${f##*/}"; cp "$f" "$o/test/python/"; }; done
+  awk 'NR == FNR {want["\"" $0 "\""] = 1; next} match($0, /^\{:id "[^"]*"/) {id = substr($0, 6, RLENGTH - 5); if (id in want) print}' \
+    "$dir/aot-slice.txt" "$REF" > "$o/test/python/ref-cpython$RECV-slice.edn"
+  sed -i "s|:py-ref \"test/python/ref-cpython$RECV.edn\"|:py-ref \"test/python/ref-cpython$RECV-slice.edn\"|" "$o/test/reap/cells.edn"
+  echo "$o"
+}
+
 case "${1:-}" in
   gen) shift; cmd_gen "$@" ;;
   golden) shift; cmd_golden "$@" ;;
@@ -2450,6 +2632,7 @@ case "${1:-}" in
   bench) shift; mkdir -p "$WORK"; cmd_bench "$@" ;;
   check) shift; mkdir -p "$WORK"; if [ "${1:-}" = --aot ]; then shift; cmd_check_aot "$@"; else cmd_check_lib "$@"; fi ;;
   divergences) shift; mkdir -p "$WORK"; cmd_divergences "$@" ;;
+  records) shift; mkdir -p "$WORK"; cmd_records "$@" ;;
   cover) shift; mkdir -p "$WORK"; cmd_cover "$@" ;;
   wheels) shift; cmd_wheels "$@" ;;
   c2j-check) shift; mkdir -p "$WORK"; cmd_c2j_check "$@" ;;
