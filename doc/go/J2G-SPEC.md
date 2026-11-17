@@ -703,6 +703,17 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   the completion Paints is refused, with the edge alone Guarded, Watcher and Handler, a world class's member never
   names a java.base outside class, jdk.internal is not declared, without the file's imports Supplier is the
   namespace's).
+- **The run-path ranking** (A14, 2026-11-17, branch `h-g2-arbace`: the Ghidra case study's G2 plan, GH1 (b) made a
+  tool; it replaces the demo's `bin/analyze-g1-reach.py`): `bin/j2g-rank OUT REPORT RUNS...` (`test/j2g/rank.ae`, on
+  the tools' host) reads an `--analyze-only` report made with `J2G_MISSING` (`:missing`, an operation the translation
+  stubs; `:analysis-failures`, a class refused) and lists of the classes runs loaded (the JDK's `-Xlog:class+load` lines,
+  plain names, or EDN of one run or of `:runs`), and writes each run's stubs on its path, by cause, and the causes
+  ranked by the runs they alone block (`:sole`: fixing that cause unblocks them), then by the runs they block. A
+  cause: `[:outside SOURCE]` (the declarations' source: a platform module, a jar's coordinate), `[:jrt-lacks CLASS]`,
+  `[:world ...]`, `[:refused NAME]` (the unresolved name's first two parts), `[:other ...]`. A run's path is the
+  classes it loaded, so a stub is counted though the run may not execute it. Unit test: `bin/j2g-unit`'s `rank:`
+  over `test/j2g/unit/rank` (test/programs/outside's reasons), with its controls (an empty list ranks nothing; a list
+  naming no stubbed class blocks no run).
 
 ### 4.2 Go packages
 

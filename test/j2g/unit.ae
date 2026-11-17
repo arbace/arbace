@@ -22,7 +22,8 @@
             [arbace.j2g.start :as start]
             [arbace.j2g.outside :as outside]
             [arbace.j2g.world :as w]
-            [j2g.typeann :as ta]))
+            [j2g.typeann :as ta]
+            [j2g.rank :as rank]))
 
 (def ^:private failures (atom 0))
 
@@ -735,6 +736,39 @@
                       (= "q/other/Supplier" (binding [a/*unit* (dissoc a/*unit* :file-imports)]
                                               (a/resolve-class-sym {:class "q/Imports" :ns (the-ns 'q)} 'Supplier))))))))))
 
+;; A14 of the Ghidra case study's G2 plan (J2G-SPEC §4.1, "The run-path ranking"; bin/j2g-rank): each run's stubs on its
+;; path by cause, the causes ranked by the runs they block alone. The fixture test/j2g/unit/rank: a report of
+;; test/programs/outside's classes' reasons and three runs files of the three shapes; the controls: an empty list ranks
+;; nothing, a list naming no stubbed class blocks no run
+
+(defn test-rank []
+  (let [d "test/j2g/unit/rank/"
+        st (rank/stubs (read-string (slurp (str d "report.edn"))))
+        runs (vec (mapcat rank/read-runs [(str d "main.txt") (str d "reach.log") (str d "runs.edn")]))
+        r (rank/rank st runs)
+        row (fn [c] (some #(when (= c (:cause %)) %) (:ranking r)))
+        jar [:outside "org.example:toyext:1.0"]]
+    (check "rank: the causes of the reasons (outside by source, jrt's member by class, a refusal by its name)"
+           (and (= [:outside "java.desktop (the platform)"] (first (get st "demo/outside/Events")))
+                (= #{jar [:jrt-lacks "java.util.prefs.Preferences"]} (get st "demo/outside/Store"))
+                (= #{[:refused "java.awt"]} (get st "demo/outside/Gui")))
+           (pr-str st))
+    (check "rank: the three runs files read (text, -Xlog lines, :runs)"
+           (= [["main.txt" ["demo.outside.Main" "demo.outside.Recorder"]] ["reach.log" ["demo.outside.Main" "demo.outside.Events"]]]
+              (subvec runs 0 2))
+           (pr-str (subvec runs 0 2)))
+    (check "rank: four runs, three meet a stub (main's run none)" (and (= 4 (:runs r)) (= 3 (:blocked r))) (pr-str (dissoc r :per-run)))
+    (check "rank: toyext's jar first: one run blocked by it alone (JarTest), two in all"
+           (and (= jar (:cause (first (:ranking r)))) (= 1 (:sole (row jar))) (= 2 (:runs (row jar)))
+                (= ["demo/outside/Store" "demo/outside/Texts"] (:classes (row jar))))
+           (pr-str (:ranking r)))
+    (check "rank: java.desktop blocks reach's run alone; StoreTest's three causes none alone"
+           (and (= 1 (:sole (row [:outside "java.desktop (the platform)"]))) (= 0 (:sole (row [:refused "java.awt"])))
+                (= 3 (count (:causes (nth (:per-run r) 3))))))
+    (check "rank: control: an empty list ranks nothing" (= {:runs 1 :blocked 0 :ranking []} (dissoc (rank/rank st [["e" []]]) :per-run)))
+    (check "rank: control: a list naming no stubbed class blocks no run"
+           (zero? (:blocked (rank/rank st [["x" ["demo.outside.Main" "java.lang.String"]]]))))))
+
 (defn -main [& _]
   (test-support-tables)
   (test-unresolved-cause)
@@ -752,6 +786,7 @@
   (test-arch-collisions)
   (test-inherited-static-accessor)
   (test-forname)
+  (test-rank)
   (test-outside)
   (test-outside-completion)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))

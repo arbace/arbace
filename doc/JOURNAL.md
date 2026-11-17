@@ -10245,3 +10245,17 @@ bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no 
   on javac on Arbace; whether the JDK's javac accepts them is the oracle tier's (`bin/ref-g2 probes`, by hand). If it does, this
   is javac on Arbace's inference (an inference variable seen as a capture in a nested poly call), to fix with the probes as
   fixtures; until then the demo carries a variant (`patches/hamcrest-2.2-javac.patch`), a decision for the user.
+
+## 2026-11-17: next merged into `h-g2-arbace` (f26-ghidra in), and A14, the run-path ranking (branch `h-g2-arbace`)
+
+- `git merge next` (`498d7296f`): `bin/java-project` keeps both A16's `classes.shadowed` and A8's `outside.args`,
+  `java.project`'s `:java` keys `:outside` and `:shadow`, `test.bash` both sides' cases (A16's controls renumbered c12, c13),
+  `test/j2g/unit.ae` `test-forname` beside `test-outside` and `test-outside-completion`; the resources fix once (the cherry-picked
+  `7fcffa2b4` and f26-ghidra's own resolved to one text). `bin/java-project test` 38 of 38; `bin/j2g-unit`
+  (`J2G_UNIT_SOURCES=arbace.classes.analyze`): forname, outside and completion pass, the same 7 failures as on next.
+- **A14** (GH1 (b) made a tool, J2G-SPEC §4.1 "The run-path ranking"): `bin/j2g-rank` (`test/j2g/rank.ae`) over an
+  `--analyze-only` report with `J2G_MISSING` and the runs' class-load lists: each run's stubs on its path by cause, the causes
+  ranked by the runs they alone block. Unit test `bin/j2g-unit`'s `rank:` (7 of 7) over `test/j2g/unit/rank` (the reasons of
+  test/programs/outside's classes as code/missing-reason writes them, three runs files of the three shapes), with its controls.
+  Its first real input is the demo's M3 (`bin/run-g2 analyze`) against R2's `ref/junit-closure-g2-jdk26.edn`. Alternative: keep
+  the demo's script (Ghidra-specific paths, one closure format).
