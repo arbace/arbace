@@ -10344,3 +10344,19 @@ doc/cpp/CPP-SURVEY.md's "As built: queue 324" lists. Alternative considered: reb
   alone. C++ read 5,309 / 243 / 943 to 5,357 / 243 / 895; crop completeness 91 to 92. Source: the standard's [expr.const] and
   gcc-15.2.0's g++.dg tests (the pinned tarball); no GCC code read. gate_key moves. Alternative: a separate constant evaluator for
   the checker (not taken: the code generator's folds share these semantics, and the checker's rules are gated by `checking?`).
+
+## 2026-11-17: n-review-b, the C++ stack held after the night's gate reviewed and merged (branch `n-review-b` from `next` 42bf8614b)
+
+- Merged in order h-review-mac-crops-cpp b22363909 (queue 324 round 2 with the main host's review fixes), mac/338-cpp-sema-crash
+  9609178aa (its sema.ae and sysroot-text hunks identical to 324's: an empty merge), mac/336-cpp-own-diag d2af54311, h-cpp-consteval
+  d36d4e385. Conflicts: doc/JOURNAL.md and doc/cpp/CPP-SURVEY.md (both sides' entries kept, in merge order), test/crops/scores.edn and
+  test/reap/matrix.edn (re-recorded). test/cpp/check-dg-own-linux-amd64.edn merged by rows (336's 42 and consteval's 48 disjoint);
+  own-diag-review.edn's `:own` made `:pass` for consteval's 48. C++ read 5,362 / 328 / 805 (36 n/a), completeness 92.
+- Read consteval's sema.ae for the code generator (the evaluator is shared; `checking?` gates the checker's rules alone): the list
+  of folds that now succeed or fail outside the checker is doc/cpp/CPP-SURVEY.md's "n-review-b"; the lowered runtime's IR can change
+  (a switch, a member array's decay and a union's write are the likeliest in libstdc++'s constexpr code). Fixed two of its bugs
+  (taken overnight, round 52): a reference bound to a temporary's member lost the temporary's lifetime extension, and a switch with a
+  label in a nested statement chose a wrong label. Alternatives considered: gating the lifetime tracking and the new folds by
+  `checking?` (rejected: the folds are the standard's, and the code generator then would keep the old, laxer semantics the checker
+  disagrees with; the IR check by day decides).
+- Note: the own dg run of 53 files peaked at 2.5 GB RSS (GOMEMLIMIT 1 GiB is a soft limit), over the night's 1 GiB a process; run once.

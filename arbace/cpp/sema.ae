@@ -2115,6 +2115,16 @@
 
 (defn- ce-temp! [c] (when *ce-temps* (swap! *ce-temps* conj c)) c)
 
+(defn- ce-extended-temp?
+  "n-review-b: whether the glvalue `e` is a temporary object or a member or base subobject of one, by member access and
+  base conversions alone ([class.temporary]/6: a reference bound to it extends the temporary's lifetime)."
+  [e]
+  (case (:op e)
+    (:temp :temp-obj) true
+    :field (recur (:obj e))
+    :base-lv (recur (:e e))
+    false))
+
 (defmacro ^:private ce-full-expr
   "The body evaluated as a full-expression: the temporaries it makes die at its end."
   [& body]
@@ -2345,7 +2355,7 @@
   (when (and (checking?) (not *ce-in-call*) (not *ce-fold*))
     (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true :cx/sure true :cx/top (some-> *ce-pos* deref)}))))
 
-(declare ce-lv ce-init ce-glvalue ce-store ce-construct ce-args-env ce-not-constexpr? cx-pce-bad?)
+(declare ce-lv ce-init ce-glvalue ce-store ce-construct ce-args-env ce-not-constexpr? cx-pce-bad? ce-has-label?)
 
 (def ^:dynamic *ce-analyzing*
   "h-cpp-read: the functions whose bodies a constant evaluation is analyzing (their ids), so that a call of one from within
@@ -2630,7 +2640,13 @@
                                                                     ;; its value indeterminate, [basic.indet], nil)
                                                                     (case (:i init) :expr (ce-init (:ty v) init @env) :none (if (and (checking?) (abi/scalar? at)) nil 0) 0))
                                  (and init (or (abi/class? at) (abi/ref? (:ty v))))
-                                 (try (ce-init (:ty v) init @env)
+                                 (try (let [r (ce-init (:ty v) init @env)]
+                                        ;; (n-review-b: a reference bound to a temporary's member or base subobject extends the
+                                        ;; temporary's lifetime to the reference's, [class.temporary]/6, `const int& r = S{}.x;`:
+                                        ;; its cell kept out of the full-expression's temporaries; not through a call's result)
+                                        (when (and *ce-temps* (abi/ref? (:ty v)) (= :bind (:i init)) (ce-extended-temp? (:e init)) (ce-loc? r))
+                                          (let [c (::cell r)] (swap! *ce-temps* (fn [ts] (filterv #(not (identical? % c)) ts)))))
+                                        r)
                                       (catch arbace.lang.ExceptionInfo x
                                         (if (:codegen/not-constant (ex-data x))
                                           (throw (ex-info (str (.getMessage x) " (in a local's initializer (" (:i init) " of " (:name v) "))") (ex-data x)))
@@ -2666,6 +2682,10 @@
     :switch (let [b (:body s)
                   items (when (= :block (:s b)) (vec (mapcat #(if (:flat %) (:items %) [%]) (:items b))))
                   _ (when (or (nil? items) (some #(= :decl (:s %)) items)) (not-constant "a switch's body"))
+                  ;; (n-review-b: a case or default label below the body's top, inside a nested statement, is not found by
+                  ;; the label scan: not a constant rather than a wrong branch)
+                  _ (when (some #(ce-has-label? (loop [x %] (if (#{:case :default} (:s x)) (recur (:body x)) x))) items)
+                      (not-constant "a switch's label inside a nested statement"))
                   v (ce-num (ce-eval (:e s) env))
                   labels (fn [x] (loop [x x ls []] (if (#{:case :default} (:s x)) (recur (:body x) (conj ls (if (= :case (:s x)) (:v x) :default))) ls)))
                   hit (or (first (keep-indexed (fn [i x] (when (some #(and (number? %) (= (ce-num %) v)) (labels x)) i)) items))
@@ -2684,6 +2704,15 @@
                       (ub! s "control passes through definition of '" (:name v) "' with " (if (:tls v) "thread" "static") " storage duration"))
                     (not-constant "the statement :static-local"))
     (not-constant "the statement " (:s s)))))
+
+(defn- ce-has-label?
+  "n-review-b: whether the statement `s` holds a case or default label of the enclosing switch (not a nested switch's)."
+  [s]
+  (and (map? s)
+       (case (:s s)
+         (:case :default) true
+         :switch false
+         (boolean (some (fn [x] (cond (map? x) (ce-has-label? x) (sequential? x) (some ce-has-label? x) :else false)) (vals s))))))
 
 (defn- ce-base-path
   "The keys from an object of class `from` down to its base subobject of class `to` ([:b B] each), the first path found."

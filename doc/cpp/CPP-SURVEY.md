@@ -8619,3 +8619,34 @@ pr94066*.C). Also fixed: ubsan/pr63956.C's crash (a float conversion of an infin
   evaluator's changes outside the checker only fold more (arrays in objects, `this` in default member initializers, switch) or
   fold less (a union's other members after zero-initialization, `:null` refused): the night's `cpp-essential` and `cpp-check` judge it.
 - Keys: `gate_key` moves (arbace/cpp and repr/cpp embedded since W2), as `arbace_javac_key`; the runtime key does not.
+
+### n-review-b: the stack reviewed, the evaluator's changes outside the checker (2026-11-17, round 52; branch `n-review-b` from next 42bf8614b)
+
+The stack 324 (h-review-mac-crops-cpp b22363909), 338 (9609178aa, its hunks 324's: an empty merge), 336 (d2af54311) and
+h-cpp-consteval (d36d4e385) merged in that order; the own record's rows of 336 (42) and of consteval (48) disjoint, none of
+consteval's new passes named in a class of test/cpp/divergences-dg.edn, test/cpp/own-diag-review.edn's `:own` made `:pass` for the
+48. The constant evaluator is the code generator's too (`ce-try`, `fold-mark`, the constexpr globals; `checking?` is off there), so
+consteval's changes the checker does not gate change the code generator's folds:
+
+- folds that can now succeed: an array subobject's decay (a member's, an element's, a base's: `{::base LOC ::n N}`), its pointers'
+  arithmetic, reads and same-base comparison; a pointer to an object moved by 0; an assignment's lvalue read (`return (u.i = 42);`);
+  a switch statement (the label scan, fallthrough, break; a body declaring at its top refused); a `const_cast`'s lvalue; a comma's
+  lvalue; an aggregate whose default member initializers name `this`.
+- folds that can now fail (not a constant, the runtime code instead): a read of an object after its lifetime (a block's locals,
+  a call's parameters, a full-expression's temporaries: `*ce-dead*`, bound by every top-level evaluation); a union's member other
+  than its active one read, or written while another is active (before, the map kept both); a union value-initialized zeroes its
+  first named member alone; an array subscript out of bounds in a store's path (before, `assoc` at the count grew the vector).
+- `float`'s conversion is `unchecked-float` (a double out of float's range had thrown Java's range error, a crash, not a refusal).
+
+Two found here and fixed (round 52, taken overnight): a reference local bound to a temporary's member or base subobject (`const int& r
+= S{}.x;`) had its temporary killed at the declaration's end ([class.temporary]/6 extends it), a false "accessing an object outside its
+lifetime" in the checker and a fold lost in the code generator; the temporary's cell is now kept out of the full-expression's
+temporaries (`ce-extended-temp?`; a call's returned reference not, constexpr-lifetime2.C still an error). And a switch whose case or
+default label sits inside a nested statement (Duff's style) was evaluated from the wrong label, a wrong value rather than a refusal;
+now not a constant (`ce-has-label?`). Proved on samples (`.tmp/tmp/probe` of the branch: the extension accepted, the call's dangling
+reference still an error, the switch's four cases folded, the nested label refused, a false static_assert still failing) and the own
+dg check of the 48 consteval files with the lifetime files (`bin/repr-cpp dg --corpus dg-error --only LIST --front native --own`):
+53 rows as recorded but cpp1y/constexpr-lifetime1.C, now passing (its row taken from the run; the read cell unchanged, the file already
+passing by the clang record). Not checked here: the lowered runtime's IR and the run checks (`cpp-runtime`, `cpp-check`), the main
+host's by day. Known, not changed: a GNU case range (`case 1 ... 3:`) is analyzed as its low value with its high one as the body
+(`CaseStmt`'s three children read as two), now evaluated by the switch too.
