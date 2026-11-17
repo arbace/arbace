@@ -2,12 +2,21 @@
 ;; (a)): test/haskell/eval/testsuite-run.edn's tests, those under one of DIRS (all with "-"), as rows separated by tabs:
 ;;   ID DIR KIND MAIN FLAGS RUN-OPTS EXIT NAME
 ;; ID testsuite/DIR/NAME; DIR under the testsuite's tests/; KIND the test's function; MAIN the file GHC is given (NAME.hs
-;; or NAME.lhs for compile_and_run, the top module's file for the multi-module ones; "-" when none is found); FLAGS
+;; or NAME.lhs for compile_and_run, NAME.cmm for a cmm_src test, the top module's file for the multi-module ones, also when
+;; all.T's pre_cmd `{compiler} --run ./GEN.hs` writes it (HES92 (a)); "-" when none is found); FLAGS
 ;; the call's flags and extra_hc_opts (one string); RUN-OPTS extra_run_opts; EXIT the expected status (exit_code,
 ;; default 0); an empty field is "-". A test whose name is not a string literal (a loop's) is left out with a note on standard error.
 ;; usage: arbace test/haskell/eval/run_plan.ae TESTSUITE-RUN.edn TESTS-DIR DIRS
 (require '[arbace.string :as s])
 (import '[java.io File PushbackReader StringReader])
+
+(defn- gen-pre
+  "The generator a test's all.T runs before it as `pre_cmd('{compiler} --run ./GEN.hs')` (unboxedsums/ManyUbxSums: GEN writes the
+  test's main module), GEN.hs or nil (HES92 (a); bin/lib/hsi/records.bash's hsi_pre_gen, which record-ref and bin/hsi check run first)"
+  [opts]
+  (some (fn [o] (when (and (seq? o) (= 'pre_cmd (first o)) (string? (second o)))
+                  (second (re-matches #"\{compiler\} --run \./(\S+\.l?hs)" (second o)))))
+        (if (sequential? opts) opts [opts])))
 
 (let [[runs tests-dir dirs] *command-line-args*
       dirs (when (not= dirs "-") (s/split dirs #","))
@@ -15,7 +24,7 @@
       ts (loop [acc []] (let [x (read {:eof ::eof} rdr)] (if (= x ::eof) acc (recur (conj acc x)))))
       under? (fn [d] (or (nil? dirs) (some #(or (= d %) (s/starts-with? d (str % "/"))) dirs)))
       clean (fn [x] (s/replace (str x) #"[\t\n]" " "))]
-  (doseq [{:keys [dir name func args hc-opts run-opts exit-code]} ts
+  (doseq [{:keys [dir name func args hc-opts run-opts exit-code opts]} ts
           :when (under? dir)]
     (if-not (string? name)
       (binding [*out* *err*] (println "run_plan: left out (a computed name):" dir (pr-str name)))
@@ -23,10 +32,17 @@
             exists? (fn [f] (.isFile (File. d ^String f)))
             arg0 (when (sequential? args) (first args))
             [main flags] (case (str func)
-                           "compile_and_run" [(first (filter exists? [(str name ".hs") (str name ".lhs")])) arg0]
+                           ;; HES92 (a): a test whose source is Cmm (all.T's cmm_src, T17920: the .cmm defines Main's closure),
+                           ;; GHC given the .cmm
+                           "compile_and_run" [(first (filter exists? (concat [(str name ".hs") (str name ".lhs")]
+                                                                             (when (some #{'cmm_src} (if (sequential? opts) opts [opts]))
+                                                                               [(str name ".cmm")]))))
+                                              arg0]
                            ("multimod_compile_and_run" "multi_compile_and_run")
                            [(when (string? arg0)
-                              (first (filter exists? [arg0 (str arg0 ".hs") (str arg0 ".lhs")])))
+                              (or (first (filter exists? [arg0 (str arg0 ".hs") (str arg0 ".lhs")]))
+                                  ;; HES92 (a): the main a pre_cmd's generator writes (ManyUbxSums.hs), run first by the plan's users
+                                  (when (gen-pre opts) (if (re-find #"\.l?hs$" arg0) arg0 (str arg0 ".hs")))))
                             (if (= (str func) "multi_compile_and_run")
                               ;; its extra sources, (tuple FILE OPTS) each (a test's C or Cmm, HES64 (a)), before its flags
                               (s/join " " (concat (for [t (when (sequential? (second args)) (second args))

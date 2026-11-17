@@ -9674,3 +9674,23 @@ group left (kahan alone needs 119 s of CPU against the 60 s limit); callback002 
 could build, the print cell's 14 byte-identical rows: HES91-HES93 proposed. Alternatives considered: running the whole `bin/llvmi check
 --record` (refused by the day's rules: a subset's record instead), raising the C++ budget in test/cpp/check-budget.edn for threads alone
 (the default for every C++ program keeps llvmi and cppi equal).
+
+## 2026-11-17: HES92, HES93 and LLS54 as built, HES91 prepared (branch `h-hes-lls`, from `next` `35a98986e`; the user's round 51, each (a))
+
+Light, no gate. HES93 (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES92 (a), HES93 (a)"): the print cell judged by the native
+reader's verdict, the text byte for byte, which the 14 module-view modules meet; the helper's trees of mode `:full` moved to their own
+known file (`roundtrip-ghc-9.14.1-text-tree-known.edn`, the oracle's), a source beside the cell; the text level's controls skip a
+pair of modules whose references are one text (ReadInt.hs and ReadNat.hs). Print 1,331 / 14 / 0 to 1,345 / 0 / 0, proved on the 14
+and the controls' pair. HES92: the plan finds T17920's Cmm main and ManyUbxSums's generated main (`hsi_pre_gen`: all.T's pre_cmd
+`{compiler} --run ./GenManyUbxSums.hs` run before the build and the dump); their references recorded by hand with GHC 9.14.1
+(record-ref `--only`), ManyUbxSums's STG packed (haskell-stg-progs `d2c8c4c0`), its own verdict listed, hsi's rows by `--only`:
+ManyUbxSums passes, T17920 in `:test-cmm` (a Cmm main has no STG). T24809 cannot be built here: `req_profiling`, and this GHC has no
+profiled libraries; it is `:skipped` now (the testsuite's verdict on this GHC) rather than referenced: a deviation from the decision's
+premise, reported as a decision. Eval 811 / 63 / 34 to 812 / 62 / 35. HES91: its class change waits on the branch `h-hes-lls-hes91` with
+the night's command (the survey's section). LLS54 (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS54 (a)"): `bin/llvmi ir-make tx` passes
+each torture test's dg-options (`tx_dg_options`); the pack made again with clang 23.1.5 by hand: 61 modules' IR differs, all with
+options, the other 2,979 by the clang version in `!llvm.ident` alone; the five changed modules the records hold re-run by `--only`
+at eval and AOT, all pass; `:dg-options` gone; heldout-check passes on the new pack. LLVM eval 547 / 12 / 3 to 549 / 12 / 1, AOT 537 /
+10 / 15 to 539 / 10 / 13. Completeness: Haskell 97 (meant 99), LLVM 98 (meant 99). Alternatives considered: building T24809 without
+`-prof` (not the test's way), a pack mixing the old clang's modules with the 61 new ones (not reproducible by ir-make), a guard in the
+classes for HES91 (no judge reads one; a commit of its own instead).

@@ -61,6 +61,31 @@ ref=$root/test/llvm/ref-lli23.edn
 # the torture corpus (tx-O0, tx-O2): ccorpus2 in Go's module cache, as bin/ci's corpora (test/c/corpora.edn's :torture-execute)
 tx=${LLVMI_TORTURE:-${GOMODCACHE:-/root/go/pkg/mod}/modernc.org/ccorpus2@v1.6.0/assets/gcc-9.1.0/gcc/testsuite/gcc.c-torture/execute}
 tx_flags="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=return-mismatch -Wno-error=incompatible-function-pointer-types"
+# tx_dg_options FILE (LLS54 (a), the user 2026-11-17): the options gcc's harness adds to the torture test FILE (relative to $tx), its
+# dg-options and dg-additional-options, after the torture level's (gcc's order: an -O2 of them wins over tx-O0's -O0), one line: a
+# directive without a target selector, or whose selector names x86_64-*-* (not with ia32), or fpic, applies; of its options -f*, -std=*,
+# -O*, -D* and -m* that clang accepts (a gcc-only one clang refuses, -mpc64, is left out), never -W* (the build is -w) nor -Wl,* (no link)
+tx_dg_options() {
+  local f=$1 probe=$TMPDIR/llvmi-dg-probe.c
+  [ -f "$probe" ] || : > "$probe"
+  grep -h 'dg-\(additional-\)\{0,1\}options' "$tx/$f" 2>"$TMPDIR/llvmi-dg.err" | while IFS= read -r line; do
+    local opts sel o
+    opts=$(printf '%s\n' "$line" | sed -n 's/.*dg-\(additional-\)\{0,1\}options *{\{0,1\} *"\([^"]*\)".*/\2/p')
+    sel=$(printf '%s\n' "$line" | sed -n 's/.*dg-\(additional-\)\{0,1\}options *{\{0,1\} *"[^"]*" *}\{0,1\} *\(.*\)$/\2/p')
+    case $sel in
+      *target*)
+        case $sel in *ia32*|*'!'*) continue ;; esac
+        case $sel in *'x86_64-*-*'*|*' fpic '*) ;; *) continue ;; esac ;;
+    esac
+    for o in $opts; do
+      case $o in
+        -W*) ;;
+        -f*|-std=*|-O*|-D*|-m*) clang -fsyntax-only -x c "$o" "$probe" 2>"$TMPDIR/llvmi-dg.err" && printf ' %s' "$o" ;;
+      esac
+    done
+  done
+  rm -f "$TMPDIR/llvmi-dg.err"
+}
 quiet() { grep -v '^Reflection warning\|recur arg for primitive\|^Auto-boxing' || true; }
 tool() { # an Arbace tool on the tools' host, its compiler's warnings filtered out of stderr
   local e st; e=$(mktemp "$TMPDIR/llvmi-err.XXXXXX")
@@ -285,8 +310,11 @@ modules() {
         (cd "$tx" && ls *.c ieee/*.c | LC_ALL=C sort) | while read -r f; do
           n=$c.$(echo "${f%.c}" | tr / .)
           [ -z "${only_ids:-}" ] || grep -qxF "$n" "$only_ids" || continue  # --only: compile only the ids asked
-          (cd "$tx" && clang -${c#tx-} -S -emit-llvm -std=gnu17 -w -fno-strict-aliasing $tx_flags \
+          # LLS54 (a): the test's own dg-options after the level's (tx_dg_options)
+          dgo=$(tx_dg_options "$f")
+          (cd "$tx" && clang -${c#tx-} -S -emit-llvm -std=gnu17 -w -fno-strict-aliasing $tx_flags $dgo \
              -ffile-prefix-map="$tx/"= -o "$work/ir/$n.ll" "$f") 2> "$work/ir/$n.clang.log" || { rm -f "$work/ir/$n.ll"; continue; }
+          [ -z "$dgo" ] || printf '%s\t%s\n' "$n" "${dgo# }" >> "$work/dg-options.tsv"
           grep -q '^define .*@main(' "$work/ir/$n.ll" || { rm -f "$work/ir/$n.ll"; continue; }
           printf '%s\ttorture:%s\t%s\n' "$n" "$f" "$tx/$f" >> "$work/sources.tsv"
           printf '%s\t%s\n' "$n" "$work/ir/$n.ll"
@@ -435,6 +463,7 @@ case $cmd in
       case $pk in tx) cs=tx-O0,tx-O2 ;; c) cs=c-O0,c-O2,cpp ;; *) echo "llvmi ir-make: no pack $pk (tx, c; rt alone: bin/llvmi ir-make rt [--mutants])" >&2; exit 2 ;; esac
       w=$root/.tmp/llvmi/ir-make/$pk
       rm -rf "$w"; mkdir -p "$w/stage"
+      corp=$cs  # (modules makes cs its array: the command's line names the pack's corpora, not the first, LLS54)
       LLVMI_CLANG=1 modules "$w" "$cs"
       awk -F'\t' 'FILENAME == ARGV[1] { s[$1] = $2; p[$1] = $3; next } { print $1 "\t" s[$1] "\t" p[$1] "\t" $3 "\t" $2 }' "$w/sources.tsv" "$w/modules.tsv" |
         while IFS=$'\t' read -r n lab sp h f; do
@@ -445,9 +474,10 @@ case $cmd in
       (cd "$irdir" && sha256sum "$pk.tar.xz" > "$pk.tar.xz.sha256")
       { echo ";; the pack $pk's IR (bin/llvmi ir-make $pk; doc/llvm/LLVM-CROP-SURVEY.md, \"Decided (2026-11-06, the user: the torture corpora's IR pinned)\")"
         echo "clang: $(clang --version | head -1)"
-        echo "corpora: $cs"
+        echo "corpora: $corp"
         echo "c-O0, c-O2: clang -O0|-O2 -S -emit-llvm -std=gnu23 -w -I test/c/synth -ffile-prefix-map=ROOT/= test/c/{synth,run}/*.c"
-        echo "tx-O0, tx-O2: clang -O0|-O2 -S -emit-llvm -std=gnu17 -w -fno-strict-aliasing $tx_flags -ffile-prefix-map=TX/= {*,ieee/*}.c (TX: $(echo "$tx" | sed 's|^.*/pkg/mod/||'))"
+        echo "tx-O0, tx-O2: clang -O0|-O2 -S -emit-llvm -std=gnu17 -w -fno-strict-aliasing $tx_flags DG -ffile-prefix-map=TX/= {*,ieee/*}.c (TX: $(echo "$tx" | sed 's|^.*/pkg/mod/||'); DG: the test's dg-options and dg-additional-options as bin/llvmi's tx_dg_options selects them, LLS54 (a))"
+        [ ! -s "$w/dg-options.tsv" ] || { echo "dg-options (ID, the options added):"; LC_ALL=C sort "$w/dg-options.tsv" | sed 's/^/  /'; }
         echo "cpp: clang++ -O0 -S -emit-llvm -std=c++23 -w -ffile-prefix-map=ROOT/= test/cpp/{samples,runtime/samples}/*.cpp"
         echo "modules: a file clang refuses, or without a main, is not one; the manifest $pk.tsv: ID, SOURCE, SOURCE-SHA256, IR-SHA256"; } > "$irdir/$pk.cmd"
       echo "llvmi ir-make: $pk: $(wc -l < "$irdir/$pk.tsv") modules, $(wc -c < "$irdir/$pk.tar.xz") bytes"
