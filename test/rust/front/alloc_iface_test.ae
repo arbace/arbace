@@ -8,8 +8,47 @@
             [arbace.rust.front.core-check :as cc]
             [arbace.rust.front.collect :as collect]
             [arbace.rust.front.resolve :as resolve]
+            [arbace.rust.front.expand]
             [arbace.string :as str])
   (:import [java.io File]))
+
+(def ^:private module-cases
+  "RIND9 (a)'s three causes, fact by fact on the modules passed alone: [WHAT GET EXPECTED] (independent of the helper's
+  facts: the values rustc's interface writes, as the helper's std-iface holds them)"
+  {"alloc::borrow"
+   [["ToOwned::Owned's bounds: the implicit Sized, then Borrow<Self> (explicit_item_bounds)"
+     #(get-in % [:traits "alloc::borrow::ToOwned" :items 0 3])
+     '[(trait "core::marker::Sized" [(projection "alloc::borrow::ToOwned::Owned" [(param 0 "Self")])])
+       (trait "core::borrow::Borrow" [(projection "alloc::borrow::ToOwned::Owned" [(param 0 "Self")]) (param 0 "Self")])]]
+    ["Cow's Debug impl: `B: ToOwned<Owned: Debug>`'s bound a clause on the projection, last"
+     #(last (get-in % [:impls "alloc::borrow::{impl#12}" :predicates]))
+     '(trait "core::fmt::Debug" [(projection "alloc::borrow::ToOwned::Owned" [(param 1 "B")])])]
+    ["Cow's Display impl: likewise"
+     #(last (get-in % [:impls "alloc::borrow::{impl#13}" :predicates]))
+     '(trait "core::fmt::Display" [(projection "alloc::borrow::ToOwned::Owned" [(param 1 "B")])])]
+    ["Cow's Default impl: `B: ToOwned<Owned: Default>`, after ToOwned"
+     #(vec (take-last 2 (get-in % [:impls "alloc::borrow::{impl#14}" :predicates])))
+     '[(trait "alloc::borrow::ToOwned" [(param 1 "B")]) (trait "core::default::Default" [(projection "alloc::borrow::ToOwned::Owned" [(param 1 "B")])])]]
+    ["negative: Cow's Hash impl (no associated-type bound) has no projection clause"
+     #(boolean (some (fn [c] (str/includes? (pr-str c) "projection")) (get-in % [:impls "alloc::borrow::{impl#15}" :predicates])))
+     false]]
+   "alloc::alloc"
+   [["derive_const(Clone) on Global: TrivialClone's impl, {impl#6}"
+     #(get-in % [:impls "alloc::alloc::{impl#6}" :trait]) '(trait "core::clone::TrivialClone" [(adt "alloc::alloc::Global" [])])]
+    ["derive_const(Clone): Clone's impl, {impl#7}"
+     #(get-in % [:impls "alloc::alloc::{impl#7}" :trait]) '(trait "core::clone::Clone" [(adt "alloc::alloc::Global" [])])]
+    ["derive_const(Default): {impl#8}"
+     #(get-in % [:impls "alloc::alloc::{impl#8}" :trait]) '(trait "core::default::Default" [(adt "alloc::alloc::Global" [])])]
+    ["derive(Copy, Debug) before them, in the attributes' order: {impl#4} Copy, {impl#5} Debug"
+     #(mapv (fn [i] (second (get-in % [:impls (str "alloc::alloc::{impl#" i "}") :trait]))) [4 5]) ["core::marker::Copy" "core::fmt::Debug"]]
+    ["derive_const's functions const: {impl#7}::clone, {impl#8}::default"
+     #(mapv (fn [p] (get-in % [:fns p :const])) ["alloc::alloc::{impl#7}::clone" "alloc::alloc::{impl#8}::default"]) [true true]]
+    ["negative: derive(Debug)'s fmt is not const"
+     #(get-in % [:fns "alloc::alloc::{impl#5}::fmt" :const]) false]]
+   "alloc::slice"
+   [["Join::Output's bounds: Sized over the projection, the trait's parameter among its arguments"
+     #(get-in % [:traits "alloc::slice::Join" :items 0 3])
+     '[(trait "core::marker::Sized" [(projection "alloc::slice::Join::Output" [(param 0 "Self") (param 1 "Separator")])])]]]})
 
 (defn -main [lib & [front cache file]]
   (let [bad (atom 0)
@@ -62,6 +101,16 @@
           (check "compare: h missing, p a native extra" (and (= ["alloc::h"] (:missing fs)) (= ["alloc::p"] (:extra fs))))
           (check "compare: the total line" (some #(= "alloc-iface: total 3 facts: 1 equal, 1 differ, 1 missing (native extras 1)" %) (ac/summary-lines cmp)))
           (check "control: f judged against g's helper fact differs, as it must" (= ["alloc::f" "alloc::g" true] (ac/control helper native))))
+        ;; RIND9 (a): #[derive_const(...)]'s impls are `const impl` (rustc_builtin_macros' TraitDef is_const): Clone on a Copy
+        ;; type without parameters both its impls (TrivialClone's and Clone's), as core's own `const unsafe impl TrivialClone`
+        (let [dt #'arbace.rust.front.expand/derive-text
+              info {:kind :struct :name "Global" :tparams [] :ptoks nil :gparams [] :shape [:unit] :copy? true :field-spans []}
+              c (dt "Clone" (assoc info :const-traits #{"Clone"}) (atom {}))
+              d (dt "Clone" (assoc info :const-traits #{}) (atom {}))]
+          (check "derive_const(Clone): TrivialClone's impl a const unsafe impl"
+                 (str/includes? c "#[doc(hidden)] const unsafe impl $crate::clone::TrivialClone for Global"))
+          (check "derive_const(Clone): Clone's impl a const impl" (str/includes? c "#[automatically_derived] const impl $crate::clone::Clone for Global"))
+          (check "negative: derive(Clone)'s impls not const" (and (not (str/includes? d "const ")) (str/includes? d "unsafe impl $crate::clone::TrivialClone"))))
         ;; the helper's shape written and read back
         (let [facts {:fns {"alloc::f" {:generics ['(type "T")] :parent-count 0 :has-self false :predicates [] :inputs [] :output '(param 0 "T")
                                        :variadic false :safety "Safe" :abi "\"Rust\"" :const false :promotable false :nounwind false :native true}}
@@ -85,6 +134,9 @@
             cmp (ac/compare-facts helper facts)
             ctl (ac/control helper facts)]
         (doseq [l (ac/summary-lines cmp)] (println l))
+        ;; RIND9 (a): the module's own cases, on the native facts alone
+        (doseq [[what f expected] (get module-cases (:path m))]
+          (let [v (f facts)] (check (str what (when (not= v expected) (str ": " (pr-str v)))) (= v expected))))
         (spit (str (System/getenv "TMPDIR") "/alloc-iface-" (str/replace (:path m) "::" "-") ".report") (ac/report-text cmp helper facts))
         (check (str "no alloc fact read from the helper's interface: " (count (:fns (ac/crate-facts (:si setup) "alloc")))) (empty? (:fns (ac/crate-facts (:si setup) "alloc"))))
         (check (str "the control: " (pr-str ctl)) (and ctl (nth ctl 2)))))

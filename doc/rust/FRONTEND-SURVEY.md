@@ -4198,3 +4198,58 @@ The causes the compare names (each a fix of its own, RIND9's next steps):
   `bin/rust-front alloc-iface` (its summary lines; `.tmp/rust-front/alloc/alloc-iface.edn.report` the causes), then
   `ALLOC_IFACE_ROUNDS=2 bin/rust-front alloc-iface` once to see whether a second round changes the counts.
 - core unchanged by the generalization: `bin/rust-front core-essential` (its known summary) and `bin/rust-front rind-test`.
+
+## As built: RIND9 (a), alloc's pass: its three causes fixed (2026-11-17, night, branch `n-rust-alloc2`)
+
+The three causes the compare named on borrow.rs and alloc.rs are fixed, each in the code core's build shares:
+
+- A trait's associated type's bounds: native-iface wrote `[]`; it now writes `collect/item-bounds` (explicit_item_bounds: the
+  implicit `Sized`, or `?Sized`'s `MetaSized`, the written bounds, the trait's where clauses on the item), self the item's
+  projection over the trait's identity arguments (`ToOwned::Owned`: Sized, then `Borrow<Self>`; `Join::Output`: Sized over
+  `[Self Separator]`).
+- An associated-type bound in a bound (`B: ToOwned<Owned: Debug>`): lower dropped the constraint's bounds (`{:bounds []}`); it
+  now lowers them, and collect's `lower-trait-ref` gives the trait ref the metadata `:clauses`, lower_assoc_item_constraint's
+  clauses in the constraints' order (an equality's projection, a bound's clauses on the projection, lower_bounds without
+  implicit sizedness), which `lower-bounds` puts after the trait clause (`:constraints` stays for its other readers: dyn's
+  projections).
+- `#[derive_const(...)]`: the expansion read `#[derive]` alone, so `derive_const`'s impls were never made (and every later
+  impl of the module numbered one or two short). expand_derive now reads both attributes in their order and writes a
+  `derive_const` trait's impls `const impl` (TraitDef's is_const; Clone on a Copy type both TrivialClone's and Clone's, as core
+  writes its own `const unsafe impl TrivialClone`); the attribute is dropped as `derive` is (expand, lower's attributes).
+
+### Results (light, one process a module, 0.91 GB peak)
+
+| module | facts | before: equal / differ / missing | after: equal / differ / missing | native extras |
+|---|---|---|---|---|
+| `alloc::borrow` (borrow.rs) | 47 | 43 / 4 / 0 | 47 / 0 / 0 | 0 |
+| `alloc::alloc` (alloc.rs) | 36 | 31 / 0 / 5 | 36 / 0 / 0 | 2 |
+| `alloc::slice` (slice.rs) | 37 | 30 / 5 / 2 | 32 / 3 / 2 | 7 |
+| `alloc::collections` (collections/mod.rs) | 29 | 29 / 0 / 0 | 29 / 0 / 0 | 2 |
+| `alloc::collections::btree::set_val` | 18 | 18 / 0 / 0 | 18 / 0 / 0 | 6 |
+
+(vec/in_place_collect.rs was tried and left out: the helper writes none of its facts, all crate-private, so its control has
+no pair.) slice.rs' remaining causes, not this round's: the late-bound regions of a where clause's Fn sugar written `'_`
+where the helper writes `'^#0` (`sort_by`, `sort_by_key`, `sort_by_cached_key`'s `F: FnMut(&T, &T) -> Ordering`), and an
+impl inside a function body inside an impl's function (`{impl#0}::to_vec_in::{impl#0}::to_vec::{impl#0}`) not written. The
+unit cases: 25 pure (3 new: derive_const's text, its negative), and per module the causes' facts written by value
+(test/rust/front/alloc_iface_test.ae's `module-cases`, with negatives: Cow's Hash impl has no projection clause, derive's
+`fmt` not const), the summary held to `alloc-iface-units-known.txt` (five modules).
+
+core's pass shares the code, so its facts may move: derive_const is written in 12 of core's files (cmp, any, option, result,
+ops/control_flow, ops/range among `test/rust/front/core-modules.txt`: their impls now made, later `{impl#N}` renumbered as
+rustc numbers them), associated-type bounds in option, convert/mod and ops/try_trait (their clauses now in the param envs);
+none in core-essential's six modules.
+
+### Decisions taken overnight (round 52)
+
+- RIND9a-6 (a) a `derive_const` trait's every impl is const, TrivialClone's too (rustc passes is_const to each TraitDef of the
+  derive; core's hand-written `const unsafe impl TrivialClone`): taken. Alternative: Clone's alone, set aside (no source for it).
+- RIND9a-7 (a) the constraints' clauses as one ordered metadata `:clauses` beside `:constraints` (left for dyn's readers):
+  taken. Alternative: `:constraints` extended with bound entries, set aside (its readers destructure `[ad args term]`).
+
+### The day's commands (not run here)
+
+- `bin/rust-front core-essential` (its known summary: expected unchanged) and `bin/rust-front rind-test`.
+- core's whole check over `test/rust/front/core-modules.txt` (`bin/rust-front core-check --records`, as the day runs it) to see
+  the derive_const and associated-type-bound modules move; re-record its known lines from a passing run.
+- The whole alloc pass, `bin/rust-front alloc-iface` (about 25 minutes, 2.3 GB), for the crate's counts after the fixes.
