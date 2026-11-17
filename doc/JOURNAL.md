@@ -10319,3 +10319,32 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: A15, `:jdk-extra`: a JDK module as a program's world extension (branch `n-g2-xml`, night round 52)
+
+- What: the Ghidra demo's G2 item A15 (the user's GH13 (a); round 53: java.xml stays out of the shipped world, per
+  program only). `bin/java-project`'s model takes `:java :jdk-extra [{:module "java.xml" :closure {:roots [...]}
+  :variants [...]}]` (or `:classes`, the set itself, in place of `:closure`): a module of kind `jdk` first in the plan,
+  its sources jdk26u's (`/root/jdk26u` at `jdk/javac/provenance.edn`'s commit `baf63fbe`, checked, `src/MODULE` clean)
+  share/unix/linux layers, cut by A3 with javac's `--patch-module MODULE=TREE -Xprefer:source` (the platform's classes
+  are newer than the sources: without it javac takes them and parses nothing), read by `bin/repr-java read-jdk`, the forms
+  into `forms.all`, the resources (but HTML) into `resources.jars/001-MODULE`, the variants copied by digest and named by
+  `--variants` in `outside.args`. Doc: doc/go/BUILD.md, "Java sources by module", the `:jdk-extra` bullet.
+- Proof (light, each process under 0.7 GiB): `bin/java-project test` with `test/java/project/controls/jdk-extra.edn`: the
+  cut from `org.xml.sax.SAXParseException` keeps SAXParseException, SAXException and Locator; both fronts and nread equal;
+  the three forms byte for byte `jdk/javac/forms`' (bin/javac-vendor's read of the same files); `:classes`; seven
+  controls. The program `test/programs-pending/xml` (DOM and SAX by JAXP's default factories, `runs/main.out` written by
+  hand) waits for the day's `--build-program` before it moves to `test/programs/` (where the weekly `programs-full` would
+  build it).
+- Measured (one javac run, 1.18 GiB, 72 s, before the night's 1 GiB rule was applied to it): the cut from
+  `javax.xml.namespace.QName` alone keeps 1,493 of java.xml's 1,855 files (SecuritySupport, JdkXmlConfig's catalog and
+  XMLSecurityManager reach most of Xerces); the JDK's runs load 171 java.xml classes for SAX and 97 for StAX
+  (n-clojure-cdr's probe, .tmp/keep/wt-n-clojure-cdr/xmlprobe/): hence `:classes`, a measured set as
+  overlay/jdk/javac/closure.txt is for javac's tool world, the rest declared outside (`:outside [:platform]`).
+- Decisions taken overnight (round 52): (1) j2g's extra arguments through `outside.args` and the forms through
+  `forms.all`, so that `bin/arbace-go`, j2g and `gate_key` stay unchanged (alternative: a `jdk-extra.args` read by
+  bin/arbace-go, which is in gate_key: a full gate first); (2) the variants are javac's tool world's two java.xml ones,
+  named by path (`overlay/jdk/javac/variants/{SecuritySupport,JdkXmlConfig}.ae`; copies under `overlay/jdk/` would move
+  gate_key); (3) the program fixture pending outside `test/programs/`; (4) `-Xprefer:source` for a JDK module's cut;
+  (5) `:classes` beside `:closure` (the coordinator's round 53 note, for Clojure's suite program: clojure.xml's SAX and
+  xml-stream's StAX).

@@ -23,7 +23,15 @@
 #     module's in forms.all, the later listed in WORK/classes.shadowed): the later copy in forms.all, and with :shadow false
 #     (controls/shadow-off.edn) the read itself;
 #   - :outside (A8, A8b; test/programs/outside): the read's WORK/outside.args, j2g's --outside-platform (the platform's
-#     directory) and --outside-classes (the binary-only jar unpacked, named by its coordinate).
+#     directory) and --outside-classes (the binary-only jar unpacked, named by its coordinate);
+#   - :jdk-extra (A15, GH13 (a); controls/jdk-extra.edn): java.xml as the program's world extension, the plan's module
+#     of kind jdk first (jdk26u's share, unix and linux layers), its cut from org.xml.sax.SAXParseException three files
+#     (--patch-module, -Xprefer:source), read by read-jdk with both fronts and nread equal, its forms in forms.all byte for
+#     byte bin/javac-vendor's read of the same files (jdk/javac/forms) and their headers jdk26u's paths, its resources
+#     (the JDK catalog, Xerces' messages; not HTML) the first directory of resources.jars, its variant copied by digest
+#     and named by --variants in outside.args; :classes (the set itself, no cut: Locator and Location alone); controls:
+#     java.base, no :closure, both :closure and :classes, an unknown key, a jdk26u tree not at the pin, a root or a
+#     :classes name the module lacks.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -98,7 +106,56 @@ expect ":outside: outside.args names the platform's modules and the class path's
     && [ "$(wc -l < "$3/out/outside.args")" = 4 ]' _ "$jp" "$ofx" "$w"
 expect "  (without :outside, no outside.args lines: the fixture of java-project)" bash -c '[ ! -s "$1/fx/outside.args" ]' _ "$w"
 
+jx=$ctl/jdk-extra.edn
+jxo=(--base "$fx" --root "controls=$ctl")
+expect "A15 :jdk-extra: the plan's first module java.xml, of kind jdk, jdk26u's layers" \
+  bash -c '"$2" plan "$3" "${@:4}" > "$1/jx.plan" 2>&1 && [ "$(sed -n 2p "$1/jx.plan")" = "$(printf "module\tjava.xml")" ] \
+    && grep -qx "$(printf "kind\tjdk")" "$1/jx.plan" && grep -q "^src.*/src/java.xml/share/classes.*/src/java.xml/unix/classes" "$1/jx.plan" \
+    && grep -qx "$(printf "module\tapp")" "$1/jx.plan"' _ "$w" "$jp" "$jx" "${jxo[@]}"
+expect "A15: read --check front: java.xml's cut read by read-jdk, both trees' forms equal" \
+  logged "$w/jx-front.log" "$jp" read "$jx" "$w/jx" "${jxo[@]}" --check front
+expect "A15: read --check nread: read-jdk without javac equal" logged "$w/jx-nread.log" "$jp" read "$jx" "$w/jx" "${jxo[@]}" --check nread
+expect "A15: the cut keeps SAXParseException, SAXException and Locator alone" \
+  bash -c 'sed -n "/^ :kept\$/,\$p" "$1" | grep -o "\"[^\"]*\"" | tr "\n" " " | grep -qx "\"org/xml/sax/Locator.java\" \"org/xml/sax/SAXException.java\" \"org/xml/sax/SAXParseException.java\" "' \
+  _ "$w/jx/closure/java.xml/report.edn"
+expect "A15: the forms in forms.all, byte for byte bin/javac-vendor's read of the same files (jdk/javac/forms)" \
+  bash -c 'for f in Locator SAXException SAXParseException; do cmp -s "$1/org/xml/sax/$f.ae" "$2/org/xml/sax/$f.ae" || exit 1; done
+    [ "$(find "$1/org/xml" -name "*.ae" | wc -l)" = 4 ] && [ -f "$1/demo/xmlerr/Where.ae" ]' _ "$w/jx/forms.all" "$root/jdk/javac/forms"
+expect "A15: the forms' headers name jdk26u's paths" \
+  has "$w/jx/forms.all/org/xml/sax/Locator.ae" ";; Converted from jdk26u src/java.xml/share/classes/org/xml/sax/Locator.java by arbace.repr.java"
+expect "A15: java.xml's resources the first directory of resources.jars (the catalog, Xerces' messages; no HTML)" \
+  bash -c 'cd "$1" && [ "$(ls | tr "\n" " ")" = "001-java.xml " ] && [ -f 001-java.xml/jdk/xml/internal/jdkcatalog/JDKCatalog.xml ] \
+    && [ -f 001-java.xml/com/sun/org/apache/xerces/internal/impl/msg/XMLMessages.properties ] && [ -z "$(find . -name "*.html")" ]' _ "$w/jx/resources.jars"
+expect "A15: outside.args names the variants' directory, by digest, holding SecuritySupport.ae" \
+  bash -c '[ "$(sed -n 1p "$1/outside.args")" = --variants ] && d=$(sed -n 2p "$1/outside.args") && [ "$(wc -l < "$1/outside.args")" = 2 ] \
+    && [[ $d == "$1"/variants/????????????????????  ]] && cmp -s "$d/SecuritySupport.ae" "$2/overlay/jdk/javac/variants/SecuritySupport.ae"' _ "$w/jx" "$root"
+sed 's/:closure {:roots \["org.xml.sax.SAXParseException"\]}/:classes ["org.xml.sax.Locator" "javax.xml.stream.Location"]/' "$jx" > "$w/jx-classes.edn"
+expect "A15 :classes: the set itself, no cut: Locator and Location read, nothing else of java.xml" \
+  bash -c '"$2" read "$3" "$1/jc" "${@:4}" --no-classes > "$1/jx-classes.log" 2>&1 \
+    && [ "$(sed -n "/^ :kept\$/,\$p" "$1/jc/closure/java.xml/report.edn" | grep -o "\"[^\"]*\"" | tr "\n" " ")" = "\"javax/xml/stream/Location.java\" \"org/xml/sax/Locator.java\" " ] \
+    && [ -f "$1/jc/forms.all/javax/xml/stream/Location.ae" ] && [ -f "$1/jc/forms.all/org/xml/sax/Locator.ae" ] \
+    && [ "$(find "$1/jc/forms.all" -name "*.ae" | grep -vc demo/)" = 4 ]' _ "$w" "$jp" "$w/jx-classes.edn" "${jxo[@]}"
+
 echo "controls:"
+sed 's/:closure {:roots/:classes ["org.xml.sax.Locator"] :closure {:roots/' "$jx" > "$w/jx-both.edn"
+must_fail "A15: :jdk-extra with both :closure and :classes" "$w/c19.log" "$jp" plan "$w/jx-both.edn" "${jxo[@]}"
+sed 's/:closure {:roots \["org.xml.sax.SAXParseException"\]}/:classes ["org.xml.sax.NoSuchType"]/' "$jx" > "$w/jx-classes-absent.edn"
+must_fail "A15: a :classes name the module lacks" "$w/c20.log" "$jp" sources "$w/jx-classes-absent.edn" "$w/c20" "${jxo[@]}"
+expect "  (its message names the class)" has "$w/c20.log" ":classes with no file: org.xml.sax.NoSuchType"
+sed 's/:module "java.xml"/:module "java.base"/' "$jx" > "$w/jx-base.edn"
+must_fail "A15: :jdk-extra java.base" "$w/c14.log" "$jp" plan "$w/jx-base.edn" "${jxo[@]}"
+expect "  (its message names the shipped world)" has "$w/c14.log" "java.base is the shipped world's"
+sed 's/:closure {:roots \["org.xml.sax.SAXParseException"\]}//' "$jx" > "$w/jx-noclosure.edn"
+must_fail "A15: :jdk-extra without :closure" "$w/c15.log" "$jp" plan "$w/jx-noclosure.edn" "${jxo[@]}"
+sed 's/:module "java.xml"/:module "java.xml" :patches []/' "$jx" > "$w/jx-key.edn"
+must_fail "A15: :jdk-extra with an unknown key" "$w/c16.log" "$jp" plan "$w/jx-key.edn" "${jxo[@]}"
+mkdir -p "$w/fakejdk/src/java.xml/share/classes/org/xml"
+cp -r "${JDK:-/root/jdk26u}/src/java.xml/share/classes/org/xml/sax" "$w/fakejdk/src/java.xml/share/classes/org/xml/"
+must_fail "A15: a jdk26u tree not at the platform's pin" "$w/c17.log" "$jp" sources "$jx" "$w/c17" "${jxo[@]}" --root "jdk26u=$w/fakejdk"
+expect "  (its message names the pin)" has "$w/c17.log" "is not jdk26u at the platform's pin"
+sed 's/org.xml.sax.SAXParseException/org.xml.sax.NoSuchType/' "$jx" > "$w/jx-absent.edn"
+must_fail "A15: a :jdk-extra root the module lacks" "$w/c18.log" "$jp" sources "$w/jx-absent.edn" "$w/c18" "${jxo[@]}"
+expect "  (its message names the root)" has "$w/c18.log" "roots with no file (or left out): org.xml.sax.NoSuchType"
 must_fail ":outside with a value neither :platform nor :class-path" "$w/c10.log" "$jp" plan "$ctl/outside-bad.edn" --base "$fx"
 must_fail "a resource outside META-INF in two modules, differing" "$w/c9.log" \
   "$jp" read "$ctl/res-dup.edn" "$w/c9" --base "$fx" --root "controls=$ctl" --no-classes

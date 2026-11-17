@@ -18,7 +18,9 @@
 #                                                  resources into WORK/resources.all and, a directory
 #                                                  a module, WORK/resources.jars; with :outside
 #                                                  (A8, A8b) j2g's arguments of the declarations
-#                                                  outside the world in WORK/outside.args
+#                                                  outside the world in WORK/outside.args, and with
+#                                                  :jdk-extra (A15) the variants of the program's
+#                                                  world extension after them
 #   bin/java-project fetch [--from DIR] [--check]  the pinned artifacts of Arbace's own fixtures
 #                                                  (test/java/project/maven-pins.edn) into the main checkout's
 #                                                  .tmp/maven, a model's $maven-pins root (--from: a local
@@ -26,9 +28,20 @@
 #                                                  and the pinned bytes)
 #   bin/java-project test                          the fixtures (test/java/project/, test/programs/java-project),
 #                                                  with their negative controls
+# :jdk-extra (A15, GH13 (a)): a JDK module as a per-program world extension, [{:module "java.xml" :closure
+# {:roots [...]} :variants [...]}]: its sources jdk26u's ($jdk26u, default $JDK or /root/jdk26u) at the pin
+# of jdk/javac/provenance.edn (the platform's), share's, unix's and linux's layers, cut by A3 against the
+# platform with --patch-module MODULE=TREE -Xprefer:source (the module's own classes taken from its sources,
+# java.base's and the others' from the platform), read by repr/java's read-jdk (--patch-module, as
+# bin/jrt-convert and bin/javac-vendor read the JDK) with the module's resources (but its HTML), its forms
+# merged into WORK/forms.all with the modules' (j2g puts the JDK's packages into jrt: the world, not the
+# shipped one), its :variants copied into WORK/variants/DIGEST and named by --variants in outside.args
+# (bin/arbace-go --build-program appends that file to j2g's arguments: the shipped runtime, gate_key and
+# bin/arbace-go unchanged). JAVA_PROJECT_JDK_THREADS: read-jdk's threads (default 1: memory).
 # MODEL: a directory holding program.edn, or a plan file. OPTIONS:
 #   --base DIR            the directory the model's relative paths are under (default MODEL's)
-#   --root NAME=DIR       the model's $NAME/... paths (repeatable)
+#   --root NAME=DIR       the model's $NAME/... paths (repeatable; $arbace, this checkout, and $jdk26u,
+#                         $JDK or /root/jdk26u, by default)
 #   --repository DIR      the Maven repository (default the model's :repository, ARBACE_MAVEN_REPO)
 #   --only M,...          these modules (with read: their dependencies' sources are made too)
 #   --check front|nread   with read: each module also read from both trees (read --front both: the
@@ -104,6 +117,8 @@ else mfile=$model; [ -n "$base" ] || base=$(dirname "$model"); fi
 mfile=$(cd "$(dirname "$mfile")" && pwd)/$(basename "$mfile")
 base=$(cd "$base" && pwd)
 printf '%s\n' "${plan_opts[@]}" | grep -q '^maven-pins=' || plan_opts+=(--root "maven-pins=$(pins_store)")
+printf '%s\n' "${plan_opts[@]}" | grep -q '^jdk26u=' || plan_opts+=(--root "jdk26u=${JDK:-/root/jdk26u}")
+printf '%s\n' "${plan_opts[@]}" | grep -q '^arbace=' || plan_opts+=(--root "arbace=$root")
 [ -n "${ARBACE_MAVEN_REPO:-}" ] && ! printf '%s\n' "${plan_opts[@]}" | grep -qx -- --repository \
   && plan_opts+=(--repository "$ARBACE_MAVEN_REPO")
 
@@ -216,6 +231,11 @@ closure() {
   vals "$m" roots > "$c/roots.txt"
   cp=$(jar_dirs "$m" | join_path)
   sp=$( { echo "$c/tree"; dep_src "$m"; } | join_path)
+  # where javac finds the files the roots reach: the source path; a JDK module's (A15) its own sources
+  # patched over the platform's module, each of its classes taken from the sources (-Xprefer:source: the
+  # platform has them all compiled, newer than jdk26u's files), the other modules' from the platform
+  local where=(-sourcepath "$sp" ${cp:+-cp "$cp"})
+  [ "${P[$m:kind]}" != jdk ] || where=(--patch-module "$m=$c/tree" -Xprefer:source)
   while :; do
     round=$((round + 1))
     [ $round -le 50 ] || { echo "java-project: $m: the closure does not settle in 50 rounds" >&2; return 1; }
@@ -233,7 +253,7 @@ closure() {
     st=0
     (cd "$c" && timed "$c/round$round.time" "$root/bin/repr-java" javac -proc:none -implicit:class -verbose -nowarn \
        -Xmaxerrs 100000 -encoding UTF-8 $(release_opts "$m") $(vals "$m" javac) \
-       -sourcepath "$sp" ${cp:+-cp "$cp"} -d "$c/classes" "@$c/files.list") > "$c/round$round.log" 2>&1 || st=$?
+       "${where[@]}" -d "$c/classes" "@$c/files.list") > "$c/round$round.log" 2>&1 || st=$?
     jp closure-scan "$c/round$round.log" "$c/tree" > "$c/round$round.scan" || return 1
     if ! grep -q '^error' "$c/round$round.scan"; then
       [ $st = 0 ] || { tail -20 "$c/round$round.log" >&2; echo "java-project: $m: javac failed without an error of the closure's files ($c/round$round.log)" >&2; return 1; }
@@ -261,6 +281,25 @@ closure() {
   echo "  $m: closure: $(wc -l < "$c/kept.txt") files kept, $(wc -l < "$c/left.tsv") left out, $round rounds ($c/report.edn)"
 }
 
+# class_set M TREE: :jdk-extra's :classes (A15, round 53): the set itself, no cut: the files its names and
+# patterns name (resolve_roots), each present, copied into WORK/closure/M/src with the report WORK/closure/M/report.edn
+# (the closure's shape: no round, nothing left out)
+class_set() {
+  local m=$1 tree=$2 c=$work/closure/$1 pats
+  rm -rf "$c"; mkdir -p "$c/src"
+  vals "$m" classes > "$c/roots.txt"
+  mapfile -t pats < "$c/roots.txt"
+  resolve_roots "$tree" "${pats[@]}" > "$c/kept.all"
+  if grep -q '^MISSING:' "$c/kept.all"; then
+    echo "java-project: $m: :classes with no file: $(sed -n 's/^MISSING://p' "$c/kept.all" | paste -sd' ' -)" >&2; return 1
+  fi
+  grep . "$c/kept.all" > "$c/kept.txt" || { echo "java-project: $m: :classes name no file" >&2; return 1; }
+  (cd "$tree" && xargs -r -d '\n' cp --parents -t "$c/src" < "$c/kept.txt")
+  : > "$c/left.tsv"
+  jp closure-report "$c/report.edn" "$m" 0 "$c/left.tsv" "$c/kept.txt" "$c/roots.txt" || return 1
+  echo "  $m: the class set: $(wc -l < "$c/kept.txt") files (no cut; $c/report.edn)"
+}
+
 # mr_report M: an artifact's binary jar's versioned classes (layers up to the release) whose source the
 # sources jar lacks at that layer: WORK/src/M.mr.edn (the sources read are the base's for those)
 mr_report() {
@@ -280,9 +319,52 @@ mr_report() {
     echo " ]}"; } > "$work/src/$m.mr.edn"
 }
 
+# jdk_pin: the commit of jdk26u the platform is built from (jdk/javac/provenance.edn's :jdk26u)
+jdk_pin() { sed -n 's/^{:jdk26u {.*:commit "\([0-9a-f]*\)".*/\1/p' "$root/jdk/javac/provenance.edn" | head -1; }
+
+# jdk_sources M: a JDK module of :jdk-extra (A15): jdk26u's tree at the pin (clean in src/M), the module's
+# layers (share, unix, linux: those that exist) laid over in order into WORK/src/M (their .java files but
+# module-info.java and the javadoc's snippet-files), WORK/src/M.origins.tsv (each file's layer: the forms'
+# headers name it as bin/javac-vendor's do), WORK/resources/M (the other files but HTML: the module's
+# resources, its messages' properties and the JDK catalog), then the cut (A3; :closure is required)
+jdk_sources() {
+  local m=$1 k t0=$SECONDS jr pin head dirty tree d l n=0
+  jr=$(vals "$m" jdk-root); pin=$(jdk_pin)
+  [ -n "$pin" ] || { echo "java-project: $m: no jdk26u pin in $root/jdk/javac/provenance.edn" >&2; return 1; }
+  head=$(git -C "$jr" rev-parse HEAD 2>&1) || head="not a git tree ($head)"
+  [ "$head" = "$pin" ] || { echo "java-project: $m: $jr is not jdk26u at the platform's pin $pin (HEAD: $head)" >&2; return 1; }
+  dirty=$(git -C "$jr" status --porcelain --untracked-files=no -- "src/$m" 2>&1) || dirty="git status failed: $dirty"
+  [ -z "$dirty" ] || { echo "java-project: $m: $jr's src/$m differs from the pin: $(echo "$dirty" | head -3 | tr '\n' ' ')" >&2; return 1; }
+  [ -d "$jr/src/$m/share/classes" ] || { echo "java-project: $m: no JDK module $m ($jr/src/$m/share/classes)" >&2; return 1; }
+  k=$( { echo jdk-sources; echo "$pin"; vals "$m" src; vals "$m" roots; echo --; vals "$m" optional; echo --; vals "$m" classes; tool_id; self_digest; } | sha)
+  if key_same "$m.sources" "$k" && [ -f "$work/src/$m.roots" ]; then return 0; fi
+  tree=$work/src/$m
+  rm -rf "$tree" "$work/resources/$m"; mkdir -p "$tree" "$work/resources/$m"
+  : > "$work/src/$m.origins.tsv.part"
+  while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    l=${d#"$jr"/}; n=$((n + 1))
+    (cd "$d" && find . -type f -name '*.java' ! -name module-info.java ! -path '*/snippet-files/*' | sed 's|^\./||' | LC_ALL=C sort) > "$tree.files"
+    (cd "$d" && xargs -r -d '\n' cp -f --parents -t "$tree" < "$tree.files")
+    sed "s|.*|&\tjdk26u $l/&|" "$tree.files" >> "$work/src/$m.origins.tsv.part"
+    (cd "$d" && find . -type f ! -name '*.java' ! -name '*.html' | sed 's|^\./||' | LC_ALL=C sort) > "$tree.res"
+    (cd "$d" && xargs -r -d '\n' cp -f --parents -t "$work/resources/$m" < "$tree.res")
+  done <<< "$(vals "$m" src)"
+  rm -f "$tree.files" "$tree.res"
+  # a file of a later layer replaces the earlier one's: its origin the later layer's
+  tac "$work/src/$m.origins.tsv.part" | awk -F'\t' '!seen[$1]++' | LC_ALL=C sort > "$work/src/$m.origins.tsv"
+  rm -f "$work/src/$m.origins.tsv.part"
+  if [ -n "$(vals "$m" classes)" ]; then class_set "$m" "$tree" || return 1
+  else closure "$m" "$tree" || return 1; fi
+  echo "$work/closure/$m/src" > "$work/src/$m.roots"
+  echo "$k" > "$work/keys/$m.sources"
+  echo "  $m: sources jdk26u ${pin:0:12} ($n layers, $(wc -l < "$work/src/$m.origins.tsv") files, $(find "$work/resources/$m" -type f | wc -l) resources; $((SECONDS - t0)) s)"
+}
+
 # sources M: WORK/src/M.roots (the source roots), WORK/resources/M (resources :jar)
 sources() {
   local m=$1 k t0=$SECONDS
+  if [ "${P[$m:kind]}" = jdk ]; then jdk_sources "$m"; return; fi
   if [ "${P[$m:kind]}" = src ]; then
     vals "$m" src | while IFS= read -r d; do [ -d "$d" ] || { echo "java-project: $m: no source directory $d" >&2; exit 1; }; done || return 1
     vals "$m" src > "$work/src/$m.roots"
@@ -334,6 +416,8 @@ sources() {
 # classes M: javac on Arbace, the module's files against its dependencies' classes and the jars (A11)
 classes() {
   local m=$1 k cp out=$work/classes/$1 st=0 t0=$SECONDS
+  # a JDK module (A15): the platform has its classes; the cut compiled what it keeps
+  if [ "${P[$m:kind]}" = jdk ]; then echo "  $m: classes: the platform's (a JDK module; the cut compiled its files)"; return 0; fi
   mapfile -t roots < "$work/src/$m.roots"
   cp=$( { for d in $(vals "$m" deps); do echo "$work/classes/$d"; done; jar_dirs "$m"; } | join_path)
   k=$( { echo classes; for r in "${roots[@]}"; do files_digest "$r"; done; for d in $(vals "$m" deps); do cat "$work/keys/$d.classes"; done
@@ -370,10 +454,18 @@ read_module() {
          vals "$m" jars | xargs -r -d '\n' sha256sum; vals "$m" javac; release_opts "$m"; echo "$check $chunk"; tool_id; self_digest; } | sha)
   if key_same "$m.read" "$k" && [ -d "$out" ]; then echo "  $m: forms cached"; return 0; fi
   (cd "$tree" && java_files . | sed 's|^\./||') > "$work/log/$m.files"
-  awk -v m="$m" 'BEGIN {print "{"} {printf "\"%s\" \"%s/%s\"\n", $0, m, $0} END {print "}"}' "$work/log/$m.files" > "$work/log/$m.origins.edn"
+  # repr/java's read: read, or for a JDK module (A15) read-jdk (OUT MODULE SRC: --patch-module against the
+  # platform, the files' origins jdk26u's)
+  local rj=("$root/bin/repr-java" read) mid=()
+  if [ "${P[$m:kind]}" = jdk ]; then
+    rj=(env "REPR_JAVA_THREADS=${JAVA_PROJECT_JDK_THREADS:-1}" "$root/bin/repr-java" read-jdk) mid=("$m")
+    awk -F'\t' 'BEGIN {print "{"} {printf "\"%s\" \"%s\"\n", $1, $2} END {print "}"}' "$work/src/$m.origins.tsv" > "$work/log/$m.origins.edn"
+  else
+    awk -v m="$m" 'BEGIN {print "{"} {printf "\"%s\" \"%s/%s\"\n", $0, m, $0} END {print "}"}' "$work/log/$m.files" > "$work/log/$m.origins.edn"
+  fi
   # the read's javac takes the text as UTF-8 (its file manager): an -encoding option is dropped
   local jopts=() o skip=
-  for o in -sourcepath "$sp" ${cp:+-cp "$cp"} $(release_opts "$m") $(vals "$m" javac); do
+  [ "${P[$m:kind]}" = jdk ] || for o in -sourcepath "$sp" ${cp:+-cp "$cp"} $(release_opts "$m") $(vals "$m" javac); do
     if [ -n "$skip" ]; then skip=; continue; fi
     [ "$o" != -encoding ] || { skip=1; continue; }
     jopts+=(--javac "$o")
@@ -403,18 +495,18 @@ read_module() {
     local L=$cdir/$i st1=0
     case $check in
       front)
-        (cd "$work" && timed "$L.read.time" "$root/bin/repr-java" read --check --front both --split \
-           --native-out "$L.native" --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "$tree" "${paths[@]}") \
+        (cd "$work" && timed "$L.read.time" "${rj[@]}" --check --front both --split \
+           --native-out "$L.native" --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "${mid[@]}" "$tree" "${paths[@]}") \
            > "$L.read.log" 2>&1 || st1=$? ;;
       nread)
-        (cd "$work" && timed "$L.read.time" "$root/bin/repr-java" read --check --front javac \
-           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "$tree" "${paths[@]}") > "$L.read.log" 2>&1 || st1=$?
-        (cd "$work" && timed "$L.nread.time" "$root/bin/repr-java" read --check --no-javac \
-           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.native" "$tree" "${paths[@]}") > "$L.nread.log" 2>&1 || { [ $st1 != 0 ] || st1=$?; }
+        (cd "$work" && timed "$L.read.time" "${rj[@]}" --check --front javac \
+           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "${mid[@]}" "$tree" "${paths[@]}") > "$L.read.log" 2>&1 || st1=$?
+        (cd "$work" && timed "$L.nread.time" "${rj[@]}" --check --no-javac \
+           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.native" "${mid[@]}" "$tree" "${paths[@]}") > "$L.nread.log" 2>&1 || { [ $st1 != 0 ] || st1=$?; }
         cat "$L.nread.log" >> "$work/log/$m.nread.log" ;;
       *)
-        (cd "$work" && timed "$L.read.time" "$root/bin/repr-java" read --check \
-           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "$tree" "${paths[@]}") > "$L.read.log" 2>&1 || st1=$? ;;
+        (cd "$work" && timed "$L.read.time" "${rj[@]}" --check \
+           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "${mid[@]}" "$tree" "${paths[@]}") > "$L.read.log" 2>&1 || st1=$? ;;
     esac
     cat "$L.read.log" >> "$work/log/$m.read.log"
     [ $st1 = 0 ] || st=$st1
@@ -530,7 +622,24 @@ if [ $status = 0 ] && [ "$verb" = read ]; then
           done ;;
       esac
     done
-    [ ! -s "$work/outside.args" ] || echo "java-project: the declarations outside the world in $work/outside.args ($(grep -c '^--outside' "$work/outside.args") sources)"
+    # :jdk-extra's variants (A15): each module's files (a file, or a directory's .ae files) copied into
+    # WORK/variants/DIGEST, named by their contents (bin/arbace-go keys a program by outside.args' text), one
+    # --variants a module after the declarations outside the world
+    rm -rf "$work/variants"
+    for m in "${want[@]}"; do
+      [ "${P[$m:kind]}" = jdk ] && [ -n "$(vals "$m" variants)" ] || continue
+      vt=$work/variants/tmp-$m; mkdir -p "$vt"
+      while IFS= read -r v; do
+        if [ -d "$v" ]; then find "$v" -maxdepth 1 -type f -name '*.ae' -exec cp -t "$vt" {} + || status=1
+        elif [ -f "$v" ]; then cp -t "$vt" "$v" || status=1
+        else echo "java-project: $m: no variant file or directory $v" >&2; status=1; fi
+      done <<< "$(vals "$m" variants)"
+      vd=$work/variants/$(files_digest "$vt" | cut -c1-20)
+      rm -rf "$vd"; mv "$vt" "$vd"
+      printf '%s\n' --variants "$vd" >> "$work/outside.args"
+      echo "java-project: $m: $(ls "$vd" | wc -l) variants for j2g ($vd)"
+    done
+    [ ! -s "$work/outside.args" ] || echo "java-project: j2g's world arguments in $work/outside.args ($(grep -c '^--outside' "$work/outside.args") sources outside the world, $(grep -c '^--variants' "$work/outside.args") variant directories)"
     [ ! -s "$work/resources.shadowed" ] || echo "java-project: $(wc -l < "$work/resources.shadowed") META-INF resources of a later module shadowed in resources.all by an earlier module's ($work/resources.shadowed)"
     echo "java-project: the forms merged in $work/forms.all ($(find "$work/forms.all" -name '*.ae' | wc -l) files), the resources in $work/resources.all ($(find "$work/resources.all" -type f | wc -l) files; by module in $work/resources.jars)"
   fi
