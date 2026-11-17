@@ -7080,3 +7080,68 @@ check does not judge regressions.
    dis, ast and tokenize, plus 5 dataclass and 12 namedtuple execs. Probed by importing them at the top of hexiom's
    main module (1,296 -> 72 code objects interpreted), the CPU fell by only about 5%. Most of their cost is the IR
    read and the collections, not the loop.
+
+## As built: 304, the next deferred classes (round 4): memoryview's formats, _bisect, property, struct_time, the seeds, the built-ins' checks (2026-11-16, the Mac VM, queue 304)
+
+Night 12's partial eval record (181 modules) judged with 288fc7dc7's classes keeps only `:runner-limits` (252: whole modules
+past the night's cap), `:testcapi` (53, by design since 244-4 (a)), `:finalization-collect` (27), `:memoryview-formats` (22,
+286's Barrier rows: the record not run since) and single digits as deferred rows; the deferred classes with the most rows
+are named by `:tests` from later runs of modules outside the record: `:multiprocessing-children` 95, `:finalization-goi`
+82, `:memoryview-formats` 63 (41 named), `:capi-port` 63, `:regrtest-children` 58, `:io-c-checks` 48, `:pyi-command-line`
+40, `:pydoc-builtins` 38, `:builtin-functions-core` 36, `:core-objects-287` 34, `:ordered-dict-c` 31 and below them
+`:c-bisect` 23, `:property-core` 21, `:hash-algorithm` 17, `:structseq-protocol` 15, `:set-core` 14. The ones closed here by
+fixes in pyi, the largest pyi-fixable first (the forkserver's and the C API's are not pyi code; goi's finalization is W2):
+
+- **memoryview's formats** (`memoryview.ae`, `builtins_array.ae`, `bytes.ae`, `bytearray.ae`): an exporter's 1-D format
+  (`BufferFormatter`: an array's typecode, as array_buffer_getbuf gives it; 'u' and 'w' stay byte views), so a view of an
+  array('i') is a view of ints (len, items, slices by item, strides, tobytes, tolist, count, index); memory_richcompare's
+  item comparison for native formats other than a byte format on both sides ('?' by truth, 'i' against 'B' by value, a NaN
+  unequal to itself); BASE_INACCESSIBLE (a released view equals itself only); CHECK_RELEASED at `bytes(m)`,
+  `bytearray(m)`, `with m:` and after an index's, a value's or a slice's conversion (gh-92888: a `__index__`, `__float__`
+  or `__bool__` that releases the view); the tuple keys of a 1-D view (is_multiindex, is_multislice: an index's 1-tuple,
+  NotImplementedError for slices, TypeError past one index); pack_single's TypeError for a value of no int ('B');
+  `hex(sep, bytes_per_sep)` as bytes.hex's, the view exported meanwhile (gh-143195); `__buffer__` and
+  `__release_buffer__` (wrap_releasebuffer's "memoryview's buffer is not this object"); the repr's address; a strided
+  wider view's strides in bytes.
+- **_bisect** (`builtins_bisect.ae`, new): Modules/_bisectmodule.c's four functions, so `bisect.py`'s `from _bisect import *`
+  takes them: lo and hi as Py_ssize_t (hi None or -1 the length), the unsigned midpoint (issue 13496), get_sq_item's
+  refusals, key, an exact list inserted into directly, anything else by its insert method.
+- **property** (`descr.ae`, `attr.ae`, `class.ae`, `finalize.ae`): property_init_impl's subclass rule (the doc stored as the
+  instance's own `__doc__`, gh-41287; a `__slots__` subclass without `__doc__` drops the getter's silently, raises for an
+  explicit one), so a property subclass's instance has its `__dict__` and slots; getter_doc; property_copy as
+  `type(old)(get, set, del, doc)` keeping the name; `__name__` with None a name (unset is NULL); the getter's
+  `__isabstractmethod__` errors propagated; "property %R of %R object has no getter" with the owner's `__qualname__`;
+  `__set_name__`'s argument count message.
+- **struct_time and the struct sequences** (`builtins_time.ae`, `posix_structseq.ae`): `time.struct_time` is a struct
+  sequence of 11 fields, 9 visible (n_fields, n_sequence_fields, n_unnamed_fields, `__match_args__`, `__replace__`,
+  `__reduce__` with tm_zone and tm_gmtoff, copy and deepcopy); structseq_new_impl's "got duplicate or unexpected field
+  name(s)" and `dict=None` refused; concatenation with a tuple and repetition by an int (a tuple's: its visible items);
+  structseq_replace's messages. Not a tuple subclass still (`isinstance(t, tuple)`: test_tuple).
+- **PYTHONHASHSEED** (`hash.ae`): `HashKey` is a package-level initializer, so every hash at the package's init is under
+  it: an integer seed N keys siphash13 by lcg_urandom(N) (CPython's `_PyRandom_Init`), "random" by the system's random
+  bytes; unset, 0, under -E or -I, or not a seed: the zero key, deterministic (CPython randomizes when unset: the
+  DECISION of 304's report).
+- **The built-ins' checks** (`sys.ae`, `builtins.ae`, `core.ae`, `class.ae`, `containers.ae`, `list.ae`, `dict.ae`,
+  `set.ae`, `range.ae`, `slice.ae`, `descr.ae`): `sys.breakpointhook` and `sys.__breakpointhook__` (sys_breakpointhook:
+  `$PYTHONBREAKPOINT`, "0", a builtin name, an unimportable one warned of), `breakpoint()`; NotImplemented has no truth
+  (GH-79893); chr's overflow a ValueError; `__repr__ = None` blocks repr; a `__len__` past ssize_t an OverflowError;
+  `None.__ne__(None)` is False (object's NE through EQ); PyObject_LengthHint's `__len__` errors propagate from list(),
+  list.extend and bytearray.extend (issue 1242657); the dict iterators' `__length_hint__`; set_unhashable_type's message
+  for any TypeError of a hash, set.discard's too; `set().difference(123)` iterates (issue 37219); the classes'
+  `__dict__` and `__weakref__` descriptors' docs; a built-in exception's built-in subclasses in `__subclasses__()` (pydoc's
+  "Built-in subclasses"); range's and slice's start, stop, step member descriptors.
+
+Measured (`bin/pyi lib-test-all --fresh`, each test's own verdict, base 288fc7dc7 in a worktree of its own -> head, pass of
+methods): test_memoryview 105 -> 146 of 171, test_bisect 23 -> 46 of 46, test_property 8 -> 29 of 31, test_builtin 83 -> 100
+of 147, test_iterlen 14 -> 21 of 22, test_set 612 -> 620 of 630, test_structseq 10 -> 22 of 25 (rerun alone, `bin/pyi check
+--only`), test_hash 13 -> 26 of 30, test.test_pydoc.test_pydoc 92 -> 99 of 121; test_array, test_buffer, test_bytes,
+test_memoryio, test_fileio, test_struct, test_abc, test_enum, test_list, test_dict, test_inspect, test_pdb, test_time,
+test_strptime unchanged method for method; test_io's two test_read_byteslike now refused as CPython's array.frombytes
+refuses an 'i' view (_pyio's BytesIO.read1 calls the subclass's read: `:pyio`), its garbage-collection rows failing under
+the VM's load pass alone (PyIOTest's fails alone at the base too). Classes (rows named), before -> after: `:memoryview-formats`
+41 -> retired (40 pass, test_buffer_reference_loop to `:finalization-collect`), `:c-bisect` 23 -> retired,
+`:property-core` 21 -> retired, `:builtin-functions-core` 36 -> 18, `:pydoc-builtins` 38 -> 11 (8 by these fixes, 19 that
+passed since 290), `:hash-algorithm` 17 -> 4, `:structseq-protocol` 15 -> 3, `:set-core` 14 -> 5, `:core-objects-287` 34 ->
+27. Judged with the head's classes, night 12's record has 22 more rows in no class (386 -> 408): its Barrier rows'
+"memoryview: assignment to format 'i'", a message pyi has not raised since 286. Queue 304's report:
+`.tmp/q304/304-python-deferred-classes-4.md` (the VM).
