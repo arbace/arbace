@@ -338,7 +338,9 @@ load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan:
     outputs[$n]=$ou uses[$n]=${us//,/ } kind[$n]=$ki declgib[$n]=$dm diskgib[$n]=$dg cmd[$n]=$cm
   done < "$logs/plan.tsv"
 }
-ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip|absent) return 0 ;; esac; return 1; }
+# (night: the crops tier's subset deferred to the night's gate, gate.plan's crop-why; never a need of a step that runs, which the
+# planner wakes, but not a failure of one)
+ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip|absent|night) return 0 ;; esac; return 1; }
 # out_sha PATH: an output's digest, as gate.plan's out-digest: a file's SHA-256; a directory's, the
 # SHA-256 of sha256sum's lines of its files in order; missing
 out_sha() {
@@ -374,6 +376,9 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     none) echo none > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
     # the oracle tier (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a)): a step whose toolchain this host lacks
     absent) echo absent > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
+    # the crops tier (doc/GATE-DIET-SURVEY.md, "As built: the crops tier"): a crop's subset whose crop did not change, deferred to
+    # the night's gate: no run, no failure, no pass
+    night) echo night > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
   esac
   local nw
   for x in ${needs[$n]}; do
@@ -526,6 +531,7 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
     skip) echo "   skipped  $n (${why[$n]})"; return ;;
     none) echo "   -  $n (not needed: no step that runs needs it)"; return ;;
     absent) echo "   absent  $n (${why[$n]})"; return ;;
+    night) echo "   night  $n (${why[$n]})"; return ;;
     # GD4 (GDS12 (a)): deferred for the disk: not a failure; bin/gate retries it at the end, and a run left with one is incomplete
     deferred) echo "   deferred  $n ($(cat "$logs/$n.deferred" 2>"$logs/count.err"))"; return ;;
     notrun*:*) echo "   FAILED  $n (not run: needs ${st#notrun })"; status=1; return ;;

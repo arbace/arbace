@@ -9511,3 +9511,27 @@ check of an OCaml, a new crop, at most 3 by GTS215), goi-check (8.5 once, 2 of 1
 suite-aot-essential (1 percent over), cpp-builtins (a 3 s step, peak 2.3 with tree 0.0: a sampler artefact; the table says 3).
 Checked: `test/gate/crops-test.bash` (gate.crops check on steps.edn included) ok. Step keys: `:mem-gib` is outside the keys
 (crops.ae header), so none moves; only the lanes' admission changes.
+
+## 2026-11-17: the crops tier: the essential gate is the core (branch `gate-ess-diet`, from `next` `cf8268ebf`)
+
+The user's decision of the day: shrink the essential gate. It had 71 steps and about 113 minutes of serial work whenever its keys
+moved (a re-seed, a runtime change), 83.5 of them the crops' 42 essential subsets on stage 0, which rerun on every stage 0 or
+runtime move though the crops are out of every key. Built (doc/GATE-DIET-SURVEY.md, "As built: the crops tier"):
+- `test/gate/steps.edn`'s `:crop-paths {CROP [RULES]}` (each crop's own namespaces, Go forms, scripts, records and fragment) and
+  the step attribute `:essential-when-changed CROP` on every crop's essential check (C's five too). The planner
+  (`test/gate/plan.ae`'s `crop-tier?`, `crop-why`) runs such a step in the essential gate only when its crop's paths, its
+  declaration or its environment changed since its latest pass, else decides `night` (deferred to the night's gate, explained in
+  `bin/gate --plan`); a deferred step a running one needs is woken; `--rerun`, `GATE_CROP_DEFER=0`, the clean run and every night
+  tier key them as before. The rules' files join the keys (GD3's `:also-changed` precedent), so the passes name them. The runner
+  (`bin/lib/gate-run.bash`) and `bin/gate` take the status `night` (no run, no failure, no pass). `gate.crops check` requires a new
+  crop's essential check in the tier and accepts a vector of controls.
+- Merged within their chains where the keys agree: asm-amd64-essential (3), asm-arm64-essential (5), a64i-essential (3),
+  wasm-essential (5), llvm-essential (4), cpp-essential (3), si-essential (2), oi-essential (2), rust-read-essential (2): 20 steps
+  fewer, every command and all 128 control entries kept (`.tmp/ess/cover.ae` on the branch). Not merged: C's levels (GDS10 (a)),
+  cpp-check-essential, rust-front/core, haskell's two, the c2j pair, the two read chains.
+- The fragments synced from steps.edn (the drift memdecl-fix noted), `test/crops/independence.edn`'s step names, CLAUDE.md,
+  the tests (`test/gate/crop-tier-test.bash` new; crops-test, costs-test).
+Alternatives considered: moving the subsets to `:phase :full` (simplest, but a crop's own change would wait for the night, and
+crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
+command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
+29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
