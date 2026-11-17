@@ -10319,3 +10319,22 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: n-review-d: the Mac VM's held crop branches stacked on next (branch `n-review-d`)
+
+- Merged on next 42bf8614b, reading and sub-1-GiB judging only (the night's full gate on the host): mac/323-ocaml-deferred
+  (65109ab43: OT30-OT32, the light level's Gc canary in jdk/ocaml/ocaml/rt/ExtGc.ae), mac/325-haskell-own-stg (5376b5ea7: own
+  interfaces, golden files, the arm64 reference, the .cabal reexports, LibSystem sorted), mac/327-wasm-custom-descriptors (e18c2576f,
+  with 326's b800bb2ad), mac/334-scheme-speed (95595fe6e). None of them was on next, so tonight's gate judged none of their records.
+- Conflicts: test/crops/scores.edn and test/reap/matrix.edn taken from next and re-recorded once at the end (`bin/reap --record`,
+  `bin/crops-score --record`); bin/lib/hsi/record-ref's exports both sides' (`hsi_pre_gen`, `root`, `keep`); hsi-controls.txt both
+  controls; HASKELL-EVAL-SURVEY.md both sections; own-verdicts.tsv first the union, then `bin/hsi own-verdicts --record` over the
+  trees, which adds two rows neither side had (hs_try_putmvar003, IncallAffinity: next's threaded way meeting 325's empty-stdout
+  rule), `--check` current: eval 756 of 909, AOT 132 of 139 by their own verdict; independence.edn's Haskell judge cases restated
+  (self 6035, recorded 1758; the judge stays 0.887).
+- Checks: `bin/reap` 53 of 56 cells, 0 problems; `bin/crops-score --judge --strict` 0 problems; `bin/records-check` 0; `bin/oi
+  divergences` (eval, --aot, --compiled, suite, suite --aot) 0 failing; `bin/hsi divergences` 0 not in a class; `bin/wai
+  divergences [--aot]` ok; `bin/si corpora divergences` reads; `bin/repr-wasm ops check` 571 rows; the gate's crop-tier, crops,
+  chain-needs, gate-key-crops, caches and stale-comments tests pass; `bin/gate --plan` plans. Only 334 moves gate_key (go/arbace/scm
+  and arbace/scheme are embedded since W2): next's e8e0d017 to fa199ec1, so the next gate builds the executables afresh.
+- Every arm64-made or interim record waits for the main host's amd64 runs (the branches' reports, queue 323, 325, 326, 327, 334).
