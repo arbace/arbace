@@ -515,6 +515,9 @@ data, `:java`:
   the modules' resources merged, stays for reading).
   `java.class.path` is then the modules' directories' names in that order (`001-util:002-app`; names only, GH4 (iii),
   ghidra-gh4iii, J2G-SPEC §10.3 "The class path's entries by name"), also for `resources/`'s directories.
+  Since A17 (2026-11-17, the Ghidra case study's G2 plan) each module's entry also lists its classes: `--entry-classes
+  NNN-MODULE=WORK/forms/MODULE` for each `resources.jars` directory, so that `getResources` of a package and an entry's
+  `JarFile` list them names only (J2G-SPEC §10.3, "Package listings"; fixture `test/programs/scan`).
 - **A dependency's variants** (`:patches`, 2026-11-11, ghidra-g1b; GH8 (iii) for third-party sources): an
   artifact module's `:patches`, unified diffs applied in order (`patch -p1`) over its unpacked sources jar
   before the closure, each in the module's sources key and listed with its digest and the files it changes

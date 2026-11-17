@@ -3047,8 +3047,30 @@ rest): a loader's own override of the method first (a translated subclass's: `UR
 else `ClassPathResources`' statics `getResource(ClassLoader, String)`, `getResources`, `getResourceAsStream` (the
 JDK's: getResource's URL opened, null when it cannot be) and `systemResource`, `systemResources`,
 `systemResourceAsStream`, which `main.ae` roots. A world whose `ClassPathResources` lacks them (forms converted
-before A5) keeps the stubs (`m/class-loader-resource-ready?`). Not built: GH4 (iii)'s names-only listing of the
-world's classes on `java.class.path`.
+before A5) keeps the stubs (`m/class-loader-resource-ready?`). GH4 (iii)'s names-only listing: below, A17.
+
+**Package listings** (A17 of the Ghidra case study's G2 plan, GH15 (a); branch `n-g2-next`, 2026-11-17, write-ahead: the
+forms of `ClassPathResources` wait for `bin/jrt-convert predict`). With `--resources`, j2g embeds a third index,
+`META-INF/arbace/entries` (`K NAME` a line, by K then name; `arbace.j2g.meta/entries-listing`, `entries-text`): entry K's
+resources (the plain paths it owns, the plain paths of its root copies), the class files `p/C.class` of its classes, and
+every directory `p/` above them. An entry's classes are those of the Java forms trees `--entry-classes NAME=DIR` gives it
+(`meta/tree-class-names`: each file's top-level classes and their member classes, recursively; local and anonymous classes
+are not listed); `bin/arbace-go --build-program` gives each `:java` module's entry (`resources.jars/NNN-MODULE`) its
+module's forms, `WORK/forms/MODULE`. `ClassPathResources.findAll` (getResources) of a name no resource has but a directory
+some entries list (`p` or `p/`) answers one URL an entry, in the class path's order: the first entry's at the plain path
+(`jar:file:EXE!/p`), entry K's at its root copy's path (`...!/META-INF/arbace/roots/K/p`), as A5's copies; `find` the first,
+`findIn` an entry's. An embedded URL's connection is a `java.net.JarURLConnection`: `getEntryName()` the plain path (a root
+copy's prefix taken off), `getJarFile()` the URL's entry (a root copy's K, else the plain path's owner, else the first
+entry listing it; none: an empty jar) as a `JarFile` whose entries are its listing, a resource with its bytes, a directory,
+and a translated class names only (its `getInputStream` throws `FileNotFoundException`, as A5's connection does for a class
+file). The `JarFile` is a stored zip of the listing written to `java.io.tmpdir` and deleted as it is opened
+(`ZipFile.OPEN_DELETE`), made once an entry for connections that use caches; its `getName()` is the entry's name (as
+`java.class.path` lists it). The connection of a root copy's path that entry K owns at its plain path reads the plain
+path's bytes, so a URL made relative to an entry's package URL (`new URL(base, "C.properties")`, Spring's) reads entry K's
+resource. Not done: a `:java` module without resources is no entry (`bin/java-project` makes no `resources.jars`
+directory for it), so its classes are listed nowhere; a scanner that opens the jar's file by its path (log4j's
+`ResolverUtil`'s `JarInputStream` over `extractPath(url)`) finds the executable, no jar. Fixtures: `test/programs/scan`,
+`test/j2g/unit/scan` (`bin/j2g-unit`'s `entries:`).
 
 **The JDK's resource data** (amendment RD1, accepted 2026-10-10; JRT-NOTES.md, "The JDK's
 resource data"). Besides the sources, `--program` embeds the data that `bin/jrt-convert` makes

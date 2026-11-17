@@ -24,6 +24,15 @@
  * directory that is an entry's name as the file: URL of a directory would (a URLClassLoader over
  * new File(entry).toURI().toURL() finds the entry's embedded resources). The names are names only: no
  * file of the host's file system has them (java.io.File does not see the embedded resources).
+ * Since A17 of the Ghidra case study's G2 plan (GH15 (a); doc/go/J2G-SPEC.md §10.3, "Package listings"): each
+ * entry's listing. j2g embeds META-INF/arbace/entries (K NAME a line: entry K's resources, the class files of
+ * its translated classes, p/C.class, and the directories above them, p/), so that getResources("p") of a
+ * package answers one URL an entry that holds p's classes or resources, in the class path's order (the first
+ * entry's at the plain path, entry K's at META-INF/arbace/roots/K/p, as A5's copies), and the URL's connection
+ * is a JarURLConnection whose JarFile lists the entry's names: a resource with its bytes, a directory, and a
+ * translated class as a names-only entry whose bytes are refused (FileNotFoundException, as A5's connection
+ * refuses a class file's). The JarFile is a stored zip of the entry written once to java.io.tmpdir and
+ * deleted as it is opened (ZipFile.OPEN_DELETE); getName() is the entry's name.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -41,6 +50,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.zip.CRC32;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipOutputStream;
 import sun.net.www.ParseUtil;
 
 /** The resources of the Go build's class path, by URL. */
@@ -154,6 +169,79 @@ public final class ClassPathResources {
         return owners;
     }
 
+    /** The entries' listings (META-INF/arbace/entries: K NAME a line), entry K's names sorted, read once (A17). */
+    private static List<List<String>> listings;
+
+    private static synchronized List<List<String>> listings() {
+        if (listings == null) {
+            List<List<String>> ls = new ArrayList<>();
+            for (int k = 0; k < entries().size(); k++)
+                ls.add(new ArrayList<>());
+            byte[] b = bytes0("META-INF/arbace/entries");
+            if (b != null) {
+                for (String line : new String(b, java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+                    int i = line.indexOf(' ');
+                    if (i > 0) {
+                        int k = Integer.parseInt(line.substring(0, i));
+                        if (k >= 0 && k < ls.size())
+                            ls.get(k).add(line.substring(i + 1));
+                    }
+                }
+            }
+            for (List<String> l : ls)
+                Collections.sort(l);
+            listings = ls;
+        }
+        return listings;
+    }
+
+    /** Does entry k's listing have name? */
+    private static boolean lists(int k, String name) {
+        List<List<String>> ls = listings();
+        return k >= 0 && k < ls.size() && Collections.binarySearch(ls.get(k), name) >= 0;
+    }
+
+    /** The directory a package's resource name names ("p" or "p/": "p/"), or null ("" or "/"). */
+    private static String dirName(String name) {
+        if (name.isEmpty() || name.startsWith("/"))
+            return null;
+        return name.endsWith("/") ? name : name + "/";
+    }
+
+    /** The entries whose listings have name, in the class path's order. */
+    private static List<Integer> holders(String name) {
+        List<Integer> ks = new ArrayList<>();
+        if (name != null) {
+            for (int k = 0; k < listings().size(); k++) {
+                if (lists(k, name))
+                    ks.add(k);
+            }
+        }
+        return ks;
+    }
+
+    /**
+     * The URL of directory name (a package, "p" or "p/") in entry k, which lists it: the plain path for the
+     * first entry listing it, else entry k's root copy's path (A5's), so that each URL names its entry.
+     */
+    private static URL directoryIn(int k, String name) {
+        List<Integer> hs = holders(dirName(name));
+        if (!hs.isEmpty() && hs.get(0).intValue() == k)
+            return embeddedURL(name);
+        return embeddedURL("META-INF/arbace/roots/" + k + "/" + name);
+    }
+
+    /** The package directory name's URLs, one an entry listing it, in order (A17). */
+    private static List<URL> directoryURLs(String name) {
+        List<URL> urls = new ArrayList<>();
+        String d = dirName(name);
+        if (d != null) {
+            for (int k : holders(d))
+                urls.add(directoryIn(k, name));
+        }
+        return urls;
+    }
+
     /** The class path's entries' names, in order (java.class.path's parts): a copy. */
     public static List<String> classPath() {
         return new ArrayList<>(entries());
@@ -182,6 +270,9 @@ public final class ClassPathResources {
             if (o != null && o.intValue() == k)
                 return embeddedURL(name);
         }
+        String d = dirName(name);
+        if (d != null && lists(k, d))
+            return directoryIn(k, name);
         return null;
     }
 
@@ -279,7 +370,8 @@ public final class ClassPathResources {
         }
         if (classFile(name))
             return embeddedURL(name);
-        return null;
+        List<URL> ds = directoryURLs(name);
+        return ds.isEmpty() ? null : ds.get(0);
     }
 
     /** Every URL of resource name on the class path, in order. */
@@ -296,6 +388,8 @@ public final class ClassPathResources {
         }
         if (urls.isEmpty() && classFile(name))
             urls.add(embeddedURL(name));
+        if (urls.isEmpty())
+            urls.addAll(directoryURLs(name));
         for (String d : path()) {
             URL b = directoryURL(d);
             URL u = b == null ? null : inDirectory(b, name);
@@ -371,24 +465,181 @@ public final class ClassPathResources {
         }
     }
 
-    /** The connection of an embedded resource's URL. */
-    static final class EmbeddedConnection extends URLConnection {
+    /**
+     * An embedded name's entry and plain path: a root copy's (META-INF/arbace/roots/K/PATH) its K and PATH,
+     * else the plain path's owner (META-INF/arbace/owners), else the first entry listing it (a class file, a
+     * directory), else -1 (the JDK's resources, Arbace's own: no entry's).
+     */
+    private static Object[] entryAndPath(String name) {
+        if (name.startsWith("META-INF/arbace/roots/")) {
+            String rest = name.substring("META-INF/arbace/roots/".length());
+            int i = rest.indexOf('/');
+            if (i > 0) {
+                try {
+                    return new Object[] {Integer.parseInt(rest.substring(0, i)), rest.substring(i + 1)};
+                } catch (NumberFormatException e) {
+                }
+            }
+        }
+        Integer o = owners().get(name);
+        if (o != null)
+            return new Object[] {o, name};
+        List<Integer> hs = holders(name);
+        if (hs.isEmpty() && dirName(name) != null)
+            hs = holders(dirName(name));
+        return new Object[] {hs.isEmpty() ? Integer.valueOf(-1) : hs.get(0), name};
+    }
+
+    /** Entry k's bytes of plain path name: its root copy's, else the plain path's when k owns it; else null. */
+    private static byte[] bytesIn(int k, String name) {
+        byte[] b = bytes0("META-INF/arbace/roots/" + k + "/" + name);
+        if (b != null)
+            return b;
+        Integer o = owners().get(name);
+        return o != null && o.intValue() == k ? bytes0(name) : null;
+    }
+
+    /**
+     * The bytes of embedded name: its own, else its entry's resource (a root copy's path of a resource its
+     * entry owns at the plain path), else empty for a directory its entry lists; null when none (a class file).
+     */
+    private static byte[] entryBytes(String name) {
+        byte[] b = bytes0(name);
+        if (b != null)
+            return b;
+        Object[] e = entryAndPath(name);
+        int k = (Integer) e[0];
+        String plain = (String) e[1];
+        if (k < 0)
+            return null;
+        b = bytesIn(k, plain);
+        if (b != null)
+            return b;
+        String d = dirName(plain);
+        if (d != null && lists(k, d))
+            return new byte[0];
+        return null;
+    }
+
+    /** The JarFiles of the entries, made once each (a connection's that uses caches). */
+    private static final java.util.Map<Integer, JarFile> jarFiles = new java.util.HashMap<>();
+
+    /** Entry k's JarFile (k -1: an empty one), cached when caches is true. */
+    static JarFile jarFile(int k, boolean caches) throws IOException {
+        synchronized (jarFiles) {
+            JarFile j = caches ? jarFiles.get(k) : null;
+            if (j == null) {
+                j = EmbeddedJarFile.make(k);
+                if (caches)
+                    jarFiles.put(k, j);
+            }
+            return j;
+        }
+    }
+
+    /**
+     * An entry of the class path as a JarFile (A17): its listing as a stored zip in java.io.tmpdir, deleted as
+     * it is opened; a resource's entry with its bytes, a directory's, and a translated class's names-only
+     * (marked by its comment), whose bytes getInputStream refuses.
+     */
+    static final class EmbeddedJarFile extends JarFile {
+        /** The comment of a translated class's names-only entry. */
+        static final String NO_CLASS_FILE = "arbace: a translated class, no class file";
+
+        private final String entryName;
+
+        private EmbeddedJarFile(File zip, String entryName) throws IOException {
+            super(zip, false, ZipFile.OPEN_READ | ZipFile.OPEN_DELETE);
+            this.entryName = entryName;
+        }
+
+        static EmbeddedJarFile make(int k) throws IOException {
+            List<String> names = k >= 0 && k < listings().size() ? listings().get(k) : Collections.<String>emptyList();
+            File zip = File.createTempFile("arbace-entry-", ".jar");
+            try (ZipOutputStream out = new ZipOutputStream(new java.io.FileOutputStream(zip))) {
+                for (String n : names) {
+                    byte[] b = n.endsWith("/") ? new byte[0] : bytesIn(k, n);
+                    ZipEntry e = new ZipEntry(n);
+                    e.setMethod(ZipEntry.STORED);
+                    e.setTime(315532800000L);
+                    if (b == null) {
+                        b = new byte[0];
+                        e.setComment(NO_CLASS_FILE);
+                    }
+                    CRC32 crc = new CRC32();
+                    crc.update(b, 0, b.length);
+                    e.setSize(b.length);
+                    e.setCompressedSize(b.length);
+                    e.setCrc(crc.getValue());
+                    out.putNextEntry(e);
+                    out.write(b);
+                    out.closeEntry();
+                }
+            } catch (IOException x) {
+                zip.delete();
+                throw x;
+            }
+            List<String> es = ClassPathResources.entries();
+            return new EmbeddedJarFile(zip, k >= 0 && k < es.size() ? es.get(k) : executable());
+        }
+
+        /** The entry's name, as java.class.path lists it. */
+        @Override
+        public String getName() {
+            return entryName;
+        }
+
+        @Override
+        public synchronized InputStream getInputStream(ZipEntry ze) throws IOException {
+            if (ze != null && NO_CLASS_FILE.equals(ze.getComment()))
+                throw new FileNotFoundException("JAR entry " + ze.getName() + " not found in " + entryName
+                                                + " (a translated class has no class file)");
+            return super.getInputStream(ze);
+        }
+    }
+
+    /**
+     * The connection of an embedded resource's URL: a JarURLConnection whose entry is the URL's entry of the
+     * class path (A17) and whose entry name is the plain path.
+     */
+    static final class EmbeddedConnection extends java.net.JarURLConnection {
         private final String name;
+        private final int entry;
+        private final String plain;
         private byte[] bytes;
 
-        EmbeddedConnection(URL u, String name) {
+        EmbeddedConnection(URL u, String name) throws MalformedURLException {
             super(u);
             this.name = name;
+            Object[] e = entryAndPath(name);
+            this.entry = (Integer) e[0];
+            this.plain = (String) e[1];
         }
 
         @Override
         public void connect() throws IOException {
             if (!connected) {
-                bytes = bytes0(name);
+                bytes = entryBytes(name);
                 if (bytes == null)
                     throw new FileNotFoundException("JAR entry " + name + " not found in " + executable());
                 connected = true;
             }
+        }
+
+        @Override
+        public String getEntryName() {
+            return plain.isEmpty() ? null : plain;
+        }
+
+        @Override
+        public JarFile getJarFile() throws IOException {
+            return jarFile(entry, getUseCaches());
+        }
+
+        @Override
+        public JarEntry getJarEntry() throws IOException {
+            String n = getEntryName();
+            return n == null ? null : getJarFile().getJarEntry(n);
         }
 
         @Override

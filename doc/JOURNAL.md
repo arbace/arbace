@@ -10319,3 +10319,32 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: A17 and A18 of the Ghidra case study's G2 plan: package listings for class-path scanners (branch `n-g2-next`)
+
+- **A17 (GH15 (a), the user's G2 plan in `/root/arbace-ghidra.git`, branch `g2-light`, `plan/G2.md`).** j2g embeds
+  `META-INF/arbace/entries` beside A5's and GH4 (iii)'s indexes: each class-path entry's names, its resources, its classes'
+  class files (names only) and their directories (`arbace.j2g.meta/entries-listing`, `tree-class-names`; `--entry-classes
+  NAME=DIR`, which `bin/arbace-go --build-program` passes a `:java` module's entry with the module's forms). jrt's own
+  `jdk.internal.jrt.ClassPathResources` answers `getResources` of a package with one URL an entry listing it (the first at the
+  plain path, entry K's at A5's root path), and its embedded URLs' connection is now a `JarURLConnection` whose `getJarFile()`
+  is the entry's listing as a `JarFile` (a stored zip in `java.io.tmpdir`, deleted at open), resources with their bytes, classes
+  names only, their bytes refused as A5 refuses them. J2G-SPEC §10.3 "Package listings", BUILD.md.
+- **Decisions taken overnight (round 52), the recommended ones:** the `JarFile` as a temporary stored zip opened with
+  `OPEN_DELETE` (public API only), not an in-memory `ZipFile.Source` (an overlay change of `ZipFile` and `JarFile` across
+  packages); a later entry's package URL at A5's root path, with `getEntryName()` the plain path, so that every URL names its
+  entry and a scanner's entry-name prefix matches the listing; an entry's classes from its module's forms (`--entry-classes`),
+  not from the world after analysis (member classes walked in the forms; local and anonymous classes not listed); a `:java`
+  module without resources stays no entry (changing `bin/java-project`'s `resources.jars` would move `java.class.path` and its
+  test, and n-g2-xml edits that script tonight); `JarFile.getName()` the entry's name.
+- **A18**: verified, nothing to build (as L5 of the plan found, `5f85d4c6b`): `bin/j2g-unit`'s `forname:` 9 of 9 with its
+  control; the run is `test/programs/reflect-meta`'s `rm.Lazy`.
+- **Proved light** (night rules, every process under 1 GiB): `bin/j2g-unit` on the gate executable `31f89bf86` (next's key
+  `e8e0d017` not built yet) and on `f60652fb`, `GOMEMLIMIT=900MiB`, peak 0.95 GB: `entries:` 8 of 8 with two controls, the
+  runtime's case skipped until `jdk/forms` carries the new `ClassPathResources`; the failures `invokers:` (6) and `type
+  annotations: the known rows` are those executables' with the unchanged checkout too. `ClassPathResources.java` compiled by the
+  JDK's javac (`--patch-module java.base=overlay/jdk/java.base`, no error in it) and run on the JDK with its natives replaced by a
+  map: getResources of `s/plug` two URLs, each entry's jar listing, resources read, class bytes refused, an absent package none.
+  `test/programs/scan`'s Main run on the JDK over two jars: the same lines but the jars' paths and the class bytes.
+- **By day:** `bin/jrt-convert predict jdk/internal/jrt/ClassPathResources.java` and its forms copied into `jdk/forms` (as
+  `711bce083`), then `bin/j2g-unit` (the runtime case), `bin/arbace-go --build-program --check scan reflect-meta`.
