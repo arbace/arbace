@@ -10425,3 +10425,15 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   compiler-libs' parser.ml (1.05 GB) as on n-oc217b: only this worktree's scratch library lacks Parser.
 - `bin/oi pins` exits 1, "not attested" (331's finding 1: its re-pinned and dropped pins), until the main host's whole runs and
   `bin/oi pins --attest`; the gate's oi-essential step fails until then.
+
+## 2026-11-17: n-wasm-defer: WebAssembly's i64 limit message (branch `n-wasm-defer`, round 52)
+
+- On next 42bf8614b with mac/n-review-d (b60d7ffb2) merged: 326 and 327 already took the crop's deferred rows to none (completeness
+  0.9790 -> 0.9996, meant 1.0000). The rows left are by design or budget; one class rested on a misreading: wg-3.0's
+  `interpreter/text/parser.mly` (spec tag wg-3.0, `nat64`) says "i64 constant out of range" for a limit past 2^64, as
+  `proposals/custom-page-sizes/memory_max_i64.wast` expects. `arbace/repr/wasm/text.ae`'s `nat64` says so; the class
+  `custom-page-sizes-i64-message` removed, its one messages row passes (5,338 of 5,346; a beside source, the score unchanged).
+  Taken overnight (round 52); doc/wasm/WASM-SURVEY.md "As built: n-wasm-defer".
+- Checks under 1 GiB: `bin/repr-wasm wast --only` (custom-page-sizes, twelve root scripts, the essential list with its controls),
+  the row re-recorded from the run's rows by hand, `bin/reap --record`, `bin/crops-score --record`, both judged after, 0 problems.
+  No key moves (arbace/repr/wasm is in `arbace_crop_paths`).
