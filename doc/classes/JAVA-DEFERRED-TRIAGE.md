@@ -7478,3 +7478,17 @@ getstatic or putstatic of the same member through another class: the lines compa
 re-recorded alone: Java print 3,236 / 29 / 60 → **3,256 / 29 / 40**, completeness 88 → 88 (0.8765 → 0.8780; meant 90). Left in
 `:print-classes-unnamed`: t05125 (a local's slot), t03567 and t06072 (mixed), t03434 and t06032 (RP3 (a), below). c00001 still
 differs at print.
+
+RP3 (a), arbace/repr/java/convert.ae (its own commit; javac's tool loads the changed converter from the checkout, so it is proved
+on the tool at hand): `long-compare-operand`, a comparison on long whose int operand meets a long literal widens the int
+explicitly, `(== (long (aget pos 0)) 0)` (the literal's form is an int literal's: the printed Java compared ints; t03434,
+and ASM's `bits == 0L` in the baseline's GeneratorAdapter and InstructionAdapter); `binding-for`'s `unboxed-of`, a box unboxed
+into a wider primitive local types the local by its declaration, `^float i` (javac's type of a generic result: t06032).
+Proved: both tests' read, print (every step, the class files now the original's) and interp pass; `bin/repr-java check`'s
+language features and module as expected, the baseline's two files' hashes updated (`check --update`,
+test/repr/java/expected/baseline.sha256); `bin/repr-java roundtrip --corpus samples` and `--corpus baseline` as known. Not
+run by day (the night's): `bin/repr-java check --jdk` (test/repr/java/expected/jdk26u.sha256 may move), `roundtrip --corpus jdk`
+(test/repr/java/roundtrip/jdk*.edn), `bin/jrt-convert verify` and `bin/javac-vendor verify` (jdk/ and jdk/javac/ forms where
+their sources compare an int with a long literal or unbox into a wider local: `bin/jrt-convert update` and `bin/javac-vendor
+convert` if so), `bin/java-check --forms verify` (test/java/forms), `bin/clojure-tests --java-fixtures verify`, and every Java
+level's read (the reader's key moves).

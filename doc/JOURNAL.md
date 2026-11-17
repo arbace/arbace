@@ -9892,3 +9892,15 @@ class-kinds; test/java/divergences.edn's :print-classes pattern). 20 rows re-rec
 3,256 / 29 / 40. A conditional branch's sense beside another kind's instructions now counts as control flow too (t06347).
 Alternatives considered: one kind "the converter's shapes" for the three (less precise for a later audit); the converter keeping
 the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of meaning).
+
+## 2026-11-17: RP3 (a), two of the converter's type losses fixed (branch `h-java-readprint`)
+
+arbace/repr/java/convert.ae: an int operand compared with a long literal is widened explicitly, `(== (long x) 0)` (the
+literal's form being an int literal's, the printed Java compared ints: t03434's `pos[0] != 0L`); a box unboxed into a wider
+primitive local keeps the local's declared type as its tag (`float i = it.next()` of an Iterator<Integer>, t06032, was an
+int). Proved on javac's tool at hand (it loads the changed converter from the checkout): both tests pass read, print (class
+files equal) and interp; repr/java's check as expected but the baseline's two ASM files (`bits == 0L`), their hashes updated;
+the samples' and baseline's round trips as known. The jdk corpora, jdk/ and jdk/javac/ forms and the essential forms wait for
+the night (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-readprint"). Alternatives considered: the literal written
+`(long 0)` (a cast of a constant javac folds; the widened operand is what javac's Lower compares); the printer writing every
+literal of a long comparison as long (it cannot tell a long literal from an int one in the forms).
