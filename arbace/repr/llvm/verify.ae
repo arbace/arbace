@@ -3025,6 +3025,15 @@
         (when (and (= k "DICompileUnit") (set? :enums) (not (tuple? (:enums fs)))) (apply verr :di/node "invalid enum list" (N :enums)))
         (when (and (= k "DICompileUnit") (set? :retainedTypes) (not (tuple? (:retainedTypes fs)))) (apply verr :di/node "invalid retained type list" (N :retainedTypes)))
         (when (and (= k "DICompileUnit") (set? :globals) (not (tuple? (:globals fs)))) (apply verr :di/node "invalid global variable list" (N :globals)))
+        ;; queue 335 (V:1479-1486): each a DIGlobalVariableExpression whose variable's scope is no local scope (the variable's first
+        ;; operand, read through the Verifier's unchecked cast: a DILocation's scope too)
+        (when (and (= k "DICompileUnit") (set? :globals) (tuple? (:globals fs)))
+          (doseq [op (md-ops (:globals fs))]
+            (when-not (= "DIGlobalVariableExpression" (kind-of op)) (verr :di/node "invalid global variable ref" [:md id] [:mdv op]))
+            (let [v (:var (di-fields (node-of op)))]
+              (when (and (#{"DIGlobalVariable" "DILocalVariable" "DILocation"} (kind-of v))
+                         (local-scope-kinds (kind-of (:scope (di-fields (node-of v))))))
+                (verr :di/node "function-local variables are not allowed in a DICompileUnit's global variables list" [:md id] [:mdv op])))))
         (when (and (= k "DICompileUnit") (set? :imports) (not (tuple? (:imports fs)))) (apply verr :di/node "invalid imported entity list" (N :imports)))
         (when (and (= k "DICompileUnit") (set? :macros) (not (tuple? (:macros fs)))) (apply verr :di/node "invalid macro list" (N :macros)))
         (when (and (= k "DISubprogram") (set? :retainedNodes) (not (tuple? (:retainedNodes fs)))) (apply verr :di/node "invalid retained nodes list" (N :retainedNodes)))
@@ -3255,12 +3264,22 @@
                   (let [v (:var (di-fields n))]
                     (when (and v (some? (get *meta* v)) (= "DIGlobalVariable" (di-kind (get *meta* v))))
                       (visiting (binding [*ctx* {:md v}] (check-di-node v (get *meta* v)))))
+                    ;; queue 335: a DILocation as the variable, visitDIGlobalVariable through the unchecked cast: its tag is no
+                    ;; DW_TAG_variable (the pin's opt: `invalid tag`); a compile unit's are visited after the unit (below)
+                    (when (and v (= "DILocation" (di-kind (get *meta* v))) (not (contains? cu-gves id)))
+                      (visiting (binding [*ctx* {:md v}] (verr :di/node "invalid tag"))))
                     ;; LLS43 (a): its expression's fragment against the variable (V:1749-1753), here when visitMDNode reaches it (a
                     ;; compile unit's globals); a global's !dbg is checked again by visitGlobalVariable's direct call (V:799, below)
                     (when (and v (some? (node-of v)) (contains? cu-gves id))
                       (when-let [fi (frag-info (node-of (:expr (di-fields n))))]
                         (visiting (binding [*ctx* {:md id}] (check-fragment v fi [:mdv id])))))))
-                (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
+                (visiting (binding [*ctx* {:md id}] (check-di-node id n)))
+                ;; queue 335: visitMDNode reaches a unit's global variable expressions after the unit itself
+                (when (= "DICompileUnit" (di-kind n))
+                  (doseq [g (md-ops (:globals (di-fields n)))
+                          :let [v (when (= "DIGlobalVariableExpression" (di-kind (node-of g))) (:var (di-fields (node-of g))))]
+                          :when (and v (= "DILocation" (di-kind (get *meta* v))))]
+                    (visiting (binding [*ctx* {:md v}] (verr :di/node "invalid tag")))))))
             (doseq [:let [attached (java.util.HashMap.)]
                     f forms :when (#{'llvm/define 'llvm/declare} (first f))]
               (let [o (apply hash-map (drop 4 f)) md (apply hash-map (:md o))
@@ -3335,6 +3354,11 @@
               ;; LLS43 (a): visitGlobalVariable calls visitDIGlobalVariableExpression itself (V:799): the fragment again
               (when (and d (= "DIGlobalVariableExpression" (di-kind (node-of d))))
                 (let [v (:var (di-fields (node-of d)))]
+                  (when (and v (= "DILocation" (di-kind (node-of v))))   ; queue 335, as above
+                    (visiting (binding [*ctx* {:md v}] (verr :di/node "invalid tag"))))
+                  ;; queue 335: and visitDIGlobalVariable again (V:1742), its errors printed once more
+                  (when (and v (= "DIGlobalVariable" (di-kind (node-of v))))
+                    (visiting (binding [*ctx* {:md v}] (check-di-node v (node-of v)))))
                   (when (and v (= "DIGlobalVariable" (di-kind (node-of v))))
                     (when-let [fi (frag-info (node-of (:expr (di-fields (node-of d)))))]
                       (visiting (binding [*ctx* {:md d}] (check-fragment v fi [:mdv d]))))))))))))))
