@@ -9780,3 +9780,13 @@ interpreter does (proved evaluated only: the compiled guard waits for the gate's
 limit in the interpreter's terms only (Rt/MAX_DEPTH is the evaluator's; compiled code has none), or catching the Go fatal error
 (impossible). Not done: OpenMP's parse errors (27 gomp/goacc syntax files; CP399), named UCNs (a Unicode name table), the
 parser's recovery lines (extra errors after a decline), #embed and line-directive pedantry (the shared C preprocessor, gate-wide).
+
+## 2026-11-17: C++'s dg classes after the user's CP398 (a) then (c) and CP399 (a) (branch `h-cpp-read`, after next 77630727b)
+
+The user's round 51 on the read audit: test/cpp/divergences-dg.edn's six clang-* classes (by design under CP2 (a)) became `:own-diag`,
+deferred (863 files neither clang nor Arbace's own front end meets), `:gcc-dialect` (by design, 173 files by name: the 150 of OpenMP,
+OpenACC, GNU TM, GCC's contracts, -fpermissive and -fms-extensions, and the 23 syntax-only files of gomp/, goacc/ and contracts/; the
+report had estimated 27) and `:gcc-own-rules` (by design, 64 files by name after reviewing clang-accepts' and clang-pedantic's 206 by
+their messages: GNU extensions', GCC's ABI and runtime interface, its limits and IFNDR diagnoses). C++ read 5,309 / 1,083 / 103 to 5,309 /
+243 / 943; completeness 91 unchanged, without by design 96 to 93 (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-read (2)"). Not yet: the
+file-by-file review of the other four former classes' files.
