@@ -1633,6 +1633,10 @@
         ;; values of limit and gnu::offset are evaluated for their diagnostics
         unknown (remove embed-known (keys params))
         _ (doseq [nm unknown] (eh c (str (pos-str verb) ": unknown embed parameter '" nm "'")))
+        ;; gcc under -fpreprocessed: a preprocessed source's #embed holds its bytes as gnu::base64 (gcc.dg/cpp/embed-6.c)
+        pre-bad (and (:preprocessed (.-cfg c)) (> (count raw) 2) (empty? unknown) (not (contains? params "gnu::base64")))
+        _ (when pre-bad (eh c (str (pos-str verb) ": 'gnu::base64' parameter required in preprocessed source")))
+        unknown (if pre-bad ["gnu::base64"] unknown) ; the directive dropped, as an unknown parameter's
         _ (when (and (> (count raw) 2) (empty? unknown))
             (when-let [b (get params "limit")] (param-value c b))
             (when-let [b (get params "gnu::offset")] (offset-value c b)))
@@ -1813,6 +1817,18 @@
       (slot! c INCLUDED (Included. (.-using cur) s (.-path cur) (.-entry cur)))
       (record! c {:directive "system" :file (.-path cur) :entry (.-entry cur) :off (.-po t) :system s}))))
 
+(defn- ucn-dollar-check!
+  "C23 (6.4.3): a universal character name in an identifier names no character of the basic set, \\u0024 ($) among them since
+  C23, which C11 allowed; gcc's error at C23 and later, whatever -fdollars-in-identifiers says (gcc.dg/cpp/c23-ucnid-2.c).
+  The text line's identifiers, C's (C++ has its own rule)."
+  [^Cpp c line]
+  (when (and (#{:c23 :gnu23 :c2y :gnu2y} (:std (.-cfg c))) (not (:cxx (.-cfg c))))
+    (doseq [^Tok t line
+            :when (and (= (.-ch t) :IDENTIFIER) (.contains ^String (.-src t) "\\"))
+            :let [m (re-find #"\\(?:u0024|U00000024)" (.-src t))]
+            :when m]
+      (eh c (str (pos-str t) ": universal character " m " is not valid in an identifier")))))
+
 (defn next-line
   "cpp.nextLine: the next text line, the directives before it executed."
   [^Cpp c]
@@ -1862,7 +1878,7 @@
               (do (slot! c TOS (subvec x 1)) (push! c (x 0)) (recur)))
             (case (x 0)
               :leave (do (slot! c DEPTH (dec (long (slot c DEPTH)))) (pop-tos! c) (recur))
-              :text (do (pop-tos! c) (x 1))
+              :text (do (pop-tos! c) (ucn-dollar-check! c (x 1)) (x 1))
               :nondir (do (pop-tos! c) (record-directive! c (x 1)) (linemarker! c (x 1)) (recur))
               :eof (do (slot! c EOFLINE (x 1))
                        (if (zero? (.size ^ArrayList (.-stack c)))

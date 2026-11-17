@@ -334,7 +334,7 @@ external object are a link error).
 | `struct s { ... }`, `struct { ... }` | `(struct s [members])`, `(struct [members])` (§5.4) |
 | `enum e { ... }`, `enum e : long { ... }` | `(enum e [enumerators])`, `^{:c/underlying long} (enum e [...])` (§5.5) |
 | a typedef name `T` | `T` |
-| `typeof(e)`, `typeof(T)`, `typeof_unqual(e)`, `typeof_unqual(T)` | `(typeof e)`, `(typeof-type T)`, `(typeof-unqual e)`, `(typeof-unqual-type T)` (GNU's `__typeof__` the same, N2) |
+| `typeof(e)`, `typeof(T)`, `typeof_unqual(e)`, `typeof_unqual(T)` | `(typeof e)`, `(typeof-type T)`, `(typeof-unqual e)`, `(typeof-unqual-type T)` (GNU's `__typeof__` the same, N2; at C23 and later GNU's spelling marked `^:c/gnu`, which gcc reads keeping a function's `_Noreturn`, and printed back so) |
 | the type of `nullptr` | `(typeof nil)` (`nullptr_t` is a typedef name of `<stddef.h>`, §13.4) |
 
 - **Type symbols are never C identifiers.** Every base type symbol is a keyword of every standard
@@ -354,7 +354,8 @@ external object are a link error).
 - **Function types** are `(fn [params] R)` (§5.3); `R` is a type form. GNU's `__attribute__((mode(DI)))`
   and vector types are attributes (§5.6, §14).
 - **Address spaces, `_Nonnull`, `__ptr32` and Microsoft's `__declspec`** are read and printed only, as
-  `:c/gnu-attrs` or `:c/quals` entries (§14).
+  `:c/gnu-attrs` or `:c/quals` entries (§14); `__declspec(T...)` as a declaration's attribute `(__declspec "T...")` in
+  `:c/decl-attrs`, its tokens as written (2026-11-17).
 
 ### 5.2 Where types are written
 

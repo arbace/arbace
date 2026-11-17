@@ -5914,3 +5914,76 @@ entries of 990130-1, 20030222-1, bitint-34 and 95_bitfields_ms removed; the clas
 GNU vector types and GNU nested functions are deferred, not by design: `test/c/divergences.edn`'s classes `vector` (41 eval, 41
 AOT) and `nested-fn` (31, 31), kind `:deferred`, judged before `by-design` on the refusals' text; SPEC §14's two rows struck. C eval
 2,173 / 34 / 72, AOT 2,181 / 26 / 72; completeness 96, meant 100 to 98. Then both built in ci and cf2g (below, as they land).
+
+## As built: the read and print levels' deferred rows (2026-11-17, branch `h-c-deferred`, from `next` `e4a7a30f3`)
+
+The host burst's task: C's 33 read and 44 print rows of kind deferred, grouped by cause, fixed where light, proved on lists
+(`--only`), each fixed row re-recorded from its run (the results files merged by id, CS240 (a); no whole corpus). Before:
+read 5221 / 221 / 33, print 4775 / 3 / 44 (completeness 96, 100 without by design). After: read 5225 / 223 / 27, print
+4798 / 3 / 22 (completeness 96, 100 without by design: 0.9599 to 0.9612, 0.9961 to 0.9976).
+
+Fixed (arbace/repr/c/, each checked under the default judge and under gcc's, `ARBACE_C_JUDGE=gcc`, levels 3-4 fresh):
+- The converter (`convert.ae`):
+  - a function definition whose declarator is not a function's (`auto g { }`, `constexpr int v { }`, a function defined
+    through a typedef) is the read's error in gcc's words (`'auto' requires an initialized data declaration`, else
+    `expected '=', ',', ';', 'asm' or '__attribute__' before '{' token`), not a refusal: c23-auto-3.c, c23-constexpr-3.c;
+  - `__declspec(...)` is a declaration's attribute `(__declspec "TEXT")`, printed back where the declaration's attributes
+    stand (SPEC §5.1): torture-compile's dll.c;
+  - GNU attributes before a declarator after a comma join that declarator's `:c/decl-attrs` (its form is printed alone): the
+    old `:c/list-attrs` was printed at the head and read back as the declaration's: 20010714-1.c;
+  - an attribute declaration of empty specifiers, `[[]];`, keeps `:c/decl-attrs []`: c23-attr-syntax-1.c, -4.c;
+  - at C23 and later GNU's `__typeof__` is marked `:c/gnu` and C's `typeof` printed as `typeof` (gcc's `__typeof__` keeps a
+    function's `_Noreturn`): c23-typeof-1.c;
+  - an `#embed` whose output begins the next item (its `if_empty`'s or `prefix`'s tokens) is not placed as a directive too:
+    embed-17.c;
+  - a directive between a statement's labels and the statement (`g: h: #pragma GCC unroll 2 while`) is placed before the
+    statement's form: c23-named-loops-1.c;
+  - the macro groups: an invocation's text runs over the source's closing parentheses or one parenthesized list that the
+    expansion's own invocation took (`bcat (0'À'))`, `CAT(A,B)(x)`); an invocation on a directive's line (an `#embed`'s
+    `if_empty`) is printed expanded: c23-digit-separators-1.c, 64_macro_nesting.c, embed-1.c;
+  - gcc's digit separator errors (`bad-digit-separators`: after a base indicator, adjacent, outside a digit sequence) as
+    `c/bad-lit`.
+- The printer (`print.ae`): `(atomic T)` of a qualified T is the qualifier `_Atomic` (c23-nullptr-1.c, c23-typeof-1.c); a
+  range `case` whose end is `nullptr` (c23-nullptr-6.c); a C2y selection statement's declaration block printed as the
+  statement, `if (int i = 42; i)` (c23-if-decls-1.c); a label ending its block with GNU attributes, `e: __attribute__((unused))`
+  (c23-labels-3.c); `__declspec`.
+- The preprocessor (`pp.ae`, `host.ae`): C23's `$` in an identifier is gcc's error (c23-ucnid-2.c, the token check's
+  `:undiagnosed`); `-fpreprocessed` is modelled (an `#embed` without `gnu::base64` is gcc's error; gcc.dg/cpp/embed-6.c, -7.c),
+  in the file's `:args`; the pedantic `#embed` note is off inside `__extension__` (gcc.dg/cpp/embed-2.c, dg).
+- The token check's digest (`ppcheck.ae`, `tokens-digest`): the corpus's directory written `${srcdir}`, so a checkout's path
+  is not in it; embed-11.c's digest recorded so (`test/repr/c/pp-gcc.sha256`), its class `:embed` (by design, cc lacks
+  #embed), the class `:absolute-name` removed.
+- The round trip's judge (`rtcheck.ae`, `bin/lib/repr-c/roundtrip`):
+  - `own-rejects?`: a file the reader rejects passes the acceptance by its own verdict when its first error is on a dg-error
+    line of the main file and one of the line's regexps finds the message (the user's decision of 2026-11-07); another line
+    or other words do not (c23-attr-syntax-5.c's parser gap stays known); the controls' rows never;
+  - `link-resources!`: the original's resources a print's string literal names are linked beside the print (a quoted
+    `#embed` searches the current file's directory first), not the original's directory as an `--embed-dir`, which answered
+    embed-1.c's `__has_embed (<embed-1.c>)` too; a file the print `#include`s is not linked; gcc compiles an absolute
+    original's print by its absolute name (`__has_embed (__FILE__ ...)`): embed-2.c, embed-19.c, gcc.dg/cpp/embed-1.c, and
+    embed-15.c, gcc.dg/cpp/embed-2.c, -3.c, -17.c at level 3 (they failed in a worktree's path under gcc's judge before).
+- The dg judge (`arbace/c/dg.ae`): "preprocessed source" is a syntax expectation a read error stands for.
+- `bin/records-check` (`test/records/check.ae`): a `:time-dependent` entry whose row passes is not stale (GTS-B, as `bin/reap`).
+- Time-dependent entries now passing (compiled reader): limits-blockid.c, limits-externalid.c, limits-fndefn.c (entries kept).
+- Also: dg c23-attr-syntax-6.c passes; the accepted known-unlisted rows pr34093.c (round trip) and pr54559.c (annotations)
+  pass (removed from `test/records/accepted.edn`).
+
+Left deferred: read: dg 22 rows (the checker's diagnostics: decl-diag 11 with c23-auto-3 and c23-constexpr-3, whose read error
+now stops the checker, pp-diag 6, wrong-reason 3, pedantic-diag 1 (c23-digit-separators-2.c: its unterminated character
+constants stop the read), parse-gap 1), eval-depth 5 (MAX-NEST 4000, the
+converter's Go stack); print: eval-limits 11 (limits-externdecl.c parses in 2m47 at 4 GB, pr46534.c's 200 MB string; quickjs.c,
+sqlite3.c, libunicode.c, binary-constants-1.c not rerun), macro-context 4 (macro-skip-expand.c's painted name, stringify.c,
+shell.c, 921227-1.c's concatenated invocations), split-declaration 2, objects-macro-body 2, cc-grammar 3 (c23-attr-syntax-5.c's
+balanced tokens outside `*recover*`; tcc-pp's 12.S and 13.S, assembler sources: a DECISION in the report).
+
+Checks: `bin/ci c2j-check` (27 sources), `bin/ci dg --essential` (92 of 92), `bin/repr-c check --c23` (59 pass, 3 expected),
+`bin/ci judge-test` (with `roundtrip-own-rejects`, `converter-deferred-rows`), the round trip of 239 listed files under gcc's
+judge (gcc-c23's attr/typeof/nullptr/labels/auto/constexpr/digit/qual/bool/generic files, all of gcc-embed, samples of
+torture-compile, tcc-tests2, mir, zlib), the token and tree checks of gcc-embed and gcc-cpp-c23, the annotations and dg of the
+lists, the negative controls of the round trip and the token check; `bin/reap`, `bin/crops-score --judge --strict`,
+`bin/records-check`.
+
+Keys: arbace/repr/c/ and arbace/c/ are embedded (in `gate_key`): the key moves, the C steps and `--full` rerun, and stage 0
+evaluates the changed namespaces from the checkout until the next re-seed. The main host's night: the C full runs record
+whole (`bin/repr-c roundtrip --record`, `check --tokens --record`, `parse-check --record`, `bin/ci annotations --record`,
+`dg --record`), so the rows of files these changes touch outside the lists are recorded too.
