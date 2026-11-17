@@ -10413,3 +10413,18 @@ next's gate executable with arbace.classes.env and analyze from the checkout, 13
 (type annotations' known rows, invokers' fixture); test/gate/javac-platform-test.bash 21 of 21; bin/reap 0 problems; crops-score
 --record, --judge --strict; records-check 0 problems; bin/gate --plan exits 0. Keys: gate_key (arbace/j2g, arbace/classes),
 arbace_javac_key (the platform's tooling) and the reader's key (convert.ae) move. Nothing built.
+
+## 2026-11-17: Java's independence read stage by stage; the facts' guard JOP12 (a) (branch `n-java-indep`, round 52)
+
+On n-review-c (`6ff92621f`, merged fast-forward). Why Java is 60: read, eval, AOT and print 0.5 for one reason, the platform (the
+JDK build tree's class files, the user's ruling of 2026-11-09); javac on Arbace and the native read (`--no-javac`, nread) are
+Arbace's own and move nothing; the judge's 0.986 is the 207 `:stdout` tests on the JDK's record (JCV2 (b)). JOP12 (a), taken
+overnight (round 52): a fact's `:requires-line` (test/crops/score.ae's `requires-line-problem`) holds a claim above 0.5 at 0.5,
+refuted, until its file has the line; Java's four stages require `jdk/javac/platform.sha256`'s `# kind: own`;
+`test/javac-platform/switch.patch` regenerated over it. Alternatives: scoring from the pin's kind (moves before JOP7 (a)'s clean
+run), nothing. Proven light under 1 GiB: crops-score --self-test (controls fail when the check is disabled), --judge --strict,
+reap, records-check; the patch with the build pin refuted (60), with an own pin line 99.7 (reverted). Found: the switch night's
+script commits the facts at the switch, JOP7 (a) at the clean run; and JOP13 proposed (the source sets in ref-jdk26.edn are the
+JDK javac's, consumed by every stage: (a) made by javac on Arbace, recommended). Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As
+built: Java's independence, stage by stage, and the facts' guard". No key moves (test/crops, test/javac-platform are in none);
+the crops-score step reruns.

@@ -7226,3 +7226,60 @@ check --jdk`'s hashes and the jtreg read level run in the night's `--full` after
   later Java night (CaseFolding the tool's with the regex tests re-judged, cacerts by GenerateCacerts on the shipped program).
 - **JOP11 (a):** the pin, the pack, the records and the known files out of `arbace_javac_key` (`! -path 'jdk/javac/platform*'` in
   `bin/lib/javac-key.bash`) with the next change that moves `gate_key` anyway.
+
+## As built: Java's independence, stage by stage, and the facts' guard (2026-11-17, round 52; branch `n-java-indep`)
+
+**Why each stage is 0.5** (`test/crops/scores.edn`: independence 59.7, read, eval, AOT and print 0.5, judge 0.986). The rule
+(`test/crops/independence.edn`'s header): 1 when no host toolchain runs at check time and no record of one is consumed, 0.5 when
+the stage consumes a record a toolchain made. Every Java stage's steps run on Arbace's own hosts (`java-read`, `java-print`,
+`java-classes`, `java-diagnostics` on `:javac-prog :stage0`; `java-check` on `:prog`; `java-compiled` on `:gate`): javac on Arbace
+is Arbace's own executable, not a host toolchain, so neither javac's read nor the native read (`read --no-javac`, JN9f, the
+`nread` level of JFS123 (b), outside the gate) changes a score: both attribute against the platform's class files (javac through
+its file manager, the native provider through `arbace.repr.java.classfile` and `jdk/platform/java.base.decls`). The one reason for
+all four is the user's ruling of 2026-11-09: the platform, jdk26u's build tree's modules pinned by `jdk/javac/platform.sha256`, is
+a toolchain's product consumed at check time by the read, and through the forms made against it by the interpreter, j2g and the
+printer. It moves with the switch (JOP4 (a)), not before. The judge's 0.014 is the 207 jtreg `:stdout` tests (414 cases at interp
+and compiled) judged by the JDK's recorded stdout, kept by the user's JCV2 (b) (JCV2 (c), reviewed golden files, not chosen).
+
+**JOP12 (a), taken overnight (round 52): the facts cannot move ahead of the pin.** A fact may name `:requires-line {:file F :line
+L :why W}`: `crops.score` holds a claim above 0.5 at 0.5 and reports it CLAIM REFUTED (so `--judge --strict` fails) unless F has
+the line L exactly (`requires-line-problem`). Java's read, eval, AOT and print name `jdk/javac/platform.sha256`'s `# kind: own`
+(JOP2 (a)'s one setting); at their present 0.5 nothing changes. `test/javac-platform/switch.patch` regenerated over the new lines
+(it still applies, `git apply --check`; the night's preflight checks the same). Self-test: the own pin passes; the controls (the
+build tree's pin, a pin that only mentions the line in a comment, no pin file) refute, and with the check disabled the three
+controls fail the self-test as they must. Alternatives: (b) score the stages from the pin's kind (no stated score; but JOP7 (a)
+moves the facts at the clean run, not at the pin), (c) nothing (the patch could then be applied without the pin).
+
+**Proven light** (stage 0 of next, `GOMEMLIMIT=1GiB`): `bin/crops-score --self-test` 0 (508 MB); `--judge --strict` 0, 0 problems
+(996 MB, 66 s); `bin/reap` 0 problems, 53 of 56 cells (861 MB); `bin/records-check` 9 pairs, 0 problems (718 MB). The patch applied
+with the build tree's pin: Java's four stages held at 0.5, four refuted, `--strict` status 1 (59.7). The patch with a `# kind: own`
+line appended to the pin (temporarily, reverted): read, eval, AOT and print 1, independence 99.7, the only problem the record's
+difference (`--record` writes it). No record changes; `scores.edn` unchanged.
+
+**A finding on JOP7 (a).** `.tmp/goal/java-platform-night.sh` applies the patch and records the scores in the switch night's second
+commit; JOP7 (a) moves the facts in the commit that records the clean run's audited pass. The guard allows either (it needs the pin
+only). To follow JOP7 (a) the night stops after the platform's commit and the patch goes with the clean record.
+
+### Proposed (JOP13)
+
+- **JOP13, the source sets the read consumes.** Each test's source set (`test/java/ref-jdk26.edn`'s `:files`, the files and their
+  renamed places the read, interp, compiled and print levels take) is what the JDK's javac parsed (`bin/java-check record_sources`:
+  `javac -verbose -implicit:class -sourcepath`, the system's JDK), and JCV3 left it open ("a record of the JDK, the read stage's input
+  ... until crops-score counts the read stage's corpus records"). By the header's rule it is a record a toolchain made, consumed by
+  every stage, so after the switch the four stages would still be 0.5 by the letter. (a) **Make the source sets on javac on Arbace**
+  (JCV3 (b)): `record_sources` with `bin/repr-java javac` (javac's command line on the tool, the same `-verbose -sourcepath`), the
+  levels reading a source-set record of Arbace's own (`test/java/sources.edn`), the JDK's sets compared in the oracle tier
+  (`--judge --oracle`); per case through crops.edn's `:own-inputs :java [:platform :sources]` and `:case-inputs` if they are made in
+  parts (RFP53 (a)'s form). Cost: the verb and a night run (3,325 tests' `javac -verbose` on the tool; estimate 1 h at 8 jobs, about 2
+  GiB a javac). (b) Rule the source set a run list (which files make the test, as the corpus's selection is which tests run), not a
+  consumed record: the switch moves the four stages to 1 as staged. (c) Count it at the read alone (eval, AOT and print take the
+  read's forms, not the list). *Recommended: (a)*, the honest reading of the rule and JCV3's own condition; until it is built (b)'s
+  projection is the switch's.
+
+| state | read | eval | AOT | print | judge | independence |
+|---|---|---|---|---|---|---|
+| now (the build tree's pin) | 0.5 | 0.5 | 0.5 | 0.5 | 0.986 | 60 |
+| switch night (own pin), JOP7 (a)'s clean run, JOP13 (b) | 1 | 1 | 1 | 1 | 0.986 | 100 (99.7) |
+| switch night, JOP13 (a) until the own source sets | 0.5 | 0.5 | 0.5 | 0.5 | 0.986 | 60 |
+| JOP13 (a) built | 1 | 1 | 1 | 1 | 0.986 | 100 (99.7) |
+| JCV2 (c) (the 207 reviewed) | | | | | 1 | 100 |
