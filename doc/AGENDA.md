@@ -124,7 +124,7 @@ Six crops are above 90 on all three. What the others still need:
   (2026-11-17); the switch's tooling is ready on `h-java-platform` (the known file's 48 entries, `platform-own`, the cache built on a miss,
   the weekly rebuild, the oracle step, the audit rule, JOP5's moves, the facts staged); next the switch night (round 51,
   `.tmp/goal/java-platform-night.sh`, about 2 h 10 min), then the clean run that moves Java's independence to 100 (JOP7 (a)).
-  Proposed: JOP9 (the generated sources' pack), JOP10 (jdk/'s two recorded inputs), JOP11 (the pin out of the javac key). The
+  Decided too: JOP9 (a) the pack, JOP10 (c) the two recorded inputs until a Java night, JOP11 (a) the pin out of the javac key later. The
   score moves at stages 4-5: Java to 99.7.
   P2 by day on `java-p2` (2026-11-11; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by day)"): RecordComponent
   (slice 5), the classes made at run time deserializable (slice 8: Clojure's `serialization`), the platform logging bean

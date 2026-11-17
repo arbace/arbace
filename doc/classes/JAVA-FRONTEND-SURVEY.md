@@ -7217,3 +7217,12 @@ check --jdk`'s hashes and the jtreg read level run in the night's `--full` after
   (c) as (a), then (b) in a Java night. *Recommended: (c).*
 - **JOP11** JCS365 (a)'s pin out of `arbace_javac_key`. (a) **With the next change that moves `gate_key` anyway** (`bin/lib/javac-key.bash`
   is in it): `! -path 'jdk/javac/platform*'`, so a pin or pack change rebuilds no tool; (b) now (one gate rebuild). *Recommended: (a).*
+
+## Decided (the user, 2026-11-17, round 51): JOP9 (a), JOP10 (c), JOP11 (a)
+
+- **JOP9 (a):** the generated sources committed as `jdk/javac/platform-gensrc.tar.xz` (as built: the switch night writes it), pinned
+  by the own pin's `gensrc/` lines, regenerated weekly against the own platform.
+- **JOP10 (c):** the recorded copies of `CaseFolding.java` and `cacerts` (`jdk/javac/platform-records/`) kept; both generated in a
+  later Java night (CaseFolding the tool's with the regex tests re-judged, cacerts by GenerateCacerts on the shipped program).
+- **JOP11 (a):** the pin, the pack, the records and the known files out of `arbace_javac_key` (`! -path 'jdk/javac/platform*'` in
+  `bin/lib/javac-key.bash`) with the next change that moves `gate_key` anyway.

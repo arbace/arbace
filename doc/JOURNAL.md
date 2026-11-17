@@ -9732,3 +9732,9 @@ proposed: a 3 MB pack, as built); jdk/'s conversion takes CaseFolding.java and c
 copies as built); JCS365's pin out of the javac key needs a `gate_key` move (JOP11). Keys: `gate_key` and the runtime key unchanged,
 `arbace_javac_key` moved (and again at the switch). Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the own platform's
 tooling, for the switch night".
+
+## 2026-11-17: JOP9 (a), JOP10 (c), JOP11 (a) decided (the user, round 51)
+
+The generated sources' pack committed (as built), the two recorded inputs kept until a Java night generates them, the pin out of
+the javac key with the next `gate_key` move. Recorded in doc/classes/JAVA-FRONTEND-SURVEY.md, "Decided (the user, 2026-11-17, round
+51)". No code or key change.
