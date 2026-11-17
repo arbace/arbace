@@ -6181,3 +6181,77 @@ pedantic-diag 1 (CS324), parse-gap 1 (embed-10.c: the read error stops the check
 wrong-reason 1 (c23-bool-errors-3.c, a test's quoting); print: as h-c-deferred left them (eval-limits 11, macro-context 4,
 cc-grammar 3, split-declaration 2, objects-macro-body 2): no light change found tonight (each needs the compiled reader, the
 macro printer's planned fix, or the DECISION on tcc-pp's assembler sources).
+
+## As built: libcpp's unterminated literals and GNU raw strings in C (CS324 (a), CS325 (a), 2026-11-18, branch `n-c-lex`, from `mac/n-c-defer` `95615687e`)
+
+The night's task (round 52, memory-free: every process under 1 GiB): the two lexer DECISIONs n-c-defer proposed, taken overnight
+as recommended. Read from gcc 15.2's tarball (the pin `:gcc-15.2.0`: `libcpp/lex.cc`'s `lex_string` and `lex_number`,
+`libcpp/init.cc`'s `lang_defaults`, `gcc/c-family/c-lex.cc`'s `c_lex_with_flags`; GPL-3.0-or-later, studied, no text copied but
+the diagnostics' words).
+
+Built:
+- `arbace/repr/c/lex.ae` (CS324 (a)): `quoted` makes an unterminated string literal or character constant one `:OTHER` token to
+  its line's end in C as in C++ (CX2's path, now shared): libcpp's `CPP_OTHER`, no error of the lexer's (libcpp's pedwarn is a
+  warning, which the dg judge does not count), the file read on. cc's scanner reported "... not terminated" and ended the unit.
+- `arbace/repr/c/parse.ae`: the parser's `next!` reports a stray `:OTHER` as c-lex does and drops it, the parse going on:
+  "missing terminating ' character" (or `"`), else "stray 'X' in program" (`'\NNN'` for a character that is not graphic).
+- `arbace/repr/c/host.ae` (CS325 (a)): `raw-string-stds` (gnu99, gnu11, gnu17, gnu23, gnu2y: `lang_defaults`' rliterals, never
+  strict ISO C) and `lex-mask`: the configuration's `:trigraphs`, the lexer's argument, is the mask of bit 0 (trigraphs) and
+  `F-RAW` in those modes (as repr/cpp's `feature-mask` already gives C++), else the boolean as before. `lex.ae`'s `uR`, `UR`, `u8R`
+  tests take `feat?` for `F-ULIT` (true in C).
+- `arbace/repr/c/pp.ae`: `gnu::base64` takes a raw string as a narrow string literal (libcpp's `CPP_STRING`), whose spelling is not
+  base64 (embed-27.c's "'gnu::base64' argument not valid base64"). `arbace/repr/c/convert.ae`: a raw string's value (`unraw`: its
+  characters, backslashes escaped, through the ordinary literal's decoding).
+- `arbace/repr/c/ppcheck.ae`: `classify` names the two lexer causes first (`:unterminated-literal`: a file whose tokens hold an
+  `:OTHER`; `:gnu-raw-strings`), the known file's two new classes; the record prints each corpus's entries sorted (a corpus not
+  re-recorded kept its reader's hash order before).
+- `test/c/dg-wording.edn`: a family `:if-operand-left` (embed-4.c, now read to its end: gcc's reduce names the token left after a
+  stopped `__has_embed`, "missing binary operator before token", "':' without preceding '?'", "token '::' is not valid", the
+  evaluator cc's "unexpected ...", kept because the tree check compares #if errors with cc's). `test/c/divergences-dg.edn`: CS323's
+  two classes removed (no row left in them).
+
+Records (rows of the runs only): dg embed-4.c and embed-27.c pass, c23-digit-separators-2.c re-recorded ("both: missed [10 11 12 13
+14 15] extra [25]", still `:pedantic-diag`); the token check's known file at `:lex` gcc-embed's embed-4.c and tcc-pp's 13.S (an
+assembler source whose comment line holds an apostrophe: libcpp reads it on as the port now does), both `:unterminated-literal`,
+with their results files' rows, and c23-digit-separators-2.c at `:pp` and `:lex` by hand (`--record` takes whole corpora; gcc-c23
+did not fit the cap whole).
+
+c23-digit-separators-2.c is not the lexer's unterminated literals alone: its lines 16 and 23 now give gcc's "missing terminating '"
+at gcc's columns, but (1) libcpp's pp-number takes every `'` and backs off a trailing one (`lex_number`: "A number can't end with a
+digit separator"), so `1''2` is one pp-number whose "adjacent digit separators" the converter reports, where the port's `ppnumber`
+takes a `'` only before an identifier character (`1`, `''`, `2`: a parse error at line 9); (2) a read with parse errors never runs
+the converter, whose digit separator errors are lines 10 to 15, 21 and 22; (3) gcc places a missing `;` at the previous token's end
+(line 23), the port at the next token (line 25). Proposed as CS326 below.
+
+Checks (each process under 1 GiB, `REPR_C_THREADS` 1 or 2 where 3 passed the cap): `bin/ci dg --only` the three rows; `bin/ci dg
+--corpus` gcc-embed (45 of 47 pass: embed-4.c and embed-27.c moved), gcc-cpp-c23 (16 of 16), gcc-va-opt (12 of 12), gcc-gnu23 (50
+of 50), gcc-c23-sub (30 of 30), gcc-bitint (201 of 201), every row as recorded; `bin/repr-c check --tokens --corpus` gcc-embed,
+gcc-cpp-c23, tcc-pp, tcc-tests2 (88 equal) and `--only` c23-digit-separators-2.c (all known or equal); `parse-check --no-mutants`
+on the same (all equal or known; the results' rows of gcc-embed's embed-3.c, embed-4.c, embed-18.c, embed-27.c and tcc-pp's 13.S
+re-recorded from the run, embed-3.c's and embed-18.c's counts n-c-defer's); `roundtrip --corpus gcc-embed,gcc-cpp-c23,tcc-pp` (47,
+16 and 21 pass, 13.S known as recorded; 12.S's known entry stale under each test's own verdict, cc rejecting it too: its row was
+recorded under `ARBACE_C_JUDGE=gcc`, not re-recorded here); `bin/ci dg --essential` (92 of 92, the control differs); `bin/reap
+--record` (read 5237 / 224 / 14 to 5237 / 226 / 12: the new token check entries are by design, `test/c/divergences-read.edn`'s two
+new classes), `bin/crops-score --record`, `--judge --strict`, `bin/records-check`. gcc-c23's whole dg, token and tree runs passed
+the cap (the day's).
+
+Keys: `arbace/repr/c/` is embedded (in `gate_key`): the key moves, the C steps and `--full` rerun, and stage 0 evaluates the changed
+namespaces from the checkout until the next re-seed. Nothing was built here.
+
+For the day (whole corpora, the token and tree checks' new known entries wherever a file holds an unterminated literal or, in a GNU
+mode, `R"`): `bin/repr-c check --tokens --record`, `bin/repr-c parse-check --record` (mutants included), `bin/repr-c roundtrip
+--record`, `bin/ci annotations --record`, `bin/ci dg --record` (gcc-c23 whole), `bin/ci check` and `check --aot` (no change expected:
+the run corpora hold neither), then `bin/reap --record`, `bin/crops-score --record`.
+
+### Decided (taken overnight, round 52)
+
+- CS324 (a): C's unterminated literals as libcpp lexes them, C++'s path shared (the user's choice listed by n-c-defer; (b) cc's kept).
+- CS325 (a): raw strings in the GNU C modes from gnu99 (`lang_defaults`' rliterals), off in strict ISO C ((b) C++'s only).
+
+### Proposed (DECISION for the user)
+
+- CS326: libcpp's pp-number in C and C++ (`lex_number`: every `'` taken under digit separators, a trailing one given back), so that
+  `1''2` is one pp-number and its error the converter's: (a) recommended, judged by a night's whole token checks of both crops (cc's
+  and clang's dumps then differ on such files: known entries); (b) keep go-whim's rule (`'` only before an identifier character).
+  c23-digit-separators-2.c also needs the converter to run past a parse error (or the parser to report gcc's digit separator
+  errors), and gcc's location of a missing `;`; it stays `:pedantic-diag` until then.
