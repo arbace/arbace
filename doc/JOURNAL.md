@@ -10319,3 +10319,16 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: queue 324 (C++'s eval and AOT inputs records) reviewed on the main host (branch `h-review-mac-crops-cpp`)
+
+The Mac VM's `324-cpp-own-ir` 07ce58856 and its round 2 260f3777f (CP356 (a), CP333 (b); the user's DECISIONs 1 (a), 2 (a); round 2:
+Sema's header text from the target tree, CP241 (b)) read against next: the inputs
+record's wiring to `bin/lib/cppi/route.bash` (which writes each program's `route`, `ir.status`, `gen.refused`), `ir-input`, the
+runtime's `inputs.edn`, crops-score's `:mean-with`. No correctness bug found. `bin/cppi selftest case-inputs`, `bin/crops-score
+--self-test`, `--judge --strict` (0 problems, C++ independence 72 until the programs' record), `bin/records-check` pass on this host.
+Round 2 proved: `selftest sysroot-text`, and `bin/cppi codegen-gen` under strace (155 of 155, no `/usr/include` file opened by an Arbace
+process). Fixed: `bin/lib/cppi/check`'s header (auto, not clang, the default route since night 11) and the eval and AOT facts' `:evidence`. Not
+run: `bin/cppi check` (no lowered runtime at the key here; its records-mode build declares 8 GiB): the records stay the night's, as
+doc/cpp/CPP-SURVEY.md's "As built: queue 324" lists. Alternative considered: rebuilding the runtime at one job to run two samples
+(rejected: over the day's 2 GiB a process, and the night's record runs the same path whole).
