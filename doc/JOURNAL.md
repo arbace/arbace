@@ -10336,3 +10336,28 @@ channels outside the world, RMI (F27), SimpleFileVisitor missing from javac's to
 Calendar.Builder, MalformedParametersException. Alternatives considered: the members through the interpreter's reflection
 fallback (no: the methods are not in the Go program's tables at all); listing each extended class's protected members without a
 DynSub_C (no: an interpreted subclass needs the DynSub to call them).
+
+## 2026-11-17: Java's AOT cell triaged by root cause (branch `h-java-aot-triage`, from `next` `498d7296f`)
+
+The AOT cell's 536 deferred and 201 by-design rows (test/java/check-compiled.edn, gate 13c's) read by cause against the interp triage
+(h-java-deferred's run, h-java-members' tables) and one light measurement: `bin/java-check --levels compiled --analyze-only` of the 328
+rows recorded `:refused`, over today's jdk/forms (F26's conversion), on f26-ghidra's executable `31f89bf86be7dac52b3d` (52 min, peak
+2.8 GB): 140 of the 198 deferred refusals and 62 of the 130 by-design ones analyze today. The record predates B2's world and F26: 135
+rows wait on next's conversion (h-java-deferred's ObjectInputFilter, Logger, ClassCache; F26's Wrapper), 148 pass at interp already,
+52 are h-java-members', 24 compiled-only (javac's API on the shipped program 16, JCS158), 177 shared with interp's remaining causes.
+Built: j2g's `up-sym` gives `(conv any nil)` for a null constant cast to a class (t05934's "nil.Ref undefined"), with a unit test and its
+control. The by-design audit found `:design-also-compiled` stale (serialization out of by design since JCS167 (a), the class-file API in
+the world since F26: 44 of its rows deferred or passing at interp, 43 analyzing), `:classloading` taking world gaps by its pattern, `:jmx`
+wider than what JMX-1 left out: AT1-AT10 proposed (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-aot-triage"), no row moved.
+Alternatives considered: re-sorting the classes now (refused: the user decides, and the night's whole record moves them anyway); a light
+compiled run (not light: a shard is a whole-program j2g run and a build).
+
+## 2026-11-17: AT1-AT10 decided; AT9 and AT10 built (branch `h-java-aot-triage`, next merged at `7e2115a6e`)
+
+The user approved AT1-AT10 as recommended (round 51). AT1-AT8 are written into doc/classes/JAVA-DEFERRED-TRIAGE.md's decided list as the
+main host's steps after the night's whole compiled record, with their ids. Built: AT9, the edge recorder gives every class it records
+with an info its generics (`env/reflect-generics`, moved out of analyze's class-generics; jdk/edge.edn grows at the night's `bin/j2g-edge
+update`, which must precede the essential `j2g-edge` step); AT10, j2g translates an instance call of Object.finalize() that no class of
+the receiver's declares as Object's empty body (`jrt.NN` of the receiver; t06387). Each with a bin/j2g-unit test and controls (pass on
+`31f89bf86be7dac52b3d`). Alternatives: AT9 (b) java-check's compiled level over the platform's declarations (changes refusals into run-time
+stubs); AT10 (b) a Finalize__V on every translated struct (jrt and every class's code grow for one test).

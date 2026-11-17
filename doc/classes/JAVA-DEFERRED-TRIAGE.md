@@ -7630,3 +7630,185 @@ The conversions for the night (not done here): `java/nio/file/SimpleFileVisitor.
 Calendar.Builder in overlay/jdk/java.base/java/util/Calendar.java (2); java.lang.Package into the world (3, with Class.getPackage).
 The asynchronous channels (11 with the two cut AsynchronousFileChannel uses), RMI (13) and the single-class areas (prefs, JNDI's
 directory, SCTP, kerberos, smartcardio, xpath, dynalink) are slices of their own, not closure lines.
+
+## As built: h-java-aot-triage (write-ahead), 2026-11-17
+
+Branch `h-java-aot-triage` (from next `498d7296f`), by day under the host burst's light rules: Java's AOT cell (2,588 / 201 /
+536; test/java/check-compiled.edn as gate 13c recorded it, 2026-11-14) grouped by root cause from its recorded reasons, the interp
+triage ("As built: h-java-deferred", its run's reasons, `.tmp/jd/run1`, and "As built: h-java-members", on its branch) and one light
+measurement: **`bin/java-check --levels compiled --analyze-only`** (JCS265 (b): j2g's analysis alone over today's `jdk/forms`, F26's
+and h-java-deferred's conversion included, nothing translated or built) of the 328 compiled rows recorded `:refused` (deferred 198,
+by design 130), on f26-ghidra's executable `31f89bf86be7dac52b3d` (F26's world compiled; javac's tool `javac-f70d1a9d900eb07a9afc` for the
+read, `REPR_JAVA_STALE_OK=1`; 11 shards of 30, `J2G_JOBS=8`, 52 min, peak 2.8 GB). No row moved, no class changed: the record is
+13c's and the night records it whole.
+
+**The record is stale.** Gate 13c ran before B2's world (2026-11-15) and before F26's conversion (2026-11-17); the compiled reasons
+are mostly "j2g: class X is not in the closed world" or an analysis refusal for classes the world now holds (ObjectOutputStream,
+ObjectStreamClass, MethodHandle, Annotation, TypeVariable, MulticastChannel, ThreadGroup...). Of the 198 deferred refusals, **140 analyze
+today**; of the 130 by-design refusals, **62**.
+
+### The 536 deferred by root cause
+
+| group | rows | cause | refused at 13c → analyzed today | fixed by |
+|---|---|---|---|---|
+| A. on next, converted 2026-11-17 | 135 | h-java-deferred's ObjectInputFilter (77), F26's Wrapper (33), DefaultLoggerFinder (18), ClassCache (7): the same causes as at interp (h-java-deferred's lists) | 22 → 22 | next's world; the night's build and record |
+| B. stale since B2's world | 148 | the test passes at interp on next's executable (h-java-deferred's 168), its compiled row is 13c's world gap | 54 → 53 (t04508: Annotation's generics, group F) | next's world; the record |
+| C. h-java-members' | 52 | the member tables, support entries, DynSub list and conversions h-java-members lists | 42 → 22 | held for after the gate; 20 still refused: async channels 6, Thread.Builder.OfPlatform 3, Calendar.Builder 2, ToolProvider on the shipped program 2, MalformedParametersException, Semaphore's generics, prefs, SCTP, JNDI, LdapLoginModule, smartcardio, dynalink 1 each |
+| D. compiled-only | 24 | interp passed already at 13c | 20 → 2 | see below |
+| E. shared, interp still failing | 177 | behaviour after loading 92 (serialization's bodies, dates, references, charsets, ...), world classes 22, DynSub-only 16, jrt members 15, stdout 10, javac's world's SimpleFileVisitor 9, timeouts 8, async channels 4, unread 1 | 60 → 39 | per area (the interp triage's) |
+
+**C and E's DynSub and protected-constructor causes are the interpreter's alone.** DynSub (`arbace.j2g.model/class-supers`, JCS120) is how an
+interpreted class extends a translated one; at the compiled level the test's subclass is translated with the world, so the 16 "cannot
+extend" tests of E (TextCallbackHandler 7, CyclicBarrier 2, ConcurrentHashMap, CountDownLatch, Hashtable, BigDecimal, SocketAddress,
+IOException, ExceptionInInitializerError) and C's RMI tests (RemoteStub's and UnicastRemoteObject's protected constructors, 12) may pass
+compiled before they do interpreted: their compiled rows fail on 13c's world (ObjectOutputStream, Sasl, MulticastChannel) and 11 of
+C's RMI 12 analyze today. The "cannot extend" rows that analyze: t04448 t04702 t04905 t05200 t05547 t05549 t05653 t05671 t05712 t07871 t07872 t07874 t07876 t07877 t07879 t07880; the RMI ones: t05241 t05242 t05244 t05246 t05247 t05248 t05249 t05250 t05252 t05253 t05256 t07954.
+
+**D, compiled-only (24).**
+
+| cause | rows | today | where |
+|---|---|---|---|
+| javac's API on the shipped program (JCS158 (a): deferred) | 16: t06044 t06045 t06347 t06348 t06356 t06378-t06384 t06421, and t05890 t06369 t06385 filed `:j2g-unresolved` (13c's empty message; today's names javax.tools / javax.lang.model) | refused | JCS158 (b), a shard over javac's tool's program |
+| java.util.spi.ToolProvider (the jar tool) | 1: t05926 | refused | the same (interp runs it on javac's tool) |
+| an edge class's generics not recorded | 1: t05089 (Thread$UncaughtExceptionHandler) | refused | group F |
+| Go that does not compile: a null constant cast to a class, coerced to Object | 1: t05934 (`nil.Ref`) | analyzed | **fixed here** (j2g) |
+| a package-private method redeclared in another package | 1: t07703 | analyzed (the refusal is the translation's) | J2G-SPEC §4.4's rename table |
+| a StackOverflowError expected | 1: t06279 | not a refusal | AT7 |
+| GC and timing | 3: t04817 (weak reference not cleared), t04819 (flaky), t04544 (speed-hang) | not refusals | jrt's references under Go's GC |
+
+**F, the edge's generics (6 rows, groups B-E and by design).** "Undeclared generics of class X: not in the declared edge": the edge
+(`jdk/edge.edn`) records a class's `:generics` only when the program's j2g run asked for them; a test that implements or extends an
+edge class of jrt's (Thread$UncaughtExceptionHandler t05089 t07956, CountDownLatch t05653, Semaphore t05707, System$Logger t04680,
+Annotation t04508) asks what the program never did. AT9.
+
+### Built here
+
+- **arbace/j2g/code.ae** `up-sym`: a null constant cast to a class (`(cast String nil)`, cast-val's `(v nil d)`) coerced to Object is
+  `(conv any nil)`, not `(.Ref nil)` (Go: "nil.Ref undefined (type untyped nil has no field or method Ref)"; OneCaseSwitches'
+  `method.invoke(null, (String) null, ...)`, t05934). Unit test `test-null-up` in test/j2g/unit.ae, with its control (a String value is
+  still `.Ref`): bin/j2g-unit on `31f89bf86be7dac52b3d` passes both; without the change the first fails (the negative control). The 7
+  other failures of that run (type annotations 1, invokers 6) are the executable's, not the checkout's: the same 7 fail with code.ae as
+  at HEAD.
+- Not built (need a build to be correct): t06387's `ProtectedAccess_3.this.finalize()` (Go: "Finalize__V undefined": an invokevirtual of
+  Object.finalize()V on a class whose hierarchy declares no finalize; AT10); t07703's rename table; the edge's generics (AT9).
+
+### The by-design 201 audited
+
+| class | rows | today | finding |
+|---|---|---|---|
+| `:design-also-compiled` | 128 | of 98 refused, 43 analyze | **stale**: its `:why` counts serialization 48 (out of by design since JCS167 (a)), the class-file API 29 (in the world since F26); 38 of its rows are deferred `:serialization` at interp, 4 deferred otherwise (t04809 t05313 t07839 t04996), 2 pass at interp (t05786 t08100); the 43 that analyze: t04379 t04383 t04400 t04418 t04436 t04437 t04443 t04444 t04783 t04785 t04787 t04788 t04789 t05243 t05254 t05296 t06005 t06326 t06327 t06328 t07933 t07934 t07935 t07936 t07937 t07938 t07939 t07940 t07941 t07942 t07943 t07944 t07946 t07947 t07948 t07949 t07950 t07952 t07953 t07957 t08020 t08102 t08103. Of the 55 still refused: XML 20, javac's API 22 (ClassfileTestHelper's 16, t05847 t05856 t05857 t05915 t05921 t06334: the class-file tests' remaining cause, deferred by JCS158), JDI 4, kerberos's ticket 1, smartcardio 2, JMX's relation service 1, ToolProvider 1, Unsafe 1, ModuleDescriptor 1, the edge's generics 1, JNDI 1 |
+| `:classfile` | 6 | 5 analyze; t06156 refused on javac's API | JCS303 (b): re-sorted by the main session with the night's records (F26) |
+| `:classloading` | 21 | 2 refused (t05627 ResourceBundle.Control, t05787 ToolProvider) | t04539, t04730 (java.lang.Package, a cut class: h-java-members' conversion) and t03295 are deferred at interp (`:interp-protected`, `:reflection`): the pattern `ClassLoader` takes them at compiled; t05787's cause is ToolProvider (`:util-classes`, deferred) |
+| `:define-bytes` | 6 | 6 analyze | holds (the failure is at run time: defineClass of class files, JCS302 (a)) |
+| `:kerberos` 9, `:hotspot-beans` 4, `:desktop` 1 | 14 | refused | hold |
+| `:hotspot-diagnostic` 3, `:jmx` 1 | 4 | analyze | `:jmx` (JCS95 (a), JCS128 (a)) matches `javax.management` whole though JMX-1 (JCS263) and F27 put its core and the RMI connector in the world |
+| `:foreign` 8, `:memory-limit` 5, `:xml` 4, `:jvm-tools` 3, `:j2g-reflection` 1, `:zip` 1 | 22 | not refusals | hold |
+
+### Proposed (h-java-aot-triage): AT1-AT10 (DECISIONS; no row moved)
+
+- **AT1** `:design-also-compiled`'s stale rows. (a) After the night's whole compiled record, its `:tests` keep only the ids whose cause is
+  still a by-design feature (XML, JDI, smartcardio, kerberos's tickets, Unsafe, the JMX services JMX-1 left out); the 44 rows deferred
+  or passing at interp (38 `:serialization`; t04307 t04308 t04309 t04378 t04379 t04383 t04385 t04394 t04400 t04418 t04432 t04436 t04437 t04439 t04443 t04444 t04725 t04809 t04958 t04959 t04996 t05018 t05243 t05267 t05313 t05325 t05338 t05751 t05752 t05753 t05779 t05786 t07839 t07887 t07939 t07950 t07965 t07966 t08020 t08036 t08037 t08053 t08082 t08100 ) and the rows that pass or fall into world classes leave it. (b) As is until a whole
+  compiled record names them. *Recommended (a).*
+- **AT2** The class-file API's tests whose remaining compiled cause is javac's API (22 rows: ClassfileTestHelper's 16 and six others):
+  (a) with JCS303 (b)'s re-sort, out of `:design-also-compiled` into `:javac-api` (deferred, JCS158 (a)); (b) by design as javac's
+  API at the compiled level (JCS158 (c), which the user did not choose). *Recommended (a).*
+- **AT3** `:jmx`'s pattern after JMX-1 and F27: (a) narrowed to what is still outside (javax.management.relation, monitor, modelmbean,
+  com.sun.management's HotSpot beans keep their classes), the rest deferred in `:mxbeans`; (b) as is. *Recommended (a).*
+- **AT4** `:classloading` at compiled: (a) t04539, t04730, t03295 and t05787 by id into the classes their interp rows are in (deferred);
+  (b) as is. *Recommended (a).*
+- **AT5** JCS158 (b) (a compiled shard over javac's tool's program) now that 16 compiled-only rows and 22 of AT2 wait on it: (a) after the
+  GT8 budget, as decided; (b) now. *Recommended (a).*
+- **AT6** t07703 (VTableTest, J2G-SPEC §4.4's rename table for a package-private method redeclared in another package): (a) deferred
+  `:j2g-pp-override` as is; (b) the rename table in j2g. *Recommended (a)*: one test.
+- **AT7** t06279 (LambdaTest5's unbounded recursion, a StackOverflowError expected; Go's goroutine stack limit ends the program, which no
+  recover catches): (a) by design (`:kind :design`: no StackOverflowError in the Go build); (b) deferred as is. *Recommended (a)*; the
+  interp level passes it.
+- **AT8** The DynSub-only and RMI rows (28) at compiled: (a) the night's run of group B's list includes them (below); (b) wait for the
+  whole record. *Recommended (a).*
+- **AT9** The edge's generics: (a) `arbace.j2g.edge/recorded-edge` adds `:generics` for every class it records with `:info` (the
+  frozen JVM's reflection, as `:info` is), `bin/j2g-edge update` at night (jdk/edge.edn grows; every key that holds the edge moves);
+  (b) java-check's compiled level passes `--outside-platform` (A8c completes the edge's generics from java.base's platform, test/j2g/unit's
+  "the edge's UncaughtExceptionHandler gains its generics"), which also turns its refusals of outside classes into J2g_Missing at run time;
+  (c) as is (6 rows). *Recommended (a).*
+- **AT10** `C.this.finalize()` and `super.finalize()` of a class whose hierarchy declares no finalize (t06387): (a) j2g calls Object's empty
+  body (no Go method; the call evaluates its receiver and nothing else) when no class from the receiver's up declares finalize()V, a
+  unit test over a fixture; (b) jrt's every translated struct a Finalize__V. *Recommended (a)*, a day's change with the night's build.
+
+### The night's commands
+
+One shard each (`--shard-size 500`; a compiled shard is one whole-program j2g run, `:mem-gib` as `java-check-compiled`'s, under
+`bin/heavy-lock`), on the gate's executables at the merged key (next with this branch: j2g moved `gate_key`):
+
+```sh
+bin/arbace-go --gate-build
+# shard 1: groups A, B, the DynSub-only and RMI rows, and t05934 (283 + 28 + 1 tests): next's world and this branch's fix
+bin/heavy-lock bin/java-check --levels compiled --list .tmp/hat/shard1.txt --save .tmp/hat/s1
+# shard 2, after h-java-members' merge and its build: group C
+bin/heavy-lock bin/java-check --levels compiled --list .tmp/hat/shard2.txt --save .tmp/hat/s2
+bin/java-check --judge --partial --record .tmp/hat/s1/results.tsv .tmp/hat/s2/results.tsv   # the rows that moved alone; then bin/reap --record
+```
+
+shard1.txt (A): t04245 t04264 t04375 t04380 t04384 t04390 t04392 t04393 t04395 t04396 t04397 t04399 t04401 t04403 t04404 t04406 t04407 t04408 t04413 t04414 t04415 t04416 t04417 t04429 t04431 t04434 t04438 t04441 t04442 t04445 t04446 t04451 t04453 t04706 t04763 t04769 t04920 t05037 t05038 t05268 t05277 t05287 t05288 t05297 t05308 t05324 t05327 t05401 t05405 t05435 t05449 t05457 t05494 t05495 t05499 t05512 t05514 t05518 t05521 t05543 t05556 t05560 t05567 t05595 t05652 t05666 t05672 t06159 t06200 t06256 t06257 t06258 t07754 t07919 t07959 t07989 t08306 t03287 t03306 t03574 t03593 t03630 t03631 t03632 t03635 t03862 t03895 t03899 t04745 t04746 t04747 t04748 t04751 t04758 t04766 t04767 t04768 t04770 t04771 t04772 t04773 t04774 t04776 t04777 t04778 t07677 t07679 t07685 t07689 t07693 t04313 t04792 t05061 t07855 t07856 t07857 t07859 t07860 t07861 t07862 t07978 t08121 t08122 t08123 t08134 t08136 t08137 t08139 t04381 t04398 t05315 t05520 t05717 t05964 t08234
+
+shard1.txt (B): t03578 t03610 t03634 t04259 t04261 t04267 t04310 t04321 t04382 t04409 t04410 t04425 t04450 t04452 t04464 t04508 t04511 t04514 t04518 t04519 t04520 t04524 t04525 t04536 t04598 t04682 t04686 t04716 t04718 t04720 t04722 t04728 t04731 t04734 t04739 t04761 t04775 t04800 t04815 t04818 t04826 t04830 t04831 t04835 t04841 t04843 t04847 t04848 t04850 t04852 t04853 t04855 t04860 t04861 t04874 t04875 t04876 t04877 t04880 t04881 t04884 t04938 t05072 t05074 t05108 t05111 t05112 t05113 t05114 t05115 t05116 t05117 t05118 t05162 t05198 t05202 t05203 t05205 t05226 t05227 t05228 t05229 t05230 t05231 t05232 t05236 t05245 t05654 t05693 t05713 t05736 t05737 t05739 t05741 t05742 t05744 t05749 t05758 t05832 t05842 t05990 t06338 t06345 t06420 t07678 t07681 t07686 t07691 t07702 t07745 t07746 t07751 t07752 t07753 t07755 t07757 t07758 t07763 t07764 t07765 t07766 t07767 t07771 t07808 t07864 t07873 t07875 t07878 t07881 t07893 t07898 t07905 t07906 t07918 t08012 t08013 t08048 t08049 t08050 t08054 t08055 t08144 t08202 t08242 t08276 t08280 t08283 t08351
+
+shard1.txt (the DynSub-only and RMI rows, t05934): t04448 t04702 t04905 t05200 t05547 t05549 t05653 t05671 t05712 t07871 t07872 t07874 t07876 t07877 t07879 t07880 t05241 t05242 t05244 t05246 t05247 t05248 t05249 t05250 t05252 t05253 t05256 t07954 t05934
+
+shard2.txt (C): t03296 t04387 t04388 t04649 t04689 t04690 t04723 t04733 t04756 t04794 t04832 t04868 t04873 t04878 t05071 t05091 t05096 t05098 t05099 t05101 t05141 t05150 t05166 t05224 t05225 t05241 t05242 t05244 t05246 t05247 t05248 t05249 t05250 t05252 t05253 t05256 t05460 t05461 t05691 t05707 t05719 t05784 t06387 t07858 t07863 t07869 t07870 t07954 t08071 t08097 t08312 t08322
+
+**Expected yield** (the triage's 0.7 where a second cause is unknown): B 148 → about 130 pass compiled (their interp passes; 53 of 54 refused
+analyze); A 135 → the interp night's yield (h-java-deferred: 146 of its 154 lose their first failure); the DynSub-only and RMI 28 → about 10
+(serialization's and RMI's run-time pieces follow); C 52 → about 15 (22 analyze); t05934 1. Java AOT 2,588 / 201 / 536 → about 2,800 / 201 /
+325 before AT1-AT4 (completeness 78 → about 84); AT1-AT4 move about 85 rows from by design to deferred or pass (strict unchanged, the
+without-by-design figure down).
+
+### Decided (the user, 2026-11-17, round 51): AT1-AT10, all (a)
+
+AT9 and AT10 are built below. AT1-AT8 are the main host's steps after the night's whole compiled record (`bin/java-check --levels compiled`,
+recorded), each a change of test/java/divergences.edn judged on that record (`bin/java-check --judge`, then `bin/reap --record`,
+`bin/crops-score --record`):
+
+1. **AT1** `:design-also-compiled`'s `:tests`: drop every id whose new compiled row passes or whose reason names no by-design feature
+   (XML, JDI, smartcardio, kerberos's tickets, Unsafe, the JMX services JMX-1 left out), first of all the 44 deferred or passing at interp:
+   t04307 t04308 t04309 t04378 t04379 t04383 t04385 t04394 t04400 t04418 t04432 t04436 t04437 t04439 t04443 t04444 t04725 t04809 t04958 t04959 t04996 t05018 t05243 t05267 t05313 t05325 t05338 t05751 t05752 t05753 t05779 t05786 t07839 t07887 t07939 t07950 t07965 t07966 t08020 t08036 t08037 t08053 t08082 t08100 ; and the 43 that analyze today: t04379 t04383 t04400 t04418 t04436 t04437 t04443 t04444 t04783 t04785 t04787 t04788 t04789 t05243 t05254 t05296 t06005 t06326 t06327 t06328 t07933 t07934 t07935 t07936 t07937 t07938 t07939 t07940 t07941 t07942 t07943 t07944 t07946 t07947 t07948 t07949 t07950 t07952 t07953 t07957 t08020 t08102 t08103. Its `:why` rewritten from the new counts.
+2. **AT2** the class-file API's tests whose compiled cause is javac's API, with JCS303 (b)'s re-sort: out of `:design-also-compiled` and
+   `:classfile` into `:javac-api`'s `:tests` (deferred, JCS158 (a)): t05992 t05993 t05994 t05995 t05996 t05997 t05998 t05999 t06000 t06001 t06002 t06003 t06004 t06006 t06007 t06008 t06156 t05847 t05856 t05857 t05915 t05921 t06334 (and any other the record shows refused on javax.tools,
+   com.sun.tools.javac or javax.lang.model).
+3. **AT3** `:jmx`'s `:match` narrowed to what JMX-1 and F27 left out: `javax\.management\.(relation|monitor|modelmbean)` (com.sun.management's
+   HotSpot beans keep `:hotspot-beans`, `:hotspot-diagnostic`); a row it no longer takes falls to `:mxbeans` or its world class (deferred).
+4. **AT4** `:classloading` at compiled: t04539 and t04730 (java.lang.Package) into `:reflection`'s `:tests`, t03295 into
+   `:interp-protected`'s, t05787 into `:util-classes`' (ToolProvider), each class taking them at `:compiled` before `:classloading`.
+5. **AT5** JCS158 (b) stays after the GT8 budget: no change; the 16 compiled-only javac-API rows (t06044 t06045 t06347 t06348 t06356 t06378
+   t06379 t06380 t06381 t06382 t06383 t06384 t06421 t05890 t06369 t06385) stay `:javac-api` (the last three by id, moved from `:j2g-unresolved`).
+6. **AT6** t07703 stays `:j2g-pp-override` (deferred).
+7. **AT7** t06279: a class `:j2g-stack-overflow` (`:kind :design`, `:level :compiled`, `:tests ["t06279"]`, why: Go's goroutine stack
+   overflow is fatal and no recover catches it, so the Go build has no StackOverflowError), `:j2g-deep-stack` removed.
+8. **AT8** the night's shard 1 holds the 28 DynSub-only and RMI rows (above, "The night's commands"): no class change unless the record shows
+   them still failing on their 13c reasons.
+
+## As built: AT9, AT10 (write-ahead), 2026-11-17
+
+Branch `h-java-aot-triage` (next merged at `7e2115a6e`), by day, unit tests only; the night's build and `bin/j2g-edge update` prove them.
+
+- **AT9** `arbace.j2g.edge/recorded-edge`: every class the run records with an `:info` gains `:generics` (`env/reflect-generics`, the
+  frozen JVM's reflection, the body `arbace.classes.analyze/class-generics` used for a class outside the forms, moved into
+  arbace.classes.env and called from both); a facet the run asked is kept as asked; an array none. jdk/edge.edn holds 403 classes with an info,
+  32 with generics today: about 371 gain them at `bin/j2g-edge update` (the file, 1.6 MB, grows; javac's edge derived from it moves too).
+  Rows it serves: t04508 t04680 t05089 t05653 t05707 t07956 ("Undeclared generics of class X: not in the declared edge").
+  Unit test `test-edge-generics` (the reflection stubbed: the Go build's Class has no generic signatures) with two controls.
+- **AT10** `arbace.j2g.code/object-finalize?` and `invoke-val`: an instance call of Object.finalize() itself (the analysis resolved it to
+  Object: no class from the receiver's type up declares finalize) is jdk26u's empty body, the receiver evaluated and null-checked
+  (`jrt.NN(x)`, a call Go takes as a statement); virtual, `super.finalize()` and `Outer.super.finalize()` alike. A subclass's override is
+  not dispatched to from such a call (the receiver's Go type has no Finalize__V). Row: t06387. Unit test `test-object-finalize` over the
+  fixture test/j2g/unit/finalize (z.Plain calls this.finalize(), z.Own declares finalize: the control; hashCode the second).
+- bin/j2g-unit on `31f89bf86be7dac52b3d` (1.0 GB peak): the 9 tests of AT9, AT10 and t05934 pass; the 7 that fail (type annotations 1,
+  invokers 6) fail alike at HEAD (the executable's analysis). AT9's and AT10's tests call functions that do not exist before the change.
+
+The night, before the essential gate's `j2g-edge` step (it verifies the edge afresh and fails on the recorder's new output until then):
+
+```sh
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge   # jdk/edge.edn with every class's generics; commit it
+bin/arbace-go --gate-build                                                   # arbace/classes and arbace/j2g moved gate_key
+# then "The night's commands" above: shard 1 with t04508 t04680 t05089 t05653 t05707 t07956 t06387 added
+```
