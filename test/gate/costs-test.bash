@@ -116,14 +116,15 @@ has "$w/gate.txt" '^   a +essential clojure +2 store +0m15s +0m20s' "bin/gate --
 [ $st = 2 ] && ok "--last without --costs: usage" || bad "--last without --costs: exit $st"
 
 # GT9 (GT9.1, GTS215, GTS222): the new crops known, a share weighted by :shares, "measuring" in place of OVER until every
-# row of the crop has two passes, the essential chains against :chain-s (:chain-s-by), GT9's rules among the problems
+# row of the crop has two passes, the essential chains against :chain-s (:chain-s-by), GT9's rules among the problems (the new
+# crops' essential checks in the crops tier, :essential-when-changed, since 2026-11-17)
 cat > "$w/gt9.edn" <<'F'
 {:groups {}
  :steps
  [{:name a :phase :essential :cmd "true"}
-  {:name o1 :phase :essential :chain oc :cmd "true" :mem-gib 1}
-  {:name o2 :phase :essential :chain oc :cmd "true" :mem-gib 1}
-  {:name l1 :phase :essential :cmd "true" :mem-gib 1}
+  {:name o1 :phase :essential :chain oc :cmd "true" :mem-gib 1 :essential-when-changed :ocaml}
+  {:name o2 :phase :essential :chain oc :cmd "true" :mem-gib 1 :essential-when-changed :ocaml}
+  {:name l1 :phase :essential :cmd "true" :mem-gib 1 :essential-when-changed :llvm}
   {:name of :phase :full :cmd "true" :mem-gib 1}
   {:name lf :phase :full :cmd "true" :mem-gib 1}]
  :crops {:clojure [a] :ocaml [o1 o2 of] :llvm [l1 lf]}

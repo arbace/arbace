@@ -9692,3 +9692,43 @@ and fixtures' updates, then this branch's four commits (cherry-picked: they are 
   (PropertyChangeListener leaves the edge for the forms), `bin/clojure-tests --java-fixtures update` if the fixtures' forms move,
   `bin/provenance-check` and `bin/jrt-convert verify`. Until then `jdk/sources.txt` and `jdk/forms` lag `jrt_sources.ae` by these
   two files.
+
+## 2026-11-17: the crops tier: the essential gate is the core (branch `gate-ess-diet`, from `next` `cf8268ebf`)
+
+The user's decision of the day: shrink the essential gate. It had 71 steps and about 113 minutes of serial work whenever its keys
+moved (a re-seed, a runtime change), 83.5 of them the crops' 42 essential subsets on stage 0, which rerun on every stage 0 or
+runtime move though the crops are out of every key. Built (doc/GATE-DIET-SURVEY.md, "As built: the crops tier"):
+- `test/gate/steps.edn`'s `:crop-paths {CROP [RULES]}` (each crop's own namespaces, Go forms, scripts, records and fragment) and
+  the step attribute `:essential-when-changed CROP` on every crop's essential check (C's five too). The planner
+  (`test/gate/plan.ae`'s `crop-tier?`, `crop-why`) runs such a step in the essential gate only when its crop's paths, its
+  declaration or its environment changed since its latest pass, else decides `night` (deferred to the night's gate, explained in
+  `bin/gate --plan`); a deferred step a running one needs is woken; `--rerun`, `GATE_CROP_DEFER=0`, the clean run and every night
+  tier key them as before. The rules' files join the keys (GD3's `:also-changed` precedent), so the passes name them. The runner
+  (`bin/lib/gate-run.bash`) and `bin/gate` take the status `night` (no run, no failure, no pass). `gate.crops check` requires a new
+  crop's essential check in the tier and accepts a vector of controls.
+- Merged within their chains where the keys agree: asm-amd64-essential (3), asm-arm64-essential (5), a64i-essential (3),
+  wasm-essential (5), llvm-essential (4), cpp-essential (3), si-essential (2), oi-essential (2), rust-read-essential (2): 20 steps
+  fewer, every command and all 128 control entries kept (`.tmp/ess/cover.ae` on the branch). Not merged: C's levels (GDS10 (a)),
+  cpp-check-essential, rust-front/core, haskell's two, the c2j pair, the two read chains.
+- The fragments synced from steps.edn (the drift memdecl-fix noted), `test/crops/independence.edn`'s step names, CLAUDE.md,
+  the tests (`test/gate/crop-tier-test.bash` new; crops-test, costs-test).
+Alternatives considered: moving the subsets to `:phase :full` (simplest, but a crop's own change would wait for the night, and
+crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
+command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
+29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
+
+## 2026-11-17: Java's deferred interp rows triaged (branch `h-java-deferred`, from `next` `e4a7a30f3`)
+
+The eval cell's 611 deferred rows (gate 13c's record, 2026-11-14) run again at interp, light, on next's gate executable
+`f60652fb7fb9568e76b1` (581 tests, the `:speed-hang` ones left out; javac's tool `javac-f70d1a9d900eb07a9afc` stale-ok): 168 pass,
+B2's world being in the executable and not yet in the record; their rows alone re-recorded (Java eval 2,549 / 165 / 611 → 2,717 /
+165 / 443, completeness 87 → 89). The 74 of the remaining 413 whose new reasons no class took classed in test/java/divergences.edn.
+The 413 grouped by root cause (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-deferred"): ObjectInputFilter's System.Logger
+87, sun.invoke.util.Wrapper 33 (F26's removal of 2026-11-16 took it from MethodType), DefaultLoggerFinder 18, jrt's ClassCache's
+recursive computeIfAbsent 8, and the costlier ones (the DynSub list 29, members 48, missing classes 37). Fixed in code for the night
+(not provable by day: each needs `bin/jrt-convert derive`, `update` and a build): four derivations in test/jrt/derive.ae
+(ObjectInputFilter, java.util.logging's Logger and LogManager over `jdk.internal.jrt.SystemLoggers`, Wrapper without its
+ClassDescs), `SystemLoggers.isSystem`, ClassCache computing outside the map, and the interpreter's try (`Compiler$CF$Try.eval`):
+a finally that jumps discards the pending exception (JLS 14.20.2; t03210). Alternatives considered: System.Logger in jrt itself
+(JCS155 (a), a Go port of the interface and LoggerFinder: larger, and the derivations follow the rule F24 and JMX-1 already use);
+bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no ConstantDesc).
