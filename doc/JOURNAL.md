@@ -9552,3 +9552,24 @@ Alternatives considered: moving the subsets to `:phase :full` (simplest, but a c
 crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
+
+## 2026-11-17: Clojure's stale deferred rows recorded, gen-class's exposer, Go's by-design audit (branch `h-clojure-go`, from `next` `e4a7a30f3`)
+
+The host burst (light checks only). Clojure: the eval level's deferred classes `:q1-typing`, `:desktop` and `:javadoc-url` were
+built on `clojure-cdr` (CDR2, CDR4 (b)) and merged, but their rows were never re-recorded. Run alone on next's test build
+(`.tmp/gate-exe/f60652fb7fb9568e76b1/amd64/arbace-tests`, `bin/clojure-tests --no-generative` with the namespaces named, the
+macros/vars control failing as it must): compilation 124 of 124, java-interop 43 tests 334 assertions (test-dot and test-bean
+unskipped), java.javadoc 5 of 5. Recorded in `test/arbace-go-results.edn` (those rows only), the three classes removed from
+`test/clojure/divergences.edn`, `bin/reap --record` and `bin/crops-score --record`: eval 21,060 / 24 / 50 to 21,065 / 24 / 45.
+genclass's `protected-final-access` still errs after CDR11: `ClassLoader` is extendable, but jrt's reflection lists only its
+public members, so gen-class's `:exposes-methods` found no `findSystemClass`. `arbace/genclass.ae` now also takes the world's
+protected methods (`arbace.classes.go/protected-members`, as the Java forms' analysis does; doc/VENDOR-NOTES.md, hand change
+33); proven by loading the file over the embedded copy (`superFindSystemClass` answers String, the reflective `findSystemClass`
+throws IllegalArgumentException as upstream's test wants). It moves `gate_key` (not the runtime key); the genclass row and the
+AOT level's rows (desktop, javadoc-url, q1-evaluated, gen-class: the AOT program is a 32 GiB j2g build) wait for the main host.
+Alternatives considered: adding ClassLoader's protected methods to jrt's member tables (`test/jrt/tables.ae`, a jrt change and
+`bin/jrt manifest` on the frozen JVM, and reflection would then list them for every caller) rather than gen-class reading the
+world's signatures as `arbace.classes.go/generics` already does. Not done (not cheap): the locales (CDR1), SAX and StAX (CDR5).
+Go: the by-design classes audited against doc/go/GOI-SPEC.md ("v1's divergences", §1.1) and the surveys; no class changed, the
+candidates reported for the user's decision (weak and unique, GPS43's two types2 programs, the abridged interface spelling as
+feature gaps; gc's failed references, the compile-only directory tests, unsafe and the other boards' goos packages as n/a).
