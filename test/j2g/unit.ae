@@ -780,7 +780,48 @@
     (check "rank: control: a list naming no stubbed class blocks no run"
            (zero? (:blocked (rank/rank st [["x" ["demo.outside.Main" "java.lang.String"]]]))))))
 
+;; AT9 (h-java-aot-triage, the user 2026-11-17): the edge's recorder gives every class it records with an info its
+;; generics too (a test's Thread.UncaughtExceptionHandler, CountDownLatch, Semaphore: "Undeclared generics"); the
+;; reflection stubbed (generics-of), as the Go build's Class has no generic signatures; the controls: a facet the run
+;; asked is kept as asked, an array (no class loaded, no info) gains none
+
+(defn test-edge-generics []
+  (let [g {:tparams [] :supers [] :methods [] :stub true}
+        asked {:tparams ['T] :supers [] :methods []}
+        r (binding [env/*declared* nil]
+            (:classes (edge/recorded-edge {"java/lang/Runnable" {:exists true}
+                                           "java/lang/Comparable" {:exists true :generics asked}
+                                           "[I" {:exists true}}
+                                          {} (constantly g))))]
+    (check "edge-generics: a recorded class with an info gains its generics"
+           (and (contains? (get r "java/lang/Runnable") :info) (:stub (:generics (get r "java/lang/Runnable"))))
+           (pr-str (get r "java/lang/Runnable")))
+    (check "edge-generics: control: generics the run asked are kept as asked"
+           (= ['T] (:tparams (:generics (get r "java/lang/Comparable")))) (pr-str (:generics (get r "java/lang/Comparable"))))
+    (check "edge-generics: control: an array gains no generics" (not (contains? (get r "[I") :generics)) (pr-str (get r "[I")))))
+
+;; AT10 (h-java-aot-triage, the user 2026-11-17): an instance call of Object.finalize() itself, its class declaring
+;; none (ProtectedAccess_3's C.this.finalize(), t06387: Go's "Finalize__V undefined"), is Object's empty body in
+;; invoke-val (jrt.NN of the receiver); the controls: a class declaring finalize calls its own, hashCode is not it
+
+(defn test-object-finalize []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/finalize" :tree true}] :variant-files []))
+        call (fn [cls mn] (w/with-world world
+                            (first (filter #(= :invoke (:op %))
+                                           (nodes-of (some (fn [[[n _] b]] (when (= n mn) b)) (:bodies @(:state (a/decl cls)))))))))
+        plain (call "z/Plain" "fin") own (call "z/Own" "fin") hash (call "z/Plain" "hash")]
+    (check "object-finalize: the fixture analyzes" (and plain own hash (empty? (:failed world))) (pr-str (:failed world)))
+    (check "object-finalize: Plain's this.finalize() is Object's own, the no-op" (code/object-finalize? plain)
+           (pr-str (select-keys plain [:owner :name :desc :kind]) (:owner (:method plain))))
+    (check "object-finalize: control: Own's this.finalize() is Own's" (not (code/object-finalize? own))
+           (pr-str (select-keys own [:owner :name :desc :kind]) (:owner (:method own))))
+    (check "object-finalize: control: hashCode is not finalize" (not (code/object-finalize? hash)))))
+
 (defn -main [& _]
+  (test-edge-generics)
+  (test-object-finalize)
   (test-null-up)
   (test-support-tables)
   (test-unresolved-cause)

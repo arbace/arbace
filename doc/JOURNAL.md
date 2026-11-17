@@ -10326,3 +10326,13 @@ the world since F26: 44 of its rows deferred or passing at interp, 43 analyzing)
 wider than what JMX-1 left out: AT1-AT10 proposed (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-aot-triage"), no row moved.
 Alternatives considered: re-sorting the classes now (refused: the user decides, and the night's whole record moves them anyway); a light
 compiled run (not light: a shard is a whole-program j2g run and a build).
+
+## 2026-11-17: AT1-AT10 decided; AT9 and AT10 built (branch `h-java-aot-triage`, next merged at `7e2115a6e`)
+
+The user approved AT1-AT10 as recommended (round 51). AT1-AT8 are written into doc/classes/JAVA-DEFERRED-TRIAGE.md's decided list as the
+main host's steps after the night's whole compiled record, with their ids. Built: AT9, the edge recorder gives every class it records
+with an info its generics (`env/reflect-generics`, moved out of analyze's class-generics; jdk/edge.edn grows at the night's `bin/j2g-edge
+update`, which must precede the essential `j2g-edge` step); AT10, j2g translates an instance call of Object.finalize() that no class of
+the receiver's declares as Object's empty body (`jrt.NN` of the receiver; t06387). Each with a bin/j2g-unit test and controls (pass on
+`31f89bf86be7dac52b3d`). Alternatives: AT9 (b) java-check's compiled level over the platform's declarations (changes refusals into run-time
+stubs); AT10 (b) a Finalize__V on every translated struct (jrt and every class's code grow for one test).
