@@ -164,7 +164,15 @@ file; Java's comments are not carried over.
    Tags are written where the declared type differs from the initializer's (or is generic, or
    the initializer is a literal), `^:const` on constant variables. Postfix increments inside a
    statement whose variable is not otherwise read there move after the statement
-   (`(aset arr i x) (set! i (unchecked-inc-int i))`) or bind the old value before it.
+   (`(aset arr i x) (set! i (unchecked-inc-int i))`) or bind the old value before it. Since
+   n-java-hoist (2026-11-18) an increment whose variable is seen when the statement completes
+   abruptly (a field, or a local a `catch` or `finally` of an enclosing `try` sees: one in scope
+   at the `try`) moves only where no exception can tell: after the statement when nothing after
+   the increment can throw (`x = i++` into a local or a field of `this`), else before it when
+   nothing before it can (literals, types, `this`, locals, fields of `this` named simply, a call's
+   target, an array element's array and index: `c = text.charAt(index++)` is
+   `(let [index-1 index] (set! index ...) (set! c (.charAt text index-1)))`), else it stays in
+   place (JLS 15.14.2: the variable is incremented when the increment is evaluated).
 7. **Patterns.** `instanceof` patterns become `if-instance`/`when-instance` with Java's flow
    scoping: through `&&`, `||` and `!`, into the rest of the block after an early exit, in
    conditionals, `while` and `for` conditions and `if`-assigned locals. A case with several

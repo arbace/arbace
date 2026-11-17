@@ -92,7 +92,8 @@ comes back as Java:
 - the converter's temporaries become Java's operators again: postfix increments
   (`(let [old-N g] ...)`), compound assignments on places with impure parts, boolean `&` and
   `|`, increments hoisted before a `return`; an increment the converter moved after a statement
-  on a local returns into it (`a[i++] = x`); the rebinding of captured locals disappears;
+  on a local returns into it (`a[i++] = x`), one a `catch` or `finally` sees only into `x = i`
+  (the converter's rule since n-java-hoist: else it would read back hoisted before); the rebinding of captured locals disappears;
 - conversions written out are Java's casts, those the converter made of implicit ones go
   (the `float` promotion of comparisons; `(long 1)` of an `int` `?:` in a compound assignment;
   the boxing of a `?:` branch); integer literals are written as longs where Java needs them (an

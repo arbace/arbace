@@ -2438,7 +2438,12 @@
       (when (and (#{"++" "--"} op) (local? env v)
                  (= [1 1] (uses-of v s))
                  ;; not the assigned variable itself
-                 (not (and (is? s 'set!) (= v (second s)))))
+                 (not (and (is? s 'set!) (= v (second s))))
+                 ;; a local a catch or finally sees moves after the statement only when nothing after
+                 ;; the increment can throw, x = v++ into a local or a field (the converter's
+                 ;; hoist-mode): else it reads as v++ hoisted before or in place
+                 (or (not (contains? (:guarded env) (name v)))
+                     (and (is? s 'set!) (= v (nth s 2)) (symbol? (second s)) (nil? (namespace (second s))))))
         (subst {v [:postfix-of v nxt]} s)))))
 
 (defn- escaping-binding
@@ -2795,6 +2800,15 @@
       kw [(str "continue " (java-label kw) ";")]
       :else ["continue;"])))
 
+(defn- guard-locals
+  "Env `env` for a try's body: the locals of `outer` (default `env`) that its catches or finally see,
+  :guarded (fold-increment)."
+  ([env catches fin] (guard-locals env catches fin env))
+  ([env catches fin outer]
+   (if (or (seq catches) fin)
+     (update env :guarded (fnil into #{}) (keys (:locals outer)))
+     env)))
+
 (defn- try-lines [env [_ & forms] ctx]
   (let [[body clauses] (split-with #(not (or (is? % 'catch) (is? % 'finally))) forms)
         catches (filter #(is? % 'catch) clauses)
@@ -2804,8 +2818,8 @@
         [head-t body-l] (if twr
                           (let [[_ bv & tb] twr
                                 [rs env'] (resources-text env bv tb)]
-                            [(str "try (" rs ")") (body-lines env' tb ctx)])
-                          ["try" (body-lines env body ctx)])
+                            [(str "try (" rs ")") (body-lines (guard-locals env' catches fin env) tb ctx)])
+                          ["try" (body-lines (guard-locals env catches fin) body ctx)])
         lines (block head-t body-l)
         lines (reduce (fn [lines [_ t s & hb]]
                         (let [types (if (vector? t) t [t])
