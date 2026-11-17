@@ -10457,3 +10457,19 @@ classes samples`. Proven on the JDK (the overlay compiled with `--patch-module j
 build's exploded modules): before the fix four spellings fail, after each compiles as the JDK's javac, the classes byte for byte.
 Keys: `arbace_javac_key`, `arbace_javac_rest_key`; not `gate_key`, not the runtime key. The tool build and its checks by day. Details:
 doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: a file named twice, compiled once".
+
+## 2026-11-17: n-java-defer, the interp cell's untaken deferred rows (round 52, overnight; branch `n-java-defer` on n-review-c `6ff92621f`)
+
+Of the eval cell's 443 deferred Java rows, the 145 the stack's triage (h-java-deferred, h-java-members, AT1-AT10) did not take were
+classed from h-java-deferred's light run: serialization 21 (12 of them h-java-deferred's ObjectInputFilter cause, their reason the
+stdout's first line: add them to its night's list), reflection 20, net 13, jrt-dates 13, mxbeans 12, the rest 9 or fewer. Taken
+overnight (round 52), recommended: `:reflection`, the largest class with interpreter causes. Run at interp on next's gate executable
+`f60652fb7fb9568e76b1` (read on javac's tool `javac-f70d1a9d900eb07a9afc`, `REPR_JAVA_STALE_OK=1`, each process under 0.8 GB), its
+causes read one by one; two are the interpreter's and fixed: Compiler$CF$Rt.isInstance answers an object without a Klass (a Proxy of
+an interpreted interface: an annotation of an interpreted annotation type) by the Klass's Class (t04729; arbace/lang, compiled, built
+tomorrow), and arbace.classes.interp's implicit-params! gives an enum's constructor javac's descriptor, String and int first (t04717).
+Both proven light with the checkout on ARBACE_PATH (arbace/classes/ loaded from it; isInstance through an equivalent substitute in
+arbace.classes.interp, removed after), and 141 passing tests of the reflective, enum and cast areas pass alike. Others found, not
+fixed: repr/java drops a receiver parameter's type annotations (t04740 t04741) and writes repeated annotations as `^` maps the reader
+merges into one (t04727). No row moves tonight (java-check runs the embedded analyzer and runtime); keys: `gate_key` and the runtime
+key move (arbace/lang, arbace/classes). doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer".
