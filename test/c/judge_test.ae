@@ -1727,3 +1727,54 @@
     (is (= [:pass] (dg/verdict d {:status :ok :lines {4 1 6 1}})))
     ;; the old reading (the directive's own line 2) is now an extra line, and 4 missed
     (is (= :both (second (dg/verdict d {:status :ok :lines {2 1 6 1}}))))))
+
+;; h-c-deferred (2026-11-17; doc/C23-SURVEY.md, "As built: the read and print levels' deferred rows"): a file the reader rejects
+;; passes the round trip's acceptance by its own verdict when its first error is on a dg-error line of the main file and one of
+;; the line's regexps finds the message (own-rejects); another line, another message or no file is not
+(deftest roundtrip-own-rejects
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-own-rejects")
+        f (str w "/t.c")]
+    (put-files w {"t.c" (str "/* { dg-do compile } */\n"
+                             "int a;\n"
+                             "auto g { } /* { dg-error \"initialized data declaration\" } */\n")})
+    (is (rt/own-rejects? f (str f ":3:1: 'auto' requires an initialized data declaration")))
+    (is (rt/own-rejects? f "3:1: 'auto' requires an initialized data declaration") "a position without the file's name")
+    (is (not (rt/own-rejects? f (str f ":3:7: unexpected '{', expected ';'"))) "the line's error in other words")
+    (is (not (rt/own-rejects? f (str f ":2:5: 'auto' requires an initialized data declaration"))) "a line no dg-error names")
+    (is (not (rt/own-rejects? (str w "/other.c:3:1: x") (str w "/other.c:3:1: initialized data declaration"))) "an included file's")
+    (is (not (rt/own-rejects? nil "3:1: initialized data declaration")) "no file (a control's row)")))
+
+;; h-c-deferred: the converter's digit separators (gcc's cpp_classify_number errors), C23's typeof against GNU's __typeof__, and
+;; __declspec read as an attribute and printed back
+(deftest converter-deferred-rows
+  (require 'arbace.repr.c.convert)
+  (let [bad (resolve 'arbace.repr.c.convert/bad-digit-separators)]
+    (is (nil? (bad "1'000'000")))
+    (is (nil? (bad "0x1'f")))
+    (is (nil? (bad "0x1'a.bp1'0")))
+    (is (nil? (bad "1'0.2'5e1'0")))
+    (is (= "digit separator after base indicator" (bad "0x'1")))
+    (is (= "digit separator after base indicator" (bad "0B'1")))
+    (is (= "adjacent digit separators" (bad "1''2")))
+    (is (= "digit separator outside digit sequence" (bad "1'u")))
+    (is (= "digit separator outside digit sequence" (bad "1.2e-3'f"))))
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-converter-rows")
+        h (host/load-host "test/c/host")
+        rd (fn [name text std]
+             (put-files w {name text})
+             (let [fc (host/file-config [(str "-std=" std)] std)]
+               (rc/read-c (host/config h fc w) fc name false)))
+        pr (fn [r] (rc/print-c (:file-form r) (:forms r)))]
+    (let [r (rd "a.c" "__declspec (dllimport) int foo;\n" "gnu17")]
+      (is (nil? (:refused r)))
+      (is (str/includes? (pr r) "__declspec(dllimport) int foo;")))
+    (let [r (rd "b.c" "_Noreturn void f (void);\ntypeof (&f) p;\n__typeof__ (&f) q;\n" "c23")
+          t (pr r)]
+      (is (str/includes? t "typeof(&f) p;"))
+      (is (str/includes? t "__typeof__(&f) q;")))
+    (let [r (rd "c.c" "auto g { }\n" "c23")]
+      (is (re-find #"c\.c:1:1: 'auto' requires an initialized data declaration" (first (:error r)))))
+    (let [r (rd "d.c" "[[]];\n__attribute__((noreturn)) void d0 (void), __attribute__((cold)) d1 (void);\n" "c23")
+          t (pr r)]
+      (is (str/includes? t "[[]];"))
+      (is (str/includes? t "__attribute__((noreturn)) __attribute__((cold)) void d1(void);")))))

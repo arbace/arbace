@@ -9552,3 +9552,17 @@ Alternatives considered: moving the subsets to `:phase :full` (simplest, but a c
 crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
+
+## 2026-11-17: C's read and print deferred rows (branch `h-c-deferred`, from `next` `e4a7a30f3`)
+
+The host burst's task: C's deferred rows of the read (33) and print (44) cells, by cause. Fixed in repr/c's converter,
+printer, preprocessor, the token check's digest and the round trip's judge; recorded row by row from listed runs (the results
+files merged by id, levels 3-4 fresh under gcc's judge by hand); doc/C23-SURVEY.md, "As built: the read and print levels'
+deferred rows", lists each cause and file. Read 5221 / 221 / 33 to 5225 / 223 / 27 (embed-11.c's `:absolute-name` and
+c23-ucnid-2.c's `:undiagnosed` closed: by design now, as `:embed` and `:ucn-identifier`); print 4775 / 3 / 44 to 4798 / 3 / 22;
+C's completeness 96 (100 without by design). Two judge rules are new: the round trip's acceptance takes a test's own dg-error
+verdict for a rejection on its line in its words (`own-rejects?`), and the print's directory gets the original's named
+resources by symbolic links instead of the original's directory as an `--embed-dir` (which found angle-bracketed names too).
+Alternatives considered: reclassifying the gcc-only rejections by hand (rejected: the test's own verdict is the user's rule
+of 2026-11-07); balanced tokens for every unknown attribute outside `*recover*` (left: it would change cc-equal trees of the
+tree check; c23-attr-syntax-5.c stays deferred); raising the read budget for the limits-*.c files (rejected, as GTS-B did).

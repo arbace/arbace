@@ -311,6 +311,28 @@
         (not (contains? int-suffixes (str/replace (str/lower-case suffix) #"[ij]" ""))) (str "invalid suffix \"" suffix "\" on integer constant")
         :else nil))))
 
+(defn bad-digit-separators
+  "gcc's error for a pp-number's digit separators (C23 6.4.4.1, libcpp's cpp_classify_number), or nil: one right after 0x or
+  0b (\"digit separator after base indicator\"), two together (\"adjacent digit separators\"), one not between two digits of
+  its part, before a suffix, a point or an exponent (\"digit separator outside digit sequence\")."
+  [^String text]
+  (when (<= 0 (.indexOf text "'"))
+    (let [n (count text)
+          pre (if (re-find #"^0[xXbB]" text) 2 0)
+          hex (and (= pre 2) (#{\x \X} (.charAt text 1)))
+          ;; the exponent's start: p for hex, e for decimal (never inside a hex mantissa)
+          ex (or (first (keep-indexed (fn [i c] (when (and (>= i pre) (if hex (#{\p \P} c) (and (zero? pre) (#{\e \E} c)))) i)) text)) n)
+          digit? (fn [i] (and (< -1 i n)
+                              (let [c (.charAt text (int i))]
+                                (if (and hex (< i ex)) (or (Character/isDigit c) (<= (int \a) (int (Character/toLowerCase c)) (int \f)))
+                                    (Character/isDigit c)))))]
+      (cond
+        (and (pos? pre) (< pre n) (= \' (.charAt text pre))) "digit separator after base indicator"
+        (str/includes? text "''") "adjacent digit separators"
+        (some (fn [i] (and (= \' (.charAt text (int i))) (not (and (digit? (dec i)) (digit? (inc i)))))) (range n))
+        "digit separator outside digit sequence"
+        :else nil))))
+
 (defn- bad-lit
   "CS291 (a): a constant gcc's lexer rejects, as a form: its type, its spelling (printed back as written) and gcc's message,
   which the checker reports at its line (arbace.c.check's c/bad-lit)."
@@ -320,7 +342,7 @@
 (defn int-literal
   "An integer constant's form (§8.1): the value, or (lit T v) when its type is not the decimal default."
   [^String text]
-  (if-let [msg (bad-binary-constant text)] (bad-lit 'int text msg)
+  (if-let [msg (or (bad-binary-constant text) (bad-digit-separators text))] (bad-lit 'int text msg)
   (let [[digits suffix hex bin] (int-suffix text)
         _ (when (and (or hex bin) (<= (count digits) 2)) (refuse :literal (str "invalid suffix on integer constant " text)))
         imag (when (re-find #"[ij]" suffix) true)
@@ -367,6 +389,7 @@
   "A floating constant's form (§8.3)."
   [^String text]
   (if-let [msg (bad-binary-constant text)] (bad-lit 'int text msg)
+  (if-let [msg (bad-digit-separators text)] (bad-lit 'double text msg)
   ;; an integer imaginary constant (GNU's 2i: _Complex int), which cc's parser takes as a floating one: the integer's form
   (if (re-matches #"(0[xXbB][0-9a-fA-F']+|[0-9']+)[uUlL]*[ijIJ][uUlL]*" text)
     (int-literal text)
@@ -395,7 +418,7 @@
                       (and (not hex) (zero? (.compareTo (java.math.BigDecimal. (Double/toString d)) (java.math.BigDecimal. ^String body)))) (shortest-double d)
                       :else exact)))
         form (if t (list 'lit t v) v)]
-    (if imag (list 'imaginary form) form)))))
+    (if imag (list 'imaginary form) form))))))
 
 ;; Character constants and string literals: their code units
 
@@ -624,6 +647,11 @@
 
 (declare struct-form enum-form type-of-name defines-type?)
 
+(defn- gnu-typeof?
+  "Whether a typeof keyword is GNU's spelling (__typeof__, __typeof, __typeof_unqual__) at C23 or later, where typeof is C's."
+  [^String w]
+  (and (.startsWith w "__") (#{:c23 :gnu23 :c2y :gnu2y} (cx :std))))
+
 (defn- base-type
   "The base type of a specifier list's type specifiers (N2: their order and words normalized)."
   [specs at]
@@ -642,10 +670,14 @@
                    :TypeSpecifierStructOrUnion (struct-form (g other :StructOrUnionSpecifier))
                    :TypeSpecifierEnum (enum-form (g other :EnumSpecifier))
                    :TypeSpecifierTypeName (ident-tok (g other :Token))
+                   ;; C23's typeof (6.7.3.6) drops what is not the type (a function's _Noreturn); GNU's __typeof__ keeps it in
+                   ;; gcc: at C23 and later a GNU spelling is marked :c/gnu, which the print writes back (c23-typeof-1.c)
                    :TypeSpecifierTypeofExpr (let [w (tsrc (g other :Token))]
-                                              (L (if (re-find #"unqual" w) 'typeof-unqual 'typeof) (expr (g other :ExpressionList))))
+                                              (cond-> (L (if (re-find #"unqual" w) 'typeof-unqual 'typeof) (expr (g other :ExpressionList)))
+                                                (gnu-typeof? w) (addm {:c/gnu true})))
                    :TypeSpecifierTypeofType (let [w (tsrc (g other :Token))]
-                                              (list (if (re-find #"unqual" w) 'typeof-unqual-type 'typeof-type) (type-name-form (g other :TypeName))))
+                                              (cond-> (list (if (re-find #"unqual" w) 'typeof-unqual-type 'typeof-type) (type-name-form (g other :TypeName)))
+                                                (gnu-typeof? w) (addm {:c/gnu true})))
                    :TypeSpecifierAtomic (list 'atomic (type-name-form (g (g other :AtomicTypeSpecifier) :TypeName)))
                    :TypeSpecifierBitInt (L (if uns 'unsigned-bit-int 'bit-int) (expr (g other :ExpressionList)))
                    (sym (tsrc (g other :Token)))) ; _Float16 ... _Decimal128, __bf16
@@ -668,6 +700,8 @@
       (list 'complex (or scalar 'double))
       scalar)))
 
+(declare tokens-text)
+
 (defn specifiers
   "A declaration's specifiers (DeclarationSpecifiers or SpecifierQualifierList, or a vector of their
   nodes): {:type T :meta {...} :implicit-int bool :typedef bool}."
@@ -675,15 +709,21 @@
   (let [els (cond (vector? ds) ds
                   (= (nt ds) "DeclarationSpecifiers") (chain ds :DeclarationSpecifiers)
                   :else (chain ds :SpecifierQualifierList))
-        tspecs (ArrayList.) quals (ArrayList.) m (HashMap.) at (ArrayList.) tat (ArrayList.)]
+        tspecs (ArrayList.) quals (ArrayList.) m (HashMap.) at (ArrayList.) tat (ArrayList.)
+        ;; an attribute declaration of empty specifiers, `[[]];` (C23 6.7): its :c/decl-attrs [] (the print's [[]]), which a
+        ;; declaration with type specifiers does not keep (an empty [[]] before them is printed as none)
+        had-attr (volatile! false)]
     (doseq [e els]
       ;; CS140: an attribute after a type specifier stood after the type (it appertains to it, not to the declaration)
-      (let [add-attrs (fn [as] (.addAll at as) (when (pos? (.size tspecs)) (.addAll tat as)))]
+      (let [add-attrs (fn [as] (when as (vreset! had-attr true)) (.addAll at as) (when (pos? (.size tspecs)) (.addAll tat as)))]
       (case (cs e)
         :DeclarationSpecifiersStorage
         (let [sc (g e :StorageClassSpecifier)]
           (if (= (cs sc) :StorageClassSpecifierDeclspec)
-            (refuse :declspec "__declspec" sc)
+            ;; Microsoft's __declspec(...), which cc reads as a storage class: a declaration's attribute (__declspec "TEXT"),
+            ;; its balanced tokens as written, printed back where the declaration's attributes stand (gcc takes it on
+            ;; Windows targets alone: torture-compile's dll.c, dg-require-dll)
+            (add-attrs [(list '__declspec (tokens-text (g sc :Declspecs)))])
             (.put m (storage-keys (cs sc)) true)))
         (:DeclarationSpecifiersTypeSpec :SpecifierQualifierListTypeSpec) (.add tspecs (g e :TypeSpecifier))
         (:DeclarationSpecifiersTypeQual :SpecifierQualifierListTypeQual)
@@ -714,7 +754,7 @@
               (.put m :c/bad-specs (let [ws (mapv #(some-> (g % :Token) tsrc) tspecs)] (if (every? some? ws) ws true)))
               ;; CS237 (a): a written _Atomic qualifier, which (atomic T) alone cannot tell from the _Atomic(T) specifier
               (when (some #{'atomic} quals) (.put m :c/atomic-qual true)))]
-      (when (seq at) (.put m :c/decl-attrs (vec at)))
+      (when (or (seq at) (and @had-attr (zero? (.size tspecs)) (zero? (.size quals)))) (.put m :c/decl-attrs (vec at)))
       (when (seq tat) (.put m :c/type-attrs (vec tat)))
       {:type (wrap-quals (or b 'int) (vec quals))
        :implicit-int (nil? b)
@@ -1220,7 +1260,10 @@
                                m (if-let [a (attrs (g id :AttributeSpecifierList))]
                                    (cond-> (assoc m :c/after-attrs a) (trailing-pos (g id :Declarator)) (assoc :c/after-at (trailing-pos (g id :Declarator))))
                                    m)
-                               m (if-let [a (attrs (g idl :AttributeSpecifierList))] (assoc m :c/list-attrs a) m)
+                               ;; GNU's attributes before a declarator after a comma appertain to it alone: the declaration of
+                               ;; it alone (its form, printed alone) has them as its leading attributes, after the shared ones
+                               ;; (CS83's class: :c/list-attrs, printed at the head, read again as such, differed)
+                               m (if-let [a (attrs (g idl :AttributeSpecifierList))] (update m :c/decl-attrs (fnil into []) a) m)
                                init (if (= (cs id) :InitDeclaratorInit) (initializer (g id :Initializer)) ::none)]
                            (decl-form spec nt t m init (when-let [a (g id :Asm)] (tokens-text (node-tokens a))))))]
                (cond
@@ -1438,8 +1481,15 @@
       (not (iobj? x)) (list 'c/expr x)
       :else x)))
 
+(declare stmt-items*)
+
 (defn stmt-items
-  "A Statement's items (labels are items before what they label)."
+  "A Statement's items (labels are items before what they label), the directives placed before it (place-directives!: one
+  between its labels and it) first."
+  [st]
+  (let [ds (dirs-at st 0)] (if (seq ds) (into (vec ds) (stmt-items* st)) (stmt-items* st))))
+
+(defn stmt-items*
   [st]
   (let [t (group-of st)
         items
@@ -1531,7 +1581,16 @@
   (let [spec (specifiers ds)
         {type :type sm :meta implicit-int :implicit-int} spec
         [nt t as] (declarator type d)
-        _ (when-not (fn-type? t) (refuse :declarator "a function definition whose declarator is not a function's" d))
+        ;; 6.9.1p2: a function definition's declarator declares a function in its own form; `auto g { }`, `constexpr int v { }`,
+        ;; a function defined through a typedef: gcc's error before the body (an error test's line, its read an error, not a refusal)
+        _ (when-not (fn-type? t)
+            (let [b (first (filter #(instance? PTok %) (node-tokens cst)))
+                  ;; gcc's words for C23's underspecified declarations: the specifier's position
+                  sp (some (fn [w] (first (filter #(and (instance? PTok %) (= w (tsrc %))) (node-tokens ds)))) ["constexpr" "auto"])]
+              (throw (ex-info (if sp
+                                (str (tree/pos-string sp) ": '" (tsrc sp) "' requires an initialized data declaration")
+                                (str (if b (tree/pos-string b) "-") ": expected '=', ',', ';', 'asm' or '__attribute__' before '{' token"))
+                              {:c/error true}))))
         [_ ps r] t
         kr (:c/kr (meta ps))
         ps (if kr
@@ -1695,7 +1754,12 @@
                                :else (recur (inc i))))
                        ok (or (zero? idx)
                               (let [prev (last (filter has-main? (take idx items)))]
-                                (or (nil? prev) (< (max-end prev) off))))]
+                                (or (nil? prev) (< (max-end prev) off))))
+                       ;; an #embed whose output begins the next item (its prefix's or if_empty's tokens on the directive's
+                       ;; line: embed-17.c's `if_empty (int a = 42;)`) is that item's text: the item is printed, not the
+                       ;; directive too, which the print's read would expand again
+                       ok (and ok (not (and (= "embed" (verb-of d)) (:end d) (< idx (count items))
+                                            (has-main? (nth items idx)) (< (min-po (nth items idx)) (long (:end d))))))]
                    (when ok
                      (.put where (:off d) [owner idx])
                      true)))]
@@ -1725,9 +1789,19 @@
                   (if inside
                     (let [subs (nested inside)
                           sub (first (filter (fn [[o _]] (and (has-main? o) (<= (min-po o) off) (< off (max-end o)))) subs))]
-                      (when sub
-                        (place-in (first sub) (second sub) [d])))
-                    (place! owner items d)))))]
+                      (if sub
+                        (place-in (first sub) (second sub) [d])
+                        ;; between a statement's labels and what they label (c23-named-loops-1.c's `g: h: #pragma GCC unroll 2
+                        ;; while ...`): before the labeled statement's form (stmt-items), the labels' forms before it
+                        (when-let [s (label-inner inside off)] (place! s [s] d))))
+                    (place! owner items d)))))
+            (label-inner [it off]
+              (loop [x (if (= (nt it) "BlockItem") (g it :Statement) it)]
+                (when (and (instance? HashMap x) (= (cs x) :StatementLabeled))
+                  (let [inner (g (g x :LabeledStatement) :Statement)]
+                    (cond (nil? inner) nil
+                          (and (has-main? inner) (< off (min-po inner)) (<= (min-po x) off)) inner
+                          :else (recur inner))))))]
       (place-in :top tu-items active))
     ;; a conditional family's lines all in one list, else none of them
     (let [drop (HashSet.)]
@@ -1759,6 +1833,10 @@
         [sts _] (lex/tokens (lex/new-file "m" src))
         sts (vec (remove #(= (.-ch ^Tok %) \newline) sts))
         starts (long-array (map #(.-po ^Tok %) sts))
+        ;; an invocation on a directive's line (an #embed's if_empty, prefix or suffix: embed-1.c's XIFEMPTY3, defined inside the
+        ;; initializer, whose #define the print does not keep) is printed expanded
+        dls (let [m (java.util.TreeMap.)] (doseq [d (directive-lines)] (.put m (Long/valueOf (long (:off d))) (Long/valueOf (long (or (:end d) n))))) m)
+        on-directive? (fn [^long po] (when-let [e (.floorEntry ^java.util.TreeMap dls (Long/valueOf po))] (< po (long (.getValue e)))))
         groups (HashMap.)
         ts (vec all-toks)
         cnt (count ts)]
@@ -1775,7 +1853,7 @@
                                 (subvec ts i j))))
             (let [q (if (< j cnt) (.-po ^PTok (ts j)) n)
                   si (java.util.Arrays/binarySearch starts po)]
-              (when (and (>= si 0) (= (.-ch ^Tok (sts si)) :IDENTIFIER))
+              (when (and (>= si 0) (= (.-ch ^Tok (sts si)) :IDENTIFIER) (not (on-directive? po)))
                 (let [nxt (inc si)
                       end (if (and (< nxt (count sts)) (= (.-ch ^Tok (sts nxt)) \() (< (.-po ^Tok (sts nxt)) q))
                             (loop [m nxt depth 0]
@@ -1786,8 +1864,21 @@
                                 :else (recur (inc m) depth)))
                             si)]
                   (when (and end (or (= end si) (< (.-po ^Tok (sts end)) q)))
-                    (.put groups (.-seq t) {:max (.-seq ^PTok (ts (dec j)))
-                                            :text (line-text (subvec sts si (inc end)))}))))))
+                    ;; the source's tokens after the invocation and before the next token of the tree were taken by an
+                    ;; invocation its expansion began (c23-digit-separators-1.c: `bcat (0'\u00c0'))`, bcat's `c0 (` closed by the
+                    ;; second `)`): the text runs to them when they are closing parentheses alone (an #embed's if_empty around an
+                    ;; invocation, embed-1.c's `XIFEMPTY3) prefix (...)`, is not one)
+                    (let [end2 (loop [m (inc end)] (if (and (< m (count sts)) (< (.-po ^Tok (sts m)) q)) (recur (inc m)) (dec m)))
+                          ;; closing parentheses alone, or one balanced parenthesized list (64_macro_nesting.c's `CAT(A,B)(x)`,
+                          ;; AB's arguments)
+                          between (map #(.-ch ^Tok (sts %)) (range (inc end) (inc end2)))
+                          balanced? (and (= \( (first between))
+                                         (= 0 (reduce (fn [d c] (cond (neg? d) (reduced -1) (= c \() (inc d) (= c \)) (dec d) :else d))
+                                                      0 between))
+                                         (not-any? #{\#} between))
+                          end (if (and (> end2 end) (or (every? #{\)} between) balanced?)) end2 end)]
+                      (.put groups (.-seq t) {:max (.-seq ^PTok (ts (dec j)))
+                                              :text (line-text (subvec sts si (inc end)))})))))))
           (recur j))))
     groups))
 
@@ -2074,6 +2165,8 @@
                   (doseq [[off df] (placed-at :top (count main-eds))] (.add out df) (.add items [off df]))
                   {:forms (vec out) :units (into {} units) :items (vec items)})))))))
     (catch arbace.lang.ExceptionInfo e
-      (if-let [c (:c/refuse (ex-data e))]
-        {:refused c :message (ex-message e)}
-        (throw e)))))
+      (cond
+        (:c/refuse (ex-data e)) {:refused (:c/refuse (ex-data e)) :message (ex-message e)}
+        ;; a constraint the parse does not check, the read's error as the parser's (an error test's)
+        (:c/error (ex-data e)) {:error [(ex-message e)]}
+        :else (throw e)))))
