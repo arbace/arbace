@@ -94,7 +94,7 @@
   (loop [t t n 0]
     (if (m/array? t) (recur (m/elemtype t) (inc n)) [t n])))
 
-(declare type-ann-items)
+(declare type-ann-items type-annotated?)
 
 (def ^:dynamic *skip-anns*
   "Binary names of the TYPE_USE annotations in a declaration's modifiers: javac also puts them
@@ -147,7 +147,9 @@
          (if (and (m/class-type? outer) (m/allparams? outer)
                   (not (m/static? c)) (not (m/local-class? c))
                   (not (and (identical? (get (:scope env) (m/simple-name c)) c)
-                            (m/own-type? outer))))
+                            (m/own-type? outer)
+                            ;; an annotated outer is written (round 52, n-java-conv)
+                            (not (type-annotated? outer)))))
            (list '.. (type-form* env outer false)
                  (annotate (if args
                              (apply list (symbol (m/simple-name c)) (map #(type-form* env % false) args))
@@ -160,7 +162,8 @@
                     (m/allparams? (m/enclosing-type t))
                     (not (m/static? (m/tsym t))) (not (m/local-class? (m/tsym t)))
                     (not (and (identical? (get (:scope env) (m/simple-name (m/tsym t))) (m/tsym t))
-                              (m/own-type? (m/enclosing-type t)))))
+                              (m/own-type? (m/enclosing-type t))
+                              (not (type-annotated? (m/enclosing-type t))))))
        anns))))
 
 (defn type-form
@@ -190,6 +193,13 @@
   annotations where it has some (the compiler erases it)."
   [env t]
   (if (type-annotated? t) (type-form env t) (erased-form env t)))
+
+(defn- form-annotated?
+  "Does type form `x` carry an annotation item anywhere?"
+  [x]
+  (boolean
+   (and x (or (some #(and (vector? %) (= :ann (first %))) (f/items x))
+              (and (sequential? x) (some form-annotated? x))))))
 
 (defn- generic? [t]
   (cond
@@ -246,20 +256,56 @@
 
 (declare compound-item)
 
+(defn- nested-annotation
+  "Annotation `c` as a nested annotation value, (A {:k v}), as attr-value writes one."
+  [env c]
+  (list (class-ref env (m/compound-class c))
+        (into {} (for [[n v] (m/compound-values c)] [(keyword n) (attr-value env v nil)]))))
+
+(defn- compound-items
+  "Metadata items for annotations `cs` (compounds) on one element, leaving out SOURCE ones. Two or
+  more of one repeatable class are its container, at the first one's place, their values in order,
+  as javac's Annotate makes it for the class file and reflection: `@A(1) @A(2)` is
+  `^{As [(A {:value 1}) (A {:value 2})]}`, since two `^{A ..}` maps read as one (round 52,
+  n-java-conv; SPEC §4.4)."
+  [env cs]
+  (let [k #(m/binary-name (m/compound-class %))
+        groups (group-by k cs)]
+    (if (every? #(= 1 (count %)) (vals groups))
+      (keep #(compound-item env %) cs)
+      (first
+       (reduce (fn [[out done] c]
+                 (let [n (k c)
+                       g (get groups n)]
+                   (cond
+                     (contains? done n) [out done]
+                     (= 1 (count g)) [(conj out (compound-item env c)) done]
+                     :else
+                     (let [cc (m/repeatable-container (m/compound-class c))]
+                       (cond
+                         (nil? cc) [(into out (map #(compound-item env %) g)) (conj done n)]
+                         (= "SOURCE" (m/class-retention cc)) [out (conj done n)]
+                         :else (do (note! :form/annotation-container)
+                                   [(conj out [:ann (class-ref env cc) (mapv #(nested-annotation env %) g)])
+                                    (conj done n)]))))))
+               [[] #{}] cs)))))
+
 (defn annotation-items
-  "Metadata items for the annotations `anns` (ANNOTATION trees), leaving out SOURCE ones."
+  "Metadata items for the annotations `anns` (ANNOTATION trees), leaving out SOURCE ones; repeated
+  ones in their container (compound-items)."
   [env anns]
-  (keep (fn [a] (some->> (attr/attribute a) (compound-item env))) anns))
+  (remove nil? (compound-items env (keep attr/attribute anns))))
 
 (defn type-ann-items
   "Metadata items for the type annotations of type `t`; at a declaration's element type
-  (`elem?`) without those of the declaration's modifiers (*skip-anns*)."
+  (`elem?`) without those of the declaration's modifiers (*skip-anns*); repeated ones in their
+  container (compound-items)."
   [env t elem?]
   (when t
-    (keep (fn [c]
-            (when-not (and elem? (contains? *skip-anns* (m/binary-name (m/compound-class c))))
-              (compound-item env c)))
-          (m/type-anns t))))
+    (remove nil?
+            (compound-items env
+                            (remove (fn [c] (and elem? (contains? *skip-anns* (m/binary-name (m/compound-class c)))))
+                                    (m/type-anns t))))))
 
 (defn- compound-item
   "The metadata item for annotation `c`, nil for a SOURCE one."
@@ -2998,8 +3044,18 @@
         env (if (= recv 'this) env (assoc-in env [:anon-this c] recv))
         [pv env'] (if compact? [[] env] (param-forms env md omit?))
         ;; a receiver parameter's annotations go on the receiver symbol (§4.6)
+        ;; and its declared type when annotations sit inside it, C<@A T>, or when it is an inner
+        ;; class constructor's, the enclosing class's (round 52, n-java-conv): ^{:tag (C ^{A 0} T)}
+        ;; this, the type's own annotations of the modifiers left out as a parameter's
         recv-sym (if-let [rp (tr/f md :recvparam)]
-                   (apply m+ recv (annotation-items env (tr/f (tr/f rp :mods) :annotations)))
+                   (let [anns (annotation-items env (tr/f (tr/f rp :mods) :annotations))
+                         rt (attr/type-of (tr/f rp :vartype) :names/type-tree)
+                         tf (when (or ctor? (type-annotated? rt))
+                              (binding [*skip-anns* (mods-type-anns (tr/f rp :mods))] (type-form env rt)))]
+                     (apply m+ recv (concat anns
+                                            (when (or (form-annotated? tf) (and ctor? tf (seq anns)))
+                                              (note! :form/receiver-type)
+                                              [[:tag tf]]))))
                    recv)
         pv (if static? pv (into [recv-sym] pv))
         rt (m/mret m)

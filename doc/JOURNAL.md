@@ -10473,3 +10473,23 @@ arbace.classes.interp, removed after), and 141 passing tests of the reflective, 
 fixed: repr/java drops a receiver parameter's type annotations (t04740 t04741) and writes repeated annotations as `^` maps the reader
 merges into one (t04727). No row moves tonight (java-check runs the embedded analyzer and runtime); keys: `gate_key` and the runtime
 key move (arbace/lang, arbace/classes). doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer".
+
+## 2026-11-17: n-java-conv, two converter bugs of repr/java (round 52, overnight)
+
+Branch n-java-conv from mac/n-review-c 6ff92621f, the two bugs n-java-defer found (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"As built: n-java-defer" on mac/n-java-defer). (1) Repeated annotations were written as two `^{Ann ...}` maps, merged into
+one by the reader (t04727): now written as their container, `^{AnnCont [(Ann {:value 20}) (Ann {:value 21})]}`, as javac's
+Annotate makes it for the class file and reflection (taken overnight (round 52), recommended over a vector of annotations
+under the containee's key, which would need Annotate's wrapping in the analyzer and reads like an array element; the
+container needs nothing new downstream and javac compiles the printed container to the same class files). The container is
+the annotation class's @Repeatable value (arbace.repr.java.model's repeatable-container and class-retention, natively in
+nattr and through two new javac hooks). (2) A receiver parameter's type annotations inside its type were dropped (t04740,
+t04741): the receiver symbol now carries its declared type as its tag when annotated inside (and for an annotated inner
+class constructor's receiver), the analyzer gives them METHOD_RECEIVER paths, the printer prints the receiver (a
+constructor's as Outer.this); also type-form* no longer drops an annotated generic outer of the class's own inner type.
+SPEC §4.4 and §4.6 amended. Proof, light (under 0.9 GB a process): the three tests read natively and by javac's front, equal;
+printed and read again, equal; the class files of the originals and of the printed files equal byte for byte; at interp
+(the gate's executable, the checkout on ARBACE_PATH) t04727 passes, t04740/t04741 reach the annotations and stop at jrt's
+missing AnnotationInvocationHandler constructor (another row); 18 of 18 annotation tests that passed still pass. The reader's
+hash moves (already stale on the base); the day rewrites the provenance (bin/jrt-convert update, bin/javac-vendor convert,
+--java-fixtures update, --forms update).
