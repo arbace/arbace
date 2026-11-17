@@ -1958,3 +1958,41 @@ no source in the corpora to port), the local label (1 + 1), a fixup (1).
   the round trip of the 24 + 8 error tests; the earlier musl, arm64 and lexer samples unchanged.
 
 After: x86-64 read 25,253 pass / 1 design / 1 deferred, print 194,746 / 1,187 / 581; arm64 read 6,654 / 0 / 2, print 12,664 / 5 / 2.
+
+## As built: the asm streamer's lines (2026-11-17; branch `h-asm-directive`, from `next` `498d7296f`)
+
+The print level's `:directive` (47 texts after AXS97 (a)), `:local-label` (1 text, 1 cross) and `:fixup` (1) rows, ported from
+llvm-project 23.1.5's MCAsmStreamer.cpp (read from the pinned tarball; llvm-mc not run):
+
+- **The streamer's lines** (`arbace.asm.amd64.print/stream-statement`): a statement that is no instruction gives the lines llvm-mc's
+  asm streamer writes for it, threaded through the file as its state (the section, the mode, the temporaries): the initial `.text`
+  (initSections), labels (emitLabel), assignments `x = v` (emitAssignment; `=`, `.set`, `.equ`, the value folded when absolute,
+  parseExpression, a register `%reg`, X86MCExpr), the symbol attributes (`.globl`, `.weak`, `.hidden`, ...; `.type`, `.size` on ELF),
+  the data directives (`.byte`/`.short`/`.long`/`.quad` and their aliases, `.word` two bytes, a constant by emitIntValue, else the
+  expression; 32-bit Mach-O's `.quad` as two `.long`), `.ascii`/`.asciz`/`.string` (emitBytes, PrintQuotedString: a single byte as
+  `.byte`, the terminator its own `.byte 0`, as parseDirectiveAscii emits it), `.zero` (emitFill), the alignments (parseDirectiveAlign:
+  `.p2align` with the fill in hex outside code sections, `.balign`, `.align` in bytes but on Mach-O), `.text`/`.data`/`.bss` on ELF and
+  COFF (printSwitchToSection; another section stays unported), `.code16`/`.code16gcc`/`.code32`/`.code64` (X86WinCOFFAsmTargetStreamer,
+  only on a change of mode), the `.cfi_*` family (EmitRegisterName: a DWARF number or a register through X86RegisterInfo.td's 64-bit
+  DwarfRegNum, `%r16`-`%r31` from 130-145), `.reloc` (emitRelocDirective). A directive not ported gives `:unported`, its texts still
+  `:directive`.
+- **The temporaries** (`resolve-temps`): `.` is a temporary label emitted before its statement (createTempSymbol), the directional
+  labels `Nf`/`Nb`/`N:` the instances MCContext names (createNamedTempSymbol), one count `.Ltmp0, .Ltmp1, ...` (`Ltmp` on Mach-O and
+  32-bit COFF: InternalSymbolPrefix), so `jge 1f` prints `jge Ltmp0` and the cross judge reads back the same symbol.
+- **`.if`/`.elseif`** are followed when their value is known (an absolute value, or registers compared, `.if var == %rcx`;
+  register-assignment's two blocks), an unknown one assembled as before.
+- **Fixups** (`fixup-lines`): -show-encoding's `fixup A - offset: O, value: V, kind: K` for the generic kinds (FK_Data_N, FK_PCRel_N),
+  the value with its ImmOffset; the target kinds (reloc_*) left `:fixup`.
+- **The judge.** The streamer's lines are entries of their own (`:directive true`, only under `*streamer*`, the print level's and
+  control-print's): an instruction's text is held to the instructions alone as before; a text of a line that is no instruction's
+  (text-kind `:directive`, or a first word no mnemonic) to every printed line, FileCheck's way, and unmet beside a line the streamer
+  wrote is `:mismatch` (else `:directive`); a fixup's text to the fixup lines.
+
+Proof: encode-check `--only` over 140 files (every file with a directive-like CHECK text, a directional label or a `.if`): only the 12
+target files' rows move, every other row as recorded; the 20 control files and the 2 new controls
+(`_control-print/cfi-reg-vs-x86-directives`, `reloc-elf-64-vs-elf-32`), every control failing as it must; 4 mutants by hand (a `.cfi_offset`
+register, a `.byte` value, a `.elseif` register, a fixup's value) each `:mismatch`. arm64's printer is its own (unchanged).
+
+After: x86-64 print 194,746 pass / 1,187 design / 581 deferred to 194,796 / 1,187 / 531 (CHECK texts 107,588 to 107,637 met,
+`:directive`, `:local-label` and `:fixup` empty; the cross judge 86,350 to 86,351); arm64 unchanged. Left deferred in the cell: the 406
+`:object-unjudged` (the Mac's task 337), the LFI rewriter's 61, the 63 unread texts and the cross judge's classes.
