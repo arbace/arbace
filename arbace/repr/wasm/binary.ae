@@ -926,3 +926,108 @@
           (write-section w (section-id k) (fn [s] (section-content s k its flags))))
         (doseq [c (after k)] (write-custom c))))
     (.toByteArray (out w))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the extended name section's own checks (queue 326; the proposal's handler_name.ml): its subsections 0-13 decoded
+;; (malformed: their order and sizes, the name maps' indices strictly increasing) and their indices checked against the
+;; module (invalid, a custom check). The forms keep the section as the decoder does (decode-names): this only judges it.
+
+(def ^:private name-subsections
+  ;; id -> [kind of map, the outer index's kind, the inner's (an indirect map)]
+  {0 [:module] 1 [:map "function"] 2 [:indirect "function" "local" "local name map"] 3 [:indirect "function" "label" "label name map"]
+   4 [:map "type"] 5 [:map "table"] 6 [:map "memory"] 7 [:map "global"] 8 [:map "elem"] 9 [:map "data"]
+   10 [:indirect "type" "field" "field name map"] 11 [:map "tag"] 12 [:indirect "type" "param" "param name map"]
+   13 [:indirect "tag" "param" "tag param name map"]})
+
+(defn- name-malformed [msg] (throw (ex-info msg {:wasm/malformed msg})))
+
+(defn- name-map
+  "A name map at r: [[INDEX NAME] ...], its indices strictly increasing ('duplicate KIND name', 'KIND names out of order')."
+  [r ^String what]
+  (let [m (vec-of r (fn [r] [(u32 r) (wname r)]))]
+    (doseq [[[a] [b]] (partition 2 1 m)]
+      (cond (= a b) (name-malformed (str "custom @name: duplicate " what " name"))
+            (> (long a) (long b)) (name-malformed (str "custom @name: " what " names out of order"))))
+    m))
+
+(defn- name-subsections-of
+  "The subsections of a name section's payload: [[ID VALUE] ...], or throws {:wasm/malformed MSG}."
+  [^bytes payload]
+  (let [r (reader payload)]
+    (loop [out [] last -1]
+      (if (neg? (peek8 r))
+        out
+        (let [id (u8 r)]
+          (when (or (<= id last) (not (name-subsections id))) (name-malformed "invalid name subsection id"))
+          (let [n (try (u32 r) (catch arbace.lang.ExceptionInfo _ (name-malformed "unexpected end of name section")))
+                e (+ (pos r) n) saved (end r)]
+            (when (> e saved) (name-malformed "unexpected end of name section"))
+            (set-end! r e)
+            (let [[k outer inner inner-what] (name-subsections id)
+                  v (try
+                      (case k
+                        :module (wname r)
+                        :map (name-map r outer)
+                        :indirect (let [m (vec-of r (fn [r] [(u32 r) (name-map r inner)]))]
+                                    (doseq [[[a] [b]] (partition 2 1 m)]
+                                      (cond (= a b) (name-malformed (str "custom @name: duplicate " inner-what))
+                                            (> (long a) (long b)) (name-malformed (str "custom @name: " inner-what "s out of order"))))
+                                    m))
+                      (catch arbace.lang.ExceptionInfo x
+                        (let [m (:wasm/malformed (ex-data x))]
+                          (throw (if (and m (or (.startsWith ^String m "unexpected end") (= m "length out of bounds"))) (ex-info "unexpected end of name subsection" {:wasm/malformed "unexpected end of name subsection"}) x)))))]
+              (when-not (= (pos r) e) (name-malformed "name subsection size mismatch"))
+              (set-end! r saved)
+              (recur (conj out [id v]) id))))))))
+
+(defn- labels-of
+  "The labels of a function's body (its structured instructions, in order)."
+  ^long [body]
+  (let [n (atom 0)]
+    (letfn [(walk [x] (cond (seq? x) (do (when ('#{block loop if try_table try} (first x)) (swap! n inc)) (doseq [y (rest x)] (walk y)))
+                            (vector? x) (doseq [y x] (walk y))))]
+      (doseq [i body] (walk i)))
+    @n))
+
+(defn check-names
+  "A name section's payload against its module's items (the extended name section's checks, queue 326): throws
+  {:wasm/malformed MSG} when it does not decode; else nil, or the first index that names nothing (the custom check's
+  'custom @name: ...' message)."
+  [^bytes payload items]
+  (let [subs (name-subsections-of payload)
+        imports (filter #(= 'wasm/import (kind-of %)) items)
+        imp (fn [k] (filter #(= k (first (nth % 3))) imports))
+        defs (fn [k] (filter #(= k (kind-of %)) items))
+        types (vec (mapcat (fn [t] (if (= 'wasm/rec (kind-of t)) (nth t 2) [(nth t 2)])) (defs 'wasm/type)))
+        comp (fn [t] (if (and (seq? t) (= 'sub (first t))) (last t) t))
+        ftype (fn [x] (let [t (comp (get types x))] (when (and (seq? t) (= 'func (first t))) t)))
+        funcs (vec (concat (map (fn [i] {:type (:type (nth (nth i 3) 2)) :locals 0 :labels 0}) (imp 'func))
+                           (map (fn [f] {:type (:type (nth f 2)) :locals (count (:locals (nth f 2))) :labels (labels-of (drop 3 f))}) (defs 'wasm/func))))
+        tags (vec (concat (map #(:type (nth (nth % 3) 2)) (imp 'tag)) (map #(:type (nth % 2)) (defs 'wasm/tag))))
+        counts {"function" (count funcs) "type" (count types) "table" (+ (count (imp 'table)) (count (defs 'wasm/table)))
+                "memory" (+ (count (imp 'memory)) (count (defs 'wasm/memory))) "global" (+ (count (imp 'global)) (count (defs 'wasm/global)))
+                "elem" (count (defs 'wasm/elem)) "data" (count (defs 'wasm/data)) "tag" (count tags)}
+        inner-count (fn [outer inner x]
+                      (case [outer inner]
+                        ["function" "local"] (let [f (funcs x)] (+ (count (second (ftype (:type f)))) (long (:locals f))))
+                        ["function" "label"] (:labels (funcs x))
+                        ["type" "field"] (let [t (comp (types x))] (when (and (seq? t) (= 'struct (first t))) (count (second t))))
+                        ["type" "param"] (when-let [t (ftype x)] (count (second t)))
+                        ["tag" "param"] (count (second (ftype (tags x))))))
+        bad (fn [msg] (reduced msg))]
+    (reduce (fn [_ [id v]]
+              (let [[k outer inner] (name-subsections id)]
+                (case k
+                  :module nil
+                  :map (when-let [m (some (fn [[x]] (when (>= (long x) (long (counts outer))) (str "custom @name: invalid " outer " index " x))) v)]
+                         (bad m))
+                  :indirect (when-let [m (some (fn [[x m]]
+                                                 (if (>= (long x) (long (counts outer)))
+                                                   (str "custom @name: invalid " outer " index " x)
+                                                   (let [n (inner-count outer inner x)]
+                                                     (if (nil? n)
+                                                       (str "custom @name: " (if (= inner "field") "non-struct" "non-function") " type " x)
+                                                       (some (fn [[y]] (when (>= (long y) (long n)) (str "custom @name: invalid " inner " index " y " for " outer " " x))) m)))))
+                                               v)]
+                              (bad m)))))
+            nil subs)))

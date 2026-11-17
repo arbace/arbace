@@ -11,6 +11,7 @@
   label\", \"import after function\", ...)."
   (:require [arbace.repr.wasm.lex :as lex]
             [arbace.repr.wasm.ops :as ops]
+            [arbace.repr.wasm.binary :as bin]
             [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
@@ -967,54 +968,91 @@
       (or (lex/kw? z "if") (lex/kw? z "br_if") (lex/list-of? z "if") (lex/list-of? z "br_if")) nil
       :else (when *custom-invalid* (swap! *custom-invalid* #(or % "@metadata.code.branch_hint annotation: invalid target"))))))
 
-(defn- strip-deep
-  "x without annotations; one inside it is misplaced (`msg` names the error for a @name, a @custom is always misplaced; a
-  branch hint is a function's, checked and dropped, when `func?`)."
-  ([x name-msg] (strip-deep x name-msg false))
-  ([x name-msg func?]
-   (if (= :list (:t x))
-     (do (when func? (check-hints (:xs x)))
-         (assoc x :xs (vec (for [y (:xs x)
-                                 :when (not (and func? (hint? y)))]
-                             (if (annot? y)
-                               (annot-error (cond (= "custom" (:name y)) "misplaced @custom annotation"
-                                                  (hint? y) "@metadata.code.branch_hint annotation: not in a function"
-                                                  :else name-msg) y)
-                               (strip-deep y name-msg func?))))))
-     x)))
+(def ^:private field-kinds
+  {"func" "function" "table" "table" "memory" "memory" "global" "global" "tag" "tag" "elem" "elem" "data" "data" "type" "type"})
+
+(def ^:private desc-kinds {"func" "function" "table" "table" "memory" "memory" "global" "global" "tag" "tag"})
+
+(def ^:private label-kws #{"block" "loop" "if" "try_table"})
+
+(defn- name-start
+  "The index of xs where a binding's @name goes: after its keyword at k and its identifier, when it has one."
+  [xs ^long k]
+  (let [j (first (keep-indexed (fn [i y] (when (and (> (long i) k) (not (annot? y))) i)) xs))]
+    (if (and j (= :id (:t (nth xs j)))) (inc (long j)) (inc k))))
+
+(defn- binding-kind
+  "The kind of binding a list headed h is in its context ctx (its @name's subsection, the extended name section's), or nil."
+  [ctx h]
+  (case ctx
+    :field (field-kinds h)
+    :rec (when (= h "type") "type")
+    :desc (desc-kinds h)
+    :func-decl (when (#{"param" "local"} h) "local")
+    :type-decl (when (= h "param") "param")
+    :tag-decl (when (= h "param") "tag param")
+    :struct (when (= h "field") "field")
+    :instr (when (label-kws h) "label")
+    nil))
+
+(defn- child-ctx
+  "The context of a list's children (its head h, in its own context ctx)."
+  [ctx h ch]
+  (cond
+    (= ctx :plain) :plain
+    (and (#{:field :desc} ctx) (= h "func")) (case ch ("param" "local") :func-decl ("type" "export" "import" "result") :plain :instr)
+    (and (#{:field :desc} ctx) (= h "tag")) (if (= ch "param") :tag-decl :plain)
+    (and (= ctx :field) (= h "import")) :desc
+    (and (= ctx :field) (= h "rec")) :rec
+    (or (and (= ctx :field) (= h "type")) (= ctx :rec)) :comptype
+    (= ctx :comptype) (case h "func" (if (= ch "param") :type-decl :plain) "struct" (if (= ch "field") :struct :plain) "sub" :comptype :plain)
+    (#{:func-decl :type-decl :tag-decl :struct} ctx) :plain
+    (#{:field :desc} ctx) (if (#{"export" "import" "mut" "ref" "type" "result" "param"} ch) :plain :instr)
+    :else :instr))
+
+(defn- walk-names
+  "x (a list in its context ctx) without its annotations, each checked (the extended name section's @name annotations,
+  queue 326: one at a binding's place, after its keyword and identifier; elsewhere misplaced; a branch hint a function's):
+  [x' NAME-or-nil], NAME x's own binding's name. The names but the module's and the functions' are not kept in the forms."
+  [x ctx func?]
+  (let [xs (:xs x)
+        h (lex/head x)
+        kind (binding-kind ctx h)
+        func? (or func? (and (= ctx :field) (= h "func")))
+        starts (cond-> {}
+                 kind (assoc (name-start xs 0) kind)
+                 ;; a flat block, loop, if or try_table's label
+                 func? (into (keep-indexed (fn [i y] (when (and (= :kw (:t y)) (label-kws (:s y))) [(name-start xs i) "label"])) xs)))
+        _ (when func? (check-hints xs))
+        out (java.util.ArrayList.)
+        own (atom nil)]
+    (loop [i 0 group nil]
+      (when (< i (count xs))
+        (let [y (nth xs i)]
+          (cond
+            (and (annot? y) (= "name" (:name y)))
+            (let [g (or group (when-let [k (starts i)] [k i 0]))
+                  nm (name-of-annot y)]
+              (when (and (= ctx :instr) (= h "param")) (annot-error "@name annotation: param names not allowed here" y))
+              (when-not g (annot-error "misplaced @name annotation" y))
+              (when (pos? (long (nth g 2))) (annot-error (str "@name annotation: multiple " (nth g 0) " names") y))
+              (when (and kind (= (nth g 1) (name-start xs 0))) (reset! own nm))
+              (recur (inc i) (update g 2 inc)))
+            (hint? y) (do (when-not func? (annot-error "@metadata.code.branch_hint annotation: not in a function" y)) (recur (inc i) nil))
+            (annot? y) (annot-error "misplaced @custom annotation" y)
+            (= :list (:t y)) (do (.add out (first (walk-names y (child-ctx ctx h (lex/head y)) func?))) (recur (inc i) nil))
+            :else (do (.add out y) (recur (inc i) nil))))))
+    ;; a named parameter, local or field declares one
+    (when (and @own (#{"local" "param" "tag param" "field"} kind))
+      (when (> (count (remove #(= :id (:t %)) (rest out))) 1)
+        (annot-error (str "@name annotation: multiple " kind "s declared") (first xs))))
+    [(assoc x :xs (vec out)) @own]))
 
 (defn- strip-field
-  "A module field without its annotations: [field name-or-nil] (a func's or a tag's @name, handler_name.ml's locate_func and
-  locate_tag; a @custom inside a field is misplaced)."
+  "A module field without its annotations: [field name-or-nil] (a func's @name, handler_name.ml's locate_func)."
   [f]
-  (let [kind (lex/head f)
-        xs (:xs f)
-        out (java.util.ArrayList.)
-        nm (atom nil)]
-    (when (= kind "func") (check-hints xs))
-    (doseq [[i y] (map-indexed vector xs)]
-      (if (annot? y)
-        (cond
-          (and (hint? y) (= kind "func")) nil
-          (hint? y) (annot-error "@metadata.code.branch_hint annotation: not in a function" y)
-          (= "custom" (:name y))
-          (annot-error "misplaced @custom annotation" y)
-          :else
-          (let [s (name-of-annot y)
-                before (subvec xs (min 1 i) i)]
-            (case kind
-              "func" (cond
-                       ;; before the function's type use: its name
-                       (every? #(or (#{:id :kw} (:t %)) (lex/list-of? % "export")) before)
-                       (do (when @nm (annot-error "@name annotation: multiple function names" y)) (reset! nm s))
-                       (every? #(some (fn [k] (lex/list-of? % k)) ["type" "param" "result" "local" "export"]) before)
-                       (annot-error "@name annotation: local names not yet supported" y)
-                       :else (annot-error "@name annotation: misplaced annotation" y))
-              "tag" (do (when @nm (annot-error "@name annotation: multiple tag names" y)) (reset! nm s))
-              ("type" "rec") (annot-error "@name annotation: type and field names not yet supported" y)
-              (annot-error "misplaced @name annotation" y))))
-        (.add out (strip-deep y (if (= kind "func") "@name annotation: misplaced annotation" "misplaced @name annotation") (= kind "func")))))
-    [(assoc f :xs (vec out)) @nm]))
+  (let [[g nm] (walk-names f :field false)]
+    [g (when (= "func" (lex/head f)) nm)]))
 
 (defn- annotations
   "The module's fields without their annotations, and what they say: {:fields :customs [[name place bytes]...] :module NAME
@@ -1078,8 +1116,19 @@
   "The items of a `(module $id? field*)` S-expression's fields (their @custom and @name annotations included)."
   [fields]
   (let [an (annotations fields)
-        items (module-items* (:fields an))]
-    (with-annotations items an)))
+        items (with-annotations (module-items* (:fields an)) an)]
+    (if-let [cs (seq (filter #(= "name" (first %)) (:customs an)))]
+      ;; a @custom "name" (queue 326, the extended name section's checks): decoded by the reference's name handler, so
+      ;; malformed when it does not decode, its indices a custom check; the forms the binary decoder's of its bytes
+      (do (doseq [[_ _ bs] cs]
+            (when-let [m (bin/check-names bs items)]
+              (when *custom-invalid* (swap! *custom-invalid* #(or % m)))))
+          ;; the names where the text's @name annotations put them (after the last section), so that they print and read back
+          (let [d (:items (bin/decode (bin/encode items nil)))
+                present (set (concat (keep item-section d) (when (some #(= 'wasm/func (first %)) d) [:func])))
+                at (last (filter present section-order))]
+            (mapv #(if (= 'wasm/names (first %)) (list 'wasm/names (assoc (second %) :after at)) %) d)))
+      items)))
 
 (defn- module-items*
   "The items of a module's fields (no annotation among them)."

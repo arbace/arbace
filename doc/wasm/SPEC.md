@@ -158,6 +158,15 @@ handlers): a custom section, `(after S)` kept as `{:after S}`, `(before S)` and 
 (or of all); the module's name (an annotation before every field) and a defined function's (before its type use) into `wasm/names`
 and the function's `:name`. The canonical printer writes them back as such annotations.
 
+Since queue 326 the extended name section's: a `@name` is read at every binding's place (after its keyword and identifier: an import,
+a function, a parameter or local, a label (`block`, `loop`, `if`, `try_table`, flat or folded), a type, a field, a table, a memory, a
+global, an element or data segment, a tag and its parameters; one at most, a parameter, local or field naming one declaration; in a
+block type or `call_indirect`, "param names not allowed here"; elsewhere "misplaced @name annotation"), the names but the module's
+and the functions' checked and not kept in the forms. A `@custom "name"` is the reference's name section: its subsections 0-13
+decoded (`arbace.repr.wasm.binary/check-names`: malformed when they do not, their indices a custom check, "custom @name: ..."),
+its forms the binary decoder's of its bytes (the names after the last section). The branch hints `(@metadata.code.branch_hint
+"BYTES")` are checked (one an instruction, on an `if` or a `br_if`, inside a function) and not kept.
+
 ## 9. Validation (WA3)
 
 `arbace.wasm.valid/check` (`arbace/wasm/valid.ae`) validates a module's items (§2) by the specification's typing rules, Wasm 3.0's,
