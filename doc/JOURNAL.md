@@ -10494,3 +10494,22 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `:no-reference-own` until HF10-P64 (HF10-P65 (a)). HF10-P63 (a), P65 (a) taken overnight (round 52). doc/haskell/FRONTEND-SURVEY.md,
   "As built: HF10-P63 (a)". Alternatives considered: a second preprocessor (none needed); own-fallback.txt for the 29, or refusing
   programs whose reference is `:no-build` (P65 (b), (c)).
+
+## 2026-11-18: LLVM IR's deferred rows and judge, the pack's stale own verdicts (branch `n-llvm-defer`, from next `42bf8614b`; round 52)
+
+- Audit (test/reap/matrix.edn, test/llvm/divergences-*.edn, test/crops/independence.edn): deferred read 1 (pr79354.g2.di-retarget.500483),
+  eval 1 (thread-throw, ci's abort off the main thread: C's runtime), AOT 13 (the modules that unwind, recorded as refusals before
+  llvm-eh; their AOT build 1.5-3 GB, the day's); independence below 1 by the judge stage alone (1,181 recorded cases).
+- The mutants' own verdicts are the pack's first lines, written before LLS46 changed arbace.repr.llvm.expect. Every mutant regenerated
+  from its base, kind and index by the mutator's own loop (1,697 of 1,750; rs.g0's 53 above the night's 1 GiB): the texts all the
+  pack's, the lines of the current expectation differ in the deferred row only.
+- arbace/repr/llvm/expect.ae: `body-md` (a GEP's `inbounds nuw` before its type broke StripDebugInfo's walk: 4 debug mutants threw);
+  ex-type's Verifier-level unknowns (a load's or store's attachment, atomics) yield to the function's LLParser error; `const-error`
+  (null and a global's name read as a scalar: LLParser 23.1.5's P:6908, P:1874/P:1904). With them 21 lines change, all equal to opt's
+  record. Unit cases in test/repr/llvm/expect_test.ae: 50 cases, 15 controls, 0 failing.
+- No record re-recorded: the rows read the pack's lines, so they move with `bin/llvmi ir-make rt --mutants` (LLS55 (a)) and the
+  hand-written modules' RUN lines (LLS56 (a)), both taken overnight (round 52) and left to the day (the mutator above 1 GiB; a hw edit
+  makes the pack stale until the re-make). Alternatives: the judge re-deriving each line at check time (rejected: the pack's line is the
+  LLS33 (b) contract), keeping the pack to the next clang re-make (the rows stay on opt's record).
+- Projected after the day's commands (doc/llvm/LLVM-CROP-SURVEY.md, "As built: round 52"): completeness 98 to 99, meant 99 to 100
+  (read 3,845 / 1 / 0; AOT 549 / 12 / 1 when the 13 behave as at eval), independence 98 (judge 0.893 to 0.895: 23 cases to own verdicts).

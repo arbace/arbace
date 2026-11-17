@@ -36,6 +36,8 @@
    :not-bb ["LLParser" "' is not a basic block" "P:1859 checkValidVariableType"]
    :var-type ["LLParser" "' defined with type '" "P:1861 checkValidVariableType"]
    :ret-type ["LLParser" "value doesn't match function result type '" "P:7927, P:7939 parseRet"]
+   :null-type ["LLParser" "null must be a pointer type" "P:6908 convertValIDToValue"]
+   :global-ptr ["LLParser" "global variable reference must have pointer type" "P:1874, P:1904 getGlobalVal"]
    :select ["LLParser" "both values to select must have same type" "P:parseSelect, SelectInst::areInvalidOperands"]
    :cast ["LLParser" "invalid cast opcode for cast from '" "P:parseCast"]
    :md-operand ["LLParser" "expected metadata operand" "P:6797 parseMetadataAsValue"]
@@ -87,6 +89,13 @@
 ;; A function's text order
 
 (defn- body [x] (if (= (first x) '=) (nth x 2) x))
+
+(defn- body-md
+  "An instruction body's attachments, the vector after its :md (round 52: opts-of over (drop 2 b) pairs the flags a getelementptr
+  writes before its type, `:inbounds :nuw`, with the operands, and threw on io.g0's and 20020418-1.g0's GEPs)."
+  [b]
+  (let [v (vec b) i (.indexOf ^java.util.List v :md)] (when (>= i 0) (get v (inc i)))))
+
 (defn- result [x] (when (= (first x) '=) (nth x 1)))
 (defn dbg-record? [x] (let [h (first (body x))] (and (symbol? h) (nil? (namespace h)) (str/starts-with? (name h) "dbg_"))))
 (defn- local? [x] (vf/local?* x))
@@ -392,6 +401,16 @@
 (defn- callee-decl [m callee] (first (filter #(and (#{'llvm/declare 'llvm/define} (first %)) (= (second %) callee)) m)))
 (defn- intrinsic-name? [c] (and (symbol? c) (= "g" (namespace c)) (str/starts-with? (name c) "llvm.")))
 
+(defn- const-error
+  "Round 52: LLParser's error converting the constant `v` to the scalar type `t` (convertValIDToValue, getGlobalVal), as it
+  parses the operand: null or a global's name read with an integer or floating-point type; nil when it is not one of these."
+  [t v]
+  (let [t (vf/norm-type t)
+        scalar? (or (contains? '#{half bfloat float double x86_fp80 fp128 ppc_fp128} t) (and (symbol? t) (re-matches #"i[0-9]+" (name t))))]
+    (when scalar?
+      (cond (= v 'null) (invalid :null-type)
+            (and (symbol? v) (= "g" (namespace v))) (invalid :global-ptr)))))
+
 (defn ex-type
   "An instruction's type changed (arbace.repr.llvm.mutate's retype): LLParser reads each operand with the new type, so a
   local defined with the old one is a mismatch, a forward reference a placeholder of the new one; the result's uses
@@ -408,7 +427,8 @@
                     consts (fn [vs] (every? #(or (integer? %) ('#{poison undef} %)) vs))]
                 (case h
           ret (let [ft (vf/norm-type (nth (fdef m fi) 2)) t (vf/norm-type (nth b 1))]
-                (cond (not (consts [(nth b 2)])) (unknown "a returned constant of another kind")
+                (cond (const-error (nth b 1) (nth b 2)) (const-error (nth b 1) (nth b 2))
+                      (not (consts [(nth b 2)])) (unknown "a returned constant of another kind")
                       (not= ft t) (invalid :ret-type (str "value doesn't match function result type '" (tstr ft) "'"))
                       :else valid))
           select (let [[_ [t1 v1] [t2 v2]] (vec (rest b))]
@@ -419,14 +439,17 @@
                      k (first (keep-indexed (fn [i [a o]] (when (not= a o) i)) (map vector args (nth (body orig) 3))))
                      a (when k (nth args k))]
                  (cond (nil? a) (unknown "no argument changed")
+                       (const-error (first a) (peek a)) (const-error (first a) (peek a))
                        (not (consts [(peek a)])) (unknown "an argument constant of another kind")
                        (some #(and (not= % :noundef) (or (keyword? %) (seq? %))) (rest (pop a))) (unknown "the argument's attributes")
                        (intrinsic-name? c) (if (callee-decl m c) (invalid :intr-sig) (unknown "an undeclared intrinsic"))
                        :else valid))
           ;; a load's or a store's type changed with no use that sees it: valid unless an attachment or an atomic order
           ;; constrains the type (the Verifier's !range, atomic loads' and stores' sizes)
-          (load store) (cond (some #{:atomic} b) (unknown "an atomic access")
-                             (:md (apply hash-map (drop-while #(not (keyword? %)) (rest b)))) (unknown "an attachment on the access")
+          ;; round 52: these two are the Verifier's (visitLoadInst's and visitStoreInst's atomic sizes, the attachments' checks), so
+          ;; an LLParser error the simulation finds anywhere in the function comes first (::verifier: the cond below)
+          (load store) (cond (some #{:atomic} b) (assoc (unknown "an atomic access") ::verifier true)
+                             (body-md b) (assoc (unknown "an attachment on the access") ::verifier true)
                              :else valid)
           (add sub mul udiv sdiv urem srem shl lshr ashr and or xor icmp) valid
           (trunc zext sext ptrtoint inttoptr bitcast)
@@ -444,6 +467,7 @@
                   :else (invalid :cast (str "invalid cast opcode for cast from '" (tstr t) "' to '" (tstr t2) "'"))))
                   (if (:msg sim) valid (unknown (str "no LLParser error at " h))))))]
     (cond first? (parse-ex sim)
+          (and (::verifier own) (:msg sim)) (parse-ex sim)
           (and own (not= (:verdict own) :valid)) own
           (:msg sim) (parse-ex sim)
           :else own)))
@@ -963,7 +987,7 @@
                      (and (= 'llvm/define (first f))
                           (some (fn [bl] (some (fn [x] (let [b (body x)]
                                                          (or (dbg-record? x) (and (= 'call (first b)) (old-dbg? (nth b 2 nil)))
-                                                             (dbg? (:md (opts-of (drop 2 b)))))))
+                                                             (dbg? (body-md b)))))
                                                (items-of bl)))
                                 (blocks-of f)))))
                llvm/global (dbg? (:md (opts-of (drop 3 f))))
@@ -1132,8 +1156,8 @@
             (doseq [bl (blocks-of f) x (items-of bl) :let [b (body x)]
                     :when (not (dbg-record? x))
                     :when (not (and (= 'call (first b)) (old-dbg? (nth b 2 nil))))]
-              (when-let [l (loop-id (:md (opts-of (drop 2 b))))] (.add loops l))
-              (doseq [r (md-ids-in (no-dbg (:md (opts-of (drop 2 b)))))] (push! r))
+              (when-let [l (loop-id (body-md b))] (.add loops l))
+              (doseq [r (md-ids-in (no-dbg (body-md b)))] (push! r))
               (when (and ('#{call invoke callbr} (first b)) (vector? (nth b 3 nil)))
                 (doseq [r (md-ids-in (filter #(and (vector? %) (= 'metadata (first %))) (nth b 3)))] (push! r))))))
         llvm/global (doseq [r (md-ids-in (no-dbg (:md (opts-of (drop 3 f)))))] (push! r))
