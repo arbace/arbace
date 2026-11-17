@@ -3849,3 +3849,102 @@ own code (the pinned rust-src's `compiler/`).
   RF20 changes `core_check.ae`, `collect.ae` and the front end's expansion-side files that `core-attrs.edn.key` hashes
   (`collect.ae`, `core_check.ae`), so the plan's rsi-build makes `core-attrs.edn` again first (about 23 minutes, 2.3 GB, one
   process), then the 67 programs.
+
+## RIND: eval and AOT on Arbace's own lowering, the design (2026-11-17)
+
+Branch `h-rust-indep` (from `next` `e4a7a30f3`), light lane. The question: Rust's independence is 80 (`test/crops/independence.edn`:
+read 1, eval 0.5, AOT 0.5, print 1, judge 1) because every case of the eval cell consumes rustc's records (RES54 (a), RFP43 (a)); a
+case scores 1 only when its seven inputs C1-C7 (`test/crops/crops.edn`'s `:own-inputs :rust`, RFP53 (a)) are Arbace's own. The
+Mac's task 322 takes the AOT cell's record and eval's width (the cell's cases beyond the five samples); this section takes the
+inputs. It refreshes `.tmp/plans/RUST-90-PLAN.md` (RFP53-RFP61, decided (a) by the user 2026-11-10) at RF20's state.
+
+### Where each input stands
+
+How far the front end goes is no longer the question: the pipeline is complete for a program (the native reader, expansion,
+resolution, HIR lowering, collection, typeck, THIR and MIR building, the ported passes, mono's facts, codegen to LLVM forms, rsi's
+lowering): 66 of the 67 synthetic programs build every body of their own natively (RF19, `bin/rust-front rsi-build`), core-check
+5,594 of the 37 modules' bodies equal to rustc's built MIR (RF20). What holds the stage at 0.5 is the library and its facts:
+
+| input | today (the cell's five cases) | the work | cost |
+|---|---|---|---|
+| C1 the program's bodies | rustc's -O0 IR pack (the samples: 0 of 6 own at RF11's measure; synthetic 66 of 67) | the samples' causes; `--front own` the record's default (RFP42 (a) extended) | 3-5 days, one night |
+| C2 std's instances' bodies | the pack `rust-front-rsi` (rustc's) | RFP55 (a): the library closure built natively, RFP54 (a) taken unconditionally | with C6 |
+| C3 no mono fact from the record | refused facts from `rust-front-rsi` | RFP48/RFP49's rest, `try_process`'s bounds, opaque returns (RF20's left) | with C4 |
+| C4 std's interface, StableCrateIds | the helper's `std-iface`, `std-crates-rsi.edn` (rustc's rlibs) | RFP57 (a) native interfaces; RIND6 for the ids | 5-7 days, one night |
+| C5 the allocator shim | rustc's `shim.ll` | **built (RIND2 (a), below)** | done |
+| C6 the library's non-generic items | std's IR from Cargo, rustc and clang | RFP55 (a) + the own lowered library (RUST-90 S5) | 12-16 days, 2-3 nights |
+| C7 ci's C target | `test/c/host` (gcc's recorded macros) | RFP59 (a): runtime-ci and the program's read on `c/target` | 1 day, one night |
+
+The score moves only when a case has all seven (RFP53 (a)): no stage before C2 and C6 changes the 80. The order below takes the
+cheap inputs first so that each later stage is the only thing left between a case and 1.
+
+### Proposed (RIND1-RIND7)
+
+- **RIND1 The order.** (a) **By input, cheapest first, over every case at once: C5 (built), C7, C1 on the cell's cases, C3 with C4,
+  then C2 with C6, then the switch and the records (RUST-90's S6)**; (b) one case end to end first (a program needs std, so its
+  library closure is the bulk of the work either way, and the cheap inputs wait); (c) wait for Tier S (std whole from source,
+  RES54's 35-60 days). *Recommended: (a).* Total about 25-34 agent days and 5-6 nights; the earliest 90 about four weeks out.
+- **RIND2 The allocator shim (C5).** (a) **Arbace's own shim (`arbace.rust.back.shim`) in place of the pack's on every case of
+  the default allocator's case, the packs left rustc's (`RSI_SHIM=pack` the old path); a program whose source names a global
+  allocator, no_std, an allocator attribute, a crate name or an extern crate keeps the pack's (conservative, by its words)**; (b)
+  only on `--front own`'s cases (C5 own only where C1 is, nothing gained); (c) keep `shim.ll`. *Recommended: (a); built below.*
+- **RIND3 The shim's judge in the gate.** (a) **`bin/rsi shim-check` (seconds, under 1 GiB, no rustc: the forms and the lowered C
+  of all 73 programs of the samples and synthetic packs against rustc's `shim.ll`, a crossed control that must differ) as a light
+  step of Rust's crops tier beside `rust-front-essential`**; (b) by hand only. *Recommended: (a)*; the step's declaration is the
+  main host's to add (this branch adds no step: no gate run here).
+- **RIND4 ci's C target (C7).** (a) **RFP59 (a) as decided: runtime-ci's library read and each program's read on `c/target`
+  (Arbace's own C target, as llvmi since batch 2), `test/c/host` the oracle tier's; the ci library's key takes `c/target` in place
+  of `test/c/host` (one runtime-ci rebuild, about 4 h and 6 GiB, a night)**; (b) the program's units alone on `c/target`, std's
+  library still read on gcc's macros (C7 not own). *Recommended: (a).* About 1 day, then the night; the next stage.
+- **RIND5 C1 on the cell's cases.** (a) **The samples through `bin/rust-front rsi-build` (RFP46's night measure first: which of the
+  six it refuses and why), their causes fixed, and `--front own` the record's default for samples and synthetic (a case the front
+  end does not build runs on the pack and says so in `front.tsv`)**; (b) widen the cell to the synthetic corpus alone (task 322)
+  and leave the samples on the pack. *Recommended: (a)*, with task 322's width: the own count is then the synthetic's 66 plus the
+  samples fixed.
+- **RIND6 The compiler's identity.** (a) **The emulated rustc's identity (CFG_VERSION, the data layout, the triple, target-cpu,
+  llvm.ident's text) is a constant of Arbace's target, counted own, as `c/target` is C's; held equal to the rmeta's header only in a
+  check (`shim-check` does so for CFG_VERSION). Once Arbace builds the library itself (C2, C6) the library's `-C metadata` values are
+  constants of that build's description, and core's, alloc's and std's StableCrateIds are computed natively (`mono/stable-crate-id`),
+  not read from rlibs (C4's ids)**; (b) read the identity from the rmeta (C4 stays rustc's until a byte-identical std, never).
+  *Recommended: (a).*
+- **RIND7 The library (C2, C6).** (a) **RFP55 (a) and RFP54 (a) as decided: the closure of library items the cell's programs and
+  `lang_start` reach, built from source by the front end (generic instances and non-generic items), lowered by codegen, rsi's
+  lowering and ci into an own lowered library kept by key (`.tmp/rsi/runtime-own`), grown with the cell**; (b) the whole std now.
+  *Recommended: (a).* RFP56's census (half a day, light) first sizes it; 12-16 days with its nights.
+
+### Stages and estimates
+
+| stage | inputs | work | cost | independence |
+|---|---|---|---|---|
+| 1 | C5 | RIND2, RIND3 | 0.5 day (built) | 80 |
+| 2 | C7 | RIND4 | 1 day, one night | 80 |
+| 3 | C1 | RIND5 | 3-5 days, one night | 80 |
+| 4 | C3, C4 | RFP57 (a), RF20's left, RIND6 | 5-7 days, one night | 80 |
+| 5 | C2, C6 | RIND7 (RUST-90 S4-S5) | 12-16 days, 2-3 nights | 80 |
+| 6 | the records | RUST-90 S6, RFP61 (a) | 3-4 days, two nights | 85 (eval), then 90-96 (AOT), by the own share of the cell |
+
+## As built: RIND (stage 1): the allocator shim Arbace's own (2026-11-17)
+
+- `arbace/rust/back/shim.ae` (`arbace.rust.back.shim`): the default allocator's shim as LLVM forms, `__rust_alloc`,
+  `__rust_dealloc`, `__rust_realloc`, `__rust_alloc_zeroed` tail-calling std's hidden `__rdl_` functions, then
+  `__rust_no_alloc_shim_is_unstable_v2`; the names by mono's `mangle-internal`; the attribute groups (allockind, allocsize,
+  alloc-family, probe-stack, target-cpu), the module flags of a PIE executable with unwind tables, llvm.ident, each definition's
+  `!guid` (MD5 of its name). The module's source filename is the allocator CGU's mangled name: the human-readable
+  `CRATE.ID-crate.allocator`, ID the program crate's StableCrateId in hex without leading zeros (`casts.d3164f7a67cfd47`: the
+  first try's 16 digits missed three of the 73), hashed by StableHasher (the bytes, then 0xFF) into a Hash128 in base 36, 25 digits
+  (none of the 73 shorter, so the padding's side is unseen). The identity constant CFG_VERSION is the shim's own (RIND6 (a)),
+  checked equal to `test/rust/front/std-crates-rsi.edn`'s.
+- `bin/rsi shim-check [CORPUS...]` (`make rsi-shim-check`): the samples' and synthetic packs extracted at their pins, each
+  program's shim read by repr/llvm and compared as forms with ours, both lowered to C and compared, and a crossed control (the
+  first program's shim against the second's record) that must differ. **73 of 73 equal (forms and lowered C), the control
+  differing; 13 s, 0.9 GB.** A mutated record (`allocsize(3)` made `allocsize(2)`) fails it (exit 1).
+- `bin/lib/rsi/check`: on the pack path (`RSI_IR=pack`, the default) and `RSI_SHIM=own` (the default), after the IR step each
+  program of the default allocator's case gets our `shim.ll` (printed by repr/llvm: no comments, the same forms) in place of the
+  pack's; `WORK/CORPUS/shims.tsv` and `files/KEY/shim.src` say which; the packs and `ir-pack` stay rustc's. The block was run
+  alone over the synthetic list (67 of 67 own); the whole `rsi check` was not run here (`rsi-essential` declares 8 GiB): its runs
+  are unchanged by construction, the lowering reading the same forms.
+- `test/rust/eval-inputs-linux-amd64.edn`: C5 `:own` on the five cases. Independence unchanged at 80 (the other six inputs are
+  rustc's; RFP53 (a)); `bin/crops-score --judge --strict` exit 0.
+- Keys: `arbace/rust/` and `bin/lib/rsi/` are crop paths (`arbace_crop_paths`): no gate key moves; `bin/rsi` and the Makefile are
+  in Rust's steps' inputs. The main host: the night's `rsi-check` (weekly) and `rsi-essential` run on the own shim; RIND3's step to
+  add; stage 2's runtime-ci rebuild (RIND4) a night.

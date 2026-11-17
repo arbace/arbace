@@ -694,7 +694,10 @@ items below are the ones whose work is still ahead or tied to a night.
   constants and macro-made constructors in the native interface and collect's names, out-of-line modules' items, the impl's trait
   in scope, derive(Debug) of a cfg'd-out struct): core-check 5,576 -> 5,594 equal, refused 24 -> 6 (core-essential 564 -> 566);
   `gate_key` unmoved. Next: `try_process`'s associated item bounds, opaque return types in the native interface (RFP57), RFP56's
-  census.
+  census. RIND (`h-rust-indep`, 2026-11-17; FRONTEND-SURVEY, "RIND", "As built: RIND (stage 1)"): RIND1-RIND7 proposed (the
+  inputs C1-C7 cheapest first: C5, C7, C1, C3+C4, C2+C6, then the records; 25-34 days to 90); stage 1 built: the allocator shim
+  Arbace's own (`arbace.rust.back.shim`, `bin/rsi shim-check` 73 of 73), C5 `:own` on the cell's cases, independence 80 unchanged.
+  Next: RIND3's step, RIND4 (ci on `c/target`, one runtime-ci night).
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above); `llvm-compl2` (2026-11-10): llvmi on the checkout's ci and RES34's cilib, eight Verifier rules
   ported, completeness 97.6.

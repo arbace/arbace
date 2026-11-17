@@ -1,0 +1,195 @@
+;; After rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3): the allocator shim as rustc's recorded IR shows it (shim.ll
+;; of test/rust/ir/{samples,synthetic}.tar.xz) and the algorithms of compiler/rustc_codegen_llvm/src/allocator.rs (codegen),
+;; compiler/rustc_ast/src/expand/allocator.rs (ALLOCATOR_METHODS, the default allocator's `__rdl_` prefix),
+;; compiler/rustc_middle/src/mir/mono.rs (CodegenUnitNameBuilder::build_cgu_name, CodegenUnit::mangle_name) and
+;; compiler/rustc_data_structures/src/base_n.rs (base 36), as recalled: the compiler's sources were not on the host where this was
+;; written (2026-11-17), so every rule is held to the 73 recorded shims (bin/rsi shim-check); and LLVM's GlobalValue::getGUID (the
+;; `!guid` of each definition: MD5 of the name, the digest's first eight bytes little-endian). rustc is dual-licensed MIT OR
+;; Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.back.shim
+  "RIND2 (a) (doc/rust/FRONTEND-SURVEY.md, \"As built: RIND (stage 1)\"; RFP60 (a)): the allocator shim of a Rust program,
+  rustc's second codegen unit (`shim.ll` of rsi's IR packs, bin/lib/rsi/link-ir's), made by Arbace as LLVM forms: for the
+  default allocator `__rust_alloc`, `__rust_dealloc`, `__rust_realloc` and `__rust_alloc_zeroed` calling std's `__rdl_`
+  functions, then `__rust_no_alloc_shim_is_unstable_v2`; each name mangled as rustc's mangle_internal_symbol
+  (arbace.rust.front.mono), the module's source filename the allocator CGU's mangled name (the program crate's StableCrateId,
+  SipHasher128, base 36), each definition's `!guid` its name's MD5. A program this shim does not describe (a
+  `#[global_allocator]`, `no_std`, `no_core`, an `alloc_error_handler`, a `crate_name` attribute) is refused by its source's
+  words, conservatively: its run keeps the pack's shim.
+
+    (refusal SRC)          nil, or why the source is not the default allocator's case
+    (shim-forms CRATE)     the shim's LLVM forms for the crate named CRATE (`-` written `_`), within with-crates
+    -main emit-list LIST OUT          LIST's lines KEY<TAB>SRC: OUT/KEY/shim.ll, OUT/shims.tsv KEY<TAB>own|pack<TAB>why
+    -main check PACK...               each extracted IR pack's programs: our forms against rustc's shim.ll, the lowered C too,
+                                      a crossed control (one program's shim against another's) that must differ"
+  (:require [arbace.rust.front.mono :as mono] [arbace.repr.llvm :as llvm] [arbace.string :as str])
+  (:import [java.io File] [java.security MessageDigest]))
+
+(def cfg-version
+  "The emulated compiler's identity, rustc's CFG_VERSION for the pinned rustc 1.99.1 (tools/rsdump/RUSTC_VERSION's version and
+  commit, Alpine's package rust 1.99.1-r0): the program crate's StableCrateId, the `__rustc` crate's disambiguator and
+  llvm.ident's text. A constant of the target Arbace emulates, not read from any toolchain product (RIND6 (a)); `check`
+  holds it equal to test/rust/front/std-crates-rsi.edn's, rsi's std build's rmeta header"
+  "1.99.1 (58cf8f9c3 2026-10-13) (Alpine Linux Rust 1.99.1-r0)")
+
+(def ^:private crates-file "test/rust/front/std-crates-rsi.edn")
+
+(defn- utf8 [^String s] (map #(bit-and (long %) 0xff) (.getBytes s "UTF-8")))
+
+(def ^:private digits "0123456789abcdefghijklmnopqrstuvwxyz")
+
+(defn- base36-fixed
+  "base_n's to_base_fixed_len(CASE_INSENSITIVE) of a u128: base 36, most significant digit first, 25 digits (u128::MAX's length)"
+  [n]
+  (let [s (loop [n (bigint n) acc ()]
+            (let [acc (cons (nth digits (int (mod n 36))) acc) n (quot n 36)]
+              (if (zero? n) (apply str acc) (recur n acc))))]
+    (str (apply str (repeat (- 25 (count s)) \0)) s)))   ; the padding's side unseen yet: 73 of 73 names had 25 digits
+
+(defn cgu-name
+  "The allocator module's CGU name: build_cgu_name(LOCAL_CRATE, [\"crate\"], Some(\"allocator\")) without
+  -Zhuman-readable-cgu-names, the human-readable `CRATE.ID-crate.allocator` (ID the StableCrateId in hex, `{:x}`: no leading
+  zeros, as `casts.d3164f7a67cfd47-cgu.0`) hashed
+  by StableHasher (Hash for str: its bytes then 0xFF) into a Hash128 written in base 36"
+  [^String crate]
+  (let [{:keys [name id]} (mono/local-crate crate)
+        [l h] (mono/sip128 (concat (utf8 (str name "." (.toString (biginteger (mono/u64 id)) 16) "-crate.allocator")) [0xff]))]
+    (base36-fixed (+ (* (mono/u64 h) 18446744073709551616N) (mono/u64 l)))))
+
+(defn guid
+  "LLVM's GUID of a global with external linkage: the MD5 of its name, the digest's first eight bytes as a little-endian i64"
+  [^String nm]
+  (let [b (.digest (MessageDigest/getInstance "MD5") (.getBytes nm "UTF-8"))]
+    (loop [i 7 acc 0]
+      (if (neg? i) acc (recur (dec i) (bit-or (bit-shift-left acc 8) (bit-and (long (aget b i)) 0xff)))))))
+
+(defn refusal
+  "nil when the program at SRC is the default allocator's case, else why not: any word of the source (comments included) that
+  could change the shim, a global allocator, no std, an alloc error handler, another crate name"
+  [^String src]
+  (let [t (slurp src)]
+    (some (fn [[re why]] (when (re-find re t) why))
+          [[#"global_allocator" "a #[global_allocator] (the shim calls __rg_ functions)"]
+           [#"no_std|no_core" "no_std or no_core (no shim, or another)"]
+           [#"alloc_error_handler|default_lib_allocator|rustc_std_internal_symbol" "an allocator attribute"]
+           [#"crate_name" "a crate_name attribute (the CGU name's crate)"]
+           [#"extern\s+crate" "an extern crate (one may bring an allocator)"]])))
+
+;; ALLOCATOR_METHODS: name, the shim's return and parameters (rustc's AllocatorTy: Layout as size and align, Ptr, ResultPtr,
+;; Unit), the function's attributes (allocator.rs: allockind and allocsize by the method, alloc-family)
+(def ^:private alloc-methods
+  [{:m "alloc" :ret 'ptr :params [['i64 '%0] ['i64 :allocalign '%1]] :args [['i64 '%0] ['i64 '%1]] :decl [['i64] ['i64]]
+    :kind "\"alloc,uninitialized,aligned\"" :size "0"}
+   {:m "dealloc" :ret 'void :params [['ptr :allocptr '(:captures "address") '%0] ['i64 '%1] ['i64 '%2]] :args [['ptr '%0] ['i64 '%1] ['i64 '%2]]
+    :decl [['ptr] ['i64] ['i64]] :kind "\"free\""}
+   {:m "realloc" :ret 'ptr :params [['ptr :allocptr '%0] ['i64 '%1] ['i64 :allocalign '%2] ['i64 '%3]] :args [['ptr '%0] ['i64 '%1] ['i64 '%2] ['i64 '%3]]
+    :decl [['ptr] ['i64] ['i64] ['i64]] :kind "\"realloc,aligned\"" :size "3"}
+   {:m "alloc_zeroed" :ret 'ptr :params [['i64 '%0] ['i64 :allocalign '%1]] :args [['i64 '%0] ['i64 '%1]] :decl [['i64] ['i64]]
+    :kind "\"alloc,zeroed,aligned\"" :size "0"}])
+
+(def ^:private target-attrs [["probe-stack" "inline-asm"] ["target-cpu" "x86-64"]])
+
+(defn shim-forms
+  "The allocator shim of the crate CRATE with the default allocator (AllocatorKind::Default), as LLVM forms: the module's
+  header, each method's definition (a tail call of std's `__rdl_` function, declared hidden) and the marker, the attribute
+  groups in order, the module flags of a PIE executable with unwind tables, llvm.ident and each definition's guid"
+  [^String crate]
+  (let [g (fn [nm] (symbol "g" (mono/mangle-internal nm)))
+        nmeta 5
+        defs (concat
+              (mapcat (fn [i {:keys [m ret params args decl]}]
+                        (let [self (g (str "__rust_" m)) callee (g (str "__rdl_" m))
+                              res (symbol (str "%" (count params)))
+                              call (list 'call ret callee args :tail :tail)]
+                          [(concat (list 'llvm/define self ret params)
+                                   (when (= 'ptr ret) [:ret-attrs [:noalias]])
+                                   [:unnamed-addr :unnamed_addr :attrs [i] :md ['!guid (symbol (str "!" (+ nmeta i)))]
+                                    :body [(if (= 'void ret)
+                                             (list 'block '%entry call '(ret void))
+                                             (list 'block '%entry (list '= res call) (list 'ret 'ptr res)))]])
+                           (list 'llvm/declare callee ret decl :visibility :hidden :unnamed-addr :unnamed_addr)]))
+                      (range) alloc-methods)
+              [(list 'llvm/define (g "__rust_no_alloc_shim_is_unstable_v2") 'void [] :unnamed-addr :unnamed_addr :attrs [4]
+                     :md ['!guid (symbol (str "!" (+ nmeta 4)))] :body [(list 'block '%entry '(ret void))])])
+        names (keep (fn [f] (when (= 'llvm/define (first f)) (name (second f)))) defs)]
+    (vec (concat
+          [(list 'llvm/source-filename (cgu-name crate))
+           (list 'llvm/datalayout "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
+           (list 'llvm/triple "x86_64-alpine-linux-musl")]
+          (map #(apply list %) defs)
+          (map-indexed (fn [i {:keys [kind size]}]
+                         (list 'llvm/attributes i (vec (concat [(list :allockind kind)] (when size [(list :allocsize size)])
+                                                               [:uwtable ["alloc-family" "__rust_alloc"]] target-attrs))))
+                       alloc-methods)
+          [(list 'llvm/attributes 4 (vec (cons :uwtable target-attrs)))
+           '(llvm/named-meta !llvm.module.flags [!0 !1 !2 !3])
+           '(llvm/named-meta !llvm.ident [!4])
+           '(llvm/meta !0 (! [[i32 8] (! "PIC Level") [i32 2]]))
+           '(llvm/meta !1 (! [[i32 7] (! "PIE Level") [i32 2]]))
+           '(llvm/meta !2 (! [[i32 2] (! "RtLibUseGOT") [i32 1]]))
+           '(llvm/meta !3 (! [[i32 7] (! "uwtable") [i32 2]]))
+           (list 'llvm/meta '!4 (list '! [(list '! (str "rustc version " (:cfg-version mono/*crates*)))]))]
+          (map-indexed (fn [i nm] (list 'llvm/meta (symbol (str "!" (+ nmeta i))) (list '! [['i64 (guid nm)]]))) names)))))
+
+(defn crate-of
+  "rustc's crate name of a source file without a crate_name attribute: its stem (local-crate writes `-` as `_`)"
+  [^String src]
+  (str/replace (.getName (File. src)) #"\.rs$" ""))
+
+(defn- with-crates [f] (binding [mono/*crates* {:cfg-version cfg-version :crates {}}] (f)))
+
+(defn emit-list
+  "LIST's lines KEY<TAB>SRC (SRC relative to the working directory or absolute): OUT/KEY/shim.ll for each program the default
+  allocator's case; OUT/shims.tsv KEY<TAB>own|pack<TAB>why"
+  [^String list ^String out]
+  (with-crates
+    (fn []
+      (let [rows (for [l (str/split-lines (slurp list)) :when (not (str/blank? l))
+                       :let [[k src] (str/split l #"\t")]]
+                   (if-let [why (try (refusal src) (catch Throwable e (str "the source not read: " (.getMessage e))))]
+                     [k "pack" why]
+                     (do (llvm/spit-latin1 (str out "/" k "/shim.ll") (llvm/print-ll (shim-forms (crate-of src))))
+                         [k "own" "arbace.rust.back.shim"])))]
+        (spit (str out "/shims.tsv") (str (str/join "\n" (map #(str/join "\t" %) rows)) "\n"))
+        (println "rsi shim:" (count (filter #(= "own" (second %)) rows)) "of" (count rows) "programs' allocator shims Arbace's own")))))
+
+(defn- lowered [forms]
+  (require 'arbace.cpp.lower)
+  (let [r ((resolve 'arbace.cpp.lower/lower-file) forms "shim.c")] (or (:c r) (str "refused " (:refused r)))))
+
+(defn check
+  "Each PACK (an extracted IR pack: KEY/shim.ll, KEY the source's path with `/` written `%`): our forms against rustc's
+  shim.ll's read (forms), their lowered C, and one crossed control (the first program's shim against the second's record),
+  which must differ. Exit 0 when every refused-free program is equal and the control differs."
+  [packs]
+  (with-crates
+    (fn []
+      (let [ds (sort (for [p packs ^File d (.listFiles (File. ^String p)) :when (.exists (File. d "shim.ll"))] d))
+            res (doall
+                 (for [^File d ds
+                       :let [src (str/replace (.getName d) "%" "/")
+                             theirs (llvm/read-ll (str d "/shim.ll"))
+                             why (when (.exists (File. src)) (refusal src))]]
+                   (cond
+                     (not (.exists (File. src))) [d :no-source theirs]
+                     why [d :refused theirs why]
+                     :else (let [ours (shim-forms (crate-of src))]
+                             [d (cond (not= ours theirs) :forms-differ
+                                      (not= (lowered ours) (lowered theirs)) :c-differs
+                                      :else :equal)
+                              theirs ours]))))
+            eq (filter #(= :equal (second %)) res)
+            ctl (when (>= (count eq) 2)
+                  (let [[a b] eq] (not= (nth a 3) (nth b 2))))]
+        (doseq [[d st _ x] res :when (not= :equal st)] (println "shim-check:" (.getName ^File d) (name st) (if (string? x) x "")))
+        (when-not (= cfg-version (:cfg-version (mono/load-crates crates-file)))
+          (println "shim-check: the compiler identity differs from" crates-file "(cfg-version)") (System/exit 1))
+        (println "shim-check:" (count eq) "of" (count res) "programs' allocator shims equal to rustc's (forms and lowered C);"
+                 "control" (cond (nil? ctl) "not run (fewer than two programs)" ctl "differs" :else "PASSES (a failure)"))
+        (System/exit (if (and (= (count eq) (count res)) ctl) 0 1))))))
+
+(defn -main [verb & args]
+  (case verb
+    "emit-list" (let [[list out] args] (emit-list list out) (System/exit 0))
+    "check" (check args)
+    (do (println "arbace.rust.back.shim: emit-list LIST OUT | check PACK...") (System/exit 2))))
