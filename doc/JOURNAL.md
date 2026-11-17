@@ -10277,3 +10277,24 @@ Proof: encode-check `--only` over the 140 files with directive-like texts, direc
 and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones in test/asm/controls-print.txt, failing as it must);
 4 mutants `:mismatch` by hand. The 12 rows re-recorded alone (`--record --only`); x86-64 print 194,746 / 1,187 / 581 to
 194,796 / 1,187 / 531 (completeness 99.41 to 99.42); test/reap/matrix.edn and test/crops/scores.edn re-recorded.
+
+
+## 2026-11-17: Haskell's threaded way, HES84 (a) (branch `h-haskell-threaded`, from next `498d7296f`)
+
+- **What.** HES84 (a), the user's decision of 2026-11-08 ("then (a)" once the threaded semantics are taken up), built:
+  `test/haskell/eval/run_plan.ae` builds a test whose all.T `only_ways` are all threaded ways `-threaded` (and takes T21651's
+  Linux-conditional `extra_run_opts`); GHC 9.14.1's references of the 13 recorded such tests of the core recorded again by hand
+  (`bin/hsi record-ref --only`, the oracle tier, light; T21969 with `HSI_REF_TIMEOUT=30`), their STG re-dumped into haskell-stg-progs;
+  hsi's threaded way (`go/arbace/hs/threaded.ae`, new, and machine, nodes, compile, image, prim_ctl, rts, rtsapi, cprog, ffi, mem,
+  the driver's -N): capabilities' count and setNumCapabilities, safe foreign calls to blocking host functions on goroutines of their
+  own releasing the capability, bound threads and forkOS, a spark pool, hs_exit's exitScheduler; the I/O manager kept the
+  non-threaded RTS's (rtsSupportsBoundThreads answered 0 to its modules). doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES84 (a),
+  the threaded way".
+- **Why this design.** The machine's state is one goroutine's (thunks, stacks, ci's memory), so capabilities as goroutines are
+  staged: stage 1 runs the Haskell threads on one evaluator and puts only what a program observes of the threaded RTS off it (a safe
+  call that blocks); true parallel capabilities need the machine made concurrent (left). Considered: porting GHC's event manager
+  (epoll, the timer manager: a large port for waits hsi already makes), and HES88's tried model of a safe sleep for every program
+  (reverted then: the normal way's references differ; now it is the threaded way's alone).
+- **Results.** eval 812 / 62 / 35 to 817 / 62 / 30 (conc037, conc038, conc059, numsparks001, ffi014 pass; T21651 and
+  setnumcapabilities001 correct with no limit, 270 s, so `:speed`; hs_try_putmvar003 `:test-c`); AOT 137 / 1 / 1 to 138 / 1 / 0
+  (ffi014). The classes `:threaded-only` and `:threaded-way` removed; a negative control added (conc038 against conc037).
