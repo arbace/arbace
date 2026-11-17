@@ -6042,3 +6042,49 @@ The 31 programs of the class: eval 31 of 31, AOT 31 of 31 (`bin/ci check --only`
 programs at eval (the vector piece's 268 and the 31; only the 31 move, compcert/fft.c's one timeout under the AOT run beside it
 passes alone, every control differs) and test/c/essential-aot.txt at AOT (0 failing, the controls differ). The class `nested-fn`
 stays as a guard class. C eval 2,245 / 34 / 0, AOT 2,253 / 26 / 0: completeness 97 to 98 (0.9726 to 0.9794), meant 100.
+
+## As built: abort off the main thread (CS322 (a), CS323 (a), 2026-11-17, branch `n-ci-thread`, from `next` `42bf8614b`)
+
+**The cause.** musl's `abort` is `raise(SIGABRT)`, then the action set to SIG_DFL and `tkill(__pthread_self()->tid, SIGABRT)`
+again, then `a_crash()`; `raise` is `tkill` of the calling thread's id too. crt's `tkill` took only the process's id (`sysPid`,
+1000) and `tgkill` only `tgid == tid == 1000`: on any other thread (1001 and on, crt's scheduler's tids) both answered ESRCH, so
+abort went on to `a_crash`, a fault at 0x0 that the thread's start (ci's `runThread`) passed to the main thread as a SIGSEGV
+(status 139). The end of a program from another thread was already right (`Sys.EndProgram`, the main thread raising `Over`);
+only the signal's target was refused. That is LLVM's eval row `cpp.runtime.thread-throw` (`test/llvm/divergences-eval.edn`'s
+`:cpp-threads`) and `bin/cppi check`'s `runtime/thread-throw.cpp` (`test/cpp/divergences.edn`'s `:threads`, its second pattern):
+std::terminate on a std::thread, then abort.
+
+**The fix** (`go/arbace/crt`, embedded and in `gate_key`: ci's back end, crt and cinterp are copied into the program since C9):
+`Sys.IsThread(tid)` (sched.ae), the process's id or a thread of the scheduler that has not exited (the running one, the
+runnable, the waiting); `tkill` takes any of them, `tgkill` any of them in the process (`tgid` still 1000). The signal is then
+the process's as before (one mask, one pending set, the handler run on the calling thread): SIGABRT's default action ends the
+program with `Exit{134, SIGABRT}`, which the thread's start passes to the main thread and `Prog.Run` turns into status 134
+(`tools/cirun`'s `DieBy`, the parent's WIFSIGNALED). CS322 (a), taken overnight (round 52): any live thread's id accepted, the
+signal process-directed (options: (a) this; (b) per-thread masks and pending sets with delivery on the target's goroutine, the
+exact Linux model, which no program of the corpora needs yet; (c) abort as a native that panics the Exit directly, which leaves
+`raise` and `pthread_kill` of the calling thread refused).
+
+**The test.** `test/c/run/thread-abort.c`: main starts a thread that prints and calls abort; a return from the join or from abort
+fails. Its first line "ci-run verdict: exit 134." states its own status: CS323 (a), taken overnight (round 52), `test/c/selfref.ae`'s
+ci-run rule reads "exit N" (was "exit 0" alone), the output not compared; `test/reap/cells.edn`'s `:ref-runs-extra` names it (no
+gcc run needed); `test/c/corpora.edn`'s ci-run count 23. Two negative controls (`test/c/controls.edn`):
+`_control/thread-abort-vs-self-check` (its 134 against atomic-gcc's exit 0) and `_control/ptr-sub-unsigned-vs-thread-abort`
+(ptr-sub-unsigned's status 3 against its 134); both differ.
+
+**How it was checked** (light, past 19:00 UTC): `bin/ci run test/c/run/thread-abort.c`: "main", "thread", status 134 (peak 0.99
+GB); the same nodes on a cirun built from the same printed Go with the old `tkill` test: status 139, "a_crash (thread 1001: abort
+< run < start) at 0x0", the recorded fault. `bin/ci check --only` of ci-run's thread-abort, atomic-gcc, ptr-sub-unsigned and
+signal-sync: 4 of 4 pass, the four ci-run controls differ (peak 1.47 GB: the self reference's read and musl's nodes, over the
+night's 1 GiB by 0.47); `bin/ci check --aot --only` of thread-abort: pass, its control differs (peak 0.97 GB). The rows recorded by
+hand from those runs (`--record` takes no `--only`). C eval 2,246 / 34 / 0, AOT 2,254 / 26 / 0. C's run corpora hold no other
+program that starts a thread (`:threads`'s class matches no recorded row).
+
+**Not run here** (the lowered C++ runtime, `bin/cppi runtime-build`, peaks over 1.2 GB; no build of it was kept on the host): the
+LLVM row (`bin/llvmi check --only` of `cpp.runtime.thread-throw`, expected 134 = lli's) and `bin/cppi check --only` of
+`runtime/thread-throw.cpp` (expected 134 = g++'s). After they pass, `:cpp-threads` and `:threads`'s second pattern match nothing.
+
+### The day's commands (main host)
+
+    printf 'cpp.runtime.thread-throw\n' > .tmp/tt.txt; bin/llvmi check --only .tmp/tt.txt --record; bin/llvmi check --aot --only .tmp/tt.txt
+    printf 'runtime/thread-throw.cpp\n' > .tmp/tt2.txt; bin/cppi check --only .tmp/tt2.txt; bin/cppi check --aot --only .tmp/tt2.txt
+    bin/reap --record; bin/crops-score --record    # then drop :cpp-threads and :threads's a_crash pattern if nothing matches them

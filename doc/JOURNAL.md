@@ -10319,3 +10319,15 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: abort off the main thread, CS322 (a), CS323 (a) (branch `n-ci-thread`, from next `42bf8614b`)
+
+- Cause: crt's `tkill` and `tgkill` refused every tid but the process's (1000), so musl's abort on a thread (raise's and abort's
+  own `tkill(self)`) got ESRCH and fell to `a_crash`: status 139 where Linux gives 134 (LLVM's `cpp.runtime.thread-throw`, C++'s
+  `runtime/thread-throw.cpp`). Fix: `Sys.IsThread` (go/arbace/crt/sched.ae), any live thread's id accepted, the signal
+  process-directed as before (CS322 (a), taken overnight (round 52); alternatives per-thread signal state, or abort as a native).
+  go/arbace/crt is embedded: `gate_key` moves (the executables rebuild).
+- Test `test/c/run/thread-abort.c` ("ci-run verdict: exit 134."; selfref's ci-run rule reads "exit N", CS323 (a), taken
+  overnight (round 52)), two negative controls in test/c/controls.edn. `bin/ci run`: 134 (139 on the old tkill); `bin/ci check
+  --only` 4 of 4 and `--aot --only` 1 of 1, controls differ. LLVM's and C++'s rows not run (the lowered C++ runtime's build is
+  over 1 GiB): doc/C23-SURVEY.md, "As built: abort off the main thread", has the day's commands.
