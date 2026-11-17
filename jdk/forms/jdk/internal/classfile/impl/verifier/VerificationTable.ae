@@ -1,0 +1,460 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/classfile/impl/verifier/VerificationTable.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.classfile.impl.verifier)
+
+(import '(java.util ArrayList List)
+        '(jdk.internal.classfile.impl StackMapGenerator))
+
+(defclass VerificationTable
+  (field ^:private ^:final ^int _code_length)
+
+  (field ^:private ^:final ^int _frame_count)
+
+  (field ^:private ^:final ^{:tag (List VerificationFrame)} _frame_array)
+
+  (field ^:private ^:final ^VerifierImpl _verifier)
+
+  (method get_frame_count ^int [this] _frame_count)
+
+  (method get_offset ^int [this ^int index]
+    (.offset (cast VerificationFrame (.get _frame_array index))))
+
+  (defclass ^:static StackMapStream
+    (field ^:private ^:final ^byte/1 _data)
+
+    (field ^:private ^int _index)
+
+    (field ^:private ^:final ^VerifierImpl _verifier)
+
+    (constructor [this ^byte/1 ah ^VerifierImpl context]
+      (set! _data ah)
+      (set! _index 0)
+      (set! _verifier context))
+
+    (method get_u1 ^int [this]
+      (when (or (nil? _data) (>= _index (alength _data)))
+        (.classError _verifier "access beyond the end of attribute"))
+      (let [_index-1 _index]
+        (set! _index (unchecked-inc-int _index))
+        (bit-and-int (aget _data _index-1) 0xff)))
+
+    (method get_u2 ^int [this]
+      (let [res (bit-shift-left-int (.get_u1 this) 8)] (bit-or-int res (.get_u1 this))))
+
+    (method at_end ^boolean [this]
+      (or (nil? _data) (== _index (alength _data)))))
+
+  (constructor [this ^StackMapReader reader ^VerificationWrapper$ConstantPoolWrapper cp
+                ^VerifierImpl v]
+    (set! _verifier v)
+    (set! _code_length (.code_length reader))
+    (let [_frame_count (.get_frame_count reader)]
+      (set! _frame_array (ArrayList. _frame_count))
+      (when (> _frame_count 0)
+        (while (not (.at_end reader))
+          (let [frame (.next reader)] (when (some? frame) (.add _frame_array frame)))))
+      (.check_end reader)
+      (set! (.-_frame_count this) (.size _frame_array))))
+
+  (method get_index_from_offset ^int [this ^int offset]
+    (let [^:mutable ^int i 0]
+      (while (< i _frame_count)
+        (when (== (.offset (cast VerificationFrame (.get _frame_array i))) offset) (return i))
+        (set! i (unchecked-inc-int i)))
+      i))
+
+  (method match_stackmap ^boolean [this ^VerificationFrame frame ^int target ^boolean match
+                                   ^boolean update]
+    (let [index (.get_index_from_offset this target)]
+      (.match_stackmap this frame target index match update)))
+
+  (method match_stackmap ^boolean [this ^VerificationFrame frame ^int target ^int frame_index
+                                   ^boolean match ^boolean update]
+    (when (or (< frame_index 0) (>= frame_index _frame_count))
+      (.verifyError _verifier
+                    (String/format "Expecting a stackmap frame at branch target %d"
+                                   (new Object/1 [target]))))
+    (let [stackmap_frame (cast VerificationFrame (.get _frame_array frame_index))
+          ^:mutable result true]
+      (when match (set! result (.is_assignable_to frame stackmap_frame)))
+      (when update
+        (let [lsize (.locals_size stackmap_frame)
+              ssize (.stack_size stackmap_frame)]
+          (when (or (> (.locals_size frame) lsize) (> (.stack_size frame) ssize)) (.reset frame))
+          (.set_locals_size frame lsize)
+          (.copy_locals frame stackmap_frame)
+          (.set_stack_size frame ssize)
+          (.copy_stack frame stackmap_frame)
+          (.set_flags frame (.flags stackmap_frame))))
+      result))
+
+  (method check_jump_target ^void [this ^VerificationFrame frame ^int target]
+    (let [match (.match_stackmap this frame target true false)]
+      (when (or (not match) (or (< target 0) (>= target _code_length)))
+        (.verifyError _verifier
+                      (String/format "Inconsistent stackmap frames at branch target %d"
+                                     (new Object/1 [target]))))))
+
+  (defclass ^:static StackMapReader
+    (field ^:private ^:final ^VerificationWrapper$ConstantPoolWrapper _cp)
+
+    (field ^:private ^:final ^StackMapStream _stream)
+
+    (field ^:private ^:final ^byte/1 _code_data)
+
+    (field ^:private ^:final ^int _code_length)
+
+    (field ^:private ^:final ^int _frame_count)
+
+    (field ^:private ^int _parsed_frame_count)
+
+    (field ^:private ^VerificationFrame _prev_frame)
+
+    (field ^char _max_locals)
+
+    (field ^char _max_stack)
+
+    (field ^boolean _first)
+
+    (method check_verification_type_array_size ^void [this ^int size ^int max_size]
+      (when (or (< size 0) (> size max_size))
+        (.classError _verifier "StackMapTable format error: bad type array size")))
+
+    (method ^:public get_frame_count ^int [this] _frame_count)
+
+    (method ^:public prev_frame ^VerificationFrame [this] _prev_frame)
+
+    (method ^:public code_data ^byte/1 [this] _code_data)
+
+    (method ^:public code_length ^int [this] _code_length)
+
+    (method ^:public at_end ^boolean [this] (.at_end _stream))
+
+    (method ^:public next ^VerificationFrame [this]
+      (set! _parsed_frame_count (unchecked-inc-int _parsed_frame_count))
+      (.check_size this)
+      (let [frame (.next_helper this)]
+        (when (some? frame) (.check_offset this frame) (set! _prev_frame frame))
+        frame))
+
+    (method ^:public check_end ^void [this]
+      (when-not (== _frame_count _parsed_frame_count)
+        (.verifyError _verifier "wrong attribute size")))
+
+    (field ^:private ^:final ^VerifierImpl _verifier)
+
+    (constructor ^:public [this ^byte/1 stackmapData ^byte/1 code_data ^int code_len
+                           ^VerificationFrame init_frame ^char max_locals ^char max_stack
+                           ^VerificationWrapper$ConstantPoolWrapper cp ^VerifierImpl context]
+      (set! (.-_verifier this) context)
+      (set! _stream (StackMapStream. stackmapData _verifier))
+      (set! _code_data code_data)
+      (set! _code_length code_len)
+      (set! _parsed_frame_count 0)
+      (set! _prev_frame init_frame)
+      (set! _max_locals max_locals)
+      (set! _max_stack max_stack)
+      (set! _first true)
+      (if (some? stackmapData)
+          (do (set! _cp cp) (set! _frame_count (.get_u2 _stream)))
+          (do (set! _cp nil) (set! _frame_count 0))))
+
+    (method check_offset ^void [this ^VerificationFrame frame]
+      (let [offset (.offset frame)]
+        (when (or (>= offset _code_length) (== (aget _code_data offset) 0))
+          (.verifyError _verifier "StackMapTable error: bad offset"))))
+
+    (method check_size ^void [this]
+      (when (< _frame_count _parsed_frame_count) (.verifyError _verifier "wrong attribute size")))
+
+    (method chop ^int [this ^VerificationType/1 locals ^int length ^int chops]
+      (if (nil? locals)
+          -1
+          (let [^:mutable pos (unchecked-subtract-int length 1)]
+            (loop [^int i 0]
+              (when (< i chops)
+                (if (.is_category2_2nd (aget locals pos))
+                    (set! pos (unchecked-subtract-int pos 2))
+                    (set! pos (unchecked-dec-int pos)))
+                (if (and (< pos 0) (< i (unchecked-subtract-int chops 1)))
+                    (return -1)
+                    (recur (unchecked-inc-int i)))))
+            (unchecked-add-int pos 1))))
+
+    (method parse_verification_type ^VerificationType [this ^int/1 flags]
+      (let [tag (.get_u1 _stream)]
+        (cond
+          (< tag StackMapGenerator/ITEM_UNINITIALIZED_THIS)
+            (VerificationType/from_tag tag _verifier)
+          (== tag StackMapGenerator/ITEM_OBJECT)
+            (let [class_index (.get_u2 _stream)
+                  nconstants (.entryCount _cp)]
+              (when (or (or (<= class_index 0) (>= class_index nconstants))
+                        (not (== (.tagAt _cp class_index) VerifierImpl/JVM_CONSTANT_Class)))
+                (.classError _verifier "bad class index"))
+              (VerificationType/reference_type (.classNameAt _cp class_index)))
+          (== tag StackMapGenerator/ITEM_UNINITIALIZED_THIS)
+            (do
+              (when (some? flags)
+                (aset flags 0 (bit-or-int (aget flags 0) VerificationFrame/FLAG_THIS_UNINIT)))
+              VerificationType/uninitialized_this_type)
+          (== tag StackMapGenerator/ITEM_UNINITIALIZED)
+            (let [offset (.get_u2 _stream)]
+              (when (or (>= offset _code_length)
+                        (not (== (aget _code_data offset) VerifierImpl/NEW_OFFSET)))
+                (.classError _verifier "StackMapTable format error: bad offset for Uninitialized"))
+              (VerificationType/uninitialized_type offset))
+          :else (do (.classError _verifier "bad verification type") VerificationType/bogus_type))))
+
+    (method next_helper ^VerificationFrame [this]
+      (let [^:mutable ^VerificationFrame frame nil
+            ^:mutable ^int offset 0
+            ^:mutable ^VerificationType/1 locals nil
+            frame_type (.get_u1 _stream)]
+        (cond
+          (<= frame_type StackMapGenerator/SAME_FRAME_END)
+            (do
+              (if _first
+                  (do
+                    (set! offset frame_type)
+                    (when (> (.locals_size _prev_frame) 0)
+                      (set! locals (new VerificationType/1 (.locals_size _prev_frame)))))
+                  (do
+                    (set!
+                      offset
+                      (unchecked-add-int (unchecked-add-int (.offset _prev_frame) frame_type) 1))
+                    (set! locals (.locals _prev_frame))))
+              (set! frame
+                    (VerificationFrame. offset
+                                        (.flags _prev_frame)
+                                        (.locals_size _prev_frame)
+                                        0
+                                        _max_locals
+                                        _max_stack
+                                        locals
+                                        nil
+                                        _verifier))
+              (when (and _first (some? locals)) (.copy_locals frame _prev_frame))
+              (set! _first false)
+              frame)
+          (<= frame_type StackMapGenerator/SAME_LOCALS_1_STACK_ITEM_FRAME_END)
+            (do
+              (if _first
+                  (do
+                    (set! offset
+                          (unchecked-subtract-int
+                            frame_type
+                            StackMapGenerator/SAME_LOCALS_1_STACK_ITEM_FRAME_START))
+                    (when (> (.locals_size _prev_frame) 0)
+                      (set! locals (new VerificationType/1 (.locals_size _prev_frame)))))
+                  (do
+                    (set! offset
+                          (unchecked-add-int
+                            (unchecked-subtract-int
+                              (unchecked-add-int (.offset _prev_frame) frame_type)
+                              StackMapGenerator/SAME_LOCALS_1_STACK_ITEM_FRAME_START)
+                            1))
+                    (set! locals (.locals _prev_frame))))
+              (let [stack (new VerificationType/1 2)
+                    ^:mutable ^int stack_size 1]
+                (aset stack 0 (.parse_verification_type this nil))
+                (when (.is_category2 (aget stack 0))
+                  (aset stack 1 (.to_category2_2nd (aget stack 0) _verifier))
+                  (set! stack_size 2))
+                (.check_verification_type_array_size this stack_size _max_stack)
+                (set! frame
+                      (VerificationFrame. offset
+                                          (.flags _prev_frame)
+                                          (.locals_size _prev_frame)
+                                          stack_size
+                                          _max_locals
+                                          _max_stack
+                                          locals
+                                          stack
+                                          _verifier))
+                (when (and _first (some? locals)) (.copy_locals frame _prev_frame))
+                (set! _first false)
+                frame))
+          :else
+            (let [offset_delta (.get_u2 _stream)]
+              (when (< frame_type StackMapGenerator/SAME_LOCALS_1_STACK_ITEM_EXTENDED)
+                (.classError _verifier "reserved frame type"))
+              (cond
+                (== frame_type StackMapGenerator/SAME_LOCALS_1_STACK_ITEM_EXTENDED)
+                  (do
+                    (if _first
+                        (do
+                          (set! offset offset_delta)
+                          (when (> (.locals_size _prev_frame) 0)
+                            (set! locals (new VerificationType/1 (.locals_size _prev_frame)))))
+                        (do
+                          (set! offset
+                                (unchecked-add-int
+                                  (unchecked-add-int (.offset _prev_frame) offset_delta)
+                                  1))
+                          (set! locals (.locals _prev_frame))))
+                    (let [stack (new VerificationType/1 2)
+                          ^:mutable ^int stack_size 1]
+                      (aset stack 0 (.parse_verification_type this nil))
+                      (when (.is_category2 (aget stack 0))
+                        (aset stack 1 (.to_category2_2nd (aget stack 0) _verifier))
+                        (set! stack_size 2))
+                      (.check_verification_type_array_size this stack_size _max_stack)
+                      (set! frame
+                            (VerificationFrame. offset
+                                                (.flags _prev_frame)
+                                                (.locals_size _prev_frame)
+                                                stack_size
+                                                _max_locals
+                                                _max_stack
+                                                locals
+                                                stack
+                                                _verifier))
+                      (when (and _first (some? locals)) (.copy_locals frame _prev_frame))
+                      (set! _first false)
+                      frame))
+                (<= frame_type StackMapGenerator/SAME_FRAME_EXTENDED)
+                  (do
+                    (set! locals (.locals _prev_frame))
+                    (let [length (.locals_size _prev_frame)
+                          chops (unchecked-subtract-int
+                                  StackMapGenerator/SAME_FRAME_EXTENDED
+                                  frame_type)
+                          ^:mutable new_length length
+                          ^:mutable flags (.flags _prev_frame)]
+                      (when-not (== chops 0)
+                        (set! new_length (.chop this locals length chops))
+                        (.check_verification_type_array_size this new_length _max_locals)
+                        (set! flags 0)
+                        (loop [^int i 0]
+                          (if (< i new_length)
+                              (if (.is_uninitialized_this (aget locals i) _verifier)
+                                  (set! flags (bit-or-int flags VerificationFrame/FLAG_THIS_UNINIT))
+                                  (recur (unchecked-inc-int i)))
+                              nil)))
+                      (if _first
+                          (do
+                            (set! offset offset_delta)
+                            (if (> new_length 0)
+                                (set! locals (new VerificationType/1 new_length))
+                                (set! locals nil)))
+                          (set! offset
+                                (unchecked-add-int
+                                  (unchecked-add-int (.offset _prev_frame) offset_delta)
+                                  1)))
+                      (set! frame
+                            (VerificationFrame. offset
+                                                flags
+                                                new_length
+                                                0
+                                                _max_locals
+                                                _max_stack
+                                                locals
+                                                nil
+                                                _verifier))
+                      (when (and _first (some? locals)) (.copy_locals frame _prev_frame))
+                      (set! _first false)
+                      frame))
+                (<= frame_type StackMapGenerator/APPEND_FRAME_END)
+                  (let [appends (unchecked-add-int
+                                  (unchecked-subtract-int
+                                    frame_type
+                                    StackMapGenerator/APPEND_FRAME_START)
+                                  1)
+                        ^:mutable real_length (.locals_size _prev_frame)
+                        new_length (unchecked-add-int
+                                     real_length
+                                     (unchecked-multiply-int appends 2))]
+                    (set! locals (new VerificationType/1 new_length))
+                    (let [pre_locals (.locals _prev_frame)
+                          ^:mutable ^int i 0]
+                      (set! i 0)
+                      (while (< i (.locals_size _prev_frame))
+                        (aset locals i (aget pre_locals i))
+                        (set! i (unchecked-inc-int i)))
+                      (let [flags (new int/1 [(.flags _prev_frame)])]
+                        (set! i 0)
+                        (while (< i appends)
+                          (aset locals real_length (.parse_verification_type this flags))
+                          (when (.is_category2 (aget locals real_length))
+                            (aset locals
+                                  (unchecked-add-int real_length 1)
+                                  (.to_category2_2nd (aget locals real_length) _verifier))
+                            (set! real_length (unchecked-inc-int real_length)))
+                          (set! real_length (unchecked-inc-int real_length))
+                          (set! i (unchecked-inc-int i)))
+                        (.check_verification_type_array_size this real_length _max_locals)
+                        (if _first
+                            (set! offset offset_delta)
+                            (set! offset
+                                  (unchecked-add-int
+                                    (unchecked-add-int (.offset _prev_frame) offset_delta)
+                                    1)))
+                        (set! frame
+                              (VerificationFrame.
+                                offset
+                                (aget flags 0)
+                                real_length
+                                0
+                                _max_locals
+                                _max_stack
+                                locals
+                                nil
+                                _verifier))
+                        (set! _first false)
+                        frame)))
+                (== frame_type StackMapGenerator/FULL_FRAME)
+                  (let [flags (new int/1 [0])
+                        locals_size (.get_u2 _stream)
+                        ^:mutable ^int real_locals_size 0]
+                    (when (> locals_size 0)
+                      (set! locals (new VerificationType/1 (unchecked-multiply-int locals_size 2))))
+                    (let [^:mutable ^int i 0]
+                      (set! i 0)
+                      (while (< i locals_size)
+                        (aset locals real_locals_size (.parse_verification_type this flags))
+                        (when (.is_category2 (aget locals real_locals_size))
+                          (aset locals
+                                (unchecked-add-int real_locals_size 1)
+                                (.to_category2_2nd (aget locals real_locals_size) _verifier))
+                          (set! real_locals_size (unchecked-inc-int real_locals_size)))
+                        (set! real_locals_size (unchecked-inc-int real_locals_size))
+                        (set! i (unchecked-inc-int i)))
+                      (.check_verification_type_array_size this real_locals_size _max_locals)
+                      (let [stack_size (.get_u2 _stream)
+                            ^:mutable ^int real_stack_size 0
+                            ^:mutable ^VerificationType/1 stack nil]
+                        (when (> stack_size 0)
+                          (set! stack
+                                (new VerificationType/1 (unchecked-multiply-int stack_size 2))))
+                        (set! i 0)
+                        (while (< i stack_size)
+                          (aset stack real_stack_size (.parse_verification_type this nil))
+                          (when (.is_category2 (aget stack real_stack_size))
+                            (aset stack
+                                  (unchecked-add-int real_stack_size 1)
+                                  (.to_category2_2nd (aget stack real_stack_size) _verifier))
+                            (set! real_stack_size (unchecked-inc-int real_stack_size)))
+                          (set! real_stack_size (unchecked-inc-int real_stack_size))
+                          (set! i (unchecked-inc-int i)))
+                        (.check_verification_type_array_size this real_stack_size _max_stack)
+                        (if _first
+                            (set! offset offset_delta)
+                            (set! offset
+                                  (unchecked-add-int
+                                    (unchecked-add-int (.offset _prev_frame) offset_delta)
+                                    1)))
+                        (set! frame
+                              (VerificationFrame.
+                                offset
+                                (aget flags 0)
+                                real_locals_size
+                                real_stack_size
+                                _max_locals
+                                _max_stack
+                                locals
+                                stack
+                                _verifier))
+                        (set! _first false)
+                        frame)))
+                :else (do (.classError _verifier "reserved frame type") nil))))))))

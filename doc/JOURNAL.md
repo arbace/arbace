@@ -9529,6 +9529,170 @@ jdk26u's. Alternatives considered: keeping the variant with the method dropped (
 Keys: `arbace_javac_key` moves (overlay/jdk/javac/), gate_key and the runtime key do not. Verified by `bin/javac-vendor
 tool` as the gate runs it (on the gate's executable of key f60652fb7fb9, `ARBACE_HOST_EXE` the stage 0 of seed 3c48859d).
 
+## 2026-11-16: F26's slice, the class-file API compiled in the Go build (branch `f26-classfile`, from `b2-1115` 9e3d05d2b)
+
+B2's joint world (java-night's slices, converted at 9e3d05d2b) did not compile: `go build ./jrt` gave 206 errors, 173 of them
+F26's (172 in `ClassPrinterImpl`, 1 in `ClassReaderImpl`). The user decided B2 ships without F26 and F26 returns as its own
+slice; this is that slice's work, on top of 9e3d05d2b (whose world still holds F26). Three root causes:
+
+- **String is not a ConstantDesc.** With F26 the world translates ConstantDesc with its `resolveConstantDesc(Lookup)` (Lookup is
+  translated since F15), so its Go interface has `ResolveConstantDesc_MethodHandles_Lookup__O`, which jrt's hand-written String
+  lacked: ClassPrinterImpl passes string literals as ConstantDescs (172 errors) and j2g_up's `Up_String_ConstantDesc` failed.
+- **Class is not a TypeDescriptor.OfField (nor a Constable).** F26 brings `java.lang.invoke.TypeDescriptor`; MethodType's
+  bridges `parameterType`/`returnType` return Classes as OfFields (`Up_Class_TypeDescriptor_OfField`). jrt's Class had
+  `descriptorString`, `isArray`, `isPrimitive`, `componentType` and `arrayType` but not the markers or the bridges.
+- **A switch's lub.** `ClassReaderImpl.entryByIndex` assigns a switch of AbstractPoolEntry's subclasses (each a PoolEntry) to
+  a PoolEntry. javac's type is the intersection AbstractPoolEntry & PoolEntry; the analyzer's `convert-node` converted each tail
+  but kept the tails' unified type (the class part), so j2g declared an `AbstractPoolEntry_I` temporary and assigned it to the
+  PoolEntry.
+
+Fixes: a32a1401c (j2g's support code, `arbace/j2g/out.ae`, as for String.describeConstable: String's `resolveConstantDesc` and
+its bridge; Class's `Is_TypeDescriptor`, `Is_TypeDescriptor_OfField`, the `componentType`/`arrayType` OfField bridges,
+`Is_Constable` and `describeConstable` as `Optional.of(ClassDesc.ofDescriptor(descriptorString()))`, each written only when
+its interfaces are in the world and jrt does not define it); 0ba1d5de3 (`arbace.classes.analyze/converted-type`: the switch,
+if and if-instance cases of `convert-node` type the node `to` when the tails' unified type does not convert to it; and, because
+the tools' host evaluates `arbace/classes` from its embedded copy (RT.toolSource names j2g's, not the front end's) until a
+re-seed, j2g's `coerce` takes an abstract class or interface to an interface it is not a subtype of by jrt's `As`: in the
+world's translation that changes one assignment, no other file's `As` count). Considered: jrt's manifest and hand-written
+String/Class (jrt's own build has no Lookup, ClassDesc or TypeDescriptor types, so the methods cannot live in `go/arbace/jrt`;
+the support code is where such members already are); a variant of ClassReaderImpl (the defect is the analyzer's, any such
+switch would meet it).
+
+After them, `go build -gcflags=-e ./jrt` at the gate build of 0ba1d5de3 (`bin/heavy-lock bin/arbace-go --gate-build` on the
+next worktree's stage 0) reports **no F26 error**; 26 remain, all B2's non-F26 ones (ObjectInputStream's and SealedObject's
+private accessors, GenericSignatureFormatError's and ConcurrentHashMap$Segment's super constructors, eleven `any(nil)` Lookups,
+TypeAnnotationSupport/TypeAnnotationParser's Executable as an AnnotatedElement, HttpConnection's `Id__J`). None of them shares a
+root cause with F26's. `bin/j2g-unit` on stage 0 passes; with the checkout's analyzer loaded over it (`J2G_UNIT_SOURCES`) its
+six invokers tests fail the same with and without 0ba1d5de3 (the checkout's analyzer over the seed's world, not this change).
+
+The run-time smoke `test/jrt/classfile/cfsmoke/ClassFileSmoke.java` (03739ada5; its expected output `ClassFileSmoke.out` from
+jdk26u's JDK 26): builds a class (a branch, a loop, a field, stack maps by the default resolver), parses it element by element,
+verifies and transforms it, and asks the String and Class contracts above. It is run by hand (its header), not a corpus test.
+
+A fourth commit, 149432655: the interpreter reads a hand-written class's member table, so Class.describeConstable and
+String.resolveConstantDesc also get table entries (j2g's support-table-forms, as String.describeConstable has); without
+them the smoke stopped at "No accessible method describeConstable in java.lang.Class".
+
+**The smoke ran.** B2's 26 non-F26 errors (and four more in package lang: `jrt.Member_Cast` undefined, MethodHandleInfo's
+reflectAs in j2g_dyn; `any(nil)` Lookups in KeywordInvokeSite and ReflectorCallSite; `jrt.NN(any(nil))`) were stubbed by sed
+in the gate build's generated module only (`.tmp/f26/scratch-hacks.sh` in the worktree, nothing committed), the executable
+built from it (`.tmp/f26/scratch-build.sh`), and `test/java/run.ae --load files` ran the smoke's forms on it: **its output is
+the JDK's byte for byte** (`ClassFileSmoke.out`). So once B2's own fixes land, F26 compiles and the API works on the runtime.
+
+**Landing F26 on top of B2** (which removes it from the world): re-add `classfile-sources` to `test/jrt/jrt_sources.ae`'s world
+(and the java.lang.constant/invoke/reflect parts B2 takes out with it), `bin/jrt-convert update` (35 GiB) and `bin/j2g-edge
+update` (MethodHandleInfo's REF_ constants, Enum$EnumDesc, VarHandle$VarHandleDesc, as in F26's night commands), the forms'
+and fixtures' updates, then this branch's four commits (cherry-picked: they are no-ops in a world without F26, each guarded by
+`m/translated?`), a gate build, the smoke by its header's commands, and Java's levels on F26's 44 corpus tests.
+
+## 2026-11-16: `bin/java-project`: a `META-INF` file in two modules shadowed, not an error (branch `ghidra-g1n`, from `mac/java-night` `989b6607a`)
+
+- Found by the Ghidra demo's `bin/run-g1 analyze` (run by day while B2's build is fixed): SleighCompile's read stopped after
+  every module read, merging `WORK/resources.all`, at `META-INF/DEPENDENCIES` in log4j-api and log4j-core (Maven's
+  remote-resources output; their `LICENSE` and `NOTICE` too, equal by chance). Any program of two Apache artifacts hits it; so
+  would night 18's `--build-program` of SleighCompile and of G1's tests.
+- The rule: a `META-INF` file (not `META-INF/services`, still concatenated) in two modules that differ is the first module's in
+  `resources.all`, as a class path's `getResource` answers in its order; the later ones are listed in `WORK/resources.shadowed`
+  (path and module a line) and kept in their own `resources.jars/NNN-MODULE`, which is what `--build-program` gives j2g. A file
+  outside `META-INF` in two modules that differ stays an error. Alternatives: dropping `DEPENDENCIES`, `LICENSE` and `NOTICE` as
+  Maven metadata beside `META-INF/maven` (a program may read its notices; the class path keeps them), or the first copy of every
+  duplicate (hides real conflicts of program data).
+- Fixture: `test/java/project/controls/meta-dup.edn` (two source modules, each `META-INF/NOTICE`: the first kept, the second
+  listed and in `002-b`) and the control `res-dup.edn` (`shared.txt` in both must fail, its message naming it). `bin/java-project
+  test` 31 of 31 (main's stage 0, javac's tool `javac-f70d1a9d900eb07a9afc` with `REPR_JAVA_STALE_OK=1`). doc/go/BUILD.md's
+  "Java sources by module".
+
+## 2026-11-16: A8 and A8b, declarations outside the world (branch `ghidra-a8`, from B2's `71f9d2f7b` with `6519bdd3b`)
+
+- **The decision** (the user, round 48): A8 is built as the Ghidra case study's G1 plan intended (§2's row: java.desktop's
+  declarations so that unreached GUI code translates to stubs), with A8b (the same over the binary jars on javac's class path
+  alone). The case: the demo's `bin/run-g1 analyze` over B2's world refused 23 classes the JDK's runs load, 11 for a type of a JDK
+  module outside the world (java.beans.PropertyChangeEvent in log4j-core's LoggerContext and its cascade, java.awt.Desktop in
+  Ghidra's FileUtilities, javax.sql in log4j's JDBC sources) and 9 for a class-path-only jar's type (jdom2, commons-io, OSGi, the
+  disruptor, jspecify's @Nullable, javax.annotation.processing).
+- **The design** (`arbace.j2g.outside`; J2G-SPEC §4.1, "Declarations outside the world"; doc/go/BUILD.md, "Declarations outside the
+  world"). j2g's `--outside-platform DIR` (the platform's exploded modules but java.base: `bin/repr-java platform-dir`, the
+  platform javac compiles against, jdk/javac/platform.sha256's pin) and `--outside-classes DIR=ORIGIN` (a binary jar unpacked,
+  named by its coordinate) make `env/*declared*` a lookup over the edge's classes and those sources in javac's order: a class
+  neither the forms, jrt nor the edge has is declared on first use from its class file (`arbace.repr.java.classfile`), in the shape
+  the JVM's reflection gave the edge (`env/reflect-info`'s: modifiers from InnerClasses for an inner class, ACC_SUPER off, no super
+  for an interface, fields with constants, methods and constructors without an inner member class's outer instance, generic
+  signatures, retention and targets, @FunctionalInterface's method, enum constants, record components), read back by the edge's
+  own `edge/facets-value` (factored out of `read-edge`). The class is outside the world: a class naming it analyzes and is
+  translated; each operation on it is `J2g_Missing`, which throws `UnsupportedOperationException: j2g: class C is outside the
+  closed world: declarations only, from SOURCE` when reached (`code/class-missing`; SOURCE `java.desktop (the platform)` or the
+  coordinate). A member of a translated class whose descriptor names such a class exists in Go, the type Go's `any`
+  (`m/member-desc?`, `member-mdesc?` in `decls/class-methods`, `class-fields`, `m/member-in-world?`; code's member-descriptor
+  checks): without it a call of a world method taking an outside interface, made with a world object (the fixture's
+  `events.listen(new Recorder())`), was itself a stub on the main path; a value, a cast and an array of the class stay stubs, and a
+  catch of it catches nothing (no instance exists). Constants of such a class fold as javac folds them; an annotation of such a
+  type is left out at run time (jrt skips a type it cannot load). java.base is never a source (its classes outside the world are
+  jrt's, the cut ones or refused on purpose); an edge class keeps the edge's facets and takes a missing one (java.desktop's
+  JPanel's generics) from its class file only when it is a platform class. The methods' declaration annotations and NestHost are
+  left out (documented). `report.edn`'s `:outside`: the sources and each class declared with its source (the provenance).
+  Opt-in: `program.edn`'s `:java :outside [:platform :class-path]` (test/java/project.ae checks it); `bin/java-project read` writes
+  j2g's arguments into `WORK/outside.args`, which `bin/arbace-go --build-program` appends to j2g's and keys with the platform's pin.
+  Without the options nothing changes (`report-str` leaves a nil `:outside` out).
+- **Alternatives**: the edge recorded on the frozen JVM for java.desktop's classes (`bin/j2g-edge`), the case study's GH5 (iv) as
+  written: binds a program's world to the JVM's recording and to one shipped file, and A8b's jars have no JVM recording at all;
+  declarations as generated Java forms stubs (bodies that throw): the classes would be in the world, their instances creatable and
+  their failures later and quieter; refusals left as they were (A7 alone): stubs SleighCompile itself.
+- **Fixtures and controls**. `bin/j2g-unit`'s `test-outside` (test/j2g/unit/outside, the platform and the toy jar unpacked by
+  bin/j2g-unit): without the declarations the four classes are refused (the control), with them none; a class naming
+  javax.nonesuch.Gadget is refused still (the control); `new PropertyChangeEvent` and `ToyText.upper` are J2g_Missing naming their
+  sources; a world method taking the outside interface is no stub, and without the declarations its descriptor is no member's (the
+  control); ToyText.NAME folded; the declarations' facts (Desktop$Action's modifiers 16409 and constants, PropertyChangeEvent's
+  super, DataSource's none, Marker's retention and targets); java.base not declared (java.lang.classfile); the edge's classes
+  keep its answers. 14 of 14 pass; bin/j2g-unit's 7 other failures (type annotations, invokers) fail alike at HEAD on B2's
+  executable (`08bfa5c8`), not this branch's. The toy repository gains `org.example:toyext:1.0` (binary only: a utility with a
+  constant, an exception, an interface, a RUNTIME annotation; test/java/project/make-jars, `--check` byte for byte).
+  `test/programs/outside` (java.beans, java.awt.Desktop, javax.sql and toyext, each named in code the main run never executes; its
+  runs `main`, and `reach` and `reach-jar`, the negative controls, which must fail with the stub's message on stderr, exit 1 as an
+  uncaught exception's); `bin/java-project test` 34 of 34 (its `outside.args` and the control `controls/outside-bad.edn`).
+  `bin/j2g --analyze-only` over the fixture on the whole world (stage 0): without `:outside` 6 failures in 5 classes (Main
+  itself by the cascade through Recorder), with it 0, the stubs (`J2G_MISSING`) only in fire, propertyChange, connect, browse,
+  fancy and readOr.
+- **Waiting for a build**: `test/programs/outside`'s build and runs (`bin/arbace-go --build-program --check outside`) need the gate
+  build at this branch's key (j2g changed: the key moved from B2's `08bfa5c8`); the runs' exit code 1 and stderr prefix are as
+  jrt's uncaught exception prints them, to confirm there.
+
+## 2026-11-16: A8 over the Ghidra demo's SleighCompile, and a fix (branch `ghidra-a8`)
+
+- The demo's `bin/run-g1 analyze` (arbace-ghidra `g1f` `c8e5e58`: `plan/softwaremodeling.edn` `:outside [:platform
+  :class-path]`; main's stage 0, javac's tool `javac-f70d1a9d900eb07a9afc` with `REPR_JAVA_STALE_OK=1`, `J2G_MISSING` over the
+  23 classes): 14,474 classes analyzed, 20 failing (B2's world without A8: 1,835), none of them loaded by the JDK's runs (was
+  23); 52 min 46 s, peak 5.4 GiB; 769 classes declared outside the world (417 of the platform's modules, 341 java.desktop's;
+  352 of 25 jars). The 20 left: the world's own java.awt.Color (jrt's overlay) is no java.awt.Paint (9), java.base outside the
+  world (java.lang.foreign, SecurityManager: 7), two java.base edge classes recorded without generics (3), an overload (1).
+- The first run gave 310 failures, 286 of them `No matching clause`: a generic interface's Signature names Object as its super,
+  which outside/generics-data dropped as nil and `tnode` refused (guava's BiMap). Fixed in `b7a8ac6a6`, with test-outside's
+  checks of javax.swing.ListModel's and DefaultListModel's generics (16 of 16).
+- Two of the 23 keep a stub on the run's path, by design of A8 (a declaration has no code): log4j-core's
+  `LoggerContext.setConfiguration` makes a java.beans.PropertyChangeEvent (the only java.desktop class the JDK's runs load), and
+  SourceFileIndexer uses guava's HashBiMap, declared from guava's binary jar. The first needs a decision (GH5 (iii)'s headless
+  subset into the world, as java.awt.Point is, or GH5 (i)); the second guava's sources module, which needs jsr305 3.0.2 and
+  checker-qual 3.37.0 pinned (A3's closure of BiMap fails at its root on javax.annotation's absence): a fetch to approve.
+- Correction to the entry above: the first run's `No matching clause` failures were 276 of the 310, not 286.
+
+## 2026-11-16: GH5 (iii)'s first slice, java.beans' PropertyChangeEvent and PropertyChangeListener (branch `ghidra-a8`; conversion pending)
+
+- **Decided (the user, round 49):** GH5 (iii) for PropertyChangeEvent: it and PropertyChangeListener, with the supertypes they
+  need, into the world from jdk26u's java.desktop sources (jdk26u `baf63fbe`, `src/java.desktop/share/classes/java/beans/`),
+  as java.awt.Point is. Their supertypes, java.util.EventObject and EventListener, are the world's already; PropertyChangeEvent
+  imports java.io.Serial alone. `test/jrt/jrt_sources.ae`'s `added-module-sources` lists the two files (KIND
+  share:java.desktop, translated into java.base's tree). On ghidra-a8 only: it lands after the consolidation.
+- `test/programs/outside` follows: Events.fire (a PropertyChangeEvent to a world PropertyChangeListener, Recorder) now runs in the
+  main run (`changed: config`), and the negative control `reach` uses java.beans.PropertyChangeSupport, still outside.
+- **The conversion is not done.** `bin/jrt-convert update` (javac's tool `javac-f70d1a9d900eb07a9afc`, `REPR_JAVA_STALE_OK=1`,
+  under `ARBACE_HEAVY_LOCK=.tmp/big-h.lock`) ran twice and its read was killed by the kernel's OOM killer both times: at 20:27
+  (MemAvailable 53 GiB at the start, the javac tool at 42 GiB RSS when killed) and at 20:40 with `GOMEMLIMIT=34GiB` (60 GiB at the
+  start; the host's MemAvailable fell to 13 GiB under the other jobs, the tool killed at 29 GiB). jdk/ is untouched: `update` writes
+  it only after every step passes. Left for a morning window with the host otherwise quiet (the read's own peak, 35-42 GiB, plus
+  margin): `GOMEMLIMIT=34GiB ARBACE_HEAVY_LOCK=.tmp/big-h.lock bin/heavy-lock bin/jrt-convert update`, then `bin/j2g-edge update`
+  (PropertyChangeListener leaves the edge for the forms), `bin/clojure-tests --java-fixtures update` if the fixtures' forms move,
+  `bin/provenance-check` and `bin/jrt-convert verify`. Until then `jdk/sources.txt` and `jdk/forms` lag `jrt_sources.ae` by these
+  two files.
+
 ## 2026-11-17: the crops tier: the essential gate is the core (branch `gate-ess-diet`, from `next` `cf8268ebf`)
 
 The user's decision of the day: shrink the essential gate. It had 71 steps and about 113 minutes of serial work whenever its keys
@@ -9952,3 +10116,106 @@ the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of
   `simd_swizzle!` expansion's `Impl::concat_swizzle` is unresolved (a def-site block item, a trait's provided method, the const
   argument `{$index.len()}`); the CTFE of `Swizzle::INDEX` is the record's while concat_swizzle's body is std's (C2). Alternative
   considered: evaluating INDEX now (no body of ours needs it yet; nothing would test it).
+
+## 2026-11-17: Java's deferred interp rows triaged (branch `h-java-deferred`, from `next` `e4a7a30f3`)
+
+The eval cell's 611 deferred rows (gate 13c's record, 2026-11-14) run again at interp, light, on next's gate executable
+`f60652fb7fb9568e76b1` (581 tests, the `:speed-hang` ones left out; javac's tool `javac-f70d1a9d900eb07a9afc` stale-ok): 168 pass,
+B2's world being in the executable and not yet in the record; their rows alone re-recorded (Java eval 2,549 / 165 / 611 → 2,717 /
+165 / 443, completeness 87 → 89). The 74 of the remaining 413 whose new reasons no class took classed in test/java/divergences.edn.
+The 413 grouped by root cause (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-deferred"): ObjectInputFilter's System.Logger
+87, sun.invoke.util.Wrapper 33 (F26's removal of 2026-11-16 took it from MethodType), DefaultLoggerFinder 18, jrt's ClassCache's
+recursive computeIfAbsent 8, and the costlier ones (the DynSub list 29, members 48, missing classes 37). Fixed in code for the night
+(not provable by day: each needs `bin/jrt-convert derive`, `update` and a build): four derivations in test/jrt/derive.ae
+(ObjectInputFilter, java.util.logging's Logger and LogManager over `jdk.internal.jrt.SystemLoggers`, Wrapper without its
+ClassDescs), `SystemLoggers.isSystem`, ClassCache computing outside the map, and the interpreter's try (`Compiler$CF$Try.eval`):
+a finally that jumps discards the pending exception (JLS 14.20.2; t03210). Alternatives considered: System.Logger in jrt itself
+(JCS155 (a), a Go port of the interface and LoggerFinder: larger, and the derivations follow the rule F24 and JMX-1 already use);
+bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no ConstantDesc).
+
+## 2026-11-17: A8c, the declarations outside the world completed (branch `h-ghidra-20`, next `e4a7a30f3` with `ghidra-a8` merged)
+
+- Why: after A8/A8b the Ghidra demo's `bin/run-g1 analyze` (arbace-ghidra `results/analyze-g1.edn` `:after-a8`) left 20 failing
+  classes, none loaded by the JDK's runs, in four causes. Fixed generically in j2g, Ghidra unedited, no program variant
+  (`b2110296a`; J2G-SPEC §4.1, "A8c"; `arbace/j2g/outside.ae`, `arbace/classes/analyze.ae`, `arbace/j2g/{model,code,decls,world,main}.ae`):
+  1. java.base's API (`java.*`, `javax.*`) that neither the world, jrt nor the edge has is declared from the platform's java.base
+     class files (`java.base (the platform)`): SecurityManager, java.lang.foreign. A8 had left java.base out; the change is kept
+     away from the world: such a class is a member's type only in a program's own class (`m/member-desc? owner d`), so the
+     world's classes keep the members jrt's hand-written Go knows; jdk.internal and sun stay refused.
+  2. An edge class's missing facets read from java.base's class file (Thread.UncaughtExceptionHandler's and
+     ReentrantReadWriteLock's generics), as A8 did for the other modules; the edge's answers kept, not reported as outside.
+     Chosen over `bin/j2g-edge update`: the edge records the world's questions, a program's are its own.
+  3. The world's variants of platform classes completed (`outside/completion`, `analyze/*completion*`): jrt's java.awt.Color
+     takes Paint and the cut ColorSpace members from java.desktop's class, the members derived `:outside-member` methods whose Go
+     bodies return J2g_Missing's value. Alternatives: Paint into the world with a reduced overlay (a conversion, a Paint without
+     createContext, and GColor's ColorSpace calls still failing); stubs at the call sites (Color would still be no Paint).
+     Constructors, fields and interfaces are never completed, nor a method the class inherits concretely.
+  4. Not an overload: ghidra.util's files share a namespace, and DateUtils' import of java.util.function.Predicate, read last,
+     won over AddressRangeIterators' commons-collections4 Predicate. A file's own imports now resolve first
+     (`analyze/file-import`, the world unit's `:file-imports`), as JLS 7.5.1 means.
+- Proof: `bin/j2g-unit` 110 pass (23 new checks in `test-outside-completion`, fixtures `test/j2g/unit/outside/q/{Paints,Guarded,
+  Imports,Watched}.ae`, each fix with its negative control), the 7 failures next has too (invokers, type annotations) unchanged.
+  `bin/run-g1 analyze` by day under the heavy lock (the plan with guava's sources module): 15,271 classes, 0 failing (was 20),
+  45 min 55 s, peak 6.25 GiB; 771 classes declared, 9 of java.base (arbace-ghidra g1g `3f086eb`, `:after-a8c`).
+- Left: the translation of A8c (Color's Go methods, a class extending the outside SecurityManager) is first compiled by the
+  build (§8's jobs at the merged key); log4j-core's PropertyChangeEvent stays a stub until GH5 (iii)'s conversion.
+
+## 2026-11-17: F26 and GH5 (iii)'s first slice landed in one conversion, with h-java-deferred and A8c (branch `f26-ghidra`, from `next` `cf8268ebf`)
+
+- **What the branch holds.** F26, the class-file API in the Go build's world: B2's removal (6df319ee1) reversed in
+  `test/jrt/jrt_sources.ae` (`classfile-sources` back in the closure) and f26-classfile's four code commits cherry-picked
+  (a32a1401c, 03739ada5, 0ba1d5de3, 149432655; its journal acaae3905 as the entry above, unchanged). ghidra-a8's six commits
+  (6519bdd3b, fe5b0fe58, b7a8ac6a6, 3691d479a, 1ea2867ae, 352535191: A8, A8b and java.beans' PropertyChangeEvent and
+  PropertyChangeListener in `added-module-sources`; 127eac68c, 6519bdd3b's earlier pick, is on no branch, so it was picked
+  again). h-java-deferred (0b63165bb) merged, the coordinator's addition, with one change: **its Wrapper derivation is dropped**
+  (`test/jrt/derive.ae`'s `hjd-derivations` keeps ObjectInputFilter, Logger and LogManager; the derived
+  `overlay/jdk/java.base/sun/invoke/util/Wrapper.java` removed). It took Wrapper's ClassDescs out because F26 had left the world;
+  with F26 back, jdk26u's Wrapper is the world's again and jdk.internal.constant's ConstantUtils and ArrayClassDescImpl call
+  `basicClassDescriptor`/`wrapperClassDescriptor`. h-ghidra-20's A8c (b2110296a, b6c576acd) cherry-picked after the conversion
+  (it changes no converted input). next merged three times (105b0d832: javac's tool fixed; 77630727b; 5bf0e1ccf: genclass.ae's
+  `into`, without which the gate build's prepare failed).
+- **Two fixes of this branch.** (1) `arbace.j2g.outside` required `arbace.repr.java.classfile` in its ns form, but repr/java is
+  not embedded (`arbace.j2g.embed/excluded`), so every build's image prepare failed ("arbace.j2g.main Syntax error executing at
+  (arbace/j2g/outside.ae:1:1)"): the reader is now resolved on demand (`requiring-resolve`, as `arbace.j2g.jvm`), outside the
+  callers' `try`, so that a reader that does not load is an error and not a class left undeclared. A8c's version of the file was
+  merged with the same rule. (2) `Compiler$CodeHostNew`'s field `abstract` (eval speed, 94914b900) renamed `abstractClass`:
+  `abstract` is a Java keyword, so `bin/repr-java declarations`' Java did not compile and `bin/clojure-tests --java-fixtures
+  update` (and the full gate's `verify`) failed.
+- **javac's tool.** Three builds at the checkout's key failed: Go's shared build cache was trimmed under the first one's
+  `go build` (another job's trim, "could not import bytes ... no such file"; the next builds used a cache of the worktree's own,
+  `GOCACHE=.tmp/gocache`); the second stopped on fix (1); the third was OOM-killed in its host compile (the second stage, the
+  namespaces compiled with repr/java's reader, 27 GB and growing, beside its j2g at 9.6 GB and other jobs; the first build's peak
+  was 45 GB). The conversion then ran on B2's tool, `.tmp/gate-exe/javac-09cfb08baf2525092d6d` (the provenance's host since B2),
+  with `REPR_JAVA_STALE_OK=1`: repr/java has not changed since 2026-11-10 (e1d5c5b70), so the read is the same reader's. The
+  provenance names that tool; the full gate's javac-tool build at the merged key and its `jrt-convert verify` are the check.
+- **The one conversion**, under `ARBACE_HEAVY_LOCK=.tmp/big-h.lock bin/heavy-lock` with `GOMEMLIMIT=34GiB`, started at
+  MemAvailable 46 GiB: `bin/jrt-convert derive --check` (86 of 86 as derived), `bin/jrt-convert update`: **1700 s, peak 40.4 GB**
+  (the javac tool's read: 3350 files, all native, 0 failed, 1108 s); 3275 of 3554 forms unchanged, 11 different, 268 added
+  (java.lang.classfile and its subpackages, jdk.internal.classfile, java.lang.constant's descriptors, jdk.internal.constant,
+  java.lang.invoke.TypeDescriptor, sun.invoke.util.Wrapper, VerifyError, JavaUtilCollectionAccess, java.beans.PropertyChangeEvent
+  and PropertyChangeListener; the h-java-deferred overlays' forms). Then `bin/jrt modules --check` and `provides --check`
+  (current), `bin/j2g-edge update` (7 min, 8.6 GB: jdk/edge.edn 117 lines in, 439 out; jdk/javac/edge.edn and its :jdk-edge by
+  `bin/javac-vendor edge`), `bin/clojure-tests --java-fixtures update` (no change), `bin/provenance-check` (passes).
+- **Verified.** `bin/j2g-edge verify` passes (after A8c and next's merges). `bin/jrt-convert verify` (on the same tool, after A8c and next's merges): **jdk/ is the conversion, byte for byte** (3554 of
+  3554 forms, 22 data files; 753 s, peak 40.5 GB).
+  The gate build (`bin/heavy-lock bin/arbace-go --gate-build`, 66 min, peak 29.7 GB, both executables built; under
+  `ARBACE_HOST_EXE`, so cached at `.tmp/gate-exe/31f89bf86be7dac52b3d`, not at the gate's own key): F26's world compiles. **F26's
+  smoke** (`test/jrt/classfile/cfsmoke`, by its header's commands on that executable): its output is the JDK's byte for byte
+  (58 lines). java.beans.PropertyChangeEvent and PropertyChangeListener are translated (`java_beans_PropertyChangeEvent.ae` in
+  package jrt; j2g's report lists both). `bin/java-check --essential` on the gate build: 428 of 428 pass, as recorded, the
+  controls fail as they must. `J2G_UNIT_SOURCES=arbace.classes.analyze bin/j2g-unit`: 110 pass, 7 fail, as on next (type
+  annotations' known rows, F15's invokers fixture). `bin/arbace-go --build-program --check outside mixed` on that build
+  (`ARBACE_PROGRAM_BASE`): mixed passes; outside's j2g run translates java.beans.PropertyChangeEvent and PropertyChangeListener and
+  154 java.lang.classfile classes (4776 files, 267 s), but its repr/go print was OOM-killed (the run's peak 46.0 GB; 12 min and
+  27 GiB before F26, `programs-full`'s `:mem-gib` 30): the world with F26 needs more for a whole program's print, and
+  `programs-full`'s declaration should follow its next measured peak. The run of outside's sample is left to the night.
+- **Keys.** jdk/, arbace/j2g, arbace/classes and arbace/lang changed: gate_key (now `a592edc5f47d` at this branch's tip), the
+  runtime key and the javac key (`3854d014cd5a`) all move; tonight's gate builds the executables and javac's tool afresh.
+- **A mistake.** A stray `bin/arbace-go --smoke EXE` by hand (it builds) trimmed Go's shared build cache
+  (`/root/.cache/go-build`, 7135 MB to 335 MB) at about 17:00 before it was stopped; a build of another worktree running then may
+  have failed on a missing entry and needs a rerun.
+- **Not run.** The essential `bin/gate` (its own go-build at the gate's key, about an hour, did not fit before the night's gate).
+- **Left.** Ghidra's analyze run and G1.md §8's jobs on a gate build of the merged key (the next steps); Java's levels on F26's 44
+  corpus tests; the rest of JAVA-DEFERRED-TRIAGE.md's 154 ids (a sample of 12 of them, `bin/java-check --levels interp --list`
+  on the gate build: 11 now passing against `check-interp.edn`, t04706, StackTraceSerialization, still failing in the serialization
+  class (JCS167); none regress).

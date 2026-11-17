@@ -445,8 +445,10 @@ data, `:java`:
   forms do not depend on where the work directory is. The modules' forms are merged into one tree for
   j2g (`WORK/forms.all`; a package split over modules, as class-path programs have them, gets one
   namespace file with the loads of both), the resources likewise (`WORK/resources.all`; a
-  `META-INF/services` file in two modules concatenated, any other file in two modules an error unless
-  equal).
+  `META-INF/services` file in two modules concatenated; another `META-INF` file in two modules that
+  differ, as artifacts' `LICENSE`, `NOTICE` and `DEPENDENCIES` do, the first module's, as a class path's
+  `getResource` answers, the later ones listed in `WORK/resources.shadowed` and kept in their modules'
+  `resources.jars`; any other file in two modules an error unless equal).
 - **An artifact sources-first** (A2): its sources jar unpacked with the release's multi-release layer
   laid over the base (`META-INF/versions/9..R`, in order, as javac's file manager reads a multi-release
   jar for a release). A binary jar's versioned classes whose source the sources jar lacks (log4j's
@@ -479,6 +481,21 @@ data, `:java`:
   A binary-only artifact is for compiling against: its classes are not translated (they have no
   forms); a class-retention annotation jar (jspecify's kind) is the common case, and the forms keep
   the annotations as written.
+- **Declarations outside the world** (`:outside`, 2026-11-16, ghidra-a8: A8 and A8b of the Ghidra case study's G1
+  plan, the user's decision of round 48; J2G-SPEC §4.1, "Declarations outside the world"): `:java`'s `:outside`, a
+  vector of `:platform` and `:class-path`, names what j2g declares from class files beside the world: `:platform`
+  the platform's modules but java.base (`bin/repr-java platform-dir`, the platform javac compiles against,
+  jdk/javac/platform.sha256's pin), `:class-path` every module's binary jars on the class path alone, unpacked as
+  above, once each in the plan's order, named by their coordinates. `read` writes j2g's arguments one a line into
+  `WORK/outside.args` (`--outside-platform DIR`, `--outside-classes DIR=COORD`), which `--build-program` appends to
+  j2g's and puts in the program's key with the platform's pin. A class of the sources naming such a class is then
+  translated, its operations on it J2g_Missing stubs that throw when reached (naming the source), where without
+  `:outside` the whole class is refused (A7). Without `:outside` nothing changes. The fixture `test/programs/outside`
+  (java.beans, java.awt.Desktop, javax.sql and the binary-only toy jar `org.example:toyext:1.0`; its runs `reach`
+  and `reach-jar` the negative controls, which must fail naming the source); `bin/java-project test` checks
+  `outside.args`, `bin/j2g-unit`'s `test-outside` the declarations and the stubs. Since A8c (2026-11-17, J2G-SPEC
+  §4.1) `:platform` also declares java.base's API the world and the edge lack and completes the world's variants
+  of platform classes (java.awt.Color's Paint and ColorSpace members), with no change to `outside.args`.
 - **The commands.** `bin/java-project plan|sources|classes|read MODEL WORK` (MODEL a program's
   directory or a plan file holding the same map; `--root`, `--repository`, `--only M,...`, `--check
   front|nread`: each module also read from the native trees, the forms equal to javac's trees' as
