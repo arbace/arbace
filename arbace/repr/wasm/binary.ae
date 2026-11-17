@@ -420,17 +420,32 @@
                   (do (u8 r) (let [ts (vec-of r subtype)] (recur (inc i) (+ idx (count ts)) (conj out (list 'wasm/rec idx ts)))))
                   (recur (inc i) (inc idx) (conj out (list 'wasm/type idx (subtype r)))))
                 out)))
-    :import (let [counts (:imports state)]
-              (vec-of r (fn [r]
-                          (let [m (wname r) nm (wname r) [k d] (import-desc r)
-                                i (get @counts k 0)]
-                            (swap! counts assoc k (inc i))
-                            (list 'wasm/import m nm (case k
-                                                      :func (list 'func i {:type d})
-                                                      :table (list 'table i d)
-                                                      :memory (list 'memory i d)
-                                                      :global (list 'global i d)
-                                                      :tag (list 'tag i {:type d})))))))
+    :import (let [counts (:imports state)
+                  item (fn [m nm [k d]]
+                         (let [i (get @counts k 0)]
+                           (swap! counts assoc k (inc i))
+                           (list 'wasm/import m nm (case k
+                                                     :func (list 'func i {:type d})
+                                                     :table (list 'table i d)
+                                                     :memory (list 'memory i d)
+                                                     :global (list 'global i d)
+                                                     :tag (list 'tag i {:type d})))))]
+              ;; the compact import section (queue 326, beyond Wasm 3.0): after an empty name, 0x7f a vector of names and
+              ;; descriptions, 0x7e one description and a vector of names; read as the imports they stand for (the canonical
+              ;; encoding writes them one by one)
+              ;; the grouping kept in the layer (its flags' [:imports]: [ENC N] a group, ENC 0 one import, 0x7f or 0x7e N of them;
+              ;; a group of none also its module's name, 0x7e's its description), so that mode :full writes the original's bytes
+              (let [groups (vec-of r (fn [r]
+                                       (let [m (wname r) nm (wname r)]
+                                         (if (and (= nm "") (#{0x7f 0x7e} (peek8 r)))
+                                           (if (= 0x7f (u8 r))
+                                             (let [its (vec-of r (fn [r] (let [n (wname r)] (item m n (import-desc r)))))]
+                                               [(if (seq its) [0x7f (count its)] [0x7f 0 m]) its])
+                                             (let [d (import-desc r) its (mapv #(item m % d) (vec-of r wname))]
+                                               [(if (seq its) [0x7e (count its)] [0x7e 0 m d]) its]))
+                                           [[0 1] [(item m nm (import-desc r))]]))))]
+                (when (some #(pos? (long (ffirst %))) groups) (swap! (:flags state) assoc [:imports] (mapv first groups)))
+                (vec (mapcat second groups))))
     :func (do (reset! (:func-types state) (vec-of r u32)) [])
     :table (let [base (get @(:imports state) :table 0)]
              (vec (map-indexed
@@ -782,14 +797,28 @@
                         (if (= 'wasm/rec (first it))
                           (do (w8 w 0x4e) (wvec w (nth it 2) wsub))
                           (wsub w (nth it 2)))))
-    :import (wvec w its (fn [w [_ m nm [k i d]]]
-                          (wname! w m) (wname! w nm)
-                          (case k
-                            func (do (w8 w 0) (wuleb w (:type d)))
-                            table (do (w8 w 1) (wvaltype w (:type d)) (wlimits w d))
-                            memory (do (w8 w 2) (wlimits w d))
-                            global (do (w8 w 3) (wvaltype w (:type d)) (w8 w (if (:mut d) 1 0)))
-                            tag (do (w8 w 4) (w8 w 0) (wuleb w (:type d))))))
+    :import (let [desc (fn [w k d]
+                         (case k
+                           func (do (w8 w 0) (wuleb w (:type d)))
+                           table (do (w8 w 1) (wvaltype w (:type d)) (wlimits w d))
+                           memory (do (w8 w 2) (wlimits w d))
+                           global (do (w8 w 3) (wvaltype w (:type d)) (w8 w (if (:mut d) 1 0)))
+                           tag (do (w8 w 4) (w8 w 0) (wuleb w (:type d)))))]
+              (if-let [groups (get flags [:imports])]
+                ;; the layer's grouping (the compact import section, queue 326): the original's groups
+                (do (wuleb w (count groups))
+                    (loop [gs (seq groups) its (seq its)]
+                      (when-let [[enc n m0 kd] (first gs)]
+                        (let [g (take n its) m (if (seq g) (second (first g)) m0)]
+                          (case (long enc)
+                            0 (let [[_ m nm [k _ d]] (first g)] (wname! w m) (wname! w nm) (desc w k d))
+                            0x7f (do (wname! w m) (wname! w "") (w8 w 0x7f) (wuleb w n)
+                                     (doseq [[_ _ nm [k _ d]] g] (wname! w nm) (desc w k d)))
+                            0x7e (let [[k d] (if (seq g) (let [[_ _ _ [k _ d]] (first g)] [k d]) (let [k (symbol (name (first kd)))] [k (if (#{'func 'tag} k) {:type (second kd)} (second kd))]))]
+                                   (wname! w m) (wname! w "") (w8 w 0x7e) (desc w k d) (wuleb w n)
+                                   (doseq [[_ _ nm] g] (wname! w nm))))
+                          (recur (next gs) (drop n its))))))
+                (wvec w its (fn [w [_ m nm [k i d]]] (wname! w m) (wname! w nm) (desc w k d)))))
     :func (wvec w its (fn [w it] (wuleb w (:type (nth it 2)))))
     :table (wvec w its (fn [w [_ _ d]]
                          (if (:init d)

@@ -610,6 +610,23 @@
 
 (def ^:private space-of {"func" :func "table" :table "memory" :memory "global" :global "tag" :tag})
 
+(defn- compact-import
+  "A field of the compact import section's text (queue 326, beyond Wasm 3.0) as [MODULE [[NAME DESC] ...] SHARED]:
+  (import \"m\" (item \"n\" DESC)*) the first encoding (SHARED nil), (import \"m\" (item \"n\")* DESC) the second (SHARED the
+  one DESC, which takes no identifier); nil for an import of one name."
+  [f]
+  (let [[_ m x :as xs] (:xs f)]
+    (when (and m (or (nil? x) (= :list (:t x))))
+      (let [body (drop 2 xs) md (name-str m)]
+        (if (or (empty? body) (lex/list-of? (last body) "item"))
+          (do (doseq [it body] (when-not (and (lex/list-of? it "item") (= 3 (count (:xs it)))) (malformed "unexpected token" it)))
+              [md (mapv (fn [it] [(name-str (nth (:xs it) 1)) (nth (:xs it) 2)]) body) nil])
+          (let [d (last body) its (butlast body)]
+            (doseq [it its] (when-not (and (lex/list-of? it "item") (= 2 (count (:xs it)))) (malformed "unexpected token" it)))
+            (when-not (= :list (:t d)) (malformed "unexpected token" d))
+            (when (= :id (:t (second (:xs d)))) (malformed "identifier not allowed" d))
+            [md (mapv (fn [it] [(name-str (nth (:xs it) 1)) d]) its) d]))))))
+
 (defn- field-space
   "The index space a field defines and whether it imports: [space import?]."
   [f]
@@ -619,6 +636,8 @@
       ("func" "table" "memory" "global" "tag")
       (let [[_ imp] (exports+import xs)] [(space-of h) (boolean imp)])
       [nil false])))
+
+(declare ^:private index-field!)
 
 (defn- index-pass!
   "The first pass: every field's identifier bound to its index (types, the definitions with their imports, element and
@@ -637,7 +656,25 @@
                 (let [i (bind! ctx :type (id-of (rest (:xs t))) t)
                       ct (last (:xs t)) ct (if (lex/list-of? ct "sub") (last (:xs ct)) ct)]
                   (when-let [fs (field-ids ct)] (swap! (:fields ctx) assoc i fs))))
-        ("func" "table" "memory" "global" "tag" "import")
+        "import" (if-let [[_ its shared] (compact-import f)]
+                   (do (when (seq @(:defined ctx))
+                         (malformed (str "import after " (let [k (name (peek @(:defined ctx)))] (if (= k "func") "function" k)) " definition") f))
+                       (when shared (when-not (space-of (lex/head shared)) (malformed "unexpected token" shared)))
+                       (doseq [[_ d] its]
+                         (let [sp (space-of (lex/head d))]
+                           (when-not sp (malformed "unexpected token" d))
+                           (bind! ctx sp (when-not shared (id-of (rest (:xs d)))) f))))
+                   (index-field! ctx f h))
+        ("func" "table" "memory" "global" "tag")
+        (index-field! ctx f h)
+        "elem" (bind! ctx :elem (id-of (rest (:xs f))) f)
+        "data" (bind! ctx :data (id-of (rest (:xs f))) f)
+        ("export" "start") nil
+        (malformed "unexpected token" f)))))
+
+(defn- index-field!
+  "index-pass!'s binding of a definition's or an import's index (its identifier, the imports-first rule, its inline segments)."
+  [ctx f h]
         (let [[sp imp?] (field-space f)
               id (if (= h "import")
                    (let [d (nth (:xs f) 3 nil)] (when-not (= :list (:t d)) (malformed "unexpected token" f)) (id-of (rest (:xs d))))
@@ -651,11 +688,7 @@
           (bind! ctx sp id f)
           ;; a table's inline elements and a memory's inline data are segments of their own, numbered in field order
           (when (and (not imp?) (= h "table") (some #(lex/list-of? % "elem") (rest (:xs f)))) (bind! ctx :elem nil f))
-          (when (and (not imp?) (= h "memory") (some #(lex/list-of? % "data") (rest (:xs f)))) (bind! ctx :data nil f)))
-        "elem" (bind! ctx :elem (id-of (rest (:xs f))) f)
-        "data" (bind! ctx :data (id-of (rest (:xs f))) f)
-        ("export" "start") nil
-        (malformed "unexpected token" f)))))
+          (when (and (not imp?) (= h "memory") (some #(lex/list-of? % "data") (rest (:xs f)))) (bind! ctx :data nil f))))
 
 (defn- elem-list
   "An element list at xs: [type init] (init {:funcs [...]} or {:exprs [...]})."
@@ -672,6 +705,25 @@
 
 (defn- type-item [ctx i t]
   (list 'wasm/type i (subtype ctx (last (:xs t)))))
+
+(defn- import-desc
+  "An import's description read once: [SPACE (fn [i] the item's description at index i)] (a type use's implicit type added
+  by the read, not by the calls)."
+  [ctx d]
+  (let [sp (space-of (lex/head d))
+        _ (when-not sp (malformed "unexpected token" d))
+        ds (after-id (rest (:xs d)))
+        [k v] (case sp
+                :func (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) ['func {:type ti}])
+                :tag (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) ['tag {:type ti}])
+                :global (let [[g more] [(first ds) (rest ds)]]
+                          (when (or (nil? g) (seq more)) (malformed "unexpected token" d))
+                          ['global (if (lex/list-of? g "mut") {:type (valtype ctx (second (:xs g))) :mut true} {:type (valtype ctx g) :mut false})])
+                :memory (let [[l more] (limits ctx ds d)] (when (seq more) (malformed "unexpected token" (first more))) ['memory l])
+                :table (let [[l more] (limits ctx ds d)]
+                         (when-not (= 1 (count more)) (malformed "unexpected token" d))
+                         ['table (assoc l :type (valtype ctx (first more)))]))]
+    [sp (fn [i] (list k i v))]))
 
 (defn- parse-fields
   "The second pass: the fields in order into items (by section, as the binary decoder orders them)."
@@ -691,24 +743,16 @@
           "rec" (let [i @tindex ts (rest (:xs f))]
                   (swap! tindex + (count ts))
                   (add! :type (list 'wasm/rec i (mapv #(subtype ctx (last (:xs %))) ts))))
-          "import" (let [[_ m nm d & more] (:xs f)
-                         _ (when (or (nil? d) more) (malformed "unexpected token" f))
-                         sp (space-of (lex/head d))
-                         _ (when-not sp (malformed "unexpected token" d))
-                         i (next! sp)
-                         ds (after-id (rest (:xs d)))]
-                     (add! :import
-                           (list 'wasm/import (name-str m) (name-str nm)
-                                 (case sp
-                                   :func (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) (list 'func i {:type ti}))
-                                   :tag (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) (list 'tag i {:type ti}))
-                                   :global (let [[g more] [(first ds) (rest ds)]]
-                                             (when (or (nil? g) (seq more)) (malformed "unexpected token" d))
-                                             (list 'global i (if (lex/list-of? g "mut") {:type (valtype ctx (second (:xs g))) :mut true} {:type (valtype ctx g) :mut false})))
-                                   :memory (let [[l more] (limits ctx ds d)] (when (seq more) (malformed "unexpected token" (first more))) (list 'memory i l))
-                                   :table (let [[l more] (limits ctx ds d)]
-                                            (when-not (= 1 (count more)) (malformed "unexpected token" d))
-                                            (list 'table i (assoc l :type (valtype ctx (first more)))))))))
+          "import" (if-let [[m its shared] (compact-import f)]
+                     ;; the second encoding's description read once (one implicit type use), even for no name
+                     (let [one (when shared (import-desc ctx shared))]
+                       (doseq [[nm d] its]
+                         (let [[sp desc] (or one (import-desc ctx d))]
+                           (add! :import (list 'wasm/import m nm (desc (next! sp)))))))
+                     (let [[_ m nm d & more] (:xs f)
+                           _ (when (or (nil? d) more) (malformed "unexpected token" f))
+                           [sp desc] (import-desc ctx d)]
+                       (add! :import (list 'wasm/import (name-str m) (name-str nm) (desc (next! sp))))))
           "func" (let [i (next! :func)
                        [names imp ys] (exports+import (after-id xs))
                        [ti pids ys] (typeuse ctx ys)
