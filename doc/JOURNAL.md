@@ -9794,3 +9794,13 @@ resources by symbolic links instead of the original's directory as an `--embed-d
 Alternatives considered: reclassifying the gcc-only rejections by hand (rejected: the test's own verdict is the user's rule
 of 2026-11-07); balanced tokens for every unknown attribute outside `*recover*` (left: it would change cc-equal trees of the
 tree check; c23-attr-syntax-5.c stays deferred); raising the read budget for the limits-*.c files (rejected, as GTS-B did).
+
+## 2026-11-17: C++'s dg classes after the user's CP398 (a) then (c) and CP399 (a) (branch `h-cpp-read`, after next 77630727b)
+
+The user's round 51 on the read audit: test/cpp/divergences-dg.edn's six clang-* classes (by design under CP2 (a)) became `:own-diag`,
+deferred (863 files neither clang nor Arbace's own front end meets), `:gcc-dialect` (by design, 173 files by name: the 150 of OpenMP,
+OpenACC, GNU TM, GCC's contracts, -fpermissive and -fms-extensions, and the 23 syntax-only files of gomp/, goacc/ and contracts/; the
+report had estimated 27) and `:gcc-own-rules` (by design, 64 files by name after reviewing clang-accepts' and clang-pedantic's 206 by
+their messages: GNU extensions', GCC's ABI and runtime interface, its limits and IFNDR diagnoses). C++ read 5,309 / 1,083 / 103 to 5,309 /
+243 / 943; completeness 91 unchanged, without by design 96 to 93 (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-read (2)"). Not yet: the
+file-by-file review of the other four former classes' files.
