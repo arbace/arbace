@@ -7468,9 +7468,13 @@
             (set! (.-jv f) jv)
             (set! (.-jl f) jl)
             (set! (.-jd f) jd))))
+      ;; JLS 14.20.2: a finally that completes abruptly (a return, break or continue: a jump
+      ;; of its own) discards the exception the try or a catch threw; one that completes
+      ;; normally rethrows it (the JLS corpus's Exceptions, t03210)
       (method ^:public eval [this ^Frame f]
         (let [^:mutable r nil
-              ^:mutable done false]
+              ^:mutable done false
+              ^:mutable ^Throwable pend nil]
           (try
             (try
               (set! r (.eval body f))
@@ -7487,8 +7491,16 @@
                     (aset (.-r f) (aget slots c) e)
                     (set! r (.eval (aget handlers c) f))))))
             (when (and done (some? nfin)) (Try/finish nfin f))
-            (finally
-              (when (some? fin) (Try/finish fin f))))
+            (catch Throwable e
+              (when (nil? fin) (throw e))
+              (set! pend e)))
+          (when (some? fin)
+            (if (some? pend)
+              (do (set! (.-jump f) 0)
+                  (.exec fin f)
+                  (when (== (.-jump f) 0) (throw pend))
+                  (set! r nil))
+              (Try/finish fin f)))
           r)))
 
     ;; locking
@@ -12974,14 +12986,14 @@
     ;; c a deftype's stub class (its class looked up when the code runs), else what the call of
     ;; ctor needs found once: whether c is abstract, the constructor's parameter types
     (field ^:public ^:final ^boolean stub)
-    (field ^:public ^:final ^boolean abstract)
+    (field ^:public ^:final ^boolean abstractClass)
     (field ^:public ^:final ^Class/1 ps)
     (constructor ^:public [this ^Class c ^java.lang.reflect.Constructor ctor ^Code/1 args]
       (set! (.-c this) c)
       (set! (.-ctor this) ctor)
       (set! (.-args this) args)
       (set! (.-stub this) (.startsWith (.getName c) COMPILE_STUB_PREFIX))
-      (set! (.-abstract this) (and (some? ctor) (not stub)
+      (set! (.-abstractClass this) (and (some? ctor) (not stub)
                                    (java.lang.reflect.Modifier/isAbstract (.getModifiers c))))
       (set! (.-ps this) (when (and (some? ctor) (not stub)) (.getParameterTypes ctor))))
     (method ^:public run [this ^Frame f]
@@ -13000,7 +13012,7 @@
                     (CodeRun/construct k (CodeRun/directArgs (.getParameterTypes k) vs)))
                   (Reflector/invokeConstructor dc vs))))
           (do
-            (when abstract (throw (InstantiationError. (.getName c))))
+            (when abstractClass (throw (InstantiationError. (.getName c))))
             (let [vs (CodeRun/argsOf args f)]
               (if (some? ctor)
                   (CodeRun/construct ctor (CodeRun/directArgs ps vs))

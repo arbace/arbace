@@ -1,0 +1,424 @@
+(ns arbace.j2g.outside
+  "Declarations outside the world (A8 and A8b of the Ghidra case study's G1 plan; J2G-SPEC §4.1,
+  \"Declarations outside the world\"): the classes a program's sources were compiled against that
+  neither the world's forms, jrt nor j2g's edge has, declared from their class files, so that a
+  class naming one analyzes and is translated, each operation on it a J2g_Missing that throws
+  when reached (code/missing-reason: \"class C is outside the closed world: declarations only,
+  from SOURCE\"), in place of the whole class refused (JCS69 (b)).
+
+  Two kinds of source, in javac's order (the platform, then the class path):
+  - the platform (A8): the exploded modules of the platform javac compiles against
+    (jdk/javac/platform.sha256's pin, bin/repr-java platform-dir), every module but java.base;
+    since A8c (the Ghidra demo's analysis, 2026-11-17) also java.base, for its API (java.*, javax.*)
+    that neither the world nor the edge has (java.lang.SecurityManager, java.lang.foreign's
+    FunctionDescriptor: base-origin, a program's own classes' member types alone, j2g.model's
+    member-class?) and for the facets an edge class lacks (Thread.UncaughtExceptionHandler's
+    generics: not declared outside, not reported); its internal packages stay refused;
+  - class directories (A8b): a program's binary jars on javac's class path alone (bin/java-project's
+    unpacked jars, the multi-release layer chosen), each named by its Maven coordinate.
+
+  A class j2g compiles from forms is never declared here (env/known? asks its forms). A class the
+  edge declares keeps every facet the edge gives; one the edge lacks (the generics of a java.desktop
+  class the edge recorded for another question) is the class file's, when the class is a platform
+  class outside java.base. The declarations are made from the class file as the JVM's reflection
+  answered them when the edge was recorded (arbace.classes.env/reflect-info's shape, read back by
+  arbace.j2g.edge/facets-value): the class's modifiers (an inner class's from InnerClasses, ACC_SUPER
+  off), its super (none for an interface), its fields with their constants, its methods and
+  constructors (an inner member class's without the outer instance), the generic signatures, the
+  annotation type's retention and targets, @FunctionalInterface, an enum's constants and a record's
+  components. Left out: the methods' declaration annotations (javac copies them to a bridge; a
+  stand-in's are read by no translated code) and the nest host's NestHost attribute (taken as the
+  outermost class of InnerClasses, else the name before its first $).
+
+  A8c's completion (completion, analyze/*completion*): a world class that is a platform class outside
+  java.base (a jrt variant, java.awt.Color) takes from the platform's class the interfaces and the
+  methods it lacks, declared outside the world, the methods throwing when called.
+
+  (declared base sources) is env/*declared* over the edge's classes `base`: a lookup (ILookup,
+  Associative's containsKey and entryAt) that answers the edge's entries and the outside classes,
+  made on first use and kept; (asked d) the outside classes the run looked up, {internal name
+  source}, for report.edn's :outside."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.types :as t]
+            [arbace.classes.env :as env]
+            [arbace.j2g.edge :as edge])
+  (:import (java.io File)
+           (java.util.concurrent ConcurrentHashMap)))
+
+(defn- cf
+  "arbace.repr.java.classfile's var named by sym, loaded on demand (requiring-resolve, as j2g's
+  arbace.j2g.jvm): repr/java is not embedded (arbace.j2g.embed/excluded), so that a program that
+  embeds j2g prepares it without repr/java, and the declarations outside the world load the class
+  file reader from the checkout when first asked. Resolved outside the callers' try, so that a
+  reader that does not load is an error, not a class left undeclared."
+  [sym]
+  (requiring-resolve (symbol "arbace.repr.java.classfile" (name sym))))
+
+;; ---------------------------------------------------------------------------------------
+;; sources
+
+(defn platform-source
+  "The platform's exploded modules in directory dir (DIR/MODULE/pkg/C.class), java.base aside."
+  [dir]
+  {:kind :platform :dir (str dir)
+   :modules (vec (sort (for [^File m (or (.listFiles (File. (str dir))) (make-array File 0))
+                             :when (and (.isDirectory m) (not= "java.base" (.getName m)))]
+                         (.getName m))))
+   ;; package dir -> the modules holding it, as found
+   :pkgs (ConcurrentHashMap.)})
+
+(defn classes-source
+  "A directory of class files (a binary jar unpacked), named `origin` (its Maven coordinate)."
+  [dir origin]
+  {:kind :class-path :dir (str dir) :origin (str origin)})
+
+(defn parse-spec
+  "j2g's --outside-classes DIR=ORIGIN as a source."
+  [^String spec]
+  (let [i (.lastIndexOf spec "=")]
+    (if (pos? i)
+      (classes-source (subs spec 0 i) (subs spec (inc i)))
+      (classes-source spec spec))))
+
+(defn- package-dir [^String n] (let [i (.lastIndexOf n "/")] (if (neg? i) "" (subs n 0 i))))
+
+(defn- class-file
+  "[^File the class file of internal name n, its origin] in source src, or nil."
+  [src ^String n]
+  (case (:kind src)
+    :platform
+    (let [pd (package-dir n)
+          ^ConcurrentHashMap pkgs (:pkgs src)
+          ms (or (.get pkgs pd)
+                 (let [ms (vec (filter #(.isDirectory (File. (str (:dir src) "/" % "/" pd))) (:modules src)))]
+                   (.putIfAbsent pkgs pd ms)
+                   ms))]
+      (some (fn [m] (let [f (File. (str (:dir src) "/" m "/" n ".class"))]
+                      (when (.isFile f) [f (str m " (the platform)")])))
+            ms))
+    :class-path
+    (let [f (File. (str (:dir src) "/" n ".class"))]
+      (when (.isFile f) [f (:origin src)]))))
+
+(def base-origin
+  "The source a java.base class declared outside the world names (A8c)."
+  "java.base (the platform)")
+
+(defn- base-class-file
+  "[^File the class file of internal name n, its origin] in the platform's java.base, or nil (A8c:
+  a platform source only)."
+  [src ^String n]
+  (when (= :platform (:kind src))
+    (let [f (File. (str (:dir src) "/java.base/" n ".class"))]
+      (when (.isFile f) [f base-origin]))))
+
+(defn- base-api?
+  "Is n of java.base's exported API (java.*, javax.*), which a program's sources can name (A8c)? Its
+  internal packages (jdk.internal, sun) stay refused."
+  [^String n]
+  (or (str/starts-with? n "java/") (str/starts-with? n "javax/")))
+
+;; ---------------------------------------------------------------------------------------
+;; a class file as declarations (the edge's data shape)
+
+(def ^:private prim-desc
+  {:boolean "Z" :byte "B" :char "C" :short "S" :int "I" :long "J" :float "F" :double "D" :void "V"})
+
+(defn- slashed [^String s] (str/replace s "." "/"))
+
+(defn tnode
+  "A type of arbace.repr.java.classfile's signatures as a parsed type (arbace.classes.types'
+  tnode, as t/reflect->tnode makes it from reflection: no owner type, ? extends Object unbounded)."
+  [ty]
+  (cond
+    (nil? ty) nil
+    (keyword? ty) {:t :prim :desc (prim-desc ty)}
+    :else
+    (case (first ty)
+      :class {:t :class :name (slashed (nth ty 1)) :args (mapv tnode (nth ty 2))}
+      :array {:t :array :elem (tnode (nth ty 1))}
+      :tvar {:t :tvar :sym (symbol (nth ty 1))}
+      :wild (case (nth ty 1)
+              :unbound {:t :wild :kind nil}
+              :super {:t :wild :kind :super :bound (tnode (nth ty 2))}
+              :extends (let [b (nth ty 2)]
+                         (if (and (vector? b) (= :class (first b)) (= "java.lang.Object" (nth b 1)))
+                           {:t :wild :kind nil}
+                           {:t :wild :kind :extends :bound (tnode b)}))))))
+
+(defn- has? [flags bit] (not (zero? (bit-and (long flags) (long bit)))))
+
+(defn- ann-type? [c ^String d] (some #(= d (:type %)) (:annotations c)))
+
+(defn- ann-value [c ^String d k] (some #(when (= d (:type %)) (get (:values %) k)) (:annotations c)))
+
+(defn- const-data
+  "A ConstantValue as the edge writes it: a boolean as true or false, a char as its code."
+  [desc v]
+  (if (= desc "Z") (not (zero? (long v))) v))
+
+(defn- inner-entry [c] (some #(when (= (:this c) (:inner %)) %) (:inner c)))
+
+(defn- nest-host [c]
+  (let [n (:this c)
+        outer-of (into {} (for [e (:inner c) :when (:outer e)] [(:inner e) (:outer e)]))]
+    (loop [x n]
+      (if-let [o (get outer-of x)]
+        (recur o)
+        (if (and (= x n) (str/includes? n "$") (inner-entry c))
+          (subs n 0 (str/index-of n "$"))
+          x)))))
+
+(defn info-data
+  "Class file c (classfile/parse's) as the edge's :info data (env/reflect-info's view, as
+  arbace.j2g.edge/info-data writes it)."
+  [c]
+  (let [n (:this c)
+        ie (inner-entry c)
+        flags (bit-and (long (if ie (:flags ie) (:flags c))) (bit-not 0x20))
+        iface? (has? (:flags c) 0x200)
+        outer (:outer ie)
+        outer-instance? (boolean (and outer (not (has? flags 0x0008)) (not iface?)
+                                      (not (has? (:flags c) 0x4000)) (not (:record? c))))]
+    {:name n :flags flags :interface? iface?
+     :super (when-not iface? (:super c))
+     :interfaces (vec (:interfaces c))
+     :nest-host (nest-host c)
+     :outer outer
+     :outer-instance? outer-instance?
+     :fields (vec (for [f (:fields c)
+                        :let [d (:desc f) v (:const f)
+                              k (when (and (has? (:flags f) 0x10) (some? v) (or (t/prim? d) (= d t/string-desc)))
+                                  (const-data d v))]]
+                    (cond-> {:name (:name f) :desc d :flags (:flags f)} (some? k) (assoc :const k))))
+     :methods (vec (sort-by (juxt :name :desc)
+                            (for [m (:methods c)
+                                  :when (not= "<clinit>" (:name m))
+                                  :let [ctor (= "<init>" (:name m))
+                                        desc (if (and ctor outer-instance?)
+                                               (let [[ps r] (t/parse-method-desc (:desc m))]
+                                                 (t/method-desc (rest ps) r))
+                                               (:desc m))]]
+                              (cond-> {:name (:name m) :desc desc :flags (:flags m)}
+                                (seq (:exceptions m)) (assoc :throws (vec (:exceptions m)))))))}))
+
+(defn- method-tnodes
+  "A method's generic parameter types and its type parameters' bounds ({sym [tnode]})."
+  [m]
+  (let [[ps _] (t/parse-method-desc (:desc m))
+        erased (mapv t/desc->tnode ps)]
+    (if-let [s (:signature m)]
+      (let [parse (cf 'method-signature)
+            sig (try (parse s) (catch Exception _ nil))]
+        (if (and sig (= (count (:params sig)) (count ps)))
+          [(mapv tnode (:params sig))
+           (into {} (for [[nm bs] (:tparams sig)] [(symbol nm) (mapv tnode bs)]))]
+          [erased {}]))
+      [erased {}])))
+
+(defn generics-data
+  "Class file c's generic view (arbace.classes.analyze/class-generics' shape, as the edge holds
+  it): its type parameters, generic supertypes and methods."
+  [c]
+  (let [iface? (has? (:flags c) 0x200)
+        parse (cf 'class-signature)
+        sig (when-let [s (:signature c)] (try (parse s) (catch Exception _ nil)))
+        supers (if sig
+                 (map tnode (cons (when-not iface? (:super sig)) (:interfaces sig)))
+                 (map #(when % {:t :class :name % :args []})
+                      (cons (when-not iface? (:super c)) (:interfaces c))))]
+    {:tparams (mapv (comp symbol first) (:tparams sig))
+     :supers (vec (remove nil? supers))
+     :methods (vec (for [m (sort-by (juxt :name :desc) (:methods c))
+                         :when (not (#{"<init>" "<clinit>"} (:name m)))
+                         :let [[params bounds] (method-tnodes m)]]
+                     {:name (:name m) :desc (:desc m) :flags (:flags m)
+                      :throws (vec (:exceptions m)) :params params :bounds bounds}))}))
+
+(defn- fi-method-data
+  "@FunctionalInterface's method as analyze/clj-fi-method answers it by reflection: the first
+  abstract method of at most 10 parameters but equals, toString and hashCode, its own first."
+  [c info-of]
+  (when (ann-type? c "Ljava/lang/FunctionalInterface;")
+    (let [cands (fn [ms] (for [m ms
+                               :when (and (has? (:flags m) 0x400)
+                                          (not (#{"equals" "toString" "hashCode"} (:name m)))
+                                          (<= (count (first (t/parse-method-desc (:desc m)))) 10))]
+                           m))
+          m (or (first (cands (:methods c)))
+                (some #(first (cands (:methods (info-of %)))) (:interfaces c)))]
+      (when m
+        (let [[ps r] (t/parse-method-desc (:desc m))]
+          {:name (:name m) :ps (vec ps) :ret r})))))
+
+(defn facets-data
+  "Every facet the analysis asks of a class outside the forms (env/reflected's), as data, from
+  class file c; :outside names its source. `info-of` answers another class's info (a
+  functional interface's inherited method)."
+  [c origin info-of]
+  (let [annotation? (has? (:flags c) 0x2000)
+        g (generics-data c)
+        retention (ann-value c "Ljava/lang/annotation/Retention;" "value")
+        targets (ann-value c "Ljava/lang/annotation/Target;" "value")]
+    {:exists true
+     :outside origin
+     :info (info-data c)
+     :generics g
+     :tparams (:tparams g)
+     :functional (boolean (ann-type? c "Ljava/lang/FunctionalInterface;"))
+     :fi-method (fi-method-data c info-of)
+     :retention (if (and annotation? retention) (keyword (str/lower-case (:name retention))) :class)
+     :targets (when (and annotation? targets) (set (map :name (:values targets))))
+     :enum-constants (vec (for [f (:fields c) :when (has? (:flags f) 0x4000)] (:name f)))
+     :record-components (when (:record? c)
+                          (vec (for [f (:fields c) :when (not (has? (:flags f) 0x0008))]
+                                 {:name (:name f) :desc (:desc f)})))}))
+
+;; ---------------------------------------------------------------------------------------
+;; the lookup
+
+(def ^:private none (Object.))
+
+(def ^:private facet-keys
+  "The facets facets-data makes (an edge class lacking none of them reads no java.base class file)."
+  [:exists :info :generics :tparams :functional :fi-method :retention :targets :enum-constants :record-components])
+
+(defn- read-facets
+  "The facets of the class file f of internal name k (facets-data in env's shape), or nil."
+  [^File f k origin info-of]
+  (let [read-file (cf 'read-file)
+        c (try (read-file f) (catch Exception _ nil))]
+    (when (and c (= k (:this c)))
+      (edge/facets-value (facets-data c origin info-of)))))
+
+(defn- platform-facets
+  "The platform's facets of world class n (A8c: a platform class outside java.base the world holds as
+  forms, a jrt variant such as java.awt.Color), not recorded as declared; cached in cache under
+  [::platform n]."
+  [^ConcurrentHashMap cache sources n info-of]
+  (let [k [::platform n]
+        v (.get cache k)]
+    (if (some? v)
+      (when-not (identical? v none) v)
+      (let [r (or (when-let [[^File f origin] (some #(when (= :platform (:kind %)) (class-file % n)) sources)]
+                    (read-facets f n origin info-of))
+                  none)]
+        (.putIfAbsent cache k r)
+        (when-not (identical? r none) r)))))
+
+(defn- edge-fillable?
+  "May an edge class's missing facets be the class file's? Only a platform class outside
+  java.base (the outside modules: the world has none of their classes as forms)."
+  [origin]
+  (str/ends-with? (str origin) " (the platform)"))
+
+(defn declared
+  "env/*declared* over the edge's classes base (env's shape) and the outside sources (the
+  namespace's docstring)."
+  [base sources]
+  (let [cache (ConcurrentHashMap.)
+        asked (ConcurrentHashMap.)
+        lookup (fn lookup [k]
+                 (when (and (string? k) (not (str/starts-with? k "[")))
+                   (let [v (.get cache k)]
+                     (if (some? v)
+                       (when-not (identical? v none) v)
+                       (let [b (get base k)
+                             found (or (some #(class-file % k) sources)
+                                       ;; A8c: java.base's class file, for an edge class's missing
+                                       ;; facets or a class of its API neither the world nor the edge has
+                                       (when (if b (some #(not (contains? b %)) facet-keys) (base-api? k))
+                                         (some #(base-class-file % k) sources)))
+                             base? (= base-origin (second found))
+                             o (when-let [[^File f origin] found]
+                                 (when (or (nil? b) (edge-fillable? origin) base?)
+                                   (read-facets f k origin #(:info (lookup %)))))
+                             r (cond (and b o) (merge (if base? (dissoc o :outside) o) b)
+                                     b b
+                                     o o
+                                     :else none)]
+                         (when (and o (nil? b)) (.put asked k (:outside o)))
+                         (.putIfAbsent cache k r)
+                         (let [v (.get cache k)] (when-not (identical? v none) v)))))))]
+    (let [lookup* (fn [k]
+                    (if (vector? k)
+                      (when (= ::platform (first k)) (platform-facets cache sources (second k) #(:info (lookup %))))
+                      (lookup k)))]
+    (reify
+      arbace.lang.ILookup
+      ;; [::platform n]: the platform's facets of a world class (platform-facets; completion)
+      (valAt [_ k] (lookup* k))
+      (valAt [_ k nf] (let [v (lookup* k)] (if (some? v) v nf)))
+      arbace.lang.Associative
+      (containsKey [_ k] (some? (lookup k)))
+      (entryAt [_ k] (when-let [v (lookup k)] (arbace.lang.MapEntry. k v)))
+      (assoc [_ k v] (throw (UnsupportedOperationException. "j2g: the declared classes are read only")))
+      arbace.lang.IDeref
+      (deref [_] (into (sorted-map) asked))))))
+
+;; ---------------------------------------------------------------------------------------
+;; A8c: the world's variants completed from the platform
+
+(defn- api? [^String n] (or (str/starts-with? n "java/") (str/starts-with? n "javax/")))
+
+(defn- exists? [d n] (or (env/from-source? n) (some? (get d n))))
+
+(defn completion
+  "arbace.classes.analyze/*completion* over d (declared's lookup, A8c): what a world class that is a
+  platform class outside java.base (a jrt variant in the world's forms: java.awt.Color, which jrt cut of
+  Paint and of its ColorSpace members) lacks of the platform's class, declared outside the world:
+  (f :interfaces n names): the platform class's interfaces that names lack and the world has not, declared
+  outside it (Color's java.awt.Paint); (f :methods n keys): its public and protected methods, neither
+  abstract, synthetic nor bridges, whose [name desc] keys lack and whose descriptors' classes all exist
+  (the world's or declared), as {:name :desc :flags :outside origin}, the analysis's derived
+  :outside-member methods, whose bodies throw (decls/derived-body); keys hold the methods the class
+  inherits, concrete, from its supertypes too (a method a variant cut so that the class inherits it stays
+  inherited); (f :completes? n nil) whether n is such a class. Constructors and fields are left out,
+  and an interface is never completed (a method added there would be every world implementor's). nil for
+  any other class."
+  [d]
+  (fn [what n have]
+    (when-let [p (when (api? n) (get d [::platform n]))]
+      (let [info (:info p)]
+        (case what
+          :completes? true
+          :interfaces
+          (seq (for [i (:interfaces info)
+                     :when (not (some #{i} have))
+                     :when (not (env/from-source? i))
+                     :when (:outside (get d i))]
+                 i))
+          :methods
+          (when-not (:interface? info)
+            (let [have (set have)]
+              (seq (for [m (:methods info)
+                         :let [fl (long (:flags m))]
+                         :when (not (#{"<init>" "<clinit>"} (:name m)))
+                         :when (has? fl 0x0005)
+                         :when (not (has? fl (bit-or 0x0400 0x1000 0x0040)))
+                         :when (not (contains? have [(:name m) (:desc m)]))
+                         :when (every? #(exists? d %) (keep #(when (t/class-desc? %) (t/desc->internal %))
+                                                            (map #(loop [x %] (if (t/array? x) (recur (t/elem-type x)) x))
+                                                                 (let [[ps r] (t/parse-method-desc (:desc m))] (cons r ps)))))]
+                     {:name (:name m) :desc (:desc m)
+                      ;; public or protected, static, final, varargs, deprecated: not native or synchronized
+                      :flags (bit-and fl (bit-or 0x0001 0x0004 0x0008 0x0010 0x0080 0x20000))
+                      :outside (:outside p)})))))))))
+
+(defn asked
+  "The outside classes the run declared, {internal name source} (sorted)."
+  [d]
+  (when (instance? arbace.lang.IDeref d) @d))
+
+(defn report
+  "report.edn's :outside: the sources and the classes declared from them."
+  [sources d]
+  (let [a (asked d)]
+    {:sources (vec (for [s sources]
+                     (cond-> {:kind (:kind s) :dir (:dir s)}
+                       (:origin s) (assoc :origin (:origin s))
+                       (:modules s) (assoc :modules (count (:modules s))))))
+     :declared (count a)
+     :by-source (into (sorted-map) (frequencies (vals a)))
+     :classes (vec (keys a))}))

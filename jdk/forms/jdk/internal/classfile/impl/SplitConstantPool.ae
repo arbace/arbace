@@ -1,0 +1,726 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/classfile/impl/SplitConstantPool.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.classfile.impl)
+
+(import '(java.lang.classfile Attributes BootstrapMethodEntry ClassReader)
+        '(java.lang.classfile.attribute BootstrapMethodsAttribute)
+        '(java.lang.classfile.constantpool ClassEntry
+                                           ConstantDynamicEntry
+                                           ConstantPool
+                                           ConstantPoolBuilder
+                                           ConstantPoolException
+                                           DoubleEntry
+                                           FieldRefEntry
+                                           FloatEntry
+                                           IntegerEntry
+                                           InterfaceMethodRefEntry
+                                           InvokeDynamicEntry
+                                           LoadableConstantEntry
+                                           LongEntry
+                                           MemberRefEntry
+                                           MethodHandleEntry
+                                           MethodRefEntry
+                                           MethodTypeEntry
+                                           ModuleEntry
+                                           NameAndTypeEntry
+                                           PackageEntry
+                                           PoolEntry
+                                           StringEntry
+                                           Utf8Entry)
+        '(java.lang.constant ClassDesc MethodTypeDesc)
+        '(java.util Arrays List Objects))
+
+(defclass ^:public ^:final SplitConstantPool
+  :implements [ConstantPoolBuilder]
+
+  (field ^:private ^:final ^ClassReaderImpl parent)
+
+  (field ^:private ^:final ^int parentSize)
+
+  (field ^:private ^:final ^int parentBsmSize)
+
+  (field ^:private ^int size)
+
+  (field ^:private ^int bsmSize)
+
+  (field ^:private ^PoolEntry/1 myEntries)
+
+  (field ^:private ^BootstrapMethodEntryImpl/1 myBsmEntries)
+
+  (field ^:private ^boolean doneFullScan)
+
+  (field ^:private ^EntryMap map)
+
+  (field ^:private ^EntryMap bsmMap)
+
+  (constructor ^:public [this]
+    (set! (.-size this) 1)
+    (set! (.-bsmSize this) 0)
+    (set! (.-myEntries this) (new PoolEntry/1 1024))
+    (set! (.-myBsmEntries this) (new BootstrapMethodEntryImpl/1 8))
+    (set! (.-parent this) nil)
+    (set! (.-parentSize this) 0)
+    (set! (.-parentBsmSize this) 0)
+    (set! (.-doneFullScan this) true))
+
+  (constructor ^:public [this ^ClassReader parent]
+    (set! (.-parent this) (cast ClassReaderImpl parent))
+    (set! (.-parentSize this) (.size parent))
+    (set! (.-parentBsmSize this) (.bootstrapMethodCount parent))
+    (set! (.-size this) parentSize)
+    (set! (.-bsmSize this) parentBsmSize)
+    (set! (.-myEntries this) (new PoolEntry/1 8))
+    (set! (.-myBsmEntries this) (new BootstrapMethodEntryImpl/1 8))
+    (set! (.-doneFullScan this) true))
+
+  (method ^:public size ^int [this] size)
+
+  (method ^:public bootstrapMethodCount ^int [this] bsmSize)
+
+  (method ^:public entryByIndex ^PoolEntry [this ^int index]
+    (when (or (<= index 0) (>= index (.size this))) (throw (SplitConstantPool/badCP index)))
+    (let [^PoolEntry pe (if (< index parentSize)
+                            (.entryByIndex parent index)
+                            (aget myEntries (unchecked-subtract-int index parentSize)))]
+      (when (nil? pe) (throw (SplitConstantPool/unusableCP index)))
+      pe))
+
+  (method ^:private ^:static badCP ^ConstantPoolException [^int index]
+    (ConstantPoolException. (java-str "Bad CP index: " index)))
+
+  (method ^:private ^:static unusableCP ^ConstantPoolException [^int index]
+    (ConstantPoolException. (java-str "Unusable CP index: " index)))
+
+  (method ^:public entryByIndex :type-params [(T extends PoolEntry)] ^T [this ^int index
+                                                                         ^{:tag (Class T)} cls]
+    (ClassReaderImpl/checkType (.entryByIndex this index) index cls))
+
+  (method ^:public bootstrapMethodEntry ^BootstrapMethodEntryImpl [this ^int index]
+    (when (or (< index 0) (>= index (.bootstrapMethodCount this)))
+      (throw (ConstantPoolException. (java-str "Bad BSM index: " index))))
+    (if (< index parentBsmSize)
+        (.bootstrapMethodEntry parent index)
+        (aget myBsmEntries (unchecked-subtract-int index parentBsmSize))))
+
+  (method ^:public canWriteDirect ^boolean [this ^ConstantPool other]
+    (Objects/requireNonNull other)
+    (or (identical? this other) (identical? parent other)))
+
+  (method ^:public writeBootstrapMethods ^boolean [this ^BufWriterImpl buf]
+    (if (== bsmSize 0)
+        false
+        (let [pos (.size buf)]
+          (Util/checkU2 bsmSize "num bootstrap methods")
+          (if (and (some? parent) (not (== parentBsmSize 0)))
+              (do
+                (.writeBootstrapMethods parent buf)
+                (loop [^int i parentBsmSize]
+                  (when (< i bsmSize)
+                    (.writeTo (.bootstrapMethodEntry this i) buf)
+                    (recur (unchecked-inc-int i))))
+                (let [attrLen (unchecked-subtract-int (.size buf) pos)]
+                  (.patchInt buf (unchecked-add-int pos 2) (unchecked-subtract-int attrLen 6))
+                  (.patchU2 buf (unchecked-add-int pos 6) bsmSize)))
+              (let [^{:tag (UnboundAttribute BootstrapMethodsAttribute)} a
+                      (anon (UnboundAttribute$AdHocAttribute BootstrapMethodsAttribute) [(Attributes/bootstrapMethods)]
+                        (method ^:public writeBody ^void [this ^BufWriterImpl b]
+                          (.writeU2 buf bsmSize)
+                          (loop [^int i 0]
+                            (when (< i bsmSize)
+                              (.writeTo (.bootstrapMethodEntry SplitConstantPool/this i) buf)
+                              (recur (unchecked-inc-int i)))))
+
+                        (method ^:public attributeName ^Utf8Entry [this]
+                          (.utf8Entry SplitConstantPool/this Attributes/NAME_BOOTSTRAP_METHODS)))]
+                (.writeTo a buf)))
+          true)))
+
+  (method writeTo ^void [this ^BufWriterImpl buf]
+    (let [^:mutable ^int writeFrom 1
+          mySize (.size this)]
+      (Util/checkU2 mySize "constant pool count")
+      (.writeU2 buf mySize)
+      (when (and (some? parent) (.canWriteDirect (.constantPool buf) this))
+        (.writeConstantPoolEntries parent buf)
+        (set! writeFrom (.size parent)))
+      (let [^:mutable i writeFrom]
+        (while (< i mySize)
+          (let [info (cast AbstractPoolEntry (.entryByIndex this i))]
+            (.writeTo info buf)
+            (set! i (unchecked-add-int i (.width info))))))))
+
+  (method ^:private map ^EntryMap [this]
+    (let [parentSize (.-parentSize this)
+          ^:mutable map (.-map this)]
+      (when (nil? map)
+        (set! (.-map this) (set! map (EntryMap. (^[int int] Math/max size 1024) (float 0.75))))
+        (let [^:mutable ^int i 1]
+          (while (< i parentSize)
+            (let [cpi (aget (.-cp parent) i)]
+              (if (nil? cpi)
+                  (do (set! doneFullScan false) (set! i (unchecked-inc-int i)))
+                  (do
+                    (.put map (.hashCode cpi) (.index cpi))
+                    (set! i (unchecked-add-int i (.width cpi))))))))
+        (let [^:mutable i (^[int int] Math/max parentSize 1)]
+          (while (< i size)
+            (let [cpi (aget myEntries (unchecked-subtract-int i parentSize))]
+              (.put map (.hashCode cpi) (.index cpi))
+              (set! i (unchecked-add-int i (.width cpi)))))))
+      map))
+
+  (method ^:private fullScan ^void [this]
+    (let [^:mutable ^int i 1]
+      (while (< i parentSize)
+        (let [cpi (.entryByIndex parent i)]
+          (.put map (.hashCode cpi) (.index cpi))
+          (set! i (unchecked-add-int i (.width cpi))))))
+    (set! doneFullScan true))
+
+  (method ^:private bsmMap ^EntryMap [this]
+    (let [bsmSize (.-bsmSize this)
+          ^:mutable bsmMap (.-bsmMap this)]
+      (when (nil? bsmMap)
+        (set! (.-bsmMap this)
+              (set! bsmMap (EntryMap. (^[int int] Math/max bsmSize 16) (float 0.75))))
+        (loop [^int i 0]
+          (when (< i parentBsmSize)
+            (let [bsm (.bootstrapMethodEntry parent i)]
+              (.put bsmMap (.-hash bsm) (.-index bsm))
+              (recur (unchecked-inc-int i)))))
+        (loop [^int i parentBsmSize]
+          (when (< i bsmSize)
+            (let [bsm (aget myBsmEntries (unchecked-subtract-int i parentBsmSize))]
+              (.put bsmMap (.-hash bsm) (.-index bsm))
+              (recur (unchecked-inc-int i))))))
+      bsmMap))
+
+  (method ^:private internalAdd :type-params [(E extends PoolEntry)] ^E [this ^E cpi]
+    (.internalAdd this cpi (.hashCode cpi)))
+
+  (method ^:private internalAdd :type-params [(E extends PoolEntry)] ^E [this ^E cpi ^int hash]
+    (let [newIndex (unchecked-subtract-int size parentSize)]
+      (when (> (unchecked-add-int newIndex 2) (alength myEntries))
+        (set! myEntries
+              (cast PoolEntry/1
+                    (Arrays/copyOf myEntries (unchecked-multiply-int 2 newIndex) PoolEntry/1))))
+      (aset myEntries newIndex cpi)
+      (set! size (unchecked-add-int size (.width cpi)))
+      (.put (.map this) hash (.index cpi))
+      cpi))
+
+  (method ^:private internalAdd ^BootstrapMethodEntryImpl [this ^BootstrapMethodEntryImpl bsm
+                                                           ^int hash]
+    (let [newIndex (unchecked-subtract-int bsmSize parentBsmSize)]
+      (when (> (unchecked-add-int newIndex 2) (alength myBsmEntries))
+        (set! myBsmEntries
+              (cast BootstrapMethodEntryImpl/1
+                    (Arrays/copyOf myBsmEntries
+                                   (unchecked-multiply-int 2 newIndex)
+                                   BootstrapMethodEntryImpl/1))))
+      (aset myBsmEntries newIndex bsm)
+      (set! bsmSize (unchecked-add-int bsmSize 1))
+      (.put (.bsmMap this) hash (.-index bsm))
+      bsm))
+
+  (method ^:private findIntEntry ^IntegerEntry [this ^int val]
+    (let [hash (AbstractPoolEntry/hash1 PoolEntry/TAG_INTEGER (Integer/hashCode val))
+          map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) PoolEntry/TAG_INTEGER)
+                (if-instance [^AbstractPoolEntry$IntegerEntryImpl ce e]
+                  (if (== (.intValue ce) val) (return ce) (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.findIntEntry this val))))
+
+  (method ^:private findLongEntry ^LongEntry [this ^long val]
+    (let [hash (AbstractPoolEntry/hash1 PoolEntry/TAG_LONG (Long/hashCode val))
+          map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) PoolEntry/TAG_LONG)
+                (if-instance [^AbstractPoolEntry$LongEntryImpl ce e]
+                  (if (== (.longValue ce) val) (return ce) (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.findLongEntry this val))))
+
+  (method ^:private findFloatEntry ^FloatEntry [this ^float val]
+    (let [hash (AbstractPoolEntry/hash1 PoolEntry/TAG_FLOAT (Float/hashCode val))
+          map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) PoolEntry/TAG_FLOAT)
+                (if-instance [^AbstractPoolEntry$FloatEntryImpl ce e]
+                  (if (== (.floatValue ce) val) (return ce) (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.findFloatEntry this val))))
+
+  (method ^:private findDoubleEntry ^DoubleEntry [this ^double val]
+    (let [hash (AbstractPoolEntry/hash1 PoolEntry/TAG_DOUBLE (Double/hashCode val))
+          map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) PoolEntry/TAG_DOUBLE)
+                (if-instance [^AbstractPoolEntry$DoubleEntryImpl ce e]
+                  (if (== (.doubleValue ce) val) (return ce) (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.findDoubleEntry this val))))
+
+  (method ^:private findEntry :type-params [(T extends AbstractPoolEntry)] ^AbstractPoolEntry [this
+                                                                                               ^int tag
+                                                                                               ^T ref1]
+    (let [hash (AbstractPoolEntry/hash1 tag (.index ref1))
+          map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) tag)
+                (if-instance [^{:tag (AbstractPoolEntry$AbstractRefEntry ?)} re e]
+                  (if (identical? (.-ref1 re) ref1) (return re) (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.findEntry this tag ref1))))
+
+  (method ^:private findEntry :type-params [(T extends AbstractPoolEntry)
+                                            (U extends AbstractPoolEntry)] ^AbstractPoolEntry [this
+                                                                                               ^int tag
+                                                                                               ^T ref1
+                                                                                               ^U ref2]
+    (let [hash (AbstractPoolEntry/hash2 tag (.index ref1) (.index ref2))
+          map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) tag)
+                (if-instance [^{:tag (AbstractPoolEntry$AbstractRefsEntry ? ?)} re e]
+                  (if (identical? (.-ref1 re) ref1)
+                      (if (identical? (.-ref2 re) ref2)
+                          (return re)
+                          (recur (.nextToken map hash token)))
+                      (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.findEntry this tag ref1 ref2))))
+
+  (method ^:private tryFindUtf8 ^AbstractPoolEntry$Utf8EntryImpl [this ^int hash ^String target]
+    (let [map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) PoolEntry/TAG_UTF8)
+                (if-instance [^AbstractPoolEntry$Utf8EntryImpl ce e]
+                  (if (.equals target (.stringValue ce))
+                      (return ce)
+                      (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.tryFindUtf8 this hash target))))
+
+  (method ^:private tryFindUtf8 ^AbstractPoolEntry$Utf8EntryImpl [this ^int hash
+                                                                  ^AbstractPoolEntry$Utf8EntryImpl target]
+    (let [map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) PoolEntry/TAG_UTF8)
+                (if-instance [^AbstractPoolEntry$Utf8EntryImpl ce e]
+                  (if (.equalsUtf8 target ce) (return ce) (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.tryFindUtf8 this hash target))))
+
+  (method ^:private tryFindClassOrInterface ^AbstractPoolEntry$ClassEntryImpl [this ^int hash
+                                                                               ^ClassDesc cd]
+    (while true
+      (let [map (.map this)]
+        (loop [^int token (.firstToken map hash)]
+          (when-not (== token -1)
+            (let [e (.entryByIndex this (.getIndexByToken map token))]
+              (if (== (.tag e) PoolEntry/TAG_CLASS)
+                  (if-instance [^AbstractPoolEntry$ClassEntryImpl ce e]
+                    (let [esym (.-sym ce)]
+                      (cond
+                        (some? esym)
+                          (do
+                            (when (.equals cd esym) (return ce))
+                            (recur (.nextToken map hash token)))
+                        (.equalsString (cast AbstractPoolEntry$Utf8EntryImpl (.-ref1 ce))
+                                       (Util/toInternalName cd))
+                          (do (set! (.-sym ce) cd) (return ce))
+                        :else (recur (.nextToken map hash token))))
+                    (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token))))))
+        (if (not doneFullScan) (.fullScan this) (return nil)))))
+
+  (method ^:private classEntryForClassOrInterface ^AbstractPoolEntry$ClassEntryImpl [this
+                                                                                     ^ClassDesc cd]
+    (let [desc (.descriptorString cd)
+          hash (AbstractPoolEntry/hashClassFromDescriptor (.hashCode desc))
+          ce (.tryFindClassOrInterface this hash cd)]
+      (if (some? ce)
+          ce
+          (let [internalName (Util/toInternalName cd)
+                utfHash (.hashCode internalName)
+                ^:mutable utf (.tryFindUtf8 this
+                                            (AbstractPoolEntry/hashString utfHash)
+                                            internalName)]
+            (when (nil? utf)
+              (set! utf
+                    (cast AbstractPoolEntry$Utf8EntryImpl
+                          (.internalAdd this
+                                        (AbstractPoolEntry$Utf8EntryImpl.
+                                          this
+                                          size
+                                          internalName
+                                          utfHash)))))
+            (cast AbstractPoolEntry$ClassEntryImpl
+                  (.internalAdd this (AbstractPoolEntry$ClassEntryImpl. this size utf hash cd)))))))
+
+  (method ^:private tryFindClassEntry ^AbstractPoolEntry$ClassEntryImpl [this ^int hash
+                                                                         ^AbstractPoolEntry$Utf8EntryImpl utf8]
+    (let [map (.map this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map token))]
+            (if (== (.tag e) PoolEntry/TAG_CLASS)
+                (if-instance [^AbstractPoolEntry$ClassEntryImpl ce e]
+                  (if (.equalsUtf8 (cast AbstractPoolEntry$Utf8EntryImpl (.-ref1 ce)) utf8)
+                      (return ce)
+                      (recur (.nextToken map hash token)))
+                  (recur (.nextToken map hash token)))
+                (recur (.nextToken map hash token))))))
+      (when-not doneFullScan (.fullScan this) (.tryFindClassEntry this hash utf8))))
+
+  (method ^:public utf8Entry ^AbstractPoolEntry$Utf8EntryImpl [this ^ClassDesc desc]
+    (let [utf8 (.utf8Entry this (.descriptorString desc))]
+      (when (nil? (.-typeSym utf8)) (set! (.-typeSym utf8) desc))
+      utf8))
+
+  (method ^:public utf8Entry ^Utf8Entry [this ^MethodTypeDesc desc]
+    (let [utf8 (.utf8Entry this (.descriptorString desc))]
+      (when (nil? (.-typeSym utf8)) (set! (.-typeSym utf8) desc))
+      utf8))
+
+  (method ^:public utf8Entry ^AbstractPoolEntry$Utf8EntryImpl [this ^String s]
+    (let [contentHash (.hashCode s)
+          ce (.tryFindUtf8 this (AbstractPoolEntry/hashString contentHash) s)]
+      (if (nil? ce)
+          (cast AbstractPoolEntry$Utf8EntryImpl
+                (.internalAdd this (AbstractPoolEntry$Utf8EntryImpl. this size s contentHash)))
+          ce)))
+
+  (method maybeCloneUtf8Entry ^AbstractPoolEntry$Utf8EntryImpl [this ^Utf8Entry entry]
+    (let [e (cast AbstractPoolEntry$Utf8EntryImpl entry)]
+      (if (or (identical? (.-constantPool e) this) (identical? (.-constantPool e) parent))
+          e
+          (let [ce (.tryFindUtf8 this (.hashCode e) e)]
+            (if (nil? ce)
+                (cast AbstractPoolEntry$Utf8EntryImpl
+                      (.internalAdd this (AbstractPoolEntry$Utf8EntryImpl. this size e)))
+                ce)))))
+
+  (method ^:public classEntry ^AbstractPoolEntry$ClassEntryImpl [this ^Utf8Entry nameEntry]
+    (let [ne (.maybeCloneUtf8Entry this nameEntry)]
+      (.classEntry this ne (.mayBeArrayDescriptor ne))))
+
+  (method classEntry ^AbstractPoolEntry$ClassEntryImpl [this ^AbstractPoolEntry$Utf8EntryImpl ne
+                                                        ^boolean isArray]
+    (let [hash (AbstractPoolEntry/hashClassFromUtf8 isArray ne)
+          e (.tryFindClassEntry this hash ne)]
+      (if (nil? e)
+          (cast AbstractPoolEntry$ClassEntryImpl
+                (.internalAdd this
+                              (AbstractPoolEntry$ClassEntryImpl.
+                                this
+                                size
+                                ne
+                                hash
+                                ^ClassDesc (when isArray
+                                             (when-instance [^ClassDesc cd (.-typeSym ne)] cd)))))
+          e)))
+
+  (method ^:public classEntry ^ClassEntry [this ^ClassDesc cd]
+    (cond
+      (.isClassOrInterface cd) (.classEntryForClassOrInterface this cd)
+      (.isArray cd) (.classEntry this (.utf8Entry this cd) true)
+      :else
+        (throw (IllegalArgumentException.
+                 (java-str "Cannot be encoded as ClassEntry: " (.displayName cd))))))
+
+  (method cloneClassEntry ^AbstractPoolEntry$ClassEntryImpl [this
+                                                             ^AbstractPoolEntry$ClassEntryImpl e]
+    (let [ce (.tryFindClassEntry this
+                                 (.hashCode e)
+                                 (cast AbstractPoolEntry$Utf8EntryImpl (.-ref1 e)))]
+      (if (some? ce)
+          (let [mySym (.-sym e)]
+            (when (and (nil? (.-sym ce)) (some? mySym)) (set! (.-sym ce) mySym))
+            ce)
+          (let [utf8 (.maybeCloneUtf8Entry this (cast Utf8Entry (.-ref1 e)))]
+            (cast AbstractPoolEntry$ClassEntryImpl
+                  (.internalAdd this
+                                (AbstractPoolEntry$ClassEntryImpl.
+                                  this
+                                  size
+                                  utf8
+                                  (.hashCode e)
+                                  (.-sym e))))))))
+
+  (method ^:public packageEntry ^PackageEntry [this ^Utf8Entry nameEntry]
+    (let [ne (.maybeCloneUtf8Entry this nameEntry)
+          e (cast AbstractPoolEntry$PackageEntryImpl (.findEntry this PoolEntry/TAG_PACKAGE ne))]
+      (if (nil? e)
+          (cast PackageEntry (.internalAdd this (AbstractPoolEntry$PackageEntryImpl. this size ne)))
+          ^PackageEntry e)))
+
+  (method ^:public moduleEntry ^ModuleEntry [this ^Utf8Entry nameEntry]
+    (let [ne (.maybeCloneUtf8Entry this nameEntry)
+          e (cast AbstractPoolEntry$ModuleEntryImpl (.findEntry this PoolEntry/TAG_MODULE ne))]
+      (if (nil? e)
+          (cast ModuleEntry (.internalAdd this (AbstractPoolEntry$ModuleEntryImpl. this size ne)))
+          ^ModuleEntry e)))
+
+  (method ^:public nameAndTypeEntry ^AbstractPoolEntry$NameAndTypeEntryImpl [this
+                                                                             ^Utf8Entry nameEntry
+                                                                             ^Utf8Entry typeEntry]
+    (let [ne (.maybeCloneUtf8Entry this nameEntry)
+          te (.maybeCloneUtf8Entry this typeEntry)
+          e (cast AbstractPoolEntry$NameAndTypeEntryImpl
+                  (.findEntry this PoolEntry/TAG_NAME_AND_TYPE ne te))]
+      (if (nil? e)
+          (cast AbstractPoolEntry$NameAndTypeEntryImpl
+                (.internalAdd this (AbstractPoolEntry$NameAndTypeEntryImpl. this size ne te)))
+          e)))
+
+  (method ^:public fieldRefEntry ^FieldRefEntry [this ^ClassEntry owner
+                                                 ^NameAndTypeEntry nameAndType]
+    (let [oe (cast
+               AbstractPoolEntry$ClassEntryImpl
+               (AbstractPoolEntry/maybeClone this (cast AbstractPoolEntry$ClassEntryImpl owner)))
+          ne (cast AbstractPoolEntry$NameAndTypeEntryImpl
+                   (AbstractPoolEntry/maybeClone
+                     this
+                     (cast AbstractPoolEntry$NameAndTypeEntryImpl nameAndType)))
+          e (cast AbstractPoolEntry$FieldRefEntryImpl
+                  (.findEntry this PoolEntry/TAG_FIELDREF oe ne))]
+      (if (nil? e)
+          (cast FieldRefEntry
+                (.internalAdd this (AbstractPoolEntry$FieldRefEntryImpl. this size oe ne)))
+          ^FieldRefEntry e)))
+
+  (method ^:public methodRefEntry ^MethodRefEntry [this ^ClassEntry owner
+                                                   ^NameAndTypeEntry nameAndType]
+    (let [oe (cast
+               AbstractPoolEntry$ClassEntryImpl
+               (AbstractPoolEntry/maybeClone this (cast AbstractPoolEntry$ClassEntryImpl owner)))
+          ne (cast AbstractPoolEntry$NameAndTypeEntryImpl
+                   (AbstractPoolEntry/maybeClone
+                     this
+                     (cast AbstractPoolEntry$NameAndTypeEntryImpl nameAndType)))
+          e (cast AbstractPoolEntry$MethodRefEntryImpl
+                  (.findEntry this PoolEntry/TAG_METHODREF oe ne))]
+      (if (nil? e)
+          (cast MethodRefEntry
+                (.internalAdd this (AbstractPoolEntry$MethodRefEntryImpl. this size oe ne)))
+          ^MethodRefEntry e)))
+
+  (method ^:public interfaceMethodRefEntry ^InterfaceMethodRefEntry [this ^ClassEntry owner
+                                                                     ^NameAndTypeEntry nameAndType]
+    (let [oe (cast
+               AbstractPoolEntry$ClassEntryImpl
+               (AbstractPoolEntry/maybeClone this (cast AbstractPoolEntry$ClassEntryImpl owner)))
+          ne (cast AbstractPoolEntry$NameAndTypeEntryImpl
+                   (AbstractPoolEntry/maybeClone
+                     this
+                     (cast AbstractPoolEntry$NameAndTypeEntryImpl nameAndType)))
+          e (cast AbstractPoolEntry$InterfaceMethodRefEntryImpl
+                  (.findEntry this PoolEntry/TAG_INTERFACE_METHODREF oe ne))]
+      (if (nil? e)
+          (cast
+            InterfaceMethodRefEntry
+            (.internalAdd this (AbstractPoolEntry$InterfaceMethodRefEntryImpl. this size oe ne)))
+          ^InterfaceMethodRefEntry e)))
+
+  (method ^:public methodTypeEntry ^MethodTypeEntry [this ^MethodTypeDesc descriptor]
+    (.methodTypeEntry this (.utf8Entry this descriptor)))
+
+  (method ^:public methodTypeEntry ^MethodTypeEntry [this ^Utf8Entry descriptor]
+    (let [de (.maybeCloneUtf8Entry this descriptor)
+          e (cast AbstractPoolEntry$MethodTypeEntryImpl
+                  (.findEntry this PoolEntry/TAG_METHOD_TYPE de))]
+      (if (nil? e)
+          (cast MethodTypeEntry
+                (.internalAdd this (AbstractPoolEntry$MethodTypeEntryImpl. this size de)))
+          ^MethodTypeEntry e)))
+
+  (method ^:public methodHandleEntry ^MethodHandleEntry [this ^int refKind
+                                                         ^:mutable ^MemberRefEntry reference]
+    (Util/checkU1 refKind "reference kind")
+    (set! reference (cast MemberRefEntry (AbstractPoolEntry/maybeClone this reference)))
+    (let [hash (AbstractPoolEntry/hash2 PoolEntry/TAG_METHOD_HANDLE refKind (.index reference))
+          map1 (.map this)]
+      (loop [^int token (.firstToken map1 hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map1 token))]
+            (if (== (.tag e) PoolEntry/TAG_METHOD_HANDLE)
+                (if-instance [^AbstractPoolEntry$MethodHandleEntryImpl ce e]
+                  (if (== (.kind ce) refKind)
+                      (if (identical? (.reference ce) reference)
+                          (return ce)
+                          (recur (.nextToken map1 hash token)))
+                      (recur (.nextToken map1 hash token)))
+                  (recur (.nextToken map1 hash token)))
+                (recur (.nextToken map1 hash token))))))
+      (if (not doneFullScan)
+          (do (.fullScan this) (.methodHandleEntry this refKind reference))
+          (cast MethodHandleEntry
+                (.internalAdd this
+                              (AbstractPoolEntry$MethodHandleEntryImpl.
+                                this
+                                size
+                                hash
+                                refKind
+                                (cast AbstractPoolEntry$AbstractMemberRefEntry reference))
+                              hash)))))
+
+  (method ^:public invokeDynamicEntry ^InvokeDynamicEntry [this
+                                                           ^:mutable ^BootstrapMethodEntry bootstrapMethodEntry
+                                                           ^:mutable ^NameAndTypeEntry nameAndType]
+    (when-not (.canWriteDirect this (.constantPool bootstrapMethodEntry))
+      (set! bootstrapMethodEntry
+            (.bsmEntry this
+                       (.bootstrapMethod bootstrapMethodEntry)
+                       (.arguments bootstrapMethodEntry))))
+    (set! nameAndType (cast NameAndTypeEntry (AbstractPoolEntry/maybeClone this nameAndType)))
+    (let [hash (AbstractPoolEntry/hash2 PoolEntry/TAG_INVOKE_DYNAMIC
+                                        (.bsmIndex bootstrapMethodEntry)
+                                        (.index nameAndType))
+          map1 (.map this)]
+      (loop [^int token (.firstToken map1 hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map1 token))]
+            (if (== (.tag e) PoolEntry/TAG_INVOKE_DYNAMIC)
+                (if-instance [^AbstractPoolEntry$InvokeDynamicEntryImpl ce e]
+                  (if (identical? (.bootstrap ce) bootstrapMethodEntry)
+                      (if (identical? (.nameAndType ce) nameAndType)
+                          (return ce)
+                          (recur (.nextToken map1 hash token)))
+                      (recur (.nextToken map1 hash token)))
+                  (recur (.nextToken map1 hash token)))
+                (recur (.nextToken map1 hash token))))))
+      (if (not doneFullScan)
+          (do (.fullScan this) (.invokeDynamicEntry this bootstrapMethodEntry nameAndType))
+          (let [ce (AbstractPoolEntry$InvokeDynamicEntryImpl.
+                     this
+                     size
+                     hash
+                     (cast BootstrapMethodEntryImpl bootstrapMethodEntry)
+                     (cast AbstractPoolEntry$NameAndTypeEntryImpl nameAndType))]
+            (.internalAdd this ce hash)
+            ce))))
+
+  (method ^:public constantDynamicEntry ^ConstantDynamicEntry [this
+                                                               ^:mutable ^BootstrapMethodEntry bootstrapMethodEntry
+                                                               ^:mutable ^NameAndTypeEntry nameAndType]
+    (when-not (.canWriteDirect this (.constantPool bootstrapMethodEntry))
+      (set! bootstrapMethodEntry
+            (.bsmEntry this
+                       (.bootstrapMethod bootstrapMethodEntry)
+                       (.arguments bootstrapMethodEntry))))
+    (set! nameAndType (cast NameAndTypeEntry (AbstractPoolEntry/maybeClone this nameAndType)))
+    (let [hash (AbstractPoolEntry/hash2 PoolEntry/TAG_DYNAMIC
+                                        (.bsmIndex bootstrapMethodEntry)
+                                        (.index nameAndType))
+          map1 (.map this)]
+      (loop [^int token (.firstToken map1 hash)]
+        (when-not (== token -1)
+          (let [e (.entryByIndex this (.getIndexByToken map1 token))]
+            (if (== (.tag e) PoolEntry/TAG_DYNAMIC)
+                (if-instance [^AbstractPoolEntry$ConstantDynamicEntryImpl ce e]
+                  (if (identical? (.bootstrap ce) bootstrapMethodEntry)
+                      (if (identical? (.nameAndType ce) nameAndType)
+                          (return ce)
+                          (recur (.nextToken map1 hash token)))
+                      (recur (.nextToken map1 hash token)))
+                  (recur (.nextToken map1 hash token)))
+                (recur (.nextToken map1 hash token))))))
+      (if (not doneFullScan)
+          (do (.fullScan this) (.constantDynamicEntry this bootstrapMethodEntry nameAndType))
+          (let [ce (AbstractPoolEntry$ConstantDynamicEntryImpl.
+                     this
+                     size
+                     hash
+                     (cast BootstrapMethodEntryImpl bootstrapMethodEntry)
+                     (cast AbstractPoolEntry$NameAndTypeEntryImpl nameAndType))]
+            (.internalAdd this ce hash)
+            ce))))
+
+  (method ^:public intEntry ^IntegerEntry [this ^int value]
+    (let [e (.findIntEntry this value)]
+      (if (nil? e)
+          (cast IntegerEntry
+                (.internalAdd this (AbstractPoolEntry$IntegerEntryImpl. this size value)))
+          e)))
+
+  (method ^:public floatEntry ^FloatEntry [this ^float value]
+    (let [e (.findFloatEntry this value)]
+      (if (nil? e)
+          (cast FloatEntry (.internalAdd this (AbstractPoolEntry$FloatEntryImpl. this size value)))
+          e)))
+
+  (method ^:public longEntry ^LongEntry [this ^long value]
+    (let [e (.findLongEntry this value)]
+      (if (nil? e)
+          (cast LongEntry (.internalAdd this (AbstractPoolEntry$LongEntryImpl. this size value)))
+          e)))
+
+  (method ^:public doubleEntry ^DoubleEntry [this ^double value]
+    (let [e (.findDoubleEntry this value)]
+      (if (nil? e)
+          (cast DoubleEntry
+                (.internalAdd this (AbstractPoolEntry$DoubleEntryImpl. this size value)))
+          e)))
+
+  (method ^:public stringEntry ^StringEntry [this ^Utf8Entry utf8]
+    (let [ue (.maybeCloneUtf8Entry this utf8)
+          e (cast AbstractPoolEntry$StringEntryImpl (.findEntry this PoolEntry/TAG_STRING ue))]
+      (if (nil? e)
+          (cast StringEntry (.internalAdd this (AbstractPoolEntry$StringEntryImpl. this size ue)))
+          ^StringEntry e)))
+
+  (method ^:public bsmEntry ^BootstrapMethodEntry [this ^:mutable ^MethodHandleEntry methodReference
+                                                   ^:mutable ^{:tag (List LoadableConstantEntry)} arguments]
+    (set! methodReference
+          (cast MethodHandleEntry (AbstractPoolEntry/maybeClone this methodReference)))
+    (for-each [^LoadableConstantEntry a arguments]
+      (when-not (.canWriteDirect this (.constantPool a))
+        (let [arr (cast LoadableConstantEntry/1
+                        (.toArray arguments (new LoadableConstantEntry/1 0)))]
+          (loop [^int i 0]
+            (when (< i (alength arr))
+              (aset arr
+                    i
+                    (cast LoadableConstantEntry (AbstractPoolEntry/maybeClone this (aget arr i))))
+              (recur (unchecked-inc-int i))))
+          (set! arguments (List/of arr))
+          (break))))
+    (let [mre (cast AbstractPoolEntry$MethodHandleEntryImpl methodReference)
+          hash (BootstrapMethodEntryImpl/computeHashCode mre arguments)
+          map (.bsmMap this)]
+      (loop [^int token (.firstToken map hash)]
+        (when-not (== token -1)
+          (let [e (.bootstrapMethodEntry this (.getIndexByToken map token))]
+            (if (and (identical? (.bootstrapMethod e) mre) (.equals (.arguments e) arguments))
+                (return e)
+                (recur (.nextToken map hash token))))))
+      (let [ne (BootstrapMethodEntryImpl. this bsmSize hash mre arguments)]
+        (.internalAdd this ne hash)))))

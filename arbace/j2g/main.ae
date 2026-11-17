@@ -58,6 +58,22 @@
                        asked into FILE (bin/j2g-edge update merges the builds' runs)
     --jvm-reflection   instead, ask the JVM, without recording (a world the edge does not
                        cover)
+    --outside-platform DIR
+                       declarations outside the world (A8 of the Ghidra case study's G1 plan,
+                       arbace.j2g.outside; J2G-SPEC §4.1, \"Declarations outside the world\"): a
+                       class of the platform's exploded modules in DIR (bin/repr-java
+                       platform-dir) but java.base's, neither in the forms, jrt nor the edge,
+                       declared from its class file: its uses are J2g_Missing, which throw
+                       when reached, in place of the class naming it refused; since A8c also
+                       java.base's API (java.*, javax.*) the world and the edge lack (members
+                       of a program's own classes alone), an edge class's missing facets from
+                       java.base's class file, and a world class that is a platform class (a
+                       jrt variant: java.awt.Color) completed with the platform class's
+                       interfaces and methods it lacks, those methods throwing
+    --outside-classes DIR[=ORIGIN]
+                       the same (A8b) for a directory of class files, a binary jar on javac's
+                       class path alone (bin/java-project's outside.args), after the platform
+                       and earlier ones (repeatable); report.edn's :outside lists the classes
     --analyze-only     the world loaded and analyzed (w/load-world), nothing reached,
                        translated or written but DIR/report.edn: :analyze-only true, :files,
                        :classes (analyzed), :analysis-failures (as a translation's report has
@@ -86,6 +102,7 @@
             [arbace.j2g.checks :as chk]
             [arbace.j2g.embed :as embed]
             [arbace.j2g.edge :as edge]
+            [arbace.j2g.outside :as outside]
             [arbace.j2g.zlib :as zlib]
             [arbace.j2g.meta :as meta]
             [arbace.repr.go.print :as gp]))
@@ -138,6 +155,10 @@
       "--analyze-only" (recur more (assoc opts :analyze-only true))
       "--own-roots" (recur (rest more) (assoc opts :own-roots (keyword (first more))))
       "--provides" (recur (rest more) (assoc opts :provides (first more)))
+      ;; declarations outside the world (A8, A8b; arbace.j2g.outside): the platform's modules but
+      ;; java.base, then class directories (a binary jar unpacked) named by their origin
+      "--outside-platform" (recur (rest more) (update opts :outside (fnil conj []) (outside/platform-source (first more))))
+      "--outside-classes" (recur (rest more) (update opts :outside (fnil conj []) (outside/parse-spec (first more))))
       (throw (ex-info (str "j2g: unknown option " a) {})))))
 
 (defn- internal [s] (str/replace s "." "/"))
@@ -589,7 +610,10 @@
                     (map? v) (str "{" (str/join ",\n  " (for [[k x] v] (str (pr-str k) " " (pr-str x)))) "}")
                     (vector? v) (str "[" (str/join "\n  " (map pr-str v)) "]")
                     :else (pr-str v)))]
-    (str "{" (str/join ",\n " (for [[k v] report] (str (pr-str k) " " (val-str v)))) "}\n")))
+    (str "{" (str/join ",\n " (for [[k v] report
+                                     ;; :outside only with declarations outside the world (A8)
+                                     :when (not (and (= k :outside) (nil? v)))]
+                                 (str (pr-str k) " " (val-str v)))) "}\n")))
 
 (defn- world-scan
   "jrt's scan (jrt/scan) with what j2g's support code adds to jrt's hand-written classes in this world: String.format
@@ -705,6 +729,7 @@
                                          :root-keys (vec (sort (distinct (mapcat root-keys (:roots mr)))))})))
                  {})
         report (merge {:analyze-only true
+                       :outside (when (seq (:outside opts)) (outside/report (:outside opts) env/*declared*))
                        :files (count (:files world))
                        :classes (count @(:compile-set world))
                        :analysis-failures failed
@@ -1185,6 +1210,8 @@
                              :unavailable (into (sorted-map) (for [[k v] (:unavailable res)] [(str/join " " k) (vec (sort v))]))
                              :missing (into (sorted-map) (for [[k v] (:missing res)] [k (count v)]))
                              :analysis-failures (:failed world)
+                             ;; the declarations outside the world (A8, A8b)
+                             :outside (when (seq (:outside opts)) (outside/report (:outside opts) env/*declared*))
                              ;; the refused classes, stubbed or dropped (GH6 (iv); J2G-SPEC §4.1)
                              :refused (meta/refusals (merge (into {} (for [[n msg] (:failed world) :when (a/decl n)] [n msg]))
                                                             (:failed-classes res))
@@ -1420,11 +1447,19 @@
                 (throw (ex-info (str "j2g: no edge " f " (bin/j2g-edge update, or --jvm-reflection)") {}))))
           e (apply edge/read-edge fs)]
       (println (str "j2g: the edge " (str/join " + " fs) ": " (count (:classes e)) " classes, read in " (secs t0) " s"))
-      (binding [env/*declared* (:classes e)
+      (let [d (if-let [srcs (seq (:outside opts))]
+                (do (println (str "j2g: declarations outside the world from " (count srcs) " sources"
+                                  " (the platform's modules, java.base's API for what the world and the edge lack,"
+                                  " then the class path's)"))
+                    (outside/declared (:classes e) (vec srcs)))
+                (:classes e))]
+      (binding [env/*declared* d
+                ;; A8c: the world's variants completed from the platform (java.awt.Color's Paint and members)
+                a/*completion* (when (seq (:outside opts)) (outside/completion d))
                 edge/*edge* e
                 ;; no Java forms sources from the class path (§9.2), as on the Go build
                 a/*source-lookup* false]
-        (run* opts))))))
+        (run* opts)))))))
 
 (defn -main [& args]
   (let [opts (parse-args args)
