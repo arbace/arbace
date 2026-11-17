@@ -6012,3 +6012,33 @@ argument, the check gives none), and pass as such; run by hand with `-- 200` man
 mandelbrot-2.c's image byte for byte. nbody-4's `_mm_*` functions (Arbace's `<immintrin.h>` declares them only) are not built: no
 check reaches them; left for a program that does. The class `vector` stays as a guard class. C eval 2,214 / 34 / 31, AOT 2,222 / 26
 / 31; completeness 96 to 97.
+
+## As built: GNU nested functions (CS321 (a), 2026-11-17, branch `h-c-run`)
+
+`arbace/c/build.ae` (and one fix in `arbace/c/cf2g.ae`); no back-end change: a nested function is a function of ci's like any,
+gcc's static chain register made a static per nested function.
+- **Its code.** A `c/defn` in a block's bindings (`local-decl`) is built where it stands by `build-nested` into a `(code ...)`
+  command of its own, under a unit-unique name (`PARENT$NAME$N`), with the enclosing functions' states as `*outer*`;
+  `build-fn` returns the top-level function's command with its nested functions' in its metadata (`:ci/extra`), printed on the
+  lines after its own (`frag-item`, `build-program-direct`), and `link-text` adds each line as an entry of its own, so the
+  link trace's line numbers (cf2g's prebuilt library items, by line) stay right.
+- **The static chain.** Each nested function has a static word `g`; a direct call (`call-node`) and taking its address (`ex`,
+  `addr`) first store there the frame base of its parent as the current function reaches it (`chain-to`: its own `(fp 0)`, or up
+  the chain), and the nested function copies it into its own frame (`:chain-off`) at entry. An address taken in one activation
+  and called while another activation of the parent took it later sees the later frame (gcc's trampolines are per activation):
+  no case of the corpora does so.
+- **The enclosing locals.** A parent keeps in its frame memory every local whose name its nested functions use (`nested-names`,
+  types' metadata too: `int a[N]`), and a VLA's address in a frame word beside its slot (`:mirror`); `place` finds a name that
+  is no local of the current function in the enclosing states (`outer-place`) and addresses it through the chain.
+- **Non-local gotos.** The labels of a function that its nested functions' gotos name (`body-labels`, `nested-gotos`) each get a
+  jmp_buf in its frame, set at entry by a setjmp statement (`sj`, the body an `sjbody`) that jumps to the label when it returns
+  non-zero; a nested function's goto to such a label is a longjmp to it, through the chain (it unwinds qsort's frames in
+  nestfunc-6). `&&label` of an enclosing label is that function's label value (920721-4).
+- **A variably modified result** (`vm?` of a function type: gnu23-varmod-2's `typeof((n++, a))` evaluates its operand).
+- **cf2g:** a computed goto's dispatch anywhere in a function's statements, a branch's too (`finish-scope`; comp-goto-2's
+  `if (a == -1) goto *x;`, which no program reached before).
+
+The 31 programs of the class: eval 31 of 31, AOT 31 of 31 (`bin/ci check --only`, `check --aot --only`). Regression: 296
+programs at eval (the vector piece's 268 and the 31; only the 31 move, compcert/fft.c's one timeout under the AOT run beside it
+passes alone, every control differs) and test/c/essential-aot.txt at AOT (0 failing, the controls differ). The class `nested-fn`
+stays as a guard class. C eval 2,245 / 34 / 0, AOT 2,253 / 26 / 0: completeness 97 to 98 (0.9726 to 0.9794), meant 100.
