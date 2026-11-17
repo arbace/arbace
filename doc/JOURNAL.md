@@ -9573,3 +9573,16 @@ world's signatures as `arbace.classes.go/generics` already does. Not done (not c
 Go: the by-design classes audited against doc/go/GOI-SPEC.md ("v1's divergences", §1.1) and the surveys; no class changed, the
 candidates reported for the user's decision (weak and unique, GPS43's two types2 programs, the abridged interface spelling as
 feature gaps; gc's failed references, the compile-only directory tests, unsafe and the other boards' goos packages as n/a).
+
+## 2026-11-17: Go's by-design classes reclassified (round 51, the user's DECISION A (a) and B (a); branch `h-clojure-go`)
+
+The audit of the entry above, decided by the user. A (a), feature gaps made deferred: `test/goi/divergences.edn`'s new
+`:std-weak-unique` (weak.go, escape_unique.go, fixedbugs/issue68415.go; `:std-out-of-scope` keeps escape_runtime_atomic, the
+internal-package rule), `:no-forms` (issue50372, slice3err: types2's checks on syntax's tree, GPS43's alternative) and the new
+`:abridged-type-literal` (issue11614: goi's interface{…}; `:spellings` keeps bug217). peano's call depth stays by design (S23, GC42).
+B (a), no reference or no level made `:na` as `divergences-aot.edn`'s `:no-forms`: `:gc-reference` (3 eval, 4 AOT),
+`test/repr/go/divergences-print.edn`'s `:compile-only-dirtests` (127) and `:unsafe` (2), `divergences-read.edn`'s
+`:goos-other-boards` (67). No record changed; `bin/goi divergences` (and `--aot`) classify as before under the new kinds;
+`bin/reap --record`, `bin/crops-score --record`. Go: read 12,158 / 204 / 0 to 12,158 / 137 / 0 (67 n/a), eval 1,755 / 79 / 3 to
+1,755 / 70 / 9 (3 n/a), AOT 1,691 / 9 / 0 (137 n/a) to 1,691 / 5 / 0 (141 n/a), print 2,584 / 141 / 0 to 2,584 / 12 / 0 (129 n/a);
+completeness 0.9705 to 0.9846, without by design 0.9996 to 0.9987.
