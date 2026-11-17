@@ -118,8 +118,10 @@ Six crops are above 90 on all three. What the others still need:
   `jdk/javac/platform-own-known.edn` (JCS360 (a), 12 classes); the controls. Stages 2-3's day parts are on `jcs359-s2` (2026-11-11): `bin/javac-vendor gensrc`, the 16 modules' generated
   sources by the build's own tools on javac's tool, 2,305 of 2,307 the build's byte for byte (2 known), the two `gcc -E` ones by
   repr/c (JCS369 (a)); `descriptors`, the 68 module descriptors as the image holds them, 67 equal and java.base known
-  (ModuleHashes, JCS364 (a)); JCS389-JCS392 proposed. Next: stage 1's measure of all 68 modules on night 15 (JCS374 (a);
-  `.tmp/night13/slots/jcs359.sh`, which then runs stages 2-3 from its outputs), stage 4's `platform --own` and switch. The
+  (ModuleHashes, JCS364 (a)); JCS389-JCS392 proposed. Stage 1's measure is done by day (h-java-platform, 2026-11-17: all 68 modules, 27,530 classes, 50 modules
+  byte for byte, 48 classes `:param-names`, every process at most 2.07 GB under `GOMEMLIMIT=2GiB`); the open parts of stages 4-5
+  are JOP1-JOP8 for the user ([classes/JAVA-FRONTEND-SURVEY.md](classes/JAVA-FRONTEND-SURVEY.md), "Own platform"). Next: the known
+  file's 36 new entries, then stage 4's `platform --own` and switch. The
   score moves at stages 4-5: Java to 99.7.
   P2 by day on `java-p2` (2026-11-11; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by day)"): RecordComponent
   (slice 5), the classes made at run time deserializable (slice 8: Clojure's `serialization`), the platform logging bean
