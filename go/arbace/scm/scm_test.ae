@@ -53,3 +53,31 @@ by its uid), the strings fresh and mutable; a record of a type made outside the 
       (.konst u (List (addr (lit Record :RTD other :F (lit (slice any) false)))))
       (when (== (.-refused u) "")
         (.Fatal t "a record of a type made outside psyntax's boot is not refused")))))
+
+(go/func TestEvalFastPaths
+  "TestEvalFastPaths: queue 334's evaluator paths on core forms (no psyntax), each against the value Chez gives: a self
+tail loop that takes over its frame (frameSafe, markSelf), or's expansion as an Or, a thunk's application as its body, a
+Let with an operand that is not simple (LetK), the closures a loop makes each over its own frame (a body with a lambda
+is not frame-safe), (if (not x) ...), and a continuation re-entered into an operand of a call whose callee changed its
+parameter: the frame is the callee's own, so the re-entered call sees the operand's value (((1 3) (1 2)), as Chez for a
+callee it does not inline; si before queue 334: ((99 3) (1 2))), while into a let's init it sees the set! (((99 3) (1 2)),
+as Chez's let and si before).\n"
+  [^{:tag (* testing/T)} t]
+  (let [cases (lit (slice (slice string))
+                (lit (slice string) "(letrec ((loop (lambda (i acc) (if ((primitive =) i '0) acc (loop ((primitive -) i '1) ((primitive +) acc i)))))) (loop '100000 '0))" "5000050000")
+                (lit (slice string) "((lambda (t) (if t t 'b)) '#f)" "b")
+                (lit (slice string) "((lambda (t) (if t t 'b)) 'a)" "a")
+                (lit (slice string) "((case-lambda ((t) (if t t ((primitive list) t)))) '#f)" "(#f)")
+                (lit (slice string) "((lambda () '1 '2))" "2")
+                (lit (slice string) "(letrec ((f (lambda (x) ((primitive *) x '10)))) ((lambda (a b) ((primitive list) a b)) (f '1) (f '2)))" "(10 20)")
+                (lit (slice string) "(letrec ((loop (lambda (i acc) (if ((primitive =) i '0) acc (loop ((primitive -) i '1) ((primitive cons) (lambda () i) acc)))))) ((lambda (l) ((primitive list) ((primitive car) l) ((primitive car) ((primitive cdr) l)))) ((primitive map) (lambda (p) (p)) (loop '3 '()))))" "(1 2)")
+                (lit (slice string) "(if ((primitive not) ((primitive null?) '())) 'yes 'no)" "no")
+                (lit (slice string) "(letrec ((k '#f) (r '()) (f (lambda (a b) ((lambda (old) (begin (set! a '99) ((primitive list) old b))) a)))) (begin (set! r ((primitive cons) (f '1 ((primitive call-with-current-continuation) (lambda (c) (begin (set! k c) '2)))) r)) (if ((primitive =) ((primitive length) r) '1) (k '3) r)))" "((1 3) (1 2))")
+                (lit (slice string) "(letrec ((k '#f) (r '())) (begin (set! r ((primitive cons) ((lambda (a b) ((lambda (old) (begin (set! a '99) ((primitive list) old b))) a)) '1 ((primitive call-with-current-continuation) (lambda (c) (begin (set! k c) '2)))) r)) (if ((primitive =) ((primitive length) r) '1) (k '3) r)))" "((99 3) (1 2))"))]
+    (range [_ c cases]
+      (let [m (NewM)
+            ^any v nil]
+        (range [_ f (ReadAllString (aget c 0))]
+          (set! v (.Eval m f)))
+        (when (!= (WriteValue v false) (aget c 1))
+          (.Errorf t "%s: got %s, want %s" (aget c 0) (WriteValue v false) (aget c 1)))))))
