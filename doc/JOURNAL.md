@@ -10032,3 +10032,63 @@ bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no 
   45 min 55 s, peak 6.25 GiB; 771 classes declared, 9 of java.base (arbace-ghidra g1g `3f086eb`, `:after-a8c`).
 - Left: the translation of A8c (Color's Go methods, a class extending the outside SecurityManager) is first compiled by the
   build (§8's jobs at the merged key); log4j-core's PropertyChangeEvent stays a stub until GH5 (iii)'s conversion.
+
+## 2026-11-17: F26 and GH5 (iii)'s first slice landed in one conversion, with h-java-deferred and A8c (branch `f26-ghidra`, from `next` `cf8268ebf`)
+
+- **What the branch holds.** F26, the class-file API in the Go build's world: B2's removal (6df319ee1) reversed in
+  `test/jrt/jrt_sources.ae` (`classfile-sources` back in the closure) and f26-classfile's four code commits cherry-picked
+  (a32a1401c, 03739ada5, 0ba1d5de3, 149432655; its journal acaae3905 as the entry above, unchanged). ghidra-a8's six commits
+  (6519bdd3b, fe5b0fe58, b7a8ac6a6, 3691d479a, 1ea2867ae, 352535191: A8, A8b and java.beans' PropertyChangeEvent and
+  PropertyChangeListener in `added-module-sources`; 127eac68c, 6519bdd3b's earlier pick, is on no branch, so it was picked
+  again). h-java-deferred (0b63165bb) merged, the coordinator's addition, with one change: **its Wrapper derivation is dropped**
+  (`test/jrt/derive.ae`'s `hjd-derivations` keeps ObjectInputFilter, Logger and LogManager; the derived
+  `overlay/jdk/java.base/sun/invoke/util/Wrapper.java` removed). It took Wrapper's ClassDescs out because F26 had left the world;
+  with F26 back, jdk26u's Wrapper is the world's again and jdk.internal.constant's ConstantUtils and ArrayClassDescImpl call
+  `basicClassDescriptor`/`wrapperClassDescriptor`. h-ghidra-20's A8c (b2110296a, b6c576acd) cherry-picked after the conversion
+  (it changes no converted input). next merged three times (105b0d832: javac's tool fixed; 77630727b; 5bf0e1ccf: genclass.ae's
+  `into`, without which the gate build's prepare failed).
+- **Two fixes of this branch.** (1) `arbace.j2g.outside` required `arbace.repr.java.classfile` in its ns form, but repr/java is
+  not embedded (`arbace.j2g.embed/excluded`), so every build's image prepare failed ("arbace.j2g.main Syntax error executing at
+  (arbace/j2g/outside.ae:1:1)"): the reader is now resolved on demand (`requiring-resolve`, as `arbace.j2g.jvm`), outside the
+  callers' `try`, so that a reader that does not load is an error and not a class left undeclared. A8c's version of the file was
+  merged with the same rule. (2) `Compiler$CodeHostNew`'s field `abstract` (eval speed, 94914b900) renamed `abstractClass`:
+  `abstract` is a Java keyword, so `bin/repr-java declarations`' Java did not compile and `bin/clojure-tests --java-fixtures
+  update` (and the full gate's `verify`) failed.
+- **javac's tool.** Three builds at the checkout's key failed: Go's shared build cache was trimmed under the first one's
+  `go build` (another job's trim, "could not import bytes ... no such file"; the next builds used a cache of the worktree's own,
+  `GOCACHE=.tmp/gocache`); the second stopped on fix (1); the third was OOM-killed in its host compile (the second stage, the
+  namespaces compiled with repr/java's reader, 27 GB and growing, beside its j2g at 9.6 GB and other jobs; the first build's peak
+  was 45 GB). The conversion then ran on B2's tool, `.tmp/gate-exe/javac-09cfb08baf2525092d6d` (the provenance's host since B2),
+  with `REPR_JAVA_STALE_OK=1`: repr/java has not changed since 2026-11-10 (e1d5c5b70), so the read is the same reader's. The
+  provenance names that tool; the full gate's javac-tool build at the merged key and its `jrt-convert verify` are the check.
+- **The one conversion**, under `ARBACE_HEAVY_LOCK=.tmp/big-h.lock bin/heavy-lock` with `GOMEMLIMIT=34GiB`, started at
+  MemAvailable 46 GiB: `bin/jrt-convert derive --check` (86 of 86 as derived), `bin/jrt-convert update`: **1700 s, peak 40.4 GB**
+  (the javac tool's read: 3350 files, all native, 0 failed, 1108 s); 3275 of 3554 forms unchanged, 11 different, 268 added
+  (java.lang.classfile and its subpackages, jdk.internal.classfile, java.lang.constant's descriptors, jdk.internal.constant,
+  java.lang.invoke.TypeDescriptor, sun.invoke.util.Wrapper, VerifyError, JavaUtilCollectionAccess, java.beans.PropertyChangeEvent
+  and PropertyChangeListener; the h-java-deferred overlays' forms). Then `bin/jrt modules --check` and `provides --check`
+  (current), `bin/j2g-edge update` (7 min, 8.6 GB: jdk/edge.edn 117 lines in, 439 out; jdk/javac/edge.edn and its :jdk-edge by
+  `bin/javac-vendor edge`), `bin/clojure-tests --java-fixtures update` (no change), `bin/provenance-check` (passes).
+- **Verified.** `bin/j2g-edge verify` passes (after A8c and next's merges). `bin/jrt-convert verify` (on the same tool, after A8c and next's merges): **jdk/ is the conversion, byte for byte** (3554 of
+  3554 forms, 22 data files; 753 s, peak 40.5 GB).
+  The gate build (`bin/heavy-lock bin/arbace-go --gate-build`, 66 min, peak 29.7 GB, both executables built; under
+  `ARBACE_HOST_EXE`, so cached at `.tmp/gate-exe/31f89bf86be7dac52b3d`, not at the gate's own key): F26's world compiles. **F26's
+  smoke** (`test/jrt/classfile/cfsmoke`, by its header's commands on that executable): its output is the JDK's byte for byte
+  (58 lines). java.beans.PropertyChangeEvent and PropertyChangeListener are translated (`java_beans_PropertyChangeEvent.ae` in
+  package jrt; j2g's report lists both). `bin/java-check --essential` on the gate build: 428 of 428 pass, as recorded, the
+  controls fail as they must. `J2G_UNIT_SOURCES=arbace.classes.analyze bin/j2g-unit`: 110 pass, 7 fail, as on next (type
+  annotations' known rows, F15's invokers fixture). `bin/arbace-go --build-program --check outside mixed` on that build
+  (`ARBACE_PROGRAM_BASE`): mixed passes; outside's j2g run translates java.beans.PropertyChangeEvent and PropertyChangeListener and
+  154 java.lang.classfile classes (4776 files, 267 s), but its repr/go print was OOM-killed (the run's peak 46.0 GB; 12 min and
+  27 GiB before F26, `programs-full`'s `:mem-gib` 30): the world with F26 needs more for a whole program's print, and
+  `programs-full`'s declaration should follow its next measured peak. The run of outside's sample is left to the night.
+- **Keys.** jdk/, arbace/j2g, arbace/classes and arbace/lang changed: gate_key (now `a592edc5f47d` at this branch's tip), the
+  runtime key and the javac key (`3854d014cd5a`) all move; tonight's gate builds the executables and javac's tool afresh.
+- **A mistake.** A stray `bin/arbace-go --smoke EXE` by hand (it builds) trimmed Go's shared build cache
+  (`/root/.cache/go-build`, 7135 MB to 335 MB) at about 17:00 before it was stopped; a build of another worktree running then may
+  have failed on a missing entry and needs a rerun.
+- **Not run.** The essential `bin/gate` (its own go-build at the gate's key, about an hour, did not fit before the night's gate).
+- **Left.** Ghidra's analyze run and G1.md §8's jobs on a gate build of the merged key (the next steps); Java's levels on F26's 44
+  corpus tests; the rest of JAVA-DEFERRED-TRIAGE.md's 154 ids (a sample of 12 of them, `bin/java-check --levels interp --list`
+  on the gate build: 11 now passing against `check-interp.edn`, t04706, StackTraceSerialization, still failing in the serialization
+  class (JCS167); none regress).
