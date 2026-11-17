@@ -10372,3 +10372,16 @@ stage the mean of both (the user's CP333 (b)); facts in test/crops/independence.
 2026-11-16 (on test/c/host): 72.4 unchanged; projected 74 after the day's samples+runtime records, about 81 with the samplings',
 about 85 with P21 (b). Alternatives: counting the programs alone (CP333 (a), 0.75 a program on a clang runtime) against the user's
 CP333 (b); leaving ci on test/c/host (no case own by RFP53's C7). doc/cpp/CPP-SURVEY.md, "As built: n-cpp-indep".
+
+## 2026-11-18: n-cpp-read, C++'s jumps into protected scopes in the own front end (branch `n-cpp-read` from mac/n-review-b aaa6d7786)
+
+- The read cell's deferred `:own-diag` (726) grouped by test/cpp/own-diag-review.edn's groups and the own record's expected messages;
+  concepts left to n-cpp-concepts. Taken: the `:jumps` group (10 files), one rule independent of types: `arbace.repr.cpp.diag/jumps`,
+  written from the standard ([stmt.dcl]/2, [except.pre], [stmt.if]/2) and GCC's manual for statement expressions, no compiler code
+  read. 11 files to pass (9 `:own-diag`, 2 `:gcc-own-rules`, out of its `:tests`); C++ read 5,362 / 328 / 805 to 5,373 / 326 / 796.
+  The 12 rows recorded by a row-wise merge of `bin/repr-cpp dg --corpus dg-error --only LIST --front native --own` (two lists of 6,
+  peak 936 MB); the 5 own-only passes holding a goto or a case label rerun, still passing. Decisions CP400-CP402 (a), taken overnight
+  (round 52), in doc/cpp/CPP-SURVEY.md's "As built: n-cpp-read". gate_key moves (repr/cpp embedded). Alternatives: the error at the
+  goto as clang places it (rejected: g++'s dg lines name the label); counting default-initialized class variables (rejected: their
+  triviality is not known here, and a wrong error would fail passing files); attr-assume8 left (needs the parser to keep the
+  attribute's expression).
