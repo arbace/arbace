@@ -9740,3 +9740,14 @@ The user's decision (round 51): the 41 programs refused for GNU vector types and
 class `by-design` to the deferred classes `vector` and `nested-fn` (test/c/divergences.edn, matched on the refusals' text, so no
 record row moves); doc/c/SPEC.md §14's rows struck. C eval 2,173 / 34 / 72, AOT 2,181 / 26 / 72 (`bin/reap --record`,
 `bin/crops-score --record`, `--judge --strict`). Both are to be built in ci next, on this branch.
+
+## 2026-11-17: GNU vector types in ci (CS320 (a), branch `h-c-run`)
+
+Built in `arbace/c/build.ae` (and the checker's result types of the shuffles, SSE2's cmp*pd and movmskp[ds], and of a floating
+vector comparison): vectors as aggregates of lanes in memory, the operators lane by lane into a temporary with a scalar operand
+broadcast, comparisons to 0 / -1, subscripts, initializers, bit conversions, `__builtin_convertvector`, `__builtin_shuffle`,
+`__builtin_shufflevector`. No back-end change (scalar nodes only), so cf2g compiles them unchanged. The 41 programs pass at eval and
+AOT; 268 programs at eval move only those 41, the controls differ. C eval 2,214 / 34 / 31, AOT 2,222 / 26 / 31 (completeness 97).
+Alternatives: vectors as a node kind of their own in go/arbace/ci (faster, but a back-end and cf2g change for no case that needs
+speed), left; the `_mm_*` functions of Arbace's headers as builtins, left (no check reaches them: benchmarksgame's SSE programs are
+recorded faulting without their argument; mandelbrot.c, -3, -4 run by hand with 200 print mandelbrot-2.c's image).

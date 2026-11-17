@@ -5914,3 +5914,28 @@ entries of 990130-1, 20030222-1, bitint-34 and 95_bitfields_ms removed; the clas
 GNU vector types and GNU nested functions are deferred, not by design: `test/c/divergences.edn`'s classes `vector` (41 eval, 41
 AOT) and `nested-fn` (31, 31), kind `:deferred`, judged before `by-design` on the refusals' text; SPEC §14's two rows struck. C eval
 2,173 / 34 / 72, AOT 2,181 / 26 / 72; completeness 96, meant 100 to 98. Then both built in ci and cf2g (below, as they land).
+
+## As built: GNU vector types (CS320 (a), 2026-11-17, branch `h-c-run`)
+
+`arbace/c/build.ae`: a vector type is of kind `:m` (an aggregate, its address), so declarations, copies, parameters, results,
+`sizeof` and `_Alignof` are the aggregates' (the checker already laid vectors out: their size, aligned to it). Added:
+- **Operators.** `vec-binary` (from `binary` and the compound assignments' `assign`) and `vec-unary` (unary `-`, `~`, `+`): each
+  operand evaluated once (`held`), the result a frame temporary of the result type filled lane by lane (`vec-build`) by the scalar
+  nodes (`arith` at the lane's promoted type, `shift`, `compare-nodes`), a scalar operand broadcast to every lane. A comparison's lane
+  is 0 or -1 in the signed integer of the lane's size; the checker's type of a comparison of floating vectors is now that integer
+  vector (it gave the operand's type).
+- **Subscripts** (`aget-place`, `aset`): a vector's lanes as an array's elements; **initializers** (`fill`, `fill-list`,
+  `fill-designated`): a vector's braces as an array's, a vector from a vector expression copied.
+- **Conversions** (`conv`): a vector to a vector or to a scalar of its size, a scalar to a vector, by their bits (GNU's rule).
+- **Builtins.** `__builtin_convertvector` (lane by lane), `__builtin_shuffle (a, [b,] mask)` and `__builtin_shufflevector (a, b,
+  i...)` (the inputs side by side in one temporary, each lane loaded at its index modulo the lanes there; the checker gives both
+  their result types), SSE2's `__builtin_ia32_cmplepd`/`cmpltpd`/`cmpeqpd` and `movmskpd`/`movmskps`.
+- No back end change: the nodes are the scalar ones, so cf2g compiles them as they are.
+
+The 41 programs of the class: eval 41 of 41, AOT 41 of 41 (`bin/ci check --only`, `check --aot --only`). Regression: 268 programs
+(every program with an asm, `__real__` or `__imag__`, gcc-bitint-run, the 41 and test/c/essential-check.txt) at eval: only the 41
+move, every control differs. benchmarksgame's four SSE programs are recorded by gcc 15.2 as a fault (status 139: they read their
+argument, the check gives none), and pass as such; run by hand with `-- 200` mandelbrot.c, -3 and -4 print the scalar
+mandelbrot-2.c's image byte for byte. nbody-4's `_mm_*` functions (Arbace's `<immintrin.h>` declares them only) are not built: no
+check reaches them; left for a program that does. The class `vector` stays as a guard class. C eval 2,214 / 34 / 31, AOT 2,222 / 26
+/ 31; completeness 96 to 97.
