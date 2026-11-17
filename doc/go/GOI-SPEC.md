@@ -4757,6 +4757,19 @@ against gc's recorded runs and errors, then on every errorcheck program (`--list
   go/parser accepts never fails it, so a file with forms is unchanged): `fixedbugs/issue23586` and `issue4468`
   pass (their lines left `test/goi/check-known.edn`); `issue50372` (range over a typed operand) and `slice3err`
   (types2's slice checks) need the rest of types2 and stay known.
+- **Since v1: types2's range and slice checks** (`go/arbace/repr/go/gcsyntax/errors.ae`'s `goParserRejects` and
+  `tchecker`, `Revision` 5; 2026-11-17, branch `h-go-noforms`). The class `:no-forms`' two (`fixedbugs/issue50372`,
+  `slice3err`): the driver ports types2's checks those programs need onto syntax's tree, range.go's `rangeStmt`'s
+  checks of the iteration variables (`range clause permits at most two iteration variables`, `range over X permits
+  only one iteration variable`) and index.go's `sliceExpr`'s of a slice's indices (`3-index slice of string`, a
+  constant index out of bounds, inverted constant indices), with the operands' types as the file's syntax gives them:
+  a scope per block as types2's, a variable's type when its declaration writes a type of basic types, arrays of a
+  literal length, pointers, slices, maps and channels; an operand of any other type (a named type, a variable
+  declared by `:=`, a variadic parameter) is not checked, so that the driver reports a subset of types2's errors and
+  never one types2 does not. They run only on a file whose tree has a node go/parser rejects (a range of three
+  variables, a 3-index slice missing an index, a go or defer of a non-call: `goParserRejects`), the files without
+  forms, so a file goi's checker checks has the errors it had. Both programs pass (gc's 5 and 66 errors, byte for
+  byte); the class is empty and left `test/goi/divergences.edn`.
 
 The interpreted driver: the executables built before this branch list gcsyntax at `Revision` 2, so
 `arbace.repr.go.syntax` interprets the checkout's (about 4 s per process, the errorcheck programs about

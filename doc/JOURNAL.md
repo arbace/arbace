@@ -10342,3 +10342,23 @@ the runtime's semaphores and rand: not interpretable), unique.Make[any] compiled
 types store the value in the interface's word: no stable *T), a strong map (never reclaimed: unique's contract says otherwise), and
 weak pointers by finalizers over hidden uintptrs (unsafe, one finalizer per object). fixedbugs/issue68415.go (a run of unique.Make) waits for an
 executable built with the new table, `:std-weak-unique` kept for it (gate_key moves: arbace/go, go/arbace, the list, j2g).
+## 2026-11-17: goi's deferred class `:no-forms` closed: types2's range and slice checks on syntax's tree (branch `h-go-noforms`, after next `55e8c0ae7`)
+
+- The class's two (`fixedbugs/issue50372.go`, `slice3err.go`, `$GOROOT/test` of TamaGo's go1.27.1): go/parser rejects them, so
+  goi's checker has no forms; gc's types2 reports their errors on syntax's tree. The smallest adapter is the gc syntax driver's,
+  as the go and defer check was (2026-11-04): `go/arbace/repr/go/gcsyntax/errors.ae` (`Revision` 5) ports from TamaGo's go1.27.1
+  `src/cmd/compile/internal/types2` range.go's `rangeStmt` (the iteration variables' checks, with stmt.go's extraction of
+  sKey, sValue, sExtra and `rangeKeyVal`), index.go's `sliceExpr` and `index` (3-index slice of string, a constant index out of
+  bounds, inverted constant indices) and operand.go's operand string, over a typing of the file's syntax (`tchecker`: types2's
+  scopes; a variable's type when its declaration writes basic types, arrays of a literal length, pointers, slices, maps or
+  channels; any other operand unknown and not checked, so the driver reports a subset of types2's errors). They run only on a
+  file whose tree has a node go/parser rejects (`goParserRejects`), so every file with forms keeps its errors.
+- Proven: gc's errors of both byte for byte (5 and 66 lines); a probe of the subset's edges reported only lines gc reports;
+  `bin/goi check --only` on E1's four: 4 pass; the errorcheck list (`--list`, 659): no regression (584 pass, the 17 -m programs
+  failing only for want of std's forms in a fresh worktree, then 17 of 17 with them); `--essential` 801 of 801 with the three
+  controls failing as they must; reap Go eval 1755 -> 1757 pass, deferred 9 -> 7; crops-score Go completeness 98 (meant 100).
+  Alternatives: GPS43 (b), syntax's tree adapted to the dump's go/ast shape (go/ast cannot hold a range of three
+  variables; the converter and the checker would need the bad trees adapted too); all of types2 as a renamed copy in goi's table
+  (with the std internals it imports; interpreted until a re-seed, a large program for two tests). The class left
+  `test/goi/divergences.edn`, the two lines `test/goi/check-known.edn`; doc/go/GOI-SPEC.md "Since v1: types2's range and slice
+  checks", doc/go/GO-PARSER-SURVEY.md "As built: GPS43, types2's range and slice checks".
