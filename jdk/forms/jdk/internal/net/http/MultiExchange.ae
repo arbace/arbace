@@ -1,0 +1,578 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/MultiExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.lang.ref WeakReference)
+        '(java.net ConnectException)
+        '(java.net.http HttpClient$Version
+                        HttpConnectTimeoutException
+                        HttpRequest
+                        HttpResponse
+                        HttpResponse$BodyHandler
+                        HttpResponse$BodySubscriber
+                        HttpResponse$PushPromiseHandler
+                        HttpTimeoutException
+                        StreamLimitException)
+        '(java.time Duration)
+        '(java.util List ListIterator Objects Optional)
+        '(java.util.concurrent CancellationException
+                               CompletableFuture
+                               CompletionStage
+                               Executor
+                               Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicInteger AtomicLong AtomicReference)
+        '(java.util.function BiConsumer BiFunction Function Supplier)
+        '(jdk.internal.net.http.common Cancelable
+                                       ConnectionExpiredException
+                                       Log
+                                       Logger
+                                       MinimalFuture
+                                       Utils))
+
+(defclass MultiExchange
+  :implements [Cancelable]
+  :type-params [T]
+
+  (field ^:static ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] "MultiExchange" String/.toString)
+                          Utils/DEBUG))
+
+  (defclass ^:private ^:record RetryContext [^Throwable requestFailureCause ^boolean shouldRetry
+                                             ^AtomicInteger reqAttemptCounter
+                                             ^boolean shouldResetConnectTimer]
+    (method ^:private ^:static doNotRetry ^RetryContext [^Throwable requestFailureCause]
+      (RetryContext. requestFailureCause false nil false)))
+
+  (field ^:private ^:static ^:final ^AtomicLong IDS (AtomicLong.))
+
+  (field ^:private ^:final ^HttpRequest userRequest)
+
+  (field ^:private ^:final ^HttpRequestImpl request)
+
+  (field ^:private ^:final ^ConnectTimeoutTracker connectTimeout)
+
+  (field ^:final ^HttpClientImpl client)
+
+  (field ^:final ^{:tag (HttpResponse$BodyHandler T)} responseHandler)
+
+  (field ^:final ^HttpClientImpl$DelegatingExecutor executor)
+
+  (field ^:final ^AtomicInteger attempts (AtomicInteger.))
+
+  (field ^:final ^long id (.incrementAndGet IDS))
+
+  (field ^HttpRequestImpl currentreq)
+
+  (field ^HttpRequestImpl previousreq)
+
+  (field ^{:tag (Exchange T)} exchange)
+
+  (field ^{:tag (Exchange T)} previous)
+
+  (field ^:volatile ^{:tag (HttpResponse T)} response)
+
+  (field ^:static ^:final ^int DEFAULT_MAX_ATTEMPTS 5)
+
+  (field ^:static ^:final ^int max_attempts
+    (Utils/getIntegerNetProperty "jdk.httpclient.redirects.retrylimit" DEFAULT_MAX_ATTEMPTS))
+
+  (field ^:static ^:final ^int max_stream_limit_attempts
+    (Utils/getIntegerNetProperty "jdk.httpclient.retryOnStreamlimit" max_attempts))
+
+  (field ^:private ^:final ^{:tag (List HeaderFilter)} filters)
+
+  (field ^:volatile ^ResponseTimerEvent responseTimerEvent)
+
+  (field ^:volatile ^boolean cancelled)
+
+  (field ^{:tag (AtomicReference CancellationException)} interrupted (AtomicReference.))
+
+  (field ^:final ^{:tag (PushGroup T)} pushGroup)
+
+  (field ^:volatile ^AuthenticationFilter$AuthInfo serverauth)
+
+  (field ^:volatile ^AuthenticationFilter$AuthInfo proxyauth)
+
+  (field ^:volatile ^int numberOfRedirects 0)
+
+  (field ^:private ^:final ^AtomicInteger streamLimitRetries (AtomicInteger.))
+
+  (defclass ^:private ^:static ^:final ConnectTimeoutTracker
+    (field ^:final ^Duration max)
+
+    (field ^:final ^AtomicLong startTime (AtomicLong.))
+
+    (constructor [this ^Duration connectTimeout]
+      (set! (.-max this) (cast Duration (Objects/requireNonNull connectTimeout))))
+
+    (method getRemaining ^Duration [this]
+      (let [now (System/nanoTime)
+            previous (.compareAndExchange startTime 0 now)]
+        (if (or (== previous 0) (.isZero max))
+            max
+            (let [remaining (.minus max (Duration/ofNanos (unchecked-subtract now previous)))]
+              (java-assert (<= (.compareTo remaining max) 0))
+              (if (.isNegative remaining) Duration/ZERO remaining)))))
+
+    (method reset ^void [this] (.set startTime 0)))
+
+  (constructor [this ^HttpRequest userRequest ^HttpRequestImpl requestImpl ^HttpClientImpl client
+                ^{:tag (HttpResponse$BodyHandler T)} responseHandler
+                ^{:tag (HttpResponse$PushPromiseHandler T)} pushPromiseHandler]
+    (set! (.-previous this) nil)
+    (set! (.-userRequest this) userRequest)
+    (set! (.-request this) requestImpl)
+    (set! (.-currentreq this) request)
+    (set! (.-previousreq this) nil)
+    (set! (.-client this) client)
+    (set! (.-filters this) (.filterChain client))
+    (set! (.-executor this) (.theExecutor client))
+    (set! (.-responseHandler this) responseHandler)
+    (if (some? pushPromiseHandler)
+        (let [executor (method-ref Executor
+                                   (.-executor this)
+                                   HttpClientImpl$DelegatingExecutor/.ensureExecutedAsync)]
+          (set! (.-pushGroup this) (PushGroup. pushPromiseHandler request executor)))
+        (set! pushGroup nil))
+    (set! (.-connectTimeout this)
+          (cast ConnectTimeoutTracker
+                (.orElse (.map (.connectTimeout client)
+                               (method-ref Function
+                                           ^ConnectTimeoutTracker [Duration]
+                                           ConnectTimeoutTracker/new))
+                         nil)))
+    (set! (.-exchange this) (Exchange. request this)))
+
+  (defclass ^:static ^:final CancelableRef
+    :implements [Cancelable]
+
+    (field ^:private ^:final ^{:tag (WeakReference Cancelable)} cancelableRef)
+
+    (constructor [this ^Cancelable cancelable]
+      (set! cancelableRef (WeakReference. cancelable)))
+
+    (method ^:public cancel ^boolean [this ^boolean mayInterruptIfRunning]
+      (let [cancelable (cast Cancelable (.get cancelableRef))]
+        (if (some? cancelable) (.cancel cancelable mayInterruptIfRunning) false))))
+
+  (method ^:synchronized getExchange ^{:tag (Exchange T)} [this] exchange)
+
+  (method client ^HttpClientImpl [this] client)
+
+  (method version ^HttpClient$Version [this]
+    (let [^:mutable vers (cast HttpClient$Version (.orElse (.version request) (.version client)))]
+      (when (and (and (and (not (identical? vers HttpClient$Version/HTTP_1_1))
+                           (not (.secure request)))
+                      (some? (.proxy request)))
+                 (not (.isHttp3Only request vers)))
+        (set! vers HttpClient$Version/HTTP_1_1))
+      (when (and (and (identical? vers HttpClient$Version/HTTP_3) (.secure request))
+                 (not (.isPresent (.client3 client))))
+        (when-not (.isHttp3Only request vers)
+          (set! vers HttpClient$Version/HTTP_2)
+          (when (.on debug) (.log debug (java-str "HTTP_3 downgraded to " vers)))))
+      vers))
+
+  (method ^:private setExchange ^void [this ^{:tag (Exchange T)} exchange]
+    (let [^:mutable ^{:tag (Exchange T)} previousExchange nil]
+      (locking this (set! previousExchange (.-exchange this)) (set! (.-exchange this) exchange))
+      (when (and (some? previousExchange) (not (identical? exchange previousExchange)))
+        (.released previousExchange))
+      (when cancelled (.cancel exchange))))
+
+  (method ^:public remainingConnectTimeout ^{:tag (Optional Duration)} [this]
+    (.map (Optional/ofNullable connectTimeout)
+          (method-ref Function
+                      ^Duration [ConnectTimeoutTracker]
+                      ConnectTimeoutTracker/.getRemaining)))
+
+  (method cancelTimer ^void [this]
+    (when (some? responseTimerEvent)
+      (.cancelTimer client responseTimerEvent)
+      (set! responseTimerEvent nil)))
+
+  (method ^:private requestFilters :throws [IOException] ^void [this ^HttpRequestImpl r]
+    (when (Log/trace) (Log/logTrace "Applying request filters"))
+    (for-each [^HeaderFilter filter filters]
+      (when (Log/trace) (Log/logTrace "Applying {0}" filter))
+      (.request filter r this))
+    (when (Log/trace) (Log/logTrace "All filters applied")))
+
+  (method ^:private responseFilters :throws [IOException] ^HttpRequestImpl [this ^Response response]
+    (when (Log/trace) (Log/logTrace "Applying response filters"))
+    (let [^{:tag (ListIterator HeaderFilter)} reverseItr (.listIterator filters (.size filters))]
+      (while (.hasPrevious reverseItr)
+        (let [filter (cast HeaderFilter (.previous reverseItr))]
+          (when (Log/trace) (Log/logTrace "Applying {0}" filter))
+          (let [newreq (.response filter response)]
+            (when (some? newreq)
+              (when (Log/trace) (Log/logTrace "New request: stopping filters"))
+              (return newreq)))))
+      (when (Log/trace) (Log/logTrace "All filters applied"))
+      nil))
+
+  (method ^:public cancel ^void [this ^IOException cause]
+    (set! cancelled true)
+    (.cancel (.getExchange this) cause))
+
+  (method ^:public cancel ^boolean [this ^boolean mayInterruptIfRunning]
+    (let [cancelled (.-cancelled this)
+          ^:mutable firstCancel false]
+      (if (and (not cancelled) mayInterruptIfRunning)
+          (do
+            (when (nil? (.get interrupted))
+              (set! firstCancel
+                    (.compareAndSet interrupted nil (CancellationException. "Request cancelled"))))
+            (when (.on debug)
+              (if firstCancel
+                  (.log debug (java-str "multi exchange recording: " (.get interrupted)))
+                  (.log debug (java-str "multi exchange recorded: " (.get interrupted)))))
+            (set! (.-cancelled this) true)
+            (let [exchange (.getExchange this)] (when (some? exchange) (.cancel exchange)) true))
+          (do
+            (cond
+              cancelled
+                (when (.on debug)
+                  (.log debug (java-str "multi exchange already cancelled: " (.get interrupted))))
+              (.on debug)
+                (.log debug
+                      (java-str "multi exchange mayInterruptIfRunning=" mayInterruptIfRunning)))
+            false))))
+
+  (method ^:public newMinimalFuture :type-params [U] ^{:tag (MinimalFuture U)} [this]
+    (MinimalFuture. (CancelableRef. this)))
+
+  (method ^:public responseAsync ^{:tag (CompletableFuture (HttpResponse T))} [this
+                                                                               ^Executor executor]
+    (let [^{:tag (CompletableFuture Void)} start (.newMinimalFuture this)
+          ^{:tag (CompletableFuture (HttpResponse T))} cf (.responseAsync0 this start)]
+      (.completeAsync start (lambda Supplier ^Void [] nil) executor)
+      cf))
+
+  (method ^:private ^:static bodyNotPermitted ^boolean [^Response r]
+    (== (.-statusCode r) 204))
+
+  (method ^:private bodyIsPresent ^boolean [this ^Response r]
+    (let [headers (.headers r)]
+      (cond
+        (not (== (.orElse (.firstValueAsLong headers "Content-length") 0) 0)) true
+        (.isPresent (.firstValue headers "Transfer-encoding")) true
+        :else false)))
+
+  (method ^:private handleNoBody ^{:tag (CompletableFuture (HttpResponse T))} [this ^Response r
+                                                                               ^{:tag (Exchange T)} exch]
+    (let [^{:tag (HttpResponse$BodySubscriber T)} bs (.apply
+                                                       responseHandler
+                                                       (ResponseInfoImpl.
+                                                         (.statusCode r)
+                                                         (.headers r)
+                                                         (.version r)))]
+      (.onSubscribe bs (NullSubscription.))
+      (.onComplete bs)
+      (let [^{:tag (CompletionStage T)} cs (ResponseSubscribers/getBodyAsync executor bs)
+            ^{:tag (MinimalFuture (HttpResponse T))} result (MinimalFuture.)]
+        (.whenComplete
+          cs
+          (lambda BiConsumer ^void [nullBody ^Throwable exception]
+            (if (some? exception)
+                (.completeExceptionally result exception)
+                (.complete result (.setNewResponse this (.request r) r nullBody exch)))))
+        (.whenComplete result
+                       (method-ref BiConsumer [HttpResponse Throwable] exch Exchange/.nullBody)))))
+
+  (method ^:private setNewResponse ^{:tag (HttpResponse T)} [this ^HttpRequest request ^Response r
+                                                             ^T body ^{:tag (Exchange T)} exch]
+    (let [^{:tag (HttpResponse T)} previousResponse (.-response this)]
+      (set! (.-response this) (HttpResponseImpl. request r previousResponse body exch))))
+
+  (method ^:private responseAsync0 ^{:tag (CompletableFuture (HttpResponse T))} [this
+                                                                                 ^{:tag (CompletableFuture Void)} start]
+    (.exceptionallyCompose
+      (.thenCompose (.thenCompose start
+                                  (lambda Function ^CompletionStage [^Void _]
+                                    (.set attempts 1)
+                                    (.responseAsyncImpl this true)))
+                    (lambda Function ^CompletionStage [^Response r]
+                      (AltSvcProcessor/processAltSvcHeader r (.client this) currentreq)
+                      (let [^{:tag (Exchange T)} exch (.getExchange this)]
+                        (if (MultiExchange/bodyNotPermitted r)
+                            (do
+                              (.cancelTimer this)
+                              (if (.bodyIsPresent this r)
+                                  (let [ioe (IOException.
+                                              "unexpected content length header with 204 response")]
+                                    (.cancel exch ioe)
+                                    (MinimalFuture/failedFuture ioe))
+                                  (.handleNoBody this r exch)))
+                            (.thenApply (.readBodyAsync exch responseHandler)
+                                        (lambda Function ^HttpResponse [body]
+                                          (.setNewResponse this (.-request r) r body exch)))))))
+      (method-ref Function ^CompletionStage [Throwable] this MultiExchange/.whenCancelled)))
+
+  (method ^:private wrapIfCancelled ^Throwable [this ^Throwable cause]
+    (let [interrupt (cast CancellationException (.get interrupted))]
+      (if (nil? interrupt)
+          cause
+          (let [cancel (CancellationException. (.getMessage interrupt))]
+            (.setStackTrace cancel (.getStackTrace interrupt))
+            (.initCause cancel (Utils/getCancelCause cause))
+            cancel))))
+
+  (method ^:private whenCancelled ^{:tag (CompletableFuture (HttpResponse T))} [this ^Throwable t]
+    (let [x (.wrapIfCancelled this t)]
+      (when (instance? CancellationException x)
+        (when (.on debug) (.log debug (java-str "MultiExchange interrupted with: " (.getCause x)))))
+      (MinimalFuture/failedFuture x)))
+
+  (defclass ^:static NullSubscription
+    :implements [Flow$Subscription]
+
+    (method ^:public request ^void [this ^long n])
+
+    (method ^:public cancel ^void [this]))
+
+  (method ^:private retryRequest ^{:tag (CompletableFuture Response)} [this]
+    (set! previousreq currentreq)
+    (let [^:const applyReqFilters false] (.responseAsyncImpl this applyReqFilters)))
+
+  (method ^:private responseAsyncImpl ^{:tag (CompletableFuture Response)} [this
+                                                                            ^:final ^boolean applyReqFilters]
+    (when (.isPresent (.timeout currentreq))
+      (.cancelTimer this)
+      (set! responseTimerEvent (ResponseTimerEvent/of this))
+      (.registerTimer client responseTimerEvent))
+    (try
+      (when applyReqFilters (.requestFilters this currentreq))
+      (catch IOException e (return (MinimalFuture/failedFuture e))))
+    (let [^{:tag (Exchange T)} exch (.getExchange this)
+          ^{:tag (CompletableFuture Response)} cf (.thenCompose
+                                                    (.handle
+                                                      (.thenCompose
+                                                        (.responseAsync exch)
+                                                        (lambda Function ^CompletionStage [^Response response]
+                                                          (let [^:mutable ^HttpRequestImpl newrequest
+                                                                  nil]
+                                                            (try
+                                                              (set!
+                                                                newrequest
+                                                                (.responseFilters this response))
+                                                              (catch Throwable t
+                                                                (let [^IOException e
+                                                                        (if-instance [^IOException io
+                                                                                        t]
+                                                                          io
+                                                                          (IOException. t))]
+                                                                  (.cancel (.-exchImpl exch) e)
+                                                                  (return
+                                                                    (MinimalFuture/failedFuture e)))))
+                                                            (if (nil? newrequest)
+                                                                (do
+                                                                  (when (> (.get attempts) 1)
+                                                                    (when (Log/requests)
+                                                                      (Log/logResponse
+                                                                        (lambda Supplier ^String []
+                                                                          (String/format
+                                                                            "%s #%s Succeeded on attempt %s: statusCode=%s"
+                                                                            (new
+                                                                              Object/1
+                                                                              [request
+                                                                               id
+                                                                               attempts
+                                                                               (.-statusCode
+                                                                                 response)]))))))
+                                                                  (MinimalFuture/completedFuture
+                                                                    response))
+                                                                (do
+                                                                  (.setNewResponse
+                                                                    this
+                                                                    currentreq
+                                                                    response
+                                                                    nil
+                                                                    exch)
+                                                                  (when (.isWebSocket currentreq)
+                                                                    (.close
+                                                                      (.connection
+                                                                        (.-exchImpl exch))))
+                                                                  (.thenCompose
+                                                                    (.handle
+                                                                      (.ignoreBody exch)
+                                                                      (let [newrequest newrequest]
+                                                                        (lambda BiFunction ^CompletableFuture [^Void r
+                                                                                                               ^Throwable t]
+                                                                          (set!
+                                                                            previousreq
+                                                                            currentreq)
+                                                                          (set!
+                                                                            currentreq
+                                                                            newrequest)
+                                                                          (.set attempts 1)
+                                                                          (.setExchange
+                                                                            this
+                                                                            (Exchange.
+                                                                              currentreq
+                                                                              this))
+                                                                          (.responseAsyncImpl
+                                                                            this
+                                                                            true))))
+                                                                    (Function/identity)))))))
+                                                      (lambda BiFunction ^CompletableFuture [^Response response
+                                                                                             ^Throwable ex]
+                                                        (if (nil? ex)
+                                                            (do
+                                                              (java-assert (some? response))
+                                                              (MinimalFuture/completedFuture
+                                                                response))
+                                                            (do
+                                                              (.cancelTimer this)
+                                                              (let [retryCtx (.checkRetryEligible
+                                                                               this
+                                                                               ex
+                                                                               exch)]
+                                                                (java-assert (some? retryCtx)
+                                                                  "retry context is null")
+                                                                (if (.shouldRetry retryCtx)
+                                                                    (do
+                                                                      (java-assert (some?
+                                                                                     (.-reqAttemptCounter
+                                                                                       retryCtx))
+                                                                        "request attempt counter is null")
+                                                                      (let [numAttempt
+                                                                              (.incrementAndGet
+                                                                                (.-reqAttemptCounter
+                                                                                  retryCtx))]
+                                                                        (when (.on debug)
+                                                                          (.log
+                                                                            debug
+                                                                            (java-str
+                                                                              "Retrying request: "
+                                                                              currentreq
+                                                                              " id: "
+                                                                              id
+                                                                              " attempt: "
+                                                                              numAttempt
+                                                                              " due to: "
+                                                                              (.-requestFailureCause
+                                                                                retryCtx))))
+                                                                        (when (and
+                                                                                (.-shouldResetConnectTimer
+                                                                                  retryCtx)
+                                                                                (some?
+                                                                                  (.-connectTimeout
+                                                                                    this)))
+                                                                          (.reset
+                                                                            (.-connectTimeout this)))
+                                                                        (.retryRequest this)))
+                                                                    (do
+                                                                      (java-assert (some?
+                                                                                     (.-requestFailureCause
+                                                                                       retryCtx))
+                                                                        "missing request failure cause")
+                                                                      (MinimalFuture/failedFuture
+                                                                        (.-requestFailureCause
+                                                                          retryCtx)))))))))
+                                                    (Function/identity))]
+      cf))
+
+  (method ^:private ^:static retryPostValue ^boolean []
+    (let [s (Utils/getNetProperty "jdk.httpclient.enableAllMethodRetry")]
+      (if (nil? s) false (or (.isEmpty s) (Boolean/parseBoolean s)))))
+
+  (method ^:private ^:static disableRetryConnect ^boolean []
+    (let [s (Utils/getNetProperty "jdk.httpclient.disableRetryConnect")]
+      (if (nil? s) false (or (.isEmpty s) (Boolean/parseBoolean s)))))
+
+  (field ^:private ^:static ^:final ^boolean RETRY_ALWAYS (MultiExchange/retryPostValue))
+
+  (field ^:static ^:final ^boolean RETRY_CONNECT (not (MultiExchange/disableRetryConnect)))
+
+  (method ^:private ^:static isIdempotentRequest ^boolean [^HttpRequest request]
+    (let [method (.method request)] (switch method ("GET" "HEAD") true false)))
+
+  (method ^:private ^:static isHttpMethodRetriable ^boolean [^HttpRequest request]
+    (cond RETRY_ALWAYS true (MultiExchange/isIdempotentRequest request) true :else false))
+
+  (method requestCancelled ^boolean [this] (some? (.get interrupted)))
+
+  (method streamLimitState ^String [this]
+    (java-str id " attempt:" (.get streamLimitRetries)))
+
+  (method ^:private checkRetryEligible ^RetryContext [this ^:final ^Throwable requestFailureCause
+                                                      ^:final ^{:tag (Exchange ?)} exchg]
+    (java-assert (some? requestFailureCause) "request failure cause is missing")
+    (java-assert (some? exchg) "exchange cannot be null")
+    (let [t (Utils/getCompletionCause requestFailureCause)
+          ^Throwable underlyingCause (label :switch
+                                       (switch t
+                                         [^IOException ioe]
+                                           (do
+                                             (when (and
+                                                     (and cancelled (not (.requestCancelled this)))
+                                                     (not (instance? HttpTimeoutException ioe)))
+                                               (break :switch (.toTimeoutException this ioe)))
+                                             ioe)
+                                         t))]
+      (if (.requestCancelled this)
+          (RetryContext/doNotRetry underlyingCause)
+          (letclass [(^:record Limit [^int numAttempts ^int maxLimit]
+                       (method retryLimitReached ^boolean [this]
+                         (>= (.-numAttempts this) (.-maxLimit this))))]
+            (let [^Limit limit (switch underlyingCause
+                                 [^StreamLimitException _]
+                                   (Limit. (.get streamLimitRetries) max_stream_limit_attempts)
+                                 [^ConnectException _] (Limit. (.get attempts) 2)
+                                 (Limit. (.get attempts) max_attempts))]
+              (if (.retryLimitReached limit)
+                  (do
+                    (when (.on debug)
+                      (.log debug
+                            (java-str "request already attempted "
+                                      (.-numAttempts limit)
+                                      " times, won't be retried again "
+                                      currentreq
+                                      " "
+                                      id)
+                            underlyingCause))
+                    (let [^Throwable x
+                            (if-instance [^ConnectionExpiredException cee underlyingCause]
+                              (if (nil? (.getCause cee)) ^Throwable cee (.getCause cee))
+                              underlyingCause)]
+                      (RetryContext/doNotRetry x)))
+                  (label :switch
+                    (switch underlyingCause
+                      [^ConnectException _]
+                        (do
+                          (when-not RETRY_CONNECT
+                            (break :switch (RetryContext/doNotRetry underlyingCause)))
+                          (RetryContext. underlyingCause true attempts false))
+                      [^StreamLimitException sle]
+                        (do
+                          (.streamLimitReached exchg true)
+                          (RetryContext. underlyingCause true streamLimitRetries false))
+                      [^ConnectionExpiredException cee]
+                        (let [^Throwable cause (if (nil? (.getCause cee))
+                                                   ^Throwable cee
+                                                   (.getCause cee))]
+                          (when (.isUnprocessedByPeer exchg)
+                            (break :switch (RetryContext. cause true attempts true)))
+                          (when-not (MultiExchange/isHttpMethodRetriable currentreq)
+                            (break :switch (RetryContext/doNotRetry cause)))
+                          (RetryContext. cause true attempts true))
+                      (do
+                        (when (.isUnprocessedByPeer exchg)
+                          (break :switch (RetryContext. underlyingCause true attempts false)))
+                        (RetryContext/doNotRetry underlyingCause))))))))))
+
+  (method ^:private toTimeoutException ^HttpTimeoutException [this ^IOException ioe]
+    (let [^:mutable ^HttpTimeoutException t nil
+          ^{:tag (Exchange ?)} exchange (.getExchange this)]
+      (when (some? exchange)
+        (let [^{:tag (ExchangeImpl ?)} exchangeImpl (.-exchImpl exchange)]
+          (when (some? exchangeImpl)
+            (when (.connected (.connection exchangeImpl))
+              (set! t (HttpTimeoutException. "request timed out"))
+              (.initCause t ioe)))))
+      (when (nil? t)
+        (set! t (HttpConnectTimeoutException. "HTTP connect timed out"))
+        (.initCause t (ConnectException. "HTTP connect timed out")))
+      t)))

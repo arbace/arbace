@@ -1,0 +1,1248 @@
+(in-ns 'go.arbace.wai) (go/file "jsrt.go" :imports [
+
+
+    ^{:line 4} [math "math"]
+    ^{:line 5} [strconv "strconv"]
+    ^{:line 6} [strings "strings"]])
+
+
+;; The headless world's JavaScript runtime (doc/wasm/WAI.md §10.2): property access, the conversions, and the built-in
+;; constructors syscall/js, Go's runtime and the shim's programs use. It is not a JavaScript engine: a subset after ECMA-262 (the
+;; spec's algorithms for what is built, their names kept), enough for wasm_exec.js's protocol and the browser's fakes.
+
+
+(go/type JSRealm "JSRealm holds the built-in prototypes and constructors.\n" (struct
+    ^{:line 15 :tag (* JSObject)} Global
+    ^{:line 16 :tag (* JSObject)} ObjectProto ^{:tag (* JSObject)} FunctionProto ^{:tag (* JSObject)} ArrayProto ^{:tag (* JSObject)} ErrorProto
+    ^{:line 17 :tag (* JSObject)} U8Proto ^{:tag (* JSObject)} U8CProto ^{:tag (* JSObject)} F32Proto ^{:tag (* JSObject)} DateProto ^{:tag (* JSObject)} PromiseProto
+    ^{:line 18 :tag (* JSObject)} NumberProto ^{:tag (* JSObject)} BooleanProto ^{:tag (* JSObject)} StringProto ^{:tag (* JSObject)} SymbolProto
+    ^{:line 19 :tag (* JSObject)} TypeErrorProto ^{:tag (* JSObject)} RangeErrorProto ^{:tag (* JSObject)} SyntaxErrorProto
+    ^{:line 20 :tag (* JSObject)} ReferenceErrorProto
+    ^{:line 21 :tag (func [] [float64])} Now ; the world's clock, ms since the epoch
+    ^{:line 22 :tag (func [^{:tag (func [])} fn])} Micro))
+
+
+^{:go/end 25} (go/method obj ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r] (addr (lit JSObject :Class "Object" :Proto (.-ObjectProto r))))
+
+
+^{:go/end 34} (go/method Object "Object is a new plain object with the properties given as key, value pairs.\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r & ^{:tag (slice any)} kv]
+  (let [o (.obj r)]
+    (for [i 0] (< (+ i 1) (len kv)) (set! i + 2)
+      (.Put o (assert string (aget kv i)) (aget kv (+ i 1))))
+
+    ^{:line 33} o))
+
+
+
+^{:go/end 39} (go/method Array "Array is a new array of the elements.\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r ^{:tag (slice any)} elems]
+  (addr (lit JSObject :Class "Array" :Proto (.-ArrayProto r) :Arr elems)))
+
+
+
+^{:go/end 47} (go/method Bytes "Bytes is a new Uint8Array over b (shared).\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r ^{:tag (slice byte)} b]
+  (when (== b nil)
+    (set! b (lit (slice byte))))
+
+  (addr (lit JSObject :Class "Uint8Array" :Proto (.-U8Proto r) :Bytes b)))
+
+
+
+^{:go/end 52} (go/method Func "Func is a built-in function.\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r ^string name ^{:tag (func [^any this ^{:tag (slice any)} args] [any])} fn]
+  (addr (lit JSObject :Class "Function" :Proto (.-FunctionProto r) :Fn fn :Name name)))
+
+
+
+^{:go/end 57} (go/method Method "Method defines a built-in method on o.\n" [^{:tag (* JSRealm)} r ^{:tag (* JSObject)} o ^string name ^{:tag (func [^any this ^{:tag (slice any)} args] [any])} fn]
+  (.Put o name (.Func r name fn)))
+
+
+
+^{:go/end 67} (go/method Error "Error is a new error of a prototype with a message (and a Node.js code when not empty).\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r ^{:tag (* JSObject)} proto ^string msg ^string code]
+  (let [o (addr (lit JSObject :Class "Error" :Proto proto))]
+    (.Put o "message" msg)
+    (when (!= code "")
+      (.Put o "code" code))
+
+    ^{:line 66} o))
+
+
+
+^{:go/end 83} (go/method Throw "Throw throws a TypeError (kind \"type\"), RangeError, SyntaxError, ReferenceError or Error.\n" [^{:tag (* JSRealm)} r ^string kind ^string msg]
+  (let [p (.-ErrorProto r)]
+    (switch kind
+      (case ["type"]
+        (set! p (.-TypeErrorProto r)))
+      (case ["range"]
+        (set! p (.-RangeErrorProto r)))
+      (case ["syntax"]
+        (set! p (.-SyntaxErrorProto r)))
+      (case ["reference"]
+        (set! p (.-ReferenceErrorProto r))))
+
+    (panic (addr (lit JSThrow (.Error r p msg ""))))))
+
+
+^{:go/end 90} (go/func arg ^any [^{:tag (slice any)} args ^int i]
+  (when (and (>= i 0) (< i (len args)))
+    (return (aget args i)))
+
+  ^{:line 89} JSUndefined)
+
+
+
+^{:go/end 114} (go/method ToNumber "ToNumber.\n" ^float64 [^{:tag (* JSRealm)} r ^any v]
+  (type-switch [x v]
+    (case [jsUndefined]
+      (return (math/NaN)))
+    (case [jsNull]
+      (return 0))
+    (case [bool]
+      (when x
+        (return 1))
+
+      (return 0))
+    (case [float64]
+      (return x))
+    (case [string]
+      (return (jsStrNum x)))
+    (case [(* JSSymbol)]
+      (.Throw r "type" "Cannot convert a Symbol value to a number"))
+    (case [(* JSObject)]
+      (return (.ToNumber r (.ToPrimitive r x "number")))))
+
+  (math/NaN))
+
+
+
+^{:go/end 125} (go/method ToString "ToString.\n" ^string [^{:tag (* JSRealm)} r ^any v]
+  (type-switch [x v]
+    (case [(* JSSymbol)]
+      (.Throw r "type" "Cannot convert a Symbol value to a string"))
+    (case [(* JSObject)]
+      (return (.ToString r (.ToPrimitive r x "string")))))
+
+  (jsToStringPrim v))
+
+
+
+^{:go/end 148} (go/method ToPrimitive "ToPrimitive: an object's valueOf or toString (OrdinaryToPrimitive), a wrapper's value first.\n" ^any [^{:tag (* JSRealm)} r ^any v ^string hint]
+  (let [(values o ok) (assert (* JSObject) v)]
+    (when (not ok)
+      (return v))
+
+    ^{:go/breaks [5]} (let [order (lit (slice string) "valueOf" "toString")]
+      (when (or (== hint "string") ^:go/paren (and (== hint "default") (== (.-Class o) "Date")))
+        (set! order (lit (slice string) "toString" "valueOf")))
+
+      (range [_ m order]
+        (let [f (.Get r o m)]
+          (when (isCallable f)
+            (let [res (.Call r f o nil)]
+              (when [(values _ isObj) (assert (* JSObject) res)] (not isObj)
+                (return res))))))
+
+
+
+      (.Throw r "type" "Cannot convert object to primitive value")
+      nil)))
+
+
+
+^{:go/breaks [[5 162]] :go/end 163} (go/method protoOf "ToObject's prototype for a primitive's property lookup.\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r ^any v]
+  (type-switch v
+    (case [bool]
+      (return (.-BooleanProto r)))
+    (case [float64]
+      (return (.-NumberProto r)))
+    (case [string]
+      (return (.-StringProto r)))
+    (case [(* JSSymbol)]
+      (return (.-SymbolProto r))))
+
+  nil)
+
+
+
+^{:go/end 188} (go/method Get "Get is [[Get]] (Reflect.get): undefined and null throw.\n" ^any [^{:tag (* JSRealm)} r ^any v ^string key]
+  (type-switch [x v]
+    (case [jsUndefined jsNull]
+      (.Throw r "type" (+ "Cannot read properties of " (jsToStringPrim v) " (reading '" key "')")))
+    (case [string]
+      (when (== key "length")
+        (return (conv float64 (jsUTF16Len x))))
+
+      (when [i (arrayIndex key)] (>= i 0)
+        (let [u (jsUnits x)]
+          (when (< i (len u))
+            (return (jsFromUnits (subslice u i (+ i 1)))))
+
+          (return JSUndefined))))
+
+    (case [(* JSObject)]
+      (return (.getObj r x key x))))
+
+  (when [p (.protoOf r v)] (!= p nil)
+    (return (.getObj r p key v)))
+
+  ^{:line 187} JSUndefined)
+
+
+^{:go/end 228} (go/method getObj ^any [^{:tag (* JSRealm)} r ^{:tag (* JSObject)} o ^string key ^any recv]
+  (for [p o] (!= p nil) (set! p (.-Proto p))
+    (when (!= (.-Getter p) nil)
+      (when [(values v ok) ((.-Getter p) key)] ok
+        (return v)))
+
+
+    (when (== (.-Class p) "Array")
+      (when (== key "length")
+        (return (conv float64 (len (.-Arr p)))))
+
+      (when [i (arrayIndex key)] (>= i 0)
+        (when (< i (len (.-Arr p)))
+          (return (aget (.-Arr p) i)))
+
+        (return JSUndefined)))
+
+
+    (when (!= (.-Bytes p) nil)
+      (switch key
+        (case ["length" "byteLength"]
+          (return (conv float64 (len (.-Bytes p))))))
+
+      (when [i (arrayIndex key)] (>= i 0)
+        (when (< i (len (.-Bytes p)))
+          (when (== (.-Class p) "Float32Array")
+            (return (conv float64 (math/Float32frombits (le32 (subslice (.-Bytes p) (* i 4)))))))
+
+          (return (conv float64 (aget (.-Bytes p) i))))
+
+        (return JSUndefined)))
+
+
+    (when [(values v ok) (.own p key)] ok
+      (return v)))
+
+
+  ^{:line 227} JSUndefined)
+
+
+^{:go/end 232} (go/func le32 ^uint32 [^{:tag (slice byte)} b]
+  (bit-or (conv uint32 (aget b 0)) (<< (conv uint32 (aget b 1)) 8) (<< (conv uint32 (aget b 2)) 16) (<< (conv uint32 (aget b 3)) 24)))
+
+
+
+^{:go/end 289} (go/method Set "Set is [[Set]] (Reflect.set, sloppy: a frozen object's write is ignored): false when not taken.\n" ^bool [^{:tag (* JSRealm)} r ^any v ^string key ^any x]
+  ^{:go/breaks [8]} (let [(values o ok) (assert (* JSObject) v)]
+    (when (not ok)
+      (when (or (== v JSUndefined) (== v JSNull))
+        (.Throw r "type" (+ "Cannot set properties of " (jsToStringPrim v) " (setting '" key "')")))
+
+      (return false))
+
+    (when (and (!= (.-Setter o) nil) ((.-Setter o) key x))
+      (return true))
+
+    (when (.-Frozen o)
+      (return false))
+
+    (when (== (.-Class o) "Array")
+      (when (== key "length")
+        (let [n (conv int (.ToNumber r x))]
+          (when (or (< n 0) (!= (conv float64 n) (.ToNumber r x)))
+            (.Throw r "range" "Invalid array length"))
+
+          (while (< (len (.-Arr o)) n)
+            (set! (.-Arr o) (append (.-Arr o) JSUndefined)))
+
+          (set! (.-Arr o) (subslice (.-Arr o) _ n))
+          (return true)))
+
+      (when [i (arrayIndex key)] (>= i 0)
+        (while (<= (len (.-Arr o)) i)
+          (set! (.-Arr o) (append (.-Arr o) JSUndefined)))
+
+        (aset (.-Arr o) i x)
+        (return true)))
+
+
+    (when (!= (.-Bytes o) nil)
+      (when [i (arrayIndex key)] (>= i 0)
+        (when (== (.-Class o) "Float32Array")
+          (when (<= (+ (* i 4) 4) (len (.-Bytes o)))
+            (let [b (math/Float32bits (conv float32 (.ToNumber r x)))]
+              (set! (values (aget (.-Bytes o) (* i 4)) (aget (.-Bytes o) (+ (* i 4) 1)) (aget (.-Bytes o) (+ (* i 4) 2)) (aget (.-Bytes o) (+ (* i 4) 3))) (values (conv byte b) (conv byte (>> b 8)) (conv byte (>> b 16)) (conv byte (>> b 24))))))
+
+          (return true))
+
+        (when (< i (len (.-Bytes o)))
+          (aset (.-Bytes o) i (.toUint8 r x (== (.-Class o) "Uint8ClampedArray"))))
+
+        (return true))
+
+      (when (or (== key "length") (== key "byteLength"))
+        (return false)))
+
+
+    (.Put o key x)
+    true))
+
+
+^{:go/end 309} (go/method toUint8 ^byte [^{:tag (* JSRealm)} r ^any x ^bool clamp]
+  (let [f (.ToNumber r x)]
+    (when (or (math/IsNaN f) (math/IsInf f 0))
+      (when (and clamp (> f 0))
+        (return 255))
+
+      (return 0))
+
+    (when clamp
+      (when (<= f 0)
+        (return 0))
+
+      (when (>= f 255)
+        (return 255))
+
+      (return (conv byte (math/RoundToEven f))))
+
+    (conv byte (conv int64 (math/Trunc f)))))
+
+
+
+^{:go/end 330} (go/method Delete "Delete is [[Delete]] (Reflect.deleteProperty).\n" ^bool [^{:tag (* JSRealm)} r ^any v ^string key]
+  (let [(values o ok) (assert (* JSObject) v)]
+    (when (not ok)
+      (when (or (== v JSUndefined) (== v JSNull))
+        (.Throw r "type" "Cannot convert undefined or null to object"))
+
+      (return true))
+
+    (when (== (.-Class o) "Array")
+      (when [i (arrayIndex key)] (and (>= i 0) (< i (len (.-Arr o))))
+        (when (.-Frozen o)
+          (return false))
+
+        (aset (.-Arr o) i JSUndefined)
+        (return true)))
+
+
+    (.del o key)))
+
+
+
+^{:go/end 349} (go/method HasOwn "HasOwn is hasOwnProperty.\n" ^bool [^{:tag (* JSRealm)} r ^{:tag (* JSObject)} o ^string key]
+  (when (== (.-Class o) "Array")
+    (when (== key "length")
+      (return true))
+
+    (when [i (arrayIndex key)] (>= i 0)
+      (return (< i (len (.-Arr o))))))
+
+
+  (when (!= (.-Bytes o) nil)
+    (when [i (arrayIndex key)] (>= i 0)
+      (return (< i (len (.-Bytes o))))))
+
+
+  (let [(values _ ok) (.own o key)]
+    ^{:line 348} ok))
+
+
+
+^{:go/end 358} (go/method Call "Call is Reflect.apply: a non-callable throws a TypeError.\n" ^any [^{:tag (* JSRealm)} r ^any f ^any this ^{:tag (slice any)} args]
+  (let [(values o ok) (assert (* JSObject) f)]
+    (when (or (not ok) (== (.-Fn o) nil))
+      (.Throw r "type" (+ (jsTypeof f) " is not a function")))
+
+    ((.-Fn o) this args)))
+
+
+
+^{:go/end 367} (go/method Construct "Construct is Reflect.construct.\n" ^any [^{:tag (* JSRealm)} r ^any f ^{:tag (slice any)} args]
+  (let [(values o ok) (assert (* JSObject) f)]
+    (when (or (not ok) (== (.-Ctor o) nil))
+      (.Throw r "type" (+ (jsDescribe f) " is not a constructor")))
+
+    ((.-Ctor o) args)))
+
+
+
+^{:go/end 389} (go/method InstanceOf "InstanceOf is OrdinaryHasInstance.\n" ^bool [^{:tag (* JSRealm)} r ^any v ^any t]
+  (let [(values c ok) (assert (* JSObject) t)]
+    (when (or (not ok) (== (.-Fn c) nil))
+      (.Throw r "type" "Right-hand side of 'instanceof' is not callable"))
+
+    (let [(values o ^:assign ok) (assert (* JSObject) v)]
+      (when (not ok)
+        (return false))
+
+      ^{:go/breaks [[4 388]]} (let [(values p _) (assert (* JSObject) (.Get r c "prototype"))]
+        (when (== p nil)
+          (.Throw r "type" "Function has non-object prototype in instanceof check"))
+
+        (for [q (.-Proto o)] (!= q nil) (set! q (.-Proto q))
+          (when (== q p)
+            (return true)))
+
+
+        false))))
+
+
+
+^{:go/end 399} (go/func StrictEquals "StrictEquals is ===.\n" ^bool [^any a ^any b]
+  (let [(values fa aok) (assert float64 a)
+      (values fb bok) (assert float64 b)]
+    (when (and aok bok)
+      (return (== fa fb)))
+
+    (== a b)))
+
+
+
+^{:go/end 432} (go/method LooseEquals "LooseEquals is ==.\n" ^bool [^{:tag (* JSRealm)} r ^any a ^any b]
+  (let [(values na nb) (values (or (== a JSNull) (== a JSUndefined)) (or (== b JSNull) (== b JSUndefined)))]
+    (when (or na nb)
+      (return (and na nb)))
+
+    (when (== (jsTypeof a) (jsTypeof b))
+      (return (StrictEquals a b)))
+
+    (let [(values _ ao) (assert (* JSObject) a)
+        (values _ bo) (assert (* JSObject) b)]
+      (switch
+        (case [(and ao bo)]
+          (return (== a b)))
+        (case [ao]
+          (return (.LooseEquals r (.ToPrimitive r a "default") b)))
+        (case [bo]
+          (return (.LooseEquals r a (.ToPrimitive r b "default")))))
+
+      (when [(values sa ok) (assert string a)] ok
+        (when [(values sb ok) (assert string b)] ok
+          (return (== sa sb))))
+
+
+      (when [(values _ ok) (assert (* JSSymbol) a)] ok
+        (return (== a b)))
+
+      (when [(values _ ok) (assert (* JSSymbol) b)] ok
+        (return (== a b)))
+
+      (== (.ToNumber r a) (.ToNumber r b)))))
+
+
+^{:go/end 441} (go/method ctor ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r ^string name ^{:tag (* JSObject)} proto ^{:tag (func [^any this ^{:tag (slice any)} args] [any])} call ^{:tag (func [^{:tag (slice any)} args] [any])} construct]
+  (let [c (.Func r name call)]
+    (set! (.-Ctor c) construct)
+    (.Put c "prototype" proto)
+    (.Put proto "constructor" c)
+    (.Put (.-Global r) name c)
+    ^{:line 440} c))
+
+
+^{:go/end 453} (go/method intArg ^int [^{:tag (* JSRealm)} r ^{:tag (slice any)} args ^int i ^int def]
+  (let [v (arg args i)]
+    (when (== v JSUndefined)
+      (return def))
+
+    (let [f (.ToNumber r v)]
+      (when (math/IsNaN f)
+        (return 0))
+
+      (conv int (math/Trunc f)))))
+
+
+
+^{:go/end 467} (go/func relIndex "relIndex is the typed arrays' and slice's relative index into [0, n].\n" ^int [^int k ^int n]
+  (when (< k 0)
+    (set! k + n)
+    (when (< k 0)
+      (set! k 0)))
+
+
+  (when (> k n)
+    (set! k n))
+
+  ^{:line 466} k)
+
+
+
+^{:go/end 1112} (go/func NewRealm "NewRealm makes the built-ins on a new global object.\n" ^{:tag (* JSRealm)} []
+  (let [r (addr (lit JSRealm))]
+    (set! (.-ObjectProto r) (addr (lit JSObject :Class "Object")))
+    (set! (.-FunctionProto r) (addr (lit JSObject :Class "Function" :Proto (.-ObjectProto r) :Fn ^{:go/end 473} (fn ^any [^any this ^{:tag (slice any)} args] JSUndefined))))
+    (let [np ^{:go/end 474} (fn ^{:tag (* JSObject)} [^string class] (addr (lit JSObject :Class class :Proto (.-ObjectProto r))))]
+      (set! (.-ArrayProto r) (addr (lit JSObject :Class "Array" :Proto (.-ObjectProto r))))
+      (set! (.-ErrorProto r) (np "Object"))
+      (set! (values (.-U8Proto r) (.-U8CProto r) (.-F32Proto r)) (values (np "Object") (np "Object") (np "Object")))
+      (set! (values (.-DateProto r) (.-PromiseProto r)) (values (np "Object") (np "Object")))
+      (set! (values (.-NumberProto r) (.-BooleanProto r) (.-StringProto r) (.-SymbolProto r)) (values (np "Object") (np "Object") (np "Object") (np "Object")))
+      (let [sub ^{:go/end 485} (fn ^{:tag (* JSObject)} [^string name]
+            (let [p (addr (lit JSObject :Class "Object" :Proto (.-ErrorProto r)))]
+              (.Put p "name" name)
+              (.Put p "message" "")
+              ^{:line 484} p))]
+
+        (set! (values (.-TypeErrorProto r) (.-RangeErrorProto r) (.-SyntaxErrorProto r) (.-ReferenceErrorProto r)) (values (sub "TypeError") (sub "RangeError") (sub "SyntaxError") (sub "ReferenceError")))
+        (.Put (.-ErrorProto r) "name" "Error")
+        (.Put (.-ErrorProto r) "message" "")
+        (let [g (addr (lit JSObject :Class "global" :Proto (.-ObjectProto r)))]
+          (set! (.-Global r) g)
+          (.Put g "globalThis" g)
+          (.Put g "NaN" (math/NaN))
+          (.Put g "Infinity" (math/Inf 1))
+          (.Put g "undefined" JSUndefined)
+
+          ;; Object
+          (.Method r (.-ObjectProto r) "hasOwnProperty" ^{:go/end 500} (fn ^any [^any this ^{:tag (slice any)} args]
+              (let [(values o ok) (assert (* JSObject) this)]
+                (and ok (.HasOwn r o (.ToString r (arg args 0)))))))
+
+          (.Method r (.-ObjectProto r) "toString" ^{:go/breaks [[3 525]] :go/end 526} (fn ^any [^any this ^{:tag (slice any)} args]
+              (type-switch [x this]
+                (case [jsUndefined]
+                  (return "[object Undefined]"))
+                (case [jsNull]
+                  (return "[object Null]"))
+                (case [(* JSObject)]
+                  (let [c (.-Class x)]
+                    (switch
+                      (case [(!= (.-Fn x) nil)]
+                        (set! c "Function"))
+                      (case [(== c "global")]
+                        (set! c "global"))
+                      (case [(== c "Fake")]
+                        (set! c (.-Name x))))
+
+                    (when (or (== c "Uint8Array") (== c "Float32Array") (== c "Uint8ClampedArray") (== c "Array") (== c "Error") (== c "Date")
+                        (== c "Function") (== c "global") (== c "Promise"))
+                      (return (+ "[object " c "]")))
+
+                    (when (== (.-Class x) "Fake")
+                      (return (+ "[object " (.-Name x) "]"))))))
+
+
+              "[object Object]"))
+
+          (.Method r (.-ObjectProto r) "valueOf" ^{:go/end 527} (fn ^any [^any this ^{:tag (slice any)} args] this))
+          (let [objCtor (.ctor r "Object" (.-ObjectProto r) ^{:go/end 533} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (when [v (arg args 0)] (and (!= v JSUndefined) (!= v JSNull))
+                    (return v))
+
+                  (.obj r))
+                ^{:go/end 538} (fn ^any [^{:tag (slice any)} args]
+                  (when [(values o ok) (assert (* JSObject) (arg args 0))] ok
+                    (return o))
+
+                  (.obj r)))]
+
+            (.Method r objCtor "freeze" ^{:go/end 544} (fn ^any [^any this ^{:tag (slice any)} args]
+                (when [(values o ok) (assert (* JSObject) (arg args 0))] ok
+                  (set! (.-Frozen o) true))
+
+                (arg args 0)))
+
+            (.Method r objCtor "isFrozen" ^{:go/end 548} (fn ^any [^any this ^{:tag (slice any)} args]
+                (let [(values o ok) (assert (* JSObject) (arg args 0))]
+                  (or (not ok) (.-Frozen o)))))
+
+            (.Method r objCtor "keys" ^{:go/end 559} (fn ^any [^any this ^{:tag (slice any)} args]
+                (let [(values o ok) (assert (* JSObject) (arg args 0))]
+                  (when (not ok)
+                    (return (.Array r nil)))
+
+                  (let [^{:tag (slice any)} out (zero (slice any))]
+                    (range [_ k (.Keys o)]
+                      (set! out (append out k)))
+
+                    (.Array r out)))))
+
+            (.Method r objCtor "assign" ^{:go/end 570} (fn ^any [^any this ^{:tag (slice any)} args]
+                (let [(values t _) (assert (* JSObject) (arg args 0))]
+                  (range [_ s (subslice args 1)]
+                    (when [(values o ok) (assert (* JSObject) s)] ok
+                      (range [_ k (.Keys o)]
+                        (.Set r t k (.Get r o k)))))
+
+
+
+                  ^{:line 569} t)))
+
+            (.Method r objCtor "getPrototypeOf" ^{:go/end 576} (fn ^any [^any this ^{:tag (slice any)} args]
+                (when [(values o ok) (assert (* JSObject) (arg args 0))] (and ok (!= (.-Proto o) nil))
+                  (return (.-Proto o)))
+
+                ^{:line 575} JSNull))
+
+
+            ;; Function
+            (.Method r (.-FunctionProto r) "call" ^{:go/end 585} (fn ^any [^any this ^{:tag (slice any)} args]
+                (let [^{:tag (slice any)} rest (zero (slice any))]
+                  (when (> (len args) 1)
+                    (set! rest (subslice args 1)))
+
+                  (.Call r this (arg args 0) rest))))
+
+            (.Method r (.-FunctionProto r) "apply" ^{:go/end 592} (fn ^any [^any this ^{:tag (slice any)} args]
+                (let [^{:tag (slice any)} list (zero (slice any))]
+                  (when [(values a ok) (assert (* JSObject) (arg args 1))] ok
+                    (set! list (append list (spread (.-Arr a)))))
+
+                  (.Call r this (arg args 0) list))))
+
+            (.Method r (.-FunctionProto r) "bind" ^{:go/end 607} (fn ^any [^any this ^{:tag (slice any)} args]
+                (let [target this]
+                  (when (not (isCallable target))
+                    (.Throw r "type" "Bind must be called on a function"))
+
+                  (let [bthis (arg args 0)
+                      ^{:line 599 :tag (slice any)} bound (zero (slice any))]
+                    (when (> (len args) 1)
+                      (set! bound (append bound (spread (subslice args 1)))))
+
+                    (let [f (.Func r (+ "bound " (.-Name (assert (* JSObject) target))) ^{:go/end 605} (fn ^any [^any _ ^{:tag (slice any)} a]
+                            (.Call r target bthis (append (append (lit (slice any)) (spread bound)) (spread a)))))]
+
+                      ^{:line 606} f)))))
+
+            (.Method r (.-FunctionProto r) "toString" ^{:go/breaks [4] :go/end 614} (fn ^any [^any this ^{:tag (slice any)} args]
+                (when [(values o ok) (assert (* JSObject) this)] (and ok (!= (.-Fn o) nil))
+                  (return (+ "function " (.-Name o) "() { [native code] }")))
+
+                (.Throw r "type" "Function.prototype.toString requires that 'this' be a Function")
+                nil))
+
+            ^{:go/breaks [5]} (.ctor r "Function" (.-FunctionProto r) ^{:go/breaks [3] :go/end 618} (fn ^any [^any this ^{:tag (slice any)} args]
+                (.Throw r "syntax" "Function constructor is not supported by the headless world")
+                nil)
+              nil)
+
+            ;; Array
+            (let [newArray ^{:go/end 636} (fn ^any [^{:tag (slice any)} args]
+                  (when (== (len args) 1)
+                    (when [(values f ok) (assert float64 (aget args 0))] ok
+                      (let [n (conv int f)]
+                        (when (or (!= (conv float64 n) f) (< n 0))
+                          (.Throw r "range" "Invalid array length"))
+
+                        (let [a (make (slice any) n)]
+                          (range [i a]
+                            (aset a i JSUndefined))
+
+                          (return (.Array r a))))))
+
+
+                  (.Array r (append (lit (slice any)) (spread args))))
+
+                ^{:line 637} arrCtor (.ctor r "Array" (.-ArrayProto r) ^{:go/end 637} (fn ^any [^any this ^{:tag (slice any)} args] (newArray args)) newArray)]
+              (.Method r arrCtor "isArray" ^{:go/end 641} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (let [(values o ok) (assert (* JSObject) (arg args 0))]
+                    (and ok (== (.-Class o) "Array")))))
+
+              (.Method r arrCtor "from" ^{:go/end 650} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (let [src (arg args 0)
+                      ^{:line 644} n (conv int (.ToNumber r (.Get r src "length")))
+                      ^{:line 645} out (make (slice any) n)]
+                    (range [i out]
+                      (aset out i (.Get r src (strconv/Itoa i))))
+
+                    (.Array r out))))
+
+              (let [thisArr ^{:go/end 657} (fn ^{:tag (* JSObject)} [^any this]
+                    (let [(values o ok) (assert (* JSObject) this)]
+                      (when (or (not ok) (!= (.-Class o) "Array"))
+                        (.Throw r "type" "Array.prototype method called on a non-array"))
+
+                      ^{:line 656} o))]
+
+                (.Method r (.-ArrayProto r) "push" ^{:go/end 665} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)]
+                      (when (.-Frozen o)
+                        (.Throw r "type" "Cannot add property, object is not extensible"))
+
+                      (set! (.-Arr o) (append (.-Arr o) (spread args)))
+                      (conv float64 (len (.-Arr o))))))
+
+                (.Method r (.-ArrayProto r) "pop" ^{:go/end 674} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)]
+                      (when (== (len (.-Arr o)) 0)
+                        (return JSUndefined))
+
+                      (let [v (aget (.-Arr o) (- (len (.-Arr o)) 1))]
+                        (set! (.-Arr o) (subslice (.-Arr o) _ (- (len (.-Arr o)) 1)))
+                        ^{:line 673} v))))
+
+                (.Method r (.-ArrayProto r) "shift" ^{:go/end 683} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)]
+                      (when (== (len (.-Arr o)) 0)
+                        (return JSUndefined))
+
+                      (let [v (aget (.-Arr o) 0)]
+                        (set! (.-Arr o) (append (lit (slice any)) (spread (subslice (.-Arr o) 1))))
+                        ^{:line 682} v))))
+
+                (.Method r (.-ArrayProto r) "concat" ^{:go/end 695} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)
+                        ^{:line 686} out (append (lit (slice any)) (spread (.-Arr o)))]
+                      (range [_ a args]
+                        (if [(values x ok) (assert (* JSObject) a)] (and ok (== (.-Class x) "Array"))
+                          (set! out (append out (spread (.-Arr x))))
+
+                          (set! out (append out a))))
+
+
+                      (.Array r out))))
+
+                (.Method r (.-ArrayProto r) "slice" ^{:go/end 704} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)
+                        ^{:line 698} n (len (.-Arr o))
+                        (values s e) (values (relIndex (.intArg r args 0 0) n) (relIndex (.intArg r args 1 n) n))]
+                      (when (< e s)
+                        (set! e s))
+
+                      (.Array r (append (lit (slice any)) (spread (subslice (.-Arr o) s e)))))))
+
+                (.Method r (.-ArrayProto r) "indexOf" ^{:go/end 713} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)]
+                      (range [i x (.-Arr o)]
+                        (when (StrictEquals x (arg args 0))
+                          (return (conv float64 i))))
+
+
+                      (conv float64 -1))))
+
+                (.Method r (.-ArrayProto r) "join" ^{:go/end 727} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)
+                        ^{:line 716} sep ","]
+                      (when [v (arg args 0)] (!= v JSUndefined)
+                        (set! sep (.ToString r v)))
+
+                      (let [parts (make (slice string) (len (.-Arr o)))]
+                        (range [i x (.-Arr o)]
+                          (when (and (!= x JSUndefined) (!= x JSNull))
+                            (aset parts i (.ToString r x))))
+
+
+                        (strings/Join parts sep)))))
+
+                (.Method r (.-ArrayProto r) "toString" ^{:go/end 730} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (.Call r (.Get r (.-ArrayProto r) "join") this nil)))
+
+                (.Method r (.-ArrayProto r) "forEach" ^{:go/end 737} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)]
+                      (for [i 0] (< i (len (.-Arr o))) (inc! i)
+                        (.Call r (arg args 0) (arg args 1) (lit (slice any) (aget (.-Arr o) i) (conv float64 i) o)))
+
+                      ^{:line 736} JSUndefined)))
+
+                (.Method r (.-ArrayProto r) "map" ^{:go/end 745} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [o (thisArr this)
+                        ^{:line 740} out (make (slice any) (len (.-Arr o)))]
+                      (range [i (.-Arr o)]
+                        (aset out i (.Call r (arg args 0) (arg args 1) (lit (slice any) (aget (.-Arr o) i) (conv float64 i) o))))
+
+                      (.Array r out))))
+
+
+                ;; typed arrays: Uint8Array, Uint8ClampedArray and Float32Array over byte slices (subarray shares)
+                (let [typed ^{:go/end 841} (fn [^string name ^{:tag (* JSObject)} proto ^int size]
+                      (let [mk ^{:go/end 749} (fn ^{:tag (* JSObject)} [^{:tag (slice byte)} b] (addr (lit JSObject :Class name :Proto proto :Bytes b)))
+                          ^{:line 750} construct ^{:go/end 780} (fn ^any [^{:tag (slice any)} args]
+                            (type-switch [x (arg args 0)]
+                              (case [jsUndefined]
+                                (return (mk (lit (slice byte)))))
+                              (case [float64]
+                                (let [n (conv int x)]
+                                  (when (or (!= (conv float64 n) x) (< n 0))
+                                    (.Throw r "range" (+ "Invalid typed array length: " (jsNumStr x))))
+
+                                  (return (mk (make (slice byte) (* n size))))))
+                              (case [(* JSObject)]
+                                (when (== (.-Class x) "ArrayBuffer")
+                                  (let [off (.intArg r args 1 0)
+                                      ^{:line 763} n (/ (- (len (.-Bytes x)) off) size)]
+                                    (when [v (arg args 2)] (!= v JSUndefined)
+                                      (set! n (.intArg r args 2 0)))
+
+                                    (when (or (< off 0) (> (+ off (* n size)) (len (.-Bytes x))))
+                                      (.Throw r "range" "Invalid typed array length"))
+
+                                    (return (mk (subslice (.-Bytes x) off (+ off (* n size)) (+ off (* n size)))))))
+
+                                (let [n (conv int (.ToNumber r (.Get r x "length")))
+                                    ^{:line 773} t (mk (make (slice byte) (* n size)))]
+                                  (for [i 0] (< i n) (inc! i)
+                                    (.Set r t (strconv/Itoa i) (.Get r x (strconv/Itoa i))))
+
+                                  (return t))))
+
+                            (mk (lit (slice byte))))]
+
+                        (.ctor r name proto ^{:go/breaks [3] :go/end 784} (fn ^any [^any this ^{:tag (slice any)} args]
+                            (.Throw r "type" (+ "Constructor " name " requires 'new'"))
+                            nil)
+                          ^{:line 784} construct)
+                        (let [thisT ^{:go/end 791} (fn ^{:tag (* JSObject)} [^any this]
+                              (let [(values o ok) (assert (* JSObject) this)]
+                                (when (or (not ok) (== (.-Bytes o) nil))
+                                  (.Throw r "type" "this is not a typed array."))
+
+                                ^{:line 790} o))]
+
+                          (.Method r proto "subarray" ^{:go/end 800} (fn ^any [^any this ^{:tag (slice any)} args]
+                              (let [o (thisT this)
+                                  ^{:line 794} n (/ (len (.-Bytes o)) size)
+                                  (values s e) (values (relIndex (.intArg r args 0 0) n) (relIndex (.intArg r args 1 n) n))]
+                                (when (< e s)
+                                  (set! e s))
+
+                                (mk (subslice (.-Bytes o) (* s size) (* e size) (* e size))))))
+
+                          (.Method r proto "slice" ^{:go/end 809} (fn ^any [^any this ^{:tag (slice any)} args]
+                              (let [o (thisT this)
+                                  ^{:line 803} n (/ (len (.-Bytes o)) size)
+                                  (values s e) (values (relIndex (.intArg r args 0 0) n) (relIndex (.intArg r args 1 n) n))]
+                                (when (< e s)
+                                  (set! e s))
+
+                                (mk (append (lit (slice byte)) (spread (subslice (.-Bytes o) (* s size) (* e size))))))))
+
+                          (.Method r proto "set" ^{:go/end 832} (fn ^any [^any this ^{:tag (slice any)} args]
+                              (let [o (thisT this)
+                                  ^{:line 812} off (.intArg r args 1 0)
+                                  (values src ok) (assert (* JSObject) (arg args 0))]
+                                (when (not ok)
+                                  (return JSUndefined))
+
+                                (when (and (!= (.-Bytes src) nil) (== (.-Class src) name))
+                                  (when (or (< off 0) (> (+ (* off size) (len (.-Bytes src))) (len (.-Bytes o))))
+                                    (.Throw r "range" "offset is out of bounds"))
+
+                                  (copy (subslice (.-Bytes o) (* off size)) (.-Bytes src))
+                                  (return JSUndefined))
+
+                                (let [n (conv int (.ToNumber r (.Get r src "length")))]
+                                  (when (or (< off 0) (> (* (+ off n) size) (len (.-Bytes o))))
+                                    (.Throw r "range" "offset is out of bounds"))
+
+                                  (for [i 0] (< i n) (inc! i)
+                                    (.Set r o (strconv/Itoa (+ off i)) (.Get r src (strconv/Itoa i))))
+
+                                  ^{:line 831} JSUndefined))))
+
+                          (.Method r proto "fill" ^{:go/end 840} (fn ^any [^any this ^{:tag (slice any)} args]
+                              (let [o (thisT this)
+                                  ^{:line 835} n (/ (len (.-Bytes o)) size)]
+                                (for [i 0] (< i n) (inc! i)
+                                  (.Set r o (strconv/Itoa i) (arg args 0)))
+
+                                ^{:line 839} o))))))]
+
+
+                  (typed "Uint8Array" (.-U8Proto r) 1)
+                  (typed "Uint8ClampedArray" (.-U8CProto r) 1)
+                  (typed "Float32Array" (.-F32Proto r) 4)
+
+                  ;; Number, Boolean, String, Symbol
+                  (.ctor r "Number" (.-NumberProto r) ^{:go/end 852} (fn ^any [^any this ^{:tag (slice any)} args]
+                      (when (== (len args) 0)
+                        (return 0.0))
+
+                      (.ToNumber r (aget args 0)))
+                    ^{:go/end 858} (fn ^any [^{:tag (slice any)} args]
+                      (let [v 0.0]
+                        (when (> (len args) 0)
+                          (set! v (.ToNumber r (aget args 0))))
+
+                        (addr (lit JSObject :Class "Number" :Proto (.-NumberProto r) :Prim v)))))
+
+                  (let [prim ^{:go/end 864} (fn ^any [^any this]
+                        (when [(values o ok) (assert (* JSObject) this)] (and ok (!= (.-Prim o) nil))
+                          (return (.-Prim o)))
+
+                        ^{:line 863} this)]
+
+                    (.Method r (.-NumberProto r) "valueOf" ^{:go/end 865} (fn ^any [^any this ^{:tag (slice any)} args] (prim this)))
+                    (.Method r (.-NumberProto r) "toString" ^{:go/end 872} (fn ^any [^any this ^{:tag (slice any)} args]
+                        (let [(values f _) (assert float64 (prim this))]
+                          (when [rd (.intArg r args 0 10)] (and (!= rd 10) (== f (math/Trunc f)) (not (math/IsInf f 0)))
+                            (return (strconv/FormatInt (conv int64 f) rd)))
+
+                          (jsNumStr f))))
+
+                    (.Method r (.-NumberProto r) "toFixed" ^{:go/end 876} (fn ^any [^any this ^{:tag (slice any)} args]
+                        (let [(values f _) (assert float64 (prim this))]
+                          (strconv/FormatFloat f \f (.intArg r args 0 0) 64))))
+
+                    (.ctor r "Boolean" (.-BooleanProto r) ^{:go/end 877} (fn ^any [^any this ^{:tag (slice any)} args] (jsTruthy (arg args 0))) ^{:go/end 879} (fn ^any [^{:tag (slice any)} args]
+                        (addr (lit JSObject :Class "Boolean" :Proto (.-BooleanProto r) :Prim (jsTruthy (arg args 0))))))
+
+                    (.Method r (.-BooleanProto r) "valueOf" ^{:go/end 880} (fn ^any [^any this ^{:tag (slice any)} args] (prim this)))
+                    (.Method r (.-BooleanProto r) "toString" ^{:go/end 881} (fn ^any [^any this ^{:tag (slice any)} args] (jsToStringPrim (prim this))))
+                    (let [strCtor (.ctor r "String" (.-StringProto r) ^{:go/end 890} (fn ^any [^any this ^{:tag (slice any)} args]
+                            (when (== (len args) 0)
+                              (return ""))
+
+                            (when [(values s ok) (assert (* JSSymbol) (aget args 0))] ok
+                              (return (+ "Symbol(" (.-Desc s) ")")))
+
+                            (.ToString r (aget args 0)))
+                          ^{:go/end 896} (fn ^any [^{:tag (slice any)} args]
+                            (let [s ""]
+                              (when (> (len args) 0)
+                                (set! s (.ToString r (aget args 0))))
+
+                              (addr (lit JSObject :Class "String" :Proto (.-StringProto r) :Prim s)))))]
+
+                      (set! _ strCtor)
+                      (let [thisStr ^{:go/end 898} (fn ^string [^any this] (.ToString r (prim this)))]
+                        (.Method r (.-StringProto r) "valueOf" ^{:go/end 899} (fn ^any [^any this ^{:tag (slice any)} args] (prim this)))
+                        (.Method r (.-StringProto r) "toString" ^{:go/end 900} (fn ^any [^any this ^{:tag (slice any)} args] (prim this)))
+                        (.Method r (.-StringProto r) "indexOf" ^{:go/end 916} (fn ^any [^any this ^{:tag (slice any)} args]
+                            (let [(values s t) (values (jsUnits (thisStr this)) (jsUnits (.ToString r (arg args 0))))]
+                              (for [i 0] (<= (+ i (len t)) (len s)) (inc! i)
+                                (let [eq true]
+                                  (range [j t]
+                                    (when (!= (aget s (+ i j)) (aget t j))
+                                      (set! eq false)
+                                      (break)))
+
+
+                                  (when eq
+                                    (return (conv float64 i)))))
+
+
+                              (conv float64 -1))))
+
+                        (.Method r (.-StringProto r) "substring" ^{:go/end 934} (fn ^any [^any this ^{:tag (slice any)} args]
+                            (let [u (jsUnits (thisStr this))
+                                ^{:line 919} n (len u)
+                                ^{:line 920} clamp ^{:go/end 928} (fn ^int [^int k]
+                                  (when (< k 0)
+                                    (return 0))
+
+                                  (when (> k n)
+                                    (return n))
+
+                                  ^{:line 927} k)
+
+                                (values s e) (values (clamp (.intArg r args 0 0)) (clamp (.intArg r args 1 n)))]
+                              (when (> s e)
+                                (set! (values s e) (values e s)))
+
+                              (jsFromUnits (subslice u s e)))))
+
+                        (.Method r (.-StringProto r) "split" ^{:go/end 941} (fn ^any [^any this ^{:tag (slice any)} args]
+                            (let [^{:tag (slice any)} out (zero (slice any))]
+                              (range [_ p (strings/Split (thisStr this) (.ToString r (arg args 0)))]
+                                (set! out (append out p)))
+
+                              (.Array r out))))
+
+                        (.Method r (.-StringProto r) "charCodeAt" ^{:go/end 949} (fn ^any [^any this ^{:tag (slice any)} args]
+                            (let [u (jsUnits (thisStr this))
+                                ^{:line 944} i (.intArg r args 0 0)]
+                              (when (or (< i 0) (>= i (len u)))
+                                (return (math/NaN)))
+
+                              (conv float64 (aget u i)))))
+
+                        (let [symCtor ^{:go/breaks [5]} (.ctor r "Symbol" (.-SymbolProto r) ^{:go/end 956} (fn ^any [^any this ^{:tag (slice any)} args]
+                                (let [d ""]
+                                  (when [v (arg args 0)] (!= v JSUndefined)
+                                    (set! d (.ToString r v)))
+
+                                  (addr (lit JSSymbol :Desc d))))
+                              nil)]
+                          (set! (.-Ctor symCtor) nil)
+                          (.Method r (.-SymbolProto r) "toString" ^{:go/breaks [[3 962]] :go/end 963} (fn ^any [^any this ^{:tag (slice any)} args]
+                              (when [(values s ok) (assert (* JSSymbol) this)] ok
+                                (return (+ "Symbol(" (.-Desc s) ")")))
+
+                              "Symbol()"))
+
+
+                          ;; errors
+                          (let [errCtor ^{:go/end 975} (fn [^string name ^{:tag (* JSObject)} proto]
+                                (let [mk ^{:go/end 973} (fn ^any [^{:tag (slice any)} args]
+                                      (let [m ""]
+                                        (when [v (arg args 0)] (!= v JSUndefined)
+                                          (set! m (.ToString r v)))
+
+                                        (.Error r proto m "")))]
+
+                                  (.ctor r name proto ^{:go/end 974} (fn ^any [^any this ^{:tag (slice any)} args] (mk args)) mk)))]
+
+                            (errCtor "Error" (.-ErrorProto r))
+                            (errCtor "TypeError" (.-TypeErrorProto r))
+                            (errCtor "RangeError" (.-RangeErrorProto r))
+                            (errCtor "SyntaxError" (.-SyntaxErrorProto r))
+                            (errCtor "ReferenceError" (.-ReferenceErrorProto r))
+                            (.Method r (.-ErrorProto r) "toString" ^{:go/breaks [[3 985]] :go/end 986} (fn ^any [^any this ^{:tag (slice any)} args]
+                                (when [(values o ok) (assert (* JSObject) this)] ok
+                                  (return (jsErrorText o)))
+
+                                "Error"))
+
+
+                            ;; Date: the world's clock, UTC (getTimezoneOffset 0)
+                            (let [dateOf ^{:go/end 995} (fn ^float64 [^any this]
+                                  (let [(values o ok) (assert (* JSObject) this)]
+                                    (when (or (not ok) (!= (.-Class o) "Date"))
+                                      (.Throw r "type" "this is not a Date object."))
+
+                                    (assert float64 (.-Prim o))))
+
+                                ^{:line 996} newDate ^{:go/end 1002} (fn ^any [^{:tag (slice any)} args]
+                                  (let [t ((.-Now r))]
+                                    (when (== (len args) 1)
+                                      (set! t (math/Trunc (.ToNumber r (aget args 0)))))
+
+                                    (addr (lit JSObject :Class "Date" :Proto (.-DateProto r) :Prim t))))
+
+                                ^{:line 1003} dateCtor (.ctor r "Date" (.-DateProto r) ^{:go/end 1003} (fn ^any [^any this ^{:tag (slice any)} args] (jsDateString ((.-Now r)))) newDate)]
+                              (.Method r dateCtor "now" ^{:go/end 1004} (fn ^any [^any this ^{:tag (slice any)} args] ((.-Now r))))
+                              (.Method r (.-DateProto r) "getTime" ^{:go/end 1005} (fn ^any [^any this ^{:tag (slice any)} args] (dateOf this)))
+                              (.Method r (.-DateProto r) "valueOf" ^{:go/end 1006} (fn ^any [^any this ^{:tag (slice any)} args] (dateOf this)))
+                              (.Method r (.-DateProto r) "getTimezoneOffset" ^{:go/end 1007} (fn ^any [^any this ^{:tag (slice any)} args] (dateOf this) 0.0))
+                              (.Method r (.-DateProto r) "toString" ^{:go/end 1008} (fn ^any [^any this ^{:tag (slice any)} args] (jsDateString (dateOf this))))
+                              (.Method r (.-DateProto r) "toISOString" ^{:go/end 1009} (fn ^any [^any this ^{:tag (slice any)} args] (jsISODate (dateOf this))))
+
+                              ;; Promise: resolved by the world's microtasks
+                              (.ctor r "Promise" (.-PromiseProto r) ^{:go/breaks [3] :go/end 1015} (fn ^any [^any this ^{:tag (slice any)} args]
+                                  (.Throw r "type" "Promise constructor cannot be invoked without 'new'")
+                                  nil)
+                                ^{:go/end 1032} (fn ^any [^{:tag (slice any)} args]
+                                  (let [p (.NewPromise r)
+                                      (values res rej) (values (.Func r "resolve" ^{:go/end 1017} (fn ^any [^any _ ^{:tag (slice any)} a] (.Resolve r p (arg a 0)) JSUndefined))
+                                        (.Func r "reject" ^{:go/end 1018} (fn ^any [^any _ ^{:tag (slice any)} a] (.Reject r p (arg a 0)) JSUndefined)))]
+                                    (^{:go/end 1030} (fn []
+                                        (defer (^{:go/end 1028} (fn []
+                                              (when [x (recover)] (!= x nil)
+                                                (let [(values t ok) (assert (* JSThrow) x)]
+                                                  (when (not ok)
+                                                    (panic x))
+
+                                                  (.Reject r p (.-V t)))))))
+
+
+                                        (.Call r (arg args 0) JSUndefined (lit (slice any) res rej))))
+
+                                    ^{:line 1031} p)))
+
+                              (.Method r (.-PromiseProto r) "then" ^{:go/end 1035} (fn ^any [^any this ^{:tag (slice any)} args]
+                                  (.Then r (assert (* JSObject) this) (arg args 0) (arg args 1))))
+
+                              (.Method r (.-PromiseProto r) "catch" ^{:go/end 1038} (fn ^any [^any this ^{:tag (slice any)} args]
+                                  (.Then r (assert (* JSObject) this) JSUndefined (arg args 0))))
+
+                              (let [promCtor (assert (* JSObject) (.Get r g "Promise"))]
+                                (.Method r promCtor "resolve" ^{:go/end 1047} (fn ^any [^any this ^{:tag (slice any)} args]
+                                    (when [(values p ok) (assert (* JSObject) (arg args 0))] (and ok (== (.-Class p) "Promise"))
+                                      (return p))
+
+                                    (let [p (.NewPromise r)]
+                                      (.Resolve r p (arg args 0))
+                                      ^{:line 1046} p)))
+
+                                (.Method r promCtor "reject" ^{:go/end 1052} (fn ^any [^any this ^{:tag (slice any)} args]
+                                    (let [p (.NewPromise r)]
+                                      (.Reject r p (arg args 0))
+                                      ^{:line 1051} p)))
+
+
+                                ;; Math
+                                (let [m (.obj r)]
+                                  (.Put g "Math" m)
+                                  (.Put m "PI" math/Pi)
+                                  (let [m1 ^{:go/end 1060} (fn [^string name ^{:tag (func [float64] [float64])} f]
+                                        (.Method r m name ^{:go/end 1059} (fn ^any [^any this ^{:tag (slice any)} args] (f (.ToNumber r (arg args 0))))))]
+
+                                    (m1 "floor" math/Floor)
+                                    (m1 "ceil" math/Ceil)
+                                    (m1 "abs" math/Abs)
+                                    (m1 "sqrt" math/Sqrt)
+                                    (m1 "sin" math/Sin)
+                                    (m1 "cos" math/Cos)
+                                    (m1 "trunc" math/Trunc)
+                                    (m1 "round" ^{:go/end 1068} (fn ^float64 [^float64 f] (math/Floor (+ f 0.5))))
+                                    (.Method r m "max" ^{:go/end 1079} (fn ^any [^any this ^{:tag (slice any)} args]
+                                        (let [v (math/Inf -1)]
+                                          (range [_ a args]
+                                            (let [f (.ToNumber r a)]
+                                              (when (math/IsNaN f)
+                                                (return f))
+
+                                              (set! v (math/Max v f))))
+
+                                          ^{:line 1078} v)))
+
+                                    (.Method r m "min" ^{:go/end 1090} (fn ^any [^any this ^{:tag (slice any)} args]
+                                        (let [v (math/Inf 1)]
+                                          (range [_ a args]
+                                            (let [f (.ToNumber r a)]
+                                              (when (math/IsNaN f)
+                                                (return f))
+
+                                              (set! v (math/Min v f))))
+
+                                          ^{:line 1089} v)))
+
+                                    (.Method r g "isNaN" ^{:go/end 1091} (fn ^any [^any this ^{:tag (slice any)} args] (math/IsNaN (.ToNumber r (arg args 0)))))
+                                    (.Method r g "parseInt" ^{:go/end 1103} (fn ^any [^any this ^{:tag (slice any)} args]
+                                        (let [s (strings/TrimSpace (.ToString r (arg args 0)))
+                                            ^{:line 1094} end 0]
+                                          (while (and (< end (len s)) ^:go/paren (or (and (>= (aget s end) \0) (<= (aget s end) \9)) (and (== end 0) ^:go/paren (or (== (aget s 0) \-) (== (aget s 0) \+)))))
+                                            (inc! end))
+
+                                          (let [(values n err) (strconv/ParseInt (subslice s _ end) 10 64)]
+                                            (when (!= err nil)
+                                              (return (math/NaN)))
+
+                                            (conv float64 n)))))
+
+                                    (.Method r g "eval" ^{:go/end 1110} (fn ^any [^any this ^{:tag (slice any)} args]
+                                        (let [(values src ok) (assert string (arg args 0))]
+                                          (when (not ok)
+                                            (return (arg args 0)))
+
+                                          (.Eval r src))))
+
+                                    ^{:line 1111} r))))))))))))))))))
+
+
+
+^{:go/end 1117} (go/method NewPromise "NewPromise is a pending promise.\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r]
+  (addr (lit JSObject :Class "Promise" :Proto (.-PromiseProto r) :Prim (addr (lit jsPromise)))))
+
+
+(go/type jsPromise (struct
+    ^{:line 1120 :tag int} state ; 0 pending, 1 fulfilled, 2 rejected
+    ^{:line 1121 :tag any} value
+    ^{:line 1122 :tag (slice (func []))} react))
+
+
+
+^{:go/end 1137} (go/method Resolve "Resolve resolves a promise (a thenable adopted).\n" [^{:tag (* JSRealm)} r ^{:tag (* JSObject)} p ^any v]
+  (let [ps (assert (* jsPromise) (.-Prim p))]
+    (when (!= (.-state ps) 0)
+      (return))
+
+    (when [(values q ok) (assert (* JSObject) v)] (and ok (== (.-Class q) "Promise"))
+      (.Then r q (.Func r "" ^{:go/end 1132} (fn ^any [^any _ ^{:tag (slice any)} a] (.Resolve r p (arg a 0)) JSUndefined))
+        (.Func r "" ^{:go/end 1133} (fn ^any [^any _ ^{:tag (slice any)} a] (.Reject r p (arg a 0)) JSUndefined)))
+      (return))
+
+    (.settle r ps 1 v)))
+
+
+
+^{:go/end 1146} (go/method Reject "Reject rejects a promise.\n" [^{:tag (* JSRealm)} r ^{:tag (* JSObject)} p ^any v]
+  (let [ps (assert (* jsPromise) (.-Prim p))]
+    (when (!= (.-state ps) 0)
+      (return))
+
+    (.settle r ps 2 v)))
+
+
+^{:go/end 1154} (go/method settle [^{:tag (* JSRealm)} r ^{:tag (* jsPromise)} ps ^int st ^any v]
+  (set! (values (.-state ps) (.-value ps)) (values st v))
+  (range [_ f (.-react ps)]
+    ((.-Micro r) f))
+
+  (set! (.-react ps) nil))
+
+
+
+^{:go/end 1193} (go/method Then "Then is Promise.prototype.then.\n" ^{:tag (* JSObject)} [^{:tag (* JSRealm)} r ^{:tag (* JSObject)} p ^any onOK ^any onErr]
+  (let [(values ps ok) (assert (* jsPromise) (.-Prim p))]
+    (when (not ok)
+      (.Throw r "type" "Method Promise.prototype.then called on incompatible receiver"))
+
+    (let [q (.NewPromise r)
+        ^{:line 1163} job ^{:go/end 1186} (fn []
+          (let [h onOK]
+            (when (== (.-state ps) 2)
+              (set! h onErr))
+
+            (when (not (isCallable h))
+              (if (== (.-state ps) 1)
+                (.Resolve r q (.-value ps))
+
+                (.Reject r q (.-value ps)))
+
+              (return))
+
+            (defer (^{:go/end 1184} (fn []
+                  (when [x (recover)] (!= x nil)
+                    (let [(values t ok) (assert (* JSThrow) x)]
+                      (when (not ok)
+                        (panic x))
+
+                      (.Reject r q (.-V t)))))))
+
+
+            (.Resolve r q (.Call r h JSUndefined (lit (slice any) (.-value ps))))))]
+
+      (if (== (.-state ps) 0)
+        (set! (.-react ps) (append (.-react ps) job))
+
+        ((.-Micro r) job))
+
+      ^{:line 1192} q)))
+
+
+(go/var jsDays (lit (slice string) "Thu" "Fri" "Sat" "Sun" "Mon" "Tue" "Wed"))
+(go/var jsMonths (lit (slice string) "Jan" "Feb" "Mar" "Apr" "May" "Jun" "Jul" "Aug" "Sep" "Oct" "Nov" "Dec"))
+
+
+^{:go/end 1222} (go/func jsCivil "jsCivil is a time value's UTC date and time (days from civil, Howard Hinnant's algorithm).\n" [^float64 t] :results [^int y ^int mo ^int d ^int h ^int mi ^int s ^int ms ^int wd]
+  (let [tm (conv int64 (math/Floor t))
+      ^{:line 1201} day (floorDiv tm 86400000)
+      ^{:line 1202} rem (- tm (* day 86400000))]
+    (set! (values h mi s ms) (values (conv int (/ rem 3600000)) (conv int (% (/ rem 60000) 60)) (conv int (% (/ rem 1000) 60)) (conv int (% rem 1000))))
+    (set! wd (conv int (% (+ (% day 7) 7) 7)))
+    (let [z (+ day 719468)
+        ^{:line 1206} era (floorDiv z 146097)
+        ^{:line 1207} doe (- z (* era 146097))
+        ^{:line 1208} yoe (/ (- (+ (- doe (/ doe 1460)) (/ doe 36524)) (/ doe 146096)) 365)
+        ^{:line 1209} yy (+ yoe (* era 400))
+        ^{:line 1210} doy (- doe (- (+ (* 365 yoe) (/ yoe 4)) (/ yoe 100)))
+        ^{:line 1211} mp (/ (+ (* 5 doy) 2) 153)]
+      (set! d (conv int (+ (- doy (/ (+ (* 153 mp) 2) 5)) 1)))
+      (if (< mp 10)
+        (set! mo (conv int (+ mp 3)))
+
+        (set! mo (conv int (- mp 9))))
+
+      (when (<= mo 2)
+        (inc! yy))
+
+      (return (conv int yy) mo d h mi s ms wd))))
+
+
+^{:go/end 1230} (go/func floorDiv ^int64 [^int64 a ^int64 b]
+  (let [q (/ a b)]
+    (when (and ^:go/paren (!= (% a b) 0) ^:go/paren (!= (< a 0) (< b 0)))
+      (dec! q))
+
+    ^{:line 1229} q))
+
+
+^{:go/end 1238} (go/func pad ^string [^int n ^int w]
+  (let [s (strconv/Itoa n)]
+    (while (< (len s) w)
+      (set! s (+ "0" s)))
+
+    ^{:line 1237} s))
+
+
+^{:go/end 1244} (go/func jsDateString ^string [^float64 t]
+  (let [(values y mo d h mi s _ wd) (jsCivil t)]
+    (+ (aget jsDays wd) " " (aget jsMonths (- mo 1)) " " (pad d 2) " " (pad y 4) " " (pad h 2) ":" (pad mi 2) ":"
+      (pad s 2) " GMT+0000 (Coordinated Universal Time)")))
+
+
+^{:go/end 1249} (go/func jsISODate ^string [^float64 t]
+  (let [(values y mo d h mi s ms _) (jsCivil t)]
+    (+ (pad y 4) "-" (pad mo 2) "-" (pad d 2) "T" (pad h 2) ":" (pad mi 2) ":" (pad s 2) "." (pad ms 3) "Z")))

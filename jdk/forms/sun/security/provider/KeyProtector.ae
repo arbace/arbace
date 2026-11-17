@@ -1,0 +1,153 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/KeyProtector.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.security InvalidKeyException
+                        Key
+                        KeyStoreException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        UnrecoverableKeyException)
+        '(java.util Arrays)
+        '(sun.security.pkcs EncryptedPrivateKeyInfo PKCS8Key)
+        '(sun.security.util KnownOIDs ObjectIdentifier)
+        '(sun.security.x509 AlgorithmId))
+
+(defclass ^:final KeyProtector
+  (field ^:private ^:static ^:final ^int SALT_LEN 20)
+
+  (field ^:private ^:static ^:final ^String DIGEST_ALG "SHA")
+
+  (field ^:private ^:static ^:final ^int DIGEST_LEN 20)
+
+  (field ^:private ^byte/1 passwdBytes)
+
+  (field ^:private ^:final ^MessageDigest md)
+
+  (constructor :throws [NoSuchAlgorithmException] ^:public [this ^byte/1 passwordBytes]
+    (when (nil? passwordBytes) (throw (IllegalArgumentException. "password can't be null")))
+    (set! md (MessageDigest/getInstance DIGEST_ALG))
+    (set! (.-passwdBytes this) passwordBytes))
+
+  (method ^:public protect :throws [KeyStoreException] ^byte/1 [this ^Key key]
+    (let [^:mutable ^int i 0
+          ^:mutable ^int numRounds 0
+          ^:mutable ^byte/1 digest nil
+          ^:mutable ^int xorOffset 0
+          ^:mutable ^int encrKeyOffset 0]
+      (when (nil? key) (throw (IllegalArgumentException. "plaintext key can't be null")))
+      (when-not (.equalsIgnoreCase "PKCS#8" (.getFormat key))
+        (throw (KeyStoreException. "Cannot get key bytes, not PKCS#8 encoded")))
+      (let [plainKey (.getEncoded key)]
+        (when (nil? plainKey)
+          (throw (KeyStoreException. "Cannot get key bytes, encoding not supported")))
+        (set! numRounds (unchecked-divide-int (alength plainKey) DIGEST_LEN))
+        (when-not (== (unchecked-remainder-int (alength plainKey) DIGEST_LEN) 0)
+          (set! numRounds (unchecked-inc-int numRounds)))
+        (let [salt (new byte/1 SALT_LEN)
+              random (java.security.SecureRandom.)]
+          (.nextBytes random salt)
+          (let [xorKey (new byte/1 (alength plainKey))]
+            (set! i 0)
+            (set! xorOffset 0)
+            (set! digest salt)
+            (while (< i numRounds)
+              (.update md passwdBytes)
+              (.update md digest)
+              (set! digest (.digest md))
+              (.reset md)
+              (if (< i (unchecked-subtract-int numRounds 1))
+                  (System/arraycopy digest 0 xorKey xorOffset (alength digest))
+                  (System/arraycopy digest
+                                    0
+                                    xorKey
+                                    xorOffset
+                                    (unchecked-subtract-int (alength xorKey) xorOffset)))
+              (set! i (unchecked-inc-int i))
+              (set! xorOffset (unchecked-add-int xorOffset DIGEST_LEN)))
+            (let [tmpKey (new byte/1 (alength plainKey))]
+              (set! i 0)
+              (while (< i (alength tmpKey))
+                (aset tmpKey i (unchecked-byte (bit-xor-int (aget plainKey i) (aget xorKey i))))
+                (set! i (unchecked-inc-int i)))
+              (let [encrKey (new byte/1
+                                 (unchecked-add-int
+                                   (unchecked-add-int (alength salt) (alength tmpKey))
+                                   DIGEST_LEN))]
+                (System/arraycopy salt 0 encrKey encrKeyOffset (alength salt))
+                (set! encrKeyOffset (unchecked-add-int encrKeyOffset (alength salt)))
+                (System/arraycopy tmpKey 0 encrKey encrKeyOffset (alength tmpKey))
+                (set! encrKeyOffset (unchecked-add-int encrKeyOffset (alength tmpKey)))
+                (.update md passwdBytes)
+                (Arrays/fill passwdBytes (unchecked-byte 0x00))
+                (set! passwdBytes nil)
+                (.update md plainKey)
+                (set! digest (.digest md))
+                (.reset md)
+                (System/arraycopy digest 0 encrKey encrKeyOffset (alength digest))
+                (Arrays/fill plainKey (unchecked-byte 0))
+                (let [encrAlg (AlgorithmId.
+                                (ObjectIdentifier/of KnownOIDs/JAVASOFT_JDKKeyProtector))]
+                  (.getEncoded (EncryptedPrivateKeyInfo. encrAlg encrKey))))))))))
+
+  (method ^:public recover :throws [UnrecoverableKeyException] ^Key [this
+                                                                     ^EncryptedPrivateKeyInfo encrInfo]
+    (let [^:mutable ^int i 0
+          ^:mutable ^byte/1 digest nil
+          ^:mutable ^int numRounds 0
+          ^:mutable ^int xorOffset 0
+          ^:mutable ^int encrKeyLen 0
+          encrAlg (.getAlgorithm encrInfo)]
+      (when-not (.equals (.toString (.getOID encrAlg)) (.value KnownOIDs/JAVASOFT_JDKKeyProtector))
+        (throw (UnrecoverableKeyException. "Unsupported key protection algorithm")))
+      (let [protectedKey (.getEncryptedData encrInfo)
+            salt (new byte/1 SALT_LEN)]
+        (System/arraycopy protectedKey 0 salt 0 SALT_LEN)
+        (set! encrKeyLen
+              (unchecked-subtract-int (unchecked-subtract-int (alength protectedKey) SALT_LEN)
+                                      DIGEST_LEN))
+        (set! numRounds (unchecked-divide-int encrKeyLen DIGEST_LEN))
+        (when-not (== (unchecked-remainder-int encrKeyLen DIGEST_LEN) 0)
+          (set! numRounds (unchecked-inc-int numRounds)))
+        (let [encrKey (new byte/1 encrKeyLen)]
+          (System/arraycopy protectedKey SALT_LEN encrKey 0 encrKeyLen)
+          (let [xorKey (new byte/1 (alength encrKey))]
+            (set! i 0)
+            (set! xorOffset 0)
+            (set! digest salt)
+            (while (< i numRounds)
+              (.update md passwdBytes)
+              (.update md digest)
+              (set! digest (.digest md))
+              (.reset md)
+              (if (< i (unchecked-subtract-int numRounds 1))
+                  (System/arraycopy digest 0 xorKey xorOffset (alength digest))
+                  (System/arraycopy digest
+                                    0
+                                    xorKey
+                                    xorOffset
+                                    (unchecked-subtract-int (alength xorKey) xorOffset)))
+              (set! i (unchecked-inc-int i))
+              (set! xorOffset (unchecked-add-int xorOffset DIGEST_LEN)))
+            (let [plainKey (new byte/1 (alength encrKey))]
+              (set! i 0)
+              (while (< i (alength plainKey))
+                (aset plainKey i (unchecked-byte (bit-xor-int (aget encrKey i) (aget xorKey i))))
+                (set! i (unchecked-inc-int i)))
+              (.update md passwdBytes)
+              (Arrays/fill passwdBytes (unchecked-byte 0x00))
+              (set! passwdBytes nil)
+              (.update md plainKey)
+              (set! digest (.digest md))
+              (.reset md)
+              (set! i 0)
+              (while (< i (alength digest))
+                (when-not (== (aget digest i)
+                              (aget protectedKey
+                                    (unchecked-add-int (unchecked-add-int SALT_LEN encrKeyLen) i)))
+                  (throw (UnrecoverableKeyException. "Cannot recover key")))
+                (set! i (unchecked-inc-int i)))
+              (try
+                (PKCS8Key/parseKey plainKey)
+                (catch InvalidKeyException e (throw (UnrecoverableKeyException. (.getMessage e))))
+                (finally (Arrays/fill plainKey (unchecked-byte 0)))))))))))

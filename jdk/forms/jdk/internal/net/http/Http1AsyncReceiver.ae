@@ -1,0 +1,474 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/Http1AsyncReceiver.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io EOFException IOException)
+        '(java.nio ByteBuffer)
+        '(java.util Arrays HashSet List Set)
+        '(java.util.concurrent ConcurrentLinkedDeque Executor ExecutorService Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference)
+        '(java.util.function Consumer Supplier)
+        '(jdk.internal.net.http.common ConnectionExpiredException
+                                       FlowTube$TubeSubscriber
+                                       Log
+                                       Logger
+                                       MinimalFuture
+                                       SequentialScheduler
+                                       Utils))
+
+(defclass Http1AsyncReceiver
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this Http1AsyncReceiver/.dbgString)
+                          Utils/DEBUG))
+
+  (defclass ^:static ^:interface Http1AsyncDelegate
+    (method ^:public tryAsyncReceive ^boolean [this ^ByteBuffer ref])
+
+    (method ^:public onReadError ^void [this ^Throwable ex])
+
+    (method ^:public onSubscribe ^void [this ^AbstractSubscription s])
+
+    (method ^:public subscription ^AbstractSubscription [this])
+
+    (method ^:public close ^void [this ^Throwable error]))
+
+  (defclass ^:private ^:static ^:final Http1AsyncDelegateSubscription
+    :extends AbstractSubscription
+
+    (field ^:private ^:final ^Runnable onCancel)
+
+    (field ^:private ^:final ^{:tag (Consumer Throwable)} onError)
+
+    (field ^:private ^:final ^SequentialScheduler scheduler)
+
+    (field ^:private ^:volatile ^boolean cancelled)
+
+    (constructor [this ^SequentialScheduler scheduler ^Runnable onCancel
+                  ^{:tag (Consumer Throwable)} onError]
+      (set! (.-scheduler this) scheduler)
+      (set! (.-onCancel this) onCancel)
+      (set! (.-onError this) onError))
+
+    (method ^:public request ^void [this ^long n]
+      (when-not cancelled
+        (try
+          (let [demand (.demand this)] (when (.increase demand n) (.runOrSchedule scheduler)))
+          (catch IllegalArgumentException x (set! cancelled true) (.accept onError x)))))
+
+    (method ^:public cancel ^void [this]
+      (set! cancelled true)
+      (.run onCancel)))
+
+  (field ^:private ^:final ^{:tag (ConcurrentLinkedDeque ByteBuffer)} queue
+    (ConcurrentLinkedDeque.))
+
+  (field ^:private ^:final ^SequentialScheduler scheduler
+    (SequentialScheduler/lockingScheduler (method-ref Runnable this Http1AsyncReceiver/.flush)))
+
+  (field ^:final ^{:tag (MinimalFuture Void)} whenFinished)
+
+  (field ^:private ^:final ^Executor executor)
+
+  (field ^:private ^:final ^Http1TubeSubscriber subscriber (Http1TubeSubscriber.))
+
+  (field ^:private ^:final ^{:tag (AtomicReference Http1AsyncDelegate)} pendingDelegateRef)
+
+  (field ^:private ^:final ^AtomicLong received (AtomicLong.))
+
+  (field ^:final ^AtomicBoolean canRequestMore (AtomicBoolean.))
+
+  (field ^:private ^:volatile ^Throwable error)
+
+  (field ^:private ^:volatile ^Http1AsyncDelegate delegate)
+
+  (field ^:private ^:volatile ^{:tag (Http1Exchange ?)} owner)
+
+  (field ^:private ^:final ^HttpClientImpl client)
+
+  (field ^:private ^boolean retry)
+
+  (field ^:private ^:volatile ^boolean stopRequested)
+
+  (constructor ^:public [this ^Executor executor ^{:tag (Http1Exchange ?)} owner]
+    (set! (.-pendingDelegateRef this) (AtomicReference.))
+    (set! (.-executor this) executor)
+    (set! (.-whenFinished this) (MinimalFuture.))
+    (set! (.-owner this) owner)
+    (set! (.-client this) (.-client owner)))
+
+  (method ^:private flush ^void [this]
+    (let [^:mutable ^ByteBuffer buf nil]
+      (try
+        (java-assert (or (not (.isSelectorThread client))
+                         (not (instance? ExecutorService (.delegate (.theExecutor client)))))
+          (java-str "Http1AsyncReceiver::flush should not run in the selector: "
+                    (.getName (Thread/currentThread))))
+        (.handlePendingDelegate this)
+        (while (and (some? (set! buf (cast ByteBuffer (.peek queue)))) (not stopRequested))
+          (let [delegate (.-delegate this)]
+            (when (.on debug)
+              (.log debug "Got %s bytes for delegate %s" (new Object/1 [(.remaining buf) delegate])))
+            (when-not (.hasDemand this delegate) (return))
+            (java-assert (some? delegate))
+            (when (.on debug)
+              (.log debug
+                    "Forwarding %s bytes to delegate %s"
+                    (new Object/1 [(.remaining buf) delegate])))
+            (when-not (.tryAsyncReceive delegate buf)
+              (let [^long remaining (.remaining buf)]
+                (when (.on debug)
+                  (.log debug
+                        (lambda Supplier ^String []
+                          (let [^:mutable ^String remstr (if (.isStopped scheduler)
+                                                             ""
+                                                             (java-str
+                                                               " remaining in ref: "
+                                                               remaining))]
+                            (set! remstr
+                                  (java-str
+                                    remstr
+                                    (java-str remstr " total remaining: " (.remaining this))))
+                            (java-str "Delegate done: " remaining)))))
+                (.set canRequestMore false)
+                (return)))
+            (let [parsed (cast ByteBuffer (.remove queue))]
+              (.set canRequestMore (and (.isEmpty queue) (not stopRequested)))
+              (java-assert (identical? parsed buf)))))
+        (.checkRequestMore this)
+        (catch Throwable t
+          (locking this (let [x error] (when (nil? x) (set! error t))))
+          (when (.on debug) (.log debug "Unexpected error caught in flush()" t)))
+        (finally (.checkForErrors this)))))
+
+  (method ^:private describe ^String [this]
+    (let [^{:tag (Http1Exchange ?)} exchange owner]
+      (if (some? exchange) (String/valueOf (.request exchange)) "<uri unavailable>")))
+
+  (method ^:private checkForErrors ^void [this]
+    (let [^:mutable delegate (cast Http1AsyncDelegate (.get pendingDelegateRef))]
+      (when (nil? delegate) (set! delegate (.-delegate this)))
+      (let [x error]
+        (when (and (and (some? delegate) (some? x)) (or stopRequested (.isEmpty queue)))
+          (let [^Object captured delegate]
+            (when (.on debug)
+              (.log debug
+                    (lambda Supplier ^String []
+                      (java-str "flushing "
+                                x
+                                "\n\t delegate: "
+                                captured
+                                "\t\t queue.isEmpty: "
+                                (.isEmpty queue)))))
+            (.stop scheduler)
+            (.onReadError delegate x)
+            (.completeExceptionally whenFinished x)
+            (when (Log/channel)
+              (Log/logChannel "HTTP/1 read subscriber stopped for: {0}"
+                              (new Object/1 [(.describe this)])))
+            (when stopRequested
+              (let [^{:tag (Http1Exchange ?)} exchg owner]
+                (.stop this)
+                (when (some? exchg) (.close (.connection exchg) x)))))))))
+
+  (method ^:private checkRequestMore ^void [this]
+    (let [delegate (.-delegate this)
+          more (.get (.-canRequestMore this))
+          hasDemand (.hasDemand this delegate)]
+      (when (.on debug)
+        (.log debug
+              (java-str "checkRequestMore: canRequestMore="
+                        more
+                        ", hasDemand="
+                        hasDemand
+                        (if (nil? delegate) ", delegate=null" ""))))
+      (when hasDemand (.requestMore subscriber))))
+
+  (method ^:private hasDemand ^boolean [this ^Http1AsyncDelegate delegate]
+    (if (nil? delegate)
+        false
+        (let [subscription (.subscription delegate)
+              demand (.get (.demand subscription))]
+          (when (.on debug)
+            (.log debug
+                  "downstream subscription demand is %s for %s"
+                  (new Object/1 [demand delegate])))
+          (> demand 0))))
+
+  (method ^:private handlePendingDelegate ^boolean [this]
+    (let [pending (cast Http1AsyncDelegate (.get pendingDelegateRef))]
+      (if (and (some? pending) (.compareAndSet pendingDelegateRef pending nil))
+          (let [^:mutable delegate (.-delegate this)]
+            (when (some? delegate) (.unsubscribe this delegate))
+            (let [^{:tag (Consumer Throwable)} onSubscriptionError
+                    (lambda Consumer ^void [^Throwable x]
+                      (.setRetryOnError this false)
+                      (set! stopRequested true)
+                      (.onReadError this x))
+                  cancel (lambda Runnable ^void []
+                           (when (.on debug)
+                             (.log debug
+                                   "Downstream subscription cancelled by %s"
+                                   (new Object/1 [pending])))
+                           (try
+                             (.setRetryOnError this false)
+                             (.close pending nil)
+                             (.onReadError this (IOException. "subscription cancelled"))
+                             (.unsubscribe this pending)
+                             (finally
+                               (let [^{:tag (Http1Exchange ?)} exchg owner]
+                                 (.stop this)
+                                 (when (some? exchg) (.close (.connection exchg)))))))
+                  subscription (Http1AsyncDelegateSubscription.
+                                 scheduler
+                                 cancel
+                                 onSubscriptionError)]
+              (try
+                (.onSubscribe pending subscription)
+                (finally (set! (.-delegate this) (set! delegate pending))))
+              (let [^Object captured delegate]
+                (when (.on debug)
+                  (.log debug
+                        (java-str "delegate is now "
+                                  captured
+                                  ", demand="
+                                  (.get (.demand subscription))
+                                  ", canRequestMore="
+                                  (.get canRequestMore)
+                                  ", queue.isEmpty="
+                                  (.isEmpty queue))))
+                true)))
+          false)))
+
+  (method ^:synchronized setRetryOnError ^void [this ^boolean retry]
+    (set! (.-retry this) retry))
+
+  (method clear ^void [this]
+    (when (.on debug) (.log debug "cleared"))
+    (.set (.-pendingDelegateRef this) nil)
+    (set! (.-delegate this) nil)
+    (set! (.-owner this) nil))
+
+  (method subscribe ^void [this ^Http1AsyncDelegate delegate]
+    (locking this (.set pendingDelegateRef delegate))
+    (when (.isEmpty queue) (.set canRequestMore true))
+    (when (.on debug)
+      (.log debug (java-str "Subscribed pending " delegate " queue.isEmpty: " (.isEmpty queue))))
+    (if (.isSelectorThread client) (.runOrSchedule scheduler executor) (.runOrSchedule scheduler)))
+
+  (method remaining ^long [this]
+    (Utils/remaining (cast ByteBuffer/1 (.toArray queue Utils/EMPTY_BB_ARRAY))))
+
+  (method unsubscribe ^void [this ^Http1AsyncDelegate delegate]
+    (let [^:mutable unsubscribed false]
+      (locking this
+        (when (identical? (.-delegate this) delegate)
+          (set! (.-delegate this) nil)
+          (set! unsubscribed true)))
+      (when unsubscribed
+        (when (.on debug) (.log debug "Unsubscribed %s" (new Object/1 [delegate]))))))
+
+  (method ^:private asyncReceive ^void [this ^ByteBuffer buf]
+    (when (.on debug)
+      (.log debug "Putting %s bytes into the queue" (new Object/1 [(.remaining buf)])))
+    (.addAndGet received (.remaining buf))
+    (.offer queue buf)
+    (.runOrSchedule scheduler executor))
+
+  (method onReadError ^void [this ^:mutable ^Throwable ex]
+    (let [^:mutable ^Http1AsyncDelegate delegate nil
+          ^:mutable ^Throwable recorded nil]
+      (when (.on debug) (.log debug "onError: %s" (new Object/1 [^Object ex])))
+      (locking this
+        (set! delegate (.-delegate this))
+        (set! recorded error)
+        (when (nil? recorded)
+          (when (and retry (instance? IOException ex))
+            (when (== (.get received) 0)
+              (set! retry false)
+              (set! ex (ConnectionExpiredException. ex))))
+          (set! error ex)))
+      (let [^Throwable t (if (nil? recorded) ex recorded)]
+        (when (.on debug)
+          (.log debug
+                (java-str "recorded "
+                          t
+                          "\n\t delegate: "
+                          delegate
+                          "\n\t queue.isEmpty: "
+                          (.isEmpty queue)
+                          "\n\tstopRequested: "
+                          stopRequested)
+                ex))
+        (when (Log/errors)
+          (Log/logError "HTTP/1 read subscriber recorded error: {0} - {1}"
+                        (new Object/1 [(.describe this) t])))
+        (when (or (or (.isEmpty queue) (some? (.get pendingDelegateRef))) stopRequested)
+          (when (Log/errors)
+            (Log/logError "HTTP/1 propagating recorded error: {0} - {1}"
+                          (new Object/1 [(.describe this) t])))
+          (.runOrSchedule scheduler executor)))))
+
+  (method stop ^void [this]
+    (when (.on debug) (.log debug "stopping"))
+    (when (and (Log/channel) (not (.isStopped scheduler)))
+      (Log/logChannel "HTTP/1 read subscriber stopped for {0}" (new Object/1 [(.describe this)])))
+    (.stop scheduler)
+    (let [previous delegate]
+      (when (some? previous) (.close previous error))
+      (set! delegate nil)
+      (set! owner nil)
+      (.complete whenFinished nil)))
+
+  (method subscriber ^FlowTube$TubeSubscriber [this] subscriber)
+
+  (defclass ^:final Http1TubeSubscriber
+    :implements [FlowTube$TubeSubscriber]
+
+    (field ^:volatile ^Flow$Subscription subscription)
+
+    (field ^:volatile ^boolean completed)
+
+    (field ^:volatile ^boolean dropped)
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (when (.on debug) (.log debug "Received onSubscribed from upstream"))
+      (when (Log/channel)
+        (Log/logChannel "HTTP/1 read subscriber got subscription from {0}"
+                        (new Object/1 [(.describe Http1AsyncReceiver/this)])))
+      (java-assert (or (nil? (.-subscription this)) (= dropped false)))
+      (set! (.-subscription this) subscription)
+      (set! dropped false)
+      (.set canRequestMore true)
+      (cond
+        (some? delegate) (.runOrSchedule scheduler executor)
+        (.on debug) (.log debug "onSubscribe: read delegate not present yet")))
+
+    (method requestMore ^void [this]
+      (let [s subscription]
+        (when (some? s)
+          (when (.compareAndSet canRequestMore true false)
+            (when (and (not completed) (not dropped))
+              (when (.on debug)
+                (.log debug (java-str "Http1TubeSubscriber: requesting one more from upstream: " s)))
+              (.request s 1)
+              (return)))
+          (when (.on debug) (.log debug "Http1TubeSubscriber: no need to request more")))))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (.set canRequestMore (.isEmpty item))
+      (for-each [^ByteBuffer buffer item] (.asyncReceive Http1AsyncReceiver/this buffer)))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (.onReadError Http1AsyncReceiver/this throwable)
+      (set! completed true))
+
+    (method ^:public onComplete ^void [this]
+      (.onReadError Http1AsyncReceiver/this (EOFException. "EOF reached while reading"))
+      (set! completed true))
+
+    (method ^:public dropSubscription ^void [this]
+      (when (.on debug) (.log debug "Http1TubeSubscriber: dropSubscription"))
+      (set! dropped true)))
+
+  (method drain ^ByteBuffer [this ^:mutable ^ByteBuffer initial]
+    (let [^:mutable b (set! initial (if (nil? initial) Utils/EMPTY_BYTEBUFFER initial))]
+      (java-assert (.isStopped scheduler))
+      (if (.isEmpty queue)
+          b
+          (let [qbb (cast ByteBuffer/1 (.toArray queue (new ByteBuffer/1 (.size queue))))
+                size (Utils/remaining qbb Integer/MAX_VALUE)
+                remaining (.remaining b)
+                free (unchecked-subtract-int (unchecked-subtract-int (.capacity b) (.position b))
+                                             remaining)]
+            (when (.on debug)
+              (.log debug
+                    "Flushing %s bytes from queue into initial buffer (remaining=%s, free=%s)"
+                    (new Object/1 [size remaining free])))
+            (when (> size free)
+              (when (.on debug)
+                (.log debug
+                      "Allocating new buffer for initial: %s"
+                      (new Object/1 [(unchecked-add-int size remaining)])))
+              (set! b (ByteBuffer/allocate (unchecked-add-int size remaining)))
+              (Utils/copy initial b)
+              (java-assert (== (.position b) remaining))
+              (.flip b)
+              (java-assert (== (.position b) 0))
+              (java-assert (== (.limit b) remaining))
+              (java-assert (== (.remaining b) remaining)))
+            (let [pos (.position b)
+                  limit (.limit b)]
+              (java-assert (== (unchecked-subtract-int limit pos) remaining))
+              (java-assert (>= (.capacity b) (unchecked-add-int remaining size))
+                (java-str "capacity: " (.capacity b) ", remaining: " (.remaining b) ", size: " size))
+              (.position b limit)
+              (.limit b (unchecked-add-int (unchecked-add-int pos remaining) size))
+              (java-assert (>= (.remaining b) size)
+                (java-str "remaining: " (.remaining b) ", size: " size))
+              (let [^:mutable ^int count 0]
+                (loop [^int i 0]
+                  (when (< i (alength qbb))
+                    (let [b2 (aget qbb i)
+                          r (.remaining b2)]
+                      (java-assert (>= (.remaining b) r)
+                        (java-str "need at least " r " only " (.remaining b) " available"))
+                      (let [copied (Utils/copy b2 b)]
+                        (java-assert (== copied r) (java-str "copied=" copied " available=" r))
+                        (java-assert (== (.remaining b2) 0))
+                        (set! count (unchecked-add-int count copied))
+                        (recur (unchecked-inc-int i))))))
+                (java-assert (== count size))
+                (java-assert (== (.position b)
+                                 (unchecked-add-int (unchecked-add-int pos remaining) size))
+                  (java-str "b.position=" (.position b) " != " pos "+" remaining "+" size))
+                (.limit b (unchecked-add-int limit size))
+                (.position b pos)
+                (.clear queue)
+                (let [bb b]
+                  (when (.on debug)
+                    (.log debug
+                          (java-str "Initial buffer now has "
+                                    (.remaining bb)
+                                    " pos="
+                                    (.position bb)
+                                    " limit="
+                                    (.limit bb))))
+                  b)))))))
+
+  (method ^:private debugQBB ^String [this ^ByteBuffer/1 qbb]
+    (let [msg (StringBuilder.)
+          ^{:tag (List ByteBuffer)} lbb (Arrays/asList qbb)
+          ^{:tag (Set ByteBuffer)} sbb (HashSet. (Arrays/asList qbb))
+          uniquebb (.size sbb)]
+      (.append (.append (.append (.append (.append (.append msg "qbb: ") (.size lbb)) " (unique: ")
+                                 uniquebb)
+                        "), ")
+               "duplicates: ")
+      (let [^:mutable sep ""]
+        (for-each [^ByteBuffer b lbb]
+          (when-not (.remove sbb b)
+            (.append (.append (.append (.append (.append
+                                                  (.append
+                                                    (.append
+                                                      (.append (.append msg sep) b)
+                                                      "[remaining=")
+                                                    (.remaining b))
+                                                  ", position=")
+                                                (.position b))
+                                       ", capacity=")
+                              (.capacity b))
+                     "]")
+            (set! sep ", ")))
+        (.toString msg))))
+
+  (field ^:volatile ^String dbgTag)
+
+  (method dbgString ^String [this]
+    (let [^:mutable tag dbgTag]
+      (when (nil? tag)
+        (let [^{:tag (Http1Exchange ?)} exchg owner
+              flow (when (some? exchg) ^Object (.getConnectionFlow (.connection exchg)))]
+          (if (some? flow)
+              (set! dbgTag (set! tag (java-str "Http1AsyncReceiver(" flow ")")))
+              (set! tag "Http1AsyncReceiver(?)"))))
+      tag)))

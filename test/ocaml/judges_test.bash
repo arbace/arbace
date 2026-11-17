@@ -99,10 +99,15 @@ out=$(cd "$root" && OI_TIMEOUT=60 O2J_LOAD_ALLOWANCE=5 bin/oi aot-cpu); expect "
 # re-review 030's finding 7 (a): oi's own level runs a program under the CPU limit (limited_cpu), as the AOT level's rerun: a program that needs
 # more than OI_TIMEOUT seconds of CPU is a "timeout 1s" row, and the limit is the project's (ARBACE_CPU_LOG records the run)
 rm -f "$W/cpu.log"
-out=$(cd "$root" && OI_TIMEOUT=1 ARBACE_CPU_LOG=$W/cpu.log bin/oi check --only 'misc/taku' 2>&1; cut -f2,6 .tmp/oi/check.tsv; cut -f1 "$W/cpu.log")
+# (the default path's rows file: the native path's check-native.tsv, TY24 (a); OI_CHECK_DEFAULT=ocdump the oracle's check.tsv)
+T=check-native.tsv; [ "${OI_CHECK_DEFAULT:-native}" = ocdump ] && T=check.tsv
+out=$(cd "$root" && OI_TIMEOUT=1 ARBACE_CPU_LOG=$W/cpu.log bin/oi check --only 'misc/taku' 2>&1; cut -f2,6 .tmp/oi/$T; cut -f1 "$W/cpu.log")
 expect "oi: a program over the CPU limit is a timeout row" 0 '124.timeout 1s' "$out" $?
 echo "$out" | grep -Eq '^(137|152)$' || { echo "FAIL oi: the program did not run under limited_cpu (no line in ARBACE_CPU_LOG)"; bad=1; }
 
+# OC181 (a): the expect action runs the host's toolchain (testsuite/tools/expect.ml on the ocaml toplevel): its cases are the oracle
+# tier's (bin/oi judges-test --oracle); OI_JUDGES_NO_HOST (judges-test --fixtures) leaves them out, counted as run
+if [ -z "${OI_JUDGES_NO_HOST:-}" ]; then
 # finding 9: bin/oi suite expect is a check: the run against the record, the committed record untouched without --record
 only='basic/patmatch_for_multiple'
 before=$(sha256sum "$root/test/ocaml/ref-expect.edn")
@@ -115,17 +120,21 @@ out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.tampered bin/oi suite expect 
 expect "expect: a run that differs from the record fails" 1 'not in the record' "$out" $st
 
 # re-review 030's finding 1: a whole run equals the committed record (rows), and a header edit alone is not a difference
+# (GT9: OI_JUDGES_NO_EXPECT, from bin/oi judges-test --no-expect, leaves out the two whole runs; their two cases are counted as run)
+if [ -z "${OI_JUDGES_NO_EXPECT:-}" ]; then
 out=$(cd "$root" && bin/oi suite expect 2>&1); st=$?
 expect "expect: a whole run passes against the committed record" 0 'equals the record' "$out" $st
 { echo ';; another header'; grep -v '^;;' "$root/test/ocaml/ref-expect.edn"; } > "$W/ref-expect.header"
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.header bin/oi suite expect 2>&1); st=$?
 expect "expect: a header edit alone is not a difference" 0 'equals the record' "$out" $st
+else echo "skip the two whole runs of expect (OI_JUDGES_NO_EXPECT)"; cases=$((cases + 2)); fi
 
 # re-review 030's finding 6: a missing record is an error, an --only that matches nothing says so
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect --only "$only" 2>&1); st=$?
 expect "expect: a missing record is an error" 2 'cannot be read' "$out" $st
 out=$(cd "$root" && bin/oi suite expect --only 'no-such-directory/zzz' 2>&1); st=$?
 expect "expect: an --only that matches nothing says so" 2 'no test selected' "$out" $st
+else echo "skip the expect action's cases (OI_JUDGES_NO_HOST: the oracle tier's)"; cases=$((cases + 6)); fi
 
 # finding 2: a listed slow program recorded as slow that passes this time (the CPU limit's boundary) is not a change
 printf 'a\t0\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
@@ -146,10 +155,19 @@ printf '0m0,1s 0m0,2s\n0m1,5s 0m2,0s\n' > "$W/c2"; printf '0m0,1s 0m0,2s\n2m1,5s
 out=$(cd "$root" && bin/oi oi-cpu "$W/c2" "$W/c3" 2>&1); expect "oi: a comma locale's times parse" 0 '^121.25$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 152 3 2>&1); expect "oi: 152 (SIGXCPU) is a timeout" 0 '^124$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: another status is kept" 0 '^2$' "$out" $?
+# review 300's finding 1: a 124 is the wall cap's (4 x 120 s) only when the wall seconds reach it; earlier it is the program's own exit
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 124 3 2.5 2>&1); expect "oi: a program's own 124 after 2.5 s is its status" 0 '^own$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 124 30 480.2 2>&1); expect "oi: 124 at the 480 s wall cap is the limit's" 0 '^timeout$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 137 121.5 130 2>&1); expect "oi: 137 after the CPU limit is the limit's" 0 '^timeout$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 137 5 6 2>&1); expect "oi: 137 after 5 s of CPU is no limit's" 0 '^own$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 0 5 6 2>&1); expect "oi: status 0 is no limit's" 0 '^own$' "$out" $?
 
-# re-review 042's finding 6: a whole run against an unreadable record says so, as --only does (and before the run)
+# re-review 042's finding 6: a whole run against an unreadable record says so, as --only does (and before the run); the expect
+# action's, so the oracle tier's (OI_JUDGES_NO_HOST leaves it out, counted as run)
+if [ -z "${OI_JUDGES_NO_HOST:-}" ]; then
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect 2>&1); st=$?
 expect "expect: a whole run against an unreadable record says it cannot be read" 2 'cannot be read' "$out" $st
+else cases=$((cases + 1)); fi
 
 # re-review 049's finding 5: the "status " pins are attested by the digests of the runs they were made for, test/ocaml/pins-attested.tsv (bin/oi pins:
 # no run); a pin with no attested digest, or an attested row with no pin, fails
@@ -169,7 +187,7 @@ awk -F'\t' '$0 !~ /^#/ && $1 == "oi" { print $2 "\t" $3 "\t" $4 "\t1\t1.0\t" }' 
 awk -F'\t' '$0 !~ /^#/ && $1 == "aot" { print $2 "\t" $3 "\t" $4 "\t1\t1.0\t" }' "$root/test/ocaml/pins-attested.tsv" > "$R/o6/check-aot.tsv"
 echo corpus > "$R/oi/corpus.tsv"; echo fake1 > "$R/oi/check.tsv.key"; echo fake1 > "$R/o6/check-aot.tsv.key"
 out=$(cd "$root" && OI_PINS_RUNS=$R OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.attest bin/oi pins --attest 2>&1); st=$?
-expect "pins: --attest from current runs attests every pin" 0 '39 attested' "$out" $st
+expect "pins: --attest from current runs attests every pin" 0 "$(grep -vc '^#' "$root/test/ocaml/pins-attested.tsv") attested" "$out" $st
 grep -v '^#' "$W/pins.attest" > "$W/pins.got"; grep -v '^#' "$root/test/ocaml/pins-attested.tsv" > "$W/pins.want"
 cmp -s "$W/pins.got" "$W/pins.want" || { echo "FAIL pins: the attested rows differ from the committed ones"; bad=1; }
 echo stale > "$R/o6/check-aot.tsv.key"; rm -f "$W/pins.attest2"
@@ -181,5 +199,44 @@ expect "pins: --attest skips a run made by another key and refuses" 2 'aot progr
 out=$(cd "$root" && OI_PINS_RUNS=$R OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.oldkey bin/oi pins 2>&1); st=$?
 expect "pins: a header key that is not the current run's is noted" 0 'note: the attested rows of the oi program run come from key bbbbbbbbbbbb, the current key is fake1' "$out" $st
 out=$(cd "$root" && OI_PINS_RUNS=$W/no-runs OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.oldkey bin/oi pins 2>&1); st=$?
-expect "pins: with no run present nothing is compared" 0 '^oi: pins: 39 pins, each attested' "$out" $st
-echo "$out" | grep -q 'note:' && { echo "FAIL pins: a note with no run present"; bad=1; }
+expect "pins: with no run present nothing is compared" 0 "^oi: pins: $(grep -vc '^#' "$root/test/ocaml/pins-attested.tsv") pins, each attested" "$out" $st
+if echo "$out" | grep -q 'note:'; then echo "FAIL pins: a note with no run present"; bad=1; fi
+
+# the user, 2026-11-14, round 33 (night 13's lazy/lazy7): the boundary the other way. A program listed in oi-slow.edn and recorded passing
+# that the CPU limit stops ("slow") is no change; the controls: the same timeout of a program not listed changes, and a listed program
+# recorded passing that now fails otherwise changes
+s=$W/slow-boundary; mk "$s"
+printf '[{:id :speed :match [#"^slow timeout "]}]\n' > "$s/classes.edn"
+printf '[\n ["a" "pass" ""]\n ["b" "pass" ""]\n ["c" "pass" ""]\n]\n' > "$s/oi-results.edn"
+printf 'a\t0\th\t1\t1.0\t\nb\t124\tx\t0\t120\ttimeout 120s\nc\t0\th\t1\t1.0\t\n' > "$s/check.tsv"
+printf '["b"]\n' > "$s/oi-slow.edn"
+out=$(judge_oi judge "$s/check.tsv" "$s/corpus.tsv" "$s/refs.edn" "$s/oi-results.edn" "$s/classes.edn"); st=$?
+expect "oi: a listed slow program recorded passing that the limit stops is no change" 0 'oi: 2 pass, 0 failing' "$out" $st
+if echo "$out" | grep -q '^CHANGED b'; then echo "FAIL oi: the listed slow program at the boundary was reported CHANGED"; bad=1; fi
+printf '[]\n' > "$s/oi-slow.edn"
+out=$(judge_oi judge "$s/check.tsv" "$s/corpus.tsv" "$s/refs.edn" "$s/oi-results.edn" "$s/classes.edn"); st=$?
+expect "oi: control: the same timeout of a program not listed is failing" 1 'FAILING b: fail timeout 120s' "$out" $st
+printf '["b"]\n' > "$s/oi-slow.edn"
+printf 'a\t0\th\t1\t1.0\t\nb\t2\tx\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$s/check.tsv"
+out=$(judge_oi judge "$s/check.tsv" "$s/corpus.tsv" "$s/refs.edn" "$s/oi-results.edn" "$s/classes.edn"); st=$?
+expect "oi: control: a listed program recorded passing that now fails otherwise changes" 1 '^CHANGED b' "$out" $st
+
+# gate 13c (2026-11-14): a program's own exit status 124 (cmdliner's Cmd.Exit.cli_error, opam/cmdliner/example_chorus: ocamlc's and
+# ocamlopt's 124 too) is a status oi's and the AOT level's runs are compared on, not a timeout: the record's "same" stands. The control:
+# both runs stopped by the limit (124 with the limit's note "timeout ...") are still "-", two partial outputs
+c=$W/own-124; mk "$c"
+printf '[{:test "a" :ocamlc {:status "124" :sha256 "h" :bytes 1} :ocamlopt {:status "124" :sha256 "h" :bytes 1}}\n {:test "b" :ocamlc {:status "0" :sha256 "h" :bytes 1} :ocamlopt {:status "0" :sha256 "h" :bytes 1}}\n {:test "c" :ocamlc {:status "0" :sha256 "h" :bytes 1} :ocamlopt {:status "0" :sha256 "h" :bytes 1}}]\n' > "$c/refs.edn"
+printf 'a\t124\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/check.tsv"
+printf 'a\t124\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/oi.tsv"
+printf '[\n ["a" "pass" "" "same"]\n ["b" "pass" "" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$c/aot-results.edn"
+out=$(judge_aot judge "$c/check.tsv" "$c/corpus.tsv" "$c/refs.edn" "$c/oi.tsv" "$c/aot-results.edn" "$c/classes.edn"); st=$?
+expect "aot: a program's own exit 124 is compared with oi's run (same), not read as two timeouts" 0 'against oi: \{"same" 3\}' "$out" $st
+printf 'a\t124\th\t1\t140\ttimeout 120s of CPU\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/check.tsv"
+printf 'a\t124\th\t1\t480\ttimeout 120s\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/oi.tsv"
+out=$(judge_aot judge "$c/check.tsv" "$c/corpus.tsv" "$c/refs.edn" "$c/oi.tsv" "$c/aot-results.edn" "$c/classes.edn"); st=$?
+expect "aot: control: both runs stopped by the limit are two timeouts, -" 1 '^CHANGED a: .* "-"\]$' "$out" $st
+# review 300's finding 1: one side stopped by the limit, the other's own 124 with the same partial output, is "differs", never "same"
+printf 'a\t124\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/check.tsv"
+printf 'a\t124\th\t1\t480\ttimeout 120s\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/oi.tsv"
+out=$(judge_aot judge "$c/check.tsv" "$c/corpus.tsv" "$c/refs.edn" "$c/oi.tsv" "$c/aot-results.edn" "$c/classes.edn"); st=$?
+expect "aot: control: one run stopped by the limit against the other's own 124 differs" 1 '^CHANGED a: .* "differs"\]$' "$out" $st

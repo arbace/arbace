@@ -1,0 +1,231 @@
+;; Converted from overlay/jdk/java.base/com/sun/jmx/mbeanserver/Repository.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.mbeanserver)
+
+(import '(com.sun.jmx.defaults JmxProperties ServiceName)
+        '(java.util ArrayList Collections HashMap HashSet List Map Map$Entry Set)
+        '(java.util.concurrent.locks ReentrantReadWriteLock)
+        '(javax.management DynamicMBean
+                           InstanceAlreadyExistsException
+                           InstanceNotFoundException
+                           ObjectName
+                           QueryExp
+                           RuntimeOperationsException)
+        '(jdk.internal.jrt SystemLoggers$Logger$Level))
+
+(defclass ^:public Repository
+  (defclass ^:public ^:interface RegistrationContext
+    (method ^:public registering ^void [this])
+
+    (method ^:public unregistered ^void [this]))
+
+  (field ^:private ^:final ^{:tag (Map String (Map String NamedObject))} domainTb)
+
+  (field ^:private ^:volatile ^int nbElements 0)
+
+  (field ^:private ^:final ^String domain)
+
+  (field ^:private ^:final ^ReentrantReadWriteLock lock)
+
+  (method ^:private addAllMatching ^void [this ^:final ^{:tag (Map String NamedObject)} moiTb
+                                          ^:final ^{:tag (Set NamedObject)} result
+                                          ^:final ^ObjectName pattern]
+    (locking moiTb
+      (for-each [^NamedObject no (.values moiTb)]
+        (let [on (.getName no)]
+          (when (.apply pattern (ObjectName/getInstance on)) (.add result no))))))
+
+  (method ^:private addNewDomMoi ^void [this ^:final ^DynamicMBean object ^:final ^String dom
+                                        ^:final ^ObjectName name
+                                        ^:final ^RegistrationContext context]
+    (let [^{:tag (Map String NamedObject)} moiTb (HashMap.)
+          key (.getCanonicalKeyPropertyListString name)]
+      (.addMoiToTb this object name key moiTb context)
+      (.put domainTb dom moiTb)
+      (set! nbElements (unchecked-inc-int nbElements))))
+
+  (method ^:private registering ^void [this ^RegistrationContext context]
+    (when (some? context)
+      (try
+        (.registering context)
+        (catch RuntimeOperationsException x (throw x))
+        (catch RuntimeException x (throw (RuntimeOperationsException. x))))))
+
+  (method ^:private unregistering ^void [this ^RegistrationContext context ^ObjectName name]
+    (when (some? context)
+      (try
+        (.unregistered context)
+        (catch Exception x
+          (.log JmxProperties/MBEANSERVER_LOGGER
+                SystemLoggers$Logger$Level/DEBUG
+                (java-str "Unexpected exception while unregistering " name)
+                x)))))
+
+  (method ^:private addMoiToTb ^void [this ^:final ^DynamicMBean object ^:final ^ObjectName name
+                                      ^:final ^String key
+                                      ^:final ^{:tag (Map String NamedObject)} moiTb
+                                      ^:final ^RegistrationContext context]
+    (.registering this context)
+    (.put moiTb key (NamedObject. name object)))
+
+  (method ^:private retrieveNamedObject ^NamedObject [this ^ObjectName name]
+    (when-not (.isPattern name)
+      (let [^:mutable dom (.intern (.getDomain name))]
+        (when (== (.length dom) 0) (set! dom domain))
+        (let [^{:tag (Map String NamedObject)} moiTb (cast Map (.get domainTb dom))]
+          (when (some? moiTb)
+            (cast NamedObject (.get moiTb (.getCanonicalKeyPropertyListString name))))))))
+
+  (constructor ^:public [this ^String domain] (this. domain true))
+
+  (constructor ^:public [this ^String domain ^boolean fairLock]
+    (set! lock (ReentrantReadWriteLock. fairLock))
+    (set! domainTb (HashMap. 5))
+    (if (and (some? domain) (not (== (.length domain) 0)))
+        (set! (.-domain this) (.intern domain))
+        (set! (.-domain this) ServiceName/DOMAIN))
+    (.put domainTb (.-domain this) (HashMap.)))
+
+  (method ^:public getDomains ^String/1 [this]
+    (.lock (.readLock lock))
+    (let [^:mutable ^{:tag (List String)} result nil]
+      (try
+        (set! result (ArrayList. (.size domainTb)))
+        (for-each [^{:tag (Map$Entry String (Map String NamedObject))} entry (.entrySet domainTb)]
+          (let [^{:tag (Map String NamedObject)} t (cast Map (.getValue entry))]
+            (when (and (some? t) (not (== (.size t) 0)))
+              (.add result (cast String (.getKey entry))))))
+        (finally (.unlock (.readLock lock))))
+      (cast String/1 (.toArray result (new String/1 (.size result))))))
+
+  (method ^:public addMBean :throws [InstanceAlreadyExistsException] ^void [this
+                                                                            ^:final ^DynamicMBean object
+                                                                            ^:mutable ^ObjectName name
+                                                                            ^:final ^RegistrationContext context]
+    (when (.isLoggable JmxProperties/MBEANSERVER_LOGGER SystemLoggers$Logger$Level/TRACE)
+      (.log JmxProperties/MBEANSERVER_LOGGER
+            SystemLoggers$Logger$Level/TRACE
+            (java-str "name = " name)))
+    (let [^:mutable dom (.intern (.getDomain name))
+          ^:mutable to_default_domain false]
+      (when (== (.length dom) 0)
+        (set! name (sun.management.Util/newObjectName (java-str domain (.toString name)))))
+      (if (identical? dom domain)
+          (do (set! to_default_domain true) (set! dom domain))
+          (set! to_default_domain false))
+      (when (.isPattern name)
+        (throw (RuntimeOperationsException.
+                 (IllegalArgumentException.
+                   (java-str "Repository: cannot add mbean for pattern name " (.toString name))))))
+      (.lock (.writeLock lock))
+      (try
+        (when (and (and (not to_default_domain) (.equals dom "JMImplementation"))
+                   (.containsKey domainTb "JMImplementation"))
+          (throw
+            (RuntimeOperationsException.
+              (IllegalArgumentException. "Repository: domain name cannot be JMImplementation"))))
+        (let [^{:tag (Map String NamedObject)} moiTb (cast Map (.get domainTb dom))]
+          (if (nil? moiTb)
+              (.addNewDomMoi this object dom name context)
+              (let [cstr (.getCanonicalKeyPropertyListString name)
+                    elmt (cast NamedObject (.get moiTb cstr))]
+                (if (some? elmt)
+                    (throw (InstanceAlreadyExistsException. (.toString name)))
+                    (do
+                      (set! nbElements (unchecked-inc-int nbElements))
+                      (.addMoiToTb this object name cstr moiTb context))))))
+        (finally (.unlock (.writeLock lock))))))
+
+  (method ^:public contains ^boolean [this ^ObjectName name]
+    (when (.isLoggable JmxProperties/MBEANSERVER_LOGGER SystemLoggers$Logger$Level/TRACE)
+      (.log JmxProperties/MBEANSERVER_LOGGER
+            SystemLoggers$Logger$Level/TRACE
+            (java-str "name = " name)))
+    (.lock (.readLock lock))
+    (try (some? (.retrieveNamedObject this name)) (finally (.unlock (.readLock lock)))))
+
+  (method ^:public retrieve ^DynamicMBean [this ^ObjectName name]
+    (when (.isLoggable JmxProperties/MBEANSERVER_LOGGER SystemLoggers$Logger$Level/TRACE)
+      (.log JmxProperties/MBEANSERVER_LOGGER
+            SystemLoggers$Logger$Level/TRACE
+            (java-str "name = " name)))
+    (.lock (.readLock lock))
+    (try
+      (let [no (.retrieveNamedObject this name)] (when (some? no) (.getObject no)))
+      (finally (.unlock (.readLock lock)))))
+
+  (method ^:public query ^{:tag (Set NamedObject)} [this ^ObjectName pattern ^QueryExp query]
+    (let [^{:tag (Set NamedObject)} result (HashSet.)
+          ^ObjectName name (if (or (or (nil? pattern) (== (.length (.getCanonicalName pattern)) 0))
+                                   (.equals pattern ObjectName/WILDCARD))
+                               ObjectName/WILDCARD
+                               (ObjectName/getInstance pattern))]
+      (.lock (.readLock lock))
+      (try
+        (cond
+          (not (.isPattern name))
+            (let [no (.retrieveNamedObject this name)] (when (some? no) (.add result no)) result)
+          (identical? name ObjectName/WILDCARD)
+            (do
+              (for-each [^{:tag (Map String NamedObject)} moiTb (.values domainTb)]
+                (.addAll result (.values moiTb)))
+              result)
+          :else
+            (let [canonical_key_property_list_string (.getCanonicalKeyPropertyListString name)
+                  allNames (== (.length canonical_key_property_list_string) 0)
+                  dom2Match (.getDomain name)]
+              (cond
+                (== (.length dom2Match) 0)
+                  (let [^{:tag (Map String NamedObject)} moiTb (cast Map (.get domainTb domain))]
+                    (if allNames
+                        (.addAll result (.values moiTb))
+                        (.addAllMatching this
+                                         moiTb
+                                         result
+                                         (sun.management.Util/newObjectName
+                                           (java-str domain (.getCanonicalName name)))))
+                    result)
+                (not (.isDomainPattern name))
+                  (let [^{:tag (Map String NamedObject)} moiTb (cast Map (.get domainTb dom2Match))]
+                    (if (nil? moiTb)
+                        (Collections/emptySet)
+                        (do
+                          (if allNames
+                              (.addAll result (.values moiTb))
+                              (.addAllMatching this moiTb result name))
+                          result)))
+                :else
+                  (do
+                    (for-each [^String dom (.keySet domainTb)]
+                      (when (Util/wildmatch dom dom2Match)
+                        (let [^{:tag (Map String NamedObject)} moiTb (cast Map (.get domainTb dom))]
+                          (if allNames
+                              (.addAll result (.values moiTb))
+                              (.addAllMatching this moiTb result name)))))
+                    result))))
+        (finally (.unlock (.readLock lock))))))
+
+  (method ^:public remove :throws [InstanceNotFoundException] ^void [this ^:final ^ObjectName name
+                                                                     ^:final ^RegistrationContext context]
+    (when (.isLoggable JmxProperties/MBEANSERVER_LOGGER SystemLoggers$Logger$Level/TRACE)
+      (.log JmxProperties/MBEANSERVER_LOGGER
+            SystemLoggers$Logger$Level/TRACE
+            (java-str "name = " name)))
+    (let [^:mutable dom (.intern (.getDomain name))]
+      (when (== (.length dom) 0) (set! dom domain))
+      (.lock (.writeLock lock))
+      (try
+        (let [^{:tag (Map String NamedObject)} moiTb (cast Map (.get domainTb dom))]
+          (when (nil? moiTb) (throw (InstanceNotFoundException. (.toString name))))
+          (when (nil? (.remove moiTb (.getCanonicalKeyPropertyListString name)))
+            (throw (InstanceNotFoundException. (.toString name))))
+          (set! nbElements (unchecked-dec-int nbElements))
+          (when (.isEmpty moiTb)
+            (.remove domainTb dom)
+            (when (identical? dom domain) (.put domainTb domain (HashMap.))))
+          (.unregistering this context name))
+        (finally (.unlock (.writeLock lock))))))
+
+  (method ^:public getCount ^Integer [this] nbElements)
+
+  (method ^:public getDefaultDomain ^String [this] domain))

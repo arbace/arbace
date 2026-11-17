@@ -69,9 +69,47 @@
   (when (> (long b) (long e)) (gap :text "a range that ends before it begins"))
   (subs ^String *src* (int b) (int e)))
 
+(defn- skip-ws ^long [^String s ^long j]
+  (loop [j j] (if (and (< j (.length s)) (Character/isWhitespace (.charAt s (int j)))) (recur (inc j)) j)))
+
+(defn- close-parens
+  "The offset past the `)` that closes `depth` open parentheses from offset j of s (string and character literals skipped), or
+  nil when the text ends first."
+  [^String s ^long j ^long depth]
+  (loop [k j d depth]
+    (if (>= k (.length s))
+      nil
+      (let [c (.charAt s (int k))]
+        (cond (or (= c \") (= c \'))
+              (recur (loop [i (inc k)] (cond (>= i (.length s)) i
+                                              (= \\ (.charAt s (int i))) (recur (+ i 2))
+                                              (= c (.charAt s (int i))) (inc i)
+                                              :else (recur (inc i))))
+                     d)
+              (= c \() (recur (inc k) (inc d))
+              (= c \)) (if (= d 1) (inc k) (recur (inc k) (dec d)))
+              :else (recur (inc k) d))))))
+
+(defn- unbalanced-opens
+  "CP265 (the user, 2026-11-08): the parentheses a macro's replacement list leaves open, its last definition in the main file
+  before offset `before` ([cpp.rescan]: an invocation whose expansion ends in `name(` takes the following source text as its
+  arguments, so the macro's extent runs on to the `)` that closes them: `#define a z(` then `a\\u{})`). 0 for a macro the main
+  file does not define (a header's: the shared preprocessor's expansion would know it) or one that balances."
+  ^long [^String s ^String name ^long before]
+  (let [m (re-matcher (re-pattern (str "(?m)^[ \\t]*#[ \\t]*define[ \\t]+" (java.util.regex.Pattern/quote name) "(\\([^)]*\\))?((?:[^\\n\\\\]|\\\\.)*(?:\\\\\\n(?:[^\\n\\\\]|\\\\.)*)*)"))
+                      (subs s 0 (int before)))
+        body (loop [b nil] (if (.find m) (recur (.group m 2)) b))]
+    (if-not body
+      0
+      (let [t (-> ^String body (str/replace #"\\\n" " ") (str/replace #"/\*.*?\*/" " ") (str/replace #"//.*" "")
+                  (str/replace #"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'" "\"\""))
+            d (- (count (filter #(= \( %) t)) (count (filter #(= \) %) t)))]
+        (max 0 d)))))
+
 (defn macro-extent
   "A macro node's text in the main file: from its first token's expansion to its last's, an invocation's argument
-  list included (the expansion location is the macro's name: a ( after it opens the arguments)."
+  list included (the expansion location is the macro's name: a ( after it opens the arguments), and the arguments its
+  expansion's unbalanced `(` takes from the text after it (CP265, unbalanced-opens)."
   [n]
   (let [r (:range n) b (exp-loc (:begin r)) e (exp-loc (:end r))
         s ^String *src*]
@@ -86,8 +124,15 @@
                              (= \) (.charAt s (int k))) (if (= d 1) (inc k) (recur (inc k) (dec d)))
                              :else (recur (inc k) d)))
                      e0))
-                 e0)]
-        [(long (:offset b)) e1]))))
+                 e0)
+            ;; CP265: the macro named at the last token's expansion leaves parentheses open: the text up to their `)`
+            e2 (if (macro-loc? (:end r))
+                 (let [o (long (:offset e)) tl (long (:tokLen e))
+                       nm (when (<= (+ o tl) (.length s)) (subs s (int o) (int (+ o tl))))
+                       u (if (and nm (re-matches #"[A-Za-z_][A-Za-z_0-9]*" nm)) (unbalanced-opens s nm o) 0)]
+                   (or (when (pos? u) (close-parens s e1 u)) e1))
+                 e1)]
+        [(long (:offset b)) e2]))))
 (defn- ntext ^String [n] (when-let [[b e] (rng n)] (text-at b e)))
 
 (defn- semi-end
@@ -95,9 +140,19 @@
   not in a node's range: up to the ; they precede."
   ^long [^long e]
   (let [s ^String *src*
-        j (loop [j e] (if (and (< j (.length s)) (Character/isWhitespace (.charAt s (int j)))) (recur (inc j)) j))]
+        j (loop [j e] (if (and (< j (.length s)) (Character/isWhitespace (.charAt s (int j)))) (recur (inc j)) j))
+        ;; cpp-compl: the ; after comments too (`for (...) // { dg-error ... }` then `;` on the next line: g++.dg
+        ;; cpp0x/range-for8.C, cpp2a/typename7.C, the native parser's declines of the statement ending at its `)`)
+        jc (loop [j (long j)]
+             (cond
+               (and (< (inc j) (.length s)) (= \/ (.charAt s (int j))) (= \/ (.charAt s (int (inc j)))))
+               (let [nl (.indexOf s "\n" (int j))] (if (neg? nl) j (recur (loop [k (long nl)] (if (and (< k (.length s)) (Character/isWhitespace (.charAt s (int k)))) (recur (inc k)) k)))))
+               (and (< (inc j) (.length s)) (= \/ (.charAt s (int j))) (= \* (.charAt s (int (inc j)))))
+               (let [c (.indexOf s "*/" (int (+ j 2)))] (if (neg? c) j (recur (loop [k (+ c 2)] (if (and (< k (.length s)) (Character/isWhitespace (.charAt s (int k)))) (recur (inc k)) k)))))
+               :else j))]
     (cond
       (and (< j (.length s)) (= \; (.charAt s (int j)))) (inc j)
+      (and (not= jc j) (< jc (.length s)) (= \; (.charAt s (int jc)))) (inc jc)
       (re-find #"^(__attribute__|__attribute|__asm__|__asm|asm|alignas|__declspec|\[\[)" (subs s (int j) (min (.length s) (+ (int j) 14))))
       (let [k (loop [k (long j) d 0]
                 (if (>= k (.length s))
@@ -129,6 +184,8 @@
     (+ (long n) (count-nl s (inc (long end)) b))
     (inc (count-nl s 0 b))))
 
+(declare tparam-kinds)
+
 (defn text-form
   "The node as its source text, or a refusal; `semi`: a statement's or a declaration's text, the ; after it
   included. A node from a macro expansion is its extent's text, the invocations as written."
@@ -136,7 +193,15 @@
   ([n why semi]
    (if-let [[b e] (if (macro-node? n) (macro-extent n) (rng n))]
      (let [s ^String *src*
-           e (if semi (semi-end e) e)]
+           e (if semi (semi-end e) e)
+           ;; cpp-compl: a template whose declaration is written under outer headers (an out-of-line member template of a class
+           ;; template, `template<...> template<...> int C<D,E>::f(...)`, g++.old-deja g++.pt/ttp33.C): the declaration's range
+           ;; begins at the outermost header, the template's at its own (clang's getOuterLocStart): the text from the first
+           b (if (and (not (macro-node? n)) (#{"FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl"} (kind n)))
+               (let [d (first (remove #(or (tparam-kinds (kind %)) (.endsWith ^String (kind %) "Attr")) (kids n)))
+                     [db] (when d (rng d))]
+                 (if (and db (< (long db) (long b))) db b))
+               b)]
        (when *texts* (swap! *texts* update (keyword why) (fnil inc 0)))
        ;; a macro invocation keeps its line: its expansion may hold __LINE__ (the printer writes a #line before it)
        (let [f (list 'cpp/text (utf8 (close-split (text-at b e))))]
@@ -307,6 +372,11 @@
 
 (defn- prefix-words [n] (set (keep (fn [[k t]] (when (= k :id) t)) (prefix-tokens n))))
 
+(def ^:private qualifier-keywords
+  #{"struct" "class" "union" "enum" "typename" "friend" "template" "using" "namespace" "return" "new" "delete" "operator" "void" "bool"
+    "char" "int" "long" "short" "signed" "unsigned" "float" "double" "auto" "const" "volatile" "static" "extern" "inline" "virtual"
+    "explicit" "constexpr" "consteval" "constinit" "typedef" "export"})
+
 (defn- qualifier
   "The qualifier written before a declaration's name (`S::` of `int S::f()`), as name parts' text, or nil."
   ^String [n]
@@ -325,9 +395,11 @@
                              :else (recur (dec k) d)))
                      j)
                 k (when j2 (loop [k (long j2)] (if (and (pos? k) (let [c (.charAt s (int (dec k)))] (or (Character/isLetterOrDigit c) (= c \_) (> (int c) 127)))) (recur (dec k)) k)))]
-            (if (and k (< k j2))
-              (recur k k)
-              (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" ""))))
+            (cond
+              ;; a keyword before the :: is no qualifier: the :: is the global one (`friend struct ::X`, CX9's modules part)
+              (and k (< k j2) (= j2 j) (qualifier-keywords (subs s (int k) (int j2)))) (str/replace (subs s (int (- i 2)) (int (:offset l))) #"\s+" "")
+              (and k (< k j2)) (recur k k)
+              :else (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" ""))))
           (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" "")))))))
 
 (defn- decl-name
@@ -493,7 +565,7 @@
 (defn- operator-of [n]
   ;; the operator a CXXOperatorCallExpr calls: "+" of operator+
   (let [c (strip (first (kids n)))
-        nm ^String (or (get-in c [:referencedDecl :name]) (:name c) "")]
+        ^String nm (or (get-in c [:referencedDecl :name]) (:name c) "")]
     (when (.startsWith nm "operator") (str/trim (subs nm 8)))))
 
 (defn- cast-type
@@ -576,12 +648,27 @@
 
 (declare ^:dynamic *directives*)
 
+(defn- holes?
+  "An InitListExpr with a value-initialized or default-initialized member before a written one, here or in a list
+  without braces of its own inside it."
+  [n]
+  (let [ks (loop [ks (vec (or (seq (kids n)) (rest (:array_filler n))))]
+             (if (and (seq ks) (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind (peek ks)))) (recur (pop ks)) ks))]
+    (boolean (some (fn [k] (or (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind k))
+                               (and (= "InitListExpr" (kind k)) (not (some-> (ntext k) ^String (str/trim) (.startsWith "{"))) (holes? k))))
+                   ks))))
+
 (defn- init-list [n]
   ;; an InitListExpr's written elements (the trailing value-initialized ones are the oracle's)
   (let [;; with an array filler, clang's JSON writes the filler and then the elements under :array_filler
         ks (vec (or (seq (kids n)) (rest (:array_filler n))))
         ks (loop [ks ks] (if (and (seq ks) (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind (peek ks)))) (recur (pop ks)) ks))]
-    (when (some #(= (kind %) "ImplicitValueInitExpr") ks) (gap :init "value-initialized elements inside a list"))
+    ;; a member a designator skips, value-initialized or by its default member initializer, in the list or in a list
+    ;; clang makes of a nested designator's (.a.y = 2: no braces of its own): the designators are not in the semantic
+    ;; form, so the list is its text
+    (when (some #(#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind %)) ks) (gap :init "value-initialized elements inside a list"))
+    (when (some (fn [k] (and (= "InitListExpr" (kind k)) (not (some-> (ntext k) ^String (str/trim) (.startsWith "{"))) (holes? k))) ks)
+      (gap :init "value-initialized elements inside a list"))
     (when (:array_filler n) (when (some #(= (kind %) "DesignatedInitExpr") ks) (gap :init "designators")))
     (let [fs (exs ks)]
       (if (seq *directives*)
@@ -613,7 +700,7 @@
       (let [c (.charAt t i)]
         (cond
           q (cond (= c \\) (recur (+ i 2) d q start out)
-                  (= c q) (recur (inc i) d nil start out)
+                  (= c (char q)) (recur (inc i) d nil start out)
                   :else (recur (inc i) d q start out))
           (or (= c \") (= c \')) (recur (inc i) d c start out)
           (#{\( \[ \{} c) (recur (inc i) (inc d) nil start out)
@@ -655,24 +742,33 @@
         [b _] (rng n)
         close (loop [i 1 d 1] (cond (>= i (count t)) (gap :lambda "captures") (= \[ (.charAt t i)) (recur (inc i) (inc d))
                                     (= \] (.charAt t i)) (if (= d 1) i (recur (inc i) (dec d))) :else (recur (inc i) d)))
-        caps (str/trim (subs t 1 close))
+        caps-raw (subs t 1 close)
+        caps (str/trim caps-raw)
         cls (first (filter #(= (kind %) "CXXRecordDecl") (kids n)))
-        mids (atom (vec (butlast (remove #(= (kind %) "CXXRecordDecl") (kids n)))))
+        ;; the capture initializers clang lists (one an explicit capture, then the implicit ones'): an init-capture's is
+        ;; the one that begins within its text, found by its offset (not by its place in the list: a simple capture
+        ;; before it has one too, the variable it names)
+        mids (vec (butlast (remove #(= (kind %) "CXXRecordDecl") (kids n))))
+        init-at (fn [^long cb ^long ce]
+                  (or (first (filter #(when-let [[mb _] (rng %)] (and (<= cb (long mb)) (< (long mb) ce))) mids))
+                      (gap :lambda "an init-capture's initializer")))
+        pieces (let [ps (split-top caps-raw)]
+                 (first (reduce (fn [[out ^long at] ^String c] [(conj out [c (+ b 1 at) (+ b 1 at (count c))]) (+ at (count c) 1)])
+                                [[] 0] ps)))
         cap-forms (if (= caps "")
                     []
-                    (mapv (fn [^String c]
+                    (mapv (fn [[^String c cb ce]]
                             (let [c (str/trim c)]
                               (cond
                                 (re-matches #"(?s)&?\s*[A-Za-z_][A-Za-z0-9_]*\s*=[^=].*" c)
                                 (let [[_ amp nm] (re-find #"^(&?)\s*([A-Za-z_][A-Za-z0-9_]*)" c)
-                                      e (or (first @mids) (gap :lambda "an init-capture's initializer"))]
-                                  (swap! mids subvec 1)
+                                      e (init-at cb ce)]
                                   (if (= amp "&") (list '& (ident nm) (ex e)) (list '= (ident nm) (ex e))))
                                 (= c "&") '& (= c "=") '= (= c "this") 'this (= c "*this") '(deref this)
                                 (re-matches #"[A-Za-z_][A-Za-z0-9_]*" c) (ident c)
                                 (re-matches #"&\s*[A-Za-z_][A-Za-z0-9_]*" c) (list '& (ident (str/trim (subs c 1))))
                                 :else (gap :lambda "a capture"))))
-                          (split-top caps)))
+                          pieces))
         op (first (filter #(and (= (kind %) "CXXMethodDecl") (= (:name %) "operator()")) (kids cls)))
         _ (when-not op (gap :lambda "a generic lambda"))
         body (last (kids n))
@@ -1137,6 +1233,24 @@
             ;; the written type: the prefix less its specifiers
             spec #{"static" "extern" "inline" "constexpr" "constinit" "consteval" "thread_local" "mutable" "register" "virtual" "explicit" "friend" "typedef"}
             ts (vec (remove #(contains? spec (nth % 1)) ts))
+            ;; cpp-compl: the attributes written before the type (`__attribute__((unused)) auto ke = ...`, libstdc++'s
+            ;; 23_containers/unordered_multimap/observers.cc as printed) are the declaration's (attrs-of), not the type's
+            ts (loop [i 0 out []]
+                 (if (>= i (count ts))
+                   out
+                   (let [x (nth (nth ts i) 1)
+                         group-end (fn [open close j]
+                                     (loop [k j d 0]
+                                       (cond (>= k (count ts)) k
+                                             (= open (nth (nth ts k) 1)) (recur (inc k) (inc d))
+                                             (= close (nth (nth ts k) 1)) (if (= d 1) (inc k) (recur (inc k) (dec d)))
+                                             :else (recur (inc k) d))))]
+                     (cond
+                       (and (#{"__attribute__" "__attribute" "alignas" "_Alignas"} x) (= "(" (some-> (get ts (inc i)) (nth 1))))
+                       (recur (long (group-end "(" ")" (inc i))) out)
+                       (and (= "[" x) (= "[" (some-> (get ts (inc i)) (nth 1))))
+                       (recur (long (group-end "[" "]" i)) out)
+                       :else (recur (inc i) (conj out (nth ts i)))))))
             s (str/join " " (map #(nth % 1) ts))]
         (if (and (contains? ws "auto") (seq ts))
           (esc-name (ty/parse-type s))
@@ -1264,7 +1378,9 @@
                                 (first (remove #(.endsWith ^String (kind %) "Attr") (kids p))))
                           t (or (written-param-type p dflt) (type-for p))
                           m (cond-> (merge {:tag t} (attrs-of p)) dflt (assoc :cpp/default (ex dflt)))]
-                      (if (:name p) (addm (ident (:name p)) m) (if dflt (gap :param "an unnamed parameter with a default") t))))
+                      (cond->> (if (:name p) (addm (ident (:name p)) m) (if dflt (gap :param "an unnamed parameter with a default") t))
+                        ;; (an explicit object parameter, C++23's `this S& self`: (cpp/this PARAM))
+                        (:isExplicitObjectParameter p) (list 'cpp/this))))
                   ps)
       (or (:variadic n) (and (seq? ft) (= '& (last (second ft))))) (conj '&))))
 
@@ -1336,6 +1452,27 @@
         (catch arbace.lang.ExceptionInfo _ r))
       r)))
 
+;; CX9's modules part: an explicit specialization's written template arguments (`template <> void f<int>() {}`: no parameter
+;; deduces T), the template-id read from the text after the name
+(defn- spec-fn-name [n]
+  (when (some #(= (kind %) "TemplateArgument") (kids n))
+    (when-let [l (plain (:loc n))]
+      (let [s ^String *src*
+            nm ^String (:name n)
+            o (long (:offset l))
+            e (+ o (count nm))]
+        (when (and (re-matches #"[A-Za-z_][A-Za-z0-9_]*" nm) (<= e (count s)) (= nm (subs s (int o) (int e))))
+          (let [i (loop [i e] (if (and (< i (count s)) (Character/isWhitespace (.charAt s (int i)))) (recur (inc i)) i))]
+            (when (and (< i (count s)) (= \< (.charAt s (int i))))
+              (when-let [j (loop [j i d 0]
+                             (when (< j (count s))
+                               (let [c (.charAt s (int j))]
+                                 (cond (#{\( \) \{ \} \;} c) (if (and (= c \() (pos? d)) (recur (inc j) d) (when (pos? d) (when-not (#{\{ \} \;} c) (recur (inc j) d))))
+                                       (= c \<) (recur (inc j) (inc d))
+                                       (= c \>) (if (= d 1) (inc j) (recur (inc j) (dec d)))
+                                       :else (recur (inc j) d)))))]
+                (name-of (str (qualifier n) (subs s (int o) (int j))))))))))))
+
 (defn fn-form [n]
   (let [k (kind n)
         ft (type-of (qt n))
@@ -1368,6 +1505,7 @@
             m (if (re-find #"\bnoexcept\b" (let [t (-> (or (ntext n) "") (str/replace #"//[^\n]*" "") (str/replace #"(?s)/\*.*?\*/" "")) i (.indexOf ^String t "{")] (if (neg? i) t (subs t 0 i)))) m (dissoc m :noexcept))]
         (addm f (cond-> (dissoc m :const :volatile :cpp/ref) declare? (assoc :cpp/declare true))))
       (let [nm (or (decl-name n) (gap :fn "a name"))
+            nm (or (spec-fn-name n) nm)
             ;; a conversion function's name is its return type, qualifiers included (clang's name drops them)
             nm (if (and (= k "CXXConversionDecl") (seq? nm) (= (first nm) 'operator) (= (second nm) 'conv) r (not= r (nth nm 2 nil)))
                  (with-meta (list 'operator 'conv r) (meta nm))
@@ -1386,7 +1524,7 @@
             (:isVirtual b) (assoc :virtual true))]
     (addm t m)))
 
-(declare members)
+(declare members items-of)
 
 (defn record-form [n ctx]
   (let [tag (symbol (str "cpp/" (:tagUsed n)))
@@ -1555,7 +1693,16 @@
           ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (with-headers n outer? #(vector (fn-form n)))
           "CXXRecordDecl" [(record-form n ctx)]
           "EnumDecl" [(enum-form n)]
-          "TypedefDecl" (do (when (has-attrs? n) (gap :attr "a typedef's attributes")) [(list 'c/typedef (or (decl-name n) (gap :typedef "a name")) (type-of (qt n)))])
+          "TypedefDecl" (let [m (when (has-attrs? n)
+                                  ;; cpp-compl: standard attributes written before `typedef` ([dcl.attr.grammar]/5: they appertain to
+                                  ;; the declared typedef-name; g++.dg diagnostic/maybe_unused1.C) as :cpp/attrs; the others (GNU's,
+                                  ;; whose place decides what they apply to: vector_size, mode ...) stay the text form's
+                                  (let [m (attrs-of n)
+                                        [db] (rng n)
+                                        lead? (every? (fn [a] (let [[b] (rng a)] (and b db (< (long b) (long db)))))
+                                                      (filter #(.endsWith ^String (kind %) "Attr") (kids n)))]
+                                    (if (and lead? (= (set (keys m)) #{:cpp/attrs})) m (gap :attr "a typedef's attributes"))))]
+                          [(cond-> (list 'c/typedef (or (decl-name n) (gap :typedef "a name")) (type-of (qt n))) m (with-meta m))])
           "TypeAliasDecl" (do (when (has-attrs? n) (gap :attr "an alias's attributes")) [(list 'cpp/alias (decl-name n) (type-of (qt n)))])
           "NamespaceDecl"
           (let [[nm inner inl] (loop [nm [(:name n)] n n inl []]
@@ -1589,20 +1736,28 @@
           "FriendDecl"
           (if-let [t (:type n)]
             ;; a template-id's arguments are the written ones (clang prints the template's own parameter names)
+            ;; C++26's variadic friends (friend Ts...;): a pack's expansion
             [(list 'cpp/friend
-                   (or (when (str/includes? (:qualType t) "<")
-                         (when-let [w (ntext n)]
-                           (try (type-of (str/trim (-> w (str/replace #"^friend\s+" "") (str/replace #";\s*$" ""))))
-                                (catch arbace.lang.ExceptionInfo _ nil))))
-                       (type-of (:qualType t))))]
-            [(list 'cpp/friend (first (decl-forms (first (kids n)) ctx)))])
+                   (cond->> (or (when (and (str/includes? (:qualType t) "<") (not (:isPackExpansion n)))
+                                  (when-let [w (ntext n)]
+                                    (try (type-of (str/trim (-> w (str/replace #"^friend\s+" "") (str/replace #";\s*$" ""))))
+                                         (catch arbace.lang.ExceptionInfo _ nil))))
+                                (type-of (:qualType t)))
+                     (:isPackExpansion n) (list 'pack-expand)))]
+            ;; a friend naming a function template's specialization (`friend void ns::f<int>();`, CX9's modules part) is its
+            ;; declaration, the pattern clang links it to aside; a friend without forms is a gap, never (cpp/friend nil)
+            (let [d (first (kids n))
+                  d (if (and (= (kind d) "FunctionDecl") (contains? d :TemplateInstantiationPattern)) (dissoc d :TemplateInstantiationPattern) d)]
+              [(list 'cpp/friend (or (first (decl-forms d ctx)) (gap :friend "a declaration without forms")))]))
           ("FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl") [(template-form n ctx)]
           "ClassTemplateSpecializationDecl"
           (let [nm (decl-name n)
                 f (record-form (assoc n :name nil) ctx)
                 tag (first f)
                 args (spec-args n)
-                f (with-meta (apply list tag (apply list '<> nm args) (rest f)) (meta f))]
+                ;; cpp-compl: no argument at all (`template <> struct A {};`, an error test's \"not a specialization\", g++.old-deja
+                ;; g++.pt/spec31.C: the native parser's recovery has none, `A<>` would have the defaults) is the name as written
+                f (with-meta (apply list tag (if (seq args) (apply list '<> nm args) nm) (rest f)) (meta f))]
             [(list 'cpp/template [] f)])
           "ClassTemplatePartialSpecializationDecl"
           ;; template <params> struct V<T *> {...}: the parameters are the node's, the written template-id is read from the text
@@ -1622,6 +1777,9 @@
                        j))
                 outer (butlast (outer-headers t))
                 ki (or (first (filter #(#{"struct" "class" "union"} (tt ts %)) (range he (count ts)))) (gap :template "a partial specialization's keyword"))
+                ;; a requires-clause between the headers and the keyword is not read yet, as template-form's (CX9's modules part:
+                ;; its constraint expression is a child of the node, which record-form would write as a member)
+                _ (when (some #(= "requires" (tt ts %)) (range he ki)) (gap :template "a partial specialization's requires clause"))
                 ;; skip attributes between the keyword and the name
                 ni (loop [j (inc ki)]
                      (cond (= "[" (tt ts j)) (let [e (loop [k j d 0] (let [x (tt ts k)] (cond (nil? x) k (= x "[") (recur (inc k) (inc d)) (= x "]") (if (= d 1) (inc k) (recur (inc k) (dec d))) :else (recur (inc k) d))))] (recur e))
@@ -1671,7 +1829,19 @@
                         (list 'c/var (vary-meta nm assoc :tag (esc-name ty))))))
                 f (list 'cpp/instantiate f)]
             [(if ext (vary-meta f assoc :extern true) f)])
-          "EmptyDecl" ['(c/null)]
+          "EmptyDecl" [(list 'c/null)] ; a constructed list: a quoted one carries this file's :line, which the layout reads (review 196, finding 7)
+          ;; CX9, modules (SPEC §15): an export block's members in (cpp/export ...), one exported declaration's forms with
+          ;; ^:export on the first; an import is the text's (module-lines), its node dropped
+          "ExportDecl"
+          ;; its begin is enough (clang leaves the end of `export template <...> using T = Ts...[I];` empty)
+          (let [b (or (:offset (plain (:begin (:range n)))) (gap :module "an export in a macro"))
+                braced (re-find #"^export\s*\{" (text-at b (min (count *src*) (+ (long b) 64))))]
+            (if braced
+              [(apply list 'cpp/export (members n))]
+              ;; the members as items, so that `export typedef struct {...} T;` keeps the class and its declarator one group (CP75 (b))
+              (let [fs (vec (mapcat :fs (items-of (kids n) ctx)))]
+                (if (seq fs) (assoc fs 0 (vary-meta (first fs) assoc :export true)) (gap :module "an empty export")))))
+          "ImportDecl" []
           [(text-form n k true)])
         (catch arbace.lang.ExceptionInfo e
           (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e))))))))
@@ -1808,7 +1978,8 @@
   (let [ctx (if (= (kind n) "CXXRecordDecl") :member :top)
         its (items-of (remove #(and (= (kind %) "CXXRecordDecl") (implicit? %)) (kids n)) ctx)
         [b e] (extent n)]
-    (binding [*directives* (filter (fn [d] (and b (< (long b) (long (:off d)) (long e)))) *directives*)]
+    ;; a module declaration or import is a top-level line (CX9): none inside a declaration context
+    (binding [*directives* (filter (fn [d] (and b (not (:module d)) (< (long b) (long (:off d)) (long e)))) *directives*)]
       (place its))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1854,6 +2025,56 @@
       (= v "pragma") (list 'c/pragma (str/trim (subs t (+ (.indexOf t "pragma") 6))))
       :else (list 'c/directive (utf8 t)))))
 
+(defn module-lines
+  "CX9 (SPEC §15): the main file's module declarations and imports (`export module a.b:p;`, `module;`, `module :private;`,
+  `export import a.b;`, `import :p;`, `import <h>;`), each a line of its own outside comments: [{:off :end :form}], placed
+  between the items as the directives are. One the forms do not spell is a text form."
+  [^String s]
+  ;; a line whose ; a macro writes (`module :private SEMI`, pmp-6.C) is matched to its end and kept as a text form
+  (let [m (re-matcher #"(?m)^[ \t]*((export[ \t]+)?(module|import)\b[^;\n{}]*;|(export[ \t]+)?(?:module|import)[ \t]+[:A-Za-z_<\"][^;\n{}()=,/]*?(?=[ \t]*(?://[^\n]*)?$))" s)
+        cmts (let [v (java.util.ArrayList.)]
+               (loop [i 0]
+                 (when (< i (.length s))
+                   (let [c (.charAt s i)]
+                     (cond
+                       (and (= c \/) (< (inc i) (.length s)) (= \* (.charAt s (inc i))))
+                       (let [e (.indexOf s "*/" (int (+ i 2))) e (if (neg? e) (.length s) (+ e 2))] (.add v [i e]) (recur e))
+                       (and (= c \/) (< (inc i) (.length s)) (= \/ (.charAt s (inc i))))
+                       (let [e (.indexOf s "\n" (int i)) e (if (neg? e) (.length s) e)] (.add v [i e]) (recur e))
+                       (= c \") (let [e (loop [j (inc i)] (cond (>= j (.length s)) j (= \\ (.charAt s j)) (recur (+ j 2)) (#{\" \newline} (.charAt s j)) (inc j) :else (recur (inc j))))]
+                                  (recur (long e)))
+                       :else (recur (inc i))))))
+               v)
+        in-cmt? (fn [o] (some (fn [[b e]] (and (<= (long b) (long o)) (< (long o) (long e)))) cmts))
+        ;; review 196, finding 6: a line inside a conditional group (whether its group is taken is the preprocessor's, which
+        ;; the dump does not say for a line that is no directive) or continuing a directive is not read
+        conds (vec (keep (fn [d] (case (:verb d) ("if" "ifdef" "ifndef") [(:off d) 1] "endif" [(:off d) -1] nil)) (directive-lines s)))
+        in-cond? (fn [o] (pos? (long (reduce (fn [n [d k]] (if (< (long d) (long o)) (+ (long n) (long k)) n)) 0 conds))))
+        continued? (fn [o] (let [i (.lastIndexOf s "\n" (int (dec (long o))))] (and (pos? i) (= \\ (.charAt s (dec i))))))]
+    (loop [out []]
+      (if (.find m)
+        (let [b (.start m 1) e (.end m 1) t (.group m 1)
+              ex (boolean (.group m 2))
+              body (str/trim (subs t (+ (if ex (.length (.group m 2)) 0) (count (.group m 3))) (dec (count t))))
+              id #"[A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)*"
+              f (if (= (.group m 3) "module")
+                  (cond
+                    (and (= body "") (not ex)) (list 'cpp/module)
+                    (and (re-matches #":\s*private" body) (not ex)) (list 'cpp/module-private)
+                    (re-matches id body) (list 'cpp/module (symbol body))
+                    :else (when-let [[_ a p] (re-matches #"([A-Za-z_][\w.]*)\s*:\s*([A-Za-z_][\w.]*)" body)]
+                            (when (and (re-matches id a) (re-matches id p)) (list 'cpp/module (symbol a) :partition (symbol p)))))
+                  (cond
+                    (re-matches id body) (list 'cpp/import (symbol body))
+                    (re-matches #"<[^>\s]+>|\"[^\"]+\"" body) (list 'cpp/import body)
+                    :else (when-let [[_ p] (re-matches #":\s*([A-Za-z_][\w.]*)" body)]
+                            (when (re-matches id p) (list 'cpp/import :partition (symbol p))))))
+              f (cond (nil? f) (list 'cpp/text (utf8 t))
+                      ex (vary-meta f assoc :export true)
+                      :else f)]
+          (recur (if (or (in-cmt? b) (in-cond? b) (continued? b)) out (conj out {:off b :end e :form f :module true}))))
+        out))))
+
 (defn active-directives
   "The directives the print keeps: those outside every conditional group, and those inside an executed one that are
   not conditionals themselves (`executed`, the lines of the main file's directives the preprocessor executed, as
@@ -1880,7 +2101,7 @@
   [nodes ^String src ^String main executed]
   (let [texts (atom {})]
     (binding [*src* src *main* main *texts* texts
-              *directives* (active-directives src executed)
+              *directives* (vec (sort-by :off (concat (active-directives src executed) (module-lines src))))
               *line-dirs* (vec (for [d (directive-lines src) :when (and (= "line" (:verb d)) (zero? (long (:depth d))))
                                      :let [m (re-find #"^#\s*line\s+(\d[\d']*)" (:text d))] :when m]
                                  [(:end d) (Long/parseLong (str/replace (second m) "'" ""))]))]

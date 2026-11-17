@@ -1,0 +1,147 @@
+;; Converted from jdk26u src/java.base/share/classes/java/nio/channels/spi/AbstractSelectableChannel.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.nio.channels.spi)
+
+(import '(java.io IOException)
+        '(java.nio.channels ClosedChannelException
+                            IllegalBlockingModeException
+                            SelectableChannel
+                            SelectionKey
+                            Selector)
+        '(java.util Arrays)
+        '(java.util.function Consumer Predicate))
+
+(defclass ^:public ^:abstract AbstractSelectableChannel
+  :extends SelectableChannel
+
+  (field ^:private ^:final ^SelectorProvider provider)
+
+  (field ^:private ^SelectionKey/1 keys nil)
+
+  (field ^:private ^int keyCount 0)
+
+  (field ^:private ^:final keyLock (Object.))
+
+  (field ^:private ^:final regLock (Object.))
+
+  (field ^:private ^:volatile ^boolean nonBlocking)
+
+  (constructor ^:protected [this ^SelectorProvider provider]
+    (set! (.-provider this) provider))
+
+  (method ^:public ^:final provider ^SelectorProvider [this] provider)
+
+  (method ^:private addKey ^void [this ^SelectionKey k]
+    (java-assert (Thread/holdsLock keyLock))
+    (let [^:mutable ^int i 0]
+      (cond
+        (and (some? keys) (< keyCount (alength keys)))
+          (do
+            (set! i 0)
+            (while (< i (alength keys))
+              (when (nil? (aget keys i)) (break))
+              (set! i (unchecked-inc-int i))))
+        (nil? keys) (set! keys (new SelectionKey/1 2))
+        :else
+          (let [n (unchecked-multiply-int (alength keys) 2)
+                ks (new SelectionKey/1 n)]
+            (set! i 0)
+            (while (< i (alength keys)) (aset ks i (aget keys i)) (set! i (unchecked-inc-int i)))
+            (set! keys ks)
+            (set! i keyCount)))
+      (aset keys i k)
+      (set! keyCount (unchecked-inc-int keyCount))))
+
+  (method ^:private findKey ^SelectionKey [this ^Selector sel]
+    (java-assert (Thread/holdsLock keyLock))
+    (when (some? keys)
+      (loop [^int i 0]
+        (if (< i (alength keys))
+            (if (and (some? (aget keys i)) (identical? (.selector (aget keys i)) sel))
+                (return (aget keys i))
+                (recur (unchecked-inc-int i)))
+            nil))
+      nil))
+
+  (method removeKey ^void [this ^SelectionKey k]
+    (locking keyLock
+      (when (some? keys)
+        (loop [^int i 0]
+          (if (< i (alength keys))
+              (if (identical? (aget keys i) k)
+                  (do
+                    (aset keys i nil)
+                    (set! keyCount (unchecked-dec-int keyCount))
+                    (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+              nil))
+        (.invalidate (cast AbstractSelectionKey k)))))
+
+  (method ^:private haveValidKeys ^boolean [this]
+    (locking keyLock
+      (if (== keyCount 0)
+          false
+          (do
+            (loop [^int i 0]
+              (if (< i (alength keys))
+                  (if (and (some? (aget keys i)) (.isValid (aget keys i)))
+                      (return true)
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            false))))
+
+  (method ^:public ^:final isRegistered ^boolean [this]
+    (locking keyLock (not (== keyCount 0))))
+
+  (method ^:public ^:final keyFor ^SelectionKey [this ^Selector sel]
+    (locking keyLock (.findKey this sel)))
+
+  (method ^:private forEach ^void [this ^{:tag (Consumer SelectionKey)} action]
+    (locking keyLock
+      (let [keys (.-keys this)]
+        (when (some? keys)
+          (.forEach (.filter (Arrays/stream keys)
+                             (lambda Predicate ^boolean [^SelectionKey k] (some? k)))
+                    (method-ref Consumer [SelectionKey] action Consumer/.accept))))))
+
+  (method ^:public ^:final register :throws [ClosedChannelException] ^SelectionKey [this
+                                                                                    ^Selector sel
+                                                                                    ^int ops att]
+    (when-not (== (bit-and-int ops (bit-not-int (.validOps this))) 0)
+      (throw (IllegalArgumentException.)))
+    (when-not (.isOpen this) (throw (ClosedChannelException.)))
+    (locking regLock
+      (when (.isBlocking this) (throw (IllegalBlockingModeException.)))
+      (locking keyLock
+        (when-not (.isOpen this) (throw (ClosedChannelException.)))
+        (let [^:mutable k (.findKey this sel)]
+          (if (some? k)
+              (do (.attach k att) (.interestOps k ops))
+              (do (set! k (.register (cast AbstractSelector sel) this ops att)) (.addKey this k)))
+          k))))
+
+  (method ^:protected ^:final implCloseChannel :throws [IOException] ^void [this]
+    (.implCloseSelectableChannel this)
+    (let [^:mutable ^SelectionKey/1 copyOfKeys nil]
+      (locking keyLock (when (some? keys) (set! copyOfKeys (.clone keys))))
+      (when (some? copyOfKeys) (for-each [^SelectionKey k copyOfKeys] (when (some? k) (.cancel k))))))
+
+  (method ^:protected ^:abstract implCloseSelectableChannel :throws [IOException] ^void [this])
+
+  (method ^:public ^:final isBlocking ^boolean [this] (not nonBlocking))
+
+  (method ^:public ^:final blockingLock [this] regLock)
+
+  (method ^:public ^:final configureBlocking :throws [IOException] ^SelectableChannel [this
+                                                                                       ^boolean block]
+    (locking regLock
+      (when-not (.isOpen this) (throw (ClosedChannelException.)))
+      (let [blocking (not nonBlocking)]
+        (when-not (= block blocking)
+          (when (and block (.haveValidKeys this)) (throw (IllegalBlockingModeException.)))
+          (.implConfigureBlocking this block)
+          (set! nonBlocking (not block)))))
+    this)
+
+  (method ^:protected ^:abstract implConfigureBlocking :throws [IOException] ^void [this
+                                                                                    ^boolean block]))

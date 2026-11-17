@@ -1,0 +1,259 @@
+(ns c.target
+  "Arbace's C target description (c/README.md): its predefined macros per standard, computed from c/target/abi.edn (the
+  System V AMD64 ABI's data representation, C23 §5.2.5.3's formulas over the floating formats, the dialect's
+  identification), and its __has_ answers from c/target/dialect.edn over c/target/probes.tsv; written into c/target/ in
+  the layout repr/c's preprocessor reads (arbace.repr.c.host/load-host: host.edn, search.txt, has.tsv, predefined/STD.h).
+  No compiler is run or read: the oracle tier (`oracle`) compares what this makes with gcc 15.2's recorded answers
+  (test/c/host/), by hand at a tag.
+
+  gen DIR       write DIR/predefined/*.h and DIR/has.tsv (DIR: c/target)
+  verify DIR    the committed files equal what gen makes (exit 1 else)
+  oracle DIR REF  DIR's answers against REF's (test/c/host: gcc's), the differences listed (exit 1 on one)"
+  (:require [arbace.string :as str])
+  (:import (java.math BigDecimal BigInteger MathContext RoundingMode)))
+
+(set! *warn-on-reflection* true)
+
+(defn- rd [^String f] (read-string (slurp f)))
+
+;; ---------------------------------------------------------------------------------------------
+;; numbers
+
+(defn- pow2
+  "2^k exactly, as a BigDecimal (k may be negative: 5^-k scaled by 10^k)."
+  ^BigDecimal [k]
+  (let [k (long k)]
+    (if (>= k 0)
+      (BigDecimal. (.shiftLeft BigInteger/ONE (int k)))
+      (.scaleByPowerOfTen (BigDecimal. (.pow (BigInteger/valueOf 5) (int (- k)))) (int k)))))
+
+(defn- exponent10
+  "floor(log10 x) of a positive BigDecimal: its precision less its scale less 1."
+  ^long [^BigDecimal x]
+  (- (.precision x) (.scale x) 1))
+
+(defn- sci
+  "x to `digits` significant digits, nearest (ties to even), as d.ddd...e±N with every digit written."
+  [^BigDecimal x digits]
+  (let [r (.round x (MathContext. (int digits) RoundingMode/HALF_EVEN))
+        e (exponent10 r)
+        u (str (.unscaledValue (.stripTrailingZeros r)))
+        u (str u (apply str (repeat (- (long digits) (count u)) \0)))]
+    (str (subs u 0 1) "." (subs u 1) "e" (if (neg? e) "-" "+") (Math/abs (long e)))))
+
+(def ^:private log10-2 0.30102999566398119521)
+
+(defn- neg-paren [n] (if (neg? (long n)) (str "(" n ")") (str n)))
+
+;; ---------------------------------------------------------------------------------------------
+;; the macros
+
+(defn- binary-macros
+  "C23 §5.2.5.3.3 for a binary format with p digits and exponents [emin, emax] (x = s 2^e sum f_k 2^-k)."
+  [abi {:keys [id p emin emax iec suffix cast]}]
+  (let [digits (:float-digits abi)
+        k (fn [^BigDecimal v] (let [s (str (sci v digits) suffix)] (if cast (str "((" cast ")" s ")") s)))
+        mx (.multiply (BigDecimal. (.subtract (.shiftLeft BigInteger/ONE (int p)) BigInteger/ONE)) (pow2 (- emax p)))
+        mn (pow2 (dec emin))]
+    [[(str "__" id "_MANT_DIG__") p]
+     [(str "__" id "_DIG__") (long (Math/floor (* (dec p) log10-2)))]
+     [(str "__" id "_DECIMAL_DIG__") (long (Math/ceil (+ 1 (* p log10-2))))]
+     [(str "__" id "_MIN_EXP__") (neg-paren emin)]
+     [(str "__" id "_MAX_EXP__") (neg-paren emax)]
+     ;; the least n with 10^n normalized: floor(log10 MIN) + 1 (MIN, a power of 2, is no power of 10)
+     [(str "__" id "_MIN_10_EXP__") (neg-paren (inc (exponent10 mn)))]
+     [(str "__" id "_MAX_10_EXP__") (neg-paren (exponent10 mx))]
+     [(str "__" id "_MAX__") (k mx)]
+     [(str "__" id "_NORM_MAX__") (k mx)]
+     [(str "__" id "_MIN__") (k mn)]
+     [(str "__" id "_EPSILON__") (k (pow2 (- 1 p)))]
+     [(str "__" id "_DENORM_MIN__") (k (pow2 (- emin p)))]
+     [(str "__" id "_HAS_DENORM__") 1]
+     [(str "__" id "_HAS_INFINITY__") 1]
+     [(str "__" id "_HAS_QUIET_NAN__") 1]
+     [(str "__" id "_IS_IEC_60559__") (if iec 1 0)]]))
+
+(defn- decimal-macros
+  "C23 §5.2.5.3.3 for a decimal format with p digits and exponents [emin, emax] (x = s 10^e sum f_k 10^-k)."
+  [{:keys [id p emin emax suffix]}]
+  [[(str "__" id "_MANT_DIG__") p]
+   [(str "__" id "_MIN_EXP__") (neg-paren emin)]
+   [(str "__" id "_MAX_EXP__") (neg-paren emax)]
+   [(str "__" id "_MAX__") (str "9." (apply str (repeat (dec p) \9)) "E" (dec emax) suffix)]
+   [(str "__" id "_MIN__") (str "1E" (dec emin) suffix)]
+   [(str "__" id "_EPSILON__") (str "1E" (- 1 p) suffix)]
+   [(str "__" id "_SUBNORMAL_MIN__") (str "0." (apply str (repeat (- p 2) \0)) "1E" (dec emin) suffix)]])
+
+(defn- hex-max [abi t]
+  (let [{:keys [size signed]} (get-in abi [:int-types t])
+        bits (* 8 (long size))
+        v (.subtract (.shiftLeft BigInteger/ONE (int (if signed (dec bits) bits))) BigInteger/ONE)]
+    (str "0x" (.toString v 16) (get-in abi [:suffix t]))))
+
+(defn- width [abi t] (* 8 (long (get-in abi [:int-types t :size]))))
+
+(defn- integer-macros [abi char8?]
+  (let [td (:typedefs abi)
+        tn (fn [n] (get-in abi [:int-types (td n) :name]))
+        widths #{"INT_LEAST8" "INT_LEAST16" "INT_LEAST32" "INT_LEAST64" "INT_FAST8" "INT_FAST16" "INT_FAST32" "INT_FAST64"
+                 "INTMAX" "INTPTR" "PTRDIFF" "SIZE" "WCHAR" "WINT" "SIG_ATOMIC"}
+        c-macros #{"INT8" "INT16" "INT32" "INT64" "UINT8" "UINT16" "UINT32" "UINT64" "INTMAX" "UINTMAX"}]
+    (concat
+     (for [[n t] [["SCHAR" :schar] ["SHRT" :short] ["INT" :int] ["LONG" :long] ["LONG_LONG" :llong]]
+           m [[(str "__" n "_MAX__") (hex-max abi t)] [(str "__" n "_WIDTH__") (width abi t)]]]
+       m)
+     [["__CHAR_BIT__" (:char-bit abi)]]
+     (for [[n t] td
+           :when (or char8? (not= n "CHAR8"))
+           :let [chr? (#{"CHAR8" "CHAR16" "CHAR32"} n)
+                 signed (get-in abi [:int-types t :signed])
+                 sfx (get-in abi [:suffix t])]
+           m (concat [[(str "__" n "_TYPE__") (tn n)]]
+                     (when-not chr? [[(str "__" n "_MAX__") (hex-max abi t)]])
+                     (when (widths n) [[(str "__" n "_WIDTH__") (width abi t)]])
+                     (when (c-macros n) [[(str "__" n "_C(c)") (if (= sfx "") "c" (str "c ## " sfx))]])
+                     (when (#{"WCHAR" "WINT" "SIG_ATOMIC"} n)
+                       [[(str "__" n "_MIN__") (if signed (str "(-__" n "_MAX__ - 1)") (str "0" sfx))]]))]
+       m))))
+
+(def ^:private months ["Jan" "Feb" "Mar" "Apr" "May" "Jun" "Jul" "Aug" "Sep" "Oct" "Nov" "Dec"])
+(def ^:private days ["Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat"])
+
+(defn- civil
+  "The UTC date and time of a Unix time: [year month day hh mm ss weekday] (Howard Hinnant's days_from_civil, inverted)."
+  [t]
+  (let [t (long t) d (Math/floorDiv t 86400) s (Math/floorMod t 86400)
+        z (+ d 719468) era (Math/floorDiv z 146097) doe (- z (* era 146097))
+        yoe (quot (- doe (quot doe 1460) (- (quot doe 36524)) (quot doe 146096)) 365)
+        y (+ yoe (* era 400)) doy (- doe (- (+ (* 365 yoe) (quot yoe 4)) (quot yoe 100)))
+        mp (quot (+ (* 5 doy) 2) 153) dd (inc (- doy (quot (+ (* 153 mp) 2) 5)))
+        m (if (< mp 10) (+ mp 3) (- mp 9)) y (if (<= m 2) (inc y) y)]
+    [y m dd (quot s 3600) (quot (mod s 3600) 60) (mod s 60) (Math/floorMod (+ d 4) 7)]))
+
+(defn- date-macros
+  "__DATE__, __TIME__ and __TIMESTAMP__ at the fixed epoch (C23 6.10.10.2: \"Mmm dd yyyy\", the day's first digit a
+  space under 10; asctime's form for the timestamp)."
+  [epoch]
+  (let [[y m d hh mm ss wd] (civil epoch)
+        mon (months (dec m)) day (format "%2d" d) tm (format "%02d:%02d:%02d" hh mm ss)]
+    [(str "#define __DATE__ \"" mon " " day " " y "\"")
+     (str "#define __TIME__ \"" tm "\"")
+     (str "#define __TIMESTAMP__ \"" (days wd) " " mon " " day " " tm " " y "\"")]))
+
+(defn macros
+  "The predefined macros of standard `std`, [NAME VALUE] pairs."
+  [abi std]
+  (let [{:keys [version strict]} (get-in abi [:stds std])
+        v (if version (Long/parseLong (str/replace version "L" "")) 0)
+        char8? (>= v 202311)
+        gnu-inline? (< v 199901)
+        d (:dialect abi)]
+    (concat
+     (when (= :lp64 (:data-model abi)) [["_LP64" 1] ["__LP64__" 1]])
+     (:stdc-predef abi)
+     (for [u (:stdc-utf abi)] [(str "__STDC_UTF_" u "__") 1])
+     [["__STDC__" 1] ["__STDC_HOSTED__" 1]]
+     (when version [["__STDC_VERSION__" version]])
+     (when strict [["__STRICT_ANSI__" 1]])
+     (for [[n x] (:embed abi)] [(str "__STDC_EMBED_" n "__") x])
+     (for [[n x] (:memory-orders abi)] [(str "__ATOMIC_" n) x])
+     (mapcat #(binary-macros abi %) (:binary abi))
+     (mapcat decimal-macros (:decimal abi))
+     [["__FLT_RADIX__" 2] ["__FLT_EVAL_METHOD__" (:flt-eval-method abi)]
+      ["__FLT_EVAL_METHOD_TS_18661_3__" (:flt-eval-method abi)]
+      ;; the widest standard type's DECIMAL_DIG (C23 §5.2.5.3.3)
+      ["__DECIMAL_DIG__" (apply max (for [b (:binary abi) :when (#{"FLT" "DBL" "LDBL"} (:id b))]
+                                      (long (Math/ceil (+ 1 (* (:p b) log10-2))))))]
+      ["__DEC_EVAL_METHOD__" (:dec-eval-method abi)] ["__DECIMAL_BID_FORMAT__" 1]]
+     (integer-macros abi char8?)
+     (for [[n s] (:sizeof abi)] [(str "__SIZEOF_" n "__") s])
+     [["__BIGGEST_ALIGNMENT__" (:biggest-alignment abi)] ["__BITINT_MAXWIDTH__" (:bitint-maxwidth abi)]
+      ["__ORDER_LITTLE_ENDIAN__" 1234] ["__ORDER_BIG_ENDIAN__" 4321] ["__ORDER_PDP_ENDIAN__" 3412]
+      ["__BYTE_ORDER__" "__ORDER_LITTLE_ENDIAN__"] ["__FLOAT_WORD_ORDER__" "__ORDER_LITTLE_ENDIAN__"]]
+     (for [n (:atomic-lock-free abi) :when (or char8? (not= n "CHAR8_T"))] [(str "__GCC_ATOMIC_" n "_LOCK_FREE") 2])
+     [["__GCC_ATOMIC_TEST_AND_SET_TRUEVAL" 1]
+      ["__GCC_CONSTRUCTIVE_SIZE" (:cache-line abi)] ["__GCC_DESTRUCTIVE_SIZE" (:cache-line abi)]]
+     (for [n (:sync-cas abi)] [(str "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_" n) 1])
+     (let [[ma mi pa] (:gnuc d)]
+       [["__GNUC__" ma] ["__GNUC_MINOR__" mi] ["__GNUC_PATCHLEVEL__" pa] ["__VERSION__" (str "\"" (:version d) "\"")]
+        ["__GXX_ABI_VERSION" (:gxx-abi d)]
+        [(if gnu-inline? "__GNUC_GNU_INLINE__" "__GNUC_STDC_INLINE__") 1]
+        ["__GNUC_EXECUTION_CHARSET_NAME" (str "\"" (:charset abi) "\"")]
+        ["__GNUC_WIDE_EXECUTION_CHARSET_NAME" (str "\"" (:wide-charset abi) "\"")]])
+     (:flags d)
+     (for [n ["__PIC__" "__pic__" "__PIE__" "__pie__"]] [n (:pic abi)])
+     [["__SSP_STRONG__" (:ssp-strong abi)]]
+     (for [n (concat (:isa abi) (:system abi) (when-not strict (:system-gnu abi)))] [n 1]))))
+
+(defn predefined
+  "The text of predefined/STD.h: the macros as `#define NAME VALUE` lines in C's byte order, then the date macros."
+  [abi std]
+  (let [ls (sort (map (fn [[n v]] (str "#define " n " " v)) (macros abi std)))]
+    (str (str/join "\n" (concat ls (date-macros (:epoch abi)))) "\n")))
+
+;; ---------------------------------------------------------------------------------------------
+;; the __has_ answers
+
+(defn- unscope [^String nm] (let [i (.indexOf nm "::")] (if (neg? i) [nil nm] [(subs nm 0 i) (subs nm (+ i 2))])))
+(defn- bare [^String n] (if (and (> (count n) 4) (str/starts-with? n "__") (str/ends-with? n "__")) (subs n 2 (- (count n) 2)) n))
+
+(defn answer
+  "The dialect's answer to `op(nm)` (c/target/dialect.edn's rules)."
+  [dl ^String op ^String nm]
+  (let [std (set (:c23-attributes dl)) gnu (set (:gnu-attributes dl)) clang (set (:clang-attributes dl))
+        sv (:c23-attribute-version dl)
+        [scope n] (unscope nm) n (bare n) scope (when scope (bare scope))
+        attr (fn [cpp?]
+               (cond (nil? scope) (cond (and (gnu n) (std n)) sv (gnu n) 1 :else 0)
+                     (= scope "gnu") (if (gnu n) 1 0)
+                     (and cpp? (= scope "clang")) (if (clang n) 1 0)
+                     :else 0))]
+    (case op
+      "__has_c_attribute" (cond (nil? scope) (if (std n) sv 0)
+                                (= scope "gnu") (if (gnu n) 1 0)
+                                (= scope "clang") (if (clang n) 1 0)
+                                :else 0)
+      "__has_attribute" (attr false)
+      "__has_cpp_attribute" (attr true)
+      "__has_builtin" (let [lib (set (:library-builtins dl))]
+                        (if (or ((set (:builtins dl)) nm) (lib nm)
+                                (and (str/starts-with? nm "__builtin_") (lib (subs nm 10))))
+                          1 0))
+      "__has_feature" (if ((set (:features dl)) nm) 1 0)
+      "__has_extension" (if (or ((set (:features dl)) nm) ((set (:extensions dl)) nm)) 1 0)
+      0)))
+
+(defn has-tsv [dl ^String probes]
+  (let [ps (for [l (str/split-lines (slurp probes)) :when (and (not (str/blank? l)) (not (str/starts-with? l "#")))]
+             (vec (take 2 (str/split l #"\t"))))]
+    (str (str/join "\n" (sort (distinct (for [[op nm] ps] (str op "\t" nm "\t" (answer dl op nm)))))) "\n")))
+
+;; ---------------------------------------------------------------------------------------------
+;; commands
+
+(defn- outputs [dir]
+  (let [abi (rd (str dir "/abi.edn")) dl (rd (str dir "/dialect.edn"))]
+    (into (sorted-map "has.tsv" (has-tsv dl (str dir "/probes.tsv")))
+          (for [s (sort (keys (:stds abi)))] [(str "predefined/" s ".h") (predefined abi s)]))))
+
+(defn- diff-lines [a b]
+  (let [as (set (str/split-lines a)) bs (set (str/split-lines b))]
+    [(sort (remove bs as)) (sort (remove as bs))]))
+
+(defn -main [cmd dir & [ref]]
+  (case cmd
+    "gen" (do (.mkdirs (java.io.File. (str dir "/predefined")))
+              (doseq [[f t] (outputs dir)] (spit (str dir "/" f) t))
+              (println "target: wrote" (count (outputs dir)) "files under" dir))
+    "verify" (let [bad (for [[f t] (outputs dir) :let [g (java.io.File. (str dir "/" f))]
+                             :when (not (and (.exists g) (= t (slurp g))))] f)]
+               (if (seq bad)
+                 (do (println "target: stale (bin/repr-c target gen):" (str/join " " bad)) (System/exit 1))
+                 (println "target:" (count (outputs dir)) "files as abi.edn and dialect.edn make them")))
+    "oracle" (let [rows (for [[f t] (outputs dir) :let [g (java.io.File. (str ref "/" f))] :when (.exists g)]
+                          (let [[ours theirs] (diff-lines t (slurp g))] [f ours theirs]))
+                   n (count (filter (fn [[_ a b]] (or (seq a) (seq b))) rows))]
+               (doseq [[f a b] rows :when (or (seq a) (seq b))]
+                 (println "differ" f) (doseq [l (take 8 a)] (println "  arbace:" l)) (doseq [l (take 8 b)] (println "  ref:   " l)))
+               (println (str "target oracle: " (- (count rows) n) " of " (count rows) " files equal to " ref "'s"))
+               (when (pos? n) (System/exit 1)))))

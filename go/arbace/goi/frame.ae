@@ -18,10 +18,11 @@ floats (float32 rounded), S for strings, R for every other type (its Go value), 
 function; defers its deferred calls, rec the panic its deferred call may recover (the frame of
 a deferred function), passRec the panic its call gives the callee (a deferred call's frame);
 sig, ifn and saved a call's from compiled code (a typed adapter's, GR5: its signature, the
-Arbace fn it calls, the thread's state to restore).\n"
+Arbace fn it calls, the thread's state to restore); wskip, a wrapper's frame (CodeWrapper), the depth of
+the first frame below its run of wrappers, which traces skip to.\n"
   (struct ^{:tag (slice int64)} I ^{:tag (slice float64)} F ^{:tag (slice string)} S ^{:tag (slice any)} R
           ^{:tag (slice unsafe/Pointer)} C
-          ^{:tag (* Thread)} Th ^{:tag (* Func)} Fn ^int32 Line ^int32 depth
+          ^{:tag (* Thread)} Th ^{:tag (* Func)} Fn ^int32 Line ^int32 depth ^int32 wskip
           ^{:tag (slice deferred)} defers ^{:tag (* panicState)} rec ^{:tag (* panicState)} passRec
           ^{:tag (* Type)} sig ^{:tag (* ifnTarget)} ifn ^mark saved))
 
@@ -47,6 +48,32 @@ Arbace fn it calls, the thread's state to restore).\n"
 (go/func LocalR "LocalR reads R slot i.\n" ^R [^int32 i]
   (fn ^any [^{:tag (* Frame)} fr] (aget (.-R fr) i)))
 
+(go/func KillR "KillR is x, then the slots that are dead after it cleared: a variable's last use is an argument, its value moves into the callee's frame (liveness).\n"
+  ^R [^R x ^{:tag (slice int32)} rs ^{:tag (slice int32)} ss ^{:tag (slice int32)} cs]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [v (x fr)]
+      (range [_ s rs] (aset (.-R fr) s nil))
+      (range [_ s ss] (aset (.-S fr) s ""))
+      (range [_ s cs] (aset (.-C fr) s nil))
+      v)))
+
+(go/func KillS "KillS is KillR's for a string.\n"
+  ^S [^S x ^{:tag (slice int32)} rs ^{:tag (slice int32)} ss ^{:tag (slice int32)} cs]
+  (fn ^string [^{:tag (* Frame)} fr]
+    (let [v (x fr)]
+      (range [_ s rs] (aset (.-R fr) s nil))
+      (range [_ s ss] (aset (.-S fr) s ""))
+      (range [_ s cs] (aset (.-C fr) s nil))
+      v)))
+
+(go/func ClearSlots "ClearSlots clears the R, S and C slots that are dead from here (a variable past its last use, liveness: gc's maps would not show them to the collector).\n"
+  ^Stmt [^{:tag (slice int32)} rs ^{:tag (slice int32)} ss ^{:tag (slice int32)} cs]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (range [_ s rs] (aset (.-R fr) s nil))
+    (range [_ s ss] (aset (.-S fr) s ""))
+    (range [_ s cs] (aset (.-C fr) s nil))
+    0))
+
 (go/func B2I "B2I is a bool as an I value: 1 or 0.\n" ^int64 [^bool b]
   (when b
     (return 1))
@@ -65,11 +92,15 @@ Arbace fn it calls, the thread's state to restore).\n"
   "Thread is goi's state of one goroutine: a stack per slot kind (a call's frame takes a window of
 each, popped when the call returns normally; a panic leaves them), the frames by depth (reused),
 and the depth limit (§4.3, S23); pendRec the panic a deferred call of a compiled func gives
-the first interpreted function compiled code then enters (reflect.MakeFunc's: GR8b).\n"
+the first interpreted function compiled code then enters (reflect.MakeFunc's: GR8b); goid, bottom
+and creator what its traces show below its interpreted frames (GOI-SPEC.md, \"Since v1: frames\"):
+its goroutine's number, gc's runtime frames under them (bottomInit, bottomMain, bottomGo) and the
+function and line of the go statement that started it.\n"
   (struct ^{:tag (slice int64)} I ^{:tag (slice float64)} F ^{:tag (slice string)} S ^{:tag (slice any)} R
           ^{:tag (slice unsafe/Pointer)} C
           ^{:tag (slice (* Frame))} frames ^int32 depth ^int32 limit
-          ^{:tag (slice chainEntry)} chain ^{:tag (* panicState)} pendRec))
+          ^{:tag (slice chainEntry)} chain ^{:tag (* panicState)} pendRec
+          ^int64 goid ^int32 bottom ^{:tag (* Func)} creator ^int32 creatorLine ^int64 creatorGoid))
 
 (go/var ^{:tag int32 :doc "DepthLimit is the interpreted call depth at which a call panics (ARBACE_GOI_DEPTH, S23).\n"}
   DepthLimit 100000)
@@ -158,15 +189,19 @@ the first interpreted function compiled code then enters (reflect.MakeFunc's: GR
 (go/method save ^mark [^{:tag (* Thread)} th]
   (lit mark (len (.-I th)) (len (.-F th)) (len (.-S th)) (len (.-R th)) (len (.-C th)) (.-depth th)))
 
-(go/method restore "restore pops the thread's stacks to m; the popped R and C slots cleared, so a returned call's
-values are not kept reachable above the stack's top (queue 218: an interpreted program's finalizers and weak
-references, pyi's PYS9 (a)).\n"
+(go/method restore "restore pops the thread's stacks to m.\n"
   [^{:tag (* Thread)} th ^mark m]
   (set! (.-I th) (subslice (.-I th) _ (.-i m)))
   (set! (.-F th) (subslice (.-F th) _ (.-f m)))
+  ;; the popped windows of the pointer-holding kinds are cleared: what a returned call left in them is
+  ;; garbage the collector would otherwise keep alive (liveness: a value reachable only from a dead slot)
+  (when (> (len (.-S th)) (.-s m))
+    (clear (subslice (.-S th) (.-s m))))
   (set! (.-S th) (subslice (.-S th) _ (.-s m)))
-  (clear (subslice (.-R th) (.-r m)))
+  (when (> (len (.-R th)) (.-r m))
+    (clear (subslice (.-R th) (.-r m))))
   (set! (.-R th) (subslice (.-R th) _ (.-r m)))
-  (clear (subslice (.-C th) (.-c m)))
+  (when (> (len (.-C th)) (.-c m))
+    (clear (subslice (.-C th) (.-c m))))
   (set! (.-C th) (subslice (.-C th) _ (.-c m)))
   (set! (.-depth th) (.-d m)))

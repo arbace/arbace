@@ -96,6 +96,8 @@ var (
 	alive   = map[int]bool{}
 	cdAt    = map[int]int64{} // the line of a process's last chdir
 	exAt    = map[int]int64{} // the line of its last execve
+	unborn  = map[int]bool{}  // seen before its parent's clone result named it: its directory not known yet
+	trel    bool              // target's last path was relative to the process's own directory
 	cloneAt = map[int]int64{} // the line of its last clone call
 	seen    = map[string]bool{}
 	out     *bufio.Writer
@@ -160,8 +162,10 @@ var (
 
 // target: the path argument of a call's text: [dirfd, ] "path"; "" without one
 func target(args string, pid int, pathFirst bool) string {
+	trel = false
 	if pathFirst {
 		if q, ok := quoted(args); ok {
+			trel = !strings.HasPrefix(q, "/")
 			return resolve(q, cwd[pid])
 		}
 		return ""
@@ -171,15 +175,35 @@ func target(args string, pid int, pathFirst bool) string {
 		base, args = m[1], args[len(m[0]):]
 	} else if m := fdcwd.FindString(args); m != "" {
 		args = args[len(m):]
+		trel = true
 	} else if m := fdDir.FindStringSubmatch(args); m != nil {
 		base, args = m[1], args[len(m[0]):]
 	} else if fdBare.MatchString(args) {
 		return ""
 	}
 	if q, ok := quoted(args); ok {
+		if strings.HasPrefix(q, "/") {
+			trel = false
+		}
 		return resolve(q, base)
 	}
+	trel = false
 	return ""
+}
+
+var resultPath = regexp.MustCompile(`\) += [0-9]+<(/[^>]*)>$`)
+
+// early: the path of a call by a process not yet born (its first lines printed before its parent's clone result:
+// its directory is not known yet), relative to that directory: the opened file's own path when the result names it
+// (-y: "= N</abs/path>"), else P as resolved against the checkout's root (as the awk's early)
+func early(p string, pid int, args string) string {
+	if _, cd := cdAt[pid]; !trel || !unborn[pid] || cd {
+		return p
+	}
+	if m := resultPath.FindStringSubmatch(args); m != nil {
+		return norm(m[1])
+	}
+	return p
 }
 
 var (
@@ -253,6 +277,7 @@ func child(pid int, s string) {
 		// execve); lines of an earlier life of a reused PID are older than the clone call and give way (strace -qq
 		// hides the exits and PIDs wrap: review 081, N1)
 		if c > 0 {
+			delete(unborn, c)
 			if !(cdAt[c] > cloneAt[pid]) {
 				cwd[c] = cwd[pid]
 			}
@@ -353,6 +378,9 @@ func main() {
 		}
 		if _, ok := cwd[pid]; !ok {
 			cwd[pid] = *root
+			if nlines.Load() > 1 {
+				unborn[pid] = true
+			}
 		}
 		alive[pid] = true
 		// a call resumed: only a clone's result matters (its path arguments came in the unfinished line)
@@ -393,11 +421,11 @@ func main() {
 			}
 		case path1[call]:
 			if p := target(args, pid, true); p != "" {
-				emit(opFor(call, args), p, pid)
+				emit(opFor(call, args), early(p, pid, args), pid)
 			}
 		case dirfd1[call]:
 			if p := target(args, pid, false); p != "" {
-				emit(opFor(call, args), p, pid)
+				emit(opFor(call, args), early(p, pid, args), pid)
 			}
 		}
 	}

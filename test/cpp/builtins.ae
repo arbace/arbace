@@ -1,0 +1,288 @@
+;; Part of Arbace. Reads files of the LLVM Project's clang (llvm-project-23.1.5.src.tar.xz, the pin of test/cpp/corpora.edn,
+;; sha256 fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e) as data: clang/include/clang/Basic/
+;; Builtins.td, BuiltinsBase.td, BuiltinsX86.td, BuiltinsX86Base.td, BuiltinsX86_64.td (the builtins' records) and
+;; TokenKinds.def with TransformTypeTraits.def (the keywords); the names it computes follow
+;; clang/utils/TableGen/ClangBuiltinsEmitter.cpp (collectBuiltins: Spellings with a Template's affixes, the
+;; RequiredNamePrefix, a LibBuiltin's __builtin_ alias) and TokenKinds.def's macros, written by hand on 2026-11-08
+;; (doc/cpp/CPP-SURVEY.md, "As built: CX12 (second slice)", CP270 (a)). Their notice:
+;;
+;;   Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+;;   See https://llvm.org/LICENSE.txt for license information.
+;;   SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+;;
+(ns cpp.builtins
+  "clang's identifier table for the C++ front end's undeclared check (CX12, CP270 (a)): the names clang's builtins are
+  spelled with (a small reader of the TableGen subset Builtins*.td use: class and def with template arguments and
+  parents, let ... in, foreach ... in, # pasting, NAME) and its keywords (TokenKinds.def), into
+  cpp/target/clang-builtins.edn. `gen DIR OUT` writes it from the tarball's files under DIR, `verify DIR OUT` compares."
+  (:require [arbace.string :as str]))
+
+;; ---------------------------------------------------------------------------------------------
+;; TableGen's tokens: identifiers, strings, numbers, punctuation; comments and code blocks [{ ... }] skipped
+
+(defn- tokens [^String s]
+  (let [n (.length s) out (java.util.ArrayList.)]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt s i)]
+          (cond
+            (Character/isWhitespace c) (recur (inc i))
+            (and (= c \/) (< (inc i) n) (= \/ (.charAt s (inc i)))) (recur (let [j (.indexOf s "\n" i)] (if (neg? j) n j)))
+            (and (= c \/) (< (inc i) n) (= \* (.charAt s (inc i)))) (recur (+ 2 (.indexOf s "*/" (+ i 2))))
+            (and (= c \[) (< (inc i) n) (= \{ (.charAt s (inc i)))) (do (.add out [:code nil]) (recur (+ 2 (.indexOf s "}]" (+ i 2)))))
+            (= c \") (let [j (.indexOf s "\"" (inc i))] (.add out [:str (subs s (inc i) j)]) (recur (inc j)))
+            (or (Character/isLetterOrDigit c) (= c \_))
+            (let [j (loop [j i] (if (and (< j n) (let [d (.charAt s j)] (or (Character/isLetterOrDigit d) (= d \_) (= d \.)))) (recur (inc j)) j))
+                  w (subs s i j)]
+              (.add out (if (re-matches #"-?\d+" w) [:int (Long/parseLong w)] [:id w]))
+              (recur j))
+            (and (= c \-) (< (inc i) n) (Character/isDigit (.charAt s (inc i))))
+            (let [j (loop [j (inc i)] (if (and (< j n) (Character/isDigit (.charAt s j))) (recur (inc j)) j))]
+              (.add out [:int (Long/parseLong (subs s i j))]) (recur j))
+            :else (do (.add out [:p (str c)]) (recur (inc i)))))))
+    (vec out)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The evaluator: records as {:name :parents #{class...} :fields {name value}}; values strings, ints, lists, records
+;; ({:ref name}) or anonymous instances ({:inst class :args [...]})
+
+(declare parse-primary)
+
+(defn- paste-str [x] (cond (map? x) (or (:ref x) (pr-str x)) (nil? x) "" :else (str x)))
+
+(defn- parse-value
+  "A value from token i in the environment `env` (template arguments, foreach variables), # pastes joined: [value next-i]."
+  [ts i env]
+  (let [[v j] (parse-primary ts i env)]
+    (loop [v v j j]
+      (if (= [:p "#"] (ts j))
+        (let [[r j] (parse-primary ts (inc j) env)] (recur (str (paste-str v) (paste-str r)) j))
+        [v j]))))
+
+(defn- parse-primary
+  [ts i env]
+  (let [[k v] (ts i)]
+    (case k
+      :str [v (inc i)]
+      :int [v (inc i)]
+      :code [:code (inc i)]
+      :p (case v
+           "[" (loop [j (inc i) xs []]
+                 (if (= [:p "]"] (ts j)) [xs (inc j)]
+                     (let [[x j] (parse-value ts j env)
+                           j (if (= [:p ","] (ts j)) (inc j) j)]
+                       (recur j (conj xs x)))))
+           "?" [nil (inc i)]
+           (throw (ex-info (str "builtins: value at " (ts i)) {})))
+      :id (let [[base j] [(if (contains? env v) (get env v) {:ref v}) (inc i)]]
+            (cond
+              ;; Class<args>: an anonymous instance
+              (= [:p "<"] (ts j))
+              (let [[args j] (loop [j (inc j) xs []]
+                               (if (= [:p ">"] (ts j)) [xs (inc j)]
+                                   (let [[x j] (parse-value ts j env) j (if (= [:p ","] (ts j)) (inc j) j)] (recur j (conj xs x)))))]
+                [{:inst v :args args} j])
+              :else [base j])))))
+
+(defn- parse-name
+  "A def's name: identifiers and variables pasted with #."
+  [ts i env]
+  (loop [i i acc ""]
+    (let [[k v] (ts i)
+          part (cond (= k :str) v (and (= k :id) (contains? env v)) (str (get env v)) (= k :id) v :else nil)]
+      (if (nil? part) [acc i]
+          (let [acc (str acc part)]
+            (if (= [:p "#"] (ts (inc i))) (recur (+ i 2) acc) [acc (inc i)]))))))
+
+(defn- parse-parents
+  "`: A<args>, B` until { or ;: [[class args] ...]."
+  [ts i env]
+  (if (not= [:p ":"] (ts i)) [[] i]
+      (loop [i (inc i) ps []]
+        (let [[_ nm] (ts i)
+              [args i] (if (= [:p "<"] (ts (inc i)))
+                         (loop [j (+ i 2) xs []]
+                           (if (= [:p ">"] (ts j)) [xs (inc j)]
+                               (let [[x j] (parse-value ts j env) j (if (= [:p ","] (ts j)) (inc j) j)] (recur j (conj xs x)))))
+                         [[] (inc i)])
+              ps (conj ps [nm args])]
+          (if (= [:p ","] (ts i)) (recur (inc i) ps) [ps i])))))
+
+(defn- parse-body
+  "{ field decls and lets } or ;: [[[name value-thunk] ...] next-i]; a declaration `type name = v;` or `let name = v;`."
+  [ts i env]
+  (if (= [:p ";"] (ts i)) [[] (inc i)]
+      (loop [j (inc i) fs []]
+        (if (= [:p "}"] (ts j)) [fs (inc j)]
+            (let [;; skip the type (and `let`) up to the field's name: the token before `=` or `;`
+                  e (loop [k j] (if (#{[:p "="] [:p ";"]} (ts k)) k (recur (inc k))))
+                  nm (second (ts (dec e)))]
+              (if (= [:p ";"] (ts e))
+                (recur (inc e) (conj fs [nm ::unset]))
+                (let [vstart (inc e)
+                      end (loop [k vstart d 0]
+                            (let [t (ts k)]
+                              (cond (and (zero? d) (= t [:p ";"])) k
+                                    (#{[:p "["] [:p "<"] [:p "("]} t) (recur (inc k) (inc d))
+                                    (#{[:p "]"] [:p ">"] [:p ")"]} t) (recur (inc k) (dec d))
+                                    :else (recur (inc k) d))))]
+                  (recur (inc end) (conj fs [nm [vstart env]])))))))))
+
+(defn- class-params
+  "`<type name = default, ...>` after a class's name: [[[name default-or-nil] ...] next-i]."
+  [ts i env]
+  (if (not= [:p "<"] (ts i)) [[] i]
+      (loop [j (inc i) ps []]
+        (if (= [:p ">"] (ts j)) [ps (inc j)]
+            (let [e (loop [k j d 0]
+                      (let [t (ts k)]
+                        (cond (and (zero? d) (#{[:p ","] [:p ">"]} t)) k
+                              (#{[:p "<"] [:p "["]} t) (recur (inc k) (inc d))
+                              (#{[:p ">"] [:p "]"]} t) (recur (inc k) (dec d))
+                              :else (recur (inc k) d))))
+                  eq (some #(when (= [:p "="] (ts %)) %) (range j e))
+                  nm (second (ts (dec (or eq e))))
+                  dflt (when eq [(inc eq) env])
+                  j (if (= [:p ","] (ts e)) (inc e) e)]
+              (recur j (conj ps [nm dflt])))))))
+
+(defn- read-files
+  "The statements of the files, includes followed in DIR: {:classes {name {:params :parents :body}} :defs [...]}."
+  [^String dir files]
+  (let [classes (atom {}) defs (atom []) seen (atom #{})]
+    (letfn [(stmts [ts i lets env end?]
+              (loop [i i]
+                (when (and (< i (count ts)) (not (end? i)))
+                  (recur (stmt ts i lets env)))))
+            (stmt [ts i lets env]
+              (let [[k v] (ts i)]
+                (case v
+                  "include" (do (file! (second (ts (inc i)))) (+ i 2))
+                  "class" (let [nm (second (ts (inc i)))
+                                [ps j] (class-params ts (+ i 2) env)
+                                [pars j] (parse-parents ts j env)
+                                [body j] (parse-body ts j env)]
+                            (swap! classes assoc nm {:params ps :parents pars :body body :lets lets :ts ts})
+                            j)
+                  "def" (let [[nm j] (parse-name ts (inc i) env)
+                              [pars j] (parse-parents ts j env)
+                              [body j] (parse-body ts j env)]
+                          (swap! defs conj {:name nm :parents pars :body body :lets lets :ts ts})
+                          j)
+                  "let" (let [;; let A = v, B = w in { ... } | stmt
+                              [ls j] (loop [j (inc i) ls []]
+                                       (let [nm (second (ts j))
+                                             vs (+ j 2)
+                                             e (loop [k vs d 0]
+                                                 (let [t (ts k)]
+                                                   (cond (and (zero? d) (or (= t [:p ","]) (= t [:id "in"]))) k
+                                                         (#{[:p "["] [:p "<"]} t) (recur (inc k) (inc d))
+                                                         (#{[:p "]"] [:p ">"]} t) (recur (inc k) (dec d))
+                                                         :else (recur (inc k) d))))
+                                             ls (conj ls [nm [vs env ts]])]
+                                         (if (= [:p ","] (ts e)) (recur (inc e) ls) [ls (inc e)])))
+                              lets (into lets ls)]
+                          (block ts j lets env))
+                  "foreach" (let [var (second (ts (inc i)))
+                                  [xs j] (parse-value ts (+ i 3) env)
+                                  j (inc j)] ; in
+                              (let [ends (for [x xs] (block ts j lets (assoc env var x)))]
+                                (last (doall ends))))
+                  (if (= [:p ";"] (ts i)) (inc i) (throw (ex-info (str "builtins: statement at " (ts i) " " (ts (inc i))) {}))))))
+            (block [ts j lets env]
+              (if (= [:p "{"] (ts j))
+                (let [close (loop [k (inc j) d 0]
+                              (let [t (ts k)]
+                                (cond (and (zero? d) (= t [:p "}"])) k
+                                      (= t [:p "{"]) (recur (inc k) (inc d))
+                                      (= t [:p "}"]) (recur (inc k) (dec d))
+                                      :else (recur (inc k) d))))]
+                  (stmts ts (inc j) lets env #(>= % close))
+                  (inc close))
+                (stmt ts j lets env)))
+            (file! [f]
+              (let [base (last (str/split f #"/"))]
+                (when-not (@seen base)
+                  (swap! seen conj base)
+                  (let [ts (tokens (slurp (str dir "/" base)))]
+                    (stmts ts 0 [] {} (constantly false))))))]
+      (doseq [f files] (file! f))
+      {:classes @classes :defs @defs})))
+
+(defn- eval-at [[i env ts0] ts] (first (parse-value (or ts0 ts) i env)))
+
+(defn- record
+  "A def's fields and classes: the parents' (their arguments bound to their parameters, in order), then the def's lets and
+  body, as TableGen resolves them. {:fields {name value} :classes #{name}}."
+  [{:keys [classes]} d]
+  (letfn [(inst [cname args]
+            (let [c (get classes cname)
+                  env (into {} (map-indexed (fn [i [pn dflt]] [pn (if (< i (count args)) (nth args i) (when dflt (eval-at dflt (:ts c))))]) (:params c)))
+                  sub (reduce (fn [acc [pc pargs]]
+                                (let [r (inst pc (mapv #(if (and (map? %) (contains? env (:ref %))) (get env (:ref %)) %) pargs))]
+                                  (-> acc (update :fields merge (:fields r)) (update :classes into (:classes r)))))
+                              {:fields {} :classes #{cname}} (:parents c))
+                  ;; (a class's body evaluated with its template arguments)
+                  fs (into {} (for [[nm v] (:body c) :when (not= v ::unset)]
+                                [nm (first (parse-value (:ts c) (first v) (merge (second v) env)))]))]
+              (update sub :fields merge fs)))]
+    (let [r (reduce (fn [acc [pc pargs]] (let [x (inst pc pargs)] (-> acc (update :fields merge (:fields x)) (update :classes into (:classes x)))))
+                    {:fields {} :classes #{}} (:parents d))
+          lets (into {} (for [[nm [i env ts]] (:lets d)] [nm (first (parse-value ts i env))]))
+          body (into {} (for [[nm v] (:body d) :when (not= v ::unset)] [nm (first (parse-value (:ts d) (first v) (second v)))]))]
+      (update r :fields #(merge % lets body)))))
+
+(defn- builtin-names
+  "ClangBuiltinsEmitter's collectBuiltins over every def derived from Builtin: [name kind] pairs."
+  [db]
+  (let [prefixes (into {} (for [d (:defs db) :let [r (record db d)] :when ((:classes r) "NamePrefix")] [(:name d) (get-in r [:fields "Spelling"])]))]
+    (sort (distinct
+           (for [d (:defs db)
+                 :let [r (record db d) cs (:classes r) fs (:fields r)]
+                 :when (cs "Builtin")
+                 :let [spell (map #(cond (= {:ref "NAME"} %) (:name d) (map? %) (:ref %) :else %) (get fs "Spellings"))
+                       pre (when-let [p (get fs "RequiredNamePrefix")] (when (map? p) (get prefixes (:ref p))))
+                       [affixes as-prefix] (if (cs "Template") [(get fs "Affixes") (= 1 (get fs "AsPrefix"))] [[""] false])
+                       kind (cond (cs "AtomicBuiltin") :atomic (cs "LangBuiltin") :lang (cs "TargetLibBuiltin") :target-lib
+                                  (cs "TargetBuiltin") :target (cs "LibBuiltin") :lib :else :builtin)]
+                 a affixes
+                 s spell
+                 :let [full (str pre (if as-prefix (str a s) (str s a)))]
+                 x (cond-> [[full kind]]
+                     (and (= kind :lib) (= 1 (get fs "AddBuiltinPrefixedAlias"))) (conj [(str "__builtin_" (if as-prefix (str a s) (str s a))) :builtin]))]
+             x)))))
+
+(defn- keyword-names
+  "TokenKinds.def's identifiers: KEYWORD and the macros defined as it (the C++ ones, the traits, TESTING_KEYWORD), ALIAS's
+  spellings, TRANSFORM_TYPE_TRAIT_DEF's __Trait (TransformTypeTraits.def)."
+  [^String dir]
+  (let [tk (slurp (str dir "/TokenKinds.def"))
+        tt (slurp (str dir "/TransformTypeTraits.def"))
+        kw (for [[_ m x] (re-seq #"(?m)^(KEYWORD|CXX11_KEYWORD|CXX20_KEYWORD|C99_KEYWORD|C23_KEYWORD|COROUTINES_KEYWORD|MODULES_KEYWORD|TYPE_TRAIT_1|TYPE_TRAIT_2|TYPE_TRAIT_N|ARRAY_TYPE_TRAIT|UNARY_EXPR_OR_TYPE_TRAIT|CXX11_UNARY_EXPR_OR_TYPE_TRAIT|EXPRESSION_TRAIT|TESTING_KEYWORD)\(\s*([A-Za-z_][A-Za-z_0-9]*)" tk)]
+             x)
+        al (map second (re-seq #"(?m)^ALIAS\(\s*\"([^\"]+)\"" tk))
+        tr (map #(str "__" (second %)) (re-seq #"(?m)^TRANSFORM_TYPE_TRAIT_DEF\(\s*[A-Za-z_0-9]+\s*,\s*([A-Za-z_0-9]+)\s*\)" tt))]
+    (sort (distinct (concat kw al tr)))))
+
+(defn table
+  "The table's text from the files under `dir`."
+  ^String [^String dir]
+  (let [db (read-files dir ["Builtins.td" "BuiltinsX86.td" "BuiltinsX86_64.td"])
+        bs (builtin-names db)
+        ks (keyword-names dir)]
+    (str ";; clang's identifier table for the C++ front end's undeclared check (arbace.repr.cpp.diag, doc/cpp/CPP-SURVEY.md, \"As built:\n"
+         ";; CX12 (second slice)\", CP270 (a)), made by test/cpp/builtins.ae (bin/repr-cpp target builtins gen) from llvm-project-23.1.5.src.tar.xz\n"
+         ";; (sha256 fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e): clang/include/clang/Basic/Builtins.td, BuiltinsX86.td,\n"
+         ";; BuiltinsX86_64.td (with BuiltinsBase.td, BuiltinsX86Base.td) as ClangBuiltinsEmitter.cpp names them, and TokenKinds.def's\n"
+         ";; keywords. :builtins [NAME KIND]: KIND :builtin :atomic :lang :target (declared implicitly), :lib :target-lib (library builtins,\n"
+         ";; implicit in C only: Sema's LookupBuiltin); :keywords the identifiers the lexer makes keywords in some language mode.\n"
+         ";; Read with the Clojure reader.\n"
+         "{:builtins\n [" (str/join "\n  " (map pr-str bs)) "]\n :keywords\n [" (str/join "\n  " (map pr-str ks)) "]}\n")))
+
+(defn -main [verb dir out]
+  (let [t (table dir)]
+    (case verb
+      "gen" (do (spit out t) (println "builtins:" out (count (:builtins (read-string t))) "builtins," (count (:keywords (read-string t))) "keywords"))
+      "verify" (if (= t (slurp out))
+                 (println "builtins: verify:" out "is the tarball's")
+                 (do (println "builtins: verify:" out "differs from the tarball's (bin/repr-cpp target builtins gen)") (System/exit 1))))))

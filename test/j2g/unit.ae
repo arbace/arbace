@@ -1,0 +1,484 @@
+(ns j2g.unit
+  "j2g's unit tests (doc/go/J2G-SPEC.md), each over a fixture of test/j2g/unit/ or a function alone,
+  with the edge (jdk/edge.edn) as j2g binds it and no JDK forms: light (seconds, well under a GiB).
+  Run: bin/j2g-unit (arbace_tool -p test -m j2g.unit); prints each test's name and pass or FAIL,
+  exits 1 on a failure."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.env :as env]
+            [arbace.classes.analyze :as a]
+            [arbace.classes.annot :as annot]
+            [arbace.j2g.access :as access]
+            [arbace.j2g.checks :as chk]
+            [arbace.j2g.code :as code]
+            [arbace.j2g.edge :as edge]
+            [arbace.j2g.embed :as embed]
+            [arbace.j2g.main :as jm]
+            [arbace.j2g.meta :as meta]
+            [arbace.j2g.model :as m]
+            [arbace.j2g.out :as out]
+            [arbace.j2g.world :as w]
+            [j2g.typeann :as ta]))
+
+(def ^:private failures (atom 0))
+
+(defn- check [what ok & [detail]]
+  (println (str (if ok "pass  " "FAIL  ") what (when (and (not ok) detail) (str "\n      " detail))))
+  (when-not ok (swap! failures inc)))
+
+(defn- load-fixture
+  "j2g's world over the fixture tree dir alone (load-world as bin/j2g binds it: the edge, no
+  source lookup)."
+  [dir]
+  (#'jm/advance-ids!)
+  (let [e (edge/read-edge "jdk/edge.edn")]
+    (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+      (w/load-world [{:root dir :tree true}] :variant-files []))))
+
+;; JCS69 (b): the analysis fails at the unresolved class itself, not at the conversion after it
+
+(defn test-unresolved-cause []
+  (let [causes {"p/C$D" "members: Unknown type: X (the import q.X)"}]
+    (check "unresolved-cause: a constructor of the class named"
+           (= (w/unresolved-cause causes "analysis: No accessible constructor of p.C$D (line 4) / No accessible constructor of p.C$D")
+              "analysis: No accessible constructor of p.C$D (line 4) / No accessible constructor of p.C$D (because p/C$D: members: Unknown type: X (the import q.X))"))
+    (check "unresolved-cause: a static field, by the internal name"
+           (= (w/unresolved-cause causes "analysis: No static field f in p/C$D (line 2)")
+              "analysis: No static field f in p/C$D (line 2) (because p/C$D: members: Unknown type: X (the import q.X))"))
+    (check "unresolved-cause: a longer name is not the class (p.C$DE)"
+           (= (w/unresolved-cause causes "analysis: No accessible constructor of p.C$DE")
+              "analysis: No accessible constructor of p.C$DE"))
+    (check "unresolved-cause: not an analysis failure"
+           (= (w/unresolved-cause causes "members: No accessible constructor of p.C$D")
+              "members: No accessible constructor of p.C$D"))
+    (check "unresolved-cause: no causes"
+           (= (w/unresolved-cause {} "analysis: x") "analysis: x"))))
+
+(defn test-unresolved-world []
+  (let [world (load-fixture "test/j2g/unit/unresolved")
+        failed (:failed world)
+        of (fn [n] (vec (for [[c msg] failed :when (= c n)] msg)))
+        st (fn [n] (w/with-world world @(:state (a/decl n))))]
+    (check "unresolved: Holder's failure is its members', the class named with its import"
+           (= (of "p/Holder") ["members: Unknown type: Gadget (the import javax.nonesuch.Gadget)"])
+           (pr-str (of "p/Holder")))
+    (check "unresolved: Holder not analyzed, marked failed with that cause"
+           (let [s (st "p/Holder")] (and (:analyzed s) (= (:analysis-failed s) "members: Unknown type: Gadget")))
+           (pr-str (select-keys (st "p/Holder") [:analyzed :analysis-failed])))
+    (check "unresolved: User's failure names Holder's cause"
+           (let [[m & more] (of "p/User")]
+             (and (nil? more) (str/starts-with? m "analysis: No accessible constructor of p.Holder")
+                  (str/ends-with? m "(because p/Holder: members: Unknown type: Gadget (the import javax.nonesuch.Gadget))")))
+           (pr-str (of "p/User")))
+    (check "unresolved: Clean analyzed, no failure"
+           (and (empty? (of "p/Clean")) (:analyzed (st "p/Clean")) (nil? (:analysis-failed (st "p/Clean"))))
+           (pr-str (of "p/Clean")))
+    (check "unresolved: no empty conversion message (\"Cannot convert ... to \")"
+           (not-any? (fn [[_ msg]] (re-find #"Cannot convert .* to\s*$" (str msg))) failed)
+           (pr-str failed))))
+
+(defn test-analyze-only
+  "JCS265 (b): bin/j2g --analyze-only over the fixture, its report.edn the load's failures alone."
+  []
+  (let [out (str (or (System/getenv "TMPDIR") ".tmp/tmp") "/j2g-unit-analyze-only")
+        f (io/file out "report.edn")
+        _ (io/delete-file f true)
+        e (edge/read-edge "jdk/edge.edn")
+        ret (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+              (jm/run* {:analyze-only true :jdk "test/j2g/unit/unresolved" :variant-files [] :inputs []
+                        :slice [] :roots [] :out out}))
+        r (when (.isFile f) (read-string (slurp f)))
+        failed (into {} (map vec (:analysis-failures r)))]
+    (check "analyze-only: report.edn written, marked :analyze-only" (true? (:analyze-only r)) (pr-str (keys r)))
+    (check "analyze-only: no :errors (the status is 0)" (empty? (:errors ret)) (pr-str (:errors ret)))
+    (check "analyze-only: Holder's members failure and User's named cause"
+           (and (= (get failed "p/Holder") "members: Unknown type: Gadget (the import javax.nonesuch.Gadget)")
+                (str/ends-with? (str (get failed "p/User")) "(because p/Holder: members: Unknown type: Gadget (the import javax.nonesuch.Gadget))"))
+           (pr-str (:analysis-failures r)))
+    (check "analyze-only: nothing translated (no gen/ nor prog/)"
+           (not (or (.exists (io/file out "gen")) (.exists (io/file out "prog")))))
+    (check "analyze-only: the classes analyzed counted (Clean, Holder, User)" (= 3 (:classes r)) (pr-str (:classes r)))))
+
+(defn test-support-tables
+  "JCS271 (b), JCS273: the jrt methods j2g writes and the roots they need, by J2G-SPEC §4.4's names."
+  []
+  (check "type annotations: 11 methods (Class 2, Field 1, Method and Constructor 4 each)"
+         (= 11 (count out/type-annotation-methods)) (pr-str out/type-annotation-methods))
+  (check "type annotations: Go names as J2G-SPEC §4.4 gives them"
+         (every? (set out/type-annotation-methods)
+                 [["Class" "GetAnnotatedSuperclass__AnnotatedType"] ["Class" "GetAnnotatedInterfaces__AnnotatedType1"]
+                  ["Field" "GetAnnotatedType__AnnotatedType"] ["Method" "GetAnnotatedParameterTypes__AnnotatedType1"]
+                  ["Constructor" "GetAnnotatedReceiverType__AnnotatedType"]])
+         (pr-str out/type-annotation-methods))
+  (check "type annotations: 7 roots, TypeAnnotationSupport's"
+         (and (= 7 (count out/type-annotation-roots))
+              (every? #(= "jdk/internal/jrt/TypeAnnotationSupport" (first %)) out/type-annotation-roots)
+              (some #{["jdk/internal/jrt/TypeAnnotationSupport" "annotatedParameterTypes"
+                       "(Ljava/lang/reflect/Executable;)[Ljava/lang/reflect/AnnotatedType;"]} out/type-annotation-roots))
+         (pr-str out/type-annotation-roots))
+  (check "accessFlags: AccessFlagSupport's three roots"
+         (= 3 (count out/access-flags-roots)) (pr-str out/access-flags-roots)))
+
+(defn test-throws
+  "JCS240 (a) (F27): a class's throws clauses are its data's E records with :throws alone, a JDK class's too (j2g's
+  class-data call), and none without; with :members they are written once."
+  []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        ;; load-fixture's binding without its advance-ids! (the counter advances once a run: test-unresolved-world's)
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/throws" :tree true}] :variant-files []))
+        data (fn [n & opts] (w/with-world world (some-> (apply annot/class-data n opts) str/split-lines set)))
+        es (fn [ls] (set (filter #(str/starts-with? % "E ") ls)))]
+    (check "throws: an interface's method, :throws alone"
+           (= #{"E M ping ()V java.lang.Exception"} (es (data "q/Pinger" :throws true))) (pr-str (data "q/Pinger" :throws true)))
+    (check "throws: a constructor's and a method's, none for a method without"
+           (= #{"E C ()V java.lang.InterruptedException" "E M ping ()V java.lang.Exception"} (es (data "q/Impl" :throws true)))
+           (pr-str (data "q/Impl" :throws true)))
+    (check "throws: none without :throws or :members"
+           (empty? (es (data "q/Impl"))) (pr-str (data "q/Impl")))
+    (check "throws: with :members and :throws, each record once"
+           (let [ls (w/with-world world (str/split-lines (annot/class-data "q/Impl" :members true :throws true)))]
+             (= 2 (count (filter #(str/starts-with? % "E ") ls))))
+           (pr-str (data "q/Impl" :members true :throws true)))))
+
+(def ^:private typeann-known
+  "JCS282 (b): javac's rows the encoder writes otherwise, each with why (the check holds both sides to these)."
+  {["p/TA" ["T"] ["0x10" [65535] [[3 0]] ["Lp/B;" [["e" ["e" "Ljava/lang/annotation/ElementType;" "METHOD"]]]]]]
+   "an element value of java.lang.annotation.ElementType encodes as a string where the world does not know the enum (the
+   edge alone: no JDK forms in the unit tests' world, JCS271 (b)'s day finding); the sample's own enum (Color) encodes as
+   javac's e"})
+
+(defn test-type-annotations
+  "JCS282 (b) (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS282 (b)\"): the encoder's RuntimeVisibleTypeAnnotations
+  records (arbace.classes.annot's Y and N lines) of the sample test/j2g/unit/typeann/p/TA.java (its committed forms), decoded
+  and resolved through their pool (j2g.typeann), equal javac's as recorded by hand with the JDK (test/j2g/unit/typeann.edn),
+  but the known rows; and the check's negative control, one value changed, differs."
+  []
+  (let [ours (ta/sorted-set-of (ta/encoder "test/j2g/unit/typeann/p/TA.ae"))
+        javac (with-open [r (java.io.PushbackReader. (io/reader "test/j2g/unit/typeann.edn"))] (read r))
+        known (set (keys typeann-known))
+        missing (remove (set ours) (remove known javac))
+        extra (remove (set javac) ours)
+        ;; a known row's place: its class, owner, target, path and annotation type (the value is what differs)
+        place (fn [[c o [tt info path [ty]]]] [c o tt info path ty])
+        extra (remove (fn [row] (some #(= (place %) (place row)) known)) extra)]
+    (check (str "type annotations: the encoder's " (count ours) " equal javac's " (count javac) " but " (count known) " known")
+           (and (= 29 (count javac)) (empty? missing) (empty? extra))
+           (str "javac's not written: " (pr-str (vec missing)) " written, not javac's: " (pr-str (vec extra))))
+    (check "type annotations: the known rows are javac's and still differ"
+           (and (every? (set javac) known) (not-any? (set ours) known)))
+    ;; the negative control: a row with its first int constant changed is not javac's
+    (let [bump (fn bump [x] (cond (and (vector? x) (= "I" (first x)) (integer? (second x))) ["I" (inc (second x))]
+                                  (vector? x) (mapv bump x)
+                                  :else x))
+          changed (bump (first ours))]
+      (check "type annotations: control: a changed value differs"
+             (and (not= changed (first ours)) (not (some #{changed} javac)))))))
+
+(defn- nodes-of
+  "Every node (a map with :op) under x."
+  [x]
+  (filter #(and (map? %) (:op %)) (tree-seq coll? seq x)))
+
+(defn test-invokers
+  "F15: in a world with jdk.internal.jrt.Invokers (the fixture test/j2g/unit/invoke, beside the edge's
+  java.lang.invoke), the analyzer writes (int) mh.invokeExact(1, \"a\") as Invokers.invokeExactI(mh, int.class,
+  {int.class, String.class}, {1, \"a\"}), (String) mh.invoke(x) as invokeL cast to String, a statement's call
+  as invokeExactV, MethodHandles.lookup() as Invokers.lookup(U.class); the control: MethodHandle.type() stays a
+  virtual call of MethodHandle."
+  []
+  (if-not (resolve 'arbace.classes.analyze/invokers-call)
+    ;; a host whose analysis predates F15 (stage 0 until a re-seed): the gate's build at the checkout's key has it, or
+    ;; J2G_UNIT_SOURCES=arbace.classes.analyze
+    (println "skip  invokers: the host's arbace.classes.analyze predates F15 (J2G_UNIT_SOURCES=arbace.classes.analyze)")
+  (let [e (edge/read-edge "jdk/edge.edn")
+        ;; load-fixture's binding without its advance-ids! (as test-throws)
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/invoke" :tree true}] :variant-files []))
+        bodies (w/with-world world (:bodies @(:state (a/decl "p/U"))))
+        body (fn [nm] (some (fn [[[n _] b]] (when (= n nm) b)) bodies))
+        calls (fn [nm] (filter #(= :invoke (:op %)) (nodes-of (body nm))))
+        inv (fn [nm] (first (filter #(= "jdk/internal/jrt/Invokers" (:owner %)) (calls nm))))]
+    (check "invokers: the fixture analyzes" (and (seq bodies) (not (contains? (into {} (:failed world)) "p/U")))
+           (pr-str (:failed world)))
+    (let [n (inv "poly")
+          [_ r cs os] (:args n)]
+      (check "invokers: (int) mh.invokeExact(1, \"a\") is Invokers.invokeExactI, the site's classes and the boxed arguments"
+             (and (= "invokeExactI" (:name n)) (= :static (:kind n))
+                  (= "(Ljava/lang/invoke/MethodHandle;Ljava/lang/Class;[Ljava/lang/Class;[Ljava/lang/Object;)I" (:desc n))
+                  (= "I" (:class r)) (= ["I" "Ljava/lang/String;"] (mapv :class (:elems cs)))
+                  (= 2 (count (:elems os))))
+             (pr-str (select-keys n [:name :desc]))))
+    (check "invokers: (String) mh.invoke(x) is invokeL, cast to String"
+           (and (= "invokeL" (:name (inv "gen")))
+                (some #(and (= :cast (:op %)) (= "Ljava/lang/String;" (:class %))) (nodes-of (body "gen")))))
+    (check "invokers: a statement's mh.invokeExact() is invokeExactV" (= "invokeExactV" (:name (inv "stmt"))))
+    (let [n (inv "lk")]
+      (check "invokers: MethodHandles.lookup() is Invokers.lookup(U.class)"
+             (and (= "lookup" (:name n)) (= "Lp/U;" (:class (first (:args n)))))
+             (pr-str (select-keys n [:name :args]))))
+    (check "invokers: control: MethodHandle.type() is MethodHandle's own call"
+           (and (nil? (inv "plain")) (some #(and (= "java/lang/invoke/MethodHandle" (:owner %)) (= "type" (:name %))) (calls "plain")))))))
+
+(defn test-lookup-call
+  "F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F15 (java.lang.invoke)\"): the analyzer writes
+  MethodHandles.lookup() as jdk.internal.jrt.Invokers.lookup(C.class); in a JDK class (C of the JDK's packages,
+  pkg-of :jrt) j2g keeps it the nil of J2G-SPEC section 8.5 (the VarHandle idiom's static initializers unchanged), in
+  a program's own class or Arbace's a real call; and MethodHandles.lookup() itself (a world without Invokers) is the
+  nil as before. The control: a call of another Invokers method is not the lookup."
+  []
+  (let [lit (fn [c] {:op :class-lit :class (str "L" c ";") :type "Ljava/lang/Class;"})
+        call (fn [owner name args] {:op :invoke :kind :static :owner owner :name name :args args})]
+    (check "lookup-call: MethodHandles.lookup() is the nil"
+           (code/lookup-call? (call "java/lang/invoke/MethodHandles" "lookup" [])))
+    (check "lookup-call: Invokers.lookup(C.class) of a JDK class is the nil"
+           (code/lookup-call? (call "jdk/internal/jrt/Invokers" "lookup" [(lit "java/util/concurrent/ConcurrentHashMap")])))
+    (check "lookup-call: Invokers.lookup(C.class) of a test's class is a real call"
+           (not (code/lookup-call? (call "jdk/internal/jrt/Invokers" "lookup" [(lit "t04746/Test7157574")]))))
+    (check "lookup-call: Invokers.lookup(C.class) of Arbace's class is a real call"
+           (not (code/lookup-call? (call "jdk/internal/jrt/Invokers" "lookup" [(lit "arbace/lang/KeywordInvokeSite")]))))
+    (check "lookup-call: control: Invokers.invokeExactI is not the lookup"
+           (not (code/lookup-call? (call "jdk/internal/jrt/Invokers" "invokeExactI" [(lit "java/lang/String")]))))))
+
+;; JCS350 (a): a private method of an interpreted class in reflection (arbace.j2g.dyncf's setMethod native, the Go
+;; the executable's interpreter runs): JVMS 5.4.6, a private method is selected as itself, so it takes no Dyn slot
+;; and no method by key (where a subclass's private method of the same key would replace it), and its member table
+;; entry calls its own implementation, not the receiver's class's of that key. The natives are Go forms in j2g's
+;; source, checked as data (their run needs the executable, the night's: t07686)
+
+(defn- source-forms [path]
+  (with-open [r (java.io.PushbackReader. (io/reader path))]
+    (binding [*read-eval* false]
+      (doall (take-while #(not= % ::eof) (repeatedly #(read r false ::eof)))))))
+
+(defn- native-form
+  "The (list 'go/func (native-name NAME ...) ...) form of NAME in the forms of PATH (the name also as
+  (symbol (native-name NAME ...)), dyn.ae's)."
+  [path name]
+  (let [named? (fn [n] (and (seq? n) (= 'native-name (first n)) (= name (second n))))]
+    (some (fn [f] (when (and (seq? f) (= 'list (first f)) (= ''go/func (second f))
+                             (let [n (nth f 2 nil)]
+                               (or (named? n) (and (seq? n) (= 'symbol (first n)) (named? (second n))))))
+                    f))
+          (tree-seq coll? seq (source-forms path)))))
+
+(defn- private-rule?
+  "Whether a setMethod native's form selects a private method as itself: the slot and by-key stores guarded by
+  the private flag, and the member entry's (set! f impl) under it."
+  [form]
+  (let [subs (tree-seq coll? seq form)
+        priv? (fn [x] (some #(= 'jrt/AccPrivate %) (tree-seq coll? seq x)))]
+    (boolean
+      (and (some #(and (seq? %) (= 'when (first %)) (priv? (second %))
+                       (some (fn [y] (= y '(aset (.-ByKey dc) key impl))) (tree-seq coll? seq %)))
+                 subs)
+           (some #(= % '(when (!= (bit-and flags jrt/AccPrivate) 0) (set! f impl))) subs)))))
+
+(defn test-private-reflection []
+  (let [cf (native-form "arbace/j2g/dyncf.ae" "setMethod")
+        px (native-form "arbace/j2g/dyn.ae" "setMethod")]
+    (check "private reflection: dyncf's setMethod native found" (some? cf))
+    (check "private reflection: a private method is selected as itself (no slot, no by-key method, its own impl)"
+           (private-rule? cf))
+    (check "private reflection: control: a proxy's setMethod (dyn.ae, every method public) has no such rule"
+           (and (some? px) (not (private-rule? px))))))
+
+(defn test-inner-ctor-annotations
+  "JCS351 (a): a constructor's annotation records (arbace.classes.annot's C and P lines) name javac's descriptor, the one
+  jrt's Constructor has (an inner class's outer instance first), and its parameters' indices follow the leading implicit
+  parameters as the JDK's getParameterAnnotations gives them (handleParameterNumberMismatch: a member class's one); the
+  control, a static nested class's, is unshifted. The fixture test/j2g/unit/innerctor/r/Outer.java (its committed forms)."
+  []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/innerctor" :tree true}] :variant-files []))
+        data (fn [n] (w/with-world world (some-> (annot/class-data n :members true) str/split-lines vec)))
+        has (fn [ls re] (some #(re-find re %) ls))
+        in (data "r/Outer$In")
+        nested (data "r/Outer$Nested")]
+    (check "inner ctor: an inner class's constructor annotations by javac's descriptor (the outer instance first)"
+           (and (has in #"^C \(Lr[.]Outer;Ljava[.]lang[.]String;\)V ") (not (has in #"^C \(Ljava[.]lang[.]String;\)V ")))
+           (pr-str in))
+    (check "inner ctor: its parameter's annotation at index 1, after the outer instance"
+           (and (has in #"^P <init> \(Lr[.]Outer;Ljava[.]lang[.]String;\)V 1 ") (not (has in #"^P <init> \S+ 0 ")))
+           (pr-str in))
+    (check "inner ctor: control: a static nested class's, its own descriptor, index 0"
+           (and (has nested #"^C \(Ljava[.]lang[.]String;\)V ") (has nested #"^P <init> \(Ljava[.]lang[.]String;\)V 0 "))
+           (pr-str nested))))
+;; A4-A7 of the Ghidra case study's G1 plan (J2G-SPEC §4.1, "Roots from a program's metadata", "Refusals, stubbed
+;; or dropped"; §10.3): the metadata's pure parts over the fixtures of test/programs/, and their negative controls
+
+(defn test-program-meta []
+  (let [P "test/programs/"
+        specs [(str P "services/resources/a") (str P "services/resources/b") (str P "reflect-meta/resources/lib")]
+        [_ data owners] (embed/user-resources specs #{})
+        fns (into {} (for [[p f] data] [p #(slurp (io/file f))]))
+        svcs (meta/services [["s.S" "w.M"]] fns)]
+    ;; A5: the second jar's copy of a path the first holds is a root copy, its index listed
+    (check "resources: the second jar's svc.Greeter is root 1's copy"
+           (and (contains? data "META-INF/services/svc.Greeter")
+                (contains? data "META-INF/arbace/roots/1/META-INF/services/svc.Greeter"))
+           (pr-str (keys data)))
+    (check "resources: the roots' index names root 1, the directory b"
+           (= "1 b\n" (meta/roots-index-text (keys data) (embed/resource-dir-names specs)))
+           (pr-str (meta/roots-index-text (keys data) (embed/resource-dir-names specs))))
+    ;; GH4 (iii): the class path's entries by name, the owners of the plain paths
+    (check "classpath: the entries' index lists every directory, in order"
+           (= (meta/classpath-index-text (embed/resource-dir-names specs)) "0 a\n1 b\n2 lib\n")
+           (pr-str (meta/classpath-index-text (embed/resource-dir-names specs))))
+    (check "classpath: java.class.path is the names, joined"
+           (= "a:b:lib" (meta/classpath-property (embed/resource-dir-names specs))))
+    (check "classpath: svc.Greeter's plain path is directory a's, directory b's copy is a root copy, owners say so"
+           (and (some #{[0 "META-INF/services/svc.Greeter"]} owners)
+                (not-any? #(= [1 "META-INF/services/svc.Greeter"] %) owners)
+                (not-any? #(re-find #"^META-INF/arbace/roots/" (second %)) owners)
+                (every? #(<= 0 (first %) 2) owners))
+           (pr-str (take 5 owners)))
+    (check "classpath: control: lib's own path is lib's (2), no other directory's"
+           (and (some #{[2 "rm/plugins.txt"]} owners) (not-any? #{[0 "rm/plugins.txt"] [1 "rm/plugins.txt"]} owners)))
+    (check "classpath: the owners' text, sorted"
+           (= (meta/owners-text [[1 "y"] [0 "z"] [0 "x"]]) "0 x\n0 z\n1 y\n"))
+    (check "resources: a source two directories hold is an error"
+           (try (embed/user-resources [(str P "hello-java/java") (str P "hello-java/java")] #{}) false
+                (catch Exception _ true)))
+    ;; A4: the registry, the world's first, the jars in order, the duplicate once, the comment dropped
+    (check "services: the registry in the class path's order"
+           (= (get svcs "svc.Greeter") [["svc.English" :classpath] ["svc.French" :classpath] ["svc.Missing" :classpath]])
+           (pr-str svcs))
+    (check "services: the world's provides first, kind module"
+           (= (get svcs "s.S") [["w.M" :module]]))
+    (check "services: the registry's text"
+           (= (meta/services-text svcs)
+              "module s.S w.M\nclasspath svc.Greeter svc.English\nclasspath svc.Greeter svc.French\nclasspath svc.Greeter svc.Missing\n")
+           (pr-str (meta/services-text svcs)))
+    (check "services: control: the jars' order reversed is another registry"
+           (not= (get (meta/services [] (into {} (for [[p f] [["META-INF/services/svc.Greeter" (str P "services/resources/b/META-INF/services/svc.Greeter")]
+                                                               ["META-INF/arbace/roots/1/META-INF/services/svc.Greeter" (str P "services/resources/a/META-INF/services/svc.Greeter")]]]
+                                                   [p #(slurp f)])))
+                      "svc.Greeter")
+                 (get svcs "svc.Greeter")))
+    ;; B2 (2026-11-15): the count is the file's lines, which bin/jrt provides writes from the world (two until
+    ;; JMX-1, java.rmi and SASL joined it)
+    (check "services: jdk/provides.txt is read, a provider a line"
+           (= (count (remove #(or (str/blank? %) (str/starts-with? % "#")) (str/split-lines (slurp "jdk/provides.txt"))))
+              (count (meta/read-provides "jdk/provides.txt"))))
+    ;; A6: the reflect-config's roots, the conditional entry by its condition
+    (let [md (meta/data-metadata-roots fns)]
+      (check "metadata: reflect-config's roots"
+             (= (vec md) [[nil ["rm.Plugin#<clinit>" "rm.Plugin#<init>" "rm.Plugin#run"]]
+                          ["rm.Main" ["rm.Conditional#<clinit>" "rm.Conditional#<init>" "rm.Conditional"]]])
+             (pr-str md))
+      (check "metadata: no errors" (empty? (:errors (meta md))))
+      (check "metadata: control: malformed JSON is an error, not roots"
+             (let [bad (meta/data-metadata-roots {"META-INF/native-image/x/reflect-config.json" (constantly "[{\"name\": ")})]
+               (and (empty? bad) (= 1 (count (:errors (meta bad))))))))
+    ;; A7: the refusals sorted by their referrers
+    (let [r (meta/refusals {"ui/Tool" "analysis: Unable to resolve class: java.awt.Robot"
+                            "ui/Panel" "members: Unknown type: java.awt.datatransfer.Clipboard"}
+                           {["ui/Main" "main" "([Ljava/lang/String;)V"] #{"class ui/Tool failed analysis"}
+                            ["ui/Tool" "paint" "()I"] #{"class ui/Panel failed analysis"}})]
+      (check "refusals: Tool stubbed (Main needs it), Panel dropped (only a refused class names it)"
+             (and (= (map first (:stubbed r)) ["ui/Tool"]) (= (map first (:dropped r)) ["ui/Panel"]))
+             (pr-str r))
+      (check "refusals: control: with no referrer both are dropped"
+             (= 2 (count (:dropped (meta/refusals {"ui/Tool" "x" "ui/Panel" "y"} {}))))))))
+
+(defn test-reflective-sites
+  "A6: meta/site-roots over analyzed call nodes (the shapes arbace.classes.analyze makes), and the control."
+  []
+  (let [inv (fn [owner nme target & args] {:op :invoke :owner owner :name nme :target target :args (vec args)})
+        lit (fn [c] {:op :class-lit :class (str "L" c ";")})
+        s (fn [v] {:op :const :type "Ljava/lang/String;" :val v})]
+    (check "sites: Class.forName of a constant roots the class"
+           (= [:rooted ["p.C#<clinit>"]] (meta/site-roots (inv "java/lang/Class" "forName" nil (s "p.C")))))
+    (check "sites: C.class.getMethod(\"m\") roots C#m"
+           (= [:rooted ["p.C#m"]] (meta/site-roots (inv "java/lang/Class" "getMethod" (lit "p/C") (s "m") nil))))
+    (check "sites: getConstructor of a literal roots its constructors"
+           (= [:rooted ["p.C#<init>"]] (meta/site-roots (inv "java/lang/Class" "getConstructor" (lit "p/C") nil))))
+    (check "sites: control: a name not constant is listed, not rooted"
+           (= :dynamic (first (meta/site-roots (inv "java/lang/Class" "forName" nil {:op :local :name 'x})))))))
+
+(defn test-properties
+  "A13: j2g --property K=V (program.edn :properties): the pairs parsed in order, a value keeping its =, set in
+  the main package's main after arbace.version and before the host and the image; none, main unchanged."
+  []
+  (let [o (jm/parse-args ["--program" "--property" "java.awt.headless=true" "--property" "m=a=b c" "--property" "e="])
+        pm @#'jm/program-main-forms
+        main-of (fn [& a] (out/form-text (last (apply pm false a))))
+        with (main-of "p.Main" ["-x"] (:properties o))
+        sets (re-seq #"System_SetProperty_String_String__String \(jrt/Str \"([^\"]*)\"\) \(jrt/Str \"([^\"]*)\"\)" with)]
+    (check "properties: parsed in order, the value after the first ="
+           (= (:properties o) [["java.awt.headless" "true"] ["m" "a=b c"] ["e" ""]]) (pr-str (:properties o)))
+    (check "properties: set after arbace.version, in order"
+           (and (= (map rest sets) [["java.awt.headless" "true"] ["m" "a=b c"] ["e" ""]])
+                (< (.indexOf ^String with "arbace.version") (.indexOf ^String with "java.awt.headless")))
+           (pr-str (map rest sets)))
+    (check "properties: before the host and the image"
+           (< (.indexOf ^String with "\"e\")") (.indexOf ^String with "ProgramHost") (.indexOf ^String with "setupImage")))
+    (check "properties: the REPL's main takes them too"
+           (re-find #"\(jrt/Str \"k\"\) \(jrt/Str \"v\"\)" (main-of nil nil [["k" "v"]])))
+    (check "properties: none, both mains as without the option"
+           (and (= (main-of "p.Main" ["-x"] nil) (main-of "p.Main" ["-x"]))
+                (= (main-of nil nil nil) (main-of))
+                (not (re-find #"SetProperty.*SetProperty" (main-of)))))
+    (check "properties: control: a pair without = is an error"
+           (try (jm/parse-args ["--program" "--property" "noequals"]) false (catch Exception _ true)))))
+
+;; B2 (2026-11-15): jrt's files for one architecture each (F9's nio_fs_linux_amd64.ae, _arm64.ae) declare the same
+;; names; Go builds one of them, so j2g's duplicate check counts a name once per architecture
+
+(defn test-arch-collisions []
+  (let [scan (fn [& fs] {:files (into (sorted-map) (for [[f n] fs] [f {:consts #{n}}]))})
+        names (fn [cs] (set (map :name cs)))]
+    (check "collisions: one name in an amd64 and an arm64 file is no duplicate"
+           (empty? (chk/collisions {} (scan ["x_amd64.ae" "sysStatx"] ["x_arm64.ae" "sysStatx"]))))
+    (check "collisions: control: the same name in an amd64 file and a file of no architecture is"
+           (= #{"sysStatx"} (names (chk/collisions {} (scan ["x_amd64.ae" "sysStatx"] ["x.ae" "sysStatx"])))))
+    (check "collisions: control: two files of one architecture are"
+           (= #{"sysStatx"} (names (chk/collisions {} (scan ["x_amd64.ae" "sysStatx"] ["y_amd64.ae" "sysStatx"])))))
+    (check "collisions: control: a generated file beside an architecture's is"
+           (= #{"sysStatx"} (names (chk/collisions {[:jrt "j2g_cut.go"] ['(go/const [sysStatx 1])]}
+                                                    (scan ["x_amd64.ae" "sysStatx"])))))))
+
+;; B2 (2026-11-15): an accessor of an inherited protected static (DigestMD5Base's nested classes calling
+;; AbstractSaslImpl.traceOutput): j2g's unaccess gives the call of the declaring class, the one with a Go function
+
+(defn test-inherited-static-accessor []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/access" :tree true}] :variant-files []))
+        body (fn [cls nm] (w/with-world world
+                            (some (fn [[[n _] b]] (when (= n nm) b)) (:bodies @(:state (a/decl cls))))))
+        call (fn [cls nm] (first (filter #(= :invoke (:op %)) (nodes-of (body cls nm)))))
+        via (call "b/Sub$In" "viaOuter")
+        un (w/with-world world (access/unaccess via))
+        direct (call "b/Sub" "direct")]
+    (check "accessor: the fixture analyzes, In's call is an accessor of Sub"
+           (and (= "b/Sub" (:owner via)) (str/starts-with? (str (:name via)) "access$"))
+           (pr-str (select-keys via [:owner :name]) (:failed world)))
+    (check "accessor: unaccess calls Base.trace, the declaring class (the JVM's resolution), not Sub.trace"
+           (and (= "a/Base" (:owner un)) (= "trace" (:name un)) (= "a/Base" (:owner (:method un))))
+           (pr-str (select-keys un [:owner :name])))
+    (check "accessor: control: Sub's own call of Base.shown needs no accessor"
+           (and (= "a/Base" (:owner direct)) (= "shown" (:name direct)))
+           (pr-str (select-keys direct [:owner :name])))))
+
+(defn -main [& _]
+  (test-support-tables)
+  (test-unresolved-cause)
+  (test-unresolved-world)
+  (test-analyze-only)
+  (test-throws)
+  (test-type-annotations)
+  (test-lookup-call)
+  (test-invokers)
+  (test-private-reflection)
+  (test-inner-ctor-annotations)
+  (test-program-meta)
+  (test-reflective-sites)
+  (test-properties)
+  (test-arch-collisions)
+  (test-inherited-static-accessor)
+  (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
+  (shutdown-agents)
+  (System/exit (if (zero? @failures) 0 1)))

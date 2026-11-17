@@ -180,7 +180,12 @@
                   (addr (lit FloatArray :F fs))))))
 
 
-          (return ^{:go/end 183} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag tag :F a))))))
+          ;; an allocation is a poll point, as the runtime's (Alloc_small: a pending signal's handler runs before the block is
+          ;; made; callback/signals_alloc)
+          (return ^{:go/end 183} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+              (when (!= (.Load sigPending) 0)
+                (.processSignals th))
+              (addr (lit Block :Tag tag :F a))))))
       (case ["makelazyblock"]
         (return ^{:go/end 185} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag TagLazy :F a)))))
       (case ["makeforwardblock"]
@@ -273,7 +278,17 @@
 
 ^{:go/end 285} (go/method external "external is the Op calling the external named cname.\n" ^Op [^{:tag (* Compiler)} c ^string cname ^int nargs]
   (when [(values e ok) (aget Externals cname)] ok
+    ;; the externals that may block in a read, a write or a wait note their thread (curTh, ext_signal.go's interruptions)
+    (when (or (strings/HasPrefix cname "caml_ml_") (strings/HasPrefix cname "caml_unix_"))
+      (return (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+        (set! curTh th)
+        (e th a))))
     (return (conv Op e)))
+
+  ;; a program's own C stubs (ext_capi.go)
+  (when (!= ExternalFallback nil)
+    (when [e (ExternalFallback cname nargs)] (!= e nil)
+      (return (conv Op e))))
 
   (when (!= (.-Missing c) nil)
     (inc! (aget (.-Missing c) cname)))

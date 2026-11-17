@@ -85,6 +85,18 @@ cat > "$w/earlyopen.trace" <<'T'
 101 execve("./nx", ["nx"], 0x7ffd /* 3 vars */) = -1 ENOENT (No such file or directory)
 T
 printf 'R\t/work/sub/x\nX\t/work/sub/nx\n' > "$w/earlyopen.want"
+# the same with the path relative and AT_FDCWD unnamed (strace prints open("x") or openat(AT_FDCWD, "x")): the child's
+# directory is not known at its early line, so the result's path (-y) names the file, not the checkout's root (night 5's
+# gate-tests flake, 2026-11-04: a fabricated tree's go/arbace/goi/ops.ae reported as the checkout's)
+cat > "$w/earlyrel.trace" <<'T'
+100 chdir("/work/sub") = 0
+100 clone(child_stack=NULL, flags=CLONE_CHILD_SETTID|SIGCHLD <unfinished ...>
+101 open("x", O_RDONLY) = 3</work/sub/x>
+101 openat(AT_FDCWD, "y", O_RDONLY) = 4</work/sub/y>
+100 <... clone resumed>) = 101
+101 open("z", O_RDONLY) = 5</work/sub/z>
+T
+printf 'R\t/work/sub/x\nR\t/work/sub/y\nR\t/work/sub/z\n' > "$w/earlyrel.want"
 # fchdir by descriptor (the JVM's perf data: fchdir into /tmp/hsperfdata_root, then a stale file opened by its bare PID
 # name): the name resolves against the directory -y names, not the checkout's root (a failed fchdir changes nothing)
 cat > "$w/fchdir.trace" <<'T'
@@ -101,6 +113,9 @@ for r in "${reducers[@]}"; do
   reduce "$r" "$w/earlyopen.trace" > "$w/earlyopen.out" 2> "$w/earlyopen.err"
   if cmp -s "$w/earlyopen.out" "$w/earlyopen.want"; then ck "$r: a child's early path line does not stop it taking its parent's directory" ok
   else ck "$r: early path line" "got '$(tr '\n\t' '; ' < "$w/earlyopen.out")'"; fi
+  reduce "$r" "$w/earlyrel.trace" > "$w/earlyrel.out" 2> "$w/earlyrel.err"
+  if cmp -s "$w/earlyrel.out" "$w/earlyrel.want"; then ck "$r: a child's early relative open before its clone result takes the result's path" ok
+  else ck "$r: early relative open" "got '$(tr '\n\t' '; ' < "$w/earlyrel.out")'"; fi
   reduce "$r" "$w/fchdir.trace" > "$w/fchdir.out" 2> "$w/fchdir.err"
   if cmp -s "$w/fchdir.out" "$w/fchdir.want"; then ck "$r: fchdir sets the process's directory" ok
   else ck "$r: fchdir" "got '$(tr '\n\t' '; ' < "$w/fchdir.out")'"; fi

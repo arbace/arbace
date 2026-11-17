@@ -341,6 +341,28 @@
       msg)
     msg))
 
+(defn unresolved-cause
+  "An analysis failure's message msg with the cause of the class it names, when that class's header
+  or members failed to resolve (causes: class -> its failure, the import named): the analysis of
+  a class using it stops at its missing members (\"No accessible constructor of p.C$D\", \"No
+  static field f in p/C\") while the cause is the class the other one could not resolve
+  (JCS69 (b)); \" (because p/C$D: members: Unknown type: X (the import q.X))\" appended. The
+  first such class the message names, in the message's order; else msg as it is."
+  [causes ^String msg]
+  (if (or (empty? causes) (not (str/starts-with? msg "analysis: ")))
+    msg
+    (let [hits (for [[n why] causes
+                     :let [bin (str/replace (str n) "/" ".")
+                           i (max (.indexOf msg (str n)) (.indexOf msg ^String bin))]
+                     :when (and (not (neg? i))
+                                ;; the whole name: not a prefix of a longer one (p.C of p.C$D)
+                                (let [j (+ i (count bin))]
+                                  (or (= j (count msg)) (not (re-find #"[\w$]" (subs msg j (inc j)))))))]
+                 [i n why])]
+      (if-let [[_ n why] (first (sort-by (juxt first (comp - count str second)) hits))]
+        (str msg " (because " n ": " why ")")
+        msg))))
+
 (defn load-world
   "Reads, enters and analyzes the Java forms of the inputs, each {:root :dirs|:tree|:files},
   with the Go-build variants of the variant files applied. Returns the world:
@@ -379,7 +401,9 @@
         from-source (fn [n] (contains? @tops (top-of n)))
         cs (atom {})
         unit (new-unit)
-        failed (atom (vec (for [{:keys [file read-error]} @parsed :when read-error] [(str file) (str "read: " read-error)])))]
+        failed (atom (vec (for [{:keys [file read-error]} @parsed :when read-error] [(str file) (str "read: " read-error)])))
+        ;; the classes whose header or members failed to resolve: class -> the failure
+        unresolved (atom {})]
     (binding [env/*compile-set* cs
               a/*unit* unit
               env/*from-source* from-source]
@@ -441,11 +465,19 @@
                        (par-levels names #(some-> (a/decl %) :outer vector)
                                    (fn [n]
                                      (when-not (:headers-done (a/decl n))
-                                       (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))))
+                                       (try (a/resolve-header! n)
+                                            (catch Throwable e
+                                              (let [msg (str "header: " (.getMessage e))]
+                                                (swap! unresolved assoc n msg)
+                                                (swap! failed conj [n msg])))))))
                        (lap :headers)
                        (par-levels names supers-of
                                    (fn [n]
-                                     (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))])))))
+                                     (try (a/resolve-members! n)
+                                          (catch Throwable e
+                                            (let [msg (str "members: " (.getMessage e))]
+                                              (swap! unresolved assoc n msg)
+                                              (swap! failed conj [n msg]))))))
                        (lap :members)
                        (par-levels names supers-of
                                    (fn [n]
@@ -453,12 +485,19 @@
                        (lap :bridges)
                        (doseq [n names]
                          (try (#'a/mark-enum-abstract! n) (catch Throwable e (swap! failed conj [n (str "enum: " (.getMessage e))])))))
+            ;; a class whose header or members did not resolve is not analyzed: its failure is
+            ;; that one, the class it could not resolve named (JCS69 (b)); the analysis would stop
+            ;; at a member the failed step left without a type, with an empty message ("Cannot
+            ;; convert initializer of field  of type \"J\" to "). Marked analyzed, so that an outer
+            ;; class analyzing its member classes in place skips it
             analyze! (fn [n]
-                       (try (a/analyze-class! n)
-                            (catch Throwable e
-                              (swap! (:state (a/decl n)) assoc :analysis-failed (.getMessage e))
-                              (swap! failed conj [n (str "analysis: " (.getMessage e)
-                                                         (some->> (.getCause e) .getMessage (str " / ")))]))))
+                       (if-let [why (get @unresolved n)]
+                         (swap! (:state (a/decl n)) assoc :analyzed true :analysis-failed why)
+                         (try (a/analyze-class! n)
+                              (catch Throwable e
+                                (swap! (:state (a/decl n)) assoc :analysis-failed (.getMessage e))
+                                (swap! failed conj [n (str "analysis: " (.getMessage e)
+                                                           (some->> (.getCause e) .getMessage (str " / ")))])))))
             _ (enter! @parsed)
             names1 @(:order unit)
             _ (resolve! names1)
@@ -578,11 +617,13 @@
                                n (top-names ns forms)]
                            [n (str file)]))
      :failed (let [imports (into {} (for [{:keys [file forms ns]} @parsed :when ns] [(str file) (imported forms)]))
-                   file-of (into {} (for [{:keys [file ns forms]} @parsed :when ns n (top-names ns forms)] [n (str file)]))]
+                   file-of (into {} (for [{:keys [file ns forms]} @parsed :when ns n (top-names ns forms)] [n (str file)]))
+                   named (fn [n msg] (let [f (or (get imports (str n)) (get imports (get file-of (top-of (str n)))))]
+                                       (if f (name-import f (str msg)) msg)))
+                   causes (into {} (for [[n msg] @unresolved] [n (named n msg)]))]
                (vec (sort-by (juxt first second)
-                             (for [[n msg] @failed
-                                   :let [f (or (get imports (str n)) (get imports (get file-of (top-of (str n)))))]]
-                               [n (if f (name-import f (str msg)) msg)]))))
+                             (for [[n msg] @failed]
+                               [n (unresolved-cause causes (named n msg))]))))
      :variants @applied :erased erased}))
 
 (defmacro with-world

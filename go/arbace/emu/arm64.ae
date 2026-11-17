@@ -1,0 +1,149 @@
+(in-ns 'go.arbace.emu) (go/file "arm64.go" :imports [
+
+    ^{:line 3} [crt "arbace/crt"]])
+
+;; AArch64's part of the frame (doc/asm/ARM64-SURVEY.md SH5, AR5): Linux's arm64 layout with ASLR off (48-bit virtual
+;; addresses; read off the VM's own /proc/PID/maps and auxv, never the kernel's source), the initial stack Linux builds for
+;; an arm64 process, and Linux's system calls by name: the generic table's numbers (asm-generic/unistd.h's, arm64's) and
+;; x86-64's, which the kernel layer and crt's Sys take.
+
+
+(go/const ^{:val 183 :doc "EM_AARCH64 is AArch64's e_machine.\n"} EM_AARCH64 183)
+
+
+
+(go/const "Linux's arm64 layout with ASLR off: the stack's top (TASK_SIZE, 1<<48), the top of mmap's area (128 MiB below it: the\nstack's gap), the vdso's and vvar's pages Linux 6.18 maps at the top of mmap's area (vvar 4 pages, vdso 2).\n"
+  ^{:line 16} [^{:val 281474976710656} A64StackTop (<< 1 48)]
+  ^{:line 17} [^{:val 8388608} A64StackSize (<< 8 20)]
+  ^{:line 18} [^{:val 281474842492928} A64MmapTop (- A64StackTop (<< 128 20))]
+  ^{:line 19} [^{:val 24576} A64VdsoSize (* 6 pageSize)]
+  ^{:line 20} [^{:val 4720} a64MinSigStk 4720]
+  ^{:line 21} [^{:val 800325627} a64Hwcap 800325627] ; AT_HWCAP: FP, ASIMD, FPHP, ASIMDHP (queue 280, AR15: FEAT_FP16), ASIMDRDM, JSCVT, FCMA, ASIMDDP, ASIMDFHM (queue 282, AR16), AES, PMULL, SHA1, SHA2, SHA3, SHA512 (queue 283, AR17), CRC32, ATOMICS (LSE, a64i's since AR5), LRCPC, USCAT (FEAT_LSE2's alignment), ILRCPC, FLAGM (queue 285, AR18), DCPOP, DIT, SB (queue 288, AR19), CPUID (queue 291, AR20: the ID registers Linux emulates, a64i's own values, a64i.IDReg)
+  [^{:val 385} a64Hwcap2 385]) ; AT_HWCAP2: FLAGM2, FRINT (queue 285, AR18), DCPODP (queue 288, AR19)
+
+
+
+^{:go/end 27} (go/func NewKernelA64 "NewKernelA64 is the kernel of an arm64 program in a: its break from img, mmap's area below arm64's vdso, uname's\nmachine aarch64 (queue 311).\n" ^{:tag (* Kernel)} [^{:tag (* AS)} a ^{:tag (* Image)} img ^{:tag (* crt/Sys)} sys]
+  (set! (.-Machine sys) "aarch64")
+  (addr (lit Kernel :AS a :Sys sys :BrkBase (.-BrkBase img) :Brk (.-BrkBase img) :MmapNext (- A64MmapTop A64VdsoSize) :StackLow (- A64StackTop A64StackSize))))
+
+
+
+
+
+
+^{:go/end 81} (go/func StackA64 "StackA64 builds the initial stack as Linux gives it to a new arm64 process (the same layout as x86-64's: from the top,\neight zero bytes, the executable's name, the environment's and the arguments' strings, the platform string \"aarch64\",\nthe 16 random bytes, then the auxiliary vector in Linux 6.18's order, envp, argv and argc; SP 16-aligned at argc). No\nAT_SYSINFO_EHDR: no vdso.\n" ^uint64 [^{:tag (* AS)} a ^{:tag (* Image)} img ^{:tag (slice string)} argv ^{:tag (slice string)} envp ^{:tag (array 16 byte)} random]
+  (.Map a (- A64StackTop A64StackSize) A64StackSize (bit-or PermR PermW) "stack")
+  (let [p (conv uint64 (- A64StackTop 8))
+      ^{:line 36} put ^{:go/end 40} (fn ^uint64 [^string s]
+        (set! p - (conv uint64 (+ (len s) 1)))
+        (.WriteBytes a p (append (conv (slice byte) s) 0))
+        ^{:line 39} p)
+
+      ^{:line 41} execfn (put (aget argv 0))
+      ^{:line 42} envAddr (make (slice uint64) (len envp))]
+    (for [i (- (len envp) 1)] (>= i 0) (dec! i)
+      (aset envAddr i (put (aget envp i))))
+
+    (let [argAddr (make (slice uint64) (len argv))]
+      (for [i (- (len argv) 1)] (>= i 0) (dec! i)
+        (aset argAddr i (put (aget argv i))))
+
+      (set! p bit-and-not 15)
+      (let [platform (put "aarch64")]
+        (set! p - 16)
+        (let [rnd p]
+          (.WriteBytes a rnd (subslice random))
+          (let [aux (lit (slice (array 2 uint64)) (lit _ 51 a64MinSigStk) (lit _ 16 a64Hwcap) (lit _ 6 pageSize) (lit _ 17 100) (lit _ 3 (.-Phdr img)) (lit _ 4 (.-Phent img)) (lit _ 5 (.-Phnum img)) (lit _ 7 0) (lit _ 8 0) (lit _ 9 (.-Entry img)) (lit _ 11 0) (lit _ 12 0) (lit _ 13 0) (lit _ 14 0) (lit _ 23 0) (lit _ 25 rnd) (lit _ 26 a64Hwcap2) (lit _ 29 0) (lit _ 31 execfn) (lit _ 15 platform) (lit _ 27 28) (lit _ 28 32) (lit _ 0 0))
+              ^{:line 56} words (+ 1 (len argv) 1 (len envp) 1 (* 2 (len aux)))
+              ^{:line 57} sp (bit-and-not (- p (conv uint64 (* 8 words))) 15)
+              ^{:line 58} w sp
+              ^{:line 59} put8 ^{:go/end 66} (fn [^uint64 v]
+                (let [^{:tag (array 8 byte)} b (zero (array 8 byte))]
+                  (for [k 0] (< k 8) (inc! k)
+                    (aset b k (conv byte (>> v (* 8 k)))))
+
+                  (.WriteBytes a w (subslice b))
+                  (set! w + 8)))]
+
+            (put8 (conv uint64 (len argv)))
+            (range [_ x argAddr]
+              (put8 x))
+
+            (put8 0)
+            (range [_ x envAddr]
+              (put8 x))
+
+            (put8 0)
+            (range [_ kv aux]
+              (put8 (aget kv 0))
+              (put8 (aget kv 1)))
+
+            ^{:line 80} sp))))))
+
+
+
+(go/type Syscall "Syscall is a Linux system call by name with its numbers on arm64 (the generic table) and on x86-64 (-1: none).\n" (struct
+    ^{:line 85 :tag string} Name
+    ^{:line 86 :tag int} Arm64 ^int Amd64))
+
+
+
+(go/var ^{:doc "Syscalls are the calls the frame knows by name. An arm64 call the table lacks is ENOSYS.\n"} Syscalls (lit (slice Syscall)
+    (lit _ "io_setup" 0 206) (lit _ "getcwd" 17 79) (lit _ "dup" 23 32) (lit _ "dup3" 24 292) (lit _ "fcntl" 25 72) (lit _ "ioctl" 29 16)
+    (lit _ "mkdirat" 34 258) (lit _ "unlinkat" 35 263) (lit _ "symlinkat" 36 266) (lit _ "linkat" 37 265) (lit _ "renameat" 38 264) (lit _ "ftruncate" 46 77) (lit _ "fallocate" 47 285) (lit _ "faccessat" 48 269) (lit _ "chdir" 49 80) (lit _ "fchmodat" 53 268) (lit _ "fchownat" 54 260)
+    (lit _ "openat" 56 257) (lit _ "close" 57 3) (lit _ "pipe2" 59 293) (lit _ "getdents64" 61 217) (lit _ "lseek" 62 8) (lit _ "read" 63 0)
+    (lit _ "write" 64 1) (lit _ "readv" 65 19) (lit _ "writev" 66 20) (lit _ "pread64" 67 17) (lit _ "pwrite64" 68 18)
+    (lit _ "pselect6" 72 270) (lit _ "ppoll" 73 271) (lit _ "readlinkat" 78 267) (lit _ "newfstatat" 79 -1) (lit _ "fstat" 80 -1) (lit _ "fsync" 82 74) (lit _ "fdatasync" 83 75) (lit _ "utimensat" 88 280)
+    (lit _ "exit" 93 60) (lit _ "exit_group" 94 231) (lit _ "set_tid_address" 96 218) (lit _ "futex" 98 202)
+    (lit _ "set_robust_list" 99 273) (lit _ "nanosleep" 101 35) (lit _ "clock_gettime" 113 228) (lit _ "clock_getres" 114 229)
+    (lit _ "clock_nanosleep" 115 230) (lit _ "sched_getaffinity" 123 204) (lit _ "sched_yield" 124 24) (lit _ "kill" 129 62) (lit _ "tkill" 130 200) (lit _ "tgkill" 131 234)
+    (lit _ "sigaltstack" 132 131) (lit _ "rt_sigaction" 134 13) (lit _ "rt_sigprocmask" 135 14) (lit _ "rt_sigreturn" 139 15)
+    (lit _ "uname" 160 63) (lit _ "umask" 166 95) (lit _ "getrlimit" 163 97) (lit _ "setrlimit" 164 160) (lit _ "prctl" 167 157) (lit _ "gettimeofday" 169 96)
+    (lit _ "getpid" 172 39) (lit _ "getppid" 173 110) (lit _ "getuid" 174 102) (lit _ "geteuid" 175 107) (lit _ "getgid" 176 104)
+    (lit _ "getegid" 177 108) (lit _ "gettid" 178 186) (lit _ "brk" 214 12) (lit _ "munmap" 215 11) (lit _ "mremap" 216 25)
+    (lit _ "clone" 220 56) (lit _ "execve" 221 59) (lit _ "mmap" 222 9) (lit _ "mprotect" 226 10) (lit _ "msync" 227 26) (lit _ "madvise" 233 28)
+    (lit _ "wait4" 260 61) (lit _ "prlimit64" 261 302) (lit _ "getrandom" 278 318) (lit _ "rseq" 293 334) (lit _ "clone3" 435 435) (lit _ "fchmodat2" 452 452)))
+
+
+(go/var ^{:tag (map int Syscall)} byArm64)
+
+
+^{:go/end 119} (go/func SyscallA64 "SyscallA64 is arm64's call n by name: its entry, false when the table lacks it.\n" [^int n] :results [Syscall bool]
+  (when (== byArm64 nil)
+    (set! byArm64 (lit (map int Syscall)))
+    (range [_ s Syscalls]
+      (aset byArm64 (.-Arm64 s) s)))
+
+
+  (let [(values s ok) (aget byArm64 n)]
+    (return s ok)))
+
+
+
+
+
+^{:go/end 129} (go/method SyscallByName "SyscallByName performs the call named name with the frame's kernel (its x86-64 number is the kernel layer's and crt's):\nthe result, or the process's end. A call the frame knows only by name (no x86-64 number: arm64's own struct layouts,\nnewfstatat and fstat) is ENOSYS.\n" [^{:tag (* Kernel)} k ^Syscall s ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6] :results [int64 (* Exited)]
+  (when (< (.-Amd64 s) 0)
+    (return (- eNOSYS) nil))
+
+  (.Syscall k (conv uint64 (.-Amd64 s)) a1 a2 a3 a4 a5 a6))
+
+
+
+(go/func OpenFlagsFromA64 "OpenFlagsFromA64 is arm64's open flags (openat's, fcntl F_SETFL's) as x86-64's, crt's (queue 309): four differ,\narch/arm64's uapi asm/fcntl.h's O_DIRECTORY 040000, O_NOFOLLOW 0100000, O_DIRECT 0200000 and O_LARGEFILE 0400000 against\nx86-64's O_DIRECT 040000, O_LARGEFILE 0100000, O_DIRECTORY 0200000 and O_NOFOLLOW 0400000 (the same four bits); the rest are\nasm-generic's on both.\n" ^uint64 [^uint64 f]
+  (moveOpenFlags f 0))
+
+
+(go/func OpenFlagsToA64 "OpenFlagsToA64 is crt's (x86-64's) open flags as arm64's (F_GETFL's result; queue 309).\n" ^uint64 [^uint64 f]
+  (moveOpenFlags f 1))
+
+
+(go/func moveOpenFlags "moveOpenFlags moves the four flags arm64 and x86-64 place differently from column from (0 arm64, 1 x86-64) to the other.\n" ^uint64 [^uint64 f ^int from]
+  (let [pairs (lit (array 4 (array 2 uint64)) (lit _ 040000 0200000) (lit _ 0100000 0400000) (lit _ 0200000 040000) (lit _ 0400000 0100000))
+        r (bit-and-not f 0740000)]
+    (range [_ p pairs]
+      (when (!= (bit-and f (aget p from)) 0)
+        (set! r bit-or (aget p (- 1 from)))))
+
+    r))

@@ -1,0 +1,518 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/CipherCore.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.security AlgorithmParameters
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        ProviderException
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec InvalidParameterSpecException)
+        '(java.util Arrays Locale)
+        '(javax.crypto BadPaddingException
+                       Cipher
+                       IllegalBlockSizeException
+                       NoSuchPaddingException
+                       ShortBufferException)
+        '(javax.crypto.spec IvParameterSpec RC2ParameterSpec))
+
+(defclass ^:final CipherCore
+  (field ^:private ^:final ^byte/1 buffer)
+
+  (field ^:private ^:final ^int blockSize)
+
+  (field ^:private ^int unitBytes)
+
+  (field ^:private ^int buffered 0)
+
+  (field ^:private ^int minBytes 0)
+
+  (field ^:private ^int diffBlocksize)
+
+  (field ^:private ^Padding padding)
+
+  (field ^:private ^FeedbackCipher cipher)
+
+  (field ^:private ^int cipherMode ECB_MODE)
+
+  (field ^:private ^boolean decrypting false)
+
+  (field ^:private ^:static ^:final ^int ECB_MODE 0)
+
+  (field ^:private ^:static ^:final ^int CBC_MODE 1)
+
+  (field ^:private ^:static ^:final ^int CFB_MODE 2)
+
+  (field ^:private ^:static ^:final ^int OFB_MODE 3)
+
+  (field ^:private ^:static ^:final ^int PCBC_MODE 4)
+
+  (field ^:private ^:static ^:final ^int CTR_MODE 5)
+
+  (field ^:private ^:static ^:final ^int CTS_MODE 6)
+
+  (constructor [this ^SymmetricCipher impl ^int blkSize]
+    (set! blockSize blkSize)
+    (set! unitBytes blkSize)
+    (set! diffBlocksize blkSize)
+    (set! buffer (new byte/1 (unchecked-multiply-int blockSize 2)))
+    (set! cipher (ElectronicCodeBook. impl))
+    (set! padding (PKCS5Padding. blockSize)))
+
+  (method setMode :throws [NoSuchAlgorithmException] ^void [this ^String mode]
+    (when (nil? mode) (throw (NoSuchAlgorithmException. "null mode")))
+    (let [modeUpperCase (.toUpperCase mode Locale/ENGLISH)]
+      (when-not (.equals modeUpperCase "ECB")
+        (let [rawImpl (.getEmbeddedCipher cipher)]
+          (cond
+            (.equals modeUpperCase "CBC")
+              (do (set! cipherMode CBC_MODE) (set! cipher (CipherBlockChaining. rawImpl)))
+            (.equals modeUpperCase "CTS")
+              (do
+                (set! cipherMode CTS_MODE)
+                (set! cipher (CipherTextStealing. rawImpl))
+                (set! minBytes (unchecked-add-int blockSize 1))
+                (set! padding nil))
+            (.equals modeUpperCase "CTR")
+              (do
+                (set! cipherMode CTR_MODE)
+                (set! cipher (CounterMode. rawImpl))
+                (set! unitBytes 1)
+                (set! padding nil))
+            (.startsWith modeUpperCase "CFB")
+              (do
+                (set! cipherMode CFB_MODE)
+                (set! unitBytes (CipherCore/getNumOfUnit mode (.length "CFB") blockSize))
+                (set! cipher (CipherFeedback. rawImpl unitBytes)))
+            (.startsWith modeUpperCase "OFB")
+              (do
+                (set! cipherMode OFB_MODE)
+                (set! unitBytes (CipherCore/getNumOfUnit mode (.length "OFB") blockSize))
+                (set! cipher (OutputFeedback. rawImpl unitBytes)))
+            (.equals modeUpperCase "PCBC")
+              (do (set! cipherMode PCBC_MODE) (set! cipher (PCBC. rawImpl)))
+            :else (throw (NoSuchAlgorithmException. (java-str "Cipher mode: " mode " not found"))))))))
+
+  (method ^:private ^:static getNumOfUnit :throws [NoSuchAlgorithmException] ^int [^String mode
+                                                                                   ^int offset
+                                                                                   ^int blockSize]
+    (let [^:mutable result blockSize]
+      (when (> (.length mode) offset)
+        (let [^:mutable ^int numInt 0]
+          (try
+            (set! numInt (Integer/parseInt (.substring mode offset)))
+            (set! result (bit-shift-right-int numInt 3))
+            (catch NumberFormatException e
+              (throw (NoSuchAlgorithmException.
+                       (java-str "Algorithm mode: " mode " not implemented")))))
+          (when (or (not (== (unchecked-remainder-int numInt 8) 0)) (> result blockSize))
+            (throw (NoSuchAlgorithmException. (java-str "Invalid algorithm mode: " mode))))))
+      result))
+
+  (method setPadding :throws [NoSuchPaddingException] ^void [this ^String paddingScheme]
+    (when (nil? paddingScheme) (throw (NoSuchPaddingException. "null padding")))
+    (cond
+      (.equalsIgnoreCase paddingScheme "NoPadding") (set! padding nil)
+      (.equalsIgnoreCase paddingScheme "ISO10126Padding")
+        (set! padding (ISO10126Padding. blockSize))
+      (.equalsIgnoreCase paddingScheme "PKCS5Padding") (set! padding (PKCS5Padding. blockSize))
+      :else
+        (throw (NoSuchPaddingException. (java-str "Padding: " paddingScheme " not implemented"))))
+    (when (and (some? padding) (or (== cipherMode CTR_MODE) (== cipherMode CTS_MODE)))
+      (set! padding nil)
+      (let [^:mutable ^String modeStr nil]
+        (switch cipherMode CTR_MODE (set! modeStr "CTR") CTS_MODE (set! modeStr "CTS") nil)
+        (when (some? modeStr)
+          (throw (NoSuchPaddingException. (java-str modeStr " mode must be used with NoPadding")))))))
+
+  (method getOutputSize ^int [this ^int inputLen]
+    (.getOutputSizeByOperation this inputLen true))
+
+  (method ^:private getOutputSizeByOperation ^int [this ^int inputLen ^boolean isDoFinal]
+    (let [^:mutable totalLen buffered]
+      (set! totalLen (Math/addExact totalLen inputLen))
+      (when (and (some? padding) (not decrypting))
+        (if (not (== unitBytes blockSize))
+            (if (< totalLen diffBlocksize)
+                (set! totalLen diffBlocksize)
+                (let [residue (unchecked-remainder-int
+                                (unchecked-subtract-int totalLen diffBlocksize)
+                                blockSize)]
+                  (set! totalLen
+                        (Math/addExact totalLen (unchecked-subtract-int blockSize residue)))))
+            (set! totalLen (Math/addExact totalLen (.padLength padding totalLen)))))
+      totalLen))
+
+  (method getIV ^byte/1 [this]
+    (let [iv (.getIV cipher)] (when (some? iv) (.clone iv))))
+
+  (method getParameters ^AlgorithmParameters [this ^String algName]
+    (when-not (== cipherMode ECB_MODE)
+      (let [^:mutable ^AlgorithmParameters params nil
+            ^:mutable ^AlgorithmParameterSpec spec nil
+            ^:mutable iv (.getIV this)]
+        (when (nil? iv) (set! iv (new byte/1 blockSize)) (.nextBytes (SunJCE/getRandom) iv))
+        (if (.equals algName "RC2")
+            (let [rawImpl (cast RC2Crypt (.getEmbeddedCipher cipher))]
+              (set! spec (RC2ParameterSpec. (.getEffectiveKeyBits rawImpl) iv)))
+            (set! spec (IvParameterSpec. iv)))
+        (try
+          (set! params (AlgorithmParameters/getInstance algName (SunJCE/getInstance)))
+          (.init params spec)
+          (catch NoSuchAlgorithmException nsae
+            (throw (RuntimeException.
+                     (java-str "Cannot find "
+                               algName
+                               " AlgorithmParameters implementation in SunJCE provider"))))
+          (catch InvalidParameterSpecException ipse
+            (throw (RuntimeException. (java-str (.getClass spec) " not supported")))))
+        params)))
+
+  (method init :throws [InvalidKeyException] ^void [this ^int opmode ^Key key ^SecureRandom random]
+    (try
+      (.init this opmode key (cast AlgorithmParameterSpec nil) random)
+      (catch InvalidAlgorithmParameterException e (throw (InvalidKeyException. (.getMessage e))))))
+
+  (method init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                       ^int opmode
+                                                                                       ^Key key
+                                                                                       ^AlgorithmParameterSpec params
+                                                                                       ^:mutable ^SecureRandom random]
+    (set! decrypting (or (== opmode Cipher/DECRYPT_MODE) (== opmode Cipher/UNWRAP_MODE)))
+    (let [keyBytes (CipherCore/getKeyBytes key)
+          ^:mutable ^byte/1 ivBytes nil]
+      (try
+        (when (some? params)
+          (cond
+            (instance? IvParameterSpec params)
+              (do
+                (set! ivBytes (.getIV (cast IvParameterSpec params)))
+                (when (or (nil? ivBytes) (not (== (alength ivBytes) blockSize)))
+                  (throw (InvalidAlgorithmParameterException.
+                           (java-str "Wrong IV length: must be " blockSize " bytes long")))))
+            (instance? RC2ParameterSpec params)
+              (do
+                (set! ivBytes (.getIV (cast RC2ParameterSpec params)))
+                (when (and (some? ivBytes) (not (== (alength ivBytes) blockSize)))
+                  (throw (InvalidAlgorithmParameterException.
+                           (java-str "Wrong IV length: must be " blockSize " bytes long")))))
+            :else
+              (throw (InvalidAlgorithmParameterException.
+                       (java-str "Unsupported parameter: " params)))))
+        (if (== cipherMode ECB_MODE)
+            (when (some? ivBytes)
+              (throw (InvalidAlgorithmParameterException. "ECB mode cannot use IV")))
+            (when (nil? ivBytes)
+              (when decrypting (throw (InvalidAlgorithmParameterException. "Parameters missing")))
+              (when (nil? random) (set! random (SunJCE/getRandom)))
+              (set! ivBytes (new byte/1 blockSize))
+              (.nextBytes random ivBytes)))
+        (set! buffered 0)
+        (set! diffBlocksize blockSize)
+        (let [algorithm (.getAlgorithm key)] (.init cipher decrypting algorithm keyBytes ivBytes))
+        (finally (Arrays/fill keyBytes (unchecked-byte 0))))))
+
+  (method init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                       ^int opmode
+                                                                                       ^Key key
+                                                                                       ^AlgorithmParameters params
+                                                                                       ^SecureRandom random]
+    (let [^:mutable ^AlgorithmParameterSpec spec nil
+          ^:mutable ^String paramType nil]
+      (when (some? params)
+        (try
+          (set! paramType "IV")
+          (set! spec (.getParameterSpec params IvParameterSpec))
+          (catch InvalidParameterSpecException ipse
+            (throw (InvalidAlgorithmParameterException.
+                     (java-str "Wrong parameter type: " paramType " expected"))))))
+      (.init this opmode key spec random)))
+
+  (method ^:static getKeyBytes :throws [InvalidKeyException] ^byte/1 [^Key key]
+    (when (nil? key) (throw (InvalidKeyException. "No key given")))
+    (when-not (.equalsIgnoreCase "RAW" (.getFormat key))
+      (throw (InvalidKeyException. "Wrong format: RAW bytes needed")))
+    (let [keyBytes (.getEncoded key)]
+      (when (nil? keyBytes) (throw (InvalidKeyException. "RAW key bytes missing")))
+      keyBytes))
+
+  (method update ^byte/1 [this ^byte/1 input ^int inputOffset ^int inputLen]
+    (let [^:mutable ^byte/1 output nil]
+      (try
+        (set! output (new byte/1 (.getOutputSizeByOperation this inputLen false)))
+        (let [len (.update this input inputOffset inputLen output 0)]
+          (if (== len (alength output))
+              output
+              (let [copy (Arrays/copyOf output len)]
+                (when decrypting (Arrays/fill output (unchecked-byte 0x00)))
+                copy)))
+        (catch ShortBufferException e (throw (ProviderException. "Unexpected exception" e))))))
+
+  (method update :throws [ShortBufferException] ^int [this ^:mutable ^byte/1 input
+                                                      ^:mutable ^int inputOffset
+                                                      ^:mutable ^int inputLen ^byte/1 output
+                                                      ^:mutable ^int outputOffset]
+    (let [^:mutable len (Math/addExact buffered inputLen)]
+      (set! len (unchecked-subtract-int len minBytes))
+      (when (and (some? padding) decrypting) (set! len (unchecked-subtract-int len blockSize)))
+      (set! len
+            (if (> len 0) (unchecked-subtract-int len (unchecked-remainder-int len unitBytes)) 0))
+      (when (or (nil? output) (< (unchecked-subtract-int (alength output) outputOffset) len))
+        (throw (ShortBufferException.
+                 (java-str "Output buffer must be (at least) " len " bytes long"))))
+      (let [^:mutable ^int outLen 0]
+        (when-not (== len 0)
+          (when (and (and (identical? input output)
+                          (< (unchecked-subtract-int outputOffset inputOffset) inputLen))
+                     (< (unchecked-subtract-int inputOffset outputOffset) (alength buffer)))
+            (set! input (Arrays/copyOfRange input inputOffset (Math/addExact inputOffset inputLen)))
+            (set! inputOffset 0))
+          (if (<= len buffered)
+              (do
+                (if decrypting
+                    (set! outLen (.decrypt cipher buffer 0 len output outputOffset))
+                    (set! outLen (.encrypt cipher buffer 0 len output outputOffset)))
+                (set! buffered (unchecked-subtract-int buffered len))
+                (when-not (== buffered 0) (System/arraycopy buffer len buffer 0 buffered)))
+              (let [^:mutable inputConsumed (unchecked-subtract-int len buffered)
+                    ^:mutable ^int temp 0]
+                (when (> buffered 0)
+                  (let [bufferCapacity (unchecked-subtract-int (alength buffer) buffered)]
+                    (when-not (== bufferCapacity 0)
+                      (set! temp (Math/min bufferCapacity inputConsumed))
+                      (when-not (== unitBytes blockSize)
+                        (set! temp
+                              (unchecked-subtract-int
+                                temp
+                                (unchecked-remainder-int (Math/addExact buffered temp) unitBytes))))
+                      (System/arraycopy input inputOffset buffer buffered temp)
+                      (set! inputOffset (Math/addExact inputOffset temp))
+                      (set! inputConsumed (unchecked-subtract-int inputConsumed temp))
+                      (set! inputLen (unchecked-subtract-int inputLen temp))
+                      (set! buffered (Math/addExact buffered temp)))
+                    (if decrypting
+                        (set! outLen (.decrypt cipher buffer 0 buffered output outputOffset))
+                        (do
+                          (set! outLen (.encrypt cipher buffer 0 buffered output outputOffset))
+                          (Arrays/fill buffer (unchecked-byte 0x00))))
+                    (set! outputOffset (Math/addExact outputOffset outLen))
+                    (set! buffered 0)))
+                (when (> inputConsumed 0)
+                  (if decrypting
+                      (set! outLen
+                            (unchecked-add-int outLen
+                                               (.decrypt
+                                                 cipher
+                                                 input
+                                                 inputOffset
+                                                 inputConsumed
+                                                 output
+                                                 outputOffset)))
+                      (set! outLen
+                            (unchecked-add-int outLen
+                                               (.encrypt
+                                                 cipher
+                                                 input
+                                                 inputOffset
+                                                 inputConsumed
+                                                 output
+                                                 outputOffset))))
+                  (set! inputOffset (unchecked-add-int inputOffset inputConsumed))
+                  (set! inputLen (unchecked-subtract-int inputLen inputConsumed)))))
+          (when-not (== unitBytes blockSize)
+            (if (< len diffBlocksize)
+                (set! diffBlocksize (unchecked-subtract-int diffBlocksize len))
+                (set! diffBlocksize
+                      (unchecked-subtract-int blockSize
+                                              (unchecked-remainder-int
+                                                (unchecked-subtract-int len diffBlocksize)
+                                                blockSize))))))
+        (when (> inputLen 0)
+          (System/arraycopy input inputOffset buffer buffered inputLen)
+          (set! buffered (Math/addExact buffered inputLen)))
+        outLen)))
+
+  (method doFinal :throws [IllegalBlockSizeException BadPaddingException] ^byte/1 [this
+                                                                                   ^byte/1 input
+                                                                                   ^int inputOffset
+                                                                                   ^int inputLen]
+    (try
+      (let [output (new byte/1 (.getOutputSizeByOperation this inputLen true))
+            finalBuf (.prepareInputBuffer this input inputOffset inputLen output 0)
+            ^int finalOffset (if (identical? finalBuf input) inputOffset 0)
+            ^int finalBufLen (if (identical? finalBuf input) inputLen (alength finalBuf))
+            outLen (.fillOutputBuffer this finalBuf finalOffset output 0 finalBufLen input)]
+        (.endDoFinal this)
+        (if (< outLen (alength output))
+            (let [copy (Arrays/copyOf output outLen)]
+              (when decrypting (Arrays/fill output (unchecked-byte 0x00)))
+              copy)
+            output))
+      (catch ShortBufferException e (throw (ProviderException. "Unexpected exception" e)))))
+
+  (method doFinal :throws [IllegalBlockSizeException ShortBufferException BadPaddingException] ^int [this
+                                                                                                     ^byte/1 input
+                                                                                                     ^int inputOffset
+                                                                                                     ^int inputLen
+                                                                                                     ^byte/1 output
+                                                                                                     ^int outputOffset]
+    (let [estOutSize (.getOutputSizeByOperation this inputLen true)
+          outputCapacity (.checkOutputCapacity this output outputOffset estOutSize)
+          ^:mutable offset outputOffset
+          finalBuf (.prepareInputBuffer this input inputOffset inputLen output outputOffset)
+          ^:mutable ^byte/1 internalOutput nil
+          ^int finalOffset (if (identical? finalBuf input) inputOffset 0)
+          ^int finalBufLen (if (identical? finalBuf input) inputLen (alength finalBuf))]
+      (when decrypting
+        (when (< outputCapacity estOutSize) (.save cipher))
+        (when (or (< outputCapacity estOutSize) (some? padding))
+          (set! internalOutput (new byte/1 estOutSize))
+          (set! offset 0)))
+      (let [^byte/1 outBuffer (if (some? internalOutput) internalOutput output)
+            outLen (.fillOutputBuffer this finalBuf finalOffset outBuffer offset finalBufLen input)]
+        (when decrypting
+          (when (< outputCapacity outLen)
+            (.restore cipher)
+            (throw (ShortBufferException.
+                     (java-str "Output buffer too short: "
+                               outputCapacity
+                               " bytes given, "
+                               outLen
+                               " bytes needed"))))
+          (when (some? internalOutput)
+            (System/arraycopy internalOutput 0 output outputOffset outLen)
+            (Arrays/fill internalOutput (unchecked-byte 0x00))))
+        (.endDoFinal this)
+        outLen)))
+
+  (method ^:private endDoFinal ^void [this]
+    (set! buffered 0)
+    (set! diffBlocksize blockSize)
+    (when-not (== cipherMode ECB_MODE) (.reset cipher)))
+
+  (method ^:private unpad :throws [BadPaddingException] ^int [this ^int outLen ^int off
+                                                              ^byte/1 outWithPadding]
+    (let [padStart (.unpad padding outWithPadding off outLen)]
+      (when (< padStart 0)
+        (throw
+          (BadPaddingException.
+            "Given final block not properly padded. Such issues can arise if a bad key is used during decryption.")))
+      (unchecked-subtract-int padStart off)))
+
+  (method ^:private prepareInputBuffer :throws [IllegalBlockSizeException ShortBufferException] ^byte/1 [this
+                                                                                                         ^byte/1 input
+                                                                                                         ^int inputOffset
+                                                                                                         ^int inputLen
+                                                                                                         ^byte/1 output
+                                                                                                         ^int outputOffset]
+    (let [len (Math/addExact buffered inputLen)
+          totalLen len
+          ^:mutable ^int paddingLen 0]
+      (cond
+        (not (== unitBytes blockSize))
+          (if (< totalLen diffBlocksize)
+              (set! paddingLen (unchecked-subtract-int diffBlocksize totalLen))
+              (set! paddingLen
+                    (unchecked-subtract-int blockSize
+                                            (unchecked-remainder-int
+                                              (unchecked-subtract-int totalLen diffBlocksize)
+                                              blockSize))))
+        (some? padding) (set! paddingLen (.padLength padding totalLen)))
+      (when (and (and (and decrypting (some? padding)) (> paddingLen 0))
+                 (not (== paddingLen blockSize)))
+        (throw (IllegalBlockSizeException.
+                 (java-str "Input length must be multiple of "
+                           blockSize
+                           " when decrypting with padded cipher"))))
+      (if (or (or (not (== buffered 0)) (and (not decrypting) (some? padding)))
+              (and (and (identical? input output)
+                        (< (unchecked-subtract-int outputOffset inputOffset) inputLen))
+                   (< (unchecked-subtract-int inputOffset outputOffset) (alength buffer))))
+          (let [^:mutable ^byte/1 finalBuf nil]
+            (when (or decrypting (nil? padding)) (set! paddingLen 0))
+            (set! finalBuf (new byte/1 (Math/addExact len paddingLen)))
+            (when-not (== buffered 0)
+              (System/arraycopy buffer 0 finalBuf 0 buffered)
+              (when-not decrypting (Arrays/fill buffer (unchecked-byte 0x00))))
+            (when-not (== inputLen 0)
+              (System/arraycopy input inputOffset finalBuf buffered inputLen))
+            (when-not (== paddingLen 0)
+              (.padWithLen padding finalBuf (Math/addExact buffered inputLen) paddingLen))
+            finalBuf)
+          input)))
+
+  (method ^:private fillOutputBuffer :throws [BadPaddingException IllegalBlockSizeException] ^int [this
+                                                                                                   ^byte/1 finalBuf
+                                                                                                   ^int finalOffset
+                                                                                                   ^byte/1 output
+                                                                                                   ^int outOfs
+                                                                                                   ^int finalBufLen
+                                                                                                   ^byte/1 input]
+    (let [^:mutable ^int len 0]
+      (try
+        (set! len (.finalNoPadding this finalBuf finalOffset output outOfs finalBufLen))
+        (when (and decrypting (some? padding)) (set! len (.unpad this len outOfs output)))
+        len
+        (finally
+          (when (and (not decrypting) (not (identical? finalBuf input)))
+            (Arrays/fill finalBuf (unchecked-byte 0x00)))))))
+
+  (method ^:private checkOutputCapacity :throws [ShortBufferException] ^int [this ^byte/1 output
+                                                                             ^int outputOffset
+                                                                             ^int estOutSize]
+    (let [outputCapacity (unchecked-subtract-int (alength output) outputOffset)
+          ^int minOutSize (if decrypting (unchecked-subtract-int estOutSize blockSize) estOutSize)]
+      (when (or (nil? output) (< outputCapacity minOutSize))
+        (throw (ShortBufferException.
+                 (java-str "Output buffer must be (at least) " minOutSize " bytes long"))))
+      outputCapacity))
+
+  (method ^:private finalNoPadding :throws [IllegalBlockSizeException] ^int [this ^byte/1 in
+                                                                             ^int inOfs ^byte/1 out
+                                                                             ^int outOfs ^int len]
+    (if (or (nil? in) (== len 0))
+        0
+        (do
+          (when (and (and (and (not (== cipherMode CFB_MODE)) (not (== cipherMode OFB_MODE)))
+                          (not (== (unchecked-remainder-int len unitBytes) 0)))
+                     (not (== cipherMode CTS_MODE)))
+            (if (some? padding)
+                (throw (IllegalBlockSizeException.
+                         (java-str "Input length (with padding) not multiple of "
+                                   unitBytes
+                                   " bytes")))
+                (throw (IllegalBlockSizeException.
+                         (java-str "Input length not multiple of " unitBytes " bytes")))))
+          (let [^int outLen (if decrypting
+                                (.decryptFinal cipher in inOfs len out outOfs)
+                                (.encryptFinal cipher in inOfs len out outOfs))]
+            outLen))))
+
+  (method wrap :throws [IllegalBlockSizeException InvalidKeyException] ^byte/1 [this ^Key key]
+    (let [^:mutable ^byte/1 result nil]
+      (try
+        (let [encodedKey (.getEncoded key)]
+          (when (or (nil? encodedKey) (== (alength encodedKey) 0))
+            (throw (InvalidKeyException. "Cannot get an encoding of the key to be wrapped")))
+          (try
+            (set! result (.doFinal this encodedKey 0 (alength encodedKey)))
+            (finally (Arrays/fill encodedKey (unchecked-byte 0)))))
+        (catch BadPaddingException e))
+      result))
+
+  (method unwrap :throws [InvalidKeyException NoSuchAlgorithmException] ^Key [this
+                                                                              ^byte/1 wrappedKey
+                                                                              ^String wrappedKeyAlgorithm
+                                                                              ^int wrappedKeyType]
+    (let [^:mutable ^byte/1 encodedKey nil]
+      (try
+        (set! encodedKey (.doFinal this wrappedKey 0 (alength wrappedKey)))
+        (catch BadPaddingException ePadding
+          (throw (InvalidKeyException. "The wrapped key is not padded correctly")))
+        (catch IllegalBlockSizeException eBlockSize
+          (throw (InvalidKeyException. "The wrapped key does not have the correct length"))))
+      (try
+        (ConstructKeys/constructKey encodedKey wrappedKeyAlgorithm wrappedKeyType)
+        (finally (Arrays/fill encodedKey (unchecked-byte 0)))))))

@@ -1,0 +1,123 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/ObjectTable.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport)
+
+(import '(java.lang.ref ReferenceQueue)
+        '(java.rmi NoSuchObjectException Remote)
+        '(java.rmi.dgc VMID)
+        '(java.rmi.server ExportException ObjID)
+        '(java.util HashMap Map)
+        '(sun.rmi.runtime Log RuntimeUtil))
+
+(defclass ^:public ^:final ObjectTable
+  (field ^:private ^:static ^:final ^long gcInterval
+    (Long/getLong "sun.rmi.dgc.server.gcInterval" 3600000))
+
+  (field ^:private ^:static ^:final tableLock (Object.))
+
+  (field ^:private ^:static ^:final ^{:tag (Map ObjectEndpoint Target)} objTable (HashMap.))
+
+  (field ^:private ^:static ^:final ^{:tag (Map WeakRef Target)} implTable (HashMap.))
+
+  (field ^:private ^:static ^:final keepAliveLock (Object.))
+
+  (field ^:private ^:static ^int keepAliveCount 0)
+
+  (field ^:private ^:static ^Thread reaper nil)
+
+  (field ^:static ^:final ^{:tag (ReferenceQueue Object)} reapQueue (ReferenceQueue.))
+
+  (field ^:private ^:static ^GC$LatencyRequest gcLatencyRequest nil)
+
+  (constructor ^:private [this])
+
+  (method ^:static getTarget ^Target [^ObjectEndpoint oe]
+    (locking tableLock (cast Target (.get objTable oe))))
+
+  (method ^:public ^:static getTarget ^Target [^Remote impl]
+    (locking tableLock (cast Target (.get implTable (WeakRef. impl)))))
+
+  (method ^:public ^:static getStub :throws [NoSuchObjectException] ^Remote [^Remote impl]
+    (let [target (ObjectTable/getTarget impl)]
+      (if (nil? target) (throw (NoSuchObjectException. "object not exported")) (.getStub target))))
+
+  (method ^:public ^:static unexportObject :throws [NoSuchObjectException] ^boolean [^Remote obj
+                                                                                     ^boolean force]
+    (locking tableLock
+      (let [target (ObjectTable/getTarget obj)]
+        (cond
+          (nil? target) (throw (NoSuchObjectException. "object not exported"))
+          (.unexport target force) (do (ObjectTable/removeTarget target) true)
+          :else false))))
+
+  (method ^:static putTarget :throws [ExportException] ^void [^Target target]
+    (let [oe (.getObjectEndpoint target)
+          weakImpl (.getWeakImpl target)]
+      (when (.isLoggable DGCImpl/dgcLog Log/VERBOSE)
+        (.log DGCImpl/dgcLog Log/VERBOSE (java-str "add object " oe)))
+      (locking tableLock
+        (when (some? (.getImpl target))
+          (cond
+            (.containsKey objTable oe)
+              (throw (ExportException. "internal error: ObjID already in use"))
+            (.containsKey implTable weakImpl) (throw (ExportException. "object already exported")))
+          (.put objTable oe target)
+          (.put implTable weakImpl target)
+          (when-not (.isPermanent target) (ObjectTable/incrementKeepAliveCount))))))
+
+  (method ^:private ^:static removeTarget ^void [^Target target]
+    (let [oe (.getObjectEndpoint target)
+          weakImpl (.getWeakImpl target)]
+      (when (.isLoggable DGCImpl/dgcLog Log/VERBOSE)
+        (.log DGCImpl/dgcLog Log/VERBOSE (java-str "remove object " oe)))
+      (.remove objTable oe)
+      (.remove implTable weakImpl)
+      (.markRemoved target)))
+
+  (method ^:static referenced ^void [^ObjID id ^long sequenceNum ^VMID vmid]
+    (locking tableLock
+      (let [oe (ObjectEndpoint. id (Transport/currentTransport))
+            target (cast Target (.get objTable oe))]
+        (when (some? target) (.referenced target sequenceNum vmid)))))
+
+  (method ^:static unreferenced ^void [^ObjID id ^long sequenceNum ^VMID vmid ^boolean strong]
+    (locking tableLock
+      (let [oe (ObjectEndpoint. id (Transport/currentTransport))
+            target (cast Target (.get objTable oe))]
+        (when (some? target) (.unreferenced target sequenceNum vmid strong)))))
+
+  (method ^:static incrementKeepAliveCount ^void []
+    (locking keepAliveLock
+      (set! keepAliveCount (unchecked-inc-int keepAliveCount))
+      (when (nil? reaper)
+        (set! reaper (RuntimeUtil/newSystemThread (Reaper.) "Reaper" false))
+        (.start reaper))
+      (when (nil? gcLatencyRequest) (set! gcLatencyRequest (GC/requestLatency gcInterval)))))
+
+  (method ^:static decrementKeepAliveCount ^void []
+    (locking keepAliveLock
+      (set! keepAliveCount (unchecked-dec-int keepAliveCount))
+      (when (== keepAliveCount 0)
+        (when-not (some? reaper) (throw (AssertionError.)))
+        (.interrupt reaper)
+        (set! reaper nil)
+        (.cancel gcLatencyRequest)
+        (set! gcLatencyRequest nil))))
+
+  (defclass ^:private ^:static Reaper
+    :implements [Runnable]
+
+    (method ^:public run ^void [this]
+      (try
+        (loop []
+          (let [weakImpl (cast WeakRef (.remove reapQueue))]
+            (locking tableLock
+              (let [target (cast Target (.get implTable weakImpl))]
+                (when (some? target)
+                  (cond
+                    (not (.isEmpty target))
+                      (throw (Error. "object with known references collected"))
+                    (.isPermanent target) (throw (Error. "permanent object collected")))
+                  (ObjectTable/removeTarget target)))))
+          (when-not (Thread/interrupted) (recur)))
+        (catch InterruptedException e)))))

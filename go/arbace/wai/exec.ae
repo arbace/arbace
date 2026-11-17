@@ -1,0 +1,1343 @@
+(in-ns 'go.arbace.wai) (go/file "exec.go" :imports [
+
+
+    ^{:line 4} [binary "encoding/binary"]
+    ^{:line 5} [math "math"]
+    ^{:line 6} [bits "math/bits"]
+    ^{:line 7} [strconv "strconv"]])
+
+
+^{:go/end 10} (go/func vi32 ^V [^uint32 x] (lit V :L (conv uint64 x)))
+^{:go/end 11} (go/func vi64 ^V [^uint64 x] (lit V :L x))
+^{:go/end 12} (go/func vf32 ^V [^float32 x] (lit V :L (conv uint64 (math/Float32bits x))))
+^{:go/end 13} (go/func vf64 ^V [^float64 x] (lit V :L (math/Float64bits x)))
+^{:go/end 14} (go/func f32of ^float32 [^V v] (math/Float32frombits (conv uint32 (.-L v))))
+^{:go/end 15} (go/func f64of ^float64 [^V v] (math/Float64frombits (.-L v)))
+
+^{:go/end 22} (go/func b2v ^V [^bool b]
+  (when b
+    (return (lit V :L 1)))
+
+  (lit V))
+
+
+^{:go/end 31} (go/func br ^int [^{:tag (slice V)} st ^int sp ^int fp ^uint32 a ^uint32 h]
+  (let [n (conv int a)
+      ^{:line 26} dst (+ fp (conv int h))]
+    (when (!= dst (- sp n))
+      (copy (subslice st dst (+ dst n)) (subslice st (- sp n) sp)))
+
+    (+ dst n)))
+
+
+
+^{:go/end 40} (go/method at "at is the n bytes at base+off of a memory, or the trap.\n" ^{:tag (slice byte)} [^{:tag (* Memory)} mem ^uint64 base ^uint64 off ^uint64 n]
+  (let [ea (+ base off)]
+    (when (or (< ea base) (< (+ ea n) ea) (> (+ ea n) (conv uint64 (len (.-Data mem)))))
+      (trap "out of bounds memory access"))
+
+    (subslice (.-Data mem) ea (+ ea n))))
+
+
+^{:go/end 80} (go/method run ^{:tag (* Exn)} [^{:tag (* Machine)} m ^{:tag (* Func)} f ^int fp]
+  (inc! (.-depth m))
+  (when (> (.-depth m) MaxDepth)
+    (panic (lit Exhaustion)))
+
+  (let [^{:tag (* Exn)} e (zero (* Exn))]
+    (while true
+      (if (!= (.-Native f) nil)
+        (set! e ((.-Native f) m f fp))
+        (do
+          (when (and (not (.-Const f)) ^:go/paren (or (> (len aotRegistry) 0) (> (len aotShapes) 0)))
+            (inc! (.-Interpreted m))
+            (when (== (.-InterpretedWhy m) "")
+              (set! (.-InterpretedWhy m) (w2gRefuse (.-Code f)))
+              (when (== (.-InterpretedWhy m) "")
+                (set! (.-InterpretedWhy m) "a module w2g did not translate"))))
+
+
+
+          (set! e (.exec m f fp))))
+
+      ;; a tail call w2g's Go (or the interpreter, to a translated function) left to run in this frame (WA7: a trampoline, so
+      ;; that a chain of tail calls grows neither the Go stack nor the depth)
+      (when (or (!= e nil) (== (.-tail m) nil))
+        (break))
+
+      (set! (values f (.-tail m)) (values (.-tail m) nil))
+      (when (!= (.-Host f) nil)
+        (let [t (aget ctypes (.-Type f))
+            ^{:line 71} args (make (slice V) (len (.-Params t)))]
+          (copy args (subslice (.-stack m) fp (+ fp (len (.-Params t)))))
+          (let [res (.HostCall m f args (+ fp (len (.-Params t))))]
+            (copy (subslice (.-stack m) fp) res)
+            (break)))))
+
+
+    (dec! (.-depth m))
+    ^{:line 79} e))
+
+
+
+^{:go/end 121} (go/method catch "catch finds the handler of an exception thrown at pc `at` in a frame: the new pc and stack top, or ok false.\n" [^{:tag (* Machine)} m ^{:tag (* Code)} code ^{:tag (* Instance)} inst ^int fp ^int at ^{:tag (* Exn)} e] :results [int int bool]
+  ;; the handlers whose range holds at, innermost first; a delegate's (WA8) skips the next ones, those of the blocks between it
+  ;; and its label
+  (let [skip 0]
+    (range [_ h (.-Handlers code)]
+      (when (or (< (conv uint32 at) (.-Start h)) (>= (conv uint32 at) (.-End h)))
+        (continue))
+
+      (when (> skip 0)
+        (dec! skip)
+        (continue))
+
+      (range [_ c (.-Catches h)]
+        (when (== (.-Kind c) catchDelegate)
+          (set! skip (conv int (.-Tag c)))
+          (break))
+
+        (when (and ^:go/paren (or (== (.-Kind c) catchTag) (== (.-Kind c) catchRef) (== (.-Kind c) catchLegacy)) (!= (aget (.-Tags inst) (.-Tag c)) (.-Tag e)))
+          (continue))
+
+        (let [st (.-stack m)
+            ^{:line 104} dst (+ fp (conv int (.-Height c)))
+            ^{:line 105} n 0]
+          (when (or (== (.-Kind c) catchLegacy) (== (.-Kind c) catchAllLegacy))
+            (aset st dst (.exnRef m e))
+            (set! n 1))
+
+          (when (or (== (.-Kind c) catchTag) (== (.-Kind c) catchRef) (== (.-Kind c) catchLegacy))
+            (set! n + (copy (subslice st (+ dst n)) (.-Vals e))))
+
+          (when (or (== (.-Kind c) catchRef) (== (.-Kind c) catchAllRef))
+            (aset st (+ dst n) (.exnRef m e))
+            (inc! n))
+
+          (return (conv int (.-PC c)) (+ dst n) true))))
+
+
+    (return 0 0 false)))
+
+
+^{:go/end 130} (go/method exnRef ^V [^{:tag (* Machine)} m ^{:tag (* Exn)} e]
+  (range [i o (.-Objs (.-St m))]
+    (when (== o (conv any e))
+      (return (lit V :L (conv uint64 i) :H rExn))))
+
+
+  (lit V :L (.addObj (.-St m) e) :H rExn))
+
+
+^{:go/breaks [[4 143]] :go/end 144} (go/func storageSize ^uint64 [^byte k]
+  (switch k
+    (case [tI8]
+      (return 1))
+    (case [tI16]
+      (return 2))
+    (case [tI32 tF32]
+      (return 4))
+    (case [tV128]
+      (return 16)))
+
+  8)
+
+
+^{:go/end 154} (go/func pack ^V [^byte k ^V v]
+  (switch k
+    (case [tI8]
+      (return (lit V :L (bit-and (.-L v) 0xff))))
+    (case [tI16]
+      (return (lit V :L (bit-and (.-L v) 0xffff)))))
+
+  ^{:line 153} v)
+
+
+^{:go/end 164} (go/func unpackS ^V [^byte k ^V v]
+  (switch k
+    (case [tI8]
+      (return (vi32 (conv uint32 (conv int32 (conv int8 (.-L v)))))))
+    (case [tI16]
+      (return (vi32 (conv uint32 (conv int32 (conv int16 (.-L v))))))))
+
+  ^{:line 163} v)
+
+
+^{:go/end 178} (go/func readStorage ^V [^byte k ^{:tag (slice byte)} b]
+  (switch k
+    (case [tI8]
+      (return (lit V :L (conv uint64 (aget b 0)))))
+    (case [tI16]
+      (return (lit V :L (conv uint64 (.Uint16 binary/LittleEndian b)))))
+    (case [tI32 tF32]
+      (return (lit V :L (conv uint64 (.Uint32 binary/LittleEndian b)))))
+    (case [tV128]
+      (return (lit V :L (.Uint64 binary/LittleEndian b) :H (.Uint64 binary/LittleEndian (subslice b 8))))))
+
+  (lit V :L (.Uint64 binary/LittleEndian b)))
+
+
+
+^{:go/end 200} (go/method refHeap "refHeap is a non-null reference's dynamic heap type.\n" ^int32 [^{:tag (* Machine)} m ^V v]
+  (when (!= (bit-and (.-H v) rExt) 0)
+    (return hExtern))
+
+  (switch (.-H v)
+    (case [rFunc]
+      (return (conv int32 (.-Type (aget (.-Funcs (.-St m)) (.-L v))))))
+    (case [rHost]
+      (return hAny))
+    (case [rI31]
+      (return hI31))
+    (case [rStruct]
+      (return (conv int32 (.-Type (assert (* Struct) (aget (.-Objs (.-St m)) (.-L v)))))))
+    (case [rArray]
+      (return (conv int32 (.-Type (assert (* Array) (aget (.-Objs (.-St m)) (.-L v)))))))
+    (case [rExn]
+      (return hExn)))
+
+  ^{:line 199} hAny)
+
+
+^{:go/end 207} (go/method refTest ^bool [^{:tag (* Machine)} m ^V v ^bool null ^int32 h]
+  (when (== (.-H v) 0)
+    (return null))
+
+  (heapSub (.refHeap m v) h))
+
+
+^{:go/end 214} (go/method structOf ^{:tag (* Struct)} [^{:tag (* Machine)} m ^V v]
+  (when (== (.-H v) 0)
+    (trap "null structure reference"))
+
+  (assert (* Struct) (aget (.-Objs (.-St m)) (.-L v))))
+
+
+^{:go/end 221} (go/method arrayOf ^{:tag (* Array)} [^{:tag (* Machine)} m ^V v]
+  (when (== (.-H v) 0)
+    (trap "null array reference"))
+
+  (assert (* Array) (aget (.-Objs (.-St m)) (.-L v))))
+
+
+^{:go/end 228} (go/method newArray ^{:tag (* Array)} [^{:tag (* Machine)} m ^int t ^uint64 n]
+  (when (> n (<< 1 24))
+    (trap "out of memory"))
+
+  (addr (lit Array :Type t :Elems (make (slice V) n))))
+
+
+^{:go/end 230} (go/func quiet32 ^uint32 [^uint32 x] (bit-or x 0x00400000))
+^{:go/end 231} (go/func quiet64 ^uint64 [^uint64 x] (bit-or x 0x0008000000000000))
+
+^{:go/end 239} (go/func un32 ^V [^uint32 x ^{:tag (func [float64] [float64])} fn]
+  (let [f (math/Float32frombits x)]
+    (when (!= f f)
+      (return (lit V :L (conv uint64 (quiet32 x)))))
+
+    (vf32 (conv float32 (go/call fn (conv float64 f))))))
+
+
+^{:go/end 247} (go/func un64 ^V [^uint64 x ^{:tag (func [float64] [float64])} fn]
+  (let [f (math/Float64frombits x)]
+    (when (!= f f)
+      (return (lit V :L (quiet64 x))))
+
+    (vf64 (go/call fn f))))
+
+
+^{:go/end 262} (go/func min32 ^V [^uint32 a ^uint32 b]
+  (let [(values x y) (values (math/Float32frombits a) (math/Float32frombits b))]
+    (switch
+      (case [(!= x x)]
+        (return (lit V :L (conv uint64 (quiet32 a)))))
+      (case [(!= y y)]
+        (return (lit V :L (conv uint64 (quiet32 b)))))
+      (case [(== x y)]
+        (return (lit V :L (conv uint64 (bit-or a b))))) ; -0 wins
+      (case [(< x y)]
+        (return (lit V :L (conv uint64 a)))))
+
+    (lit V :L (conv uint64 b))))
+
+
+^{:go/end 277} (go/func max32 ^V [^uint32 a ^uint32 b]
+  (let [(values x y) (values (math/Float32frombits a) (math/Float32frombits b))]
+    (switch
+      (case [(!= x x)]
+        (return (lit V :L (conv uint64 (quiet32 a)))))
+      (case [(!= y y)]
+        (return (lit V :L (conv uint64 (quiet32 b)))))
+      (case [(== x y)]
+        (return (lit V :L (conv uint64 (bit-and a b))))) ; +0 wins
+      (case [(> x y)]
+        (return (lit V :L (conv uint64 a)))))
+
+    (lit V :L (conv uint64 b))))
+
+
+^{:go/end 292} (go/func min64 ^V [^uint64 a ^uint64 b]
+  (let [(values x y) (values (math/Float64frombits a) (math/Float64frombits b))]
+    (switch
+      (case [(!= x x)]
+        (return (lit V :L (quiet64 a))))
+      (case [(!= y y)]
+        (return (lit V :L (quiet64 b))))
+      (case [(== x y)]
+        (return (lit V :L (bit-or a b))))
+      (case [(< x y)]
+        (return (lit V :L a))))
+
+    (lit V :L b)))
+
+
+^{:go/end 307} (go/func max64 ^V [^uint64 a ^uint64 b]
+  (let [(values x y) (values (math/Float64frombits a) (math/Float64frombits b))]
+    (switch
+      (case [(!= x x)]
+        (return (lit V :L (quiet64 a))))
+      (case [(!= y y)]
+        (return (lit V :L (quiet64 b))))
+      (case [(== x y)]
+        (return (lit V :L (bit-and a b))))
+      (case [(> x y)]
+        (return (lit V :L a))))
+
+    (lit V :L b)))
+
+
+^{:go/end 315} (go/func u64tof32 ^float32 [^uint64 x]
+  (when (== (>> x 63) 0)
+    (return (conv float32 (conv int64 x))))
+
+  (let [h (bit-or (>> x 1) (bit-and x 1))]
+    (* (conv float32 (conv int64 h)) 2)))
+
+
+^{:go/end 323} (go/func u64tof64 ^float64 [^uint64 x]
+  (when (== (>> x 63) 0)
+    (return (conv float64 (conv int64 x))))
+
+  (let [h (bit-or (>> x 1) (bit-and x 1))]
+    (* (conv float64 (conv int64 h)) 2)))
+
+
+
+^{:go/end 334} (go/func truncChk "truncation: f's integer part when lo < f < hi (strict bounds), else the trap or the saturated value\n" ^float64 [^float64 f ^float64 lo ^float64 hi]
+  (when (!= f f)
+    (trap "invalid conversion to integer"))
+
+  (when (not (and (> f lo) (< f hi)))
+    (trap "integer overflow"))
+
+  (math/Trunc f))
+
+
+^{:go/end 346} (go/func satS32 ^uint32 [^float64 f]
+  (switch
+    (case [(!= f f)]
+      (return 0))
+    (case [(<= f -2.147483649E9)]
+      (return 0x80000000))
+    (case [(>= f 2.147483648E9)]
+      (return 0x7fffffff)))
+
+  (conv uint32 (conv int32 (math/Trunc f))))
+
+
+^{:go/end 356} (go/func satU32 ^uint32 [^float64 f]
+  (switch
+    (case [(or (!= f f) (<= f -1.0))]
+      (return 0))
+    (case [(>= f 4.294967296E9)]
+      (return 0xffffffff)))
+
+  (conv uint32 (math/Trunc f)))
+
+
+^{:go/end 368} (go/func satS64 ^uint64 [^float64 f]
+  (switch
+    (case [(!= f f)]
+      (return 0))
+    (case [(< f -9223372036854775808.0M)]
+      (return (<< 1 63)))
+    (case [(>= f 9223372036854775808.0M)]
+      (return (- (<< 1 63) 1))))
+
+  (conv uint64 (conv int64 (math/Trunc f))))
+
+
+^{:go/end 378} (go/func satU64 ^uint64 [^float64 f]
+  (switch
+    (case [(or (!= f f) (<= f -1.0))]
+      (return 0))
+    (case [(>= f 18446744073709551616.0M)]
+      (return math/MaxUint64)))
+
+  (conv uint64 (math/Trunc f)))
+
+
+^{:go/end 1346} (go/method exec ^{:tag (* Exn)} [^{:tag (* Machine)} m ^{:tag (* Func)} f ^int fp]
+  (let [
+      ^{:line 382 :go/label :top} code (.-Code f)
+      ^{:line 383} inst (.-Inst f)]
+    (.ensure m (+ fp (.-MaxHeight code) 2))
+    (let [st (.-stack m)]
+      (for [i (.-NParams code)] (< i (.-NLocals code)) (inc! i)
+        (aset st (+ fp i) (lit V)))
+
+      (let [sp (+ fp (.-NLocals code))
+          ^{:line 390} ins (.-Ins code)
+          ^{:line 391} pc 0
+          ^{:line 392 :tag (* Exn)} exn (zero (* Exn))
+          ^{:line 393 :tag (* Func)} g (zero (* Func))]
+        (while true
+          (let [in (addr (aget ins pc))]
+            (inc! pc)
+            (switch (.-Op in)
+              (case [OpUnreachable]
+                (trap "unreachable executed"))
+              (case [OpNop])
+              (case [OpBr]
+                (set! sp (br st sp fp (.-A in) (.-B in)))
+                (set! pc (conv int (.-C in))))
+              (case [OpBrIf]
+                (dec! sp)
+                (when (!= (conv uint32 (.-L (aget st sp))) 0)
+                  (set! sp (br st sp fp (.-A in) (.-B in)))
+                  (set! pc (conv int (.-C in)))))
+
+              (case [OpBrTable]
+                (dec! sp)
+                (let [i (conv uint32 (.-L (aget st sp)))
+                    ^{:line 413} tb (aget (.-Tables code) (.-B in))]
+                  (when (or (>= (conv int i) (- (len tb) 1)) (< (conv int i) 0))
+                    (set! i (conv uint32 (- (len tb) 1))))
+
+                  (let [t (aget tb i)]
+                    (set! sp (br st sp fp (.-A in) (.-Height t)))
+                    (set! pc (conv int (.-PC t))))))
+              (case [OpIf]
+                (dec! sp)
+                (when (== (conv uint32 (.-L (aget st sp))) 0)
+                  (set! pc (conv int (.-C in)))))
+
+              (case [OpJump]
+                (set! pc (conv int (.-C in))))
+              (case [OpReturn]
+                (let [n (conv int (.-A in))]
+                  (copy (subslice st fp (+ fp n)) (subslice st (- sp n) sp))
+                  (return nil)))
+              (case [OpBrOnNull]
+                (when (== (.-H (aget st (- sp 1))) 0)
+                  (dec! sp)
+                  (set! sp (br st sp fp (.-A in) (.-B in)))
+                  (set! pc (conv int (.-C in)))))
+
+              (case [OpBrOnNonNull]
+                (if (!= (.-H (aget st (- sp 1))) 0) (do
+                    (set! sp (br st sp fp (.-A in) (.-B in)))
+                    (set! pc (conv int (.-C in))))
+
+                  (dec! sp)))
+
+              (case [OpBrOnCast]
+                (when (.refTest m (aget st (- sp 1)) (!= (.-D in) 0) (.-E in))
+                  (set! sp (br st sp fp (.-A in) (.-B in)))
+                  (set! pc (conv int (.-C in)))))
+
+              (case [OpBrOnCastFail]
+                (when (not (.refTest m (aget st (- sp 1)) (!= (.-D in) 0) (.-E in)))
+                  (set! sp (br st sp fp (.-A in) (.-B in)))
+                  (set! pc (conv int (.-C in)))))
+
+
+              (case [OpCall OpReturnCall]
+                (set! g (aget (.-Funcs inst) (.-A in)))
+                (goto :call))
+              (case [OpCallIndirect OpReturnCallIndirect]
+                (do
+                  (dec! sp)
+                  (let [i (.-L (aget st sp))
+                      ^{:line 462} t (aget (.-Tables inst) (.-A in))]
+                    (when (>= i (conv uint64 (len (.-Elems t))))
+                      (trap (+ "undefined element " (strconv/FormatUint i 10))))
+
+                    (let [r (aget (.-Elems t) i)]
+                      (when (== (.-H r) 0)
+                        (trap (+ "uninitialized element " (strconv/FormatUint i 10))))
+
+                      (set! g (aget (.-Funcs (.-St m)) (.-L r)))
+                      (when (not (subCanon (.-Type g) (conv int (.-B in))))
+                        (trap "indirect call type mismatch")))))
+
+
+                (goto :call))
+              (case [OpCallRef OpReturnCallRef]
+                (dec! sp)
+                (when (== (.-H (aget st sp)) 0)
+                  (trap "null function reference"))
+
+                (set! g (aget (.-Funcs (.-St m)) (.-L (aget st sp))))
+                (goto :call))
+
+              (case [OpThrow]
+                (do
+                  (let [tag (aget (.-Tags inst) (.-A in))
+                      ^{:line 487} n (len (.-Params (aget ctypes (.-Type tag))))
+                      ^{:line 488} vals (make (slice V) n)]
+                    (copy vals (subslice st (- sp n) sp))
+                    (set! sp - n)
+                    (set! exn (addr (lit Exn :Tag tag :Vals vals)))))
+
+                (goto :throw))
+              (case [OpThrowRef]
+                (dec! sp)
+                (when (== (.-H (aget st sp)) 0)
+                  (trap "null exception reference"))
+
+                (set! exn (assert (* Exn) (aget (.-Objs (.-St m)) (.-L (aget st sp)))))
+                (goto :throw))
+
+              (case [OpDrop]
+                (dec! sp))
+              (case [OpSelect OpSelectT]
+                (set! sp - 2)
+                (when (== (conv uint32 (.-L (aget st (+ sp 1)))) 0)
+                  (aset st (- sp 1) (aget st sp))))
+
+              (case [OpLocalGet]
+                (aset st sp (aget st (+ fp (conv int (.-A in)))))
+                (inc! sp))
+              (case [OpLocalSet]
+                (dec! sp)
+                (aset st (+ fp (conv int (.-A in))) (aget st sp)))
+              (case [OpLocalTee]
+                (aset st (+ fp (conv int (.-A in))) (aget st (- sp 1))))
+              (case [OpGlobalGet]
+                (aset st sp (.-Val (aget (.-Globals inst) (.-A in))))
+                (inc! sp))
+              (case [OpGlobalSet]
+                (dec! sp)
+                (set! (.-Val (aget (.-Globals inst) (.-A in))) (aget st sp)))
+
+              (case [OpTableGet]
+                (do
+                  (let [t (aget (.-Tables inst) (.-A in))
+                      ^{:line 527} i (.-L (aget st (- sp 1)))]
+                    (when (>= i (conv uint64 (len (.-Elems t))))
+                      (trap "out of bounds table access"))
+
+                    (aset st (- sp 1) (aget (.-Elems t) i)))))
+
+              (case [OpTableSet]
+                (do
+                  (set! sp - 2)
+                  (let [t (aget (.-Tables inst) (.-A in))
+                      ^{:line 537} i (.-L (aget st sp))]
+                    (when (>= i (conv uint64 (len (.-Elems t))))
+                      (trap "out of bounds table access"))
+
+                    (aset (.-Elems t) i (aget st (+ sp 1))))))
+
+              (case [OpTableSize]
+                (aset st sp (lit V :L (conv uint64 (len (.-Elems (aget (.-Tables inst) (.-A in)))))))
+                (inc! sp))
+              (case [OpTableGrow]
+                (do
+                  (dec! sp)
+                  (let [t (aget (.-Tables inst) (.-A in))
+                      ^{:line 550} n (.-L (aget st sp))
+                      ^{:line 551} init (aget st (- sp 1))
+                      ^{:line 552} old (conv uint64 (len (.-Elems t)))
+                      ^{:line 553} max (conv uint64 math/MaxUint32)]
+                    (when (.-Addr64 (.-L (.-T t)))
+                      (set! max math/MaxUint64))
+
+                    (when (.-HasMax (.-L (.-T t)))
+                      (set! max (.-Max (.-L (.-T t)))))
+
+                    (if (or (> n max) (< (+ old n) old) (> (+ old n) max) (> (+ old n) maxTableSize))
+                      (if (!= (.-D in) 0)
+                        (aset st (- sp 1) (lit V :L math/MaxUint64))
+
+                        (aset st (- sp 1) (lit V :L math/MaxUint32)))
+
+                      (do
+                        (for [k (conv uint64 0)] (< k n) (inc! k)
+                          (set! (.-Elems t) (append (.-Elems t) init)))
+
+                        (aset st (- sp 1) (lit V :L old)))))))
+
+
+              (case [OpTableFill]
+                (do
+                  (set! sp - 3)
+                  (let [t (aget (.-Tables inst) (.-A in))
+                      (values i v n) (values (.-L (aget st sp)) (aget st (+ sp 1)) (.-L (aget st (+ sp 2))))]
+                    (when (or (< (+ i n) i) (> (+ i n) (conv uint64 (len (.-Elems t)))))
+                      (trap "out of bounds table access"))
+
+                    (for [k (conv uint64 0)] (< k n) (inc! k)
+                      (aset (.-Elems t) (+ i k) v)))))
+
+
+              (case [OpTableCopy]
+                (do
+                  (set! sp - 3)
+                  (let [(values dt s) (values (aget (.-Tables inst) (.-A in)) (aget (.-Tables inst) (.-B in)))
+                      (values d si n) (values (.-L (aget st sp)) (.-L (aget st (+ sp 1))) (.-L (aget st (+ sp 2))))]
+                    (when (or (< (+ si n) si) (> (+ si n) (conv uint64 (len (.-Elems s)))) (< (+ d n) d) (> (+ d n) (conv uint64 (len (.-Elems dt)))))
+                      (trap "out of bounds table access"))
+
+                    (copy (subslice (.-Elems dt) d (+ d n)) (subslice (.-Elems s) si (+ si n))))))
+
+              (case [OpTableInit]
+                (set! sp - 3)
+                (tableInit (aget (.-Tables inst) (.-A in)) (aget (.-Elems inst) (.-B in)) (.-L (aget st sp)) (.-L (aget st (+ sp 1))) (.-L (aget st (+ sp 2)))))
+              (case [OpElemDrop]
+                (aset (.-Elems inst) (.-A in) nil))
+
+              (case [OpMemorySize]
+                (aset st sp (lit V :L (conv uint64 (/ (len (.-Data (aget (.-Mems inst) (.-A in)))) 65536))))
+                (inc! sp))
+              (case [OpMemoryGrow]
+                (do
+                  (let [mem (aget (.-Mems inst) (.-A in))
+                      ^{:line 607} n (.-L (aget st (- sp 1)))
+                      ^{:line 608} old (conv uint64 (/ (len (.-Data mem)) 65536))
+                      ^{:line 609} max (conv uint64 65536)]
+                    (when (.-Addr64 (.-T mem))
+                      (set! max (<< 1 48)))
+
+                    (when (.-HasMax (.-T mem))
+                      (set! max (.-Max (.-T mem))))
+
+                    (if (or (> n max) (< (+ old n) old) (> (+ old n) max) (> (+ old n) maxPages))
+                      (if (!= (.-D in) 0)
+                        (aset st (- sp 1) (lit V :L math/MaxUint64))
+
+                        (aset st (- sp 1) (lit V :L math/MaxUint32)))
+
+                      (do
+                        (when (> n 0)
+                          (let [nd (make (slice byte) (* (+ old n) 65536))]
+                            (copy nd (.-Data mem))
+                            (set! (.-Data mem) nd)))
+
+                        (aset st (- sp 1) (lit V :L old)))))))
+
+
+              (case [OpMemoryFill]
+                (do
+                  (set! sp - 3)
+                  (let [mem (aget (.-Mems inst) (.-A in))
+                      (values d v n) (values (.-L (aget st sp)) (conv byte (.-L (aget st (+ sp 1)))) (.-L (aget st (+ sp 2))))
+                      ^{:line 636} b (.at mem d 0 n)]
+                    (range [k b]
+                      (aset b k v)))))
+
+
+              (case [OpMemoryCopy]
+                (do
+                  (set! sp - 3)
+                  (let [(values d s n) (values (.-L (aget st sp)) (.-L (aget st (+ sp 1))) (.-L (aget st (+ sp 2))))
+                      ^{:line 645} sb (.at (aget (.-Mems inst) (.-B in)) s 0 n)
+                      ^{:line 646} db (.at (aget (.-Mems inst) (.-A in)) d 0 n)]
+                    (copy db sb))))
+
+              (case [OpMemoryInit]
+                (set! sp - 3)
+                (memInit (aget (.-Mems inst) (.-A in)) (aget (.-Datas inst) (.-B in)) (.-L (aget st sp)) (.-L (aget st (+ sp 1))) (.-L (aget st (+ sp 2)))))
+              (case [OpDataDrop]
+                (aset (.-Datas inst) (.-A in) nil))
+
+              ;; loads and stores
+              (case [OpI32Load]
+                (aset st (- sp 1) (lit V :L (conv uint64 (.Uint32 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 4))))))
+              (case [OpI64Load]
+                (aset st (- sp 1) (lit V :L (.Uint64 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 8)))))
+              (case [OpF32Load]
+                (aset st (- sp 1) (lit V :L (conv uint64 (.Uint32 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 4))))))
+              (case [OpF64Load]
+                (aset st (- sp 1) (lit V :L (.Uint64 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 8)))))
+              (case [OpI32Load8S]
+                (aset st (- sp 1) (vi32 (conv uint32 (conv int32 (conv int8 (aget (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 1) 0)))))))
+              (case [OpI32Load8U]
+                (aset st (- sp 1) (vi32 (conv uint32 (aget (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 1) 0)))))
+              (case [OpI32Load16S]
+                (aset st (- sp 1) (vi32 (conv uint32 (conv int32 (conv int16 (.Uint16 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 2))))))))
+              (case [OpI32Load16U]
+                (aset st (- sp 1) (vi32 (conv uint32 (.Uint16 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 2))))))
+              (case [OpI64Load8S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (conv int8 (aget (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 1) 0)))))))
+              (case [OpI64Load8U]
+                (aset st (- sp 1) (vi64 (conv uint64 (aget (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 1) 0)))))
+              (case [OpI64Load16S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (conv int16 (.Uint16 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 2))))))))
+              (case [OpI64Load16U]
+                (aset st (- sp 1) (vi64 (conv uint64 (.Uint16 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 2))))))
+              (case [OpI64Load32S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (conv int32 (.Uint32 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 4))))))))
+              (case [OpI64Load32U]
+                (aset st (- sp 1) (vi64 (conv uint64 (.Uint32 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st (- sp 1))) (.-C in) 4))))))
+              (case [OpI32Store OpF32Store]
+                (set! sp - 2)
+                (.PutUint32 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st sp)) (.-C in) 4) (conv uint32 (.-L (aget st (+ sp 1))))))
+              (case [OpI64Store OpF64Store]
+                (set! sp - 2)
+                (.PutUint64 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st sp)) (.-C in) 8) (.-L (aget st (+ sp 1)))))
+              (case [OpI32Store8 OpI64Store8]
+                (set! sp - 2)
+                (aset (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st sp)) (.-C in) 1) 0 (conv byte (.-L (aget st (+ sp 1))))))
+              (case [OpI32Store16 OpI64Store16]
+                (set! sp - 2)
+                (.PutUint16 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st sp)) (.-C in) 2) (conv uint16 (.-L (aget st (+ sp 1))))))
+              (case [OpI64Store32]
+                (set! sp - 2)
+                (.PutUint32 binary/LittleEndian (.at (aget (.-Mems inst) (.-A in)) (.-L (aget st sp)) (.-C in) 4) (conv uint32 (.-L (aget st (+ sp 1))))))
+
+              ;; constants
+              (case [OpI32Const OpI64Const OpF32Const OpF64Const]
+                (aset st sp (lit V :L (.-C in)))
+                (inc! sp))
+
+              ;; i32
+              (case [OpI32Eqz]
+                (aset st (- sp 1) (b2v (== (conv uint32 (.-L (aget st (- sp 1)))) 0))))
+              (case [OpI32Eq OpI32Ne OpI32LtS OpI32LtU OpI32GtS OpI32GtU OpI32LeS OpI32LeU OpI32GeS OpI32GeU]
+                (do
+                  (dec! sp)
+                  (let [(values a b) (values (conv uint32 (.-L (aget st (- sp 1)))) (conv uint32 (.-L (aget st sp))))
+                      ^{:line 712 :tag bool} r (zero bool)]
+                    (switch (.-Op in)
+                      (case [OpI32Eq]
+                        (set! r (== a b)))
+                      (case [OpI32Ne]
+                        (set! r (!= a b)))
+                      (case [OpI32LtS]
+                        (set! r (< (conv int32 a) (conv int32 b))))
+                      (case [OpI32LtU]
+                        (set! r (< a b)))
+                      (case [OpI32GtS]
+                        (set! r (> (conv int32 a) (conv int32 b))))
+                      (case [OpI32GtU]
+                        (set! r (> a b)))
+                      (case [OpI32LeS]
+                        (set! r (<= (conv int32 a) (conv int32 b))))
+                      (case [OpI32LeU]
+                        (set! r (<= a b)))
+                      (case [OpI32GeS]
+                        (set! r (>= (conv int32 a) (conv int32 b))))
+                      (case [OpI32GeU]
+                        (set! r (>= a b))))
+
+                    (aset st (- sp 1) (b2v r)))))
+
+              (case [OpI32Clz]
+                (aset st (- sp 1) (vi32 (conv uint32 (bits/LeadingZeros32 (conv uint32 (.-L (aget st (- sp 1)))))))))
+              (case [OpI32Ctz]
+                (aset st (- sp 1) (vi32 (conv uint32 (bits/TrailingZeros32 (conv uint32 (.-L (aget st (- sp 1)))))))))
+              (case [OpI32Popcnt]
+                (aset st (- sp 1) (vi32 (conv uint32 (bits/OnesCount32 (conv uint32 (.-L (aget st (- sp 1)))))))))
+              (case [OpI32Add OpI32Sub OpI32Mul OpI32DivS OpI32DivU OpI32RemS OpI32RemU OpI32And OpI32Or OpI32Xor OpI32Shl
+                  ^{:line 744} OpI32ShrS OpI32ShrU OpI32Rotl OpI32Rotr]
+                (do
+                  (dec! sp)
+                  (let [(values a b) (values (conv uint32 (.-L (aget st (- sp 1)))) (conv uint32 (.-L (aget st sp))))
+                      ^{:line 748 :tag uint32} r (zero uint32)]
+                    (switch (.-Op in)
+                      (case [OpI32Add]
+                        (set! r (+ a b)))
+                      (case [OpI32Sub]
+                        (set! r (- a b)))
+                      (case [OpI32Mul]
+                        (set! r (* a b)))
+                      (case [OpI32DivS]
+                        (when (== b 0)
+                          (trap "integer divide by zero"))
+
+                        (when (and (== a 0x80000000) (== b 0xffffffff))
+                          (trap "integer overflow"))
+
+                        (set! r (conv uint32 (/ (conv int32 a) (conv int32 b)))))
+                      (case [OpI32DivU]
+                        (when (== b 0)
+                          (trap "integer divide by zero"))
+
+                        (set! r (/ a b)))
+                      (case [OpI32RemS]
+                        (when (== b 0)
+                          (trap "integer divide by zero"))
+
+                        (if (== b 0xffffffff)
+                          (set! r 0)
+
+                          (set! r (conv uint32 (% (conv int32 a) (conv int32 b))))))
+
+                      (case [OpI32RemU]
+                        (when (== b 0)
+                          (trap "integer divide by zero"))
+
+                        (set! r (% a b)))
+                      (case [OpI32And]
+                        (set! r (bit-and a b)))
+                      (case [OpI32Or]
+                        (set! r (bit-or a b)))
+                      (case [OpI32Xor]
+                        (set! r (bit-xor a b)))
+                      (case [OpI32Shl]
+                        (set! r (<< a (bit-and b 31))))
+                      (case [OpI32ShrS]
+                        (set! r (conv uint32 (>> (conv int32 a) (bit-and b 31)))))
+                      (case [OpI32ShrU]
+                        (set! r (>> a (bit-and b 31))))
+                      (case [OpI32Rotl]
+                        (set! r (bits/RotateLeft32 a (conv int (bit-and b 31)))))
+                      (case [OpI32Rotr]
+                        (set! r (bits/RotateLeft32 a (- (conv int (bit-and b 31)))))))
+
+                    (aset st (- sp 1) (vi32 r)))))
+
+
+              ;; i64
+              (case [OpI64Eqz]
+                (aset st (- sp 1) (b2v (== (.-L (aget st (- sp 1))) 0))))
+              (case [OpI64Eq OpI64Ne OpI64LtS OpI64LtU OpI64GtS OpI64GtU OpI64LeS OpI64LeU OpI64GeS OpI64GeU]
+                (do
+                  (dec! sp)
+                  (let [(values a b) (values (.-L (aget st (- sp 1))) (.-L (aget st sp)))
+                      ^{:line 810 :tag bool} r (zero bool)]
+                    (switch (.-Op in)
+                      (case [OpI64Eq]
+                        (set! r (== a b)))
+                      (case [OpI64Ne]
+                        (set! r (!= a b)))
+                      (case [OpI64LtS]
+                        (set! r (< (conv int64 a) (conv int64 b))))
+                      (case [OpI64LtU]
+                        (set! r (< a b)))
+                      (case [OpI64GtS]
+                        (set! r (> (conv int64 a) (conv int64 b))))
+                      (case [OpI64GtU]
+                        (set! r (> a b)))
+                      (case [OpI64LeS]
+                        (set! r (<= (conv int64 a) (conv int64 b))))
+                      (case [OpI64LeU]
+                        (set! r (<= a b)))
+                      (case [OpI64GeS]
+                        (set! r (>= (conv int64 a) (conv int64 b))))
+                      (case [OpI64GeU]
+                        (set! r (>= a b))))
+
+                    (aset st (- sp 1) (b2v r)))))
+
+              (case [OpI64Clz]
+                (aset st (- sp 1) (vi64 (conv uint64 (bits/LeadingZeros64 (.-L (aget st (- sp 1))))))))
+              (case [OpI64Ctz]
+                (aset st (- sp 1) (vi64 (conv uint64 (bits/TrailingZeros64 (.-L (aget st (- sp 1))))))))
+              (case [OpI64Popcnt]
+                (aset st (- sp 1) (vi64 (conv uint64 (bits/OnesCount64 (.-L (aget st (- sp 1))))))))
+              (case [OpI64Add OpI64Sub OpI64Mul OpI64DivS OpI64DivU OpI64RemS OpI64RemU OpI64And OpI64Or OpI64Xor OpI64Shl
+                  ^{:line 842} OpI64ShrS OpI64ShrU OpI64Rotl OpI64Rotr]
+                (do
+                  (dec! sp)
+                  (let [(values a b) (values (.-L (aget st (- sp 1))) (.-L (aget st sp)))
+                      ^{:line 846 :tag uint64} r (zero uint64)]
+                    (switch (.-Op in)
+                      (case [OpI64Add]
+                        (set! r (+ a b)))
+                      (case [OpI64Sub]
+                        (set! r (- a b)))
+                      (case [OpI64Mul]
+                        (set! r (* a b)))
+                      (case [OpI64DivS]
+                        (when (== b 0)
+                          (trap "integer divide by zero"))
+
+                        (when (and (== a (<< 1 63)) (== b math/MaxUint64))
+                          (trap "integer overflow"))
+
+                        (set! r (conv uint64 (/ (conv int64 a) (conv int64 b)))))
+                      (case [OpI64DivU]
+                        (when (== b 0)
+                          (trap "integer divide by zero"))
+
+                        (set! r (/ a b)))
+                      (case [OpI64RemS]
+                        (when (== b 0)
+                          (trap "integer divide by zero"))
+
+                        (if (== b math/MaxUint64)
+                          (set! r 0)
+
+                          (set! r (conv uint64 (% (conv int64 a) (conv int64 b))))))
+
+                      (case [OpI64RemU]
+                        (when (== b 0)
+                          (trap "integer divide by zero"))
+
+                        (set! r (% a b)))
+                      (case [OpI64And]
+                        (set! r (bit-and a b)))
+                      (case [OpI64Or]
+                        (set! r (bit-or a b)))
+                      (case [OpI64Xor]
+                        (set! r (bit-xor a b)))
+                      (case [OpI64Shl]
+                        (set! r (<< a (bit-and b 63))))
+                      (case [OpI64ShrS]
+                        (set! r (conv uint64 (>> (conv int64 a) (bit-and b 63)))))
+                      (case [OpI64ShrU]
+                        (set! r (>> a (bit-and b 63))))
+                      (case [OpI64Rotl]
+                        (set! r (bits/RotateLeft64 a (conv int (bit-and b 63)))))
+                      (case [OpI64Rotr]
+                        (set! r (bits/RotateLeft64 a (- (conv int (bit-and b 63)))))))
+
+                    (aset st (- sp 1) (vi64 r)))))
+
+
+              ;; f32
+              (case [OpF32Eq OpF32Ne OpF32Lt OpF32Gt OpF32Le OpF32Ge]
+                (do
+                  (dec! sp)
+                  (let [(values a b) (values (f32of (aget st (- sp 1))) (f32of (aget st sp)))
+                      ^{:line 906 :tag bool} r (zero bool)]
+                    (switch (.-Op in)
+                      (case [OpF32Eq]
+                        (set! r (== a b)))
+                      (case [OpF32Ne]
+                        (set! r (!= a b)))
+                      (case [OpF32Lt]
+                        (set! r (< a b)))
+                      (case [OpF32Gt]
+                        (set! r (> a b)))
+                      (case [OpF32Le]
+                        (set! r (<= a b)))
+                      (case [OpF32Ge]
+                        (set! r (>= a b))))
+
+                    (aset st (- sp 1) (b2v r)))))
+
+              (case [OpF32Abs]
+                (aset st (- sp 1) (lit V :L (bit-and (.-L (aget st (- sp 1))) 0x7fffffff))))
+              (case [OpF32Neg]
+                (aset st (- sp 1) (lit V :L (bit-and (bit-xor (.-L (aget st (- sp 1))) 0x80000000) 0xffffffff))))
+              (case [OpF32Ceil]
+                (aset st (- sp 1) (un32 (conv uint32 (.-L (aget st (- sp 1)))) math/Ceil)))
+              (case [OpF32Floor]
+                (aset st (- sp 1) (un32 (conv uint32 (.-L (aget st (- sp 1)))) math/Floor)))
+              (case [OpF32Trunc]
+                (aset st (- sp 1) (un32 (conv uint32 (.-L (aget st (- sp 1)))) math/Trunc)))
+              (case [OpF32Nearest]
+                (aset st (- sp 1) (un32 (conv uint32 (.-L (aget st (- sp 1)))) math/RoundToEven)))
+              (case [OpF32Sqrt]
+                (aset st (- sp 1) (vf32 (conv float32 (math/Sqrt (conv float64 (f32of (aget st (- sp 1)))))))))
+              (case [OpF32Add]
+                (dec! sp)
+                (aset st (- sp 1) (vf32 (+ (f32of (aget st (- sp 1))) (f32of (aget st sp))))))
+              (case [OpF32Sub]
+                (dec! sp)
+                (aset st (- sp 1) (vf32 (- (f32of (aget st (- sp 1))) (f32of (aget st sp))))))
+              (case [OpF32Mul]
+                (dec! sp)
+                (aset st (- sp 1) (vf32 (* (f32of (aget st (- sp 1))) (f32of (aget st sp))))))
+              (case [OpF32Div]
+                (dec! sp)
+                (aset st (- sp 1) (vf32 (/ (f32of (aget st (- sp 1))) (f32of (aget st sp))))))
+              (case [OpF32Min]
+                (dec! sp)
+                (aset st (- sp 1) (min32 (conv uint32 (.-L (aget st (- sp 1)))) (conv uint32 (.-L (aget st sp))))))
+              (case [OpF32Max]
+                (dec! sp)
+                (aset st (- sp 1) (max32 (conv uint32 (.-L (aget st (- sp 1)))) (conv uint32 (.-L (aget st sp))))))
+              (case [OpF32Copysign]
+                (dec! sp)
+                (aset st (- sp 1) (lit V :L (bit-or (bit-and (.-L (aget st (- sp 1))) 0x7fffffff) (bit-and (.-L (aget st sp)) 0x80000000)))))
+
+              ;; f64
+              (case [OpF64Eq OpF64Ne OpF64Lt OpF64Gt OpF64Le OpF64Ge]
+                (do
+                  (dec! sp)
+                  (let [(values a b) (values (f64of (aget st (- sp 1))) (f64of (aget st sp)))
+                      ^{:line 964 :tag bool} r (zero bool)]
+                    (switch (.-Op in)
+                      (case [OpF64Eq]
+                        (set! r (== a b)))
+                      (case [OpF64Ne]
+                        (set! r (!= a b)))
+                      (case [OpF64Lt]
+                        (set! r (< a b)))
+                      (case [OpF64Gt]
+                        (set! r (> a b)))
+                      (case [OpF64Le]
+                        (set! r (<= a b)))
+                      (case [OpF64Ge]
+                        (set! r (>= a b))))
+
+                    (aset st (- sp 1) (b2v r)))))
+
+              (case [OpF64Abs]
+                (aset st (- sp 1) (lit V :L (bit-and-not (.-L (aget st (- sp 1))) (<< 1 63)))))
+              (case [OpF64Neg]
+                (aset st (- sp 1) (lit V :L (bit-xor (.-L (aget st (- sp 1))) (<< 1 63)))))
+              (case [OpF64Ceil]
+                (aset st (- sp 1) (un64 (.-L (aget st (- sp 1))) math/Ceil)))
+              (case [OpF64Floor]
+                (aset st (- sp 1) (un64 (.-L (aget st (- sp 1))) math/Floor)))
+              (case [OpF64Trunc]
+                (aset st (- sp 1) (un64 (.-L (aget st (- sp 1))) math/Trunc)))
+              (case [OpF64Nearest]
+                (aset st (- sp 1) (un64 (.-L (aget st (- sp 1))) math/RoundToEven)))
+              (case [OpF64Sqrt]
+                (aset st (- sp 1) (vf64 (math/Sqrt (f64of (aget st (- sp 1)))))))
+              (case [OpF64Add]
+                (dec! sp)
+                (aset st (- sp 1) (vf64 (+ (f64of (aget st (- sp 1))) (f64of (aget st sp))))))
+              (case [OpF64Sub]
+                (dec! sp)
+                (aset st (- sp 1) (vf64 (- (f64of (aget st (- sp 1))) (f64of (aget st sp))))))
+              (case [OpF64Mul]
+                (dec! sp)
+                (aset st (- sp 1) (vf64 (* (f64of (aget st (- sp 1))) (f64of (aget st sp))))))
+              (case [OpF64Div]
+                (dec! sp)
+                (aset st (- sp 1) (vf64 (/ (f64of (aget st (- sp 1))) (f64of (aget st sp))))))
+              (case [OpF64Min]
+                (dec! sp)
+                (aset st (- sp 1) (min64 (.-L (aget st (- sp 1))) (.-L (aget st sp)))))
+              (case [OpF64Max]
+                (dec! sp)
+                (aset st (- sp 1) (max64 (.-L (aget st (- sp 1))) (.-L (aget st sp)))))
+              (case [OpF64Copysign]
+                (dec! sp)
+                (aset st (- sp 1) (lit V :L (bit-or (bit-and-not (.-L (aget st (- sp 1))) (<< 1 63)) (bit-and (.-L (aget st sp)) (<< 1 63))))))
+
+              ;; conversions
+              (case [OpI32WrapI64]
+                (aset st (- sp 1) (vi32 (conv uint32 (.-L (aget st (- sp 1)))))))
+              (case [OpI32TruncF32S]
+                (aset st (- sp 1) (vi32 (conv uint32 (conv int32 (truncChk (conv float64 (f32of (aget st (- sp 1)))) -2.147483904E9 2.147483648E9))))))
+              (case [OpI32TruncF32U]
+                (aset st (- sp 1) (vi32 (conv uint32 (truncChk (conv float64 (f32of (aget st (- sp 1)))) -1.0 4.294967296E9)))))
+              (case [OpI32TruncF64S]
+                (aset st (- sp 1) (vi32 (conv uint32 (conv int32 (truncChk (f64of (aget st (- sp 1))) -2.147483649E9 2.147483648E9))))))
+              (case [OpI32TruncF64U]
+                (aset st (- sp 1) (vi32 (conv uint32 (truncChk (f64of (aget st (- sp 1))) -1.0 4.294967296E9)))))
+              (case [OpI64ExtendI32S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (conv int32 (.-L (aget st (- sp 1)))))))))
+              (case [OpI64ExtendI32U]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv uint32 (.-L (aget st (- sp 1))))))))
+              (case [OpI64TruncF32S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (truncChk (conv float64 (f32of (aget st (- sp 1)))) -9223373136366403584.0M 9223372036854775808.0M))))))
+              (case [OpI64TruncF32U]
+                (aset st (- sp 1) (vi64 (conv uint64 (truncChk (conv float64 (f32of (aget st (- sp 1)))) -1.0 18446744073709551616.0M)))))
+              (case [OpI64TruncF64S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (truncChk (f64of (aget st (- sp 1))) -9223372036854777856.0M 9223372036854775808.0M))))))
+              (case [OpI64TruncF64U]
+                (aset st (- sp 1) (vi64 (conv uint64 (truncChk (f64of (aget st (- sp 1))) -1.0 18446744073709551616.0M)))))
+              (case [OpF32ConvertI32S]
+                (aset st (- sp 1) (vf32 (conv float32 (conv int32 (.-L (aget st (- sp 1))))))))
+              (case [OpF32ConvertI32U]
+                (aset st (- sp 1) (vf32 (conv float32 (conv uint32 (.-L (aget st (- sp 1))))))))
+              (case [OpF32ConvertI64S]
+                (aset st (- sp 1) (vf32 (conv float32 (conv int64 (.-L (aget st (- sp 1))))))))
+              (case [OpF32ConvertI64U]
+                (aset st (- sp 1) (vf32 (u64tof32 (.-L (aget st (- sp 1)))))))
+              (case [OpF32DemoteF64]
+                (aset st (- sp 1) (vf32 (conv float32 (f64of (aget st (- sp 1)))))))
+              (case [OpF64ConvertI32S]
+                (aset st (- sp 1) (vf64 (conv float64 (conv int32 (.-L (aget st (- sp 1))))))))
+              (case [OpF64ConvertI32U]
+                (aset st (- sp 1) (vf64 (conv float64 (conv uint32 (.-L (aget st (- sp 1))))))))
+              (case [OpF64ConvertI64S]
+                (aset st (- sp 1) (vf64 (conv float64 (conv int64 (.-L (aget st (- sp 1))))))))
+              (case [OpF64ConvertI64U]
+                (aset st (- sp 1) (vf64 (u64tof64 (.-L (aget st (- sp 1)))))))
+              (case [OpF64PromoteF32]
+                (aset st (- sp 1) (vf64 (conv float64 (f32of (aget st (- sp 1)))))))
+              (case [OpI32ReinterpretF32 OpF32ReinterpretI32 OpI64ReinterpretF64 OpF64ReinterpretI64])
+              (case [OpI32Extend8S]
+                (aset st (- sp 1) (vi32 (conv uint32 (conv int32 (conv int8 (.-L (aget st (- sp 1)))))))))
+              (case [OpI32Extend16S]
+                (aset st (- sp 1) (vi32 (conv uint32 (conv int32 (conv int16 (.-L (aget st (- sp 1)))))))))
+              (case [OpI64Extend8S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (conv int8 (.-L (aget st (- sp 1)))))))))
+              (case [OpI64Extend16S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (conv int16 (.-L (aget st (- sp 1)))))))))
+              (case [OpI64Extend32S]
+                (aset st (- sp 1) (vi64 (conv uint64 (conv int64 (conv int32 (.-L (aget st (- sp 1)))))))))
+              (case [OpI32TruncSatF32S]
+                (aset st (- sp 1) (vi32 (satS32 (conv float64 (f32of (aget st (- sp 1))))))))
+              (case [OpI32TruncSatF32U]
+                (aset st (- sp 1) (vi32 (satU32 (conv float64 (f32of (aget st (- sp 1))))))))
+              (case [OpI32TruncSatF64S]
+                (aset st (- sp 1) (vi32 (satS32 (f64of (aget st (- sp 1)))))))
+              (case [OpI32TruncSatF64U]
+                (aset st (- sp 1) (vi32 (satU32 (f64of (aget st (- sp 1)))))))
+              (case [OpI64TruncSatF32S]
+                (aset st (- sp 1) (vi64 (satS64 (conv float64 (f32of (aget st (- sp 1))))))))
+              (case [OpI64TruncSatF32U]
+                (aset st (- sp 1) (vi64 (satU64 (conv float64 (f32of (aget st (- sp 1))))))))
+              (case [OpI64TruncSatF64S]
+                (aset st (- sp 1) (vi64 (satS64 (f64of (aget st (- sp 1)))))))
+              (case [OpI64TruncSatF64U]
+                (aset st (- sp 1) (vi64 (satU64 (f64of (aget st (- sp 1)))))))
+
+              ;; references
+              (case [OpRefNull]
+                (aset st sp (lit V))
+                (inc! sp))
+              (case [OpRefIsNull]
+                (aset st (- sp 1) (b2v (== (.-H (aget st (- sp 1))) 0))))
+              (case [OpRefFunc]
+                (aset st sp (FuncRef (aget (.-Funcs inst) (.-A in))))
+                (inc! sp))
+              (case [OpRefEq]
+                (dec! sp)
+                (aset st (- sp 1) (b2v (== (aget st (- sp 1)) (aget st sp)))))
+              (case [OpRefAsNonNull]
+                (when (== (.-H (aget st (- sp 1))) 0)
+                  (trap "null reference")))
+
+              (case [OpRefTest OpRefTestNull]
+                (aset st (- sp 1) (b2v (.refTest m (aget st (- sp 1)) (!= (.-D in) 0) (.-E in)))))
+              (case [OpRefCast OpRefCastNull]
+                (when (not (.refTest m (aget st (- sp 1)) (!= (.-D in) 0) (.-E in)))
+                  (trap "cast failure")))
+
+              (case [OpAnyConvertExtern]
+                (when (!= (.-H (aget st (- sp 1))) 0)
+                  (set! (.-H (aget st (- sp 1))) bit-and-not rExt)))
+
+              (case [OpExternConvertAny]
+                (when (!= (.-H (aget st (- sp 1))) 0)
+                  (set! (.-H (aget st (- sp 1))) bit-or rExt)))
+
+              (case [OpRefI31]
+                (aset st (- sp 1) (lit V :L (bit-and (.-L (aget st (- sp 1))) 0x7fffffff) :H rI31)))
+              (case [OpI31GetS OpI31GetU]
+                (when (== (.-H (aget st (- sp 1))) 0)
+                  (trap "null i31 reference"))
+
+                (if (== (.-Op in) OpI31GetS)
+                  (aset st (- sp 1) (vi32 (conv uint32 (>> (conv int32 (<< (conv uint32 (.-L (aget st (- sp 1)))) 1)) 1))))
+
+                  (aset st (- sp 1) (vi32 (conv uint32 (.-L (aget st (- sp 1))))))))
+
+
+              ;; GC
+              (case [OpStructNew]
+                (do
+                  (let [t (aget ctypes (.-A in))
+                      ^{:line 1134} n (len (.-Fields t))
+                      ^{:line 1135} fs (make (slice V) n)]
+                    (for [k 0] (< k n) (inc! k)
+                      (aset fs k (pack (.-K (.-T (aget (.-Fields t) k))) (aget st (+ (- sp n) k)))))
+
+                    (set! sp - n)
+                    (aset st sp (lit V :L (.addObj (.-St m) (addr (lit Struct :Type (conv int (.-A in)) :Fields fs))) :H rStruct))
+                    (inc! sp))))
+
+              (case [OpStructNewDefault]
+                (aset st sp (lit V :L (.addObj (.-St m) (addr (lit Struct :Type (conv int (.-A in)) :Fields (make (slice V) (len (.-Fields (aget ctypes (.-A in)))))))) :H rStruct))
+                (inc! sp))
+              (case [OpStructGet OpStructGetU]
+                (aset st (- sp 1) (aget (.-Fields (.structOf m (aget st (- sp 1)))) (.-B in))))
+              (case [OpStructGetS]
+                (aset st (- sp 1) (unpackS (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) (.-B in)))) (aget (.-Fields (.structOf m (aget st (- sp 1)))) (.-B in)))))
+              (case [OpStructSet]
+                (set! sp - 2)
+                (aset (.-Fields (.structOf m (aget st sp))) (.-B in) (pack (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) (.-B in)))) (aget st (+ sp 1)))))
+              (case [OpArrayNew]
+                (do
+                  (dec! sp)
+                  (let [a (.newArray m (conv int (.-A in)) (conv uint64 (conv uint32 (.-L (aget st sp)))))
+                      ^{:line 1157} v (pack (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) 0))) (aget st (- sp 1)))]
+                    (range [k (.-Elems a)]
+                      (aset (.-Elems a) k v))
+
+                    (aset st (- sp 1) (lit V :L (.addObj (.-St m) a) :H rArray)))))
+
+              (case [OpArrayNewDefault]
+                (aset st (- sp 1) (lit V :L (.addObj (.-St m) (.newArray m (conv int (.-A in)) (conv uint64 (conv uint32 (.-L (aget st (- sp 1))))))) :H rArray)))
+              (case [OpArrayNewFixed]
+                (do
+                  (let [n (conv int (.-B in))
+                      ^{:line 1168} a (.newArray m (conv int (.-A in)) (conv uint64 n))
+                      ^{:line 1169} k (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) 0)))]
+                    (for [j 0] (< j n) (inc! j)
+                      (aset (.-Elems a) j (pack k (aget st (+ (- sp n) j)))))
+
+                    (set! sp - n)
+                    (aset st sp (lit V :L (.addObj (.-St m) a) :H rArray))
+                    (inc! sp))))
+
+              (case [OpArrayNewData]
+                (do
+                  (dec! sp)
+                  (let [(values s n) (values (conv uint64 (conv uint32 (.-L (aget st (- sp 1))))) (conv uint64 (conv uint32 (.-L (aget st sp)))))
+                      ^{:line 1181} k (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) 0)))
+                      ^{:line 1182} z (storageSize k)
+                      ^{:line 1183} seg (aget (.-Datas inst) (.-B in))]
+                    (when (> (+ s (* n z)) (conv uint64 (len seg)))
+                      (trap "out of bounds memory access"))
+
+                    (let [a (.newArray m (conv int (.-A in)) n)]
+                      (for [j (conv uint64 0)] (< j n) (inc! j)
+                        (aset (.-Elems a) j (readStorage k (subslice seg (+ s (* j z))))))
+
+                      (aset st (- sp 1) (lit V :L (.addObj (.-St m) a) :H rArray))))))
+
+              (case [OpArrayNewElem]
+                (do
+                  (dec! sp)
+                  (let [(values s n) (values (conv uint64 (conv uint32 (.-L (aget st (- sp 1))))) (conv uint64 (conv uint32 (.-L (aget st sp)))))
+                      ^{:line 1197} seg (aget (.-Elems inst) (.-B in))]
+                    (when (> (+ s n) (conv uint64 (len seg)))
+                      (trap "out of bounds table access"))
+
+                    (let [a (.newArray m (conv int (.-A in)) n)]
+                      (copy (.-Elems a) (subslice seg s (+ s n)))
+                      (aset st (- sp 1) (lit V :L (.addObj (.-St m) a) :H rArray))))))
+
+              (case [OpArrayGet OpArrayGetS OpArrayGetU]
+                (do
+                  (dec! sp)
+                  (let [a (.arrayOf m (aget st (- sp 1)))
+                      ^{:line 1209} i (conv uint64 (conv uint32 (.-L (aget st sp))))]
+                    (when (>= i (conv uint64 (len (.-Elems a))))
+                      (trap "out of bounds array access"))
+
+                    (let [v (aget (.-Elems a) i)]
+                      (when (== (.-Op in) OpArrayGetS)
+                        (set! v (unpackS (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) 0))) v)))
+
+                      (aset st (- sp 1) v)))))
+
+              (case [OpArraySet]
+                (do
+                  (set! sp - 3)
+                  (let [a (.arrayOf m (aget st sp))
+                      ^{:line 1223} i (conv uint64 (conv uint32 (.-L (aget st (+ sp 1)))))]
+                    (when (>= i (conv uint64 (len (.-Elems a))))
+                      (trap "out of bounds array access"))
+
+                    (aset (.-Elems a) i (pack (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) 0))) (aget st (+ sp 2)))))))
+
+              (case [OpArrayLen]
+                (aset st (- sp 1) (vi32 (conv uint32 (len (.-Elems (.arrayOf m (aget st (- sp 1)))))))))
+              (case [OpArrayFill]
+                (do
+                  (set! sp - 4)
+                  (let [a (.arrayOf m (aget st sp))
+                      (values i v n) (values (conv uint64 (conv uint32 (.-L (aget st (+ sp 1))))) (pack (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) 0))) (aget st (+ sp 2))) (conv uint64 (conv uint32 (.-L (aget st (+ sp 3))))))]
+                    (when (> (+ i n) (conv uint64 (len (.-Elems a))))
+                      (trap "out of bounds array access"))
+
+                    (for [j (conv uint64 0)] (< j n) (inc! j)
+                      (aset (.-Elems a) (+ i j) v)))))
+
+
+              (case [OpArrayCopy]
+                (do
+                  (set! sp - 5)
+                  (let [d (.arrayOf m (aget st sp))
+                      ^{:line 1247} di (conv uint64 (conv uint32 (.-L (aget st (+ sp 1)))))
+                      ^{:line 1248} s (.arrayOf m (aget st (+ sp 2)))
+                      (values si n) (values (conv uint64 (conv uint32 (.-L (aget st (+ sp 3))))) (conv uint64 (conv uint32 (.-L (aget st (+ sp 4))))))]
+                    (when (or (> (+ di n) (conv uint64 (len (.-Elems d)))) (> (+ si n) (conv uint64 (len (.-Elems s)))))
+                      (trap "out of bounds array access"))
+
+                    (copy (subslice (.-Elems d) di (+ di n)) (subslice (.-Elems s) si (+ si n))))))
+
+              (case [OpArrayInitData]
+                (do
+                  (set! sp - 4)
+                  (let [a (.arrayOf m (aget st sp))
+                      (values d s n) (values (conv uint64 (conv uint32 (.-L (aget st (+ sp 1))))) (conv uint64 (conv uint32 (.-L (aget st (+ sp 2))))) (conv uint64 (conv uint32 (.-L (aget st (+ sp 3))))))
+                      ^{:line 1260} k (.-K (.-T (aget (.-Fields (aget ctypes (.-A in))) 0)))
+                      ^{:line 1261} z (storageSize k)
+                      ^{:line 1262} seg (aget (.-Datas inst) (.-B in))]
+                    (when (> (+ d n) (conv uint64 (len (.-Elems a))))
+                      (trap "out of bounds array access"))
+
+                    (when (> (+ s (* n z)) (conv uint64 (len seg)))
+                      (trap "out of bounds memory access"))
+
+                    (for [j (conv uint64 0)] (< j n) (inc! j)
+                      (aset (.-Elems a) (+ d j) (readStorage k (subslice seg (+ s (* j z)))))))))
+
+
+              (case [OpArrayInitElem]
+                (do
+                  (set! sp - 4)
+                  (let [a (.arrayOf m (aget st sp))
+                      (values d s n) (values (conv uint64 (conv uint32 (.-L (aget st (+ sp 1))))) (conv uint64 (conv uint32 (.-L (aget st (+ sp 2))))) (conv uint64 (conv uint32 (.-L (aget st (+ sp 3))))))
+                      ^{:line 1278} seg (aget (.-Elems inst) (.-B in))]
+                    (when (> (+ d n) (conv uint64 (len (.-Elems a))))
+                      (trap "out of bounds array access"))
+
+                    (when (> (+ s n) (conv uint64 (len seg)))
+                      (trap "out of bounds table access"))
+
+                    (copy (subslice (.-Elems a) d (+ d n)) (subslice seg s (+ s n))))))
+
+              (default
+                (let [fn (aget simdFns (.-Op in))]
+                  (when (== fn nil)
+                    (panic (+ "op " (OpName (.-Op in)) " not run")))
+
+                  (set! sp (go/call fn m in code inst st sp)))))
+
+            (continue)
+
+            (label :call
+              (do
+                (let [t (aget ctypes (.-Type g))
+                    ^{:line 1299} np (len (.-Params t))
+                    ^{:line 1300} tail (or (== (.-Op in) OpReturnCall) (== (.-Op in) OpReturnCallIndirect) (== (.-Op in) OpReturnCallRef))
+                    ^{:line 1301} base (- sp np)]
+                  (when tail
+                    (copy (subslice st fp (+ fp np)) (subslice st base sp))
+                    (set! base fp))
+
+                  (when (!= (.-Host g) nil)
+                    (let [args (make (slice V) np)]
+                      (copy args (subslice st base (+ base np)))
+                      (let [res (.HostCall m g args (+ base np))]
+                        (set! st (.-stack m))
+                        (copy (subslice st base) res)
+                        (when tail
+                          (return nil))
+
+                        (set! sp (+ base (len res)))
+                        (continue))))
+
+                  (when tail
+                    (when (!= (.-Native g) nil)
+                      (set! (.-tail m) g)
+                      (return nil))
+
+                    (set! f g)
+                    (goto :top))
+
+                  (let [e (.run m g base)]
+                    (set! st (.-stack m))
+                    (when (!= e nil)
+                      (set! exn e)
+                      (goto :throw))
+
+                    (set! sp (+ base (len (.-Results t))))
+                    (continue)))))
+
+
+            (label :throw
+              (do
+                (let [(values npc nsp ok) (.catch m code inst fp (- pc 1) exn)]
+                  (when (not ok)
+                    (return exn))
+
+                  (set! st (.-stack m))
+                  (set! (values pc sp) (values npc nsp)))))))))))

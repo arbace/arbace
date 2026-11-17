@@ -1,0 +1,178 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/ch/SourceChannelImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io FileDescriptor IOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels AsynchronousCloseException
+                            ClosedChannelException
+                            Pipe$SourceChannel
+                            SelectionKey)
+        '(java.nio.channels.spi SelectorProvider)
+        '(java.util Objects)
+        '(java.util.concurrent.locks ReentrantLock))
+
+(defclass SourceChannelImpl
+  :extends Pipe$SourceChannel
+  :implements [SelChImpl]
+
+  (field ^:private ^:static ^:final ^NativeDispatcher nd (SocketDispatcher.))
+
+  (field ^:private ^:final ^FileDescriptor fd)
+
+  (field ^:private ^:final ^int fdVal)
+
+  (field ^:private ^:final ^ReentrantLock readLock (ReentrantLock.))
+
+  (field ^:private ^:final stateLock (Object.))
+
+  (field ^:private ^:static ^:final ^int ST_INUSE 0)
+
+  (field ^:private ^:static ^:final ^int ST_CLOSING 1)
+
+  (field ^:private ^:static ^:final ^int ST_CLOSED 2)
+
+  (field ^:private ^int state)
+
+  (field ^:private ^long thread)
+
+  (field ^:private ^:volatile ^boolean forcedNonBlocking)
+
+  (method ^:public getFD ^FileDescriptor [this] fd)
+
+  (method ^:public getFDVal ^int [this] fdVal)
+
+  (constructor :throws [IOException] [this ^SelectorProvider sp ^FileDescriptor fd]
+    (super. sp)
+    (set! (.-fd this) fd)
+    (set! (.-fdVal this) (IOUtil/fdVal fd)))
+
+  (method ^:private ensureOpen :throws [ClosedChannelException] ^void [this]
+    (when-not (.isOpen this) (throw (ClosedChannelException.))))
+
+  (method ^:private configureSocketNonBlockingIfVirtualThread :throws [IOException] ^void [this]
+    (java-assert (.isHeldByCurrentThread readLock))
+    (when (and (not forcedNonBlocking) (.isVirtual (Thread/currentThread)))
+      (locking stateLock
+        (.ensureOpen this)
+        (IOUtil/configureBlocking fd false)
+        (set! forcedNonBlocking true))))
+
+  (method ^:private tryClose :throws [IOException] ^boolean [this]
+    (java-assert (and (Thread/holdsLock stateLock) (== state ST_CLOSING)))
+    (if (and (== thread 0) (not (.isRegistered this)))
+        (do (set! state ST_CLOSED) (.close nd fd) true)
+        false))
+
+  (method ^:private tryFinishClose ^void [this]
+    (try (.tryClose this) (catch IOException ignore)))
+
+  (method ^:private implCloseBlockingMode :throws [IOException] ^void [this]
+    (locking stateLock
+      (java-assert (< state ST_CLOSING))
+      (set! state ST_CLOSING)
+      (when-not (.tryClose this) (.preClose nd fd thread 0))))
+
+  (method ^:private implCloseNonBlockingMode :throws [IOException] ^void [this]
+    (locking stateLock (java-assert (< state ST_CLOSING)) (set! state ST_CLOSING))
+    (.lock readLock)
+    (.unlock readLock)
+    (locking stateLock (when (== state ST_CLOSING) (.tryClose this))))
+
+  (method ^:protected implCloseSelectableChannel :throws [IOException] ^void [this]
+    (java-assert (not (.isOpen this)))
+    (if (.isBlocking this) (.implCloseBlockingMode this) (.implCloseNonBlockingMode this)))
+
+  (method ^:public kill ^void [this]
+    (.lock readLock)
+    (.unlock readLock)
+    (locking stateLock
+      (java-assert (not (.isOpen this)))
+      (when (== state ST_CLOSING) (.tryFinishClose this))))
+
+  (method ^:protected implConfigureBlocking :throws [IOException] ^void [this ^boolean block]
+    (.lock readLock)
+    (try
+      (locking stateLock
+        (.ensureOpen this)
+        (when-not forcedNonBlocking (IOUtil/configureBlocking fd block)))
+      (finally (.unlock readLock))))
+
+  (method ^:public translateReadyOps ^boolean [this ^int ops ^int initialOps ^SelectionKeyImpl ski]
+    (let [intOps (.nioInterestOps ski)
+          oldOps (.nioReadyOps ski)
+          ^:mutable newOps initialOps]
+      (when-not (== (bit-and-int ops Net/POLLNVAL) 0) (throw (Error. "POLLNVAL detected")))
+      (if (not (== (bit-and-int ops (bit-or-int Net/POLLERR Net/POLLHUP)) 0))
+          (do
+            (set! newOps intOps)
+            (.nioReadyOps ski newOps)
+            (not (== (bit-and-int newOps (bit-not-int oldOps)) 0)))
+          (do
+            (when (and (not (== (bit-and-int ops Net/POLLIN) 0))
+                       (not (== (bit-and-int intOps SelectionKey/OP_READ) 0)))
+              (set! newOps (bit-or-int newOps SelectionKey/OP_READ)))
+            (.nioReadyOps ski newOps)
+            (not (== (bit-and-int newOps (bit-not-int oldOps)) 0))))))
+
+  (method ^:public translateAndUpdateReadyOps ^boolean [this ^int ops ^SelectionKeyImpl ski]
+    (.translateReadyOps this ops (.nioReadyOps ski) ski))
+
+  (method ^:public translateAndSetReadyOps ^boolean [this ^int ops ^SelectionKeyImpl ski]
+    (.translateReadyOps this ops 0 ski))
+
+  (method ^:public translateInterestOps ^int [this ^int ops]
+    (let [^:mutable ^int newOps 0]
+      (when (== ops SelectionKey/OP_READ) (set! newOps (bit-or-int newOps Net/POLLIN)))
+      newOps))
+
+  (method ^:private beginRead :throws [ClosedChannelException] ^void [this ^boolean blocking]
+    (when blocking (.begin this))
+    (locking stateLock (.ensureOpen this) (when blocking (set! thread (NativeThread/current)))))
+
+  (method ^:private endRead :throws [AsynchronousCloseException] ^void [this ^boolean blocking
+                                                                        ^boolean completed]
+    (when blocking
+      (locking stateLock (set! thread 0) (when (== state ST_CLOSING) (.tryFinishClose this)))
+      (.end this completed)))
+
+  (method ^:public read :throws [IOException] ^int [this ^ByteBuffer dst]
+    (Objects/requireNonNull dst)
+    (.lock readLock)
+    (try
+      (.ensureOpen this)
+      (let [blocking (.isBlocking this)
+            ^:mutable ^int n 0]
+        (try
+          (.beginRead this blocking)
+          (.configureSocketNonBlockingIfVirtualThread this)
+          (set! n (IOUtil/read fd dst -1 nd))
+          (when blocking
+            (while (and (IOStatus/okayToRetry n) (.isOpen this))
+              (.park this Net/POLLIN)
+              (set! n (IOUtil/read fd dst -1 nd))))
+          (finally (.endRead this blocking (> n 0)) (java-assert (IOStatus/check n))))
+        (IOStatus/normalize n))
+      (finally (.unlock readLock))))
+
+  (method ^:public read :throws [IOException] ^long [this ^ByteBuffer/1 dsts ^int offset ^int length]
+    (Objects/checkFromIndexSize offset length (alength dsts))
+    (.lock readLock)
+    (try
+      (.ensureOpen this)
+      (let [blocking (.isBlocking this)
+            ^:mutable n 0]
+        (try
+          (.beginRead this blocking)
+          (.configureSocketNonBlockingIfVirtualThread this)
+          (set! n (IOUtil/read fd dsts offset length nd))
+          (when blocking
+            (while (and (IOStatus/okayToRetry n) (.isOpen this))
+              (.park this Net/POLLIN)
+              (set! n (IOUtil/read fd dsts offset length nd))))
+          (finally (.endRead this blocking (> n 0)) (java-assert (IOStatus/check n))))
+        (IOStatus/normalize n))
+      (finally (.unlock readLock))))
+
+  (method ^:public read :throws [IOException] ^long [this ^ByteBuffer/1 dsts]
+    (.read this dsts 0 (alength dsts))))

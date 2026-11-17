@@ -38,11 +38,13 @@
   ["regabiwrappers" "regabiargs" "dwarf5" "randomizedheapbase64" "greenteagc" "jsonv2" "sizespecializedmalloc"])
 
 (defn tag-set
-  "The build tags satisfied by a configuration {:goos :goarch :goamd64 :goarm64 :tags}."
+  "The build tags satisfied by a configuration {:goos :goarch :goamd64 :goarm64 :tags}; as go/build's
+  matchTag, GOOS android also satisfies linux, illumos solaris and ios darwin."
   [{:keys [goos goarch goamd64 goarm64 tags]}]
   (into #{goos goarch "gc"}
         (concat (for [i (range 1 28)] (str "go1." i))
                 (when (unix-os goos) ["unix"])
+                (case goos "android" ["linux"] "illumos" ["solaris"] "ios" ["darwin"] nil)
                 (when (= "amd64" goarch)
                   (let [lv (Long/parseLong (subs (or goamd64 "v1") 1))]
                     (for [i (range 1 (inc lv))] (str "amd64.v" i))))
@@ -71,30 +73,56 @@
                           (contains? tags t))))]
       (or-expr))))
 
+(defn eval-plus-build
+  "The value of one // +build line (go/constraint's plusBuild): its space-separated options OR'd, each
+  a comma-separated AND of tags, a tag negated by one !."
+  [^String line tags]
+  (let [opts (remove str/blank? (str/split (str/trim (str/replace line #"^//\s*\+build" "")) #"\s+"))]
+    (boolean (some (fn [o] (every? (fn [^String t] (if (str/starts-with? t "!") (not (contains? tags (subs t 1))) (contains? tags t)))
+                                   (str/split o #",")))
+                   opts))))
+
+(defn- match-tag
+  "go/build's matchTag for a file name's GOOS or GOARCH part: the configuration's GOOS or GOARCH, or a tag it
+  satisfies (GOOS android satisfies linux, illumos solaris, ios darwin: tag-set)."
+  [^String part goos goarch tags]
+  (or (= part goos) (= part goarch)
+      (and (= goos "android") (= part "linux"))
+      (and (= goos "illumos") (= part "solaris"))
+      (and (= goos "ios") (= part "darwin"))
+      (boolean (and tags (contains? tags part)))))
+
 (defn good-os-arch-file?
-  "go/build's goodOSArchFile: a file name's _GOOS, _GOARCH, _GOOS_GOARCH suffixes."
-  [^String fname goos goarch]
-  (let [n (str/replace fname #"\.go$" "")
-        n (if-let [i (str/index-of n "_")] (subs n i) "")
-        parts (vec (rest (str/split n #"_")))
-        l (count parts)
-        parts (if (and (>= l 1) (= "test" (peek parts))) (pop parts) parts)
-        l (count parts)]
-    (cond
-      (and (>= l 2) (known-os (nth parts (- l 2))) (known-arch (nth parts (- l 1))))
-      (and (= goarch (nth parts (- l 1))) (or (= goos (nth parts (- l 2))) (and (= "android" (nth parts (- l 2))) (= goos "linux"))))
-      (and (>= l 1) (known-os (nth parts (- l 1))))
-      (let [o (nth parts (- l 1))]
-        (or (= o goos) (and (= o "android") (= goos "linux")) (and (= o "illumos") (= goos "solaris"))))
-      (and (>= l 1) (known-arch (nth parts (- l 1)))) (= goarch (nth parts (- l 1)))
-      :else true)))
+  "go/build's goodOSArchFile: a file name's _GOOS, _GOARCH, _GOOS_GOARCH suffixes (the name cut at its first
+  dot, a _test suffix dropped), each part matched by matchTag: a file x_linux.go is kept for GOOS android, a
+  file x_android.go only for android (review 1111, #2: the reverse before)."
+  ([fname goos goarch] (good-os-arch-file? fname goos goarch nil))
+  ([^String fname goos goarch tags]
+   (let [n (let [b (subs fname (inc (or (str/last-index-of fname "/") -1)))]
+             (if-let [d (str/index-of b ".")] (subs b 0 d) b))
+         n (if-let [i (str/index-of n "_")] (subs n i) "")
+         parts (vec (rest (str/split n #"_")))
+         l (count parts)
+         parts (if (and (>= l 1) (= "test" (peek parts))) (pop parts) parts)
+         l (count parts)
+         m #(match-tag % goos goarch tags)]
+     (cond
+       (and (>= l 2) (known-os (nth parts (- l 2))) (known-arch (nth parts (- l 1))))
+       (and (m (nth parts (- l 1))) (m (nth parts (- l 2))))
+       (and (>= l 1) (or (known-os (nth parts (- l 1))) (known-arch (nth parts (- l 1)))))
+       (m (nth parts (- l 1)))
+       :else true))))
 
 (defn file-included?
-  "Whether a file (its go/file options) is part of the package for the configuration."
+  "Whether a file (its go/file options) is part of the package for the configuration: go/build's
+  shouldBuild, its //go:build line when it has one, else every // +build line (ANDed), and its name."
   [fname opts config tags]
-  (and (good-os-arch-file? fname (:goos config) (:goarch config))
-       (every? (fn [^String b] (if (str/starts-with? b "//go:build") (eval-build b tags) true))
-               (:build opts))))
+  (let [bs (map str (:build opts))
+        gb (filter #(str/starts-with? % "//go:build") bs)]
+    (and (good-os-arch-file? fname (:goos config) (:goarch config) tags)
+         (if (seq gb)
+           (every? #(eval-build % tags) gb)
+           (every? #(eval-plus-build % tags) (filter #(re-find #"^//\s*\+build" %) bs))))))
 
 ;;; Reading packages
 

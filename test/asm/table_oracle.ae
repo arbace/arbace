@@ -1,0 +1,317 @@
+(ns asm.table-oracle
+  "bin/repr-asm table oracle's second half (AXS37; the oracle tier's, by hand): what llvm-tblgen 23.1.5 makes of X86.td
+  against asm/amd64/table.edn, beyond the match tables' classes the script's awk compares. Four parts, each a file of
+  rows in the oracle's directory (llvm-NAME.txt beside arbace-NAME.txt, equal when the table is llvm-tblgen's):
+  - conv-0, conv-1: each MatchTable0/MatchTable1 row's conversion (X86GenAsmMatcher.inc's ConversionTable, each step
+    by convertToMCInst's case: an asm operand rendered by its class's method over N machine operands, a tied operand by
+    TiedAsmOperandTable's result operand, an immediate, a register) against the :match/:match-intel row's;
+  - insns: each :insns entry's encoding fields (opcode, format, map, prefixes, sizes, encoding, immediate, explicit
+    prefix, CD8 scale, the flag bits), its machine operands (name, operand, sub-operand count from MIOperandInfo), defs
+    and ties, from llvm-tblgen -print-records' resolved fields of the instruction and of its operands;
+  - print-0, print-1: each :insns entry's :print and :print-intel against X86GenAsmWriter.inc's and
+    X86GenAsmWriter1.inc's printInstruction, decoded (getMnemonic's AsmStrs and OpInfo words, each fragment's command
+    by its bits): the literal text and each operand's printer and machine operand.
+  Reads llvm-tblgen's output only (the C++ is never compiled)."
+  (:require [arbace.string :as str]))
+
+(defn- lines [path] (str/split-lines (slurp path)))
+
+(defn- c-unescape
+  "A C string or character literal's body unescaped."
+  ^String [^String s]
+  (let [sb (StringBuilder.) n (count s)]
+    (loop [i 0]
+      (if (>= i n)
+        (str sb)
+        (let [c (.charAt s i)]
+          (if (and (= c \\) (< (inc i) n))
+            (let [d (.charAt s (inc i))]
+              (cond
+                (Character/isDigit d) (let [e (loop [e (inc i)] (if (and (< e n) (< (- e i) 4) (Character/isDigit (.charAt s e))) (recur (inc e)) e))]
+                                        (.append sb (char (Long/parseLong (subs s (inc i) e) 8))) (recur e))
+                (= d \x) (let [e (loop [e (+ i 2)] (if (and (< e n) (< (- e i) 4) (re-matches #"[0-9A-Fa-f]" (str (.charAt s e)))) (recur (inc e)) e))]
+                           (.append sb (char (Long/parseLong (subs s (+ i 2) e) 16))) (recur e))
+                :else (do (.append sb (case d \t \tab \n \newline \r \return \\ \\ \" \" \' \' d)) (recur (+ i 2)))))
+            (do (.append sb c) (recur (inc i)))))))))
+
+(defn- literals
+  "The C string literals of a line, concatenated and unescaped."
+  ^String [^String l]
+  (apply str (map (comp c-unescape second) (re-seq #"\"((?:[^\"\\]|\\.)*)\"" l))))
+
+(defn- write-rows [path rows] (spit path (apply str (map #(str % "\n") rows))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the conversions
+
+(defn- matcher-conversions
+  "X86GenAsmMatcher.inc's [MATCHTABLE0-ROWS MATCHTABLE1-ROWS], each row [MNEMONIC INSTRUCTION [STEP ...]]."
+  [path]
+  (let [ls (lines path)
+        ;; convertToMCInst's cases: CVT name -> step kind
+        cvt (let [start (first (keep-indexed (fn [i l] (when (re-find #"^convertToMCInst\(" l) i)) ls))
+                  body (take-while #(not= "}" %) (drop start ls))]
+              (loop [ls body cur nil out {}]
+                (if-let [l (first ls)]
+                  (let [l (str/trim l)]
+                    (cond
+                      (re-find #"^case (CVT_\w+):" l) (recur (rest ls) (second (re-find #"^case (CVT_\w+):" l)) out)
+                      (and cur (not (contains? out cur)))
+                      (if-let [[_ m n] (re-find #"\.(\w+)\(Inst, (\d+)\)" l)]
+                        (recur (rest ls) cur (assoc out cur [:a m n]))
+                        (if-let [[_ v] (re-find #"createImm\((-?\d+)\)" l)]
+                          (recur (rest ls) cur (assoc out cur [:i v]))
+                          (if-let [[_ r] (re-find #"createReg\((?:X86::)?(\w+)\)" l)]
+                            (recur (rest ls) cur (assoc out cur [:r r]))
+                            (recur (rest ls) cur out))))
+                      :else (recur (rest ls) cur out)))
+                  (assoc out "CVT_Tied" [:t]))))
+        ties (into {} (keep (fn [l] (when-let [[_ n r] (re-find #"/\* (Tie\w+) \*/ \{ (\d+)," l)] [n r])) ls))
+        ;; ConversionTable: signature -> steps
+        table (let [start (first (keep-indexed (fn [i l] (when (re-find #"^static const uint8_t ConversionTable" l) i)) ls))
+                    body (take-while #(not= "};" %) (drop (inc start) ls))]
+                (loop [ls body sig nil out {}]
+                  (if-let [l (first ls)]
+                    (if-let [[_ s] (re-find #"^  // (\w+)$" l)]
+                      (recur (rest ls) s out)
+                      (let [toks (mapv str/trim (str/split (str/replace (str/replace (str/trim l) "{" "") "}," "") #","))
+                            toks (vec (remove empty? toks))
+                            steps (loop [ts toks acc []]
+                                    (let [[k x] ts]
+                                      (cond
+                                        (or (nil? k) (= k "CVT_Done")) acc
+                                        (= k "CVT_Tied") (recur (drop 2 ts) (conj acc (str "t" (or (ties x) (str "?" x)))))
+                                        :else (let [[kind m n] (or (cvt k) [:unknown k])]
+                                                (recur (drop 2 ts)
+                                                       (conj acc (case kind
+                                                                   :a (str "a" (dec (Long/parseLong x)) " " m " " n)
+                                                                   :i (str "i" m)
+                                                                   :r (str "r" m)
+                                                                   (str "?" k))))))))]
+                        (recur (rest ls) nil (assoc out sig steps))))
+                    out)))
+        rows (fn [t]
+               (let [start (first (keep-indexed (fn [i l] (when (str/includes? l (str "static const MatchEntry " t "[]")) i)) ls))
+                     body (take-while #(not= "};" %) (drop (inc start) ls))]
+                 (vec (for [l body :let [[_ mn i c] (re-find #"/\* (\S+) \*/, X86::(\w+), (\w+)," l)] :when mn]
+                        [mn i (or (table c) [(str "?" c)])]))))]
+    [(rows "MatchTable0") (rows "MatchTable1")]))
+
+(defn- table-conversions
+  "The table's :match or :match-intel rows as [MNEMONIC INSTRUCTION [STEP ...]], each step written as the matcher's."
+  [t key]
+  (let [classes (:classes t)
+        render (fn [c] (cond (str/starts-with? c "reg:") "addRegOperands"
+                             (str/starts-with? c "user:") (second (classes c))
+                             :else (str "?" c)))]
+    (vec (for [[mn cs inst conv] (key t)
+               :let [ops (:ops ((:insns t) inst))]]
+           [mn inst
+            (loop [ops ops conv conv acc []]
+              (if (empty? conv)
+                acc
+                (let [[_ _ n] (first ops)
+                      n (or n 1)
+                      [k x] (first conv)]
+                  (case k
+                    :a (recur (rest ops) (rest conv) (conj acc (str "a" x " " (render (nth cs x)) " " n)))
+                    :i (recur (rest ops) (rest conv) (conj acc (str "i" x)))
+                    :r (recur (rest ops) (rest conv) (conj acc (str "r" x)))
+                    (:t :z) (let [k (min n (count conv))]
+                              (recur (rest ops) (drop k conv)
+                                     (into acc (map (fn [[kk xx]] (if (= kk :t) (str "t" xx) "z")) (take k conv)))))))))]))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the instructions' fields
+
+(def ^:private flag-fields
+  [[:w "hasREX_W"] [:4v "hasVEX_4V"] [:l "hasVEX_L"] [:ignl "ignoresVEX_L"] [:k "hasEVEX_K"]
+   [:z "hasEVEX_Z"] [:l2 "hasEVEX_L2"] [:b "hasEVEX_B"] [:rc "hasEVEX_RC"] [:u "hasEVEX_U"]
+   [:nf "hasEVEX_NF"] [:2cc "hasTwoConditionalOps"] [:lock "hasLockPrefix"] [:rep "hasREPPrefix"]
+   [:notrack "hasNoTrackPrefix"] [:ignw "IgnoresW"] [:commutable "isCommutable"] [:pseudo "isPseudo"]])
+
+(defn- read-records
+  "The extract of llvm-tblgen -print-records (lines `D NAME`, `S SUPERCLASS...` and `F FIELD<tab>VALUE`): NAME -> {FIELD VALUE,
+  :supers #{SUPERCLASS}}."
+  [path]
+  (let [out (java.util.HashMap.)]
+    (loop [ls (lines path) cur nil m {}]
+      (if-let [l (first ls)]
+        (cond
+          (str/starts-with? l "D ") (do (when cur (.put out cur m)) (recur (rest ls) (subs l 2) {}))
+          (str/starts-with? l "S ") (recur (rest ls) cur (assoc m :supers (set (str/split (str/trim (subs l 2)) #"\s+"))))
+          (str/starts-with? l "F ") (let [i (.indexOf ^String l "\t")] (recur (rest ls) cur (assoc m (subs l 2 i) (subs l (inc i)))))
+          :else (recur (rest ls) cur m))
+        (do (when cur (.put out cur m)) out)))))
+
+(defn- bits-int [^String v]
+  (when-let [[_ b] (re-find #"^\{ (.*) \}$" v)]
+    (let [bs (map str/trim (str/split b #","))]
+      (when-not (some #{"?"} bs) (reduce (fn [a x] (+ (* 2 a) (Long/parseLong x))) 0 bs)))))
+
+(defn- bit1? [v] (or (= v "1") (= 1 (some-> v bits-int))))
+
+(defn- dag-args
+  "The `TYPE:$name` arguments of a printed dag `(op a, b, ...)`: [[TYPE NAME] ...]."
+  [^String v]
+  (let [inner (second (re-find #"^\(\w+\s*(.*)\)$" v))]
+    (if (or (nil? inner) (= "" (str/trim inner)))
+      []
+      (vec (for [a (str/split inner #", ")]
+             (let [[_ t n] (re-find #"^([^:]+)(?::\$(\w+))?$" (str/trim a))] [t n]))))))
+
+(defn- unquote-str [^String v] (if (re-find #"^\".*\"$" v) (c-unescape (subs v 1 (dec (count v)))) v))
+
+(defn- llvm-insn
+  "The fields of the table's :insns entry (less :print and :print-intel) as llvm-tblgen's records give them."
+  [^java.util.HashMap recs name]
+  (let [r (.get recs name)
+        g (fn [k] (get r k))
+        nm (fn [k] (let [v (g k)] (when (and v (not= v "?")) v)))
+        mi-n (fn [t] (let [mi (get (.get recs t) "MIOperandInfo")] (if (and mi (seq (dag-args mi))) (count (dag-args mi)) 1)))
+        outs (dag-args (g "OutOperandList"))
+        args (concat outs (dag-args (g "InOperandList")))
+        ol (loop [as args i 0 acc []]
+             (if-let [[t n] (first as)]
+               (if (= t "variable_ops") (recur (rest as) i acc)
+                   (let [k (mi-n t)] (recur (rest as) (+ i k) (conj acc {:name n :t t :n k :ix i}))))
+               acc))
+        tie (into {} (mapcat (fn [part] (when-let [[_ a b] (re-find #"^\s*\$(\w+)\s*=\s*\$(\w+)\s*$" part)] [[a b] [b a]]))
+                             (str/split (unquote-str (or (g "Constraints") "\"\"")) #",")))
+        cd8 (some-> (g "CD8_Scale") bits-int)
+        flags (vec (for [[k fl] flag-fields :when (bit1? (g fl))] k))
+        ties (vec (for [o ol :let [t (tie (:name o))] :when t
+                        :let [to (some #(when (= (:name %) t) %) ol)]
+                        :when (< (long (:ix to)) (long (:ix o)))]
+                    [(:ix o) (:ix to)]))]
+    (when r
+      (cond-> (into {} (remove (comp nil? val)
+                               {:opcode (some-> (g "Opcode") bits-int) :form (nm "Form") :map (nm "OpMap") :prefix (nm "OpPrefix")
+                                :opsize (nm "OpSize") :adsize (nm "AdSize") :enc (nm "OpEnc") :imm (nm "ImmT")
+                                :explicit (nm "explicitOpPrefix")}))
+        (and cd8 (not (zero? (long cd8)))) (assoc :cd8 cd8)
+        (seq flags) (assoc :flags flags)
+        ;; the disassembler's instructions and their mode, as X86RecognizableInstr reads the records (shouldBeEmitted;
+        ;; Is32Bit/Is64Bit from the first predicate naming Not64Bit or In32Bit, else In64Bit): AX4's decoder
+        (and (contains? (:supers r) "X86Inst") (not= "Pseudo" (nm "Form"))
+             (or (not (bit1? (g "isCodeGenOnly"))) (bit1? (g "ForceDisassemble")))
+             (not (bit1? (g "isAsmParserOnly"))))
+        (assoc :dis (or (some (fn [^String p] (cond (or (.contains p "Not64Bit") (.contains p "In32Bit")) 32
+                                                    (.contains p "In64Bit") 64))
+                              (let [v (g "Predicates")] (when v (map str/trim (str/split (str/replace v #"^\[|\]$" "") #",")))))
+                        0))
+        true (assoc :ops (mapv (fn [o] [(:name o) (:t o) (:n o)]) ol) :defs (count outs))
+        (seq tie) (assoc :ties ties)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the printers
+
+(defn- writer-prints
+  "X86GenAsmWriter*.inc's printInstruction decoded: INSTRUCTION -> [TEXT [MI-OPERAND PRINTER] ...] (texts merged)."
+  [path]
+  (let [ls (vec (lines path))
+        n (count ls)
+        mn-start (first (keep-indexed (fn [i l] (when (re-find #"::getMnemonic\(" l) i)) ls))
+        ;; AsmStrs: the concatenated literals from the first table (getMnemonic's)
+        asm-strs (let [s (first (filter #(re-find #"static const char AsmStrs\[\]" (nth ls %)) (range mn-start n)))
+                       sb (StringBuilder.)]
+                   (loop [i (inc s)] (let [l (nth ls i)] (when-not (re-find #"^\s*\};" l) (.append sb (literals l)) (recur (inc i)))))
+                   (str sb))
+        ;; the OpInfo words: K -> {NAME VALUE}, and each K's shift
+        opinfo (loop [i mn-start out {}]
+                 (let [l (nth ls i)]
+                   (if-let [[_ k] (re-find #"static const uint\d+_t OpInfo(\d+)\[\] = \{" l)]
+                     (let [vals (loop [j (inc i) m (transient {})]
+                                  (let [l (nth ls j)]
+                                    (if (re-find #"^\s*\};" l) [j (persistent! m)]
+                                        (recur (inc j) (if-let [[_ v nm] (re-find #"^\s*(\d+)U,\s*// (\S+)" l)] (assoc! m nm (Long/parseLong v)) m)))))]
+                       (recur (first vals) (assoc out k (second vals))))
+                     (if (re-find #"AsmStrs\+\(Bits" l) out (recur (inc i) out)))))
+        shifts (into {} (keep (fn [i] (when-let [[_ k s] (re-find #"OpInfo(\d+)\[MI.getOpcode\(\)\] << (\d+);" (nth ls i))] [k (Long/parseLong s)]))
+                              (range mn-start n)))
+        mask (some (fn [i] (when-let [[_ m] (re-find #"AsmStrs\+\(Bits & (\d+)\)-1" (nth ls i))] (Long/parseLong m))) (range mn-start n))
+        ;; printInstruction's fragments: [SHIFT MASK {CASE [STMT ...]}]
+        pi (first (keep-indexed (fn [i l] (when (re-find #"::printInstruction\(" l) i)) ls))
+        stmt (fn [^String l]
+               (let [l (str/trim l)]
+                 (cond
+                   (= l "return;") :return
+                   (str/starts-with? l "O << \"") (literals l)
+                   (re-find #"^O << '" l) (c-unescape (second (re-find #"^O << '((?:[^'\\]|\\.)*)'" l)))
+                   :else (when-let [[_ fnm k] (re-find #"^(\w+)\(MI, (?:Address, )?(\d+)(?:, STI)?, O\);$" l)] [(Long/parseLong k) fnm]))))
+        frags (loop [i (inc pi) out []]
+                (let [l (nth ls i)]
+                  (cond
+                    (= l "}") out
+                    (re-find #"^  switch \(\(Bits >> (\d+)\) & (\d+)\) \{" l)
+                    (let [[_ s m] (re-find #"^  switch \(\(Bits >> (\d+)\) & (\d+)\) \{" l)
+                          [j cases] (loop [j (inc i) cur nil cases {}]
+                                      (let [l (nth ls j)]
+                                        (cond
+                                          (= l "  }") [j cases]
+                                          (re-find #"^  case (\d+):" l) (let [c (Long/parseLong (second (re-find #"^  case (\d+):" l)))] (recur (inc j) c (assoc cases c [])))
+                                          :else (let [x (when cur (stmt l))] (recur (inc j) cur (if x (update cases cur conj x) cases))))))]
+                      (recur (inc j) (conj out [(Long/parseLong s) (Long/parseLong m) cases])))
+                    (re-find #"^  if \(\(Bits >> (\d+)\) & 1\) \{" l)
+                    (let [s (Long/parseLong (second (re-find #"^  if \(\(Bits >> (\d+)\) & 1\) \{" l)))
+                          [j cases] (loop [j (inc i) cur 1 cases {1 []}]
+                                      (let [l (nth ls j)]
+                                        (cond
+                                          (= l "  } else {") (recur (inc j) 0 (assoc cases 0 []))
+                                          (= l "  }") [j cases]
+                                          :else (let [x (stmt l)] (recur (inc j) cur (if x (update cases cur conj x) cases))))))]
+                      (recur (inc j) (conj out [s 1 cases])))
+                    :else (recur (inc i) out))))
+        names (keys (get opinfo "0"))
+        merge-texts (fn [xs] (reduce (fn [acc x] (if (and (string? x) (string? (peek acc))) (conj (pop acc) (str (peek acc) x)) (conj acc x)))
+                                     [] (remove #(= "" %) xs)))]
+    (into {} (for [nm names
+                   :let [bits (reduce + (map (fn [[k m]] (bit-shift-left (long (get m nm 0)) (long (shifts k)))) opinfo))]
+                   :when (not (zero? bits))]
+               (let [off (dec (bit-and bits mask))
+                     e (.indexOf ^String asm-strs (int 0) (int off))
+                     mnem (subs asm-strs off e)
+                     items (loop [fs frags acc [mnem]]
+                             (if-let [[s m cases] (first fs)]
+                               (let [c (bit-and (unsigned-bit-shift-right bits (long s)) (long m))
+                                     st (or (cases c) [(str "?case" c)])
+                                     ret (some #{:return} st)]
+                                 (if ret (into acc (take-while #(not= :return %) st)) (recur (rest fs) (into acc st))))
+                               acc))]
+                 [nm (merge-texts items)])))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+
+(defn main
+  "Writes the oracle's rows into `dir` and prints a line a part; the number of parts that differ."
+  [table-path dir matcher writer0 writer1 records]
+  (let [t (read-string (slurp table-path))
+        fails (atom 0)
+        part (fn [name what llvm ours]
+               (write-rows (str dir "/llvm-" name ".txt") llvm)
+               (write-rows (str dir "/arbace-" name ".txt") ours)
+               (let [d (count (filter (fn [[a b]] (not= a b)) (map vector llvm ours)))
+                     d (+ d (Math/abs (- (count llvm) (count ours))))]
+                 (if (zero? d)
+                   (println (str "repr-asm table oracle: " what ": the same " (count llvm) " rows"))
+                   (do (swap! fails inc)
+                       (println (str "FAIL: repr-asm table oracle: " what ": " d " of " (count llvm) " rows differ: diff "
+                                     dir "/llvm-" name ".txt " dir "/arbace-" name ".txt"))))))
+        row (fn [[mn i steps]] (str mn " " i " | " (str/join " ; " steps)))
+        [m0 m1] (matcher-conversions matcher)]
+    (part "conv-0" "MatchTable0's conversions and the :match rows'" (mapv row m0) (mapv row (table-conversions t :match)))
+    (part "conv-1" "MatchTable1's conversions and the :match-intel rows'" (mapv row m1) (mapv row (table-conversions t :match-intel)))
+    (let [recs (read-records records)
+          names (keys (:insns t))]
+      (part "insns" "the instructions' fields (-print-records) and the :insns entries'"
+            (mapv (fn [n] (str n " " (pr-str (into (sorted-map) (llvm-insn recs n))))) names)
+            (mapv (fn [n] (str n " " (pr-str (into (sorted-map) (dissoc ((:insns t) n) :print :print-intel))))) names)))
+    (doseq [[v w key] [[0 writer0 :print] [1 writer1 :print-intel]]]
+      (let [ps (writer-prints w)
+            merge-texts (fn [xs] (reduce (fn [acc x] (if (and (string? x) (string? (peek acc))) (conj (pop acc) (str (peek acc) x)) (conj acc x)))
+                                         [] (remove #(= "" %) xs)))
+            names (keys (:insns t))]
+        (part (str "print-" v) (str "printInstruction (writer " v ") and the :insns entries' " key)
+              (mapv (fn [n] (str n " " (pr-str (ps n)))) names)
+              (mapv (fn [n] (str n " " (pr-str (merge-texts (key ((:insns t) n)))))) names))))
+    @fails))

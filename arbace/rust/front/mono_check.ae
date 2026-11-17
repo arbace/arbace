@@ -1,0 +1,100 @@
+(ns arbace.rust.front.mono-check
+  "RFP23 (c)'s judge (doc/rust/FRONTEND-SURVEY.md, \"As built: RFP23 (c)\"): each fact arbace.rust.front.mono computes
+  natively against the pack rust-front-mono's record of the same program, entry by entry: the mono items (each local body's
+  symbol, DefId and instance; core's bodies the collector reaches directly), the callees of the local bodies' calls (kind,
+  symbol, def, can-unwind, track-caller, external, intrinsic) and their caller locations, the function constants' symbols,
+  the statics', the lang items' symbols, and every layout of the record's table. A negative control: one program's native
+  facts against another's record must differ.
+
+    -main FRONT-DIR STD-CRATES LIB-DIR RECORD-DIR NAME...   (RECORD-DIR/NAME.record.edn; MONO_VERBOSE=1: each difference)"
+  (:require [arbace.rust.front.build-check :as bc] [arbace.rust.front.mono :as mono] [arbace.string :as str]))
+
+(defn read-forms [s] (let [r (java.io.PushbackReader. (java.io.StringReader. s))]
+                       (loop [acc []] (let [x (read {:eof ::eof} r)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(defn- walk-all [f x] (f x) (cond (seq? x) (doseq [y x] (walk-all f y)) (vector? x) (doseq [y x] (walk-all f y)) (map? x) (doseq [y (vals x)] (walk-all f y)) :else nil))
+
+(defn record-entries
+  "The record's facts: {:bodies [m ...] :callees {[body const-text] callee} :locs {[body const-text] [loc ...]} :fsyms {text sym}
+  :statics {name m} :langsyms {} :layouts {text l}}"
+  [forms]
+  (let [bodies (for [f forms :when (= 'mir/body (first f))] (second f))
+        callees (atom {}) locs (atom {}) fsyms (atom {})]
+    (doseq [b bodies]
+      (walk-all (fn [x]
+                  (when (and (seq? x) (= 'call (first x)) (> (count x) 7))
+                    (let [k [(:name b) (second (second x))]]
+                      (swap! callees assoc k (second (nth x 6)))
+                      (swap! locs update k (fnil conj []) (nth x 7))))
+                  (when (and (seq? x) (= 'const (first x)) (some #{:fn-symbol} x))
+                    (swap! fsyms assoc (second x) (second (drop-while #(not= :fn-symbol %) x)))))
+                (dissoc b :alloc-data)))
+    {:bodies (vec bodies) :callees @callees :locs @locs :fsyms @fsyms
+     :statics (into {} (for [f forms :when (= 'mir/static (first f)) :let [m (second f)]] [(str/replace (last (str/split (str (:def m)) #"::")) #"\)$" "") m]))
+     :langsyms (or (second (some #(when (= 'mir/langsyms (first %)) %) forms)) {})
+     :layouts (into {} (second (some #(when (= 'mir/layouts (first %)) %) forms)))}))
+
+(defn- local-body? [b] (str/starts-with? (str (:def-id b)) "DefId(0:"))
+
+(defn judge
+  "[{kind [equal total]} differences] for one program: our facts (within its bindings) against the record's entries REC"
+  [n bodies facts rec forms]
+  (let [diffs (atom []) tally (atom {})
+        count! (fn [k ok what] (swap! tally update k (fnil (fn [[e t]] [(if ok (inc e) e) (inc t)]) [0 0])) (when-not ok (swap! diffs conj [k what])))
+        ours-by-name (into {} (for [[nm b] bodies :when b] [nm b]))
+        ext-syms (set (map :symbol (:ext-items facts)))]
+    ;; the mono items: each local body's header facts; core's bodies reached directly by the collector, the rest the pack's
+    (doseq [b (:bodies rec)]
+      (if (local-body? b)
+        (let [o (get (:items facts) (:name b))]
+          (doseq [k [:symbol :def :def-id :instance :track-caller]]
+            (count! (if (= k :symbol) :symbols :items) (and o (not (mono/error? o)) (= (get o k) (get b k))) [(:name b) k (get b k) (when (map? o) (get o k)) (when (mono/error? o) o)])))
+        (if (contains? ext-syms (:symbol b))
+          (count! :core-items true nil)
+          ;; reached through core's own bodies (the pack's): counted when the run builds it natively (RF12-P6: Arbace's closure of
+          ;; core's bodies holds its instance, by its symbol)
+          (swap! tally update :core-closure (fnil (fn [[e t]] [(if (contains? (:native-core-syms facts) (:symbol b)) (inc e) e) (inc t)]) [0 0])))))
+    (doseq [[nm _] (:items facts)] (when-not (some #(= nm (:name %)) (:bodies rec)) (count! :items false [nm :not-in-record])))
+    ;; the callees and their locations
+    (doseq [[[bn txt] rc] (:callees rec) :when (some #(and (= bn (:name %)) (local-body? %)) (:bodies rec))]
+      (let [o (get (:callees facts) txt)]
+        (count! :callees (= rc (if (map? o) (dissoc o :slot) o)) [bn txt rc o])
+        (let [ob (get ours-by-name bn)
+              spans (when ob (for [blk (:blocks ob) :let [t (:term blk)] :when (and (seq? t) (= 'call (first t)) (= txt (second (second t))))]
+                               (:call-span (meta (second t)))))
+              ol (sort-by pr-str (for [s spans] (if (vector? s) (list 'loc arbace.rust.front.build/*root-file* (first s) (second s)) [:no-span s])))]
+          (count! :locs (= ol (sort-by pr-str (get (:locs rec) [bn txt]))) [bn txt (get (:locs rec) [bn txt]) ol]))))
+    (doseq [[txt s] (:fsyms rec)]
+      (when (contains? (:fsyms facts) txt)
+        (let [o (get (:fsyms facts) txt)] (count! :fn-symbols (= s o) [txt s o]))))
+    (doseq [[nm m] (:statics rec)] (let [o (get (:statics facts) nm)] (count! :statics (and (map? o) (= (:symbol m) (:symbol o)) (= (:def m) (:def o))) [nm m o])))
+    (doseq [[ln s] (:langsyms rec)] (count! :langsyms (= s (get (:langsyms facts) ln)) [ln s (get (:langsyms facts) ln)]))
+    (doseq [ln (keys (:langsyms facts)) :when (not (contains? (:langsyms rec) ln))] (count! :langsyms false [ln :not-in-record]))
+    ;; the layouts: every key of the record's table, its type from the bodies' forms (ours where we built them)
+    (let [our-forms (mono/ty-forms (vals ours-by-name))
+          rec-forms (mono/ty-forms (map #(dissoc % :alloc-data) (:bodies rec)))
+          lt ((:layouts-of facts) (concat our-forms rec-forms))]
+      (doseq [[txt l] (:layouts rec)]
+        (count! :layouts (= l (get lt txt)) [txt l (get lt txt)])))
+    [@tally @diffs]))
+
+(defn -main [front-dir crates-file lib-dir record-dir & names]
+  (let [verbose (System/getenv "MONO_VERBOSE")
+        control? (= "--control" (first names))
+        names (if control? (rest names) names)
+        total (atom {})
+        all-ok (atom true)]
+    (doseq [[i n] (map-indexed vector names)]
+      (let [rn (if control? (nth names (mod (inc i) (count names))) n)
+            forms (read-forms (slurp (str record-dir "/" rn "/" rn ".record.edn")))
+            rec (record-entries forms)
+            [tally diffs] (binding [mono/*crates* (mono/load-crates crates-file) mono/*lib-dir* lib-dir]
+                            (bc/build-program front-dir n (fn [bodies] (judge n bodies (mono/program-facts n bodies) rec forms))))]
+        (println (str "mono-check: " n (when control? (str " against " rn "'s record")) ": "
+                      (str/join ", " (for [[k [e t]] (sort tally)] (str (name k) " " e "/" t)))))
+        (when (or verbose control?) (doseq [d (take (if verbose 400 3) diffs)] (println "  " (pr-str d))))
+        (when (seq diffs) (reset! all-ok false))
+        (doseq [[k [e t]] tally] (swap! total update k (fnil (fn [[a b]] [(+ a e) (+ b t)]) [0 0])))))
+    (println (str "mono-check: " (count names) " programs" (when control? " (control)") ": "
+                  (str/join ", " (for [[k [e t]] (sort @total)] (str (name k) " " e " of " t)))))
+    (System/exit (if (or @all-ok control?) 0 1))))

@@ -1,0 +1,267 @@
+;; Converted from jdk26u src/java.base/share/classes/java/security/CodeSource.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.security)
+
+(import '(java.io ByteArrayInputStream
+                  IOException
+                  ObjectInputStream
+                  ObjectOutputStream
+                  Serializable)
+        '(java.net SocketPermission URL)
+        '(java.security.cert CertificateEncodingException
+                             CertificateException
+                             CertificateFactory
+                             X509Certificate)
+        '(java.util ArrayList Hashtable List Objects)
+        '(sun.net.util URLUtil)
+        '(sun.security.util IOUtils))
+
+(defclass ^:public CodeSource
+  :implements [Serializable]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 4977541819976013951)
+
+  (field ^:private ^:final ^URL location)
+
+  (field ^:private ^:transient ^CodeSigner/1 signers nil)
+
+  (field ^:private ^:transient ^java.security.cert.Certificate/1 certs nil)
+
+  (field ^:private ^:transient ^SocketPermission sp)
+
+  (field ^:private ^:transient ^CertificateFactory factory nil)
+
+  (field ^:private ^:transient ^String locationNoFragString)
+
+  (constructor ^:public [this ^URL url ^java.security.cert.Certificate/1 certs]
+    (set! (.-location this) url)
+    (when (some? url) (set! (.-locationNoFragString this) (URLUtil/urlNoFragString url)))
+    (when (some? certs) (set! (.-certs this) (.clone certs))))
+
+  (constructor ^:public [this ^URL url ^CodeSigner/1 signers]
+    (set! (.-location this) url)
+    (when (some? url) (set! (.-locationNoFragString this) (URLUtil/urlNoFragString url)))
+    (when (some? signers) (set! (.-signers this) (.clone signers))))
+
+  (method ^:public hashCode ^int [this] (Objects/hashCode location))
+
+  (method ^:public equals ^boolean [this obj]
+    (if (identical? obj this)
+        true
+        (if-instance [^CodeSource other obj]
+          (if (Objects/equals location (.-location other)) (.matchCerts this other true) false)
+          false)))
+
+  (method ^:public ^:final getLocation ^URL [this] (.-location this))
+
+  (method getLocationNoFragString ^String [this] locationNoFragString)
+
+  (method ^:public ^:final getCertificates ^java.security.cert.Certificate/1 [this]
+    (cond
+      (some? certs) (.clone certs)
+      (some? signers)
+        (let [^{:tag (ArrayList java.security.cert.Certificate)} certChains (ArrayList.)]
+          (loop [^int i 0]
+            (when (< i (alength signers))
+              (.addAll certChains (.getCertificates (.getSignerCertPath (aget signers i))))
+              (recur (unchecked-inc-int i))))
+          (set! certs
+                (cast java.security.cert.Certificate/1
+                      (.toArray certChains (new java.security.cert.Certificate/1 0))))
+          (.clone certs))))
+
+  (method ^:public ^:final getCodeSigners ^CodeSigner/1 [this]
+    (if (some? signers)
+        (.clone signers)
+        (when (some? certs)
+          (set! signers (.convertCertArrayToSignerArray this certs))
+          (.clone signers))))
+
+  (method ^:public implies ^boolean [this ^CodeSource codesource]
+    (if (nil? codesource)
+        false
+        (and (.matchCerts this codesource false) (.matchLocation this codesource))))
+
+  (method matchCerts ^boolean [this ^CodeSource that ^boolean strict]
+    (let [^:mutable ^boolean match false]
+      (cond
+        (and (nil? certs) (nil? signers))
+          (if strict (and (nil? (.-certs that)) (nil? (.-signers that))) true)
+        (and (some? signers) (some? (.-signers that)))
+          (if (and strict (not (== (alength signers) (alength (.-signers that)))))
+              false
+              (do
+                (loop [^int i 0]
+                  (when (< i (alength signers))
+                    (set! match false)
+                    (loop [^int j 0]
+                      (if (< j (alength (.-signers that)))
+                          (if (.equals (aget signers i) (aget (.-signers that) j))
+                              (set! match true)
+                              (recur (unchecked-inc-int j)))
+                          nil))
+                    (if (not match) (return false) (recur (unchecked-inc-int i)))))
+                true))
+        (and (some? certs) (some? (.-certs that)))
+          (if (and strict (not (== (alength certs) (alength (.-certs that)))))
+              false
+              (do
+                (loop [^int i 0]
+                  (when (< i (alength certs))
+                    (set! match false)
+                    (loop [^int j 0]
+                      (if (< j (alength (.-certs that)))
+                          (if (.equals (aget certs i) (aget (.-certs that) j))
+                              (set! match true)
+                              (recur (unchecked-inc-int j)))
+                          nil))
+                    (if (not match) (return false) (recur (unchecked-inc-int i)))))
+                true))
+        :else false)))
+
+  (method ^:private matchLocation ^boolean [this ^CodeSource that]
+    (cond
+      (nil? location) true
+      (or (nil? that) (nil? (.-location that))) false
+      (.equals location (.-location that)) true
+      (not (.equalsIgnoreCase (.getProtocol location) (.getProtocol (.-location that)))) false
+      :else
+        (let [thisPort (.getPort location)]
+          (when-not (== thisPort -1)
+            (let [thatPort (.getPort (.-location that))
+                  ^int port (if (not (== thatPort -1)) thatPort (.getDefaultPort (.-location that)))]
+              (when-not (== thisPort port) (return false))))
+          (cond
+            (.endsWith (.getFile location) "/-")
+              (let [thisPath (.substring (.getFile location)
+                                         0
+                                         (unchecked-subtract-int (.length (.getFile location)) 1))]
+                (when-not (.startsWith (.getFile (.-location that)) thisPath) (return false)))
+            (.endsWith (.getFile location) "/*")
+              (let [last (.lastIndexOf (.getFile (.-location that)) \/)]
+                (when (== last -1) (return false))
+                (let [thisPath (.substring (.getFile location)
+                                           0
+                                           (unchecked-subtract-int (.length (.getFile location)) 1))
+                      thatPath (.substring (.getFile (.-location that))
+                                           0
+                                           (unchecked-add-int last 1))]
+                  (when-not (.equals thatPath thisPath) (return false))))
+            (and (not (.equals (.getFile (.-location that)) (.getFile location)))
+                 (not (.equals (.getFile (.-location that)) (java-str (.getFile location) "/"))))
+              (return false))
+          (if (and (some? (.getRef location))
+                   (not (.equals (.getRef location) (.getRef (.-location that)))))
+              false
+              (let [thisHost (.getHost location)
+                    thatHost (.getHost (.-location that))]
+                (when (some? thisHost)
+                  (when-not (and (or (.equals "" thisHost) (.equals "localhost" thisHost))
+                                 (or (.equals "" thatHost) (.equals "localhost" thatHost)))
+                    (when-not (.equals thisHost thatHost)
+                      (when (nil? thatHost) (return false))
+                      (when (nil? (.-sp this))
+                        (set! (.-sp this) (SocketPermission. thisHost "resolve")))
+                      (when (nil? (.-sp that))
+                        (set! (.-sp that) (SocketPermission. thatHost "resolve")))
+                      (return (.implies (.-sp this) (.-sp that))))))
+                true)))))
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append sb "(")
+      (.append sb (.-location this))
+      (cond
+        (and (some? (.-certs this)) (> (alength (.-certs this)) 0))
+          (loop [^int i 0]
+            (when (< i (alength (.-certs this)))
+              (.append sb (java-str " " (aget (.-certs this) i)))
+              (recur (unchecked-inc-int i))))
+        (and (some? (.-signers this)) (> (alength (.-signers this)) 0))
+          (loop [^int i 0]
+            (when (< i (alength (.-signers this)))
+              (.append sb (java-str " " (aget (.-signers this) i)))
+              (recur (unchecked-inc-int i))))
+        :else (.append sb " <no signer certificates>"))
+      (.append sb ")")
+      (.toString sb)))
+
+  (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream oos]
+    (.defaultWriteObject oos)
+    (if (or (nil? certs) (== (alength certs) 0))
+        (.writeInt oos 0)
+        (do
+          (.writeInt oos (alength certs))
+          (loop [^int i 0]
+            (when (< i (alength certs))
+              (let [cert (aget certs i)]
+                (try
+                  (.writeUTF oos (.getType cert))
+                  (let [encoded (.getEncoded cert)]
+                    (.writeInt oos (alength encoded))
+                    (.write oos encoded))
+                  (catch CertificateEncodingException cee (throw (IOException. (.getMessage cee)))))
+                (recur (unchecked-inc-int i)))))))
+    (when (and (some? signers) (> (alength signers) 0)) (.writeObject oos signers)))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream ois]
+    (let [^:mutable ^{:tag (Hashtable String CertificateFactory)} cfs nil
+          ^:mutable ^{:tag (List java.security.cert.Certificate)} certList nil]
+      (.defaultReadObject ois)
+      (let [size (.readInt ois)]
+        (cond
+          (> size 0)
+            (do
+              (set! cfs (Hashtable. 3))
+              (set! certList (ArrayList. (^[int int] Math/min size 20))))
+          (< size 0) (throw (IOException. "size cannot be negative")))
+        (loop [^int i 0]
+          (when (< i size)
+            (let [certType (.readUTF ois)
+                  ^:mutable cf (cast CertificateFactory (.get cfs certType))]
+              (when (nil? cf)
+                (try
+                  (set! cf (CertificateFactory/getInstance certType))
+                  (catch CertificateException ce
+                    (throw (ClassNotFoundException.
+                             (java-str "Certificate factory for " certType " not found")))))
+                (.put cfs certType cf))
+              (let [encoded (IOUtils/readExactlyNBytes ois (.readInt ois))
+                    bais (ByteArrayInputStream. encoded)]
+                (try
+                  (.add certList (.generateCertificate cf bais))
+                  (catch CertificateException ce (throw (IOException. (.getMessage ce)))))
+                (.close bais)
+                (recur (unchecked-inc-int i))))))
+        (when (some? certList)
+          (set! (.-certs this)
+                (cast java.security.cert.Certificate/1
+                      (.toArray certList (new java.security.cert.Certificate/1 size)))))
+        (try
+          (set! (.-signers this) (.clone (cast CodeSigner/1 (.readObject ois))))
+          (catch IOException ioe))
+        (when (some? location) (set! locationNoFragString (URLUtil/urlNoFragString location))))))
+
+  (method ^:private convertCertArrayToSignerArray ^CodeSigner/1 [this
+                                                                 ^java.security.cert.Certificate/1 certs]
+    (when (some? certs)
+      (try
+        (when (nil? factory) (set! factory (CertificateFactory/getInstance "X.509")))
+        (let [^:mutable ^int i 0
+              ^{:tag (List CodeSigner)} signers (ArrayList.)]
+          (while (< i (alength certs))
+            (let [^{:tag (List java.security.cert.Certificate)} certChain (ArrayList.)]
+              (.add certChain (aget certs i))
+              (set! i (unchecked-inc-int i))
+              (let [^:mutable j i]
+                (while (and (and (< j (alength certs)) (instance? X509Certificate (aget certs j)))
+                            (not (== (.getBasicConstraints (cast X509Certificate (aget certs j)))
+                                     -1)))
+                  (.add certChain (aget certs j))
+                  (set! j (unchecked-inc-int j)))
+                (set! i j)
+                (let [certPath (.generateCertPath factory certChain)]
+                  (.add signers (CodeSigner. certPath nil))))))
+          (when-not (.isEmpty signers) (cast CodeSigner/1 (.toArray signers (new CodeSigner/1 0)))))
+        (catch CertificateException e nil)))))

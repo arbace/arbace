@@ -1,0 +1,225 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/Http2ClientImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException UncheckedIOException)
+        '(java.util Base64 HashSet Map Set)
+        '(java.util.concurrent CompletableFuture ConcurrentHashMap)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function BiConsumer Predicate Supplier)
+        '(jdk.internal.net.http.common Logger MinimalFuture Utils)
+        '(jdk.internal.net.http.frame SettingsFrame))
+
+(defclass Http2ClientImpl
+  (field ^:static ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] "Http2ClientImpl" String/.toString)
+                          Utils/DEBUG))
+
+  (field ^:private ^:final ^HttpClientImpl client)
+
+  (field ^:private ^:volatile ^boolean stopping)
+
+  (constructor [this ^HttpClientImpl client]
+    (set! (.-client this) client))
+
+  (field ^:private ^:final ^{:tag (Map String Http2Connection)} connections (ConcurrentHashMap.))
+
+  (field ^:private ^:final ^{:tag (Set String)} failures (HashSet.))
+
+  (field ^:private ^:final ^ReentrantLock connectionPoolLock (ReentrantLock.))
+
+  (method getConnectionFor ^{:tag (CompletableFuture Http2Connection)} [this ^HttpRequestImpl req
+                                                                        ^{:tag (Exchange ?)} exchange]
+    (let [key (Http2Connection/keyFor req)
+          pushEnabled (.pushEnabled exchange)]
+      (.lock connectionPoolLock)
+      (try
+        (let [connection (cast Http2Connection (.get connections key))]
+          (when (some? connection)
+            (try
+              (if (or (not (.tryReserveForPoolCheckout connection))
+                      (not (.reserveStream connection true pushEnabled)))
+                  (do
+                    (when (.on debug)
+                      (.log
+                        debug
+                        "removing connection from pool since it couldn't be reserved for use%s: %s"
+                        (new Object/1 [(if pushEnabled " with server push enabled" "") connection])))
+                    (.removeFromPool this connection))
+                  (do
+                    (when (.on debug)
+                      (.log debug "found connection in the pool: %s" (new Object/1 [connection])))
+                    (return (MinimalFuture/completedFuture connection))))
+              (catch IOException e (return (MinimalFuture/failedFuture e)))))
+          (when (or (not (.secure req)) (.contains failures key))
+            (when (.on debug) (.log debug "not found in connection pool"))
+            (return (MinimalFuture/completedFuture nil))))
+        (finally (.unlock connectionPoolLock)))
+      (.whenComplete (Http2Connection/createAsync req this exchange)
+                     (lambda BiConsumer ^void [^Http2Connection conn ^Throwable t]
+                       (.lock connectionPoolLock)
+                       (try
+                         (if (some? conn)
+                             (do
+                               (try
+                                 (.reserveStream conn true (.pushEnabled exchange))
+                                 (.clear (.-connectionAborter exchange) (.-connection conn))
+                                 (catch IOException e (throw (UncheckedIOException. e))))
+                               (.offerConnection this conn))
+                             (let [cause (Utils/getCompletionCause t)]
+                               (when (instance? Http2Connection$ALPNException cause)
+                                 (.add failures key))))
+                         (finally (.unlock connectionPoolLock)))))))
+
+  (method offerConnection ^boolean [this ^Http2Connection c]
+    (when (.on debug) (.log debug "offering to the connection pool: %s" (new Object/1 [c])))
+    (if (or (not (.isOpen c)) (.finalStream c))
+        (do
+          (when (.on debug)
+            (.log debug "skipping offered closed or closing connection: %s" (new Object/1 [c])))
+          false)
+        (let [key (.key c)]
+          (.lock connectionPoolLock)
+          (try
+            (cond
+              stopping
+                (do
+                  (when (.on debug)
+                    (.log debug "stopping - closing connection: %s" (new Object/1 [c])))
+                  (.close this c)
+                  false)
+              (not (.isOpen c))
+                (do
+                  (when (.on debug)
+                    (.log debug
+                          "skipping offered closed or closing connection: %s"
+                          (new Object/1 [c])))
+                  false)
+              :else
+                (let [c1 (cast Http2Connection (.putIfAbsent connections key c))]
+                  (if (some? c1)
+                      (if (and (.serverPushEnabled c) (not (.serverPushEnabled c1)))
+                          (do
+                            (.setFinalStream c1)
+                            (.remove connections key c1)
+                            (.put connections key c)
+                            (when (.on debug)
+                              (.log debug
+                                    "Replacing %s with %s in connection pool"
+                                    (new Object/1 [c1 c])))
+                            (when (.shouldClose c1) (.close c1))
+                            true)
+                          (do
+                            (.setFinalStream c)
+                            (when (.on debug)
+                              (.log debug
+                                    "existing entry in connection pool for %s"
+                                    (new Object/1 [key])))
+                            false))
+                      (do
+                        (when (.on debug)
+                          (.log debug "put in the connection pool: %s" (new Object/1 [c])))
+                        true))))
+            (finally (.unlock connectionPoolLock))))))
+
+  (method removeFromPool ^void [this ^Http2Connection c]
+    (when (.on debug) (.log debug "removing from the connection pool: %s" (new Object/1 [c])))
+    (.lock connectionPoolLock)
+    (try
+      (when (.remove connections (.key c) c)
+        (when (.on debug) (.log debug "removed from the connection pool: %s" (new Object/1 [c]))))
+      (finally (.unlock connectionPoolLock))))
+
+  (method stop ^void [this]
+    (when (.on debug) (.log debug "stopping"))
+    (.lock connectionPoolLock)
+    (try (set! stopping true) (finally (.unlock connectionPoolLock)))
+    (loop []
+      (.removeIf (.values connections)
+                 (method-ref Predicate [Http2Connection] this Http2ClientImpl/.close))
+      (when-not (.isEmpty connections) (recur))))
+
+  (method ^:private close ^boolean [this ^Http2Connection h2c]
+    (try (.closeAllStreams h2c) (catch Throwable t))
+    (try (.close h2c) (catch Throwable t))
+    (try (.closeAllStreams h2c) (catch Throwable t))
+    true)
+
+  (method client ^HttpClientImpl [this] client)
+
+  (method getSettingsString ^String [this ^boolean defaultServerPush]
+    (let [sf (.getClientSettings this defaultServerPush)
+          settings (.toByteArray sf)
+          encoder (.withoutPadding (Base64/getUrlEncoder))]
+      (.encodeToString encoder settings)))
+
+  (field ^:private ^:static ^:final ^int K 1024)
+
+  (method ^:private ^:static getParameter ^int [^String property ^int min ^int max ^int defaultValue]
+    (Utils/getIntegerNetProperty property min max defaultValue true))
+
+  (method getConnectionWindowSize ^int [this ^SettingsFrame clientSettings]
+    (let [streamWindow (.getParameter clientSettings SettingsFrame/INITIAL_WINDOW_SIZE)
+          defaultValue (Math/max streamWindow
+                                 (unchecked-multiply-int (unchecked-multiply-int K K) 32))
+          minValue (Math/max SettingsFrame/INITIAL_CONNECTION_WINDOW_SIZE streamWindow)]
+      (Http2ClientImpl/getParameter "jdk.httpclient.connectionWindowSize"
+                                    minValue
+                                    Integer/MAX_VALUE
+                                    defaultValue)))
+
+  (method serverPushDisabled ^boolean [this]
+    (== (Http2ClientImpl/getParameter "jdk.httpclient.enablepush" 0 1 1) 0))
+
+  (method getClientSettings ^SettingsFrame [this ^boolean defaultServerPush]
+    (let [frame (SettingsFrame.)]
+      (.setParameter frame
+                     SettingsFrame/HEADER_TABLE_SIZE
+                     (Http2ClientImpl/getParameter
+                       "jdk.httpclient.hpack.maxheadertablesize"
+                       0
+                       Integer/MAX_VALUE
+                       (unchecked-multiply-int 16 K)))
+      (.setParameter frame
+                     SettingsFrame/ENABLE_PUSH
+                     (Http2ClientImpl/getParameter
+                       "jdk.httpclient.enablepush"
+                       0
+                       1
+                       (if defaultServerPush 1 0)))
+      (let [^int initialServerStreams (if (== (.getParameter frame SettingsFrame/ENABLE_PUSH) 0)
+                                          0
+                                          100)]
+        (.setParameter frame
+                       SettingsFrame/MAX_CONCURRENT_STREAMS
+                       (Http2ClientImpl/getParameter
+                         "jdk.httpclient.maxstreams"
+                         0
+                         Integer/MAX_VALUE
+                         initialServerStreams))
+        (.setParameter frame
+                       SettingsFrame/INITIAL_WINDOW_SIZE
+                       (Http2ClientImpl/getParameter
+                         "jdk.httpclient.windowsize"
+                         (unchecked-multiply-int 16 K)
+                         Integer/MAX_VALUE
+                         (unchecked-multiply-int (unchecked-multiply-int 16 K) K)))
+        (.setParameter frame
+                       SettingsFrame/MAX_FRAME_SIZE
+                       (Http2ClientImpl/getParameter
+                         "jdk.httpclient.maxframesize"
+                         (unchecked-multiply-int 16 K)
+                         (unchecked-subtract-int
+                           (unchecked-multiply-int (unchecked-multiply-int 16 K) K)
+                           1)
+                         (unchecked-multiply-int 16 K)))
+        (let [^:mutable maxHeaderSize (Http2ClientImpl/getParameter
+                                        "jdk.http.maxHeaderSize"
+                                        Integer/MIN_VALUE
+                                        Integer/MAX_VALUE
+                                        (unchecked-multiply-int 384 K))]
+          (when (<= maxHeaderSize 0) (set! maxHeaderSize -1))
+          (.setParameter frame SettingsFrame/MAX_HEADER_LIST_SIZE maxHeaderSize)
+          frame))))
+
+  (method ^:public stopping ^boolean [this] stopping))

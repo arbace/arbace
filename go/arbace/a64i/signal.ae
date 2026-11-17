@@ -1,0 +1,359 @@
+;; a64i's signal delivery (AR20, queue 291, ARS84 (a); doc/asm/ARM64-SURVEY.md, "As built: AR20"): a signal whose disposition is a
+;; handler is delivered to it as Linux delivers it on arm64 (arch/arm64/kernel/signal.c's frame, read word by word on the M2: the
+;; queue's probes), at an instruction boundary: a synchronous fault (SIGSEGV, SIGBUS, SIGILL, SIGTRAP) that the thread does not block
+;; at the faulting instruction (its pc), a signal sent by kill, tkill or tgkill at the end of the instruction where it is pending and
+;; not blocked (the system call's, for a signal a thread sends itself). The frame (4,688 bytes, struct rt_sigframe) goes below the
+;; thread's stack pointer, or below its alternate stack's top (SA_ONSTACK, the alternate stack set and not in use), under a frame
+;; record of x29 and x30: siginfo (with SA_SIGINFO), the ucontext (uc_stack, the mask, the general registers, sp, pc, pstate), the
+;; FP/SIMD record, the ESR record of a data abort, an instruction abort or an SP or PC alignment fault, the terminator. The handler
+;; starts with x0 the signal, x1 and x2 siginfo and the ucontext (with SA_SIGINFO), x29 the frame record, x30 the restorer
+;; (SA_RESTORER) or a64i's trampoline page (Linux's is the vdso's, which a64i has none of), the mask with sa_mask and the signal
+;; (unless SA_NODEFER) added. rt_sigreturn restores the registers, the FP/SIMD record, the mask and the alternate stack.
+;; Not modelled: a pending signal interrupting a blocking system call (a64i's futex, nanosleep and epoll waits run to their end
+;; first: a delay, which Linux allows), the real-time signals' queue (one pending each), SVE, SME and the extra context records.
+(in-ns 'go.arbace.a64i) (go/file "signal.go" :imports [
+    [fmt "fmt"]
+    [bits "math/bits"]
+    [os "os"]
+    [strings "strings"]])
+
+
+(go/const "Linux's arm64 numbers of the signal frame: sa_flags, the frame's size and offsets, the records' magics, si_codes.\n"
+  [^{:tag uint64 :val 4} saSiginfo 4]
+  [^{:tag uint64 :val 134217728} saOnstack 0x08000000]
+  [^{:tag uint64 :val 67108864} saRestorer 0x04000000]
+  [^{:tag uint64 :val 1073741824} saNodefer 0x40000000]
+  [^{:tag uint64 :val 2147483648} saResethand 0x80000000]
+  [^{:tag uint64 :val 4688} frameSize 4688] ; sizeof(struct rt_sigframe): siginfo 128, ucontext 4,560
+  [^{:tag uint64 :val 128} ucOff 128]
+  [^{:tag uint64 :val 304} mcOff 304] ; uc_mcontext: fault_address, then regs[31], sp, pc, pstate
+  [^{:tag uint64 :val 592} resOff 592] ; uc_mcontext.__reserved
+  [^{:tag uint64 :val 1179680769} fpsimdMagic 0x46508001]
+  [^{:tag uint64 :val 528} fpsimdSize 528]
+  [^{:tag uint64 :val 1163088385} esrMagic 0x45535201]
+  [^{:val 139} sysRtSigreturn 139])
+
+
+(go/type sigInfo "sigInfo is a pending signal's siginfo: si_code and the sender's pid and uid (kill, tkill, tgkill).\n" (struct
+    ^int32 code
+    ^int32 pid
+    ^uint32 uid))
+
+
+(go/type Delivery "Delivery is a signal a64i delivered to a handler: the signal, the pc it interrupted and the frame's address, the ESR\nrecord's address (0: none) (the lockstep's).\n" (struct
+    ^int Sig
+    ^uint64 PC
+    ^uint64 Frame
+    ^uint64 EsrAt))
+
+
+(go/func sigBit ^uint64 [^int sig] ^uint64 (<< 1 (- sig 1)))
+
+
+(go/func syncSig "syncSig reports a signal Linux takes first among the pending ones (SYNCHRONOUS_MASK: SIGSEGV, SIGBUS, SIGILL, SIGTRAP,\nSIGFPE, SIGSYS).\n" ^bool [^int sig]
+  (or (== sig SIGSEGV) (== sig SIGBUS) (== sig SIGILL) (== sig SIGTRAP) (== sig 8) (== sig 31)))
+
+
+(go/func defaultIgnored "defaultIgnored reports a signal whose default action is to ignore it (SIGCHLD, SIGCONT, SIGURG, SIGWINCH) or to stop the\nprocess (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU: no job control here).\n" ^bool [^int sig]
+  (or (== sig 17) (== sig 18) (== sig 23) (== sig 28) (and (>= sig 19) (<= sig 22))))
+
+
+(go/method handler "handler is the signal's disposition: its handler, flags, restorer and mask (all 0: SIG_DFL).\n" ^{:tag (array 4 uint64)} [^{:tag (* CPU)} c ^int sig]
+  (when (== (.-P c) nil)
+    (let [^{:tag (array 4 uint64)} none (zero (array 4 uint64))]
+      (return none)))
+
+  (aget (.-actions (.-P c)) sig))
+
+
+(go/method onAltStack "onAltStack reports whether sp is on the thread's alternate stack (Linux's on_sig_stack).\n" ^bool [^{:tag (* CPU)} c ^uint64 sp]
+  (and (!= (.-AltSize c) 0) (> sp (.-AltSP c)) (<= (- sp (.-AltSP c)) (.-AltSize c))))
+
+
+(go/method signalled "signalled delivers the synchronous fault that ended the instruction at pc (fetch: its fetch) to the signal's handler,\nwhen it has one and the thread does not block it; else the fault stays the process's end, as Linux's force_sig_fault makes it.\n" [^{:tag (* CPU)} c ^uint64 pc ^bool fetch]
+  (let [sig (.-Signal c)]
+    (when (or (not (.-Done c)) (.-exited c) (strings/HasPrefix (.-Reason c) ":signal") (strings/HasPrefix (.-Reason c) ":sigframe") (not ^:go/paren (or (== sig SIGSEGV) (== sig SIGBUS) (== sig SIGILL) (== sig SIGTRAP))))
+      (return))
+
+    (let [act (.handler c sig)]
+      (when (or (<= (aget act 0) 1) (!= (bit-and (.-SigMask c) (sigBit sig)) 0))
+        (return))
+
+      (let [^int32 code 1
+            addr pc
+            ^uint64 fa 0
+            ^uint64 esr 0
+            r (.-Reason c)
+            ^uint64 btype 0]
+        (when (and fetch (!= (.-Last c) nil))
+          ;; FEAT_BTI's PSTATE.BTYPE as an indirect branch leaves it, when its target's fetch faults (BR 01, BLR 10; the M2 has
+          ;; FEAT_BTI, the pages are not guarded)
+          (switch (.-Op (.-Last c))
+            (case [OpBR]
+              (set! btype 0x400))
+            (case [OpBLR]
+              (set! btype 0x800))))
+
+        (cond
+          (strings/HasPrefix r ":segv")
+          (let [a (.-FaultAddr c)
+                ^uint64 fsc 0x0f]
+            (cond
+              (not (.Mapped (.-AS c) a 1))
+              (set! (values code fsc) (values 1 (+ 4 (conv uint64 (.TableLevel (.-AS c) a)))))
+              (== (bit-and (.Perm (.-AS c) a) 1) 0)
+              (set! (values code fsc) (values 2 7))
+              :else
+              (set! code 2))
+
+            (set! (values addr fa esr) (values a a (bit-or 0x92000000 (.-faultISS c) fsc))))
+          (== r ":fetch")
+          (let [^uint64 fsc 0x0f]
+            (if (not (.Mapped (.-AS c) pc 1))
+              (set! (values code fsc) (values 1 (+ 4 (conv uint64 (.TableLevel (.-AS c) pc)))))
+              (set! code 2))
+
+            (set! (values fa esr) (values pc (bit-or 0x82000000 fsc))))
+          (strings/HasPrefix r ":alignment")
+          (set! (values addr fa esr) (values (.-FaultAddr c) (.-FaultAddr c) (bit-or 0x92000021 (.-faultISS c))))
+          (== r ":sp-alignment")
+          (set! (values addr esr) (values (.-FaultAddr c) 0x9a000000))
+          (== r ":pc-alignment")
+          (set! esr 0x8a000000))
+
+        (set! (values (.-Done c) (.-Signal c) (.-Reason c) (.-PC c) (.-faultISS c)) (values false 0 "" pc 0))
+        (.deliver c sig (lit sigInfo :code code) addr fa esr btype)))))
+
+
+(go/method deliverPending "deliverPending delivers the thread's pending signals it does not block, each in its turn (Linux's do_signal at the return\nto user space: the synchronous ones first, then the lowest), the last delivered's handler the first to run.\n" [^{:tag (* CPU)} c]
+  (while (and (not (.-Done c)) (!= (bit-and-not (.-Pending c) (.-SigMask c)) 0))
+    (let [d (bit-and-not (.-Pending c) (.-SigMask c))
+          ^int sig 0]
+      (for [s 1] (<= s 64) (inc! s)
+        (when (and (!= (bit-and d (sigBit s)) 0) (syncSig s))
+          (set! sig s)
+          (break)))
+
+      (when (== sig 0)
+        (set! sig (+ (bits/TrailingZeros64 d) 1)))
+
+      (set! (.-Pending c) bit-and-not (sigBit sig))
+      (let [act (.handler c sig)]
+        (cond
+          (or (== (aget act 0) 1) ^:go/paren (and (== (aget act 0) 0) (defaultIgnored sig)))
+          (do
+            (set! (.-Ignored c) (append (.-Ignored c) sig))
+            (when strace
+              (fmt/Fprintf os/Stderr "a64i: [%d] signal %d ignored\n" (.tid c) sig)))
+          (== (aget act 0) 0)
+          (.raise c sig (fmt/Sprintf ":signal %d" sig))
+          :else
+          (.deliver c sig (aget (.-pendInfo c) sig) 0 0 0 0))))))
+
+
+(go/method deliver "deliver builds the signal's frame and starts its handler (Linux's setup_rt_frame and setup_return on arm64); a frame that\ncannot be written ends the process with SIGSEGV (Linux's force_sigsegv).\n" [^{:tag (* CPU)} c ^int sig ^sigInfo info ^uint64 addr ^uint64 fa ^uint64 esr ^uint64 btype]
+  (let [act (.handler c sig)
+        flags (aget act 1)
+        sp (aget (.-X c) 31)]
+    (when (and (!= (bit-and flags saOnstack) 0) (!= (.-AltSize c) 0) (not (.onAltStack c sp)))
+      (set! sp (+ (.-AltSP c) (.-AltSize c))))
+
+    (let [rec (bit-and-not (- sp 16) 15)
+          frame (- rec frameSize)
+          ok true
+          w (fn [^uint64 off ^int size ^uint64 v]
+              (when (not (.Write (.-AS c) (+ frame off) size v))
+                (set! ok false)))]
+      (when (not (and (.Write (.-AS c) rec 8 (aget (.-X c) 29)) (.Write (.-AS c) (+ rec 8) 8 (aget (.-X c) 30))))
+        (set! ok false))
+
+      (when (!= (bit-and flags saSiginfo) 0)
+        (for [o (conv uint64 0)] (< o 128) (set! o + 8)
+          (w o 8 0))
+
+        (w 0 4 (conv uint64 sig))
+        (w 8 4 (conv uint64 (conv uint32 (.-code info))))
+        (if (or (== (.-pid info) 0) (syncSig sig))
+          (w 16 8 addr)
+          (do
+            (w 16 4 (conv uint64 (conv uint32 (.-pid info))))
+            (w 20 4 (conv uint64 (.-uid info))))))
+
+      (w ucOff 8 0) ; uc_flags
+      (w (+ ucOff 8) 8 0) ; uc_link
+      (w (+ ucOff 16) 8 (.-AltSP c)) ; uc_stack: ss_sp, ss_flags (the flags sigaltstack was given), ss_size
+      (w (+ ucOff 24) 4 (.-AltFlags c))
+      (w (+ ucOff 32) 8 (.-AltSize c))
+      (w (+ ucOff 40) 8 (.-SigMask c))
+      (w mcOff 8 fa)
+      (for [i 0] (< i 31) (inc! i)
+        (w (+ mcOff 8 (conv uint64 (* 8 i))) 8 (aget (.-X c) i)))
+
+      (w (+ mcOff 256) 8 (aget (.-X c) 31))
+      (w (+ mcOff 264) 8 (.-PC c))
+      (let [pstate (bit-or (.NZCV c) btype)]
+        (when (.-DIT c)
+          (set! pstate bit-or (<< 1 24)))
+
+        (when (.-SSBS c)
+          (set! pstate bit-or (<< 1 12)))
+
+        (w (+ mcOff 272) 8 pstate))
+
+      (w resOff 4 fpsimdMagic)
+      (w (+ resOff 4) 4 fpsimdSize)
+      (w (+ resOff 8) 4 (.-FPSR c))
+      (w (+ resOff 12) 4 (.-FPCR c))
+      (for [i 0] (< i 32) (inc! i)
+        (w (+ resOff 16 (conv uint64 (* 16 i))) 8 (aget (aget (.-Q c) i) 0))
+        (w (+ resOff 24 (conv uint64 (* 16 i))) 8 (aget (aget (.-Q c) i) 1)))
+
+      (let [end (+ resOff fpsimdSize)
+            ^uint64 esrAt 0]
+        (when (!= esr 0)
+          (w end 4 esrMagic)
+          (w (+ end 4) 4 16)
+          (w (+ end 8) 8 esr)
+          (set! esrAt (+ frame end 8))
+          (set! end + 16))
+
+        (w end 4 0)
+        (w (+ end 4) 4 0)
+        (when (not ok)
+          (set! (.-FaultAddr c) frame)
+          (.raise c SIGSEGV (fmt/Sprintf ":sigframe %#x" frame))
+          (return))
+
+        (when strace
+          (fmt/Fprintf os/Stderr "a64i: [%d] signal %d delivered at %#x to %#x (frame %#x)\n" (.tid c) sig (.-PC c) (aget act 0) frame))
+
+        (set! (.-Delivered c) (append (.-Delivered c) (lit Delivery sig (.-PC c) frame esrAt))))
+
+      (aset (.-X c) 0 (conv uint64 sig))
+      (when (!= (bit-and flags saSiginfo) 0)
+        (aset (.-X c) 1 frame)
+        (aset (.-X c) 2 (+ frame ucOff)))
+
+      (aset (.-X c) 31 frame)
+      (aset (.-X c) 29 rec)
+      (if (!= (bit-and flags saRestorer) 0)
+        (aset (.-X c) 30 (aget act 2))
+        (aset (.-X c) 30 (.trampoline c)))
+
+      (set! (.-PC c) (aget act 0))
+      (set! (.-exclValid c) false)
+      (set! (.-SigMask c) bit-or (aget act 3))
+      (when (== (bit-and flags saNodefer) 0)
+        (set! (.-SigMask c) bit-or (sigBit sig)))
+
+      (set! (.-SigMask c) bit-and-not (bit-or (sigBit sigKILL) (sigBit sigSTOP)))
+      (when (!= (bit-and flags saResethand) 0)
+        (aset (aget (.-actions (.-P c)) sig) 0 0)))))
+
+
+(go/method trampoline "trampoline is the address of a64i's sigreturn trampoline (mov x8, #139; svc #0), a page mapped at its first use: the\nhandler's return when the disposition has no restorer (Linux's is the vdso's __kernel_rt_sigreturn).\n" ^uint64 [^{:tag (* CPU)} c]
+  (let [p (.p c)]
+    (when (== (.-tramp p) 0)
+      (let [(values r _) (.Syscall (.-K c) 9 0 4096 5 0x22 (bit-not (conv uint64 0)) 0)]
+        (when (< r 0)
+          (return 0))
+
+        (set! (.-tramp p) (conv uint64 r))
+        (.WriteBytes (.-AS c) (.-tramp p) (lit (slice byte) 0x68 0x11 0x80 0xd2 0x01 0x00 0x00 0xd4))))
+
+    (.-tramp p)))
+
+
+(go/method sigreturn "sigreturn is rt_sigreturn: the frame at sp restored (the general registers, sp, pc, NZCV, DIT and SSBS, the FP/SIMD record,\nthe mask; the alternate stack when sp is not on it, as Linux's restore_altstack); a frame Linux refuses (sp not 16-aligned, no\nFP/SIMD record, an unknown record) ends the process with SIGSEGV.\n" [^{:tag (* CPU)} c]
+  (let [frame (aget (.-X c) 31)
+        bad (fn [^string why]
+              (set! (.-FaultAddr c) frame)
+              (.raise c SIGSEGV (fmt/Sprintf ":sigframe rt_sigreturn: %s" why)))
+        r (fn [^uint64 off ^int size] :results [uint64]
+            (let [(values v ok) (.Read (.-AS c) (+ frame off) size)]
+              (when (not ok)
+                (panic "unreadable"))
+
+              (return v)))]
+    (when (!= (bit-and frame 15) 0)
+      (bad "sp not 16-aligned")
+      (return))
+
+    (when (not (.Mapped (.-AS c) frame frameSize))
+      (bad "unmapped")
+      (return))
+
+    (defer ((fn []
+        (when [e (recover)] (!= e nil)
+          (bad (fmt/Sprint e))))))
+
+    (let [^{:tag (array 32 uint64)} x (zero (array 32 uint64))]
+      (for [i 0] (< i 31) (inc! i)
+        (aset x i (r (+ mcOff 8 (conv uint64 (* 8 i))) 8)))
+
+      (aset x 31 (r (+ mcOff 256) 8))
+      (let [pc (r (+ mcOff 264) 8)
+            pstate (r (+ mcOff 272) 8)
+            mask (r (+ ucOff 40) 8)
+            ^bool fp false
+            ^{:tag (array 32 (array 2 uint64))} q (zero (array 32 (array 2 uint64)))
+            (values ^uint64 fpsr ^uint64 fpcr) (values 0 0)
+            off resOff]
+        (while true
+          (let [magic (r off 4)
+                size (r (+ off 4) 4)]
+            (when (== magic 0)
+              (when (!= size 0)
+                (bad "the terminator's size")
+                (return))
+
+              (break))
+
+            (switch magic
+              (case [fpsimdMagic]
+                (when (or fp (!= size fpsimdSize))
+                  (bad "the FP/SIMD record")
+                  (return))
+
+                (set! (values fp fpsr fpcr) (values true (r (+ off 8) 4) (r (+ off 12) 4)))
+                (for [i 0] (< i 32) (inc! i)
+                  (aset (aget q i) 0 (r (+ off 16 (conv uint64 (* 16 i))) 8))
+                  (aset (aget q i) 1 (r (+ off 24 (conv uint64 (* 16 i))) 8))))
+              (case [esrMagic]
+                (when (!= size 16)
+                  (bad "the ESR record")
+                  (return)))
+              (default
+                (bad (fmt/Sprintf "record %#x" magic))
+                (return)))
+
+            (set! off + size)
+            (when (> (+ off 8) (+ resOff 4096))
+              (bad "no terminator")
+              (return))))
+
+        (when (not fp)
+          (bad "no FP/SIMD record")
+          (return))
+
+        (let [ssp (r (+ ucOff 16) 8)
+              sflags (r (+ ucOff 24) 4)
+              ssize (r (+ ucOff 32) 8)]
+          (when (not (.onAltStack c frame))
+            ;; restore_altstack: sigaltstack(uc_stack) (its errors ignored)
+            (cond
+              (== sflags ssDisable)
+              (set! (values (.-AltSP c) (.-AltSize c) (.-AltFlags c)) (values 0 0 ssDisable))
+              (and (== sflags 0) (>= ssize minSigStk))
+              (set! (values (.-AltSP c) (.-AltSize c) (.-AltFlags c)) (values ssp ssize 0)))))
+
+        (set! (.-X c) x)
+        (set! (.-Q c) q)
+        (set! (values (.-PC c) (.-FPSR c) (.-FPCR c)) (values pc fpsr fpcr))
+        (.SetNZCV c pstate)
+        (set! (.-DIT c) (!= (bit-and pstate (<< 1 24)) 0))
+        (set! (.-SSBS c) (!= (bit-and pstate (<< 1 12)) 0))
+        (set! (.-SigMask c) (bit-and-not mask (bit-or (sigBit sigKILL) (sigBit sigSTOP))))
+        (set! (.-exclValid c) false)
+        (when strace
+          (fmt/Fprintf os/Stderr "a64i: [%d] rt_sigreturn to %#x\n" (.tid c) pc))))))

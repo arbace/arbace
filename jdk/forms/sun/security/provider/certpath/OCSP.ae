@@ -1,0 +1,148 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/OCSP.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io IOException)
+        '(java.net HttpURLConnection URI URISyntaxException URL URLEncoder)
+        '(java.nio.charset StandardCharsets)
+        '(java.security.cert CRLReason
+                             CertPathValidatorException
+                             CertPathValidatorException$BasicReason
+                             CertificateException
+                             Extension
+                             X509Certificate)
+        '(java.util Base64 Date List Map)
+        '(sun.security.util Debug Event Event$ReporterCategory IOUtils SecurityProperties)
+        '(sun.security.x509 AccessDescription
+                            GeneralNameInterface
+                            PKIXExtensions
+                            URIName
+                            X509CertImpl))
+
+(defclass ^:public ^:final OCSP
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^:static ^:final ^int DEFAULT_CONNECT_TIMEOUT 15000)
+
+  (field ^:private ^:static ^:final ^int CONNECT_TIMEOUT
+    (OCSP/initializeTimeout "com.sun.security.ocsp.timeout" DEFAULT_CONNECT_TIMEOUT))
+
+  (field ^:private ^:static ^:final ^int READ_TIMEOUT
+    (OCSP/initializeTimeout "com.sun.security.ocsp.readtimeout" CONNECT_TIMEOUT))
+
+  (field ^:private ^:static ^:final ^boolean USE_GET
+    (OCSP/initializeBoolean "com.sun.security.ocsp.useget" true))
+
+  (method ^:private ^:static initializeTimeout ^int [^String prop ^int def]
+    (let [timeoutVal (SecurityProperties/getTimeoutSystemProp prop def debug)]
+      (when (some? debug) (.println debug (java-str prop " set to " timeoutVal " milliseconds")))
+      timeoutVal))
+
+  (method ^:private ^:static initializeBoolean ^boolean [^String prop ^boolean def]
+    (let [value (SecurityProperties/getBooleanSystemProp prop def debug)]
+      (when (some? debug) (.println debug (java-str prop " set to " value)))
+      value))
+
+  (constructor ^:private [this])
+
+  (method ^:static check :throws [IOException CertPathValidatorException] ^OCSPResponse [^{:tag (List CertId)} certIds
+                                                                                         ^URI responderURI
+                                                                                         ^OCSPResponse$IssuerInfo issuerInfo
+                                                                                         ^X509Certificate responderCert
+                                                                                         ^Date date
+                                                                                         ^{:tag (List Extension)} extensions
+                                                                                         ^String variant]
+    (let [^:mutable ^byte/1 nonce nil]
+      (for-each [^Extension ext extensions]
+        (when (.equals (.getId ext) (.toString PKIXExtensions/OCSPNonce_Id))
+          (set! nonce (.getValue ext))))
+      (let [^:mutable ^OCSPResponse ocspResponse nil]
+        (try
+          (let [response (OCSP/getOCSPBytes certIds responderURI extensions)]
+            (set! ocspResponse (OCSPResponse. response))
+            (.verify ocspResponse certIds issuerInfo responderCert date nonce variant))
+          (catch IOException ioe
+            (throw (CertPathValidatorException.
+                     "Unable to determine revocation status due to network error"
+                     ioe
+                     nil
+                     -1
+                     CertPathValidatorException$BasicReason/UNDETERMINED_REVOCATION_STATUS))))
+        ocspResponse)))
+
+  (method ^:public ^:static getOCSPBytes :throws [IOException] ^byte/1 [^{:tag (List CertId)} certIds
+                                                                        ^URI responderURI
+                                                                        ^{:tag (List Extension)} extensions]
+    (let [request (OCSPRequest. certIds extensions)
+          bytes (.encodeBytes request)
+          responder (.toString responderURI)]
+      (when (some? debug) (.println debug (java-str "connecting to OCSP service at: " responder)))
+      (Event/report Event$ReporterCategory/CRLCHECK "event.ocsp.check" responder)
+      (let [^:mutable ^URL url nil
+            ^:mutable ^HttpURLConnection con nil]
+        (try
+          (let [encodedGetReq (StringBuilder. responder)]
+            (when-not (.endsWith responder "/") (.append encodedGetReq "/"))
+            (.append encodedGetReq
+                     (URLEncoder/encode (.encodeToString (Base64/getEncoder) bytes)
+                                        StandardCharsets/UTF_8))
+            (if (and USE_GET (<= (.length encodedGetReq) 255))
+                (do
+                  (set! url (.toURL (URI. (.toString encodedGetReq))))
+                  (set! con (cast HttpURLConnection (.openConnection url)))
+                  (.setConnectTimeout con CONNECT_TIMEOUT)
+                  (.setReadTimeout con READ_TIMEOUT)
+                  (.setDoOutput con true)
+                  (.setDoInput con true)
+                  (.setRequestMethod con "GET"))
+                (do
+                  (set! url (.toURL responderURI))
+                  (set! con (cast HttpURLConnection (.openConnection url)))
+                  (.setConnectTimeout con CONNECT_TIMEOUT)
+                  (.setReadTimeout con READ_TIMEOUT)
+                  (.setDoOutput con true)
+                  (.setDoInput con true)
+                  (.setRequestMethod con "POST")
+                  (.setRequestProperty con "Content-type" "application/ocsp-request")
+                  (.setRequestProperty con "Content-length" (String/valueOf (alength bytes)))
+                  (let [out (.getOutputStream con)] (.write out bytes) (.flush out))))
+            (let [respCode (.getResponseCode con)]
+              (when-not (== respCode HttpURLConnection/HTTP_OK)
+                (let [msg (java-str "Received HTTP error: "
+                                    respCode
+                                    " - "
+                                    (.getResponseMessage con))]
+                  (when (some? debug) (.println debug msg))
+                  (throw (IOException. msg))))
+              (let [contentLength (.getContentLength con)]
+                (if (== contentLength -1)
+                    (.readAllBytes (.getInputStream con))
+                    (IOUtils/readExactlyNBytes (.getInputStream con) contentLength)))))
+          (catch URISyntaxException urise (throw (IOException. urise)))
+          (finally (when (some? con) (.disconnect con)))))))
+
+  (method ^:public ^:static getResponderURI ^URI [^X509Certificate cert]
+    (try (OCSP/getResponderURI (X509CertImpl/toImpl cert)) (catch CertificateException ce nil)))
+
+  (method ^:static getResponderURI ^URI [^X509CertImpl certImpl]
+    (let [aia (.getAuthorityInfoAccessExtension certImpl)]
+      (when (some? aia)
+        (let [^{:tag (List AccessDescription)} descriptions (.getAccessDescriptions aia)]
+          (for-each [^AccessDescription description descriptions]
+            (when (.equals (.getAccessMethod description) AccessDescription/Ad_OCSP_Id)
+              (let [generalName (.getAccessLocation description)]
+                (when (== (.getType generalName) GeneralNameInterface/NAME_URI)
+                  (let [uri (cast URIName (.getName generalName))] (return (.getURI uri)))))))
+          nil))))
+
+  (defclass ^:public ^:interface RevocationStatus
+    (defclass ^:public ^:static ^:enum CertStatus
+      (constants GOOD REVOKED UNKNOWN))
+
+    (method getCertStatus ^CertStatus [this])
+
+    (method getRevocationTime ^Date [this])
+
+    (method getRevocationReason ^CRLReason [this])
+
+    (method getSingleExtensions ^{:tag (Map String Extension)} [this])))

@@ -1,0 +1,435 @@
+;; The C API at the compiled level (OC215 (a), the user 2026-11-10; doc/ocaml/OCAML-SURVEY.md, "As built: OC215"): a test's C stubs
+;; run by ci beside the translated program, through arbace/oicapi's boundary as oi runs them (the C API on ci). Given to bin/j2g as a
+;; second --main tree by bin/oi's compiled level for the shards of the programs with C stubs: this file, the package's listing with it
+;; (ocamlprog.ae), and the packages arbace/oi and arbace/oicapi copied beside (ci and crt are j2g's own).
+;;
+;; The Java runtime (jdk/ocaml/ocaml/rt/CApi.ae) and this main speak through capiPath, a file jrt's host serves here (as execPath,
+;; OC208): the runtime writes a message and reads the reply. A message is [op][updates][payload], every value in the wire form below;
+;; the program's values cross as mirrors, oi's values (a Block, Bytes, a FloatArray, a bigarray, a Closure or an opaque Custom standing
+;; for a Java object), and the boundary copies the mirrors into ci's memory as it copies oi's. The C runs on a goroutine of its own
+;; (a worker), so that a callback or a named value the C asks for is a reply to the runtime ('K', 'Q'), which answers with its next
+;; message ('A'); the runtime drives and Go never calls into the translated code. Nested calls (a callback calling a stub) push a worker.
+;;
+;; The wire form of a value (big-endian): 'i' i64 an integer; 'd' f64 a float; 'l' i32 an int32; 'j' i64 an int64; 'n' i64 a nativeint;
+;; 'r' u32 a node already known (the session's id); a new node, given the next id before its contents: 'b' u32 tag, u32 n, n values (a
+;; block); 's' u32 n, n bytes; 'f' u32 n, n f64 (a float array); 'B' u32 kind, u32 layout, u32 nd, nd u32 dims, u32 n, n values (a
+;; bigarray's elements); 'k' a closure; 'h' another Java object; and, no node: 'c' u32 len, the identifier, u64 the address (a custom
+;; block the C allocated, kept for the run); 'p' u32 i (Go to Java: fail.h's predefined exception i). A session is an outermost call:
+;; the ids of both sides start again with it. The updates: u32 count, then the contents of each node of id below it in order (a
+;; block's fields, a string's bytes, a float array's floats, a bigarray's elements; nothing for the others): the node's state as the
+;; sender holds it when it writes (the C, OCaml's code or a callback may have stored into it).
+;;
+;; Ops, Java to Go: 'C' str name, str reprs, u32 n, n values (call the stub name; reprs "" a bytecode external's call, else the
+;; native one's representations, oicapi's CallRaw: OC199 (a)); 'A' then the answer: 'R' value, 'E' value (the exception the
+;; callback raised), 'N' (no such named value), 'T' (a Java throwable the runtime keeps; the C call unwinds). Go to Java: 'R' value
+;; (the stub's result), 'E' value (it raised), 'X' i32 (the C called exit), 'F' str (a fatal error), 'N' (no stub of that name, or no
+;; stubs: OI_CSTUBS unset), 'T' (the call unwound for the runtime's throwable), 'K' value, u32 n, n values (a callback: apply the
+;; closure), 'Q' str (caml_named_value). Every reply to the runtime is u32 its length, then it.
+(in-ns 'go.arbace.cmd.ocamlprog)
+
+(go/file "capi.go" :imports [[binary "encoding/binary"] [fmt "fmt"] [io "io"] [math "math"] [os "os"] [jrt "arbace/jrt"] [oi "arbace/oi"]
+                             [oicapi "arbace/oicapi"]])
+
+(go/const ^{:doc "capiPath is the file the runtime's CApi writes its messages to (as execPath: a path no file system lets a program\ncreate, so that at the light level the open fails and an external with no Java implementation is missing as before).\n"}
+  capiPath "/proc/self/ocaml-capi")
+
+(go/func init []
+  (set! hostWrap (fn ^jrt/Host [^jrt/Host h] (lit capiHost :Host h)))
+  (set! atEnd flushStubs))
+
+(go/type capiHost "capiHost serves capiPath, its other files the host's.\n" (struct jrt/Host))
+
+(go/method Open [^capiHost h ^string name ^int flag ^uint32 perm] :results [jrt/HostFile error]
+  (when (== name capiPath)
+    (return (addr (lit capiFile)) nil))
+  (return (.Open (.-Host h) name flag perm)))
+
+;; ---- the session: the mirrors' ids, the workers
+
+(go/type session "session is an outermost call's state: its nodes by id and back, its workers (the innermost last).\n"
+  (struct ^{:tag (slice oi/Value)} nodes ^{:tag (map any int)} ids ^{:tag (slice (* worker))} workers))
+
+(go/var ^{:tag (* session)} sess)
+(go/var ^bool loaded)
+(go/var ^string loadErr)
+
+(go/type worker "worker is a C call on a goroutine of its own: in brings the runtime's answers, out its requests and its end.\n"
+  (struct ^{:tag (chan (slice byte))} in ^{:tag (chan (slice byte))} out))
+
+(go/type unwind "unwind is the panic that unwinds a C call for a throwable the runtime keeps (an answer 'T').\n" (struct))
+
+(go/func load "load loads the stubs' node program (OI_CSTUBS) once; false when there is none.\n" ^bool []
+  (when (not loaded)
+    (set! loaded true)
+    (let [path (os/Getenv "OI_CSTUBS")]
+      (when (== path "")
+        (set! loadErr "no C stubs (OI_CSTUBS)")
+        (return false))
+      (when [err (oicapi/Load path os/Args)] (!= err nil)
+        (set! loadErr (.Error err))
+        (return false))
+      (set! oicapi/Apply apply)
+      (set! oicapi/Named named)))
+  (== loadErr ""))
+
+;; ---- the wire form
+
+(go/type wbuf "wbuf is a message being written.\n" (struct ^{:tag (slice byte)} b))
+
+(go/method u8 [^{:tag (* wbuf)} w ^byte x] (set! (.-b w) (append (.-b w) x)))
+(go/method u32 [^{:tag (* wbuf)} w ^int x] (set! (.-b w) (.AppendUint32 binary/BigEndian (.-b w) (conv uint32 x))))
+(go/method u64 [^{:tag (* wbuf)} w ^uint64 x] (set! (.-b w) (.AppendUint64 binary/BigEndian (.-b w) x)))
+(go/method str [^{:tag (* wbuf)} w ^string s]
+  (.u32 w (len s))
+  (set! (.-b w) (append (.-b w) (spread s))))
+
+(go/type rbuf "rbuf is a message being read.\n" (struct ^{:tag (slice byte)} b ^int i))
+
+(go/method u8 ^byte [^{:tag (* rbuf)} r]
+  (let [x (aget (.-b r) (.-i r))]
+    (inc! (.-i r))
+    x))
+(go/method u32 ^int [^{:tag (* rbuf)} r]
+  (let [x (.Uint32 binary/BigEndian (subslice (.-b r) (.-i r)))]
+    (set! (.-i r) (+ (.-i r) 4))
+    (conv int x)))
+(go/method u64 ^uint64 [^{:tag (* rbuf)} r]
+  (let [x (.Uint64 binary/BigEndian (subslice (.-b r) (.-i r)))]
+    (set! (.-i r) (+ (.-i r) 8))
+    x))
+(go/method str ^string [^{:tag (* rbuf)} r]
+  (let [n (.u32 r)
+        s (conv string (subslice (.-b r) (.-i r) (+ (.-i r) n)))]
+    (set! (.-i r) (+ (.-i r) n))
+    s))
+
+(go/method add "add gives the node v the next id.\n" [^{:tag (* session)} s ^oi/Value v]
+  (aset (.-ids s) v (len (.-nodes s)))
+  (set! (.-nodes s) (append (.-nodes s) v)))
+
+(go/func predefIndex "predefIndex is oi's predefined exception v's index in fail.h, or -1.\n" ^int [^oi/Value v]
+  (range [i p (lit (slice oi/Value) oi/ExnOutOfMemory oi/ExnSysError oi/ExnFailure oi/ExnInvalidArgument oi/ExnEndOfFile
+                   oi/ExnDivisionByZero oi/ExnNotFound oi/ExnMatchFailure oi/ExnStackOverflow oi/ExnSysBlockedIO oi/ExnAssertFailure
+                   oi/ExnUndefinedRecursiveModule)]
+    (when (== p v)
+      (return i)))
+  -1)
+
+(go/method put "put writes v in the wire form.\n" [^{:tag (* session)} s ^{:tag (* wbuf)} w ^oi/Value v]
+  (type-switch [x v]
+    (case [nil]
+      (.u8 w \i)
+      (.u64 w 0)
+      (return))
+    (case [int]
+      (.u8 w \i)
+      (.u64 w (conv uint64 x))
+      (return))
+    (case [float64]
+      (.u8 w \d)
+      (.u64 w (math/Float64bits x))
+      (return))
+    (case [int32]
+      (.u8 w \l)
+      (.u32 w (conv int (conv uint32 x)))
+      (return))
+    (case [int64]
+      (.u8 w \j)
+      (.u64 w (conv uint64 x))
+      (return))
+    (case [oi/Nativeint]
+      (.u8 w \n)
+      (.u64 w (conv uint64 x))
+      (return)))
+  (when [i (predefIndex v)] (>= i 0)
+    (.u8 w \p)
+    (.u32 w i)
+    (return))
+  (when [(values id ok) (aget (.-ids s) v)] ok
+    (.u8 w \r)
+    (.u32 w id)
+    (return))
+  (type-switch [x v]
+    (case [(* oi/Block)]
+      (.add s v)
+      (.u8 w \b)
+      (.u32 w (.-Tag x))
+      (.u32 w (len (.-F x)))
+      (range [_ f (.-F x)]
+        (.put s w f)))
+    (case [(* oi/Bytes)]
+      (.add s v)
+      (.u8 w \s)
+      (.u32 w (len (.-B x)))
+      (set! (.-b w) (append (.-b w) (spread (.-B x)))))
+    (case [(* oi/FloatArray)]
+      (.add s v)
+      (.u8 w \f)
+      (.u32 w (len (.-F x)))
+      (range [_ f (.-F x)]
+        (.u64 w (math/Float64bits f))))
+    (case [(* oi/Custom)]
+      (when [(values kind layout dims data ok) (oi/BigarrayParts v)] ok
+        (.add s v)
+        (.u8 w \B)
+        (.u32 w kind)
+        (.u32 w layout)
+        (.u32 w (len dims))
+        (range [_ d dims]
+          (.u32 w d))
+        (.u32 w (len data))
+        (range [_ e data]
+          (.put s w e))
+        (return))
+      (when [(values cb ok) (assert (* oicapi/CBlock) (.-V x))] ok
+        (.u8 w \c)
+        (.str w (.-Name x))
+        (.u64 w (.-Addr cb))
+        (return))
+      (oi/Internalf "the C API: a custom block %q the runtime does not know" (.-Name x)))
+    (default
+      (oi/Internalf "the C API: a value %T the runtime does not know" v))))
+
+(go/method get "get reads a value in the wire form.\n" ^oi/Value [^{:tag (* session)} s ^{:tag (* rbuf)} r]
+  (let [op (.u8 r)]
+    (switch op
+      (case [\i] (return (conv int (conv int64 (.u64 r)))))
+      (case [\d] (return (math/Float64frombits (.u64 r))))
+      (case [\l] (return (conv int32 (conv uint32 (.u32 r)))))
+      (case [\j] (return (conv int64 (.u64 r))))
+      (case [\n] (return (conv oi/Nativeint (conv int64 (.u64 r)))))
+      (case [\r] (return (aget (.-nodes s) (.u32 r))))
+      (case [\b]
+        (let [tag (.u32 r)
+              n (.u32 r)
+              b (addr (lit oi/Block :Tag tag :F (make (slice oi/Value) n)))]
+          (.add s b)
+          (for [i 0] (< i n) (inc! i)
+            (aset (.-F b) i (.get s r)))
+          (return b)))
+      (case [\s]
+        (let [n (.u32 r)
+              b (addr (lit oi/Bytes :B (make (slice byte) n)))]
+          (copy (.-B b) (subslice (.-b r) (.-i r) (+ (.-i r) n)))
+          (set! (.-i r) (+ (.-i r) n))
+          (.add s b)
+          (return b)))
+      (case [\f]
+        (let [n (.u32 r)
+              f (addr (lit oi/FloatArray :F (make (slice float64) n)))]
+          (for [i 0] (< i n) (inc! i)
+            (aset (.-F f) i (math/Float64frombits (.u64 r))))
+          (.add s f)
+          (return f)))
+      (case [\B]
+        (let [kind (.u32 r)
+              layout (.u32 r)
+              nd (.u32 r)
+              dims (make (slice int) nd)]
+          (for [i 0] (< i nd) (inc! i)
+            (aset dims i (.u32 r)))
+          (let [n (.u32 r)
+                data (make (slice oi/Value) n)
+                v (oi/NewBigarray kind layout dims data)]
+            (.add s v)
+            (for [i 0] (< i n) (inc! i)
+              (aset data i (.get s r)))
+            (return v))))
+      (case [\k]
+        (let [v (addr (lit oi/Closure))]
+          (.add s v)
+          (return v)))
+      (case [\h]
+        (let [v (addr (lit oi/Custom :Name "_java"))]
+          (.add s v)
+          (return v)))
+      (case [\c]
+        (let [name (.str r)
+              a (.u64 r)]
+          (return (addr (lit oi/Custom :Name name :V (addr (lit oicapi/CBlock :Addr a))))))))
+    (oi/Internalf "the C API: a value of the wire form %q" op)
+    nil))
+
+(go/method putUpdates "putUpdates writes the contents of the nodes known now.\n" [^{:tag (* session)} s ^{:tag (* wbuf)} w]
+  (let [n (len (.-nodes s))]
+    (.u32 w n)
+    (for [i 0] (< i n) (inc! i)
+      (let [v (aget (.-nodes s) i)]
+        (type-switch [x v]
+          (case [(* oi/Block)]
+            (range [_ f (.-F x)]
+              (.put s w f)))
+          (case [(* oi/Bytes)]
+            (set! (.-b w) (append (.-b w) (spread (.-B x)))))
+          (case [(* oi/FloatArray)]
+            (range [_ f (.-F x)]
+              (.u64 w (math/Float64bits f))))
+          (case [(* oi/Custom)]
+            (when [(values _ _ _ data ok) (oi/BigarrayParts v)] ok
+              (range [_ e data]
+                (.put s w e)))))))))
+
+(go/method getUpdates "getUpdates reads the contents of the nodes the sender knew into them.\n" [^{:tag (* session)} s ^{:tag (* rbuf)} r]
+  (let [n (.u32 r)]
+    (for [i 0] (< i n) (inc! i)
+      (let [v (aget (.-nodes s) i)]
+        (type-switch [x v]
+          (case [(* oi/Block)]
+            (range [j _ (.-F x)]
+              (aset (.-F x) j (.get s r))))
+          (case [(* oi/Bytes)]
+            (copy (.-B x) (subslice (.-b r) (.-i r) (+ (.-i r) (len (.-B x)))))
+            (set! (.-i r) (+ (.-i r) (len (.-B x)))))
+          (case [(* oi/FloatArray)]
+            (range [j _ (.-F x)]
+              (aset (.-F x) j (math/Float64frombits (.u64 r)))))
+          (case [(* oi/Custom)]
+            (when [(values _ _ _ data ok) (oi/BigarrayParts v)] ok
+              (range [j _ data]
+                (aset data j (.get s r))))))))))
+
+;; ---- the worker's requests
+
+(go/func ask "ask sends the innermost worker's request (op, then the updates, then body's payload) and waits for the answer,\nits updates read: the answer's reader after them.\n"
+  ^{:tag (* rbuf)} [^byte op ^{:tag (func [(* wbuf)] [])} body]
+  (let [s sess
+        wk (aget (.-workers s) (- (len (.-workers s)) 1))
+        w (addr (lit wbuf))]
+    (.u8 w op)
+    (.putUpdates s w)
+    (body w)
+    (>! (.-out wk) (.-b w))
+    (let [r (addr (lit rbuf :b (<! (.-in wk))))]
+      (.u8 r)
+      (.getUpdates s r)
+      r)))
+
+(go/func apply "apply is oicapi's Apply: the runtime applies the closure f to vs.\n" [^oi/Value f ^{:tag (slice oi/Value)} vs]
+  :results [oi/Value oi/Value]
+  (let [s sess
+        r (ask \K (fn [^{:tag (* wbuf)} w]
+                        (.put s w f)
+                        (.u32 w (len vs))
+                        (range [_ v vs]
+                          (.put s w v))))]
+    (switch (.u8 r)
+      (case [\R] (return (.get s r) nil))
+      (case [\E] (return nil (.get s r))))
+    (panic (addr (lit unwind)))))
+
+(go/func named "named is oicapi's Named: the runtime's caml_named_value.\n" [^string name] :results [oi/Value bool]
+  (let [s sess
+        r (ask \Q (fn [^{:tag (* wbuf)} w] (.str w name)))]
+    (switch (.u8 r)
+      (case [\R] (return (.get s r) true))
+      (case [\N] (return nil false)))
+    (panic (addr (lit unwind)))))
+
+(go/func run "run is a worker's call: the stub name with the arguments read from r; its end the worker's last message.\n"
+  [^{:tag (* worker)} wk ^string name ^string reprs ^{:tag (slice oi/Value)} args]
+  (let [s sess
+        w (addr (lit wbuf))]
+    (defer ((fn []
+              (when [x (recover)] (!= x nil)
+                (set! (.-b w) nil)
+                (type-switch [e x]
+                  (case [(* oi/Exn)]
+                    (.u8 w \E)
+                    (.putUpdates s w)
+                    (.put s w (.-V e)))
+                  (case [(* oi/ExitSignal)]
+                    (oicapi/Flush)
+                    (.u8 w \X)
+                    (.putUpdates s w)
+                    (.u32 w (.-Code e)))
+                  (case [(* unwind)]
+                    (.u8 w \T)
+                    (.putUpdates s w))
+                  (case [(* oi/InternalError)]
+                    (.u8 w \F)
+                    (.putUpdates s w)
+                    (.str w (+ "o2j: " (.-Msg e))))
+                  (default
+                    (.u8 w \F)
+                    (.putUpdates s w)
+                    (.str w (fmt/Sprintf "o2j: the C API: %v" x)))))
+              (>! (.-out wk) (.-b w)))))
+    (let [^oi/Value v nil]
+      (if (== reprs "")
+        (set! v (oicapi/Call name args))
+        (set! v (oicapi/CallRaw name reprs args)))
+      (.u8 w \R)
+      (.putUpdates s w)
+      (.put s w v))))
+
+;; ---- the file
+
+(go/type capiFile "capiFile is the runtime's end of the channel: a message written is handled at once, its reply read next.\n"
+  (struct ^{:tag (slice byte)} reply ^int pos))
+
+(go/method Write [^{:tag (* capiFile)} f ^{:tag (slice byte)} p] :results [int error]
+  (let [msg (append (lit (slice byte)) (spread p))
+        out (handle msg)
+        w (addr (lit wbuf))]
+    (.u32 w (len out))
+    (set! (.-reply f) (append (.-b w) (spread out)))
+    (set! (.-pos f) 0)
+    (return (len p) nil)))
+
+(go/method Read [^{:tag (* capiFile)} f ^{:tag (slice byte)} p] :results [int error]
+  (when (>= (.-pos f) (len (.-reply f)))
+    (return 0 io/EOF))
+  (let [n (copy p (subslice (.-reply f) (.-pos f)))]
+    (set! (.-pos f) (+ (.-pos f) n))
+    (return n nil)))
+
+(go/method Seek [^{:tag (* capiFile)} f ^int64 offset ^int whence] :results [int64 error]
+  (return 0 nil))
+
+(go/method Close ^error [^{:tag (* capiFile)} f] nil)
+
+(go/func handle "handle is the reply to the runtime's message msg: a call's start, or an answer to the innermost worker's request; the\nworker's next request or its end.\n"
+  ^{:tag (slice byte)} [^{:tag (slice byte)} msg]
+  (let [r (addr (lit rbuf :b msg))
+        op (.u8 r)
+        ^{:tag (* worker)} wk nil]
+    (switch op
+      (case [\C]
+        (when (== sess nil)
+          (set! sess (addr (lit session :ids (lit (map any int))))))
+        (let [s sess]
+          (.getUpdates s r)
+          (let [name (.str r)
+                reprs (.str r)
+                n (.u32 r)
+                args (make (slice oi/Value) n)]
+            (for [i 0] (< i n) (inc! i)
+              (aset args i (.get s r)))
+            (when (or (not (load)) (not (oicapi/Has name)))
+              (when (== (len (.-workers s)) 0)
+                (set! sess nil))
+              (return (lit (slice byte) \N)))
+            (set! wk (addr (lit worker :in (make (chan (slice byte))) :out (make (chan (slice byte))))))
+            (set! (.-workers s) (append (.-workers s) wk))
+            (go (run wk name reprs args)))))
+      (case [\A]
+        (set! wk (aget (.-workers sess) (- (len (.-workers sess)) 1)))
+        (>! (.-in wk) msg))
+      (default
+        (let [w (addr (lit wbuf))]
+          (.u8 w \F)
+          (.u32 w 0)
+          (.str w (fmt/Sprintf "o2j: the C API: a message %q" op))
+          (return (.-b w)))))
+    (let [out (<! (.-out wk))]
+      (switch (aget out 0)
+        (case [\K \Q])
+        (default
+          (set! (.-workers sess) (subslice (.-workers sess) 0 (- (len (.-workers sess)) 1)))
+          (when (== (len (.-workers sess)) 0)
+            (set! sess nil))))
+      out)))
+
+(go/func flushStubs "flushStubs flushes the C's stdio at the program's end (oicapi's Flush), when the stubs were loaded.\n" []
+  (when (and loaded (== loadErr ""))
+    (oicapi/Flush)))

@@ -1,0 +1,101 @@
+(ns arbace.rust.front.typeck-check
+  "RF9's judge (bin/rust-front typeck-check): each program's type checking facts by arbace.rust.front.typeck (over
+  arbace.rust.front.collect and arbace.rust.front.lower's HIR of the helper's expanded crate and resolutions) against the
+  helper's --typeck (DIR/NAME.tc.edn: rustc's TypeckResults per expression of the root file and per binding), fact by
+  fact: an expression's fact keyed by its owner, span and kind (its type, then its adjustments), a binding's by owner and
+  span (its type and mode); ours that rustc has no fact for (a desugaring's nodes) are not counted. TYPECK_VERBOSE=1:
+  each program's first differing facts; a negative control (one program's facts against another's oracle) must differ."
+  (:require [arbace.rust.front.lower :as lower] [arbace.rust.front.collect :as collect] [arbace.rust.front.typeck :as tc]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- read-all [file]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp file)))]
+    (loop [acc []] (let [x (read rdr false ::eof)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(def ^:private source-dirs ["test/rust/synthetic" "test/rust/sample" "test/rust/eval" "test/rust/front"])
+(def ^:dynamic *dir* nil)
+(defn- source-file [n]
+  (or (let [f (File. (str *dir* "/" n ".src"))] (when (.exists f) (str/trim (slurp f))))
+      (some #(let [f (File. (str % "/" n ".rs"))] (when (.exists f) (str f))) source-dirs)))
+
+(defn- oracle-facts [file]
+  (vec (for [x (read-all file)]
+         (case (first x)
+           tc/expr (let [[_ owner sp kind ty extra] x] {:key [owner sp kind] :ty ty :adj (vec (:adj extra)) :method (:method extra)})
+           tc/pat (let [[_ owner sp ty mode] x] {:key [owner sp :pat] :ty ty :mode mode})
+           nil))))
+
+(defn- our-facts [fs]
+  (vec (for [f fs :when (:owner f)]
+         (if (:pat f)
+           {:key [(:owner f) (:span f) :pat] :ty (:ty f) :mode (:mode f)}
+           {:key [(:owner f) (:span f) (:kind f)] :ty (:ty f) :adj (vec (:adj f))}))))
+
+(defn- judge [want got]
+  (let [gm (group-by :key got)
+        rs (for [w want]
+             (let [g (first (get gm (:key w)))]
+               (cond (nil? g) [:missing w nil]
+                     (and (= (:ty w) (:ty g)) (= (:adj w) (:adj g)) (= (:mode w) (:mode g))) [:equal w g]
+                     (= (:ty w) (:ty g)) [:adj w g]
+                     :else [:differ w g])))]
+    (frequencies (map first rs))))
+
+(defn -main [dir & args]
+  (alter-var-root #'*dir* (constantly dir))
+  (let [ours? (= "--ours" (first args))
+        names (if ours? (rest args) args)
+        verbose (System/getenv "TYPECK_VERBOSE")
+        std-file (str dir "/std-names.edn")
+        std (collect/load-std std-file)
+        std-generics (lower/load-std-generics std-file)
+        si-file (str dir "/std-iface.edn")
+        si (when (.exists (File. si-file)) (collect/load-std-iface si-file))
+        pipeline (when ours?
+                   (require 'arbace.rust.front.expand 'arbace.rust.front.resolve)
+                   {:macros ((resolve 'arbace.rust.front.expand/load-std-macros) std-file)
+                    :names ((resolve 'arbace.rust.front.resolve/load-std-names) std-file)})
+        got-all (atom {})
+        results
+        (vec (for [n names
+                   :let [oracle (File. (str dir "/" n ".tc.edn"))]
+                   :when (and (.exists oracle) (pos? (.length oracle)))]
+               (let [want (oracle-facts oracle)
+                     src (slurp (source-file n))
+                     got (try
+                           (let [[crate res mark-crates]
+                                 (if ours?
+                                   (let [mc (atom {})
+                                         c (with-bindings {(resolve 'arbace.rust.front.expand/*mark-crates*) mc}
+                                             ((resolve 'arbace.rust.front.expand/expand-file) (source-file n) (if (= n "edition2015") 2015 2024) (:macros pipeline)))
+                                         r ((resolve 'arbace.rust.front.resolve/resolve-crate) c (:names pipeline) {:source src})]
+                                     [c r @mc])
+                                   [(first (read-all (str dir "/" n ".exp.edn")))
+                                    (let [f (File. (str dir "/" n ".res.edn"))] (when (.exists f) (read-all f)))
+                                    nil])
+                                 res-map (into {} (for [[_ s rs] res] [s rs]))
+                                 hir (lower/lower-crate crate res-map {:file (.getCanonicalPath (File. ^String (source-file n))) :mark-crates mark-crates :std-generics std-generics})
+                                 ed (let [f (File. (str dir "/" n ".edition"))] (if (.exists f) (Long/parseLong (str/trim (slurp f))) (if (= n "edition2015") 2015 2024)))]
+                             (our-facts (binding [tc/*root-file* (.getCanonicalPath (File. ^String (source-file n)))]
+                                           (collect/with-crate hir res-map std {:source src :edition ed :si si} tc/check-crate))))
+                           (catch Throwable e (binding [*out* *err*] (println n "ERROR" e)) []))
+                     j (judge want got)]
+                 (swap! got-all assoc n got)
+                 (when (System/getenv "TYPECK_PROGRESS") (binding [*out* *err*] (println "typeck-check:" n (get j :equal 0) "of" (count want))))
+                 (when verbose
+                   (let [gm (group-by :key got)]
+                     (doseq [w (take (or (some-> verbose parse-long) 8) (filter #(let [g (first (get gm (:key %)))] (not (and g (= (:ty %) (:ty g)) (= (:adj %) (:adj g)) (= (:mode %) (:mode g))))) want))]
+                       (println "  " n (pr-str (:key w)) "want" (pr-str (dissoc w :key)) "got" (pr-str (dissoc (first (get gm (:key w))) :key))))))
+                 {:name n :total (count want) :equal (get j :equal 0) :ty-only (get j :adj 0) :differ (get j :differ 0) :missing (get j :missing 0)})))
+        sum (fn [k] (reduce + (map k results)))]
+    (doseq [r results]
+      (println (format "%-28s %5d of %5d facts equal, %4d more with the type alone, %4d differ, %4d missing" (:name r) (:equal r) (:total r) (:ty-only r) (:differ r) (:missing r))))
+    (println (format "typeck-check: %d of %d facts equal to rustc's (the helper's --typeck), %d more with the type equal, %d programs whole of %d%s"
+                     (sum :equal) (sum :total) (sum :ty-only) (count (filter #(= (:equal %) (:total %)) results)) (count results)
+                     (if ours? " (input: the pipeline)" " (input: the helper's expanded crates and resolutions)")))
+    (when (>= (count results) 2)
+      (let [[a b] (map :name results)
+            j (judge (oracle-facts (File. (str dir "/" b ".tc.edn"))) (get @got-all a))]
+        (println "control (" a "against" b "):" (if (= (get j :equal 0) (count (oracle-facts (File. (str dir "/" b ".tc.edn"))))) "PASSED (a bug)" "differs, as it must"))))
+    (System/exit 0)))

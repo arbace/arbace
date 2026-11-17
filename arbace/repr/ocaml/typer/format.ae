@@ -1,0 +1,158 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; the pretty-printing engine of stdlib/format.ml (the queue, the scan stack, format_pp_token, advance_left, set_size,
+;; the boxes and break hints; no tabulations, tags or ellipsis), whose notice follows (LICENSE.md, "The OCaml Core
+;; System"):
+;;
+;;                                 OCaml
+;;
+;;             Pierre Weis, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.format
+  "Format's engine (doc/ocaml/TYPER.md, T8): a document is a sequence of commands, [:open kind indent] (kind :h :v
+  :hv :hov :b), [:close], [:text s], [:break width offset], [:newline]; `render` prints it as Format.asprintf does
+  (margin 78, max indent 68), the queue and the scan stack as format.ml's. Builders: `box`, `docs`, `text`, `brk`, `sp`
+  (\"@ \"), `cut` (\"@,\")."
+  (:import [java.util ArrayDeque ArrayList]))
+
+(set! *warn-on-reflection* false)
+
+(def ^:private infinity 1000000010)
+(def ^:private unknown -1)
+
+;; ---------------------------------------------------------------------------------------------
+;; Builders
+
+(defn box [kind indent & items] (concat [[:open kind indent]] (apply concat items) [[:close]]))
+(defn text [s] [[:text s]])
+(defn brk [w o] [[:break w o]])
+(def sp [[:break 1 0]])
+(def cut [[:break 0 0]])
+(defn docs [& items] (apply concat items))
+(defn join [sep items] (apply concat (interpose sep items)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The engine
+
+(defn render
+  "The document's text, as Format.asprintf prints it (no newline at the end)"
+  [doc & {:keys [margin] :or {margin 78}}]
+  (let [out (StringBuilder.)
+        max-indent (- margin 10)
+        queue (ArrayDeque.)
+        scan (ArrayList.)          ; elements {:left-total :elem}, the top at the end
+        fmt (ArrayList.)           ; {:type :width}
+        st (atom {:space-left margin :current-indent 0 :is-new-line true :left-total 1 :right-total 1 :curr-depth 1})
+        g (fn [k] (get @st k))
+        s! (fn [k v] (swap! st assoc k v))
+        top (fn [^ArrayList l] (when (pos? (.size l)) (.get l (dec (.size l)))))
+        pop! (fn [^ArrayList l] (when (pos? (.size l)) (.remove l (int (dec (.size l))))))
+        output-spaces (fn [n] (dotimes [_ n] (.append out " ")))
+        format-text (fn [size s] (s! :space-left (- (g :space-left) size)) (.append out ^String s) (s! :is-new-line false))
+        break-new-line (fn [offset width]
+                         (.append out "\n")
+                         (s! :is-new-line true)
+                         (let [indent (+ (- margin width) offset)
+                               real (min max-indent indent)]
+                           (s! :current-indent real)
+                           (s! :space-left (- margin real))
+                           (output-spaces real)))
+        break-same-line (fn [width] (s! :space-left (- (g :space-left) width)) (output-spaces width))
+        force-break-line (fn []
+                           (if-let [{:keys [type width]} (top fmt)]
+                             (when (and (> width (g :space-left)) (not (#{:fits :h} type)))
+                               (break-new-line 0 width))
+                             (.append out "\n")))
+        format-token (fn [size tok]
+                       (case (tok 0)
+                         :text (format-text size (tok 1))
+                         :open (let [[_ ty off] tok
+                                     ip (- margin (g :space-left))]
+                                 (when (> ip max-indent) (force-break-line))
+                                 (let [width (- (g :space-left) off)
+                                       bt (if (= ty :v) :v (if (> size (g :space-left)) ty :fits))]
+                                   (.add fmt {:type bt :width width})))
+                         :close (pop! fmt)
+                         :newline (if-let [{:keys [width]} (top fmt)] (break-new-line 0 width) (.append out "\n"))
+                         :break (let [[_ w off] tok]
+                                  (when-let [{:keys [type width]} (top fmt)]
+                                    (case type
+                                      :hov (if (> size (g :space-left)) (break-new-line off width) (break-same-line w))
+                                      :b (cond (g :is-new-line) (break-same-line w)
+                                               (> size (g :space-left)) (break-new-line off width)
+                                               (> (g :current-indent) (+ (- margin width) off)) (break-new-line off width)
+                                               :else (break-same-line w))
+                                      :hv (break-new-line off width)
+                                      :fits (break-same-line w)
+                                      :v (break-new-line off width)
+                                      :h (break-same-line w))))))
+        advance-left (fn []
+                       (loop []
+                         (when-let [e (.peekFirst queue)]
+                           (let [{:keys [size token length]} @e
+                                 pending (- (g :right-total) (g :left-total))]
+                             (when (or (>= size 0) (>= pending (g :space-left)))
+                               (.pollFirst queue)
+                               (format-token (if (>= size 0) size infinity) token)
+                               (s! :left-total (+ length (g :left-total)))
+                               (recur))))))
+        enqueue (fn [e] (.addLast queue e) (s! :right-total (+ (g :right-total) (:length @e))))
+        init-scan (fn [] (.clear scan) (.add scan {:left-total -1 :elem (atom {:size unknown :token [:text ""] :length 0})}))
+        set-size (fn [break-hint]
+                   (when-let [{:keys [left-total elem]} (top scan)]
+                     (let [size (:size @elem)]
+                       (if (< left-total (g :left-total))
+                         (init-scan)
+                         (case ((:token @elem) 0)
+                           :break (when break-hint
+                                    (swap! elem assoc :size (+ (g :right-total) size)) (pop! scan))
+                           :open (when-not break-hint
+                                   (swap! elem assoc :size (+ (g :right-total) size)) (pop! scan))
+                           nil)))))
+        scan-push (fn [break-hint e]
+                    (if break-hint
+                      (do (.addLast queue e) (set-size true) (s! :right-total (+ (g :right-total) (:length @e))))
+                      (enqueue e))
+                    (.add scan {:left-total (g :right-total) :elem e}))
+        open-box (fn [indent ty]
+                   (s! :curr-depth (inc (g :curr-depth)))
+                   (scan-push false (atom {:size (- (g :right-total)) :token [:open ty indent] :length 0})))
+        close-box (fn []
+                    (when (> (g :curr-depth) 1)
+                      (enqueue (atom {:size 0 :token [:close] :length 0}))
+                      (set-size true) (set-size false)
+                      (s! :curr-depth (dec (g :curr-depth)))))
+        print-string (fn [^String s]
+                       (let [n (.codePointCount s 0 (count s))]
+                         (enqueue (atom {:size n :token [:text s] :length n}))
+                         (advance-left)))
+        print-break (fn [w off]
+                      (scan-push true (atom {:size (- (g :right-total)) :token [:break w off] :length w})))
+        print-newline (fn []
+                        ;; pp_force_newline: a hard newline in the current box
+                        (when (> (g :curr-depth) 0)
+                          (enqueue (atom {:size 0 :token [:newline] :length 0}))
+                          (advance-left)))]
+    ;; the formatter's initial state: the system box
+    (let [sys (atom {:size unknown :token [:open :hov 0] :length 0})]
+      (.addLast queue sys)
+      (init-scan)
+      (.add scan {:left-total 1 :elem sys}))
+    (doseq [c doc]
+      (case (c 0)
+        :open (open-box (c 2) (c 1))
+        :close (close-box)
+        :text (print-string (c 1))
+        :break (print-break (c 1) (c 2))
+        :newline (print-newline)))
+    ;; pp_flush_queue ~end_with_newline:false
+    (while (> (g :curr-depth) 1) (close-box))
+    (s! :right-total infinity)
+    (advance-left)
+    (str out)))

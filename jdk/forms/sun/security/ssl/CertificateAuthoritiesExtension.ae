@@ -1,0 +1,226 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/CertificateAuthoritiesExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security.cert X509Certificate)
+        '(java.text MessageFormat)
+        '(java.util ArrayList Collections LinkedList List Locale)
+        '(javax.net.ssl SSLProtocolException)
+        '(javax.security.auth.x500 X500Principal))
+
+(defclass ^:final CertificateAuthoritiesExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (CHCertificateAuthoritiesProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer
+    (CHCertificateAuthoritiesConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer crNetworkProducer (CRCertificateAuthoritiesProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer crOnLoadConsumer
+    (CRCertificateAuthoritiesConsumer.))
+
+  (field ^:static ^:final ^SSLStringizer ssStringizer (CertificateAuthoritiesStringizer.))
+
+  (defclass ^:static ^:final CertificateAuthoritiesSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^{:tag (List byte/1)} authorities)
+
+    (constructor ^:private [this ^{:tag (List byte/1)} authorities]
+      (set! (.-authorities this) authorities))
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext hc ^ByteBuffer m]
+      (when (< (.remaining m) 3)
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         "Invalid certificate_authorities extension: insufficient data"))))
+      (let [^:mutable listLen (Record/getInt16 m)]
+        (when (== listLen 0)
+          (throw (.fatal (.-conContext hc)
+                         Alert/DECODE_ERROR
+                         "Invalid certificate_authorities extension: no certificate authorities")))
+        (when (> listLen (.remaining m))
+          (throw (.fatal (.-conContext hc)
+                         Alert/DECODE_ERROR
+                         "Invalid certificate_authorities extension: insufficient data")))
+        (set! (.-authorities this) (LinkedList.))
+        (while (> listLen 0)
+          (let [encoded (Record/getBytes16 m)]
+            (set! listLen (unchecked-subtract-int listLen (unchecked-add-int 2 (alength encoded))))
+            (.add authorities encoded)))))
+
+    (method ^:private ^:static getEncodedAuthorities ^{:tag (List byte/1)} [^X509Certificate/1 trustedCerts]
+      (let [^{:tag (List byte/1)} authorities (ArrayList. (alength trustedCerts))
+            ^:mutable ^int sizeAccount 0]
+        (for-each [^X509Certificate cert trustedCerts]
+          (let [x500Principal (.getSubjectX500Principal cert)
+                encodedPrincipal (.getEncoded x500Principal)]
+            (set! sizeAccount (unchecked-add-int sizeAccount (alength encodedPrincipal)))
+            (when (> sizeAccount 0xFFFF) (return (Collections/emptyList)))
+            (when-not (== (alength encodedPrincipal) 0) (.add authorities encodedPrincipal))))
+        authorities))
+
+    (method getAuthorities ^X500Principal/1 [this]
+      (let [principals (new X500Principal/1 (.size authorities))
+            ^:mutable ^int i 0]
+        (for-each [^byte/1 encoded authorities]
+          (aset principals i (X500Principal. encoded))
+          (set! i (unchecked-inc-int i)))
+        principals))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat. "\"certificate authorities\": '['\n{0}']'" Locale/ENGLISH)
+            builder (StringBuilder. 512)]
+        (for-each [^byte/1 encoded authorities]
+          (try
+            (let [principal (X500Principal. encoded)] (.append builder (.toString principal)))
+            (catch IllegalArgumentException iae
+              (.append builder (java-str "unparseable distinguished name: " iae))))
+          (.append builder "\n"))
+        (let [messageFields (new Object/1 [(Utilities/indent (.toString builder))])]
+          (.format messageFormat messageFields)))))
+
+  (defclass ^:private ^:static ^:final CertificateAuthoritiesStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try
+        (.toString (CertificateAuthoritiesSpec. hc buffer))
+        (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final CHCertificateAuthoritiesProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig chc) SSLExtension/CH_CERTIFICATE_AUTHORITIES))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Ignore unavailable certificate_authorities extension"))
+              nil)
+            (let [caCerts (.getAcceptedIssuers (.getX509TrustManager (.-sslContext chc)))]
+              (if (== (alength caCerts) 0)
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "No available certificate authorities"))
+                    nil)
+                  (let [^{:tag (List byte/1)} encodedCAs
+                          (CertificateAuthoritiesSpec/getEncodedAuthorities caCerts)]
+                    (if (.isEmpty encodedCAs)
+                        (do
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/warning
+                              "The number of CAs exceeds the maximum size of the certificate_authorities extension"))
+                          nil)
+                        (let [spec (CertificateAuthoritiesSpec. encodedCAs)
+                              ^:mutable ^int vectorLen 0]
+                          (for-each [^byte/1 encoded (.-authorities spec)]
+                            (set! vectorLen
+                                  (unchecked-add-int
+                                    vectorLen
+                                    (unchecked-add-int (alength encoded) 2))))
+                          (let [extData (new byte/1 (unchecked-add-int vectorLen 2))
+                                m (ByteBuffer/wrap extData)]
+                            (Record/putInt16 m vectorLen)
+                            (for-each [^byte/1 encoded (.-authorities spec)]
+                              (Record/putBytes16 m encoded))
+                            (.put (.-handshakeExtensions chc)
+                                  SSLExtension/CH_CERTIFICATE_AUTHORITIES
+                                  spec)
+                            extData))))))))))
+
+  (defclass ^:private ^:static ^:final CHCertificateAuthoritiesConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_CERTIFICATE_AUTHORITIES))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Ignore unavailable certificate_authorities extension"))
+            (let [spec (CertificateAuthoritiesSpec. shc buffer)]
+              (try
+                (set! (.-peerSupportedAuthorities shc) (.getAuthorities spec))
+                (catch IllegalArgumentException iae
+                  (.fatal
+                    (.-conContext shc)
+                    Alert/DECODE_ERROR
+                    "The distinguished names of the peer's certificate authorities could not be parsed"
+                    iae)))
+              (.put (.-handshakeExtensions shc) SSLExtension/CH_CERTIFICATE_AUTHORITIES spec))))))
+
+  (defclass ^:private ^:static ^:final CRCertificateAuthoritiesProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/CR_CERTIFICATE_AUTHORITIES))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Ignore unavailable certificate_authorities extension"))
+              nil)
+            (let [caCerts (.getAcceptedIssuers (.getX509TrustManager (.-sslContext shc)))]
+              (if (== (alength caCerts) 0)
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "No available certificate authorities"))
+                    nil)
+                  (let [^{:tag (List byte/1)} encodedCAs
+                          (CertificateAuthoritiesSpec/getEncodedAuthorities caCerts)]
+                    (if (.isEmpty encodedCAs)
+                        (do
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/warning
+                              "Too many certificate authorities to use the certificate_authorities extension"))
+                          nil)
+                        (let [spec (CertificateAuthoritiesSpec. encodedCAs)
+                              ^:mutable ^int vectorLen 0]
+                          (for-each [^byte/1 encoded (.-authorities spec)]
+                            (set! vectorLen
+                                  (unchecked-add-int
+                                    vectorLen
+                                    (unchecked-add-int (alength encoded) 2))))
+                          (let [extData (new byte/1 (unchecked-add-int vectorLen 2))
+                                m (ByteBuffer/wrap extData)]
+                            (Record/putInt16 m vectorLen)
+                            (for-each [^byte/1 encoded (.-authorities spec)]
+                              (Record/putBytes16 m encoded))
+                            (.put (.-handshakeExtensions shc)
+                                  SSLExtension/CR_CERTIFICATE_AUTHORITIES
+                                  spec)
+                            extData))))))))))
+
+  (defclass ^:private ^:static ^:final CRCertificateAuthoritiesConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig chc) SSLExtension/CR_CERTIFICATE_AUTHORITIES))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Ignore unavailable certificate_authorities extension"))
+            (let [spec (CertificateAuthoritiesSpec. chc buffer)]
+              (try
+                (set! (.-peerSupportedAuthorities chc) (.getAuthorities spec))
+                (catch IllegalArgumentException iae
+                  (.fatal
+                    (.-conContext chc)
+                    Alert/DECODE_ERROR
+                    "The distinguished names of the peer's certificate authorities could not be parsed"
+                    iae)))
+              (.put (.-handshakeExtensions chc) SSLExtension/CR_CERTIFICATE_AUTHORITIES spec)))))))

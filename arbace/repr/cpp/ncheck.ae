@@ -1,0 +1,132 @@
+(ns arbace.repr.cpp.ncheck
+  "repr/cpp's native check (doc/cpp/NATIVE.md, \"The check\"; CX11; bin/repr-cpp native-check, its driver
+  bin/lib/repr-cpp/native-check): each file of a list read twice, from the oracle's dump (tools/cxxdump, run by the
+  driver into WORK/dump/) and by the native parser, and the two units' forms compared item by item, each form as
+  repr/c's layout writes it on one line (its metadata, :line left out). A file's result: `same` (every item equal),
+  `differ` (with the items that differ, WORK/diff/NAME.txt), `native-refused` / `clang-refused` (the converter
+  refused a tree), `clang-rejects` (the oracle rejected the file: nothing to compare), `crash`. The native read's
+  declines (the constructs it writes as their text) are counted beside."
+  (:require [arbace.repr.cpp :as rc]
+            [arbace.repr.c.layout :as layout]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+(defn- spit-mk [^String path ^String s]
+  (let [f (java.io.File. path)] (.mkdirs (.getParentFile f)) (spit f s)))
+
+(defn- status [^String p] (let [f (java.io.File. p)] (when (.exists f) (str/trim (slurp f)))))
+
+(defn- items [rd] (mapv layout/form-str (:forms rd)))
+
+(defn- differing-items
+  "The check's comparison of the clang read's items A and the native read's B: the [index clang native] of each that differs."
+  [a b]
+  (vec (for [i (range (max (count a) (count b))) :let [x (get a i) y (get b i)] :when (not= x y)] [i x y])))
+
+(defn compare-file
+  "One file: [name result clang-items native-items differing declines detail]."
+  [^String work ^String nm ^String std ^String cargs ^String path]
+  (let [dump (str work "/dump/" nm ".edn")
+        st (status (str work "/dump/" nm ".status"))
+        args (vec (remove str/blank? (str/split (or cargs "") #"\s+")))]
+    (try
+      (let [t0 (System/nanoTime)
+            n (rc/read-cpp-native path nm std args)
+            secs (/ (- (System/nanoTime) t0) 1e9)
+            c (when (= st "0") (rc/read-cpp dump path nm std))
+            dl (or (get-in n [:native :declines]) 0)
+            why (pr-str (get-in n [:native :reasons]))]
+        (cond
+          (not= st "0") [nm "clang-rejects" 0 (count (:forms n)) 0 dl (str "cxxdump " st)]
+          (:refused c) [nm "clang-refused" 0 0 0 dl (str (:refused c))]
+          (:refused n) [nm "native-refused" (count (:forms c)) 0 0 dl (str (:refused n) ": " (:message n))]
+          :else
+          (let [a (items c) b (items n)
+                bad (differing-items a b)]
+            (when (seq bad)
+              (spit-mk (str work "/diff/" nm ".txt")
+                       (str/join (for [[i x y] bad] (str "item " i "\n  clang:  " x "\n  native: " y "\n")))))
+            (spit-mk (str work "/native/" nm ".ae") (rc/unit-text n))
+            [nm (if (empty? bad) "same" "differ") (count a) (count b) (count bad) dl (format "%.2fs %s" (double secs) why)])))
+      (catch Throwable e
+        [nm "crash" 0 0 0 0 (str/replace (str e) #"[\t\n]" " ")]))))
+
+(def known-file "test/repr/cpp/native-known.edn")
+
+(defn- judge-controls
+  "The negative controls of the check (GT9, doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; CONTROLS-FILE, test/repr/cpp/
+  native-controls.edn: `{:id :subject :reference}` maps, names as the list gives them): each is a crossed pair of two files of the run, both
+  :same in RS, the SUBJECT read by the native parser and judged by the check's own comparison (`differing-items`) against the clang read of
+  the REFERENCE (its dump, WORK/dump), which must differ (`control ID fails as it must`); equal items are `control passed`, a read of
+  either that is refused or crashes `control not judged`; both fail. A control whose files the run lacks is left. ROWS: the list's rows.
+  Returns the number that failed."
+  [^String controls-file ^String work rs rows]
+  (if-not (and controls-file (.exists (java.io.File. controls-file)))
+    0
+    (let [res (into {} (map (fn [r] [(first r) (second r)]) rs))
+          row (into {} (map (fn [[nm std g path cargs :as r]] [nm r]) rows))
+          bad (atom 0)]
+      (doseq [{:keys [id subject reference]} (read-string (slurp controls-file))]
+        (cond
+          (not (and (contains? res subject) (contains? res reference)))
+          (println (str "control " id " left: " (if (contains? res subject) reference subject) " is not in the run"))
+          (not (and (= "same" (res subject)) (= "same" (res reference))))
+          (println (str "control " id " left: " (if (= "same" (res subject)) reference subject) " is not " "\"same\"" " in the check itself"))
+          :else
+          (let [[_ sstd _ spath scargs] (row subject) [_ rstd _ rpath _] (row reference)
+                args (vec (remove str/blank? (str/split (or scargs "") #"\s+")))
+                n (try (rc/read-cpp-native spath subject sstd args) (catch Throwable e {:refused :crash :message (str e)}))
+                c (try (rc/read-cpp (str work "/dump/" reference ".edn") rpath reference rstd) (catch Throwable e {:refused :crash :message (str e)}))]
+            (cond (or (:refused n) (:refused c))
+                  (do (swap! bad inc) (println (str "control not judged: " id " (a read of " subject " or " reference " is refused)")))
+                  (empty? (differing-items (items c) (items n)))
+                  (do (swap! bad inc) (println (str "control passed: " id " (" subject " read natively against the clang read of " reference ") has no item that differs")))
+                  :else (println (str "control " id " fails as it must (" subject " read natively against the clang read of " reference ": "
+                                      (count (differing-items (items c) (items n))) " items differ)"))))))
+      @bad)))
+
+(defn- judge
+  "The results against the known file: [failing improved], a result's name qualified by its corpus `corpus`."
+  [rs ^String corpus known]
+  (let [q #(str corpus "/" %)]
+    [(vec (for [r rs :let [nm (q (first r)) st (second r)]
+                :when (and (not (#{"same" "clang-rejects"} st)) (not (contains? known nm)))]
+            (str nm " " st)))
+     (vec (for [r rs :let [nm (q (first r))] :when (and (= "same" (second r)) (contains? known nm))] nm))]))
+
+(defn run
+  "Every line of LIST (NAME STD GARGS PATH CARGS, tab-separated; a # line a comment, `#list KEY` its corpus) compared:
+  WORK/results.tsv and a summary line; judged against the known file (a difference must be listed with its class).
+  0 when no file crashed and none fails the judgment and no negative control (CONTROLS-FILE) passes."
+  [^String list ^String work & [controls-file]]
+  (let [key (some #(second (re-find #"^#list (\S+)" %)) (str/split-lines (slurp list)))
+        corpus (cond (nil? key) "samples" (str/starts-with? key "native-gxx") "gxx-dg" :else key)
+        rows (for [l (str/split-lines (slurp list)) :when (and (seq l) (not (str/starts-with? l "#")))] (str/split l #"\t" -1))
+        threads (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        t0 (System/nanoTime)
+        futs (mapv (fn [[nm std _ path cargs]] (.submit pool ^Callable (fn [] (compare-file work nm std cargs path)))) rows)
+        rs (mapv #(.get ^Future %) futs)
+        _ (.shutdown pool)
+        by (frequencies (map second rs))
+        items-all (reduce + (map #(nth % 2) (filter #(#{"same" "differ"} (second %)) rs)))
+        items-bad (reduce + (map #(nth % 4) rs))
+        declines (reduce + (map #(nth % 5) rs))]
+    (spit (str work "/results.tsv") (str/join (map #(str (str/join "\t" %) "\n") rs)))
+    (println (str (count rs) " files: " (pr-str (into (sorted-map) by)) "; items " (- items-all items-bad) " of " items-all
+                  " equal; " declines " native declines; " (Math/round (double (/ (- (System/nanoTime) t0) 1e9))) " s"))
+    (let [known (let [f (java.io.File. ^String known-file)] (if (.exists f) (read-string (slurp f)) {}))
+          [bad better] (judge rs corpus known)
+          classes (frequencies (keep #(get known (str corpus "/" (first %))) (filter #(= "differ" (second %)) rs)))]
+      (when (seq classes) (println (str "known: " (pr-str (into (sorted-map) classes)))))
+      (when (seq better) (println (str (count better) " known files now the same: " (str/join " " better))))
+      (when (seq bad) (println (str (count bad) " failing: " (str/join "; " bad))))
+      (let [ctl (judge-controls controls-file work rs rows)]
+        (if (or (pos? (long (get by "crash" 0))) (seq bad) (pos? ctl)) 1 0)))))
+
+(defn -main [cmd & args]
+  (case cmd
+    "run" (System/exit (int (apply run args)))
+    (do (println "ncheck: run LIST WORK [CONTROLS]") (System/exit 2))))

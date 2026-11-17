@@ -1,0 +1,96 @@
+#!/bin/bash
+# repr/rust's Unicode tables (doc/rust/NATIVE-READER.md, "Unicode"): arbace/repr/rust/unicode.ae, the
+# character classes of rustc 1.99.1's rustc_lexer (XID_Start, XID_Continue, is_emoji_char), generated
+# from the tables of the two crates it links, unicode-ident 1.0.24 and unicode-properties 0.1.4, which
+# rustc's Cargo.lock pins and tools/rsdump/unicode-crates.sha256 repeats. The .crate files come, checked
+# by their SHA-256, from REPR_RUST_CRATES (a directory), else the host's Cargo cache, else
+# static.crates.io, into .tmp/repr-rust/unicode/; no other source is read.
+#
+#   bin/rust-unicode generate   write arbace/repr/rust/unicode.ae
+#   bin/rust-unicode check      generate into .tmp/ and compare with the committed file (fails if they differ);
+#                               with the rust-src apk extracted (bin/repr-rust corpus fetch) also checks
+#                               the pins against its Cargo.lock
+#   bin/rust-unicode probe [all]
+#                               the native lexer's character classes against rustc's (test/rust/unicode_probe.ae):
+#                               the characters at the tables' boundaries (3,774; `all`: every code point of planes 0-3 and
+#                               14, about 20 minutes: rustc reports an error per unassigned character) as identifiers' first and
+#                               later characters, rustc -Z parse-crate-root-only (RUSTC_BOOTSTRAP=1, the pinned
+#                               rustc) against the native lexer line by line, and the identifiers of the
+#                               probe read by both readers (bin/repr-rust native-check, modes lines and full)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+work=$root/.tmp/repr-rust/unicode
+pins=$root/tools/rsdump/unicode-crates.sha256
+out=$root/arbace/repr/rust/unicode.ae
+mode=${1:-}
+case $mode in generate|check|probe) ;; *) sed -n '2,/^set /p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;; esac
+
+if [ "$mode" = probe ]; then
+  all=${2:-boundaries}; p=$root/.tmp/rust-unicode/probe-$all
+  want=$(sed -n 's/^version //p' "$root/tools/rsdump/RUSTC_VERSION")
+  case $(rustc --version) in "rustc $want "*) ;; *) echo "rust-unicode: the host's rustc is not $want (tools/rsdump/RUSTC_VERSION)" >&2; exit 1 ;; esac
+  rm -rf "$p"; mkdir -p "$p"
+  arbace_tool "$root/test/rust/unicode_probe.ae" write "$p" "$all"
+  for f in start cont; do
+    (cd "$p" && RUSTC_BOOTSTRAP=1 rustc -Z parse-crate-root-only --error-format=short --edition 2024 $f.rs > $f.err 2>&1) || true
+  done
+  arbace_tool "$root/test/rust/unicode_probe.ae" compare "$p" "$p/start.err" "$p/cont.err"
+  "$root/bin/repr-rust" native-check "$p/ident.rs"
+  "$root/bin/repr-rust" native-check --full "$p/ident.rs"
+  exit 0
+fi
+
+mkdir -p "$work"
+shas=()
+while read -r sha f; do
+  [ -n "$f" ] || continue
+  c=${f%.crate}
+  if [ ! -f "$work/$f" ] || [ "$(sha256sum < "$work/$f" | cut -c1-64)" != "$sha" ]; then
+    rm -f "$work/$f"; got=""
+    for d in ${REPR_RUST_CRATES:-} "${CARGO_HOME:-$HOME/.cargo}"/registry/cache/*; do
+      if [ -f "$d/$f" ] && [ "$(sha256sum < "$d/$f" | cut -c1-64)" = "$sha" ]; then
+        cp "$d/$f" "$work/$f.part.$$" && mv "$work/$f.part.$$" "$work/$f"; got=$d; break
+      fi
+    done
+    if [ -z "$got" ]; then
+      n=${c%-*}
+      echo "== rust-unicode: fetching $f from crates.io" >&2
+      curl -fsSL -o "$work/$f.part.$$" "https://static.crates.io/crates/$n/$f" && mv "$work/$f.part.$$" "$work/$f" ||
+        { rm -f "$work/$f.part.$$"; echo "rust-unicode: could not fetch $f (REPR_RUST_CRATES names a directory holding it)" >&2; exit 1; }
+    fi
+    [ "$(sha256sum < "$work/$f" | cut -c1-64)" = "$sha" ] ||
+      { echo "rust-unicode: $work/$f: SHA-256 differs from the pin $sha" >&2; rm -f "$work/$f"; exit 1; }
+  fi
+  rm -rf "${work:?}/$c"
+  tar -xzf "$work/$f" -C "$work" "$c/src/tables.rs"
+  shas+=("$sha")
+done < "$pins"
+
+# the pins against rustc's own Cargo.lock, when its sources are at hand
+lock=
+for l in ${REPR_RUST_CARGO_LOCK:-} "$root/.tmp/repr-rust/apks/rust-src/usr/src/rustc/Cargo.lock" "$root"/../../../.tmp/repr-rust/apks/rust-src/usr/src/rustc/Cargo.lock; do
+  [ -n "$l" ] && [ -f "$l" ] && { lock=$l; break; }
+done
+if [ -n "$lock" ]; then
+  while read -r sha f; do
+    c=${f%.crate}; n=${c%-*}; v=${c##*-}
+    got=$(awk -v n="$n" -v v="$v" '$1=="name"&&$3=="\""n"\""{f=1;next} f&&$1=="version"{ok=($3=="\""v"\"")} f&&$1=="checksum"{if(ok){gsub(/"/,"",$3);print $3;exit} f=0}' "$lock")
+    [ "$got" = "$sha" ] || { echo "rust-unicode: $f: rustc's Cargo.lock ($lock) has '$got', the pin $sha" >&2; exit 1; }
+  done < "$pins"
+  echo "rust-unicode: the pins match rustc's Cargo.lock" >&2
+else
+  echo "rust-unicode: no rustc Cargo.lock at hand (bin/repr-rust corpus fetch): the pins not checked against it" >&2
+fi
+
+dest=$out
+[ "$mode" = check ] && { mkdir -p "$root/.tmp/rust-unicode"; dest=$root/.tmp/rust-unicode/unicode.ae; }
+arbace_tool "$root/test/rust/unicode_gen.ae" "$work/unicode-ident-1.0.24/src/tables.rs" "$work/unicode-properties-0.1.4/src/tables.rs" \
+  "${shas[0]}" "${shas[1]}" > "$dest.part.$$"
+mv "$dest.part.$$" "$dest"
+if [ "$mode" = check ]; then
+  cmp "$dest" "$out" && echo "rust-unicode: $(basename "$out") is what the tables generate"
+else
+  echo "rust-unicode: wrote ${out#"$root"/}"
+fi

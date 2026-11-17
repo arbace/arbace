@@ -1,0 +1,208 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/BufferingSubscriber.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.net.http HttpResponse$BodySubscriber)
+        '(java.nio ByteBuffer)
+        '(java.util ArrayList Collections List ListIterator Objects)
+        '(java.util.concurrent CompletionStage Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicBoolean)
+        '(java.util.function Predicate ToLongFunction)
+        '(jdk.internal.net.http.common Demand
+                                       SequentialScheduler
+                                       SequentialScheduler$CompleteRestartableTask))
+
+(defclass ^:public BufferingSubscriber
+  :implements [(ResponseSubscribers$TrustedSubscriber T)]
+  :type-params [T]
+
+  (field ^:private ^:final ^{:tag (HttpResponse$BodySubscriber T)} downstreamSubscriber)
+
+  (field ^:private ^:final ^int bufferSize)
+
+  (field ^:private ^:volatile ^Flow$Subscription subscription)
+
+  (field ^:private ^:volatile ^DownstreamSubscription downstreamSubscription)
+
+  (field ^:private ^:final buffersLock (Object.))
+
+  (field ^:private ^{:tag (ArrayList ByteBuffer)} internalBuffers)
+
+  (field ^:private ^long accumulatedBytes)
+
+  (field ^:private ^:volatile ^Throwable throwable)
+
+  (field ^:static ^:final ^int UNSUBSCRIBED 0x01)
+
+  (field ^:static ^:final ^int ACTIVE 0x02)
+
+  (field ^:static ^:final ^int ERROR 0x04)
+
+  (field ^:static ^:final ^int CANCELLED 0x08)
+
+  (field ^:static ^:final ^int COMPLETE 0x10)
+
+  (field ^:private ^:volatile ^int state)
+
+  (constructor ^:public [this ^{:tag (HttpResponse$BodySubscriber T)} downstreamSubscriber
+                         ^int bufferSize]
+    (set! (.-downstreamSubscriber this)
+          (cast HttpResponse$BodySubscriber (Objects/requireNonNull downstreamSubscriber)))
+    (set! (.-bufferSize this) bufferSize)
+    (locking buffersLock (set! internalBuffers (ArrayList.)))
+    (set! state UNSUBSCRIBED))
+
+  (method ^:private ^:static ^:final remaining ^long [^{:tag (List ByteBuffer)} buffers]
+    (.sum (.mapToLong (.stream buffers)
+                      (method-ref ToLongFunction [ByteBuffer] ByteBuffer/.remaining))))
+
+  (method ^:public needsExecutor ^boolean [this]
+    (ResponseSubscribers$TrustedSubscriber/needsExecutor downstreamSubscriber))
+
+  (method ^:private ^:final hasEnoughAccumulatedBytes ^boolean [this]
+    (java-assert (Thread/holdsLock buffersLock))
+    (or (>= accumulatedBytes bufferSize) (and (== state COMPLETE) (> accumulatedBytes 0))))
+
+  (method ^:private fromInternalBuffers ^{:tag (List ByteBuffer)} [this]
+    (java-assert (Thread/holdsLock buffersLock))
+    (let [^:mutable leftToFill bufferSize
+          state (.-state this)]
+      (java-assert (if (or (== state ACTIVE) (== state CANCELLED))
+                       (>= accumulatedBytes leftToFill)
+                       true))
+      (let [^{:tag (List ByteBuffer)} dsts (ArrayList.)
+            ^{:tag (ListIterator ByteBuffer)} itr (.listIterator internalBuffers)]
+        (while (.hasNext itr)
+          (let [^:mutable b (cast ByteBuffer (.next itr))]
+            (if (<= (.remaining b) leftToFill)
+                (do
+                  (.remove itr)
+                  (when-not (== (.position b) 0) (set! b (.slice b)))
+                  (.add dsts b)
+                  (set! leftToFill (unchecked-subtract-int leftToFill (.remaining b)))
+                  (set! accumulatedBytes (unchecked-subtract accumulatedBytes (.remaining b)))
+                  (when (== leftToFill 0) (break)))
+                (let [prevLimit (.limit b)]
+                  (.limit b (unchecked-add-int (.position b) leftToFill))
+                  (let [slice (.slice b)]
+                    (.add dsts slice)
+                    (.limit b prevLimit)
+                    (.position b (unchecked-add-int (.position b) leftToFill))
+                    (set! accumulatedBytes (unchecked-subtract accumulatedBytes leftToFill))
+                    (set! leftToFill 0)
+                    (break))))))
+        (java-assert (if (or (== state ACTIVE) (== state CANCELLED))
+                         (== leftToFill 0)
+                         (== state COMPLETE)))
+        (java-assert (if (or (== state ACTIVE) (== state CANCELLED))
+                         (== (BufferingSubscriber/remaining dsts) bufferSize)
+                         (== state COMPLETE)))
+        (java-assert (>= accumulatedBytes 0))
+        (java-assert (.noneMatch (.stream dsts)
+                                 (lambda Predicate ^boolean [^ByteBuffer b]
+                                   (not (== (.position b) 0)))))
+        (Collections/unmodifiableList dsts))))
+
+  (defclass ^:private DownstreamSubscription
+    :implements [Flow$Subscription]
+
+    (field ^:private ^:final ^AtomicBoolean cancelled (AtomicBoolean.))
+
+    (field ^:private ^:final ^Demand demand (Demand.))
+
+    (field ^:private ^:volatile ^boolean illegalArg)
+
+    (method ^:public request ^void [this ^long n]
+      (when-not (or (.get cancelled) illegalArg)
+        (if (<= n 0)
+            (do (set! illegalArg true) (.request subscription n))
+            (do (.increase demand n) (.pushDemanded this)))))
+
+    (field ^:private ^:final ^SequentialScheduler pushDemandedScheduler
+      (SequentialScheduler. (PushDemandedTask.)))
+
+    (method pushDemanded ^void [this]
+      (when-not (.get cancelled) (.runOrSchedule pushDemandedScheduler)))
+
+    (defclass PushDemandedTask
+      :extends SequentialScheduler$CompleteRestartableTask
+
+      (method ^:public run ^void [this]
+        (try
+          (let [t throwable]
+            (when (some? t)
+              (.stop pushDemandedScheduler)
+              (.onError downstreamSubscriber t)
+              (return))
+            (while true
+              (let [^:mutable ^{:tag (List ByteBuffer)} item nil]
+                (locking buffersLock
+                  (when (.get cancelled) (return))
+                  (when-not (.hasEnoughAccumulatedBytes BufferingSubscriber/this) (break))
+                  (when-not (.tryDecrement demand) (break))
+                  (set! item (.fromInternalBuffers BufferingSubscriber/this)))
+                (java-assert (some? item))
+                (.onNext downstreamSubscriber item)))
+            (when (.get cancelled) (return))
+            (let [^:mutable ^boolean complete false]
+              (locking buffersLock
+                (set! complete (and (== state COMPLETE) (.isEmpty internalBuffers))))
+              (when complete
+                (java-assert (.isEmpty internalBuffers))
+                (.stop pushDemandedScheduler)
+                (.onComplete downstreamSubscriber)
+                (return))))
+          (catch Throwable t (.cancel DownstreamSubscription/this) (throw t)))
+        (let [^:mutable requestMore false]
+          (locking buffersLock
+            (when (and (not (.hasEnoughAccumulatedBytes BufferingSubscriber/this))
+                       (not (.isFulfilled demand)))
+              (set! requestMore true)))
+          (when requestMore (.request subscription 1)))))
+
+    (method ^:public cancel ^void [this]
+      (when-not (.compareAndExchange cancelled false true)
+        (set! state CANCELLED)
+        (.cancel subscription)
+        (.stop pushDemandedScheduler))))
+
+  (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+    (Objects/requireNonNull subscription)
+    (if (some? (.-subscription this))
+        (.cancel subscription)
+        (let [s (.-state this)]
+          (java-assert (== s UNSUBSCRIBED))
+          (set! state ACTIVE)
+          (set! (.-subscription this) subscription)
+          (set! downstreamSubscription (DownstreamSubscription.))
+          (.onSubscribe downstreamSubscriber downstreamSubscription))))
+
+  (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+    (Objects/requireNonNull item)
+    (let [s state]
+      (when-not (== s CANCELLED)
+        (when-not (== s ACTIVE) (throw (InternalError. "onNext on inactive subscriber")))
+        (locking buffersLock
+          (.addAll internalBuffers item)
+          (set! accumulatedBytes
+                (unchecked-add accumulatedBytes (BufferingSubscriber/remaining item))))
+        (.pushDemanded downstreamSubscription))))
+
+  (method ^:public onError ^void [this ^Throwable incomingThrowable]
+    (Objects/requireNonNull incomingThrowable)
+    (let [s state]
+      (java-assert (== s ACTIVE) (java-str "Expected ACTIVE, got:" s))
+      (set! state ERROR)
+      (let [t (.-throwable this)]
+        (java-assert (nil? t) (java-str "Expected null, got:" t))
+        (set! (.-throwable this) incomingThrowable)
+        (.pushDemanded downstreamSubscription))))
+
+  (method ^:public onComplete ^void [this]
+    (let [s state]
+      (java-assert (== s ACTIVE) (java-str "Expected ACTIVE, got:" s))
+      (set! state COMPLETE)
+      (.pushDemanded downstreamSubscription)))
+
+  (method ^:public getBody ^{:tag (CompletionStage T)} [this]
+    (.getBody downstreamSubscriber)))

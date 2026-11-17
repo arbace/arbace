@@ -1,0 +1,46 @@
+(in-ns 'go.arbace.oi) (go/file "ext_capi.go" :imports [[os "os"] [syscall "syscall"] [time "time"]])
+
+;; The C API's hooks (doc/ocaml/OCAML-SURVEY.md, "As built: the C API on ci"): a program's own C stubs run by ci beside oi
+;; (go/arbace/oicapi, bin/oi's OI_CSTUBS): an external no file of oi's registers is the stubs' function of its name when
+;; they define one, and a bigarray crosses the boundary through its parts.
+
+(go/var ^{:tag (func [string int] [Ext]) :doc "ExternalFallback, when set (go/arbace/oicapi), is the implementation of an external oi does not implement:\nthe C function of that name a program's stubs define, called with nargs arguments; nil when they define none.\n"}
+  ExternalFallback)
+
+(go/func BigarrayParts "BigarrayParts is a bigarray's kind (bigarray.h's), layout (0 C, 1 Fortran), dimensions and elements (each as the\nkind's Value: a float, an int, an int32, an int64, a Nativeint, a complex's two-float FloatArray); ok is false for\nanother value. The elements are the array's own: a store into the slice is a store into the array.\n"
+  [^Value v] :results [^int kind ^int layout ^{:tag (slice int)} dims ^{:tag (slice Value)} data ^bool ok]
+  (when [(values c isc) (assert (* Custom) v)] (and isc (== (.-Name c) "_bigarr02"))
+    (when [(values b isb) (assert (* bigarray) (.-V c))] isb
+      (return (.-kind b) (.-layout b) (.-dims b) (.-data b) true)))
+  (return 0 0 nil nil false))
+
+(go/func NewBigarray "NewBigarray is a bigarray of its parts (BigarrayParts').\n"
+  ^Value [^int kind ^int layout ^{:tag (slice int)} dims ^{:tag (slice Value)} data]
+  (addr (lit Custom :Name "_bigarr02" :V (addr (lit bigarray :kind kind :layout layout :dims dims :data data)))))
+
+(go/method ApplyCallback "ApplyCallback is a C stub's callback (caml_callbackN_exn): f applied to args on a stack of no effect handlers, as\nOCaml 5 runs a callback on a fresh fiber: an effect it performs and does not handle is Effect.Unhandled at the perform.\n"
+  ^Value [^{:tag (* Thread)} th ^Value f ^{:tag (slice Value)} args]
+  (let [fb (.-fiber th)]
+    (set! (.-fiber th) nil)
+    (defer ((fn [] (set! (.-fiber th) fb))))
+    (.ApplyN th f args)))
+
+(go/var ^{:tag (func [(* Custom)] [(slice byte) uint64 uint64 bool]) :doc "CustomSerialize, when set (go/arbace/oicapi), is a C stub's custom block's serialization: its bytes and the sizes its\noperations' serialize gives (32-bit and 64-bit), ok false for a block without one.\n"}
+  CustomSerialize)
+
+(go/var ^{:tag (func [string (slice byte) uint64] [Value int int bool]) :doc "CustomDeserialize, when set (go/arbace/oicapi), is the deserialization of a custom block of the C operations registered\nunder an identifier: the block over the bytes (expected bytes reserved for its data), the size its deserialize returned,\nthe bytes it read, ok false when no operations of that identifier are registered.\n"}
+  CustomDeserialize)
+
+(go/func SignalProcess "SignalProcess is a C stub's kill(pid, sig) (raise: pid the process's own): the host's kill, and a signal sent to the\nprocess itself and caught by oi (a handler installed) waited for until os/signal records it, as caml_unix_kill does, so it\nis pending when the stub returns; its handler runs at the next safe point, as OCaml's after an external returns.\n"
+  ^error [^int pid ^int sig]
+  (let [self (or (== pid 0) (== pid (os/Getpid)))
+        seen (conv uint64 0)]
+    (when (and (> sig 0) (< sig 64))
+      (set! seen (.Load (aget sigArrived sig))))
+    (when [err (syscall/Kill pid (conv syscall/Signal sig))] (!= err nil)
+      (return err))
+    (when (and self (> sig 0) (< sig 64) (!= (bit-and (.Load sigWatched) (sigBit sig)) 0))
+      (let [until (.Add (time/Now) time/Second)]
+        (while (and (== (.Load (aget sigArrived sig)) seen) (.Before (time/Now) until))
+          (time/Sleep (* 100 time/Microsecond)))))
+    nil))

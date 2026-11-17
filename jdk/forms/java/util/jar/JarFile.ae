@@ -6,12 +6,13 @@
         '(java.lang.ref SoftReference)
         '(java.security CodeSigner)
         '(java.security.cert Certificate)
-        '(java.util Enumeration Objects)
+        '(java.util Enumeration List Objects)
         '(java.util.function Function Predicate)
         '(java.util.stream Stream)
-        '(java.util.zip ZipEntry ZipFile)
+        '(java.util.zip ZipEntry ZipException ZipFile)
         '(jdk.internal.access JavaUtilZipFileAccess)
-        '(jdk.internal.jrt ZipAccess))
+        '(jdk.internal.jrt ZipAccess)
+        '(sun.security.util ManifestEntryVerifier SignatureFileVerifier))
 
 (defclass ^:public JarFile
   :extends ZipFile
@@ -27,6 +28,10 @@
   (field ^:private ^{:tag (SoftReference Manifest)} manRef)
 
   (field ^:private ^JarEntry manEntry)
+
+  (field ^:private ^JarVerifier jv)
+
+  (field ^:private ^boolean jvInitialized)
 
   (field ^:private ^boolean verify)
 
@@ -125,7 +130,13 @@
           (when (some? manEntry)
             (if verify
                 (let [b (.getBytes this manEntry)]
-                  (set! man (Manifest. (ByteArrayInputStream. b) (.getName this))))
+                  (when-not jvInitialized
+                    (cond
+                      (== (.getManifestNum JUZFA this) 1)
+                        (set! jv (JarVerifier. (.getName manEntry) b))
+                      (some? JarVerifier/debug)
+                        (.println JarVerifier/debug JarVerifier/MULTIPLE_MANIFEST_WARNING)))
+                  (set! man (Manifest. jv (ByteArrayInputStream. b) (.getName this))))
                 (with-resources [is (.getInputStream super manEntry)]
                   (set! man (Manifest. is (.getName this)))))
             (set! manRef (SoftReference. man)))))
@@ -206,9 +217,19 @@
         (when (some? man) (.getAttributes man (.getName super)))))
 
     (method ^:public getCertificates ^Certificate/1 [this]
+      (try
+        (.maybeInstantiateVerifier JarFile/this)
+        (catch IOException e (throw (RuntimeException. e))))
+      (when (and (nil? (.-certs this)) (some? jv))
+        (set! (.-certs this) (.getCerts jv (.realEntry this))))
       (when (some? (.-certs this)) (.clone (.-certs this))))
 
     (method ^:public getCodeSigners ^CodeSigner/1 [this]
+      (try
+        (.maybeInstantiateVerifier JarFile/this)
+        (catch IOException e (throw (RuntimeException. e))))
+      (when (and (nil? (.-signers this)) (some? jv))
+        (set! (.-signers this) (.getCodeSigners jv (.realEntry this))))
       (when (some? (.-signers this)) (.clone (.-signers this))))
 
     (method ^:public getRealName ^String [this] (.getName super))
@@ -227,10 +248,48 @@
       (set! basename name)
       this))
 
+  (method ^:private maybeInstantiateVerifier :throws [IOException] ^void [this]
+    (when-not (some? jv)
+      (when verify
+        (let [name (.getManifestName JUZFA this true)]
+          (if (some? name) (.getManifest this) (set! verify false))))))
+
+  (method ^:private initializeVerifier ^void [this]
+    (let [^:mutable ^ManifestEntryVerifier mev nil]
+      (try
+        (let [^{:tag (List String)} names (.getManifestAndSignatureRelatedFiles JUZFA this)]
+          (for-each [^String name names]
+            (let [e (.getJarEntry this name)
+                  ^:mutable ^byte/1 b nil]
+              (when (nil? e) (throw (JarException. "corrupted jar file")))
+              (when (nil? mev)
+                (set! mev
+                      (ManifestEntryVerifier. (.getManifestFromReference this) (.-manifestName jv))))
+              (if (.equalsIgnoreCase name MANIFEST_NAME)
+                  (set! b (.-manifestRawBytes jv))
+                  (set! b (.getBytes this e)))
+              (when (and (some? b) (> (alength b) 0))
+                (.beginEntry jv e mev)
+                (.update jv (alength b) b 0 (alength b) mev)
+                (.update jv -1 nil 0 0 mev)))))
+        (catch [IOException IllegalArgumentException] ex
+          (set! jv nil)
+          (set! verify false)
+          (when (some? JarVerifier/debug)
+            (.println JarVerifier/debug "jarfile parsing error!")
+            (.printStackTrace ex))))
+      (when (some? jv)
+        (.doneWithMeta jv)
+        (when (some? JarVerifier/debug) (.println JarVerifier/debug "done with meta!"))
+        (when (.nothingToVerify jv)
+          (when (some? JarVerifier/debug) (.println JarVerifier/debug "nothing to verify!"))
+          (set! jv nil)
+          (set! verify false)))))
+
   (method ^:private getBytes :throws [IOException] ^byte/1 [this ^ZipEntry ze]
     (with-resources [is (.getInputStream super ze)]
       (let [uncompressedSize (.getSize ze)]
-        (when (> uncompressedSize MAX_SIG_FILE_SIZE)
+        (when (> uncompressedSize SignatureFileVerifier/MAX_SIG_FILE_SIZE)
           (throw
             (IOException.
               (java-str
@@ -239,7 +298,7 @@
                 " for JarEntry "
                 (.getName ze)
                 ". Allowed max size: "
-                MAX_SIG_FILE_SIZE
+                SignatureFileVerifier/MAX_SIG_FILE_SIZE
                 " bytes. You can use the jdk.jar.maxSignatureFileSize system property to increase the default value."))))
         (let [len (unchecked-int uncompressedSize)
               ^:mutable ^int bytesRead 0
@@ -254,9 +313,28 @@
   (method ^:public ^:synchronized getInputStream :throws [IOException] ^InputStream [this
                                                                                      ^ZipEntry ze]
     (Objects/requireNonNull ze "ze")
-    (.getInputStream super ze))
+    (.maybeInstantiateVerifier this)
+    (if (nil? jv)
+        (.getInputStream super ze)
+        (do
+          (when-not jvInitialized
+            (.initializeVerifier this)
+            (set! jvInitialized true)
+            (when (nil? jv) (return (.getInputStream super ze))))
+          (let [je (.verifiableEntry this ze)]
+            (when (some? je)
+              (JarVerifier$VerifierStream. (.getManifestFromReference this)
+                                           je
+                                           (.getInputStream super ze)
+                                           jv))))))
 
-  (field ^:private ^:static ^:final ^int MAX_SIG_FILE_SIZE (unchecked-multiply-int 8000 1024))
+  (method ^:private verifiableEntry :throws [ZipException] ^JarEntry [this ^:mutable ^ZipEntry ze]
+    (if (instance? JarFileEntry ze)
+        (.realEntry (cast JarFileEntry ze))
+        (let [entryName (.getName ze)]
+          (when (some? entryName)
+            (set! ze (.getJarEntry this entryName))
+            (if (instance? JarFileEntry ze) (.realEntry (cast JarFileEntry ze)) (cast JarEntry ze))))))
 
   (field ^:private ^:static ^:final ^byte/1 CLASSPATH_CHARS
     (new byte/1
@@ -397,6 +475,17 @@
                               (Boolean/parseBoolean (.getValue attr Attributes$Name/MULTI_RELEASE)))))))))
             (set! hasCheckedSpecialAttributes true))))))
 
-  (method ^:synchronized ensureInitialization ^void [this])
+  (method ^:synchronized ensureInitialization ^void [this]
+    (try (.maybeInstantiateVerifier this) (catch IOException e (throw (RuntimeException. e))))
+    (when-not (or (nil? jv) jvInitialized)
+      (let [outer (cast Boolean (.get IN_VERIFIER_INIT))]
+        (.set IN_VERIFIER_INIT Boolean/TRUE)
+        (try
+          (.initializeVerifier this)
+          (set! jvInitialized true)
+          (finally (.set IN_VERIFIER_INIT outer))))))
 
-  (method ^:static isInitializing ^boolean [] false))
+  (method ^:static isInitializing ^boolean []
+    (identical? (.get IN_VERIFIER_INIT) Boolean/TRUE))
+
+  (field ^:private ^:static ^:final ^{:tag (ThreadLocal Boolean)} IN_VERIFIER_INIT (ThreadLocal.)))

@@ -1,0 +1,352 @@
+;; Converted from jdk26u src/java.management.rmi/share/classes/javax/management/remote/rmi/RMIConnectorServer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.management.remote.rmi)
+
+(import '(com.sun.jmx.remote.security MBeanServerFileAccessController)
+        '(com.sun.jmx.remote.util ClassLogger EnvHelp)
+        '(java.io ByteArrayOutputStream IOException ObjectOutputStream)
+        '(java.net MalformedURLException)
+        '(java.rmi.server RMIClientSocketFactory RMIServerSocketFactory)
+        '(java.util Collections HashMap HashSet Hashtable Map Set)
+        '(javax.management InstanceNotFoundException MBeanServer)
+        '(javax.management.remote JMXConnector
+                                  JMXConnectorServer
+                                  JMXServiceURL
+                                  MBeanServerForwarder)
+        '(javax.naming InitialContext NamingException))
+
+(defclass ^:public RMIConnectorServer
+  :extends JMXConnectorServer
+
+  (field ^:public ^:static ^:final ^String JNDI_REBIND_ATTRIBUTE "jmx.remote.jndi.rebind")
+
+  (field ^:public ^:static ^:final ^String RMI_CLIENT_SOCKET_FACTORY_ATTRIBUTE
+    "jmx.remote.rmi.client.socket.factory")
+
+  (field ^:public ^:static ^:final ^String RMI_SERVER_SOCKET_FACTORY_ATTRIBUTE
+    "jmx.remote.rmi.server.socket.factory")
+
+  (field ^:public ^:static ^:final ^String CREDENTIALS_FILTER_PATTERN
+    "jmx.remote.rmi.server.credentials.filter.pattern")
+
+  (field ^:public ^:static ^:final ^String SERIAL_FILTER_PATTERN
+    "jmx.remote.rmi.server.serial.filter.pattern")
+
+  (constructor :throws [IOException] ^:public [this ^JMXServiceURL url
+                                               ^{:tag (Map String ?)} environment]
+    (this. url environment (cast MBeanServer nil)))
+
+  (constructor :throws [IOException] ^:public [this ^JMXServiceURL url
+                                               ^{:tag (Map String ?)} environment
+                                               ^MBeanServer mbeanServer]
+    (this. url environment (cast RMIServerImpl nil) mbeanServer))
+
+  (constructor :throws [IOException] ^:public [this ^JMXServiceURL url
+                                               ^{:tag (Map String ?)} environment
+                                               ^RMIServerImpl rmiServerImpl ^MBeanServer mbeanServer]
+    (super. mbeanServer)
+    (when (nil? url) (throw (IllegalArgumentException. "Null JMXServiceURL")))
+    (when (nil? rmiServerImpl)
+      (let [prt (.getProtocol url)]
+        (when (or (nil? prt) (not (.equals prt "rmi")))
+          (let [msg (java-str "Invalid protocol type: " prt)] (throw (MalformedURLException. msg))))
+        (let [urlPath (.getURLPath url)]
+          (when (and (and (not (.isEmpty urlPath)) (not (.equals urlPath "/")))
+                     (not (.startsWith urlPath "/jndi/")))
+            (let [^:const msg "URL path must be empty or start with /jndi/"]
+              (throw (MalformedURLException. msg)))))))
+    (if (nil? environment)
+        (set! (.-attributes this) (Collections/emptyMap))
+        (do
+          (EnvHelp/checkAttributes environment)
+          (set! (.-attributes this) (Collections/unmodifiableMap environment))))
+    (set! (.-address this) url)
+    (set! (.-rmiServerImpl this) rmiServerImpl))
+
+  (method ^:public toJMXConnector :throws [IOException] ^JMXConnector [this
+                                                                       ^{:tag (Map String ?)} env]
+    (when-not (.isActive this) (throw (IllegalStateException. "Connector is not active")))
+    (let [^:mutable ^{:tag (Map String Object)} usemap (HashMap.
+                                                         ^Map (if (nil? (.-attributes this))
+                                                                  (Collections/emptyMap)
+                                                                  (.-attributes this)))]
+      (when (some? env) (EnvHelp/checkAttributes env) (.putAll usemap env))
+      (set! usemap (EnvHelp/filterAttributes usemap))
+      (let [stub (cast RMIServer (.toStub rmiServerImpl))] (RMIConnector. stub usemap))))
+
+  (method ^:public ^:synchronized start :throws [IOException] ^void [this]
+    (let [tracing (.traceOn logger)]
+      (if (== state STARTED)
+          (when tracing (.trace logger "start" "already started"))
+          (do
+            (when (== state STOPPED)
+              (when tracing (.trace logger "start" "already stopped"))
+              (throw (IOException. "The server has been stopped.")))
+            (when (nil? (.getMBeanServer this))
+              (throw (IllegalStateException.
+                       "This connector server is not attached to an MBean server")))
+            (when (some? attributes)
+              (let [accessFile (cast String (.get attributes "jmx.remote.x.access.file"))]
+                (when (some? accessFile)
+                  (let [^:mutable ^MBeanServerForwarder mbsf nil]
+                    (try
+                      (set! mbsf (MBeanServerFileAccessController. accessFile))
+                      (catch IOException e (throw (IllegalArgumentException. (.getMessage e) e))))
+                    (.setMBeanServerForwarder this mbsf)))))
+            (try
+              (when tracing (.trace logger "start" "setting default class loader"))
+              (set! defaultClassLoader
+                    (EnvHelp/resolveServerClassLoader attributes (.getMBeanServer this)))
+              (catch InstanceNotFoundException infc
+                (throw (IllegalArgumentException. (java-str "ClassLoader not found: " infc) infc))))
+            (when tracing (.trace logger "start" "setting RMIServer object"))
+            (let [^RMIServerImpl rmiServer (if (some? rmiServerImpl)
+                                               rmiServerImpl
+                                               (.newServer this))]
+              (.setMBeanServer rmiServer (.getMBeanServer this))
+              (.setDefaultClassLoader rmiServer defaultClassLoader)
+              (.setRMIConnectorServer rmiServer this)
+              (.export rmiServer)
+              (try
+                (when tracing (.trace logger "start" "getting RMIServer object to export"))
+                (let [objref (RMIConnectorServer/objectToBind rmiServer attributes)]
+                  (if (and (some? address) (.startsWith (.getURLPath address) "/jndi/"))
+                      (let [jndiUrl (.substring (.getURLPath address) 6)]
+                        (when tracing
+                          (.trace logger "start" (java-str "Using external directory: " jndiUrl)))
+                        (let [stringBoolean (cast String (.get attributes JNDI_REBIND_ATTRIBUTE))
+                              rebind (EnvHelp/computeBooleanFromString stringBoolean)]
+                          (when tracing
+                            (.trace logger
+                                    "start"
+                                    (java-str (java-str JNDI_REBIND_ATTRIBUTE "=") rebind)))
+                          (try
+                            (when tracing (.trace logger "start" (java-str "binding to " jndiUrl)))
+                            (let [^{:tag (Hashtable ? ?)} usemap (EnvHelp/mapToHashtable attributes)]
+                              (.bind this jndiUrl usemap objref rebind)
+                              (set! boundJndiUrl jndiUrl))
+                            (catch NamingException e
+                              (throw (RMIConnectorServer/newIOException
+                                       (java-str "Cannot bind to URL [" jndiUrl "]: " e)
+                                       e))))))
+                      (do
+                        (when tracing (.trace logger "start" "Encoding URL"))
+                        (.encodeStubInAddress this objref attributes)
+                        (when tracing
+                          (.trace logger "start" (java-str "Encoded URL: " (.-address this)))))))
+                (catch Exception e
+                  (try (.close rmiServer) (catch Exception x))
+                  (cond
+                    (instance? RuntimeException e) (throw (cast RuntimeException e))
+                    (instance? IOException e) (throw (cast IOException e))
+                    :else
+                      (throw (RMIConnectorServer/newIOException
+                               (java-str
+                                 "Got unexpected exception while starting the connector server: "
+                                 e)
+                               e)))))
+              (set! rmiServerImpl rmiServer)
+              (locking openedServers (.add openedServers this))
+              (set! state STARTED)
+              (when tracing
+                (.trace logger "start" (java-str "Connector Server Address = " address))
+                (.trace logger "start" "started.")))))))
+
+  (method ^:public stop :throws [IOException] ^void [this]
+    (let [tracing (.traceOn logger)]
+      (locking this
+        (cond
+          (== state STOPPED) (do (when tracing (.trace logger "stop" "already stopped.")) (return))
+          (== state CREATED) (when tracing (.trace logger "stop" "not started yet.")))
+        (when tracing (.trace logger "stop" "stopping."))
+        (set! state STOPPED))
+      (locking openedServers (.remove openedServers this))
+      (let [^:mutable ^IOException exception nil]
+        (when (some? rmiServerImpl)
+          (try
+            (when tracing (.trace logger "stop" "closing RMI server."))
+            (.close rmiServerImpl)
+            (catch IOException e
+              (when tracing (.trace logger "stop" (java-str "failed to close RMI server: " e)))
+              (when (.debugOn logger) (.debug logger "stop" e))
+              (set! exception e))))
+        (when (some? boundJndiUrl)
+          (try
+            (when tracing
+              (.trace logger "stop" (java-str "unbind from external directory: " boundJndiUrl)))
+            (let [^{:tag (Hashtable ? ?)} usemap (EnvHelp/mapToHashtable attributes)
+                  ctx (InitialContext. usemap)]
+              (.unbind ctx boundJndiUrl)
+              (.close ctx))
+            (catch NamingException e
+              (when tracing (.trace logger "stop" (java-str "failed to unbind RMI server: " e)))
+              (when (.debugOn logger) (.debug logger "stop" e))
+              (when (nil? exception)
+                (set! exception
+                      (RMIConnectorServer/newIOException (java-str "Cannot bind to URL: " e) e))))))
+        (when (some? exception) (throw exception))
+        (when tracing (.trace logger "stop" "stopped")))))
+
+  (method ^:public ^:synchronized isActive ^boolean [this]
+    (== state STARTED))
+
+  (method ^:public getAddress ^JMXServiceURL [this]
+    (when-not (not (.isActive this)) address))
+
+  (method ^:public getAttributes ^{:tag (Map String ?)} [this]
+    (let [^{:tag (Map String ?)} map (EnvHelp/filterAttributes attributes)]
+      (Collections/unmodifiableMap map)))
+
+  (method ^:public ^:synchronized setMBeanServerForwarder ^void [this ^MBeanServerForwarder mbsf]
+    (.setMBeanServerForwarder super mbsf)
+    (when (some? rmiServerImpl) (.setMBeanServer rmiServerImpl (.getMBeanServer this))))
+
+  (method ^:protected connectionOpened ^void [this ^String connectionId ^String message userData]
+    (.connectionOpened super connectionId message userData))
+
+  (method ^:protected connectionClosed ^void [this ^String connectionId ^String message userData]
+    (.connectionClosed super connectionId message userData))
+
+  (method ^:protected connectionFailed ^void [this ^String connectionId ^String message userData]
+    (.connectionFailed super connectionId message userData))
+
+  (method bind :throws [NamingException MalformedURLException] ^void [this ^String jndiUrl
+                                                                      ^{:tag (Hashtable ? ?)} attributes
+                                                                      ^RMIServer rmiServer
+                                                                      ^boolean rebind]
+    (let [ctx (InitialContext. attributes)]
+      (if rebind (.rebind ctx jndiUrl rmiServer) (.bind ctx jndiUrl rmiServer))
+      (.close ctx)))
+
+  (method newServer :throws [IOException] ^RMIServerImpl [this]
+    (let [^int port (if (nil? address) 0 (.getPort address))]
+      (RMIConnectorServer/newJRMPServer attributes port)))
+
+  (method ^:private encodeStubInAddress :throws [IOException] ^void [this ^RMIServer rmiServer
+                                                                     ^{:tag (Map String ?)} attributes]
+    (let [^:mutable ^String protocol nil
+          ^:mutable ^String host nil
+          ^:mutable ^int port 0]
+      (if (nil? address)
+          (do (set! protocol "rmi") (set! host nil) (set! port 0))
+          (do
+            (set! protocol (.getProtocol address))
+            (set! host (when-not (.isEmpty (.getHost address)) (.getHost address)))
+            (set! port (.getPort address))))
+      (let [urlPath (RMIConnectorServer/encodeStub rmiServer attributes)]
+        (set! address (JMXServiceURL. protocol host port urlPath)))))
+
+  (method ^:static encodeStub :throws [IOException] ^String [^RMIServer rmiServer
+                                                             ^{:tag (Map String ?)} env]
+    (java-str "/stub/" (RMIConnectorServer/encodeJRMPStub rmiServer env)))
+
+  (method ^:static encodeJRMPStub :throws [IOException] ^String [^RMIServer rmiServer
+                                                                 ^{:tag (Map String ?)} env]
+    (let [bout (ByteArrayOutputStream.)
+          oout (ObjectOutputStream. bout)]
+      (.writeObject oout rmiServer)
+      (.close oout)
+      (let [bytes (.toByteArray bout)] (RMIConnectorServer/byteArrayToBase64 bytes))))
+
+  (method ^:private ^:static objectToBind :throws [IOException] ^RMIServer [^RMIServerImpl rmiServer
+                                                                            ^{:tag (Map String ?)} env]
+    (cast RMIServer (.toStub rmiServer)))
+
+  (method ^:private ^:static newJRMPServer :throws [IOException] ^RMIServerImpl [^{:tag (Map String ?)} env
+                                                                                 ^int port]
+    (let [csf (cast RMIClientSocketFactory (.get env RMI_CLIENT_SOCKET_FACTORY_ATTRIBUTE))
+          ssf (cast RMIServerSocketFactory (.get env RMI_SERVER_SOCKET_FACTORY_ATTRIBUTE))]
+      (RMIJRMPServerImpl. port csf ssf env)))
+
+  (method ^:private ^:static byteArrayToBase64 ^String [^byte/1 a]
+    (let [aLen (alength a)
+          numFullGroups (unchecked-divide-int aLen 3)
+          numBytesInPartialGroup (unchecked-subtract-int
+                                   aLen
+                                   (unchecked-multiply-int 3 numFullGroups))
+          resultLen (unchecked-multiply-int 4 (unchecked-divide-int (unchecked-add-int aLen 2) 3))
+          result (StringBuilder. resultLen)
+          ^:mutable ^int inCursor 0]
+      (loop [^int i 0]
+        (when (< i numFullGroups)
+          (let [byte0 (bit-and-int (aget a
+                                         (let [old-1 inCursor]
+                                           (set! inCursor (unchecked-inc-int inCursor))
+                                           old-1))
+                                   0xff)
+                byte1 (bit-and-int (aget a
+                                         (let [old-2 inCursor]
+                                           (set! inCursor (unchecked-inc-int inCursor))
+                                           old-2))
+                                   0xff)
+                byte2 (bit-and-int (aget a
+                                         (let [old-3 inCursor]
+                                           (set! inCursor (unchecked-inc-int inCursor))
+                                           old-3))
+                                   0xff)]
+            (.append result (aget intToAlpha (bit-shift-right-int byte0 2)))
+            (.append result
+                     (aget intToAlpha
+                           (bit-or-int (bit-and-int (bit-shift-left-int byte0 4) 0x3f)
+                                       (bit-shift-right-int byte1 4))))
+            (.append result
+                     (aget intToAlpha
+                           (bit-or-int (bit-and-int (bit-shift-left-int byte1 2) 0x3f)
+                                       (bit-shift-right-int byte2 6))))
+            (.append result (aget intToAlpha (bit-and-int byte2 0x3f)))
+            (recur (unchecked-inc-int i)))))
+      (when-not (== numBytesInPartialGroup 0)
+        (let [byte0 (bit-and-int (aget a
+                                       (let [old-4 inCursor]
+                                         (set! inCursor (unchecked-inc-int inCursor))
+                                         old-4))
+                                 0xff)]
+          (.append result (aget intToAlpha (bit-shift-right-int byte0 2)))
+          (if (== numBytesInPartialGroup 1)
+              (do
+                (.append result (aget intToAlpha (bit-and-int (bit-shift-left-int byte0 4) 0x3f)))
+                (.append result "=="))
+              (let [byte1 (bit-and-int (aget a
+                                             (let [old-5 inCursor]
+                                               (set! inCursor (unchecked-inc-int inCursor))
+                                               old-5))
+                                       0xff)]
+                (.append result
+                         (aget intToAlpha
+                               (bit-or-int (bit-and-int (bit-shift-left-int byte0 4) 0x3f)
+                                           (bit-shift-right-int byte1 4))))
+                (.append result (aget intToAlpha (bit-and-int (bit-shift-left-int byte1 2) 0x3f)))
+                (.append result \=)))))
+      (.toString result)))
+
+  (field ^:private ^:static ^:final ^char/1 intToAlpha
+    (new char/1
+         [\A \B \C \D \E \F \G \H \I \J \K \L \M \N \O \P \Q \R \S \T \U \V \W \X \Y \Z \a \b \c \d
+          \e \f \g \h \i \j \k \l \m \n \o \p \q \r \s \t \u \v \w \x \y \z \0 \1 \2 \3 \4 \5 \6 \7
+          \8 \9 \+ \/]))
+
+  (method ^:private ^:static newIOException ^IOException [^String message ^Throwable cause]
+    (IOException. message cause))
+
+  (field ^:private ^:static ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.rmi" "RMIConnectorServer"))
+
+  (field ^:private ^JMXServiceURL address)
+
+  (field ^:private ^RMIServerImpl rmiServerImpl)
+
+  (field ^:private ^:final ^{:tag (Map String ?)} attributes)
+
+  (field ^:private ^ClassLoader defaultClassLoader nil)
+
+  (field ^:private ^String boundJndiUrl)
+
+  (field ^:private ^:static ^:final ^int CREATED 0)
+
+  (field ^:private ^:static ^:final ^int STARTED 1)
+
+  (field ^:private ^:static ^:final ^int STOPPED 2)
+
+  (field ^:private ^int state CREATED)
+
+  (field ^:private ^:static ^:final ^{:tag (Set RMIConnectorServer)} openedServers (HashSet.)))

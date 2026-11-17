@@ -3,6 +3,8 @@
 # bit-field's store clobbered the next field. test/cpp/samples/bitfields.cpp (i24, i40, i48, i56 and a masked i17) lowered,
 # run as the original (it needs no library: a minimal runtime).
 . "$(dirname "$0")/lib.bash"
+# ORS27: the lowered run is gcc's (CPPI_GCC=1; in toolchain.txt: gcc, the oracle tier's); bitfields.cpp's run on ci is cpp-check-essential's
+export CPPI_GCC=1
 fake_runtime "$t/rt" || die "fake runtime"
 printf 'samples/bitfields.cpp\tc++23\t\t%s\n' "$root/test/cpp/samples/bitfields.cpp" > "$t/list.tsv"
 "$root/bin/cppi" lower-check "$t/list.tsv" "$t/w" --runtime "$t/rt" > "$t/w.log" 2>&1; st=$?

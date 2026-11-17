@@ -15,7 +15,8 @@
             [arbace.go.check.types :as t]
             [arbace.go.check.const :as c]
             [arbace.go.check.env :as e]
-            [arbace.go.check.code :as code])
+            [arbace.go.check.code :as code]
+            [arbace.go.check.load :as load])
   (:import (java.io File)))
 
 (def dir (or (System/getProperty "goi.test.dir") "test/goi"))
@@ -126,3 +127,40 @@
             want (read-string (slurp (str dir "/checked/" (str/replace f #"\.ae$" ".edn"))))]
         (is (empty? errors) (pr-str errors))
         (is (= want trees))))))
+
+;;; Build constraints (go/build's goodOSArchFile, matchTag and shouldBuild; review 1111, #2)
+
+(deftest build-constraints
+  (let [cfg (fn [goos goarch] {:goos goos :goarch goarch})
+        incl? (fn [fname build goos goarch]
+                (let [c (cfg goos goarch)] (load/file-included? fname {:build build} c (load/tag-set c))))]
+    (testing "file names: GOOS android satisfies linux, illumos solaris, ios darwin; never the reverse"
+      (is (incl? "x_linux.go" nil "linux" "amd64"))
+      (is (not (incl? "x_android.go" nil "linux" "amd64")))
+      (is (incl? "x_android.go" nil "android" "arm64"))
+      (is (incl? "x_linux.go" nil "android" "arm64"))
+      (is (incl? "x_linux_arm64.go" nil "android" "arm64"))
+      (is (not (incl? "x_illumos.go" nil "solaris" "amd64")))
+      (is (incl? "x_solaris.go" nil "illumos" "amd64"))
+      (is (not (incl? "x_ios.go" nil "darwin" "arm64")))
+      (is (incl? "x_darwin_arm64.go" nil "ios" "arm64"))
+      (is (incl? "x_windows_test.go" nil "windows" "amd64"))
+      (is (not (incl? "x_windows_test.go" nil "linux" "amd64")))
+      (is (not (incl? "x_arm64.go" nil "linux" "amd64")))
+      (is (incl? "x_unix.go" nil "windows" "amd64"))      ; unix is no GOOS: no file-name constraint
+      (is (incl? "linux.go" nil "windows" "amd64"))        ; no underscore
+      (is (not (incl? "x_linux.pb.go" nil "windows" "amd64"))))  ; the name cut at its first dot
+    (testing "//go:build tags: android satisfies linux"
+      (is (incl? "a.go" ["//go:build linux"] "android" "arm64"))
+      (is (not (incl? "a.go" ["//go:build android"] "linux" "amd64"))))
+    (testing "// +build when no //go:build: space OR, comma AND, ! not, lines ANDed"
+      (is (not (incl? "a.go" ["// +build windows"] "linux" "amd64")))
+      (is (incl? "a.go" ["// +build windows linux"] "linux" "amd64"))
+      (is (not (incl? "a.go" ["// +build linux,arm64"] "linux" "amd64")))
+      (is (incl? "a.go" ["// +build linux,!arm64"] "linux" "amd64"))
+      (is (not (incl? "a.go" ["// +build linux" "// +build arm64"] "linux" "amd64")))
+      (is (not (incl? "a.go" ["// +build"] "linux" "amd64")))
+      (is (incl? "a.go" ["// +build !windows"] "linux" "amd64")))
+    (testing "a //go:build line wins over // +build lines"
+      (is (incl? "a.go" ["//go:build linux" "// +build windows"] "linux" "amd64"))
+      (is (not (incl? "a.go" ["//go:build windows" "// +build linux"] "linux" "amd64"))))))

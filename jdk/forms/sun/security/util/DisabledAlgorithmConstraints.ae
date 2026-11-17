@@ -1,0 +1,629 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/DisabledAlgorithmConstraints.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util)
+
+(import '(java.lang.ref SoftReference)
+        '(java.security AlgorithmParameters CryptoPrimitive Key)
+        '(java.security.cert CertPathValidatorException CertPathValidatorException$BasicReason)
+        '(java.security.interfaces ECKey)
+        '(java.security.spec InvalidParameterSpecException MGF1ParameterSpec PSSParameterSpec)
+        '(java.time DateTimeException Instant ZoneId ZonedDateTime)
+        '(java.util ArrayList
+                    Collection
+                    Collections
+                    HashMap
+                    HashSet
+                    List
+                    Locale
+                    Map
+                    Set
+                    StringTokenizer)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function Predicate)
+        '(java.util.regex Matcher Pattern)
+        '(sun.security.ssl SSLScope)
+        '(sun.security.validator Validator))
+
+(defclass ^:public DisabledAlgorithmConstraints
+  :extends AbstractAlgorithmConstraints
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:public ^:static ^:final ^String PROPERTY_CERTPATH_DISABLED_ALGS
+    "jdk.certpath.disabledAlgorithms")
+
+  (field ^:public ^:static ^:final ^String PROPERTY_SECURITY_LEGACY_ALGS
+    "jdk.security.legacyAlgorithms")
+
+  (field ^:public ^:static ^:final ^String PROPERTY_TLS_DISABLED_ALGS "jdk.tls.disabledAlgorithms")
+
+  (field ^:public ^:static ^:final ^String PROPERTY_JAR_DISABLED_ALGS "jdk.jar.disabledAlgorithms")
+
+  (field ^:private ^:static ^:final ^String PROPERTY_DISABLED_EC_CURVES "jdk.disabled.namedCurves")
+
+  (field ^:private ^:static ^:final ^Pattern INCLUDE_PATTERN
+    (Pattern/compile (java-str "include " PROPERTY_DISABLED_EC_CURVES) Pattern/CASE_INSENSITIVE))
+
+  (defclass ^:private ^:static CertPathHolder
+    (field ^:static ^:final ^DisabledAlgorithmConstraints CONSTRAINTS
+      (DisabledAlgorithmConstraints. PROPERTY_CERTPATH_DISABLED_ALGS)))
+
+  (defclass ^:private ^:static JarHolder
+    (field ^:static ^:final ^DisabledAlgorithmConstraints CONSTRAINTS
+      (DisabledAlgorithmConstraints. PROPERTY_JAR_DISABLED_ALGS)))
+
+  (field ^:private ^:final ^{:tag (Set String)} disabledAlgorithms)
+
+  (field ^:private ^:final ^{:tag (List Pattern)} disabledPatterns)
+
+  (field ^:private ^:final ^Constraints algorithmConstraints)
+
+  (field ^:private ^:volatile ^{:tag (SoftReference (Map String Boolean))} cacheRef
+    (SoftReference. nil))
+
+  (method ^:public ^:static certPathConstraints ^DisabledAlgorithmConstraints []
+    CertPathHolder/CONSTRAINTS)
+
+  (method ^:public ^:static jarConstraints ^DisabledAlgorithmConstraints []
+    JarHolder/CONSTRAINTS)
+
+  (constructor ^:public [this ^String propertyName]
+    (this. propertyName (AlgorithmDecomposer.)))
+
+  (constructor ^:public [this ^String propertyName ^AlgorithmDecomposer decomposer]
+    (super. decomposer)
+    (set! disabledAlgorithms (DisabledAlgorithmConstraints/getAlgorithms propertyName))
+    (if (.equals PROPERTY_TLS_DISABLED_ALGS propertyName)
+        (set! disabledPatterns (.getDisabledPatterns this))
+        (set! disabledPatterns nil))
+    (for-each [^String s disabledAlgorithms]
+      (let [matcher (.matcher INCLUDE_PATTERN s)]
+        (when (.matches matcher)
+          (.remove disabledAlgorithms (.group matcher))
+          (.addAll disabledAlgorithms
+                   (DisabledAlgorithmConstraints/getAlgorithms PROPERTY_DISABLED_EC_CURVES))
+          (break))))
+    (set! algorithmConstraints (Constraints. propertyName disabledAlgorithms)))
+
+  (method ^:public ^:final permits ^boolean [this ^{:tag (Set CryptoPrimitive)} primitives
+                                             ^String algorithm ^AlgorithmParameters parameters]
+    (when (or (nil? primitives) (.isEmpty primitives))
+      (throw (IllegalArgumentException. "The primitives cannot be null or empty.")))
+    (when (or (nil? algorithm) (.isEmpty algorithm))
+      (throw (IllegalArgumentException. "No algorithm name specified")))
+    (cond
+      (not (.cachedCheckAlgorithm this algorithm)) false
+      (some? parameters) (.permits algorithmConstraints algorithm parameters)
+      :else true))
+
+  (method ^:public permits ^boolean [this ^String algorithm ^{:tag (Set SSLScope)} scopes]
+    (let [^{:tag (List Constraint)} list (.getConstraints algorithmConstraints algorithm)]
+      (or
+        (nil? list)
+        (.allMatch (.stream list) (lambda Predicate ^boolean [^Constraint c] (.permits c scopes))))))
+
+  (method ^:public ^:final permits ^boolean [this ^{:tag (Set CryptoPrimitive)} primitives ^Key key]
+    (.checkConstraints this primitives "" key nil))
+
+  (method ^:public ^:final permits ^boolean [this ^{:tag (Set CryptoPrimitive)} primitives
+                                             ^String algorithm ^Key key
+                                             ^AlgorithmParameters parameters]
+    (when (or (nil? algorithm) (.isEmpty algorithm))
+      (throw (IllegalArgumentException. "No algorithm name specified")))
+    (.checkConstraints this primitives algorithm key parameters))
+
+  (method ^:public ^:final permits :throws [CertPathValidatorException] ^void [this
+                                                                               ^String algorithm
+                                                                               ^AlgorithmParameters ap
+                                                                               ^ConstraintsParameters cp
+                                                                               ^boolean checkKey]
+    (.permits this algorithm cp checkKey)
+    (when (some? ap) (.permits this ap cp)))
+
+  (method ^:public permits :throws [CertPathValidatorException] ^void [this ^AlgorithmParameters ap
+                                                                       ^ConstraintsParameters cp]
+    (switch (.toUpperCase (.getAlgorithm ap) Locale/ENGLISH)
+      "RSASSA-PSS" (.permitsPSSParams this ap cp)
+      nil))
+
+  (method ^:private permitsPSSParams :throws [CertPathValidatorException] ^void [this
+                                                                                 ^AlgorithmParameters ap
+                                                                                 ^ConstraintsParameters cp]
+    (try
+      (let [pssParams (cast PSSParameterSpec (.getParameterSpec ap PSSParameterSpec))
+            digestAlg (.getDigestAlgorithm pssParams)]
+        (.permits this digestAlg cp false)
+        (let [mgfParams (.getMGFParameters pssParams)]
+          (when (instance? MGF1ParameterSpec mgfParams)
+            (let [mgfDigestAlg (.getDigestAlgorithm (cast MGF1ParameterSpec mgfParams))]
+              (when-not (.equalsIgnoreCase mgfDigestAlg digestAlg)
+                (.permits this mgfDigestAlg cp false))))))
+      (catch InvalidParameterSpecException ipse)))
+
+  (method ^:public ^:final permits :throws [CertPathValidatorException] ^void [this
+                                                                               ^String algorithm
+                                                                               ^ConstraintsParameters cp
+                                                                               ^boolean checkKey]
+    (when checkKey
+      (for-each [^Key key (.getKeys cp)]
+        (for-each [^String curve (DisabledAlgorithmConstraints/getNamedParametersFromKey key)]
+          (when-not (.cachedCheckAlgorithm this curve)
+            (throw (CertPathValidatorException.
+                     (java-str "Algorithm constraints check failed on disabled algorithm: " curve)
+                     nil
+                     nil
+                     -1
+                     CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED))))))
+    (.permits algorithmConstraints algorithm cp checkKey))
+
+  (method ^:private ^:static getNamedParametersFromKey ^{:tag (List String)} [^Key key]
+    (label :switch
+      (switch key
+        [^ECKey ecKey]
+          (let [nc (CurveDB/lookup (.getParams ecKey))]
+            (when (nil? nc) (break :switch (List/of)))
+            (List/of (.getNameAndAliases nc)))
+        (let [n (KeyUtil/getAlgorithm key)]
+          (when (.equalsIgnoreCase n (.getAlgorithm key)) (break :switch (List/of n)))
+          (List/of (.getAlgorithm key) n)))))
+
+  (method ^:private checkConstraints ^boolean [this ^{:tag (Set CryptoPrimitive)} primitives
+                                               ^String algorithm ^Key key
+                                               ^AlgorithmParameters parameters]
+    (when (or (nil? primitives) (.isEmpty primitives))
+      (throw (IllegalArgumentException. "The primitives cannot be null or empty.")))
+    (when (nil? key) (throw (IllegalArgumentException. "The key cannot be null")))
+    (when (and (some? algorithm) (not (.isEmpty algorithm)))
+      (when-not (.permits this primitives algorithm parameters) (return false)))
+    (if (not (.permits this primitives (KeyUtil/getAlgorithm key) nil))
+        false
+        (do
+          (for-each [^String curve (DisabledAlgorithmConstraints/getNamedParametersFromKey key)]
+            (when-not (.permits this primitives curve nil) (return false)))
+          (.permits algorithmConstraints key))))
+
+  (defclass ^:private ^:static Constraints
+    (field ^:private ^:final ^{:tag (Map String (List Constraint))} constraintsMap (HashMap.))
+
+    (defclass ^:private ^:static Holder
+      (field ^:private ^:static ^:final ^Pattern DENY_AFTER_PATTERN
+        (Pattern/compile "denyAfter\\s+(\\d{4})-(\\d{2})-(\\d{2})")))
+
+    (constructor ^:public [this ^String propertyName ^{:tag (Set String)} constraintSet]
+      (for-each [^:mutable ^String constraintEntry constraintSet]
+        (when-not (or (nil? constraintEntry) (.isEmpty constraintEntry))
+          (set! constraintEntry (.trim constraintEntry))
+          (when (some? debug) (.println debug (java-str "Constraints: " constraintEntry)))
+          (let [space (.indexOf constraintEntry \space)
+                algorithm (AlgorithmDecomposer/decomposeDigestName
+                            ^String (if (> space 0)
+                                        (.substring constraintEntry 0 space)
+                                        constraintEntry))
+                ^{:tag (List Constraint)} constraintList (cast
+                                                           List
+                                                           (.getOrDefault
+                                                             constraintsMap
+                                                             (.toUpperCase algorithm Locale/ENGLISH)
+                                                             (ArrayList. 1)))]
+            (for-each [^String alias (AlgorithmDecomposer/getAliases algorithm)]
+              (.putIfAbsent constraintsMap (.toUpperCase alias Locale/ENGLISH) constraintList))
+            (if (or (<= space 0) (some? (CurveDB/lookup constraintEntry)))
+                (.add constraintList (DisabledConstraint. algorithm))
+                (let [policy (.substring constraintEntry (unchecked-add-int space 1))
+                      ^:mutable ^Constraint c nil
+                      ^:mutable ^Constraint lastConstraint nil
+                      ^:mutable jdkCALimit false
+                      ^:mutable denyAfterLimit false]
+                  (for-each [^:mutable ^String entry (.split policy "&")]
+                    (set! entry (.trim entry))
+                    (let [^:mutable ^Matcher matcher nil]
+                      (cond
+                        (.startsWith entry "keySize")
+                          (do
+                            (when (some? debug)
+                              (.println debug (java-str "Constraints set to keySize: " entry)))
+                            (let [tokens (StringTokenizer. entry)]
+                              (when-not (.equals "keySize" (.nextToken tokens))
+                                (throw (IllegalArgumentException.
+                                         (java-str
+                                           "Error in security property. Constraint unknown: "
+                                           entry))))
+                              (set! c
+                                    (KeySizeConstraint.
+                                      algorithm
+                                      (DisabledAlgorithmConstraints$Constraint$Operator/of
+                                        (.nextToken tokens))
+                                      (Integer/parseInt (.nextToken tokens))))))
+                        (.equalsIgnoreCase entry "jdkCA")
+                          (do
+                            (when (some? debug) (.println debug "Constraints set to jdkCA."))
+                            (when jdkCALimit
+                              (throw (IllegalArgumentException.
+                                       (java-str
+                                         "Only one jdkCA entry allowed in property. Constraint: "
+                                         constraintEntry))))
+                            (set! c (jdkCAConstraint. algorithm))
+                            (set! jdkCALimit true))
+                        (and (.startsWith entry "denyAfter")
+                             (.matches (set! matcher (.matcher Holder/DENY_AFTER_PATTERN entry))))
+                          (do
+                            (when (some? debug) (.println debug "Constraints set to denyAfter"))
+                            (when denyAfterLimit
+                              (throw
+                                (IllegalArgumentException.
+                                  (java-str
+                                    "Only one denyAfter entry allowed in property. Constraint: "
+                                    constraintEntry))))
+                            (let [year (Integer/parseInt (.group matcher 1))
+                                  month (Integer/parseInt (.group matcher 2))
+                                  day (Integer/parseInt (.group matcher 3))]
+                              (set! c (DenyAfterConstraint. algorithm year month day))
+                              (set! denyAfterLimit true)))
+                        (.startsWith entry "usage")
+                          (let [s (.split (.trim (.substring entry 5)) " ")]
+                            (set! c (UsageConstraint. algorithm s propertyName))
+                            (when (some? debug)
+                              (.println debug (java-str "Constraints usage length is " (alength s)))))
+                        :else
+                          (throw (IllegalArgumentException.
+                                   (java-str "Error in security property. Constraint unknown: "
+                                             entry))))
+                      (if (nil? lastConstraint)
+                          (.add constraintList c)
+                          (set! (.-nextConstraint lastConstraint) c))
+                      (set! lastConstraint c)))))))))
+
+    (method ^:private getConstraints ^{:tag (List Constraint)} [this ^String algorithm]
+      (cast List (.get constraintsMap (.toUpperCase algorithm Locale/ENGLISH))))
+
+    (method ^:public permits ^boolean [this ^Key key]
+      (let [^{:tag (List Constraint)} list (.getConstraints this (KeyUtil/getAlgorithm key))]
+        (if (nil? list)
+            true
+            (do
+              (for-each [^Constraint constraint list]
+                (when-not (.permits constraint key)
+                  (when (some? debug)
+                    (.println debug
+                              (java-str "Constraints: failed key size constraint check "
+                                        (KeyUtil/getKeySize key))))
+                  (return false)))
+              true))))
+
+    (method ^:public permits ^boolean [this ^String algorithm ^AlgorithmParameters aps]
+      (let [^{:tag (List Constraint)} list (.getConstraints this algorithm)]
+        (if (nil? list)
+            true
+            (do
+              (for-each [^Constraint constraint list]
+                (when-not (.permits constraint aps)
+                  (when (some? debug)
+                    (.println debug
+                              (java-str "Constraints: failed algorithm parameters constraint check "
+                                        aps)))
+                  (return false)))
+              true))))
+
+    (method ^:public permits :throws [CertPathValidatorException] ^void [this ^String algorithm
+                                                                         ^ConstraintsParameters cp
+                                                                         ^boolean checkKey]
+      (when (some? debug)
+        (.println debug (java-str "Constraints.permits(): " algorithm ", " (.toString cp))))
+      (let [^{:tag (Set String)} algorithms (HashSet.)]
+        (when (some? algorithm)
+          (.addAll algorithms (AlgorithmDecomposer/decomposeName algorithm))
+          (.add algorithms algorithm))
+        (when checkKey
+          (for-each [^Key key (.getKeys cp)] (.add algorithms (KeyUtil/getAlgorithm key))))
+        (for-each [^String alg algorithms]
+          (let [^{:tag (List Constraint)} list (.getConstraints this alg)]
+            (when (some? list)
+              (for-each [^Constraint constraint list]
+                (when-not (and (not checkKey) (instance? KeySizeConstraint constraint))
+                  (.permits constraint cp)))))))))
+
+  (defclass ^:private ^:abstract ^:static Constraint
+    (field ^String algorithm)
+
+    (field ^Constraint nextConstraint nil)
+
+    (defclass ^:enum Operator
+      (constants EQ NE LT LE GT GE)
+
+      (method ^:static of ^Operator [^String s]
+        (switch s
+          "==" (return EQ)
+          "!=" (return NE)
+          "<" (return LT)
+          "<=" (return LE)
+          ">" (return GT)
+          ">=" (return GE))
+        (throw (IllegalArgumentException.
+                 (java-str "Error in security property. " s " is not a legal Operator")))))
+
+    (method ^:public permits ^boolean [this ^Key key] true)
+
+    (method ^:public permits ^boolean [this ^AlgorithmParameters parameters]
+      true)
+
+    (method ^:public permits ^boolean [this ^{:tag (Set SSLScope)} scopes]
+      true)
+
+    (method ^:public ^:abstract permits :throws [CertPathValidatorException] ^void [this
+                                                                                    ^ConstraintsParameters cp])
+
+    (method next :throws [CertPathValidatorException] ^boolean [this ^ConstraintsParameters cp]
+      (if (some? nextConstraint) (do (.permits nextConstraint cp) true) false))
+
+    (method next ^boolean [this ^Key key]
+      (and (some? nextConstraint) (.permits nextConstraint key))))
+
+  (defclass ^:private ^:static jdkCAConstraint
+    :extends Constraint
+
+    (constructor [this ^String algo] (set! (.-algorithm this) algo))
+
+    (method ^:public permits :throws [CertPathValidatorException] ^void [this
+                                                                         ^ConstraintsParameters cp]
+      (when (some? debug)
+        (.println debug (java-str "jdkCAConstraints.permits(): " (.-algorithm this))))
+      (when (.anchorIsJdkCA cp)
+        (when-not (.next this cp)
+          (throw (CertPathValidatorException.
+                   (java-str "Algorithm constraints check failed on certificate anchor limits. "
+                             (.-algorithm this)
+                             (.extendedExceptionMsg cp))
+                   nil
+                   nil
+                   -1
+                   CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED))))))
+
+  (defclass ^:private ^:static DenyAfterConstraint
+    :extends Constraint
+
+    (field ^:private ^:final ^ZonedDateTime zdt)
+
+    (field ^:private ^:final ^Instant denyAfterDate)
+
+    (constructor [this ^String algo ^int year ^int month ^int day]
+      (set! (.-algorithm this) algo)
+      (when (some? debug)
+        (.println debug
+                  (java-str "DenyAfterConstraint read in as: year "
+                            year
+                            ", month = "
+                            month
+                            ", day = "
+                            day)))
+      (try
+        (set! zdt (ZonedDateTime/of year month day 0 0 0 0 (ZoneId/of "GMT")))
+        (set! denyAfterDate (.toInstant zdt))
+        (catch DateTimeException dte
+          (throw (IllegalArgumentException. "Invalid denyAfter date" dte))))
+      (when (some? debug)
+        (.println debug (java-str "DenyAfterConstraint date set to: " (.toLocalDate zdt)))))
+
+    (method ^:public permits :throws [CertPathValidatorException] ^void [this
+                                                                         ^ConstraintsParameters cp]
+      (let [^Instant currentDate (if (some? (.getDate cp)) (.toInstant (.getDate cp)) (Instant/now))]
+        (when-not (.isAfter denyAfterDate currentDate)
+          (when-not (.next this cp)
+            (throw (CertPathValidatorException.
+                     (java-str "denyAfter constraint check failed: "
+                               (.-algorithm this)
+                               " used with Constraint date: "
+                               (.toLocalDate zdt)
+                               "; params date: "
+                               currentDate
+                               (.extendedExceptionMsg cp))
+                     nil
+                     nil
+                     -1
+                     CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED))))))
+
+    (method ^:public permits ^boolean [this ^Key key]
+      (if (.next this key)
+          true
+          (do
+            (when (some? debug)
+              (.println debug (java-str "DenyAfterConstraints.permits(): " (.-algorithm this))))
+            (.isAfter denyAfterDate (Instant/now))))))
+
+  (defclass ^:private ^:static UsageConstraint
+    :extends Constraint
+
+    (field ^String/1 usages)
+
+    (field ^{:tag (Set SSLScope)} scopes)
+
+    (constructor [this ^String algorithm ^String/1 usages ^String propertyName]
+      (set! (.-algorithm this) algorithm)
+      (if (.equals PROPERTY_TLS_DISABLED_ALGS propertyName)
+          (do
+            (for-each [^String usage usages]
+              (let [scope (SSLScope/nameOf usage)]
+                (if (some? scope)
+                    (do
+                      (when (nil? (.-scopes this))
+                        (set! (.-scopes this) (HashSet. (alength usages))))
+                      (.add (.-scopes this) scope))
+                    (set! (.-usages this) usages))))
+            (when (and (some? (.-scopes this)) (some? (.-usages this)))
+              (throw (IllegalArgumentException.
+                       "Can't mix TLS protocol specific constraints with other usage constraints"))))
+          (set! (.-usages this) usages)))
+
+    (method ^:public permits ^boolean [this ^{:tag (Set SSLScope)} scopes]
+      (if (or (nil? (.-scopes this)) (nil? scopes))
+          true
+          (Collections/disjoint (.-scopes this) scopes)))
+
+    (method ^:public permits :throws [CertPathValidatorException] ^void [this
+                                                                         ^ConstraintsParameters cp]
+      (let [variant (.getVariant cp)]
+        (for-each [^String usage usages]
+          (let [^:mutable match false]
+            (switch (.toLowerCase usage Locale/ENGLISH)
+              "tlsserver" (set! match (.equals variant Validator/VAR_TLS_SERVER))
+              "tlsclient" (set! match (.equals variant Validator/VAR_TLS_CLIENT))
+              "signedjar"
+                (set! match
+                      (or (.equals variant Validator/VAR_CODE_SIGNING)
+                          (.equals variant Validator/VAR_TSA_SERVER))))
+            (when (some? debug)
+              (.println debug
+                        (java-str "Checking if usage constraint \""
+                                  usage
+                                  "\" matches \""
+                                  (.getVariant cp)
+                                  "\""))
+              (when (Debug/isVerbose) (.printStackTrace (Exception.) (.getPrintStream debug))))
+            (when match
+              (when (.next this cp) (return))
+              (throw (CertPathValidatorException.
+                       (java-str "Usage constraint "
+                                 usage
+                                 " check failed: "
+                                 (.-algorithm this)
+                                 (.extendedExceptionMsg cp))
+                       nil
+                       nil
+                       -1
+                       CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED))))))))
+
+  (defclass ^:private ^:static KeySizeConstraint
+    :extends Constraint
+
+    (field ^:private ^:final ^int minSize)
+
+    (field ^:private ^:final ^int maxSize)
+
+    (field ^:private ^int prohibitedSize -1)
+
+    (constructor ^:public [this ^String algo
+                           ^DisabledAlgorithmConstraints$Constraint$Operator operator ^int length]
+      (set! (.-algorithm this) algo)
+      (switch operator
+        EQ
+          (do
+            (set! (.-minSize this) 0)
+            (set! (.-maxSize this) Integer/MAX_VALUE)
+            (set! prohibitedSize length))
+        NE (do (set! (.-minSize this) length) (set! (.-maxSize this) length))
+        LT (do (set! (.-minSize this) length) (set! (.-maxSize this) Integer/MAX_VALUE))
+        LE
+          (do
+            (set! (.-minSize this) (unchecked-add-int length 1))
+            (set! (.-maxSize this) Integer/MAX_VALUE))
+        GT (do (set! (.-minSize this) 0) (set! (.-maxSize this) length))
+        GE
+          (do
+            (set! (.-minSize this) 0)
+            (set! (.-maxSize this) (if (> length 1) (unchecked-subtract-int length 1) 0)))
+        (do (set! (.-minSize this) Integer/MAX_VALUE) (set! (.-maxSize this) -1))))
+
+    (method ^:public permits :throws [CertPathValidatorException] ^void [this
+                                                                         ^ConstraintsParameters cp]
+      (for-each [^Key key (.getKeys cp)]
+        (when-not (.permitsImpl this key)
+          (if (some? (.-nextConstraint this))
+              (.permits (.-nextConstraint this) cp)
+              (throw (CertPathValidatorException.
+                       (java-str "Algorithm constraints check failed on keysize limits: "
+                                 (.-algorithm this)
+                                 " "
+                                 (KeyUtil/getKeySize key)
+                                 " bit key"
+                                 (.extendedExceptionMsg cp))
+                       nil
+                       nil
+                       -1
+                       CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED))))))
+
+    (method ^:public permits ^boolean [this ^Key key]
+      (if (and (some? (.-nextConstraint this)) (.permits (.-nextConstraint this) key))
+          true
+          (do
+            (when (some? debug)
+              (.println debug (java-str "KeySizeConstraints.permits(): " (.-algorithm this))))
+            (.permitsImpl this key))))
+
+    (method ^:public permits ^boolean [this ^AlgorithmParameters parameters]
+      (let [paramAlg (.getAlgorithm parameters)]
+        (when-not (.equalsIgnoreCase (.-algorithm this) (.getAlgorithm parameters))
+          (let [^{:tag (Collection String)} aliases (AlgorithmDecomposer/getAliases
+                                                      (.-algorithm this))]
+            (when-not (.contains aliases paramAlg) (return true))))
+        (let [keySize (KeyUtil/getKeySize parameters)]
+          (cond
+            (== keySize 0) false
+            (> keySize 0)
+              (not (or (or (< keySize minSize) (> keySize maxSize)) (== prohibitedSize keySize)))
+            :else true))))
+
+    (method ^:private permitsImpl ^boolean [this ^Key key]
+      (if (not (== (.compareToIgnoreCase (.-algorithm this) (.getAlgorithm key)) 0))
+          true
+          (let [size (KeyUtil/getKeySize key)]
+            (cond
+              (== size 0) false
+              (> size 0) (not (or (or (< size minSize) (> size maxSize)) (== prohibitedSize size)))
+              :else true)))))
+
+  (method ^:private cachedCheckAlgorithm ^boolean [this ^String algorithm]
+    (let [^:mutable ^{:tag (Map String Boolean)} cache nil]
+      (when (nil? (set! cache (cast Map (.get cacheRef))))
+        (locking this
+          (when (nil? (set! cache (cast Map (.get cacheRef))))
+            (set! cache (ConcurrentHashMap.))
+            (set! cacheRef (SoftReference. cache)))))
+      (let [^:mutable result (cast Boolean (.get cache algorithm))]
+        (if (some? result)
+            result
+            (do
+              (set! result
+                    (and (DisabledAlgorithmConstraints/checkAlgorithm
+                           disabledAlgorithms
+                           algorithm
+                           (.-decomposer this))
+                         (.checkDisabledPatterns this algorithm)))
+              (.put cache algorithm result)
+              result)))))
+
+  (method ^:private checkDisabledPatterns ^boolean [this ^:final ^String algorithm]
+    (or (nil? disabledPatterns)
+        (.noneMatch (.stream disabledPatterns)
+                    (lambda Predicate ^boolean [^Pattern p] (.matches (.matcher p algorithm))))))
+
+  (method ^:private getDisabledPatterns ^{:tag (List Pattern)} [this]
+    (let [^:mutable ^{:tag (List Pattern)} ret nil
+          ^{:tag (List String)} patternStrings (ArrayList. 4)]
+      (for-each [^String p disabledAlgorithms]
+        (when (.contains p "*")
+          (when-not (.startsWith p "TLS_")
+            (throw (IllegalArgumentException. "Wildcard pattern must start with \"TLS_\"")))
+          (.add patternStrings p)))
+      (when-not (.isEmpty patternStrings)
+        (set! ret (ArrayList. (.size patternStrings)))
+        (for-each [^String p patternStrings]
+          (.remove disabledAlgorithms p)
+          (.add ret (Pattern/compile (java-str "^\\Q" (.replace p "*" "\\E.*\\Q") "\\E$")))))
+      ret))
+
+  (defclass ^:private ^:static DisabledConstraint
+    :extends Constraint
+
+    (constructor [this ^String algo] (set! (.-algorithm this) algo))
+
+    (method ^:public permits :throws [CertPathValidatorException] ^void [this
+                                                                         ^ConstraintsParameters cp]
+      (throw (CertPathValidatorException.
+               (java-str "Algorithm constraints check failed on disabled algorithm: "
+                         (.-algorithm this)
+                         (.extendedExceptionMsg cp))
+               nil
+               nil
+               -1
+               CertPathValidatorException$BasicReason/ALGORITHM_CONSTRAINED)))
+
+    (method ^:public permits ^boolean [this ^Key key] false)))

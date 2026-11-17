@@ -138,13 +138,23 @@
         tg {:applies v :xfail false}
         :else {:applies true :xfail false}))))
 
-(defn- resolve-line [spec dl]
-  (cond
-    (or (nil? spec) (= spec ".")) dl
-    (re-matches #"\d+" spec) (let [n (Long/parseLong spec)] (if (zero? n) :any n))
-    :else (if-let [[_ sg d] (re-matches #"\.([+-])(\d+)" spec)]
-            ((if (= sg "+") + -) dl (Long/parseLong d))
-            dl)))
+(defn line-names
+  "The lines `dg-line NAME` directives name (gcc-dg.exp's dg-line): {NAME line}, from directives' output."
+  [ds]
+  (into {} (for [{:keys [name line words]} ds :when (and (= name "line") (first words))] [(str (first words)) line])))
+
+(defn resolve-line
+  "A directive's line spec as gcc-dg.exp's get-absolute-line reads it: `.` (or none) the directive's line `dl`, a number,
+  `.+N` or `.-N`, or a name a dg-line directive gives (`names`, line-names'); 0 is :any. An unknown name is the
+  directive's own line (DejaGnu stops the test with an error)."
+  ([spec dl] (resolve-line spec dl {}))
+  ([spec dl names]
+   (cond
+     (or (nil? spec) (= spec ".")) dl
+     (re-matches #"\d+" spec) (let [n (Long/parseLong spec)] (if (zero? n) :any n))
+     :else (if-let [[_ sg d] (re-matches #"\.([+-])(\d+)" spec)]
+             ((if (= sg "+") + -) dl (Long/parseLong d))
+             (if (re-matches #"[a-zA-Z][a-zA-Z0-9_]*" spec) (get names spec dl) dl)))))
 
 (def message-kinds {"error" :error "warning" :warning "message" :note "note" :note "bogus" :bogus})
 
@@ -155,6 +165,7 @@
   action is compile."
   [^String text]
   (let [ds (directives text)
+        names (line-names ds)
         acc (reduce
              (fn [a {:keys [name line words]}]
                (cond
@@ -173,7 +184,7 @@
                  (let [[_ _ sel spec] words
                        {:keys [applies xfail]} (sel-info sel)
                        k (message-kinds name)
-                       l (resolve-line spec line)]
+                       l (resolve-line spec line names)]
                    (cond
                      (not applies) a
                      (= l :any) (update-in a [:any k] (fnil inc 0))
@@ -184,7 +195,7 @@
                  (= name "additional-sources") (update a :sources (fnil into []) (str/split (str/trim (str (first words))) #"\s+"))
                  (= name "require-effective-target") (update a :requires (fnil conj []) (first words))
                  (#{"skip-if" "xfail-if" "require" "options" "additional-options" "prune-output" "final" "timeout" "add-options"
-                    "set-compiler-env-var" "message-kinds"} name)
+                    "set-compiler-env-var" "message-kinds" "line"} name)
                  (if (= name "skip-if") (update a :skips (fnil conj []) (vec words)) a)
                  :else (update a :other (fnil conj []) name)))
              {} ds)]

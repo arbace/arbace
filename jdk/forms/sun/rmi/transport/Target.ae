@@ -1,0 +1,181 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/Target.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport)
+
+(import '(java.rmi NoSuchObjectException Remote)
+        '(java.rmi.dgc VMID)
+        '(java.rmi.server ObjID Unreferenced)
+        '(java.util Enumeration Hashtable Vector)
+        '(sun.rmi.runtime Log RuntimeUtil)
+        '(sun.rmi.server Dispatcher))
+
+(defclasses
+  (defclass ^:public ^:final Target
+    (field ^:private ^:final ^ObjID id)
+
+    (field ^:private ^:final ^boolean permanent)
+
+    (field ^:private ^:final ^WeakRef weakImpl)
+
+    (field ^:private ^:volatile ^Dispatcher disp)
+
+    (field ^:private ^:final ^Remote stub)
+
+    (field ^:private ^:final ^{:tag (Vector VMID)} refSet (Vector.))
+
+    (field ^:private ^:final ^{:tag (Hashtable VMID SequenceEntry)} sequenceTable (Hashtable. 5))
+
+    (field ^:private ^:final ^ClassLoader ccl)
+
+    (field ^:private ^int callCount 0)
+
+    (field ^:private ^boolean removed false)
+
+    (field ^:private ^:volatile ^Transport exportedTransport nil)
+
+    (field ^:private ^:static ^int nextThreadNum 0)
+
+    (constructor ^:public [this ^Remote impl ^Dispatcher disp ^Remote stub ^ObjID id
+                           ^boolean permanent]
+      (set! (.-weakImpl this) (WeakRef. impl ObjectTable/reapQueue))
+      (set! (.-disp this) disp)
+      (set! (.-stub this) stub)
+      (set! (.-id this) id)
+      (let [threadContextLoader (.getContextClassLoader (Thread/currentThread))
+            serverLoader (.getClassLoader (.getClass impl))]
+        (if (Target/checkLoaderAncestry threadContextLoader serverLoader)
+            (set! (.-ccl this) threadContextLoader)
+            (set! (.-ccl this) serverLoader))
+        (set! (.-permanent this) permanent)
+        (when permanent (.pinImpl this))))
+
+    (method ^:private ^:static checkLoaderAncestry ^boolean [^ClassLoader child
+                                                             ^ClassLoader ancestor]
+      (cond
+        (nil? ancestor) true
+        (nil? child) false
+        :else
+          (do
+            (loop [parent child]
+              (if (some? parent)
+                  (if (identical? parent ancestor) (return true) (recur (.getParent parent)))
+                  nil))
+            false)))
+
+    (method ^:public getStub ^Remote [this] stub)
+
+    (method getObjectEndpoint ^ObjectEndpoint [this]
+      (ObjectEndpoint. id exportedTransport))
+
+    (method getWeakImpl ^WeakRef [this] weakImpl)
+
+    (method getDispatcher ^Dispatcher [this] disp)
+
+    (method getContextClassLoader ^ClassLoader [this] ccl)
+
+    (method getImpl ^Remote [this] (cast Remote (.get weakImpl)))
+
+    (method isPermanent ^boolean [this] permanent)
+
+    (method ^:synchronized pinImpl ^void [this] (.pin weakImpl))
+
+    (method ^:synchronized unpinImpl ^void [this]
+      (when (and (not permanent) (.isEmpty refSet)) (.unpin weakImpl)))
+
+    (method setExportedTransport ^void [this ^Transport exportedTransport]
+      (when (nil? (.-exportedTransport this)) (set! (.-exportedTransport this) exportedTransport)))
+
+    (method ^:synchronized referenced ^void [this ^long sequenceNum ^VMID vmid]
+      (let [entry (cast SequenceEntry (.get sequenceTable vmid))]
+        (cond
+          (nil? entry) (.put sequenceTable vmid (SequenceEntry. sequenceNum))
+          (< (.-sequenceNum entry) sequenceNum) (.update entry sequenceNum)
+          :else (return))
+        (when-not (.contains refSet vmid)
+          (.pinImpl this)
+          (when (some? (.getImpl this))
+            (when (.isLoggable DGCImpl/dgcLog Log/VERBOSE)
+              (.log DGCImpl/dgcLog Log/VERBOSE (java-str "add to dirty set: " vmid)))
+            (.addElement refSet vmid)
+            (.registerTarget (DGCImpl/getDGCImpl) vmid this)))))
+
+    (method ^:synchronized unreferenced ^void [this ^long sequenceNum ^VMID vmid ^boolean strong]
+      (let [entry (cast SequenceEntry (.get sequenceTable vmid))]
+        (when-not (or (nil? entry) (> (.-sequenceNum entry) sequenceNum))
+          (cond
+            strong (.retain entry sequenceNum)
+            (= (.-keep entry) false) (.remove sequenceTable vmid))
+          (when (.isLoggable DGCImpl/dgcLog Log/VERBOSE)
+            (.log DGCImpl/dgcLog Log/VERBOSE (java-str "remove from dirty set: " vmid)))
+          (.refSetRemove this vmid))))
+
+    (method ^:private ^:synchronized refSetRemove ^void [this ^VMID vmid]
+      (.unregisterTarget (DGCImpl/getDGCImpl) vmid this)
+      (when (and (.removeElement refSet vmid) (.isEmpty refSet))
+        (when (.isLoggable DGCImpl/dgcLog Log/VERBOSE)
+          (.log DGCImpl/dgcLog Log/VERBOSE (java-str "reference set is empty: target = " this)))
+        (let [obj (.getImpl this)]
+          (when-instance [^Unreferenced unrefObj obj]
+            (.start (RuntimeUtil/newUserThread
+                      (lambda Runnable ^void []
+                        (.setContextClassLoader (Thread/currentThread) ccl)
+                        (.unreferenced unrefObj))
+                      (java-str "Unreferenced-"
+                                (let [old-1 nextThreadNum]
+                                  (set! nextThreadNum (unchecked-inc-int nextThreadNum))
+                                  old-1))
+                      false)))
+          (.unpinImpl this))))
+
+    (method ^:synchronized unexport ^boolean [this ^boolean force]
+      (if (or (or (= force true) (== callCount 0)) (nil? disp))
+          (do
+            (set! disp nil)
+            (.unpinImpl this)
+            (let [dgc (DGCImpl/getDGCImpl)
+                  ^{:tag (Enumeration VMID)} enum_ (.elements refSet)]
+              (while (.hasMoreElements enum_)
+                (let [vmid (cast VMID (.nextElement enum_))] (.unregisterTarget dgc vmid this)))
+              true))
+          false))
+
+    (method ^:synchronized markRemoved ^void [this]
+      (when-not (not removed) (throw (AssertionError.)))
+      (set! removed true)
+      (when (and (not permanent) (== callCount 0)) (ObjectTable/decrementKeepAliveCount))
+      (when (some? exportedTransport) (.targetUnexported exportedTransport)))
+
+    (method ^:synchronized incrementCallCount :throws [NoSuchObjectException] ^void [this]
+      (if (some? disp)
+          (set! callCount (unchecked-inc-int callCount))
+          (throw (NoSuchObjectException. "object not accepting new calls"))))
+
+    (method ^:synchronized decrementCallCount ^void [this]
+      (when (< (set! callCount (unchecked-dec-int callCount)) 0)
+        (throw (Error. "internal error: call count less than zero")))
+      (when (and (and (not permanent) removed) (== callCount 0))
+        (ObjectTable/decrementKeepAliveCount)))
+
+    (method isEmpty ^boolean [this] (.isEmpty refSet))
+
+    (method ^:public ^:synchronized vmidDead ^void [this ^VMID vmid]
+      (when (.isLoggable DGCImpl/dgcLog Log/BRIEF)
+        (.log DGCImpl/dgcLog Log/BRIEF (java-str "removing endpoint " vmid " from reference set")))
+      (.remove sequenceTable vmid)
+      (.refSetRemove this vmid)))
+
+  (defclass SequenceEntry
+    (field ^long sequenceNum)
+
+    (field ^boolean keep)
+
+    (constructor [this ^long sequenceNum]
+      (set! (.-sequenceNum this) sequenceNum)
+      (set! keep false))
+
+    (method retain ^void [this ^long sequenceNum]
+      (set! (.-sequenceNum this) sequenceNum)
+      (set! keep true))
+
+    (method update ^void [this ^long sequenceNum]
+      (set! (.-sequenceNum this) sequenceNum))))

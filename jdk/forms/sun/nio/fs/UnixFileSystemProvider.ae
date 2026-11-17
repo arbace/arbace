@@ -1,0 +1,363 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/fs/UnixFileSystemProvider.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.net URI)
+        '(java.nio.channels AsynchronousFileChannel FileChannel SeekableByteChannel)
+        '(java.nio.file AccessMode
+                        CopyOption
+                        DirectoryNotEmptyException
+                        DirectoryStream
+                        DirectoryStream$Filter
+                        FileAlreadyExistsException
+                        FileStore
+                        FileSystem
+                        FileSystemAlreadyExistsException
+                        LinkOption
+                        NotDirectoryException
+                        NotLinkException
+                        OpenOption
+                        Path)
+        '(java.nio.file.attribute BasicFileAttributeView
+                                  BasicFileAttributes
+                                  FileAttribute
+                                  FileAttributeView
+                                  FileOwnerAttributeView
+                                  PosixFileAttributeView
+                                  PosixFileAttributes)
+        '(java.nio.file.spi FileTypeDetector)
+        '(java.util HashSet Map Set)
+        '(java.util.concurrent ExecutorService)
+        '(java.util.function Function)
+        '(jdk.internal.util StaticProperty)
+        '(sun.nio.ch ThreadPool))
+
+(defclass ^:public ^:abstract UnixFileSystemProvider
+  :extends AbstractFileSystemProvider
+
+  (field ^:private ^:static ^:final ^byte/1 EMPTY_PATH (new byte/1 0))
+
+  (field ^:private ^:final ^UnixFileSystem theFileSystem)
+
+  (constructor ^:public [this]
+    (set! theFileSystem (.newFileSystem this (StaticProperty/userDir))))
+
+  (method theFileSystem ^UnixFileSystem [this] theFileSystem)
+
+  (method ^:abstract newFileSystem ^UnixFileSystem [this ^String dir])
+
+  (method ^:public ^:final getScheme ^String [this] "file")
+
+  (method ^:private checkUri ^void [this ^URI uri]
+    (when-not (.equalsIgnoreCase (.getScheme uri) (.getScheme this))
+      (throw (IllegalArgumentException. "URI does not match this provider")))
+    (when (some? (.getRawAuthority uri))
+      (throw (IllegalArgumentException. "Authority component present")))
+    (let [path (.getPath uri)]
+      (when (nil? path) (throw (IllegalArgumentException. "Path component is undefined")))
+      (when-not (.equals path "/")
+        (throw (IllegalArgumentException. "Path component should be '/'")))
+      (when (some? (.getRawQuery uri))
+        (throw (IllegalArgumentException. "Query component present")))
+      (when (some? (.getRawFragment uri))
+        (throw (IllegalArgumentException. "Fragment component present")))))
+
+  (method ^:public ^:final newFileSystem ^FileSystem [this ^URI uri ^{:tag (Map String ?)} env]
+    (.checkUri this uri)
+    (throw (FileSystemAlreadyExistsException.)))
+
+  (method ^:public ^:final getFileSystem ^FileSystem [this ^URI uri]
+    (.checkUri this uri)
+    theFileSystem)
+
+  (method ^:public getPath ^Path [this ^URI uri]
+    (UnixUriUtils/fromUri theFileSystem uri))
+
+  (method ^:public getFileAttributeView :type-params [(V extends FileAttributeView)] ^V [this
+                                                                                         ^Path obj
+                                                                                         ^{:tag (Class V)} type
+                                                                                         &
+                                                                                         ^LinkOption/1 options]
+    (let [file (UnixPath/toUnixPath obj)
+          followLinks (Util/followLinks options)]
+      (cond
+        (identical? type BasicFileAttributeView)
+          ^FileAttributeView (UnixFileAttributeViews/createBasicView file followLinks)
+        (identical? type PosixFileAttributeView)
+          ^FileAttributeView (UnixFileAttributeViews/createPosixView file followLinks)
+        (identical? type FileOwnerAttributeView)
+          ^FileAttributeView (UnixFileAttributeViews/createOwnerView file followLinks)
+        :else (do (when (nil? type) (throw (NullPointerException.))) nil))))
+
+  (method ^:public readAttributes :type-params [(A extends BasicFileAttributes)] :throws [IOException] ^A [this
+                                                                                                           ^Path file
+                                                                                                           ^{:tag (Class A)} type
+                                                                                                           &
+                                                                                                           ^LinkOption/1 options]
+    (let [^:mutable ^{:tag (Class (? extends BasicFileAttributeView))} view nil]
+      (cond
+        (identical? type BasicFileAttributes) (set! view BasicFileAttributeView)
+        (identical? type PosixFileAttributes) (set! view PosixFileAttributeView)
+        (nil? type) (throw (NullPointerException.))
+        :else (throw (UnsupportedOperationException.)))
+      (.readAttributes (cast BasicFileAttributeView (.getFileAttributeView this file view options)))))
+
+  (method ^:public readAttributesIfExists :type-params [(A extends BasicFileAttributes)] :throws [IOException] ^A [this
+                                                                                                                   ^Path path
+                                                                                                                   ^{:tag (Class A)} type
+                                                                                                                   &
+                                                                                                                   ^LinkOption/1 options]
+    (when (and (identical? type BasicFileAttributes) (Util/followLinks options))
+      (let [file (UnixPath/toUnixPath path)]
+        (try
+          (let [^A attrs ^BasicFileAttributes (UnixFileAttributes/getIfExists file)] (return attrs))
+          (catch UnixException e (.rethrowAsIOException e file)))))
+    (.readAttributesIfExists super path type options))
+
+  (method ^:protected getFileAttributeView ^DynamicFileAttributeView [this ^Path obj ^String name &
+                                                                      ^LinkOption/1 options]
+    (let [file (UnixPath/toUnixPath obj)
+          followLinks (Util/followLinks options)]
+      (cond
+        (.equals name "basic") (UnixFileAttributeViews/createBasicView file followLinks)
+        (.equals name "posix") (UnixFileAttributeViews/createPosixView file followLinks)
+        (.equals name "unix") (UnixFileAttributeViews/createUnixView file followLinks)
+        (.equals name "owner") (UnixFileAttributeViews/createOwnerView file followLinks))))
+
+  (method ^:public newFileChannel :throws [IOException] ^FileChannel [this ^Path obj
+                                                                      ^{:tag (Set (? extends OpenOption))} options
+                                                                      &
+                                                                      ^{:tag (array (FileAttribute ?))} attrs]
+    (let [file (UnixPath/toUnixPath obj)
+          mode (UnixFileModeAttribute/toUnixMode UnixFileModeAttribute/ALL_READWRITE attrs)]
+      (try
+        (UnixChannelFactory/newFileChannel file options mode)
+        (catch UnixException x (.rethrowAsIOException x file) nil))))
+
+  (method ^:public newAsynchronousFileChannel :throws [IOException] ^AsynchronousFileChannel [this
+                                                                                              ^Path obj
+                                                                                              ^{:tag (Set (? extends OpenOption))} options
+                                                                                              ^ExecutorService executor
+                                                                                              &
+                                                                                              ^{:tag (array (FileAttribute ?))} attrs]
+    (let [file (UnixPath/toUnixPath obj)
+          mode (UnixFileModeAttribute/toUnixMode UnixFileModeAttribute/ALL_READWRITE attrs)
+          ^ThreadPool pool (when (some? executor) (ThreadPool/wrap executor 0))]
+      (try
+        (UnixChannelFactory/newAsynchronousFileChannel file options mode pool)
+        (catch UnixException x (.rethrowAsIOException x file) nil))))
+
+  (method ^:public newByteChannel :throws [IOException] ^SeekableByteChannel [this ^Path obj
+                                                                              ^{:tag (Set (? extends OpenOption))} options
+                                                                              &
+                                                                              ^{:tag (array (FileAttribute ?))} attrs]
+    (.newFileChannel this obj options attrs))
+
+  (method implDelete :throws [IOException] ^boolean [this ^Path obj ^boolean failIfNotExists]
+    (let [file (UnixPath/toUnixPath obj)
+          ^:mutable ^UnixFileAttributes attrs nil]
+      (try
+        (set! attrs (UnixFileAttributes/get file false))
+        (if (.isDirectory attrs)
+            (UnixNativeDispatcher/rmdir file)
+            (UnixNativeDispatcher/unlink file))
+        true
+        (catch UnixException x
+          (if (and (not failIfNotExists) (== (.errno x) UnixConstants/ENOENT))
+              false
+              (do
+                (when (and (and (some? attrs) (.isDirectory attrs))
+                           (or (== (.errno x) UnixConstants/EEXIST)
+                               (== (.errno x) UnixConstants/ENOTEMPTY)))
+                  (throw (DirectoryNotEmptyException. (.getPathForExceptionMessage file))))
+                (.rethrowAsIOException x file)
+                false))))))
+
+  (method ^:public copy :throws [IOException] ^void [this ^Path source ^Path target &
+                                                     ^CopyOption/1 options]
+    (.copy theFileSystem (UnixPath/toUnixPath source) (UnixPath/toUnixPath target) options))
+
+  (method ^:public move :throws [IOException] ^void [this ^Path source ^Path target &
+                                                     ^CopyOption/1 options]
+    (.move theFileSystem (UnixPath/toUnixPath source) (UnixPath/toUnixPath target) options))
+
+  (method ^:public checkAccess :throws [IOException] ^void [this ^Path obj & ^AccessMode/1 modes]
+    (let [file (UnixPath/toUnixPath obj)
+          ^:mutable e false
+          ^:mutable r false
+          ^:mutable w false
+          ^:mutable x false]
+      (if (== (alength modes) 0)
+          (set! e true)
+          (for-each [^AccessMode mode modes]
+            (switch mode READ (set! r true) WRITE (set! w true) EXECUTE (set! x true))))
+      (let [^:mutable ^int mode 0]
+        (when (or e r) (set! mode (bit-or-int mode (if r UnixConstants/R_OK UnixConstants/F_OK))))
+        (when w (set! mode (bit-or-int mode UnixConstants/W_OK)))
+        (when x (set! mode (bit-or-int mode UnixConstants/X_OK)))
+        (let [^:mutable errno (UnixNativeDispatcher/access file mode)]
+          (when-not (== errno 0)
+            (when (== errno UnixConstants/ENOTDIR) (set! errno UnixConstants/ENOENT))
+            (.rethrowAsIOException (UnixException. errno) file))))))
+
+  (method ^:public isReadable ^boolean [this ^Path path]
+    (let [file (UnixPath/toUnixPath path)]
+      (== (UnixNativeDispatcher/access file UnixConstants/R_OK) 0)))
+
+  (method ^:public isWritable ^boolean [this ^Path path]
+    (let [file (UnixPath/toUnixPath path)]
+      (== (UnixNativeDispatcher/access file UnixConstants/W_OK) 0)))
+
+  (method ^:public isExecutable ^boolean [this ^Path path]
+    (let [file (UnixPath/toUnixPath path)]
+      (== (UnixNativeDispatcher/access file UnixConstants/X_OK) 0)))
+
+  (method ^:private lastFileKey :throws [UnixException] ^UnixFileKey [this ^:mutable ^UnixPath path]
+    (let [fileKeys (HashSet.)
+          ^:mutable ^UnixFileKey lastFileKey nil]
+      (while (some? path)
+        (let [attrs (UnixFileAttributes/getIfExists path false)]
+          (when (nil? attrs) (break))
+          (let [fileKey (.fileKey attrs)]
+            (when-not (.isSymbolicLink attrs) (break))
+            (when-not (.add fileKeys fileKey) (throw (UnixException. UnixConstants/ELOOP)))
+            (set! lastFileKey fileKey)
+            (let [target (UnixNativeDispatcher/readlink path)]
+              (set! path (UnixPath. theFileSystem target))))))
+      lastFileKey))
+
+  (method ^:public isSameFile :throws [IOException] ^boolean [this ^Path obj1 ^Path obj2]
+    (let [file1 (UnixPath/toUnixPath obj1)]
+      (if (.equals file1 obj2)
+          true
+          (do
+            (when (nil? obj2) (throw (NullPointerException.)))
+            (if-instance [^UnixPath file2 obj2]
+              (let [^:mutable ^UnixFileKey key1 nil]
+                (try
+                  (let [attrs (UnixFileAttributes/getIfExists file1)]
+                    (set! key1 (if (some? attrs) (.fileKey attrs) (.lastFileKey this file1))))
+                  (catch UnixException e (.rethrowAsIOException e file1) (return false)))
+                (if (nil? key1)
+                    false
+                    (let [^:mutable ^UnixFileKey key2 nil]
+                      (try
+                        (let [attrs (UnixFileAttributes/getIfExists file2)]
+                          (set! key2 (if (some? attrs) (.fileKey attrs) (.lastFileKey this file2))))
+                        (catch UnixException e (.rethrowAsIOException e file2) (return false)))
+                      (.equals key1 key2))))
+              false)))))
+
+  (method ^:public isHidden ^boolean [this ^Path obj]
+    (let [file (UnixPath/toUnixPath obj)
+          name (.getFileName file)]
+      (if (nil? name)
+          false
+          (let [^byte/1 path (if (.isEmpty name)
+                                 (.defaultDirectory (.getFileSystem name))
+                                 (.asByteArray name))]
+            (== (aget path 0) \.)))))
+
+  (method ^:abstract getFileStore :throws [IOException] ^FileStore [this ^UnixPath path])
+
+  (method ^:public getFileStore :throws [IOException] ^FileStore [this ^Path obj]
+    (let [file (UnixPath/toUnixPath obj)] (.getFileStore this file)))
+
+  (method ^:public createDirectory :throws [IOException] ^void [this ^Path obj &
+                                                                ^{:tag (array (FileAttribute ?))} attrs]
+    (let [dir (UnixPath/toUnixPath obj)
+          mode (UnixFileModeAttribute/toUnixMode UnixFileModeAttribute/ALL_PERMISSIONS attrs)]
+      (try
+        (UnixNativeDispatcher/mkdir dir mode)
+        (catch UnixException x
+          (when (== (.errno x) UnixConstants/EISDIR)
+            (throw (FileAlreadyExistsException. (.toString dir))))
+          (.rethrowAsIOException x dir)))))
+
+  (method ^:public newDirectoryStream :throws [IOException] ^{:tag (DirectoryStream Path)} [this
+                                                                                            ^Path obj
+                                                                                            ^{:tag (DirectoryStream$Filter (? super Path))} filter]
+    (let [dir (UnixPath/toUnixPath obj)]
+      (when (nil? filter) (throw (NullPointerException.)))
+      (when (or (not (UnixNativeDispatcher/openatSupported)) (== UnixConstants/O_NOFOLLOW 0))
+        (try
+          (let [ptr (UnixNativeDispatcher/opendir dir)]
+            (return (UnixDirectoryStream. dir ptr filter)))
+          (catch UnixException x
+            (when (== (.errno x) UnixConstants/ENOTDIR)
+              (throw (NotDirectoryException. (.getPathForExceptionMessage dir))))
+            (.rethrowAsIOException x dir))))
+      (let [^:mutable ^int dfd1 -1
+            ^:mutable ^int dfd2 -1
+            ^:mutable dp 0]
+        (try
+          (set! dfd1 (UnixNativeDispatcher/open dir UnixConstants/O_RDONLY 0))
+          (set! dfd2 (UnixNativeDispatcher/dup dfd1))
+          (set! dp (UnixNativeDispatcher/fdopendir dfd1))
+          (catch UnixException x
+            (let [^IOException ioe (if (== (.errno x) UnixConstants/ENOTDIR)
+                                       ^IOException (NotDirectoryException.
+                                                      (.getPathForExceptionMessage dir))
+                                       (.asIOException x dir))]
+              (when-not (== dfd1 -1)
+                (UnixNativeDispatcher/close dfd1
+                                            (lambda Function ^RuntimeException [^UnixException e]
+                                              nil)))
+              (when-not (== dfd2 -1)
+                (UnixNativeDispatcher/close dfd2
+                                            (lambda Function ^RuntimeException [^UnixException e]
+                                              nil)))
+              (throw ioe))))
+        (UnixSecureDirectoryStream. dir dp dfd2 filter))))
+
+  (method ^:public createSymbolicLink :throws [IOException] ^void [this ^Path obj1 ^Path obj2 &
+                                                                   ^{:tag (array (FileAttribute ?))} attrs]
+    (let [link (UnixPath/toUnixPath obj1)
+          target (UnixPath/toUnixPath obj2)]
+      (when (> (alength attrs) 0)
+        (UnixFileModeAttribute/toUnixMode 0 attrs)
+        (throw (UnsupportedOperationException.
+                 "Initial file attributes not supported when creating symbolic link")))
+      (try
+        (UnixNativeDispatcher/symlink (.asByteArray target) link)
+        (catch UnixException x (.rethrowAsIOException x link)))))
+
+  (method ^:public createLink :throws [IOException] ^void [this ^Path obj1 ^Path obj2]
+    (let [link (UnixPath/toUnixPath obj1)
+          existing (UnixPath/toUnixPath obj2)]
+      (try
+        (UnixNativeDispatcher/link existing link)
+        (catch UnixException x (.rethrowAsIOException x link existing)))))
+
+  (method ^:public readSymbolicLink :throws [IOException] ^Path [this ^Path obj1]
+    (let [link (UnixPath/toUnixPath obj1)]
+      (try
+        (let [target (UnixNativeDispatcher/readlink link)] (UnixPath. (.getFileSystem link) target))
+        (catch UnixException x
+          (when (== (.errno x) UnixConstants/EINVAL)
+            (throw (NotLinkException. (.getPathForExceptionMessage link))))
+          (.rethrowAsIOException x link)
+          nil))))
+
+  (method ^:public exists ^boolean [this ^Path path & ^LinkOption/1 options]
+    (if (Util/followLinks options)
+        (let [file (UnixPath/toUnixPath path)]
+          (== (UnixNativeDispatcher/access file UnixConstants/F_OK) 0))
+        (.exists super path options)))
+
+  (method getFileTypeDetector ^FileTypeDetector [this]
+    (anon AbstractFileTypeDetector []
+      (method ^:public implProbeContentType ^String [this ^Path file] nil)))
+
+  (method ^:final chain ^FileTypeDetector [this & ^:final ^AbstractFileTypeDetector/1 detectors]
+    (anon AbstractFileTypeDetector []
+      (method ^:protected implProbeContentType :throws [IOException] ^String [this ^Path file]
+        (for-each [^AbstractFileTypeDetector detector detectors]
+          (let [result (.implProbeContentType detector file)]
+            (when (and (some? result) (not (.isEmpty result))) (return result))))
+        nil)))
+
+  (method ^:public getSunPathForSocketFile ^byte/1 [this ^Path obj]
+    (let [file (UnixPath/toUnixPath obj)]
+      (if (.isEmpty file) EMPTY_PATH (.getByteArrayForSysCalls file)))))

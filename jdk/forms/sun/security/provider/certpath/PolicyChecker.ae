@@ -1,0 +1,528 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/PolicyChecker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.security.cert CertPathValidatorException
+                             Certificate
+                             CertificateException
+                             PKIXCertPathChecker
+                             PKIXReason
+                             PolicyNode
+                             PolicyQualifierInfo
+                             X509Certificate)
+        '(java.util Collection Collections HashSet Iterator List Set)
+        '(sun.security.util Debug KnownOIDs)
+        '(sun.security.x509 CertificatePoliciesExtension
+                            CertificatePolicyMap
+                            InhibitAnyPolicyExtension
+                            PKIXExtensions
+                            PolicyInformation
+                            X509CertImpl))
+
+(defclass PolicyChecker
+  :extends PKIXCertPathChecker
+
+  (field ^:private ^:final ^{:tag (Set String)} initPolicies)
+
+  (field ^:private ^:final ^int certPathLen)
+
+  (field ^:private ^:final ^boolean expPolicyRequired)
+
+  (field ^:private ^:final ^boolean polMappingInhibited)
+
+  (field ^:private ^:final ^boolean anyPolicyInhibited)
+
+  (field ^:private ^:final ^boolean rejectPolicyQualifiers)
+
+  (field ^:private ^PolicyNodeImpl rootNode)
+
+  (field ^:private ^int explicitPolicy)
+
+  (field ^:private ^int policyMapping)
+
+  (field ^:private ^int inhibitAnyPolicy)
+
+  (field ^:private ^int certIndex)
+
+  (field ^:private ^{:tag (Set String)} supportedExts)
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:static ^:final ^String ANY_POLICY (.value KnownOIDs/CE_CERT_POLICIES_ANY))
+
+  (constructor [this ^{:tag (Set String)} initialPolicies ^int certPathLen
+                ^boolean expPolicyRequired ^boolean polMappingInhibited ^boolean anyPolicyInhibited
+                ^boolean rejectPolicyQualifiers ^PolicyNodeImpl rootNode]
+    (if (.isEmpty initialPolicies)
+        (do
+          (set! (.-initPolicies this) (HashSet/newHashSet 1))
+          (.add (.-initPolicies this) ANY_POLICY))
+        (set! (.-initPolicies this) (HashSet. initialPolicies)))
+    (set! (.-certPathLen this) certPathLen)
+    (set! (.-expPolicyRequired this) expPolicyRequired)
+    (set! (.-polMappingInhibited this) polMappingInhibited)
+    (set! (.-anyPolicyInhibited this) anyPolicyInhibited)
+    (set! (.-rejectPolicyQualifiers this) rejectPolicyQualifiers)
+    (set! (.-rootNode this) rootNode))
+
+  (method ^:public init :throws [CertPathValidatorException] ^void [this ^boolean forward]
+    (when forward (throw (CertPathValidatorException. "forward checking not supported")))
+    (set! certIndex 1)
+    (set! explicitPolicy (if expPolicyRequired 0 (unchecked-add-int certPathLen 1)))
+    (set! policyMapping (if polMappingInhibited 0 (unchecked-add-int certPathLen 1)))
+    (set! inhibitAnyPolicy (if anyPolicyInhibited 0 (unchecked-add-int certPathLen 1))))
+
+  (method ^:public isForwardCheckingSupported ^boolean [this] false)
+
+  (method ^:public getSupportedExtensions ^{:tag (Set String)} [this]
+    (when (nil? supportedExts)
+      (set! supportedExts (HashSet/newHashSet 4))
+      (.add supportedExts (.toString PKIXExtensions/CertificatePolicies_Id))
+      (.add supportedExts (.toString PKIXExtensions/PolicyMappings_Id))
+      (.add supportedExts (.toString PKIXExtensions/PolicyConstraints_Id))
+      (.add supportedExts (.toString PKIXExtensions/InhibitAnyPolicy_Id))
+      (set! supportedExts (Collections/unmodifiableSet supportedExts)))
+    supportedExts)
+
+  (method ^:public check :throws [CertPathValidatorException] ^void [this ^Certificate cert
+                                                                     ^{:tag (Collection String)} unresCritExts]
+    (.checkPolicy this (cast X509Certificate cert))
+    (when (and (some? unresCritExts) (not (.isEmpty unresCritExts)))
+      (.remove unresCritExts (.toString PKIXExtensions/CertificatePolicies_Id))
+      (.remove unresCritExts (.toString PKIXExtensions/PolicyMappings_Id))
+      (.remove unresCritExts (.toString PKIXExtensions/PolicyConstraints_Id))
+      (.remove unresCritExts (.toString PKIXExtensions/InhibitAnyPolicy_Id))))
+
+  (method ^:private checkPolicy :throws [CertPathValidatorException] ^void [this
+                                                                            ^X509Certificate currCert]
+    (let [msg "certificate policies"]
+      (when (some? debug)
+        (.println debug (java-str "PolicyChecker.checkPolicy() ---checking " msg "..."))
+        (.println debug (java-str "PolicyChecker.checkPolicy() certIndex = " certIndex))
+        (.println debug
+                  (java-str "PolicyChecker.checkPolicy() BEFORE PROCESSING: explicitPolicy = "
+                            explicitPolicy))
+        (.println debug
+                  (java-str "PolicyChecker.checkPolicy() BEFORE PROCESSING: policyMapping = "
+                            policyMapping))
+        (.println debug
+                  (java-str "PolicyChecker.checkPolicy() BEFORE PROCESSING: inhibitAnyPolicy = "
+                            inhibitAnyPolicy))
+        (.println
+          debug
+          (java-str "PolicyChecker.checkPolicy() BEFORE PROCESSING: policyTree = " rootNode)))
+      (let [^:mutable ^X509CertImpl currCertImpl nil]
+        (try
+          (set! currCertImpl (X509CertImpl/toImpl currCert))
+          (catch CertificateException ce (throw (CertPathValidatorException. ce))))
+        (let [finalCert (== certIndex certPathLen)]
+          (set! rootNode
+                (PolicyChecker/processPolicies certIndex
+                                               initPolicies
+                                               explicitPolicy
+                                               policyMapping
+                                               inhibitAnyPolicy
+                                               rejectPolicyQualifiers
+                                               rootNode
+                                               currCertImpl
+                                               finalCert))
+          (when-not finalCert
+            (set! explicitPolicy
+                  (PolicyChecker/mergeExplicitPolicy explicitPolicy currCertImpl false))
+            (set! policyMapping (PolicyChecker/mergePolicyMapping policyMapping currCertImpl))
+            (set! inhibitAnyPolicy
+                  (PolicyChecker/mergeInhibitAnyPolicy inhibitAnyPolicy currCertImpl)))
+          (set! certIndex (unchecked-inc-int certIndex))
+          (when (some? debug)
+            (.println debug
+                      (java-str "PolicyChecker.checkPolicy() AFTER PROCESSING: explicitPolicy = "
+                                explicitPolicy))
+            (.println debug
+                      (java-str "PolicyChecker.checkPolicy() AFTER PROCESSING: policyMapping = "
+                                policyMapping))
+            (.println debug
+                      (java-str "PolicyChecker.checkPolicy() AFTER PROCESSING: inhibitAnyPolicy = "
+                                inhibitAnyPolicy))
+            (.println debug
+                      (java-str "PolicyChecker.checkPolicy() AFTER PROCESSING: policyTree = "
+                                rootNode))
+            (.println debug (java-str "PolicyChecker.checkPolicy() " msg " verified")))))))
+
+  (method ^:static mergeExplicitPolicy :throws [CertPathValidatorException] ^int [^:mutable ^int explicitPolicy
+                                                                                  ^X509CertImpl currCert
+                                                                                  ^boolean finalCert]
+    (when (and (> explicitPolicy 0) (not (X509CertImpl/isSelfIssued currCert)))
+      (set! explicitPolicy (unchecked-dec-int explicitPolicy)))
+    (let [polConstExt (.getPolicyConstraintsExtension currCert)]
+      (if (nil? polConstExt)
+          explicitPolicy
+          (let [require (.getRequire polConstExt)]
+            (when (some? debug)
+              (.println debug
+                        (java-str "PolicyChecker.mergeExplicitPolicy() require Index from cert = "
+                                  require)))
+            (cond
+              (not finalCert)
+                (when-not (== require -1)
+                  (when (or (== explicitPolicy -1) (< require explicitPolicy))
+                    (set! explicitPolicy require)))
+              (== require 0) (set! explicitPolicy require))
+            explicitPolicy))))
+
+  (method ^:static mergePolicyMapping :throws [CertPathValidatorException] ^int [^:mutable ^int policyMapping
+                                                                                 ^X509CertImpl currCert]
+    (when (and (> policyMapping 0) (not (X509CertImpl/isSelfIssued currCert)))
+      (set! policyMapping (unchecked-dec-int policyMapping)))
+    (let [polConstExt (.getPolicyConstraintsExtension currCert)]
+      (if (nil? polConstExt)
+          policyMapping
+          (let [inhibit (.getInhibit polConstExt)]
+            (when (some? debug)
+              (.println debug
+                        (java-str "PolicyChecker.mergePolicyMapping() inhibit Index from cert = "
+                                  inhibit)))
+            (when-not (== inhibit -1)
+              (when (or (== policyMapping -1) (< inhibit policyMapping))
+                (set! policyMapping inhibit)))
+            policyMapping))))
+
+  (method ^:static mergeInhibitAnyPolicy :throws [CertPathValidatorException] ^int [^:mutable ^int inhibitAnyPolicy
+                                                                                    ^X509CertImpl currCert]
+    (when (and (> inhibitAnyPolicy 0) (not (X509CertImpl/isSelfIssued currCert)))
+      (set! inhibitAnyPolicy (unchecked-dec-int inhibitAnyPolicy)))
+    (let [inhAnyPolExt (cast InhibitAnyPolicyExtension
+                             (.getExtension currCert PKIXExtensions/InhibitAnyPolicy_Id))]
+      (if (nil? inhAnyPolExt)
+          inhibitAnyPolicy
+          (let [skipCerts (.getSkipCerts inhAnyPolExt)]
+            (when (some? debug)
+              (.println debug
+                        (java-str
+                          "PolicyChecker.mergeInhibitAnyPolicy() skipCerts Index from cert = "
+                          skipCerts)))
+            (when-not (== skipCerts -1)
+              (when (< skipCerts inhibitAnyPolicy) (set! inhibitAnyPolicy skipCerts)))
+            inhibitAnyPolicy))))
+
+  (method ^:static processPolicies :throws [CertPathValidatorException] ^PolicyNodeImpl [^int certIndex
+                                                                                         ^{:tag (Set String)} initPolicies
+                                                                                         ^:mutable ^int explicitPolicy
+                                                                                         ^int policyMapping
+                                                                                         ^int inhibitAnyPolicy
+                                                                                         ^boolean rejectPolicyQualifiers
+                                                                                         ^PolicyNodeImpl origRootNode
+                                                                                         ^X509CertImpl currCert
+                                                                                         ^boolean finalCert]
+    (let [^:mutable policiesCritical false
+          ^:mutable ^{:tag (List PolicyInformation)} policyInfo nil
+          ^:mutable ^PolicyNodeImpl rootNode nil
+          ^:mutable ^{:tag (Set PolicyQualifierInfo)} anyQuals (HashSet.)]
+      (if (nil? origRootNode) (set! rootNode nil) (set! rootNode (.copyTree origRootNode)))
+      (let [currCertPolicies (.getCertificatePoliciesExtension currCert)]
+        (if (and (some? currCertPolicies) (some? rootNode))
+            (do
+              (set! policiesCritical (.isCritical currCertPolicies))
+              (when (some? debug)
+                (.println debug
+                          (java-str "PolicyChecker.processPolicies() policiesCritical = "
+                                    policiesCritical)))
+              (set! policyInfo (.getCertPolicies currCertPolicies))
+              (when (some? debug)
+                (.println debug
+                          (java-str "PolicyChecker.processPolicies() rejectPolicyQualifiers = "
+                                    rejectPolicyQualifiers)))
+              (let [^:mutable foundAnyPolicy false]
+                (for-each [^PolicyInformation curPolInfo policyInfo]
+                  (let [curPolicy (.toString (.getIdentifier (.getPolicyIdentifier curPolInfo)))]
+                    (if (.equals curPolicy ANY_POLICY)
+                        (do
+                          (set! foundAnyPolicy true)
+                          (set! anyQuals (.getPolicyQualifiers curPolInfo)))
+                        (do
+                          (when (some? debug)
+                            (.println debug
+                                      (java-str
+                                        "PolicyChecker.processPolicies() processing policy: "
+                                        curPolicy)))
+                          (let [^{:tag (Set PolicyQualifierInfo)} pQuals (.getPolicyQualifiers
+                                                                           curPolInfo)]
+                            (when (and (and (not (.isEmpty pQuals)) rejectPolicyQualifiers)
+                                       policiesCritical)
+                              (throw (CertPathValidatorException.
+                                       "critical policy qualifiers present in certificate"
+                                       nil
+                                       nil
+                                       -1
+                                       PKIXReason/INVALID_POLICY)))
+                            (let [foundMatch (PolicyChecker/processParents
+                                               certIndex
+                                               policiesCritical
+                                               rejectPolicyQualifiers
+                                               rootNode
+                                               curPolicy
+                                               pQuals
+                                               false)]
+                              (when-not foundMatch
+                                (PolicyChecker/processParents
+                                  certIndex
+                                  policiesCritical
+                                  rejectPolicyQualifiers
+                                  rootNode
+                                  curPolicy
+                                  pQuals
+                                  true))))))))
+                (when foundAnyPolicy
+                  (when (or (> inhibitAnyPolicy 0)
+                            (and (not finalCert) (X509CertImpl/isSelfIssued currCert)))
+                    (when (some? debug)
+                      (.println debug
+                                (java-str "PolicyChecker.processPolicies() processing policy: "
+                                          ANY_POLICY)))
+                    (PolicyChecker/processParents
+                      certIndex
+                      policiesCritical
+                      rejectPolicyQualifiers
+                      rootNode
+                      ANY_POLICY
+                      anyQuals
+                      true)))
+                (.prune rootNode certIndex)
+                (when-not (.hasNext (.getChildren rootNode)) (set! rootNode nil))))
+            (when (nil? currCertPolicies)
+              (when (some? debug)
+                (.println debug "PolicyChecker.processPolicies() no policies present in cert"))
+              (set! rootNode nil)))
+        (when (some? rootNode)
+          (when-not finalCert
+            (set! rootNode
+                  (PolicyChecker/processPolicyMappings
+                    currCert
+                    certIndex
+                    policyMapping
+                    rootNode
+                    policiesCritical
+                    anyQuals))))
+        (when (and (some? rootNode) (not (.contains initPolicies ANY_POLICY)))
+          (set! rootNode
+                (PolicyChecker/removeInvalidNodes rootNode certIndex initPolicies currCertPolicies))
+          (when (and (some? rootNode) finalCert)
+            (set! rootNode (PolicyChecker/rewriteLeafNodes certIndex initPolicies rootNode))))
+        (when finalCert
+          (set! explicitPolicy (PolicyChecker/mergeExplicitPolicy explicitPolicy currCert true)))
+        (when (and (== explicitPolicy 0) (nil? rootNode))
+          (throw (CertPathValidatorException.
+                   "non-null policy tree required and policy tree is null"
+                   nil
+                   nil
+                   -1
+                   PKIXReason/INVALID_POLICY)))
+        rootNode)))
+
+  (method ^:private ^:static rewriteLeafNodes ^PolicyNodeImpl [^int certIndex
+                                                               ^{:tag (Set String)} initPolicies
+                                                               ^:mutable ^PolicyNodeImpl rootNode]
+    (let [^{:tag (Set PolicyNodeImpl)} anyNodes (.getPolicyNodesValid rootNode certIndex ANY_POLICY)]
+      (if (.isEmpty anyNodes)
+          rootNode
+          (let [anyNode (cast PolicyNodeImpl (.next (.iterator anyNodes)))
+                parentNode (cast PolicyNodeImpl (.getParent anyNode))]
+            (.deleteChild parentNode anyNode)
+            (let [^{:tag (Set String)} initial (HashSet. initPolicies)]
+              (for-each [^PolicyNodeImpl node (.getPolicyNodes rootNode certIndex)]
+                (.remove initial (.getValidPolicy node)))
+              (if (.isEmpty initial)
+                  (do
+                    (.prune rootNode certIndex)
+                    (when-not (.hasNext (.getChildren rootNode)) (set! rootNode nil)))
+                  (let [anyCritical (.isCritical anyNode)
+                        ^{:tag (Set PolicyQualifierInfo)} anyQualifiers (.getPolicyQualifiers
+                                                                          anyNode)]
+                    (for-each [^String policy initial]
+                      (let [^{:tag (Set String)} expectedPolicies (Collections/singleton policy)]
+                        (PolicyNodeImpl. parentNode
+                                         policy
+                                         anyQualifiers
+                                         anyCritical
+                                         expectedPolicies
+                                         false)))))
+              rootNode)))))
+
+  (method ^:private ^:static processParents ^boolean [^int certIndex ^boolean policiesCritical
+                                                      ^boolean rejectPolicyQualifiers
+                                                      ^PolicyNodeImpl rootNode ^String curPolicy
+                                                      ^{:tag (Set PolicyQualifierInfo)} pQuals
+                                                      ^boolean matchAny]
+    (let [^:mutable foundMatch false]
+      (when (some? debug)
+        (.println debug (java-str "PolicyChecker.processParents(): matchAny = " matchAny)))
+      (let [^{:tag (Set PolicyNodeImpl)} parentNodes (.getPolicyNodesExpected
+                                                       rootNode
+                                                       (unchecked-subtract-int certIndex 1)
+                                                       curPolicy
+                                                       matchAny)]
+        (for-each [^PolicyNodeImpl curParent parentNodes]
+          (when (some? debug)
+            (.println debug
+                      (java-str "PolicyChecker.processParents() found parent:\n"
+                                (.asString curParent))))
+          (set! foundMatch true)
+          (let [^:mutable ^{:tag (Set String)} curExpPols nil]
+            (if (.equals curPolicy ANY_POLICY)
+                (let [^{:tag (Set String)} parExpPols (.getExpectedPolicies curParent)]
+                  (label :parentExplicitPolicies
+                    (for-each [^String curParExpPol parExpPols]
+                      (let [^{:tag (Iterator PolicyNodeImpl)} childIter (.getChildren curParent)]
+                        (while (.hasNext childIter)
+                          (let [childNode (cast PolicyNodeImpl (.next childIter))
+                                childPolicy (.getValidPolicy childNode)]
+                            (when (.equals curParExpPol childPolicy)
+                              (when (some? debug)
+                                (.println
+                                  debug
+                                  (java-str
+                                    childPolicy
+                                    " in parent's expected policy set already appears in child node")))
+                              (continue :parentExplicitPolicies))))
+                        (let [^{:tag (Set String)} expPols (HashSet.)]
+                          (.add expPols curParExpPol)
+                          (PolicyNodeImpl. curParent
+                                           curParExpPol
+                                           pQuals
+                                           policiesCritical
+                                           expPols
+                                           false))))))
+                (do
+                  (set! curExpPols (HashSet.))
+                  (.add curExpPols curPolicy)
+                  (PolicyNodeImpl. curParent curPolicy pQuals policiesCritical curExpPols false)))))
+        foundMatch)))
+
+  (method ^:private ^:static processPolicyMappings :throws [CertPathValidatorException] ^PolicyNodeImpl [^X509CertImpl currCert
+                                                                                                         ^int certIndex
+                                                                                                         ^int policyMapping
+                                                                                                         ^:mutable ^PolicyNodeImpl rootNode
+                                                                                                         ^boolean policiesCritical
+                                                                                                         ^{:tag (Set PolicyQualifierInfo)} anyQuals]
+    (let [polMappingsExt (.getPolicyMappingsExtension currCert)]
+      (if (nil? polMappingsExt)
+          rootNode
+          (do
+            (when (some? debug)
+              (.println debug "PolicyChecker.processPolicyMappings() inside policyMapping check"))
+            (let [^:mutable ^{:tag (List CertificatePolicyMap)} maps nil]
+              (set! maps (.getMaps polMappingsExt))
+              (let [^:mutable childDeleted false]
+                (for-each [^CertificatePolicyMap polMap maps]
+                  (let [issuerDomain (.toString (.getIdentifier (.getIssuerIdentifier polMap)))
+                        subjectDomain (.toString (.getIdentifier (.getSubjectIdentifier polMap)))]
+                    (when (some? debug)
+                      (.println debug
+                                (java-str "PolicyChecker.processPolicyMappings() issuerDomain = "
+                                          issuerDomain))
+                      (.println debug
+                                (java-str "PolicyChecker.processPolicyMappings() subjectDomain = "
+                                          subjectDomain)))
+                    (when (.equals issuerDomain ANY_POLICY)
+                      (throw (CertPathValidatorException.
+                               "encountered an issuerDomainPolicy of ANY_POLICY"
+                               nil
+                               nil
+                               -1
+                               PKIXReason/INVALID_POLICY)))
+                    (when (.equals subjectDomain ANY_POLICY)
+                      (throw (CertPathValidatorException.
+                               "encountered a subjectDomainPolicy of ANY_POLICY"
+                               nil
+                               nil
+                               -1
+                               PKIXReason/INVALID_POLICY)))
+                    (let [^{:tag (Set PolicyNodeImpl)} validNodes (.getPolicyNodesValid
+                                                                    rootNode
+                                                                    certIndex
+                                                                    issuerDomain)]
+                      (cond
+                        (not (.isEmpty validNodes))
+                          (for-each [^PolicyNodeImpl curNode validNodes]
+                            (cond
+                              (or (> policyMapping 0) (== policyMapping -1))
+                                (.addExpectedPolicy curNode subjectDomain)
+                              (== policyMapping 0)
+                                (let [parentNode (cast PolicyNodeImpl (.getParent curNode))]
+                                  (when (some? debug)
+                                    (.println
+                                      debug
+                                      (java-str
+                                        "PolicyChecker.processPolicyMappings() before deleting: policy tree = "
+                                        rootNode)))
+                                  (.deleteChild parentNode curNode)
+                                  (set! childDeleted true)
+                                  (when (some? debug)
+                                    (.println
+                                      debug
+                                      (java-str
+                                        "PolicyChecker.processPolicyMappings() after deleting: policy tree = "
+                                        rootNode))))))
+                        (or (> policyMapping 0) (== policyMapping -1))
+                          (let [^{:tag (Set PolicyNodeImpl)} validAnyNodes (.getPolicyNodesValid
+                                                                             rootNode
+                                                                             certIndex
+                                                                             ANY_POLICY)]
+                            (for-each [^PolicyNodeImpl curAnyNode validAnyNodes]
+                              (let [curAnyNodeParent (cast PolicyNodeImpl (.getParent curAnyNode))
+                                    ^{:tag (Set String)} expPols (HashSet.)]
+                                (.add expPols subjectDomain)
+                                (PolicyNodeImpl.
+                                  curAnyNodeParent
+                                  issuerDomain
+                                  anyQuals
+                                  policiesCritical
+                                  expPols
+                                  true))))))))
+                (when childDeleted
+                  (.prune rootNode certIndex)
+                  (when-not (.hasNext (.getChildren rootNode))
+                    (when (some? debug) (.println debug "setting rootNode to null"))
+                    (set! rootNode nil)))
+                rootNode))))))
+
+  (method ^:private ^:static removeInvalidNodes :throws [CertPathValidatorException] ^PolicyNodeImpl [^:mutable ^PolicyNodeImpl rootNode
+                                                                                                      ^int certIndex
+                                                                                                      ^{:tag (Set String)} initPolicies
+                                                                                                      ^CertificatePoliciesExtension currCertPolicies]
+    (let [^{:tag (List PolicyInformation)} policyInfo (.getCertPolicies currCertPolicies)
+          ^:mutable childDeleted false]
+      (for-each [^PolicyInformation curPolInfo policyInfo]
+        (let [curPolicy (.toString (.getIdentifier (.getPolicyIdentifier curPolInfo)))]
+          (when (some? debug)
+            (.println debug
+                      (java-str "PolicyChecker.processPolicies() processing policy second time: "
+                                curPolicy)))
+          (let [^{:tag (Set PolicyNodeImpl)} validNodes (.getPolicyNodesValid
+                                                          rootNode
+                                                          certIndex
+                                                          curPolicy)]
+            (for-each [^PolicyNodeImpl curNode validNodes]
+              (let [parentNode (cast PolicyNodeImpl (.getParent curNode))]
+                (when (.equals (.getValidPolicy parentNode) ANY_POLICY)
+                  (when (and (not (.contains initPolicies curPolicy))
+                             (not (.equals curPolicy ANY_POLICY)))
+                    (when (some? debug)
+                      (.println debug
+                                (java-str
+                                  "PolicyChecker.processPolicies() before deleting: policy tree = "
+                                  rootNode)))
+                    (.deleteChild parentNode curNode)
+                    (set! childDeleted true)
+                    (when (some? debug)
+                      (.println debug
+                                (java-str
+                                  "PolicyChecker.processPolicies() after deleting: policy tree = "
+                                  rootNode))))))))))
+      (when childDeleted
+        (.prune rootNode certIndex)
+        (when-not (.hasNext (.getChildren rootNode)) (set! rootNode nil)))
+      rootNode))
+
+  (method getPolicyTree ^PolicyNode [this]
+    (when (some? rootNode)
+      (let [policyTree (.copyTree rootNode)] (.setImmutable policyTree) policyTree))))

@@ -57,12 +57,14 @@ oracle_make() {  # PIN DIR IDS CMD HOST
   [ -d "$dir/$name" ] || { echo "oracle: no $dir/$name to pack" >&2; return 1; }
   [ -s "$ids" ] || { echo "oracle: no members listed for $name ($ids)" >&2; return 1; }
   # every file under DIR/NAME is a listed member, and every listed member is there
-  (cd "$dir/$name" && find . -type f -printf '%P\n' | LC_ALL=C sort) > "$TMPDIR/oracle-make.files"
-  awk -F'\t' '{id=$1; sub(/^\//, "", id); print id}' "$ids" | LC_ALL=C sort > "$TMPDIR/oracle-make.ids"
-  if ! cmp -s "$TMPDIR/oracle-make.files" "$TMPDIR/oracle-make.ids"; then
+  local w; w=$(mktemp -d "$TMPDIR/oracle-make.XXXXXX") || return 1
+  (cd "$dir/$name" && find . -type f -printf '%P\n' | LC_ALL=C sort) > "$w/files"
+  awk -F'\t' '{id=$1; sub(/^\//, "", id); print id}' "$ids" | LC_ALL=C sort > "$w/ids"
+  if ! cmp -s "$w/files" "$w/ids"; then
     echo "oracle: $dir/$name's files are not the listed members:" >&2
-    diff "$TMPDIR/oracle-make.ids" "$TMPDIR/oracle-make.files" | head -5 >&2; return 1
+    diff "$w/ids" "$w/files" | head -5 >&2; rm -rf "$w"; return 1
   fi
+  rm -rf "$w"
   mkdir -p "$store/$name" "$(dirname "$pin")"
   oracle_tar "$dir" "$name" | xz -9e -T1 -c > "$store/$name/new.$$" || { rm -f "$store/$name/new.$$"; return 1; }
   sha=$(sha256sum < "$store/$name/new.$$" | cut -c1-64)
@@ -81,15 +83,18 @@ oracle_make() {  # PIN DIR IDS CMD HOST
 }
 
 oracle_check_members() {  # DIR MANIFEST: every member of the manifest in DIR with its digest and size, no other file
-  local d=$1 man=$2 st=0
-  awk -F'\t' '!/^#/ && NF {id=$1; sub(/^\//, "", id); print $3 "  " id}' "$man" > "$TMPDIR/oracle-check.sums"
-  (cd "$d" && sha256sum -c --quiet --strict "$TMPDIR/oracle-check.sums") > "$TMPDIR/oracle-check.out" 2>&1 || st=1
-  (cd "$d" && find . -type f -printf '%P\n' | LC_ALL=C sort) > "$TMPDIR/oracle-check.files"
-  awk '{print $2}' "$TMPDIR/oracle-check.sums" | LC_ALL=C sort > "$TMPDIR/oracle-check.ids"
-  if ! cmp -s "$TMPDIR/oracle-check.files" "$TMPDIR/oracle-check.ids"; then
-    echo "members not in the manifest: $(comm -13 "$TMPDIR/oracle-check.ids" "$TMPDIR/oracle-check.files" | head -3 | tr '\n' ' ')" >> "$TMPDIR/oracle-check.out"; st=1
+  local d=$1 man=$2 st=0 w
+  # a private scratch per call: steps that unpack at once share TMPDIR (night 13's hsi-check, beside haskell-lib-check)
+  w=$(mktemp -d "$TMPDIR/oracle-check.XXXXXX") || return 1
+  awk -F'\t' '!/^#/ && NF {id=$1; sub(/^\//, "", id); print $3 "  " id}' "$man" > "$w/sums"
+  (cd "$d" && sha256sum -c --quiet --strict "$w/sums") > "$w/out" 2>&1 || st=1
+  (cd "$d" && find . -type f -printf '%P\n' | LC_ALL=C sort) > "$w/files"
+  awk '{print $2}' "$w/sums" | LC_ALL=C sort > "$w/ids"
+  if ! cmp -s "$w/files" "$w/ids"; then
+    echo "members not in the manifest: $(comm -13 "$w/ids" "$w/files" | head -3 | tr '\n' ' ')" >> "$w/out"; st=1
   fi
-  [ $st = 0 ] || head -5 "$TMPDIR/oracle-check.out" >&2
+  [ $st = 0 ] || head -5 "$w/out" >&2
+  rm -rf "$w"
   return $st
 }
 
@@ -104,7 +109,7 @@ oracle_unpack() {  # PIN: prints the directory holding NAME/
     got=$(sha256sum < "$pack" | cut -c1-64)
     [ "$got" = "$sha" ] || { echo "oracle: $pack is $got, $pin pins $sha: refused" >&2; return 1; }
     rm -rf "$u.$$"; mkdir -p "$u.$$"
-    xz -dc "$pack" | tar -C "$u.$$" -xf - || { rm -rf "$u.$$"; echo "oracle: cannot unpack $pack" >&2; return 1; }
+    xz -dc "$pack" | tar -C "$u.$$" -xmf - || { rm -rf "$u.$$"; echo "oracle: cannot unpack $pack" >&2; return 1; }
     mkdir -p "$u"; [ -d "$u/$name" ] || mv "$u.$$/$name" "$u/$name"; rm -rf "$u.$$"
   fi
   # the members checked at every unpack (a tampered member, one byte flipped, is refused: ORS7 (a), the control

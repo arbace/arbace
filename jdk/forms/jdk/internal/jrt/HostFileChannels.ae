@@ -1,0 +1,115 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/jrt/HostFileChannels.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.jrt)
+
+(import '(java.io File FileDescriptor IOException)
+        '(java.nio ByteBuffer MappedByteBuffer)
+        '(java.nio.channels FileLock OverlappingFileLockException)
+        '(java.util ArrayList HashMap Iterator List Map))
+
+(defclass ^:public ^:final HostFileChannels
+  (constructor ^:private [this])
+
+  (method ^:public ^:static pread :throws [IOException] ^int [^FileDescriptor fd ^long pos ^byte/1 b
+                                                              ^int off ^int len]
+    (locking fd
+      (let [h (HostFiles/handle fd)
+            saved (HostFiles/position h)]
+        (try (HostFiles/seek h pos) (HostFiles/read h b off len) (finally (HostFiles/seek h saved))))))
+
+  (method ^:public ^:static pwrite :throws [IOException] ^void [^FileDescriptor fd ^long pos
+                                                                ^byte/1 b ^int off ^int len]
+    (locking fd
+      (let [h (HostFiles/handle fd)
+            saved (HostFiles/position h)]
+        (try
+          (HostFiles/seek h pos)
+          (HostFiles/write h b off len)
+          (finally (HostFiles/seek h saved))))))
+
+  (field ^:private ^:static ^:final ^{:tag (Map Object (List FileLock))} locks (HashMap.))
+
+  (method ^:public ^:static lockKey [^FileDescriptor fd ^String path]
+    (if (nil? path) ^Object fd ^Object (.getAbsolutePath (File. path))))
+
+  (method ^:public ^:static addLock ^void [key ^FileLock fl]
+    (locking locks
+      (let [^:mutable ^{:tag (List FileLock)} list (cast List (.get locks key))]
+        (when (nil? list) (set! list (ArrayList.)) (.put locks key list))
+        (for-each [^FileLock l list]
+          (when (.overlaps l (.position fl) (.size fl)) (throw (OverlappingFileLockException.))))
+        (.add list fl))))
+
+  (method ^:public ^:static removeLock ^void [key ^FileLock fl]
+    (locking locks
+      (let [^{:tag (List FileLock)} list (cast List (.get locks key))]
+        (when (some? list) (.remove list fl) (when (.isEmpty list) (.remove locks key))))))
+
+  (method ^:public ^:static removeLocks ^{:tag (List FileLock)} [key ch]
+    (let [^{:tag (List FileLock)} out (ArrayList.)]
+      (locking locks
+        (let [^{:tag (List FileLock)} list (cast List (.get locks key))]
+          (when (some? list)
+            (loop [^{:tag (Iterator FileLock)} i (.iterator list)]
+              (when (.hasNext i)
+                (let [l (cast FileLock (.next i))]
+                  (if (identical? (.acquiredBy l) ch)
+                      (do (.add out l) (.remove i) (recur i))
+                      (recur i)))))
+            (when (.isEmpty list) (.remove locks key)))))
+      out))
+
+  (defclass ^:public ^:static ^:final Mapping
+    (field ^:private ^:final ^FileDescriptor fd)
+
+    (field ^:private ^:final ^String path)
+
+    (field ^:private ^:final ^long position)
+
+    (field ^:private ^:final ^boolean writeBack)
+
+    (constructor ^:public [this ^FileDescriptor fd ^String path ^long position ^boolean writeBack]
+      (set! (.-fd this) fd)
+      (set! (.-path this) path)
+      (set! (.-position this) position)
+      (set! (.-writeBack this) writeBack))
+
+    (method ^:public fd ^FileDescriptor [this] fd)
+
+    (method ^:public force :throws [IOException] ^void [this ^byte/1 hb ^int index ^int len]
+      (when-not (or (not writeBack) (<= len 0))
+        (cond
+          (.valid fd)
+            (locking fd
+              (let [h (HostFiles/handle fd)
+                    n (.clip this (HostFiles/length h) index len)]
+                (when (> n 0)
+                  (HostFileChannels/pwrite fd
+                                           (unchecked-add position index)
+                                           hb
+                                           index
+                                           (unchecked-int n)))))
+          (some? path)
+            (let [h (HostFiles/open path HostFiles/READ_WRITE)]
+              (try
+                (let [n (.clip this (HostFiles/length h) index len)]
+                  (when (> n 0)
+                    (HostFiles/seek h (unchecked-add position index))
+                    (HostFiles/write h hb index (unchecked-int n))))
+                (finally (HostFiles/close h)))))))
+
+    (method ^:private clip ^long [this ^long size ^int index ^int len]
+      (let [end (Math/min size (unchecked-add (unchecked-add position index) len))]
+        (unchecked-subtract end (unchecked-add position index)))))
+
+  (defclass ^:public ^:interface MappedBuffers
+    (method map ^MappedByteBuffer [this ^byte/1 contents ^Mapping m ^boolean readOnly]))
+
+  (field ^:private ^:static ^:volatile ^MappedBuffers mappedBuffers)
+
+  (method ^:public ^:static setMappedBuffers ^void [^MappedBuffers mb]
+    (set! mappedBuffers mb))
+
+  (method ^:public ^:static map ^MappedByteBuffer [^byte/1 contents ^Mapping m ^boolean readOnly]
+    (when (nil? mappedBuffers) (ByteBuffer/allocateDirect 0))
+    (.map mappedBuffers contents m readOnly)))

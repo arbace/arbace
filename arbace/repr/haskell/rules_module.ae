@@ -1,0 +1,661 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Parser.y.source's
+;; actions of the identifiers, Backpack, the module header, the export and import lists, the
+;; fixity declarations' parts, the Boolean formulas, the names, the literals and the layout's close,
+;; and GHC/Parser/PostProcess.hs's import and export helpers, whose notice follows (LICENSE.md,
+;; "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.rules-module
+  "Parser.y's actions (doc/haskell/NATIVE.md) of the identifiers, Backpack (not reachable from a
+  module's parse: its productions build nothing), the module header and body, the export and
+  import lists, the fixity declarations' prec, infix and ops, the Boolean formulas of MINIMAL, the
+  data constructors', type constructors', operators' and variables' names, the literals, the
+  layout's close (the parse-error(t) rule: Happy's error token, popContext), modid, commas and
+  bars; with PostProcess's import and export helpers (mkModuleImpExp, mkImpExpSubSpec,
+  checkImportDecl). Values follow Parser.y's types in arbace.repr.haskell.ast's representation."
+  (:require [arbace.repr.haskell.ast :as a :refer [defrule L unLoc getLoc gl comb2 comb3 comb6 sL1 sLL noLoc nx con just maybe tuple]]
+            [arbace.repr.haskell.lex :as lx]
+            [arbace.repr.haskell.post :as pp]
+            [arbace.string :as str]))
+
+(defn- tv "a token's value" [t] (nth t 1))
+
+(defn- built-in
+  "The Exact names of built-in syntax (GHC.Builtin.Types, getOccString of their Name)"
+  [what & [n]]
+  (case what
+    :unit-tycon (a/exact 'tc "Unit")
+    :unboxed-unit-tycon (a/exact 'tc "Unit#")
+    :list-tycon (a/exact 'tc "List")
+    :fun-tycon (a/exact 'tc "->")
+    :unit-datacon (a/exact 'data "()")
+    :nil-datacon (a/exact 'data "[]")
+    :cons-datacon (a/exact 'data ":")
+    :unboxed-unit-datacon (a/exact 'data "(##)")
+    :tuple-tycon (a/exact 'tc (case (long n) 0 "Unit" 1 "Solo" (str "Tuple" n)))
+    :unboxed-tuple-tycon (a/exact 'tc (case (long n) 0 "Unit#" 1 "Solo#" (str "Tuple" n "#")))
+    :tuple-datacon (a/exact 'data (case (long n) 0 "()" 1 "MkSolo" (str "(" (apply str (repeat (dec n) ",")) ")")))
+    :unboxed-tuple-datacon (a/exact 'data (case (long n) 0 "(##)" 1 "MkSolo#" (str "(#" (apply str (repeat (dec n) ",")) "#)")))
+    :sum-tycon (a/exact 'tc (str "Sum" n "#"))))
+
+(def built-in-name built-in)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Identifiers (an entry point)
+
+(defrule "identifier" "qvar" [ps $1] $1)
+(defrule "identifier" "qcon" [ps $1] $1)
+(defrule "identifier" "qvarop" [ps $1] $1)
+(defrule "identifier" "qconop" [ps $1] $1)
+(defrule "identifier" "'->'" [ps $1] (sLL $1 $1 (built-in :fun-tycon)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Backpack (its own entry point; nothing of a module's parse reaches it)
+
+(defn- backpack [] (pp/fatal! "Backpack files are not read by the native reader" nil))
+(defrule "backpack" "implicit_top units close" [ps $1 $2 $3] (backpack))
+(defrule "backpack" "'{' units '}'" [ps $1 $2 $3] (backpack))
+(defrule "units" "units ';' unit" [ps $1 $2 $3] (backpack))
+(defrule "units" "units ';'" [ps $1 $2] (backpack))
+(defrule "units" "unit" [ps $1] (backpack))
+(defrule "unit" "'unit' pkgname 'where' unitbody" [ps $1 $2 $3 $4] (backpack))
+(defrule "unitid" "pkgname" [ps $1] (backpack))
+(defrule "unitid" "pkgname '[' msubsts ']'" [ps $1 $2 $3 $4] (backpack))
+(defrule "msubsts" "msubsts ',' msubst" [ps $1 $2 $3] (backpack))
+(defrule "msubsts" "msubsts ','" [ps $1 $2] (backpack))
+(defrule "msubsts" "msubst" [ps $1] (backpack))
+(defrule "msubst" "modid '=' moduleid" [ps $1 $2 $3] (backpack))
+(defrule "msubst" "modid VARSYM modid VARSYM" [ps $1 $2 $3 $4] (backpack))
+(defrule "moduleid" "VARSYM modid VARSYM" [ps $1 $2 $3] (backpack))
+(defrule "moduleid" "unitid ':' modid" [ps $1 $2 $3] (backpack))
+(defrule "pkgname" "STRING" [ps $1] (backpack))
+(defrule "pkgname" "litpkgname" [ps $1] (backpack))
+(defrule "litpkgname_segment" "VARID" [ps $1] (backpack))
+(defrule "litpkgname_segment" "CONID" [ps $1] (backpack))
+(defrule "litpkgname_segment" "special_id" [ps $1] (backpack))
+(defrule "HYPHEN" "'-'" [ps $1] nil)
+(defrule "HYPHEN" "PREFIX_MINUS" [ps $1] nil)
+(defrule "HYPHEN" "VARSYM" [ps $1] nil)
+(defrule "litpkgname" "litpkgname_segment" [ps $1] (backpack))
+(defrule "litpkgname" "litpkgname_segment HYPHEN litpkgname" [ps $1 $2 $3] (backpack))
+(defrule "mayberns" "" [ps] (backpack))
+(defrule "mayberns" "'(' rns ')'" [ps $1 $2 $3] (backpack))
+(defrule "rns" "rns ',' rn" [ps $1 $2 $3] (backpack))
+(defrule "rns" "rns ','" [ps $1 $2] (backpack))
+(defrule "rns" "rn" [ps $1] (backpack))
+(defrule "rn" "modid 'as' modid" [ps $1 $2 $3] (backpack))
+(defrule "rn" "modid" [ps $1] (backpack))
+(defrule "unitbody" "'{' unitdecls '}'" [ps $1 $2 $3] (backpack))
+(defrule "unitbody" "vocurly unitdecls close" [ps $1 $2 $3] (backpack))
+(defrule "unitdecls" "unitdecls ';' unitdecl" [ps $1 $2 $3] (backpack))
+(defrule "unitdecls" "unitdecls ';'" [ps $1 $2] (backpack))
+(defrule "unitdecls" "unitdecl" [ps $1] (backpack))
+(defrule "unitdecl" "'module' maybe_src modid maybe_warning_pragma maybeexports 'where' body" [ps $1 $2 $3 $4 $5 $6 $7] (backpack))
+(defrule "unitdecl" "'signature' modid maybe_warning_pragma maybeexports 'where' body" [ps $1 $2 $3 $4 $5 $6] (backpack))
+(defrule "unitdecl" "'dependency' unitid mayberns" [ps $1 $2 $3] (backpack))
+(defrule "unitdecl" "'dependency' 'signature' unitid" [ps $1 $2 $3] (backpack))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The module header
+
+(defn file-src-span
+  "fileSrcSpan: a point span at line 1, column 1 of the current location's file (no BufSpan)"
+  [ps]
+  (let [[f] (lx/loc ps)] [f 1 1 1 1 nil nil]))
+
+(defn- hs-module
+  "HsModule (XModulePs ann layout deprecation haddock-header) name exports imports decls; ann the
+  `module` (or `signature`) keyword's token and layout the body's EpLayout, the two annotations
+  the Haddock pass reads (arbace.repr.haskell.haddock), written nil in the dump"
+  [kw layout warning name exports [imports decls]]
+  (con HsModule (con XModulePs kw layout warning 'Nothing) name exports imports decls))
+
+(defrule "signature" "'signature' modid maybe_warning_pragma maybeexports 'where' body" [ps $1 $2 $3 $4 $5 $6]
+  (L (file-src-span ps) (hs-module $1 (nth $6 2) $3 (just $2) $4 (second $6))))
+
+(defrule "module" "'module' modid maybe_warning_pragma maybeexports 'where' body" [ps $1 $2 $3 $4 $5 $6]
+  (L (file-src-span ps) (hs-module $1 (nth $6 2) $3 (just $2) $4 (second $6))))
+
+(defrule "module" "body2" [ps $1]
+  (L (file-src-span ps) (hs-module nil (nth $1 2) 'Nothing 'Nothing 'Nothing (second $1))))
+
+(defrule "missing_module_keyword" "" [ps] (lx/push-module-context! ps) nil)
+(defrule "implicit_top" "" [ps] (lx/push-module-context! ps) nil)
+
+;; body: [trailing-anns [imports decls] layout], layout the EpLayout: (EpExplicitBraces open
+;; close), (EpVirtualBraces column) with getVOCURLY's column (the virtual brace's), leftmostColumn
+;; without a module header
+(defrule "body" "'{' top '}'" [ps $1 $2 $3] [(first $2) (second $2) (list 'EpExplicitBraces $1 $3)])
+(defrule "body" "vocurly top close" [ps $1 $2 $3] [(first $2) (second $2) (list 'EpVirtualBraces (nth (nth $1 2) 2))])
+(defrule "body2" "'{' top '}'" [ps $1 $2 $3] [(first $2) (second $2) (list 'EpExplicitBraces $1 $3)])
+(defrule "body2" "missing_module_keyword top close" [ps $1 $2 $3] [[] (second $2) (list 'EpVirtualBraces 1)])
+
+(defn rseq-of "reverse of a list Parser.y builds reversed" [v] (reverse v))
+
+(defrule "top" "semis top1" [ps $1 $2] [nil $2])
+
+(defn- cv-top-decls [decls]
+  ((requiring-resolve 'arbace.repr.haskell.post-decl/cv-top-decls) decls))
+
+(defrule "top1" "importdecls_semi topdecls_cs_semi" [ps $1 $2] [(vec (rseq-of $1)) (cv-top-decls $2)])
+(defrule "top1" "importdecls_semi topdecls_cs" [ps $1 $2] [(vec (rseq-of $1)) (cv-top-decls $2)])
+(defrule "top1" "importdecls" [ps $1] [(vec (rseq-of $1)) []])
+
+;;; ------------------------------------------------------------------------------------------
+;;; Module declaration and imports only (parseHeader)
+
+(defrule "header" "'module' modid maybe_warning_pragma maybeexports 'where' header_body" [ps $1 $2 $3 $4 $5 $6]
+  (L (file-src-span ps) (hs-module $1 nil $3 (just $2) $4 [$6 []])))
+(defrule "header" "'signature' modid maybe_warning_pragma maybeexports 'where' header_body" [ps $1 $2 $3 $4 $5 $6]
+  (L (file-src-span ps) (hs-module $1 nil $3 (just $2) $4 [$6 []])))
+(defrule "header" "header_body2" [ps $1]
+  (L (file-src-span ps) (hs-module nil nil 'Nothing 'Nothing 'Nothing [$1 []])))
+(defrule "header_body" "'{' header_top" [ps $1 $2] $2)
+(defrule "header_body" "vocurly header_top" [ps $1 $2] $2)
+(defrule "header_body2" "'{' header_top" [ps $1 $2] $2)
+(defrule "header_body2" "missing_module_keyword header_top" [ps $1 $2] $2)
+(defrule "header_top" "semis header_top_importdecls" [ps $1 $2] $2)
+(defrule "header_top_importdecls" "importdecls_semi" [ps $1] $1)
+(defrule "header_top_importdecls" "importdecls" [ps $1] $1)
+
+;;; ------------------------------------------------------------------------------------------
+;;; The export list
+
+(defrule "maybeexports" "'(' exportlist ')'" [ps $1 $2 $3] (just (sLL $1 $3 (second $2))))
+(defrule "maybeexports" "" [ps] 'Nothing)
+
+;; exportlist: [commas ies]
+(defrule "exportlist" "exportlist1" [ps $1] [[] $1])
+(defrule "exportlist" "" [ps] [[] []])
+(defrule "exportlist" "exportlist1 ','" [ps $1 $2] [[] $1])
+(defrule "exportlist" "','" [ps $1] [[nil] []])
+
+(defrule "exportlist1" "exportlist1 ',' export_cs" [ps $1 $2 $3] (into $1 $3))
+(defrule "exportlist1" "export_cs" [ps $1] $1)
+(defrule "export_cs" "export" [ps $1] [$1])
+
+;; an ImpExpQcSpec: [:name kw lname] (kw nil, :type or :data) or [:wildcard]
+
+(defn- ie-wrapped-name
+  "ieNameFromSpec: IEName, IEType, IEData of a spec's name"
+  [[_ kw lname]]
+  (case kw
+    nil (con IEName nx lname)
+    :type (con IEType nil lname)
+    :data (con IEData nil lname)))
+
+(defn- var-name-space? [r] (= 'var (a/rdr-ns r)))
+
+(defn mk-module-imp-exp
+  "mkModuleImpExp: an IE of a spec (L l spec) and its sub-specification"
+  [warning lspec subs]
+  (let [[_ l spec] lspec
+        nm (unLoc (nth spec 2))
+        nameT (fn []
+                (when (var-name-space? nm) (pp/fatal! (lx/msg :PsErrVarForTyCon l nm)))
+                (ie-wrapped-name spec))]
+    (case (first subs)
+      :abs (if (var-name-space? nm)
+             (con IEVar warning (L l (ie-wrapped-name spec)) 'Nothing)
+             (con IEThingAbs warning (L l (nameT)) 'Nothing))
+      :all (con IEThingAll (tuple warning (tuple nil nil nil)) (L l (nameT)) 'Nothing)
+      :list (let [xs (second subs)]
+              (con IEThingWith (tuple warning (tuple nil nil nil nil)) (L l (nameT)) 'NoIEWildcard
+                   (mapv (fn [[_ ll s]] (L ll (ie-wrapped-name s))) xs) 'Nothing))
+      :all-with (let [_ (when-not (lx/get-bit pp/*ps* :PatternSynonymsBit)
+                          (pp/fatal! (lx/msg :PsErrIllegalPatSynExport l)))
+                      xs (second subs)
+                      withs (map unLoc xs)
+                      pos (first (keep-indexed (fn [i s] (when (= :wildcard (first s)) i)) withs))]
+                  (con IEThingWith (tuple warning (tuple nil nil nil nil)) (L l (nameT))
+                       (if pos (con IEWildcard pos) 'NoIEWildcard)
+                       (mapv (fn [[_ ll s]] (L ll (ie-wrapped-name s))) (remove #(= :wildcard (first (unLoc %))) xs))
+                       'Nothing)))))
+
+(defn- mk-imp-exp-sub-spec
+  "mkImpExpSubSpec: [:list specs], [:all], [:all-with specs]"
+  [xs]
+  (cond
+    (empty? xs) [:list []]
+    (and (= 1 (count xs)) (= :wildcard (first (unLoc (first xs))))) [:all]
+    (some #(= :wildcard (first (unLoc %))) xs) [:all-with xs]
+    :else [:list xs]))
+
+(defrule "export" "maybe_warning_pragma qcname_ext export_subspec" [ps $1 $2 $3]
+  (let [span (if (= $1 'Nothing) (comb2 $2 $3) (comb3 $1 $2 $3))]
+    (L span (mk-module-imp-exp $1 $2 (second (unLoc $3))))))
+(defrule "export" "maybe_warning_pragma 'module' modid" [ps $1 $2 $3]
+  (let [span (if (= $1 'Nothing) (comb2 $2 $3) (comb3 $1 $2 $3))]
+    (L span (con IEModuleContents (tuple $1 nil) $3))))
+(defrule "export" "maybe_warning_pragma 'pattern' qcon" [ps $1 $2 $3]
+  (lx/add-warning! ps (lx/msg :PsWarnPatternNamespaceSpecifier (gl $2) (boolean (lx/get-bit ps :ExplicitNamespacesBit))))
+  (let [span (if (= $1 'Nothing) (comb2 $2 $3) (comb3 $1 $2 $3))]
+    (L span (con IEVar $1 (sLL $2 $3 (con IEPattern nil $3)) 'Nothing))))
+(defrule "export" "maybe_warning_pragma 'default' qtycon" [ps $1 $2 $3]
+  (let [span (if (= $1 'Nothing) (comb2 $2 $3) (comb3 $1 $2 $3))]
+    (L span (con IEThingAbs $1 (sLL $2 $3 (con IEDefault nil $3)) 'Nothing))))
+
+;; export_subspec: (L span [parens sub-spec])
+(defrule "export_subspec" "" [ps] (noLoc [nil [:abs]]))
+(defrule "export_subspec" "'(' qcnames ')'" [ps $1 $2 $3]
+  (sLL $1 $3 [nil (mk-imp-exp-sub-spec (vec (reverse $2)))]))
+
+(defrule "qcnames" "" [ps] [])
+(defrule "qcnames" "qcnames1" [ps $1] $1)
+;; qcnames1 is reversed
+(defrule "qcnames1" "qcnames1 ',' qcname_ext_w_wildcard" [ps $1 $2 $3] (into [$3] $1))
+(defrule "qcnames1" "qcname_ext_w_wildcard" [ps $1] [$1])
+
+(defrule "qcname_ext_w_wildcard" "qcname_ext" [ps $1] $1)
+(defrule "qcname_ext_w_wildcard" "'..'" [ps $1] (sL1 $1 [:wildcard]))
+
+(defrule "qcname_ext" "qcname" [ps $1] (sL1 $1 [:name nil $1]))
+(defn- require-explicit-namespaces "requireExplicitNamespaces" [kw tok]
+  (when-not (lx/get-bit pp/*ps* :ExplicitNamespacesBit)
+    (pp/add-error! (lx/msg :PsErrIllegalExplicitNamespace (gl tok) kw))))
+
+(defrule "qcname_ext" "'type' oqtycon" [ps $1 $2]
+  (require-explicit-namespaces :type $1)
+  (sLL $1 $2 [:name :type (L (getLoc $2) (a/set-rdr-ns (unLoc $2) 'tc))]))
+(defrule "qcname_ext" "'data' qvarcon" [ps $1 $2]
+  (require-explicit-namespaces :data $1)
+  (sLL $1 $2 [:name :data $2]))
+
+(defrule "qcname" "qvar" [ps $1] $1)
+(defrule "qcname" "oqtycon_no_varcon" [ps $1] $1)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Imports
+
+;; semis1: (L span [trailing-anns]); semis: [trailing-anns]
+(defrule "semis1" "semis1 ';'" [ps $1 $2]
+  (if (a/zero-width? (gl $2)) (sL1 $1 (unLoc $1)) (sLL $1 $2 (conj (unLoc $1) nil))))
+(defrule "semis1" "';'" [ps $1]
+  (if (a/zero-width? (gl $1)) (noLoc []) (sL1 $1 [nil])))
+(defrule "semis" "semis ';'" [ps $1 $2] (if (a/zero-width? (gl $2)) $1 (conj $1 nil)))
+(defrule "semis" "" [ps] [])
+
+;; importdecls are reversed
+(defrule "importdecls" "importdecls_semi importdecl" [ps $1 $2] (cons $2 $1))
+(defrule "importdecls_semi" "importdecls_semi importdecl semis1" [ps $1 $2 $3] (cons $2 $1))
+(defrule "importdecls_semi" "" [ps] ())
+
+(defn- import-qualified-style
+  "importDeclQualifiedStyle"
+  [pre post]
+  (cond post 'QualifiedPost pre 'QualifiedPre :else 'NotQualified))
+
+(defn- import-level-style
+  "importDeclLevelStyle; a level is :splice or :quote"
+  [pre post]
+  (let [lvl (fn [t] (case t :splice 'ImportDeclSplice :quote 'ImportDeclQuote))]
+    (cond post (con LevelStylePost (lvl post))
+          pre (con LevelStylePre (lvl pre))
+          :else 'NotLevelled)))
+
+(defrule "importdecl" "'import' maybe_src maybe_splice maybe_safe optqualified maybe_pkg modid maybe_splice optqualified maybeas maybeimpspec"
+  [ps $1 $2 $3 $4 $5 $6 $7 $8 $9 $10 $11]
+  ;; checkImportDecl
+  (when (and $9 (not (lx/get-bit ps :ImportQualifiedPostBit)))
+    (pp/add-error! (lx/msg :PsErrImportPostQualified (gl $9))))
+  (when (and $5 $9) (pp/add-error! (lx/msg :PsErrImportQualifiedTwice (gl $9))))
+  (when (and $3 $8) (pp/add-error! (lx/msg :PsErrSpliceOrQuoteTwice (second $8))))
+  (let [qual (import-qualified-style $5 $9)
+        level (import-level-style (first $3) (first $8))
+        loc (comb6 $1 $7 (second $8) (when $9 (gl $9)) (second $10) $11)
+        [[_ srctext] boot] $2]
+    (L loc (con ImportDecl (con XImportDeclPass nil srctext false)
+                $7 (second $6) boot level (second $4) qual
+                (unLoc (second $10)) (unLoc $11)))))
+
+;; maybe_src: [[ann sourcetext] IsBootInterface]
+(defrule "maybe_src" "'{-# SOURCE' '#-}'" [ps $1 $2] [[nil (tv $1)] 'IsBoot])
+(defrule "maybe_src" "" [ps] [[nil nil] 'NotBoot])
+
+;; maybe_safe: [ann bool]
+(defrule "maybe_safe" "'safe'" [ps $1] [nil true])
+(defrule "maybe_safe" "" [ps] [nil false])
+
+;; maybe_splice: nil, or the level's token kind with its span (for comb6): [:splice span]
+(defrule "maybe_splice" "'splice'" [ps $1] [:splice (gl $1)])
+(defrule "maybe_splice" "'quote'" [ps $1] [:quote (gl $1)])
+(defrule "maybe_splice" "" [ps] nil)
+
+;; maybe_pkg: [ann RawPkgQual]
+(defrule "maybe_pkg" "STRING" [ps $1]
+  (let [[src s] (tv $1)]
+    ;; looksLikePackageName: dash-separated parts of letters and digits, none all digits
+    (when-not (every? #(and (every? (fn [c] (Character/isLetterOrDigit (int c))) %) (not (every? (fn [c] (Character/isDigit (int c))) %)))
+                      (str/split s #"-" -1))
+      (lx/add-error! ps (lx/msg :PsErrInvalidPackageName (a/gl $1) s)))
+    [nil (con RawPkgQual (con StringLiteral src s 'Nothing))]))
+(defrule "maybe_pkg" "" [ps] [nil 'NoRawPkgQual])
+
+;; optqualified: the token (its location) or nil
+(defrule "optqualified" "'qualified'" [ps $1] $1)
+(defrule "optqualified" "" [ps] nil)
+
+;; maybeas: [ann (L span (Maybe modid))]
+(defrule "maybeas" "'as' modid" [ps $1 $2] [nil (sLL $1 $2 (just $2))])
+(defrule "maybeas" "" [ps] [nil (noLoc 'Nothing)])
+
+(defrule "maybeimpspec" "impspec" [ps $1]
+  (let [[b ie] (unLoc $1)]
+    (doseq [s (unLoc ie)]
+      (when (and (= 'IEThingWith (first (unLoc s))) (seq? (nth (unLoc s) 3)) (= 'IEWildcard (first (nth (unLoc s) 3))))
+        (pp/fatal! (lx/msg :PsErrIllegalImportBundleForm (getLoc s)))))
+    (L (gl $1) (just (tuple b ie)))))
+(defrule "maybeimpspec" "" [ps] (noLoc 'Nothing))
+
+(defrule "impspec" "'(' importlist ')'" [ps $1 $2 $3]
+  (sLL $1 $3 ['Exactly (sLL $1 $3 (second $2))]))
+(defrule "impspec" "'hiding' '(' importlist ')'" [ps $1 $2 $3 $4]
+  (sLL $1 $4 ['EverythingBut (sLL $1 $4 (second $3))]))
+
+(defrule "importlist" "importlist1" [ps $1] [[] $1])
+(defrule "importlist" "" [ps] [[] []])
+(defrule "importlist" "importlist1 ','" [ps $1 $2] [[] $1])
+(defrule "importlist" "','" [ps $1] [[nil] []])
+
+(defrule "importlist1" "importlist1 ',' import" [ps $1 $2 $3] (into $1 $3))
+(defrule "importlist1" "import" [ps $1] $1)
+
+(defrule "import" "qcname_ext export_subspec" [ps $1 $2]
+  [(sLL $1 $2 (mk-module-imp-exp 'Nothing $1 (second (unLoc $2))))])
+(defrule "import" "'module' modid" [ps $1 $2]
+  [(sLL $1 $2 (con IEModuleContents (tuple 'Nothing nil) $2))])
+(defrule "import" "'pattern' qcon" [ps $1 $2]
+  (lx/add-warning! ps (lx/msg :PsWarnPatternNamespaceSpecifier (gl $1) (boolean (lx/get-bit ps :ExplicitNamespacesBit))))
+  [(sLL $1 $2 (con IEVar 'Nothing (sLL $1 $2 (con IEPattern nil $2)) 'Nothing))])
+
+;;; ------------------------------------------------------------------------------------------
+;;; Fixity declarations' parts
+
+;; prec: Maybe (Located (SourceText, Int)) as Nothing / (Just (L span [src n]))
+(defrule "prec" "" [ps] 'Nothing)
+(defrule "prec" "INTEGER" [ps $1]
+  (let [[_ src _ v] (tv $1)] (just (sL1 $1 [src v]))))
+
+(defrule "infix" "'infix'" [ps $1] (sL1 $1 'InfixN))
+(defrule "infix" "'infixl'" [ps $1] (sL1 $1 'InfixL))
+(defrule "infix" "'infixr'" [ps $1] (sL1 $1 'InfixR))
+
+;; ops: (L span [names])
+(defrule "ops" "ops ',' op" [ps $1 $2 $3] (sLL $1 $3 (conj (unLoc $1) $3)))
+(defrule "ops" "op" [ps $1] (sL1 $1 [$1]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Boolean formulas (MINIMAL)
+
+(defrule "name_boolformula_opt" "name_boolformula" [ps $1] $1)
+(defrule "name_boolformula_opt" "" [ps] (noLoc (con And [])))
+
+(defrule "name_boolformula" "name_boolformula_and" [ps $1] $1)
+(defrule "name_boolformula" "name_boolformula_and '|' name_boolformula" [ps $1 $2 $3]
+  (sLL $1 $3 (con Or [$1 $3])))
+
+(defrule "name_boolformula_and" "name_boolformula_and_list" [ps $1]
+  (sLL (first $1) (peek $1) (con And (vec $1))))
+
+(defrule "name_boolformula_and_list" "name_boolformula_atom" [ps $1] [$1])
+(defrule "name_boolformula_and_list" "name_boolformula_atom ',' name_boolformula_and_list" [ps $1 $2 $3]
+  (into [$1] $3))
+
+(defrule "name_boolformula_atom" "'(' name_boolformula ')'" [ps $1 $2 $3] (sLL $1 $3 (con Parens $2)))
+(defrule "name_boolformula_atom" "name_var" [ps $1] (sL1 $1 (con Var $1)))
+
+(defrule "namelist" "name_var" [ps $1] (sL1 $1 [$1]))
+(defrule "namelist" "name_var ',' namelist" [ps $1 $2 $3] (sLL $1 $3 (into [$1] (unLoc $3))))
+
+(defrule "name_var" "var" [ps $1] $1)
+(defrule "name_var" "con" [ps $1] $1)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Data constructors
+
+(defrule "qcon" "gen_qcon" [ps $1] $1)
+(defrule "qcon" "syscon" [ps $1] $1)
+(defrule "gen_qcon" "qconid" [ps $1] $1)
+(defrule "gen_qcon" "'(' qconsym ')'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+(defrule "con" "conid" [ps $1] $1)
+(defrule "con" "'(' consym ')'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+(defrule "con" "syscon" [ps $1] $1)
+
+(defrule "con_list" "con" [ps $1] (sL1 $1 [$1]))
+(defrule "con_list" "con ',' con_list" [ps $1 $2 $3] (sLL $1 $3 (into [$1] (unLoc $3))))
+(defrule "qcon_list" "qcon" [ps $1] [$1])
+(defrule "qcon_list" "qcon ',' qcon_list" [ps $1 $2 $3] (into [$1] $3))
+
+;; sysdcon_nolist and sysdcon: LocatedN DataCon, as the data constructor's Exact name
+(defrule "sysdcon_nolist" "'(' commas ')'" [ps $1 $2 $3] (sLL $1 $3 (built-in :tuple-datacon (inc (long (second $2))))))
+(defrule "sysdcon_nolist" "'(#' '#)'" [ps $1 $2] (sLL $1 $2 (built-in :unboxed-unit-datacon)))
+(defrule "sysdcon_nolist" "'(#' commas '#)'" [ps $1 $2 $3] (sLL $1 $3 (built-in :unboxed-tuple-datacon (inc (long (second $2))))))
+
+(defrule "syscon" "sysdcon" [ps $1] $1)
+(defrule "syscon" "'(' '->' ')'" [ps $1 $2 $3] (sLL $1 $3 (built-in :fun-tycon)))
+
+(defrule "sysdcon" "sysdcon_nolist" [ps $1] $1)
+(defrule "sysdcon" "'(' ')'" [ps $1 $2] (sLL $1 $2 (built-in :unit-datacon)))
+(defrule "sysdcon" "'[' ']'" [ps $1 $2] (sLL $1 $2 (built-in :nil-datacon)))
+
+(defrule "conop" "consym" [ps $1] $1)
+(defrule "conop" "'`' conid '`'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+(defrule "qconop" "qconsym" [ps $1] $1)
+(defrule "qconop" "'`' qconid '`'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Type constructors
+
+(defrule "gtycon" "ntgtycon" [ps $1] $1)
+(defrule "gtycon" "'(' ')'" [ps $1 $2] (sLL $1 $2 (built-in :unit-tycon)))
+(defrule "gtycon" "'(#' '#)'" [ps $1 $2] (sLL $1 $2 (built-in :unboxed-unit-tycon)))
+(defrule "gtycon" "'[' ']'" [ps $1 $2] (sLL $1 $2 (built-in :list-tycon)))
+
+(defn- puns? [ps] (lx/get-bit ps :ListTuplePunsBit))
+
+(defrule "ntgtycon" "oqtycon" [ps $1] $1)
+(defrule "ntgtycon" "'(' commas ')'" [ps $1 $2 $3]
+  (let [n (inc (long (second $2)))]
+    (sLL $1 $3 (if (puns? ps) (built-in :tuple-tycon n) (built-in :tuple-datacon n)))))
+(defrule "ntgtycon" "'(#' commas '#)'" [ps $1 $2 $3]
+  (let [n (inc (long (second $2)))]
+    (sLL $1 $3 (if (puns? ps) (built-in :unboxed-tuple-tycon n) (built-in :unboxed-tuple-datacon n)))))
+(defrule "ntgtycon" "'(#' bars '#)'" [ps $1 $2 $3]
+  (pp/require-lt-puns :SumSyntaxType $1 $3)
+  (sLL $1 $3 (built-in :sum-tycon (inc (long (second $2))))))
+(defrule "ntgtycon" "'(' '->' ')'" [ps $1 $2 $3] (sLL $1 $3 (built-in :fun-tycon)))
+
+(defrule "oqtycon" "qtycon" [ps $1] $1)
+(defrule "oqtycon" "'(' qtyconsym ')'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+
+(defrule "oqtycon_no_varcon" "qtycon" [ps $1] $1)
+(defrule "oqtycon_no_varcon" "'(' QCONSYM ')'" [ps $1 $2 $3]
+  (let [[m s] (tv $2)] (sLL $1 $3 (a/qual 'tc m s))))
+(defrule "oqtycon_no_varcon" "'(' CONSYM ')'" [ps $1 $2 $3] (sLL $1 $3 (a/unqual 'tc (tv $2))))
+(defrule "oqtycon_no_varcon" "'(' ':' ')'" [ps $1 $2 $3] (sLL $1 $3 (built-in :cons-datacon)))
+
+(defrule "qtyconop" "qtyconsym" [ps $1] $1)
+(defrule "qtyconop" "'`' qtycon '`'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+
+(defrule "qtycon" "QCONID" [ps $1] (let [[m s] (tv $1)] (sL1 $1 (a/qual 'tc m s))))
+(defrule "qtycon" "tycon" [ps $1] $1)
+(defrule "tycon" "CONID" [ps $1] (sL1 $1 (a/unqual 'tc (tv $1))))
+
+(defrule "qtyconsym" "QCONSYM" [ps $1] (let [[m s] (tv $1)] (sL1 $1 (a/qual 'tc m s))))
+(defrule "qtyconsym" "QVARSYM" [ps $1] (let [[m s] (tv $1)] (sL1 $1 (a/qual 'tc m s))))
+(defrule "qtyconsym" "tyconsym" [ps $1] $1)
+
+(defrule "tyconsym" "CONSYM" [ps $1] (sL1 $1 (a/unqual 'tc (tv $1))))
+(defrule "tyconsym" "VARSYM" [ps $1] (sL1 $1 (a/unqual 'tc (tv $1))))
+(defrule "tyconsym" "':'" [ps $1] (sL1 $1 (built-in :cons-datacon)))
+(defrule "tyconsym" "'-'" [ps $1] (sL1 $1 (a/unqual 'tc "-")))
+(defrule "tyconsym" "'.'" [ps $1] (sL1 $1 (a/unqual 'tc ".")))
+
+(defrule "otycon" "tycon" [ps $1] $1)
+(defrule "otycon" "'(' tyconsym ')'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Operators
+
+(defrule "op" "varop" [ps $1] $1)
+(defrule "op" "conop" [ps $1] $1)
+(defrule "op" "'->'" [ps $1] (sLL $1 $1 (built-in :fun-tycon)))
+
+(defrule "varop" "varsym" [ps $1] $1)
+(defrule "varop" "'`' varid '`'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+
+;; qop and qopm: DisambInfixOp b => PV (LocatedN b): a fn of the operator's mode, :expr (an
+;; HsExpr operator) or :name (a RdrName, InfixOp of a PatBuilder)
+(defrule "qop" "qvarop" [ps $1] (pp/mk-hs-var-op-pv $1))
+(defrule "qop" "qconop" [ps $1] (pp/mk-hs-con-op-pv $1))
+(defrule "qop" "hole_op" [ps $1] (pp/mk-hs-infix-hole-pv $1))
+(defrule "qopm" "qvaropm" [ps $1] (pp/mk-hs-var-op-pv $1))
+(defrule "qopm" "qconop" [ps $1] (pp/mk-hs-con-op-pv $1))
+(defrule "qopm" "hole_op" [ps $1] (pp/mk-hs-infix-hole-pv $1))
+
+(defrule "hole_op" "'`' '_' '`'" [ps $1 $2 $3] (sLL $1 $3 (a/unqual 'var "_")))
+
+(defrule "qvarop" "qvarsym" [ps $1] $1)
+(defrule "qvarop" "'`' qvarid '`'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+(defrule "qvaropm" "qvarsym_no_minus" [ps $1] $1)
+(defrule "qvaropm" "'`' qvarid '`'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Type variables
+
+(defrule "tyvar" "tyvarid" [ps $1] $1)
+(defrule "tyvarop" "'`' tyvarid '`'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+(defrule "tyvarid" "VARID" [ps $1] (sL1 $1 (a/unqual 'tv (tv $1))))
+(defrule "tyvarid" "special_id" [ps $1] (sL1 $1 (a/unqual 'tv (unLoc $1))))
+(defrule "tyvarid" "'unsafe'" [ps $1] (sL1 $1 (a/unqual 'tv "unsafe")))
+(defrule "tyvarid" "'safe'" [ps $1] (sL1 $1 (a/unqual 'tv "safe")))
+(defrule "tyvarid" "'interruptible'" [ps $1] (sL1 $1 (a/unqual 'tv "interruptible")))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Variables
+
+(defrule "var" "varid" [ps $1] $1)
+(defrule "var" "'(' varsym ')'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+(defrule "qvar" "qvarid" [ps $1] $1)
+(defrule "qvar" "'(' varsym ')'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+(defrule "qvar" "'(' qvarsym1 ')'" [ps $1 $2 $3] (sLL $1 $3 (unLoc $2)))
+
+;; field: LocatedN FieldLabelString, the varid's occurrence string
+(defrule "field" "varid" [ps $1] (L (getLoc $1) (con FieldLabelString (a/rdr-occ (unLoc $1)))))
+
+(defrule "qvarid" "varid" [ps $1] $1)
+(defrule "qvarid" "QVARID" [ps $1] (let [[m s] (tv $1)] (sL1 $1 (a/qual 'var m s))))
+
+(defrule "varid" "VARID" [ps $1] (sL1 $1 (a/unqual 'var (tv $1))))
+(defrule "varid" "special_id" [ps $1] (sL1 $1 (a/unqual 'var (unLoc $1))))
+(defrule "varid" "'unsafe'" [ps $1] (sL1 $1 (a/unqual 'var "unsafe")))
+(defrule "varid" "'safe'" [ps $1] (sL1 $1 (a/unqual 'var "safe")))
+(defrule "varid" "'interruptible'" [ps $1] (sL1 $1 (a/unqual 'var "interruptible")))
+(defrule "varid" "'family'" [ps $1] (sL1 $1 (a/unqual 'var "family")))
+(defrule "varid" "'role'" [ps $1] (sL1 $1 (a/unqual 'var "role")))
+
+(defrule "qvarsym" "varsym" [ps $1] $1)
+(defrule "qvarsym" "qvarsym1" [ps $1] $1)
+(defrule "qvarsym_no_minus" "varsym_no_minus" [ps $1] $1)
+(defrule "qvarsym_no_minus" "qvarsym1" [ps $1] $1)
+(defrule "qvarsym1" "QVARSYM" [ps $1] (let [[m s] (tv $1)] (sL1 $1 (a/qual 'var m s))))
+(defrule "varsym" "varsym_no_minus" [ps $1] $1)
+(defrule "varsym" "'-'" [ps $1] (sL1 $1 (a/unqual 'var "-")))
+(defrule "varsym_no_minus" "VARSYM" [ps $1] (sL1 $1 (a/unqual 'var (tv $1))))
+(defrule "varsym_no_minus" "special_sym" [ps $1] (sL1 $1 (a/unqual 'var (unLoc $1))))
+
+;; special_id: Located FastString
+(doseq [w ["as" "qualified" "hiding" "export" "label" "dynamic" "stdcall" "ccall" "capi" "prim"
+           "javascript" "group" "stock" "anyclass" "via" "unit" "dependency" "signature" "quote" "splice"]]
+  (.put ^java.util.HashMap a/actions (a/rule-key "special_id" [(str "'" w "'")]) (fn [ps t] (sL1 t w))))
+
+(defrule "special_sym" "'.'" [ps $1] (sL1 $1 "."))
+(defrule "special_sym" "'*'" [ps $1] (sL1 $1 (if (= :unicode (tv $1)) "★" "*")))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Data constructors' names
+
+(defrule "qconid" "conid" [ps $1] $1)
+(defrule "qconid" "QCONID" [ps $1] (let [[m s] (tv $1)] (sL1 $1 (a/qual 'data m s))))
+(defrule "conid" "CONID" [ps $1] (sL1 $1 (a/unqual 'data (tv $1))))
+(defrule "qconsym" "consym" [ps $1] $1)
+(defrule "qconsym" "QCONSYM" [ps $1] (let [[m s] (tv $1)] (sL1 $1 (a/qual 'data m s))))
+(defrule "consym" "CONSYM" [ps $1] (sL1 $1 (a/unqual 'data (tv $1))))
+(defrule "consym" "':'" [ps $1] (sL1 $1 (built-in :cons-datacon)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Literals
+
+(defn- src-val [t] (let [[src v] (tv t)] [src v]))
+
+(defrule "literal" "CHAR" [ps $1] (let [[s c] (src-val $1)] (sL1 $1 (con HsChar s (a/hs-char c)))))
+(defrule "literal" "STRING" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsString s v))))
+(defrule "literal" "STRING_MULTI" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsMultilineString s v))))
+(defrule "literal" "PRIMINTEGER" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsIntPrim s v))))
+(defrule "literal" "PRIMWORD" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsWordPrim s v))))
+(defrule "literal" "PRIMINTEGER8" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsInt8Prim s v))))
+(defrule "literal" "PRIMINTEGER16" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsInt16Prim s v))))
+(defrule "literal" "PRIMINTEGER32" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsInt32Prim s v))))
+(defrule "literal" "PRIMINTEGER64" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsInt64Prim s v))))
+(defrule "literal" "PRIMWORD8" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsWord8Prim s v))))
+(defrule "literal" "PRIMWORD16" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsWord16Prim s v))))
+(defrule "literal" "PRIMWORD32" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsWord32Prim s v))))
+(defrule "literal" "PRIMWORD64" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsWord64Prim s v))))
+(defrule "literal" "PRIMCHAR" [ps $1] (let [[s c] (src-val $1)] (sL1 $1 (con HsCharPrim s (a/hs-char c)))))
+(defrule "literal" "PRIMSTRING" [ps $1] (let [[s v] (src-val $1)] (sL1 $1 (con HsStringPrim s (list 'bytes v)))))
+(defrule "literal" "PRIMFLOAT" [ps $1] (sL1 $1 (con HsFloatPrim nx (tv $1))))
+(defrule "literal" "PRIMDOUBLE" [ps $1] (sL1 $1 (con HsDoublePrim nx (tv $1))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Layout: the close of an implicit block (Note [Layout and error])
+
+(defrule "close" "vccurly" [ps $1] nil)
+(defrule "close" "error" [ps $1] (lx/pop-context! ps) nil)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Miscellaneous
+
+(defrule "modid" "CONID" [ps $1] (sL1 $1 (a/mod-name (tv $1))))
+(defrule "modid" "QCONID" [ps $1] (let [[m c] (tv $1)] (sL1 $1 (a/mod-name (str m "." c)))))
+
+;; commas: [spans count]
+(defrule "commas" "commas ','" [ps $1 $2] [(conj (first $1) (gl $2)) (inc (long (second $1)))])
+(defrule "commas" "','" [ps $1] [[(gl $1)] 1])
+
+;; bars0, bars: [tokens count]
+(defrule "bars0" "bars" [ps $1] $1)
+(defrule "bars0" "" [ps] [[] 0])
+(defrule "bars" "bars '|'" [ps $1 $2] [(conj (first $1) $2) (inc (long (second $1)))])
+(defrule "bars" "'|'" [ps $1] [[$1] 1])

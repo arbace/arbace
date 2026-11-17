@@ -1,0 +1,80 @@
+(ns arbace.rust.back.collect
+  "RF3's collector slice (doc/rust/FRONTEND-SURVEY.md, \"As built: RF1-RF3 (trial)\"): the mono items of a program found from its
+  roots by what the MIR bodies use, after rustc_monomorphize/collector.rs (rustc 1.99.1; MIT or Apache-2.0, recorded in
+  doc/ARBACE.md and LICENSE.md): the entry's `main` and `lang_start`, then each body's callees (resolved instances), drop glue,
+  function items and pointers, allocations' functions, statics and vtables, the panic functions its asserts call and the personality
+  and terminate functions its unwinding needs. The instances come from the helper's resolution (`Instance::try_resolve`, in the
+  dump's callee facts); what this judges is the traversal: its set against `collect_and_partition_mono_items`'s."
+  (:require [arbace.rust.front.mir :as mir]
+            [arbace.string :as str]))
+
+(defn- uses
+  "The symbols one body uses, by the shapes of its forms."
+  [body langs]
+  (let [syms (volatile! #{})
+        add! (fn [s] (when (and s (string? s) (seq s)) (vswap! syms conj s)))
+        panic-fn (fn [msg]
+                   (case (name (first msg))
+                     "overflow" (get langs (str "panic_const_" (str/lower-case (nth msg 1)) "_overflow"))
+                     "overflow-neg" (get langs "panic_const_neg_overflow")
+                     "div-zero" (get langs "panic_const_div_by_zero")
+                     "rem-zero" (get langs "panic_const_rem_by_zero")
+                     "bounds-check" (get langs "panic_bounds_check")
+                     "null-deref" (get langs "panic_null_pointer_dereference")
+                     "null-ref" (get langs "panic_null_reference_constructed")
+                     "misaligned" (get langs "panic_misaligned_pointer_dereference")
+                     nil))
+        has-cleanup (some :cleanup (:blocks body))]
+    (doseq [x (tree-seq coll? seq (:blocks body))]
+      (cond
+        (and (seq? x) (= 'callee (first x)) (map? (second x)))
+        (let [c (second x)]
+          (when-not (#{"intrinsic" "virtual" "unresolved" "drop-glue-empty"} (:kind c)) (add! (:symbol c))))
+        (and (seq? x) (= 'glue (first x)) (map? (second x))) (add! (:symbol (second x)))
+        (and (seq? x) (= 'assert (first x))) (add! (panic-fn (nth x 3)))
+        (and (seq? x) (= 'terminate (first x)) (string? (second x)))
+        (add! (get langs (if (= "cleanup" (second x)) "panic_in_cleanup" "panic_cannot_unwind")))))
+    ;; a function item used as a value (`:fn-symbol`) and the functions and statics of the allocations the body's constants reach
+    (let [fs (vec (tree-seq coll? seq (:blocks body)))]
+      (doseq [[a b] (partition 2 1 fs)]
+        (when (and (= :fn-symbol a) (string? b)) (add! b))))
+    (doseq [[_ a] (:alloc-data body)]
+      (when (#{:fn :static} (:kind a)) (add! (:symbol a))))
+    (when has-cleanup (add! (get langs "eh_personality")))
+    @syms))
+
+(defn collect
+  "The set of symbols collected from the roots of a dump: `all` is mir/read-all's map."
+  [all]
+  (let [langs (:langsyms all)
+        by (into {} (map (juxt :symbol identity)) (filter #(= :body (:form %)) (:bodies all)))
+        entry (:entry all)
+        roots (cond-> #{} entry (conj (:main entry) (:lang-start entry)))
+        ;; the roots rustc adds besides the entry: reachable non-generic items, symbols no one names (no_std programs: their
+        ;; `#[no_mangle]` functions are the dump's bodies that are not generic and not instances: judged by the symbol's shape)
+        extra (set (for [[s b] by :when (or (and (not entry) (not (.startsWith ^String s "_R")))
+                                           ;; the panic handler: a `__rustc` symbol (RUSTC_STD_INTERNAL_SYMBOL)
+                                           (re-find #"7___rustc" s))] s))]
+    (loop [todo (vec (concat roots extra)) seen #{}]
+      (if-let [s (first todo)]
+        (if (or (seen s) (not (by s)))
+          (recur (subvec todo 1) (if (by s) seen (conj seen s)))
+          (recur (into (subvec todo 1) (uses (by s) langs)) (conj seen s)))
+        (set (filter by seen))))))
+
+(defn check-one
+  "[collected rustc-items missing extra] for one program's mono dump."
+  [dir n]
+  (let [all (mir/read-all (slurp (str dir "/" n ".mono.edn")))
+        want (set (map :symbol (filter #(= :body (:form %)) (:bodies all))))
+        got (collect all)]
+    [(count got) (count want) (sort (remove got want)) (sort (remove want got))]))
+
+(defn -main [dir & names]
+  (let [rs (for [n names] [n (try (check-one dir n) (catch Throwable e [0 0 [] [] (.getMessage e)]))])
+        ok (count (filter (fn [[_ [g w m x]]] (and (= g w) (empty? m) (empty? x))) rs))]
+    (doseq [[n [g w m x err]] rs :when (not (and (= g w) (empty? m) (empty? x)))]
+      (println "DIFF" n "collected" g "of rustc's" w (if err (str "error: " err) (str "missing " (count m) " extra " (count x)))
+               (when (seq m) (str "\n   first missing: " (first m)))))
+    (println "collect:" ok "of" (count rs) "programs' mono item sets equal rustc's")
+    (System/exit (if (= ok (count rs)) 0 1))))

@@ -36,7 +36,7 @@ else echo "FAIL: a missing CI_EXE gave status $rc"; printf '%s\n' "$out" | tail 
 # queue 150: an --only entry outside the run corpora is refused (status 2) before anything runs, not skipped
 printf '# a list\ntcc-tests2/p1.c\nci-run/x.c\n' > "$t/only.txt"
 out=$(cd "$t" && ARBACE_GOROOT=$t/go GOWHIM=$t CI_CHECK_WORK=$t/work3 bash bin/lib/ci/check --corpus tcc-tests2 --only "$t/only.txt" 2>&1); rc=$?
-if [ "$rc" = 2 ] && printf '%s' "$out" | grep -q 'ci-run/x.c' && [ ! -e "$t/work3/tcc-tests2" ]; then echo "ok:   an --only entry outside the run corpora refused (status 2)"
+if [ "$rc" = 2 ] && grep -q 'ci-run/x.c' <<< "$out" && [ ! -e "$t/work3/tcc-tests2" ]; then echo "ok:   an --only entry outside the run corpora refused (status 2)"
 else echo "FAIL: an --only entry outside the run corpora gave status $rc"; printf '%s\n' "$out" | tail -3; fails=$((fails + 1)); fi
 [ "$fails" = 0 ] && { echo "PASS: ci-exe-relative-test"; exit 0; }
 echo "FAIL: ci-exe-relative-test ($fails)"; exit 1

@@ -1,0 +1,452 @@
+;; jrt: what java.lang.management asks of the runtime (doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, "As built: F13
+;; (write-ahead)"; JCS161 (a)): the registry of live threads (ThreadMXBean's ids, counts, peak, total started,
+;; daemons, as HotSpot's ThreadService counts them) and the natives of jdk.internal.jrt.HostManagement
+;; (overlay/jdk/java.base/jdk/internal/jrt/HostManagement.java), under the variants of
+;; sun.management.VMManagementImpl and ThreadImpl: the threads, their counts, the runtime's start and uptime,
+;; the process id. A thread is live from its start (thread.ae's threadEntry) to its end (terminate); the main
+;; thread from RunMain; a goroutine jrt adopts is not counted (no Java thread of the JVM's either: the JVM's
+;; are the threads it starts and attaches). Since slice 2, what a thread waits for (getState's BLOCKED,
+;; WAITING, TIMED_WAITING; ThreadInfo's lock, its owner, the blocked and waited counts and, with contention
+;; monitoring on, times): recorded by monitor.ae's contended entry and wait, thread.ae's sleep and join,
+;; locks.ae's park and lock waits (waitBegin, waitEnd), never on a path that does not wait.
+(in-ns 'go.arbace.jrt)
+
+(go/file "management.go"
+  :imports [[os "os"] [sync "sync"] [atomic "sync/atomic"] [time "time"] [weak "weak"]])
+
+(go/var ^{:doc "vmStart is when the program's runtime started (package initialization), RuntimeMXBean's
+start time.\n"
+          :tag time/Time} vmStart (time/Now))
+
+(go/var ^{:tag sync/Mutex} liveMu)
+(go/var ^{:doc "liveSet holds the live threads (liveMu).\n" :tag (map (* Thread) int64)} liveSet
+  (make (map (* Thread) int64)))
+(go/var ^{:doc "liveOrder numbers the threads in start order (liveMu): liveSet's values.\n" :tag int64} liveOrder)
+(go/var ^{:doc "liveStarted counts the threads ever started (liveMu).\n" :tag int64} liveStarted)
+(go/var ^{:doc "livePeak is the most live threads since the start or the last reset (liveMu).\n" :tag int32} livePeak)
+
+(go/func liveAdd
+  "liveAdd makes t live: counted once, however often it is added.\n"
+  [^{:tag (* Thread)} t]
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  (let [(values _ ok) (aget liveSet t)]
+    (when ok (return)))
+  (inc! liveOrder)
+  (aset liveSet t liveOrder)
+  (inc! liveStarted)
+  (when (> (conv int32 (len liveSet)) livePeak)
+    (set! livePeak (conv int32 (len liveSet)))))
+
+(go/func liveRemove "liveRemove ends t's life.\n" [^{:tag (* Thread)} t]
+  (.Lock liveMu)
+  (delete liveSet t)
+  (.Unlock liveMu))
+
+(go/func liveThreads
+  "liveThreads is the live threads in start order.\n"
+  ^{:tag (slice (* Thread))} []
+  (.Lock liveMu)
+  (let [ts (make (slice (* Thread)) 0 (len liveSet))]
+    (range [t _ liveSet] (set! ts (append ts t)))
+    (let [order liveSet]
+      (for [i 1] (< i (len ts)) (inc! i)
+        (for [j i] (and (> j 0) (> (aget order (aget ts (- j 1))) (aget order (aget ts j)))) (dec! j)
+          (let [x (aget ts j)]
+            (aset ts j (aget ts (- j 1)))
+            (aset ts (- j 1) x)))))
+    (.Unlock liveMu)
+    ts))
+
+(go/func HostManagement_Threads0__Thread1_native
+  "HostManagement_Threads0__Thread1_native is the live threads, in start order (ThreadImpl's getThreads).\n"
+  ^{:tag (* RefArray)} []
+  (let [ts (liveThreads)
+        a (NewRefArray Thread_class (conv int32 (len ts)))]
+    (range [i t ts] (aset (.-A a) i (.-self t)))
+    a))
+
+(go/func HostManagement_LiveCount0__I_native "HostManagement_LiveCount0__I_native is the live threads' count.\n"
+  ^int32 []
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  (conv int32 (len liveSet)))
+
+(go/func HostManagement_DaemonCount0__I_native "HostManagement_DaemonCount0__I_native is the live daemon threads' count.\n"
+  ^int32 []
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  (let [^int32 n 0]
+    (range [t _ liveSet]
+      (when (.Load (.-daemon t)) (inc! n)))
+    n))
+
+(go/func HostManagement_PeakCount0__I_native "HostManagement_PeakCount0__I_native is the peak live count.\n"
+  ^int32 []
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  livePeak)
+
+(go/func HostManagement_ResetPeakCount0__V_native
+  "HostManagement_ResetPeakCount0__V_native makes the peak the current live count.\n"
+  []
+  (.Lock liveMu)
+  (set! livePeak (conv int32 (len liveSet)))
+  (.Unlock liveMu))
+
+(go/func HostManagement_TotalStarted0__J_native
+  "HostManagement_TotalStarted0__J_native is the count of threads ever started.\n"
+  ^int64 []
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  liveStarted)
+
+(go/func HostManagement_StartTime0__J_native
+  "HostManagement_StartTime0__J_native is the runtime's start, in milliseconds since the epoch.\n"
+  ^int64 []
+  (.UnixMilli vmStart))
+
+(go/func HostManagement_Uptime0__J_native
+  "HostManagement_Uptime0__J_native is the milliseconds since the runtime's start (the monotonic clock).\n"
+  ^int64 []
+  (.Milliseconds (time/Since vmStart)))
+
+(go/func HostManagement_Pid0__I_native "HostManagement_Pid0__I_native is the process id.\n"
+  ^int32 []
+  (conv int32 (os/Getpid)))
+
+;; ---------------------------------------------------------------------------------------
+;; slice 2: what a thread waits for
+
+(go/const
+  [^{:tag int32 :val 0} wsNone 0]
+  [^{:tag int32 :val 1} wsBlocked 1]
+  [^{:tag int32 :val 2} wsWaiting 2]
+  [^{:tag int32 :val 3} wsTimed 3])
+
+(go/var ^{:doc "contentionMonitoring is ThreadMXBean's thread contention monitoring: the blocked and waited
+times measured while on.\n" :tag atomic/Bool} contentionMonitoring)
+
+(go/func waitBegin
+  "waitBegin records that t blocks (ws wsBlocked) to enter on's monitor or a lock, or waits (wsWaiting,
+wsTimed) on on (nil: sleep): its state and its count.\n"
+  [^{:tag (* Thread)} t ^int32 ws ^any on]
+  (.Store (.-waitOn t) on)
+  (.Store (.-wstate t) ws)
+  (if (== ws wsBlocked)
+    (.Add (.-blockedCount t) 1)
+    (.Add (.-waitedCount t) 1))
+  (when (.Load contentionMonitoring)
+    (.Store (.-waitSince t) (conv int64 (time/Since vmStart))))
+  ;; slice 4: once tracked, the waiting thread's Java frames, for another thread's ThreadInfo
+  (when (and (.Load trackLocks) (== t (CurrentThread)))
+    (.Store (.-waitStack t) (javaFrames (callers 2) (evalTrace) (goiTrace)))))
+
+(go/func waitEnd
+  "waitEnd records that t no longer waits, its time added while contention monitoring is on.\n"
+  [^{:tag (* Thread)} t]
+  (let [ws (.Swap (.-wstate t) wsNone)
+        since (.Swap (.-waitSince t) 0)]
+    (.Store (.-waitOn t) nil)
+    (.Store (.-waitStack t) nil)
+    (when (and (!= since 0) (.Load contentionMonitoring))
+      (let [d (- (conv int64 (time/Since vmStart)) since)]
+        (if (== ws wsBlocked)
+          (.Add (.-blockedNanos t) d)
+          (.Add (.-waitedNanos t) d))))))
+
+(go/var ^{:doc "adopted holds the adopted goroutines' Threads by number, weakly (liveMu): not live threads
+of the counts, but a monitor's or a lock's owner may be one.\n"
+          :tag (map uint64 (weak/Pointer Thread))} adopted
+  (make (map uint64 (weak/Pointer Thread))))
+
+(go/func adoptedAdd "adoptedAdd records the adopted thread t of number n.\n" [^uint64 n ^{:tag (* Thread)} t]
+  (.Lock liveMu)
+  (aset adopted n (weak/Make t))
+  (.Unlock liveMu))
+
+(go/func freeAdopted
+  "freeAdopted forgets the adopted thread of number n and frees the number (its Thread's cleanup).\n"
+  [^uint64 n]
+  (.Lock liveMu)
+  (delete adopted n)
+  (.Unlock liveMu)
+  (freeNum n))
+
+(go/func threadByNum
+  "threadByNum is the live or adopted thread of number n (monitor.ae's owners), or nil.\n"
+  ^{:tag (* Thread)} [^uint64 n]
+  (.Lock liveMu)
+  (defer (.Unlock liveMu))
+  (range [t _ liveSet]
+    (when (== (.Load (.-num t)) n) (return t)))
+  (let [(values w ok) (aget adopted n)]
+    (when ok (return (.Value w))))
+  nil)
+
+(go/func monitorOwner
+  "monitorOwner is the thread that holds o's monitor, or nil.\n"
+  ^{:tag (* Thread)} [^{:tag (* Object)} o]
+  (let [w (atomic/LoadUint64 (addr (.-hdr o)))
+        l (lockWord w)]
+    (switch (bit-and l lockStateMask)
+      (case [lockThin] (return (threadByNum (conv uint64 (>> l 10)))))
+      (case [lockInflated]
+        (let [m (monitorAt (>> l 2))]
+          (when (or (== m nil) (!= (.-obj m) o)) (return nil))
+          (.Lock (.-mu m))
+          (let [owner (.-owner m)]
+            (.Unlock (.-mu m))
+            (when (== owner 0) (return nil))
+            (return (threadByNum owner))))))
+    nil))
+
+(go/func lockOwnerOf
+  "lockOwnerOf is the thread that holds x (an object's monitor, or jrt's ReentrantLock), or nil.\n"
+  ^{:tag (* Thread)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values rl ok) (assert (* ReentrantLock) x)]
+    (when ok
+      (.Lock (.-mu rl))
+      (defer (.Unlock (.-mu rl)))
+      (return (.-owner rl))))
+  (monitorOwner (header x)))
+
+(go/func HostManagement_WaitOn0_Thread__O_native
+  "HostManagement_WaitOn0_Thread__O_native is the object t is blocked or waits on (ThreadInfo's lock), or null.\n"
+  ^any [^Thread_I t]
+  (let [th (.Self_Thread t)]
+    (when (== (.Load (.-wstate th)) wsNone) (return nil))
+    (.Load (.-waitOn th))))
+
+(go/func HostManagement_LockOwner0_O__Thread_native
+  "HostManagement_LockOwner0_O__Thread_native is the thread holding x's monitor or lock, or null.\n"
+  ^Thread_I [^any x]
+  (let [t (lockOwnerOf x)]
+    (when (== t nil) (return nil))
+    (.-self t)))
+
+(go/func HostManagement_BlockedCount0_Thread__J_native ^int64 [^Thread_I t]
+  (.Load (.-blockedCount (.Self_Thread t))))
+
+(go/func HostManagement_WaitedCount0_Thread__J_native ^int64 [^Thread_I t]
+  (.Load (.-waitedCount (.Self_Thread t))))
+
+(go/func HostManagement_BlockedTime0_Thread__J_native
+  "HostManagement_BlockedTime0_Thread__J_native is t's milliseconds blocked while contention monitoring was on,
+-1 when it is off.\n"
+  ^int64 [^Thread_I t]
+  (when (not (.Load contentionMonitoring)) (return -1))
+  (/ (.Load (.-blockedNanos (.Self_Thread t))) 1000000))
+
+(go/func HostManagement_WaitedTime0_Thread__J_native ^int64 [^Thread_I t]
+  (when (not (.Load contentionMonitoring)) (return -1))
+  (/ (.Load (.-waitedNanos (.Self_Thread t))) 1000000))
+
+(go/func HostManagement_SetContentionMonitoring0_Z__V_native
+  "HostManagement_SetContentionMonitoring0_Z__V_native turns contention monitoring on or off; turned on, the
+times start again from 0 (as HotSpot resets them).\n"
+  [^bool on]
+  (when (and on (not (.Load contentionMonitoring)))
+    (.Lock liveMu)
+    (range [t _ liveSet]
+      (.Store (.-blockedNanos t) 0)
+      (.Store (.-waitedNanos t) 0))
+    (.Unlock liveMu))
+  (.Store contentionMonitoring on))
+
+;; ---------------------------------------------------------------------------------------
+;; slice 3: deadlocks (ThreadMXBean's findMonitorDeadlockedThreads, findDeadlockedThreads)
+
+(go/type ownableSynchronizer
+  "ownableSynchronizer is java.util.concurrent.locks.AbstractOwnableSynchronizer as jrt sees a translated one
+(LockSupport's blocker of a parked thread): its exclusive owner.\n"
+  (interface
+    (GetExclusiveOwnerThread__Thread ^Thread_I [])))
+
+(go/func waitOwner
+  "waitOwner is the thread t waits for in a deadlock search: the owner of the monitor t is BLOCKED to enter
+and, when synchronizers counts, of the lock or ownable synchronizer it waits on (WAITING or TIMED_WAITING:
+jrt's ReentrantLock, a translated AbstractOwnableSynchronizer park's blocker); nil if none.\n"
+  ^{:tag (* Thread)} [^{:tag (* Thread)} t ^bool synchronizers]
+  (let [ws (.Load (.-wstate t))
+        on (.Load (.-waitOn t))]
+    (when (or (== on nil) (== ws wsNone)) (return nil))
+    (when (== ws wsBlocked)
+      (return (lockOwnerOf on)))
+    (when (not synchronizers) (return nil))
+    (let [(values rl ok) (assert (* ReentrantLock) on)]
+      (when ok
+        (.Lock (.-mu rl))
+        (defer (.Unlock (.-mu rl)))
+        (return (.-owner rl))))
+    (let [(values os ok) (assert ownableSynchronizer on)]
+      (when ok
+        (let [o (.GetExclusiveOwnerThread__Thread os)]
+          (when (== o nil) (return nil))
+          (return (.Self_Thread o)))))
+    nil))
+
+(go/func deadlocked
+  "deadlocked is the live threads in a cycle of waits (each waiting for one the next owns, waitOwner), as
+HotSpot's ThreadService::find_deadlocks_at_safepoint finds them, in a search per thread; nil when none.\n"
+  ^{:tag (slice (* Thread))} [^bool synchronizers]
+  (let [ts (liveThreads)
+        in (make (map (* Thread) bool))
+        ^{:tag (slice (* Thread))} out nil]
+    (range [_ t ts]
+      (when (not (aget in t))
+        (let [pos (make (map (* Thread) int))
+              ^{:tag (slice (* Thread))} path nil
+              cur t]
+          (while (and (!= cur nil) (not (aget in cur)))
+            (let [(values i seen) (aget pos cur)]
+              (when seen
+                ;; a cycle: path[i:]
+                (range [_ c (subslice path i)]
+                  (when (not (aget in c))
+                    (aset in c true)
+                    (set! out (append out c))))
+                (break))
+              (aset pos cur (len path))
+              (set! path (append path cur))
+              (set! cur (waitOwner cur synchronizers)))))))
+    out))
+
+(go/func deadlockArray ^{:tag (* RefArray)} [^{:tag (slice (* Thread))} ts]
+  (when (== (len ts) 0) (return nil))
+  (let [a (NewRefArray Thread_class (conv int32 (len ts)))]
+    (range [i t ts] (aset (.-A a) i (.-self t)))
+    a))
+
+(go/func HostManagement_FindMonitorDeadlocked0__Thread1_native
+  "HostManagement_FindMonitorDeadlocked0__Thread1_native is the threads deadlocked on object monitors, or null.\n"
+  ^{:tag (* RefArray)} []
+  (deadlockArray (deadlocked false)))
+
+(go/func HostManagement_FindDeadlocked0__Thread1_native
+  "HostManagement_FindDeadlocked0__Thread1_native is the threads deadlocked on monitors or ownable
+synchronizers, or null.\n"
+  ^{:tag (* RefArray)} []
+  (deadlockArray (deadlocked true)))
+
+;; ---------------------------------------------------------------------------------------
+;; slice 3b: the monitors and synchronizers a thread holds (ThreadInfo's locked monitors and synchronizers)
+
+(go/var ^{:doc "trackLocks is on once ThreadMXBean is made (HostManagement.trackLocks0): from then each thread's
+monitor entries and exits, and its jrt ReentrantLocks' acquisitions and releases, are recorded (one atomic
+load on the paths before). What was locked before is not known: a monitor entered before stays unlisted, and
+its exit finds no entry.\n" :tag atomic/Bool} trackLocks)
+
+(go/type heldMonitor "heldMonitor is a monitor a thread entered: its header, its Java object (nil: unknown) and
+how many Java frames the thread had when it entered (slice 4: the frame that locked it).\n"
+  (struct ^{:tag (* Object)} o ^any x ^int frames))
+
+(go/func heldPush [^{:tag (* Thread)} t ^{:tag (* Object)} o ^any x]
+  (let [n (len (.-A (javaFrames (callers 3) (evalTrace) (goiTrace))))]
+    (.Lock (.-heldMu t))
+    (set! (.-held t) (append (.-held t) (lit heldMonitor :o o :x x :frames n)))
+    (.Unlock (.-heldMu t))))
+
+(go/func heldPop "heldPop removes t's latest entry of o's monitor, if any.\n" [^{:tag (* Thread)} t ^{:tag (* Object)} o]
+  (.Lock (.-heldMu t))
+  (for [i (- (len (.-held t)) 1)] (>= i 0) (dec! i)
+    (when (== (.-o (aget (.-held t) i)) o)
+      (set! (.-held t) (append (subslice (.-held t) _ i) (spread (subslice (.-held t) (+ i 1)))))
+      (break)))
+  (.Unlock (.-heldMu t)))
+
+(go/func syncHeld
+  "syncHeld records that t now holds (on) or no longer holds the synchronizer s, once tracked.\n"
+  [^{:tag (* Thread)} t ^any s ^bool on]
+  (when (not (.Load trackLocks)) (return))
+  (.Lock (.-heldMu t))
+  (if on
+    (set! (.-syncs t) (append (.-syncs t) s))
+    (range [i x (.-syncs t)]
+      (when (== x s)
+        (set! (.-syncs t) (append (subslice (.-syncs t) _ i) (spread (subslice (.-syncs t) (+ i 1)))))
+        (break))))
+  (.Unlock (.-heldMu t)))
+
+(go/func HostManagement_TrackLocks0__V_native
+  "HostManagement_TrackLocks0__V_native starts recording the threads' held monitors and synchronizers.\n"
+  []
+  (.Store trackLocks true))
+
+(go/func HostManagement_LockedMonitors0_Thread__O1_native
+  "HostManagement_LockedMonitors0_Thread__O1_native is the monitors t holds, the latest entered first, each once
+(its latest entry), not the one it waits on (Object.wait releases it): their Java objects (the header when
+unknown).\n"
+  ^{:tag (* RefArray)} [^Thread_I th]
+  (let [t (.Self_Thread th)
+        waiting (or (== (.Load (.-wstate t)) wsWaiting) (== (.Load (.-wstate t)) wsTimed))
+        on (.Load (.-waitOn t))
+        seen (make (map (* Object) bool))
+        ^{:tag (slice any)} out nil]
+    (.Lock (.-heldMu t))
+    (for [i (- (len (.-held t)) 1)] (>= i 0) (dec! i)
+      (let [h (aget (.-held t) i)
+            ^any x (.-x h)]
+        (when (== x nil) (set! x (.-o h)))
+        (when (and (not (aget seen (.-o h))) (not (and waiting (== x on))))
+          (aset seen (.-o h) true)
+          (set! out (append out x)))))
+    (.Unlock (.-heldMu t))
+    (let [a (NewRefArray Object_class (conv int32 (len out)))]
+      (range [i x out] (aset (.-A a) i x))
+      a)))
+
+(go/func HostManagement_LockedSynchronizers0_Thread__O1_native
+  "HostManagement_LockedSynchronizers0_Thread__O1_native is the ownable synchronizers t holds (jrt's
+ReentrantLocks; the JDK lists the locks' AQS sync objects, which jrt's lock has not).\n"
+  ^{:tag (* RefArray)} [^Thread_I th]
+  (let [t (.Self_Thread th)]
+    (.Lock (.-heldMu t))
+    (defer (.Unlock (.-heldMu t)))
+    (let [a (NewRefArray Object_class (conv int32 (len (.-syncs t))))]
+      (range [i x (.-syncs t)] (aset (.-A a) i x))
+      a)))
+
+;; ---------------------------------------------------------------------------------------
+;; slice 4: other threads' stacks
+
+(go/func stackOf
+  "stackOf is t's Java frames as ThreadInfo reports them: the current thread's now; a waiting thread's as it
+began to wait (once tracked); else none (a running thread's goroutine stack cannot be read from another).\n"
+  ^{:tag (* RefArray)} [^{:tag (* Thread)} t]
+  (when (== t (CurrentThread))
+    (return (javaFrames (callers 3) (evalTrace) (goiTrace))))
+  (when (!= (.Load (.-wstate t)) wsNone)
+    (let [(values a ok) (assert (* RefArray) (.Load (.-waitStack t)))]
+      (when (and ok (!= a nil)) (return a))))
+  (NewRefArray StackTraceElement_class 0))
+
+(go/func HostManagement_StackTrace0_Thread__StackTraceElement1_native
+  "HostManagement_StackTrace0_Thread__StackTraceElement1_native is t's stack as ThreadInfo reports it (stackOf).\n"
+  ^{:tag (* RefArray)} [^Thread_I th]
+  (stackOf (.Self_Thread th)))
+
+(go/func HostManagement_LockedMonitorDepths0_Thread_I__I1_native
+  "HostManagement_LockedMonitorDepths0_Thread_I__I1_native is, for each of t's locked monitors (lockedMonitors0's
+order), the depth in a stack of n frames (stackOf's) of the frame that locked it, -1 when not known.\n"
+  ^{:tag (* IntArray)} [^Thread_I th ^int32 n]
+  (let [t (.Self_Thread th)
+        waiting (or (== (.Load (.-wstate t)) wsWaiting) (== (.Load (.-wstate t)) wsTimed))
+        on (.Load (.-waitOn t))
+        seen (make (map (* Object) bool))
+        ^{:tag (slice int32)} out nil]
+    (.Lock (.-heldMu t))
+    (for [i (- (len (.-held t)) 1)] (>= i 0) (dec! i)
+      (let [h (aget (.-held t) i)
+            ^any x (.-x h)]
+        (when (== x nil) (set! x (.-o h)))
+        (when (and (not (aget seen (.-o h))) (not (and waiting (== x on))))
+          (aset seen (.-o h) true)
+          (let [d (- (conv int32 n) (conv int32 (.-frames h)))]
+            (when (or (< d 0) (>= d n) (== n 0)) (set! d -1))
+            (set! out (append out d))))))
+    (.Unlock (.-heldMu t))
+    (let [a (NewIntArray (conv int32 (len out)))]
+      (range [i d out] (aset (.-A a) i d))
+      a)))

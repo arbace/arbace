@@ -1,0 +1,75 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/AsyncSSLTunnelConnection.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.net InetSocketAddress)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels SocketChannel)
+        '(java.util.concurrent CompletableFuture)
+        '(java.util.function BiFunction Consumer Function)
+        '(jdk.internal.net.http.common BufferSupplier MinimalFuture SSLTube Utils$ProxyHeaders))
+
+(defclass AsyncSSLTunnelConnection
+  :extends AbstractAsyncSSLConnection
+
+  (field ^:final ^PlainTunnelingConnection plainConnection)
+
+  (field ^:final ^HttpConnection$PlainHttpPublisher writePublisher)
+
+  (field ^:volatile ^SSLTube flow)
+
+  (constructor [this ^Origin originServer ^InetSocketAddress addr ^HttpClientImpl client
+                ^String/1 alpn ^InetSocketAddress proxy ^Utils$ProxyHeaders proxyHeaders
+                ^String label]
+    (super. originServer addr client alpn label)
+    (set! (.-plainConnection this)
+          (PlainTunnelingConnection. originServer addr proxy client proxyHeaders label))
+    (set! (.-writePublisher this) (HttpConnection$PlainHttpPublisher.)))
+
+  (method ^:public connectAsync ^{:tag (CompletableFuture Void)} [this ^{:tag (Exchange ?)} exchange]
+    (when (.on (.-debug this)) (.log (.-debug this) "Connecting plain tunnel connection"))
+    (.thenApply (.connectAsync plainConnection exchange)
+                (lambda Function ^Void [^Void unused]
+                  (when (.on (.-debug this)) (.log (.-debug this) "creating SSLTube"))
+                  (set! flow
+                        (SSLTube. (.-engine this)
+                                  (.theExecutor (.client this))
+                                  (method-ref Consumer
+                                              [ByteBuffer]
+                                              (.getSSLBufferSupplier (.client this))
+                                              BufferSupplier/.recycle)
+                                  (.getConnectionFlow plainConnection)))
+                  nil)))
+
+  (method ^:public finishConnect ^{:tag (CompletableFuture Void)} [this]
+    (.thenCompose (.handle (.getALPN this)
+                           (lambda BiFunction ^CompletableFuture [^String unused ^Throwable ex]
+                             (if (nil? ex)
+                                 (.finishConnect plainConnection)
+                                 (do (.close plainConnection ex) (MinimalFuture/failedFuture ex)))))
+                  (Function/identity)))
+
+  (method isTunnel ^boolean [this] true)
+
+  (method connected ^boolean [this] (.connected plainConnection))
+
+  (method publisher ^HttpConnection$HttpPublisher [this] writePublisher)
+
+  (method ^:public toString ^String [this]
+    (java-str "AsyncSSLTunnelConnection: " (.toString super)))
+
+  (method cacheKey ^ConnectionPool$CacheKey [this]
+    (ConnectionPool/cacheKey true (.-address this) (.-proxyAddr plainConnection)))
+
+  (method ^:public close ^void [this] (.close plainConnection))
+
+  (method close ^void [this ^Throwable cause]
+    (.close plainConnection cause))
+
+  (method channel ^SocketChannel [this] (.channel plainConnection))
+
+  (method isProxied ^boolean [this] true)
+
+  (method proxy ^InetSocketAddress [this] (.-proxyAddr plainConnection))
+
+  (method getConnectionFlow ^SSLTube [this] flow))

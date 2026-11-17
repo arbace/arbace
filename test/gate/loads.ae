@@ -1,0 +1,102 @@
+(ns gate.loads
+  "GD3 (doc/GATE-DIET-SURVEY.md, GDS9 (a), \"As built: GD3\"): the steps' load closures, test/gate/loads.edn, made from the
+  audited runs' logs (bin/gate --audit and the clean run write, per step, NAME.loaded: the namespaces it loaded, RT.load's
+  ARBACE_LOADED_LOG; and NAME.paths: the files of the checkout it read, strace's, tools/gateaudit's reduction). The planner
+  (test/gate/plan.ae's closure) keys a step that has an entry by the files under arbace/ it read (a tool namespace that
+  stage 0 or an executable loads from the checkout is read there, also when it equals the embedded copy: RT.load compares
+  them), not by every embedded tool's source (:tools); and on a program host (:prog, :javac-prog) it adds the namespace
+  families it never loaded (goi's arbace.go, C's arbace.c and arbace.repr.c) to its :never-loads. The audit holds the
+  closure honest: a step that reads a file of arbace/ its closure leaves out, or loads a :never-loads namespace, fails
+  its audit (test/gate/audit.ae), and the next clean run's logs make the file again.
+
+  -main update OUT LOGDIR...   OUT (test/gate/loads.edn) from the logs' directories (.tmp/gate-clean/SHA.logs/gate, a
+                               --audit's .tmp/gate-audit), in order: a later directory's entry for a step replaces an
+                               earlier one's
+  -main show FILE STEP         a step's entry, as the planner finds it (the step, its part, its step's parts' union)"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-file [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(def families
+  "the namespace families a program host's identity drops for a step that never loaded them (GDS9 (a)): the program's
+  units below these prefixes. Each FAMILY is [:name [scriptbase-prefix ...] [namespace ...]]"
+  [[:go ["arbace/go"] '[arbace.go]]
+   [:c ["arbace/c" "arbace/repr/c"] '[arbace.c arbace.repr.c]]])
+
+(defn- loads-family? [loads prefixes]
+  (boolean (some (fn [l] (some #(or (= l %) (str/starts-with? l (str % "/"))) prefixes)) loads)))
+
+(defn- lines [^File f] (if (.isFile f) (vec (remove str/blank? (str/split-lines (slurp (.getPath f))))) []))
+
+(defn- checkout-path
+  "a path of NAME.paths (an absolute path in the audited checkout: the clean clone .tmp/gate-clean/SHA/, or the checkout
+  ROOT) as a checkout path, or nil"
+  [^String root ^String p]
+  (cond
+    (re-find #"/\.tmp/gate-clean/[0-9a-f]+/" p) (second (re-find #"/\.tmp/gate-clean/[0-9a-f]+/(.*)$" p))
+    (and root (str/starts-with? p (str root "/"))) (subs p (inc (count root)))
+    :else nil))
+
+(defn entry
+  "a step's entry from its NAME.loaded and NAME.paths in DIR: {:from DIR's run :reads [arbace/ files read] :never [families]}"
+  [^File dir nm root]
+  (let [loaded (lines (File. dir (str nm ".loaded")))
+        reads (sort (distinct (for [l (lines (File. dir (str nm ".paths")))
+                                    :let [[k p] (str/split l #"\t" 2)]
+                                    :when (#{"R" "H"} k)
+                                    :let [c (checkout-path root (str p))]
+                                    :when (and c (str/starts-with? c "arbace/") (not (str/includes? c "/.")))]
+                                c)))
+        run (or (second (re-find #"gate-clean/([0-9a-f]{8})" (.getPath dir))) (.getPath dir))]
+    {:from run :reads (vec reads)
+     :never (vec (for [[k pre _] families :when (not (loads-family? loaded pre))] k))}))
+
+(defn update-file [out dirs]
+  (let [root (.getCanonicalPath (File. "."))
+        m (reduce (fn [m d]
+                    (let [dir (File. (str d))
+                          names (sort (distinct (for [^File f (or (.listFiles dir) [])
+                                                      :let [n (.getName f)]
+                                                      :when (str/ends-with? n ".loaded")
+                                                      ;; an audited step has both: its loads and its reads
+                                                      :when (.isFile (File. dir (str (subs n 0 (- (count n) 7)) ".paths")))]
+                                                  (subs n 0 (- (count n) 7)))))]
+                      (into m (for [nm names] [nm (entry dir nm root)]))))
+                  (sorted-map) dirs)]
+    (spit out
+          (str ";; GD3 (doc/GATE-DIET-SURVEY.md, GDS9 (a), \"As built: GD3\"): each audited step's load closure, made by\n"
+               ";; `bin/gate --loads-update LOGDIR...` (gate.loads, test/gate/loads.ae) from the audited runs' NAME.loaded and NAME.paths:\n"
+               ";; :reads the files under arbace/ it read (its tool namespaces), :never the families of namespaces it never loaded\n"
+               ";; (:go arbace.go, :c arbace.c and arbace.repr.c), :from the run. The planner keys a step's arbace/ files by :reads and\n"
+               ";; drops :never from a program host's units; a step with no entry keeps its whole declaration. The audit fails a read\n"
+               ";; outside it; the next clean run's logs make this file again.\n"
+               "{\n"
+               (apply str (for [[k v] m]
+                            (str " " (pr-str k) " {:from " (pr-str (:from v)) " :never " (pr-str (:never v)) "\n"
+                                 "  :reads " (pr-str (:reads v)) "}\n")))
+               "}\n"))
+    (println (str "gate loads: " (count m) " steps' closures into " out))))
+
+(defn lookup
+  "the entry the planner uses for step NM (its name; a rotated check's NAME.PART; else the union of its step's parts'
+  entries, NAME.*; else NAME's), or nil"
+  [loads ^String nm]
+  (let [strip (fn [^String n] (str/replace n #"\.(sub|s[0-9]+|whole)$" ""))
+        n1 (strip nm)
+        base (first (str/split n1 #"\." 2))
+        parts (for [[k v] loads :when (str/starts-with? (str k) (str base "."))] v)]
+    (or (get loads nm) (get loads n1)
+        (when (seq parts)
+          {:from "parts" :reads (vec (sort (distinct (mapcat :reads parts))))
+           :never (vec (filter (fn [f] (every? #(some #{f} (:never %)) parts)) (map first families)))})
+        (get loads base))))
+
+(defn -main [& args]
+  (case (first args)
+    "update" (let [[_ out & dirs] args] (update-file out dirs))
+    "show" (let [[_ f nm] args] (prn (lookup (read-file f) nm)))
+    (do (println "usage: gate.loads update OUT LOGDIR... | show FILE STEP") (System/exit 2))))

@@ -1,0 +1,1448 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/net/http/HttpClientImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException Serializable UncheckedIOException)
+        '(java.lang.ref Reference WeakReference)
+        '(java.net Authenticator
+                   ConnectException
+                   CookieHandler
+                   InetAddress
+                   ProtocolException
+                   ProxySelector)
+        '(java.net.http HttpClient
+                        HttpClient$Redirect
+                        HttpClient$Version
+                        HttpConnectTimeoutException
+                        HttpOption
+                        HttpOption$Http3DiscoveryMode
+                        HttpRequest
+                        HttpResponse
+                        HttpResponse$BodyHandler
+                        HttpResponse$PushPromiseHandler
+                        HttpTimeoutException
+                        UnsupportedProtocolVersionException
+                        WebSocket$Builder)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels CancelledKeyException
+                            ClosedChannelException
+                            ClosedSelectorException
+                            SelectableChannel
+                            SelectionKey
+                            Selector)
+        '(java.security NoSuchAlgorithmException)
+        '(java.time Duration)
+        '(java.time.temporal ChronoUnit)
+        '(java.util ArrayList Arrays HashSet Iterator List Objects Optional Set TreeSet)
+        '(java.util.concurrent CancellationException
+                               CompletableFuture
+                               ConcurrentSkipListSet
+                               ExecutionException
+                               Executor
+                               ExecutorService
+                               Executors
+                               RejectedExecutionException
+                               ThreadFactory)
+        '(java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong AtomicReference)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function BiConsumer
+                             BiFunction
+                             BooleanSupplier
+                             Consumer
+                             Function
+                             Predicate
+                             Supplier)
+        '(javax.net.ssl SSLContext SSLException SSLHandshakeException SSLParameters)
+        '(jdk.internal.net.http.common BufferSupplier
+                                       HttpBodySubscriberWrapper
+                                       Log
+                                       Logger
+                                       MinimalFuture
+                                       OperationTrackers$Trackable
+                                       OperationTrackers$Tracker
+                                       Pair
+                                       TimeSource
+                                       Utils
+                                       Utils$SafeExecutor
+                                       Utils$SafeExecutorService
+                                       Utils$UseVTForSelector)
+        '(jdk.internal.net.http.websocket BuilderImpl))
+
+(defclass ^:final HttpClientImpl
+  :extends HttpClient
+  :implements [OperationTrackers$Trackable]
+
+  (field ^:static ^:final ^boolean DEBUGELAPSED (or Utils/TESTING Utils/DEBUG))
+
+  (field ^:static ^:final ^boolean DEBUGTIMEOUT false)
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this HttpClientImpl/.dbgString)
+                          Utils/DEBUG))
+
+  (field ^:final ^Logger debugelapsed
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this HttpClientImpl/.dbgString)
+                          DEBUGELAPSED))
+
+  (field ^:final ^Logger debugtimeout
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this HttpClientImpl/.dbgString)
+                          DEBUGTIMEOUT))
+
+  (field ^:static ^:final ^AtomicLong CLIENT_IDS (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong CONNECTION_IDS (AtomicLong.))
+
+  (field ^:static ^:final ^int DEFAULT_KEEP_ALIVE_TIMEOUT 30)
+
+  (field ^:static ^:final ^long KEEP_ALIVE_TIMEOUT
+    (HttpClientImpl/getTimeoutProp "jdk.httpclient.keepalive.timeout" DEFAULT_KEEP_ALIVE_TIMEOUT))
+
+  (field ^:static ^:final ^long IDLE_CONNECTION_TIMEOUT_H2
+    (HttpClientImpl/getTimeoutProp "jdk.httpclient.keepalive.timeout.h2" KEEP_ALIVE_TIMEOUT))
+
+  (field ^:static ^:final ^long IDLE_CONNECTION_TIMEOUT_H3
+    (HttpClientImpl/getTimeoutProp "jdk.httpclient.keepalive.timeout.h3" IDLE_CONNECTION_TIMEOUT_H2))
+
+  (field ^:private ^:final ^boolean hasRequiredH3TLS)
+
+  (field ^:private ^:final ^boolean hasRequiredH2TLS)
+
+  (field ^:static ^:final ^Utils$UseVTForSelector USE_VT_FOR_SELECTOR
+    (Utils/useVTForSelector "jdk.internal.httpclient.tcp.selector.useVirtualThreads" "default"))
+
+  (method ^:private ^:static useVtForSelector ^boolean []
+    (switch USE_VT_FOR_SELECTOR ALWAYS true NEVER false true))
+
+  (defclass ^:private ^:static ^:final DefaultThreadFactory
+    :implements [ThreadFactory]
+
+    (field ^:private ^:final ^String namePrefix)
+
+    (field ^:private ^:final ^AtomicInteger nextId (AtomicInteger.))
+
+    (constructor [this ^long clientID]
+      (set! namePrefix (java-str "HttpClient-" clientID "-Worker-")))
+
+    (method ^:public newThread ^Thread [this ^Runnable r]
+      (let [name (java-str namePrefix (.getAndIncrement nextId))
+            t (Thread. nil r name 0 false)]
+        (.setDaemon t true)
+        t)))
+
+  (defclass ^:static ^:final DelegatingExecutor
+    :implements [Executor]
+
+    (field ^:private ^:final ^BooleanSupplier isInSelectorThread)
+
+    (field ^:private ^:final ^Executor delegate)
+
+    (field ^:private ^:final ^{:tag (Utils$SafeExecutor ?)} safeDelegate)
+
+    (field ^:private ^:final ^{:tag (BiConsumer Runnable Throwable)} errorHandler)
+
+    (constructor [this ^BooleanSupplier isInSelectorThread ^Executor delegate
+                  ^{:tag (BiConsumer Runnable Throwable)} errorHandler]
+      (set! (.-isInSelectorThread this) isInSelectorThread)
+      (set! (.-delegate this) delegate)
+      (set! (.-safeDelegate this)
+            (if-instance [^ExecutorService svc delegate]
+              ^Utils$SafeExecutor (Utils$SafeExecutorService. svc ASYNC_POOL errorHandler)
+              (Utils$SafeExecutor. delegate ASYNC_POOL errorHandler)))
+      (set! (.-errorHandler this) errorHandler))
+
+    (method safeDelegate ^Executor [this] safeDelegate)
+
+    (method delegate ^Executor [this] delegate)
+
+    (method ^:public execute ^void [this ^Runnable command]
+      (if (.getAsBoolean isInSelectorThread) (.ensureExecutedAsync this command) (.run command)))
+
+    (method ^:public ensureExecutedAsync ^void [this ^Runnable command]
+      (try
+        (.execute delegate command)
+        (catch RejectedExecutionException t
+          (.accept errorHandler command t)
+          (.execute ASYNC_POOL command))))
+
+    (method shutdown ^void [this]
+      (when-instance [^ExecutorService service delegate] (.shutdown service))))
+
+  (field ^:private ^:final ^{:tag (Set PendingRequest)} pendingRequests)
+
+  (field ^:private ^:final ^AtomicLong pendingRequestId (AtomicLong.))
+
+  (defclass ^:private ^:static ^:final PendingRequest
+    :implements [(Comparable PendingRequest)]
+
+    (field ^:final ^long id)
+
+    (field ^:final ^HttpRequest request)
+
+    (field ^:final ^{:tag (CompletableFuture ?)} cf)
+
+    (field ^:final ^HttpClientImpl client)
+
+    (field ^:final ^{:tag (MultiExchange ?)} mex)
+
+    (field ref)
+
+    (constructor ^:private [this ^long id ^HttpRequest request ^{:tag (CompletableFuture ?)} cf
+                            ^{:tag (MultiExchange ?)} mex ^HttpClientImpl client]
+      (set! (.-id this) id)
+      (set! (.-request this) request)
+      (set! (.-cf this) cf)
+      (set! (.-mex this) mex)
+      (set! (.-client this) client))
+
+    (method ^:public abort ^void [this ^Throwable t]
+      (try
+        (if (.isSelectorThread client)
+            (let [done (.exceptionally cf (lambda Function [^Throwable e] nil))]
+              (.execute ASYNC_POOL (lambda Runnable ^void [] (.completeExceptionally this t)))
+              (.join done))
+            (.completeExceptionally cf t))
+        (finally (.cancel mex (Utils/getIOException t)))))
+
+    (method ^:private completeExceptionally ^void [this ^Throwable t]
+      (when (.on (.-debug client))
+        (.log (.-debug client) "aborting %s with %s" (new Object/1 [this t])))
+      (try
+        (.completeExceptionally cf t)
+        (catch Throwable e
+          (.log (.-debug client) "Failed to complete cf for [%s]: %s" (new Object/1 [this e])))))
+
+    (method ^:public compareTo ^int [this ^PendingRequest o]
+      (if (nil? o) 1 (Long/compare id (.-id o))))
+
+    (method ^:public toString ^String [this]
+      (java-str id ": " (.toString request))))
+
+  (method ^:static registerPending :type-params [T] ^{:tag (CompletableFuture T)} [^PendingRequest pending
+                                                                                   ^{:tag (CompletableFuture T)} res]
+    (if (.isDone (.-cf pending))
+        res
+        (let [client (.-client pending)
+              id (.-id pending)
+              added (.add (.-pendingRequests client) pending)
+              ref (.whenComplete res
+                                 (lambda BiConsumer ^void [r ^Throwable t]
+                                   (.remove (.-pendingRequests client) pending)))]
+          (set! (.-ref pending) ref)
+          (java-assert added (.formatted "request %d was already added" id))
+          (when (.isClosed (.-selmgr client))
+            (.abort pending (.selectorClosedException (.-selmgr client))))
+          ref)))
+
+  (method ^:static abortPendingRequests ^void [^HttpClientImpl client ^:mutable ^Throwable reason]
+    (set! reason (Utils/getCompletionCause reason))
+    (when (.on (.-debug client))
+      (let [^Serializable msg (if (instance? RejectedExecutionException reason)
+                                  ^Serializable (.getClass reason)
+                                  ^Serializable reason)]
+        (.log (.-debug client) "aborting pending requests due to: %s" (new Object/1 [msg]))))
+    (HttpClientImpl/closeSubscribers client reason)
+    (let [pendingRequests (.-pendingRequests client)]
+      (while (not (.isEmpty pendingRequests))
+        (let [pendings (.iterator pendingRequests)]
+          (while (.hasNext pendings)
+            (let [pending (cast PendingRequest (.next pendings))]
+              (try (.abort pending reason) (finally (.remove pendings)))))))))
+
+  (field ^:private ^:final ^CookieHandler cookieHandler)
+
+  (field ^:private ^:final ^Duration connectTimeout)
+
+  (field ^:private ^:final ^HttpClient$Redirect followRedirects)
+
+  (field ^:private ^:final ^ProxySelector userProxySelector)
+
+  (field ^:private ^:final ^ProxySelector proxySelector)
+
+  (field ^:private ^:final ^Authenticator authenticator)
+
+  (field ^:private ^:final ^HttpClient$Version version)
+
+  (field ^:private ^:final ^ConnectionPool connections)
+
+  (field ^:private ^:final ^DelegatingExecutor delegatingExecutor)
+
+  (field ^:private ^:final ^boolean isDefaultExecutor)
+
+  (field ^:private ^:final ^SSLContext sslContext)
+
+  (field ^:private ^:final ^SSLParameters sslParams)
+
+  (field ^:private ^:final ^Thread selmgrThread)
+
+  (field ^:private ^:final ^SelectorManager selmgr)
+
+  (field ^:private ^:final ^FilterFactory filters)
+
+  (field ^:private ^:final ^Http2ClientImpl client2)
+
+  (field ^:private ^:final client3)
+
+  (field ^:private ^:final ^AltServicesRegistry registry)
+
+  (field ^:private ^:final ^long id)
+
+  (field ^:private ^:final ^String dbgTag)
+
+  (field ^:private ^:final ^InetAddress localAddr)
+
+  (field ^:private ^:final ^SSLDirectBufferSupplier sslBufferSupplier
+    (SSLDirectBufferSupplier. this))
+
+  (field ^:private ^:final ^{:tag (WeakReference HttpClientFacade)} facadeRef)
+
+  (field ^:private ^:final ^{:tag (WeakReference HttpClientImpl)} implRef)
+
+  (field ^:private ^:final ^{:tag (ConcurrentSkipListSet PlainHttpConnection)} openedConnections
+    (ConcurrentSkipListSet. HttpConnection/COMPARE_BY_ID))
+
+  (field ^:private ^:final ^{:tag (ConcurrentSkipListSet (HttpBodySubscriberWrapper ?))} subscribers
+    (ConcurrentSkipListSet. HttpBodySubscriberWrapper/COMPARE_BY_ID))
+
+  (field ^:private ^:final ^AtomicLong pendingOperationCount (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong pendingWebSocketCount (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong pendingHttpOperationsCount (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong pendingHttpRequestCount (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong pendingHttp2StreamCount (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong pendingHttp3StreamCount (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong pendingTCPConnectionCount (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong pendingSubscribersCount (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicBoolean isAlive (AtomicBoolean.))
+
+  (field ^:private ^:final ^AtomicBoolean isStarted (AtomicBoolean.))
+
+  (field ^:private ^:volatile ^boolean shutdownRequested)
+
+  (field ^:private ^:final ^{:tag (TreeSet TimeoutEvent)} timeouts)
+
+  (defclass ^:private ^:static ^:final SingleFacadeFactory
+    (field ^HttpClientFacade facade)
+
+    (method createFacade ^HttpClientFacade [this ^HttpClientImpl impl]
+      (java-assert (nil? facade))
+      (set! facade (HttpClientFacade. impl))))
+
+  (method ^:static create ^HttpClientFacade [^HttpClientBuilderImpl builder]
+    (let [facadeFactory (SingleFacadeFactory.)
+          impl (HttpClientImpl. builder facadeFactory)]
+      (.start impl)
+      (java-assert (some? (.-facade facadeFactory)))
+      (java-assert (identical? (.get (.-facadeRef impl)) (.-facade facadeFactory)))
+      (.-facade facadeFactory)))
+
+  (constructor ^:private [this ^HttpClientBuilderImpl builder ^SingleFacadeFactory facadeFactory]
+    (set! id (.incrementAndGet CLIENT_IDS))
+    (set! dbgTag (java-str "HttpClientImpl(" id ")"))
+    (set! localAddr (.-localAddr builder))
+    (set! version
+          (cast HttpClient$Version
+                (Objects/requireNonNullElse (.-version builder) HttpClient$Version/HTTP_2)))
+    (set! sslContext
+          (cast SSLContext
+                (Objects/requireNonNullElseGet
+                  (.-sslContext builder)
+                  (lambda Supplier ^SSLContext []
+                    (try
+                      (SSLContext/getDefault)
+                      (catch NoSuchAlgorithmException ex
+                        (throw (UncheckedIOException. (IOException. ex)))))))))
+    (let [^:const sslCtxSupportedForH3 false]
+      (when (and (identical? version HttpClient$Version/HTTP_3) (not sslCtxSupportedForH3))
+        (throw (UncheckedIOException.
+                 (UnsupportedProtocolVersionException. "HTTP3 is not supported"))))
+      (set! sslParams
+            (cast SSLParameters
+                  (Objects/requireNonNullElseGet
+                    (.-sslParams builder)
+                    (method-ref Supplier
+                                ^SSLParameters []
+                                sslContext
+                                SSLContext/.getDefaultSSLParameters))))
+      (let [^:mutable sslProtocols (.getProtocols sslParams)]
+        (when (nil? sslProtocols)
+          (set! sslProtocols
+                (cast String/1
+                      (Objects/requireNonNullElseGet
+                        (.getProtocols (.getDefaultSSLParameters sslContext))
+                        (lambda Supplier ^String/1 [] (new String/1 0))))))
+        (set! hasRequiredH3TLS (.contains (Arrays/asList sslProtocols) "TLSv1.3"))
+        (set! hasRequiredH2TLS
+              (or hasRequiredH3TLS (.contains (Arrays/asList sslProtocols) "TLSv1.2")))
+        (when (and (identical? version HttpClient$Version/HTTP_3) (not hasRequiredH3TLS))
+          (throw (UncheckedIOException.
+                   (UnsupportedProtocolVersionException.
+                     "HTTP3 is not supported - TLSv1.3 isn't configured on SSLParameters"))))
+        (let [^:mutable ex (.-executor builder)]
+          (if (nil? ex)
+              (do
+                (set! ex (Executors/newCachedThreadPool (DefaultThreadFactory. id)))
+                (set! isDefaultExecutor true))
+              (set! isDefaultExecutor false))
+          (set! pendingRequests (ConcurrentSkipListSet.))
+          (set!
+            delegatingExecutor
+            (DelegatingExecutor. (method-ref BooleanSupplier this HttpClientImpl/.isSelectorThread)
+                                 ex
+                                 (method-ref BiConsumer
+                                             [Runnable Throwable]
+                                             this
+                                             HttpClientImpl/.onSubmitFailure)))
+          (set! facadeRef (WeakReference. (.createFacade facadeFactory this)))
+          (set! implRef (WeakReference. this))
+          (set! cookieHandler (.-cookieHandler builder))
+          (set! connectTimeout (.-connectTimeout builder))
+          (set! followRedirects
+                (if (nil? (.-followRedirects builder))
+                    HttpClient$Redirect/NEVER
+                    (.-followRedirects builder)))
+          (set! (.-userProxySelector this) (.-proxy builder))
+          (set!
+            (.-proxySelector this)
+            (cast ProxySelector
+                  (.orElseGet (Optional/ofNullable userProxySelector)
+                              (method-ref Supplier ^ProxySelector [] ProxySelector/getDefault))))
+          (when (.on debug)
+            (.log debug
+                  "proxySelector is %s (user-supplied=%s)"
+                  (new Object/1 [(.-proxySelector this) (some? userProxySelector)])))
+          (set! authenticator (.-authenticator builder))
+          (let [h3Supported (and sslCtxSupportedForH3 hasRequiredH3TLS)]
+            (set! registry (AltServicesRegistry. id))
+            (set! connections (ConnectionPool. id))
+            (set! client2 (Http2ClientImpl. this))
+            (set! client3 nil)
+            (.start connections)
+            (set! timeouts (TreeSet.))
+            (try
+              (set! selmgr (SelectorManager. this))
+              (catch IOException e (throw (UncheckedIOException. e))))
+            (set! selmgrThread (Thread. selmgr (java-str "HttpClient-" id "-SelectorManager")))
+            (.setDaemon selmgrThread true)
+            (set! filters (FilterFactory.))
+            (.initFilters this)
+            (java-assert (some? (.get facadeRef))))))))
+
+  (method hasRequiredHTTP3TLSVersion ^boolean [this] hasRequiredH3TLS)
+
+  (method hasRequiredHTTP2TLSVersion ^boolean [this] hasRequiredH2TLS)
+
+  (method facadeCleanup ^void [this]
+    (let [selmgr (.-selmgr this)] (when (some? selmgr) (.wakeupSelector selmgr))))
+
+  (method onSubmitFailure ^void [this ^Runnable command ^Throwable failure]
+    (.abort selmgr failure))
+
+  (method ^:private start ^void [this]
+    (try (.start selmgrThread) (catch Throwable t (.set isStarted true) (throw t))))
+
+  (method ^:private stop ^void [this]
+    (.stop connections)
+    (.stop client2)
+    (.closeSubscribers this)
+    (.forEach openedConnections
+              (method-ref Consumer [PlainHttpConnection] this HttpClientImpl/.closeConnection))
+    (when isDefaultExecutor (.shutdown delegatingExecutor)))
+
+  (method ^:private closeSubscribers ^void [this]
+    (when-not (.isEmpty subscribers)
+      (let [io (.selectorClosedException selmgr)] (HttpClientImpl/closeSubscribers this io))))
+
+  (method ^:private ^:static closeSubscribers ^void [^HttpClientImpl client ^Throwable t]
+    (.forEach (.-subscribers client)
+              (lambda Consumer ^void [^HttpBodySubscriberWrapper s] (.onError s t))))
+
+  (method ^:public registerSubscriber ^boolean [this
+                                                ^{:tag (HttpBodySubscriberWrapper ?)} subscriber]
+    (when-not (.isClosed selmgr)
+      (.lock selmgr)
+      (try
+        (when-not (.isClosed selmgr)
+          (when (.add subscribers subscriber)
+            (let [count (.incrementAndGet pendingSubscribersCount)]
+              (when (.on debug) (.log debug (java-str "body subscriber registered: " count)))
+              (return true)))
+          (return false))
+        (finally (.unlock selmgr))))
+    (.onError subscriber (.selectorClosedException selmgr))
+    false)
+
+  (method ^:public unregisterSubscriber ^boolean [this
+                                                  ^{:tag (HttpBodySubscriberWrapper ?)} subscriber]
+    (if (.remove subscribers subscriber)
+        (let [count (.decrementAndGet pendingSubscribersCount)]
+          (when (.on debug) (.log debug (java-str "body subscriber unregistered: " count)))
+          true)
+        false))
+
+  (method ^:private closeConnection ^void [this ^HttpConnection conn]
+    (try
+      (.close conn)
+      (catch Throwable e
+        (when (Log/channel)
+          (Log/logChannel (java-str "Failed to close connection: " e) (new Object/1 []))))))
+
+  (method ^:public shutdown ^void [this]
+    (set! shutdownRequested true)
+    (.wakeupSelector selmgr))
+
+  (method ^:public shutdownNow ^void [this]
+    (.shutdown this)
+    (.abort selmgr (IOException. "shutdownNow")))
+
+  (method ^:public awaitTermination :throws [InterruptedException] ^boolean [this ^Duration duration]
+    (.join selmgrThread duration))
+
+  (method ^:public isTerminated ^boolean [this]
+    (and (.get isStarted) (not (.get isAlive))))
+
+  (method ^:final facade ^HttpClientFacade [this]
+    (cast HttpClientFacade (.get facadeRef)))
+
+  (method ^:public newConnectionId ^long [this]
+    (.incrementAndGet CONNECTION_IDS))
+
+  (method ^:public connectionOpened ^void [this ^PlainHttpConnection plainHttpConnection]
+    (if (not (.finished this))
+        (when (.add openedConnections plainHttpConnection)
+          (.incrementAndGet pendingTCPConnectionCount))
+        (.closeConnection this plainHttpConnection)))
+
+  (method ^:public connectionClosed ^void [this ^PlainHttpConnection plainHttpConnection]
+    (when (.remove openedConnections plainHttpConnection)
+      (.decrementAndGet pendingTCPConnectionCount)))
+
+  (method ^:final requestReference ^long [this]
+    (.incrementAndGet pendingHttpRequestCount)
+    (.reference this))
+
+  (method ^:final requestUnreference ^long [this]
+    (.decrementAndGet pendingHttpRequestCount)
+    (.unreference this))
+
+  (method ^:final reference ^long [this]
+    (.incrementAndGet pendingHttpOperationsCount)
+    (.incrementAndGet pendingOperationCount))
+
+  (method ^:final unreference ^long [this]
+    (let [count (.decrementAndGet pendingOperationCount)
+          httpCount (.decrementAndGet pendingHttpOperationsCount)
+          http2Count (.get pendingHttp2StreamCount)
+          http3Count (.get pendingHttp3StreamCount)
+          webSocketCount (.get pendingWebSocketCount)]
+      (when (and (== count 0) (or (.refersTo facadeRef nil) shutdownRequested))
+        (.wakeupSelector selmgr))
+      (java-assert (>= httpCount 0) "count of HTTP/1.1 operations < 0")
+      (java-assert (>= http2Count 0) "count of HTTP/2 operations < 0")
+      (java-assert (>= http3Count 0) "count of HTTP/3 operations < 0")
+      (java-assert (>= webSocketCount 0) "count of WS operations < 0")
+      (java-assert (>= count 0) "count of pending operations < 0")
+      count))
+
+  (method ^:final streamReference ^long [this]
+    (.incrementAndGet pendingHttp2StreamCount)
+    (.incrementAndGet pendingOperationCount))
+
+  (method ^:final h3StreamReference ^long [this]
+    (.incrementAndGet pendingHttp3StreamCount)
+    (.incrementAndGet pendingOperationCount))
+
+  (method ^:final streamUnreference ^long [this]
+    (let [count (.decrementAndGet pendingOperationCount)
+          http2Count (.decrementAndGet pendingHttp2StreamCount)
+          http3Count (.get pendingHttp3StreamCount)
+          httpCount (.get pendingHttpOperationsCount)
+          webSocketCount (.get pendingWebSocketCount)]
+      (when (and (== count 0) (.refersTo facadeRef nil)) (.wakeupSelector selmgr))
+      (java-assert (>= httpCount 0) "count of HTTP/1.1 operations < 0")
+      (java-assert (>= http2Count 0) "count of HTTP/2 operations < 0")
+      (java-assert (>= http3Count 0) "count of HTTP/3 operations < 0")
+      (java-assert (>= webSocketCount 0) "count of WS operations < 0")
+      (java-assert (>= count 0) "count of pending operations < 0")
+      count))
+
+  (method ^:final h3StreamUnreference ^long [this]
+    (let [count (.decrementAndGet pendingOperationCount)
+          http2Count (.get pendingHttp2StreamCount)
+          http3Count (.decrementAndGet pendingHttp3StreamCount)
+          httpCount (.get pendingHttpOperationsCount)
+          webSocketCount (.get pendingWebSocketCount)]
+      (when (and (== count 0) (or (.refersTo facadeRef nil) shutdownRequested))
+        (.wakeupSelector selmgr))
+      (java-assert (>= httpCount 0) "count of HTTP/1.1 operations < 0")
+      (java-assert (>= http2Count 0) "count of HTTP/2 operations < 0")
+      (java-assert (>= http3Count 0) "count of HTTP/3 operations < 0")
+      (java-assert (>= webSocketCount 0) "count of WS operations < 0")
+      (java-assert (>= count 0) "count of pending operations < 0")
+      count))
+
+  (method ^:final webSocketOpen ^long [this]
+    (.incrementAndGet pendingWebSocketCount)
+    (.incrementAndGet pendingOperationCount))
+
+  (method ^:final webSocketClose ^long [this]
+    (let [count (.decrementAndGet pendingOperationCount)
+          webSocketCount (.decrementAndGet pendingWebSocketCount)
+          httpCount (.get pendingHttpOperationsCount)
+          http2Count (.get pendingHttp2StreamCount)
+          http3Count (.get pendingHttp3StreamCount)]
+      (when (and (== count 0) (or (.refersTo facadeRef nil) shutdownRequested))
+        (.wakeupSelector selmgr))
+      (java-assert (>= httpCount 0) "count of HTTP/1.1 operations < 0")
+      (java-assert (>= http2Count 0) "count of HTTP/2 operations < 0")
+      (java-assert (>= http3Count 0) "count of HTTP/3 operations < 0")
+      (java-assert (>= webSocketCount 0) "count of WS operations < 0")
+      (java-assert (>= count 0) "count of pending operations < 0")
+      count))
+
+  (method ^:final referenceCount ^long [this]
+    (.get pendingOperationCount))
+
+  (defclass ^:static ^:final HttpClientTracker
+    :implements [OperationTrackers$Tracker]
+
+    (field ^:final ^AtomicLong requestCount)
+
+    (field ^:final ^AtomicLong httpCount)
+
+    (field ^:final ^AtomicLong http2Count)
+
+    (field ^:final ^AtomicLong http3Count)
+
+    (field ^:final ^AtomicLong websocketCount)
+
+    (field ^:final ^AtomicLong operationsCount)
+
+    (field ^:final ^AtomicLong connnectionsCount)
+
+    (field ^:final ^AtomicLong subscribersCount)
+
+    (field ^:final ^{:tag (Reference ?)} reference)
+
+    (field ^:final ^{:tag (Reference ?)} implRef)
+
+    (field ^:final ^AtomicBoolean isAlive)
+
+    (field ^:final ^AtomicBoolean isStarted)
+
+    (field ^:final ^String name)
+
+    (constructor [this ^AtomicLong request ^AtomicLong http ^AtomicLong http2 ^AtomicLong http3
+                  ^AtomicLong ws ^AtomicLong ops ^AtomicLong conns ^AtomicLong subscribers
+                  ^{:tag (Reference ?)} ref ^{:tag (Reference ?)} implRef ^AtomicBoolean isAlive
+                  ^AtomicBoolean isStarted ^String name]
+      (set! (.-requestCount this) request)
+      (set! (.-httpCount this) http)
+      (set! (.-http2Count this) http2)
+      (set! (.-http3Count this) http3)
+      (set! (.-websocketCount this) ws)
+      (set! (.-operationsCount this) ops)
+      (set! (.-connnectionsCount this) conns)
+      (set! (.-subscribersCount this) subscribers)
+      (set! (.-reference this) ref)
+      (set! (.-implRef this) implRef)
+      (set! (.-isAlive this) isAlive)
+      (set! (.-isStarted this) isStarted)
+      (set! (.-name this) name))
+
+    (method ^:public getOutstandingSubscribers ^long [this]
+      (.get subscribersCount))
+
+    (method ^:public getOutstandingOperations ^long [this]
+      (.get operationsCount))
+
+    (method ^:public getOutstandingHttpRequests ^long [this]
+      (.get requestCount))
+
+    (method ^:public getOutstandingTcpConnections ^long [this]
+      (.get connnectionsCount))
+
+    (method ^:public getOutstandingHttpOperations ^long [this]
+      (.get httpCount))
+
+    (method ^:public getOutstandingHttp2Streams ^long [this]
+      (.get http2Count))
+
+    (method ^:public getOutstandingHttp3Streams ^long [this]
+      (.get http3Count))
+
+    (method ^:public getOutstandingWebSocketOperations ^long [this]
+      (.get websocketCount))
+
+    (method ^:public isFacadeReferenced ^boolean [this]
+      (not (.refersTo reference nil)))
+
+    (method ^:public isImplementationReferenced ^boolean [this]
+      (not (.refersTo implRef nil)))
+
+    (method ^:public isSelectorAlive ^boolean [this]
+      (or (.get isAlive) (not (.get isStarted))))
+
+    (method ^:public getName ^String [this] name))
+
+  (method ^:public getOperationsTracker ^OperationTrackers$Tracker [this]
+    (HttpClientTracker. pendingHttpRequestCount
+                        pendingHttpOperationsCount
+                        pendingHttp2StreamCount
+                        pendingHttp3StreamCount
+                        pendingWebSocketCount
+                        pendingOperationCount
+                        pendingTCPConnectionCount
+                        pendingSubscribersCount
+                        facadeRef
+                        implRef
+                        isAlive
+                        isStarted
+                        dbgTag))
+
+  (method finished ^boolean [this]
+    (if (> (.referenceCount this) 0)
+        false
+        (do
+          (when shutdownRequested (locking this (when (== (.referenceCount this) 0) (return true))))
+          (not (.isReferenced this)))))
+
+  (method ^:private isReferenced ^boolean [this]
+    (or (not (.refersTo facadeRef nil)) (> (.referenceCount this) 0)))
+
+  (method registerEvent :throws [IOException] ^void [this ^AsyncEvent exchange]
+    (.register selmgr exchange))
+
+  (method eventUpdated :throws [ClosedChannelException] ^void [this ^AsyncEvent event]
+    (java-assert (not (instance? AsyncTriggerEvent event)))
+    (.eventUpdated selmgr event))
+
+  (method isSelectorThread ^boolean [this]
+    (identical? (Thread/currentThread) selmgrThread))
+
+  (method registry ^AltServicesRegistry [this] registry)
+
+  (method isSelectorClosed ^boolean [this] (.isClosed selmgr))
+
+  (method selectorClosedException ^IOException [this]
+    (.selectorClosedException selmgr))
+
+  (method client2 ^Http2ClientImpl [this] client2)
+
+  (method client3 ^{:tag (Optional Object)} [this]
+    (Optional/ofNullable client3))
+
+  (method ^:private debugCompleted ^void [this ^String tag ^long startNanos ^HttpRequest req]
+    (when (.on debugelapsed)
+      (.log debugelapsed
+            (java-str tag
+                      " elapsed "
+                      (unchecked-divide (unchecked-subtract (System/nanoTime) startNanos) 1000000)
+                      " millis for "
+                      (.method req)
+                      " to "
+                      (.uri req)))))
+
+  (method ^:public send :type-params [T] :throws [IOException InterruptedException] ^{:tag (HttpResponse T)} [this
+                                                                                                              ^HttpRequest req
+                                                                                                              ^{:tag (HttpResponse$BodyHandler T)} responseHandler]
+    (let [^:mutable ^{:tag (CompletableFuture (HttpResponse T))} cf nil]
+      (when (Thread/interrupted) (throw (InterruptedException.)))
+      (try
+        (set! cf (.sendAsync this req responseHandler nil nil))
+        (cast HttpResponse (.get cf))
+        (catch InterruptedException ie (when (some? cf) (.cancel cf true)) (throw ie))
+        (catch ExecutionException e
+          (let [throwable (.getCause e)
+                msg (.getMessage throwable)]
+            (cond
+              (instance? IllegalArgumentException throwable)
+                (throw (IllegalArgumentException. msg throwable))
+              (instance? SecurityException throwable) (throw (SecurityException. msg throwable))
+              (instance? HttpConnectTimeoutException throwable)
+                (let [hcte (HttpConnectTimeoutException. msg)]
+                  (.initCause hcte throwable)
+                  (throw hcte))
+              (instance? UnsupportedProtocolVersionException throwable)
+                (let [upve (UnsupportedProtocolVersionException. msg)]
+                  (.initCause upve throwable)
+                  (throw upve))
+              (instance? HttpTimeoutException throwable) (throw (HttpTimeoutException. msg))
+              (instance? ConnectException throwable)
+                (let [ce (ConnectException. msg)] (.initCause ce throwable) (throw ce))
+              (instance? SSLHandshakeException throwable)
+                (throw (SSLHandshakeException. msg throwable))
+              (instance? SSLException throwable) (throw (SSLException. msg throwable))
+              (instance? ProtocolException throwable)
+                (let [pe (ProtocolException. msg)] (.initCause pe throwable) (throw pe))
+              (instance? IOException throwable) (throw (IOException. msg throwable))
+              :else (throw (IOException. msg throwable))))))))
+
+  (field ^:private ^:static ^:final ^Executor ASYNC_POOL (.defaultExecutor (CompletableFuture.)))
+
+  (method ^:public sendAsync :type-params [T] ^{:tag (CompletableFuture (HttpResponse T))} [this
+                                                                                            ^HttpRequest userRequest
+                                                                                            ^{:tag (HttpResponse$BodyHandler T)} responseHandler]
+    (.sendAsync this userRequest responseHandler nil))
+
+  (method ^:public sendAsync :type-params [T] ^{:tag (CompletableFuture (HttpResponse T))} [this
+                                                                                            ^HttpRequest userRequest
+                                                                                            ^{:tag (HttpResponse$BodyHandler T)} responseHandler
+                                                                                            ^{:tag (HttpResponse$PushPromiseHandler T)} pushPromiseHandler]
+    (.sendAsync this userRequest responseHandler pushPromiseHandler (.-delegate delegatingExecutor)))
+
+  (method ^:private sendAsync :type-params [T] ^{:tag (CompletableFuture (HttpResponse T))} [this
+                                                                                             ^HttpRequest userRequest
+                                                                                             ^{:tag (HttpResponse$BodyHandler T)} responseHandler
+                                                                                             ^{:tag (HttpResponse$PushPromiseHandler T)} pushPromiseHandler
+                                                                                             ^Executor exchangeExecutor]
+    (Objects/requireNonNull userRequest)
+    (Objects/requireNonNull responseHandler)
+    (if shutdownRequested
+        (MinimalFuture/failedFuture (IOException. "closed"))
+        (let [vers (cast HttpClient$Version (.orElse (.version userRequest) (.version this)))]
+          (cond
+            (and (and (identical? vers HttpClient$Version/HTTP_3) (nil? client3))
+                 (identical? (.orElse (.getOption userRequest HttpOption/H3_DISCOVERY) nil)
+                             HttpOption$Http3DiscoveryMode/HTTP_3_URI_ONLY))
+              (MinimalFuture/failedFuture
+                (UnsupportedProtocolVersionException. "HTTP3 is not supported"))
+            (.isClosed selmgr) (MinimalFuture/failedFuture (.selectorClosedException selmgr))
+            :else
+              (let [requestImpl (HttpRequestImpl. userRequest proxySelector)]
+                (when (.equals (.method requestImpl) "CONNECT")
+                  (throw (IllegalArgumentException. "Unsupported method CONNECT")))
+                (let [id (.incrementAndGet pendingRequestId)
+                      start (if DEBUGELAPSED (System/nanoTime) 0)]
+                  (locking this
+                    (when shutdownRequested
+                      (return (MinimalFuture/failedFuture (IOException. "closed"))))
+                    (.requestReference this))
+                  (try
+                    (when (.on debugelapsed)
+                      (.log debugelapsed "ClientImpl (async) send %s" (new Object/1 [userRequest])))
+                    (let [^Executor executor (if (nil? exchangeExecutor)
+                                                 ^Executor (.-delegatingExecutor this)
+                                                 exchangeExecutor)
+                          ^{:tag (MultiExchange T)} mex (MultiExchange.
+                                                          userRequest
+                                                          requestImpl
+                                                          this
+                                                          responseHandler
+                                                          pushPromiseHandler)
+                          ^{:tag (CompletableFuture (HttpResponse T))} mexCf (.responseAsync
+                                                                               mex
+                                                                               executor)
+                          ^:mutable ^{:tag (CompletableFuture (HttpResponse T))} res (.whenComplete
+                                                                                       mexCf
+                                                                                       (lambda BiConsumer ^void [^HttpResponse b
+                                                                                                                 ^Throwable t]
+                                                                                         (.requestUnreference
+                                                                                           this)))]
+                      (when DEBUGELAPSED
+                        (set! res
+                              (.whenComplete res
+                                             (lambda BiConsumer ^void [^HttpResponse b ^Throwable t]
+                                               (.debugCompleted
+                                                 this
+                                                 "ClientImpl (async)"
+                                                 start
+                                                 userRequest)))))
+                      (let [pending (PendingRequest. id requestImpl mexCf mex this)]
+                        (set! res (HttpClientImpl/registerPending pending res))
+                        (cond
+                          (some? exchangeExecutor)
+                            (do
+                              (set! res (HttpClientImpl/translateSendAsyncExecFailure res))
+                              (if (.isDone res)
+                                  res
+                                  (.whenCompleteAsync
+                                    res
+                                    (lambda BiConsumer ^void [^HttpResponse r ^Throwable t])
+                                    ASYNC_POOL)))
+                          (.isDone res) res
+                          :else (.copy res))))
+                    (catch Throwable t
+                      (.requestUnreference this)
+                      (.debugCompleted this "ClientImpl (async)" start userRequest)
+                      (throw t)))))))))
+
+  (method ^:private ^:static translateSendAsyncExecFailure :type-params [T] ^{:tag (CompletableFuture (HttpResponse T))} [^{:tag (CompletableFuture (HttpResponse T))} responseFuture]
+    (.thenCompose
+      (.handle responseFuture
+               (lambda BiFunction ^CompletableFuture [^HttpResponse response ^Throwable exception]
+                 (if (nil? exception)
+                     (MinimalFuture/completedFuture response)
+                     (let [unwrappedException (Utils/getCompletionCause exception)
+                           ^Throwable translatedException (if (or
+                                                                (or
+                                                                  (instance?
+                                                                    Error
+                                                                    unwrappedException)
+                                                                  (instance?
+                                                                    CancellationException
+                                                                    unwrappedException))
+                                                                (instance?
+                                                                  IOException
+                                                                  unwrappedException))
+                                                              unwrappedException
+                                                              ^Throwable (IOException.
+                                                                           unwrappedException))]
+                       (MinimalFuture/failedFuture translatedException)))))
+      (Function/identity)))
+
+  (defclass ^:private ^:static ^:final SelectorManager
+    :implements [Runnable]
+
+    (field ^:private ^:static ^:final ^int MIN_NODEADLINE 1000)
+
+    (field ^:private ^:static ^:final ^int MAX_NODEADLINE (unchecked-multiply-int 1000 1200))
+
+    (field ^:private ^:static ^:final ^int DEF_NODEADLINE 3000)
+
+    (field ^:private ^:static ^:final ^long NODEADLINE)
+
+    (static-initializer
+      (let [^:mutable ^long deadline (Utils/getIntegerProperty
+                                       "jdk.internal.httpclient.selectorTimeout"
+                                       DEF_NODEADLINE)]
+        (when (<= deadline 0) (set! deadline DEF_NODEADLINE))
+        (set! deadline (Math/max deadline MIN_NODEADLINE))
+        (set! NODEADLINE (Math/min deadline MAX_NODEADLINE))))
+
+    (field ^:private ^:final ^Selector selector)
+
+    (field ^:private ^:volatile ^boolean closed)
+
+    (field ^:private ^:final ^{:tag (List AsyncEvent)} registrations)
+
+    (field ^:private ^:final ^{:tag (List AsyncTriggerEvent)} deregistrations)
+
+    (field ^:private ^:final ^Logger debug)
+
+    (field ^:private ^:final ^Logger debugtimeout)
+
+    (field ^:private ^:final ^HttpClientImpl owner)
+
+    (field ^:private ^:final ^ConnectionPool pool)
+
+    (field ^:private ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+    (field ^:private ^:final ^ReentrantLock lock (ReentrantLock.))
+
+    (constructor :throws [IOException] [this ^HttpClientImpl ref]
+      (set! owner ref)
+      (set! debug (.-debug ref))
+      (set! debugtimeout (.-debugtimeout ref))
+      (set! pool (.connectionPool ref))
+      (set! registrations (ArrayList.))
+      (set! deregistrations (ArrayList.))
+      (set! selector (Selector/open)))
+
+    (method selectorClosedException ^IOException [this]
+      (let [cause (cast Throwable (.get errorRef))
+            ^String msg (if (nil? cause)
+                            "selector manager closed"
+                            (java-str "selector manager closed due to: " cause))
+            io (IOException. msg)]
+        (when (some? cause) (.initCause io cause))
+        io))
+
+    (method eventUpdated :throws [ClosedChannelException] ^void [this ^AsyncEvent e]
+      (if (.isSelectorThread owner)
+          (let [key (.keyFor (.channel e) selector)]
+            (if (and (some? key) (.isValid key))
+                (let [sa (cast SelectorAttachment (.attachment key))] (.register sa e))
+                (when-not (== (.interestOps e) 0)
+                  (when (.on debug) (.log debug "No key for channel"))
+                  (.abort e (IOException. "No key for channel")))))
+          (.register this e)))
+
+    (method register ^void [this ^AsyncEvent e]
+      (let [^:mutable closed (.-closed this)]
+        (when-not closed
+          (.lock lock)
+          (try
+            (set! closed (.-closed this))
+            (when-not closed (.add registrations e))
+            (finally (.unlock lock))))
+        (if closed (.abort e (.selectorClosedException this)) (.wakeup selector))))
+
+    (method wakeupSelector ^void [this] (.wakeup selector))
+
+    (method abort ^void [this ^:mutable ^Throwable t]
+      (let [^:mutable closed (.-closed this)]
+        (.compareAndSet errorRef nil t)
+        (when (.on debug)
+          (.log debug (java-str "aborting selector manager(closed=%s): " t) (new Object/1 [closed])))
+        (set! t (cast Throwable (.get errorRef)))
+        (let [inSelectorThread (.isSelectorThread owner)]
+          (when-not inSelectorThread (HttpClientImpl/abortPendingRequests owner t))
+          (let [^{:tag (Set SelectionKey)} keys (HashSet.)
+                ^{:tag (Set AsyncEvent)} toAbort (HashSet.)]
+            (.lock lock)
+            (try
+              (when (set! closed (.-closed this)) (return))
+              (set! (.-closed this) true)
+              (try (.addAll keys (.keys selector)) (catch ClosedSelectorException ce))
+              (.addAll toAbort (.-registrations this))
+              (.addAll toAbort (.-deregistrations this))
+              (.clear (.-registrations this))
+              (.clear (.-deregistrations this))
+              (finally (.unlock lock)))
+            (HttpClientImpl/abortPendingRequests owner t)
+            (let [^IOException io (when-not (.isEmpty toAbort) (.selectorClosedException this))]
+              (for-each [^AsyncEvent e toAbort]
+                (try
+                  (.abort e io)
+                  (catch Throwable x (.log debug (java-str "Failed to abort event: " x)))))
+              (when-not inSelectorThread (.wakeup selector)))))))
+
+    (method getName ^String [this] (.getName (.-selmgrThread owner)))
+
+    (method ^:private shutdown ^void [this]
+      (Log/logTrace "{0}: stopping" (.-dbgTag owner))
+      (try (.stop owner) (catch Throwable ignored))
+      (try
+        (.lock lock)
+        (try
+          (Log/logTrace "{0}: shutting down" (.getName this))
+          (when (.on debug) (.log debug "SelectorManager shutting down"))
+          (set! closed true)
+          (.close selector)
+          (finally (.unlock lock)))
+        (catch IOException ignored)
+        (finally (.stop owner))))
+
+    (method isClosed ^boolean [this] closed)
+
+    (method ^:public run ^void [this]
+      (let [^{:tag (List (Pair AsyncEvent IOException))} errorList (ArrayList.)
+            ^{:tag (List AsyncEvent)} readyList (ArrayList.)
+            ^{:tag (List Runnable)} resetList (ArrayList.)]
+        (.set (.-isAlive owner) true)
+        (.set (.-isStarted owner) true)
+        (try
+          (when (Log/channel)
+            (Log/logChannel (java-str (.getName this) ": starting") (new Object/1 [])))
+          (while (and (not (.isInterrupted (Thread/currentThread))) (not closed))
+            (.lock lock)
+            (try
+              (java-assert (.isEmpty errorList))
+              (java-assert (.isEmpty readyList))
+              (java-assert (.isEmpty resetList))
+              (for-each [^AsyncTriggerEvent event deregistrations] (.handle event))
+              (.clear deregistrations)
+              (for-each [^AsyncEvent event registrations]
+                (if (instance? AsyncTriggerEvent event)
+                    (.add readyList event)
+                    (let [chan (.channel event)
+                          ^:mutable ^SelectionKey key nil]
+                      (try
+                        (set! key (.keyFor chan selector))
+                        (let [^:mutable ^SelectorAttachment sa nil]
+                          (if (or (nil? key) (not (.isValid key)))
+                              (do
+                                (when (some? key) (.selectNow selector))
+                                (set! sa (SelectorAttachment. chan selector)))
+                              (set! sa (cast SelectorAttachment (.attachment key))))
+                          (.register sa event)
+                          (when-not (.isOpen chan) (throw (ClosedChannelException.))))
+                        (catch IOException e
+                          (Log/logTrace "{0}: {1}" (.getName this) e)
+                          (when (.on debug)
+                            (.log debug
+                                  (java-str "Got "
+                                            (.getName (.getClass e))
+                                            " while handling registration events")))
+                          (.close chan)
+                          (.add errorList (Pair. event e))
+                          (when (some? key) (.cancel key) (.selectNow selector)))))))
+              (.clear registrations)
+              (.clear (.selectedKeys selector))
+              (finally (.unlock lock)))
+            (for-each [^AsyncEvent event readyList]
+              (java-assert (instance? AsyncTriggerEvent event))
+              (.handle event))
+            (.clear readyList)
+            (for-each [^{:tag (Pair AsyncEvent IOException)} error errorList]
+              (.handleEvent this
+                            (cast AsyncEvent (.-first error))
+                            (cast IOException (.-second error))))
+            (.clear errorList)
+            (when (.finished owner)
+              (Log/logTrace "{0}: {1}" (.getName this) "HttpClient finished. Exiting...")
+              (return))
+            (let [^:mutable nextTimeout (.purgeTimeoutsAndReturnNextDeadline owner)]
+              (when (.on debugtimeout)
+                (.log debugtimeout "next timeout: %d" (new Object/1 [nextTimeout])))
+              (let [^:mutable nextExpiry (.purgeExpiredConnectionsAndReturnNextDeadline pool)]
+                (when (.on debugtimeout)
+                  (.log debugtimeout "next expired: %d" (new Object/1 [nextExpiry])))
+                (java-assert (>= nextTimeout 0))
+                (java-assert (>= nextExpiry 0))
+                (when (<= nextTimeout 0) (set! nextTimeout NODEADLINE))
+                (if (<= nextExpiry 0)
+                    (set! nextExpiry NODEADLINE)
+                    (set! nextExpiry (Math/min NODEADLINE nextExpiry)))
+                (let [millis (Math/min nextExpiry nextTimeout)]
+                  (when (.on debugtimeout)
+                    (.log debugtimeout
+                          "Next deadline is %d"
+                          (new Object/1 [(if (== millis 0) NODEADLINE millis)])))
+                  (let [n (.select selector (if (== millis 0) NODEADLINE millis))]
+                    (if (== n 0)
+                        (do
+                          (when (.finished owner)
+                            (Log/logTrace "{0}: {1}"
+                                          (.getName this)
+                                          "HttpClient finished. Exiting...")
+                            (return))
+                          (.purgeTimeoutsAndReturnNextDeadline owner))
+                        (let [^{:tag (Set SelectionKey)} keys (.selectedKeys selector)]
+                          (java-assert (.isEmpty errorList))
+                          (for-each [^SelectionKey key keys]
+                            (let [sa (cast SelectorAttachment (.attachment key))]
+                              (if (not (.isValid key))
+                                  (let [^IOException ex (if (.isOpen (.-chan sa))
+                                                            (IOException. "Invalid key")
+                                                            ^IOException (ClosedChannelException.))]
+                                    (.forEach (.-pending sa)
+                                              (lambda Consumer ^void [^AsyncEvent e]
+                                                (.add errorList (Pair. e ex))))
+                                    (.clear (.-pending sa)))
+                                  (let [^:mutable ^int eventsOccurred 0]
+                                    (try
+                                      (set! eventsOccurred (.readyOps key))
+                                      (catch CancelledKeyException ex
+                                        (let [io (Utils/getIOException ex)]
+                                          (.forEach
+                                            (.-pending sa)
+                                            (lambda Consumer ^void [^AsyncEvent e]
+                                              (.add errorList (Pair. e io))))
+                                          (.clear (.-pending sa))
+                                          (continue))))
+                                    (.forEach
+                                      (.events sa eventsOccurred)
+                                      (method-ref Consumer [AsyncEvent] readyList List/.add))
+                                    (.add resetList
+                                          (let [eventsOccurred eventsOccurred]
+                                            (lambda Runnable ^void []
+                                              (.resetInterestOps sa eventsOccurred))))))))
+                          (.selectNow selector)
+                          (.clear (.selectedKeys selector))
+                          (let [^IOException ioe (when closed (.selectorClosedException this))]
+                            (.forEach readyList
+                                      (lambda Consumer ^void [^AsyncEvent e]
+                                        (.handleEvent this e ioe)))
+                            (.clear readyList)
+                            (.forEach errorList
+                                      (lambda Consumer ^void [^Pair p]
+                                        (.handleEvent
+                                          this
+                                          (cast AsyncEvent (.-first p))
+                                          (cast IOException (.-second p)))))
+                            (.clear errorList)
+                            (.forEach resetList (lambda Consumer ^void [^Runnable r] (.run r)))
+                            (.clear resetList)))))))))
+          (catch Throwable e
+            (.compareAndSet errorRef nil e)
+            (when-not closed
+              (set! closed true)
+              (let [err (Utils/stackTrace e)]
+                (Log/logError "{0}: {1}: {2}"
+                              (new Object/1
+                                   [(.getName this)
+                                    "HttpClientImpl shutting down due to fatal error"
+                                    err]))))
+            (HttpClientImpl/abortPendingRequests owner (.selectorClosedException this))
+            (when (.on debug) (.log debug "shutting down" e))
+            (when (and Utils/ASSERTIONSENABLED (not (.on debug))) (.printStackTrace e System/err)))
+          (finally
+            (when (Log/channel)
+              (Log/logChannel (java-str (.getName this) ": stopping") (new Object/1 [])))
+            (try (.shutdown this) (finally (.set (.-isAlive owner) false)))))))
+
+    (method handleEvent ^void [this ^AsyncEvent event ^:mutable ^IOException ioe]
+      (when (and (nil? ioe) closed) (set! ioe (.selectorClosedException this)))
+      (if (some? ioe) (.abort event ioe) (.handle event)))
+
+    (method lock ^void [this] (.lock lock))
+
+    (method unlock ^void [this] (.unlock lock)))
+
+  (method ^:final debugInterestOps ^String [this ^SelectableChannel channel]
+    (try
+      (let [key (.keyFor channel (.-selector selmgr))]
+        (if (nil? key)
+            "channel not registered with selector"
+            (let [^String keyInterestOps (if (.isValid key)
+                                             (java-str "key.interestOps=" (Utils/interestOps key))
+                                             "invalid key")]
+              (String/format "channel registered with selector, %s, sa.interestOps=%s"
+                             (new Object/1
+                                  [keyInterestOps
+                                   (Utils/describeOps
+                                     (.-interestOps (cast SelectorAttachment (.attachment key))))])))))
+      (catch Throwable t (String/valueOf t))))
+
+  (defclass ^:private ^:static SelectorAttachment
+    (field ^:private ^:final ^SelectableChannel chan)
+
+    (field ^:private ^:final ^Selector selector)
+
+    (field ^:private ^:final ^{:tag (Set AsyncEvent)} pending)
+
+    (field ^:private ^:static ^:final ^Logger debug
+      (Utils/getDebugLogger (method-ref Supplier ^String [] "SelectorAttachment" String/.toString)
+                            Utils/DEBUG))
+
+    (field ^:private ^int interestOps)
+
+    (constructor [this ^SelectableChannel chan ^Selector selector]
+      (set! (.-pending this) (HashSet.))
+      (set! (.-chan this) chan)
+      (set! (.-selector this) selector))
+
+    (method register :throws [ClosedChannelException] ^void [this ^AsyncEvent e]
+      (let [newOps (.interestOps e)
+            reRegister (not (== (bit-and-int interestOps newOps) newOps))]
+        (set! interestOps (bit-or-int interestOps newOps))
+        (.add pending e)
+        (when (.on debug)
+          (.log debug
+                "Registering %s for %s (%s)"
+                (new Object/1 [e (Utils/describeOps newOps) reRegister])))
+        (if reRegister
+            (try
+              (.register chan selector interestOps this)
+              (catch Throwable x (.abortPending this x)))
+            (when-not (.isOpen chan) (.abortPending this (ClosedChannelException.))))))
+
+    (method events ^{:tag (java.util.stream.Stream AsyncEvent)} [this ^int interestOps]
+      (.filter (.stream pending)
+               (lambda Predicate ^boolean [^AsyncEvent ev]
+                 (not (== (bit-and-int (.interestOps ev) interestOps) 0)))))
+
+    (method resetInterestOps ^void [this ^int interestOps]
+      (let [^:mutable ^int newOps 0
+            ^{:tag (Iterator AsyncEvent)} itr (.iterator pending)]
+        (while (.hasNext itr)
+          (let [event (cast AsyncEvent (.next itr))
+                evops (.interestOps event)]
+            (cond
+              (.repeating event) (set! newOps (bit-or-int newOps evops))
+              (not (== (bit-and-int evops interestOps) 0)) (.remove itr)
+              :else (set! newOps (bit-or-int newOps evops)))))
+        (set! (.-interestOps this) newOps)
+        (let [key (.keyFor chan selector)]
+          (if (and (and (== newOps 0) (some? key)) (.isEmpty pending))
+              (.cancel key)
+              (try
+                (when (or (nil? key) (not (.isValid key))) (throw (CancelledKeyException.)))
+                (.interestOps key newOps)
+                (if (not (.isOpen chan))
+                    (.abortPending this (ClosedChannelException.))
+                    (java-assert (== (.interestOps key) newOps)))
+                (catch CancelledKeyException x
+                  (when (.on debug) (.log debug (java-str "key cancelled for " chan)))
+                  (.abortPending this x)))))))
+
+    (method abortPending ^void [this ^Throwable x]
+      (when-not (.isEmpty pending)
+        (let [evts (cast AsyncEvent/1 (.toArray pending (new AsyncEvent/1 0)))]
+          (.clear pending)
+          (let [io (Utils/getIOException x)] (for-each [^AsyncEvent event evts] (.abort event io)))))))
+
+  (method theSSLContext ^SSLContext [this] sslContext)
+
+  (method ^:public sslContext ^SSLContext [this] sslContext)
+
+  (method ^:public sslParameters ^SSLParameters [this]
+    (Utils/copySSLParameters sslParams))
+
+  (method ^:public authenticator ^{:tag (Optional Authenticator)} [this]
+    (Optional/ofNullable authenticator))
+
+  (method ^:final theExecutor ^DelegatingExecutor [this]
+    delegatingExecutor)
+
+  (method ^:public ^:final executor ^{:tag (Optional Executor)} [this]
+    (if isDefaultExecutor (Optional/empty) (Optional/of (.delegate delegatingExecutor))))
+
+  (method connectionPool ^ConnectionPool [this] connections)
+
+  (method ^:public followRedirects ^HttpClient$Redirect [this]
+    followRedirects)
+
+  (method ^:public cookieHandler ^{:tag (Optional CookieHandler)} [this]
+    (Optional/ofNullable cookieHandler))
+
+  (method ^:public connectTimeout ^{:tag (Optional Duration)} [this]
+    (Optional/ofNullable connectTimeout))
+
+  (method idleConnectionTimeout ^{:tag (Optional Duration)} [this ^HttpClient$Version version]
+    (switch version
+      HTTP_2 (.timeoutDuration this IDLE_CONNECTION_TIMEOUT_H2)
+      HTTP_3 (.timeoutDuration this IDLE_CONNECTION_TIMEOUT_H3)
+      HTTP_1_1 (.timeoutDuration this KEEP_ALIVE_TIMEOUT)
+      (throw (MatchException. nil nil))))
+
+  (method ^:public proxy ^{:tag (Optional ProxySelector)} [this]
+    (Optional/ofNullable userProxySelector))
+
+  (method proxySelector ^ProxySelector [this] proxySelector)
+
+  (method ^:public newWebSocketBuilder ^WebSocket$Builder [this]
+    (BuilderImpl. (.facade this) proxySelector))
+
+  (method ^:public version ^HttpClient$Version [this] version)
+
+  (method localAddress ^InetAddress [this] localAddr)
+
+  (method dbgString ^String [this] dbgTag)
+
+  (method ^:public toString ^String [this]
+    (java-str (.toString super) "(" id ")"))
+
+  (method ^:private initFilters ^void [this]
+    (.addFilter this AuthenticationFilter)
+    (.addFilter this RedirectFilter)
+    (when (some? (.-cookieHandler this)) (.addFilter this CookieFilter)))
+
+  (method ^:private addFilter ^void [this ^{:tag (Class (? extends HeaderFilter))} f]
+    (.addFilter filters f))
+
+  (method ^:final filterChain ^{:tag (List HeaderFilter)} [this]
+    (.getFilterChain filters))
+
+  (method registerTimer ^void [this ^TimeoutEvent event]
+    (Log/logTrace "Registering timer {0}" event)
+    (locking this (.add timeouts event) (.wakeupSelector selmgr)))
+
+  (method cancelTimer ^void [this ^TimeoutEvent event]
+    (Log/logTrace "Canceling timer {0}" event)
+    (locking this (.remove timeouts event)))
+
+  (method timers ^{:tag (List TimeoutEvent)} [this]
+    (locking this (ArrayList. timeouts)))
+
+  (method ^:private purgeTimeoutsAndReturnNextDeadline ^long [this]
+    (let [^:mutable diff 0
+          ^:mutable ^{:tag (List TimeoutEvent)} toHandle nil
+          ^:mutable ^int remaining 0]
+      (locking this
+        (when (.isEmpty timeouts) (return 0))
+        (let [now (TimeSource/now)
+              ^{:tag (Iterator TimeoutEvent)} itr (.iterator timeouts)]
+          (while (.hasNext itr)
+            (let [event (cast TimeoutEvent (.next itr))]
+              (set! diff (.until now (.deadline event) ChronoUnit/MILLIS))
+              (if (<= diff 0)
+                  (do
+                    (.remove itr)
+                    (set! toHandle (if (nil? toHandle) ^List (ArrayList.) toHandle))
+                    (.add toHandle event))
+                  (break))))
+          (set! remaining (.size timeouts))))
+      (when (and (some? toHandle) (Log/trace))
+        (Log/logTrace (java-str "purgeTimeoutsAndReturnNextDeadline: handling "
+                                (.size toHandle)
+                                " events, remaining "
+                                remaining
+                                ", next deadline: "
+                                (if (< diff 0) 0 diff))))
+      (when (some? toHandle)
+        (let [^:mutable ^Throwable failed nil]
+          (for-each [^TimeoutEvent event toHandle]
+            (try
+              (Log/logTrace "Firing timer {0}" event)
+              (.handle event)
+              (catch [Error RuntimeException] e
+                (if (nil? failed) (set! failed e) (Utils/addSuppressed failed e))
+                (Log/logTrace "Failed to handle event {0}: {1}" event e))))
+          (when (instance? Error failed) (throw (cast Error failed)))
+          (when (instance? RuntimeException failed) (throw (cast RuntimeException failed)))))
+      (if (< diff 0) 0 diff)))
+
+  (method getReceiveBufferSize ^int [this]
+    (Utils/getIntegerNetProperty "jdk.httpclient.receiveBufferSize" 0))
+
+  (method getSendBufferSize ^int [this]
+    (Utils/getIntegerNetProperty "jdk.httpclient.sendBufferSize" 0))
+
+  (method getSSLBufferSupplier ^BufferSupplier [this] sslBufferSupplier)
+
+  (method ^:private timeoutDuration ^{:tag (Optional Duration)} [this ^long seconds]
+    (if (>= seconds 0) (Optional/of (Duration/ofSeconds seconds)) (Optional/empty)))
+
+  (method ^:private ^:static getTimeoutProp ^long [^String prop ^long def]
+    (let [s (Utils/getNetProperty prop)]
+      (try
+        (when (some? s)
+          (let [timeoutVal (Long/parseLong s)] (when (>= timeoutVal 0) (return timeoutVal))))
+        (catch NumberFormatException ignored
+          (Log/logTrace (java-str "Invalid value set for " prop " property: " ignored))))
+      def))
+
+  (defclass ^:private ^:static ^:final SSLDirectBufferSupplier
+    :implements [BufferSupplier]
+
+    (field ^:private ^:static ^:final ^int POOL_SIZE SocketTube/MAX_BUFFERS)
+
+    (field ^:private ^:final ^ByteBuffer/1 pool (new ByteBuffer/1 POOL_SIZE))
+
+    (field ^:private ^:final ^HttpClientImpl client)
+
+    (field ^:private ^:final ^Logger debug)
+
+    (field ^:private ^int tail)
+
+    (field ^:private ^int count)
+
+    (constructor [this ^HttpClientImpl client]
+      (set! (.-client this) (cast HttpClientImpl (Objects/requireNonNull client)))
+      (set! (.-debug this) (.-debug client)))
+
+    (method ^:public get ^ByteBuffer [this]
+      (java-assert (.isSelectorThread client))
+      (java-assert (<= tail POOL_SIZE) (java-str "allocate tail is " tail))
+      (let [^:mutable ^ByteBuffer buf nil]
+        (if (== tail 0)
+            (do
+              (when (.on debug)
+                (.log debug "ByteBuffer.allocateDirect(%d)" (new Object/1 [Utils/BUFSIZE])))
+              (java-assert (< (let [old-1 count] (set! count (unchecked-inc-int count)) old-1)
+                              POOL_SIZE)
+                (java-str (java-str "trying to allocate more than " POOL_SIZE) " buffers"))
+              (set! buf (ByteBuffer/allocateDirect Utils/BUFSIZE)))
+            (do
+              (java-assert (> tail 0) (java-str "non positive tail value: " tail))
+              (set! tail (unchecked-dec-int tail))
+              (set! buf (aget pool tail))
+              (aset pool tail nil)))
+        (java-assert (.isDirect buf))
+        (java-assert (== (.position buf) 0))
+        (java-assert (.hasRemaining buf))
+        (java-assert (== (.limit buf) Utils/BUFSIZE))
+        (java-assert (< tail POOL_SIZE))
+        (java-assert (>= tail 0))
+        buf))
+
+    (method ^:public recycle ^void [this ^ByteBuffer buffer]
+      (java-assert (.isSelectorThread client))
+      (java-assert (.isDirect buffer))
+      (java-assert (not (.hasRemaining buffer)))
+      (java-assert (< tail POOL_SIZE) (java-str "recycle tail is " tail))
+      (java-assert (>= tail 0))
+      (.position buffer 0)
+      (.limit buffer (.capacity buffer))
+      (when (< tail POOL_SIZE) (aset pool tail buffer) (set! tail (unchecked-inc-int tail)))
+      (java-assert (<= tail POOL_SIZE))
+      (java-assert (> tail 0)))))

@@ -459,8 +459,7 @@
          ;; and not used, doc/classes/JAVA-CONFORMANCE-SURVEY.md, JC2)
          (if (empty? comps)
            (list 'return true)
-         (list 'let ['other (list 'assert (list '* (symbol g)) o)]
-               (list 'return (reduce (fn [acc cm]
+         (let [ret (list 'return (reduce (fn [acc cm]
                                        (let [a (fld 't cm) b (fld 'other cm)
                                              e (case (:desc cm)
                                                  "F" (list '== (list (js "J2g_FloatBits") a) (list (js "J2g_FloatBits") b))
@@ -469,7 +468,12 @@
                                                  (list (js "J2g_ObjEquals") (c/coerce a (:desc cm) "Ljava/lang/Object;" false)
                                                        (c/coerce b (:desc cm) "Ljava/lang/Object;" false)))]
                                          (if (true? acc) e (list 'and acc e))))
-                                     true comps))))]))))
+                                     true comps))]
+           ;; every component's type outside the world (J2g_Missing for each): other is read by none,
+           ;; gc's declared and not used (F19's ObjectFactoriesFilter$ValidFilter), so it is used once
+           (if (some #{'other} (tree-seq coll? seq ret))
+             (list 'let ['other (list 'assert (list '* (symbol g)) o)] ret)
+             (list 'let ['other (list 'assert (list '* (symbol g)) o)] (list 'set! '_ 'other) ret))))]))))
 
 (defn derived-body
   "Go statements of a derived method (enum values/valueOf/$values, bridges, record members).
@@ -576,6 +580,8 @@
                         (= n "arbace/lang/GoInterp") (symbol "goi" fname)
                         ;; arbace.lang.CInterp's are ci's (doc/C23-SURVEY.md, CS103)
                         (= n "arbace/lang/CInterp") (symbol "cinterp" fname)
+                        ;; arbace.lang.SchemeInterp's are si's (doc/scheme/SCHEME-SURVEY.md, SC61 (a), SC240)
+                        (= n "arbace/lang/SchemeInterp") (symbol "scminterp" fname)
                         :else (symbol fname))
                     call (apply list f (concat (when-not static ['t]) pn))]
                 [pn [(if (= "V" r) call (list 'return call))]])
@@ -905,6 +911,51 @@
                  (stub-body n (:name mm) (:desc mm))))
         (instance-forms pkg n)))))
 
+(defn serial-new-forms
+  "CDR10: C_SerialNew, the object of class n made for deserialization (m/serial-super): n's zero
+  struct, its first non-serializable superclass's no-argument constructor body run on it (as
+  ctor-forms calls a super constructor), n's own constructors not run."
+  [pkg n]
+  (when-let [[s k] (m/serial-super n)]
+    (let [g (m/go-name n)
+          call (when s
+                 (let [real (if (m/translated? s) (ctor-desc s k) (:desc k))]
+                   (list (symbol (str "." (nm/ctor-base real))) (list (symbol (str ".-" (m/go-name s))) 't) 't)))]
+      [(list 'go/func (symbol (str g "_SerialNew")) (with-meta [] {:tag 'any})
+             (list* 'let ['t (list 'addr (list 'lit (symbol g)))]
+                    (concat (when-not (m/trivial-init? n) [(list (symbol (str g "_Init")))])
+                            (when call [call])
+                            ['t])))])))
+
+(defn annotation-impl-forms
+  "F14: the Go type of annotation type n's annotations, C_ann, embedding jrt.AnnotationObj (its
+equals, hashCode, toString, annotationType and the Object protocol, jdk26u's
+AnnotationInvocationHandler's: go/arbace/jrt/annotation.ae) with n's markers and one method a
+member returning AnnotationObj.Member in n's Go types; C_AnnNew, the new object jrt fills
+(ClassInfo.AnnNew, out/class-registration). In place of the JDK's Proxy of n."
+  [pkg n]
+  (let [g (m/go-name n)
+        ty (symbol (str g "_ann"))
+        recv (tag 't (list '* ty))
+        base (list 'addr (list '.-AnnotationObj 't))]
+    (vec
+      (concat
+        [(list 'go/type ty (list 'struct (m/jrt-sym pkg "AnnotationObj")))
+         (list 'go/method 'Ref (with-meta [recv] {:tag 'any}) (list 'when (list '== 't nil) (list 'return nil)) 't)]
+        (for [j (cons n (interface-closure n))
+              :when (and (m/interface? j) (not (m/hand-written? j)))]
+          (list 'go/method (symbol (str "Is_" (m/go-name j))) [recv]))
+        (for [mm (:methods (a/decl n))
+              :when (and (m/abstract-m? mm) (not (m/static? mm)) (str/starts-with? (:desc mm) "()")
+                         (m/mdesc-in-world? (:desc mm)))
+              :let [r (second (t/parse-method-desc (:desc mm)))
+                    v (list '.Member base (:name mm))]]
+          (list 'go/method (symbol (nm/method-base (:name mm) (:desc mm))) (with-ret [recv] pkg r)
+                (list 'return (cond (t/prim? r) (list 'assert (m/go-type pkg r) v)
+                                    (= r "Ljava/lang/Object;") v
+                                    :else (list (list 'inst (m/jrt-sym pkg "As") (m/go-type pkg r)) v)))))
+        [(list 'go/func (symbol (str g "_AnnNew")) (with-meta [] {:tag 'any}) (list 'addr (list 'lit ty)))]))))
+
 (defn class-forms
   "All Go forms of translated class n (in package pkg), in order."
   [n]
@@ -953,11 +1004,13 @@
             (for [j (markers n)
                   :when (not (code-iface? j))]
               (list 'go/method (symbol (str "Is_" (m/go-name j))) [(tag 't (list '* (symbol g)))]))))
+        (when (= :annotation (:kind d)) (annotation-impl-forms pkg n))
         (static-forms pkg n)
         (clj-const-fields pkg n)
         (init-forms pkg n)
         (when-not iface
           (mapcat #(ctor-forms pkg n %) (filter #(= "<init>" (:name %)) methods)))
+        (when-not iface (serial-new-forms pkg n))
         (mapcat #(method-forms pkg n %) (remove #(= "<init>" (:name %)) methods))
         (when (and (not iface) (not abstract))
           (if (code-class? n)

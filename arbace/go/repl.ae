@@ -224,15 +224,18 @@
 (defn- repl-source [] (let [f (str *file*)] (if (or (= f "NO_SOURCE_PATH") (= f "NO_SOURCE_FILE")) "REPL" f)))
 
 (defn source-of
-  "The checker's source of package state st (its files as they stand): those the configuration's build constraints
-  select, as load/package-source selects them (a loaded package's file of //go:build !linux, or _tamago.go, is not the
-  linux program's; queue 214: pyi's runtime, built for tamago too)."
+  "The checker's source of package state st (its files as they stand): the files whose build
+  constraints the package's configuration satisfies, as go/build keeps them (their //go:build
+  lines and _GOOS/_GOARCH names, arbace.go.check.load/file-included?, as the package reader
+  does); a package file loads every file it lists, so a file for another configuration is
+  loaded but left out (its declarations neither checked nor defined)."
   [st]
   (let [s @st
-        tags (load/tag-set (:config s))]
+        config (or (:config s) @config)
+        tags (load/tag-set config)]
     {:path (:path s) :name (:name s) :config (:config s) :opts (or (:opts s) {})
      :files (vec (for [fi (:files s)
-                       :when (load/file-included? (:name fi) (:opts fi) (:config s) tags)]
+                       :when (load/file-included? (:name fi) (:opts fi) config tags)]
                    {:name (:name fi) :opts (assoc (:opts fi) :imports (:imports fi))
                     :imports (:imports fi) :decls (:decls fi)}))}))
 
@@ -502,8 +505,16 @@
   "The builder's context for the package of state st."
   [st]
   {:path (:path @st) :name (:name @st)
+   ;; the directory of the package's Go files as its frames name them (the package file's, the
+   ;; forms' mirror of the Go tree: GOI-SPEC.md, "Since v1: frames")
+   :dir (when-let [pf (:pf @st)] (.getParent (.getAbsoluteFile (File. (str pf)))))
    :ctx-of ctx-of
    :source (let [ns (str (:ns @st))] (fn [fname] [ns (display-file fname)]))
+   ;; each Go file's //line directives, which apply to the rest of their file (GOI-SPEC.md, "Since
+   ;; v1: frames"): by file name, read when a function's code is first built
+   :line-dirs (let [files (:files @st)]
+                ;; (mode :full's /*line directives: arbace.go.run's keys, :line-keys)
+                (delay (into {} (for [fi files] [(:name fi) (or (:line-keys fi) (b/file-line-dirs (:decls fi)))]))))
    :compiled? listed?
    :table-type? table-type?
    :pkg-scope digest-scope
@@ -676,9 +687,12 @@
                                 ;; cell (GR8a, GC59)
                                 alias [nm {:cell cell :key k :obj x :kept true :alias true}]
                                 :else [nm {:cell cell :key k :tree (:tree d) :obj x}])))
-            init-cells (vec (for [x (:inits r)]
+            init-cells (vec (for [[i x] (map-indexed vector (:inits r))]
                               (let [d (some #(when (identical? (:obj %) x) %) decls)]
-                                {:cell (b/op "FuncCell" "init" (:name old) nil) :tree (:tree d) :obj x})))]
+                                ;; gc's name of the i-th init function: pkg.init.i
+                                {:cell (b/op "FuncCell" "init" (:name old) nil)
+                                 :tree (some-> (:tree d) (assoc :gc-name (str (if (= "main" (:name old)) "main" (:path old)) ".init." i)))
+                                 :obj x})))]
         (swap! st assoc :funcs new-funcs)
         ;; methods: a cell per T.M, kept while its signature is (G9)
         (let [new-methods (into {}
@@ -733,7 +747,20 @@
                 ordered (if-let [names (or init-names only)]
                           (filter #(some (fn [x] (contains? names (e/o x :name))) (:lhs %)) ordered)
                           ordered)]
-            (b/op "SetCode" inits (b/build-inits ordered) nil)
+            ;; the initializers' frames name their files (§10.6; GOI-SPEC.md, "Since v1: frames"):
+            ;; the first's the cell's, each other file's a cell of its own with the same code, the
+            ;; frame's function while its initializers run (an executable without FrameFn: the
+            ;; first's for all)
+            (let [file-of #(some-> (first (:lhs %)) (e/o :file))
+                  files (distinct (keep file-of ordered))
+                  cells (into {} (map-indexed (fn [i f] [f (if (zero? i) inits (b/op "FuncCell" "init.vars" (:name old) nil))])
+                                              (if (b/frame-fn?) files (take 1 files))))]
+              (doseq [[f cell] cells]
+                (let [[ns sf] ((:source ctx) f)] (b/op "FuncSource" cell ns sf)))
+              (let [code (b/build-inits ordered (when (> (count cells) 1) (fn [tr] (get cells (file-of tr)))))]
+                (doseq [cell (vals cells) :when (not (identical? cell inits))]
+                  (b/op "SetCode" cell code nil))
+                (b/op "SetCode" inits code nil)))
             ;; the namespace's vars (§2.1)
             (when vars?
               (let [ns (create-ns (:ns old))]
@@ -807,6 +834,12 @@
   [st]
   (swap! st dissoc :loading)
   (apply swap! ahead dissoc (:ahead @st))
+  ;; the REPL's current file after the load: the last file loaded that the configuration keeps (review 1111, #3:
+  ;; a load ending on a file for another configuration left :current on it, and a declaration typed next was
+  ;; added to a file source-of leaves out), else the REPL's own repl.go
+  (let [kept (set (map :name (:files (source-of st))))]
+    (when-not (kept (:current @st))
+      (swap! st assoc :current (or (last (filter kept (map :name (:files @st)))) "repl.go"))))
   (let [r (check-source (source-of st) nil)]
     (when (seq (:errors r))
       (throw (ex-info (str "Go check errors in package " (:path @st) ":\n" (error-text (:errors r)))
@@ -887,6 +920,15 @@
             (when-not (:loading @st) st))))))
 
 ;;; Declaring at the REPL (§2.5)
+
+(defn directive!
+  "A go/directive form between declarations (the macro's): kept among its file's declarations in a
+  load (the checker skips it; the builder reads its file's //line directives), else nothing."
+  [form ns-sym]
+  (when-let [st (when (str/starts-with? (str ns-sym) "go.") (package-state ns-sym false))]
+    (when (:loading @st)
+      (update-file st (:current @st) #(update % :decls conj form))))
+  nil)
 
 (defn declare!
   "A declaration macro's form (go/func, go/var ...): queued in a load, else checked against the

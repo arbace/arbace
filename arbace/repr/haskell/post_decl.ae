@@ -1,0 +1,1113 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Parser/PostProcess.hs
+;; (the declarations' and types' post-processing: mkClassDecl, mkTyData, mkDataDefn, mkTySynonym,
+;; mkStandaloneKindSig, mkTyFamInstEqn, mkDataFamInst, mkTyFamInst, mkFamDecl, mkSpliceDecl,
+;; mkRoleAnnotDecl, fromSpecTyVarBndr(s), cvTopDecls, cvBindGroup, cvBindsAndSigs, getMonoBind,
+;; getMonoBindAll, mkPatSynMatchGroup, mkConDeclH98, mkGadtDecl, setRdrNameSpace, tyConToDataCon,
+;; checkTyVars, checkTyClHdr, checkContext, checkNewOrData, the DisambTD class and its instances,
+;; mkBangTy, addUnpackednessP, mkMultAnn, mkMultField, mkLHsOpTy, mkTupleSyntaxTy, mkListSyntaxTy0,
+;; mkListSyntaxTy1, mkRuleBndrs, checkRuleTyVarBndrNames, mkImport, parseCImport, mkExport,
+;; mkExtName), GHC/Hs/Type.hs's and GHC/Hs/Utils.hs's builders (mkHsAppTy, mkHsAppKindTy,
+;; mkHsOpTy, mkConDeclField, hsPlainTypeField, splitHsFunType, splitLHsGadtTy, mkHsImplicitSigType,
+;; mkHsExplicitSigType, hsTypeToHsSigType, hsTypeToHsSigWcType, mkHsWildCardBndrs, mkHsPatSigType,
+;; mkHsTyPat, mkHsQTvs, mkHsForAllInvisTele, mkHsForAllVisTele, mkClassOpSigs, mkPatSynBind,
+;; mkMatchGroup, mkLocatedList), GHC/Hs/Decls.hs's partitionBindsAndSigs, GHC/Builtin/Types.hs's
+;; names of the tuples and sums, GHC/Types/Name/Reader.hs's promoteRdrName, GHC/Utils/Lexeme.hs's
+;; okConOcc and ghc-internal's GHC/Internal/Lexeme.hs's character classes, whose notice follows
+;; (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.post-decl
+  "The parser's post-processing of declarations and types (doc/haskell/NATIVE.md), a port of
+  GHC.Parser.PostProcess's declaration part with the GHC.Hs.Type and GHC.Hs.Utils builders it
+  uses: the nodes of HsModule GhcPs in arbace.repr.haskell.ast's representation, built as
+  Parser.y's actions of the declarations and types (arbace.repr.haskell.rules-decl) call them.
+
+  Values of the parser's own (not in the tree) follow Parser.y's types: a pair or triple a
+  vector, an OrdList or list a vector, a Maybe Nothing / (Just x). GHC's DisambTD class (a type
+  that may turn out a data constructor, `forall b. DisambTD b => PV (LocatedA b)`, the value of
+  infixtype and ftype) is a fn of the mode, :ty (HsType) or :dcb (DataConBuilder); its methods
+  are fns of the mode (mk-hs-app-ty-head-pv...). A DataConBuilder is (PrefixDataConBuilder
+  [field...] con) or (InfixDataConBuilder lhs con rhs), located.
+
+  Where GHC takes a node's span from an exact-print annotation (the forall's anchor of
+  HsOuterExplicit, a GADT constructor's con_outer_bndrs; the '@' of a kind application, which
+  widens an invisible binder), the annotation's span rides on the node as Clojure metadata
+  (:anchor, :at), invisible in the tree's values. A fatal error throws (arbace.repr.haskell.post's
+  fatal!); a non-fatal one (GHC's addError: the files read are valid) is not recorded."
+  (:require [arbace.repr.haskell.ast :as a :refer [L unLoc getLoc gl comb2 combine nx con just maybe tuple]]
+            [arbace.repr.haskell.lex :as lx]
+            [arbace.repr.haskell.post :as pp]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- fatal! [msg span] (pp/fatal! msg span))
+
+(defn- near? "Whether role is near the name r (fuzzyLookup)" [role r]
+  (contains? (set (a/fuzzy-lookup role [r])) r))
+
+(defn tv "A token's value" [t] (nth t 1))
+
+(defn vcons "x : xs, on a vector" [x xs] (into [x] xs))
+
+(defn- nothing? [m] (or (nil? m) (= m 'Nothing)))
+
+(defn with-anchor
+  "x carrying the span of its exact-print annotation's anchor (metadata)"
+  [x sp]
+  (with-meta x (assoc (meta x) :anchor sp)))
+
+(defn anchor "The span of x's annotation's anchor (with-anchor)" [x] (:anchor (meta x)))
+
+(defn with-at "x carrying the span of a '@' token (metadata)" [x sp] (with-meta x (assoc (meta x) :at sp)))
+
+(defn at-span "The span of the '@' token x carries" [x] (:at (meta x)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Names: built-in syntax (GHC.Builtin.Types), name spaces (setRdrNameSpace, promoteRdrName),
+;;; acceptable constructor names (okConOcc)
+
+(defn- commas [^long n] (apply str (repeat (dec n) ",")))
+
+(defn tuple-tycon-occ
+  "mkTupleStr's type constructor names: Unit, Solo, TupleN; Unit#, Solo#, TupleN#"
+  [boxed? ^long n]
+  (if boxed?
+    (case n 0 "Unit" 1 "Solo" (str "Tuple" n))
+    (case n 0 "Unit#" 1 "Solo#" (str "Tuple" n "#"))))
+
+(defn tuple-datacon-occ
+  "mkTupleStr's data constructor names: (), MkSolo, (,...); (##), MkSolo#, (#,...#)"
+  [boxed? ^long n]
+  (if boxed?
+    (case n 0 "()" 1 "MkSolo" (str "(" (commas n) ")"))
+    (case n 0 "(##)" 1 "MkSolo#" (str "(#" (commas n) "#)"))))
+
+(defn- ctuple-tycon-occ "mkConstraintTupleStr" [^long n]
+  (case n 0 "CUnit" 1 "CSolo" (str "CTuple" n)))
+
+(defn sum-datacon-occ
+  "mkSumDataConOcc of sumDataCon tag arity (tag from 1): (# _| #), (# |_ #)..."
+  [^long tag ^long arity]
+  (let [bars (fn [^long i] (str/join " " (repeat i "|")))]
+    (str "(# " (bars (dec tag)) "_" (bars (- arity tag)) " #)")))
+
+(defn- tuple-tycon-arity
+  "The boxity and arity of a tuple type constructor's name, or nil"
+  [^String occ]
+  (cond
+    (= occ "Unit") [true 0] (= occ "Solo") [true 1]
+    (= occ "Unit#") [false 0] (= occ "Solo#") [false 1]
+    :else (when-let [[_ n h] (re-matches #"Tuple([0-9]+)(#?)" occ)]
+            [(= h "") (Long/parseLong n)])))
+
+(defn- tuple-datacon-arity
+  "The boxity and arity of a tuple data constructor's name, or nil"
+  [^String occ]
+  (cond
+    (= occ "()") [true 0] (= occ "MkSolo") [true 1]
+    (= occ "(##)") [false 0] (= occ "MkSolo#") [false 1]
+    (re-matches #"\(,+\)" occ) [true (dec (count occ))]
+    (re-matches #"\(#,+#\)" occ) [false (- (count occ) 3)]
+    :else nil))
+
+(defn set-rdr-name-space
+  "setRdrNameSpace: the name in name space ns (an Exact built-in name through
+  setWiredInNameSpace: a tuple's or the list's type and data constructors are each other's, any
+  other an Unqual name of its occurrence)"
+  [r ns]
+  (case (first r)
+    (unqual qual) (a/set-rdr-ns r ns)
+    orig (list 'orig ns (nth r 2) (nth r 3) (nth r 4))
+    exact
+    (let [ns0 (second r) occ (nth r 2)]
+      (cond
+        (= ns0 ns) r
+        (and (= ns0 'tc) (= ns 'data))
+        (cond (= occ "List") (a/exact 'data "[]")
+              (tuple-tycon-arity occ) (let [[b n] (tuple-tycon-arity occ)] (a/exact 'data (tuple-datacon-occ b n)))
+              :else (a/unqual 'data occ))
+        (and (= ns0 'data) (= ns 'tc))
+        (cond (= occ "[]") (a/exact 'tc "List")
+              (tuple-datacon-arity occ) (let [[b n] (tuple-datacon-arity occ)] (a/exact 'tc (tuple-tycon-occ b n)))
+              :else (a/unqual 'tc occ))
+        :else r))
+    r))
+
+(defn- general-category ^long [^long c] (long (Character/getType (int c))))
+
+(def ^:private sym-categories
+  (set (map long [Character/CONNECTOR_PUNCTUATION Character/DASH_PUNCTUATION Character/OTHER_PUNCTUATION
+                  Character/MATH_SYMBOL Character/CURRENCY_SYMBOL Character/MODIFIER_SYMBOL
+                  Character/OTHER_SYMBOL])))
+
+(def ^:private id-categories
+  (set (map long [Character/UPPERCASE_LETTER Character/LOWERCASE_LETTER Character/TITLECASE_LETTER
+                  Character/MODIFIER_LETTER Character/OTHER_LETTER Character/NON_SPACING_MARK
+                  Character/DECIMAL_DIGIT_NUMBER Character/OTHER_NUMBER])))
+
+(def ^:private upper-categories (set (map long [Character/UPPERCASE_LETTER Character/TITLECASE_LETTER])))
+
+(defn- ok-sym-char?
+  "okSymChar (GHC.Internal.Lexeme)"
+  [^long c]
+  (and (not (contains? #{40 41 44 59 91 93 96 123 125 95 34 39} c))
+       (contains? sym-categories (general-category c))))
+
+(defn sym-char? "okSymChar" [c] (ok-sym-char? (long c)))
+
+(defn- lex-var-sym?
+  "isLexVarSym of an occurrence"
+  [^String s]
+  (or (= s "~R#")
+      (and (pos? (count s))
+           (let [c (.codePointAt s 0)]
+             (and (not= c 58) (sym-char? c)
+                  (every? #(let [c (long %)] (or (= c 58) (sym-char? c))) (rest (vec (.toArray (.codePoints s))))))))))
+
+(defn promote-rdr-name
+  "promoteRdrName: a data constructor's name in the type namespace, a variable's in the type
+  variables' (a type operator's in the type constructors'); nil for an Exact or Orig name, or
+  another name space"
+  [r]
+  (when (#{'unqual 'qual} (first r))
+    (case (a/rdr-ns r)
+      data (a/set-rdr-ns r 'tc)
+      var (if (lex-var-sym? (a/rdr-occ r)) (a/set-rdr-ns r 'tc) (a/set-rdr-ns r 'tv))
+      nil)))
+
+
+(defn- ok-id-char?
+  "okIdChar (GHC.Utils.Lexeme)"
+  [^long c]
+  (or (contains? id-categories (general-category c)) (= c 39) (= c 95)))
+
+(defn- upper? "isUpper: an upper-case or title-case letter" [^long c]
+  (contains? upper-categories (general-category c)))
+
+(def ^:private reserved-ops #{".." ":" "::" "=" "\\" "|" "<-" "->" "=>"})
+
+(defn- ok-id-occ?
+  "okIdOcc: identifier characters, then only hashes"
+  [cps]
+  (every? #(= 35 (long %)) (drop-while #(ok-id-char? (long %)) cps)))
+
+(defn- tuple-name? [cps boxed?]
+  (let [cs (map char cps)]
+    (if boxed?
+      (and (= \( (first cs))
+           (loop [r (rest cs)]
+             (cond (= r [\)]) true
+                   (empty? r) false
+                   (or (= \, (first r)) (Character/isWhitespace (char (first r)))) (recur (rest r))
+                   :else false)))
+      (and (= [\( \#] (take 2 cs))
+           (loop [r (drop 2 cs)]
+             (cond (= r [\# \)]) true
+                   (empty? r) false
+                   (or (= \, (first r)) (Character/isWhitespace (char (first r)))) (recur (rest r))
+                   :else false))))))
+
+(defn- sum-name? [cps]
+  (let [cs (map char cps)]
+    (and (= [\( \#] (take 2 cs))
+         (loop [r (drop 2 cs) under false]
+           (cond (= r [\# \)]) true
+                 (empty? r) false
+                 (= \| (first r)) (recur (rest r) under)
+                 (and (not under) (= \_ (first r))) (recur (rest r) true)
+                 (Character/isWhitespace (char (first r))) (recur (rest r) under)
+                 :else false)))))
+
+(defn ok-con-occ?
+  "okConOcc: an acceptable constructor name"
+  [^String s]
+  (let [cps (vec (.toArray (.codePoints s)))]
+    (if (empty? cps)
+      false
+      (let [c (long (first cps))]
+        (cond
+          (or (upper? c) (= c 40))
+          (or (ok-id-occ? cps) (tuple-name? cps true) (tuple-name? cps false) (sum-name? cps))
+          (= c 58) (or (= s ":") (and (every? #(ok-sym-char? (long %)) cps) (not (reserved-ops s))))
+          :else (= s "[]"))))))
+
+(defn rdr-tc? "isRdrTc" [r] (= 'tc (a/rdr-ns r)))
+(defn rdr-tyvar? "isRdrTyVar" [r] (= 'tv (a/rdr-ns r)))
+(defn rdr-datacon? "isRdrDataCon" [r] (= 'data (a/rdr-ns r)))
+
+(defn mk-ext-name "mkExtName: a name's occurrence" [r] (a/rdr-occ r))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Locations
+
+(defn list-location
+  "listLocation: the span over the items' spans (noSrcSpan for none)"
+  [xs]
+  (reduce (fn [acc x] (combine acc (getLoc x))) nil xs))
+
+(defn mk-located-list
+  "mkLocatedList: the list located over its first and last items' spans"
+  [ms]
+  (if (empty? ms) (L nil []) (L (combine (getLoc (first ms)) (getLoc (peek (vec ms)))) (vec ms))))
+
+(defn- widen-span
+  "widenSpanL: s combined with each span of locs (nil ones skipped)"
+  [s locs]
+  (reduce (fn [acc l] (if l (combine acc l) acc)) s locs))
+
+(defn- parens-locs
+  "mkParensLocs: the spans of the first and the last character of s (no BufSpan)"
+  [s]
+  (let [[f l1 c1 l2 c2] s]
+    [[f l1 c1 l1 (inc (long c1)) nil nil] [f l2 (dec (long c2)) l2 c2 nil nil]]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types (GHC.Hs.Type's builders)
+
+(defn mk-hs-app-ty "mkHsAppTy" [t1 t2] (L (comb2 t1 t2) (con HsAppTy nx t1 t2)))
+
+(defn mk-hs-app-kind-ty
+  "mkHsAppKindTy: t @k, the '@' token's span on the node (:at)"
+  [at t k]
+  (L (comb2 t k) (with-at (con HsAppKindTy nil t k) (gl at))))
+
+(defn mk-hs-op-ty "mkHsOpTy" [prom t1 op t2] (con HsOpTy nx prom t1 op t2))
+
+(defn mk-lhs-op-ty
+  "mkLHsOpTy: the operator application located over its operands and operator"
+  [prom x op y]
+  (L (combine (combine (getLoc x) (getLoc op)) (getLoc y)) (mk-hs-op-ty prom x op y)))
+
+(defn mk-anon-wild-card-ty "mkAnonWildCardTy" [] (con HsWildCardTy nil))
+
+(defn mk-bang-ty
+  "mkBangTy: a strictness mark on a type (HsBangTy, the parser's extension of HsType)"
+  [strictness lty]
+  (con XHsType (con HsBangTy (tuple nil nil nil) (con HsSrcBang nil 'NoSrcUnpack strictness) lty)))
+
+(defn- bang-ty? [t] (and (= 'XHsType (first t)) (= 'HsBangTy (first (second t)))))
+(defn rec-ty? "An HsRecTy (the parser's extension of HsType)" [t] (and (= 'XHsType (first t)) (= 'HsRecTy (first (second t)))))
+
+(defn add-unpackedness-p
+  "addUnpackednessP: {-# UNPACK #-} or {-# NOUNPACK #-} on a type (unpk located [source-text
+  SrcUnpack|SrcNoUnpack]), into its strictness mark when it has one without a pragma"
+  [unpk ty]
+  (let [[prag u] (unLoc unpk)
+        l' (combine (getLoc unpk) (getLoc ty))
+        t (unLoc ty)
+        t' (if (and (bang-ty? t)
+                    (let [[_ st un] (nth (second t) 2)] (and (nil? st) (= un 'NoSrcUnpack))))
+             (let [[_ ann bang t0] (second t)]
+               (con XHsType (con HsBangTy ann (con HsSrcBang prag u (nth bang 3)) t0)))
+             (con XHsType (con HsBangTy (tuple nil nil nil) (con HsSrcBang prag u 'NoSrcStrict) ty)))]
+    (L l' t')))
+
+(defn mk-mult-ann
+  "mkMultAnn: %1 is HsLinearAnn (its source text 1), any other multiplicity HsExplicitMult"
+  [pct t ep]
+  (let [n (unLoc t)]
+    (if (and (= 'HsTyLit (first n)) (= 'HsNumTy (first (nth n 2)))
+             (= (a/src "1") (nth (nth n 2) 1)) (= 1 (nth (nth n 2) 2)))
+      (con HsLinearAnn nil)
+      (con HsExplicitMult (tuple nil nil) t))))
+
+(defn mk-con-decl-field
+  "mkConDeclField: a constructor field of a type, its strictness and unpackedness from its
+  HsBangTy, its documentation from its HsDocTy"
+  [mult lty]
+  (let [t (unLoc lty)]
+    (cond
+      (= 'HsDocTy (first t))
+      (let [f (mk-con-decl-field mult (nth t 2))] (apply list (concat (butlast f) [(just (nth t 3))])))
+      (bang-ty? t)
+      (let [[_ ann [_ src unp strict] t0] (second t)]
+        (con CDF (tuple ann src) unp strict mult t0 'Nothing))
+      :else (con CDF (tuple (tuple nil nil nil) nil) 'NoSrcUnpack 'NoSrcStrict mult lty 'Nothing))))
+
+(defn hs-plain-type-field "hsPlainTypeField" [t] (mk-con-decl-field (con HsUnannotated nil) t))
+
+(defn mk-mult-field "mkMultField" [pct mult col t] (mk-con-decl-field (mk-mult-ann pct mult col) t))
+
+(defn split-hs-fun-type
+  "splitHsFunType: (t1 -> ... -> tn -> r), parentheses around it or its result looked through, as
+  [[open-parens close-parens] comments [field...] r] (the parens' tokens nil)"
+  [ty]
+  (let [n (unLoc ty)]
+    (case (first n)
+      HsParTy (let [[[ops cps] cs args res] (split-hs-fun-type (nth n 2))]
+                [[(conj ops nil) (conj cps nil)] cs args res])
+      HsFunTy (let [[anns cs args res] (split-hs-fun-type (nth n 4))]
+                [anns cs (vcons (mk-con-decl-field (nth n 2) (nth n 3)) args) res])
+      [[[] []] nil [] ty])))
+
+(defn mk-hs-outer-implicit "mkHsOuterImplicit" [] (con HsOuterImplicit nx))
+
+(defn mk-hs-outer-explicit
+  "mkHsOuterExplicit: its annotation's anchor (the forall's span) on the node"
+  [anc bndrs]
+  (with-anchor (con HsOuterExplicit nil bndrs) anc))
+
+(defn mk-hs-implicit-sig-type "mkHsImplicitSigType" [body] (con HsSig nx (mk-hs-outer-implicit) body))
+
+(defn mk-hs-explicit-sig-type "mkHsExplicitSigType" [anc bndrs body]
+  (con HsSig nx (mk-hs-outer-explicit anc bndrs) body))
+
+(defn hs-type-to-hs-sig-type
+  "hsTypeToHsSigType: a forall type's outermost invisible binders become the signature's"
+  [lty]
+  (let [ty (unLoc lty)]
+    (if (and (= 'HsForAllTy (first ty)) (= 'HsForAllInvis (first (nth ty 2))))
+      (let [tele (nth ty 2)]
+        (L (getLoc lty) (mk-hs-explicit-sig-type (anchor tele) (nth tele 2) (nth ty 3))))
+      (L (getLoc lty) (mk-hs-implicit-sig-type lty)))))
+
+(defn mk-lhs-sig-type "hsTypeToHsSigType" [lty] (hs-type-to-hs-sig-type lty))
+
+(defn mk-hs-wild-card-bndrs "mkHsWildCardBndrs" [x] (con HsWC nx x))
+
+(defn hs-type-to-hs-sig-wc-type "hsTypeToHsSigWcType" [lty] (mk-hs-wild-card-bndrs (hs-type-to-hs-sig-type lty)))
+
+(defn mk-hs-pat-sig-type "mkHsPatSigType noAnn" [ty] (con HsPS nil ty))
+
+(defn mk-hs-ty-pat "mkHsTyPat" [ty] (con HsTP nx ty))
+
+(defn mk-hs-qtvs "mkHsQTvs" [tvs] (con HsQTvs nx (vec tvs)))
+
+(defn mk-hs-forall-invis-tele
+  "mkHsForAllInvisTele: the annotation's anchor (forall ... .) on the node"
+  [anc bndrs]
+  (with-anchor (con HsForAllInvis nil (vec bndrs)) anc))
+
+(defn mk-hs-forall-vis-tele
+  "mkHsForAllVisTele: the annotation's anchor (forall ... ->) on the node"
+  [anc bndrs]
+  (with-anchor (con HsForAllVis nil (vec bndrs)) anc))
+
+(defn mk-tuple-syntax-ty
+  "mkTupleSyntaxTy: (t1, ..., tn) a tuple type with ListTuplePuns, else a tuple data
+  constructor's type"
+  [ps args]
+  (if (lx/get-bit ps :ListTuplePunsBit)
+    (con HsTupleTy nil 'HsBoxedOrConstraintTuple (vec args))
+    (con HsExplicitTupleTy (tuple nil nil nil) 'NotPromoted (vec args))))
+
+(defn mk-list-syntax-ty0
+  "mkListSyntaxTy0: [] the list type constructor with ListTuplePuns (its name located at span),
+  else the empty list"
+  [ps span]
+  (if (lx/get-bit ps :ListTuplePunsBit)
+    (con HsTyVar nil 'NotPromoted (L span (a/exact 'tc "List")))
+    (con HsExplicitListTy (tuple nil nil nil) 'NotPromoted [])))
+
+(defn mk-list-syntax-ty1
+  "mkListSyntaxTy1: [t] the list type with ListTuplePuns, else a one-element list"
+  [ps t]
+  (if (lx/get-bit ps :ListTuplePunsBit)
+    (con HsListTy nil t)
+    (con HsExplicitListTy (tuple nil nil nil) 'NotPromoted [t])))
+
+(defn check-context
+  "checkContext: the constraints of a context type (a tuple, its parentheses looked through, or
+  any other type alone), located at the type's span"
+  [ps orig]
+  (let [l (getLoc orig)]
+    (loop [t orig]
+      (let [n (unLoc t)]
+        (case (first n)
+          HsTupleTy (if (= 'HsBoxedOrConstraintTuple (nth n 2)) (L l (vec (nth n 3))) (L l [orig]))
+          HsExplicitTupleTy (if (lx/get-bit ps :ListTuplePunsBit) (L l [orig]) (L l (vec (nth n 3))))
+          HsParTy (recur (nth n 2))
+          (L l [orig]))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types that may be data constructors (DisambTD, DataConBuilder)
+
+(defn ty-con-to-data-con
+  "tyConToDataCon: a type constructor's name reinterpreted as a data constructor's"
+  [ltc]
+  (let [tc (unLoc ltc) occ (a/rdr-occ tc)]
+    (if (ok-con-occ? occ)
+      (L (getLoc ltc) (set-rdr-name-space tc 'data))
+      (pp/fatal! (lx/msg :PsErrNotADataCon (getLoc ltc) tc)))))
+
+(defn- check-not-promoted-data-con
+  "checkNotPromotedDataCon: a data/newtype constructor is not written 'MkT"
+  [prom ldc]
+  (when (= 'IsPromoted prom)
+    (pp/add-error! (lx/msg :PsErrIllegalPromotionQuoteDataCon (getLoc ldc) (unLoc ldc)))))
+
+(defn ty-to-data-con-builder
+  "tyToDataConBuilder: the head of a constructor declaration: a type constructor, or a tuple's"
+  [t]
+  (let [l (getLoc t) n (unLoc t)]
+    (case (first n)
+      HsTyVar (let [dc (ty-con-to-data-con (nth n 3))]
+                (check-not-promoted-data-con (nth n 2) dc)
+                (L l (list 'PrefixDataConBuilder [] dc)))
+      HsTupleTy (case (nth n 2)
+                  HsBoxedOrConstraintTuple
+                  (L l (list 'PrefixDataConBuilder (vec (nth n 3)) (L l (a/exact 'data (tuple-datacon-occ true (count (nth n 3)))))))
+                  HsUnboxedTuple
+                  (L l (list 'PrefixDataConBuilder (vec (nth n 3)) (L l (a/exact 'data (tuple-datacon-occ false (count (nth n 3)))))))
+                  (pp/fatal! (lx/msg :PsErrInvalidDataCon l t)))
+      (pp/fatal! (lx/msg :PsErrInvalidDataCon l t)))))
+
+(defn mk-hs-app-ty-head-pv "mkHsAppTyHeadPV" [mode t]
+  (case mode :ty t :dcb (ty-to-data-con-builder t)))
+
+(defn mk-hs-app-ty-pv "mkHsAppTyPV" [mode b t]
+  (case mode
+    :ty (mk-hs-app-ty b t)
+    :dcb (let [d (unLoc b)]
+           (if (= 'PrefixDataConBuilder (first d))
+             (L (combine (getLoc b) (getLoc t)) (list 'PrefixDataConBuilder (conj (nth d 1) t) (nth d 2)))
+             (throw (ex-info "mkHsAppTyPV: InfixDataConBuilder" {:span (getLoc b)}))))))
+
+(defn mk-hs-app-kind-ty-pv "mkHsAppKindTyPV" [mode b at ki]
+  (case mode
+    :ty (mk-hs-app-kind-ty at b ki)
+    :dcb (pp/fatal! (lx/msg :PsErrUnexpectedKindAppInDataCon (combine (getLoc b) (getLoc ki))
+                            (let [d (unLoc b)]
+                              (if (= 'PrefixDataConBuilder (first d))
+                                (reduce (fn [acc t] (L nil (con HsAppTy nx acc t))) (L nil (con HsTyVar nil 'NotPromoted (nth d 2))) (nth d 1))
+                                b))
+                            ki))))
+
+(defn mk-hs-op-ty-pv "mkHsOpTyPV" [mode prom lhs op rhs]
+  (case mode
+    :ty (mk-lhs-op-ty prom lhs op rhs)
+    :dcb (let [l (combine (getLoc lhs) (getLoc rhs))
+               no-ops (fn no-ops [t]
+                        (let [n (unLoc t)]
+                          (cond (bang-ty? n) (no-ops (nth (second n) 3))
+                                (= 'HsOpTy (first n)) (pp/add-error! (lx/msg :PsErrInvalidInfixDataCon l (unLoc lhs) (unLoc op) n))
+                                :else nil)))
+               _ (no-ops rhs)
+               dc (ty-con-to-data-con op)]
+           (check-not-promoted-data-con prom dc)
+           (L l (list 'InfixDataConBuilder lhs dc rhs)))))
+
+(defn mk-unpackedness-pv "mkUnpackednessPV" [mode unpk b]
+  (case mode
+    :ty (add-unpackedness-p unpk b)
+    :dcb (let [d (unLoc b)]
+           (if (= 'InfixDataConBuilder (first d))
+             (L (combine (getLoc unpk) (getLoc b))
+                (list 'InfixDataConBuilder (add-unpackedness-p unpk (nth d 1)) (nth d 2) (nth d 3)))
+             (do (pp/add-error! (lx/msg :PsErrUnpackDataCon (getLoc unpk)))
+                 b)))))
+
+(defn data-con-builder-con "dataConBuilderCon" [b] (nth (unLoc b) 2))
+
+(defn data-con-builder-details
+  "dataConBuilderDetails: a record constructor's fields, a prefix one's or an infix one's"
+  [b]
+  (let [d (unLoc b)]
+    (case (first d)
+      PrefixDataConBuilder
+      (let [flds (nth d 1)]
+        (if (and (= 1 (count flds)) (rec-ty? (unLoc (first flds))))
+          (let [f (first flds)] (con RecCon (L (getLoc f) (vec (nth (second (unLoc f)) 2)))))
+          (con PrefixCon (mapv hs-plain-type-field flds))))
+      InfixDataConBuilder
+      (con InfixCon (hs-plain-type-field (nth d 1)) (hs-plain-type-field (nth d 3))))))
+
+(defn mk-unboxed-sum-con
+  "mkUnboxedSumCon: (# t | #)'s constructor (sumDataCon tag arity, no location) and field"
+  [t tag arity]
+  [(L nil (a/exact 'data (sum-datacon-occ tag arity))) (con PrefixCon [(hs-plain-type-field t)])])
+
+;;; ------------------------------------------------------------------------------------------
+;;; Declaration heads (checkTyClHdr, checkTyVars)
+
+(defn- val-arg [t] (con HsValArg nx t))
+
+(defn check-ty-cl-hdr
+  "checkTyClHdr: a class or type declaration's head T t1 ... tn (or t1 `op` t2, or a tuple's) as
+  [name [arg...] fixity n-parens], the arguments HsValArg/HsTypeArg, n-parens the parentheses
+  around the head taken off (their tokens are FamEqn's ([nil...] [nil...] _))"
+  [is-cls ty]
+  (let [malformed (fn [l] (pp/fatal! (lx/msg :PsErrMalformedTyOrClDecl l ty)))]
+    (loop [t ty acc () np 0 fix 'Prefix]
+      (let [l (getLoc t) n (unLoc t)]
+        (case (first n)
+          HsParTy (let [inner (nth n 2) ni (unLoc inner)]
+                    (if (= 'HsStarTy (first ni))
+                      (do (lx/add-warning! pp/*ps* (lx/msg :PsWarnStarBinder (getLoc inner)))
+                      [(L (combine (getLoc inner) l) (a/unqual 'tc (if (nth ni 2) "★" "*"))) (vec acc) fix np])
+                      (recur inner acc (inc np) fix)))
+          HsTyVar (let [ltc (nth n 3)]
+                    (if (rdr-tc? (unLoc ltc)) [ltc (vec acc) fix np] (malformed l)))
+          HsOpTy (let [ltc (nth n 4)]
+                   (if (rdr-tc? (unLoc ltc))
+                     [ltc (into [(val-arg (nth n 3)) (val-arg (nth n 5))] acc) 'Infix np]
+                     (malformed l)))
+          HsAppTy (recur (nth n 2) (cons (val-arg (nth n 3)) acc) np fix)
+          HsAppKindTy (recur (nth n 2) (cons (with-at (con HsTypeArg nil (nth n 3)) (at-span n)) acc) np fix)
+          HsTupleTy (if (and (= 'HsBoxedOrConstraintTuple (nth n 2)) (empty? acc))
+                      (let [ts (nth n 3) k (count ts)]
+                        [(L l (a/exact 'tc (if is-cls (ctuple-tycon-occ k) (tuple-tycon-occ true k))))
+                         (mapv val-arg ts) fix np])
+                      (malformed l))
+          (malformed l))))))
+
+(defn- match-bndr-var
+  "match_bndr_var: a type variable or a wild card as a binder's variable, else nil"
+  [n]
+  (case (first n)
+    HsTyVar (when (rdr-tyvar? (unLoc (nth n 3))) (con HsBndrVar nx (nth n 3)))
+    HsWildCardTy (con HsBndrWildCard nil)
+    nil))
+
+(defn check-ty-vars
+  "checkTyVars: the head's arguments as binders (each a type variable or a wild card, with a
+  kind signature or not, in parentheses or not; an @k invisible), their spans widened over the
+  parentheses (and the '@'); what and eq the messages' words (\"data\", \"= ...\")"
+  [what eq tc tparams]
+  (mk-hs-qtvs
+   (mapv (fn [arg]
+           (let [[bvis fw ty]
+                 (case (first arg)
+                   HsTypeArg [(con HsBndrInvisible nil) (at-span arg) (nth arg 2)]
+                   HsValArg [(con HsBndrRequired nx) nil (nth arg 2)]
+                   (pp/fatal! (lx/msg :PsErrMalformedDecl (nth arg 1) what (unLoc tc))))]
+             (loop [t ty ops () cps []]
+               (let [l (getLoc t) n (unLoc t)]
+                 (if (= 'HsParTy (first n))
+                   (let [[o c] (parens-locs l)] (recur (nth n 2) (cons o ops) (cons c cps)))
+                   (let [widen (fn [s] (widen-span s (cons fw (concat (reverse ops) cps))))]
+                     (cond
+                       (and (= 'HsKindSig (first n)) (match-bndr-var (unLoc (nth n 2))))
+                       (let [inner (nth n 2)]
+                         (L (widen (combine l (getLoc inner)))
+                            (con HsTvb nil bvis (match-bndr-var (unLoc inner)) (con HsBndrKind nx (nth n 3)))))
+                       (match-bndr-var n)
+                       (L (widen l) (con HsTvb nil bvis (match-bndr-var n) (con HsBndrNoKind nx)))
+                       :else
+                       (pp/fatal! (lx/msg :PsErrUnexpectedTypeInDecl l t what (unLoc tc) tparams eq)))))))))
+         tparams)))
+
+(defn from-spec-ty-var-bndr
+  "fromSpecTyVarBndr: a specified binder's flag (); an inferred one is an error"
+  [lt]
+  (let [[_ x flag v k] (unLoc lt)]
+    (when (= flag 'InferredSpec)
+      (pp/fatal! (lx/msg :PsErrInferredTypeVarNotAllowed (getLoc lt))))
+    (L (getLoc lt) (list 'HsTvb x () v k))))
+
+(defn from-spec-ty-var-bndrs "fromSpecTyVarBndrs" [ts] (mapv from-spec-ty-var-bndr ts))
+
+(defn set-lhs-ty-var-bndr-name-space
+  "setLHsTyVarBndrNameSpace: the binder's variable in name space ns"
+  [ns lt]
+  (let [tvb (unLoc lt) var (nth tvb 3)]
+    (L (getLoc lt)
+       (list 'HsTvb (nth tvb 1) (nth tvb 2)
+             (if (= 'HsBndrVar (first var))
+               (let [lv (nth var 2)] (con HsBndrVar (nth var 1) (L (getLoc lv) (set-rdr-name-space (unLoc lv) ns))))
+               var)
+             (nth tvb 4)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Bindings (cvBindGroup, cvBindsAndSigs, getMonoBind, partitionBindsAndSigs)
+
+(defn mk-match-group "mkMatchGroup FromSource" [lms] (con MG 'FromSource lms))
+
+(defn make-fun-bind "makeFunBind" [fun-id lms] (con FunBind nx fun-id (mk-match-group lms)))
+
+(defn- single-match
+  "A FunBind of one match: [its name its located match], else nil"
+  [b]
+  (when (= 'FunBind (first b))
+    (let [mg (nth b 3) ms (unLoc (nth mg 2))]
+      (when (= 1 (count ms)) [(unLoc (nth b 2)) (first ms)]))))
+
+(defn- has-args? "has_args" [lm] (boolean (seq (unLoc (nth (unLoc lm) 3)))))
+
+(defn get-mono-bind
+  "getMonoBind: the equations after a FunBind (at loc1) of the same function, with the
+  documentation between them, grouped into it: [bind its-span rest-of-decls]"
+  [loc1 bind binds]
+  (if-let [[f1 m1] (single-match bind)]
+    (if (has-args? m1)
+      (loop [mtchs [(L loc1 (unLoc m1))] loc loc1 binds (seq binds) docs []]
+        (let [d (first binds)
+              dn (when d (unLoc d))]
+          (cond
+            (and dn (= 'ValD (first dn))
+                 (let [[f2] (single-match (nth dn 2))] (and f2 (= f1 f2))))
+            (recur (conj mtchs (second (single-match (nth dn 2)))) (combine loc (getLoc d)) (next binds) [])
+            (and dn (= 'DocD (first dn)))
+            (recur mtchs (combine loc (getLoc d)) (next binds) (conj docs d))
+            :else
+            [(make-fun-bind (nth bind 2) (mk-located-list mtchs)) loc (concat docs binds)])))
+      [bind loc1 binds])
+    [bind loc1 binds]))
+
+(defn get-mono-bind-all
+  "getMonoBindAll: every function's adjacent equations grouped (getMonoBind)"
+  [decls]
+  (loop [ds (seq decls) out (transient [])]
+    (if ds
+      (let [d (first ds) n (unLoc d)]
+        (if (= 'ValD (first n))
+          (let [[b' l' rest-ds] (get-mono-bind (getLoc d) (nth n 2) (next ds))]
+            (recur (seq rest-ds) (conj! out (L l' (con ValD nx b')))))
+          (recur (next ds) (conj! out d))))
+      (persistent! out))))
+
+(defn cv-top-decls "cvTopDecls" [decls] (get-mono-bind-all decls))
+
+(defn partition-binds-and-sigs
+  "partitionBindsAndSigs: [binds sigs families type-family-instances data-family-instances docs]"
+  [decls]
+  (loop [ds (seq decls) bs [] ss [] ts [] tfis [] dfis [] docs []]
+    (if ds
+      (let [d (first ds) l (getLoc d) n (unLoc d) x (nth n 2)]
+        (case (first n)
+          ValD (recur (next ds) (conj bs (L l x)) ss ts tfis dfis docs)
+          SigD (recur (next ds) bs (conj ss (L l x)) ts tfis dfis docs)
+          TyClD (if (= 'FamDecl (first x))
+                  (recur (next ds) bs ss (conj ts (L l (nth x 2))) tfis dfis docs)
+                  (throw (ex-info "partitionBindsAndSigs" {:span l})))
+          InstD (case (first x)
+                  TyFamInstD (recur (next ds) bs ss ts (conj tfis (L l (nth x 2))) dfis docs)
+                  DataFamInstD (recur (next ds) bs ss ts tfis (conj dfis (L l (nth x 2))) docs)
+                  (throw (ex-info "partitionBindsAndSigs" {:span l})))
+          DocD (recur (next ds) bs ss ts tfis dfis (conj docs (L l x)))
+          (throw (ex-info "partitionBindsAndSigs" {:span l}))))
+      [bs ss ts tfis dfis docs])))
+
+(defn cv-binds-and-sigs
+  "cvBindsAndSigs: a binding group's declarations (splices dropped) as [binds sigs families
+  type-family-instances data-family-instances docs]"
+  [decls]
+  ;; drop_bad_decls: a declaration splice is not allowed here
+  (doseq [d decls]
+    (when (= 'SpliceD (first (unLoc d)))
+      (pp/add-error! (lx/msg :PsErrDeclSpliceNotAtTopLevel (getLoc d) (nth (unLoc d) 2)))))
+  (partition-binds-and-sigs (get-mono-bind-all (remove #(= 'SpliceD (first (unLoc %))) decls))))
+
+(defn cv-bind-group
+  "cvBindGroup: the HsValBinds of a group of value bindings and signatures"
+  [decls]
+  (let [[mbs sigs] (cv-binds-and-sigs decls)]
+    (con ValBinds nil mbs sigs)))
+
+(defn mk-class-op-sigs
+  "mkClassOpSigs: the class's type signatures as ClassOpSig"
+  [sigs]
+  (mapv (fn [ls]
+          (let [s (unLoc ls)]
+            (if (= 'TypeSig (first s))
+              (L (getLoc ls) (con ClassOpSig (nth s 1) false (nth s 2) (nth (nth s 3) 2)))
+              ls)))
+        sigs))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Declarations
+
+(defn mk-ty-cl-d "mkTyClD" [ld] (L (getLoc ld) (con TyClD nx (unLoc ld))))
+(defn mk-inst-d "mkInstD" [ld] (L (getLoc ld) (con InstD nx (unLoc ld))))
+
+(defn mk-class-decl
+  "mkClassDecl: hdr (L _ [Maybe-context head]), fds (L _ [_ [fundep...]]), the body's declarations;
+  tcdCExt (tuple where-token layout nil): the `where` token (nil without one) and the body's
+  EpLayout ((EpExplicitBraces open close), (EpVirtualBraces column) or EpNoLayout), which the
+  Haddock pass reads (the dump has them nil: arbace.repr.haskell.ast/to-dump)"
+  [loc hdr fds wtok where-decls layout]
+  (let [[mcxt head] (unLoc hdr)
+        [binds sigs ats at-defs _ docs] (cv-binds-and-sigs where-decls)
+        [cls tparams fixity] (check-ty-cl-hdr true head)
+        tyvars (check-ty-vars "class" "where ..." cls tparams)]
+    (L loc (con ClassDecl (tuple wtok layout nil) mcxt cls tyvars fixity (vec (second (unLoc fds)))
+                (mk-class-op-sigs sigs) binds ats at-defs docs))))
+
+(defn- promote-constructor
+  "A type data declaration's constructor's names in the type namespace"
+  [lc]
+  (let [promote (fn [ln] (L (getLoc ln) (or (promote-rdr-name (unLoc ln)) (unLoc ln))))
+        c (unLoc lc)]
+    (L (getLoc lc)
+       (case (first c)
+         ConDeclGADT (apply list (assoc (vec c) 2 (mapv promote (nth c 2))))
+         ConDeclH98 (apply list (assoc (vec c) 2 (promote (nth c 2))))
+         c))))
+
+(defn check-new-or-data
+  "checkNewOrData: a newtype's constructor (exactly one), or a data type's"
+  [span name is-type-data new-or-data cons]
+  (cond
+    (and (= new-or-data 'NewType) (= 1 (count cons))) (con NewTypeCon (first cons))
+    (= new-or-data 'DataType)
+    (con DataTypeCons (boolean is-type-data) (if is-type-data (mapv promote-constructor cons) (vec cons)))
+    :else (pp/fatal! (lx/msg :PsErrMultipleConForNewtype span name (count cons)))))
+
+(defn mk-data-defn
+  "mkDataDefn: ext a GADT-style declaration's `where` token (nil when none), which the Haddock
+  pass reads (dd_ext's AnnDataDefn; the dump has it nil)"
+  [ext ctype mcxt ksig cons derivs]
+  ;; checkDatatypeContext
+  (when-let [c (a/from-just mcxt)]
+    (when-not (lx/get-bit pp/*ps* :DatatypeContextsBit)
+      (pp/add-error! (lx/msg :PsErrIllegalDataTypeContext (getLoc c) c))))
+  (con HsDataDefn ext mcxt ctype ksig cons (vec derivs)))
+
+(defn mk-ty-data
+  "mkTyData: hdr (L _ [Maybe-context head]), derivs (L _ [clause...]) in order, wtok a GADT-style
+  declaration's `where` token or nil"
+  [loc is-type-data new-or-data ctype hdr ksig data-cons derivs wtok]
+  (let [[mcxt head] (unLoc hdr)
+        [tc tparams fixity] (check-ty-cl-hdr false head)
+        tyvars (check-ty-vars (if (= new-or-data 'NewType) "newtype" "data") "= ..." tc tparams)
+        cons (check-new-or-data loc (unLoc tc) is-type-data new-or-data data-cons)]
+    (L loc (con DataDecl nx tc tyvars fixity (mk-data-defn wtok ctype mcxt ksig cons (unLoc derivs))))))
+
+(defn mk-ty-synonym
+  "mkTySynonym"
+  [loc lhs rhs]
+  (let [[tc tparams fixity] (check-ty-cl-hdr false lhs)
+        tyvars (check-ty-vars "type" "= ..." tc tparams)]
+    (L loc (con SynDecl nil tc tyvars fixity rhs))))
+
+(defn mk-standalone-kind-sig
+  "mkStandaloneKindSig: lhs (L _ [name...]) reversed, one unqualified type constructor"
+  [loc lhs rhs]
+  (let [vs (mapv (fn [v]
+                   (let [n (unLoc v)]
+                     (if (and (a/rdr-unqual? n) (rdr-tc? n))
+                       v
+                       (pp/fatal! (lx/msg :PsErrUnexpectedQualifiedConstructor (getLoc v) n)))))
+                 (unLoc lhs))]
+    (when-not (= 1 (count vs))
+      (pp/fatal! (lx/msg :PsErrMultipleNamesInStandaloneKindSignature (getLoc lhs) (mapv unLoc (reverse vs)))))
+    (L loc (con StandaloneKindSig (tuple nil nil) (first vs) rhs))))
+
+(defn- nils [^long n] (vec (repeat n nil)))
+
+(defn mk-ty-fam-inst-eqn
+  "mkTyFamInstEqn: bndrs the equation's HsOuterTyVarBndrs"
+  [loc bndrs lhs rhs]
+  (let [[tc tparams fixity np] (check-ty-cl-hdr false lhs)]
+    (L loc (con FamEqn (tuple (nils np) (nils np) nil) tc bndrs tparams fixity rhs))))
+
+(defn mk-data-fam-inst
+  "mkDataFamInst: hdr [Maybe-context bndrs head], derivs (L _ [clause...]) in order, wtok a
+  GADT-style declaration's `where` token or nil"
+  [loc new-or-data ctype [mcxt bndrs head] ksig data-cons derivs wtok]
+  (let [[tc tparams fixity] (check-ty-cl-hdr false head)
+        cons (check-new-or-data loc (unLoc tc) false new-or-data data-cons)
+        defn (mk-data-defn wtok ctype mcxt ksig cons (unLoc derivs))]
+    (L loc (con DataFamInstD nx (con DataFamInstDecl (con FamEqn (tuple [] [] nil) tc bndrs tparams fixity defn))))))
+
+(defn mk-ty-fam-inst
+  "mkTyFamInst"
+  [loc eqn]
+  (L loc (con TyFamInstD nx (con TyFamInstDecl (tuple nil nil) eqn))))
+
+(defn mk-fam-decl
+  "mkFamDecl: info DataFamily, OpenTypeFamily or (ClosedTypeFamily Maybe-eqns); ksig the located
+  FamilyResultSig; inj Maybe the injectivity annotation"
+  [loc info top-level lhs ksig inj]
+  (let [[tc tparams fixity] (check-ty-cl-hdr false lhs)
+        ih (if (seq? info) (first info) info)
+        tyvars (check-ty-vars (case ih DataFamily "data family" "type family")
+                              (if (= 'ClosedTypeFamily ih) "where ..." "") tc tparams)]
+    (L loc (con FamDecl nx (con FamilyDecl nil info top-level tc tyvars fixity ksig inj)))))
+
+(defn mk-splice-decl
+  "mkSpliceDecl: a top-level splice $(e) or quasi-quote (DollarSplice), any other expression a
+  bare splice"
+  [lexpr]
+  (let [loc (getLoc lexpr) e (unLoc lexpr)]
+    (if (and (= 'HsUntypedSplice (first e)) (#{'HsUntypedSpliceExpr 'HsQuasiQuote} (first (nth e 2))))
+      (L loc (con SpliceD nx (con SpliceDecl nx (L loc (nth e 2)) 'DollarSplice)))
+      (L loc (con SpliceD nx (con SpliceDecl nx (L loc (con HsUntypedSpliceExpr nil lexpr)) 'BareSplice))))))
+
+(def ^:private roles {"nominal" 'Nominal "representational" 'Representational "phantom" 'Phantom})
+
+(defn mk-role-annot-decl
+  "mkRoleAnnotDecl: each role (L _ Nothing|(Just \"name\")) parsed"
+  [loc tycon rs]
+  (L loc (con RoleAnnotDecl (tuple nil nil) tycon
+              (mapv (fn [lr]
+                      (let [r (unLoc lr)]
+                        (if (nothing? r)
+                          (L (getLoc lr) 'Nothing)
+                          (if-let [role (roles (second r))]
+                            (L (getLoc lr) (just role))
+                            (pp/fatal! (lx/msg :PsErrIllegalRoleName (getLoc lr) (second r)
+                                               ;; the roles whose names are near (fuzzyMatch)
+                                               (vec (filter #(near? (second r) %) ["nominal" "representational" "phantom"]))))))))
+                    rs))))
+
+(defn mk-con-decl-h98
+  "mkConDeclH98: mb-forall Maybe the binders, mb-cxt Maybe the context"
+  [name mb-forall mb-cxt args]
+  (con ConDeclH98 nil name (a/just? mb-forall) (if (a/just? mb-forall) (vec (second mb-forall)) []) mb-cxt args 'Nothing))
+
+(defn split-lhs-gadt-ty
+  "splitLHsGadtTy: a GADT constructor's signature as [outer-bndrs [telescope...] Maybe-context
+  body], parentheses kept"
+  [ty]
+  (let [sig (unLoc ty)
+        outer (nth sig 2)
+        sigma (nth sig 3)
+        [inner phi] (loop [t sigma teles []]
+                      (let [n (unLoc t)]
+                        (if (= 'HsForAllTy (first n)) (recur (nth n 3) (conj teles (nth n 2))) [teles t])))
+        [mcxt rho] (let [n (unLoc phi)] (if (= 'HsQualTy (first n)) [(just (nth n 2)) (nth n 3)] ['Nothing phi]))
+        rn (unLoc rho)]
+    (if (and (= 'HsFunTy (first rn)) (rec-ty? (unLoc (nth rn 3))) (seq inner))
+      [outer [] 'Nothing sigma]
+      [outer inner mcxt rho])))
+
+(defn mk-gadt-decl
+  "mkGadtDecl: names [name...], ty the signature: a record constructor when its body is a record
+  type's function"
+  [loc names ty]
+  (let [[outer inner mcxt body] (split-lhs-gadt-ty ty)
+        b (unLoc body)
+        [args res] (if (and (= 'HsFunTy (first b)) (rec-ty? (unLoc (nth b 3))))
+                     (let [rt (nth b 3)]
+                       (when-not (= 'HsUnannotated (first (nth b 2)))
+                         (pp/add-error! (lx/msg :PsErrIllegalGadtRecordMultiplicity (getLoc body) (nth b 2))))
+                       [(con RecConGADT nil (L (getLoc rt) (vec (nth (second (unLoc rt)) 2)))) (nth b 4)])
+                     (let [[_ _ as r] (split-hs-fun-type body)] [(con PrefixConGADT nx as) r]))
+        outer-loc (if (= 'HsOuterImplicit (first outer)) (getLoc ty) (anchor outer))]
+    (L loc (con ConDeclGADT nil (vec names) (L outer-loc outer) (vec inner) mcxt args res 'Nothing))))
+
+(defn check-record-syntax
+  "checkRecordSyntax: without TraditionalRecordSyntax an error (not fatal) showing the record"
+  [lr]
+  (when-not (lx/get-bit pp/*ps* :TraditionalRecordSyntaxBit)
+    (pp/add-error! (lx/msg :PsErrIllegalTraditionalRecordSyntax (getLoc lr)
+                           ((requiring-resolve 'arbace.repr.haskell.pprhs/ppr-type) (unLoc lr)))))
+  lr)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Pattern synonyms
+
+(defn mk-pat-syn-bind
+  "mkPatSynBind"
+  [name details lpat dir]
+  (con PatSynBind nx (con PSB nil name details lpat dir)))
+
+(defn mk-pat-syn-match-group
+  "mkPatSynMatchGroup: an explicitly bidirectional pattern synonym's where clause's equations
+  (L ld [decl...]), each name args = rhs, as its MatchGroup"
+  [lname ldecls]
+  (let [name (unLoc lname)
+        ms (mapv (fn [ld]
+                   (let [l (getLoc ld) d (unLoc ld)
+                         pb (when (= 'ValD (first d)) (nth d 2))
+                         pat (when (and pb (= 'PatBind (first pb))) (unLoc (nth pb 2)))]
+                     (if (and pat (= 'ConPat (first pat)))
+                       (let [ln (nth pat 2) details (nth pat 3) rhs (nth pb 4)]
+                         (when-not (= (unLoc ln) name)
+                           (pp/fatal! (lx/msg :PsErrInvalidWhereBindInPatSynDecl l name d)))
+                         (case (first details)
+                           PrefixCon (let [pats (vec (nth details 1))]
+                                       (L l (con Match nx (con FunRhs ln 'Prefix 'NoSrcStrict nil) (L (list-location pats) pats) rhs)))
+                           InfixCon (let [pats [(nth details 1) (nth details 2)]]
+                                      (L l (con Match nx (con FunRhs ln 'Infix 'NoSrcStrict nil) (L (list-location pats) pats) rhs)))
+                           (pp/fatal! (lx/msg :PsErrRecordSyntaxInPatSynDecl l (nth pb 2)))))
+                       (pp/fatal! (lx/msg :PsErrNoSingleWhereBindInPatSynDecl l name d)))))
+                 (unLoc ldecls))]
+    (when (empty? ms)
+      (pp/fatal! (lx/msg :PsErrEmptyWhereInPatSynDecl (getLoc ldecls) name)))
+    (mk-match-group (L (getLoc ldecls) ms))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Rules (mkRuleBndrs, ruleBndrsOrDef, checkRuleTyVarBndrNames); a rule variable is
+;;; (L span (RuleTyTmVar nil name Maybe-type))
+
+(defn mk-rule-bndrs
+  "mkRuleBndrs: ann an HsRuleBndrsAnn, tvbs Maybe the type variables, tmbs the term variables"
+  [ann tvbs tmbs]
+  (let [cvt-tv (fn [lv]
+                 (let [[_ ann v msig] (unLoc lv)]
+                   (set-lhs-ty-var-bndr-name-space
+                    'tv (L (getLoc lv) (con HsTvb ann () (con HsBndrVar nx v)
+                                            (if (nothing? msig) (con HsBndrNoKind nx) (con HsBndrKind nx (second msig))))))))
+        cvt-tm (fn [lv]
+                 (let [[_ ann v msig] (unLoc lv)]
+                   (L (getLoc lv) (if (nothing? msig)
+                                    (con RuleBndr ann v)
+                                    (con RuleBndrSig ann v (mk-hs-pat-sig-type (second msig)))))))]
+    (con RuleBndrs ann (if (a/just? tvbs) (just (mapv cvt-tv (second tvbs))) 'Nothing) (mapv cvt-tm tmbs))))
+
+(defn rule-bndrs-or-def
+  "ruleBndrsOrDef"
+  [m]
+  (if (a/just? m) (second m) (mk-rule-bndrs (con HsRuleBndrsAnn 'Nothing 'Nothing) 'Nothing [])))
+
+(defn check-rule-ty-var-bndr-names
+  "checkRuleTyVarBndrNames: a rule's type variables are not named family or role"
+  [bndrs]
+  (doseq [lv bndrs]
+    (let [lname (nth (unLoc lv) 2) n (unLoc lname)]
+      (if (a/rdr-unqual? n)
+        (when (#{"family" "role"} (a/rdr-occ n))
+          (pp/fatal! (lx/msg :PsErrParseErrorOnInput (getLoc lname) (a/rdr-occ n))))
+        (throw (ex-info "checkRuleTyVarBndrNames" {:span (getLoc lname)}))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Warnings and deprecations
+
+(def ^:private lex-string-literal
+  (delay (requiring-resolve 'arbace.repr.haskell.haddocklex/lex-string-literal)))
+
+(defn string-literal-to-hs-doc-wst
+  "stringLiteralToHsDocWst: a warning's string (L span StringLiteral) with the identifiers it
+  names (GHC's lexStringLiteral parseIdentifier: arbace.repr.haskell.haddocklex's
+  lex-string-literal, ls -> (L span (WithHsDocIdentifiers sl [ident...])))"
+  [ps ls]
+  (@lex-string-literal ls))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Foreign declarations (mkImport, parseCImport, mkExport): a declaration's value a fn of the
+;;; 'foreign' token, as fdecl's
+
+(defn- cps-str "The string of code points" ^String [cps]
+  (let [^ints a (int-array cps)] (String. a (int 0) (int (alength a)))))
+
+(defn- id-first-char? [^long c] (or (Character/isLetter (int c)) (= c 95)))
+(defn- id-char? [^long c] (or (Character/isLetterOrDigit (int c)) (= c 95)))
+(defn- space-char? [^long c] (or (= c 32) (<= 9 c 13) (= c 0xA0) (Character/isSpaceChar (int c))))
+
+(defn- c-import-parses
+  "parseCImport's ReadP parser: every parse of the entity string cs (code points) as [result
+  remaining-looks] in ReadP's order of the alternatives (dynamic, wrapper, [static] cimp,
+  [static] header cimp), each with the number of looks after its last character consumed
+  (ReadP's results at the end of the input come first for fewer of them)"
+  [cps capi?]
+  (let [n (count cps)
+        ;; a parser: fn of [pos looks] to a seq of [value pos looks]
+        skip-spaces (fn [[p lk]] [[nil (loop [q p] (if (and (< q n) (space-char? (long (nth cps q)))) (recur (inc q)) q))
+                                   (let [q (loop [q p] (if (and (< q n) (space-char? (long (nth cps q)))) (recur (inc q)) q))]
+                                     (if (= q p) (inc (long lk)) 0))]])
+        string (fn [^String s] (fn [[p lk]]
+                                 (let [cs (vec (.toArray (.codePoints s))) k (count cs)]
+                                   (if (and (<= (+ p k) n) (= cs (subvec cps p (+ p k))))
+                                     [[s (+ p k) (if (zero? k) (inc (long lk)) 0)]]
+                                     []))))
+        token (fn [^String s] (fn [st]
+                                (for [[v p lk] ((string s) st)
+                                      :when (not (and (< p n) (id-char? (long (nth cps p)))))]
+                                  [v p (inc (long lk))])))
+        seq2 (fn [pa f] (fn [st] (mapcat (fn [[v p lk]] ((f v) [p lk])) (pa st))))
+        alt (fn [& ps] (fn [st] (mapcat #(% st) ps)))
+        ret (fn [v] (fn [[p lk]] [[v p lk]]))
+        cid (fn [nm] (alt (ret nm)
+                          (fn [[p lk]]
+                            (if (and (< p n) (id-first-char? (long (nth cps p))))
+                              ;; many (satisfy id_char): the shortest first
+                              (let [end (loop [q (inc p)] (if (and (< q n) (id-char? (long (nth cps q)))) (recur (inc q)) q))]
+                                (for [q (range (inc p) (inc end))]
+                                  [(cps-str (subvec cps p q)) q 0]))
+                              []))))
+        cimp (fn [nm] (alt (seq2 (string "&") (fn [_] (seq2 skip-spaces (fn [_] (seq2 (cid nm) (fn [c] (ret [:label c])))))))
+                           (seq2 (if capi?
+                                   (alt (seq2 (token "value") (fn [_] (seq2 skip-spaces (fn [_] (ret false))))) (ret true))
+                                   (ret true))
+                                 (fn [fun?] (seq2 (cid nm) (fn [c] (ret [:function c fun?])))))))
+        munch1-hdr (fn [[p lk]]
+                     (if (and (< p n) (not (space-char? (long (nth cps p)))))
+                       (let [end (loop [q (inc p)] (if (and (< q n) (not (space-char? (long (nth cps q))))) (recur (inc q)) q))]
+                         ;; munch's look is after the first character
+                         [[(cps-str (subvec cps p end)) end (if (= end (inc p)) 1 0)]])
+                       []))
+        body (fn [nm]
+               (seq2 skip-spaces
+                     (fn [_]
+                       (seq2 (alt (seq2 (string "dynamic") (fn [_] (ret [nil [:dynamic]])))
+                                  (seq2 (string "wrapper") (fn [_] (ret [nil [:wrapper]])))
+                                  (seq2 (alt (seq2 (token "static") (fn [_] (seq2 skip-spaces (fn [_] (ret nil))))) (ret nil))
+                                        (fn [_] (alt (seq2 (cimp nm) (fn [c] (ret [nil c])))
+                                                     (seq2 munch1-hdr (fn [h] (seq2 skip-spaces (fn [_] (seq2 (cimp nm) (fn [c] (ret [h c])))))))))))
+                             (fn [r] (seq2 skip-spaces (fn [_] (ret r))))))))]
+    body))
+
+(defn parse-c-import
+  "parseCImport: the C entity string of a foreign import (\"[static] [header] [&] [cid]\",
+  \"dynamic\" or \"wrapper\") as the CImport, or nil when it does not parse; nm the Haskell name's
+  occurrence (the cid when none is given), lsrc the located SourceText"
+  [cconv safety ^String nm ^String s lsrc]
+  (let [cps (vec (.toArray (.codePoints s)))
+        capi? (= 'CApiConv (unLoc cconv))
+        results (filter (fn [[_ p]] (= p (count cps))) (((c-import-parses cps capi?) nm) [0 0]))
+        best (first (sort-by (fn [[_ _ lk]] lk) results))]
+    (when best
+      (let [[[h spec]] best
+            hdr (if h (just (con Header (a/src h) h)) 'Nothing)
+            target (case (first spec)
+                     :dynamic (con CFunction 'DynamicTarget)
+                     :wrapper 'CWrapper
+                     :label (con CLabel (second spec))
+                     :function (con CFunction (con StaticTarget nil (second spec) 'Nothing (nth spec 2))))]
+        (con CImport lsrc cconv safety hdr target)))))
+
+(defn mk-import
+  "mkImport: cconv and safety located, spec [(L loc StringLiteral) name sigtype]; a fn of the
+  'foreign' token giving the ForD"
+  [cconv safety [lstr v ty]]
+  (let [loc (getLoc lstr)
+        [_ esrc entity] (unLoc lstr)
+        return-spec (fn [spec] (fn [_] (con ForD nx (con ForeignImport (tuple nil nil nil) v ty spec))))
+        mk-cimport (fn []
+                     (or (parse-c-import cconv safety (mk-ext-name (unLoc v)) entity (L loc esrc))
+                         (pp/fatal! (lx/msg :PsErrMalformedEntityString loc))))]
+    (case (unLoc cconv)
+      (CCallConv StdCallConv) (return-spec (mk-cimport))
+      CApiConv (let [imp (mk-cimport)]
+                 (if (= 'CWrapper (nth imp 5))
+                   (pp/fatal! (lx/msg :PsErrInvalidCApiImport loc))
+                   (return-spec imp)))
+      (PrimCallConv JavaScriptCallConv)
+      (let [entity' (if (= "" entity) (mk-ext-name (unLoc v)) entity)]
+        (return-spec (con CImport (L loc esrc) cconv safety 'Nothing
+                          (con CFunction (con StaticTarget esrc entity' 'Nothing true))))))))
+
+(defn mk-export
+  "mkExport: cconv located, spec [(L loc StringLiteral) name sigtype]; a fn of the 'foreign' token"
+  [cconv [lstr v ty]]
+  (let [le (getLoc lstr)
+        [_ esrc entity] (unLoc lstr)
+        entity' (if (= "" entity) (mk-ext-name (unLoc v)) entity)]
+    (fn [_]
+      (con ForD nx (con ForeignExport (tuple nil nil nil) v ty
+                        (con CExport (L le esrc) (L (getLoc cconv) (con CExportStatic esrc entity' (unLoc cconv)))))))))

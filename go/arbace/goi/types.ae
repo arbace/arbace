@@ -10,7 +10,7 @@
 (in-ns 'go.arbace.goi)
 
 (go/file "types.go"
-  :imports [[fmt "fmt"] [reflect "reflect"] [strings "strings"] [sync "sync"] [unsafe "unsafe"]])
+  :imports [[fmt "fmt"] [reflect "reflect"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"] [unsafe "unsafe"]])
 
 (go/const
   [^{:tag byte} convNone 0]
@@ -32,7 +32,8 @@ that is not an interface, made by reflect.ArbaceNamed, or a composite of one), s
 registry finds the descriptor from a value's reflect type; room, proom: the methods the RT
 (and its pointer type's) have room for; layout: the RT has its shape's layout only, before its
 underlying type (ArbaceSetLayout, GC70); stubbed: the RT's method table is set (once: itabs are
-cached for good, GC68). Every descriptor but a compiled interface's is made once per type
+cached for good, GC68). fast: how load and store move a value of t without reflect (fastKind;
+tw its RT's type word). Every descriptor but a compiled interface's is made once per type
 (interned), so that descriptors compare by identity. Reify: an Arbace reify's type (G13), its
 values a struct holding the Arbace object, its methods calling its fns.\n"
   (struct ^{:tag reflect/Type} RT ^{:tag reflect/Type} Mem ^byte Conv ^byte K ^{:tag reflect/Kind} GK
@@ -43,7 +44,8 @@ values a struct holding the Arbace object, its methods calling its fns.\n"
           ^{:tag (map string (* Method))} Methods ^{:tag (slice IMethod)} IMethods
           ^bool complete ^bool own ^bool layout ^int room ^int proom ^bool roomed
           ^bool methodsSet ^bool stubbed ^bool Reify ^int mver
-          ^bool direct ^bool zeroDone ^any zero))
+          ^bool direct ^bool zeroDone ^any zero
+          ^uint32 fast ^unsafe/Pointer tw))
 
 (go/var ^{:tag sync/Mutex} typesMu)
 
@@ -563,8 +565,76 @@ interpreted closure the closure again, a nil func nil.\n"
 ;; ---------------------------------------------------------------------------------------
 ;; Loads and stores through addresses (§4.4, S25): typed by the place's type
 
+;; Their fast paths (P7, GOI-SPEC.md "As built: P7"): a value whose Go memory is the words of its
+;; interface value moves by its words, without reflect's NewAt (its pointer type's lookup) and
+;; Interface (packEface's copy): a pointer-shaped kind (pointer, map, channel, unsafe.Pointer) its
+;; one word, a slice its header (a new box), an empty interface itself, and a compiled non-empty
+;; interface loaded as gc converts it to any (its itab's type word).
+(go/const
+  [^uint32 fastUnknown 0]
+  [^uint32 fastNone 1]
+  [^uint32 fastWord 2]
+  [^uint32 fastSlice 3]
+  [^uint32 fastEface 4]
+  [^uint32 fastIface 5])
+
+(go/type ifaceWords
+  "ifaceWords is a non-empty interface type: every one's value is (itab, data), and its conversion
+to any reads only the itab's type word, so a compiled non-empty interface loads as one of it.\n"
+  (interface (goiIfaceWords [])))
+
+(go/func typeWord "typeWord is reflect type rt's type word, the first word of an interface holding a value of
+rt: its *abi.Type, reflect.Type's data word (a *rtype, as stubs' typ).\n"
+  ^unsafe/Pointer [^{:tag reflect/Type} rt]
+  (aget @(conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr rt))) 1))
+
+(go/func efaceType "efaceType is an interface value's type word.\n" ^unsafe/Pointer [^any x]
+  (aget @(conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr x))) 0))
+
+(go/func wordsEface "wordsEface is the interface value of type word typ and data word data.\n"
+  ^any [^unsafe/Pointer typ ^unsafe/Pointer data]
+  (let [e (lit (array 2 unsafe/Pointer) typ data)]
+    @(conv (* any) (conv unsafe/Pointer (addr e)))))
+
+(go/method fastKind
+  "fastKind is how load and store move a value of t (fastNone: through reflect), decided once
+when t's RT is final (a compiled or unnamed type's, a named one's once complete; until then
+fastNone, not kept).\n"
+  ^uint32 [^{:tag (* Type)} t]
+  (let [k (atomic/LoadUint32 (addr (.-fast t)))]
+    (when (!= k fastUnknown)
+      (return k))
+    (let [rt (.-RT t)]
+      (when (== rt nil)
+        (return fastNone))
+      (when (== rt anyType)
+        (set! k fastEface))
+      (when (and (== k fastUnknown) (!= (.-Name t) "") (not (.-Compiled t)) (not (.-complete t)))
+        (return fastNone))
+      (when (== k fastUnknown)
+        (set! k fastNone)
+        (cond
+          (.-Iface t) (when (== (.Kind rt) reflect/Interface)
+                        (if (== (.NumMethod rt) 0)
+                          (set! k fastEface)
+                          (set! k fastIface)))
+          (!= (.-Conv t) convFunc) (switch (.-GK t)
+                                     (case [reflect/Pointer reflect/Map reflect/Chan reflect/UnsafePointer] (set! k fastWord))
+                                     (case [reflect/Slice] (set! k fastSlice)))))
+      (set! (.-tw t) (typeWord rt))
+      (atomic/StoreUint32 (addr (.-fast t)) k)
+      k)))
+
 (go/method load "load is the value at p of type t as a frame holds it (R kinds; the others by kind too).\n"
   ^any [^{:tag (* Type)} t ^unsafe/Pointer p]
+  (switch (.fastKind t)
+    (case [fastWord] (return (wordsEface (.-tw t) @(conv (* unsafe/Pointer) p))))
+    (case [fastSlice]
+      (let [h (new sliceHeader)]
+        (set! @h @(conv (* sliceHeader) p))
+        (return (wordsEface (.-tw t) (conv unsafe/Pointer h)))))
+    (case [fastEface] (return @(conv (* any) p)))
+    (case [fastIface] (return (conv any @(conv (* ifaceWords) p)))))
   (when (.-Iface t)
     (when (== (.mem t) anyType)
       (return @(conv (* any) p))))
@@ -575,6 +645,18 @@ interpreted closure the closure again, a nil func nil.\n"
 
 (go/method store "store writes frame value v of type t at p (a typed copy: the write barriers apply).\n"
   [^{:tag (* Type)} t ^unsafe/Pointer p ^any v]
+  (switch (.fastKind t)
+    (case [fastEface]
+      (set! @(conv (* any) p) v)
+      (return))
+    (case [fastWord]
+      (when (== (efaceType v) (.-tw t))
+        (set! @(conv (* unsafe/Pointer) p) (efaceData v))
+        (return)))
+    (case [fastSlice]
+      (when (== (efaceType v) (.-tw t))
+        (set! @(conv (* sliceHeader) p) @(conv (* sliceHeader) (efaceData v)))
+        (return))))
   (when (and (.-Iface t) (== (.mem t) anyType))
     (set! @(conv (* any) p) v)
     (return))

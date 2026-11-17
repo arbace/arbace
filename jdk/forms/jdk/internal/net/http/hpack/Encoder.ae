@@ -1,0 +1,286 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/hpack/Encoder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.hpack)
+
+(import '(java.nio ByteBuffer)
+        '(java.util LinkedList List Objects)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.function Supplier))
+
+(defclass ^:public Encoder
+  (field ^:private ^:static ^:final ^AtomicLong ENCODERS_IDS (AtomicLong.))
+
+  (field ^:private ^:final ^QuickHuffman$Writer huffmanWriter (QuickHuffman$Writer.))
+
+  (field ^:private ^:final ^HPACK$Logger logger)
+
+  (field ^:private ^:final ^long id)
+
+  (field ^:private ^:final ^IndexedWriter indexedWriter (IndexedWriter.))
+
+  (field ^:private ^:final ^LiteralWriter literalWriter (LiteralWriter.))
+
+  (field ^:private ^:final ^LiteralNeverIndexedWriter literalNeverIndexedWriter
+    (LiteralNeverIndexedWriter.))
+
+  (field ^:private ^:final ^LiteralWithIndexingWriter literalWithIndexingWriter
+    (LiteralWithIndexingWriter.))
+
+  (field ^:private ^:final ^SizeUpdateWriter sizeUpdateWriter (SizeUpdateWriter.))
+
+  (field ^:private ^:final ^BulkSizeUpdateWriter bulkSizeUpdateWriter (BulkSizeUpdateWriter.))
+
+  (field ^:private ^BinaryRepresentationWriter writer)
+
+  (field ^:private ^:final ^HeaderTable headerTable)
+
+  (field ^:private ^boolean encoding)
+
+  (field ^:private ^int maxCapacity)
+
+  (field ^:private ^int currCapacity)
+
+  (field ^:private ^int lastCapacity)
+
+  (field ^:private ^long minCapacity)
+
+  (field ^:private ^boolean capacityUpdate)
+
+  (field ^:private ^boolean configuredCapacityUpdate)
+
+  (constructor ^:public [this ^int maxCapacity]
+    (set! id (.incrementAndGet ENCODERS_IDS))
+    (set! (.-logger this) (.subLogger (HPACK/getLogger) (java-str "Encoder#" id)))
+    (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+      (.log
+        logger
+        HPACK$Logger$Level/NORMAL
+        (lambda Supplier ^String []
+          (String/format "new encoder with maximum table size %s" (new Object/1 [maxCapacity])))))
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (let [hashCode (Integer/toHexString (System/identityHashCode this))]
+                (String/format "toString='%s', hashCode=%s, identityHashCode=%s"
+                               (new Object/1 [(.toString this) (.hashCode this) hashCode]))))))
+    (when (< maxCapacity 0)
+      (throw (IllegalArgumentException. (java-str "maxCapacity >= 0: " maxCapacity))))
+    (set! minCapacity Long/MAX_VALUE)
+    (set! currCapacity -1)
+    (.setMaxCapacity0 this maxCapacity)
+    (set! headerTable (HeaderTable. lastCapacity (.subLogger logger "HeaderTable"))))
+
+  (method ^:public header :throws [IllegalStateException] ^void [this ^CharSequence name
+                                                                 ^CharSequence value]
+    (.header this name value false))
+
+  (method ^:public header :throws [IllegalStateException] ^void [this ^CharSequence name
+                                                                 ^CharSequence value
+                                                                 ^boolean sensitive]
+    (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+      (.log logger
+            HPACK$Logger$Level/NORMAL
+            (lambda Supplier ^String []
+              (String/format "encoding ('%s', '%s'), sensitive: %s"
+                             (new Object/1 [name value sensitive])))))
+    (Objects/requireNonNull name "name")
+    (Objects/requireNonNull value "value")
+    (let [t (.getHeaderTable this)
+          index (.indexOf t name value)]
+      (if (> index 0)
+          (.indexed this index)
+          (let [huffmanValue (.isHuffmanBetterFor this value)]
+            (if (< index 0)
+                (if sensitive
+                    (.literalNeverIndexed this (unchecked-negate-int index) value huffmanValue)
+                    (.literal this (unchecked-negate-int index) value huffmanValue))
+                (let [huffmanName (.isHuffmanBetterFor this name)]
+                  (if sensitive
+                      (.literalNeverIndexed this name huffmanName value huffmanValue)
+                      (.literal this name huffmanName value huffmanValue))))))
+      (java-assert encoding "encoding is false")))
+
+  (method ^:protected ^:final isHuffmanBetterFor ^boolean [this ^CharSequence value]
+    (< (.lengthOf huffmanWriter value) (.length value)))
+
+  (method ^:public setMaxCapacity ^void [this ^int capacity]
+    (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+      (.log logger
+            HPACK$Logger$Level/NORMAL
+            (lambda Supplier ^String []
+              (String/format "setting maximum table size to %s" (new Object/1 [capacity])))))
+    (.setMaxCapacity0 this capacity))
+
+  (method ^:private setMaxCapacity0 ^void [this ^int capacity]
+    (.checkEncoding this)
+    (when (< capacity 0) (throw (IllegalArgumentException. (java-str "capacity >= 0: " capacity))))
+    (let [calculated (.calculateCapacity this capacity)]
+      (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+        (.log logger
+              HPACK$Logger$Level/NORMAL
+              (lambda Supplier ^String []
+                (String/format "actual maximum table size will be %s" (new Object/1 [calculated])))))
+      (when (or (< calculated 0) (> calculated capacity))
+        (throw (IllegalArgumentException.
+                 (String/format "0 <= calculated <= capacity: calculated=%s, capacity=%s"
+                                (new Object/1 [calculated capacity])))))
+      (set! capacityUpdate true)
+      (set! maxCapacity capacity)
+      (set! lastCapacity calculated)
+      (set! minCapacity (Math/min minCapacity lastCapacity))))
+
+  (method ^:protected calculateCapacity ^int [this ^int maxCapacity] 0)
+
+  (method ^:protected ^:final tableIndexOf ^int [this ^CharSequence name ^CharSequence value]
+    (.indexOf (.getHeaderTable this) name value))
+
+  (method ^:public ^:final encode ^boolean [this ^ByteBuffer headerBlock]
+    (when-not encoding (throw (IllegalStateException. "A header hasn't been set up")))
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (String/format "writing to %s" (new Object/1 [headerBlock])))))
+    (if (not (.prependWithCapacityUpdate this headerBlock))
+        false
+        (let [done (.write writer headerTable headerBlock)]
+          (when done (.reset writer) (set! encoding false))
+          (java-assert (or done encoding) (java-str "done: " done ", encoding: " encoding))
+          done)))
+
+  (method ^:private prependWithCapacityUpdate ^boolean [this ^ByteBuffer headerBlock]
+    (if capacityUpdate
+        (do
+          (when-not configuredCapacityUpdate
+            (let [^{:tag (List Integer)} sizes (LinkedList.)]
+              (if (< minCapacity currCapacity)
+                  (do
+                    (.add sizes (unchecked-int minCapacity))
+                    (when-not (== minCapacity lastCapacity) (.add sizes lastCapacity)))
+                  (when-not (== lastCapacity currCapacity) (.add sizes lastCapacity)))
+              (.maxHeaderTableSizes bulkSizeUpdateWriter sizes)
+              (set! configuredCapacityUpdate true)))
+          (let [done (.write bulkSizeUpdateWriter headerTable headerBlock)]
+            (when done
+              (set! minCapacity lastCapacity)
+              (set! currCapacity lastCapacity)
+              (.reset bulkSizeUpdateWriter)
+              (set! capacityUpdate false)
+              (set! configuredCapacityUpdate false))
+            done))
+        true))
+
+  (method ^:protected ^:final indexed :throws [IndexOutOfBoundsException] ^void [this ^int index]
+    (.checkEncoding this)
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String [] (String/format "indexed %s" (new Object/1 [index])))))
+    (set! encoding true)
+    (set! writer (.index indexedWriter index)))
+
+  (method ^:protected ^:final literal :throws [IndexOutOfBoundsException] ^void [this ^int index
+                                                                                 ^CharSequence value
+                                                                                 ^boolean useHuffman]
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (String/format "literal without indexing (%s, '%s', huffman=%b)"
+                             (new Object/1 [index value useHuffman])))))
+    (.checkEncoding this)
+    (set! encoding true)
+    (set! writer (.value (.index literalWriter index) value useHuffman)))
+
+  (method ^:protected ^:final literal ^void [this ^CharSequence name ^boolean nameHuffman
+                                             ^CharSequence value ^boolean valueHuffman]
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (String/format "literal without indexing ('%s', huffman=%b, '%s', huffman=%b)"
+                             (new Object/1 [name nameHuffman value valueHuffman])))))
+    (.checkEncoding this)
+    (set! encoding true)
+    (set! writer (.value (.name literalWriter name nameHuffman) value valueHuffman)))
+
+  (method ^:protected ^:final literalNeverIndexed :throws [IndexOutOfBoundsException] ^void [this
+                                                                                             ^int index
+                                                                                             ^CharSequence value
+                                                                                             ^boolean valueHuffman]
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (String/format "literal never indexed (%s, '%s', huffman=%b)"
+                             (new Object/1 [index value valueHuffman])))))
+    (.checkEncoding this)
+    (set! encoding true)
+    (set! writer (.value (.index literalNeverIndexedWriter index) value valueHuffman)))
+
+  (method ^:protected ^:final literalNeverIndexed ^void [this ^CharSequence name
+                                                         ^boolean nameHuffman ^CharSequence value
+                                                         ^boolean valueHuffman]
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (String/format "literal never indexed ('%s', huffman=%b, '%s', huffman=%b)"
+                             (new Object/1 [name nameHuffman value valueHuffman])))))
+    (.checkEncoding this)
+    (set! encoding true)
+    (set! writer (.value (.name literalNeverIndexedWriter name nameHuffman) value valueHuffman)))
+
+  (method ^:protected ^:final literalWithIndexing :throws [IndexOutOfBoundsException] ^void [this
+                                                                                             ^int index
+                                                                                             ^CharSequence value
+                                                                                             ^boolean valueHuffman]
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (String/format "literal with incremental indexing (%s, '%s', huffman=%b)"
+                             (new Object/1 [index value valueHuffman])))))
+    (.checkEncoding this)
+    (set! encoding true)
+    (set! writer (.value (.index literalWithIndexingWriter index) value valueHuffman)))
+
+  (method ^:protected ^:final literalWithIndexing ^void [this ^CharSequence name
+                                                         ^boolean nameHuffman ^CharSequence value
+                                                         ^boolean valueHuffman]
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (String/format
+                "literal with incremental indexing ('%s', huffman=%b, '%s', huffman=%b)"
+                (new Object/1 [name nameHuffman value valueHuffman])))))
+    (.checkEncoding this)
+    (set! encoding true)
+    (set! writer (.value (.name literalWithIndexingWriter name nameHuffman) value valueHuffman)))
+
+  (method ^:protected ^:final sizeUpdate :throws [IllegalArgumentException] ^void [this
+                                                                                   ^int capacity]
+    (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+      (.log logger
+            HPACK$Logger$Level/EXTRA
+            (lambda Supplier ^String []
+              (String/format "dynamic table size update %s" (new Object/1 [capacity])))))
+    (.checkEncoding this)
+    (when (> capacity (.-maxCapacity this))
+      (throw (IllegalArgumentException.
+               (String/format "capacity <= maxCapacity: capacity=%s, maxCapacity=%s"
+                              (new Object/1 [capacity maxCapacity])))))
+    (set! writer (.maxHeaderTableSize sizeUpdateWriter capacity)))
+
+  (method ^:protected ^:final getMaxCapacity ^int [this] maxCapacity)
+
+  (method ^:protected ^:final getHeaderTable ^HeaderTable [this]
+    headerTable)
+
+  (method ^:protected ^:final checkEncoding ^void [this]
+    (when encoding
+      (throw (IllegalStateException. "Previous encoding operation hasn't finished yet"))))
+
+  (method ^:protected ^:final logger ^HPACK$Logger [this] logger))

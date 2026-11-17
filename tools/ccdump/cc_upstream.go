@@ -36,5 +36,6 @@ func newConfig(h *host) (*Config, error) {
 		IncludePaths:        append([]string{""}, append(append([]string(nil), h.include...), h.sysInclude...)...),
 		Predefined:          h.predefined,
 		SysIncludePaths:     h.sysInclude,
+		FS:                  sysroot,
 	}, nil
 }

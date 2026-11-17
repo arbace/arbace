@@ -1515,7 +1515,12 @@ expressions) is for consumers.
   2026-10-08). Beyond the grammar, an operand of `and` or `or` marked `^:go/paren` is
   parenthesized (§7.5).
 - **Groups.** In a file whose forms carry `:go/grouped`, names are grouped exactly as marked
-  (§5.3); local `const` bindings marked `^:go/grouped` print as one `const ( ... )` group,
+  (§5.3); elsewhere (N3) consecutive names of one type (the same type form with the same type
+  metadata inside it: the `:tag` of a func type's parameters and named results and of a struct
+  type's fields, struct tags, `:go/grouped`; `=` alone ignores metadata, amendment of 2026-11-08),
+  doc and struct tag on one line are one group, and in mode `:full` only names whose type has one
+  recorded position (the source's groups); the specs of `go/var` and `go/const` keep the names
+  the source spec gave them; local `const` bindings marked `^:go/grouped` print as one `const ( ... )` group,
   those marked `^:go/implicit` without their type and init (§7.3). A binding with `:go/label`
   prints with its label (`L: x := 1`), at `:go/label-line` when given. A `go/directive` element of `:imports` prints between
   the import declarations where it stands (§4.3).

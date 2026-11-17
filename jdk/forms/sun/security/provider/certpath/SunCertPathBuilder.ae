@@ -1,0 +1,395 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/SunCertPathBuilder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io IOException)
+        '(java.security GeneralSecurityException InvalidAlgorithmParameterException PublicKey)
+        '(java.security.cert CertPathBuilderException
+                             CertPathBuilderResult
+                             CertPathBuilderSpi
+                             CertPathChecker
+                             CertPathParameters
+                             CertPathValidatorException
+                             CertPathValidatorException$BasicReason
+                             Certificate
+                             CertificateException
+                             CertificateFactory
+                             PKIXCertPathBuilderResult
+                             PKIXCertPathChecker
+                             PKIXReason
+                             PKIXRevocationChecker
+                             PolicyNode
+                             TrustAnchor
+                             X509Certificate)
+        '(java.util ArrayList Arrays Collection Collections LinkedList List Set)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.util Debug)
+        '(sun.security.x509 PKIXExtensions X509CertImpl))
+
+(defclass ^:public ^:final SunCertPathBuilder
+  :extends CertPathBuilderSpi
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^PKIX$BuilderParams buildParams)
+
+  (field ^:private ^:final ^CertificateFactory cf)
+
+  (field ^:private ^boolean pathCompleted false)
+
+  (field ^:private ^PolicyNode policyTreeResult)
+
+  (field ^:private ^TrustAnchor trustAnchor)
+
+  (field ^:private ^PublicKey finalPublicKey)
+
+  (constructor :throws [CertPathBuilderException] ^:public [this]
+    (try
+      (set! cf (CertificateFactory/getInstance "X.509"))
+      (catch CertificateException e (throw (CertPathBuilderException. e)))))
+
+  (method ^:public engineGetRevocationChecker ^CertPathChecker [this]
+    (RevocationChecker.))
+
+  (method ^:public engineBuild :throws [CertPathBuilderException InvalidAlgorithmParameterException] ^CertPathBuilderResult [this
+                                                                                                                             ^CertPathParameters params]
+    (when (some? debug) (.println debug (java-str "SunCertPathBuilder.engineBuild(" params ")")))
+    (set! buildParams (PKIX/checkBuilderParams params))
+    (.build this))
+
+  (method ^:private build :throws [CertPathBuilderException] ^PKIXCertPathBuilderResult [this]
+    (let [^{:tag (List (List Vertex))} adjList (ArrayList.)
+          ^:mutable result (.buildCertPath this false adjList)]
+      (when (nil? result)
+        (when (or (> (.size (.certStores buildParams)) 1) Builder/USE_AIA)
+          (when (some? debug)
+            (.println
+              debug
+              "SunCertPathBuilder.engineBuild: 2nd pass; try building again searching all certstores"))
+          (.clear adjList)
+          (set! result (.buildCertPath this true adjList))
+          (when (some? result) (return result)))
+        (throw (SunCertPathBuilderException.
+                 "unable to find valid certification path to requested target"
+                 (AdjacencyList. adjList))))
+      result))
+
+  (method ^:private buildCertPath :throws [CertPathBuilderException] ^PKIXCertPathBuilderResult [this
+                                                                                                 ^boolean searchAllCertStores
+                                                                                                 ^{:tag (List (List Vertex))} adjList]
+    (set! pathCompleted false)
+    (set! trustAnchor nil)
+    (set! finalPublicKey nil)
+    (set! policyTreeResult nil)
+    (let [^{:tag (LinkedList X509Certificate)} certPathList (LinkedList.)]
+      (try
+        (.buildForward this adjList certPathList searchAllCertStores)
+        (catch [GeneralSecurityException IOException] e
+          (when (some? debug)
+            (.println debug "SunCertPathBuilder.engineBuild() exception in build")
+            (.printStackTrace e))
+          (throw (SunCertPathBuilderException.
+                   "unable to find valid certification path to requested target"
+                   e
+                   (AdjacencyList. adjList)))))
+      (try
+        (when pathCompleted
+          (when (some? debug) (.println debug "SunCertPathBuilder.engineBuild() pathCompleted"))
+          (Collections/reverse certPathList)
+          (return (SunCertPathBuilderResult. (.generateCertPath cf certPathList)
+                                             trustAnchor
+                                             policyTreeResult
+                                             finalPublicKey
+                                             (AdjacencyList. adjList))))
+        (catch CertificateException e
+          (when (some? debug)
+            (.println debug "SunCertPathBuilder.engineBuild() exception in wrap-up")
+            (.printStackTrace e))
+          (throw (SunCertPathBuilderException.
+                   "unable to find valid certification path to requested target"
+                   e
+                   (AdjacencyList. adjList)))))
+      nil))
+
+  (method ^:private buildForward :throws [GeneralSecurityException IOException] ^void [this
+                                                                                       ^{:tag (List (List Vertex))} adjacencyList
+                                                                                       ^{:tag (LinkedList X509Certificate)} certPathList
+                                                                                       ^boolean searchAllCertStores]
+    (when (some? debug) (.println debug "SunCertPathBuilder.buildForward()..."))
+    (let [currentState (ForwardState.)]
+      (.initState currentState (.certPathCheckers buildParams))
+      (.clear adjacencyList)
+      (.add adjacencyList (LinkedList.))
+      (set! (.-untrustedChecker currentState) (UntrustedChecker.))
+      (.depthFirstSearchForward this
+                                (.targetSubject buildParams)
+                                currentState
+                                (ForwardBuilder. buildParams searchAllCertStores)
+                                adjacencyList
+                                certPathList)))
+
+  (method ^:private depthFirstSearchForward :throws [GeneralSecurityException IOException] ^void [this
+                                                                                                  ^X500Principal dN
+                                                                                                  ^ForwardState currentState
+                                                                                                  ^ForwardBuilder builder
+                                                                                                  ^{:tag (List (List Vertex))} adjList
+                                                                                                  ^{:tag (LinkedList X509Certificate)} cpList]
+    (when (some? debug)
+      (.println debug
+                (java-str "SunCertPathBuilder.depthFirstSearchForward("
+                          dN
+                          ", "
+                          (.toString currentState)
+                          ")")))
+    (let [^{:tag (Collection X509Certificate)} certs (.getMatchingCerts
+                                                       builder
+                                                       currentState
+                                                       (.certStores buildParams))
+          ^{:tag (List Vertex)} vertices (SunCertPathBuilder/addVertices certs adjList cpList)]
+      (when (some? debug)
+        (.println debug
+                  (java-str "SunCertPathBuilder.depthFirstSearchForward(): certs.size="
+                            (.size vertices))))
+      (label :vertices
+        (for-each [^Vertex vertex vertices]
+          (let [nextState (cast ForwardState (.clone currentState))
+                cert (.getCertificate vertex)]
+            (try
+              (.verifyCert builder cert nextState cpList)
+              (catch GeneralSecurityException gse
+                (when (some? debug)
+                  (.println debug
+                            (java-str
+                              "SunCertPathBuilder.depthFirstSearchForward(): validation failed: "
+                              gse))
+                  (.printStackTrace gse))
+                (.setThrowable vertex gse)
+                (continue)))
+            (if (.isPathCompleted builder cert)
+                (do
+                  (when (some? debug)
+                    (.println
+                      debug
+                      "SunCertPathBuilder.depthFirstSearchForward(): commencing final verification"))
+                  (let [^{:tag (List X509Certificate)} appendedCerts (ArrayList. cpList)
+                        ^:mutable rootKey (.getPublicKey cert)]
+                    (when (nil? (.getTrustedCert (.-trustAnchor builder)))
+                      (.add appendedCerts 0 cert)
+                      (set! rootKey (.getCAPublicKey (.-trustAnchor builder)))
+                      (when (some? debug)
+                        (.println
+                          debug
+                          (java-str
+                            "SunCertPathBuilder.depthFirstSearchForward using buildParams public key: "
+                            (.toString rootKey)))))
+                    (let [anchor (TrustAnchor. (.getSubjectX500Principal cert) rootKey nil)
+                          ^{:tag (List PKIXCertPathChecker)} checkers (ArrayList.)
+                          basicChecker (BasicChecker.
+                                         anchor
+                                         (.date buildParams)
+                                         (.sigProvider buildParams)
+                                         true)]
+                      (.add checkers basicChecker)
+                      (let [^{:tag (Set String)} initExpPolSet (Collections/singleton
+                                                                 PolicyChecker/ANY_POLICY)
+                            rootNode (PolicyNodeImpl.
+                                       nil
+                                       PolicyChecker/ANY_POLICY
+                                       nil
+                                       false
+                                       initExpPolSet
+                                       false)
+                            policyChecker (PolicyChecker.
+                                            (.initialPolicies buildParams)
+                                            (.size appendedCerts)
+                                            (.explicitPolicyRequired buildParams)
+                                            (.policyMappingInhibited buildParams)
+                                            (.anyPolicyInhibited buildParams)
+                                            (.policyQualifiersRejected buildParams)
+                                            rootNode)]
+                        (.add checkers policyChecker)
+                        (.add checkers (ConstraintsChecker. (.size appendedCerts)))
+                        (.add checkers
+                              (AlgorithmChecker.
+                                (.-trustAnchor builder)
+                                (.timestamp buildParams)
+                                (.variant buildParams)))
+                        (.setCertPath buildParams (.generateCertPath cf appendedCerts))
+                        (let [^:mutable revCheckerAdded false
+                              ^{:tag (List PKIXCertPathChecker)} ckrs (.certPathCheckers
+                                                                        buildParams)]
+                          (for-each [^PKIXCertPathChecker ckr ckrs]
+                            (when (instance? PKIXRevocationChecker ckr)
+                              (when revCheckerAdded
+                                (throw (CertPathValidatorException.
+                                         "Only one PKIXRevocationChecker can be specified")))
+                              (set! revCheckerAdded true)
+                              (when (instance? RevocationChecker ckr)
+                                (.init (cast RevocationChecker ckr)
+                                       (.-trustAnchor builder)
+                                       buildParams))))
+                          (when (and (.revocationEnabled buildParams) (not revCheckerAdded))
+                            (.add checkers (RevocationChecker. (.-trustAnchor builder) buildParams)))
+                          (.addAll checkers ckrs)
+                          (loop [^int i 0]
+                            (when (< i (.size appendedCerts))
+                              (let [currCert (cast X509Certificate (.get appendedCerts i))]
+                                (when (some? debug)
+                                  (.println debug
+                                            (java-str
+                                              "current subject = "
+                                              (.getSubjectX500Principal currCert))))
+                                (let [^:mutable ^{:tag (Set String)} unresCritExts
+                                        (.getCriticalExtensionOIDs currCert)]
+                                  (when (nil? unresCritExts)
+                                    (set! unresCritExts (Collections/emptySet)))
+                                  (for-each [^PKIXCertPathChecker currChecker checkers]
+                                    (when-not (.isForwardCheckingSupported currChecker)
+                                      (when (== i 0)
+                                        (.init currChecker false)
+                                        (when (instance? AlgorithmChecker currChecker)
+                                          (.trySetTrustAnchor
+                                            (cast AlgorithmChecker currChecker)
+                                            (.-trustAnchor builder))))
+                                      (try
+                                        (.check currChecker currCert unresCritExts)
+                                        (catch CertPathValidatorException cpve
+                                          (when (some? debug)
+                                            (.println
+                                              debug
+                                              (java-str
+                                                "SunCertPathBuilder.depthFirstSearchForward(): final verification failed: "
+                                                cpve)))
+                                          (when (and
+                                                  (.match
+                                                    (.targetCertConstraints buildParams)
+                                                    currCert)
+                                                  (identical?
+                                                    (.getReason cpve)
+                                                    CertPathValidatorException$BasicReason/REVOKED))
+                                            (throw cpve))
+                                          (.setThrowable vertex cpve)
+                                          (continue :vertices)))))
+                                  (for-each [^PKIXCertPathChecker checker (.certPathCheckers
+                                                                            buildParams)]
+                                    (when (.isForwardCheckingSupported checker)
+                                      (let [^{:tag (Set String)} suppExts (.getSupportedExtensions
+                                                                            checker)]
+                                        (when (some? suppExts) (.removeAll unresCritExts suppExts)))))
+                                  (if (not (.isEmpty unresCritExts))
+                                      (do
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/BasicConstraints_Id))
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/NameConstraints_Id))
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/CertificatePolicies_Id))
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/PolicyMappings_Id))
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/PolicyConstraints_Id))
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/InhibitAnyPolicy_Id))
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/SubjectAlternativeName_Id))
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/KeyUsage_Id))
+                                        (.remove
+                                          unresCritExts
+                                          (.toString PKIXExtensions/ExtendedKeyUsage_Id))
+                                        (if (not (.isEmpty unresCritExts))
+                                            (throw
+                                              (CertPathValidatorException.
+                                                "unrecognized critical extension(s)"
+                                                nil
+                                                nil
+                                                -1
+                                                PKIXReason/UNRECOGNIZED_CRIT_EXT))
+                                            (recur (unchecked-inc-int i))))
+                                      (recur (unchecked-inc-int i)))))))
+                          (when (some? debug)
+                            (.println
+                              debug
+                              "SunCertPathBuilder.depthFirstSearchForward(): final verification succeeded - path completed!"))
+                          (set! pathCompleted true)
+                          (when (nil? (.getTrustedCert (.-trustAnchor builder)))
+                            (.addCertToPath builder cert cpList))
+                          (set! (.-trustAnchor this) (.-trustAnchor builder))
+                          (if (some? basicChecker)
+                              (set! finalPublicKey (.getPublicKey basicChecker))
+                              (let [^Certificate finalCert (if (.isEmpty cpList)
+                                                               (.getTrustedCert
+                                                                 (.-trustAnchor builder))
+                                                               (cast Certificate (.getLast cpList)))]
+                                (set! finalPublicKey (.getPublicKey finalCert))))
+                          (set! policyTreeResult (.getPolicyTree policyChecker))
+                          (return))))))
+                (do
+                  (when (and (.-selfIssued currentState) (X509CertImpl/isSelfIssued cert))
+                    (when (some? debug) (.println debug "Successive certs are self-issued"))
+                    (return))
+                  (.addCertToPath builder cert cpList)))
+            (.updateState nextState cert)
+            (.add adjList (LinkedList.))
+            (.setIndex vertex (unchecked-subtract-int (.size adjList) 1))
+            (.depthFirstSearchForward this
+                                      (.getIssuerX500Principal cert)
+                                      nextState
+                                      builder
+                                      adjList
+                                      cpList)
+            (if pathCompleted
+                (return)
+                (do
+                  (when (some? debug)
+                    (.println debug "SunCertPathBuilder.depthFirstSearchForward(): backtracking"))
+                  (.removeFinalCertFromPath builder cpList))))))))
+
+  (method ^:private ^:static addVertices ^{:tag (List Vertex)} [^{:tag (Collection X509Certificate)} certs
+                                                                ^{:tag (List (List Vertex))} adjList
+                                                                ^{:tag (List X509Certificate)} cpList]
+    (let [^{:tag (List Vertex)} l (cast List
+                                        (.get adjList (unchecked-subtract-int (.size adjList) 1)))]
+      (for-each [^X509Certificate cert certs]
+        (let [^:mutable repeated false]
+          (for-each [^X509Certificate cpListCert cpList]
+            (when (SunCertPathBuilder/repeated cpListCert cert)
+              (when (some? debug)
+                (.println debug
+                          "cert with repeated subject, public key, and subjectAltNames detected"))
+              (set! repeated true)
+              (break)))
+          (when-not repeated (.add l (Vertex. cert)))))
+      l))
+
+  (method ^:private ^:static repeated ^boolean [^X509Certificate currCert ^X509Certificate nextCert]
+    (if (.equals currCert nextCert)
+        true
+        (and (and (.equals (.getSubjectX500Principal currCert) (.getSubjectX500Principal nextCert))
+                  (.equals (.getPublicKey currCert) (.getPublicKey nextCert)))
+             (SunCertPathBuilder/altNamesEqual currCert nextCert))))
+
+  (method ^:private ^:static altNamesEqual ^boolean [^X509Certificate currCert
+                                                     ^X509Certificate nextCert]
+    (let [^:mutable ^X509CertImpl curr nil
+          ^:mutable ^X509CertImpl next nil]
+      (try
+        (set! curr (X509CertImpl/toImpl currCert))
+        (set! next (X509CertImpl/toImpl nextCert))
+        (catch CertificateException ce (return false)))
+      (let [currAltNameExt (.getSubjectAlternativeNameExtension curr)
+            nextAltNameExt (.getSubjectAlternativeNameExtension next)]
+        (if (some? currAltNameExt)
+            (if (nil? nextAltNameExt)
+                false
+                (Arrays/equals (.getExtensionValue currAltNameExt)
+                               (.getExtensionValue nextAltNameExt)))
+            (nil? nextAltNameExt))))))

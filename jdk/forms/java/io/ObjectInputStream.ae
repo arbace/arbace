@@ -1,0 +1,1764 @@
+;; Converted from overlay/jdk/java.base/java/io/ObjectInputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.io)
+
+(import '(java.lang.reflect Array Modifier Proxy)
+        '(java.nio.charset StandardCharsets)
+        '(java.util Arrays Objects)
+        '(jdk.internal.access JavaLangAccess
+                              JavaObjectInputStreamAccess
+                              JavaObjectInputStreamReadString
+                              SharedSecrets)
+        '(jdk.internal.misc VM)
+        '(jdk.internal.util ByteArray))
+
+(defclass ^:public ObjectInputStream
+  :extends InputStream
+  :implements [ObjectInput ObjectStreamConstants]
+
+  (field ^:private ^:static ^:final ^int NULL_HANDLE -1)
+
+  (field ^:private ^:static ^:final unsharedMarker (Object.))
+
+  (defclass ^:private ^:static Caches
+    (field ^:static ^:final ^boolean SET_FILTER_AFTER_READ
+      (Boolean/getBoolean "jdk.serialSetFilterAfterRead"))
+
+    (field ^:private ^:static ^:final ^boolean GETFIELD_CNFE_RETURNS_NULL
+      (Boolean/getBoolean "jdk.serialGetFieldCnfeReturnsNull"))
+
+    (field ^:static ^:final ^int PROXY_INTERFACE_LIMIT
+      (^[long int int] Math/clamp (Integer/getInteger "jdk.serialProxyInterfaceLimit" 65535)
+                                  0
+                                  65535)))
+
+  (defclass ^:private ^:static Logging
+    (field ^:static ^:final ^System$Logger filterLogger)
+
+    (static-initializer
+      (let [filterLog (System/getLogger "java.io.serialization")]
+        (set! filterLogger
+              (when (or (.isLoggable filterLog System$Logger$Level/DEBUG)
+                        (.isLoggable filterLog System$Logger$Level/TRACE))
+                filterLog)))))
+
+  (field ^:private ^:final ^BlockDataInputStream bin)
+
+  (field ^:private ^:final ^ValidationList vlist)
+
+  (field ^:private ^long depth)
+
+  (field ^:private ^long totalObjectRefs)
+
+  (field ^:private ^boolean closed)
+
+  (field ^:private ^:final ^HandleTable handles)
+
+  (field ^:private ^int passHandle NULL_HANDLE)
+
+  (field ^:private ^boolean defaultDataEnd false)
+
+  (field ^:private ^:final ^boolean enableOverride)
+
+  (field ^:private ^boolean enableResolve)
+
+  (field ^:private ^SerialCallbackContext curContext)
+
+  (field ^:private ^ObjectInputFilter serialFilter)
+
+  (field ^:private ^boolean streamFilterSet)
+
+  (constructor :throws [IOException] ^:public [this ^InputStream in]
+    (set! bin (BlockDataInputStream. in))
+    (set! handles (HandleTable. 10))
+    (set! vlist (ValidationList.))
+    (set! streamFilterSet false)
+    (set! serialFilter
+          (cast ObjectInputFilter
+                (.apply (ObjectInputFilter$Config/getSerialFilterFactorySingleton)
+                        nil
+                        (ObjectInputFilter$Config/getSerialFilter))))
+    (set! enableOverride false)
+    (.readStreamHeader this)
+    (.setBlockDataMode bin true))
+
+  (constructor :throws [IOException] ^:protected [this]
+    (set! bin nil)
+    (set! handles nil)
+    (set! vlist nil)
+    (set! streamFilterSet false)
+    (set! serialFilter
+          (cast ObjectInputFilter
+                (.apply (ObjectInputFilter$Config/getSerialFilterFactorySingleton)
+                        nil
+                        (ObjectInputFilter$Config/getSerialFilter))))
+    (set! enableOverride true))
+
+  (method ^:public ^:final readObject :throws [IOException ClassNotFoundException] [this]
+    (.readObject this Object))
+
+  (method ^:private readString :throws [IOException] ^String [this]
+    (try
+      (cast String (.readObject this String))
+      (catch ClassNotFoundException cnf (throw (IllegalStateException. cnf)))))
+
+  (method ^:private ^:final readObject :throws [IOException ClassNotFoundException] [this
+                                                                                     ^{:tag (Class ?)} type]
+    (if enableOverride
+        (.readObjectOverride this)
+        (do
+          (when-not (or (identical? type Object) (identical? type String))
+            (throw (AssertionError. "internal error")))
+          (let [outerHandle passHandle]
+            (try
+              (let [obj (.readObject0 this type false)]
+                (.markDependency handles outerHandle passHandle)
+                (let [ex (.lookupException handles passHandle)]
+                  (when (some? ex) (throw ex))
+                  (when (== depth 0) (.doCallbacks vlist) (.freeze this))
+                  obj))
+              (finally (set! passHandle outerHandle) (when (and closed (== depth 0)) (.clear this))))))))
+
+  (method ^:protected readObjectOverride :throws [IOException ClassNotFoundException] [this]
+    nil)
+
+  (method ^:public readUnshared :throws [IOException ClassNotFoundException] [this]
+    (let [outerHandle passHandle]
+      (try
+        (let [obj (.readObject0 this Object true)]
+          (.markDependency handles outerHandle passHandle)
+          (let [ex (.lookupException handles passHandle)]
+            (when (some? ex) (throw ex))
+            (when (== depth 0) (.doCallbacks vlist) (.freeze this))
+            obj))
+        (finally (set! passHandle outerHandle) (when (and closed (== depth 0)) (.clear this))))))
+
+  (method ^:public defaultReadObject :throws [IOException ClassNotFoundException] ^void [this]
+    (let [ctx curContext]
+      (when (nil? ctx) (throw (NotActiveException. "not in call to readObject")))
+      (let [curObj (.getObj ctx)
+            curDesc (.getDesc ctx)]
+        (.setBlockDataMode bin false)
+        (let [values (FieldValues. curDesc true)]
+          (when (some? curObj)
+            (.defaultCheckFieldValues values curObj)
+            (.defaultSetFieldValues values curObj))
+          (.setBlockDataMode bin true)
+          (when-not (.hasWriteObjectData curDesc) (set! defaultDataEnd true))
+          (let [ex (.lookupException handles passHandle)] (when (some? ex) (throw ex)))))))
+
+  (method ^:public readFields :throws [IOException ClassNotFoundException] ^GetField [this]
+    (let [ctx curContext]
+      (when (nil? ctx) (throw (NotActiveException. "not in call to readObject")))
+      (.checkAndSetUsed ctx)
+      (let [curDesc (.getDesc ctx)]
+        (.setBlockDataMode bin false)
+        (let [values (FieldValues. curDesc false)]
+          (.setBlockDataMode bin true)
+          (when-not (.hasWriteObjectData curDesc) (set! defaultDataEnd true))
+          values))))
+
+  (method ^:public registerValidation :throws [NotActiveException InvalidObjectException] ^void [this
+                                                                                                 ^ObjectInputValidation obj
+                                                                                                 ^int prio]
+    (when (== depth 0) (throw (NotActiveException. "stream inactive")))
+    (.register vlist obj prio))
+
+  (method ^:protected resolveClass :throws [IOException ClassNotFoundException] ^{:tag (Class ?)} [this
+                                                                                                   ^ObjectStreamClass desc]
+    (let [name (.getName desc)]
+      (try
+        (Class/forName name false (ObjectInputStream/latestUserDefinedLoader))
+        (catch ClassNotFoundException ex
+          (let [^{:tag (Class ?)} cl (Class/forPrimitiveName name)] (if (some? cl) cl (throw ex)))))))
+
+  (method ^:protected resolveProxyClass :throws [IOException ClassNotFoundException] ^{:tag (Class ?)} [this
+                                                                                                        ^String/1 interfaces]
+    (let [latestLoader (ObjectInputStream/latestUserDefinedLoader)
+          ^:mutable ^ClassLoader nonPublicLoader nil
+          ^:mutable hasNonPublicInterface false
+          ^{:tag (array (Class ?))} classObjs (new Class/1 (alength interfaces))]
+      (loop [^int i 0]
+        (when (< i (alength interfaces))
+          (let [^{:tag (Class ?)} cl (Class/forName (aget interfaces i) false latestLoader)]
+            (when (== (bit-and-int (.getModifiers cl) Modifier/PUBLIC) 0)
+              (if hasNonPublicInterface
+                  (when-not (identical? nonPublicLoader (.getClassLoader cl))
+                    (throw (IllegalAccessError. "conflicting non-public interface class loaders")))
+                  (do (set! nonPublicLoader (.getClassLoader cl)) (set! hasNonPublicInterface true))))
+            (aset classObjs i cl)
+            (recur (unchecked-inc-int i)))))
+      (try
+        (let [^{:tag (Class ?)} proxyClass (Proxy/getProxyClass
+                                             ^ClassLoader (if hasNonPublicInterface
+                                                              nonPublicLoader
+                                                              latestLoader)
+                                             classObjs)]
+          proxyClass)
+        (catch IllegalArgumentException e (throw (ClassNotFoundException. nil e))))))
+
+  (method ^:protected resolveObject :throws [IOException] [this obj] obj)
+
+  (method ^:protected enableResolveObject ^boolean [this ^boolean enable]
+    (if (= enable enableResolve) enable (do (set! enableResolve enable) (not enableResolve))))
+
+  (method ^:protected readStreamHeader :throws [IOException StreamCorruptedException] ^void [this]
+    (let [s0 (.readShort bin)
+          s1 (.readShort bin)]
+      (when (or (not (== s0 ObjectInputStream/STREAM_MAGIC))
+                (not (== s1 ObjectInputStream/STREAM_VERSION)))
+        (throw (StreamCorruptedException.
+                 (String/format "invalid stream header: %04X%04X" (new Object/1 [s0 s1])))))))
+
+  (method ^:protected readClassDescriptor :throws [IOException ClassNotFoundException] ^ObjectStreamClass [this]
+    (let [desc (ObjectStreamClass.)] (.readNonProxy desc this) desc))
+
+  (method ^:public read :throws [IOException] ^int [this] (.read bin))
+
+  (method ^:public read :throws [IOException] ^int [this ^byte/1 buf ^int off ^int len]
+    (when (nil? buf) (throw (NullPointerException.)))
+    (Objects/checkFromIndexSize off len (alength buf))
+    (.read bin buf off len false))
+
+  (method ^:public available :throws [IOException] ^int [this]
+    (.available bin))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (set! closed true)
+    (when (== depth 0) (.clear this))
+    (.close bin))
+
+  (method ^:public readBoolean :throws [IOException] ^boolean [this]
+    (.readBoolean bin))
+
+  (method ^:public readByte :throws [IOException] ^byte [this]
+    (.readByte bin))
+
+  (method ^:public readUnsignedByte :throws [IOException] ^int [this]
+    (.readUnsignedByte bin))
+
+  (method ^:public readChar :throws [IOException] ^char [this]
+    (.readChar bin))
+
+  (method ^:public readShort :throws [IOException] ^short [this]
+    (.readShort bin))
+
+  (method ^:public readUnsignedShort :throws [IOException] ^int [this]
+    (.readUnsignedShort bin))
+
+  (method ^:public readInt :throws [IOException] ^int [this]
+    (.readInt bin))
+
+  (method ^:public readLong :throws [IOException] ^long [this]
+    (.readLong bin))
+
+  (method ^:public readFloat :throws [IOException] ^float [this]
+    (.readFloat bin))
+
+  (method ^:public readDouble :throws [IOException] ^double [this]
+    (.readDouble bin))
+
+  (method ^:public readFully :throws [IOException] ^void [this ^byte/1 buf]
+    (.readFully bin buf 0 (alength buf) false))
+
+  (method ^:public readFully :throws [IOException] ^void [this ^byte/1 buf ^int off ^int len]
+    (Objects/checkFromIndexSize off len (alength buf))
+    (.readFully bin buf off len false))
+
+  (method ^:public skipBytes :throws [IOException] ^int [this ^int len]
+    (.skipBytes bin len))
+
+  (method ^:public ^{Deprecated true} readLine :throws [IOException] ^String [this]
+    (.readLine bin))
+
+  (method ^:public readUTF :throws [IOException] ^String [this]
+    (.readUTF bin))
+
+  (method ^:public ^:final getObjectInputFilter ^ObjectInputFilter [this]
+    serialFilter)
+
+  (method ^:public ^:final setObjectInputFilter ^void [this ^ObjectInputFilter filter]
+    (when (and (> totalObjectRefs 0) (not Caches/SET_FILTER_AFTER_READ))
+      (throw (IllegalStateException. "filter can not be set after an object has been read")))
+    (when streamFilterSet (throw (IllegalStateException. "filter can not be set more than once")))
+    (set! streamFilterSet true)
+    (let [next (cast ObjectInputFilter
+                     (.apply (ObjectInputFilter$Config/getSerialFilterFactory) serialFilter filter))]
+      (when (and (some? serialFilter) (nil? next))
+        (throw (IllegalStateException. "filter can not be replaced with null filter")))
+      (set! serialFilter next)))
+
+  (method ^:private filterCheck :throws [InvalidClassException] ^void [this ^{:tag (Class ?)} clazz
+                                                                       ^int arrayLength]
+    (let [bytesRead (if (nil? bin) 0 (.getBytesRead bin))
+          ^:mutable ^RuntimeException ex nil
+          ^:mutable ^ObjectInputFilter$Status status nil]
+      (when (some? serialFilter)
+        (try
+          (set! status
+                (.checkInput serialFilter
+                             (FilterValues. clazz arrayLength totalObjectRefs depth bytesRead)))
+          (catch RuntimeException e (set! status ObjectInputFilter$Status/REJECTED) (set! ex e)))
+        (when (some? Logging/filterLogger)
+          (.log
+            Logging/filterLogger
+            ^System$Logger$Level (if (or (nil? status)
+                                         (identical? status ObjectInputFilter$Status/REJECTED))
+                                     System$Logger$Level/DEBUG
+                                     System$Logger$Level/TRACE)
+            "ObjectInputFilter {0}: {1}, array length: {2}, nRefs: {3}, depth: {4}, bytes: {5}, ex: {6}"
+            (new Object/1
+                 [status
+                  clazz
+                  arrayLength
+                  totalObjectRefs
+                  depth
+                  bytesRead
+                  (Objects/toString ex "n/a")]))))
+      (when (and (some? serialFilter)
+                 (or (nil? status) (identical? status ObjectInputFilter$Status/REJECTED)))
+        (throw (InvalidClassException. (java-str "filter status: " status) ex)))))
+
+  (method ^:private checkArray :throws [ObjectStreamException] ^void [this
+                                                                      ^{:tag (Class ?)} arrayType
+                                                                      ^int arrayLength]
+    (when-not (.isArray arrayType) (throw (IllegalArgumentException. "not an array type")))
+    (when (< arrayLength 0) (throw (StreamCorruptedException. "Array length is negative")))
+    (.filterCheck this arrayType arrayLength))
+
+  (defclass ^:public ^:abstract ^:static GetField
+    (constructor ^:public [this])
+
+    (method ^:public ^:abstract getObjectStreamClass ^ObjectStreamClass [this])
+
+    (method ^:public ^:abstract defaulted :throws [IOException] ^boolean [this ^String name])
+
+    (method ^:public ^:abstract get :throws [IOException] ^boolean [this ^String name ^boolean val])
+
+    (method ^:public ^:abstract get :throws [IOException] ^byte [this ^String name ^byte val])
+
+    (method ^:public ^:abstract get :throws [IOException] ^char [this ^String name ^char val])
+
+    (method ^:public ^:abstract get :throws [IOException] ^short [this ^String name ^short val])
+
+    (method ^:public ^:abstract get :throws [IOException] ^int [this ^String name ^int val])
+
+    (method ^:public ^:abstract get :throws [IOException] ^long [this ^String name ^long val])
+
+    (method ^:public ^:abstract get :throws [IOException] ^float [this ^String name ^float val])
+
+    (method ^:public ^:abstract get :throws [IOException] ^double [this ^String name ^double val])
+
+    (method ^:public ^:abstract get :throws [IOException ClassNotFoundException] [this ^String name
+                                                                                  val]))
+
+  (method ^:private clear ^void [this] (.clear handles) (.clear vlist))
+
+  (method ^:private readObject0 :throws [IOException] [this ^{:tag (Class ?)} type ^boolean unshared]
+    (let [oldMode (.getBlockDataMode bin)]
+      (when oldMode
+        (let [remain (.currentBlockRemaining bin)]
+          (cond
+            (> remain 0) (throw (OptionalDataException. remain))
+            defaultDataEnd (throw (OptionalDataException. true)))
+          (.setBlockDataMode bin false)))
+      (let [^:mutable ^byte tc 0]
+        (while (== (set! tc (.peekByte bin)) ObjectInputStream/TC_RESET)
+          (.readByte bin)
+          (.handleReset this))
+        (set! depth (unchecked-inc depth))
+        (set! totalObjectRefs (unchecked-inc totalObjectRefs))
+        (try
+          (switch tc
+            ObjectInputStream/TC_NULL (.readNull this)
+            ObjectInputStream/TC_REFERENCE (.cast type (.readHandle this unshared))
+            ObjectInputStream/TC_CLASS
+              (do
+                (when (identical? type String)
+                  (throw (ClassCastException. "Cannot cast a class to java.lang.String")))
+                (.readClass this unshared))
+            (ObjectInputStream/TC_CLASSDESC ObjectInputStream/TC_PROXYCLASSDESC)
+              (do
+                (when (identical? type String)
+                  (throw (ClassCastException. "Cannot cast a class to java.lang.String")))
+                (.readClassDesc this unshared))
+            (ObjectInputStream/TC_STRING ObjectInputStream/TC_LONGSTRING)
+              (.checkResolve this (.readString this unshared))
+            ObjectInputStream/TC_ARRAY
+              (do
+                (when (identical? type String)
+                  (throw (ClassCastException. "Cannot cast an array to java.lang.String")))
+                (.checkResolve this (.readArray this unshared)))
+            ObjectInputStream/TC_ENUM
+              (do
+                (when (identical? type String)
+                  (throw (ClassCastException. "Cannot cast an enum to java.lang.String")))
+                (.checkResolve this (.readEnum this unshared)))
+            ObjectInputStream/TC_OBJECT
+              (do
+                (when (identical? type String)
+                  (throw (ClassCastException. "Cannot cast an object to java.lang.String")))
+                (.checkResolve this (.readOrdinaryObject this unshared)))
+            ObjectInputStream/TC_EXCEPTION
+              (do
+                (when (identical? type String)
+                  (throw (ClassCastException. "Cannot cast an exception to java.lang.String")))
+                (let [ex (.readFatalException this)]
+                  (throw (WriteAbortedException. "writing aborted" ex))))
+            (ObjectInputStream/TC_BLOCKDATA ObjectInputStream/TC_BLOCKDATALONG)
+              (if oldMode
+                  (do
+                    (.setBlockDataMode bin true)
+                    (.peek bin)
+                    (throw (OptionalDataException. (.currentBlockRemaining bin))))
+                  (throw (StreamCorruptedException. "unexpected block data")))
+            ObjectInputStream/TC_ENDBLOCKDATA
+              (if oldMode
+                  (throw (OptionalDataException. true))
+                  (throw (StreamCorruptedException. "unexpected end of block data")))
+            (throw (StreamCorruptedException.
+                     (String/format "invalid type code: %02X" (new Object/1 [tc])))))
+          (finally (set! depth (unchecked-dec depth)) (.setBlockDataMode bin oldMode))))))
+
+  (method ^:private checkResolve :throws [IOException] [this obj]
+    (if (or (not enableResolve) (some? (.lookupException handles passHandle)))
+        obj
+        (let [rep (.resolveObject this obj)]
+          (when-not (identical? rep obj)
+            (when (some? rep)
+              (if (.isArray (.getClass rep))
+                  (.filterCheck this (.getClass rep) (Array/getLength rep))
+                  (.filterCheck this (.getClass rep) -1)))
+            (.setObject handles passHandle rep))
+          rep)))
+
+  (method readTypeString :throws [IOException] ^String [this]
+    (let [oldHandle passHandle]
+      (try
+        (let [tc (.peekByte bin)]
+          (switch tc
+            ObjectInputStream/TC_NULL (cast String (.readNull this))
+            ObjectInputStream/TC_REFERENCE (cast String (.readHandle this false))
+            (ObjectInputStream/TC_STRING ObjectInputStream/TC_LONGSTRING) (.readString this false)
+            (throw (StreamCorruptedException.
+                     (String/format "invalid type code: %02X" (new Object/1 [tc]))))))
+        (finally (set! passHandle oldHandle)))))
+
+  (method ^:private readNull :throws [IOException] [this]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_NULL) (throw (InternalError.)))
+    (set! passHandle NULL_HANDLE)
+    nil)
+
+  (method ^:private readHandle :throws [IOException] [this ^boolean unshared]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_REFERENCE) (throw (InternalError.)))
+    (set! passHandle (unchecked-subtract-int (.readInt bin) ObjectInputStream/baseWireHandle))
+    (when (or (< passHandle 0) (>= passHandle (.size handles)))
+      (throw
+        (StreamCorruptedException.
+          (String/format "invalid handle value: %08X"
+                         (new Object/1
+                              [(unchecked-add-int passHandle ObjectInputStream/baseWireHandle)])))))
+    (when unshared (throw (InvalidObjectException. "cannot read back reference as unshared")))
+    (let [obj (.lookupObject handles passHandle)]
+      (when (identical? obj unsharedMarker)
+        (throw (InvalidObjectException. "cannot read back reference to unshared object")))
+      (.filterCheck this nil -1)
+      obj))
+
+  (method ^:private readClass :throws [IOException] ^{:tag (Class ?)} [this ^boolean unshared]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_CLASS) (throw (InternalError.)))
+    (let [desc (.readClassDesc this false)
+          ^{:tag (Class ?)} cl (.forClass desc)]
+      (set! passHandle (.assign handles (if unshared unsharedMarker ^Object cl)))
+      (let [resolveEx (.getResolveException desc)]
+        (when (some? resolveEx) (.markException handles passHandle resolveEx))
+        (.finish handles passHandle)
+        cl)))
+
+  (method ^:private readClassDesc :throws [IOException] ^ObjectStreamClass [this ^boolean unshared]
+    (let [tc (.peekByte bin)]
+      (switch tc
+        ObjectInputStream/TC_NULL (cast ObjectStreamClass (.readNull this))
+        ObjectInputStream/TC_PROXYCLASSDESC (.readProxyDesc this unshared)
+        ObjectInputStream/TC_CLASSDESC (.readNonProxyDesc this unshared)
+        ObjectInputStream/TC_REFERENCE
+          (let [d (cast ObjectStreamClass (.readHandle this unshared))] (.checkInitialized d) d)
+        (throw (StreamCorruptedException.
+                 (String/format "invalid type code: %02X" (new Object/1 [tc])))))))
+
+  (method ^:private readProxyDesc :throws [IOException] ^ObjectStreamClass [this ^boolean unshared]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_PROXYCLASSDESC) (throw (InternalError.)))
+    (let [desc (ObjectStreamClass.)
+          descHandle (.assign handles (if unshared unsharedMarker ^Object desc))]
+      (set! passHandle NULL_HANDLE)
+      (let [numIfaces (.readInt bin)]
+        (when (> numIfaces 65535)
+          (throw (InvalidObjectException.
+                   (java-str "interface limit exceeded: "
+                             numIfaces
+                             ", limit: "
+                             Caches/PROXY_INTERFACE_LIMIT))))
+        (let [ifaces (new String/1 numIfaces)]
+          (loop [^int i 0]
+            (when (< i numIfaces) (aset ifaces i (.readUTF bin)) (recur (unchecked-inc-int i))))
+          (when (> numIfaces Caches/PROXY_INTERFACE_LIMIT)
+            (throw (InvalidObjectException.
+                     (java-str "interface limit exceeded: "
+                               numIfaces
+                               ", limit: "
+                               Caches/PROXY_INTERFACE_LIMIT
+                               "; "
+                               (Arrays/toString ifaces)))))
+          (let [^:mutable ^{:tag (Class ?)} cl nil
+                ^:mutable ^ClassNotFoundException resolveEx nil]
+            (.setBlockDataMode bin true)
+            (try
+              (cond
+                (nil? (set! cl (.resolveProxyClass this ifaces)))
+                  (set! resolveEx (ClassNotFoundException. "null class"))
+                (not (Proxy/isProxyClass cl)) (throw (InvalidClassException. "Not a proxy"))
+                :else
+                  (for-each [^{:tag (Class ?)} clazz (.getInterfaces cl)]
+                    (.filterCheck this clazz -1)))
+              (catch ClassNotFoundException ex (set! resolveEx ex))
+              (catch IllegalAccessError aie (throw (InvalidClassException. (.getMessage aie) aie)))
+              (catch OutOfMemoryError oome
+                (throw (ObjectInputStream/genInvalidObjectException oome ifaces))))
+            (.filterCheck this cl -1)
+            (.skipCustomData this)
+            (try
+              (set! totalObjectRefs (unchecked-inc totalObjectRefs))
+              (set! depth (unchecked-inc depth))
+              (.initProxy desc cl resolveEx (.readClassDesc this false))
+              (catch OutOfMemoryError oome
+                (throw (ObjectInputStream/genInvalidObjectException oome ifaces)))
+              (finally (set! depth (unchecked-dec depth))))
+            (.finish handles descHandle)
+            (set! passHandle descHandle)
+            desc)))))
+
+  (method ^:private ^:static genInvalidObjectException ^InvalidObjectException [^OutOfMemoryError oome
+                                                                                ^String/1 ifaces]
+    (InvalidObjectException. (.concat "Proxy interface limit exceeded: " (Arrays/toString ifaces))
+                             oome))
+
+  (method ^:private readNonProxyDesc :throws [IOException] ^ObjectStreamClass [this
+                                                                               ^boolean unshared]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_CLASSDESC) (throw (InternalError.)))
+    (let [desc (ObjectStreamClass.)
+          descHandle (.assign handles (if unshared unsharedMarker ^Object desc))]
+      (set! passHandle NULL_HANDLE)
+      (let [^:mutable ^ObjectStreamClass readDesc nil]
+        (try
+          (set! readDesc (.readClassDescriptor this))
+          (catch ClassNotFoundException ex
+            (throw (InvalidClassException. "failed to read class descriptor" ex))))
+        (let [^:mutable ^{:tag (Class ?)} cl nil
+              ^:mutable ^ClassNotFoundException resolveEx nil]
+          (.setBlockDataMode bin true)
+          (try
+            (when (nil? (set! cl (.resolveClass this readDesc)))
+              (set! resolveEx (ClassNotFoundException. "null class")))
+            (catch ClassNotFoundException ex (set! resolveEx ex)))
+          (.filterCheck this cl -1)
+          (.skipCustomData this)
+          (try
+            (set! totalObjectRefs (unchecked-inc totalObjectRefs))
+            (set! depth (unchecked-inc depth))
+            (.initNonProxy desc readDesc cl resolveEx (.readClassDesc this false))
+            (when (some? cl)
+              (let [^:mutable ^ObjectStreamClass superLocal nil]
+                (loop [sDesc (.getSuperDesc desc)]
+                  (when (some? sDesc)
+                    (when-not (some? (set! superLocal (.getLocalDesc sDesc)))
+                      (recur (.getSuperDesc sDesc)))))
+                (loop [lDesc (.getSuperDesc (.getLocalDesc desc))]
+                  (when (and (some? lDesc) (not (identical? lDesc superLocal)))
+                    (.filterCheck this (.forClass lDesc) -1)
+                    (recur (.getSuperDesc lDesc))))))
+            (finally (set! depth (unchecked-dec depth))))
+          (.finish handles descHandle)
+          (set! passHandle descHandle)
+          desc))))
+
+  (method ^:private readString :throws [IOException] ^String [this ^boolean unshared]
+    (let [tc (.readByte bin)
+          ^String str (switch tc
+                        ObjectInputStream/TC_STRING (.readUTF bin)
+                        ObjectInputStream/TC_LONGSTRING (.readLongUTF bin)
+                        (throw (StreamCorruptedException.
+                                 (String/format "invalid type code: %02X" (new Object/1 [tc])))))]
+      (set! passHandle (.assign handles (if unshared unsharedMarker ^Object str)))
+      (.finish handles passHandle)
+      str))
+
+  (method ^:private readArray :throws [IOException] [this ^boolean unshared]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_ARRAY) (throw (InternalError.)))
+    (let [desc (.readClassDesc this false)
+          len (.readInt bin)]
+      (when (< len 0) (throw (StreamCorruptedException. "Array length is negative")))
+      (.filterCheck this (.forClass desc) len)
+      (let [^:mutable ^Object array nil
+            ^:mutable ^{:tag (Class ?)} cl nil
+            ^:mutable ^{:tag (Class ?)} ccl nil]
+        (when (some? (set! cl (.forClass desc)))
+          (set! ccl (.getComponentType cl))
+          (set! array (Array/newInstance ccl len)))
+        (let [arrayHandle (.assign handles (if unshared unsharedMarker array))
+              resolveEx (.getResolveException desc)]
+          (when (some? resolveEx) (.markException handles arrayHandle resolveEx))
+          (cond
+            (nil? ccl)
+              (loop [^int i 0]
+                (when (< i len) (.readObject0 this Object false) (recur (unchecked-inc-int i))))
+            (.isPrimitive ccl)
+              (cond
+                (identical? ccl Integer/TYPE) (.readInts bin (cast int/1 array) 0 len)
+                (identical? ccl Byte/TYPE) (.readFully bin (cast byte/1 array) 0 len true)
+                (identical? ccl Long/TYPE) (.readLongs bin (cast long/1 array) 0 len)
+                (identical? ccl Float/TYPE) (.readFloats bin (cast float/1 array) 0 len)
+                (identical? ccl Double/TYPE) (.readDoubles bin (cast double/1 array) 0 len)
+                (identical? ccl Short/TYPE) (.readShorts bin (cast short/1 array) 0 len)
+                (identical? ccl Character/TYPE) (.readChars bin (cast char/1 array) 0 len)
+                (identical? ccl Boolean/TYPE) (.readBooleans bin (cast boolean/1 array) 0 len)
+                :else (throw (InternalError.)))
+            :else
+              (let [oa (cast Object/1 array)]
+                (loop [^int i 0]
+                  (when (< i len)
+                    (aset oa i (.readObject0 this Object false))
+                    (.markDependency handles arrayHandle passHandle)
+                    (recur (unchecked-inc-int i))))))
+          (.finish handles arrayHandle)
+          (set! passHandle arrayHandle)
+          array))))
+
+  (method ^:private readEnum :throws [IOException] ^{:tag (Enum ?)} [this ^boolean unshared]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_ENUM) (throw (InternalError.)))
+    (let [desc (.readClassDesc this false)]
+      (when-not (.isEnum desc) (throw (InvalidClassException. (java-str "non-enum class: " desc))))
+      (let [enumHandle (.assign handles (when unshared unsharedMarker))
+            resolveEx (.getResolveException desc)]
+        (when (some? resolveEx) (.markException handles enumHandle resolveEx))
+        (let [name (.readString this false)
+              ^:mutable ^{:tag (Enum ?)} result nil
+              ^{:tag (Class ?)} cl (.forClass desc)]
+          (when (some? cl)
+            (try
+              (let [^{:tag (Enum ?)} en (Enum/valueOf cl name)] (set! result en))
+              (catch IllegalArgumentException ex
+                (throw (InvalidObjectException.
+                         (java-str "enum constant " name " does not exist in " cl)
+                         ex))))
+            (when-not unshared (.setObject handles enumHandle result)))
+          (.finish handles enumHandle)
+          (set! passHandle enumHandle)
+          result))))
+
+  (method ^:private readOrdinaryObject :throws [IOException] [this ^boolean unshared]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_OBJECT) (throw (InternalError.)))
+    (let [desc (.readClassDesc this false)]
+      (.checkDeserialize desc)
+      (let [^{:tag (Class ?)} cl (.forClass desc)]
+        (when (or (or (identical? cl String) (identical? cl Class))
+                  (identical? cl ObjectStreamClass))
+          (throw (InvalidClassException. "invalid class descriptor")))
+        (let [^:mutable ^Object obj nil]
+          (try
+            (set! obj (when (.isInstantiable desc) (.newInstance desc)))
+            (catch Exception ex
+              (throw (InvalidClassException. (.getName (.forClass desc))
+                                             "unable to create instance"
+                                             ex))))
+          (set! passHandle (.assign handles (if unshared unsharedMarker obj)))
+          (let [resolveEx (.getResolveException desc)]
+            (when (some? resolveEx) (.markException handles passHandle resolveEx))
+            (let [isRecord (.isRecord desc)]
+              (cond
+                isRecord
+                  (do
+                    (java-assert (nil? obj))
+                    (set! obj (.readRecord this desc))
+                    (when-not unshared (.setObject handles passHandle obj)))
+                (.isExternalizable desc) (.readExternalData this (cast Externalizable obj) desc)
+                :else (.readSerialData this obj desc))
+              (.finish handles passHandle)
+              (when (and (and (some? obj) (nil? (.lookupException handles passHandle)))
+                         (.hasReadResolveMethod desc))
+                (let [^:mutable rep (.invokeReadResolve desc obj)]
+                  (when (and unshared (.isArray (.getClass rep)))
+                    (set! rep (ObjectInputStream/cloneArray rep)))
+                  (when-not (identical? rep obj)
+                    (when (some? rep)
+                      (if (.isArray (.getClass rep))
+                          (.filterCheck this (.getClass rep) (Array/getLength rep))
+                          (.filterCheck this (.getClass rep) -1)))
+                    (.setObject handles passHandle (set! obj rep)))))
+              obj))))))
+
+  (method ^:private readExternalData :throws [IOException] ^void [this ^Externalizable obj
+                                                                  ^ObjectStreamClass desc]
+    (let [oldContext curContext]
+      (when (some? oldContext) (.check oldContext))
+      (set! curContext nil)
+      (try
+        (let [blocked (.hasBlockExternalData desc)]
+          (when blocked (.setBlockDataMode bin true))
+          (when (some? obj)
+            (try
+              (.readExternal obj this)
+              (catch ClassNotFoundException ex (.markException handles passHandle ex))))
+          (when blocked (.skipCustomData this)))
+        (finally (when (some? oldContext) (.check oldContext)) (set! curContext oldContext)))))
+
+  (method ^:private readRecord :throws [IOException] [this ^ObjectStreamClass desc]
+    (let [slots (.getClassDataLayout desc)]
+      (when-not (== (alength slots) 1)
+        (loop [^int i 0]
+          (if (< i (unchecked-subtract-int (alength slots) 1))
+              (if (.-hasData (aget slots i))
+                  (do (FieldValues. (.-desc (aget slots i)) true) (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+              nil)))
+      (let [fieldValues (FieldValues. desc true)]
+        (when-not (some? (.lookupException handles passHandle))
+          (let [ctrMH (ObjectStreamClass$RecordSupport/deserializationCtr desc)]
+            (try
+              (.construct ctrMH (.-primValues fieldValues) (.-objValues fieldValues))
+              (catch Exception e (throw (InvalidObjectException. (.getMessage e) e)))
+              (catch Error e (throw e))
+              (catch Throwable t
+                (throw (InvalidObjectException.
+                         "ReflectiveOperationException during deserialization"
+                         t)))))))))
+
+  (method ^:private readSerialData :throws [IOException] ^void [this obj ^ObjectStreamClass desc]
+    (let [slots (.getClassDataLayout desc)
+          ^:mutable ^FieldValues/1 slotValues nil
+          ^:mutable hasSpecialReadMethod false]
+      (loop [^int i 1]
+        (when (< i (alength slots))
+          (let [slotDesc (.-desc (aget slots i))]
+            (if (or (.hasReadObjectMethod slotDesc) (.hasReadObjectNoDataMethod slotDesc))
+                (set! hasSpecialReadMethod true)
+                (recur (unchecked-inc-int i))))))
+      (when-not hasSpecialReadMethod (set! slotValues (new FieldValues/1 (alength slots))))
+      (loop [^int i 0]
+        (when (< i (alength slots))
+          (let [slotDesc (.-desc (aget slots i))]
+            (cond
+              (.-hasData (aget slots i))
+                (do
+                  (cond
+                    (or (nil? obj) (some? (.lookupException handles passHandle)))
+                      (FieldValues. slotDesc true)
+                    (.hasReadObjectMethod slotDesc)
+                      (let [oldContext curContext]
+                        (when (some? oldContext) (.check oldContext))
+                        (try
+                          (set! curContext (SerialCallbackContext. obj slotDesc))
+                          (.setBlockDataMode bin true)
+                          (.invokeReadObject slotDesc obj this)
+                          (catch ClassNotFoundException ex (.markException handles passHandle ex))
+                          (finally
+                            (.setUsed curContext)
+                            (when (some? oldContext) (.check oldContext))
+                            (set! curContext oldContext)))
+                        (set! defaultDataEnd false))
+                    :else
+                      (let [values (FieldValues. slotDesc true)]
+                        (cond
+                          (some? slotValues) (aset slotValues i values)
+                          (some? obj)
+                            (when (nil? (.lookupException handles passHandle))
+                              (.defaultCheckFieldValues values obj)
+                              (.defaultSetFieldValues values obj)))))
+                  (if (.hasWriteObjectData slotDesc)
+                      (do (.skipCustomData this) (recur (unchecked-inc-int i)))
+                      (do (.setBlockDataMode bin false) (recur (unchecked-inc-int i)))))
+              (and (and (some? obj) (.hasReadObjectNoDataMethod slotDesc))
+                   (nil? (.lookupException handles passHandle)))
+                (do (.invokeReadObjectNoData slotDesc obj) (recur (unchecked-inc-int i)))
+              :else (recur (unchecked-inc-int i))))))
+      (when (and (and (some? obj) (some? slotValues)) (nil? (.lookupException handles passHandle)))
+        (loop [^int i 0]
+          (if (< i (alength slots))
+              (if (some? (aget slotValues i))
+                  (do
+                    (.defaultCheckFieldValues (aget slotValues i) obj)
+                    (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+              nil))
+        (loop [^int i 0]
+          (if (< i (alength slots))
+              (if (some? (aget slotValues i))
+                  (do
+                    (.defaultSetFieldValues (aget slotValues i) obj)
+                    (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+              nil)))))
+
+  (method ^:private skipCustomData :throws [IOException] ^void [this]
+    (let [oldHandle passHandle]
+      (while true
+        (when (.getBlockDataMode bin) (.skipBlockData bin) (.setBlockDataMode bin false))
+        (switch (.peekByte bin)
+          (ObjectInputStream/TC_BLOCKDATA ObjectInputStream/TC_BLOCKDATALONG)
+            (.setBlockDataMode bin true)
+          ObjectInputStream/TC_ENDBLOCKDATA
+            (do (.readByte bin) (set! passHandle oldHandle) (return))
+          (.readObject0 this Object false)))))
+
+  (method ^:private readFatalException :throws [IOException] ^IOException [this]
+    (when-not (== (.readByte bin) ObjectInputStream/TC_EXCEPTION) (throw (InternalError.)))
+    (.clear this)
+    (let [tc (.peekByte bin)]
+      (when (and (not (== tc ObjectInputStream/TC_OBJECT))
+                 (not (== tc ObjectInputStream/TC_REFERENCE)))
+        (throw (StreamCorruptedException.
+                 (String/format "invalid type code: %02X" (new Object/1 [tc])))))
+      (cast IOException (.readObject0 this Object false))))
+
+  (method ^:private handleReset :throws [StreamCorruptedException] ^void [this]
+    (when (> depth 0)
+      (throw (StreamCorruptedException. (java-str "unexpected reset; recursion depth: " depth))))
+    (.clear this))
+
+  (method ^:private ^:static latestUserDefinedLoader ^ClassLoader []
+    (VM/latestUserDefinedLoader))
+
+  (defclass ^:private ^:final FieldValues
+    :extends GetField
+
+    (field ^:private ^:final ^ObjectStreamClass desc)
+
+    (field ^:final ^byte/1 primValues)
+
+    (field ^:final ^Object/1 objValues)
+
+    (field ^:private ^:final ^int/1 objHandles)
+
+    (constructor :throws [IOException] [this ^ObjectStreamClass desc ^boolean recordDependencies]
+      (set! (.-desc this) desc)
+      (let [primDataSize (.getPrimDataSize desc)]
+        (set! primValues (when (> primDataSize 0) (new byte/1 primDataSize)))
+        (when (> primDataSize 0) (.readFully bin primValues 0 primDataSize false))
+        (let [numObjFields (.getNumObjFields desc)]
+          (set! objValues (when (> numObjFields 0) (new Object/1 numObjFields)))
+          (set! objHandles (when (> numObjFields 0) (new int/1 numObjFields)))
+          (when (> numObjFields 0)
+            (let [objHandle passHandle
+                  fields (.getFields desc false)
+                  numPrimFields (unchecked-subtract-int (alength fields) (alength objValues))]
+              (loop [^int i 0]
+                (when (< i (alength objValues))
+                  (let [f (aget fields (unchecked-add-int numPrimFields i))]
+                    (aset objValues i (.readObject0 ObjectInputStream/this Object (.isUnshared f)))
+                    (aset objHandles i passHandle)
+                    (if (and recordDependencies (some? (.getField f)))
+                        (do
+                          (.markDependency handles objHandle passHandle)
+                          (recur (unchecked-inc-int i)))
+                        (recur (unchecked-inc-int i))))))
+              (set! passHandle objHandle))))))
+
+    (method ^:public getObjectStreamClass ^ObjectStreamClass [this] desc)
+
+    (method ^:public defaulted ^boolean [this ^String name]
+      (< (.getFieldOffset this name nil) 0))
+
+    (method ^:public get ^boolean [this ^String name ^boolean val]
+      (let [off (.getFieldOffset this name Boolean/TYPE)]
+        (if (>= off 0) (ByteArray/getBoolean primValues off) val)))
+
+    (method ^:public get ^byte [this ^String name ^byte val]
+      (let [off (.getFieldOffset this name Byte/TYPE)] (if (>= off 0) (aget primValues off) val)))
+
+    (method ^:public get ^char [this ^String name ^char val]
+      (let [off (.getFieldOffset this name Character/TYPE)]
+        (if (>= off 0) (ByteArray/getChar primValues off) val)))
+
+    (method ^:public get ^short [this ^String name ^short val]
+      (let [off (.getFieldOffset this name Short/TYPE)]
+        (if (>= off 0) (ByteArray/getShort primValues off) val)))
+
+    (method ^:public get ^int [this ^String name ^int val]
+      (let [off (.getFieldOffset this name Integer/TYPE)]
+        (if (>= off 0) (ByteArray/getInt primValues off) val)))
+
+    (method ^:public get ^float [this ^String name ^float val]
+      (let [off (.getFieldOffset this name Float/TYPE)]
+        (if (>= off 0) (ByteArray/getFloat primValues off) val)))
+
+    (method ^:public get ^long [this ^String name ^long val]
+      (let [off (.getFieldOffset this name Long/TYPE)]
+        (if (>= off 0) (ByteArray/getLong primValues off) val)))
+
+    (method ^:public get ^double [this ^String name ^double val]
+      (let [off (.getFieldOffset this name Double/TYPE)]
+        (if (>= off 0) (ByteArray/getDouble primValues off) val)))
+
+    (method ^:public get :throws [ClassNotFoundException] [this ^String name val]
+      (let [off (.getFieldOffset this name Object)]
+        (if (>= off 0)
+            (let [objHandle (aget objHandles off)]
+              (.markDependency handles passHandle objHandle)
+              (let [ex (.lookupException handles objHandle)]
+                (if (nil? ex)
+                    (aget objValues off)
+                    (when-not Caches/GETFIELD_CNFE_RETURNS_NULL (throw ex)))))
+            val)))
+
+    (method defaultCheckFieldValues ^void [this obj]
+      (when (some? objValues) (.checkObjFieldValueTypes desc obj objValues)))
+
+    (method ^:private defaultSetFieldValues ^void [this obj]
+      (when (some? primValues) (.setPrimFieldValues desc obj primValues))
+      (when (some? objValues) (.setObjFieldValues desc obj objValues)))
+
+    (method ^:private getFieldOffset ^int [this ^String name ^{:tag (Class ?)} type]
+      (let [field (.getField desc name type)]
+        (cond
+          (some? field) (.getOffset field)
+          (some? (.getField (.getLocalDesc desc) name type)) -1
+          :else
+            (throw (IllegalArgumentException. (java-str "no such field " name " with type " type)))))))
+
+  (defclass ^:private ^:static ValidationList
+    (defclass ^:private ^:static Callback
+      (field ^:final ^ObjectInputValidation obj)
+
+      (field ^:final ^int priority)
+
+      (field ^Callback next)
+
+      (constructor [this ^ObjectInputValidation obj ^int priority ^Callback next]
+        (set! (.-obj this) obj)
+        (set! (.-priority this) priority)
+        (set! (.-next this) next)))
+
+    (field ^:private ^Callback list)
+
+    (constructor [this])
+
+    (method register :throws [InvalidObjectException] ^void [this ^ObjectInputValidation obj
+                                                             ^int priority]
+      (when (nil? obj) (throw (InvalidObjectException. "null callback")))
+      (let [^:mutable ^Callback prev nil
+            ^:mutable cur list]
+        (while (and (some? cur) (< priority (.-priority cur)))
+          (set! prev cur)
+          (set! cur (.-next cur)))
+        (if (some? prev)
+            (set! (.-next prev) (Callback. obj priority cur))
+            (set! list (Callback. obj priority list)))))
+
+    (method doCallbacks :throws [InvalidObjectException] ^void [this]
+      (try
+        (while (some? list) (.validateObject (.-obj list)) (set! list (.-next list)))
+        (catch InvalidObjectException ex (set! list nil) (throw ex))))
+
+    (method ^:public clear ^void [this] (set! list nil)))
+
+  (defclass ^:static FilterValues
+    :implements [ObjectInputFilter$FilterInfo]
+
+    (field ^:final ^{:tag (Class ?)} clazz)
+
+    (field ^:final ^long arrayLength)
+
+    (field ^:final ^long totalObjectRefs)
+
+    (field ^:final ^long depth)
+
+    (field ^:final ^long streamBytes)
+
+    (constructor ^:public [this ^{:tag (Class ?)} clazz ^long arrayLength ^long totalObjectRefs
+                           ^long depth ^long streamBytes]
+      (set! (.-clazz this) clazz)
+      (set! (.-arrayLength this) arrayLength)
+      (set! (.-totalObjectRefs this) totalObjectRefs)
+      (set! (.-depth this) depth)
+      (set! (.-streamBytes this) streamBytes))
+
+    (method ^:public serialClass ^{:tag (Class ?)} [this] clazz)
+
+    (method ^:public arrayLength ^long [this] arrayLength)
+
+    (method ^:public references ^long [this] totalObjectRefs)
+
+    (method ^:public depth ^long [this] depth)
+
+    (method ^:public streamBytes ^long [this] streamBytes))
+
+  (defclass ^:private ^:static PeekInputStream
+    :extends InputStream
+
+    (field ^:private ^:final ^InputStream in)
+
+    (field ^:private ^int peekb -1)
+
+    (field ^:private ^long totalBytesRead 0)
+
+    (constructor [this ^InputStream in] (set! (.-in this) in))
+
+    (method peek :throws [IOException] ^int [this]
+      (if (>= peekb 0)
+          peekb
+          (do
+            (set! peekb (.read in))
+            (set! totalBytesRead (unchecked-add totalBytesRead (if (>= peekb 0) (long 1) (long 0))))
+            peekb)))
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (if (>= peekb 0)
+          (let [v peekb] (set! peekb -1) v)
+          (let [nbytes (.read in)]
+            (set! totalBytesRead
+                  (unchecked-add totalBytesRead (if (>= nbytes 0) (long 1) (long 0))))
+            nbytes)))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^:mutable ^int off
+                                                      ^:mutable ^int len]
+      (let [^:mutable ^int nbytes 0]
+        (cond
+          (== len 0) 0
+          (< peekb 0)
+            (do
+              (set! nbytes (.read in b off len))
+              (set! totalBytesRead (unchecked-add totalBytesRead (if (>= nbytes 0) nbytes 0)))
+              nbytes)
+          :else
+            (do
+              (aset b off (unchecked-byte peekb))
+              (set! off (unchecked-inc-int off))
+              (set! len (unchecked-dec-int len))
+              (set! peekb -1)
+              (set! nbytes (.read in b off len))
+              (set! totalBytesRead (unchecked-add totalBytesRead (if (>= nbytes 0) nbytes 0)))
+              (if (>= nbytes 0) (unchecked-add-int nbytes 1) 1)))))
+
+    (method readFully :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+      (let [^:mutable ^int n 0]
+        (while (< n len)
+          (let [count (.read this b (unchecked-add-int off n) (unchecked-subtract-int len n))]
+            (when (< count 0) (throw (EOFException.)))
+            (set! n (unchecked-add-int n count))))))
+
+    (method ^:public skip :throws [IOException] ^long [this ^:mutable ^long n]
+      (if (<= n 0)
+          0
+          (let [^:mutable ^int skipped 0]
+            (when (>= peekb 0)
+              (set! peekb -1)
+              (set! skipped (unchecked-inc-int skipped))
+              (set! n (unchecked-dec n)))
+            (set! n (unchecked-add skipped (.skip in n)))
+            (set! totalBytesRead (unchecked-add totalBytesRead n))
+            n)))
+
+    (method ^:public available :throws [IOException] ^int [this]
+      (unchecked-add-int (.available in) (if (>= peekb 0) 1 0)))
+
+    (method ^:public close :throws [IOException] ^void [this] (.close in))
+
+    (method ^:public getBytesRead ^long [this] totalBytesRead))
+
+  (method ^:private freeze ^void [this])
+
+  (defclass ^:private BlockDataInputStream
+    :extends InputStream
+    :implements [DataInput]
+
+    (field ^:private ^:static ^:final ^int MAX_BLOCK_SIZE 1024)
+
+    (field ^:private ^:static ^:final ^int MAX_HEADER_SIZE 5)
+
+    (field ^:private ^:static ^:final ^int CHAR_BUF_SIZE 256)
+
+    (field ^:private ^:static ^:final ^int HEADER_BLOCKED -2)
+
+    (field ^:private ^:static ^:final ^JavaLangAccess JLA (SharedSecrets/getJavaLangAccess))
+
+    (field ^:private ^:final ^byte/1 buf (new byte/1 MAX_BLOCK_SIZE))
+
+    (field ^:private ^:final ^byte/1 hbuf (new byte/1 MAX_HEADER_SIZE))
+
+    (field ^:private ^:final ^char/1 cbuf (new char/1 CHAR_BUF_SIZE))
+
+    (field ^:private ^boolean blkmode false)
+
+    (field ^:private ^int pos 0)
+
+    (field ^:private ^int end -1)
+
+    (field ^:private ^int unread 0)
+
+    (field ^:private ^:final ^PeekInputStream in)
+
+    (field ^:private ^:final ^DataInputStream din)
+
+    (constructor [this ^InputStream in]
+      (set! (.-in this) (PeekInputStream. in))
+      (set! din (DataInputStream. this)))
+
+    (method setBlockDataMode :throws [IOException] ^boolean [this ^boolean newmode]
+      (if (= blkmode newmode)
+          blkmode
+          (do
+            (cond
+              newmode (do (set! pos 0) (set! end 0) (set! unread 0))
+              (< pos end) (throw (IllegalStateException. "unread block data")))
+            (set! blkmode newmode)
+            (not blkmode))))
+
+    (method getBlockDataMode ^boolean [this] blkmode)
+
+    (method skipBlockData :throws [IOException] ^void [this]
+      (when-not blkmode (throw (IllegalStateException. "not in block data mode")))
+      (while (>= end 0) (.refill this)))
+
+    (method ^:private readBlockHeader :throws [IOException] ^int [this ^boolean canBlock]
+      (if defaultDataEnd
+          -1
+          (try
+            (while true
+              (let [^int avail (if canBlock Integer/MAX_VALUE (.available in))]
+                (when (== avail 0) (return HEADER_BLOCKED))
+                (let [tc (.peek in)]
+                  (switch tc
+                    ObjectStreamConstants/TC_BLOCKDATA
+                      (do
+                        (when (< avail 2) (return HEADER_BLOCKED))
+                        (.readFully in hbuf 0 2)
+                        (return (bit-and-int (aget hbuf 1) 0xFF)))
+                    ObjectStreamConstants/TC_BLOCKDATALONG
+                      (do
+                        (when (< avail 5) (return HEADER_BLOCKED))
+                        (.readFully in hbuf 0 5)
+                        (let [len (ByteArray/getInt hbuf 1)]
+                          (when (< len 0)
+                            (throw (StreamCorruptedException.
+                                     (java-str "illegal block data header length: " len))))
+                          (return len)))
+                    ObjectStreamConstants/TC_RESET
+                      (do (.read in) (.handleReset ObjectInputStream/this))
+                    (do
+                      (when (and (>= tc 0)
+                                 (or (< tc ObjectStreamConstants/TC_BASE)
+                                     (> tc ObjectStreamConstants/TC_MAX)))
+                        (throw (StreamCorruptedException.
+                                 (String/format "invalid type code: %02X" (new Object/1 [tc])))))
+                      (return -1))))))
+            (catch EOFException ex
+              (throw (StreamCorruptedException. "unexpected EOF while reading block data header"))))))
+
+    (method ^:private refill :throws [IOException] ^void [this]
+      (try
+        (loop []
+          (set! pos 0)
+          (if (> unread 0)
+              (let [n (.read in buf 0 (Math/min unread MAX_BLOCK_SIZE))]
+                (if (>= n 0)
+                    (do (set! end n) (set! unread (unchecked-subtract-int unread n)))
+                    (throw (StreamCorruptedException. "unexpected EOF in middle of data block"))))
+              (let [n (.readBlockHeader this true)]
+                (if (>= n 0) (do (set! end 0) (set! unread n)) (do (set! end -1) (set! unread 0)))))
+          (when (== pos end) (recur)))
+        (catch IOException ex (set! pos 0) (set! end -1) (set! unread 0) (throw ex))))
+
+    (method currentBlockRemaining ^int [this]
+      (if blkmode
+          (if (>= end 0) (unchecked-add-int (unchecked-subtract-int end pos) unread) 0)
+          (throw (IllegalStateException.))))
+
+    (method peek :throws [IOException] ^int [this]
+      (if blkmode
+          (do
+            (when (== pos end) (.refill this))
+            (if (>= end 0) (bit-and-int (aget buf pos) 0xFF) -1))
+          (.peek in)))
+
+    (method peekByte :throws [IOException] ^byte [this]
+      (let [val (.peek this)] (when (< val 0) (throw (EOFException.))) (unchecked-byte val)))
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (if blkmode
+          (do
+            (when (== pos end) (.refill this))
+            (if (>= end 0)
+                (bit-and-int (aget buf (let [old-1 pos] (set! pos (unchecked-inc-int pos)) old-1))
+                             0xFF)
+                -1))
+          (.read in)))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+      (.read this b off len false))
+
+    (method ^:public skip :throws [IOException] ^long [this ^long len]
+      (let [^:mutable remain len]
+        (while (> remain 0)
+          (if blkmode
+              (do
+                (when (== pos end) (.refill this))
+                (when (< end 0) (break))
+                (let [nread (unchecked-int (Math/min remain (unchecked-subtract-int end pos)))]
+                  (set! remain (unchecked-subtract remain nread))
+                  (set! pos (unchecked-add-int pos nread))))
+              (let [^:mutable nread (unchecked-int (Math/min remain MAX_BLOCK_SIZE))]
+                (when (< (set! nread (.read in buf 0 nread)) 0) (break))
+                (set! remain (unchecked-subtract remain nread)))))
+        (unchecked-subtract len remain)))
+
+    (method ^:public available :throws [IOException] ^int [this]
+      (if blkmode
+          (do
+            (when (and (== pos end) (== unread 0))
+              (let [^:mutable ^int n 0]
+                (while (== (set! n (.readBlockHeader this false)) 0))
+                (switch n
+                  HEADER_BLOCKED nil
+                  -1 (do (set! pos 0) (set! end -1))
+                  (do (set! pos 0) (set! end 0) (set! unread n)))))
+            (let [^int unreadAvail (if (> unread 0) (Math/min (.available in) unread) 0)]
+              (if (>= end 0) (unchecked-add-int (unchecked-subtract-int end pos) unreadAvail) 0)))
+          (.available in)))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when blkmode (set! pos 0) (set! end -1) (set! unread 0))
+      (.close in))
+
+    (method read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len ^boolean copy]
+      (cond
+        (== len 0) 0
+        blkmode
+          (do
+            (when (== pos end) (.refill this))
+            (if (< end 0)
+                -1
+                (let [nread (Math/min len (unchecked-subtract-int end pos))]
+                  (System/arraycopy buf pos b off nread)
+                  (set! pos (unchecked-add-int pos nread))
+                  nread)))
+        copy
+          (let [nread (.read in buf 0 (Math/min len MAX_BLOCK_SIZE))]
+            (when (> nread 0) (System/arraycopy buf 0 b off nread))
+            nread)
+        :else (.read in b off len)))
+
+    (method ^:public readFully :throws [IOException] ^void [this ^byte/1 b]
+      (.readFully this b 0 (alength b) false))
+
+    (method ^:public readFully :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+      (.readFully this b off len false))
+
+    (method ^:public readFully :throws [IOException] ^void [this ^byte/1 b ^:mutable ^int off
+                                                            ^:mutable ^int len ^boolean copy]
+      (while (> len 0)
+        (let [n (.read this b off len copy)]
+          (when (< n 0) (throw (EOFException.)))
+          (set! off (unchecked-add-int off n))
+          (set! len (unchecked-subtract-int len n)))))
+
+    (method ^:public skipBytes :throws [IOException] ^int [this ^int n]
+      (.skipBytes din n))
+
+    (method ^:public readBoolean :throws [IOException] ^boolean [this]
+      (let [v (.read this)] (when (< v 0) (throw (EOFException.))) (not (== v 0))))
+
+    (method ^:public readByte :throws [IOException] ^byte [this]
+      (let [v (.read this)] (when (< v 0) (throw (EOFException.))) (unchecked-byte v)))
+
+    (method ^:public readUnsignedByte :throws [IOException] ^int [this]
+      (let [v (.read this)] (when (< v 0) (throw (EOFException.))) v))
+
+    (method ^:public readChar :throws [IOException] ^char [this]
+      (cond
+        (not blkmode) (do (set! pos 0) (.readFully in buf 0 2))
+        (< (unchecked-subtract-int end pos) 2) (return (.readChar din)))
+      (let [v (ByteArray/getChar buf pos)] (set! pos (unchecked-add-int pos 2)) v))
+
+    (method ^:public readShort :throws [IOException] ^short [this]
+      (cond
+        (not blkmode) (do (set! pos 0) (.readFully in buf 0 2))
+        (< (unchecked-subtract-int end pos) 2) (return (.readShort din)))
+      (let [v (ByteArray/getShort buf pos)] (set! pos (unchecked-add-int pos 2)) v))
+
+    (method ^:public readUnsignedShort :throws [IOException] ^int [this]
+      (cond
+        (not blkmode) (do (set! pos 0) (.readFully in buf 0 2))
+        (< (unchecked-subtract-int end pos) 2) (return (.readUnsignedShort din)))
+      (let [v (bit-and-int (ByteArray/getShort buf pos) 0xFFFF)]
+        (set! pos (unchecked-add-int pos 2))
+        v))
+
+    (method ^:public readInt :throws [IOException] ^int [this]
+      (cond
+        (not blkmode) (do (set! pos 0) (.readFully in buf 0 4))
+        (< (unchecked-subtract-int end pos) 4) (return (.readInt din)))
+      (let [v (ByteArray/getInt buf pos)] (set! pos (unchecked-add-int pos 4)) v))
+
+    (method ^:public readFloat :throws [IOException] ^float [this]
+      (cond
+        (not blkmode) (do (set! pos 0) (.readFully in buf 0 4))
+        (< (unchecked-subtract-int end pos) 4) (return (.readFloat din)))
+      (let [v (ByteArray/getFloat buf pos)] (set! pos (unchecked-add-int pos 4)) v))
+
+    (method ^:public readLong :throws [IOException] ^long [this]
+      (cond
+        (not blkmode) (do (set! pos 0) (.readFully in buf 0 8))
+        (< (unchecked-subtract-int end pos) 8) (return (.readLong din)))
+      (let [v (ByteArray/getLong buf pos)] (set! pos (unchecked-add-int pos 8)) v))
+
+    (method ^:public readDouble :throws [IOException] ^double [this]
+      (cond
+        (not blkmode) (do (set! pos 0) (.readFully in buf 0 8))
+        (< (unchecked-subtract-int end pos) 8) (return (.readDouble din)))
+      (let [v (ByteArray/getDouble buf pos)] (set! pos (unchecked-add-int pos 8)) v))
+
+    (method ^:public readUTF :throws [IOException] ^String [this]
+      (.readUTFBody this (.readUnsignedShort this)))
+
+    (method ^:public readLine :throws [IOException] ^String [this]
+      (.readLine din))
+
+    (method readBooleans :throws [IOException] ^void [this ^boolean/1 v ^:mutable ^int off ^int len]
+      (let [^:mutable ^int stop 0
+            endoff (unchecked-add-int off len)]
+        (while (< off endoff)
+          (cond
+            (not blkmode)
+              (let [span (Math/min (unchecked-subtract-int endoff off) MAX_BLOCK_SIZE)]
+                (.readFully in buf 0 span)
+                (set! stop (unchecked-add-int off span))
+                (set! pos 0))
+            (< (unchecked-subtract-int end pos) 1)
+              (do (aset v off (.readBoolean din)) (set! off (unchecked-inc-int off)) (continue))
+            :else
+              (set! stop (Math/min endoff (unchecked-subtract-int (unchecked-add-int off end) pos))))
+          (while (< off stop)
+            (aset v
+                  off
+                  (ByteArray/getBoolean buf
+                                        (let [old-2 pos] (set! pos (unchecked-inc-int pos)) old-2)))
+            (set! off (unchecked-inc-int off))))))
+
+    (method readChars :throws [IOException] ^void [this ^char/1 v ^:mutable ^int off ^int len]
+      (let [^:mutable ^int stop 0
+            endoff (unchecked-add-int off len)]
+        (while (< off endoff)
+          (cond
+            (not blkmode)
+              (let [span (Math/min (unchecked-subtract-int endoff off)
+                                   (bit-shift-right-int MAX_BLOCK_SIZE 1))]
+                (.readFully in buf 0 (bit-shift-left-int span 1))
+                (set! stop (unchecked-add-int off span))
+                (set! pos 0))
+            (< (unchecked-subtract-int end pos) 2)
+              (do (aset v off (.readChar din)) (set! off (unchecked-inc-int off)) (continue))
+            :else
+              (set! stop
+                    (Math/min endoff
+                              (unchecked-add-int
+                                off
+                                (bit-shift-right-int (unchecked-subtract-int end pos) 1)))))
+          (while (< off stop)
+            (aset v off (ByteArray/getChar buf pos))
+            (set! off (unchecked-inc-int off))
+            (set! pos (unchecked-add-int pos 2))))))
+
+    (method readShorts :throws [IOException] ^void [this ^short/1 v ^:mutable ^int off ^int len]
+      (let [^:mutable ^int stop 0
+            endoff (unchecked-add-int off len)]
+        (while (< off endoff)
+          (cond
+            (not blkmode)
+              (let [span (Math/min (unchecked-subtract-int endoff off)
+                                   (bit-shift-right-int MAX_BLOCK_SIZE 1))]
+                (.readFully in buf 0 (bit-shift-left-int span 1))
+                (set! stop (unchecked-add-int off span))
+                (set! pos 0))
+            (< (unchecked-subtract-int end pos) 2)
+              (do (aset v off (.readShort din)) (set! off (unchecked-inc-int off)) (continue))
+            :else
+              (set! stop
+                    (Math/min endoff
+                              (unchecked-add-int
+                                off
+                                (bit-shift-right-int (unchecked-subtract-int end pos) 1)))))
+          (while (< off stop)
+            (aset v off (ByteArray/getShort buf pos))
+            (set! off (unchecked-inc-int off))
+            (set! pos (unchecked-add-int pos 2))))))
+
+    (method readInts :throws [IOException] ^void [this ^int/1 v ^:mutable ^int off ^int len]
+      (let [^:mutable ^int stop 0
+            endoff (unchecked-add-int off len)]
+        (while (< off endoff)
+          (cond
+            (not blkmode)
+              (let [span (Math/min (unchecked-subtract-int endoff off)
+                                   (bit-shift-right-int MAX_BLOCK_SIZE 2))]
+                (.readFully in buf 0 (bit-shift-left-int span 2))
+                (set! stop (unchecked-add-int off span))
+                (set! pos 0))
+            (< (unchecked-subtract-int end pos) 4)
+              (do (aset v off (.readInt din)) (set! off (unchecked-inc-int off)) (continue))
+            :else
+              (set! stop
+                    (Math/min endoff
+                              (unchecked-add-int
+                                off
+                                (bit-shift-right-int (unchecked-subtract-int end pos) 2)))))
+          (while (< off stop)
+            (aset v off (ByteArray/getInt buf pos))
+            (set! off (unchecked-inc-int off))
+            (set! pos (unchecked-add-int pos 4))))))
+
+    (method readFloats :throws [IOException] ^void [this ^float/1 v ^:mutable ^int off ^int len]
+      (let [^:mutable ^int stop 0
+            endoff (unchecked-add-int off len)]
+        (while (< off endoff)
+          (cond
+            (not blkmode)
+              (let [span (Math/min (unchecked-subtract-int endoff off)
+                                   (bit-shift-right-int MAX_BLOCK_SIZE 2))]
+                (.readFully in buf 0 (bit-shift-left-int span 2))
+                (set! stop (unchecked-add-int off span))
+                (set! pos 0))
+            (< (unchecked-subtract-int end pos) 4)
+              (do (aset v off (.readFloat din)) (set! off (unchecked-inc-int off)) (continue))
+            :else
+              (set! stop (Math/min endoff (bit-shift-right-int (unchecked-subtract-int end pos) 2))))
+          (while (< off stop)
+            (aset v off (ByteArray/getFloat buf pos))
+            (set! off (unchecked-inc-int off))
+            (set! pos (unchecked-add-int pos 4))))))
+
+    (method readLongs :throws [IOException] ^void [this ^long/1 v ^:mutable ^int off ^int len]
+      (let [^:mutable ^int stop 0
+            endoff (unchecked-add-int off len)]
+        (while (< off endoff)
+          (cond
+            (not blkmode)
+              (let [span (Math/min (unchecked-subtract-int endoff off)
+                                   (bit-shift-right-int MAX_BLOCK_SIZE 3))]
+                (.readFully in buf 0 (bit-shift-left-int span 3))
+                (set! stop (unchecked-add-int off span))
+                (set! pos 0))
+            (< (unchecked-subtract-int end pos) 8)
+              (do (aset v off (.readLong din)) (set! off (unchecked-inc-int off)) (continue))
+            :else
+              (set! stop
+                    (Math/min endoff
+                              (unchecked-add-int
+                                off
+                                (bit-shift-right-int (unchecked-subtract-int end pos) 3)))))
+          (while (< off stop)
+            (aset v off (ByteArray/getLong buf pos))
+            (set! off (unchecked-inc-int off))
+            (set! pos (unchecked-add-int pos 8))))))
+
+    (method readDoubles :throws [IOException] ^void [this ^double/1 v ^:mutable ^int off ^int len]
+      (let [^:mutable ^int stop 0
+            endoff (unchecked-add-int off len)]
+        (while (< off endoff)
+          (cond
+            (not blkmode)
+              (let [span (Math/min (unchecked-subtract-int endoff off)
+                                   (bit-shift-right-int MAX_BLOCK_SIZE 3))]
+                (.readFully in buf 0 (bit-shift-left-int span 3))
+                (set! stop (unchecked-add-int off span))
+                (set! pos 0))
+            (< (unchecked-subtract-int end pos) 8)
+              (do (aset v off (.readDouble din)) (set! off (unchecked-inc-int off)) (continue))
+            :else
+              (set! stop
+                    (Math/min (unchecked-subtract-int endoff off)
+                              (bit-shift-right-int (unchecked-subtract-int end pos) 3))))
+          (while (< off stop)
+            (aset v off (ByteArray/getDouble buf pos))
+            (set! off (unchecked-inc-int off))
+            (set! pos (unchecked-add-int pos 8))))))
+
+    (method readLongUTF :throws [IOException] ^String [this]
+      (.readUTFBody this (.readLong this)))
+
+    (method ^:private readUTFBody :throws [IOException] ^String [this ^:mutable ^long utflen]
+      (when-not blkmode (set! end (set! pos 0)))
+      (let [^:mutable ^StringBuilder sbuf nil]
+        (if (and (> utflen 0) (< utflen Integer/MAX_VALUE))
+            (let [avail (unchecked-subtract-int end pos)
+                  ascii (.countPositives JLA buf pos (Math/min avail (unchecked-int utflen)))]
+              (when (== ascii utflen)
+                (let [utf (String. buf pos ascii StandardCharsets/ISO_8859_1)]
+                  (set! pos (unchecked-add-int pos ascii))
+                  (return utf)))
+              (when (and (>= avail utflen) (<= utflen CHAR_BUF_SIZE))
+                (.inflateBytesToChars JLA buf pos cbuf 0 ascii)
+                (set! pos (unchecked-add-int pos ascii))
+                (let [cbufPos (.readUTFSpan this ascii (unchecked-subtract utflen ascii))]
+                  (return (String. cbuf 0 cbufPos))))
+              (let [initialCapacity (^[int int] Math/min (unchecked-int utflen) 0xFFFF)]
+                (set! sbuf (StringBuilder. initialCapacity))))
+            (set! sbuf (StringBuilder.)))
+        (while (> utflen 0)
+          (let [avail (unchecked-subtract-int end pos)]
+            (cond
+              (or (>= avail 3) (== (long avail) utflen))
+                (let [cbufPos (.readUTFSpan this 0 utflen)]
+                  (set! utflen
+                        (unchecked-subtract utflen
+                                            (unchecked-subtract-int
+                                              avail
+                                              (unchecked-subtract-int end pos))))
+                  (.append sbuf cbuf 0 cbufPos))
+              blkmode (set! utflen (unchecked-subtract utflen (.readUTFChar this sbuf utflen)))
+              :else
+                (do
+                  (when (> avail 0) (System/arraycopy buf pos buf 0 avail))
+                  (set! pos 0)
+                  (set! end (unchecked-int (Math/min MAX_BLOCK_SIZE utflen)))
+                  (.readFully in buf avail (unchecked-subtract-int end avail))))))
+        (.toString sbuf)))
+
+    (method ^:private readUTFSpan :throws [IOException] ^int [this ^:mutable ^int cpos ^long utflen]
+      (let [start pos
+            avail (Math/min (unchecked-subtract-int end pos) CHAR_BUF_SIZE)
+            stop (unchecked-add-int start
+                                    (if (> utflen avail)
+                                        (unchecked-subtract-int avail 2)
+                                        (unchecked-int utflen)))
+            ^:mutable outOfBounds false]
+        (try
+          (while (< pos stop)
+            (let [^:mutable ^int b1 0
+                  ^:mutable ^int b2 0
+                  ^:mutable ^int b3 0]
+              (set! b1
+                    (bit-and-int (aget buf
+                                       (let [old-3 pos] (set! pos (unchecked-inc-int pos)) old-3))
+                                 0xFF))
+              (switch (bit-shift-right-int b1 4)
+                (0 1 2 3 4 5 6 7)
+                  (do (aset cbuf cpos (unchecked-char b1)) (set! cpos (unchecked-inc-int cpos)))
+                (12 13)
+                  (do
+                    (set! b2 (aget buf (let [old-4 pos] (set! pos (unchecked-inc-int pos)) old-4)))
+                    (when-not (== (bit-and-int b2 0xC0) 0x80) (throw (UTFDataFormatException.)))
+                    (aset cbuf
+                          cpos
+                          (unchecked-char
+                            (bit-or-int (bit-shift-left-int (bit-and-int b1 0x1F) 6)
+                                        (bit-shift-left-int (bit-and-int b2 0x3F) 0))))
+                    (set! cpos (unchecked-inc-int cpos)))
+                14
+                  (do
+                    (set! b3 (aget buf (unchecked-add-int pos 1)))
+                    (set! b2 (aget buf (unchecked-add-int pos 0)))
+                    (set! pos (unchecked-add-int pos 2))
+                    (when (or (not (== (bit-and-int b2 0xC0) 0x80))
+                              (not (== (bit-and-int b3 0xC0) 0x80)))
+                      (throw (UTFDataFormatException.)))
+                    (aset cbuf
+                          cpos
+                          (unchecked-char
+                            (bit-or-int (bit-or-int
+                                          (bit-shift-left-int (bit-and-int b1 0x0F) 12)
+                                          (bit-shift-left-int (bit-and-int b2 0x3F) 6))
+                                        (bit-shift-left-int (bit-and-int b3 0x3F) 0))))
+                    (set! cpos (unchecked-inc-int cpos)))
+                (throw (UTFDataFormatException.)))))
+          (catch ArrayIndexOutOfBoundsException ex (set! outOfBounds true))
+          (finally
+            (when (or outOfBounds (> (unchecked-subtract-int pos start) utflen))
+              (set! pos (unchecked-add-int start (unchecked-int utflen)))
+              (throw (UTFDataFormatException.)))))
+        cpos))
+
+    (method ^:private readUTFChar :throws [IOException] ^int [this ^StringBuilder sbuf ^long utflen]
+      (let [^:mutable ^int b1 0
+            ^:mutable ^int b2 0
+            ^:mutable ^int b3 0]
+        (set! b1 (bit-and-int (.readByte this) 0xFF))
+        (switch (bit-shift-right-int b1 4)
+          (0 1 2 3 4 5 6 7) (do (.append sbuf (unchecked-char b1)) 1)
+          (12 13)
+            (do
+              (when (< utflen 2) (throw (UTFDataFormatException.)))
+              (set! b2 (.readByte this))
+              (when-not (== (bit-and-int b2 0xC0) 0x80) (throw (UTFDataFormatException.)))
+              (.append sbuf
+                       (unchecked-char
+                         (bit-or-int (bit-shift-left-int (bit-and-int b1 0x1F) 6)
+                                     (bit-shift-left-int (bit-and-int b2 0x3F) 0))))
+              2)
+          14
+            (do
+              (when (< utflen 3)
+                (when (== utflen 2) (.readByte this))
+                (throw (UTFDataFormatException.)))
+              (set! b2 (.readByte this))
+              (set! b3 (.readByte this))
+              (when (or (not (== (bit-and-int b2 0xC0) 0x80)) (not (== (bit-and-int b3 0xC0) 0x80)))
+                (throw (UTFDataFormatException.)))
+              (.append sbuf
+                       (unchecked-char
+                         (bit-or-int (bit-or-int
+                                       (bit-shift-left-int (bit-and-int b1 0x0F) 12)
+                                       (bit-shift-left-int (bit-and-int b2 0x3F) 6))
+                                     (bit-shift-left-int (bit-and-int b3 0x3F) 0))))
+              3)
+          (throw (UTFDataFormatException.)))))
+
+    (method getBytesRead ^long [this] (.getBytesRead in)))
+
+  (defclass ^:private ^:static ^:final HandleTable
+    (field ^:private ^:static ^:final ^byte STATUS_OK 1)
+
+    (field ^:private ^:static ^:final ^byte STATUS_UNKNOWN 2)
+
+    (field ^:private ^:static ^:final ^byte STATUS_EXCEPTION 3)
+
+    (field ^byte/1 status)
+
+    (field ^Object/1 entries)
+
+    (field ^HandleList/1 deps)
+
+    (field ^int lowDep -1)
+
+    (field ^int size 0)
+
+    (constructor [this ^int initialCapacity]
+      (set! status (new byte/1 initialCapacity))
+      (set! entries (new Object/1 initialCapacity))
+      (set! deps (new HandleList/1 initialCapacity)))
+
+    (method assign ^int [this obj]
+      (when (>= size (alength entries)) (.grow this))
+      (aset status size STATUS_UNKNOWN)
+      (aset entries size obj)
+      (let [size-5 size] (set! size (unchecked-inc-int size)) size-5))
+
+    (method markDependency ^void [this ^int dependent ^int target]
+      (when-not (or (or (== dependent target) (== dependent NULL_HANDLE)) (== target NULL_HANDLE))
+        (switch (aget status dependent)
+          STATUS_UNKNOWN
+            (switch (aget status target)
+              STATUS_OK nil
+              STATUS_EXCEPTION
+                (.markException this dependent (cast ClassNotFoundException (aget entries target)))
+              STATUS_UNKNOWN
+                (do
+                  (when (nil? (aget deps target)) (aset deps target (HandleList.)))
+                  (.add (aget deps target) dependent)
+                  (when (or (< lowDep 0) (> lowDep target)) (set! lowDep target)))
+              (throw (InternalError.)))
+          STATUS_EXCEPTION nil
+          (throw (InternalError.)))))
+
+    (method markException ^void [this ^int handle ^ClassNotFoundException ex]
+      (switch (aget status handle)
+        STATUS_UNKNOWN
+          (do
+            (aset status handle STATUS_EXCEPTION)
+            (aset entries handle ex)
+            (let [dlist (aget deps handle)]
+              (when (some? dlist)
+                (let [ndeps (.size dlist)]
+                  (loop [^int i 0]
+                    (when (< i ndeps)
+                      (.markException this (.get dlist i) ex)
+                      (recur (unchecked-inc-int i))))
+                  (aset deps handle nil)))))
+        STATUS_EXCEPTION nil
+        (throw (InternalError.))))
+
+    (method finish ^void [this ^int handle]
+      (let [^:mutable ^int end 0]
+        (cond
+          (< lowDep 0) (set! end (unchecked-add-int handle 1))
+          (>= lowDep handle) (do (set! end size) (set! lowDep -1))
+          :else (return))
+        (loop [^int i handle]
+          (when (< i end)
+            (switch (aget status i)
+              STATUS_UNKNOWN
+                (do (aset status i STATUS_OK) (aset deps i nil) (recur (unchecked-inc-int i)))
+              (STATUS_OK STATUS_EXCEPTION) (recur (unchecked-inc-int i))
+              (throw (InternalError.)))))))
+
+    (method setObject ^void [this ^int handle obj]
+      (switch (aget status handle)
+        (STATUS_UNKNOWN STATUS_OK) (aset entries handle obj)
+        STATUS_EXCEPTION nil
+        (throw (InternalError.))))
+
+    (method lookupObject [this ^int handle]
+      (when (and (not (== handle NULL_HANDLE)) (not (== (aget status handle) STATUS_EXCEPTION)))
+        (aget entries handle)))
+
+    (method lookupException ^ClassNotFoundException [this ^int handle]
+      (when (and (not (== handle NULL_HANDLE)) (== (aget status handle) STATUS_EXCEPTION))
+        (cast ClassNotFoundException (aget entries handle))))
+
+    (method clear ^void [this]
+      (Arrays/fill status 0 size (unchecked-byte 0))
+      (Arrays/fill entries 0 size nil)
+      (Arrays/fill deps 0 size nil)
+      (set! lowDep -1)
+      (set! size 0))
+
+    (method size ^int [this] size)
+
+    (method ^:private grow ^void [this]
+      (let [newCapacity (unchecked-add-int (bit-shift-left-int (alength entries) 1) 1)
+            newStatus (new byte/1 newCapacity)
+            newEntries (new Object/1 newCapacity)
+            newDeps (new HandleList/1 newCapacity)]
+        (System/arraycopy status 0 newStatus 0 size)
+        (System/arraycopy entries 0 newEntries 0 size)
+        (System/arraycopy deps 0 newDeps 0 size)
+        (set! status newStatus)
+        (set! entries newEntries)
+        (set! deps newDeps)))
+
+    (defclass ^:private ^:static HandleList
+      (field ^:private ^int/1 list (new int/1 4))
+
+      (field ^:private ^int size 0)
+
+      (constructor ^:public [this])
+
+      (method ^:public add ^void [this ^int handle]
+        (when (>= size (alength list))
+          (let [newList (new int/1 (bit-shift-left-int (alength list) 1))]
+            (System/arraycopy list 0 newList 0 (alength list))
+            (set! list newList)))
+        (aset list (let [old-6 size] (set! size (unchecked-inc-int size)) old-6) handle))
+
+      (method ^:public get ^int [this ^int index]
+        (when (>= index size) (throw (ArrayIndexOutOfBoundsException.)))
+        (aget list index))
+
+      (method ^:public size ^int [this] size)))
+
+  (method ^:private ^:static cloneArray [array]
+    (cond
+      (instance? Object/1 array) (.clone (cast Object/1 array))
+      (instance? boolean/1 array) (.clone (cast boolean/1 array))
+      (instance? byte/1 array) (.clone (cast byte/1 array))
+      (instance? char/1 array) (.clone (cast char/1 array))
+      (instance? double/1 array) (.clone (cast double/1 array))
+      (instance? float/1 array) (.clone (cast float/1 array))
+      (instance? int/1 array) (.clone (cast int/1 array))
+      (instance? long/1 array) (.clone (cast long/1 array))
+      (instance? short/1 array) (.clone (cast short/1 array))
+      :else (throw (AssertionError.))))
+
+  (static-initializer
+    (SharedSecrets/setJavaObjectInputStreamAccess
+      (method-ref JavaObjectInputStreamAccess ObjectInputStream/.checkArray))
+    (SharedSecrets/setJavaObjectInputStreamReadString
+      (method-ref JavaObjectInputStreamReadString ObjectInputStream/.readString))))

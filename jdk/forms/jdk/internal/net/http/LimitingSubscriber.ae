@@ -1,0 +1,80 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/LimitingSubscriber.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net.http HttpResponse$BodySubscriber)
+        '(java.nio ByteBuffer)
+        '(java.util List Objects)
+        '(java.util.concurrent CompletionStage Flow$Subscription)
+        '(jdk.internal.net.http.common Utils))
+
+(defclass ^:public ^:final LimitingSubscriber
+  :implements [(ResponseSubscribers$TrustedSubscriber T)]
+  :type-params [T]
+
+  (field ^:private ^:final ^{:tag (HttpResponse$BodySubscriber T)} downstreamSubscriber)
+
+  (field ^:private ^:final ^long capacity)
+
+  (field ^:private ^State state)
+
+  (field ^:private ^long length)
+
+  (defclass ^:private ^:interface State
+    (field ^State TERMINATED (anon State []))
+
+    (defclass ^:public ^:static ^:record Subscribed [^Flow$Subscription subscription]
+      :implements [State]))
+
+  (constructor ^:public [this ^{:tag (HttpResponse$BodySubscriber T)} downstreamSubscriber
+                         ^long capacity]
+    (when (< capacity 0)
+      (throw (IllegalArgumentException. (java-str "capacity must not be negative: " capacity))))
+    (set! (.-downstreamSubscriber this)
+          (cast HttpResponse$BodySubscriber
+                (Objects/requireNonNull downstreamSubscriber "downstreamSubscriber")))
+    (set! (.-capacity this) capacity))
+
+  (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+    (Objects/requireNonNull subscription "subscription")
+    (if (some? state)
+        (.cancel subscription)
+        (do
+          (set! state (LimitingSubscriber$State$Subscribed. subscription))
+          (.onSubscribe downstreamSubscriber subscription))))
+
+  (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} buffers]
+    (Objects/requireNonNull buffers "buffers")
+    (java-assert (Utils/hasRemaining buffers))
+    (when-instance [^LimitingSubscriber$State$Subscribed subscribed state]
+      (let [lengthAllocated (.allocateLength this buffers)]
+        (if lengthAllocated
+            (.onNext downstreamSubscriber buffers)
+            (do
+              (set! state State/TERMINATED)
+              (.onError downstreamSubscriber
+                        (IOException. (java-str "body exceeds capacity: " capacity)))
+              (.cancel (.-subscription subscribed)))))))
+
+  (method ^:private allocateLength ^boolean [this ^{:tag (List ByteBuffer)} buffers]
+    (let [bufferLength (Utils/remaining buffers)
+          ^:mutable ^long nextLength 0]
+      (try
+        (set! nextLength (Math/addExact length bufferLength))
+        (catch ArithmeticException _ (return false)))
+      (if (> nextLength capacity) false (do (set! length nextLength) true))))
+
+  (method ^:public onError ^void [this ^Throwable throwable]
+    (Objects/requireNonNull throwable "throwable")
+    (when (instance? LimitingSubscriber$State$Subscribed state)
+      (set! state State/TERMINATED)
+      (.onError downstreamSubscriber throwable)))
+
+  (method ^:public onComplete ^void [this]
+    (when (instance? LimitingSubscriber$State$Subscribed state)
+      (set! state State/TERMINATED)
+      (.onComplete downstreamSubscriber)))
+
+  (method ^:public getBody ^{:tag (CompletionStage T)} [this]
+    (.getBody downstreamSubscriber)))
