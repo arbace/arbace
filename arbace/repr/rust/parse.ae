@@ -16,6 +16,7 @@
   them is rustc's first error, doc/rust/NATIVE-READER.md, \"Errors\"), a returned one rides the
   thrown perr until a snapshot's restore cancels it or the parse's end emits it."
   (:require [arbace.repr.rust.lex :as lx]
+            [arbace.repr.rust.stack :as stk]
             [arbace.string :as str])
   (:import [arbace.repr.rust.lex Tok Src]))
 
@@ -1827,72 +1828,73 @@
   "parse_ty_common; o: {:allow-plus (default true) :c-variadic :recover-qpath (default true)
   :recover-return-sign (:yes :only-fat-arrow :no) :ty-generics :recover-question (default true)}"
   [^P p o]
-  (let [allow-plus (get o :allow-plus true)
-        recover-question (get o :recover-question true)]
-    (when (and (is? :Pound) (identical? (.-kind (la p 1)) :OpenBracket))
-      (let [as (parse-outer-attrs p)
-            as-span (sp-to (fget (first as) :span) (fget (peek as) :span))]
-        (if (attempt (parse-ty p))
-          (emit p "attributes cannot be applied to types" as-span)
-          (emit p "attributes cannot be applied here" as-span))))
-    (let [lo (tsp)
-          impl-dyn-multi (volatile! false)
-          kind
-          (cond
-            (check p :OpenParen) (parse-ty-tuple-or-parens p lo allow-plus)
-            (eat p :Bang) 'Never
-            (eat p :Star) (parse-ty-ptr p)
-            (eat p :OpenBracket) (parse-array-or-slice-ty p)
-            (or (check p :And) (check p :AndAnd)) (do (expect-and p) (parse-borrowed-pointee p))
-            (eat-kw-ne p "typeof")
-            (do (expect p :OpenParen) (parse-expr-anon-const p) (expect p :CloseParen)
-                (emit p "`typeof` is a reserved keyword but unimplemented" (sp-to lo (psp)) "E0516"))
-            (builtin? p) (parse-builtin p (fn [lo nm]
-                                            (when (= nm "field_of")
-                                              (let [container (parse-ty p)]
-                                                (expect p :Comma)
-                                                (let [fields (parse-floating-field-access p)]
-                                                  (eat p :Comma)
-                                                  (when-not (check p :CloseParen) (unexpected p))
-                                                  (case (count fields)
-                                                    1 (list 'FieldOf container 'None (first fields))
-                                                    2 (list 'FieldOf container (list 'Some (first fields)) (second fields))
-                                                    (fail p "`field_of!` expects a field or a variant with a field")))))))
-            (eat-kw p "_") 'Infer
-            (check-fn-front-matter p false :sensitive) (parse-ty-fn-ptr p lo [] (get o :recover-return-sign :yes))
-            (check-kw p "for")
-            (let [[bound-vars _] (parse-higher-ranked-binder p)]
-              (if (check-fn-front-matter p false :sensitive)
-                (parse-ty-fn-ptr p lo bound-vars (get o :recover-return-sign :yes))
-                (if (or (kw? (tok) "impl") (kw? (tok) "dyn"))
-                  (let [kw (tok)]
-                    (bump p)
-                    (let [path (parse-path p :type)
-                          d (diag (str "`for<...>` expected after `" (.-sym ^Tok kw) "`, not before") (tspan kw))]
-                      (parse-remaining-bounds-path p bound-vars path lo (and allow-plus (check-plus p)) 'No)
-                      (emit-diag p d)))
-                  (let [path (parse-path p :type)]
-                    (parse-remaining-bounds-path p bound-vars path lo (and allow-plus (check-plus p)) 'No)))))
-            (eat-kw p "impl") (parse-impl-ty p impl-dyn-multi)
-            (explicit-dyn-type? p) (parse-dyn-ty p impl-dyn-multi)
-            (eat-lt p) (let [[qself path] (parse-qpath p :type)] (list 'Path (list 'Some qself) path))
-            (and (or (kw? (tok) "const") (kw? (tok) "mut")) (identical? (.-kind (la p 1)) :Star))
-            (let [ks (tsp) m (.-sym (tok))]
-              (bump p) (bump p) (parse-ty-common p {:recover-question false})
-              (emit p (str "raw pointer types must be written as `*" m " T`") ks))
-            (check-path p) (parse-path-start-ty p lo allow-plus (:ty-generics o))
-            (can-begin-bound p) (parse-bare-trait-object p lo allow-plus)
-            (eat p :DotDotDot) (if (:c-variadic o) 'CVarArgs (emit p "C-variadic type `...` may not be nested inside another type" lo "E0743"))
-            (and (check-kw p "unsafe") (identical? (.-kind (la p 1)) :Lt)) (parse-unsafe-binder-ty p)
-            :else (fail p (str "expected type, found " (describe (tok)))))
-          ty (mk-ty (sp-to lo (psp)) kind)]
-      ;; maybe_recover_from_bad_type_plus, maybe_report_ambiguous_plus, maybe_recover_from_question_mark
-      (when (and allow-plus (like-plus? (tok)))
-        (bump p) (parse-generic-bounds p)
-        (emit p "expected a path on the left-hand side of `+`" (ty-span ty) "E0178"))
-      (when (and (not allow-plus) @impl-dyn-multi) (emit p "ambiguous `+` in a type" (ty-span ty)))
-      (when (and recover-question (is? :Question)) (bump p) (emit p "invalid `?` in type" (psp)))
-      (if (get o :recover-qpath true) (maybe-recover-from-bad-qpath p ty) ty))))
+  (stk/ensure-sufficient-stack
+    (let [allow-plus (get o :allow-plus true)
+          recover-question (get o :recover-question true)]
+      (when (and (is? :Pound) (identical? (.-kind (la p 1)) :OpenBracket))
+        (let [as (parse-outer-attrs p)
+              as-span (sp-to (fget (first as) :span) (fget (peek as) :span))]
+          (if (attempt (parse-ty p))
+            (emit p "attributes cannot be applied to types" as-span)
+            (emit p "attributes cannot be applied here" as-span))))
+      (let [lo (tsp)
+            impl-dyn-multi (volatile! false)
+            kind
+            (cond
+              (check p :OpenParen) (parse-ty-tuple-or-parens p lo allow-plus)
+              (eat p :Bang) 'Never
+              (eat p :Star) (parse-ty-ptr p)
+              (eat p :OpenBracket) (parse-array-or-slice-ty p)
+              (or (check p :And) (check p :AndAnd)) (do (expect-and p) (parse-borrowed-pointee p))
+              (eat-kw-ne p "typeof")
+              (do (expect p :OpenParen) (parse-expr-anon-const p) (expect p :CloseParen)
+                  (emit p "`typeof` is a reserved keyword but unimplemented" (sp-to lo (psp)) "E0516"))
+              (builtin? p) (parse-builtin p (fn [lo nm]
+                                              (when (= nm "field_of")
+                                                (let [container (parse-ty p)]
+                                                  (expect p :Comma)
+                                                  (let [fields (parse-floating-field-access p)]
+                                                    (eat p :Comma)
+                                                    (when-not (check p :CloseParen) (unexpected p))
+                                                    (case (count fields)
+                                                      1 (list 'FieldOf container 'None (first fields))
+                                                      2 (list 'FieldOf container (list 'Some (first fields)) (second fields))
+                                                      (fail p "`field_of!` expects a field or a variant with a field")))))))
+              (eat-kw p "_") 'Infer
+              (check-fn-front-matter p false :sensitive) (parse-ty-fn-ptr p lo [] (get o :recover-return-sign :yes))
+              (check-kw p "for")
+              (let [[bound-vars _] (parse-higher-ranked-binder p)]
+                (if (check-fn-front-matter p false :sensitive)
+                  (parse-ty-fn-ptr p lo bound-vars (get o :recover-return-sign :yes))
+                  (if (or (kw? (tok) "impl") (kw? (tok) "dyn"))
+                    (let [kw (tok)]
+                      (bump p)
+                      (let [path (parse-path p :type)
+                            d (diag (str "`for<...>` expected after `" (.-sym ^Tok kw) "`, not before") (tspan kw))]
+                        (parse-remaining-bounds-path p bound-vars path lo (and allow-plus (check-plus p)) 'No)
+                        (emit-diag p d)))
+                    (let [path (parse-path p :type)]
+                      (parse-remaining-bounds-path p bound-vars path lo (and allow-plus (check-plus p)) 'No)))))
+              (eat-kw p "impl") (parse-impl-ty p impl-dyn-multi)
+              (explicit-dyn-type? p) (parse-dyn-ty p impl-dyn-multi)
+              (eat-lt p) (let [[qself path] (parse-qpath p :type)] (list 'Path (list 'Some qself) path))
+              (and (or (kw? (tok) "const") (kw? (tok) "mut")) (identical? (.-kind (la p 1)) :Star))
+              (let [ks (tsp) m (.-sym (tok))]
+                (bump p) (bump p) (parse-ty-common p {:recover-question false})
+                (emit p (str "raw pointer types must be written as `*" m " T`") ks))
+              (check-path p) (parse-path-start-ty p lo allow-plus (:ty-generics o))
+              (can-begin-bound p) (parse-bare-trait-object p lo allow-plus)
+              (eat p :DotDotDot) (if (:c-variadic o) 'CVarArgs (emit p "C-variadic type `...` may not be nested inside another type" lo "E0743"))
+              (and (check-kw p "unsafe") (identical? (.-kind (la p 1)) :Lt)) (parse-unsafe-binder-ty p)
+              :else (fail p (str "expected type, found " (describe (tok)))))
+            ty (mk-ty (sp-to lo (psp)) kind)]
+        ;; maybe_recover_from_bad_type_plus, maybe_report_ambiguous_plus, maybe_recover_from_question_mark
+        (when (and allow-plus (like-plus? (tok)))
+          (bump p) (parse-generic-bounds p)
+          (emit p "expected a path on the left-hand side of `+`" (ty-span ty) "E0178"))
+        (when (and (not allow-plus) @impl-dyn-multi) (emit p "ambiguous `+` in a type" (ty-span ty)))
+        (when (and recover-question (is? :Question)) (bump p) (emit p "invalid `?` in type" (psp)))
+        (if (get o :recover-qpath true) (maybe-recover-from-bad-qpath p ty) ty)))))
 
 (defn parse-ty
   "parse_ty (a C-variadic ... is an error, emitted)"

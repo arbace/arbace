@@ -1125,3 +1125,53 @@ mirrors, the crate set's extraction; a unit's builds removed after their compari
   `include!` after `=`, `(`, `,`), non-`.rs` files included, `(rs/expr e)`; (b) `.rs` files only;
   (c) found by expansion (the helper records the files `include!` loads in an expression's place,
   which needs each crate expanded). *Recommended: (a).*
+
+## RCD1: the deep files, rustc's ensure_sufficient_stack (2026-11-17, round 52)
+
+The read and print cells' one deferred class, `:converter-depth` (3 files of the UI suite: `associated-consts/issue-93775.rs`,
+964 nested generic applications; `expr/if/expr-stack-overflow.rs`, 5,204 `else if`s; `parser/survive-peano-lesson-queue.rs`, 8 MB),
+had moved: with the native reader the round trip's default (rust-90), the first stop was the native parser, not the converter
+(a synthetic file of 964 nested `S<...>`: "native reader failed: java.lang.StackOverflowError"). The evaluator stops at about
+10,000 nested evaluated calls a thread (Compiler's `Evaluator/MAX_DEPTH`, J2G-SPEC §10.5); rustc survives these files by
+`ensure_sufficient_stack` (rustc_data_structures' stack.rs over stacker's `maybe_grow`), a fresh stack segment when less than a
+red zone is left.
+
+### What was built
+
+- `arbace.repr.rust.stack` (`arbace/repr/rust/stack.ae`, Arbace's own): `ensure-sufficient-stack`, a macro that reads the
+  thread's evaluated depth (`(.-depth (Compiler$Evaluator/state))`, one field) and, past `red-zone` (7,000), runs its body on a
+  new thread (depth 0, a goroutine stack of its own), the caller's bindings conveyed (`bound-fn*`), its value returned or its
+  throwable thrown again (the same object: the parser's `identical? perr` holds). Nothing sets a dynamic var inside the
+  wrapped bodies, and the parser's state `P` is a mutable object handed across the join.
+- Wrapped, at the recursions' hubs: the parser's `parse-ty-common`, `parse-expr-assoc-after-attrs`, `parse-expr-prefix`,
+  `parse-block-common`, `parse-pat-with-range-pat`, `parse-item-common` and `parse-expr-else`'s `if` (where rustc itself wraps);
+  the native dump's `out`, `tree-at` and `facts`; the tree texts' compounds; the converter's `collect-starts`, `tt-form`,
+  `ty-form`, `pat-form`, `expr-form`, `item-forms`, `stmts-forms`, `generic-args`; the printer's `print-expr-raw*`,
+  `print-pat-raw`, `print-ty-raw`, `print-item`, `internalize`, `strip-positions`.
+- The round trip's tree texts with `--depths` (`arbace.repr.rust.native tree --depths`, `bin/repr-rust`'s `run_trees` for the
+  native reader): each line's indentation written as its depth in decimal, the same text (N spaces as the number N; a line's
+  content opens a compound, never a digit). rsdump tree's indentation is quadratic in the nesting: 56 MB of text for 964
+  nested types, about 1 GB for 5,204 `else if`s (a 2 GB process, stopped); with depths 0.2 MB and 3 MB. `native-check --trees`
+  (the native texts against the helper's, byte for byte) keeps rsdump's format.
+
+### Checks (light, one file a process)
+
+Synthetic files of each shape (`.tmp/deep/` in the worktree), read natively, printed in mode `:lines` and the pretty layout,
+the trees and lines of the original and the printed files compared (`--depths`): 964 nested `S<...>` (and the issue's shape:
+`type Nested = S<S<...Z>>` 1,000 deep with `Nested::NUM`), 5,204 `else if`s, 3,000 nested parentheses and unary minuses,
+3,000 nested blocks, 3,000 nested tuple patterns, 3,000 nested token-tree brackets in a macro call, 800 nested modules,
+5,000 `+` terms: every one equal (trees, lines; the pretty layout's trees); the 964 and the 5,204 also in mode `:full`, printed
+back byte for byte. Each process 0.8-1.3 GB. std's `core/src/{option,hint,cell}.rs` and `alloc/src/rc.rs` round trip
+(`--text --pretty`) equal, the edit controls 7 of 7 failing their judges as they must.
+
+Not run here: the three files themselves (the UI tarball is not on the host). The known files keep them until the day's run
+confirms (DECISION RCD1 below); `parser/survive-peano-lesson-queue.rs`'s shape is unknown here (its depth decides how many
+threads stand at once).
+
+### Decided (taken overnight, round 52)
+
+- **RCD1 The deep files.** (a) **As built: rustc's own remedy, the stack grown by a thread at the recursions' hubs, the round
+  trip's tree texts with depths**; (b) the evaluator's `MAX_DEPTH` raised (the runtime's key, every build, and Go's 1 GB stack
+  the limit still); (c) repr/rust embedded and compiled (out of the crops' paths, every key). *Recommended: (a)*, light and
+  local to the crop. The known files keep the three entries until `bin/repr-rust roundtrip --text --pretty --only-list LIST
+  rustc-1.99.1-ui` reports them FIXED; then each FIXED entry is removed from the tree, text and pretty known files.
