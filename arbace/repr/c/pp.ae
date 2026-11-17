@@ -576,6 +576,15 @@
 
 (declare parse-defined parse-has parse-pragma parse-macro-args subst include-next-paths expression uv u?)
 
+(def ^:dynamic *paste-at*
+  "Arbace: the invocation's macro name token while its replacement list is substituted: where gcc places a pasting error
+  whose left operand the expansion made (a stringized argument) or that a __VA_OPT__'s body makes (va-opt-6)." nil)
+(def ^:dynamic *in-va-opt* "Arbace: whether a __VA_OPT__'s body is being substituted." false)
+(def ^:private stringized
+  "Arbace: the tokens stringize made (identity), the left operands glue places at the invocation."
+  (java.util.Collections/synchronizedMap (java.util.WeakHashMap.)))
+(defn- stringized! [^Tok t] (.put ^java.util.Map stringized t true) t)
+
 (defn expand
   "cpp.expand: the tokens of `ts` expanded into `w` (an ArrayList); `outer`: one token at a time
   (the tokenizer's), `eval`: in a #if (defined and the __has_ operators)."
@@ -600,11 +609,11 @@
                         :else (recur (inc i) level)))))]
           (cond
             (and eval (= s "defined")) (recur (parse-defined c ts))
-            (and eval (has-ops s)) (recur (parse-has c ts s))
+            (and eval (has-ops s)) (recur (parse-has c ts s t))
             ;; Arbace: gcc answers the attribute and builtin operators outside #if too (cc: an identifier)
             (and (not eval) (#{"__has_attribute" "__has_c_attribute" "__has_builtin" "__has_cpp_attribute"} s)
                  (= (ch (first (ts-peek-non-blank ts))) \())
-            (recur (parse-has c ts s))
+            (recur (parse-has c ts s t))
             (and (not eval) (= s "__has_embed") (= (ch (first (ts-peek-non-blank ts))) \())
             (let [w (ArrayList.)
                   body (loop [acc [] level 0]
@@ -631,7 +640,7 @@
                             (slot! c COUNTER (inc n))
                             (assoc m :rl [(Tok. :PPNUMBER (str n) (.-sep t) (.-pf t) (.-po t) nil nil)]))
                           m)
-                      sub (subst c eval m (:rl m) nil nil (hs-add hs s) [])]
+                      sub (binding [*paste-at* t] (subst c eval m (:rl m) nil nil (hs-add hs s) []))]
                   (ts-prepend ts (mapv #(lex/with-pos-m % t m) sub))
                   (recur ts))
                 :else
@@ -645,7 +654,7 @@
                             (do (eh c (str (pos-str rparen) ": too many macro arguments"))
                                 (when (= (ret) ::more) (recur ts)))
                             :else
-                            (let [sub (subst c eval m (:rl m) (:params m) args (hs-add (hs-cap hs (.-hs rparen)) s) [])]
+                            (let [sub (binding [*paste-at* t] (subst c eval m (:rl m) (:params m) args (hs-add (hs-cap hs (.-hs rparen)) s) []))]
                               (ts-prepend ts (mapv #(lex/with-pos % t) sub))
                               (recur ts)))))
                     (when (= (ret) ::more) (recur ts))))))))))))
@@ -688,11 +697,16 @@
   "Arbace (cc: parseHasFeature, its own answers for __has_feature and __has_builtin, 0 else): the
   reference's __has_attribute, __has_c_attribute, __has_builtin, __has_feature, __has_extension:
   `op ( name )`, the name an identifier or `vendor::name`, replaced by the recorded answer."
-  [^Cpp c ts ^String op]
+  [^Cpp c ts ^String op ^Tok opt]
   (skip-blank ts)
-  (let [p (ts-peek ts 0)]
-    (if-not (= (ch p) \()
-      (do (eh c (str (pos-str p) ": operator \"" op "\" requires a parenthesized identifier")) ts)
+  (let [p (ts-peek ts 0)
+        ;; the line's end has no position: the operator's (review 006's finding 1)
+        p (if (and opt (nil? (lex/tok-position p))) opt p)]
+    (if-not (= (ch (ts-peek ts 0)) \()
+      (do (eh c (str (pos-str p) (if (contains? #{"__has_c_attribute" "__has_attribute" "__has_cpp_attribute"} op)
+                                   (str ": missing '(' after \"" op "\"") ; c_common_has_attribute's
+                                   (str ": operator \"" op "\" requires a parenthesized identifier"))))
+          ts)
       (do (ts-shift ts)
           (let [closed (volatile! false)
                 raw (loop [acc []]
@@ -819,7 +833,8 @@
                  (not (if cxx lexed (single-token? text)))
                  ;; Arbace (CS143): `::` is a token in C23 (6.4.7)
                  (not (and (= text "::") c23)))
-          (do (eh c (str (pos-str t) ": pasting \"" (.-src t) "\" and \"" (.-src r0)
+          (do (eh c (str (pos-str (if (and *paste-at* (or *in-va-opt* (.containsKey ^java.util.Map stringized t))) *paste-at* t))
+                         ": pasting \"" (.-src t) "\" and \"" (.-src r0)
                          "\" does not give a valid preprocessing token"))
               (-> ls (conj sp-tok) (into rs)))
           (let [t2 (Tok. k text "" (.-pf t) (.-po t) (.-m t) (hs-cap (.-hs t) (.-hs r0)))]
@@ -905,7 +920,7 @@
             (let [k (count bodies)
                   nm (str "__VA_OPT__\u0000" k)
                   body (if (va-present? c eval m aps)
-                         (subst c eval (assoc (dissoc m :opt :opt-bodies :opt-base) :pm true) content fp aps nil [])
+                         (binding [*in-va-opt* true] (subst c eval (assoc (dissoc m :opt :opt-bodies :opt-base) :pm true) content fp aps nil []))
                          [])]
               (recur (long j) (conj out (Tok. :IDENTIFIER nm (.-sep t) (.-pf t) (.-po t) (.-m t) (.-hs t)))
                      (assoc opt nm (+ 1000000 (count aps) k)) (conj bodies (trim body))))
@@ -933,7 +948,7 @@
                     (let [[^Tok t2 skip] (peek-non-blank-v is i)
                           skip (long skip)]
                       (when (and (= (.-ch t2) :IDENTIFIER) (>= (m-is m (.-src t2)) 0))
-                        [(+ i skip 1) (conj os (stringize t (ap-select m t2 aps (m-is m (.-src t2)))))])))
+                        [(+ i skip 1) (conj os (stringized! (stringize t (ap-select m t2 aps (m-is m (.-src t2))))))])))
                   (let [[^Tok t i space-deleted] (if (and (= (.-ch t) \space) (< i n) (= (ch (is i)) :PPPASTE))
                                                    [(is i) (inc i) true]
                                                    [t i false])]
@@ -949,7 +964,7 @@
                                  (and (= (.-ch t3) :IDENTIFIER) (>= (m-is m (.-src t3)) 0))))
                           (let [[^Tok t3 skip3] (peek-non-blank-v is (+ i skip 1))]
                             [(+ i skip 1 (long skip3) 1)
-                             (glue c os [(stringize t2 (ap-select m t3 aps (m-is m (.-src t3))))])])
+                             (glue c os [(stringized! (stringize t2 (ap-select m t3 aps (m-is m (.-src t3)))))])])
                           (>= k 0)
                           (if (arg-empty? m aps k)
                             [(+ i skip 1)

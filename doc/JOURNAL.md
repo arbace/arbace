@@ -10362,3 +10362,25 @@ executable built with the new table, `:std-weak-unique` kept for it (gate_key mo
   (with the std internals it imports; interpreted until a re-seed, a large program for two tests). The class left
   `test/goi/divergences.edn`, the two lines `test/goi/check-known.edn`; doc/go/GOI-SPEC.md "Since v1: types2's range and slice
   checks", doc/go/GO-PARSER-SURVEY.md "As built: GPS43, types2's range and slice checks".
+
+## 2026-11-17: C's read cell, the dg diagnostics h-c-deferred left (branch `h-c-decl-diag`, from `next` `498d7296f`)
+
+The host burst's task: the read cell's 27 deferred rows (dg 22, eval-depth 5). Ten dg rows fixed by porting gcc's diagnostics in
+its words, each proved on its file and on a list of 284 dg files (no other row changed); doc/C23-SURVEY.md, "As built: the read
+cell's dg diagnostics", lists them. The checker (`arbace/c/check.ae`): C99 6.7.4p3's statics of an inline definition (gcc's
+check_inline_statics) and "used but never defined" (unevaluated operands as gcc's in_typeof: sizeof, typeof, _Alignof, _Generic's
+controlling one), both only under a compilation (`check-unit`'s new `:compile`, given by dg's compile and run tests: gcc
+-fsyntax-only, the annotations' and round trip's reference, gives neither, as c23-complit-8.c's annotation row showed); a goto into
+the scope of a variably modified identifier; the conditional's composite of structures of constant and variable size; C23's fixed
+enums' empty declarations, misplaced and invalid underlying types, wrong kind of tag and incompatible redeclarations;
+`va_start ()`; `transaction_safe` in a structure's identity. The parser (`parse.ae`): a GNU nested function's definition gives the
+enclosing function's label scope back (cc's tree check keeps cc's "label undefined": gnu23-varmod-1.c known there as
+`:gcc-syntax`). The preprocessor (`pp.ae`): `__has_c_attribute` without its parenthesis in gcc's words at the operator; a pasting
+error of a stringized or `__VA_OPT__` operand at the invocation. Read 5225 / 223 / 27 to 5234 / 224 / 17; the read cell 96 (100
+without by design). Rows re-recorded by id from listed runs (h-c-deferred's merge, `.tmp/keep/wt-h-c-deferred/tools/merge.clj`,
+with the CSP5 path rule): dg 10, annotations 9, round trip 2 (levels 3-4 under `ARBACE_C_JUDGE=gcc`), tree check 2.
+Alternatives considered: a `(c/bad-defn MESSAGE TEXT)` form so that c23-auto-3.c's and c23-constexpr-3.c's reads go on past a
+definition whose declarator is not a function's (tried: the checker then runs and still misses 29 and about 150 lines of gcc's long
+tail; not kept); eval-depth's five limits-*.c rows: the parse stops at MAX-NEST 4000 by design and the converter never sees those
+trees, so no converter change helps without moving the cap (a DECISION for the user: an explicit stack in the parser's nesting
+productions and every tree walker after it, or the rows kept deferred).
