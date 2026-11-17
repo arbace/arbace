@@ -558,7 +558,19 @@
                                                      (and (zero? i) (:has-self m) (= "Self" nm)) (assoc :self true)))
                                (:generics m)))}
   (if (and (#{"AssocTy" "AssocFn" "AssocConst { is_type_const: false }"} (ext-kind p)) (= "Trait" (ext-kind (path-parent p))))
-    {:parent-count (count (get (:generics *std*) (path-parent p))) :params [] :has-parent true}
+    (let [pc (count (get (:generics *std*) (path-parent p)))
+          ;; round 52: a generic associated type's own parameters (`Pattern::Searcher<'a>`), read off its bounds in std's
+          ;; interface: the item's projection over the trait's identity arguments, then its own
+          own (when (= "AssocTy" (ext-kind p))
+                (let [bs (some (fn [it] (when (and (vector? it) (= p (nth it 2 nil))) (nth it 3 nil))) (:items (get (:traits *si*) (path-parent p))))
+                      pr (when (sequential? bs)
+                           (first (filter (fn [x] (and (seq? x) (= 'projection (first x)) (= p (second x))))
+                                          (tree-seq (fn [x] (or (seq? x) (vector? x))) seq bs))))]
+                  (when pr (drop pc (nth pr 2)))))]
+      {:parent-count pc :has-parent true
+       :params (vec (map-indexed (fn [i a] {:name (if (= 'lt (first a)) (second a) (nth a 2))
+                                             :kind (case (first a) lt :lifetime cparam :const :type) :index (+ pc i)})
+                                 own))})
   (let [ps (or (get (:generics *std*) p)
                ;; RF10: a lang item ADT no public module reaches (std's names lack it): its interface's generics
                (:generics (get (:adts *si*) p)))]
@@ -1572,6 +1584,15 @@
           (let [self-ty (binding [*self-ty* nil] (lower-ty (:self-ty n)))]
             [self-ty (when-let [ot (:of-trait n)] (binding [*self-ty* self-ty] (lower-trait-ref (:path ot) self-ty)))]))))))
 
+(defn param-defaults
+  "round 52: a definition's own type parameters' defaults as types ({NAME TY}; `Box<T, A = Global>`'s A), as type_of writes
+  them in generics_of"
+  [id]
+  (let [g (generics-of id)]
+    (into {} (for [p (:params g) :when (and (:default p) (not= :const (:kind p)))
+                   :let [t (try (in-def id (lower-ty (:default p))) (catch Throwable _ nil))] :when t]
+               [(:name p) t]))))
+
 (def ^:dynamic *impl-cache* nil)
 (defn impl-header [id] (or (get @*impl-cache* id) (let [h (impl-header* id)] (swap! *impl-cache* assoc id h) h)))
 
@@ -1597,7 +1618,9 @@
               inputs (vec (for [p (:params f)] (lower-ty (:ty p))))
               ;; RF9b: lifetime elision (resolve_fn_signature): the output's elided lifetimes are the reference
               ;; receiver's, else the inputs' one lifetime position's
-              rs (input-regions inputs)
+              ;; round 52: a by-value `self` (its type the implicit Self) has no elision candidates (resolve_fn_params:
+              ;; find_lifetime_for_self empty), though Self may stand for a reference (`impl Pattern for &'b String`)
+              rs (input-regions (if (#{:imm :mut} (:self f)) (vec (rest inputs)) inputs))
               fixed (cond (and (#{:ref-imm :ref-mut} (:self f)) (= :ref (first (first inputs)))) (second (first inputs))
                           (= 1 (count rs)) (first rs)
                           :else nil)]

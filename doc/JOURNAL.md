@@ -10351,3 +10351,19 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   convert/mod, ops/try_trait), none in core-essential's modules: the day runs core-essential, rind-test and core's check.
   Decisions RIND9a-6, RIND9a-7 taken overnight (round 52), doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass:
   its three causes fixed". Alternatives there.
+
+## 2026-11-18: RIND9 (a): alloc's pass, the compare module by module (branch `n-rust-alloc3`, from `n-rust-alloc2` `1a6ec44bf`)
+
+- slice.rs' two causes fixed (Fn sugar's late-bound regions in where clauses written in their binder, `'^#0`; an impl in a
+  body inside an impl's function written at its def path), then boxed/convert, string, boxed, rc, sync, fmt, vec_deque, raw_vec
+  and vec passed alone or in pairs (one process each, under 0.91 GB) against the helper's std-iface (rust-src 1.99.1), and their
+  causes fixed in arbace/rust/front/ (core_check's writer, collect, expand, expand_derive): trait objects, outlives and
+  ConstArgHasType clauses, cfg_attr's derive (string.rs did not expand), a std GAT's own parameters, by-value self's elision,
+  type parameter defaults, the `rust-call` ABI, negative impls, and tool-attributed items' DefId order (`#[rustfmt::skip]`:
+  rustc's attribute invocation), which renumbered vec's and raw_vec's impls.
+- Results: slice 32 to 37 of 37, boxed/convert 26 to 54 of 54, string 0 to 284 of 284, boxed 166 of 166, rc 274 of 274, sync
+  287 of 287, vec with raw_vec 168 of 168 (vec alone 12 of 164 before); unit cases 8 more pure and five more modules
+  (`alloc-iface-units.txt` ten), the known file re-recorded. Decisions RIND9a-8 to RIND9a-10 taken overnight (round 52),
+  doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass: the compare module by module", alternatives there.
+- core's native facts may move (const generics' clauses, trait objects, impl numbering in option.rs and result.rs): the day runs
+  core-essential, rind-test, core's check and the whole alloc pass.
