@@ -7283,3 +7283,53 @@ only). To follow JOP7 (a) the night stops after the platform's commit and the pa
 | switch night, JOP13 (a) until the own source sets | 0.5 | 0.5 | 0.5 | 0.5 | 0.986 | 60 |
 | JOP13 (a) built | 1 | 1 | 1 | 1 | 0.986 | 100 (99.7) |
 | JCV2 (c) (the 207 reviewed) | | | | | 1 | 100 |
+
+## As built: JOP13 (a), the source sets as Arbace's own record (2026-11-17, round 52; branch `n-java-sources`)
+
+**JOP13 (a), taken overnight (round 52).** Each test's source set is now made by javac on Arbace and kept as Arbace's own record,
+`test/java/sources.edn`, one row a test: `[ID {:sources :own :platform P :files [[REL DST] ...] :unnamed [DST ...]}]`, a
+golden-diagnostics test (run in place by javac on Arbace, no set consumed) `:in-place true`, a set javac on Arbace could not make
+`:sources "why"` (not own). `:platform` is the platform javac on Arbace read against: `:own` when `jdk/javac/platform.sha256` has
+`# kind: own`, else the build tree's name.
+
+| piece | what |
+|---|---|
+| `bin/java-check sources [--jobs N] [--only RE] [--list FILE] [--scan DIR] [--record]` | `java.check/scan` (or a scan made before, `--scan`), then `record_sources` as `--record-ref` runs it but with `JAVA_CHECK_OWN_JAVAC` (`bin/repr-java javac` on `REPR_JAVA_EXE`, the same `-verbose -implicit:class -sourcepath DIR[:ROOTS]`, `GOMEMLIMIT` `JAVA_CHECK_SOURCES_MEM`, default 1GiB, each javac under `busybox time -v`, `WORK/sources/mem.tsv`), `rename`, then `java.check/own-sources`: rows compared with `ref-jdk26.edn`'s `:files`, `--record` writing them (other tests' rows kept) |
+| javac on Arbace's `-verbose` | every parsed file as `WrappedJavaFileObject[PATH]` (the argument as given, `./REL` from the source path's `.`, `ROOT/REL` from a source root), parsed by its own branch of `record_sources`; the JDK's branch unchanged |
+| `record_sources`' file list | each file once: the plan names the main file for `@compile`, `@build` and `@run`; the JDK's javac takes a repeated file once, javac on Arbace's command line (`jdk.internal.jrt.javac.Main`) parses it again and fails with "duplicate class" (found here: 6 of the first 8 tests). The JDK's sets are unchanged by it |
+| `java.check/plan` | a test's `:files`/`:unnamed` from `sources.edn` (beside the reference) when its row has them and is `:own`, else the JDK's; `JAVA_CHECK_SOURCES=jdk`: the JDK's always. So the read, interp, compiled and print levels consume the own record where it exists |
+| `bin/java-check sources --check [--complete]`, step `java-sources-oracle` | the oracle tier's (`:phase :oracle`, `:hosts [:stage0]`, 1 GiB, records alone): every test with a JDK set against its row (equal, differ, not made, unrecorded), the negative control (the first equal row judged against another test's JDK set, which must differ); exit 1 on a difference, a set not made, a passing control, and with `--complete` a test the record lacks |
+| `test/crops/crops.edn` `:own-inputs :java` | `[:platform :sources]`: a case is own when both are `:own` |
+| `test/crops/independence.edn` | Java's read, eval, AOT and print: `:case-inputs {:file "test/java/sources.edn"}` and `:requires-record {:file "test/java/sources.edn"}` beside JOP12 (a)'s `:requires-line` |
+| `test/crops/score.ae` | `requires-record-problem`: a claim above 0.5 is held at 0.5, CLAIM REFUTED, unless the record exists, is not INTERIM and has a row for every case id of the cell; `rfp53-counts` counts an id the cell's records hold twice as two cases (Java's read cell: read and classes, as the matrix counts 7,844), at most the total; `cell-ids` leaves out the `:role :beside` sources (eval's diffcheck and oracle rows, which the matrix does not count) |
+| `test/javac-platform/switch.patch` | regenerated over the new keys and the new step (still `git apply --check`), the switched comment saying the stages are 1 once the own record, made against the own pin, covers them |
+
+**Proven light** (stage 0 of next, `GOMEMLIMIT=1GiB`, javac's tool `javac-f70d1a9d900e`, one process at a time): the scan 61 s, peak
+1.06 GB (stage 0; the one process just over 1 GiB, as `--record-ref`'s own scan); `sources --jobs 1` over 10 tests (t03208, t03213
+jls; t03219 hotspot; t04247, t04266 with Util.java; t04443, t04730 run-compile, 5 and 8 files, a subpackage; t04575 run-jitopts, 4
+files; t06427, t06430 golden-diagnostics): 8 javac runs, 0.44 to 1.05 s and 301 to 327 MB each, the verb's own peak 723 MB, 17 s;
+**8 of 8 sets equal to the JDK's** (`:files` and `:unnamed`), 2 in place; `--record` wrote the 10 rows. `sources --check`: 3,325 tests
+with a JDK set, 8 equal, 0 differ, 3,317 not recorded, the control differing (717 MB). `plan` of the 10 with the own record equals
+`JAVA_CHECK_SOURCES=jdk`'s byte for byte; with a row's place altered (a copy) the plan takes it. `crops-score --self-test` 0 (512
+MB): Java's 10-case cell 10 own (1.0), the build tree's platform 0 own (0.5), one test at read and classes 2 cases; the guard
+passes a covering record and holds a record without a test, no record, an INTERIM record and a cell with no case; with the guard
+disabled and the ids counted distinct, 7 failures, as they must. `--judge --strict` 0, 0 problems, Java 59.7 unchanged (1.0 GB);
+`bin/reap` 0 problems, 53 of 56 cells (848 MB); `bin/records-check` 9 pairs, 0 problems (715 MB); `bin/gate --oracle --plan` 0
+(the new step planned, 634 MB). Projections (applied, reverted): the patch and an own pin line with the 10 rows as `:platform :own`:
+the four stages refuted, "test/java/sources.edn covers 10 of 4519 of the cell's tests", held at 0.5 (59.7, `--strict` 1); with a
+full fabricated own record (4,519 ids): read, eval, AOT and print 1, 99.7, the only problem the scores record's difference.
+
+**The whole run, the main host's** (3,325 run tests; 5,230 scanned plans, 103 skipped, 1,212 golden-diagnostics in place, 3,915
+javac runs counting the tests the JDK fails): `REPR_JAVA_EXE=<the javac tool at the checkout's arbace_javac_key> bin/java-check sources
+--jobs 8 --record` (the scan 1 min at 1.06 GB; 3,915 javac runs at about 0.7 s and 0.33 GB each: about 6 min at 8 jobs, 2.7 GiB; the
+verb's stage 0 parts under 0.8 GB), then `bin/java-check sources --check --complete`, `bin/crops-score --judge --strict`. Before the
+switch it proves the sets (:platform the build tree's: no score moves); the counted record is made after the switch's pin, the same
+command, in the switch night before its facts' commit (or JOP7 (a)'s clean-run commit). A set that differs from the JDK's is
+recorded as javac on Arbace makes it (the levels then read it) and fails the oracle step until judged.
+
+**Keys.** `gate_key` and `arbace_runtime_key` do not move. Java's level steps (`:java-run`: `bin/java-check`, `test/java/`, so
+`check.ae` and `sources.edn`) and `java-judge` rerun at the night's `--full`; `crops-score` reruns; the new oracle step never passed.
+
+**A finding for later** (not in JOP13's scope): javac on Arbace's `Main` does not drop a repeated file argument as the JDK's javac
+does (javac's `Arguments` keeps the files in a set); the fix is in `overlay/jdk/javac/jdk.compiler`'s Main (moves
+`arbace_javac_key`: a tool build), until then the callers pass each file once.

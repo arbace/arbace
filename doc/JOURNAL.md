@@ -10428,3 +10428,19 @@ script commits the facts at the switch, JOP7 (a) at the clean run; and JOP13 pro
 JDK javac's, consumed by every stage: (a) made by javac on Arbace, recommended). Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As
 built: Java's independence, stage by stage, and the facts' guard". No key moves (test/crops, test/javac-platform are in none);
 the crops-score step reruns.
+
+## 2026-11-17: JOP13 (a), the Java tests' source sets as Arbace's own record (branch `n-java-sources`, round 52)
+
+On n-java-indep (`09882cbae`). JOP13 (a), taken overnight (round 52): `bin/java-check sources` makes each test's source set by
+javac on Arbace (`record_sources` with `bin/repr-java javac -verbose -implicit:class -sourcepath`, its `WrappedJavaFileObject[...]`
+lines parsed) into `test/java/sources.edn` (a row a test, `:sources`, `:platform`, `:files`, `:unnamed`; golden-diagnostics tests
+`:in-place`); `java.check/plan` takes a test's files from it; `sources --check` and the oracle step `java-sources-oracle` compare the
+JDK's sets with it (with a negative control); crops.edn's `:own-inputs :java [:platform :sources]`, independence.edn's
+`:case-inputs` and the new `:requires-record` guard on read, eval, AOT and print (test/crops/score.ae: held at 0.5 until the record
+covers the cell's tests; an id at two checks of a cell two cases; `:role :beside` sources not cases), as n-cpp-indep's CP401 (a)
+(`0466c4d68`). switch.patch regenerated. Found: javac on Arbace's Main parses a repeated file argument twice ("duplicate class"),
+the JDK's javac once: `record_sources` passes each file once. Alternatives: JOP13 (b) (the set a run list, not a record) and (c)
+(counted at the read alone), not taken. Proven light under 1.1 GB a process: 10 tests, 8 of 8 sets equal to the JDK's (javac 0.3 GB,
+under 1.1 s each), the 10 rows recorded; self-test with controls; --judge --strict, reap, records-check 0 problems; Java 59.7
+unchanged; projections 59.7 (a partial own record, refuted) and 99.7 (a full one). The main host's whole run: `bin/java-check
+sources --jobs 8 --record`, about 7 min, 2.7 GiB. Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JOP13 (a)".
