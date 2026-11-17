@@ -4054,3 +4054,28 @@ of the expansion's def-site context, the trait's provided method through the blo
 constant `{[7, 0, 5, 2].len()}`) has no resolution. Next: resolve's lexical lookup of a def-site item in the expansion's block
 and the const argument's evaluation (a `len()` of an array literal, CTFE's first step), then `main` built. `bin/rust-front essential`
 equals its known summary after the changes (run-built 7 of 7, 1.73 GB). The cell: 4 of 5 own, unchanged.
+
+## As built: RIND5's swizzle, simd_swizzle!'s block resolved (2026-11-17, evening)
+
+The user's next slice (round 51): `Impl::concat_swizzle` of `simd_swizzle!(a, b, [7, 0, 5, 2])` resolved so that vectors' own
+`main` builds. Probed light: the pipeline (`arbace.rust.front.build-check/build-program`) over a seven-line program with the
+pack rust-front-std's names and interface, seconds a run. Three causes, each after rustc 1.99.1's behaviour:
+
+- **The block's items in scope of the body** (rustc_resolve: a block is an anonymous module whose items the body's paths see).
+  An expansion's path has no resolution in the record (its span is core's file), so collect's `res-def` looks it up by its written
+  names in `*module*`, the enclosing module (the crate's root for main), which does not hold main's block items (`struct Impl`'s
+  parent is main). `collect/*body*` (the function whose body is checked: `body-fn`, a closure's or a block item's nearest function)
+  is bound by typeck's check-body and with-solver, and `res-def` looks a name up there first (lookup-name already falls back from a
+  function body to its module), but for `self::`, `super::`, `crate::`, `$crate::` and std's crates.
+- **A macro's `use $crate::..`** (`use $crate::simd::Swizzle` in the block): lookup-name and typeck's traits in scope resolved the
+  use's written path with `$crate` as a name; now `$crate` is the macro's crate (the use's `:krate`, else core), as res-def took it
+  for paths. The impl's trait (`impl Swizzle<..> for Impl`, its header nil before) is core's `Swizzle`, and the trait is in scope for
+  `Impl::concat_swizzle` (probe-assoc-fn's trait candidate).
+- **Constant evaluation's first step**: the trait's const argument `{$index.len()}` was the unevaluated `{const :method}`, so no impl
+  matched `Swizzle<_>`. `lower-const-arg` evaluates `[..].len()` of an array literal (its elements, or a repeat's literal count,
+  through parentheses): `<[T; N]>::len` is N, here 4 (`Swizzle<4>`). The associated constant is now named as rustc names it,
+  `<main::Impl as std::simd::Swizzle<4>>::INDEX`.
+
+Unit cases: `bin/rust-front rind-test` (`test/rust/front/rind_test.ae`, the program `test/rust/front/swizzle1.rs`): `[a, b, c,
+d].len()` is 4, `[x; 3].len()` is 3, the negative case `[..].first()` stays unevaluated, the impl's trait `Swizzle<4>` through the
+block's use, main built, INDEX's name; all ok.

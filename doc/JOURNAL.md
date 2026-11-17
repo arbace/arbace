@@ -9952,3 +9952,13 @@ the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of
   `simd_swizzle!` expansion's `Impl::concat_swizzle` is unresolved (a def-site block item, a trait's provided method, the const
   argument `{$index.len()}`); the CTFE of `Swizzle::INDEX` is the record's while concat_swizzle's body is std's (C2). Alternative
   considered: evaluating INDEX now (no body of ours needs it yet; nothing would test it).
+
+## 2026-11-17: RIND5's swizzle: simd_swizzle!'s block resolved, `[..].len()` evaluated (branch `h-rust-indep`)
+
+- vectors' `main` was refused at `Impl::concat_swizzle`. Probed with the pipeline over a seven-line program: collect's res-def
+  looked the expansion's names up in the enclosing module, not main's block (`collect/*body*` now, bound by typeck's check-body and
+  with-solver); a macro's `use $crate::simd::Swizzle` resolved `$crate` as a name (now the macro's crate, in lookup-name and in
+  typeck's traits in scope); the impl's trait argument `{$index.len()}` stayed unevaluated (lower-const-arg evaluates `[..].len()` of
+  an array literal: constant evaluation's first step). Unit cases `bin/rust-front rind-test` (test/rust/front/rind_test.ae,
+  swizzle1.rs) with a negative case; `bin/rust-front essential` equal. Alternative: a general CTFE of the const argument (the
+  interpreter over the anonymous constant's MIR), larger; the literal's length covers simd_swizzle!, whose index is always one.
