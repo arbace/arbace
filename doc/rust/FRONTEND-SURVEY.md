@@ -4013,7 +4013,8 @@ after rustc 1.99.1's own code:
 codegen and rsi's lowering accept the module; `front.tsv`'s `own`), vectors on the pack. Their runs on ci are not proven here: the
 ci leg needs runtime-ci's library (a night's build), and the native leg (`rsi-native`) runs rustc as the linker (the oracle tier).
 Regressions: `bin/rust-front essential` equals its known summary (run-built 7 of 7, mono-check unchanged, every control differing;
-1.77 GB); `bin/rust-front core-essential`: 566 equal, the known summary, the control differing (2.18 GB).
+1.77 GB); `bin/rust-front core-essential`: 566 equal, the known summary, the control differing (2.18 GB). Three synthetic programs spot-checked
+after the changes (closures, iterators, traits: own as before, 2.15 GB); the other 64 are the night's rsi-build.
 
 `bin/lib/rsi/check`: `--record` may take `--front own`, and a `--record`'s default is `--front own` (`RSI_FRONT` another default;
 a run that does not record keeps the packs, so the gate's `rsi-check` and `rsi-essential` are as before); a passing `--record` writes
