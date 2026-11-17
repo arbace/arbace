@@ -92,7 +92,8 @@
 ;;; ---------------------------------------------------------------------------------------
 ;;; The forms (the dumper's): (k I) (u) (l D I) (lc D I K) (g NAME) (gp NAME UID) (pl NAME) (pv NAME)
 ;;; (pp NAME MIN MAX IMPL) (pc NAME) (pm NAME) (if T C A) (seq E...) (setl D I X) (setg G X)
-;;; (lam (REQ REST BODY)...) (letrec N (INIT...) BODY) (app F ARG...)
+;;; (lam (REQ REST BODY)...) (letrec N (INIT...) BODY) (app F ARG...) (or X Y) (or's expansion, ((lambda (t) (if t t Y)) X)
+;;; with t not in Y: X's value when true, else Y's; no frame, no closure)
 
 (defn- arity-ok? [[_ _ mn mx] n] (and (>= n mn) (or (< mx 0) (<= n mx))))
 
@@ -314,30 +315,95 @@
 (defn- pure? [e] (or (and (symbol? e) (not (temp? e))) (and (seq? e) (contains? '#{addr} (first e)))
                      (and (seq? e) (= 'aget (first e)) (= 'K (second e)))))
 
-(defn- app-step [parts i acc lst fr k]
+(defn- app-step
+  "The statements evaluating parts from i (their exprs so far acc, lst the last that is not simple), then (fin exprs)."
+  [parts i acc lst fr fin]
   (if (= i (count parts))
-    (finish-app (first parts) acc k)
+    (fin acc)
     (let [x (nth parts i)]
       (if (simple? x)
         (let [[ss e] (atom* x fr true)]
           (if (and (< i lst) (not (pure? e)))
             (let [t (tmp)]
-              (concat ss [[:bind t e]] (app-step parts (inc i) (conj acc t) lst fr k)))
-            (concat ss (app-step parts (inc i) (conj acc e) lst fr k))))
+              (concat ss [[:bind t e]] (app-step parts (inc i) (conj acc t) lst fr fin)))
+            (concat ss (app-step parts (inc i) (conj acc e) lst fr fin))))
         (cx x fr {:single true
                   :gen (fn [v]
                          (if (temp? v)
-                           (app-step parts (inc i) (conj acc v) lst fr k)
+                           (app-step parts (inc i) (conj acc v) lst fr fin)
                            (let [t (tmp)]
-                             (concat [[:bind t v]] (app-step parts (inc i) (conj acc t) lst fr k)))))})))))
+                             (concat [[:bind t v]] (app-step parts (inc i) (conj acc t) lst fr fin)))))})))))
 
-(defn- cx-app [[_ f & as] fr k]
-  (let [parts (vec (cons f as))
+(defn- eval-parts
+  "The statements evaluating forms parts in order, then (fin exprs)."
+  [parts fr fin]
+  (let [parts (vec parts)
         lst (last (remove #(simple? (nth parts %)) (range (count parts))))]
     (if (nil? lst)
       (let [[ss es] (atomize-list parts fr)]
-        (concat ss (finish-app f es k)))
-      (app-step parts 0 [] lst fr k))))
+        (concat ss (fin es)))
+      (app-step parts 0 [] lst fr fin))))
+
+(defn- let-lam
+  "The body of f when f is (lam (N false BODY)), one clause taking n operands: ((lambda (x ...) body) arg ...) is then
+  compiled inline, its frame made (scm/Frame) and no closure."
+  [f n]
+  (when (and (seq? f) (= 'lam (first f)) (= 1 (count (rest f))))
+    (let [[req rest body] (second f)]
+      (when (and (not rest) (= req n)) body))))
+
+(defn- cx-let [body as fr k]
+  (let [ev (envsym)]
+    (eval-parts as fr
+                (fn [es]
+                  (let [n (count es)
+                        frame (if (<= 1 n 3)
+                                (list* (symbol (str "scm/Frame" n)) (cur-env fr) es)
+                                (list* 'scm/Frame (cur-env fr) es))]
+                    (concat [[:bind ev frame] (list 'set! '_ ev)]
+                            (cx body (cons {:var ev} fr) k)))))))
+
+(def ^:dynamic *self*
+  "The lambda whose body is being compiled when a tail call of it may take over its frame (frame-safe?): {:lam its
+  package variable, :ev its frame's variable, :fr its frames, :n its operand count}, else nil."
+  nil)
+
+(defn- frame-safe?
+  "Whether form x (in tail position when tail) leaves no reference to its frame when run: no lambda, no continuation
+  pushed (a call not in tail position), no letrec. The evaluator's frameSafe."
+  [x tail]
+  (case (first x)
+    (k u l lc g gp pl pv pp pc pm) true
+    lam false
+    letrec false
+    if (let [[_ t c a] x] (and (frame-safe? t false) (frame-safe? c tail) (frame-safe? a tail)))
+    seq (and (every? #(frame-safe? % false) (butlast (rest x))) (frame-safe? (last x) tail))
+    (setl setg) (frame-safe? (last x) false)
+    or (let [[_ a b] x] (and (frame-safe? a false) (frame-safe? b tail)))
+    app (let [[_ f & as] x]
+          (cond
+            (direct? f (count as)) (every? #(frame-safe? % false) as)
+            (let-lam f (count as)) (and (every? #(frame-safe? % false) as) (frame-safe? (let-lam f (count as)) tail))
+            :else (and tail (every? simple? as) (every? #(frame-safe? % false) (cons f as)))))
+    false))
+
+(defn- cx-app [[_ f & as] fr k]
+  (if-let [body (let-lam f (count as))]
+    (cx-let body as fr k)
+    (let [{:keys [lam ev n] :as self} *self*]
+      (if (and self (tail? k) (identical? fr (:fr self)) (= n (count as)) (not (direct? f n)))
+        ;; a self tail call: the frame taken over (scm's SelfN), else an application
+        (eval-parts (cons f as) fr (fn [[fe & aes]] [(list 'return (list* (symbol (str ".Self" n)) 'm fe ev lam aes))]))
+        (eval-parts (cons f as) fr #(finish-app f % k))))))
+
+(defn- cx-or [[_ x y] fr k]
+  (let [k2 (if (tail? k) k (reify-k k))
+        branch (fn [tv] [(list 'if (list 'scm/Truthy tv) (do-form (deliver-k k2 tv)) (do-form (cx y fr k2)))])]
+    (if (simple? x)
+      (let [[ss xe] (atom* x fr true)
+            t (tmp)]
+        (concat ss [[:bind t xe]] (branch t)))
+      (cx x fr {:single true :gen branch}))))
 
 (defn- cx-if [[_ t c a] fr k]
   (if (simple? t)
@@ -400,6 +466,7 @@
              (cx y fr {:single true :gen (fn [v] (concat [(list 'set! (list '.-V (loc-ref g)) v)] (deliver-k k 'scm/Unspec)))}))
       letrec (cx-letrec x fr k)
       app (cx-app x fr k)
+      or (cx-or x fr k)
       (throw (ex-info (str "aot: unknown form " (pr-str (first x))) {})))))
 
 (defn- lambda-sym [[_ & clauses] fr]
@@ -409,7 +476,9 @@
                    (let [bt (fresh "b")
                          ev (envsym)
                          fr2 (cons {:var ev} (map #(assoc % :var nil) fr))
-                         stmts (block (cx body fr2 :tail))]
+                         self (when (and (= 1 (count clauses)) (not rest) (<= 1 req 4) (frame-safe? body true))
+                                {:lam ls :ev ev :fr fr2 :n req})
+                         stmts (binding [*self* self] (block (cx body fr2 :tail)))]
                      (emit! (list 'go/type bt '(struct)))
                      (emit! (list* 'go/method 'Run [(tagged 'n (list '* bt)) m-param (tagged ev '(* scm/Env))] :results '[any bool] stmts))
                      [req rest bt])))]
@@ -545,7 +614,7 @@
             {:keys [decls uses]} (compile-unit prog 'main false)
             main (list 'go/func 'main []
                        (list 'set! 'scm/CommandLine (list 'append (list 'lit '(slice string) file) (list 'spread (list 'subslice 'os/Args 1))))
-                       (list 'when (list '== (list 'os/Getenv "GOGC") "") (list 'debug/SetGCPercent 400))
+                       '(scm/GCTune)
                        ;; h-scheme (2026-11-17): the program's mode as the interpreted run has it (the dump's :r7rs, :exp-sign)
                        (list 'set! 'scm/R7RS (boolean r7rs))
                        (list 'set! 'scm/R7RSExpSign (boolean exp-sign))
@@ -569,7 +638,7 @@
                                                             [(list 'Run 'm)]))])]
                              (list 'when (list '!= 'scm/AtExit nil) (list 'scm/AtExit))
                              (list 'os/Exit 'status)))
-            imports (-> '[[os "os"] [debug "runtime/debug"] [pprof "runtime/pprof"] [scm "arbace/scm"]]
+            imports (-> '[[os "os"] [pprof "runtime/pprof"] [scm "arbace/scm"]]
                         (into (when needs-psyntax '[[psyntax "arbace/scmaot/psyntax"]]))
                         (into (for [nm names] [(symbol nm) (path-of nm)])))]
         (write-package! src (str "arbace/scmaot/" pkg "/prog") "main" imports (concat decls [main]))
