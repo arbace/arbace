@@ -131,7 +131,10 @@ END {
         for (q = 1; q <= c; q++) {
           f = fl[q]
           if (f == "-w" || f == "-warn-error") { q++; continue }
-          if (f ~ /^-w[+-]/ || f == "-g" || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
+          # -g (OC217 (a)): oi's level keeps it, the typer's debugging events its backtraces read; the AOT levels have no
+          # backtraces yet (their class)
+          if (f == "-g") { if (aot == "" || aot == 0) flags = flags " -g"; continue }
+          if (f ~ /^-w[+-]/ || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
           if (f == "-inline") { q++; continue }
           # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
           if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
@@ -155,6 +158,8 @@ END {
       if (key == "stderr" && val == "/dev/null") { env = env " @stderr=null"; continue }
       # a main .mll's ocamllex action (OC197 (a)): bin/oi's mll_gen runs the native ocamllex with -q, the flags every such test sets
       if (key == "ocamllex_flags" && FILENAME ~ /\.mll$/ && trim(val) == "-q") continue
+      # compiler_directory_suffix (OC217 (a)): a native variant's build directory (inline_test's -O3 block), not the bytecode run's
+      if (key == "compiler_directory_suffix") continue
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
       # the program's own C stubs (the C API on ci, doc/ocaml/OCAML-SURVEY.md "As built: the C API on ci"): modules that are all C
@@ -166,6 +171,8 @@ END {
       # value: its leading comma an ignored option); l, the stack's limit, likewise (OC216 (a), the user 2026-11-10: oi's and the AOT
       # runtime's call depth); the other parameters (b=, ...) keep the class
       if (key == "ocamlrunparam" && val ~ /^,?[dl]=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
+      # b, the backtraces' recording (OC217 (a)): oi's level records them (its backtrace stack over the typer's debugging events)
+      if (key == "ocamlrunparam" && val ~ /^,?b=[0-9]+$/ && (aot == "" || aot == 0)) { env = env " OCAMLRUNPARAM=" val; continue }
       if (key == "ocamlrunparam") { cls("ocamlrunparam " val) }
       cls(key " = " val)
     }

@@ -42,7 +42,8 @@
     ^{:line 42 :tag (map int (* exitInfo))} exits
     ^{:line 43 :tag int} level
     ^{:line 44 :tag (* Compiler)} unit
-    ^{:line 45 :tag string} name))
+    ^{:line 45 :tag string} name
+    ^{:tag (* btSlot)} ev)) ; an after-event's slot for the application or primitive compiled next (OC217 (a))
 
 
 
@@ -192,6 +193,13 @@
       (case ["letrec"]
         (return (.letrec s (assert SVec (aget a 0)) (aget a 1) tail)))
       (case ["prim"]
+        (let [ev (.-ev s)]
+          (set! (.-ev s) nil)
+          (switch (assert string (aget a 0))
+            (case ["raise" "reraise" "raise_notrace"]
+              (return (.raiseNode s (assert string (aget a 0)) (assert SVec (aget a 1))))))
+          (when (!= ev nil)
+            (return (.primEv s (assert string (aget a 0)) (assert SVec (aget a 1)) ev))))
         (switch (assert string (aget a 0))
           (case ["runstack"]
             (return (.applyFn s runstackFn (assert SVec (aget a 1)) tail)))
@@ -303,7 +311,7 @@
       (case ["send"]
         (return (.send s (assert Kw (aget a 0)) (aget a 1) (aget a 2) (assert SVec (aget a 3)) tail)))
       (case ["event"]
-        (return (.expr s (aget a 0) tail)))
+        (return (.event s a tail)))
       (case ["ifused"]
         (return (.expr s (aget a 1) tail))))
 
@@ -340,9 +348,118 @@
 
 
 ^{:go/end 346} (go/method apply ^Node [^{:tag (* scope)} s ^any fn ^SVec argv ^bool tail]
+  (let [ev (.-ev s)]
+    (set! (.-ev s) nil)
+    (let [args (.args s argv)
+        ^{:line 344} f (.inner s fn)]
+      (when (and (!= ev nil) (not tail))
+        (return (.applyEvNode s f args ev)))
+      (.applyNode s f args tail))))
+
+
+(go/method event "event compiles (event L [INFO]) (OC217 (a); bytegen's Levent with Lev_after): in tail position, or without the native
+typer's information, L alone (bytegen drops the event to keep the tail call); around an event, the inner one (bytegen keeps the
+event nearest the code); around an application or a primitive, their slot entered as they are called; else around L's evaluation.
+" ^Node [^{:tag (* scope)} s ^{:tag (slice any)} a ^bool tail]
+  (let [sl (btSlotOf a)
+      inner (aget a 0)]
+    (when (or (== sl nil) tail)
+      (return (.expr s inner tail)))
+    (let [(values ih _) (head inner)]
+      (switch ih
+        (case ["event"]
+          (return (.expr s inner tail)))
+        (case ["apply" "prim"]
+          (when (== ih "prim")
+            (set! (.-prim sl) true))
+          (set! (.-ev s) sl)
+          (let [n (.expr s inner tail)]
+            (set! (.-ev s) nil)
+            (return n))))
+      (let [n (.expr s inner false)]
+        (fn ^Value [^{:tag (* Frame)} fr]
+          (.btPush (.-Th fr) sl)
+          (let [v (n fr)]
+            (.btPop (.-Th fr))
+            v))))))
+
+
+(go/method applyEvNode "applyEvNode is a non-tail application with an after-event: its slot entered once the arguments and the
+function are evaluated (bytegen's APPLY1-3 push the return address), before the arguments for four or more (PUSH_RETADDR).
+" ^Node [^{:tag (* scope)} s ^Node f ^{:tag (slice Node)} args ^{:tag (* btSlot)} ev]
+  (let [early (>= (len args) 4)]
+    (fn ^Value [^{:tag (* Frame)} fr]
+      (let [th (.-Th fr)]
+        (when early
+          (.btPush th ev))
+        (let [(values vs ok) (evalArgs args fr)]
+          (when (not ok)
+            (when early
+              (.btPop th))
+            (return exitMark))
+          (let [fv (f fr)]
+            (when (== fv exitMark)
+              (when early
+                (.btPop th))
+              (return fv))
+            (when (not early)
+              (.btPush th ev))
+            (let [v (.call th fv vs)]
+              (.btPop th)
+              v)))))))
+
+
+(go/method primEv "primEv is a primitive with an after-event: its slot entered around the operation, once its arguments are
+evaluated (bytegen's C_CALL saves its pc).
+" ^Node [^{:tag (* scope)} s ^string name ^SVec argv ^{:tag (* btSlot)} ev]
+  (switch name
+    (case ["&&" "||" "runstack" "resume" "reperform"]
+      (return (.expr s (lit SList (conv Sym "prim") name argv) false))))
+  (when (or (strings/HasPrefix name "setglobal ") (strings/HasPrefix name "global "))
+    (return (.prim s name argv nil)))
   (let [args (.args s argv)
-      ^{:line 344} f (.inner s fn)]
-    (.applyNode s f args tail)))
+      op (.primOp (.-unit s) name (len args))]
+    (fn ^Value [^{:tag (* Frame)} fr]
+      (let [(values vs ok) (evalArgs args fr)]
+        (when (not ok)
+          (return exitMark))
+        (let [th (.-Th fr)]
+          (.btPush th ev)
+          (let [v (op th vs)]
+            (.btPop th)
+            v))))))
+
+
+(go/method raiseNode "raiseNode compiles a raise (interp.c's RAISE, RERAISE, RAISE_NOTRACE): its slot the innermost event of its
+argument, the one at the raise's pc, marked a raise; with none, a pc without an event (a compiler-inserted raise, skipped when printed).
+" ^Node [^{:tag (* scope)} s ^string name ^SVec argv]
+  (newBtSlot nil)
+  (let [x (aget argv 0)
+      ^{:tag (* btSlot)} sl btUnknownRaise]
+    (while true
+      (let [(values h a) (head x)]
+        (when (!= h "event")
+          (break))
+        (let [(values ih _) (head (aget a 0))]
+          (when (== ih "event")
+            (set! x (aget a 0))
+            (continue)))
+        (when [e (btSlotOf a)] (!= e nil)
+          (set! (.-raise e) true)
+          (set! sl e)
+          ;; an argument that is no call: its value alone (its event is the raise's pc)
+          (let [(values ih _) (head (aget a 0))]
+            (when (and (!= ih "apply") (!= ih "prim"))
+              (set! x (aget a 0)))))
+        (break)))
+    (let [arg (.inner s x)
+        re (== name "reraise")
+        nt (== name "raise_notrace")]
+      (fn ^Value [^{:tag (* Frame)} fr]
+        (let [v (arg fr)]
+          (when (== v exitMark)
+            (return v))
+          (panic (addr (lit Exn :V v :At sl :Re re :NoTrace nt))))))))
 
 
 ^{:go/end 416} (go/method applyNode ^Node [^{:tag (* scope)} s ^Node f ^{:tag (slice Node)} args ^bool tail]
@@ -665,11 +782,13 @@
 
 
 ^{:go/end 680} (go/func runCatch [^Node b ^{:tag (* Frame)} fr ^{:tag (* int)} id] :results [^Value v ^bool exited]
-  (let [depth (.-depth (.-Th fr))]
+  (let [depth (.-depth (.-Th fr))
+      bd (len (.-bt (.-Th fr)))]
     (defer (^{:go/end 678} (fn []
           (when [r (recover)] (!= r nil)
             (when [(values se ok) (assert (* staticExit) r)] (and ok (== (.-id se) id))
               (set! (.-depth (.-Th fr)) depth)
+              (.unwind (.-Th fr) bd)
               (set! exited true)
               (return))
 
@@ -699,11 +818,15 @@
 
 ^{:go/end 714} (go/func runTry [^Node b ^{:tag (* Frame)} fr] :results [^Value v ^{:tag (* Exn)} ex]
   (let [th (.-Th fr)
-      ^{:line 702} depth (.-depth th)]
+      ^{:line 702} depth (.-depth th)
+      bd (len (.-bt th))]
     (defer (^{:go/end 712} (fn []
           (when [r (recover)] (!= r nil)
             (when [(values e ok) (assert (* Exn) r)] ok
               (set! (.-depth th) depth)
+              ;; the backtrace (OC217 (a)): the raise's slot and the slots above the handler's depth, then cut back to it
+              (.stash th e bd)
+              (.unwind th bd)
               (set! ex e)
               (return))
 

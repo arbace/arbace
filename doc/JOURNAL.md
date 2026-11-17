@@ -10357,3 +10357,28 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
 - Recorded only opam-re's rows (`bin/repr-ocaml roundtrip --record-results --corpus opam-re`); `bin/reap --record`,
   `bin/crops-score --record`; `--judge --strict` and `bin/records-check` pass. OCaml print 3,082 / 0 / 0; completeness 86, 91
   without by design (0.8589, 0.9078).
+
+## 2026-11-17 (round 52, night): OC217's first stage, the debugging events and oi's backtrace stack (branch `n-oc217`)
+
+- Built OC217 (a)'s first stage (the user's decision of 2026-11-10, byte-exact backtraces) on `mac/n-ocaml-defer` (b63c350f6) over next
+  42bf8614b: the typer's `--debug` (a header's -g) puts Lambda's after-events (Translcore's and Translprim's event_after: applications,
+  the primitives primitive_needs_event_after names, method calls, let-operators, a raise's argument), written `(event L [:after DEF FILE
+  L1 C1 EOFF L2 C2])`; Simplif, Tmc and Value_rec_compiler take Levent; oi keeps a thread's stack of the slots of calls in flight
+  (bytegen's rules: an event in tail position dropped, the nearest kept, the slot entered at APPLY1-3 or PUSH_RETADDR), stashes at the
+  handler as caml_stash_backtrace does, reads OCAMLRUNPARAM b, and Printexc's raw backtraces, slots, call stacks and the runtime's
+  uncaught report print ocamlc's lines. Sources: OCaml 5.5.0's tarball (SHA-256 fcc6ae66...), lambda/translcore.ml, translprim.ml,
+  simplif.ml, tmc.ml, value_rec_compiler.ml, bytecomp/bytegen.ml, runtime/interp.c, backtrace_byt.c, backtrace.c, printexc.c,
+  stdlib/printexc.ml (doc/ocaml/OCAML-SURVEY.md, "As built: OC217's first stage").
+- header.awk keeps -g and takes `ocamlrunparam b=` at oi's level (OC224 (b)), and skips `compiler_directory_suffix` (a native variant's
+  block). Taken overnight (round 52), as recommended: OC224 (b); OC225 (a) only the after-events (the before, function and pseudo
+  events wait for a consumer); OC226 (a) the native library stays without -g in this stage (with it every program's library Lambda
+  changes, a whole record's proof); OC227 (a) the AOT levels keep the class. Alternatives: the library with -g now (rejected: no whole
+  run tonight), pinning the 19 as `known backtrace` first (OC224 (a), rejected as the survey recommended).
+- Ran `bin/oi check --record --only-list test/ocaml/oc217.txt` (24 programs): 14 pass by their own verdict, 10 in `:backtraces` (6
+  newly pinned in test/ocaml/oi-known.edn: the native library's frames, a domain's join, a fiber's frames). Only those 24 rows were
+  recorded. New negative control `_control/why-at-vs-why-swallow` differs. `bin/reap --record`, `bin/crops-score --record`; `--judge
+  --strict`, `bin/records-check`, `bin/oi test`, `repl-check --native` pass. OCaml eval 495 / 75 / 71 to 509 / 75 / 57; completeness 86,
+  91 without by design (0.8589 to 0.8643, 0.9078 to 0.9140). Peaks: the typer's runs on stage 0 1.18-1.22 GB (over the night's 1 GiB).
+- Left of OC217 (4-6 days): the library with -g, backtraces per domain and across fibers, the finer placements of four programs, the
+  AOT levels.
+

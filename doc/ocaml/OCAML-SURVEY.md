@@ -3398,6 +3398,15 @@ all (a), as recommended there:
 - **OC222 (a)** (scoring) the tests ocamltest itself skips on the reference's configuration (tsan, frame pointers, flambda, Windows,
   macOS, POWER, other arches' debugger tests: 33 programs a level) `:na`, out of both denominators; the tool tests and compiler-output
   stay by design.
+- **OC224 (b)** (taken overnight, round 52, as recommended) `b=1` taken by header.awk with OC217's backtraces, one change (OC217's
+  first stage, below).
+- **OC225 (a)** (taken overnight, round 52) OC217's first stage puts only the after-events a backtrace reads (applications, the
+  primitives Translprim's primitive_needs_event_after names, method calls, let-operators, a raise's argument); the before-events,
+  the function events and Translmod's pseudo-events (the debugger's) wait for a consumer.
+- **OC226 (a)** (taken overnight, round 52) the native library stays compiled without -g in the first stage: with -g every program's
+  library Lambda changes (an event at each call site of the stdlib), which a whole record must prove; it is the second stage.
+- **OC227 (a)** (taken overnight, round 52) the AOT levels keep -g dropped and `b=` classed (`:runtime-parameters`) until o2j has a
+  backtrace of its own (OC217's (b) part).
 Order (the plan's): OC213, OC214 (S1) with OC209 and OC210 first (branch `ocaml-s1`), then OC215, OC216, OC217, OC218 then OC219,
 OC220 and OC221; OC222 with the scoring's next change.
 
@@ -3920,3 +3929,59 @@ such file. Proof: `bin/repr-ocaml roundtrip --text --corpus opam-re`, 97 of 97 t
 2 of 2; `--record-results --corpus opam-re` moved the row to pass; `test/ocaml/full-known.edn` is `{}` and the class was retired
 (`divergences-print.edn` `[]`). Print cell 3,081 / 0 / 1 to 3,082 / 0 / 0; completeness 0.8588 to 0.8589, meant 0.9077 to 0.9078. No key
 moves (`arbace/repr/ocaml` is a crop path).
+
+## As built: OC217's first stage, the debugging events and oi's backtrace stack (2026-11-17, round 52, branch `n-oc217`)
+
+OC217 (a) (the user, 2026-11-10: byte-exact backtraces) in its first stage: under -g the typer puts Lambda's after-events, oi keeps a
+backtrace stack over them, and Printexc's raw backtraces, slots and the runtime's uncaught-exception report print ocamlc's bytecode
+lines. Sources: OCaml 5.5.0's tarball, lambda/translcore.ml (event_after on Texp_apply, Texp_send, Texp_letop, assert_failed),
+lambda/translprim.ml (event_after, primitive_needs_event_after, lambda_primitive_needs_event_after, the Raise and Raise_with_backtrace
+cases of lambda_of_prim), lambda/simplif.ml, tmc.ml and value_rec_compiler.ml (their Levent cases), bytecomp/bytegen.ml (Lev_after:
+dropped in tail position, the nearest event kept; APPLY1-3 and PUSH_RETADDR), runtime/interp.c (RAISE, RERAISE, RAISE_NOTRACE, the C
+raise path), runtime/backtrace_byt.c (caml_stash_backtrace, get_callstack, caml_add_debug_info's ev_info, caml_debuginfo_location),
+runtime/backtrace.c (caml_print_exception_backtrace, print_location, caml_convert_debuginfo, caml_restore_raw_backtrace),
+runtime/printexc.c (default_fatal_uncaught_exception), stdlib/printexc.ml (backtrace_slot, format_backtrace_slot).
+
+**The typer** (`arbace/repr/ocaml/typer/translcore.ae`, `--debug`, from a header's `-g`: `bin/oi`'s oi_dump and o2j_dump_file,
+`suite.bash`'s native dump). `*debug*` puts `[:Levent lam ev]`, ev the location as caml_add_debug_info reads it (start line and
+character, the end's offset from the start's line, end line and character), the file, and the scopes' name
+(Scoped_location.string_of_scopes, the `%loc_FUNCTION` scopes the port already had). The dump's form is `(event L [:after DEF FILE
+L1 C1 EOFF L2 C2])` (SPEC §11.2's `(event L)` with its information vector; ocdump's events carry none and oi runs them as before).
+Simplif's traversals, Tmc's choice, Value_rec_compiler's size and split, and transl_apply's `Levent(Lsend ...)` take the node. Without
+-g nothing changes (typer-check's samples have no -g).
+
+**oi** (`go/arbace/oi/exn.ae`, `compile.ae`, `run.ae`, `ext_sys.ae`). An event's slot (`btSlot`, registered in `btSlots`: its index is
+the raw backtrace's entry) is entered on the thread's stack when its application is called (after its arguments and function, before
+them for four arguments or more), around its primitive's operation, or around its expression; in tail position, or nested in another
+event, it is dropped as bytegen drops it. A raise's slot is the innermost event of its argument (the one at the RAISE's pc, marked a
+raise: so a call in a raise's argument prints "Re-raised" if its callee raises, as the bytecode's), none for a compiler-inserted raise
+(skipped when printed); a primitive's raise starts with the primitive's slot ("Raised by primitive operation"). The handler (`runTry`)
+stashes the raise's slot and the slots above its own depth (a reraise of the last exception appends, at most 1024), then cuts the stack
+back; the uncaught exception stashes all of it. OCAMLRUNPARAM's b (`btInit`, header.awk at oi's level) starts the recording.
+`caml_get_exception_raw_backtrace`, `caml_get_exception_backtrace`, `caml_get_current_callstack`, `caml_restore_raw_backtrace`,
+`caml_convert_raw_backtrace(_slot)` read the slots; the runtime's own report without Printexc (default_fatal_uncaught_exception) runs
+at_exit with the recording off and prints the lines as caml_print_exception_backtrace does. A program with no event (no -g) has no
+debug information and behaves as before.
+
+**Results (light).** `bin/oi check --record --only-list test/ocaml/oc217.txt` (the 24 programs of `:runtime-parameters` and
+`:backtraces`, native path, two jobs, 3 min 21 s): 14 pass by their own verdict (backtrace, backtrace3, backtrace_bounds_exn,
+backtrace_c_exn, backtrace_deprecated, backtrace_or_exception, backtrace_slots, backtraces_and_finalizers, inline_test,
+inline_traversal_test, pr6920_why_at, pr6920_why_swallow, print_location, raw_backtrace), 10 in `:backtraces`: the four known before
+(callstack, event_after_prim, methods, names) and six pinned in `oi-known.edn` (backtrace2, backtrace_systhreads,
+lib-threads/uncaught_exception_handler: the native library's frames, its units without -g; backtrace_domain_join: a domain's
+backtrace through Domain.join; backtrace_effects, effects/backtrace: a fiber's frames). header.awk also skips
+`compiler_directory_suffix` (inline_test's native -O3 block, not the bytecode run). The record's 24 rows alone were rewritten. The
+negative control `_control/why-at-vs-why-swallow` (pr6920_why_at's run against pr6920_why_swallow's reference) differs, as it must.
+Eval 495 / 75 / 71 to 509 / 75 / 57 (`:runtime-parameters` 19 to 0 at oi's level, `:backtraces` 4 to 10, `:c-runtime-decided` 11 to
+10); completeness 0.8589 to 0.8643, meant 0.9078 to 0.9140. Checks: `bin/oi test` (go vet, go test), `repl-check --native`, the first
+nine programs of the essential list, `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`, `bin/records-check`.
+Memory: oi's build 0.46 GB, the native library's rebuild (the typer's key moved) 1.22 GB peak, each check run 1.18 GB peak (the
+typer on stage 0 under GOMEMLIMIT=900MiB, a program about 0.94 GB): over the night's 1 GiB by a fifth, single processes.
+
+**What remains of OC217** (about 4-6 days): (2) the native library with -g (OC226: `stdlib-build --debug`, a whole record), which
+gives backtrace2's, the threads' and Stdlib.failwith's frames; with it the frames of calls without an event as "unknown location"
+where a bytecode stack has them; (3) the backtrace per domain and across fibers (Domain.join's, effects' continuations,
+get_continuation_callstack); (4) the before-events' and the finer placements callstack, event_after_prim, methods and names need
+(Printexc's call stacks of threads, the event after a primitive, methods' frames, the names of functors and classes); (5) the AOT
+levels (o2j's shadow stack for -g programs, the plain references of the two flambda-referenced tests).
+

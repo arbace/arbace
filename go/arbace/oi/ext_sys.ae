@@ -694,25 +694,61 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
                       ^{:line 570} Unit))
 
 
-                  ;; backtrace.c: no backtraces are recorded
+                  ;; backtrace.c (OC217 (a)): the backtraces of the programs with debugging events (exn.go's btSlots), else none
                   (r "caml_record_backtrace" ^{:go/end 574} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (set! backtraceActive (Truth (aget a 0))) Unit))
                   (r "caml_backtrace_status" ^{:go/end 575} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool backtraceActive)))
                   (r "caml_ml_debug_info_status" ^{:go/end 576} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
-                  (let [empty ^{:go/end 577} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag 0)))]
-                    (r "caml_get_exception_raw_backtrace" empty)
-                    (r "caml_get_exception_backtrace" ^{:go/end 579} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] None))
-                    (r "caml_get_current_callstack" empty)
-                    (r "caml_restore_raw_backtrace" ^{:go/end 581} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+                  (let [entries (fn ^Value [^{:tag (slice int)} es]
+                                  (let [f (make (slice Value) (len es))]
+                                    (range [i e es]
+                                      (aset f i e))
+                                    (addr (lit Block :Tag 0 :F f))))
+                      convert (fn ^Value [^Value bt]
+                                (let [b (AsBlock bt)
+                                    f (make (slice Value) (len (.-F b)))]
+                                  (range [i e (.-F b)]
+                                    (aset f i (btConvert e)))
+                                  (addr (lit Block :Tag 0 :F f))))]
+                    (r "caml_get_exception_raw_backtrace" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+                        (when (or (not backtraceActive) (not debugInfo))
+                          (return (addr (lit Block :Tag 0))))
+                        (entries (.-btBuf th))))
+                    (r "caml_get_exception_backtrace" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+                        (when (not debugInfo)
+                          (return None))
+                        (let [^{:tag (slice int)} es (zero (slice int))]
+                          (when backtraceActive
+                            (set! es (.-btBuf th)))
+                          (Some (convert (entries es))))))
+                    ;; caml_get_current_callstack: the slots in flight, the innermost first
+                    (r "caml_get_current_callstack" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+                        (let [n (AsInt (aget a 0))
+                            ^{:tag (slice int)} es (zero (slice int))]
+                          (when debugInfo
+                            (for [i (- (len (.-bt th)) 1)] (and (>= i 0) (< (len es) n)) (dec! i)
+                              (set! es (append es (.-id (aget (.-bt th) i))))))
+                          (entries es))))
+                    (r "caml_restore_raw_backtrace" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+                        (set! (.-btExn th) (aget a 0))
+                        (let [b (AsBlock (aget a 1))
+                            es (make (slice int) 0 (len (.-F b)))]
+                          (range [_ e (.-F b)]
+                            (when (< (len es) 1024)
+                              (set! es (append es (AsInt e)))))
+                          (set! (.-btBuf th) es))
+                        Unit))
                     (r "caml_raw_backtrace_length" ^{:go/end 582} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (len (.-F (AsBlock (aget a 0))))))
-                    (r "caml_convert_raw_backtrace" ^{:go/end 588} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
-                        (when (> (len (.-F (AsBlock (aget a 0)))) 0)
+                    (r "caml_convert_raw_backtrace" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                        (when (not debugInfo)
+                          (when (> (len (.-F (AsBlock (aget a 0)))) 0)
+                            (Failwith "No debug information available"))
+                          (return (addr (lit Block :Tag 0))))
+                        (convert (aget a 0))))
+
+                    (r "caml_convert_raw_backtrace_slot" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                        (when (not debugInfo)
                           (Failwith "No debug information available"))
-
-                        (addr (lit Block :Tag 0))))
-
-                    (r "caml_convert_raw_backtrace_slot" ^{:go/breaks [3] :go/end 592} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
-                        (Failwith "No debug information available")
-                        nil))
+                        (btConvert (aget a 0))))
 
                     (r "caml_raw_backtrace_slot" ^{:go/end 600} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
                         (let [i (AsInt (aget a 1))
