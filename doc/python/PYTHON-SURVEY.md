@@ -7577,3 +7577,88 @@ pass, 102 classed, 2 failing, head 798, 102, 1 failing; the one difference test_
 test_async_gen_asyncio_shutdown_exception_02 (failing at base, passing at head: 297's base row, flaky), test_sys_setprofile's
 ProfileHookTestCase.test_caught_exception failing on goi at both; every other method's outcome and message the same.
 
+
+## As built: 329, the IR read at import: the binary IR (2026-11-17, the Mac VM, queue 329; 305's next step 2)
+
+305 measured ReadIR, the printed IR's EDN reader and then its conversion, at 31% of hexiom's CPU, 11-12% of go and chaos
+and 21% of an import probe: every import of a module compiled ahead parsed its package's IR text, and every source a
+compiled program compiles at run time (the 41 of importlib's bootstrap, the codecs, argparse's lazy imports) parsed the
+host's IR cache's text. Both now read a binary IR (`go/arbace/py/irbin.go`, PYI-SPEC.md §7.2): no EDN at import.
+
+- **The layout**: `"\x02pyi-ir-1\n"`, a string table (each string once: names, operations, constants), then the code
+  objects in the order `loadCode` reads them, counts and indices as varints, integers zigzag, a constant tagged as
+  `loadConst`'s cases (a nested code object inline), the other IR values as generic tagged values; an instruction its
+  operation's name (looked up once per string) and its ARG, decoded as `decodeArg` decodes it. The reader makes the same
+  `*Code` as the text's reader, in the same order: the interned names, the parents, the creation events (queue 274).
+- **Two writers, one layout**: `arbace.python.aot`'s `ir-binary` writes each compiled module's package `IR` as a
+  `(byte-string ...)` (printable runs as strings); `irBinaryOf`, its port in Go, writes an IR cache answer's binary IR.
+  Over the 1,751 modules of the shared package cache both writers give the same bytes, every one. A code object with a
+  key `loadCode` does not read (`ir-code-keys`, `irCodeKeys`), a map constant of more than one key or any shape the
+  writers do not mirror keeps the text; `PYI_AOT_BINARY_IR=0` keeps every text (packages and cache).
+- **The IR cache's answers**: `irCacheRead` reads `KEY.b` beside the answer, the binary IR stamped with the runtime's key
+  (`compiler.sh`'s new `# ir-bin:` line, the key `bin/pyi`'s aot_module builds the runtime by); the first compiled program
+  of a runtime to read an answer's text writes it (a name of its own, then renamed). A runtime of another key rewrites it,
+  so a change to the loader never reads another runtime's binary; a compiled program with no `# ir-bin:` line keeps none.
+- **What a change to the loader must do**: a key the compiler adds keeps its modules' text until `loadCode`, `irbin.go`'s
+  reader and both writers carry it (the guard); a change to how `loadCode` reads an existing key is a change to the three
+  (load.go's comment). The package cache is keyed by `aot.ae`'s digest (the writer), the sidecars by the runtime's key.
+
+**Proofs** (the VM):
+- The 1,751 modules' IR texts of the shared package cache (`.tmp/repr-python/pyi/aot-shared/pkgs-e70dff6081aec2e1`, 140 MB):
+  each read from its text, from `ir-binary`'s bytes and from `irBinaryOf`'s, the three trees of code objects equal field by
+  field (names, instructions, handlers, lines, positions, constants by value, floats by their bits, interned names by
+  identity, parents); a negative control (two modules' binaries swapped) differs. Reading: text 2.4 s, binary 0.26 s.
+- `irbin_test.go` (`bin/pyi runtime vet`'s go test): a sample module's binary IR against its text, a control, another
+  version refused, the key guard.
+- The 145 programs of `test/python/pyi/` compiled (`bin/pyi aot`) and run as the runtime check runs a program (stdout,
+  status, stderr's last line) at base and head: 145 of 145 the same bytes; 141 equal `python3 -I`'s, the other 4 fail at
+  both by the direct run's harness (e-executable, e-subprocess, g-gil-blocking: no `sys.executable` outside `bin/pyi
+  python`; f-thread: 120 s).
+- On goi (`bin/pyi run`, nf's stage 0, the checkout's runtime interpreted: the text path, `isIR`, `loadIndexes`): 8 of 8
+  sampled programs equal CPython's runs (arith, b-decorators, 6b-import, 6b-marshal, c-pickle0, c-datamodel, c-codecs,
+  d-array).
+- `bin/pyi runtime print` of the committed forms equal to the edited Go file for file; `runtime vet` ok; `table-check
+  --configs tamago/amd64,tamago/arm64` ok (173 files); `make python-essential` rc 0 (21 programs: 20 pass, 1 classed).
+- Every benchmark's stdout the same at base and head in every run, and each run's counts (code objects native and on the
+  loop, the IR cache's answers) the same.
+
+**Measured** (the VM, compiled, base 7baf829c0 against head, each executable's second run onward (warm: the IR cache and
+its sidecars written by the compile's run), 10 interleaved rounds B H / H B, CPU (user + system) medians, load 15.6-34.3;
+`.tmp/q329/ab/r2.tsv`):
+
+| benchmark | base CPU ms | head CPU ms | change |
+|---|---:|---:|---:|
+| raytrace | 751 | 700 | -7% |
+| deltablue | 503 | 460 | -9% |
+| fannkuch | 893 | 841 | -6% |
+| generators | 869 | 846 | -3% |
+| nqueens | 789 | 742 | -6% |
+| go | 348 | 288 | -17% |
+| richards | 672 | 626 | -7% |
+| chaos | 308 | 257 | -17% |
+| json_dumps | 315 | 266 | -16% |
+| spectral_norm | 843 | 757 | -10% |
+| unpack_sequence | 786 | 753 | -4% |
+| coroutines | 1073 | 1000 | -7% |
+| float | 605 | 561 | -7% |
+| nbody | 460 | 417 | -9% |
+| hexiom | 179 | 114 | -36% |
+| base64 | 3491 | 3493 | +0% |
+| bpe_tokeniser | 7850 | 7844 | +0% |
+| async_tree | 1405 | 1248 | -11% |
+| mdp | 4330 | 4224 | -2% |
+| pprint | 5673 | 5679 | +0% |
+| the import probe | 381 | 292 | -23% |
+| the 21 summed | 32526 | 31409 | -3% |
+
+The packages' IR alone (head's first commit, 5 rounds, load 23-36): hexiom -15% of its -36%, go and chaos -8% of their
+-17%, the import probe -22% of its -23% (its modules are compiled ahead); the rest is the 41 sources' answers read as
+binary. Go's profile (12 merged runs each): ReadIR 23.9% of hexiom's CPU -> 5.7% (the EDN reader 21.9% -> not in the
+profile), the import probe 21.3% -> 4.7%. What is left of a short program's start is 305's finding 2: the 41 sources'
+code run on the loop, and the collections.
+
+**The packages' size and build**: the printed `unit.go` of the 166 modules both caches hold 45.4 MB -> 44.1 MB (-3%);
+the executables 0.8-2.9% smaller (the import probe's 237.7 MB -> 230.9 MB). Go's compile of hexiom's 28 module packages
+(rebuilt alone, `-p 2`): 26.2 s -> 26.5 s of CPU, peak 440 -> 436 MiB, the same. The writer adds about 50 ms per module to
+`arbace.python.aot program` (the 1,751 modules in 77-90 s on stage 0). The binary is 40-45% of the text's bytes (62 MB for
+the 140 MB).

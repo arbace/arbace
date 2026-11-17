@@ -577,6 +577,167 @@
          nil)))
 
 ;;; ---------------------------------------------------------------------------------------
+;;; The binary IR (queue 329; go/arbace/py's irbin.go, its layout): a module's code objects as bytes its package holds in
+;;; place of the IR's text, read at import without the EDN reader. The writer knows the IR's shapes as the loader reads
+;;; them (load.go's loadCode, loadConst, decodeArg); a module with any other shape keeps its text (ir-binary throws).
+
+(def ^:private ir-bin-magic "\u0002pyi-ir-1\n")
+
+(defn- bin-uint [^java.io.ByteArrayOutputStream o ^long n]
+  (when (neg? n) (throw (ex-info "ir-binary: a negative count" {:ir-binary true})))
+  (loop [n n]
+    (if (< n 0x80)
+      (.write o (int n))
+      (do (.write o (int (bit-or 0x80 (bit-and n 0x7f)))) (recur (unsigned-bit-shift-right n 7))))))
+
+(defn- bin-int [o ^long n]
+  ;; zigzag; a long's whole range
+  (let [z (bit-xor (bit-shift-left n 1) (bit-shift-right n 63))]
+    (loop [z z]
+      (if (zero? (bit-and z (bit-not 0x7f)))
+        (.write ^java.io.ByteArrayOutputStream o (int z))
+        (do (.write ^java.io.ByteArrayOutputStream o (int (bit-or 0x80 (bit-and z 0x7f))))
+            (recur (unsigned-bit-shift-right z 7)))))))
+
+(defn- bin-refuse [what x]
+  (throw (ex-info (str "ir-binary: " what " " (binding [*print-length* 5 *print-level* 3] (pr-str x))) {:ir-binary true})))
+
+(defn- long-val? [x] (instance? Long x))
+
+(def ^:private ir-code-keys
+  "The keys of a code object's map the loader reads (load.go's loadCode); a code object with another key keeps the module's
+  text: a key the compiler adds is read by loadCode before the binary IR carries it (queue 329)"
+  #{:name :qualname :kind :flags :argcount :posonly :kwonly :locals :cells :frees :names :docstring :consts :threaded :code
+    :handlers :firstlineno :warnings :lines :positions})
+
+(defn- big-val? [x] (or (instance? arbace.lang.BigInt x) (instance? java.math.BigInteger x)))
+
+(defn ir-binary
+  "The binary IR (irbin.go's) of a module's code object CODE, the IR read: a byte array. Throws ex-info {:ir-binary
+  true} on a shape the loader's binary reading does not mirror."
+  [code]
+  (let [body (java.io.ByteArrayOutputStream.)
+        strs (volatile! (transient {}))
+        order (volatile! (transient []))
+        s! (fn [^String x]
+             (let [i (get @strs x)]
+               (if i
+                 (bin-uint body i)
+                 (let [i (count @order)]
+                   (vswap! strs assoc! x i) (vswap! order conj! x) (bin-uint body i)))))
+        kw-name (fn [k] (subs (str k) 1))
+        str-of (fn [x] (if (string? x) x ""))
+        int-of (fn [x] (cond (long-val? x) x (nil? x) 0 (big-val? x) 0 (or (string? x) (keyword? x) (boolean? x) (coll? x) (symbol? x) (float? x)) 0
+                             :else (bin-refuse "an integer" x)))
+        tag! (fn [t] (.write body (int t)))
+        value! (fn value! [x]
+                 (cond (nil? x) (tag! 0)
+                       (false? x) (tag! 1)
+                       (true? x) (tag! 2)
+                       (long-val? x) (do (tag! 3) (bin-int body x))
+                       (big-val? x) (do (tag! 4) (s! (str x)))
+                       (instance? Double x) (let [b (Double/doubleToLongBits x)]
+                                              (tag! 5) (dotimes [i 8] (.write body (int (bit-and (unsigned-bit-shift-right b (* 8 i)) 0xff)))))
+                       (string? x) (do (tag! 6) (s! x))
+                       (keyword? x) (do (tag! 7) (s! (kw-name x)))
+                       (symbol? x) (do (tag! 8) (s! (str x)))
+                       (or (vector? x) (seq? x) (set? x)) (do (tag! 9) (bin-uint body (count x)) (doseq [e x] (value! e)))
+                       (map? x) (do (when-not (every? keyword? (keys x)) (bin-refuse "a map key" x))
+                                    (tag! 10) (bin-uint body (count x))
+                                    (doseq [[k v] x] (s! (kw-name k)) (value! v)))
+                       :else (bin-refuse "a value" x)))
+        seqv? (fn [x] (or (vector? x) (seq? x) (set? x)))
+        strs! (fn [xs] (let [xs (if (seqv? xs) xs [])] (bin-uint body (count xs)) (doseq [x xs] (s! (str-of x)))))
+        ints! (fn [xs] (let [xs (if (seqv? xs) xs [])] (bin-uint body (count xs)) (doseq [x xs] (bin-int body (int-of x)))))
+        const! (fn const! [code! x]
+                 (cond (nil? x) (tag! 0)
+                       (false? x) (tag! 1)
+                       (true? x) (tag! 2)
+                       (long-val? x) (do (tag! 3) (bin-int body x))
+                       (big-val? x) (do (tag! 4) (s! (str x)))
+                       (instance? Double x) (do (tag! 5) (let [b (Double/doubleToLongBits x)]
+                                                           (dotimes [i 8] (.write body (int (bit-and (unsigned-bit-shift-right b (* 8 i)) 0xff))))))
+                       (string? x) (do (tag! 6) (s! x))
+                       (= :ellipsis x) (tag! 7)
+                       (and (map? x) (map? (:code x))) (do (tag! 8) (code! (:code x)))
+                       (and (map? x) (seqv? (:tuple x)))
+                       (do (tag! 9) (bin-uint body (count (:tuple x))) (doseq [e (:tuple x)] (const! code! e)))
+                       (and (map? x) (= 1 (count x)) (keyword? (key (first x))))
+                       (do (tag! 10) (s! (kw-name (key (first x)))) (value! (val (first x))))
+                       (and (map? x) (> (count x) 1)) (bin-refuse "a constant's map" x)
+                       :else (do (tag! 11) (value! x))))
+        arg! (fn [op a]
+               (cond (nil? a) (tag! 0)
+                     (long-val? a) (do (tag! 3) (bin-int body a))
+                     (boolean? a) (tag! (if a 2 1))
+                     (symbol? a) (do (tag! 8) (s! (str a)))
+                     (and (seqv? a) (>= (count a) 2)
+                          (every? (fn [e] (or (nil? e) (boolean? e) (long-val? e) (string? e) (keyword? e) (symbol? e)
+                                              (and (seqv? e) (every? #(or (keyword? %) (string? %) (nil? %) (long-val? %)) e))))
+                                  a))
+                     (do (tag! 9) (bin-uint body (count a))
+                         (doseq [e a]
+                           (cond (seqv? e) (do (tag! 9) (bin-uint body (count e)) (doseq [x e] (value! x)))
+                                 :else (value! e))))
+                     :else (bin-refuse (str "an argument of " op) a)))
+        code! (fn code! [c]
+                (when-not (map? c) (bin-refuse "a code object" c))
+                (when-let [k (first (remove ir-code-keys (keys c)))] (bin-refuse "a code object's key" k))
+                (s! (str-of (:name c))) (s! (str-of (:qualname c)))
+                (s! (if (keyword? (:kind c)) (kw-name (:kind c)) ""))
+                (let [fs (filter keyword? (if (seqv? (:flags c)) (:flags c) []))]
+                  (bin-uint body (count fs)) (doseq [f fs] (s! (kw-name f))))
+                (bin-int body (int-of (:argcount c))) (bin-int body (int-of (:posonly c))) (bin-int body (int-of (:kwonly c)))
+                (strs! (:locals c)) (strs! (:cells c)) (strs! (:frees c)) (strs! (:names c))
+                (let [d (:docstring c)]
+                  (cond (string? d) (do (tag! 1) (s! d))
+                        (map? d) (do (tag! 2) (value! d))
+                        :else (tag! 0)))
+                (let [ks (if (seqv? (:consts c)) (:consts c) [])]
+                  (bin-uint body (count ks)) (doseq [k ks] (const! code! k)))
+                (ints! (:threaded c))
+                (let [ins (if (seqv? (:code c)) (:code c) [])]
+                  (bin-uint body (count ins))
+                  (doseq [i ins]
+                    (when-not (and (seqv? i) (= 2 (count i)) (keyword? (first i))) (bin-refuse "an instruction" i))
+                    (let [[op a] (vec i)] (s! (kw-name op)) (arg! op a))))
+                (let [hs (if (seqv? (:handlers c)) (:handlers c) [])]
+                  (bin-uint body (count hs))
+                  (doseq [h hs]
+                    (when-not (and (seqv? h) (>= (count h) 4)) (bin-refuse "a handler" h))
+                    (let [h (vec h)]
+                      (dotimes [i 4] (bin-int body (int-of (nth h i))))
+                      (tag! (if (and (> (count h) 4) (true? (nth h 4))) 1 0)))))
+                (bin-int body (int-of (:firstlineno c)))
+                (let [ws (filter #(and (seqv? %) (= 5 (count %))) (if (seqv? (:warnings c)) (:warnings c) []))]
+                  (bin-uint body (count ws))
+                  (doseq [[m l o el eo] (map vec ws)] (s! (str-of m)) (doseq [n [l o el eo]] (bin-int body (int-of n)))))
+                (ints! (:lines c))
+                (if (string? (:positions c)) (do (tag! 1) (s! (:positions c))) (tag! 0)))]
+    (code! code)
+    (let [out (java.io.ByteArrayOutputStream.)
+          ss (persistent! @order)]
+      (.write out (.getBytes ^String ir-bin-magic "UTF-8"))
+      (bin-uint out (count ss))
+      (doseq [^String x ss]
+        (let [bs (.getBytes x "UTF-8")] (bin-uint out (count bs)) (.write out bs 0 (count bs))))
+      (let [bs (.toByteArray body)] (.write out bs 0 (count bs)))
+      (.toByteArray out))))
+
+(defn- byte-string-form
+  "The Go form (byte-string ...) of bytes BS: runs of printable ASCII as strings, any other byte an integer"
+  [^bytes bs]
+  (let [sb (StringBuilder.)
+        flush! (fn [parts] (if (pos? (.length sb)) (let [s (.toString sb)] (.setLength sb 0) (conj! parts s)) parts))]
+    (loop [i 0 parts (transient ['byte-string])]
+      (if (< i (alength bs))
+        (let [b (bit-and (int (aget bs i)) 0xff)]
+          (if (and (>= b 0x20) (< b 0x7f))
+            (do (.append sb (char b)) (recur (inc i) parts))
+            (recur (inc i) (conj! (flush! parts) b))))
+        (apply list (persistent! (flush! parts)))))))
+
+;;; ---------------------------------------------------------------------------------------
 ;;; Writing packages (as arbace.scheme.aot writes its units)
 
 (defn- pf
@@ -625,7 +786,14 @@
         fns (vec (map-indexed (fn [i c] (let [nm (symbol (str "c" i))] (or (reg-func* nm c) (code-func nm c)))) cs))]
     (write-package! src (str "arbace/pyaot/" nm) nm '[[py "arbace/py"]]
                     (concat
-                      [(list 'go/var 'IR text)]
+                      ;; queue 329: the binary IR, its text when the module has a shape the binary IR does not write
+                      [(list 'go/var 'IR (if (= "0" (System/getenv "PYI_AOT_BINARY_IR"))
+                                           text
+                                           (try (byte-string-form (ir-binary code))
+                                                (catch arbace.lang.ExceptionInfo e
+                                                  (when-not (:ir-binary (ex-data e)) (throw e))
+                                                  (binding [*out* *err*] (println "aot: the IR kept as text -" (.getMessage e)))
+                                                  text))))]
                       fns
                       [(list 'go/func 'Register "Register registers the module's IR and its compiled code objects.\n" []
                              (list 'py/AotRegister (or key "") 'IR
