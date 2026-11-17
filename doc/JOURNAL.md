@@ -9512,6 +9512,23 @@ suite-aot-essential (1 percent over), cpp-builtins (a 3 s step, peak 2.3 with tr
 Checked: `test/gate/crops-test.bash` (gate.crops check on steps.edn included) ok. Step keys: `:mem-gib` is outside the keys
 (crops.ae header), so none moves; only the lanes' admission changes.
 
+## 2026-11-17: `javac-tool` on stack-w2: Path's tool-world variant retired (F9 made the world's Path jdk26u's)
+
+The full gate's build step `javac-tool` (`bin/javac-vendor tool`) failed at the Go build of javac's tool world, on
+main's f1969748f: `jrt/java_nio_file_Path.ae:113:76: duplicate method GetFileSystem__Nio_FileSystem`; the generated
+interface `Path` (`target/arbace-go/work-javac-amd64/mod/jrt/java_nio_file_Path.go`, line 120) declared the method
+twice. Cause: `overlay/jdk/javac/variants/Path.ae` (JN2, JFS18) added a default `getFileSystem` that throws, because jrt's
+own Path had none and javac's file package names it; since java-night's F9 (B2's conversion, 435ba0f03) the world's
+`java.nio.file.Path` is jdk26u's (`jdk/forms/java/nio/file/Path.ae`), which declares the abstract `getFileSystem` itself,
+so j2g translated both. The same cause as Files' variant's ten duplicates (6b5f91a70), which `bin/javac-vendor edge`
+caught at the time; Path's, an interface method beside its default, went through j2g and reached Go's compiler only, and
+`javac-tool` had not run since B2's merge. The shipped world's go-build was unaffected (the variant is the tool world's
+alone). Fix: the variant removed (nothing left in it); the world's Path, its FileSystem and the platform's providers are
+jdk26u's. Alternatives considered: keeping the variant with the method dropped (empty, pointless); a j2g check that a
+`j2g/add` names no member its base declares (would have caught it at translation; left for later, noted here).
+Keys: `arbace_javac_key` moves (overlay/jdk/javac/), gate_key and the runtime key do not. Verified by `bin/javac-vendor
+tool` as the gate runs it (on the gate's executable of key f60652fb7fb9, `ARBACE_HOST_EXE` the stage 0 of seed 3c48859d).
+
 ## 2026-11-16: F26's slice, the class-file API compiled in the Go build (branch `f26-classfile`, from `b2-1115` 9e3d05d2b)
 
 B2's joint world (java-night's slices, converted at 9e3d05d2b) did not compile: `go build ./jrt` gave 206 errors, 173 of them
