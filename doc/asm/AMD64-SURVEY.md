@@ -1997,3 +1997,22 @@ triples). Queue 337 judges them by the tests' own verdicts, as AR4's arm64 verdi
 - **The matrix**: the AOT cell of x86-64 assembly gains the source "bin/repr-asm object-verdict" (CHECK lines), `:until` the main
   host's record `test/asm/objverdict-results-amd64.edn`; the gate's `asm-amd64-objverdict` (`--full`, chain asm-amd64-full) and
   `bin/repr-asm backend check` in `asm-amd64-table`.
+- **Proof** (the Mac VM, stage 0 of next's seed; records in scratch, the main host records): the verdict over the whole corpus,
+  68 files, 1,251 CHECK lines, 798 met, the rest `:other-format` 338, `:options` 53, `:elf32` 32, `:split-file` 16, `:x32` 7,
+  `:message` 4, `:unsupported-directive` 2, `:stats` 1, none failing; its seven controls failing as they must. encode-check `--only`
+  over the 36 files of the 406 texts: 362 pass, 43 `:other-format`, 1 `:debug-trace`, none `:object-unjudged` (the 5 `:directive`
+  beside unchanged); the cross-syntax judge 276 of 276. Unchanged by the shared layout's changes: object-check musl 32 of 32,
+  synthetic 8 of 8 with obj-err 3 of 3, mc-x86-obj 49 of 49, arm64's a64-synthetic 3 of 3 and object-verdict ok; `backend check`
+  byte for byte. Projected with the slice's and the verdict's records: x86-64 print 194,746 / 1,187 / 581 to 195,108 / 1,231 / 175.
+
+### Proposed (queue 337)
+
+- **AXS99 Mach-O and COFF runs.** 338 CHECK lines of the verdict (43 print texts) read a Mach-O or COFF object's dump. (a) by design,
+  `:other-format`: Arbace's object writer is ELF's, x86_64-linux-musl's target; (b) deferred until Arbace writes those formats.
+  *Recommended: (a)*.
+- **AXS100 The verdict in the AOT cell.** (a) `:role :beside` (as built): the CHECK lines shown beside object-check's files, not in
+  the cell's sum, until `:elf32` and `:options` close; (b) counted: the cell's 108 files would sum with 1,251 CHECK lines, 453 of them
+  non-passes (its completeness 100 to about 67, 89 without by design). *Recommended: (a)*.
+- **AXS101 ELF32.** 32 lines (i386's relocations, symbols, section headers; R_386_* in .reloc) and the x32 runs' 7 wait for an ELF32
+  writer: (a) an ELF32 i386 writer in arbace.asm.elf with X86ELFObjectWriter's R_386 types (the i386 runs then judged whole);
+  (b) keep `:elf32` deferred. *Recommended: (b)* until a crop needs i386 objects.
