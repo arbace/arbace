@@ -1597,8 +1597,9 @@
 ;; Calling conventions, function headers, call sites, musttail, operand bundles
 
 (def ^:private cc-no-calls
-  #{"spir_kernel" "amdgpu_kernel" "amdgpu_vs" "amdgpu_hs" "amdgpu_es" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs" "amdgpu_cs_chain"
-    "amdgpu_cs_chain_preserve" "ptx_kernel"})
+  "CallingConv.h's isCallableCC false (queue 335: amdgpu_ls and amdgpu_gfx_whole_wave, called by llvm.amdgcn.call.whole.wave alone)."
+  #{"spir_kernel" "amdgpu_kernel" "amdgpu_vs" "amdgpu_hs" "amdgpu_es" "amdgpu_ls" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs" "amdgpu_cs_chain"
+    "amdgpu_cs_chain_preserve" "amdgpu_gfx_whole_wave" "ptx_kernel"})
 (def ^:private cc-void-ret #{"amdgpu_kernel" "spir_kernel" "amdgpu_cs_chain" "amdgpu_cs_chain_preserve"})
 (def ^:private cc-shader #{"amdgpu_vs" "amdgpu_hs" "amdgpu_es" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs"})
 (def ^:private cc-no-varargs #{"fastcc" "coldcc" "intel_ocl_bicc" "ptx_kernel" "ptx_device"})
@@ -1641,6 +1642,12 @@
                 (when (and (has-attr? as "byref") (= (addrspace (norm-type (first (nth pl i)))) *alloca-as*))
                   (verr :verifier/cc "Calling convention disallows stack byref")))))
           (when var? (verr :verifier/cc "Calling convention does not support varargs or perfect forwarding!")))
+        ;; queue 335: AMDGPU_Gfx_WholeWave, its first parameter the i1 of the active lanes
+        (= cc "amdgpu_gfx_whole_wave")
+        (do (when-not (and (seq pl) (= 'i1 (norm-type (first (first pl)))))
+              (verr :verifier/cc "Calling convention requires first argument to be i1"))
+            (when (has-attr? first-attrs "inreg") (verr :verifier/cc "Calling convention requires first argument to not be inreg"))
+            (when var? (verr :verifier/cc "Calling convention does not support varargs or perfect forwarding!")))
         :else nil))
     (when-not intr?
       (doseq [[pi p] (map-indexed vector pl) :let [t (norm-type (first p)) at (str (pr/type-str t) " " (pr/value-str (if (local? (peek p)) (peek p) (symbol (str "%" pi)))))]]
@@ -1825,6 +1832,21 @@
                     (value-culprit 'metadata (arg (dec (count args))) defs)))))
       :else nil)
     (case id
+      ;; queue 335 (lib/IR/VerifierAMDGPU.cpp's verifyAMDGPUIntrinsicCall, amdgcn_call_whole_wave): a direct call of an
+      ;; amdgpu_gfx_whole_wave function, not variadic, its arguments the callee's after the first (an i1), type and inreg
+      "llvm.amdgcn.call.whole.wave"
+      (let [fa (arg 0) d (when (global? fa) (.get *gdefs* (global-key fa)))
+            _ (when-not (and d (= :function (:kind d))) (verr :verifier/intrinsic-call "Indirect whole wave calls are not allowed" :inst))
+            [_ _ _ fps & fopts] (:form d) fo (apply hash-map fopts) fpl (vec (remove #{'&} fps))]
+        (when-not (= "amdgpu_gfx_whole_wave" (:cconv fo))
+          (verr :verifier/intrinsic-call "Callee must have the amdgpu_gfx_whole_wave calling convention" :inst))
+        (when (some #{'&} fps) (verr :verifier/intrinsic-call "Variadic whole wave calls are not allowed" :inst))
+        (when-not (= (count args) (count fpl)) (verr :verifier/intrinsic-call "Call argument count must match callee argument count" :inst))
+        (when-not (= 'i1 (norm-type (first (first fpl)))) (verr :verifier/intrinsic-call "Callee must have i1 as its first argument" :inst))
+        (doseq [i (range 1 (count fpl))]
+          (when-not (= (aty i) (norm-type (first (nth fpl i)))) (verr :verifier/intrinsic-call "Argument types must match" :inst))
+          (when-not (= (has-attr? (group-items (param-attrs (nth args i))) "inreg") (has-attr? (group-items (param-attrs (nth fpl i))) "inreg"))
+            (verr :verifier/intrinsic-call "Argument inreg attributes must match" :inst))))
       "llvm.assume"
       (do (when (seq (:bundles o)) (when-not (#{1 true} (arg 0)) (verr :verifier/intrinsic-call "assume with operand bundles must have i1 true condition" :inst)))
           (doseq [[tag & ins] (:bundles o)]
