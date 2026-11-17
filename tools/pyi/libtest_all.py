@@ -15,12 +15,15 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       checkout's paths"; a reason naming another path of the machine (under /root, /home, /tmp, /Users: Alpine's build
       directory) kept, the path's head written <home>/ and the like (queue 235: a record holds no host path; idempotent,
       rerun on a committed reference rewrites those lines alone)
-  run --root ROOT --modules FILE --dir DIR [--jobs N] [--test-timeout S] [--idle-timeout S] [--module-timeout S] [--oracle LIB] [--tmp-base D]
+  run --root ROOT --modules FILE --dir DIR [--jobs N] [--test-timeout S] [--idle-timeout S] [--mem-max MB] [--module-timeout S] [--oracle LIB] [--tmp-base D]
       each module through test/python/libtest_run.py, by pyi (ROOT/bin/pyi run) or with --oracle by python3 (the
       control: PYTHONPATH LIB): DIR/MODULE.out, .err, .status in test/python/libtest_judge.ae's format. A test that
       outlives S seconds (default 300) is killed and written "CASE ID timeout ..."; with --idle-timeout S (queue 275;
       default 0, off; bin/pyi passes 90) one whose processes (the driver's session and its descendants, /proc) use under 5%
-      of one core for S seconds is a hang, killed then: "CASE ID timeout the test idle past S s, a hang ..."; each test's
+      of one core for S seconds is a hang, killed then: "CASE ID timeout the test idle past S s, a hang ..."; with --mem-max MB
+      (queue 321; default 0, off; bin/pyi passes PYI_LIB_TEST_MEM_MAX, 8192) one whose processes' summed resident memory
+      passes MB, sampled every 5 s, is killed then: "CASE ID crash the test's processes past MB MB resident ..." (a
+      driver of test_capi reached 29.6 GB on the VM; a night's 4 jobs share the host's memory); each test's
       wall and CPU seconds in DIR/MODULE.times (ID, outcome, wall, CPU; "#start N" lines: a driver start's import); a driver that dies in a test (a Go
       panic, a fatal error) is written "CASE ID crash FIRST-CAUSE"; either way the driver starts again on the module's
       other tests (its SKIPFILE the tests already reported), until DONE. A run that makes no progress, or the module's
@@ -316,7 +319,46 @@ def tree_cpu(pid):
     return sum(procs[q][2] for q in mine) / CLK_TCK
 
 
-def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0):
+try:
+    PAGE_KB = (os.sysconf("SC_PAGE_SIZE") or 4096) // 1024
+except (ValueError, OSError, AttributeError):
+    PAGE_KB = 4
+
+
+def tree_rss_mb(pid):
+    """queue 321: the summed resident memory (MB) of a driver's processes, as tree_cpu finds them; None where /proc
+    cannot be read"""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return None
+    procs = {}
+    for n in names:
+        if not n.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % n) as f:
+                s = f.read()
+        except OSError:
+            continue
+        r = s[s.rfind(")") + 2:].split()
+        try:
+            procs[int(n)] = (int(r[1]), int(r[3]), int(r[21]))  # ppid, session, rss pages
+        except (IndexError, ValueError):
+            continue
+    if pid not in procs:
+        return None
+    mine, grew = {q for q, v in procs.items() if q == pid or v[1] == pid}, True
+    while grew:
+        grew = False
+        for q, v in procs.items():
+            if q not in mine and v[0] in mine:
+                mine.add(q)
+                grew = True
+    return sum(procs[q][2] for q in mine) * PAGE_KB // 1024
+
+
+def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0, mem_max=0):
     skipfile = os.path.join(d, m + ".skip")
     out_lines, err_parts, reported = [], [], set()
     times = []  # queue 275: DIR/MODULE.times, a line a test: ID, outcome, wall and CPU seconds (the driver's processes)
@@ -372,9 +414,14 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
                     # the last idle_timeout seconds waits on something that does not come (a hang): killed then, not
                     # at test_timeout
                     c = tree_cpu(p.pid) if idle_timeout and tick % 5 == 0 else None
+                    # queue 321: every 5 s the processes' summed resident memory, killed past mem_max MB
+                    mb = tree_rss_mb(p.pid) if mem_max and tick % 5 == 0 else None
                     with lock:
                         now = time.monotonic()
                         why = None
+                        if mb is not None and mb > mem_max:
+                            why = "memory"
+                            state["mem"] = mb
                         if c is not None and state["t0"] is not None:
                             sm = state["samples"]
                             sm.append((now, c))
@@ -441,6 +488,9 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
             elif state["killed"] == "idle":
                 # queue 275: a hang told from a slow test: its processes idle (under 5% of a core) for idle_timeout s
                 out_lines.append("CASE\t%s\ttimeout\tthe test idle past %d s, a hang (killed; the driver started again)" % (cur, idle_timeout))
+            elif state["killed"] == "memory":
+                # queue 321: past the memory cap (the host's memory shared by the jobs)
+                out_lines.append("CASE\t%s\tcrash\tthe test's processes past %d MB resident (killed by the runner's memory cap; the driver started again)" % (cur, mem_max))
             else:
                 out_lines.append("CASE\t%s\tcrash\t%s" % (cur, first_cause(err, status).replace("\t", " ")))
             if state["t0"] is not None:
@@ -470,6 +520,7 @@ def cmd_run(args):
     jobs = int(arg(args, "--jobs", "1"))
     test_timeout, module_timeout = float(arg(args, "--test-timeout", "300")), float(arg(args, "--module-timeout", "3600"))
     idle_timeout = float(arg(args, "--idle-timeout", "0"))
+    mem_max = int(arg(args, "--mem-max", "0"))
     oracle = arg(args, "--oracle")
     tbase = os.path.abspath(arg(args, "--tmp-base", os.path.join(d, "_tmp")))
     os.makedirs(d, exist_ok=True)
@@ -486,7 +537,7 @@ def cmd_run(args):
                 m = q.pop(0)
             t0 = time.monotonic()
             tmp = short_tmp(tbase, "j%d" % k)
-            n = run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout)
+            n = run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout, mem_max)
             shutil.rmtree(tmp, ignore_errors=True)
             shutil.rmtree(tmp + "c", ignore_errors=True)
             tmp_guard(m, os.path.join(d, "tmp-leftovers.log"))
