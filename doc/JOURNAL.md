@@ -10384,3 +10384,19 @@ definition whose declarator is not a function's (tried: the checker then runs an
 tail; not kept); eval-depth's five limits-*.c rows: the parse stops at MAX-NEST 4000 by design and the converter never sees those
 trees, so no converter change helps without moving the cap (a DECISION for the user: an explicit stack in the parser's nesting
 productions and every tree walker after it, or the rows kept deferred).
+
+## 2026-11-18: C's read cell, #embed's parameters as libcpp parses them (branch `n-c-defer`, from `next` `42bf8614b` with `mac/n-review-a`)
+
+The night's task (round 52, memory-free, each process under 1 GiB): the C read cell's 17 and print cell's 22 deferred rows. Four
+dg rows of gcc 15.2's c-c++-common/cpp/embed-*.c had one cause: repr/c's preprocessor read `#embed`'s and `__has_embed`'s
+parameters its own way and looked the resource up after a parameter error (a fatal "No such file" closed embed-18.c and
+embed-27.c). Ported libcpp's `_cpp_parse_embed_params`, `skip_balanced_token_seq`, `finish_base64_embed` and `builtin_has_embed`
+(studied in gcc-15.2.0's tarball at the pin `:gcc-15.2.0`, libcpp/directives.cc, files.cc, macro.cc; GPL-3.0-or-later, no code
+copied) into `arbace/repr/c/pp.ae` (CS322 (a), taken overnight). embed-3.c and embed-18.c pass; embed-4.c and embed-27.c fail
+further on, in two new deferred classes of the C lexer (CS323 (a), taken overnight: `:unterminated-literal`, `:gnu-raw-strings`);
+gnu23-attr-syntax-3.c's row passes (h-c-decl-diag's checker). Read 5234 / 224 / 17 to 5237 / 224 / 14; C's completeness 0.9811 to
+0.9813. Rows re-recorded by id from listed runs (dg 5 rows); the token, tree and round trip checks of gcc-embed and gcc-cpp-c23 as
+recorded. Alternatives considered: widening the old messages one by one (rejected: the stops and the base64 rules are libcpp's
+logic, not words); gcc's "missing '(' in expression" in the #if evaluator (tried, reverted: the tree check compares #if errors with
+cc's; a dg-wording family instead); libcpp's unterminated literals and GNU raw strings in the C lexer (proposed as CS324, CS325: they
+need a night's whole token check). doc/C23-SURVEY.md, "As built: #embed's parameters as libcpp parses them".
