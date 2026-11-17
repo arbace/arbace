@@ -10311,3 +10311,11 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
 - Then vectors' `f.cast::<i32>()`: a generic associated type's own arguments in normalize* (the impl's then the projection's own),
   and MIR forms' constant arguments `(cst V)`. vectors is own (`bin/rust-front rsi-build vectors`, 2.04 GB): 5 of the eval cell's 5
   cases at C1. Independence 80 (C2, C3, C4, C6 rustc's).
+
+## 2026-11-17: RIND stage 4 (C3, C4): measures and RIND8-RIND10 proposed (branch `h-rust-indep`)
+
+- mono-check's facts on the five cases tabled; vectors' 20 refused callees are portable SIMD's macro-made methods missing from
+  core-attrs' files. C4: the recorded StableCrateIds are not `StableCrateId::new` over the rlibs' extra filenames (Cargo's own
+  `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
+  library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
+  RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.

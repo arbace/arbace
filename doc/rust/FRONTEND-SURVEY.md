@@ -4089,3 +4089,52 @@ rind-test: `f.cast::<i32>()` a `Simd<i32, 4>`, no local of a parameter's type). 
 **`bin/rust-front rsi-build vectors`: own** (2.04 GB; mono's facts: callees 92/112 and fn-symbols 62/82 native, the rest the
 record's, as for the other own cases). **The cell: 5 of its 5 cases own at C1** (intrinsics, panics, std, unwind, vectors), C5 and
 C7 own; C2, C3, C4, C6 still rustc's (independence 80). `bin/rust-front essential` equal; `core-essential` 566 equal, its known summary, the control differing (2.19 GB).
+
+## RIND stage 4 (C3, C4): the measures and the plan (2026-11-17, 19:00)
+
+The user chose C3 and C4 next (RIND1's order). What the five cases consume, measured on their rsi-builds (mono-check against the
+records, `RF11_BATCH=1`, this afternoon):
+
+| case | callees | fn-symbols | items | langsyms | layouts | locs | symbols |
+|---|---|---|---|---|---|---|---|
+| intrinsics | 88/88 | 88/88 | 2/4 | 16/17 | 1204/1232 | 56/88 | 1/1 |
+| panics | 63/64 | 56/56 | 34/68 | 16/17 | 808/903 | 50/64 | 17/17 |
+| std | 124/125 | 119/122 | 20/45 | 16/17 | 4400/4655 | 74/125 | 10/11 |
+| unwind | 66/66 | 55/55 | 28/56 | 16/17 | 733/806 | 47/66 | 14/14 |
+| vectors | 62/82 | 62/82 | 6/12 | 16/17 | 2870/3082 | 61/82 | 3/3 |
+
+(`core-closure` 0/N everywhere: std's bodies are the record's, C2.) The refusals C3 counts are the facts a run takes from the record:
+vectors' 20 callees are one cause, `core::core_simd::..::{impl#N}::reduce_sum's attributes are not in core's sources` (portable
+SIMD's macro-made methods: `bin/rust-front core-attrs` reads `test/rust/front/core-attrs.txt`'s files, none of them under
+`portable-simd/`); the other cases' are one callee each and the locations and layouts mono writes differently (the mono-check
+lines name them).
+
+C4's two inputs:
+- **The StableCrateIds** (`std-crates-rsi.edn`): `StableCrateId::new(name, lib, -C metadata, CFG_VERSION)` with the rlibs' extra
+  filenames as the metadata does not give the recorded ids (core `1336fe62..` against `bdd42e15..`): Cargo passes a `-C metadata`
+  of its own hash, which the rlib does not keep. Computing them natively means porting Cargo's metadata hash (Cargo's sources:
+  not on this host, a fetch) or building std with Arbace's own `-C metadata` (the library stage, C6).
+- **std's interface** (`std-iface.edn`, the helper's): the native whole-crate collection pass (RF12-P2 (b), RFP57 (a)) exists for
+  core's modules (core-check's interface pass, about 23 minutes and 2.3 GB for the 37 modules); alloc and std (the linux `sys`) are
+  not passed yet.
+
+### Proposed (RIND8-RIND10)
+
+- **RIND8 The library's crate identities.** (a) **Under RIND6 (a), the std build's crate identities (each crate's name and
+  StableCrateId) are constants of the library build Arbace links (as CFG_VERSION is of the emulated rustc), kept as data
+  (`std-crates-rsi.edn`, made once), checked against the rlibs' rmeta only in the oracle tier; computed natively when Arbace builds
+  std with its own `-C metadata` (C6)**; (b) port Cargo's metadata hash now (Cargo's sources fetched: the user's go-ahead); (c) C4
+  stays rustc's until C6. *Recommended: (a).*
+- **RIND9 std's interface natively.** (a) **The interface pass crate by crate, core first (its 37 modules, the pass that exists),
+  then alloc, then std's linux `sys` and its dependencies, each written as the helper's `std-iface` shape and compared fact by fact
+  with it in a check of its own (night runs: about 25 minutes and 2.3 GB a crate's pass); a run reads the native interface once
+  all three crates compare equal on the five cases' uses**; (b) the whole interface at once (one long pass, no staged proof).
+  *Recommended: (a).* 3-5 days.
+- **RIND10 C3's first slice.** (a) **The portable SIMD files in core-attrs (`../../portable-simd/crates/core_simd/src/simd/
+  {num/int,num/uint,num/float,cmp/ord,cmp/eq}.rs` in `test/rust/front/core-attrs.txt`, if core-check's module tree reaches core's
+  `#[path]` module), then each case's remaining refused callee and the locations' and layouts' differences, one by one, against
+  mono-check**; (b) count C3 by the five cases' facts alone (a case whose run took no record fact). *Recommended: (a)*, judged by (b).
+
+Not built tonight: from 19:00 UTC only code and unit tests under 1 GiB, and each step above needs an rsi-build or a core-attrs
+pass (2.3 GB). The main host's commands for RIND10 (a) once decided: add the five lines, then `RF11_BATCH=1 bin/rust-front
+rsi-build vectors` (core-attrs is rebuilt first: about 35 minutes, 2.3 GB), its `mono-check` line's callees against 62/82.
