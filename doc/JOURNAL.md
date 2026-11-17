@@ -10319,3 +10319,26 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: Ghidra G2 BC: bouncycastle's provider roots (branch `n-g2-bc`; the demo's `g2-bc`, 75b4a0f)
+
+- A19's risk (the demo repo `/root/arbace-ghidra.git`, `g2-a19:plan/A19.md`): `CertTool` adds `BouncyCastleProvider`, whose
+  constructor loads `PACKAGE + NAME + "$Mappings"` by name and whose services `Provider.Service.newInstance` builds by
+  `Class.forName` and `getConstructor`. Read from the pinned `bcprov-jdk18on-1.86-sources.jar` (with bcutil's and bcpkix's, the
+  store's `deps/maven`, release 25's layer; nothing fetched) by the demo's new `bin/bc-roots`: 108 `$Mappings` asked (all present),
+  130 in the binary jar (A19's 131 counted `asn1/x509/PolicyMappings`; the 22 unasked are BouncyCastlePQCProvider's), 1,414 service
+  classes. ghidra.net's tier on "BC": the tests' `X509` and `RSA` `$Mappings` with `x509.CertificateFactory`, `rsa.KeyFactorySpi`,
+  `DigestSignatureSpi$SHA256`; CertTool's commands add `AES` and `OpenSSLPBKDF` with `rsa.KeyPairGeneratorSpi`,
+  `DigestSignatureSpi$SHA512`, `AES$ECB`, `OpenSSLPBKDF$PBKDF` (4 + 7, the plan's).
+- No new key: bin/java-project's `:closure :roots` (A3; a nested class by dots) roots the cut, and native-image metadata (A6) in
+  bcprov's module `:resources` roots j2g (a `reflect-config.json`, each no-argument constructor on `typeReachable`
+  BouncyCastleProvider; `arbace.j2g.meta/metadata-roots` reads it as 11 conditional entries). A `:reflect-roots` key was the
+  alternative, rejected: it would duplicate A6. BUILD.md's A3 paragraph says so.
+- Proved light (each process tree under 1 GiB): the merged G2 plan resolves by `bin/java-project plan` (15 modules, Generic
+  without the three binary jars, bcprov's 32 roots and 308 optional); `bin/java-project sources` over bcprov alone from the 32
+  roots (javac's tool `gate-exe/javac-8526ceb9d1ea3ff0bd68`, peak 1.01 GB summed, 57 s): 1,286 files kept, 0 left out, every
+  root's class compiled; of the 108 asked `$Mappings` the cut keeps only the 4 rooted and 3 statically reached files.
+- Decisions taken overnight (round 52), the demo's `plan/BC.md` §5: BC-1 (a) the certtool tier, BC-2 (a) the existing keys,
+  BC-3 (a) bcutil's and bcpkix's cut from Ghidra's names with their static closure as `:optional`, BC-4 (a) the modules
+  generated into `plan/bc/modules.edn`, merged by bin/test-g2's `:add-module-files`. By day: the three modules' read
+  (`bin/java-project read ... --only bcprov,bcutil,bcpkix`), and after R2 the loaded bouncycastle classes against the tiers.
