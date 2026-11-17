@@ -10558,3 +10558,14 @@ pass, cut to them); the 99 date mains 1 fail → pass, 0 pass → fail; `bin/jav
 Decisions taken overnight (round 52): the JDK's exception for non-Gregorian types rather than a Gregorian stand-in; th_TH's default stays
 "buddhist". Keys: gate_key and the runtime key (overlay/jdk, jdk/forms). Nothing built (doc/classes/JAVA-DEFERRED-TRIAGE.md,
 "As built: n-java-calb").
+
+## 2026-11-18: n-java-night, the night's nine Java branches stacked on n-review-c (round 52, overnight)
+
+Branch `n-java-night` from mac/n-review-c `6ff92621f` merges n-java-indep `09882cbae`, n-java-sources `f992724a5`, n-javac-dup
+`783585fdb`, n-java-defer `86db53b2e`, n-java-conv `92eabf1b7`, n-jrt-aih `a6aa49249`, n-java-serial `3e085c191`, n-java-dates
+`667665e41`, n-java-calb `ac17b290e`, in that order, so the day merges one head with one build and one reconversion. Conflicts only
+in the journal, JAVA-FRONTEND-SURVEY.md and JAVA-DEFERRED-TRIAGE.md (appended sections, both kept); no two branches touched the
+same form of jdk/ or the same row of check-interp.edn. Light proof: reap and crops-score re-recorded (unchanged), --judge --strict,
+records-check, the planner, java-check --essential 428 of 428 on next's gate executable with the checkout on ARBACE_PATH,
+javac-platform-test. Still running, to merge on top tomorrow: n-java-hoist, n-java-net. The day's list:
+doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-night".

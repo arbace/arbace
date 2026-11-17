@@ -8155,3 +8155,49 @@ bin/java-check --judge --partial --record .tmp/ncb/results.tsv   # t05460 pass; 
 bin/reap --record && bin/crops-score --record
 # the compiled level's rows at the night's compiled shard (shard2: t05460; t05461 stays refused on its Locale field initializer)
 ```
+
+## As built: n-java-night, the night's Java branches as one head (2026-11-18, round 52, overnight)
+
+Branch `n-java-night` (from mac/n-review-c `6ff92621f`) merges, in order, n-java-indep `09882cbae`, n-java-sources `f992724a5`,
+n-javac-dup `783585fdb`, n-java-defer `86db53b2e`, n-java-conv `92eabf1b7`, n-jrt-aih `a6aa49249`, n-java-serial `3e085c191`,
+n-java-dates `667665e41`, n-java-calb `ac17b290e`, so the day merges one head and runs one reconversion. Conflicts only in
+doc/JOURNAL.md, doc/classes/JAVA-FRONTEND-SURVEY.md and this file, each two appended sections, both kept in merge order (the
+sections' shared closing fence restored). test/java/divergences.edn, test/java/check-interp.edn (only n-java-serial changes rows),
+arbace/classes/interp.ae (n-java-defer and n-java-serial, apart hunks) merged by themselves. The hand-converted forms never overlap:
+n-java-serial's `jdk/forms/jdk/internal/jrt/CaseInsensitiveComparator.ae`, `jdk/forms/sun/rmi/server/MarshalInputStream.ae`;
+n-java-dates then n-java-calb (chained) `jdk/forms/java/util/{Calendar,GregorianCalendar}.ae`; n-javac-dup
+`jdk/javac/forms/jdk/internal/jrt/javac/Main.ae`; each equal at the head to its branch's own. To merge on top tomorrow, still
+running tonight: n-java-hoist (the converter's post-increment, t05396) and n-java-net.
+
+Proven light (GOMEMLIMIT=1GiB, stage 0 of next): `bin/reap --record` 0 problems, 53 of 56 cells, matrix unchanged (860 MB);
+`bin/crops-score --record` unchanged, `--judge --strict` 0 problems (Java 89 / 92 / 100 / 60; 1.0 GB); `bin/records-check` 9 pairs,
+0 problems; `bin/gate --plan` 0; `bin/java-check --essential` on the gate's executable `e8e0d017243dca8a9f9f` with the checkout on
+ARBACE_PATH 428 of 428 as recorded, the controls failing as they must (930 MB); `test/gate/javac-platform-test.bash` all passed.
+
+The day's list, once for the nine branches (keys moved: `gate_key`, `arbace_runtime_key`, `arbace_javac_key`, `arbace_javac_rest_key`).
+The javac tool comes before the reconversion: n-java-conv's converter and n-javac-dup's Main are compiled into it.
+
+```sh
+bin/arbace-go --gate-build                                  # one build: jrt's annotation.ae, date.ae, the overlay's forms, interp.ae, j2g's dyn.ae
+bin/jrt test --arch amd64 -run 'TestAnnotation'             # n-jrt-aih's TestAnnotationHandlerNew
+grep -c 'jrt lacks constructor sun/reflect/annotation/AnnotationInvocationHandler' "$(. bin/lib/gate-cache.bash; arbace_gate_cache)/amd64/j2g/report.edn"   # 0
+bin/javac-vendor tool                                       # the javac tool at the new arbace_javac_key
+bin/jrt-convert update && bin/javac-vendor convert && bin/clojure-tests --java-fixtures update && bin/java-check --forms update
+bin/provenance-check
+git diff --stat jdk/                                        # the hand forms should come back equal; if jdk/forms moved, the build again
+bin/j2g-edge update
+printf '%s\n' t04717 t04729 t04724 t04727 t04735 t04738 t04740 t04741 t04742 t04389 t04433 t04440 t04623 t05237 t05251 \
+  t04927 t05398 t05450 t05451 t05453 t05459 t05467 t05468 t05506 t05507 t05460 t05461 > .tmp/njn.txt   # 27 rows
+printf '%s\n' t04727 t04740 t04741 > .tmp/njn-conv.txt
+bin/java-check --levels read,interp --list .tmp/njn.txt --save .tmp/njn
+bin/java-check --levels compiled,print --list .tmp/njn-conv.txt --save .tmp/njn-cp
+bin/java-check --judge --partial --record .tmp/njn/results.tsv .tmp/njn-cp/results.tsv
+REPR_JAVA_EXE=<the new javac tool> bin/java-check sources --jobs 8 --record && bin/java-check sources --check --complete   # n-java-sources, 2.7 GiB
+bin/reap --record && bin/crops-score --record && bin/crops-score --judge --strict && bin/records-check
+# then: divergences.edn's :tests for the rows that moved (:reflection, :serialization, :util-classes, :jrt-dates);
+# the compiled level's rows of the date tests at the night's compiled shard
+```
+
+The rows by branch: n-java-defer t04717 t04729; n-java-conv t04727 t04740 t04741 (read, interp, compiled, print); n-jrt-aih t04724
+t04735 t04738 t04740 t04741 t04742 (read, interp); n-java-serial t04389 t04433 t04440 t04623 t05237 t05251; n-java-dates t04927
+t05398 t05450 t05451 t05453 t05459 t05467 t05468 t05506 t05507; n-java-calb t05460 t05461 (t05461 expected in :jrt-dates, Buddhist).
