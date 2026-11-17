@@ -388,6 +388,53 @@
     (tok! ")" "expected ')'")
     (aset ^ints (.pos *t*) 0 (int p0))))
 
+(defn- check-memory!
+  "LLParser::parseMemoryAttr's errors over the tokens after `memory` (queue 335), the cursor left where it was: `(`, then
+  access kinds, each after a location and its `:` but the first (the default), separated by commas, then `)`."
+  []
+  (let [p0 (p)
+        locs {"argmem" 1 "inaccessiblemem" 1 "errnomem" 1 "target_mem0" :target "target_mem1" :target "target_mem" 2}
+        kinds #{"none" "read" "write" "readwrite"}]
+    (when-not (punct? "(") (llerr "expected '('"))
+    (adv!)
+    (loop [seen-loc false seen-target false]
+      (let [w (when (#{:word :label} (kind)) (text))
+            loc (when w (get locs w))
+            _ (when loc
+                (if (= (kind) :label)
+                  (adv!)
+                  (do (adv!) (if (punct? ":") (adv!) (llerr "expected ':' after location")))))
+            _ (when-not (and (= (kind) :word) (kinds (text)))
+                (llerr (if loc "expected access kind (none, read, write, readwrite)"
+                           "expected memory location (argmem, inaccessiblemem, errnomem) or access kind (none, read, write, readwrite)")))
+            _ (adv!)
+            seen-target (or seen-target (= loc :target))]
+        (when (and (= loc 2) seen-target) (llerr "target memory default access kind must be specified first"))
+        (when (and (nil? loc) seen-loc) (llerr "default access kind must be specified first"))
+        (cond
+          (punct? ")") nil
+          (punct? ",") (do (adv!) (recur (or seen-loc (some? loc)) seen-target))
+          :else (llerr "unterminated memory attribute"))))
+    (aset ^ints (.pos *t*) 0 (int p0))))
+
+(def ^:private fn-attr-words
+  "The words LLParser::parseFnAttributeValuePairs takes (queue 335): Attributes.td's names (LLVM 23.1.5; a parameter's in a
+  function's place is its error, `this attribute does not apply to functions`) and the memory attributes it upgrades."
+  #{"align" "alignstack" "allocalign" "allockind" "allocptr" "allocsize" "allow_direct_access_in_hot_patch_function"
+    "disable_sanitizer_instrumentation" "hot" "marked_for_windows_hot_patching" "nocreateundeforpoison" "alwaysinline" "builtin" "byref" "byval" "captures" "cold" "convergent"
+    "coro_elide_safe" "coro_only_destroy_when_complete" "dead_on_return" "dead_on_unwind" "denormal_fpenv" "dereferenceable"
+    "dereferenceable_or_null" "elementtype" "flatten" "fn_ret_thunk_extern" "hybrid_patchable" "immarg" "inalloca" "initializes"
+    "inlinehint" "inreg" "jumptable" "memory" "minsize" "mustprogress" "naked" "nest" "noalias" "nobuiltin" "nocallback"
+    "nocf_check" "nodivergencesource" "noduplicate" "noext" "nofpclass" "nofree" "noimplicitfloat" "noinline" "noipa" "nomerge"
+    "nonlazybind" "nonnull" "nooutline" "noprofile" "norecurse" "noredzone" "noreturn" "nosanitize_bounds" "nosanitize_coverage"
+    "nosync" "noundef" "nounwind" "null_pointer_is_valid" "optdebug" "optforfuzzing" "optnone" "optsize" "preallocated"
+    "presplitcoroutine" "range" "readnone" "readonly" "returned" "returns_twice" "safestack" "sanitize_address"
+    "sanitize_alloc_token" "sanitize_hwaddress" "sanitize_memory" "sanitize_memtag" "sanitize_numerical_stability"
+    "sanitize_realtime" "sanitize_realtime_blocking" "sanitize_thread" "sanitize_type" "shadowcallstack" "signext" "skipprofile"
+    "speculatable" "speculative_load_hardening" "sret" "ssp" "sspreq" "sspstrong" "strictfp" "swiftasync" "swifterror" "swiftself"
+    "uwtable" "vscale_range" "willreturn" "writable" "writeonly" "zeroext"
+    "argmemonly" "inaccessiblememonly" "inaccessiblemem_or_argmemonly"})
+
 (defn- parse-attr
   "One attribute: :word, (:word ARG) for word(ARG) (a type for byval and the like, else the raw text), (:align N) for
   align N, (:word= N) for word=N, [\"k\" \"v\"] or [\"k\"] for a string attribute."
@@ -407,6 +454,7 @@
               (do (adv!) (llerr "expected integer"))
               (= w "captures") (do (check-captures!) (list kw (raw-parens)))
               (= w "initializes") (do (check-initializes!) (list kw (raw-parens)))
+              (= w "memory") (do (check-memory!) (list kw (raw-parens)))
               (punct? "(") (if (type-attrs w)
                              (do (adv!) (when-not (type-start?) (llerr "expected type")) (let [t (parse-type)] (expect! ")") (list kw t)))
                              (list kw (raw-parens)))
@@ -429,16 +477,19 @@
                                "unwind" "declare" "define" "attributes" "source_filename" "target" "module" "uselistorder"})
 
 (defn- parse-fn-attrs
-  "Function attributes after a header's parameter list (or a global's properties): group numbers and inline attributes."
-  []
+  "Function attributes after a header's parameter list (or a global's properties): group numbers and inline attributes.
+  In a function's header (`header?`) a word LLParser takes for no attribute ends them (its next error is the header's)."
+  ([] (parse-fn-attrs false))
+  ([header?]
   (loop [out []]
     (cond
       (= (kind) :attrgrp) (let [n (Long/parseLong (text))] (adv!) (recur (conj out n)))
       (= (kind) :str) (recur (conj out (parse-attr false)))
+      (and header? (= (kind) :word) (not (fn-attr-words (text)))) out
       (and (= (kind) :word) (not (fn-attr-stop (text))) (not (#{"unnamed_addr" "local_unnamed_addr" "addrspace"} (text))))
       (if (re-find #"[A-Z]" (text)) out   ; no attribute keyword has a capital: the header ends here (LLParser's next error)
           (recur (conj out (parse-attr false))))
-      :else out)))
+      :else out))))
 
 (def ^:private opcodes
   "The words that begin an instruction (and what may follow a call's attributes in a body: `to`, the use-list orders)."
@@ -1196,7 +1247,7 @@
         nm (if (= (kind) :gname) (let [n (global-name (text))] (adv!) n) (refuse "expected the function's name"))
         ps (parse-params)
         o2 (parse-global-prefix)
-        fa (parse-fn-attrs)
+        fa (parse-fn-attrs true)
         more (loop [m []]
                (let [w (when (= (kind) :word) (text))]
                  (cond
