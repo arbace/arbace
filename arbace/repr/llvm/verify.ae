@@ -1874,6 +1874,31 @@
         (when-not (ok? (aty s1)) (verr :verifier/intrinsic-call (str "operand " s1 " must be " lens-text " element i32 vector") :inst (vc s1)))
         (when-not (>= (long (nth (aty s0) 1)) (long (regs (fmt f0)))) (verr :verifier/intrinsic-call "invalid vector type for format" :inst (vc s0) (vc f0)))
         (when-not (>= (long (nth (aty s1) 1)) (long (regs (fmt f1)))) (verr :verifier/intrinsic-call "invalid vector type for format" :inst (vc s1) (vc p1))))
+      ;; queue 335 (verifyAMDGPUIntrinsicCall's kill, cs.chain, init.exec.from.input and set.inactive.chain.arg cases)
+      "llvm.amdgcn.cs.chain"
+      (let [inreg? (fn [i] (has-attr? (group-items (param-attrs (nth args i []))) "inreg"))
+            nx (some-> (:next *ctx*) body) nc (when nx (callee-of nx))]
+        (when-not (#{"amdgpu_cs" "amdgpu_cs_chain" "amdgpu_cs_chain_preserve" "amdgpu_es" "amdgpu_gs" "amdgpu_hs" "amdgpu_ls" "amdgpu_vs"} (:cconv fo))
+          (soft! :verifier/intrinsic-call "Intrinsic cannot be called from functions with this calling convention" :inst))
+        (when-not (inreg? 2) (verr :verifier/intrinsic-call "SGPR arguments must have the `inreg` attribute" :inst))
+        (when (inreg? 3) (verr :verifier/intrinsic-call "VGPR arguments must not have the `inreg` attribute" :inst))
+        (when-not (and (integer? (arg 4)) (<= 0 (long (arg 4)) 1)) (verr :verifier/intrinsic-call "flags must be 0 or 1 for llvm.amdgcn.cs.chain" :inst))
+        (when-not (or (= '(unreachable) nx)
+                      (and nc (= 'call (first nx)) (global? nc) (= (:name (intr/lookup (global-key nc))) "llvm.amdgcn.unreachable")))
+          (verr :verifier/intrinsic-call "llvm.amdgcn.cs.chain must be followed by unreachable" :inst)))
+      ("llvm.amdgcn.init.exec.from.input" "llvm.amdgcn.set.inactive.chain.arg")
+      (let [init? (= id "llvm.amdgcn.init.exec.from.input") i (if init? 0 1) v (arg i)
+            p (when (local? v) (first (filter #(and (vector? %) (local? (peek %)) (= (local-key (peek %)) (local-key v))) (nth f 3))))
+            p-inreg? (and p (has-attr? (group-items (param-attrs p)) "inreg"))]
+        (if init?
+          (when-not p-inreg?
+            (verr :verifier/intrinsic-call "only inreg arguments to the parent function are valid as inputs to this intrinsic" :inst))
+          (do (when-not (#{"amdgpu_cs_chain" "amdgpu_cs_chain_preserve"} (:cconv fo))
+                (soft! :verifier/intrinsic-call "Intrinsic can only be used from functions with the amdgpu_cs_chain or amdgpu_cs_chain_preserve calling conventions" :inst))
+              (when (has-attr? (group-items (param-attrs (nth args 1 []))) "inreg")
+                (verr :verifier/intrinsic-call "Value for inactive lanes must not have the `inreg` attribute" :inst))
+              (when-not p (verr :verifier/intrinsic-call "Value for inactive lanes must be a function argument" :inst))
+              (when p-inreg? (verr :verifier/intrinsic-call "Value for inactive lanes must be a VGPR function argument" :inst)))))
       "llvm.assume"
       (do (when (seq (:bundles o)) (when-not (#{1 true} (arg 0)) (verr :verifier/intrinsic-call "assume with operand bundles must have i1 true condition" :inst)))
           (doseq [[tag & ins] (:bundles o)]
@@ -3464,7 +3489,10 @@
                     (recur (inc ii) seen-non-phi)
                     (do
                      (visiting
-                      (binding [*ctx* {:fn f :bb l :bi bi :inst x :defs defs}]
+                      (binding [*ctx* {:fn f :bb l :bi bi :inst x :defs defs
+                                       :next (first (remove #(let [nb (body %) c (callee-of nb)]   ; the next instruction: a debug record or intrinsic is none
+                                                                  (or (dbg-record? nb) (and c (global? c) (re-find #"^llvm\.dbg\.(declare|value|assign|label)" (global-key c)))))
+                                                               (drop (inc ii) items)))}]
                       (when (and (terminator? x) (< ii (dec (count items))))
                         (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!"))
                       (when (and (= hd 'phi) seen-non-phi) (verr :verifier/phi-grouped "PHI nodes not grouped at top of basic block!" :inst :bb))
@@ -3809,8 +3837,14 @@
             :let [b (body x) c (callee-of b)]
             :when (and c (global? c) (str/starts-with? (global-key c) "llvm."))]
       (let [[_ ps] (split-inst b)] (.put users (global-key c) (conj (vec (.get users (global-key c))) [(call-fty (first ps) (nth ps 2)) x]))))
-    (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
-      (verify-function f (into {} users)))
+    ;; a declaration remangled (Intrinsic::remangleIntrinsicFunction, the upgrade at validateEndOfModule) is a new one at the
+    ;; module's end (getOrInsertDeclaration), visited after the others (queue 335)
+    (let [fns (filter #(#{'llvm/define 'llvm/declare} (first %)) forms)
+          names (set (map #(global-key (second %)) fns))
+          moved? (fn [f] (and (= 'llvm/declare (first f))
+                              (let [m (get *renames* (global-key (second f)))] (and (string? m) (not (names m))))))]
+      (doseq [f (concat (remove moved? fns) (filter moved? fns))]
+        (verify-function f (into {} users))))
     (doseq [f forms :when (= (first f) 'llvm/global)]
       (visiting (binding [*ctx* {:global f}] (check-global-variable forms f))))
     (doseq [f forms :when (= (first f) 'llvm/alias)]
@@ -4067,7 +4101,8 @@
                   *group-numbers*)
               nb (set-opt b :attrs (fn [attrs]
                                      (let [k (if (#{'llvm/define 'llvm/declare} h) (fn-attrs-key b) (attrs-key attrs))]
-                                       (if-let [n (get m k)] [n] attrs))))]
+                                       ;; no attribute at all (a group the module does not define: LLParser's empty set) prints none
+                                       (cond (empty? k) [] (get m k) [(get m k)] :else attrs))))]
           (if (= (first x) '=) (list '= (second x) nb) nb))
         :else x))))
 
