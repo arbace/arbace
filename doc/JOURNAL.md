@@ -9943,3 +9943,30 @@ the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of
   the C target). The record itself is the night's (ci needs runtime-ci at c/target). Alternative: keep the packs the record's default
   until the night proves the own cases (RFP42 (a)'s letter); the user's RIND5 (a) makes the own path the record's, the pack the
   fallback per case.
+
+## 2026-11-17: the Ghidra demo's G2, light: A16 (classes shadowed in class-path order) and A18 (forName without initialization) (branch `h-g2-arbace`, from next `55e8c0ae7`)
+
+- The user's decisions GH13-GH20 all (a) (the demo's `plan/G2.md` §8, branch `g2-plan`). `bin/java-project`'s resource
+  shadowing (`7fcffa2b4`, on `f26-ghidra`) cherry-picked first, its journal entry left there.
+- **A16** (GH14 (a)): a class in two modules' forms is the first module's in the plan's order, as a class path loads it
+  (`java.project`'s `merge-forms --shadowed`: a later differing copy listed in `WORK/classes.shadowed`, `REL MODULE` a line; an
+  equal copy, but for its header's file name, silent); `:shadow false` in `:java` keeps the error. javac's class path and source
+  path already took the modules in that order. Fixture `test/java/project/controls/shadow.edn` (Version differs, Same equal,
+  OldOnly the old module's) and the controls (the later copy absent from `forms.all`; `shadow-off.edn` fails naming the class):
+  `bin/java-project test` 35 of 35 (31 before, plus the case, two controls and the message). For the demo: hamcrest 2.2 before hamcrest-core 1.3 (Generic's
+  tests: one class, `util.CollectionUtilsTest`, uses 2.2's API, the demo's census `census/g2.edn`). Alternative: hamcrest 2.2 alone
+  with JUnit patched (GH14 (b)), or the class classed (c).
+- **A18**: verified, nothing to build. jrt's `Class_ForName_String_Z_ClassLoader__Class` runs `Init` only under its initialize
+  argument, the registry lookup `ForName` none; `arbace.j2g.start`'s classes initialized at start are the runtime's alone.
+  `bin/j2g-unit`'s `test-forname` over the fixture `test/j2g/unit/forname/f/Lazy.java` (its forms; stand-ins of Class's
+  interfaces beside it): the analysis keeps the argument, the call is that function, the initializer is code, the control
+  (`Class.forName(String)` runs Init unguarded) seen; 9 of 9. The run: `test/programs/reflect-meta`'s `rm.Lazy` (two lines
+  added to `runs/main.out`, the JDK's semantics: not initialized after `forName(..., false, ...)`, initialized after the
+  constructor), the night's `--build-program --check reflect-meta`. `bin/j2g-unit`'s 7 failing checks (type annotations' known
+  rows, F15's invokers fixture) fail as on next without this branch.
+- Found by the demo's read of G2's test sets: javac on Arbace rejects hamcrest 2.2's sources at eight calls (the varargs
+  factories' `Arrays.asList(matchers)` to their Iterable overload; `new CombinableMatcher<>(first).and(other)`), the same
+  rejection G1's `hamcrest-core-1.3-javac.patch` works around. Two small probes (the demo's `bin/ref-g2.d/probes/`) reproduce it
+  on javac on Arbace; whether the JDK's javac accepts them is the oracle tier's (`bin/ref-g2 probes`, by hand). If it does, this
+  is javac on Arbace's inference (an inference variable seen as a capture in a nested poly call), to fix with the probes as
+  fixtures; until then the demo carries a variant (`patches/hamcrest-2.2-javac.patch`), a decision for the user.

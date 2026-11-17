@@ -623,7 +623,8 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
     `allPublicMethods`/`allDeclaredMethods`; resource-config's `bundles` their classes' constructors; an entry
     with `condition.typeReachable` (or `typeReached`) once that class is reached, the others at once;
   - **reflective sites of constant names**, in the program's own classes (`nm/own-class?`): `Class.forName("p.C")`
-    and `ClassLoader.loadClass` root C's initializer; `C.class.getMethod("m", ...)`, `getDeclaredMethod` C's
+    and `ClassLoader.loadClass` root C's initializer (rooted, not run: the run initializes as the JVM does, A18);
+    `C.class.getMethod("m", ...)`, `getDeclaredMethod` C's
     members named m; `getConstructor`, `getDeclaredConstructor` C's constructors; `getField` the class;
     `MethodHandles.Lookup`'s `findVirtual`/`findStatic(C.class, "m", ...)` C#m, `findConstructor` C's
     constructors. The sites whose names are not constants are listed for review (`:reflective-sites :dynamic`).
@@ -1349,7 +1350,7 @@ the same for its own classes and its stand-ins (§4.3).
 | `Methods` | per method (`jrt.MethodInfo`): name, parameter classes, return class, modifiers (varargs, bridge, synthetic among them), `Invoke func(this any, args []any) any` | `getMethods`, `Method.invoke` |
 | `Ctors` | per constructor (`jrt.CtorInfo`): parameter classes, modifiers, `New func(args []any) any` | `getConstructors`, `newInstance` |
 | `IsInstance` | `C_InstanceOf` | `isInstance`, `cast`, `instance?` |
-| `Init` | `C_Init` | `Class.forName(name, true, ...)`, static field access and `newInstance` through reflection |
+| `Init` | `C_Init` | `Class.forName(name, true, ...)`, static field access and `newInstance` through reflection; `Class.forName(name, false, loader)` and `ClassLoader.loadClass` find the class without it, its initializer then running at the first active use (A18 of the Ghidra case study's G2 plan, checked: `bin/j2g-unit`'s `forname:`, the run `test/programs/reflect-meta`'s `rm.Lazy`); a program's class is never one initialized at start (§6.2, `arbace.j2g.start`: the runtime's alone) |
 | `Enum` | the constants in order | `getEnumConstants`, `Enum.valueOf` |
 | `FromFn` | for a functional interface: wraps an `IFn` into its adapter (§7.11); set on every interface `Compiler.FISupport` may adapt, the `@FunctionalInterface` ones (amendment R13), by `arbace/lang`'s `j2g_fromfn.go` (§7.11, amendment E5) | `jrt.AdaptFn`, `Reflector`'s functional interface adaptation, `isAnnotationPresent(FunctionalInterface)` |
 
