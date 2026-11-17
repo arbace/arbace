@@ -8274,3 +8274,16 @@ gate-key-crops-test, audited-test, costs-test, claude-md-test, `make check-makef
 Rule slips: the waits on the checks' logs used `grep -q ... 2>/dev/null` (read-only) and one `git stash list` (a listing, nothing stashed);
 `ps -eo rss,...` (no grep) to see that a stopped check's process was gone. Scratch (the worktree's `.tmp/`): `oi-list/` (logs, the oi-only
 lists), `oi/table/`, `si/interp/`, `goi-table/8a66635705fc1650` (a link to the main checkout's cached linux std forms, same key), removable.
+
+## As built: h-judges, the judge's and the read's bounds (2026-11-17, branch `h-judges`)
+
+No C++ row moves to its own verdict: the token check's 1,931 files state no preprocessed stream of their own (g++ -E's and
+clang's digests are the only reference), the samples' and runtime's 15 programs are Arbace's own and print what they compute
+with no expected output, and the sampling's 2 (`ubsan/null-8.C`, `ubsan/vptr-1.C`) state their verdict by dg-output, the
+sanitizer's message under `-fsanitize`, which the check's harness does not pass (`cppi_opts`), so g++'s recorded run stays their
+reference. The facts (`test/crops/independence.edn`) now leave the read cell's 36 n/a cases out (CP260 (a): 33
+`:dg-unsupported`, 3 `:not-cxx` and `:target-option`), as `test/reap/matrix.edn` does: read 0.711 to 0.712 ((1931 + 823 + 0.5 x
+3741) / 6495), judge 0.907 unchanged. The read stays near 0.71 because 3,741 dg files fail the own front end's record
+(`test/cpp/check-dg-own-linux-amd64.edn`): 3,386 `missed` (3,071 accepted where a dg-error expects a Sema diagnostic: overload
+resolution, incomplete types, deleted functions, narrowing, access, constant evaluation, the most frequent message 32 files),
+212 `both`, 92 `extra`, 29 crashes, 20 timeouts, 2 stopped. CX12's next slices move it; no light change does.

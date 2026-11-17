@@ -9552,3 +9552,20 @@ Alternatives considered: moving the subsets to `:phase :full` (simplest, but a c
 crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
+
+## 2026-11-17: the judges of C, C++ and LLVM IR audited, rows moved to their own verdict (branch `h-judges`, from `next` `e4a7a30f3`)
+
+The judge stage's rows still on a host toolchain's recorded runs (doc/CROPS-SCORE.md, "Independence"; the user's rule of
+2026-11-07), each crop's listed with its reason in `test/crops/independence.edn` and the surveys' "As built: h-judges".
+- C: mir/andrewchambers_c's 67 execute tests (Andrew Chambers' C compiler's test/execute, their README.md; self-checking by
+  status, no output) judged by exit 0 in `test/c/selfref.ae`, at eval and AOT; a control (`_control/ptr-sub-unsigned-vs-execute`).
+  The fact recounted on today's cells: judge 0.985 to 0.989.
+- LLVM IR: `section_verdict` takes split-file's directory as named (`%t.dir`) and strips CR: cfi-icall-alias's section by its own
+  verdict; the verify-llvmtest count measured (756/50 before, not 758/48; 757/49 after); a control (`_control/dir-section-vs-reject`).
+  Judge 0.893 unchanged. The rest stays for stated reasons (LLS30's probes, Arbace's output-only programs, the pack's modules,
+  the mutants whose verdict line is the pack's).
+- C++: nothing movable (the token check states no stream; the samples print; the 2 dg-output tests need -fsanitize). The read
+  and judge facts leave the 36 n/a out as the matrix does: read 0.711 to 0.712, judge 0.907.
+Alternatives considered: own expected values for synth-c23 and the probes (a DECISION: LLS30's reasoning, the expected output
+would be written by us and checked against the toolchain); MIR's default status for its new/ tests (not established without its
+runner, which ccorpus2 does not carry); fixing the 4 mutants whose expectation throws (needs a re-made pack, night work).

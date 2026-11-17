@@ -2533,3 +2533,22 @@ and the steps' table (see the report's key check).
 
 One phase stays (a class where a program shows it); the links above 2.5 GiB run in the night lanes only when no gate runs and the main
 session schedules them (the night's commands above); llvmi's full steps keep needing cpp-runtime.
+
+## As built: h-judges, the judge's recorded rows audited (2026-11-17, branch `h-judges`)
+
+Every row still judged by opt's or lli's record, and why (`test/crops/independence.edn`, LLVM's judge, the list):
+- verify-llvmtest, measured by its run's `verify.tsv`: 756 by their own verdict and 50 by opt's record (the fact said 758 and 48).
+  One more moved: Transforms/LowerTypeTests/cfi-icall-alias.ll's section `test` (split-file into `%t.dir`, CRLF lines, `cd
+  %t.dir`, `opt test.ll`); `section_verdict` (bin/repr-llvm) takes split-file's directory as the RUN line names it and strips the
+  CR. 757 and 49 now. The 49 have no own verdict for the module as the check reads it: whole split-file tests (the concatenation
+  no RUN line feeds a tool), sections reached only through `cat`, target options, passes other than verify, XFAIL, llvm-diff.
+  `bin/repr-llvm check verify-llvmtest`: 806 modules, 800 pass, 0 failing against the record; the new control
+  `_control/dir-section-vs-reject` fails as it must; `test/repr/llvm/controls-test.bash` all ok.
+- The probes' 478: LLS30 (opt's record kept).
+- lli's 177 at each level: c-O0's and c-O2's 74 synth-c23 programs and 7 ci-run programs, the 14 C++ samples, all Arbace's own
+  programs that print what they compute with no expected output; ee.MCJIT.2003-05-07-ArgumentTest (an argument after the file).
+- verify-rt's 268: the pack's 252 modules (clang's IR of the torture programs) and 16 hw modules, no RUN line.
+- verify-rt-heldout's 32: mutants of unknown kinds (a typed access's attachment 7, an intrinsic's bundle checks 5, musttail 4,
+  personality 3, the DI kinds 6 of which 4 are the expectation's own IllegalArgumentException, others 1 each). Their verdict is the
+  pack's first line: a rule fixed in `arbace.repr.llvm.expect` reaches them only with a re-made pack (night work).
+Judge 0.8933 to 0.8932 (the count corrected by 2, one row moved): (4345 + 0.5 x 1181) / 5526.
