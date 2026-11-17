@@ -9815,3 +9815,13 @@ AOT; 268 programs at eval move only those 41, the controls differ. C eval 2,214 
 Alternatives: vectors as a node kind of their own in go/arbace/ci (faster, but a back-end and cf2g change for no case that needs
 speed), left; the `_mm_*` functions of Arbace's headers as builtins, left (no check reaches them: benchmarksgame's SSE programs are
 recorded faulting without their argument; mandelbrot.c, -3, -4 run by hand with 200 print mandelbrot-2.c's image).
+
+## 2026-11-17: genclass.ae: no fn defined after it in arbace.core again (`into`, `mapv`; branch `h-prepare-fail`)
+
+`test/gate/prepare-fail-test.bash` failed on next (`c36f7366f`) with next's own stage 0: its host-compile control (prepfix.ok
+alone) could not load arbace.core from the checkout, "Unable to resolve symbol: into" at arbace/genclass.ae:167. arbace.core loads
+genclass.ae at core.ae:6927, before `into` (7105) and `mapv` (7133); 729785948 (CDR11, gen-class's `:exposes-methods` over the
+world's protected methods) added `gc-world-protected-methods`, which uses both, the same kind of break as 080c5ec64 fixed. The
+executables compile arbace.core from their embedded copy, so only a load from the checkout (the host compile, the image prepare)
+showed it. Fixed as 080c5ec64 did: `(reduce1 conj acc (for ...))` and `(vec (map ...))`, the same values. prepare-fail-test: 4 of 4
+on next's stage 0. Moves `gate_key` (arbace/genclass.ae is embedded), as 729785948 already did.
