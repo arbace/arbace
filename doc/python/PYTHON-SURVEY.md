@@ -7200,3 +7200,49 @@ modules: test_weakref, test_gc, test_finalization, test_module, test_atexit, tes
 test_coroutines, test_queue, test_generators, test_threading): 985 methods, every outcome the same (806 pass, 178 classed,
 test_threading's test_can_interrupt_tight_loops failing at both; base's first run had 20 more child-process failures in
 test_threading and test_gc, a rerun of the two modules alone at base gave head's outcomes).
+
+## As built: 318, the read and print cells' passes (2026-11-17, the Mac VM, queue 318)
+
+The pieces were all there already (PY10's R1, queues 212, 235, 265). `bin/repr-python roundtrip [--text]`, `lex-check` and
+`parse-check [--full]` with `--record` write test/python/{roundtrip,full,lex-check,parse-check}-results.edn
+(`arbace.repr.python.results/write`: rows ["CORPUS FILE" :pass|:known|:fail|:pending REASON]). test/reap/cells.edn's Python
+read and print sources name them as `:results` of the `:c-known` reader. bin/records-check (GD4, on next) takes them as pairs
+of that reader. What was missing is a record. No whole run had been recorded, so the cells counted no pass ("0 pass / 66
+design", "0 pass / 5 design"). Queue 318 ran the chain on a recorded slice and committed nothing but this text. The results
+files are the main host's, from whole runs.
+
+**The slice** (`.tmp/q318/slice.list`, 458 lines; REPR_PYTHON_ORACLE=live, python3 3.14.10; stage 0 of next's seed
+3c48859d): every other file of stdlib up to 300, plus the controls' pairs (303 files); samples (6); lex-errors (62); every
+file of the four known files (lib-test 13, site-packages 23, syntax-errors 33, the mutant m01045-0.py); 16 more mutants.
+Every run exited 0, and every negative control failed as it must:
+- `roundtrip --record`: 345 files, 311 pass, 34 known (29 s, 355 MiB);
+- `roundtrip --text --record`: 345 files, 341 pass, 4 known (82 s, 489 MiB);
+- `lex-check --record`: 420 rows, every row a pass (48 s, 380 MiB);
+- `parse-check --record` and then `--full --record`: 453 rows, 422 pass, 31 known (60 s and 73 s, 534 MiB). After the
+  :lines run alone, every row is :pending (queue 265), as it should be.
+
+**Read back**: `bin/reap` judges Python read at 376 / 64 / 0 (each file counted once over the three checks) and print at
+341 / 4 / 0, with no problem besides the matrix's record. next's records-check gives each of the four pairs as ok, and its
+four controls fail as they must. `bin/crops-score --crop python --input` the slice's cells (on next) moves Python's
+completeness from 0 to 46: read 85, print 99.
+
+**Found: four known entries are stale on next's runtime.** next's charsets (JC9b's F8) decode KOI8-R and cp1251. 201's
+stage 0 still refuses them: `lex-check lib-test` on module_koi8_r.py gives "refused" on nf's stage 0 and "equal" on nx's.
+So on next's stage 0, `Lib/test/encoded_modules/module_koi8_r.py` passes lex-check, parse-check (:lines and :full) and
+roundtrip --text, and the syntax-errors case `test_exceptions-0012.py` (coding cp1251) passes parse-check in both modes. Only
+`test_exceptions-0043.py` (iso8859-7) is still :charset. Without a fix, the non-record runs on 201 merged onto next fail
+those files as GONE. The fix is to drop the entries from the four known files.
+
+**The main host's whole record** (amd64, a host with python3 3.14.10, the live oracle; the order matters: parse-check's rows
+are :pending until both modes ran):
+
+    export REPR_PYTHON_ORACLE=live
+    bin/repr-python roundtrip --record --jobs 4
+    bin/repr-python roundtrip --text --record --jobs 4
+    bin/repr-python lex-check --record --jobs 4
+    bin/repr-python parse-check --record --jobs 4
+    bin/repr-python parse-check --full --record --jobs 4
+    bin/reap --record && bin/records-check && bin/crops-score --record && bin/crops-score --judge --strict
+
+Commit the four results files, the known files the record rewrote, the two costs files, test/reap/matrix.edn and
+test/crops/scores.edn together.
