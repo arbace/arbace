@@ -7393,3 +7393,62 @@ controls failing as they must. So the eval fact is 1 (`:steps [pyi-check]`) and 
 DECISION 3 (a)): judge 0.196 to 0.910, Python's independence 64 to 98. Queue 319's port is moot (its remainder: a wider stub run).
 The review (`.tmp/goal/review-mac-python.md` on the main host) also found that 317's splice of test/gate/crops/python.edn fails the
 planner until the main host's records (the big corpora's packs, the four results files, the eval and AOT records) are committed.
+
+## As built: 330, a yield-from chain resumed without each level's frame (2026-11-17, the Mac VM, queue 330)
+
+305's profile put 59-76% of generators, nqueens and coroutines under the resume chain (resume, run, runFrames,
+guardedStep, the compiled function's dispatch, AotExec, opYieldFrom, genSendTo, per level of `yield from`). Measured again
+at the base (Go pprof, 4-6 runs merged): the chain's own frames are about a third of bm_generators' CPU (a tree's
+`yield from` 17 deep per item); in bm_coroutines and bm_nqueens they are 8% or less, the rest Go's collector (35-45%:
+the generators and frames made per call) and the work itself.
+
+- **The pass** (`gen.go`'s `passDelegate`, `genDone`; `eval.go`'s `loop`, runFrames's loop split from its entry). A
+  resumption with a value sent (`next`, `send`, a for loop's next item) of a generator suspended at its yield-from on a
+  generator or coroutine hands the value to the delegate's resume itself: the frame is entered as run enters it (f_back,
+  the depth, the C level, the thread's frame, gi_running, its exception state pushed, `f.PC` past its yield-from), and its
+  loop, its instruction and its compiled function are not run. When the delegate yields, so does the frame from its
+  yield-from (suspended there, f_back None), as opYieldFrom does. When the delegate returns or raises, or a tool's events
+  came on while it ran, the frame goes on from its yield-from by its loop entered past its RESUME (it was resumed before its
+  delegate ran), its yield-from finding the delegate's outcome in `genDone`: the value pushed, the error raised in the
+  frame, the yield (the PY_YIELD event, the jump from a yield's event as before). Taken only when no tool has events, no
+  eval breaker is pending, no throw is pending for the frame, and the depth and the C level are below their limits (resume's
+  own path otherwise, with its errors). A chain of d levels runs one frame per item where it ran d. throw and close were
+  already sent to the innermost delegate first (_gen_throw).
+- **CPython's FOR_ITER_GEN and SEND_GEN themselves** (the generator's frame pushed in its caller's loop, its yield and
+  return completing the caller's for-iter or yield-from in place) were built and measured, and left out: in pyi's loop a
+  frame push returns from the caller's step and enters it again after the callee, which costs more than the Go-level
+  resume it saves. On the loop (PYI_AOT_LOOP=1, 5 interleaved rounds, CPU medians): bm_generators 0.81 s with the pass alone
+  and 0.87 s with both, bm_coroutines 1.89 and 1.95; the same push for a compiled caller's await (bm_coroutines compiled)
+  1.63 against 1.75 (3 rounds). CPython's frames are pushed in one C loop; pyi's pushed frame leaves the caller's
+  step and re-enters it, so the Go-level resume is the cheaper of the two here.
+- **Two fixes on the way.** `yield from` over a class's iterator returned None for the iterator's `StopIteration(value)`:
+  the class's tp_iternext slot ends the for loop's way, without the value; genSendTo now calls the class's `__next__` (as
+  slot_tp_iternext does) and takes the value. PEP 479's RuntimeError carried an entry of the generator's own frame;
+  CPython's (INTRINSIC_STOPITERATION_ERROR in the frame's handler, re-raised) carries none, its StopIteration cause does.
+
+**Measured** (the VM, base 7baf829c0 against head, warm executables, interleaved B H / H B, 7 rounds, CPU (user+sys)
+medians, load 30-37 with other tasks' runs beside; `.tmp/q330/log/ab-final.tsv`, `abloop-final.tsv`): compiled,
+bm_generators 1.16 -> 0.83 s (-28%), bm_coroutines 1.89 -> 1.88, bm_nqueens 1.40 -> 1.39, bm_async_tree 1.90 -> 1.92; on
+the loop (PYI_AOT_LOOP=1) bm_generators 1.26 -> 0.87 (-31%), bm_coroutines 1.99 -> 1.96, bm_nqueens 1.58 -> 1.62,
+bm_async_tree 2.11 -> 2.06: the others' differences are within the load's noise. Every run's stdout the same at base and
+head. bm_coroutines and bm_nqueens await or iterate fresh generators: their cost is the generator and frame made per call
+and Go's collections of them (the pass does not apply to a first send), and 218's tracking of the coroutines a flush
+finds running (`flushPendingGens`, 4% of bm_coroutines).
+
+**Order unchanged** (the VM): two probes written for it (`.tmp/q330/t/p330.py`, `p330b.py`: sends and returns through a
+4-deep chain, for loops and list() of chains, an exception caught at each level with the finally blocks' order, PEP 479
+through a chain, close and throw into a suspended chain, gi_running, gi_yieldfrom and f_back seen from the leaf,
+sys.exception() in nested generators resumed from handlers, a generator resumed through its own delegate, a reused
+coroutine, await chains with sends and throws, the recursion limit in a chain, a class's iterator delegated to, f_lineno
+of a suspended chain, a generator closed at its death, settrace switched on inside a delegate, break out of a for over
+a generator, a generator iterating itself, tracebacks of generators' errors, async for) compiled and on the loop against
+python3 -I: equal but at the base the class's iterator's value and PEP 479's tracebacks (3 lines), fixed, and one line
+at both (the generator a `break` leaves is closed at its collection, not at the break: 297's moment does not cover a for
+loop's iterator). Lib/test compiled (`bin/pyi check --aot --lib-test --fresh` test_generators test_coroutines
+test_asyncgen test_contextlib test_sys_settrace test_sys_setprofile test_monitoring): 901 methods, 805 pass, 96 classed,
+0 failing at base and head, every method's outcome and message the same. On goi (the eval level, `bin/pyi check --fresh`, the
+same modules, stage 0 nf's, which interprets the checkout's runtime; nx's runs the runtime compiled into it): base 797
+pass, 102 classed, 2 failing, head 798, 102, 1 failing; the one difference test_asyncgen's
+test_async_gen_asyncio_shutdown_exception_02 (failing at base, passing at head: 297's base row, flaky), test_sys_setprofile's
+ProfileHookTestCase.test_caught_exception failing on goi at both; every other method's outcome and message the same.
+
