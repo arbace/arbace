@@ -1958,3 +1958,42 @@ no source in the corpora to port), the local label (1 + 1), a fixup (1).
   the round trip of the 24 + 8 error tests; the earlier musl, arm64 and lexer samples unchanged.
 
 After: x86-64 read 25,253 pass / 1 design / 1 deferred, print 194,746 / 1,187 / 581; arm64 read 6,654 / 0 / 2, print 12,664 / 5 / 2.
+
+## As built: queue 337, the object verdict (2026-11-17; branch `337-asm-object-unjudged`, from `next` `d23b2215c`; the Mac VM)
+
+AXS95 (a) left 406 print texts `:object-unjudged`: llvm-objdump's and llvm-readobj's CHECK lines over objects no check judged, the
+runs object-check's corpus mc-x86-obj leaves out (branch alignment, prefix padding, relaxation, -mcpu, CREL, i386 and other
+triples). Queue 337 judges them by the tests' own verdicts, as AR4's arm64 verdict does MC/AArch64's, no LLVM tool at check time.
+
+- **The corpus** `mc-x86-objverdict` (`bin/repr-asm object-verdict`): MC/X86's files with an object run that mc-x86-obj leaves out
+  (by path), and those it takes whose object runs are all Mach-O's or COFF's: 68 files. Each RUN line that assembles with
+  -filetype=obj, its object piped to a viewer or written to `%t` and viewed by a later RUN line, is a run.
+- **The object** (`arbace.asm.amd64.obj`, `arbace.asm.obj`): the run's X86AsmBackend options, after llvm-project 23.1.5's
+  X86AsmBackend.cpp, MCAssembler.cpp and MCObjectStreamer.cpp (Apache-2.0 WITH LLVM-exception, written again in Arbace):
+  -mcpu's NOPs (getMaximumNopSize over `asm/amd64/backend.edn`: each processor's FeatureNOPL and NOP tunings, Implies closed, and
+  the instructions' branch flags, generated from X86.td by arbace.asm.tablegen, `bin/repr-asm backend gen|check`,
+  `arbace.asm.amd64.mcgen`; the 32-bit generic CPU's one-byte NOPs, which the fixed 15 got wrong); the branch alignment
+  (emitInstructionBegin/End, canPadInst, needAlign, X86BaseInfo.h's macro fusion, a `:boundary` chunk sized by relaxBoundaryAlign);
+  finishLayout's padding (padInstructionViaRelaxation, padInstructionViaPrefix, determinePaddingPrefix, the relaxable chunks since
+  the last label, LLVM's fragments rebuilt from the chunks); the enhanced relaxation (every instruction a fragment when a prefix
+  maximum is given); --mc-relax-all; `.code16gcc` (16-bit mode matched as 32-bit, check.ae's `*gcc*`); i386's REL addends kept in
+  their fields; X86AsmBackend::applyFixup's overflow error; FT_Nops' "illegal NOP size"; and relaxOnce over every section again when
+  one moved (a fill sized by another section's labels: relax-offset).
+- **The view** (`arbace.asm.amd64.objcheck`): llvm-objdump -d as llvm-objdump.cpp prints it: the file format, each code section's
+  symbols as SymbolInfoTy sorts them (a section-name label when none is at its start, the last code symbol of an address shown),
+  each instruction decoded by `arbace.asm.amd64.decode` and printed by `arbace.asm.amd64.print` (PrintBranchImmAsAddress:
+  `*branch-address*`), its bytes unless --no-show-raw-insn, --no-print-imm-hex, a branch's ` <SYM+0xOFF>`, a RIP-relative operand's
+  address; `--headers`; arm64's llvm-readobj and llvm-readelf views with x86-64's names (`arbace.asm.arm64.objcheck/*target*`). The
+  CHECK lines are held to it by decode-check's FileCheck subset; an error run by the diagnostics.
+- **Classes** (test/asm/divergences-object.edn): `:other-format` (a Mach-O or COFF triple: another object writer, by design,
+  DECISION AXS99), `:elf32` (an i386 view beyond the disassembly and --headers: Arbace writes ELF64), `:x32`, `:options` (an llvm-mc
+  option not taken: -relax-relocations=false, -g), `:stats` (--stats' counters, by design), `:split-file`, `:message`,
+  `:error-accepted`, the views not made. Controls `test/asm/controls-objverdict.txt`: five tests against themselves assembled without
+  their options (the alignment, padding, relaxation and -mcpu undone) and two against another test's lines, each failing as it must.
+- **The print level** (`arbace.asm.amd64.check`): another tool's text of a file object-check does not hold takes the verdict's result
+  for its line: met, `:pass` (the object's view, its disassembly Arbace's decoder's and printer's text); `:other-format` (by design,
+  new in divergences-print.edn), `:elf32` (deferred, new), `:mismatch` when the verdict fails it, `:debug-trace` for --stats', else
+  `:object-unjudged`.
+- **The matrix**: the AOT cell of x86-64 assembly gains the source "bin/repr-asm object-verdict" (CHECK lines), `:until` the main
+  host's record `test/asm/objverdict-results-amd64.edn`; the gate's `asm-amd64-objverdict` (`--full`, chain asm-amd64-full) and
+  `bin/repr-asm backend check` in `asm-amd64-table`.

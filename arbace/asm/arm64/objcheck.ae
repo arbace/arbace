@@ -93,10 +93,16 @@
         a (long (:addend r))]
     [nm a]))
 
-(defn- reloc-name [t] (get obj/reloc-names t (str "Unknown (" t ")")))
+(def ^:dynamic *target*
+  "The views' target (queue 337: x86-64's object verdict binds its own): the file format's and the architecture's names, the
+  relocation types' names, the machine's section types and flags."
+  {:format "elf64-littleaarch64" :arch "aarch64" :reloc-names obj/reloc-names
+   :sht {0x70000003 "SHT_AARCH64_ATTRIBUTES"} :shf [["SHF_AARCH64_PURECODE" 0x20000000]] :gnu-flags {0x20000000 "y"}})
+
+(defn- reloc-name [t] (get (:reloc-names *target*) t (str "Unknown (" t ")")))
 
 (defn view-objdump-r [o]
-  (concat [(str "<stdin>:\tfile format elf64-littleaarch64") ""]
+  (concat [(str "<stdin>:\tfile format " (:format *target*)) ""]
           (mapcat (fn [rs]
                     (concat [(str "RELOCATION RECORDS FOR [" (:section (first rs)) "]:") "OFFSET           TYPE                     VALUE"]
                             (for [r rs :let [[nm a] (value-text o r)]]
@@ -120,15 +126,17 @@
 
 (defn- hexu [^long v] (str "0x" (str/upper-case (Long/toHexString v))))
 
-(def ^:private sht-names
+(def ^:private sht-base
   {0 "SHT_NULL" 1 "SHT_PROGBITS" 2 "SHT_SYMTAB" 3 "SHT_STRTAB" 4 "SHT_RELA" 5 "SHT_HASH" 6 "SHT_DYNAMIC" 7 "SHT_NOTE"
    8 "SHT_NOBITS" 9 "SHT_REL" 11 "SHT_DYNSYM" 14 "SHT_INIT_ARRAY" 15 "SHT_FINI_ARRAY" 16 "SHT_PREINIT_ARRAY" 17 "SHT_GROUP"
-   18 "SHT_SYMTAB_SHNDX" 0x6fffff4c "SHT_LLVM_ADDRSIG" 0x70000003 "SHT_AARCH64_ATTRIBUTES"})
+   18 "SHT_SYMTAB_SHNDX" 0x6fffff4c "SHT_LLVM_ADDRSIG"})
+(defn- sht-names [t] (get (merge sht-base (:sht *target*)) t))
 
-(def ^:private shf-names
+(def ^:private shf-base
   [["SHF_ALLOC" 0x2] ["SHF_COMPRESSED" 0x800] ["SHF_EXCLUDE" 0x80000000] ["SHF_EXECINSTR" 0x4] ["SHF_GROUP" 0x200]
    ["SHF_INFO_LINK" 0x40] ["SHF_LINK_ORDER" 0x80] ["SHF_MERGE" 0x10] ["SHF_OS_NONCONFORMING" 0x100] ["SHF_STRINGS" 0x20]
-   ["SHF_TLS" 0x400] ["SHF_WRITE" 0x1] ["SHF_AARCH64_PURECODE" 0x20000000] ["SHF_GNU_RETAIN" 0x200000]])
+   ["SHF_TLS" 0x400] ["SHF_WRITE" 0x1] ["SHF_GNU_RETAIN" 0x200000]])
+(defn- shf-names [] (concat shf-base (:shf *target*)))
 
 (defn view-readobj
   "llvm-readobj's LLVM style (ELFDumper's LLVMELFDumper): the file's summary, then as the options ask the sections (-S), the
@@ -139,13 +147,13 @@
         sname (fn [^long i] (cond (= i 0) "Undefined (0x0)" (= i 0xfff1) "Absolute (0xFFF1)" (= i 0xfff2) "Common (0xFFF2)"
                                   :else (str (:name (nth secs i)) " " (str "(" (hexu i) ")"))))]
     (concat
-     ["" "File: <stdin>" "Format: elf64-littleaarch64" "Arch: aarch64" "AddressSize: 64bit" "LoadName: <Not found>"]
+     ["" "File: <stdin>" (str "Format: " (:format *target*)) (str "Arch: " (:arch *target*)) "AddressSize: 64bit" "LoadName: <Not found>"]
      (when (has "-S" "--sections" "--section-headers")
        (concat ["Sections ["]
                (mapcat (fn [s]
-                         (let [fl (long (:flags s)) set-fl (sort-by first (filter (fn [[_ v]] (= v (bit-and fl (long v)))) shf-names))]
+                         (let [fl (long (:flags s)) set-fl (sort-by first (filter (fn [[_ v]] (= v (bit-and fl (long v)))) (shf-names)))]
                            (concat ["  Section {" (str "    Index: " (:index s)) (str "    Name: " (:name s) " (" (:name-off s) ")")
-                                    (str "    Type: " (get sht-names (:type s) (str "Unknown")) " (" (hexu (:type s)) ")")
+                                    (str "    Type: " (or (sht-names (:type s)) (str "Unknown")) " (" (hexu (:type s)) ")")
                                     (str "    Flags [ (" (hexu fl) ")")]
                                    (for [[nm v] set-fl] (str "      " nm " (" (hexu v) ")"))
                                    ["    ]" "    Address: 0x0" (str "    Offset: " (hexu (:offset s))) (str "    Size: " (:size s))
@@ -181,7 +189,7 @@
   "llvm-objdump -t's symbol table (llvm-objdump.cpp's printSymbol): every symbol but the null one."
   [o]
   (concat
-   ["" "<stdin>:	file format elf64-littleaarch64" "" "SYMBOL TABLE:"]
+   ["" (str "<stdin>:	file format " (:format *target*)) "" "SYMBOL TABLE:"]
    (for [y (rest (:symbols o))
          :let [sh (long (:shndx y)) und (zero? sh) abs (= sh 0xfff1) com (= sh 0xfff2)
                weak (= 2 (:bind y)) t (:type y)
@@ -249,7 +257,8 @@
   "getGNUFlags: the known flags' letters from the least significant bit, then o, p, x."
   ^String [^long fl]
   (let [known {0x1 "W" 0x2 "A" 0x4 "X" 0x10 "M" 0x20 "S" 0x40 "I" 0x80 "L" 0x100 "O" 0x200 "G" 0x400 "T" 0x800 "C"
-               0x80000000 "E" 0x200000 "R" 0x20000000 "y"}]
+               0x80000000 "E" 0x200000 "R"}
+        known (merge known (:gnu-flags *target*))]
     (loop [f fl out "" os false pr false un false]
       (if (zero? f)
         (str out (when os "o") (when pr "p") (when un "x"))
@@ -270,7 +279,7 @@
       (pad-line (map vector [2 7 25 41 58 65 72 75 79 82 86] ["[Nr]" "Name" "Type" "Address" "Off" "Size" "ES" "Flg" "Lk" "Inf" "Al"]))]
      (for [s secs]
        (pad-line (concat [[2 (str "[" (rjust (str (:index s)) 2) "]")]]
-                         (map vector cols [(:name s) (let [t (get sht-names (:type s))] (if t (subs t 4) (str "0x" (Long/toHexString (:type s)) ": <unknown>")))
+                         (map vector cols [(:name s) (let [t (sht-names (:type s))] (if t (subs t 4) (str "0x" (Long/toHexString (:type s)) ": <unknown>")))
                                            (format "%016x" 0) (format "%06x" (:offset s)) (format "%06x" (:size s)) (format "%02x" (:entsize s))])
                          [[75 (rjust (gnu-flags (:flags s)) 3)] [79 (rjust (str (:link s)) 2)] [82 (rjust (str (:info s)) 3)] [86 (rjust (str (:align s)) 2)]])))
      ["Key to Flags:"

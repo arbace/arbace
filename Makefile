@@ -21,7 +21,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
   repr-asm-extract repr-asm-pins repr-asm-ensure asm-essential asm-amd64-essential asm-arm64-essential repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
   repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
-  repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle \
+  repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle repr-asm-object-verdict repr-asm-object-verdict-record repr-asm-backend-check \
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
@@ -600,6 +600,12 @@ repr-asm-object: ## amd64's object assembler: FILE assembled into an ELF64 objec
 	bin/repr-asm object $(FILE) $(OUT)
 repr-asm-object-check: ## amd64's objects judged against llvm-mc 23.1.5's recorded ones (musl, synthetic, mc-x86-obj) against test/asm/object-results-amd64.edn, the classes and the controls (bin/repr-asm object-check [CORPUS...]; CORPORA=...)
 	bin/repr-asm object-check $(CORPORA)
+repr-asm-object-verdict: ## queue 337: MC/X86's object tests object-check leaves out, each object run's CHECK lines held to Arbace's view of Arbace's object (llvm-objdump -d decoded and printed by Arbace), against test/asm/objverdict-results-amd64.edn, the classes and the controls (bin/repr-asm object-verdict)
+	bin/repr-asm object-verdict
+repr-asm-object-verdict-record: ## queue 337: the x86-64 object verdict recorded into test/asm/objverdict-results-amd64.edn (bin/repr-asm object-verdict --record)
+	bin/repr-asm object-verdict --record
+repr-asm-backend-check: ## queue 337: asm/amd64/backend.edn (X86AsmBackend's TableGen facts: the processors' NOP features, the branch flags) regenerated from X86.td and compared (bin/repr-asm backend check)
+	bin/repr-asm backend check
 repr-asm-object-record: ## amd64's object check recorded into test/asm/object-results-amd64.edn (bin/repr-asm object-check --record [CORPUS...]; CORPORA=...)
 	bin/repr-asm object-check --record $(CORPORA)
 repr-asm-object-oracle: ## the oracle tier's, by hand: a corpus's objects recorded by the host's llvm-mc 23.1.5 into test/asm/records/ and pinned (bin/repr-asm object-record CORPUS; CORPUS=musl|synthetic|mc-x86-obj)

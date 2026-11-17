@@ -73,6 +73,19 @@
 #   bin/repr-asm object-record [CORPUS]              the oracle tier's, by hand: the record made by the host's llvm-mc 23.1.5
 #                                                    (REPR_ASM_MC; -triple x86_64-linux-musl -filetype=obj), each object twice
 #                                                    and compared (verify), the pin rewritten
+#   bin/repr-asm object-verdict [--record] [--only LIST]
+#                                                    queue 337: MC/X86's object tests mc-x86-obj leaves out (the corpus
+#                                                    mc-x86-objverdict: the relaxation, padding, branch-alignment and -mcpu runs, the
+#                                                    other triples) judged by their own CHECK lines, no LLVM tool
+#                                                    (arbace.asm.amd64.objcheck: each run's object assembled with its X86AsmBackend
+#                                                    options, viewed as llvm-objdump -d prints it, its instructions decoded and
+#                                                    printed by Arbace, --headers, llvm-readobj, llvm-readelf); rows
+#                                                    test/asm/objverdict-results-amd64.edn (OBJVERDICT_RESULTS: another file),
+#                                                    classes divergences-object.edn, controls controls-objverdict.txt; --only LIST
+#                                                    (names, one a line): those files alone, no judge against the record
+#   bin/repr-asm backend gen|check                   queue 337: asm/amd64/backend.edn, X86AsmBackend's TableGen facts (the
+#                                                    processors' NOP features, the branch flags) from X86.td by
+#                                                    arbace.asm.tablegen (arbace.asm.amd64.mcgen; about 1 minute, 0.6 GiB)
 #   bin/repr-asm --arch arm64 object|object-dump|object-check|object-record ...
 #                                                    arm64's (AR4): arbace.asm.arm64.obj; the corpora a64-musl, a64-synthetic
 #                                                    (test/asm/obj-arm64/) by default, mc-aarch64-obj (MC/AArch64's ELF object
@@ -644,6 +657,22 @@ obj_list() {
             if (syms != "" && !(syms in seen)) { seen[syms] = 1; printf "%s@%s\t%s\t%s\n", n, syms, f, opts } }' >> "$lists/mc-x86-obj.list"
     done
     echo "repr-asm: mc-x86-obj: $(wc -l < "$lists/mc-x86-obj.list") files"
+  elif [ "$1" = mc-x86-objverdict ]; then
+    # queue 337: MC/X86's object tests that mc-x86-obj leaves out (its relaxation, padding, branch-alignment, -mcpu and
+    # other-triple runs; by path: two directories hold a compact-unwind.s), judged by their own CHECK lines (object-verdict)
+    local d=$src/llvm-project-23.1.5.src/llvm/test/MC/X86 f n
+    obj_list mc-x86-obj > /dev/null
+    : > "$lists/mc-x86-objverdict.list"
+    for f in $(grep -l -e 'filetype=obj' -e 'filetype obj' -r --include='*.s' "$d" | LC_ALL=C sort); do
+      n=${f##*/}; n=${n%.s}
+      # (a file mc-x86-obj takes whose object runs are all for Mach-O or COFF is the verdict's too: object-check assembles it at
+      # x86_64-linux-musl, the tests' CHECK lines read the other format's dump)
+      if awk -F'\t' -v f="$f" '$2 == f { found = 1 } END { exit found ? 0 : 1 }' "$lists/mc-x86-obj.list"; then
+        grep 'RUN:' "$f" | grep -e 'filetype[= ]obj' | grep -o -e '-m\?triple[= ]*[^ ]*' | grep -q -v -i -e darwin -e apple -e macos -e win -e msvc -e coff && continue
+      fi
+      printf '%s\t%s\t\n' "$n" "$f" >> "$lists/mc-x86-objverdict.list"
+    done
+    echo "repr-asm: mc-x86-objverdict: $(wc -l < "$lists/mc-x86-objverdict.list") files"
   else
     make_list "$1"
   fi
@@ -716,6 +745,11 @@ case ${1:-} in
     judge=(-e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"$all\" \"$classes\" \"${record:-}\" \"${ids[*]}\")")
     arbace_tool "${judge[@]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
+  backend)
+    case ${2:-} in gen|check) ;; *) echo "repr-asm backend gen|check" >&2; exit 2 ;; esac
+    llvm=$src/llvm-project-23.1.5.src/llvm
+    [ -f "$llvm/lib/Target/X86/X86.td" ] || { echo "repr-asm: $llvm/lib/Target/X86/X86.td missing: bin/repr-asm corpus extract" >&2; exit 1; }
+    arbace_tool -m arbace.asm.amd64.mcgen "$2" "$llvm" "$root/asm/amd64/backend.edn" ;;
   table)
     if [ "$arch" = arm64 ]; then
       case ${2:-} in gen) chk= ;; check) chk=--check ;; oracle) chk=oracle ;; *) echo "repr-asm --arch arm64 table gen|check|oracle" >&2; exit 2 ;; esac
@@ -994,10 +1028,38 @@ case ${1:-} in
     arbace_tool "${judge[@]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
   object-verdict)
+    if [ "$arch" = amd64 ]; then
+      # queue 337: MC/X86's object tests mc-x86-obj leaves out by their own CHECK lines (arbace.asm.amd64.objcheck; no LLVM tool):
+      # each object run's CHECK lines held to Arbace's view of Arbace's object (llvm-objdump -d decoded and printed by Arbace);
+      # rows test/asm/objverdict-results-amd64.edn (OBJVERDICT_RESULTS: another record, a scratch one), classes
+      # test/asm/divergences-object.edn, controls test/asm/controls-objverdict.txt; --only FILE: the listed names alone
+      shift; record= only=
+      while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only) only=$2; shift 2 ;; *) shift ;; esac; done
+      export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+      obj_list mc-x86-objverdict
+      vl=$lists/mc-x86-objverdict.list
+      if [ -n "$only" ]; then awk -F'\t' 'NR == FNR { k[$1] = 1; next } $1 in k' "$only" "$vl" > "$asm_tmp/only.list"; vl=$asm_tmp/only.list; fi
+      work=$root/.tmp/repr-asm/objverdict-amd64; rm -rf "$work"; mkdir -p "$work"
+      arbace_tool -m arbace.asm.amd64.objcheck check "$vl" mc-x86-objverdict "$work"
+      fails=0
+      while read -r cid subj ref; do
+        case $cid in ''|'#'*) continue ;; esac
+        sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/mc-x86-objverdict.list")
+        rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/mc-x86-objverdict.list")
+        if [ -z "$sp" ] || [ -z "$rp" ]; then echo "FAIL: control $cid: left (not in the corpus)"; fails=$((fails + 1)); continue; fi
+        v=$(arbace_tool -m arbace.asm.amd64.objcheck control "$sp" "$rp" | tail -1)
+        if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+      done < "$root/test/asm/controls-objverdict.txt"
+      if [ -n "$record" ] && [ $fails != 0 ]; then echo "repr-asm object-verdict: not recorded: $fails controls did not fail"; record=; fi
+      [ -n "$only" ] && [ -n "$record" ] && { echo "repr-asm object-verdict: --only does not record"; record=; }
+      if [ -z "$only" ]; then
+        arbace_tool -m arbace.asm.amd64.objcheck judge "${OBJVERDICT_RESULTS:-$root/test/asm/objverdict-results-amd64.edn}" "$work" "$root/test/asm/divergences-object.edn" "${record:-}" || fails=$((fails + 1))
+      fi
+      [ $fails = 0 ]; exit
+    fi
     # AR4: MC/AArch64's object tests by their own CHECK lines (arbace.asm.arm64.objcheck; no LLVM tool): each object run's
     # stated bytes and relocations held to Arbace's view of Arbace's object; rows test/asm/objverdict-results-arm64.edn, classes
     # test/asm/divergences-object-arm64.edn, controls test/asm/controls-objverdict-arm64.txt (a test's object held to another's lines)
-    [ "$arch" = arm64 ] || { echo "repr-asm: object-verdict is arm64's" >&2; exit 2; }
     shift; record=
     for a in "$@"; do case $a in --record) record=1 ;; esac; done
     obj_list mc-aarch64-obj
