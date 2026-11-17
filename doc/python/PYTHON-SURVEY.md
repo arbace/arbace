@@ -7294,3 +7294,14 @@ On the merge with 317 (next's shared tooling): Python's kinds in `test/oracle-re
 computing it ran `python3 --version` at every start, 6 calls in the stub run), and the judge's fact in
 `test/crops/independence.edn` as a case-weighted mean: 0.196 (66,657 cases; Lib/test's 47,621 methods live, 0, until
 319's driver), Python's independence 60 to 64; with 319 and the methods by their own verdict (queue 234), 0.910.
+
+## As built: the review of 317-320 (2026-11-17, the main host, h-review-mac-py)
+
+320's premise for Lib/test was stale: `bin/pyi check` runs no python3 by default since queues 234, 256 and 279 (its runner
+tools/pyi/libtest_all.py compiled by pyi's AOT, `pyrun`; the universe by findtests on pyi; each method by its own verdict;
+python3, `pyall`, only for `--oracle` and `--cover`). Shown on amd64 by `bin/pyi check --only test_bool` (with the controls'
+test_getopt) with python3, python and python3.14 stubbed to exit 99: rc 0, no stub called, 41 of 41 methods, the three negative
+controls failing as they must. So the eval fact is 1 (`:steps [pyi-check]`) and the judge's `:lib-test` cases count 1 (the user's
+DECISION 3 (a)): judge 0.196 to 0.910, Python's independence 64 to 98. Queue 319's port is moot (its remainder: a wider stub run).
+The review (`.tmp/goal/review-mac-python.md` on the main host) also found that 317's splice of test/gate/crops/python.edn fails the
+planner until the main host's records (the big corpora's packs, the four results files, the eval and AOT records) are committed.
