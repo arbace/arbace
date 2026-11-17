@@ -242,9 +242,20 @@ pyrec_flush() {
   for corpus in $(cat "$PYREC_STAGE"/*/corpus | LC_ALL=C sort -u); do
     pin=$(pyrec_pin "$corpus"); man=$(oracle_manifest "$pin"); name=python-pydump-$corpus; st=$PYREC_STAGE/pack-$corpus
     rm -rf "$st"; mkdir -p "$st/$name"; : > "$st/ids"
-    # the members recorded before, kept but those this run replaced
-    if [ -f "$man" ] && [ -f "$pin" ] && d=$(oracle_unpack "$pin" 2>"$TMPDIR/pyrec.err"); then
-      cp -a "$d/$name/." "$st/$name/"; awk -F'\t' '!/^#/ && NF {print $1 "\t" $2}' "$man" > "$st/ids"
+    # the members recorded before, kept but those this run replaced: an essential corpus's from its committed copy, else the
+    # pinned pack's from the store; a pin whose members are not here refuses the record (queue 320: before, the pack was
+    # rewritten with this run's members alone, the earlier ones dropped, when the store lacked it)
+    if [ -f "$man" ] && [ -f "$pin" ]; then
+      if pyrec_essential "$corpus" && [ -d "$PYREC_DIR/essential/$corpus" ]; then
+        oracle_check_members "$PYREC_DIR/essential/$corpus" "$man" \
+          || { echo "pyrec: $corpus: test/python/records/essential/$corpus differs from its manifest: not recorded" >&2; return 1; }
+        d=$PYREC_DIR/essential/$corpus
+      elif d=$(oracle_unpack "$pin" 2>"$TMPDIR/pyrec.err"); then d=$d/$name
+      else
+        echo "pyrec: $corpus: $pin's pack is not in the store ($(head -1 "$TMPDIR/pyrec.err")): not recorded, its earlier members would be lost (bin/oracle-records fetch $name first)" >&2
+        return 1
+      fi
+      cp -a "$d/." "$st/$name/"; awk -F'\t' '!/^#/ && NF {print $1 "\t" $2}' "$man" > "$st/ids"
     fi
     for s in "$PYREC_STAGE"/*; do
       [ -f "$s/corpus" ] && [ "$(cat "$s/corpus")" = "$corpus" ] || continue
