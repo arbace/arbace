@@ -7280,3 +7280,34 @@ the VM. Base 201 cb8457fc0, then 317's merge (80a6f9eaa, 201 onto next): reap's 
   bin/pyi passes `PYI_LIB_TEST_MEM_MAX` (default 8192). `:host-memory` (divergences.edn and divergences-315.edn) matches the
   line. Proved by a fake driver (400 MB against a 200 MB cap: the test written so, the driver started again, the next test
   run, under python3 and under the compiled runner) and by `bin/pyi divergences --results` of such a row (`:host-memory`).
+- **The dry run** (`bin/pyi records --slice 20`: 8 of the 151 programs, 27 of the 529 modules, among them test_subprocess,
+  test_capi and test.test_multiprocessing_spawn.test_manager; 2 jobs, GOGC=50, the VM loaded by 7 other agents):
+  - on 201 with next's stage 0 (`PYI_RUNTIME_STALE=1`: next's runtime compiled, so the night's speed): AOT 8 pass, 10 min 49 s
+    (the runtime printed), 3.0 GB; Lib/test 3,713 methods: 2,532 pass, 1,163 classed, 18 in no class (left out of the record:
+    reap's "18 cases ... not in" the record, its one problem), **31 min wall, 5,467 s CPU**, the modules' runs summed 3,708 s
+    (test_multiprocessing_spawn.test_manager 1,792 s, test_capi 690 s, test_subprocess 660 s), peak 32.9 GB summed (the
+    test_capi driver above). 8 of the 18 were next's runtime's (test_set's 37219 and unhashable message: 304's, passing on the
+    checkout's runtime).
+  - on 317's merge with 201's stage 0 (`interpreted`: the checkout's runtime, on goi): AOT 8 pass, 9 min 32 s, 617 s CPU,
+    3.0 GB; Lib/test 3,713 methods: 2,100 pass, 1,518 classed, 95 in no class, **1 h 54 min wall, 14,422 s CPU**, peak 14.9
+    GB summed (goi's drivers past 6 GB killed nine times by the VM's watchdog, written `crash Terminated`: with the runner's
+    cap they are `:host-memory`'s). Of the 95: three on both runtimes, now classed (test_capi's test_long_fromstring in
+    `:testcapi-behaviour`, test_functools' two test_update_type_wrapper in `:functools-core`); goi's alone (passing compiled):
+    test_manager's 82 (the driver killed with no output, status 137, in 256 s; 1,792 s and results compiled), test_functools'
+    two TestPartialPy test_weakref (a weak reference not cleared on goi), test_subprocess' test_leak_fast_process_del_killed;
+    the watchdog's eight. reap through the overlay: every Python cell checked, eval 2,108 / 419 / 1,099, AOT 8 / 0 / 0; its one
+    problem the 13 left-out methods (test_manager's 82 not among them: below). With the overlay's matrix written whatever the
+    problem (a scratch script), `bin/crops-score --crop python`: completeness 40 (eval 58, AOT 100), maturity 92 (the four
+    cells recorded), independence 60.
+- **The night's time and memory** (from the compiled slice, the night's host): the modules' runs about 20 x 3,708 s =
+  74,000 s, so about 5 h at 4 jobs on the VM's cores and about 3-4 h on the main host; check --aot about 20-30 min with
+  pyi's runs compiled in (70 min on goi, 287). Peak: 4 drivers of 1-3 GB with their children, each capped at 8 GB by the
+  runner: under 35 GB.
+- **Left for the night** (findings): a method in no class is left out of the record (libtest_judge's rule: no placeholder
+  class), so the first whole record will lack the methods the slice could not see (about 20 x 13 on its evidence); the night
+  keeps its run (`WORK/check/run`), and after classing them `bin/pyi check --judge .tmp/repr-python/pyi/check/run --record`
+  writes the record again with no run (the guard does not apply to a judge), then `bin/reap --record`. reap reads Lib/test's
+  record per module (`:py-ref-modules`: the modules the record holds), so a module whose every method is left out (the slice's
+  test_manager on goi) leaves the record without a problem: the judge's "N failing" line and exit 3 are the night's signal.
+  Pre-existing: `bin/pyi divergences` reports two shadowed names (test_capi's test_no_FatalError_infinite_loop under
+  `:testcapi`, test_pyexpat's test_error_path_no_crash under `:cpython-only`).
