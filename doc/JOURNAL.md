@@ -10219,3 +10219,20 @@ bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no 
   corpus tests; the rest of JAVA-DEFERRED-TRIAGE.md's 154 ids (a sample of 12 of them, `bin/java-check --levels interp --list`
   on the gate build: 11 now passing against `check-interp.edn`, t04706, StackTraceSerialization, still failing in the serialization
   class (JCS167); none regress).
+
+## 2026-11-17: x86-64's print cell, the asm streamer's lines (branch `h-asm-directive`, from `next` `498d7296f`)
+
+The print level's `:directive` (47 texts), `:local-label` (1 text + 1 cross) and `:fixup` (1) rows: llvm-project 23.1.5's
+`llvm/lib/MC/MCAsmStreamer.cpp` (with MCAsmInfo.h, MCAsmInfoELF/COFF/Darwin.cpp, MCContext.cpp's temporary symbols, MCParser/AsmParser.cpp's
+directive parsers, X86AsmParser.cpp's ParseDirectiveCode, X86WinCOFFTargetStreamer.cpp, X86RegisterInfo.td's DwarfRegNum; read from the
+pinned `llvm-project-23.1.5.src.tar.xz`, llvm-mc not run) ported into `arbace/asm/amd64/print.ae` (`stream-statement`, `resolve-temps`,
+`fixup-lines`); `arbace/asm/amd64/check.ae`'s print level writes the streamer's lines beside the instructions (`*streamer*`), follows
+`.if`/`.elseif` of a known value, names directional labels and `.` as llvm-mc's temporaries, and holds a non-instruction text to every
+printed line (unmet beside a written line `:mismatch`). Considered: keeping the streamer's lines in one stream with the instructions
+for every text (FileCheck's exact way) — not taken, an instruction's text stays held to the instructions alone so no recorded row of
+another file moves (proven on 140 files). arm64's printer is its own, untouched. See doc/asm/AMD64-SURVEY.md, "As built: the asm
+streamer's lines".
+Proof: encode-check `--only` over the 140 files with directive-like texts, directional labels or `.if` (only the 12 target rows move)
+and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones in test/asm/controls-print.txt, failing as it must);
+4 mutants `:mismatch` by hand. The 12 rows re-recorded alone (`--record --only`); x86-64 print 194,746 / 1,187 / 581 to
+194,796 / 1,187 / 531 (completeness 99.41 to 99.42); test/reap/matrix.edn and test/crops/scores.edn re-recorded.
