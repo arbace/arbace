@@ -1917,12 +1917,14 @@
   [temp.constr.decl]/3); not satisfied with no doubt, GCC's \"template constraint failure\" (a substitution failure where a
   deduction names it: a sure drop)."
   [t args]
-  (when (and (sema/checking?) (or (:class-constraint t) (some :tc (:params t))) (not (dependent? args)))
+  (when (and (sema/checking?) (or (:class-constraint t) (and (= :var (:tk t)) (:constraint t)) (some :tc (:params t))) (not (dependent? args)))
     (let [d (atom false)
+          ;; (a variable template's too, its requires-clause its :constraint: concepts/var-templ1.C)
+          rc (or (:class-constraint t) (when (= :var (:tk t)) (:constraint t)))
           ok (try (let [ps (bind-scope (:scope t) (:params t) args nil)]
                     (binding [sema/*constraint-doubt* d sema/*no-user* false sema/*cutoff* Long/MAX_VALUE]
                       (and (type-constraints-satisfied? t args ps)
-                           (or (nil? (:class-constraint t)) (sema/constraint-satisfied? ps (:class-constraint t))))))
+                           (or (nil? rc) (sema/constraint-satisfied? ps rc)))))
                   (catch arbace.lang.ExceptionInfo _ (reset! d true) true))]
       (when (and (not ok) (not @d))
         (throw (ex-info (str "codegen: template constraint failure for '" (:name t) "'")
@@ -2396,6 +2398,12 @@
   [t args scope]
   (every? (fn [[p a]]
             (cond
+              ;; (n-cpp-concepts, the checker: a constrained pack's arguments each satisfy its concept, [temp.param]/4's
+              ;; fold expansion (C<Ts> && ...); a concept of one parameter alone, as below)
+              (and (sema/checking?) (:tc p) (:pack p) (not (:tc-args p)) (map? a) (vector? (:pack a)) (not (dependent? (:pack a))))
+              (if-let [c (concept-of t p)]
+                (if (= 1 (count (:params c))) (every? #(concept-satisfied? c [%]) (:pack a)) true)
+                true)
               (or (not (:tc p)) (:pack p)) true
               ;; (C<A...> T: C<T, A...>, the arguments resolved where the parameters are bound, cpp-s2: std::tuple's
               ;; `template<__eligible_tuple_like<tuple> _UTuple>`; arguments the text does not show: not checked, as before)
@@ -2469,7 +2477,11 @@
             ;; whose static_cast needs string_view's converting constructor)
             _ (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false] (type-constraints-satisfied? t args ps)) (unsat "type-constraints"))
             _ (when-let [rc (:constraint t)]
-                (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false] (sema/constraint-satisfied? ps rc))
+                ;; (n-cpp-concepts, the checker: a member template's, `this` its class's, sema's *constraint-this*)
+                (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false
+                                    sema/*constraint-this* (or sema/*constraint-this*
+                                                               (when-let [c (and (sema/checking?) (:cls (:scope t)))] (abi/ptr {:k :class :id c})))]
+                            (sema/constraint-satisfied? ps rc))
                   (unsat "constraints")))
             fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (#'sema/declare-fn! ps (:pattern t)))
             _ (when-not fid (unsat "constraints"))
@@ -2631,6 +2643,7 @@
   __detail::__variant::__accepted_index<_Tp, _Variant, void_t<_FUN_type<_Tp, _Variant>>>), else the primary's."
   [t args]
   (let [t (tmpl (:id t))
+        _ (when-not (get-in t [:insts args]) (class-constraints-check! t args))
         ms (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t))
         best (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms)
         _ (when (and (seq ms) (not= 1 (count best))) (fail :template "ambiguous partial specializations of " (:name t)))

@@ -1022,6 +1022,11 @@
 ;; or evaluate (a refusal read as not satisfied): its false then not sure. A false with the atom unset is the program's own
 ;; (an atomic constraint that evaluated to false, [temp.constr.atomic]/3), a sure deduction failure.
 (def ^:dynamic *constraint-doubt* nil)
+(def ^:dynamic *constraint-this*
+  "n-cpp-concepts (the checker): the class pointer type `this` has in a member function's trailing requires-clause while it is
+  checked at the declaration ([expr.prim.this]/2; its unevaluated operands name the members, [expr.prim.id.general]/3), else nil."
+  nil)
+
 (defn doubt! [] (when-let [d *constraint-doubt*] (reset! d true)) false)
 
 (defn- class-scope?
@@ -1039,7 +1044,7 @@
   [e]
   (let [m (str (ex-message e))]
     (boolean (and (checking?)
-                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|unknown name \S+: no member of the complete class)" m)
+                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|unknown name \S+: no member of the complete class|template constraint failure for)" m)
                   (not (re-find #":k :(auto|dep|tparam)" m))))))
 
 (declare const-int analyze)
@@ -1147,7 +1152,12 @@
   now; any other true."
   [f]
   (if-let [[ps rc] (:trailing-defer f)]
-    (constraint-satisfied? ps rc)
+    (if (checking?)
+      ;; (n-cpp-concepts: in the checker a doubt keeps the function viable, its class's `this` in scope)
+      (let [d (atom false)
+            v (binding [*constraint-doubt* d *constraint-this* (when-let [c (:cls f)] (abi/ptr {:k :class :id c}))] (constraint-satisfied? ps rc))]
+        (or v @d))
+      (constraint-satisfied? ps rc))
     true))
 
 (defn fn-type-scope
@@ -1186,7 +1196,15 @@
         ;; [over.match.viable]/3, where it is checked: declared now, neither dropped nor kept by an answer that would
         ;; change once the class is complete)
         defer (boolean (and rc (unfinished-targs? scope)))
-        sat (or (nil? rc) defer (constraint-satisfied? rps rc))]
+        ;; (n-cpp-concepts, the checker: a member's constraint with `this` its class's, *constraint-this*; one not satisfied
+        ;; with a doubt, the function declared with its constraint deferred to overload resolution, trailing-ok?, where a
+        ;; doubt keeps it viable: before, dropped, its calls "no member": cpp2a/concepts-this1.C's A<B>().g(0))
+        dd (atom false)
+        sat (or (nil? rc) defer (binding [*constraint-this* (when (and (checking?) (:cls scope)) (abi/ptr {:k :class :id (:cls scope)}))
+                                          *constraint-doubt* (if (checking?) dd *constraint-doubt*)]
+                                  (constraint-satisfied? rps rc)))
+        _ (when (and (checking?) @dd *constraint-doubt*) (reset! *constraint-doubt* true))
+        defer (or defer (boolean (and (checking?) (not sat) @dd)))]
   (if (and (not sat) (not defer))
     nil
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n))
@@ -4058,8 +4076,9 @@
 (defn- this-expr [ctx]
   (if (:lambda ctx)
     (capture-field ctx :this)
-    (do (when-not (:this-type ctx) (fail :this "this outside a method"))
-        {:op :this :ty (:this-type ctx) :cat :pr})))
+    (let [tt (or (:this-type ctx) *constraint-this*)]
+      (when-not tt (fail :this "this outside a method"))
+      {:op :this :ty tt :cat :pr})))
 
 (defn- deref-node [e]
   (let [e (rv e)]
@@ -5564,17 +5583,32 @@
     "RequiresExpr" (if (and (empty? (:inner n)) (nil? (:params n)))
                      (fail :expr "a requires-expression the parser kept as its text")
                      (let [c (block-ctx ctx)
+                           ;; (n-cpp-concepts, the checker: a parameter of type void, [dcl.fct]/2 with [expr.prim.req.general]/5:
+                           ;; the substitution fails, the requires-expression false; GCC's "invalid parameter type", reported
+                           ;; at the requires-expression)
+                           void-param (atom false)
                            _ (doseq [pn (:params n)]
-                               (let [id (next-id)]
-                                 (swap! *vars* assoc id {:id id :name (:name pn) :ty (resolve-type (:scope c) (get-in pn [:type :qualType])) :storage :local :fn (:fn-id ctx)})
+                               (let [id (next-id)
+                                     pt (resolve-type (:scope c) (get-in pn [:type :qualType]))]
+                                 (when (and (checking?) (abi/void? pt) (not (:c pt)) (not (:v pt)) (not (str/includes? (str (get-in pn [:type :qualType])) "...")))
+                                   (reset! void-param true))
+                                 (swap! *vars* assoc id {:id id :name (:name pn) :ty pt :storage :local :fn (:fn-id ctx)})
                                  (when (:name pn) (enter! (:scope c) (:name pn) {:e :var :id id}))))
+                           _ (when @void-param
+                               (when-let [h *on-refusal*]
+                                 (h (ex-info "codegen: invalid parameter type 'void' in a requires-expression's parameters" {:codegen/refused :constraint :cx/node n}) n)))
                            ;; (CX12, the checker: a requirement the program surely fails is false with no doubt: a type
                            ;; requirement naming a member of a type that is no class, [temp.res.general]/3's typename-
                            ;; specifier over a scalar or pointer; an expression requirement whose analysis failed by an error
                            ;; Sema is sure of, `*` of a non-pointer or a member of a non-class)
                            type-sure-false? (fn [r]
                                               (when-let [[_ q] (re-matches #"(?:typename\s+)?(.+?)\s*::\s*(?:template\s+)?[A-Za-z_]\w*(?:<.*>)?" (str/trim (str (get-in r [:type :qualType]))))]
-                                                (let [qt (try (abi/unq (abi/non-ref (resolve-type (:scope c) q))) (catch arbace.lang.ExceptionInfo _ nil))]
+                                                (let [qt (try (abi/unq (abi/non-ref (resolve-type (:scope c) q))) (catch arbace.lang.ExceptionInfo _ nil))
+                                                      ;; (n-cpp-concepts: else the qualifier's first name, a plain identifier bound
+                                                      ;; to a type that is no class: T::_name_t::template _member_t<int> for T = int,
+                                                      ;; concepts/template-parm11.C)
+                                                      qt (or qt (when-let [[_ q0] (re-matches #"([A-Za-z_]\w*)\s*::.*" q)]
+                                                                  (try (abi/unq (abi/non-ref (resolve-type (:scope c) q0))) (catch arbace.lang.ExceptionInfo _ nil))))]
                                                   (and qt (or (abi/arith? qt) (abi/ptr? qt) (abi/void? qt))))))
                            sure-expr-failure? sure-failure?
                            ok? (fn [r]
@@ -5587,7 +5621,11 @@
                                                                  (check-type-access! (:scope c) (-> (str (get-in r [:type :qualType])) (str/replace #"^\s*typename\s+" "") (str/replace #"\s*::\s*" "::")) r))
                                                                true
                                                                (catch arbace.lang.ExceptionInfo e
-                                                                 (if (and (checking?) (or (type-sure-false? r) (sure-failure? e))) false (throw e))))
+                                                                 ;; (n-cpp-concepts: and a nested-name-specifier naming a type
+                                                                 ;; that is no class, [temp.res.general]/3, resolve-type-form's)
+                                                                 (if (and (checking?) (or (type-sure-false? r) (sure-failure? e)
+                                                                                          (re-find #"^codegen: a scope of a non-class" (str (ex-message e)))))
+                                                                   false (throw e))))
                                         "NestedRequirement" (constraint-satisfied? (:scope c) (first (:inner r)))
                                         (let [x (analyze c (first (:inner r)))]
                                           (cond
@@ -5615,11 +5653,11 @@
                                       (catch arbace.lang.ExceptionInfo e
                                         (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "requirement" (:kind r) "fails:" (ex-message e) "|" (some-> (node-text r) (subs 0 (min 120 (count (node-text r))))))))
                                         (if (and (checking?) (sure-expr-failure? e)) false (doubt!)))))]
-                       {:op :int :v (if (every? (fn [r] (let [v (ok? r)]
+                       {:op :int :v (if (and (not @void-param) (every? (fn [r] (let [v (ok? r)]
                                                          (when (and (not v) (System/getenv "CPP_CONCEPT_TRACE"))
                                                            (binding [*out* *err*] (println "requirement" (:kind r) "false:" (pr-str (some-> (node-text r) (subs 0 (min 120 (count (node-text r)))))) (pr-str (keys r)))))
                                                          v))
-                                                (:inner n)) 1 0) :ty abi/bool* :cat :pr}))
+                                                (:inner n))) 1 0) :ty abi/bool* :cat :pr}))
     ;; noexcept(e) ([expr.unary.noexcept]): e unevaluated, true when no function it calls may throw (an implicit or
     ;; defaulted special member counted as not throwing; G4)
     "CXXNoexceptExpr" (let [x (binding [*unevaluated* true] (analyze ctx (first (kids n))))
