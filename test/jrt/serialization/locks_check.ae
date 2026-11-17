@@ -1,0 +1,67 @@
+;; JCS191 (a) and JCS193 (b)'s night check (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: Java's older proposals
+;; (JCS191-JCS213)"): jrt's locks, Semaphore and ForkJoinTask's adapters (jdk-locks.txt, SerialRecordLocks.java's cases)
+;; and the hookless translated classes (jdk-prog.txt, SerialRecordProg.java's) written by the world's ObjectOutputStream
+;; (jdk26u's, translated) to the bytes jdk26u's JDK writes, and the JDK's bytes read back by ObjectInputStream (the
+;; synchronizers' twins matched by name) to an object that shows the same; a held lock read unlocked, written again as
+;; the unheld case. On an executable whose world has the streams:
+;;   EXE -e '(load-file "test/jrt/serialization/locks_check.ae")'
+;; prints a line per case and "locks-check: N of M", exit 1 on a mismatch.
+(import '(java.io ByteArrayOutputStream ObjectOutputStream ObjectInputStream ByteArrayInputStream)
+        '(java.util.concurrent ForkJoinTask Semaphore Callable)
+        '(java.util.concurrent.locks ReentrantLock ReentrantReadWriteLock)
+        '(java.util AbstractMap$SimpleEntry AbstractMap$SimpleImmutableEntry Arrays Collections UUID))
+(defn hex [^bytes b] (apply str (map #(format "%02x" (bit-and (long %) 0xff)) b)))
+(defn unhex [^String s] (byte-array (map #(unchecked-byte (Integer/parseInt (subs s % (+ % 2)) 16)) (range 0 (count s) 2))))
+(defn write [x] (let [b (ByteArrayOutputStream.)] (with-open [o (ObjectOutputStream. b)] (.writeObject o x)) (hex (.toByteArray b))))
+(defn read [s] (.readObject (ObjectInputStream. (ByteArrayInputStream. (unhex s)))))
+(defn adapter [simple params & args]
+  (let [k (doto (.getDeclaredConstructor (Class/forName (str "java.util.concurrent.ForkJoinTask$" simple)) (into-array Class params))
+            (.setAccessible true))]
+    (.newInstance k (object-array args))))
+(defn show [x]
+  (cond
+    (instance? ReentrantLock x) (str "lock fair=" (.isFair ^ReentrantLock x) " locked=" (.isLocked ^ReentrantLock x))
+    (instance? ReentrantReadWriteLock x) (str "rwlock written=" (.isWriteLocked ^ReentrantReadWriteLock x)
+                                              " reads=" (.getReadLockCount ^ReentrantReadWriteLock x))
+    (instance? Semaphore x) (str "semaphore " (.availablePermits ^Semaphore x) " fair=" (.isFair ^Semaphore x))
+    (instance? ForkJoinTask x) (str "task done=" (.isDone ^ForkJoinTask x) " cancelled=" (.isCancelled ^ForkJoinTask x)
+                                    " tag=" (.getForkJoinTaskTag ^ForkJoinTask x)
+                                    " exc=" (some-> (.getException ^ForkJoinTask x) .getMessage))
+    :else (str (class x) " " x)))
+(def held {"reentrantlock-held" "reentrantlock" "rwlock-held" "rwlock"})
+(def cases
+  (let [h (ReentrantLock.) rw (ReentrantReadWriteLock.)
+        done (adapter "AdaptedCallable" [Callable] nil)
+        cancelled (adapter "AdaptedRunnableAction" [Runnable] nil)
+        thrown (adapter "AdaptedRunnableAction" [Runnable] nil)
+        tagged (adapter "AdaptedRunnableAction" [Runnable] nil)
+        x (doto (Throwable. "x") (.setStackTrace (into-array StackTraceElement [])))
+        m (doto (.getDeclaredMethod ForkJoinTask "trySetThrown" (into-array Class [Throwable])) (.setAccessible true))]
+    (.lock h) (.lock h) (.lock (.writeLock rw)) (.lock (.readLock rw))
+    (.complete ^ForkJoinTask done "v") (.cancel ^ForkJoinTask cancelled false)
+    (.invoke m thrown (object-array [x])) (.setForkJoinTaskTag ^ForkJoinTask tagged (short 7))
+    {"reentrantlock" (ReentrantLock.) "reentrantlock-fair" (ReentrantLock. true) "reentrantlock-held" h
+     "rwlock" (ReentrantReadWriteLock.) "rwlock-fair" (ReentrantReadWriteLock. true) "rwlock-held" rw
+     "rwlock-readlock" (.readLock (ReentrantReadWriteLock.))
+     "semaphore" (Semaphore. 3) "semaphore-fair" (Semaphore. -2 true)
+     "fjt-runnable" (adapter "AdaptedRunnable" [Runnable Object] nil "r") "fjt-callable-done" done
+     "fjt-action-cancelled" cancelled "fjt-action-thrown" thrown "fjt-action-tagged" tagged
+     "integer" (Integer/valueOf 42) "long" (Long/valueOf -5) "boolean" Boolean/TRUE "character" (Character/valueOf \x)
+     "double" (Double/valueOf 1.5) "uuid" (UUID. 0x0123456789abcdef -81985529216486896)
+     "entry" (AbstractMap$SimpleEntry. "k" (Integer/valueOf 1)) "immutable-entry" (AbstractMap$SimpleImmutableEntry. "k" "v")
+     "singleton-list" (Collections/singletonList "x") "as-list" (Arrays/asList (into-array String ["a" "b"]))}))
+(def bad (atom 0))
+(def lines (concat (arbace.string/split-lines (slurp "test/jrt/serialization/jdk-locks.txt"))
+                   (arbace.string/split-lines (slurp "test/jrt/serialization/jdk-prog.txt"))))
+(def streams (into {} (map #(arbace.string/split % #" ") lines)))
+(doseq [l lines :let [[n want] (arbace.string/split l #" ") x (cases n)
+                      got (try (write x) (catch Throwable e (str "ERR " e)))
+                      r (try (read want) (catch Throwable e e))
+                      again (try (write r) (catch Throwable e (str "ERR " e)))
+                      ok (and (= got want) (= again (streams (held n n)))
+                              (or (held n) (= (show r) (show x))))]]
+  (when-not ok (swap! bad inc))
+  (println (if ok "ok  " "BAD ") n (if ok "" (str "\n  written " got "\n  want    " want "\n  again   " again
+                                                  "\n  read    " (show r) "\n  made    " (show x)))))
+(println "locks-check:" (- (count lines) @bad) "of" (count lines))
+(when (pos? @bad) (System/exit 1))

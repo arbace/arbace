@@ -113,7 +113,10 @@ arbace_local.go): the box's vCPUs.\n"
     (GetState__Thread_State ^{:tag (* Thread_State)} [])
     (GetUncaughtExceptionHandler__Thread_UncaughtExceptionHandler ^Thread_UncaughtExceptionHandler [])
     (SetUncaughtExceptionHandler_Thread_UncaughtExceptionHandler__V [^Thread_UncaughtExceptionHandler h])
-    (GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [])))
+    (GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [])
+    (GetContextClassLoader__ClassLoader ^ClassLoader_I [])
+    (SetContextClassLoader_ClassLoader__V [^ClassLoader_I cl])
+    (GetThreadGroup__ThreadGroup ^{:tag (* ThreadGroup)} [])))
 
 (go/const
   [^{:tag int32 :val 0} threadNew 0]
@@ -140,6 +143,19 @@ LockSupport's permit.\n"
           ^{:tag (chan (struct))} intr
           ^{:tag (chan (struct))} park
           ^{:tag (Volatile any) :doc "LockSupport's blocker (getBlocker)\n"} parkBlocker
+          ^{:tag atomic/Int32 :doc "what the thread waits for (management.ae: wsNone, wsBlocked, wsWaiting, wsTimed), for
+getState and ThreadMXBean\n"} wstate
+          ^{:tag (Volatile any) :doc "the object it is blocked or waits on (management.ae), or nil\n"} waitOn
+          ^{:tag atomic/Int64 :doc "the times it blocked to enter a monitor or a lock (ThreadInfo.getBlockedCount)\n"} blockedCount
+          ^{:tag atomic/Int64 :doc "the times it waited (ThreadInfo.getWaitedCount)\n"} waitedCount
+          ^{:tag atomic/Int64 :doc "the nanoseconds blocked while contention monitoring was on\n"} blockedNanos
+          ^{:tag atomic/Int64 :doc "the nanoseconds waited while contention monitoring was on\n"} waitedNanos
+          ^{:tag atomic/Int64 :doc "when the current wait began (nanoseconds since vmStart), for the times\n"} waitSince
+          ^{:tag sync/Mutex :doc "guards held and syncs (management.ae)\n"} heldMu
+          ^{:tag (slice heldMonitor) :doc "the monitors it holds, in entry order, once tracked (management.ae)\n"} held
+          ^{:tag (slice any) :doc "the ownable synchronizers (jrt's ReentrantLocks) it holds, once tracked\n"} syncs
+          ^{:tag (Volatile any) :doc "its Java frames when it began to wait, once tracked (management.ae: another thread's
+ThreadInfo stack)\n"} waitStack
           ^{:tag (Volatile Thread_UncaughtExceptionHandler)} ueh
           ^{:tag (map (* ThreadLocal) any) :doc "thread locals, used by the thread itself only\n"} locals
           ^{:tag (map (* ThreadLocal) any)} inheritable
@@ -150,7 +166,18 @@ LockSupport's permit.\n"
           ^{:tag uint32 :doc "the evaluator's method runs and recurs on the thread, counted for its yield on TamaGo
 (natives.go: Compiler_CodeRun_Tick__V_native)\n"} evalTicks
           ^{:tag any :doc "goi's state of the goroutine (its *goi.Thread: doc/go/GOI-SPEC.md §4.3, S22), set on
-its first interpreted call\n"} Interp))
+its first interpreted call\n"} Interp
+          ^{:tag any :doc "the evaluator's state of the thread (its Compiler$EvalState: CodeRun.state,
+natives.go's Compiler_CodeRun_ThreadState__O_native), set on its first evaluated call\n"} EvalState
+          ^{:tag sync/Mutex :doc "jdk26u's Thread.interruptLock: guards nioBlocker (JCS162)\n"} interruptMu
+          ^{:tag nioInterruptible :doc "jdk26u's Thread.nioBlocker: the sun.nio.ch.Interruptible of the channel or selector
+the thread is blocked on (AbstractInterruptibleChannel.blockedOn), or nil (JCS162)\n"} nioBlocker
+          ^{:tag (Volatile ClassLoader_I) :doc "jdk26u's Thread.contextClassLoader (F27): the creating thread's at construction\n"} ccl
+          ^{:tag atomic/Bool :doc "ccl was set (a constructor or setContextClassLoader); an adopted thread's is the
+system class loader, as the JVM's main thread's\n"} cclSet
+          ^{:tag bool :doc "made with inheritInheritableThreadLocals false: start copies no inheritable values\n"} noInherit
+          ^{:tag (* ThreadGroup) :doc "jdk26u's holder.threadGroup (JCS322 (a), threadgroup.ae): the creating thread's
+group or the constructor's; an adopted thread's the main group\n"} group))
 
 (go/var Thread_class
   (Define (addr (lit ClassInfo :Name "java.lang.Thread" :Kind KindClass :Modifiers AccPublic
@@ -199,7 +226,74 @@ current thread is one, as Java's.\n"
   (.Store (.-name t) name)
   (set! (.-target t) task)
   (let [cur (CurrentThread)]
-    (.Store (.-daemon t) (.Load (.-daemon cur)))))
+    (.Store (.-daemon t) (.Load (.-daemon cur)))
+    ;; jdk26u's Thread(ThreadGroup, ...): the creating thread's group, the priority within its maximum (JCS322)
+    (set! (.-group t) (.-group cur))
+    (when (== (.-group t) nil)
+      (set! (.-group t) mainThreadGroup))
+    (.Store (.-priority t) (min (.Load (.-priority cur)) (.Load (.-maxPriority (.-group t)))))
+    ;; jdk26u's Thread(ThreadGroup, String, int, Runnable, long, AccessControlContext): the context class
+    ;; loader is the parent's (F27)
+    (.Store (.-ccl t) (.Impl_GetContextClassLoader__ClassLoader cur cur))
+    (.Store (.-cclSet t) true)))
+
+;; the constructors taking a thread group (JCS322 (a)): jdk26u's Thread(ThreadGroup, Runnable, String, long,
+;; boolean) and the shorter ones (a null group: the current thread's; the stack size is a hint Go ignores)
+(go/method Ctor_ThreadGroup_Runnable [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^Runnable task]
+  (.Ctor_ThreadGroup_Runnable_String_J_Z t this g task (genThreadName) 0 true))
+(go/method Ctor_ThreadGroup_String [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^{:tag (* String)} name]
+  (.Ctor_ThreadGroup_Runnable_String_J_Z t this g nil name 0 true))
+(go/method Ctor_ThreadGroup_Runnable_String
+  [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name]
+  (.Ctor_ThreadGroup_Runnable_String_J_Z t this g task name 0 true))
+(go/method Ctor_ThreadGroup_Runnable_String_J
+  [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name ^int64 stack]
+  (.Ctor_ThreadGroup_Runnable_String_J_Z t this g task name stack true))
+(go/method Ctor_ThreadGroup_Runnable_String_J_Z
+  "Ctor_ThreadGroup_Runnable_String_J_Z is Thread(group, task, name, stackSize, inheritInheritableThreadLocals):
+in group (null: the current thread's), the priority within the group's maximum; without inheritance the
+inheritable thread locals start empty (Impl_Start__V copies them only when noInherit is false).\n"
+  [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name ^int64 stack
+   ^bool inherit]
+  (.Ctor_Runnable_String t this task name)
+  (when (!= g nil)
+    (set! (.-group t) g)
+    (.Store (.-priority t) (min (.Load (.-priority t)) (.Load (.-maxPriority g)))))
+  (set! (.-noInherit t) (not inherit)))
+
+(go/func Thread_New_ThreadGroup_Runnable ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^Runnable task]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_Runnable t t g task) t))
+(go/func Thread_New_ThreadGroup_String ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^{:tag (* String)} name]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_String t t g name) t))
+(go/func Thread_New_ThreadGroup_Runnable_String
+  ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_Runnable_String t t g task name) t))
+(go/func Thread_New_ThreadGroup_Runnable_String_J
+  ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name ^int64 stack]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_Runnable_String_J t t g task name stack) t))
+(go/func Thread_New_ThreadGroup_Runnable_String_J_Z
+  ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name ^int64 stack ^bool inherit]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_Runnable_String_J_Z t t g task name stack inherit) t))
+
+(go/method Impl_GetThreadGroup__ThreadGroup
+  "Impl_GetThreadGroup__ThreadGroup is getThreadGroup(): null once the thread terminated, the virtual threads'
+group for a virtual thread, else its group (JCS322 (a)).\n"
+  ^{:tag (* ThreadGroup)} [^{:tag (* Thread)} t ^Thread_I this]
+  (cond
+    (== (.Load (.-state t)) threadTerminated) (return nil)
+    (.-virtual t) (return virtualThreadGroup)
+    (== (.-group t) nil) (return mainThreadGroup))
+  (.-group t))
+(go/method GetThreadGroup__ThreadGroup ^{:tag (* ThreadGroup)} [^{:tag (* Thread)} t]
+  (.Impl_GetThreadGroup__ThreadGroup t t))
+
+(go/func Thread_ActiveCount__I
+  "Thread_ActiveCount__I is Thread.activeCount(): the current thread's group's activeCount().\n" ^int32 []
+  (.ActiveCount__I (.GetThreadGroup__ThreadGroup (CurrentThread))))
+(go/func Thread_Enumerate_Thread1__I
+  "Thread_Enumerate_Thread1__I is Thread.enumerate(list): the current thread's group's enumerate(list).\n"
+  ^int32 [^{:tag (* RefArray)} list]
+  (.Enumerate_Thread1__I (.GetThreadGroup__ThreadGroup (CurrentThread)) list))
 
 ;; markers and generated members
 (go/method Self_Thread ^{:tag (* Thread)} [^{:tag (* Thread)} t] t)
@@ -223,9 +317,13 @@ current thread is one, as Java's.\n"
   [^{:tag (* Thread)} t ^Thread_I this]
   (when (not (.CompareAndSwap (.-state t) threadNew threadAlive))
     (panic (IllegalThreadStateException_New)))
-  (let [cur (CurrentThread)]
-    ;; InheritableThreadLocal: the child's values are the parent's, through childValue
-    (range [k v (.-inheritable cur)]
+  (let [cur (CurrentThread)
+        inh (.-inheritable cur)]
+    ;; InheritableThreadLocal: the child's values are the parent's, through childValue (none for a thread made
+    ;; with inheritInheritableThreadLocals false, JCS322)
+    (when (.-noInherit t)
+      (set! inh nil))
+    (range [k v inh]
       (when (== (.-inheritable t) nil)
         (set! (.-inheritable t) (make (map (* ThreadLocal) any))))
       (aset (.-inheritable t) k (.ChildValue_O__O (.-self k) v))))
@@ -236,9 +334,12 @@ current thread is one, as Java's.\n"
 (go/func threadEntry
   "threadEntry is the goroutine of a started Thread (and the entry of every goroutine Java
 code starts): it puts the Thread in the slot, runs run, hands an uncaught exception to the
-handlers and ends the thread (joiners released, number freed).\n"
+handlers and ends the thread (joiners released, number freed). The thread is live
+(management.ae's registry, java.lang.management's ThreadMXBean) from before its run to its
+end.\n"
   [^{:tag (* Thread)} t]
   (.Store (.-num t) (allocNum))
+  (liveAdd t)
   (setLocal (conv unsafe/Pointer t))
   (let [exc (runCatching (fn [] (.Run__V (.-self t))))]
     (when (!= exc nil)
@@ -252,6 +353,7 @@ handlers and ends the thread (joiners released, number freed).\n"
   (close (.-done t))
   (setLocal nil)
   (freeNum (.Swap (.-num t) 0))
+  (liveRemove t)
   (when (not (.Load (.-daemon t)))
     (nonDaemonAdd -1)))
 
@@ -267,13 +369,52 @@ ignored, as the JVM ignores it.\n"
       (runCatching (fn [] (.UncaughtException_Thread_Throwable__V h (.-self t) e)))
       (runCatching (fn [] (Uncaught (.String (.Load (.-name t))) e))))))
 
+(go/type nioInterruptible
+  "nioInterruptible is sun.nio.ch.Interruptible's Go method set, as j2g names it: jrt's hand-written Go cannot
+name the translated interface, and any translated implementation (AbstractInterruptibleChannel's and
+AbstractSelector's anonymous classes) has these methods (JCS162).\n"
+  (interface
+    (Interrupt_Thread__V [^Thread_I target])
+    (PostInterrupt__V [])))
+
 (go/method Impl_Interrupt__V
   "Impl_Interrupt__V is Thread.interrupt: sets the status (the token), which wakes the
-thread from wait, sleep, join, park and the interruptible waits of locks and executors.\n"
+thread from wait, sleep, join, park and the interruptible waits of locks and executors; then, as
+jdk26u's Thread.interrupt (baf63fb, src/java.base/share/classes/java/lang/Thread.java), when another
+thread interrupts it, the I/O operation it is blocked in: its blocker's interrupt(Thread) under the
+interrupt lock (a channel closes, a selector wakes up), postInterrupt after it (JCS162).\n"
   [^{:tag (* Thread)} t ^Thread_I this]
+  ;; setting the interrupt status must be done before reading nioBlocker
   (select
     (case (>! (.-intr t) (lit (struct))))
-    (default)))
+    (default))
+  (when (!= t (CurrentThread))
+    (let [b ((fn ^nioInterruptible []
+               (.Lock (.-interruptMu t))
+               (defer (.Unlock (.-interruptMu t)))
+               (let [b (.-nioBlocker t)]
+                 (when (!= b nil)
+                   (.Interrupt_Thread__V b this))
+                 b)))]
+      (when (!= b nil)
+        (.PostInterrupt__V b)))))
+
+(go/func HostThreads_BlockedOn_O__V_native
+  "HostThreads_BlockedOn_O__V_native is jdk26u's Thread.blockedOn(Interruptible) (JavaLangAccess.blockedOn, which
+AbstractInterruptibleChannel.blockedOn calls, overlay/jdk/variants/AbstractInterruptibleChannel.ae): the current
+thread's blocker set under its interrupt lock, nil cleared; an object without Interruptible's methods is a
+ClassCastException (JCS162).\n"
+  [^any b]
+  (let [me (CurrentThread)
+        ^nioInterruptible i nil]
+    (when (!= b nil)
+      (let [(values v ok) (assert nioInterruptible b)]
+        (when (not ok)
+          (panic (ClassCastException_New_String (Str "not a sun.nio.ch.Interruptible"))))
+        (set! i v)))
+    (.Lock (.-interruptMu me))
+    (set! (.-nioBlocker me) i)
+    (.Unlock (.-interruptMu me))))
 
 (go/method Impl_IsInterrupted__Z ^bool [^{:tag (* Thread)} t ^Thread_I this]
   (> (len (.-intr t)) 0))
@@ -310,11 +451,16 @@ current thread is interrupted. A thread never started is not alive: join returns
         (panic (InterruptedException_New)))
       (return))
     (if (< d 0)
-      (select
-        (case (<! (.-done t)))
-        (case (<! (.-intr me)) (panic (InterruptedException_New))))
+      (do
+        (waitBegin me wsWaiting t)
+        (defer (waitEnd me))
+        (select
+          (case (<! (.-done t)))
+          (case (<! (.-intr me)) (panic (InterruptedException_New)))))
       (let [tm (time/NewTimer d)]
         (defer (.Stop tm))
+        (waitBegin me wsTimed t)
+        (defer (waitEnd me))
         (select
           (case (<! (.-done t)))
           (case (<! (.-C tm)))
@@ -352,18 +498,29 @@ current thread is interrupted. A thread never started is not alive: join returns
   (when (or (< p 1) (> p 10))
     (panic (IllegalArgumentException_New)))
   (when (not (.-virtual t))
+    ;; jdk26u's: within the group's maximum (JCS322)
+    (let [g (.Impl_GetThreadGroup__ThreadGroup t this)]
+      (when (and (!= g nil) (> p (.Load (.-maxPriority g))))
+        (set! p (.Load (.-maxPriority g)))))
     (.Store (.-priority t) p)))
 
 (go/method Impl_GetId__J ^int64 [^{:tag (* Thread)} t ^Thread_I this] (.-tid t))
 (go/method Impl_ThreadId__J ^int64 [^{:tag (* Thread)} t ^Thread_I this] (.-tid t))
 (go/method Impl_IsVirtual__Z ^bool [^{:tag (* Thread)} t ^Thread_I this] (.-virtual t))
 (go/method Impl_GetState__Thread_State
-  "Impl_GetState__Thread_State is getState: NEW before start, TERMINATED after the run, else
-RUNNABLE (jrt does not tell a thread blocked or waiting from a running one: JC8).\n"
+  "Impl_GetState__Thread_State is getState: NEW before start, TERMINATED after the run, BLOCKED,
+WAITING or TIMED_WAITING while it waits (management.ae's waitBegin, since F13; before, RUNNABLE, JC8), else
+RUNNABLE.\n"
   ^{:tag (* Thread_State)} [^{:tag (* Thread)} t ^Thread_I this]
   (switch (.Load (.-state t))
     (case [threadNew] (return Thread_State_NEW))
     (case [threadTerminated] (return Thread_State_TERMINATED)))
+  ;; F13 (management.ae): what an alive thread waits for, recorded by the monitors' contended entry, wait,
+  ;; sleep, join, park and the locks' waits
+  (switch (.Load (.-wstate t))
+    (case [wsBlocked] (return Thread_State_BLOCKED))
+    (case [wsWaiting] (return Thread_State_WAITING))
+    (case [wsTimed] (return Thread_State_TIMED_WAITING)))
   Thread_State_RUNNABLE)
 
 ;; ---- java.lang.Thread.State, an enum (§7.13)
@@ -427,8 +584,8 @@ empty array.\n"
   (NewRefArray StackTraceElement_class 0))
 
 (go/method Impl_ToString__String
-  "Impl_ToString__String is Thread.toString: Thread[#id,name,priority,group] (the group is
-main for every platform thread), VirtualThread[#id,name]/state for a virtual one.\n"
+  "Impl_ToString__String is Thread.toString: Thread[#id,name,priority,group] (the group's name,
+empty once terminated: JCS322), VirtualThread[#id,name]/state for a virtual one.\n"
   ^{:tag (* String)} [^{:tag (* Thread)} t ^Thread_I this]
   (let [id (strconv/FormatInt (.-tid t) 10)
         n (.String (.Load (.-name t)))]
@@ -442,10 +599,26 @@ main for every platform thread), VirtualThread[#id,name]/state for a virtual one
           (case [threadAlive] (set! s (+ s "runnable")))
           (default (set! s (+ s "terminated"))))
         (return (Str s))))
-    (let [g ",main]"]
-      (when (== (.Load (.-state t)) threadTerminated)
-        (set! g ",]"))
+    (let [g ",]"
+          tg (.Impl_GetThreadGroup__ThreadGroup t this)]
+      (when (!= tg nil)
+        (set! g (+ "," (.String (.-name tg)) "]")))
       (Str (+ "Thread[#" id "," n "," (strconv/Itoa (conv int (.Load (.-priority t)))) g)))))
+
+(go/method Impl_GetContextClassLoader__ClassLoader
+  "Impl_GetContextClassLoader__ClassLoader is Thread.getContextClassLoader (F27, doc/classes/JAVA-DEFERRED-TRIAGE.md,
+\"As built: F27 (write-ahead)\"): the loader set by setContextClassLoader, else the creating thread's; an adopted
+thread's (the main thread's) the system class loader, as the JVM's.\n"
+  ^ClassLoader_I [^{:tag (* Thread)} t ^Thread_I this]
+  (when (.Load (.-cclSet t))
+    (return (.Load (.-ccl t))))
+  (ClassLoader_GetSystemClassLoader__ClassLoader))
+
+(go/method Impl_SetContextClassLoader_ClassLoader__V
+  "Impl_SetContextClassLoader_ClassLoader__V is Thread.setContextClassLoader (no security manager: no check).\n"
+  [^{:tag (* Thread)} t ^Thread_I this ^ClassLoader_I cl]
+  (.Store (.-ccl t) cl)
+  (.Store (.-cclSet t) true))
 
 ;; Thread's dispatch methods (§5.4)
 (go/method Run__V [^{:tag (* Thread)} t] (.Impl_Run__V t t))
@@ -471,6 +644,10 @@ main for every platform thread), VirtualThread[#id,name]/state for a virtual one
 (go/method SetUncaughtExceptionHandler_Thread_UncaughtExceptionHandler__V
   [^{:tag (* Thread)} t ^Thread_UncaughtExceptionHandler h]
   (.Impl_SetUncaughtExceptionHandler_Thread_UncaughtExceptionHandler__V t t h))
+(go/method GetContextClassLoader__ClassLoader ^ClassLoader_I [^{:tag (* Thread)} t]
+  (.Impl_GetContextClassLoader__ClassLoader t t))
+(go/method SetContextClassLoader_ClassLoader__V [^{:tag (* Thread)} t ^ClassLoader_I cl]
+  (.Impl_SetContextClassLoader_ClassLoader__V t t cl))
 (go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* Thread)} t]
   (.Impl_GetStackTrace__StackTraceElement1 t t))
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* Thread)} t] (.Impl_ToString__String t t))
@@ -511,6 +688,7 @@ the goroutine ends).\n"
   (let [t (addr (lit Thread))
         n (allocNum)]
     (newThreadStruct t t)
+    (set! (.-group t) mainThreadGroup)
     (when (== name nil)
       (set! name (genThreadName)))
     (.Store (.-name t) name)
@@ -518,7 +696,9 @@ the goroutine ends).\n"
     (.Store (.-state t) threadAlive)
     (.Store (.-num t) n)
     (setLocal (conv unsafe/Pointer t))
-    (runtime/AddCleanup t freeNum n)
+    ;; management.ae: an adopted thread is no live thread of the counts, but can own a monitor
+    (adoptedAdd n t)
+    (runtime/AddCleanup t freeAdopted n)
     t))
 
 (go/func Thread_CurrentThread__Thread "Thread_CurrentThread__Thread is Thread.currentThread().\n"
@@ -547,6 +727,8 @@ interrupted before or during the sleep (the status cleared).\n"
       (return))
     (let [tm (time/NewTimer d)]
       (defer (.Stop tm))
+      (waitBegin me wsTimed nil)
+      (defer (waitEnd me))
       (select
         (case (<! (.-C tm)))
         (case (<! (.-intr me))
@@ -662,6 +844,10 @@ threads, runs the shutdown hooks (as the JVM's DestroyJavaVM does) and returns t
         (set! t (CurrentThread))
         (.Store (.-name t) (Str "main"))))
     (.Store (.-daemon t) false)
+    ;; the main thread is live from here (management.ae), as the JVM's from its start
+    (liveAdd t)
+    ;; the thread "Reference Handler" alive from the start, as the JVM's (reference.ae, F17)
+    (startReferenceHandler)
     (keepAlive)
     (let [exc (runCatching run)
           status 0]

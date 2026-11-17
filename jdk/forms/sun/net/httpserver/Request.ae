@@ -1,0 +1,315 @@
+;; Converted from jdk26u src/jdk.httpserver/share/classes/sun/net/httpserver/Request.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.httpserver)
+
+(import '(com.sun.net.httpserver Headers)
+        '(java.io IOException InputStream OutputStream)
+        '(java.nio BufferOverflowException ByteBuffer)
+        '(java.nio.channels SelectionKey SocketChannel)
+        '(java.util Objects))
+
+(defclass Request
+  (field ^:static ^:final ^int BUF_LEN 2048)
+
+  (field ^:static ^:final ^byte CR 13)
+
+  (field ^:static ^:final ^byte LF 10)
+
+  (field ^:private ^String startLine)
+
+  (field ^:private ^SocketChannel chan)
+
+  (field ^:private ^InputStream is)
+
+  (field ^:private ^OutputStream os)
+
+  (field ^:private ^:final ^int maxReqHeaderSize)
+
+  (constructor :throws [IOException] [this ^InputStream rawInputStream ^OutputStream rawout]
+    (set! (.-maxReqHeaderSize this) (ServerConfig/getMaxReqHeaderSize))
+    (set! is rawInputStream)
+    (set! os rawout)
+    (loop [] (set! startLine (.readLine this)) (when (.equals "" startLine) (recur))))
+
+  (field ^char/1 buf (new char/1 BUF_LEN))
+
+  (field ^int pos)
+
+  (field ^StringBuffer lineBuf)
+
+  (method ^:public inputStream ^InputStream [this] is)
+
+  (method ^:public outputStream ^OutputStream [this] os)
+
+  (method ^:public readLine :throws [IOException] ^String [this]
+    (let [^:mutable gotCR false
+          ^:mutable gotLF false]
+      (set! pos 0)
+      (set! lineBuf (StringBuffer.))
+      (let [^:mutable lsize 32]
+        (while (not gotLF)
+          (let [c (.read is)]
+            (when (== c -1) (return nil))
+            (cond
+              gotCR
+                (if (== c LF)
+                    (set! gotLF true)
+                    (do
+                      (set! gotCR false)
+                      (.consume this CR)
+                      (.consume this c)
+                      (set! lsize (unchecked-add lsize 2))))
+              (== c CR) (set! gotCR true)
+              :else (do (.consume this c) (set! lsize (unchecked-add lsize 1))))
+            (when (and (> maxReqHeaderSize 0) (> lsize maxReqHeaderSize))
+              (throw (IOException.
+                       (java-str "Maximum header (sun.net.httpserver.maxReqHeaderSize) exceeded, "
+                                 (ServerConfig/getMaxReqHeaderSize)
+                                 "."))))))
+        (.append lineBuf buf 0 pos)
+        (String. lineBuf))))
+
+  (method ^:private consume :throws [IOException] ^void [this ^int c]
+    (when (== pos BUF_LEN) (.append lineBuf buf) (set! pos 0))
+    (aset buf (let [old-1 pos] (set! pos (unchecked-inc-int pos)) old-1) (unchecked-char c)))
+
+  (method ^:public requestLine ^String [this] startLine)
+
+  (field ^Headers hdrs nil)
+
+  (method headers :throws [IOException] ^Headers [this]
+    (if (some? hdrs)
+        hdrs
+        (do
+          (set! hdrs (Headers.))
+          (let [^:mutable s (new char/1 10)
+                ^:mutable ^int len 0
+                ^:mutable firstc (.read is)]
+            (when (or (== firstc CR) (== firstc LF))
+              (let [c (.read is)]
+                (when (or (== c CR) (== c LF)) (return hdrs))
+                (aset s 0 (unchecked-char firstc))
+                (set! len 1)
+                (set! firstc c)))
+            (let [^:mutable hsize (unchecked-add (.length startLine) 32)]
+              (while (and (and (not (== firstc LF)) (not (== firstc CR))) (>= firstc 0))
+                (let [^:mutable ^int keyend -1
+                      ^:mutable ^int c 0
+                      ^:mutable inKey (> firstc \space)]
+                  (aset s len (unchecked-char firstc))
+                  (set! len (unchecked-inc-int len))
+                  (set! hsize (unchecked-add hsize 1))
+                  (label :parseloop
+                    (let [maxRemaining (if (> maxReqHeaderSize 0)
+                                           (unchecked-subtract
+                                             (unchecked-subtract maxReqHeaderSize hsize)
+                                             32)
+                                           Long/MAX_VALUE)]
+                      (while (>= (set! c (.read is)) 0)
+                        (switch c
+                          \: (do (when (and inKey (> len 0)) (set! keyend len)) (set! inKey false))
+                          \tab (do (set! c \space) (set! inKey false))
+                          \space (set! inKey false)
+                          (CR LF)
+                            (do
+                              (set! firstc (.read is))
+                              (when (and (== c CR) (== firstc LF))
+                                (set! firstc (.read is))
+                                (when (== firstc CR) (set! firstc (.read is))))
+                              (when (or (or (== firstc LF) (== firstc CR)) (> firstc \space))
+                                (break :parseloop))
+                              (set! c \space)))
+                        (when (>= len (alength s))
+                          (let [ns (new char/1 (unchecked-multiply-int (alength s) 2))]
+                            (System/arraycopy s 0 ns 0 len)
+                            (set! s ns)))
+                        (aset s len (unchecked-char c))
+                        (set! len (unchecked-inc-int len))
+                        (when (and (> maxReqHeaderSize 0) (> len maxRemaining))
+                          (throw
+                            (IOException.
+                              (java-str
+                                "Maximum header (sun.net.httpserver.maxReqHeaderSize) exceeded, "
+                                (ServerConfig/getMaxReqHeaderSize)
+                                ".")))))
+                      (set! firstc -1)))
+                  (while (and (> len 0) (<= (aget s (unchecked-subtract-int len 1)) \space))
+                    (set! len (unchecked-dec-int len)))
+                  (let [^:mutable ^String k nil]
+                    (if (<= keyend 0)
+                        (do (set! k nil) (set! keyend 0))
+                        (do
+                          (set! k (String/copyValueOf s 0 keyend))
+                          (when (and (< keyend len) (== (aget s keyend) \:))
+                            (set! keyend (unchecked-inc-int keyend)))
+                          (while (and (< keyend len) (<= (aget s keyend) \space))
+                            (set! keyend (unchecked-inc-int keyend)))))
+                    (let [^String v (if (>= keyend len)
+                                        (String.)
+                                        (String/copyValueOf
+                                          s
+                                          keyend
+                                          (unchecked-subtract-int len keyend)))]
+                      (when (>= (.size hdrs) (ServerConfig/getMaxReqHeaders))
+                        (throw
+                          (IOException.
+                            (java-str
+                              "Maximum number of request headers (sun.net.httpserver.maxReqHeaders) exceeded, "
+                              (ServerConfig/getMaxReqHeaders)
+                              "."))))
+                      (set! hsize (unchecked-add (unchecked-add hsize len) 32))
+                      (when (and (> maxReqHeaderSize 0) (> hsize maxReqHeaderSize))
+                        (throw (IOException.
+                                 (java-str
+                                   "Maximum header (sun.net.httpserver.maxReqHeaderSize) exceeded, "
+                                   (ServerConfig/getMaxReqHeaderSize)
+                                   "."))))
+                      (when (nil? k) (set! k ""))
+                      (.add hdrs k v)
+                      (set! len 0)))))
+              hdrs)))))
+
+  (defclass ^:static ReadStream
+    :extends InputStream
+
+    (field ^SocketChannel channel)
+
+    (field ^ByteBuffer chanbuf)
+
+    (field ^byte/1 one)
+
+    (field ^:private ^boolean closed false)
+
+    (field ^:private ^boolean eof false)
+
+    (field ^ByteBuffer markBuf)
+
+    (field ^boolean marked)
+
+    (field ^boolean reset)
+
+    (field ^int readlimit)
+
+    (field ^:static ^long readTimeout)
+
+    (field ^ServerImpl server)
+
+    (field ^:static ^:final ^int BUFSIZE (unchecked-multiply-int 8 1024))
+
+    (constructor :throws [IOException] ^:public [this ^ServerImpl server ^SocketChannel chan]
+      (set! (.-channel this) chan)
+      (set! (.-server this) server)
+      (set! chanbuf (ByteBuffer/allocate BUFSIZE))
+      (.clear chanbuf)
+      (set! one (new byte/1 1))
+      (set! closed (set! marked (set! reset false))))
+
+    (method ^:public ^:synchronized read :throws [IOException] ^int [this ^byte/1 b]
+      (.read this b 0 (alength b)))
+
+    (method ^:public ^:synchronized read :throws [IOException] ^int [this]
+      (let [result (.read this one 0 1)] (if (== result 1) (bit-and-int (aget one 0) 0xFF) -1)))
+
+    (method ^:public ^:synchronized read :throws [IOException] ^int [this ^byte/1 b ^int off
+                                                                     ^int srclen]
+      (let [^:mutable ^int canreturn 0
+            ^:mutable ^int willreturn 0]
+        (when closed (throw (IOException. "Stream closed")))
+        (if eof
+            -1
+            (do
+              (java-assert (.isBlocking channel))
+              (Objects/checkFromIndexSize off srclen (alength b))
+              (if reset
+                  (do
+                    (set! canreturn (.remaining markBuf))
+                    (set! willreturn (if (> canreturn srclen) srclen canreturn))
+                    (.get markBuf b off willreturn)
+                    (when (== canreturn willreturn) (set! reset false)))
+                  (do
+                    (.clear chanbuf)
+                    (when (< srclen BUFSIZE) (.limit chanbuf srclen))
+                    (loop []
+                      (set! willreturn (.read channel chanbuf))
+                      (when (== willreturn 0) (recur)))
+                    (when (== willreturn -1) (set! eof true) (return -1))
+                    (.flip chanbuf)
+                    (.get chanbuf b off willreturn)
+                    (when marked
+                      (try
+                        (.put markBuf b off willreturn)
+                        (catch BufferOverflowException e (set! marked false))))))
+              willreturn))))
+
+    (method ^:public markSupported ^boolean [this] true)
+
+    (method ^:public ^:synchronized available :throws [IOException] ^int [this]
+      (when closed (throw (IOException. "Stream is closed")))
+      (cond eof -1 reset (.remaining markBuf) :else (.remaining chanbuf)))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when-not closed (.close channel) (set! closed true)))
+
+    (method ^:public ^:synchronized mark ^void [this ^int readlimit]
+      (when-not closed
+        (set! (.-readlimit this) readlimit)
+        (set! markBuf (ByteBuffer/allocate readlimit))
+        (set! marked true)
+        (set! reset false)))
+
+    (method ^:public ^:synchronized reset :throws [IOException] ^void [this]
+      (when-not closed
+        (when-not marked (throw (IOException. "Stream not marked")))
+        (set! marked false)
+        (set! reset true)
+        (.flip markBuf))))
+
+  (defclass ^:static WriteStream
+    :extends OutputStream
+
+    (field ^SocketChannel channel)
+
+    (field ^ByteBuffer buf)
+
+    (field ^SelectionKey key)
+
+    (field ^boolean closed)
+
+    (field ^byte/1 one)
+
+    (field ^ServerImpl server)
+
+    (constructor :throws [IOException] ^:public [this ^ServerImpl server ^SocketChannel channel]
+      (set! (.-channel this) channel)
+      (set! (.-server this) server)
+      (java-assert (.isBlocking channel))
+      (set! closed false)
+      (set! one (new byte/1 1))
+      (set! buf (ByteBuffer/allocate 4096)))
+
+    (method ^:public ^:synchronized write :throws [IOException] ^void [this ^int b]
+      (aset one 0 (unchecked-byte b))
+      (.write this one 0 1))
+
+    (method ^:public ^:synchronized write :throws [IOException] ^void [this ^byte/1 b]
+      (.write this b 0 (alength b)))
+
+    (method ^:public ^:synchronized write :throws [IOException] ^void [this ^byte/1 b ^int off
+                                                                       ^int len]
+      (let [^:mutable l len]
+        (when closed (throw (IOException. "stream is closed")))
+        (let [cap (.capacity buf)]
+          (when (< cap len)
+            (let [diff (unchecked-subtract-int len cap)]
+              (set! buf
+                    (ByteBuffer/allocate (unchecked-multiply-int 2 (unchecked-add-int cap diff))))))
+          (.clear buf)
+          (.put buf b off len)
+          (.flip buf)
+          (let [^:mutable ^int n 0]
+            (while (< (set! n (.write channel buf)) l)
+              (set! l (unchecked-subtract-int l n))
+              (when (== l 0) (return)))))))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when-not closed (.close channel) (set! closed true)))))

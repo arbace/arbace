@@ -1,0 +1,365 @@
+(in-ns 'go.arbace.wai) (go/file "js.go" :imports [
+
+
+    ^{:line 4} [math "math"]
+    ^{:line 5} [sort "sort"]
+    ^{:line 6} [strconv "strconv"]
+    ^{:line 7} [strings "strings"]
+    ^{:line 8} [utf16 "unicode/utf16"]
+    ^{:line 9} [utf8 "unicode/utf8"]])
+
+
+;; The headless world's JavaScript values (doc/wasm/WAI.md §10; WA11): what syscall/js's reference table holds on the JS side. A
+;; value is any of: JSUndefined, JSNull, bool, float64 (a number), string (a Go string: UTF-8, its length counted in UTF-16 units),
+;; *JSSymbol, *JSObject. A thrown value is a panic of *JSThrow, caught where JavaScript would catch it (wasm_exec.js's try around
+;; Reflect.apply, construct and the mini interpreter's own).
+
+(go/type jsUndefined (struct))
+(go/type jsNull (struct))
+
+(go/var
+  ^{:line 21} [^any JSUndefined (lit jsUndefined)]
+  ^{:line 22} [^any JSNull (lit jsNull)])
+
+
+
+(go/type JSSymbol "JSSymbol is a symbol.\n" (struct ^string Desc))
+
+
+(go/type JSObject "JSObject is an object: its own properties in insertion order, its prototype, and the internal slots its class gives it.\n" (struct
+    ^{:line 30 :tag string} Class
+    ^{:line 31 :tag (* JSObject)} Proto
+    ^{:line 32 :tag (slice string)} keys
+    ^{:line 33 :tag (map string any)} props
+    ^{:line 34 :tag (slice any)} Arr ; an Array's elements
+    ^{:line 35 :tag (slice byte)} Bytes ; a Uint8Array's (a subarray shares its parent's)
+    ^{:line 36 :tag any} Prim ; a Number's, Boolean's or String's wrapped value, a Date's time value (ms)
+    ^{:line 37 :tag (func [^any this ^{:tag (slice any)} args] [any])} Fn
+    ^{:line 38 :tag (func [^{:tag (slice any)} args] [any])} Ctor
+    ^{:line 39 :tag bool} Frozen
+
+    ^{:line 41 :tag (func [^string key] [any bool]) :doc "Getter is an exotic object's property read (the Go object's _values, a recording fake's methods): ok false for none\n"} Getter
+
+    ^{:line 43 :tag (func [^string key ^any v] [bool]) :doc "Setter is an exotic object's property write: true when it took it\n"} Setter
+    ^{:line 44 :tag string} Name
+    ^{:line 45 :tag int} ID)) ; a recording fake's number
+
+
+
+(go/type JSThrow "JSThrow is a thrown JavaScript value.\n" (struct ^any V))
+
+^{:go/end 51} (go/method Error ^string [^{:tag (* JSThrow)} t] (+ "uncaught JavaScript exception: " (jsDescribe (.-V t))))
+
+^{:go/end 59} (go/method own [^{:tag (* JSObject)} o ^string k] :results [any bool]
+  (when (== (.-props o) nil)
+    (return nil false))
+
+  (let [(values v ok) (aget (.-props o) k)]
+    (return v ok)))
+
+
+
+^{:go/end 70} (go/method Put "Put defines (or replaces) an own property.\n" [^{:tag (* JSObject)} o ^string k ^any v]
+  (when (== (.-props o) nil)
+    (set! (.-props o) (lit (map string any))))
+
+  (when [(values _ ok) (aget (.-props o) k)] (not ok)
+    (set! (.-keys o) (append (.-keys o) k)))
+
+  (aset (.-props o) k v))
+
+
+^{:go/breaks [[7 86]] :go/end 87} (go/method del ^bool [^{:tag (* JSObject)} o ^string k]
+  (when (.-Frozen o)
+    (return false))
+
+  (when [(values _ ok) (.own o k)] (not ok)
+    (return true))
+
+  (delete (.-props o) k)
+  (range [i x (.-keys o)]
+    (when (== x k)
+      (set! (.-keys o) (append (subslice (.-keys o) _ i i) (spread (subslice (.-keys o) (+ i 1)))))
+      (break)))
+
+
+  true)
+
+
+
+^{:go/end 103} (go/method Keys "Keys are the own enumerable keys: an array's indices first, then the properties in insertion order.\n" ^{:tag (slice string)} [^{:tag (* JSObject)} o]
+  (let [^{:tag (slice string)} out (zero (slice string))]
+    (when (== (.-Class o) "Array")
+      (range [i (.-Arr o)]
+        (set! out (append out (strconv/Itoa i)))))
+
+
+    (when (!= (.-Bytes o) nil)
+      (range [i (.-Bytes o)]
+        (set! out (append out (strconv/Itoa i)))))
+
+
+    (append out (spread (.-keys o)))))
+
+
+^{:go/end 108} (go/func isCallable ^bool [^any v]
+  (let [(values o ok) (assert (* JSObject) v)]
+    (and ok (!= (.-Fn o) nil))))
+
+
+
+^{:go/end 123} (go/func arrayIndex "arrayIndex is a canonical array index's value, or -1.\n" ^int [^string k]
+  (when (or (== k "") (> (len k) 10) ^:go/paren (and (> (len k) 1) (== (aget k 0) \0)))
+    (return -1))
+
+  (let [n 0]
+    (for [i 0] (< i (len k)) (inc! i)
+      (when (or (< (aget k i) \0) (> (aget k i) \9))
+        (return -1))
+
+      (set! n (+ (* n 10) (conv int (- (aget k i) \0)))))
+
+    ^{:line 122} n))
+
+
+
+^{:go/breaks [[5 146]] :go/end 147} (go/func jsTypeof "jsTypeof is typeof's answer.\n" ^string [^any v]
+  (type-switch [x v]
+    (case [jsUndefined]
+      (return "undefined"))
+    (case [jsNull]
+      (return "object"))
+    (case [bool]
+      (return "boolean"))
+    (case [float64]
+      (return "number"))
+    (case [string]
+      (return "string"))
+    (case [(* JSSymbol)]
+      (return "symbol"))
+    (case [(* JSObject)]
+      (when (!= (.-Fn x) nil)
+        (return "function"))
+
+      (return "object")))
+
+  "undefined")
+
+
+
+^{:go/breaks [[5 161]] :go/end 162} (go/func jsTruthy "jsTruthy is ToBoolean.\n" ^bool [^any v]
+  (type-switch [x v]
+    (case [jsUndefined jsNull]
+      (return false))
+    (case [bool]
+      (return x))
+    (case [float64]
+      (return (and (!= x 0) (not (math/IsNaN x)))))
+    (case [string]
+      (return (!= x ""))))
+
+  true)
+
+
+
+^{:go/end 205} (go/func jsNumStr "jsNumStr is Number::toString(10).\n" ^string [^float64 f]
+  (switch
+    (case [(math/IsNaN f)]
+      (return "NaN"))
+    (case [(math/IsInf f 1)]
+      (return "Infinity"))
+    (case [(math/IsInf f -1)]
+      (return "-Infinity"))
+    (case [(== f 0)]
+      (return "0")))
+
+  (when (< f 0)
+    (return (+ "-" (jsNumStr (- f)))))
+
+  (let [e (strconv/FormatFloat f \e -1 64) ; d.ddde±XX
+      (values mant exp _) (strings/Cut e "e")
+      ^{:line 181} digits (strings/Replace mant "." "" 1)
+      (values x _) (strconv/Atoi exp)
+      (values n k) (values (+ x 1) (len digits))]
+    (switch
+      (case [(and (<= k n) (<= n 21))]
+        (return (+ digits (strings/Repeat "0" (- n k)))))
+      (case [(and (< 0 n) (<= n 21))]
+        (return (+ (subslice digits _ n) "." (subslice digits n))))
+      (case [(and (< -6 n) (<= n 0))]
+        (return (+ "0." (strings/Repeat "0" (- n)) digits))))
+
+    (let [sign "+"]
+      (when (< (- n 1) 0)
+        (set! sign "-"))
+
+      (let [m (subslice digits _ 1)]
+        (when (> k 1)
+          (set! m + (+ "." (subslice digits 1))))
+
+        (let [ex (- n 1)]
+          (when (< ex 0)
+            (set! ex (- ex)))
+
+          (+ m "e" sign (strconv/Itoa ex)))))))
+
+
+
+^{:go/end 237} (go/func jsStrNum "jsStrNum is ToNumber of a string.\n" ^float64 [^string s]
+  (let [t (strings/TrimSpace s)]
+    (switch t
+      (case [""]
+        (return 0))
+      (case ["Infinity" "+Infinity"]
+        (return (math/Inf 1)))
+      (case ["-Infinity"]
+        (return (math/Inf -1))))
+
+    (when (and (> (len t) 2) (== (aget t 0) \0) ^:go/paren (or (== (aget t 1) \x) (== (aget t 1) \X)))
+      (let [(values n err) (strconv/ParseUint (subslice t 2) 16 64)]
+        (when (!= err nil)
+          (return (math/NaN)))
+
+        (return (conv float64 n))))
+
+    (when (or (strings/ContainsAny t "_xXpP") (strings/HasPrefix (strings/ToLower (strings/TrimLeft t "+-")) "in")
+        (strings/HasPrefix (strings/ToLower (strings/TrimLeft t "+-")) "na"))
+      (return (math/NaN)))
+
+    (let [(values f err) (strconv/ParseFloat t 64)]
+      (when (!= err nil)
+        (when [(values ne ok) (assert (* strconv/NumError) err)] (and ok (== (.-Err ne) strconv/ErrRange))
+          (return f))
+
+        (return (math/NaN)))
+
+      ^{:line 236} f)))
+
+
+
+^{:go/end 250} (go/func jsUTF16Len "jsUTF16Len is a string's length in UTF-16 code units.\n" ^int [^string s]
+  (let [n 0]
+    (range [_ r s]
+      (if (>= r 0x10000)
+        (set! n + 2)
+
+        (inc! n)))
+
+
+    ^{:line 249} n))
+
+
+
+^{:go/end 264} (go/func jsDecodeUTF8 "jsDecodeUTF8 is TextDecoder's decoding: each invalid byte replaced.\n" ^string [^{:tag (slice byte)} b]
+  (when (utf8/Valid b)
+    (return (conv string b)))
+
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (while (> (len b) 0)
+      (let [(values r n) (utf8/DecodeRune b)]
+        (.WriteRune sb r)
+        (set! b (subslice b n))))
+
+    (.String sb)))
+
+
+
+^{:go/end 267} (go/func jsUnits "jsUnits is a string's UTF-16 code units (charAt, substring).\n" ^{:tag (slice uint16)} [^string s] (utf16/Encode (conv (slice rune) s)))
+
+^{:go/end 269} (go/func jsFromUnits ^string [^{:tag (slice uint16)} u] (conv string (utf16/Decode u)))
+
+
+^{:go/end 308} (go/func jsDescribe "jsDescribe is a value's text for messages and the console (util.inspect's shape, simplified).\n" ^string [^any v]
+  (type-switch [x v]
+    (case [string]
+      (return x))
+    (case [(* JSObject)]
+      (when (== (.-Class x) "Error")
+        (return (jsErrorText x)))
+
+      (when (!= (.-Fn x) nil)
+        (return (+ "[Function: " (.-Name x) "]")))
+
+      (when (== (.-Class x) "Array")
+        (let [parts (make (slice string) (len (.-Arr x)))]
+          (range [i e (.-Arr x)]
+            (aset parts i (jsInspect e)))
+
+          (return (+ "[ " (strings/Join parts ", ") " ]"))))
+
+      (when (== (.-Class x) "Object")
+        (let [parts (lit (slice string))]
+          (range [_ k (.-keys x)]
+            (set! parts (append parts (+ k ": " (jsInspect (aget (.-props x) k))))))
+
+          (when (== (len parts) 0)
+            (return "{}"))
+
+          (return (+ "{ " (strings/Join parts ", ") " }"))))
+
+      (when (== (.-Class x) "Fake")
+        (return (+ (.-Name x) "#" (strconv/Itoa (.-ID x)))))
+
+      (return (+ "[object " (.-Class x) "]")))
+    (case [(* JSSymbol)]
+      (return (+ "Symbol(" (.-Desc x) ")"))))
+
+  (jsToStringPrim v))
+
+
+^{:go/end 315} (go/func jsInspect ^string [^any v]
+  (when [(values s ok) (assert string v)] ok
+    (return (+ "'" s "'")))
+
+  (jsDescribe v))
+
+
+^{:go/end 336} (go/func jsErrorText ^string [^{:tag (* JSObject)} o]
+  (let [(values name _) (.own o "name")
+      (values msg _) (.own o "message")]
+    (when (== name nil)
+      (when (!= (.-Proto o) nil)
+        (set! (values name _) (.own (.-Proto o) "name"))))
+
+
+    (let [(values n m) (values "Error" "")]
+      (when [(values s ok) (assert string name)] ok
+        (set! n s))
+
+      (when [(values s ok) (assert string msg)] ok
+        (set! m s))
+
+      (when (== m "")
+        (return n))
+
+      (+ n ": " m))))
+
+
+
+^{:go/breaks [[5 355]] :go/end 356} (go/func jsToStringPrim "jsToStringPrim is ToString of a primitive.\n" ^string [^any v]
+  (type-switch [x v]
+    (case [jsUndefined]
+      (return "undefined"))
+    (case [jsNull]
+      (return "null"))
+    (case [bool]
+      (when x
+        (return "true"))
+
+      (return "false"))
+    (case [float64]
+      (return (jsNumStr x)))
+    (case [string]
+      (return x)))
+
+  "")
+
+
+
+^{:go/end 366} (go/func sortedKeys "sortedKeys is a map's keys sorted (the world's deterministic orders).\n" ^{:tag (slice string)} [^{:tag (map string any)} m]
+  (let [out (make (slice string) 0 (len m))]
+    (range [k m]
+      (set! out (append out k)))
+
+    (sort/Strings out)
+    ^{:line 365} out))

@@ -1,0 +1,91 @@
+(ns asm.a64i-goroot
+  "bin/a64i goroot-check's judgment (AR24, queue 299; doc/asm/ARM64-SURVEY.md \"As built: AR24\"): each program of goi's
+  $GOROOT/test corpus (the run, rundir, buildrundir and runindir programs of test/goi/check-linux-amd64.edn) built for
+  linux/arm64 and run on this arm64 CPU and on a64i (test/asm/a64i-goroot/one.bash's raw rows, results.tsv). A row
+  `[PROGRAM RESULT DETAIL]`: :pass (a64i's run equal to the CPU's, the CPU's passing the test by its golden .out), else a class of
+  test/asm/divergences-a64i-goroot.edn: :gc-arm64 (the CPU's own run does not pass the test, a64i's equal to it), :not-arm64 (the
+  program's build constraint excludes linux/arm64), :driver-skip (the action sets -goexperiment or -godebug; the CPU's run timed
+  out), or the class test/asm/a64i-goroot/known.edn gives a program a64i's run differs on, times out on or that does not build;
+  one it does not give is failing. Held to test/asm/a64i-goroot-results-arm64.edn (RECORD: rewritten from a whole run without
+  failures); a partial run (PARTIAL) to the recorded rows of its programs. The negative controls
+  (test/asm/a64i-goroot/controls.txt) judged from the runs' digests must fail."
+  (:require [arbace.string :as str]))
+
+(def header
+  (str ";; a64i's $GOROOT/test check (bin/a64i goroot-check; doc/asm/ARM64-SURVEY.md \"As built: AR24\"): the run, rundir, buildrundir and\n"
+       ";; runindir programs of goi's linux record built for linux/arm64 by TamaGo's go1.27.1 and run on the M2 and on a64i: :pass (a64i's\n"
+       ";; run equal to the CPU's, the CPU's passing the test), else a class of test/asm/divergences-a64i-goroot.edn. Written by\n"
+       ";; `bin/a64i goroot-check --record`. Read with the Clojure reader.\n"))
+
+(defn- exists? [^String p] (.exists (java.io.File. p)))
+
+(defn- tsv [^String path]
+  (if (exists? path)
+    (vec (for [l (str/split-lines (slurp path)) :when (seq l)] (str/split l #"\t" -1)))
+    []))
+
+(defn rows
+  "The run's rows from the raw rows RAW ([PROGRAM RAW DETAIL STATS]) and the known programs KNOWN ({PROGRAM [CLASS REASON]})."
+  [raw known]
+  (vec (for [[p r dt] raw]
+         (let [[kc kr] (known p)]
+           (case r
+             "pass" [p :pass ""]
+             "ref" [p :gc-arm64 dt]
+             "constraint" [p :not-arm64 dt]
+             "skip" [p :driver-skip dt]
+             "speed" (if kc [p kc (str kr " (" r ")")] [p :speed "the CPU's run over A64I_GOROOT_CPU_MAX ms: a64i not run"])
+             ;; a known row's detail its reason and the raw result, never the run's own words (times, paths, dates): the record stable
+             (if kc
+               [p kc (str kr " (" r ")")]
+               [p (keyword (str "failing-" r)) dt]))))))
+
+(defn- digests [w p] (let [f (str w "/res/" (str/replace p "/" "__") ".dig")] (when (exists? f) (first (tsv f)))))
+
+(defn control
+  "A negative control KIND SUBJECT REFERENCE from the runs' digests in W: `cpu` (SUBJECT's a64i run against REFERENCE's CPU
+  run), `golden` (SUBJECT's CPU output against REFERENCE's golden .out): differs as it must, same, or left (not run)."
+  [w kind subj ref]
+  (let [s (digests w subj) r (digests w ref)]
+    (cond (or (nil? s) (nil? r)) "left"
+          (= kind "cpu") (if (= (subvec s 0 3) (subvec r 3 6)) "same" "differs")
+          (= kind "golden") (if (= (nth s 6) (nth r 7)) "same" "differs")
+          :else (str "unknown kind " kind))))
+
+(defn main [root results record partial]
+  (let [w (str root "/.tmp/a64i/goroot")
+        rpath (str root "/test/asm/a64i-goroot-results-arm64.edn")
+        classes (set (map :id (read-string (slurp (str root "/test/asm/divergences-a64i-goroot.edn")))))
+        known (into {} (for [[p c r] (read-string (slurp (str root "/test/asm/a64i-goroot/known.edn")))] [p [c r]]))
+        raw (tsv results)
+        run (rows raw known)
+        ran (set (map first run))
+        old (if (exists? rpath) (read-string (slurp rpath)) [])
+        oldm (into {} (map (fn [[i c]] [i c]) old))
+        problems (atom [])
+        ins (reduce + 0 (for [[_ _ _ s] raw :let [[_ n] (re-find #" (\d+) instructions" (str s))] :when n] (Long/parseLong n)))
+        ms (reduce + 0 (for [[_ _ _ s] raw :let [[_ n] (re-find #"a64i (\d+)ms" (str s))] :when n] (Long/parseLong n)))]
+    (println (str "a64i goroot-check: " (count (filter #(= :pass (second %)) run)) " of " (count run) " pass; "
+                  (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))
+                  "; a64i " ins " instructions in " (quot ms 1000) " s of runs"))
+    (doseq [[i c dt] run]
+      (cond (str/starts-with? (name c) "failing-") (swap! problems conj (str "failing: " i " " (subs (name c) 8) " " dt))
+            (and (not= c :pass) (not (classes c))) (swap! problems conj (str "unclassed: " i " " (name c) " " dt))))
+    (doseq [[p [c]] known :when (and (ran p) (= :pass (second (first (filter #(= p (first %)) run)))))]
+      (println (str "a64i goroot-check: known " p " (" (name c) ") passes now")))
+    (if (and (seq record) (empty? @problems))
+      (do (spit rpath (str header "[\n" (apply str (map (fn [r] (str (pr-str r) "\n")) (sort-by first run))) "]\n"))
+          (println (str "a64i goroot-check: recorded " (count run) " rows into test/asm/a64i-goroot-results-arm64.edn")))
+      (do (doseq [[i c] run :let [o (oldm i)]]
+            (cond (nil? o) (swap! problems conj (str "not recorded: " i))
+                  (and (= o :pass) (not= c :pass)) (swap! problems conj (str i ": " (name c) ", recorded :pass"))))
+          (when-not (seq partial)
+            (doseq [[i] old :when (not (ran i))] (swap! problems conj (str "recorded, not run: " i))))))
+    (let [cf (str root "/test/asm/a64i-goroot/controls.txt")]
+      (doseq [l (str/split-lines (slurp cf)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))]
+        (let [[id kind subj ref] (str/split l #"\s+") v (control w kind subj ref)]
+          (cond (= v "differs") (println (str "control " id ": fails as it must"))
+                (= v "left") (println (str "control " id ": left (not in this run)"))
+                :else (swap! problems conj (str "control " id ": " v))))))
+    (doseq [p @problems] (println (str "FAIL: " p)))
+    (if (empty? @problems) (println "a64i goroot-check: ok") (System/exit 1))))

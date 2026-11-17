@@ -1,0 +1,318 @@
+;; Package wai is Arbace's WebAssembly engine (doc/wasm/WAI.md; doc/wasm/WASM-SURVEY.md §6, WAS6 (a), WA4): a module decoded from
+;; the binary format, its functions translated at load into an internal code (branch targets and stack heights resolved), and an
+;; interpreter over it, with the store, the linker and the hosts. Written after the specification's semantics (WebAssembly/spec at
+;; tag wg-3.0, interpreter/exec/eval.ml read for the messages and the order of effects); wasmi's and wazero's designs read as
+;; references, nothing of theirs converted.
+(in-ns 'go.arbace.wai) (go/file "types.go" :doc "Package wai is Arbace's WebAssembly engine (doc/wasm/WAI.md; doc/wasm/WASM-SURVEY.md §6, WAS6 (a), WA4): a module decoded from\nthe binary format, its functions translated at load into an internal code (branch targets and stack heights resolved), and an\ninterpreter over it, with the store, the linker and the hosts. Written after the specification's semantics (WebAssembly/spec at\ntag wg-3.0, interpreter/exec/eval.ml read for the messages and the order of effects); wasmi's and wazero's designs read as\nreferences, nothing of theirs converted.\n" :imports [
+
+
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [strings "strings"]])
+
+
+
+
+(go/const "Value types' kinds: the binary format's codes for the numeric and vector types, kRef for a reference type, and the packed\nstorage types.\n"
+  ^{:line 16} [^{:val 127} tI32 0x7f]
+  ^{:line 17} [^{:val 126} tI64 0x7e]
+  ^{:line 18} [^{:val 125} tF32 0x7d]
+  ^{:line 19} [^{:val 124} tF64 0x7c]
+  ^{:line 20} [^{:val 123} tV128 0x7b]
+  ^{:line 21} [^{:val 120} tI8 0x78]
+  ^{:line 22} [^{:val 119} tI16 0x77]
+  ^{:line 23} [^{:val 100} tRef 0x64])
+
+
+
+(go/const "The abstract heap types, as their s33 values in the binary format (negative); a concrete heap type is a canonical type id (>= 0).\n"
+  ^{:line 28} [^{:val -12} hNoExn -0x0c]
+  ^{:line 29} [^{:val -13} hNoFunc -0x0d]
+  ^{:line 30} [^{:val -14} hNoExtern -0x0e]
+  ^{:line 31} [^{:val -15} hNone -0x0f]
+  ^{:line 32} [^{:val -16} hFunc -0x10]
+  ^{:line 33} [^{:val -17} hExtern -0x11]
+  ^{:line 34} [^{:val -18} hAny -0x12]
+  ^{:line 35} [^{:val -19} hEq -0x13]
+  ^{:line 36} [^{:val -20} hI31 -0x14]
+  ^{:line 37} [^{:val -21} hStruct -0x15]
+  ^{:line 38} [^{:val -22} hArray -0x16]
+  ^{:line 39} [^{:val -23} hExn -0x17])
+
+
+
+(go/type ValType "ValType is a value type: K the kind; for a reference Null and H, the heap type.\n" (struct
+    ^{:line 44 :tag byte} K
+    ^{:line 45 :tag bool} Null
+    ^{:line 46 :tag int32} H))
+
+
+^{:go/end 71} (go/method String ^string [^ValType t]
+  (switch (.-K t)
+    (case [tI32]
+      (return "i32"))
+    (case [tI64]
+      (return "i64"))
+    (case [tF32]
+      (return "f32"))
+    (case [tF64]
+      (return "f64"))
+    (case [tV128]
+      (return "v128"))
+    (case [tI8]
+      (return "i8"))
+    (case [tI16]
+      (return "i16")))
+
+  (let [n ""]
+    (when (.-Null t)
+      (set! n "null "))
+
+    (+ "(ref " n (heapName (.-H t)) ")")))
+
+
+^{:go/end 101} (go/func heapName ^string [^int32 h]
+  (switch h
+    (case [hNoExn]
+      (return "noexn"))
+    (case [hNoFunc]
+      (return "nofunc"))
+    (case [hNoExtern]
+      (return "noextern"))
+    (case [hNone]
+      (return "none"))
+    (case [hFunc]
+      (return "func"))
+    (case [hExtern]
+      (return "extern"))
+    (case [hAny]
+      (return "any"))
+    (case [hEq]
+      (return "eq"))
+    (case [hI31]
+      (return "i31"))
+    (case [hStruct]
+      (return "struct"))
+    (case [hArray]
+      (return "array"))
+    (case [hExn]
+      (return "exn")))
+
+  (fmt/Sprintf "$%d" h))
+
+
+
+(go/const "The composite types' kinds.\n"
+  ^{:line 105} [^{:val 96} cFunc 0x60]
+  ^{:line 106} [^{:val 95} cStruct 0x5f]
+  ^{:line 107} [^{:val 94} cArray 0x5e])
+
+
+
+(go/type Field "Field is a struct's field or an array's element.\n" (struct
+    ^{:line 112 :tag ValType} T
+    ^{:line 113 :tag bool} Mut))
+
+
+
+(go/type CType "CType is a canonical defined type: its composite type with every concrete heap type a canonical id, its declared supertype.\n" (struct
+    ^{:line 118 :tag bool} Final
+    ^{:line 119 :tag int} Super ; a canonical id, -1 for none
+    ^{:line 120 :tag byte} Kind
+    ^{:line 121 :tag (slice ValType)} Params
+    ^{:line 122 :tag (slice ValType)} Results
+    ^{:line 123 :tag (slice Field)} Fields))
+
+
+
+(go/var "The canonical types: one registry for the process (types are values, iso-recursive equivalence by the rec groups' shapes).\n"
+  ^{:line 128} [^{:tag (slice (* CType))} ctypes]
+  ^{:line 129} [cgroups (lit (map string int))])
+
+
+
+(go/type rawSub "rawSub is a subtype as decoded, its heap types module-local indices.\n" (struct
+    ^{:line 134 :tag bool} final
+    ^{:line 135 :tag (slice int32)} supers
+    ^{:line 136 :tag byte} kind
+    ^{:line 137 :tag (slice ValType)} params
+    ^{:line 138 :tag (slice ValType)} res
+    ^{:line 139 :tag (slice Field)} fields))
+
+
+^{:go/end 160} (go/func keyVT [^{:tag (* strings/Builder)} b ^ValType t ^int base ^int n ^{:tag (slice int)} canon]
+  (fmt/Fprintf b "%02x" (.-K t))
+  (defer (.WriteByte b \,))
+  (when (!= (.-K t) tRef)
+    (return))
+
+  (when (.-Null t)
+    (.WriteByte b \n))
+
+  (.WriteByte b \:)
+  (let [h (conv int (.-H t))]
+    (cond (< h 0)
+      (fmt/Fprintf b "a%d" (- h))
+      (and (>= h base) (< h (+ base n)))
+      (fmt/Fprintf b "r%d" (- h base)) :else
+
+      (fmt/Fprintf b "c%d" (aget canon h)))))
+
+
+
+
+^{:go/end 228} (go/func canonGroup "canonGroup registers a rec group (module type indices base..base+len(subs)) and returns its canonical ids.\n" ^{:tag (slice int)} [^{:tag (slice rawSub)} subs ^int base ^{:tag (slice int)} canon]
+  (let [n (len subs)
+      ^{:line 165 :tag strings/Builder} b (zero strings/Builder)]
+    (range [_ s subs]
+      (fmt/Fprintf (addr b) "{%v %d" (.-final s) (.-kind s))
+      (range [_ x (.-supers s)]
+        (keyVT (addr b) (lit ValType :K tRef :H x) base n canon))
+
+      (.WriteByte b \|)
+      (range [_ t (.-params s)]
+        (keyVT (addr b) t base n canon))
+
+      (.WriteByte b \|)
+      (range [_ t (.-res s)]
+        (keyVT (addr b) t base n canon))
+
+      (.WriteByte b \|)
+      (range [_ f (.-fields s)]
+        (keyVT (addr b) (.-T f) base n canon)
+        (when (.-Mut f)
+          (.WriteByte b \m))
+
+        (.WriteByte b \,))
+
+      (.WriteByte b \}))
+
+    (let [key (.String b)
+        ^{:line 190} ids (make (slice int) n)]
+      (when [(values first ok) (aget cgroups key)] ok
+        (range [i ids]
+          (aset ids i (+ first i)))
+
+        (return ids))
+
+      (let [first (len ctypes)]
+        (aset cgroups key first)
+        (let [conv ^{:go/end 209} (fn ^ValType [^ValType t]
+              (when (and (== (.-K t) tRef) (>= (.-H t) 0))
+                (let [h (conv int (.-H t))]
+                  (if (and (>= h base) (< h (+ base n)))
+                    (set! (.-H t) (conv int32 (- (+ first h) base)))
+
+                    (set! (.-H t) (conv int32 (aget canon h))))))
+
+
+              ^{:line 208} t)]
+
+          (range [i s subs]
+            (let [c (addr (lit CType :Final (.-final s) :Super -1 :Kind (.-kind s)))]
+              (when (> (len (.-supers s)) 0)
+                (set! (.-Super c) (conv int (.-H (go/call conv (lit ValType :K tRef :H (aget (.-supers s) 0)))))))
+
+              (range [_ t (.-params s)]
+                (set! (.-Params c) (append (.-Params c) (go/call conv t))))
+
+              (range [_ t (.-res s)]
+                (set! (.-Results c) (append (.-Results c) (go/call conv t))))
+
+              (range [_ f (.-fields s)]
+                (set! (.-Fields c) (append (.-Fields c) (lit Field (go/call conv (.-T f)) (.-Mut f)))))
+
+              (set! ctypes (append ctypes c))
+              (aset ids i (+ first i))))
+
+          ^{:line 227} ids)))))
+
+
+
+^{:go/end 233} (go/func funcTypeID "funcTypeID is the canonical id of the function type params -> results in a rec group of its own (the hosts' types).\n" ^int [^{:tag (slice ValType)} params ^{:tag (slice ValType)} results]
+  (aget (canonGroup (lit (slice rawSub) (lit _ :final true :kind cFunc :params params :res results)) 0 nil) 0))
+
+
+
+^{:go/breaks [[5 243]] :go/end 244} (go/func subCanon "subCanon: the canonical type a is b or declares it among its supertypes, transitively.\n" ^bool [^int a ^int b]
+  (while (>= a 0)
+    (when (== a b)
+      (return true))
+
+    (set! a (.-Super (aget ctypes a))))
+
+  false)
+
+
+
+^{:go/end 263} (go/func topOf "topOf is a heap type's top: func, extern, any or exn.\n" ^int32 [^int32 h]
+  (when (>= h 0)
+    (when (== (.-Kind (aget ctypes h)) cFunc)
+      (return hFunc))
+
+    (return hAny))
+
+  (switch h
+    (case [hFunc hNoFunc]
+      (return hFunc))
+    (case [hExtern hNoExtern]
+      (return hExtern))
+    (case [hExn hNoExn]
+      (return hExn)))
+
+  ^{:line 262} hAny)
+
+
+
+^{:go/breaks [[8 304]] :go/end 305} (go/func heapSub "heapSub is the heap types' subtyping (the spec's match.ml, over canonical ids).\n" ^bool [^int32 a ^int32 b]
+  (when (== a b)
+    (return true))
+
+  (when (and (>= a 0) (>= b 0))
+    (return (subCanon (conv int a) (conv int b))))
+
+  (when (>= a 0)
+    (let [k (.-Kind (aget ctypes a))]
+      (switch b
+        (case [hAny]
+          (return (!= k cFunc)))
+        (case [hEq]
+          (return (or (== k cStruct) (== k cArray))))
+        (case [hStruct]
+          (return (== k cStruct)))
+        (case [hArray]
+          (return (== k cArray)))
+        (case [hFunc]
+          (return (== k cFunc))))
+
+      (return false)))
+
+  (switch a
+    (case [hNone]
+      (return (or (== b hAny) (== b hEq) (== b hI31) (== b hStruct) (== b hArray) ^:go/paren (and (>= b 0) (!= (.-Kind (aget ctypes b)) cFunc)))))
+    (case [hNoFunc]
+      (return (or (== b hFunc) ^:go/paren (and (>= b 0) (== (.-Kind (aget ctypes b)) cFunc)))))
+    (case [hNoExtern]
+      (return (== b hExtern)))
+    (case [hNoExn]
+      (return (== b hExn)))
+    (case [hEq hI31 hStruct hArray]
+      (when (== b hAny)
+        (return true))
+
+      (return (and (== b hEq) (!= a hEq)))))
+
+  false)
+
+
+
+^{:go/end 319} (go/func valSub "valSub is the value types' subtyping.\n" ^bool [^ValType a ^ValType b]
+  (when (!= (.-K a) (.-K b))
+    (return false))
+
+  (when (!= (.-K a) tRef)
+    (return true))
+
+  (when (and (.-Null a) (not (.-Null b)))
+    (return false))
+
+  (heapSub (.-H a) (.-H b)))

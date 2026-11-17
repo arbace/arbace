@@ -1,0 +1,170 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/ch/SelectorImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io IOException)
+        '(java.nio.channels CancelledKeyException
+                            ClosedSelectorException
+                            IllegalSelectorException
+                            SelectionKey)
+        '(java.nio.channels.spi AbstractSelectableChannel AbstractSelector SelectorProvider)
+        '(java.util ArrayDeque Collections Deque HashSet Iterator Objects Set)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function Consumer))
+
+(defclass ^:public ^:abstract SelectorImpl
+  :extends AbstractSelector
+
+  (field ^:private ^:final ^{:tag (Set SelectionKey)} keys)
+
+  (field ^:private ^:final ^{:tag (Set SelectionKey)} selectedKeys)
+
+  (field ^:private ^:final ^{:tag (Set SelectionKey)} publicKeys)
+
+  (field ^:private ^:final ^{:tag (Set SelectionKey)} publicSelectedKeys)
+
+  (field ^:private ^:final ^{:tag (Deque SelectionKeyImpl)} cancelledKeys (ArrayDeque.))
+
+  (field ^:private ^boolean inSelect)
+
+  (constructor ^:protected [this ^SelectorProvider sp]
+    (super. sp)
+    (set! keys (ConcurrentHashMap/newKeySet))
+    (set! selectedKeys (HashSet.))
+    (set! publicKeys (Collections/unmodifiableSet keys))
+    (set! publicSelectedKeys (Util/ungrowableSet selectedKeys)))
+
+  (method ^:private ensureOpen ^void [this]
+    (when-not (.isOpen this) (throw (ClosedSelectorException.))))
+
+  (method ^:public ^:final keys ^{:tag (Set SelectionKey)} [this]
+    (.ensureOpen this)
+    publicKeys)
+
+  (method ^:public ^:final selectedKeys ^{:tag (Set SelectionKey)} [this]
+    (.ensureOpen this)
+    publicSelectedKeys)
+
+  (method ^:protected ^:final begin ^void [this ^boolean blocking]
+    (when blocking (.begin this)))
+
+  (method ^:protected ^:final end ^void [this ^boolean blocking]
+    (when blocking (.end this)))
+
+  (method ^:protected ^:abstract doSelect :throws [IOException] ^int [this
+                                                                      ^{:tag (Consumer SelectionKey)} action
+                                                                      ^long timeout])
+
+  (method ^:private lockAndDoSelect :throws [IOException] ^int [this
+                                                                ^{:tag (Consumer SelectionKey)} action
+                                                                ^long timeout]
+    (locking this
+      (.ensureOpen this)
+      (when inSelect (throw (IllegalStateException. "select in progress")))
+      (set! inSelect true)
+      (try
+        (locking publicSelectedKeys (.doSelect this action timeout))
+        (finally (set! inSelect false)))))
+
+  (method ^:public ^:final select :throws [IOException] ^int [this ^long timeout]
+    (when (< timeout 0) (throw (IllegalArgumentException. "Negative timeout")))
+    (.lockAndDoSelect this nil (if (== timeout 0) -1 timeout)))
+
+  (method ^:public ^:final select :throws [IOException] ^int [this]
+    (.lockAndDoSelect this nil -1))
+
+  (method ^:public ^:final selectNow :throws [IOException] ^int [this]
+    (.lockAndDoSelect this nil 0))
+
+  (method ^:public ^:final select :throws [IOException] ^int [this
+                                                              ^{:tag (Consumer SelectionKey)} action
+                                                              ^long timeout]
+    (Objects/requireNonNull action)
+    (when (< timeout 0) (throw (IllegalArgumentException. "Negative timeout")))
+    (.lockAndDoSelect this action (if (== timeout 0) -1 timeout)))
+
+  (method ^:public ^:final select :throws [IOException] ^int [this
+                                                              ^{:tag (Consumer SelectionKey)} action]
+    (Objects/requireNonNull action)
+    (.lockAndDoSelect this action -1))
+
+  (method ^:public ^:final selectNow :throws [IOException] ^int [this
+                                                                 ^{:tag (Consumer SelectionKey)} action]
+    (Objects/requireNonNull action)
+    (.lockAndDoSelect this action 0))
+
+  (method ^:protected ^:abstract implClose :throws [IOException] ^void [this])
+
+  (method ^:public ^:final implCloseSelector :throws [IOException] ^void [this]
+    (.wakeup this)
+    (locking this
+      (.implClose this)
+      (locking publicSelectedKeys
+        (let [^{:tag (Iterator SelectionKey)} i (.iterator keys)]
+          (while (.hasNext i)
+            (let [ski (cast SelectionKeyImpl (.next i))]
+              (.deregister this ski)
+              (let [selch (.channel ski)]
+                (when (and (not (.isOpen selch)) (not (.isRegistered selch)))
+                  (.kill (cast SelChImpl selch)))
+                (.remove selectedKeys ski)
+                (.remove i))))
+          (java-assert (.isEmpty selectedKeys))))))
+
+  (method ^:protected ^:final register ^SelectionKey [this ^AbstractSelectableChannel ch ^int ops
+                                                      attachment]
+    (when-not (instance? SelChImpl ch) (throw (IllegalSelectorException.)))
+    (let [k (SelectionKeyImpl. (cast SelChImpl ch) this)]
+      (when (some? attachment) (.attach k attachment))
+      (.implRegister this k)
+      (.add keys k)
+      (try (.interestOps k ops) (catch CancelledKeyException e))
+      (when-not (.isOpen this)
+        (java-assert (nil? (.keyFor ch this)))
+        (.remove keys k)
+        (.cancel k)
+        (throw (ClosedSelectorException.)))
+      k))
+
+  (method ^:protected implRegister ^void [this ^SelectionKeyImpl ski]
+    (.ensureOpen this))
+
+  (method ^:protected ^:abstract implDereg :throws [IOException] ^void [this ^SelectionKeyImpl ski])
+
+  (method ^:public cancel ^void [this ^SelectionKeyImpl ski]
+    (locking cancelledKeys (.addLast cancelledKeys ski)))
+
+  (method ^:protected ^:final processDeregisterQueue :throws [IOException] ^void [this]
+    (java-assert (Thread/holdsLock this))
+    (java-assert (Thread/holdsLock publicSelectedKeys))
+    (locking cancelledKeys
+      (let [^:mutable ^SelectionKeyImpl ski nil]
+        (while (some? (set! ski (cast SelectionKeyImpl (.pollFirst cancelledKeys))))
+          (.implDereg this ski)
+          (.remove selectedKeys ski)
+          (.remove keys ski)
+          (.deregister this ski)
+          (let [ch (.channel ski)]
+            (when (and (not (.isOpen ch)) (not (.isRegistered ch))) (.kill (cast SelChImpl ch))))))))
+
+  (method ^:protected ^:final processReadyEvents ^int [this ^int rOps ^SelectionKeyImpl ski
+                                                       ^{:tag (Consumer SelectionKey)} action]
+    (if (some? action)
+        (do
+          (.translateAndSetReadyOps ski rOps)
+          (when-not (== (bit-and-int (.nioReadyOps ski) (.nioInterestOps ski)) 0)
+            (.accept action ski)
+            (.ensureOpen this)
+            (return 1)))
+        (do
+          (java-assert (Thread/holdsLock publicSelectedKeys))
+          (if (.contains selectedKeys ski)
+              (when (.translateAndUpdateReadyOps ski rOps) (return 1))
+              (do
+                (.translateAndSetReadyOps ski rOps)
+                (when-not (== (bit-and-int (.nioReadyOps ski) (.nioInterestOps ski)) 0)
+                  (.add selectedKeys ski)
+                  (return 1))))))
+    0)
+
+  (method ^:protected ^:abstract setEventOps ^void [this ^SelectionKeyImpl ski]))

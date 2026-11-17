@@ -1,0 +1,349 @@
+(ns arbace.repr.asm.amd64.intel
+  "repr/asm's Intel syntax for amd64 (doc/asm/SPEC.md §5a; doc/asm/AMD64-SURVEY.md §4.1, AX3): an instruction's text into its
+  form and back, after LLVM's X86AsmParser (llvm-project 23.1.5, llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp, Apache-2.0
+  WITH LLVM-exception): parseIntelOperand, ParseIntelMemoryOperandSize, ParseIntelExpression and its IntelExprStateMachine
+  (the infix calculator's precedence, the base and index registers taken from the sum, `Reg*Scale`), ParseRoundingModeOp,
+  HandleAVX512Operand, written again in Arbace (no MASM, no MS inline assembly: llvm-mc's `.intel_syntax noprefix`).
+
+  (MNEMONIC {:pseudo [...] :prefix [...]} OPERAND ...): the mnemonic as written, lower case (Intel's carry no size suffix),
+  the operands in the text's order, which is the SDM's (destination first), so the forms of the two syntaxes share their
+  operand order. An operand: (reg NAME), (reg st N) for st(N), with a map of its decorations {:k K :z true}; (imm E) for an
+  immediate; (mem {:size BITS :seg S :base B :index I :scale E :disp E :bare true :bcst N :k K :z true}) with only the parts
+  written (:size from `dword ptr`, :bare when written without brackets); (rc \"TEXT\") for {rn-sae}, {sae}.
+
+  MASM's symbol rule as llvm-mc applies it (P3): an operand without brackets, segment or register is an immediate unless it
+  names a symbol that is not a constant at that point of the file (a `.set`/`=` of a constant before it is inlined, as
+  AsmParser::parsePrimaryExpr inlines it); `offset SYM` is always an immediate."
+  (:require [arbace.repr.asm.lex :as lex]
+            [arbace.repr.asm.gnu :as gnu]
+            [arbace.repr.asm.amd64.att :as att]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; the register names of X86's AsmNames (asm/amd64/table.edn's :regs; MatchRegisterName on the name or its lower case), db0-db15 as
+;; dr0-dr15 (MatchRegisterByName); st(N) is read apart
+(def ^:private reg-re
+  #"(?:[re]?[abcd]x|[abcd][lh]|[re]?(?:si|di|sp|bp)|(?:si|di|sp|bp)l|r(?:[89]|[12][0-9]|3[01])[bwd]?|[re]?ip|[re]iz|[cdefgs]s|cr(?:[0-9]|1[0-5])|d[rb](?:[0-9]|1[0-5])|[er]?flags|dirflag|fp[0-7]|fpcr|fpsr|[fg]s\.base|k[0-7]|mm[0-7]|mxcsr|ssp|st|tmm[0-7]|tmmcfg|[xyz]mm(?:[0-9]|[12][0-9]|3[01]))")
+
+(defn reg-name?
+  "Whether the identifier names a register (MatchRegisterName: as written or in lower case)."
+  [^String s]
+  (boolean (re-matches reg-re (str/lower-case s))))
+
+(def sizes {"byte" 8 "word" 16 "dword" 32 "float" 32 "long" 32 "fword" 48 "double" 64 "qword" 64 "mmword" 64 "xword" 80
+            "tbyte" 80 "xmmword" 128 "ymmword" 256 "zmmword" 512})
+;; the canonical size words, X86IntelInstPrinter's print*mem
+(def size-words {8 "byte" 16 "word" 32 "dword" 48 "fword" 64 "qword" 80 "tbyte" 128 "xmmword" 256 "ymmword" 512 "zmmword"})
+
+(defn- tok [ts ^long i] (when (< i (count ts)) (nth ts i)))
+(defn- ident-tok? [t] (and t (= :ident (lex/kind t))))
+;; a named operator or keyword: lower or upper case, not mixed (ParseIntelNamedOperator)
+(defn- word [t] (when (ident-tok? t) (let [^String v (lex/value t)] (when (or (= v (str/lower-case v)) (= v (str/upper-case v))) (str/lower-case v)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; expressions: the infix calculator's precedence (OpPrecedence: | 0, ^ 1, & 2, << >> 4, + - 5, * / % 6), every operator left
+;; associative; a register a leaf (reg NAME), a bracket a group [:br E]
+
+(def ^:private punct-ops {"|" ['| 0] "^" ['xor 1] "&" ['& 2] "<<" ['<< 4] ">>" ['>> 4] "+" ['+ 5] "-" ['- 5] "*" ['* 6] "/" ['/ 6] "%" ['% 6]})
+(def ^:private word-ops {"or" ['| 0] "xor" ['xor 1] "and" ['& 2] "shl" ['<< 4] "shr" ['>> 4] "mod" ['% 6]})
+
+(defn- binop [t]
+  (cond (and t (= :punct (lex/kind t))) (punct-ops (lex/value t))
+        :else (when-let [w (word t)] (word-ops w))))
+
+(declare parse-expr)
+
+(defn- parse-unit
+  "[E I] a primary at `i`: an integer, a register, a symbol (gnu's primary: `foo@PLT`, a quoted name), a local label's
+  reference, `offset SYM`, (E), [E], a unary - ~ not; a primary followed by `[` adds the bracket's group (`16[rbx]`)."
+  [ts ^long i st]
+  (let [t (tok ts i)
+        _ (when-not t (gnu/fail "expected an expression" {:at i}))
+        [x j]
+        (cond
+          (= :int (lex/kind t)) [(lex/value t) (inc i)]
+          (= :local (lex/kind t)) (let [[n d] (lex/value t)] (vswap! st assoc :sym true) [(list 'local n d) (inc i)])
+          (lex/punct? t "(") (let [[e j] (parse-expr ts (inc i) st 0)]
+                               (if (lex/punct? (tok ts j) ")") [e (inc j)] (gnu/fail "expected )" {:at j})))
+          (lex/punct? t "[") (do (when (:in-br @st) (gnu/fail "unexpected bracket encountered" {:at i}))
+                                 (vswap! st assoc :in-br true :br true)
+                                 (let [[e j] (parse-expr ts (inc i) st 0)]
+                                   (vswap! st assoc :in-br false)
+                                   (if (lex/punct? (tok ts j) "]") [[:br e] (inc j)] (gnu/fail "expected ]" {:at j}))))
+          (lex/punct? t "-") (let [n (tok ts (inc i))]
+                               (if (= :int (some-> n lex/kind))
+                                 [(- (lex/value n)) (+ i 2)]
+                                 (let [[e j] (parse-unit ts (inc i) st)] [(list '- e) j])))
+          (lex/punct? t "+") (parse-unit ts (inc i) st)
+          (lex/punct? t "~") (let [[e j] (parse-unit ts (inc i) st)] [(list 'bnot e) j])
+          (= "not" (word t)) (let [[e j] (parse-unit ts (inc i) st)] [(list 'bnot e) j])
+          (= "offset" (word t))
+          (let [n (tok ts (inc i))]
+            (when-not (and n (#{:ident :string} (lex/kind n))) (gnu/fail "unexpected token!" {:at i}))
+            (vswap! st assoc :offset true)
+            (gnu/parse-expr ts (inc i) false 7))
+          (and (ident-tok? t) (reg-name? (lex/value t)) (not (word-ops (word t))))
+          (let [r (symbol (str/replace (str/lower-case (lex/value t)) #"^db" "dr"))]
+            (if (and (= r 'st) (lex/punct? (tok ts (inc i)) "(") (= :int (some-> (tok ts (+ i 2)) lex/kind)) (lex/punct? (tok ts (+ i 3)) ")"))
+              [(list 'reg 'st (lex/value (tok ts (+ i 2)))) (+ i 4)]
+              [(list 'reg r) (inc i)]))
+          (and t (#{:ident :string} (lex/kind t)))
+          (let [[e j] (gnu/parse-expr ts i false 7)]
+            (vswap! st update :syms (fnil conj []) e)
+            [e j])
+          :else (gnu/fail (str "unknown token in expression " (pr-str (lex/value t))) {:at i}))]
+    (loop [x x j (long j)]
+      (let [n (tok ts j)]
+        (cond
+          (lex/punct? n "[") (let [[y k] (parse-unit ts j st)] [(list '+ x y) k])
+          ;; the dot operator: `[ebx].4` adds 4 (ParseIntelDotOperator on a Real token)
+          (and n (= :float (lex/kind n)) (re-matches #"\.[0-9]+" (lex/value n)))
+          (recur (list '+ x (Long/parseLong (subs (lex/value n) 1))) (inc j))
+          :else [x j])))))
+
+(defn- parse-expr [ts ^long i st ^long minp]
+  (let [[lhs j] (parse-unit ts i st)]
+    (loop [lhs lhs j (long j)]
+      (let [[op p] (binop (tok ts j))]
+        (if (and op (>= (long p) minp))
+          (let [[rhs k] (parse-expr ts (inc j) st (inc (long p)))]
+            (recur (list op lhs rhs) (long k)))
+          [lhs j])))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the address: the sum's terms, its registers the base and the index (IntelExprStateMachine's onPlus, onRegister, onInteger
+;; with Reg*Scale and Scale*Reg), the rest the displacement
+
+(defn- reg? [x] (and (seq? x) (= 'reg (first x))))
+(defn- has-reg? [x] (cond (reg? x) true (vector? x) (has-reg? (second x)) (seq? x) (some has-reg? (rest x)) :else false))
+
+(defn- unbracket [e] (cond (vector? e) (unbracket (second e)) (seq? e) (apply list (map unbracket e)) :else e))
+
+(defn- scaled
+  "The register and scale of a `Reg*Scale` or `Scale*Reg` node, else nil."
+  [x]
+  (when (and (seq? x) (= '* (first x)) (= 3 (count x)))
+    (cond (and (reg? (nth x 1)) (not (has-reg? (nth x 2)))) [(second (nth x 1)) (nth x 2)]
+          (and (reg? (nth x 2)) (not (has-reg? (nth x 1)))) [(second (nth x 2)) (nth x 1)])))
+
+(defn- regs-of
+  "The registers of `e` left to right: [:plain R] or [:scaled R SCALE]."
+  [e]
+  (cond (reg? e) [[:plain (second e)]]
+        (scaled e) [(into [:scaled] (scaled e))]
+        (seq? e) (vec (mapcat regs-of (rest e)))
+        :else []))
+
+(defn- simplify
+  "The expression with its registers taken out (each a placeholder ::r that the calculator counts as 0): a sum keeps its other
+  terms, ::r alone is no displacement."
+  [e]
+  (cond
+    (or (reg? e) (scaled e)) ::r
+    (and (seq? e) (= 2 (count e)) (#{'- 'bnot} (first e)))
+    (let [a (simplify (second e))] (if (= a ::r) ::r (if (and (= '- (first e)) (integer? a)) (- a) (list (first e) a))))
+    (and (seq? e) (= 3 (count e)) (#{'+ '- '* '/ '% '<< '>> '| '& 'xor} (first e)))
+    (let [[op x y] e x (simplify x) y (simplify y)]
+      (cond
+        (and (= x ::r) (= y ::r)) ::r
+        (= op '+) (cond (= x ::r) y (= y ::r) x :else (list op x y))
+        (= op '-) (cond (= y ::r) x (= x ::r) (if (integer? y) (- y) (list '- y)) :else (list op x y))
+        (and (= op '*) (or (= x ::r) (= y ::r))) ::r
+        :else (list op (if (= x ::r) 0 x) (if (= y ::r) 0 y))))
+    :else e))
+
+(defn- address
+  "{:base :index :scale :disp} of the expression `e` (IntelExprStateMachine: a register times an integer the index, another
+  register the base, then the index; the calculator's value the displacement)."
+  [e]
+  (let [e (unbracket e)
+        m (reduce (fn [m [k r sc]]
+                    (case k
+                      :plain (cond (not (:base m)) (assoc m :base r)
+                                   (:index m) (gnu/fail "BaseReg/IndexReg already set!" {})
+                                   :else (assoc m :index r))
+                      :scaled (if (:index m) (gnu/fail "BaseReg/IndexReg already set!" {}) (assoc m :index r :scale sc))))
+                  {} (regs-of e))
+        d (simplify e)]
+    (cond-> m (not= d ::r) (assoc :disp d))))
+
+;; a symbol is a constant when its assignment so far folds to an integer (AsmParser::parseExpression folds a constant expression,
+;; parsePrimaryExpr inlines a variable whose value is constant)
+(defn- fold [e seen]
+  (cond
+    (integer? e) e
+    (or (symbol? e) (and (seq? e) (= 'sym (first e))))
+    (let [n (if (symbol? e) (name e) (second e))]
+      (when-not (contains? seen n) (when-let [v (get gnu/*equ* n)] (fold v (conj seen n)))))
+    (and (seq? e) (= 2 (count e)) (#{'- '+ 'bnot} (first e)))
+    (when-let [x (fold (second e) seen)] (case (first e) - (-' x) + x bnot (if (instance? Long x) (bit-not (long x)) x)))
+    (and (seq? e) (= 3 (count e)) (#{'+ '- '* '<< '>> '| '& 'xor} (first e)))
+    (let [x (fold (nth e 1) seen) y (fold (nth e 2) seen)]
+      (when (and x y (instance? Long x) (instance? Long y))
+        (let [x (long x) y (long y)]
+          (case (first e) + (+ x y) - (- x y) * (* x y) << (bit-shift-left x y) >> (bit-shift-right x y)
+                | (bit-or x y) & (bit-and x y) xor (bit-xor x y)))))
+    :else nil))
+
+(defn- constant? [e] (some? (fold e #{})))
+
+(defn- decorate [^String src ts x ^long i]
+  ;; HandleAVX512Operand: {1toN}, {k}, {z} after the operand, as AT&T's reader takes them (k registers without %)
+  (loop [x x i i]
+    (if (lex/punct? (tok ts i) "{")
+      (let [j (loop [j (inc i)] (cond (>= j (count ts)) (gnu/fail "expected }" {:at i}) (lex/punct? (nth ts j) "}") j :else (recur (inc j))))
+            t (str/trim (subs src (int (lex/end (nth ts i))) (int (lex/start (nth ts j)))))
+            [k v] (cond
+                    (re-matches #"%?[kK][0-7]" t) [:k (symbol (str/lower-case (str/replace t "%" "")))]
+                    (= t "z") [:z true]
+                    (re-matches #"1to[0-9]+" t) [:bcst (Long/parseLong (subs t 3))]
+                    :else (gnu/fail (str "unknown decoration {" t "}") {:at i}))
+            x (if (= 'mem (first x))
+                (list 'mem (assoc (second x) k v))
+                (let [m (if (map? (last x)) (last x) {})
+                      base (if (map? (last x)) (butlast x) x)]
+                  (apply list (concat base [(assoc m k v)]))))]
+        (recur x (long (inc j))))
+      [x i])))
+
+(defn parse-operand
+  "[FORM I] the operand at `i` (parseIntelOperand)."
+  [^String src ts ^long i]
+  (let [t (tok ts i)
+        sz (when-let [w (word t)] (when (and (sizes w) (#{"ptr"} (word (tok ts (inc i))))) (sizes w)))
+        i (if sz (+ i 2) i)
+        t (tok ts i)
+        _ (when-not t (gnu/fail "expected an operand" {:at i}))]
+    (cond
+      (lex/punct? t "{")
+      (let [j (loop [j (inc i)] (cond (>= j (count ts)) (gnu/fail "expected }" {:at i}) (lex/punct? (nth ts j) "}") j :else (recur (inc j))))]
+        [(list 'rc (str/trim (subs src (int (lex/end t)) (int (lex/start (nth ts j)))))) (inc j)])
+      :else
+      (let [reg-first (when (and (ident-tok? t) (reg-name? (lex/value t)) (not (word-ops (word t))) (not= "offset" (word t)))
+                        (let [st (volatile! {})] (parse-unit ts i st)))
+            [r j] (if (and reg-first (reg? (first reg-first)) (not (lex/punct? (tok ts (second reg-first)) "[")))
+                    reg-first [nil i])]
+        (cond
+          (and r (not (lex/punct? (tok ts j) ":")))
+          (do (when sz (gnu/fail "expected memory operand after 'ptr', found register operand instead" {:at i}))
+              (decorate src ts r j))
+          :else
+          (let [seg (when r (second r))
+                j (if r (inc (long j)) j)
+                st (volatile! {})
+                [e k] (parse-expr ts j st 0)
+                mem? (or seg (:br @st) (has-reg? e)
+                         (and (not (:offset @st)) (some #(not (constant? %)) (:syms @st)))
+                         (and (not (:offset @st)) (:sym @st)))
+                x (if mem?
+                    (list 'mem (cond-> (address e)
+                                 sz (assoc :size sz)
+                                 seg (assoc :seg seg)
+                                 (not (:br @st)) (assoc :bare true)))
+                    (do (when sz (gnu/fail "an immediate after 'ptr'" {:at i}))
+                        (list 'imm (unbracket e))))]
+            (decorate src ts x k)))))))
+
+;; the prefix words AT&T's reader takes, and Intel's `acquire` and `release` (parseInstruction's IsPrefix)
+(defn- prefix? [^String v] (let [l (str/lower-case v)] (or (contains? att/prefixes l) (#{"acquire" "release"} l))))
+
+(defn read-insn
+  "An instruction's form from the statement's tokens `ts` at `i` (the prefixes and pseudo prefixes as AT&T's reader takes
+  them; `short` after a jump skipped, as parseInstruction skips it)."
+  [^String src ts ^long i]
+  (let [[pseudo i] (loop [ps [] i i]
+                     (if (lex/punct? (tok ts i) "{")
+                       (let [j (loop [j (inc i)] (cond (>= j (count ts)) (gnu/fail "expected }" {:at i}) (lex/punct? (nth ts j) "}") j :else (recur (inc j))))]
+                         (recur (conj ps (str/trim (subs src (int (lex/end (nth ts i))) (int (lex/start (nth ts j)))))) (long (inc j))))
+                       [ps i]))
+        [pfx i] (loop [ps [] i i]
+                  (let [t (tok ts i) n (tok ts (inc i))]
+                    (cond
+                      (and (ident-tok? t) (prefix? (lex/value t)) (ident-tok? n)
+                           (not (#{"ptr"} (word (tok ts (+ i 2))))) (not (lex/punct? (tok ts (+ i 2)) ":")))
+                      (recur (conj ps (symbol (str/lower-case (lex/value t)))) (inc i))
+                      (and (ident-tok? t) (prefix? (lex/value t)) (lex/punct? n "/") (ident-tok? (tok ts (+ i 2))))
+                      (recur (conj ps (symbol (str/lower-case (lex/value t)))) (+ i 2))
+                      :else [ps i])))
+        t (tok ts i)
+        _ (when-not (ident-tok? t) (gnu/fail "expected a mnemonic" {:at i}))
+        mn (symbol (str/lower-case (lex/value t)))
+        i (inc i)
+        ;; Jcc short / jmp short: the keyword skipped (MS and GAS ignore it)
+        i (if (and (= "short" (lex/value (or (tok ts i) [nil nil nil nil]))) (re-matches #"j\w+" (name mn))) (inc i) i)
+        ops (loop [i i ops []]
+              (if (>= i (count ts))
+                ops
+                (let [[x j] (parse-operand src ts i)
+                      n (tok ts j)]
+                  (cond
+                    (nil? n) (conj ops x)
+                    (and (= 'rc (first x)) (not (lex/punct? n ","))) (recur j (conj ops x))
+                    (lex/punct? n ",") (if (>= (inc (long j)) (count ts)) (gnu/fail "an operand expected after ," {:at j}) (recur (inc (long j)) (conj ops x)))
+                    :else (gnu/fail (str "unexpected " (pr-str (lex/value n)) " after an operand") {:at j})))))
+        attrs (cond-> {} (seq pseudo) (assoc :pseudo pseudo) (seq pfx) (assoc :prefix pfx))]
+    (apply list mn (concat (when (seq attrs) [attrs]) ops))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; canonical text: X86IntelInstPrinter's layout (`dword ptr fs:[rax + 4*rbx + 8]`), expressions in the calculator's precedence
+
+(def ^:private op-text {'| "|" 'xor "^" '& "&" '<< "<<" '>> ">>" '+ "+" '- "-" '* "*" '/ "/" '% "%"})
+(def ^:private op-prec {'| 0 'xor 1 '& 2 '<< 4 '>> 4 '+ 5 '- 5 '* 6 '/ 6 '% 6})
+
+(defn expr-text
+  "An expression's text in Intel syntax at the surrounding precedence `ctx`; `off?` writes `offset` before each symbol (an
+  immediate's)."
+  (^String [e off?] (expr-text e off? -1))
+  (^String [e off? ^long ctx]
+   (cond
+     (integer? e) (if (and (neg? e) (> ctx 5)) (str "(" e ")") (str e))
+     (and (seq? e) (= 3 (count e)) (op-prec (first e)))
+     (let [p (long (op-prec (first e)))
+           s (str (expr-text (nth e 1) off? p) (op-text (first e)) (expr-text (nth e 2) off? (inc p)))]
+       (if (< p ctx) (str "(" s ")") s))
+     (and (seq? e) (= 2 (count e)) (#{'- 'bnot} (first e)))
+     (str (if (= '- (first e)) "-" "~")
+          (let [a (second e)]
+            (if (or (and (seq? a) (= 3 (count a)) (op-prec (first a))) (and (integer? a) (neg? a)))
+              (str "(" (expr-text a off?) ")")
+              (expr-text a off? 7))))
+     (or (symbol? e) (and (seq? e) (#{'sym 'at 'local} (first e))))
+     (let [s (gnu/expr-text e)
+           s (if (and (seq? e) (= 'at (first e)) (> ctx 6)) (str "(" s ")") s)]
+       (if (and off? (not (and (seq? e) (= 'local (first e))))) (str "offset " s) s))
+     :else (gnu/expr-text e))))
+
+(defn- dec-text ^String [m] (str (when-let [k (:k m)] (str " {" (name k) "}")) (when (:z m) " {z}")))
+
+(defn operand-text ^String [x]
+  (case (first x)
+    reg (let [[_ r & more] x
+              n (first (remove map? more))
+              m (first (filter map? more))]
+          (str (name r) (when n (str "(" n ")")) (when m (dec-text m))))
+    imm (expr-text (second x) true)
+    rc (str "{" (second x) "}")
+    mem (let [{:keys [size seg base index scale disp bare bcst] :as m} (second x)
+              in (str (when base (name base))
+                      (when index (str (when base " + ") (when (contains? m :scale) (str (expr-text scale false 6) "*")) (name index)))
+                      (when (contains? m :disp)
+                        (if (or base index)
+                          (if (or (and (integer? disp) (neg? disp)) (and (seq? disp) (= 2 (count disp)) (= '- (first disp))))
+                            (str " - " (expr-text (if (integer? disp) (- disp) (second disp)) false 6))
+                            (str " + " (expr-text disp false 5)))
+                          (expr-text disp false))))]
+          (str (when size (str (size-words size) " ptr "))
+               (when seg (str (name seg) ":"))
+               (if bare in (str "[" in "]"))
+               (when bcst (str "{1to" bcst "}"))
+               (dec-text m)))))
+
+(defn insn-text ^String [f]
+  (let [[mn & r] f
+        attrs (when (map? (first r)) (first r))
+        ops (if attrs (rest r) r)]
+    (str (apply str (map #(str "{" % "} ") (:pseudo attrs)))
+         (apply str (map #(str (name %) " ") (:prefix attrs)))
+         (name mn)
+         (when (seq ops) (str "\t" (str/join ", " (map operand-text ops)))))))

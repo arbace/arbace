@@ -7,8 +7,10 @@ set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
 OI=.tmp/oi; keep=$root/.tmp/w/aot-oi-column; rm -rf "$keep"; mkdir -p "$keep"
-for f in check.tsv check.tsv.key; do [ -f "$OI/$f" ] && cp "$OI/$f" "$keep/$f"; done
-restore() { rm -f "$OI/check.tsv" "$OI/check.tsv.key"; for f in check.tsv check.tsv.key; do [ -f "$keep/$f" ] && cp "$keep/$f" "$OI/$f"; done; }
+# the default path's rows file (TY24 (a): the native path's check-native.tsv; OI_CHECK_DEFAULT=ocdump, the oracle's check.tsv)
+T=check-native.tsv; [ "${OI_CHECK_DEFAULT:-native}" = ocdump ] && T=check.tsv
+for f in $T $T.key; do [ -f "$OI/$f" ] && cp "$OI/$f" "$keep/$f"; done
+restore() { rm -f "$OI/$T" "$OI/$T.key"; for f in $T $T.key; do [ -f "$keep/$f" ] && cp "$keep/$f" "$OI/$f"; done; }
 trap restore EXIT
 only='basic/(arrays|divint|min_int)'
 bad=0
@@ -17,7 +19,7 @@ run() { # NAME
   bin/oi check --aot --only "$only" > "$out" 2>&1; local st=$?
   if [ $st != 0 ] || grep -q '^CHANGED' "$out"; then echo "FAIL $1: exit $st"; grep '^CHANGED' "$out" | head -3; bad=1; else echo "ok   $1"; fi
 }
-rm -f "$OI/check.tsv" "$OI/check.tsv.key"; run absent
+rm -f "$OI/$T" "$OI/$T.key"; run absent
 bin/oi check --only 'basic/arrays' > "$keep/partial.oi.log" 2>&1; run partial
-printf 'basic/divint\t0\t0000\t0\t0\t\n' > "$OI/check.tsv"; echo stale > "$OI/check.tsv.key"; run stale
+printf 'basic/divint\t0\t0000\t0\t0\t\n' > "$OI/$T"; echo stale > "$OI/$T.key"; run stale
 exit $bad

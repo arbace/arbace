@@ -1,0 +1,670 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/PreSharedKeyExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security GeneralSecurityException
+                        InvalidKeyException
+                        MessageDigest
+                        NoSuchAlgorithmException)
+        '(java.text MessageFormat)
+        '(java.util ArrayList Arrays Collection List Locale)
+        '(javax.crypto KDF Mac SecretKey)
+        '(javax.crypto.spec HKDFParameterSpec)
+        '(javax.net.ssl SSLPeerUnverifiedException SSLProtocolException)
+        '(sun.security.util HexDumpEncoder KeyUtil))
+
+(defclass ^:final PreSharedKeyExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (CHPreSharedKeyProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer
+    (CHPreSharedKeyConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence chOnLoadAbsence (CHPreSharedKeyOnLoadAbsence.))
+
+  (field ^:static ^:final ^HandshakeConsumer chOnTradeConsumer (CHPreSharedKeyUpdate.))
+
+  (field ^:static ^:final ^HandshakeAbsence chOnTradeAbsence (CHPreSharedKeyOnTradeAbsence.))
+
+  (field ^:static ^:final ^SSLStringizer chStringizer (CHPreSharedKeyStringizer.))
+
+  (field ^:static ^:final ^HandshakeProducer shNetworkProducer (SHPreSharedKeyProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer shOnLoadConsumer
+    (SHPreSharedKeyConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence shOnLoadAbsence (SHPreSharedKeyAbsence.))
+
+  (field ^:static ^:final ^SSLStringizer shStringizer (SHPreSharedKeyStringizer.))
+
+  (defclass ^:private ^:static ^:final PskIdentity
+    (field ^:final ^byte/1 identity)
+
+    (field ^:final ^int obfuscatedAge)
+
+    (constructor [this ^byte/1 identity ^int obfuscatedAge]
+      (set! (.-identity this) identity)
+      (set! (.-obfuscatedAge this) obfuscatedAge))
+
+    (method getEncodedLength ^int [this]
+      (unchecked-add-int (unchecked-add-int 2 (alength identity)) 4))
+
+    (method writeEncoded :throws [IOException] ^void [this ^ByteBuffer m]
+      (Record/putBytes16 m identity)
+      (Record/putInt32 m obfuscatedAge))
+
+    (method ^:public toString ^String [this]
+      (java-str "{" (Utilities/toHexString identity) ", " obfuscatedAge "}")))
+
+  (defclass ^:private ^:static ^:final CHPreSharedKeySpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^{:tag (List PskIdentity)} identities)
+
+    (field ^:final ^{:tag (List byte/1)} binders)
+
+    (constructor [this ^{:tag (List PskIdentity)} identities ^{:tag (List byte/1)} binders]
+      (set! (.-identities this) identities)
+      (set! (.-binders this) binders))
+
+    (constructor :throws [IOException] [this ^HandshakeContext hc ^ByteBuffer m]
+      (when (< (.remaining m) 44)
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         (java-str "Invalid pre_shared_key extension: insufficient data (length="
+                                   (.remaining m)
+                                   ")")))))
+      (let [idEncodedLength (Record/getInt16 m)]
+        (when (< idEncodedLength 7)
+          (throw (.fatal (.-conContext hc)
+                         Alert/DECODE_ERROR
+                         (SSLProtocolException.
+                           (java-str
+                             "Invalid pre_shared_key extension: insufficient identities (length="
+                             idEncodedLength
+                             ")")))))
+        (set! identities (ArrayList.))
+        (let [^:mutable ^int idReadLength 0]
+          (while (< idReadLength idEncodedLength)
+            (let [id (Record/getBytes16 m)]
+              (when (< (alength id) 1)
+                (throw (.fatal
+                         (.-conContext hc)
+                         Alert/DECODE_ERROR
+                         (SSLProtocolException.
+                           (java-str
+                             "Invalid pre_shared_key extension: insufficient identity (length="
+                             (alength id)
+                             ")")))))
+              (let [obfuscatedTicketAge (Record/getInt32 m)
+                    pskId (PskIdentity. id obfuscatedTicketAge)]
+                (.add identities pskId)
+                (set! idReadLength (unchecked-add-int idReadLength (.getEncodedLength pskId))))))
+          (when (< (.remaining m) 35)
+            (throw (.fatal
+                     (.-conContext hc)
+                     Alert/DECODE_ERROR
+                     (SSLProtocolException.
+                       (java-str
+                         "Invalid pre_shared_key extension: insufficient binders data (length="
+                         (.remaining m)
+                         ")")))))
+          (let [bindersEncodedLen (Record/getInt16 m)]
+            (when (< bindersEncodedLen 33)
+              (throw (.fatal (.-conContext hc)
+                             Alert/DECODE_ERROR
+                             (SSLProtocolException.
+                               (java-str
+                                 "Invalid pre_shared_key extension: insufficient binders (length="
+                                 bindersEncodedLen
+                                 ")")))))
+            (set! binders (ArrayList.))
+            (let [^:mutable ^int bindersReadLength 0]
+              (while (< bindersReadLength bindersEncodedLen)
+                (let [binder (Record/getBytes8 m)]
+                  (when (< (alength binder) 32)
+                    (throw
+                      (.fatal
+                        (.-conContext hc)
+                        Alert/DECODE_ERROR
+                        (SSLProtocolException.
+                          (java-str
+                            "Invalid pre_shared_key extension: insufficient binder entry (length="
+                            (alength binder)
+                            ")")))))
+                  (.add binders binder)
+                  (set!
+                    bindersReadLength
+                    (unchecked-add-int bindersReadLength (unchecked-add-int 1 (alength binder)))))))))))
+
+    (method getIdsEncodedLength ^int [this]
+      (let [^:mutable ^int idEncodedLength 0]
+        (for-each [^PskIdentity curId identities]
+          (set! idEncodedLength (unchecked-add-int idEncodedLength (.getEncodedLength curId))))
+        idEncodedLength))
+
+    (method getBindersEncodedLength ^int [this]
+      (let [^:mutable ^int binderEncodedLength 0]
+        (for-each [^byte/1 curBinder binders]
+          (set! binderEncodedLength
+                (unchecked-add-int binderEncodedLength (unchecked-add-int 1 (alength curBinder)))))
+        binderEncodedLength))
+
+    (method getEncoded :throws [IOException] ^byte/1 [this]
+      (let [idsEncodedLength (.getIdsEncodedLength this)
+            bindersEncodedLength (.getBindersEncodedLength this)
+            encodedLength (unchecked-add-int (unchecked-add-int 4 idsEncodedLength)
+                                             bindersEncodedLength)
+            buffer (new byte/1 encodedLength)
+            m (ByteBuffer/wrap buffer)]
+        (Record/putInt16 m idsEncodedLength)
+        (for-each [^PskIdentity curId identities] (.writeEncoded curId m))
+        (Record/putInt16 m bindersEncodedLength)
+        (for-each [^byte/1 curBinder binders] (Record/putBytes8 m curBinder))
+        buffer))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"PreSharedKey\": '{'\n  \"identities\": '{'\n{0}\n  '}'  \"binders\": \"{1}\",\n'}'"
+                            Locale/ENGLISH)
+            messageFields (new Object/1
+                               [(Utilities/indent (.identitiesString this))
+                                (Utilities/indent (.bindersString this))])]
+        (.format messageFormat messageFields)))
+
+    (method identitiesString ^String [this]
+      (let [hexEncoder (HexDumpEncoder.)
+            result (StringBuilder.)]
+        (for-each [^PskIdentity curId identities]
+          (.append result
+                   (java-str "  {\n"
+                             (Utilities/indent (.encode hexEncoder (.-identity curId)) "    ")
+                             "\n  }\n")))
+        (.toString result)))
+
+    (method bindersString ^String [this]
+      (let [result (StringBuilder.)]
+        (for-each [^byte/1 curBinder binders]
+          (.append result (java-str "{" (Utilities/toHexString curBinder) "}\n")))
+        (.toString result))))
+
+  (defclass ^:private ^:static ^:final CHPreSharedKeyStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (CHPreSharedKeySpec. hc buffer)) (catch Exception ex (.getMessage ex)))))
+
+  (defclass ^:private ^:static ^:final SHPreSharedKeySpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^int selectedIdentity)
+
+    (constructor [this ^int selectedIdentity]
+      (set! (.-selectedIdentity this) selectedIdentity))
+
+    (constructor :throws [IOException] [this ^HandshakeContext hc ^ByteBuffer m]
+      (when (< (.remaining m) 2)
+        (throw (.fatal
+                 (.-conContext hc)
+                 Alert/DECODE_ERROR
+                 (SSLProtocolException.
+                   (java-str
+                     "Invalid pre_shared_key extension: insufficient selected_identity (length="
+                     (.remaining m)
+                     ")")))))
+      (set! (.-selectedIdentity this) (Record/getInt16 m)))
+
+    (method getEncoded ^byte/1 [this]
+      (new byte/1
+           [(unchecked-byte (bit-and-int (bit-shift-right-int selectedIdentity 8) 0xFF))
+            (unchecked-byte (bit-and-int selectedIdentity 0xFF))]))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"PreSharedKey\": '{'\n  \"selected_identity\"      : \"{0}\",\n'}'"
+                            Locale/ENGLISH)
+            messageFields (new Object/1 [(Utilities/byte16HexString selectedIdentity)])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:private ^:static ^:final SHPreSharedKeyStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (SHPreSharedKeySpec. hc buffer)) (catch Exception ex (.getMessage ex)))))
+
+  (defclass ^:private ^:static ^:final CHPreSharedKeyConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [clientHello (cast ClientHello$ClientHelloMessage message)
+            shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_PRE_SHARED_KEY))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Ignore unavailable pre_shared_key extension"))
+            (let [pskSpec (CHPreSharedKeySpec. shc buffer)]
+              (when-not (.containsKey (.-handshakeExtensions shc)
+                                      SSLExtension/PSK_KEY_EXCHANGE_MODES)
+                (throw
+                  (.fatal
+                    (.-conContext shc)
+                    Alert/ILLEGAL_PARAMETER
+                    "Client sent PSK but not PSK modes, or the PSK extension is not the last extension")))
+              (when-not (== (.size (.-identities pskSpec)) (.size (.-binders pskSpec)))
+                (throw (.fatal (.-conContext shc)
+                               Alert/ILLEGAL_PARAMETER
+                               "PSK extension has incorrect number of binders")))
+              (when (.-isResumption shc)
+                (let [sessionCache (cast SSLSessionContextImpl
+                                         (.engineGetServerSessionContext (.-sslContext shc)))
+                      ^:mutable ^int idIndex 0
+                      ^:mutable ^SSLSessionImpl s nil]
+                  (for-each [^PskIdentity requestedId (.-identities pskSpec)]
+                    (when (== (alength (.-identity requestedId)) SessionId/MAX_LENGTH)
+                      (set! s (.pull sessionCache (.-identity requestedId))))
+                    (when (and (and (nil? s)
+                                    (> (alength (.-identity requestedId)) SessionId/MAX_LENGTH))
+                               (.statelessEnabled sessionCache))
+                      (let [b (.decrypt (SessionTicketExtension$SessionTicketSpec.
+                                          shc
+                                          (.-identity requestedId))
+                                        shc)]
+                        (when (some? b)
+                          (try
+                            (set! s (SSLSessionImpl. shc b))
+                            (catch [IOException RuntimeException] e (set! s nil))))
+                        (when (or (nil? b) (nil? s))
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/fine "Stateless session ticket invalid")))))
+                    (when (and (some? s) (PreSharedKeyExtension/canRejoin clientHello shc s))
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                        (SSLLogger/fine "Resuming session: " s))
+                      (set! (.-resumingSession shc) s)
+                      (.put (.-handshakeExtensions shc)
+                            SSLExtension/SH_PRE_SHARED_KEY
+                            (SHPreSharedKeySpec. idIndex))
+                      (break))
+                    (set! idIndex (unchecked-inc-int idIndex)))
+                  (when (== idIndex (.size (.-identities pskSpec)))
+                    (set! (.-isResumption shc) false)
+                    (set! (.-resumingSession shc) nil))))
+              (.put (.-handshakeExtensions shc) SSLExtension/CH_PRE_SHARED_KEY pskSpec))))))
+
+  (method ^:private ^:static canRejoin ^boolean [^ClientHello$ClientHelloMessage clientHello
+                                                 ^ServerHandshakeContext shc ^SSLSessionImpl s]
+    (let [^:mutable result (and (.isRejoinable s) (some? (.getPreSharedKey s)))]
+      (when (and result (not (identical? (.getProtocolVersion s) (.-negotiatedProtocol shc))))
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake,verbose"))
+          (SSLLogger/finest "Can't resume, incorrect protocol version"))
+        (set! result false))
+      (when (and result
+                 (identical? (.-clientAuthType (.-sslConfig shc))
+                             ClientAuthType/CLIENT_AUTH_REQUIRED))
+        (try
+          (.getPeerPrincipal s)
+          (catch SSLPeerUnverifiedException e
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake,verbose"))
+              (SSLLogger/finest "Can't resume, client authentication is required"))
+            (set! result false)))
+        (let [^{:tag (Collection SignatureScheme)} sessionSigAlgs
+                (.getLocalSupportedSignatureSchemes s)]
+          (when (and result (not (.containsAll (.-localSupportedCertSignAlgs shc) sessionSigAlgs)))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Can't resume. Session uses different signature algorithms"))
+            (set! result false))))
+      (let [identityAlg (.-identificationProtocol (.-sslConfig shc))]
+        (when (and result (some? identityAlg))
+          (let [sessionIdentityAlg (.getIdentificationProtocol s)]
+            (when-not (.equalsIgnoreCase identityAlg sessionIdentityAlg)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake,verbose"))
+                (SSLLogger/finest
+                  (java-str "Can't resume, endpoint id algorithm does not match, requested: "
+                            identityAlg
+                            ", cached: "
+                            sessionIdentityAlg)))
+              (set! result false))))
+        (when (and result
+                   (or (not (.isNegotiable shc (.getSuite s)))
+                       (not (.contains (.-cipherSuites clientHello) (.getSuite s)))))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake,verbose"))
+            (SSLLogger/finest "Can't resume, unavailable session cipher suite"))
+          (set! result false))
+        result)))
+
+  (defclass ^:private ^:static ^:final CHPreSharedKeyUpdate
+    :implements [HandshakeConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when-not (or (not (.-isResumption shc)) (nil? (.-resumingSession shc)))
+          (let [chPsk (cast CHPreSharedKeySpec
+                            (.get (.-handshakeExtensions shc) SSLExtension/CH_PRE_SHARED_KEY))
+                shPsk (cast SHPreSharedKeySpec
+                            (.get (.-handshakeExtensions shc) SSLExtension/SH_PRE_SHARED_KEY))]
+            (when (or (nil? chPsk) (nil? shPsk))
+              (throw (.fatal (.-conContext shc)
+                             Alert/INTERNAL_ERROR
+                             "Required extensions are unavailable")))
+            (let [binder (cast byte/1 (.get (.-binders chPsk) (.-selectedIdentity shPsk)))
+                  pskBinderHash (.copy (.-handshakeHash shc))
+                  lastMessage (.removeLastReceived pskBinderHash)
+                  messageBuf (ByteBuffer/wrap lastMessage)]
+              (.position messageBuf 4)
+              (ClientHello$ClientHelloMessage/readPartial (.-conContext shc) messageBuf)
+              (let [length (.position messageBuf)]
+                (.position messageBuf 0)
+                (.receive pskBinderHash messageBuf length)
+                (PreSharedKeyExtension/checkBinder shc (.-resumingSession shc) pskBinderHash binder))))))))
+
+  (method ^:private ^:static checkBinder :throws [IOException] ^void [^ServerHandshakeContext shc
+                                                                      ^SSLSessionImpl session
+                                                                      ^HandshakeHash pskBinderHash
+                                                                      ^byte/1 binder]
+    (let [psk (.getPreSharedKey session)]
+      (when (nil? psk)
+        (throw (.fatal (.-conContext shc) Alert/INTERNAL_ERROR "Session has no PSK")))
+      (let [binderKey (PreSharedKeyExtension/deriveBinderKey shc psk session)]
+        (try
+          (let [computedBinder (PreSharedKeyExtension/computeBinder
+                                 shc
+                                 binderKey
+                                 session
+                                 pskBinderHash)]
+            (when-not (MessageDigest/isEqual binder computedBinder)
+              (throw (.fatal (.-conContext shc)
+                             Alert/ILLEGAL_PARAMETER
+                             "Incorrect PSK binder value"))))
+          (finally (KeyUtil/destroySecretKeys binderKey))))))
+
+  (defclass ^:static ^:final PartialClientHelloMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:private ^:final ^ClientHello$ClientHelloMessage msg)
+
+    (field ^:private ^:final ^CHPreSharedKeySpec psk)
+
+    (constructor [this ^HandshakeContext ctx ^ClientHello$ClientHelloMessage msg
+                  ^CHPreSharedKeySpec psk]
+      (super. ctx)
+      (set! (.-msg this) msg)
+      (set! (.-psk this) psk))
+
+    (method handshakeType ^SSLHandshake [this] (.handshakeType msg))
+
+    (method ^:private pskTotalLength ^int [this]
+      (unchecked-add-int
+        (unchecked-add-int (.getIdsEncodedLength psk) (.getBindersEncodedLength psk))
+        8))
+
+    (method messageLength ^int [this]
+      (if (some? (.get (.-extensions msg) SSLExtension/CH_PRE_SHARED_KEY))
+          (.messageLength msg)
+          (unchecked-add-int (.messageLength msg) (.pskTotalLength this))))
+
+    (method send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.sendCore msg hos)
+      (let [^:mutable extsLen (.length (.-extensions msg))]
+        (when (nil? (.get (.-extensions msg) SSLExtension/CH_PRE_SHARED_KEY))
+          (set! extsLen (unchecked-add-int extsLen (.pskTotalLength this))))
+        (.putInt16 hos (unchecked-subtract-int extsLen 2))
+        (for-each [^SSLExtension ext (SSLExtension/values)]
+          (let [extData (.get (.-extensions msg) ext)]
+            (when (some? extData)
+              (when-not (identical? ext SSLExtension/CH_PRE_SHARED_KEY)
+                (let [extID (.-id ext)] (.putInt16 hos extID) (.putBytes16 hos extData))))))
+        (let [extID (.-id SSLExtension/CH_PRE_SHARED_KEY)]
+          (.putInt16 hos extID)
+          (let [encodedPsk (.getEncoded psk)]
+            (.putInt16 hos (alength encodedPsk))
+            (.write hos encodedPsk 0 (unchecked-add-int (.getIdsEncodedLength psk) 2)))))))
+
+  (defclass ^:private ^:static ^:final CHPreSharedKeyProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (or (not (.-isResumption chc)) (nil? (.-resumingSession chc)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "No session to resume."))
+              nil)
+            (let [^{:tag (Collection SignatureScheme)} sessionSigAlgs
+                    (.getLocalSupportedSignatureSchemes (.-resumingSession chc))]
+              (if (not (.containsAll (.-localSupportedCertSignAlgs chc) sessionSigAlgs))
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "Existing session uses different signature algorithms"))
+                    nil)
+                  (let [psk (.getPreSharedKey (.-resumingSession chc))]
+                    (if (nil? psk)
+                        (do
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/fine "Existing session has no PSK."))
+                          nil)
+                        (do
+                          (when (nil? (.-pskIdentity chc))
+                            (set! (.-pskIdentity chc) (.consumePskIdentity (.-resumingSession chc))))
+                          (if (nil? (.-pskIdentity chc))
+                              (do
+                                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                                  (SSLLogger/fine
+                                    "PSK has no identity, or identity was already used"))
+                                nil)
+                              (let [sessionCache (cast
+                                                   SSLSessionContextImpl
+                                                   (.engineGetClientSessionContext
+                                                     (.-sslContext chc)))]
+                                (.remove sessionCache (.getSessionId (.-resumingSession chc)) true)
+                                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                                  (SSLLogger/fine "Found resumable session. Preparing PSK message.")
+                                  (SSLLogger/fine
+                                    (java-str "MultiNST PSK (Client): "
+                                              (Utilities/toHexString
+                                                (Arrays/copyOf (.-pskIdentity chc) 16)))))
+                                (let [^{:tag (List PskIdentity)} identities (ArrayList.)
+                                      ageMillis (unchecked-int
+                                                  (unchecked-subtract
+                                                    (System/currentTimeMillis)
+                                                    (.getTicketCreationTime (.-resumingSession chc))))
+                                      obfuscatedAge (unchecked-add-int
+                                                      ageMillis
+                                                      (.getTicketAgeAdd (.-resumingSession chc)))]
+                                  (.add identities (PskIdentity. (.-pskIdentity chc) obfuscatedAge))
+                                  (let [binderKey (PreSharedKeyExtension/deriveBinderKey
+                                                    chc
+                                                    psk
+                                                    (.-resumingSession chc))]
+                                    (try
+                                      (let [clientHello (cast
+                                                          ClientHello$ClientHelloMessage
+                                                          message)
+                                            pskPrototype (.createPskPrototype
+                                                           this
+                                                           (.-hashLength
+                                                             (.-hashAlg
+                                                               (.getSuite (.-resumingSession chc))))
+                                                           identities)
+                                            pskBinderHash (.copy (.-handshakeHash chc))
+                                            binder (PreSharedKeyExtension/computeBinder
+                                                     chc
+                                                     binderKey
+                                                     pskBinderHash
+                                                     (.-resumingSession chc)
+                                                     chc
+                                                     clientHello
+                                                     pskPrototype)
+                                            ^{:tag (List byte/1)} binders (ArrayList.)]
+                                        (.add binders binder)
+                                        (let [pskMessage (CHPreSharedKeySpec. identities binders)]
+                                          (.put (.-handshakeExtensions chc)
+                                                SSLExtension/CH_PRE_SHARED_KEY
+                                                pskMessage)
+                                          (.getEncoded pskMessage)))
+                                      (finally (KeyUtil/destroySecretKeys binderKey)))))))))))))))
+
+    (method ^:private createPskPrototype ^CHPreSharedKeySpec [this ^int hashLength
+                                                              ^{:tag (List PskIdentity)} identities]
+      (let [^{:tag (List byte/1)} binders (ArrayList.)
+            binderProto (new byte/1 hashLength)
+            ^:mutable i (.size identities)]
+        (while (> (let [old-1 i] (set! i (unchecked-dec-int i)) old-1) 0)
+          (.add binders binderProto))
+        (CHPreSharedKeySpec. identities binders))))
+
+  (method ^:private ^:static computeBinder :throws [IOException] ^byte/1 [^HandshakeContext context
+                                                                          ^SecretKey binderKey
+                                                                          ^SSLSessionImpl session
+                                                                          ^HandshakeHash pskBinderHash]
+    (.determine pskBinderHash (.getProtocolVersion session) (.getSuite session))
+    (.update pskBinderHash)
+    (let [digest (.digest pskBinderHash)]
+      (PreSharedKeyExtension/computeBinder context binderKey session digest)))
+
+  (method ^:private ^:static computeBinder :throws [IOException] ^byte/1 [^HandshakeContext context
+                                                                          ^SecretKey binderKey
+                                                                          ^HandshakeHash hash
+                                                                          ^SSLSessionImpl session
+                                                                          ^HandshakeContext ctx
+                                                                          ^ClientHello$ClientHelloMessage hello
+                                                                          ^CHPreSharedKeySpec pskPrototype]
+    (let [partialMsg (PartialClientHelloMessage. ctx hello pskPrototype)
+          record (SSLEngineOutputRecord. hash)
+          hos (HandshakeOutStream. record)]
+      (.write partialMsg hos)
+      (.determine hash (.getProtocolVersion session) (.getSuite session))
+      (.update hash)
+      (let [digest (.digest hash)]
+        (PreSharedKeyExtension/computeBinder context binderKey session digest))))
+
+  (method ^:private ^:static computeBinder :throws [IOException] ^byte/1 [^HandshakeContext context
+                                                                          ^SecretKey binderKey
+                                                                          ^SSLSessionImpl session
+                                                                          ^byte/1 digest]
+    (try
+      (let [hashAlg (.-hashAlg (.getSuite session))
+            hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))
+            label (.getBytes "tls13 finished")
+            hkdfInfo (SSLSecretDerivation/createHkdfInfo
+                       label
+                       (new byte/1 0)
+                       (.-hashLength hashAlg))
+            finishedKey (.deriveKey hkdf
+                                    "TlsBinderKey"
+                                    (HKDFParameterSpec/expandOnly
+                                      binderKey
+                                      hkdfInfo
+                                      (.-hashLength hashAlg)))
+            hmacAlg (java-str "Hmac" (.replace (.-name hashAlg) "-" ""))]
+        (try
+          (let [hmac (Mac/getInstance hmacAlg)] (.init hmac finishedKey) (.doFinal hmac digest))
+          (catch [NoSuchAlgorithmException InvalidKeyException] ex
+            (throw (.fatal (.-conContext context) Alert/INTERNAL_ERROR ex)))
+          (finally (KeyUtil/destroySecretKeys finishedKey))))
+      (catch GeneralSecurityException ex
+        (throw (.fatal (.-conContext context) Alert/INTERNAL_ERROR ex)))))
+
+  (method ^:private ^:static deriveBinderKey :throws [IOException] ^SecretKey [^HandshakeContext context
+                                                                               ^SecretKey psk
+                                                                               ^SSLSessionImpl session]
+    (try
+      (let [hashAlg (.-hashAlg (.getSuite session))
+            zeros (new byte/1 (.-hashLength hashAlg))
+            label (.getBytes "tls13 res binder")
+            md (MessageDigest/getInstance (.-name hashAlg))
+            hkdfInfo (SSLSecretDerivation/createHkdfInfo
+                       label
+                       (.digest md (new byte/1 0))
+                       (.-hashLength hashAlg))
+            hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))
+            ^HKDFParameterSpec spec (.thenExpand
+                                      (.addIKM (.addSalt (HKDFParameterSpec/ofExtract) zeros) psk)
+                                      hkdfInfo
+                                      (.-hashLength hashAlg))]
+        (.deriveKey hkdf "TlsBinderKey" spec))
+      (catch GeneralSecurityException ex
+        (throw (.fatal (.-conContext context) Alert/INTERNAL_ERROR ex)))))
+
+  (defclass ^:private ^:static ^:final CHPreSharedKeyOnLoadAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+        (SSLLogger/fine "Handling pre_shared_key absence."))
+      (let [shc (cast ServerHandshakeContext context)]
+        (set! (.-resumingSession shc) nil)
+        (set! (.-isResumption shc) false))))
+
+  (defclass ^:private ^:static ^:final CHPreSharedKeyOnTradeAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (and (.useTLS13PlusSpec (.-negotiatedProtocol shc))
+                   (or (not (.containsKey (.-handshakeExtensions shc)
+                                          SSLExtension/CH_SIGNATURE_ALGORITHMS))
+                       (not (.containsKey (.-handshakeExtensions shc)
+                                          SSLExtension/CH_SUPPORTED_GROUPS))))
+          (throw
+            (.fatal
+              (.-conContext shc)
+              Alert/MISSING_EXTENSION
+              "No supported_groups or signature_algorithms extension when pre_shared_key extension is not present"))))))
+
+  (defclass ^:private ^:static ^:final SHPreSharedKeyConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when-not (.containsKey (.-handshakeExtensions chc) SSLExtension/CH_PRE_SHARED_KEY)
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Server sent unexpected pre_shared_key extension")))
+        (let [shPsk (SHPreSharedKeySpec. chc buffer)]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Received pre_shared_key extension: " shPsk))
+          (when-not (== (.-selectedIdentity shPsk) 0)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           "Selected identity index is not in correct range.")))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Resuming session: " (.-resumingSession chc)))))))
+
+  (defclass ^:private ^:static ^:final SHPreSharedKeyAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Handling pre_shared_key absence."))
+        (set! (.-resumingSession chc) nil)
+        (set! (.-isResumption chc) false))))
+
+  (defclass ^:private ^:static ^:final SHPreSharedKeyProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            psk (cast SHPreSharedKeySpec
+                      (.get (.-handshakeExtensions shc) SSLExtension/SH_PRE_SHARED_KEY))]
+        (when (some? psk) (.getEncoded psk))))))

@@ -1,0 +1,165 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/DSAParameterGenerator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.security AlgorithmParameterGeneratorSpi
+                        AlgorithmParameters
+                        InvalidAlgorithmParameterException
+                        InvalidParameterException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        ProviderException)
+        '(java.security.spec AlgorithmParameterSpec
+                             DSAGenParameterSpec
+                             DSAParameterSpec
+                             InvalidParameterSpecException)
+        '(sun.security.util SecurityProviderConstants))
+
+(defclass ^:public DSAParameterGenerator
+  :extends AlgorithmParameterGeneratorSpi
+
+  (field ^:private ^int valueL -1)
+
+  (field ^:private ^int valueN -1)
+
+  (field ^:private ^int seedLen -1)
+
+  (field ^:private ^java.security.SecureRandom random)
+
+  (constructor ^:public [this])
+
+  (method ^:protected engineInit ^void [this ^int strength ^java.security.SecureRandom random]
+    (when (and (and (not (== strength 2048)) (not (== strength 3072)))
+               (or (or (< strength 512) (> strength 1024))
+                   (not (== (unchecked-remainder-int strength 64) 0))))
+      (throw (InvalidParameterException.
+               (java-str "Unexpected strength (size of prime): "
+                         strength
+                         ". Prime size should be 512-1024, 2048, or 3072"))))
+    (set! (.-valueL this) strength)
+    (set! (.-valueN this) (SecurityProviderConstants/getDefDSASubprimeSize strength))
+    (set! (.-seedLen this) valueN)
+    (set! (.-random this) random))
+
+  (method ^:protected engineInit :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                     ^AlgorithmParameterSpec genParamSpec
+                                                                                     ^java.security.SecureRandom random]
+    (if-instance [^DSAGenParameterSpec dsaGenParams genParamSpec]
+      (do
+        (set! (.-valueL this) (.getPrimePLength dsaGenParams))
+        (set! (.-valueN this) (.getSubprimeQLength dsaGenParams))
+        (set! (.-seedLen this) (.getSeedLength dsaGenParams))
+        (set! (.-random this) random))
+      (throw (InvalidAlgorithmParameterException. "Invalid parameter"))))
+
+  (method ^:protected engineGenerateParameters ^AlgorithmParameters [this]
+    (let [^:mutable ^AlgorithmParameters algParams nil]
+      (try
+        (when (nil? (.-random this)) (set! (.-random this) (java.security.SecureRandom.)))
+        (when (== valueL -1)
+          (.engineInit this SecurityProviderConstants/DEF_DSA_KEY_SIZE (.-random this)))
+        (let [pAndQ (DSAParameterGenerator/generatePandQ (.-random this) valueL valueN seedLen)
+              paramP (aget pAndQ 0)
+              paramQ (aget pAndQ 1)
+              paramG (DSAParameterGenerator/generateG paramP paramQ)
+              dsaParamSpec (DSAParameterSpec. paramP paramQ paramG)]
+          (set! algParams (AlgorithmParameters/getInstance "DSA" "SUN"))
+          (.init algParams dsaParamSpec))
+        (catch [InvalidParameterSpecException NoSuchAlgorithmException NoSuchProviderException] e
+          (throw (RuntimeException. (.getMessage e)))))
+      algParams))
+
+  (method ^:private ^:static generatePandQ ^BigInteger/1 [^java.security.SecureRandom random
+                                                          ^int valueL ^int valueN ^int seedLen]
+    (let [^:mutable ^String hashAlg nil]
+      (cond
+        (== valueN 160) (set! hashAlg "SHA")
+        (== valueN 224) (set! hashAlg "SHA-224")
+        (== valueN 256) (set! hashAlg "SHA-256"))
+      (let [^:mutable ^MessageDigest hashObj nil]
+        (try
+          (set! hashObj (MessageDigest/getInstance hashAlg))
+          (catch NoSuchAlgorithmException nsae))
+        (let [outLen (unchecked-multiply-int (.getDigestLength hashObj) 8)
+              n (unchecked-divide-int (unchecked-subtract-int valueL 1) outLen)
+              b (unchecked-remainder-int (unchecked-subtract-int valueL 1) outLen)
+              seedBytes (new byte/1 (unchecked-divide-int seedLen 8))
+              twoSl (.pow BigInteger/TWO seedLen)
+              ^:mutable ^int primeCertainty -1]
+          (cond
+            (<= valueL 1024) (set! primeCertainty 80)
+            (== valueL 2048) (set! primeCertainty 112)
+            (== valueL 3072) (set! primeCertainty 128))
+          (when (< primeCertainty 0)
+            (throw (ProviderException. (java-str "Invalid valueL: " valueL))))
+          (let [^:mutable ^BigInteger resultP nil
+                ^:mutable ^BigInteger resultQ nil
+                ^:mutable ^BigInteger seed nil
+                ^:mutable ^int counter 0]
+            (while true
+              (loop []
+                (.nextBytes random seedBytes)
+                (set! seed (BigInteger. 1 seedBytes))
+                (let [U (.mod (BigInteger. 1 (.digest hashObj seedBytes))
+                              (.pow BigInteger/TWO (unchecked-subtract-int valueN 1)))]
+                  (set! resultQ
+                        (.subtract (.add (.add (.pow
+                                                 BigInteger/TWO
+                                                 (unchecked-subtract-int valueN 1))
+                                               U)
+                                         BigInteger/ONE)
+                                   (.mod U BigInteger/TWO))))
+                (when-not (.isProbablePrime resultQ primeCertainty) (recur)))
+              (let [^:mutable offset BigInteger/ONE]
+                (set! counter 0)
+                (while (< counter (unchecked-multiply-int 4 valueL))
+                  (let [V (new BigInteger/1 (unchecked-add-int n 1))]
+                    (loop [^int j 0]
+                      (when (<= j n)
+                        (let [J (BigInteger/valueOf j)
+                              tmp (.mod (.add (.add seed offset) J) twoSl)
+                              vjBytes (.digest hashObj (DSAParameterGenerator/toByteArray tmp))]
+                          (aset V j (BigInteger. 1 vjBytes))
+                          (recur (unchecked-inc-int j)))))
+                    (let [^:mutable W (aget V 0)]
+                      (loop [^int i 1]
+                        (when (< i n)
+                          (set! W
+                                (.add W
+                                      (.multiply
+                                        (aget V i)
+                                        (.pow BigInteger/TWO (unchecked-multiply-int i outLen)))))
+                          (recur (unchecked-inc-int i))))
+                      (set! W
+                            (.add W
+                                  (.multiply
+                                    (.mod (aget V n) (.pow BigInteger/TWO b))
+                                    (.pow BigInteger/TWO (unchecked-multiply-int n outLen)))))
+                      (let [twoLm1 (.pow BigInteger/TWO (unchecked-subtract-int valueL 1))
+                            X (.add W twoLm1)
+                            c (.mod X (.multiply resultQ BigInteger/TWO))]
+                        (set! resultP (.subtract X (.subtract c BigInteger/ONE)))
+                        (when (and (> (.compareTo resultP twoLm1) -1)
+                                   (.isProbablePrime resultP primeCertainty))
+                          (return (new BigInteger/1
+                                       [resultP resultQ seed (BigInteger/valueOf counter)])))
+                        (set! offset (.add (.add offset (BigInteger/valueOf n)) BigInteger/ONE)))))
+                  (set! counter (unchecked-inc-int counter))))))))))
+
+  (method ^:private ^:static generateG ^BigInteger [^BigInteger p ^BigInteger q]
+    (let [^:mutable h BigInteger/ONE
+          pMinusOneOverQ (.divide (.subtract p BigInteger/ONE) q)
+          ^:mutable resultG BigInteger/ONE]
+      (while (< (.compareTo resultG BigInteger/TWO) 0)
+        (set! resultG (.modPow h pMinusOneOverQ p))
+        (set! h (.add h BigInteger/ONE)))
+      resultG))
+
+  (method ^:private ^:static toByteArray ^byte/1 [^BigInteger bigInt]
+    (let [^:mutable result (.toByteArray bigInt)]
+      (when (== (aget result 0) 0)
+        (let [tmp (new byte/1 (unchecked-subtract-int (alength result) 1))]
+          (System/arraycopy result 1 tmp 0 (alength tmp))
+          (set! result tmp)))
+      result)))

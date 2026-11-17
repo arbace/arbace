@@ -1,0 +1,232 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/websocket/MessageEncoder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.websocket)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset CharacterCodingException
+                           CharsetEncoder
+                           CoderResult
+                           CodingErrorAction
+                           StandardCharsets)
+        '(java.security SecureRandom)
+        '(java.util.function Supplier)
+        '(jdk.internal.net.http.common Logger Utils))
+
+(defclass ^:public MessageEncoder
+  (field ^:private ^:static ^:final ^Logger debug
+    (Utils/getWebSocketLogger (method-ref Supplier ^String [] "[Output]" String/.toString)))
+
+  (field ^:private ^:final ^SecureRandom maskingKeySource (SecureRandom.))
+
+  (field ^:private ^:final ^Frame$HeaderWriter headerWriter (Frame$HeaderWriter.))
+
+  (field ^:private ^:final ^Frame$Masker payloadMasker (Frame$Masker.))
+
+  (field ^:private ^:final ^CharsetEncoder charsetEncoder
+    (.onUnmappableCharacter
+      (.onMalformedInput (.newEncoder StandardCharsets/UTF_8) CodingErrorAction/REPORT)
+      CodingErrorAction/REPORT))
+
+  (field ^:private ^:final ^ByteBuffer intermediateBuffer
+    (.createIntermediateBuffer this Frame/MAX_CONTROL_FRAME_PAYLOAD_LENGTH))
+
+  (field ^:private ^:final ^ByteBuffer headerBuffer
+    (ByteBuffer/allocate Frame/MAX_HEADER_SIZE_BYTES))
+
+  (field ^:private ^boolean started)
+
+  (field ^:private ^boolean flushing)
+
+  (field ^:private ^boolean moreText true)
+
+  (field ^:private ^long headerCount)
+
+  (field ^:private ^boolean previousFin true)
+
+  (field ^:private ^boolean previousText)
+
+  (field ^:private ^boolean closed)
+
+  (field ^:private ^:final ^boolean server)
+
+  (constructor [this] (this. false))
+
+  (constructor [this ^boolean isServer] (set! (.-server this) isServer))
+
+  (field ^:private ^int actualLen)
+
+  (field ^:private ^int expectedLen)
+
+  (method ^:protected createIntermediateBuffer ^ByteBuffer [this ^int minSize]
+    (let [capacity (Utils/getIntegerNetProperty "jdk.httpclient.websocket.intermediateBufferSize"
+                                                16384)]
+      (ByteBuffer/allocate (Math/max minSize capacity))))
+
+  (method ^:public reset ^void [this]
+    (set! started false)
+    (set! flushing false)
+    (set! moreText true)
+    (set! headerCount 0)
+    (set! actualLen 0))
+
+  (method ^:public encodeText :throws [IOException] ^boolean [this ^CharBuffer src ^boolean last
+                                                              ^ByteBuffer dst]
+    (when (.on debug)
+      (.log debug
+            "encode text src=[pos=%s lim=%s cap=%s] last=%s dst=%s"
+            (new Object/1 [(.position src) (.limit src) (.capacity src) last dst])))
+    (when closed (throw (IOException. "Output closed")))
+    (when-not started
+      (when (and (not previousText) (not previousFin))
+        (throw (IllegalStateException. "Unexpected text message")))
+      (set! started true)
+      (.limit (.position headerBuffer 0) 0)
+      (.limit (.position intermediateBuffer 0) 0)
+      (.reset charsetEncoder))
+    (while true
+      (when (.on debug) (.log debug "put"))
+      (when-not (.putAvailable this headerBuffer dst) (return false))
+      (when (.on debug) (.log debug "mask"))
+      (when (< (.maskAvailable this intermediateBuffer dst) 0) (return false))
+      (when (.on debug) (.log debug "moreText"))
+      (when-not moreText (set! previousFin last) (set! previousText true) (return true))
+      (.clear intermediateBuffer)
+      (let [^:mutable ^CoderResult r nil]
+        (when-not flushing
+          (set! r (.encode charsetEncoder src intermediateBuffer true))
+          (when (.isUnderflow r) (set! flushing true)))
+        (when flushing
+          (set! r (.flush charsetEncoder intermediateBuffer))
+          (when (.isUnderflow r) (set! moreText false)))
+        (when (.isError r)
+          (try
+            (.throwException r)
+            (catch CharacterCodingException e (throw (IOException. "Malformed text message" e)))))
+        (when (.on debug) (.log debug "frame #%s" (new Object/1 [headerCount])))
+        (.flip intermediateBuffer)
+        (let [^Frame$Opcode opcode (if (and previousFin (== headerCount 0))
+                                       Frame$Opcode/TEXT
+                                       Frame$Opcode/CONTINUATION)
+              fin (and last (not moreText))]
+          (.setupHeader this opcode fin (.remaining intermediateBuffer))
+          (set! headerCount (unchecked-inc headerCount))))))
+
+  (method ^:private putAvailable ^boolean [this ^ByteBuffer src ^ByteBuffer dst]
+    (let [available (.remaining dst)]
+      (if (>= available (.remaining src))
+          (do (.put dst src) true)
+          (let [lim (.limit src)]
+            (.limit src (unchecked-add-int (.position src) available))
+            (.put dst src)
+            (.limit src lim)
+            false))))
+
+  (method ^:public encodeBinary :throws [IOException] ^boolean [this ^ByteBuffer src ^boolean last
+                                                                ^ByteBuffer dst]
+    (when (.on debug)
+      (.log debug "encode binary src=%s last=%s dst=%s" (new Object/1 [src last dst])))
+    (when closed (throw (IOException. "Output closed")))
+    (when-not started
+      (when (and previousText (not previousFin))
+        (throw (IllegalStateException. "Unexpected binary message")))
+      (set! expectedLen (.remaining src))
+      (let [^Frame$Opcode opcode (if previousFin Frame$Opcode/BINARY Frame$Opcode/CONTINUATION)]
+        (.setupHeader this opcode last expectedLen)
+        (set! previousFin last)
+        (set! previousText false)
+        (set! started true)))
+    (if (not (.putAvailable this headerBuffer dst))
+        false
+        (let [count (.maskAvailable this src dst)]
+          (set! actualLen (unchecked-add-int actualLen (Math/abs count)))
+          (when (and (>= count 0) (not (== actualLen expectedLen)))
+            (throw (IOException. "Concurrent message modification")))
+          (>= count 0))))
+
+  (method ^:private maskAvailable ^int [this ^ByteBuffer src ^ByteBuffer dst]
+    (let [r0 (.remaining dst)]
+      (.applyMask payloadMasker src dst)
+      (let [masked (unchecked-subtract-int r0 (.remaining dst))]
+        (if (.hasRemaining src) (unchecked-negate-int masked) masked))))
+
+  (method ^:public encodePing :throws [IOException] ^boolean [this ^ByteBuffer src ^ByteBuffer dst]
+    (when (.on debug) (.log debug "encode ping src=%s dst=%s" (new Object/1 [src dst])))
+    (when closed (throw (IOException. "Output closed")))
+    (when-not started
+      (set! expectedLen (.remaining src))
+      (when (> expectedLen Frame/MAX_CONTROL_FRAME_PAYLOAD_LENGTH)
+        (throw (IllegalArgumentException. (java-str "Long message: " expectedLen))))
+      (.setupHeader this Frame$Opcode/PING true expectedLen)
+      (set! started true))
+    (if (not (.putAvailable this headerBuffer dst))
+        false
+        (let [count (.maskAvailable this src dst)]
+          (set! actualLen (unchecked-add-int actualLen (Math/abs count)))
+          (when (and (>= count 0) (not (== actualLen expectedLen)))
+            (throw (IOException. "Concurrent message modification")))
+          (>= count 0))))
+
+  (method ^:public encodePong :throws [IOException] ^boolean [this ^ByteBuffer src ^ByteBuffer dst]
+    (when (.on debug) (.log debug "encode pong src=%s dst=%s" (new Object/1 [src dst])))
+    (when closed (throw (IOException. "Output closed")))
+    (when-not started
+      (set! expectedLen (.remaining src))
+      (when (> expectedLen Frame/MAX_CONTROL_FRAME_PAYLOAD_LENGTH)
+        (throw (IllegalArgumentException. (java-str "Long message: " expectedLen))))
+      (.setupHeader this Frame$Opcode/PONG true expectedLen)
+      (set! started true))
+    (if (not (.putAvailable this headerBuffer dst))
+        false
+        (let [count (.maskAvailable this src dst)]
+          (set! actualLen (unchecked-add-int actualLen (Math/abs count)))
+          (when (and (>= count 0) (not (== actualLen expectedLen)))
+            (throw (IOException. "Concurrent message modification")))
+          (>= count 0))))
+
+  (method ^:public encodeClose :throws [IOException] ^boolean [this ^int statusCode
+                                                               ^CharBuffer reason ^ByteBuffer dst]
+    (when (.on debug)
+      (.log debug
+            "encode close statusCode=%s reason=[pos=%s lim=%s cap=%s] dst=%s"
+            (new Object/1 [statusCode (.position reason) (.limit reason) (.capacity reason) dst])))
+    (when closed (throw (IOException. "Output closed")))
+    (when-not started
+      (when (.on debug)
+        (.log debug
+              "reason [pos=%s lim=%s cap=%s]"
+              (new Object/1 [(.position reason) (.limit reason) (.capacity reason)])))
+      (.limit (.position intermediateBuffer 0) Frame/MAX_CONTROL_FRAME_PAYLOAD_LENGTH)
+      (.putChar intermediateBuffer (unchecked-char statusCode))
+      (let [^:mutable r (.encode (.reset charsetEncoder) reason intermediateBuffer true)]
+        (when (.isUnderflow r)
+          (when (.on debug) (.log debug "flushing"))
+          (set! r (.flush charsetEncoder intermediateBuffer)))
+        (when (.on debug) (.log debug "encoding result: %s" (new Object/1 [r])))
+        (cond
+          (.isError r)
+            (try
+              (.throwException r)
+              (catch CharacterCodingException e (throw (IOException. "Malformed reason" e))))
+          (.isOverflow r) (throw (IOException. "Long reason"))
+          :else (when-not (.isUnderflow r) (throw (InternalError.))))
+        (.flip intermediateBuffer)
+        (.setupHeader this Frame$Opcode/CLOSE true (.remaining intermediateBuffer))
+        (set! started true)
+        (set! closed true)
+        (when (.on debug) (.log debug "intermediateBuffer=%s" (new Object/1 [intermediateBuffer])))))
+    (if (not (.putAvailable this headerBuffer dst))
+        false
+        (>= (.maskAvailable this intermediateBuffer dst) 0)))
+
+  (method ^:private setupHeader ^void [this ^Frame$Opcode opcode ^boolean fin ^long payloadLen]
+    (when (.on debug)
+      (.log debug "frame opcode=%s fin=%s len=%s" (new Object/1 [opcode fin payloadLen])))
+    (.clear headerBuffer)
+    (let [^int mask (if (.-server this) 0 (.nextInt maskingKeySource))]
+      (if (== mask 0)
+          (.write (.payloadLen (.opcode (.fin headerWriter fin) opcode) payloadLen) headerBuffer)
+          (.write (.mask (.payloadLen (.opcode (.fin headerWriter fin) opcode) payloadLen) mask)
+                  headerBuffer))
+      (.flip headerBuffer)
+      (.setMask payloadMasker mask))))

@@ -8,7 +8,8 @@
  * class output's per module: the JDK build's multi-module compilations), module-oriented as
  * javac's Modules, ModuleFinder and ClassWriter ask. It decides only where files come from and go to, not what javac makes of
  * them. Since JFS52 (b) StandardFileManager extends it, the standard file manager of javac's
- * JavaCompiler on Arbace (SystemCompiler). Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
+ * JavaCompiler on Arbace (SystemCompiler). Since F6 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+ * F6") a class file without -d goes where javac's own file manager puts it. Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
  * baf63fb): Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt.javac;
@@ -348,9 +349,25 @@ public class FileManager implements JavaFileManager {
         return f == null ? null : new Obj(f, kind, className);
     }
 
+    /**
+     * A class file without -d (F6, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F6"): where
+     * javac's JavacFileManager.getFileForOutput puts it, beside its source file (the sibling, a
+     * file of this file manager), else in the current directory, by its simple name.
+     */
+    static File besideSibling(String className, JavaFileObject.Kind kind, FileObject sibling) {
+        String base = className.substring(className.lastIndexOf('.') + 1) + kind.extension;
+        if (sibling instanceof Obj o) {
+            return new File(o.file.getAbsoluteFile().getParentFile(), base);
+        }
+        return new File(base);
+    }
+
     @Override
     public JavaFileObject getJavaFileForOutput(Location location, String className, JavaFileObject.Kind kind, FileObject sibling) throws IOException {
         File dir = outputDir(location);
+        if (dir == null && location == StandardLocation.CLASS_OUTPUT && !multiModule) {
+            return new Obj(besideSibling(className, kind, sibling), kind, null);
+        }
         if (dir == null) {
             throw new IOException("no output location " + location + " for " + className);
         }
@@ -370,6 +387,10 @@ public class FileManager implements JavaFileManager {
     @Override
     public FileObject getFileForOutput(Location location, String packageName, String relativeName, FileObject sibling) throws IOException {
         File dir = outputDir(location);
+        if (dir == null && location == StandardLocation.CLASS_OUTPUT && !multiModule) {
+            // F6: without -d, javac's JavacFileManager resolves it against the current directory
+            dir = new File(".");
+        }
         if (dir == null) {
             throw new IOException("no output location " + location + " for " + relativeName);
         }

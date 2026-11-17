@@ -1,0 +1,145 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/PushGroup.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.net.http HttpRequest
+                        HttpResponse
+                        HttpResponse$BodyHandler
+                        HttpResponse$PushPromiseHandler
+                        HttpResponse$PushPromiseHandler$PushId)
+        '(java.util Objects)
+        '(java.util.concurrent CompletableFuture Executor)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function BiConsumer Function)
+        '(jdk.internal.net.http.common Log MinimalFuture))
+
+(defclass PushGroup
+  :type-params [T]
+
+  (field ^:private ^:final ^ReentrantLock stateLock (ReentrantLock.))
+
+  (field ^:private ^:final ^HttpRequest initiatingRequest)
+
+  (field ^:volatile ^Throwable error)
+
+  (field ^:final ^{:tag (HttpResponse$PushPromiseHandler T)} pushPromiseHandler)
+
+  (field ^:private ^:final ^Executor executor)
+
+  (field ^int numberOfPushes)
+
+  (field ^int remainingPushes)
+
+  (constructor [this ^{:tag (HttpResponse$PushPromiseHandler T)} pushPromiseHandler
+                ^HttpRequestImpl initiatingRequest ^Executor executor]
+    (this. pushPromiseHandler initiatingRequest (MinimalFuture.) executor))
+
+  (constructor ^:private [this ^{:tag (HttpResponse$PushPromiseHandler T)} pushPromiseHandler
+                          ^HttpRequestImpl initiatingRequest
+                          ^{:tag (CompletableFuture (HttpResponse T))} mainResponse
+                          ^Executor executor]
+    (set! (.-pushPromiseHandler this) pushPromiseHandler)
+    (set! (.-initiatingRequest this) initiatingRequest)
+    (set! (.-executor this) executor))
+
+  (defclass ^:interface Acceptor
+    :type-params [T]
+
+    (method bodyHandler ^{:tag (HttpResponse$BodyHandler T)} [this])
+
+    (method cf ^{:tag (CompletableFuture (HttpResponse T))} [this])
+
+    (method accepted ^boolean [this]))
+
+  (defclass ^:private ^:static AcceptorImpl
+    :implements [(Acceptor T)]
+    :type-params [T]
+
+    (field ^:private ^:final ^Executor executor)
+
+    (field ^:private ^:volatile ^{:tag (HttpResponse$BodyHandler T)} bodyHandler)
+
+    (field ^:private ^:volatile ^{:tag (CompletableFuture (HttpResponse T))} cf)
+
+    (constructor [this ^Executor executor]
+      (set! (.-executor this) executor))
+
+    (method accept ^{:tag (CompletableFuture (HttpResponse T))} [this
+                                                                 ^{:tag (HttpResponse$BodyHandler T)} bodyHandler]
+      (Objects/requireNonNull bodyHandler)
+      (when (some? (.-bodyHandler this)) (throw (IllegalStateException. "non-null bodyHandler")))
+      (set! (.-bodyHandler this) bodyHandler)
+      (set! cf (MinimalFuture.))
+      (.whenCompleteAsync cf (lambda BiConsumer ^void [^HttpResponse r ^Throwable t]) executor))
+
+    (method ^:public bodyHandler ^{:tag (HttpResponse$BodyHandler T)} [this]
+      bodyHandler)
+
+    (method ^:public cf ^{:tag (CompletableFuture (HttpResponse T))} [this]
+      cf)
+
+    (method ^:public accepted ^boolean [this] (some? cf)))
+
+  (method acceptPushRequest ^{:tag (Acceptor T)} [this ^HttpRequest pushRequest]
+    (.doAcceptPushRequest this pushRequest nil))
+
+  (method acceptPushRequest ^{:tag (Acceptor T)} [this ^HttpRequest pushRequest
+                                                  ^HttpResponse$PushPromiseHandler$PushId pushId]
+    (.doAcceptPushRequest this
+                          pushRequest
+                          (cast HttpResponse$PushPromiseHandler$PushId
+                                (Objects/requireNonNull pushId))))
+
+  (method ^:private doAcceptPushRequest ^{:tag (Acceptor T)} [this ^HttpRequest pushRequest
+                                                              ^HttpResponse$PushPromiseHandler$PushId pushId]
+    (let [^{:tag (AcceptorImpl T)} acceptor (AcceptorImpl. executor)]
+      (try
+        (if (nil? pushId)
+            (.applyPushPromise pushPromiseHandler
+                               initiatingRequest
+                               pushRequest
+                               (method-ref Function
+                                           ^CompletableFuture [HttpResponse$BodyHandler]
+                                           acceptor
+                                           AcceptorImpl/.accept))
+            (.applyPushPromise pushPromiseHandler
+                               initiatingRequest
+                               pushRequest
+                               pushId
+                               (method-ref Function
+                                           ^CompletableFuture [HttpResponse$BodyHandler]
+                                           acceptor
+                                           AcceptorImpl/.accept)))
+        (catch Throwable t
+          (when (.accepted acceptor)
+            (let [^{:tag (CompletableFuture ?)} cf (.cf acceptor)] (.completeExceptionally cf t)))
+          (throw t)))
+      (.lock stateLock)
+      (try
+        (when (.accepted acceptor)
+          (set! numberOfPushes (unchecked-inc-int numberOfPushes))
+          (set! remainingPushes (unchecked-inc-int remainingPushes)))
+        acceptor
+        (finally (.unlock stateLock)))))
+
+  (method acceptPushPromiseId ^void [this ^HttpResponse$PushPromiseHandler$PushId pushId]
+    (.notifyAdditionalPromise pushPromiseHandler initiatingRequest pushId))
+
+  (method pushCompleted ^void [this]
+    (.lock stateLock)
+    (try
+      (set! remainingPushes (unchecked-dec-int remainingPushes))
+      (.checkIfCompleted this)
+      (finally (.unlock stateLock))))
+
+  (method ^:private checkIfCompleted ^void [this]
+    (java-assert (.isHeldByCurrentThread stateLock))
+    (when (Log/trace)
+      (Log/logTrace "PushGroup remainingPushes={0} error={1}"
+                    remainingPushes
+                    (if (nil? error) ^Object error ^Object (.getSimpleName (.getClass error)))))
+    (when (and (== remainingPushes 0) (nil? error))
+      (when (Log/trace) (Log/logTrace "push completed"))))
+
+  (method pushError ^void [this ^Throwable t]
+    (when (some? t) (.lock stateLock) (try (set! (.-error this) t) (finally (.unlock stateLock))))))

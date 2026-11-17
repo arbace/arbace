@@ -1,0 +1,128 @@
+;; jrt's tests of java.home (javahome.ae; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS233"): the directory
+;; made once per key from a host's embedded resources, shared by concurrent first readers, the property's first
+;; read, its overrides. Copyright (c) the Arbace authors; Eclipse Public License 1.0 (LICENSE.md).
+(in-ns 'go.arbace.jrt)
+
+(go/file "javahome_test.go"
+  :imports [[os "os"] [strings "strings"] [sync "sync"] [testing "testing"] [fstest "testing/fstest"]])
+
+(go/type homeHost
+  "homeHost is OSHost over a map of resources with an environment of its own (none of the process's).\n"
+  (struct OSHost ^{:tag (map string string)} env))
+
+(go/method Getenv [^homeHost h ^string name] :results [string bool]
+  (let [(values v ok) (aget (.-env h) name)]
+    (return v ok)))
+
+(go/func newHomeHost ^homeHost [^{:tag (map string string)} files ^{:tag (map string string)} env]
+  (let [m (lit fstest/MapFS)]
+    (range [n d files]
+      (aset m n (addr (lit fstest/MapFile :Data (conv (slice byte) d)))))
+    (lit homeHost :OSHost (lit OSHost :Resources m) :env env)))
+
+(go/func homeFiles ^{:tag (map string string)} [^string policy]
+  (lit (map string string)
+       ["conf/security/java.security" (+ "crypto.policy=" policy "\n")]
+       ["conf/security/policy/unlimited/default_local.policy" "grant { permission javax.crypto.CryptoAllPermission; };\n"]
+       ["lib/security/cacerts" "0\u0082"]
+       ["not/java/home.txt" "x"]))
+
+(go/func TestJavaHome
+  "java.home: \"\" without a cache directory, an ARBACE_JAVA_HOME, or embedded files; else the key's directory under
+XDG_CACHE_HOME (HOME's .cache without it) holding the embedded files of the list alone, made once (a file removed
+from it stays removed: the directory is not rewritten), another key for other data, and the same directory for
+eight first readers at once, no temporary left beside it.\n"
+  [^{:tag (* testing/T)} t]
+  (let [cache (.TempDir t)
+        home (.TempDir t)]
+    (when [d (JavaHome (newHomeHost (homeFiles "unlimited") (lit (map string string))))] (!= d "")
+      (.Errorf t "no cache directory: %q" d))
+    (when [d (JavaHome (newHomeHost (homeFiles "unlimited") (lit (map string string) ["ARBACE_JAVA_HOME" "/opt/jdk"])))]
+          (!= d "/opt/jdk")
+      (.Errorf t "ARBACE_JAVA_HOME: %q" d))
+    (when [d (JavaHome (newHomeHost (lit (map string string) ["x" "y"]) (lit (map string string) ["XDG_CACHE_HOME" cache])))]
+          (!= d "")
+      (.Errorf t "no embedded file: %q" d))
+    (let [h (newHomeHost (homeFiles "unlimited") (lit (map string string) ["XDG_CACHE_HOME" cache] ["HOME" home]))
+          d (JavaHome h)]
+      (when (or (not (strings/HasPrefix d (+ cache "/arbace/java-home/"))) (!= (len d) (+ (len cache) 18 20)))
+        (.Fatalf t "the directory: %q" d))
+      (let [(values b err) (os/ReadFile (+ d "/conf/security/java.security"))]
+        (when (or (!= err nil) (!= (conv string b) "crypto.policy=unlimited\n"))
+          (.Errorf t "java.security: %q %v" (conv string b) err)))
+      (let [(values b err) (os/ReadFile (+ d "/lib/security/cacerts"))]
+        (when (or (!= err nil) (!= (conv string b) "0\u0082"))
+          (.Errorf t "cacerts: %q %v" (conv string b) err)))
+      (when [(values _ err) (os/Stat (+ d "/not/java/home.txt"))] (== err nil)
+        (.Error t "a resource outside the list was written"))
+      (os/Remove (+ d "/lib/security/cacerts"))
+      (when [d2 (JavaHome h)] (!= d2 d)
+        (.Errorf t "again: %q, not %q" d2 d))
+      (when [(values _ err) (os/Stat (+ d "/lib/security/cacerts"))] (== err nil)
+        (.Error t "the directory was written again"))
+      ;; HOME's .cache without XDG_CACHE_HOME (or with a relative one)
+      (let [dh (JavaHome (newHomeHost (homeFiles "unlimited") (lit (map string string) ["XDG_CACHE_HOME" "rel"] ["HOME" home])))]
+        (when (!= dh (+ home "/.cache/arbace/java-home/" (subslice d (- (len d) 20))))
+          (.Errorf t "HOME's: %q" dh)))
+      ;; other data, another key; eight first readers at once, one directory
+      (let [h2 (newHomeHost (homeFiles "limited") (lit (map string string) ["XDG_CACHE_HOME" cache]))
+            got (make (slice string) 8)
+            wg (lit sync/WaitGroup)]
+        (range [i _ got]
+          (.Add wg 1)
+          (let [i i]
+            (go ((fn [] (aset got i (JavaHome h2)) (.Done wg))))))
+        (.Wait wg)
+        (range [_ g got]
+          (when (or (== (aget got 0) "") (== (aget got 0) d) (!= g (aget got 0)))
+            (.Errorf t "concurrent readers: %q" got)))
+        (let [(values es _) (os/ReadDir (+ cache "/arbace/java-home"))]
+          (when (!= (len es) 2)
+            (.Errorf t "%d entries beside the two keys' directories" (- (len es) 2)))
+          (range [_ e es]
+            (when (strings/Contains (.Name e) ".tmp-")
+              (.Errorf t "a temporary left: %s" (.Name e)))))))))
+
+(go/func TestJavaHomeProperty
+  "The property java.home is made at its first read; JAVA_TOOL_OPTIONS' -Djava.home=... and setProperty replace it.\n"
+  [^{:tag (* testing/T)} t]
+  (let [cache (.TempDir t)
+        old (CurrentHost)]
+    (.Lock propMu)
+    (let [saved props]
+      (set! props nil)
+      (.Unlock propMu)
+      (defer ((fn []
+                (.Lock propMu)
+                (set! props saved)
+                (.Unlock propMu)
+                (SetHost old))))
+      (SetHost (newHomeHost (homeFiles "unlimited") (lit (map string string) ["XDG_CACHE_HOME" cache])))
+      (let [v (.String (System_GetProperty_String__String (Str "java.home")))]
+        (when (or (not (strings/HasPrefix v (+ cache "/arbace/java-home/"))) (!= v (JavaHome (CurrentHost))))
+          (.Errorf t "java.home: %q" v)))
+      (System_SetProperty_String_String__String (Str "java.home") (Str "/elsewhere"))
+      (when [v (.String (System_GetProperty_String__String (Str "java.home")))] (!= v "/elsewhere")
+        (.Errorf t "set: %q" v))
+      (.Lock propMu)
+      (set! props nil)
+      (.Unlock propMu)
+      (SetHost (newHomeHost (homeFiles "unlimited")
+                            (lit (map string string) ["XDG_CACHE_HOME" cache] ["JAVA_TOOL_OPTIONS" "-Djava.home=/jh"])))
+      (when [v (.String (System_GetProperty_String__String (Str "java.home")))] (!= v "/jh")
+        (.Errorf t "-Djava.home: %q" v)))))
+
+(go/func BenchmarkJavaHome
+  "BenchmarkJavaHome is java.home's cost at a start once its directory exists (the key's hash of the files and a
+stat): every start that reads the property pays it (RT.doInit's System.getProperties does). The files are the size of
+jdk/data's (about 360 KB).\n"
+  [^{:tag (* testing/B)} b]
+  (let [files (homeFiles "unlimited")]
+    (aset files "lib/tzdb.dat" (strings/Repeat "z" 105000))
+    (aset files "lib/security/cacerts" (strings/Repeat "c" 134174))
+    (aset files "conf/security/java.security" (strings/Repeat "s" 62000))
+    (let [h (newHomeHost files (lit (map string string) ["XDG_CACHE_HOME" (.TempDir b)]))]
+      (JavaHome h)
+      (.ResetTimer b)
+      (for [i 0] (< i (.-N b)) (inc! i)
+        (JavaHome h)))))

@@ -1,0 +1,213 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/registry/RegistryImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.registry)
+
+(import '(java.io File
+                  IOException
+                  ObjectInputFilter
+                  ObjectInputFilter$FilterInfo
+                  ObjectInputFilter$Status)
+        '(java.lang.reflect Proxy)
+        '(java.net InetAddress
+                   MalformedURLException
+                   ServerSocket
+                   URL
+                   URLClassLoader
+                   UnknownHostException)
+        '(java.nio.file Paths)
+        '(java.rmi AccessException AlreadyBoundException NotBoundException Remote RemoteException)
+        '(java.rmi.registry Registry)
+        '(java.rmi.server ObjID
+                          RMIClientSocketFactory
+                          RMIServerSocketFactory
+                          RemoteServer
+                          ServerNotActiveException
+                          UID)
+        '(java.security Security)
+        '(java.text MessageFormat)
+        '(java.util ArrayList Enumeration Hashtable List MissingResourceException ResourceBundle)
+        '(jdk.internal.access SharedSecrets)
+        '(sun.rmi.runtime Log)
+        '(sun.rmi.server LoaderHandler UnicastRef UnicastServerRef UnicastServerRef2)
+        '(sun.rmi.transport LiveRef))
+
+(defclass ^:public RegistryImpl
+  :extends RemoteServer
+  :implements [Registry]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 4666870661827494597)
+
+  (field ^:private ^{:tag (Hashtable String Remote)} bindings (Hashtable. 101))
+
+  (field ^:private ^:static ^{:tag (Hashtable InetAddress InetAddress)} allowedAccessCache
+    (Hashtable. 3))
+
+  (field ^:private ^:static ^RegistryImpl registry)
+
+  (field ^:private ^:static ^ObjID id (ObjID. ObjID/REGISTRY_ID))
+
+  (field ^:private ^:static ^ResourceBundle resources nil)
+
+  (field ^:private ^:static ^:final ^String REGISTRY_FILTER_PROPNAME
+    "sun.rmi.registry.registryFilter")
+
+  (field ^:private ^:static ^:final ^int REGISTRY_MAX_DEPTH 20)
+
+  (field ^:private ^:static ^:final ^int REGISTRY_MAX_ARRAY_SIZE 1000000)
+
+  (field ^:private ^:static ^:final ^ObjectInputFilter registryFilter
+    (RegistryImpl/initRegistryFilter))
+
+  (method ^:private ^:static initRegistryFilter ^ObjectInputFilter []
+    (let [^:mutable ^ObjectInputFilter filter nil
+          ^:mutable props (System/getProperty REGISTRY_FILTER_PROPNAME)]
+      (when (nil? props) (set! props (Security/getProperty REGISTRY_FILTER_PROPNAME)))
+      (when (some? props)
+        (set! filter (.createFilter2 (SharedSecrets/getJavaObjectInputFilterAccess) props))
+        (let [regLog (Log/getLog "sun.rmi.registry" "registry" -1)]
+          (when (.isLoggable regLog Log/BRIEF)
+            (.log regLog Log/BRIEF (java-str "registryFilter = " filter)))))
+      filter))
+
+  (constructor :throws [RemoteException] ^:public [this ^int port ^RMIClientSocketFactory csf
+                                                   ^RMIServerSocketFactory ssf]
+    (this. port csf ssf (method-ref ObjectInputFilter RegistryImpl/registryFilter)))
+
+  (constructor :throws [RemoteException] ^:public [this ^int port ^RMIClientSocketFactory csf
+                                                   ^RMIServerSocketFactory ssf
+                                                   ^ObjectInputFilter serialFilter]
+    (let [lref (LiveRef. id port csf ssf)] (.setup this (UnicastServerRef2. lref serialFilter))))
+
+  (constructor :throws [RemoteException] ^:public [this ^int port]
+    (let [lref (LiveRef. id port)]
+      (.setup this
+              (UnicastServerRef. lref (method-ref ObjectInputFilter RegistryImpl/registryFilter)))))
+
+  (method ^:private setup :throws [RemoteException] ^void [this ^UnicastServerRef uref]
+    (set! (.-ref this) uref)
+    (.exportObject uref this nil true))
+
+  (method ^:public lookup :throws [RemoteException NotBoundException] ^Remote [this ^String name]
+    (locking bindings
+      (let [obj (cast Remote (.get bindings name))]
+        (when (nil? obj) (throw (NotBoundException. name)))
+        obj)))
+
+  (method ^:public bind :throws [RemoteException AlreadyBoundException AccessException] ^void [this
+                                                                                               ^String name
+                                                                                               ^Remote obj]
+    (locking bindings
+      (let [curr (cast Remote (.get bindings name))]
+        (when (some? curr) (throw (AlreadyBoundException. name)))
+        (.put bindings name obj))))
+
+  (method ^:public unbind :throws [RemoteException NotBoundException AccessException] ^void [this
+                                                                                             ^String name]
+    (locking bindings
+      (let [obj (cast Remote (.get bindings name))]
+        (when (nil? obj) (throw (NotBoundException. name)))
+        (.remove bindings name))))
+
+  (method ^:public rebind :throws [RemoteException AccessException] ^void [this ^String name
+                                                                           ^Remote obj]
+    (.put bindings name obj))
+
+  (method ^:public list :throws [RemoteException] ^String/1 [this]
+    (let [^:mutable ^String/1 names nil]
+      (locking bindings
+        (let [^:mutable i (.size bindings)]
+          (set! names (new String/1 i))
+          (let [^{:tag (Enumeration String)} enum_ (.keys bindings)]
+            (while (>= (set! i (unchecked-dec-int i)) 0)
+              (aset names i (cast String (.nextElement enum_)))))))
+      names))
+
+  (method ^:public ^:static checkAccess :throws [AccessException] ^void [^String op]
+    (try
+      (let [clientHostName (RegistryImpl/getClientHost)
+            clientHost (InetAddress/getByName clientHostName)]
+        (when (nil? (.get allowedAccessCache clientHost))
+          (when (.isAnyLocalAddress clientHost)
+            (throw (AccessException. (java-str op " disallowed; origin unknown"))))
+          (try
+            (.close (ServerSocket. 0 10 clientHost))
+            (.put allowedAccessCache clientHost clientHost)
+            (catch IOException ioe
+              (throw (AccessException.
+                       (java-str op " disallowed; origin " clientHost " is non-local host")
+                       ioe))))))
+      (catch ServerNotActiveException ex)
+      (catch UnknownHostException ex
+        (throw (AccessException. (java-str op " disallowed; origin is unknown host"))))))
+
+  (method ^:public ^:static getID ^ObjID [] id)
+
+  (method ^:private ^:static getTextResource ^String [^String key]
+    (when (nil? resources)
+      (try
+        (set! resources (ResourceBundle/getBundle "sun.rmi.registry.resources.rmiregistry"))
+        (catch MissingResourceException mre))
+      (when (nil? resources) (return (java-str "[missing resource file: " key "]"))))
+    (let [^:mutable ^String val nil]
+      (try (set! val (.getString resources key)) (catch MissingResourceException mre))
+      (if (nil? val) (java-str "[missing resource: " key "]") val)))
+
+  (method ^:private ^:static pathToURLs ^URL/1 [^String path]
+    (let [^{:tag (List URL)} paths (ArrayList.)]
+      (for-each [^String entry (.split path File/pathSeparator)]
+        (let [^:mutable p (Paths/get entry (new String/1 []))]
+          (try (set! p (.toRealPath p)) (catch IOException x (set! p (.toAbsolutePath p))))
+          (try (.add paths (.toURL (.toUri p))) (catch MalformedURLException e))))
+      (cast URL/1 (.toArray paths (new URL/1 0)))))
+
+  (method ^:private ^:static registryFilter ^ObjectInputFilter$Status [^ObjectInputFilter$FilterInfo filterInfo]
+    (when (some? registryFilter)
+      (let [status (.checkInput registryFilter filterInfo)]
+        (when-not (identical? status ObjectInputFilter$Status/UNDECIDED) (return status))))
+    (if (> (.depth filterInfo) REGISTRY_MAX_DEPTH)
+        ObjectInputFilter$Status/REJECTED
+        (let [^{:tag (Class ?)} clazz (.serialClass filterInfo)]
+          (if (some? clazz)
+              (cond
+                (.isArray clazz)
+                  (if (and (>= (.arrayLength filterInfo) 0)
+                           (> (.arrayLength filterInfo) REGISTRY_MAX_ARRAY_SIZE))
+                      ObjectInputFilter$Status/REJECTED
+                      ObjectInputFilter$Status/UNDECIDED)
+                (or (or (or (or (or (or (or (identical? String clazz)
+                                            (.isAssignableFrom Number clazz))
+                                        (.isAssignableFrom Remote clazz))
+                                    (.isAssignableFrom Proxy clazz))
+                                (.isAssignableFrom UnicastRef clazz))
+                            (.isAssignableFrom RMIClientSocketFactory clazz))
+                        (.isAssignableFrom RMIServerSocketFactory clazz))
+                    (.isAssignableFrom UID clazz))
+                  ObjectInputFilter$Status/ALLOWED
+                :else ObjectInputFilter$Status/REJECTED)
+              ObjectInputFilter$Status/UNDECIDED))))
+
+  (method ^:public ^:static createRegistry :throws [RemoteException] ^RegistryImpl [^int regPort]
+    (let [^:mutable envcp (System/getProperty "env.class.path")]
+      (when (nil? envcp) (set! envcp "."))
+      (let [urls (RegistryImpl/pathToURLs envcp)
+            ^ClassLoader cl (URLClassLoader. urls)]
+        (LoaderHandler/registerCodebaseLoader cl)
+        (.setContextClassLoader (Thread/currentThread) cl)
+        (RegistryImpl. regPort))))
+
+  (method ^:public ^:static main ^void [^String/1 args]
+    (try
+      (let [^int regPort (if (>= (alength args) 1)
+                             (Integer/parseInt (aget args 0))
+                             Registry/REGISTRY_PORT)]
+        (set! registry (RegistryImpl/createRegistry regPort))
+        (while true (try (Thread/sleep Long/MAX_VALUE) (catch InterruptedException e))))
+      (catch NumberFormatException e
+        (.println System/err
+                  (MessageFormat/format (RegistryImpl/getTextResource "rmiregistry.port.badnumber")
+                                        (new Object/1 [(aget args 0)])))
+        (.println System/err
+                  (MessageFormat/format (RegistryImpl/getTextResource "rmiregistry.usage")
+                                        (new Object/1 ["rmiregistry"]))))
+      (catch Exception e (.printStackTrace e)))
+    (System/exit 1)))

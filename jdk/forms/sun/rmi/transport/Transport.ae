@@ -1,0 +1,84 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/Transport.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport)
+
+(import '(java.io IOException)
+        '(java.rmi MarshalException NoSuchObjectException Remote RemoteException)
+        '(java.rmi.server LogStream ObjID RemoteCall RemoteServer ServerNotActiveException)
+        '(sun.rmi.runtime Log)
+        '(sun.rmi.server UnicastServerRef))
+
+(defclass ^:public ^:abstract Transport
+  (field ^:static ^:final ^int logLevel (LogStream/parseLevel (Transport/getLogLevel)))
+
+  (method ^:private ^:static getLogLevel ^String []
+    (System/getProperty "sun.rmi.transport.logLevel"))
+
+  (field ^:static ^:final ^Log transportLog
+    (Log/getLog "sun.rmi.transport.misc" "transport" Transport/logLevel))
+
+  (field ^:private ^:static ^:final ^{:tag (ThreadLocal Transport)} currentTransport (ThreadLocal.))
+
+  (field ^:private ^:static ^:final ^ObjID dgcID (ObjID. ObjID/DGC_ID))
+
+  (method ^:public ^:abstract getChannel ^Channel [this ^Endpoint ep])
+
+  (method ^:public ^:abstract free ^void [this ^Endpoint ep])
+
+  (method ^:public exportObject :throws [RemoteException] ^void [this ^Target target]
+    (.setExportedTransport target this)
+    (ObjectTable/putTarget target))
+
+  (method ^:protected targetUnexported ^void [this])
+
+  (method ^:static currentTransport ^Transport []
+    (cast Transport (.get currentTransport)))
+
+  (method ^:private ^:static setContextClassLoader ^void [^ClassLoader ccl]
+    (.setContextClassLoader (Thread/currentThread) ccl))
+
+  (method ^:public serviceCall ^boolean [this ^:final ^RemoteCall call]
+    (try
+      (let [^:mutable ^Remote impl nil
+            ^:mutable ^ObjID id nil]
+        (try
+          (set! id (ObjID/read (.getInputStream call)))
+          (catch IOException e (throw (MarshalException. "unable to read objID" e))))
+        (let [^Transport transport (when-not (.equals id dgcID) this)
+              target (ObjectTable/getTarget (ObjectEndpoint. id transport))]
+          (when (or (nil? target) (nil? (set! impl (.getImpl target))))
+            (throw (NoSuchObjectException. "no such object in table")))
+          (let [disp (.getDispatcher target)]
+            (.incrementCallCount target)
+            (try
+              (.log transportLog Log/VERBOSE "call dispatcher")
+              (let [ccl (.getContextClassLoader target)
+                    savedCcl (.getContextClassLoader (Thread/currentThread))]
+                (try
+                  (when-not (identical? ccl savedCcl) (Transport/setContextClassLoader ccl))
+                  (.set currentTransport this)
+                  (.dispatch disp impl call)
+                  (finally
+                    (when-not (identical? ccl savedCcl) (Transport/setContextClassLoader savedCcl))
+                    (.set currentTransport nil))))
+              (catch IOException ex
+                (.log transportLog Log/BRIEF "exception thrown by dispatcher: " ex)
+                (return false))
+              (finally (.decrementCallCount target))))))
+      (catch RemoteException e
+        (when (.isLoggable UnicastServerRef/callLog Log/BRIEF)
+          (let [^:mutable clientHost ""]
+            (try
+              (set! clientHost (java-str "[" (RemoteServer/getClientHost) "] "))
+              (catch ServerNotActiveException ex))
+            (let [message (java-str clientHost "exception: ")]
+              (.log UnicastServerRef/callLog Log/BRIEF message e))))
+        (try
+          (let [out (.getResultStream call false)]
+            (UnicastServerRef/clearStackTraces e)
+            (.writeObject out e)
+            (.releaseOutputStream call))
+          (catch IOException ie
+            (.log transportLog Log/BRIEF "exception thrown marshalling exception: " ie)
+            (return false)))))
+    true))

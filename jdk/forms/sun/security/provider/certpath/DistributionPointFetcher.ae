@@ -1,0 +1,488 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/certpath/DistributionPointFetcher.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider.certpath)
+
+(import '(java.io IOException)
+        '(java.security GeneralSecurityException
+                        InvalidAlgorithmParameterException
+                        NoSuchAlgorithmException
+                        PublicKey)
+        '(java.security.cert CRL
+                             CRLException
+                             CertPathBuilder
+                             CertPathValidatorException
+                             CertStore
+                             CertStoreException
+                             CertificateException
+                             PKIXBuilderParameters
+                             PKIXCertPathBuilderResult
+                             TrustAnchor
+                             URICertStoreParameters
+                             X509CRL
+                             X509CRLSelector
+                             X509CertSelector
+                             X509Certificate)
+        '(java.util ArrayList Arrays Collection Collections Date HashSet Iterator List Set)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.util Debug Event Event$ReporterCategory)
+        '(sun.security.x509 DistributionPoint
+                            GeneralName
+                            GeneralNameInterface
+                            GeneralNames
+                            PKIXExtensions
+                            RDN
+                            ReasonFlags
+                            URIName
+                            X500Name
+                            X509CRLImpl
+                            X509CertImpl))
+
+(defclass ^:public DistributionPointFetcher
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "certpath"))
+
+  (field ^:private ^:static ^:final ^boolean/1 ALL_REASONS
+    (new boolean/1 [true true true true true true true true true]))
+
+  (constructor ^:private [this])
+
+  (method ^:public ^:static getCRLs :throws [CertStoreException] ^{:tag (Collection X509CRL)} [^X509CRLSelector selector
+                                                                                               ^boolean signFlag
+                                                                                               ^PublicKey prevKey
+                                                                                               ^X509Certificate prevCert
+                                                                                               ^String provider
+                                                                                               ^{:tag (List CertStore)} certStores
+                                                                                               ^boolean/1 reasonsMask
+                                                                                               ^{:tag (Set TrustAnchor)} trustAnchors
+                                                                                               ^Date validity
+                                                                                               ^String variant
+                                                                                               ^TrustAnchor anchor]
+    (let [cert (.getCertificateChecking selector)]
+      (if (nil? cert)
+          (Collections/emptySet)
+          (try
+            (let [certImpl (X509CertImpl/toImpl cert)]
+              (when (some? debug)
+                (.println debug
+                          (java-str "DistributionPointFetcher.getCRLs: Checking CRLDPs for "
+                                    (.getSubjectX500Principal certImpl))))
+              (let [ext (.getCRLDistributionPointsExtension certImpl)]
+                (if (nil? ext)
+                    (do (when (some? debug) (.println debug "No CRLDP ext")) (Collections/emptySet))
+                    (let [^{:tag (List DistributionPoint)} points (.getDistributionPoints ext)
+                          ^{:tag (Set X509CRL)} results (HashSet.)
+                          ^:mutable ^CertStoreException savedCSE nil]
+                      (loop [^{:tag (Iterator DistributionPoint)} t (.iterator points)]
+                        (when (and (.hasNext t) (not (Arrays/equals reasonsMask ALL_REASONS)))
+                          (try
+                            (let [point (cast DistributionPoint (.next t))
+                                  ^{:tag (Collection X509CRL)} crls
+                                    (DistributionPointFetcher/getCRLs
+                                      selector
+                                      certImpl
+                                      point
+                                      reasonsMask
+                                      signFlag
+                                      prevKey
+                                      prevCert
+                                      provider
+                                      certStores
+                                      trustAnchors
+                                      validity
+                                      variant
+                                      anchor)]
+                              (.addAll results crls))
+                            (catch CertStoreException cse
+                              (if (nil? savedCSE) (set! savedCSE cse) (.addSuppressed savedCSE cse))))
+                          (recur t)))
+                      (when (and (.isEmpty results) (some? savedCSE)) (throw savedCSE))
+                      (when (some? debug)
+                        (.println debug (java-str "Returning " (.size results) " CRLs")))
+                      results))))
+            (catch CertificateException e (Collections/emptySet))))))
+
+  (method ^:private ^:static getCRLs :throws [CertStoreException] ^{:tag (Collection X509CRL)} [^X509CRLSelector selector
+                                                                                                ^X509CertImpl certImpl
+                                                                                                ^DistributionPoint point
+                                                                                                ^boolean/1 reasonsMask
+                                                                                                ^boolean signFlag
+                                                                                                ^PublicKey prevKey
+                                                                                                ^X509Certificate prevCert
+                                                                                                ^String provider
+                                                                                                ^{:tag (List CertStore)} certStores
+                                                                                                ^{:tag (Set TrustAnchor)} trustAnchors
+                                                                                                ^Date validity
+                                                                                                ^String variant
+                                                                                                ^TrustAnchor anchor]
+    (let [^:mutable fullName (.getFullName point)]
+      (when (nil? fullName)
+        (let [relativeName (.getRelativeName point)]
+          (when (nil? relativeName) (return (Collections/emptySet)))
+          (try
+            (let [crlIssuers (.getCRLIssuer point)]
+              (cond
+                (nil? crlIssuers)
+                  (set! fullName
+                        (DistributionPointFetcher/getFullNames
+                          (cast X500Name (.getIssuerDN certImpl))
+                          relativeName))
+                (not (== (.size crlIssuers) 1)) (return (Collections/emptySet))
+                :else
+                  (set! fullName
+                        (DistributionPointFetcher/getFullNames
+                          (cast X500Name (.getName (.get crlIssuers 0)))
+                          relativeName))))
+            (catch IOException ioe (return (Collections/emptySet))))))
+      (let [^{:tag (Collection X509CRL)} possibleCRLs (ArrayList.)
+            ^:mutable ^CertStoreException savedCSE nil]
+        (loop [^{:tag (Iterator GeneralName)} t (.iterator fullName)]
+          (when (.hasNext t)
+            (try
+              (let [name (cast GeneralName (.next t))]
+                (cond
+                  (== (.getType name) GeneralNameInterface/NAME_DIRECTORY)
+                    (let [x500Name (cast X500Name (.getName name))]
+                      (.addAll possibleCRLs
+                               (DistributionPointFetcher/getCRLs
+                                 x500Name
+                                 (.getIssuerX500Principal certImpl)
+                                 certStores)))
+                  (== (.getType name) GeneralNameInterface/NAME_URI)
+                    (let [uriName (cast URIName (.getName name))
+                          crl (DistributionPointFetcher/getCRL uriName)]
+                      (when (some? crl) (.add possibleCRLs crl)))))
+              (catch CertStoreException cse
+                (if (nil? savedCSE) (set! savedCSE cse) (.addSuppressed savedCSE cse))))
+            (recur t)))
+        (when (and (.isEmpty possibleCRLs) (some? savedCSE)) (throw savedCSE))
+        (let [^{:tag (Collection X509CRL)} crls (ArrayList. 2)]
+          (for-each [^X509CRL crl possibleCRLs]
+            (try
+              (.setIssuerNames selector nil)
+              (when (and (.match selector crl)
+                         (DistributionPointFetcher/verifyCRL
+                           certImpl
+                           point
+                           crl
+                           reasonsMask
+                           signFlag
+                           prevKey
+                           prevCert
+                           provider
+                           trustAnchors
+                           certStores
+                           validity
+                           variant
+                           anchor))
+                (.add crls crl))
+              (catch [IOException CRLException] e
+                (when (some? debug)
+                  (.println debug (java-str "Exception verifying CRL: " (.getMessage e)))
+                  (.printStackTrace e)))))
+          crls))))
+
+  (method ^:private ^:static getCRL :throws [CertStoreException] ^X509CRL [^URIName name]
+    (let [uri (.getURI name)]
+      (when (some? debug) (.println debug (java-str "Trying to fetch CRL from DP " uri)))
+      (Event/report Event$ReporterCategory/CRLCHECK "event.crl.check" (.toString uri))
+      (let [^:mutable ^CertStore ucs nil]
+        (try
+          (set! ucs (URICertStore/getInstance (URICertStoreParameters. uri)))
+          (catch [InvalidAlgorithmParameterException NoSuchAlgorithmException] e
+            (when (some? debug)
+              (.println debug (java-str "Can't create URICertStore: " (.getMessage e))))
+            (return nil)))
+        (let [^{:tag (Collection (? extends CRL))} crls (.getCRLs ucs nil)]
+          (when-not (.isEmpty crls) (cast X509CRL (.next (.iterator crls))))))))
+
+  (method ^:private ^:static getCRLs :throws [CertStoreException] ^{:tag (Collection X509CRL)} [^X500Name name
+                                                                                                ^X500Principal certIssuer
+                                                                                                ^{:tag (List CertStore)} certStores]
+    (when (some? debug) (.println debug (java-str "Trying to fetch CRL from DP " name)))
+    (let [xcs (X509CRLSelector.)]
+      (.addIssuer xcs (.asX500Principal name))
+      (.addIssuer xcs certIssuer)
+      (let [^{:tag (Collection X509CRL)} crls (ArrayList.)
+            ^:mutable ^CertStoreException savedCSE nil]
+        (for-each [^CertStore store certStores]
+          (try
+            (for-each [^CRL crl (.getCRLs store xcs)] (.add crls (cast X509CRL crl)))
+            (catch CertStoreException cse
+              (when (some? debug)
+                (.println debug (java-str "Exception while retrieving CRLs: " cse))
+                (.printStackTrace cse))
+              (set! savedCSE (PKIX$CertStoreTypeException. (.getType store) cse)))))
+        (if (and (.isEmpty crls) (some? savedCSE)) (throw savedCSE) crls))))
+
+  (method ^:static verifyCRL :throws [CRLException IOException] ^boolean [^X509CertImpl certImpl
+                                                                          ^DistributionPoint point
+                                                                          ^X509CRL crl
+                                                                          ^boolean/1 reasonsMask
+                                                                          ^boolean signFlag
+                                                                          ^:mutable ^PublicKey prevKey
+                                                                          ^X509Certificate prevCert
+                                                                          ^String provider
+                                                                          ^{:tag (Set TrustAnchor)} trustAnchors
+                                                                          ^{:tag (List CertStore)} certStores
+                                                                          ^Date validity
+                                                                          ^String variant
+                                                                          ^TrustAnchor anchor]
+    (when (some? debug)
+      (.println debug
+                (java-str
+                  "DistributionPointFetcher.verifyCRL: checking revocation status for\n  SN: "
+                  (Debug/toString (.getSerialNumber certImpl))
+                  "\n  Subject: "
+                  (.getSubjectX500Principal certImpl)
+                  "\n  Issuer: "
+                  (.getIssuerX500Principal certImpl))))
+    (let [^:mutable indirectCRL false
+          crlImpl (X509CRLImpl/toImpl crl)
+          idpExt (.getIssuingDistributionPointExtension crlImpl)
+          certIssuer (cast X500Name (.getIssuerDN certImpl))
+          crlIssuer (cast X500Name (.getIssuerDN crlImpl))
+          pointCrlIssuers (.getCRLIssuer point)
+          ^:mutable ^X500Name pointCrlIssuer nil]
+      (cond
+        (some? pointCrlIssuers)
+          (do
+            (when (or (nil? idpExt) (not (.isIndirectCRL idpExt))) (return false))
+            (let [^:mutable match false]
+              (loop [^{:tag (Iterator GeneralName)} t (.iterator pointCrlIssuers)]
+                (when (and (not match) (.hasNext t))
+                  (let [name (.getName (cast GeneralName (.next t)))]
+                    (if (.equals crlIssuer name)
+                        (do (set! pointCrlIssuer (cast X500Name name)) (set! match true) (recur t))
+                        (recur t)))))
+              (when-not match (return false))
+              (if (DistributionPointFetcher/issues certImpl crlImpl provider)
+                  (set! prevKey (.getPublicKey certImpl))
+                  (set! indirectCRL true))))
+        (not (.equals crlIssuer certIssuer))
+          (do
+            (when (some? debug)
+              (.println debug
+                        (java-str "crl issuer does not equal cert issuer.\ncrl issuer: "
+                                  crlIssuer
+                                  "\ncert issuer: "
+                                  certIssuer)))
+            (return false))
+        :else
+          (let [certAKID (.getAuthKeyId certImpl)
+                crlAKID (.getAuthKeyId crlImpl)]
+            (if (or (nil? certAKID) (nil? crlAKID))
+                (when (DistributionPointFetcher/issues certImpl crlImpl provider)
+                  (set! prevKey (.getPublicKey certImpl)))
+                (when-not (.equals certAKID crlAKID)
+                  (if (DistributionPointFetcher/issues certImpl crlImpl provider)
+                      (set! prevKey (.getPublicKey certImpl))
+                      (set! indirectCRL true))))))
+      (if (and (not indirectCRL) (not signFlag))
+          false
+          (do
+            (when (some? idpExt)
+              (let [idpPoint (.getDistributionPoint idpExt)]
+                (when (some? idpPoint)
+                  (let [^:mutable idpNames (.getFullName idpPoint)]
+                    (when (nil? idpNames)
+                      (let [relativeName (.getRelativeName idpPoint)]
+                        (when (nil? relativeName)
+                          (when (some? debug) (.println debug "IDP must be relative or full DN"))
+                          (return false))
+                        (when (some? debug)
+                          (.println debug (java-str "IDP relativeName:" relativeName)))
+                        (set! idpNames
+                              (DistributionPointFetcher/getFullNames crlIssuer relativeName))))
+                    (if (or (some? (.getFullName point)) (some? (.getRelativeName point)))
+                        (let [^:mutable pointNames (.getFullName point)]
+                          (when (nil? pointNames)
+                            (let [relativeName (.getRelativeName point)]
+                              (when (nil? relativeName)
+                                (when (some? debug)
+                                  (.println debug "DP must be relative or full DN"))
+                                (return false))
+                              (when (some? debug)
+                                (.println debug (java-str "DP relativeName:" relativeName)))
+                              (if indirectCRL
+                                  (do
+                                    (when (or (nil? pointCrlIssuers)
+                                              (not (== (.size pointCrlIssuers) 1)))
+                                      (when (some? debug)
+                                        (.println
+                                          debug
+                                          "must only be one CRL issuer when relative name present"))
+                                      (return false))
+                                    (set! pointNames
+                                          (DistributionPointFetcher/getFullNames
+                                            pointCrlIssuer
+                                            relativeName)))
+                                  (set! pointNames
+                                        (DistributionPointFetcher/getFullNames
+                                          certIssuer
+                                          relativeName)))))
+                          (let [^:mutable match false]
+                            (loop [^{:tag (Iterator GeneralName)} i (.iterator idpNames)]
+                              (when (and (not match) (.hasNext i))
+                                (let [idpName (.getName (cast GeneralName (.next i)))]
+                                  (when (some? debug)
+                                    (.println debug (java-str "idpName: " idpName)))
+                                  (loop [^{:tag (Iterator GeneralName)} p (.iterator pointNames)]
+                                    (when (and (not match) (.hasNext p))
+                                      (let [pointName (.getName (cast GeneralName (.next p)))]
+                                        (when (some? debug)
+                                          (.println debug (java-str "pointName: " pointName)))
+                                        (set! match (.equals idpName pointName))
+                                        (recur p))))
+                                  (recur i))))
+                            (when-not match
+                              (when (some? debug)
+                                (.println debug "IDP name does not match DP name"))
+                              (return false))))
+                        (let [^:mutable match false]
+                          (loop [^{:tag (Iterator GeneralName)} t (.iterator pointCrlIssuers)]
+                            (when (and (not match) (.hasNext t))
+                              (let [crlIssuerName (.getName (cast GeneralName (.next t)))]
+                                (loop [^{:tag (Iterator GeneralName)} i (.iterator idpNames)]
+                                  (when (and (not match) (.hasNext i))
+                                    (let [idpName (.getName (cast GeneralName (.next i)))]
+                                      (set! match (.equals crlIssuerName idpName))
+                                      (recur i))))
+                                (recur t))))
+                          (when-not match (return false))))))
+                (let [^:mutable b (.hasOnlyUserCerts idpExt)]
+                  (when (and b (not (== (.getBasicConstraints certImpl) -1)))
+                    (when (some? debug) (.println debug "cert must be a EE cert"))
+                    (return false))
+                  (set! b (.hasOnlyCACerts idpExt))
+                  (when (and b (== (.getBasicConstraints certImpl) -1))
+                    (when (some? debug) (.println debug "cert must be a CA cert"))
+                    (return false))
+                  (set! b (.hasOnlyAttributeCerts idpExt))
+                  (when b
+                    (when (some? debug) (.println debug "cert must not be an AA cert"))
+                    (return false)))))
+            (let [^:mutable interimReasonsMask (new boolean/1 9)
+                  ^:mutable ^ReasonFlags reasons nil]
+              (when (some? idpExt) (set! reasons (.getRevocationReasons idpExt)))
+              (let [pointReasonFlags (.getReasonFlags point)]
+                (cond
+                  (some? reasons)
+                    (if (some? pointReasonFlags)
+                        (let [idpReasonFlags (.getFlags reasons)]
+                          (loop [^int i 0]
+                            (when (< i (alength interimReasonsMask))
+                              (aset interimReasonsMask
+                                    i
+                                    (and (and (< i (alength idpReasonFlags))
+                                              (aget idpReasonFlags i))
+                                         (and (< i (alength pointReasonFlags))
+                                              (aget pointReasonFlags i))))
+                              (recur (unchecked-inc-int i)))))
+                        (set! interimReasonsMask (.clone (.getFlags reasons))))
+                  (some? pointReasonFlags) (set! interimReasonsMask (.clone pointReasonFlags))
+                  :else (Arrays/fill interimReasonsMask true))
+                (let [^:mutable oneOrMore false]
+                  (loop [^int i 0]
+                    (if (< i (alength interimReasonsMask))
+                        (if (and (aget interimReasonsMask i)
+                                 (not (and (< i (alength reasonsMask)) (aget reasonsMask i))))
+                            (set! oneOrMore true)
+                            (recur (unchecked-inc-int i)))
+                        nil))
+                  (if (not oneOrMore)
+                      false
+                      (do
+                        (when indirectCRL
+                          (let [certSel (X509CertSelector.)]
+                            (.setSubject certSel (.asX500Principal crlIssuer))
+                            (let [crlSign (new boolean/1 [false false false false false false true])]
+                              (.setKeyUsage certSel crlSign)
+                              (let [akidext (.getAuthKeyIdExtension crlImpl)]
+                                (when (some? akidext)
+                                  (let [kid (.getEncodedKeyIdentifier akidext)]
+                                    (when (some? kid) (.setSubjectKeyIdentifier certSel kid))
+                                    (let [asn (.getSerialNumber akidext)]
+                                      (when (some? asn) (.setSerialNumber certSel (.getNumber asn))))))
+                                (let [^{:tag (Set TrustAnchor)} newTrustAnchors (HashSet.
+                                                                                  trustAnchors)]
+                                  (when (some? prevKey)
+                                    (let [^:mutable ^TrustAnchor temporary nil]
+                                      (if (some? prevCert)
+                                          (set! temporary (TrustAnchor. prevCert nil))
+                                          (let [principal (.getIssuerX500Principal certImpl)]
+                                            (set! temporary (TrustAnchor. principal prevKey nil))))
+                                      (.add newTrustAnchors temporary)))
+                                  (let [^:mutable ^PKIXBuilderParameters params nil]
+                                    (try
+                                      (set! params (PKIXBuilderParameters. newTrustAnchors certSel))
+                                      (catch InvalidAlgorithmParameterException iape
+                                        (throw (CRLException. iape))))
+                                    (.setCertStores params certStores)
+                                    (.setSigProvider params provider)
+                                    (.setDate params validity)
+                                    (try
+                                      (let [builder (CertPathBuilder/getInstance "PKIX")
+                                            result (cast
+                                                     PKIXCertPathBuilderResult
+                                                     (.build builder params))]
+                                        (set! prevKey (.getPublicKey result)))
+                                      (catch GeneralSecurityException e (throw (CRLException. e))))))))))
+                        (try
+                          (AlgorithmChecker/check prevKey (.getSigAlgId crlImpl) variant anchor)
+                          (catch CertPathValidatorException cpve
+                            (when (some? debug)
+                              (.println debug
+                                        (java-str "CRL signature algorithm check failed: " cpve)))
+                            (return false)))
+                        (try
+                          (.verify crl prevKey provider)
+                          (catch GeneralSecurityException e
+                            (when (some? debug) (.println debug "CRL signature failed to verify"))
+                            (return false)))
+                        (let [^{:tag (Set String)} unresCritExts (.getCriticalExtensionOIDs crl)]
+                          (when (some? unresCritExts)
+                            (.remove unresCritExts
+                                     (.toString PKIXExtensions/IssuingDistributionPoint_Id))
+                            (when-not (.isEmpty unresCritExts)
+                              (when (some? debug)
+                                (.println debug
+                                          (java-str
+                                            "Unrecognized critical extension(s) in CRL: "
+                                            unresCritExts))
+                                (for-each [^String ext unresCritExts] (.println debug ext)))
+                              (return false)))
+                          (loop [^int i 0]
+                            (when (< i (alength reasonsMask))
+                              (aset reasonsMask
+                                    i
+                                    (or (aget reasonsMask i)
+                                        (and (< i (alength interimReasonsMask))
+                                             (aget interimReasonsMask i))))
+                              (recur (unchecked-inc-int i))))
+                          true))))))))))
+
+  (method ^:private ^:static getFullNames :throws [IOException] ^GeneralNames [^X500Name issuer
+                                                                               ^RDN rdn]
+    (let [^{:tag (List RDN)} rdns (ArrayList. (.rdns issuer))]
+      (.add rdns rdn)
+      (let [fullName (X500Name. (cast RDN/1 (.toArray rdns (new RDN/1 0))))
+            fullNames (GeneralNames.)]
+        (.add fullNames (GeneralName. fullName))
+        fullNames)))
+
+  (method ^:private ^:static issues :throws [IOException] ^boolean [^X509CertImpl cert
+                                                                    ^X509CRLImpl crl
+                                                                    ^String provider]
+    (let [^:mutable ^boolean matched false
+          issuerSelector (AdaptableX509CertSelector.)
+          usages (.getKeyUsage cert)]
+      (when (some? usages) (aset usages 6 true) (.setKeyUsage issuerSelector usages))
+      (let [crlIssuer (.getIssuerX500Principal crl)]
+        (.setSubject issuerSelector crlIssuer)
+        (let [crlAKID (.getAuthKeyIdExtension crl)]
+          (.setSkiAndSerialNumber issuerSelector crlAKID)
+          (set! matched (.match issuerSelector cert))
+          (when (and matched (or (nil? crlAKID) (nil? (.getAuthorityKeyIdentifierExtension cert))))
+            (try
+              (.verify crl (.getPublicKey cert) provider)
+              (catch GeneralSecurityException e (set! matched false))))
+          matched)))))

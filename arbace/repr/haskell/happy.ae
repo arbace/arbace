@@ -1,0 +1,1626 @@
+(ns arbace.repr.haskell.happy
+  "Happy's LALR(1) table construction, for repr/haskell's native parser: GHC's grammar read from
+  its Happy source and made into the tables GHC's parser runs on, which the native parser's
+  driver (Happy's template's: action, goto, reduce) interprets.
+
+  Its input is GHC 9.14.1's compiler/GHC/Parser.y.source (the pinned ghc-9.14.1-src.tar.xz's),
+  its reference compiler/GHC/Parser.hs, the parser GHC ships: Happy 1.20.1.1's output for that
+  grammar (array tables, GHC mode). It follows Happy's algorithms as Happy 1.20's sources have
+  them, and happy-lib 2.2's, read for reference (the host's Happy; no Happy code is vendored):
+
+    read-grammar      Happy.Frontend.Lexer and Parser (the grammar file's syntax; 1.20's: {- -}
+                      a comment), ParamRules (the plain rules in file order, then the instances
+                      of the parameterized ones generation by generation, each generation sorted
+                      by name and arguments) and Mangler (the symbols numbered: error, the
+                      starts, the nonterminals, the %token terminals, %eof; the productions: one
+                      a start, then the rules')
+    build-tables      Happy.Tabular.LALR: the LR(0) sets numbered as genLR0items numbers them
+                      (the initial sets, then batch after batch, a batch's sets from the last to
+                      the first, each one's gotos by symbol), so that the states are Parser.hs's;
+                      the LALR(1) lookaheads, by DeRemer and Pennello's relations over that
+                      automaton (the sets Happy's propagation gives); each state's actions from
+                      closure1 of its kernel, resolved by genActionTable's res (a %shift
+                      production is PrioLowest); ProduceCode's default actions (getDefault) and
+                      encoding (actionVal)
+    decode-parser-hs  the same tables read back from Parser.hs's packed arrays
+    compare-tables    two automata compared up to the numbering of their states
+    tables-source     the tables as the namespace arbace.repr.haskell.tables
+
+  -main's gen writes that namespace; check proves the productions against Parser.hs's
+  reductions, the tables against Parser.hs's and the committed namespace against a fresh
+  generation.
+
+  Happy 2.x numbers a catch token as terminal 1, which 1.20 has not: with it taken out, happy
+  2.2's tables for this grammar are Parser.hs's, state for state. Details of Happy's the tables
+  show: the initial sets are the starts' and one more, the first rule's (genLR0items'
+  [0..n_starts]: state 13, {identifier -> . qvar}, reached from no start); a %partial parser
+  accepts on the error token, its start's lookahead (its parse ends through the driver's error
+  path); a state's default action is the error token's reduction, none when the error token has
+  another action, else the state's first reduction by terminal."
+  (:require [arbace.string :as str])
+  (:import (java.util ArrayList Arrays HashMap)))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; The grammar file's tokens (Happy.Frontend.Lexer)
+
+(defn- space?
+  "Haskell's isSpace"
+  [c]
+  (let [c (char c)]
+    (or (= c \space) (<= 9 (int c) 13) (= (int c) 0xA0) (Character/isSpaceChar c))))
+
+(defn- alpha-num? [c] (Character/isLetterOrDigit (char c)))
+
+(defn- id-start? [c]
+  (let [i (int c)] (or (<= 97 i 122) (<= 65 i 90))))
+
+(defn- id-part? [c]
+  (let [i (int c)] (or (<= 97 i 122) (<= 65 i 90) (<= 48 i 57) (= i 95))))
+
+(defn- trim-code
+  "Happy's cleanupCode: the text without the white space around it"
+  [^String s]
+  (let [n (.length s)
+        a (loop [i 0] (if (and (< i n) (space? (.charAt s i))) (recur (inc i)) i))
+        b (loop [j n] (if (and (> j a) (space? (.charAt s (dec j)))) (recur (dec j)) j))]
+    (subs s a b)))
+
+(defn- newlines
+  "The newlines of s between i and j"
+  ^long [^String s ^long i ^long j]
+  (loop [k i c 0]
+    (if (< k j) (recur (inc k) (if (= (.charAt s (int k)) \newline) (inc c) c)) c)))
+
+(defn- quoted-end
+  "The end of a quoted text after its opening quote q at i (Happy's lexReadChar and
+  lexReadString): the index after the closing quote, a backslash escaping the next character;
+  -1 when the text ends first"
+  [^String s i q]
+  (let [n (.length s) q (char q)]
+    (loop [i (long i)]
+      (cond (>= i n) -1
+            (= (.charAt s (int i)) q) (inc i)
+            (and (= (.charAt s (int i)) \\) (< (inc i) n)) (recur (+ i 2))
+            :else (recur (inc i))))))
+
+(defn- single-char-end
+  "Happy's lexReadSingleChar: after a code block's quote at i-1, the end of a character literal
+  \\c' or c', else i"
+  [^String s i]
+  (let [n (.length s) i (long i)]
+    (cond (and (< (+ i 2) n) (= (.charAt s (int i)) \\) (= (.charAt s (int (+ i 2))) \')) (+ i 3)
+          (and (< (inc i) n) (= (.charAt s (int (inc i))) \')) (+ i 2)
+          :else i)))
+
+(defn- read-code
+  "A code block from i, after its opening brace (Happy's lexReadCode: braces nested, a string's
+  and a character literal's characters not counted): [end text], end after the closing brace"
+  [^String s i line]
+  (let [n (.length s) sb (StringBuilder.)]
+    (loop [i (long i) depth 0]
+      (when (>= i n) (throw (ex-info (str "happy: line " line ": no closing '}' in code segment") {})))
+      (let [c (.charAt s (int i))]
+        (cond
+          (= c \{) (do (.append sb c) (recur (inc i) (inc depth)))
+          (= c \}) (if (zero? depth)
+                     [(inc i) (trim-code (.toString sb))]
+                     (do (.append sb c) (recur (inc i) (dec depth))))
+          (= c \") (let [j (quoted-end s (inc i) \") j (if (neg? j) n j)]
+                     (.append sb s (int i) (int j)) (recur (long j) depth))
+          (and (alpha-num? c) (< (inc i) n) (= (.charAt s (int (inc i))) \'))
+          (do (.append sb s (int i) (int (+ i 2))) (recur (+ i 2) depth))
+          (= c \') (let [j (single-char-end s (inc i))] (.append sb s (int i) (int j)) (recur (long j) depth))
+          :else (do (.append sb c) (recur (inc i) depth)))))))
+
+(defn- skip-comment
+  "The end of a nested {- -} comment whose text starts at i (Happy's lexNestedComment)"
+  [^String s i]
+  (let [n (.length s)]
+    (loop [i (long i) depth 1]
+      (cond (>= i n) (throw (ex-info "happy: unterminated comment" {}))
+            (and (= (.charAt s (int i)) \-) (< (inc i) n) (= (.charAt s (int (inc i))) \}))
+            (if (= depth 1) (+ i 2) (recur (+ i 2) (dec depth)))
+            (and (= (.charAt s (int i)) \{) (< (inc i) n) (= (.charAt s (int (inc i))) \-))
+            (recur (+ i 2) (inc depth))
+            :else (recur (inc i) depth)))))
+
+(def ^:private directives
+  "The directives after %, in the order Happy's lexPercent tries them"
+  [["tokentype" :tokentype] ["token" :token] ["name" :name] ["partial" :partial]
+   ["importedidentity" :importedidentity] ["monad" :monad] ["lexer" :lexer]
+   ["nonassoc" :nonassoc] ["left" :left] ["right" :right] ["prec" :prec] ["shift" :shift]
+   ["expect" :expect] ["error.expected" :error-expected] ["errorhandlertype" :errorhandlertype]
+   ["error" :error] ["attributetype" :attributetype] ["attribute" :attribute]])
+
+(defn- lex
+  "The tokens of a grammar file (Happy.Frontend.Lexer, Happy 1.20's: {- -} is a comment), a
+  vector of [kind value line]: kind :id (a name, a quoted name or a string, value as written),
+  :code (a { } block's text, trimmed), :num (value a long), a directive's keyword (:token, :name,
+  :shift, ...) or :colon, :dcolon, :semi, :bar, :dpercent, :lparen, :rparen, :comma; the last
+  :eof. line is the line the token starts on."
+  [^String s]
+  (let [n (.length s)
+        toks (ArrayList.)
+        at (fn [i] (if (< (long i) n) (.charAt s (int i)) \u0000))
+        emit (fn [kind value line] (.add toks [kind value line]))]
+    (loop [i 0 line 1]
+      (if (>= i n)
+        (do (emit :eof nil line) (vec toks))
+        (let [c (.charAt s (int i))]
+          (cond
+            (and (= c \-) (= (at (inc i)) \-))
+            (recur (let [j (.indexOf s "\n" (int i))] (if (neg? j) n j)) line)
+            (and (= c \{) (= (at (inc i)) \-))
+            (let [j (skip-comment s (+ i 2))] (recur (long j) (+ line (newlines s i j))))
+            (= c \newline) (recur (inc i) (inc line))
+            (= c \%)
+            (if (= (at (inc i)) \%)
+              (do (emit :dpercent nil line) (recur (+ i 2) line))
+              (let [[word kind] (some (fn [[^String w k]]
+                                        (let [e (+ i 1 (.length w))]
+                                          (when (and (.startsWith s w (int (inc i)))
+                                                     (or (>= e n) (not (alpha-num? (.charAt s (int e))))))
+                                            [w k])))
+                                      directives)]
+                (when-not kind
+                  (throw (ex-info (str "happy: line " line ": unrecognised directive: %"
+                                       (subs s (inc i) (min n (+ i 20)))) {})))
+                (emit kind nil line)
+                (recur (+ i 1 (count word)) line)))
+            (= c \:) (if (= (at (inc i)) \:)
+                       (do (emit :dcolon nil line) (recur (+ i 2) line))
+                       (do (emit :colon nil line) (recur (inc i) line)))
+            (= c \;) (do (emit :semi nil line) (recur (inc i) line))
+            (= c \|) (do (emit :bar nil line) (recur (inc i) line))
+            (= c \() (do (emit :lparen nil line) (recur (inc i) line))
+            (= c \)) (do (emit :rparen nil line) (recur (inc i) line))
+            (= c \,) (do (emit :comma nil line) (recur (inc i) line))
+            (or (= c \') (= c \"))
+            ;; a quoted name or a string as written (Happy closes one the text ends in)
+            (let [j (quoted-end s (inc i) c)
+                  j' (if (neg? j) n j)]
+              (emit :id (if (neg? j) (str (subs s i) c) (subs s i j)) line)
+              (recur (long j') (+ line (newlines s i j'))))
+            (= c \{)
+            (let [[j code] (read-code s (inc i) line)]
+              (emit :code code line)
+              (recur (long j) (+ line (newlines s i j))))
+            (space? c) (recur (inc i) line)
+            (id-start? c)
+            (let [j (loop [j (inc i)] (if (and (< j n) (id-part? (.charAt s (int j)))) (recur (inc j)) j))]
+              (emit :id (subs s i j) line)
+              (recur (long j) line))
+            (<= 48 (int c) 57)
+            (let [j (loop [j (inc i)] (if (and (< j n) (<= 48 (int (.charAt s (int j))) 57)) (recur (inc j)) j))]
+              (emit :num (Long/parseLong (subs s i j)) line)
+              (recur (long j) line))
+            :else (throw (ex-info (str "happy: line " line ": lexical error before `" c "'") {}))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The grammar file's syntax (Happy.Frontend.Parser)
+
+(defn- parse-file
+  "The abstract syntax of a grammar file's tokens (Happy's Parser.ly): {:header code :directives
+  [{:dir kind ...}] :rules [{:name :params :type :prods [{:terms :prec :code :line}]}] :trailer
+  code}; a term is [name [term...]], prec nil, :shift or [:prec name]"
+  [toks]
+  (let [pos (int-array 1)
+        peek-tok (fn [] (nth toks (aget pos 0)))
+        kind (fn [] (first (peek-tok)))
+        take! (fn [] (let [t (peek-tok)] (aset pos 0 (inc (aget pos 0))) t))
+        fail (fn [what] (let [[k v l] (peek-tok)]
+                          (throw (ex-info (str "happy: line " l ": parse error: expected " what ", found "
+                                               (name k) (when v (str " " (pr-str v)))) {}))))
+        expect! (fn [k what] (if (= (kind) k) (second (take!)) (fail what)))
+        opt-code (fn [] (when (= (kind) :code) (second (take!))))
+        ids (fn [] (loop [acc []] (if (= (kind) :id) (recur (conj acc (second (take!)))) acc)))
+        directive
+        (fn []
+          (let [[k _ line] (take!)]
+            (assoc
+             (case k
+               :tokentype {:dir :tokentype :code (expect! :code "code")}
+               :token {:dir :token
+                       :specs (loop [acc []]
+                                (if (= (kind) :id)
+                                  (let [nm (second (take!))]
+                                    (recur (conj acc [nm (expect! :code "a token's code")])))
+                                  (if (empty? acc) (fail "a token") acc)))}
+               (:name :partial) {:dir :name :parser (expect! :id "a parser's name")
+                                 :start (when (= (kind) :id) (second (take!)))
+                                 :partial (= k :partial)}
+               :importedidentity {:dir :importedidentity}
+               :lexer {:dir :lexer :codes [(expect! :code "code") (expect! :code "code")]}
+               :monad {:dir :monad :codes (loop [acc [(expect! :code "code")]]
+                                            (if (and (= (kind) :code) (< (count acc) 4))
+                                              (recur (conj acc (second (take!)))) acc))}
+               (:nonassoc :left :right) {:dir k :names (ids)}
+               :expect {:dir :expect :n (expect! :num "a number")}
+               :error {:dir :error :codes (let [a (expect! :code "code")] (if-let [b (opt-code)] [a b] [a]))}
+               :error-expected {:dir :error-expected}
+               :errorhandlertype {:dir :errorhandlertype :name (expect! :id "a name")}
+               :attributetype {:dir :attributetype :code (expect! :code "code")}
+               :attribute {:dir :attribute :name (expect! :id "a name") :code (expect! :code "code")}
+               (do (aset pos 0 (dec (aget pos 0))) (fail "a directive")))
+             :line line)))
+        term (fn term []
+               (let [nm (expect! :id "a symbol")]
+                 (if (= (kind) :lparen)
+                   (do (take!)
+                       (let [args (loop [acc [(term)]]
+                                    (if (= (kind) :comma) (do (take!) (recur (conj acc (term)))) acc))]
+                         (expect! :rparen "')'")
+                         [nm args]))
+                   [nm []])))
+        prod (fn []
+               (let [line (nth (peek-tok) 2)
+                     terms (loop [acc []] (if (= (kind) :id) (recur (conj acc (term))) acc))
+                     prec (case (kind)
+                            :prec (do (take!) [:prec (expect! :id "a precedence name")])
+                            :shift (do (take!) :shift)
+                            nil)
+                     code (expect! :code "a production's code")]
+                 (when (= (kind) :semi) (take!))
+                 {:terms terms :prec prec :code code :line line}))
+        rule (fn []
+               (let [[_ nm line] (take!)
+                     params (when (= (kind) :lparen)
+                              (take!)
+                              (let [ps (loop [acc [(expect! :id "a parameter")]]
+                                         (if (= (kind) :comma) (do (take!) (recur (conj acc (expect! :id "a parameter")))) acc))]
+                                (expect! :rparen "')'")
+                                ps))
+                     type (when (= (kind) :dcolon)
+                            (take!)
+                            (let [t (expect! :code "a type")]
+                              (when (= (kind) :id) (take!))
+                              t))]
+                 (expect! :colon "':'")
+                 {:name nm :params (vec params) :type type :line line
+                  :prods (loop [acc [(prod)]]
+                           (if (= (kind) :bar) (do (take!) (recur (conj acc (prod)))) acc))}))
+        header (opt-code)
+        dirs (loop [acc []]
+               (if (and (not= (kind) :dpercent) (not= (kind) :eof)) (recur (conj acc (directive))) acc))
+        _ (when (empty? dirs) (fail "a directive"))
+        _ (expect! :dpercent "%%")
+        rules (loop [acc []] (if (= (kind) :id) (recur (conj acc (rule))) acc))
+        _ (when (empty? rules) (fail "a rule"))
+        trailer (opt-code)]
+    (expect! :eof "the end of the file")
+    {:header header :directives dirs :rules rules :trailer trailer}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Parameterized rules (Happy.Frontend.ParamRules)
+
+(defn- inst-name
+  "An instance's two names, [Happy's display]: Happy's f__a__b__ (Happy 1.20's inst_name, the
+  name instances sort by) and the display form f(a,b); args are such pairs"
+  [f args]
+  (if (empty? args)
+    [f f]
+    [(str f "__" (str/join "__" (map first args)) "__")
+     (str f "(" (str/join "," (map second args)) ")")]))
+
+(defn- compare-inst
+  "Happy's order of instances (Inst's derived Ord): by name, then the arguments' Happy names as a
+  list, lexicographically"
+  [[f1 a1] [f2 a2]]
+  (let [c (compare f1 f2)]
+    (if-not (zero? c)
+      c
+      (loop [a1 (seq a1) a2 (seq a2)]
+        (cond (and (nil? a1) (nil? a2)) 0
+              (nil? a1) -1
+              (nil? a2) 1
+              :else (let [c (compare (ffirst a1) (ffirst a2))]
+                      (if (zero? c) (recur (next a1) (next a2)) c)))))))
+
+(defn- expand-rules
+  "The rules without parameters (Happy's expand_rules): the plain rules in file order, then the
+  instances of the parameterized ones, generation by generation (the instances the previous
+  generation's productions name and no earlier one made), each sorted by compare-inst. A rule
+  is {:name [happy display] :written lhs :prods [{:syms [[happy display]...] :written [symbol...]
+  :prec :code :line}] :type :line}, :written the rule as the file writes it (its parameters
+  unsubstituted, applications f(a,b))."
+  [rules]
+  (let [funs (into {} (for [r rules :when (seq (:params r))] [(:name r) r]))
+        found (volatile! nil)
+        term-text (fn term-text [[f args]]
+                    (if (empty? args) f (str f "(" (str/join "," (map term-text args)) ")")))
+        term (fn term [subst [f args]]
+               (if (empty? args)
+                 (get subst f [f f])
+                 (let [xs (mapv #(term subst %) args)
+                       inst [f xs]]
+                   (vswap! found assoc inst inst)
+                   (inst-name f xs))))
+        inst-rule (fn [r args]
+                    (let [params (:params r)]
+                      (when (not= (count params) (count args))
+                        (throw (ex-info (str "happy: In " (second (inst-name (:name r) args)) ": "
+                                             (if (> (count params) (count args))
+                                               (str "Need " (- (count params) (count args)) " more arguments")
+                                               (str (- (count args) (count params)) " arguments too many."))) {})))
+                      {:name (inst-name (:name r) args) :type (:type r) :line (:line r)
+                       :written (if (seq params) (str (:name r) "(" (str/join "," params) ")") (:name r))
+                       :prods (mapv (fn [p] (-> p
+                                                (dissoc :terms)
+                                                (assoc :syms (mapv #(term (zipmap params args) %) (:terms p))
+                                                       :written (mapv term-text (:terms p)))))
+                                    (:prods r))}))
+        collect (fn [f xs]
+                  (vreset! found (sorted-map-by compare-inst))
+                  (let [out (mapv f xs)] [out (keys @found)]))
+        [plain insts] (collect #(inst-rule % []) (remove #(seq (:params %)) rules))]
+    (loop [gen insts done #{} acc plain]
+      (if (empty? gen)
+        acc
+        (let [[made ws] (collect (fn [[f xs]]
+                                   (if-let [r (get funs f)]
+                                     (inst-rule r xs)
+                                     (throw (ex-info (str "happy: Undefined rule: " f) {}))))
+                                 gen)
+              done (into done gen)]
+          (recur (remove #(contains? done %) ws) done (into acc made)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The grammar's symbols and productions (Happy.Frontend.Mangler)
+
+(defn- action-kind
+  "An action's kind by its code's marker (ProduceCode's: {%% } happyMonad2Reduce, {%^ } and {% }
+  happyMonadReduce) and its code without the marker"
+  [^String code]
+  (cond (.startsWith code "%%") [:monadic2 (trim-code (subs code 2))]
+        (.startsWith code "%^") [:monadic-token (trim-code (subs code 2))]
+        (.startsWith code "%") [:monadic (trim-code (subs code 1))]
+        :else [:pure code]))
+
+(defn read-grammar
+  "A Happy grammar file's grammar as data (Happy's front end: Lexer, Parser, ParamRules, Mangler):
+    :tokens        the %token terminals [{:name \"'_'\" :pattern \"L _ ITunderscore\"}...];
+                   terminal i+1 is (tokens i), terminal 0 the error token, the last %eof
+    :terminals     the terminals' names by number: \"error\", the tokens', \"%eof\"
+    :starts        the %name and %partial parsers in order [{:name :symbol :partial}...]
+    :nonterminals  the nonterminals' names by goto index (an instance of a parameterized rule
+                   in the display form exp_gen(infixexp)), the start symbols not among them
+    :types         each nonterminal's type as written, or nil (a parameterized rule's unsubstituted)
+    :precedences   the %left, %right, %nonassoc directives in order [{:assoc :level :names}]
+    :expect        %expect's number, or nil
+    :productions   every production in Happy's numbering: one per start (lhs %start_NAME, :kind
+                   :start, no code), then the rules' in order, each {:lhs :lhs-index :rhs [names]
+                   :rule-lhs :rule-rhs :prio nil|:shift|[assoc level] :kind :pure|:monadic|
+                   :monadic2|:monadic-token :code :line}: lhs-index the goto index (-1 for a
+                   start); rule-lhs and rule-rhs the rule as the file writes it, its parameters
+                   unsubstituted (exp_gen(IEXP), [\"IEXP\" \"'::'\" \"ctype\"]; a plain rule's are
+                   its :lhs and :rhs); code the action's text without its % marker; line the
+                   line of the production's first token
+    :header, :trailer the code blocks around the grammar"
+  [^String text]
+  (let [{:keys [header directives rules trailer]} (parse-file (lex text))
+        rules (expand-rules rules)
+        ;; checkRules: one nonterminal per run of rules of a name
+        nts (loop [rs rules above nil seen #{} acc []]
+              (if-let [r (first rs)]
+                (let [n (first (:name r))]
+                  (cond (= n above) (recur (next rs) n seen acc)
+                        (contains? seen n) (throw (ex-info (str "happy: Multiple rules for '" n "'") {}))
+                        :else (recur (next rs) n (conj seen n) (conj acc (:name r)))))
+                acc))
+        tokens (vec (for [d directives :when (= (:dir d) :token), [nm code] (:specs d)]
+                      {:name nm :pattern code}))
+        starts (let [ss (filterv #(= (:dir %) :name) directives)]
+                 (if (empty? ss) [{:dir :name :parser "happyParse" :start nil :partial false}] ss))
+        ns (count starts)
+        start-names (mapv #(str "%start_" (:parser %)) starts)
+        ;; Happy's names: error, the starts, the nonterminals, the terminals, %eof
+        env (reduce (fn [m [nm sym]] (update m nm (fnil conj []) sym))
+                    {}
+                    (concat [["error" :error]]
+                            (map-indexed (fn [i n] [n [:start i]]) start-names)
+                            (map-indexed (fn [i [h _]] [h [:nt i]]) nts)
+                            (map-indexed (fn [i t] [(:name t) [:t (inc i)]]) tokens)
+                            [["%eof" [:t (inc (count tokens))]]]))
+        lookup (fn [nm line]
+                 (let [ss (get env nm)]
+                   (cond (empty? ss) (throw (ex-info (str "happy: " line ": unknown identifier '" nm "'") {}))
+                         (next ss) (throw (ex-info (str "happy: " line ": multiple use of '" nm "'") {}))
+                         :else (first ss))))
+        display (into {"error" "error" "%eof" "%eof"} (concat (map (fn [[h d]] [h d]) nts)
+                                               (map (fn [t] [(:name t) (:name t)]) tokens)))
+        prec-dirs (filterv #(#{:nonassoc :left :right} (:dir %)) directives)
+        precedences (vec (map-indexed (fn [i d] {:assoc (:dir d) :level (inc i) :names (:names d)}) prec-dirs))
+        prio-of-terminal (fn [nm] (some #(when (some #{nm} (:names %)) [(:assoc %) (:level %)]) precedences))
+        nt-index (into {} (map-indexed (fn [i [h _]] [h i]) nts))
+        start-prods (vec (map-indexed
+                          (fn [i d]
+                            (let [sym (if-let [s (:start d)] (lookup s (:line d)) [:nt 0])]
+                              (when-not (= :nt (first sym))
+                                (throw (ex-info (str "happy: a start symbol must be a nonterminal: " (:start d)) {})))
+                              {:lhs (start-names i) :lhs-index -1 :rhs [(second (nts (second sym)))]
+                               :rule-lhs (start-names i) :rule-rhs [(second (nts (second sym)))]
+                               :prio nil :kind :start :code nil :line (:line d)}))
+                          starts))
+        rule-prods (vec (for [r rules, p (:prods r)]
+                          (let [syms (mapv (fn [[h _]] (let [s (lookup h (:line p))] [h s])) (:syms p))
+                                terms (keep (fn [[h s]] (when (and (vector? s) (= :t (first s))) h)) syms)
+                                prio (case (:prec p)
+                                       nil (when (seq terms) (prio-of-terminal (last terms)))
+                                       :shift :shift
+                                       (or (some #(when (some #{(second (:prec p))} (:names %)) [(:assoc %) (:level %)]) precedences)
+                                           (throw (ex-info (str "happy: " (:line p) ": Undeclared precedence token: " (second (:prec p))) {}))))
+                                [kind code] (action-kind (:code p))]
+                            {:lhs (second (:name r)) :lhs-index (nt-index (first (:name r)))
+                             :rhs (mapv (fn [[h _]] (display h)) syms)
+                             :rule-lhs (:written r) :rule-rhs (:written p)
+                             :prio prio :kind kind :code code :line (:line p)})))]
+    {:tokens tokens
+     :terminals (vec (concat ["error"] (map :name tokens) ["%eof"]))
+     :starts (mapv (fn [d p] {:name (:parser d) :symbol (first (:rhs p)) :partial (:partial d)}) starts start-prods)
+     :nonterminals (mapv second nts)
+     :types (let [ty (into {} (for [r rules :when (:type r)] [(first (:name r)) (:type r)]))]
+              (mapv (fn [[h _]] (ty h)) nts))
+     :precedences precedences
+     :expect (some #(when (= (:dir %) :expect) (:n %)) directives)
+     :productions (into start-prods rule-prods)
+     :header header :trailer trailer}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Parser.hs's tables (Happy 1.20's array tables, GHC mode)
+
+(defn- happy-bytes
+  "The bytes of Parser.hs's HappyA# string named name (\\xNN escapes)"
+  ^bytes [^String text ^String name]
+  (let [marker (str "\n" name " = HappyA# \"")
+        i (.indexOf text marker)
+        _ (when (neg? i) (throw (ex-info (str "happy: no " name " in the parser") {})))
+        start (+ i (.length marker))
+        end (.indexOf text "\"#" (int start))
+        n (quot (- end start) 4)
+        out (byte-array n)]
+    (loop [k 0 p start]
+      (when (< k n)
+        (when-not (and (= (.charAt text (int p)) \\) (= (.charAt text (int (inc p))) \x))
+          (throw (ex-info (str "happy: " name ": not a \\x escape at " p) {})))
+        (aset out k (unchecked-byte (+ (* 16 (Character/digit (.charAt text (int (+ p 2))) 16))
+                                       (Character/digit (.charAt text (int (+ p 3))) 16))))
+        (recur (inc k) (+ p 4))))
+    out))
+
+(defn- le-values
+  "The signed little-endian values of width w (2 or 4 bytes) in bs"
+  ^ints [^bytes bs w]
+  (let [w (long w)
+        n (quot (alength bs) w)
+        out (int-array n)]
+    (dotimes [k n]
+      (let [b (fn [j] (bit-and 0xFF (long (aget bs (int (+ (* k w) j))))))
+            v (if (= w 2)
+                (let [v (bit-or (b 0) (bit-shift-left (b 1) 8))] (if (>= v 32768) (- v 65536) v))
+                (let [v (bit-or (b 0) (bit-shift-left (b 1) 8) (bit-shift-left (b 2) 16) (bit-shift-left (b 3) 24))]
+                  (if (>= v 2147483648) (- v 4294967296) v)))]
+        (aset out k (int v))))
+    out))
+
+(defn- reductions-of
+  "Parser.hs's happyReduceArr: for each happyReduce_N, [N nt len] (happySpecReduce_K NT#,
+  happyReduce K# NT#, happyMonadReduce K# NT#, happyMonad2Reduce K# NT#)"
+  [^String text]
+  (let [m (re-matcher #"(?m)^happyReduce_(\d+) = happy(?:SpecReduce_(\d+)\s+(\d+)#|(?:Monad2?)?Reduce (\d+)# (\d+)#)" text)]
+    (loop [acc []]
+      (if (.find m)
+        (let [g (fn [i] (when-let [s (.group m (int i))] (Long/parseLong s)))]
+          (recur (conj acc (if (g 2) [(g 1) (g 3) (g 2)] [(g 1) (g 5) (g 4)]))))
+        acc))))
+
+(defn decode-parser-hs
+  "The tables of Parser.hs (Happy 1.20's output, array tables) in build-tables' form: :n-states,
+  :n-terms, :n-nonterms, :action (the effective action of every state and terminal: the table's
+  entry where happyCheck has it, else the state's default), :goto (the target of every state and
+  nonterminal that has one, else -1), :rules ([nt len] of every production; the starts' [-1 1])"
+  [^String text]
+  (let [num (fn [re] (Long/parseLong (second (re-find re text))))
+        n-terms (num #"(?m)^happy_n_terms = (\d+)")
+        n-nonterms (num #"(?m)^happy_n_nonterms = (\d+)")
+        act-bytes (happy-bytes text "happyActOffsets")
+        def-bytes (happy-bytes text "happyDefActions")
+        ;; the offsets have a state more than the defaults: the difference is the width
+        w (- (alength act-bytes) (alength def-bytes))
+        _ (when-not (#{2 4} w) (throw (ex-info (str "happy: unexpected table width " w) {})))
+        act-off (le-values act-bytes w)
+        defs (le-values def-bytes w)
+        goto-off (le-values (happy-bytes text "happyGotoOffsets") w)
+        check (le-values (happy-bytes text "happyCheck") w)
+        table (le-values (happy-bytes text "happyTable") w)
+        n-states (alength defs)
+        tlen (alength check)
+        action (int-array (* n-states n-terms))
+        goto (int-array (* n-states n-nonterms) -1)
+        reds (reductions-of text)
+        n-starts (num #"happyReduceArr = Happy_Data_Array\.array \((\d+), ")]
+    (dotimes [s n-states]
+      (let [off (aget act-off s) d (aget defs s) row (* s n-terms)]
+        (dotimes [t n-terms]
+          (let [o (+ off t)]
+            (aset action (+ row t) (if (and (>= o 0) (< o tlen) (== (aget check o) t)) (aget table o) d)))))
+      (let [off (aget goto-off s) row (* s n-nonterms)]
+        (dotimes [n n-nonterms]
+          (let [o (+ off n)]
+            (when (and (>= o 0) (< o tlen) (== (aget check o) n))
+              (aset goto (+ row n) (aget table o)))))))
+    {:n-states n-states :n-terms n-terms :n-nonterms n-nonterms :action action :goto goto
+     :rules (reduce (fn [v [r nt len]] (assoc v r [nt len]))
+                    (vec (concat (repeat n-starts [-1 1]) (repeat (- (inc (apply max (map first reds))) n-starts) nil)))
+                    reds)}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The grammar as arrays
+;;;
+;;; Symbols are numbered as Happy orders them: the nonterminals, the start symbols first (0..ns-1,
+;;; then ns+k for goto index k), then the terminals (na+t for terminal t: error 0, the tokens,
+;;; %eof last). An item, a production with a dot, is a number: (base r) + dot, so that items sort
+;;; as Happy's Lr0 r dot do. A set of terminals is w longs.
+
+(defn- prio-of
+  "A production's or a terminal's priority as Happy's Priority: :no, :lowest (%shift), or
+  [:prio assoc level]"
+  [p]
+  (cond (nil? p) :no
+        (= p :shift) :lowest
+        :else [:prio (first p) (second p)]))
+
+(defn- grammar-arrays
+  "The grammar's symbols, productions and items as arrays"
+  [g]
+  (let [prods (:productions g)
+        ns (count (:starts g))
+        nnt (count (:nonterminals g))
+        na (+ ns nnt)
+        nterm (count (:terminals g))
+        nsym (+ na nterm)
+        w (quot (+ nterm 63) 64)
+        sym-of (reduce (fn [m [k v]]
+                         (when (contains? m k) (throw (ex-info (str "happy: two symbols named " k) {})))
+                         (assoc m k v))
+                       {}
+                       (concat (map-indexed (fn [i p] [(:lhs p) i]) (take ns prods))
+                               (map-indexed (fn [k n] [n (+ ns k)]) (:nonterminals g))
+                               (map-indexed (fn [t n] [n (+ na t)]) (:terminals g))))
+        sym (fn [n] (or (sym-of n) (throw (ex-info (str "happy: unknown symbol " n) {}))))
+        np (count prods)
+        lhs (int-array np)
+        rhs (object-array np)
+        base (int-array (inc np))]
+    (dotimes [r np]
+      (let [p (prods r)]
+        (aset lhs r (int (sym (:lhs p))))
+        (aset rhs r (int-array (map sym (:rhs p))))
+        (aset base (inc r) (int (+ (aget base r) (count (:rhs p)) 1)))))
+    (let [ni (aget base np)
+          item-rule (int-array ni)
+          item-next (int-array ni -1)
+          prods-of (object-array na)
+          by-lhs (group-by #(aget lhs %) (range np))]
+      (dotimes [r np]
+        (let [^ints xs (aget rhs r) b (aget base r)]
+          (dotimes [d (inc (alength xs))]
+            (aset item-rule (+ b d) r)
+            (when (< d (alength xs)) (aset item-next (+ b d) (aget xs d))))))
+      (dotimes [a na] (aset prods-of a (int-array (get by-lhs a []))))
+      {:ns ns :nnt nnt :na na :nterm nterm :nsym nsym :w w :np np
+       :lhs lhs :rhs rhs :base base :ni ni :item-rule item-rule :item-next item-next :prods-of prods-of
+       :prod-prio (mapv (comp prio-of :prio) prods)
+       :term-prio (let [ps (:precedences g)]
+                    (mapv (fn [n] (prio-of (some #(when (some #{n} (:names %)) [(:assoc %) (:level %)]) ps)))
+                          (:terminals g)))
+       :start-la (mapv #(if (:partial %) 0 (dec nterm)) (:starts g))})))
+
+(defn- bits-or!
+  "a[ai..ai+w) |= b[bi..bi+w); true when a changed"
+  [^longs a ai ^longs b bi w]
+  (let [ai (long ai) bi (long bi) w (long w)]
+    (loop [k 0 changed false]
+      (if (< k w)
+        (let [x (aget a (int (+ ai k))) y (bit-or x (aget b (int (+ bi k))))]
+          (if (== x y)
+            (recur (inc k) changed)
+            (do (aset a (int (+ ai k)) y) (recur (inc k) true))))
+        changed))))
+
+(defn- bits-empty? [^longs a ai w]
+  (let [ai (long ai) w (long w)]
+    (loop [k 0] (cond (>= k w) true (zero? (aget a (int (+ ai k)))) (recur (inc k)) :else false))))
+
+(defn- bit-set! [^longs a ai t]
+  (let [i (int (+ (long ai) (quot (long t) 64)))]
+    (aset a i (bit-or (aget a i) (bit-shift-left 1 (rem (long t) 64))))))
+
+(defn- bit? [^longs a ai t]
+  (not (zero? (bit-and (aget a (int (+ (long ai) (quot (long t) 64)))) (bit-shift-left 1 (rem (long t) 64))))))
+
+(defn- first-sets
+  "Nullable nonterminals and the FIRST sets of every item's rest (Happy.Tabular.First): for item
+  i, :first-rest at i*w the terminals that begin rhs[dot..], :null-rest i whether it derives the
+  empty string"
+  [{:keys [na np w ni ^ints lhs ^objects rhs ^ints base]}]
+  (let [na (long na) w (long w)
+        nullable (boolean-array na)
+        first (long-array (* na w))
+        first-rest (long-array (* ni w))
+        null-rest (boolean-array ni)
+        term? (fn [x] (>= (long x) na))]
+    ;; nullable, then FIRST, each to its fixpoint
+    (loop []
+      (when (loop [r 0 changed false]
+              (if (< r np)
+                (let [^ints xs (aget rhs r) a (aget lhs r)]
+                  (if (and (not (aget nullable a))
+                           (every? #(and (not (term? %)) (aget nullable (int %))) xs))
+                    (do (aset nullable a true) (recur (inc r) true))
+                    (recur (inc r) changed)))
+                changed))
+        (recur)))
+    (loop []
+      (when (loop [r 0 changed false]
+              (if (< r np)
+                (let [^ints xs (aget rhs r) a (aget lhs r)
+                      ch (loop [k 0 ch false]
+                           (if (< k (alength xs))
+                             (let [x (aget xs k)]
+                               (if (term? x)
+                                 (let [had (bit? first (* a w) (- x na))]
+                                   (bit-set! first (* a w) (- x na))
+                                   (or ch (not had)))
+                                 (let [ch (or (bits-or! first (* a w) first (* x w) w) ch)]
+                                   (if (aget nullable x) (recur (inc k) ch) ch))))
+                             ch))]
+                  (recur (inc r) (or changed ch)))
+                changed))
+        (recur)))
+    ;; each item's rest, from the end of its production
+    (dotimes [r np]
+      (let [^ints xs (aget rhs r) b (aget base r) n (alength xs)]
+        (aset null-rest (+ b n) true)
+        (loop [d (dec n)]
+          (when (>= d 0)
+            (let [i (+ b d) x (aget xs d)]
+              (if (term? x)
+                (bit-set! first-rest (* i w) (- x na))
+                (do (bits-or! first-rest (* i w) first (* x w) w)
+                    (when (aget nullable x)
+                      (bits-or! first-rest (* i w) first-rest (* (inc i) w) w)
+                      (aset null-rest i (aget null-rest (inc i))))))
+              (recur (dec d)))))))
+    {:nullable nullable :first first :first-rest first-rest :null-rest null-rest}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The LR(0) item sets (Happy.Tabular.LALR's precalcClosure0, closure0, gotoClosure, genLR0items)
+
+(defn- closure-items
+  "For each nonterminal, the items (dot 0) of the productions its closure adds: those of the
+  nonterminals it begins with, transitively (precalcClosure0)"
+  [{:keys [na ^ints base ^objects prods-of ^objects rhs]}]
+  (let [na (long na)
+        words (quot (+ na 63) 64)
+        reach (long-array (* na words))
+        firsts (object-array na)]
+    (dotimes [a na]
+      (bit-set! reach (* a words) a)
+      (aset firsts a (int-array (distinct (for [r (aget ^objects prods-of a)
+                                                :let [^ints xs (aget rhs r)]
+                                                :when (and (pos? (alength xs)) (< (aget xs 0) na))]
+                                            (aget xs 0))))))
+    (loop []
+      (when (loop [a 0 changed false]
+              (if (< a na)
+                (recur (inc a) (reduce (fn [ch b] (or (bits-or! reach (* a words) reach (* (long b) words) words) ch))
+                                       changed (aget firsts a)))
+                changed))
+        (recur)))
+    (let [out (object-array na)]
+      (dotimes [a na]
+        (aset out a (int-array (sort (for [b (range na) :when (bit? reach (* a words) b)
+                                           r (aget ^objects prods-of b)]
+                                       (aget base r))))))
+      out)))
+
+(defn- lr0
+  "The LR(0) automaton, numbered as Happy's genLR0items numbers it: the initial sets (production
+  0..ns, the starts' and the next one's, at dot 0), then batch after batch, the sets of a batch
+  taken from the last to the first, each one's gotos by symbol in order, a new set numbered as
+  met. {:kernels [int-array of items, sorted] :gotos [int-array of symbol, target pairs]}"
+  [{:keys [ns np nsym ni ^ints base ^ints item-next ^ints item-rule] :as ga}]
+  (let [cl-items (closure-items ga)
+        kernels (ArrayList.)
+        gotos (ArrayList.)
+        index (HashMap.)
+        stamp (int-array ni)
+        buf (int-array ni)
+        out (int-array ni)
+        cnt (int-array nsym)
+        start (int-array nsym)
+        touched (int-array nsym)
+        add-state (fn [^ints k]
+                    (let [s (.size kernels)]
+                      (.add kernels k)
+                      (.add gotos nil)
+                      (.put index (Arrays/toString k) s)
+                      s))]
+    (dotimes [r (min (inc ns) np)] (add-state (int-array [(aget base r)])))
+    (loop [batch (vec (range (.size kernels)))]
+      (when (seq batch)
+        (let [fresh (ArrayList.)]
+          (doseq [s (rseq batch)]
+            (let [^ints k (.get kernels s)
+                  tag (int (inc s))
+                  ;; closure0: the kernel and its nonterminals' closure items
+                  m (loop [j 0 m 0]
+                      (if (< j (alength k))
+                        (let [i (aget k j)]
+                          (aset stamp i tag) (aset buf m i)
+                          (recur (inc j) (inc m)))
+                        m))
+                  m (loop [j 0 m m]
+                      (if (< j (alength k))
+                        (let [x (aget item-next (aget k j))]
+                          (if (and (>= x 0) (< x (long (:na ga))))
+                            (let [^ints cs (aget ^objects cl-items x)
+                                  m (loop [q 0 m m]
+                                      (if (< q (alength cs))
+                                        (let [i (aget cs q)]
+                                          (if (== (aget stamp i) tag)
+                                            (recur (inc q) m)
+                                            (do (aset stamp i tag) (aset buf m i) (recur (inc q) (inc m)))))
+                                        m))]
+                              (recur (inc j) m))
+                            (recur (inc j) m)))
+                        m))
+                  ;; the items by the symbol after their dot, the symbols in order
+                  nt (loop [j 0 nt 0]
+                       (if (< j m)
+                         (let [x (aget item-next (aget buf j))]
+                           (if (neg? x)
+                             (recur (inc j) nt)
+                             (let [c (aget cnt x)]
+                               (aset cnt x (inc c))
+                               (if (zero? c) (do (aset touched nt x) (recur (inc j) (inc nt))) (recur (inc j) nt)))))
+                         nt))
+                  _ (Arrays/sort touched 0 (int nt))
+                  _ (loop [j 0 off 0]
+                      (when (< j nt)
+                        (let [x (aget touched j)]
+                          (aset start x off)
+                          (recur (inc j) (+ off (aget cnt x))))))
+                  _ (dotimes [j m]
+                      (let [i (aget buf j) x (aget item-next i)]
+                        (when (>= x 0)
+                          (let [p (aget start x)]
+                            (aset out p (inc i))
+                            (aset start x (inc p))))))
+                  pairs (int-array (* 2 nt))]
+              (loop [j 0 off 0]
+                (when (< j nt)
+                  (let [x (aget touched j) c (aget cnt x)
+                        g (Arrays/copyOfRange out (int off) (int (+ off c)))
+                        _ (Arrays/sort g)
+                        key (Arrays/toString g)
+                        t (or (.get index key)
+                              (let [t (add-state g)] (.add fresh t) t))]
+                    (aset pairs (* 2 j) x)
+                    (aset pairs (inc (* 2 j)) (int t))
+                    (aset cnt x 0)
+                    (recur (inc j) (+ off c)))))
+              (.set gotos (int s) pairs)))
+          (recur (vec fresh)))))
+    {:kernels (vec kernels) :gotos (vec gotos) :closure-items cl-items}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The LALR(1) lookaheads
+;;;
+;;; Happy (propLookaheads, calcLookaheads) propagates lookaheads between kernel items, the
+;;; dragon book's way; DeRemer and Pennello's relations over the same LR(0) automaton give the
+;;; same sets: Read and Follow of each nonterminal transition (p, A), a kernel item [A -> a . b] of
+;;; q looking ahead to the Follow of every (p, A) with p --a--> q. The starts' items look ahead
+;;; to %eof, a %partial one's to the error token (startLookahead); the first rule's initial set
+;;; (state 13 of GHC's grammar), reached from no start, to nothing.
+
+(defn- csr
+  "The adjacency of n nodes, [off adj], from the edges src[e] -> dst[e]"
+  [n ^ArrayList src ^ArrayList dst]
+  (let [n (long n) m (.size src) off (int-array (inc n)) adj (int-array m) pos (int-array n)]
+    (dotimes [e m] (let [x (inc (long (.get src e)))] (aset off x (inc (aget off x)))))
+    (dotimes [x n] (aset off (inc x) (+ (aget off (inc x)) (aget off x))))
+    (System/arraycopy off 0 pos 0 n)
+    (dotimes [e m] (let [x (long (.get src e)) p (aget pos x)]
+                     (aset adj p (int (.get dst e))) (aset pos x (inc p))))
+    [off adj]))
+
+(defn- digraph!
+  "DeRemer and Pennello's digraph: F(x) = F'(x) + the F(y) of every x R y, in place over f
+  (F' on entry, w longs a node), R the adjacency off, adj; strongly connected nodes share their F"
+  [n w ^ints off ^ints adj ^longs f]
+  (let [n (long n) w (long w)
+        depth (int-array n) stack (int-array n)
+        fnode (int-array n) fedge (int-array n) fdepth (int-array n)
+        sp (int-array 1) fp (int-array 1)
+        inf Integer/MAX_VALUE
+        push! (fn [x]
+                (let [d (inc (aget sp 0)) p (aget fp 0)]
+                  (aset sp 0 d) (aset stack (dec d) (int x)) (aset depth (int x) d)
+                  (aset fnode p (int x)) (aset fedge p (aget off (int x))) (aset fdepth p d)
+                  (aset fp 0 (inc p))))]
+    (dotimes [x0 n]
+      (when (zero? (aget depth x0))
+        (push! x0)
+        (loop []
+          (let [p (dec (aget fp 0))]
+            (when (>= p 0)
+              (let [x (aget fnode p) e (aget fedge p)]
+                (if (< e (aget off (inc x)))
+                  (let [y (aget adj e)]
+                    (aset fedge p (inc e))
+                    (if (zero? (aget depth y))
+                      (push! y)
+                      (do (aset depth x (min (aget depth x) (aget depth y)))
+                          (bits-or! f (* x w) f (* y w) w))))
+                  (do (when (== (aget depth x) (aget fdepth p))
+                        (loop []
+                          (let [top (aget stack (dec (aget sp 0)))]
+                            (aset sp 0 (dec (aget sp 0)))
+                            (aset depth top inf)
+                            (when (not= top x)
+                              (System/arraycopy f (int (* x w)) f (int (* top w)) (int w))
+                              (recur)))))
+                      (aset fp 0 p)
+                      (when (pos? p)
+                        (let [parent (aget fnode (dec p))]
+                          (aset depth parent (min (aget depth parent) (aget depth x)))
+                          (bits-or! f (* parent w) f (* x w) w)))))
+                (recur)))))))
+    f))
+
+(defn- lalr
+  "The lookaheads of every kernel item: {:goto-all (the LR(0) gotos, state * nsym + symbol,
+  -1 none) :koff (each state's first kernel slot) :la (w longs a slot)}"
+  [{:keys [ns na nsym w ^objects rhs ^ints base ^objects prods-of start-la]}
+   {:keys [^booleans nullable ^booleans null-rest]}
+   {:keys [kernels gotos]}]
+  (let [ns (long ns) na (long na) nsym (long nsym) w (long w)
+        n-states (count kernels)
+        goto-all (int-array (* n-states nsym) -1)
+        trans-of (int-array (* n-states na) -1)
+        tstate (ArrayList.) tsym (ArrayList.)]
+    (dotimes [s n-states]
+      (let [^ints ps (gotos s)]
+        (loop [j 0]
+          (when (< j (alength ps))
+            (let [x (aget ps j)]
+              (aset goto-all (+ (* s nsym) x) (aget ps (inc j)))
+              (when (< x na)
+                (aset trans-of (+ (* s na) x) (int (.size tstate)))
+                (.add tstate s) (.add tsym x)))
+            (recur (+ j 2))))))
+    (let [nt (.size tstate)
+          go (fn ^long [^long q ^long x] (aget goto-all (+ (* q nsym) x)))
+          f (long-array (* nt w))
+          rs (ArrayList.) rd (ArrayList.)
+          is (ArrayList.) id (ArrayList.)]
+      ;; DR: the terminals goto(p, A) shifts, and the starts' lookaheads; reads: the nullable
+      ;; nonterminals goto(p, A) goes on with
+      (dotimes [x nt]
+        (let [r (go (.get tstate x) (.get tsym x)) ^ints ps (gotos r)]
+          (loop [j 0]
+            (when (< j (alength ps))
+              (let [y (aget ps j)]
+                (if (>= y na)
+                  (bit-set! f (* x w) (- y na))
+                  (when (aget nullable y)
+                    (.add rs x) (.add rd (aget trans-of (+ (* r na) y))))))
+              (recur (+ j 2))))))
+      (dotimes [i ns]
+        (bit-set! f (* (aget trans-of (+ (* i na) (aget ^ints (aget rhs i) 0))) w) (start-la i)))
+      (let [[off adj] (csr nt rs rd)] (digraph! nt w off adj f))
+      ;; includes: (q, X) includes (p, B) for B -> b X c, c nullable, p --b--> q
+      (dotimes [x nt]
+        (let [p (long (.get tstate x)) b (long (.get tsym x))]
+          (doseq [r (aget prods-of b)]
+            (let [^ints xs (aget rhs r) bs (aget base r)]
+              (loop [k 0 q p]
+                (when (< k (alength xs))
+                  (let [y (aget xs k)]
+                    (when (and (< y na) (aget null-rest (+ bs k 1)))
+                      (.add is (aget trans-of (+ (* q na) y))) (.add id x))
+                    (recur (inc k) (long (go q y))))))))))
+      (let [[off adj] (csr nt is id)] (digraph! nt w off adj f))
+      ;; the kernel items' lookaheads: the Follow of each transition their production began at
+      (let [koff (int-array (inc n-states))
+            _ (dotimes [s n-states] (aset koff (inc s) (+ (aget koff s) (alength ^ints (kernels s)))))
+            la (long-array (* (aget koff n-states) w))
+            slot (fn ^long [^long q ^long item]
+                   (let [k (Arrays/binarySearch ^ints (kernels q) (int item))]
+                     (when (neg? k) (throw (ex-info "happy: lookback: item not in kernel" {:state q :item item})))
+                     (+ (aget koff q) k)))]
+        (dotimes [i ns] (bit-set! la (* (slot i (aget base i)) w) (start-la i)))
+        (dotimes [x nt]
+          (let [p (long (.get tstate x)) b (long (.get tsym x))]
+            (doseq [r (aget prods-of b)]
+              (let [^ints xs (aget rhs r) bs (aget base r)]
+                (loop [k 0 q p]
+                  (when (< k (alength xs))
+                    (let [q (long (go q (aget xs k)))]
+                      (bits-or! la (* (slot q (+ bs k 1)) w) f (* x w) w)
+                      (recur (inc k) q))))))))
+        {:goto-all goto-all :koff koff :la la :n-transitions nt}))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The actions (Happy.Tabular.LALR's genActionTable and res, ProduceCode's getDefault)
+;;;
+;;; An action is nil (LR'Fail), :accept, :must-fail, [:shift state prio], [:reduce rule prio] or
+;;; [:multiple [dropped...] winner], as Happy's LRAction; a priority :no, :lowest or
+;;; [:prio assoc level], equal as Happy's Eq Priority has them (PrioLowest equal to nothing).
+
+(defn- prio= [p q]
+  (cond (and (= p :no) (= q :no)) true
+        (and (vector? p) (vector? q)) (= (nth p 2) (nth q 2))
+        :else false))
+
+(defn- multiple? [a] (and (vector? a) (= :multiple (nth a 0))))
+(defn- shift? [a] (and (vector? a) (= :shift (nth a 0))))
+(defn- reduce? [a] (and (vector? a) (= :reduce (nth a 0))))
+
+(defn- action=
+  "Happy's Eq LRAction"
+  [a b]
+  (cond (and (nil? a) (nil? b)) true
+        (or (nil? a) (nil? b)) false
+        (or (keyword? a) (keyword? b)) (= a b)
+        (not= (nth a 0) (nth b 0)) false
+        (multiple? a) (and (= (count (nth a 1)) (count (nth b 1)))
+                           (every? true? (map action= (nth a 1) (nth b 1)))
+                           (action= (nth a 2) (nth b 2)))
+        :else (and (= (nth a 1) (nth b 1)) (prio= (nth a 2) (nth b 2)))))
+
+(defn- nub [xs]
+  (reduce (fn [acc x] (if (some #(action= % x) acc) acc (conj acc x))) [] xs))
+
+(defn- res
+  "Happy's conflict resolution of two actions for a state and terminal (genActionTable's res):
+  a shift wins over a reduction, the reduction a conflict unless one of them is PrioLowest (a
+  %shift production, which loses silently) or precedences decide; of two reductions the later
+  (a conflict) unless one is PrioLowest; the losers are kept in a :multiple"
+  [x y]
+  (cond
+    (nil? x) y
+    (nil? y) x
+    (= x :must-fail) :must-fail
+    (= y :must-fail) :must-fail
+    (action= x y) x
+    (= x :accept) :accept
+    (= y :accept) :accept
+    (and (multiple? x) (multiple? y))
+    (let [[_ as a] x [_ bs b] y]
+      (if (action= a b)
+        [:multiple (nub (concat as bs)) a]
+        (let [r (res a b)]
+          (if (multiple? r)
+            (let [[_ cs c] r]
+              (cond (action= c a) [:multiple (nub (concat [b] as bs cs)) a]
+                    (action= c b) [:multiple (nub (concat [a] as bs cs)) b]
+                    :else (throw (ex-info "happy: failed invariant in resolve" {:a x :b y}))))
+            r))))
+    (multiple? x) (res x [:multiple [] y])
+    (multiple? y) (res [:multiple [] x] y)
+    (and (shift? x) (reduce? y)) (res y x)
+    (and (reduce? x) (shift? y))
+    (let [p (nth x 2) q (nth y 2)]
+      (cond (and (= p :lowest) (= q :lowest)) :must-fail
+            (= q :lowest) x
+            (= p :lowest) y
+            (or (= p :no) (= q :no)) [:multiple [x] y]
+            :else (let [i (nth p 2) j (nth q 2)]
+                    (cond (< i j) y
+                          (> i j) x
+                          :else (case (nth p 1) :left x :right y :nonassoc :must-fail)))))
+    (and (reduce? x) (reduce? y))
+    (let [p (nth x 2) q (nth y 2)]
+      (cond (and (= p :lowest) (= q :lowest)) [:multiple [x] y]
+            (= q :lowest) x
+            (= p :lowest) y
+            (or (= p :no) (= q :no)) [:multiple [x] y]
+            :else (let [i (nth p 2) j (nth q 2)]
+                    ;; as Happy has it: its second guard (j > i) is the first one's
+                    (cond (< i j) y
+                          (< (nth x 1) (nth y 1)) [:multiple [y] x]
+                          :else [:multiple [x] y]))))
+    :else (throw (ex-info "happy: conflict in resolve" {:a x :b y}))))
+
+(defn- action-val
+  "ProduceCode's actionVal: shift s+1, reduce -(r+1), accept -1, fail 0"
+  ^long [a]
+  (cond (nil? a) 0
+        (= a :accept) -1
+        (= a :must-fail) 0
+        (shift? a) (inc (long (nth a 1)))
+        (reduce? a) (- (inc (long (nth a 1))))
+        :else (action-val (nth a 2))))
+
+(defn- default-action
+  "ProduceCode's getDefault: the error token's action when it is a reduction (any other action
+  there: no default); else the first reduction by terminal, else the first conflict a reduction
+  won; else none"
+  [^objects cells]
+  (let [n (alength cells) e (aget cells 0)]
+    (if (some? e)
+      (when (or (reduce? e) (and (multiple? e) (reduce? (nth e 2)))) e)
+      (or (some (fn [t] (let [a (aget cells t)] (when (reduce? a) a))) (range n))
+          (some (fn [t] (let [a (aget cells t)] (when (and (multiple? a) (reduce? (nth a 2))) (nth a 2)))) (range n))))))
+
+(defn- actions
+  "Every state's actions, as genActionTable makes them from closure1 of the state's kernel with
+  its lookaheads (an item without lookaheads gives its closure none: Happy's unionNameMap over
+  them), in the order of the items: shifts, accepts and reductions by terminal, resolved by res;
+  then each state's default (getDefault) folded in. {:action (state * nterm + terminal ->
+  actionVal) :default (state -> actionVal) :conflicts [{:state :terminal :action}] :by-shift n}"
+  [{:keys [ns na nterm w ni ^ints item-next ^ints item-rule ^ints lhs ^objects prods-of ^ints base ^objects rhs
+           prod-prio term-prio start-la]}
+   {:keys [^longs first-rest ^booleans null-rest]}
+   {:keys [kernels closure-items]}
+   {:keys [^ints goto-all ^ints koff ^longs la]}]
+  (let [ns (long ns) na (long na) nterm (long nterm) w (long w) nsym (+ na nterm)
+        n-states (count kernels)
+        ^objects closure-items closure-items
+        ;; each nonterminal's productions that begin with a nonterminal: [B, the rest's item]
+        lc (object-array na)
+        _ (dotimes [a na]
+            (aset lc a (int-array (mapcat (fn [r] (let [^ints xs (aget rhs r)]
+                                                    (when (and (pos? (alength xs)) (< (aget xs 0) na))
+                                                      [(aget xs 0) (inc (aget base r))])))
+                                          (aget prods-of a)))))
+        reductions (mapv (fn [r p] [:reduce r p]) (range) prod-prio)
+        action (int-array (* n-states nterm))
+        defaults (int-array n-states)
+        la-nt (long-array (* na w))
+        nt-tag (int-array na)
+        queued (boolean-array na)
+        stack (int-array na)
+        tmp (long-array w)
+        las (long-array w)
+        item-tag (int-array ni)
+        kslot (int-array ni)
+        items (int-array ni)
+        cells (object-array nterm)
+        lowest (boolean-array nterm)
+        multi (boolean-array nterm)
+        conflicts (ArrayList.)
+        by-shift (long-array 1)]
+    (dotimes [q n-states]
+      (let [tag (int (inc q))
+            ^ints k (kernels q)
+            sp (int-array 1)
+            ;; LA_nt[c] |= the lookaheads an item with lookaheads l (at arr, off) gives c, its
+            ;; rest after c the item j: nothing when l is empty, else FIRST(rest), and l when the
+            ;; rest is nullable; c to the worklist when its lookaheads grew
+            give! (fn [c ^longs arr off j]
+                    (when-not (bits-empty? arr off w)
+                      (System/arraycopy first-rest (int (* (long j) w)) tmp 0 (int w))
+                      (when (aget null-rest (int j)) (bits-or! tmp 0 arr off w))
+                      (let [c (int c)
+                            grew (if (== (aget nt-tag c) tag)
+                                   (bits-or! la-nt (* c w) tmp 0 w)
+                                   (do (aset nt-tag c tag)
+                                       (System/arraycopy tmp 0 la-nt (int (* c w)) (int w))
+                                       true))]
+                        (when (and grew (not (aget queued c)))
+                          (aset queued c true)
+                          (aset stack (aget sp 0) c)
+                          (aset sp 0 (inc (aget sp 0)))))))]
+        ;; closure1: the kernel's lookaheads into its nonterminals', to the fixpoint
+        (dotimes [j (alength k)]
+          (let [i (aget k j) b (aget item-next i)]
+            (when (and (>= b 0) (< b na)) (give! b la (* (+ (aget koff q) j) w) (inc i)))))
+        (loop []
+          (when (pos? (aget sp 0))
+            (let [c (aget stack (dec (aget sp 0)))
+                  ^ints ps (aget lc c)]
+              (aset sp 0 (dec (aget sp 0)))
+              (aset queued c false)
+              (loop [j 0]
+                (when (< j (alength ps))
+                  (give! (aget ps j) la-nt (* c w) (aget ps (inc j)))
+                  (recur (+ j 2))))
+              (recur))))
+        ;; the items in order: the kernel's and its closure's
+        (let [m (loop [j 0 m 0]
+                  (if (< j (alength k))
+                    (let [i (aget k j)]
+                      (aset item-tag i tag) (aset kslot i (+ (aget koff q) j)) (aset items m i)
+                      (recur (inc j) (inc m)))
+                    m))
+              m (loop [j 0 m m]
+                  (if (< j (alength k))
+                    (let [b (aget item-next (aget k j))]
+                      (if (and (>= b 0) (< b na))
+                        (let [^ints cs (aget closure-items b)]
+                          (recur (inc j)
+                                 (loop [z 0 m m]
+                                   (if (< z (alength cs))
+                                     (let [i (aget cs z)]
+                                       (if (== (aget item-tag i) tag)
+                                         (recur (inc z) m)
+                                         (do (aset item-tag i (- tag)) (aset items m i) (recur (inc z) (inc m)))))
+                                     m))))
+                        (recur (inc j) m)))
+                    m))
+              _ (Arrays/sort items 0 (int m))
+              apply! (fn [t a]
+                       (let [t (int t) old (aget cells t)]
+                         (when (and (some? old) (not (action= old a))) (aset multi t true))
+                         (when (and (reduce? a) (= :lowest (nth a 2))) (aset lowest t true))
+                         (aset cells t (res old a))))]
+          (Arrays/fill cells nil)
+          (Arrays/fill lowest false)
+          (Arrays/fill multi false)
+          (dotimes [j m]
+            (let [i (aget items j) x (aget item-next i)]
+              (cond
+                (>= x na)
+                (apply! (- x na) [:shift (aget goto-all (+ (* q nsym) x)) (term-prio (- x na))])
+                (neg? x)
+                (let [r (aget item-rule i)]
+                  (if (< r ns)
+                    (apply! (start-la r) :accept)
+                    ;; a kernel item's lookaheads, a closure item's its nonterminal's (both for a
+                    ;; kernel item at dot 0 its closure adds again); by terminal in order
+                    (let [a (aget lhs r)]
+                      (Arrays/fill las 0)
+                      (when (== (aget item-tag i) tag) (bits-or! las 0 la (* (aget kslot i) w) w))
+                      (when (and (== (aget nt-tag a) tag) (== i (aget base r))) (bits-or! las 0 la-nt (* a w) w))
+                      (dotimes [z w]
+                        (loop [bits (aget las z)]
+                          (when-not (zero? bits)
+                            (apply! (+ (* z 64) (Long/numberOfTrailingZeros bits)) (reductions r))
+                            (recur (bit-and bits (unchecked-dec bits)))))))))
+                :else nil)))
+          ;; conflicts, the default, the effective actions
+          (dotimes [t nterm]
+            (let [a (aget cells t)]
+              (when (and (multiple? a) (seq (nth a 1)))
+                (.add conflicts {:state q :terminal t :action a}))
+              (when (and (aget lowest t) (aget multi t))
+                (aset by-shift 0 (inc (aget by-shift 0))))))
+          (let [d (default-action cells)
+                dv (action-val d)
+                row (* q nterm)]
+            (aset defaults q (int dv))
+            (dotimes [t nterm]
+              (let [a (aget cells t)]
+                (aset action (+ row t) (int (if (nil? a) dv (action-val a))))))))))
+    {:action action :default defaults :conflicts (vec conflicts) :by-shift (aget by-shift 0)}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The tables
+
+(defn- item-text
+  "An item as Happy's info file writes it: lhs -> a . b"
+  [g [r dot]]
+  (let [p ((:productions g) r) xs (:rhs p)]
+    (str (:lhs p) " -> " (str/join " " (concat (take dot xs) ["."] (drop dot xs))))))
+
+(defn build-tables
+  "Happy's LALR(1) tables of a grammar (read-grammar's): {:n-states :n-terms :n-nonterms
+  :action (int-array n-states * n-terms, the effective action of every state and terminal,
+  defaults folded in, Happy's encoding: shift s+1, reduce -(r+1), accept -1, fail 0) :goto
+  (int-array n-states * n-nonterms, -1 where none) :default (each state's default action) :rules
+  ([lhs-index rhs-length] per production) :kernels (each state's kernel items, [rule dot]...)
+  :terminals, :nonterminals, :productions (the grammar's, for reports)
+  :conflicts [{:state :terminal :action}...] (the ones Happy counts: a shift or a reduction
+  over a reduction neither %shift nor precedences decide) :by-shift (how many state and terminal
+  pairs had a %shift production's reduction among other actions: the conflicts %shift resolved)
+  :n-transitions :times (ms by phase)}"
+  [g]
+  (let [t0 (System/nanoTime)
+        ga (grammar-arrays g)
+        fs (first-sets ga)
+        t1 (System/nanoTime)
+        a (lr0 ga)
+        t2 (System/nanoTime)
+        l (lalr ga fs a)
+        t3 (System/nanoTime)
+        acts (actions ga fs a l)
+        t4 (System/nanoTime)
+        {:keys [na ns nnt nsym ^ints item-rule ^ints base]} ga
+        n-states (count (:kernels a))
+        ^ints goto-all (:goto-all l)
+        goto (int-array (* n-states nnt) -1)]
+    (dotimes [s n-states]
+      (dotimes [n nnt]
+        (aset goto (+ (* s nnt) n) (aget goto-all (+ (* s nsym) ns n)))))
+    {:n-states n-states :n-terms (:nterm ga) :n-nonterms nnt
+     :terminals (:terminals g) :nonterminals (:nonterminals g) :productions (:productions g)
+     :action (:action acts) :goto goto :default (:default acts)
+     :rules (mapv (fn [p] [(:lhs-index p) (count (:rhs p))]) (:productions g))
+     :kernels (mapv (fn [^ints k] (mapv (fn [i] (let [r (aget item-rule i)] [r (- i (aget base r))])) k))
+                    (:kernels a))
+     :conflicts (:conflicts acts) :by-shift (:by-shift acts) :n-transitions (:n-transitions l)
+     :times {:first (/ (- t1 t0) 1e6) :lr0 (/ (- t2 t1) 1e6) :lalr (/ (- t3 t2) 1e6)
+             :actions (/ (- t4 t3) 1e6)}}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Two automata compared
+
+(defn- action-text
+  "An effective action as text, its production's when it reduces (from t's grammar, if any)"
+  [t v]
+  (let [v (long v)]
+    (cond (zero? v) "fail"
+          (= v -1) "accept"
+          (pos? v) (str "shift " (dec v))
+          :else (let [r (- (inc v))
+                      p (get (:productions t) r)]
+                  (str "reduce " r (when p (str " (" (:lhs p) " -> " (str/join " " (:rhs p)) ")")))))))
+
+(defn compare-tables
+  "nil when the automata of two tables (build-tables' or decode-parser-hs' form) are equal up to
+  the numbering of their states: the same terminals, nonterminals and productions ([lhs length]),
+  and every state reachable from the starts' (the productions whose lhs is -1) paired with one of
+  the other's by walking both along shifts and gotos, each pair with the same actions (the same
+  reductions, shifts and gotos to paired states). Else the first differences (at most limit,
+  default 10): {:state [a b] :terminal or :nonterminal name :a :b (the actions or gotos as text)
+  :kernel [items]}, the kernel from whichever table has :kernels."
+  ([a b] (compare-tables a b 10))
+  ([a b limit]
+   (let [nt (long (:n-terms a)) nn (long (:n-nonterms a))
+         diffs (ArrayList.)
+         full? (fn [] (>= (.size diffs) (long limit)))
+         named (if (:kernels a) a (if (:kernels b) b a))
+         kernel (fn [sa sb] (let [k (if (identical? named a) (get (:kernels a) sa) (get (:kernels b) sb))
+                                  g {:productions (:productions named)}]
+                              (when k (mapv #(item-text g %) k))))
+         sym-name (fn [names i] (or (get names i) i))]
+     (cond
+       (or (not= nt (:n-terms b)) (not= nn (:n-nonterms b)))
+       [{:sizes {:a [nt nn] :b [(:n-terms b) (:n-nonterms b)]}}]
+       (not= (:rules a) (:rules b))
+       (vec (take limit (for [[i x y] (map vector (range) (:rules a) (:rules b)) :when (not= x y)]
+                          {:rule i :a x :b y})))
+       :else
+       (let [^ints aa (:action a) ^ints ab (:action b) ^ints ga (:goto a) ^ints gb (:goto b)
+             na (long (:n-states a)) nb (long (:n-states b))
+             a->b (int-array na -1) b->a (int-array nb -1)
+             queue (ArrayList.)
+             link! (fn [sa sb]
+                     (cond (and (neg? (aget a->b sa)) (neg? (aget b->a sb)))
+                           (do (aset a->b sa (int sb)) (aset b->a sb (int sa)) (.add queue [sa sb]) true)
+                           (and (== (aget a->b sa) sb) (== (aget b->a sb) sa)) true
+                           :else false))
+             starts (keep-indexed (fn [i [lhs _]] (when (= lhs -1) i)) (:rules a))]
+         (doseq [i starts] (link! i i))
+         (loop [j 0]
+           (when (and (< j (.size queue)) (not (full?)))
+             (let [[sa sb] (.get queue j)
+                   sa (long sa) sb (long sb)]
+               (dotimes [t nt]
+                 (let [x (aget aa (+ (* sa nt) t)) y (aget ab (+ (* sb nt) t))]
+                   (when-not (or (full?)
+                                 (if (and (pos? x) (pos? y)) (link! (dec x) (dec y)) (== x y)))
+                     (.add diffs {:state [sa sb] :terminal (sym-name (:terminals named) t)
+                                  :a (action-text named x) :b (action-text named y) :kernel (kernel sa sb)}))))
+               (dotimes [n nn]
+                 (let [x (aget ga (+ (* sa nn) n)) y (aget gb (+ (* sb nn) n))]
+                   (when-not (or (full?)
+                                 (if (and (>= x 0) (>= y 0)) (link! x y) (== x y)))
+                     (.add diffs {:state [sa sb] :nonterminal (sym-name (:nonterminals named) n)
+                                  :a (if (neg? x) "none" (str "goto " x)) :b (if (neg? y) "none" (str "goto " y))
+                                  :kernel (kernel sa sb)})))))
+             (recur (inc j))))
+         (when (pos? (.size diffs)) (vec diffs)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; arbace.repr.haskell.tables: the tables as a namespace
+;;;
+;;; Each state's action row and goto row are strings of base-36 numbers of fixed widths: an
+;;; action row the state's most frequent action (3 digits, the action + the offset: 1000, or
+;;; more than the productions), the number of terminals acting otherwise (2) and each of them (2)
+;;; with its action (3); a goto row the number of the state's gotos (2), each nonterminal (2) with
+;;; its target (3).
+
+(defn- action-offset [t] (max 1000 (inc (count (:rules t)))))
+
+(defn- b36
+  "n in base 36, k digits"
+  [^StringBuilder sb n k]
+  (let [s (Long/toString (long n) 36)]
+    (when (or (neg? (long n)) (> (count s) (long k)))
+      (throw (ex-info (str "happy: " n " does not fit " k " base-36 digits") {})))
+    (dotimes [_ (- (long k) (count s))] (.append sb \0))
+    (.append sb s)))
+
+(defn- encode-rows
+  "The action rows and the goto rows of the tables, a string a state"
+  [t]
+  (let [nt (long (:n-terms t)) nn (long (:n-nonterms t)) ns (long (:n-states t))
+        off (long (action-offset t))
+        ^ints action (:action t) ^ints goto (:goto t)
+        arows (for [s (range ns)]
+                (let [row (* s nt)
+                      vals (map #(aget action (+ row (long %))) (range nt))
+                      freq (frequencies vals)
+                      ;; the most frequent action, the least of those equally frequent
+                      d (reduce (fn [best [v c]]
+                                  (if (or (nil? best) (> (long c) (long (freq best)))
+                                          (and (== (long c) (long (freq best))) (< (long v) (long best))))
+                                    v best))
+                                nil freq)
+                      sb (StringBuilder.)
+                      odd (remove #(== (aget action (+ row (long %))) (long d)) (range nt))]
+                  (b36 sb (+ (long d) off) 3)
+                  (b36 sb (count odd) 2)
+                  (doseq [x odd] (b36 sb x 2) (b36 sb (+ (aget action (+ row (long x))) off) 3))
+                  (.toString sb)))
+        grows (for [s (range ns)]
+                (let [row (* s nn)
+                      gs (filter #(>= (aget goto (+ row (long %))) 0) (range nn))
+                      sb (StringBuilder.)]
+                  (b36 sb (count gs) 2)
+                  (doseq [n gs] (b36 sb n 2) (b36 sb (aget goto (+ row (long n))) 3))
+                  (.toString sb)))]
+    [(vec arows) (vec grows)]))
+
+(def ^:private loader-source
+  "The generated namespace's decoder, after its data"
+  ";; ---------------------------------------------------------------------------------------------
+;; The decoder
+
+(defn- digits
+  \"The base-36 number of k digits at i in s\"
+  ^long [^String s ^long i ^long k]
+  (loop [j 0 v 0]
+    (if (< j k)
+      (recur (inc j) (+ (* v 36) (Character/digit (.charAt s (int (+ i j))) 36)))
+      v)))
+
+(defn- decode-actions
+  \"The action table from action-rows: a state's row its most frequent action (3 digits, the
+  action + action-offset), the number of terminals acting otherwise (2) and each of them (2)
+  with its action (3)\"
+  ^ints []
+  (let [nt (long n-terms)
+        off (long action-offset)
+        out (int-array (* (long n-states) nt))]
+    (loop [rows (seq action-rows) s 0]
+      (when-let [^String r (first rows)]
+        (let [row (* s nt)
+              k (digits r 3 2)]
+          (Arrays/fill out (int row) (int (+ row nt)) (int (- (digits r 0 3) off)))
+          (loop [j 0 p 5]
+            (when (< j k)
+              (aset out (int (+ row (digits r p 2))) (int (- (digits r (+ p 2) 3) off)))
+              (recur (inc j) (+ p 5))))
+          (recur (next rows) (inc s)))))
+    out))
+
+(defn- decode-gotos
+  \"The goto table from goto-rows: a state's row the number of its gotos (2), each nonterminal
+  (2) with its target (3); -1 where none\"
+  ^ints []
+  (let [nn (long n-nonterms)
+        out (int-array (* (long n-states) nn) -1)]
+    (loop [rows (seq goto-rows) s 0]
+      (when-let [^String r (first rows)]
+        (let [row (* s nn)
+              k (digits r 0 2)]
+          (loop [j 0 p 2]
+            (when (< j k)
+              (aset out (int (+ row (digits r p 2))) (int (digits r (+ p 2) 3)))
+              (recur (inc j) (+ p 5))))
+          (recur (next rows) (inc s)))))
+    out))
+
+(def ^:private decoded
+  (delay
+    (let [terminals (vec (concat [\"error\"] (map first tokens) [\"%eof\"]))
+          nn (long n-nonterms)
+          sym (fn [i] (if (< (long i) nn) (nonterminals i) (terminals (- (long i) nn))))]
+      {:n-states n-states :n-terms n-terms :n-nonterms n-nonterms
+       :action (decode-actions) :goto (decode-gotos)
+       :rules (mapv (fn [[lhs rhs]] [lhs (count rhs)]) productions)
+       :starts (into {} (map-indexed (fn [i [nm]] [nm i]) starts))
+       :tokens (mapv (fn [[nm pattern]] {:name nm :pattern pattern}) tokens)
+       :terminals terminals
+       :nonterminals nonterminals
+       :productions (mapv (fn [i [lhs rhs prio kind line rule-lhs rule-rhs]]
+                            (let [l (if (neg? (long lhs)) (str \"%start_\" (first (starts i))) (nonterminals lhs))
+                                  r (mapv sym rhs)]
+                              {:lhs l :lhs-index lhs :rhs r :rule-lhs (or rule-lhs l) :rule-rhs (or rule-rhs r)
+                               :prio prio :kind kind :line line}))
+                          (range) productions)})))
+
+(defn tables
+  \"The tables, decoded once: {:n-states :n-terms :n-nonterms :action (int-array n-states *
+  n-terms: the action of a state on a terminal, Happy's: shift to s as s+1, reduce by production
+  r as -(r+1), accept -1, fail 0; a state's default action folded in) :goto (int-array n-states *
+  n-nonterms: the state after a reduction to a nonterminal, -1 where none) :rules ([lhs-index
+  rhs-length] by production) :starts (each parser's start state by name) :tokens ([{:name
+  :pattern}], terminal i+1 the i-th; terminal 0 the error token, the last %eof) :terminals
+  :nonterminals (the names by number) :productions ([{:lhs :lhs-index :rhs :rule-lhs :rule-rhs
+  :prio :kind :line}], arbace.repr.haskell.happy/read-grammar's without the code)}\"
+  []
+  @decoded)
+")
+
+(defn- sha256-hex [^bytes bs]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") bs)]
+    (apply str (map #(format "%02x" (bit-and 0xFF (long %))) d))))
+
+(defn- wrap-items
+  "The printed items as lines of at most about width characters, each line indented"
+  [items indent width]
+  (loop [items (seq items) line (StringBuilder.) acc []]
+    (if-let [^String x (first items)]
+      (if (and (pos? (.length line)) (> (+ (.length line) 1 (.length x)) (long width)))
+        (recur (next items) (doto (StringBuilder. ^String indent) (.append x)) (conj acc (.toString line)))
+        (recur (next items) (if (pos? (.length line)) (.append (.append line " ") x) (doto (StringBuilder. ^String indent) (.append x))) acc))
+      (str/join "\n" (if (pos? (.length line)) (conj acc (.toString line)) acc)))))
+
+(defn tables-source
+  "The text of arbace.repr.haskell.tables for a grammar (read-grammar's), its tables
+  (build-tables') and the SHA-256 of the grammar file it was read from"
+  [g t ^String digest]
+  (let [nn (count (:nonterminals g))
+        index (merge (zipmap (:nonterminals g) (range))
+                     (zipmap (:terminals g) (map #(+ nn %) (range))))
+        [arows grows] (encode-rows t)
+        prod-line (fn [p]
+                    (pr-str [(:lhs-index p) (mapv index (:rhs p)) (:prio p) (:kind p) (:line p)
+                             (when (not= (:rule-lhs p) (:lhs p)) (:rule-lhs p))
+                             (when (not= (:rule-rhs p) (:rhs p)) (:rule-rhs p))]))]
+    (str ";; Generated by arbace.repr.haskell.happy (-m arbace.repr.haskell.happy gen --parser-y FILE --out\n"
+         ";; arbace/repr/haskell/tables.ae) from GHC 9.14.1's compiler/GHC/Parser.y.source, the one of the\n"
+         ";; pinned ghc-9.14.1-src.tar.xz (test/haskell/corpus-ghc-9.14.1.edn), whose SHA-256 is\n"
+         ";; " digest ".\n"
+         ";; Do not edit: generate it again; happy's check compares it with a fresh generation.\n\n"
+         "(ns arbace.repr.haskell.tables\n"
+         "  \"The LALR(1) tables of GHC 9.14.1's grammar as Happy makes them, for repr/haskell's native\n"
+         "  parser: generated by arbace.repr.haskell.happy, which proves them equal, state for state, to\n"
+         "  the ones of GHC's own Parser.hs. (tables) decodes them once.\"\n"
+         "  (:import (java.util Arrays)))\n\n"
+         "(set! *warn-on-reflection* true)\n\n"
+         "(def ^:private n-states " (:n-states t) ")\n"
+         "(def ^:private n-terms " (:n-terms t) ")\n"
+         "(def ^:private n-nonterms " (:n-nonterms t) ")\n"
+         "(def ^:private action-offset " (action-offset t) ")\n\n"
+         "(def ^:private tokens\n"
+         "  \"The %token terminals, [name pattern]: terminal i+1 the i-th\"\n"
+         "  [" (str/join "\n   " (map (fn [x] (pr-str [(:name x) (:pattern x)])) (:tokens g))) "])\n\n"
+         "(def ^:private starts\n"
+         "  \"The %name and %partial parsers, [name start-symbol partial]: start state i the i-th\"\n"
+         "  [" (str/join "\n   " (map (fn [s] (pr-str [(:name s) (:symbol s) (:partial s)])) (:starts g))) "])\n\n"
+         "(def ^:private nonterminals\n"
+         "  \"The nonterminals' names by goto index\"\n"
+         "  [" (subs (wrap-items (map pr-str (:nonterminals g)) "   " 100) 3) "])\n\n"
+         "(def ^:private productions\n"
+         "  \"Every production, [lhs-index [symbol...] prio kind line rule-lhs rule-rhs]: a symbol a\n"
+         "  nonterminal's goto index, or n-nonterms + a terminal's number; rule-lhs and rule-rhs, the\n"
+         "  rule as Parser.y.source writes it, nil when the production's own\"\n"
+         "  [" (str/join "\n   " (map prod-line (:productions g))) "])\n\n"
+         "(def ^:private action-rows\n"
+         "  \"The action table, a state's row in base 36 (decode-actions)\"\n"
+         "  [" (str/join "\n   " (map pr-str arows)) "])\n\n"
+         "(def ^:private goto-rows\n"
+         "  \"The goto table, a state's row in base 36 (decode-gotos)\"\n"
+         "  [" (str/join "\n   " (map pr-str grows)) "])\n\n"
+         loader-source)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The commands
+
+(defn- expected-conflicts?
+  "Whether the tables' conflicts are the ones %expect allows: its number of shift/reduce
+  conflicts (0 without it), no reduce/reduce one"
+  [g t]
+  (let [sr (count (filter #(shift? (nth (:action %) 2)) (:conflicts t)))
+        rr (- (count (:conflicts t)) sr)]
+    [(and (= sr (or (:expect g) 0)) (zero? rr)) sr rr]))
+
+(defn- conflict-text [t {:keys [state terminal action]}]
+  (str "state " state ", " ((:terminals t) terminal) ": " (action-text t (action-val action))
+       " over " (str/join ", " (map #(action-text t (action-val %)) (nth action 1)))))
+
+(defn- cmd-gen [opts]
+  (let [t0 (System/nanoTime)
+        y (or (get opts "--parser-y") (throw (ex-info "happy gen: --parser-y FILE" {})))
+        out (or (get opts "--out") (throw (ex-info "happy gen: --out FILE" {})))
+        bytes (java.nio.file.Files/readAllBytes (.toPath (java.io.File. ^String y)))
+        g (read-grammar (String. bytes "UTF-8"))
+        t (build-tables g)
+        [ok sr rr] (expected-conflicts? g t)]
+    (doseq [c (:conflicts t)] (println "conflict:" (conflict-text t c)))
+    (if-not ok
+      (do (println (format "happy gen: %d shift/reduce and %d reduce/reduce conflicts, %%expect %s: no tables written"
+                           sr rr (pr-str (:expect g))))
+          1)
+      (let [text (tables-source g t (sha256-hex bytes))]
+        (spit out text)
+        (println (format "happy gen: %d productions, %d states, %d conflicts, %d resolved by %%shift: %s (%d bytes), %.1f s"
+                         (count (:productions g)) (:n-states t) (count (:conflicts t)) (:by-shift t) out
+                         (count (.getBytes ^String text "UTF-8")) (/ (- (System/nanoTime) t0) 1e9)))
+        0))))
+
+(defn- cmd-check [opts]
+  (let [t0 (System/nanoTime)
+        y (or (get opts "--parser-y") (throw (ex-info "happy check: --parser-y FILE" {})))
+        hs (or (get opts "--parser-hs") (throw (ex-info "happy check: --parser-hs FILE" {})))
+        tables-file (get opts "--tables" "arbace/repr/haskell/tables.ae")
+        bytes (java.nio.file.Files/readAllBytes (.toPath (java.io.File. ^String y)))
+        g (read-grammar (String. bytes "UTF-8"))
+        d (decode-parser-hs (slurp hs))
+        ns (count (:starts g))
+        ;; 1: the productions, Parser.hs's reductions
+        bad-prods (for [[i p r] (map vector (range) (:productions g) (:rules d))
+                        :when (and (>= i ns) (not= r [(:lhs-index p) (count (:rhs p))]))]
+                    [i (:lhs p) (:rhs p) r])
+        prods-ok (and (= (count (:productions g)) (count (:rules d))) (empty? bad-prods))
+        _ (doseq [b (take 10 bad-prods)] (println "production differs from Parser.hs's reduction:" (pr-str b)))
+        ;; 2: the tables, Parser.hs's
+        t (build-tables g)
+        diffs (compare-tables t d)
+        same-numbering (and (= (:n-states t) (:n-states d))
+                            (Arrays/equals ^ints (:action t) ^ints (:action d))
+                            (Arrays/equals ^ints (:goto t) ^ints (:goto d)))
+        [conflicts-ok sr rr] (expected-conflicts? g t)
+        _ (doseq [x diffs] (println "differs from Parser.hs:" (pr-str x)))
+        _ (doseq [c (:conflicts t)] (println "conflict:" (conflict-text t c)))
+        tables-ok (and (nil? diffs) conflicts-ok)
+        ;; 3: the committed tables, a fresh generation's (and what they decode to, the tables)
+        fresh (tables-source g t (sha256-hex bytes))
+        f (java.io.File. ^String tables-file)
+        committed (when (.exists f) (slurp f))
+        text-ok (= fresh committed)
+        decoded (when text-ok
+                  (load-file tables-file)
+                  ((resolve 'arbace.repr.haskell.tables/tables)))
+        decode-ok (and decoded
+                       (Arrays/equals ^ints (:action decoded) ^ints (:action t))
+                       (Arrays/equals ^ints (:goto decoded) ^ints (:goto t))
+                       (= (:rules decoded) (:rules t))
+                       (= (:productions decoded) (mapv #(dissoc % :code) (:productions g))))
+        ok (and prods-ok tables-ok text-ok decode-ok)]
+    (when-not text-ok
+      (println (if committed (str tables-file " differs from a fresh generation") (str tables-file ": no such file"))))
+    (when (and text-ok (not decode-ok)) (println tables-file "does not decode to the tables"))
+    (println (format (str "happy check: productions %s (%d, Parser.hs's reductions: %d); tables %s (%d states, %s; "
+                          "%d shift/reduce and %d reduce/reduce conflicts, %%expect %s; %d resolved by %%shift); "
+                          "%s %s; %.1f s: %s")
+                     (if prods-ok "equal" "DIFFER") (count (:productions g)) (count (:rules d))
+                     (if (nil? diffs) "equal" "DIFFER") (:n-states t)
+                     (if same-numbering "numbered as Parser.hs's" "numbered otherwise")
+                     sr rr (pr-str (:expect g)) (:by-shift t)
+                     tables-file (cond (not text-ok) "DIFFERS from a fresh generation"
+                                       (not decode-ok) "does NOT decode to the tables"
+                                       :else "equal to a fresh generation")
+                     (/ (- (System/nanoTime) t0) 1e9) (if ok "ok" "FAILED")))
+    (if ok 0 1)))
+
+(defn -main
+  "gen --parser-y FILE --out FILE: the tables of a grammar into a namespace (tables-source);
+  check --parser-y FILE --parser-hs FILE [--tables FILE]: the grammar's productions against
+  Parser.hs's reductions, its tables against Parser.hs's, the committed tables (by default
+  arbace/repr/haskell/tables.ae) against a fresh generation; status 0 when all hold"
+  [& args]
+  (let [[cmd & more] args
+        opts (when (even? (count more)) (apply hash-map more))
+        status (try
+                 (case (when opts cmd)
+                   "gen" (cmd-gen opts)
+                   "check" (cmd-check opts)
+                   (do (println "usage: -m arbace.repr.haskell.happy gen --parser-y FILE --out FILE")
+                       (println "       -m arbace.repr.haskell.happy check --parser-y FILE --parser-hs FILE [--tables FILE]")
+                       2))
+                 (catch Throwable e
+                   (.printStackTrace e)
+                   1))]
+    (shutdown-agents)
+    (flush)
+    (System/exit status)))

@@ -1,0 +1,709 @@
+(ns arbace.wasm.valid
+  "WebAssembly's validation (doc/wasm/SPEC.md §9; doc/wasm/WASM-SURVEY.md §4.3, WA3, WAS9 (a)): a module's Wasm forms (the items
+  arbace.repr.wasm.binary and arbace.repr.wasm.text read) checked by the specification's typing rules, Wasm 3.0's (GC's
+  subtyping and iso-recursive type equivalence, typed function references, tail calls, exceptions, memory64 and multiple
+  memories, SIMD128 and relaxed SIMD), as the reference interpreter's algorithm states them (WebAssembly/spec wg-3.0,
+  interpreter/valid/valid.ml and match.ml: the same order of checks and the same messages): an operand stack of value types
+  with an ellipsis for the unreachable code's unknown bottom and `bot` for an unknown type, a label stack, the locals'
+  initialization. `check` returns nil for a valid module or throws ex-info {:wasm/invalid MESSAGE}.
+
+  Types inside the checker: value types `i32` `i64` `f32` `f64` `v128` (symbols), `:bot`, and `[:ref NULL? HEAP]`, HEAP an
+  abstract heap type symbol, a type index, or `:bot`. A type index's identity is its canonical form (`canon`): its recursive
+  group with the group's own indices as `[:rec J]` and every other index replaced by its canonical form, and its place in the
+  group, so that two indices are the same type exactly when the spec's closed deftypes are equal.")
+
+(set! *warn-on-reflection* true)
+
+(defn- invalid [^String msg] (throw (ex-info msg {:wasm/invalid msg})))
+(defn- require! [b msg] (when-not b (invalid (if (fn? msg) (msg) msg))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; value types
+
+(def ^:private shorthand
+  {'funcref 'func 'externref 'extern 'anyref 'any 'eqref 'eq 'i31ref 'i31 'structref 'struct 'arrayref 'array 'exnref 'exn
+   'nullref 'none 'nullfuncref 'nofunc 'nullexternref 'noextern 'nullexnref 'noexn})
+
+(defn vt
+  "A value type form (doc/wasm/SPEC.md §2) as the checker's."
+  [t]
+  (cond
+    (#{'i32 'i64 'f32 'f64 'v128} t) t
+    (shorthand t) [:ref true (shorthand t)]
+    (and (seq? t) (= 'ref (first t)) (= 'null (second t))) [:ref true (nth t 2)]
+    (and (seq? t) (= 'ref (first t))) [:ref false (second t)]
+    :else (invalid (str "unknown value type " (pr-str t)))))
+
+(defn- ref? [t] (vector? t))
+(defn- num? [t] (or (#{'i32 'i64 'f32 'f64} t) (= t :bot)))
+(defn- vec? [t] (or (= t 'v128) (= t :bot)))
+(defn- reft? [t] (or (vector? t) (= t :bot)))
+
+(defn- ht-str [h] (cond (= h :bot) "something" (integer? h) (str h) :else (str h)))
+(defn- rt-str [[_ n h]] (str "(ref " (when n "null ") (ht-str h) ")"))
+(defn- t-str [t] (cond (= t :bot) "bot" (vector? t) (rt-str t) :else (str t)))
+(defn- ts-str [ts] (str "[" (apply str (interpose " " (map t-str ts))) "]"))
+(defn- st-str [st] (if (#{'i8 'i16} st) (str st) (t-str st)))
+(defn- ft-str [[st m]] (if m (str "(mut " (st-str st) ")") (st-str st)))
+
+(defn- u-str [^long x] (Long/toUnsignedString x))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the context
+
+(defn- lookup [category xs ^long x]
+  (if (and (>= x 0) (< x (count xs))) (nth xs x) (invalid (str "unknown " category " " (u-str x)))))
+
+(defn- type-def [c x] (lookup "type" (:types c) x))
+
+;; a type definition: {:final B :supers [I...] :comp COMP :group [START N]}, COMP [:func [T...] [T...]], [:struct [FT...]] or
+;; [:array FT], FT [STORAGE MUT?] (STORAGE a value type or i8, i16)
+
+(defn- storage [s] (if (#{'i8 'i16} s) s (vt s)))
+(defn- field [[_ s m]] [(storage s) (boolean m)])
+
+(defn- comp-of [c]
+  (case (first c)
+    func [:func (mapv vt (nth c 1)) (mapv vt (nth c 2))]
+    struct [:struct (mapv field (nth c 1))]
+    array [:array (field (nth c 1))]
+    (invalid (str "unknown type " (pr-str c)))))
+
+(defn- sub-of [t]
+  (if (and (seq? t) (= 'sub (first t)))
+    (let [{:keys [final supers]} (second t)] {:final (boolean final) :supers (vec supers) :comp (comp-of (nth t 2))})
+    {:final true :supers [] :comp (comp-of t)}))
+
+(defn- map-heaps
+  "COMP with each heap type f's image (f takes a heap type)."
+  [f comp]
+  (let [t (fn [v] (if (vector? v) [:ref (nth v 1) (f (nth v 2))] v))
+        fld (fn [[s m]] [(if (vector? s) (t s) s) m])]
+    (case (first comp)
+      :func [:func (mapv t (nth comp 1)) (mapv t (nth comp 2))]
+      :struct [:struct (mapv fld (nth comp 1))]
+      :array [:array (fld (nth comp 1))])))
+
+(defn- canon
+  "The canonical form of type index x (the closed deftype's identity)."
+  [c ^long x]
+  (let [^java.util.HashMap memo (:canon c)]
+    (or (.get memo x)
+        (let [d (type-def c x)
+              [s n] (:group d)
+              s (long s) n (long n)
+              ref (fn [y] (if (integer? y)
+                            (let [y (long y)] (if (and (>= y s) (< y (+ s n))) [:rec (- y s)] (canon c y)))
+                            y))
+              g (vec (for [i (range s (+ s n)) :let [di (type-def c i)]]
+                       [(:final di) (mapv ref (:supers di)) (map-heaps ref (:comp di))]))
+              v [:def g (- x s)]]
+          (.put memo x v)
+          v))))
+
+(defn- expand [c x] (:comp (type-def c x)))
+
+(defn- func-type [c x]
+  (let [cm (expand c x)]
+    (if (= :func (first cm)) [(nth cm 1) (nth cm 2)] (invalid (str "non-function type " (u-str x))))))
+(defn- struct-type [c x]
+  (let [cm (expand c x)] (if (= :struct (first cm)) (nth cm 1) (invalid (str "non-structure type " (u-str x))))))
+(defn- array-type [c x]
+  (let [cm (expand c x)] (if (= :array (first cm)) (nth cm 1) (invalid (str "non-array type " (u-str x))))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; matching (match.ml)
+
+(def ^:private any-family '#{any none eq struct array i31})
+
+(defn- top-of-heap [c h]
+  (cond (integer? h) (if (= :func (first (expand c h))) 'func 'any)
+        (any-family h) 'any
+        ('#{func nofunc} h) 'func
+        ('#{exn noexn} h) 'exn
+        ('#{extern noextern} h) 'extern
+        :else h))
+
+(declare match-heap)
+
+(defn- match-def [c x1 x2]
+  (or (= x1 x2)
+      (= (canon c x1) (canon c x2))
+      (boolean (some #(match-heap c % x2) (:supers (type-def c x1))))))
+
+(defn match-heap [c h1 h2]
+  (cond
+    (= h1 :bot) true
+    (and (= h1 'eq) (= h2 'any)) true
+    (and ('#{struct array i31} h1) ('#{any eq} h2)) true
+    (= h1 'none) (match-heap c h2 'any)
+    (= h1 'nofunc) (match-heap c h2 'func)
+    (= h1 'noexn) (match-heap c h2 'exn)
+    (= h1 'noextern) (match-heap c h2 'extern)
+    (and (integer? h1) (integer? h2)) (match-def c h1 h2)
+    (integer? h1) (case (first (expand c h1))
+                    :struct (contains? '#{any eq struct} h2)
+                    :array (contains? '#{any eq array} h2)
+                    :func (= h2 'func))
+    :else (= h1 h2)))
+
+(defn match-ref [c [_ n1 h1] [_ n2 h2]]
+  (and (or (= n1 n2) (and (not n1) n2)) (match-heap c h1 h2)))
+
+(defn match-val [c t1 t2]
+  (cond (= t1 :bot) true
+        (and (vector? t1) (vector? t2)) (match-ref c t1 t2)
+        :else (= t1 t2)))
+
+(defn- match-results [c ts1 ts2]
+  (and (= (count ts1) (count ts2)) (every? true? (map #(match-val c %1 %2) ts1 ts2))))
+
+(defn- match-storage [c s1 s2]
+  (cond (and (#{'i8 'i16} s1) (#{'i8 'i16} s2)) (= s1 s2)
+        (or (#{'i8 'i16} s1) (#{'i8 'i16} s2)) false
+        :else (match-val c s1 s2)))
+
+(defn- match-field [c [s1 m1] [s2 m2]]
+  (and (= m1 m2) (match-storage c s1 s2) (or (not m1) (match-storage c s2 s1))))
+
+(defn- match-comp [c c1 c2]
+  (case [(first c1) (first c2)]
+    [:struct :struct] (let [f1 (nth c1 1) f2 (nth c2 1)]
+                        (and (>= (count f1) (count f2)) (every? true? (map #(match-field c %1 %2) f1 f2))))
+    [:array :array] (match-field c (nth c1 1) (nth c2 1))
+    [:func :func] (and (match-results c (nth c2 1) (nth c1 1)) (match-results c (nth c1 2) (nth c2 2)))
+    false))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; type checks
+
+(defn- check-heap [c h] (when (integer? h) (type-def c h)) nil)
+(defn- check-val [c t] (when (vector? t) (check-heap c (nth t 2))) nil)
+(defn- check-comp [c cm]
+  (case (first cm)
+    :func (do (run! #(check-val c %) (nth cm 1)) (run! #(check-val c %) (nth cm 2)))
+    :struct (run! (fn [[s]] (when (vector? s) (check-val c s))) (nth cm 1))
+    :array (let [[s] (nth cm 1)] (when (vector? s) (check-val c s)))))
+
+(defn- defaultable? [t] (or (not (vector? t)) (nth t 1)))
+(defn- unpacked [s] (if (#{'i8 'i16} s) 'i32 s))
+
+(defn- check-limits [{:keys [min max]} ^long range msg]
+  (require! (<= (Long/compareUnsigned (long min) range) 0) msg)
+  (when (some? max)
+    (require! (<= (Long/compareUnsigned (long max) range) 0) msg)
+    (require! (<= (Long/compareUnsigned (long min) (long max)) 0) "size minimum must not be greater than maximum")))
+
+(defn- addr [m] (if (:i64 m) 'i64 'i32))
+
+(defn- check-memtype [m]
+  (if (:i64 m)
+    (check-limits m 0x1000000000000 "memory size must be at most 2^48 pages (256 TiB) for i64")
+    (check-limits m 0x10000 "memory size must be at most 2^16 pages (4 GiB) for i32")))
+
+(defn- check-tabletype [c m]
+  (check-val c (vt (:type m)))
+  (if (:i64 m)
+    (check-limits m -1 "table size must be at most 2^64-1 for i64")
+    (check-limits m 0xffffffff "table size must be at most 2^32-1 for i32")))
+
+(defn- check-tagtype [c x]
+  (let [[_ ts2] (func-type c x)] (require! (empty? ts2) "non-empty tag result type")))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the operand stack: [ELLIPSIS? [T...]] (the top last)
+
+(defn- peek-t [^long i [_ ts]]
+  (let [n (count ts)] (if (< i n) (nth ts (- n 1 i)) :bot)))
+
+(defn- peek-ref [i s]
+  (let [t (peek-t i s)]
+    (cond (vector? t) t
+          (= t :bot) [:ref false :bot]
+          :else (invalid (str "type mismatch: instruction requires reference type but stack has " (t-str t))))))
+
+(defn- match-stack [c ts1 ts2]
+  ;; ts1 the stack's, ts2 the instruction's
+  (require! (match-results c ts1 ts2)
+            #(str "type mismatch: instruction requires " (ts-str ts2) " but stack has " (ts-str ts1))))
+
+(defn- pop-s [c [ell1 ts1] [ell2 ts2]]
+  (let [n1 (count ts1) n2 (count ts2) n (min n1 n2)
+        n3 (if ell2 (- n1 n) 0)]
+    (match-stack c (into (vec (repeat n3 :bot)) (subvec ts2 (- n2 n))) ts1)
+    [ell2 (if ell1 [] (subvec ts2 0 (- n2 n)))]))
+
+(defn- push-s [[ell1 ts1] [ell2 ts2]] [(or ell1 ell2) (into ts2 ts1)])
+
+(defn- sig [ins outs] [[false (vec ins)] [false (vec outs)] nil])
+(defn- sig* [ins outs] [[true (vec ins)] [true (vec outs)] nil])
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the instructions' signatures by name (the numeric and vector ones)
+
+(def ^:private lane-type {"i8x16" 'i32 "i16x8" 'i32 "i32x4" 'i32 "i64x2" 'i64 "f32x4" 'f32 "f64x2" 'f64})
+(def ^:private lanes {"i8x16" 16 "i16x8" 8 "i32x4" 4 "i64x2" 2 "f32x4" 4 "f64x2" 2})
+(def ^:private num-size {'i32 4 'i64 8 'f32 4 'f64 8})
+
+(def ^:private num-cmp #{"eq" "ne" "lt_s" "lt_u" "gt_s" "gt_u" "le_s" "le_u" "ge_s" "ge_u" "lt" "gt" "le" "ge"})
+(def ^:private num-un #{"clz" "ctz" "popcnt" "abs" "neg" "ceil" "floor" "trunc" "nearest" "sqrt" "extend8_s" "extend16_s" "extend32_s"})
+(def ^:private num-bin #{"add" "sub" "mul" "div_s" "div_u" "rem_s" "rem_u" "and" "or" "xor" "shl" "shr_s" "shr_u" "rotl" "rotr"
+                         "div" "min" "max" "copysign"})
+(def ^:private vec-tern #{"bitselect" "relaxed_madd" "relaxed_nmadd" "relaxed_laneselect" "relaxed_dot_i8x16_i7x16_add_s"})
+(def ^:private vec-un-prefix ["not" "abs" "neg" "popcnt" "sqrt" "ceil" "floor" "trunc" "nearest" "extend" "convert" "demote"
+                              "promote" "extadd" "relaxed_trunc"])
+
+(defn- mem-size
+  "A memory instruction's access size in bytes and whether it stores: [SIZE STORE? LANE?], or nil."
+  [^String shape ^String op]
+  (let [t (symbol shape)]
+    (cond
+      (= shape "v128")
+      (case op
+        "load" [16 false] "store" [16 true]
+        ("load8x8_s" "load8x8_u" "load16x4_s" "load16x4_u" "load32x2_s" "load32x2_u") [8 false]
+        "load8_splat" [1 false] "load16_splat" [2 false] "load32_splat" [4 false] "load64_splat" [8 false]
+        "load32_zero" [4 false] "load64_zero" [8 false]
+        "load8_lane" [1 false true] "load16_lane" [2 false true] "load32_lane" [4 false true] "load64_lane" [8 false true]
+        "store8_lane" [1 true true] "store16_lane" [2 true true] "store32_lane" [4 true true] "store64_lane" [8 true true]
+        nil)
+      (num-size t)
+      (cond (= op "load") [(num-size t) false]
+            (= op "store") [(num-size t) true]
+            (re-matches #"load(8|16|32)_[su]" op) [(quot (Long/parseLong (second (re-matches #"load(8|16|32)_[su]" op))) 8) false]
+            (re-matches #"store(8|16|32)" op) [(quot (Long/parseLong (second (re-matches #"store(8|16|32)" op))) 8) true]))))
+
+(defn- simple-sig
+  "[INS OUTS] of a numeric or vector instruction without a memory or lane immediate, or nil."
+  [^String nm]
+  (let [k (.indexOf nm ".")]
+    (when (pos? k)
+      (let [shape (subs nm 0 k) op (subs nm (inc k)) t (symbol shape)]
+        (cond
+          (num-size t)
+          (cond (= op "eqz") [[t] '[i32]]
+                (num-cmp op) [[t t] '[i32]]
+                (num-un op) [[t] [t]]
+                (num-bin op) [[t t] [t]]
+                :else (when-let [[_ y] (re-matches #"[a-z_]+_(i32|i64|f32|f64)(?:_[su])?" op)] [[(symbol y)] [t]]))
+          (or (= shape "v128") (lanes shape))
+          (cond (= op "splat") [[(lane-type shape)] '[v128]]
+                (#{"any_true" "all_true" "bitmask"} op) ['[v128] '[i32]]
+                (#{"shl" "shr_s" "shr_u"} op) ['[v128 i32] '[v128]]
+                (vec-tern op) ['[v128 v128 v128] '[v128]]
+                (some #(.startsWith op ^String %) vec-un-prefix) ['[v128] '[v128]]
+                (or (.startsWith op "load") (.startsWith op "store") (.contains op "lane") (= op "const") (= op "shuffle")) nil
+                :else ['[v128 v128] '[v128]]))))))
+
+(def ^:private sigs
+  (memoize (fn [nm] (simple-sig (str nm)))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; instructions (valid.ml's check_instr)
+
+(defn- lbl [c x] (lookup "label" (:labels c) x))
+(defn- local [c x] (lookup "local" (:locals c) x))
+(defn- global [c x] (lookup "global" (:globals c) x))
+(defn- memory [c x] (lookup "memory" (:mems c) x))
+(defn- table [c x] (lookup "table" (:tables c) x))
+(defn- func [c x] (lookup "function" (:funcs c) x))
+(defn- data [c x] (lookup "data segment" (:datas c) x))
+(defn- elem [c x] (lookup "elem segment" (:elems c) x))
+(defn- tag [c x] (lookup "tag" (:tags c) x))
+
+(defn- blocktype [c bt]
+  (let [t (:bt bt)]
+    (cond (nil? t) [[] []]
+          (vector? t) (let [v (vt (first t))] (check-val c v) [[] [v]])
+          :else (func-type c t))))
+
+(defn- check-memop
+  "valid.ml's check_memop, with the testsuite's rule for the offset: its bound is the accessed memory's address type (wg-3.0's
+  interpreter reads memory 0's there; load64.wast's assertion names the accessed one)."
+  [mm m ^long size]
+  (require! (<= (long (:align m)) (Long/numberOfTrailingZeros size)) "alignment must not be larger than natural")
+  (do
+    (when-not (:i64 mm)
+      (require! (< (Long/compareUnsigned (long (:offset m)) 0x100000000) 0) "offset out of range"))))
+
+(defn- diff-ref [[_ n1 h1] [_ n2 _]] [:ref (if n2 false n1) h1])
+
+(declare check-block check-instrs)
+
+(defn- results-match! [c ts2]
+  (require! (match-results c ts2 (:results c))
+            #(str "type mismatch: current function requires result type " (ts-str (:results c)) " but callee returns " (ts-str ts2))))
+
+(defn- table-funcs! [c rt]
+  (require! (match-ref c rt [:ref true 'func])
+            #(str "type mismatch: instruction requires table of function type but table has element type " (rt-str rt))))
+
+(defn- check-catch [c cc]
+  (let [target (fn [ts1 x]
+                 (let [l (lbl c x)]
+                   (require! (match-results c ts1 l)
+                             #(str "type mismatch: catch handler requires " (ts-str l) " but label has " (ts-str ts1)))))]
+    (case (first cc)
+      catch (target (first (func-type c (tag c (nth cc 1)))) (nth cc 2))
+      catch_ref (target (conj (first (func-type c (tag c (nth cc 1)))) [:ref false 'exn]) (nth cc 2))
+      catch_all (target [] (nth cc 1))
+      catch_all_ref (target [[:ref false 'exn]] (nth cc 1)))))
+
+(defn- check-instr
+  "[INS OUTS XS] of instruction e on stack s (XS the locals it initializes)."
+  [c e s]
+  (let [nm (first e)
+        a1 (when (next e) (second e))]
+    (case nm
+      unreachable (sig* [] [])
+      nop (sig [] [])
+      drop (sig [(peek-t 0 s)] [])
+      select (if (vector? a1)
+               (let [ts (mapv vt a1)]
+                 (require! (= 1 (count ts)) "invalid result arity other than 1 is not (yet) allowed")
+                 (run! #(check-val c %) ts)
+                 (sig (conj (into ts ts) 'i32) ts))
+               (let [t (peek-t 1 s)]
+                 (require! (or (num? t) (vec? t)) #(str "type mismatch: instruction requires numeric or vector type but stack has " (t-str t)))
+                 (sig [t t 'i32] [t])))
+      (block loop) (let [[ts1 ts2 :as it] (blocktype c a1)]
+                     (check-block (update c :labels conj (if (= nm 'block) ts2 ts1)) (nth e 2) it)
+                     (sig ts1 ts2))
+      if (let [[ts1 ts2 :as it] (blocktype c a1)
+               c' (update c :labels conj ts2)]
+           (check-block c' (nth e 2) it)
+           (check-block c' (if (> (count e) 3) (nth e 3) []) it)
+           (sig (conj ts1 'i32) ts2))
+      try_table (let [[ts1 ts2 :as it] (blocktype c a1)]
+                  (run! #(check-catch c %) (nth e 2))
+                  (check-block (update c :labels conj ts2) (nth e 3) it)
+                  (sig ts1 ts2))
+      ;; the legacy exceptions (WA8; the spec's legacy/ documents): try's body as a block's, each catch's as a block's from the
+      ;; tag's values, its label a catch's (rethrow's), delegate's label in the try's context
+      try (let [[ts1 ts2 :as it] (blocktype c a1)
+                hs (nth e 3)]
+            (check-block (update c :labels conj ts2) (nth e 2) it)
+            (if (seq? hs)
+              (lbl c (second hs))
+              (let [c' (update c :labels conj (with-meta (vec ts2) {:catch true}))]
+                (doseq [h hs]
+                  (case (first h)
+                    catch (check-block c' (nth h 2) [(first (func-type c (tag c (nth h 1)))) ts2])
+                    catch_all (check-block c' (nth h 1) [[] ts2])))))
+            (sig ts1 ts2))
+      rethrow (do (require! (:catch (meta (lbl c a1))) "invalid rethrow label") (sig* [] []))
+      br (sig* (lbl c a1) [])
+      br_if (let [l (lbl c a1)] (sig (conj l 'i32) l))
+      br_table (let [d (nth e 2) ld (lbl c d) n (count ld)
+                     ts (mapv #(peek-t (- n %) s) (range n))]
+                 (match-stack c ts ld)
+                 (run! #(match-stack c ts (lbl c %)) a1)
+                 (sig* (conj ts 'i32) []))
+      br_on_null (let [[_ _ h] (peek-ref 0 s) l (lbl c a1)]
+                   (sig (conj l [:ref true h]) (conj l [:ref false h])))
+      br_on_non_null (let [l (lbl c a1)]
+                       (require! (seq l) #(str "type mismatch: instruction requires reference type but label has " (ts-str l)))
+                       (let [t1 (peek l) ts0 (pop l)]
+                         (require! (reft? t1) #(str "type mismatch: instruction requires reference type but label has " (t-str t1)))
+                         (sig (conj ts0 [:ref true (nth t1 2)]) ts0)))
+      (br_on_cast br_on_cast_fail)
+      (let [x a1 rt1 (vt (nth e 2)) rt2 (vt (nth e 3))]
+        (check-val c rt1) (check-val c rt2)
+        (require! (match-ref c rt2 rt1) #(str "type mismatch on cast: type " (rt-str rt2) " does not match " (rt-str rt1)))
+        (let [want (if (= nm 'br_on_cast) rt2 (diff-ref rt1 rt2))
+              l (lbl c x)]
+          (require! (seq l) #(str "type mismatch: instruction requires type " (rt-str want) " but label has " (ts-str l)))
+          (let [t1 (peek l) ts0 (pop l)]
+            (require! (match-val c want t1) #(str "type mismatch: instruction requires type " (rt-str want) " but label has " (ts-str l)))
+            (sig (conj ts0 rt1) (conj ts0 (if (= nm 'br_on_cast) (diff-ref rt1 rt2) rt2))))))
+      return (sig* (:results c) [])
+      call (let [[ts1 ts2] (func-type c (func c a1))] (sig ts1 ts2))
+      call_ref (let [[ts1 ts2] (func-type c a1)] (sig (conj ts1 [:ref true a1]) ts2))
+      call_indirect (let [tb (table c a1) [ts1 ts2] (func-type c (nth e 2))]
+                      (table-funcs! c (:rt tb))
+                      (sig (conj ts1 (:at tb)) ts2))
+      return_call (let [[ts1 ts2] (func-type c (func c a1))] (results-match! c ts2) (sig* ts1 []))
+      return_call_ref (let [[ts1 ts2] (func-type c a1)] (results-match! c ts2) (sig* (conj ts1 [:ref true a1]) []))
+      return_call_indirect (let [tb (table c a1) [ts1 ts2] (func-type c (nth e 2))]
+                             (table-funcs! c (:rt tb))
+                             (results-match! c ts2)
+                             (sig* (conj ts1 (:at tb)) []))
+      throw (let [[ts1] (func-type c (tag c a1))] (sig* ts1 []))
+      throw_ref (sig* [[:ref true 'exn]] [])
+      local.get (let [[init t] (local c a1)] (require! init "uninitialized local") (sig [] [t]))
+      local.set (let [[_ t] (local c a1)] [[false [t]] [false []] [a1]])
+      local.tee (let [[_ t] (local c a1)] [[false [t]] [false [t]] [a1]])
+      global.get (let [g (global c a1)] (sig [] [(:t g)]))
+      global.set (let [g (global c a1)] (require! (:mut g) "immutable global") (sig [(:t g)] []))
+      table.get (let [tb (table c a1)] (sig [(:at tb)] [(:rt tb)]))
+      table.set (let [tb (table c a1)] (sig [(:at tb) (:rt tb)] []))
+      table.size (let [tb (table c a1)] (sig [] [(:at tb)]))
+      table.grow (let [tb (table c a1)] (sig [(:rt tb) (:at tb)] [(:at tb)]))
+      table.fill (let [tb (table c a1)] (sig [(:at tb) (:rt tb) (:at tb)] []))
+      table.copy (let [t1 (table c a1) t2 (table c (nth e 2))]
+                   (require! (match-ref c (:rt t2) (:rt t1))
+                             #(str "type mismatch: source element type " (rt-str (:rt t1)) " does not match destination element type " (rt-str (:rt t2))))
+                   (sig [(:at t1) (:at t2) (if (and (= 'i64 (:at t1)) (= 'i64 (:at t2))) 'i64 'i32)] []))
+      table.init (let [t1 (table c a1) rt (elem c (nth e 2))]
+                   (require! (match-ref c rt (:rt t1))
+                             #(str "type mismatch: element segment's type " (rt-str (:rt t1)) " does not match table's element type " (rt-str rt)))
+                   (sig [(:at t1) 'i32 'i32] []))
+      elem.drop (do (elem c a1) (sig [] []))
+      memory.size (let [m (memory c a1)] (sig [] [(addr m)]))
+      memory.grow (let [m (memory c a1)] (sig [(addr m)] [(addr m)]))
+      memory.fill (let [m (memory c a1)] (sig [(addr m) 'i32 (addr m)] []))
+      memory.copy (let [m1 (memory c a1) m2 (memory c (nth e 2))
+                        a (addr m1) b (addr m2)]
+                    (sig [a b (if (and (= 'i64 a) (= 'i64 b)) 'i64 'i32)] []))
+      memory.init (let [m (memory c a1)] (data c (nth e 2)) (sig [(addr m) 'i32 'i32] []))
+      data.drop (do (data c a1) (sig [] []))
+      ref.null (do (check-heap c a1) (sig [] [[:ref true a1]]))
+      ref.func (let [_ (func c a1)]
+                 (require! (contains? (:refs c) a1) #(str "undeclared function reference " (u-str a1)))
+                 (sig [] [[:ref false (func c a1)]]))
+      ref.is_null (let [[_ _ h] (peek-ref 0 s)] (sig [[:ref true h]] '[i32]))
+      ref.as_non_null (let [[_ _ h] (peek-ref 0 s)] (sig [[:ref true h]] [[:ref false h]]))
+      ref.test (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))]] '[i32]))
+      ref.cast (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))]] [rt]))
+      ref.eq (sig [[:ref true 'eq] [:ref true 'eq]] '[i32])
+      ref.i31 (sig '[i32] [[:ref false 'i31]])
+      (i31.get_s i31.get_u) (sig [[:ref true 'i31]] '[i32])
+      (struct.new struct.new_default)
+      (let [fts (struct-type c a1)]
+        (require! (or (= nm 'struct.new) (every? (fn [[s]] (defaultable? (unpacked s))) fts)) "field type is not defaultable")
+        (sig (if (= nm 'struct.new) (mapv (fn [[s]] (unpacked s)) fts) []) [[:ref false a1]]))
+      (struct.get struct.get_s struct.get_u)
+      (let [fts (struct-type c a1) i (long (nth e 2))]
+        (require! (< i (count fts)) #(str "unknown field " (u-str i)))
+        (let [[s] (nth fts i)]
+          (require! (= (not= nm 'struct.get) (boolean (#{'i8 'i16} s))) (str "field is " (if (= nm 'struct.get) "packed" "unpacked")))
+          (sig [[:ref true a1]] [(unpacked s)])))
+      struct.set (let [fts (struct-type c a1) i (long (nth e 2))]
+                   (require! (< i (count fts)) #(str "unknown field " (u-str i)))
+                   (let [[s m] (nth fts i)]
+                     (require! m "immutable field")
+                     (sig [[:ref true a1] (unpacked s)] [])))
+      (array.new array.new_default)
+      (let [[s] (array-type c a1)]
+        (require! (or (= nm 'array.new) (defaultable? (unpacked s))) "array type is not defaultable")
+        (sig (conj (if (= nm 'array.new) [(unpacked s)] []) 'i32) [[:ref false a1]]))
+      array.new_fixed (let [[s] (array-type c a1)] (sig (vec (repeat (nth e 2) (unpacked s))) [[:ref false a1]]))
+      array.new_elem (let [[s :as ft] (array-type c a1) rt (elem c (nth e 2))]
+                       (require! (match-val c rt (unpacked s))
+                                 #(str "type mismatch: element segment's type " (rt-str rt) " does not match array's field type " (ft-str ft)))
+                       (sig '[i32 i32] [[:ref false a1]]))
+      array.new_data (let [[s] (array-type c a1)]
+                       (data c (nth e 2))
+                       (let [t (unpacked s)] (require! (or (num? t) (vec? t)) "array type is not numeric or vector"))
+                       (sig '[i32 i32] [[:ref false a1]]))
+      (array.get array.get_s array.get_u)
+      (let [[s] (array-type c a1)]
+        (require! (= (not= nm 'array.get) (boolean (#{'i8 'i16} s))) (str "array is " (if (= nm 'array.get) "packed" "unpacked")))
+        (sig [[:ref true a1] 'i32] [(unpacked s)]))
+      array.set (let [[s m] (array-type c a1)]
+                  (require! m "immutable array")
+                  (sig [[:ref true a1] 'i32 (unpacked s)] []))
+      array.len (sig [[:ref true 'array]] '[i32])
+      array.copy (let [[sd md] (array-type c a1) [ss] (array-type c (nth e 2))]
+                   (require! md "immutable array")
+                   (require! (match-storage c ss sd) "array types do not match")
+                   (sig [[:ref true a1] 'i32 [:ref true (nth e 2)] 'i32 'i32] []))
+      array.fill (let [[s m] (array-type c a1)]
+                   (require! m "immutable array")
+                   (sig [[:ref true a1] 'i32 (unpacked s) 'i32] []))
+      array.init_data (let [[s m] (array-type c a1)]
+                        (require! m "immutable array")
+                        (data c (nth e 2))
+                        (let [t (unpacked s)] (require! (or (num? t) (vec? t)) "array type is not numeric or vector"))
+                        (sig [[:ref true a1] 'i32 'i32 'i32] []))
+      array.init_elem (let [[s m :as ft] (array-type c a1) rt (elem c (nth e 2))]
+                        (require! m "immutable array")
+                        (require! (match-val c rt (unpacked s))
+                                  #(str "type mismatch: element segment's type " (rt-str rt) " does not match array's field type " (ft-str ft)))
+                        (sig [[:ref true a1] 'i32 'i32 'i32] []))
+      any.convert_extern (let [[_ n] (peek-ref 0 s)] (sig [[:ref n 'extern]] [[:ref n 'any]]))
+      extern.convert_any (let [[_ n] (peek-ref 0 s)] (sig [[:ref n 'any]] [[:ref n 'extern]]))
+      (i32.const i64.const f32.const f64.const) (sig [] [(symbol (subs (str nm) 0 3))])
+      v128.const (sig [] '[v128])
+      i8x16.shuffle (do (require! (every? #(< (long %) 32) a1) "invalid lane index") (sig '[v128 v128] '[v128]))
+      ;; the rest: numeric and vector instructions, memory accesses, lanes
+      (let [s-nm (str nm) k (.indexOf s-nm ".") shape (subs s-nm 0 (max k 0)) op (subs s-nm (inc k))]
+        (if-let [[size store? lane?] (when (pos? k) (mem-size shape op))]
+          (let [m (if lane? a1 a1)
+                mi (long (:memory m 0))
+                mm (memory c mi)
+                _ (check-memop mm m size)
+                at (addr mm)
+                t (if (= shape "v128") 'v128 (symbol shape))]
+            (when lane? (require! (< (long (nth e 2)) (quot 16 (long size))) "invalid lane index"))
+            (cond lane? (if store? (sig [at t] []) (sig [at t] [t]))
+                  store? (sig [at t] [])
+                  :else (sig [at] [t])))
+          (cond
+            (and (lanes shape) (re-find #"^extract_lane" op))
+            (do (require! (< (long a1) (long (lanes shape))) "invalid lane index") (sig '[v128] [(lane-type shape)]))
+            (and (lanes shape) (= op "replace_lane"))
+            (do (require! (< (long a1) (long (lanes shape))) "invalid lane index") (sig ['v128 (lane-type shape)] '[v128]))
+            :else
+            (if-let [[ins outs] (sigs nm)]
+              (sig ins outs)
+              (invalid (str "unknown instruction " s-nm)))))))))
+
+(defn- init-locals [c xs]
+  (if (seq xs)
+    (update c :locals (fn [ls] (reduce (fn [ls x] (assoc ls x [true (second (nth ls x))])) ls xs)))
+    c))
+
+(defn- check-instrs [c s es]
+  (loop [c c s s es (seq es)]
+    (if es
+      (let [e (first es)
+            [ins outs xs] (check-instr c e s)]
+        (recur (init-locals c xs) (push-s outs (pop-s c ins s)) (next es)))
+      s)))
+
+(defn- check-block [c es [ts1 ts2]]
+  (let [s (check-instrs c [false (vec ts1)] es)
+        s' (pop-s c [false (vec ts2)] s)]
+    (require! (empty? (second s')) #(str "type mismatch: block requires " (ts-str ts2) " but stack has " (ts-str (second s))))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; constant expressions, functions, the module
+
+(defn- const-instr? [c e]
+  (case (first e)
+    (i32.const i64.const f32.const f64.const v128.const i32.add i32.sub i32.mul i64.add i64.sub i64.mul
+     ref.null ref.func ref.i31 struct.new struct.new_default array.new array.new_default array.new_fixed
+     any.convert_extern extern.convert_any) true
+    global.get (not (:mut (global c (second e))))
+    false))
+
+(defn- check-const [c es t]
+  (require! (every? #(const-instr? c %) es) "constant expression required")
+  (check-block c es [[] [t]]))
+
+(defn- kind-of [it] (when (seq? it) (first it)))
+
+(defn- refs-of
+  "The function indices the module refers to outside the functions' bodies (Free.module_ without funcs and start)."
+  [items]
+  (let [in-expr (fn [es] (keep #(when (= 'ref.func (first %)) (second %)) es))]
+    (set (mapcat (fn [it]
+                   (case (kind-of it)
+                     wasm/export (let [[k i] (nth it 2)] (when (= 'func k) [i]))
+                     wasm/global (in-expr (nth it 3))
+                     wasm/table (in-expr (:init (nth it 2)))
+                     wasm/elem (let [m (nth it 2)]
+                                 (concat (:funcs m) (mapcat in-expr (:exprs m)) (in-expr (get-in m [:active :offset]))))
+                     wasm/data (in-expr (get-in (nth it 2) [:active :offset]))
+                     nil))
+                 items))))
+
+(defn- check-types [c items]
+  (let [groups (keep (fn [it]
+                       (case (kind-of it)
+                         wasm/type [(second it) [(nth it 2)]]
+                         wasm/rec [(second it) (nth it 2)]
+                         nil))
+                     items)]
+    (reduce
+      (fn [c [s ts]]
+        (let [s (long s) n (count ts)
+              c' (update c :types into (map (fn [t] (assoc (sub-of t) :group [s n])) ts))]
+          ;; check_subtype: each member's supers and types known
+          (doseq [i (range n) :let [d (type-def c' (+ s i))]]
+            ;; the testsuite's rule (type-subtyping.wast; wg-3.0's interpreter does not state it): at most one supertype
+            (require! (<= (count (:supers d)) 1) "multiple supertypes")
+            (run! #(type-def c' %) (:supers d))
+            (check-comp c' (:comp d)))
+          ;; check_subtype_sub
+          (doseq [i (range n) :let [x (+ s i) d (type-def c' x)]]
+            (doseq [xi (:supers d)]
+              (let [di (type-def c' xi)]
+                (require! (< (long xi) x) #(str "forward use of type " (u-str xi) " in sub type definition"))
+                (require! (not (:final di)) #(str "sub type " (u-str x) " has final super type " (u-str xi)))
+                (require! (match-comp c' (:comp d) (:comp di)) #(str "sub type " (u-str x) " does not match super type " (u-str xi))))))
+          c'))
+      c groups)))
+
+(defn- table-of [m] {:at (addr m) :rt (vt (:type m)) :lim m})
+
+(defn- check-func-body [c it]
+  (let [[_ _ m & body] it
+        [ts1 ts2] (func-type c (:type m))
+        lts (mapv (fn [t] (let [v (vt t)] (check-val c v) [(defaultable? v) v])) (:locals m))
+        c' (assoc c :locals (into (mapv (fn [t] [true t]) ts1) lts) :results ts2 :labels (list ts2))]
+    (try (check-block c' body [[] ts2])
+         (catch arbace.lang.ExceptionInfo e
+           (if-let [m (:wasm/invalid (ex-data e))] (throw (ex-info m {:wasm/invalid m :func (second it)})) (throw e))))))
+
+(defn check
+  "nil when the module's items are valid; else throws ex-info {:wasm/invalid MESSAGE} (valid.ml's check_module)."
+  [items]
+  (let [by (group-by kind-of items)
+        c0 {:types [] :tags [] :globals [] :mems [] :tables [] :funcs [] :datas [] :elems [] :locals [] :labels () :results []
+            :refs (refs-of items) :canon (java.util.HashMap.)}
+        c (check-types c0 items)
+        ;; imports, in order
+        c (reduce (fn [c [_ _ _ [k _ d]]]
+                    (case k
+                      func (do (func-type c (:type d)) (update c :funcs conj (:type d)))
+                      table (do (check-tabletype c d) (update c :tables conj (table-of d)))
+                      memory (do (check-memtype d) (update c :mems conj d))
+                      global (let [t (vt (:type d))] (check-val c t) (update c :globals conj {:mut (boolean (:mut d)) :t t}))
+                      tag (do (check-tagtype c (:type d)) (update c :tags conj (:type d)))))
+                  c (by 'wasm/import))
+        c (reduce (fn [c [_ _ d]] (check-tagtype c (:type d)) (update c :tags conj (:type d))) c (by 'wasm/tag))
+        c (reduce (fn [c it] (let [t (:type (nth it 2))] (func-type c t) (update c :funcs conj t))) c (by 'wasm/func))
+        c (reduce (fn [c [_ _ d]] (check-memtype d) (update c :mems conj d)) c (by 'wasm/memory))
+        c (reduce (fn [c [_ _ d]]
+                    (check-tabletype c d)
+                    (let [tb (table-of d)]
+                      (check-const c (or (:init d) [(list 'ref.null (nth (:rt tb) 2))]) (:rt tb))
+                      (update c :tables conj tb)))
+                  c (by 'wasm/table))
+        c (reduce (fn [c [_ _ d e]]
+                    (let [t (vt (:type d))]
+                      (check-val c t)
+                      (check-const c e t)
+                      (update c :globals conj {:mut (boolean (:mut d)) :t t})))
+                  c (by 'wasm/global))
+        c (reduce (fn [c [_ _ m]]
+                    (when-let [{x :memory o :offset} (:active m)]
+                      (check-const c o (addr (memory c x))))
+                    (update c :datas conj true))
+                  c (by 'wasm/data))
+        c (reduce (fn [c [_ _ m]]
+                    (let [rt (vt (:type m))]
+                      (check-val c rt)
+                      (doseq [e (or (:exprs m) (map (fn [x] [(list 'ref.func x)]) (:funcs m)))] (check-const c e rt))
+                      (when-let [{x :table o :offset} (:active m)]
+                        (let [tb (table c x)]
+                          (require! (match-ref c rt (:rt tb))
+                                    #(str "type mismatch: element segment's type " (rt-str rt) " does not match table's element type " (rt-str (:rt tb))))
+                          (check-const c o (:at tb))))
+                      (update c :elems conj rt)))
+                  c (by 'wasm/elem))]
+    (run! #(check-func-body c %) (by 'wasm/func))
+    (doseq [[_ x] (by 'wasm/start)]
+      (require! (= [[] []] (func-type c (func c x))) "start function must not have parameters or results"))
+    (doseq [[_ _ [k x]] (by 'wasm/export)]
+      (case k func (func c x) table (table c x) memory (memory c x) global (global c x) tag (tag c x)))
+    (reduce (fn [seen [_ nm]]
+              (require! (not (contains? seen nm)) #(str "duplicate export name \"" nm "\""))
+              (conj seen nm))
+            #{} (by 'wasm/export))
+    nil))
+
+(defn explain
+  "The validator's verdict on the items: nil when they are valid, else {:message M :func I} (I the function whose body is
+  invalid, when one is)."
+  [items]
+  (try (check items) nil
+       (catch arbace.lang.ExceptionInfo e
+         (if-let [m (:wasm/invalid (ex-data e))] (select-keys (assoc (ex-data e) :message m) [:message :func]) (throw e)))))
+
+(defn message
+  "The validator's message for the items, nil when they are valid."
+  [items]
+  (:message (explain items)))

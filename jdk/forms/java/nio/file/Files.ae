@@ -4,99 +4,526 @@
 
 (import '(java.io BufferedReader
                   BufferedWriter
-                  File
-                  FileInputStream
-                  FileNotFoundException
-                  FileOutputStream
+                  Closeable
                   IOException
                   InputStream
                   InputStreamReader
                   OutputStream
                   OutputStreamWriter
-                  UncheckedIOException)
-        '(java.nio.charset Charset StandardCharsets)
-        '(java.nio.file.attribute FileAttribute)
-        '(java.util ArrayList Iterator List NoSuchElementException Objects Random)
-        '(java.util.regex Pattern)
-        '(java.util.stream Stream)
-        '(sun.nio.fs GlobPatterns))
+                  Reader
+                  UncheckedIOException
+                  Writer)
+        '(java.nio.channels Channels FileChannel SeekableByteChannel)
+        '(java.nio.charset Charset)
+        '(java.nio.file.attribute BasicFileAttributeView
+                                  BasicFileAttributes
+                                  FileAttribute
+                                  FileAttributeView
+                                  FileOwnerAttributeView
+                                  FileTime
+                                  PosixFileAttributeView
+                                  PosixFileAttributes
+                                  PosixFilePermission
+                                  UserPrincipal)
+        '(java.nio.file.spi FileSystemProvider FileTypeDetector)
+        '(java.util ArrayList
+                    Arrays
+                    Collections
+                    EnumSet
+                    HashSet
+                    Iterator
+                    List
+                    Map
+                    Objects
+                    Set
+                    Spliterator
+                    Spliterators)
+        '(java.util.function BiPredicate Function Predicate)
+        '(java.util.stream Stream StreamSupport)
+        '(jdk.internal.access JavaLangAccess SharedSecrets)
+        '(jdk.internal.jrt NioStrings)
+        '(jdk.internal.util ArraysSupport)
+        '(sun.nio.ch FileChannelImpl)
+        '(sun.nio.cs UTF_8)
+        '(sun.nio.fs AbstractFileSystemProvider DefaultFileTypeDetector))
 
 (defclass ^:public ^:final Files
+  (field ^:private ^:static ^:final ^int BUFFER_SIZE 8192)
+
   (constructor ^:private [this])
 
-  (field ^:private ^:static ^:final ^Random RANDOM (Random.))
+  (method ^:private ^:static provider ^FileSystemProvider [^Path path]
+    (.provider (.getFileSystem path)))
 
-  (method ^:private ^:static file ^File [^Path path]
-    (.toFile (cast Path (Objects/requireNonNull path))))
-
-  (method ^:private ^:static has ^boolean [^OpenOption/1 options ^OpenOption option]
-    (for-each [^OpenOption o options] (when (identical? o option) (return true)))
-    false)
+  (method ^:private ^:static asUncheckedRunnable ^Runnable [^Closeable c]
+    (lambda Runnable ^void []
+      (try (.close c) (catch IOException e (throw (UncheckedIOException. e))))))
 
   (method ^:public ^:static newInputStream :throws [IOException] ^InputStream [^Path path &
                                                                                ^OpenOption/1 options]
-    (for-each [^OpenOption o options]
-      (when (or (identical? o StandardOpenOption/APPEND) (identical? o StandardOpenOption/WRITE))
-        (throw (UnsupportedOperationException. (java-str "'" o "' not allowed")))))
-    (let [f (Files/file path)]
-      (when-not (.exists f) (throw (NoSuchFileException. (.toString path))))
-      (try
-        (FileInputStream. f)
-        (catch FileNotFoundException x
-          (throw (FileSystemException. (.toString path) nil (Files/reason x)))))))
+    (.newInputStream (Files/provider path) path options))
 
   (method ^:public ^:static newOutputStream :throws [IOException] ^OutputStream [^Path path &
                                                                                  ^OpenOption/1 options]
-    (let [f (Files/file path)
-          append (Files/has options StandardOpenOption/APPEND)]
-      (when (and append (Files/has options StandardOpenOption/TRUNCATE_EXISTING))
-        (throw (IllegalArgumentException. "APPEND + TRUNCATE_EXISTING not allowed")))
-      (when (Files/has options StandardOpenOption/READ)
-        (throw (IllegalArgumentException. "READ not allowed")))
-      (let [create (or (or (== (alength options) 0) (Files/has options StandardOpenOption/CREATE))
-                       (Files/has options StandardOpenOption/CREATE_NEW))]
-        (when (and (Files/has options StandardOpenOption/CREATE_NEW) (.exists f))
-          (throw (FileAlreadyExistsException. (.toString path))))
-        (when (and (not create) (not (.exists f))) (throw (NoSuchFileException. (.toString path))))
-        (try
-          (FileOutputStream. f append)
-          (catch FileNotFoundException x
-            (let [parent (.getParentFile (.getAbsoluteFile f))]
-              (when (and (some? parent) (not (.exists parent)))
-                (throw (NoSuchFileException. (.toString path))))
-              (throw (FileSystemException. (.toString path) nil (Files/reason x)))))))))
+    (.newOutputStream (Files/provider path) path options))
 
-  (method ^:private ^:static reason ^String [^FileNotFoundException x]
-    (let [m (.getMessage x)
-          ^int i (if (nil? m) -1 (.lastIndexOf m " ("))]
-      (if (or (< i 0) (not (.endsWith m ")")))
-          m
-          (.substring m (unchecked-add-int i 2) (unchecked-subtract-int (.length m) 1)))))
+  (method ^:public ^:static newByteChannel :throws [IOException] ^SeekableByteChannel [^Path path
+                                                                                       ^{:tag (Set (? extends OpenOption))} options
+                                                                                       &
+                                                                                       ^{:tag (array (FileAttribute ?))} attrs]
+    (.newByteChannel (Files/provider path) path options attrs))
+
+  (method ^:public ^:static newByteChannel :throws [IOException] ^SeekableByteChannel [^Path path &
+                                                                                       ^OpenOption/1 options]
+    (let [^:mutable ^{:tag (Set OpenOption)} set nil]
+      (if (== (alength options) 0)
+          (set! set (Collections/emptySet))
+          (do (set! set (HashSet.)) (Collections/addAll set options)))
+      (Files/newByteChannel path set (new FileAttribute/1 []))))
+
+  (defclass ^:private ^:static AcceptAllFilter
+    :implements [(DirectoryStream$Filter Path)]
+
+    (constructor ^:private [this])
+
+    (method ^:public accept ^boolean [this ^Path entry] true)
+
+    (field ^:static ^:final ^AcceptAllFilter FILTER (AcceptAllFilter.)))
+
+  (method ^:public ^:static newDirectoryStream :throws [IOException] ^{:tag (DirectoryStream Path)} [^Path dir]
+    (.newDirectoryStream (Files/provider dir) dir AcceptAllFilter/FILTER))
+
+  (method ^:public ^:static newDirectoryStream :throws [IOException] ^{:tag (DirectoryStream Path)} [^Path dir
+                                                                                                     ^String glob]
+    (if (.equals glob "*")
+        (Files/newDirectoryStream dir)
+        (let [fs (.getFileSystem dir)
+              matcher (.getPathMatcher fs (java-str "glob:" glob))
+              ^{:tag (DirectoryStream$Filter Path)} filter (anon ^:diamond (DirectoryStream$Filter
+                                                                             Path) []
+                                                             (method ^:public accept ^boolean [this
+                                                                                               ^Path entry]
+                                                               (.matches
+                                                                 matcher
+                                                                 (.getFileName entry))))]
+          (.newDirectoryStream (.provider fs) dir filter))))
+
+  (method ^:public ^:static newDirectoryStream :throws [IOException] ^{:tag (DirectoryStream Path)} [^Path dir
+                                                                                                     ^{:tag (DirectoryStream$Filter (? super Path))} filter]
+    (.newDirectoryStream (Files/provider dir) dir filter))
+
+  (field ^:private ^:static ^:final ^{:tag (Set OpenOption)} DEFAULT_CREATE_OPTIONS
+    (Set/of StandardOpenOption/CREATE_NEW StandardOpenOption/WRITE))
+
+  (method ^:public ^:static createFile :throws [IOException] ^Path [^Path path &
+                                                                    ^{:tag (array (FileAttribute ?))} attrs]
+    (.close (Files/newByteChannel path DEFAULT_CREATE_OPTIONS attrs))
+    path)
+
+  (method ^:public ^:static createDirectory :throws [IOException] ^Path [^Path dir &
+                                                                         ^{:tag (array (FileAttribute ?))} attrs]
+    (.createDirectory (Files/provider dir) dir attrs)
+    dir)
+
+  (method ^:public ^:static createDirectories :throws [IOException] ^Path [^Path dir &
+                                                                           ^{:tag (array (FileAttribute ?))} attrs]
+    (try
+      (Files/createAndCheckIsDirectory dir attrs)
+      (return dir)
+      (catch FileAlreadyExistsException x (throw x))
+      (catch IOException x))
+    (let [absDir (.toAbsolutePath dir)
+          ^:mutable parent (.getParent absDir)]
+      (while (some? parent)
+        (try (.checkAccess (Files/provider parent) parent) (break) (catch NoSuchFileException x))
+        (set! parent (.getParent parent)))
+      (when (nil? parent)
+        (throw (FileSystemException. (.toString absDir)
+                                     nil
+                                     "Unable to determine if root directory exists")))
+      (let [^:mutable child parent]
+        (for-each [^Path name (.relativize parent absDir)]
+          (set! child (.resolve child name))
+          (Files/createAndCheckIsDirectory child attrs))
+        dir)))
+
+  (method ^:private ^:static createAndCheckIsDirectory :throws [IOException] ^void [^Path dir &
+                                                                                    ^{:tag (array (FileAttribute ?))} attrs]
+    (try
+      (Files/createDirectory dir attrs)
+      (catch FileAlreadyExistsException x (when-not (Files/isDirectory dir) (throw x)))))
+
+  (method ^:public ^:static createTempFile :throws [IOException] ^Path [^Path dir ^String prefix
+                                                                        ^String suffix &
+                                                                        ^{:tag (array (FileAttribute ?))} attrs]
+    (TempFileHelper/createTempFile (cast Path (Objects/requireNonNull dir)) prefix suffix attrs))
+
+  (method ^:public ^:static createTempFile :throws [IOException] ^Path [^String prefix
+                                                                        ^String suffix &
+                                                                        ^{:tag (array (FileAttribute ?))} attrs]
+    (TempFileHelper/createTempFile nil prefix suffix attrs))
+
+  (method ^:public ^:static createTempDirectory :throws [IOException] ^Path [^Path dir
+                                                                             ^String prefix &
+                                                                             ^{:tag (array (FileAttribute ?))} attrs]
+    (TempFileHelper/createTempDirectory (cast Path (Objects/requireNonNull dir)) prefix attrs))
+
+  (method ^:public ^:static createTempDirectory :throws [IOException] ^Path [^String prefix &
+                                                                             ^{:tag (array (FileAttribute ?))} attrs]
+    (TempFileHelper/createTempDirectory nil prefix attrs))
+
+  (method ^:public ^:static createSymbolicLink :throws [IOException] ^Path [^Path link ^Path target
+                                                                            &
+                                                                            ^{:tag (array (FileAttribute ?))} attrs]
+    (.createSymbolicLink (Files/provider link) link target attrs)
+    link)
+
+  (method ^:public ^:static createLink :throws [IOException] ^Path [^Path link ^Path existing]
+    (.createLink (Files/provider link) link existing)
+    link)
+
+  (method ^:public ^:static delete :throws [IOException] ^void [^Path path]
+    (.delete (Files/provider path) path))
+
+  (method ^:public ^:static deleteIfExists :throws [IOException] ^boolean [^Path path]
+    (.deleteIfExists (Files/provider path) path))
+
+  (method ^:public ^:static copy :throws [IOException] ^Path [^Path source ^Path target &
+                                                              ^CopyOption/1 options]
+    (let [provider (Files/provider source)]
+      (if (identical? (Files/provider target) provider)
+          (.copy provider source target options)
+          (CopyMoveHelper/copyToForeignTarget source target options))
+      target))
+
+  (method ^:public ^:static move :throws [IOException] ^Path [^Path source ^Path target &
+                                                              ^CopyOption/1 options]
+    (let [provider (Files/provider source)]
+      (if (identical? (Files/provider target) provider)
+          (.move provider source target options)
+          (CopyMoveHelper/moveToForeignTarget source target options))
+      target))
+
+  (method ^:public ^:static readSymbolicLink :throws [IOException] ^Path [^Path link]
+    (.readSymbolicLink (Files/provider link) link))
+
+  (method ^:public ^:static getFileStore :throws [IOException] ^FileStore [^Path path]
+    (.getFileStore (Files/provider path) path))
+
+  (method ^:public ^:static isSameFile :throws [IOException] ^boolean [^Path path ^Path path2]
+    (.isSameFile (Files/provider path) path path2))
+
+  (method ^:public ^:static mismatch :throws [IOException] ^long [^Path path ^Path path2]
+    (if (Files/isSameFile path path2)
+        -1
+        (let [buffer1 (new byte/1 BUFFER_SIZE)
+              buffer2 (new byte/1 BUFFER_SIZE)]
+          (with-resources [in1 (Files/newInputStream path)
+                           in2 (Files/newInputStream path2)]
+            (let [^:mutable totalRead 0]
+              (while true
+                (let [nRead1 (.readNBytes in1 buffer1 0 BUFFER_SIZE)
+                      nRead2 (.readNBytes in2 buffer2 0 BUFFER_SIZE)
+                      i (Arrays/mismatch buffer1 0 nRead1 buffer2 0 nRead2)]
+                  (when (> i -1) (return (unchecked-add totalRead i)))
+                  (when (< nRead1 BUFFER_SIZE) (return -1))
+                  (set! totalRead (unchecked-add totalRead nRead1)))))))))
+
+  (method ^:public ^:static isHidden :throws [IOException] ^boolean [^Path path]
+    (.isHidden (Files/provider path) path))
+
+  (defclass ^:private ^:static FileTypeDetectors
+    (field ^:static ^:final ^FileTypeDetector defaultFileTypeDetector
+      (FileTypeDetectors/createDefaultFileTypeDetector))
+
+    (field ^:static ^:final ^{:tag (List FileTypeDetector)} installedDetectors
+      (FileTypeDetectors/loadInstalledDetectors))
+
+    (method ^:private ^:static createDefaultFileTypeDetector ^FileTypeDetector []
+      (DefaultFileTypeDetector/create))
+
+    (method ^:private ^:static loadInstalledDetectors ^{:tag (List FileTypeDetector)} []
+      (List/of)))
+
+  (method ^:public ^:static probeContentType :throws [IOException] ^String [^Path path]
+    (for-each [^FileTypeDetector detector FileTypeDetectors/installedDetectors]
+      (let [result (.probeContentType detector path)] (when (some? result) (return result))))
+    (.probeContentType FileTypeDetectors/defaultFileTypeDetector path))
+
+  (method ^:public ^:static getFileAttributeView :type-params [(V extends FileAttributeView)] ^V [^Path path
+                                                                                                  ^{:tag (Class V)} type
+                                                                                                  &
+                                                                                                  ^LinkOption/1 options]
+    (.getFileAttributeView (Files/provider path) path type options))
+
+  (method ^:public ^:static readAttributes :type-params [(A extends BasicFileAttributes)] :throws [IOException] ^A [^Path path
+                                                                                                                    ^{:tag (Class A)} type
+                                                                                                                    &
+                                                                                                                    ^LinkOption/1 options]
+    (.readAttributes (Files/provider path) path type options))
+
+  (method ^:public ^:static setAttribute :throws [IOException] ^Path [^Path path ^String attribute
+                                                                      value & ^LinkOption/1 options]
+    (.setAttribute (Files/provider path) path attribute value options)
+    path)
+
+  (method ^:public ^:static getAttribute :throws [IOException] [^Path path ^String attribute &
+                                                                ^LinkOption/1 options]
+    (when (or (>= (.indexOf attribute \*) 0) (>= (.indexOf attribute \,) 0))
+      (throw (IllegalArgumentException. attribute)))
+    (let [^{:tag (Map String Object)} map (Files/readAttributes path attribute options)]
+      (java-assert (== (.size map) 1))
+      (let [^:mutable ^String name nil
+            pos (.indexOf attribute \:)]
+        (if (== pos -1)
+            (set! name attribute)
+            (set! name
+                  (if (== pos (.length attribute))
+                      ""
+                      (.substring attribute (unchecked-add-int pos 1)))))
+        (.get map name))))
+
+  (method ^:public ^:static readAttributes :throws [IOException] ^{:tag (Map String Object)} [^Path path
+                                                                                              ^String attributes
+                                                                                              &
+                                                                                              ^LinkOption/1 options]
+    (.readAttributes (Files/provider path) path attributes options))
+
+  (method ^:public ^:static getPosixFilePermissions :throws [IOException] ^{:tag (Set PosixFilePermission)} [^Path path
+                                                                                                             &
+                                                                                                             ^LinkOption/1 options]
+    (.permissions
+      (cast PosixFileAttributes (Files/readAttributes path PosixFileAttributes options))))
+
+  (method ^:public ^:static setPosixFilePermissions :throws [IOException] ^Path [^Path path
+                                                                                 ^{:tag (Set PosixFilePermission)} perms]
+    (let [view (cast PosixFileAttributeView
+                     (Files/getFileAttributeView path PosixFileAttributeView))]
+      (when (nil? view) (throw (UnsupportedOperationException.)))
+      (.setPermissions view perms)
+      path))
+
+  (method ^:public ^:static getOwner :throws [IOException] ^UserPrincipal [^Path path &
+                                                                           ^LinkOption/1 options]
+    (let [view (cast FileOwnerAttributeView
+                     (Files/getFileAttributeView path FileOwnerAttributeView options))]
+      (when (nil? view) (throw (UnsupportedOperationException.)))
+      (.getOwner view)))
+
+  (method ^:public ^:static setOwner :throws [IOException] ^Path [^Path path ^UserPrincipal owner]
+    (let [view (cast FileOwnerAttributeView
+                     (Files/getFileAttributeView path FileOwnerAttributeView))]
+      (when (nil? view) (throw (UnsupportedOperationException.)))
+      (.setOwner view owner)
+      path))
+
+  (method ^:public ^:static isSymbolicLink ^boolean [^Path path]
+    (try
+      (.isSymbolicLink
+        (Files/readAttributes path
+                              BasicFileAttributes
+                              (new LinkOption/1 [LinkOption/NOFOLLOW_LINKS])))
+      (catch IOException ioe false)))
+
+  (method ^:public ^:static isDirectory ^boolean [^Path path & ^LinkOption/1 options]
+    (try
+      (let [attrs (.readAttributesIfExists (Files/provider path) path BasicFileAttributes options)]
+        (and (some? attrs) (.isDirectory attrs)))
+      (catch IOException ioe false)))
+
+  (method ^:public ^:static isRegularFile ^boolean [^Path path & ^LinkOption/1 options]
+    (try
+      (let [attrs (.readAttributesIfExists (Files/provider path) path BasicFileAttributes options)]
+        (and (some? attrs) (.isRegularFile attrs)))
+      (catch IOException ioe false)))
+
+  (method ^:public ^:static getLastModifiedTime :throws [IOException] ^FileTime [^Path path &
+                                                                                 ^LinkOption/1 options]
+    (.lastModifiedTime (Files/readAttributes path BasicFileAttributes options)))
+
+  (method ^:public ^:static setLastModifiedTime :throws [IOException] ^Path [^Path path
+                                                                             ^FileTime time]
+    (.setTimes (cast BasicFileAttributeView
+                     (Files/getFileAttributeView path BasicFileAttributeView))
+               (cast FileTime (Objects/requireNonNull time))
+               nil
+               nil)
+    path)
+
+  (method ^:public ^:static size :throws [IOException] ^long [^Path path]
+    (.size (Files/readAttributes path BasicFileAttributes (new LinkOption/1 []))))
+
+  (method ^:private ^:static followLinks ^boolean [& ^LinkOption/1 options]
+    (let [^:mutable followLinks true]
+      (for-each [^LinkOption opt options]
+        (if (identical? opt LinkOption/NOFOLLOW_LINKS)
+            (set! followLinks false)
+            (do
+              (when (nil? opt) (throw (NullPointerException.)))
+              (throw (AssertionError. "Should not get here")))))
+      followLinks))
+
+  (method ^:public ^:static exists ^boolean [^Path path & ^LinkOption/1 options]
+    (.exists (Files/provider path) path options))
+
+  (method ^:public ^:static notExists ^boolean [^Path path & ^LinkOption/1 options]
+    (try
+      (if (Files/followLinks options)
+          (.checkAccess (Files/provider path) path)
+          (Files/readAttributes path
+                                BasicFileAttributes
+                                (new LinkOption/1 [LinkOption/NOFOLLOW_LINKS])))
+      false
+      (catch NoSuchFileException x true)
+      (catch IOException x false)))
+
+  (method ^:private ^:static isAccessible ^boolean [^Path path & ^AccessMode/1 modes]
+    (try (.checkAccess (Files/provider path) path modes) true (catch IOException x false)))
+
+  (method ^:public ^:static isReadable ^boolean [^Path path]
+    (let [provider (Files/provider path)]
+      (if-instance [^AbstractFileSystemProvider afsp provider]
+        (.isReadable afsp path)
+        (Files/isAccessible path AccessMode/READ))))
+
+  (method ^:public ^:static isWritable ^boolean [^Path path]
+    (let [provider (Files/provider path)]
+      (if-instance [^AbstractFileSystemProvider afsp provider]
+        (.isWritable afsp path)
+        (Files/isAccessible path AccessMode/WRITE))))
+
+  (method ^:public ^:static isExecutable ^boolean [^Path path]
+    (let [provider (Files/provider path)]
+      (if-instance [^AbstractFileSystemProvider afsp provider]
+        (.isExecutable afsp path)
+        (Files/isAccessible path AccessMode/EXECUTE))))
+
+  (method ^:public ^:static walkFileTree :throws [IOException] ^Path [^Path start
+                                                                      ^{:tag (Set FileVisitOption)} options
+                                                                      ^int maxDepth
+                                                                      ^{:tag (FileVisitor (? super Path))} visitor]
+    (with-resources [walker (FileTreeWalker. options maxDepth)]
+      (let [^:mutable ev (.walk walker start)]
+        (loop []
+          (let [^FileVisitResult result (switch (.type ev)
+                                          ENTRY
+                                            (let [ioe (.ioeException ev)]
+                                              (if (nil? ioe)
+                                                  (do
+                                                    (java-assert (some? (.attributes ev)))
+                                                    (.visitFile visitor (.file ev) (.attributes ev)))
+                                                  (.visitFileFailed visitor (.file ev) ioe)))
+                                          START_DIRECTORY
+                                            (let [res (.preVisitDirectory
+                                                        visitor
+                                                        (.file ev)
+                                                        (.attributes ev))]
+                                              (when (or
+                                                      (identical? res FileVisitResult/SKIP_SUBTREE)
+                                                      (identical? res FileVisitResult/SKIP_SIBLINGS))
+                                                (.pop walker))
+                                              res)
+                                          END_DIRECTORY
+                                            (let [^:mutable res (.postVisitDirectory
+                                                                  visitor
+                                                                  (.file ev)
+                                                                  (.ioeException ev))]
+                                              (when (identical? res FileVisitResult/SKIP_SIBLINGS)
+                                                (set! res FileVisitResult/CONTINUE))
+                                              res)
+                                          (throw (AssertionError. "Should not get here")))]
+            (when-not (identical? (Objects/requireNonNull result) FileVisitResult/CONTINUE)
+              (cond
+                (identical? result FileVisitResult/TERMINATE) (break)
+                (identical? result FileVisitResult/SKIP_SIBLINGS) (.skipRemainingSiblings walker)))
+            (set! ev (.next walker)))
+          (when (some? ev) (recur)))))
+    start)
+
+  (method ^:public ^:static walkFileTree :throws [IOException] ^Path [^Path start
+                                                                      ^{:tag (FileVisitor (? super Path))} visitor]
+    (Files/walkFileTree start (EnumSet/noneOf FileVisitOption) Integer/MAX_VALUE visitor))
 
   (method ^:public ^:static newBufferedReader :throws [IOException] ^BufferedReader [^Path path
                                                                                      ^Charset cs]
-    (BufferedReader. (InputStreamReader. (Files/newInputStream path) cs)))
+    (let [decoder (.newDecoder cs)
+          ^Reader reader (InputStreamReader. (Files/newInputStream path) decoder)]
+      (BufferedReader. reader)))
 
   (method ^:public ^:static newBufferedReader :throws [IOException] ^BufferedReader [^Path path]
-    (Files/newBufferedReader path StandardCharsets/UTF_8))
+    (Files/newBufferedReader path UTF_8/INSTANCE))
 
   (method ^:public ^:static newBufferedWriter :throws [IOException] ^BufferedWriter [^Path path
                                                                                      ^Charset cs &
                                                                                      ^OpenOption/1 options]
-    (BufferedWriter. (OutputStreamWriter. (Files/newOutputStream path options) cs)))
+    (let [encoder (.newEncoder cs)
+          ^Writer writer (OutputStreamWriter. (Files/newOutputStream path options) encoder)]
+      (BufferedWriter. writer)))
 
   (method ^:public ^:static newBufferedWriter :throws [IOException] ^BufferedWriter [^Path path &
                                                                                      ^OpenOption/1 options]
-    (Files/newBufferedWriter path StandardCharsets/UTF_8 options))
+    (Files/newBufferedWriter path UTF_8/INSTANCE options))
+
+  (method ^:public ^:static copy :throws [IOException] ^long [^InputStream in ^Path target &
+                                                              ^CopyOption/1 options]
+    (Objects/requireNonNull in)
+    (let [^:mutable replaceExisting false]
+      (for-each [^CopyOption opt options]
+        (cond
+          (identical? opt StandardCopyOption/REPLACE_EXISTING) (set! replaceExisting true)
+          (nil? opt) (throw (NullPointerException. "options contains 'null'"))
+          :else (throw (UnsupportedOperationException. (java-str opt " not supported")))))
+      (when replaceExisting (Files/deleteIfExists target))
+      (let [^:mutable ^OutputStream ostream nil]
+        (try
+          (set! ostream
+                (Files/newOutputStream target
+                                       StandardOpenOption/CREATE_NEW
+                                       StandardOpenOption/WRITE))
+          (catch FileAlreadyExistsException x (throw x)))
+        (with-resources [out ostream] (.transferTo in out)))))
+
+  (method ^:public ^:static copy :throws [IOException] ^long [^Path source ^OutputStream out]
+    (Objects/requireNonNull out)
+    (with-resources [in (Files/newInputStream source)] (.transferTo in out)))
+
+  (field ^:private ^:static ^:final ^JavaLangAccess JLA (SharedSecrets/getJavaLangAccess))
+
+  (method ^:private ^:static read :throws [IOException] ^byte/1 [^InputStream source
+                                                                 ^int initialSize]
+    (let [^:mutable capacity initialSize
+          ^:mutable buf (new byte/1 capacity)
+          ^:mutable ^int nread 0
+          ^:mutable ^int n 0]
+      (while true
+        (while (> (set! n (.read source buf nread (unchecked-subtract-int capacity nread))) 0)
+          (set! nread (unchecked-add-int nread n)))
+        (when (or (< n 0) (< (set! n (.read source)) 0)) (break))
+        (set! capacity (Math/max (ArraysSupport/newLength capacity 1 capacity) BUFFER_SIZE))
+        (set! buf (Arrays/copyOf buf capacity))
+        (aset buf nread (unchecked-byte n))
+        (set! nread (unchecked-inc-int nread)))
+      (if (== capacity nread) buf (Arrays/copyOf buf nread))))
 
   (method ^:public ^:static readAllBytes :throws [IOException] ^byte/1 [^Path path]
-    (with-resources [in (Files/newInputStream path)] (.readAllBytes in)))
-
-  (method ^:public ^:static readString :throws [IOException] ^String [^Path path ^Charset cs]
-    (String. (Files/readAllBytes path) cs))
+    (with-resources [sbc (Files/newByteChannel path (new OpenOption/1 []))
+                     in (Channels/newInputStream sbc)]
+      (when (instance? FileChannelImpl sbc) (.setUninterruptible (cast FileChannelImpl sbc)))
+      (let [size (.size sbc)]
+        (when (> size (long Integer/MAX_VALUE))
+          (throw (OutOfMemoryError. "Required array size too large")))
+        (Files/read in (unchecked-int size)))))
 
   (method ^:public ^:static readString :throws [IOException] ^String [^Path path]
-    (Files/readString path StandardCharsets/UTF_8))
+    (Files/readString path UTF_8/INSTANCE))
+
+  (method ^:public ^:static readString :throws [IOException] ^String [^Path path ^Charset cs]
+    (Objects/requireNonNull path)
+    (Objects/requireNonNull cs)
+    (let [^:mutable ba (Files/readAllBytes path)]
+      (when-not (identical? (.getModule (.getClass path)) (.getModule Object))
+        (set! ba (.clone ba)))
+      (NioStrings/newStringOrThrow ba cs)))
 
   (method ^:public ^:static readAllLines :throws [IOException] ^{:tag (List String)} [^Path path
                                                                                       ^Charset cs]
@@ -106,269 +533,149 @@
         result)))
 
   (method ^:public ^:static readAllLines :throws [IOException] ^{:tag (List String)} [^Path path]
-    (Files/readAllLines path StandardCharsets/UTF_8))
-
-  (method ^:public ^:static lines :throws [IOException] ^{:tag (Stream String)} [^Path path
-                                                                                 ^Charset cs]
-    (let [br (Files/newBufferedReader path cs)]
-      (cast Stream
-            (.onClose (.lines br)
-                      (lambda Runnable ^void []
-                        (try (.close br) (catch IOException x (throw (UncheckedIOException. x)))))))))
-
-  (method ^:public ^:static lines :throws [IOException] ^{:tag (Stream String)} [^Path path]
-    (Files/lines path StandardCharsets/UTF_8))
+    (Files/readAllLines path UTF_8/INSTANCE))
 
   (method ^:public ^:static write :throws [IOException] ^Path [^Path path ^byte/1 bytes &
                                                                ^OpenOption/1 options]
     (Objects/requireNonNull bytes)
-    (with-resources [out (Files/newOutputStream path options)] (.write out bytes))
+    (with-resources [out (Files/newOutputStream path options)]
+      (let [len (alength bytes)
+            ^:mutable rem len]
+        (while (> rem 0)
+          (let [n (Math/min rem BUFFER_SIZE)]
+            (.write out bytes (unchecked-subtract-int len rem) n)
+            (set! rem (unchecked-subtract-int rem n))))))
     path)
 
   (method ^:public ^:static write :throws [IOException] ^Path [^Path path
                                                                ^{:tag (Iterable (? extends CharSequence))} lines
                                                                ^Charset cs & ^OpenOption/1 options]
     (Objects/requireNonNull lines)
-    (with-resources [writer (Files/newBufferedWriter path cs options)]
-      (for-each [^CharSequence line lines] (.append writer line) (.newLine writer)))
-    path)
+    (let [encoder (.newEncoder cs)]
+      (with-resources [out (Files/newOutputStream path options)
+                       writer (BufferedWriter. (OutputStreamWriter. out encoder))]
+        (for-each [^CharSequence line lines] (.append writer line) (.newLine writer)))
+      path))
 
   (method ^:public ^:static write :throws [IOException] ^Path [^Path path
                                                                ^{:tag (Iterable (? extends CharSequence))} lines
                                                                & ^OpenOption/1 options]
-    (Files/write path lines StandardCharsets/UTF_8 options))
+    (Files/write path lines UTF_8/INSTANCE options))
+
+  (method ^:public ^:static writeString :throws [IOException] ^Path [^Path path ^CharSequence csq &
+                                                                     ^OpenOption/1 options]
+    (Files/writeString path csq UTF_8/INSTANCE options))
 
   (method ^:public ^:static writeString :throws [IOException] ^Path [^Path path ^CharSequence csq
                                                                      ^Charset cs &
                                                                      ^OpenOption/1 options]
+    (Objects/requireNonNull path)
     (Objects/requireNonNull csq)
-    (Files/write path (.getBytes (String/valueOf csq) cs) options))
-
-  (method ^:public ^:static writeString :throws [IOException] ^Path [^Path path ^CharSequence csq &
-                                                                     ^OpenOption/1 options]
-    (Files/writeString path csq StandardCharsets/UTF_8 options))
-
-  (method ^:public ^:static exists ^boolean [^Path path & ^LinkOption/1 options]
-    (.exists (Files/file path)))
-
-  (method ^:public ^:static notExists ^boolean [^Path path & ^LinkOption/1 options]
-    (not (.exists (Files/file path))))
-
-  (method ^:public ^:static isDirectory ^boolean [^Path path & ^LinkOption/1 options]
-    (.isDirectory (Files/file path)))
-
-  (method ^:public ^:static isRegularFile ^boolean [^Path path & ^LinkOption/1 options]
-    (.isFile (Files/file path)))
-
-  (method ^:public ^:static isReadable ^boolean [^Path path]
-    (.canRead (Files/file path)))
-
-  (method ^:public ^:static isWritable ^boolean [^Path path]
-    (.canWrite (Files/file path)))
-
-  (method ^:public ^:static isExecutable ^boolean [^Path path]
-    (.canExecute (Files/file path)))
-
-  (method ^:public ^:static isHidden :throws [IOException] ^boolean [^Path path]
-    (.isHidden (Files/file path)))
-
-  (method ^:public ^:static isSameFile :throws [IOException] ^boolean [^Path path ^Path path2]
-    (if (.equals path path2)
-        true
-        (do
-          (when-not (Files/exists path) (throw (NoSuchFileException. (.toString path))))
-          (when-not (Files/exists path2) (throw (NoSuchFileException. (.toString path2))))
-          (.equals (.toRealPath path) (.toRealPath path2)))))
-
-  (method ^:public ^:static size :throws [IOException] ^long [^Path path]
-    (let [f (Files/file path)]
-      (when-not (.exists f) (throw (NoSuchFileException. (.toString path))))
-      (.length f)))
-
-  (method ^:public ^:static createFile :throws [IOException] ^Path [^Path path &
-                                                                    ^{:tag (array (FileAttribute ?))} attrs]
-    (let [f (Files/file path)
-          ^:mutable ^boolean created false]
-      (try
-        (set! created (.createNewFile f))
-        (catch IOException x (throw (NoSuchFileException. (.toString path)))))
-      (when-not created (throw (FileAlreadyExistsException. (.toString path))))
+    (Objects/requireNonNull cs)
+    (let [^:mutable bytes (NioStrings/getBytesOrThrow (String/valueOf csq) cs)]
+      (when-not (identical? (.getModule (.getClass path)) (.getModule Object))
+        (set! bytes (.clone bytes)))
+      (Files/write path bytes options)
       path))
 
-  (method ^:public ^:static createDirectory :throws [IOException] ^Path [^Path dir &
-                                                                         ^{:tag (array (FileAttribute ?))} attrs]
-    (let [f (Files/file dir)]
-      (if (.mkdir f)
-          dir
-          (do
-            (when (.exists f) (throw (FileAlreadyExistsException. (.toString dir))))
-            (let [parent (.getParentFile (.getAbsoluteFile f))]
-              (when (and (some? parent) (not (.exists parent)))
-                (throw (NoSuchFileException. (.toString dir))))
-              (throw (AccessDeniedException. (.toString dir))))))))
+  (method ^:public ^:static list :throws [IOException] ^{:tag (Stream Path)} [^Path dir]
+    (let [^{:tag (DirectoryStream Path)} ds (Files/newDirectoryStream dir)]
+      (try
+        (let [^{:tag (Iterator Path)} delegate (.iterator ds)
+              ^{:tag (Iterator Path)} iterator (anon ^:diamond (Iterator Path) []
+                                                 (method ^:public hasNext ^boolean [this]
+                                                   (try
+                                                     (.hasNext delegate)
+                                                     (catch DirectoryIteratorException e
+                                                       (throw (UncheckedIOException. (.getCause e))))))
 
-  (method ^:public ^:static createDirectories :throws [IOException] ^Path [^Path dir &
-                                                                           ^{:tag (array (FileAttribute ?))} attrs]
-    (let [f (Files/file dir)]
-      (if (.isDirectory f)
-          dir
-          (do
-            (when (.exists f) (throw (FileAlreadyExistsException. (.toString dir))))
-            (let [parent (.getParent (.toAbsolutePath dir))]
-              (when (some? parent) (Files/createDirectories parent))
-              (when (and (not (.mkdir f)) (not (.isDirectory f)))
-                (throw (AccessDeniedException. (.toString dir))))
-              dir)))))
+                                                 (method ^:public next ^Path [this]
+                                                   (try
+                                                     (cast Path (.next delegate))
+                                                     (catch DirectoryIteratorException e
+                                                       (throw (UncheckedIOException. (.getCause e)))))))
+              ^{:tag (Spliterator Path)} spliterator (Spliterators/spliteratorUnknownSize
+                                                       iterator
+                                                       Spliterator/DISTINCT)]
+          (cast Stream
+                (.onClose (StreamSupport/stream spliterator false) (Files/asUncheckedRunnable ds))))
+        (catch [Error RuntimeException] e
+          (try
+            (.close ds)
+            (catch IOException ex (try (.addSuppressed e ex) (catch Throwable ignore))))
+          (throw e)))))
 
-  (method ^:private ^:static createTemp :throws [IOException] ^Path [^:mutable ^Path dir
-                                                                     ^:mutable ^String prefix
-                                                                     ^:mutable ^String suffix
-                                                                     ^boolean directory]
-    (when (nil? prefix) (set! prefix ""))
-    (when (nil? suffix) (set! suffix (if directory "" ".tmp")))
-    (when (nil? dir) (set! dir (Path/of (System/getProperty "java.io.tmpdir") (new String/1 []))))
-    (when (or (>= (.indexOf prefix \/) 0) (>= (.indexOf suffix \/) 0))
-      (throw (IllegalArgumentException. "Invalid prefix or suffix")))
-    (while true
-      (let [name (java-str prefix (Long/toUnsignedString (.nextLong RANDOM)) suffix)
-            p (.resolve dir name)
-            f (.toFile p)]
-        (if directory
-            (do
-              (when (.mkdir f) (return p))
-              (when-not (.exists f) (throw (NoSuchFileException. (.toString dir)))))
-            (let [^:mutable ^boolean created false]
-              (try
-                (set! created (.createNewFile f))
-                (catch IOException x (throw (NoSuchFileException. (.toString dir)))))
-              (when created (return p)))))))
+  (method ^:public ^:static walk :throws [IOException] ^{:tag (Stream Path)} [^Path start
+                                                                              ^int maxDepth &
+                                                                              ^FileVisitOption/1 options]
+    (let [iterator (FileTreeIterator. start maxDepth options)]
+      (try
+        (let [^{:tag (Spliterator FileTreeWalker$Event)} spliterator
+                (Spliterators/spliteratorUnknownSize iterator Spliterator/DISTINCT)]
+          (.map (cast Stream
+                      (.onClose (StreamSupport/stream spliterator false)
+                                (method-ref Runnable iterator FileTreeIterator/.close)))
+                (lambda Function ^Path [^FileTreeWalker$Event entry] (.file entry))))
+        (catch [Error RuntimeException] e (.close iterator) (throw e)))))
 
-  (method ^:public ^:static createTempFile :throws [IOException] ^Path [^Path dir ^String prefix
-                                                                        ^String suffix &
-                                                                        ^{:tag (array (FileAttribute ?))} attrs]
-    (Files/createTemp (cast Path (Objects/requireNonNull dir)) prefix suffix false))
+  (method ^:public ^:static walk :throws [IOException] ^{:tag (Stream Path)} [^Path start &
+                                                                              ^FileVisitOption/1 options]
+    (Files/walk start Integer/MAX_VALUE options))
 
-  (method ^:public ^:static createTempFile :throws [IOException] ^Path [^String prefix
-                                                                        ^String suffix &
-                                                                        ^{:tag (array (FileAttribute ?))} attrs]
-    (Files/createTemp nil prefix suffix false))
+  (method ^:public ^:static find :throws [IOException] ^{:tag (Stream Path)} [^Path start
+                                                                              ^int maxDepth
+                                                                              ^{:tag (BiPredicate Path BasicFileAttributes)} matcher
+                                                                              &
+                                                                              ^FileVisitOption/1 options]
+    (let [iterator (FileTreeIterator. start maxDepth options)]
+      (try
+        (let [^{:tag (Spliterator FileTreeWalker$Event)} spliterator
+                (Spliterators/spliteratorUnknownSize iterator Spliterator/DISTINCT)]
+          (.map (.filter (cast Stream
+                               (.onClose (StreamSupport/stream spliterator false)
+                                         (method-ref Runnable iterator FileTreeIterator/.close)))
+                         (lambda Predicate ^boolean [^FileTreeWalker$Event entry]
+                           (.test matcher (.file entry) (.attributes entry))))
+                (lambda Function ^Path [^FileTreeWalker$Event entry] (.file entry))))
+        (catch [Error RuntimeException] e (.close iterator) (throw e)))))
 
-  (method ^:public ^:static createTempDirectory :throws [IOException] ^Path [^Path dir
-                                                                             ^String prefix &
-                                                                             ^{:tag (array (FileAttribute ?))} attrs]
-    (Files/createTemp (cast Path (Objects/requireNonNull dir)) prefix nil true))
+  (method ^:public ^:static lines :throws [IOException] ^{:tag (Stream String)} [^Path path
+                                                                                 ^Charset cs]
+    (when (and (identical? (.getFileSystem path) (FileSystems/getDefault))
+               (.contains FileChannelLinesSpliterator/SUPPORTED_CHARSETS cs))
+      (let [fc (FileChannel/open path (new OpenOption/1 [StandardOpenOption/READ]))
+            ^{:tag (Stream String)} fcls (Files/createFileChannelLinesStream fc cs)]
+        (when (some? fcls) (return fcls))
+        (.close fc)))
+    (Files/createBufferedReaderLinesStream (Files/newBufferedReader path cs)))
 
-  (method ^:public ^:static createTempDirectory :throws [IOException] ^Path [^String prefix &
-                                                                             ^{:tag (array (FileAttribute ?))} attrs]
-    (Files/createTemp nil prefix nil true))
+  (method ^:private ^:static createFileChannelLinesStream :throws [IOException] ^{:tag (Stream String)} [^FileChannel fc
+                                                                                                         ^Charset cs]
+    (try
+      (let [length (.size fc)]
+        (when (and (> length 0) (<= length Integer/MAX_VALUE))
+          (let [fcls (FileChannelLinesSpliterator. fc cs 0 (unchecked-int length))]
+            (return (cast Stream
+                          (.onClose (cast Stream
+                                          (.onClose
+                                            (StreamSupport/stream fcls false)
+                                            (Files/asUncheckedRunnable fc)))
+                                    (lambda Runnable ^void [] (.close fcls))))))))
+      (catch [Error RuntimeException IOException] e
+        (try
+          (.close fc)
+          (catch IOException ex (try (.addSuppressed e ex) (catch Throwable ignore))))
+        (throw e)))
+    nil)
 
-  (method ^:public ^:static delete :throws [IOException] ^void [^Path path]
-    (let [f (Files/file path)]
-      (when-not (.delete f)
-        (when-not (.exists f) (throw (NoSuchFileException. (.toString path))))
-        (let [names (.list f)]
-          (when (and (some? names) (> (alength names) 0))
-            (throw (DirectoryNotEmptyException. (.toString path))))
-          (throw (AccessDeniedException. (.toString path)))))))
+  (method ^:private ^:static createBufferedReaderLinesStream ^{:tag (Stream String)} [^BufferedReader br]
+    (try
+      (cast Stream (.onClose (.lines br) (Files/asUncheckedRunnable br)))
+      (catch [Error RuntimeException] e
+        (try
+          (.close br)
+          (catch IOException ex (try (.addSuppressed e ex) (catch Throwable ignore))))
+        (throw e))))
 
-  (method ^:public ^:static deleteIfExists :throws [IOException] ^boolean [^Path path]
-    (if (not (.exists (Files/file path))) false (do (Files/delete path) true)))
-
-  (method ^:public ^:static copy :throws [IOException] ^Path [^Path source ^Path target &
-                                                              ^CopyOption/1 options]
-    (let [from (Files/file source)
-          to (Files/file target)]
-      (when-not (.exists from) (throw (NoSuchFileException. (.toString source))))
-      (when (.exists to)
-        (when-not (Files/hasCopyOption options StandardCopyOption/REPLACE_EXISTING)
-          (throw (FileAlreadyExistsException. (.toString target))))
-        (Files/delete target))
-      (if (.isDirectory from)
-          (Files/createDirectory target)
-          (with-resources [^InputStream in (FileInputStream. from)
-                           out (Files/newOutputStream target StandardOpenOption/CREATE_NEW)]
-            (.transferTo in out)))
-      (when (Files/hasCopyOption options StandardCopyOption/COPY_ATTRIBUTES)
-        (.setLastModified to (.lastModified from)))
-      target))
-
-  (method ^:public ^:static copy :throws [IOException] ^long [^InputStream in ^Path target &
-                                                              ^CopyOption/1 options]
-    (Objects/requireNonNull in)
-    (when (.exists (Files/file target))
-      (when-not (Files/hasCopyOption options StandardCopyOption/REPLACE_EXISTING)
-        (throw (FileAlreadyExistsException. (.toString target))))
-      (Files/delete target))
-    (with-resources [out (Files/newOutputStream target StandardOpenOption/CREATE_NEW)]
-      (.transferTo in out)))
-
-  (method ^:public ^:static copy :throws [IOException] ^long [^Path source ^OutputStream out]
-    (Objects/requireNonNull out)
-    (with-resources [in (Files/newInputStream source)] (.transferTo in out)))
-
-  (method ^:public ^:static move :throws [IOException] ^Path [^Path source ^Path target &
-                                                              ^CopyOption/1 options]
-    (let [from (Files/file source)
-          to (Files/file target)]
-      (when-not (.exists from) (throw (NoSuchFileException. (.toString source))))
-      (when (and (.exists to)
-                 (not (.equals (.normalize (.toAbsolutePath source))
-                               (.normalize (.toAbsolutePath target)))))
-        (when-not (Files/hasCopyOption options StandardCopyOption/REPLACE_EXISTING)
-          (throw (FileAlreadyExistsException. (.toString target))))
-        (Files/delete target))
-      (when-not (.renameTo from to)
-        (throw (FileSystemException. (.toString source) (.toString target) "Rename failed")))
-      target))
-
-  (method ^:private ^:static hasCopyOption ^boolean [^CopyOption/1 options ^CopyOption option]
-    (for-each [^CopyOption o options] (when (identical? o option) (return true)))
-    false)
-
-  (method ^:public ^:static newDirectoryStream :throws [IOException] ^{:tag (DirectoryStream Path)} [^Path dir]
-    (Files/newDirectoryStream dir
-                              (anon (DirectoryStream$Filter Path) []
-                                (method ^:public accept ^boolean [this ^Path entry] true))))
-
-  (method ^:public ^:static newDirectoryStream :throws [IOException] ^{:tag (DirectoryStream Path)} [^Path dir
-                                                                                                     ^String glob]
-    (if (.equals glob "*")
-        (Files/newDirectoryStream dir)
-        (let [pattern (Pattern/compile (GlobPatterns/toUnixRegex glob))]
-          (Files/newDirectoryStream dir
-                                    (anon (DirectoryStream$Filter Path) []
-                                      (method ^:public accept ^boolean [this ^Path entry]
-                                        (let [name (.getFileName entry)]
-                                          (and (some? name)
-                                               (.matches (.matcher pattern (.toString name)))))))))))
-
-  (method ^:public ^:static newDirectoryStream :throws [IOException] ^{:tag (DirectoryStream Path)} [^Path dir
-                                                                                                     ^{:tag (DirectoryStream$Filter (? super Path))} filter]
-    (Objects/requireNonNull filter)
-    (let [d (.toFile dir)]
-      (when-not (.exists d) (throw (NoSuchFileException. (.toString dir))))
-      (when-not (.isDirectory d) (throw (NotDirectoryException. (.toString dir))))
-      (let [names (.list d)]
-        (when (nil? names) (throw (AccessDeniedException. (.toString dir))))
-        (let [^{:tag (List Path)} entries (ArrayList.)]
-          (for-each [^String n names]
-            (let [entry (.resolve dir n)] (when (.accept filter entry) (.add entries entry))))
-          (anon (DirectoryStream Path) []
-            (field ^:private ^boolean iterated)
-
-            (field ^:private ^boolean closed)
-
-            (method ^:public iterator ^{:tag (Iterator Path)} [this1]
-              (when closed (throw (IllegalStateException. "Directory stream is closed")))
-              (when iterated (throw (IllegalStateException. "Iterator already obtained")))
-              (set! iterated true)
-              (let [^{:tag (Iterator Path)} it (.iterator entries)]
-                (anon (Iterator Path) []
-                  (method ^:public hasNext ^boolean [this]
-                    (and (not closed) (.hasNext it)))
-
-                  (method ^:public next ^Path [this]
-                    (when-not (.hasNext this) (throw (NoSuchElementException.)))
-                    (cast Path (.next it))))))
-
-            (method ^:public close ^void [this] (set! closed true))))))))
+  (method ^:public ^:static lines :throws [IOException] ^{:tag (Stream String)} [^Path path]
+    (Files/lines path UTF_8/INSTANCE)))

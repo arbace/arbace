@@ -1,0 +1,394 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/NewSessionTicket.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security GeneralSecurityException SecureRandom)
+        '(java.text MessageFormat)
+        '(java.util Arrays Locale)
+        '(javax.crypto KDF SecretKey)
+        '(javax.crypto.spec HKDFParameterSpec SecretKeySpec)
+        '(javax.net.ssl SSLHandshakeException)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:final NewSessionTicket
+  (field ^:static ^:final ^int MAX_TICKET_LIFETIME 604800)
+
+  (field ^:static ^:final ^SSLConsumer handshakeConsumer (T13NewSessionTicketConsumer.))
+
+  (field ^:static ^:final ^SSLConsumer handshake12Consumer (T12NewSessionTicketConsumer.))
+
+  (field ^:static ^:final ^SSLProducer t13PosthandshakeProducer (T13NewSessionTicketProducer.))
+
+  (field ^:static ^:final ^HandshakeProducer handshake12Producer (T12NewSessionTicketProducer.))
+
+  (defclass ^:abstract ^:static NewSessionTicketMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^int ticketLifetime)
+
+    (field ^byte/1 ticket (new byte/1 0))
+
+    (constructor [this ^HandshakeContext context] (super. context))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      SSLHandshake/NEW_SESSION_TICKET)
+
+    (method getTicketAgeAdd :throws [IOException] ^int [this]
+      (throw (.fatal (.-conContext (.-handshakeContext this))
+                     Alert/ILLEGAL_PARAMETER
+                     "TicketAgeAdd not part of RFC 5077.")))
+
+    (method getTicketNonce :throws [IOException] ^byte/1 [this]
+      (throw (.fatal (.-conContext (.-handshakeContext this))
+                     Alert/ILLEGAL_PARAMETER
+                     "TicketNonce not part of RFC 5077.")))
+
+    (method isValid ^boolean [this] (> (alength ticket) 0)))
+
+  (defclass ^:static ^:final T12NewSessionTicketMessage
+    :extends NewSessionTicketMessage
+
+    (constructor [this ^HandshakeContext context ^int ticketLifetime ^byte/1 ticket]
+      (super. context)
+      (set! (.-ticketLifetime this) ticketLifetime)
+      (set! (.-ticket this) ticket))
+
+    (constructor :throws [IOException] [this ^HandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (when (< (.remaining m) 6)
+        (throw (.fatal (.-conContext context)
+                       Alert/ILLEGAL_PARAMETER
+                       "Invalid NewSessionTicket message: insufficient data")))
+      (set! (.-ticketLifetime this) (Record/getInt32 m))
+      (set! (.-ticket this) (Record/getBytes16 m)))
+
+    (method ^:public messageLength ^int [this]
+      (unchecked-add-int (unchecked-add-int 4 2) (alength (.-ticket this))))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putInt32 hos (.-ticketLifetime this))
+      (.putBytes16 hos (.-ticket this)))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"NewSessionTicket\": '{'\n  \"ticket_lifetime\"      : \"{0}\",\n  \"ticket\"               : '{'\n{1}\n  '}''}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(.-ticketLifetime this)
+                                (Utilities/indent (.encode hexEncoder (.-ticket this)) "    ")])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:static ^:final T13NewSessionTicketMessage
+    :extends NewSessionTicketMessage
+
+    (field ^int ticketAgeAdd)
+
+    (field ^byte/1 ticketNonce)
+
+    (field ^SSLExtensions extensions)
+
+    (constructor [this ^HandshakeContext context ^int ticketLifetime ^SecureRandom generator
+                  ^byte/1 ticketNonce ^byte/1 ticket]
+      (super. context)
+      (set! (.-ticketLifetime this) ticketLifetime)
+      (set! (.-ticketAgeAdd this) (.nextInt generator))
+      (set! (.-ticketNonce this) ticketNonce)
+      (set! (.-ticket this) ticket)
+      (set! (.-extensions this) (SSLExtensions. this)))
+
+    (constructor :throws [IOException] [this ^HandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (when (< (.remaining m) 14)
+        (throw (.fatal (.-conContext context)
+                       Alert/ILLEGAL_PARAMETER
+                       "Invalid NewSessionTicket message: insufficient data")))
+      (set! (.-ticketLifetime this) (Record/getInt32 m))
+      (set! (.-ticketAgeAdd this) (Record/getInt32 m))
+      (set! (.-ticketNonce this) (Record/getBytes8 m))
+      (when (< (.remaining m) 5)
+        (throw (.fatal (.-conContext context)
+                       Alert/ILLEGAL_PARAMETER
+                       "Invalid NewSessionTicket message: insufficient ticket data")))
+      (set! (.-ticket this) (Record/getBytes16 m))
+      (when (== (alength (.-ticket this)) 0)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "No ticket in the NewSessionTicket handshake message")))
+      (when (< (.remaining m) 2)
+        (throw (.fatal (.-conContext context)
+                       Alert/ILLEGAL_PARAMETER
+                       "Invalid NewSessionTicket message: extra data")))
+      (let [supportedExtensions (.getEnabledExtensions
+                                  (.-sslConfig context)
+                                  SSLHandshake/NEW_SESSION_TICKET)]
+        (set! (.-extensions this) (SSLExtensions. this m supportedExtensions))))
+
+    (method getTicketAgeAdd ^int [this] ticketAgeAdd)
+
+    (method getTicketNonce ^byte/1 [this] ticketNonce)
+
+    (method ^:public messageLength ^int [this]
+      (let [^:mutable extLen (.length extensions)]
+        (when (== extLen 0) (set! extLen 2))
+        (unchecked-add-int
+          (unchecked-add-int
+            (unchecked-add-int
+              (unchecked-add-int (unchecked-add-int (unchecked-add-int 4 4) 1)
+                                 (alength ticketNonce))
+              2)
+            (alength (.-ticket this)))
+          extLen)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putInt32 hos (.-ticketLifetime this))
+      (.putInt32 hos ticketAgeAdd)
+      (.putBytes8 hos ticketNonce)
+      (.putBytes16 hos (.-ticket this))
+      (if (== (.length extensions) 0) (.putInt16 hos 0) (.send extensions hos)))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"NewSessionTicket\": '{'\n  \"ticket_lifetime\"      : \"{0}\",\n  \"ticket_age_add\"       : \"{1}\",\n  \"ticket_nonce\"         : \"{2}\",\n  \"ticket\"               : '{'\n{3}\n  '}'  \"extensions\"           : [\n{4}\n  ]\n'}'"
+                            Locale/ENGLISH)
+            hexEncoder (HexDumpEncoder.)
+            messageFields (new Object/1
+                               [(.-ticketLifetime this)
+                                "<omitted>"
+                                (Utilities/toHexString ticketNonce)
+                                (Utilities/indent (.encode hexEncoder (.-ticket this)) "    ")
+                                (Utilities/indent (.toString extensions) "    ")])]
+        (.format messageFormat messageFields))))
+
+  (method ^:private ^:static derivePreSharedKey :throws [IOException] ^SecretKey [^CipherSuite$HashAlg hashAlg
+                                                                                  ^SecretKey resumptionMasterSecret
+                                                                                  ^byte/1 nonce]
+    (try
+      (let [hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))
+            hkdfInfo (SSLSecretDerivation/createHkdfInfo
+                       (.getBytes "tls13 resumption")
+                       nonce
+                       (.-hashLength hashAlg))]
+        (SecretKeySpec.
+          (.deriveData hkdf
+                       (HKDFParameterSpec/expandOnly
+                         resumptionMasterSecret
+                         hkdfInfo
+                         (.-hashLength hashAlg)))
+          "TlsPreSharedKey"))
+      (catch GeneralSecurityException gse
+        (throw (SSLHandshakeException. "Could not derive PSK" gse)))))
+
+  (defclass ^:private ^:static ^:final T13NewSessionTicketProducer
+    :implements [SSLProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context]
+      (let [hc (cast HandshakeContext context)]
+        (when (.-hasDelegatedFinished (.-conContext hc))
+          (set! (.-hasDelegatedFinished (.-conContext hc)) false)
+          (set! (.-needHandshakeFinishedStatus (.-conContext hc)) true))
+        (if (instance? ServerHandshakeContext hc)
+            (do
+              (when-not (.isRejoinable (.-handshakeSession hc))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine "No session ticket produced: session is not resumable"))
+                (return nil))
+              (let [pkemSpec (cast PskKeyExchangeModesExtension$PskKeyExchangeModesSpec
+                                   (.get (.-handshakeExtensions hc)
+                                         SSLExtension/PSK_KEY_EXCHANGE_MODES))]
+                (when (or (nil? pkemSpec)
+                          (not (.contains
+                                 pkemSpec
+                                 PskKeyExchangeModesExtension$PskKeyExchangeMode/PSK_DHE_KE)))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                    (SSLLogger/fine
+                      "No session ticket produced: client does not support psk_dhe_ke"))
+                  (return nil))))
+            (when-not (.isPSKable (.-handshakeSession hc))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine
+                  "No session ticket produced: No session ticket allowed in this session"))
+              (return nil)))
+        (let [sessionCache (cast SSLSessionContextImpl
+                                 (.engineGetServerSessionContext (.-sslContext hc)))
+              sessionTimeoutSeconds (.getSessionTimeout sessionCache)]
+          (if (> sessionTimeoutSeconds MAX_TICKET_LIFETIME)
+              (do
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine "No session ticket produced: session timeout is too long"))
+                nil)
+              (do
+                (when (> SSLConfiguration/serverNewSessionTicketCount 0)
+                  (let [^:mutable ^int i 0
+                        ^:mutable ^NewSessionTicketMessage nstm nil]
+                    (while (< i SSLConfiguration/serverNewSessionTicketCount)
+                      (set! nstm (.generateNST this hc sessionCache))
+                      (when (nil? nstm) (break))
+                      (.write nstm (.-handshakeOutput hc))
+                      (set! i (unchecked-inc-int i)))
+                    (.flush (.-handshakeOutput hc))))
+                (when (.-needHandshakeFinishedStatus (.-conContext hc))
+                  (set! (.-needHandshakeFinishedStatus (.-conContext hc)) false))
+                (.finishPostHandshake (.-conContext hc))
+                nil)))))
+
+    (method ^:private generateNST :throws [IOException] ^NewSessionTicketMessage [this
+                                                                                  ^HandshakeContext hc
+                                                                                  ^SSLSessionContextImpl sessionCache]
+      (let [^:mutable ^NewSessionTicketMessage nstm nil
+            newId (SessionId. true (.getSecureRandom (.-sslContext hc)))
+            nonce (.incrTicketNonceCounter (.-handshakeSession hc))
+            sessionCopy (SSLSessionImpl. (.-handshakeSession hc) newId)]
+        (.setPreSharedKey sessionCopy
+                          (NewSessionTicket/derivePreSharedKey
+                            (.-hashAlg (.-negotiatedCipherSuite hc))
+                            (.getResumptionMasterSecret (.-handshakeSession hc))
+                            nonce))
+        (.setPskIdentity sessionCopy (.getId newId))
+        (cond
+          (and (.-statelessResumption hc) (.isStatelessable (.-handshakeSession hc)))
+            (do
+              (set! nstm
+                    (T13NewSessionTicketMessage.
+                      hc
+                      (.getSessionTimeout sessionCache)
+                      (.getSecureRandom (.-sslContext hc))
+                      nonce
+                      (.encrypt (SessionTicketExtension$SessionTicketSpec.) hc sessionCopy)))
+              (cond
+                (not (.isValid nstm)) (set! (.-statelessResumption hc) false)
+                (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                  (SSLLogger/fine "Produced NewSessionTicket stateless post-handshake message" nstm))
+              nstm)
+          (or (not (.-statelessResumption hc)) (not (.isStatelessable (.-handshakeSession hc))))
+            (do
+              (set! nstm
+                    (T13NewSessionTicketMessage.
+                      hc
+                      (.getSessionTimeout sessionCache)
+                      (.getSecureRandom (.-sslContext hc))
+                      nonce
+                      (.getId newId)))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Produced NewSessionTicket post-handshake message" nstm))
+              (.addChild (.-handshakeSession hc) sessionCopy)
+              (.setTicketAgeAdd sessionCopy (.getTicketAgeAdd nstm))
+              (.put sessionCache sessionCopy)
+              nstm)
+          :else
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "No NewSessionTicket created"))
+              nil)))))
+
+  (defclass ^:private ^:static ^:final T12NewSessionTicketProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when-not (or (== SSLConfiguration/serverNewSessionTicketCount 0)
+                      (not (.isRejoinable (.-handshakeSession shc))))
+          (let [newId (.getSessionId (.-handshakeSession shc))
+                sessionCache (cast SSLSessionContextImpl
+                                   (.engineGetServerSessionContext (.-sslContext shc)))
+                sessionTimeoutSeconds (.getSessionTimeout sessionCache)]
+            (if (> sessionTimeoutSeconds MAX_TICKET_LIFETIME)
+                (do
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                    (SSLLogger/fine "Session timeout is too long. No ticket sent."))
+                  nil)
+                (let [sessionCopy (SSLSessionImpl. (.-handshakeSession shc) newId)]
+                  (.setPskIdentity sessionCopy (.getId newId))
+                  (let [^NewSessionTicketMessage nstm (T12NewSessionTicketMessage.
+                                                        shc
+                                                        sessionTimeoutSeconds
+                                                        (.encrypt
+                                                          (SessionTicketExtension$SessionTicketSpec.)
+                                                          shc
+                                                          sessionCopy))]
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "Produced NewSessionTicket stateless handshake message" nstm))
+                    (.write nstm (.-handshakeOutput shc))
+                    (.flush (.-handshakeOutput shc))
+                    nil))))))))
+
+  (defclass ^:private ^:static ^:final T13NewSessionTicketConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [hc (cast HandshakeContext context)
+            ^NewSessionTicketMessage nstm (T13NewSessionTicketMessage. hc message)]
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Consuming NewSessionTicket message" nstm))
+        (let [sessionCache (cast SSLSessionContextImpl
+                                 (.engineGetClientSessionContext (.-sslContext hc)))]
+          (cond
+            (or (<= (.-ticketLifetime nstm) 0) (> (.-ticketLifetime nstm) MAX_TICKET_LIFETIME))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine
+                  (java-str "Discarding NewSessionTicket with lifetime " (.-ticketLifetime nstm))
+                  nstm))
+            (> (.getSessionTimeout sessionCache) MAX_TICKET_LIFETIME)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Session cache lifetime is too long. Discarding ticket."))
+            :else
+              (let [sessionToSave (.-conSession (.-conContext hc))
+                    resumptionMasterSecret (.getResumptionMasterSecret sessionToSave)]
+                (if (nil? resumptionMasterSecret)
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "Session has no resumption master secret. Ignoring ticket."))
+                    (let [psk (NewSessionTicket/derivePreSharedKey
+                                (.-hashAlg (.getSuite sessionToSave))
+                                resumptionMasterSecret
+                                (.getTicketNonce nstm))
+                          newId (SessionId. true (.getSecureRandom (.-sslContext hc)))
+                          sessionCopy (SSLSessionImpl. sessionToSave newId)]
+                      (.addChild sessionToSave sessionCopy)
+                      (.setPreSharedKey sessionCopy psk)
+                      (.setTicketAgeAdd sessionCopy (.getTicketAgeAdd nstm))
+                      (.setPskIdentity sessionCopy (.-ticket nstm))
+                      (.put sessionCache sessionCopy (.isPSK sessionCopy))
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                        (SSLLogger/fine
+                          (java-str "MultiNST PSK (Server): "
+                                    (Utilities/toHexString (Arrays/copyOf (.-ticket nstm) 16)))))
+                      (.finishPostHandshake (.-conContext hc))))))))))
+
+  (defclass ^:private ^:static ^:final T12NewSessionTicketConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [hc (cast HandshakeContext context)]
+        (.remove (.-handshakeConsumers hc) (.-id SSLHandshake/NEW_SESSION_TICKET))
+        (let [^NewSessionTicketMessage nstm (T12NewSessionTicketMessage. hc message)]
+          (cond
+            (== (alength (.-ticket nstm)) 0)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "NewSessionTicket ticket was empty"))
+            (or (<= (.-ticketLifetime nstm) 0) (> (.-ticketLifetime nstm) MAX_TICKET_LIFETIME))
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine
+                  (java-str "Discarding NewSessionTicket with lifetime " (.-ticketLifetime nstm))
+                  nstm))
+            :else
+              (let [sessionCache (cast SSLSessionContextImpl
+                                       (.engineGetClientSessionContext (.-sslContext hc)))]
+                (if (> (.getSessionTimeout sessionCache) MAX_TICKET_LIFETIME)
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine "Session cache lifetime is too long. Discarding ticket."))
+                    (do
+                      (.setPskIdentity (.-handshakeSession hc) (.-ticket nstm))
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                        (SSLLogger/fine (java-str "Consuming NewSessionTicket\n" nstm))))))))))))

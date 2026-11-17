@@ -1,0 +1,425 @@
+;; Converted from jdk26u src/jdk.httpserver/share/classes/sun/net/httpserver/SSLStreams.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.httpserver)
+
+(import '(com.sun.net.httpserver HttpsConfigurator HttpsParameters)
+        '(java.io IOException)
+        '(java.net InetSocketAddress)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels SocketChannel)
+        '(java.util.concurrent.locks Lock ReentrantLock)
+        '(javax.net.ssl SSLContext
+                        SSLEngine
+                        SSLEngineResult
+                        SSLEngineResult$HandshakeStatus
+                        SSLEngineResult$Status
+                        SSLException
+                        SSLParameters))
+
+(defclass SSLStreams
+  (field ^SSLContext sslctx)
+
+  (field ^SocketChannel chan)
+
+  (field ^ServerImpl server)
+
+  (field ^SSLEngine engine)
+
+  (field ^EngineWrapper wrapper)
+
+  (field ^OutputStream os)
+
+  (field ^InputStream is)
+
+  (field ^Lock handshaking (ReentrantLock.))
+
+  (constructor :throws [IOException] [this ^ServerImpl server ^SSLContext sslctx ^SocketChannel chan]
+    (set! (.-server this) server)
+    (set! (.-sslctx this) sslctx)
+    (set! (.-chan this) chan)
+    (let [addr (cast InetSocketAddress (.getRemoteSocketAddress (.socket chan)))]
+      (set! engine (.createSSLEngine sslctx (.getHostName addr) (.getPort addr)))
+      (.setUseClientMode engine false)
+      (let [cfg (.getHttpsConfigurator server)]
+        (.configureEngine this cfg addr)
+        (set! wrapper (EngineWrapper. chan engine)))))
+
+  (method ^:private configureEngine ^void [this ^HttpsConfigurator cfg ^InetSocketAddress addr]
+    (when (some? cfg)
+      (let [params (Parameters. cfg addr)]
+        (.configure cfg params)
+        (let [sslParams (.getSSLParameters params)]
+          (if (some? sslParams)
+              (.setSSLParameters engine sslParams)
+              (do
+                (when (some? (.getCipherSuites params))
+                  (try
+                    (.setEnabledCipherSuites engine (.getCipherSuites params))
+                    (catch IllegalArgumentException e)))
+                (cond
+                  (.getNeedClientAuth params) (.setNeedClientAuth engine true)
+                  (.getWantClientAuth params) (.setWantClientAuth engine true))
+                (when (some? (.getProtocols params))
+                  (try
+                    (.setEnabledProtocols engine (.getProtocols params))
+                    (catch IllegalArgumentException e)))))))))
+
+  (defclass Parameters
+    :extends HttpsParameters
+
+    (field ^InetSocketAddress addr)
+
+    (field ^HttpsConfigurator cfg)
+
+    (constructor [this ^HttpsConfigurator cfg ^InetSocketAddress addr]
+      (set! (.-addr this) addr)
+      (set! (.-cfg this) cfg))
+
+    (method ^:public getClientAddress ^InetSocketAddress [this] addr)
+
+    (method ^:public getHttpsConfigurator ^HttpsConfigurator [this] cfg)
+
+    (field ^SSLParameters params)
+
+    (method ^:public setSSLParameters ^void [this ^SSLParameters p]
+      (set! params p))
+
+    (method getSSLParameters ^SSLParameters [this] params))
+
+  (method close :throws [IOException] ^void [this] (.close wrapper))
+
+  (method getInputStream :throws [IOException] ^InputStream [this]
+    (when (nil? is) (set! is (InputStream.)))
+    is)
+
+  (method getOutputStream :throws [IOException] ^OutputStream [this]
+    (when (nil? os) (set! os (OutputStream.)))
+    os)
+
+  (method getSSLEngine ^SSLEngine [this] engine)
+
+  (method beginHandshake :throws [SSLException] ^void [this]
+    (.beginHandshake engine))
+
+  (defclass WrapperResult
+    (field ^SSLEngineResult result)
+
+    (field ^ByteBuffer buf))
+
+  (field ^int app_buf_size)
+
+  (field ^int packet_buf_size)
+
+  (defclass ^:enum BufType
+    (constants PACKET APPLICATION))
+
+  (method ^:private allocate ^ByteBuffer [this ^BufType type]
+    (.allocate this type -1))
+
+  (method ^:private allocate ^ByteBuffer [this ^BufType type ^int len]
+    (java-assert (some? engine))
+    (locking this
+      (let [^:mutable ^int size 0]
+        (if (identical? type BufType/PACKET)
+            (do
+              (when (== packet_buf_size 0)
+                (let [sess (.getSession engine)] (set! packet_buf_size (.getPacketBufferSize sess))))
+              (when (> len packet_buf_size) (set! packet_buf_size len))
+              (set! size packet_buf_size))
+            (do
+              (when (== app_buf_size 0)
+                (let [sess (.getSession engine)]
+                  (set! app_buf_size (.getApplicationBufferSize sess))))
+              (when (> len app_buf_size) (set! app_buf_size len))
+              (set! size app_buf_size)))
+        (ByteBuffer/allocate size))))
+
+  (method ^:private realloc ^ByteBuffer [this ^:mutable ^ByteBuffer b ^boolean flip ^BufType type]
+    (locking this
+      (let [nsize (unchecked-multiply-int 2 (.capacity b))
+            n (.allocate this type nsize)]
+        (when flip (.flip b))
+        (.put n b)
+        (set! b n)))
+    b)
+
+  (defclass EngineWrapper
+    (field ^SocketChannel chan)
+
+    (field ^SSLEngine engine)
+
+    (field wrapLock)
+
+    (field unwrapLock)
+
+    (field ^ByteBuffer unwrap_src)
+
+    (field ^ByteBuffer wrap_dst)
+
+    (field ^boolean closed false)
+
+    (field ^int u_remaining)
+
+    (constructor :throws [IOException] [this ^SocketChannel chan ^SSLEngine engine]
+      (set! (.-chan this) chan)
+      (set! (.-engine this) engine)
+      (set! wrapLock (Object.))
+      (set! unwrapLock (Object.))
+      (set! unwrap_src (.allocate SSLStreams/this BufType/PACKET))
+      (set! wrap_dst (.allocate SSLStreams/this BufType/PACKET)))
+
+    (method close :throws [IOException] ^void [this])
+
+    (method wrapAndSend :throws [IOException] ^WrapperResult [this ^ByteBuffer src]
+      (.wrapAndSendX this src false))
+
+    (method wrapAndSendX :throws [IOException] ^WrapperResult [this ^ByteBuffer src
+                                                               ^boolean ignoreClose]
+      (when (and closed (not ignoreClose)) (throw (IOException. "Engine is closed")))
+      (let [^:mutable ^SSLEngineResult$Status status nil
+            r (WrapperResult.)]
+        (locking wrapLock
+          (.clear wrap_dst)
+          (loop []
+            (set! (.-result r) (.wrap engine src wrap_dst))
+            (set! status (.getStatus (.-result r)))
+            (when (identical? status SSLEngineResult$Status/BUFFER_OVERFLOW)
+              (set! wrap_dst (.realloc SSLStreams/this wrap_dst true BufType/PACKET)))
+            (when (identical? status SSLEngineResult$Status/BUFFER_OVERFLOW) (recur)))
+          (when (and (identical? status SSLEngineResult$Status/CLOSED) (not ignoreClose))
+            (set! closed true))
+          (when (> (.bytesProduced (.-result r)) 0)
+            (.flip wrap_dst)
+            (let [^:mutable l (.remaining wrap_dst)]
+              (java-assert (== l (.bytesProduced (.-result r))))
+              (while (> l 0) (set! l (unchecked-subtract-int l (.write chan wrap_dst)))))))
+        r))
+
+    (method recvAndUnwrap :throws [IOException] ^WrapperResult [this ^ByteBuffer dst]
+      (let [^:mutable status SSLEngineResult$Status/OK
+            r (WrapperResult.)]
+        (set! (.-buf r) dst)
+        (when closed (throw (IOException. "Engine is closed")))
+        (let [^:mutable ^boolean needData false]
+          (if (> u_remaining 0)
+              (do (.compact unwrap_src) (.flip unwrap_src) (set! needData false))
+              (do (.clear unwrap_src) (set! needData true)))
+          (locking unwrapLock
+            (let [^:mutable ^int x 0]
+              (loop []
+                (when needData
+                  (loop [] (set! x (.read chan unwrap_src)) (when (== x 0) (recur)))
+                  (when (== x -1) (throw (IOException. "connection closed for reading")))
+                  (.flip unwrap_src))
+                (set! (.-result r) (.unwrap engine unwrap_src (.-buf r)))
+                (set! status (.getStatus (.-result r)))
+                (cond
+                  (identical? status SSLEngineResult$Status/BUFFER_UNDERFLOW)
+                    (do
+                      (if (== (.limit unwrap_src) (.capacity unwrap_src))
+                          (set! unwrap_src
+                                (.realloc SSLStreams/this unwrap_src false BufType/PACKET))
+                          (do
+                            (.position unwrap_src (.limit unwrap_src))
+                            (.limit unwrap_src (.capacity unwrap_src))))
+                      (set! needData true))
+                  (identical? status SSLEngineResult$Status/BUFFER_OVERFLOW)
+                    (do
+                      (set! (.-buf r) (.realloc SSLStreams/this (.-buf r) true BufType/APPLICATION))
+                      (set! needData false))
+                  :else
+                    (when (identical? status SSLEngineResult$Status/CLOSED)
+                      (set! closed true)
+                      (.flip (.-buf r))
+                      (return r)))
+                (when-not (identical? status SSLEngineResult$Status/OK) (recur)))))
+          (set! u_remaining (.remaining unwrap_src))
+          r))))
+
+  (method ^:public sendData :throws [IOException] ^WrapperResult [this ^ByteBuffer src]
+    (let [^:mutable ^WrapperResult r nil]
+      (while (> (.remaining src) 0)
+        (set! r (.wrapAndSend wrapper src))
+        (let [status (.getStatus (.-result r))]
+          (when (identical? status SSLEngineResult$Status/CLOSED) (.doClosure this) (return r))
+          (let [hs_status (.getHandshakeStatus (.-result r))]
+            (when (and (not (identical? hs_status SSLEngineResult$HandshakeStatus/FINISHED))
+                       (not (identical? hs_status SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING)))
+              (.doHandshake this hs_status)))))
+      r))
+
+  (method ^:public recvData :throws [IOException] ^WrapperResult [this ^:mutable ^ByteBuffer dst]
+    (let [^:mutable ^WrapperResult r nil]
+      (java-assert (== (.position dst) 0))
+      (while (== (.position dst) 0)
+        (set! r (.recvAndUnwrap wrapper dst))
+        (set! dst (if (not (identical? (.-buf r) dst)) (.-buf r) dst))
+        (let [status (.getStatus (.-result r))]
+          (when (identical? status SSLEngineResult$Status/CLOSED) (.doClosure this) (return r))
+          (let [hs_status (.getHandshakeStatus (.-result r))]
+            (when (and (not (identical? hs_status SSLEngineResult$HandshakeStatus/FINISHED))
+                       (not (identical? hs_status SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING)))
+              (.doHandshake this hs_status)))))
+      (.flip dst)
+      r))
+
+  (method doClosure :throws [IOException] ^void [this]
+    (try
+      (.lock handshaking)
+      (let [tmp (.allocate this BufType/APPLICATION)
+            ^:mutable ^WrapperResult r nil
+            ^:mutable ^SSLEngineResult$Status st nil
+            ^:mutable ^SSLEngineResult$HandshakeStatus hs nil]
+        (loop []
+          (.clear tmp)
+          (.flip tmp)
+          (set! r (.wrapAndSendX wrapper tmp true))
+          (set! hs (.getHandshakeStatus (.-result r)))
+          (set! st (.getStatus (.-result r)))
+          (when (and (not (identical? st SSLEngineResult$Status/CLOSED))
+                     (not (and (identical? st SSLEngineResult$Status/OK)
+                               (identical? hs SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING))))
+            (recur))))
+      (finally (.unlock handshaking))))
+
+  (method doHandshake :throws [IOException] ^void [this
+                                                   ^:mutable ^SSLEngineResult$HandshakeStatus hs_status]
+    (try
+      (.lock handshaking)
+      (let [^:mutable tmp (.allocate this BufType/APPLICATION)]
+        (while (and (not (identical? hs_status SSLEngineResult$HandshakeStatus/FINISHED))
+                    (not (identical? hs_status SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING)))
+          (let [^:mutable ^WrapperResult r nil]
+            (switch hs_status
+              NEED_TASK
+                (let [^:mutable ^Runnable task nil]
+                  (while (some? (set! task (.getDelegatedTask engine))) (.run task))
+                  (.clear tmp)
+                  (.flip tmp)
+                  (set! r (.wrapAndSend wrapper tmp)))
+              NEED_WRAP (do (.clear tmp) (.flip tmp) (set! r (.wrapAndSend wrapper tmp)))
+              NEED_UNWRAP
+                (do
+                  (.clear tmp)
+                  (set! r (.recvAndUnwrap wrapper tmp))
+                  (when-not (identical? (.-buf r) tmp) (set! tmp (.-buf r)))
+                  (java-assert (== (.position tmp) 0))))
+            (set! hs_status (.getHandshakeStatus (.-result r))))))
+      (finally (.unlock handshaking))))
+
+  (defclass InputStream
+    :extends java.io.InputStream
+
+    (field ^ByteBuffer bbuf)
+
+    (field ^boolean closed false)
+
+    (field ^boolean eof false)
+
+    (field ^boolean needData true)
+
+    (constructor [this]
+      (set! bbuf (.allocate SSLStreams/this BufType/APPLICATION)))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 buf ^int off ^:mutable ^int len]
+      (when closed (throw (IOException. "SSL stream is closed")))
+      (if eof
+          -1
+          (let [^:mutable ^int available 0]
+            (when-not needData (set! available (.remaining bbuf)) (set! needData (== available 0)))
+            (when needData
+              (.clear bbuf)
+              (let [r (.recvData SSLStreams/this bbuf)]
+                (set! bbuf (if (identical? (.-buf r) bbuf) bbuf (.-buf r)))
+                (if (== (set! available (.remaining bbuf)) 0)
+                    (do (set! eof true) (return -1))
+                    (set! needData false))))
+            (when (> len available) (set! len available))
+            (.get bbuf buf off len)
+            len)))
+
+    (method ^:public available :throws [IOException] ^int [this]
+      (.remaining bbuf))
+
+    (method ^:public markSupported ^boolean [this] false)
+
+    (method ^:public reset :throws [IOException] ^void [this]
+      (throw (IOException. "mark/reset not supported")))
+
+    (method ^:public skip :throws [IOException] ^long [this ^long s]
+      (let [^:mutable n (unchecked-int s)]
+        (when closed (throw (IOException. "SSL stream is closed")))
+        (if eof
+            0
+            (let [ret n]
+              (while (> n 0)
+                (if (>= (.remaining bbuf) n)
+                    (do (.position bbuf (unchecked-add-int (.position bbuf) n)) (return ret))
+                    (do
+                      (set! n (unchecked-subtract-int n (.remaining bbuf)))
+                      (.clear bbuf)
+                      (let [r (.recvData SSLStreams/this bbuf)]
+                        (set! bbuf (if (identical? (.-buf r) bbuf) bbuf (.-buf r)))))))
+              ret))))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (set! eof true)
+      (.closeInbound engine))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 buf]
+      (.read this buf 0 (alength buf)))
+
+    (field ^byte/1 single (new byte/1 1))
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (if eof
+          -1
+          (let [n (.read this single 0 1)] (if (<= n 0) -1 (bit-and-int (aget single 0) 0xFF))))))
+
+  (defclass OutputStream
+    :extends java.io.OutputStream
+
+    (field ^ByteBuffer buf)
+
+    (field ^boolean closed false)
+
+    (field ^byte/1 single (new byte/1 1))
+
+    (constructor [this]
+      (set! buf (.allocate SSLStreams/this BufType/APPLICATION)))
+
+    (method ^:public write :throws [IOException] ^void [this ^int b]
+      (aset single 0 (unchecked-byte b))
+      (.write this single 0 1))
+
+    (method ^:public write :throws [IOException] ^void [this ^byte/1 b]
+      (.write this b 0 (alength b)))
+
+    (method ^:public write :throws [IOException] ^void [this ^byte/1 b ^:mutable ^int off
+                                                        ^:mutable ^int len]
+      (when closed (throw (IOException. "output stream is closed")))
+      (while (> len 0)
+        (let [^int l (if (> len (.capacity buf)) (.capacity buf) len)]
+          (.clear buf)
+          (.put buf b off l)
+          (set! len (unchecked-subtract-int len l))
+          (set! off (unchecked-add-int off l))
+          (.flip buf)
+          (let [r (.sendData SSLStreams/this buf)]
+            (when (identical? (.getStatus (.-result r)) SSLEngineResult$Status/CLOSED)
+              (set! closed true)
+              (when (> len 0) (throw (IOException. "output stream is closed"))))))))
+
+    (method ^:public flush :throws [IOException] ^void [this])
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (let [^:mutable ^WrapperResult r nil]
+        (.closeOutbound engine)
+        (set! closed true)
+        (let [^:mutable stat SSLEngineResult$HandshakeStatus/NEED_WRAP]
+          (.clear buf)
+          (while (identical? stat SSLEngineResult$HandshakeStatus/NEED_WRAP)
+            (set! r (.wrapAndSend wrapper buf))
+            (set! stat (.getHandshakeStatus (.-result r))))
+          (java-assert (identical? (.getStatus (.-result r)) SSLEngineResult$Status/CLOSED)
+            (java-str "status is: " (.getStatus (.-result r)) ", handshakeStatus is: " stat)))))))

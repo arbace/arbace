@@ -1,0 +1,323 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/HttpRequestImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net Authenticator$RequestorType InetSocketAddress Proxy Proxy$Type ProxySelector URI)
+        '(java.net.http HttpClient$Version
+                        HttpHeaders
+                        HttpOption
+                        HttpOption$Http3DiscoveryMode
+                        HttpRequest
+                        HttpRequest$BodyPublisher)
+        '(java.time Duration)
+        '(java.util List Locale Map Objects Optional)
+        '(java.util.function BiPredicate Supplier)
+        '(jdk.internal.net.http.common Alpns HttpHeadersBuilder Utils Utils$ProxyHeaders)
+        '(jdk.internal.net.http.websocket WebSocketRequest))
+
+(defclass ^:public HttpRequestImpl
+  :extends HttpRequest
+  :implements [WebSocketRequest]
+
+  (field ^:private ^:final ^HttpHeaders userHeaders)
+
+  (field ^:private ^:final ^HttpHeadersBuilder systemHeadersBuilder)
+
+  (field ^:private ^:final ^URI uri)
+
+  (field ^:private ^:volatile ^Proxy proxy)
+
+  (field ^:private ^:final ^InetSocketAddress authority)
+
+  (field ^:private ^:final ^String method)
+
+  (field ^:final ^HttpRequest$BodyPublisher requestPublisher)
+
+  (field ^:final ^boolean secure)
+
+  (field ^:final ^boolean expectContinue)
+
+  (field ^:private ^:volatile ^boolean isWebSocket)
+
+  (field ^:private ^:final ^Duration timeout)
+
+  (field ^:private ^:final ^{:tag (Optional HttpClient$Version)} version)
+
+  (field ^:private ^:final ^{:tag (Map (HttpOption ?) Object)} options)
+
+  (field ^:private ^:volatile ^boolean userSetAuthorization)
+
+  (field ^:private ^:volatile ^boolean userSetProxyAuthorization)
+
+  (method ^:private ^:static userAgent ^String []
+    (let [version (System/getProperty "java.version")] (java-str "Java-http-client/" version)))
+
+  (field ^:public ^:static ^:final ^String USER_AGENT (HttpRequestImpl/userAgent))
+
+  (constructor ^:public [this ^HttpRequestBuilderImpl builder]
+    (let [method (.method builder)]
+      (set! (.-method this) (if (nil? method) "GET" method))
+      (set! (.-userHeaders this)
+            (HttpHeaders/of (.map (.headersBuilder builder)) Utils/ALLOWED_HEADERS))
+      (set! (.-systemHeadersBuilder this) (HttpHeadersBuilder.))
+      (set! (.-uri this) (.uri builder))
+      (java-assert (some? uri))
+      (set! (.-proxy this) nil)
+      (set! (.-expectContinue this) (.expectContinue builder))
+      (set! (.-secure this) (.equals (.toLowerCase (.getScheme uri) Locale/US) "https"))
+      (set! (.-requestPublisher this) (.bodyPublisher builder))
+      (set! (.-timeout this) (.timeout builder))
+      (set! (.-version this) (.version builder))
+      (set! (.-options this) (Map/copyOf (.options builder)))
+      (set! (.-authority this) nil)))
+
+  (constructor ^:public [this ^HttpRequest request ^ProxySelector ps]
+    (let [method (.method request)]
+      (when (and (some? method) (not (Utils/isValidName method)))
+        (throw (IllegalArgumentException.
+                 (java-str "illegal method \""
+                           (.replace (.replace (.replace method "\n" "\\n") "\r" "\\r") "\t" "\\t")
+                           "\""))))
+      (let [requestURI (cast URI (Objects/requireNonNull (.uri request) "uri must be non null"))
+            timeout (cast Duration (.orElse (.timeout request) nil))]
+        (set! (.-method this) (if (nil? method) "GET" method))
+        (set! (.-options this) (HttpRequestBuilderImpl/copySupportedOptions request))
+        (set! (.-userHeaders this)
+              (HttpHeaders/of (.map (.headers request)) Utils/VALIDATE_USER_HEADER))
+        (if-instance [^HttpRequestImpl impl request]
+          (do
+            (set! (.-isWebSocket this) (.-isWebSocket impl))
+            (if isWebSocket
+                (set! (.-systemHeadersBuilder this) (.-systemHeadersBuilder impl))
+                (set! (.-systemHeadersBuilder this) (HttpHeadersBuilder.))))
+          (do
+            (HttpRequestBuilderImpl/checkURI requestURI)
+            (HttpRequestImpl/checkTimeout timeout)
+            (set! (.-systemHeadersBuilder this) (HttpHeadersBuilder.))))
+        (when (.isEmpty (.firstValue userHeaders "User-Agent"))
+          (.setHeader (.-systemHeadersBuilder this) "User-Agent" USER_AGENT))
+        (set! (.-uri this) requestURI)
+        (set! (.-proxy this) (HttpRequestImpl/retrieveProxy request ps uri))
+        (set! (.-expectContinue this) (.expectContinue request))
+        (set! (.-secure this) (.equals (.toLowerCase (.getScheme uri) Locale/US) "https"))
+        (set! (.-requestPublisher this)
+              (cast HttpRequest$BodyPublisher (.orElse (.bodyPublisher request) nil)))
+        (set! (.-timeout this) timeout)
+        (set! (.-version this) (.version request))
+        (set! (.-authority this) nil))))
+
+  (method ^:private ^:static checkTimeout ^void [^Duration duration]
+    (when (some? duration)
+      (when (or (.isNegative duration) (.equals Duration/ZERO duration))
+        (throw (IllegalArgumentException. (java-str "Invalid duration: " duration))))))
+
+  (method ^:public ^:static newInstanceForRedirection ^HttpRequestImpl [^URI uri ^String method
+                                                                        ^HttpRequestImpl other
+                                                                        ^boolean mayHaveBody]
+    (if (and (.equalsIgnoreCase (.getScheme uri) (.getScheme (.-uri other)))
+             (.equals (.getRawAuthority uri) (.getRawAuthority (.-uri other))))
+        (HttpRequestImpl. uri method other mayHaveBody (Optional/empty))
+        (HttpRequestImpl. uri method other mayHaveBody (Optional/of Utils/ALLOWED_REDIRECT_HEADERS))))
+
+  (method ^:public ^:static newInstanceForAuthentication ^HttpRequestImpl [^HttpRequestImpl other]
+    (let [request (HttpRequestImpl. (.uri other) (.method other) other true)]
+      (when (.isWebSocket request) (Utils/setWebSocketUpgradeHeaders request))
+      request))
+
+  (constructor ^:private [this ^URI uri ^String method ^HttpRequestImpl other ^boolean mayHaveBody]
+    (this. uri method other mayHaveBody (Optional/empty)))
+
+  (constructor ^:private [this ^URI uri ^String method ^HttpRequestImpl other ^boolean mayHaveBody
+                          ^{:tag (Optional (BiPredicate String String))} redirectHeadersFilter]
+    (java-assert (or (nil? method) (Utils/isValidName method)))
+    (set! (.-method this) (if (nil? method) "GET" method))
+    (let [^HttpHeaders userHeaders (if (.isPresent redirectHeadersFilter)
+                                       (HttpHeaders/of
+                                         (.map (.-userHeaders other))
+                                         (cast BiPredicate (.get redirectHeadersFilter)))
+                                       (.-userHeaders other))]
+      (set! (.-userHeaders this) userHeaders)
+      (set! (.-isWebSocket this) (.-isWebSocket other))
+      (set! (.-systemHeadersBuilder this) (HttpHeadersBuilder.))
+      (when (.isEmpty (.firstValue userHeaders "User-Agent"))
+        (.setHeader (.-systemHeadersBuilder this) "User-Agent" USER_AGENT))
+      (set! (.-uri this) uri)
+      (set! (.-proxy this) (.-proxy other))
+      (set! (.-expectContinue this) (.-expectContinue other))
+      (set! (.-secure this) (.equals (.toLowerCase (.getScheme uri) Locale/US) "https"))
+      (set! (.-requestPublisher this) (when mayHaveBody (.publisher this other)))
+      (set! (.-timeout this) (.-timeout other))
+      (set! (.-version this) (.version other))
+      (set! (.-authority this) nil)
+      (set! (.-options this) (.optionsFor other (.-uri this)))))
+
+  (method ^:private optionsFor ^{:tag (Map (HttpOption ?) Object)} [this ^URI uri]
+    (if (or (identical? (.-uri this) uri)
+            (Objects/equals (.getRawAuthority (.-uri this)) (.getRawAuthority uri)))
+        options
+        (do
+          (when (identical? (.orElse version nil) HttpClient$Version/HTTP_3)
+            (let [h3DiscoveryMode (cast HttpOption$Http3DiscoveryMode
+                                        (.get options HttpOption/H3_DISCOVERY))]
+              (when (some? h3DiscoveryMode)
+                (return (Map/of HttpOption/H3_DISCOVERY h3DiscoveryMode)))))
+          (Map/of))))
+
+  (method ^:private publisher ^HttpRequest$BodyPublisher [this ^HttpRequestImpl other]
+    (let [^:mutable res (.-requestPublisher other)]
+      (when-not (Objects/equals method (.-method other)) (set! res nil))
+      res))
+
+  (constructor [this ^String method ^InetSocketAddress authority ^Utils$ProxyHeaders headers]
+    (java-assert (.equalsIgnoreCase "CONNECT" method))
+    (set! (.-method this) method)
+    (set! (.-systemHeadersBuilder this) (HttpHeadersBuilder.))
+    (.putAll (.map (.-systemHeadersBuilder this)) (.map (.systemHeaders headers)))
+    (set! (.-userHeaders this) (.userHeaders headers))
+    (set! (.-uri this)
+          (URI/create
+            (java-str "socket://" (.getHostString authority) ":" (.getPort authority) "/")))
+    (set! (.-proxy this) nil)
+    (set! (.-requestPublisher this) nil)
+    (set! (.-authority this) authority)
+    (set! (.-secure this) false)
+    (set! (.-expectContinue this) false)
+    (set! (.-timeout this) nil)
+    (set! (.-version this) (Optional/of HttpClient$Version/HTTP_1_1))
+    (set! (.-options this) (Map/of)))
+
+  (method ^:final isConnect ^boolean [this]
+    (.equalsIgnoreCase "CONNECT" method))
+
+  (method ^:final isHttp3Only ^boolean [this ^HttpClient$Version version]
+    (and (identical? version HttpClient$Version/HTTP_3)
+         (identical? (.http3Discovery this) HttpOption$Http3DiscoveryMode/HTTP_3_URI_ONLY)))
+
+  (method ^:final http3Discovery ^HttpOption$Http3DiscoveryMode [this]
+    (let [h3Discovery (.getOption this HttpOption/H3_DISCOVERY)]
+      (cast HttpOption$Http3DiscoveryMode (.orElse h3Discovery HttpOption$Http3DiscoveryMode/ANY))))
+
+  (method ^:static createPushRequest :throws [IOException] ^HttpRequestImpl [^HttpRequestImpl parent
+                                                                             ^HttpHeaders headers]
+    (HttpRequestImpl. parent headers))
+
+  (constructor :throws [IOException] ^:private [this ^HttpRequestImpl parent ^HttpHeaders headers]
+    (set! (.-method this)
+          (cast String
+                (.orElseThrow (.firstValue headers ":method")
+                              (lambda Supplier ^IOException []
+                                (IOException. "No method in Push Promise")))))
+    (let [path (cast String
+                     (.orElseThrow (.firstValue headers ":path")
+                                   (lambda Supplier ^IOException []
+                                     (IOException. "No path in Push Promise"))))
+          scheme (cast String
+                       (.orElseThrow (.firstValue headers ":scheme")
+                                     (lambda Supplier ^IOException []
+                                       (IOException. "No scheme in Push Promise"))))
+          authority (cast String
+                          (.orElseThrow (.firstValue headers ":authority")
+                                        (lambda Supplier ^IOException []
+                                          (IOException. "No authority in Push Promise"))))
+          sb (StringBuilder.)]
+      (.append (.append (.append (.append sb scheme) "://") authority) path)
+      (set! (.-uri this) (URI/create (.toString sb)))
+      (set! (.-proxy this) nil)
+      (set! (.-userHeaders this) (HttpHeaders/of (.map headers) Utils/ALLOWED_HEADERS))
+      (set! (.-systemHeadersBuilder this) (.-systemHeadersBuilder parent))
+      (set! (.-expectContinue this) (.-expectContinue parent))
+      (set! (.-secure this) (.-secure parent))
+      (set! (.-requestPublisher this) (.-requestPublisher parent))
+      (set! (.-timeout this) (.-timeout parent))
+      (set! (.-version this) (.-version parent))
+      (set! (.-authority this) nil)
+      (set! (.-options this) (.-options parent))))
+
+  (method ^:public toString ^String [this]
+    (java-str (if (nil? uri) "" (.toString uri)) " " method))
+
+  (method ^:public headers ^HttpHeaders [this] userHeaders)
+
+  (method authority ^InetSocketAddress [this] authority)
+
+  (method setH2Upgrade ^void [this ^{:tag (Exchange ?)} exchange]
+    (.setHeader systemHeadersBuilder "Connection" "Upgrade, HTTP2-Settings")
+    (.setHeader systemHeadersBuilder "Upgrade" Alpns/H2C)
+    (.setHeader systemHeadersBuilder "HTTP2-Settings" (.h2cSettingsStrings exchange)))
+
+  (method ^:public expectContinue ^boolean [this] expectContinue)
+
+  (method ^:private ^:static retrieveProxy ^Proxy [^HttpRequest request ^ProxySelector ps ^URI uri]
+    (when-instance [^HttpRequestImpl requestImpl request]
+      (when (.-isWebSocket requestImpl) (return (.-proxy requestImpl))))
+    (when (some? ps)
+      (let [^{:tag (List Proxy)} pl (.select ps uri)]
+        (when-not (.isEmpty pl)
+          (let [p (cast Proxy (.getFirst pl))]
+            (when (identical? (.type p) Proxy$Type/HTTP) (return (Utils/copyProxy p)))))))
+    nil)
+
+  (method proxy ^InetSocketAddress [this]
+    (when-not (or (or (nil? proxy) (not (identical? (.type proxy) Proxy$Type/HTTP)))
+                  (.equalsIgnoreCase method "CONNECT"))
+      (cast InetSocketAddress (.address proxy))))
+
+  (method secure ^boolean [this] secure)
+
+  (method ^:public setProxy ^void [this ^Proxy proxy]
+    (java-assert isWebSocket)
+    (set! (.-proxy this) (Utils/copyProxy proxy)))
+
+  (method ^:public isWebSocket ^void [this ^boolean is]
+    (set! isWebSocket is))
+
+  (method isWebSocket ^boolean [this] isWebSocket)
+
+  (method ^:public setUserSetAuthFlag ^void [this ^Authenticator$RequestorType type ^boolean value]
+    (if (identical? type Authenticator$RequestorType/SERVER)
+        (set! userSetAuthorization value)
+        (set! userSetProxyAuthorization value)))
+
+  (method ^:public getUserSetAuthFlag ^boolean [this ^Authenticator$RequestorType type]
+    (if (identical? type Authenticator$RequestorType/SERVER)
+        userSetAuthorization
+        userSetProxyAuthorization))
+
+  (method ^:public bodyPublisher ^{:tag (Optional HttpRequest$BodyPublisher)} [this]
+    (if (nil? requestPublisher) (Optional/empty) (Optional/of requestPublisher)))
+
+  (method ^:public method ^String [this] method)
+
+  (method ^:public uri ^URI [this] uri)
+
+  (method ^:public timeout ^{:tag (Optional Duration)} [this]
+    (if (nil? timeout) (Optional/empty) (Optional/of timeout)))
+
+  (method getUserHeaders ^HttpHeaders [this] userHeaders)
+
+  (method getSystemHeadersBuilder ^HttpHeadersBuilder [this]
+    systemHeadersBuilder)
+
+  (method ^:public version ^{:tag (Optional HttpClient$Version)} [this]
+    version)
+
+  (method ^:public getOption :type-params [T] ^{:tag (Optional T)} [this
+                                                                    ^{:tag (HttpOption T)} option]
+    (Optional/ofNullable (.cast (.type option) (.get options option))))
+
+  (method ^:public setSystemHeader ^void [this ^String name ^String value]
+    (.setHeader systemHeadersBuilder name value))
+
+  (method getAddress ^InetSocketAddress [this]
+    (let [uri (.uri this)]
+      (if (nil? uri)
+          (.authority this)
+          (let [^:mutable p (.getPort uri)]
+            (when (== p -1)
+              (if (.equalsIgnoreCase (.getScheme uri) "https") (set! p 443) (set! p 80)))
+            (let [host (.getHost uri)
+                  port p]
+              (if (nil? (.proxy this))
+                  (InetSocketAddress. host port)
+                  (InetSocketAddress/createUnresolved host port))))))))

@@ -1,0 +1,166 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/KeyChoices.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util)
+
+(import '(java.security InvalidKeyException)
+        '(java.util Arrays Locale)
+        '(java.util.function BiFunction))
+
+(defclass ^:public ^:final KeyChoices
+  (defclass ^:public ^:enum Type
+    (constants SEED EXPANDED_KEY BOTH))
+
+  (defclass ^:private ^:record Choice [^Type type ^byte/1 seed ^byte/1 expanded])
+
+  (method ^:public ^:static getPreferred ^Type [^String name]
+    (let [prop (SecurityProperties/getOverridableProperty (java-str "jdk." name ".pkcs8.encoding"))]
+      (if (nil? prop)
+          Type/SEED
+          (switch (.toLowerCase prop Locale/ROOT)
+            "seed" Type/SEED
+            "expandedkey" Type/EXPANDED_KEY
+            "both" Type/BOTH
+            (throw (IllegalArgumentException. (java-str "Unknown format: " prop)))))))
+
+  (method ^:public ^:static writeToChoice ^byte/1 [^Type type ^byte/1 seed ^byte/1 expanded]
+    (let [^:mutable ^byte/1 skOctets nil]
+      (java-assert (or (nil? seed) (< (alength seed) 128)))
+      (java-assert (or (nil? expanded)
+                       (and (> (alength expanded) 256) (< (alength expanded) 60000))))
+      (switch type
+        SEED
+          (do
+            (java-assert (some? seed))
+            (set! skOctets (new byte/1 (unchecked-add-int (alength seed) 2)))
+            (aset skOctets 0 (unchecked-byte 0x80))
+            (aset skOctets 1 (unchecked-byte (alength seed)))
+            (System/arraycopy seed 0 skOctets 2 (alength seed))
+            skOctets)
+        EXPANDED_KEY
+          (do
+            (java-assert (some? expanded))
+            (set! skOctets (new byte/1 (unchecked-add-int (alength expanded) 4)))
+            (aset skOctets 0 0x04)
+            (KeyChoices/writeShortLength skOctets 1 (alength expanded))
+            (System/arraycopy expanded 0 skOctets 4 (alength expanded))
+            skOctets)
+        BOTH
+          (do
+            (java-assert (some? seed))
+            (java-assert (some? expanded))
+            (set!
+              skOctets
+              (new byte/1
+                   (unchecked-add-int (unchecked-add-int 10 (alength seed)) (alength expanded))))
+            (aset skOctets 0 0x30)
+            (KeyChoices/writeShortLength skOctets
+                                         1
+                                         (unchecked-add-int
+                                           (unchecked-add-int 6 (alength seed))
+                                           (alength expanded)))
+            (aset skOctets 4 0x04)
+            (aset skOctets 5 (unchecked-byte (alength seed)))
+            (System/arraycopy seed 0 skOctets 6 (alength seed))
+            (aset skOctets (unchecked-add-int 6 (alength seed)) 0x04)
+            (KeyChoices/writeShortLength skOctets
+                                         (unchecked-add-int 7 (alength seed))
+                                         (alength expanded))
+            (System/arraycopy expanded
+                              0
+                              skOctets
+                              (unchecked-add-int 10 (alength seed))
+                              (alength expanded))
+            skOctets)
+        (throw (MatchException. nil nil)))))
+
+  (method ^:public ^:static typeOfChoice :throws [InvalidKeyException] ^Type [^byte/1 input]
+    (when (< (alength input) 1) (throw (InvalidKeyException. "Empty key")))
+    (switch (aget input 0)
+      -128 Type/SEED
+      0x04 Type/EXPANDED_KEY
+      0x30 Type/BOTH
+      (throw (InvalidKeyException. (java-str "Wrong tag: " (aget input 0))))))
+
+  (method ^:private ^:static readFromChoice :throws [InvalidKeyException] ^Choice [^int seedLen
+                                                                                   ^byte/1 input]
+    (when (< (alength input) (unchecked-add-int seedLen 2))
+      (throw (InvalidKeyException. "Too short")))
+    (switch (aget input 0)
+      -128
+        (do
+          (when (and (not (== (aget input 1) seedLen))
+                     (not (== (alength input) (unchecked-add-int seedLen 2))))
+            (throw (InvalidKeyException. "Invalid seed")))
+          (Choice. Type/SEED (Arrays/copyOfRange input 2 (unchecked-add-int seedLen 2)) nil))
+      0x04
+        (do
+          (when-not (== (KeyChoices/readShortLength input 1)
+                        (unchecked-subtract-int (alength input) 4))
+            (throw (InvalidKeyException. "Invalid expandedKey")))
+          (Choice. Type/EXPANDED_KEY nil (Arrays/copyOfRange input 4 (alength input))))
+      0x30
+        (do
+          (when (< (alength input) (unchecked-add-int (unchecked-add-int 6 seedLen) 4))
+            (throw (InvalidKeyException. "Too short")))
+          (when (or (or (or (or (not (== (KeyChoices/readShortLength input 1)
+                                         (unchecked-subtract-int (alength input) 4)))
+                                (not (== (aget input 4) 0x04)))
+                            (not (== (aget input 5) (unchecked-byte seedLen))))
+                        (not (== (aget input (unchecked-add-int seedLen 6)) 0x04)))
+                    (not (== (KeyChoices/readShortLength input (unchecked-add-int seedLen 7))
+                             (unchecked-subtract-int
+                               (unchecked-subtract-int (alength input) 10)
+                               seedLen))))
+            (throw (InvalidKeyException. "Invalid both")))
+          (Choice. Type/BOTH
+                   (Arrays/copyOfRange input 6 (unchecked-add-int 6 seedLen))
+                   (Arrays/copyOfRange input (unchecked-add-int seedLen 10) (alength input))))
+      (throw (InvalidKeyException. (java-str "Wrong tag: " (aget input 0))))))
+
+  (method ^:public ^:static choiceToChoice :throws [InvalidKeyException] ^byte/1 [^Type type
+                                                                                  ^String pname
+                                                                                  ^int seedLen
+                                                                                  ^byte/1 input
+                                                                                  ^{:tag (BiFunction String byte/1 byte/1)} expander]
+    (let [choice (KeyChoices/readFromChoice seedLen input)]
+      (try
+        (when (and (not (identical? type Type/EXPANDED_KEY))
+                   (identical? (.-type choice) Type/EXPANDED_KEY))
+          (throw (InvalidKeyException. "key contains not enough info to translate")))
+        (let [^byte/1 expanded (if (and (nil? (.-expanded choice))
+                                        (not (identical? type Type/SEED)))
+                                   (cast byte/1 (.apply expander pname (.-seed choice)))
+                                   (.-expanded choice))]
+          (KeyChoices/writeToChoice type (.-seed choice) expanded))
+        (finally
+          (when (some? (.-seed choice)) (Arrays/fill (.-seed choice) (unchecked-byte 0)))
+          (when (some? (.-expanded choice)) (Arrays/fill (.-expanded choice) (unchecked-byte 0)))))))
+
+  (method ^:public ^:static choiceToExpanded :throws [InvalidKeyException] ^byte/1 [^String pname
+                                                                                    ^int seedLen
+                                                                                    ^byte/1 input
+                                                                                    ^{:tag (BiFunction String byte/1 byte/1)} expander]
+    (let [choice (KeyChoices/readFromChoice seedLen input)]
+      (when (identical? (.-type choice) Type/BOTH)
+        (let [calculated (cast byte/1 (.apply expander pname (.-seed choice)))]
+          (when-not (Arrays/equals (.-expanded choice) calculated)
+            (throw (InvalidKeyException. "seed and expandedKey do not match")))
+          (Arrays/fill calculated (unchecked-byte 0))))
+      (try
+        (if (some? (.-expanded choice))
+            (.-expanded choice)
+            (cast byte/1 (.apply expander pname (.-seed choice))))
+        (finally (when (some? (.-seed choice)) (Arrays/fill (.-seed choice) (unchecked-byte 0)))))))
+
+  (method ^:private ^:static readShortLength :throws [InvalidKeyException] ^int [^byte/1 input
+                                                                                 ^int from]
+    (when-not (== (aget input from) (unchecked-byte 0x82))
+      (throw (InvalidKeyException. "Unexpected length")))
+    (unchecked-add-int
+      (bit-shift-left-int (bit-and-int (aget input (unchecked-add-int from 1)) 0xff) 8)
+      (bit-and-int (aget input (unchecked-add-int from 2)) 0xff)))
+
+  (method ^:private ^:static writeShortLength ^void [^byte/1 input ^int from ^int value]
+    (aset input from (unchecked-byte 0x82))
+    (aset input (unchecked-add-int from 1) (unchecked-byte (bit-shift-right-int value 8)))
+    (aset input (unchecked-add-int from 2) (unchecked-byte value))))

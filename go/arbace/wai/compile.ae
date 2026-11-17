@@ -1,0 +1,653 @@
+(in-ns 'go.arbace.wai) (go/file "compile.go" :imports [
+
+
+    ^{:line 4} [binary "encoding/binary"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [strings "strings"]])
+
+
+
+
+(go/type Ins "Ins is an instruction of the internal code. Its fields by op (doc/wasm/WAI.md §3): a branch's A is its arity, B the target's\nstack height (relative to the frame), C the target's pc; a memory access's A its memory, C its offset; a constant's C its bits.\n" (struct
+    ^{:line 12 :tag uint16} Op
+    ^{:line 13 :tag uint32} A ^uint32 B
+    ^{:line 14 :tag uint32} D
+    ^{:line 15 :tag int32} E
+    ^{:line 16 :tag uint64} C))
+
+
+(go/type target (struct
+    ^{:line 20 :tag uint32} PC ^uint32 Height))
+
+
+
+(go/const "The catch clauses' kinds.\n"
+  ^{:line 25} [^{:val 0} catchTag 0]
+  ^{:line 26} [^{:val 1} catchRef 1]
+  ^{:line 27} [^{:val 2} catchAll 2]
+  ^{:line 28} [^{:val 3} catchAllRef 3]
+
+
+  ^{:line 31} [^{:val 4 :doc "the legacy exceptions' (WA8): try's catch and catch_all, the exception's reference below the tag's values (the catch\nblock's slot rethrow reads), and delegate, its Tag the number of the enclosing handlers to skip\n"} catchLegacy 4]
+  ^{:line 32} [^{:val 5} catchAllLegacy 5]
+  ^{:line 33} [^{:val 6} catchDelegate 6])
+
+
+(go/type catchClause (struct
+    ^{:line 37 :tag byte} Kind
+    ^{:line 38 :tag uint32} Tag
+    ^{:line 39 :tag uint32} PC ^uint32 Height ^uint32 Arity))
+
+
+(go/type handler (struct
+    ^{:line 43 :tag uint32} Start ^uint32 End
+    ^{:line 44 :tag (slice catchClause)} Catches))
+
+
+
+(go/type Code "Code is a function's (or a constant expression's) internal code.\n" (struct
+    ^{:line 49 :tag (slice Ins)} Ins
+    ^{:line 50 :tag int} NParams
+    ^{:line 51 :tag int} NLocals ; with the parameters
+    ^{:line 52 :tag int} NResults
+    ^{:line 53 :tag int} MaxHeight
+    ^{:line 54 :tag (slice (slice target))} Tables
+    ^{:line 55 :tag (slice (array 16 byte))} V128s
+    ^{:line 56 :tag (slice (* handler))} Handlers
+
+    ^{:line 58 :tag (slice int32) :doc "H is each instruction's stack height before it runs, relative to the frame (w2g's static slots, WA7)\n"} H))
+
+
+
+(go/const "The structured and internal ops, after the table's.\n"
+  ^{:line 63} [^{:val 494} OpBlock (+ opTableEnd iota)]
+  ^{:line 64} [^{:val 495} OpLoop]
+  ^{:line 65} [^{:val 496} OpIf]
+  ^{:line 66} [^{:val 497} OpElse]
+  ^{:line 67} [^{:val 498} OpEnd]
+  ^{:line 68} [^{:val 499} OpTryTable]
+  ^{:line 69} [^{:val 500} OpJump])
+
+
+(go/var
+  ^{:line 73} [^{:tag (array 256 uint16)} oneByte]
+  ^{:line 74} [prefixed (lit (map uint32 uint16))]
+  ^{:line 75} [^{:tag (array opTableEnd int8)} effPop]
+  ^{:line 76} [^{:tag (array opTableEnd int8)} effPush])
+
+
+(go/type opInfo (struct
+    ^{:line 80 :tag byte} prefix
+    ^{:line 81 :tag uint32} code
+    ^{:line 82 :tag string} name
+    ^{:line 83 :tag int} kind))
+
+
+(go/var binaryNames (lit (map string bool) ["add" true] ["sub" true] ["mul" true] ["div_s" true] ["div_u" true] ["div" true] ["rem_s" true]
+    ^{:line 87} ["rem_u" true] ["and" true] ["or" true] ["xor" true] ["shl" true] ["shr_s" true] ["shr_u" true] ["rotl" true] ["rotr" true]
+    ^{:line 88} ["min" true] ["max" true] ["copysign" true] ["eq" true] ["ne" true] ["lt_s" true] ["lt_u" true] ["gt_s" true] ["gt_u" true]
+    ^{:line 89} ["le_s" true] ["le_u" true] ["ge_s" true] ["ge_u" true] ["lt" true] ["gt" true] ["le" true] ["ge" true]))
+
+^{:go/end 136} (go/func init []
+  (for [op 1] (< op opTableEnd) (inc! op)
+    (let [in (aget opInfos op)]
+      (if (== (.-prefix in) 0)
+        (aset oneByte (.-code in) (conv uint16 op))
+
+        (aset prefixed (bit-or (<< (conv uint32 (.-prefix in)) 24) (.-code in)) (conv uint16 op)))
+
+      (set! (values (aget effPop op) (aget effPush op)) (values -1 -1))
+      (let [n (.-name in)]
+        (when [i (strings/IndexByte n \.)] (and (> i 0) ^:go/paren (or (== (subslice n _ i) "i32") (== (subslice n _ i) "i64") (== (subslice n _ i) "f32") (== (subslice n _ i) "f64")))
+          (let [s (subslice n (+ i 1))]
+            (switch
+              (case [(== s "const")]
+                (set! (values (aget effPop op) (aget effPush op)) (values 0 1)))
+              (case [(strings/HasPrefix s "load")]
+                (set! (values (aget effPop op) (aget effPush op)) (values 1 1)))
+              (case [(strings/HasPrefix s "store")]
+                (set! (values (aget effPop op) (aget effPush op)) (values 2 0)))
+              (case [(aget binaryNames s)]
+                (set! (values (aget effPop op) (aget effPush op)) (values 2 1)))
+              (default
+                (set! (values (aget effPop op) (aget effPush op)) (values 1 1)))))))))
+
+
+
+  (range [_ e (lit (slice (struct
+            ^{:line 118 :tag int} op
+            ^{:line 119 :tag int8} pop ^int8 push))
+
+        (lit _ OpNop 0 0) (lit _ OpDrop 1 0) (lit _ OpSelect 3 1) (lit _ OpSelectT 3 1)
+        (lit _ OpLocalGet 0 1) (lit _ OpLocalSet 1 0) (lit _ OpLocalTee 1 1) (lit _ OpGlobalGet 0 1) (lit _ OpGlobalSet 1 0)
+        (lit _ OpTableGet 1 1) (lit _ OpTableSet 2 0) (lit _ OpTableSize 0 1) (lit _ OpTableGrow 2 1) (lit _ OpTableFill 3 0)
+        (lit _ OpTableCopy 3 0) (lit _ OpTableInit 3 0) (lit _ OpElemDrop 0 0)
+        (lit _ OpMemorySize 0 1) (lit _ OpMemoryGrow 1 1) (lit _ OpMemoryFill 3 0) (lit _ OpMemoryCopy 3 0) (lit _ OpMemoryInit 3 0) (lit _ OpDataDrop 0 0)
+        (lit _ OpRefNull 0 1) (lit _ OpRefIsNull 1 1) (lit _ OpRefFunc 0 1) (lit _ OpRefEq 2 1) (lit _ OpRefAsNonNull 1 1)
+        (lit _ OpStructNewDefault 0 1) (lit _ OpStructGet 1 1) (lit _ OpStructGetS 1 1) (lit _ OpStructGetU 1 1) (lit _ OpStructSet 2 0)
+        (lit _ OpArrayNew 2 1) (lit _ OpArrayNewDefault 1 1) (lit _ OpArrayNewData 2 1) (lit _ OpArrayNewElem 2 1)
+        (lit _ OpArrayGet 2 1) (lit _ OpArrayGetS 2 1) (lit _ OpArrayGetU 2 1) (lit _ OpArraySet 3 0) (lit _ OpArrayLen 1 1)
+        (lit _ OpArrayFill 4 0) (lit _ OpArrayCopy 5 0) (lit _ OpArrayInitData 4 0) (lit _ OpArrayInitElem 4 0)
+        (lit _ OpRefI31 1 1) (lit _ OpI31GetS 1 1) (lit _ OpI31GetU 1 1) (lit _ OpRefTest 1 1) (lit _ OpRefTestNull 1 1)
+        (lit _ OpRefCast 1 1) (lit _ OpRefCastNull 1 1) (lit _ OpAnyConvertExtern 1 1) (lit _ OpExternConvertAny 1 1))]
+
+    (set! (values (aget effPop (.-op e)) (aget effPush (.-op e))) (values (.-pop e) (.-push e)))))
+
+
+
+
+^{:go/end 144} (go/func OpName "OpName is an op's text name.\n" ^string [^uint16 op]
+  (when (< (conv int op) opTableEnd)
+    (return (.-name (aget opInfos op))))
+
+  (fmt/Sprintf "op%d" op))
+
+
+(go/const
+  ^{:line 147} [^{:val 0} lBlock iota]
+  ^{:line 148} [^{:val 1} lLoop]
+  ^{:line 149} [^{:val 2} lIf]
+  ^{:line 150} [^{:val 3} lTry]
+  ^{:line 151} [^{:val 4} lFunc]
+  ^{:line 152} [^{:val 5} lLegacy]) ; the legacy exceptions' try (WA8)
+
+
+(go/type label (struct
+    ^{:line 156 :tag byte} kind
+    ^{:line 157 :tag int} height
+    ^{:line 158 :tag int} np ^int nr
+    ^{:line 159 :tag int} loopPC
+    ^{:line 160 :tag (slice (func [^int pc]))} patches
+    ^{:line 161 :tag int} ifIns
+    ^{:line 162 :tag bool} hasElse
+    ^{:line 163 :tag bool} outerDead
+    ^{:line 164 :tag (* handler)} h
+
+    ^{:line 166 :tag bool :doc "a legacy try: its handler's range closed (in a catch), and the catch block's slot of the caught exception\n"} inCatch
+    ^{:line 167 :tag int} exnSlot))
+
+
+
+^{:go/end 171} (go/method active "active: the label's handler covers its current position (a try_table, a legacy try before its first catch)\n" ^bool [^{:tag (* label)} l] (and (!= (.-h l) nil) (not (.-inCatch l))))
+
+(go/type compiler (struct
+    ^{:line 174 :tag (* Module)} m
+    ^{:line 175 :tag (* reader)} r
+    ^{:line 176 :tag (* Code)} code
+    ^{:line 177 :tag (slice (* label))} labels
+    ^{:line 178 :tag int} h
+    ^{:line 179 :tag bool} dead))
+
+
+^{:go/end 186} (go/method emit ^int [^{:tag (* compiler)} c ^Ins i]
+  (set! (.-Ins (.-code c)) (append (.-Ins (.-code c)) i))
+  (set! (.-H (.-code c)) (append (.-H (.-code c)) (conv int32 (.-h c))))
+  (- (len (.-Ins (.-code c))) 1))
+
+
+
+
+^{:go/end 190} (go/method popped "popped notes that the instruction at i was emitted after its condition was popped (if, br_if, br_table): its height before\nit runs is one more\n" [^{:tag (* compiler)} c ^int i] (inc! (aget (.-H (.-code c)) i)))
+
+^{:go/end 197} (go/method adj [^{:tag (* compiler)} c ^int pop ^int push]
+  (set! (.-h c) + (- push pop))
+  (when (> (.-h c) (.-MaxHeight (.-code c)))
+    (set! (.-MaxHeight (.-code c)) (.-h c))))
+
+
+
+^{:go/end 214} (go/method blocktype [^{:tag (* compiler)} c] :results [^int np ^int nr]
+  (let [r (.-r c)
+      ^{:line 201} b (aget (.-b r) (.-p r))]
+    (when (== b 0x40)
+      (inc! (.-p r))
+      (return 0 0))
+
+    (when (isValStart b)
+      (let [d (addr (lit dec :r r :m (.-m c) :canon (.-Types (.-m c))))]
+        (.valtype d false)
+        (return 0 1)))
+
+    (let [x (.sleb r 33)
+        ^{:line 212} t (aget ctypes (aget (.-Types (.-m c)) x))]
+      (return (len (.-Params t)) (len (.-Results t))))))
+
+
+
+^{:go/end 225} (go/method branch "branch: the label at depth d's arity and height, and a setter of its target pc (patched later for a forward one)\n" [^{:tag (* compiler)} c ^uint32 d ^{:tag (func [^int pc])} set] :results [^int arity ^int height]
+  (let [l (aget (.-labels c) (- (len (.-labels c)) 1 (conv int d)))]
+    (when (== (.-kind l) lLoop)
+      (set (.-loopPC l))
+      (return (.-np l) (.-height l)))
+
+    (set! (.-patches l) (append (.-patches l) set))
+    (return (.-nr l) (.-height l))))
+
+
+^{:go/end 231} (go/method brIns [^{:tag (* compiler)} c ^uint16 op ^uint32 d]
+  (let [i (.emit c (lit Ins :Op op))
+      (values a h) (.branch c d ^{:go/end 229} (fn [^int pc] (set! (.-C (aget (.-Ins (.-code c)) i)) (conv uint64 pc))))]
+    (set! (values (.-A (aget (.-Ins (.-code c)) i)) (.-B (aget (.-Ins (.-code c)) i))) (values (conv uint32 a) (conv uint32 h)))))
+
+
+^{:go/end 239} (go/method memarg [^{:tag (* compiler)} c] :results [^uint32 mem ^uint32 align ^uint64 off]
+  (let [f (.u32 (.-r c))]
+    (when (!= (bit-and f 0x40) 0)
+      (set! mem (.u32 (.-r c))))
+
+    (return mem (bit-and f 0x3f) (.uleb (.-r c) 64))))
+
+
+^{:go/end 247} (go/method heap ^int32 [^{:tag (* compiler)} c]
+  (let [h (.sleb (.-r c) 33)]
+    (when (>= h 0)
+      (return (conv int32 (aget (.-Types (.-m c)) h))))
+
+    (conv int32 h)))
+
+
+^{:go/end 249} (go/method funcType ^{:tag (* CType)} [^{:tag (* compiler)} c ^uint32 x] (aget ctypes (aget (.-FuncTypes (.-m c)) x)))
+
+
+^{:go/end 267} (go/func compileBody "compileBody translates an expression (a function's body when locals is not nil or a constant expression) up to its end.\n" [^{:tag (* Module)} m ^{:tag (* reader)} r ^{:tag (slice ValType)} params ^{:tag (slice ValType)} results ^{:tag (slice ValType)} locals ^bool isConst] :results [^{:tag (* Code)} code ^error err]
+  (set! code (addr (lit Code :NParams (len params) :NLocals (+ (len params) (len locals)) :NResults (len results))))
+  (let [c (addr (lit compiler :m m :r r :code code))]
+    (set! (.-h c) (.-NLocals code))
+    (set! (.-MaxHeight code) (.-h c))
+    (set! (.-labels c) (lit (slice (* label)) (lit _ :kind lFunc :height 0 :nr (len results))))
+    (while true
+      (when (== (len (.-labels c)) 0)
+        (break))
+
+      (when [err (.step c)] (!= err nil)
+        (return nil err)))
+
+
+    (return code nil)))
+
+
+^{:go/end 465} (go/method step ^error [^{:tag (* compiler)} c]
+  (let [r (.-r c)
+      ^{:line 271} at (.-p r)
+      ^{:line 272} b (.u8 r)
+      ^{:line 273 :tag uint16} op (zero uint16)]
+    (switch b
+      (case [0x02 0x03 0x04 0x1f]
+        (let [(values np nr) (.blocktype c)
+            ^{:line 277} l (addr (lit label :np np :nr nr :outerDead (.-dead c) :height (- (.-h c) np)))]
+          (switch b
+            (case [0x02]
+              (set! (.-kind l) lBlock))
+            (case [0x03]
+              (set! (.-kind l) lLoop)
+              (set! (.-loopPC l) (len (.-Ins (.-code c)))))
+            (case [0x04]
+              (set! (.-kind l) lIf)
+              (when (not (.-dead c))
+                (.adj c 1 0)
+                (set! (.-height l) (- (.-h c) np))
+                (set! (.-ifIns l) (.emit c (lit Ins :Op OpIf)))
+                (.popped c (.-ifIns l))))
+
+            (case [0x1f]
+              (set! (.-kind l) lTry)
+              (let [n (conv int (.u32 r))
+                  ^{:line 295} h (addr (lit handler))]
+                (for [i 0] (< i n) (inc! i)
+                  (let [k (.u8 r)
+                      ^{:line 298 :tag uint32} tag (zero uint32)]
+                    (when (or (== k catchTag) (== k catchRef))
+                      (set! tag (.u32 r)))
+
+                    (let [d (.u32 r)]
+                      (when (.-dead c)
+                        (continue))
+
+                      (set! (.-Catches h) (append (.-Catches h) (lit catchClause :Kind k :Tag tag)))
+                      (let [ci (- (len (.-Catches h)) 1)
+                          (values a ht) (.branch c d ^{:go/end 308} (fn [^int pc] (set! (.-PC (aget (.-Catches h) ci)) (conv uint32 pc))))]
+                        (set! (values (.-Height (aget (.-Catches h) ci)) (.-Arity (aget (.-Catches h) ci))) (values (conv uint32 ht) (conv uint32 a)))))))
+
+                (set! (.-Start h) (conv uint32 (len (.-Ins (.-code c)))))
+                (set! (.-h l) h))))
+
+          (set! (.-labels c) (append (.-labels c) l))
+          (return nil)))
+      (case [0x05]
+        (let [l (aget (.-labels c) (- (len (.-labels c)) 1))]
+          (when (not (.-outerDead l))
+            (when (not (.-dead c))
+              (let [j (.emit c (lit Ins :Op OpJump))]
+                (set! (.-patches l) (append (.-patches l) ^{:go/end 321} (fn [^int pc] (set! (.-C (aget (.-Ins (.-code c)) j)) (conv uint64 pc)))))))
+
+            (set! (.-C (aget (.-Ins (.-code c)) (.-ifIns l))) (conv uint64 (len (.-Ins (.-code c)))))
+            (set! (.-hasElse l) true))
+
+          (set! (.-dead c) (.-outerDead l))
+          (set! (.-h c) (+ (.-height l) (.-np l)))
+          (return nil)))
+      (case [0x0b]
+        (let [l (aget (.-labels c) (- (len (.-labels c)) 1))]
+          (when (and (== (.-kind l) lLegacy) (.-inCatch l) (not (.-outerDead l)) (not (.-dead c)))
+            ;; the last catch's results moved down over its slot (a branch to the try's end)
+            (.brIns c OpBr 0))
+
+          (set! (.-labels c) (subslice (.-labels c) _ (- (len (.-labels c)) 1)))
+          (when (== (.-kind l) lFunc)
+            ;; the end of the function: its results to the frame's base
+            (range [_ p (.-patches l)]
+              (p (len (.-Ins (.-code c)))))
+
+            (.emit c (lit Ins :Op OpReturn :A (conv uint32 (.-nr l))))
+            (return nil))
+
+          (when (not (.-outerDead l))
+            (let [pc (len (.-Ins (.-code c)))]
+              (when (and (== (.-kind l) lIf) (not (.-hasElse l)))
+                (set! (.-C (aget (.-Ins (.-code c)) (.-ifIns l))) (conv uint64 pc)))
+
+              (range [_ p (.-patches l)]
+                (p pc))
+
+              (when (== (.-kind l) lTry)
+                (set! (.-End (.-h l)) (conv uint32 pc))
+                (set! (.-Handlers (.-code c)) (append (.-Handlers (.-code c)) (.-h l))))))
+
+
+          (set! (.-dead c) (.-outerDead l))
+          (set! (.-h c) (+ (.-height l) (.-nr l)))
+          (when (> (.-h c) (.-MaxHeight (.-code c)))
+            (set! (.-MaxHeight (.-code c)) (.-h c)))
+
+          (return nil)))
+      (case [0x06]
+        ;; legacy try (WA8): a block whose body's range has a handler, closed by its first catch, catch_all or delegate
+        (let [(values np nr) (.blocktype c)
+            ^{:line 366} l (addr (lit label :kind lLegacy :np np :nr nr :outerDead (.-dead c) :height (- (.-h c) np)))]
+          (when (not (.-dead c))
+            (set! (.-h l) (addr (lit handler :Start (conv uint32 (len (.-Ins (.-code c))))))))
+
+          (set! (.-labels c) (append (.-labels c) l))
+          (return nil)))
+      (case [0x07 0x19]
+        ;; catch TAG, catch_all: the body (or the previous catch) jumps to the end; the clause's code starts here with the
+        ;; exception's reference in the slot at the try's height, then the tag's values
+        (let [l (aget (.-labels c) (- (len (.-labels c)) 1))
+            ^{:line 376 :tag uint32} tag (zero uint32)
+            ^{:line 377} np 0
+            ^{:line 378} kind (conv byte catchAllLegacy)]
+          (when (== b 0x07)
+            (set! tag (.u32 r))
+            (set! np (len (.-Params (aget ctypes (aget (.-TagTypes (.-m c)) tag)))))
+            (set! kind catchLegacy))
+
+          (when (not (.-outerDead l))
+            (cond (and (not (.-dead c)) (.-inCatch l))
+              ;; a catch's results above its slot: moved down to the try's height as a branch to its end moves them
+              (.brIns c OpBr 0)
+              (not (.-dead c))
+              (let [j (.emit c (lit Ins :Op OpJump))]
+                (set! (.-patches l) (append (.-patches l) ^{:go/end 390} (fn [^int pc] (set! (.-C (aget (.-Ins (.-code c)) j)) (conv uint64 pc)))))))
+
+            (when (not (.-inCatch l))
+              (set! (.-End (.-h l)) (conv uint32 (len (.-Ins (.-code c)))))
+              (set! (.-Handlers (.-code c)) (append (.-Handlers (.-code c)) (.-h l)))
+              (set! (.-inCatch l) true))
+
+            (set! (.-Catches (.-h l)) (append (.-Catches (.-h l)) (lit catchClause :Kind kind :Tag tag :PC (conv uint32 (len (.-Ins (.-code c)))) :Height (conv uint32 (.-height l))))))
+
+          (set! (.-inCatch l) true)
+          (set! (.-exnSlot l) (.-height l))
+          (set! (.-dead c) (.-outerDead l))
+          (set! (.-h c) (+ (.-height l) 1 np))
+          (when (> (.-h c) (.-MaxHeight (.-code c)))
+            (set! (.-MaxHeight (.-code c)) (.-h c)))
+
+          (return nil)))
+      (case [0x18]
+        ;; delegate L: the try ends; an exception of its body goes on past the handlers of the blocks between it and the label L
+        (let [d (.u32 r)
+            ^{:line 410} l (aget (.-labels c) (- (len (.-labels c)) 1))]
+          (set! (.-labels c) (subslice (.-labels c) _ (- (len (.-labels c)) 1)))
+          (when (not (.-outerDead l))
+            (let [pc (len (.-Ins (.-code c)))]
+              (range [_ p (.-patches l)]
+                (p pc))
+
+              (let [skip 0]
+                (range [_ x (subslice (.-labels c) (- (len (.-labels c)) (conv int d)))]
+                  (when (.active x)
+                    (inc! skip)))
+
+
+                (set! (.-End (.-h l)) (conv uint32 pc))
+                (set! (.-Catches (.-h l)) (lit (slice catchClause) (lit _ :Kind catchDelegate :Tag (conv uint32 skip))))
+                (set! (.-Handlers (.-code c)) (append (.-Handlers (.-code c)) (.-h l))))))
+
+          (set! (.-dead c) (.-outerDead l))
+          (set! (.-h c) (+ (.-height l) (.-nr l)))
+          (when (> (.-h c) (.-MaxHeight (.-code c)))
+            (set! (.-MaxHeight (.-code c)) (.-h c)))
+
+          (return nil)))
+      (case [0x09]
+        ;; rethrow L: the caught exception of the catch block L, from its slot
+        (let [d (.u32 r)]
+          (when (.-dead c)
+            (return nil))
+
+          (let [l (aget (.-labels c) (- (len (.-labels c)) 1 (conv int d)))]
+            (.emit c (lit Ins :Op OpLocalGet :A (conv uint32 (.-exnSlot l))))
+            (.adj c 0 1)
+            (.emit c (lit Ins :Op OpThrowRef))
+            (set! (.-dead c) true)
+            (return nil))))
+      (case [0xfb 0xfc 0xfd 0xfe]
+        (let [x (.u32 r)]
+          (set! op (aget prefixed (bit-or (<< (conv uint32 b) 24) x)))
+          (when (and (== b 0xfd) (== (aget simdFns op) nil))
+            (let [n (fmt/Sprintf "0x%x" x)]
+              (when (!= op 0)
+                (set! n (.-name (aget opInfos op))))
+
+              (return (addr (lit Unimplemented "simd" n)))))
+
+          (when (== b 0xfe)
+            (return (addr (lit Unimplemented "threads" (fmt/Sprintf "atomic 0x%x" x)))))))
+
+      (default
+        (set! op (aget oneByte b))))
+
+    (when (== op 0)
+      (return (fmt/Errorf "unknown opcode 0x%02x at %d" b at)))
+
+    (.instr c op)))
+
+
+^{:go/end 654} (go/method instr ^error [^{:tag (* compiler)} c ^uint16 op]
+  (let [r (.-r c)
+      ^{:line 469} in (aget opInfos op)
+      ^{:line 470} ins (lit Ins :Op op)]
+    (switch (.-kind in)
+      (case [kIdx]
+        (set! (.-A ins) (.u32 r)))
+      (case [kIdx2 kIdx2Rev kIdxField kIdxU32]
+        (set! (.-A ins) (.u32 r))
+        (set! (.-B ins) (.u32 r)))
+      (case [kMem]
+        (set! (values (.-A ins) (.-D ins) (.-C ins)) (.memarg c)))
+      (case [kMemLane]
+        (set! (values (.-A ins) (.-D ins) (.-C ins)) (.memarg c))
+        (set! (.-B ins) (conv uint32 (.u8 r))))
+      (case [kLane]
+        (set! (.-A ins) (conv uint32 (.u8 r))))
+      (case [kShuffle]
+        (let [^{:tag (array 16 byte)} v (zero (array 16 byte))]
+          (copy (subslice v) (.bytes r 16))
+          (set! (.-A ins) (conv uint32 (len (.-V128s (.-code c)))))
+          (set! (.-V128s (.-code c)) (append (.-V128s (.-code c)) v))))
+      (case [kV128]
+        (let [^{:tag (array 16 byte)} v (zero (array 16 byte))]
+          (copy (subslice v) (.bytes r 16))
+          (set! (.-A ins) (conv uint32 (len (.-V128s (.-code c)))))
+          (set! (.-V128s (.-code c)) (append (.-V128s (.-code c)) v))))
+      (case [kHeap kRefTest kRefNullTest]
+        (set! (.-E ins) (.heap c))
+        (when (== (.-kind in) kRefNullTest)
+          (set! (.-D ins) 1)))
+
+      (case [kI32]
+        (set! (.-C ins) (conv uint64 (conv uint32 (conv int32 (.sleb r 32))))))
+      (case [kI64]
+        (set! (.-C ins) (conv uint64 (.sleb r 64))))
+      (case [kF32]
+        (set! (.-C ins) (conv uint64 (.Uint32 binary/LittleEndian (.bytes r 4)))))
+      (case [kF64]
+        (set! (.-C ins) (.Uint64 binary/LittleEndian (.bytes r 8))))
+      (case [kSelectT]
+        (let [n (conv int (.u32 r))
+            ^{:line 509} d (addr (lit dec :r r :m (.-m c) :canon (.-Types (.-m c))))]
+          (for [i 0] (< i n) (inc! i)
+            (.valtype d false))))
+
+      (case [kBrTable]
+        (let [n (conv int (.u32 r))
+            ^{:line 515} ds (make (slice uint32) (+ n 1))]
+          (range [i ds]
+            (aset ds i (.u32 r)))
+
+          (when (.-dead c)
+            (return nil))
+
+          (let [ti (len (.-Tables (.-code c)))]
+            (set! (.-Tables (.-code c)) (append (.-Tables (.-code c)) (make (slice target) (+ n 1))))
+            (.adj c 1 0)
+            (let [^int arity (zero int)]
+              (range [i d ds]
+                (let [i i
+                    (values a h) (.branch c d ^{:go/end 528} (fn [^int pc] (set! (.-PC (aget (aget (.-Tables (.-code c)) ti) i)) (conv uint32 pc))))]
+                  (set! (.-Height (aget (aget (.-Tables (.-code c)) ti) i)) (conv uint32 h))
+                  (set! arity a)))
+
+              (.popped c (.emit c (lit Ins :Op OpBrTable :A (conv uint32 arity) :B (conv uint32 ti))))
+              (set! (.-dead c) true)
+              (return nil)))))
+      (case [kBrOnCast]
+        (let [f (.u8 r)
+            ^{:line 537} d (.u32 r)]
+          (.sleb r 33)
+          (let [h2 (.heap c)]
+            (when (.-dead c)
+              (return nil))
+
+            ;; D: the target type's nullability, E its heap type
+            (let [i (.emit c (lit Ins :Op op :D (conv uint32 (bit-and (>> f 1) 1)) :E h2))
+                (values a h) (.branch c d ^{:go/end 545} (fn [^int pc] (set! (.-C (aget (.-Ins (.-code c)) i)) (conv uint64 pc))))]
+              (set! (.-A (aget (.-Ins (.-code c)) i)) (conv uint32 a))
+              (set! (.-B (aget (.-Ins (.-code c)) i)) (conv uint32 h))
+              (return nil))))))
+
+    (when (.-dead c)
+      (return nil))
+
+    ^{:go/breaks [6]} (let [m (.-m c)]
+      (switch op
+        (case [OpUnreachable]
+          (.emit c ins)
+          (set! (.-dead c) true)
+          (return nil))
+        (case [OpBr]
+          (.brIns c OpBr (.-A ins))
+          (set! (.-dead c) true)
+          (return nil))
+        (case [OpBrIf]
+          (.adj c 1 0)
+          (.brIns c OpBrIf (.-A ins))
+          (.popped c (- (len (.-Ins (.-code c))) 1))
+          (return nil))
+        (case [OpBrOnNull]
+          (.brIns c OpBrOnNull (.-A ins))
+          (return nil))
+        (case [OpBrOnNonNull]
+          (.brIns c OpBrOnNonNull (.-A ins))
+          (.adj c 1 0)
+          (return nil))
+        (case [OpReturn]
+          (.emit c (lit Ins :Op OpReturn :A (conv uint32 (.-NResults (.-code c)))))
+          (set! (.-dead c) true)
+          (return nil))
+        (case [OpCall OpReturnCall]
+          (let [t (.funcType c (.-A ins))]
+            (.emit c ins)
+            (when (== op OpReturnCall)
+              (set! (.-dead c) true)
+              (return nil))
+
+            (.adj c (len (.-Params t)) (len (.-Results t)))
+            (return nil)))
+        (case [OpCallIndirect OpReturnCallIndirect]
+          ;; binary: type then table
+          (let [tid (aget (.-Types m) (.-A ins))]
+            (set! (values (.-A ins) (.-B ins)) (values (.-B ins) (conv uint32 tid)))
+            (let [t (aget ctypes tid)]
+              (.emit c ins)
+              (when (== op OpReturnCallIndirect)
+                (set! (.-dead c) true)
+                (return nil))
+
+              (.adj c (+ (len (.-Params t)) 1) (len (.-Results t)))
+              (return nil))))
+        (case [OpCallRef OpReturnCallRef]
+          (let [tid (aget (.-Types m) (.-A ins))]
+            (set! (.-A ins) (conv uint32 tid))
+            (let [t (aget ctypes tid)]
+              (.emit c ins)
+              (when (== op OpReturnCallRef)
+                (set! (.-dead c) true)
+                (return nil))
+
+              (.adj c (+ (len (.-Params t)) 1) (len (.-Results t)))
+              (return nil))))
+        (case [OpThrow]
+          (.emit c ins)
+          (set! (.-dead c) true)
+          (return nil))
+        (case [OpThrowRef]
+          (.emit c ins)
+          (set! (.-dead c) true)
+          (return nil))
+        (case [OpStructNew]
+          (let [tid (aget (.-Types m) (.-A ins))]
+            (set! (.-A ins) (conv uint32 tid))
+            (.emit c ins)
+            (.adj c (len (.-Fields (aget ctypes tid))) 1)
+            (return nil)))
+        (case [OpArrayNewFixed]
+          (set! (.-A ins) (conv uint32 (aget (.-Types m) (.-A ins))))
+          (.emit c ins)
+          (.adj c (conv int (.-B ins)) 1)
+          (return nil))
+        (case [OpStructNewDefault OpStructGet OpStructGetS OpStructGetU OpStructSet OpArrayNew OpArrayNewDefault OpArrayNewData
+            ^{:line 631} OpArrayNewElem OpArrayGet OpArrayGetS OpArrayGetU OpArraySet OpArrayFill OpArrayInitData OpArrayInitElem]
+          (set! (.-A ins) (conv uint32 (aget (.-Types m) (.-A ins)))))
+        (case [OpArrayCopy]
+          (set! (.-A ins) (conv uint32 (aget (.-Types m) (.-A ins))))
+          (set! (.-B ins) (conv uint32 (aget (.-Types m) (.-B ins)))))
+        (case [OpTableInit OpMemoryInit]
+          ;; binary: the segment then the table or memory
+          (set! (values (.-A ins) (.-B ins)) (values (.-B ins) (.-A ins))))
+        (case [OpMemoryGrow OpMemorySize]
+          (when (and (< (conv int (.-A ins)) (len (.-MemTypes m))) (.-Addr64 (aget (.-MemTypes m) (.-A ins))))
+            (set! (.-D ins) 1)))
+
+        (case [OpTableGrow OpTableSize]
+          (when (and (< (conv int (.-A ins)) (len (.-TabTypes m))) (.-Addr64 (.-L (aget (.-TabTypes m) (.-A ins)))))
+            (set! (.-D ins) 1))))
+
+
+      (when (< (aget effPop op) 0)
+        (return (addr (lit Unimplemented "op" (.-name in)))))
+
+      (.emit c ins)
+      (.adj c (conv int (aget effPop op)) (conv int (aget effPush op)))
+      nil)))

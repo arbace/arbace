@@ -75,35 +75,46 @@
                 (recur (unchecked-inc-int i)))))))
       Rt/UNIT))
 
+  ;; caml_ba_sub: the C layout reduces the first dimension, the Fortran one the last (its offset from 1)
   (method ^:public ^:static caml_ba_sub [b o n]
-    (let [a (BigArray/of b) ofs (Rt/l o) len (Rt/l n)]
-      (when (or (== (alength (.-dims a)) 0) (< ofs 0) (< len 0)
-                (> (unchecked-add ofs len) (long (aget (.-dims a) 0))))
-        (throw (Rt/invalidArg "Bigarray.sub: bad sub-array")))
-      (let [stride (BigArray/product (.-dims a) 1)
+    (let [a (BigArray/of b) nd (alength (.-dims a)) len (Rt/l n)]
+      (when (== nd 0) (throw (Rt/invalidArg "Bigarray.sub: bad sub-array")))
+      (let [fortran (not (== (.-layout a) 0))
+            ch (if fortran (unchecked-dec-int nd) 0)
+            ofs (if fortran (unchecked-dec (Rt/l o)) (Rt/l o))
+            stride (if fortran (BigArray/product (Arrays/copyOfRange (.-dims a) 0 ch) 0) (BigArray/product (.-dims a) 1))
             dims (.clone (.-dims a))]
-        (aset dims 0 (unchecked-int len))
+        (when (or (< ofs 0) (< len 0) (> (unchecked-add ofs len) (long (aget (.-dims a) ch))))
+          (throw (Rt/invalidArg "Bigarray.sub: bad sub-array")))
+        (aset dims ch (unchecked-int len))
         (ExtBigarray/wrap a dims (unchecked-add-int (.-off a) (unchecked-multiply-int (unchecked-int ofs) stride))))))
 
+  ;; caml_ba_slice: the C layout fixes the first indices, the Fortran one the last (the others at their first position), the
+  ;; offset caml_ba_offset's
   (method ^:public ^:static caml_ba_slice [b ix]
-    (let [a (BigArray/of b) idx (ExtBigarray/idx ix)]
-      (when (>= (alength idx) (alength (.-dims a)))
+    (let [a (BigArray/of b) idx (ExtBigarray/idx ix) nd (alength (.-dims a)) k (alength idx)]
+      (when (> k nd)
         (throw (Rt/invalidArg "Bigarray.slice: too many indices")))
-      (let [^:mutable ^long off 0]
+      (let [full (new Object/1 nd) fortran (not (== (.-layout a) 0))]
         (loop [^int i 0]
-          (when (< i (alength idx))
-            (let [j (Rt/l (aget idx i))]
-              (when (or (< j 0) (>= j (long (aget (.-dims a) i))))
-                (throw (Rt/invalidArg "Bigarray.slice: index out of bounds")))
-              (set! off (unchecked-add (unchecked-multiply off (long (aget (.-dims a) i))) j)))
+          (when (< i nd)
+            (aset full i (if fortran
+                           (if (>= i (unchecked-subtract-int nd k)) (aget idx (unchecked-subtract-int i (unchecked-subtract-int nd k))) (Long/valueOf 1))
+                           (if (< i k) (aget idx i) (Long/valueOf 0))))
             (recur (unchecked-inc-int i))))
-        (let [rest (Arrays/copyOfRange (.-dims a) (alength idx) (alength (.-dims a)))
-              n (BigArray/product rest 0)]
-          (ExtBigarray/wrap a rest (unchecked-add-int (.-off a) (unchecked-multiply-int (unchecked-int off) n)))))))
+        (let [off (.offset a full)
+              rest (if fortran (Arrays/copyOfRange (.-dims a) 0 (unchecked-subtract-int nd k)) (Arrays/copyOfRange (.-dims a) k nd))]
+          (BigArray/custom (BigArray. (.-kind a) (.-layout a) rest (.-data a) off))))))
 
+  ;; caml_ba_reshape's checks: the number of dimensions, negative ones, an overflow of the product (a mismatch)
   (method ^:public ^:static caml_ba_reshape [b ds]
     (let [a (BigArray/of b) dims (ExtBigarray/dimsOf ds)]
-      (when (not (== (BigArray/product dims 0) (.size a)))
+      (when (> (alength dims) 16) (throw (Rt/invalidArg "Bigarray.reshape: bad number of dimensions")))
+      (loop [^int i 0]
+        (when (< i (alength dims))
+          (when (< (aget dims i) 0) (throw (Rt/invalidArg "Bigarray.reshape: negative dimension")))
+          (recur (unchecked-inc-int i))))
+      (when (not (== (BaOps/elements dims) (long (.size a))))
         (throw (Rt/invalidArg "Bigarray.reshape: size mismatch")))
       (ExtBigarray/wrap a dims (.-off a))))
 

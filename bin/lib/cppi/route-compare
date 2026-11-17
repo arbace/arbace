@@ -1,0 +1,62 @@
+#!/bin/bash
+# The runs' routes compared (doc/cpp/CPP-SURVEY.md, "As built: cpp-target", CP240 (b), decided 2026-11-07): the same programs checked by
+# bin/cppi check (or check --aot) with CPPI_ROUTE=clang (clang's IR, from the packs unless CPPI_LIVE=1) and with CPPI_ROUTE=auto (Arbace's
+# front end and code generator where they cover the program, clang's IR for the rest and for what they refuse), each judgment
+# (WORK/ROUTE/results-LEVEL.edn: [ID :pass|:fail|... REASON]) set beside the other's. Fails when a program passing by clang does not pass
+# by auto (the condition of the switch: bin/lib/cppi/route.bash's cppi_route_default becomes auto); a program auto passes and clang does
+# not is an improvement. Writes WORK/compare.tsv (ID, clang's, auto's, auto's route for it) and WORK/compare.txt (the summary).
+#
+# Usage: bin/cppi route-compare [--aot] [bin/cppi check's options: --corpus C,... --only LIST --sample N]
+#   WORK: CPPI_ROUTE_WORK, default .tmp/cppi-route; each route's run in WORK/clang and WORK/auto (CPPI_CHECK_WORK, CPPI_AOT_WORK),
+#   one after the other (the C++ checks peak about 6.7 GB at their defaults: run it with CPPI_JOBS=1 CPPI_THREADS=1 on a small host).
+#   --judge-only: the two runs' results compared again, nothing run.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+cd "$root"
+aot= judgeonly= args=()
+for a in "$@"; do
+  case $a in
+    --aot) aot=1 ;;
+    --judge-only) judgeonly=1 ;;
+    --record|--judge|--resume) echo "route-compare: $a is not a comparison's option" >&2; exit 2 ;;
+    *) args+=("$a") ;;
+  esac
+done
+work=${CPPI_ROUTE_WORK:-$root/.tmp/cppi-route}
+lvl=eval; [ -n "$aot" ] && lvl=aot
+mkdir -p "$work"
+for r in clang auto; do
+  [ -n "$judgeonly" ] && continue
+  rm -rf "${work:?}/$r"; mkdir -p "$work/$r"
+  echo "route-compare: CPPI_ROUTE=$r bin/cppi check ${aot:+--aot }${args[*]}"
+  if [ -n "$aot" ]; then
+    CPPI_ROUTE=$r CPPI_AOT_WORK=$work/$r "$root/bin/cppi" check --aot "${args[@]}" > "$work/$r.log" 2>&1
+  else
+    CPPI_ROUTE=$r CPPI_CHECK_WORK=$work/$r "$root/bin/cppi" check "${args[@]}" > "$work/$r.log" 2>&1
+  fi
+  echo "route-compare: $r exited $? ($(grep -m1 'programs by route' "$work/$r.log" | sed 's/^cppi: //'))"
+done
+for r in clang auto; do
+  [ -s "$work/$r/results-$lvl.edn" ] || { echo "route-compare: no judgment of the $r run ($work/$r/results-$lvl.edn; its log $work/$r.log)" >&2; exit 1; }
+done
+# the judgments' rows: ["ID" :STATUS "REASON" ...]
+rows() { sed -n 's/^\["\([^"]*\)" :\([a-z-]*\).*/\1\t\2/p' "$1" | LC_ALL=C sort; }
+rows "$work/clang/results-$lvl.edn" > "$work/clang.rows"; rows "$work/auto/results-$lvl.edn" > "$work/auto.rows"
+LC_ALL=C join -t $'\t' -a1 -a2 -e absent -o 0,1.2,2.2 "$work/clang.rows" "$work/auto.rows" | while IFS=$'\t' read -r id c a; do
+  f=$work/auto/files/$id/route; rt=$(cat "$f" 2>"$TMPDIR/route-compare.err" || echo -)
+  printf '%s\t%s\t%s\t%s\n' "$id" "$c" "$a" "$rt"
+done > "$work/compare.tsv"
+{
+  echo "routes compared at level $lvl: $(wc -l < "$work/compare.tsv") programs; auto's IR: $(cut -f4 "$work/compare.tsv" | sort | uniq -c | awk '{printf "%s%s %s", (n++ ? ", " : ""), $2, $1}')"
+  echo "  both pass: $(awk -F'\t' '$2 == "pass" && $3 == "pass"' "$work/compare.tsv" | wc -l) (by ours: $(awk -F'\t' '$2 == "pass" && $3 == "pass" && $4 == "ours"' "$work/compare.tsv" | wc -l))"
+  echo "  neither passes: $(awk -F'\t' '$2 != "pass" && $3 != "pass"' "$work/compare.tsv" | wc -l)"
+  echo "  improvements (auto passes, clang does not): $(awk -F'\t' '$2 != "pass" && $3 == "pass"' "$work/compare.tsv" | wc -l)"
+  awk -F'\t' '$2 != "pass" && $3 == "pass" {print "    + " $1 " (clang " $2 ", by " $4 ")"}' "$work/compare.tsv"
+  echo "  regressions (clang passes, auto does not): $(awk -F'\t' '$2 == "pass" && $3 != "pass"' "$work/compare.tsv" | wc -l)"
+  awk -F'\t' '$2 == "pass" && $3 != "pass" {print "    - " $1 " (auto " $3 ", by " $4 ")"}' "$work/compare.tsv"
+} | tee "$work/compare.txt"
+if awk -F'\t' '$2 == "pass" && $3 != "pass" {bad = 1} END {exit !bad}' "$work/compare.tsv"; then
+  echo "route-compare: auto loses a pass: the default stays clang" >&2; exit 1
+fi
+echo "route-compare: auto holds every pass of clang's ($work/compare.txt)"

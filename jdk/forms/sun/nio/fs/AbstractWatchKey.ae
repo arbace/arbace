@@ -1,0 +1,130 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/fs/AbstractWatchKey.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.nio.file Path StandardWatchEventKinds WatchEvent WatchEvent$Kind WatchKey)
+        '(java.util ArrayList HashMap List Map Objects)
+        '(jdk.internal.util ArraysSupport))
+
+(defclass ^:abstract AbstractWatchKey
+  :implements [WatchKey]
+
+  (field ^:private ^:static ^:final ^int DEFAULT_MAX_EVENT_LIST_SIZE 512)
+
+  (field ^:static ^:final ^int MAX_EVENT_LIST_SIZE)
+
+  (static-initializer
+    (let [rawValue (System/getProperty "jdk.nio.file.WatchService.maxEventsPerPoll"
+                                       (String/valueOf DEFAULT_MAX_EVENT_LIST_SIZE))
+          ^:mutable ^int intValue 0]
+      (try
+        (set! intValue
+              (^[long int int] Math/clamp (Long/decode rawValue)
+                                          1
+                                          ArraysSupport/SOFT_MAX_ARRAY_LENGTH))
+        (catch NumberFormatException e (set! intValue DEFAULT_MAX_EVENT_LIST_SIZE)))
+      (set! MAX_EVENT_LIST_SIZE intValue)))
+
+  (field ^:static ^:final ^{:tag (Event Object)} OVERFLOW_EVENT
+    (Event. StandardWatchEventKinds/OVERFLOW nil))
+
+  (defclass ^:private ^:static ^:enum State
+    (constants READY SIGNALLED))
+
+  (field ^:private ^:final ^AbstractWatchService watcher)
+
+  (field ^:private ^:final ^Path dir)
+
+  (field ^:private ^State state)
+
+  (field ^:private ^{:tag (List (WatchEvent ?))} events)
+
+  (field ^:private ^{:tag (Map Object (WatchEvent ?))} lastModifyEvents)
+
+  (constructor ^:protected [this ^Path dir ^AbstractWatchService watcher]
+    (set! (.-watcher this) watcher)
+    (set! (.-dir this) dir)
+    (set! (.-state this) State/READY)
+    (set! (.-events this) (ArrayList.))
+    (set! (.-lastModifyEvents this) (HashMap.)))
+
+  (method ^:final watcher ^AbstractWatchService [this] watcher)
+
+  (method ^:public watchable ^Path [this] dir)
+
+  (method ^:final signal ^void [this]
+    (locking this
+      (when (identical? state State/READY) (set! state State/SIGNALLED) (.enqueueKey watcher this))))
+
+  (method ^:final signalEvent ^void [this ^:mutable ^{:tag (WatchEvent$Kind ?)} kind
+                                     ^:mutable context]
+    (let [^:mutable isModify (identical? kind StandardWatchEventKinds/ENTRY_MODIFY)]
+      (locking this
+        (let [size (.size events)]
+          (when (> size 0)
+            (let [^{:tag (WatchEvent ?)} prev (cast
+                                                WatchEvent
+                                                (.get events (unchecked-subtract-int size 1)))]
+              (when (or (identical? (.kind prev) StandardWatchEventKinds/OVERFLOW)
+                        (and (identical? kind (.kind prev))
+                             (Objects/equals context (.context prev))))
+                (.increment (cast Event prev))
+                (return))
+              (when-not (.isEmpty lastModifyEvents)
+                (if isModify
+                    (let [^{:tag (WatchEvent ?)} ev (cast
+                                                      WatchEvent
+                                                      (.get lastModifyEvents context))]
+                      (when (some? ev)
+                        (java-assert (identical? (.kind ev) StandardWatchEventKinds/ENTRY_MODIFY))
+                        (.increment (cast Event ev))
+                        (return)))
+                    (.remove lastModifyEvents context)))
+              (when (>= size MAX_EVENT_LIST_SIZE)
+                (set! kind StandardWatchEventKinds/OVERFLOW)
+                (set! isModify false)
+                (set! context nil))))
+          (let [^{:tag (Event Object)} ev (Event. kind context)]
+            (if isModify
+                (.put lastModifyEvents context ev)
+                (when (identical? kind StandardWatchEventKinds/OVERFLOW)
+                  (.clear events)
+                  (.clear lastModifyEvents)))
+            (.add events ev)
+            (.signal this))))))
+
+  (method ^:public ^:final pollEvents ^{:tag (List (WatchEvent ?))} [this]
+    (locking this
+      (let [^{:tag (List (WatchEvent ?))} result events]
+        (set! events (ArrayList.))
+        (.clear lastModifyEvents)
+        result)))
+
+  (method ^:public ^:final reset ^boolean [this]
+    (locking this
+      (when (and (identical? state State/SIGNALLED) (.isValid this))
+        (if (.isEmpty events) (set! state State/READY) (.enqueueKey watcher this)))
+      (.isValid this)))
+
+  (defclass ^:private ^:static Event
+    :implements [(WatchEvent T)]
+    :type-params [T]
+
+    (field ^:private ^:final ^{:tag (WatchEvent$Kind T)} kind)
+
+    (field ^:private ^:final ^T context)
+
+    (field ^:private ^int count)
+
+    (constructor [this ^{:tag (WatchEvent$Kind T)} type ^T context]
+      (set! (.-kind this) type)
+      (set! (.-context this) context)
+      (set! (.-count this) 1))
+
+    (method ^:public kind ^{:tag (WatchEvent$Kind T)} [this] kind)
+
+    (method ^:public context ^T [this] context)
+
+    (method ^:public count ^int [this] count)
+
+    (method increment ^void [this] (set! count (unchecked-inc-int count)))))

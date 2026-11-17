@@ -1,0 +1,241 @@
+;; Processes (doc/ocaml/DEFERRED-TRIAGE.md, §3 fix 7, "As built: OT9's fixes 6-8"), the AOT runtime's mirror of oi's caml_unix_spawn,
+;; waitpid and wait (ext_signal.go) over java.lang.ProcessBuilder. Java has no descriptors of the OS, so a redirection is the
+;; runtime's: a standard descriptor left to itself is inherited, a file of Fd's table is the process's file (ProcessBuilder's
+;; Redirect, from its path), a pipe of the runtime (Pipe) is pumped by a thread of its own to or from the process's stream, the
+;; pipe's end held (Fd's extra count) until the stream ends. A pid is the process's; waitpid waits for it and its pumps outside the
+;; Gil. No fork (OT1 (a)); WNOHANG answers (0, WEXITED 0) while the process runs; a process another program made is ECHILD.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io File InputStream OutputStream IOException)
+        '(java.util ArrayList HashMap))
+
+(defclass ^:public ^:final ExtProc
+  ;; pid -> [Process, ArrayList of its pumps' threads]
+  (field ^:static ^:final ^HashMap procs (HashMap.))
+
+  ;; an end the process (a pump) held is given back, as Fd/close gives back one of the table
+  (method ^:static release ^void [^Fd d]
+    (if (> (.-extra d) 0)
+      (set! (.-extra d) (unchecked-dec-int (.-extra d)))
+      (.closeEnd (.-pipe d) (.-pipeW d))))
+
+  (method ^:static strings ^ArrayList [v]
+    (let [out (ArrayList.)]
+      (when (instance? Block v)
+        (let [f (.-f (cast Block v))]
+          (loop [^int i 0]
+            (when (< i (alength f)) (.add out (Rt/utf8 (aget f i))) (recur (unchecked-inc-int i))))))
+      out))
+
+  ;; a thread copying the process's output into the runtime's pipe d
+  (method ^:static pumpOut ^Thread [^InputStream in ^Fd d]
+    (set! (.-extra d) (unchecked-inc-int (.-extra d)))
+    (Thread. (lambda Runnable []
+               (let [buf (new byte/1 8192)]
+                 (try
+                   (loop []
+                     (let [n (.read in buf)]
+                       (when (> n 0)
+                         (Gil/lock)
+                         (try (.write (.-pipe d) buf 0 n false) (finally (Gil/unlock)))
+                         (recur))))
+                   (catch IOException e nil))
+                 (Gil/lock)
+                 (ExtProc/release d)
+                 (Gil/unlock)))))
+
+  ;; a thread copying the runtime's pipe d into the process's input
+  (method ^:static pumpIn ^Thread [^OutputStream out ^Fd d]
+    (set! (.-extra d) (unchecked-inc-int (.-extra d)))
+    (Thread. (lambda Runnable []
+               (let [buf (new byte/1 8192)]
+                 (try
+                   (loop []
+                     (Gil/lock)
+                     (let [n (try (.read (.-pipe d) buf 0 8192 false) (finally (Gil/unlock)))]
+                       (when (> n 0)
+                         (.write out buf 0 (unchecked-int n))
+                         (.flush out)
+                         (recur))))
+                   (catch IOException e nil))
+                 (try (.close out) (catch IOException e nil))
+                 (Gil/lock)
+                 (ExtProc/release d)
+                 (Gil/unlock)))))
+
+  (method ^:static lookPath ^String [^String cmd]
+    (if (.contains cmd "/")
+      (ExtSys/resolve cmd)
+      (let [pe (ExtUnix/getenv "PATH")
+            path (if (nil? pe) "/bin:/usr/bin" pe)
+            dirs (.split path ":")]
+        (loop [^int i 0]
+          (if (>= i (alength dirs))
+            cmd
+            (let [f (File. (if (.isEmpty (aget dirs i)) "." (aget dirs i)) cmd)]
+              (if (and (.isFile f) (.canExecute f)) (.getPath f) (recur (unchecked-inc-int i)))))))))
+
+  ;; caml_unix_spawn (cmd, args, env option, usepath, redirections [| stdin; stdout; stderr |])
+  (method ^:public ^:static caml_unix_spawn [cmdv args envo usepath red]
+    (let [cmd (Rt/utf8 cmdv)
+          argv (ExtProc/strings args)
+          prog (if (not (== (Rt/l usepath) 0)) (ExtProc/lookPath cmd) (ExtSys/resolve cmd))
+          rf (.-f (cast Block red))
+          pumps (ArrayList.)
+          pipes (new Fd/1 3)]
+      (when (.isEmpty argv) (.add argv cmd))
+      (.set argv 0 prog)
+      (let [pb (ProcessBuilder. ^java.util.List argv)]
+        (.directory pb (File. ExtSys/cwd))
+        (when (instance? Block envo)
+          (let [e (.environment pb)
+                kvs (ExtProc/strings (aget (.-f (cast Block envo)) 0))]
+            (.clear e)
+            (loop [^int i 0]
+              (when (< i (.size kvs))
+                (let [kv (cast String (.get kvs i))
+                      k (.indexOf kv "=")]
+                  (when (> k 0) (.put e (.substring kv 0 k) (.substring kv (unchecked-inc-int k)))))
+                (recur (unchecked-inc-int i))))))
+        (loop [^int i 0]
+          (when (< i 3)
+            (let [r (Rt/l (aget rf i))
+                  d (Fd/get r)]
+              (cond
+                ;; the error output to the descriptor the output goes to (2>&1, >file 2>&1: redirections' test_12tofile): one stream, as
+                ;; dup2 shares the open file (two Redirect.to the same file would each truncate it and write over the other)
+                (and (== i 2) (not (== r 2)) (== r (Rt/l (aget rf 1))))
+                (.redirectErrorStream pb true)
+                (and (== r i) (or (nil? d) (nil? (.-pipe d))))
+                (cond (== i 0) (.redirectInput pb ProcessBuilder$Redirect/INHERIT)
+                      (== i 1) (.redirectOutput pb ProcessBuilder$Redirect/INHERIT)
+                      :else (.redirectError pb ProcessBuilder$Redirect/INHERIT))
+                (nil? d) (throw (ExtUnix/error 9 "create_process" cmd))
+                (some? (.-pipe d)) (aset pipes i d)
+                (some? (.-path d))
+                (cond (== i 0) (.redirectInput pb (File. (.-path d)))
+                      (== i 1) (.redirectOutput pb (if (.-append d) (ProcessBuilder$Redirect/appendTo (File. (.-path d))) (ProcessBuilder$Redirect/to (File. (.-path d)))))
+                      :else (.redirectError pb (if (.-append d) (ProcessBuilder$Redirect/appendTo (File. (.-path d))) (ProcessBuilder$Redirect/to (File. (.-path d))))))
+                :else
+                (cond (== i 0) (.redirectInput pb ProcessBuilder$Redirect/INHERIT)
+                      (== i 1) (.redirectOutput pb ProcessBuilder$Redirect/INHERIT)
+                      :else (.redirectError pb ProcessBuilder$Redirect/INHERIT))))
+            (recur (unchecked-inc-int i))))
+        (let [p (try (.start pb) (catch IOException e (throw (ExtUnix/error 2 "create_process" cmd))))]
+          (when (some? (aget pipes 0)) (.add pumps (ExtProc/pumpIn (.getOutputStream p) (aget pipes 0))))
+          (when (some? (aget pipes 1)) (.add pumps (ExtProc/pumpOut (.getInputStream p) (aget pipes 1))))
+          (when (some? (aget pipes 2)) (.add pumps (ExtProc/pumpOut (.getErrorStream p) (aget pipes 2))))
+          (loop [^int i 0]
+            (when (< i (.size pumps))
+              (let [t (cast Thread (.get pumps i))] (.setDaemon t true) (.start t))
+              (recur (unchecked-inc-int i))))
+          (let [pid (.pid p)]
+            (.put procs (Long/valueOf pid) (new Object/1 [p pumps]))
+            (Long/valueOf pid))))))
+
+  ;; ---- exec (OC208 (b), doc/ocaml/OCAML-SURVEY.md "As built: OC208 (b)"): otherlibs/unix's execv.c, execve.c, execvp.c (OCaml
+  ;; 5.5.0) and oi's caml_unix_execv... (ext_signal.go: the standard channels flushed first, execvp's search as its lookPath). Java
+  ;; cannot replace its process; the compiled level's main (test/ocaml/o2j/main) can: its host serves the path execPath, a request
+  ;; written there and closed is its syscall.Exec, after the working directory (ExtSys/cwd) and the standard descriptors of Fd's
+  ;; table made the process's. Nothing serves execPath at the light level (a Java forms interpreter in stage 0): the open fails and
+  ;; the external is missing there, as before (OC208 (b): the light level keeps :unix-unported). Errors: Unix_error as the C
+  ;; library's (the host's close answers "ocaml-exec: errno N").
+
+  (field ^:static ^:final ^String execPath "/proc/self/ocaml-exec")
+
+  (method ^:static field ^void [^java.io.ByteArrayOutputStream o x]
+    (let [b (cast byte/1 x)]
+      (.write o b 0 (alength b))
+      (.write o 0)))
+
+  ;; an OCaml string array's strings, each C-safe (caml_unix_cstringvect: EINVAL naming the string)
+  (method ^:static cstrings ^ArrayList [v ^String fn]
+    (let [out (ArrayList.)]
+      (when (instance? Block v)
+        (let [f (.-f (cast Block v))]
+          (loop [^int i 0]
+            (when (< i (alength f))
+              (when (not (ExtSys/cSafe (aget f i))) (throw (ExtUnix/error 22 fn (Rt/utf8 (aget f i)))))
+              (.add out (aget f i))
+              (recur (unchecked-inc-int i))))))
+      out))
+
+  ;; standard descriptor i as the exec'd process is to have it: "" its own, "-" closed, "dN" a dup of the process's N, "fFLAGS:POS:PATH" a
+  ;; file of the table (r, w, a, rw: its access and append; POS its offset); a runtime pipe or socket has no descriptor of the OS
+  (method ^:static stdRedirect ^String [^int i ^String fn]
+    (let [d (Fd/get i)]
+      (cond
+        (nil? d) "-"
+        (> (.-std d) 0) (if (== (.-std d) (unchecked-inc-int i)) "" (java-str "d" (unchecked-dec-int (.-std d))))
+        (and (some? (.-raf d)) (some? (.-path d)))
+        (java-str "f" (cond (and (.-readable d) (.-writable d)) "rw" (.-append d) "a" (.-writable d) "w" :else "r")
+                  ":" (try (.getFilePointer (.-raf d)) (catch IOException e 0)) ":" (ExtSys/resolve (.-path d)))
+        :else (throw (Rt/unsupported (java-str fn " with a standard descriptor on a pipe or a socket"))))))
+
+  (method ^:static exec [^String fn path args envv ^boolean search]
+    (when (not (ExtSys/cSafe path)) (throw (ExtUnix/error 2 fn (Rt/utf8 path))))
+    (let [argv (ExtProc/cstrings args fn)
+          env (ExtProc/cstrings (if (some? envv) envv (ExtUnix/caml_unix_environment Rt/UNIT)) fn)
+          o (java.io.ByteArrayOutputStream.)]
+      (ExtProc/field o (Rt/ofUtf8 fn))
+      (ExtProc/field o (Rt/ofUtf8 ExtSys/cwd))
+      (ExtProc/field o (cast byte/1 path))
+      (ExtProc/field o (Rt/ofUtf8 (if search "1" "0")))
+      (ExtProc/field o (Rt/ofUtf8 (String/valueOf (.size argv))))
+      (loop [^int i 0] (when (< i (.size argv)) (ExtProc/field o (cast byte/1 (.get argv i))) (recur (unchecked-inc-int i))))
+      (ExtProc/field o (Rt/ofUtf8 (String/valueOf (.size env))))
+      (loop [^int i 0] (when (< i (.size env)) (ExtProc/field o (cast byte/1 (.get env i))) (recur (unchecked-inc-int i))))
+      (loop [^int i 0] (when (< i 3) (ExtProc/field o (Rt/ofUtf8 (ExtProc/stdRedirect i fn))) (recur (unchecked-inc-int i))))
+      (let [s (try (java.io.FileOutputStream. execPath) (catch IOException e nil))]
+        ;; the light level: no host serves the request
+        (when (nil? s) (throw (Rt/missing (java-str "caml_unix_" fn))))
+        (try (ExtIo/flushStd) (catch Throwable _ nil))
+        (Main/flushStd)
+        (let [msg (try (.write s (.toByteArray o)) (.close s) nil (catch IOException e (.getMessage e)))
+              k (if (some? msg) (.indexOf msg "errno ") -1)]
+          ;; the host's close returns only when the exec failed
+          (throw (ExtUnix/error (if (>= k 0) (Integer/parseInt (.trim (.substring msg (unchecked-add-int k 6)))) 5) fn (Rt/utf8 path)))))))
+
+  (method ^:public ^:static caml_unix_execv [path args] (ExtProc/exec "execv" path args nil false))
+  (method ^:public ^:static caml_unix_execve [path args env] (ExtProc/exec "execve" path args env false))
+  (method ^:public ^:static caml_unix_execvp [path args] (ExtProc/exec "execvp" path args nil true))
+  (method ^:public ^:static caml_unix_execvpe [path args env] (ExtProc/exec "execvpe" path args env true))
+
+  (method ^:static status [^int code]
+    (if (> code 128)
+      (Block. 1 (new Object/1 [(ExtSys/caml_sys_rev_convert_signal_number (Long/valueOf (unchecked-subtract (long code) 128)))]))
+      (Block. 0 (new Object/1 [(Long/valueOf (long code))]))))
+
+  ;; the process pid's end (its pumps' too), outside the Gil
+  (method ^:static await [^long pid ^Object/1 e]
+    (let [p (cast Process (aget e 0))
+          pumps (cast ArrayList (aget e 1))]
+      (Gil/unlock)
+      (let [code (try
+                   (let [c (.waitFor p)]
+                     (loop [^int i 0]
+                       (when (< i (.size pumps)) (.join (cast Thread (.get pumps i))) (recur (unchecked-inc-int i))))
+                     c)
+                   (catch InterruptedException x -1)
+                   (finally (Gil/lock)))]
+        (.remove procs (Long/valueOf pid))
+        (Rt/tuple (new Object/1 [(Long/valueOf pid) (ExtProc/status code)])))))
+
+  (method ^:public ^:static caml_unix_waitpid [flags pidv]
+    (let [pid (Rt/l pidv)
+          nohang (.contains (ExtUnixFd/ints flags) (Long/valueOf 0))
+          key (if (<= pid 0)
+                (let [it (.iterator (.keySet procs))] (if (.hasNext it) (Rt/l (.next it)) -1))
+                pid)
+          e (cast Object/1 (.get procs (Long/valueOf key)))]
+      (when (nil? e) (throw (ExtUnix/error 10 "waitpid" "")))
+      (if (and nohang (.isAlive (cast Process (aget e 0))))
+        (Rt/tuple (new Object/1 [(Long/valueOf 0) (Block. 0 (new Object/1 [(Long/valueOf 0)]))]))
+        (ExtProc/await key e))))
+
+  (method ^:public ^:static caml_unix_wait [u]
+    (let [it (.iterator (.keySet procs))]
+      (when (not (.hasNext it)) (throw (ExtUnix/error 10 "wait" "")))
+      (let [k (Rt/l (.next it))]
+        (ExtProc/await k (cast Object/1 (.get procs (Long/valueOf k))))))))

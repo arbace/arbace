@@ -1148,7 +1148,12 @@ build constraints.
   `VirtualThread[#22,name]/runnable`.
 - **`getStackTrace()`**: the current thread's Java frames (phase 1's frame mapping); another
   thread's stack cannot be read from Go, so it is empty.
-- **The context class loader** is not there (`ClassLoader` is reworked, JAVA-SURFACE.md).
+- **The context class loader** is not there (`ClassLoader` is reworked, JAVA-SURFACE.md). Since F27 (2026-11-08,
+  doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)"; java.rmi's transport sets it around each call):
+  `getContextClassLoader` and `setContextClassLoader` are jdk26u's, a field of the Thread set by its constructor to the
+  creating thread's loader and by `setContextClassLoader` (no security manager, no check); an adopted thread's (the main
+  thread's) is the system class loader, as the JVM's main thread's. jrt has no thread groups: the JDK classes that make
+  threads in a group (sun.rmi.runtime.RuntimeUtil, JMX's communicator admins) are derived without one.
 
 ## Thread locals
 
@@ -1958,8 +1963,8 @@ as grown".
 | class | what |
 |---|---|
 | `SocketImpl` | `createPlatformSocketImpl` makes a `HostSocketImpl` |
-| `Socket` | the state bits and the streams' installation through `Unsafe` (a compare-and-set loop for `getAndBitwiseOr`, `compareAndSetReference`) instead of `VarHandle`s; a client's impl is the platform's itself, not wrapped in a `SocksSocketImpl` (no proxies); the streams record no JFR events |
-| `ServerSocket` | `implAccept(Socket)` without the `DelegatingSocketImpl` step (no SOCKS or HTTP-tunnel impls; j2g has no cast for a pattern-matching `instanceof` of a cut class) |
+| `Socket` | the state bits and the streams' installation through `Unsafe` (a compare-and-set loop for `getAndBitwiseOr`, `compareAndSetReference`) instead of `VarHandle`s; the streams record no JFR events; until F12 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F12 (write-ahead)") a client's impl was the platform's itself, since F12 jdk26u's `SocksSocketImpl` over it again, which asks the proxy selector |
+| `ServerSocket` | (until F12) `implAccept(Socket)` without the `DelegatingSocketImpl` step; since F12 jdk26u's, the SOCKS and HTTP-tunnel impls in the world |
 | `InetAddress` | the static initializers without the native library, `SharedSecrets` and the native `init`; IPv4 and IPv6 availability from the host; the built-in resolver only (no `ServiceLoader`); the cache a map of `CachedLookup`s expiring as the JVM's default policy without a security manager (30 s, failures 10 s), checked when used (the JVM's `ConcurrentSkipListSet` of expiries is outside the world), without the one-lookup-per-host lock; `PlatformResolver` without `Blocker` |
 | `Inet4Address`, `Inet6Address` | no native `init`; `Inet6Address(String, byte[])` without `NetworkInterface` (outside the world: null in the JDK there); `Inet6AddressHolder.getHostAddress` without the scope's interface (a dropped field) |
 | `Inet4AddressImpl`, `Inet6AddressImpl` | the natives over `HostNet`; `isReachable` throws `UnsupportedOperationException`; the loopback address without asking `NetworkInterface` whether it is bound |
@@ -1995,6 +2000,32 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
 
   The JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on its standard error; the Go executable
   does not (NT2).
+
+## `java.home` (JCS233 (a), 2026-11-08)
+
+doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS233". Until JCS233 `java.home` was `""`: jrt's own readers take
+the JDK image's files as embedded resources (Security's `loadMaster`, `ZoneInfoFile`'s, `NetProperties`',
+`LogManager`'s variants), but the JDK's code and tests that open `${java.home}/...` as files found nothing.
+
+- **The directory** (`go/arbace/jrt/javahome.ae`): `$XDG_CACHE_HOME/arbace/java-home/KEY` (an absolute
+  `XDG_CACHE_HOME`, else `$HOME/.cache/...`), KEY the first 20 hex digits of the SHA-256 over the embedded files'
+  names and bytes. It holds `javaHomeFiles`, the image's paths jdk/data has: `conf/{logging,net}.properties`,
+  `conf/security/java.security`, `conf/security/policy/` (README.txt, limited's three and unlimited's two
+  policies), `lib/security/cacerts` (JCS140 (a)) and `lib/tzdb.dat`; a file the executable does not embed is left out
+  (and out of the key).
+- **When.** At the first read of the property (`System.getProperty("java.home")`, `getProperties`, `StaticProperty`'s
+  initializer): `initProps` puts a sentinel String in the table, `System_GetProperty_String__String` replaces it by
+  `JavaHome`'s answer. RT.doInit's `System.getProperties()` reads every property, so every start pays it: about
+  0.26 ms once the directory exists (`BenchmarkJavaHome`: the hash of 360 KB and a stat; the resources' inflation
+  beside it in a built executable).
+- **How.** Written once: the files below `KEY.tmp-RANDOM` beside it (0644, directories 0755, through the Host
+  interface), renamed to `KEY`; a process whose rename finds the directory there removes its copy and takes it (8
+  first readers at once share one directory: `TestJavaHome`). An existing `KEY` directory is not checked again.
+- **Overrides.** `ARBACE_JAVA_HOME` names a directory used as is (nothing written); `JAVA_TOOL_OPTIONS`'
+  `-Djava.home=...` and `System.setProperty` replace the value as any property's.
+- **Without it** (no cache directory, a host that cannot write one, the box; no file embedded): `""`, as before, and
+  `JceSecurity` falls back to the unlimited policy (CryptoAllPermission) instead of throwing as the JDK without its
+  policy files does.
 
 ## `arbace.core.server`
 
@@ -2190,7 +2221,10 @@ All accepted by the user 2026-10-10 and folded where they belong (J2G-SPEC §16,
   JRT-SOURCES.md ("The closure as grown", Files).*
 - **FS2 (decision) `java.nio.file` as jrt's own `Path`, `Files` and `HostPath`** (above,
   Decisions), and no `RandomAccessFile`. *Accepted 2026-10-10; it stays here, in Decisions, and
-  J2G-SPEC §4.1 refers to it.*
+  J2G-SPEC §4.1 refers to it.* *Reversed by F9 (the user's decision of 2026-11-07; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+  "As built: F9 (write-ahead)"): jdk26u's own `java.nio.file` and sun.nio.fs's Linux provider over jrt's Go
+  natives (`go/arbace/jrt/nio_fs_linux.ae`) and native memory (`nativemem.ae`); `Path`, `Files`, `HostPath` and
+  `GlobPatterns` removed from `overlay/jdk`.*
 - **FS3 (J2G-SPEC §9.4, the host interface) An optional `HostFS` beside `Host`.** A host's
   file system calls beyond `Host`'s are a second interface a host may implement
   (`CurrentHostFS`); jrt's natives fall back to the JDK's failure results without it. Keeps
@@ -3987,6 +4021,23 @@ class), then falls back to the prefix rule as before: javac's tool world now ans
 unnamed module as before. The shipped world has none of these packages, so its answers are unchanged.
 `classPlace` (the ClassCastException messages) is unchanged. `TestClassLoaders` checks one class of each module.
 
+**CDR4 (b): java.sql and a slice of java.desktop in the shipped world (branch `clojure-cdr`, 2026-11-06;
+doc/CLOJURE-DESIGN-REVIEW.md, the user's decision of 2026-11-05).** `test/jrt/jrt_sources.ae`'s
+`added-module-sources` (compiled into java.base's tree, KIND `share:MODULE`) gains the java.sql interfaces
+`java.sql.Connection` reaches (31 more files with `Date`, `Timestamp`), `javax.xml.transform`'s `Source` and
+`Result` (`SQLXML`'s; java.xml), and java.desktop's `java.awt.Point`, `java.awt.geom.Point2D`,
+`java.awt.Transparency`, `java.beans.Transient`; jrt's own variants in `overlay/jdk/java.base`: `java.sql.DriverManager`
+(no `ServiceLoader`, no caller: `jdk.internal.reflect.Reflection` is not in the world; the `jdbc.drivers` property's
+and `registerDriver`'s drivers only), `java.sql.Driver` (no `getParentLogger`: `java.util.logging` is not in the
+world), `java.sql.SQLException` (no `AtomicReferenceFieldUpdater`: `setNextException`'s compare-and-set under a
+lock), `java.awt.Color` (sRGB only: no `ColorSpace`, no `Paint` but its `Transparency`, no `@ConstructorProperties`).
+`bin/jrt modules` now maps a `share:MODULE` file to MODULE (jdk.localedata's excepted), so `Class.getModule`
+answers java.sql (platform loader), java.xml and java.desktop (bootstrap) for them as the JDK does: java.sql's
+`Date` and `Timestamp` move from java.base to java.sql. Checked light (the conversion is a night's): javac on Arbace
+compiles the 42 files patched into java.base against the platform, and repr/java reads them (`Date` and
+`Timestamp` byte for byte the committed forms). For Clojure's suite: java.javadoc's `javadoc-url-test`
+(`java.sql.Connection`'s module) and java-interop's `test-dot` (`Point`) and `test-bean` (`Color`).
+
 # java.io, zip and jar (JC6b, branch `java-check-jc6b`)
 
 The user's decisions JCS92 (c) and JCS93 (c) (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided
@@ -4081,6 +4132,18 @@ does not have; a missing file is `NoSuchFileException` as there), no Windows bra
 objects of `SharedSecrets` kept by `jdk.internal.jrt.ZipAccess` (jrt's `SharedSecrets` holds
 `JavaLangAccess` alone).
 
+**Deflater's bytes** (2026-11-11, the Ghidra case study's A9; `bin/jrt deflate`, the essential step `jrt-deflate`):
+the JDK's `Deflater` is jdk26u's libzip over the host's zlib 1.3.2 (`libzip.so` links `/usr/lib/libz.so.1`),
+jrt's zlib 1.3.2's deflate ported, so a program's deflated output (Sleigh's `.sla`, through
+`DeflaterOutputStream` at the default level) should be the JDK's byte for byte. `test/jrt/deflate.ae` makes a
+corpus of Arbace's own from a linear congruential generator (text, zeros, incompressible bytes, packed small
+integers, runs up to 300, the sizes around 32 KiB and 64 KiB, 1 MB of text) and deflates it eleven ways
+(`DeflaterOutputStream` whole, byte by byte, in chunks, a 64-byte buffer; levels 1 and 9; nowrap; filtered;
+Huffman only; a sync flush midway; `GZIPOutputStream`), each row the output's size and SHA-256 and that it
+inflates back; `--record` writes the frozen JVM's rows, `test/jrt/deflate-jdk26.edn` (171 rows); `bin/jrt deflate
+[EXE]` holds an executable's to them, then the control (each row held to the next row's digest) must fail.
+First run (stage 0, 2026-11-11): 171 of 171 equal, 3.7 s, 0.36 GB.
+
 ## jar
 
 **Translated from jdk26u**: `Attributes`, `JarEntry` (variant: its copy constructor without the
@@ -4102,3 +4165,55 @@ inflaters (Go's collector, JCS96 (b)); signed jars (JCS90 (b)); the `jrt:` URL (
 a multi-release jar opened at the runtime's version; MIME types of `URLConnection.getFileNameMap`
 ("Files"); `FileInputStream.skip` of a negative count (`:jrt-io`, JCS96 (b)).
 
+
+# Serialization (CDR10, branch `clojure-cdr`, begun 2026-11-06)
+
+The user's decision of 2026-11-06 (doc/CLOJURE-DESIGN-REVIEW.md, CDR10 (a)): Java serialization in the shipped world,
+after CDR5's measurement. Serialization's core is jdk26u's java.io (`ObjectOutputStream`, `ObjectInputStream`,
+`ObjectStreamClass`, `ObjectStreamField`, their interfaces and exceptions: 21 files, 12,052 lines); what it needs outside
+the world, and jrt's answer to each:
+
+| jdk26u's | used for | jrt's |
+|---|---|---|
+| `ReflectionFactory.newConstructorForSerialization` | an object made by the first non-serializable superclass's no-argument constructor | `jdk.internal.jrt.SerialAlloc` over `ClassInfo.SerialNew`, which j2g writes per class (below) |
+| `Unsafe`'s field offsets | `ObjectStreamClass.FieldReflector`'s reads and writes of fields | `java.lang.reflect.Field`'s `get`/`set` (`setAccessible(true)`) |
+| `MethodHandles` | records' deserialization constructors (`RecordSupport`) | the canonical `Constructor`, each component's value taken from the stream by an extractor (`RecordSupport.Ctr`) |
+| `ClassValue` and soft references | `ClassCache`, the descriptors' and reflectors' caches | a `ConcurrentHashMap` (the closed world unloads no class) |
+| `SharedSecrets`, `JavaLangAccess` | ASCII counts of modified UTF-8; ObjectInputStream's accessors | the loops of `StringCoding`'s; the accessors not set |
+| JFR's `DeserializationEvent`, `SerializationMisdeclarationEvent` | events | not raised |
+| `Unsafe.storeFence` | `freeze` | none: the graph is handed to another goroutine by a synchronization, which publishes it |
+
+**Staged, checked light (2026-11-06).** `test/jrt/serialization/`: jrt's own Java (`java/io/ClassCache.java`,
+`jdk/internal/jrt/SerialAlloc.java`), the variants' maker `variants.py` (jdk26u's `ObjectStreamClass`, `ObjectInputStream` and
+`ObjectOutputStream` edited as the table says: `python3 test/jrt/serialization/variants.py /root/jdk26u OUT`, replayable on
+jdk26u's next revision) and the natives' Go forms `serial.ae`. javac on Arbace compiles the five files patched into
+java.base against the platform (40 classes) and repr/java reads them (7 forms files). They are not in the world yet: the
+overlay takes every file of `overlay/jdk/java.base`, and the world would take them before j2g writes `SerialNew`.
+
+**Left (the night's build proves each).** (1) j2g, written (2026-11-06) and inert until `java/io/ObjectStreamClass` is translated (`arbace.j2g.model/serial-super`, `arbace.j2g.decls/serial-new-forms`, the class's init in `arbace.j2g.out`; the namespaces load on stage 0): for each concrete class C of the world that is
+Serializable (`m/all-supertypes` has `java/io/Serializable`) and not an enum or a record (they are written by name and
+by their canonical constructor), its first superclass S that is not Serializable; when S has a no-argument constructor
+accessible to C (public or protected, or package-private in C's package; ReflectionFactory's rule), a function
+`C_SerialNew` (`(let [t (addr (lit C))] (.Ctor <S's embedded struct of t> t) t)`: S's constructor body, `this` the
+object, as `ctor-forms` calls a super constructor; `Object`'s none), set in `C`'s init as `(.-SerialNew (.Info C_class))`,
+written only when `java/io/ObjectStreamClass` is in the world. (2) jrt: `ClassInfo`'s field `SerialNew (func [] [any])`
+(`class.ae`), `serial.ae` moved to `go/arbace/jrt`, `ClassInfo.Init` checked as `hasStaticInitializer`'s answer.
+(3) The sources: `test/jrt/serialization`'s Java into `overlay/jdk/java.base`, the variants made into it by `variants.py`,
+`java/io`'s core among `jrt_sources.ae`'s added sources, then `bin/jrt-convert update`, `bin/j2g-edge update`.
+(4) Clojure's types: `arbace.lang`'s Serializable classes (`PersistentVector`, `Keyword`'s `readResolve`, `Var`'s
+`writeReplace` and the rest) are Java forms translated as the runtime: their hooks are reached by reflection
+(`getDeclaredMethod`), so the member tables must list their private `readObject`/`writeObject`/`readResolve`; a Dyn class
+(deftype, defrecord, proxy) has no `SerialNew` (its fields are slots): a defrecord's serialization is the case to build
+next (`Compiler$Dyn`'s allocation without constructor). Then Clojure's suite's `serialization` (9 tests) and
+`test-proxy-non-serializable`, and Java's `serialization` class.
+
+**In the world (JCS167 (a), the user's decision of 2026-11-07; branch `java-serial`, 2026-11-08).** The staging's
+(1)-(3) are built: the Java in `overlay/jdk/java.base` (the variants made by `variants.py`, which now keeps jdk26u's
+JavaLangAccess and SharedSecrets calls and leaves ObjectOutputStream unvaried), `serial.ae` in jrt with
+`ClassInfo.SerialNew`, the sources in `jrt_sources.ae`'s `serial-sources`; and beyond it, jrt's `Field` writes a final
+instance field made accessible (the JDK's rule) and has the typed accessors, j2g's tables list a Serializable class's
+serial members, RTA reaches the hooks, `serial-super` follows ReflectionFactory's rule entire, SharedSecrets'
+serialization accessors are j2g's, and an interpreted class's allocation is the interpreter's
+(`Compiler$CF$Rt.serialPlan`) with j2g's `cfSerialFor` for the world's part. The design, its table of the JVM's
+services and jrt's answers, the checks and the night's commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+JCS167 (write-ahead)". (4), Clojure's types, is its slice 8.

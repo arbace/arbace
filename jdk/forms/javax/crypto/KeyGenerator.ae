@@ -1,0 +1,204 @@
+;; Converted from jdk26u src/java.base/share/classes/javax/crypto/KeyGenerator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.crypto)
+
+(import '(java.security InvalidAlgorithmParameterException
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        Provider
+                        Provider$Service
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(java.util Iterator Objects)
+        '(sun.security.jca GetInstance JCAUtil)
+        '(sun.security.util Debug))
+
+(defclass ^:public KeyGenerator
+  (field ^:private ^:static ^:final ^Debug pdebug (Debug/getInstance "provider" "Provider"))
+
+  (field ^:private ^:static ^:final ^boolean skipDebug
+    (and (Debug/isOn "engine=") (not (Debug/isOn "keygenerator"))))
+
+  (field ^:private ^:static ^:final ^int I_NONE 1)
+
+  (field ^:private ^:static ^:final ^int I_RANDOM 2)
+
+  (field ^:private ^:static ^:final ^int I_PARAMS 3)
+
+  (field ^:private ^:static ^:final ^int I_SIZE 4)
+
+  (field ^:private ^Provider provider)
+
+  (field ^:private ^:volatile ^KeyGeneratorSpi spi)
+
+  (field ^:private ^:final ^String algorithm)
+
+  (field ^:private ^:final lock (Object.))
+
+  (field ^:private ^{:tag (Iterator Provider$Service)} serviceIterator)
+
+  (field ^:private ^int initType)
+
+  (field ^:private ^int initKeySize)
+
+  (field ^:private ^AlgorithmParameterSpec initParams)
+
+  (field ^:private ^SecureRandom initRandom)
+
+  (constructor ^:protected [this ^KeyGeneratorSpi keyGenSpi ^Provider provider ^String algorithm]
+    (set! (.-spi this) keyGenSpi)
+    (set! (.-provider this) provider)
+    (set! (.-algorithm this) algorithm)
+    (when (and (not skipDebug) (some? pdebug))
+      (.println pdebug
+                (java-str "KeyGenerator." algorithm " algorithm from: " (.getProviderName this)))))
+
+  (constructor :throws [NoSuchAlgorithmException] ^:private [this ^String algorithm]
+    (set! (.-algorithm this) algorithm)
+    (set! serviceIterator (GetInstance/getServices "KeyGenerator" algorithm))
+    (set! initType I_NONE)
+    (when (nil? (.nextSpi this nil false))
+      (throw (NoSuchAlgorithmException. (java-str algorithm " KeyGenerator not available"))))
+    (when (and (not skipDebug) (some? pdebug))
+      (.println pdebug
+                (java-str "KeyGenerator." algorithm " algorithm from: " (.getProviderName this)))))
+
+  (method ^:private getProviderName ^String [this]
+    (if (nil? provider) "(no provider)" (.getName provider)))
+
+  (method ^:public ^:final getAlgorithm ^String [this] (.-algorithm this))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException] ^KeyGenerator [^String algorithm]
+    (Objects/requireNonNull algorithm "null algorithm name")
+    (KeyGenerator. algorithm))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException
+                                                         NoSuchProviderException] ^KeyGenerator [^String algorithm
+                                                                                                 ^String provider]
+    (Objects/requireNonNull algorithm "null algorithm name")
+    (let [instance (JceSecurity/getInstance "KeyGenerator" KeyGeneratorSpi algorithm provider)]
+      (KeyGenerator. (cast KeyGeneratorSpi (.-impl instance)) (.-provider instance) algorithm)))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException] ^KeyGenerator [^String algorithm
+                                                                                                  ^Provider provider]
+    (Objects/requireNonNull algorithm "null algorithm name")
+    (let [instance (JceSecurity/getInstance "KeyGenerator" KeyGeneratorSpi algorithm provider)]
+      (KeyGenerator. (cast KeyGeneratorSpi (.-impl instance)) (.-provider instance) algorithm)))
+
+  (method ^:public ^:final getProvider ^Provider [this]
+    (locking lock (.disableFailover this) provider))
+
+  (method ^:private nextSpi ^KeyGeneratorSpi [this ^KeyGeneratorSpi oldSpi ^boolean reinit]
+    (locking lock
+      (if (and (some? oldSpi) (not (identical? oldSpi spi)))
+          spi
+          (when (some? serviceIterator)
+            (while (.hasNext serviceIterator)
+              (let [s (cast Provider$Service (.next serviceIterator))]
+                (when-not (not (JceSecurity/canUseProvider (.getProvider s)))
+                  (try
+                    (let [inst (.newInstance s nil)]
+                      (when-instance [^KeyGeneratorSpi spi inst]
+                        (when reinit
+                          (cond
+                            (== initType I_SIZE) (.engineInit spi initKeySize initRandom)
+                            (== initType I_PARAMS) (.engineInit spi initParams initRandom)
+                            (== initType I_RANDOM) (.engineInit spi initRandom)
+                            :else
+                              (when-not (== initType I_NONE)
+                                (throw (AssertionError.
+                                         (java-str "KeyGenerator initType: " initType))))))
+                        (set! provider (.getProvider s))
+                        (set! (.-spi this) spi)
+                        (return spi)))
+                    (catch Exception e)))))
+            (.disableFailover this)
+            nil))))
+
+  (method disableFailover ^void [this]
+    (set! serviceIterator nil)
+    (set! initType 0)
+    (set! initParams nil)
+    (set! initRandom nil))
+
+  (method ^:public ^:final init ^void [this ^SecureRandom random]
+    (if (nil? serviceIterator)
+        (.engineInit spi random)
+        (let [^:mutable ^RuntimeException failure nil
+              ^:mutable mySpi spi]
+          (loop []
+            (try
+              (.engineInit mySpi random)
+              (set! initType I_RANDOM)
+              (set! initKeySize 0)
+              (set! initParams nil)
+              (set! initRandom random)
+              (return)
+              (catch RuntimeException e
+                (when (nil? failure) (set! failure e))
+                (set! mySpi (.nextSpi this mySpi false))))
+            (when (some? mySpi) (recur)))
+          (throw failure))))
+
+  (method ^:public ^:final init :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                    ^AlgorithmParameterSpec params]
+    (.init this params (JCAUtil/getDefSecureRandom)))
+
+  (method ^:public ^:final init :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                    ^AlgorithmParameterSpec params
+                                                                                    ^SecureRandom random]
+    (if (nil? serviceIterator)
+        (.engineInit spi params random)
+        (let [^:mutable ^Exception failure nil
+              ^:mutable mySpi spi]
+          (loop []
+            (try
+              (.engineInit mySpi params random)
+              (set! initType I_PARAMS)
+              (set! initKeySize 0)
+              (set! initParams params)
+              (set! initRandom random)
+              (return)
+              (catch Exception e
+                (when (nil? failure) (set! failure e))
+                (set! mySpi (.nextSpi this mySpi false))))
+            (when (some? mySpi) (recur)))
+          (when (instance? InvalidAlgorithmParameterException failure)
+            (throw (cast InvalidAlgorithmParameterException failure)))
+          (throw (cast RuntimeException failure)))))
+
+  (method ^:public ^:final init ^void [this ^int keysize]
+    (.init this keysize (JCAUtil/getDefSecureRandom)))
+
+  (method ^:public ^:final init ^void [this ^int keysize ^SecureRandom random]
+    (if (nil? serviceIterator)
+        (.engineInit spi keysize random)
+        (let [^:mutable ^RuntimeException failure nil
+              ^:mutable mySpi spi]
+          (loop []
+            (try
+              (.engineInit mySpi keysize random)
+              (set! initType I_SIZE)
+              (set! initKeySize keysize)
+              (set! initParams nil)
+              (set! initRandom random)
+              (return)
+              (catch RuntimeException e
+                (when (nil? failure) (set! failure e))
+                (set! mySpi (.nextSpi this mySpi false))))
+            (when (some? mySpi) (recur)))
+          (throw failure))))
+
+  (method ^:public ^:final generateKey ^SecretKey [this]
+    (if (nil? serviceIterator)
+        (.engineGenerateKey spi)
+        (let [^:mutable ^RuntimeException failure nil
+              ^:mutable mySpi spi]
+          (loop []
+            (try
+              (return (.engineGenerateKey mySpi))
+              (catch RuntimeException e
+                (when (nil? failure) (set! failure e))
+                (set! mySpi (.nextSpi this mySpi true))))
+            (when (some? mySpi) (recur)))
+          (throw failure)))))

@@ -1,0 +1,57 @@
+;; bin/oi table-check (doc/ocaml/OCAML-SURVEY.md, OC165 (a), OC170; "As built: the embedding's gaps"): oi listed in goi's table,
+;; checked without an executable. Run on stage 0 (ARBACE_PATH at the checkout, cwd the checkout) with the configurations as
+;; bin/goi table gives them:  EXE table_check.ae LIST OUT --config GOOS/GOARCH=ROOT[,OVERLAY]...
+;; 1. LIST (go/arbace/gotable.edn) lists arbace/oi, and the generator takes it as a package of the program's own go/
+;;    (arbace.go.table/program-path?);
+;; 2. goi's checker checks the package in every configuration (its files as the configuration's build constraints select them):
+;;    no error, each configuration's file count printed;
+;; 3. the generator (arbace.go.table/run) makes the table and the digests of a list of arbace/oi alone (LIST with :packages
+;;    ["arbace/oi"]) into OUT: every configuration with oi's members, none skipped (report.edn).
+(require '[arbace.string :as str] '[arbace.go.table :as table] '[arbace.go.check :as ck])
+
+(let [[list-file out & more] *command-line-args*
+      opts (table/parse-args (concat ["--list" list-file "--out" out] more))
+      list-cfg (read-string (slurp list-file))
+      p "arbace/oi"
+      fails (atom 0)
+      fail! (fn [& xs] (swap! fails inc) (apply println "FAIL" xs))]
+  (if (some #{p} (:packages list-cfg))
+    (println "listed:" p "in" list-file)
+    (fail! p "is not in" list-file "'s :packages"))
+  (when-not (table/program-path? p) (fail! p "is not a package of the program's go/ (arbace.go.table/program-path?)"))
+  ;; 2. the checker, a configuration at a time (as load-env checks a listed package)
+  (doseq [{:keys [cfg root]} (:configs opts)]
+    (let [config (merge {:goos (:goos cfg) :goarch (:goarch cfg)}
+                        (if (= "amd64" (:goarch cfg)) {:goamd64 "v1"} {:goarm64 "v8.0"}))
+          src-of (fn [path _] (#'table/source-of root path config))
+          src (src-of p nil)
+          s (ck/session src-of)
+          cp (binding [arbace.go.check.env/*pkg* (volatile! {:path "arbace/gotable"})
+                       arbace.go.check.types/*resolve-named* arbace.go.check.decl/resolve-named!
+                       arbace.go.check.types/*method-obj* arbace.go.check.decl/method-data!
+                       arbace.go.check.types/*subst-method* arbace.go.check.decl/subst-method]
+               (ck/ensure-package s p nil []))
+          errs (when cp (:errors (:result @cp)))
+          c (str (:goos cfg) "/" (:goarch cfg))]
+      (cond
+        (nil? cp) (fail! c "no files of" p)
+        (seq errs) (do (fail! c (count errs) "errors of goi's checker in" p)
+                       (doseq [{:keys [file line msg]} (take 20 errs)] (println (str "  " file ":" line ": " msg))))
+        :else (println (str "checked: " p " in " c ", " (count (:files src)) " files, no error")))))
+  ;; 3. the generator over a list of oi alone
+  (let [oi-list (str out ".list.edn")]
+    (spit oi-list (pr-str (assoc list-cfg :packages [p])))
+    (table/run (assoc opts :list-file oi-list))
+    (let [r (read-string (slurp (str out "/report.edn")))
+          ms (:members r)]
+      (doseq [c (:configs r)]
+        (let [m (get ms c)]
+          (if (and m (pos? (:funcs m)))
+            (println (str "table: " c " " (pr-str m)))
+            (fail! "table:" c "has no members of" p))))
+      (when (seq (:skipped r)) (fail! "table: skipped" (pr-str (:skipped r))))
+      (when (not= (count (:configs r)) (count (:configs opts))) (fail! "table: configurations" (pr-str (:configs r))))))
+  (shutdown-agents)
+  (if (zero? @fails)
+    (do (println "table-check: ok (arbace/oi listed, checked and tabled in" (count (:configs opts)) "configurations)") (System/exit 0))
+    (do (println "table-check:" @fails "failures") (System/exit 1))))

@@ -13,7 +13,7 @@
 
 (in-ns 'ocaml.rt)
 
-(import '(java.io ByteArrayOutputStream) '(java.util IdentityHashMap Arrays))
+(import '(java.io ByteArrayOutputStream) '(java.util IdentityHashMap Arrays ArrayList HashMap))
 
 (defclass ^:public ^:final Marshal
 
@@ -164,8 +164,37 @@
                   (do (.b1 this 2) (.be64 this x)))
                 (set! size32 (unchecked-add size32 3)) (set! size64 (unchecked-add size64 3))
                 (.record this nil) (break :item))
+              ;; a bigarray (BaOps/serialize: extern_custom of a variable-length custom block)
+              (and (instance? Custom v) (.equals (.-id (cast Custom v)) "_bigarr02"))
+              (do (when (.shareLookup this v) (break :item))
+                  (BaOps/serialize this (BigArray/of v))
+                  (.record this v) (break :item))
               (instance? Custom v) (.invalid this "output_value: abstract value (Custom)")
-              (instance? Closure v) (.invalid this "output_value: functional value")
+              ;; the Closures flag (OC216 (a), oi's closureFields): a block of Closure_tag, its code pointer (a long/1 of the
+              ;; number, see codeNumber) and its free variables, or for a partial application its function and arguments
+              (instance? Closure v)
+              (do (when (== (bit-and flags 2) 0) (.invalid this "output_value: functional value"))
+                  (when (.shareLookup this v) (break :item))
+                  (let [fs (Marshal/closureFields (cast Closure v))]
+                    (when (nil? fs) (.invalid this "output_value: functional value"))
+                    (.header this (long (alength fs)) 247)
+                    (set! size32 (unchecked-add size32 (unchecked-add 1 (long (alength fs)))))
+                    (set! size64 (unchecked-add size64 (unchecked-add 1 (long (alength fs)))))
+                    (.record this v)
+                    (when (> (alength fs) 1)
+                      (when (== xp (alength xf))
+                        (set! xf (Arrays/copyOf xf (unchecked-multiply-int xp 2)))
+                        (set! xi (Arrays/copyOf xi (unchecked-multiply-int xp 2))))
+                      (aset xf xp fs)
+                      (aset xi xp 1)
+                      (set! xp (unchecked-inc-int xp)))
+                    (set! v (aget fs 0))
+                    (continue)))
+              (instance? long/1 v)
+              (let [idx (aget (cast long/1 v) 0) d (Marshal/codeDigest (unchecked-int idx))]
+                (.b1 this 16) (.be32 this idx)
+                (loop [^int i 0] (when (< i 16) (.b1 this (long (aget d i))) (recur (unchecked-inc-int i))))
+                (break :item))
               (instance? Fiber v) (.invalid this "output_value: continuation value")
               (instance? Block v)
               (let [x (cast Block v) tag (.-tag x) f (.-f x)]
@@ -377,11 +406,12 @@
           (if (== (aget src i) 0) (set! e i) (recur (unchecked-inc-int i)))))
       (when (< e 0) (.failf this "unterminated custom block identifier"))
       (let [name (String. src pos (unchecked-subtract-int e pos) java.nio.charset.StandardCharsets/ISO_8859_1)]
-        (when (not (or (.equals name "_i") (.equals name "_j") (.equals name "_n")))
+        (when (not (or (.equals name "_i") (.equals name "_j") (.equals name "_n") (.equals name "_bigarr02")))
           (.failf this (java-str "unknown custom block identifier " name)))
-        (when (not (== code 25)) (.failf this (java-str "wrong custom block kind " name)))
+        (when (not (== code (if (.equals name "_bigarr02") 24 25))) (.failf this (java-str "wrong custom block kind " name)))
         (set! pos (unchecked-inc-int e))
-        (let [v (cond (.equals name "_i") (Integer/valueOf (unchecked-int (.u32 this)))
+        (let [v (cond (.equals name "_bigarr02") (do (.u32 this) (.u64 this) (BaOps/deserialize this))
+                      (.equals name "_i") (Integer/valueOf (unchecked-int (.u32 this)))
                       (.equals name "_j") (I64. (.u64 this))
                       :else (let [k (.u8 this)]
                               (cond (== k 1) (NInt. (long (unchecked-int (.u32 this))))
@@ -446,13 +476,125 @@
                   (14 13) (set! v (.doubleArray this (.u8 this) (== code 14)))
                   (7 15) (set! v (.doubleArray this (.u32 this) (== code 7)))
                   (23 22) (set! v (.doubleArray this (.u64 this) (== code 23)))
-                  16 (do (.u32 this) (.check this 16) (throw (Rt/failwith "input_value: unknown code module")))
+                  16 (let [idx (.u32 this)]
+                       (.check this 16)
+                       (when (or (>= idx (long (Marshal/codeCount)))
+                                 (not (Arrays/equals (Arrays/copyOfRange src pos (unchecked-add-int pos 16)) (Marshal/codeDigest (unchecked-int idx)))))
+                         (throw (Rt/failwith "input_value: unknown code module")))
+                       (set! pos (unchecked-add-int pos 16))
+                       (set! closures true)
+                       (set! v (new long/1 [idx])))
                   17 (.failf this "bad infix offset")
                   18 (.failf this "custom blocks serialized with OCaml 4.08.0 (or prior) are no longer supported")
                   (24 25) (set! v (.readCustom this (long code)))
                   (.failf this "ill-formed message")))
               (aset fr at v)))))
-      (aget root 0)))
+      (if closures (Marshal/fixClosures (aget root 0)) (aget root 0))))
+
+  ;; ---- closures (OC216 (a), oi's marshal.go): a translated function's class gets the next number of the process's table when a
+  ;; closure of it is first marshalled (the closure kept as its prototype: blank makes another); the digest of its name is the code
+  ;; fragment's digest. Number 0 is a partial application's (caml_curry)
+  (field ^:public ^boolean closures)
+  (field ^:static ^:final ^ArrayList codeProtos (let [l (ArrayList.)] (.add l nil) l))
+  (field ^:static ^:final ^HashMap codeIndex (HashMap.))
+  (method ^:static codeCount ^int [] (locking codeProtos (.size codeProtos)))
+  (method ^:static codeDigest ^byte/1 [^int idx]
+    (let [name (if (== idx 0) "caml_curry" (.getName (.getClass (locking codeProtos (.get codeProtos idx)))))
+          d (new byte/1 16)
+          ^:mutable ^long h1 -3750763034362895579
+          ^:mutable ^long h2 1469598103934665603]
+      (loop [^int i 0]
+        (when (< i (.length name))
+          (let [c (long (.charAt name i))]
+            (set! h1 (unchecked-multiply (bit-xor h1 c) 1099511628211))
+            (set! h2 (unchecked-multiply (bit-xor h2 c) 1099511628211)))
+          (recur (unchecked-inc-int i))))
+      (loop [^int i 0]
+        (when (< i 8)
+          (aset d i (unchecked-byte (unsigned-bit-shift-right h1 (unchecked-multiply-int 8 i))))
+          (aset d (unchecked-add-int i 8) (unchecked-byte (unsigned-bit-shift-right h2 (unchecked-multiply-int 8 i))))
+          (recur (unchecked-inc-int i))))
+      d))
+  (method ^:static codeNumber ^long [^Closure c]
+    (locking codeProtos
+      (let [name (.getName (.getClass c)) i (.get codeIndex name)]
+        (if (nil? i)
+          (let [n (.size codeProtos)]
+            (.add codeProtos c)
+            (.put codeIndex name (Integer/valueOf n))
+            (long n))
+          (long (.intValue (cast Integer i)))))))
+  (method ^:static closureFields ^Object/1 [^Closure c]
+    (if (instance? Pap c)
+      (let [p (cast Pap c) a (.-args p) fs (new Object/1 (unchecked-add-int (alength a) 2))]
+        (aset fs 0 (new long/1 [0]))
+        (aset fs 1 (.-fn p))
+        (System/arraycopy a 0 fs 2 (alength a))
+        fs)
+      (let [e (.envOf c)]
+        (if (nil? e)
+          nil
+          (let [fs (new Object/1 (unchecked-add-int (alength e) 1))]
+            (aset fs 0 (new long/1 [(Marshal/codeNumber c)]))
+            (System/arraycopy e 0 fs 1 (alength e))
+            fs)))))
+  ;; the closure blocks of a value read back made closures: every block reached visited once, a block of Closure_tag whose first
+  ;; field is a code pointer the closure (a blank of its prototype filled with the other fields), a code pointer elsewhere ill-formed
+  (method ^:static illFormed [] (Rt/failwith "input_value: ill-formed message"))
+  (method ^:static fixClosures [root]
+    (let [seen (IdentityHashMap.) memo (IdentityHashMap.) blocks (ArrayList.) cls (ArrayList.) stack (ArrayList.)]
+      (.add stack root)
+      (while (not (.isEmpty stack))
+        (let [v (.remove stack (unchecked-dec-int (.size stack)))]
+          (when (and (instance? Block v) (not (.containsKey seen v)))
+            (.put seen v Boolean/TRUE)
+            (let [b (cast Block v) f (.-f b)]
+              (if (== (.-tag b) 247)
+                (do (when (or (== (alength f) 0) (not (instance? long/1 (aget f 0)))) (throw (Marshal/illFormed)))
+                    (let [idx (unchecked-int (aget (cast long/1 (aget f 0)) 0))]
+                      (if (== idx 0)
+                        (when (< (alength f) 2) (throw (Marshal/illFormed)))
+                        (let [proto (cast Closure (locking codeProtos (.get codeProtos idx)))]
+                          ;; as many free variables as the class has (a message altered on the way is ill-formed, not a closure)
+                          (when (not (== (unchecked-dec-int (alength f)) (alength (.envOf proto)))) (throw (Marshal/illFormed)))
+                          (.put memo b (.blank proto)))))
+                    (.add cls b)
+                    (loop [^int i 1] (when (< i (alength f)) (.add stack (aget f i)) (recur (unchecked-inc-int i)))))
+                (do (.add blocks b)
+                    (loop [^int i 0] (when (< i (alength f)) (.add stack (aget f i)) (recur (unchecked-inc-int i))))))))))
+      ;; the partial applications, once their functions are closures (a function that is one itself made first)
+      (loop [^int k 0]
+        (when (<= k (.size cls))
+          (loop [^int j 0]
+            (when (< j (.size cls))
+              (let [b (cast Block (.get cls j)) f (.-f b)]
+                (when (and (not (.containsKey memo b)) (== (aget (cast long/1 (aget f 0)) 0) 0))
+                  (let [g (Marshal/resolve memo (aget f 1))]
+                    (when (instance? Closure g)
+                      (.put memo b (Pap. (cast Closure g) (new Object/1 (unchecked-subtract-int (alength f) 2))))))))
+              (recur (unchecked-inc-int j))))
+          (recur (unchecked-inc-int k))))
+      (loop [^int j 0]
+        (when (< j (.size blocks))
+          (let [f (.-f (cast Block (.get blocks j)))]
+            (loop [^int i 0] (when (< i (alength f)) (aset f i (Marshal/resolve memo (aget f i))) (recur (unchecked-inc-int i)))))
+          (recur (unchecked-inc-int j))))
+      (loop [^int j 0]
+        (when (< j (.size cls))
+          (let [b (cast Block (.get cls j)) f (.-f b) c (.get memo b)]
+            (when (nil? c) (throw (Marshal/illFormed)))
+            (if (instance? Pap c)
+              (let [a (.-args (cast Pap c))]
+                (loop [^int i 2] (when (< i (alength f)) (aset a (unchecked-subtract-int i 2) (Marshal/resolve memo (aget f i))) (recur (unchecked-inc-int i)))))
+              (let [e (new Object/1 (unchecked-dec-int (alength f)))]
+                (loop [^int i 1] (when (< i (alength f)) (aset e (unchecked-dec-int i) (Marshal/resolve memo (aget f i))) (recur (unchecked-inc-int i))))
+                (.fill (cast Closure c) e))))
+          (recur (unchecked-inc-int j))))
+      (Marshal/resolve memo root)))
+  (method ^:static resolve [^IdentityHashMap memo v]
+    (cond (instance? long/1 v) (throw (Marshal/illFormed))
+          (and (instance? Block v) (.containsKey memo v)) (.get memo v)
+          :else v))
 
   ;; the header: its length and data length, and the object count in the fields
   (field ^:public ^long headerLen)
@@ -493,7 +635,11 @@
       (when (> (.-numObjects s) 0)
         (set! (.-nobjs s) (unchecked-int (Math/min (.-numObjects s) (.-dataLen s))))
         (set! (.-objs s) (new Object/1 (.-nobjs s))))
-      (.readRec s)))
+      ;; a message altered on the way that the checks above let by, whose sizes the Java arrays refuse, is ill-formed (OC216 (a):
+      ;; lib-marshal/fuzzy, which the Closures flag lets fuzz), as intern.c's reader fails on it
+      (try (.readRec s)
+           (catch NegativeArraySizeException _ (throw (Rt/failwith "input_value: ill-formed message")))
+           (catch ArrayIndexOutOfBoundsException _ (throw (Rt/failwith "input_value: ill-formed message"))))))
 
   (method ^:public ^:static caml_input_value_from_bytes [b ofs] (Marshal/fromBytes (cast byte/1 b) (Rt/ii ofs)))
   (method ^:public ^:static caml_input_value_from_string [b ofs] (Marshal/fromBytes (cast byte/1 b) (Rt/ii ofs)))

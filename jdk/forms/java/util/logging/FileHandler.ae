@@ -1,0 +1,332 @@
+;; Converted from jdk26u src/java.logging/share/classes/java/util/logging/FileHandler.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util.logging)
+
+(import '(java.io BufferedOutputStream File FileOutputStream IOException OutputStream)
+        '(java.nio.channels FileChannel OverlappingFileLockException)
+        '(java.nio.file AccessDeniedException
+                        FileAlreadyExistsException
+                        Files
+                        LinkOption
+                        NoSuchFileException
+                        OpenOption
+                        Path
+                        Paths
+                        StandardOpenOption)
+        '(java.util HashSet Set)
+        '(jdk.internal.misc VM))
+
+(defclass ^:public FileHandler
+  :extends StreamHandler
+
+  (field ^:private ^MeteredStream meter)
+
+  (field ^:private ^boolean append)
+
+  (field ^:private ^long limit)
+
+  (field ^:private ^int count)
+
+  (field ^:private ^String pattern)
+
+  (field ^:private ^String lockFileName)
+
+  (field ^:private ^FileChannel lockFileChannel)
+
+  (field ^:private ^File/1 files)
+
+  (field ^:private ^:static ^:final ^int MAX_LOCKS 100)
+
+  (field ^:private ^int maxLocks MAX_LOCKS)
+
+  (field ^:private ^:static ^:final ^{:tag (Set String)} locks (HashSet.))
+
+  (defclass ^:private ^:static ^:final MeteredStream
+    :extends OutputStream
+
+    (field ^:final ^OutputStream out)
+
+    (field ^long written)
+
+    (constructor [this ^OutputStream out ^long written]
+      (set! (.-out this) out)
+      (set! (.-written this) written))
+
+    (method ^:public write :throws [IOException] ^void [this ^int b]
+      (.write out b)
+      (set! written (unchecked-inc written)))
+
+    (method ^:public write :throws [IOException] ^void [this ^byte/1 buff]
+      (.write out buff)
+      (set! written (unchecked-add written (alength buff))))
+
+    (method ^:public write :throws [IOException] ^void [this ^byte/1 buff ^int off ^int len]
+      (.write out buff off len)
+      (set! written (unchecked-add written len)))
+
+    (method ^:public flush :throws [IOException] ^void [this] (.flush out))
+
+    (method ^:public close :throws [IOException] ^void [this] (.close out)))
+
+  (method ^:private open :throws [IOException] ^void [this ^File fname ^boolean append]
+    (let [^:mutable len 0]
+      (when append (set! len (.length fname)))
+      (let [fout (FileOutputStream. (.toString fname) append)
+            bout (BufferedOutputStream. fout)]
+        (set! meter (MeteredStream. bout len))
+        (.setOutputStream this meter))))
+
+  (method ^:private configure ^void [this]
+    (let [manager (LogManager/getLogManager)
+          cname (.getName (.getClass this))]
+      (set! pattern (.getStringProperty manager (java-str cname ".pattern") "%h/java%u.log"))
+      (set! limit (.getLongProperty manager (java-str cname ".limit") 0))
+      (when (< limit 0) (set! limit 0))
+      (set! count (.getIntProperty manager (java-str cname ".count") 1))
+      (when (<= count 0) (set! count 1))
+      (set! append (.getBooleanProperty manager (java-str cname ".append") false))
+      (.setLevel this (.getLevelProperty manager (java-str cname ".level") Level/ALL))
+      (.setFilter this (.getFilterProperty manager (java-str cname ".filter") nil))
+      (.setFormatter this
+                     (.getFormatterProperty manager (java-str cname ".formatter") (XMLFormatter.)))
+      (set! maxLocks (.getIntProperty manager (java-str cname ".maxLocks") MAX_LOCKS))
+      (when (<= maxLocks 0) (set! maxLocks MAX_LOCKS))
+      (try
+        (.setEncoding this (.getStringProperty manager (java-str cname ".encoding") nil))
+        (catch Exception ex (try (.setEncoding this nil) (catch Exception ex2))))))
+
+  (constructor :throws [IOException] ^:public [this]
+    (.configure this)
+    (when (.isEmpty pattern) (throw (NullPointerException.)))
+    (.openFiles this))
+
+  (constructor :throws [IOException] ^:public [this ^String pattern]
+    (when (.isEmpty pattern) (throw (IllegalArgumentException.)))
+    (.configure this)
+    (set! (.-pattern this) pattern)
+    (set! (.-limit this) 0)
+    (set! (.-count this) 1)
+    (.openFiles this))
+
+  (constructor :throws [IOException] ^:public [this ^String pattern ^boolean append]
+    (when (.isEmpty pattern) (throw (IllegalArgumentException.)))
+    (.configure this)
+    (set! (.-pattern this) pattern)
+    (set! (.-limit this) 0)
+    (set! (.-count this) 1)
+    (set! (.-append this) append)
+    (.openFiles this))
+
+  (constructor :throws [IOException] ^:public [this ^String pattern ^int limit ^int count]
+    (when (or (or (< limit 0) (< count 1)) (.isEmpty pattern)) (throw (IllegalArgumentException.)))
+    (.configure this)
+    (set! (.-pattern this) pattern)
+    (set! (.-limit this) limit)
+    (set! (.-count this) count)
+    (.openFiles this))
+
+  (constructor :throws [IOException] ^:public [this ^String pattern ^int limit ^int count
+                                               ^boolean append]
+    (this. pattern (long limit) count append))
+
+  (constructor :throws [IOException] ^:public [this ^String pattern ^long limit ^int count
+                                               ^boolean append]
+    (when (or (or (< limit 0) (< count 1)) (.isEmpty pattern)) (throw (IllegalArgumentException.)))
+    (.configure this)
+    (set! (.-pattern this) pattern)
+    (set! (.-limit this) limit)
+    (set! (.-count this) count)
+    (set! (.-append this) append)
+    (.openFiles this))
+
+  (method ^:private isParentWritable ^boolean [this ^Path path]
+    (let [^:mutable parent (.getParent path)]
+      (when (nil? parent) (set! parent (.getParent (.toAbsolutePath path))))
+      (and (some? parent) (Files/isWritable parent))))
+
+  (method ^:private openFiles :throws [IOException] ^void [this]
+    (let [manager (LogManager/getLogManager)]
+      (when (< count 1) (throw (IllegalArgumentException. (java-str "file count = " count))))
+      (when (< limit 0) (set! limit 0))
+      (java-assert (some? pattern) "pattern should not be null")
+      (java-assert (not (.isEmpty pattern)) "pattern should not be empty")
+      (let [em (InitializationErrorManager.)]
+        (.setErrorManager this em)
+        (let [^:mutable ^int unique -1]
+          (while true
+            (set! unique (unchecked-inc-int unique))
+            (when (> unique maxLocks)
+              (throw (IOException. (java-str "Couldn't get lock for " pattern))))
+            (set! lockFileName (java-str (.toString (.generate this pattern 0 unique)) ".lck"))
+            (locking locks
+              (when-not (.contains locks lockFileName)
+                (let [lockFilePath (Paths/get lockFileName (new String/1 []))
+                      ^:mutable ^FileChannel channel nil
+                      ^:mutable ^int retries -1
+                      ^:mutable fileCreated false]
+                  (while (and (nil? channel)
+                              (< (let [old-1 retries]
+                                   (set! retries (unchecked-inc-int retries))
+                                   old-1)
+                                 1))
+                    (try
+                      (set! channel
+                            (FileChannel/open lockFilePath
+                                              (new
+                                                OpenOption/1
+                                                [StandardOpenOption/CREATE_NEW
+                                                 StandardOpenOption/WRITE])))
+                      (set! fileCreated true)
+                      (catch AccessDeniedException ade
+                        (when-not (and (Files/isRegularFile lockFilePath LinkOption/NOFOLLOW_LINKS)
+                                       (.isParentWritable this lockFilePath))
+                          (throw ade)))
+                      (catch FileAlreadyExistsException ix
+                        (if (and (Files/isRegularFile lockFilePath LinkOption/NOFOLLOW_LINKS)
+                                 (.isParentWritable this lockFilePath))
+                            (try
+                              (set! channel
+                                    (FileChannel/open
+                                      lockFilePath
+                                      (new OpenOption/1
+                                           [StandardOpenOption/WRITE StandardOpenOption/APPEND])))
+                              (catch NoSuchFileException x)
+                              (catch IOException x (break)))
+                            (break)))))
+                  (when (some? channel)
+                    (set! lockFileChannel channel)
+                    (let [^:mutable ^boolean available false]
+                      (try
+                        (set! available (some? (.tryLock lockFileChannel)))
+                        (catch IOException ix (set! available fileCreated))
+                        (catch OverlappingFileLockException x (set! available false)))
+                      (when available (.add locks lockFileName) (break))
+                      (.close lockFileChannel)))))))
+          (set! files (new File/1 count))
+          (loop [^int i 0]
+            (when (< i count)
+              (aset files i (.generate this pattern i unique))
+              (recur (unchecked-inc-int i))))
+          (if append (.open this (aget files 0) true) (.rotate this))
+          (let [ex (.-lastException em)]
+            (when (some? ex)
+              (cond
+                (instance? IOException ex) (throw (cast IOException ex))
+                (instance? SecurityException ex) (throw (cast SecurityException ex))
+                :else (throw (IOException. (java-str "Exception: " ex)))))
+            (.setErrorManager this (ErrorManager.)))))))
+
+  (method ^:private generate :throws [IOException] ^File [this ^String pattern ^int generation
+                                                          ^int unique]
+    (FileHandler/generate pattern count generation unique))
+
+  (method ^:static generate :throws [IOException] ^File [^String pat ^int count ^int generation
+                                                         ^int unique]
+    (let [path (Paths/get pat (new String/1 []))
+          ^:mutable ^Path result nil
+          ^:mutable sawg false
+          ^:mutable sawu false
+          ^:mutable word (StringBuilder.)
+          ^:mutable ^Path prev nil]
+      (for-each [^Path elem path]
+        (when (some? prev)
+          (set! prev (.resolveSibling prev (.toString word)))
+          (set! result (if (nil? result) prev (.resolve result prev))))
+        (let [pattern (.toString elem)
+              ^:mutable ^int ix 0]
+          (.setLength word 0)
+          (while (< ix (.length pattern))
+            (let [ch (.charAt pattern ix)]
+              (set! ix (unchecked-inc-int ix))
+              (let [^:mutable ^char ch2 0]
+                (when (< ix (.length pattern))
+                  (set! ch2 (Character/toLowerCase (.charAt pattern ix))))
+                (when (== ch \%)
+                  (cond
+                    (== ch2 \t)
+                      (let [^:mutable tmpDir (System/getProperty "java.io.tmpdir")]
+                        (when (nil? tmpDir) (set! tmpDir (System/getProperty "user.home")))
+                        (set! result (Paths/get tmpDir (new String/1 [])))
+                        (set! ix (unchecked-inc-int ix))
+                        (.setLength word 0)
+                        (continue))
+                    (== ch2 \h)
+                      (do
+                        (set! result (Paths/get (System/getProperty "user.home") (new String/1 [])))
+                        (when (VM/isSetUID)
+                          (throw (IOException. "can't use %h in set UID program")))
+                        (set! ix (unchecked-inc-int ix))
+                        (.setLength word 0)
+                        (continue))
+                    (== ch2 \g)
+                      (do
+                        (set! word (.append word generation))
+                        (set! sawg true)
+                        (set! ix (unchecked-inc-int ix))
+                        (continue))
+                    (== ch2 \u)
+                      (do
+                        (set! word (.append word unique))
+                        (set! sawu true)
+                        (set! ix (unchecked-inc-int ix))
+                        (continue))
+                    :else
+                      (when (== ch2 \%)
+                        (set! word (.append word \%))
+                        (set! ix (unchecked-inc-int ix))
+                        (continue))))
+                (set! word (.append word ch)))))
+          (set! prev elem)))
+      (when (and (> count 1) (not sawg)) (set! word (.append (.append word \.) generation)))
+      (when (and (> unique 0) (not sawu)) (set! word (.append (.append word \.) unique)))
+      (cond
+        (not (.isEmpty word))
+          (let [n (.toString word)
+                ^Path p (if (nil? prev) (Paths/get n (new String/1 [])) (.resolveSibling prev n))]
+            (set! result (if (nil? result) p (.resolve result p))))
+        (nil? result) (set! result (Paths/get "" (new String/1 []))))
+      (if (nil? (.getRoot path)) (.toFile result) (.toFile (.resolve (.getRoot path) result)))))
+
+  (method ^:private ^:synchronized rotate ^void [this]
+    (let [oldLevel (.getLevel this)]
+      (.setLevel this Level/OFF)
+      (.close super)
+      (loop [^int i (unchecked-subtract-int count 2)]
+        (when (>= i 0)
+          (let [f1 (aget files i)
+                f2 (aget files (unchecked-add-int i 1))]
+            (if (.exists f1)
+                (do
+                  (when (.exists f2) (.delete f2))
+                  (.renameTo f1 f2)
+                  (recur (unchecked-dec-int i)))
+                (recur (unchecked-dec-int i))))))
+      (try
+        (.open this (aget files 0) false)
+        (catch IOException ix (.reportError this nil ix ErrorManager/OPEN_FAILURE)))
+      (.setLevel this oldLevel)))
+
+  (method ^:public publish ^void [this ^LogRecord record]
+    (.publish super record))
+
+  (method synchronousPostWriteHook ^void [this]
+    (.flush this)
+    (when (and (> limit 0) (or (>= (.-written meter) limit) (< (.-written meter) 0)))
+      (.rotate this)))
+
+  (method ^:public ^:synchronized close ^void [this]
+    (.close super)
+    (when (some? lockFileName)
+      (try (.close lockFileChannel) (catch Exception ex))
+      (locking locks (.remove locks lockFileName))
+      (.delete (File. lockFileName))
+      (set! lockFileName nil)
+      (set! lockFileChannel nil)))
+
+  (defclass ^:private ^:static InitializationErrorManager
+    :extends ErrorManager
+
+    (field ^Exception lastException)
+
+    (method ^:public error ^void [this ^String msg ^Exception ex ^int code]
+      (set! lastException ex))))

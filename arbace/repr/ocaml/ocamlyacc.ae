@@ -1,0 +1,1560 @@
+;; ocamlyacc, OCaml's parser generator, ported from OCaml 5.5.0's yacc/ (the release tarball
+;; https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+;; fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): Berkeley yacc as OCaml adapted it, its files'
+;; words "Based on public-domain code from Berkeley Yacc": main.c (the command line, done's statuses and the files it
+;; leaves), reader.c (the .mly reader: %{ %}, %token <type>, %type, %start, %left/%right/%nonassoc, %prec, the actions
+;; with $n, OCaml's comments, strings, character literals and quoted strings, the trailer), symtab.c, error.c (the
+;; messages), lr0.c, closure.c, warshall.c, lalr.c (DeRemer and Pennello's LALR(1) lookaheads), mkpar.c (the parser's
+;; actions, the conflicts resolved by precedence and counted), output.c (the tables packed as byacc packs them, the
+;; action functions, the entry points, the line directives), skeleton.c and verbose.c (-v's .output); by hand, rule
+;; for rule, on 2026-11-09 (doc/ocaml/OCAML-SURVEY.md, "As built: OC194 (a)"). Their notice:
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+;;
+;;   Based on public-domain code from Berkeley Yacc
+;;
+;; (LICENSE.md, "The OCaml Core System"). The `check` verb around it is Arbace's own.
+
+(ns arbace.repr.ocaml.ocamlyacc
+  "ocamlyacc in Arbace (doc/ocaml/OCAML-SURVEY.md, \"As built: OC194 (a)\"): a grammar (.mly) read as yacc/reader.c reads
+  it, its LR(0) automaton (lr0.c, closure.c, warshall.c), the LALR(1) lookaheads (lalr.c), the parser's actions and
+  conflicts (mkpar.c), written as output.c writes the tables, the actions and the entry points, and with -v as verbose.c
+  writes the .output: the same text as ocamlyacc 5.5.0's, byte for byte, its messages and statuses included.
+
+    yacc [-v] [-q] [--strict] [-b PREFIX] FILE.mly   ocamlyacc's command line
+    check LIST                                       each line of LIST, `DIR<TAB>ARGS`, run as `ocamlyacc ARGS` would
+                                                     in DIR (relative to the current directory), its messages in DIR.out"
+  (:import [java.io File FileOutputStream]
+           [java.util ArrayList HashMap]))
+
+(set! *warn-on-reflection* false)
+
+(def ocaml-version "5.5.0")
+(def ^:private myname "ocamlyacc")
+
+;; ---------------------------------------------------------------------------------------------
+;; Byte strings (one char a byte, ISO-8859-1)
+
+(defn- read-bstr ^String [^File f]
+  (String. ^bytes (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1"))
+
+(defn- write-bstr [^File f ^String s]
+  (with-open [o (FileOutputStream. f)] (.write o (.getBytes s "ISO-8859-1"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The run's state (one run at a time), as main.c's and reader.c's globals
+
+(def ^:private err* (volatile! nil))       ;; stderr's text
+(def ^:private sout* (volatile! nil))      ;; stdout's text
+(def ^:private src* (volatile! ""))        ;; the input file
+(def ^:private ipos* (volatile! 0))        ;; getc's position in it
+(def ^:private saw-eof* (volatile! false))
+(def ^:private line* (volatile! nil))      ;; the current line, its '\n' included (nil: end of file)
+(def ^:private buf* (volatile! nil))       ;; get_line's buffer: what lies past the line's end (print_pos reads it)
+(def ^:private linesize* (volatile! 0))
+(def ^:private cptr* (volatile! 0))
+(def ^:private lineno* (volatile! 0))
+(def ^:private vname* (volatile! ""))      ;; virtual_input_file_name: the messages' name
+(def ^:private iname* (volatile! ""))      ;; input_file_name_disp: the line directives' name
+(def ^:private cname* (volatile! ""))      ;; code_file_name_disp
+(def ^:private iname-mli* (volatile! ""))  ;; interface_file_name_disp
+(def ^:private text* (volatile! nil))      ;; the temporary files: %{ %} text, the actions, the entry points
+(def ^:private action* (volatile! nil))
+(def ^:private entry* (volatile! nil))
+(def ^:private out* (volatile! nil))       ;; the .ml
+(def ^:private outline* (volatile! 0))
+(def ^:private intf* (volatile! nil))      ;; the .mli
+(def ^:private infline* (volatile! 1))
+(def ^:private verb* (volatile! nil))      ;; the .output (-v)
+(def ^:private stack* (volatile! nil))     ;; the brackets of an action
+(def ^:private symtab* (volatile! nil))
+(def ^:private symbols* (volatile! nil))   ;; first_symbol's list, in order
+(def ^:private goal* (volatile! nil))
+(def ^:private prec* (volatile! 0))
+(def ^:private last-was-action* (volatile! false))
+(def ^:private at-first* (volatile! false))
+(def ^:private pitem* (volatile! nil))
+(def ^:private plhs* (volatile! nil))
+(def ^:private rprec* (volatile! nil))
+(def ^:private rassoc* (volatile! nil))
+(def ^:private nrules* (volatile! 0))
+(def ^:private entry-counter* (volatile! 0))
+
+(def ^:private EOF -1)
+(def ^:private TOKEN 0)
+(def ^:private LEFT 1)
+(def ^:private RIGHT 2)
+(def ^:private NONASSOC 3)
+(def ^:private MARK 4)
+(def ^:private TEXT 5)
+(def ^:private TYPE 6)
+(def ^:private START 7)
+(def ^:private UNKNOWN 0)
+(def ^:private TERM 1)
+(def ^:private NONTERM 2)
+(def ^:private UNDEFINED -1)
+(def ^:private SHIFT 1)
+(def ^:private REDUCE 2)
+(def ^:private MAXSHORT 32767)
+(def ^:private MAXTABLE 32500)
+
+(defn- done [k] (throw (ex-info "ocamlyacc" {::done k})))
+(defn- eprint [s] (.append ^StringBuilder @err* (str s)))
+
+(defn- count-nl ^long [^String s]
+  (loop [i 0 n 0] (if (< i (.length s)) (recur (inc i) (if (= \newline (.charAt s i)) (inc n) n)) n)))
+
+(defn- o! [s] (let [s (str s)] (.append ^StringBuilder @out* s) (vswap! outline* + (count-nl s))))
+(defn- line-dir [n f] (str "# " n " \"" f "\"\n"))
+
+;; ---------------------------------------------------------------------------------------------
+;; Characters: a C char is signed (a byte above 127 is negative, 0xFF equals EOF); past the line's '\n', its '\0'
+
+(defn- sc ^long [^long c] (if (> c 127) (- c 256) c))
+(defn- lat ^long [l ^long i]
+  (let [^CharSequence l l] (if (and l (>= i 0) (< i (.length l))) (sc (long (.charAt l (int i)))) 0)))
+(defn- at ^long [^long i] (lat @line* i))
+(defn- cur ^long [] (at @cptr*))
+(defn- adv! ^long [] (vswap! cptr* inc))
+
+(defn- alpha? [^long c] (or (<= 65 c 90) (<= 97 c 122)))
+(defn- upper? [^long c] (<= 65 c 90))
+(defn- digit? [^long c] (<= 48 c 57))
+(defn- yident? [^long c] (or (alpha? c) (digit? c) (= c 95) (= c 46) (= c 36)))   ;; IS_IDENT
+(defn- name-start? [^long c] (or (alpha? c) (= c 95) (= c 46) (= c 36)))
+(defn- id-start? [^long c]                                                      ;; caml_ident_start
+  (let [c (bit-and c 255)] (or (<= 65 c 90) (<= 97 c 122) (= c 95) (<= 192 c 214) (<= 216 c 246) (<= 248 c 255))))
+(defn- id-body? [^long c] (or (id-start? c) (= (bit-and c 255) 39) (<= 48 (bit-and c 255) 57)))  ;; caml_ident_body
+(defn- lower? [^long c] (or (= c 95) (<= 97 c 122)))                            ;; is_ocaml_ident_start_char
+
+(defn- putc [f ^long c] (when f (.append ^StringBuilder f (char (bit-and c 255)))))
+(defn- fwrite [f ^long p ^long n] (when f (.append ^StringBuilder f ^CharSequence @line* (int p) (int (+ p n)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; error.c
+
+(defn- buffer-snapshot
+  "the line buffer as print_pos reads it through `line`: the line, its '\\0', and what earlier lines left past it"
+  ^String [] (when @line* (str @buf*)))
+
+(defn- print-pos [st-line ^long st-cptr]
+  (when st-line
+    (let [^StringBuilder sb @err*]
+      (loop [i 0]
+        (let [c (lat st-line i)]
+          (when (not= c 10)
+            (let [u (bit-and c 255)] (.append sb (if (or (<= 32 u 126) (= c 9)) (char u) \?)))
+            (recur (inc i)))))
+      (.append sb "\n")
+      (dotimes [i st-cptr] (.append sb (if (= 9 (lat st-line i)) \tab \space)))
+      (.append sb "^\n"))))
+
+(defn- file-line [n] (str "File \"" @vname* "\", line " n ": "))
+
+(defn- gen-error [n st-line st-cptr msg]
+  (eprint (str (file-line n) msg "\n")) (print-pos st-line st-cptr) (done 1))
+
+(defn- fatal [msg] (eprint (str myname ": f - " msg "\n")) (done 2))
+(defn- unexpected-eof [] (eprint (str (file-line @lineno*) "unexpected end-of-file\n")) (done 1))
+(defn- syntax-error [n st-line st-cptr] (gen-error n st-line st-cptr "syntax error"))
+(defn- syntax-error-here [p] (syntax-error @lineno* (buffer-snapshot) p))
+(defn- unterminated-comment [n l p start] (gen-error n l p (if (= start 47) "unmatched /*" "unmatched (*")))
+(defn- invalid-literal [n l p] (gen-error n l p "cannot use literal as token name"))
+(defn- unterminated-string [n l p] (gen-error n l p "unterminated string"))
+(defn- unterminated-text [n l p] (gen-error n l p "unmatched %{"))
+(defn- used-reserved [s] (eprint (str (file-line @lineno*) "illegal use of reserved symbol `" s "'\n")) (done 1))
+(defn- tokenized-start [s]
+  (eprint (str (file-line @lineno*) "the start symbol `" s "' cannot be declared to be a token\n")) (done 1))
+(defn- retyped-warning [s] (eprint (str (file-line @lineno*) "warning: the type of `" s "' has been redeclared\n")))
+(defn- reprec-warning [s] (eprint (str (file-line @lineno*) "warning: the precedence of `" s "' has been redeclared\n")))
+(defn- revalued-warning [s] (eprint (str (file-line @lineno*) "warning: the value of `" s "' has been redeclared\n")))
+(defn- terminal-start [s] (eprint (str (file-line @lineno*) "the entry point `" s "' is a token\n")) (done 1))
+(defn- too-many-entries [] (eprint (str (file-line @lineno*) "more than 255 entry points\n")) (done 1))
+(defn- no-grammar [] (eprint (str (file-line @lineno*) "no grammar has been specified\n")) (done 1))
+(defn- terminal-lhs [n] (eprint (str (file-line n) "a token appears on the lhs of a production\n")) (done 1))
+(defn- prec-redeclared [] (eprint (str (file-line @lineno*) "warning: conflicting %prec specifiers\n")))
+(defn- unterminated-action [n l p] (eprint (str (file-line n) "unterminated action\n")) (print-pos l p) (done 1))
+(defn- unknown-rhs [i] (eprint (str (file-line @lineno*) "$" i " is unbound\n")) (done 1))
+(defn- illegal-token-ref [i s]
+  (eprint (str (file-line @lineno*) "$" i " refers to terminal `" s "', which has no argument\n")) (done 1))
+(defn- default-action-error [] (eprint (str (file-line @lineno*) "no action specified for this production\n")) (done 1))
+(defn- undefined-goal [s] (eprint (str myname ": e - the start symbol `" s "' is undefined\n")) (done 1))
+(defn- undefined-symbol [s] (eprint (str myname ": e - the symbol `" s "' is undefined\n")) (done 1))
+(defn- entry-without-type [s]
+  (eprint (str myname ": e - no type has been declared for the start symbol `" s "'\n")) (done 1))
+(defn- polymorphic-entry-point [s] (eprint (str myname ": e - the start symbol `" s "' has a polymorphic type\n")) (done 1))
+(defn- forbidden-conflicts [] (eprint (str myname ": the grammar has conflicts, but --strict was specified\n")) (done 1))
+
+;; ---------------------------------------------------------------------------------------------
+;; symtab.c: a bucket is a HashMap; first_symbol's list is symbols*
+
+(defn- bg [^HashMap b k] (.get b k))
+(defn- bs! [^HashMap b k v] (.put b k v))
+
+(defn- make-bucket [^String name]
+  (doto (HashMap.)
+    (.put :name name) (.put :tag nil) (.put :value -1) (.put :index 0) (.put :prec 0) (.put :class UNKNOWN)
+    (.put :assoc TOKEN) (.put :entry 0) (.put :true-token false) (.put :lineno 0) (.put :column 0)))
+
+(defn- lookup [^String name]
+  (or (.get ^HashMap @symtab* name)
+      (let [b (make-bucket name)] (.put ^HashMap @symtab* name b) (.add ^ArrayList @symbols* b) b)))
+
+(defn- create-symbol-table []
+  (vreset! symtab* (HashMap.)) (vreset! symbols* (ArrayList.))
+  (let [b (make-bucket "error")] (bs! b :index 1) (bs! b :class TERM) (.put ^HashMap @symtab* "error" b) (.add ^ArrayList @symbols* b)))
+
+;; ---------------------------------------------------------------------------------------------
+;; reader.c
+
+(defn- get-line []
+  (let [^String s @src* n (.length s) p (long @ipos*)]
+    (if (or @saw-eof* (>= p n))
+      (do (vreset! line* nil) (vreset! cptr* 0) (vreset! saw-eof* true) (vreset! linesize* 0))
+      (let [e (.indexOf s "\n" (int p))
+            raw (if (neg? e) (str (subs s p) "\n") (subs s p (inc e)))
+            _ (if (neg? e) (do (vreset! ipos* n) (vreset! saw-eof* true)) (vreset! ipos* (inc e)))
+            len (count raw)
+            ;; the buffer: a fresh one unless the last held a line of at most 100 characters
+            _ (when (not= 101 (long @linesize*)) (vreset! buf* (StringBuilder.)) (vreset! linesize* 101))
+            ^StringBuilder b @buf*
+            _ (dotimes [i len] (if (< i (.length b)) (.setCharAt b i (.charAt ^String raw i)) (.append b (.charAt ^String raw i))))
+            _ (loop [] (when (>= len (long @linesize*)) (vswap! linesize* + 100) (recur)))
+            crlf (and (>= len 2) (= \return (.charAt ^String raw (- len 2))))
+            l (if crlf (str (subs raw 0 (- len 2)) "\n") raw)
+            ll (count l)]
+        (when crlf (.setCharAt b (- len 2) \newline))
+        (if (< ll (.length b)) (.setCharAt b ll (char 0)) (.append b (char 0)))
+        (vswap! lineno* inc) (vreset! line* l) (vreset! cptr* 0)))))
+
+(defn- parse-line-directive []
+  (loop []
+    (let [l @line*]
+      (when (and l (= 35 (lat l 0)))
+        (let [i (loop [i 1] (if (or (= 32 (lat l i)) (= 9 (lat l i))) (recur (inc i)) i))]
+          (when (digit? (lat l i))
+            (let [[num i] (loop [n 0 i i] (if (digit? (lat l i)) (recur (+ (* n 10) (- (lat l i) 48)) (inc i)) [n i]))
+                  i (loop [i i] (if (or (= 32 (lat l i)) (= 9 (lat l i))) (recur (inc i)) i))
+                  fname (when (= 34 (lat l i))
+                          (let [j (loop [j (inc i)] (if (and (not= 34 (lat l j)) (not= 0 (lat l j))) (recur (inc j)) j))]
+                            (when (= 34 (lat l j)) (subs l (inc i) j))))]
+              (vreset! lineno* (dec (long num)))
+              (when fname (vreset! vname* fname))
+              (get-line)
+              (recur))))))))
+
+(defn- skip-comment []
+  (let [st-lineno @lineno* st-line @line* st-cptr @cptr*]
+    (loop [s (+ (long st-cptr) 2)]
+      (let [c (at s)]
+        (cond
+          (and (= c 42) (= 47 (at (inc s)))) (vreset! cptr* (+ s 2))
+          (= c 10) (do (get-line)
+                       (when (nil? @line*) (unterminated-comment st-lineno st-line st-cptr 47))
+                       (recur @cptr*))
+          :else (recur (inc s)))))))
+
+(defn- process-quoted-string [quote f]
+  (let [s-lineno @lineno* s-line @line* s-cptr (dec (long @cptr*))]
+    (loop []
+      (let [c (cur)]
+        (adv!) (putc f c)
+        (cond
+          (= c quote) nil
+          (= c 10) (unterminated-string s-lineno s-line s-cptr)
+          :else (do (when (= c 92)
+                      (let [c (cur)]
+                        (adv!) (putc f c)
+                        (when (= c 10)
+                          (get-line)
+                          (when (nil? @line*) (unterminated-string s-lineno s-line s-cptr)))))
+                    (recur)))))))
+
+(defn- process-apostrophe [f]
+  (let [p (long @cptr*) c0 (at p) c1 (at (+ p 1))
+        take (fn [n] (fwrite f p n) (vreset! cptr* (+ p (long n))) true)]
+    (cond
+      (and (not= c0 0) (not= c0 92) (= c1 39)) (take 2)
+      (and (= c0 92) (or (digit? c1) (= c1 120)) (digit? (at (+ p 2))) (digit? (at (+ p 3))) (= 39 (at (+ p 4)))) (take 5)
+      (and (= c0 92) (= c1 111) (<= 48 (at (+ p 2)) 51) (<= 48 (at (+ p 3)) 55) (<= 48 (at (+ p 4)) 55) (= 39 (at (+ p 5))))
+      (take 6)
+      (and (= c0 92) (= 39 (at (+ p 2)))) (take 3)
+      :else false)))
+
+(defn- copy-ident-body [f] (loop [] (when (id-body? (cur)) (putc f (cur)) (adv!) (recur))))
+
+(defn- process-apostrophe-body [f] (when-not (process-apostrophe f) (copy-ident-body f)))
+
+(defn- skip-body ^long [^long q] (loop [q q] (if (id-body? (at q)) (recur (inc q)) q)))
+
+(defn- process-open-curly-bracket [f]
+  (let [p (long @cptr*)
+        idc (if (= 37 (at p))
+              (let [q (inc p) q (if (= 37 (at q)) (inc q) q)]
+                (when (id-start? (at q))
+                  (let [q (skip-body (inc q))
+                        q (loop [q q] (if (= 46 (at q)) (let [q (inc q)] (recur (if (id-start? (at q)) (skip-body (inc q)) q))) q))]
+                    (loop [q q] (if (or (= 32 (at q)) (= 9 (at q)) (= 12 (at q))) (recur (inc q)) q)))))
+              p)]
+    (when (and idc (or (lower? (at idc)) (= 124 (at idc))))
+      (let [nc (loop [q (long idc)] (if (lower? (at q)) (recur (inc q)) q))]
+        (when (= 124 (at nc))
+          (let [size (- nc (long idc)) ^String delim (str (subs @line* idc nc) "}")]
+            (fwrite f p (inc (- nc p)))
+            (vreset! cptr* (inc nc))
+            (let [s-lineno @lineno* s-line @line* s-cptr (dec (long @cptr*))]
+              (loop []
+                (let [c (cur)]
+                  (adv!) (putc f c)
+                  (if (and (= c 124) (let [q (long @cptr*)] (every? #(= (at (+ q (long %))) (long (.charAt delim (int %)))) (range (inc size)))))
+                    (do (fwrite f @cptr* size) (vswap! cptr* + size))
+                    (do (when (= c 10)
+                          (get-line)
+                          (when (nil? @line*) (unterminated-string s-lineno s-line s-cptr)))
+                        (recur))))))))))))
+
+(defn- process-comment [f]
+  (when (= 42 (cur))
+    (let [c-lineno @lineno* c-line @line* c-cptr (dec (long @cptr*))]
+      (putc f 42) (adv!)
+      (loop [depth 1]
+        (let [c (cur)]
+          (adv!) (putc f c)
+          (case c
+            42 (if (= 41 (cur)) (let [d (dec depth)] (when-not (zero? d) (recur d))) (recur depth))
+            10 (do (get-line)
+                   (when (nil? @line*) (unterminated-comment c-lineno c-line c-cptr 40))
+                   (recur depth))
+            40 (recur (if (= 42 (cur)) (inc depth) depth))
+            39 (do (process-apostrophe f) (recur depth))
+            34 (do (process-quoted-string 34 f) (recur depth))
+            123 (do (process-open-curly-bracket f) (recur depth))
+            (do (when (id-start? c) (copy-ident-body f)) (recur depth))))))))
+
+(defn- nextc ^long []
+  (if (and (nil? @line*) (do (get-line) (parse-line-directive) (nil? @line*)))
+    EOF
+    (loop [s (long @cptr*)]
+      (let [c (at s)]
+        (case c
+          10 (do (get-line) (parse-line-directive) (if (nil? @line*) EOF (recur @cptr*)))
+          (32 9 12 13 11 44 59) (recur (inc s))
+          92 (do (vreset! cptr* s) 37)
+          40 (if (= 42 (at (inc s)))
+               (do (vreset! cptr* (inc s)) (process-comment nil) (recur (inc (long @cptr*))))
+               (do (vreset! cptr* s) c))
+          47 (cond
+               (= 42 (at (inc s))) (do (vreset! cptr* s) (skip-comment) (recur @cptr*))
+               (= 47 (at (inc s))) (do (get-line) (parse-line-directive) (if (nil? @line*) EOF (recur @cptr*)))
+               :else (do (vreset! cptr* s) c))
+          (do (vreset! cptr* s) c))))))
+
+(defn- keyword* ^long []
+  (let [t-cptr @cptr* c (at (adv!))]
+    (if (alpha? c)
+      (let [sb (StringBuilder.)]
+        (loop [c c]
+          (cond
+            (alpha? c) (do (.append sb (char (if (upper? c) (+ c 32) c))) (recur (at (adv!))))
+            (or (digit? c) (= c 95) (= c 46) (= c 36)) (do (.append sb (char c)) (recur (at (adv!))))))
+        (case (str sb)
+          ("token" "term") TOKEN
+          "type" TYPE
+          "left" LEFT
+          "right" RIGHT
+          ("nonassoc" "binary") NONASSOC
+          "start" START
+          (syntax-error-here t-cptr)))
+      (do (adv!)
+          (case c
+            123 TEXT
+            (37 92) MARK
+            60 LEFT
+            62 RIGHT
+            48 TOKEN
+            50 NONASSOC
+            (syntax-error-here t-cptr))))))
+
+(defn- copy-text []
+  (let [f @text* t-lineno @lineno* t-line @line* t-cptr (- (long @cptr*) 2)]
+    (when (= 10 (cur))
+      (get-line)
+      (when (nil? @line*) (unterminated-text t-lineno t-line t-cptr)))
+    (.append ^StringBuilder f (line-dir @lineno* @iname*))
+    (loop [need-nl false]
+      (let [c (cur)]
+        (adv!)
+        (case c
+          10 (do (putc f 10) (get-line) (if @line* (recur false) (unterminated-text t-lineno t-line t-cptr)))
+          34 (do (putc f c) (process-quoted-string c f) (recur need-nl))
+          39 (do (putc f c) (process-apostrophe-body f) (recur need-nl))
+          40 (do (putc f c) (process-comment f) (recur true))
+          (37 92) (if (= 125 (cur))
+                    (do (when need-nl (putc f 10)) (adv!) nil)
+                    (do (putc f c) (process-open-curly-bracket f) (recur need-nl)))
+          123 (do (putc f c) (process-open-curly-bracket f) (recur need-nl))
+          (do (putc f c) (when (id-start? c) (copy-ident-body f)) (recur true)))))))
+
+(defn- reserved? [^String name]
+  (or (= name ".") (= name "$accept") (= name "$end")
+      (and (>= (count name) 3) (= \$ (.charAt name 0)) (= \$ (.charAt name 1)) (digit? (long (.charAt name 2)))
+           (every? #(digit? (long %)) (subs name 3)))))
+
+(defn- get-name []
+  (let [sb (StringBuilder.)]
+    (loop [c (cur)] (when (yident? c) (.append sb (char c)) (recur (at (adv!)))))
+    (let [name (str sb)]
+      (when (reserved? name) (used-reserved name))
+      (lookup name))))
+
+(defn- get-number ^long []
+  (loop [n 0 c (cur)] (if (digit? c) (recur (+ (* 10 n) (- c 48)) (at (adv!))) n)))
+
+(defn- get-tag []
+  (let [sb (StringBuilder.)]
+    (loop [depth 0]
+      (let [c (at (adv!))]
+        (cond
+          (= c EOF) (unexpected-eof)
+          (= c 10) (syntax-error-here @cptr*)
+          (and (= c 62) (zero? depth) (not= 45 (at (dec (long @cptr*))))) nil
+          :else (do (.append sb (char (bit-and c 255))) (recur (case c 91 (inc depth) 93 (dec depth) depth))))))
+    (adv!)
+    (let [s (str sb) z (.indexOf s (int 0))] (if (neg? z) s (subs s 0 z)))))
+
+(defn- declare-tokens [assoc]
+  (when (not= assoc TOKEN) (vswap! prec* inc))
+  (let [c (nextc)
+        _ (when (= c EOF) (unexpected-eof))
+        [c tag column] (if (= c 60)
+                         (let [column (inc (long @cptr*)) tag (get-tag) c (nextc)]
+                           (when (= c EOF) (unexpected-eof))
+                           [c tag column])
+                         [c nil 0])]
+    (loop [c (long c)]
+      (let [bp (cond
+                 (name-start? c) (get-name)
+                 (or (= c 39) (= c 34)) (invalid-literal @lineno* (buffer-snapshot) @cptr*)
+                 :else nil)]
+        (when bp
+          (when (identical? bp @goal*) (tokenized-start (bg bp :name)))
+          (bs! bp :class TERM)
+          (when tag
+            (when (and (bg bp :tag) (not= tag (bg bp :tag))) (retyped-warning (bg bp :name)))
+            (bs! bp :tag tag))
+          (if (= assoc TOKEN)
+            (do (bs! bp :true-token true)
+                (when tag (bs! bp :lineno @lineno*) (bs! bp :column column)))
+            (do (when (and (not= 0 (long (bg bp :prec))) (not= @prec* (long (bg bp :prec)))) (reprec-warning (bg bp :name)))
+                (bs! bp :assoc assoc)
+                (bs! bp :prec @prec*)))
+          (when (= "EOF" (bg bp :name)) (bs! bp :value 0))
+          (let [c (nextc)]
+            (when (= c EOF) (unexpected-eof))
+            (if (digit? c)
+              (let [value (get-number)]
+                (when (and (not= UNDEFINED (long (bg bp :value))) (not= value (long (bg bp :value)))) (revalued-warning (bg bp :name)))
+                (bs! bp :value value)
+                (let [c (nextc)] (when (= c EOF) (unexpected-eof)) (recur c)))
+              (recur c))))))))
+
+(defn- declare-types []
+  (let [c (nextc)]
+    (when (= c EOF) (unexpected-eof))
+    (when (not= c 60) (syntax-error-here @cptr*))
+    (let [tag (get-tag)]
+      (loop []
+        (let [c (nextc)
+              bp (cond
+                   (name-start? c) (get-name)
+                   (or (= c 39) (= c 34)) (invalid-literal @lineno* (buffer-snapshot) @cptr*)
+                   :else nil)]
+          (when bp
+            (when (and (bg bp :tag) (not= tag (bg bp :tag))) (retyped-warning (bg bp :name)))
+            (bs! bp :tag tag)
+            (recur)))))))
+
+(defn- declare-start []
+  (loop []
+    (let [c (nextc)]
+      (when (name-start? c)
+        (let [bp (get-name)]
+          (when (= TERM (bg bp :class)) (terminal-start (bg bp :name)))
+          (when (>= (long @entry-counter*) 255) (too-many-entries))
+          (bs! bp :entry (vswap! entry-counter* inc))
+          (recur))))))
+
+(defn- read-declarations []
+  (loop []
+    (let [c (nextc)]
+      (when (= c EOF) (unexpected-eof))
+      (when (not= c 37) (syntax-error-here @cptr*))
+      (let [k (keyword*)]
+        (cond
+          (= k MARK) nil
+          (= k TEXT) (do (copy-text) (recur))
+          (or (= k TOKEN) (= k LEFT) (= k RIGHT) (= k NONASSOC)) (do (declare-tokens k) (recur))
+          (= k TYPE) (do (declare-types) (recur))
+          (= k START) (do (declare-start) (recur)))))))
+
+(defn- output-token-type []
+  (let [^StringBuilder i @intf*
+        ii (fn [s] (.append i (str s)) (vswap! infline* + (count-nl (str s))))]
+    (ii "type token =\n")
+    (o! "type token =\n")
+    (doseq [bp @symbols*]
+      (when (and (= TERM (bg bp :class)) (bg bp :true-token))
+        (ii (str "  | " (bg bp :name)))
+        (o! (str "  | " (bg bp :name)))
+        (when-let [tag (bg bp :tag)]
+          (let [ol @outline* il @infline* sp (apply str (repeat (bg bp :column) " "))]
+            (o! (str " of (\n" (line-dir (bg bp :lineno) @iname*)))
+            (ii (str " of (\n" (line-dir (bg bp :lineno) @iname*)))
+            (ii (str sp tag "\n" (line-dir (+ (long il) 5) @iname-mli*) ")"))
+            (o! (str sp tag "\n" (line-dir (+ (long ol) 5) @cname*) ")"))))
+        (ii "\n")
+        (o! "\n")))
+    (ii "\n")
+    (o! "\n")))
+
+(defn- alset! [^ArrayList al ^long i v] (if (< i (.size al)) (.set al (int i) v) (do (while (< (.size al) i) (.add al nil)) (.add al v))))
+
+(defn- initialize-grammar []
+  (vreset! pitem* (ArrayList. [nil nil nil nil]))
+  (vreset! nrules* 3)
+  (vreset! plhs* (ArrayList. [nil nil nil]))
+  (vreset! rprec* (ArrayList. [0 0 0]))
+  (vreset! rassoc* (ArrayList. [TOKEN TOKEN TOKEN])))
+
+(defn- start-rule [bp s-lineno]
+  (when (= TERM (bg bp :class)) (terminal-lhs s-lineno))
+  (bs! bp :class NONTERM)
+  (alset! @plhs* @nrules* bp)
+  (alset! @rprec* @nrules* UNDEFINED)
+  (alset! @rassoc* @nrules* TOKEN)
+  (vreset! at-first* true))
+
+(defn- end-rule []
+  (when-not @last-was-action* (default-action-error))
+  (vreset! last-was-action* false)
+  (.add ^ArrayList @pitem* nil)
+  (vswap! nrules* inc))
+
+(defn- advance-to-start []
+  (loop []
+    (let [c (nextc)]
+      (when (= c 37)
+        (let [s-cptr @cptr* k (keyword*)]
+          (cond
+            (= k MARK) (no-grammar)
+            (= k TEXT) (do (copy-text) (recur))
+            (= k START) (do (declare-start) (recur))
+            :else (syntax-error-here s-cptr))))))
+  (let [c (nextc)]
+    (when (and (not (alpha? c)) (not= c 95) (not= c 46)) (syntax-error-here @cptr*))
+    (let [bp (get-name)]
+      (when (nil? @goal*)
+        (when (= TERM (bg bp :class)) (terminal-start (bg bp :name)))
+        (vreset! goal* bp))
+      (let [s-lineno @lineno* c (nextc)]
+        (when (= c EOF) (unexpected-eof))
+        (when (not= c 58) (syntax-error-here @cptr*))
+        (start-rule bp s-lineno)
+        (adv!)))))
+
+(defn- add-symbol []
+  (let [s-lineno @lineno* ecptr @cptr* c (cur)
+        bp (if (or (= c 39) (= c 34)) (invalid-literal s-lineno (buffer-snapshot) @cptr*) (get-name))
+        c (nextc)]
+    (if (= c 58)
+      (do (end-rule) (start-rule bp s-lineno) (adv!))
+      (do (when @last-was-action* (syntax-error-here ecptr))
+          (vreset! last-was-action* false)
+          (.add ^ArrayList @pitem* bp)))))
+
+(defn- push-stack [x] (.add ^ArrayList @stack* x))
+
+(defn- pop-stack [x]
+  (let [^ArrayList st @stack*]
+    (when-not (and (pos? (.size st)) (= x (.remove st (int (dec (.size st))))))
+      (eprint (str "Mismatched parentheses or braces: '" (char (case (long x) 123 125 40 41 x)) "'\n"))
+      (syntax-error-here (dec (long @cptr*))))))
+
+(defn- copy-action []
+  (let [^StringBuilder f @action* a-lineno @lineno* a-line @line* a-cptr @cptr*]
+    (push-stack 123)
+    (when @last-was-action* (syntax-error-here @cptr*))
+    (vreset! last-was-action* true)
+    (.append f "; (fun __caml_parser_env ->\n")
+    (let [^ArrayList pitem @pitem* nitems (.size pitem)
+          n (loop [i (dec nitems) n 0] (if (.get pitem (int i)) (recur (dec i) (inc n)) n))
+          item (fn [i] (.get pitem (int (- (+ nitems (long i)) n 1))))]
+      (doseq [i (range 1 (inc n))]
+        (let [it (item i)]
+          (when-not (and (= TERM (bg it :class)) (nil? (bg it :tag)))
+            (.append f (str "    let _" i " = "))
+            (if-let [tag (bg it :tag)]
+              (.append f (str "(Parsing.peek_val __caml_parser_env " (- n i) " : " tag ") in\n"))
+              (.append f (str "(Parsing.peek_val __caml_parser_env " (- n i) " : '" (bg it :name) ") in\n"))))))
+      (.append f "    Obj.repr(\n")
+      (.append f (line-dir @lineno* @iname*))
+      (dotimes [_ @cptr*] (.append f " "))
+      (.append f "(")
+      (adv!)
+      (loop [depth 1]
+        (let [c (cur)]
+          (cond
+            (and (= c 36) (digit? (at (inc (long @cptr*)))))
+            (do (adv!)
+                (let [i (get-number)]
+                  (when (or (<= i 0) (> i n)) (unknown-rhs i))
+                  (let [it (item i)]
+                    (when (and (= TERM (bg it :class)) (nil? (bg it :tag))) (illegal-token-ref i (bg it :name)))
+                    (.append f (str "_" i))
+                    (recur depth))))
+            (or (= c 95) (= c 36) (id-start? c))
+            (do (loop [c c] (putc f c) (let [c (at (adv!))] (when (or (= c 95) (= c 36) (id-body? c)) (recur c))))
+                (recur depth))
+            (and (= c 125) (= depth 1))
+            (do (.append f ")\n# 0\n              ")
+                (adv!)
+                (pop-stack 123)
+                (let [lhs (.get ^ArrayList @plhs* (int @nrules*))]
+                  (if-let [tagres (bg lhs :tag)]
+                    (.append f (str " : " tagres "))\n"))
+                    (.append f (str " : '" (bg lhs :name) "))\n")))))
+            :else
+            (do (putc f c) (adv!)
+                (case c
+                  10 (do (get-line) (if @line* (recur depth) (unterminated-action a-lineno a-line a-cptr)))
+                  123 (do (process-open-curly-bracket f) (push-stack 123) (recur (inc depth)))
+                  125 (do (pop-stack 123) (recur (dec depth)))
+                  34 (do (process-quoted-string 34 f) (recur depth))
+                  39 (do (process-apostrophe-body f) (recur depth))
+                  40 (do (push-stack 40) (process-comment f) (recur depth))
+                  41 (do (pop-stack 40) (recur depth))
+                  (recur depth)))))))))
+
+(defn- mark-symbol []
+  (let [p (long @cptr*) c (at (inc p))]
+    (if (or (= c 37) (= c 92))
+      (do (vreset! cptr* (+ p 2)) true)
+      (do
+        (cond
+          (= c 61) (vreset! cptr* (+ p 2))
+          (and (or (= c 112) (= c 80)) (#{114 82} (at (+ p 2))) (#{101 69} (at (+ p 3))) (#{99 67} (at (+ p 4)))
+               (not (yident? (at (+ p 5)))))
+          (vreset! cptr* (+ p 5))
+          :else (syntax-error-here p))
+        (let [c (nextc)
+              bp (cond
+                   (name-start? c) (get-name)
+                   (or (= c 39) (= c 34)) (invalid-literal @lineno* (buffer-snapshot) @cptr*)
+                   :else (syntax-error-here @cptr*))
+              r @nrules* ^ArrayList rp @rprec*]
+          (when (and (not= UNDEFINED (long (.get rp (int r)))) (not= (long (bg bp :prec)) (long (.get rp (int r))))) (prec-redeclared))
+          (.set rp (int r) (bg bp :prec))
+          (.set ^ArrayList @rassoc* (int r) (bg bp :assoc))
+          false)))))
+
+(defn- read-grammar []
+  (initialize-grammar)
+  (advance-to-start)
+  (loop []
+    (let [c (nextc)
+          c (if (and (= c 124) @at-first*) (do (adv!) (nextc)) c)]
+      (vreset! at-first* false)
+      (when-not (= c EOF)
+        (cond
+          (or (name-start? c) (= c 39) (= c 34)) (do (add-symbol) (recur))
+          (or (= c 123) (= c 61)) (do (copy-action) (recur))
+          (= c 124) (do (end-rule) (start-rule (.get ^ArrayList @plhs* (int (dec (long @nrules*)))) 0) (adv!) (recur))
+          (= c 37) (when-not (mark-symbol) (recur))
+          :else (syntax-error-here @cptr*)))))
+  (end-rule))
+
+(defn- polymorphic? [^String s]
+  (let [n (count s) at (fn [i] (if (< (long i) n) (long (.charAt s (int i))) 0))]
+    (loop [i 0]
+      (if (>= i n)
+        false
+        (let [c (at i) i (inc i)]
+          (cond
+            (or (= c 39) (= c 35)) true
+            (and (= c 91) (let [j (loop [j i] (if (#{32 9 13 10} (at j)) (recur (inc j)) j))] (#{60 62} (at j)))) true
+            (id-start? c) (recur (loop [i i] (if (id-body? (at i)) (recur (inc i)) i)))
+            :else (recur i)))))))
+
+(defn- make-goal []
+  (let [goal (lookup "%entry%") ntotal (volatile! (- (long @nrules*) 2)) ^ArrayList syms @symbols*]
+    (vreset! goal* goal)
+    (loop [k 0]
+      (when (< k (.size syms))
+        (let [bp (.get syms (int k)) e (long (bg bp :entry))]
+          (when (pos? e)
+            (start-rule goal 0)
+            (let [bc (lookup (str "'\\" (bit-and (bit-shift-right e 6) 7) (bit-and (bit-shift-right e 3) 7) (bit-and e 7) "'"))]
+              (bs! bc :class TERM)
+              (bs! bc :value e)
+              (.add ^ArrayList @pitem* bc)
+              (.add ^ArrayList @pitem* bp)
+              (when (nil? (bg bp :tag)) (entry-without-type (bg bp :name)))
+              (when (polymorphic? (bg bp :tag)) (polymorphic-entry-point (bg bp :name)))
+              (.append ^StringBuilder @entry*
+                       (str "let " (bg bp :name) " (lexfun : Lexing.lexbuf -> token) (lexbuf : Lexing.lexbuf) =\n   (Parsing.yyparse yytables "
+                            e " lexfun lexbuf : " (bg bp :tag) ")\n"))
+              (.append ^StringBuilder @intf* (str "val " (bg bp :name) " :\n  (Lexing.lexbuf  -> token) -> Lexing.lexbuf -> " (bg bp :tag) "\n"))
+              (.append ^StringBuilder @action* (str "(* Entry " (bg bp :name) " *)\n"))
+              (.append ^StringBuilder @action* "; (fun __caml_parser_env -> raise (Parsing.YYexit (Parsing.peek_val __caml_parser_env 0)))\n")
+              (vswap! ntotal inc)
+              (vreset! last-was-action* true)
+              (end-rule)))
+          (recur (inc k)))))
+    @ntotal))
+
+(defn- check-symbols []
+  (when (= UNKNOWN (bg @goal* :class)) (undefined-goal (bg @goal* :name)))
+  (doseq [bp @symbols*]
+    (when (= UNKNOWN (bg bp :class)) (undefined-symbol (bg bp :name)) (bs! bp :class TERM))))
+
+(defn- pack-symbols
+  "the symbols numbered: 0 $end, the tokens, start_symbol $accept, the goal, the nonterminals; their values"
+  []
+  (let [syms (vec @symbols*) goal @goal*
+        nsyms (+ 2 (count syms)) ntokens (inc (count (filter #(= TERM (bg % :class)) syms)))
+        start ntokens nvars (- nsyms ntokens)
+        v (object-array nsyms)
+        svalue (int-array nsyms)]
+    (loop [bs syms i 1 j (inc start)]
+      (when-let [bp (first bs)]
+        (if (= TERM (bg bp :class)) (do (aset v (int i) bp) (recur (rest bs) (inc i) j)) (do (aset v (int j) bp) (recur (rest bs) i (inc j))))))
+    (doseq [i (range 1 ntokens)] (bs! (aget v (int i)) :index i))
+    (bs! goal :index (inc start))
+    (loop [i (inc start) k (+ start 2)]
+      (when (< i nsyms)
+        (if (identical? (aget v (int i)) goal) (recur (inc i) k) (do (bs! (aget v (int i)) :index k) (recur (inc i) (inc k))))))
+    (bs! goal :value 0)
+    (loop [i (inc start) k 1]
+      (when (< i nsyms)
+        (if (identical? (aget v (int i)) goal) (recur (inc i) k) (do (bs! (aget v (int i)) :value k) (recur (inc i) (inc k))))))
+    ;; the values above 256 given, sorted, so that the others avoid them
+    (let [k (loop [i 1 k 0]
+              (if (< i ntokens)
+                (let [n (long (bg (aget v (int i)) :value))]
+                  (if (> n 256)
+                    (let [j (loop [j k] (if (and (> j 0) (> (aget svalue (int (dec j))) n)) (do (aset svalue (int j) (aget svalue (int (dec j)))) (recur (dec j))) j))]
+                      (aset svalue (int j) (int n))
+                      (recur (inc i) (inc k)))
+                    (recur (inc i) k)))
+                k))]
+      (when (= UNDEFINED (long (bg (aget v 1) :value))) (bs! (aget v 1) :value 256))
+      (loop [i 2 j 0 n 257]
+        (when (< i ntokens)
+          (if (= UNDEFINED (long (bg (aget v (int i)) :value)))
+            (let [[j n] (loop [j j n n]
+                          (if (and (< j k) (= n (aget svalue (int j))))
+                            (let [j (loop [j (inc j)] (if (and (< j k) (= n (aget svalue (int j)))) (recur (inc j)) j))] (recur j (inc n)))
+                            [j n]))]
+              (bs! (aget v (int i)) :value n)
+              (recur (inc i) j (inc (long n))))
+            (recur (inc i) j n)))))
+    (let [sname (object-array nsyms) sval (int-array nsyms) sprec (int-array nsyms) sassoc (int-array nsyms)
+          stag (object-array nsyms) strue (boolean-array nsyms)]
+      (aset sname 0 "$end")
+      (doseq [i (range 1 ntokens)]
+        (let [b (aget v (int i))]
+          (aset sname (int i) (bg b :name)) (aset sval (int i) (int (bg b :value))) (aset sprec (int i) (int (bg b :prec)))
+          (aset sassoc (int i) (int (bg b :assoc))) (aset stag (int i) (bg b :tag)) (aset strue (int i) (boolean (bg b :true-token)))))
+      (aset sname (int start) "$accept") (aset sval (int start) -1)
+      ;; (reader.c fills symbol_tag and symbol_true_token of the nonterminals at v's index, not the symbol's; nothing reads them)
+      (doseq [i (range (inc start) nsyms)]
+        (let [b (aget v (int i)) k (int (bg b :index))]
+          (aset sname k (bg b :name)) (aset sval k (int (bg b :value))) (aset sprec k (int (bg b :prec))) (aset sassoc k (int (bg b :assoc)))))
+      {:nsyms nsyms :ntokens ntokens :nvars nvars :start start
+       :symbol-name sname :symbol-value sval :symbol-prec sprec :symbol-assoc sassoc :symbol-tag stag :symbol-true-token strue})))
+
+(defn- pack-grammar [g]
+  (let [^ArrayList pitem @pitem* nitems (.size pitem) nrules (long @nrules*) ^ArrayList plhs @plhs*
+        ritem (int-array nitems) rlhs (int-array nrules) rrhs (int-array (inc nrules))
+        rprec (int-array nrules) rassoc (int-array nrules)]
+    (aset ritem 0 -1) (aset ritem 1 (int (bg @goal* :index))) (aset ritem 2 0) (aset ritem 3 -2)
+    (aset rlhs 2 (int (:start g))) (aset rrhs 2 1)
+    (loop [i 3 j 4]
+      (if (< i nrules)
+        (do (aset rlhs (int i) (int (bg (.get plhs (int i)) :index)))
+            (aset rrhs (int i) (int j))
+            (let [[j prec assoc] (loop [j j prec 0 assoc TOKEN]
+                                   (if-let [it (.get pitem (int j))]
+                                     (do (aset ritem (int j) (int (bg it :index)))
+                                         (if (= TERM (bg it :class)) (recur (inc j) (bg it :prec) (bg it :assoc)) (recur (inc j) prec assoc)))
+                                     [j prec assoc]))]
+              (aset ritem (int j) (int (- i)))
+              (if (= UNDEFINED (long (.get ^ArrayList @rprec* (int i))))
+                (do (aset rprec (int i) (int prec)) (aset rassoc (int i) (int assoc)))
+                (do (aset rprec (int i) (int (.get ^ArrayList @rprec* (int i)))) (aset rassoc (int i) (int (.get ^ArrayList @rassoc* (int i))))))
+              (recur (inc i) (inc (long j)))))
+        (aset rrhs (int i) (int j))))
+    (assoc g :nitems nitems :nrules nrules :ritem ritem :rlhs rlhs :rrhs rrhs :rprec rprec :rassoc rassoc)))
+
+(defn- print-grammar [g]
+  (when-let [^StringBuilder f @verb*]
+    (let [{:keys [nrules ^ints rlhs ^ints ritem ^objects symbol-name]} g]
+      (loop [i 2 k 1 spacing 0]
+        (when (< i (long nrules))
+          (let [spacing (if (not= (aget rlhs (int i)) (aget rlhs (int (dec i))))
+                          (let [nm (aget symbol-name (aget rlhs (int i)))]
+                            (when (not= i 2) (.append f "\n"))
+                            (.append f (str (format "%4d" (- i 2)) "  " nm " :"))
+                            (inc (count nm)))
+                          (do (.append f (str (format "%4d" (- i 2)) "  " (apply str (repeat spacing " ")) "|")) spacing))
+                k (loop [k k] (if (>= (aget ritem (int k)) 0) (do (.append f (str " " (aget symbol-name (aget ritem (int k))))) (recur (inc k))) k))]
+            (.append f "\n")
+            (recur (inc i) (inc (long k)) (long spacing))))))))
+
+(defn- reader []
+  (create-symbol-table)
+  (read-declarations)
+  (output-token-type)
+  (read-grammar)
+  (let [ntotal (make-goal)]
+    (check-symbols)
+    (let [g (pack-grammar (assoc (pack-symbols) :ntotalrules ntotal))]
+      (print-grammar g)
+      g)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Bit sets: rows of 64-bit words in a long array (byacc's are 32-bit words; the relations are the same)
+
+(defn- wsize ^long [^long n] (quot (+ n 63) 64))
+(defn- bit? [^longs r ^long base ^long n] (not (zero? (bit-and (aget r (int (+ base (quot n 64)))) (bit-shift-left 1 (rem n 64))))))
+(defn- setbit! [^longs r ^long base ^long n]
+  (let [w (int (+ base (quot n 64)))] (aset r w (bit-or (aget r w) (bit-shift-left 1 (rem n 64))))))
+(defn- or-row! [^longs dst ^long db ^longs src ^long sb ^long nw]
+  (dotimes [i nw] (let [d (int (+ db i))] (aset dst d (bit-or (aget dst d) (aget src (int (+ sb i))))))))
+
+;; warshall.c
+(defn- reflexive-transitive-closure! [^longs r ^long n]
+  (let [rs (wsize n)]
+    (dotimes [i n]
+      (dotimes [j n]
+        (when (bit? r (* j rs) i) (or-row! r (* j rs) r (* i rs) rs))))
+    (dotimes [i n] (setbit! r (* i rs) i))))
+
+;; ---------------------------------------------------------------------------------------------
+;; lr0.c and closure.c
+
+(defn- set-derives [{:keys [nsyms start nrules ^ints rlhs] :as g}]
+  (let [derives (object-array nsyms)]
+    (doseq [lhs (range start nsyms)]
+      (aset derives (int lhs) (int-array (conj (vec (filter #(= lhs (aget rlhs (int %))) (range nrules))) -1))))
+    (assoc g :derives derives)))
+
+(defn- set-nullable [{:keys [nsyms nitems ^ints ritem ^ints rlhs] :as g}]
+  (let [nullable (boolean-array nsyms)]
+    (loop []
+      (let [changed (loop [i 1 changed false]
+                      (if (< i (long nitems))
+                        (let [[i empty j] (loop [i i empty true]
+                                            (let [j (aget ritem (int i))]
+                                              (if (>= j 0) (recur (inc i) (and empty (aget nullable j))) [i empty j])))
+                              l (when empty (aget rlhs (int (- (long j)))))]
+                          (if (and empty (not (aget nullable (int l))))
+                            (do (aset nullable (int l) true) (recur (inc (long i)) true))
+                            (recur (inc (long i)) changed)))
+                        changed))]
+        (when changed (recur))))
+    (assoc g :nullable nullable)))
+
+(defn- set-first-derives [{:keys [nsyms start ntokens nvars nrules ^objects derives ^ints ritem ^ints rrhs] :as g}]
+  (let [vs (wsize nvars) rs (wsize nrules) eff (long-array (* (long nvars) vs))
+        fd (long-array (* (long nvars) rs))]
+    (doseq [i (range start nsyms)]
+      (let [^ints d (aget derives (int i)) row (* (- (long i) (long start)) vs)]
+        (loop [k 0]
+          (let [rule (aget d k)]
+            (when (> rule 0)
+              (let [sym (aget ritem (aget rrhs rule))] (when (>= sym (long start)) (setbit! eff row (- sym (long start)))))
+              (recur (inc k)))))))
+    (reflexive-transitive-closure! eff nvars)
+    (doseq [i (range start nsyms)]
+      (let [vrow (* (- (long i) (long ntokens)) vs) rrow (* (- (long i) (long ntokens)) rs)]
+        (doseq [j (range start nsyms)]
+          (when (bit? eff vrow (- (long j) (long start)))
+            (let [^ints d (aget derives (int j))]
+              (loop [k 0] (let [rule (aget d k)] (when (>= rule 0) (setbit! fd rrow rule) (recur (inc k))))))))))
+    (assoc g :first-derives fd :rulesetsize rs)))
+
+(defn- closure
+  "the closure of a kernel (its items sorted): the kernel's items merged with the first items of the rules its
+  nonterminals derive first, in order"
+  [{:keys [start ntokens nrules ^longs first-derives rulesetsize ^ints ritem ^ints rrhs]} ^ints nucleus]
+  (let [rs (long rulesetsize) ruleset (long-array rs) n (alength nucleus) out (ArrayList.)]
+    (dotimes [k n]
+      (let [sym (aget ritem (aget nucleus k))]
+        (when (>= sym (long start)) (or-row! ruleset 0 first-derives (* (- sym (long ntokens)) rs) rs))))
+    (let [csp (loop [ruleno 0 csp 0]
+                (if (< ruleno (* rs 64))
+                  (if (bit? ruleset 0 ruleno)
+                    (let [itemno (aget rrhs (int ruleno))
+                          csp (loop [csp csp] (if (and (< csp n) (< (aget nucleus (int csp)) itemno)) (do (.add out (aget nucleus (int csp))) (recur (inc csp))) csp))
+                          _ (.add out itemno)
+                          csp (loop [csp csp] (if (and (< csp n) (= (aget nucleus (int csp)) itemno)) (recur (inc csp)) csp))]
+                      (recur (inc ruleno) csp))
+                    (recur (inc ruleno) csp))
+                  csp))]
+      (loop [csp csp] (when (< csp n) (.add out (aget nucleus (int csp))) (recur (inc csp)))))
+    (int-array out)))
+
+(defn- generate-states [{:keys [nsyms start ^objects derives ^ints ritem ^ints rrhs] :as g}]
+  (let [g (set-first-derives g)
+        states (ArrayList.)                 ;; [accessing-symbol items]
+        state-set (HashMap.)                ;; a kernel -> its state's number
+        shifts (ArrayList.) reductions (ArrayList.)
+        ^ints sd (aget derives (int start))
+        init (int-array (map #(aget rrhs (int %)) (take-while #(>= (long %) 0) sd)))]
+    (.add states [0 init])
+    (loop [this 0]
+      (when (< this (.size states))
+        (let [[_ ^ints items] (.get states (int this))
+              itemset (closure g items)
+              reds (vec (keep #(let [it (aget ritem (int %))] (when (< it 0) (- it))) itemset))
+              kernels (java.util.LinkedHashMap.)]
+          (.add reductions (when (seq reds) reds))
+          (doseq [i itemset]
+            (let [sym (aget ritem (int i))]
+              (when (> sym 0)
+                (when-not (.containsKey kernels sym) (.put kernels sym (ArrayList.)))
+                (.add ^ArrayList (.get kernels sym) (inc (long i))))))
+          (let [syms (sort (vec (.keySet kernels)))
+                targets (vec (for [sym syms]
+                               (let [k (vec (.get kernels sym))]
+                                 (or (.get state-set k)
+                                     (let [num (.size states)]
+                                       (when (>= num MAXSHORT) (fatal "too many states"))
+                                       (.add states [sym (int-array k)])
+                                       (.put state-set k num)
+                                       num)))))]
+            (.add shifts (when (seq targets) targets)))
+          (recur (inc this)))))
+    (assoc g :nstates (.size states)
+             :accessing-symbol (int-array (map first states))
+             :state-items (vec (map second states))
+             :shift-table (vec shifts) :reduction-table (vec reductions))))
+
+(defn- lr0 [g] (-> g set-derives set-nullable generate-states))
+
+;; ---------------------------------------------------------------------------------------------
+;; lalr.c
+
+(defn- digraph!
+  "DeRemer and Pennello's traversal: each node's row of F joined with the rows of the nodes it reaches"
+  [^objects rel ^long ngotos ^longs F ^long tss]
+  (let [index (int-array (inc ngotos)) vertices (int-array (inc ngotos)) top (volatile! 0) infinity (+ ngotos 2)]
+    (letfn [(traverse [i]
+              (let [height (vswap! top inc)]
+                (aset vertices (int height) (int i))
+                (aset index (int i) (int height))
+                (when-let [^ints rp (aget rel (int i))]
+                  (loop [k 0]
+                    (let [j (aget rp k)]
+                      (when (>= j 0)
+                        (when (zero? (aget index j)) (traverse j))
+                        (when (> (aget index (int i)) (aget index j)) (aset index (int i) (aget index j)))
+                        (or-row! F (* (long i) tss) F (* j tss) tss)
+                        (recur (inc k))))))
+                (when (= (aget index (int i)) height)
+                  (loop []
+                    (let [j (aget vertices (int @top))]
+                      (vswap! top dec)
+                      (aset index j (int infinity))
+                      (when (not= (long i) j)
+                        (dotimes [w tss] (aset F (int (+ (* j tss) w)) (aget F (int (+ (* (long i) tss) w)))))
+                        (recur)))))))]
+      (dotimes [i ngotos]
+        (when (and (zero? (aget index i)) (aget rel i)) (traverse i))))))
+
+(defn- lalr [{:keys [nstates ntokens nsyms start nitems nrules ^ints ritem ^ints rrhs ^ints accessing-symbol shift-table
+                     reduction-table ^objects derives ^booleans nullable] :as g}]
+  (let [tss (wsize ntokens)
+        ;; initialize_LA
+        lookaheads (int-array (inc (long nstates)))
+        _ (loop [i 0 k 0] (if (< i (long nstates)) (do (aset lookaheads i (int k)) (recur (inc i) (+ k (count (nth reduction-table i))))) (aset lookaheads i (int k))))
+        nla (aget lookaheads (int nstates))
+        LA (long-array (* nla tss))
+        LAruleno (int-array (vec (mapcat identity (remove nil? reduction-table))))
+        lookback (object-array nla)
+        ;; set_goto_map: the gotos of each nonterminal, by the state they leave
+        goto-map (int-array (inc (long nsyms)))
+        _ (doseq [sp shift-table :when sp]
+            (loop [i (dec (count sp))]
+              (when (>= i 0)
+                (let [sym (aget accessing-symbol (int (nth sp i)))]
+                  (when (>= sym (long start)) (aset goto-map sym (inc (aget goto-map sym))) (recur (dec i)))))))
+        ngotos (loop [i (long ntokens) k 0] (if (< i (long nsyms)) (let [n (aget goto-map (int i))] (aset goto-map (int i) (int k)) (recur (inc i) (+ k n))) k))
+        _ (when (>= ngotos MAXSHORT) (fatal "too many gotos"))
+        _ (aset goto-map (int nsyms) (int ngotos))
+        temp-map (aclone goto-map)
+        from-state (int-array ngotos) to-state (int-array ngotos)
+        _ (doseq [[state1 sp] (map-indexed vector shift-table) :when sp]
+            (loop [i (dec (count sp))]
+              (when (>= i 0)
+                (let [state2 (long (nth sp i)) sym (aget accessing-symbol (int state2))]
+                  (when (>= sym (long start))
+                    (let [k (aget temp-map sym)] (aset temp-map sym (inc k)) (aset from-state k (int state1)) (aset to-state k (int state2)))
+                    (recur (dec i)))))))
+        map-goto (fn ^long [^long state ^long sym]
+                   (loop [low (long (aget goto-map (int sym))) high (long (aget goto-map (int (inc sym))))]
+                     (let [middle (bit-shift-right (+ low high) 1) s (aget from-state (int middle))]
+                       (cond (= s state) middle (< s state) (recur (inc middle) high) :else (recur low (dec middle))))))
+        ;; initialize_F: the tokens each goto's state shifts, read through its nullable gotos
+        F (long-array (* ngotos tss))
+        reads (object-array ngotos)
+        _ (dotimes [i ngotos]
+            (let [stateno (aget to-state i)]
+              (when-let [sp (nth shift-table stateno)]
+                (let [k (count sp)
+                      j (loop [j 0] (if (< j k) (let [sym (aget accessing-symbol (int (nth sp j)))] (if (>= sym (long start)) j (do (setbit! F (* i tss) sym) (recur (inc j))))) j))
+                      edges (vec (for [j (range j k) :let [sym (aget accessing-symbol (int (nth sp j)))] :when (aget nullable sym)] (map-goto stateno sym)))]
+                  (when (seq edges) (aset reads i (int-array (conj edges -1))))))))
+        _ (setbit! F 0 0)
+        _ (digraph! reads ngotos F tss)
+        ;; build_relations: includes (transposed) and the lookback edges
+        includes (object-array ngotos)
+        add-lookback (fn [stateno ruleno gotono]
+                       (let [i (loop [i (aget lookaheads (int stateno))] (if (= (aget LAruleno i) (long ruleno)) i (recur (inc i))))]
+                         (aset lookback i (cons gotono (aget lookback i)))))
+        _ (dotimes [i ngotos]
+            (let [state1 (aget from-state i) symbol1 (aget accessing-symbol (aget to-state i))
+                  ^ints d (aget derives symbol1) edges (ArrayList.)]
+              (loop [r 0]
+                (let [rule (aget d r)]
+                  (when (>= rule 0)
+                    (let [states (ArrayList. [state1])
+                          [stateno rp] (loop [rp (aget rrhs rule) stateno state1]
+                                         (let [sym2 (aget ritem rp)]
+                                           (if (>= sym2 0)
+                                             (let [sp (nth shift-table stateno)
+                                                   st (loop [j 0 st stateno] (if (< j (count sp)) (let [st (long (nth sp j))] (if (= (aget accessing-symbol (int st)) sym2) st (recur (inc j) st))) st))]
+                                               (.add states st)
+                                               (recur (inc rp) st))
+                                             [stateno rp])))]
+                      (add-lookback stateno rule i)
+                      (loop [rp (dec (long rp)) length (dec (.size states))]
+                        (let [sym (aget ritem (int rp))]
+                          (when (>= sym (long start))
+                            (let [length (dec length)]
+                              (.add edges (map-goto (.get states (int length)) sym))
+                              (when (and (aget nullable sym) (> length 0)) (recur (dec rp) length)))))))
+                    (recur (inc r)))))
+              (when (pos? (.size edges)) (aset includes i (int-array (conj (vec edges) -1))))))
+        ;; transpose
+        tlists (object-array ngotos)
+        _ (dotimes [i ngotos]
+            (when-let [^ints sp (aget includes i)]
+              (loop [k 0] (let [t (aget sp k)] (when (>= t 0) (aset tlists t (conj (or (aget tlists t) []) i)) (recur (inc k)))))))
+        new-includes (object-array ngotos)
+        _ (dotimes [i ngotos] (when-let [l (aget tlists i)] (aset new-includes i (int-array (conj l -1)))))
+        ;; compute_FOLLOWS, compute_lookaheads
+        _ (digraph! new-includes ngotos F tss)
+        _ (dotimes [i nla] (doseq [gt (aget lookback i)] (or-row! LA (* i tss) F (* (long gt) tss) tss)))]
+    (assoc g :tokensetsize tss :lookaheads lookaheads :LA LA :LAruleno LAruleno :goto-map goto-map :from-state from-state
+             :to-state to-state :ngotos ngotos)))
+
+;; ---------------------------------------------------------------------------------------------
+;; mkpar.c: an action is a long array [symbol number prec code assoc suppressed]; a state's actions an ArrayList
+
+(defn- a-sym ^long [^longs a] (aget a 0))
+(defn- a-num ^long [^longs a] (aget a 1))
+(defn- a-prec ^long [^longs a] (aget a 2))
+(defn- a-code ^long [^longs a] (aget a 3))
+(defn- a-assoc ^long [^longs a] (aget a 4))
+(defn- a-supp ^long [^longs a] (aget a 5))
+(defn- supp! [^longs a v] (aset a 5 (long v)))
+
+(defn- add-reduce [^ArrayList actions ruleno sym ^ints rprec ^ints rassoc]
+  (let [n (.size actions)
+        i (loop [i 0] (if (and (< i n) (< (a-sym (.get actions (int i))) (long sym))) (recur (inc i)) i))
+        i (loop [i i] (if (and (< i n) (= (a-sym (.get actions (int i))) (long sym)) (= SHIFT (a-code (.get actions (int i))))) (recur (inc i)) i))
+        i (loop [i i] (if (and (< i n) (= (a-sym (.get actions (int i))) (long sym)) (= REDUCE (a-code (.get actions (int i)))) (< (a-num (.get actions (int i))) (long ruleno))) (recur (inc i)) i))]
+    (.add actions (int i) (long-array [sym ruleno (aget rprec (int ruleno)) REDUCE (aget rassoc (int ruleno)) 0]))))
+
+(defn- parse-actions [{:keys [ntokens start shift-table ^ints accessing-symbol ^ints symbol-prec ^ints symbol-assoc ^ints lookaheads
+                              ^longs LA ^ints LAruleno tokensetsize ^ints rprec ^ints rassoc]} stateno]
+  (let [actions (ArrayList.)]
+    (doseq [k (nth shift-table stateno)]
+      (let [sym (aget accessing-symbol (int k))]
+        (when (< sym (long start)) (.add actions (long-array [sym k (aget symbol-prec sym) SHIFT (aget symbol-assoc sym) 0])))))
+    (doseq [i (range (aget lookaheads (int stateno)) (aget lookaheads (int (inc (long stateno)))))]
+      (let [ruleno (aget LAruleno (int i))]
+        (loop [j (dec (long ntokens))]
+          (when (>= j 0)
+            (when (bit? LA (* (long i) (long tokensetsize)) j) (add-reduce actions ruleno j rprec rassoc))
+            (recur (dec j))))))
+    actions))
+
+(defn- make-parser [{:keys [nstates nrules shift-table ^ints accessing-symbol ^ints ritem] :as g}]
+  (let [parser (vec (for [i (range nstates)] (parse-actions g i)))
+        ;; find_final_state
+        sp0 (nth shift-table 0) goal (aget ritem 1)
+        final-state (loop [i (dec (count sp0))]
+                      (let [fs (long (nth sp0 i))] (if (or (= (aget accessing-symbol (int fs)) goal) (zero? i)) fs (recur (dec i)))))
+        ;; remove_conflicts
+        sr (int-array nstates) rr (int-array nstates)
+        _ (dotimes [i nstates]
+            (let [^ArrayList acts (nth parser i)]
+              (loop [k 0 pref nil symbol -1 src 0 rrc 0]
+                (if (< k (.size acts))
+                  (let [p (.get acts (int k))]
+                    (cond
+                      (not= (a-sym p) symbol) (recur (inc k) p (a-sym p) src rrc)
+                      (and (= i final-state) (= symbol 0)) (do (supp! p 1) (recur (inc k) pref symbol (inc src) rrc))
+                      (= SHIFT (a-code pref))
+                      (if (and (> (a-prec pref) 0) (> (a-prec p) 0))
+                        (cond
+                          (< (a-prec pref) (a-prec p)) (do (supp! pref 2) (recur (inc k) p symbol src rrc))
+                          (> (a-prec pref) (a-prec p)) (do (supp! p 2) (recur (inc k) pref symbol src rrc))
+                          (= LEFT (a-assoc pref)) (do (supp! pref 2) (recur (inc k) p symbol src rrc))
+                          (= RIGHT (a-assoc pref)) (do (supp! p 2) (recur (inc k) pref symbol src rrc))
+                          :else (do (supp! pref 2) (supp! p 2) (recur (inc k) pref symbol src rrc)))
+                        (do (supp! p 1) (recur (inc k) pref symbol (inc src) rrc)))
+                      :else (do (supp! p 1) (recur (inc k) pref symbol src (inc rrc)))))
+                  (do (aset sr i (int src)) (aset rr i (int rrc)))))))
+        srtotal (reduce + (seq sr)) rrtotal (reduce + (seq rr))
+        ;; unused_rules
+        rules-used (boolean-array nrules)
+        _ (doseq [^ArrayList acts parser a acts] (when (and (= REDUCE (a-code a)) (zero? (a-supp a))) (aset rules-used (int (a-num a)) true)))
+        nunused (count (remove #(aget rules-used (int %)) (range 3 nrules)))
+        _ (when (pos? nunused) (eprint (if (= nunused 1) "1 rule never reduced\n" (str nunused " rules never reduced\n"))))
+        ;; total_conflicts
+        _ (when (pos? (+ srtotal rrtotal))
+            (eprint (str (cond (= srtotal 1) "1 shift/reduce conflict" (> srtotal 1) (str srtotal " shift/reduce conflicts") :else "")
+                         (if (and (pos? srtotal) (pos? rrtotal)) ", " "")
+                         (cond (= rrtotal 1) "1 reduce/reduce conflict" (> rrtotal 1) (str rrtotal " reduce/reduce conflicts") :else "")
+                         ".\n")))
+        ;; defreds: sole_reduction
+        defred (int-array (for [i (range nstates)]
+                            (let [^ArrayList acts (nth parser i)]
+                              (loop [k 0 cnt 0 ruleno 0]
+                                (if (< k (.size acts))
+                                  (let [p (.get acts (int k))]
+                                    (cond
+                                      (and (= SHIFT (a-code p)) (zero? (a-supp p))) 0
+                                      (and (= REDUCE (a-code p)) (zero? (a-supp p)))
+                                      (if (and (> ruleno 0) (not= (a-num p) ruleno)) 0 (recur (inc k) (if (not= (a-sym p) 1) (inc cnt) cnt) (a-num p)))
+                                      :else (recur (inc k) cnt ruleno)))
+                                  (if (zero? cnt) 0 ruleno))))))]
+    (assoc g :parser parser :final-state final-state :SRconflicts sr :RRconflicts rr :SRtotal srtotal :RRtotal rrtotal
+             :rules-used rules-used :nunused nunused :defred defred)))
+
+;; ---------------------------------------------------------------------------------------------
+;; verbose.c
+
+(defn- verbose [{:keys [nstates nrules ntokens nvars start parser final-state ^ints SRconflicts ^ints RRconflicts SRtotal RRtotal
+                        ^booleans rules-used nunused ^ints defred state-items shift-table ^ints accessing-symbol
+                        ^objects symbol-name ^ints ritem ^ints rlhs ^ints rrhs]}]
+  (when-let [^StringBuilder f @verb*]
+    (let [nm (fn [i] (aget symbol-name (int i)))
+          final-state (long final-state)]
+      (.append f "\f\n")
+      (dotimes [state nstates]
+        (let [^ArrayList acts (nth parser state)]
+          (when (pos? state) (.append f "\n\n"))
+          ;; print_conflicts
+          (when (or (pos? (aget SRconflicts state)) (pos? (aget RRconflicts state)))
+            (loop [k 0 symbol -1 act 0 number 0]
+              (when (< k (.size acts))
+                (let [p (.get acts (int k))]
+                  (cond
+                    (= 2 (a-supp p)) (recur (inc k) symbol act number)
+                    (not= (a-sym p) symbol) (recur (inc k) (a-sym p) (if (= SHIFT (a-code p)) SHIFT REDUCE) (a-num p))
+                    (= 1 (a-supp p))
+                    (do (cond
+                          (and (= state final-state) (= symbol 0))
+                          (.append f (str state ": shift/reduce conflict (accept, reduce " (- (a-num p) 2) ") on $end\n"))
+                          (= act SHIFT)
+                          (.append f (str state ": shift/reduce conflict (shift " number ", reduce " (- (a-num p) 2) ") on " (nm symbol) "\n"))
+                          :else
+                          (.append f (str state ": reduce/reduce conflict (reduce " (- number 2) ", reduce " (- (a-num p) 2) ") on " (nm symbol) "\n")))
+                        (recur (inc k) symbol act number))
+                    :else (recur (inc k) symbol act number))))))
+          (.append f (str "state " state "\n"))
+          ;; print_core
+          (doseq [item (nth state-items state)]
+            (let [e (loop [s (long item)] (if (>= (aget ritem (int s)) 0) (recur (inc s)) s))
+                  rule (- (aget ritem (int e)))]
+              (.append f (str "\t" (nm (aget rlhs (int rule))) " : "))
+              (doseq [s (range (aget rrhs (int rule)) item)] (.append f (str (nm (aget ritem (int s))) " ")))
+              (.append f ".")
+              (doseq [s (range item e)] (.append f (str " " (nm (aget ritem (int s))))))
+              (.append f (str "  (" (- -2 (aget ritem (int e))) ")\n"))))
+          ;; print_nulls
+          (let [nulls (ArrayList.)]
+            (doseq [p acts]
+              (when (and (= REDUCE (a-code p)) (or (= 0 (a-supp p)) (= 1 (a-supp p))))
+                (let [i (a-num p)]
+                  (when (= (inc (aget rrhs (int i))) (aget rrhs (int (inc i))))
+                    (let [nn (.size nulls) j (loop [j 0] (if (and (< j nn) (> i (long (.get nulls (int j))))) (recur (inc j)) j))]
+                      (cond
+                        (= j nn) (.add nulls i)
+                        (not= i (long (.get nulls (int j)))) (.add nulls (int j) i)))))))
+            (doseq [j nulls] (.append f (str "\t" (nm (aget rlhs (int j))) " : .  (" (- (long j) 2) ")\n")))
+            (.append f "\n"))
+          ;; print_actions
+          (when (= state final-state) (.append f "\t$end  accept\n"))
+          (when (pos? (.size acts))
+            (when (pos? (count (filter #(and (< (a-supp %) 2) (= SHIFT (a-code %))) acts)))
+              (doseq [p acts] (when (and (= SHIFT (a-code p)) (zero? (a-supp p))) (.append f (str "\t" (nm (a-sym p)) "  shift " (a-num p) "\n")))))
+            (let [dr (aget defred state)]
+              (if-not (some #(and (= REDUCE (a-code %)) (< (a-supp %) 2)) acts)
+                (.append f "\t.  error\n")
+                (do (doseq [p acts]
+                      (when (and (= REDUCE (a-code p)) (not= (a-num p) dr) (zero? (a-supp p)))
+                        (.append f (str "\t" (nm (a-sym p)) "  reduce " (- (a-num p) 2) "\n"))))
+                    (when (pos? dr) (.append f (str "\t.  reduce " (- dr 2) "\n")))))))
+          (let [sp (nth shift-table state)]
+            (when (and sp (>= (aget accessing-symbol (int (peek sp))) (long start)))
+              (.append f "\n")
+              (doseq [k sp]
+                (let [as (aget accessing-symbol (int k))]
+                  (when (>= as (long start)) (.append f (str "\t" (nm as) "  goto " k "\n")))))))))
+      (when (pos? (long nunused))
+        (.append f "\n\nRules never reduced:\n")
+        (doseq [i (range 3 nrules) :when (not (aget rules-used (int i)))]
+          (.append f (str "\t" (nm (aget rlhs (int i))) " :"))
+          (loop [p (aget rrhs (int i))] (when (>= (aget ritem p) 0) (.append f (str " " (nm (aget ritem p)))) (recur (inc p))))
+          (.append f (str "  (" (- (long i) 2) ")\n"))))
+      (when (pos? (+ (long SRtotal) (long RRtotal)))
+        (.append f "\n\n")
+        (dotimes [i nstates]
+          (let [s (aget SRconflicts i) r (aget RRconflicts i)]
+            (when (or (pos? s) (pos? r))
+              (.append f (str "State " i " contains "
+                              (cond (= s 1) "1 shift/reduce conflict" (> s 1) (str s " shift/reduce conflicts") :else "")
+                              (if (and (pos? s) (pos? r)) ", " "")
+                              (cond (= r 1) "1 reduce/reduce conflict" (> r 1) (str r " reduce/reduce conflicts") :else "")
+                              ".\n"))))))
+      (.append f (str "\n\n" ntokens " terminals, " nvars " nonterminals\n"))
+      (.append f (str (- (long nrules) 2) " grammar rules, " nstates " states\n")))))
+
+;; ---------------------------------------------------------------------------------------------
+;; output.c and skeleton.c
+
+(defn- out-short [^StringBuilder sb ^long n]
+  (doseq [v [(bit-and n 255) (bit-and (bit-shift-right n 8) 255)]]
+    (.append sb "\\") (.append sb (char (+ 48 (quot v 100)))) (.append sb (char (+ 48 (rem (quot v 10) 10)))) (.append sb (char (+ 48 (rem v 10))))))
+
+(defn- out-vector
+  "`let NAME = \"...\"`: the shorts eight a line, as output.c's loops write them"
+  [name xs]
+  (let [sb (StringBuilder.)]
+    (.append sb (str "let " name " = \""))
+    (loop [xs (seq xs) j -1]
+      (when xs
+        (cond (neg? j) nil
+              (>= j 8) (.append sb "\\\n"))
+        (out-short sb (long (first xs)))
+        (recur (next xs) (if (or (neg? j) (>= j 8)) (if (neg? j) 8 1) (inc j)))))
+    (.append sb "\"\n\n")
+    (o! (str sb))))
+
+(defn- copy-file [^String s]
+  ;; the temporary file copied into the .ml, `\n# 0` turned into the line directive of the line after it
+  (let [n (count s)]
+    (loop [i 0 state 0 last 10]
+      (if (< i n)
+        (let [c (long (.charAt s i))
+              [state txt] (case c
+                            10 [1 nil]
+                            35 [(if (= state 1) 2 0) nil]
+                            32 [(if (= state 2) 3 0) nil]
+                            48 (if (= state 3) [0 (str (+ (long @outline*) 2) " \"" @cname* "\"")] [0 nil])
+                            [0 nil])]
+          (o! (or txt (str (char c))))
+          (recur (inc i) state c))
+        (when (not= last 10) (o! "\n"))))))
+
+(defn- output-trailing-text []
+  (when @line*
+    (o! ";;\n")
+    (let [^String s @src* n (.length s)
+          getc (fn [] (let [p (long @ipos*)] (if (< p n) (do (vreset! ipos* (inc p)) (long (.charAt s (int p)))) -1)))
+          last (if (= 10 (cur))
+                 (do (vswap! lineno* inc)
+                     (let [c (getc)]
+                       (if (= c -1)
+                         nil
+                         (do (o! (line-dir @lineno* @iname*)) (o! (str (char c))) c))))
+                 (do (o! (line-dir @lineno* @iname*))
+                     (let [^String l @line* e (.indexOf l "\n" (int @cptr*))] (o! (subs l @cptr* e)))
+                     (o! "\n")
+                     10))]
+      (when last
+        (let [p (long @ipos*) rest (if (< p n) (subs s p) "")]
+          (vreset! ipos* n)
+          (o! rest)
+          (when (not= 10 (if (pos? (count rest)) (long (.charAt ^String rest (dec (count rest)))) (long last))) (o! "\n"))
+          (o! (line-dir (+ (long @outline*) 2) @cname*)))))))
+
+(defn- output [{:keys [nstates ntokens nvars nsyms start nrules ntotalrules ^ints symbol-value ^objects symbol-name ^objects symbol-tag
+                       ^booleans symbol-true-token ^ints rlhs ^ints rrhs ^ints defred parser ^ints goto-map ^ints from-state
+                       ^ints to-state]}]
+  (let [nstates (long nstates) ntokens (long ntokens) nsyms (long nsyms) start (long start)]
+    (o! "open Parsing\nlet _ = parse_error;;\n")
+    ;; output_stored_text
+    (let [t (str @text*)] (when (pos? (count t)) (o! t) (o! (line-dir (+ (long @outline*) 2) @cname*))))
+    ;; output_transl
+    (doseq [[nm blk] [["yytransl_const" false] ["yytransl_block" true]]]
+      (o! (str "let " nm " = [|\n"))
+      (dotimes [i ntokens]
+        (when (and (aget symbol-true-token i) (= blk (some? (aget symbol-tag i))))
+          (o! (str (format "  %3d" (aget symbol-value i)) " (* " (aget symbol-name i) " *);\n"))))
+      (o! "    0|]\n\n"))
+    ;; output_rule_data, output_yydefred
+    (out-vector "yylhs" (cons (aget symbol-value (int start)) (for [i (range 3 nrules)] (aget symbol-value (aget rlhs (int i))))))
+    (out-vector "yylen" (cons 2 (for [i (range 3 nrules)] (- (aget rrhs (int (inc (long i)))) (aget rrhs (int i)) 1))))
+    (out-vector "yydefred" (for [i (range nstates)] (let [d (aget defred (int i))] (if (pos? d) (- d 2) 0))))
+    ;; output_actions: token_actions
+    (let [nvectors (+ (* 2 nstates) (long nvars))
+          froms (object-array nvectors) tos (object-array nvectors) tally (int-array nvectors) width (int-array nvectors)]
+      (dotimes [i nstates]
+        (let [^ArrayList acts (nth parser i)]
+          (when (pos? (.size acts))
+            (let [row (int-array (* 2 ntokens)) dr (aget defred i)
+                  [sc rc] (reduce (fn [[sc rc] p]
+                                    (cond
+                                      (not (zero? (a-supp p))) [sc rc]
+                                      (= SHIFT (a-code p)) (do (aset row (int (a-sym p)) (int (a-num p))) [(inc (long sc)) rc])
+                                      (and (= REDUCE (a-code p)) (not= (a-num p) dr)) (do (aset row (int (+ (a-sym p) ntokens)) (int (a-num p))) [sc (inc (long rc))])
+                                      :else [sc rc]))
+                                  [0 0] acts)
+                  fill (fn [vec-i off sub]
+                         (let [js (filter #(not (zero? (aget row (int (+ (long off) (long %)))))) (range ntokens))]
+                           (aset froms (int vec-i) (int-array (map #(aget symbol-value (int %)) js)))
+                           (aset tos (int vec-i) (int-array (map #(- (aget row (int (+ (long off) (long %)))) (long sub)) js)))
+                           (let [vals (map #(aget symbol-value (int %)) js)]
+                             (aset width (int vec-i) (int (inc (- (long (reduce max 0 vals)) (long (reduce min MAXSHORT vals)))))))))]
+              (aset tally i (int sc)) (aset tally (int (+ nstates i)) (int rc))
+              (when (pos? (long sc)) (fill i 0 0))
+              (when (pos? (long rc)) (fill (+ nstates i) ntokens 2))))))
+      ;; goto_actions
+      (let [default-goto (fn [sym]
+                           (let [m (aget goto-map (int sym)) n (aget goto-map (int (inc (long sym))))]
+                             (if (= m n)
+                               0
+                               (let [cnt (int-array nstates)]
+                                 (doseq [i (range m n)] (let [t (aget to-state (int i))] (aset cnt t (inc (aget cnt t)))))
+                                 (loop [i 0 mx 0 ds 0] (if (< i nstates) (if (> (aget cnt (int i)) mx) (recur (inc i) (aget cnt (int i)) i) (recur (inc i) mx ds)) ds))))))
+            dgoto (vec (for [sym (range (inc start) nsyms)]
+                         (let [k (default-goto sym)
+                               m (aget goto-map (int sym)) n (aget goto-map (int (inc (long sym))))
+                               idx (filter #(not= (aget to-state (int %)) (long k)) (range m n))]
+                           (when (seq idx)
+                             (let [symno (+ (aget symbol-value (int sym)) (* 2 nstates))
+                                   fr (int-array (map #(aget from-state (int %)) idx))]
+                               (aset froms (int symno) fr)
+                               (aset tos (int symno) (int-array (map #(aget to-state (int %)) idx)))
+                               (aset tally (int symno) (int (count idx)))
+                               (aset width (int symno) (int (inc (- (aget fr (dec (alength fr))) (aget fr 0)))))))
+                           k)))]
+        (out-vector "yydgoto" dgoto))
+      ;; sort_actions
+      (let [order (int-array nvectors)
+            nentries (loop [i 0 ne 0]
+                       (if (< i nvectors)
+                         (if (pos? (aget tally (int i)))
+                           (let [t (aget tally (int i)) w (aget width (int i))
+                                 j (loop [j (dec ne)] (if (and (>= j 0) (< (aget width (aget order (int j))) w)) (recur (dec j)) j))
+                                 j (loop [j j] (if (and (>= j 0) (= (aget width (aget order (int j))) w) (< (aget tally (aget order (int j))) t)) (recur (dec j)) j))]
+                             (loop [k (dec ne)] (when (> k j) (aset order (int (inc k)) (aget order (int k))) (recur (dec k))))
+                             (aset order (int (inc j)) (int i))
+                             (recur (inc i) (inc ne)))
+                           (recur (inc i) ne))
+                         ne))
+            ;; pack_table
+            base (int-array nvectors) pos (int-array (max 1 nentries))
+            table (int-array MAXTABLE) check (int-array MAXTABLE -1)
+            lowzero (volatile! 0) high (volatile! 0)
+            matching-vector (fn [vector]
+                              (let [i (aget order (int vector))]
+                                (if (>= i (* 2 nstates))
+                                  -1
+                                  (let [t (aget tally i) w (aget width i)]
+                                    (loop [prev (dec (long vector))]
+                                      (if (< prev 0)
+                                        -1
+                                        (let [j (aget order (int prev))]
+                                          (if (or (not= (aget width j) w) (not= (aget tally j) t))
+                                            -1
+                                            (if (every? #(and (= (aget ^ints (aget tos j) (int %)) (aget ^ints (aget tos i) (int %)))
+                                                              (= (aget ^ints (aget froms j) (int %)) (aget ^ints (aget froms i) (int %))))
+                                                        (range t))
+                                              j
+                                              (recur (dec prev)))))))))))
+            pack-vector (fn [vector]
+                          (let [i (aget order (int vector)) t (aget tally i) ^ints from (aget froms i) ^ints to (aget tos i)
+                                j0 (reduce max (map #(- (long @lowzero) (aget from (int %))) (range t)))]
+                            (loop [j (long j0)]
+                              (if (zero? j)
+                                (recur (inc j))
+                                (let [ok (and (every? #(let [loc (+ j (aget from (int %)))]
+                                                         (when (>= loc MAXTABLE) (fatal "maximum table size exceeded"))
+                                                         (= -1 (aget check (int loc))))
+                                                      (range t))
+                                              (not-any? #(= j (aget pos (int %))) (range vector)))]
+                                  (if ok
+                                    (do (dotimes [k t]
+                                          (let [loc (int (+ j (aget from k)))]
+                                            (aset table loc (aget to k)) (aset check loc (aget from k))
+                                            (when (> loc (long @high)) (vreset! high loc))))
+                                        (loop [] (when (and (< (long @lowzero) MAXTABLE) (not= -1 (aget check (int @lowzero)))) (vswap! lowzero inc) (recur)))
+                                        j)
+                                    (recur (inc j))))))))]
+        (dotimes [i nentries]
+          (let [state (matching-vector i)
+                place (if (neg? (long state)) (pack-vector i) (aget base (int state)))]
+            (aset pos i (int place))
+            (aset base (aget order i) (int place))))
+        ;; output_base, output_table, output_check
+        (out-vector "yysindex" (for [i (range nstates)] (aget base (int i))))
+        (out-vector "yyrindex" (for [i (range nstates (* 2 nstates))] (aget base (int i))))
+        (out-vector "yygindex" (for [i (range (* 2 nstates) (dec nvectors))] (aget base (int i))))
+        (o! (str "let yytablesize = " @high "\n"))
+        (out-vector "yytable" (for [i (range (inc (long @high)))] (aget table (int i))))
+        (out-vector "yycheck" (for [i (range (inc (long @high)))] (aget check (int i))))))
+    ;; output_debug
+    (doseq [[nm blk] [["yynames_const" false] ["yynames_block" true]]]
+      (o! (str "let " nm " = \"\\\n"))
+      (dotimes [i ntokens]
+        (when (and (aget symbol-true-token i) (= blk (some? (aget symbol-tag i))))
+          (o! (str "  " (aget symbol-name i) "\\000\\\n"))))
+      (o! "  \"\n\n"))
+    (o! "let yyact = [|\n  (fun _ -> failwith \"parser\")\n")
+    (copy-file (str @action*))
+    (o! "|]\n")
+    (o! (str "let yytables =\n  { Parsing.actions=yyact;\n    Parsing.transl_const=yytransl_const;\n"
+             "    Parsing.transl_block=yytransl_block;\n    Parsing.lhs=yylhs;\n    Parsing.len=yylen;\n"
+             "    Parsing.defred=yydefred;\n    Parsing.dgoto=yydgoto;\n    Parsing.sindex=yysindex;\n"
+             "    Parsing.rindex=yyrindex;\n    Parsing.gindex=yygindex;\n    Parsing.tablesize=yytablesize;\n"
+             "    Parsing.table=yytable;\n    Parsing.check=yycheck;\n    Parsing.error_function=parse_error;\n"
+             "    Parsing.names_const=yynames_const;\n    Parsing.names_block=yynames_block }\n"))
+    (copy-file (str @entry*))
+    (output-trailing-text)))
+
+;; ---------------------------------------------------------------------------------------------
+;; main.c
+
+(def ^:private usage-text (str "usage: " myname " [-v] [--strict] [-q] [-b file_prefix] filename\n"))
+
+(defn- getargs
+  "main.c's getargs: {:vflag :eflag :prefix :file} or {:exit status} (usage, -version, -vnum)"
+  [args]
+  (let [args (vec args) argc (count args)
+        usage {:exit 1 :err usage-text}]
+    (loop [i 0 o {:vflag false :eflag false :prefix nil}]
+      (if (>= i argc)
+        usage
+        (let [^String s (nth args i)]
+          (if (or (= "" s) (not= \- (.charAt s 0)))
+            (if (= (inc i) argc) (assoc o :file s) usage)
+            (let [c1 (if (> (count s) 1) (.charAt s 1) (char 0))]
+              (case c1
+                \u0000 (if (< (inc i) argc) usage (assoc o :file "-" :stdin true :prefix "stdin"))
+                \- (if (= s "--strict")
+                     (recur (inc i) (assoc o :eflag true))
+                     (let [i (inc i)] (if (= (inc i) argc) (assoc o :file (nth args i)) usage)))
+                \v (cond
+                     (= s "-version") {:exit 0 :out (str "The OCaml parser generator, version " ocaml-version "\n")}
+                     (= s "-vnum") {:exit 0 :out (str ocaml-version "\n")}
+                     :else (let [o (assoc o :vflag true)
+                                 o (reduce (fn [o c] (case c \v (assoc o :vflag true) \q o (reduced nil))) o (subs s 2))]
+                             (if o (recur (inc i) o) usage)))
+                \q (let [o (reduce (fn [o c] (case c \v (assoc o :vflag true) \q o (reduced nil))) o (subs s 2))]
+                     (if o (recur (inc i) o) usage))
+                \b (if (> (count s) 2)
+                     (recur (inc i) (assoc o :prefix (subs s 2)))
+                     (if (< (inc i) argc) (recur (+ i 2) (assoc o :prefix (nth args (inc i)))) usage))
+                usage))))))))
+
+(defn- resolve-file ^File [^String dir ^String path]
+  (let [f (File. path)] (if (or (.isAbsolute f) (nil? dir)) f (File. dir path))))
+
+(defn run
+  "ocamlyacc ARGS, run in DIR (nil: the current directory): {:status :out :err}; the files written or removed as
+  ocamlyacc leaves them"
+  [dir args]
+  (let [o (getargs args)]
+    (if (:exit o)
+      {:status (:exit o) :out (or (:out o) "") :err (or (:err o) "")}
+      (let [^String file (:file o)
+            prefix (or (:prefix o) (let [k (.lastIndexOf file ".")] (if (neg? k) file (subs file 0 k))))
+            ml (str prefix ".ml") mli (str prefix ".mli") outf (str prefix ".output")
+            inf (resolve-file dir file)]
+        (vreset! err* (StringBuilder.))
+        (vreset! sout* (StringBuilder.))
+        (cond
+          (and (not (:stdin o)) (not (and (.isFile inf) (.canRead inf))))
+          {:status 2 :out "" :err (str myname ": f - cannot open \"" file "\"\n")}
+          ;; open_files: the .output (-v), the .ml and the .mli created in turn; one that cannot be ends the run (done(2)
+          ;; removes the .ml and the .mli it opened, the .output stays)
+          (some #(let [p (.getParentFile (.getAbsoluteFile (resolve-file dir %)))] (not (and p (.isDirectory p))))
+                (concat (when (:vflag o) [outf]) [ml mli]))
+          (let [bad (first (filter #(let [p (.getParentFile (.getAbsoluteFile (resolve-file dir %)))] (not (and p (.isDirectory p))))
+                                   (concat (when (:vflag o) [outf]) [ml mli])))]
+            (doseq [f (take-while #(not= % bad) (concat (when (:vflag o) [outf]) [ml mli]))]
+              (if (= f outf) (write-bstr (resolve-file dir f) "") (.delete (resolve-file dir f))))
+            {:status 2 :out "" :err (str myname ": f - cannot open \"" bad "\"\n")})
+          :else
+          (let [src (if (:stdin o) (String. (.readAllBytes System/in) "ISO-8859-1") (read-bstr inf))]
+            (vreset! src* src) (vreset! ipos* 0) (vreset! saw-eof* false) (vreset! line* nil) (vreset! buf* nil)
+            (vreset! linesize* 0) (vreset! cptr* 0) (vreset! lineno* 0)
+            (vreset! vname* (if (:stdin o) "" file)) (vreset! iname* (if (:stdin o) "(null)" file))
+            (vreset! cname* ml) (vreset! iname-mli* mli)
+            (vreset! text* (StringBuilder.)) (vreset! action* (StringBuilder.)) (vreset! entry* (StringBuilder.))
+            (vreset! out* (StringBuilder.)) (vreset! outline* 0) (vreset! intf* (StringBuilder.)) (vreset! infline* 0)
+            (vreset! verb* (when (:vflag o) (StringBuilder.))) (vreset! stack* (ArrayList.))
+            (vreset! goal* nil) (vreset! prec* 0) (vreset! last-was-action* false) (vreset! at-first* false)
+            (vreset! entry-counter* 0)
+            (let [status (try
+                           (let [g (-> (reader) lr0 lalr make-parser)]
+                             (verbose g)
+                             (when (and (:eflag o) (pos? (+ (long (:SRtotal g)) (long (:RRtotal g))))) (forbidden-conflicts))
+                             (output g)
+                             0)
+                           (catch arbace.lang.ExceptionInfo e
+                             (if-let [k (::done (ex-data e))] k (throw e))))]
+              (when @verb* (write-bstr (resolve-file dir outf) (str @verb*)))
+              (if (zero? (long status))
+                (do (write-bstr (resolve-file dir ml) (str @out*)) (write-bstr (resolve-file dir mli) (str @intf*)))
+                (do (.delete (resolve-file dir ml)) (.delete (resolve-file dir mli))))
+              {:status status :out (str @sout*) :err (str @err*)})))))))
+
+(defn -main [& args]
+  (let [[verb & more] args]
+    (case verb
+      "yacc" (let [r (run nil more)]
+               (print (:out r)) (flush)
+               (.print System/err ^String (:err r)) (.flush System/err)
+               (System/exit (int (:status r))))
+      "check"
+      ;; each line `DIR<TAB>ARGS` run as `ocamlyacc ARGS` in DIR; its messages in DIR.out: one process for the list
+      (let [lines (remove #(= "" %) (.split ^String (slurp (first more)) "\n"))
+            t0 (System/nanoTime)]
+        (doseq [^String l lines]
+          (let [[dir argline] (.split l "\t" 2)
+                as (vec (remove #(= "" %) (.split ^String (or argline "") " ")))
+                r (try (run dir as)
+                       (catch Throwable e {:status 99 :out "" :err (str "ocamlyacc (Arbace): " e "\n")}))]
+            (write-bstr (File. (str dir ".out")) (str "status " (:status r) "\n--- stdout\n" (:out r) "--- stderr\n" (:err r)))
+            (println (str "ocamlyacc: " dir " " argline " status " (:status r)))))
+        (println (format "ocamlyacc: %d runs (%.1f s)" (count lines) (/ (- (System/nanoTime) t0) 1e9)))
+        (System/exit 0))
+      (do (println "usage: arbace.repr.ocaml.ocamlyacc yacc [-v] [-q] [--strict] [-b PREFIX] FILE.mly | check LIST") (System/exit 2)))))

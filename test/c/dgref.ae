@@ -1,0 +1,123 @@
+(ns c.dgref
+  "gcc's diagnostics of the dg check as a record (doc/ORACLE-RECORDS-SURVEY.md, ORS1-ORS10 (a), \"As built: the tooling and C\"):
+  test/c/ref-dg-gcc15.edn, one map a line sorted by :id, {:id \"GROUP/NAME\" :sha256 \"the file's bytes\" :action \"compile\"
+  :opts \"the dg-options\" :status N :diag \"gcc's diagnostic lines\"} (bin/lib/ci/gcc-diag.bash's filter of gcc 15.2's output for
+  the file run as bin/lib/ci/dg's gcc1 runs it). :diag holds the bytes as characters (\\uXXXX for a byte outside 0x20-0x7e, a
+  tab or a newline), so the record reads with the Clojure reader and gives the bytes back. Run by bin/lib/ci/dg on the tools'
+  host (-p test), never embedded:
+    write WORK RECORD HEADER ID...        the groups' entries rewritten from WORK's live gcc outputs, the other groups' kept
+    materialize WORK RECORD ID...         WORK/ID/gcc/F.txt and .status from the record for each file of gcc.list; a file with
+                                          no entry is unrecorded, one whose :sha256, :action or :opts differ is stale: each
+                                          printed as FAIL GROUP/NAME WHY; exit 3 when any (ORS10 (a): the step fails)
+    verify WORK RECORD ID...              WORK's live outputs against the record: DIFF lines and the count; then the crossed
+                                          pair (ORS7 (a)): the first file's live output against the second's entry must
+                                          differ, else CONTROL-TAKEN; prints \"verify-count DIFFERING TOTAL\""
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- bytes-of ^bytes [^String p] (java.nio.file.Files/readAllBytes (.toPath (java.io.File. p))))
+
+(defn- sha256 [^bytes b]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") b)]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) d))))
+
+(defn- latin1 ^String [^bytes b] (String. b "ISO-8859-1"))
+
+(defn- enc
+  "A string literal of the text's characters (each a byte), readable by the Clojure reader."
+  [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (doseq [c s :let [i (int c)]]
+      (cond (= c \\) (.append sb "\\\\")
+            (= c \") (.append sb "\\\"")
+            (= c \newline) (.append sb "\\n")
+            (or (< i 0x20) (> i 0x7e)) (.append sb (format "\\u%04x" i))
+            :else (.append sb c)))
+    (str (.append sb "\""))))
+
+(defn- esc-name ^String [^String n] (str/replace n "/" "__"))
+
+(defn- gcc-list
+  "WORK/ID's files as bin/lib/ci/dg runs gcc on them: [{:id :name :action :opts :file}]."
+  [work id]
+  (let [base (str/trim (slurp (str work "/" id "/base.txt")))]
+    (vec (for [l (str/split-lines (slurp (str work "/" id "/gcc.list"))) :when (not (str/blank? l))
+               :let [[nm action opts] (str/split l #"\t" -1)]]
+           {:id (str id "/" nm) :name nm :action action :opts (or opts "") :file (str base "/" nm)}))))
+
+(defn- entry-line [m]
+  (str "{:id " (enc (:id m)) " :sha256 " (enc (:sha256 m)) " :action " (enc (:action m)) " :opts " (enc (:opts m))
+       " :status " (:status m) " :diag " (enc (:diag m)) "}"))
+
+(defn- read-record [^String record]
+  (let [f (java.io.File. record)]
+    (if (.exists f)
+      (into {} (for [l (str/split-lines (slurp record)) :when (str/starts-with? l "{")
+                     :let [m (read-string l)]]
+                 [(:id m) m]))
+      {})))
+
+(defn- live [work id e]
+  (let [g (str work "/" id "/gcc/" (esc-name (:name e)))]
+    {:status (Long/parseLong (str/trim (slurp (str g ".status")))) :diag (latin1 (bytes-of (str g ".txt")))}))
+
+(defn write [work record header ids]
+  (let [old (read-record record)
+        groups (set ids)
+        kept (remove #(groups (first (str/split (key %) #"/" 2))) old)
+        fresh (for [id ids e (gcc-list work id)]
+                [(:id e) (merge {:id (:id e) :sha256 (sha256 (bytes-of (:file e))) :action (:action e) :opts (:opts e)}
+                                (live work id e))])
+        all (into (sorted-map) (concat kept fresh))]
+    (spit record (str (slurp header) (str/join (map #(str (entry-line (val %)) "\n") all))))
+    (println (str "recorded " record ": " (count fresh) " files of " (str/join "," ids) ", " (count all) " in all"))))
+
+(defn materialize [work record ids]
+  (let [rec (read-record record)
+        bad (atom 0) n (atom 0)]
+    (doseq [id ids e (gcc-list work id)
+            :let [r (get rec (:id e))
+                  why (cond (nil? r) "unrecorded: no entry in the record (bin/oracle-records record c dg)"
+                            (not= (:sha256 r) (sha256 (bytes-of (:file e)))) "stale: the file's bytes are not the record's"
+                            (not= [(:action r) (:opts r)] [(:action e) (:opts e)])
+                            (str "stale: run as " (:action e) " " (:opts e) ", recorded as " (:action r) " " (:opts r)))]]
+      (if why
+        (do (swap! bad inc) (println (str "FAIL " (:id e) "\t" why)))
+        (let [g (str work "/" id "/gcc/" (esc-name (:name e)))]
+          (.mkdirs (java.io.File. (str work "/" id "/gcc")))
+          (java.nio.file.Files/write (.toPath (java.io.File. (str g ".txt"))) (.getBytes ^String (:diag r) "ISO-8859-1")
+                                     ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0))
+          (spit (str g ".status") (str (:status r) "\n"))
+          (swap! n inc))))
+    (println (str "dg: gcc's diagnostics of " @n " files from " record (when (pos? @bad) (str "; " @bad " unrecorded or stale"))))
+    (if (pos? @bad) 3 0)))
+
+(defn verify [work record ids]
+  (let [rec (read-record record)
+        es (vec (for [id ids e (gcc-list work id)] [id e]))
+        diffs (vec (for [[id e] es
+                         :let [r (get rec (:id e)) l (live work id e)]
+                         :when (or (nil? r) (not= (:sha256 r) (sha256 (bytes-of (:file e))))
+                                   (not= [(:status r) (:diag r)] [(:status l) (:diag l)]))]
+                     (:id e)))]
+    (doseq [d (take 10 diffs)] (println (str "DIFF " d)))
+    ;; the crossed pair: the first two files whose entries differ from each other, one's live output against the other's
+    (let [pair (first (for [[[ia a] [ib b]] (partition 2 1 es)
+                            :let [ra (get rec (:id a)) rb (get rec (:id b))]
+                            :when (and ra rb (not= [(:status ra) (:diag ra)] [(:status rb) (:diag rb)]))]
+                        [ia a ib b]))]
+      (if-let [[ia a _ b] pair]
+        (let [la (live work ia a) rb (get rec (:id b))]
+          (if (= [(:status la) (:diag la)] [(:status rb) (:diag rb)])
+            (println (str "CONTROL-TAKEN " (:id a) "'s live output judged equal to " (:id b) "'s entry"))
+            (println (str "control: " (:id a) "'s live output against " (:id b) "'s entry differs, as it must"))))
+        (println "control: no two entries that differ in the sample (not judged)")))
+    (println (str "verify-count " (count diffs) " " (count es)))))
+
+(defn -main [cmd work record & more]
+  (case cmd
+    "write" (write work record (first more) (rest more))
+    "materialize" (System/exit (materialize work record more))
+    "verify" (verify work record more)
+    (do (println "c.dgref: write, materialize or verify") (System/exit 2))))

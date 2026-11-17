@@ -1,0 +1,308 @@
+;; The Unix library's descriptors and files (doc/ocaml/DEFERRED-TRIAGE.md, §4 item 4, "As built: OT9's next three fixes"), the AOT
+;; runtime's mirror of oi's ext_unix_fd.go: the caml_unix_* primitives of otherlibs/unix (OCaml 5.5.0, LGPL-2.1 with the linking
+;; exception) of descriptors, files and directories. A Unix.file_descr is an index of Fd's table, as the channels' descriptors are.
+;;
+;; Java's limits, and how they are met: no descriptors of the OS (a file opened by openfile is a RandomAccessFile of Fd's table, a pipe
+;; a buffer of the runtime, Pipe, its ends two entries; dup and dup2 put the same entry at another index, counted); no chdir (paths
+;; resolved by ExtSys/resolve); no permission bits (open's permissions ignored, chmod and fchmod the owner's read, write and execute
+;; flags of java.io.File, access the running user's); no terminal test (isatty false: the runs' standard streams are files); no
+;; close-on-exec (nothing is exec'd). Not mirrored, for want of the JDK classes in the runtime's world (java.nio.file's links): link,
+;; symlink, readlink, mkfifo; they fail at their call as every external the runtime lacks (:unix-unported).
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io File RandomAccessFile IOException))
+
+(defclass ^:public ^:final ExtUnixFd
+
+  ;; the errno of a strerror text (ExtUnix's table), EIO for another
+  (method ^:static textErrno ^int [^String t]
+    (loop [^int i 0]
+      (cond (>= i (alength ExtUnix/texts)) 5
+            (.equals (aget ExtUnix/texts i) t) (aget ExtUnix/errnos i)
+            :else (recur (unchecked-inc-int i)))))
+
+  ;; a Sys_error of ExtSys's file system externals as Unix_error (fn, arg): its text after the last ": "
+  (method ^:static ofSys ^RuntimeException [^Exn e ^String fn ^String arg]
+    (let [v (.-v e)]
+      (if (and (instance? Block v) (identical? (aget (.-f (cast Block v)) 0) Rt/Sys_error))
+        (let [m (Rt/utf8 (aget (.-f (cast Block v)) 1))
+              k (.lastIndexOf m ": ")]
+          (ExtUnix/error (ExtUnixFd/textErrno (if (< k 0) m (.substring m (unchecked-add-int k 2)))) fn arg))
+        e)))
+
+  (method ^:static fail ^RuntimeException [^long r ^String fn ^String arg]
+    (ExtUnix/error (unchecked-int (unchecked-negate r)) fn arg))
+
+  ;; a path argument: Unix_error (ENOENT, fn, path) for a NUL byte
+  (method ^:static path ^String [v ^String fn]
+    (let [s (Rt/utf8 v)]
+      (when (not (ExtSys/cSafe v)) (throw (ExtUnix/error 2 fn s)))
+      s))
+
+  (method ^:static entry ^Fd [fd ^String fn]
+    (let [d (Fd/get (Rt/l fd))]
+      (when (nil? d) (throw (ExtUnix/error 9 fn "")))
+      d))
+
+  ;; the constructors of a list of constant constructors
+  (method ^:static ints ^java.util.ArrayList [l]
+    (let [out (java.util.ArrayList.)]
+      (loop [x l]
+        (when (instance? Block x)
+          (.add out (aget (.-f (cast Block x)) 0))
+          (recur (aget (.-f (cast Block x)) 1))))
+      out))
+
+  ;; ---- descriptors
+
+  (method ^:public ^:static caml_unix_open [pv flags perm]
+    (let [p (ExtUnixFd/path pv "open")
+          fl (ExtUnixFd/ints flags)
+          ^:mutable ^long f 0
+          ^:mutable ^boolean nb false]
+      (loop [^int i 0]
+        (when (< i (.size fl))
+          (switch (Rt/ii (.get fl i))
+            1 (set! f (bit-or f 1))
+            2 (set! f (bit-or f 1))
+            3 (set! nb true)
+            4 (set! f (bit-or f 2))
+            5 (set! f (bit-or f 4))
+            6 (set! f (bit-or f 8))
+            7 (set! f (bit-or f 16))
+            nil)
+          (recur (unchecked-inc-int i))))
+      (let [r (Fd/open (ExtSys/resolve p) f)]
+        (when (< r 0) (throw (ExtUnixFd/fail r "open" p)))
+        (let [d (Fd/get r)]
+          (set! (.-nonblock d) nb)
+          (set! (.-path d) (ExtSys/resolve p)))
+        (Long/valueOf r))))
+
+  (method ^:public ^:static caml_unix_close [fd]
+    (let [r (Fd/close (Rt/l fd))]
+      (when (< r 0) (throw (ExtUnixFd/fail r "close" "")))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_fsync [fd] (ExtUnixFd/entry fd "fsync") Rt/UNIT)
+
+  ;; read(2) of at most 65,536 bytes (UNIX_BUFFER_SIZE) into b at ofs
+  (method ^:static readInto ^int [fd ^byte/1 b ^int ofs ^int len]
+    (let [n (if (> len 65536) 65536 len)
+          r (Fd/read (Rt/l fd) b ofs n)]
+      (when (< r 0) (throw (ExtUnixFd/fail r "read" "")))
+      (unchecked-int r)))
+  (method ^:public ^:static caml_unix_read [fd buf ofs len]
+    (Long/valueOf (long (ExtUnixFd/readInto fd (cast byte/1 buf) (Rt/ii ofs) (Rt/ii len)))))
+
+  ;; write(2) of all of it, by 65,536 bytes, or of one piece (single_write); EAGAIN after a piece ends it
+  (method ^:static writeFrom [fd ^byte/1 b ^int ofs ^int len ^boolean single ^String fn]
+    (let [^:mutable ^int done 0]
+      (label :out
+        (while (< done len)
+          (let [k (unchecked-subtract-int len done)
+                n (if (> k 65536) 65536 k)
+                r (Fd/write (Rt/l fd) b (unchecked-add-int ofs done) n)]
+            (when (< r 0)
+              (when (and (== r -11) (> done 0)) (break :out nil))
+              (throw (ExtUnixFd/fail r fn "")))
+            (set! done (unchecked-add-int done (unchecked-int r)))
+            (when single (break :out nil)))))
+      (Long/valueOf (long done))))
+  (method ^:public ^:static caml_unix_write [fd buf ofs len] (ExtUnixFd/writeFrom fd (cast byte/1 buf) (Rt/ii ofs) (Rt/ii len) false "write"))
+  (method ^:public ^:static caml_unix_single_write [fd buf ofs len] (ExtUnixFd/writeFrom fd (cast byte/1 buf) (Rt/ii ofs) (Rt/ii len) true "single_write"))
+
+  (method ^:public ^:static caml_unix_read_bigarray [fd ba ofs len]
+    (let [a (BigArray/of ba)
+          d (.-data a)
+          p (unchecked-add-int (Rt/ii ofs) (.-off a))
+          buf (new byte/1 (Rt/ii len))
+          got (ExtUnixFd/readInto fd buf 0 (Rt/ii len))]
+      (loop [^int i 0]
+        (when (< i got)
+          (aset d (unchecked-add-int p i) (Long/valueOf (bit-and (long (aget buf i)) 255)))
+          (recur (unchecked-inc-int i))))
+      (Long/valueOf (long got))))
+  (method ^:public ^:static caml_unix_write_bigarray [fd ba ofs len single]
+    (let [a (BigArray/of ba)
+          d (.-data a)
+          p (unchecked-add-int (Rt/ii ofs) (.-off a))
+          n (Rt/ii len)
+          buf (new byte/1 n)]
+      (loop [^int i 0]
+        (when (< i n)
+          (aset buf i (unchecked-byte (let [e (aget d (unchecked-add-int p i))] (if (instance? Long e) (Rt/l e) (Rt/bv e)))))
+          (recur (unchecked-inc-int i))))
+      (ExtUnixFd/writeFrom fd buf 0 n (not (== (Rt/l single) 0)) "write_bigarray")))
+
+  ;; channels.c's stream semantics check: a descriptor of the table, a socket a stream one
+  (method ^:static checkStream ^void [fd ^String fn]
+    (let [d (Fd/get (Rt/l fd))]
+      (when (nil? d) (throw (ExtUnix/error 9 fn "")))
+      (when (and (some? (.-sock d)) (.-sdgram d)) (throw (ExtUnix/error 22 fn "")))))
+  (method ^:public ^:static caml_unix_inchannel_of_filedescr [fd]
+    (ExtUnixFd/checkStream fd "in_channel_of_descr")
+    (.-cust (Channel. (Rt/ii fd) false)))
+  (method ^:public ^:static caml_unix_outchannel_of_filedescr [fd]
+    (ExtUnixFd/checkStream fd "out_channel_of_descr")
+    (.-cust (Channel. (Rt/ii fd) true)))
+
+  (method ^:static seek ^long [fd ^long ofs cmd]
+    (let [r (Fd/seek (Rt/l fd) ofs (Rt/ii cmd))]
+      (when (< r 0) (throw (ExtUnixFd/fail r "lseek" "")))
+      r))
+  (method ^:public ^:static caml_unix_lseek [fd ofs cmd] (Long/valueOf (ExtUnixFd/seek fd (Rt/l ofs) cmd)))
+  (method ^:public ^:static caml_unix_lseek_64 [fd ofs cmd] (I64. (ExtUnixFd/seek fd (Rt/bv ofs) cmd)))
+
+  (method ^:static truncatePath ^void [pv ^long n]
+    (let [p (ExtUnixFd/path pv "truncate")
+          f (File. (ExtSys/resolve p))]
+      (when (not (.exists f)) (throw (ExtUnix/error 2 "truncate" p)))
+      (when (.isDirectory f) (throw (ExtUnix/error 21 "truncate" p)))
+      (when (< n 0) (throw (ExtUnix/error 22 "truncate" p)))
+      (try (let [r (RandomAccessFile. f "rw")] (.setLength r n) (.close r))
+           (catch IOException e (throw (ExtUnix/error (unchecked-int (Fd/errnoOf e)) "truncate" p))))))
+  (method ^:public ^:static caml_unix_truncate [p n] (ExtUnixFd/truncatePath p (Rt/l n)) Rt/UNIT)
+  (method ^:public ^:static caml_unix_truncate_64 [p n] (ExtUnixFd/truncatePath p (Rt/bv n)) Rt/UNIT)
+  (method ^:static ftruncate ^void [fd ^long n]
+    (let [d (ExtUnixFd/entry fd "ftruncate")]
+      (when (or (nil? (.-raf d)) (not (.-writable d))) (throw (ExtUnix/error 22 "ftruncate" "")))
+      (when (< n 0) (throw (ExtUnix/error 22 "ftruncate" "")))
+      (try (.setLength (.-raf d) n)
+           (catch IOException e (throw (ExtUnix/error (unchecked-int (Fd/errnoOf e)) "ftruncate" ""))))))
+  (method ^:public ^:static caml_unix_ftruncate [fd n] (ExtUnixFd/ftruncate fd (Rt/l n)) Rt/UNIT)
+  (method ^:public ^:static caml_unix_ftruncate_64 [fd n] (ExtUnixFd/ftruncate fd (Rt/bv n)) Rt/UNIT)
+
+  ;; fstat: a file's stat by its path (its size the open file's), a pipe's kind S_FIFO, a standard stream's S_CHR
+  (method ^:static fstat ^Block [fd]
+    (let [d (ExtUnixFd/entry fd "fstat")
+          z (Long/valueOf 0)
+          t (Double/valueOf 0.0)]
+      (cond
+        (some? (.-path d))
+        (let [b (cast Block (ExtUnix/stat (Rt/ofUtf8 (.-path d)) "fstat" true))]
+          (when (some? (.-raf d))
+            (try (aset (.-f b) 8 (Long/valueOf (.length (.-raf d)))) (catch IOException e nil)))
+          b)
+        (some? (.-pipe d)) (Block. 0 (new Object/1 [z z (Long/valueOf 5) (Long/valueOf 0600) (Long/valueOf 1) z z z (Long/valueOf (long (.-count (.-pipe d)))) t t t]))
+        :else (Block. 0 (new Object/1 [z z (Long/valueOf 2) (Long/valueOf 0620) (Long/valueOf 1) z z z z t t t])))))
+  (method ^:static large ^Block [^Block b]
+    (aset (.-f b) 8 (I64. (Rt/l (aget (.-f b) 8))))
+    b)
+  (method ^:public ^:static caml_unix_fstat [fd] (ExtUnixFd/fstat fd))
+  (method ^:public ^:static caml_unix_fstat_64 [fd] (ExtUnixFd/large (ExtUnixFd/fstat fd)))
+  (method ^:public ^:static caml_unix_stat_64 [n] (ExtUnixFd/large (cast Block (ExtUnix/stat n "stat" true))))
+  (method ^:public ^:static caml_unix_lstat_64 [n] (ExtUnixFd/large (cast Block (ExtUnix/stat n "lstat" false))))
+  (method ^:public ^:static caml_unix_isatty [fd] Rt/FALSE)
+
+  (method ^:public ^:static caml_unix_dup [cloexec fd]
+    (let [d (ExtUnixFd/entry fd "dup")]
+      (set! (.-extra d) (unchecked-inc-int (.-extra d)))
+      (Long/valueOf (Fd/install d))))
+  (method ^:public ^:static caml_unix_dup2 [cloexec fd to]
+    (let [r (Fd/dup2 (Rt/l fd) (Rt/l to))]
+      (when (< r 0) (throw (ExtUnixFd/fail r "dup2" "")))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_set_nonblock [fd] (set! (.-nonblock (ExtUnixFd/entry fd "set_nonblock")) true) Rt/UNIT)
+  (method ^:public ^:static caml_unix_clear_nonblock [fd] (set! (.-nonblock (ExtUnixFd/entry fd "clear_nonblock")) false) Rt/UNIT)
+  (method ^:public ^:static caml_unix_set_close_on_exec [fd] (ExtUnixFd/entry fd "set_close_on_exec") Rt/UNIT)
+  (method ^:public ^:static caml_unix_clear_close_on_exec [fd] (ExtUnixFd/entry fd "clear_close_on_exec") Rt/UNIT)
+  (method ^:public ^:static caml_unix_pipe [cloexec u]
+    (let [p (Fd/pipe)]
+      (Block. 0 (new Object/1 [(Long/valueOf (aget p 0)) (Long/valueOf (aget p 1))]))))
+
+  ;; ---- files
+
+  (method ^:public ^:static caml_unix_unlink [pv]
+    (let [p (ExtUnixFd/path pv "unlink")
+          f (File. (ExtSys/resolve p))]
+      (when (and (.isDirectory f) (not (ExtUnix/isLink f))) (throw (ExtUnix/error 21 "unlink" p)))
+      (try (ExtSys/caml_sys_remove pv) (catch Exn e (throw (ExtUnixFd/ofSys e "unlink" p))))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_rename [a b]
+    (let [p (ExtUnixFd/path a "rename")]
+      (ExtUnixFd/path b "rename")
+      (try (ExtSys/caml_sys_rename a b) (catch Exn e (throw (ExtUnixFd/ofSys e "rename" p))))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_realpath [pv]
+    (let [p (ExtUnixFd/path pv "realpath")
+          f (File. (ExtSys/resolve p))]
+      (when (not (.exists f)) (throw (ExtUnix/error 2 "realpath" p)))
+      (try (Rt/ofUtf8 (.getCanonicalPath f))
+           (catch IOException e (throw (ExtUnix/error (unchecked-int (Fd/errnoOf e)) "realpath" p))))))
+  (method ^:static chmodFile ^void [^File f ^long m]
+    (.setReadable f (not (== 0 (bit-and m 0400))) true)
+    (.setWritable f (not (== 0 (bit-and m 0200))) true)
+    (.setExecutable f (not (== 0 (bit-and m 0100))) true))
+  (method ^:public ^:static caml_unix_chmod [pv m]
+    (let [p (ExtUnixFd/path pv "chmod")
+          f (File. (ExtSys/resolve p))]
+      (when (not (.exists f)) (throw (ExtUnix/error 2 "chmod" p)))
+      (ExtUnixFd/chmodFile f (Rt/l m))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_fchmod [fd m]
+    (let [d (ExtUnixFd/entry fd "fchmod")]
+      (when (some? (.-path d)) (ExtUnixFd/chmodFile (File. (.-path d)) (Rt/l m)))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_access [pv perms]
+    (let [p (ExtUnixFd/path pv "access")
+          f (File. (ExtSys/resolve p))
+          l (ExtUnixFd/ints perms)]
+      (when (not (.exists f)) (throw (ExtUnix/error 2 "access" p)))
+      (loop [^int i 0]
+        (when (< i (.size l))
+          (let [k (Rt/ii (.get l i))]
+            (when (or (and (== k 0) (not (.canRead f))) (and (== k 1) (not (.canWrite f))) (and (== k 2) (not (.canExecute f))))
+              (throw (ExtUnix/error 13 "access" p))))
+          (recur (unchecked-inc-int i))))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_mkdir [pv m]
+    (let [p (ExtUnixFd/path pv "mkdir")]
+      (try (ExtSys/caml_sys_mkdir pv m) (catch Exn e (throw (ExtUnixFd/ofSys e "mkdir" p))))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_rmdir [pv]
+    (let [p (ExtUnixFd/path pv "rmdir")]
+      (try (ExtSys/caml_sys_rmdir pv) (catch Exn e (throw (ExtUnixFd/ofSys e "rmdir" p))))
+      Rt/UNIT))
+  (method ^:public ^:static caml_unix_has_symlink [u] Rt/FALSE)
+  ;; utimes: the modification time (Java sets no access time); 0.0 and 0.0 the current time
+  (method ^:public ^:static caml_unix_utimes [pv at mt]
+    (let [p (ExtUnixFd/path pv "utimes")
+          f (File. (ExtSys/resolve p))
+          a (Rt/d at)
+          m (Rt/d mt)]
+      (when (not (.exists f)) (throw (ExtUnix/error 2 "utimes" p)))
+      (.setLastModified f (if (and (== a 0.0) (== m 0.0)) (System/currentTimeMillis) (unchecked-long (* m 1000.0))))
+      Rt/UNIT))
+
+  ;; ---- directories: a handle is the entries read at opendir (. and .. first), the next one's index and whether it is closed
+
+  (method ^:public ^:static caml_unix_opendir [pv]
+    (let [p (ExtUnixFd/path pv "opendir")
+          names (try (cast Block (ExtSys/caml_sys_read_directory pv)) (catch Exn e (throw (ExtUnixFd/ofSys e "opendir" p))))
+          n (alength (.-f names))
+          all (new Object/1 (unchecked-add-int n 2))]
+      (aset all 0 (Rt/ofUtf8 "."))
+      (aset all 1 (Rt/ofUtf8 ".."))
+      (System/arraycopy (.-f names) 0 all 2 n)
+      (Custom. "_dir" (new Object/1 [all (new long/1 2)]))))
+  (method ^:static dir ^Object/1 [h ^String fn]
+    (let [s (cast Object/1 (.-v (cast Custom h)))]
+      (when (< (aget (cast long/1 (aget s 1)) 0) 0) (throw (ExtUnix/error 9 fn "")))
+      s))
+  (method ^:public ^:static caml_unix_readdir [h]
+    (let [s (ExtUnixFd/dir h "readdir")
+          all (cast Object/1 (aget s 0))
+          pos (cast long/1 (aget s 1))]
+      (when (>= (aget pos 0) (alength all)) (throw (Rt/endOfFile)))
+      (aset pos 0 (unchecked-inc (aget pos 0)))
+      (aget all (unchecked-int (unchecked-dec (aget pos 0))))))
+  (method ^:public ^:static caml_unix_rewinddir [h]
+    (aset (cast long/1 (aget (ExtUnixFd/dir h "rewinddir") 1)) 0 0)
+    Rt/UNIT)
+  (method ^:public ^:static caml_unix_closedir [h]
+    (aset (cast long/1 (aget (ExtUnixFd/dir h "closedir") 1)) 0 -1)
+    Rt/UNIT)
+
+  ;; Unix._exit: the end at once, no at_exit, the channels not flushed (Main/fail's Exit)
+  (method ^:public ^:static caml_unix_exit [st] (throw (Exit. (Rt/ii st)))))

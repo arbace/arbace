@@ -1,0 +1,230 @@
+(ns arbace.asm.arm64.eval
+  "arm64's eval (doc/asm/ARM64-SURVEY.md §4.2, AR5): a program's forms laid out, never encoded. The object assembler
+  (arbace.asm.obj with arbace.asm.arm64.obj's part) lays the sources out as it does for AOT, but each instruction is a
+  placeholder of four zero bytes with no fixup, and its form is kept with its place; the linker (arbace.asm.link, its
+  option :layout) places the sections and the symbols; each form's symbolic operands are then replaced by their values at
+  that layout (`(addr V)`: a label's, a symbol's address with its addend; a specifier kept around it, `(spec lo12 (addr V))`),
+  constants folded. The result: the executable with zero words for its instructions (its data the same bytes as AOT's) and
+  NAME.forms, an instruction a line (ADDR<tab>FORM), which a64i runs (`a64i run --forms`) by lowering each form to its
+  instruction (go/arbace/a64i's forms.go) with no encoder and no decoder."
+  (:require [arbace.repr.asm :as asm]
+            [arbace.asm.obj :as o]
+            [arbace.asm.arm64.obj :as a64]
+            [arbace.asm.link :as link]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- head [x] (when (seq? x) (first x)))
+
+;; the bare words an operand may be that are not labels: conditions, barrier options, system registers, prefetch operations
+(def non-labels
+  (into #{"eq" "ne" "cs" "hs" "cc" "lo" "mi" "pl" "vs" "vc" "hi" "ls" "ge" "lt" "gt" "le" "al" "nv"
+          "sy" "st" "ld" "ish" "ishst" "ishld" "nsh" "nshst" "nshld" "osh" "oshst" "oshld"
+          "nzcv" "fpcr" "fpsr" "tpidr_el0" "tpidrro_el0" "cntvct_el0" "cntfrq_el0" "dczid_el0" "ctr_el0" "midr_el1"
+          ;; AR19 (queue 288): FEAT_ECV's counter, PSTATE.DIT and PSTATE.SSBS; dc's and ic's operations
+          "cntvctss_el0" "dit" "ssbs" "zva" "cvac" "cvau" "civac" "cvap" "cvadp" "ivau"}
+        (for [t ["pld" "pli" "pst"] l ["l1" "l2" "l3"] p ["keep" "strm"]] (str t l p))))
+
+(defn- non-label?
+  "A bare word that is not a label: non-labels' or a system register by its encoding (s3_3_c14_c0_6: op0, op1, CRn, CRm, op2;
+  AR19)."
+  [x]
+  (and (symbol? x)
+       (let [s (str/lower-case (name x))]
+         (or (contains? non-labels s) (some? (re-matches #"s[0-3]_[0-7]_c[0-9]+_c[0-9]+_[0-7]" s))))))
+
+(defn- fold
+  "An expression's value now (a constant), or a placeholder (val K) with its MCValue kept in `vals`."
+  [ctx vals e]
+  (if (integer? e)
+    e
+    (let [v (o/value ctx e 0)]
+      (if (and (nil? (:add v)) (nil? (:sub v)))
+        (:c v)
+        (let [k (count @vals)] (vswap! vals conj v) (list 'val k))))))
+
+(defn- operand [ctx vals x]
+  (let [h (head x)]
+    (cond
+      ;; a floating-point constant (fmov's, fcmp's #0.0) is its text, lowered by a64i (AR6)
+      (or (#{'reg 'rlist 'elt 'float} h) (and (= '- h) (= 2 (count x)) (= 'float (head (second x))))) x
+      (= 'shift h) (if (> (count x) 2) (list 'shift (second x) (operand ctx vals (nth x 2))) x)
+      (= 'imm h) (list 'imm (operand ctx vals (second x)))
+      (#{'mem 'wb} h) (apply list h (map #(operand ctx vals %) (rest x)))
+      (= 'spec h) (let [sp (str/lower-case (str (second x)))]
+                    (when (str/starts-with? sp "tlsdesc") (o/unsupported :tls-model (pr-str x)))
+                    (list 'spec (second x) (fold ctx vals (nth x 2))))
+      (= 'lit h) (o/unsupported :literal-pool (pr-str x))
+      (non-label? x) x
+      :else (fold ctx vals x))))
+
+(defn- got-fixups
+  "A GOT reference's relocation on the placeholder word (adrp :got:, ldr :got_lo12:; their initial exec TLS forms :gottprel:,
+  :gottprel_lo12:): the linker makes the GOT entry the form then names, as it makes AOT's; the placeholder's bits are the
+  relocation's, never read. The kind is the mnemonic's (the operand's field), not an encoded word's."
+  [ctx f]
+  (let [m (str/lower-case (name (first f)))
+        ops (rest f)
+        spec-of (fn [op] (cond (= 'spec (head op)) op
+                               (#{'mem 'wb 'imm} (head op)) (first (keep #(when (= 'spec (head %)) %) (rest op)))
+                               :else nil))
+        sp (first (keep spec-of ops))
+        s (when sp (str/lower-case (str (second sp))))]
+    (if (and s (or (str/starts-with? s "got") ))
+      (let [kind (case m
+                   "adrp" [:adrp21]
+                   "ldr" (let [r (str (second (first ops)))] [:ldst12 (if (str/starts-with? r "w") 4 8)])
+                   (o/unsupported :got (pr-str f)))
+            e (list 'at (nth sp 2) s)]
+        (o/visit-syms! ctx e)
+        [[0 4 e kind (= kind [:adrp21]) 0]])
+      [])))
+
+(defn- arch
+  "arbace.asm.arm64.obj's part with the eval's instructions: each recorded into `recs` as [CHUNK OFFSET FORM VALS] and
+  emitted as four zero bytes; after the layout, `out` holds [SECTION OFFSET FORM VALS] with each MCValue's symbols as
+  [:local SECTION OFFSET], [:abs V] or [:global NAME]."
+  [recs out]
+  (assoc a64/arch
+         :emit-insn! (fn [ctx f]
+                       (let [f (#'a64/const-subst ctx (o/resolve-expr ctx f))
+                             vals (volatile! [])
+                             fxs (got-fixups ctx f)
+                             f (apply list (first f) (map #(operand ctx vals %) (rest f)))]
+                         ;; the symbols the operands name registered, as the fixups' are (the object's symbol table names
+                         ;; the undefined ones, which the linker resolves)
+                         (doseq [v @vals s [(:add v) (:sub v)] :when s] (o/register! ctx (:name @s)))
+                         (#'a64/emit-word! ctx 0 fxs)
+                         (let [ch (o/cur-data! ctx)]
+                           (vswap! recs conj [ch (- (.size ^java.util.ArrayList (:bytes @ch)) 4) f @vals]))))
+         :after-layout (fn [ctx]
+                         (let [ref (fn [s]
+                                     (when s
+                                       (let [o (o/sym-offset ctx s 0)]
+                                         (cond (nil? o) [:global (:name @s)]
+                                               (= :abs (first o)) [:abs (second o)]
+                                               (not= elf/STB_LOCAL (o/binding-of ctx s)) [:global (:name @s)]
+                                               :else [:local (first o) (second o)]))))]
+                           (vreset! out (vec (for [[ch off f vals] @recs]
+                                               [(:sec @ch) (+ (long (:offset @ch)) (long off)) f
+                                                (mapv (fn [v] (when (:spec v) (o/unsupported :expression (str "a specifier inside an expression: " (pr-str f))))
+                                                        {:add (ref (:add v)) :sub (ref (:sub v)) :c (:c v)}) vals)])))))))
+
+(defn assemble-file
+  "The eval object of the file at `path`: {:bytes BYTES :insns [[SECTION OFFSET FORM VALS]...]}, or {:unsupported ...} or
+  {:error ...} as arbace.asm.obj/assemble gives them."
+  [^String path]
+  (let [items (try (asm/read-items (asm/latin1 path) (asm/dialect "arm64" nil path))
+                   (catch arbace.lang.ExceptionInfo e
+                     (if (= :syntax (:asm/refused (ex-data e))) {:unsupported :syntax :what (.getMessage e)} (throw e))))]
+    (if (map? items)
+      items
+      (let [recs (volatile! []) out (volatile! nil)
+            r (binding [o/*arch* (arch recs out)] (o/assemble items))]
+        (if (:bytes r)
+          ;; the sections' ELF indexes (the object writer puts groups and relocation sections among them): the content
+          ;; sections in order
+          (let [^bytes b (:bytes r)
+                u (fn [^long at ^long n] (reduce (fn [v k] (bit-or (bit-shift-left (long v) 8) (bit-and (long (aget b (+ at (- n 1 k)))) 0xff))) 0 (range n)))
+                shoff (u 0x28 8) shnum (u 0x3c 2)
+                ords (vec (for [i (range 1 shnum) :let [t (u (+ shoff (* 64 i) 4) 4)] :when (not (#{0 2 3 4 17} t))] i))
+                ord (fn [k] (nth ords k))
+                fix (fn [v] (if (= :local (first v)) [:local (ord (second v)) (nth v 2)] v))]
+            (assoc r :insns (vec (for [[sec off f vals] @out]
+                                   [(ord sec) off f (mapv (fn [m] (-> m (update :add #(when % (fix %))) (update :sub #(when % (fix %))))) vals)]))))
+          r)))))
+
+(defn- subst
+  "The form with each (val K) its value (addr V); a TP-relative specifier's value the offset from the thread pointer; a GOT
+  specifier's the GOT entry's address (:got: its page, :got_lo12: its low 12 bits; :gottprel: likewise, the entry holding the
+  TP offset)."
+  [f vals tp gotv]
+  (cond (and (seq? f) (= 'val (first f))) (list 'addr (nth vals (second f)))
+        (and (seq? f) (= 'spec (first f)) (str/starts-with? (str/lower-case (str (second f))) "got"))
+        (let [s (str/lower-case (str (second f))) e (nth f 2)
+              k (when (and (seq? e) (= 'val (first e))) (second e))
+              v (when k (gotv k))]
+          (when-not v (o/unsupported :got (str "a GOT entry the linker did not make: " (pr-str f))))
+          (if (str/includes? s "lo12") (list 'spec 'lo12 (list 'addr v)) (list 'addr v)))
+        (and (seq? f) (= 'spec (first f)) (str/starts-with? (str/lower-case (str (second f))) "tprel"))
+        (let [e (nth f 2)]
+          (list 'spec (second f) (if (and (seq? e) (= 'val (first e))) (tp (nth vals (second e))) e)))
+        (seq? f) (apply list (map #(subst % vals tp gotv) f))
+        :else f))
+
+(defn forms-text
+  "The forms of the linked objects (`objs`: their eval results in link order) at the linker's `layout`: ADDR<tab>FORM lines."
+  [objs layout]
+  (let [local (:local layout) global (:global layout) tp (:tp layout)
+        va (fn [fi r] (when r
+                        (case (first r)
+                          :abs (second r)
+                          :global (global (second r))
+                          :local (or (local fi (second r) (nth r 2))
+                                     (o/unsupported :layout (str "a symbol in a discarded section: " (second r)))))))]
+    (apply str
+           (for [[fi obj] (map-indexed vector objs) [sec off f vals] (:insns obj)]
+             (let [a (local fi sec off)]
+               (if-not a
+                 ""                     ; a discarded section (COMDAT): no place
+                 (let [vs (mapv (fn [{:keys [add sub c]}]
+                                  (- (+ (long (or (va fi add) 0)) (long c)) (long (or (va fi sub) 0))))
+                                vals)]
+                   (str (Long/toHexString (long a)) "\t"
+                        (pr-str (subst f vs tp (fn [k] (let [{:keys [add sub c]} (nth vals k)]
+                                                         (when (and add (nil? sub) (zero? (long c)))
+                                                           (case (first add)
+                                                             :global ((:got layout) (second add))
+                                                             :local ((:got-local layout) fi (second add) (nth add 2))
+                                                             nil))))))
+                        "\n"))))))))
+
+(defn- write-bytes [^String path ^bytes b]
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) b ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn build-tests
+  "Each NAME<tab>PATH of LIST, as arbace.asm.link/build-tests builds it for AOT, built for eval: WORK/NAME.eval (the
+  executable, its instructions zero words) and WORK/NAME.forms; WORK/build-eval.tsv: NAME RESULT DETAIL (built, else the
+  class of what failed)."
+  [lst work musl]
+  (let [rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
+        res (vec (for [[n p] rows]
+                   (let [v (link/verdict (slurp p))
+                         dir (.getParent (java.io.File. ^String p))
+                         src (fn [w] (if (str/starts-with? w "musl:") (str musl "/" (subs w 5)) (str dir "/" w)))
+                         srcs (concat (map src (:before v)) [p] (map src (:with v)))
+                         objs (reduce (fn [acc s]
+                                        (if (map? acc) acc
+                                            (let [r (try (assemble-file s) (catch Throwable e {:unsupported :crash :what (str e)}))]
+                                              (cond (:bytes r) (conj acc [s r])
+                                                    (:error r) {:class :assemble-error :what (str s ": " (:error r))}
+                                                    :else {:class (keyword (str "eval-" (name (:unsupported r)))) :what (str s ": " (:what r))}))))
+                                      [] srcs)
+                         r (if (map? objs) objs
+                               (let [l (binding [link/*arch* link/aarch64]
+                                         (try (link/link (mapv (fn [[s r]] [s (:bytes r)]) objs) {:layout true})
+                                              (catch Throwable e {:unsupported :crash :what (str e)})))]
+                                 (cond (and (:link-error v) (:error l)) {:class :refused :what (:error l)}
+                                       (:bytes l) (let [t (try (forms-text (mapv second objs) (:layout l))
+                                                               (catch arbace.lang.ExceptionInfo e
+                                                                 (let [d (ex-data e)]
+                                                                   (cond (:obj/unsupported d) {:class (keyword (str "eval-" (name (:obj/unsupported d)))) :what (.getMessage e)}
+                                                                         (and (:link/error d) (:link-error v)) {:class :refused :what (:link/error d)}
+                                                                         (:link/error d) {:class :link-error :what (:link/error d)}
+                                                                         :else (throw e)))))]
+                                                    (if (map? t)
+                                                      t
+                                                      (do (write-bytes (str work "/" n ".eval") (:bytes l))
+                                                          (spit (str work "/" n ".forms") t)
+                                                          {:class :built :what ""})))
+                                       (:error l) {:class :link-error :what (:error l)}
+                                       :else {:class (keyword (str "link-" (name (:unsupported l)))) :what (:what l)})))]
+                     [n (:class r) (:what r)])))]
+    (spit (str work "/build-eval.tsv") (apply str (for [[n c d] res] (str n "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))))
+    (println (str "a64i: " (count (filter #(= :built (second %)) res)) " of " (count res) " programs laid out for eval"))))
+
+(defn -main [verb & args]
+  (case verb
+    "build" (let [[lst work musl] args] (build-tests lst work musl))))

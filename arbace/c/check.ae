@@ -204,7 +204,7 @@
 
 (defn- ldouble-size [] (long (or (cx :ldouble-size) 16)))
 
-(declare size-of align-of complete-record! vla?)
+(declare size-of align-of complete-record! vla? var-size?)
 
 (defn- bitint-size [n] (cond (<= n 8) 1 (<= n 16) 2 (<= n 32) 4 (<= n 64) 8 :else (* 8 (quot (+ n 63) 64))))
 
@@ -292,6 +292,15 @@
                                "?")))))]
       (w t 0))
     (str b)))
+
+(defn- gcc-int-name
+  "An integer type's name as gcc's diagnostics print it (\"long unsigned int\"), else tstr's."
+  [t]
+  (case (:k t)
+    :char "char" :schar "signed char" :uchar "unsigned char" :short "short int" :ushort "short unsigned int"
+    :int "int" :uint "unsigned int" :long "long int" :ulong "long unsigned int" :llong "long long int"
+    :ullong "long long unsigned int" :int128 "__int128" :uint128 "__int128 unsigned" :bool "_Bool"
+    (tstr t)))
 
 (def ^:dynamic *compat-depth* 0)
 
@@ -517,7 +526,10 @@
   (doseq [[n args parens ns gnu am] (apply attrs-of m all-attr-keys)
           :when (and parens (not gnu) (nil? ns))]
     (cond
-      (contains? std-no-arg-attrs n) (err! (str "'" n "' attribute does not take any arguments"))
+      ;; arguments given (not an empty list): gcc's parser stops at them first ("expected"), then the attribute's error, two
+      ;; diagnostics of the line (c23-attr-reproducible-3, -unsequenced-3; noreturn-3 takes either)
+      (contains? std-no-arg-attrs n) (do (when (seq args) (err! "expected ')'"))
+                                         (err! (str "'" n "' attribute does not take any arguments")))
       (contains? std-string-attrs n)
       (cond (empty? args) (err! "parentheses must be omitted if attribute argument list is empty")
             (not (and (= 1 (count args)) (or (string? (first args)) (and (seq? (first args)) (= 'byte-string (ffirst args))))
@@ -672,26 +684,93 @@
   [m packed max-align]
   (let [ta (long (align-of (:t m)))
         base (if (or packed (:mpacked m)) 1 ta)
-        base (if max-align (min base (long max-align)) base)]
-    (if (:align m) (max base (long (:align m))) base)))
+        a (if (:align m) (max base (long (:align m))) base)]
+    ;; CS290 (a): #pragma pack caps an aligned attribute's alignment too (gcc's layout_decl caps DECL_ALIGN by
+    ;; maximum_field_alignment whether the user set it or not; 95_bitfields' packed ALIGN tests)
+    (if max-align (min a (long max-align)) a)))
+
+(defn- ms-layout!
+  "The 244 request (Mac VM's report 244, item 4): a structure with GNU's `ms_struct` attribute laid out as gcc documents the
+  Microsoft layout (gcc's manual, x86 type attributes `ms_struct`, and -mms-bitfields): adjacent bit-fields share a unit of
+  their type's size only while their types have the same size and the next one fits in what is left of it; a new unit starts at
+  the type's alignment (1 when packed, capped by #pragma pack); a bit-field's type aligns the record even unnamed (not when
+  packed); a zero-width bit-field ends the run it follows and then aligns the record and the next member to its type (capped by
+  #pragma pack), and after no bit-field it is ignored. Each rule's case measured against the host's gcc 15.2 by hand
+  (test/c/run/ms-struct.c). The members into `out`; [size-in-bits align]."
+  [members packed max-align ^ArrayList out]
+  (let [off (atom 0) al (atom 1) run (atom nil) zw (atom nil) vseen (atom false)
+        close! (fn [] (when-let [{:keys [start size]} @run] (reset! off (+' start size)) (reset! run nil)))
+        next-align (fn [a] (let [z @zw] (reset! zw nil) (if z (max (long a) (long z)) a)))]
+    (doseq [m members]
+      (let [t (:t m)
+            ta (long (align-of t))
+            a (member-align m packed max-align)
+            mpacked (or packed (:mpacked m))
+            w (:bits m)
+            tsz (*' 8 (long (or (size-of t) 4)))]
+        (cond
+          (and w (zero? w))
+          (if @run
+            (let [za (if max-align (min ta (long max-align)) ta)]
+              (close!)
+              (swap! al max za)
+              (reset! zw za)
+              (.add out (assoc m :off (quot @off 8) :bitoff 0)))
+            (.add out (assoc m :off (quot @off 8) :bitoff 0)))
+          w
+          (let [r0 @run]
+            (if (and r0 (= (:size r0) tsz) (<= w (:rem r0)))
+              (let [o (- (+' (:start r0) (:size r0)) (:rem r0))]
+                (swap! run update :rem - w)
+                (.add out (assoc m :off (quot (:start r0) 8) :bitoff (- o (:start r0)))))
+              (let [_ (close!)
+                    ba (long (next-align a))
+                    start (align-up @off (*' 8 ba))]
+                (when-not mpacked (swap! al max a))
+                (reset! run {:start start :size tsz :rem (- tsz w)})
+                (reset! off start)
+                (.add out (assoc m :off (quot start 8) :bitoff 0)))))
+          :else
+          (let [_ (close!)
+                o (align-up (quot (+' @off 7) 8) (long (next-align a)))
+                sz (size-of t)]
+            (swap! al max a)
+            (.add out (cond-> (assoc m :off o) @vseen (assoc :voff true)))
+            (when (var-size? t) (reset! vseen true))
+            (reset! off (*' 8 (+' o (or sz 0))))))))
+    (close!)
+    [@off @al]))
 
 (defn- layout!
   "Lays out the record `r`'s members [{:name :t :bits :align :packed}] as gcc 15.2 does on x86-64."
   [^HashMap r members kind packed max-align]
-  (let [out (ArrayList.)]
-    (if (= kind :union)
+  (let [out (ArrayList.)
+        ms (.get r :ms)]
+    (cond
+      ;; the 244 request: GNU's ms_struct (ms-layout!)
+      (and ms (not= kind :union))
+      (let [[bits al] (ms-layout! members packed max-align out)
+            al (long al)
+            al (if-let [ra (.get r :min-align)] (max al (long ra)) al)]
+        (.put r :size (align-up (quot (+' bits 7) 8) al))
+        (.put r :align al))
+      (= kind :union)
       (let [sz (atom 0) al (atom 1)]
         (doseq [m members]
           (let [t (:t m)
                 a (member-align m packed max-align)
                 s (long (or (size-of t) 0))
                 s (if (:bits m) (quot (+' (:bits m) 7) 8) s)]
-            (when-not (and (:bits m) (nil? (:name m))) (swap! al max a))
+            ;; the 244 request: under ms_struct an unnamed bit-field's type aligns the union too (not when packed or zero-width)
+            (when (or (not (and (:bits m) (nil? (:name m))))
+                      (and ms (pos? (long (:bits m))) (not (or packed (:mpacked m)))))
+              (swap! al max a))
             (swap! sz max s)
             (.add out (assoc m :off 0 :bitoff (when (:bits m) 0)))))
         (.put r :size (align-up @sz (long @al)))
         (.put r :align @al))
-      (let [off (atom 0) al (atom 1)] ; off in bits
+      :else
+      (let [off (atom 0) al (atom 1) vseen (atom false)] ; off in bits
         (doseq [m members]
           (let [t (:t m)
                 ta (long (align-of t))
@@ -702,13 +781,17 @@
                     unit (*' 8 (long (or (size-of t) 4)))]
                 (cond
                   (zero? w)
-                  (do (swap! off #(align-up % (*' 8 (if max-align (min ta (long max-align)) ta))))
+                  ;; CS290 (a): a zero-width bit-field aligns to its type's alignment even under #pragma pack (gcc 15.2 on
+                  ;; x86-64, as 95_bitfields' packed tests 3 and 4 show: tcc's expected output is gcc's)
+                  (do (swap! off #(align-up % (*' 8 ta)))
                       (.add out (assoc m :off (quot @off 8) :bitoff 0)))
                   :else
                   ;; gcc's rule: the field lies within a window of its type's size that begins at a boundary of
                   ;; its type's alignment (for the integer types, whose size is their alignment, a unit of their
                   ;; type; for _BitInt(N > 64) a window of N's size on a 64-bit boundary)
-                  (do (when (and (not packed)
+                  ;; CS290 (a): under #pragma pack (a maximum field alignment) gcc's stor-layout place_field takes no such
+                  ;; window (its PCC_BITFIELD_TYPE_MATTERS rule asks maximum_field_alignment == 0): the field follows the last
+                  (do (when (and (not packed) (not max-align)
                                  (let [ab (*' 8 ta) o @off] (> (+' (- o (*' ab (quot o ab))) w) unit)))
                         (swap! off #(align-up % (*' 8 ta))))
                       (when (:align m) (swap! off #(align-up % (*' 8 a))))
@@ -721,13 +804,20 @@
               (let [o (align-up (quot (+' @off 7) 8) a)
                     s (size-of t)]
                 (swap! al max a)
-                (.add out (assoc m :off o))
+                ;; a member after one of variable size (a VLA, GNU's): its offset is the run time's, :voff (CS106)
+                (.add out (cond-> (assoc m :off o) @vseen (assoc :voff true)))
+                (when (var-size? t) (reset! vseen true))
                 (reset! off (*' 8 (+' o (or s 0))))))))
         (let [al (long @al)
               al (if-let [ra (.get r :min-align)] (max al (long ra)) al)]
           (.put r :size (align-up (quot (+' @off 7) 8) al))
           (.put r :align al))))
     (.put r :members (vec out))
+    ;; GNU's structures of variable size (CS106): a member of variable size makes the record's size the run time's;
+    ;; the builder lays it out again at run time with the members' alignments (member-align: packed, #pragma pack)
+    (.put r :var-size (boolean (some #(var-size? (:t %)) members)))
+    (.put r :packed packed)
+    (.put r :max-align max-align)
     (.put r :complete true)))
 
 (defn- member
@@ -760,7 +850,7 @@
       (do (when *auto-init* (err! (str "'" (name kind) " " tag "' declared in underspecified object initializer")))
           (let [r (new-rec kind tag)] (.put ^HashMap (:tags (top-scope)) tag r) r)))))
 
-(declare check-struct check-enum)
+(declare check-struct check-enum pragma-pack!)
 
 (defn- int-mode
   "mode_for_size_tree (size, MODE_INT, limit): the integer mode of `n` bytes, up to TImode, else BLKmode."
@@ -1063,8 +1153,16 @@
             packed (some #(= "packed" (first %)) as)
             al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)]
         (when al (.put r :min-align al))
-        (when (cx :pack) (feat! :cc-attr-layout))
-        (layout! r ms kind packed (cx :pack))
+        ;; the 244 request: GNU's ms_struct (gcc_struct the default here; of the two the first written wins, gcc ignoring the
+        ;; other as incompatible)
+        (.put r :ms (= "ms_struct" (some #(#{"ms_struct" "gcc_struct"} (first %)) as)))
+        ;; CS290 (a): the pack state as it is now (a statement-level #pragma pack changes it inside a body)
+        (let [pk (:pack @(cx :pack-state))]
+          (when pk (feat! :cc-attr-layout))
+          (layout! r ms kind packed pk))
+        ;; a variably modified definition's members (GNU's, CS106): the builder lays it out at run time where it stands,
+        ;; finding its record by its body
+        (when (and (seq body) (vm-type? {:k kind :rec r})) (record! body {:rec r :kind kind}))
         ;; GNU's transparent_union on the definition: the type itself is transparent (c-attribs.cc)
         (when (and (= kind :union) (some #(= "transparent_union" (first %)) as) (transparent-ok? r))
           (.put r :transparent true))
@@ -1150,6 +1248,13 @@
                   v (if has-vf (when (integer? (:v rv)) (:v rv)) nxt)
                   _ (when (and under (some? v) (integer? v) (not= :bitint (:k (unq under))) (not= (wrap v under) v))
                       (err! (if vf "enumerator value outside the range of the underlying type" "overflow in enumeration values")))
+                  ;; C23 6.7.3.3: a redefinition of an enumeration without a fixed type has the first definition's
+                  ;; underlying type, and gcc's build_enumerator holds every value of the redefinition to it, an implicit
+                  ;; one too (c23-tag-enum-6)
+                  _ (when (and (not under) redef (not nested-under) (some? v) (integer? v))
+                      (when-let [ru (.get ^HashMap redef :under)]
+                        (when (and (int-type? ru) (not= (wrap v ru) v))
+                          (err! "enumerator value outside the range of underlying type"))))
                   v (if (and under (some? v)) (wrap v under) v)
                   _ (when under (feat! :cc-enum-type))
                   ;; C23 (6.7.3.3): during the definition a constant that int cannot hold has its
@@ -1528,7 +1633,14 @@
           (void-type? ub) (ptr (cond-> t-void (seq q) (assoc :q q)))
           ;; 6.5.15 p6: pointers to qualified or unqualified versions of compatible types give a pointer to the composite
           ;; type with the qualifiers of both (CS141); else gcc's "pointer type mismatch"
-          (or (compatible? ua ub) (compatible-ptr-targets? ua ub)) (ptr (reduce qual ua q))
+          ;; C23 6.2.7's composite of two compatible structures or unions, as far as ci models it: the variably modified
+          ;; one when only one is (gcc's composite_type_internal takes each member's composite: char (*)[] and char
+          ;; (*)[n] give char (*)[n]; gnu23-tag-composite-3, CS106)
+          (or (compatible? ua ub) (compatible-ptr-targets? ua ub))
+          (ptr (reduce qual (if (and (record-type? ua) (record-type? ub) (not (identical? (:rec ua) (:rec ub)))
+                                     (vm-type? ub) (not (vm-type? ua)))
+                              ub ua)
+                       q))
           :else (do (when-not (cx :permissive) (err! "pointer type mismatch in conditional expression")) (ptr (reduce qual ua q)))))
       (ptr-type? ta) ta
       (ptr-type? tb) tb
@@ -1681,7 +1793,8 @@
   "A call's result: the callee's result, its arguments checked."
   [f args form]
   (let [fname (ident f)
-        known (when fname (lookup fname))
+        ;; LLS21 (a): the parser's prelude declares the generic __atomic_load, store and exchange as `void f ()`: builtins here
+        known (when (and fname (not (#{"__atomic_load" "__atomic_store" "__atomic_exchange"} fname))) (lookup fname))
         bk (when (and fname (nil? known)) (lookup (str "__builtin_" fname)))
         _ (when (and bk (c99?)) (err! (str "implicit declaration of function '" fname "'")))
         rf (if (and fname (nil? known) (not= fname "__func__") (nil? bk))
@@ -1709,6 +1822,20 @@
     (or (when-let [b (or (:builtin rf) (when (and known fname (str/starts-with? fname "__builtin_")) fname))]
           (call-builtin b ras ft))
         (res (if ft (:ret ft) t-int)))))
+
+(defn- atomic-res
+  "LLS21 (a): the result of an __atomic_* or __sync_* builtin: the pointed-to type for a value, _Bool for a
+  compare-exchange and test-and-set, void for the rest."
+  [^String b ras]
+  (let [short (cond (str/starts-with? b "__atomic_") (subs b 9) (str/starts-with? b "__sync_") (subs b 7))]
+    (when (and short (not (#{"always_lock_free" "is_lock_free"} short)))
+      (let [t0 (when-let [r0 (first ras)] (let [t (decay (unq (:t r0)))] (when (ptr-type? t) (unq (:to t)))))
+            v (or t0 t-int)]
+        (cond
+          (re-matches #"(compare_exchange(_n)?|test_and_set|bool_compare_and_swap)" short) (res t-bool)
+          (re-matches #"(load_n|exchange_n|(fetch|add|sub|and|or|xor|nand)_.*|val_compare_and_swap|lock_test_and_set)" short)
+          (res v)
+          (#{"load" "store" "store_n" "exchange" "clear" "thread_fence" "signal_fence" "lock_release" "synchronize"} short) (res t-void))))))
 
 (defn- call-builtin [^String b ras ft]
   (when (#{"__builtin_constant_p" "__builtin_choose_expr" "__builtin_expect" "__builtin_inf" "__builtin_huge_val" "__builtin_inff"
@@ -1779,9 +1906,10 @@
           lf (and (integer? n) (#{1 2 4 8} (long n)) al (>= (long al) (long n)))]
       (res t-bool :v (cond lf 1 (= b "__atomic_always_lock_free") (when (integer? n) 0) :else nil)))
     ;; CS174 (b): decimal infinities and NaNs of the call's type (`__builtin_infd32 ()`, `__builtin_nansd64 ("")`)
+    (or (atomic-res b ras)
     (when-let [[_ w bits] (re-matches #"__builtin_(inf|nan|nans)d(32|64|128)" b)]
       (let [k (case bits "32" :dec32 "64" :dec64 :dec128)]
-        (res {:k k} :snan (when (= w "nans") k))))))
+        (res {:k k} :snan (when (= w "nans") k)))))))
 
 (def ^:private dec-kinds #{:dec32 :dec64 :dec128 :dec64x})
 
@@ -1826,6 +1954,16 @@
     (res t-ulong :v (when (and s (not (:vla t))) s) :vla-expr (boolean (:vla t)))))
 
 (defn- vla? [t] (case (:k t) :array (or (:vla t) (vla? (:of t))) false))
+
+(defn var-size?
+  "Whether a type's size is the run time's: a VLA, an array of elements of variable size, a structure or union with a
+  member of variable size (GNU's, CS106)."
+  [t]
+  (let [t (unq t)]
+    (case (:k t)
+      :array (boolean (or (:vla t) (var-size? (:of t))))
+      (:struct :union) (boolean (.get ^HashMap (:rec t) :var-size))
+      false)))
 
 (defn- generic-select [f]
   (let [[_ ctl & assocs] f
@@ -1915,10 +2053,16 @@
     (doseq [e (rest init)]
       (cond
         (keyword? e) nil
-        (and (seq? e) (= 'at (first e))) (doseq [d (rest e)]
-                                            (cond (keyword? d) nil
-                                                  (vector? d) (doseq [x d] (exi x))
-                                                  :else (exi d)))
+        ;; an array designator's index: c-typeck.cc's set_init_index, "not of integer type" for one that is not of integer
+        ;; type (nullptr's among them; c23-nullptr-6)
+        (and (seq? e) (= 'at (first e))) (let [idx! (fn [x] (let [r (ex x) k (:k (decay (unq (:t r))))]
+                                                              (when-not (or (int-type? (unq (:t r))) (#{:invalid :enum :bool} k))
+                                                                (err! "array index in initializer not of integer type"))
+                                                              r))]
+                                           (doseq [d (rest e)]
+                                             (cond (keyword? d) nil
+                                                   (vector? d) (doseq [x d] (idx! x))
+                                                   :else (idx! d))))
         (and et (not (seq? e))) (let [r (ex e)] (ptr-conv! et r "initialization") r)
         :else (check-init e)))
     (and (seq? init) (= 'c/embed (first init))) nil
@@ -1993,6 +2137,8 @@
           (emit! (call h args f))
           (case h
             c/id (emit! (ident-expr (second f)))
+            ;; CS291 (a): a constant gcc's lexer rejects (the converter's c/bad-lit): its message at its line, a value of its type
+            c/bad-lit (do (err! (nth f 3)) (emit! (res (parse-type (second f)) :v 0)))
             (+ - * / bit-and bit-or bit-xor and or)
             (if (= 1 n)
               (let [r (ex (first args)) t (decay (unq (:t r)))
@@ -2073,9 +2219,13 @@
                                :nfp (or (:nfp r) (float-type? (unq (:t r)))))))
             sizeof (let [r (ex (first args))]
                      (when (bit-field? r) (err! "'sizeof' applied to a bit-field"))
-                     (emit! (if (vla? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
-            sizeof-type (let [t (parse-type (first args))] (emit! (if (vla? t) (res t-ulong :tt t) (sizeof-res t)))) ; :tt, the builder's (queue 165)
-            alignof (let [r (ex (first args))] (when (bit-field? r) (err! "'_Alignof' applied to a bit-field")) (emit! (res t-ulong :v (or (:malign r) (align-of (unq (:t r)))))))
+                     (emit! (if (var-size? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
+            sizeof-type (let [t (parse-type (first args))] (emit! (if (var-size? t) (res t-ulong :tt t) (sizeof-res t)))) ; :tt, the builder's (queue 165)
+            alignof (let [r (ex (first args))
+                          dal (when (and (:entry r) (or (symbol? (first args)) (and (seq? (first args)) (= 'c/id (first (first args))))))
+                                (:dalign (:entry r)))]
+                      (when (bit-field? r) (err! "'_Alignof' applied to a bit-field"))
+                      (emit! (res t-ulong :v (or (:malign r) (if dal (max (long dal) (long (align-of (unq (:t r))))) (align-of (unq (:t r))))))))
             alignof-type (let [t (parse-type (first args))]
                            (when (incomplete-type? t) (err! "invalid application of 'alignof' to incomplete type"))
                            (emit! (res t-ulong :v (align-of (unq t)))))
@@ -2100,7 +2250,12 @@
             lit (emit! (lit-form f))
             byte-string (emit! (res (arr t-char (inc (byte-string-len args))) :str true))
             imaginary (do (when (< (std-num) 124) (pedwarn-c2y! "imaginary constants are a C2Y feature or GCC extension"))
-                          (emit! (res {:k :complex :of t-double})))
+                          ;; the complex type of the constant's part (GNU's 2i is _Complex int, 2.0fi _Complex float, CS105)
+                          (emit! (res {:k :complex :of (let [a (first args)]
+                                                         (cond
+                                                           (integer? a) (if (<= -2147483648 a 2147483647) t-int t-long)
+                                                           (and (seq? a) (= 'lit (first a))) (unq (parse-type (second a)))
+                                                           :else t-double))})))
             va-arg (let [[ap tf] args
                          t (unq (parse-type tf))]
                      ;; cc's Builtin: (*(T*)__builtin_va_arg_impl(ap))
@@ -2110,15 +2265,16 @@
                            t (parse-type tf)]
                        (feat! :cc-builtin-macro)
                        (doseq [p path] (when-not (keyword? p) (ex p)))
-                       (res t-ulong :v (loop [t (unq t) off 0 ps (seq path)]
+                       ;; :tt, the builder's: an offset through members or elements of variable size is the run time's (CS106)
+                       (res t-ulong :tt t :v (loop [t (unq t) off 0 ps (seq path)]
                                          (if-not ps
                                            off
                                            (let [p (first ps)]
                                              (cond
                                                (and (keyword? p) (record-type? t))
-                                               (if-let [m (member t (name p))] (recur (unq (:t m)) (+ off (long (:off m))) (next ps)) nil)
+                                               (if-let [m (member t (name p))] (when-not (:voff m) (recur (unq (:t m)) (+ off (long (:off m))) (next ps))) nil)
                                                (and (= :array (:k t)) (not (keyword? p)))
-                                               (when-let [i (const-int p)] (recur (unq (:of t)) (+ off (* (long i) (long (or (size-of (unq (:of t))) 0)))) (next ps)))
+                                               (when-let [i (when-not (var-size? (:of t)) (const-int p))] (recur (unq (:of t)) (+ off (* (long i) (long (or (size-of (unq (:of t))) 0)))) (next ps)))
                                                :else nil))))))
             types-compatible? (let [[a b] args ta (unq (parse-type a)) tb (unq (parse-type b))]
                                 ;; cc's Builtin: __ccgo__types_compatible_p((t1){}, (t2){})
@@ -2206,11 +2362,26 @@
       (assoc new :params (mapv pick (:params old) (:params new))))
     :else new))
 
+(def ^:private spec-modifiers #{"long" "short" "signed" "__signed" "__signed__" "unsigned" "_Complex" "__complex" "__complex__" "_Sat"})
+
+(defn- bad-specs-msg
+  "The error of a declaration's invalid type specifiers (the converter's :c/bad-specs, the words as written), as gcc's
+  declspecs_add_type gives it: the first type word (not long, short, signed, unsigned or _Complex) after another one is the
+  error, and when it is bool or _Bool the message names it (C23: \"'bool' cannot be defined via 'typedef'\" in a typedef,
+  else \"cannot be used here\"; c23-bool-errors-1, -2); otherwise two or more data types."
+  [m]
+  (let [ws (:c/bad-specs m)
+        words (when (vector? ws) (vec (remove spec-modifiers ws)))
+        w (when (>= (count words) 2) (second words))]
+    (if (#{"bool" "_Bool"} w)
+      (str "'" w "' cannot " (if (:c/typedef m) "be defined via 'typedef'" "be used here"))
+      "two or more data types in declaration specifiers")))
+
 (defn- declare-object!
   "A declared object or function: entered in its scope, its d annotation written."
   [^String n t m kind init param]
   (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be used here")))
-  (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
+  (when (:c/bad-specs m) (err! (bad-specs-msg m)))
   (let [t (if param (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t) t) ; a parameter's adjusted type (6.7.7.4)
         fn? (= :fn (:k (unq t)))
         lk (linkage-of n m fn? param)
@@ -2231,8 +2402,13 @@
                      (not= :invalid (:k (:t prev*))) (not= :invalid (:k t)))
             (err! (str "conflicting types for '" n "'")))
         t (if (and prev (#{:obj :fn} (:kind prev))) (composite (:t prev) t) t)
+        ;; the declaration's own alignment (gcc's DECL_ALIGN: the aligned attributes and alignment specifiers of every
+        ;; declaration of the identifier, merged by duplicate_decls), which __alignof__ of the name reads (c_alignof_expr's
+        ;; DECL_P case; align-3: a function declared aligned(256), defined without it)
+        dal (max (long (or (:dalign prev*) 0)) (long (or (:c/declared-align m) 0))
+                 (long (reduce max 0 (keep #(when (= "aligned" (first %)) (aligned-value (second %))) (apply attrs-of m all-attr-keys)))))
         e {:kind kind :t t :linkage lk :v (when (and (:constexpr m) (some? init)) (:v init)) :m m :feats (cx :feats)
-           :id (Object.) :file-scope (file-scope?) :name n}]
+           :id (Object.) :file-scope (file-scope?) :name n :dalign (when (pos? dal) dal)}]
     (attr-args! m)
     (binding [*line* (or (:line m) *line*)] (decl-position-attrs! m kind t))
     ;; cc types a library function gcc knows as a builtin by its __builtin_ declaration
@@ -2460,6 +2636,13 @@
         (pop-scope!) ;; the function itself is declared in the enclosing scope
         (record! nm (declare-object! n ft m :fn nil false))
         (push-scope!)
+        ;; CS294 (a): an identifier list's parameter no declaration names defaults to int, an error of gcc's since C99 (a
+        ;; permerror of -Wimplicit-int: a warning under -fpermissive, which -w silences; C90 warns only), at the declarator's line;
+        ;; CS297 (a): none under -Wno-implicit-int, a warning (not the checker's) under -Wno-error=implicit-int
+        (when (and kr (c99?) (not (cx :permissive)) (not (cx :no-implicit-int)))
+          (doseq [[pn _ pm] named :when (and pn (:c/implicit-int pm))]
+            (binding [*line* (or (:line (meta ps)) *line*)]
+              (err! (str "type of '" pn "' defaults to 'int'")))))
         (doseq [[pn pt pm psym] named]
           (when pn
             (record! psym
@@ -2498,7 +2681,7 @@
         t (if (= :union (:k t)) (assoc t :typedef-name n) t)]
     (attr-args! m)
     (decl-position-attrs! (assoc m :tag tf) :typedef t)
-    (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
+    (when (:c/bad-specs m) (err! (bad-specs-msg (assoc m :c/typedef true))))
     (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be defined via 'typedef'")))
     (let [prev (.get ^HashMap (:ord (top-scope)) n)]
       (when (and prev (= :typedef (:kind prev)) (not (type-eq (:t prev) t)))
@@ -2522,7 +2705,7 @@
                 (binding [*base* bt] (doseq [d ds] (check-decl d))))
       c/static-assert (let [[_ e] f r (exi e)]
                         (if (and (integer? (:v r)) (zero? (:v r)) (not= :nullptr (:k (unq (:t r)))) (not (cx :exec-charset))) (err! "static assertion failed")))
-      c/declare-specs (do (when (:c/bad-specs (meta f)) (err! "two or more data types in declaration specifiers"))
+      c/declare-specs (do (when (:c/bad-specs (meta f)) (err! (bad-specs-msg (meta f))))
                           (when (and (:c/implicit-int (meta f)) (seq (:c/decl-attrs (meta f))))
                             ;; `[[...]];` at file scope reads as attribute-only specifiers
                             (attr-decl-check! (cons 'c/attr-decl (:c/decl-attrs (meta f))) nil :top))
@@ -2635,11 +2818,18 @@
                    (let [iv (fn [r] (let [v (:v r)] (when (integer? v) (wrap v t))))
                          lo (iv ra)
                          hi (if has-b (iv rb) lo)]
+                     (when has-b (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
+                     ;; c-typeck.cc's do_case: a range's bound the controlling type cannot hold is converted, a pedwarn
+                     ;; (c23-switch-1)
+                     (when has-b
+                       (doseq [r [ra rb] :let [v (:v r)] :when (and (integer? v) (not= (wrap v t) v))]
+                         (pedwarn! (str "conversion of '" v "' to '" (gcc-int-name t) "' in range expression changes value to '" (wrap v t) "'"))))
                      (when (and (some? lo) (some? hi) (<= lo hi))
+                       ;; c-common.cc's c_add_case_label: a range's duplicate is "duplicate (or overlapping)"
                        (when (some (fn [[l h]] (and (<= lo h) (<= l hi))) @seen)
-                         (err! "duplicate case value"))
+                         (err! (if has-b "duplicate (or overlapping) case value" "duplicate case value")))
                        (swap! seen conj [lo hi]))))
-                 (when has-b (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
+                 (when (and has-b (not *switch*)) (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
                  nil)
           c/asm (do (feat! :asm) (asm-operands! (first args)) nil)
           (continue break) (do (when (seq args)
@@ -2651,7 +2841,10 @@
                    (let [r (ex (first args))]
                      (when-let [rt (cx :fn-ret)] (ptr-conv! rt r "return")))
                    nil)
-          (c/define c/undef c/directive c/pragma c/include) nil
+          ;; CS290 (a): #pragma pack anywhere, gcc's (its pragmas are tokens): a statement-level c/pragma (a main-file pragma
+          ;; inside a body, placed by offset, or the re-entered copy's, placed by the stream) changes the pack state from here on
+          c/pragma (do (pragma-pack! s) nil)
+          (c/define c/undef c/directive c/include) nil
           (if (decl-form? s)
             (do (check-decl s) nil)
             (ex s))))
@@ -2730,15 +2923,15 @@
   {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
    :done-units (HashSet.) :defs (IdentityHashMap.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
    :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts) :sys-dirs (:sys-dirs opts) :base (:base opts)
-   :permissive (:permissive opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
+   :permissive (:permissive opts) :no-implicit-int (:no-implicit-int opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
 
 (defn check-unit
   "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
   builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
   items when `annotate`)."
-  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines sys-dirs base notes no-c2y-compat no-c23-compat exec-charset permissive]}]
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines sys-dirs base notes no-c2y-compat no-c23-compat exec-charset permissive no-implicit-int]}]
   (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines :sys-dirs sys-dirs :base base
-                                      :permissive permissive :no-c2y-compat no-c2y-compat :no-c23-compat no-c23-compat :exec-charset exec-charset})
+                                      :permissive permissive :no-implicit-int no-implicit-int :no-c2y-compat no-c2y-compat :no-c23-compat no-c23-compat :exec-charset exec-charset})
                  :units (into {} (for [[k u] (:units rd)] [(str k) u]))
                  :results (when results (IdentityHashMap.)))
         items (ArrayList.)]

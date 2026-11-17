@@ -35,8 +35,9 @@ echo '{:files {}}' > "$t/known.edn"; mk "$t/w7" a.C:p b.C:d; judge "$t/w7" recor
 # through bin/repr-cpp roundtrip (the script passes the record): min.cpp under --corpus tr, recorded, then held
 printf 'min.cpp\tc++23\t-std=c++23\t%s\t-std=c++23\n' "$root/test/cpp/selftest/min.cpp" > "$t/list.tsv"
 echo '{:files {}}' > "$t/known.edn"
+# the clang judge's records (--judge clang: the own judge, the default since CP243 (a)'s flip, records under RESULTS/own/)
 rtrip() { REPR_CPP_ROUNDTRIP_KNOWN=$t/known.edn REPR_CPP_ROUNDTRIP_ORACLE=$t/oracle.edn REPR_CPP_ROUNDTRIP_RESULTS=$res \
-  "$root/bin/repr-cpp" roundtrip "$t/list.tsv" "$t/$1" --no-objects --corpus tr "${@:2}" > "$t/$1.log" 2>&1; }
+  "$root/bin/repr-cpp" roundtrip "$t/list.tsv" "$t/$1" --judge clang --no-objects --corpus tr "${@:2}" > "$t/$1.log" 2>&1; }
 rtrip r1 --record-results; st=$?
 [ $st = 0 ] && grep -q '"tr/min.cpp" :pass' "$res/tr.edn" && ok "bin/repr-cpp roundtrip --record-results writes tr.edn" || bad "script record: exit $st, $(tail -3 "$t/r1.log")"
 sed -i 's|"tr/min.cpp" :pass|"tr/min.cpp" :pass\n  "tr/gone.cpp" :pass|' "$res/tr.edn"

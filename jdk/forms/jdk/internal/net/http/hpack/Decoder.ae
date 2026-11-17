@@ -1,0 +1,372 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/hpack/Decoder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.hpack)
+
+(import '(java.io IOException)
+        '(java.net ProtocolException)
+        '(java.nio ByteBuffer)
+        '(java.util List Objects)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.function Supplier))
+
+(defclass ^:public ^:final Decoder
+  (field ^:private ^:final ^HPACK$Logger logger)
+
+  (field ^:private ^:static ^:final ^AtomicLong DECODERS_IDS (AtomicLong.))
+
+  (field ^:private ^:static ^:final ^{:tag (List State)} states)
+
+  (static-initializer
+    (let [s (new State/1 256)]
+      (loop [^int i 0]
+        (when (< i (alength s))
+          (cond
+            (== (bit-and-int i 2r10000000) 2r10000000)
+              (do (aset s i State/INDEXED) (recur (unchecked-inc-int i)))
+            (== (bit-and-int i 2r11000000) 2r01000000)
+              (do (aset s i State/LITERAL_WITH_INDEXING) (recur (unchecked-inc-int i)))
+            (== (bit-and-int i 2r11100000) 2r00100000)
+              (do (aset s i State/SIZE_UPDATE) (recur (unchecked-inc-int i)))
+            (== (bit-and-int i 2r11110000) 2r00010000)
+              (do (aset s i State/LITERAL_NEVER_INDEXED) (recur (unchecked-inc-int i)))
+            (== (bit-and-int i 2r11110000) 2r00000000)
+              (do (aset s i State/LITERAL) (recur (unchecked-inc-int i)))
+            :else (throw (InternalError. (String/valueOf i))))))
+      (set! states (List/of s))))
+
+  (field ^:private ^:final ^long id)
+
+  (field ^:private ^:final ^SimpleHeaderTable table)
+
+  (field ^:private ^State state State/READY)
+
+  (field ^:private ^:final ^IntegerReader integerReader)
+
+  (field ^:private ^:final ^StringReader stringReader)
+
+  (field ^:private ^:final ^StringBuilder name)
+
+  (field ^:private ^:final ^StringBuilder value)
+
+  (field ^:private ^:final ^int maxHeaderListSize)
+
+  (field ^:private ^:final ^int maxIndexed)
+
+  (field ^:private ^int intValue)
+
+  (field ^:private ^boolean firstValueRead)
+
+  (field ^:private ^boolean firstValueIndex)
+
+  (field ^:private ^boolean nameHuffmanEncoded)
+
+  (field ^:private ^boolean valueHuffmanEncoded)
+
+  (field ^:private ^int capacity)
+
+  (field ^:private ^long size)
+
+  (field ^:private ^int indexed)
+
+  (constructor ^:public [this ^int capacity] (this. capacity 0 0))
+
+  (constructor ^:public [this ^int capacity ^int maxHeaderListSize ^int maxIndexed]
+    (set! id (.incrementAndGet DECODERS_IDS))
+    (set! logger (.subLogger (HPACK/getLogger) (java-str "Decoder#" id)))
+    (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+      (.log logger
+            HPACK$Logger$Level/NORMAL
+            (lambda Supplier ^String []
+              (String/format "new decoder with maximum table size %s" (new Object/1 [capacity])))))
+    (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+      (.log logger
+            HPACK$Logger$Level/NORMAL
+            (lambda Supplier ^String []
+              (let [hashCode (Integer/toHexString (System/identityHashCode this))]
+                (String/format "toString='%s', identityHashCode=%s"
+                               (new Object/1 [(.toString this) hashCode]))))))
+    (set! (.-maxHeaderListSize this) maxHeaderListSize)
+    (set! (.-maxIndexed this) maxIndexed)
+    (.setMaxCapacity0 this capacity)
+    (set! table (SimpleHeaderTable. capacity (.subLogger logger "HeaderTable")))
+    (set! integerReader (IntegerReader.))
+    (set! stringReader (StringReader.))
+    (set! name (StringBuilder. 512))
+    (set! value (StringBuilder. 1024)))
+
+  (method ^:public setMaxCapacity ^void [this ^int capacity]
+    (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+      (.log logger
+            HPACK$Logger$Level/NORMAL
+            (lambda Supplier ^String []
+              (String/format "setting maximum table size to %s" (new Object/1 [capacity])))))
+    (.setMaxCapacity0 this capacity))
+
+  (method ^:private setMaxCapacity0 ^void [this ^int capacity]
+    (when (< capacity 0) (throw (IllegalArgumentException. (java-str "capacity >= 0: " capacity))))
+    (set! (.-capacity this) capacity))
+
+  (method ^:public decode :throws [IOException] ^void [this ^ByteBuffer headerBlock
+                                                       ^boolean endOfHeaderBlock
+                                                       ^DecodingCallback consumer]
+    (Objects/requireNonNull headerBlock "headerBlock")
+    (Objects/requireNonNull consumer "consumer")
+    (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+      (.log logger
+            HPACK$Logger$Level/NORMAL
+            (lambda Supplier ^String []
+              (String/format "reading %s, end of header block? %s"
+                             (new Object/1 [headerBlock endOfHeaderBlock])))))
+    (while (.hasRemaining headerBlock) (.proceed this headerBlock consumer))
+    (when (and endOfHeaderBlock (not (identical? state State/READY)))
+      (.log logger
+            HPACK$Logger$Level/NORMAL
+            (lambda Supplier ^String []
+              (String/format "unexpected end of %s representation" (new Object/1 [state]))))
+      (throw (ProtocolException. "Unexpected end of header block")))
+    (when endOfHeaderBlock (set! size (set! indexed 0))))
+
+  (method ^:private proceed :throws [IOException] ^void [this ^ByteBuffer input
+                                                         ^DecodingCallback action]
+    (switch state
+      READY (.resumeReady this input action)
+      INDEXED (.resumeIndexed this input action)
+      LITERAL (.resumeLiteral this input action)
+      LITERAL_WITH_INDEXING (.resumeLiteralWithIndexing this input action)
+      LITERAL_NEVER_INDEXED (.resumeLiteralNeverIndexed this input action)
+      SIZE_UPDATE (.resumeSizeUpdate this input action)
+      (throw (InternalError. (java-str "Unexpected decoder state: " state)))))
+
+  (method ^:private resumeReady :throws [IOException] ^void [this ^ByteBuffer input
+                                                             ^DecodingCallback action]
+    (let [b (bit-and-int (.get input (.position input)) 0xff)
+          s (cast State (.get states b))]
+      (when (.isLoggable logger HPACK$Logger$Level/EXTRA)
+        (.log logger
+              HPACK$Logger$Level/EXTRA
+              (lambda Supplier ^String []
+                (String/format "next binary representation %s (first byte 0x%02x)"
+                               (new Object/1 [s b])))))
+      (switch s
+        INDEXED
+          (do (.configure integerReader 7) (set! state State/INDEXED) (set! firstValueIndex true))
+        LITERAL
+          (do
+            (set! state State/LITERAL)
+            (set! firstValueIndex (not (== (bit-and-int b 2r00001111) 0)))
+            (when firstValueIndex (.configure integerReader 4)))
+        LITERAL_WITH_INDEXING
+          (do
+            (when (and (> maxIndexed 0) (> (set! indexed (unchecked-inc-int indexed)) maxIndexed))
+              (.onMaxLiteralWithIndexingReached action indexed maxIndexed))
+            (set! state State/LITERAL_WITH_INDEXING)
+            (set! firstValueIndex (not (== (bit-and-int b 2r00111111) 0)))
+            (when firstValueIndex (.configure integerReader 6)))
+        LITERAL_NEVER_INDEXED
+          (do
+            (set! state State/LITERAL_NEVER_INDEXED)
+            (set! firstValueIndex (not (== (bit-and-int b 2r00001111) 0)))
+            (when firstValueIndex (.configure integerReader 4)))
+        SIZE_UPDATE
+          (do
+            (.configure integerReader 5)
+            (set! state State/SIZE_UPDATE)
+            (set! firstValueIndex true))
+        (throw (InternalError. (String/valueOf s))))
+      (when-not firstValueIndex (.get input))))
+
+  (method ^:private checkMaxHeaderListSize :throws [ProtocolException] ^void [this ^long sz
+                                                                              ^DecodingCallback consumer]
+    (when (and (> maxHeaderListSize 0) (> sz maxHeaderListSize))
+      (.onMaxHeaderListSizeReached consumer sz maxHeaderListSize)))
+
+  (method ^:private resumeIndexed :throws [IOException] ^void [this ^ByteBuffer input
+                                                               ^DecodingCallback action]
+    (when-not (not (.read integerReader input))
+      (set! intValue (.get integerReader))
+      (.reset integerReader)
+      (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+        (.log logger
+              HPACK$Logger$Level/NORMAL
+              (lambda Supplier ^String [] (String/format "indexed %s" (new Object/1 [intValue])))))
+      (try
+        (let [f (.getHeaderFieldAt this intValue)]
+          (set! size
+                (unchecked-add (unchecked-add (unchecked-add size 32) (.length (.-name f)))
+                               (.length (.-value f))))
+          (.checkMaxHeaderListSize this size action)
+          (.onIndexed action intValue (.-name f) (.-value f)))
+        (finally (set! state State/READY)))))
+
+  (method ^:private getHeaderFieldAt :throws [IOException] ^SimpleHeaderTable$HeaderField [this
+                                                                                           ^int index]
+    (let [^:mutable ^SimpleHeaderTable$HeaderField f nil]
+      (try
+        (set! f (.get table index))
+        (catch IndexOutOfBoundsException e (throw (IOException. "header fields table index" e))))
+      f))
+
+  (method ^:private resumeLiteral :throws [IOException] ^void [this ^ByteBuffer input
+                                                               ^DecodingCallback action]
+    (when-not (not (.completeReading this input action))
+      (try
+        (if firstValueIndex
+            (do
+              (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+                (.log logger
+                      HPACK$Logger$Level/NORMAL
+                      (lambda Supplier ^String []
+                        (String/format "literal without indexing (%s, '%s', huffman=%b)"
+                                       (new Object/1 [intValue value valueHuffmanEncoded])))))
+              (let [f (.getHeaderFieldAt this intValue)]
+                (set! size
+                      (unchecked-add (unchecked-add (unchecked-add size 32) (.length (.-name f)))
+                                     (.length value)))
+                (.checkMaxHeaderListSize this size action)
+                (.onLiteral action intValue (.-name f) value valueHuffmanEncoded)))
+            (do
+              (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+                (.log logger
+                      HPACK$Logger$Level/NORMAL
+                      (lambda Supplier ^String []
+                        (String/format
+                          "literal without indexing ('%s', huffman=%b, '%s', huffman=%b)"
+                          (new Object/1 [name nameHuffmanEncoded value valueHuffmanEncoded])))))
+              (set! size
+                    (unchecked-add (unchecked-add (unchecked-add size 32) (.length name))
+                                   (.length value)))
+              (.checkMaxHeaderListSize this size action)
+              (.onLiteral action name nameHuffmanEncoded value valueHuffmanEncoded)))
+        (finally (.cleanUpAfterReading this)))))
+
+  (method ^:private resumeLiteralWithIndexing :throws [IOException] ^void [this ^ByteBuffer input
+                                                                           ^DecodingCallback action]
+    (when-not (not (.completeReading this input action))
+      (try
+        (let [^:mutable ^String n nil
+              v (.toString value)]
+          (if firstValueIndex
+              (do
+                (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+                  (.log logger
+                        HPACK$Logger$Level/NORMAL
+                        (lambda Supplier ^String []
+                          (String/format "literal with incremental indexing (%s, '%s', huffman=%b)"
+                                         (new Object/1 [intValue value valueHuffmanEncoded])))))
+                (let [f (.getHeaderFieldAt this intValue)]
+                  (set! n (.-name f))
+                  (set! size
+                        (unchecked-add (unchecked-add (unchecked-add size 32) (.length n))
+                                       (.length v)))
+                  (.checkMaxHeaderListSize this size action)
+                  (.onLiteralWithIndexing action intValue n v valueHuffmanEncoded)))
+              (do
+                (set! n (.toString name))
+                (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+                  (.log
+                    logger
+                    HPACK$Logger$Level/NORMAL
+                    (let [n n]
+                      (lambda Supplier ^String []
+                        (String/format
+                          "literal with incremental indexing ('%s', huffman=%b, '%s', huffman=%b)"
+                          (new Object/1 [n nameHuffmanEncoded value valueHuffmanEncoded]))))))
+                (set! size
+                      (unchecked-add (unchecked-add (unchecked-add size 32) (.length n))
+                                     (.length v)))
+                (.checkMaxHeaderListSize this size action)
+                (.onLiteralWithIndexing action n nameHuffmanEncoded v valueHuffmanEncoded)))
+          (.put table n v))
+        (finally (.cleanUpAfterReading this)))))
+
+  (method ^:private resumeLiteralNeverIndexed :throws [IOException] ^void [this ^ByteBuffer input
+                                                                           ^DecodingCallback action]
+    (when-not (not (.completeReading this input action))
+      (try
+        (if firstValueIndex
+            (do
+              (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+                (.log logger
+                      HPACK$Logger$Level/NORMAL
+                      (lambda Supplier ^String []
+                        (String/format "literal never indexed (%s, '%s', huffman=%b)"
+                                       (new Object/1 [intValue value valueHuffmanEncoded])))))
+              (let [f (.getHeaderFieldAt this intValue)]
+                (set! size
+                      (unchecked-add (unchecked-add (unchecked-add size 32) (.length (.-name f)))
+                                     (.length value)))
+                (.checkMaxHeaderListSize this size action)
+                (.onLiteralNeverIndexed action intValue (.-name f) value valueHuffmanEncoded)))
+            (do
+              (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+                (.log logger
+                      HPACK$Logger$Level/NORMAL
+                      (lambda Supplier ^String []
+                        (String/format "literal never indexed ('%s', huffman=%b, '%s', huffman=%b)"
+                                       (new Object/1
+                                            [name nameHuffmanEncoded value valueHuffmanEncoded])))))
+              (set! size
+                    (unchecked-add (unchecked-add (unchecked-add size 32) (.length name))
+                                   (.length value)))
+              (.checkMaxHeaderListSize this size action)
+              (.onLiteralNeverIndexed action name nameHuffmanEncoded value valueHuffmanEncoded)))
+        (finally (.cleanUpAfterReading this)))))
+
+  (method ^:private resumeSizeUpdate :throws [IOException] ^void [this ^ByteBuffer input
+                                                                  ^DecodingCallback action]
+    (when-not (not (.read integerReader input))
+      (set! intValue (.get integerReader))
+      (when (.isLoggable logger HPACK$Logger$Level/NORMAL)
+        (.log logger
+              HPACK$Logger$Level/NORMAL
+              (lambda Supplier ^String []
+                (String/format "dynamic table size update %s" (new Object/1 [intValue])))))
+      (java-assert (>= intValue 0))
+      (when (> intValue capacity)
+        (throw (IOException. (String/format
+                               "Received capacity exceeds expected: capacity=%s, expected=%s"
+                               (new Object/1 [intValue capacity])))))
+      (.reset integerReader)
+      (try
+        (.onSizeUpdate action intValue)
+        (.setMaxSize table intValue)
+        (finally (set! state State/READY)))))
+
+  (method ^:private completeReading :throws [IOException] ^boolean [this ^ByteBuffer input
+                                                                    ^DecodingCallback action]
+    (if (not firstValueRead)
+        (do
+          (if firstValueIndex
+              (do
+                (when-not (.read integerReader input) (return false))
+                (set! intValue (.get integerReader))
+                (.reset integerReader))
+              (do
+                (when-not (.read stringReader input name)
+                  (let [sz (unchecked-add (unchecked-add size 32) (.length name))]
+                    (.checkMaxHeaderListSize this sz action)
+                    (return false)))
+                (set! nameHuffmanEncoded (.isHuffmanEncoded stringReader))
+                (.reset stringReader)))
+          (set! firstValueRead true)
+          false)
+        (do
+          (when-not (.read stringReader input value)
+            (let [sz (unchecked-add (unchecked-add (unchecked-add size 32) (.length name))
+                                    (.length value))]
+              (.checkMaxHeaderListSize this sz action)
+              (return false)))
+          (set! valueHuffmanEncoded (.isHuffmanEncoded stringReader))
+          (.reset stringReader)
+          true)))
+
+  (method ^:private cleanUpAfterReading ^void [this]
+    (.setLength name 0)
+    (.setLength value 0)
+    (set! firstValueRead false)
+    (set! state State/READY))
+
+  (defclass ^:private ^:enum State
+    (constants READY INDEXED LITERAL_NEVER_INDEXED LITERAL LITERAL_WITH_INDEXING SIZE_UPDATE))
+
+  (method getTable ^SimpleHeaderTable [this] table))

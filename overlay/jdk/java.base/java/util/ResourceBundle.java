@@ -77,6 +77,15 @@ public abstract class ResourceBundle {
     }
 
     /**
+     * The bundle of baseName for locale (getBundle(String, Locale)): jrt has one class registry, so the
+     * loader names no other place to look (F5: java.util.logging's Logger and LogRecord call this form).
+     */
+    public static ResourceBundle getBundle(String baseName, Locale locale, ClassLoader loader) {
+        Objects.requireNonNull(loader);
+        return getBundle(baseName, locale);
+    }
+
+    /**
      * The bundle of baseName for locale, as the JDK's getBundle finds it with the default
      * Control: for the locale, then for each fallback locale, the classes of the candidate
      * locales' bundle names, the first found holding the others found after it as its parents;

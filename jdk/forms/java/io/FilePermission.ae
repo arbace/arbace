@@ -1,0 +1,547 @@
+;; Converted from jdk26u src/java.base/share/classes/java/io/FilePermission.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.io)
+
+(import '(java.nio.file InvalidPathException Path)
+        '(java.security Permission PermissionCollection)
+        '(java.util Enumeration Objects StringJoiner Vector)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function BiFunction)
+        '(jdk.internal.util StaticProperty)
+        '(sun.nio.fs DefaultFileSystemProvider)
+        '(sun.security.util SecurityConstants SecurityProperties))
+
+(defclasses
+  (defclass ^:public ^:final ^{Deprecated {:since "25" :forRemoval true}} FilePermission
+    :extends Permission
+    :implements [Serializable]
+
+    (field ^:private ^:static ^:final ^int EXECUTE 0x1)
+
+    (field ^:private ^:static ^:final ^int WRITE 0x2)
+
+    (field ^:private ^:static ^:final ^int READ 0x4)
+
+    (field ^:private ^:static ^:final ^int DELETE 0x8)
+
+    (field ^:private ^:static ^:final ^int READLINK 0x10)
+
+    (field ^:private ^:static ^:final ^int ALL
+      (bit-or-int (bit-or-int (bit-or-int (bit-or-int READ WRITE) EXECUTE) DELETE) READLINK))
+
+    (field ^:private ^:static ^:final ^int NONE 0x0)
+
+    (field ^:private ^:transient ^int mask)
+
+    (field ^:private ^:transient ^boolean directory)
+
+    (field ^:private ^:transient ^boolean recursive)
+
+    (field ^:private ^String actions)
+
+    (field ^:private ^:transient ^String cpath)
+
+    (field ^:private ^:transient ^Path npath)
+
+    (field ^:private ^:transient ^Path npath2)
+
+    (field ^:private ^:transient ^boolean allFiles)
+
+    (field ^:private ^:transient ^boolean invalid)
+
+    (field ^:private ^:static ^:final ^char RECURSIVE_CHAR \-)
+
+    (field ^:private ^:static ^:final ^char WILD_CHAR \*)
+
+    (field ^:private ^:static ^:final ^boolean nb (FilePermission/initNb))
+
+    (method ^:private ^:static initNb ^boolean []
+      (let [flag (SecurityProperties/getOverridableProperty "jdk.io.permissionsUseCanonicalPath")]
+        (switch flag
+          "true" false
+          "false" true
+          nil true
+          (throw (RuntimeException. (java-str "Invalid jdk.io.permissionsUseCanonicalPath: " flag))))))
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 7930732926638008763)
+
+    (field ^:private ^:static ^:final ^java.nio.file.FileSystem builtInFS
+      (DefaultFileSystemProvider/theFileSystem))
+
+    (field ^:private ^:static ^:final ^Path here (.getPath builtInFS (StaticProperty/userDir)))
+
+    (field ^:private ^:static ^:final ^Path EMPTY_PATH (.getPath builtInFS ""))
+
+    (field ^:private ^:static ^:final ^Path DASH_PATH (.getPath builtInFS "-"))
+
+    (field ^:private ^:static ^:final ^Path DOTDOT_PATH (.getPath builtInFS ".."))
+
+    (constructor ^:private [this ^String name ^FilePermission input ^Path npath ^Path npath2
+                            ^int mask ^String actions]
+      (super. name)
+      (set! (.-npath this) npath)
+      (set! (.-npath2 this) npath2)
+      (set! (.-actions this) actions)
+      (set! (.-mask this) mask)
+      (set! (.-allFiles this) (.-allFiles input))
+      (set! (.-invalid this) (.-invalid input))
+      (set! (.-recursive this) (.-recursive input))
+      (set! (.-directory this) (.-directory input))
+      (set! (.-cpath this) (.-cpath input)))
+
+    (method ^:private ^:static altPath ^Path [^Path in]
+      (try
+        (if (not (.isAbsolute in))
+            (.normalize (.resolve here in))
+            (.normalize (.relativize here in)))
+        (catch IllegalArgumentException e nil)))
+
+    (method ^:private newPermPlusAltPath ^FilePermission [this]
+      (.println System/err (java-str "PlusAlt path: " this ", npath: " npath))
+      (when (and (and (and nb (not invalid)) (nil? npath2)) (not allFiles))
+        (let [npath2 (FilePermission/altPath npath)]
+          (when (some? npath2)
+            (return (FilePermission. (java-str (.getName this) "#plus")
+                                     this
+                                     npath
+                                     npath2
+                                     mask
+                                     actions)))))
+      this)
+
+    (method ^:private newPermUsingAltPath ^FilePermission [this]
+      (.println System/err (java-str "Alt path: " this ", npath: " npath))
+      (when (and (not invalid) (not allFiles))
+        (let [npath2 (FilePermission/altPath npath)]
+          (when (some? npath2)
+            (return (FilePermission. (java-str (.getName this) "#using")
+                                     this
+                                     npath2
+                                     nil
+                                     mask
+                                     actions)))))
+      this)
+
+    (method ^:private init ^void [this ^int mask]
+      (when-not (== (bit-and-int mask ALL) mask)
+        (throw (IllegalArgumentException. "invalid actions mask")))
+      (when (== mask NONE) (throw (IllegalArgumentException. "invalid actions mask")))
+      (if nb
+          (let [^:mutable name (.getName this)]
+            (when (nil? name) (throw (NullPointerException. "name can't be null")))
+            (set! (.-mask this) mask)
+            (if (.equals name "<<ALL FILES>>")
+                (do (set! allFiles true) (set! npath EMPTY_PATH))
+                (let [^:mutable rememberStar false]
+                  (when (.endsWith name "*")
+                    (set! rememberStar true)
+                    (set! recursive false)
+                    (set! name
+                          (java-str (.substring name 0 (unchecked-subtract-int (.length name) 1))
+                                    "-")))
+                  (try
+                    (set! npath (.normalize (.getPath builtInFS (.getPath (File. name)))))
+                    (let [lastName (.getFileName npath)]
+                      (when (and (some? lastName) (.equals lastName DASH_PATH))
+                        (set! directory true)
+                        (set! recursive (not rememberStar))
+                        (set! npath (.getParent npath)))
+                      (when (nil? npath) (set! npath EMPTY_PATH))
+                      (set! invalid false))
+                    (catch InvalidPathException ipe
+                      (set! npath (.getPath builtInFS "-u-s-e-l-e-s-s-"))
+                      (set! invalid true))))))
+          (do
+            (when (nil? (set! cpath (.getName this)))
+              (throw (NullPointerException. "name can't be null")))
+            (set! (.-mask this) mask)
+            (if (.equals cpath "<<ALL FILES>>")
+                (do
+                  (set! allFiles true)
+                  (set! directory true)
+                  (set! recursive true)
+                  (set! cpath ""))
+                (do
+                  (try
+                    (let [^String name (if (.endsWith cpath "*")
+                                           (java-str
+                                             (.substring
+                                               cpath
+                                               0
+                                               (unchecked-subtract-int (.length cpath) 1))
+                                             "-")
+                                           cpath)]
+                      (.getPath builtInFS (.getPath (File. name))))
+                    (catch InvalidPathException ipe (set! invalid true) (return)))
+                  (try
+                    (let [^:mutable path cpath]
+                      (if (.endsWith cpath "*")
+                          (do
+                            (set! path
+                                  (java-str (.substring
+                                              path
+                                              0
+                                              (unchecked-subtract-int (.length path) 1))
+                                            "-"))
+                            (set! path (.getCanonicalPath (File. path)))
+                            (set! cpath
+                                  (java-str (.substring
+                                              path
+                                              0
+                                              (unchecked-subtract-int (.length path) 1))
+                                            "*")))
+                          (set! cpath (.getCanonicalPath (File. path)))))
+                    (catch IOException ignore))
+                  (let [^:mutable len (.length cpath)
+                        ^char last (if (> len 0) (.charAt cpath (unchecked-subtract-int len 1)) 0)]
+                    (if (and (== last RECURSIVE_CHAR)
+                             (== (.charAt cpath (unchecked-subtract-int len 2)) File/separatorChar))
+                        (do
+                          (set! directory true)
+                          (set! recursive true)
+                          (set! cpath (.substring cpath 0 (set! len (unchecked-dec-int len)))))
+                        (when (and (== last WILD_CHAR)
+                                   (== (.charAt cpath (unchecked-subtract-int len 2))
+                                       File/separatorChar))
+                          (set! directory true)
+                          (set! cpath (.substring cpath 0 (set! len (unchecked-dec-int len))))))))))))
+
+    (constructor ^:public [this ^String path ^String actions]
+      (super. path)
+      (.init this (FilePermission/getMask actions)))
+
+    (constructor [this ^String path ^int mask]
+      (super. path)
+      (.init this mask))
+
+    (method ^:public implies ^boolean [this ^Permission p]
+      (if-instance [^FilePermission that p]
+        (and (== (bit-and-int (.-mask this) (.-mask that)) (.-mask that))
+             (.impliesIgnoreMask this that))
+        false))
+
+    (method impliesIgnoreMask ^boolean [this ^FilePermission that]
+      (cond
+        (identical? this that) true
+        allFiles true
+        (or (.-invalid this) (.-invalid that)) false
+        (.-allFiles that) false
+        nb
+          (cond
+            (or (not (= (and (.-recursive this) (.-recursive that)) (.-recursive that)))
+                (not (= (and (.-directory this) (.-directory that)) (.-directory that))))
+              false
+            (and (.equals (.-npath this) (.-npath that)) (= (.-directory this) (.-directory that)))
+              true
+            :else
+              (let [^:mutable diff (FilePermission/containsPath (.-npath this) (.-npath that))]
+                (cond
+                  (and (>= diff 1) recursive) true
+                  (and (and (== diff 1) directory) (not (.-directory that))) true
+                  :else
+                    (do
+                      (when (some? (.-npath2 this))
+                        (when (and (.equals (.-npath2 this) (.-npath that))
+                                   (= (.-directory this) (.-directory that)))
+                          (return true))
+                        (set! diff (FilePermission/containsPath (.-npath2 this) (.-npath that)))
+                        (when (and (>= diff 1) recursive) (return true))
+                        (when (and (and (== diff 1) directory) (not (.-directory that)))
+                          (return true)))
+                      false))))
+        (.-directory this)
+          (cond
+            (.-recursive this)
+              (if (.-directory that)
+                  (and (>= (.length (.-cpath that)) (.length (.-cpath this)))
+                       (.startsWith (.-cpath that) (.-cpath this)))
+                  (and (> (.length (.-cpath that)) (.length (.-cpath this)))
+                       (.startsWith (.-cpath that) (.-cpath this))))
+            (.-directory that) (if (.-recursive that) false (.equals (.-cpath this) (.-cpath that)))
+            :else
+              (let [last (.lastIndexOf (.-cpath that) File/separatorChar)]
+                (if (== last -1)
+                    false
+                    (and (== (.length (.-cpath this)) (unchecked-add-int last 1))
+                         (.regionMatches (.-cpath this)
+                                         0
+                                         (.-cpath that)
+                                         0
+                                         (unchecked-add-int last 1))))))
+        (.-directory that) false
+        :else (.equals (.-cpath this) (.-cpath that))))
+
+    (method ^:private ^:static containsPath ^int [^Path p1 ^Path p2]
+      (cond
+        (not (Objects/equals (.getRoot p1) (.getRoot p2))) -1
+        (.equals p1 EMPTY_PATH)
+          (cond
+            (.equals p2 EMPTY_PATH) 0
+            (.equals (.getName p2 0) DOTDOT_PATH) -1
+            :else (.getNameCount p2))
+        (.equals p2 EMPTY_PATH)
+          (let [c1 (.getNameCount p1)]
+            (if (not (.equals (.getName p1 (unchecked-subtract-int c1 1)) DOTDOT_PATH)) -1 c1))
+        :else
+          (let [c1 (.getNameCount p1)
+                c2 (.getNameCount p2)
+                n (Math/min c1 c2)
+                ^:mutable ^int i 0]
+            (while (< i n)
+              (when-not (.equals (.getName p1 i) (.getName p2 i)) (break))
+              (set! i (unchecked-inc-int i)))
+            (cond
+              (and (< i c1) (not (.equals (.getName p1 (unchecked-subtract-int c1 1)) DOTDOT_PATH)))
+                -1
+              (and (< i c2) (.equals (.getName p2 i) DOTDOT_PATH)) -1
+              :else (unchecked-subtract-int (unchecked-add-int (unchecked-subtract-int c1 i) c2) i)))))
+
+    (method ^:public equals ^boolean [this obj]
+      (if (identical? obj this)
+          true
+          (if-instance [^FilePermission that obj]
+            (cond
+              (or (.-invalid this) (.-invalid that)) false
+              nb
+                (and (and (and (and (and (== (.-mask this) (.-mask that))
+                                         (= (.-allFiles this) (.-allFiles that)))
+                                    (.equals (.-npath this) (.-npath that)))
+                               (Objects/equals npath2 (.-npath2 that)))
+                          (= (.-directory this) (.-directory that)))
+                     (= (.-recursive this) (.-recursive that)))
+              :else
+                (and (and (and (and (== (.-mask this) (.-mask that))
+                                    (= (.-allFiles this) (.-allFiles that)))
+                               (.equals (.-cpath this) (.-cpath that)))
+                          (= (.-directory this) (.-directory that)))
+                     (= (.-recursive this) (.-recursive that))))
+            false)))
+
+    (method ^:public hashCode ^int [this]
+      (if nb (Objects/hash mask allFiles directory recursive npath npath2 invalid) 0))
+
+    (method ^:private ^:static getMask ^int [^String actions]
+      (let [^:mutable mask NONE]
+        (cond
+          (nil? actions) mask
+          (identical? actions SecurityConstants/FILE_READ_ACTION) READ
+          (identical? actions SecurityConstants/FILE_WRITE_ACTION) WRITE
+          (identical? actions SecurityConstants/FILE_EXECUTE_ACTION) EXECUTE
+          (identical? actions SecurityConstants/FILE_DELETE_ACTION) DELETE
+          (identical? actions SecurityConstants/FILE_READLINK_ACTION) READLINK
+          :else
+            (let [a (.toCharArray actions)
+                  ^:mutable i (unchecked-subtract-int (alength a) 1)]
+              (if (< i 0)
+                  mask
+                  (do
+                    (while (not (== i -1))
+                      (let [^:mutable ^char c (unchecked-char 0)]
+                        (while (and (not (== i -1))
+                                    (or (or (or (or (== (set! c (aget a i)) \space) (== c \return))
+                                                (== c \newline))
+                                            (== c \formfeed))
+                                        (== c \tab)))
+                          (set! i (unchecked-dec-int i)))
+                        (let [^:mutable ^int matchlen 0]
+                          (cond
+                            (and (and (and (and (>= i 3)
+                                                (or
+                                                  (== (aget a (unchecked-subtract-int i 3)) \r)
+                                                  (== (aget a (unchecked-subtract-int i 3)) \R)))
+                                           (or (== (aget a (unchecked-subtract-int i 2)) \e)
+                                               (== (aget a (unchecked-subtract-int i 2)) \E)))
+                                      (or (== (aget a (unchecked-subtract-int i 1)) \a)
+                                          (== (aget a (unchecked-subtract-int i 1)) \A)))
+                                 (or (== (aget a i) \d) (== (aget a i) \D)))
+                              (do (set! matchlen 4) (set! mask (bit-or-int mask READ)))
+                            (and (and (and (and (and
+                                                  (>= i 4)
+                                                  (or
+                                                    (== (aget a (unchecked-subtract-int i 4)) \w)
+                                                    (== (aget a (unchecked-subtract-int i 4)) \W)))
+                                                (or
+                                                  (== (aget a (unchecked-subtract-int i 3)) \r)
+                                                  (== (aget a (unchecked-subtract-int i 3)) \R)))
+                                           (or (== (aget a (unchecked-subtract-int i 2)) \i)
+                                               (== (aget a (unchecked-subtract-int i 2)) \I)))
+                                      (or (== (aget a (unchecked-subtract-int i 1)) \t)
+                                          (== (aget a (unchecked-subtract-int i 1)) \T)))
+                                 (or (== (aget a i) \e) (== (aget a i) \E)))
+                              (do (set! matchlen 5) (set! mask (bit-or-int mask WRITE)))
+                            (and (and (and (and
+                                             (and
+                                               (and
+                                                 (and
+                                                   (>= i 6)
+                                                   (or
+                                                     (== (aget a (unchecked-subtract-int i 6)) \e)
+                                                     (== (aget a (unchecked-subtract-int i 6)) \E)))
+                                                 (or
+                                                   (== (aget a (unchecked-subtract-int i 5)) \x)
+                                                   (== (aget a (unchecked-subtract-int i 5)) \X)))
+                                               (or
+                                                 (== (aget a (unchecked-subtract-int i 4)) \e)
+                                                 (== (aget a (unchecked-subtract-int i 4)) \E)))
+                                             (or
+                                               (== (aget a (unchecked-subtract-int i 3)) \c)
+                                               (== (aget a (unchecked-subtract-int i 3)) \C)))
+                                           (or (== (aget a (unchecked-subtract-int i 2)) \u)
+                                               (== (aget a (unchecked-subtract-int i 2)) \U)))
+                                      (or (== (aget a (unchecked-subtract-int i 1)) \t)
+                                          (== (aget a (unchecked-subtract-int i 1)) \T)))
+                                 (or (== (aget a i) \e) (== (aget a i) \E)))
+                              (do (set! matchlen 7) (set! mask (bit-or-int mask EXECUTE)))
+                            (and (and (and (and
+                                             (and
+                                               (and
+                                                 (>= i 5)
+                                                 (or
+                                                   (== (aget a (unchecked-subtract-int i 5)) \d)
+                                                   (== (aget a (unchecked-subtract-int i 5)) \D)))
+                                               (or
+                                                 (== (aget a (unchecked-subtract-int i 4)) \e)
+                                                 (== (aget a (unchecked-subtract-int i 4)) \E)))
+                                             (or
+                                               (== (aget a (unchecked-subtract-int i 3)) \l)
+                                               (== (aget a (unchecked-subtract-int i 3)) \L)))
+                                           (or (== (aget a (unchecked-subtract-int i 2)) \e)
+                                               (== (aget a (unchecked-subtract-int i 2)) \E)))
+                                      (or (== (aget a (unchecked-subtract-int i 1)) \t)
+                                          (== (aget a (unchecked-subtract-int i 1)) \T)))
+                                 (or (== (aget a i) \e) (== (aget a i) \E)))
+                              (do (set! matchlen 6) (set! mask (bit-or-int mask DELETE)))
+                            (and (and (and
+                                        (and
+                                          (and
+                                            (and
+                                              (and
+                                                (and
+                                                  (>= i 7)
+                                                  (or
+                                                    (== (aget a (unchecked-subtract-int i 7)) \r)
+                                                    (== (aget a (unchecked-subtract-int i 7)) \R)))
+                                                (or
+                                                  (== (aget a (unchecked-subtract-int i 6)) \e)
+                                                  (== (aget a (unchecked-subtract-int i 6)) \E)))
+                                              (or
+                                                (== (aget a (unchecked-subtract-int i 5)) \a)
+                                                (== (aget a (unchecked-subtract-int i 5)) \A)))
+                                            (or (== (aget a (unchecked-subtract-int i 4)) \d)
+                                                (== (aget a (unchecked-subtract-int i 4)) \D)))
+                                          (or (== (aget a (unchecked-subtract-int i 3)) \l)
+                                              (== (aget a (unchecked-subtract-int i 3)) \L)))
+                                        (or (== (aget a (unchecked-subtract-int i 2)) \i)
+                                            (== (aget a (unchecked-subtract-int i 2)) \I)))
+                                      (or (== (aget a (unchecked-subtract-int i 1)) \n)
+                                          (== (aget a (unchecked-subtract-int i 1)) \N)))
+                                 (or (== (aget a i) \k) (== (aget a i) \K)))
+                              (do (set! matchlen 8) (set! mask (bit-or-int mask READLINK)))
+                            :else
+                              (throw (IllegalArgumentException.
+                                       (java-str "invalid permission: " actions))))
+                          (let [^:mutable seencomma false]
+                            (while (and (>= i matchlen) (not seencomma))
+                              (switch (set! c (aget a (unchecked-subtract-int i matchlen)))
+                                (\space \return \newline \formfeed \tab) nil
+                                (if (and (== c \,) (> i matchlen))
+                                    (set! seencomma true)
+                                    (throw (IllegalArgumentException.
+                                             (java-str "invalid permission: " actions)))))
+                              (set! i (unchecked-dec-int i)))
+                            (set! i (unchecked-subtract-int i matchlen))))))
+                    mask))))))
+
+    (method getMask ^int [this] mask)
+
+    (method ^:private ^:static getActions ^String [^int mask]
+      (let [sj (StringJoiner. ",")]
+        (when (== (bit-and-int mask READ) READ) (.add sj "read"))
+        (when (== (bit-and-int mask WRITE) WRITE) (.add sj "write"))
+        (when (== (bit-and-int mask EXECUTE) EXECUTE) (.add sj "execute"))
+        (when (== (bit-and-int mask DELETE) DELETE) (.add sj "delete"))
+        (when (== (bit-and-int mask READLINK) READLINK) (.add sj "readlink"))
+        (.toString sj)))
+
+    (method ^:public getActions ^String [this]
+      (when (nil? actions) (set! actions (FilePermission/getActions (.-mask this))))
+      actions)
+
+    (method ^:public newPermissionCollection ^PermissionCollection [this]
+      (FilePermissionCollection.))
+
+    (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream s]
+      (when (nil? actions) (.getActions this))
+      (.defaultWriteObject s))
+
+    (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                     ^ObjectInputStream s]
+      (.defaultReadObject s)
+      (.init this (FilePermission/getMask actions)))
+
+    (method withNewActions ^FilePermission [this ^int effective]
+      (FilePermission. (.getName this) this (.-npath this) (.-npath2 this) effective nil)))
+
+  (defclass ^:final FilePermissionCollection
+    :extends PermissionCollection
+    :implements [Serializable]
+
+    (field ^:private ^:transient ^{:tag (ConcurrentHashMap String Permission)} perms)
+
+    (constructor ^:public [this] (set! perms (ConcurrentHashMap.)))
+
+    (method ^:public add ^void [this ^Permission permission]
+      (if-instance [^FilePermission fp permission]
+        (do
+          (when (.isReadOnly this)
+            (throw (SecurityException.
+                     "attempt to add a Permission to a readonly PermissionCollection")))
+          (.merge perms
+                  (.getName fp)
+                  fp
+                  (lambda BiFunction ^Permission [^Permission existingVal ^Permission newVal]
+                    (let [oldMask (.getMask (cast FilePermission existingVal))
+                          newMask (.getMask (cast FilePermission newVal))]
+                      (when-not (== oldMask newMask)
+                        (let [effective (bit-or-int oldMask newMask)]
+                          (when (== effective newMask) (return newVal))
+                          (when-not (== effective oldMask)
+                            (return (.withNewActions (cast FilePermission newVal) effective)))))
+                      existingVal))))
+        (throw (IllegalArgumentException. (java-str "invalid permission: " permission)))))
+
+    (method ^:public implies ^boolean [this ^Permission permission]
+      (if-instance [^FilePermission fperm permission]
+        (let [desired (.getMask fperm)
+              ^:mutable ^int effective 0
+              ^:mutable needed desired]
+          (for-each [^Permission perm (.values perms)]
+            (let [fp (cast FilePermission perm)]
+              (when (and (not (== (bit-and-int needed (.getMask fp)) 0))
+                         (.impliesIgnoreMask fp fperm))
+                (set! effective (bit-or-int effective (.getMask fp)))
+                (when (== (bit-and-int effective desired) desired) (return true))
+                (set! needed (bit-and-int desired (bit-not-int effective))))))
+          false)
+        false))
+
+    (method ^:public elements ^{:tag (Enumeration Permission)} [this]
+      (.elements perms))
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 2202956749081564585)
+
+    (field ^:private ^:static ^:final ^ObjectStreamField/1 serialPersistentFields
+      (new ObjectStreamField/1 [(ObjectStreamField. "permissions" Vector)]))
+
+    (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream out]
+      (let [^{:tag (Vector Permission)} permissions (Vector. (.values perms))
+            pfields (.putFields out)]
+        (.put pfields "permissions" permissions)
+        (.writeFields out)))
+
+    (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                     ^ObjectInputStream in]
+      (let [gfields (.readFields in)
+            ^{:tag (Vector Permission)} permissions (cast Vector (.get gfields "permissions" nil))]
+        (set! perms (ConcurrentHashMap. (.size permissions)))
+        (for-each [^Permission perm permissions] (.put perms (.getName perm) perm))))))

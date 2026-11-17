@@ -294,6 +294,8 @@
   [host ^String id ^String nm ^String dg errors?]
   (let [g (get (:gcc-db host) (str id "/" nm))]
     (cond
+      ;; the test's own verdict (the user, 2026-11-07): the port's stream against cc's alone; gcc -E's digests the oracle tier's
+      (not (host/gcc-judge?)) "-"
       (nil? g) "unrecorded"
       (gcc-digest-agrees? g dg errors?) (if (= g dg) "agree" "both-reject")
       (contains? (get-in (:known-gcc host) [(keyword id)]) nm) "known"
@@ -327,6 +329,9 @@
                 (nil? cc) ["no-cc" dg nil]
                 (same-dump? cc mine) ["equal" dg nil]
                 (and k (= (:gcc k) dg)) ["gcc" dg nil]
+                ;; the test's own verdict (the user, 2026-11-07): where cc and the port differ, the known file's reviewed class
+                ;; decides; its :gcc digest (gcc -E's stream, over gcc's headers) is the oracle tier's (ARBACE_C_JUDGE=gcc)
+                (and k (:class k) (not (host/gcc-judge?)) (not (seq (:crash r)))) ["gcc" dg nil]
                 ;; the reference rejects the file (an error test): the port must report an error too
                 (and k (= (:gcc k) :rejected) (seq (:errors r))) ["gcc" dg nil]
                 ;; the port's stream is not gcc's either: the known file's :gcc level classes it
@@ -364,7 +369,9 @@
         gcc-fail (filter (fn [r] (#{"differ" "unrecorded"} (nth r 5))) rs)
         stale (concat (for [[nm _] known :when (not (some (fn [[n _ ps]] (and (= n nm) (= ps "gcc"))) rs))] [:pp nm])
                       (for [[nm _] known-lex :when (not (some (fn [[n ls]] (and (= n nm) (= ls "differ"))) rs))] [:lex nm])
-                      (for [[nm _] known-gcc :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 5) "known"))) rs))] [:gcc nm]))
+                      ;; the :gcc level's entries are the oracle tier's under each test's own verdict (the user, 2026-11-07)
+                      (for [[nm _] known-gcc :when (host/gcc-judge?)
+                            :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 5) "known"))) rs))] [:gcc nm]))
         bytes (reduce + (map #(.length (java.io.File. (str base "/" (:name %)))) entries))]
     (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" (map str (concat (take 4 %) [(nth % 5)]))) "\n") rs)))
     (spit (str d "/differ.txt") (str/join (map #(str (first %) "\t" (nth % 2) "\t" (nth % 4) "\n") pp-fail)))
@@ -482,7 +489,8 @@
         judge #(token-control-result work ids levels gcc-db %)]
     (vec (concat (control-rows "repr-c check" :lex ["lex dump" "cc lex dump"] judge)
                  (control-rows "repr-c check" :pp ["pp dump" "cc pp dump"] judge)
-                 (control-rows "repr-c check" :gcc-digest ["tokens' digest" "gcc -E digest"] judge)))))
+                 (when (host/gcc-judge?)
+                   (control-rows "repr-c check" :gcc-digest ["tokens' digest" "gcc -E digest"] judge))))))
 
 (declare get-gcc-digest)
 
@@ -491,7 +499,9 @@
   pp dump differs from cc's and whose port stream gives gcc -E's tokens (WORK/ID/gcc/NAME.i), with
   the class `classify` gives it; each lex difference with its class. Files whose stream differs from
   gcc's too are printed, not recorded. A file of no class (none kept, classify none, at :gcc none kept) is not written (no
-  placeholder class: queue 122, F1): it is printed and the result is the number of such files (the caller fails)."
+  placeholder class: queue 122, F1): it is printed and the result is the number of such files (the caller fails). Under each
+  test's own verdict (the default, the user 2026-11-07; host/gcc-judge? false) gcc did not run: the :pp entries keep their :gcc
+  digests and the :gcc level is kept as recorded (the oracle tier's), only the :pp and :lex classes are the run's."
   ([^String work ids] (record work ids known-file))
   ([^String work ids ^String known-file]
   (let [known (read-string (slurp known-file))
@@ -506,9 +516,15 @@
                         cls (fn [nm old] (or (:class (get old nm)) (let [f (resolve 'arbace.repr.c.ppcheck/classify)] (f (str base "/" nm)))))
                         ;; an entry of no class: printed, counted, not written
                         no-class (fn [lvl nm e] (if (:class e) [nm e] (do (swap! left conj (str id " " nm " at " lvl)) nil)))
+                        gcc-judge (host/gcc-judge?)
                         pp-entries (into (sorted-map)
                                          (keep (fn [[nm _ ps dg]]
                                                  (when (#{"differ" "gcc"} ps)
+                                                   (if-not gcc-judge
+                                                     ;; each test's own verdict (the user, 2026-11-07): gcc did not run, so the
+                                                     ;; entry's :gcc (gcc -E's digest over gcc's headers, the oracle tier's) is kept
+                                                     ;; as recorded and only its class is the run's
+                                                     (no-class :pp nm (assoc (get old-pp nm {}) :class (cls nm old-pp)))
                                                    (let [g (read-or-nil (str d "/gcc/" nm ".i"))
                                                          gst (str/trim (or (read-or-nil (str d "/gcc/" nm ".status")) "0"))
                                                          port-errs (some #(.startsWith ^String % "#error")
@@ -522,21 +538,23 @@
                                                        :else
                                                        (do (println (str id ": " nm ": the port's stream is not gcc's either"
                                                                          (when-not g " (no gcc output)") ": its class at :gcc"))
-                                                           (no-class :pp nm {:class (cls nm old-pp) :gcc :differs})))))))
+                                                           (no-class :pp nm {:class (cls nm old-pp) :gcc :differs}))))))))
                                          rows)
                         lex-entries (into (sorted-map)
                                           (keep (fn [[nm ls]] (when (= ls "differ") (no-class :lex nm {:class (cls nm old-lex)}))))
                                           rows)
                         ;; CS51 (a): the files whose stream is not gcc's, nor rejected by both
                         old-gcc (get-in known [:gcc (keyword id)] {})
-                        gcc-entries (into (sorted-map)
+                        gcc-entries (if-not gcc-judge
+                                      old-gcc
+                                      (into (sorted-map)
                                           (keep (fn [[nm _ _ dg]]
                                                   (let [g (get-gcc-digest d nm)
                                                         port-errs (some #(.startsWith ^String % "#error")
                                                                         (str/split-lines (or (read-or-nil (str d "/port-pp/" nm ".tsv")) "")))]
                                                     (when-not (or (= g dg) (and (= g :rejected) port-errs))
                                                       (no-class :gcc nm {:class (:class (get old-gcc nm))})))))
-                                          rows)]
+                                          rows))]
                     (-> known
                         (assoc-in [:pp (keyword id)] pp-entries)
                         (assoc-in [:lex (keyword id)] lex-entries)
@@ -692,7 +710,11 @@
               (System/exit (max st cst)))
     "record" (let [[work & ids] args
                    n (record work ids)]
-               (record-gcc work ids)
+               ;; gcc -E's digests are the oracle tier's (the user, 2026-11-07): recorded only under ARBACE_C_JUDGE=gcc, where
+               ;; bin/lib/repr-c/check ran gcc; else test/repr/c/pp-gcc.sha256 is left as it is
+               (if (host/gcc-judge?)
+                 (record-gcc work ids)
+                 (println "repr-c check --tokens --record: gcc -E's digests (test/repr/c/pp-gcc.sha256) and the :gcc level kept: the oracle tier's (ARBACE_C_JUDGE=gcc)"))
                (shutdown-agents)
                ;; 3: the known file written, files of no class left out of it (the caller checks and fails)
                (System/exit (if (pos? n) 3 0)))

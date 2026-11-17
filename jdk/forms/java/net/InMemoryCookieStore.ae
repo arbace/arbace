@@ -1,0 +1,163 @@
+;; Converted from jdk26u src/java.base/share/classes/java/net/InMemoryCookieStore.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.net)
+
+(import '(java.util ArrayList Collections HashMap Iterator List Map Map$Entry)
+        '(java.util.concurrent.locks ReentrantLock))
+
+(defclass InMemoryCookieStore
+  :implements [CookieStore]
+
+  (field ^:private ^{:tag (List HttpCookie)} cookieJar nil)
+
+  (field ^:private ^{:tag (Map String (List HttpCookie))} domainIndex nil)
+
+  (field ^:private ^{:tag (Map URI (List HttpCookie))} uriIndex nil)
+
+  (field ^:private ^ReentrantLock lock nil)
+
+  (constructor ^:public [this]
+    (set! cookieJar (ArrayList.))
+    (set! domainIndex (HashMap.))
+    (set! uriIndex (HashMap.))
+    (set! lock (ReentrantLock. false)))
+
+  (method ^:public add ^void [this ^URI uri ^HttpCookie cookie]
+    (when (nil? cookie) (throw (NullPointerException. "cookie is null")))
+    (.lock lock)
+    (try
+      (.remove cookieJar cookie)
+      (when-not (== (.getMaxAge cookie) 0)
+        (.add cookieJar cookie)
+        (when (some? (.getDomain cookie)) (.addIndex this domainIndex (.getDomain cookie) cookie))
+        (when (some? uri) (.addIndex this uriIndex (.getEffectiveURI this uri) cookie)))
+      (finally (.unlock lock))))
+
+  (method ^:public get ^{:tag (List HttpCookie)} [this ^URI uri]
+    (when (nil? uri) (throw (NullPointerException. "uri is null")))
+    (let [^{:tag (List HttpCookie)} cookies (ArrayList.)
+          secureLink (.equalsIgnoreCase "https" (.getScheme uri))]
+      (.lock lock)
+      (try
+        (.getInternal1 this cookies domainIndex (.getHost uri) secureLink)
+        (.getInternal2 this cookies uriIndex (.getEffectiveURI this uri) secureLink)
+        (finally (.unlock lock)))
+      (Collections/unmodifiableList cookies)))
+
+  (method ^:public getCookies ^{:tag (List HttpCookie)} [this]
+    (let [^:mutable ^{:tag (List HttpCookie)} rt nil]
+      (.lock lock)
+      (try
+        (let [^{:tag (Iterator HttpCookie)} it (.iterator cookieJar)]
+          (while (.hasNext it) (when (.hasExpired (cast HttpCookie (.next it))) (.remove it))))
+        (finally (set! rt (Collections/unmodifiableList cookieJar)) (.unlock lock)))
+      rt))
+
+  (method ^:public getURIs ^{:tag (List URI)} [this]
+    (let [^{:tag (List URI)} uris (ArrayList.)]
+      (.lock lock)
+      (try
+        (let [^{:tag (Iterator URI)} it (.iterator (.keySet uriIndex))]
+          (while (.hasNext it)
+            (let [uri (cast URI (.next it))
+                  ^{:tag (List HttpCookie)} cookies (cast List (.get uriIndex uri))]
+              (when (or (nil? cookies) (.isEmpty cookies)) (.remove it)))))
+        (finally (.addAll uris (.keySet uriIndex)) (.unlock lock)))
+      (Collections/unmodifiableList uris)))
+
+  (method ^:public remove ^boolean [this ^URI uri ^HttpCookie ck]
+    (when (nil? ck) (throw (NullPointerException. "cookie is null")))
+    (let [^:mutable modified false]
+      (.lock lock)
+      (try (set! modified (.remove cookieJar ck)) (finally (.unlock lock)))
+      modified))
+
+  (method ^:public removeAll ^boolean [this]
+    (.lock lock)
+    (try
+      (when (.isEmpty cookieJar) (return false))
+      (.clear cookieJar)
+      (.clear domainIndex)
+      (.clear uriIndex)
+      (finally (.unlock lock)))
+    true)
+
+  (method ^:private netscapeDomainMatches ^boolean [this ^String domain ^String host]
+    (if (or (nil? domain) (nil? host))
+        false
+        (let [isLocalDomain (.equalsIgnoreCase ".local" domain)
+              ^:mutable embeddedDotInDomain (.indexOf domain \.)]
+          (when (== embeddedDotInDomain 0) (set! embeddedDotInDomain (.indexOf domain \. 1)))
+          (if (and (not isLocalDomain)
+                   (or (== embeddedDotInDomain -1)
+                       (== embeddedDotInDomain (unchecked-subtract-int (.length domain) 1))))
+              false
+              (let [firstDotInHost (.indexOf host \.)]
+                (if (and (== firstDotInHost -1) isLocalDomain)
+                    true
+                    (let [domainLength (.length domain)
+                          lengthDiff (unchecked-subtract-int (.length host) domainLength)]
+                      (cond
+                        (== lengthDiff 0) (.equalsIgnoreCase host domain)
+                        (> lengthDiff 0)
+                          (let [H (.substring host 0 lengthDiff)
+                                D (.substring host lengthDiff)]
+                            (.equalsIgnoreCase D domain))
+                        (== lengthDiff -1)
+                          (and (== (.charAt domain 0) \.)
+                               (.equalsIgnoreCase host (.substring domain 1)))
+                        :else false))))))))
+
+  (method ^:private getInternal1 ^void [this ^{:tag (List HttpCookie)} cookies
+                                        ^{:tag (Map String (List HttpCookie))} cookieIndex
+                                        ^String host ^boolean secureLink]
+    (let [^{:tag (ArrayList HttpCookie)} toRemove (ArrayList.)]
+      (for-each [^{:tag (Map$Entry String (List HttpCookie))} entry (.entrySet cookieIndex)]
+        (let [domain (cast String (.getKey entry))
+              ^{:tag (List HttpCookie)} lst (cast List (.getValue entry))]
+          (for-each [^HttpCookie c lst]
+            (when (or (and (== (.getVersion c) 0) (.netscapeDomainMatches this domain host))
+                      (and (== (.getVersion c) 1) (HttpCookie/domainMatches domain host)))
+              (if (not (== (.indexOf cookieJar c) -1))
+                  (if (not (.hasExpired c))
+                      (when (and (or secureLink (not (.getSecure c))) (not (.contains cookies c)))
+                        (.add cookies c))
+                      (.add toRemove c))
+                  (.add toRemove c))))
+          (for-each [^HttpCookie c toRemove] (.remove lst c) (.remove cookieJar c))
+          (.clear toRemove)))))
+
+  (method ^:private getInternal2 :type-params [T] ^void [this ^{:tag (List HttpCookie)} cookies
+                                                         ^{:tag (Map T (List HttpCookie))} cookieIndex
+                                                         ^{:tag (Comparable T)} comparator
+                                                         ^boolean secureLink]
+    (for-each [index (.keySet cookieIndex)]
+      (when (== (.compareTo comparator index) 0)
+        (let [^{:tag (List HttpCookie)} indexedCookies (cast List (.get cookieIndex index))]
+          (when (some? indexedCookies)
+            (let [^{:tag (Iterator HttpCookie)} it (.iterator indexedCookies)]
+              (while (.hasNext it)
+                (let [ck (cast HttpCookie (.next it))]
+                  (if (not (== (.indexOf cookieJar ck) -1))
+                      (if (not (.hasExpired ck))
+                          (when (and (or secureLink (not (.getSecure ck)))
+                                     (not (.contains cookies ck)))
+                            (.add cookies ck))
+                          (do (.remove it) (.remove cookieJar ck)))
+                      (.remove it))))))))))
+
+  (method ^:private addIndex :type-params [T] ^void [this
+                                                     ^{:tag (Map T (List HttpCookie))} indexStore
+                                                     ^T index ^HttpCookie cookie]
+    (when (some? index)
+      (let [^:mutable ^{:tag (List HttpCookie)} cookies (cast List (.get indexStore index))]
+        (if (some? cookies)
+            (do (.remove cookies cookie) (.add cookies cookie))
+            (do (set! cookies (ArrayList.)) (.add cookies cookie) (.put indexStore index cookies))))))
+
+  (method ^:private getEffectiveURI ^URI [this ^URI uri]
+    (let [^:mutable ^URI effectiveURI nil]
+      (try
+        (set! effectiveURI (URI. "http" (.getHost uri) nil nil nil))
+        (catch URISyntaxException ignored (set! effectiveURI uri)))
+      effectiveURI)))

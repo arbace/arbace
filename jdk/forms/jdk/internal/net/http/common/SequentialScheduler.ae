@@ -1,0 +1,111 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/common/SequentialScheduler.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.common)
+
+(import '(java.util Objects)
+        '(java.util.concurrent Executor)
+        '(java.util.concurrent.atomic AtomicInteger)
+        '(java.util.concurrent.locks Lock ReentrantLock))
+
+(defclass ^:public ^:final SequentialScheduler
+  (defclass ^:public ^:abstract ^:static DeferredCompleter
+    (constructor ^:private [this])
+
+    (method ^:public ^:abstract complete ^void [this]))
+
+  (defclass ^:public ^{FunctionalInterface true} ^:interface RestartableTask
+    (method run ^void [this ^DeferredCompleter taskCompleter]))
+
+  (defclass ^:public ^:abstract ^:static CompleteRestartableTask
+    :implements [RestartableTask]
+
+    (method ^:public ^:final run ^void [this ^DeferredCompleter taskCompleter]
+      (try (.run this) (finally (.complete taskCompleter))))
+
+    (method ^:protected ^:abstract run ^void [this]))
+
+  (defclass ^:public ^:static ^:final LockingRestartableTask
+    :extends CompleteRestartableTask
+
+    (field ^:private ^:final ^Runnable mainLoop)
+
+    (field ^:private ^:final ^Lock lock (ReentrantLock.))
+
+    (constructor ^:public [this ^Runnable mainLoop]
+      (set! (.-mainLoop this) mainLoop))
+
+    (method ^:protected run ^void [this]
+      (let [locked (.tryLock lock)]
+        (java-assert locked "contention detected in SequentialScheduler")
+        (try (.run mainLoop) (finally (when locked (.unlock lock)))))))
+
+  (field ^:private ^:static ^:final ^int OFFLOAD 1)
+
+  (field ^:private ^:static ^:final ^int AGAIN 2)
+
+  (field ^:private ^:static ^:final ^int BEGIN 4)
+
+  (field ^:private ^:static ^:final ^int STOP 8)
+
+  (field ^:private ^:static ^:final ^int END 16)
+
+  (field ^:private ^:final ^AtomicInteger state (AtomicInteger. END))
+
+  (field ^:private ^:final ^RestartableTask restartableTask)
+
+  (field ^:private ^:final ^DeferredCompleter completer)
+
+  (field ^:private ^:final ^SchedulableTask schedulableTask)
+
+  (defclass ^:private ^:final SchedulableTask
+    :implements [Runnable]
+
+    (method ^:public run ^void [this] (.run restartableTask completer)))
+
+  (constructor ^:public [this ^RestartableTask restartableTask]
+    (set! (.-restartableTask this) (cast RestartableTask (Objects/requireNonNull restartableTask)))
+    (set! (.-completer this) (TryEndDeferredCompleter.))
+    (set! (.-schedulableTask this) (SchedulableTask.)))
+
+  (method ^:public runOrSchedule ^void [this]
+    (.runOrSchedule this schedulableTask nil))
+
+  (method ^:public runOrSchedule ^void [this ^Executor executor]
+    (.runOrSchedule this schedulableTask executor))
+
+  (method ^:private runOrSchedule ^void [this ^SchedulableTask task ^Executor executor]
+    (while true
+      (let [s (.get state)]
+        (cond
+          (== s END) (when (.compareAndSet state END BEGIN) (break))
+          (not (== (bit-and-int s BEGIN) 0))
+            (when (.compareAndSet state s (bit-or-int AGAIN (bit-and-int s OFFLOAD))) (return))
+          (or (not (== (bit-and-int s AGAIN) 0)) (== s STOP)) (return)
+          :else (throw (InternalError. (String/valueOf s))))))
+    (if (nil? executor) (.run task) (.execute executor task)))
+
+  (defclass ^:private TryEndDeferredCompleter
+    :extends DeferredCompleter
+
+    (method ^:public complete ^void [this]
+      (while true
+        (let [^:mutable ^int s 0]
+          (while (not (== (bit-and-int (set! s (.get state)) OFFLOAD) 0))
+            (when (.compareAndSet state s (bit-and-int s (bit-not-int OFFLOAD))) (return)))
+          (while true
+            (when-not (== (bit-and-int s OFFLOAD) 0) (throw (InternalError. (String/valueOf s))))
+            (cond
+              (== s BEGIN) (when (.compareAndSet state BEGIN END) (return))
+              (== s AGAIN) (when (.compareAndSet state AGAIN (bit-or-int BEGIN OFFLOAD)) (break))
+              (== s STOP) (return)
+              (== s END) (throw (IllegalStateException. "Duplicate completion"))
+              :else (throw (InternalError. (String/valueOf s))))
+            (set! s (.get state)))
+          (.run restartableTask completer)))))
+
+  (method ^:public isStopped ^boolean [this] (== (.get state) STOP))
+
+  (method ^:public stop ^void [this] (.set state STOP))
+
+  (method ^:public ^:static lockingScheduler ^SequentialScheduler [^Runnable mainLoop]
+    (SequentialScheduler. (LockingRestartableTask. mainLoop))))

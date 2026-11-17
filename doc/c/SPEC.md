@@ -852,6 +852,11 @@ whose type is not its default is `(lit T v)` (CS7 (a)). The spelling a value doe
 - The reader reads `0x2A`, `052` and `2r101010` as `42` (Clojure's radix syntax); the converter writes
   decimal (N1). BigInts (`N`) where the value exceeds a `long`.
 
+A constant gcc's lexer rejects (CS291 (a)) is `(c/bad-lit T "spelling" "message")`: a binary-prefixed constant libcpp's
+cpp_classify_number refuses (`0b`, `0B2`, `0B02`, `0b1.1`, `0B0p0`: an invalid suffix, digit or prefix) and a `u8` character
+constant that is empty, multi-character, wider than a byte or with an escape out of range. The checker reports the message at its
+line (the value is 0 of type T); the printer writes the spelling back.
+
 ### 8.2 Character constants
 
 | C | form | type and value |
@@ -974,6 +979,11 @@ of a call) is a form there:
 - `(c/pragma ...)` is read by the checker for the pragmas that change the program: `pack` (layout),
   `STDC FP_CONTRACT`, `STDC FENV_ACCESS`, `STDC CX_LIMITED_RANGE`, GCC's `weak`, `redefine_extname`,
   `visibility`; the others (`once`, `GCC diagnostic`, `GCC optimize`) are the layer's only.
+- A statement-level `c/pragma` (a main-file `#pragma` inside a body, placed by its offset) changes the checker's state from there
+  on, as gcc's pragmas, which are tokens, do (CS290 (a)): `#pragma pack` inside a function lays out the records after it. In ci's
+  read (`*include-inside*`), the pragmas of a re-entered main file (`MAIN#again`, whose offsets do not tell its copies apart) are
+  placed by the token stream instead: the preprocessor hands each to the parser with the next token, and the body's items get a
+  `c/pragma` before the item that token starts.
 - A directive that does not fall between two items (inside an expression, between a declaration's
   specifiers) is `:full`'s only; the `:lines` print gives the active configuration (N6).
 - **Eval and AOT ignore** `c/define`, `c/undef`, `c/directive`; `c/include` enters its unit (§4.3); the
@@ -1174,6 +1184,12 @@ The SysV x86-64 psABI's, which gcc follows (cc's `abi.go` holds the same tables 
   `unsigned long` or `long` (measured: `enum { A0, A1 }` is `unsigned`, its constants `int`;
   `enum { X = 1, Y = 0x100000000 }` is `unsigned long`, C23's constants of the enumerated type).
 - `#pragma pack(n)`, `__attribute__((packed))`, `aligned(n)`, `alignas` change the layout as gcc does.
+- `__attribute__((ms_struct))` lays a structure out as gcc's documented Microsoft layout (x86 type attributes, `-mms-bitfields`):
+  bit-fields share a unit of their type's size only while the types' sizes agree and the next one fits; a new unit at the type's
+  alignment (1 when packed, capped by `#pragma pack`); an unnamed bit-field's type aligns the record; a zero-width bit-field ends
+  the run it follows and aligns the record and the next member to its type, and is ignored after a non-bit-field. `gcc_struct`,
+  the default here, undoes it (of the two, the first written wins); `-mms-bitfields` itself is not read. Measured:
+  `test/c/run/ms-struct.c`.
 - Padding bytes' values: zero in static storage; otherwise unspecified (6.2.6.1), and a struct
   assignment copies them (as gcc's `-O0` code does with `rep movs` or moves of the whole object).
 

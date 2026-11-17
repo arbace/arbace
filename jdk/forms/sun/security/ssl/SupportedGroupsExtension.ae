@@ -1,0 +1,245 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SupportedGroupsExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.text MessageFormat)
+        '(java.util ArrayList Collections LinkedList List Locale)
+        '(javax.net.ssl SSLProtocolException))
+
+(defclass ^:final SupportedGroupsExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (CHSupportedGroupsProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer
+    (CHSupportedGroupsConsumer.))
+
+  (field ^:static ^:final ^HandshakeAbsence chOnTradeAbsence (CHSupportedGroupsOnTradeAbsence.))
+
+  (field ^:static ^:final ^SSLStringizer sgsStringizer (SupportedGroupsStringizer.))
+
+  (field ^:static ^:final ^HandshakeProducer eeNetworkProducer (EESupportedGroupsProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer eeOnLoadConsumer
+    (EESupportedGroupsConsumer.))
+
+  (defclass ^:static ^:final SupportedGroupsSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:final ^int/1 namedGroupsIds)
+
+    (constructor ^:private [this ^{:tag (List NamedGroup)} namedGroups]
+      (set! (.-namedGroupsIds this) (new int/1 (.size namedGroups)))
+      (let [^:mutable ^int i 0]
+        (for-each [^NamedGroup ng namedGroups]
+          (aset namedGroupsIds i (.-id ng))
+          (set! i (unchecked-inc-int i)))))
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext hc ^ByteBuffer m]
+      (when (< (.remaining m) 2)
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         "Invalid supported_groups extension: insufficient data"))))
+      (let [ngs (Record/getBytes16 m)]
+        (when (.hasRemaining m)
+          (throw (.fatal (.-conContext hc)
+                         Alert/DECODE_ERROR
+                         (SSLProtocolException.
+                           "Invalid supported_groups extension: unknown extra data"))))
+        (when (or (== (alength ngs) 0) (not (== (unchecked-remainder-int (alength ngs) 2) 0)))
+          (throw (.fatal (.-conContext hc)
+                         Alert/DECODE_ERROR
+                         (SSLProtocolException.
+                           "Invalid supported_groups extension: incomplete data"))))
+        (let [ids (new int/1 (unchecked-divide-int (alength ngs) 2))]
+          (let [^:mutable ^int i 0
+                ^:mutable ^int j 0]
+            (while (< i (alength ngs))
+              (aset ids
+                    j
+                    (bit-or-int (bit-shift-left-int
+                                  (bit-and-int (aget
+                                                 ngs
+                                                 (let [old-1 i]
+                                                   (set! i (unchecked-inc-int i))
+                                                   old-1))
+                                               0xFF)
+                                  8)
+                                (bit-and-int (aget
+                                               ngs
+                                               (let [old-2 i] (set! i (unchecked-inc-int i)) old-2))
+                                             0xFF)))
+              (set! j (unchecked-inc-int j))))
+          (set! (.-namedGroupsIds this) ids))))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat. "\"named groups\": '['{0}']'" Locale/ENGLISH)]
+        (if (or (nil? namedGroupsIds) (== (alength namedGroupsIds) 0))
+            (let [messageFields (new Object/1 ["<no supported named group specified>"])]
+              (.format messageFormat messageFields))
+            (let [builder (StringBuilder. 512)
+                  ^:mutable isFirst true]
+              (for-each [^int ngid namedGroupsIds]
+                (if isFirst (set! isFirst false) (.append builder ", "))
+                (.append builder (NamedGroup/nameOf ngid)))
+              (let [messageFields (new Object/1 [(.toString builder)])]
+                (.format messageFormat messageFields)))))))
+
+  (defclass ^:private ^:static ^:final SupportedGroupsStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (SupportedGroupsSpec. hc buffer)) (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final CHSupportedGroupsProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig chc) SSLExtension/CH_SUPPORTED_GROUPS))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Ignore unavailable supported_groups extension"))
+              nil)
+            (let [^{:tag (ArrayList NamedGroup)} namedGroups (ArrayList.
+                                                               (alength
+                                                                 (.-namedGroups (.-sslConfig chc))))]
+              (for-each [^String name (.-namedGroups (.-sslConfig chc))]
+                (let [ng (NamedGroup/nameOf name)]
+                  (if (nil? ng)
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                        (SSLLogger/fine (java-str "Ignore unspecified named group: " name)))
+                      (when-not (and (not SSLConfiguration/enableFFDHE)
+                                     (identical?
+                                       (.-spec ng)
+                                       NamedGroup$NamedGroupSpec/NAMED_GROUP_FFDHE))
+                        (cond
+                          (and (and (.isAvailable ng (.-activeProtocols chc))
+                                    (.isSupported ng (.-activeCipherSuites chc)))
+                               (.isPermitted ng (.-algorithmConstraints chc)))
+                            (.add namedGroups ng)
+                          (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/fine
+                              (java-str "Ignore inactive or disabled named group: " (.-name ng))))))))
+              (if (.isEmpty namedGroups)
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/warning "no available named group"))
+                    nil)
+                  (let [vectorLen (bit-shift-left-int (.size namedGroups) 1)
+                        extData (new byte/1 (unchecked-add-int vectorLen 2))
+                        m (ByteBuffer/wrap extData)]
+                    (Record/putInt16 m vectorLen)
+                    (for-each [^NamedGroup namedGroup namedGroups]
+                      (Record/putInt16 m (.-id namedGroup)))
+                    (set! (.-clientRequestedNamedGroups chc)
+                          (Collections/unmodifiableList namedGroups))
+                    (.put (.-handshakeExtensions chc)
+                          SSLExtension/CH_SUPPORTED_GROUPS
+                          (SupportedGroupsSpec. namedGroups))
+                    extData)))))))
+
+  (defclass ^:private ^:static ^:final CHSupportedGroupsConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_SUPPORTED_GROUPS))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Ignore unavailable supported_groups extension"))
+            (let [spec (SupportedGroupsSpec. shc buffer)
+                  ^{:tag (List NamedGroup)} knownNamedGroups (LinkedList.)]
+              (for-each [^int id (.-namedGroupsIds spec)]
+                (let [ng (NamedGroup/valueOf id)] (when (some? ng) (.add knownNamedGroups ng))))
+              (set! (.-clientRequestedNamedGroups shc) knownNamedGroups)
+              (.put (.-handshakeExtensions shc) SSLExtension/CH_SUPPORTED_GROUPS spec))))))
+
+  (defclass ^:private ^:static ^:final CHSupportedGroupsOnTradeAbsence
+    :implements [HandshakeAbsence]
+
+    (method ^:public absent :throws [IOException] ^void [this ^ConnectionContext context
+                                                         ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (and (.useTLS13PlusSpec (.-negotiatedProtocol shc))
+                   (.containsKey (.-handshakeExtensions shc) SSLExtension/CH_KEY_SHARE))
+          (throw (.fatal (.-conContext shc)
+                         Alert/MISSING_EXTENSION
+                         "No supported_groups extension to work with the key_share extension"))))))
+
+  (defclass ^:private ^:static ^:final EESupportedGroupsProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/EE_SUPPORTED_GROUPS))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Ignore unavailable supported_groups extension"))
+              nil)
+            (let [^{:tag (ArrayList NamedGroup)} namedGroups (ArrayList.
+                                                               (alength
+                                                                 (.-namedGroups (.-sslConfig shc))))]
+              (for-each [^String name (.-namedGroups (.-sslConfig shc))]
+                (let [ng (NamedGroup/nameOf name)]
+                  (if (nil? ng)
+                      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                        (SSLLogger/fine (java-str "Ignore unspecified named group: " name)))
+                      (when-not (and (not SSLConfiguration/enableFFDHE)
+                                     (identical?
+                                       (.-spec ng)
+                                       NamedGroup$NamedGroupSpec/NAMED_GROUP_FFDHE))
+                        (cond
+                          (and (and (.isAvailable ng (.-activeProtocols shc))
+                                    (.isSupported ng (.-activeCipherSuites shc)))
+                               (.isPermitted ng (.-algorithmConstraints shc)))
+                            (.add namedGroups ng)
+                          (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/fine
+                              (java-str "Ignore inactive or disabled named group: " (.-name ng))))))))
+              (if (.isEmpty namedGroups)
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/warning "no available named group"))
+                    nil)
+                  (let [vectorLen (bit-shift-left-int (.size namedGroups) 1)
+                        extData (new byte/1 (unchecked-add-int vectorLen 2))
+                        m (ByteBuffer/wrap extData)]
+                    (Record/putInt16 m vectorLen)
+                    (for-each [^NamedGroup namedGroup namedGroups]
+                      (Record/putInt16 m (.-id namedGroup)))
+                    (set! (.-serverRequestedNamedGroups (.-conContext shc))
+                          (Collections/unmodifiableList namedGroups))
+                    (let [spec (SupportedGroupsSpec. namedGroups)]
+                      (.put (.-handshakeExtensions shc) SSLExtension/EE_SUPPORTED_GROUPS spec)
+                      extData))))))))
+
+  (defclass ^:private ^:static ^:final EESupportedGroupsConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig chc) SSLExtension/EE_SUPPORTED_GROUPS))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Ignore unavailable supported_groups extension"))
+            (let [spec (SupportedGroupsSpec. chc buffer)
+                  ^{:tag (List NamedGroup)} knownNamedGroups (ArrayList.
+                                                               (alength (.-namedGroupsIds spec)))]
+              (for-each [^int id (.-namedGroupsIds spec)]
+                (let [ng (NamedGroup/valueOf id)] (when (some? ng) (.add knownNamedGroups ng))))
+              (set! (.-serverRequestedNamedGroups (.-conContext chc)) knownNamedGroups)
+              (.put (.-handshakeExtensions chc) SSLExtension/EE_SUPPORTED_GROUPS spec)))))))

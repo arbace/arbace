@@ -1,0 +1,169 @@
+;; Converted from jdk26u src/java.base/linux/classes/sun/nio/ch/EPollSelectorImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io IOException)
+        '(java.nio.channels SelectionKey Selector)
+        '(java.nio.channels.spi SelectorProvider)
+        '(java.util ArrayDeque Deque HashMap Map)
+        '(java.util.concurrent TimeUnit)
+        '(java.util.function Consumer))
+
+(defclass EPollSelectorImpl
+  :extends SelectorImpl
+
+  (field ^:private ^:static ^:final ^int NUM_EPOLLEVENTS
+    (^[int int] Math/min (IOUtil/fdLimit) 1024))
+
+  (field ^:private ^:final ^int epfd)
+
+  (field ^:private ^:final ^long pollArrayAddress)
+
+  (field ^:private ^:final ^EventFD eventfd)
+
+  (field ^:private ^:final ^{:tag (Map Integer SelectionKeyImpl)} fdToKey (HashMap.))
+
+  (field ^:private ^:final updateLock (Object.))
+
+  (field ^:private ^:final ^{:tag (Deque SelectionKeyImpl)} updateKeys (ArrayDeque.))
+
+  (field ^:private ^:final interruptLock (Object.))
+
+  (field ^:private ^boolean interruptTriggered)
+
+  (constructor :throws [IOException] [this ^SelectorProvider sp]
+    (super. sp)
+    (set! (.-epfd this) (EPoll/create))
+    (set! (.-pollArrayAddress this) (EPoll/allocatePollArray NUM_EPOLLEVENTS))
+    (try
+      (set! (.-eventfd this) (EventFD.))
+      (IOUtil/configureBlocking (IOUtil/newFD (.efd eventfd)) false)
+      (catch IOException ioe
+        (EPoll/freePollArray pollArrayAddress)
+        (FileDispatcherImpl/closeIntFD epfd)
+        (throw ioe)))
+    (EPoll/ctl epfd EPoll/EPOLL_CTL_ADD (.efd eventfd) EPoll/EPOLLIN))
+
+  (method ^:protected doSelect :throws [IOException] ^int [this
+                                                           ^{:tag (Consumer SelectionKey)} action
+                                                           ^long timeout]
+    (java-assert (Thread/holdsLock this))
+    (let [^:mutable to (unchecked-int (Math/min timeout Integer/MAX_VALUE))
+          blocking (not (== to 0))
+          timedPoll (> to 0)
+          ^:mutable ^int numEntries 0]
+      (.processUpdateQueue this)
+      (.processDeregisterQueue this)
+      (if (.isVirtual (Thread/currentThread))
+          (set! numEntries
+                (if timedPoll
+                    (.timedPoll this (.toNanos TimeUnit/MILLISECONDS to))
+                    (.untimedPoll this blocking)))
+          (try
+            (.begin this blocking)
+            (loop []
+              (let [startTime (if timedPoll (System/nanoTime) 0)]
+                (set! numEntries (EPoll/wait epfd pollArrayAddress NUM_EPOLLEVENTS to))
+                (when (and (== numEntries IOStatus/INTERRUPTED) timedPoll)
+                  (let [adjust (unchecked-subtract (System/nanoTime) startTime)]
+                    (set! to
+                          (unchecked-subtract-int
+                            to
+                            (unchecked-int (.toMillis TimeUnit/NANOSECONDS adjust))))
+                    (when (<= to 0) (set! numEntries 0)))))
+              (when (== numEntries IOStatus/INTERRUPTED) (recur)))
+            (finally (.end this blocking))))
+      (java-assert (IOStatus/check numEntries))
+      (.processDeregisterQueue this)
+      (.processEvents this numEntries action)))
+
+  (method ^:private untimedPoll :throws [IOException] ^int [this ^boolean block]
+    (let [^:mutable numEntries (EPoll/wait epfd pollArrayAddress NUM_EPOLLEVENTS 0)]
+      (when block
+        (while (and (== numEntries 0) (not (.isInterrupted (Thread/currentThread))))
+          (Poller/pollSelector epfd 0)
+          (set! numEntries (EPoll/wait epfd pollArrayAddress NUM_EPOLLEVENTS 0))))
+      numEntries))
+
+  (method ^:private timedPoll :throws [IOException] ^int [this ^long nanos]
+    (let [startNanos (System/nanoTime)
+          ^:mutable numEntries (EPoll/wait epfd pollArrayAddress NUM_EPOLLEVENTS 0)]
+      (while (and (== numEntries 0) (not (.isInterrupted (Thread/currentThread))))
+        (let [remainingNanos (unchecked-subtract
+                               nanos
+                               (unchecked-subtract (System/nanoTime) startNanos))]
+          (when (<= remainingNanos 0) (break))
+          (Poller/pollSelector epfd remainingNanos)
+          (set! numEntries (EPoll/wait epfd pollArrayAddress NUM_EPOLLEVENTS 0))))
+      numEntries))
+
+  (method ^:private processUpdateQueue ^void [this]
+    (java-assert (Thread/holdsLock this))
+    (locking updateLock
+      (let [^:mutable ^SelectionKeyImpl ski nil]
+        (while (some? (set! ski (cast SelectionKeyImpl (.pollFirst updateKeys))))
+          (when (.isValid ski)
+            (let [fd (.getFDVal ski)
+                  previous (cast SelectionKeyImpl (.putIfAbsent fdToKey fd ski))]
+              (java-assert (or (nil? previous) (identical? previous ski)))
+              (let [newEvents (.translateInterestOps ski)
+                    registeredEvents (.registeredEvents ski)]
+                (when-not (== newEvents registeredEvents)
+                  (cond
+                    (== newEvents 0) (EPoll/ctl epfd EPoll/EPOLL_CTL_DEL fd 0)
+                    (== registeredEvents 0) (EPoll/ctl epfd EPoll/EPOLL_CTL_ADD fd newEvents)
+                    :else (EPoll/ctl epfd EPoll/EPOLL_CTL_MOD fd newEvents))
+                  (.registeredEvents ski newEvents)))))))))
+
+  (method ^:private processEvents :throws [IOException] ^int [this ^int numEntries
+                                                              ^{:tag (Consumer SelectionKey)} action]
+    (java-assert (Thread/holdsLock this))
+    (let [^:mutable interrupted false
+          ^:mutable ^int numKeysUpdated 0]
+      (loop [^int i 0]
+        (when (< i numEntries)
+          (let [event (EPoll/getEvent pollArrayAddress i)
+                fd (EPoll/getDescriptor event)]
+            (if (== fd (.efd eventfd))
+                (do (set! interrupted true) (recur (unchecked-inc-int i)))
+                (let [ski (cast SelectionKeyImpl (.get fdToKey fd))]
+                  (if (some? ski)
+                      (let [rOps (EPoll/getEvents event)]
+                        (set! numKeysUpdated
+                              (unchecked-add-int
+                                numKeysUpdated
+                                (.processReadyEvents this rOps ski action)))
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i))))))))
+      (when interrupted (.clearInterrupt this))
+      numKeysUpdated))
+
+  (method ^:protected implClose :throws [IOException] ^void [this]
+    (java-assert (Thread/holdsLock this))
+    (locking interruptLock (set! interruptTriggered true))
+    (FileDispatcherImpl/closeIntFD epfd)
+    (EPoll/freePollArray pollArrayAddress)
+    (.close eventfd))
+
+  (method ^:protected implDereg :throws [IOException] ^void [this ^SelectionKeyImpl ski]
+    (java-assert (not (.isValid ski)))
+    (java-assert (Thread/holdsLock this))
+    (let [fd (.getFDVal ski)]
+      (if (some? (.remove fdToKey fd))
+          (when-not (== (.registeredEvents ski) 0)
+            (EPoll/ctl epfd EPoll/EPOLL_CTL_DEL fd 0)
+            (.registeredEvents ski 0))
+          (java-assert (== (.registeredEvents ski) 0)))))
+
+  (method ^:public setEventOps ^void [this ^SelectionKeyImpl ski]
+    (locking updateLock (.addLast updateKeys ski)))
+
+  (method ^:public wakeup ^Selector [this]
+    (locking interruptLock
+      (when-not interruptTriggered
+        (try (.set eventfd) (catch IOException ioe (throw (InternalError. ioe))))
+        (set! interruptTriggered true)))
+    this)
+
+  (method ^:private clearInterrupt :throws [IOException] ^void [this]
+    (locking interruptLock (.reset eventfd) (set! interruptTriggered false))))

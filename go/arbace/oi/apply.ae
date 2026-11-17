@@ -60,6 +60,13 @@
 
 
 ^{:go/end 70} (go/func newFrame ^{:tag (* Frame)} [^{:tag (* Code)} code ^{:tag (slice Value)} env ^{:tag (* Thread)} th]
+  ;; OCAMLRUNPARAM's l (OC216 (a)): the depth counts a frame's words as the bytecode's stack about does, its slots beside the one the
+  ;; call counted (two for a function of one slot, where the bytecode's frame is about four: oi's slots hold the temporaries too)
+  (when stackWordsMode
+    (set! (.-depth th) + (.-NSlots code))
+    (when (> (.-depth th) DepthLimit)
+      (set! (.-depth th) 0)
+      (.overflow th)))
   (let [fr (addr (lit Frame :Env env :Th th))]
     (if (<= (.-NSlots code) (len (.-buf fr)))
       (set! (.-S fr) (subslice (.-buf fr) _ (.-NSlots code)))
@@ -78,7 +85,7 @@
 
 
 
-(go/var ^{:doc "DepthLimit is the interpreted call depth at which a call raises Stack_overflow (OCaml's own\nlimit is its stack's size, 1 GiB by default: a class of divergences, OC11).\n"} DepthLimit 200000)
+(go/var ^{:doc "DepthLimit is the interpreted call depth at which a call raises Stack_overflow (OCaml's own\nlimit is its stack's size, 1 GiB by default; OCAMLRUNPARAM's l in four-word frames when less, OC216 (a)).\n"} DepthLimit (stackDepthLimit))
 
 
 ^{:go/end 86} (go/method Apply "Apply applies f to args (one or more), with OCaml's curried semantics.\n" ^Value [^{:tag (* Thread)} th ^Value f & ^{:tag (slice Value)} args]
@@ -102,6 +109,7 @@
 
 ^{:go/end 122} (go/method call "call is a call of f to exactly the arguments a (a slice the caller will not use again), the\napplication node's fast path: an interpreted closure of that arity gets its frame directly.\n" ^Value [^{:tag (* Thread)} th ^Value f ^{:tag (slice Value)} a]
   (when [(values c ok) (assert (* Closure) f)] (and ok (!= (.-Code c) nil) (== (.-Arity c) (len a)))
+    (let [d0 (.-depth th)]
     (inc! (.-depth th))
     (when (> (.-depth th) DepthLimit)
       (set! (.-depth th) 0)
@@ -115,8 +123,9 @@
         (when (== v tailMark)
           (set! v (.applyLoop th (.-tcF fr) (.-tcA fr) fr)))
 
-        (dec! (.-depth th))
-        (return v))))
+        ;; the depth on entry (a frame's words under OCAMLRUNPARAM's l are counted by newFrame: OC216 (a))
+        (set! (.-depth th) d0)
+        (return v)))))
 
   (.ApplyN th f a))
 
@@ -225,6 +234,11 @@
 
 ^{:go/end 232} (go/method tick "tick counts a call or a loop's turn; every few thousand (a few hundred while other domains\nrun) the thread lets the others run.\n" [^{:tag (* Thread)} th]
   (inc! (.-ticks th))
+  (when (!= (.Load sigPending) 0)
+    (.processSignals th))
+  ;; the finalisers Go's collector fired (ext_final.go; OC192 (a)), as a pending action
+  (when (!= (.Load finPending) 0)
+    (.runFinalisers th))
   (when (or (> (.-ticks th) 4096) ^:go/paren (and (> (.-ticks th) 128) (> (.Load domainsRun) 0)))
     (set! (.-ticks th) 0)
     (.poll th)))

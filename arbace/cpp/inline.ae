@@ -1,0 +1,371 @@
+;; Part of Arbace. Ports parts of the LLVM Project (https://github.com/llvm/llvm-project at llvmorg-23.1.4, commit
+;; 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5): llvm/lib/Transforms/IPO/AlwaysInliner.cpp's AlwaysInlineImpl,
+;; llvm/lib/Transforms/Utils/InlineFunction.cpp's InlineFunctionImpl (the parts -O0 IR without metadata uses),
+;; HandleInlinedLandingPad, HandleCallsInBlockInlinedThroughInvoke, LandingPadInliningInfo::forwardResume and
+;; getInnerResumeDest, and llvm/lib/Analysis/InlineCost.cpp's isInlineViable, ported by hand on 2026-11-06
+;; (doc/cpp/CODEGEN.md G5). Their notice:
+;;
+;;   Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+;;   See https://llvm.org/LICENSE.txt for license information.
+;;   SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+;;
+;; LICENSE.md states which license covers what.
+
+(ns arbace.cpp.inline
+  "LLVM's AlwaysInliner over LLVM forms (doc/cpp/CODEGEN.md, G5's P16 (a)): what clang's -O0 pipeline does to the
+  functions it marks `alwaysinline` (GNU's always_inline), so that our module defines the names clang's does. A port of
+  llvm-project 23.1.4's `llvm/lib/Transforms/IPO/AlwaysInliner.cpp` (AlwaysInlineImpl: every call site of a viable
+  alwaysinline definition inlined, then the definition erased when it is discardable and no use is left) and of the
+  parts of `llvm/lib/Transforms/Utils/InlineFunction.cpp` that -O0 IR without metadata exercises (InlineFunctionImpl: the
+  callee's blocks cloned with its arguments mapped to the call's operands, a byval argument copied
+  (HandleByValArgument), the callee entry block's static allocas moved to the caller's entry block, the returns as
+  branches to the call's continuation with the result a phi; through an invoke, HandleInlinedLandingPad: the inlined
+  landing pads take the outer one's clauses and its cleanup flag, a call that may throw becomes an invoke unwinding to
+  the outer landing pad (HandleCallsInBlockInlinedThroughInvoke, changeToInvokeAndSplitBasicBlock), a resume a branch to
+  the outer landing pad's body, the landing pad's value a phi there (LandingPadInliningInfo::forwardResume,
+  getInnerResumeDest)), and of `llvm/lib/Analysis/InlineCost.cpp`'s isInlineViable (no varargs, no direct recursion).
+  Apache-2.0 with the LLVM exception (LICENSE.md). The forms are the code generator's: `(llvm/define NAME RET PARAMS
+  :attrs [...] :body [(block LABEL inst...)...])`, an instruction `(= %v (op ...))` or `(op ...)`."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The forms
+
+(defn- gname
+  "The name of a global operand (g/NAME or (g \"NAME\")), or nil."
+  [x]
+  (cond
+    (and (symbol? x) (= "g" (namespace x))) (name x)
+    (and (seq? x) (= 'g (first x)) (string? (second x))) (second x)
+    :else nil))
+
+(defn- local? [x] (and (symbol? x) (nil? (namespace x)) (str/starts-with? (name x) "%")))
+
+(defn- opts-of
+  "The keyword options of a form after its `n` positional parts."
+  [x ^long n]
+  (apply hash-map (drop n x)))
+
+(defn- define-opts [d] (let [[_ _ _ _ & o] d] (apply hash-map o)))
+
+(defn- set-opt
+  "The define `d` with its option `k` set to `v` (added when it has none)."
+  [d k v]
+  (let [[h nm rt ps & o] d
+        o (vec o)
+        i (first (keep-indexed (fn [i x] (when (and (even? i) (= x k)) i)) o))
+        o (if i (assoc o (inc i) v) (let [b (.indexOf ^java.util.List o :body)] (if (neg? b) (conj o k v) (vec (concat (subvec o 0 b) [k v] (subvec o b))))))]
+    (apply list h nm rt ps o)))
+
+(defn- inst-op
+  "An instruction's operation form: the right side of `(= %v op)`, else the instruction."
+  [i]
+  (if (and (seq? i) (= '= (first i))) (nth i 2) i))
+
+(defn- inst-def [i] (when (and (seq? i) (= '= (first i))) (second i)))
+
+(defn- head [x] (when (seq? x) (first x)))
+
+(defn- attrs-have? [as k] (boolean (some #{k} as)))
+
+;; ---------------------------------------------------------------------------------------------
+;; isInlineViable (InlineCost.cpp), as far as -O0 IR of ours needs: not variadic, not calling itself
+
+(defn- calls-in [d]
+  (for [b (:body (define-opts d)) i (drop 2 b) :let [o (inst-op i)] :when (#{'call 'invoke} (head o))] o))
+
+(defn- viable? [d]
+  (let [[_ nm _ ps] d n (gname nm)]
+    (and (not (some #{'&} ps))
+         (not (some #(= n (gname (nth % 2))) (calls-in d))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Cloning (CloneAndPruneFunctionInto's value map: the callee's locals renamed, its arguments the call's operands)
+
+(defn- remap
+  "The form `x` with every local symbol replaced through `m` (a symbol not in it renamed by `rn`)."
+  [x m rn]
+  (cond
+    (local? x) (if (contains? m x) (get m x) (rn x))
+    (vector? x) (mapv #(remap % m rn) x)
+    (seq? x) (apply list (map #(remap % m rn) x))
+    :else x))
+
+(defn- may-throw?
+  "Whether a call may unwind (CallInst::doesNotThrow's negation): not when the call or its callee is nounwind, nor for
+  an intrinsic."
+  [o nounwind-fns]
+  (let [n (gname (nth o 2))
+        os (opts-of o 4)]
+    (not (or (attrs-have? (:attrs os) :nounwind)
+             (and n (contains? nounwind-fns n))
+             (and n (str/starts-with? n "llvm."))
+             (and (seq? (nth o 2)) (= 'asm (first (nth o 2))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; InlineFunctionImpl over one call site
+
+(def ^:private counter (atom 0))
+
+(declare bv-size)
+
+(defn- inline-site
+  "The blocks that replace the caller's block `[label pre call post]` when `call` (an `(= %r (call ...))`, a `(call
+  ...)` or an `(= %r (invoke ...))` terminator) is inlined with the callee `d`: {:blocks [...] :allocas [...] :splits
+  {label tail-label} :resumes [[value block]] :unwind U :personality p}. nil when the site cannot be inlined (a callee
+  that never returns a value it promises)."
+  [label pre call post d nounwind-fns]
+  (let [k (swap! counter inc)
+        sfx (str ".i" k)
+        rn (fn [s] (symbol (str (name s) sfx)))
+        o (inst-op call)
+        res (inst-def call)
+        invoke? (= 'invoke (head o))
+        [_ rt _ args] o
+        os (opts-of o 4)
+        [_ _ crt ps] d
+        dopts (define-opts d)
+        cblocks (:body dopts)
+        ;; the arguments: the call's operands; a byval one copied into an alloca of the caller's (HandleByValArgument)
+        byvals (atom [])
+        copies (atom [])
+        amap (into {} (map (fn [p a]
+                             (let [pn (peek p) av (peek a)
+                                   bv (some #(when (and (seq? %) (= :byval (first %))) (second %)) (rest (butlast p)))]
+                               (if bv
+                                 (let [al (or (some #(when (and (seq? %) (= :align (first %))) (second %)) (rest (butlast p))) 8)
+                                       t (rn pn)]
+                                   (swap! byvals conj (list '= t (list 'alloca bv :align al)))
+                                   (swap! copies conj (list 'call 'void 'g/llvm.memcpy.p0.p0.i64 [['ptr t] ['ptr av] ['i64 (bv-size bv)] ['i1 false]]))
+                                   [pn t])
+                                 [pn av])))
+                           ps args))
+        entry-label (let [l (second (first cblocks))] (if l (rn l) (symbol (str "%entry" sfx))))
+        cl (fn [l] (if (nil? l) entry-label (rn l)))
+        ;; the clone, the entry block's allocas apart
+        cloned (vec (map-indexed
+                     (fn [bi b]
+                       (let [[_ l & is] b
+                             is (remap (vec is) amap rn)]
+                         (into [(if (zero? bi) entry-label (cl l))] is)))
+                     cblocks))
+        allocas (vec (filter #(= 'alloca (head (inst-op %))) (rest (first cloned))))
+        cloned (assoc cloned 0 (into [(first (first cloned))] (concat @copies (remove #(= 'alloca (head (inst-op %))) (rest (first cloned))))))
+        after (symbol (str "%" (if label (subs (name label) 1) "entry") ".after" sfx))
+        rets (atom [])
+        cloned (mapv (fn [[l & is]]
+                       (let [t (last is)]
+                         (if (= 'ret (head t))
+                           (do (when (= 3 (count t)) (swap! rets conj [(nth t 2) l]))
+                               (into [l] (concat (butlast is) [(list 'br after)])))
+                           (into [l] is))))
+                     cloned)]
+    (when (or (= 'void rt) (nil? res) (seq @rets))
+      (let [phi (when (and res (not= 'void rt)) (list '= res (apply list 'phi rt (map (fn [[v l]] [v l]) @rets))))
+            ;; through an invoke: the normal edge from the continuation, the unwind edges to the outer landing pad
+            tail (if invoke? [(list 'br (:to os))] (vec post))
+            unwind (:unwind os)
+            splits (atom {})
+            resumes (atom [])
+            cloned (if-not invoke?
+                     cloned
+                     (vec (mapcat
+                           (fn [[l & is]]
+                             ;; landing pads: the outer clauses appended in the outer pad's block (done by the caller,
+                             ;; which knows it); calls that may throw: invokes, each splitting its block
+                             (loop [cur l acc [] is is out []]
+                               (if-let [i (first is)]
+                                 (let [op (inst-op i)]
+                                   (cond
+                                     (and (= 'call (head op)) (may-throw? op nounwind-fns) (next is))
+                                     (let [nl (symbol (str (name cur) ".noexc"))
+                                           inv (apply list 'invoke (concat (take 3 (rest op)) [:to nl :unwind unwind]
+                                                                           (mapcat identity (dissoc (opts-of op 4) :tail))))
+                                           inv (if (inst-def i) (list '= (inst-def i) inv) inv)]
+                                       (swap! splits assoc cur nl)
+                                       (recur nl [] (rest is) (conj out (into [cur] (conj acc inv)))))
+                                     (= 'resume (head op))
+                                     (do (swap! resumes conj [(nth op 2) cur])
+                                         (recur cur (conj acc (list 'br (symbol (str (name unwind) ".body")))) (rest is) out))
+                                     :else (recur cur (conj acc i) (rest is) out)))
+                                 (conj out (into [cur] acc)))))
+                           cloned)))]
+        {:blocks (vec (concat [(into [label] (conj (vec pre) (list 'br entry-label)))]
+                              cloned
+                              [(into [after] (concat (when phi [phi]) tail))]))
+         :allocas (into @byvals allocas)
+         :after after
+         :splits @splits
+         :resumes @resumes
+         :unwind (when invoke? unwind)
+         :pads (when invoke? (set (keep (fn [[l & is]] (when (some #(= 'landingpad (head (inst-op %))) is) l)) cloned)))
+         :personality (:personality dopts)}))))
+
+(defn- bv-size
+  "The size of a byval type (an [N x i8] array, the code generator's only one)."
+  ^long [t]
+  (if (and (seq? t) (= 'array (first t)) (= 'i8 (nth t 2))) (long (second t)) (throw (ex-info (str "inline: byval of " (pr-str t)) {}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; One caller
+
+(defn- append-clauses
+  "A landing pad instruction with the outer landing pad's clauses appended and its cleanup flag (HandleInlinedLandingPad)."
+  [i outer]
+  (let [op (inst-op i)
+        [_ t & cls] op
+        [_ _ & ocls] outer
+        cleanup (or (some #{:cleanup} cls) (some #{:cleanup} ocls))
+        new (apply list 'landingpad t (concat (when cleanup [:cleanup]) (remove #{:cleanup} cls) (remove #{:cleanup} ocls)))]
+    (if (inst-def i) (list '= (inst-def i) new) new)))
+
+(defn- inline-into
+  "The define `d` with its calls to the always-inline definitions of `ai` (name -> final define) inlined."
+  [d ai nounwind-fns]
+  (let [dopts (define-opts d)
+        blocks (mapv (fn [[_ l & is]] (into [l] is)) (:body dopts))
+        allocas (atom [])
+        splits (atom {})
+        resumes (atom {})      ; unwind label -> [[value block] ...]
+        outer-pads (atom {})   ; inlined pad label -> unwind label
+        personality (atom (:personality dopts))
+        out (atom [])
+        changed (atom false)]
+    ;; every block, its instructions in order: a call to an always-inline definition splits it
+    (doseq [b blocks]
+      (loop [[l & is] b]
+        (let [i (first (keep-indexed (fn [j x] (let [o (inst-op x)]
+                                                 (when (and (#{'call 'invoke} (head o)) (contains? ai (gname (nth o 2)))
+                                                            (not= (gname (second d)) (gname (nth o 2))))
+                                                   j)))
+                                     is))
+              r (when i (let [v (vec is) c (nth v i)]
+                          (inline-site l (subvec v 0 i) c (subvec v (inc i)) (get ai (gname (nth (inst-op c) 2))) nounwind-fns)))]
+          (if-not r
+            (swap! out conj (into [l] is))
+            (do (reset! changed true)
+                (swap! allocas into (:allocas r))
+                (swap! splits merge (:splits r) {l (:after r)})
+                (when-let [u (:unwind r)]
+                  (swap! resumes update u (fnil into []) (:resumes r))
+                  (doseq [p (:pads r)] (swap! outer-pads assoc p u)))
+                (when (and (:personality r) (not @personality)) (reset! personality (:personality r)))
+                (let [bs (:blocks r)]
+                  (swap! out into (butlast bs))
+                  (recur (last bs))))))))
+    (if-not @changed
+      d
+      (let [final (fn final [l] (if-let [n (get @splits l)] (final n) l))
+            bs @out
+            by-label (into {} (map (fn [b] [(first b) b]) bs))
+            ;; the outer landing pads' instructions (the first instruction of each unwind destination)
+            lp-of (fn [u] (first (filter #(= 'landingpad (head (inst-op %))) (rest (get by-label u)))))
+            bs (mapv (fn [[l & is]]
+                       (into [l]
+                             (map (fn [i]
+                                    (let [op (inst-op i)]
+                                      (cond
+                                        ;; phis: an incoming block that was split is its last piece
+                                        (= 'phi (head op))
+                                        (let [[_ t & ins] op
+                                              new (apply list 'phi t (map (fn [[v b]] [v (final b)]) ins))]
+                                          (if (inst-def i) (list '= (inst-def i) new) new))
+                                        :else i)))
+                                  is)))
+                     bs)
+            ;; the inlined landing pads: the outer one's clauses (each inlined pad of an invoke site)
+            bs (mapv (fn [[l & is :as b]]
+                       (if-let [u (get @outer-pads (first b))]
+                         (into [l] (map #(if (= 'landingpad (head (inst-op %))) (append-clauses % (inst-op (lp-of u))) %) is))
+                         b))
+                     bs)
+            ;; the resumes forwarded: the outer landing pad's block split after its landingpad, its value a phi there
+            ;; (getInnerResumeDest, forwardResume)
+            bs (reduce
+                (fn [bs [u rs]]
+                  (if (empty? rs)
+                    bs
+                    (let [body (symbol (str (name u) ".body"))]
+                      (vec (mapcat
+                            (fn [[l & is :as b]]
+                              (if (= l u)
+                                (let [[pre [lp & post]] (split-with #(not= 'landingpad (head (inst-op %))) is)
+                                      v (inst-def lp)
+                                      v0 (symbol (str (name v) ".lpad"))
+                                      t (second (inst-op lp))]
+                                  [(into [l] (concat pre [(list '= v0 (inst-op lp)) (list 'br body)]))
+                                   (into [body] (cons (list '= v (apply list 'phi t [v0 l] (map (fn [[x src]] [x (final src)]) rs))) post))])
+                                [b]))
+                            bs)))))
+                bs @resumes)
+            [e & more] bs
+            body (vec (cons (apply list 'block (first e) (concat @allocas (rest e)))
+                            (map (fn [[l & is]] (apply list 'block l is)) more)))
+            d (set-opt d :body body)]
+        (if @personality (set-opt d :personality @personality) d)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; AlwaysInlineImpl over the module
+
+(defn- discardable? [d] (contains? #{:linkonce_odr :linkonce :internal :private :available_externally} (:linkage (define-opts d))))
+
+(defn- mentions
+  "The global names a form refers to."
+  [x acc]
+  (cond
+    (gname x) (conj! acc (gname x))
+    (or (vector? x) (seq? x)) (reduce (fn [a y] (mentions y a)) acc x)
+    :else acc))
+
+(defn always-inline
+  "The module `forms` with every call of a viable `alwaysinline` definition inlined and each such definition that is
+  discardable and no longer used removed (AlwaysInlineImpl)."
+  [forms]
+  (let [defines (into {} (for [f forms :when (= 'llvm/define (head f))] [(gname (second f)) f]))
+        ai-names (set (for [[n d] defines :when (attrs-have? (:attrs (define-opts d)) :alwaysinline) :when (viable? d)] n))]
+    (if (empty? ai-names)
+      forms
+      (let [nounwind-fns (set (for [f forms :when (#{'llvm/define 'llvm/declare} (head f))
+                                    :when (attrs-have? (:attrs (apply hash-map (drop 4 (if (= 'llvm/declare (head f)) (remove #{'&} f) f)))) :nounwind)]
+                                (gname (second f))))
+            ;; the always-inline definitions with their own always-inline calls inlined first (a callee in the course of
+            ;; being finished is not inlined into its callees: the cycle LLVM's order would also leave)
+            done (atom {})
+            busy (atom #{})
+            finish (fn finish [n]
+                     (or (get @done n)
+                         (do (swap! busy conj n)
+                             (let [d (get defines n)
+                                   callees (set (keep #(gname (nth % 2)) (calls-in d)))
+                                   ai (into {} (for [c callees :when (contains? ai-names c) :when (not (contains? @busy c))] [c (finish c)]))
+                                   r (inline-into d ai nounwind-fns)]
+                               (swap! busy disj n)
+                               (swap! done assoc n r)
+                               r))))
+            forms (mapv (fn [f]
+                          (if (= 'llvm/define (head f))
+                            (let [n (gname (second f))]
+                              (if (contains? ai-names n)
+                                (finish n)
+                                (let [callees (set (keep #(gname (nth % 2)) (calls-in f)))
+                                      ai (into {} (for [c callees :when (contains? ai-names c)] [c (finish c)]))]
+                                  (if (seq ai) (inline-into f ai nounwind-fns) f))))
+                            f))
+                        forms)]
+        ;; the dead always-inline definitions erased, until none is left (isDefTriviallyDead; a comdat's are erased
+        ;; together once dead, filterDeadComdatFunctions)
+        (loop [forms forms]
+          (let [used (persistent! (reduce (fn [acc f]
+                                            (if (= 'llvm/define (head f))
+                                              (let [own (gname (second f))]
+                                                (reduce (fn [a n] (if (= n own) a (conj! a n))) acc (persistent! (mentions (drop 2 f) (transient #{})))))
+                                              (mentions (if (#{'llvm/declare} (head f)) [] (drop 2 f)) acc)))
+                                          (transient #{}) forms))
+                dead (set (for [f forms :when (= 'llvm/define (head f)) :let [n (gname (second f))]
+                                :when (contains? ai-names n) :when (discardable? f) :when (not (contains? used n))]
+                            n))]
+            (if (empty? dead)
+              forms
+              (recur (vec (remove #(and (#{'llvm/define 'llvm/declare} (head %)) (contains? dead (gname (second %)))) forms))))))))))

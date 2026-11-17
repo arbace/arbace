@@ -1,0 +1,108 @@
+;; Go-build variant of javax.security.auth.login.LoginContext (J2G-SPEC §4.6;
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, F4, "As built: F4 (write-ahead)"): read by j2g only. invoke
+;; makes a login module from its class's name alone (Class.forName and newInstance, jdk26u's second
+;; way): java.util.ServiceLoader is not in the Go build, so the providers' cache (providersCache) is
+;; cut. A login module is found when its class is in jrt's registry (the world's and a compiled
+;; program's classes), not a class evaluated at the REPL. The replacing members are jdk26u's
+;; (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception:
+;; LICENSE.md) as repr/java converts them, with the change named; the rest Copyright (c) the Arbace
+;; authors; Eclipse Public License 1.0.
+(in-ns 'javax.security.auth.login)
+
+(j2g/variant LoginContext
+  (j2g/cut (field ^:private ^:static ^:final ^{:tag (WeakHashMap ClassLoader (Set (ServiceLoader$Provider LoginModule)))} providersCache))
+
+  (method ^:private invoke :throws [LoginException] ^void [this ^String methodName]
+    (let [^:mutable i moduleIndex]
+      (while (< i (alength moduleStack))
+        (let [name (.getLoginModuleName (.-entry (aget moduleStack i)))]
+          (try
+            (when (nil? (.-module (aget moduleStack i)))
+              (do
+                (when (nil? (.-module (aget moduleStack i)))
+                  (try
+                    (let [tmp (.newInstance (Class/forName name false contextClassLoader))]
+                      (set! (.-module (aget moduleStack i)) (cast LoginModule tmp))
+                      (when (some? debug) (.println debug (java-str name " loaded via reflection"))))
+                    (catch ClassNotFoundException e
+                      (throw (LoginException. (java-str "No LoginModule found for " name))))))
+                (.initialize (.-module (aget moduleStack i))
+                             subject
+                             callbackHandler
+                             state
+                             (.getOptions (.-entry (aget moduleStack i))))))
+            (let [^:mutable ^boolean status false]
+              (switch methodName
+                LOGIN_METHOD (set! status (.login (.-module (aget moduleStack i))))
+                COMMIT_METHOD (set! status (.commit (.-module (aget moduleStack i))))
+                LOGOUT_METHOD (set! status (.logout (.-module (aget moduleStack i))))
+                ABORT_METHOD (set! status (.abort (.-module (aget moduleStack i))))
+                (throw (AssertionError. (java-str "Unknown method " methodName))))
+              (cond
+                status
+                  (do
+                    (when (and (and (and (not (.equals methodName ABORT_METHOD))
+                                         (not (.equals methodName LOGOUT_METHOD)))
+                                    (identical?
+                                      (.getControlFlag (.-entry (aget moduleStack i)))
+                                      AppConfigurationEntry$LoginModuleControlFlag/SUFFICIENT))
+                               (nil? firstRequiredError))
+                      (.clearState this)
+                      (when (some? debug)
+                        (.println debug (java-str name " " methodName " SUFFICIENT success")))
+                      (return))
+                    (when (some? debug) (.println debug (java-str name " " methodName " success")))
+                    (set! success true))
+                (some? debug) (.println debug (java-str name " " methodName " ignored"))))
+            (catch Exception ite
+              (let [^:mutable ^LoginException le nil]
+                (cond
+                  (and (instance? PendingException ite) (.equals methodName LOGIN_METHOD))
+                    (throw (cast PendingException ite))
+                  (instance? LoginException ite) (set! le (cast LoginException ite))
+                  (instance? SecurityException ite)
+                    (do
+                      (set! le (LoginException. "Security Exception"))
+                      (.initCause le (SecurityException.))
+                      (when (some? debug)
+                        (.println
+                          debug
+                          "original security exception with detail msg replaced by new exception with empty detail msg")
+                        (.println debug (java-str "original security exception: " (.toString ite)))))
+                  :else
+                    (let [sw (StringWriter.)]
+                      (.printStackTrace ite (PrintWriter. sw))
+                      (.flush sw)
+                      (set! le (LoginException. (.toString sw)))))
+                (cond
+                  (identical? (.getControlFlag (.-entry (aget moduleStack i)))
+                              AppConfigurationEntry$LoginModuleControlFlag/REQUISITE)
+                    (do
+                      (when (some? debug)
+                        (.println debug (java-str name " " methodName " REQUISITE failure")))
+                      (if (or (.equals methodName ABORT_METHOD) (.equals methodName LOGOUT_METHOD))
+                          (when (nil? firstRequiredError) (set! firstRequiredError le))
+                          (.throwException this firstRequiredError le)))
+                  (identical? (.getControlFlag (.-entry (aget moduleStack i)))
+                              AppConfigurationEntry$LoginModuleControlFlag/REQUIRED)
+                    (do
+                      (when (some? debug)
+                        (.println debug (java-str name " " methodName " REQUIRED failure")))
+                      (when (nil? firstRequiredError) (set! firstRequiredError le)))
+                  :else
+                    (do
+                      (when (some? debug)
+                        (.println debug (java-str name " " methodName " OPTIONAL failure"))
+                        (.printStackTrace le))
+                      (when (nil? firstError) (set! firstError le))))))))
+        (set! i (unchecked-inc-int i))
+        (set! moduleIndex (unchecked-inc-int moduleIndex))))
+    (cond
+      (some? firstRequiredError) (.throwException this firstRequiredError nil)
+      (and (not success) (some? firstError)) (.throwException this firstError nil)
+      (not success)
+        (.throwException this
+                         (LoginException.
+                           (ResourcesMgr/getString "Login.Failure.all.modules.ignored"))
+                         nil)
+      :else (.clearState this))))

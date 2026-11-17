@@ -1,0 +1,228 @@
+(ns arbace.repr.wasm.lex
+  "repr/wasm's lexer and S-expression reader for the text format and the testsuite's scripts (doc/wasm/SPEC.md §7; the
+  specification's lexical grammar, its text chapter 6.2-6.3; WA2). `read-sexps` reads a text into its S-expressions:
+  a list is {:t :list :p POS :xs [...]}, an atom {:t KIND :s TEXT :p POS} with KIND :kw (a keyword: idchars from a
+  lower-case letter), :id (`$name` or `$\"...\"`; :s the name without `$`), :str (:b its bytes), :num (an unsigned or
+  signed integer or float spelling, `_` kept), :reserved (any other run of idchars). Comments (`;;` to the line's end,
+  `(; ... ;)` nested) are skipped, and annotations too but `(@custom ...)` and `(@name ...)`, kept as {:t :annot :name N
+  :p POS :xs [...]} for the text reader (WA2's rest). A lexical error throws ex-info {:wasm/malformed MSG} with lexer.mll's
+  message; `first-unknown` finds the token its lexer would reject as `unknown operator`."
+  (:require [arbace.repr.wasm.ops :as ops]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- malformed [msg ^long at] (throw (ex-info (str msg " (at char " at ")") {:wasm/malformed msg :at at})))
+
+(defn- idchar? [^long c]
+  (or (<= 0x30 c 0x39) (<= 0x41 c 0x5a) (<= 0x61 c 0x7a)
+      (case (int c) (0x21 0x23 0x24 0x25 0x26 0x27 0x2a 0x2b 0x2d 0x2e 0x2f 0x3a 0x3c 0x3d 0x3e 0x3f 0x40 0x5c 0x5e 0x5f 0x60 0x7c 0x7e) true false)))
+
+(defn- hexval ^long [^long c]
+  (cond (<= 0x30 c 0x39) (- c 0x30) (<= 0x61 c 0x66) (- c 0x57) (<= 0x41 c 0x46) (- c 0x37) :else -1))
+
+(def ^:private num-re
+  #"[+-]?(?:(?:[0-9](?:_?[0-9])*(?:\.(?:[0-9](?:_?[0-9])*)?)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?)|(?:0x[0-9a-fA-F](?:_?[0-9a-fA-F])*(?:\.(?:[0-9a-fA-F](?:_?[0-9a-fA-F])*)?)?(?:[pP][+-]?[0-9](?:_?[0-9])*)?)|inf|nan|nan:0x[0-9a-fA-F](?:_?[0-9a-fA-F])*)")
+
+(defn- string-at
+  "The string literal starting at `i` (its opening quote): [bytes end-index]."
+  [^String s ^long i]
+  (let [n (.length s) o (java.io.ByteArrayOutputStream.)]
+    (loop [j (inc i)]
+      (when (>= j n) (malformed "unclosed string" i))
+      (let [c (long (.charAt s (int j)))]
+        (cond
+          (= c 0x22) [(.toByteArray o) (inc j)]
+          (= c 0x5c)
+          (do (when (>= (inc j) n) (malformed "unclosed string" i))
+              (let [d (long (.charAt s (int (inc j))))]
+                (case (int d)
+                  0x6e (do (.write o 10) (recur (+ j 2)))
+                  0x74 (do (.write o 9) (recur (+ j 2)))
+                  0x72 (do (.write o 13) (recur (+ j 2)))
+                  0x22 (do (.write o 0x22) (recur (+ j 2)))
+                  0x27 (do (.write o 0x27) (recur (+ j 2)))
+                  0x5c (do (.write o 0x5c) (recur (+ j 2)))
+                  0x75 (let [k (+ j 2)]
+                         (when-not (and (< k n) (= \{ (.charAt s (int k)))) (malformed "illegal escape" j))
+                         (let [e (.indexOf s "}" (int k))
+                               h (when (pos? e) (subs s (inc k) e))]
+                           (when-not (and h (re-matches #"[0-9a-fA-F](?:_?[0-9a-fA-F])*" h)) (malformed "illegal escape" j))
+                           (let [cp (try (Long/parseLong (str/replace h "_" "") 16) (catch Exception _ -1))]
+                             (when (or (neg? cp) (> cp 0x10ffff) (<= 0xd800 cp 0xdfff)) (malformed "malformed UTF-8 codepoint" j))
+                             (let [bs (.getBytes (String. (Character/toChars (int cp))) java.nio.charset.StandardCharsets/UTF_8)]
+                               (.write o bs 0 (alength bs)))
+                             (recur (inc e)))))
+                  (let [h1 (hexval d) h2 (if (< (+ j 2) n) (hexval (long (.charAt s (int (+ j 2))))) -1)]
+                    (when (or (neg? h1) (neg? h2)) (malformed "illegal escape" j))
+                    (.write o (int (+ (* 16 h1) h2)))
+                    (recur (+ j 3))))))
+          (or (< c 0x20) (= c 0x7f)) (malformed "illegal character in string" j)
+          (< c 0x80) (do (.write o (int c)) (recur (inc j)))
+          :else
+          ;; a character beyond ASCII: its UTF-8 bytes (a surrogate pair one character)
+          (let [cp (.codePointAt s (int j))
+                bs (.getBytes (String. (Character/toChars cp)) java.nio.charset.StandardCharsets/UTF_8)]
+            (.write o bs 0 (alength bs))
+            (recur (+ j (Character/charCount cp)))))))))
+
+(defn- skip-block-comment
+  "The index after the block comment starting at `i` (its `(;`), nested ones included."
+  ^long [^String s ^long i]
+  (let [n (.length s)]
+    (loop [j (+ i 2) depth 1]
+      (cond
+        (>= j n) (malformed "unclosed comment" i)
+        (and (= \; (.charAt s (int j))) (< (inc j) n) (= \) (.charAt s (int (inc j)))))
+        (if (= depth 1) (+ j 2) (recur (+ j 2) (dec depth)))
+        (and (= \( (.charAt s (int j))) (< (inc j) n) (= \; (.charAt s (int (inc j))))) (recur (+ j 2) (inc depth))
+        :else (recur (inc j) depth)))))
+
+(defn- run-char?
+  "A reserved character of a token run (, [ ] { } and a `;` that starts no comment)."
+  [^String s ^long i ^long n]
+  (let [c (long (.charAt s (int i)))]
+    (or (#{0x2c 0x5b 0x5d 0x7b 0x7d} c)
+        (and (= c 0x3b) (not (and (< (inc i) n) (= \; (.charAt s (int (inc i))))))))))
+
+(defn tokens
+  "The text's tokens: [:open pos], [:close pos], [:annot pos name] (an annotation's opening, `(@name`), or an atom map."
+  [^String s]
+  (let [n (.length s) out (java.util.ArrayList.)
+        ;; the depth of parentheses inside an annotation (0: outside one): there `(@` with no id is a parenthesis
+        ad (long-array 1)
+        open! (fn [] (when (pos? (aget ad 0)) (aset ad 0 (inc (aget ad 0)))))
+        close! (fn [] (when (pos? (aget ad 0)) (aset ad 0 (dec (aget ad 0)))))]
+    (loop [i 0]
+      (if (>= i n)
+        (vec (.toArray out))
+        (let [c (long (.charAt s (int i)))]
+          (cond
+            (or (= c 0x20) (= c 0x09) (= c 0x0a) (= c 0x0d)) (recur (inc i))
+            (and (= c 0x3b) (< (inc i) n) (= \; (.charAt s (int (inc i)))))
+            ;; to the line's end: a newline is U+0A, U+0D or both (the text format's lexical grammar)
+            (let [e (loop [j (+ i 2)] (if (or (>= j n) (#{\newline \return} (.charAt s (int j)))) j (recur (inc j))))] (recur (if (>= e n) n (inc e))))
+            (and (= c 0x28) (< (inc i) n) (= \; (.charAt s (int (inc i))))) (recur (skip-block-comment s i))
+            (and (= c 0x28) (< (inc i) n) (= \@ (.charAt s (int (inc i)))))
+            (if (and (< (+ i 2) n) (= \" (.charAt s (int (+ i 2)))))
+              ;; (@"..."): an annotation id written as a string (3.0)
+              ;; lexer.mll: `(@` and no well-formed string after it is `(@` alone, "empty annotation id"
+              (let [[b e] (try (string-at s (+ i 2)) (catch arbace.lang.ExceptionInfo _ (malformed "empty annotation id" i)))]
+                (when (zero? (alength ^bytes b)) (malformed "empty annotation id" i))
+                (when-not (java.util.Arrays/equals ^bytes b (.getBytes (String. ^bytes b java.nio.charset.StandardCharsets/UTF_8) java.nio.charset.StandardCharsets/UTF_8))
+                  (malformed "malformed UTF-8 encoding" i))
+                (if (pos? (aget ad 0)) (open!) (aset ad 0 1))
+                (.add out [:annot i (String. ^bytes b java.nio.charset.StandardCharsets/UTF_8)])
+                (recur e))
+              (let [j (loop [j (+ i 2)] (if (and (< j n) (idchar? (long (.charAt s (int j))))) (recur (inc j)) j))]
+                (if (= j (+ i 2))
+                  (if (pos? (aget ad 0))
+                    (do (open!) (.add out [:open i]) (recur (inc i)))
+                    (malformed "empty annotation id" i))
+                  (do (if (pos? (aget ad 0)) (open!) (aset ad 0 1))
+                      (.add out [:annot i (subs s (+ i 2) j)])
+                      (recur j)))))
+            (= c 0x28) (do (open!) (.add out [:open i]) (recur (inc i)))
+            (= c 0x29) (do (close!) (.add out [:close i]) (recur (inc i)))
+            (or (= c 0x22) (idchar? c) (run-char? s i n))
+            ;; 3.0's lexical grammar: a maximal run of idchars, strings and the reserved characters is one token; a run that is
+            ;; one string is a string, `$` and one string an identifier, idchars alone a keyword, number, identifier or reserved
+            (let [[j strs] (loop [j i strs []]
+                             (cond (>= j n) [j strs]
+                                   (= \" (.charAt s (int j)))
+                                   ;; lexer.mll: `$` and no well-formed string after it is `$` alone, "empty identifier"
+                                   (let [[b e] (if (and (= j (inc i)) (= \$ (.charAt s (int i))))
+                                                 (try (string-at s j) (catch arbace.lang.ExceptionInfo _ (malformed "empty identifier" i)))
+                                                 (string-at s j))]
+                                     (recur e (conj strs [j e b])))
+                                   (or (idchar? (long (.charAt s (int j)))) (run-char? s j n)) (recur (inc j) strs)
+                                   :else [j strs]))
+                  w (subs s i j)]
+              (cond
+                (and (= 1 (count strs)) (= i (first (first strs))) (= j (second (first strs))))
+                (do (.add out {:t :str :s w :b (nth (first strs) 2) :p i}) (recur j))
+                (and (= 1 (count strs)) (= (inc i) (first (first strs))) (= j (second (first strs))) (= \$ (.charAt s (int i))))
+                (let [^bytes b (nth (first strs) 2)
+                      nm (String. b java.nio.charset.StandardCharsets/UTF_8)]
+                  (when (zero? (alength b)) (malformed "empty identifier" i))
+                  (when-not (java.util.Arrays/equals b (.getBytes nm java.nio.charset.StandardCharsets/UTF_8))
+                    (malformed "malformed UTF-8 encoding" i))
+                  (.add out {:t :id :s nm :p i}) (recur j))
+                (seq strs) (do (.add out {:t :reserved :s w :p i}) (recur j))
+                (not (idchar? c)) (do (.add out {:t :reserved :s w :p i}) (recur j))
+                (re-find #"[,;\[\]{}]" w) (do (.add out {:t :reserved :s w :p i}) (recur j))
+                (.startsWith w "$") (do (when (= w "$") (malformed "empty identifier" i)) (.add out {:t :id :s (subs w 1) :p i}) (recur j))
+                (re-matches num-re w) (do (.add out {:t :num :s w :p i}) (recur j))
+                (<= 0x61 c 0x7a) (do (.add out {:t :kw :s w :p i}) (recur j))
+                :else (do (.add out {:t :reserved :s w :p i}) (recur j))))
+            ;; lexer.mll: inside an annotation any other character is `illegal character`; outside, a control character is
+            ;; misplaced, a character beyond ASCII too (U+FFFD: an ill-formed sequence the decoding replaced)
+            :else (malformed (cond (= c 0xfffd) "malformed UTF-8 encoding"
+                                   (pos? (aget ad 0)) "illegal character"
+                                   (or (< c 0x20) (= c 0x7f)) "misplaced control character"
+                                   :else "misplaced unicode character")
+                             i)))))))
+
+(defn read-sexps
+  "The text's S-expressions (annotations left out but @custom and @name, kept as :annot nodes)."
+  [^String s]
+  (let [ts (tokens s) n (count ts)]
+    (letfn [(skip-annot [^long i]
+              ;; the index after the annotation opening at i, its nested parentheses balanced
+              (loop [j (inc i) depth 1]
+                (when (>= j n) (malformed "unclosed annotation" (second (nth ts i))))
+                (let [t (nth ts j)]
+                  (cond (and (vector? t) (#{:open :annot} (first t))) (recur (inc j) (inc depth))
+                        (and (vector? t) (= :close (first t))) (if (= 1 depth) (inc j) (recur (inc j) (dec depth)))
+                        :else (recur (inc j) depth)))))
+            (items [^long i stop?]
+              (loop [i i out (transient [])]
+                (if (>= i n)
+                  (if stop? (malformed "unexpected end of input" (count s)) [(persistent! out) i])
+                  (let [t (nth ts i)]
+                    (cond
+                      (and (vector? t) (= :close (first t)))
+                      (if stop? [(persistent! out) (inc i)] (malformed "unexpected token" (second t)))
+                      ;; the annotations the text reader reads (@custom and @name: custom sections and names) kept as
+                      ;; {:t :annot :name N :p P :xs [...]}, any other skipped
+                      (and (vector? t) (= :annot (first t)) (#{"custom" "name"} (nth t 2)))
+                      (let [[xs j] (items (inc i) true)] (recur j (conj! out {:t :annot :name (nth t 2) :p (second t) :xs xs})))
+                      (and (vector? t) (= :annot (first t))) (recur (skip-annot i) out)
+                      (and (vector? t) (= :open (first t)))
+                      (let [[xs j] (items (inc i) true)] (recur j (conj! out {:t :list :p (second t) :xs xs})))
+                      :else (recur (inc i) (conj! out t)))))))]
+      (first (items 0 false)))))
+
+;; the atoms' helpers for the parsers
+
+(defn kw? [x ^String k] (and (= :kw (:t x)) (= k (:s x))))
+(defn head [x] (when (= :list (:t x)) (let [f (first (:xs x))] (when (= :kw (:t f)) (:s f)))))
+(defn list-of? [x ^String k] (= k (head x)))
+
+(def legacy-keywords
+  "The legacy exceptions' keywords (WA8; the testsuite's legacy/ scripts, the exception handling proposal's legacy text format),
+  beyond lexer.mll's at wg-3.0 (ops/keywords)."
+  #{"try" "do" "catch" "catch_all" "delegate" "rethrow"})
+
+(defn unknown?
+  "An atom the reference's lexer rejects as `unknown operator` (lexer.mll: a keyword its table does not know, or a reserved
+  token; `offset=N` and `align=N` are tokens of their own)."
+  [x]
+  (case (:t x)
+    :reserved true
+    :kw (let [w (:s x)]
+          (not (or (contains? ops/keywords w) (contains? legacy-keywords w)
+                   (re-matches #"(?:offset|align)=(?:[0-9](?:_?[0-9])*|0x[0-9a-fA-F](?:_?[0-9a-fA-F])*)" w))))
+    false))
+
+(defn first-unknown
+  "The first atom of a text's tokens the reference's lexer rejects (unknown?), annotations' contents left out, or nil."
+  [^String s]
+  (loop [ts (seq (tokens s)) depth 0]
+    (when-let [t (first ts)]
+      (cond
+        (and (vector? t) (= :annot (first t))) (recur (next ts) (inc depth))
+        (and (vector? t) (= :open (first t))) (recur (next ts) (if (pos? depth) (inc depth) 0))
+        (and (vector? t) (= :close (first t))) (recur (next ts) (max 0 (dec depth)))
+        (and (zero? depth) (map? t) (unknown? t)) t
+        :else (recur (next ts) depth)))))

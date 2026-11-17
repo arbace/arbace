@@ -26,10 +26,14 @@
                    reading, after jrt.classfile) and the differences named as bin/repr-java
                    roundtrip names them (arbace.repr.java.roundtrip/class-differences): a value's
                    control flow, an increment's place, a local's initializer, a switch's arms
+          a test whose only step not passing is classes, by class-kinds alone, passes (JCV11 (b)): the
+          classes step is a sub-level, its reason kept as the pass's note (classes-note?)
         prints ID<TAB>print<TAB>RESULT<TAB>REASON per test, and the steps' counts on stderr; and for each
         negative control whose subject a test is (its plan's control-print CID REF; GTS84 (a),
         test/java/controls.edn) the control's row: forms, text and classes crossed against REF's
-        original, differ only when each differs (control-steps, control-row)"
+        original, differ only when each differs (control-steps, control-row)
+    rejudge FILE
+        a recorded print level re-judged by JCV11 (b)'s rule, from the record alone (rejudge)"
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.repr.java.print :as pr]
@@ -237,6 +241,26 @@
           (has #": (lookupswitch|tableswitch) ") (conj "a switch's arms (fall-through repeated)")
           true (#(if (empty? %) [(if (seq ds) (str "code: " (str/trim (first (sort ds)))) "the order of the code (the same instructions)")] %)))))))
 
+(def class-kinds
+  "The class-file differences class-differences names (the forms do not record what they differ by: JCV11 (b))."
+  #{"a value's control flow: ?: or a switch expression on one side, if or a switch statement on the other"
+    "an increment's place (i++ in an expression or as a statement)"
+    "a local's initializer (Java's default value written or not)"
+    "a switch's arms (fall-through repeated)"
+    "the constant pool's order or an attribute (the same code)"
+    "the order of the code (the same instructions)"})
+
+(defn classes-note?
+  "JCV11 (b) (the user, 2026-11-08; RPS9 (a) reopened): whether the classes step's reason WHY is a sub-level note,
+  not a non-pass: every class file the original's (none on one side only), each differing one's differences all
+  class-kinds. The print level then passes on the round trip's own checks (print, javac, forms, text), the class
+  files reported beside it; an unnamed code difference, an unread class file or a class file of one side only
+  stays a non-pass (:print-classes-unnamed)."
+  [why]
+  (boolean
+    (when-let [[_ ks] (re-matches #"classes: \d+ of \d+ class files differ: (.*) \([^()]*\)" (str why))]
+      (every? class-kinds (str/split ks #"; ")))))
+
 (defn- classes-result
   "pass, or differ and the reason: the class trees c1 (the original's) and c2 (the printed Java's)."
   [c1 c2]
@@ -352,8 +376,11 @@
       (println (control-row cid ref (control-steps work id cid ref))))
     (doseq [[id st] all]
       (doseq [s steps :let [[r] (get st s)] :when r] (swap! counts update-in [s r] (fnil inc 0)))
-      (let [bad (filter #(and (get st %) (not= "pass" (first (get st %)))) steps)
-            [r why] (if (seq bad) (get st (first bad)) ["pass" ""])
+      (let [bad0 (filter #(and (get st %) (not= "pass" (first (get st %)))) steps)
+            ;; JCV11 (b): class files that differ only by class-kinds are the sub-level's note on a pass
+            note (when (and (= [:classes] bad0) (classes-note? (second (get st :classes)))) (second (get st :classes)))
+            bad (if note [] bad0)
+            [r why] (if (seq bad) (get st (first bad)) ["pass" (or note "")])
             r (if (and (empty? bad) (not= (set steps) (set (keys st)))) "fail" r)
             why (if (and (empty? bad) (not= (set steps) (set (keys st))))
                   (str "steps not taken: " (str/join " " (map name (remove (set (keys st)) steps))))
@@ -365,9 +392,28 @@
       (println (str "java-print judge: " (count all) " tests; by step: "
                     (str/join "; " (for [s steps] (str (name s) " " (str/join ", " (for [[r n] (sort (get @counts s))] (str n " " r)))))))))))
 
+(defn rejudge
+  "JCV11 (b)'s re-judge of a recorded print level, FILE (test/java/check-print.edn): each row differ whose reason
+  classes-note? takes becomes pass with that reason, the sub-level's note, as judge now writes it; the other rows
+  as they are. Prints the counts. (A row whose reason the record cut at 600 characters stays as it is: the next
+  whole run judges it from its steps.)"
+  [file]
+  (let [ls (str/split-lines (slurp file))
+        n (atom 0)
+        out (for [l ls]
+              (if-let [[_ pre why] (re-matches #"( \[\"[^\"]+\" \"[^\"]+\" ):differ (\".*\")\]" l)]
+                (let [w (read-string why)]
+                  (if (classes-note? w)
+                    (do (swap! n inc) (str pre ":pass " why "]"))
+                    l))
+                l))]
+    (spit file (str (str/join "\n" out) "\n"))
+    (println (str "java-print rejudge: " @n " rows differ -> pass (JCV11 (b)), " file))))
+
 (defn -main [cmd & args]
   (case cmd
     "print" (apply print-tests args)
-    "judge" (apply judge args))
+    "judge" (apply judge args)
+    "rejudge" (apply rejudge args))
   (shutdown-agents)
   (System/exit 0))

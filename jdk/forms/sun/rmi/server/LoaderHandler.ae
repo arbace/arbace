@@ -1,0 +1,284 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/server/LoaderHandler.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.server)
+
+(import '(java.lang.ref SoftReference)
+        '(java.lang.reflect Modifier Proxy)
+        '(java.net MalformedURLException URL URLClassLoader)
+        '(java.rmi.server LogStream)
+        '(java.util Arrays Collections IdentityHashMap Map StringTokenizer WeakHashMap)
+        '(sun.rmi.runtime Log))
+
+(defclass ^:public ^:final LoaderHandler
+  (field ^:static ^:final ^int logLevel
+    (LogStream/parseLevel (System/getProperty "sun.rmi.loader.logLevel")))
+
+  (field ^:static ^:final ^Log loaderLog
+    (Log/getLog "sun.rmi.loader" "loader" LoaderHandler/logLevel))
+
+  (field ^:private ^:static ^String codebaseProperty nil)
+
+  (static-initializer
+    (let [prop (System/getProperty "java.rmi.server.codebase")]
+      (when (and (some? prop) (> (.length (.trim prop)) 0)) (set! codebaseProperty prop))))
+
+  (field ^:private ^:static ^URL/1 codebaseURLs nil)
+
+  (field ^:private ^:static ^:final ^{:tag (Map ClassLoader Void)} codebaseLoaders
+    (Collections/synchronizedMap (IdentityHashMap. 5)))
+
+  (static-initializer
+    (loop [codebaseLoader (ClassLoader/getSystemClassLoader)]
+      (when (some? codebaseLoader)
+        (.put codebaseLoaders codebaseLoader nil)
+        (recur (.getParent codebaseLoader)))))
+
+  (constructor ^:private [this])
+
+  (method ^:private ^:static ^:synchronized getDefaultCodebaseURLs :throws [MalformedURLException] ^URL/1 []
+    (when (nil? codebaseURLs)
+      (if (some? codebaseProperty)
+          (set! codebaseURLs (LoaderHandler/pathToURLs codebaseProperty))
+          (set! codebaseURLs (new URL/1 0))))
+    codebaseURLs)
+
+  (method ^:public ^:static loadClass :throws [MalformedURLException ClassNotFoundException] ^{:tag (Class ?)} [^String codebase
+                                                                                                                ^String name
+                                                                                                                ^ClassLoader defaultLoader]
+    (when (.isLoggable loaderLog Log/BRIEF)
+      (.log loaderLog
+            Log/BRIEF
+            (java-str "name = \""
+                      name
+                      "\", codebase = \""
+                      (if (some? codebase) codebase "")
+                      "\""
+                      (if (some? defaultLoader) (java-str ", defaultLoader = " defaultLoader) ""))))
+    (let [^URL/1 urls (if (some? codebase)
+                          (LoaderHandler/pathToURLs codebase)
+                          (LoaderHandler/getDefaultCodebaseURLs))]
+      (when (some? defaultLoader)
+        (try
+          (let [^{:tag (Class ?)} c (Class/forName name false defaultLoader)]
+            (when (.isLoggable loaderLog Log/VERBOSE)
+              (.log loaderLog
+                    Log/VERBOSE
+                    (java-str "class \""
+                              name
+                              "\" found via defaultLoader, defined by "
+                              (.getClassLoader c))))
+            (return c))
+          (catch ClassNotFoundException e)))
+      (LoaderHandler/loadClass urls name)))
+
+  (method ^:public ^:static getClassAnnotation ^String [^{:tag (Class ?)} cl]
+    (let [name (.getName cl)
+          nameLength (.length name)]
+      (when (and (> nameLength 0) (== (.charAt name 0) \[))
+        (let [^:mutable ^int i 1]
+          (while (and (> nameLength i) (== (.charAt name i) \[)) (set! i (unchecked-inc-int i)))
+          (when (and (> nameLength i) (not (== (.charAt name i) \L))) (return nil))))
+      (let [loader (.getClassLoader cl)]
+        (if (or (nil? loader) (.containsKey codebaseLoaders loader))
+            codebaseProperty
+            (let [^:mutable ^String annotation nil]
+              (when (instance? URLClassLoader loader)
+                (let [urls (.getURLs (cast URLClassLoader loader))]
+                  (when (some? urls) (set! annotation (LoaderHandler/urlsToPath urls)))))
+              (if (some? annotation) annotation codebaseProperty))))))
+
+  (method ^:public ^:static getClassLoader :throws [MalformedURLException] ^ClassLoader [^String codebase]
+    (let [^URL/1 urls (if (some? codebase)
+                          (LoaderHandler/pathToURLs codebase)
+                          (LoaderHandler/getDefaultCodebaseURLs))]
+      (.getContextClassLoader (Thread/currentThread))))
+
+  (method ^:public ^:static registerCodebaseLoader ^void [^ClassLoader loader]
+    (.put codebaseLoaders loader nil))
+
+  (method ^:private ^:static loadClass :throws [ClassNotFoundException] ^{:tag (Class ?)} [^URL/1 urls
+                                                                                           ^String name]
+    (let [parent (.getContextClassLoader (Thread/currentThread))]
+      (when (.isLoggable loaderLog Log/VERBOSE)
+        (.log loaderLog Log/VERBOSE (java-str "(thread context class loader: " parent ")")))
+      (try
+        (let [^{:tag (Class ?)} c (Class/forName name false parent)]
+          (when (.isLoggable loaderLog Log/VERBOSE)
+            (.log
+              loaderLog
+              Log/VERBOSE
+              (java-str
+                "class \""
+                name
+                "\" found via thread context class loader (no security manager: codebase disabled), defined by "
+                (.getClassLoader c))))
+          c)
+        (catch ClassNotFoundException e
+          (when (.isLoggable loaderLog Log/BRIEF)
+            (.log
+              loaderLog
+              Log/BRIEF
+              (java-str
+                "class \""
+                name
+                "\" not found via thread context class loader (no security manager: codebase disabled)")
+              e))
+          (throw (ClassNotFoundException.
+                   (java-str (.getMessage e) " (no security manager: RMI class loader disabled)")
+                   (.getException e)))))))
+
+  (method ^:public ^:static loadProxyClass :throws [MalformedURLException ClassNotFoundException] ^{:tag (Class ?)} [^String codebase
+                                                                                                                     ^String/1 interfaces
+                                                                                                                     ^ClassLoader defaultLoader]
+    (when (.isLoggable loaderLog Log/BRIEF)
+      (.log loaderLog
+            Log/BRIEF
+            (java-str "interfaces = "
+                      (Arrays/asList interfaces)
+                      ", codebase = \""
+                      (if (some? codebase) codebase "")
+                      "\""
+                      (if (some? defaultLoader) (java-str ", defaultLoader = " defaultLoader) ""))))
+    (let [parent (.getContextClassLoader (Thread/currentThread))]
+      (when (.isLoggable loaderLog Log/VERBOSE)
+        (.log loaderLog Log/VERBOSE (java-str "(thread context class loader: " parent ")")))
+      (let [^URL/1 urls (if (some? codebase)
+                            (LoaderHandler/pathToURLs codebase)
+                            (LoaderHandler/getDefaultCodebaseURLs))]
+        (try
+          (let [^{:tag (Class ?)} c (LoaderHandler/loadProxyClass
+                                      interfaces
+                                      defaultLoader
+                                      parent
+                                      false)]
+            (when (.isLoggable loaderLog Log/VERBOSE)
+              (.log loaderLog
+                    Log/VERBOSE
+                    (java-str "(no security manager: codebase disabled) proxy class defined by "
+                              (.getClassLoader c))))
+            c)
+          (catch ClassNotFoundException e
+            (when (.isLoggable loaderLog Log/BRIEF)
+              (.log loaderLog
+                    Log/BRIEF
+                    "(no security manager: codebase disabled) proxy class resolution failed"
+                    e))
+            (throw (ClassNotFoundException.
+                     (java-str (.getMessage e) " (no security manager: RMI class loader disabled)")
+                     (.getException e))))))))
+
+  (method ^:private ^:static loadProxyClass :throws [ClassNotFoundException] ^{:tag (Class ?)} [^String/1 interfaceNames
+                                                                                                ^ClassLoader defaultLoader
+                                                                                                ^ClassLoader codebaseLoader
+                                                                                                ^boolean preferCodebase]
+    (let [^:mutable ^ClassLoader proxyLoader nil
+          ^{:tag (array (Class ?))} classObjs (new Class/1 (alength interfaceNames))
+          nonpublic (new boolean/1 [false])]
+      (label :defaultLoaderCase
+        (when (some? defaultLoader)
+          (try
+            (set! proxyLoader
+                  (LoaderHandler/loadProxyInterfaces
+                    interfaceNames
+                    defaultLoader
+                    classObjs
+                    nonpublic))
+            (when (.isLoggable loaderLog Log/VERBOSE)
+              (let [definingLoaders (new ClassLoader/1 (alength classObjs))]
+                (loop [^int i 0]
+                  (when (< i (alength definingLoaders))
+                    (aset definingLoaders i (.getClassLoader (aget classObjs i)))
+                    (recur (unchecked-inc-int i))))
+                (.log loaderLog
+                      Log/VERBOSE
+                      (java-str "proxy interfaces found via defaultLoader, defined by "
+                                (Arrays/asList definingLoaders)))))
+            (catch ClassNotFoundException e (break :defaultLoaderCase)))
+          (when-not (aget nonpublic 0)
+            (when preferCodebase
+              (try
+                (return (Proxy/getProxyClass codebaseLoader classObjs))
+                (catch IllegalArgumentException e)))
+            (set! proxyLoader defaultLoader))
+          (return (LoaderHandler/loadProxyClass proxyLoader classObjs))))
+      (aset nonpublic 0 false)
+      (set! proxyLoader
+            (LoaderHandler/loadProxyInterfaces interfaceNames codebaseLoader classObjs nonpublic))
+      (when (.isLoggable loaderLog Log/VERBOSE)
+        (let [definingLoaders (new ClassLoader/1 (alength classObjs))]
+          (loop [^int i 0]
+            (when (< i (alength definingLoaders))
+              (aset definingLoaders i (.getClassLoader (aget classObjs i)))
+              (recur (unchecked-inc-int i))))
+          (.log loaderLog
+                Log/VERBOSE
+                (java-str "proxy interfaces found via codebase, defined by "
+                          (Arrays/asList definingLoaders)))))
+      (when-not (aget nonpublic 0) (set! proxyLoader codebaseLoader))
+      (LoaderHandler/loadProxyClass proxyLoader classObjs)))
+
+  (method ^:private ^:static loadProxyClass :throws [ClassNotFoundException] ^{:tag (Class ?)} [^ClassLoader loader
+                                                                                                ^{:tag (array (Class ?))} interfaces]
+    (try
+      (Proxy/getProxyClass loader interfaces)
+      (catch IllegalArgumentException e
+        (throw (ClassNotFoundException. "error creating dynamic proxy class" e)))))
+
+  (method ^:private ^:static loadProxyInterfaces :throws [ClassNotFoundException] ^ClassLoader [^String/1 interfaces
+                                                                                                ^ClassLoader loader
+                                                                                                ^{:tag (array (Class ?))} classObjs
+                                                                                                ^boolean/1 nonpublic]
+    (let [^:mutable ^ClassLoader nonpublicLoader nil]
+      (loop [^int i 0]
+        (when (< i (alength interfaces))
+          (let [^{:tag (Class ?)} cl (aset classObjs
+                                           i
+                                           (Class/forName (aget interfaces i) false loader))]
+            (if (not (Modifier/isPublic (.getModifiers cl)))
+                (let [current (.getClassLoader cl)]
+                  (when (.isLoggable loaderLog Log/VERBOSE)
+                    (.log loaderLog
+                          Log/VERBOSE
+                          (java-str "non-public interface \""
+                                    (aget interfaces i)
+                                    "\" defined by "
+                                    current)))
+                  (cond
+                    (not (aget nonpublic 0))
+                      (do
+                        (set! nonpublicLoader current)
+                        (aset nonpublic 0 true)
+                        (recur (unchecked-inc-int i)))
+                    (not (identical? current nonpublicLoader))
+                      (throw (IllegalAccessError.
+                               "non-public interfaces defined in different class loaders"))
+                    :else (recur (unchecked-inc-int i))))
+                (recur (unchecked-inc-int i))))))
+      nonpublicLoader))
+
+  (method ^:private ^:static pathToURLs :throws [MalformedURLException] ^URL/1 [^String path]
+    (locking pathToURLsCache
+      (let [v (cast Object/1 (.get pathToURLsCache path))]
+        (when (some? v) (return (cast URL/1 (aget v 0))))))
+    (let [st (StringTokenizer. path)
+          urls (new URL/1 (.countTokens st))]
+      (loop [^int i 0]
+        (when (.hasMoreTokens st)
+          (let [url (URL. (.nextToken st))] (aset urls i url) (recur (unchecked-inc-int i)))))
+      (locking pathToURLsCache
+        (.put pathToURLsCache path (new Object/1 [urls (SoftReference. path)])))
+      urls))
+
+  (field ^:private ^:static ^:final ^{:tag (Map String Object/1)} pathToURLsCache (WeakHashMap. 5))
+
+  (method ^:private ^:static urlsToPath ^String [^URL/1 urls]
+    (when-not (== (alength urls) 0)
+      (if (== (alength urls) 1)
+          (.toExternalForm (aget urls 0))
+          (let [path (StringBuilder. (.toExternalForm (aget urls 0)))]
+            (loop [^int i 1]
+              (when (< i (alength urls))
+                (.append path \space)
+                (.append path (.toExternalForm (aget urls i)))
+                (recur (unchecked-inc-int i))))
+            (.toString path))))))

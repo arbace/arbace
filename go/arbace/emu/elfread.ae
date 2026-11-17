@@ -1,0 +1,93 @@
+(in-ns 'go.arbace.emu) (go/file "elfread.go" :imports [
+
+
+    ^{:line 4} [binary "encoding/binary"]
+    ^{:line 5} [errors "errors"]
+    ^{:line 6} [os "os"]])
+
+
+;; An ELF64 little-endian file read as the System V gABI lays it out (the file header, the program and the section
+;; headers): what the loader and the decode judge need, without debug/elf.
+
+
+(go/type Prog "Prog is a program header.\n" (struct
+    ^{:line 14 :tag uint32} Type ^uint32 Flags
+    ^{:line 15 :tag uint64} Off ^uint64 Vaddr ^uint64 Filesz ^uint64 Memsz))
+
+
+
+(go/type Section "Section is a section header.\n" (struct
+    ^{:line 20 :tag uint32} Type
+    ^{:line 21 :tag uint64} Flags ^uint64 Addr
+    ^{:line 22 :tag uint64} Off ^uint64 Size))
+
+
+
+(go/type File "File is an ELF64 executable read whole.\n" (struct
+    ^{:line 27 :tag (slice byte)} Data
+    ^{:line 28 :tag uint16} Type
+    ^{:line 29 :tag uint16} Machine
+    ^{:line 30 :tag uint64} Entry
+    ^{:line 31 :tag uint64} Phoff
+    ^{:line 32 :tag (slice Prog)} Progs
+    ^{:line 33 :tag (slice Section)} Sections))
+
+
+
+(go/const "Program header types and flags, section flags and types the loader reads.\n"
+  ^{:line 38} [^{:val 1} PT_LOAD 1]
+  ^{:line 39} [^{:val 3} PT_INTERP 3]
+  ^{:line 40} [^{:val 6} PT_PHDR 6]
+  ^{:line 41} [^{:val 1} PF_X 1]
+  ^{:line 42} [^{:val 2} PF_W 2]
+  ^{:line 43} [^{:val 4} PF_R 4]
+  ^{:line 44} [^{:val 4} SHF_EXECINSTR 4]
+  ^{:line 45} [^{:val 1} SHT_PROGBITS 1]
+  ^{:line 46} [^{:val 2} ET_EXEC 2]
+  ^{:line 47} [^{:val 3} ET_DYN 3]
+  ^{:line 48} [^{:val 62} EM_X86_64 62])
+
+
+(go/var errNotELF (errors/New "not an ELF64 little-endian file"))
+
+
+^{:go/end 86} (go/func ReadELF "ReadELF reads the file at path.\n" [^string path] :results [(* File) error]
+  (let [(values b err) (os/ReadFile path)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (or (< (len b) 64) (!= (conv string (subslice b _ 4)) "\u007fELF") (!= (aget b 4) 2) (!= (aget b 5) 1))
+      (return nil errNotELF))
+
+    (let [le binary/LittleEndian
+        ^{:line 63} f (addr (lit File :Data b :Type (.Uint16 le (subslice b 16)) :Machine (.Uint16 le (subslice b 18)) :Entry (.Uint64 le (subslice b 24)) :Phoff (.Uint64 le (subslice b 32))))
+        ^{:line 64} shoff (.Uint64 le (subslice b 40))
+        (values phent phnum) (values (conv uint64 (.Uint16 le (subslice b 54))) (conv uint64 (.Uint16 le (subslice b 56))))
+        (values shent shnum) (values (conv uint64 (.Uint16 le (subslice b 58))) (conv uint64 (.Uint16 le (subslice b 60))))]
+      (for [i (conv uint64 0)] (< i phnum) (inc! i)
+        (let [o (+ (.-Phoff f) (* i phent))]
+          (when (> (+ o 56) (conv uint64 (len b)))
+            (return nil errNotELF))
+
+          (let [h (subslice b o)]
+            (set! (.-Progs f) (append (.-Progs f) ^{:go/breaks [10]} (lit Prog :Type (.Uint32 le h) :Flags (.Uint32 le (subslice h 4)) :Off (.Uint64 le (subslice h 8)) :Vaddr (.Uint64 le (subslice h 16))
+                  :Filesz (.Uint64 le (subslice h 32)) :Memsz (.Uint64 le (subslice h 40))))))))
+
+      (for [i (conv uint64 0)] (< i shnum) (inc! i)
+        (let [o (+ shoff (* i shent))]
+          (when (> (+ o 64) (conv uint64 (len b)))
+            (return nil errNotELF))
+
+          (let [h (subslice b o)]
+            (set! (.-Sections f) (append (.-Sections f) ^{:go/breaks [8]} (lit Section :Type (.Uint32 le (subslice h 4)) :Flags (.Uint64 le (subslice h 8)) :Addr (.Uint64 le (subslice h 16))
+                  :Off (.Uint64 le (subslice h 24)) :Size (.Uint64 le (subslice h 32))))))))
+
+      (return f nil))))
+
+
+
+^{:go/end 94} (go/method Bytes "Bytes is [off, off+n) of the file, nil when outside it.\n" ^{:tag (slice byte)} [^{:tag (* File)} f ^uint64 off ^uint64 n]
+  (when (or (> (+ off n) (conv uint64 (len (.-Data f)))) (< (+ off n) off))
+    (return nil))
+
+  (subslice (.-Data f) off (+ off n)))

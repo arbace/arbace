@@ -1,0 +1,535 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/QuicCipher.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.nio ByteBuffer ByteOrder)
+        '(java.security GeneralSecurityException Security)
+        '(java.util Collections HashMap Map)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(javax.crypto AEADBadTagException Cipher SecretKey ShortBufferException)
+        '(javax.crypto.spec ChaCha20ParameterSpec GCMParameterSpec IvParameterSpec)
+        '(jdk.internal.net.quic QuicTLSEngine$KeySpace QuicTransportErrors QuicTransportException)
+        '(sun.security.util KeyUtil))
+
+(defclass ^:abstract QuicCipher
+  (field ^:private ^:static ^:final ^String SEC_PROP_QUIC_TLS_KEY_LIMITS "jdk.quic.tls.keyLimits")
+
+  (field ^:private ^:static ^:final ^{:tag (Map String Long)} KEY_LIMITS)
+
+  (static-initializer
+    (let [propVal (Security/getProperty SEC_PROP_QUIC_TLS_KEY_LIMITS)]
+      (if (nil? propVal)
+          (set! KEY_LIMITS (Map/of))
+          (let [^{:tag (Map String Long)} limits (HashMap.)]
+            (for-each [^String entry (.split propVal ",")]
+              (let [parts (.split (.trim entry) " ")]
+                (when-not (== (alength parts) 2)
+                  (throw (RuntimeException.
+                           (java-str (java-str "invalid value for " SEC_PROP_QUIC_TLS_KEY_LIMITS)
+                                     " security property"))))
+                (let [cipher (aget parts 0)]
+                  (when (.containsKey limits cipher)
+                    (throw (RuntimeException.
+                             (java-str "key limit defined more than once for cipher " cipher))))
+                  (let [limitVal (aget parts 1)
+                        ^:mutable ^long limit 0
+                        index (.indexOf limitVal "^")]
+                    (if (>= index 0)
+                        (set! limit
+                              (unchecked-long
+                                (Math/pow (Integer/parseInt (.substring limitVal 0 index))
+                                          (Integer/parseInt
+                                            (.substring limitVal (unchecked-add-int index 1))))))
+                        (set! limit (Long/parseLong limitVal)))
+                    (when (or (== limit 0) (< limit -1))
+                      (throw (RuntimeException.
+                               (java-str (java-str
+                                           "invalid value for "
+                                           SEC_PROP_QUIC_TLS_KEY_LIMITS)
+                                         " security property"))))
+                    (.put limits cipher limit)))))
+            (set! KEY_LIMITS (Collections/unmodifiableMap limits))))))
+
+  (field ^:private ^:final ^CipherSuite cipherSuite)
+
+  (field ^:private ^:final ^QuicHeaderProtectionCipher hpCipher)
+
+  (field ^:private ^:final ^SecretKey baseSecret)
+
+  (field ^:private ^:final ^int keyPhase)
+
+  (constructor ^:protected [this ^:final ^CipherSuite cipherSuite ^:final ^SecretKey baseSecret
+                            ^:final ^QuicHeaderProtectionCipher hpCipher ^:final ^int keyPhase]
+    (java-assert (or (== keyPhase 0) (== keyPhase 1)) (java-str "invalid key phase: " keyPhase))
+    (set! (.-cipherSuite this) cipherSuite)
+    (set! (.-baseSecret this) baseSecret)
+    (set! (.-hpCipher this) hpCipher)
+    (set! (.-keyPhase this) keyPhase))
+
+  (method ^:final getBaseSecret ^SecretKey [this] (.-baseSecret this))
+
+  (method ^:final getCipherSuite ^CipherSuite [this] (.-cipherSuite this))
+
+  (method ^:final getHeaderProtectionKey ^SecretKey [this]
+    (.-headerProtectionKey (.-hpCipher this)))
+
+  (method ^:final computeHeaderProtectionMask :throws [QuicTransportException] ^ByteBuffer [this
+                                                                                            ^ByteBuffer sample]
+    (.computeHeaderProtectionMask hpCipher sample))
+
+  (method ^:final getKeyPhase ^int [this] (.-keyPhase this))
+
+  (method ^:final discard ^void [this ^boolean destroyHP]
+    (QuicCipher/safeDiscard (.-baseSecret this))
+    (when destroyHP (.discard (.-hpCipher this)))
+    (.doDiscard this))
+
+  (method ^:protected ^:abstract doDiscard ^void [this])
+
+  (method ^:static createReadCipher :throws [GeneralSecurityException] ^QuicReadCipher [^:final ^CipherSuite cipherSuite
+                                                                                        ^:final ^SecretKey baseSecret
+                                                                                        ^:final ^SecretKey key
+                                                                                        ^:final ^byte/1 iv
+                                                                                        ^:final ^SecretKey hp
+                                                                                        ^:final ^int keyPhase]
+    (switch cipherSuite
+      (TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384)
+        (T13GCMReadCipher. cipherSuite baseSecret key iv hp keyPhase)
+      TLS_CHACHA20_POLY1305_SHA256
+        (T13CC20P1305ReadCipher. cipherSuite baseSecret key iv hp keyPhase)
+      (throw (IllegalArgumentException. (java-str "Cipher suite " cipherSuite " not supported")))))
+
+  (method ^:static createWriteCipher :throws [GeneralSecurityException] ^QuicWriteCipher [^:final ^CipherSuite cipherSuite
+                                                                                          ^:final ^SecretKey baseSecret
+                                                                                          ^:final ^SecretKey key
+                                                                                          ^:final ^byte/1 iv
+                                                                                          ^:final ^SecretKey hp
+                                                                                          ^:final ^int keyPhase]
+    (switch cipherSuite
+      (TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384)
+        (T13GCMWriteCipher. cipherSuite baseSecret key iv hp keyPhase)
+      TLS_CHACHA20_POLY1305_SHA256
+        (T13CC20P1305WriteCipher. cipherSuite baseSecret key iv hp keyPhase)
+      (throw (IllegalArgumentException. (java-str "Cipher suite " cipherSuite " not supported")))))
+
+  (method ^:static safeDiscard ^void [^:final ^SecretKey secretKey]
+    (KeyUtil/destroySecretKeys secretKey))
+
+  (defclass ^:abstract ^:static QuicReadCipher
+    :extends QuicCipher
+
+    (field ^:private ^:final ^AtomicLong lowestDecryptedPktNum (AtomicLong. -1))
+
+    (constructor [this ^CipherSuite cipherSuite ^SecretKey baseSecret
+                  ^QuicHeaderProtectionCipher hpCipher ^int keyPhase]
+      (super. cipherSuite baseSecret hpCipher keyPhase))
+
+    (method ^:final decryptPacket :throws [AEADBadTagException
+                                           ShortBufferException
+                                           QuicTransportException] ^void [this ^long packetNumber
+                                                                          ^ByteBuffer packet
+                                                                          ^int headerLength
+                                                                          ^ByteBuffer output]
+      (.doDecrypt this packetNumber packet headerLength output)
+      (let [^:mutable ^boolean updated false]
+        (loop []
+          (let [current (.get lowestDecryptedPktNum)]
+            (java-assert (>= packetNumber 0) (java-str "unexpected packet number: " packetNumber))
+            (let [newLowest (if (== current -1) packetNumber (Math/min current packetNumber))]
+              (set! updated (.compareAndSet lowestDecryptedPktNum current newLowest))))
+          (when-not updated (recur)))))
+
+    (method ^:protected ^:abstract doDecrypt :throws [AEADBadTagException
+                                                      ShortBufferException
+                                                      QuicTransportException] ^void [this
+                                                                                     ^long packetNumber
+                                                                                     ^ByteBuffer packet
+                                                                                     ^int headerLength
+                                                                                     ^ByteBuffer output])
+
+    (method ^:abstract integrityLimit ^long [this])
+
+    (method ^:final lowestDecryptedPktNum ^long [this]
+      (.get (.-lowestDecryptedPktNum this)))
+
+    (method ^:final hasDecryptedAny ^boolean [this]
+      (not (== (.get (.-lowestDecryptedPktNum this)) -1))))
+
+  (defclass ^:abstract ^:static QuicWriteCipher
+    :extends QuicCipher
+
+    (field ^:private ^:final ^AtomicLong numPacketsEncrypted (AtomicLong.))
+
+    (field ^:private ^:final ^AtomicLong lowestEncryptedPktNum (AtomicLong. -1))
+
+    (constructor [this ^CipherSuite cipherSuite ^SecretKey baseSecret
+                  ^QuicHeaderProtectionCipher hpCipher ^int keyPhase]
+      (super. cipherSuite baseSecret hpCipher keyPhase))
+
+    (method ^:final encryptPacket :throws [QuicTransportException ShortBufferException] ^void [this
+                                                                                               ^:final ^long packetNumber
+                                                                                               ^:final ^ByteBuffer packetHeader
+                                                                                               ^:final ^ByteBuffer packetPayload
+                                                                                               ^:final ^ByteBuffer output]
+      (let [confidentialityLimit (.confidentialityLimit this)
+            numEncrypted (.get (.-numPacketsEncrypted this))]
+        (when (and (> confidentialityLimit 0) (> numEncrypted confidentialityLimit))
+          (throw (QuicTransportException. "confidentiality limit reached"
+                                          QuicTLSEngine$KeySpace/ONE_RTT
+                                          0
+                                          QuicTransportErrors/AEAD_LIMIT_REACHED)))
+        (.incrementAndGet (.-numPacketsEncrypted this))
+        (.doEncryptPacket this packetNumber packetHeader packetPayload output)
+        (let [^:mutable ^boolean updated false]
+          (loop []
+            (let [current (.get lowestEncryptedPktNum)]
+              (java-assert (>= packetNumber 0) (java-str "unexpected packet number: " packetNumber))
+              (let [newLowest (if (== current -1) packetNumber (Math/min current packetNumber))]
+                (set! updated (.compareAndSet lowestEncryptedPktNum current newLowest))))
+            (when-not updated (recur))))))
+
+    (method ^:final lowestEncryptedPktNum ^long [this]
+      (.get (.-lowestEncryptedPktNum this)))
+
+    (method ^:final hasEncryptedAny ^boolean [this]
+      (not (== (.get (.-lowestEncryptedPktNum this)) -1)))
+
+    (method ^:final getNumEncrypted ^long [this]
+      (.get (.-numPacketsEncrypted this)))
+
+    (method ^:abstract doEncryptPacket :throws [ShortBufferException QuicTransportException] ^void [this
+                                                                                                    ^long packetNumber
+                                                                                                    ^ByteBuffer packetHeader
+                                                                                                    ^ByteBuffer packetPayload
+                                                                                                    ^ByteBuffer output])
+
+    (method ^:abstract confidentialityLimit ^long [this]))
+
+  (defclass ^:abstract ^:static QuicHeaderProtectionCipher
+    (field ^:protected ^:final ^SecretKey headerProtectionKey)
+
+    (constructor ^:protected [this ^:final ^SecretKey headerProtectionKey]
+      (set! (.-headerProtectionKey this) headerProtectionKey))
+
+    (method getHeaderProtectionSampleSize ^int [this] 16)
+
+    (method ^:abstract computeHeaderProtectionMask :throws [QuicTransportException] ^ByteBuffer [this
+                                                                                                 ^ByteBuffer sample])
+
+    (method ^:final discard ^void [this]
+      (QuicCipher/safeDiscard (.-headerProtectionKey this))))
+
+  (defclass ^:static ^:final T13GCMReadCipher
+    :extends QuicReadCipher
+
+    (field ^:private ^:static ^:final ^long INTEGRITY_LIMIT (bit-shift-left 1 52))
+
+    (field ^:private ^:final ^Cipher cipher)
+
+    (field ^:private ^:final ^SecretKey key)
+
+    (field ^:private ^:final ^byte/1 iv)
+
+    (constructor :throws [GeneralSecurityException] [this ^:final ^CipherSuite cipherSuite
+                                                     ^:final ^SecretKey baseSecret
+                                                     ^:final ^SecretKey key ^:final ^byte/1 iv
+                                                     ^:final ^SecretKey hp ^:final ^int keyPhase]
+      (super. cipherSuite baseSecret (T13AESHPCipher. hp) keyPhase)
+      (set! (.-key this) key)
+      (set! (.-iv this) iv)
+      (set! (.-cipher this) (Cipher/getInstance "AES/GCM/NoPadding")))
+
+    (method ^:protected doDecrypt :throws [AEADBadTagException
+                                           ShortBufferException
+                                           QuicTransportException] ^void [this
+                                                                          ^:mutable ^long packetNumber
+                                                                          ^ByteBuffer packet
+                                                                          ^int headerLength
+                                                                          ^ByteBuffer output]
+      (let [iv (.clone (.-iv this))
+            ^:mutable ^int i 11]
+        (while (> packetNumber 0)
+          (aset iv
+                i
+                (unchecked-byte
+                  (bit-xor-int (aget iv i) (unchecked-byte (bit-and packetNumber 0xFF)))))
+          (set! packetNumber (unsigned-bit-shift-right packetNumber 8))
+          (set! i (unchecked-dec-int i)))
+        (let [ivSpec (GCMParameterSpec. 128 iv)]
+          (locking cipher
+            (try
+              (.init cipher Cipher/DECRYPT_MODE key ivSpec)
+              (let [limit (.limit packet)]
+                (.limit packet (unchecked-add-int (.position packet) headerLength))
+                (.updateAAD cipher packet)
+                (.limit packet limit)
+                (.doFinal cipher packet output))
+              (catch [AEADBadTagException ShortBufferException] e (throw e))
+              (catch Exception e
+                (throw (QuicTransportException. "Decryption failed"
+                                                nil
+                                                0
+                                                (unchecked-add
+                                                  QuicTLSEngineImpl/BASE_CRYPTO_ERROR
+                                                  (.-id Alert/INTERNAL_ERROR))
+                                                e))))))))
+
+    (method integrityLimit ^long [this] INTEGRITY_LIMIT)
+
+    (method ^:protected ^:final doDiscard ^void [this]
+      (T13GCMReadCipher/safeDiscard (.-key this))))
+
+  (defclass ^:static ^:final T13GCMWriteCipher
+    :extends QuicWriteCipher
+
+    (field ^:private ^:static ^:final ^String CIPHER_ALGORITHM_NAME "AES/GCM/NoPadding")
+
+    (field ^:private ^:static ^:final ^long CONFIDENTIALITY_LIMIT)
+
+    (static-initializer
+      (let [^:const ^long defaultVal (bit-shift-left-int 1 23)
+            ^:mutable limit (.longValue (cast Long
+                                              (.getOrDefault
+                                                KEY_LIMITS
+                                                CIPHER_ALGORITHM_NAME
+                                                defaultVal)))]
+        (set! limit (if (> limit defaultVal) defaultVal limit))
+        (set! CONFIDENTIALITY_LIMIT limit)))
+
+    (field ^:private ^:final ^SecretKey key)
+
+    (field ^:private ^:final ^Cipher cipher)
+
+    (field ^:private ^:final ^byte/1 iv)
+
+    (constructor :throws [GeneralSecurityException] [this ^:final ^CipherSuite cipherSuite
+                                                     ^:final ^SecretKey baseSecret
+                                                     ^:final ^SecretKey key ^:final ^byte/1 iv
+                                                     ^:final ^SecretKey hp ^:final ^int keyPhase]
+      (super. cipherSuite baseSecret (T13AESHPCipher. hp) keyPhase)
+      (set! (.-key this) key)
+      (set! (.-iv this) iv)
+      (set! (.-cipher this) (Cipher/getInstance CIPHER_ALGORITHM_NAME)))
+
+    (method doEncryptPacket :throws [ShortBufferException QuicTransportException] ^void [this
+                                                                                         ^:mutable ^long packetNumber
+                                                                                         ^ByteBuffer packetHeader
+                                                                                         ^ByteBuffer packetPayload
+                                                                                         ^ByteBuffer output]
+      (let [iv (.clone (.-iv this))
+            ^:mutable ^int i 11]
+        (while (> packetNumber 0)
+          (aset iv
+                i
+                (unchecked-byte
+                  (bit-xor-int (aget iv i) (unchecked-byte (bit-and packetNumber 0xFF)))))
+          (set! packetNumber (unsigned-bit-shift-right packetNumber 8))
+          (set! i (unchecked-dec-int i)))
+        (let [ivSpec (GCMParameterSpec. 128 iv)]
+          (locking cipher
+            (try
+              (.init cipher Cipher/ENCRYPT_MODE key ivSpec)
+              (.updateAAD cipher packetHeader)
+              (.doFinal cipher packetPayload output)
+              (catch ShortBufferException e (throw e))
+              (catch Exception e
+                (throw (QuicTransportException. "Encryption failed"
+                                                nil
+                                                0
+                                                (unchecked-add
+                                                  QuicTLSEngineImpl/BASE_CRYPTO_ERROR
+                                                  (.-id Alert/INTERNAL_ERROR))
+                                                e))))))))
+
+    (method confidentialityLimit ^long [this] CONFIDENTIALITY_LIMIT)
+
+    (method ^:protected ^:final doDiscard ^void [this]
+      (T13GCMWriteCipher/safeDiscard (.-key this))))
+
+  (defclass ^:static ^:final T13AESHPCipher
+    :extends QuicHeaderProtectionCipher
+
+    (field ^:private ^:final ^Cipher cipher)
+
+    (constructor :throws [GeneralSecurityException] [this ^SecretKey hp]
+      (super. hp)
+      (set! cipher (Cipher/getInstance "AES/ECB/NoPadding")))
+
+    (method ^:public computeHeaderProtectionMask :throws [QuicTransportException] ^ByteBuffer [this
+                                                                                               ^ByteBuffer sample]
+      (when-not (== (.remaining sample) (.getHeaderProtectionSampleSize this))
+        (throw (IllegalArgumentException. "Invalid sample size")))
+      (let [output (ByteBuffer/allocate (.remaining sample))]
+        (try
+          (locking cipher
+            (.init cipher Cipher/ENCRYPT_MODE (.-headerProtectionKey this))
+            (.doFinal cipher sample output))
+          (.flip output)
+          (java-assert (>= (.remaining output) 5))
+          output
+          (catch Exception e
+            (throw (QuicTransportException. "Encryption failed"
+                                            nil
+                                            0
+                                            (unchecked-add
+                                              QuicTLSEngineImpl/BASE_CRYPTO_ERROR
+                                              (.-id Alert/INTERNAL_ERROR))
+                                            e)))))))
+
+  (defclass ^:static ^:final T13CC20P1305ReadCipher
+    :extends QuicReadCipher
+
+    (field ^:private ^:static ^:final ^long INTEGRITY_LIMIT (bit-shift-left 1 36))
+
+    (field ^:private ^:final ^SecretKey key)
+
+    (field ^:private ^:final ^Cipher cipher)
+
+    (field ^:private ^:final ^byte/1 iv)
+
+    (constructor :throws [GeneralSecurityException] [this ^:final ^CipherSuite cipherSuite
+                                                     ^:final ^SecretKey baseSecret
+                                                     ^:final ^SecretKey key ^:final ^byte/1 iv
+                                                     ^:final ^SecretKey hp ^:final ^int keyPhase]
+      (super. cipherSuite baseSecret (T13CC20HPCipher. hp) keyPhase)
+      (set! (.-key this) key)
+      (set! (.-iv this) iv)
+      (set! (.-cipher this) (Cipher/getInstance "ChaCha20-Poly1305")))
+
+    (method ^:protected doDecrypt :throws [AEADBadTagException
+                                           ShortBufferException
+                                           QuicTransportException] ^void [this
+                                                                          ^:mutable ^long packetNumber
+                                                                          ^ByteBuffer packet
+                                                                          ^int headerLength
+                                                                          ^ByteBuffer output]
+      (let [iv (.clone (.-iv this))
+            ^:mutable ^int i 11]
+        (while (> packetNumber 0)
+          (aset iv
+                i
+                (unchecked-byte
+                  (bit-xor-int (aget iv i) (unchecked-byte (bit-and packetNumber 0xFF)))))
+          (set! packetNumber (unsigned-bit-shift-right packetNumber 8))
+          (set! i (unchecked-dec-int i)))
+        (let [ivSpec (IvParameterSpec. iv)]
+          (locking cipher
+            (try
+              (.init cipher Cipher/DECRYPT_MODE key ivSpec)
+              (let [limit (.limit packet)]
+                (.limit packet (unchecked-add-int (.position packet) headerLength))
+                (.updateAAD cipher packet)
+                (.limit packet limit)
+                (.doFinal cipher packet output))
+              (catch [AEADBadTagException ShortBufferException] e (throw e))
+              (catch Exception e
+                (throw (QuicTransportException. "Decryption failed"
+                                                nil
+                                                0
+                                                (unchecked-add
+                                                  QuicTLSEngineImpl/BASE_CRYPTO_ERROR
+                                                  (.-id Alert/INTERNAL_ERROR))
+                                                e))))))))
+
+    (method integrityLimit ^long [this] INTEGRITY_LIMIT)
+
+    (method ^:protected ^:final doDiscard ^void [this]
+      (T13CC20P1305ReadCipher/safeDiscard (.-key this))))
+
+  (defclass ^:static ^:final T13CC20P1305WriteCipher
+    :extends QuicWriteCipher
+
+    (field ^:private ^:static ^:final ^String CIPHER_ALGORITHM_NAME "ChaCha20-Poly1305")
+
+    (field ^:private ^:static ^:final ^long CONFIDENTIALITY_LIMIT)
+
+    (static-initializer
+      (let [^:const defaultVal -1
+            ^:mutable limit (.longValue (cast Long
+                                              (.getOrDefault
+                                                KEY_LIMITS
+                                                CIPHER_ALGORITHM_NAME
+                                                defaultVal)))]
+        (set! limit (if (< limit 0) -1 limit))
+        (set! CONFIDENTIALITY_LIMIT limit)))
+
+    (field ^:private ^:final ^SecretKey key)
+
+    (field ^:private ^:final ^Cipher cipher)
+
+    (field ^:private ^:final ^byte/1 iv)
+
+    (constructor :throws [GeneralSecurityException] [this ^:final ^CipherSuite cipherSuite
+                                                     ^:final ^SecretKey baseSecret
+                                                     ^:final ^SecretKey key ^:final ^byte/1 iv
+                                                     ^:final ^SecretKey hp ^:final ^int keyPhase]
+      (super. cipherSuite baseSecret (T13CC20HPCipher. hp) keyPhase)
+      (set! (.-key this) key)
+      (set! (.-iv this) iv)
+      (set! (.-cipher this) (Cipher/getInstance CIPHER_ALGORITHM_NAME)))
+
+    (method doEncryptPacket :throws [ShortBufferException QuicTransportException] ^void [this
+                                                                                         ^:final ^long packetNumber
+                                                                                         ^:final ^ByteBuffer packetHeader
+                                                                                         ^:final ^ByteBuffer packetPayload
+                                                                                         ^:final ^ByteBuffer output]
+      (let [iv (.clone (.-iv this))
+            ^:mutable ^int i 11
+            ^:mutable pn packetNumber]
+        (while (> pn 0)
+          (aset iv i (unchecked-byte (bit-xor-int (aget iv i) (unchecked-byte (bit-and pn 0xFF)))))
+          (set! pn (unsigned-bit-shift-right pn 8))
+          (set! i (unchecked-dec-int i)))
+        (let [ivSpec (IvParameterSpec. iv)]
+          (locking cipher
+            (try
+              (.init cipher Cipher/ENCRYPT_MODE key ivSpec)
+              (.updateAAD cipher packetHeader)
+              (.doFinal cipher packetPayload output)
+              (catch ShortBufferException e (throw e))
+              (catch Exception e
+                (throw (QuicTransportException. "Encryption failed"
+                                                nil
+                                                0
+                                                (unchecked-add
+                                                  QuicTLSEngineImpl/BASE_CRYPTO_ERROR
+                                                  (.-id Alert/INTERNAL_ERROR))
+                                                e))))))))
+
+    (method confidentialityLimit ^long [this] CONFIDENTIALITY_LIMIT)
+
+    (method ^:protected ^:final doDiscard ^void [this]
+      (T13CC20P1305WriteCipher/safeDiscard (.-key this))))
+
+  (defclass ^:static ^:final T13CC20HPCipher
+    :extends QuicHeaderProtectionCipher
+
+    (field ^:private ^:final ^Cipher cipher)
+
+    (constructor :throws [GeneralSecurityException] [this ^:final ^SecretKey hp]
+      (super. hp)
+      (set! cipher (Cipher/getInstance "ChaCha20")))
+
+    (method ^:public computeHeaderProtectionMask :throws [QuicTransportException] ^ByteBuffer [this
+                                                                                               ^ByteBuffer sample]
+      (when-not (== (.remaining sample) (.getHeaderProtectionSampleSize this))
+        (throw (IllegalArgumentException. "Invalid sample size")))
+      (try
+        (.order sample ByteOrder/LITTLE_ENDIAN)
+        (let [nonce (new byte/1 12)
+              counter (.getInt sample)]
+          (.get sample nonce)
+          (let [ivSpec (ChaCha20ParameterSpec. nonce counter)
+                output (new byte/1 5)]
+            (locking cipher
+              (.init cipher Cipher/DECRYPT_MODE (.-headerProtectionKey this) ivSpec)
+              (let [numBytes (.doFinal cipher output 0 5 output)] (java-assert (== numBytes 5))))
+            (ByteBuffer/wrap output)))
+        (catch Exception e
+          (throw (QuicTransportException. "Encryption failed"
+                                          nil
+                                          0
+                                          (unchecked-add
+                                            QuicTLSEngineImpl/BASE_CRYPTO_ERROR
+                                            (.-id Alert/INTERNAL_ERROR))
+                                          e)))))))

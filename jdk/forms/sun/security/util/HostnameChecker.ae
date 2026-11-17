@@ -1,0 +1,215 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/HostnameChecker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util)
+
+(import '(java.io IOException)
+        '(java.net IDN InetAddress UnknownHostException)
+        '(java.security.cert CertificateException CertificateParsingException X509Certificate)
+        '(java.text Normalizer Normalizer$Form)
+        '(java.util Collection List Locale)
+        '(java.util.function Function Predicate)
+        '(javax.net.ssl SNIHostName)
+        '(sun.net.util IPAddressUtil)
+        '(sun.security.ssl SSLLogger)
+        '(sun.security.x509 X500Name))
+
+(defclass ^:public HostnameChecker
+  (field ^:public ^:static ^:final ^byte TYPE_TLS 1)
+
+  (field ^:private ^:static ^:final ^HostnameChecker INSTANCE_TLS (HostnameChecker. TYPE_TLS))
+
+  (field ^:public ^:static ^:final ^byte TYPE_LDAP 2)
+
+  (field ^:private ^:static ^:final ^HostnameChecker INSTANCE_LDAP (HostnameChecker. TYPE_LDAP))
+
+  (field ^:private ^:static ^:final ^int ALTNAME_DNS 2)
+
+  (field ^:private ^:static ^:final ^int ALTNAME_IP 7)
+
+  (field ^:private ^:final ^byte checkType)
+
+  (constructor ^:private [this ^byte checkType]
+    (set! (.-checkType this) checkType))
+
+  (method ^:public ^:static getInstance ^HostnameChecker [^byte checkType]
+    (cond
+      (== checkType TYPE_TLS) INSTANCE_TLS
+      (== checkType TYPE_LDAP) INSTANCE_LDAP
+      :else (throw (IllegalArgumentException. (java-str "Unknown check type: " checkType)))))
+
+  (method ^:public match :throws [CertificateException] ^void [this ^String expectedName
+                                                               ^X509Certificate cert
+                                                               ^boolean chainsToPublicCA]
+    (when (nil? expectedName)
+      (throw (CertificateException. "Hostname or IP address is undefined.")))
+    (if (HostnameChecker/isIpAddress expectedName)
+        (HostnameChecker/matchIP expectedName cert)
+        (.matchDNS this expectedName cert chainsToPublicCA)))
+
+  (method ^:public match :throws [CertificateException] ^void [this ^String expectedName
+                                                               ^X509Certificate cert]
+    (.match this expectedName cert false))
+
+  (method ^:private ^:static isIpAddress ^boolean [^String name]
+    (or (IPAddressUtil/isIPv4LiteralAddress name) (IPAddressUtil/isIPv6LiteralAddress name)))
+
+  (method ^:private ^:static matchIP :throws [CertificateException] ^void [^String expectedIP
+                                                                           ^X509Certificate cert]
+    (let [^{:tag (Collection (List ?))} subjAltNames (.getSubjectAlternativeNames cert)]
+      (when (nil? subjAltNames)
+        (throw (CertificateException. "No subject alternative names present")))
+      (for-each [^{:tag (List ?)} next subjAltNames]
+        (when (== (.intValue (cast Integer (.get next 0))) ALTNAME_IP)
+          (let [ipAddress (cast String (.get next 1))]
+            (if (.equalsIgnoreCase expectedIP ipAddress)
+                (return)
+                (try
+                  (when (.equals (InetAddress/getByName expectedIP)
+                                 (InetAddress/getByName ipAddress))
+                    (return))
+                  (catch UnknownHostException e))))))
+      (throw (CertificateException.
+               (java-str "No subject alternative names matching IP address " expectedIP " found")))))
+
+  (method ^:private matchDNS :throws [CertificateException] ^void [this ^String expectedName
+                                                                   ^X509Certificate cert
+                                                                   ^boolean chainsToPublicCA]
+    (try
+      (let [sni (SNIHostName. expectedName)] nil)
+      (catch IllegalArgumentException iae
+        (throw (CertificateException. (java-str "Illegal given domain name: " expectedName) iae))))
+    (let [^{:tag (Collection (List ?))} subjAltNames (.getSubjectAlternativeNames cert)]
+      (when (some? subjAltNames)
+        (let [^:mutable foundDNS false]
+          (for-each [^{:tag (List ?)} next subjAltNames]
+            (when (== (.intValue (cast Integer (.get next 0))) ALTNAME_DNS)
+              (set! foundDNS true)
+              (let [dnsName (cast String (.get next 1))]
+                (when (.isMatched this expectedName dnsName chainsToPublicCA) (return)))))
+          (when foundDNS
+            (throw (CertificateException.
+                     (java-str "No subject alternative DNS name matching " expectedName " found."))))))
+      (let [subjectName (HostnameChecker/getSubjectX500Name cert)
+            derValue (.findMostSpecificAttribute subjectName X500Name/commonName_oid)]
+        (when (some? derValue)
+          (try
+            (let [cname (.getAsString derValue)]
+              (when-not (Normalizer/isNormalized cname Normalizer$Form/NFKC)
+                (throw (CertificateException. (java-str "Not a formal name " cname))))
+              (when (.isMatched this expectedName cname chainsToPublicCA) (return)))
+            (catch IOException e)))
+        (let [msg (java-str "No name matching " expectedName " found")]
+          (throw (CertificateException. msg))))))
+
+  (method ^:public ^:static getSubjectX500Name :throws [CertificateParsingException] ^X500Name [^X509Certificate cert]
+    (try
+      (let [subjectDN (.getSubjectDN cert)]
+        (if (instance? X500Name subjectDN)
+            (cast X500Name subjectDN)
+            (let [subjectX500 (.getSubjectX500Principal cert)]
+              (X500Name. (.getEncoded subjectX500)))))
+      (catch IOException e (throw (CertificateParsingException. e)))))
+
+  (method ^:public isMatched ^boolean [this ^:mutable ^String name ^:mutable ^String template
+                                       ^boolean chainsToPublicCA]
+    (try
+      (set! name (IDN/toUnicode (IDN/toASCII name)))
+      (set! template (IDN/toUnicode (IDN/toASCII template)))
+      (catch RuntimeException re
+        (when (SSLLogger/isOn) (SSLLogger/fine (java-str "Failed to normalize to Unicode: " re)))
+        (return false)))
+    (if (HostnameChecker/hasIllegalWildcard template chainsToPublicCA)
+        false
+        (do
+          (try
+            (SNIHostName. (.replace template \* \z))
+            (catch IllegalArgumentException iae (return false)))
+          (if (or (== checkType TYPE_TLS) (== checkType TYPE_LDAP))
+              (HostnameChecker/matchLeftmostWildcard name template)
+              false))))
+
+  (method ^:private ^:static hasIllegalWildcard ^boolean [^String template ^boolean chainsToPublicCA]
+    (if (or (.equals template "*") (.equals template "*."))
+        (do
+          (when (SSLLogger/isOn)
+            (SSLLogger/fine
+              (java-str "Certificate domain name has illegal single wildcard character: " template)))
+          true)
+        (let [lastWildcardIndex (.lastIndexOf template "*")]
+          (if (== lastWildcardIndex -1)
+              false
+              (let [afterWildcard (.substring template lastWildcardIndex)
+                    firstDotIndex (.indexOf afterWildcard ".")]
+                (cond
+                  (== firstDotIndex -1)
+                    (do
+                      (when (SSLLogger/isOn)
+                        (SSLLogger/fine
+                          (java-str
+                            "Certificate domain name has illegal wildcard, no dot after wildcard character: "
+                            template)))
+                      true)
+                  (not chainsToPublicCA) false
+                  :else
+                    (let [wildcardedDomain (.substring
+                                             afterWildcard
+                                             (unchecked-add-int firstDotIndex 1))
+                          templateDomainSuffix (cast
+                                                 String
+                                                 (.orElse
+                                                   (.map
+                                                     (.filter
+                                                       (RegisteredDomain/from
+                                                         (java-str "z." wildcardedDomain))
+                                                       (lambda Predicate ^boolean [^RegisteredDomain d]
+                                                         (identical?
+                                                           (.type d)
+                                                           RegisteredDomain$Type/ICANN)))
+                                                     (method-ref
+                                                       Function
+                                                       ^String [RegisteredDomain]
+                                                       RegisteredDomain/.publicSuffix))
+                                                   nil))]
+                      (cond
+                        (nil? templateDomainSuffix) false
+                        (.equalsIgnoreCase wildcardedDomain templateDomainSuffix)
+                          (do
+                            (when (SSLLogger/isOn)
+                              (SSLLogger/fine
+                                (java-str
+                                  "Certificate domain name has illegal wildcard for top-level public suffix: "
+                                  template)))
+                            true)
+                        :else false))))))))
+
+  (method ^:private ^:static matchLeftmostWildcard ^boolean [^:mutable ^String name
+                                                             ^:mutable ^String template]
+    (set! name (.toLowerCase name Locale/ENGLISH))
+    (set! template (.toLowerCase template Locale/ENGLISH))
+    (let [^:mutable templateIdx (.indexOf template ".")
+          ^:mutable nameIdx (.indexOf name ".")]
+      (when (== templateIdx -1) (set! templateIdx (.length template)))
+      (when (== nameIdx -1) (set! nameIdx (.length name)))
+      (if (HostnameChecker/matchWildCards (.substring name 0 nameIdx)
+                                          (.substring template 0 templateIdx))
+          (.equals (.substring template templateIdx) (.substring name nameIdx))
+          false)))
+
+  (method ^:private ^:static matchWildCards ^boolean [^:mutable ^String name ^String template]
+    (let [^:mutable wildcardIdx (.indexOf template "*")]
+      (if (== wildcardIdx -1)
+          (.equals name template)
+          (let [^:mutable isBeginning true
+                ^:mutable ^String beforeWildcard nil
+                ^:mutable afterWildcard template]
+            (while (not (== wildcardIdx -1))
+              (set! beforeWildcard (.substring afterWildcard 0 wildcardIdx))
+              (set! afterWildcard (.substring afterWildcard (unchecked-add-int wildcardIdx 1)))
+              (let [beforeStartIdx (.indexOf name beforeWildcard)]
+                (when (or (== beforeStartIdx -1) (and isBeginning (not (== beforeStartIdx 0))))
+                  (return false))
+                (set! isBeginning false)
+                (set! name
+                      (.substring name (unchecked-add-int beforeStartIdx (.length beforeWildcard))))
+                (set! wildcardIdx (.indexOf afterWildcard "*"))))
+            (.endsWith name afterWildcard))))))

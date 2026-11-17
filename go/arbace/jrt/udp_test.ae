@@ -1,0 +1,152 @@
+;; jrt's tests: the datagram sockets and the host's interfaces under HostDatagramSocketImpl and
+;; NetworkInterface (udp.ae; doc/go/JRT-NOTES.md, "Datagrams"), through HostDatagram's natives as the
+;; translated classes call them (net_test.ae's helpers).
+(in-ns 'go.arbace.jrt)
+
+(go/file "udp_test.go"
+  :imports [[testing "testing"] [time "time"]])
+
+(go/func openUDP "openUDP opens a UDP socket at 127.0.0.1 on a free port: its handle and port.\n"
+  [^{:tag (* testing/T)} t] :results [int32 int32]
+  (let [e (netErr)
+        h (HostDatagram_Open0_String_I_Z_Z_String1__I_native (Str "127.0.0.1") 0 false false e)]
+    (when (< h 0)
+      (.Fatalf t "open: %d %s" h (errText e)))
+    (return h (HostNet_Port0_I_Z__I_native h true))))
+
+(go/func recvUDP "recvUDP receives into a fresh 16 bytes: the count, the sender's bytes and port.\n"
+  [^int32 h ^int32 timeout ^bool peek ^{:tag (* RefArray)} e] :results [(* ByteArray) int32 int32 int32]
+  (let [buf (NewByteArray 16)
+        from (NewRefArray (.ArrayClass Prim_byte) 1)
+        port (NewIntArray 1)
+        n (HostDatagram_Receive0_I_B1_I_I_I_Z_B2_I1_String1__I_native h buf 0 16 timeout peek from port e)]
+    (when (< n 0)
+      (return buf n 0 0))
+    (return buf n (aget (.-A port) 0) (conv int32 (len (.-A (assert (* ByteArray) (aget (.-A from) 0))))))))
+
+(go/func TestDatagrams
+  "A datagram through loopback sockets: send, peek (the datagram stays), receive with the sender's
+address and port, a longer datagram cut to the buffer, a receive's timeout, connect's filter, the
+closed peer's port reported as unreachable, the multicast options.\n"
+  [^{:tag (* testing/T)} t]
+  (let [(values a pa) (openUDP t)
+        (values b pb) (openUDP t)
+        e (netErr)]
+    (defer (HostNet_Close0_I__V_native a))
+    (defer (HostNet_Close0_I__V_native b))
+    (when (!= (HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native b (javaBytes "hello") 0 5 (Str "127.0.0.1") pa e) 0)
+      (.Fatalf t "send: %s" (errText e)))
+    ;; its size is available, and a peek leaves it queued
+    (let [t0 (time/Now)]
+      (while (and (< (HostNet_Available0_I__I_native a) 5) (< (time/Since t0) time/Second))
+        (time/Sleep time/Millisecond)))
+    (when (!= (HostNet_Available0_I__I_native a) 5)
+      (.Errorf t "available %d" (HostNet_Available0_I__I_native a)))
+    (let [(values buf n port alen) (recvUDP a 2000 true e)]
+      (when (or (!= n 5) (!= (stringOf buf n) "hello") (!= port pb) (!= alen 4))
+        (.Errorf t "peek: %d %q from port %d (want %d), %d address bytes %s" n (stringOf buf n) port pb alen (errText e))))
+    (let [(values buf n port _) (recvUDP a 2000 false e)]
+      (when (or (!= n 5) (!= (stringOf buf n) "hello") (!= port pb))
+        (.Errorf t "receive: %d %q from port %d (want %d)" n (stringOf buf n) port pb)))
+    ;; nothing more: the receive times out
+    (let [t1 (time/Now)
+          (values _ n _ _) (recvUDP a 50 false e)]
+      (when (or (!= n netTimeout) (< (time/Since t1) (* 40 time/Millisecond)))
+        (.Errorf t "timed receive %d after %v" n (time/Since t1))))
+    ;; a datagram longer than the buffer: the rest is discarded
+    (let [big (NewByteArray 40)]
+      (HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native b big 0 40 (Str "127.0.0.1") pa e)
+      (let [(values _ n _ _) (recvUDP a 2000 false e)]
+        (when (!= n 16)
+          (.Errorf t "long datagram: %d" n))))
+    ;; connect: only the peer's datagrams come in, and sending needs no address
+    (let [(values c pc) (openUDP t)
+          (values d _) (openUDP t)]
+      (defer (HostNet_Close0_I__V_native c))
+      (defer (HostNet_Close0_I__V_native d))
+      (when (!= (HostDatagram_Connect0_I_String_I_String1__I_native a (Str "127.0.0.1") pc e) 0)
+        (.Fatalf t "connect: %s" (errText e)))
+      (HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native d (javaBytes "no") 0 2 (Str "127.0.0.1") pa e)
+      (HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native c (javaBytes "yes") 0 3 (Str "127.0.0.1") pa e)
+      (let [(values buf n _ _) (recvUDP a 2000 false e)]
+        (when (or (!= n 3) (!= (stringOf buf n) "yes"))
+          (.Errorf t "filtered receive: %d %q" n (stringOf buf n))))
+      (when (!= (HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native a (javaBytes "x") 0 1 nil 0 e) 0)
+        (.Errorf t "send to the peer: %s" (errText e)))
+      (let [(values buf n _ _) (recvUDP c 2000 false e)]
+        (when (or (!= n 1) (!= (stringOf buf n) "x"))
+          (.Errorf t "peer's receive: %d" n)))
+      ;; the peer closes: the next send's ICMP error arrives as an unreachable port
+      (HostNet_Close0_I__V_native c)
+      (HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native a (javaBytes "x") 0 1 nil 0 e)
+      (let [(values _ n _ _) (recvUDP a 2000 false e)]
+        (when (!= n netPortUnreachable)
+          (.Errorf t "closed peer: %d %s (want %d)" n (errText e) netPortUnreachable)))
+      ;; dissolved: any sender again
+      (when (!= (HostDatagram_Connect0_I_String_I_String1__I_native a nil 0 e) 0)
+        (.Errorf t "disconnect: %s" (errText e)))
+      (HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native d (javaBytes "any") 0 3 (Str "127.0.0.1") pa e)
+      (let [(values buf n _ _) (recvUDP a 2000 false e)]
+        (when (or (!= n 3) (!= (stringOf buf n) "any"))
+          (.Errorf t "after disconnect: %d" n))))
+    ;; the options: broadcast, the multicast ones
+    (let [v (NewIntArray 1)]
+      (HostNet_SetOption0_I_I_I_String1__I_native a optBroadcast 1 e)
+      (when (or (!= (HostNet_GetOption0_I_I_I1_String1__I_native a optBroadcast v e) 0) (!= (aget (.-A v) 0) 1))
+        (.Errorf t "broadcast %d: %s" (aget (.-A v) 0) (errText e)))
+      (when (!= (HostNet_SetOption0_I_I_I_String1__I_native a optMcastTTL 7 e) 0)
+        (.Errorf t "set ttl: %s" (errText e)))
+      (HostNet_GetOption0_I_I_I1_String1__I_native a optMcastTTL v e)
+      (when (!= (aget (.-A v) 0) 7)
+        (.Errorf t "ttl %d" (aget (.-A v) 0)))
+      (HostNet_SetOption0_I_I_I_String1__I_native a optMcastLoop 0 e)
+      (HostNet_GetOption0_I_I_I1_String1__I_native a optMcastLoop v e)
+      (when (!= (aget (.-A v) 0) 0)
+        (.Errorf t "loop %d" (aget (.-A v) 0))))
+    ;; a closed handle
+    (HostNet_Close0_I__V_native b)
+    (when (!= (HostDatagram_Send0_I_B1_I_I_String_I_String1__I_native b (javaBytes "x") 0 1 (Str "127.0.0.1") pa e) netClosed)
+      (.Error t "send on a closed socket"))))
+
+(go/func TestMulticastJoin
+  "A join and a leave of a group on the loopback interface (a host without a multicast route may refuse:
+logged, not failed).\n"
+  [^{:tag (* testing/T)} t]
+  (let [(values a _) (openUDP t)
+        e (netErr)
+        grp (NewByteArray 4)]
+    (aset (.-A grp) 0 -32)
+    (aset (.-A grp) 3 -5)
+    (defer (HostNet_Close0_I__V_native a))
+    (let [r (HostDatagram_Join0_I_B1_I_B1_Z_String1__I_native a grp 1 nil true e)]
+      (if (!= r 0)
+        (.Logf t "join refused: %d %s" r (errText e))
+        (when (!= (HostDatagram_Join0_I_B1_I_B1_Z_String1__I_native a grp 1 nil false e) 0)
+          (.Errorf t "leave: %s" (errText e)))))))
+
+(go/func TestInterfaces
+  "The interfaces: the loopback is there with its flags, an address of 127.0.0.1's prefix and no hardware
+address; every row has its parts.\n"
+  [^{:tag (* testing/T)} t]
+  (let [e (netErr)
+        rows (HostDatagram_Interfaces0_String1__O1_native e)]
+    (when (== rows nil)
+      (.Fatalf t "interfaces: %s" (errText e)))
+    (let [found false]
+      (range [_ x (.-A rows)]
+        (let [r (assert (* RefArray) x)
+              nums (assert (* IntArray) (aget (.-A r) 1))
+              addrs (assert (* RefArray) (aget (.-A r) 3))
+              plen (assert (* IntArray) (aget (.-A r) 4))
+              bcast (assert (* RefArray) (aget (.-A r) 5))]
+          (when (or (!= (len (.-A r)) 6) (< (aget (.-A nums) 0) 1) (!= (len (.-A addrs)) (len (.-A plen)))
+                    (!= (len (.-A bcast)) (len (.-A plen))))
+            (.Errorf t "row %v" (.-A r)))
+          (when (== (.String (assert (* String) (aget (.-A r) 0))) "lo")
+            (set! found true)
+            (when (== (bit-and (aget (.-A nums) 1) 4) 0)
+              (.Error t "lo is no loopback"))
+            (when (!= (aget (.-A r) 2) nil)
+              (.Error t "lo has a hardware address")))))
+      (when (not found)
+        (.Log t "no lo among the interfaces")))))

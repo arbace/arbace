@@ -1,0 +1,188 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/Poly1305.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.nio ByteBuffer)
+        '(java.security InvalidKeyException Key)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(java.util Arrays Objects)
+        '(jdk.internal.vm.annotation ForceInline IntrinsicCandidate)
+        '(sun.security.util.math IntegerFieldModuloP IntegerModuloP MutableIntegerModuloP)
+        '(sun.security.util.math.intpoly IntegerPolynomial1305))
+
+(defclass ^:final Poly1305
+  (field ^:private ^:static ^:final ^int KEY_LENGTH 32)
+
+  (field ^:private ^:static ^:final ^int RS_LENGTH (unchecked-divide-int KEY_LENGTH 2))
+
+  (field ^:private ^:static ^:final ^int BLOCK_LENGTH 16)
+
+  (field ^:private ^:static ^:final ^int TAG_LENGTH 16)
+
+  (field ^:private ^:static ^:final ^IntegerFieldModuloP ipl1305 IntegerPolynomial1305/ONE)
+
+  (field ^:private ^byte/1 keyBytes)
+
+  (field ^:private ^:final ^byte/1 block (new byte/1 BLOCK_LENGTH))
+
+  (field ^:private ^int blockOffset)
+
+  (field ^:private ^IntegerModuloP r)
+
+  (field ^:private ^IntegerModuloP s)
+
+  (field ^:private ^MutableIntegerModuloP a)
+
+  (field ^:private ^:final ^MutableIntegerModuloP n (.mutable (.get1 ipl1305)))
+
+  (field ^:private ^:final ^boolean checkWeakKey)
+
+  (constructor [this] (this. true))
+
+  (constructor [this ^boolean checkKey] (set! checkWeakKey checkKey))
+
+  (method engineInit :throws [InvalidKeyException] ^void [this ^Key newKey
+                                                          ^AlgorithmParameterSpec params]
+    (Objects/requireNonNull newKey "Null key provided during init")
+    (set! keyBytes (.getEncoded newKey))
+    (if (nil? keyBytes)
+        (throw (InvalidKeyException. "Key does not support encoding"))
+        (when-not (== (alength keyBytes) KEY_LENGTH)
+          (throw (InvalidKeyException. (java-str "Incorrect length for key: " (alength keyBytes))))))
+    (.engineReset this)
+    (.setRSVals this))
+
+  (method engineGetMacLength ^int [this] TAG_LENGTH)
+
+  (method engineReset ^void [this]
+    (Arrays/fill block (unchecked-byte 0))
+    (set! blockOffset 0)
+    (set! a (.mutable (.get0 ipl1305))))
+
+  (method engineUpdate ^void [this ^ByteBuffer buf]
+    (let [^:mutable remaining (.remaining buf)]
+      (while (> remaining 0)
+        (let [bytesToWrite (Integer/min remaining (unchecked-subtract-int BLOCK_LENGTH blockOffset))]
+          (if (>= bytesToWrite BLOCK_LENGTH)
+              (let [blockMultipleLength (bit-and-int
+                                          remaining
+                                          (bit-not-int (unchecked-subtract-int BLOCK_LENGTH 1)))]
+                (.processMultipleBlocks this buf blockMultipleLength)
+                (set! remaining (unchecked-subtract-int remaining blockMultipleLength)))
+              (do
+                (.get buf block blockOffset bytesToWrite)
+                (set! blockOffset (unchecked-add-int blockOffset bytesToWrite))
+                (when (>= blockOffset BLOCK_LENGTH)
+                  (.processBlock this block 0 BLOCK_LENGTH)
+                  (set! blockOffset 0))
+                (set! remaining (unchecked-subtract-int remaining bytesToWrite))))))))
+
+  (method engineUpdate ^void [this ^byte/1 input ^:mutable ^int offset ^:mutable ^int len]
+    (Objects/checkFromIndexSize offset len (alength input))
+    (when (> blockOffset 0)
+      (let [blockSpaceLeft (unchecked-subtract-int BLOCK_LENGTH blockOffset)]
+        (if (< len blockSpaceLeft)
+            (do
+              (System/arraycopy input offset block blockOffset len)
+              (set! blockOffset (unchecked-add-int blockOffset len))
+              (return))
+            (do
+              (System/arraycopy input offset block blockOffset blockSpaceLeft)
+              (set! offset (unchecked-add-int offset blockSpaceLeft))
+              (set! len (unchecked-subtract-int len blockSpaceLeft))
+              (.processBlock this block 0 BLOCK_LENGTH)
+              (set! blockOffset 0)))))
+    (let [blockMultipleLength (bit-and-int len
+                                           (bit-not-int (unchecked-subtract-int BLOCK_LENGTH 1)))
+          aLimbs (.getLimbs a)
+          rLimbs (.getLimbs r)]
+      (Poly1305/processMultipleBlocksCheck input offset blockMultipleLength aLimbs rLimbs)
+      (.processMultipleBlocks this input offset blockMultipleLength aLimbs rLimbs)
+      (set! offset (unchecked-add-int offset blockMultipleLength))
+      (set! len (unchecked-subtract-int len blockMultipleLength))
+      (when (> len 0) (System/arraycopy input offset block 0 len) (set! blockOffset len))))
+
+  (method engineUpdate ^void [this ^byte input]
+    (java-assert (< blockOffset BLOCK_LENGTH))
+    (aset block
+          (let [old-1 blockOffset] (set! blockOffset (unchecked-inc-int blockOffset)) old-1)
+          input)
+    (when (== blockOffset BLOCK_LENGTH)
+      (.processBlock this block 0 BLOCK_LENGTH)
+      (set! blockOffset 0)))
+
+  (method engineDoFinal ^byte/1 [this]
+    (let [tag (new byte/1 BLOCK_LENGTH)]
+      (when (> blockOffset 0) (.processBlock this block 0 blockOffset) (set! blockOffset 0))
+      (.addModPowerTwo a s tag)
+      (.engineReset this)
+      tag))
+
+  (method ^:private processBlock ^void [this ^ByteBuffer buf ^int len]
+    (.setValue n buf len (unchecked-byte 0x01))
+    (.setSum a n)
+    (.setProduct a r))
+
+  (method ^:private processBlock ^void [this ^byte/1 block ^int offset ^int length]
+    (Objects/checkFromIndexSize offset length (alength block))
+    (.setValue n block offset length (unchecked-byte 0x01))
+    (.setSum a n)
+    (.setProduct a r))
+
+  (method ^:private ^{ForceInline true} ^{IntrinsicCandidate true} processMultipleBlocks ^void [this
+                                                                                                ^byte/1 input
+                                                                                                ^:mutable ^int offset
+                                                                                                ^:mutable ^int length
+                                                                                                ^long/1 aLimbs
+                                                                                                ^long/1 rLimbs]
+    (while (>= length BLOCK_LENGTH)
+      (.processBlock this input offset BLOCK_LENGTH)
+      (set! offset (unchecked-add-int offset BLOCK_LENGTH))
+      (set! length (unchecked-subtract-int length BLOCK_LENGTH))))
+
+  (method ^:private processMultipleBlocks ^void [this ^ByteBuffer buf
+                                                 ^:mutable ^int blockMultipleLength]
+    (if (.hasArray buf)
+        (let [input (.array buf)
+              offset (unchecked-add-int (.arrayOffset buf) (.position buf))
+              aLimbs (.getLimbs a)
+              rLimbs (.getLimbs r)]
+          (Poly1305/processMultipleBlocksCheck input offset blockMultipleLength aLimbs rLimbs)
+          (.processMultipleBlocks this input offset blockMultipleLength aLimbs rLimbs)
+          (.position buf (unchecked-add-int (.position buf) blockMultipleLength)))
+        (while (>= blockMultipleLength BLOCK_LENGTH)
+          (.processBlock this buf BLOCK_LENGTH)
+          (set! blockMultipleLength (unchecked-subtract-int blockMultipleLength BLOCK_LENGTH)))))
+
+  (method ^:private ^:static processMultipleBlocksCheck ^void [^byte/1 input ^int offset ^int length
+                                                               ^long/1 aLimbs ^long/1 rLimbs]
+    (Objects/checkFromIndexSize offset length (alength input))
+    (let [^:const ^int numLimbs 5]
+      (when-not (== (alength aLimbs) numLimbs)
+        (throw (RuntimeException. (java-str "invalid accumulator length: " (alength aLimbs)))))
+      (when-not (== (alength rLimbs) numLimbs)
+        (throw (RuntimeException. (java-str "invalid R length: " (alength rLimbs)))))))
+
+  (method ^:private setRSVals :throws [InvalidKeyException] ^void [this]
+    (aset keyBytes 3 (unchecked-byte (bit-and-int (aget keyBytes 3) 15)))
+    (aset keyBytes 7 (unchecked-byte (bit-and-int (aget keyBytes 7) 15)))
+    (aset keyBytes 11 (unchecked-byte (bit-and-int (aget keyBytes 11) 15)))
+    (aset keyBytes 15 (unchecked-byte (bit-and-int (aget keyBytes 15) 15)))
+    (aset keyBytes 4 (unchecked-byte (bit-and-int (aget keyBytes 4) (unchecked-byte 252))))
+    (aset keyBytes 8 (unchecked-byte (bit-and-int (aget keyBytes 8) (unchecked-byte 252))))
+    (aset keyBytes 12 (unchecked-byte (bit-and-int (aget keyBytes 12) (unchecked-byte 252))))
+    (when checkWeakKey
+      (let [^:mutable ^byte keyIsZero 0]
+        (loop [^int i 0]
+          (when (< i RS_LENGTH)
+            (set! keyIsZero (unchecked-byte (bit-or-int keyIsZero (aget keyBytes i))))
+            (recur (unchecked-inc-int i))))
+        (when (== keyIsZero 0) (throw (InvalidKeyException. "R is set to zero")))
+        (set! keyIsZero 0)
+        (loop [^int i RS_LENGTH]
+          (when (< i (unchecked-multiply-int 2 RS_LENGTH))
+            (set! keyIsZero (unchecked-byte (bit-or-int keyIsZero (aget keyBytes i))))
+            (recur (unchecked-inc-int i))))
+        (when (== keyIsZero 0) (throw (InvalidKeyException. "S is set to zero")))))
+    (set! r (.getElement ipl1305 keyBytes 0 RS_LENGTH (unchecked-byte 0)))
+    (set! s (.getElement ipl1305 keyBytes RS_LENGTH RS_LENGTH (unchecked-byte 0)))))

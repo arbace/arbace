@@ -1,6 +1,7 @@
 (ns arbace.repr.llvm.print
-  "LLVM forms as LLVM IR text (doc/cpp/LLVM.md): `print-module`, the inverse of arbace.repr.llvm.read in one canonical
-  spelling (LangRef's, as clang writes it). The judge is clang: the printed text assembles to the original's object."
+  "LLVM forms as LLVM IR text (doc/llvm/SPEC.md): `print-module`, the inverse of arbace.repr.llvm.read in one canonical
+  spelling (LangRef's, as clang writes it). The judge is clang: the printed text assembles to the original's object
+  (and llvm-as to its bitcode, module summaries included)."
   (:require [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
@@ -41,6 +42,13 @@
 (defn- local? [x] (or (and (symbol? x) (str/starts-with? (name x) "%") (nil? (namespace x))) (and (seq? x) (= (first x) '%))))
 (defn- global? [x] (or (and (symbol? x) (= (namespace x) "g")) (and (seq? x) (= (first x) 'g))))
 (defn- meta-sym? [x] (and (symbol? x) (nil? (namespace x)) (str/starts-with? (name x) "!")))
+(defn- md-head?
+  "The head of a metadata form: ! (a tuple or a string) or a specialized node's !DINAME."
+  [h] (meta-sym? h))
+
+(defn- as-str
+  "An address space's text inside addrspace(...): N, or a symbolic one quoted."
+  ^String [a] (if (string? a) (qstr a) (str a)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types
@@ -51,7 +59,8 @@
     (symbol? t) (name t)
     (seq? t)
     (case (first t)
-      ptr (str "ptr addrspace(" (second t) ")")
+      ptr (str "ptr addrspace(" (as-str (second t)) ")")
+      * (if (next (next t)) (str (type-str (nth t 1)) " addrspace(" (as-str (nth t 2)) ")*") (str (type-str (nth t 1)) "*"))
       array (str "[" (nth t 1) " x " (type-str (nth t 2)) "]")
       vector (str "<" (nth t 1) " x " (type-str (nth t 2)) ">")
       vscale (str "<vscale x " (nth t 1) " x " (type-str (nth t 2)) ">")
@@ -85,9 +94,7 @@
 
 (declare value-str typed-str md-str)
 
-(defn- fp? [x] (and (seq? x) (= (first x) 'fp)))
-
-(def ^:private cast-ops '#{trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr bitcast addrspacecast})
+(def ^:private cast-ops '#{trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint ptrtoaddr inttoptr bitcast addrspacecast})
 (def ^:private bin-ops '#{add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv frem})
 
 (defn- split-flags [xs] (split-with keyword? xs))
@@ -122,19 +129,24 @@
         (= h 'packed) (if (next v) (str "<{ " (str/join ", " (map typed-str (rest v))) " }>") "<{}>")
         (= h 'array) (str "[" (str/join ", " (map typed-str (rest v))) "]")
         (= h 'vector) (str "<" (str/join ", " (map typed-str (rest v))) ">")
-        (#{'! '!DI} h) (md-str v)
+        (md-head? h) (md-str v)
         (= h 'getelementptr) (gep-str v true)
         (cast-ops h) (let [[fl [t x t2]] (split-flags (rest v))] (str (name h) " " (flags-str fl) "(" (type-str t) " " (value-str x) " to " (type-str t2) ")"))
         (bin-ops h) (let [[fl [t a b]] (split-flags (rest v))] (str (name h) " " (flags-str fl) "(" (type-str t) " " (value-str a) ", " (type-str t) " " (value-str b) ")"))
+        ('#{extractelement insertelement shufflevector ptrauth} h) (str (name h) " (" (str/join ", " (map typed-str (rest v))) ")")
         (= h 'blockaddress) (str "blockaddress(" (value-str (nth v 1)) ", " (value-str (nth v 2)) ")")
         (#{'dso_local_equivalent 'no_cfi} h) (str (name h) " " (value-str (second v)))
         (= h 'splat) (str "splat (" (typed-str (second v)) ")")
-        (= h 'ptrauth) (str "ptrauth(" (second v) ")")
         (= h 'asm) (let [[_ a c & fl] v] (str "asm " (apply str (map #(str (name %) " ") fl)) (qstr a) ", " (qstr c)))
         :else (fail "value" v)))
     :else (fail "value" v)))
 
-(defn typed-str ^String [[t v]] (str (type-str t) " " (value-str v)))
+(defn typed-str ^String [[t v]] (str (type-str t) " " (if (= t 'metadata) (md-str v) (value-str v))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Metadata
+
+(declare di-str)
 
 (defn md-str
   "A metadata operand's text."
@@ -145,8 +157,34 @@
     (vector? m) (typed-str m)
     (and (seq? m) (= (first m) '!)) (let [x (second m)]
                                       (if (string? x) (str "!" (qstr x)) (str "!{" (str/join ", " (map md-str x)) "}")))
-    (and (seq? m) (= (first m) '!DI)) (second m)
+    (and (seq? m) (md-head? (first m))) (di-str m)
     :else (fail "metadata" m)))
+
+(defn- di-value-str
+  "A specialized node's field value or operand."
+  ^String [v]
+  (cond
+    (string? v) (qstr v)
+    (true? v) "true"
+    (false? v) "false"
+    (integer? v) (str v)
+    (vector? v) (typed-str v)
+    (meta-sym? v) (str v)
+    (symbol? v) (name v)
+    (and (seq? v) (= (first v) '|)) (str/join " | " (map di-value-str (rest v)))
+    (and (seq? v) (= (first v) 'list)) (str "{" (str/join ", " (map md-str (rest v))) "}")
+    (seq? v) (md-str v)
+    :else (fail "a field's value" v)))
+
+(defn- di-str
+  "A specialized node: !NAME(key: value, ...) or !NAME(operand, ...)."
+  ^String [m]
+  (let [[h & xs] m]
+    (str (name h) "("
+         (if (keyword? (first xs))
+           (str/join ", " (map (fn [[k v]] (str (name k) ": " (di-value-str v))) (partition 2 xs)))
+           (str/join ", " (map di-value-str xs)))
+         ")")))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Instructions
@@ -169,28 +207,41 @@
   (let [t (first a) v (peek a) as (subvec a 1 (dec (count a)))]
     (str (type-str t) (when (seq as) (str " " (attrs-str as))) " " (if (= t 'metadata) (md-str v) (value-str v)))))
 
+(defn- label-str ^String [l] (str "label " (value-str l)))
+
+(defn- unwind-str
+  "An unwind destination: `to caller` for the symbol caller, else `label %bb`."
+  ^String [u] (if (= u 'caller) "to caller" (label-str u)))
+
 (defn- call-str ^String [x]
   (let [[h t callee args] x o (opts-of x 3)]
     (str (when-let [tl (:tail o)] (str (name tl) " ")) (name h) " "
          (flags-str (:fmf o))
          (when-let [c (:cconv o)] (str c " "))
          (when (seq (:ret-attrs o)) (str (attrs-str (:ret-attrs o)) " "))
-         (when-let [a (:addrspace o)] (str "addrspace(" a ") "))
-         (type-str t) " " (value-str callee) "(" (str/join ", " (map arg-str args)) ")"
+         (when-let [a (:addrspace o)] (str "addrspace(" (as-str a) ") "))
+         (type-str t) " " (value-str callee) "(" (str/join ", " (concat (map arg-str args) (when (:ellipsis o) ["..."]))) ")"
          (when (seq (:attrs o)) (str " " (attrs-str (:attrs o))))
          (when-let [bs (:bundles o)]
            (str " [ " (str/join ", " (map (fn [b] (str (qstr (first b)) "(" (str/join ", " (map typed-str (rest b))) ")")) bs)) " ]"))
-         (when (= h 'invoke) (str "\n          to label " (value-str (:to o)) " unwind label " (value-str (:unwind o)))))))
+         (when (= h 'invoke) (str "\n          to label " (value-str (:to o)) " unwind label " (value-str (:unwind o))))
+         (when (= h 'callbr) (str "\n          to label " (value-str (:to o)) " [" (str/join ", " (map label-str (:indirect o))) "]")))))
+
+(def ^:private option-keys
+  #{:count :align :addrspace :atomic :syncscope :volatile :elementwise :md :to :unwind :indirect :fmf :cconv :ret-attrs :attrs :bundles
+    :tail :weak})
 
 (defn- n-positional
   "The number of positional items of an option-taking instruction."
   ^long [x]
-  (count (take-while #(not (and (keyword? %) (#{:count :align :addrspace :atomic :syncscope :volatile :md :to :unwind :fmf :cconv
-                                                     :ret-attrs :attrs :bundles :tail :weak} %)))
-                     (rest x))))
+  (count (take-while #(not (and (keyword? %) (option-keys %))) (rest x))))
+
+(defn- dbg-record? [h] (and (symbol? h) (nil? (namespace h)) (str/starts-with? (name h) "dbg_")))
+
+(defn- exception-args-str ^String [as] (str "[" (str/join ", " (map typed-str as)) "]"))
 
 (defn inst-str
-  "An instruction's text."
+  "An instruction's (or a debug record's) text."
   ^String [x]
   (if (= (first x) '=)
     (str (local-str (nth x 1)) " = " (inst-str (nth x 2)))
@@ -207,7 +258,7 @@
             (cast-ops h) (let [[fl [t v t2]] (split-flags pos)] (str (name h) " " (flags-str fl) (type-str t) " " (value-str v) " to " (type-str t2)))
             (= h 'alloca) (let [[fl [t]] (split-flags pos)]
                             (str "alloca " (flags-str fl) (type-str t) (when-let [c (:count o)] (str ", " (typed-str c))) (align-tail o)
-                                 (when-let [a (:addrspace o)] (str ", addrspace(" a ")"))))
+                                 (when-let [a (:addrspace o)] (str ", addrspace(" (as-str a) ")"))))
             (= h 'load) (let [[t pv] pos]
                           (str "load " (when (:atomic o) "atomic ") (when (:volatile o) "volatile ") (type-str t) ", " (typed-str pv)
                                (when-let [s (:syncscope o)] (str " syncscope(" (qstr s) ")")) (when-let [a (:atomic o)] (str " " (name a))) (align-tail o)))
@@ -218,7 +269,7 @@
             (= h 'phi) (let [[fl [t & ins]] (split-flags pos)]
                          (str "phi " (flags-str fl) (type-str t) " " (str/join ", " (map (fn [[v b]] (str "[ " (value-str v) ", " (value-str b) " ]")) ins))))
             (= h 'select) (let [[fl [c a b]] (split-with keyword? pos)] (str "select " (flags-str fl) (typed-str c) ", " (typed-str a) ", " (typed-str b)))
-            (#{'call 'invoke} h) (call-str x)
+            (#{'call 'invoke 'callbr} h) (call-str x)
             (= h 'ret) (if (= (first pos) 'void) "ret void" (str "ret " (type-str (first pos)) " " (value-str (second pos))))
             (= h 'br) (if (= 1 (count pos)) (str "br label " (value-str (first pos)))
                           (let [[t c a b] pos] (str "br " (type-str t) " " (value-str c) ", label " (value-str a) ", label " (value-str b))))
@@ -226,7 +277,7 @@
                             (str "switch " (type-str t) " " (value-str v) ", label " (value-str d) " ["
                                  (apply str (map (fn [[ct cv b]] (str "\n    " (type-str ct) " " (value-str cv) ", label " (value-str b))) cs))
                                  "\n  ]"))
-            (= h 'indirectbr) (let [[t v bs] pos] (str "indirectbr " (type-str t) " " (value-str v) ", [" (str/join ", " (map #(str "label " (value-str %)) bs)) "]"))
+            (= h 'indirectbr) (let [[t v bs] pos] (str "indirectbr " (type-str t) " " (value-str v) ", [" (str/join ", " (map label-str bs)) "]"))
             (= h 'unreachable) "unreachable"
             (= h 'resume) (str "resume " (type-str (first pos)) " " (value-str (second pos)))
             (= h 'landingpad) (let [[t & cs] pos]
@@ -234,6 +285,12 @@
                                      (apply str (map (fn [c] (if (= c :cleanup) "\n          cleanup"
                                                                  (str "\n          " (name (first c)) " " (type-str (second c)) " " (value-str (nth c 2)))))
                                                      cs))))
+            (= h 'catchswitch) (let [[par hs] pos]
+                                 (str "catchswitch within " (value-str par) " [" (str/join ", " (map label-str hs)) "] unwind " (unwind-str (:unwind o))))
+            (= h 'catchpad) (str "catchpad within " (value-str (first pos)) " " (exception-args-str (second pos)))
+            (= h 'cleanuppad) (str "cleanuppad within " (value-str (first pos)) " " (exception-args-str (second pos)))
+            (= h 'catchret) (str "catchret from " (value-str (first pos)) " to " (label-str (:to o)))
+            (= h 'cleanupret) (str "cleanupret from " (value-str (first pos)) " unwind " (unwind-str (:unwind o)))
             (= h 'extractvalue) (str "extractvalue " (typed-str (first pos)) (apply str (map #(str ", " %) (rest pos))))
             (= h 'insertvalue) (str "insertvalue " (typed-str (first pos)) ", " (typed-str (second pos)) (apply str (map #(str ", " %) (nnext pos))))
             (= h 'extractelement) (str "extractelement " (typed-str (first pos)) ", " (typed-str (second pos)))
@@ -243,42 +300,71 @@
             (= h 'va_arg) (str "va_arg " (typed-str (first pos)) ", " (type-str (second pos)))
             (= h 'fence) (str "fence" (when-let [s (:syncscope o)] (str " syncscope(" (qstr s) ")")) " " (name (first pos)))
             (= h 'atomicrmw) (let [[op pv v ord] pos]
-                               (str "atomicrmw " (when (:volatile o) "volatile ") (name op) " " (typed-str pv) ", " (typed-str v)
+                               (str "atomicrmw " (when (:volatile o) "volatile ") (when (:elementwise o) "elementwise ") (name op) " " (typed-str pv) ", " (typed-str v)
                                     (when-let [s (:syncscope o)] (str " syncscope(" (qstr s) ")")) " " (name ord) (align-tail o)))
             (= h 'cmpxchg) (let [[pv c nv s f] pos]
                              (str "cmpxchg " (when (:weak o) "weak ") (when (:volatile o) "volatile ") (typed-str pv) ", " (typed-str c) ", " (typed-str nv)
                                   (when-let [ss (:syncscope o)] (str " syncscope(" (qstr ss) ")")) " " (name s) " " (name f) (align-tail o)))
+            (dbg-record? h) (str "  #" (name h) "(" (str/join ", " (map md-str pos)) ")")
             :else (fail "instruction" x))]
       (str body (md-tail o)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Module summaries
+
+(defn- sum-str
+  "A summary value's text: a vector is a tuple (key: value or a bare value each), (summary N) ^N, (range a b) [a, b]."
+  ^String [v]
+  (letfn [(items [xs] (loop [xs (seq xs) out []]
+                        (cond
+                          (empty? xs) out
+                          (keyword? (first xs)) (recur (nnext xs) (conj out (str (name (first xs)) ": " (sum-str (second xs)))))
+                          :else (recur (next xs) (conj out (sum-str (first xs)))))))]
+    (cond
+      (vector? v) (str "(" (str/join ", " (items v)) ")")
+      (and (seq? v) (= (first v) 'summary)) (str (when-let [f (nth v 2 nil)] (str (name f) " ")) "^" (second v))
+      (and (seq? v) (= (first v) 'range)) (str "[" (str/join ", " (items (rest v))) "]")
+      (string? v) (qstr v)
+      (integer? v) (str v)
+      (symbol? v) (name v)
+      :else (fail "summary value" v))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Top level
 
 (def ^:private prefix-order [:linkage :preemption :visibility :dll :thread-local :unnamed-addr :addrspace :externally-initialized])
+(def ^:private prefix-keys (set prefix-order))
 
 (defn- prefix-str ^String [o keys]
   (apply str (for [k keys :let [v (get o k)] :when (some? v)]
                (case k
                  :thread-local (if (true? v) "thread_local " (str "thread_local(" (name v) ") "))
-                 :addrspace (str "addrspace(" v ") ")
+                 :addrspace (str "addrspace(" (as-str v) ") ")
                  :externally-initialized "externally_initialized "
                  (str (name v) " ")))))
 
 (defn- comdat-str ^String [c] (if (true? c) "comdat" (str "comdat($" (name-text c) ")")))
 
-(defn- global-str* ^String [x]
+(defn- prop-str
+  "A global's `, property` in the form's order: section, partition, comdat, align, code_model, a sanitizer word."
+  ^String [k v]
+  (case k
+    :section (str ", section " (qstr v))
+    :partition (str ", partition " (qstr v))
+    :comdat (str ", " (comdat-str v))
+    :align (str ", align " v)
+    :code-model (str ", code_model " (qstr v))
+    (if (true? v) (str ", " (name k)) (fail "a global's property" [k v]))))
+
+(defn global-str* ^String [x]
   (let [[_ nm t & more] x
         [init opts] (if (and (seq more) (not (keyword? (first more)))) [(first more) (rest more)] [nil more])
         o (apply hash-map opts)]
     (str (global-str nm) " = " (prefix-str o prefix-order) (if (:constant o) "constant " "global ") (type-str t)
          (when (some? init) (str " " (value-str init)))
-         (when-let [s (:section o)] (str ", section " (qstr s)))
-         (when-let [s (:partition o)] (str ", partition " (qstr s)))
-         (when-let [c (:comdat o)] (str ", " (comdat-str c)))
-         (when-let [a (:align o)] (str ", align " a))
-         (when-let [s (:code-model o)] (str ", code_model " (qstr s)))
-         (when (seq (:attrs o)) (str " " (attrs-str (:attrs o))))
-         (md-tail o))))
+         (apply str (for [[k v] (partition 2 opts) :when (not (or (prefix-keys k) (#{:constant :attrs :md} k)))] (prop-str k v)))
+         (md-tail o)
+         (when (seq (:attrs o)) (str " " (attrs-str (:attrs o)))))))
 
 (defn- param-str ^String [p]
   (if (= p '&) "..."
@@ -286,34 +372,61 @@
             as (subvec p 1 (if nm (dec (count p)) (count p)))]
         (str (type-str t) (when (seq as) (str " " (attrs-str as))) (when nm (str " " (local-str nm)))))))
 
-(defn- fn-str ^String [x]
+(defn- index-list-str ^String [idx] (str "{ " (str/join ", " idx) " }"))
+
+(defn fn-head-str
+  "A function's header: a declaration whole, a definition's up to and including its body's `{`."
+  ^String [x]
   (let [[h nm rt ps & opts] x
-        o (apply hash-map opts)]
-    (str (if (= h 'llvm/define) "define " "declare ")
+        o (apply hash-map opts)
+        define? (= h 'llvm/define)
+        md (apply str (map (fn [[k v]] (str " " k " " (md-str v))) (partition 2 (:md o))))]
+    (str (if define? "define " (str "declare" md " "))
          (prefix-str o [:linkage :preemption :visibility :dll])
          (when-let [c (:cconv o)] (str c " "))
          (when (seq (:ret-attrs o)) (str (attrs-str (:ret-attrs o)) " "))
          (type-str rt) " " (global-str nm) "(" (str/join ", " (map param-str ps)) ")"
          (when-let [u (:unnamed-addr o)] (str " " (name u)))
-         (when-let [a (:addrspace o)] (str " addrspace(" a ")"))
+         (when-let [a (:addrspace o)] (str " addrspace(" (as-str a) ")"))
          (when (seq (:attrs o)) (str " " (attrs-str (:attrs o))))
          (when-let [s (:section o)] (str " section " (qstr s)))
          (when-let [s (:partition o)] (str " partition " (qstr s)))
          (when-let [c (:comdat o)] (str " " (comdat-str c)))
          (when-let [a (:align o)] (str " align " a))
+         (when-let [a (:prefalign o)] (str " prefalign(" a ")"))
          (when-let [s (:gc o)] (str " gc " (qstr s)))
          (when-let [p (:prefix o)] (str " prefix " (typed-str p)))
          (when-let [p (:prologue o)] (str " prologue " (typed-str p)))
          (when-let [p (:personality o)] (str " personality " (typed-str p)))
-         (apply str (map (fn [[k v]] (str " " k " " (md-str v))) (partition 2 (:md o))))
-         (when (= h 'llvm/define)
-           (str " {\n"
-                (str/join "\n" (map-indexed (fn [i b]
-                                              (let [[_ l & is] b]
-                                                (str (when l (str (when (pos? i) "") (let [s (local-str l)] (subs s 1)) ":\n"))
-                                                     (apply str (map #(str "  " (inst-str %) "\n") is)))))
-                                            (:body o)))
-                "}")))))
+         (when define? (str md " {")))))
+
+(defn item-inst-str
+  "An instruction's or a debug record's text as an item: without the indentation of a debug record."
+  ^String [x]
+  (let [s (inst-str x)] (if (dbg-record? (first x)) (subs s 2) s)))
+
+(defn define-items
+  "A definition's items, [gap text] each in the text's order: its header up to `{`, each block's label (when written)
+  and items, the use-list orders, the closing `}`; the gaps those of the canonical layout."
+  [x]
+  (let [o (apply hash-map (drop 4 x))
+        out (java.util.ArrayList.)]
+    (.add out [nil (fn-head-str x)])
+    (doseq [[i b] (map-indexed vector (:body o))]
+      (let [[_ l & is] b]
+        (when l (.add out [(if (zero? i) "\n" "\n\n") (str (subs (local-str l) 1) ":")]))
+        (doseq [[j y] (map-indexed vector is)]
+          (.add out [(str (if (and (zero? j) (nil? l) (pos? i)) "\n\n" "\n") (if (dbg-record? (first y)) "    " "  "))
+                     (item-inst-str y)]))))
+    (doseq [[_ tv idx] (:uselistorder o)]
+      (.add out ["\n  " (str "uselistorder " (typed-str tv) ", " (index-list-str idx))]))
+    (.add out ["\n" "}"])
+    (vec out)))
+
+(defn- fn-str ^String [x]
+  (if (= (first x) 'llvm/define)
+    (apply str (mapcat (fn [[g t]] [g t]) (define-items x)))
+    (fn-head-str x)))
 
 (defn top-str
   "A top-level form's text."
@@ -326,20 +439,45 @@
     llvm/comdat (str "$" (name-text (second x)) " = comdat " (name (nth x 2)))
     llvm/global (global-str* x)
     (llvm/alias llvm/ifunc) (let [[h nm t a & opts] x o (apply hash-map opts)]
-                              (str (global-str nm) " = " (prefix-str o prefix-order) (name h) " " (type-str t) ", " (typed-str a) (md-tail o)))
+                              (str (global-str nm) " = " (prefix-str o prefix-order) (name h) " " (type-str t) ", " (if (vector? a) (typed-str a) (value-str a))
+                                   (when-let [s (:partition o)] (str ", partition " (qstr s)))
+                                   (md-tail o)))
     (llvm/declare llvm/define) (fn-str x)
     llvm/attributes (str "attributes #" (second x) " = { " (attrs-str (nth x 2)) " }")
     llvm/meta (let [o (apply hash-map (drop 3 x))] (str (second x) " = " (when (:distinct o) "distinct ") (md-str (nth x 2))))
     llvm/named-meta (str (second x) " = !{" (str/join ", " (map md-str (nth x 2))) "}")
-    llvm/module-asm (str "module asm " (qstr (second x)))
+    llvm/module-asm (str "module asm" (if-let [ps (:props (apply hash-map (drop 2 x)))]
+                                        (str "(" (str/join ", " (map (fn [[k v]] (str k ": " (qstr v))) ps)) ") ")
+                                        " ")
+                         (qstr (second x)))
+    llvm/uselistorder (let [[_ tv idx] x] (str "uselistorder " (typed-str tv) ", " (index-list-str idx)))
+    llvm/summary (let [[_ n k v] x] (str "^" n " = " (name k) ": " (sum-str v)))
     (fail "top-level form" x)))
+
+(defn form-items
+  "A top-level form's items, [gap text] each (the first gap nil: the module's)."
+  [x]
+  (if (= (first x) 'llvm/define) (define-items x) [[nil (top-str x)]]))
+
+(defn module-gap
+  "The canonical gap before the top-level form after `prev` (nil before the first)."
+  ^String [prev]
+  (cond (nil? prev) "" (= (first prev) 'llvm/define) "\n\n" :else "\n"))
+
+(defn module-end
+  "The canonical text after a module's last form."
+  ^String [forms]
+  (if (seq forms) (module-gap (last forms)) ""))
 
 (defn print-module
   "A module's forms as IR text."
   ^String [forms]
   (let [b (StringBuilder.)]
-    (doseq [f forms]
-      (.append b (top-str f))
-      (.append b "\n")
-      (when (= (first f) 'llvm/define) (.append b "\n")))
+    (loop [fs (seq forms) prev nil]
+      (when fs
+        (let [f (first fs)]
+          (.append b (module-gap prev))
+          (doseq [[g t] (form-items f)] (when g (.append b ^String g)) (.append b ^String t))
+          (recur (next fs) f))))
+    (.append b (module-end forms))
     (str b)))

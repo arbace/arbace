@@ -1,0 +1,189 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/net/http/ExchangeImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net.http HttpClient$Version
+                        HttpResponse
+                        HttpResponse$BodyHandler
+                        HttpResponse$ResponseInfo
+                        UnsupportedProtocolVersionException)
+        '(java.util.concurrent CompletableFuture CompletionStage Executor)
+        '(java.util.function BiFunction Function Supplier)
+        '(jdk.internal.net.http.common HttpBodySubscriberWrapper Logger MinimalFuture Utils))
+
+(defclass ^:abstract ExchangeImpl
+  :type-params [T]
+
+  (field ^:private ^:static ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] "ExchangeImpl" String/.toString)
+                          Utils/DEBUG))
+
+  (field ^:final ^{:tag (Exchange T)} exchange)
+
+  (field ^:private ^:volatile ^boolean expectTimeoutRaised)
+
+  (constructor [this ^{:tag (Exchange T)} e] (set! (.-exchange this) e))
+
+  (method ^:final getExchange ^{:tag (Exchange T)} [this] exchange)
+
+  (method ^:final setExpectTimeoutRaised ^void [this]
+    (set! expectTimeoutRaised true))
+
+  (method ^:final expectTimeoutRaised ^boolean [this] expectTimeoutRaised)
+
+  (method client ^HttpClientImpl [this] (.client exchange))
+
+  (method ^:abstract connection ^HttpConnection [this])
+
+  (method ^:static get :type-params [U] ^{:tag (CompletableFuture (? extends (ExchangeImpl U)))} [^{:tag (Exchange U)} exchange
+                                                                                                  ^HttpConnection connection]
+    (let [request (.request exchange)
+          version (.version exchange)]
+      (cond
+        (or (identical? version HttpClient$Version/HTTP_1_1) (.isWebSocket request))
+          (do
+            (when (.on debug) (.log debug "get: HTTP/1.1: new Http1Exchange"))
+            (ExchangeImpl/createHttp1Exchange exchange connection))
+        (and (not (.secure request)) (.isHttp3Only request version))
+          (do
+            (java-assert (identical? version HttpClient$Version/HTTP_3))
+            (java-assert (not (.isWebSocket request)))
+            (when (.on debug)
+              (.log debug "get: HTTP/3: HTTP/3 is not supported on plain connections"))
+            (MinimalFuture/failedFuture
+              (UnsupportedProtocolVersionException. "HTTP/3 is not supported on plain connections")))
+        (or (or (identical? version HttpClient$Version/HTTP_2) (ExchangeImpl/isTCP connection))
+            (not (.secure request)))
+          (do
+            (java-assert (not (.isWebSocket request)))
+            (ExchangeImpl/attemptHttp2Exchange exchange connection))
+        :else
+          (do
+            (java-assert (.secure request))
+            (java-assert (identical? version HttpClient$Version/HTTP_3))
+            (java-assert (not (.isWebSocket request)))
+            (MinimalFuture/failedFuture
+              (UnsupportedProtocolVersionException. "HTTP3 is not supported"))))))
+
+  (method ^:private ^:static isTCP ^boolean [^HttpConnection connection]
+    (if (nil? connection) false true))
+
+  (method ^:private ^:static attemptHttp2Exchange :type-params [U] ^{:tag (CompletableFuture (? extends (ExchangeImpl U)))} [^{:tag (Exchange U)} exchange
+                                                                                                                             ^HttpConnection connection]
+    (let [request (.request exchange)
+          c2 (.client2 (.client exchange))
+          ^{:tag (CompletableFuture Http2Connection)} c2f (.getConnectionFor c2 request exchange)]
+      (when (.on debug) (.log debug "get: Trying to get HTTP/2 connection"))
+      (let [^{:tag (CompletableFuture (CompletableFuture (? extends (ExchangeImpl U))))} fxi
+              (.handle c2f
+                       (lambda BiFunction ^CompletableFuture [^Http2Connection h2c ^Throwable t]
+                         (ExchangeImpl/createExchangeImpl h2c t exchange connection)))]
+        (.thenCompose fxi (lambda Function ^CompletionStage [^CompletableFuture x] x)))))
+
+  (method ^:private ^:static checkCancelled :type-params [U (T extends (ExchangeImpl U))] ^T [^T exchangeImpl]
+    (let [^{:tag (Exchange ?)} e (.getExchange exchangeImpl)]
+      (when (.on debug) (.log debug (java-str "checking cancellation for: " exchangeImpl)))
+      (when (.requestCancelled (.-multi e))
+        (when (.on debug) (.log debug "request was cancelled"))
+        (when-not (.isCanceled exchangeImpl)
+          (when (.on debug) (.log debug (java-str "cancelling exchange: " exchangeImpl)))
+          (let [^:mutable cause (.getCancelCause e)]
+            (when (nil? cause) (set! cause (IOException. "Request cancelled")))
+            (.cancel exchangeImpl cause))))
+      exchangeImpl))
+
+  (method ^:private ^:static createExchangeImpl :type-params [U] ^{:tag (CompletableFuture (? extends (ExchangeImpl U)))} [^Http2Connection c
+                                                                                                                           ^:mutable ^Throwable t
+                                                                                                                           ^{:tag (Exchange U)} exchange
+                                                                                                                           ^HttpConnection connection]
+    (when (.on debug) (.log debug "handling HTTP/2 connection creation result"))
+    (let [secure (.secure (.request exchange))]
+      (cond
+        (some? t)
+          (do
+            (when (.on debug)
+              (.log debug
+                    "handling HTTP/2 connection creation failed: %s"
+                    (new Object/1 [^Object t])))
+            (set! t (Utils/getCompletionCause t))
+            (if (instance? Http2Connection$ALPNException t)
+                (let [ee (cast Http2Connection$ALPNException t)
+                      as (.getConnection ee)]
+                  (when (.on debug)
+                    (.log debug "downgrading to HTTP/1.1 with: %s" (new Object/1 [as])))
+                  (let [^{:tag (CompletableFuture (? extends (ExchangeImpl U)))} ex
+                          (ExchangeImpl/createHttp1Exchange exchange as)]
+                    ex))
+                (do
+                  (when (.on debug)
+                    (.log debug
+                          "HTTP/2 connection creation failed with unexpected exception: %s"
+                          (new Object/1 [^Object t])))
+                  (MinimalFuture/failedFuture t))))
+        (and secure (nil? c))
+          (do
+            (when (.on debug) (.log debug "downgrading to HTTP/1.1 "))
+            (let [^{:tag (CompletableFuture (? extends (ExchangeImpl U)))} ex
+                    (ExchangeImpl/createHttp1Exchange exchange nil)]
+              ex))
+        (nil? c)
+          (do
+            (when (.on debug) (.log debug "new Http1Exchange, try to upgrade"))
+            (.thenApply (ExchangeImpl/createHttp1Exchange exchange connection)
+                        (lambda Function ^Http1Exchange [^Http1Exchange e] (.h2Upgrade exchange) e)))
+        :else
+          (do
+            (when (.on debug) (.log debug "creating HTTP/2 streams"))
+            (let [^{:tag (Stream U)} s (.createStream c exchange)
+                  ^{:tag (CompletableFuture (? extends (ExchangeImpl U)))} ex
+                    (MinimalFuture/completedFuture s)]
+              ex)))))
+
+  (method ^:private ^:static createHttp1Exchange :type-params [T] ^{:tag (CompletableFuture (Http1Exchange T))} [^{:tag (Exchange T)} ex
+                                                                                                                 ^HttpConnection as]
+    (try
+      (MinimalFuture/completedFuture (Http1Exchange. ex as))
+      (catch Throwable e (MinimalFuture/failedFuture e))))
+
+  (method nullBody ^void [this ^{:tag (HttpResponse T)} resp ^Throwable t])
+
+  (method ^:static cancelTimerOnResponseBodySubscriberTermination ^boolean [^boolean webSocket
+                                                                            ^int statusCode]
+    (or (or webSocket (< statusCode 100)) (>= statusCode 200)))
+
+  (method ^:abstract sendHeadersAsync ^{:tag (CompletableFuture (ExchangeImpl T))} [this])
+
+  (method ^:abstract sendBodyAsync ^{:tag (CompletableFuture (ExchangeImpl T))} [this])
+
+  (method ^:abstract readBodyAsync ^{:tag (CompletableFuture T)} [this
+                                                                  ^{:tag (HttpResponse$BodyHandler T)} handler
+                                                                  ^boolean returnConnectionToPool
+                                                                  ^Executor executor])
+
+  (method createResponseSubscriber ^{:tag (HttpBodySubscriberWrapper T)} [this
+                                                                          ^{:tag (HttpResponse$BodyHandler T)} handler
+                                                                          ^HttpResponse$ResponseInfo response]
+    (HttpBodySubscriberWrapper. (.apply handler response)))
+
+  (method ^:abstract ignoreBody ^{:tag (CompletableFuture Void)} [this])
+
+  (method ^:abstract getResponseAsync ^{:tag (CompletableFuture Response)} [this ^Executor executor])
+
+  (method ^:abstract cancel ^void [this])
+
+  (method ^:abstract cancel ^void [this ^IOException cause])
+
+  (method ^:abstract onProtocolError ^void [this ^IOException cause])
+
+  (method ^:abstract released ^void [this])
+
+  (method ^:abstract completed ^void [this])
+
+  (method ^:abstract isCanceled ^boolean [this])
+
+  (method ^:abstract getCancelCause ^Throwable [this])
+
+  (method upgraded ^void [this])
+
+  (method expectContinueFailed ^void [this ^int rcode]))

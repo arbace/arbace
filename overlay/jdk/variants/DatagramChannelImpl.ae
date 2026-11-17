@@ -1,0 +1,150 @@
+;; Go-build variant of sun.nio.ch.DatagramChannelImpl (J2G-SPEC §4.6; doc/go/JRT-NOTES.md, "Channels"; F10 of
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10b"): read by j2g only. jdk26u's channel registers its
+;; descriptor's close and its three native socket addresses' release with a Cleaner (java.lang.ref.Cleaner and
+;; jdk.internal.ref.CleanerFactory are not in the Go build: F17), and its natives receive0 and send0 take a
+;; direct buffer's address and a NativeSocketAddress's (through JavaNioAccess, outside the Go build too); jrt
+;; has no native memory. So: the constructors are jdk26u's without the Cleaner, tryClose closes the descriptor
+;; as the Cleaner's releaser does (releaserFor: nd.close, the addresses' arrays the collector's), and
+;; receiveIntoNativeBuffer and sendFromNativeBuffer are jdk26u's over the buffer's array and the
+;; NativeSocketAddress overlay's bytes, calling HostChannels' receive0 and send0 (ports of
+;; DatagramChannelImpl.c's, go/arbace/jrt/channels_linux.ae) on the descriptor's number; disconnect0 is
+;; HostChannels' too. jrt's temporary buffers (Util's overlay) are heap buffers, so receive and send take
+;; jdk26u's substitute-buffer path, unchanged. The replacing members keep jdk26u's code where they keep it
+;; (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the
+;; rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'sun.nio.ch)
+
+(j2g/variant DatagramChannelImpl
+  (j2g/cut (field ^:private ^:static ^:final ^JavaNioAccess NIO_ACCESS))
+
+  (j2g/cut (field ^:private ^:final ^Cleaner$Cleanable cleaner))
+
+  (constructor :throws [IOException] [this ^SelectorProvider sp ^ProtocolFamily family
+                                      ^boolean interruptible]
+    (super. sp)
+    (Objects/requireNonNull family "'family' is null")
+    (when (and (not (identical? family StandardProtocolFamily/INET))
+               (not (identical? family StandardProtocolFamily/INET6)))
+      (throw (UnsupportedOperationException. "Protocol family not supported")))
+    (when (and (identical? family StandardProtocolFamily/INET6) (not (Net/isIPv6Available)))
+      (throw (UnsupportedOperationException. "IPv6 not available")))
+    (let [^:mutable ^FileDescriptor fd nil
+          ^:mutable ^NativeSocketAddress/1 sockAddrs nil
+          ^:mutable initialized false]
+      (try
+        (set! (.-interruptible this) interruptible)
+        (set! (.-family this) family)
+        (set! (.-fd this) (set! fd (Net/socket family false)))
+        (set! (.-fdVal this) (IOUtil/fdVal fd))
+        (set! sockAddrs (NativeSocketAddress/allocate 3))
+        (.lock readLock)
+        (try
+          (set! (.-sourceSockAddr this) (aget sockAddrs 0))
+          (set! (.-cachedSockAddr this) (aget sockAddrs 1))
+          (finally (.unlock readLock)))
+        (set! (.-targetSockAddr this) (aget sockAddrs 2))
+        (set! initialized true)
+        (finally
+          (when-not initialized
+            (when (some? sockAddrs) (NativeSocketAddress/freeAll sockAddrs))
+            (when (some? fd) (.close nd fd)))))))
+
+  (constructor :throws [IOException] [this ^SelectorProvider sp ^FileDescriptor fd]
+    (super. sp)
+    (let [^:mutable ^NativeSocketAddress/1 sockAddrs nil
+          ^:mutable initialized false]
+      (try
+        (set! (.-interruptible this) true)
+        (set! (.-family this)
+              (if (Net/isIPv6Available) StandardProtocolFamily/INET6 StandardProtocolFamily/INET))
+        (set! (.-fd this) fd)
+        (set! (.-fdVal this) (IOUtil/fdVal fd))
+        (set! sockAddrs (NativeSocketAddress/allocate 3))
+        (.lock readLock)
+        (try
+          (set! (.-sourceSockAddr this) (aget sockAddrs 0))
+          (set! (.-cachedSockAddr this) (aget sockAddrs 1))
+          (finally (.unlock readLock)))
+        (set! (.-targetSockAddr this) (aget sockAddrs 2))
+        (set! initialized true)
+        (finally
+          (when-not initialized
+            (when (some? sockAddrs) (NativeSocketAddress/freeAll sockAddrs))
+            (.close nd fd))))
+      (locking stateLock (set! (.-localAddress this) (Net/localAddress fd)))))
+
+  (method ^:private receiveIntoNativeBuffer :throws [IOException] ^int [this ^ByteBuffer bb ^int rem
+                                                                        ^int pos ^boolean connected]
+    (let [err (new int/1 1)
+          n (jdk.internal.jrt.HostChannels/receive0 fdVal
+                                                    (.array bb)
+                                                    (unchecked-add-int (.arrayOffset bb) pos)
+                                                    rem
+                                                    (.bytes sourceSockAddr)
+                                                    connected
+                                                    err)]
+      (when (== n jdk.internal.jrt.HostChannels/THROWN)
+        (throw (DatagramChannelImpl/datagramException (aget err 0))))
+      (when (> n 0) (.position bb (unchecked-add-int pos n)))
+      n))
+
+  (method ^:private sendFromNativeBuffer :throws [IOException] ^int [this ^FileDescriptor fd
+                                                                     ^ByteBuffer bb
+                                                                     ^InetSocketAddress target]
+    (let [pos (.position bb)
+          lim (.limit bb)]
+      (java-assert (<= pos lim))
+      (let [^int rem (if (<= pos lim) (unchecked-subtract-int lim pos) 0)
+            ^:mutable ^int written 0]
+        (try
+          (let [addressLen (.targetSocketAddress this target)
+                err (new int/1 1)
+                n (jdk.internal.jrt.HostChannels/send0 (IOUtil/fdVal fd)
+                                                       (.array bb)
+                                                       (unchecked-add-int (.arrayOffset bb) pos)
+                                                       rem
+                                                       (.bytes targetSockAddr)
+                                                       addressLen
+                                                       err)]
+            (when (== n jdk.internal.jrt.HostChannels/THROWN)
+              (throw (DatagramChannelImpl/datagramException (aget err 0))))
+            (set! written n))
+          (catch PortUnreachableException pue
+            (when (.isConnected this) (throw pue))
+            (set! written rem)))
+        (when (> written 0) (.position bb (unchecked-add-int pos written)))
+        written)))
+
+  (method ^:private tryClose :throws [IOException] ^boolean [this]
+    (java-assert (and (Thread/holdsLock stateLock) (== state ST_CLOSING)))
+    (if (and (and (== readerThread 0) (== writerThread 0)) (not (.isRegistered this)))
+        (do
+          (set! state ST_CLOSED)
+          ;; close socket (jdk26u's cleaner.clean(): releaserFor's nd.close)
+          (.close nd fd)
+          true)
+        false))
+
+  (method ^:private ^:static disconnect0 :throws [IOException] ^void [^FileDescriptor fd
+                                                                      ^boolean isIPv6]
+    (let [err (new int/1 1)]
+      (when (== (jdk.internal.jrt.HostChannels/disconnect0 (IOUtil/fdVal fd) isIPv6 err)
+                jdk.internal.jrt.HostChannels/THROWN)
+        (throw (jdk.internal.jrt.HostChannels/socketException (aget err 0) nil)))))
+
+  (j2g/cut ^:private ^:static ^:native receive0 :throws [IOException] ^int [^FileDescriptor fd
+                                                                            ^long address ^int len
+                                                                            ^long senderAddress
+                                                                            ^boolean connected])
+
+  (j2g/cut ^:private ^:static ^:native send0 :throws [IOException] ^int [^FileDescriptor fd
+                                                                         ^long address ^int len
+                                                                         ^long targetAddress
+                                                                         ^int targetAddressLen])
+
+  ;; DatagramChannelImpl.c's exceptions of receive0 and send0: ECONNREFUSED a PortUnreachableException
+  ;; (JNU_ThrowByName, no message), else handleSocketError's
+  (j2g/add (method ^:private ^:static datagramException ^IOException [^int errno]
+             (if (== errno jdk.internal.jrt.HostChannels/ECONNREFUSED)
+                 (PortUnreachableException.)
+                 (jdk.internal.jrt.HostChannels/socketException errno nil)))))

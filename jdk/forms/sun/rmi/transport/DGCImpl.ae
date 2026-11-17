@@ -1,0 +1,183 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/DGCImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport)
+
+(import '(java.io ObjectInputFilter
+                  ObjectInputFilter$Config
+                  ObjectInputFilter$FilterInfo
+                  ObjectInputFilter$Status)
+        '(java.rmi RemoteException)
+        '(java.rmi.dgc DGC Lease VMID)
+        '(java.rmi.server LogStream ObjID RemoteServer ServerNotActiveException UID)
+        '(java.security Security)
+        '(java.util ArrayList HashMap HashSet Iterator List Map Set)
+        '(java.util.concurrent Future ScheduledExecutorService TimeUnit)
+        '(sun.rmi.runtime Log RuntimeUtil)
+        '(sun.rmi.server UnicastRef UnicastServerRef Util))
+
+(defclass ^:final DGCImpl
+  :implements [DGC]
+
+  (field ^:static ^:final ^Log dgcLog
+    (Log/getLog "sun.rmi.dgc"
+                "dgc"
+                (LogStream/parseLevel (System/getProperty "sun.rmi.dgc.logLevel"))))
+
+  (field ^:private ^:static ^:final ^long leaseValue
+    (Long/getLong "java.rmi.dgc.leaseValue" 600000))
+
+  (field ^:private ^:static ^:final ^long leaseCheckInterval
+    (Long/getLong "sun.rmi.dgc.checkInterval" (unchecked-divide leaseValue 2)))
+
+  (field ^:private ^:static ^:final ^ScheduledExecutorService scheduler
+    (.getScheduler (RuntimeUtil/getInstance)))
+
+  (field ^:private ^:static ^DGCImpl dgc)
+
+  (field ^:private ^{:tag (Map VMID LeaseInfo)} leaseTable (HashMap.))
+
+  (field ^:private ^{:tag (Future ?)} checker nil)
+
+  (method ^:static getDGCImpl ^DGCImpl [] dgc)
+
+  (field ^:private ^:static ^:final ^String DGC_FILTER_PROPNAME "sun.rmi.transport.dgcFilter")
+
+  (field ^:private ^:static ^int DGC_MAX_DEPTH 5)
+
+  (field ^:private ^:static ^int DGC_MAX_ARRAY_SIZE 10000)
+
+  (field ^:private ^:static ^:final ^ObjectInputFilter dgcFilter (DGCImpl/initDgcFilter))
+
+  (method ^:private ^:static initDgcFilter ^ObjectInputFilter []
+    (let [^:mutable ^ObjectInputFilter filter nil
+          ^:mutable props (System/getProperty DGC_FILTER_PROPNAME)]
+      (when (nil? props) (set! props (Security/getProperty DGC_FILTER_PROPNAME)))
+      (when (some? props)
+        (set! filter (ObjectInputFilter$Config/createFilter props))
+        (when (.isLoggable dgcLog Log/BRIEF)
+          (.log dgcLog Log/BRIEF (java-str "dgcFilter = " filter))))
+      filter))
+
+  (constructor ^:private [this])
+
+  (method ^:public dirty ^Lease [this ^ObjID/1 ids ^long sequenceNum ^:mutable ^Lease lease]
+    (let [^:mutable vmid (.getVMID lease)
+          duration leaseValue]
+      (when (.isLoggable dgcLog Log/VERBOSE) (.log dgcLog Log/VERBOSE (java-str "vmid = " vmid)))
+      (when (nil? vmid)
+        (set! vmid (VMID.))
+        (when (.isLoggable dgcLog Log/BRIEF)
+          (let [^:mutable ^String clientHost nil]
+            (try
+              (set! clientHost (RemoteServer/getClientHost))
+              (catch ServerNotActiveException e (set! clientHost "<unknown host>")))
+            (.log dgcLog Log/BRIEF (java-str " assigning vmid " vmid " to client " clientHost)))))
+      (set! lease (Lease. vmid duration))
+      (locking leaseTable
+        (let [info (cast LeaseInfo (.get leaseTable vmid))]
+          (if (nil? info)
+              (do
+                (.put leaseTable vmid (LeaseInfo. vmid duration))
+                (when (nil? checker)
+                  (set! checker
+                        (.scheduleWithFixedDelay
+                          scheduler
+                          (anon Runnable []
+                            (method ^:public run ^void [this] (.checkLeases DGCImpl/this)))
+                          leaseCheckInterval
+                          leaseCheckInterval
+                          TimeUnit/MILLISECONDS))))
+              (.renew info duration))))
+      (for-each [^ObjID id ids]
+        (when (.isLoggable dgcLog Log/VERBOSE)
+          (.log dgcLog Log/VERBOSE (java-str "id = " id ", vmid = " vmid ", duration = " duration)))
+        (ObjectTable/referenced id sequenceNum vmid))
+      lease))
+
+  (method ^:public clean ^void [this ^ObjID/1 ids ^long sequenceNum ^VMID vmid ^boolean strong]
+    (for-each [^ObjID id ids]
+      (when (.isLoggable dgcLog Log/VERBOSE)
+        (.log dgcLog Log/VERBOSE (java-str "id = " id ", vmid = " vmid ", strong = " strong)))
+      (ObjectTable/unreferenced id sequenceNum vmid strong)))
+
+  (method registerTarget ^void [this ^VMID vmid ^Target target]
+    (locking leaseTable
+      (let [info (cast LeaseInfo (.get leaseTable vmid))]
+        (if (nil? info) (.vmidDead target vmid) (.add (.-notifySet info) target)))))
+
+  (method unregisterTarget ^void [this ^VMID vmid ^Target target]
+    (locking leaseTable
+      (let [info (cast LeaseInfo (.get leaseTable vmid))]
+        (when (some? info) (.remove (.-notifySet info) target)))))
+
+  (method ^:private checkLeases ^void [this]
+    (let [time (System/currentTimeMillis)
+          ^{:tag (List LeaseInfo)} toUnregister (ArrayList.)]
+      (locking leaseTable
+        (let [^{:tag (Iterator LeaseInfo)} iter (.iterator (.values leaseTable))]
+          (while (.hasNext iter)
+            (let [info (cast LeaseInfo (.next iter))]
+              (when (.expired info time) (.add toUnregister info) (.remove iter))))
+          (when (.isEmpty leaseTable) (.cancel checker false) (set! checker nil))))
+      (for-each [^LeaseInfo info toUnregister]
+        (for-each [^Target target (.-notifySet info)] (.vmidDead target (.-vmid info))))))
+
+  (static-initializer (DGCImpl/exportSingleton))
+
+  (method ^:private ^:static exportSingleton ^void []
+    (let [savedCcl (.getContextClassLoader (Thread/currentThread))]
+      (try
+        (.setContextClassLoader (Thread/currentThread) (ClassLoader/getSystemClassLoader))
+        (try
+          (set! dgc (DGCImpl.))
+          (let [dgcID (ObjID. ObjID/DGC_ID)
+                ref (LiveRef. dgcID 0)
+                disp (UnicastServerRef. ref (method-ref ObjectInputFilter DGCImpl/checkInput))
+                stub (Util/createProxy DGCImpl (UnicastRef. ref) true)]
+            (.setSkeleton disp dgc)
+            (let [target (Target. dgc disp stub dgcID true)] (ObjectTable/putTarget target)))
+          (catch RemoteException e (throw (Error. "exception initializing server-side DGC" e))))
+        (finally (.setContextClassLoader (Thread/currentThread) savedCcl)))))
+
+  (method ^:private ^:static checkInput ^ObjectInputFilter$Status [^ObjectInputFilter$FilterInfo filterInfo]
+    (when (some? dgcFilter)
+      (let [status (.checkInput dgcFilter filterInfo)]
+        (when-not (identical? status ObjectInputFilter$Status/UNDECIDED) (return status))))
+    (if (> (.depth filterInfo) DGC_MAX_DEPTH)
+        ObjectInputFilter$Status/REJECTED
+        (let [^:mutable ^{:tag (Class ?)} clazz (.serialClass filterInfo)]
+          (if (some? clazz)
+              (do
+                (while (.isArray clazz)
+                  (when (and (>= (.arrayLength filterInfo) 0)
+                             (> (.arrayLength filterInfo) DGC_MAX_ARRAY_SIZE))
+                    (return ObjectInputFilter$Status/REJECTED))
+                  (set! clazz (.getComponentType clazz)))
+                (cond
+                  (.isPrimitive clazz) ObjectInputFilter$Status/ALLOWED
+                  (or (or (or (identical? clazz ObjID) (identical? clazz UID))
+                          (identical? clazz VMID))
+                      (identical? clazz Lease))
+                    ObjectInputFilter$Status/ALLOWED
+                  :else ObjectInputFilter$Status/REJECTED))
+              ObjectInputFilter$Status/UNDECIDED))))
+
+  (defclass ^:private ^:static LeaseInfo
+    (field ^VMID vmid)
+
+    (field ^long expiration)
+
+    (field ^{:tag (Set Target)} notifySet (HashSet.))
+
+    (constructor [this ^VMID vmid ^long lease]
+      (set! (.-vmid this) vmid)
+      (set! expiration (unchecked-add (System/currentTimeMillis) lease)))
+
+    (method ^:synchronized renew ^void [this ^long lease]
+      (let [newExpiration (unchecked-add (System/currentTimeMillis) lease)]
+        (when (> newExpiration expiration) (set! expiration newExpiration))))
+
+    (method expired ^boolean [this ^long time]
+      (if (< expiration time)
+          (do (when (.isLoggable dgcLog Log/BRIEF) (.log dgcLog Log/BRIEF (.toString vmid))) true)
+          false))))

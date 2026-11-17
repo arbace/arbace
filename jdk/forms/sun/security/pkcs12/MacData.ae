@@ -1,0 +1,215 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/pkcs12/MacData.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.pkcs12)
+
+(import '(java.io IOException)
+        '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        UnrecoverableKeyException)
+        '(java.security.spec InvalidKeySpecException)
+        '(java.util Locale)
+        '(javax.crypto Mac SecretKey SecretKeyFactory)
+        '(javax.crypto.spec PBEKeySpec PBEParameterSpec)
+        '(sun.security.pkcs ParsingException)
+        '(sun.security.util Debug
+                            DerInputStream
+                            DerOutputStream
+                            DerValue
+                            KeyUtil
+                            KnownOIDs
+                            ObjectIdentifier)
+        '(sun.security.x509 AlgorithmId))
+
+(defclass MacData
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "pkcs12"))
+
+  (field ^:private ^:final ^String macAlgorithm)
+
+  (field ^:private ^:final ^byte/1 digest)
+
+  (field ^:private ^:final ^byte/1 macSalt)
+
+  (field ^:private ^:final ^int iterations)
+
+  (field ^:private ^:final ^int keyLength)
+
+  (field ^:private ^:final ^String kdfHmac)
+
+  (field ^:private ^:final ^String hmac)
+
+  (constructor :throws [IOException] [this ^DerInputStream derin]
+    (let [macData (.getSequence derin 2)]
+      (when (or (< (alength macData) 2) (> (alength macData) 3))
+        (throw (ParsingException. "Invalid length for MacData")))
+      (let [digestIn (DerInputStream. (.toByteArray (aget macData 0)))
+            digestInfo (.getSequence digestIn 2)]
+        (when-not (== (alength digestInfo) 2)
+          (throw (ParsingException. "Invalid length for DigestInfo")))
+        (let [digestAlgorithmId (AlgorithmId/parse (aget digestInfo 0))
+              digestAlgorithmName (.getName digestAlgorithmId)]
+          (set! (.-digest this) (.getOctetString (aget digestInfo 1)))
+          (if (.equals digestAlgorithmName "PBMAC1")
+              (let [^:mutable ^PBMAC1Parameters algParams nil]
+                (set! algParams (PBMAC1Parameters. (.getEncodedParams digestAlgorithmId)))
+                (set! (.-iterations this) (.getIterationCount (.getKdfParams algParams)))
+                (set! (.-macSalt this) (.getSalt (.getKdfParams algParams)))
+                (set! (.-kdfHmac this) (.getPrfAlgo (.getKdfParams algParams)))
+                (set! (.-keyLength this) (.getKeyLength (.getKdfParams algParams)))
+                (when (== (.-keyLength this) -1)
+                  (throw (IOException. "error: missing keyLength field")))
+                (set! (.-hmac this) (.getHmac algParams))
+                (set! (.-macAlgorithm this)
+                      (java-str "pbewith" (.-kdfHmac this) "and" (.-hmac this))))
+              (do
+                (set! (.-kdfHmac this) nil)
+                (set! (.-hmac this) nil)
+                (set! (.-keyLength this) -1)
+                (set! (.-macSalt this) (.getOctetString (aget macData 1)))
+                (if (> (alength macData) 2)
+                    (set! (.-iterations this) (.getInteger (aget macData 2)))
+                    (set! (.-iterations this) 1))
+                (set! (.-macAlgorithm this)
+                      (java-str "hmacpbe" (.replace digestAlgorithmName "-" "")))))))))
+
+  (method ^:private ^:static calculateMac :throws [InvalidAlgorithmParameterException
+                                                   InvalidKeyException
+                                                   InvalidKeySpecException
+                                                   NoSuchAlgorithmException] ^byte/1 [^String macAlgorithm
+                                                                                      ^char/1 password
+                                                                                      ^PBEParameterSpec params
+                                                                                      ^byte/1 data
+                                                                                      ^String kdfHmac
+                                                                                      ^String hmac
+                                                                                      ^int keyLength]
+    (let [^:mutable ^SecretKeyFactory skf nil
+          ^:mutable ^SecretKey pbeKey nil
+          ^:mutable ^Mac m nil
+          ^:mutable ^PBEKeySpec keySpec nil]
+      (if (.startsWith macAlgorithm "pbewith")
+          (do
+            (set! m (Mac/getInstance hmac))
+            (let [^int len (if (== keyLength -1)
+                               (unchecked-multiply-int (.getMacLength m) 8)
+                               keyLength)]
+              (set! skf (SecretKeyFactory/getInstance (java-str "PBKDF2With" kdfHmac)))
+              (set! keySpec
+                    (PBEKeySpec. password (.getSalt params) (.getIterationCount params) len))))
+          (do
+            (set! m (Mac/getInstance macAlgorithm))
+            (set! skf (SecretKeyFactory/getInstance "PBE"))
+            (set! keySpec (PBEKeySpec. password))))
+      (try
+        (set! pbeKey (.generateSecret skf keySpec))
+        (if (.startsWith macAlgorithm "pbewith") (.init m pbeKey) (.init m pbeKey params))
+        (.update m data)
+        (.doFinal m)
+        (finally (.clearPassword keySpec) (KeyUtil/destroySecretKeys pbeKey)))))
+
+  (method verifyMac :throws [InvalidAlgorithmParameterException
+                             InvalidKeyException
+                             InvalidKeySpecException
+                             NoSuchAlgorithmException
+                             UnrecoverableKeyException] ^void [this ^char/1 password ^byte/1 data]
+    (let [macResult (MacData/calculateMac (.-macAlgorithm this)
+                                          password
+                                          (PBEParameterSpec. (.-macSalt this) (.-iterations this))
+                                          data
+                                          (.-kdfHmac this)
+                                          (.-hmac this)
+                                          (.-keyLength this))]
+      (when (some? debug)
+        (.println debug
+                  (java-str "Checking keystore integrity ("
+                            (.-macAlgorithm this)
+                            " iterations: "
+                            (.-iterations this)
+                            ")")))
+      (when-not (MessageDigest/isEqual (.-digest this) macResult)
+        (throw (UnrecoverableKeyException. "Failed PKCS12 integrity checking")))))
+
+  (method ^:static generateMac :throws [IOException NoSuchAlgorithmException] ^byte/1 [^char/1 passwd
+                                                                                       ^byte/1 data
+                                                                                       ^:mutable ^String macAlgorithm
+                                                                                       ^int macIterationCount
+                                                                                       ^byte/1 salt]
+    (let [^:mutable ^PBEParameterSpec params nil
+          ^:mutable ^String algName nil
+          ^:mutable ^String kdfHmac nil
+          ^:mutable ^String hmac nil]
+      (set! macAlgorithm (.toLowerCase macAlgorithm Locale/ENGLISH))
+      (cond
+        (.startsWith macAlgorithm "pbewith")
+          (do
+            (set! algName "PBMAC1")
+            (set! kdfHmac (MacData/parseKdfHmac macAlgorithm))
+            (set! hmac (MacData/parseHmac macAlgorithm))
+            (when (nil? hmac) (set! hmac kdfHmac)))
+        (.startsWith macAlgorithm "hmacpbe")
+          (do
+            (set! algName (.substring macAlgorithm 7))
+            (set! kdfHmac nil)
+            (set! hmac macAlgorithm))
+        :else (throw (ParsingException. (java-str "unexpected algorithm '" macAlgorithm "'"))))
+      (set! params (PBEParameterSpec. salt macIterationCount))
+      (try
+        (let [macResult (MacData/calculateMac macAlgorithm passwd params data kdfHmac hmac -1)
+              bytes (DerOutputStream.)]
+          (.write bytes (MacData/encode algName macResult params kdfHmac hmac (alength macResult)))
+          (.toByteArray bytes))
+        (catch [InvalidKeySpecException InvalidKeyException InvalidAlgorithmParameterException] e
+          (throw (IOException. (java-str "calculateMac failed: " e) e))))))
+
+  (method getMacAlgorithm ^String [this] (.-macAlgorithm this))
+
+  (method getIterations ^int [this] (.-iterations this))
+
+  (method ^:static encode :throws [IOException NoSuchAlgorithmException] ^byte/1 [^String algName
+                                                                                  ^byte/1 digest
+                                                                                  ^PBEParameterSpec p
+                                                                                  ^String kdfHmac
+                                                                                  ^String hmac
+                                                                                  ^int keyLength]
+    (let [iterations (.getIterationCount p)
+          macSalt (.getSalt p)
+          tmp (DerOutputStream.)
+          out (DerOutputStream.)]
+      (if (.equals algName "PBMAC1")
+          (let [tmp1 (DerOutputStream.)
+                tmp2 (DerOutputStream.)]
+            (.putOID tmp2 (ObjectIdentifier/of KnownOIDs/PBMAC1))
+            (.writeBytes tmp2 (PBMAC1Parameters/encode macSalt iterations keyLength kdfHmac hmac))
+            (.write tmp1 DerValue/tag_Sequence tmp2)
+            (.putOctetString tmp1 digest)
+            (.write tmp DerValue/tag_Sequence tmp1)
+            (.putOctetString tmp
+                             (new byte/1
+                                  [(unchecked-byte \N)
+                                   (unchecked-byte \O)
+                                   (unchecked-byte \T)
+                                   (unchecked-byte \space)
+                                   (unchecked-byte \U)
+                                   (unchecked-byte \S)
+                                   (unchecked-byte \E)
+                                   (unchecked-byte \D)]))
+            (.putInteger tmp 1))
+          (let [digestAlgorithm (AlgorithmId/get algName)
+                tmp2 (DerOutputStream.)]
+            (.write tmp2 digestAlgorithm)
+            (.putOctetString tmp2 digest)
+            (.write tmp DerValue/tag_Sequence tmp2)
+            (.putOctetString tmp macSalt)
+            (.putInteger tmp iterations)))
+      (.write out DerValue/tag_Sequence tmp)
+      (.toByteArray out)))
+
+  (method ^:private ^:static parseKdfHmac ^String [^String text]
+    (let [index1 (unchecked-add-int (.indexOf text "with") 4)
+          index2 (.indexOf text "and")]
+      (when-not (== index1 3)
+        (if (== index2 -1) (.substring text index1) (.substring text index1 index2)))))
+
+  (method ^:private ^:static parseHmac ^String [^String text]
+    (let [index1 (unchecked-add-int (.indexOf text "and") 3)]
+      (when-not (== index1 2) (.substring text index1)))))

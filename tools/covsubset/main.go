@@ -2,8 +2,9 @@
 // Arbace's cover build (bin/arbace-go --gate-build --cover) turned into block sets per test, and those reduced to a
 // subset reaching the same blocks.
 //
-//	covsubset blocks -go GO -pkgs FILE [-exclude REGEX] -o OUT [-j N] DIR...
-//	    each DIR a test's GOCOVERDIR (bin/lib/cover.bash's cover_env: its id in DIR/id), turned into text by
+//	covsubset blocks -go GO -pkgs FILE [-exclude REGEX] -o OUT [-j N] [-dirs LIST] DIR...
+//	    each DIR (and each line of LIST: bin/cover's, one invocation for every test of a run, since xargs split
+//	    a corpus's 3,321 directories into two runs, the second's tests.tsv overwriting the first's) a test's GOCOVERDIR (bin/lib/cover.bash's cover_env: its id in DIR/id), turned into text by
 //	    `GO tool covdata textfmt -pkg` (the import paths of FILE, one a line: a crop's code under check), its
 //	    covered blocks (count above zero) written to OUT/blocks/N.txt as textfmt lines (FILE:SL.SC,EL.EC NSTMT 1,
 //	    the reducer's profile), N the test's number, but the blocks of the source files -exclude matches (no code
@@ -56,9 +57,23 @@ func blocks(args []string) {
 	out := fs.String("o", "", "the output directory")
 	jobs := fs.Int("j", 8, "textfmt runs at once")
 	exclude := fs.String("exclude", "", "the source files whose blocks are left out (a regexp)")
+	dirsf := fs.String("dirs", "", "a file of the directories, one a line (before the arguments')")
 	fs.Parse(args)
-	if *pkgsf == "" || *out == "" || fs.NArg() == 0 {
-		die("usage: covsubset blocks -go GO -pkgs FILE -o OUT [-j N] DIR...")
+	var dirs []string
+	if *dirsf != "" {
+		db, err := os.ReadFile(*dirsf)
+		if err != nil {
+			die("%v", err)
+		}
+		for _, l := range strings.Split(string(db), "\n") {
+			if l != "" {
+				dirs = append(dirs, l)
+			}
+		}
+	}
+	dirs = append(dirs, fs.Args()...)
+	if *pkgsf == "" || *out == "" || len(dirs) == 0 {
+		die("usage: covsubset blocks -go GO -pkgs FILE -o OUT [-j N] [-dirs LIST] DIR...")
 	}
 	pb, err := os.ReadFile(*pkgsf)
 	if err != nil {
@@ -75,7 +90,6 @@ func blocks(args []string) {
 	if err := os.MkdirAll(filepath.Join(*out, "blocks"), 0o755); err != nil {
 		die("%v", err)
 	}
-	dirs := fs.Args()
 	res := make([]result, len(dirs))
 	// every block of the packages, from the first full profile: FILE -> blocks
 	var mu sync.Mutex

@@ -1,0 +1,213 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/spi/DefaultProxySelector.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.spi)
+
+(import '(java.io IOException)
+        '(java.net InetSocketAddress Proxy Proxy$Type ProxySelector SocketAddress URI)
+        '(java.util Collections List Locale StringJoiner)
+        '(java.util.function Function)
+        '(java.util.regex Pattern)
+        '(java.util.stream Collectors Stream)
+        '(jdk.internal.loader BootLoader)
+        '(sun.net NetProperties SocksProxy))
+
+(defclass ^:public DefaultProxySelector
+  :extends ProxySelector
+
+  (field ^:static ^:final ^String/2 props
+    (new String/2
+         [["http" "http.proxy" "proxy" "socksProxy"]
+          ["https" "https.proxy" "proxy" "socksProxy"]
+          ["ftp" "ftp.proxy" "ftpProxy" "proxy" "socksProxy"]
+          ["socket" "socksProxy"]]))
+
+  (field ^:private ^:static ^:final ^String SOCKS_PROXY_VERSION "socksProxyVersion")
+
+  (field ^:private ^:static ^boolean hasSystemProxies false)
+
+  (field ^:private ^:static ^:final ^{:tag (List Proxy)} NO_PROXY_LIST (List/of Proxy/NO_PROXY))
+
+  (static-initializer
+    (let [^:const key "java.net.useSystemProxies"
+          b (NetProperties/getBoolean key)]
+      (when (and (some? b) (.booleanValue b))
+        (BootLoader/loadLibrary "net")
+        (set! hasSystemProxies (DefaultProxySelector/init)))))
+
+  (method ^:public ^:static socksProxyVersion ^int []
+    (NetProperties/getInteger SOCKS_PROXY_VERSION 5))
+
+  (defclass ^:static NonProxyInfo
+    (field ^:static ^:final ^String defStringVal "localhost|127.*|[::1]|0.0.0.0|[::0]")
+
+    (field ^String hostsSource)
+
+    (field ^Pattern pattern)
+
+    (field ^:final ^String property)
+
+    (field ^:final ^String defaultVal)
+
+    (field ^:static ^NonProxyInfo ftpNonProxyInfo
+      (NonProxyInfo. "ftp.nonProxyHosts" nil nil defStringVal))
+
+    (field ^:static ^NonProxyInfo httpNonProxyInfo
+      (NonProxyInfo. "http.nonProxyHosts" nil nil defStringVal))
+
+    (field ^:static ^NonProxyInfo socksNonProxyInfo
+      (NonProxyInfo. "socksNonProxyHosts" nil nil defStringVal))
+
+    (constructor [this ^String p ^String s ^Pattern pattern ^String d]
+      (set! property p)
+      (set! hostsSource s)
+      (set! (.-pattern this) pattern)
+      (set! defaultVal d)))
+
+  (method ^:public select ^{:tag (List Proxy)} [this ^URI uri]
+    (when (nil? uri) (throw (IllegalArgumentException. "URI can't be null.")))
+    (let [protocol (.getScheme uri)
+          ^:mutable host (.getHost uri)]
+      (when (nil? host)
+        (let [^:mutable auth (.getAuthority uri)]
+          (when (some? auth)
+            (let [^:mutable ^int i 0]
+              (set! i (.indexOf auth \@))
+              (when (>= i 0) (set! auth (.substring auth (unchecked-add-int i 1))))
+              (set! i (.lastIndexOf auth \:))
+              (when (>= i 0) (set! auth (.substring auth 0 i)))
+              (set! host auth)))))
+      (when (or (nil? protocol) (nil? host))
+        (throw (IllegalArgumentException. (java-str "protocol = " protocol " host = " host))))
+      (let [^:mutable ^NonProxyInfo nonProxyInfo nil]
+        (cond
+          (.equalsIgnoreCase "http" protocol) (set! nonProxyInfo NonProxyInfo/httpNonProxyInfo)
+          (.equalsIgnoreCase "https" protocol) (set! nonProxyInfo NonProxyInfo/httpNonProxyInfo)
+          (.equalsIgnoreCase "ftp" protocol) (set! nonProxyInfo NonProxyInfo/ftpNonProxyInfo)
+          (.equalsIgnoreCase "socket" protocol) (set! nonProxyInfo NonProxyInfo/socksNonProxyInfo))
+        (let [urlhost (.toLowerCase host Locale/ROOT)
+              proxyArray (.determineProxies this urlhost protocol nonProxyInfo)]
+          (if (some? proxyArray)
+              (cast List
+                    (.collect (.distinct (Stream/of proxyArray))
+                              (Collectors/collectingAndThen
+                                (Collectors/toList)
+                                (method-ref Function ^List [List] Collections/unmodifiableList))))
+              NO_PROXY_LIST)))))
+
+  (method ^:private determineProxies ^Proxy/1 [this ^:final ^String urlhost ^:final ^String protocol
+                                               ^:final ^NonProxyInfo nonProxyInfo]
+    (let [^:mutable ^int i 0
+          ^:mutable ^int j 0
+          ^:mutable ^String phost nil
+          ^:mutable ^int pport 0
+          ^:mutable ^String nphosts nil
+          ^:mutable ^InetSocketAddress saddr nil]
+      (set! i 0)
+      (while (< i (alength props))
+        (when (.equalsIgnoreCase (aget props i 0) protocol)
+          (set! j 1)
+          (while (< j (alength (aget props i)))
+            (set! phost (NetProperties/get (java-str (aget props i j) "Host")))
+            (when (and (some? phost) (not (== (.length phost) 0))) (break))
+            (set! j (unchecked-inc-int j)))
+          (when (or (nil? phost) (.isEmpty phost))
+            (when hasSystemProxies
+              (let [^String sproto (if (.equalsIgnoreCase protocol "socket") "socks" protocol)]
+                (return (.getSystemProxies this sproto urlhost))))
+            (return nil))
+          (when (some? nonProxyInfo)
+            (set! nphosts (NetProperties/get (.-property nonProxyInfo)))
+            (locking nonProxyInfo
+              (if (nil? nphosts)
+                  (if (some? (.-defaultVal nonProxyInfo))
+                      (set! nphosts (.-defaultVal nonProxyInfo))
+                      (do
+                        (set! (.-hostsSource nonProxyInfo) nil)
+                        (set! (.-pattern nonProxyInfo) nil)))
+                  (when-not (.isEmpty nphosts)
+                    (set! nphosts (java-str nphosts (java-str "|" NonProxyInfo/defStringVal)))))
+              (when (some? nphosts)
+                (when-not (.equals nphosts (.-hostsSource nonProxyInfo))
+                  (set! (.-pattern nonProxyInfo) (DefaultProxySelector/toPattern nphosts))
+                  (set! (.-hostsSource nonProxyInfo) nphosts)))
+              (when (DefaultProxySelector/shouldNotUseProxyFor (.-pattern nonProxyInfo) urlhost)
+                (return nil))))
+          (set! pport (.intValue (NetProperties/getInteger (java-str (aget props i j) "Port") 0)))
+          (when (and (== pport 0) (< j (unchecked-subtract-int (alength (aget props i)) 1)))
+            (loop [^int k 1]
+              (if (< k (unchecked-subtract-int (alength (aget props i)) 1))
+                  (if (and (not (== k j)) (== pport 0))
+                      (do
+                        (set! pport
+                              (.intValue (NetProperties/getInteger
+                                           (java-str (aget props i k) "Port")
+                                           0)))
+                        (recur (unchecked-inc-int k)))
+                      (recur (unchecked-inc-int k)))
+                  nil)))
+          (when (== pport 0)
+            (if (== j (unchecked-subtract-int (alength (aget props i)) 1))
+                (set! pport (.defaultPort this "socket"))
+                (set! pport (.defaultPort this protocol))))
+          (set! saddr (InetSocketAddress/createUnresolved phost pport))
+          (when (== j (unchecked-subtract-int (alength (aget props i)) 1))
+            (return (new Proxy/1
+                         [(SocksProxy/create saddr (DefaultProxySelector/socksProxyVersion))])))
+          (return (new Proxy/1 [(Proxy. Proxy$Type/HTTP saddr)])))
+        (set! i (unchecked-inc-int i)))
+      nil))
+
+  (method ^:public connectFailed ^void [this ^URI uri ^SocketAddress sa ^IOException ioe]
+    (when (or (or (nil? uri) (nil? sa)) (nil? ioe))
+      (throw (IllegalArgumentException. "Arguments can't be null."))))
+
+  (method ^:private defaultPort ^int [this ^String protocol]
+    (cond
+      (.equalsIgnoreCase "http" protocol) 80
+      (.equalsIgnoreCase "https" protocol) 443
+      (.equalsIgnoreCase "ftp" protocol) 80
+      (.equalsIgnoreCase "socket" protocol) 1080
+      :else -1))
+
+  (method ^:private ^:static ^:native init ^boolean [])
+
+  (method ^:private ^:synchronized ^:native getSystemProxies ^Proxy/1 [this ^String protocol
+                                                                       ^String host])
+
+  (method ^:static shouldNotUseProxyFor ^boolean [^Pattern pattern ^String urlhost]
+    (if (or (nil? pattern) (.isEmpty urlhost))
+        false
+        (let [matches (.matches (.matcher pattern urlhost))] matches)))
+
+  (method ^:static toPattern ^Pattern [^String mask]
+    (let [^:mutable disjunctionEmpty true
+          joiner (StringJoiner. "|")]
+      (for-each [^String disjunct (.split mask "\\|")]
+        (when-not (.isEmpty disjunct)
+          (set! disjunctionEmpty false)
+          (let [regex (DefaultProxySelector/disjunctToRegex (.toLowerCase disjunct Locale/ROOT))]
+            (.add joiner regex))))
+      (when-not disjunctionEmpty (Pattern/compile (.toString joiner)))))
+
+  (method ^:static disjunctToRegex ^String [^String disjunct]
+    (let [^String regex (cond
+                          (.equals disjunct "*") ".*"
+                          (and (.startsWith disjunct "*") (.endsWith disjunct "*"))
+                            (java-str ".*"
+                                      (Pattern/quote
+                                        (.substring
+                                          disjunct
+                                          1
+                                          (unchecked-subtract-int (.length disjunct) 1)))
+                                      ".*")
+                          (.startsWith disjunct "*")
+                            (java-str ".*" (Pattern/quote (.substring disjunct 1)))
+                          (.endsWith disjunct "*")
+                            (java-str (Pattern/quote
+                                        (.substring
+                                          disjunct
+                                          0
+                                          (unchecked-subtract-int (.length disjunct) 1)))
+                                      ".*")
+                          :else (Pattern/quote disjunct))]
+      regex)))

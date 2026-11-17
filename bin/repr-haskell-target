@@ -1,0 +1,97 @@
+#!/bin/bash
+# The configure answers on Arbace's C target (HFS-I2 (a); HFS-I9 (b), the user 2026-11-08: the --full step haskell-target-probe,
+# keyed on what it reads alone, so that it runs only when arbace.repr.haskell.configure, the committed answers, musl's pin or C's
+# tools change). Apart from bin/repr-haskell so that its key is its own (doc/haskell/FRONTEND-SURVEY.md, "As built: HFS-I9 (b),
+# HFS-I11 (a)"); bin/repr-haskell's `target probe` and target_src run it.
+#
+#   src                 the tarball's parts the derivation and the probe read (corpus-ghc-9.14.1.edn's :tarball: the main checkout's
+#                       in a worktree or the clean clone, haskell_take; fetched when absent in the main checkout; checked by its
+#                       SHA-256), extracted once into .tmp/repr-haskell/target/src, and musl's tree prepared (bin/ci musl prepare);
+#                       prints TSRC and TMUSL, one a line
+#   probe [--verify]    the answers: the checks' plan (arbace.repr.haskell.configure plan: each check's kind from its autoheader
+#                       comment or a rule), the compile tests by ci's checker (bin/ci diagnose), the types by bin/ci annot, the value
+#                       programs by bin/ci run, then the answers into test/haskell/target/answers.edn (--verify: into scratch,
+#                       compared with the committed file, exit 1 on a difference). About an hour, one process, under 2 GiB;
+#                       first the negative control (controls), so that a flipped answer fails it in a minute
+#   controls            HFS-I12 (a): the two planted compile tests of test/haskell/target/controls/ (REPR_HASKELL_CONTROLS names
+#                       another directory, the tests'), through bin/ci diagnose as the probe runs the 308: control-no.c must be
+#                       answered "no" (a diagnostic on it) and control-yes.c "yes" (none), else exit 1 naming the flipped one
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+. "$root/bin/lib/repr-haskell/inputs.bash"
+rh=$root/.tmp/repr-haskell
+# the tarball's parts arbace.repr.haskell.target and .configure read
+tsrc_paths="rts utils/hsc2hs utils/deriveConstants mk/system-cxx-std-lib-1.0.conf.in compiler/ghc.cabal.in utils/ghc-toolchain/ghc-toolchain.cabal utils/haddock/haddock-api/haddock-api.cabal utils/haddock/haddock-library/haddock-library.cabal libraries"
+
+src() {
+  export ARBACE_REPO=$root
+  local f=$root/test/haskell/corpus-ghc-9.14.1.edn url sha name tb d=$rh/target
+  read -r url sha name <<< "$(arbace_tool -e "(let [t (:tarball (read-string (slurp \"$f\")))] (println (:url t) (:sha256 t) (:root t)))")"
+  tb=$rh/corpus/$(basename "$url")
+  mkdir -p "$rh/corpus" "$d"
+  (
+    flock 8
+    if [ ! -f "$tb" ] && ! haskell_take "$tb"; then
+      echo "== repr-haskell: fetching $url" >&2
+      curl -fsSL -o "$tb.part" "$url" && mv "$tb.part" "$tb"
+    fi
+  ) 8> "$rh/corpus/fetch.lock"
+  [ "$(sha256sum < "$tb" | cut -c1-64)" = "$sha" ] || { echo "repr-haskell: $tb: SHA-256 differs from the corpus's $sha" >&2; return 1; }
+  if [ ! -f "$d/src.extracted" ] || [ "$(cat "$d/src.extracted")" != "$sha $tsrc_paths" ]; then
+    rm -rf "$d/src"; mkdir -p "$d/src"
+    # shellcheck disable=SC2086
+    tar -xJf "$tb" -C "$d/src" $(for p in $tsrc_paths; do echo "$name/$p"; done)
+    echo "$sha $tsrc_paths" > "$d/src.extracted"
+  fi
+  TSRC=$d/src/$name
+  # musl's tree (C's: its tarball by its pin, extracted and its headers derived without a compiler)
+  "$root/bin/ci" musl prepare > "$TMPDIR/repr-haskell-musl.txt" 2>&1 || { cat "$TMPDIR/repr-haskell-musl.txt" >&2; return 1; }
+  TMUSL=$root/.tmp/ci-musl/musl-1.2.6
+}
+
+controls() {
+  local c=${REPR_HASKELL_CONTROLS:-$root/test/haskell/target/controls} w=$rh/target/controls bad=0
+  w=$rh/target/controls; rm -rf "$w"; mkdir -p "$w"
+  [ -f "$c/control-no.c" ] && [ -f "$c/control-yes.c" ] || { echo "repr-haskell target controls: $c lacks control-no.c or control-yes.c" >&2; return 1; }
+  cp "$c/control-no.c" "$c/control-yes.c" "$w/"
+  "$root/bin/ci" diagnose "$w/control-no.c" "$w/control-yes.c" > "$w/diagnose.out" 2>&1 || true
+  # (the probe's reading: configure's compile-errors, a FILE.c:LINE: line)
+  local got_no=yes got_yes=yes
+  grep -Eq "^(.*/)?control-no\.c:[0-9]+:" "$w/diagnose.out" && got_no=no
+  grep -Eq "^(.*/)?control-yes\.c:[0-9]+:" "$w/diagnose.out" && got_yes=no
+  [ "$got_no" = no ] || { echo "repr-haskell target controls: control-no.c was answered yes (it must be no)" >&2; bad=1; }
+  [ "$got_yes" = yes ] || { echo "repr-haskell target controls: control-yes.c was answered no (it must be yes)" >&2; bad=1; }
+  [ $bad = 0 ] || return 1
+  echo "repr-haskell target controls: control-no.c answered no, control-yes.c answered yes"
+}
+
+probe() {
+  controls || return 1
+  src || return 1
+  local w=$rh/target/probe out=$root/test/haskell/target/answers.edn p
+  [ "${1:-}" = --verify ] && out=$w/answers.edn
+  rm -rf "$w"; mkdir -p "$w"
+  arbace_tool -m arbace.repr.haskell.configure plan "$w" --src "$TSRC" --musl "$TMUSL" | tee "$w/plan.log"
+  if grep -q "no rule for" "$w/plan.log"; then echo "repr-haskell target probe: a check without a rule" >&2; return 1; fi
+  "$root/bin/ci" diagnose -I"$TSRC/libraries/ghc-internal/include" "$w"/compile/*.c > "$w/compile.out" 2>&1 || true
+  for p in "$w"/types/*.c; do "$root/bin/ci" annot -I"$TSRC/libraries/ghc-internal/include" "$p" > "${p%.c}.out" 2>&1 || true; done
+  arbace_tool -m arbace.repr.haskell.configure programs "$w" --src "$TSRC" --musl "$TMUSL"
+  . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold > "$w/musl.log" 2>&1 || { tail -5 "$w/musl.log" >&2; return 1; }
+  for p in "$w"/run/*.c; do
+    "$root/bin/ci" run -I"$TSRC/libraries/ghc-internal/include" "$p" > "${p%.c}.out" 2> "${p%.c}.err" || { echo "repr-haskell target probe: $p failed (${p%.c}.err)" >&2; return 1; }
+  done
+  arbace_tool -m arbace.repr.haskell.configure answers "$w" --src "$TSRC" --musl "$TMUSL" --forms "$root/.tmp/ci-musl/forms" --out "$out"
+  if [ "${1:-}" = --verify ]; then
+    if cmp -s "$out" "$root/test/haskell/target/answers.edn"; then echo "repr-haskell target probe --verify: the answers as committed"
+    else diff "$root/test/haskell/target/answers.edn" "$out" | head -20; echo "repr-haskell target probe --verify: the answers differ" >&2; return 1; fi
+  fi
+}
+
+case ${1:-} in
+  src) src && printf '%s\n%s\n' "$TSRC" "$TMUSL" ;;
+  probe) shift; probe "$@" ;;
+  controls) controls ;;
+  *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

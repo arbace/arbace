@@ -1,0 +1,176 @@
+;; Converted from jdk26u src/java.base/share/classes/java/net/IDN.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.net)
+
+(import '(java.io IOException)
+        '(java.text ParseException)
+        '(jdk.internal.icu.impl Punycode)
+        '(jdk.internal.icu.text StringPrep UCharacterIterator))
+
+(defclass ^:public ^:final IDN
+  (field ^:public ^:static ^:final ^int ALLOW_UNASSIGNED 0x01)
+
+  (field ^:public ^:static ^:final ^int USE_STD3_ASCII_RULES 0x02)
+
+  (method ^:public ^:static toASCII ^String [^String input ^int flag]
+    (let [^:mutable ^int p 0
+          ^:mutable ^int q 0
+          out (StringBuilder.)]
+      (if (IDN/isRootLabel input)
+          "."
+          (do
+            (while (< p (.length input))
+              (set! q (IDN/searchDots input p))
+              (.append out (IDN/toASCIIInternal (.substring input p q) flag))
+              (when-not (== q (.length input)) (.append out \.))
+              (set! p (unchecked-add-int q 1)))
+            (.toString out)))))
+
+  (method ^:public ^:static toASCII ^String [^String input]
+    (IDN/toASCII input 0))
+
+  (method ^:public ^:static toUnicode ^String [^String input ^int flag]
+    (let [^:mutable ^int p 0
+          ^:mutable ^int q 0
+          out (StringBuilder.)]
+      (if (IDN/isRootLabel input)
+          "."
+          (do
+            (while (< p (.length input))
+              (set! q (IDN/searchDots input p))
+              (.append out (IDN/toUnicodeInternal (.substring input p q) flag))
+              (when-not (== q (.length input)) (.append out \.))
+              (set! p (unchecked-add-int q 1)))
+            (.toString out)))))
+
+  (method ^:public ^:static toUnicode ^String [^String input]
+    (IDN/toUnicode input 0))
+
+  (field ^:private ^:static ^:final ^String ACE_PREFIX "xn--")
+
+  (field ^:private ^:static ^:final ^int ACE_PREFIX_LENGTH (.length ACE_PREFIX))
+
+  (field ^:private ^:static ^:final ^int MAX_LABEL_LENGTH 63)
+
+  (field ^:private ^:static ^:final ^StringPrep namePrep)
+
+  (static-initializer
+    (let [^:mutable ^StringPrep stringPrep nil]
+      (try
+        (let [^:const IDN_PROFILE "/sun/net/idn/uidna.spp"
+              stream (.getResourceAsStream StringPrep IDN_PROFILE)]
+          (set! stringPrep (StringPrep. stream))
+          (.close stream))
+        (catch IOException e (java-assert false)))
+      (set! namePrep stringPrep)))
+
+  (constructor ^:private [this])
+
+  (method ^:private ^:static toASCIIInternal ^String [^String label ^int flag]
+    (let [isASCII (IDN/isAllASCII label)
+          ^:mutable ^StringBuffer dest nil]
+      (if (not isASCII)
+          (let [iter (UCharacterIterator/getInstance label)]
+            (try
+              (set! dest (.prepare namePrep iter flag))
+              (catch ParseException e (throw (IllegalArgumentException. e)))))
+          (set! dest (StringBuffer. label)))
+      (when (== (.length dest) 0)
+        (throw (IllegalArgumentException. "Empty label is not a legal name")))
+      (let [useSTD3ASCIIRules (not (== (bit-and-int flag USE_STD3_ASCII_RULES) 0))]
+        (when useSTD3ASCIIRules
+          (loop [^int i 0]
+            (when (< i (.length dest))
+              (let [^int c (.charAt dest i)]
+                (if (IDN/isNonLDHAsciiCodePoint c)
+                    (throw (IllegalArgumentException. "Contains non-LDH ASCII characters"))
+                    (recur (unchecked-inc-int i))))))
+          (when (or (== (.charAt dest 0) \-)
+                    (== (.charAt dest (unchecked-subtract-int (.length dest) 1)) \-))
+            (throw (IllegalArgumentException. "Has leading or trailing hyphen"))))
+        (when-not isASCII
+          (when-not (IDN/isAllASCII (.toString dest))
+            (if (not (IDN/startsWithACEPrefix dest))
+                (do
+                  (try
+                    (set! dest (Punycode/encode dest nil))
+                    (catch ParseException e (throw (IllegalArgumentException. e))))
+                  (set! dest (IDN/toASCIILower dest))
+                  (.insert dest 0 ACE_PREFIX))
+                (throw (IllegalArgumentException. "The input starts with the ACE Prefix")))))
+        (when (> (.length dest) MAX_LABEL_LENGTH)
+          (throw (IllegalArgumentException. "The label in the input is too long")))
+        (.toString dest))))
+
+  (method ^:private ^:static toUnicodeInternal ^String [^String label ^int flag]
+    (let [^boolean/1 caseFlags nil
+          ^:mutable ^StringBuffer dest nil
+          isASCII (IDN/isAllASCII label)]
+      (if (not isASCII)
+          (try
+            (let [iter (UCharacterIterator/getInstance label)]
+              (set! dest (.prepare namePrep iter flag)))
+            (catch Exception e (return label)))
+          (set! dest (StringBuffer. label)))
+      (when (IDN/startsWithACEPrefix dest)
+        (let [temp (.substring dest ACE_PREFIX_LENGTH (.length dest))]
+          (try
+            (let [decodeOut (Punycode/decode (StringBuffer. temp) nil)
+                  toASCIIOut (IDN/toASCII (.toString decodeOut) flag)]
+              (when (.equalsIgnoreCase toASCIIOut (.toString dest)) (return (.toString decodeOut))))
+            (catch Exception ignored))))
+      label))
+
+  (method ^:private ^:static isNonLDHAsciiCodePoint ^boolean [^int ch]
+    (or (or (or (or (and (<= 0x0000 ch) (<= ch 0x002C)) (and (<= 0x002E ch) (<= ch 0x002F)))
+                (and (<= 0x003A ch) (<= ch 0x0040)))
+            (and (<= 0x005B ch) (<= ch 0x0060)))
+        (and (<= 0x007B ch) (<= ch 0x007F))))
+
+  (method ^:private ^:static searchDots ^int [^String s ^int start]
+    (let [^:mutable ^int i 0]
+      (set! i start)
+      (while (< i (.length s))
+        (when (IDN/isLabelSeparator (.charAt s i)) (break))
+        (set! i (unchecked-inc-int i)))
+      i))
+
+  (method ^:private ^:static isRootLabel ^boolean [^String s]
+    (and (== (.length s) 1) (IDN/isLabelSeparator (.charAt s 0))))
+
+  (method ^:private ^:static isLabelSeparator ^boolean [^char c]
+    (or (or (or (== c \.) (== c \。)) (== c \．)) (== c \｡)))
+
+  (method ^:private ^:static isAllASCII ^boolean [^String input]
+    (let [^:mutable isASCII true]
+      (loop [^int i 0]
+        (when (< i (.length input))
+          (let [^int c (.charAt input i)]
+            (if (> c 0x7F) (set! isASCII false) (recur (unchecked-inc-int i))))))
+      isASCII))
+
+  (method ^:private ^:static startsWithACEPrefix ^boolean [^StringBuffer input]
+    (let [^:mutable startsWithPrefix true]
+      (if (< (.length input) ACE_PREFIX_LENGTH)
+          false
+          (do
+            (loop [^int i 0]
+              (if (< i ACE_PREFIX_LENGTH)
+                  (if (not (== (IDN/toASCIILower (.charAt input i)) (.charAt ACE_PREFIX i)))
+                      (do (set! startsWithPrefix false) (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            startsWithPrefix))))
+
+  (method ^:private ^:static toASCIILower ^char [^char ch]
+    (if (and (<= \A ch) (<= ch \Z))
+        (unchecked-char (unchecked-subtract-int (unchecked-add-int ch \a) \A))
+        ch))
+
+  (method ^:private ^:static toASCIILower ^StringBuffer [^StringBuffer input]
+    (let [dest (StringBuffer.)]
+      (loop [^int i 0]
+        (when (< i (.length input))
+          (.append dest (IDN/toASCIILower (.charAt input i)))
+          (recur (unchecked-inc-int i))))
+      dest)))

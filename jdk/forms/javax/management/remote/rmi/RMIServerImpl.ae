@@ -1,0 +1,207 @@
+;; Converted from jdk26u src/java.management.rmi/share/classes/javax/management/remote/rmi/RMIServerImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.management.remote.rmi)
+
+(import '(com.sun.jmx.remote.internal ArrayNotificationBuffer NotificationBuffer)
+        '(com.sun.jmx.remote.security JMXPluggableAuthenticator)
+        '(com.sun.jmx.remote.util ClassLogger)
+        '(java.io Closeable IOException)
+        '(java.lang.ref WeakReference)
+        '(java.rmi Remote)
+        '(java.rmi.server RemoteServer ServerNotActiveException)
+        '(java.security Principal)
+        '(java.util ArrayList Collections Iterator List Map Set)
+        '(javax.management MBeanServer)
+        '(javax.management.remote JMXAuthenticator JMXConnectorServer)
+        '(javax.security.auth Subject))
+
+(defclass ^:public ^:abstract RMIServerImpl
+  :implements [Closeable RMIServer]
+
+  (constructor ^:public [this ^{:tag (Map String ?)} env]
+    (set! (.-env this) (if (nil? env) (Collections/emptyMap) env)))
+
+  (method setRMIConnectorServer :throws [IOException] ^void [this ^RMIConnectorServer connServer]
+    (set! (.-connServer this) connServer))
+
+  (method ^:protected ^:abstract export :throws [IOException] ^void [this])
+
+  (method ^:public ^:abstract toStub :throws [IOException] ^Remote [this])
+
+  (method ^:public ^:synchronized setDefaultClassLoader ^void [this ^ClassLoader cl]
+    (set! (.-cl this) cl))
+
+  (method ^:public ^:synchronized getDefaultClassLoader ^ClassLoader [this]
+    cl)
+
+  (method ^:public ^:synchronized setMBeanServer ^void [this ^MBeanServer mbs]
+    (set! (.-mbeanServer this) mbs))
+
+  (method ^:public ^:synchronized getMBeanServer ^MBeanServer [this]
+    mbeanServer)
+
+  (method ^:public getVersion ^String [this]
+    (try
+      (java-str "1.0 java_runtime_" (System/getProperty "java.runtime.version"))
+      (catch SecurityException e "1.0 ")))
+
+  (method ^:public newClient :throws [IOException] ^RMIConnection [this credentials]
+    (.doNewClient this credentials))
+
+  (method doNewClient :throws [IOException] ^RMIConnection [this credentials]
+    (let [tracing (.traceOn logger)]
+      (when tracing (.trace logger "newClient" "making new client"))
+      (when (nil? (.getMBeanServer this))
+        (throw (IllegalStateException. "Not attached to an MBean server")))
+      (let [^:mutable ^Subject subject nil
+            ^:mutable authenticator (cast JMXAuthenticator
+                                          (.get env JMXConnectorServer/AUTHENTICATOR))]
+        (when (nil? authenticator)
+          (when (or (some? (.get env "jmx.remote.x.password.file"))
+                    (some? (.get env "jmx.remote.x.login.config")))
+            (set! authenticator (JMXPluggableAuthenticator. env))))
+        (when (some? authenticator)
+          (when tracing
+            (.trace logger
+                    "newClient"
+                    (java-str "got authenticator: " (.getName (.getClass authenticator)))))
+          (try
+            (set! subject (.authenticate authenticator credentials))
+            (catch SecurityException e
+              (.trace logger "newClient" (java-str "Authentication failed: " e))
+              (throw e))))
+        (when tracing
+          (if (some? subject)
+              (.trace logger "newClient" "subject is not null")
+              (.trace logger "newClient" "no subject")))
+        (let [connectionId (RMIServerImpl/makeConnectionId (.getProtocol this) subject)]
+          (when tracing
+            (.trace logger "newClient" (java-str "making new connection: " connectionId)))
+          (let [client (.makeClient this connectionId subject)]
+            (.dropDeadReferences this)
+            (let [^{:tag (WeakReference RMIConnection)} wr (WeakReference. client)]
+              (locking clientList (.add clientList wr))
+              (.connectionOpened connServer connectionId "Connection opened" nil)
+              (locking clientList
+                (when-not (.contains clientList wr)
+                  (throw (IOException. "The connection is refused."))))
+              (when tracing
+                (.trace logger "newClient" (java-str "new connection done: " connectionId)))
+              client))))))
+
+  (method ^:protected ^:abstract makeClient :throws [IOException] ^RMIConnection [this
+                                                                                  ^String connectionId
+                                                                                  ^Subject subject])
+
+  (method ^:protected ^:abstract closeClient :throws [IOException] ^void [this ^RMIConnection client])
+
+  (method ^:protected ^:abstract getProtocol ^String [this])
+
+  (method ^:protected clientClosed :throws [IOException] ^void [this ^RMIConnection client]
+    (let [debug (.debugOn logger)]
+      (when debug (.trace logger "clientClosed" (java-str "client=" client)))
+      (when (nil? client) (throw (NullPointerException. "Null client")))
+      (locking clientList
+        (.dropDeadReferences this)
+        (loop [^{:tag (Iterator (WeakReference RMIConnection))} it (.iterator clientList)]
+          (when (.hasNext it)
+            (let [^{:tag (WeakReference RMIConnection)} wr (cast WeakReference (.next it))]
+              (if (identical? (.get wr) client) (.remove it) (recur it))))))
+      (when debug (.trace logger "clientClosed" "closing client."))
+      (.closeClient this client)
+      (when debug (.trace logger "clientClosed" "sending notif"))
+      (.connectionClosed connServer (.getConnectionId client) "Client connection closed" nil)
+      (when debug (.trace logger "clientClosed" "done"))))
+
+  (method ^:public ^:synchronized close :throws [IOException] ^void [this]
+    (let [tracing (.traceOn logger)
+          debug (.debugOn logger)]
+      (when tracing (.trace logger "close" "closing"))
+      (let [^:mutable ^IOException ioException nil]
+        (try
+          (when debug (.debug logger "close" "closing Server"))
+          (.closeServer this)
+          (catch IOException e
+            (when tracing (.trace logger "close" (java-str "Failed to close server: " e)))
+            (when debug (.debug logger "close" e))
+            (set! ioException e)))
+        (when debug (.debug logger "close" "closing Clients"))
+        (while true
+          (locking clientList
+            (when debug (.debug logger "close" "dropping dead references"))
+            (.dropDeadReferences this)
+            (when debug (.debug logger "close" (java-str "client count: " (.size clientList))))
+            (when (== (.size clientList) 0) (break))
+            (loop [^{:tag (Iterator (WeakReference RMIConnection))} it (.iterator clientList)]
+              (when (.hasNext it)
+                (let [^{:tag (WeakReference RMIConnection)} wr (cast WeakReference (.next it))
+                      client (cast RMIConnection (.get wr))]
+                  (.remove it)
+                  (if (some? client)
+                      (try
+                        (.close client)
+                        (catch IOException e
+                          (when tracing
+                            (.trace logger "close" (java-str "Failed to close client: " e)))
+                          (when debug (.debug logger "close" e))
+                          (when (nil? ioException) (set! ioException e))))
+                      (recur it)))))))
+        (when (some? notifBuffer) (.dispose notifBuffer))
+        (when (some? ioException)
+          (when tracing (.trace logger "close" "close failed."))
+          (throw ioException))
+        (when tracing (.trace logger "close" "closed.")))))
+
+  (method ^:protected ^:abstract closeServer :throws [IOException] ^void [this])
+
+  (method ^:private ^:static ^:synchronized makeConnectionId ^String [^String protocol
+                                                                      ^Subject subject]
+    (set! connectionIdNumber (unchecked-inc-int connectionIdNumber))
+    (let [^:mutable clientHost ""]
+      (try
+        (set! clientHost (RemoteServer/getClientHost))
+        (when (.contains clientHost ":") (set! clientHost (java-str "[" clientHost "]")))
+        (catch ServerNotActiveException e (.trace logger "makeConnectionId" "getClientHost" e)))
+      (let [buf (StringBuilder.)]
+        (.append (.append buf protocol) ":")
+        (when (> (.length clientHost) 0) (.append (.append buf "//") clientHost))
+        (.append buf " ")
+        (when (some? subject)
+          (let [^{:tag (Set Principal)} principals (.getPrincipals subject)
+                ^:mutable sep ""]
+            (for-each [^Principal p principals]
+              (let [name (.replace (.replace (.getName p) \space \_) \; \:)]
+                (.append (.append buf sep) name)
+                (set! sep ";")))))
+        (.append (.append buf " ") connectionIdNumber)
+        (when (.traceOn logger) (.trace logger "newConnectionId" (java-str "connectionId=" buf)))
+        (.toString buf))))
+
+  (method ^:private dropDeadReferences ^void [this]
+    (locking clientList
+      (loop [^{:tag (Iterator (WeakReference RMIConnection))} it (.iterator clientList)]
+        (when (.hasNext it)
+          (let [^{:tag (WeakReference RMIConnection)} wr (cast WeakReference (.next it))]
+            (if (nil? (.get wr)) (do (.remove it) (recur it)) (recur it)))))))
+
+  (method ^:synchronized getNotifBuffer ^NotificationBuffer [this]
+    (when (nil? notifBuffer)
+      (set! notifBuffer (ArrayNotificationBuffer/getNotificationBuffer mbeanServer env)))
+    notifBuffer)
+
+  (field ^:private ^:static ^:final ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.rmi" "RMIServerImpl"))
+
+  (field ^:private ^:final ^{:tag (List (WeakReference RMIConnection))} clientList (ArrayList.))
+
+  (field ^:private ^ClassLoader cl)
+
+  (field ^:private ^MBeanServer mbeanServer)
+
+  (field ^:private ^:final ^{:tag (Map String ?)} env)
+
+  (field ^:private ^RMIConnectorServer connServer)
+
+  (field ^:private ^:static ^int connectionIdNumber)
+
+  (field ^:private ^NotificationBuffer notifBuffer))

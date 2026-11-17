@@ -1,0 +1,434 @@
+(in-ns 'go.arbace.wai) (go/file "gojspage.go" :imports [
+
+
+    ^{:line 4} [sha256 "crypto/sha256"]
+    ^{:line 5} [binary "encoding/binary"]
+    ^{:line 6} [hex "encoding/hex"]
+    ^{:line 7} [math "math"]
+    ^{:line 8} [strconv "strconv"]
+    ^{:line 9} [strings "strings"]])
+
+
+;; The headless world's page (doc/wasm/WAI.md §10.5, doc/wasm/WEB.md; WAS16 (a), WAS17 (a)): the recording fakes of a browser page
+;; as the shim's single-page programs see it, window (the global), document with one canvas (id "screen"), navigator.gpu,
+;; requestAnimationFrame stepped by the world, input events injected from the driver's script, and the bridge globalThis.arbace:
+;; the WebGPU command buffer decoded from linear memory (arbace.gpu.exec) and the input ring (arbace.input.ring), statement for
+;; statement as wasm/web/arbace.js does them. Every call on a fake is a line of the recording; the recording is what the frames'
+;; judge reads (test/wasm/js/*/expected/frames.edn).
+
+
+
+(go/var ^{:doc "fakeSpec: each fake kind's methods and the kind of what they return (\"\" undefined, \"promise:K\" a promise of a new K, \"=K\" the\nobject's own K made once, \"str:S\" the string S, \"*\" any method recorded, returning undefined).\n"} fakeSpec (lit (map string (map string string))
+    ^{:line 22} ["GPU" (lit _ ["requestAdapter" "promise:GPUAdapter"] ["getPreferredCanvasFormat" "str:bgra8unorm"])]
+    ^{:line 23} ["GPUAdapter" (lit _ ["requestDevice" "promise:GPUDevice"])]
+    ^{:line 24} ["GPUDevice" (lit _ ["createShaderModule" "GPUShaderModule"] ["createBuffer" "GPUBuffer"] ["createTexture" "GPUTexture"] ["createSampler" "GPUSampler"] ["createBindGroupLayout" "GPUBindGroupLayout"] ["createPipelineLayout" "GPUPipelineLayout"] ["createRenderPipeline" "GPURenderPipeline"] ["createComputePipeline" "GPUComputePipeline"] ["createBindGroup" "GPUBindGroup"] ["createCommandEncoder" "GPUCommandEncoder"] ["destroy" ""])]
+    ^{:line 25} ["GPUQueue" (lit _ ["writeBuffer" ""] ["submit" ""] ["writeTexture" ""])]
+    ^{:line 26} ["GPUCommandEncoder" (lit _ ["beginRenderPass" "GPURenderPassEncoder"] ["beginComputePass" "GPUComputePassEncoder"] ["finish" "GPUCommandBuffer"] ["copyBufferToBuffer" ""])]
+    ^{:line 27} ["GPURenderPassEncoder" (lit _ ["setPipeline" ""] ["setBindGroup" ""] ["setVertexBuffer" ""] ["setIndexBuffer" ""] ["draw" ""] ["drawIndexed" ""] ["setViewport" ""] ["setScissorRect" ""] ["end" ""])]
+    ^{:line 28} ["GPUComputePassEncoder" (lit _ ["setPipeline" ""] ["setBindGroup" ""] ["dispatchWorkgroups" ""] ["end" ""])]
+    ^{:line 29} ["GPURenderPipeline" (lit _ ["getBindGroupLayout" "GPUBindGroupLayout"])]
+    ^{:line 30} ["GPUComputePipeline" (lit _ ["getBindGroupLayout" "GPUBindGroupLayout"])]
+    ^{:line 31} ["GPUTexture" (lit _ ["createView" "GPUTextureView"] ["destroy" ""])]
+    ^{:line 32} ["GPUBuffer" (lit _ ["destroy" ""])]
+    ^{:line 33} ["GPUCanvasContext" (lit _ ["configure" ""] ["unconfigure" ""] ["getCurrentTexture" "GPUTexture"])]
+    ^{:line 34} ["CanvasRenderingContext2D" (lit _ ["*" ""])]
+    ^{:line 35} ["HTMLElement" (lit _ ["*" ""])]))
+
+
+
+(go/var ^{:doc "The fakes that are properties: a device's queue, made with it.\n"} fakeProps (lit (map string (map string string)) ["GPUDevice" (lit _ ["queue" "GPUQueue"])]))
+
+
+^{:go/end 68} (go/method fake "fake is a new recording object of a kind.\n" ^{:tag (* JSObject)} [^{:tag (* GoJS)} w ^string kind]
+  (inc! (aget (.-fakeN w) kind))
+  (let [o (addr (lit JSObject :Class "Fake" :Proto (.-ObjectProto (.-R w)) :Name kind :ID (aget (.-fakeN w) kind)))]
+    (range [p k (aget fakeProps kind)]
+      (.Put o p (.fake w k)))
+
+    (let [spec (aget fakeSpec kind)]
+      (set! (.-Getter o) ^{:go/end 61} (fn [^string key] :results [any bool]
+          (let [(values res ok) (aget spec key)]
+            (when (not ok)
+              (set! (values res ok) (aget spec "*"))
+              (when (or (not ok) (== key "then") (== key "constructor") (== key "toString") (== key "valueOf") (== key "hasOwnProperty"))
+                (return nil false))
+
+              (when [(values _ own) (.own o key)] own
+                (return nil false)))
+
+
+            (return (.Func (.-R w) key ^{:go/end 60} (fn ^any [^any this ^{:tag (slice any)} args] (.fakeCall w o key res args))) true))))
+
+      (set! (.-Setter o) ^{:go/breaks [4] :go/end 66} (fn ^bool [^string key ^any v]
+          (set! (.-Rec w) (append (.-Rec w) (+ (jsDescribe o) "." key " = " (.summary w v 0))))
+          (.Put o key v)
+          true))
+
+      ^{:line 67} o)))
+
+
+^{:go/end 94} (go/method fakeCall ^any [^{:tag (* GoJS)} w ^{:tag (* JSObject)} o ^string name ^string res ^{:tag (slice any)} args]
+  (let [parts (make (slice string) (len args))]
+    (range [i a args]
+      (aset parts i (.summary w a 0)))
+
+    (let [line (+ (jsDescribe o) "." name "(" (strings/Join parts ", ") ")")
+        ^{:line 76 :tag any} out JSUndefined]
+      (switch
+        (case [(== res "")])
+        (case [(strings/HasPrefix res "str:")]
+          (set! out (subslice res 4)))
+        (case [(strings/HasPrefix res "promise:")]
+          (let [f (.fake w (subslice res 8))
+              ^{:line 83} p (.NewPromise (.-R w))]
+            (.Resolve (.-R w) p f)
+            (set! out p)
+            (set! line + (+ " -> Promise<" (jsDescribe f) ">"))))
+        (default
+          (let [f (.fake w res)]
+            (set! out f)
+            (set! line + (+ " -> " (jsDescribe f))))))
+
+      (set! (.-Rec w) (append (.-Rec w) line))
+      ^{:line 93} out)))
+
+
+
+
+^{:go/end 143} (go/method summary "summary is a value's text in the recording: numbers and short strings as they are, a long string by its length and digest,\nbytes by their length and digest (and their first 16 float32s when a multiple of 4), plain objects and arrays by their entries.\n" ^string [^{:tag (* GoJS)} w ^any v ^int depth]
+  (type-switch [x v]
+    (case [string]
+      (when (or (> (len x) 60) (strings/ContainsAny x "\n\""))
+        (let [s (sha256/Sum256 (conv (slice byte) x))]
+          (return (+ "<string " (strconv/Itoa (len x)) " bytes sha256:" (hex/EncodeToString (subslice s _ 4)) ">"))))
+
+      (return (strconv/Quote x)))
+    (case [(* JSObject)]
+      (switch
+        (case [(== (.-Class x) "Fake")]
+          (return (jsDescribe x)))
+        (case [(!= (.-Bytes x) nil)]
+          (let [s (sha256/Sum256 (.-Bytes x))
+              ^{:line 112} t (+ "<bytes " (strconv/Itoa (len (.-Bytes x))) " sha256:" (hex/EncodeToString (subslice s _ 4)))]
+            (when (and (== (% (len (.-Bytes x)) 4) 0) (> (len (.-Bytes x)) 0))
+              (let [n (/ (len (.-Bytes x)) 4)]
+                (when (> n 16)
+                  (set! n 16))
+
+                (let [fs (make (slice string) n)]
+                  (range [i fs]
+                    (aset fs i (strconv/FormatFloat (conv float64 (math/Float32frombits (.Uint32 binary/LittleEndian (subslice (.-Bytes x) (* 4 i))))) \g -1 32)))
+
+                  (set! t + (+ " f32[" (strings/Join fs " ") "]")))))
+
+            (return (+ t ">"))))
+        (case [(!= (.-Fn x) nil)]
+          (return "<function>"))
+        (case [(> depth 4)]
+          (return "{...}"))
+        (case [(== (.-Class x) "Array")]
+          (let [parts (make (slice string) (len (.-Arr x)))]
+            (range [i e (.-Arr x)]
+              (aset parts i (.summary w e (+ depth 1))))
+
+            (return (+ "[" (strings/Join parts ", ") "]")))))
+
+      (let [parts (lit (slice string))]
+        (range [_ k (.-keys x)]
+          (set! parts (append parts (+ k ": " (.summary w (aget (.-props x) k) (+ depth 1))))))
+
+        (return (+ "{" (strings/Join parts ", ") "}")))))
+
+  (jsDescribe v))
+
+
+
+(go/var ^{:doc "The input ring's event types and key codes (doc/wasm/WEB.md §3), as arbace.js numbers them.\n"} inputTypes (lit (map string uint32) ["keydown" 1] ["keyup" 2] ["pointermove" 3] ["pointerdown" 4] ["pointerup" 5] ["wheel" 6] ["resize" 7]))
+
+
+^{:go/breaks [[6 161]] :go/end 162} (go/func KeyCode "KeyCode is a KeyboardEvent.code's number in the ring (0 for a key outside the table).\n" ^uint32 [^string code]
+  (switch
+    (case [(and (== (len code) 4) (strings/HasPrefix code "Key") (>= (aget code 3) \A) (<= (aget code 3) \Z))]
+      (return (+ (conv uint32 (- (aget code 3) \A)) 1)))
+    (case [(and (== (len code) 6) (strings/HasPrefix code "Digit") (>= (aget code 5) \0) (<= (aget code 5) \9))]
+      (return (+ (conv uint32 (- (aget code 5) \0)) 27))))
+
+  (range [i k (lit (slice string) "ArrowUp" "ArrowDown" "ArrowLeft" "ArrowRight" "Space" "Enter" "Escape" "ShiftLeft" "ControlLeft" "Backspace" "Tab")]
+    (when (== k code)
+      (return (conv uint32 (+ 37 i)))))
+
+
+  0)
+
+
+^{:go/end 290} (go/method initPage [^{:tag (* GoJS)} w]
+  (let [r (.-R w)
+      ^{:line 166} g (.-Global r)]
+    (.Put g "window" g)
+    (.Put g "self" g)
+    (.Put g "devicePixelRatio" 1.0)
+    (.Put g "innerWidth" 800.0)
+    (.Put g "innerHeight" 600.0)
+    (let [listeners ^{:go/end 190} (fn [^{:tag (* JSObject)} o]
+          (.Method r o "addEventListener" ^{:go/end 178} (fn ^any [^any this ^{:tag (slice any)} args]
+              (let [t (.ToString r (arg args 0))]
+                (aset (.-listen w) t (append (aget (.-listen w) t) (arg args 1)))
+                (set! (.-Rec w) (append (.-Rec w) (+ (jsDescribe this) ".addEventListener(" (strconv/Quote t) ")")))
+                ^{:line 177} JSUndefined)))
+
+          (.Method r o "removeEventListener" ^{:go/end 189} (fn ^any [^any this ^{:tag (slice any)} args]
+              (let [t (.ToString r (arg args 0))
+                  ^{:line 181} l (aget (.-listen w) t)]
+                (range [i f l]
+                  (when (== f (arg args 1))
+                    (aset (.-listen w) t (append (subslice l _ i i) (spread (subslice l (+ i 1)))))
+                    (break)))
+
+
+                ^{:line 188} JSUndefined))))]
+
+
+      (listeners g)
+      (let [canvas (.fake w "HTMLCanvasElement")]
+        (set! (.-Getter canvas) nil)
+        (.Put canvas "id" "screen")
+        (.Put canvas "width" 800.0)
+        (.Put canvas "height" 600.0)
+        (.Put canvas "clientWidth" 800.0)
+        (.Put canvas "clientHeight" 600.0)
+        (listeners canvas)
+        (let [(values ^{:tag (* JSObject)} gpuCtx ^{:tag (* JSObject)} ctx2d) (zero (* JSObject))]
+          (.Method r canvas "getContext" ^{:go/end 218} (fn ^any [^any this ^{:tag (slice any)} args]
+              (let [t (.ToString r (arg args 0))
+                  ^{:line 203 :tag any} out JSNull]
+                (switch t
+                  (case ["webgpu"]
+                    (when (== gpuCtx nil)
+                      (set! gpuCtx (.fake w "GPUCanvasContext")))
+
+                    (set! out gpuCtx))
+                  (case ["2d"]
+                    (when (== ctx2d nil)
+                      (set! ctx2d (.fake w "CanvasRenderingContext2D")))
+
+                    (set! out ctx2d)))
+
+                (set! (.-Rec w) (append (.-Rec w) (+ "HTMLCanvasElement#1.getContext(" (strconv/Quote t) ") -> " (jsDescribe out))))
+                ^{:line 217} out)))
+
+          (let [doc (.obj r)]
+            (set! (.-Class doc) "Document")
+            (.Put g "document" doc)
+            (listeners doc)
+            (let [body (.fake w "HTMLElement")]
+              (.Put doc "body" body)
+              (.Put doc "title" "")
+              (.Method r doc "getElementById" ^{:go/end 231} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (when (== (.ToString r (arg args 0)) "screen")
+                    (return canvas))
+
+                  ^{:line 230} JSNull))
+
+              (.Method r doc "querySelector" ^{:go/end 238} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (switch (.ToString r (arg args 0))
+                    (case ["canvas" "#screen"]
+                      (return canvas)))
+
+                  ^{:line 237} JSNull))
+
+              (.Method r doc "createElement" ^{:go/end 243} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (let [e (.fake w "HTMLElement")]
+                    (set! (.-Rec w) (append (.-Rec w) (+ "document.createElement(" (strconv/Quote (.ToString r (arg args 0))) ") -> " (jsDescribe e))))
+                    ^{:line 242} e)))
+
+              (let [nav (.obj r)]
+                (set! (.-Class nav) "Navigator")
+                (.Put g "navigator" nav)
+                (.Put nav "userAgent" "arbace-headless")
+                (.Put nav "gpu" (.fake w "GPU"))
+                (.Method r g "requestAnimationFrame" ^{:go/end 253} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (inc! (.-rafID w))
+                    (set! (.-raf w) (append (.-raf w) (lit rafEntry :id (.-rafID w) :cb (arg args 0))))
+                    (conv float64 (.-rafID w))))
+
+                (.Method r g "cancelAnimationFrame" ^{:go/end 263} (fn ^any [^any this ^{:tag (slice any)} args]
+                    (let [id (conv int (.ToNumber r (arg args 0)))]
+                      (range [i e (.-raf w)]
+                        (when (== (.-id e) id)
+                          (set! (.-raf w) (append (subslice (.-raf w) _ i i) (spread (subslice (.-raf w) (+ i 1)))))
+                          (break)))
+
+
+                      ^{:line 262} JSUndefined)))
+
+                (set! (.-gpu w) (addr (lit gpuBridge :w w :handles (lit (slice any) JSNull))))
+                (let [ab (.obj r)]
+                  (.Put g "arbace" ab)
+                  (let [gpu (.obj r)]
+                    (.Put ab "gpu" gpu)
+                    (.Method r gpu "handle" ^{:go/end 272} (fn ^any [^any this ^{:tag (slice any)} args]
+                        (set! (.-handles (.-gpu w)) (append (.-handles (.-gpu w)) (arg args 0)))
+                        (conv float64 (- (len (.-handles (.-gpu w))) 1))))
+
+                    (.Method r gpu "release" ^{:go/end 279} (fn ^any [^any this ^{:tag (slice any)} args]
+                        (let [h (conv int (.ToNumber r (arg args 0)))]
+                          (when (and (> h 0) (< h (len (.-handles (.-gpu w)))))
+                            (aset (.-handles (.-gpu w)) h JSNull))
+
+                          ^{:line 278} JSUndefined)))
+
+                    (.Method r gpu "exec" ^{:go/end 283} (fn ^any [^any this ^{:tag (slice any)} args]
+                        (.exec (.-gpu w) (conv uint32 (.ToNumber r (arg args 0))) (conv uint32 (.ToNumber r (arg args 1))))
+                        ^{:line 282} JSUndefined))
+
+                    (let [input (.obj r)]
+                      (.Put ab "input" input)
+                      (.Method r input "ring" ^{:go/end 289} (fn ^any [^any this ^{:tag (slice any)} args]
+                          (set! (values (.-ringAt (.-gpu w)) (.-ringCap (.-gpu w))) (values (conv uint32 (.ToNumber r (arg args 0))) (conv uint32 (.ToNumber r (arg args 1)))))
+                          ^{:line 288} JSUndefined)))))))))))))
+
+
+
+
+^{:go/end 315} (go/method deliver "deliver is an input event: into the ring (when Go registered one), then to the listeners of its type.\n" [^{:tag (* GoJS)} w ^InputEvent e]
+  (let [r (.-R w)
+      ^{:line 295} b (.-gpu w)]
+    (when [(values t ok) (aget inputTypes (.-Type e))] (and ok (> (.-ringCap b) 0))
+      (let [head (.Uint32 binary/LittleEndian (.bytes w (.-ringAt b) 4))
+          ^{:line 298} tail (.Uint32 binary/LittleEndian (.bytes w (+ (.-ringAt b) 4) 4))]
+        (when (< (- head tail) (.-ringCap b))
+          (let [at (+ (.-ringAt b) 8 (* (% head (.-ringCap b)) 16))
+              ^{:line 301} rec (.bytes w at 16)]
+            (.PutUint32 binary/LittleEndian (subslice rec 0) t)
+            (.PutUint32 binary/LittleEndian (subslice rec 4) (KeyCode (.-Code e)))
+            (.PutUint32 binary/LittleEndian (subslice rec 8) (math/Float32bits (conv float32 (.-X e))))
+            (.PutUint32 binary/LittleEndian (subslice rec 12) (math/Float32bits (conv float32 (.-Y e))))
+            (.PutUint32 binary/LittleEndian (.bytes w (.-ringAt b) 4) (+ head 1))))))
+
+
+    (let [ev (.Object r "type" (.-Type e) "code" (.-Code e) "key" (.-Code e) "clientX" (.-X e) "clientY" (.-Y e) "deltaY" (.-Y e) "button" 0.0)]
+      (.Method r ev "preventDefault" ^{:go/end 310} (fn ^any [^any this ^{:tag (slice any)} args] JSUndefined))
+      (set! (.-Rec w) (append (.-Rec w) (+ "input " (.-Type e) " " (.-Code e) " " (jsNumStr (.-X e)) " " (jsNumStr (.-Y e)))))
+      (range [_ f (append (lit (slice any)) (spread (aget (.-listen w) (.-Type e))))]
+        (.Call r f JSUndefined (lit (slice any) ev))))))
+
+
+
+
+(go/type gpuBridge "gpuBridge is the WebGPU bridge's world side (doc/wasm/WEB.md §2): the handle table and the command buffer's decoder.\n" (struct
+    ^{:line 319 :tag (* GoJS)} w
+    ^{:line 320 :tag (slice any)} handles
+    ^{:line 321 :tag any} encoder
+    ^{:line 322 :tag any} pass
+    ^{:line 323 :tag uint32} ringAt
+    ^{:line 324 :tag uint32} ringCap))
+
+
+
+
+(go/var ^{:doc "GPUOps are the command buffer's operations by number, each with its count of u32 words after the op (doc/wasm/WEB.md §2),\nnamed after webgpu.h's functions.\n"} GPUOps (lit (slice (struct
+        ^{:line 330 :tag string} Name
+        ^{:line 331 :tag int} N))
+
+    (lit _ "" 0)
+    (lit _ "DeviceCreateCommandEncoder" 1) ; 1: device
+    (lit _ "CommandEncoderBeginRenderPass" 7) ; 2: context, depth texture (0 none), load (1 clear, 2 load), r g b a (f32)
+    (lit _ "PassSetPipeline" 1) ; 3: pipeline
+    (lit _ "PassSetBindGroup" 2) ; 4: index, bind group
+    (lit _ "RenderPassSetVertexBuffer" 4) ; 5: slot, buffer, offset, size (0 the rest)
+    (lit _ "RenderPassSetIndexBuffer" 4) ; 6: buffer, format (1 uint16, 2 uint32), offset, size (0 the rest)
+    (lit _ "RenderPassDraw" 4) ; 7: vertices, instances, first vertex, first instance
+    (lit _ "RenderPassDrawIndexed" 5) ; 8: indices, instances, first index, base vertex (i32), first instance
+    (lit _ "PassEnd" 0) ; 9
+    (lit _ "CommandEncoderBeginComputePass" 0) ; 10
+    (lit _ "ComputePassDispatchWorkgroups" 3) ; 11: x, y, z
+    (lit _ "QueueWriteBuffer" 5) ; 12: device, buffer, offset, pointer, length (linear memory)
+    (lit _ "QueueSubmit" 1))) ; 13: device (the encoder finished and submitted)
+
+
+^{:go/end 354} (go/method h ^any [^{:tag (* gpuBridge)} b ^uint32 i]
+  (when (or (>= (conv int i) (len (.-handles b))) (== i 0))
+    (.Throw (.-R (.-w b)) "range" (+ "arbace.gpu: no handle " (strconv/Itoa (conv int i)))))
+
+  (aget (.-handles b) i))
+
+
+^{:go/end 359} (go/method call ^any [^{:tag (* gpuBridge)} b ^any o ^string name & ^{:tag (slice any)} args]
+  (let [r (.-R (.-w b))]
+    (.Call r (.Get r o name) o args)))
+
+
+
+^{:go/end 436} (go/method exec "exec decodes and runs a command buffer of linear memory [p, p+n): arbace.js's exec, statement for statement.\n" [^{:tag (* gpuBridge)} b ^uint32 p ^uint32 n]
+  (let [(values w r) (values (.-w b) (.-R (.-w b)))
+      ^{:line 364} words (.bytes w p n)
+      ^{:line 365} u ^{:go/end 365} (fn ^uint32 [^int i] (.Uint32 binary/LittleEndian (subslice words (* 4 i))))
+      ^{:line 366} f ^{:go/end 366} (fn ^float64 [^int i] (conv float64 (math/Float32frombits (u i))))]
+    (for [i 0] (< (* 4 i) (len words)) _
+      (let [op (conv int (u i))]
+        (when (or (<= op 0) (>= op (len GPUOps)))
+          (.Throw r "range" (+ "arbace.gpu: unknown op " (strconv/Itoa op))))
+
+        (when (> (* 4 (+ i 1 (.-N (aget GPUOps op)))) (len words))
+          (.Throw r "range" (+ "arbace.gpu: op " (.-Name (aget GPUOps op)) " truncated")))
+
+        (let [a (+ i 1)]
+          (switch op
+            (case [1]
+              (set! (.-encoder b) (.call b (.h b (u a)) "createCommandEncoder")))
+            (case [2]
+              (let [ctx (.h b (u a))
+                  ^{:line 381} view (.call b (.call b ctx "getCurrentTexture") "createView")
+                  ^{:line 382} load "load"]
+                (when (== (u (+ a 2)) 1)
+                  (set! load "clear"))
+
+                (let [att ^{:go/breaks [8]} (.Object r "view" view "loadOp" load "storeOp" "store"
+                      "clearValue" (.Object r "r" (f (+ a 3)) "g" (f (+ a 4)) "b" (f (+ a 5)) "a" (f (+ a 6))))
+                    ^{:line 388} desc (.Object r "colorAttachments" (.Array r (lit (slice any) att)))]
+                  (when [d (u (+ a 1))] (!= d 0)
+                    (.Put desc "depthStencilAttachment" ^{:go/breaks [6]} (.Object r "view" (.call b (.h b d) "createView") "depthClearValue" 1.0
+                        "depthLoadOp" "clear" "depthStoreOp" "store")))
+
+                  (set! (.-pass b) (.call b (.-encoder b) "beginRenderPass" desc)))))
+            (case [3]
+              (.call b (.-pass b) "setPipeline" (.h b (u a))))
+            (case [4]
+              (.call b (.-pass b) "setBindGroup" (conv float64 (u a)) (.h b (u (+ a 1)))))
+            (case [5]
+              (let [args (lit (slice any) (conv float64 (u a)) (.h b (u (+ a 1))) (conv float64 (u (+ a 2))))]
+                (when (!= (u (+ a 3)) 0)
+                  (set! args (append args (conv float64 (u (+ a 3))))))
+
+                (.call b (.-pass b) "setVertexBuffer" (spread args))))
+            (case [6]
+              (let [fm "uint16"]
+                (when (== (u (+ a 1)) 2)
+                  (set! fm "uint32"))
+
+                (let [args (lit (slice any) (.h b (u a)) fm (conv float64 (u (+ a 2))))]
+                  (when (!= (u (+ a 3)) 0)
+                    (set! args (append args (conv float64 (u (+ a 3))))))
+
+                  (.call b (.-pass b) "setIndexBuffer" (spread args)))))
+            (case [7]
+              (.call b (.-pass b) "draw" (conv float64 (u a)) (conv float64 (u (+ a 1))) (conv float64 (u (+ a 2))) (conv float64 (u (+ a 3)))))
+            (case [8]
+              (.call b (.-pass b) "drawIndexed" (conv float64 (u a)) (conv float64 (u (+ a 1))) (conv float64 (u (+ a 2))) (conv float64 (conv int32 (u (+ a 3)))) (conv float64 (u (+ a 4)))))
+            (case [9]
+              (.call b (.-pass b) "end")
+              (set! (.-pass b) nil))
+            (case [10]
+              (set! (.-pass b) (.call b (.-encoder b) "beginComputePass")))
+            (case [11]
+              (.call b (.-pass b) "dispatchWorkgroups" (conv float64 (u a)) (conv float64 (u (+ a 1))) (conv float64 (u (+ a 2)))))
+            (case [12]
+              (let [q (.Get r (.h b (u a)) "queue")
+                  ^{:line 427} data (.Bytes r (.bytes w (u (+ a 3)) (u (+ a 4))))]
+                (.call b q "writeBuffer" (.h b (u (+ a 1))) (conv float64 (u (+ a 2))) data)))
+            (case [13]
+              (let [q (.Get r (.h b (u a)) "queue")]
+                (.call b q "submit" (.Array r (lit (slice any) (.call b (.-encoder b) "finish"))))
+                (set! (.-encoder b) nil))))
+
+          (set! i (+ a (.-N (aget GPUOps op)))))))))

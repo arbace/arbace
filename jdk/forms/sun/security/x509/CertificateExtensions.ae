@@ -1,0 +1,139 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/x509/CertificateExtensions.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.x509)
+
+(import '(java.io IOException)
+        '(java.lang.reflect Constructor InvocationTargetException)
+        '(java.util Collection Collections Map Objects TreeMap)
+        '(sun.security.util Debug
+                            DerEncoder
+                            DerInputStream
+                            DerOutputStream
+                            DerValue
+                            HexDumpEncoder
+                            ObjectIdentifier))
+
+(defclass ^:public CertificateExtensions
+  :implements [DerEncoder]
+
+  (field ^:public ^:static ^:final ^String NAME "extensions")
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "x509"))
+
+  (field ^:private ^:final ^{:tag (Map String Extension)} map
+    (Collections/synchronizedMap (TreeMap.)))
+
+  (field ^:private ^boolean unsupportedCritExt false)
+
+  (field ^:private ^{:tag (Map String Extension)} unparseableExtensions)
+
+  (constructor ^:public [this])
+
+  (constructor :throws [IOException] ^:public [this ^DerInputStream in]
+    (.init this in))
+
+  (method ^:private init :throws [IOException] ^void [this ^DerInputStream in]
+    (let [exts (.getSequence in 5)]
+      (loop [^int i 0]
+        (when (< i (alength exts))
+          (let [ext (Extension. (aget exts i))]
+            (.parseExtension this ext)
+            (recur (unchecked-inc-int i)))))))
+
+  (field ^:private ^:static ^:final ^{:tag (array (Class ?))} PARAMS (new Class/1 [Boolean Object]))
+
+  (method ^:private parseExtension :throws [IOException] ^void [this ^Extension ext]
+    (try
+      (let [^{:tag (Class ?)} extClass (OIDMap/getClass (.getExtensionId ext))]
+        (when (nil? extClass)
+          (when (.isCritical ext) (set! unsupportedCritExt true))
+          (if (nil? (.put map (.toString (.getExtensionId ext)) ext))
+              (return)
+              (throw (IOException. "Duplicate extensions not allowed"))))
+        (let [^{:tag (Constructor ?)} cons (.getConstructor extClass PARAMS)
+              passed (new Object/1 [(Boolean/valueOf (.isCritical ext)) (.getExtensionValue ext)])
+              certExt (cast Extension (.newInstance cons passed))]
+          (when (some? (.put map (.getName certExt) certExt))
+            (throw (IOException. "Duplicate extensions not allowed")))))
+      (catch InvocationTargetException invk
+        (let [e (.getCause invk)]
+          (cond
+            (not (.isCritical ext))
+              (do
+                (when (nil? unparseableExtensions) (set! unparseableExtensions (TreeMap.)))
+                (.put unparseableExtensions
+                      (.toString (.getExtensionId ext))
+                      (UnparseableExtension. ext e))
+                (when (some? debug)
+                  (.println debug (java-str "Debug info only. Error parsing extension: " ext))
+                  (.printStackTrace e)
+                  (let [h (HexDumpEncoder.)]
+                    (.println System/err (.encodeBuffer h (.getExtensionValue ext))))))
+            (instance? IOException e) (throw (cast IOException e))
+            :else (throw (IOException. e)))))
+      (catch IOException e (throw e))
+      (catch Exception e (throw (IOException. e)))))
+
+  (method ^:public encode ^void [this ^DerOutputStream out]
+    (.encode this out false))
+
+  (method ^:public encode ^void [this ^DerOutputStream out ^boolean isCertReq]
+    (let [extOut (DerOutputStream.)]
+      (for-each [^Extension ext (.values map)] (.encode ext extOut))
+      (if (not isCertReq)
+          (let [seq (DerOutputStream.)]
+            (.write seq DerValue/tag_Sequence extOut)
+            (.write out (DerValue/createTag DerValue/TAG_CONTEXT true (unchecked-byte 3)) seq))
+          (.write out DerValue/tag_Sequence extOut))))
+
+  (method ^:public setExtension ^void [this ^String name ^Extension ext]
+    (.put map name ext))
+
+  (method ^:public getExtension ^Extension [this ^String alias]
+    (let [^:mutable ^String name nil]
+      (if (.startsWith alias X509CertImpl/NAME)
+          (let [index (.lastIndexOf alias \.)]
+            (set! name (.substring alias (unchecked-add-int index 1))))
+          (set! name alias))
+      (cast Extension (.get map name))))
+
+  (method ^:public delete :throws [IOException] ^void [this ^String name]
+    (let [obj (.get map name)]
+      (when (nil? obj) (throw (IOException. (java-str "No extension found with name " name))))
+      (.remove map name)))
+
+  (method ^:public getNameByOid ^String [this ^ObjectIdentifier oid]
+    (for-each [^String name (.keySet map)]
+      (when (.equals (.getExtensionId (cast Extension (.get map name))) oid) (return name)))
+    nil)
+
+  (method ^:public getAllExtensions ^{:tag (Collection Extension)} [this]
+    (.values map))
+
+  (method ^:public getUnparseableExtensions ^{:tag (Map String Extension)} [this]
+    (if (nil? unparseableExtensions) (Collections/emptyMap) unparseableExtensions))
+
+  (method ^:public hasUnsupportedCriticalExtension ^boolean [this]
+    unsupportedCritExt)
+
+  (method ^:public equals ^boolean [this other]
+    (if (identical? this other)
+        true
+        (if-instance [^CertificateExtensions otherCX other]
+          (let [^{:tag (Collection Extension)} otherX (.getAllExtensions otherCX)]
+            (if (not (== (.size otherX) (.size map)))
+                false
+                (let [^:mutable ^Extension thisExt nil
+                      ^:mutable ^String key nil]
+                  (for-each [^Extension otherExt otherX]
+                    (set! key (.getName otherExt))
+                    (set! thisExt (cast Extension (.get map key)))
+                    (when (nil? thisExt) (return false))
+                    (when-not (.equals thisExt otherExt) (return false)))
+                  (.equals (.getUnparseableExtensions this) (.getUnparseableExtensions otherCX)))))
+          false)))
+
+  (method ^:public hashCode ^int [this]
+    (Objects/hash map (.getUnparseableExtensions this)))
+
+  (method ^:public toString ^String [this] (.toString map)))

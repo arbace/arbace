@@ -55,7 +55,7 @@ done
 # a failed build leaves the directory it was to replace (the key file is stale), no half-made one beside it
 echo stale > "$ARBACE_GATE_EXES/$K20/key"
 run
-if [ "$(status)" != 0 ] && grep -q "building the executables" "$T/out" && [ -x "$ARBACE_GATE_EXES/$K20/amd64/arbace" ] && ! ls "$ARBACE_GATE_EXES" | grep -q '\.tmp\.'; then ok "a failed build kept the old directory"
+if [ "$(status)" != 0 ] && grep -q "building the executables" "$T/out" && [ -x "$ARBACE_GATE_EXES/$K20/amd64/arbace" ] && ! grep -q '\.tmp\.' <<< "$(ls "$ARBACE_GATE_EXES")"; then ok "a failed build kept the old directory"
 else bad "a failed build: status $(status), $(ls "$ARBACE_GATE_EXES" | tr '\n' ' ')"; fi
 
 # a successful miss puts the new directory in place whole (GTS126): while it is made, the directory still
@@ -71,7 +71,7 @@ echo old > "$ARBACE_GATE_EXES/$K20/amd64/old-marker"; echo stale > "$ARBACE_GATE
 run
 if [ "$(status)" = 0 ] && grep -q old-marker "$T/during.ls" && ! grep -q version.edn "$T/during.ls" \
    && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = "$KEY" ] && [ ! -e "$ARBACE_GATE_EXES/$K20/amd64/old-marker" ] \
-   && ! ls "$ARBACE_GATE_EXES" | grep -q '\.\(tmp\|old\)\.'; then ok "a miss swapped the whole directory in"
+   && ! grep -q '\.\(tmp\|old\)\.' <<< "$(ls "$ARBACE_GATE_EXES")"; then ok "a miss swapped the whole directory in"
 else bad "a miss: status $(status); during: $(tr '\n' ' ' < "$T/during.ls"); $(tail -3 "$T/out")"; fi
 
 # a fresh host: the executables' root does not exist yet (review 048, N1); the builds are the stubs above

@@ -1,0 +1,970 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/ServerHello.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security CryptoPrimitive GeneralSecurityException)
+        '(java.text MessageFormat)
+        '(java.util Arrays EnumSet HexFormat LinkedList List Locale Map$Entry)
+        '(javax.crypto KDF SecretKey)
+        '(javax.crypto.spec HKDFParameterSpec IvParameterSpec)
+        '(javax.net.ssl SSLException SSLHandshakeException SSLProtocolException))
+
+(defclass ^:final ServerHello
+  (field ^:static ^:final ^SSLConsumer handshakeConsumer (ServerHelloConsumer.))
+
+  (field ^:static ^:final ^HandshakeProducer t12HandshakeProducer (T12ServerHelloProducer.))
+
+  (field ^:static ^:final ^HandshakeProducer t13HandshakeProducer (T13ServerHelloProducer.))
+
+  (field ^:static ^:final ^HandshakeProducer hrrHandshakeProducer (T13HelloRetryRequestProducer.))
+
+  (field ^:static ^:final ^HandshakeProducer hrrReproducer (T13HelloRetryRequestReproducer.))
+
+  (field ^:private ^:static ^:final ^HandshakeConsumer t12HandshakeConsumer
+    (T12ServerHelloConsumer.))
+
+  (field ^:private ^:static ^:final ^HandshakeConsumer t13HandshakeConsumer
+    (T13ServerHelloConsumer.))
+
+  (field ^:private ^:static ^:final ^HandshakeConsumer d12HandshakeConsumer
+    (T12ServerHelloConsumer.))
+
+  (field ^:private ^:static ^:final ^HandshakeConsumer d13HandshakeConsumer
+    (T13ServerHelloConsumer.))
+
+  (field ^:private ^:static ^:final ^HandshakeConsumer t13HrrHandshakeConsumer
+    (T13HelloRetryRequestConsumer.))
+
+  (field ^:private ^:static ^:final ^HandshakeConsumer d13HrrHandshakeConsumer
+    (T13HelloRetryRequestConsumer.))
+
+  (defclass ^:static ^:final ServerHelloMessage
+    :extends SSLHandshake$HandshakeMessage
+
+    (field ^:final ^ProtocolVersion serverVersion)
+
+    (field ^:final ^RandomCookie serverRandom)
+
+    (field ^:final ^SessionId sessionId)
+
+    (field ^:final ^CipherSuite cipherSuite)
+
+    (field ^:final ^byte compressionMethod)
+
+    (field ^:final ^SSLExtensions extensions)
+
+    (field ^:final ^ClientHello$ClientHelloMessage clientHello)
+
+    (field ^:final ^ByteBuffer handshakeRecord)
+
+    (constructor [this ^HandshakeContext context ^ProtocolVersion serverVersion ^SessionId sessionId
+                  ^CipherSuite cipherSuite ^RandomCookie serverRandom
+                  ^ClientHello$ClientHelloMessage clientHello]
+      (super. context)
+      (set! (.-serverVersion this) serverVersion)
+      (set! (.-serverRandom this) serverRandom)
+      (set! (.-sessionId this) sessionId)
+      (set! (.-cipherSuite this) cipherSuite)
+      (set! (.-compressionMethod this) 0x00)
+      (set! (.-extensions this) (SSLExtensions. this))
+      (set! (.-clientHello this) clientHello)
+      (set! (.-handshakeRecord this) nil))
+
+    (constructor :throws [IOException] [this ^HandshakeContext context ^ByteBuffer m]
+      (super. context)
+      (set! (.-handshakeRecord this) (.duplicate m))
+      (let [major (.get m)
+            minor (.get m)]
+        (set! (.-serverVersion this) (ProtocolVersion/valueOf major minor))
+        (when (nil? (.-serverVersion this))
+          (throw (.fatal (.-conContext context)
+                         Alert/PROTOCOL_VERSION
+                         (java-str "Unsupported protocol version: "
+                                   (ProtocolVersion/nameOf major minor)))))
+        (set! (.-serverRandom this) (RandomCookie. m))
+        (set! (.-sessionId this) (SessionId. (Record/getBytes8 m)))
+        (try
+          (.checkLength sessionId (.-id serverVersion))
+          (catch SSLProtocolException ex
+            (throw (.fatal (.-conContext (.-handshakeContext this)) Alert/ILLEGAL_PARAMETER ex))))
+        (let [cipherSuiteId (Record/getInt16 m)]
+          (set! (.-cipherSuite this) (CipherSuite/valueOf cipherSuiteId))
+          (when (or (nil? cipherSuite) (not (.isNegotiable context cipherSuite)))
+            (throw (.fatal (.-conContext context)
+                           Alert/ILLEGAL_PARAMETER
+                           (java-str "Server selected improper ciphersuite "
+                                     (CipherSuite/nameOf cipherSuiteId)))))
+          (set! (.-compressionMethod this) (.get m))
+          (when-not (== compressionMethod 0)
+            (throw (.fatal (.-conContext context)
+                           Alert/ILLEGAL_PARAMETER
+                           (java-str "compression type not supported, " compressionMethod))))
+          (let [^SSLExtension/1 supportedExtensions (if (.isHelloRetryRequest serverRandom)
+                                                        (.getEnabledExtensions
+                                                          (.-sslConfig context)
+                                                          SSLHandshake/HELLO_RETRY_REQUEST)
+                                                        (.getEnabledExtensions
+                                                          (.-sslConfig context)
+                                                          SSLHandshake/SERVER_HELLO))]
+            (if (.hasRemaining m)
+                (set! (.-extensions this) (SSLExtensions. this m supportedExtensions))
+                (set! (.-extensions this) (SSLExtensions. this)))
+            (set! (.-clientHello this) nil)))))
+
+    (method ^:public handshakeType ^SSLHandshake [this]
+      (if (.isHelloRetryRequest serverRandom)
+          SSLHandshake/HELLO_RETRY_REQUEST
+          SSLHandshake/SERVER_HELLO))
+
+    (method ^:public messageLength ^int [this]
+      (unchecked-add-int (unchecked-add-int 38 (.length sessionId)) (.length extensions)))
+
+    (method ^:public send :throws [IOException] ^void [this ^HandshakeOutStream hos]
+      (.putInt8 hos (.-major serverVersion))
+      (.putInt8 hos (.-minor serverVersion))
+      (.write hos (.-randomBytes serverRandom))
+      (.putBytes8 hos (.getId sessionId))
+      (.putInt8 hos (bit-and-int (bit-shift-right-int (.-id cipherSuite) 8) 0xFF))
+      (.putInt8 hos (bit-and-int (.-id cipherSuite) 0xff))
+      (.putInt8 hos compressionMethod)
+      (.send extensions hos))
+
+    (method ^:public toString ^String [this]
+      (let [messageFormat (MessageFormat.
+                            "\"{0}\": '{'\n  \"server version\"      : \"{1}\",\n  \"random\"              : \"{2}\",\n  \"session id\"          : \"{3}\",\n  \"cipher suite\"        : \"{4}\",\n  \"compression methods\" : \"{5}\",\n  \"extensions\"          : [\n{6}\n  ]\n'}'"
+                            Locale/ENGLISH)
+            messageFields (new Object/1
+                               [(if (.isHelloRetryRequest serverRandom)
+                                    "HelloRetryRequest"
+                                    "ServerHello")
+                                (.-name serverVersion)
+                                (Utilities/toHexString (.-randomBytes serverRandom))
+                                (.toString sessionId)
+                                (java-str (.-name cipherSuite)
+                                          "("
+                                          (Utilities/byte16HexString (.-id cipherSuite))
+                                          ")")
+                                (.toHexDigits (HexFormat/of) compressionMethod)
+                                (Utilities/indent (.toString extensions) "    ")])]
+        (.format messageFormat messageFields))))
+
+  (defclass ^:private ^:static ^:final T12ServerHelloProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            clientHello (cast ClientHello$ClientHelloMessage message)]
+        (if (or (not (.-isResumption shc)) (nil? (.-resumingSession shc)))
+            (do
+              (when-not (.-enableSessionCreation (.-sslConfig shc))
+                (throw (SSLException. "Not resumption, and no new session is allowed")))
+              (let [session (SSLSessionImpl. shc CipherSuite/C_NULL)]
+                (.setMaximumPacketSize session (.-maximumPacketSize (.-sslConfig shc)))
+                (set! (.-handshakeSession shc) session)
+                (let [enabledExtensions (.getEnabledExtensions
+                                          (.-sslConfig shc)
+                                          SSLHandshake/CLIENT_HELLO
+                                          (.-negotiatedProtocol shc))]
+                  (.consumeOnTrade (.-extensions clientHello) shc enabledExtensions)
+                  (let [credentials (T12ServerHelloProducer/chooseCipherSuite shc clientHello)]
+                    (when (nil? credentials)
+                      (throw (.fatal (.-conContext shc)
+                                     Alert/HANDSHAKE_FAILURE
+                                     "no cipher suites in common")))
+                    (set! (.-negotiatedCipherSuite shc) (.-cipherSuite credentials))
+                    (set! (.-handshakeKeyExchange shc) (.-keyExchange credentials))
+                    (.setSuite (.-handshakeSession shc) (.-cipherSuite credentials))
+                    (.addAll (.-handshakePossessions shc)
+                             (Arrays/asList (.-possessions credentials)))
+                    (.determine (.-handshakeHash shc)
+                                (.-negotiatedProtocol shc)
+                                (.-negotiatedCipherSuite shc))
+                    (set! (.-stapleParams shc) (StatusResponseManager/processStapling shc))
+                    (set! (.-staplingActive shc) (some? (.-stapleParams shc)))
+                    (let [ke (.-keyExchange credentials)]
+                      (when (some? ke)
+                        (for-each [^{:tag (Map$Entry Byte HandshakeProducer)} me
+                                     (.getHandshakeProducers ke shc)]
+                          (.put (.-handshakeProducers shc)
+                                (cast Byte (.getKey me))
+                                (cast HandshakeProducer (.getValue me)))))
+                      (when (and (and (some? ke)
+                                      (not (identical?
+                                             (.-clientAuthType (.-sslConfig shc))
+                                             ClientAuthType/CLIENT_AUTH_NONE)))
+                                 (not (.isAnonymous (.-negotiatedCipherSuite shc))))
+                        (for-each [^SSLHandshake hs (.getRelatedHandshakers ke shc)]
+                          (when (identical? hs SSLHandshake/CERTIFICATE)
+                            (.put (.-handshakeProducers shc)
+                                  (.-id SSLHandshake/CERTIFICATE_REQUEST)
+                                  SSLHandshake/CERTIFICATE_REQUEST)
+                            (break))))
+                      (.put (.-handshakeProducers shc)
+                            (.-id SSLHandshake/SERVER_HELLO_DONE)
+                            SSLHandshake/SERVER_HELLO_DONE))))))
+            (do
+              (when (.-statelessResumption shc)
+                (set! (.-resumingSession shc)
+                      (SSLSessionImpl. (.-resumingSession shc)
+                                       ^SessionId (if (== (.length (.-sessionId clientHello)) 0)
+                                                      (SessionId.
+                                                        true
+                                                        (.getSecureRandom (.-sslContext shc)))
+                                                      (SessionId.
+                                                        (.getId (.-sessionId clientHello)))))))
+              (set! (.-handshakeSession shc) (.-resumingSession shc))
+              (set! (.-negotiatedProtocol shc) (.getProtocolVersion (.-resumingSession shc)))
+              (set! (.-negotiatedCipherSuite shc) (.getSuite (.-resumingSession shc)))
+              (.determine (.-handshakeHash shc)
+                          (.-negotiatedProtocol shc)
+                          (.-negotiatedCipherSuite shc))))
+        (let [shm (ServerHelloMessage. shc
+                                       (.-negotiatedProtocol shc)
+                                       (.getSessionId (.-handshakeSession shc))
+                                       (.-negotiatedCipherSuite shc)
+                                       (RandomCookie. shc)
+                                       clientHello)]
+          (set! (.-serverHelloRandom shc) (.-serverRandom shm))
+          (.setRandoms (.-handshakeSession shc) (.-clientHelloRandom shc) (.-serverHelloRandom shc))
+          (let [serverHelloExtensions (.getEnabledExtensions
+                                        (.-sslConfig shc)
+                                        SSLHandshake/SERVER_HELLO
+                                        (.-negotiatedProtocol shc))]
+            (.produce (.-extensions shm) shc serverHelloExtensions)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Produced ServerHello handshake message" shm))
+            (.write shm (.-handshakeOutput shc))
+            (.flush (.-handshakeOutput shc))
+            (when (and (.-isResumption shc) (some? (.-resumingSession shc)))
+              (let [kdg (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol shc))]
+                (if (nil? kdg)
+                    (throw (.fatal (.-conContext shc)
+                                   Alert/INTERNAL_ERROR
+                                   (java-str "Not supported key derivation: "
+                                             (.-negotiatedProtocol shc))))
+                    (set! (.-handshakeKeyDerivation shc)
+                          (.createKeyDerivation kdg shc (.getMasterSecret (.-resumingSession shc)))))
+                (.put (.-handshakeProducers shc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED)))
+            nil))))
+
+    (method ^:private ^:static chooseCipherSuite :throws [IOException] ^KeyExchangeProperties [^ServerHandshakeContext shc
+                                                                                               ^ClientHello$ClientHelloMessage clientHello]
+      (let [^:mutable ^{:tag (List CipherSuite)} preferred nil
+            ^:mutable ^{:tag (List CipherSuite)} proposed nil]
+        (if (.-preferLocalCipherSuites (.-sslConfig shc))
+            (do
+              (set! preferred (.-activeCipherSuites shc))
+              (set! proposed (.-cipherSuites clientHello)))
+            (do
+              (set! preferred (.-cipherSuites clientHello))
+              (set! proposed (.-activeCipherSuites shc))))
+        (let [^{:tag (List CipherSuite)} legacySuites (LinkedList.)]
+          (for-each [^CipherSuite cs preferred]
+            (when-not (not (HandshakeContext/isNegotiable proposed (.-negotiatedProtocol shc) cs))
+              (when (identical? (.-clientAuthType (.-sslConfig shc))
+                                ClientAuthType/CLIENT_AUTH_REQUIRED)
+                (when (or (identical? (.-keyExchange cs) CipherSuite$KeyExchange/K_DH_ANON)
+                          (identical? (.-keyExchange cs) CipherSuite$KeyExchange/K_ECDH_ANON))
+                  (continue)))
+              (let [ke (SSLKeyExchange/valueOf (.-keyExchange cs) (.-negotiatedProtocol shc))]
+                (when (some? ke)
+                  (if (not (.permits ServerHandshakeContext/legacyAlgorithmConstraints
+                                     (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                                     (.-name cs)
+                                     nil))
+                      (.add legacySuites cs)
+                      (let [hcds (.createPossessions ke shc)]
+                        (when-not (or (nil? hcds) (== (alength hcds) 0))
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/fine (java-str "use cipher suite " (.-name cs))))
+                          (return (KeyExchangeProperties. cs ke hcds)))))))))
+          (for-each [^CipherSuite cs legacySuites]
+            (let [ke (SSLKeyExchange/valueOf (.-keyExchange cs) (.-negotiatedProtocol shc))]
+              (when (some? ke)
+                (let [hcds (.createPossessions ke shc)]
+                  (when (and (some? hcds) (not (== (alength hcds) 0)))
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/warning (java-str "use legacy cipher suite " (.-name cs))))
+                    (return (KeyExchangeProperties. cs ke hcds)))))))
+          (throw (.fatal (.-conContext shc) Alert/HANDSHAKE_FAILURE "no cipher suites in common")))))
+
+    (defclass ^:private ^:static ^:final KeyExchangeProperties
+      (field ^:final ^CipherSuite cipherSuite)
+
+      (field ^:final ^SSLKeyExchange keyExchange)
+
+      (field ^:final ^SSLPossession/1 possessions)
+
+      (constructor ^:private [this ^CipherSuite cipherSuite ^SSLKeyExchange keyExchange
+                              ^SSLPossession/1 possessions]
+        (set! (.-cipherSuite this) cipherSuite)
+        (set! (.-keyExchange this) keyExchange)
+        (set! (.-possessions this) possessions))))
+
+  (defclass ^:private ^:static ^:final T13ServerHelloProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            clientHello (cast ClientHello$ClientHelloMessage message)
+            sessionCache (cast SSLSessionContextImpl
+                               (.engineGetServerSessionContext (.-sslContext shc)))]
+        (if (or (not (.-isResumption shc)) (nil? (.-resumingSession shc)))
+            (do
+              (when-not (.-enableSessionCreation (.-sslConfig shc))
+                (throw (SSLException. "Not resumption, and no new session is allowed")))
+              (let [session (SSLSessionImpl. shc CipherSuite/C_NULL)]
+                (.setMaximumPacketSize session (.-maximumPacketSize (.-sslConfig shc)))
+                (set! (.-handshakeSession shc) session)
+                (let [enabledExtensions (.getEnabledExtensions
+                                          (.-sslConfig shc)
+                                          SSLHandshake/CLIENT_HELLO
+                                          (.-negotiatedProtocol shc))]
+                  (.consumeOnTrade (.-extensions clientHello) shc enabledExtensions)
+                  (let [cipherSuite (T13ServerHelloProducer/chooseCipherSuite shc clientHello)]
+                    (when (nil? cipherSuite)
+                      (throw (.fatal (.-conContext shc)
+                                     Alert/HANDSHAKE_FAILURE
+                                     "no cipher suites in common")))
+                    (set! (.-negotiatedCipherSuite shc) cipherSuite)
+                    (.setSuite (.-handshakeSession shc) cipherSuite)
+                    (.determine (.-handshakeHash shc)
+                                (.-negotiatedProtocol shc)
+                                (.-negotiatedCipherSuite shc))))))
+            (do
+              (set! (.-handshakeSession shc) (.-resumingSession shc))
+              (let [enabledExtensions (.getEnabledExtensions
+                                        (.-sslConfig shc)
+                                        SSLHandshake/CLIENT_HELLO
+                                        (.-negotiatedProtocol shc))]
+                (.consumeOnTrade (.-extensions clientHello) shc enabledExtensions)
+                (set! (.-negotiatedProtocol shc) (.getProtocolVersion (.-resumingSession shc)))
+                (set! (.-negotiatedCipherSuite shc) (.getSuite (.-resumingSession shc)))
+                (.determine (.-handshakeHash shc)
+                            (.-negotiatedProtocol shc)
+                            (.-negotiatedCipherSuite shc))
+                (ServerHello/setUpPskKD shc (.consumePreSharedKey (.-resumingSession shc))))))
+        (.put (.-handshakeProducers shc)
+              (.-id SSLHandshake/ENCRYPTED_EXTENSIONS)
+              SSLHandshake/ENCRYPTED_EXTENSIONS)
+        (.put (.-handshakeProducers shc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED)
+        (let [shm (ServerHelloMessage. shc
+                                       ProtocolVersion/TLS12
+                                       (.-sessionId clientHello)
+                                       (.-negotiatedCipherSuite shc)
+                                       (RandomCookie. shc)
+                                       clientHello)]
+          (set! (.-serverHelloRandom shc) (.-serverRandom shm))
+          (let [serverHelloExtensions (.getEnabledExtensions
+                                        (.-sslConfig shc)
+                                        SSLHandshake/SERVER_HELLO
+                                        (.-negotiatedProtocol shc))]
+            (.produce (.-extensions shm) shc serverHelloExtensions)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine "Produced ServerHello handshake message" shm))
+            (.write shm (.-handshakeOutput shc))
+            (.flush (.-handshakeOutput shc))
+            (.update (.-handshakeHash shc))
+            (let [ke (.-handshakeKeyExchange shc)]
+              (when (nil? ke)
+                (throw (.fatal (.-conContext shc) Alert/INTERNAL_ERROR "Not negotiated key shares")))
+              (let [handshakeKD (.createKeyDerivation ke shc)
+                    handshakeSecret (.deriveKey handshakeKD "TlsHandshakeSecret")
+                    kdg (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol shc))]
+                (when (nil? kdg)
+                  (throw (.fatal (.-conContext shc)
+                                 Alert/INTERNAL_ERROR
+                                 (java-str "Not supported key derivation: "
+                                           (.-negotiatedProtocol shc)))))
+                (let [^SSLKeyDerivation kd (SSLSecretDerivation. shc handshakeSecret)
+                      readSecret (.deriveKey kd "TlsClientHandshakeTrafficSecret")
+                      readKD (.createKeyDerivation kdg shc readSecret)
+                      readKey (.deriveKey readKD "TlsKey")
+                      readIv (IvParameterSpec. (.deriveData readKD "TlsIv"))
+                      ^:mutable ^SSLCipher$SSLReadCipher readCipher nil]
+                  (try
+                    (set! readCipher
+                          (.createReadCipher (.-bulkCipher (.-negotiatedCipherSuite shc))
+                                             (Authenticator/valueOf (.-negotiatedProtocol shc))
+                                             (.-negotiatedProtocol shc)
+                                             readKey
+                                             readIv
+                                             (.getSecureRandom (.-sslContext shc))))
+                    (catch GeneralSecurityException gse
+                      (throw (.fatal (.-conContext shc)
+                                     Alert/HANDSHAKE_FAILURE
+                                     "Missing cipher algorithm"
+                                     gse))))
+                  (when (nil? readCipher)
+                    (throw (.fatal (.-conContext shc)
+                                   Alert/ILLEGAL_PARAMETER
+                                   (java-str "Illegal cipher suite ("
+                                             (.-negotiatedCipherSuite shc)
+                                             ") and protocol version ("
+                                             (.-negotiatedProtocol shc)
+                                             ")"))))
+                  (set! (.-baseReadSecret shc) readSecret)
+                  (.changeReadCiphers (.-inputRecord (.-conContext shc)) readCipher)
+                  (let [writeSecret (.deriveKey kd "TlsServerHandshakeTrafficSecret")
+                        writeKD (.createKeyDerivation kdg shc writeSecret)
+                        writeKey (.deriveKey writeKD "TlsKey")
+                        writeIv (IvParameterSpec. (.deriveData writeKD "TlsIv"))
+                        ^:mutable ^SSLCipher$SSLWriteCipher writeCipher nil]
+                    (try
+                      (set! writeCipher
+                            (.createWriteCipher (.-bulkCipher (.-negotiatedCipherSuite shc))
+                                                (Authenticator/valueOf (.-negotiatedProtocol shc))
+                                                (.-negotiatedProtocol shc)
+                                                writeKey
+                                                writeIv
+                                                (.getSecureRandom (.-sslContext shc))))
+                      (catch GeneralSecurityException gse
+                        (throw (.fatal (.-conContext shc)
+                                       Alert/HANDSHAKE_FAILURE
+                                       "Missing cipher algorithm"
+                                       gse))))
+                    (when (nil? writeCipher)
+                      (throw (.fatal (.-conContext shc)
+                                     Alert/ILLEGAL_PARAMETER
+                                     (java-str "Illegal cipher suite ("
+                                               (.-negotiatedCipherSuite shc)
+                                               ") and protocol version ("
+                                               (.-negotiatedProtocol shc)
+                                               ")"))))
+                    (set! (.-baseWriteSecret shc) writeSecret)
+                    (.changeWriteCiphers (.-outputRecord (.-conContext shc))
+                                         writeCipher
+                                         (not (== (.length (.-sessionId clientHello)) 0)))
+                    (set! (.-handshakeKeyDerivation shc) kd)
+                    (when (.-isQuic (.-sslConfig shc))
+                      (let [engine (cast QuicTLSEngineImpl (.-transport (.-conContext shc)))]
+                        (try
+                          (.deriveHandshakeKeys engine)
+                          (catch IOException e
+                            (throw (.fatal (.-conContext shc)
+                                           Alert/HANDSHAKE_FAILURE
+                                           "Failed to derive keys"
+                                           e))))))
+                    (when (.statelessEnabled sessionCache) (set! (.-statelessResumption shc) true))
+                    nil))))))))
+
+    (method ^:private ^:static chooseCipherSuite ^CipherSuite [^ServerHandshakeContext shc
+                                                               ^ClientHello$ClientHelloMessage clientHello]
+      (let [^:mutable ^{:tag (List CipherSuite)} preferred nil
+            ^:mutable ^{:tag (List CipherSuite)} proposed nil]
+        (if (.-preferLocalCipherSuites (.-sslConfig shc))
+            (do
+              (set! preferred (.-activeCipherSuites shc))
+              (set! proposed (.-cipherSuites clientHello)))
+            (do
+              (set! preferred (.-cipherSuites clientHello))
+              (set! proposed (.-activeCipherSuites shc))))
+        (let [^:mutable ^CipherSuite legacySuite nil
+              legacyConstraints ServerHandshakeContext/legacyAlgorithmConstraints]
+          (for-each [^CipherSuite cs preferred]
+            (when-not (not (HandshakeContext/isNegotiable proposed (.-negotiatedProtocol shc) cs))
+              (if (and (nil? legacySuite)
+                       (not (.permits legacyConstraints
+                                      (EnumSet/of CryptoPrimitive/KEY_AGREEMENT)
+                                      (.-name cs)
+                                      nil)))
+                  (set! legacySuite cs)
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine (java-str "use cipher suite " (.-name cs))))
+                    (return cs)))))
+          (when (some? legacySuite)
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/warning (java-str "use legacy cipher suite " (.-name legacySuite))))
+            legacySuite)))))
+
+  (defclass ^:private ^:static ^:final T13HelloRetryRequestProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)]
+        (when (.-sentHRR shc)
+          (throw
+            (.fatal
+              (.-conContext shc)
+              Alert/HANDSHAKE_FAILURE
+              "TLS 1.3 server MUST NOT send a second HelloRetryRequest in the same connection")))
+        (let [clientHello (cast ClientHello$ClientHelloMessage message)
+              cipherSuite (T13ServerHelloProducer/chooseCipherSuite shc clientHello)]
+          (when (nil? cipherSuite)
+            (throw (.fatal (.-conContext shc)
+                           Alert/HANDSHAKE_FAILURE
+                           "no cipher suites in common for hello retry request")))
+          (let [hhrm (ServerHelloMessage. shc
+                                          ProtocolVersion/TLS12
+                                          (.-sessionId clientHello)
+                                          cipherSuite
+                                          RandomCookie/hrrRandom
+                                          clientHello)]
+            (set! (.-negotiatedCipherSuite shc) cipherSuite)
+            (.determine (.-handshakeHash shc)
+                        (.-negotiatedProtocol shc)
+                        (.-negotiatedCipherSuite shc))
+            (let [serverHelloExtensions (.getEnabledExtensions
+                                          (.-sslConfig shc)
+                                          SSLHandshake/HELLO_RETRY_REQUEST
+                                          (.-negotiatedProtocol shc))]
+              (.produce (.-extensions hhrm) shc serverHelloExtensions)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/fine "Produced HelloRetryRequest handshake message" hhrm))
+              (.write hhrm (.-handshakeOutput shc))
+              (.flush (.-handshakeOutput shc))
+              (set! (.-sentHRR shc) true)
+              (when-not (== (.length (.-sessionId clientHello)) 0)
+                (.encodeChangeCipherSpec (.-outputRecord (.-conContext shc))))
+              (.finish (.-handshakeHash shc))
+              (.clear (.-handshakeExtensions shc))
+              (.put (.-handshakeConsumers shc)
+                    (.-id SSLHandshake/CLIENT_HELLO)
+                    SSLHandshake/CLIENT_HELLO)
+              nil))))))
+
+  (defclass ^:private ^:static ^:final T13HelloRetryRequestReproducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            clientHello (cast ClientHello$ClientHelloMessage message)
+            cipherSuite (.-negotiatedCipherSuite shc)
+            hhrm (ServerHelloMessage. shc
+                                      ProtocolVersion/TLS12
+                                      (.-sessionId clientHello)
+                                      cipherSuite
+                                      RandomCookie/hrrRandom
+                                      clientHello)
+            serverHelloExtensions (.getEnabledExtensions
+                                    (.-sslConfig shc)
+                                    SSLHandshake/MESSAGE_HASH
+                                    (.-negotiatedProtocol shc))]
+        (.produce (.-extensions hhrm) shc serverHelloExtensions)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+          (SSLLogger/fine "Reproduced HelloRetryRequest handshake message" hhrm))
+        (let [hos (HandshakeOutStream. nil)] (.write hhrm hos) (.toByteArray hos)))))
+
+  (defclass ^:private ^:static ^:final ServerHelloConsumer
+    :implements [SSLConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^ByteBuffer message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (.remove (.-handshakeConsumers chc) (.-id SSLHandshake/SERVER_HELLO))
+        (when-not (.isEmpty (.-handshakeConsumers chc))
+          (.remove (.-handshakeConsumers chc) (.-id SSLHandshake/HELLO_VERIFY_REQUEST)))
+        (when-not (.isEmpty (.-handshakeConsumers chc))
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "No more message expected before ServerHello is processed")))
+        (let [shm (ServerHelloMessage. chc message)]
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine "Consuming ServerHello handshake message" shm))
+          (if (.isHelloRetryRequest (.-serverRandom shm))
+              (.onHelloRetryRequest this chc shm)
+              (.onServerHello this chc shm)))))
+
+    (method ^:private onHelloRetryRequest :throws [IOException] ^void [this
+                                                                       ^ClientHandshakeContext chc
+                                                                       ^ServerHelloMessage helloRetryRequest]
+      (let [extTypes (new SSLExtension/1 [SSLExtension/HRR_SUPPORTED_VERSIONS])]
+        (.consumeOnLoad (.-extensions helloRetryRequest) chc extTypes)
+        (let [^:mutable ^ProtocolVersion serverVersion nil
+              svs (cast SupportedVersionsExtension$SHSupportedVersionsSpec
+                        (.get (.-handshakeExtensions chc) SSLExtension/HRR_SUPPORTED_VERSIONS))]
+          (if (some? svs)
+              (set! serverVersion (ProtocolVersion/valueOf (.-selectedVersion svs)))
+              (set! serverVersion (.-serverVersion helloRetryRequest)))
+          (when-not (.contains (.-activeProtocols chc) serverVersion)
+            (throw (.fatal (.-conContext chc)
+                           Alert/PROTOCOL_VERSION
+                           (java-str "The server selected protocol version "
+                                     serverVersion
+                                     " is not accepted by client preferences "
+                                     (.-activeProtocols chc)))))
+          (when-not (.useTLS13PlusSpec serverVersion)
+            (throw (.fatal (.-conContext chc)
+                           Alert/PROTOCOL_VERSION
+                           (java-str "Unexpected HelloRetryRequest for " (.-name serverVersion)))))
+          (set! (.-negotiatedProtocol chc) serverVersion)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine (java-str "Negotiated protocol version: " (.-name serverVersion))))
+          (SignatureScheme/updateHandshakeLocalSupportedAlgs chc)
+          (.clear (.-handshakePossessions chc))
+          (if (.-isDTLS serverVersion)
+              (.consume d13HrrHandshakeConsumer chc helloRetryRequest)
+              (.consume t13HrrHandshakeConsumer chc helloRetryRequest)))))
+
+    (method ^:private onServerHello :throws [IOException] ^void [this ^ClientHandshakeContext chc
+                                                                 ^ServerHelloMessage serverHello]
+      (let [extTypes (new SSLExtension/1 [SSLExtension/SH_SUPPORTED_VERSIONS])]
+        (.consumeOnLoad (.-extensions serverHello) chc extTypes)
+        (let [^:mutable ^ProtocolVersion serverVersion nil
+              svs (cast SupportedVersionsExtension$SHSupportedVersionsSpec
+                        (.get (.-handshakeExtensions chc) SSLExtension/SH_SUPPORTED_VERSIONS))]
+          (if (some? svs)
+              (set! serverVersion (ProtocolVersion/valueOf (.-selectedVersion svs)))
+              (set! serverVersion (.-serverVersion serverHello)))
+          (when-not (.contains (.-activeProtocols chc) serverVersion)
+            (throw (.fatal (.-conContext chc)
+                           Alert/PROTOCOL_VERSION
+                           (java-str "The server selected protocol version "
+                                     serverVersion
+                                     " is not accepted by client preferences "
+                                     (.-activeProtocols chc)))))
+          (set! (.-negotiatedProtocol chc) serverVersion)
+          (when-not (.-isNegotiated (.-conContext chc))
+            (set! (.-protocolVersion (.-conContext chc)) (.-negotiatedProtocol chc))
+            (.setVersion (.-outputRecord (.-conContext chc)) (.-negotiatedProtocol chc)))
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+            (SSLLogger/fine (java-str "Negotiated protocol version: " (.-name serverVersion))))
+          (SignatureScheme/updateHandshakeLocalSupportedAlgs chc)
+          (when (.isVersionDowngrade (.-serverRandom serverHello) chc)
+            (throw (.fatal (.-conContext chc)
+                           Alert/ILLEGAL_PARAMETER
+                           "A potential protocol version downgrade attack")))
+          (cond
+            (.-isDTLS serverVersion)
+              (if (.useTLS13PlusSpec serverVersion)
+                  (.consume d13HandshakeConsumer chc serverHello)
+                  (do
+                    (.clear (.-handshakePossessions chc))
+                    (.consume d12HandshakeConsumer chc serverHello)))
+            (.useTLS13PlusSpec serverVersion) (.consume t13HandshakeConsumer chc serverHello)
+            :else
+              (do
+                (.clear (.-handshakePossessions chc))
+                (.consume t12HandshakeConsumer chc serverHello)))))))
+
+  (defclass ^:private ^:static ^:final T12ServerHelloConsumer
+    :implements [HandshakeConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            serverHello (cast ServerHelloMessage message)]
+        (when-not (.isNegotiable chc (.-serverVersion serverHello))
+          (throw (.fatal
+                   (.-conContext chc)
+                   Alert/PROTOCOL_VERSION
+                   (java-str
+                     "Server chose "
+                     (.-serverVersion serverHello)
+                     ", but that protocol version is not enabled or not supported by the client."))))
+        (set! (.-negotiatedCipherSuite chc) (.-cipherSuite serverHello))
+        (.determine (.-handshakeHash chc) (.-negotiatedProtocol chc) (.-negotiatedCipherSuite chc))
+        (set! (.-serverHelloRandom chc) (.-serverRandom serverHello))
+        (when (nil? (.-keyExchange (.-negotiatedCipherSuite chc)))
+          (throw (.fatal (.-conContext chc)
+                         Alert/PROTOCOL_VERSION
+                         (java-str
+                           "TLS 1.2 or prior version does not support the server cipher suite: "
+                           (.-name (.-negotiatedCipherSuite chc))))))
+        (let [^:mutable extTypes (new SSLExtension/1 [SSLExtension/SH_RENEGOTIATION_INFO])]
+          (.consumeOnLoad (.-extensions serverHello) chc extTypes)
+          (when (some? (.-resumingSession chc))
+            (if (.equals (.-sessionId serverHello) (.getSessionId (.-resumingSession chc)))
+                (let [sessionSuite (.getSuite (.-resumingSession chc))]
+                  (when-not (identical? (.-negotiatedCipherSuite chc) sessionSuite)
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/PROTOCOL_VERSION
+                                   "Server returned wrong cipher suite for session")))
+                  (let [sessionVersion (.getProtocolVersion (.-resumingSession chc))]
+                    (when-not (identical? (.-negotiatedProtocol chc) sessionVersion)
+                      (throw (.fatal (.-conContext chc)
+                                     Alert/PROTOCOL_VERSION
+                                     "Server resumed with wrong protocol version")))
+                    (set! (.-isResumption chc) true)
+                    (.setAsSessionResumption (.-resumingSession chc) true)
+                    (set! (.-handshakeSession chc) (.-resumingSession chc))))
+                (do
+                  (.invalidate (.-resumingSession chc))
+                  (set! (.-resumingSession chc) nil)
+                  (set! (.-isResumption chc) false)
+                  (when-not (.-enableSessionCreation (.-sslConfig chc))
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/PROTOCOL_VERSION
+                                   "New session creation is disabled"))))))
+          (set! extTypes (.getEnabledExtensions (.-sslConfig chc) SSLHandshake/SERVER_HELLO))
+          (.consumeOnLoad (.-extensions serverHello) chc extTypes)
+          (when-not (.-isResumption chc)
+            (when (some? (.-resumingSession chc))
+              (.invalidate (.-resumingSession chc))
+              (set! (.-resumingSession chc) nil))
+            (when-not (.-enableSessionCreation (.-sslConfig chc))
+              (throw (.fatal (.-conContext chc)
+                             Alert/PROTOCOL_VERSION
+                             "New session creation is disabled")))
+            (if (and (== (.length (.-sessionId serverHello)) 0) (.-statelessResumption chc))
+                (let [newId (SessionId. true (.getSecureRandom (.-sslContext chc)))]
+                  (set! (.-handshakeSession chc)
+                        (SSLSessionImpl. chc (.-negotiatedCipherSuite chc) newId))
+                  (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                    (SSLLogger/fine (java-str "Locally assigned Session Id: " (.toString newId)))))
+                (set! (.-handshakeSession chc)
+                      (SSLSessionImpl. chc (.-negotiatedCipherSuite chc) (.-sessionId serverHello))))
+            (.setMaximumPacketSize (.-handshakeSession chc) (.-maximumPacketSize (.-sslConfig chc))))
+          (.setRandoms (.-handshakeSession chc) (.-clientHelloRandom chc) (.-serverHelloRandom chc))
+          (.consumeOnTrade (.-extensions serverHello) chc extTypes)
+          (if (.-isResumption chc)
+              (let [kdg (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol chc))]
+                (if (nil? kdg)
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/INTERNAL_ERROR
+                                   (java-str "Not supported key derivation: "
+                                             (.-negotiatedProtocol chc))))
+                    (set! (.-handshakeKeyDerivation chc)
+                          (.createKeyDerivation kdg chc (.getMasterSecret (.-resumingSession chc)))))
+                (when (.-statelessResumption chc)
+                  (.putIfAbsent (.-handshakeConsumers chc)
+                                (.-id SSLHandshake/NEW_SESSION_TICKET)
+                                SSLHandshake/NEW_SESSION_TICKET))
+                (.putIfAbsent (.-consumers (.-conContext chc))
+                              (.-id ContentType/CHANGE_CIPHER_SPEC)
+                              ChangeCipherSpec/t10Consumer)
+                (.put (.-handshakeConsumers chc) (.-id SSLHandshake/FINISHED) SSLHandshake/FINISHED))
+              (let [ke (SSLKeyExchange/valueOf (.-keyExchange (.-negotiatedCipherSuite chc))
+                                               (.-negotiatedProtocol chc))]
+                (set! (.-handshakeKeyExchange chc) ke)
+                (when (some? ke)
+                  (for-each [^SSLHandshake handshake (.getRelatedHandshakers ke chc)]
+                    (.put (.-handshakeConsumers chc) (.-id handshake) handshake)))
+                (.put (.-handshakeConsumers chc)
+                      (.-id SSLHandshake/SERVER_HELLO_DONE)
+                      SSLHandshake/SERVER_HELLO_DONE)))))))
+
+  (method ^:private ^:static setUpPskKD :throws [SSLHandshakeException] ^void [^HandshakeContext hc
+                                                                               ^SecretKey psk]
+    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+      (SSLLogger/fine "Using PSK to derive early secret"))
+    (try
+      (let [hashAlg (.-hashAlg (.-negotiatedCipherSuite hc))
+            hkdf (KDF/getInstance (.-hkdfAlgorithm hashAlg))
+            earlySecret (.deriveKey hkdf
+                                    "TlsEarlySecret"
+                                    (.extractOnly
+                                      (.addSalt (.addIKM (HKDFParameterSpec/ofExtract) psk)
+                                                (new byte/1 (.-hashLength hashAlg)))))]
+        (set! (.-handshakeKeyDerivation hc) (SSLSecretDerivation. hc earlySecret)))
+      (catch GeneralSecurityException gse
+        (throw (SSLHandshakeException. "Could not generate secret" gse)))))
+
+  (defclass ^:private ^:static ^:final T13ServerHelloConsumer
+    :implements [HandshakeConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            serverHello (cast ServerHelloMessage message)]
+        (when-not (identical? (.-serverVersion serverHello) ProtocolVersion/TLS12)
+          (throw (.fatal (.-conContext chc)
+                         Alert/PROTOCOL_VERSION
+                         "The ServerHello.legacy_version field is not TLS 1.2")))
+        (set! (.-negotiatedCipherSuite chc) (.-cipherSuite serverHello))
+        (.determine (.-handshakeHash chc) (.-negotiatedProtocol chc) (.-negotiatedCipherSuite chc))
+        (set! (.-serverHelloRandom chc) (.-serverRandom serverHello))
+        (let [extTypes (.getEnabledExtensions (.-sslConfig chc) SSLHandshake/SERVER_HELLO)]
+          (.consumeOnLoad (.-extensions serverHello) chc extTypes)
+          (if (not (.-isResumption chc))
+              (do
+                (when (some? (.-resumingSession chc))
+                  (.invalidate (.-resumingSession chc))
+                  (set! (.-resumingSession chc) nil))
+                (when-not (.-enableSessionCreation (.-sslConfig chc))
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/PROTOCOL_VERSION
+                                 "New session creation is disabled")))
+                (set! (.-handshakeSession chc)
+                      (SSLSessionImpl. chc (.-negotiatedCipherSuite chc) (.-sessionId serverHello)))
+                (.setMaximumPacketSize (.-handshakeSession chc)
+                                       (.-maximumPacketSize (.-sslConfig chc))))
+              (let [psk (.consumePreSharedKey (.-resumingSession chc))]
+                (when (nil? psk)
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/INTERNAL_ERROR
+                                 "No PSK available. Unable to resume.")))
+                (set! (.-handshakeSession chc) (.-resumingSession chc))
+                (ServerHello/setUpPskKD chc psk)))
+          (.consumeOnTrade (.-extensions serverHello) chc extTypes)
+          (.update (.-handshakeHash chc))
+          (let [ke (.-handshakeKeyExchange chc)]
+            (when (nil? ke)
+              (throw (.fatal (.-conContext chc) Alert/INTERNAL_ERROR "Not negotiated key shares")))
+            (let [handshakeKD (.createKeyDerivation ke chc)
+                  handshakeSecret (.deriveKey handshakeKD "TlsHandshakeSecret")
+                  kdg (SSLTrafficKeyDerivation/valueOf (.-negotiatedProtocol chc))]
+              (when (nil? kdg)
+                (throw (.fatal (.-conContext chc)
+                               Alert/INTERNAL_ERROR
+                               (java-str "Not supported key derivation: "
+                                         (.-negotiatedProtocol chc)))))
+              (let [^SSLKeyDerivation secretKD (SSLSecretDerivation. chc handshakeSecret)
+                    readSecret (.deriveKey secretKD "TlsServerHandshakeTrafficSecret")
+                    readKD (.createKeyDerivation kdg chc readSecret)
+                    readKey (.deriveKey readKD "TlsKey")
+                    readIv (IvParameterSpec. (.deriveData readKD "TlsIv"))
+                    ^:mutable ^SSLCipher$SSLReadCipher readCipher nil]
+                (try
+                  (set! readCipher
+                        (.createReadCipher (.-bulkCipher (.-negotiatedCipherSuite chc))
+                                           (Authenticator/valueOf (.-negotiatedProtocol chc))
+                                           (.-negotiatedProtocol chc)
+                                           readKey
+                                           readIv
+                                           (.getSecureRandom (.-sslContext chc))))
+                  (catch GeneralSecurityException gse
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/HANDSHAKE_FAILURE
+                                   "Missing cipher algorithm"
+                                   gse))))
+                (when (nil? readCipher)
+                  (throw (.fatal (.-conContext chc)
+                                 Alert/ILLEGAL_PARAMETER
+                                 (java-str "Illegal cipher suite ("
+                                           (.-negotiatedCipherSuite chc)
+                                           ") and protocol version ("
+                                           (.-negotiatedProtocol chc)
+                                           ")"))))
+                (set! (.-baseReadSecret chc) readSecret)
+                (.changeReadCiphers (.-inputRecord (.-conContext chc)) readCipher)
+                (let [writeSecret (.deriveKey secretKD "TlsClientHandshakeTrafficSecret")
+                      writeKD (.createKeyDerivation kdg chc writeSecret)
+                      writeKey (.deriveKey writeKD "TlsKey")
+                      writeIv (IvParameterSpec. (.deriveData writeKD "TlsIv"))
+                      ^:mutable ^SSLCipher$SSLWriteCipher writeCipher nil]
+                  (try
+                    (set! writeCipher
+                          (.createWriteCipher (.-bulkCipher (.-negotiatedCipherSuite chc))
+                                              (Authenticator/valueOf (.-negotiatedProtocol chc))
+                                              (.-negotiatedProtocol chc)
+                                              writeKey
+                                              writeIv
+                                              (.getSecureRandom (.-sslContext chc))))
+                    (catch GeneralSecurityException gse
+                      (throw (.fatal (.-conContext chc)
+                                     Alert/HANDSHAKE_FAILURE
+                                     "Missing cipher algorithm"
+                                     gse))))
+                  (when (nil? writeCipher)
+                    (throw (.fatal (.-conContext chc)
+                                   Alert/ILLEGAL_PARAMETER
+                                   (java-str "Illegal cipher suite ("
+                                             (.-negotiatedCipherSuite chc)
+                                             ") and protocol version ("
+                                             (.-negotiatedProtocol chc)
+                                             ")"))))
+                  (set! (.-baseWriteSecret chc) writeSecret)
+                  (.changeWriteCiphers (.-outputRecord (.-conContext chc))
+                                       writeCipher
+                                       (not (== (.length (.-sessionId serverHello)) 0)))
+                  (set! (.-handshakeKeyDerivation chc) secretKD)
+                  (when (.-isQuic (.-sslConfig chc))
+                    (let [engine (cast QuicTLSEngineImpl (.-transport (.-conContext chc)))]
+                      (try
+                        (.deriveHandshakeKeys engine)
+                        (catch IOException e
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/HANDSHAKE_FAILURE
+                                         "Failed to derive keys"
+                                         e))))))
+                  (.putIfAbsent (.-consumers (.-conContext chc))
+                                (.-id ContentType/CHANGE_CIPHER_SPEC)
+                                ChangeCipherSpec/t13Consumer)
+                  (.put (.-handshakeConsumers chc)
+                        (.-id SSLHandshake/ENCRYPTED_EXTENSIONS)
+                        SSLHandshake/ENCRYPTED_EXTENSIONS)
+                  (.put (.-handshakeConsumers chc)
+                        (.-id SSLHandshake/CERTIFICATE_REQUEST)
+                        SSLHandshake/CERTIFICATE_REQUEST)
+                  (.put (.-handshakeConsumers chc)
+                        (.-id SSLHandshake/CERTIFICATE)
+                        SSLHandshake/CERTIFICATE)
+                  (.put (.-handshakeConsumers chc)
+                        (.-id SSLHandshake/CERTIFICATE_VERIFY)
+                        SSLHandshake/CERTIFICATE_VERIFY)
+                  (.put (.-handshakeConsumers chc)
+                        (.-id SSLHandshake/FINISHED)
+                        SSLHandshake/FINISHED)))))))))
+
+  (defclass ^:private ^:static ^:final T13HelloRetryRequestConsumer
+    :implements [HandshakeConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)
+            helloRetryRequest (cast ServerHelloMessage message)]
+        (when-not (identical? (.-serverVersion helloRetryRequest) ProtocolVersion/TLS12)
+          (throw (.fatal (.-conContext chc)
+                         Alert/PROTOCOL_VERSION
+                         "The HelloRetryRequest.legacy_version is not TLS 1.2")))
+        (set! (.-negotiatedCipherSuite chc) (.-cipherSuite helloRetryRequest))
+        (let [extTypes (.getEnabledExtensions (.-sslConfig chc) SSLHandshake/HELLO_RETRY_REQUEST)]
+          (.consumeOnLoad (.-extensions helloRetryRequest) chc extTypes)
+          (.consumeOnTrade (.-extensions helloRetryRequest) chc extTypes)
+          (.finish (.-handshakeHash chc))
+          (let [hos (HandshakeOutStream. nil)]
+            (try
+              (.write (.-initialClientHelloMsg chc) hos)
+              (catch IOException ioe
+                (throw (.fatal (.-conContext chc)
+                               Alert/HANDSHAKE_FAILURE
+                               "Failed to construct message hash"
+                               ioe))))
+            (.deliver (.-handshakeHash chc) (.toByteArray hos))
+            (.determine (.-handshakeHash chc)
+                        (.-negotiatedProtocol chc)
+                        (.-negotiatedCipherSuite chc))
+            (let [clientHelloHash (.digest (.-handshakeHash chc))
+                  hashLen (.-hashLength (.-hashAlg (.-negotiatedCipherSuite chc)))
+                  hashedClientHello (new byte/1 (unchecked-add-int 4 hashLen))]
+              (aset hashedClientHello 0 (.-id SSLHandshake/MESSAGE_HASH))
+              (aset hashedClientHello 1 (unchecked-byte 0x00))
+              (aset hashedClientHello 2 (unchecked-byte 0x00))
+              (aset hashedClientHello 3 (unchecked-byte (bit-and-int hashLen 0xFF)))
+              (System/arraycopy clientHelloHash 0 hashedClientHello 4 hashLen)
+              (.finish (.-handshakeHash chc))
+              (.deliver (.-handshakeHash chc) hashedClientHello)
+              (let [hrrBodyLen (.remaining (.-handshakeRecord helloRetryRequest))
+                    hrrMessage (new byte/1 (unchecked-add-int 4 hrrBodyLen))]
+                (aset hrrMessage 0 (.-id SSLHandshake/HELLO_RETRY_REQUEST))
+                (aset hrrMessage
+                      1
+                      (unchecked-byte (bit-and-int (bit-shift-right-int hrrBodyLen 16) 0xFF)))
+                (aset hrrMessage
+                      2
+                      (unchecked-byte (bit-and-int (bit-shift-right-int hrrBodyLen 8) 0xFF)))
+                (aset hrrMessage 3 (unchecked-byte (bit-and-int hrrBodyLen 0xFF)))
+                (let [hrrBody (.duplicate (.-handshakeRecord helloRetryRequest))]
+                  (.get hrrBody hrrMessage 4 hrrBodyLen)
+                  (.receive (.-handshakeHash chc) hrrMessage)
+                  (.reproduce (.-extensions (.-initialClientHelloMsg chc))
+                              chc
+                              (new SSLExtension/1
+                                   [SSLExtension/CH_COOKIE
+                                    SSLExtension/CH_KEY_SHARE
+                                    SSLExtension/CH_PRE_SHARED_KEY]))
+                  (.produce SSLHandshake/CLIENT_HELLO context helloRetryRequest))))))))))

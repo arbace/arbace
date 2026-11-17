@@ -1,0 +1,149 @@
+;; jrt: java.home (doc/classes/JAVA-DEFERRED-TRIAGE.md, JCS233 (a), "As built: JCS233"; doc/go/JRT-NOTES.md,
+;; "java.home"). The JDK's code and the JDK's tests read files below ${java.home}: the security properties
+;; (conf/security/java.security), the crypto jurisdiction policies (conf/security/policy/), the trust anchors
+;; (lib/security/cacerts, JCS140 (a)), the networking and logging defaults (conf/net.properties,
+;; conf/logging.properties) and the time-zone database (lib/tzdb.dat). The Go build embeds those files as
+;; resource data (jdk/data, bin/jrt-convert's data step); java.home is a directory they are written into once:
+;; $XDG_CACHE_HOME/arbace/java-home/KEY (else $HOME/.cache/...), KEY the first 20 hex digits of the SHA-256 of
+;; the files' names and bytes, so that every executable with the same data shares one directory and a build
+;; with other data gets its own. It is made at the first read of the property java.home (System.getProperty,
+;; getProperties, StaticProperty): its files written below a temporary name beside it, then renamed into place
+;; (a process that loses the race takes the winner's, a reader never sees one half written). ARBACE_JAVA_HOME
+;; names a directory to use instead (nothing written). Without a cache directory, a host that cannot write one
+;; (the box), or no such resource embedded, java.home is "", as before JCS233: the readers that need it fail as
+;; the JDK without the file; jrt's own readers (Security's loadMaster, ZoneInfoFile's, NetProperties',
+;; LogManager's variants) read the embedded resources and need no java.home.
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0 (LICENSE.md).
+(in-ns 'go.arbace.jrt)
+
+(go/file "javahome.go"
+  :imports [[sha256 "crypto/sha256"] [hex "encoding/hex"] [os "os"] [strconv "strconv"] [strings "strings"]])
+
+(go/var ^{:tag (slice string)
+          :doc "javaHomeFiles are the embedded resources java.home holds, at the paths of the JDK image (sorted).\n"}
+  javaHomeFiles
+  (lit (slice string)
+    "conf/logging.properties"
+    "conf/net.properties"
+    "conf/security/java.security"
+    "conf/security/policy/README.txt"
+    "conf/security/policy/limited/default_US_export.policy"
+    "conf/security/policy/limited/default_local.policy"
+    "conf/security/policy/limited/exempt_local.policy"
+    "conf/security/policy/unlimited/default_US_export.policy"
+    "conf/security/policy/unlimited/default_local.policy"
+    "lib/security/cacerts"
+    "lib/tzdb.dat"))
+
+(go/var ^{:tag (* String)
+          :doc "javaHomeUnset is java.home's value until its first read (initProps puts this very String in the table;
+System_GetProperty_String__String replaces it by JavaHome's answer; a property set over it, -Djava.home=..., is kept).\n"}
+  javaHomeUnset (Str ""))
+
+(go/func javaHomeData
+  "javaHomeData is java.home's files as h embeds them (the names, their bytes; a file not embedded left out) and
+their key: the first 20 hex digits of the SHA-256 of each name, a NUL, its length in decimal, a NUL and its bytes.\n"
+  [^Host h] :results [(slice string) (slice (slice byte)) string]
+  (let [d (sha256/New)
+        names (make (slice string) 0 (len javaHomeFiles))
+        data (make (slice (slice byte)) 0 (len javaHomeFiles))]
+    (range [_ n javaHomeFiles]
+      (let [(values b ok) (.Resource h n)]
+        (when ok
+          (set! names (append names n))
+          (set! data (append data b))
+          (.Write d (conv (slice byte) (+ n "\u0000" (strconv/Itoa (len b)) "\u0000")))
+          (.Write d b))))
+    (return names data (subslice (hex/EncodeToString (.Sum d nil)) 0 20))))
+
+(go/func javaHomeBase
+  "javaHomeBase is the directory java.home's keys go into: $XDG_CACHE_HOME/arbace/java-home (an absolute
+XDG_CACHE_HOME, as the XDG base directories say), else $HOME/.cache/arbace/java-home; \"\" without either.\n"
+  ^string [^Host h]
+  (let [(values x ok) (.Getenv h "XDG_CACHE_HOME")]
+    (when (and ok (strings/HasPrefix x "/"))
+      (return (+ (strings/TrimRight x "/") "/arbace/java-home"))))
+  (let [(values home ok) (.Getenv h "HOME")]
+    (when (and ok (strings/HasPrefix home "/"))
+      (return (+ (strings/TrimRight home "/") "/.cache/arbace/java-home"))))
+  "")
+
+(go/func isHostDir ^bool [^Host h ^string p]
+  (let [(values fi err) (.Stat h p)]
+    (and (== err nil) (.-IsDir fi))))
+
+(go/func mkdirAllHost
+  "mkdirAllHost makes directory p and its missing parents (0755) through h.\n"
+  ^error [^Host h ^string p]
+  (when (or (== p "") (== p "/") (isHostDir h p))
+    (return nil))
+  (let [i (strings/LastIndexByte p \/)]
+    (when (> i 0)
+      (when [err (mkdirAllHost h (subslice p 0 i))] (!= err nil)
+        (return err))))
+  (let [err (.Mkdir h p 0755)]
+    (when (and (!= err nil) (not (isHostDir h p)))
+      (return err)))
+  nil)
+
+(go/func removeAllHost
+  "removeAllHost removes p and everything below it through h, ignoring errors (a temporary directory).\n"
+  [^Host h ^string p]
+  (when (isHostDir h p)
+    (let [(values ns err) (.ReadDir h p)]
+      (when (== err nil)
+        (range [_ n ns]
+          (removeAllHost h (+ p "/" n))))))
+  (.Remove h p))
+
+(go/func writeJavaHome
+  "writeJavaHome writes files names (their bytes data) into the new directory dir through h.\n"
+  ^error [^Host h ^string dir ^{:tag (slice string)} names ^{:tag (slice (slice byte))} data]
+  (range [i n names]
+    (let [p (+ dir "/" n)]
+      (when [err (mkdirAllHost h (subslice p 0 (strings/LastIndexByte p \/)))] (!= err nil)
+        (return err))
+      (let [(values f err) (.Open h p (bit-or os/O_WRONLY os/O_CREATE os/O_EXCL) 0644)]
+        (when (!= err nil)
+          (return err))
+        (let [(values _ werr) (.Write f (aget data i))
+              cerr (.Close f)]
+          (when (!= werr nil)
+            (return werr))
+          (when (!= cerr nil)
+            (return cerr))))))
+  nil)
+
+(go/func JavaHome
+  "JavaHome is java.home's directory on host h, made when missing (the file's header): ARBACE_JAVA_HOME when set,
+else the cache directory of the embedded files' key; \"\" when there is none to be had.\n"
+  ^string [^Host h]
+  (let [(values jh ok) (.Getenv h "ARBACE_JAVA_HOME")]
+    (when (and ok (!= jh ""))
+      (return jh)))
+  (let [base (javaHomeBase h)]
+    (when (== base "")
+      (return ""))
+    (let [(values names data key) (javaHomeData h)]
+      (when (== (len names) 0)
+        (return ""))
+      (let [dir (+ base "/" key)]
+        (when (isHostDir h dir)
+          (return dir))
+        (when (!= (mkdirAllHost h base) nil)
+          (return ""))
+        (let [r (make (slice byte) 8)]
+          (.RandomBytes h r)
+          (let [tmp (+ dir ".tmp-" (hex/EncodeToString r))]
+            (when (!= (.Mkdir h tmp 0755) nil)
+              (return ""))
+            (when (!= (writeJavaHome h tmp names data) nil)
+              (removeAllHost h tmp)
+              (return ""))
+            (when (== (.Rename h tmp dir) nil)
+              (return dir))
+            ;; another process renamed its copy first: take it
+            (removeAllHost h tmp)
+            (when (isHostDir h dir)
+              (return dir))
+            ""))))))
