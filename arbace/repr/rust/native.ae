@@ -25,11 +25,13 @@
         each FILE's first error as rustc reports it (rustc --error-format=json's first error: its
         message, code and primary span), a line FILE, ok|err, l1:c1-l2:c2, code, message; with --ref,
         against rustc's lines (bin/repr-rust native-errors), the files whose lines differ reported
-    tree --pin PIN [--expr] -o DIR --edition E [--list FILE] FILE...
+    tree --pin PIN [--expr] [--depths] -o DIR --edition E [--list FILE] FILE...
         DIR/FILE.tree and DIR/FILE.lines per file, as rsdump tree writes them (the round trip's
-        tree level, SPEC §11.2), from the native tree"
+        tree level, SPEC §11.2), from the native tree; --depths: each line's indentation as its
+        depth in decimal (the round trip's, RCD1)"
   (:require [arbace.repr.rust.lex :as lx]
             [arbace.repr.rust.parse :as ps]
+            [arbace.repr.rust.stack :as stk]
             [arbace.string :as str])
   (:import [arbace.repr.rust.lex Tok Src]
            [arbace.repr.rust.parse Sp Id Lt TS TT]
@@ -94,19 +96,20 @@
 (defn- tree-at
   "TokenTree::Delimited of the group opening at i"
   [^Src src ^objects toks ^ints mt ^long i]
-  (let [^Tok o (aget toks (int i)) c (aget mt (int i)) ^Tok cl (aget toks c)]
-    (list 'Delimited (list 'DelimSpan :open (span-out src (.-lo o) (.-hi o)) :close (span-out src (.-lo cl) (.-hi cl)))
-          (list 'DelimSpacing :open (spacing-out (.-sp o)) :close (spacing-out (.-sp cl)))
-          (delim-names (.-kind o))
-          (stream-out src toks mt (inc i) c))))
+  (stk/ensure-sufficient-stack
+    (let [^Tok o (aget toks (int i)) c (aget mt (int i)) ^Tok cl (aget toks c)]
+     (list 'Delimited (list 'DelimSpan :open (span-out src (.-lo o) (.-hi o)) :close (span-out src (.-lo cl) (.-hi cl)))
+           (list 'DelimSpacing :open (spacing-out (.-sp o)) :close (spacing-out (.-sp cl)))
+           (delim-names (.-kind o))
+          (stream-out src toks mt (inc i) c)))))
 
 (defn out
   "The parser's tree as the helper's dump writes it: spans [l1 c1 l2 c2] (nil for the dummy span),
   identifiers (id NAME 0), lifetimes (lifetime NAME), token streams TokenStream([...])"
   [x ^Src src ^objects toks ^ints mt ^long ed]
   (letfn [(o [x]
-            (cond (seq? x) (apply list (map o x))
-                  (vector? x) (mapv o x)
+            (cond (seq? x) (stk/ensure-sufficient-stack (apply list (mapv o x)))
+                  (vector? x) (stk/ensure-sufficient-stack (mapv o x))
                   (instance? Sp x) (span-out src (.-lo ^Sp x) (.-hi ^Sp x))
                   (instance? Id x) (list 'id (print-name (.-name ^Id x) ed) 0)
                   (instance? Lt x) (list 'lifetime (.-name ^Id (.-ident ^Lt x)))
@@ -277,26 +280,27 @@
     (letfn [(walk [x]
               (cond
                 (seq? x)
-                (let [h (first x) k2 (second x)]
-                  (cond
-                    (and (= h 'Expr) (identical? k2 :kind)) (do (walk (ps/fget x :attrs)) (walk (ps/fget x :kind)))
-                    (and (= h 'MethodCall) (identical? k2 :seg))
-                    (do (walk (ps/fget x :receiver)) (walk (ps/fget x :seg)) (walk (ps/fget x :args)))
-                    (and (= h 'MacCallStmt) (identical? k2 :mac)) (do (walk (ps/fget x :attrs)) (walk (ps/fget x :mac)))
-                    (and (= h 'MacCall) (identical? k2 :path))
-                    (do (walk (ps/fget x :path))
-                        (let [d (ps/fget x :args)
-                              delim (ps/fget d :delim)
-                              ^TS ts (ps/fget d :tokens)]
-                          (when (and (contains? #{'Parenthesis 'Bracket} delim) (instance? TS ts))
-                            (when-let [[kind es] (ps/mac-args src toks mt ed (.-from ts) (.-to ts) (= delim 'Bracket))]
-                              (.add macs [(ps/fget (ps/fget d :dspan) :open) kind es])
-                              (doseq [e es] (walk e))))))
-                    (and (= h 'Attribute) (identical? k2 :kind))
-                    (do (when-let [m (attr-meta x toks mt)] (.add metas [(ps/fget x :span) m]))
-                        (walk (ps/fget x :kind)))
-                    :else (doseq [c x] (walk c))))
-                (vector? x) (doseq [c x] (walk c))
+                (stk/ensure-sufficient-stack
+                 (let [h (first x) k2 (second x)]
+                   (cond
+                     (and (= h 'Expr) (identical? k2 :kind)) (do (walk (ps/fget x :attrs)) (walk (ps/fget x :kind)))
+                     (and (= h 'MethodCall) (identical? k2 :seg))
+                     (do (walk (ps/fget x :receiver)) (walk (ps/fget x :seg)) (walk (ps/fget x :args)))
+                     (and (= h 'MacCallStmt) (identical? k2 :mac)) (do (walk (ps/fget x :attrs)) (walk (ps/fget x :mac)))
+                     (and (= h 'MacCall) (identical? k2 :path))
+                     (do (walk (ps/fget x :path))
+                         (let [d (ps/fget x :args)
+                               delim (ps/fget d :delim)
+                               ^TS ts (ps/fget d :tokens)]
+                           (when (and (contains? #{'Parenthesis 'Bracket} delim) (instance? TS ts))
+                             (when-let [[kind es] (ps/mac-args src toks mt ed (.-from ts) (.-to ts) (= delim 'Bracket))]
+                               (.add macs [(ps/fget (ps/fget d :dspan) :open) kind es])
+                               (doseq [e es] (walk e))))))
+                     (and (= h 'Attribute) (identical? k2 :kind))
+                     (do (when-let [m (attr-meta x toks mt)] (.add metas [(ps/fget x :span) m]))
+                         (walk (ps/fget x :kind)))
+                     :else (doseq [c x] (walk c)))))
+                (vector? x) (stk/ensure-sufficient-stack (doseq [c x] (walk c)))
                 :else nil))]
       (walk tree))
     [(vec macs) (vec metas)]))
@@ -392,50 +396,57 @@
   "The tree text and the lines text of a tree whose spans are marked (*mark-spans*), as rsdump
   tree writes them: spans, identifiers' syntax contexts and token spacing left out (N1-N4), one
   compound a line indented by its depth; the start line of every span with the node and field it
-  belongs to (- for the dummy span)"
-  [x]
-  (let [tree (StringBuilder.) lines (StringBuilder.) names (java.util.ArrayList.) key (volatile! "") depth (volatile! 0)]
-    (letfn [(emit [^String s] (.append tree s))
-            (open [^String s]
-              (.append tree "\n")
-              (dotimes [_ @depth] (.append tree " "))
-              (emit s) (vswap! depth inc))
-            (close [^String s] (emit s) (vswap! depth dec))
-            (here [] (let [n (if (.isEmpty names) "-" (str (.get names (dec (.size names)))))]
-                       (if (= "" @key) n (str n "." @key))))
-            (span-line [v] (.append lines (str (if v (first v) "-") " " (here) "\n")))
-            (elems [xs] (doseq [e xs] (emit " ") (vreset! key "") (value e)))
-            (fields [xs]
-              (loop [xs (seq xs)]
-                (when xs
-                  (let [k (first xs)]
-                    (if (= k :..)
-                      (do (emit " :..") (recur (next xs)))
-                      (do (emit (str " " k " ")) (vreset! key (name k)) (value (second xs)) (recur (nnext xs))))))))
-            (compound [nm ^String o ^String c body xs]
-              (.add names nm) (open o) (body xs) (close c) (.remove names (int (dec (.size names)))))
-            (value [x]
-              (cond (instance? Spn x) (do (emit "_") (span-line (.-v ^Spn x)))
-                    (nil? x) (do (emit "_") (span-line nil))
-                    (string? x) (emit (clj-str x))
-                    (vector? x) (compound "[" "[" "]" elems x)
-                    (seq? x)
-                    (let [h (first x)]
-                      (case h
-                        id (emit (str "(id " (clj-str (second x)) ")"))
-                        lifetime (emit (str "(lifetime " (clj-str (second x)) ")"))
-                        char (emit (str "(char " (second x) ")"))
-                        ctxt (emit (str "(ctxt " (second x) ")"))
-                        DelimSpacing (emit "_")
-                        tuple (compound "tuple" "(tuple" ")" elems (rest x))
-                        map (compound "map" "(map" ")" fields (rest x))
-                        (if (keyword? (second x))
-                          (compound (str h) (str "(" h) ")" fields (rest x))
-                          (compound (str h) (str "(" h) ")" elems (rest x)))))
-                    (contains? '#{Joint Alone JointHidden} x) (emit "_")
-                    :else (emit (str x))))]
-      (value x)
-      [(str (str/triml (.toString tree)) "\n") (.toString lines)])))
+  belongs to (- for the dummy span). With depths, each line's indentation is written as its depth in
+  decimal (the same text, N spaces as the number N: a line's content opens a compound, never a
+  digit), which keeps a deeply nested file's text linear in its size (the round trip's tree level,
+  RCD1; rsdump tree's own format, which native-check --trees compares, is the default)"
+  ([x] (tree-texts x false))
+  ([x depths]
+   (let [tree (StringBuilder.) lines (StringBuilder.) names (java.util.ArrayList.) key (volatile! "") depth (volatile! 0)]
+     (letfn [(emit [^String s] (.append tree s))
+             (open [^String s]
+               (.append tree "\n")
+               (if depths
+                 (.append tree (str @depth))
+                 (dotimes [_ @depth] (.append tree " ")))
+               (emit s) (vswap! depth inc))
+             (close [^String s] (emit s) (vswap! depth dec))
+             (here [] (let [n (if (.isEmpty names) "-" (str (.get names (dec (.size names)))))]
+                        (if (= "" @key) n (str n "." @key))))
+             (span-line [v] (.append lines (str (if v (first v) "-") " " (here) "\n")))
+             (elems [xs] (doseq [e xs] (emit " ") (vreset! key "") (value e)))
+             (fields [xs]
+               (loop [xs (seq xs)]
+                 (when xs
+                   (let [k (first xs)]
+                     (if (= k :..)
+                       (do (emit " :..") (recur (next xs)))
+                       (do (emit (str " " k " ")) (vreset! key (name k)) (value (second xs)) (recur (nnext xs))))))))
+             (compound [nm ^String o ^String c body xs]
+               (stk/ensure-sufficient-stack
+                (.add names nm) (open o) (body xs) (close c) (.remove names (int (dec (.size names))))))
+             (value [x]
+               (cond (instance? Spn x) (do (emit "_") (span-line (.-v ^Spn x)))
+                     (nil? x) (do (emit "_") (span-line nil))
+                     (string? x) (emit (clj-str x))
+                     (vector? x) (compound "[" "[" "]" elems x)
+                     (seq? x)
+                     (let [h (first x)]
+                       (case h
+                         id (emit (str "(id " (clj-str (second x)) ")"))
+                         lifetime (emit (str "(lifetime " (clj-str (second x)) ")"))
+                         char (emit (str "(char " (second x) ")"))
+                         ctxt (emit (str "(ctxt " (second x) ")"))
+                         DelimSpacing (emit "_")
+                         tuple (compound "tuple" "(tuple" ")" elems (rest x))
+                         map (compound "map" "(map" ")" fields (rest x))
+                         (if (keyword? (second x))
+                           (compound (str h) (str "(" h) ")" fields (rest x))
+                           (compound (str h) (str "(" h) ")" elems (rest x)))))
+                     (contains? '#{Joint Alone JointHidden} x) (emit "_")
+                     :else (emit (str x))))]
+       (value x)
+       [(str (str/triml (.toString tree)) "\n") (.toString lines)]))))
 
 (defn- read-error
   "The native reader's message for a file it rejects"
@@ -447,8 +458,9 @@
         :else (str "native reader failed: " e)))
 
 (defn file-trees
-  "A file's [tree lines] texts as rsdump tree writes them (tree-texts), or [\"rsdump/error MSG\\n\" \"\"]"
-  [^String file ^long ed expr]
+  "A file's [tree lines] texts as rsdump tree writes them (tree-texts; depths: its depths in decimal),
+  or [\"rsdump/error MSG\\n\" \"\"]"
+  [^String file ^long ed expr & [depths]]
   (let [text (String. ^bytes (java.nio.file.Files/readAllBytes (.toPath (File. file))) "UTF-8")
         errs (java.util.ArrayList.)
         stash (java.util.ArrayList.)
@@ -460,7 +472,7 @@
         ;; batch 2's merge: a parse that recovered with an error rejects the file, as dump-forms does
         (if-let [d (or (first errs) (first stash) (first late))]
           [(str "rsdump/error native parser: " (:msg d) "\n") ""]
-          (tree-texts (binding [*mark-spans* true] (out tree src toks mt ed)))))
+          (tree-texts (binding [*mark-spans* true] (out tree src toks mt ed)) depths)))
       (catch Throwable e
         [(str "rsdump/error " (read-error e errs) "\n") ""]))))
 
@@ -668,10 +680,11 @@
 (defn- cmd-tree [args root]
   (let [{:keys [opts args]} (parse-args args #{"-o" "--edition" "--list" "--pin"})
         out (get opts "-o" ".tmp/repr-rust/native-trees")
+        depths (boolean (get opts "--depths"))
         ed (Long/parseLong (get opts "--edition" "2024"))
         bad (volatile! 0)]
     (doseq [f (files-of opts args)]
-      (let [[t l] (file-trees f ed (get opts "--expr"))
+      (let [[t l] (file-trees f ed (get opts "--expr") depths)
             o (File. (str out "/" f ".tree"))]
         (when (str/starts-with? t "rsdump/error")
           (vswap! bad inc)

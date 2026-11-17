@@ -10513,3 +10513,22 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   LLS33 (b) contract), keeping the pack to the next clang re-make (the rows stay on opt's record).
 - Projected after the day's commands (doc/llvm/LLVM-CROP-SURVEY.md, "As built: round 52"): completeness 98 to 99, meant 99 to 100
   (read 3,845 / 1 / 0; AOT 549 / 12 / 1 when the 13 behave as at eval), independence 98 (judge 0.893 to 0.895: 23 cases to own verdicts).
+
+## 2026-11-17: RCD1, Rust's deep files: rustc's ensure_sufficient_stack in repr/rust (branch `n-rust-comp`, from next `42bf8614b`)
+
+- **What.** Rust's completeness, round 52. The matrix's Rust row: read 33,342 / design 1 / deferred 3, eval 5 of 5, AOT not
+  recorded (queue 322's record, tomorrow), print as read; the only deferred class of the read and print cells is `:converter-depth`,
+  three UI-suite files nested past the evaluator's 10,000 nested calls. Probed with a synthetic file of 964 nested `S<...>`: since
+  rust-90 the first stop is the native parser. Built `arbace.repr.rust.stack/ensure-sufficient-stack` (a new thread, depth 0, the
+  bindings conveyed, past a red zone of 7,000), wrapped at the parser's, the native dump's, the converter's and the printer's
+  recursion hubs, and the round trip's tree texts written with depths in decimal (`native tree --depths`; rsdump's indentation is
+  quadratic in the nesting: about 1 GB for 5,204 else-ifs). doc/rust/RUST-NOTES.md, "RCD1".
+- **Checks.** Nine synthetic shapes (types, else-ifs, parentheses and unary minus, blocks, tuple patterns, token-tree brackets,
+  modules, `+` chains, the issue's alias) read, printed in both layouts, trees and lines equal; the type and else-if files in mode
+  `:full` byte for byte; std's option, hint, cell and rc round trip (`--text --pretty`) equal, the edit controls 7 of 7. Each process
+  0.8-1.3 GB (the else-if file's `:full` read 1.29 GB, over the night's 1 GiB: one run). `bin/crops-score --judge --strict` holds.
+- **Not run.** The three files themselves (the UI tarball is not on this host); the known files keep them until the day's run.
+- **Decided (taken overnight, round 52).** RCD1 (a): the stack grown at the hubs (rustc's own remedy, light, the crop's paths
+  alone); not (b) a larger `MAX_DEPTH` (the runtime's key, every build) or (c) repr/rust embedded and compiled (every key).
+- **Found.** `roundtrip --pretty --only REGEX`'s print step matches the regex against the forms' paths (`rs/core/hint.ae`), so it
+  prints nothing for a regex of source paths (pre-existing; the pretty trees checked by hand instead).
