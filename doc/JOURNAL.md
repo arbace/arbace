@@ -10360,3 +10360,16 @@ doc/cpp/CPP-SURVEY.md's "As built: queue 324" lists. Alternative considered: reb
   `checking?` (rejected: the folds are the standard's, and the code generator then would keep the old, laxer semantics the checker
   disagrees with; the IR check by day decides).
 - Note: the own dg run of 53 files peaked at 2.5 GB RSS (GOMEMLIMIT 1 GiB is a soft limit), over the night's 1 GiB a process; run once.
+
+## 2026-11-18: n-cpp-read, C++'s jumps into protected scopes in the own front end (branch `n-cpp-read` from mac/n-review-b aaa6d7786)
+
+- The read cell's deferred `:own-diag` (726) grouped by test/cpp/own-diag-review.edn's groups and the own record's expected messages;
+  concepts left to n-cpp-concepts. Taken: the `:jumps` group (10 files), one rule independent of types: `arbace.repr.cpp.diag/jumps`,
+  written from the standard ([stmt.dcl]/2, [except.pre], [stmt.if]/2) and GCC's manual for statement expressions, no compiler code
+  read. 11 files to pass (9 `:own-diag`, 2 `:gcc-own-rules`, out of its `:tests`); C++ read 5,362 / 328 / 805 to 5,373 / 326 / 796.
+  The 12 rows recorded by a row-wise merge of `bin/repr-cpp dg --corpus dg-error --only LIST --front native --own` (two lists of 6,
+  peak 936 MB); the 5 own-only passes holding a goto or a case label rerun, still passing. Decisions CP400-CP402 (a), taken overnight
+  (round 52), in doc/cpp/CPP-SURVEY.md's "As built: n-cpp-read". gate_key moves (repr/cpp embedded). Alternatives: the error at the
+  goto as clang places it (rejected: g++'s dg lines name the label); counting default-initialized class variables (rejected: their
+  triviality is not known here, and a wrong error would fail passing files); attr-assume8 left (needs the parser to keep the
+  attribute's expression).

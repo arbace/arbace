@@ -694,7 +694,106 @@
       (decls! [] (remove :_hdr (:nodes u))))
     (vec out)))
 
-(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls]))
+;; n-cpp-read (round 52): jumps into a protected scope, written from the standard (clean-room, no compiler's code):
+;; [stmt.dcl]/2 (a goto or a switch's case or default label may not pass from a point where a variable of automatic storage
+;; duration is not in scope to one where it is, unless its initialization is vacuous, [basic.life]), [except.pre]/2 (a goto
+;; or a switch may not transfer control into a try block or a handler), [stmt.if]/2 (a label in a constexpr if's or a
+;; consteval if's substatement is referred to only from within the same substatement), and GNU's statement expressions
+;; (GCC's manual, "Statements and Declarations in Expressions": jumping into one is not allowed). The error at the label
+;; (the label's line, as g++ places it; its notes "from here" are not errors). The function bodies of the main file, a
+;; lambda's and a local class's on their own; a body the parser declined a construct of is not judged. Conservative: a
+;; variable counts when it has an initializer or a variably modified type over a parameter (int a[n]), never a class
+;; variable default-initialized (its triviality unknown here): missed, never wrong.
+(defn jumps
+  [u starts ^String src main]
+  (let [out (java.util.ArrayList.)
+        ids (volatile! 0)
+        region (fn [what] {:id (vswap! ids inc) :what what})
+        at! (fn [n msg]
+              (let [o (get-in n [:range :begin :offset])]
+                (when (and o (= main (get-in n [:range :begin :file])))
+                  (let [[l c] (line-col starts (long o))]
+                    (.add out {:line l :col c :kind :error :rule :jump :msg msg})))))
+        goto-name (fn [n] (when-let [o (get-in n [:range :begin :offset])]
+                            (when (= main (get-in n [:range :begin :file]))
+                              (second (re-find #"^goto\s+([A-Za-z_][A-Za-z_0-9]*)" (subs src (min (long o) (count src))))))))
+        declined? (fn d [x] (cond (map? x) (or (= "NativeDecline" (:kind x)) (boolean (some d (:inner x))))
+                                  (sequential? x) (boolean (some d x)) :else false))
+        pending (java.util.ArrayDeque.)
+        body-of (fn [n] (last (filter #(#{"CompoundStmt" "CXXTryStmt"} (:kind %)) (:inner n))))
+        fn-body! (fn [body params]
+                   (when (and body (not (declined? body)))
+                     (let [labels (java.util.LinkedHashMap.) gotos (java.util.ArrayList.) cases (java.util.ArrayList.)
+                           vm? (fn [qt] (some #(contains? params (second %)) (re-seq #"\[\s*([A-Za-z_][A-Za-z_0-9]*)\s*\]" (str qt))))
+                           counts? (fn [v] (and (#{"VarDecl" "DecompositionDecl"} (:kind v)) (nil? (:storageClass v)) (not (:tls v))
+                                                (or (:init v) (vm? (get-in v [:type :qualType])))))
+                           walk (fn w [x prot sw]
+                                  (cond
+                                    (sequential? x) (do (doseq [y x] (w y prot sw)) prot)
+                                    (not (map? x)) prot
+                                    :else
+                                    (let [k (:kind x) kids (when (vector? (:inner x)) (:inner x))
+                                          seqw (fn [xs p] (reduce (fn [p c] (w c p sw)) p xs))]
+                                      (case k
+                                        ("CXXRecordDecl" "ClassTemplateDecl" "FunctionDecl" "CXXMethodDecl" "FunctionTemplateDecl")
+                                        (do (.add pending x) prot)
+                                        "LambdaExpr" (do (.add pending {:kind "LambdaBody" :body (last (filter #(= "CompoundStmt" (:kind %)) kids))}) prot)
+                                        "CompoundStmt" (do (seqw kids prot) prot)
+                                        "StmtExpr" (do (seqw kids (conj prot (region "enters a statement expression"))) prot)
+                                        "DeclStmt" (reduce (fn [p v]
+                                                             (w (:inner v) p sw)
+                                                             (if (counts? v) (conj p (region (str "bypasses the initialization of '" (:name v) "'"))) p))
+                                                           prot kids)
+                                        "LabelStmt" (do (when (string? (:name x)) (.put labels (:name x) [x prot])) (seqw kids prot))
+                                        ("CaseStmt" "DefaultStmt") (do (when sw (.add cases [x prot sw]))
+                                                                       (seqw (butlast kids) prot) (w (last kids) prot sw))
+                                        "GotoStmt" (do (when-let [nm (goto-name x)] (.add gotos [nm prot])) prot)
+                                        "SwitchStmt" (let [p (seqw (butlast kids) prot)] (w (last kids) p p) prot)
+                                        "CXXTryStmt" (do (w (first kids) (conj prot (region "enters a try block")) sw)
+                                                         (doseq [h (rest kids)] (w h (conj prot (region "enters a handler")) sw))
+                                                         prot)
+                                        "IfStmt" (if (or (:isConstexpr x) (:isConsteval x))
+                                                   (let [nsub (if (:hasElse x) 2 1)
+                                                         what (if (:isConsteval x) "enters a 'consteval if' statement" "enters a 'constexpr if' statement")
+                                                         p (seqw (drop-last nsub kids) prot)]
+                                                     (doseq [s (take-last nsub kids)] (w s (conj p (region what)) sw))
+                                                     prot)
+                                                   (do (seqw kids prot) prot))
+                                        (do (seqw kids prot) prot)))))]
+                       (walk body [] nil)
+                       (let [done (java.util.HashSet.)]
+                         (doseq [[nm gp] gotos
+                                 :let [[l lp] (.get labels nm) in (set (map :id gp))]
+                                 :when (and l (not (.contains done nm)))
+                                 :let [e (first (remove #(in (:id %)) lp))]
+                                 :when e]
+                           (.add done nm)
+                           (at! l (str "jump to label '" nm "' " (:what e)))))
+                       (doseq [[c cp sp] cases
+                               :let [in (set (map :id sp)) e (first (remove #(in (:id %)) cp))]
+                               :when e]
+                         (at! c (str "jump to case label " (:what e)))))))
+        fn! (fn [n]
+              (case (:kind n)
+                "LambdaBody" (fn-body! (:body n) #{})
+                ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
+                (fn-body! (body-of n) (set (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (:inner n))))
+                nil))]
+    (letfn [(decls! [ns]
+              (doseq [n ns]
+                (case (:kind n)
+                  ("NamespaceDecl" "LinkageSpecDecl" "ExportDecl" "CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl"
+                   "ClassTemplatePartialSpecializationDecl" "ClassTemplateSpecializationDecl")
+                  (decls! (filter map? (:inner n)))
+                  (fn! n))))]
+      (decls! (remove :_hdr (:nodes u)))
+      (loop []
+        (when-let [n (.poll pending)]
+          (if (= "LambdaBody" (:kind n)) (fn! n) (decls! [n]))
+          (recur))))
+    (vec out)))
+
+(def checks (atom [undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps]))
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."

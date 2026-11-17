@@ -8650,3 +8650,29 @@ dg check of the 48 consteval files with the lifetime files (`bin/repr-cpp dg --c
 passing by the clang record). Not checked here: the lowered runtime's IR and the run checks (`cpp-runtime`, `cpp-check`), the main
 host's by day. Known, not changed: a GNU case range (`case 1 ... 3:`) is analyzed as its low value with its high one as the body
 (`CaseStmt`'s three children read as two), now evaluated by the switch too.
+
+## As built: n-cpp-read, the jumps group (2026-11-18, round 52; branch `n-cpp-read` from mac/n-review-b aaa6d7786)
+
+The read cell's deferred rows (805: `:own-diag` 726, `:syntax-own` 71, ...) by test/cpp/own-diag-review.edn's groups, concepts left to
+n-cpp-concepts: `:jumps` (10 files) is a single Sema rule with no dependence on types or templates, so it was taken whole.
+`arbace.repr.cpp.diag/jumps`, a check beside the others (`checks`), written from the standard (clean-room): [stmt.dcl]/2 (a goto or a
+switch's case or default label may not enter the scope of an automatic variable whose initialization is not vacuous), [except.pre]
+(into a try block or a handler), [stmt.if]/2 (into a constexpr if's or a consteval if's substatement, each branch apart), and GNU's
+statement expressions (GCC's manual: no jump into one). Each function body, lambda body and local class's member alone; a body with a
+`NativeDecline` not judged; the error at the label's line (as g++ places it; its "from here" notes are no errors). Conservative: a
+variable counts when it has an initializer or a variably modified type over a parameter (`int a[n]`, `int (*p)[n]`); a class variable
+default-initialized does not (its constructor's triviality not known to the check): a miss, never a wrong error.
+
+- Moved to pass (own record, rows merged alone): cpp1z/constexpr-if4, -if5, -if8, init-statement10, cpp23/consteval-if4, -if5, -if8,
+  eh/goto2, init/goto2 (`:own-diag`, 9) and ext/stmtexpr24, ext/vla14 (`:gcc-own-rules`, 2, taken out of its `:tests`). Not moved:
+  cpp23/attr-assume8 (the parser keeps no `[[assume(e)]]` expression, so the statement expression inside it is not seen).
+- C++ read 5,362 / 328 / 805 to 5,373 / 326 / 796 (36 n/a); dg source 3,432 to 3,443 passes; crop completeness 92 (0.9157 to 0.9161).
+- Proof: `bin/repr-cpp dg --corpus dg-error --only LIST --front native --own` on two lists of 6 (11 pass, attr-assume8 as recorded),
+  peak 936 MB at GOMEMLIMIT=700MiB, REPR_CPP_THREADS=2; the 5 files the own record alone passes that hold a goto or a case label
+  (cpp1y/constexpr-throw, cpp23/constexpr-nonlit2, -nonlit6, ext/attr-no-dangling2, ext/label17) still pass; a sample's backward goto,
+  a goto inside its own try block and jumps out of scopes give no error. `bin/reap --record`, `bin/crops-score --record`, `--judge
+  --strict`, `bin/records-check` pass.
+- Decisions taken overnight (round 52): CP400 (a) the error at the label (g++'s line, which the dg lines name) rather than at the goto
+  (clang's); CP401 (a) the conservative vacuousness above (no class triviality); CP402 (a) a file of a class named by `:tests` that now
+  passes leaves the class's list.
+- Keys: `gate_key` moves (repr/cpp embedded since W2), as `arbace_javac_key`; the runtime key does not.
