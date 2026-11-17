@@ -10437,3 +10437,60 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
 - Checks under 1 GiB: `bin/repr-wasm wast --only` (custom-page-sizes, twelve root scripts, the essential list with its controls),
   the row re-recorded from the run's rows by hand, `bin/reap --record`, `bin/crops-score --record`, both judged after, 0 problems.
   No key moves (arbace/repr/wasm is in `arbace_crop_paths`).
+
+## 2026-11-18: Haskell's independence, HF10-P24 (a): programs of several modules through the native front end (round 52, branch `n-hs-indep`)
+
+- Base: next `42bf8614b` with `mac/n-review-d` `b60d7ffb2` merged (queue 325 and its stack: Haskell 78 independent, eval and AOT
+  0.5 each, read and print 1, judge 0.887). Eval and AOT lose the most: their cases count 1 only from `bin/hsi check --libs own`'s
+  records, and `test/haskell/check-hsi-own.edn` is INTERIM (counts none), `check-hsi-aot-own.edn` absent, so both stand at the stated
+  0.5. The open item that moves how many programs those records can call own is HF10-P24 (a) (decided 2026-11-10, not built): of the
+  950 planned programs 269 were ineligible, `local` (a module of the program's own) the largest refusal, 65.
+- Built: `arbace/repr/haskell/front.ae` compiles a program's own modules (found as GHC's finder finds them on ".", `./M.hs`) in
+  dependency order, each module's own interface (`ownface/own-iface-text`, unit main) in the program's pool for the modules above,
+  their STG beside Main's; `tostg.ae` runs the `main` Main exports when it is imported (GHC's checkMain); `bin/lib/hsi/check`'s
+  eligibility scans the program's modules too, refuses `-main-is` (HF10-P59 (b), taken overnight), an hs-boot file of the program's
+  own, a LANGUAGE pragma over several lines naming CPP (T1735). Tried on the own libraries 635 to 672 of 950. tcrun025 on
+  `own-fallback.txt` (`:own-lib`, as tcrun024). doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P24 (a)"; HF10-P59 (b), P60 (b),
+  P61 (a) taken overnight (round 52).
+- Checked light (one process at a time, `HSI_JOBS=1`, own libraries from the gate's tars of 2026-11-16): the front end 25 of 25 new
+  programs compiled; 20 of the 23 new ones tried pass on the own libraries (T16453M0-M5, T19397M0-M1, T12622, T8103, T9577, cgrun067, T22282,
+  tcrun038, the four T23146 tests, nofib spectral pretty and scc), 3 nofib programs over the light 1 GiB cap; a final `--only` run exit 0 with its controls
+  failing as they must. Alternatives considered: refusing an imported main (as before) instead of checkMain's rule; porting
+  `-main-is` tonight (left for a round of its own).
+
+## 2026-11-18: Haskell, HF10-P59 (a) `-main-is` and the front end's search path; the 85 `import` refusals grouped (round 52, branch `n-hs-p59`)
+
+- Base: `mac/n-hs-indep` `b5d04b12a` (HF10-P24 (a)). Its dry plan (`.tmp/keep/wt-n-hs-indep/p24/plan-all.txt`, 950 programs) refused
+  85 as `import`. Grouped by module: NofibUtils 29 (nofib's `nofib-common/NofibUtils.hs`, compiled with every program by
+  `mk/boilerplate.mk`'s `EXTRA_SRCS`), the test's `-i` helpers 2 (T5462Yes1/2), boot packages 33 (containers 10, bytestring 9, time 6,
+  transformers and mtl 4, directory 3, unix, binary, template-haskell, ghc-experimental 1 each, ghc 3), packages outside the pinned
+  tarball 14 (parallel, random, old-time, ...; GHC's reference `:no-build`), T17920's Cmm 1.
+- Built: `-main-is FN` resolved in Main's scope (rename's `*main-fn*`, implicit header `module Main (FN)`, `:main-name`; tostg's
+  `:Main.main` runs it); GHC's `-iDIR` and nofib's `-i../../nofib-common` as the front end's search path (`front_eligible`,
+  `front.ae`'s `local-source`). The dry plan: tried own 672 to 677, `import` 85 to 54, `main-is` 4 to 0, `cpp` 47 to 77 (NofibUtils
+  and Enum use CPP). `bin/hsi check --libs own --only`: T5462Yes2, T16453M6, T19397M0, M2-M4 pass own, with T16453M1, M5, nofib pretty
+  and scc and samples/Hello unchanged; the control fails as it must.
+- Found: GHC's reference builds none of the 29 NofibUtils programs (record-ref gives GHC no `EXTRA_SRCS`): HF10-P64, a DECISION for
+  the oracle window. No package was added: none is small enough to prove light (P17's slices 2-5 stand). HF10-P59 (a), P62 (a) taken
+  overnight (round 52); P63 (CPP in the front end) proposed. doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P59 (a) and the search
+  path". Alternatives considered: refusing `-main-is` until a round of its own (P59 (b)); a hard-coded NofibUtils source instead of
+  the search path.
+
+## 2026-11-18: Haskell, HF10-P63 (a) CPP in the front end (round 52, branch `n-hs-cpp`)
+
+- Base: `mac/n-hs-p59` `1c4c29575`. Its dry plan refused 77 programs as `cpp` (NofibUtils' 29, T5462Yes1's GEnum/Enum.hs, 47 others).
+- Which preprocessor: the survey's `driver/preprocess` is the driver around repr/haskell's own clean-room traditional cpp
+  (`arbace/repr/haskell/cpp.ae`; GHC's doCpp's arguments from the installation read as data). The native reads use it
+  (`native/preprocess`), so the front end takes the same path. There is one preprocessor.
+- Built: `arbace/repr/haskell/front.ae` preprocesses a module of a program (main file and own modules) when its flags or header
+  pragmas turn CPP on, `build --libdir DIR --sysroot DIR` naming the installation (read once). The macros are GHC's: ghcversion.h's
+  `__GLASGOW_HASKELL__` 914, the platform's, MIN_VERSION_pkg, all.T's -D/-U/-I/-optP and OPTIONS_GHC's. `bin/lib/hsi/check` refuses
+  `cpp` no more, passes all.T's CPP flags in the plan and gives the front end the derived tree (`bin/repr-haskell native-libdir`, which
+  it already ran). The dry plan over 950: tried own 677 to 739, `cpp` 77 to 0, `import` 54 to 67, `pragma` 19 to 21.
+- Checked light (`HSI_JOBS=1`, `ARBACE_MEM_GIB=1`, `HSI_FRONT_MEM=900MiB`, a 1.15 GB watcher): samples/Hello, CheckBoundsOK, cgrun072,
+  T12136 pass own from native STG; T1735 stops at the elaborator (a `Data` context; runs on the pack, passes); T5462Yes1's front
+  process went over the light cap (oracle-pending anyway); NofibUtils.hs takes its `__GLASGOW_HASKELL__` branch; bernouilli
+  compiles and runs own against GHC's `:no-build` reference (status 0 once, then Go's out of memory at the light 1 GiB cap on a rerun). The 29 NofibUtils programs are classed in divergences-own.edn's
+  `:no-reference-own` until HF10-P64 (HF10-P65 (a)). HF10-P63 (a), P65 (a) taken overnight (round 52). doc/haskell/FRONTEND-SURVEY.md,
+  "As built: HF10-P63 (a)". Alternatives considered: a second preprocessor (none needed); own-fallback.txt for the 29, or refusing
+  programs whose reference is `:no-build` (P65 (b), (c)).
