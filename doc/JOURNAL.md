@@ -10444,3 +10444,16 @@ the JDK's javac once: `record_sources` passes each file once. Alternatives: JOP1
 under 1.1 s each), the 10 rows recorded; self-test with controls; --judge --strict, reap, records-check 0 problems; Java 59.7
 unchanged; projections 59.7 (a partial own record, refuted) and 99.7 (a full one). The main host's whole run: `bin/java-check
 sources --jobs 8 --record`, about 7 min, 2.7 GiB. Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JOP13 (a)".
+
+## 2026-11-17: javac on Arbace's command line takes a file named twice once (branch `n-javac-dup`, round 52)
+
+`jdk.internal.jrt.javac.Main` compiled a source named twice twice ("duplicate class"); the JDK's javac keeps its files in a set of
+paths made file objects equal by canonical path (jdk26u `com/sun/tools/javac/main/Arguments.java`, `Option.java`'s SOURCEFILE,
+`file/JavacFileManager.getJavaFileObjectsFromPaths`, `FSInfo.getCanonicalFile`, `PathFileObject.equals`). Main now takes each file
+once by its canonical path, the first spelling kept (JFS162 (a), taken overnight (round 52); equality on the file manager's `Obj`
+rejected: javac's `ClientCodeWrapper` wraps a client's file objects one by one, so it never reaches javac's sets). Main.ae's forms
+written by hand to the converter's layout, checked by printing them back; the regression case `samples-twice` in `bin/javac-vendor
+classes samples`. Proven on the JDK (the overlay compiled with `--patch-module jdk.compiler`, driven as a module main against the
+build's exploded modules): before the fix four spellings fail, after each compiles as the JDK's javac, the classes byte for byte.
+Keys: `arbace_javac_key`, `arbace_javac_rest_key`; not `gate_key`, not the runtime key. The tool build and its checks by day. Details:
+doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: a file named twice, compiled once".

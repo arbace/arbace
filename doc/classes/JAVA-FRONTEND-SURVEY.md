@@ -7333,3 +7333,34 @@ recorded as javac on Arbace makes it (the levels then read it) and fails the ora
 **A finding for later** (not in JOP13's scope): javac on Arbace's `Main` does not drop a repeated file argument as the JDK's javac
 does (javac's `Arguments` keeps the files in a set); the fix is in `overlay/jdk/javac/jdk.compiler`'s Main (moves
 `arbace_javac_key`: a tool build), until then the callers pass each file once.
+
+## As built: a file named twice, compiled once (2026-11-17, round 52; branch `n-javac-dup`)
+
+javac on Arbace's command line (`jdk.internal.jrt.javac.Main`) parsed a source file named twice twice and failed with
+"duplicate class"; the JDK's javac takes it once. How the JDK does it (jdk26u, `src/jdk.compiler/share/classes/com/sun/tools/javac`):
+`main/Option.java`'s SOURCEFILE adds `Paths.get(arg)` to `Arguments`' `files`, a `LinkedHashSet<Path>`; `getFileObjects` makes them
+file objects by `JavacFileManager.getJavaFileObjectsFromPaths` (`PathFileObject.forSimplePath` over `FSInfo.getCanonicalFile`:
+`toRealPath`, else the absolute normalized path), whose `equals` and `hashCode` are that path, into a `LinkedHashSet` again (and
+`JavaCompiler.parseFiles` keeps a set too). So a file named by any spelling of its path (`A.java`, `./A.java`, absolute, a symbolic
+link) is one unit, named as first given. Main hands its file objects to `JavacTool.getTask`, where `ClientCodeWrapper` wraps each
+of a client file manager's objects apart (`WrappedJavaFileObject`, equality by identity): equality on `FileManager.Obj` could not
+reach javac's sets.
+
+- **JFS162 (a), taken overnight (round 52):** Main takes each file once, by its canonical path (`File.getCanonicalPath`, else the
+  absolute: `FSInfo.getCanonicalFile`'s), the first spelling kept; `FileManager` and `StandardFileManager` unchanged. Rejected:
+  (b) equality on `Obj` by its path, as `PathFileObject`'s (no effect through the API's wrappers); (c) `@Trusted` on `Obj`, which
+  javac's wrapper would then pass through unwrapped (it changes how a client's exceptions are reported too: more than the fix).
+  The API's own case (a client passing one file twice to `SystemCompiler`'s task) is javac's with any client file manager, left as
+  it is.
+
+Changed: `overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/Main.java` and its forms `jdk/javac/forms/jdk/internal/jrt/javac/Main.ae`
+(written to the converter's layout by hand overnight, no conversion run: printed back by `bin/repr-java print`, the diff against
+the committed forms' print is the change alone; the day's `bin/javac-vendor verify` confirms them byte for byte, else `convert`
+replaces them); the regression case `samples-twice` in `bin/javac-vendor classes samples` (test/repr/java/java with
+`sample/Circle.java` named three times more, as `sample/Circle.java`, `./sample/Circle.java` and absolute, against the JVM's javac).
+Proven on the JDK: the overlay classes compiled by jdk26u's javac with `--patch-module jdk.compiler=...` and run as
+`java --patch-module jdk.compiler=DIR -m jdk.compiler/jdk.internal.jrt.javac.Main --platform <the build's jdk/modules>`: before,
+`A.java A.java`, `A.java ./A.java`, absolute and symbolic link all "duplicate class"; after, each compiles, as the JDK's javac, and
+`samples-twice`'s classes equal the JVM javac's byte for byte (before: `./sample/Circle.java:3: error: duplicate class`); two
+different files declaring one public class still fail as the JDK's. Keys: `arbace_javac_key` and `arbace_javac_rest_key`
+(bin/javac-vendor) move; `gate_key` and the runtime key do not.
