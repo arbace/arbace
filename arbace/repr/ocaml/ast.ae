@@ -1,0 +1,899 @@
+;; Ported from OCaml 5.5.0 (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+;; fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba): parsing/ast_helper.ml's constructors, the
+;; attributes of parsing/docstrings.ml (docs_attr, text_attr, add_docs_attrs, add_info_attrs, add_text_attrs) and
+;; parsing/location.ml's mkloc and mknoloc, whose notice follows (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;                         Alain Frisch, LexiFi
+;;
+;;   Copyright 2012 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+;;
+;; The dump (the second half) is a port of Arbace's own tools/ocdump/ocdump.ml: the Parsetree as the helper writes it.
+
+(ns arbace.repr.ocaml.ast
+  "The Parsetree of OCaml 5.5.0 as Arbace data, and the helper's dump of it. A node is a map with the Parsetree's
+  field names as keywords (:pexp_desc, :pexp_loc, :pexp_loc_stack, :pexp_attributes ...), a variant a vector
+  [:Pexp_apply f args], a list a sequence, an option nil or the value, a 'a loc {:txt :loc}, a location [start end
+  ghost] of arbace.repr.ocaml.lex positions, a string a byte string. The constructors follow Ast_helper (their
+  optional arguments an options map); `dump` writes the tree as tools/ocdump/ocdump.ml does (`dump-text` its exact
+  text, `dump-data` the forms Arbace's reader reads from it)."
+  (:require [arbace.repr.ocaml.lex :as lex]
+            [arbace.repr.ocaml.docstrings :as ds]
+            [arbace.string :as str])
+  (:import [arbace.repr.ocaml.docstrings Pos]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Locations
+
+(def none lex/none)
+(defn mkloc [txt loc] {:txt txt :loc loc})
+(defn mknoloc [txt] {:txt txt :loc none})
+(defn loc-ghost? [l] (nth l 2))
+(defn loc-start [l] (nth l 0))
+(defn loc-end [l] (nth l 1))
+(defn make-ghost-loc [l] [(nth l 0) (nth l 1) true])
+
+;; ---------------------------------------------------------------------------------------------
+;; Docstrings as attributes
+
+(defn- doc-attr [name ds]
+  (let [body (ds/ds-body ds) loc (ds/ds-loc ds)
+        const {:pconst_desc [:Pconst_string body loc nil] :pconst_loc loc}
+        exp {:pexp_desc [:Pexp_constant const] :pexp_loc loc :pexp_loc_stack () :pexp_attributes ()}
+        item {:pstr_desc [:Pstr_eval exp ()] :pstr_loc loc}]
+    {:attr_name {:txt name :loc none} :attr_payload [:PStr [item]] :attr_loc loc}))
+
+(defn docs-attr [ds] (doc-attr "ocaml.doc" ds))
+(defn text-attr [ds] (doc-attr "ocaml.text" ds))
+
+(defn add-docs-attrs [docs attrs]
+  (let [pre (:pre docs) post (:post docs)
+        attrs (if (or (nil? pre) (= "" (ds/ds-body pre))) attrs (cons (docs-attr pre) attrs))
+        attrs (if (or (nil? post) (= "" (ds/ds-body post))) attrs (concat attrs [(docs-attr post)]))]
+    attrs))
+
+(defn add-info-attrs [info attrs]
+  (if (or (nil? info) (= "" (ds/ds-body info))) attrs (concat attrs [(docs-attr info)])))
+
+(defn add-text-attrs [dsl attrs]
+  (concat (map text-attr (remove #(= "" (ds/ds-body %)) dsl)) attrs))
+
+;; ---------------------------------------------------------------------------------------------
+;; Ast_helper (its default location is Location.none)
+
+(defn const-mk [loc d] {:pconst_desc d :pconst_loc (or loc none)})
+(defn attr-mk [loc name payload] {:attr_name name :attr_payload payload :attr_loc (or loc none)})
+
+(defn typ-mk [loc attrs d] {:ptyp_desc d :ptyp_loc (or loc none) :ptyp_loc_stack () :ptyp_attributes (or attrs ())})
+(defn typ-attr [t a] (assoc t :ptyp_attributes (concat (:ptyp_attributes t) [a])))
+(defn pat-mk [loc attrs d] {:ppat_desc d :ppat_loc (or loc none) :ppat_loc_stack () :ppat_attributes (or attrs ())})
+(defn pat-attr [p a] (assoc p :ppat_attributes (concat (:ppat_attributes p) [a])))
+(defn exp-mk [loc attrs d] {:pexp_desc d :pexp_loc (or loc none) :pexp_loc_stack () :pexp_attributes (or attrs ())})
+(defn exp-attr [e a] (assoc e :pexp_attributes (concat (:pexp_attributes e) [a])))
+(defn exp-case [lhs guard rhs] {:pc_lhs lhs :pc_guard guard :pc_rhs rhs})
+(defn mty-mk [loc attrs d] {:pmty_desc d :pmty_loc (or loc none) :pmty_attributes (or attrs ())})
+(defn mty-attr [m a] (assoc m :pmty_attributes (concat (:pmty_attributes m) [a])))
+(defn mod-mk [loc attrs d] {:pmod_desc d :pmod_loc (or loc none) :pmod_attributes (or attrs ())})
+(defn mod-attr [m a] (assoc m :pmod_attributes (concat (:pmod_attributes m) [a])))
+(defn sig-mk [loc d] {:psig_desc d :psig_loc (or loc none)})
+(defn str-mk [loc d] {:pstr_desc d :pstr_loc (or loc none)})
+(defn cl-mk [loc attrs d] {:pcl_desc d :pcl_loc (or loc none) :pcl_attributes (or attrs ())})
+(defn cl-attr [c a] (assoc c :pcl_attributes (concat (:pcl_attributes c) [a])))
+(defn cty-mk [loc attrs d] {:pcty_desc d :pcty_loc (or loc none) :pcty_attributes (or attrs ())})
+(defn cty-attr [c a] (assoc c :pcty_attributes (concat (:pcty_attributes c) [a])))
+(defn ctf-mk [{:keys [loc attrs docs]} d]
+  {:pctf_desc d :pctf_loc (or loc none) :pctf_attributes (add-docs-attrs (or docs ds/empty-docs) (or attrs ()))})
+(defn cf-mk [{:keys [loc attrs docs]} d]
+  {:pcf_desc d :pcf_loc (or loc none) :pcf_attributes (add-docs-attrs (or docs ds/empty-docs) (or attrs ()))})
+
+(defn- text-of [dsl] (remove #(= "" (ds/ds-body %)) dsl))
+(defn str-text [txt] (mapv (fn [d] (str-mk (ds/ds-loc d) [:Pstr_attribute (text-attr d)])) (text-of txt)))
+(defn sig-text [txt] (mapv (fn [d] (sig-mk (ds/ds-loc d) [:Psig_attribute (text-attr d)])) (text-of txt)))
+(defn cf-text [txt] (mapv (fn [d] (cf-mk {:loc (ds/ds-loc d)} [:Pcf_attribute (text-attr d)])) (text-of txt)))
+(defn ctf-text [txt] (mapv (fn [d] (ctf-mk {:loc (ds/ds-loc d)} [:Pctf_attribute (text-attr d)])) (text-of txt)))
+
+(defn val-mk [name typ {:keys [loc attrs docs prim]}]
+  {:pval_name name :pval_type typ :pval_attributes (add-docs-attrs (or docs ds/empty-docs) (or attrs ()))
+   :pval_loc (or loc none) :pval_prim (or prim ())})
+
+(defn- docs-text-attrs [{:keys [attrs docs text]}]
+  (add-text-attrs (or text []) (add-docs-attrs (or docs ds/empty-docs) (or attrs ()))))
+
+(defn md-mk [name typ o] {:pmd_name name :pmd_type typ :pmd_attributes (docs-text-attrs o) :pmd_loc (or (:loc o) none)})
+(defn ms-mk [name syn o] {:pms_name name :pms_manifest syn :pms_attributes (docs-text-attrs o) :pms_loc (or (:loc o) none)})
+(defn mtd-mk [name o] {:pmtd_name name :pmtd_type (:typ o) :pmtd_attributes (docs-text-attrs o) :pmtd_loc (or (:loc o) none)})
+(defn mb-mk [name expr o] {:pmb_name name :pmb_expr expr :pmb_attributes (docs-text-attrs o) :pmb_loc (or (:loc o) none)})
+(defn opn-mk [expr {:keys [loc attrs docs override]}]
+  {:popen_expr expr :popen_override (or override :Fresh) :popen_loc (or loc none)
+   :popen_attributes (add-docs-attrs (or docs ds/empty-docs) (or attrs ()))})
+(defn incl-mk [mexpr {:keys [loc attrs docs]}]
+  {:pincl_mod mexpr :pincl_loc (or loc none) :pincl_attributes (add-docs-attrs (or docs ds/empty-docs) (or attrs ()))})
+(defn vb-mk [pat expr o]
+  {:pvb_pat pat :pvb_expr expr :pvb_constraint (:value_constraint o) :pvb_attributes (docs-text-attrs o)
+   :pvb_loc (or (:loc o) none)})
+(defn ci-mk [name expr o]
+  {:pci_virt (or (:virt o) :Concrete) :pci_params (or (:params o) ()) :pci_name name :pci_expr expr
+   :pci_attributes (docs-text-attrs o) :pci_loc (or (:loc o) none)})
+(defn type-mk [name o]
+  {:ptype_name name :ptype_params (or (:params o) ()) :ptype_constraints (or (:constraints o) ())
+   :ptype_kind (or (:kind o) :Ptype_abstract) :ptype_private (or (:priv o) :Public) :ptype_manifest (:manifest o)
+   :ptype_attributes (docs-text-attrs o) :ptype_loc (or (:loc o) none)})
+(defn type-constructor [name {:keys [loc attrs info vars args res]}]
+  {:pcd_name name :pcd_vars (or vars ()) :pcd_args (or args [:Pcstr_tuple ()]) :pcd_res res :pcd_loc (or loc none)
+   :pcd_attributes (add-info-attrs info (or attrs ()))})
+(defn type-field [name typ {:keys [loc attrs info mut]}]
+  {:pld_name name :pld_mutable (or mut :Immutable) :pld_type typ :pld_loc (or loc none)
+   :pld_attributes (add-info-attrs info (or attrs ()))})
+(defn te-mk [path constructors {:keys [loc attrs docs params priv]}]
+  {:ptyext_path path :ptyext_params (or params ()) :ptyext_constructors constructors :ptyext_private (or priv :Public)
+   :ptyext_loc (or loc none) :ptyext_attributes (add-docs-attrs (or docs ds/empty-docs) (or attrs ()))})
+(defn te-mk-exception [constructor {:keys [loc attrs docs]}]
+  {:ptyexn_constructor constructor :ptyexn_loc (or loc none)
+   :ptyexn_attributes (add-docs-attrs (or docs ds/empty-docs) (or attrs ()))})
+(defn te-decl [name {:keys [loc attrs docs info vars args res]}]
+  {:pext_name name :pext_kind [:Pext_decl (or vars ()) (or args [:Pcstr_tuple ()]) res] :pext_loc (or loc none)
+   :pext_attributes (add-docs-attrs (or docs ds/empty-docs) (add-info-attrs info (or attrs ())))})
+(defn te-rebind [name lid {:keys [loc attrs docs info]}]
+  {:pext_name name :pext_kind [:Pext_rebind lid] :pext_loc (or loc none)
+   :pext_attributes (add-docs-attrs (or docs ds/empty-docs) (add-info-attrs info (or attrs ())))})
+(defn csig-mk [self fields] {:pcsig_self self :pcsig_fields fields})
+(defn cstr-mk [self fields] {:pcstr_self self :pcstr_fields fields})
+(defn rf-tag [loc attrs label const tys] {:prf_desc [:Rtag label const tys] :prf_loc (or loc none) :prf_attributes (or attrs ())})
+(defn rf-inherit [loc ty] {:prf_desc [:Rinherit ty] :prf_loc (or loc none) :prf_attributes ()})
+(defn of-tag [loc attrs label ty] {:pof_desc [:Otag label ty] :pof_loc (or loc none) :pof_attributes (or attrs ())})
+(defn of-inherit [loc ty] {:pof_desc [:Oinherit ty] :pof_loc (or loc none) :pof_attributes ()})
+(defn typ-package-type [loc attrs p c] {:ppt_loc (or loc none) :ppt_path p :ppt_constraints c :ppt_attrs (or attrs ())})
+
+(defn varify-constructors
+  "Typ.varify_constructors: the type constructors named as the variables become the variables"
+  [var-names t]
+  (let [vs (set (mapv :txt var-names))
+        ;; Pprintast.tyvar_of_name
+        tyvar (fn [v] (cond (and (>= (count v) 2) (= \' (.charAt ^String v 1))) (str "' " v)
+                            (contains? lex/*keywords* v) (str "'\\#" v)
+                            (= "_" v) v
+                            :else (str "'" v)))
+        check (fn [loc v] (when (contains? vs v)
+                            (let [msg (str "In this scoped type, variable " (tyvar v) " is reserved for the local type " v ".")]
+                              (throw (ex-info msg {:ocaml-error :syntax :message msg :loc loc :sub []})))))]
+    (letfn [(loop-t [t]
+              (let [d (:ptyp_desc t)
+                    desc (case (first d)
+                           :Ptyp_any d
+                           :Ptyp_var (do (check (:ptyp_loc t) (nth d 1)) d)
+                           :Ptyp_arrow (let [r (loop-t (nth d 3)) l (loop-t (nth d 2))] [:Ptyp_arrow (nth d 1) l r]) ; constructor arguments are evaluated right to left
+                           :Ptyp_tuple [:Ptyp_tuple (mapv (fn [[l x]] [l (loop-t x)]) (nth d 1))]
+                           :Ptyp_constr (let [lid (nth d 1)]
+                                          (if (and (= :Lident (first (:txt lid))) (empty? (nth d 2)) (contains? vs (second (:txt lid))))
+                                            [:Ptyp_var (second (:txt lid))]
+                                            [:Ptyp_constr lid (mapv loop-t (nth d 2))]))
+                           :Ptyp_object [:Ptyp_object (mapv loop-of (nth d 1)) (nth d 2)]
+                           :Ptyp_class [:Ptyp_class (nth d 1) (mapv loop-t (nth d 2))]
+                           :Ptyp_alias (do (check (:loc (nth d 2)) (:txt (nth d 2))) [:Ptyp_alias (loop-t (nth d 1)) (nth d 2)])
+                           :Ptyp_variant [:Ptyp_variant (mapv loop-rf (nth d 1)) (nth d 2) (nth d 3)]
+                           :Ptyp_poly (do (doseq [v (nth d 1)] (check (:ptyp_loc t) (:txt v))) [:Ptyp_poly (nth d 1) (loop-t (nth d 2))])
+                           :Ptyp_package [:Ptyp_package (loop-pkg (nth d 1))]
+                           :Ptyp_open [:Ptyp_open (nth d 1) (loop-t (nth d 2))]
+                           :Ptyp_extension d
+                           :Ptyp_functor (let [c (loop-t (nth d 4)) p (loop-pkg (nth d 3))] [:Ptyp_functor (nth d 1) (nth d 2) p c]))]
+                (assoc t :ptyp_desc desc)))
+            (loop-rf [f] (let [d (:prf_desc f)]
+                           (assoc f :prf_desc (case (first d)
+                                                :Rtag [:Rtag (nth d 1) (nth d 2) (mapv loop-t (nth d 3))]
+                                                :Rinherit [:Rinherit (loop-t (nth d 1))]))))
+            (loop-of [f] (let [d (:pof_desc f)]
+                           (assoc f :pof_desc (case (first d)
+                                                :Otag [:Otag (nth d 1) (loop-t (nth d 2))]
+                                                :Oinherit [:Oinherit (loop-t (nth d 1))]))))
+            (loop-pkg [p] (assoc p :ppt_constraints (mapv (fn [[n x]] [n (loop-t x)]) (:ppt_constraints p))))]
+      (loop-t t))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The dump: ocdump.ml's tree (A atom, Str string, L list, V vector, M map) and its two printers
+
+;; A is an atom (its UTF-8 length), L a list and M a map, each with the length of its flat text and the offset of
+;; its last check point (ocdump's flat_within checks the length after each atom, string and map: a node prints flat
+;; when its last check point is within the width; -1 when it has none); Str is a java.lang.String, V a vector
+
+(deftype A [t ^long n])
+(deftype L [items ^long flen ^long lastchk])
+(deftype M [kvs ^long flen ^long lastchk])
+;; IV: a location's vector of six integers [line col line col offset offset], as the atoms of a vector would print
+;; (flen: the length of its flat text, always ASCII); written in one piece, spread into atoms only when it does not fit
+(deftype IV [^Pos s ^Pos e ^long flen])
+
+(declare quoted)
+
+(defn- utf8-len ^long [^String s] (alength (.getBytes s "UTF-8")))
+
+(defn- measure
+  "[flat-length last-check] of a node"
+  [x]
+  (cond
+    (instance? A x) (let [n (.-n ^A x)] [n n])
+    (string? x) (let [n (utf8-len (quoted x))] [n n])
+    (instance? L x) [(.-flen ^L x) (.-lastchk ^L x)]
+    (instance? M x) [(.-flen ^M x) (.-lastchk ^M x)]
+    (instance? IV x) [(.-flen ^IV x) (dec (.-flen ^IV x))]
+    :else (let [k (count x)]
+            (loop [i 0 off 1 last -1]
+              (if (= i k)
+                [(if (pos? k) off (inc off)) last]
+                (let [[fl lc] (measure (nth x i))]
+                  (recur (inc i) (+ off fl 1) (if (>= lc 0) (+ off lc) last))))))))
+
+(defn- flen-of [x]
+  (cond (instance? A x) (.-n ^A x)
+        (instance? L x) (.-flen ^L x)
+        (instance? IV x) (.-flen ^IV x)
+        (instance? M x) (.-flen ^M x)
+        :else (first (measure x))))
+
+(defn- last-of [x]
+  (cond (instance? A x) (.-n ^A x)
+        (instance? L x) (.-lastchk ^L x)
+        (instance? IV x) (dec (.-flen ^IV x))
+        (instance? M x) (.-lastchk ^M x)
+        :else (second (measure x))))
+
+(defn- mk-l [items]
+  (let [items (vec items) k (count items)]
+    (loop [i 0 off 1 last -1]
+      (if (= i k)
+        (L. items (if (pos? k) off (inc off)) last)
+        (let [c (nth items i) fl (flen-of c)]
+          (recur (inc i) (+ off fl 1) (let [lc (last-of c)] (if (>= lc 0) (+ off lc) last))))))))
+
+(defn- mk-m [kvs]
+  (let [kvs (vec kvs)
+        fl (loop [i 0 n 1]
+             (if (= i (count kvs))
+               (inc n)
+               (let [[k v] (nth kvs i)]
+                 (recur (inc i) (+ n (if (pos? i) 1 0) 2 (count k) (flen-of v))))))]
+    (M. kvs fl fl)))
+
+(def ^:dynamic *with-loc* false)
+
+(defn- a* [^String t] (A. t (utf8-len t)))
+(defn- a-ascii [^String t] (A. t (.length t)))
+(defmacro ^:private a
+  "An atom: the length of a literal text is computed at compile time"
+  [t]
+  (if (string? t) `(A. ~t ~(long (alength (.getBytes ^String t "UTF-8")))) `(a* ~t)))
+(def ^:private anil (a "nil"))
+(defn- kw* [k] (a* (str ":" k)))
+(defmacro ^:private kw [k]
+  (if (string? k) `(A. ~(str ":" k) ~(long (alength (.getBytes ^String (str ":" k) "UTF-8")))) `(kw* ~k)))
+(def ^:private a-true (a "true"))
+(def ^:private a-false (a "false"))
+(defn- int-a [n] (a-ascii (str n)))
+(defn- bool-a [b] (if b a-true a-false))
+(defn- l [& xs] (mk-l xs))
+(defn- lv [xs] (mk-l xs))
+
+(defn- text
+  "A byte string's text for the dump (the helper writes the bytes: valid UTF-8 is its text)"
+  [^String s]
+  (if (= (.length s) (alength (.getBytes s "UTF-8")))
+    s ; every char below U+0080: the bytes are the text
+    (or (lex/utf8-text s) (String. (lex/bstr->bytes s) "UTF-8"))))
+
+(defn- dlen
+  "The number of characters of the decimal text of a non-negative integer"
+  ^long [^long n]
+  (cond (< n 10) 1 (< n 100) 2 (< n 1000) 3 (< n 10000) 4 (< n 100000) 5 (< n 1000000) 6 (< n 10000000) 7
+        :else (alength (.getBytes (str n) "UTF-8"))))
+
+(defn- pos-vec [lc]
+  (let [^Pos s (nth lc 0) ^Pos e (nth lc 1)
+        cs (.-cnum s) ce (.-cnum e)]
+    (IV. s e (+ 7 (dlen (.-lnum s)) (dlen (- cs (.-bol s))) (dlen (.-lnum e)) (dlen (- ce (.-bol e))) (dlen cs) (dlen ce)))))
+
+(defn- write-iv [^StringBuilder b ^IV x]
+  (let [^Pos s (.-s x) ^Pos e (.-e x) cs (.-cnum s) ce (.-cnum e)]
+    (.append b "[") (.append b (long (.-lnum s))) (.append b " ") (.append b (long (- cs (.-bol s)))) (.append b " ")
+    (.append b (long (.-lnum e))) (.append b " ") (.append b (long (- ce (.-bol e)))) (.append b " ")
+    (.append b (long cs)) (.append b " ") (.append b (long ce)) (.append b "]")))
+
+(defn- iv-atoms
+  "The six atoms of an IV, for printing it broken"
+  [^IV x]
+  (let [s (.-s x) e (.-e x)]
+    [(int-a (lex/pos-lnum s)) (int-a (- (lex/pos-cnum s) (lex/pos-bol s)))
+     (int-a (lex/pos-lnum e)) (int-a (- (lex/pos-cnum e) (lex/pos-bol e)))
+     (int-a (lex/pos-cnum s)) (int-a (lex/pos-cnum e))]))
+
+(declare meta-of*)
+(defn- meta-of
+  "The metadata of a node: attributes first, then positions"
+  ([attrs stack lc]
+   (if (and (not (seq attrs)) (not (and *with-loc* (seq stack))))
+     (if (and lc *with-loc*)
+       (if (nth lc 2) [["loc" (pos-vec lc)] ["ghost" a-true]] [["loc" (pos-vec lc)]])
+       [])
+     (meta-of* attrs stack lc))))
+
+(defn- meta-of*
+  ([attrs stack lc]
+   (let [m []
+         m (if (seq attrs) (conj m ["attrs" (vec attrs)]) m)
+         m (if (and lc *with-loc*)
+             (cond-> (conj m ["loc" (pos-vec lc)]) (nth lc 2) (conj ["ghost" (bool-a true)]))
+             m)
+         m (if (and *with-loc* (seq stack)) (conj m ["stack" (mapv pos-vec stack)]) m)]
+     m)))
+
+(defn- node
+  ([head fields] (node nil nil nil head fields))
+  ([attrs stack lc head fields]
+   (let [m (meta-of attrs stack lc)]
+     (mk-l (cond-> (into [(a-ascii head)] fields) (seq m) (conj (mk-m m)))))))
+
+(defn- at [lc x] (if *with-loc* (l (a "at") x (pos-vec lc)) x))
+
+(defn- bare-component? [^String c]
+  (boolean (re-matches #"[A-Za-z_][A-Za-z0-9_']*" c)))
+(defn- bare-name? [c] (and (bare-component? c) (not (#{"true" "false" "nil"} c))))
+
+(defn- name-s [c] (if (bare-name? c) (a c) (l (a "name") (text c))))
+(defn- name-loc [n] (at (:loc n) (name-s (:txt n))))
+
+(defn- lident-special [s]
+  (case s "true" (kw "true") "false" (kw "false") "()" (kw "unit") "[]" (kw "nil") "::" (kw "cons") nil))
+
+(defn- has-apply? [lid]
+  (case (first lid) :Lident false :Ldot (has-apply? (:txt (nth lid 1))) :Lapply true))
+
+(defn- lid-text [lid]
+  (case (first lid) :Lident (nth lid 1) :Ldot (str (lid-text (:txt (nth lid 1))) "." (:txt (nth lid 2)))))
+
+(defn- lid-form [lid]
+  (case (first lid)
+    :Lident (or (lident-special (nth lid 1)) (name-s (nth lid 1)))
+    :Ldot (if (has-apply? lid)
+            (l (a "ldot") (lid-form (:txt (nth lid 1))) (name-s (:txt (nth lid 2))))
+            (let [cs (letfn [(comps [x] (case (first x) :Lident [(nth x 1)] :Ldot (conj (comps (:txt (nth x 1))) (:txt (nth x 2)))))]
+                       (comps lid))]
+              (if (and (every? bare-component? cs) (bare-name? (peek cs)))
+                (a (lid-text lid))
+                (l (a "name") (text (lid-text lid))))))
+    :Lapply (l (a "lapply") (lid-form (:txt (nth lid 1))) (lid-form (:txt (nth lid 2))))))
+
+(defn- lid [x] (at (:loc x) (lid-form (:txt x))))
+
+(defn- vec-of [f xs] (mapv f xs))
+(defn- opt [f x] (if (nil? x) anil (f x)))
+(defn- opt-tail [f x] (if (nil? x) [] [(f x)]))
+
+(defn- rec-flag [r] (case r :Nonrecursive (kw "nonrec") :Recursive (kw "rec")))
+(defn- dir-flag [d] (case d :Upto (kw "to") :Downto (kw "downto")))
+(defn- private-flag [p] (case p :Private (kw "private") :Public (kw "public")))
+(defn- mutable-flag [m] (case m :Mutable (kw "mutable") :Immutable (kw "immutable")))
+(defn- virtual-flag [v] (case v :Virtual (kw "virtual") :Concrete (kw "concrete")))
+(defn- override-flag [o] (case o :Override (kw "override") :Fresh (kw "fresh")))
+(defn- closed-flag [c] (case c :Closed (kw "closed") :Open (kw "open")))
+(defn- arg-label [lb]
+  (case (first lb) :Nolabel anil :Labelled (kw (text (nth lb 1))) :Optional (kw (str "?" (text (nth lb 1))))))
+(defn- variance [v] (case v :Covariant (kw "+") :Contravariant (kw "-") :Bivariant (kw "+-") :NoVariance anil))
+(defn- injectivity [i] (case i :Injective (kw "!") :NoInjectivity anil))
+
+(defn- bytes-or-string [s]
+  (let [b (lex/bstr->bytes s)]
+    (if (lex/valid-utf8? b) (String. b "UTF-8") (mapv #(int-a (bit-and 0xff %)) b))))
+
+(declare structure signature expression pattern core-type module-expr module-type class-expr class-type
+         structure-item class-structure class-signature extension-constructor value-binding)
+
+(defn- constant [c]
+  (let [d (:pconst_desc c) lc (:pconst_loc c)]
+    (case (first d)
+      :Pconst_integer (node nil nil lc "int" (into [(text (nth d 1))] (opt-tail int-a (nth d 2))))
+      :Pconst_char (node nil nil lc "char" [(int-a (nth d 1))])
+      :Pconst_string (let [m (into (meta-of nil nil lc) (when *with-loc* [["content-loc" (pos-vec (nth d 2))]]))]
+                       (mk-l (cond-> (into [(a "string") (bytes-or-string (nth d 1))] (when (nth d 3) [(text (nth d 3))]))
+                             (seq m) (conj (mk-m m)))))
+      :Pconst_float (node nil nil lc "float" (into [(text (nth d 1))] (opt-tail int-a (nth d 2)))))))
+
+(declare payload)
+(defn- attribute [x] (node nil nil (:attr_loc x) "attr" [(name-loc (:attr_name x)) (payload (:attr_payload x))]))
+(defn- attributes [xs] (mapv attribute xs))
+(defn- extension [[n p]] (l (a "ext") (name-loc n) (payload p)))
+(defn- payload [p]
+  (case (first p)
+    :PStr (l (a "str") (structure (nth p 1)))
+    :PSig (l (a "sig") (signature (nth p 1)))
+    :PTyp (l (a "typ") (core-type (nth p 1)))
+    :PPat (lv (into [(a "pat") (pattern (nth p 1))] (opt-tail expression (nth p 2))))))
+
+(defn- label-opt-list [f xs]
+  (mapv (fn [[lbl x]] (if (nil? lbl) (f x) [(kw (text lbl)) (f x)])) xs))
+
+(declare package-type row-field object-field)
+
+(defn core-type [t]
+  (let [n (fn [h f] (node (attributes (:ptyp_attributes t)) (:ptyp_loc_stack t) (:ptyp_loc t) h f))
+        d (:ptyp_desc t)]
+    (case (first d)
+      :Ptyp_any (n "any" [])
+      :Ptyp_var (n "var" [(name-s (nth d 1))])
+      :Ptyp_arrow (n "arrow" [(arg-label (nth d 1)) (core-type (nth d 2)) (core-type (nth d 3))])
+      :Ptyp_tuple (n "tuple" [(label-opt-list core-type (nth d 1))])
+      :Ptyp_constr (n "constr" [(lid (nth d 1)) (vec-of core-type (nth d 2))])
+      :Ptyp_object (n "object" [(vec-of object-field (nth d 1)) (closed-flag (nth d 2))])
+      :Ptyp_class (n "class" [(lid (nth d 1)) (vec-of core-type (nth d 2))])
+      :Ptyp_alias (n "alias" [(core-type (nth d 1)) (name-loc (nth d 2))])
+      :Ptyp_variant (n "variant" [(vec-of row-field (nth d 1)) (closed-flag (nth d 2)) (opt #(vec-of name-s %) (nth d 3))])
+      :Ptyp_poly (n "poly" [(vec-of name-loc (nth d 1)) (core-type (nth d 2))])
+      :Ptyp_package (n "package" [(package-type (nth d 1))])
+      :Ptyp_open (n "open" [(lid (nth d 1)) (core-type (nth d 2))])
+      :Ptyp_extension (n "extension" [(extension (nth d 1))])
+      :Ptyp_functor (n "functor" [(arg-label (nth d 1)) (name-loc (nth d 2)) (package-type (nth d 3)) (core-type (nth d 4))]))))
+
+(defn- package-type [p]
+  (node (attributes (:ppt_attrs p)) nil (:ppt_loc p) "pkg"
+        [(lid (:ppt_path p)) (vec-of (fn [[x t]] [(lid x) (core-type t)]) (:ppt_constraints p))]))
+
+(defn- row-field [r]
+  (let [n (fn [h f] (node (attributes (:prf_attributes r)) nil (:prf_loc r) h f)) d (:prf_desc r)]
+    (case (first d)
+      :Rtag (n "rtag" [(name-loc (nth d 1)) (bool-a (nth d 2)) (vec-of core-type (nth d 3))])
+      :Rinherit (n "rinherit" [(core-type (nth d 1))]))))
+
+(defn- object-field [o]
+  (let [n (fn [h f] (node (attributes (:pof_attributes o)) nil (:pof_loc o) h f)) d (:pof_desc o)]
+    (case (first d)
+      :Otag (n "tag" [(name-loc (nth d 1)) (core-type (nth d 2))])
+      :Oinherit (n "inherit" [(core-type (nth d 1))]))))
+
+(defn pattern [p]
+  (let [n (fn [h f] (node (attributes (:ppat_attributes p)) (:ppat_loc_stack p) (:ppat_loc p) h f))
+        d (:ppat_desc p)]
+    (case (first d)
+      :Ppat_any (n "any" [])
+      :Ppat_var (n "var" [(name-loc (nth d 1))])
+      :Ppat_alias (n "alias" [(pattern (nth d 1)) (name-loc (nth d 2))])
+      :Ppat_constant (n "constant" [(constant (nth d 1))])
+      :Ppat_interval (n "interval" [(constant (nth d 1)) (constant (nth d 2))])
+      :Ppat_tuple (n "tuple" [(label-opt-list pattern (nth d 1)) (closed-flag (nth d 2))])
+      :Ppat_construct (n "construct" (into [(lid (nth d 1))] (when-let [[vs q] (nth d 2)] [(vec-of name-loc vs) (pattern q)])))
+      :Ppat_variant (n "variant" (into [(name-s (nth d 1))] (opt-tail pattern (nth d 2))))
+      :Ppat_record (n "record" [(vec-of (fn [[x q]] [(lid x) (pattern q)]) (nth d 1)) (closed-flag (nth d 2))])
+      :Ppat_array (n "array" [(vec-of pattern (nth d 1))])
+      :Ppat_or (n "or" [(pattern (nth d 1)) (pattern (nth d 2))])
+      :Ppat_constraint (n "constraint" [(pattern (nth d 1)) (core-type (nth d 2))])
+      :Ppat_type (n "type" [(lid (nth d 1))])
+      :Ppat_lazy (n "lazy" [(pattern (nth d 1))])
+      :Ppat_unpack (let [nm (nth d 1)] (n "unpack" (into [(at (:loc nm) (opt name-s (:txt nm)))] (opt-tail package-type (nth d 2)))))
+      :Ppat_exception (n "exception" [(pattern (nth d 1))])
+      :Ppat_effect (n "effect" [(pattern (nth d 1)) (pattern (nth d 2))])
+      :Ppat_extension (n "extension" [(extension (nth d 1))])
+      :Ppat_open (n "open" [(lid (nth d 1)) (pattern (nth d 2))]))))
+
+(declare binding-op case-s function-param function-body type-constraint)
+
+(defn expression [e]
+  (let [n (fn [h f] (node (attributes (:pexp_attributes e)) (:pexp_loc_stack e) (:pexp_loc e) h f))
+        d (:pexp_desc e)]
+    (case (first d)
+      :Pexp_ident (n "ident" [(lid (nth d 1))])
+      :Pexp_constant (n "constant" [(constant (nth d 1))])
+      :Pexp_let (n "let" [(rec-flag (nth d 1)) (vec-of value-binding (nth d 2)) (expression (nth d 3))])
+      :Pexp_function (n "function" [(vec-of function-param (nth d 1)) (opt type-constraint (nth d 2)) (function-body (nth d 3))])
+      :Pexp_apply (n "apply" [(expression (nth d 1)) (vec-of (fn [[lb x]] [(arg-label lb) (expression x)]) (nth d 2))])
+      :Pexp_match (n "match" [(expression (nth d 1)) (vec-of case-s (nth d 2))])
+      :Pexp_try (n "try" [(expression (nth d 1)) (vec-of case-s (nth d 2))])
+      :Pexp_tuple (n "tuple" [(label-opt-list expression (nth d 1))])
+      :Pexp_construct (n "construct" (into [(lid (nth d 1))] (opt-tail expression (nth d 2))))
+      :Pexp_variant (n "variant" (into [(name-s (nth d 1))] (opt-tail expression (nth d 2))))
+      :Pexp_record (n "record" (into [(vec-of (fn [[x y]] [(lid x) (expression y)]) (nth d 1))] (opt-tail expression (nth d 2))))
+      :Pexp_field (n "field" [(expression (nth d 1)) (lid (nth d 2))])
+      :Pexp_setfield (n "setfield" [(expression (nth d 1)) (lid (nth d 2)) (expression (nth d 3))])
+      :Pexp_array (n "array" [(vec-of expression (nth d 1))])
+      :Pexp_ifthenelse (n "ifthenelse" (into [(expression (nth d 1)) (expression (nth d 2))] (opt-tail expression (nth d 3))))
+      :Pexp_sequence (n "sequence" [(expression (nth d 1)) (expression (nth d 2))])
+      :Pexp_while (n "while" [(expression (nth d 1)) (expression (nth d 2))])
+      :Pexp_for (n "for" [(pattern (nth d 1)) (expression (nth d 2)) (expression (nth d 3)) (dir-flag (nth d 4)) (expression (nth d 5))])
+      :Pexp_constraint (n "constraint" [(expression (nth d 1)) (core-type (nth d 2))])
+      :Pexp_coerce (n "coerce" [(expression (nth d 1)) (opt core-type (nth d 2)) (core-type (nth d 3))])
+      :Pexp_send (n "send" [(expression (nth d 1)) (name-loc (nth d 2))])
+      :Pexp_new (n "new" [(lid (nth d 1))])
+      :Pexp_setinstvar (n "setinstvar" [(name-loc (nth d 1)) (expression (nth d 2))])
+      :Pexp_override (n "override" [(vec-of (fn [[x y]] [(name-loc x) (expression y)]) (nth d 1))])
+      :Pexp_struct_item (n "struct-item" [(structure-item (nth d 1)) (expression (nth d 2))])
+      :Pexp_assert (n "assert" [(expression (nth d 1))])
+      :Pexp_lazy (n "lazy" [(expression (nth d 1))])
+      :Pexp_poly (n "poly" (into [(expression (nth d 1))] (opt-tail core-type (nth d 2))))
+      :Pexp_object (n "object" [(class-structure (nth d 1))])
+      :Pexp_newtype (n "newtype" [(name-loc (nth d 1)) (expression (nth d 2))])
+      :Pexp_pack (n "pack" (into [(module-expr (nth d 1))] (opt-tail package-type (nth d 2))))
+      :Pexp_letop (let [lo (nth d 1)] (n "letop" [(binding-op (:let_ lo)) (vec-of binding-op (:ands lo)) (expression (:body lo))]))
+      :Pexp_extension (n "extension" [(extension (nth d 1))])
+      :Pexp_unreachable (n "unreachable" []))))
+
+(defn- binding-op [b]
+  (node nil nil (:pbop_loc b) "bop" [(name-loc (:pbop_op b)) (pattern (:pbop_pat b)) (expression (:pbop_exp b))]))
+
+(defn- case-s [c] (l (a "case") (pattern (:pc_lhs c)) (opt expression (:pc_guard c)) (expression (:pc_rhs c))))
+
+(defn- function-param [p]
+  (let [d (:pparam_desc p)]
+    (case (first d)
+      :Pparam_val (node nil nil (:pparam_loc p) "param" [(arg-label (nth d 1)) (opt expression (nth d 2)) (pattern (nth d 3))])
+      :Pparam_newtype (node nil nil (:pparam_loc p) "newtype" [(name-loc (nth d 1))]))))
+
+(defn- function-body [b]
+  (case (first b)
+    :Pfunction_body (l (a "body") (expression (nth b 1)))
+    :Pfunction_cases (node (attributes (nth b 3)) nil (nth b 2) "cases" [(vec-of case-s (nth b 1))])))
+
+(defn- type-constraint [c]
+  (case (first c)
+    :Pconstraint (l (a "constraint") (core-type (nth c 1)))
+    :Pcoerce (l (a "coerce") (opt core-type (nth c 1)) (core-type (nth c 2)))))
+
+(defn- value-description [v head]
+  (node (attributes (:pval_attributes v)) nil (:pval_loc v) head
+        [(name-loc (:pval_name v)) (core-type (:pval_type v)) (vec-of text (:pval_prim v))]))
+
+(defn- type-param [[t [v i]]] [(core-type t) (variance v) (injectivity i)])
+
+(declare constructor-declaration label-declaration)
+
+(defn- type-kind [k]
+  (if (keyword? k)
+    (case k :Ptype_abstract (kw "abstract") :Ptype_open (kw "open"))
+    (case (first k)
+      :Ptype_variant (l (a "variant") (vec-of constructor-declaration (nth k 1)))
+      :Ptype_record (l (a "record") (vec-of label-declaration (nth k 1)))
+      :Ptype_external (l (a "external") (text (nth k 1))))))
+
+(defn- type-declaration [d]
+  (node (attributes (:ptype_attributes d)) nil (:ptype_loc d) "decl"
+        (into [(name-loc (:ptype_name d))
+               (vec-of type-param (:ptype_params d))
+               (vec-of (fn [[x y lc]] (node nil nil lc "constraint" [(core-type x) (core-type y)])) (:ptype_constraints d))
+               (type-kind (:ptype_kind d))
+               (private-flag (:ptype_private d))]
+              (opt-tail core-type (:ptype_manifest d)))))
+
+(defn- label-declaration [x]
+  (node (attributes (:pld_attributes x)) nil (:pld_loc x) "ldecl"
+        [(name-loc (:pld_name x)) (mutable-flag (:pld_mutable x)) (core-type (:pld_type x))]))
+
+(defn- constructor-arguments [c]
+  (case (first c)
+    :Pcstr_tuple (vec-of core-type (nth c 1))
+    :Pcstr_record (l (a "record") (vec-of label-declaration (nth c 1)))))
+
+(defn- constructor-declaration [c]
+  (node (attributes (:pcd_attributes c)) nil (:pcd_loc c) "cdecl"
+        (into [(name-loc (:pcd_name c)) (vec-of name-loc (:pcd_vars c)) (constructor-arguments (:pcd_args c))]
+              (opt-tail core-type (:pcd_res c)))))
+
+(defn- type-extension [t]
+  (node (attributes (:ptyext_attributes t)) nil (:ptyext_loc t) "typext"
+        [(lid (:ptyext_path t)) (vec-of type-param (:ptyext_params t))
+         (vec-of extension-constructor (:ptyext_constructors t)) (private-flag (:ptyext_private t))]))
+
+(defn extension-constructor [c]
+  (let [k (:pext_kind c)
+        kind (case (first k)
+               :Pext_decl (lv (into [(a "decl") (vec-of name-loc (nth k 1)) (constructor-arguments (nth k 2))] (opt-tail core-type (nth k 3))))
+               :Pext_rebind (l (a "rebind") (lid (nth k 1))))]
+    (node (attributes (:pext_attributes c)) nil (:pext_loc c) "econstr" [(name-loc (:pext_name c)) kind])))
+
+(defn- type-exception [t]
+  (node (attributes (:ptyexn_attributes t)) nil (:ptyexn_loc t) "exception" [(extension-constructor (:ptyexn_constructor t))]))
+
+(declare open-description class-type-field class-field)
+
+(defn class-type [c]
+  (let [n (fn [h f] (node (attributes (:pcty_attributes c)) nil (:pcty_loc c) h f)) d (:pcty_desc c)]
+    (case (first d)
+      :Pcty_constr (n "constr" [(lid (nth d 1)) (vec-of core-type (nth d 2))])
+      :Pcty_signature (n "signature" [(class-signature (nth d 1))])
+      :Pcty_arrow (n "arrow" [(arg-label (nth d 1)) (core-type (nth d 2)) (class-type (nth d 3))])
+      :Pcty_extension (n "extension" [(extension (nth d 1))])
+      :Pcty_open (n "open" [(open-description (nth d 1)) (class-type (nth d 2))]))))
+
+(defn class-signature [s] (l (a "csig") (core-type (:pcsig_self s)) (vec-of class-type-field (:pcsig_fields s))))
+
+(defn- class-type-field [f]
+  (let [n (fn [h fl] (node (attributes (:pctf_attributes f)) nil (:pctf_loc f) h fl)) d (:pctf_desc f)]
+    (case (first d)
+      :Pctf_inherit (n "inherit" [(class-type (nth d 1))])
+      :Pctf_val (let [[lb m v t] (nth d 1)] (n "val" [(name-loc lb) (mutable-flag m) (virtual-flag v) (core-type t)]))
+      :Pctf_method (let [[lb p v t] (nth d 1)] (n "method" [(name-loc lb) (private-flag p) (virtual-flag v) (core-type t)]))
+      :Pctf_constraint (let [[x y] (nth d 1)] (n "constraint" [(core-type x) (core-type y)]))
+      :Pctf_attribute (n "attribute" [(attribute (nth d 1))])
+      :Pctf_extension (n "extension" [(extension (nth d 1))]))))
+
+(defn- class-infos [f c]
+  (node (attributes (:pci_attributes c)) nil (:pci_loc c) "class-infos"
+        [(virtual-flag (:pci_virt c)) (vec-of type-param (:pci_params c)) (name-loc (:pci_name c)) (f (:pci_expr c))]))
+
+(defn class-expr [c]
+  (let [n (fn [h f] (node (attributes (:pcl_attributes c)) nil (:pcl_loc c) h f)) d (:pcl_desc c)]
+    (case (first d)
+      :Pcl_constr (n "constr" [(lid (nth d 1)) (vec-of core-type (nth d 2))])
+      :Pcl_structure (n "structure" [(class-structure (nth d 1))])
+      :Pcl_fun (n "fun" [(arg-label (nth d 1)) (opt expression (nth d 2)) (pattern (nth d 3)) (class-expr (nth d 4))])
+      :Pcl_apply (n "apply" [(class-expr (nth d 1)) (vec-of (fn [[lb x]] [(arg-label lb) (expression x)]) (nth d 2))])
+      :Pcl_let (n "let" [(rec-flag (nth d 1)) (vec-of value-binding (nth d 2)) (class-expr (nth d 3))])
+      :Pcl_constraint (n "constraint" [(class-expr (nth d 1)) (class-type (nth d 2))])
+      :Pcl_extension (n "extension" [(extension (nth d 1))])
+      :Pcl_open (n "open" [(open-description (nth d 1)) (class-expr (nth d 2))]))))
+
+(defn class-structure [c] (l (a "cstruct") (pattern (:pcstr_self c)) (vec-of class-field (:pcstr_fields c))))
+
+(defn- class-field-kind [k]
+  (case (first k)
+    :Cfk_virtual (l (a "virtual") (core-type (nth k 1)))
+    :Cfk_concrete (l (a "concrete") (override-flag (nth k 1)) (expression (nth k 2)))))
+
+(defn- class-field [f]
+  (let [n (fn [h fl] (node (attributes (:pcf_attributes f)) nil (:pcf_loc f) h fl)) d (:pcf_desc f)]
+    (case (first d)
+      :Pcf_inherit (n "inherit" (into [(override-flag (nth d 1)) (class-expr (nth d 2))] (opt-tail name-loc (nth d 3))))
+      :Pcf_val (let [[lb m k] (nth d 1)] (n "val" [(name-loc lb) (mutable-flag m) (class-field-kind k)]))
+      :Pcf_method (let [[lb p k] (nth d 1)] (n "method" [(name-loc lb) (private-flag p) (class-field-kind k)]))
+      :Pcf_constraint (let [[x y] (nth d 1)] (n "constraint" [(core-type x) (core-type y)]))
+      :Pcf_initializer (n "initializer" [(expression (nth d 1))])
+      :Pcf_attribute (n "attribute" [(attribute (nth d 1))])
+      :Pcf_extension (n "extension" [(extension (nth d 1))]))))
+
+(declare with-constraint functor-parameter)
+
+(defn module-type [m]
+  (let [n (fn [h f] (node (attributes (:pmty_attributes m)) nil (:pmty_loc m) h f)) d (:pmty_desc m)]
+    (case (first d)
+      :Pmty_ident (n "ident" [(lid (nth d 1))])
+      :Pmty_signature (n "signature" [(signature (nth d 1))])
+      :Pmty_functor (n "functor" [(functor-parameter (nth d 1)) (module-type (nth d 2))])
+      :Pmty_with (n "with" [(module-type (nth d 1)) (vec-of with-constraint (nth d 2))])
+      :Pmty_typeof (n "typeof" [(module-expr (nth d 1))])
+      :Pmty_extension (n "extension" [(extension (nth d 1))])
+      :Pmty_alias (n "alias" [(lid (nth d 1))]))))
+
+(defn- functor-parameter [p]
+  (if (= p :Unit)
+    (kw "unit")
+    (let [[_ nm t] p] (l (a "named") (at (:loc nm) (opt name-s (:txt nm))) (module-type t)))))
+
+(declare signature-item)
+(defn signature [s] (vec-of signature-item s))
+
+(defn- modtype-decl [head d]
+  (node (attributes (:pmtd_attributes d)) nil (:pmtd_loc d) head (into [(name-loc (:pmtd_name d))] (opt-tail module-type (:pmtd_type d)))))
+
+(defn- open-description [o]
+  (node (attributes (:popen_attributes o)) nil (:popen_loc o) "open" [(lid (:popen_expr o)) (override-flag (:popen_override o))]))
+
+(defn- signature-item [i]
+  (let [n (fn [h f] (node nil nil (:psig_loc i) h f)) d (:psig_desc i)]
+    (case (first d)
+      :Psig_value (value-description (nth d 1) "value")
+      :Psig_type (n "type" [(rec-flag (nth d 1)) (vec-of type-declaration (nth d 2))])
+      :Psig_typesubst (n "typesubst" [(vec-of type-declaration (nth d 1))])
+      :Psig_typext (type-extension (nth d 1))
+      :Psig_exception (type-exception (nth d 1))
+      :Psig_module (let [x (nth d 1)]
+                     (node (attributes (:pmd_attributes x)) nil (:pmd_loc x) "module"
+                           [(at (:loc (:pmd_name x)) (opt name-s (:txt (:pmd_name x)))) (module-type (:pmd_type x))]))
+      :Psig_modsubst (let [x (nth d 1)]
+                       (node (attributes (:pms_attributes x)) nil (:pms_loc x) "modsubst" [(name-loc (:pms_name x)) (lid (:pms_manifest x))]))
+      :Psig_recmodule (n "recmodule" [(vec-of (fn [x] (node (attributes (:pmd_attributes x)) nil (:pmd_loc x) "moddecl"
+                                                              [(at (:loc (:pmd_name x)) (opt name-s (:txt (:pmd_name x)))) (module-type (:pmd_type x))]))
+                                              (nth d 1))])
+      :Psig_modtype (modtype-decl "modtype" (nth d 1))
+      :Psig_modtypesubst (modtype-decl "modtypesubst" (nth d 1))
+      :Psig_open (open-description (nth d 1))
+      :Psig_include (let [x (nth d 1)] (node (attributes (:pincl_attributes x)) nil (:pincl_loc x) "include" [(module-type (:pincl_mod x))]))
+      :Psig_class (n "class" [(vec-of #(class-infos class-type %) (nth d 1))])
+      :Psig_class_type (n "class-type" [(vec-of #(class-infos class-type %) (nth d 1))])
+      :Psig_attribute (n "attribute" [(attribute (nth d 1))])
+      :Psig_extension (node (attributes (nth d 2)) nil (:psig_loc i) "extension" [(extension (nth d 1))]))))
+
+(defn- with-constraint [c]
+  (case (first c)
+    :Pwith_type (l (a "type") (lid (nth c 1)) (type-declaration (nth c 2)))
+    :Pwith_module (l (a "module") (lid (nth c 1)) (lid (nth c 2)))
+    :Pwith_modtype (l (a "modtype") (lid (nth c 1)) (module-type (nth c 2)))
+    :Pwith_modtypesubst (l (a "modtypesubst") (lid (nth c 1)) (module-type (nth c 2)))
+    :Pwith_typesubst (l (a "typesubst") (lid (nth c 1)) (type-declaration (nth c 2)))
+    :Pwith_modsubst (l (a "modsubst") (lid (nth c 1)) (lid (nth c 2)))))
+
+(defn module-expr [m]
+  (let [n (fn [h f] (node (attributes (:pmod_attributes m)) nil (:pmod_loc m) h f)) d (:pmod_desc m)]
+    (case (first d)
+      :Pmod_ident (n "ident" [(lid (nth d 1))])
+      :Pmod_structure (n "structure" [(structure (nth d 1))])
+      :Pmod_functor (n "functor" [(functor-parameter (nth d 1)) (module-expr (nth d 2))])
+      :Pmod_apply (n "apply" [(module-expr (nth d 1)) (module-expr (nth d 2))])
+      :Pmod_apply_unit (n "apply-unit" [(module-expr (nth d 1))])
+      :Pmod_constraint (n "constraint" [(module-expr (nth d 1)) (module-type (nth d 2))])
+      :Pmod_unpack (n "unpack" [(expression (nth d 1))])
+      :Pmod_extension (n "extension" [(extension (nth d 1))]))))
+
+(defn structure [s] (vec-of structure-item s))
+
+(defn value-binding [b]
+  (node (attributes (:pvb_attributes b)) nil (:pvb_loc b) "binding"
+        (into [(pattern (:pvb_pat b)) (expression (:pvb_expr b))]
+              (opt-tail (fn [c]
+                          (case (first c)
+                            :Pvc_constraint (l (a "constraint") (vec-of name-loc (nth c 1)) (core-type (nth c 2)))
+                            :Pvc_coercion (l (a "coercion") (opt core-type (nth c 1)) (core-type (nth c 2)))))
+                        (:pvb_constraint b)))))
+
+(defn structure-item [i]
+  (let [n (fn [h f] (node nil nil (:pstr_loc i) h f)) d (:pstr_desc i)]
+    (case (first d)
+      :Pstr_eval (node (attributes (nth d 2)) nil (:pstr_loc i) "eval" [(expression (nth d 1))])
+      :Pstr_value (n "value" [(rec-flag (nth d 1)) (vec-of value-binding (nth d 2))])
+      :Pstr_primitive (value-description (nth d 1) "primitive")
+      :Pstr_type (n "type" [(rec-flag (nth d 1)) (vec-of type-declaration (nth d 2))])
+      :Pstr_typext (type-extension (nth d 1))
+      :Pstr_exception (type-exception (nth d 1))
+      :Pstr_module (let [x (nth d 1)]
+                     (node (attributes (:pmb_attributes x)) nil (:pmb_loc x) "module"
+                           [(at (:loc (:pmb_name x)) (opt name-s (:txt (:pmb_name x)))) (module-expr (:pmb_expr x))]))
+      :Pstr_recmodule (n "recmodule" [(vec-of (fn [x] (node (attributes (:pmb_attributes x)) nil (:pmb_loc x) "modbind"
+                                                              [(at (:loc (:pmb_name x)) (opt name-s (:txt (:pmb_name x)))) (module-expr (:pmb_expr x))]))
+                                              (nth d 1))])
+      :Pstr_modtype (modtype-decl "modtype" (nth d 1))
+      :Pstr_open (let [o (nth d 1)]
+                   (node (attributes (:popen_attributes o)) nil (:popen_loc o) "open"
+                         [(module-expr (:popen_expr o)) (override-flag (:popen_override o))]))
+      :Pstr_class (n "class" [(vec-of #(class-infos class-expr %) (nth d 1))])
+      :Pstr_class_type (n "class-type" [(vec-of #(class-infos class-type %) (nth d 1))])
+      :Pstr_include (let [x (nth d 1)] (node (attributes (:pincl_attributes x)) nil (:pincl_loc x) "include" [(module-expr (:pincl_mod x))]))
+      :Pstr_attribute (n "attribute" [(attribute (nth d 1))])
+      :Pstr_extension (node (attributes (nth d 2)) nil (:pstr_loc i) "extension" [(extension (nth d 1))]))))
+
+(defn- directive [dv]
+  (node nil nil (:pdir_loc dv) "directive"
+        (into [(name-loc (:pdir_name dv))]
+              (opt-tail (fn [arg]
+                          (let [x (:pdira_desc arg)]
+                            (case (first x)
+                              :Pdir_string (l (a "string") (bytes-or-string (nth x 1)))
+                              :Pdir_int (lv (into [(a "int") (text (nth x 1))] (opt-tail int-a (nth x 2))))
+                              :Pdir_ident (l (a "ident") (lid-form (nth x 1)))
+                              :Pdir_bool (l (a "bool") (bool-a (nth x 1))))))
+                        (:pdir_arg dv)))))
+
+(defn- phrase [p]
+  (case (first p)
+    :Ptop_def (l (a "def") (structure (nth p 1)))
+    :Ptop_dir (directive (nth p 1))))
+
+(defn top-form
+  "The helper's top form of a parse: kind :impl (a structure), :intf (a signature) or :toplevel (phrases)"
+  [kind x fname]
+  (let [m (mk-m [["file" (text fname)] ["ocaml" "5.5.0"]])]
+    (case kind
+      :impl (l (a "ocaml/impl") (structure x) m)
+      :intf (l (a "ocaml/intf") (signature x) m)
+      :toplevel (l (a "ocaml/toplevel") (vec-of phrase x) m))))
+
+(defn error-form
+  "The helper's error form: (ocaml/error KIND MESSAGE {:loc ...})"
+  [kind msg lc]
+  (let [m (if lc (meta-of nil nil lc) [])]
+    (mk-l (cond-> [(a "ocaml/error") (kw (name kind)) (text msg)] (seq m) (conj (mk-m m))))))
+
+;; mode :full's layout (ocdump --mode tokens): gaps and items, an item a token's text or (comment|doc TEXT)
+(defn layout-form [items fname]
+  (l (a "ocaml/layout")
+     (mapv (fn [x] (if (string? x) x (l (a (name (first x))) (second x)))) items)
+     (mk-m [["file" (text fname)] ["ocaml" "5.5.0"]])))
+
+;; ---------------------------------------------------------------------------------------------
+;; The dump's text, as ocdump's printer writes it (flat when a node fits in the width, else broken after its head)
+
+(defn- blen
+  "The UTF-8 length of a string"
+  [^String s]
+  (alength (.getBytes s "UTF-8")))
+
+(def ^:private needs-escape #"[\"\\\x00-\x1f\x7f]")
+
+(defn- escape [^StringBuilder b ^String s]
+  (if-not (re-find needs-escape s)
+    (.append b s)
+    (dotimes [i (count s)]
+      (let [c (.charAt s i)]
+        (case c
+          \" (.append b "\\\"")
+          \\ (.append b "\\\\")
+          \newline (.append b "\\n")
+          \tab (.append b "\\t")
+          \return (.append b "\\r")
+          (if (or (< (int c) 0x20) (= (int c) 0x7f))
+            (.append b (format "\\u%04X" (int c)))
+            (.append b c)))))))
+
+(defn- quoted ^String [^String s] (let [b (StringBuilder.)] (.append b "\"") (escape b s) (.append b "\"") (str b)))
+
+(defn- flat [^StringBuilder b x]
+  (cond
+    (instance? A x) (.append b ^String (.-t ^A x))
+    (instance? IV x) (write-iv b x)
+    (string? x) (do (.append b "\"") (escape b x) (.append b "\""))
+    (instance? L x) (do (.append b "(") (let [xs (.-items ^L x)] (dotimes [i (count xs)] (when (pos? i) (.append b " ")) (flat b (nth xs i)))) (.append b ")"))
+    (vector? x) (do (.append b "[") (dotimes [i (count x)] (when (pos? i) (.append b " ")) (flat b (nth x i))) (.append b "]"))
+    (instance? M x) (do (.append b "{")
+                        (let [kvs (.-kvs ^M x)]
+                          (dotimes [i (count kvs)]
+                            (let [[k v] (nth kvs i)]
+                              (when (pos? i) (.append b " "))
+                              (.append b (str ":" k " ")) (flat b v))))
+                        (.append b "}"))))
+
+(defn- flat-string [x] (let [b (StringBuilder.)] (flat b x) (str b)))
+
+(def ^:private max-indent 60)
+
+(defn- spaces [^StringBuilder b n] (dotimes [_ n] (.append b \space)))
+
+(defn- pretty [^StringBuilder b ind width x]
+  (let [ind (min ind max-indent)
+        fits (or (instance? A x) (string? x) (<= (last-of x) (- width ind)))]
+    (if fits
+      (flat b x)
+      (cond
+        (instance? IV x) (pretty b ind width (iv-atoms x))
+        (and (instance? L x) (seq (.-items ^L x)))
+        (let [[h & rest] (.-items ^L x)]
+          (.append b "(") (flat b h)
+          (doseq [c rest] (.append b "\n") (spaces b (inc ind)) (pretty b (inc ind) width c))
+          (.append b ")"))
+        (or (vector? x) (instance? L x))
+        (let [xs (if (vector? x) x (.-items ^L x))]
+          (.append b (if (vector? x) "[" "("))
+          (dotimes [i (count xs)]
+            (when (pos? i) (.append b "\n") (spaces b (inc ind)))
+            (pretty b (inc ind) width (nth xs i)))
+          (.append b (if (vector? x) "]" ")")))
+        (instance? M x)
+        (let [kvs (.-kvs ^M x)]
+          (.append b "{")
+          (dotimes [i (count kvs)]
+            (let [[k v] (nth kvs i)]
+              (when (pos? i) (.append b "\n") (spaces b (inc ind)))
+              (.append b (str ":" k " "))
+              (pretty b (+ ind 2 (count k)) width v)))
+          (.append b "}"))))))
+
+(defn dump-text
+  "The dump's text, as the helper prints it (width 100), with its final newline"
+  [x]
+  (let [b (StringBuilder.)]
+    (pretty b 0 100 x)
+    (.append b "\n")
+    (str b)))
+
+(defn dump-data
+  "The forms Arbace's reader reads from the dump's text"
+  [x]
+  (cond
+    (instance? A x) (let [t (.-t ^A x)]
+                      (cond (= t "nil") nil (= t "true") true (= t "false") false
+                            (.startsWith ^String t ":") (keyword (subs t 1))
+                            (re-matches #"-?\d+" t) (Long/parseLong t)
+                            :else (symbol t)))
+    (string? x) x
+    (instance? L x) (apply list (map dump-data (.-items ^L x)))
+    (vector? x) (mapv dump-data x)
+    (instance? IV x) (mapv dump-data (iv-atoms x))
+    (instance? M x) (into {} (map (fn [[k v]] [(keyword k) (dump-data v)]) (.-kvs ^M x)))))

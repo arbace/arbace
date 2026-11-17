@@ -1,0 +1,104 @@
+;; Converted from jdk26u src/java.security.sasl/share/classes/com/sun/security/sasl/ntlm/NTLMClient.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.security.sasl.ntlm)
+
+(import '(com.sun.security.ntlm Client NTLMException)
+        '(java.io IOException)
+        '(java.net InetAddress UnknownHostException)
+        '(java.util Map Random)
+        '(javax.security.auth.callback Callback
+                                       CallbackHandler
+                                       NameCallback
+                                       PasswordCallback
+                                       UnsupportedCallbackException)
+        '(javax.security.sasl RealmCallback Sasl SaslClient SaslException))
+
+(defclass ^:final NTLMClient
+  :implements [SaslClient]
+
+  (field ^:private ^:static ^:final ^String NTLM_VERSION "com.sun.security.sasl.ntlm.version")
+
+  (field ^:private ^:static ^:final ^String NTLM_RANDOM "com.sun.security.sasl.ntlm.random")
+
+  (field ^:private ^:static ^:final ^String NTLM_DOMAIN "com.sun.security.sasl.ntlm.domain")
+
+  (field ^:private ^:static ^:final ^String NTLM_HOSTNAME "com.sun.security.sasl.ntlm.hostname")
+
+  (field ^:private ^:final ^Client client)
+
+  (field ^:private ^:final ^String mech)
+
+  (field ^:private ^:final ^Random random)
+
+  (field ^:private ^int step 0)
+
+  (constructor :throws [SaslException] [this ^String mech ^String authzid ^String protocol
+                                        ^String serverName ^{:tag (Map String ?)} props
+                                        ^CallbackHandler cbh]
+    (set! (.-mech this) mech)
+    (let [^:mutable ^String version nil
+          ^:mutable ^Random rtmp nil
+          ^:mutable ^String hostname nil]
+      (when (some? props)
+        (let [qop (cast String (.get props Sasl/QOP))]
+          (when (and (some? qop) (not (.equals qop "auth")))
+            (throw (SaslException. "NTLM only support auth")))
+          (set! version (cast String (.get props NTLM_VERSION)))
+          (set! rtmp (cast Random (.get props NTLM_RANDOM)))
+          (set! hostname (cast String (.get props NTLM_HOSTNAME)))))
+      (set! (.-random this) (if (some? rtmp) rtmp (Random.)))
+      (when (nil? version) (set! version (System/getProperty "ntlm.version")))
+      (let [^RealmCallback dcb (if (and (some? serverName) (not (.isEmpty serverName)))
+                                   (RealmCallback. "Realm: " serverName)
+                                   (RealmCallback. "Realm: "))
+            ^NameCallback ncb (if (and (some? authzid) (not (.isEmpty authzid)))
+                                  (NameCallback. "User name: " authzid)
+                                  (NameCallback. "User name: "))
+            pcb (PasswordCallback. "Password: " false)]
+        (try
+          (.handle cbh (new Callback/1 [dcb ncb pcb]))
+          (catch UnsupportedCallbackException e
+            (throw (SaslException.
+                     "NTLM: Cannot perform callback to acquire realm, username or password"
+                     e)))
+          (catch IOException e
+            (throw (SaslException. "NTLM: Error acquiring realm, username or password" e))))
+        (when (nil? hostname)
+          (try
+            (set! hostname (.getCanonicalHostName (InetAddress/getLocalHost)))
+            (catch UnknownHostException e (set! hostname "localhost"))))
+        (try
+          (let [^:mutable name (.getName ncb)]
+            (when (nil? name) (set! name authzid))
+            (let [^:mutable domain (.getText dcb)]
+              (when (nil? domain) (set! domain serverName))
+              (set! client (Client. version hostname name domain (.getPassword pcb)))))
+          (catch NTLMException ne (throw (SaslException. "NTLM: client creation failure" ne)))))))
+
+  (method ^:public getMechanismName ^String [this] mech)
+
+  (method ^:public isComplete ^boolean [this] (>= step 2))
+
+  (method ^:public unwrap :throws [SaslException] ^byte/1 [this ^byte/1 incoming ^int offset
+                                                           ^int len]
+    (throw (IllegalStateException. "Not supported.")))
+
+  (method ^:public wrap :throws [SaslException] ^byte/1 [this ^byte/1 outgoing ^int offset ^int len]
+    (throw (IllegalStateException. "Not supported.")))
+
+  (method ^:public getNegotiatedProperty [this ^String propName]
+    (when-not (.isComplete this) (throw (IllegalStateException. "authentication not complete")))
+    (switch propName Sasl/QOP "auth" NTLM_DOMAIN (.getDomain client) nil))
+
+  (method ^:public dispose :throws [SaslException] ^void [this]
+    (.dispose client))
+
+  (method ^:public hasInitialResponse ^boolean [this] true)
+
+  (method ^:public evaluateChallenge :throws [SaslException] ^byte/1 [this ^byte/1 challenge]
+    (set! step (unchecked-inc-int step))
+    (if (== step 1)
+        (.type1 client)
+        (try
+          (let [nonce (new byte/1 8)] (.nextBytes random nonce) (.type3 client challenge nonce))
+          (catch NTLMException ex (throw (SaslException. "Type3 creation failed" ex)))))))

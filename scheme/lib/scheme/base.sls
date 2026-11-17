@@ -5,8 +5,8 @@
 ;;;; the range arguments of string and vector procedures, member and assoc with a predicate, bytevector-copy!,
 ;;;; parameter objects, promises, ports) this library defines the R7RS one; the rest is (rnrs) re-exported.
 ;;;; si's own string and bytevector port procedures come from (psyntax system $all).
-;;;; Not provided: include and include-ci as expressions (define-library's include declarations are read by the
-;;;; host, SM8b, SC107 (b)).
+;;;; include and include-ci as expressions: SMR1 (doc/scheme/MATURITY-REVIEW.md); define-library's include declarations are read by the
+;;;; host, SM8b, SC107 (b).
 (library (scheme base)
   (export
     => ... _ * + - / < <= = > >= abs and append apply assoc assq assv begin binary-port? boolean=? boolean?
@@ -34,7 +34,9 @@
     vector-length vector-map vector-ref vector-set! vector? when with-exception-handler write-bytevector
     write-char write-string write-u8 zero?
     ;; used by (scheme lazy), (scheme r5rs) and the other R7RS libraries
-    delay delay-force make-promise promise? force)
+    delay delay-force make-promise promise? force
+    ;; R7RS 4.? include, include-ci (SMR1)
+    include include-ci)
   (import (except (rnrs)
                   map for-each string-for-each vector-for-each error define-record-type let-syntax letrec-syntax let*-values case string-copy string->list vector->list string-fill! vector-fill!
                   member assoc bytevector-copy bytevector-copy! utf8->string string->utf8 vector-map close-port close-input-port close-output-port
@@ -47,6 +49,10 @@
           (prefix (only (rnrs) vector-map) r6:)
           (prefix (only (rnrs) utf8->string string->utf8 close-port) r6:)
           (srfi :39 parameters)
+          (for (only (rnrs) lambda define let let* if null? car cdr quote cons reverse append apply for-all string? eof-object? read
+                    call-with-input-file get-string-all open-string-input-port string-append
+                    syntax-case syntax with-syntax datum->syntax syntax->datum)
+               expand)
           (only (psyntax system $all)
                 open-bytevector-input-port open-bytevector-output-port
                 get-bytevector-n get-bytevector-n! put-bytevector get-u8 lookahead-u8 put-u8
@@ -178,6 +184,37 @@
               (unless (promise-done? p) (promise-update! p* p))
               (force p)))
         p))
+
+;; include and include-ci as expressions (R7RS 5.6.1; SMR1): the file's data read at expansion and spliced as a begin.
+  ;; The name is taken as given (the process's directory); define-library's include declarations are the host's.
+  (define-syntax include
+    (lambda (x)
+      (define (slurp fn fold?)
+        (let* ((text (call-with-input-file fn (lambda (p) (get-string-all p))))
+               (p (open-string-input-port (if fold? (string-append "#!fold-case " text) text))))
+          (let loop ((acc '()))
+            (let ((d (read p)))
+              (if (eof-object? d) (reverse acc) (loop (cons d acc)))))))
+      (syntax-case x ()
+        ((k fn ...)
+         (for-all string? (syntax->datum #'(fn ...)))
+         (with-syntax (((d ...) (datum->syntax #'k (let all ((fs (syntax->datum #'(fn ...))))
+                                                      (if (null? fs) '() (append (slurp (car fs) #f) (all (cdr fs))))))))
+           #'(begin d ...))))))
+  (define-syntax include-ci
+    (lambda (x)
+      (define (slurp fn)
+        (let* ((text (call-with-input-file fn (lambda (p) (get-string-all p))))
+               (p (open-string-input-port (string-append "#!fold-case " text))))
+          (let loop ((acc '()))
+            (let ((d (read p)))
+              (if (eof-object? d) (reverse acc) (loop (cons d acc)))))))
+      (syntax-case x ()
+        ((k fn ...)
+         (for-all string? (syntax->datum #'(fn ...)))
+         (with-syntax (((d ...) (datum->syntax #'k (let all ((fs (syntax->datum #'(fn ...))))
+                                                      (if (null? fs) '() (append (slurp (car fs)) (all (cdr fs))))))))
+           #'(begin d ...))))))
 
   ;; ---------------------------------------------------------------------------------------- errors
 

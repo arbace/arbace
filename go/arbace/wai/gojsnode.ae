@@ -1,0 +1,475 @@
+(in-ns 'go.arbace.wai) (go/file "gojsnode.go" :imports [
+
+
+    ^{:line 4} [errors "errors"]
+    ^{:line 5} [io "io"]
+    ^{:line 6} [fs "io/fs"]
+    ^{:line 7} [os "os"]
+    ^{:line 8} [path "path"]
+    ^{:line 9} [strings "strings"]
+    ^{:line 10} [syscall "syscall"]
+    ^{:line 11} [time "time"]])
+
+
+;; The headless world's Node.js part (doc/wasm/WAI.md §10.4): globalThis.fs (Node's callback API, as syscall/fs_js.go calls it:
+;; each callback called before the call returns, as wasm_exec.js's own fs does), process and path. fs sees only the driver's
+;; mounts (a guest path resolved against process.cwd(), cleaned, then mapped by its longest mount prefix; nothing outside a mount;
+;; writes under a read-only mount EROFS); descriptors 0-2 are the world's standard streams.
+
+(go/type jsFD (struct
+    ^{:line 20 :tag (* os/File)} f
+    ^{:line 21 :tag io/Reader} r
+    ^{:line 22 :tag io/Writer} w
+    ^{:line 23 :tag bool} ro
+    ^{:line 24 :tag string} path))
+
+
+^{:go/end 38} (go/method write [^{:tag (* jsFD)} f ^{:tag (slice byte)} b ^int64 pos] :results [int error]
+  (when (!= (.-w f) nil)
+    (return (.Write (.-w f) b)))
+
+  (when (or (== (.-f f) nil) (.-ro f))
+    (return 0 syscall/EBADF))
+
+  (when (>= pos 0)
+    (return (.WriteAt (.-f f) b pos)))
+
+  (.Write (.-f f) b))
+
+
+^{:go/end 62} (go/method read [^{:tag (* jsFD)} f ^{:tag (slice byte)} b ^int64 pos] :results [int error]
+  (when (!= (.-r f) nil)
+    (let [(values n err) (.Read (.-r f) b)]
+      (when (== err io/EOF)
+        (set! err nil))
+
+      (return n err)))
+
+  (when (== (.-f f) nil)
+    (return 0 syscall/EBADF))
+
+  (let [^int n (zero int)
+      ^{:line 52 :tag error} err (zero error)]
+    (if (>= pos 0)
+      (set! (values n err) (.ReadAt (.-f f) b pos))
+
+      (set! (values n err) (.Read (.-f f) b)))
+
+    (when (== err io/EOF)
+      (set! err nil))
+
+    (return n err)))
+
+
+(go/var jsErrnoNames (lit (map syscall/Errno string) [syscall/ENOENT "ENOENT"] [syscall/EEXIST "EEXIST"] [syscall/EACCES "EACCES"]
+    ^{:line 65} [syscall/EPERM "EPERM"] [syscall/ENOTDIR "ENOTDIR"] [syscall/EISDIR "EISDIR"] [syscall/ENOTEMPTY "ENOTEMPTY"]
+    ^{:line 66} [syscall/EBADF "EBADF"] [syscall/EINVAL "EINVAL"] [syscall/EROFS "EROFS"] [syscall/ELOOP "ELOOP"] [syscall/EXDEV "EXDEV"]
+    ^{:line 67} [syscall/ENAMETOOLONG "ENAMETOOLONG"] [syscall/ENOSYS "ENOSYS"] [syscall/ENOSPC "ENOSPC"] [syscall/EMFILE "EMFILE"]
+    ^{:line 68} [syscall/ESPIPE "ESPIPE"] [syscall/EIO "EIO"] [syscall/EAGAIN "EAGAIN"] [syscall/ENXIO "ENXIO"]))
+
+
+^{:go/end 89} (go/method nodeError "nodeError is a Node.js error for a Go error: its code the errno's name.\n" ^{:tag (* JSObject)} [^{:tag (* GoJS)} w ^error err ^string syscallName]
+  (let [code "EIO"
+      ^{:line 73 :tag syscall/Errno} en (zero syscall/Errno)]
+    (switch
+      (case [(errors/As err (addr en))]
+        (when [(values n ok) (aget jsErrnoNames en)] ok
+          (set! code n)))
+
+      (case [(errors/Is err fs/ErrNotExist)]
+        (set! code "ENOENT"))
+      (case [(errors/Is err fs/ErrExist)]
+        (set! code "EEXIST"))
+      (case [(errors/Is err fs/ErrPermission)]
+        (set! code "EACCES")))
+
+    (let [o (.Error (.-R w) (.-ErrorProto (.-R w)) (+ code ": " syscallName) code)]
+      (.Put o "syscall" syscallName)
+      ^{:line 88} o)))
+
+
+
+^{:go/end 112} (go/method resolve "resolve is a guest path's host path and mount (ok false: outside every mount).\n" [^{:tag (* GoJS)} w ^string p] :results [string (* Mount) bool]
+  (when (not (strings/HasPrefix p "/"))
+    (set! p (+ (.-Cwd w) "/" p)))
+
+  (set! p (path/Clean p))
+  (let [^{:tag (* Mount)} best (zero (* Mount))]
+    (range [i (.-Mounts w)]
+      (let [m (addr (aget (.-Mounts w) i))
+          ^{:line 100} g (path/Clean (.-Guest m))]
+        (when (or (== p g) (== g "/") (strings/HasPrefix p (+ g "/")))
+          (when (or (== best nil) (> (len g) (len (path/Clean (.-Guest best)))))
+            (set! best m)))))
+
+
+
+    (when (== best nil)
+      (return "" nil false))
+
+    (let [rel (strings/TrimPrefix p (path/Clean (.-Guest best)))]
+      (return (+ (.-Host best) rel) best true))))
+
+
+^{:go/end 150} (go/method statObj ^{:tag (* JSObject)} [^{:tag (* GoJS)} w ^os/FileInfo fi]
+  (let [r (.-R w)
+      ^{:line 116} o (.obj r)]
+    (set! (.-Class o) "Stats")
+    (let [num ^{:go/end 118} (fn [^string k ^float64 v] (.Put o k v))]
+      (if [(values st ok) (assert (* syscall/Stat_t) (.Sys fi))] ok (do
+          (num "dev" (conv float64 (.-Dev st)))
+          (num "ino" (conv float64 (.-Ino st)))
+          (num "mode" (conv float64 (.-Mode st)))
+          (num "nlink" (conv float64 (.-Nlink st)))
+          (num "uid" (conv float64 (.-Uid st)))
+          (num "gid" (conv float64 (.-Gid st)))
+          (num "rdev" (conv float64 (.-Rdev st)))
+          (num "size" (conv float64 (.-Size st)))
+          (num "blksize" (conv float64 (.-Blksize st)))
+          (num "blocks" (conv float64 (.-Blocks st)))
+          (let [ms ^{:go/end 130} (fn ^float64 [^syscall/Timespec t] (conv float64 (+ (* (.-Sec t) 1000) (/ (.-Nsec t) 1000000.0))))]
+            (num "atimeMs" (ms (.-Atim st)))
+            (num "mtimeMs" (ms (.-Mtim st)))
+            (num "ctimeMs" (ms (.-Ctim st)))))
+
+        (let [mode (conv uint32 (.Perm (.Mode fi)))]
+          (if (.IsDir fi)
+            (set! mode bit-or syscall/S_IFDIR)
+
+            (set! mode bit-or syscall/S_IFREG))
+
+          (num "mode" (conv float64 mode))
+          (num "size" (conv float64 (.Size fi)))
+          (num "mtimeMs" (conv float64 (.UnixMilli (.ModTime fi))))))
+
+      (let [(values isDir isLink) (values (.IsDir fi) (!= (bit-and (.Mode fi) fs/ModeSymlink) 0))]
+        (.Method r o "isDirectory" ^{:go/end 146} (fn ^any [^any this ^{:tag (slice any)} args] isDir))
+        (.Method r o "isFile" ^{:go/end 147} (fn ^any [^any this ^{:tag (slice any)} args] (.IsRegular (.Mode fi))))
+        (.Method r o "isSymbolicLink" ^{:go/end 148} (fn ^any [^any this ^{:tag (slice any)} args] isLink))
+        ^{:line 149} o))))
+
+
+^{:go/end 473} (go/method initNode [^{:tag (* GoJS)} w]
+  (let [r (.-R w)
+      ^{:line 154} g (.-Global r)]
+    (aset (.-fds w) 0 (addr (lit jsFD :r (.-Stdin w))))
+    (aset (.-fds w) 1 (addr (lit jsFD :w (.-Stdout w))))
+    (aset (.-fds w) 2 (addr (lit jsFD :w (.-Stderr w))))
+    (let [fsObj (.obj r)]
+      (.Put g "fs" fsObj)
+      ;; Linux's values: the flags Go hands open are then the host's own
+      (let [consts ^{:go/breaks [14]} (.Object r "O_RDONLY" 0.0 "O_WRONLY" 1.0 "O_RDWR" 2.0 "O_CREAT" 64.0 "O_EXCL" 128.0 "O_TRUNC" 512.0
+            "O_APPEND" 1024.0 "O_DIRECTORY" 65536.0)]
+        (.Put fsObj "constants" consts)
+        ;; def: a callback function of fs: its last argument the callback, called with (err) or (null, result)
+        (let [def ^{:go/end 186} (fn [^string name ^int n ^{:tag (func [^{:tag (slice any)} args] [any error])} fn]
+              (.Method r fsObj name ^{:go/end 185} (fn ^any [^any this ^{:tag (slice any)} args]
+                  (let [cb (arg args (- (len args) 1))]
+                    (when (not (isCallable cb))
+                      (.Throw r "type" "The \"cb\" argument must be of type function"))
+
+                    (while (< (len args) (+ n 1))
+                      (set! args (append (subslice args _ (- (len args) 1)) JSUndefined cb)))
+
+                    (let [(values res err) (go/call fn (subslice args _ (- (len args) 1)))]
+                      (when (!= err nil)
+                        (.Call r cb JSUndefined (lit (slice any) (.nodeError w err name)))
+                        (return JSUndefined))
+
+                      (if (== res nil)
+                        (.Call r cb JSUndefined (lit (slice any) JSNull))
+
+                        (.Call r cb JSUndefined (lit (slice any) JSNull res)))
+
+                      ^{:line 184} JSUndefined)))))
+
+
+            ^{:line 187} host ^{:go/end 196} (fn [^any v ^bool write] :results [string error]
+              (let [(values hp m ok) (.resolve w (.ToString r v))]
+                (when (not ok)
+                  (return "" syscall/ENOENT))
+
+                (when (and write (.-ReadOnly m))
+                  (return "" syscall/EROFS))
+
+                (return hp nil)))
+
+            ^{:line 197} fd ^{:go/end 203} (fn [^any v] :results [(* jsFD) error]
+              (let [(values f ok) (aget (.-fds w) (conv int (.ToNumber r v)))]
+                (when (not ok)
+                  (return nil syscall/EBADF))
+
+                (return f nil)))
+
+            ^{:line 204} pos ^{:go/end 209} (fn ^int64 [^any v]
+              (when (or (== v JSNull) (== v JSUndefined))
+                (return -1))
+
+              (conv int64 (.ToNumber r v)))]
+
+          (def "open" 3 ^{:go/end 229} (fn [^{:tag (slice any)} a] :results [any error]
+              (let [flags (conv int (.ToNumber r (aget a 1)))
+                  ^{:line 212} write (!= (bit-and flags (bit-or 1 2 64 512 1024)) 0)
+                  (values hp err) (host (aget a 0) write)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (let [perm (conv os/FileMode 0666)]
+                  (when (!= (aget a 2) JSUndefined)
+                    (set! perm (conv os/FileMode (conv int (.ToNumber r (aget a 2))))))
+
+                  (let [(values f ^:assign err) (os/OpenFile hp (bit-or flags syscall/O_CLOEXEC) perm)]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (let [n (.-nextFD w)]
+                      (inc! (.-nextFD w))
+                      (aset (.-fds w) n (addr (lit jsFD :f f :path hp :ro (not write))))
+                      (return (conv float64 n) nil)))))))
+
+          (def "close" 1 ^{:go/end 240} (fn [^{:tag (slice any)} a] :results [any error]
+              (let [(values f err) (fd (aget a 0))]
+                (when (!= err nil)
+                  (return nil err))
+
+                (delete (.-fds w) (conv int (.ToNumber r (aget a 0))))
+                (when (!= (.-f f) nil)
+                  (return nil (.Close (.-f f))))
+
+                (return nil nil))))
+
+          (let [buf ^{:go/end 251} (fn [^any v ^any off ^any n] :results [(slice byte) error]
+                (let [(values o ok) (assert (* JSObject) v)]
+                  (when (or (not ok) (== (.-Bytes o) nil))
+                    (return nil syscall/EINVAL))
+
+                  (let [(values s l) (values (conv int (.ToNumber r off)) (conv int (.ToNumber r n)))]
+                    (when (or (< s 0) (< l 0) (> (+ s l) (len (.-Bytes o))))
+                      (return nil syscall/EINVAL))
+
+                    (return (subslice (.-Bytes o) s (+ s l)) nil))))]
+
+            (def "read" 5 ^{:go/end 266} (fn [^{:tag (slice any)} a] :results [any error]
+                (let [(values f err) (fd (aget a 0))]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (let [(values b ^:assign err) (buf (aget a 1) (aget a 2) (aget a 3))]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (let [(values n ^:assign err) (.read f b (pos (aget a 4)))]
+                      (when (!= err nil)
+                        (return nil err))
+
+                      (return (conv float64 n) nil))))))
+
+            (def "write" 5 ^{:go/end 281} (fn [^{:tag (slice any)} a] :results [any error]
+                (let [(values f err) (fd (aget a 0))]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (let [(values b ^:assign err) (buf (aget a 1) (aget a 2) (aget a 3))]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (let [(values n ^:assign err) (.write f b (pos (aget a 4)))]
+                      (when (!= err nil)
+                        (return nil err))
+
+                      (return (conv float64 n) nil))))))
+
+            (.Method r fsObj "writeSync" ^{:go/end 288} (fn ^any [^any this ^{:tag (slice any)} args]
+                (let [(values b err) (buf (arg args 1) 0.0 (.Get r (arg args 1) "length"))]
+                  (when (!= err nil)
+                    (panic (addr (lit JSThrow (.nodeError w err "write")))))
+
+                  (conv float64 (.writeSync w (conv int (.ToNumber r (arg args 0))) b)))))
+
+            (def "fstat" 1 ^{:go/end 309} (fn [^{:tag (slice any)} a] :results [any error]
+                (let [(values f err) (fd (aget a 0))]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (when (== (.-f f) nil)
+                    (let [o (.obj r)]
+                      (set! (.-Class o) "Stats")
+                      (.Put o "mode" (conv float64 (bit-or syscall/S_IFCHR 0620)))
+                      (range [_ k (lit (slice string) "dev" "ino" "nlink" "uid" "gid" "rdev" "size" "blksize" "blocks" "atimeMs" "mtimeMs" "ctimeMs")]
+                        (.Put o k 0.0))
+
+                      (.Method r o "isDirectory" ^{:go/end 301} (fn ^any [^any this ^{:tag (slice any)} args] false))
+                      (return o nil)))
+
+                  (let [(values fi ^:assign err) (.Stat (.-f f))]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (return (.statObj w fi) nil)))))
+
+            (let [statDef ^{:go/end 327} (fn [^string name ^bool follow]
+                  (def name 1 ^{:go/end 326} (fn [^{:tag (slice any)} a] :results [any error]
+                      (let [(values hp err) (host (aget a 0) false)]
+                        (when (!= err nil)
+                          (return nil err))
+
+                        (let [^os/FileInfo fi (zero os/FileInfo)]
+                          (if follow
+                            (set! (values fi err) (os/Stat hp))
+
+                            (set! (values fi err) (os/Lstat hp)))
+
+                          (when (!= err nil)
+                            (return nil err))
+
+                          (return (.statObj w fi) nil))))))]
+
+
+              (statDef "stat" true)
+              (statDef "lstat" false)
+              (def "readdir" 1 ^{:go/end 344} (fn [^{:tag (slice any)} a] :results [any error]
+                  (let [(values hp err) (host (aget a 0) false)]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (let [(values es ^:assign err) (os/ReadDir hp)]
+                      (when (!= err nil)
+                        (return nil err))
+
+                      (let [^{:tag (slice any)} names (zero (slice any))]
+                        (range [_ e es]
+                          (set! names (append names (.Name e))))
+
+                        (return (.Array r names) nil))))))
+
+              (let [pathOp ^{:go/end 364} (fn [^string name ^int n ^{:tag (func [^{:tag (slice string)} hps ^{:tag (slice any)} a] [error])} fn]
+                    (def name n ^{:go/end 363} (fn [^{:tag (slice any)} a] :results [any error]
+                        (let [^{:tag (slice string)} hps (zero (slice string))]
+                          (for [i 0] (and (< i n) (< i (len a))) (inc! i)
+                            (when (and (== name "symlink") (== i 0))
+                              (set! hps (append hps (.ToString r (aget a 0))))
+                              (continue))
+
+                            (when [(values _ isStr) (assert string (aget a i))] (not isStr)
+                              (break))
+
+                            (let [(values hp err) (host (aget a i) true)]
+                              (when (!= err nil)
+                                (return nil err))
+
+                              (set! hps (append hps hp))))
+
+                          (return nil (go/call fn hps a))))))]
+
+
+                (pathOp "mkdir" 1 ^{:go/end 371} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a]
+                    (let [perm (conv os/FileMode 0777)]
+                      (when [v (arg a 1)] (!= v JSUndefined)
+                        (set! perm (conv os/FileMode (conv int (.ToNumber r v)))))
+
+                      (os/Mkdir (aget h 0) perm))))
+
+                (pathOp "unlink" 1 ^{:go/end 372} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] (syscall/Unlink (aget h 0))))
+                (pathOp "rmdir" 1 ^{:go/end 373} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] (syscall/Rmdir (aget h 0))))
+                (pathOp "rename" 2 ^{:go/end 374} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] (os/Rename (aget h 0) (aget h 1))))
+                (pathOp "truncate" 1 ^{:go/end 375} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] (os/Truncate (aget h 0) (conv int64 (.ToNumber r (arg a 1))))))
+                (pathOp "chmod" 1 ^{:go/end 376} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] (os/Chmod (aget h 0) (conv os/FileMode (conv int (.ToNumber r (arg a 1)))))))
+                (pathOp "link" 2 ^{:go/end 377} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] (os/Link (aget h 0) (aget h 1))))
+                (pathOp "symlink" 2 ^{:go/end 378} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] (os/Symlink (aget h 0) (aget h 1))))
+                (pathOp "chown" 1 ^{:go/end 379} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] nil))
+                (pathOp "lchown" 1 ^{:go/end 380} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a] nil))
+                (pathOp "utimes" 1 ^{:go/end 384} (fn ^error [^{:tag (slice string)} h ^{:tag (slice any)} a]
+                    (let [(values at mt) (values (.ToNumber r (arg a 1)) (.ToNumber r (arg a 2)))]
+                      (os/Chtimes (aget h 0) (unixSecs at) (unixSecs mt)))))
+
+                (def "readlink" 1 ^{:go/end 395} (fn [^{:tag (slice any)} a] :results [any error]
+                    (let [(values hp err) (host (aget a 0) false)]
+                      (when (!= err nil)
+                        (return nil err))
+
+                      (let [(values s ^:assign err) (os/Readlink hp)]
+                        (when (!= err nil)
+                          (return nil err))
+
+                        (return s nil)))))
+
+                (let [fdOp ^{:go/end 404} (fn [^string name ^int n ^{:tag (func [^{:tag (* jsFD)} f ^{:tag (slice any)} a] [error])} fn]
+                      (def name n ^{:go/end 403} (fn [^{:tag (slice any)} a] :results [any error]
+                          (let [(values f err) (fd (aget a 0))]
+                            (when (!= err nil)
+                              (return nil err))
+
+                            (return nil (go/call fn f a))))))]
+
+
+                  (fdOp "fsync" 1 ^{:go/breaks [[3 409]] :go/end 410} (fn ^error [^{:tag (* jsFD)} f ^{:tag (slice any)} a]
+                      (when (!= (.-f f) nil)
+                        (return (.Sync (.-f f))))
+
+                      nil))
+
+                  (fdOp "ftruncate" 1 ^{:go/end 416} (fn ^error [^{:tag (* jsFD)} f ^{:tag (slice any)} a]
+                      (when (or (== (.-f f) nil) (.-ro f))
+                        (return syscall/EINVAL))
+
+                      (.Truncate (.-f f) (conv int64 (.ToNumber r (arg a 1))))))
+
+                  (fdOp "fchmod" 1 ^{:go/end 422} (fn ^error [^{:tag (* jsFD)} f ^{:tag (slice any)} a]
+                      (when (or (== (.-f f) nil) (.-ro f))
+                        (return syscall/EPERM))
+
+                      (.Chmod (.-f f) (conv os/FileMode (conv int (.ToNumber r (arg a 1)))))))
+
+                  (fdOp "fchown" 1 ^{:go/end 423} (fn ^error [^{:tag (* jsFD)} f ^{:tag (slice any)} a] nil))
+
+                  (let [proc (.obj r)]
+                    (.Put g "process" proc)
+                    (let [ids ^{:go/end 427} (fn [^string name] (.Method r proc name ^{:go/end 427} (fn ^any [^any this ^{:tag (slice any)} args] -1.0)))]
+                      (ids "getuid")
+                      (ids "getgid")
+                      (ids "geteuid")
+                      (ids "getegid")
+                      (let [enosys ^{:go/end 436} (fn [^string name]
+                            (.Method r proc name ^{:go/end 435} (fn ^any [^any this ^{:tag (slice any)} args]
+                                (panic (addr (lit JSThrow (.nodeError w syscall/ENOSYS name)))))))]
+
+
+                        (enosys "getgroups")
+                        (enosys "umask")
+                        (.Put proc "pid" -1.0)
+                        (.Put proc "ppid" -1.0)
+                        (.Method r proc "cwd" ^{:go/end 441} (fn ^any [^any this ^{:tag (slice any)} args] (.-Cwd w)))
+                        (.Method r proc "chdir" ^{:go/end 458} (fn ^any [^any this ^{:tag (slice any)} args]
+                            (let [p (.ToString r (arg args 0))]
+                              (when (not (strings/HasPrefix p "/"))
+                                (set! p (+ (.-Cwd w) "/" p)))
+
+                              (set! p (path/Clean p))
+                              (let [(values hp _ ok) (.resolve w p)
+                                  (values fi err) (os/Stat hp)]
+                                (when (or (not ok) (!= err nil))
+                                  (panic (addr (lit JSThrow (.nodeError w syscall/ENOENT "chdir")))))
+
+                                (when (not (.IsDir fi))
+                                  (panic (addr (lit JSThrow (.nodeError w syscall/ENOTDIR "chdir")))))
+
+                                (set! (.-Cwd w) p)
+                                ^{:line 457} JSUndefined))))
+
+                        (let [pathObj (.obj r)]
+                          (.Put g "path" pathObj)
+                          (.Method r pathObj "resolve" ^{:go/end 472} (fn ^any [^any this ^{:tag (slice any)} args]
+                              (let [p (.-Cwd w)]
+                                (range [_ a args]
+                                  (let [s (.ToString r a)]
+                                    (cond (strings/HasPrefix s "/")
+                                      (set! p s)
+                                      (!= s "")
+                                      (set! p (+ p "/" s)))))
+
+
+                                (path/Clean p)))))))))))))))))
+
+
+
+^{:go/end 475} (go/func unixSecs ^time/Time [^float64 s] (time/Unix 0 (conv int64 (* s 1.0E9))))

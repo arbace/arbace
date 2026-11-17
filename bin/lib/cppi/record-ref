@@ -1,0 +1,98 @@
+#!/bin/bash
+# cppi's reference runs (doc/cpp/CPP-SURVEY.md, "As built: CX8 (write-ahead)"; CP11: g++ is the judge; C's CS14 (a) for C++):
+# g++ 15.2's runs of the run corpora (bin/lib/cppi/lists.bash) recorded as data, test/cpp/ref-gxx15.edn. Each program is
+# compiled by g++ -x c++ -std=STD ARGS -O0 PATH -x none LIBS (the corpus's native libraries: libstdc++, the testsuite's util/
+# library and libstdc++exp for libstdcxx) and again at -O2; each binary runs in a fresh scratch directory, an empty standard
+# input, no arguments, 60 s. g++ at -O0 is the judge, -O2 the witness. One line of Clojure-reader data per program, sorted by :id:
+#   {:id "CORPUS/NAME" :status N :stdout "SHA256" :bytes N :first "first line, 80 chars" :stderr "SHA256" :o2 :same|:differ|:no-build}
+# :status the -O0 run's exit status (128+signal) or :timeout; a compile failure is :status :no-build with :error (g++'s or the
+# linker's first error line); :o2 compares the -O2 run's status, stdout and stderr with -O0's.
+#
+# Usage: bin/cppi record-ref [--corpus C,...] [--only] [--sample N] [--ids LIST]
+#   --corpus   the run corpora (default all: samples,runtime,libstdcxx,gxx-dg-run)
+#   --only     keep the other corpora's lines and, with --sample or --ids, the corpus's other lines (a subset recorded)
+#   --sample   every Nth program of each corpus; --ids: a file of ids (CORPUS/NAME) only
+#   CPPI_REF_JOBS (default 4, at most 4). Scratch under .tmp/cppi-ref/.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/cppi/lists.bash"
+cd "$root"
+corpora=$cppi_corpora_all only= sample=1 ids=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --only) only=1; shift ;;
+    --sample) sample=$2; shift 2 ;;
+    --ids) ids=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    *) sed -n '12,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+if { [ "$sample" != 1 ] || [ -n "$ids" ]; } && [ -z "$only" ]; then
+  echo "bin/cppi record-ref: --sample and --ids record a subset: give --only (the other lines kept)" >&2; exit 2
+fi
+jobs=${CPPI_REF_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
+work=${CPPI_REF_WORK:-$root/.tmp/cppi-ref}
+mkdir -p "$work"; : > "$work/empty-stdin"
+IFS=, read -r -a cs <<< "$corpora"
+
+esc() { LC_ALL=C tr -cd '\11\40-\176' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+run1() { # ID STD ARGS PATH
+  local id=$1 std=$2 args=$3 p=$4 s rs rs2 o2s err sum first sc
+  s=$(mktemp -d "$work/s.XXXXXX")
+  # shellcheck disable=SC2086
+  (cd "$s" && LC_ALL=C timeout 300 g++ -x c++ -std=$std $args -O0 "$p" -x none -o o0 $LIBS) > "$s/err0" 2>&1
+  if [ $? != 0 ]; then
+    err=$(grep -m1 -E 'error|undefined reference' "$s/err0" || grep -m1 . "$s/err0")
+    # CSP5 (the user, 2026-11-06; doc/CROPS-SCORE.md): no host path in the record: the checkout as ${root} (the main checkout's
+    # too, whose corpora a worktree may read), the Alpine builder's tree the host's musl objects name (crt1.o's debug lines) as ${aports}
+    err=$(printf '%s\n' "$err" | sed -e "s|$s/||g" -e "s|$root/|\${root}/|g" -e "s|$mainroot/|\${root}/|g" -e 's|/home/buildozer/aports/|${aports}/|g' | cut -c1-200 | esc)
+    printf '{:id "%s" :status :no-build :error "%s"}\n' "$id" "$err" > "$work/part/$(printf '%s' "$id" | sha256sum | cut -c1-16)"
+    rm -rf "$s"; return
+  fi
+  mkdir -p "$s/r0"
+  (cd "$s/r0" && ulimit -f 1024 && timeout 60 ../o0 < "$work/empty-stdin" > ../out0 2> ../errout0); rs=$?
+  rm -f "$s/o0"
+  # shellcheck disable=SC2086
+  (cd "$s" && LC_ALL=C timeout 300 g++ -x c++ -std=$std $args -O2 "$p" -x none -o o2 $LIBS) > "$s/err2" 2>&1
+  if [ $? != 0 ]; then o2s=:no-build; else
+    mkdir -p "$s/r2"
+    (cd "$s/r2" && ulimit -f 1024 && timeout 60 ../o2 < "$work/empty-stdin" > ../out2 2> ../errout2); rs2=$?
+    if [ $rs = $rs2 ] && cmp -s "$s/out0" "$s/out2" && cmp -s "$s/errout0" "$s/errout2"; then o2s=:same; else o2s=:differ; fi
+  fi
+  sum=$(sha256sum < "$s/out0" | cut -d' ' -f1)
+  first=$(head -n1 "$s/out0" | cut -c1-80 | esc)
+  if [ $rs = 124 ]; then sc=:timeout; else sc=$rs; fi
+  printf '{:id "%s" :status %s :stdout "%s" :bytes %s :first "%s" :stderr "%s" :o2 %s}\n' "$id" "$sc" "$sum" "$(stat -c %s "$s/out0")" \
+    "$first" "$(sha256sum < "$s/errout0" | cut -d' ' -f1)" "$o2s" > "$work/part/$(printf '%s' "$id" | sha256sum | cut -c1-16)"
+  rm -rf "$s"
+}
+mainroot=$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd) # a worktree's corpora may be the main checkout's
+export -f run1 esc; export work root mainroot
+
+rm -rf "$work/part"; mkdir -p "$work/part"
+for c in "${cs[@]}"; do
+  run_list "$c" > "$work/$c.list" || exit 1
+  if [ -n "$ids" ]; then awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) w[l] = 1; ARGV[2] = "" } $1 in w' "$work/$c.list" "$ids" > "$work/$c.list.1"
+  else awk -v n="$sample" '(NR - 1) % n == 0' "$work/$c.list" > "$work/$c.list.1"; fi
+  LIBS=$(cppi_native_libs "$c" "$work/native-$c") || exit 1; export LIBS
+  tr '\t\n' '\037\0' < "$work/$c.list.1" | xargs -0 -P "$jobs" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r i s a p <<< "$1"; run1 "$i" "$s" "$a" "$p"' _ {}
+  echo "$c: $(wc -l < "$work/$c.list.1") programs" >&2
+done
+# the ids recorded now: their old lines replaced; --only keeps every other line
+cat "$work"/part/* 2>"$work/cat.err" | LC_ALL=C sort -t'"' -k2,2 > "$work/new.edn"
+out=test/cpp/ref-gxx15.edn
+{ echo ";; g++ 15.2's runs of the C++ run corpora, as data (doc/cpp/CPP-SURVEY.md, \"As built: CX8 (write-ahead)\"; CP11): one map per"
+  echo ";; program, sorted by :id. :status the -O0 run's exit status (128+signal) or :timeout, :no-build with :error when g++ fails;"
+  echo ";; :stdout and :stderr the SHA-256 of the standard output and error, :bytes stdout's size, :first its first line (80 chars); :o2"
+  echo ";; the -O2 run against -O0's (:same, :differ, :no-build). g++ -std=STD ARGS -O0 the judge, -O2 the witness; each binary run in"
+  echo ";; a fresh directory, an empty standard input, no arguments, 60 s. Made by bin/cppi record-ref (bin/lib/cppi/record-ref)."
+  echo ";; g++: $(g++ --version | head -1)"
+  { if [ -n "$only" ] && [ -f "$out" ]; then
+      grep -v '^;;' "$out" | awk -F'"' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, a, "\""); n[a[2]] = 1 }; ARGV[2] = "" } !($2 in n)' - "$work/new.edn"
+    fi
+    cat "$work/new.edn"
+  } | LC_ALL=C sort -t'"' -k2,2
+} > "$work/ref.out"
+mv "$work/ref.out" "$out"
+echo "recorded $out ($(grep -c '^{' "$out") programs)"

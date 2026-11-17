@@ -1,0 +1,107 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/AbstractAsyncSSLConnection.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.net InetSocketAddress)
+        '(java.util ArrayDeque Arrays List)
+        '(java.util.concurrent CompletableFuture)
+        '(javax.net.ssl SNIHostName SNIServerName SSLContext SSLEngine SSLParameters)
+        '(jdk.internal.net.http.common Alpns Log SSLTube Utils)
+        '(sun.net.util IPAddressUtil))
+
+(defclass ^:abstract AbstractAsyncSSLConnection
+  :extends HttpConnection
+
+  (defclass ^:private ^:record ServerName [^String name ^boolean isLiteral])
+
+  (field ^:protected ^:final ^SSLEngine engine)
+
+  (field ^:protected ^:final ^SSLParameters sslParameters)
+
+  (field ^:private ^:final ^{:tag (List SNIServerName)} sniServerNames)
+
+  (field ^:private ^:static ^:final ^boolean disableHostnameVerification
+    (Utils/isHostnameVerificationDisabled))
+
+  (constructor [this ^Origin originServer ^InetSocketAddress addr ^HttpClientImpl client
+                ^String/1 alpn ^String label]
+    (super. originServer addr client label)
+    (java-assert (some? originServer) "origin server is null")
+    (let [serverName (AbstractAsyncSSLConnection/getServerName originServer)]
+      (set! (.-sniServerNames this)
+            (AbstractAsyncSSLConnection/formSNIServerNames serverName client))
+      (let [context (.theSSLContext client)]
+        (set! sslParameters
+              (AbstractAsyncSSLConnection/createSSLParameters client (.-sniServerNames this) alpn))
+        (Log/logParams sslParameters)
+        (set! engine
+              (AbstractAsyncSSLConnection/createEngine
+                context
+                (.name serverName)
+                (.port originServer)
+                sslParameters)))))
+
+  (method ^:abstract getConnectionFlow ^SSLTube [this])
+
+  (method ^:final getALPN ^{:tag (CompletableFuture String)} [this]
+    (.getALPN (.getConnectionFlow this)))
+
+  (method ^:final getEngine ^SSLEngine [this] engine)
+
+  (method ^:public ^:final getSNIServerNames ^{:tag (List SNIServerName)} [this]
+    (.-sniServerNames this))
+
+  (method ^:private ^:static contains ^boolean [^String/1 rr ^String target]
+    (for-each [^String s rr] (when (.equalsIgnoreCase target s) (return true)))
+    false)
+
+  (method ^:private ^:static createSSLParameters ^SSLParameters [^HttpClientImpl client
+                                                                 ^{:tag (List SNIServerName)} sniServerNames
+                                                                 ^String/1 alpn]
+    (let [sslp (.sslParameters client)
+          sslParameters (Utils/copySSLParameters sslp)]
+      (when (and (and (some? alpn) (not (== (alength alpn) 0)))
+                 (not (AbstractAsyncSSLConnection/contains alpn Alpns/HTTP_1_1)))
+        (let [^{:tag (ArrayDeque String)} l (ArrayDeque.)]
+          (for-each [^String proto (.getProtocols sslParameters)]
+            (when (and (and (not (.startsWith proto "SSL")) (not (.endsWith proto "v1.1")))
+                       (not (.endsWith proto "v1")))
+              (.add l proto)))
+          (let [a1 (cast String/1 (.toArray l (new String/1 0)))] (.setProtocols sslParameters a1))))
+      (when-not disableHostnameVerification
+        (.setEndpointIdentificationAlgorithm sslParameters "HTTPS"))
+      (if (some? alpn)
+          (do
+            (Log/logSSL "AbstractAsyncSSLConnection: Setting application protocols: {0}"
+                        (new Object/1 [(Arrays/toString alpn)]))
+            (.setApplicationProtocols sslParameters alpn))
+          (Log/logSSL "AbstractAsyncSSLConnection: no applications set!" (new Object/1 [])))
+      (.setServerNames sslParameters sniServerNames)
+      sslParameters))
+
+  (method ^:private ^:static formSNIServerNames ^{:tag (List SNIServerName)} [^:final ^ServerName serverName
+                                                                              ^:final ^HttpClientImpl client]
+    (when (and (some? serverName) (not (.isLiteral serverName)))
+      (let [name (.name serverName)]
+        (when (and (some? name) (not (.isEmpty name))) (return (List/of (SNIHostName. name))))))
+    (let [clientSSLParams (.sslParameters client)
+          ^{:tag (List SNIServerName)} clientConfigured (.getServerNames clientSSLParams)]
+      (if (some? clientConfigured) clientConfigured (List/of))))
+
+  (method ^:private ^:static createEngine ^SSLEngine [^SSLContext context ^String peerHost ^int port
+                                                      ^SSLParameters sslParameters]
+    (let [engine (.createSSLEngine context peerHost port)]
+      (.setUseClientMode engine true)
+      (.setSSLParameters engine sslParameters)
+      engine))
+
+  (method ^:private ^:static getServerName ^ServerName [^:final ^Origin originServer]
+    (let [host (.host originServer)
+          ^:mutable literal (IPAddressUtil/textToNumericFormatV4 host)]
+      (if (nil? literal)
+          (do
+            (set! literal (IPAddressUtil/textToNumericFormatV6 host))
+            (ServerName. host (some? literal)))
+          (ServerName. host true))))
+
+  (method ^:final isSecure ^boolean [this] true))

@@ -1,0 +1,245 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/websocket/OpeningHandshake.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.websocket)
+
+(import '(java.io IOException)
+        '(java.net Proxy Proxy$Type ProxySelector URI URISyntaxException)
+        '(java.net.http HttpClient
+                        HttpClient$Version
+                        HttpHeaders
+                        HttpResponse
+                        HttpResponse$BodyHandlers
+                        WebSocketHandshakeException)
+        '(java.nio.charset StandardCharsets)
+        '(java.security MessageDigest NoSuchAlgorithmException SecureRandom)
+        '(java.util Base64 Collection Collections LinkedHashSet List Optional Set TreeSet)
+        '(java.util.concurrent CompletableFuture CompletionStage)
+        '(java.util.function Function)
+        '(jdk.internal.net.http HttpRequestBuilderImpl HttpRequestImpl)
+        '(jdk.internal.net.http.common MinimalFuture Pair Utils)
+        '(jdk.internal.util Exceptions Exceptions$SensitiveInfo))
+
+(defclass ^:public OpeningHandshake
+  (field ^:private ^:static ^:final ^String HEADER_CONNECTION "Connection")
+
+  (field ^:private ^:static ^:final ^String HEADER_UPGRADE "Upgrade")
+
+  (field ^:private ^:static ^:final ^String HEADER_ACCEPT "Sec-WebSocket-Accept")
+
+  (field ^:private ^:static ^:final ^String HEADER_EXTENSIONS "Sec-WebSocket-Extensions")
+
+  (field ^:private ^:static ^:final ^String HEADER_KEY "Sec-WebSocket-Key")
+
+  (field ^:private ^:static ^:final ^String HEADER_PROTOCOL "Sec-WebSocket-Protocol")
+
+  (field ^:private ^:static ^:final ^String HEADER_VERSION "Sec-WebSocket-Version")
+
+  (field ^:private ^:static ^:final ^String VERSION "13")
+
+  (field ^:private ^:static ^:final ^{:tag (Set String)} ILLEGAL_HEADERS)
+
+  (static-initializer
+    (set! ILLEGAL_HEADERS (TreeSet. String/CASE_INSENSITIVE_ORDER))
+    (.addAll ILLEGAL_HEADERS
+             (List/of HEADER_ACCEPT HEADER_EXTENSIONS HEADER_KEY HEADER_PROTOCOL HEADER_VERSION)))
+
+  (field ^:private ^:static ^:final ^SecureRandom random (SecureRandom.))
+
+  (field ^:private ^:final ^MessageDigest sha1)
+
+  (field ^:private ^:final ^HttpClient client)
+
+  (initializer
+    (try
+      (set! sha1 (MessageDigest/getInstance "SHA-1"))
+      (catch NoSuchAlgorithmException e (throw (InternalError. "Minimum requirements" e)))))
+
+  (field ^:private ^:final ^HttpRequestImpl request)
+
+  (field ^:private ^:final ^{:tag (Collection String)} subprotocols)
+
+  (field ^:private ^:final ^String nonce)
+
+  (constructor ^:public [this ^BuilderImpl b]
+    (OpeningHandshake/checkURI (.getUri b))
+    (let [proxy (OpeningHandshake/proxyFor (.getProxySelector b) (.getUri b))]
+      (set! (.-client this) (.getClient b))
+      (let [httpURI (OpeningHandshake/createRequestURI (.getUri b))
+            requestBuilder (HttpRequestBuilderImpl. httpURI)
+            connectTimeout (.getConnectTimeout b)]
+        (when (some? connectTimeout) (.timeout requestBuilder connectTimeout))
+        (for-each [^{:tag (Pair String String)} p (.getHeaders b)]
+          (when (.contains ILLEGAL_HEADERS (.-first p))
+            (throw (OpeningHandshake/illegal
+                     (java-str "Illegal header: " (cast String (.-first p))))))
+          (.header requestBuilder (cast String (.-first p)) (cast String (.-second p))))
+        (set! (.-subprotocols this)
+              (OpeningHandshake/createRequestSubprotocols (.getSubprotocols b)))
+        (when-not (.isEmpty (.-subprotocols this))
+          (let [p (String/join ", " (.-subprotocols this))]
+            (.header requestBuilder HEADER_PROTOCOL p)))
+        (.header requestBuilder HEADER_VERSION VERSION)
+        (set! (.-nonce this) (OpeningHandshake/createNonce))
+        (.header requestBuilder HEADER_KEY (.-nonce this))
+        (.GET (.version requestBuilder HttpClient$Version/HTTP_1_1))
+        (set! request (.buildForWebSocket requestBuilder))
+        (.isWebSocket request true)
+        (Utils/setWebSocketUpgradeHeaders request)
+        (.setProxy request proxy))))
+
+  (method ^:private ^:static createRequestSubprotocols ^{:tag (Collection String)} [^{:tag (Collection String)} subprotocols]
+    (let [^{:tag (LinkedHashSet String)} sp (LinkedHashSet/newLinkedHashSet (.size subprotocols))]
+      (for-each [^String s subprotocols]
+        (when (or (.isEmpty (.trim s)) (not (Utils/isValidName s)))
+          (throw (OpeningHandshake/illegal (java-str "Bad subprotocol syntax: " s))))
+        (when-not (.add sp s)
+          (throw (OpeningHandshake/illegal (java-str "Duplicating subprotocol: " s)))))
+      (Collections/unmodifiableCollection sp)))
+
+  (method ^:static createRequestURI ^URI [^URI uri]
+    (let [s (.getScheme uri)]
+      (java-assert (or (.equalsIgnoreCase "ws" s) (.equalsIgnoreCase "wss" s)))
+      (let [^:mutable newUri (.toString uri)]
+        (if (.equalsIgnoreCase s "ws")
+            (set! newUri (java-str "http" (.substring newUri 2)))
+            (set! newUri (java-str "https" (.substring newUri 3))))
+        (try (URI. newUri) (catch URISyntaxException e (throw (InternalError. e)))))))
+
+  (method ^:public send ^{:tag (CompletableFuture Result)} [this]
+    (.thenCompose (.sendAsync client (.-request this) (HttpResponse$BodyHandlers/ofString))
+                  (method-ref Function
+                              ^CompletionStage [HttpResponse]
+                              this
+                              OpeningHandshake/.resultFrom)))
+
+  (defclass ^:static ^:final Result
+    (field ^:final ^String subprotocol)
+
+    (field ^:final ^TransportFactory transport)
+
+    (constructor ^:private [this ^String subprotocol ^TransportFactory transport]
+      (set! (.-subprotocol this) subprotocol)
+      (set! (.-transport this) transport)))
+
+  (method ^:private resultFrom ^{:tag (CompletableFuture Result)} [this
+                                                                   ^{:tag (HttpResponse ?)} response]
+    (let [^:mutable ^Result result nil
+          ^:mutable ^Throwable exception nil]
+      (try
+        (set! result (.handleResponse this response))
+        (catch IOException e (set! exception e))
+        (catch Exception e (set! exception (.initCause (WebSocketHandshakeException. response) e)))
+        (catch Error e (set! exception e)))
+      (if (nil? exception)
+          (MinimalFuture/completedFuture result)
+          (do
+            (try
+              (.closeRawChannel (cast RawChannel$Provider response))
+              (catch IOException e (.addSuppressed exception e)))
+            (MinimalFuture/failedFuture exception)))))
+
+  (method ^:private handleResponse :throws [IOException] ^Result [this
+                                                                  ^{:tag (HttpResponse ?)} response]
+    (let [c (.statusCode response)]
+      (when-not (== c 101)
+        (throw (OpeningHandshake/checkFailed (java-str "Unexpected HTTP response status code " c))))
+      (let [headers (.headers response)
+            upgrade (OpeningHandshake/requireSingle headers HEADER_UPGRADE)]
+        (when-not (.equalsIgnoreCase upgrade "websocket")
+          (throw (OpeningHandshake/checkFailed (java-str "Bad response field: " HEADER_UPGRADE))))
+        (let [connection (OpeningHandshake/requireSingle headers HEADER_CONNECTION)]
+          (when-not (.equalsIgnoreCase connection "Upgrade")
+            (throw (OpeningHandshake/checkFailed
+                     (java-str "Bad response field: " HEADER_CONNECTION))))
+          (let [^{:tag (Optional String)} version (OpeningHandshake/requireAtMostOne
+                                                    headers
+                                                    HEADER_VERSION)]
+            (when (and (.isPresent version) (not (.equals (cast String (.get version)) VERSION)))
+              (throw
+                (OpeningHandshake/checkFailed (java-str "Bad response field: " HEADER_VERSION))))
+            (OpeningHandshake/requireAbsent headers HEADER_EXTENSIONS)
+            (let [x (java-str (.-nonce this) "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")]
+              (.update (.-sha1 this) (.getBytes x StandardCharsets/ISO_8859_1))
+              (let [expected (.encodeToString (Base64/getEncoder) (.digest (.-sha1 this)))
+                    actual (OpeningHandshake/requireSingle headers HEADER_ACCEPT)]
+                (when-not (.equals (.trim actual) expected)
+                  (throw (OpeningHandshake/checkFailed (java-str "Bad " HEADER_ACCEPT))))
+                (let [subprotocol (.checkAndReturnSubprotocol this headers)
+                      channel (.rawChannel (cast RawChannel$Provider response))]
+                  (Result. subprotocol (TransportFactoryImpl. channel))))))))))
+
+  (method ^:private checkAndReturnSubprotocol :throws [CheckFailedException] ^String [this
+                                                                                      ^HttpHeaders responseHeaders]
+    (let [^{:tag (Optional String)} opt (.firstValue responseHeaders HEADER_PROTOCOL)]
+      (if (.isEmpty opt)
+          ""
+          (let [s (OpeningHandshake/requireSingle responseHeaders HEADER_PROTOCOL)]
+            (if (.contains (.-subprotocols this) s)
+                s
+                (throw (OpeningHandshake/checkFailed (java-str "Unexpected subprotocol: " s))))))))
+
+  (method ^:private ^:static requireAbsent ^void [^HttpHeaders responseHeaders ^String headerName]
+    (let [^{:tag (List String)} values (.allValues responseHeaders headerName)]
+      (when-not (.isEmpty values)
+        (throw (OpeningHandshake/checkFailed
+                 (String/format "Response field '%s' present: %s"
+                                (new Object/1 [headerName (Utils/stringOf values)])))))))
+
+  (method ^:private ^:static requireAtMostOne ^{:tag (Optional String)} [^HttpHeaders responseHeaders
+                                                                         ^String headerName]
+    (let [^{:tag (List String)} values (.allValues responseHeaders headerName)]
+      (when (> (.size values) 1)
+        (throw (OpeningHandshake/checkFailed
+                 (String/format "Response field '%s' multivalued: %s"
+                                (new Object/1 [headerName (Utils/stringOf values)])))))
+      (.findFirst (.stream values))))
+
+  (method ^:private ^:static requireSingle ^String [^HttpHeaders responseHeaders ^String headerName]
+    (let [^{:tag (List String)} values (.allValues responseHeaders headerName)]
+      (cond
+        (.isEmpty values)
+          (throw (OpeningHandshake/checkFailed (java-str "Response field missing: " headerName)))
+        (> (.size values) 1)
+          (throw (OpeningHandshake/checkFailed
+                   (String/format "Response field '%s' multivalued: %s"
+                                  (new Object/1 [headerName (Utils/stringOf values)])))))
+      (cast String (.get values 0))))
+
+  (method ^:private ^:static createNonce ^String []
+    (let [bytes (new byte/1 16)]
+      (.nextBytes OpeningHandshake/random bytes)
+      (.encodeToString (Base64/getEncoder) bytes)))
+
+  (method ^:private ^:static checkFailed ^CheckFailedException [^String message]
+    (throw (CheckFailedException. message)))
+
+  (method ^:private ^:static checkURI ^URI [^URI uri]
+    (let [scheme (.getScheme uri)]
+      (when-not (or (.equalsIgnoreCase "ws" scheme) (.equalsIgnoreCase "wss" scheme))
+        (throw (OpeningHandshake/illegal (java-str "invalid URI scheme: " scheme))))
+      (when (nil? (.getHost uri))
+        (throw (IllegalArgumentException.
+                 (Exceptions/formatMsg "URI must contain a host%s"
+                                       (new Exceptions$SensitiveInfo/1
+                                            [(.prefixWith
+                                               (Exceptions/filterNonSocketInfo (.toString uri))
+                                               ": ")])))))
+      (when (some? (.getFragment uri))
+        (throw (IllegalArgumentException.
+                 (Exceptions/formatMsg "URI must not contain a fragment%s"
+                                       (new Exceptions$SensitiveInfo/1
+                                            [(.prefixWith
+                                               (Exceptions/filterNonSocketInfo (.toString uri))
+                                               ": ")])))))
+      uri))
+
+  (method ^:private ^:static illegal ^IllegalArgumentException [^String message]
+    (IllegalArgumentException. message))
+
+  (method ^:private ^:static proxyFor ^Proxy [^{:tag (Optional ProxySelector)} selector ^URI uri]
+    (when-not (.isEmpty selector)
+      (let [requestURI (OpeningHandshake/createRequestURI uri)
+            ^{:tag (List Proxy)} pl (.select (cast ProxySelector (.get selector)) requestURI)]
+        (when-not (.isEmpty pl)
+          (let [proxy (cast Proxy (.get pl 0))]
+            (when-not (not (identical? (.type proxy) Proxy$Type/HTTP)) (Utils/copyProxy proxy))))))))

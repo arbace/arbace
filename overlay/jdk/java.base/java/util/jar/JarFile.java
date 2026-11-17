@@ -27,13 +27,13 @@
  * Arbace (overlay/jdk, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b"): jrt's
  * java.util.jar.JarFile, jdk26u's (https://github.com/openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/java/util/jar/JarFile.java) transcribed with what the Go build
- * lacks taken out: no signature verification (jars are read as unsigned, jrt's JarVerifier
- * verifies nothing: getCertificates and getCodeSigners give null), no ScopedValue
- * (isInitializing is false), Runtime.Version's feature numbers kept as ints (the versions
- * themselves are made only where the API returns one; java.lang.Runtime.Version is not in the
- * Go build's world, so those members are not either), the access objects of SharedSecrets kept
- * by jdk.internal.jrt.ZipAccess, and the signature files' size limit of
- * sun.security.util.SignatureFileVerifier as its default (8000 * 1024 bytes). Copyright (c)
+ * lacks taken out: no ScopedValue (the thread initializing a verifier is marked by a
+ * ThreadLocal, IN_VERIFIER_INIT), Runtime.Version's feature numbers kept as ints (the versions
+ * themselves are made only where the API returns one), the access objects of SharedSecrets kept
+ * by jdk.internal.jrt.ZipAccess. Since P1 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1
+ * (by day)"; JCS231) signed jars are verified as the JDK verifies them: jdk26u's JarVerifier,
+ * ManifestEntryVerifier, SignatureFileVerifier and ManifestDigester, over the JCA and PKCS #7 the
+ * world holds since F1-F4, and jdk26u's verifier code of this file restored. Copyright (c)
  * Oracle and/or its affiliates, under the GNU General Public License version 2 with the
  * Classpath Exception, as the notice above says (LICENSE.md).
  */
@@ -41,6 +41,8 @@ package java.util.jar;
 
 import jdk.internal.access.JavaUtilZipFileAccess;
 import jdk.internal.jrt.ZipAccess;
+import sun.security.util.ManifestEntryVerifier;
+import sun.security.util.SignatureFileVerifier;
 
 import java.io.ByteArrayInputStream;
 import java.io.EOFException;
@@ -158,6 +160,8 @@ public class JarFile extends ZipFile {
 
     private SoftReference<Manifest> manRef;
     private JarEntry manEntry;
+    private JarVerifier jv;
+    private boolean jvInitialized;
     private boolean verify;
     private final int versionFeature;       // version.feature()
     private boolean isMultiRelease;         // is jar multi-release?
@@ -411,7 +415,17 @@ public class JarFile extends ZipFile {
             if (manEntry != null) {
                 if (verify) {
                     byte[] b = getBytes(manEntry);
-                    man = new Manifest(new ByteArrayInputStream(b), getName());
+                    if (!jvInitialized) {
+                        if (JUZFA.getManifestNum(this) == 1) {
+                            jv = new JarVerifier(manEntry.getName(), b);
+                        } else {
+                            if (JarVerifier.debug != null) {
+                                JarVerifier.debug.println(
+                                        JarVerifier.MULTIPLE_MANIFEST_WARNING);
+                            }
+                        }
+                    }
+                    man = new Manifest(jv, new ByteArrayInputStream(b), getName());
                 } else {
                     try (InputStream is = super.getInputStream(manEntry)) {
                         man = new Manifest(is, getName());
@@ -628,13 +642,27 @@ public class JarFile extends ZipFile {
 
         @Override
         public Certificate[] getCertificates() {
-            // the Go build reads jars as unsigned
+            try {
+                maybeInstantiateVerifier();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            if (certs == null && jv != null) {
+                certs = jv.getCerts(realEntry());
+            }
             return certs == null ? null : certs.clone();
         }
 
         @Override
         public CodeSigner[] getCodeSigners() {
-            // the Go build reads jars as unsigned
+            try {
+                maybeInstantiateVerifier();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            if (signers == null && jv != null) {
+                signers = jv.getCodeSigners(realEntry());
+            }
             return signers == null ? null : signers.clone();
         }
 
@@ -665,17 +693,106 @@ public class JarFile extends ZipFile {
     }
 
     /*
+     * Ensures that the JarVerifier has been created if one is
+     * necessary (i.e., the jar appears to be signed.) This is done as
+     * a quick check to avoid processing of the manifest for unsigned
+     * jars.
+     */
+    private void maybeInstantiateVerifier() throws IOException {
+        if (jv != null) {
+            return;
+        }
+
+        if (verify) {
+            // Gets the manifest name, but only if there are
+            // signature-related files. If so we can assume
+            // that the jar is signed and that we therefore
+            // need a JarVerifier and Manifest
+            String name = JUZFA.getManifestName(this, true);
+            if (name != null) {
+                getManifest();
+                return;
+            }
+            // No signature-related files; don't instantiate a
+            // verifier
+            verify = false;
+        }
+    }
+
+    /*
+     * Initializes the verifier object by reading all the manifest
+     * entries and passing them to the verifier.
+     */
+    private void initializeVerifier() {
+        ManifestEntryVerifier mev = null;
+
+        // Verify "META-INF/" entries...
+        try {
+            List<String> names = JUZFA.getManifestAndSignatureRelatedFiles(this);
+            for (String name : names) {
+                JarEntry e = getJarEntry(name);
+                byte[] b;
+                if (e == null) {
+                    throw new JarException("corrupted jar file");
+                }
+                if (mev == null) {
+                    mev = new ManifestEntryVerifier
+                        (getManifestFromReference(), jv.manifestName);
+                }
+                if (name.equalsIgnoreCase(MANIFEST_NAME)) {
+                    b = jv.manifestRawBytes;
+                } else {
+                    b = getBytes(e);
+                }
+                if (b != null && b.length > 0) {
+                    jv.beginEntry(e, mev);
+                    jv.update(b.length, b, 0, b.length, mev);
+                    jv.update(-1, null, 0, 0, mev);
+                }
+            }
+        } catch (IOException | IllegalArgumentException ex) {
+            // if we had an error parsing any blocks, just
+            // treat the jar file as being unsigned
+            jv = null;
+            verify = false;
+            if (JarVerifier.debug != null) {
+                JarVerifier.debug.println("jarfile parsing error!");
+                ex.printStackTrace();
+            }
+        }
+
+        // if after initializing the verifier we have nothing
+        // signed, we null it out.
+
+        if (jv != null) {
+
+            jv.doneWithMeta();
+            if (JarVerifier.debug != null) {
+                JarVerifier.debug.println("done with meta!");
+            }
+
+            if (jv.nothingToVerify()) {
+                if (JarVerifier.debug != null) {
+                    JarVerifier.debug.println("nothing to verify!");
+                }
+                jv = null;
+                verify = false;
+            }
+        }
+    }
+
+    /*
      * Reads all the bytes for a given entry. Used to process the
      * META-INF files.
      */
     private byte[] getBytes(ZipEntry ze) throws IOException {
         try (InputStream is = super.getInputStream(ze)) {
             long uncompressedSize = ze.getSize();
-            if (uncompressedSize > MAX_SIG_FILE_SIZE) {
+            if (uncompressedSize > SignatureFileVerifier.MAX_SIG_FILE_SIZE) {
                 throw new IOException("Unsupported size: " + uncompressedSize +
                         " for JarEntry " + ze.getName() +
                         ". Allowed max size: " +
-                        MAX_SIG_FILE_SIZE + " bytes. " +
+                        SignatureFileVerifier.MAX_SIG_FILE_SIZE + " bytes. " +
                         "You can use the jdk.jar.maxSignatureFileSize " +
                         "system property to increase the default value.");
             }
@@ -722,12 +839,52 @@ public class JarFile extends ZipFile {
         throws IOException
     {
         Objects.requireNonNull(ze, "ze");
-        // the Go build reads jars as unsigned: no verifier stream
-        return super.getInputStream(ze);
+
+        maybeInstantiateVerifier();
+        if (jv == null) {
+            return super.getInputStream(ze);
+        }
+        if (!jvInitialized) {
+            initializeVerifier();
+            jvInitialized = true;
+            // could be set to null after a call to
+            // initializeVerifier if we have nothing to
+            // verify
+            if (jv == null)
+                return super.getInputStream(ze);
+        }
+        // Return null InputStream when the specified entry is not found in the
+        // Jar
+        var je = verifiableEntry(ze);
+        if (je == null) {
+            return null;
+        }
+        // wrap a verifier stream around the real stream
+        return new JarVerifier.VerifierStream(
+                getManifestFromReference(),
+                je,
+                super.getInputStream(ze),
+                jv);
+
     }
 
-    /** SignatureFileVerifier.MAX_SIG_FILE_SIZE's default (jdk.jar.maxSignatureFileSize unset). */
-    private static final int MAX_SIG_FILE_SIZE = 8000 * 1024;
+    private JarEntry verifiableEntry(ZipEntry ze) throws ZipException {
+        if (ze instanceof JarFileEntry) {
+            // assure the name and entry match for verification
+            return ((JarFileEntry)ze).realEntry();
+        }
+        // ZipEntry::getName should not return null, if it does, return null
+        var entryName = ze.getName();
+        if (entryName != null) {
+            ze = getJarEntry(entryName);
+        } else {
+            return null;
+        }
+        if (ze instanceof JarFileEntry) {
+            return ((JarFileEntry)ze).realEntry();
+        }
+        return (JarEntry)ze;
+    }
 
     // Statics for hand-coded Boyer-Moore search
     private static final byte[] CLASSPATH_CHARS =
@@ -880,13 +1037,33 @@ public class JarFile extends ZipFile {
     }
 
     synchronized void ensureInitialization() {
-        // nothing to verify: the Go build reads jars as unsigned
+        try {
+            maybeInstantiateVerifier();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        if (jv == null || jvInitialized) {
+            return;
+        }
+        // mark the current thread as initializing
+        // the JAR verifier (the Go build: a ThreadLocal where jdk26u runs ScopedValue.where's)
+        Boolean outer = IN_VERIFIER_INIT.get();
+        IN_VERIFIER_INIT.set(Boolean.TRUE);
+        try {
+            initializeVerifier();
+            jvInitialized = true;
+        } finally {
+            IN_VERIFIER_INIT.set(outer);
+        }
     }
 
-    /*
-     * Whether called by a JarFile's verifier initialization, which the Go build never runs.
+    /**
+     * {@return true if the current thread is initializing a JAR verifier, false otherwise}
      */
     static boolean isInitializing() {
-        return false;
+        return IN_VERIFIER_INIT.get() == Boolean.TRUE;
     }
+
+    /** The threads initializing a verifier (jdk26u's ScopedValue IN_VERIFIER_INIT). */
+    private static final ThreadLocal<Boolean> IN_VERIFIER_INIT = new ThreadLocal<>();
 }

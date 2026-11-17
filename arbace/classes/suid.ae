@@ -1,0 +1,161 @@
+;; Ported in part from jdk26u (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259),
+;; src/java.base/share/classes/java/io/ObjectStreamClass.java (computeDefaultSUID) and
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Lower.java (the synthetic members of a serializable class), whose notice follows
+;; (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1996, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.classes.suid
+  "The default serialVersionUID of a class of Java forms (JCS168, doc/classes/JAVA-DEFERRED-TRIAGE.md,
+  \"As built: JCS167 slices 2-3 (write-ahead)\"): jdk26u's java.io.ObjectStreamClass.computeDefaultSUID
+  (openjdk/jdk26u at baf63fb, src/java.base/share/classes/java/io/ObjectStreamClass.java) rule for rule,
+  over the class as javac compiles it rather than over reflection: the SHA-1 of the class's name, its
+  modifiers (public, final, interface, abstract; an interface abstract when it declares methods), its
+  interfaces' names sorted, its fields sorted by name (all but the private static and the private
+  transient ones; name, modifiers, descriptor), <clinit> when it has one, its non-private constructors
+  sorted by descriptor and its non-private methods sorted by name and descriptor (\"<init>\" or the name,
+  modifiers, the descriptor with dots), written by DataOutputStream, the first eight bytes of the hash
+  little-endian.
+
+  The class as javac compiles it (class-view) is the declaration arbace.classes.analyze makes (javac's
+  derived members: default and anonymous constructors with their implicit parameters, a.ctor-real-desc;
+  bridges; records' and enums' members) and javac's synthetic members a serializable class has besides
+  (Lower, jdk26u): the enclosing instance's field this$N (final, synthetic; javac keeps it in a
+  serializable class, Lower.shouldEmitOuterThis), the captured locals' fields val$x (final, synthetic),
+  $assertionsDisabled (static, final, synthetic) in a class with an assert, and the <clinit> that a
+  static initializer, a static field's non-constant initializer, an assert or an enum's constants give.
+  j2g writes it into a translated class's ClassInfo.SerialUID (arbace.j2g.out, J2G_DEFAULT_SUID=1) and
+  the variant's computeDefaultSUID asks it first (jdk.internal.jrt.SerialAlloc.defaultSUID): the table of
+  a translated JDK class lists only its public and serial members, so the stock computation over it
+  gives another value than the JDK's."
+  (:require [arbace.string :as str]
+            [arbace.classes.types :as t]
+            [arbace.classes.analyze :as a]
+            [arbace.classes.opcodes :as Opcodes])
+  (:import (java.io ByteArrayOutputStream DataOutputStream)
+           (java.security MessageDigest)))
+
+(def ^:private PUBLIC 0x1) (def ^:private PRIVATE 0x2) (def ^:private PROTECTED 0x4)
+(def ^:private STATIC 0x8) (def ^:private FINAL 0x10) (def ^:private SYNCHRONIZED 0x20)
+(def ^:private VOLATILE 0x40) (def ^:private TRANSIENT 0x80) (def ^:private NATIVE 0x100)
+(def ^:private INTERFACE 0x200) (def ^:private ABSTRACT 0x400) (def ^:private STRICT 0x800)
+
+(defn- has? [x m] (not (zero? (bit-and (or x 0) m))))
+
+(defn suid-of
+  "computeDefaultSUID of the class view v: {:name the binary name (dots) :mods Class.getModifiers
+  :interfaces [binary names] :fields [{:name :mods :desc}] :clinit boolean :ctors [{:mods :desc}]
+  :methods [{:name :mods :desc}]} (descriptors with slashes, as the class file has them), every
+  declared member, private ones too (getDeclaredFields, getDeclaredConstructors, getDeclaredMethods)."
+  [v]
+  (let [bout (ByteArrayOutputStream.)
+        dout (DataOutputStream. bout)
+        methods (:methods v)
+        cmods (bit-and (:mods v) (bit-or PUBLIC FINAL INTERFACE ABSTRACT))
+        ;; compensate for javac bug in which ABSTRACT bit was set for an interface only if the
+        ;; interface declared methods
+        cmods (if (has? cmods INTERFACE)
+                (if (seq methods) (bit-or cmods ABSTRACT) (bit-and cmods (bit-not ABSTRACT)))
+                cmods)]
+    (.writeUTF dout ^String (:name v))
+    (.writeInt dout (int cmods))
+    (doseq [i (sort (:interfaces v))]
+      (.writeUTF dout ^String i))
+    (doseq [f (sort-by :name (:fields v))
+            :let [m (bit-and (:mods f) (bit-or PUBLIC PRIVATE PROTECTED STATIC FINAL VOLATILE TRANSIENT))]
+            :when (or (not (has? m PRIVATE)) (not (has? m (bit-or STATIC TRANSIENT))))]
+      (.writeUTF dout ^String (:name f))
+      (.writeInt dout (int m))
+      (.writeUTF dout ^String (:desc f)))
+    (when (:clinit v)
+      (.writeUTF dout "<clinit>")
+      (.writeInt dout (int STATIC))
+      (.writeUTF dout "()V"))
+    (let [mmask (bit-or PUBLIC PRIVATE PROTECTED STATIC FINAL SYNCHRONIZED NATIVE ABSTRACT STRICT)]
+      (doseq [k (sort-by :desc (:ctors v))
+              :let [m (bit-and (:mods k) mmask)]
+              :when (not (has? m PRIVATE))]
+        (.writeUTF dout "<init>")
+        (.writeInt dout (int m))
+        (.writeUTF dout (str/replace (:desc k) "/" ".")))
+      (doseq [mm (sort-by (juxt :name :desc) methods)
+              :let [m (bit-and (:mods mm) mmask)]
+              :when (not (has? m PRIVATE))]
+        (.writeUTF dout ^String (:name mm))
+        (.writeInt dout (int m))
+        (.writeUTF dout (str/replace (:desc mm) "/" "."))))
+    (.flush dout)
+    (let [h (.digest (MessageDigest/getInstance "SHA") (.toByteArray bout))]
+      (loop [i (dec (min (alength h) 8)) x 0]
+        (if (neg? i)
+          x
+          (recur (dec i) (bit-or (bit-shift-left x 8) (bit-and (long (aget h i)) 0xff))))))))
+
+(defn- class-mods
+  "Class.getModifiers of class n: a nested class's flags from its InnerClasses entry (javac's), a
+  top-level class's from its access flags."
+  [d]
+  (if (= :top (:nesting d)) (:flags d) (:inner-flags d)))
+
+(defn- outer-this-level
+  "javac's Lower.outerThisName: the nesting level of the enclosing instance's type (how many enclosing
+  instance types it has itself), the N of this$N."
+  [outer]
+  (loop [o outer k 0]
+    (let [d (a/decl o)]
+      (if (and d (:outer-instance? d)) (recur (:outer d) (inc k)) k))))
+
+(defn class-view
+  "The class view (suid-of) of class n of the compilation, as javac compiles it: its declaration's
+  members, with javac's synthetic members (this$N, val$x, $assertionsDisabled, <clinit>). The class must
+  be analyzed (a/analyze-class!: its bodies tell the captures, the static initializer, the asserts)."
+  [n]
+  (let [d (a/decl n)
+        st @(:state d)
+        iface? (#{:interface :annotation} (:kind d))
+        dotted #(str/replace % "/" ".")
+        declared (for [f (:fields d)] {:name (:name f) :mods (:flags f) :desc (:desc f)})
+        outer-this (when (:outer-instance? d)
+                     [{:name (str "this$" (outer-this-level (:outer d))) :mods (bit-or FINAL Opcodes/ACC_SYNTHETIC)
+                       :desc (t/internal->desc (:outer d))}])
+        captured (when (#{:local :anon} (:nesting d))
+                   (for [b (:captures st)]
+                     {:name (a/capture-field-name n b) :mods (bit-or FINAL Opcodes/ACC_SYNTHETIC) :desc (:type b)}))
+        asserts (when (and (:uses-assert st) (not iface?))
+                  [{:name "$assertionsDisabled" :mods (bit-or STATIC FINAL Opcodes/ACC_SYNTHETIC) :desc "Z"}])
+        ms (:methods d)]
+    {:name (dotted n)
+     :mods (class-mods d)
+     :interfaces (map dotted (:interfaces d))
+     :fields (concat declared outer-this captured asserts)
+     :clinit (boolean (or (seq (:clinit st)) (seq (:clj-consts st)) (:uses-assert st) (:interface-assert st)))
+     :ctors (for [m ms :when (= "<init>" (:name m))] {:mods (:flags m) :desc (a/ctor-real-desc n m)})
+     :methods (for [m ms :when (not (#{"<init>" "<clinit>"} (:name m)))]
+                {:name (:name m) :mods (:flags m) :desc (:desc m)})}))
+
+(defn default-suid
+  "The default serialVersionUID of class n of the compilation (computeDefaultSUID's value on the JVM
+  for the class javac compiles from the same source)."
+  [n]
+  (suid-of (class-view n)))

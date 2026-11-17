@@ -1,0 +1,314 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/https/HttpsClient.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.https)
+
+(import '(java.io BufferedOutputStream IOException PrintStream UnsupportedEncodingException)
+        '(java.net InetSocketAddress
+                   Proxy
+                   Proxy$Type
+                   Socket
+                   SocketException
+                   URL
+                   UnknownHostException)
+        '(java.security.cert Certificate CertificateException X509Certificate)
+        '(java.util ArrayList List Objects StringTokenizer)
+        '(javax.net.ssl HandshakeCompletedEvent
+                        HandshakeCompletedListener
+                        HostnameVerifier
+                        SNIHostName
+                        SSLPeerUnverifiedException
+                        SSLSession
+                        SSLSocket
+                        SSLSocketFactory)
+        '(jdk.internal.util Exceptions Exceptions$SensitiveInfo)
+        '(sun.net.util IPAddressUtil)
+        '(sun.net.www.http HttpClient)
+        '(sun.net.www.protocol.http AuthCacheImpl HttpURLConnection HttpURLConnection$TunnelState)
+        '(sun.security.ssl SSLSocketImpl)
+        '(sun.security.util HostnameChecker)
+        '(sun.util.logging PlatformLogger$Level))
+
+(defclass ^:final HttpsClient
+  :extends HttpClient
+  :implements [HandshakeCompletedListener]
+
+  (field ^:private ^:static ^:final ^int httpsPortNumber 443)
+
+  (field ^:private ^:static ^:final ^String defaultHVCanonicalName
+    "javax.net.ssl.HttpsURLConnection.DefaultHostnameVerifier")
+
+  (method ^:protected getDefaultPort ^int [this] httpsPortNumber)
+
+  (field ^:private ^HostnameVerifier hv)
+
+  (field ^:private ^SSLSocketFactory sslSocketFactory)
+
+  (field ^:private ^SSLSession session)
+
+  (method ^:private getCipherSuites ^String/1 [this]
+    (let [^:mutable ^String/1 ciphers nil
+          cipherString (System/getProperty "https.cipherSuites")]
+      (if (or (nil? cipherString) (.isEmpty cipherString))
+          (set! ciphers nil)
+          (let [^:mutable ^StringTokenizer tokenizer nil
+                ^{:tag (ArrayList String)} v (ArrayList.)]
+            (set! tokenizer (StringTokenizer. cipherString ","))
+            (while (.hasMoreTokens tokenizer) (.add v (.nextToken tokenizer)))
+            (set! ciphers (new String/1 (.size v)))
+            (loop [^int i 0]
+              (when (< i (alength ciphers))
+                (aset ciphers i (cast String (.get v i)))
+                (recur (unchecked-inc-int i))))))
+      ciphers))
+
+  (method ^:private getProtocols ^String/1 [this]
+    (let [^:mutable ^String/1 protocols nil
+          protocolString (System/getProperty "https.protocols")]
+      (if (or (nil? protocolString) (.isEmpty protocolString))
+          (set! protocols nil)
+          (let [^:mutable ^StringTokenizer tokenizer nil
+                ^{:tag (ArrayList String)} v (ArrayList.)]
+            (set! tokenizer (StringTokenizer. protocolString ","))
+            (while (.hasMoreTokens tokenizer) (.add v (.nextToken tokenizer)))
+            (set! protocols (new String/1 (.size v)))
+            (loop [^int i 0]
+              (when (< i (alength protocols))
+                (aset protocols i (cast String (.get v i)))
+                (recur (unchecked-inc-int i))))))
+      protocols))
+
+  (constructor :throws [IOException] [this ^SSLSocketFactory sf ^URL url ^Proxy proxy
+                                      ^int connectTimeout]
+    (let [logger (HttpURLConnection/getHttpLogger)]
+      (when (.isLoggable logger PlatformLogger$Level/FINEST)
+        (.finest logger
+                 (java-str "Creating new HttpsClient with url:"
+                           url
+                           " and proxy:"
+                           proxy
+                           " with connect timeout:"
+                           connectTimeout)))
+      (set! (.-proxy this) proxy)
+      (.setSSLSocketFactory this sf)
+      (set! (.-proxyDisabled this) true)
+      (set! (.-host this) (.getHost url))
+      (set! (.-url this) url)
+      (set! (.-port this) (.getPort url))
+      (when (== (.-port this) -1) (set! (.-port this) (.getDefaultPort this)))
+      (.setConnectTimeout this connectTimeout)
+      (.openServer this)))
+
+  (method ^:static New :throws [IOException] ^HttpClient [^SSLSocketFactory sf ^URL url
+                                                          ^HostnameVerifier hv ^String proxyHost
+                                                          ^int proxyPort ^boolean useCache
+                                                          ^int connectTimeout
+                                                          ^HttpURLConnection httpuc]
+    (HttpsClient/New sf
+                     url
+                     hv
+                     ^Proxy (when (some? proxyHost)
+                              (HttpClient/newHttpProxy proxyHost proxyPort "https"))
+                     useCache
+                     connectTimeout
+                     httpuc))
+
+  (method ^:static New :throws [IOException] ^HttpClient [^SSLSocketFactory sf ^URL url
+                                                          ^HostnameVerifier hv ^:mutable ^Proxy p
+                                                          ^boolean useCache ^int connectTimeout
+                                                          ^HttpURLConnection httpuc]
+    (when (nil? p) (set! p Proxy/NO_PROXY))
+    (let [logger (HttpURLConnection/getHttpLogger)]
+      (when (.isLoggable logger PlatformLogger$Level/FINEST)
+        (.finest logger (java-str "Looking for HttpClient for URL " url " and proxy value of " p)))
+      (let [^:mutable ^HttpsClient ret nil]
+        (when useCache
+          (set! ret (cast HttpsClient (.get HttpsClient/kac url sf)))
+          (when (and (and (and (some? ret) (some? httpuc)) (.streaming httpuc))
+                     (.equals "POST" (.getRequestMethod httpuc)))
+            (when-not (.available ret) (set! ret nil)))
+          (when (some? ret)
+            (let [^AuthCacheImpl ak (when (some? httpuc) (.getAuthCache httpuc))
+                  compatible (and (or (and (some? (.-proxy ret)) (.equals (.-proxy ret) p))
+                                      (and (nil? (.-proxy ret)) (identical? p Proxy/NO_PROXY)))
+                                  (Objects/equals (.getAuthCache ret) ak))]
+              (if compatible
+                  (do
+                    (.lock ret)
+                    (try
+                      (set! (.-cachedHttpClient ret) true)
+                      (java-assert (.-inCache ret))
+                      (set! (.-inCache ret) false)
+                      (when (and (some? httpuc) (.needsTunneling ret))
+                        (.setTunnelState httpuc HttpURLConnection$TunnelState/TUNNELING))
+                      (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                        (.finest logger
+                                 (java-str "KeepAlive stream retrieved from the cache, " ret)))
+                      (finally (.unlock ret))))
+                  (do
+                    (.lock ret)
+                    (try
+                      (when (.isLoggable logger PlatformLogger$Level/FINEST)
+                        (.finest logger (java-str "Not returning this connection to cache: " ret)))
+                      (set! (.-inCache ret) false)
+                      (.closeServer ret)
+                      (finally (.unlock ret)))
+                    (set! ret nil))))))
+        (if (nil? ret)
+            (do
+              (set! ret (HttpsClient. sf url p connectTimeout))
+              (when (some? httpuc) (set! (.-authcache ret) (.getAuthCache httpuc))))
+            (set! (.-url ret) url))
+        (.setHostnameVerifier ret hv)
+        ret)))
+
+  (method ^:private setHostnameVerifier ^void [this ^HostnameVerifier hv]
+    (set! (.-hv this) hv))
+
+  (method ^:private setSSLSocketFactory ^void [this ^SSLSocketFactory sf]
+    (set! sslSocketFactory sf))
+
+  (method ^:protected createSocket :throws [IOException] ^Socket [this]
+    (try
+      (.createSocket sslSocketFactory)
+      (catch SocketException se
+        (let [t (.getCause se)]
+          (if (instance? UnsupportedOperationException t) (.createSocket super) (throw se))))))
+
+  (method ^:public closeServer ^void [this]
+    (try (.setSoTimeout (.-serverSocket this) 1) (catch Exception e))
+    (.closeServer super))
+
+  (method ^:public needsTunneling ^boolean [this]
+    (and (and (some? (.-proxy this)) (not (identical? (.type (.-proxy this)) Proxy$Type/DIRECT)))
+         (not (identical? (.type (.-proxy this)) Proxy$Type/SOCKS))))
+
+  (method ^:public afterConnect :throws [IOException UnknownHostException] ^void [this]
+    (if (not (.isCachedConnection this))
+        (let [^:mutable ^SSLSocket s nil
+              factory sslSocketFactory]
+          (try
+            (if (not (instance? SSLSocket (.-serverSocket this)))
+                (set! s
+                      (cast SSLSocket
+                            (.createSocket factory
+                                           (.-serverSocket this)
+                                           (.-host this)
+                                           (.-port this)
+                                           true)))
+                (do
+                  (set! s (cast SSLSocket (.-serverSocket this)))
+                  (when (instance? SSLSocketImpl s) (.setHost (cast SSLSocketImpl s) (.-host this)))))
+            (catch IOException ex
+              (try
+                (set! s (cast SSLSocket (.createSocket factory (.-host this) (.-port this))))
+                (catch IOException ignored (throw ex)))))
+          (let [protocols (.getProtocols this)
+                ciphers (.getCipherSuites this)]
+            (when (some? protocols) (.setEnabledProtocols s protocols))
+            (when (some? ciphers) (.setEnabledCipherSuites s ciphers))
+            (.addHandshakeCompletedListener s this)
+            (let [^:mutable needToCheckSpoofing true
+                  identification (.getEndpointIdentificationAlgorithm (.getSSLParameters s))]
+              (if (and (some? identification) (not (== (.length identification) 0)))
+                  (when (.equalsIgnoreCase identification "HTTPS") (set! needToCheckSpoofing false))
+                  (let [^:mutable isDefaultHostnameVerifier false]
+                    (if (some? hv)
+                        (let [canonicalName (.getCanonicalName (.getClass hv))]
+                          (when (and (some? canonicalName)
+                                     (.equalsIgnoreCase canonicalName defaultHVCanonicalName))
+                            (set! isDefaultHostnameVerifier true)))
+                        (set! isDefaultHostnameVerifier true))
+                    (when isDefaultHostnameVerifier
+                      (let [parameters (.getSSLParameters s)]
+                        (.setEndpointIdentificationAlgorithm parameters "HTTPS")
+                        (when (and
+                                (and (not (instance? SSLSocketImpl s))
+                                     (not (IPAddressUtil/isIPv4LiteralAddress (.-host this))))
+                                (not (and (and (== (.charAt (.-host this) 0) \[)
+                                               (==
+                                                 (.charAt
+                                                   (.-host this)
+                                                   (unchecked-subtract-int
+                                                     (.length (.-host this))
+                                                     1))
+                                                 \]))
+                                          (IPAddressUtil/isIPv6LiteralAddress
+                                            (.substring
+                                              (.-host this)
+                                              1
+                                              (unchecked-subtract-int (.length (.-host this)) 1))))))
+                          (.setServerNames parameters (List/of (SNIHostName. (.-host this)))))
+                        (.setSSLParameters s parameters)
+                        (set! needToCheckSpoofing false)))))
+              (.startHandshake s)
+              (set! session (.getSession s))
+              (set! (.-serverSocket this) s)
+              (try
+                (set! (.-serverOutput this)
+                      (PrintStream. (BufferedOutputStream. (.getOutputStream (.-serverSocket this)))
+                                    false
+                                    HttpsClient/encoding))
+                (catch UnsupportedEncodingException e
+                  (throw (InternalError. (java-str HttpsClient/encoding " encoding not found")))))
+              (when needToCheckSpoofing (.checkURLSpoofing this hv)))))
+        (set! session (.getSession (cast SSLSocket (.-serverSocket this))))))
+
+  (method ^:private checkURLSpoofing :throws [IOException] ^void [this
+                                                                  ^HostnameVerifier hostnameVerifier]
+    (let [^:mutable host (.getHost (.-url this))]
+      (when (and (and (some? host) (.startsWith host "[")) (.endsWith host "]"))
+        (set! host (.substring host 1 (unchecked-subtract-int (.length host) 1))))
+      (let [^:mutable ^Certificate/1 peerCerts nil
+            cipher (.getCipherSuite session)]
+        (try
+          (let [checker (HostnameChecker/getInstance HostnameChecker/TYPE_TLS)]
+            (set! peerCerts (.getPeerCertificates session))
+            (let [^:mutable ^X509Certificate peerCert nil]
+              (if (instance? X509Certificate (aget peerCerts 0))
+                  (set! peerCert (cast X509Certificate (aget peerCerts 0)))
+                  (throw (SSLPeerUnverifiedException. "")))
+              (.match checker host peerCert)
+              (return)))
+          (catch SSLPeerUnverifiedException e)
+          (catch CertificateException cpe))
+        (when-not (and (some? cipher) (.contains cipher "_anon_"))
+          (when-not (and (some? hostnameVerifier) (.verify hostnameVerifier host session))
+            (.close (.-serverSocket this))
+            (.invalidate session)
+            (throw (IOException. (Exceptions/formatMsg
+                                   "Wrong HTTPS hostname%s"
+                                   (new Exceptions$SensitiveInfo/1
+                                        [(.suffixWith
+                                           (.prefixWith
+                                             (Exceptions/filterNonSocketInfo
+                                               (.getHost (.-url this)))
+                                             ": should be <")
+                                           ">")])))))))))
+
+  (method ^:protected putInKeepAliveCache ^void [this]
+    (.lock this)
+    (try
+      (if (.-inCache this)
+          (java-assert false "Duplicate put to keep alive cache")
+          (do
+            (set! (.-inCache this) true)
+            (.put HttpsClient/kac (.-url this) sslSocketFactory this)))
+      (finally (.unlock this))))
+
+  (method ^:public closeIdleConnection ^void [this]
+    (let [http (.get HttpsClient/kac (.-url this) sslSocketFactory)]
+      (when (some? http) (.closeServer http))))
+
+  (method getSSLSession ^SSLSession [this] session)
+
+  (method ^:public handshakeCompleted ^void [this ^HandshakeCompletedEvent event]
+    (set! session (.getSession event)))
+
+  (method ^:public getProxyHostUsed ^String [this]
+    (when-not (not (.needsTunneling this)) (.getProxyHostUsed super)))
+
+  (method ^:public getProxyPortUsed ^int [this]
+    (if (or (or (nil? (.-proxy this)) (identical? (.type (.-proxy this)) Proxy$Type/DIRECT))
+            (identical? (.type (.-proxy this)) Proxy$Type/SOCKS))
+        -1
+        (.getPort (cast InetSocketAddress (.address (.-proxy this)))))))

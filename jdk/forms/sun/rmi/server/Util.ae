@@ -1,0 +1,220 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/server/Util.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.server)
+
+(import '(java.io ByteArrayOutputStream DataOutputStream IOException)
+        '(java.lang.reflect Constructor InvocationHandler InvocationTargetException Method Proxy)
+        '(java.rmi Remote RemoteException StubNotFoundException)
+        '(java.rmi.server LogStream
+                          RemoteObjectInvocationHandler
+                          RemoteRef
+                          RemoteStub
+                          Skeleton
+                          SkeletonNotFoundException)
+        '(java.security DigestOutputStream MessageDigest NoSuchAlgorithmException)
+        '(java.util ArrayList Collections Map WeakHashMap)
+        '(sun.rmi.runtime Log))
+
+(defclass ^:public ^:final Util
+  (field ^:static ^:final ^int logLevel
+    (LogStream/parseLevel (System/getProperty "sun.rmi.server.logLevel")))
+
+  (field ^:public ^:static ^:final ^Log serverRefLog
+    (Log/getLog "sun.rmi.server.ref" "transport" Util/logLevel))
+
+  (field ^:private ^:static ^:final ^boolean ignoreStubClasses
+    (Boolean/getBoolean "java.rmi.server.ignoreStubClasses"))
+
+  (field ^:private ^:static ^:final ^{:tag (Map (Class ?) Void)} withoutStubs
+    (Collections/synchronizedMap (WeakHashMap. 11)))
+
+  (field ^:private ^:static ^:final ^{:tag (array (Class ?))} stubConsParamTypes
+    (new Class/1 [RemoteRef]))
+
+  (constructor ^:private [this])
+
+  (method ^:public ^:static createProxy :throws [StubNotFoundException] ^Remote [^{:tag (Class ?)} implClass
+                                                                                 ^RemoteRef clientRef
+                                                                                 ^boolean forceStubUse]
+    (let [^:mutable ^{:tag (Class ?)} remoteClass nil]
+      (try
+        (set! remoteClass (Util/getRemoteClass implClass))
+        (catch ClassNotFoundException ex
+          (throw
+            (StubNotFoundException.
+              (java-str "object does not implement a remote interface: " (.getName implClass))))))
+      (if (or forceStubUse (not (or ignoreStubClasses (not (Util/stubClassExists remoteClass)))))
+          (Util/createStub remoteClass clientRef)
+          (let [loader (.getClassLoader implClass)
+                ^{:tag (array (Class ?))} interfaces (Util/getRemoteInterfaces implClass)
+                ^InvocationHandler handler (RemoteObjectInvocationHandler. clientRef)]
+            (try
+              (cast Remote (Proxy/newProxyInstance loader interfaces handler))
+              (catch IllegalArgumentException e
+                (throw (StubNotFoundException. "unable to create proxy" e))))))))
+
+  (method ^:private ^:static stubClassExists ^boolean [^{:tag (Class ?)} remoteClass]
+    (when-not (.containsKey withoutStubs remoteClass)
+      (try
+        (Class/forName (java-str (.getName remoteClass) "_Stub")
+                       false
+                       (.getClassLoader remoteClass))
+        (return true)
+        (catch ClassNotFoundException cnfe (.put withoutStubs remoteClass nil))))
+    false)
+
+  (method ^:private ^:static getRemoteClass :throws [ClassNotFoundException] ^{:tag (Class ?)} [^:mutable ^{:tag (Class ?)} cl]
+    (while (some? cl)
+      (let [^{:tag (array (Class ?))} interfaces (.getInterfaces cl)]
+        (loop [^int i (unchecked-subtract-int (alength interfaces) 1)]
+          (if (>= i 0)
+              (if (.isAssignableFrom Remote (aget interfaces i))
+                  (return cl)
+                  (recur (unchecked-dec-int i)))
+              nil))
+        (set! cl (.getSuperclass cl))))
+    (throw (ClassNotFoundException. "class does not implement java.rmi.Remote")))
+
+  (method ^:private ^:static getRemoteInterfaces ^{:tag (array (Class ?))} [^{:tag (Class ?)} remoteClass]
+    (let [^{:tag (ArrayList (Class ?))} list (ArrayList.)]
+      (Util/getRemoteInterfaces list remoteClass)
+      (cast Class/1 (.toArray list (new Class/1 (.size list))))))
+
+  (method ^:private ^:static getRemoteInterfaces ^void [^{:tag (ArrayList (Class ?))} list
+                                                        ^{:tag (Class ?)} cl]
+    (let [^{:tag (Class ?)} superclass (.getSuperclass cl)]
+      (when (some? superclass) (Util/getRemoteInterfaces list superclass))
+      (let [^{:tag (array (Class ?))} interfaces (.getInterfaces cl)]
+        (loop [^int i 0]
+          (when (< i (alength interfaces))
+            (let [^{:tag (Class ?)} intf (aget interfaces i)]
+              (if (.isAssignableFrom Remote intf)
+                  (if (not (.contains list intf))
+                      (let [methods (.getMethods intf)]
+                        (loop [^int j 0]
+                          (when (< j (alength methods))
+                            (Util/checkMethod (aget methods j))
+                            (recur (unchecked-inc-int j))))
+                        (.add list intf)
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))))))))
+
+  (method ^:private ^:static checkMethod ^void [^Method m]
+    (let [^{:tag (array (Class ?))} ex (.getExceptionTypes m)]
+      (loop [^int i 0]
+        (if (< i (alength ex))
+            (if (.isAssignableFrom (aget ex i) RemoteException)
+                (return)
+                (recur (unchecked-inc-int i)))
+            nil))
+      (throw (IllegalArgumentException. (java-str "illegal remote method encountered: " m)))))
+
+  (method ^:private ^:static createStub :throws [StubNotFoundException] ^RemoteStub [^{:tag (Class ?)} remoteClass
+                                                                                     ^RemoteRef ref]
+    (let [stubname (java-str (.getName remoteClass) "_Stub")]
+      (try
+        (let [^{:tag (Class ?)} stubcl (Class/forName stubname false (.getClassLoader remoteClass))
+              ^{:tag (Constructor ?)} cons (.getConstructor stubcl stubConsParamTypes)]
+          (cast RemoteStub (.newInstance cons (new Object/1 [ref]))))
+        (catch ClassNotFoundException e
+          (throw (StubNotFoundException. (java-str "Stub class not found: " stubname) e)))
+        (catch NoSuchMethodException e
+          (throw (StubNotFoundException. (java-str "Stub class missing constructor: " stubname) e)))
+        (catch InstantiationException e
+          (throw (StubNotFoundException. (java-str "Can't create instance of stub class: " stubname)
+                                         e)))
+        (catch IllegalAccessException e
+          (throw (StubNotFoundException. (java-str "Stub class constructor not public: " stubname)
+                                         e)))
+        (catch InvocationTargetException e
+          (throw (StubNotFoundException.
+                   (java-str "Exception creating instance of stub class: " stubname)
+                   e)))
+        (catch ClassCastException e
+          (throw (StubNotFoundException.
+                   (java-str "Stub class not instance of RemoteStub: " stubname)
+                   e))))))
+
+  (method ^:static createSkeleton :throws [SkeletonNotFoundException] ^Skeleton [^Remote object]
+    (let [^:mutable ^{:tag (Class ?)} cl nil]
+      (try
+        (set! cl (Util/getRemoteClass (.getClass object)))
+        (catch ClassNotFoundException ex
+          (throw (SkeletonNotFoundException.
+                   (java-str "object does not implement a remote interface: "
+                             (.getName (.getClass object)))))))
+      (let [skelname (java-str (.getName cl) "_Skel")]
+        (try
+          (let [^{:tag (Class ?)} skelcl (Class/forName skelname false (.getClassLoader cl))]
+            (cast Skeleton (.newInstance skelcl)))
+          (catch ClassNotFoundException ex
+            (throw (SkeletonNotFoundException. (java-str "Skeleton class not found: " skelname) ex)))
+          (catch InstantiationException ex
+            (throw (SkeletonNotFoundException. (java-str "Can't create skeleton: " skelname) ex)))
+          (catch IllegalAccessException ex
+            (throw (SkeletonNotFoundException. (java-str "No public constructor: " skelname) ex)))
+          (catch ClassCastException ex
+            (throw (SkeletonNotFoundException. (java-str "Skeleton not of correct class: " skelname)
+                                               ex)))))))
+
+  (method ^:public ^:static computeMethodHash ^long [^Method m]
+    (let [^:mutable hash 0
+          sink (ByteArrayOutputStream. 127)]
+      (try
+        (let [md (MessageDigest/getInstance "SHA")
+              out (DataOutputStream. (DigestOutputStream. sink md))
+              s (Util/getMethodNameAndDescriptor m)]
+          (when (.isLoggable serverRefLog Log/VERBOSE)
+            (.log serverRefLog Log/VERBOSE (java-str "string used for method hash: \"" s "\"")))
+          (.writeUTF out s)
+          (.flush out)
+          (let [hasharray (.digest md)]
+            (loop [^int i 0]
+              (when (< i (^[int int] Math/min 8 (alength hasharray)))
+                (set! hash
+                      (unchecked-add hash
+                                     (bit-shift-left
+                                       (long (bit-and-int (aget hasharray i) 0xFF))
+                                       (unchecked-multiply-int i 8))))
+                (recur (unchecked-inc-int i))))))
+        (catch IOException ignore (set! hash -1))
+        (catch NoSuchAlgorithmException complain
+          (throw (SecurityException. (.getMessage complain)))))
+      hash))
+
+  (method ^:private ^:static getMethodNameAndDescriptor ^String [^Method m]
+    (let [desc (StringBuilder. (.getName m))]
+      (.append desc \()
+      (let [^{:tag (array (Class ?))} paramTypes (.getParameterTypes m)]
+        (loop [^int i 0]
+          (when (< i (alength paramTypes))
+            (.append desc (Util/getTypeDescriptor (aget paramTypes i)))
+            (recur (unchecked-inc-int i))))
+        (.append desc \))
+        (let [^{:tag (Class ?)} returnType (.getReturnType m)]
+          (if (identical? returnType Void/TYPE)
+              (.append desc \V)
+              (.append desc (Util/getTypeDescriptor returnType)))
+          (.toString desc)))))
+
+  (method ^:private ^:static getTypeDescriptor ^String [^{:tag (Class ?)} type]
+    (cond
+      (.isPrimitive type)
+        (cond
+          (identical? type Integer/TYPE) "I"
+          (identical? type Boolean/TYPE) "Z"
+          (identical? type Byte/TYPE) "B"
+          (identical? type Character/TYPE) "C"
+          (identical? type Short/TYPE) "S"
+          (identical? type Long/TYPE) "J"
+          (identical? type Float/TYPE) "F"
+          (identical? type Double/TYPE) "D"
+          (identical? type Void/TYPE) "V"
+          :else (throw (Error. (java-str "unrecognized primitive type: " type))))
+      (.isArray type) (.replace (.getName type) \. \/)
+      :else (java-str "L" (.replace (.getName type) \. \/) ";")))
+
+  (method ^:public ^:static getUnqualifiedName ^String [^{:tag (Class ?)} c]
+    (let [binaryName (.getName c)]
+      (.substring binaryName (unchecked-add-int (.lastIndexOf binaryName \.) 1)))))

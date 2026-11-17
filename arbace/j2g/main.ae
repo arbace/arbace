@@ -35,18 +35,36 @@
                        program (bin/arbace-go --build-program, REAP7); no rlwrap
     --entry-arg ARG    with --program, ARG put before the command line's arguments
                        (repeated, in order): -m NS for a namespace's -main; no rlwrap
+    --property K=V     with --program, the system property K set to V at the start, before
+                       any class of the program is initialized (repeated, in order; a later
+                       K wins): a program's properties as data (program.edn :properties,
+                       A13 of the Ghidra case study's G1 plan, J2G-SPEC §10.6)
     --resources DIR[=PREFIX]
                        with --program, every file under DIR embedded too, at its path relative
                        to DIR (after PREFIX/ when given), as a directory of the class path: a
                        user's namespaces (.ae, .clj, .cljc) join the embedded sources, other
                        files the resource data (bin/arbace-go --build-program, REAP7)
+    --own-roots all|entry
+                       with --program, the program's own classes (nm/own-class?: a user's Java
+                       forms) rooted every member (all, the default: the REPL's world) or only
+                       from the entry, the services, the metadata and the constant reflective
+                       sites (entry; J2G-SPEC §4.1, Roots from a program's metadata)
+    --provides FILE    the world's module provides (default jdk/provides.txt beside --jdk's
+                       forms: bin/jrt provides), the service registry's first providers
     --edge FILE        the classes outside the forms, as data (default jdk/edge.edn:
                        doc/STANDALONE-NOTES.md, S2): j2g loads no class, reflects on none and
                        runs no ASM
     --record-edge FILE instead, ask the JVM (reflection, class files) and write what this run
                        asked into FILE (bin/j2g-edge update merges the builds' runs)
     --jvm-reflection   instead, ask the JVM, without recording (a world the edge does not
-                       cover)"
+                       cover)
+    --analyze-only     the world loaded and analyzed (w/load-world), nothing reached,
+                       translated or written but DIR/report.edn: :analyze-only true, :files,
+                       :classes (analyzed), :analysis-failures (as a translation's report has
+                       them), :variants, :times {:load s}; each failure printed (j2g: analysis
+                       failure CLASS: MSG). No --program embedding. The day's light measurement
+                       of what the analysis refuses (J2G-SPEC §4.1, The analysis alone;
+                       JCS265 (b)): jdk/forms and a batch of tests within 2 GiB"
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.classes.types :as t]
@@ -69,6 +87,7 @@
             [arbace.j2g.embed :as embed]
             [arbace.j2g.edge :as edge]
             [arbace.j2g.zlib :as zlib]
+            [arbace.j2g.meta :as meta]
             [arbace.repr.go.print :as gp]))
 
 (defn- now [] (System/nanoTime))
@@ -107,11 +126,18 @@
       ;; arguments before the command line's, its source and resource directories
       "--entry" (recur (rest more) (-> opts (assoc :entry (first more)) (update :roots conj (str (first more) "#main"))))
       "--entry-arg" (recur (rest more) (update opts :entry-args (fnil conj []) (first more)))
+      "--property" (let [a (first more) i (when a (.indexOf ^String a "="))]
+                     (when-not (and i (pos? i))
+                       (throw (ex-info (str "j2g: --property K=V, not " (pr-str a)) {})))
+                     (recur (rest more) (update opts :properties (fnil conj []) [(subs a 0 i) (subs a (inc i))])))
       "--resources" (recur (rest more) (update opts :resources (fnil conj []) (first more)))
       ;; --program: a Java forms tree's package namespaces embedded as no-op loaders (REAP7b, RPS93)
       "--java-namespaces" (recur (rest more) (update opts :java-namespaces (fnil conj []) (first more)))
       "--record-edge" (recur (rest more) (assoc opts :record-edge (first more)))
       "--jvm-reflection" (recur more (assoc opts :jvm-reflection true))
+      "--analyze-only" (recur more (assoc opts :analyze-only true))
+      "--own-roots" (recur (rest more) (assoc opts :own-roots (keyword (first more))))
+      "--provides" (recur (rest more) (assoc opts :provides (first more)))
       (throw (ex-info (str "j2g: unknown option " a) {})))))
 
 (defn- internal [s] (str/replace s "." "/"))
@@ -132,6 +158,19 @@
                [n {:go (nm/go-class-name n) :var (str (nm/go-class-name n) "_class") :standin false :file nil}]))
     (into {} (for [[jn v] (:classes scan)] [(internal jn) v]))))
 
+(def repl-exports-file "jdk/repl-exports.txt")
+
+(def ^:private repl-exported
+  "The packages of JDK modules that the REPL's world makes visible though the module does not export them
+  (JCS136 (a), JCS142 (a): the tests' @modules java.base/PKG; test/java/check.ae reads the file too), one a line
+  in jdk/repl-exports.txt (read from the working directory as jdk/edge.edn is; none when it is missing)."
+  (delay (let [f (io/file repl-exports-file)]
+           (if (.isFile f)
+             ;; a line MOD/PKG (JCS334 (a): java.net.http's) names the package PKG
+             (set (for [l (str/split-lines (slurp f)) :let [l (str/trim (str/replace l #"#.*$" ""))] :when (seq l)]
+                    (str/replace l #"^[^/]*/" "")))
+             #{}))))
+
 (defn- repl-visible?
   "Can the REPL name class n's public members (internal name)? Not when n is in a JDK module's
   package that the module does not export (jdk.internal.misc, sun.nio.cs ...): the JVM refuses
@@ -140,11 +179,13 @@
   JDK module (Arbace's, jrt's own jdk.internal.jrt) are visible, and so are the tool's modules'
   (nm/qualified?: javac's internal packages, com.sun.tools.javac.*, which repr/java's reader
   calls on the tool executable; doc/classes/JAVA-FRONTEND-SURVEY.md, JFS17 (a), \"As built:
-  JN4\"): the shipped world holds none of them."
+  JN4\"): the shipped world holds none of them. And the packages of jdk/repl-exports.txt (the internal
+  packages of the JCA and PKI that jtreg's @modules exports, JCS136 (a))."
   [^String n]
   (let [i (.lastIndexOf n "/")
         pkg (.replace (subs n 0 (max i 0)) \/ \.)]
     (or (nm/qualified? n)
+        (contains? @repl-exported pkg)
         ;; the packages a JDK module does not export: the edge's :unexported
         (not (edge/jvm? :unexported pkg #((requiring-resolve 'arbace.j2g.jvm/unexported?) pkg))))))
 
@@ -324,19 +365,31 @@
    '(load "arbace/rlwrap_linux")
    '(load "arbace/rlwrap_other")])
 
+(defn- property-forms
+  "The system properties set at the start (j2g --property, program.edn :properties): one
+  System.setProperty a pair, in order, after arbace.version and before the image, the host and
+  any class of the program."
+  [properties]
+  (for [[k v] properties]
+    (list 'jrt/System_SetProperty_String_String__String (list 'jrt/Str k) (list 'jrt/Str v))))
+
 (defn- program-entry-main
   "A user's program's main (program-main-forms with an entry): Main's start but rlwrap, the
   command line after entry-args, entry's main (default arbace.lang.Main's)."
-  [entry entry-args]
+  [entry entry-args properties]
   (let [internal (str/replace (or entry "arbace.lang.Main") "." "/")
         pkg (nm/pkg-of internal)
         _ (when-not (= :lang pkg)
             (throw (ex-info (str "j2g: --entry " entry ": not a class of the program's Java forms") {})))
         call (symbol "lang" (nm/static-method-name (nm/go-class-name internal) "main" "([Ljava/lang/String;)V"))
         n (count entry-args)]
-    (list 'go/func 'main []
+    (apply list
+     (concat
+     (list 'go/func 'main []
           '(when (!= arbaceVersion "")
-             (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
+             (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion))))
+     (property-forms properties)
+     (list
           '(let [(values sub err) (fs/Sub resources "res")]
              (when (== err nil)
                (jrt/SetHost (jrt/ProgramHost sub))))
@@ -349,7 +402,7 @@
                    (list 'aset '(.-A args) (list '+ 'i n) '(jrt/Str a)))
              (list 'let ['status (list 'jrt/RunMain (list 'fn [] (list call 'args)))]
                    '(finishImage)
-                   '(os/Exit status))]))))
+                   '(os/Exit status))]))))))
 
 (defn- program-main-forms
   "main: first rlwrap for an interactive REPL (execRlwrap, which replaces the process when it
@@ -361,8 +414,9 @@
   the process's. With gotable?, the main package imports goi's table (its registration).
   With entry (a class's binary name) its static main(String[]) is called in place of Main's,
   with entry-args (strings) those arguments put before the command line's: a user's program
-  (bin/arbace-go --build-program, REAP7), whose command line is its own (no rlwrap)."
-  [gotable? & [entry entry-args]]
+  (bin/arbace-go --build-program, REAP7), whose command line is its own (no rlwrap). properties
+  ([K V] pairs, j2g --property) are set after arbace.version."
+  [gotable? & [entry entry-args properties]]
   [(list 'go/file "main.go" :imports (vec (concat '[[embed "embed"] [fs "io/fs"] [os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]]
                                                  (when gotable? '[[_ "arbace/gotable"]])
                                                  ;; the compiled namespaces' packages, for their classes' registration (S6)
@@ -378,21 +432,23 @@
               :doc "arbaceVersion is Arbace's version, the map *arbace-version* reads from the system property arbace.version: empty in j2g's output, set by bin/arbace-go's link (go build -ldflags -X main.arbaceVersion=...).\n"}
       arbaceVersion)
    (if (or entry (seq entry-args))
-     (program-entry-main entry entry-args)
-     '(go/func main []
-        (execRlwrap)
-        (when (!= arbaceVersion "")
-          (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
-        (let [(values sub err) (fs/Sub resources "res")]
-          (when (== err nil)
-            (jrt/SetHost (jrt/ProgramHost sub))))
-        (setupImage imageData)
-        (let [args (jrt/NewRefArray jrt/String_class (conv int32 (- (len os/Args) 1)))]
-          (range [i a (subslice os/Args 1)]
-            (aset (.-A args) i (jrt/Str a)))
-          (let [status (jrt/RunMain (fn [] (lang/Main_Main_String1__V args)))]
-            (finishImage)
-            (os/Exit status)))))])
+     (program-entry-main entry entry-args properties)
+     (let [[f nm params rlwrap version & body]
+           '(go/func main []
+              (execRlwrap)
+              (when (!= arbaceVersion "")
+                (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
+              (let [(values sub err) (fs/Sub resources "res")]
+                (when (== err nil)
+                  (jrt/SetHost (jrt/ProgramHost sub))))
+              (setupImage imageData)
+              (let [args (jrt/NewRefArray jrt/String_class (conv int32 (- (len os/Args) 1)))]
+                (range [i a (subslice os/Args 1)]
+                  (aset (.-A args) i (jrt/Str a)))
+                (let [status (jrt/RunMain (fn [] (lang/Main_Main_String1__V args)))]
+                  (finishImage)
+                  (os/Exit status))))]
+       (apply list (concat [f nm params rlwrap version] (property-forms properties) body))))])
 
 (defn- source-top
   "The name a Go file is named after (§4.3): in arbace/lang the Java forms file of top-level
@@ -535,25 +591,250 @@
                     :else (pr-str v)))]
     (str "{" (str/join ",\n " (for [[k v] report] (str (pr-str k) " " (val-str v)))) "}\n")))
 
+(defn- world-scan
+  "jrt's scan (jrt/scan) with what j2g's support code adds to jrt's hand-written classes in this world: String.format
+  over the translated Formatter, the standard streams, String's regex methods and the rest (run*'s translation; and
+  since F27 the --analyze-only report's J2G_MISSING scan, so that it sees what the translation sees), with the
+  conditions run* writes the support code by: {:scan :slice :in-slice? :jrt-java? :formatter? :streams? :ci-order?
+  :regex? :fjp-support?}."
+  [world opts scan]
+  (let [
+        ;; String.format over the translated Formatter (JRT-NOTES.md: "waiting for j2g"):
+        ;; j2g writes it into jrt's j2g_support when Formatter is translated
+        formatter? (and (contains? @(:compile-set world) "java/util/Formatter")
+                        (or (empty? (:slice opts)) (some #(re-find % "java/util/Formatter") (:slice opts))))
+        slice (:slice opts)
+        in-slice? (fn [n] (or (empty? slice) (some #(re-find % n) slice)))
+        ;; jrt's statics whose values are translated objects (overlay/jdk's jrt classes): the
+        ;; standard streams of System and String.CASE_INSENSITIVE_ORDER, written by j2g into
+        ;; jrt's j2g_support (out/jrt-statics-forms) when their classes are translated
+        jrt-java? (fn [n] (and (contains? @(:compile-set world) n) (in-slice? n)))
+        streams? (jrt-java? "jdk/internal/jrt/StandardStreams")
+        ci-order? (jrt-java? "jdk/internal/jrt/CaseInsensitiveComparator")
+        ;; String's regex methods over the translated java.util.regex (out/support-forms)
+        regex? (jrt-java? "java/util/regex/Pattern")
+        ;; ForkJoinPool's ExecutorService methods over translated types (out/fjp-support-forms)
+        fjp-support? (and (jrt-java? out/fjp-support-class) (jrt-java? "java/util/concurrent/ExecutorService"))
+        scan (cond-> scan
+               formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"])
+               formatter? (update-in [:methods "String"] (fnil conj #{}) "Formatted_O1__String")
+               (contains? @(:compile-set world) "java/lang/Iterable")
+               (update :funcs conj "String_Join_CharSequence_Iterable__String")
+               (contains? @(:compile-set world) "java/util/Optional")
+               (update-in [:methods "String"] (fnil conj #{}) "DescribeConstable__Optional")
+               ;; Runtime.Version's parts of translated types (out/support-forms; JCS304 (b), JCS293)
+               (and (contains? @(:compile-set world) "java/util/Optional") (not (contains? @(:compile-set world) "java/lang/Runtime$Version")))
+               (update-in [:methods "Runtime_Version"] (fnil into #{}) ["Pre__Optional" "Build__Optional" "Optional__Optional"])
+               (and (contains? @(:compile-set world) "java/util/List") (not (contains? @(:compile-set world) "java/lang/Runtime$Version")))
+               (update-in [:methods "Runtime_Version"] (fnil conj #{}) "Version__List")
+               ;; Class.getResourceAsStream (out/support-forms)
+               (contains? @(:compile-set world) "java/io/ByteArrayInputStream")
+               (update-in [:methods "Class"] (fnil conj #{}) "GetResourceAsStream_String__InputStream")
+               ;; Class.getResource (out/support-forms; F26)
+               (contains? @(:compile-set world) "jdk/internal/jrt/ClassPathResources")
+               (update-in [:methods "Class"] (fnil conj #{}) "GetResource_String__URL")
+               ;; Module.getResourceAsStream and getPackages (out/support-forms; RPS150 (b))
+               (contains? @(:compile-set world) "java/io/ByteArrayInputStream")
+               (update-in [:methods "Module"] (fnil conj #{}) "GetResourceAsStream_String__InputStream")
+               (contains? @(:compile-set world) "java/util/HashSet")
+               (update-in [:methods "Module"] (fnil conj #{}) "GetPackages__Set")
+               (contains? @(:compile-set world) "java/util/stream/Stream")
+               (update-in [:methods "String"] (fnil conj #{}) "Lines__Stream")
+               ;; Class, Method, Constructor and Field's accessFlags (out/support-forms; JCS273)
+               (and (contains? @(:compile-set world) "java/lang/reflect/AccessFlag")
+                    (contains? @(:compile-set world) "jdk/internal/jrt/AccessFlagSupport"))
+               (update :methods (fn [ms] (reduce #(update %1 %2 (fnil conj #{}) "AccessFlags__Set") ms
+                                                 ["Class" "Method" "Constructor" "Field"])))
+               ;; Method and Constructor's getParameters (out/support-forms; JCS280 (a))
+               (contains? @(:compile-set world) "java/lang/reflect/Parameter")
+               (update :methods (fn [ms] (reduce #(update %1 %2 (fnil conj #{}) "GetParameters__Parameter1") ms ["Method" "Constructor"])))
+               ;; their getAnnotated* (out/support-forms; JCS271 (b))
+               (and (contains? @(:compile-set world) "sun/reflect/annotation/TypeAnnotationParser")
+                    (contains? @(:compile-set world) "jdk/internal/jrt/TypeAnnotationSupport"))
+               (update :methods (fn [ms] (reduce (fn [ms [c n]] (update ms c (fnil conj #{}) n)) ms out/type-annotation-methods)))
+               streams? (update :vars into ["System_in" "System_out" "System_err"])
+               streams? (update :funcs into ["System_SetIn_InputStream__V" "System_SetOut_PrintStream__V" "System_SetErr_PrintStream__V"])
+               ci-order? (update :vars conj "String_CASE_INSENSITIVE_ORDER")
+               regex? (update-in [:methods "String"] (fnil into #{}) (map first out/string-regex-methods))
+               fjp-support? (update-in [:methods "ForkJoinPool"] (fnil into #{})
+                                       (map (fn [[n d]] (nm/method-base n d)) out/fjp-support-methods)))]
+    {:scan scan :slice slice :in-slice? in-slice? :jrt-java? jrt-java? :formatter? formatter? :streams? streams?
+     :ci-order? ci-order? :regex? regex? :fjp-support? fjp-support?}))
+
+(declare meta-report)
+
+(defn- meta-roots
+  "The roots of a program's metadata (opts' :program-meta, program-meta) in the loaded world (a/*unit*
+  bound): {:roots [spec ...] (unconditional: the metadata's entries without a condition and the
+  reflective sites whose names are constants, in the program's own classes) :conditional [[class
+  [spec ...]] ...] (once class is reached: the services' providers, the conditional metadata)
+  :sites (meta/reflective-sites of the own classes) :absent [spec ...] (a class not in the world)}."
+  [opts]
+  (let [pm (:program-meta opts)
+        own (filter nm/own-class? (sort @(:order a/*unit*)))
+        sites (meta/reflective-sites own)
+        uncond (concat (mapcat second (filter (comp nil? first) (:metadata pm)))
+                       (map second (:rooted sites)))
+        [present absent] (meta/present-specs uncond)
+        conds (concat (meta/service-roots (:services pm))
+                      (for [[c specs] (:metadata pm) :when c] [(meta/internal c) specs]))
+        cond-split (for [[c specs] conds] [c (meta/present-specs specs)])]
+    {:roots present
+     :conditional (vec (for [[c [p _]] cond-split :when (seq p)] [c p]))
+     :sites sites
+     ;; a service's provider whose class is absent is reported, not an error: the registry
+     ;; lists it, and ServiceLoader throws ServiceConfigurationError there, as the JDK does
+     :absent (vec (concat absent (mapcat (fn [[_ [_ a]]] a) cond-split)))}))
+
+(defn- analysis-report
+  "--analyze-only (JCS265 (b), J2G-SPEC §4.1, \"The analysis alone\"): the loaded world's
+  analysis failures, printed a line each and written into OUT/report.edn as a translation's report
+  has them (:analysis-failures, [class message] pairs), with the counts and the load's seconds; no
+  reachability, translation or Go. Returns the report (no :errors: the status is 0 whatever
+  failed)."
+  [opts world t-load]
+  (let [failed (vec (:failed world))
+        ;; with --resources: the program's metadata and the roots it gives (J2G-SPEC §4.1, \"Roots from
+        ;; a program's metadata\"), each root's methods as root-keys finds them
+        report (if (:program-meta opts)
+                 (w/with-world world
+                   (let [mr (meta-roots opts)]
+                     (assoc (meta-report (:program-meta opts) (:sites mr) (:absent mr))
+                            :analyze-only true
+                            :meta-roots {:roots (:roots mr) :conditional (:conditional mr)
+                                         :root-keys (vec (sort (distinct (mapcat root-keys (:roots mr)))))})))
+                 {})
+        report (merge {:analyze-only true
+                       :files (count (:files world))
+                       :classes (count @(:compile-set world))
+                       :analysis-failures failed
+                       :variants (:variants world)
+                       :times {:load t-load}}
+                      report)]
+    (doseq [[n msg] failed]
+      (println (str "j2g: analysis failure " n ": " (str/replace (str msg) #"\s+" " "))))
+    ;; J2G_MISSING (a regex of internal names; F27, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27
+    ;; (write-ahead)"): what the translation of those classes would stub at the operation level (code/missing-reason
+    ;; of every node of their analyzed bodies: a member jrt's hand-written classes lack, a class outside the
+    ;; world), every class of the world counted as translated
+    (let [report (if-let [re (some-> (System/getenv "J2G_MISSING") not-empty re-pattern)]
+                   (let [scan (:scan (world-scan world opts (jrt/scan "go/arbace/jrt")))
+                         jc (jrt-classes scan (manifest-classes "go/arbace/jrt"))
+                         cs (let [c @(:compile-set world)] (set (if (map? c) (keys c) c)))
+                         missing (w/with-world world
+                                   (binding [m/*w* {:jrt scan :jrt-classes jc :T cs
+                                                    :vmethods-cache (atom {}) :trivial-cache (atom {})
+                                                    :erased (:erased world)}]
+                                     (vec (sort (distinct
+                                                  (for [n (sort cs)
+                                                        :when (re-find re n)
+                                                        :let [d (a/decl n)]
+                                                        :when d
+                                                        node (tree-seq (some-fn map? vector? seq?)
+                                                                       #(if (map? %) (vals %) (seq %))
+                                                                       (let [st @(:state d)]
+                                                                         [(:bodies st) (:clinit st) (:init st)]))
+                                                        :when (and (map? node) (:op node))
+                                                        :let [why (try (c/missing-reason node) (catch Exception _ nil))]
+                                                        :when (string? why)]
+                                                    [n why]))))))]
+                     (doseq [[n why] missing] (println (str "j2g: missing in " n ": " why)))
+                     (assoc report :missing missing))
+                   report)]
+    (write! (str (:out opts) "/report.edn") (report-str report))
+    (println (str "j2g: --analyze-only: " (count failed) " analysis failures; " (:out opts) "/report.edn"))
+    report)))
+
+(defn program-meta
+  "A program's discovery metadata (arbace.j2g.meta; J2G-SPEC §4.1, \"Roots from a program's metadata\"):
+  the service registry of the world's provides (opts' :provides, default jdk/provides.txt beside the
+  JDK's forms) and of the META-INF/services files among data ({resource-path File}: the JDK's resource
+  data and the program's resources with their root copies), and the roots of the native-image
+  metadata among them. {:services {svc [[provider kind] ...]} :bad-services [[path line] ...]
+  :metadata [[condition [spec ...]] ...] :metadata-errors [[path msg] ...]}."
+  [opts jdk data]
+  (let [text-fns (into {} (for [[p f] data
+                                :when (or (meta/services-path? p) (meta/metadata-path? p))]
+                            [p #(slurp (io/file f))]))
+        provides (meta/read-provides (or (:provides opts) (str (.getParent (io/file jdk)) "/provides.txt")))
+        svcs (meta/services provides text-fns)
+        md (meta/data-metadata-roots text-fns)]
+    {:services svcs :bad-services (:bad (meta svcs))
+     :metadata md :metadata-errors (:errors (meta md))}))
+
+(defn- write-meta-resources!
+  "The generated resources of a program's metadata, written under OUT/meta and returned as
+  {resource-path File} for the embedded data: the service registry (when the world has a
+  ServiceLoader to read it) and the resource roots' index (when a resource has root copies)."
+  [opts pm data]
+  (let [dir (str (:out opts) "/meta")
+        roots (meta/roots-index-text (keys data) (embed/resource-dir-names (:resources opts)))]
+    (merge
+      (let [f (io/file dir "services")]
+        (write! (str f) (meta/services-text (:services pm)))
+        {meta/services-resource f})
+      (when (seq roots)
+        (let [f (io/file dir "roots")]
+          (write! (str f) roots)
+          {meta/roots-resource f}))
+      ;; GH4 (iii): the class path's entries by name, and which resources each has first
+      (when (seq (:resources opts))
+        (let [f (io/file dir "classpath")
+              g (io/file dir "owners")]
+          (write! (str f) (meta/classpath-index-text (embed/resource-dir-names (:resources opts))))
+          (write! (str g) (meta/owners-text (:user-owners opts)))
+          {meta/classpath-resource f meta/owners-resource g})))))
+
+(defn- meta-report
+  "report.edn's part of a program's metadata: the registry, the metadata's roots, the reflective
+  sites, the specs whose class is not in the world."
+  [pm sites absent]
+  {:services (into (sorted-map) (for [[svc ps] (:services pm)] [svc (vec (for [[p k] ps] (str (name k) " " p)))]))
+   :services-bad-lines (:bad-services pm)
+   :metadata-roots (vec (:metadata pm))
+   :metadata-errors (:metadata-errors pm)
+   :reflective-sites sites
+   :roots-absent (vec (sort (distinct absent)))})
+
 (defn run*
   "j2g's run, in the class environment run binds."
   [opts]
   (reset! nm/qualified-prefixes (vec (:qualify opts)))
   (let [t0 (now)
+        ;; GH4 (iii): java.class.path lists the --resources directories' names in order (names only), unless
+        ;; --property sets it
+        opts (let [names (embed/resource-dir-names (:resources opts))]
+               (if (and (:program opts) (seq names)
+                        (not-any? #(= "java.class.path" (first %)) (:properties opts)))
+                 (update opts :properties (fnil conj []) ["java.class.path" (meta/classpath-property names)])
+                 opts))
         root-dir "."
         ;; the converted JDK: --jdk, else $JRT_CONV, else the committed forms (jdk/README.md)
         jdk (or (:jdk opts) (System/getenv "JRT_CONV") "jdk/forms")
-        opts (if (:program opts)
+        opts (if (and (:program opts) (not (:analyze-only opts)))
                (let [srcs (embed/sources root-dir (:embed opts))
                      ;; the JDK's resource data, next to the converted JDK (jdk/data)
                      data (embed/data (str (.getParent (io/file jdk)) "/data"))
+                     ;; the resources generated from the checkout's files (si's psyntax.pp, SC240), the shipped program's: not
+                     ;; javac's tool's (--embed)
+                     data (if (:embed opts) data (merge data (embed/generated root-dir)))
                      ;; a user's program's directories (--resources, REAP7)
-                     [usrcs udata] (embed/user-resources (:resources opts) (into (set (keys srcs)) (keys data)))
+                     [usrcs udata uowners] (embed/user-resources (:resources opts) (into (set (keys srcs)) (keys data)))
                      srcs (merge srcs usrcs)
-                     srcs (merge srcs (embed/package-loaders (:java-namespaces opts) (into (set (keys srcs)) (keys data))))]
+                     srcs (merge srcs (embed/package-loaders (:java-namespaces opts) (into (set (keys srcs)) (keys data))))
+                     data (merge data udata)
+                     ;; the program's discovery metadata (arbace.j2g.meta): its registry and roots
+                     ;; index embedded, its roots applied below
+                     pm (program-meta opts jdk data)]
                  (assoc opts :embedded srcs :cut-candidates (sort (embed/cut-candidates srcs))
-                        :embedded-data (merge data udata)))
-               opts)
+                        :user-owners uowners
+                        :embedded-data (merge data (write-meta-resources! (assoc opts :user-owners uowners) pm data))
+                        :program-meta pm))
+               ;; --analyze-only with --resources: the metadata read and reported, nothing embedded
+               (if (and (:analyze-only opts) (seq (:resources opts)))
+                 (let [[_ udata] (embed/user-resources (:resources opts) #{})]
+                   (assoc opts :program-meta (program-meta opts jdk udata)))
+                 opts))
         ;; the second round's inputs: the compiled namespaces' trees (their packages.edn)
         late? (fn [i] (or (= i (:await opts)) (.isFile (io/file i "packages.edn"))))
         compiled-packages! #(reset! nm/compiled-packages
@@ -592,50 +873,17 @@
             (println (str "j2g: variant of " n ": " (:replaced c) " replaced, " (:cut c) " cut, " (:added c) " added")))
         t-load (secs t0)
         _ (println (str "j2g: " (count (:files world)) " files, " (count @(:compile-set world)) " classes analyzed in " t-load " s"
-                        (when (seq (:failed world)) (str ", " (count (:failed world)) " failures"))))
+                        (when (seq (:failed world)) (str ", " (count (:failed world)) " failures"))))]
+   (if (:analyze-only opts)
+    ;; --analyze-only: the load's report alone (JCS265 (b))
+    (analysis-report opts world t-load)
+    (let [
         jrt-dir "go/arbace/jrt"
         scan (jrt/scan jrt-dir)
         manifest (manifest-classes jrt-dir)
         jc (jrt-classes scan manifest)
-        ;; String.format over the translated Formatter (JRT-NOTES.md: "waiting for j2g"):
-        ;; j2g writes it into jrt's j2g_support when Formatter is translated
-        formatter? (and (contains? @(:compile-set world) "java/util/Formatter")
-                        (or (empty? (:slice opts)) (some #(re-find % "java/util/Formatter") (:slice opts))))
-        slice (:slice opts)
-        in-slice? (fn [n] (or (empty? slice) (some #(re-find % n) slice)))
-        ;; jrt's statics whose values are translated objects (overlay/jdk's jrt classes): the
-        ;; standard streams of System and String.CASE_INSENSITIVE_ORDER, written by j2g into
-        ;; jrt's j2g_support (out/jrt-statics-forms) when their classes are translated
-        jrt-java? (fn [n] (and (contains? @(:compile-set world) n) (in-slice? n)))
-        streams? (jrt-java? "jdk/internal/jrt/StandardStreams")
-        ci-order? (jrt-java? "jdk/internal/jrt/CaseInsensitiveComparator")
-        ;; String's regex methods over the translated java.util.regex (out/support-forms)
-        regex? (jrt-java? "java/util/regex/Pattern")
-        ;; ForkJoinPool's ExecutorService methods over translated types (out/fjp-support-forms)
-        fjp-support? (and (jrt-java? out/fjp-support-class) (jrt-java? "java/util/concurrent/ExecutorService"))
-        scan (cond-> scan
-               formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"])
-               formatter? (update-in [:methods "String"] (fnil conj #{}) "Formatted_O1__String")
-               (contains? @(:compile-set world) "java/lang/Iterable")
-               (update :funcs conj "String_Join_CharSequence_Iterable__String")
-               (contains? @(:compile-set world) "java/util/Optional")
-               (update-in [:methods "String"] (fnil conj #{}) "DescribeConstable__Optional")
-               ;; Class.getResourceAsStream (out/support-forms)
-               (contains? @(:compile-set world) "java/io/ByteArrayInputStream")
-               (update-in [:methods "Class"] (fnil conj #{}) "GetResourceAsStream_String__InputStream")
-               ;; Module.getResourceAsStream and getPackages (out/support-forms; RPS150 (b))
-               (contains? @(:compile-set world) "java/io/ByteArrayInputStream")
-               (update-in [:methods "Module"] (fnil conj #{}) "GetResourceAsStream_String__InputStream")
-               (contains? @(:compile-set world) "java/util/HashSet")
-               (update-in [:methods "Module"] (fnil conj #{}) "GetPackages__Set")
-               (contains? @(:compile-set world) "java/util/stream/Stream")
-               (update-in [:methods "String"] (fnil conj #{}) "Lines__Stream")
-               streams? (update :vars into ["System_in" "System_out" "System_err"])
-               streams? (update :funcs into ["System_SetIn_InputStream__V" "System_SetOut_PrintStream__V" "System_SetErr_PrintStream__V"])
-               ci-order? (update :vars conj "String_CASE_INSENSITIVE_ORDER")
-               regex? (update-in [:methods "String"] (fnil into #{}) (map first out/string-regex-methods))
-               fjp-support? (update-in [:methods "ForkJoinPool"] (fnil into #{})
-                                       (map (fn [[n d]] (nm/method-base n d)) out/fjp-support-methods)))
+        {:keys [scan slice in-slice? jrt-java? formatter? streams? ci-order? regex? fjp-support?]}
+        (world-scan world opts scan)
         cs (:compile-set world)]
     (w/with-world world
       (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})
@@ -645,11 +893,17 @@
             _ (println (str "j2g: " (count (:handles (:vh wst))) " constant VarHandles, on "
                             (count (:fields (:vh wst))) " fields"))
             t1 (now)
+            ;; the program's metadata (arbace.j2g.meta; J2G-SPEC §4.1, "Roots from a program's metadata")
+            mr (when (:program-meta opts) (meta-roots opts))
             roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))
+                                                         (:roots mr)
                                                          ;; --program: the REPL's world, every public
                                                          ;; member of every class with Java forms
                                                          ;; (J2G-SPEC §10.6, EVAL-PLAN.md Q2)
                                                          (when (:program opts) (filter #(and (a/decl %) (repl-visible? %)
+                                                                                             ;; --own-roots entry: the program's own
+                                                                                             ;; classes from its entry and metadata alone
+                                                                                             (not (and (= :entry (:own-roots opts)) (nm/own-class? %)))
                                                                                              ;; not a compiled fn's code or a
                                                                                              ;; reify's (S6): reached by their
                                                                                              ;; interfaces' calls
@@ -657,10 +911,28 @@
                                                                                        (sort @(:order a/*unit*))))))
                                ;; what the evaluator's Dyn (j2g_dyn.go) calls
                                (when (a/decl dyn/api-class) (concat (dyn/roots) (dyn/proxy-roots)))
+                               ;; what a serializable lambda's site and adapter call (JCS169, code/serial-lambda-val)
+                               (when (a/decl c/serial-lambdas)
+                                 (for [[nme desc] c/serial-lambdas-methods] [c/serial-lambdas nme desc]))
                                (when (a/decl "arbace/lang/RT") (fromfn/roots))
+                               ;; what ClassLoader's resource helpers call (out/support-forms; m/class-loader-resource-helpers)
+                               (when (and (a/decl "jdk/internal/jrt/ClassPathResources") (m/hand-written? "java/lang/ClassLoader"))
+                                 (for [[nme desc] m/class-loader-resource-helpers
+                                       :when (m/class-loader-resource-ready? nme desc)
+                                       :let [[n d] (m/class-loader-resource-target nme desc)]]
+                                   ["jdk/internal/jrt/ClassPathResources" n d]))
                                ;; what Class.getResourceAsStream (out/support-forms) makes
                                (when (a/decl "java/io/ByteArrayInputStream")
                                  [["java/io/ByteArrayInputStream" "<init>" "([B)V"]])
+                               ;; what accessFlags (out/support-forms; JCS273) calls
+                               (when (and (a/decl "java/lang/reflect/AccessFlag") (a/decl "jdk/internal/jrt/AccessFlagSupport"))
+                                 out/access-flags-roots)
+                               ;; Method and Constructor's getParameters (out/support-forms; JCS280 (a))
+                               (when (contains? @(:compile-set world) "java/lang/reflect/Parameter")
+                                 out/parameters-roots)
+                               ;; what getAnnotated* (out/support-forms; JCS271 (b)) calls
+                               (when (and (a/decl "sun/reflect/annotation/TypeAnnotationParser") (a/decl "jdk/internal/jrt/TypeAnnotationSupport"))
+                                 out/type-annotation-roots)
                                ;; what Module.getPackages (out/support-forms) makes
                                (when (a/decl "java/util/HashSet")
                                  [["java/util/HashSet" "<init>" "()V"]
@@ -690,6 +962,10 @@
                                    ["jdk/internal/jrt/RuntimeExec" "exec" d]))
                                (when fjp-support?
                                  (map out/fjp-support-key out/fjp-support-methods))
+                               ;; System.inheritedChannel's support function (m/support-call-helpers; JCS201 (a))
+                               (when (jrt-java? "java/nio/channels/spi/SelectorProvider")
+                                 [["java/nio/channels/spi/SelectorProvider" "provider" "()Ljava/nio/channels/spi/SelectorProvider;"]
+                                  ["java/nio/channels/spi/SelectorProvider" "inheritedChannel" "()Ljava/nio/channels/Channel;"]])
                                ;; Date.toInstant's support function (m/support-call-helpers; JCS77
                                ;; (a)): Instant.ofEpochMilli, and Timestamp's own toInstant
                                (when (jrt-java? "java/time/Instant")
@@ -704,7 +980,17 @@
                                  (bundle-roots))
                                ;; j2g's support for the REPL's reflection (out/support-forms)
                                (when (contains? @(:compile-set world) "java/util/Optional")
-                                 [["java/util/Optional" "of" "(Ljava/lang/Object;)Ljava/util/Optional;"]])
+                                 [["java/util/Optional" "of" "(Ljava/lang/Object;)Ljava/util/Optional;"]
+                                  ;; Runtime.Version's pre, build, optional (out/support-forms; JCS304 (b), JCS293)
+                                  ["java/util/Optional" "empty" "()Ljava/util/Optional;"]
+                                  ["java/lang/Integer" "valueOf" "(I)Ljava/lang/Integer;"]])
+                               ;; Thread.getAllStackTraces (out/support-forms; JCS320 (a)): the map it fills
+                               (when (contains? @(:compile-set world) "java/util/HashMap")
+                                 [["java/util/HashMap" "<init>" "()V"]
+                                  ["java/util/HashMap" "put" "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"]])
+                               ;; Runtime.Version's version (out/support-forms; JCS304 (b), JCS293)
+                               (when (contains? @(:compile-set world) "java/util/List")
+                                 [["java/util/List" "of" "([Ljava/lang/Object;)Ljava/util/List;"]])
                                (when (contains? @(:compile-set world) "java/util/stream/Stream")
                                  [["java/util/ArrayList" "<init>" "()V"]
                                   ["java/util/ArrayList" "add" "(Ljava/lang/Object;)Z"]
@@ -729,13 +1015,25 @@
             ;; every stand-in j2g can translate (in the slice) is replaced (J2G-SPEC §4.3)
             standins (vec (for [[n j] jc :when (and (:standin j) (m/translatable? n) (slice? n))] n))
             ;; each round continues the previous one from the new roots (reach/run's :state)
+            ;; the conditional roots (the services' providers, the conditional metadata) once their
+            ;; class is reached, each once
+            cond-done (atom #{})
+            cond-roots (fn [T]
+                         (vec (for [[c specs] (:conditional mr)
+                                    :when (and (contains? T c) (not (contains? @cond-done [c specs])))
+                                    :let [_ (swap! cond-done conj [c specs])]
+                                    k (mapcat root-keys specs)]
+                                k)))
             res (loop [res (binding [m/*w* wst] (r/run {:roots roots :slice? slice? :classes standins})) n 0]
-                  (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (standin-roots scan (:T res))))
+                  (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (concat (standin-roots scan (:T res)) (cond-roots (:T res)))))
                         res2 (binding [m/*w* wst] (r/run {:roots sroots :slice? slice? :state (:state res)
                                                           :fis (binding [m/*w* (assoc wst :T (:T res))] (fromfn/fis (:T res)))}))]
                     (if (or (= (:T res2) (:T res)) (> n 8)) res2 (recur res2 (inc n)))))
             T (:T res)
-            wst (assoc wst :T T :vmethods-cache (atom {}) :trivial-cache (atom {}))
+            wst (assoc wst :T T :vmethods-cache (atom {}) :trivial-cache (atom {})
+                       ;; the instantiated classes (JCS167: m/serial-super writes the allocation
+                       ;; for deserialization of these alone, whose constructors RTA reached)
+                       :inst (:inst res))
             wst (assoc wst :subclass-index (m/make-subclass-index wst))
             ;; built once here rather than by the first threads of the translation to ask
             _ ((:subclass-index wst))
@@ -887,6 +1185,12 @@
                              :unavailable (into (sorted-map) (for [[k v] (:unavailable res)] [(str/join " " k) (vec (sort v))]))
                              :missing (into (sorted-map) (for [[k v] (:missing res)] [k (count v)]))
                              :analysis-failures (:failed world)
+                             ;; the refused classes, stubbed or dropped (GH6 (iv); J2G-SPEC §4.1)
+                             :refused (meta/refusals (merge (into {} (for [[n msg] (:failed world) :when (a/decl n)] [n msg]))
+                                                            (:failed-classes res))
+                                                     (:unavailable res))
+                             ;; the program's metadata, its roots (J2G-SPEC §4.1)
+                             :metadata (when mr (meta-report (:program-meta opts) (:sites mr) (:absent mr)))
                              :variants (:variants world)
                              :errors @errors
                              ;; §8.3, Q10: non-volatile fields of interface Go type written after
@@ -946,10 +1250,13 @@
                             :when (str/ends-with? (.getName f) ".ae")]
                       (copy-file! f (str prog-dir "/go/arbace/goi/" (.getName f)))))
                 ;; ci's back end (doc/C23-SURVEY.md, CS103): the packages arbace/crt and arbace/ci (std only) and
-                ;; arbace/cinterp, whose natives arbace.lang.CInterp's are, copied as they are; pyi's runtime arbace/py and the
-                ;; libm port it imports, arbace/libm (std only), which goi's table lists (PYS28 (a); doc/python/PYTHON-SURVEY.md,
-                ;; "As built: 214"); their _test files too, as goi's (arbace.build.go prints a package's :files alone)
-                _ (doseq [pk ["crt" "ci" "cinterp" "libm" "py"]]
+                ;; arbace/cinterp, whose natives arbace.lang.CInterp's are, copied as they are; si's (doc/scheme/SCHEME-SURVEY.md,
+                ;; SC61 (a), SC240): arbace/scm (std only) and arbace/scminterp, whose natives arbace.lang.SchemeInterp's are; OCaml's
+                ;; interpreter arbace/oi (std only), which goi's table lists (doc/ocaml/OCAML-SURVEY.md, OC165 (a), OC170); pyi's
+                ;; runtime arbace/py and the libm port it imports, arbace/libm (std only), which goi's table lists (PYS28 (a);
+                ;; doc/python/PYTHON-SURVEY.md, "As built: 214"); their _test files too, as goi's (arbace.build.go prints a
+                ;; package's :files alone)
+                _ (doseq [pk ["crt" "ci" "cinterp" "scm" "scminterp" "oi" "libm" "py"]]
                     (when (.isFile (io/file (str "go/arbace/" pk ".ae")))
                       (copy-file! (str "go/arbace/" pk ".ae") (str prog-dir "/go/arbace/" pk ".ae"))
                       (doseq [^java.io.File f (sort (.listFiles (io/file (str "go/arbace/" pk))))
@@ -1018,7 +1325,8 @@
                                                  (dyncf/enabled?) (assoc "arbace/classes/generics.edn" (dyncf/generics-text T)))]
                                   [p #(.getBytes ^String text "UTF-8")])
                                 (for [[p f] (:embedded-data opts)]
-                                  [p #(java.nio.file.Files/readAllBytes (.toPath (io/file f)))])))
+                                  ;; a file's bytes, or bytes generated (embed/generated)
+                                  [p #(if (bytes? f) f (java.nio.file.Files/readAllBytes (.toPath (io/file f))))])))
                     _ (lap :resources)]
                 (write! (str prog-dir "/go/arbace/cmd/arbace.ae")
                         (str ";; Generated by j2g --program (J2G-SPEC §10.6): the program's main package.\n"
@@ -1029,7 +1337,7 @@
                       "The main package's embedded sources (j2g --program): data, not Go forms.\n")
               (write! (str prog-dir "/go/arbace/cmd/arbace/main.ae")
                       (str ";; Generated by j2g --program (J2G-SPEC §10.6).\n(in-ns 'go.arbace.cmd.arbace)\n\n"
-                           (str/join "\n\n" (map out/form-text (program-main-forms (some? (:gotable opts)) (:entry opts) (:entry-args opts)))) "\n"))
+                           (str/join "\n\n" (map out/form-text (program-main-forms (some? (:gotable opts)) (:entry opts) (:entry-args opts) (:properties opts)))) "\n"))
               ;; the image of prepared namespaces (EXEC-NOTES.md): its encoding (hand-written
               ;; forms of the main package), the program's types, and an empty image, which
               ;; bin/arbace-go --build replaces
@@ -1063,7 +1371,7 @@
               (println (str "j2g: " (reduce + (map count (vals races))) " candidate two-word race fields in "
                             (count races) " classes (report.edn :race-candidates); "
                             (count collisions) " name collisions, " (count pp-overrides) " package-private overrides"))
-              report)))))))
+              report)))))))))
 
 (def id-floor
   "Where the runtime's id counter (RT/nextID, gensym's) stands when j2g's run starts. The

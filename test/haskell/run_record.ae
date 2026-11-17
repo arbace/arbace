@@ -1,0 +1,46 @@
+;; bin/repr-haskell run-check's record (doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first light)"): the run corpus's
+;; results through Arbace's own front end against test/haskell/run-check.edn, one map per program, {:id :result} and for
+;; a non-pass its :class (a key of the file's (classes {...}) form). judge RECORD RESULTS: every result equal to its
+;; record (a pass that fails, a failure that passes, a program the record lacks: a failure), every non-pass in a class;
+;; record RECORD RESULTS: the record rewritten from the results, each line's class kept, a new non-pass :unclassed.
+(require '[arbace.string :as str])
+
+(defn- read-all [f]
+  (let [rdr (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp f)))]
+    (loop [acc []] (let [x (read {:eof ::eof} rdr)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(let [[verb rec results] *command-line-args*
+      rf (java.io.File. ^String rec)
+      old (if (.isFile rf) (read-all rec) [])
+      header (if (.isFile rf) (str/join "\n" (take-while #(str/starts-with? % ";;") (str/split-lines (slurp rec)))) "")
+      classes (or (some #(when (and (seq? %) (= 'classes (first %))) (second %)) old) {})
+      by (into {} (for [m old :when (map? m)] [(:id m) m]))
+      res (filter map? (read-all results))]
+  (case verb
+    "record"
+    (let [ran (set (map :id res))
+          lines (concat
+                 (for [r res]
+                   (let [c (:class (get by (:id r)))]
+                     (cond-> (select-keys r [:id :result :differs :stage])
+                       (not= :pass (:result r)) (assoc :class (or c :unclassed)))))
+                 ;; a run of some programs keeps the others' lines
+                 (remove #(contains? ran (:id %)) (vals by)))]
+      (spit rec (str header "\n(classes {" (str/join "\n          " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (sort-by key classes))) "})\n"
+                     (str/join "\n" (map (fn [m] (str "{" (str/join " " (map (fn [k] (str (pr-str k) " " (pr-str (get m k))))
+                                                                         (filter #(contains? m %) [:id :result :differs :stage :class]))) "}"))
+                                          (sort-by :id lines))) "\n"))
+      (println (str "run-check: recorded " (count lines) " programs into " rec)))
+    "judge"
+    (let [bad (atom 0)]
+      (doseq [r res]
+        (let [o (get by (:id r))]
+          (cond
+            (nil? o) (do (swap! bad inc) (println "run-check: not in the record:" (pr-str r)))
+            (not= (:result o) (:result r)) (do (swap! bad inc) (println "run-check: changed:" (:id r) (:result o) "->" (:result r)))
+            (and (not= :pass (:result r)) (not (contains? classes (:class o))))
+            (do (swap! bad inc) (println "run-check: not in a class:" (:id r) (:class o))))))
+      (let [np (count (remove #(= :pass (:result %)) res))]
+        (println (str "run-check: " (- (count res) @bad) " of " (count res) " as recorded, " np " non-passes in their classes"
+                      (when (pos? @bad) (str ", " @bad " differ")))))
+      (System/exit (if (zero? @bad) 0 1)))))

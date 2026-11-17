@@ -1,0 +1,284 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/http/ChunkedInputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.http)
+
+(import '(java.io IOException InputStream)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(sun.net.www MessageHeader)
+        '(sun.nio.cs US_ASCII))
+
+(defclass ^:public ChunkedInputStream
+  :extends InputStream
+  :implements [Hurryable]
+
+  (field ^:private ^InputStream in)
+
+  (field ^:private ^:final ^HttpClient hc)
+
+  (field ^:private ^:final ^MessageHeader responses)
+
+  (field ^:private ^int chunkSize)
+
+  (field ^:private ^int chunkRead)
+
+  (field ^:private ^byte/1 chunkData (new byte/1 4096))
+
+  (field ^:private ^int chunkPos)
+
+  (field ^:private ^int chunkCount)
+
+  (field ^:private ^byte/1 rawData (new byte/1 32))
+
+  (field ^:private ^int rawPos)
+
+  (field ^:private ^int rawCount)
+
+  (field ^:private ^boolean error)
+
+  (field ^:private ^boolean closed)
+
+  (field ^:private ^:final ^ReentrantLock readLock (ReentrantLock.))
+
+  (field ^:private ^:static ^:final ^int MAX_CHUNK_HEADER_SIZE 2050)
+
+  (field ^:static ^:final ^int STATE_AWAITING_CHUNK_HEADER 1)
+
+  (field ^:static ^:final ^int STATE_READING_CHUNK 2)
+
+  (field ^:static ^:final ^int STATE_AWAITING_CHUNK_EOL 3)
+
+  (field ^:static ^:final ^int STATE_AWAITING_TRAILERS 4)
+
+  (field ^:static ^:final ^int STATE_DONE 5)
+
+  (field ^:private ^int state)
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when closed (throw (IOException. "stream is closed"))))
+
+  (method ^:private ensureRawAvailable ^void [this ^int size]
+    (when (> (unchecked-add-int rawCount size) (alength rawData))
+      (let [used (unchecked-subtract-int rawCount rawPos)]
+        (cond
+          (> (unchecked-add-int used size) (alength rawData))
+            (let [tmp (new byte/1 (unchecked-add-int used size))]
+              (when (> used 0) (System/arraycopy rawData rawPos tmp 0 used))
+              (set! rawData tmp))
+          (> used 0) (System/arraycopy rawData rawPos rawData 0 used))
+        (set! rawCount used)
+        (set! rawPos 0))))
+
+  (method ^:private closeUnderlying :throws [IOException] ^void [this]
+    (when (some? in)
+      (if (and (not error) (== state STATE_DONE))
+          (.finished hc)
+          (when-not (.hurry this) (.closeServer hc)))
+      (set! in nil)))
+
+  (method ^:private fastRead :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (let [remaining (unchecked-subtract-int chunkSize chunkRead)
+          ^int cnt (if (< remaining len) remaining len)]
+      (if (> cnt 0)
+          (let [^:mutable ^int nread 0]
+            (try
+              (set! nread (.read in b off cnt))
+              (catch IOException e (set! error true) (throw e)))
+            (if (> nread 0)
+                (do
+                  (set! chunkRead (unchecked-add-int chunkRead nread))
+                  (when (>= chunkRead chunkSize) (set! state STATE_AWAITING_CHUNK_EOL))
+                  nread)
+                (do (set! error true) (throw (IOException. "Premature EOF")))))
+          0)))
+
+  (method ^:private processRaw :throws [IOException] ^void [this]
+    (let [^:mutable ^int pos 0
+          ^:mutable ^int i 0]
+      (while (not (== state STATE_DONE))
+        (switch state
+          STATE_AWAITING_CHUNK_HEADER
+            (do
+              (set! pos rawPos)
+              (while (< pos rawCount)
+                (when (== (aget rawData pos) \newline) (break))
+                (set! pos (unchecked-inc-int pos))
+                (when (>= (unchecked-subtract-int pos rawPos) MAX_CHUNK_HEADER_SIZE)
+                  (set! error true)
+                  (throw (IOException. "Chunk header too long"))))
+              (when (>= pos rawCount) (return))
+              (let [header (String. rawData
+                                    rawPos
+                                    (unchecked-add-int (unchecked-subtract-int pos rawPos) 1)
+                                    US_ASCII/INSTANCE)]
+                (set! i 0)
+                (while (< i (.length header))
+                  (when (== (Character/digit (.charAt header i) 16) -1) (break))
+                  (set! i (unchecked-inc-int i)))
+                (try
+                  (set! chunkSize (Integer/parseInt header 0 i 16))
+                  (catch NumberFormatException e
+                    (set! error true)
+                    (throw (IOException. "Bogus chunk size"))))
+                (set! rawPos (unchecked-add-int pos 1))
+                (set! chunkRead 0)
+                (if (> chunkSize 0)
+                    (set! state STATE_READING_CHUNK)
+                    (set! state STATE_AWAITING_TRAILERS))))
+          STATE_READING_CHUNK
+            (do
+              (when (>= rawPos rawCount) (return))
+              (let [copyLen (Math/min (unchecked-subtract-int chunkSize chunkRead)
+                                      (unchecked-subtract-int rawCount rawPos))]
+                (when (< (alength chunkData) (unchecked-add-int chunkCount copyLen))
+                  (let [cnt (unchecked-subtract-int chunkCount chunkPos)]
+                    (if (< (alength chunkData) (unchecked-add-int cnt copyLen))
+                        (let [tmp (new byte/1 (unchecked-add-int cnt copyLen))]
+                          (System/arraycopy chunkData chunkPos tmp 0 cnt)
+                          (set! chunkData tmp))
+                        (System/arraycopy chunkData chunkPos chunkData 0 cnt))
+                    (set! chunkPos 0)
+                    (set! chunkCount cnt)))
+                (System/arraycopy rawData rawPos chunkData chunkCount copyLen)
+                (set! rawPos (unchecked-add-int rawPos copyLen))
+                (set! chunkCount (unchecked-add-int chunkCount copyLen))
+                (set! chunkRead (unchecked-add-int chunkRead copyLen))
+                (if (<= (unchecked-subtract-int chunkSize chunkRead) 0)
+                    (set! state STATE_AWAITING_CHUNK_EOL)
+                    (return))))
+          STATE_AWAITING_CHUNK_EOL
+            (do
+              (when (>= (unchecked-add-int rawPos 1) rawCount) (return))
+              (when-not (== (aget rawData rawPos) \return)
+                (set! error true)
+                (throw (IOException. "missing CR")))
+              (when-not (== (aget rawData (unchecked-add-int rawPos 1)) \newline)
+                (set! error true)
+                (throw (IOException. "missing LF")))
+              (set! rawPos (unchecked-add-int rawPos 2))
+              (set! state STATE_AWAITING_CHUNK_HEADER))
+          STATE_AWAITING_TRAILERS
+            (do
+              (set! pos rawPos)
+              (while (< pos rawCount)
+                (when (== (aget rawData pos) \newline) (break))
+                (set! pos (unchecked-inc-int pos)))
+              (when (>= pos rawCount) (return))
+              (when (== pos rawPos)
+                (set! error true)
+                (throw (IOException. "LF should be proceeded by CR")))
+              (when-not (== (aget rawData (unchecked-subtract-int pos 1)) \return)
+                (set! error true)
+                (throw (IOException. "LF should be proceeded by CR")))
+              (when (== pos (unchecked-add-int rawPos 1))
+                (set! state STATE_DONE)
+                (.closeUnderlying this)
+                (return))
+              (let [trailer (String. rawData
+                                     rawPos
+                                     (unchecked-subtract-int pos rawPos)
+                                     US_ASCII/INSTANCE)]
+                (set! i (.indexOf trailer \:))
+                (when (== i -1)
+                  (throw (IOException. "Malformed tailer - format should be key:value")))
+                (let [key (.trim (.substring trailer 0 i))
+                      value (.trim (.substring trailer (unchecked-add-int i 1) (.length trailer)))]
+                  (.add responses key value)
+                  (set! rawPos (unchecked-add-int pos 1)))))))))
+
+  (method ^:private readAheadNonBlocking :throws [IOException] ^int [this]
+    (let [avail (.available in)]
+      (when (> avail 0)
+        (.ensureRawAvailable this avail)
+        (let [^:mutable ^int nread 0]
+          (try
+            (set! nread (.read in rawData rawCount avail))
+            (catch IOException e (set! error true) (throw e)))
+          (when (< nread 0) (set! error true) (return -1))
+          (set! rawCount (unchecked-add-int rawCount nread))
+          (.processRaw this)))
+      (unchecked-subtract-int chunkCount chunkPos)))
+
+  (method ^:private readAheadBlocking :throws [IOException] ^int [this]
+    (loop []
+      (when (== state STATE_DONE) (return -1))
+      (.ensureRawAvailable this 32)
+      (let [^:mutable ^int nread 0]
+        (try
+          (set! nread
+                (.read in rawData rawCount (unchecked-subtract-int (alength rawData) rawCount)))
+          (catch IOException e (set! error true) (throw e)))
+        (when (< nread 0) (set! error true) (throw (IOException. "Premature EOF")))
+        (set! rawCount (unchecked-add-int rawCount nread))
+        (.processRaw this))
+      (when (<= chunkCount 0) (recur)))
+    (unchecked-subtract-int chunkCount chunkPos))
+
+  (method ^:private readAhead :throws [IOException] ^int [this ^boolean allowBlocking]
+    (if (== state STATE_DONE)
+        -1
+        (do
+          (when (>= chunkPos chunkCount) (set! chunkCount 0) (set! chunkPos 0))
+          (if allowBlocking (.readAheadBlocking this) (.readAheadNonBlocking this)))))
+
+  (constructor :throws [IOException] ^:public [this ^InputStream in ^HttpClient hc
+                                               ^MessageHeader responses]
+    (set! (.-in this) in)
+    (set! (.-responses this) responses)
+    (set! (.-hc this) hc)
+    (set! state STATE_AWAITING_CHUNK_HEADER))
+
+  (method ^:public read :throws [IOException] ^int [this]
+    (.lock readLock)
+    (try
+      (.ensureOpen this)
+      (when (>= chunkPos chunkCount) (when (<= (.readAhead this true) 0) (return -1)))
+      (let [chunkPos-1 chunkPos]
+        (set! chunkPos (unchecked-inc-int chunkPos))
+        (bit-and-int (aget chunkData chunkPos-1) 0xff))
+      (finally (.unlock readLock))))
+
+  (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (.lock readLock)
+    (try
+      (.ensureOpen this)
+      (cond
+        (or (or (or (or (< off 0) (> off (alength b))) (< len 0))
+                (> (unchecked-add-int off len) (alength b)))
+            (< (unchecked-add-int off len) 0))
+          (throw (IndexOutOfBoundsException.))
+        (== len 0) (return 0))
+      (let [^:mutable avail (unchecked-subtract-int chunkCount chunkPos)]
+        (when (<= avail 0)
+          (when (== state STATE_READING_CHUNK) (return (.fastRead this b off len)))
+          (set! avail (.readAhead this true))
+          (when (< avail 0) (return -1)))
+        (let [^int cnt (if (< avail len) avail len)]
+          (System/arraycopy chunkData chunkPos b off cnt)
+          (set! chunkPos (unchecked-add-int chunkPos cnt))
+          cnt))
+      (finally (.unlock readLock))))
+
+  (method ^:public available :throws [IOException] ^int [this]
+    (.lock readLock)
+    (try
+      (.ensureOpen this)
+      (let [^:mutable avail (unchecked-subtract-int chunkCount chunkPos)]
+        (if (> avail 0) avail (do (set! avail (.readAhead this false)) (if (< avail 0) 0 avail))))
+      (finally (.unlock readLock))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when-not closed
+      (.lock readLock)
+      (try
+        (when-not closed (.closeUnderlying this) (set! closed true))
+        (finally (.unlock readLock)))))
+
+  (method ^:public hurry ^boolean [this]
+    (.lock readLock)
+    (try
+      (if (or (nil? in) error)
+          false
+          (do
+            (try (.readAhead this false) (catch Exception e (return false)))
+            (if error false (== state STATE_DONE))))
+      (finally (.unlock readLock)))))

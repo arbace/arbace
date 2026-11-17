@@ -1,0 +1,114 @@
+;; jrt's tests of the recorded class file attributes (classdata.ae; F25): a class with a member,
+;; a local and an anonymous class, as arbace.classes.annot writes their data, against what the JDK
+;; answers for the same program (jdk26u's java, below; the answers in the comments):
+;;   package test;
+;;   public class Outer {
+;;     protected static class Member {}
+;;     private class Inner {}
+;;     public <T> String run(int n) throws java.io.IOException {
+;;       class Local {}  Object o = new Object() {};  ... }
+;;   }
+;;   Member: getModifiers() 12 (protected static), isMemberClass, getSimpleName "Member",
+;;     getCanonicalName "test.Outer.Member"; Inner: getModifiers() 2 (private)
+;;   Local: isLocalClass, getSimpleName "Local", getCanonicalName null, getEnclosingClass Outer,
+;;     getEnclosingMethod "public java.lang.String test.Outer.run(int) throws java.io.IOException"
+;;   Outer$1: isAnonymousClass, getSimpleName "", getEnclosingMethod run
+;;   Outer.getDeclaredClasses(): [Inner, Member] (by name here)
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'go.arbace.jrt)
+
+(go/file "classdata_test.go"
+  :imports [[testing "testing"]])
+
+(go/var testOuter_class
+  (Define (addr (lit ClassInfo :Name "test.Outer" :Kind KindClass :Modifiers AccPublic :Super Object_class
+                     :Go "arbace/jrt.testOuter"
+                     :Annots (+ "G M run (I)Ljava.lang.String; <T:Ljava/lang/Object;>(I)Ljava/lang/String;\n"
+                                "E M run (I)Ljava.lang.String; java.io.IOException not.InTheWorld\n"
+                                "T @Lnot.InTheWorld; 0")))))
+(go/var testMember_class
+  (Define (addr (lit ClassInfo :Name "test.Outer$Member" :Kind KindClass :Modifiers AccPublic :Super Object_class
+                     :Declaring testOuter_class :Simple "Member" :Go "arbace/jrt.testMember"
+                     :Annots "K 12 m test.Outer Member"))))
+(go/var testInner_class
+  (Define (addr (lit ClassInfo :Name "test.Outer$Inner" :Kind KindClass :Modifiers 0 :Super Object_class
+                     :Declaring testOuter_class :Simple "Inner" :Go "arbace/jrt.testInner"
+                     :Annots "K 2 m test.Outer Inner"))))
+(go/var testLocal_class
+  (Define (addr (lit ClassInfo :Name "test.Outer$1Local" :Kind KindClass :Modifiers 0 :Super Object_class
+                     :Simple "Local" :Go "arbace/jrt.testLocal"
+                     :Annots "K 0 l test.Outer Local\nQ run (I)Ljava.lang.String;"))))
+(go/var testAnon_class
+  (Define (addr (lit ClassInfo :Name "test.Outer$1" :Kind KindClass :Modifiers 0 :Super Object_class
+                     :Go "arbace/jrt.testAnon"
+                     :Annots "K 0 a test.Outer -\nQ run (I)Ljava.lang.String;"))))
+
+(go/func init []
+  (set! (.-Methods (.Info testOuter_class))
+        (lit (slice MethodInfo)
+             (lit MethodInfo :Name "run" :Params (lit (slice (* Class)) Prim_int) :Return String_class :Modifiers AccPublic))))
+
+(go/func TestClassDataNesting [^{:tag (* testing/T)} t]
+  (when (or (!= (.GetModifiers__I testMember_class) 12) (!= (.GetModifiers__I testInner_class) 2))
+    (.Errorf t "inner class modifiers: %d %d" (.GetModifiers__I testMember_class) (.GetModifiers__I testInner_class)))
+  (when (not (and (.IsMemberClass__Z testMember_class) (not (.IsLocalClass__Z testMember_class))
+                  (not (.IsAnonymousClass__Z testMember_class))))
+    (.Error t "Member is not only a member class"))
+  (when (!= (.String (.GetCanonicalName__String testMember_class)) "test.Outer.Member")
+    (.Errorf t "canonical name %s" (.String (.GetCanonicalName__String testMember_class))))
+  (when (not (and (.IsLocalClass__Z testLocal_class) (not (.IsMemberClass__Z testLocal_class))))
+    (.Error t "Local is not a local class"))
+  (when (or (!= (.String (.GetSimpleName__String testLocal_class)) "Local")
+            (!= (.GetCanonicalName__String testLocal_class) nil)
+            (!= (.GetEnclosingClass__Class testLocal_class) testOuter_class)
+            (!= (.GetDeclaringClass__Class testLocal_class) nil))
+    (.Error t "Local's names or enclosing class"))
+  (when (not (and (.IsAnonymousClass__Z testAnon_class) (== (.String (.GetSimpleName__String testAnon_class)) "")))
+    (.Error t "Outer$1 is not anonymous with an empty simple name"))
+  (when (!= (.String (.GetSimpleName__String (.ArrayClass testAnon_class))) "[]")
+    (.Error t "an anonymous class's array's simple name"))
+  (when (.IsMemberClass__Z testOuter_class)
+    (.Error t "Outer is a member class"))
+  (let [ds (.GetDeclaredClasses__Class1 testOuter_class)]
+    (when (or (!= (len (.-A ds)) 2) (!= (aget (.-A ds) 0) testInner_class) (!= (aget (.-A ds) 1) testMember_class))
+      (.Errorf t "getDeclaredClasses: %d" (len (.-A ds)))))
+  (let [ps (.GetClasses__Class1 testOuter_class)]
+    (when (!= (len (.-A ps)) 0)
+      (.Errorf t "getClasses: %d public member classes, the JDK none" (len (.-A ps))))))
+
+(go/func TestClassDataEnclosingMethod [^{:tag (* testing/T)} t]
+  (let [m (.GetEnclosingMethod__Method testLocal_class)]
+    (when (== m nil) (.Fatal t "Local: no enclosing method"))
+    (let [s (.String (.ToString__String m))]
+      (when (!= s "public java.lang.String test.Outer.run(int) throws java.io.IOException")
+        (.Errorf t "enclosing method %s" s))))
+  (when (== (.GetEnclosingMethod__Method testAnon_class) nil)
+    (.Error t "Outer$1: no enclosing method"))
+  (when (!= (.GetEnclosingConstructor__Constructor testLocal_class) nil)
+    (.Error t "Local: an enclosing constructor"))
+  (when (!= (.GetEnclosingMethod__Method testMember_class) nil)
+    (.Error t "Member: an enclosing method")))
+
+(go/func TestClassDataSignatures [^{:tag (* testing/T)} t]
+  ;; jrt's own build: ReflectSupport is a stand-in, so a recorded Signature is decoded but answers as
+  ;; none; the erased answers then are jdk26u's for a declaration without one
+  (let [a (attrsOf testOuter_class)]
+    (when (!= (aget (.-sigs a) "M run (I)Ljava.lang.String;") "<T:Ljava/lang/Object;>(I)Ljava/lang/String;")
+      (.Error t "the method's Signature is not decoded")))
+  (when (== (.genericSignature Class_class) "")
+    (.Error t "Class has no hand-written Signature"))
+  (let [ifs (.GetGenericInterfaces__Type1 testMember_class)]
+    (when (!= (len (.-A ifs)) 0) (.Error t "Member's generic interfaces")))
+  (when (!= (.GetGenericSuperclass__Type testMember_class) Object_class)
+    (.Error t "Member's generic superclass is not Object"))
+  (when (!= (len (.-A (.GetTypeParameters__TypeVariable1 testOuter_class))) 0)
+    (.Error t "Outer has type parameters"))
+  (let [ms (.GetDeclaredMethods__Method1 testOuter_class)
+        m (assert (* Method) (aget (.-A ms) 0))
+        ts (.GetExceptionTypes__Class1 m)]
+    (when (or (!= (len (.-A ts)) 1) (!= (aget (.-A ts) 0) IOException_class))
+      (.Errorf t "run's exception types: %d" (len (.-A ts))))
+    (when (!= (len (.-A (.GetGenericExceptionTypes__Type1 m))) 1)
+      (.Error t "run's generic exception types"))
+    (when (!= (.GetGenericReturnType__Type m) String_class)
+      (.Error t "run's generic return type (no repository): not String"))))

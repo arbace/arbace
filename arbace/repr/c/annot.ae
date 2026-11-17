@@ -34,8 +34,12 @@
         (let [dir (str (or (System/getenv "TMPDIR") ".tmp/tmp") "/ci-builtin")
               f (java.io.File. (str dir "/builtin-" std ".c"))]
           (.mkdirs (java.io.File. dir))
-          ;; its typedef of __builtin_va_list is guarded by the macro the <builtin> source has defined
-          (spit f (str/replace parse/builtin "#ifndef __builtin_va_list" "#if 1"))
+          ;; its typedef of __builtin_va_list is guarded by the macro the <builtin> source has defined; written through a
+          ;; temporary name and renamed: processes reading at once in one TMPDIR (bin/ci check's CI_COVER_READ, a program a
+          ;; process) read a file another was rewriting, cut short (night 3: '__builtin_va_list' unknown in the host's headers)
+          (let [tmp (java.io.File. (str (.getPath f) ".tmp" (System/nanoTime) "-" (.getId (Thread/currentThread)) "-" (rand-int 1000000000)))]
+            (spit tmp (str/replace parse/builtin "#ifndef __builtin_va_list" "#if 1"))
+            (when-not (.renameTo tmp f) (.delete tmp)))
           (let [fc2 (assoc fc :pre "" :inc [] :args [])
                 rd (rc/read-c (host/config h fc2 dir) fc2 (.getAbsolutePath f) false)
                 forms (if (:forms rd) (:forms rd) [])]
@@ -52,7 +56,7 @@
   (let [r (chk/check-unit rd (keyword (:std fc)) (builtin-forms h fc) :annotate true
                           :unsigned-char (some #{"-funsigned-char"} (:args fc))
                           :pedantic (:pedantic fc) :ext-lines (:ext-lines rd) :sys-dirs (host/sys-dirs h fc) :base (:base rd) :notes (:notes rd)
-                          :no-c2y-compat (:no-c2y-compat fc) :permissive (:permissive fc) :no-c23-compat (:no-c23-compat fc) :exec-charset (:exec-charset fc))
+                          :no-c2y-compat (:no-c2y-compat fc) :permissive (:permissive fc) :no-implicit-int (:no-implicit-int fc) :no-c23-compat (:no-c23-compat fc) :exec-charset (:exec-charset fc))
         b (StringBuilder.)
         last-line (atom -1)]
     (doseq [[ln as fs] (:items r)]
@@ -153,7 +157,11 @@
         cfg (host/config h fc base)
         budget (* 1000000000 (Long/parseLong (or (System/getenv "REPR_C_READ_BUDGET") "120")))
         rn (or (:read e) nm)
-        rd (binding [parse/*deadline* (+ (System/nanoTime) budget)]
+        ;; the checker's check reads as ci reads (arbace.c.run/read-unit; the own target's triage, night 7): an #include inside
+        ;; a declaration or a body is the main file's (*include-inside*, queue 178, CS275 (b)), so zlib's inflate.c and
+        ;; infback.c check fixedtables' lenfix and distfix from inffixed.h, included inside its body, as cc's single file does
+        rd (binding [parse/*deadline* (+ (System/nanoTime) budget)
+                     arbace.repr.c.convert/*include-inside* true]
              (try (rc/read-c cfg fc rn false)
                   (catch Throwable x (if (:deadline (ex-data x)) {:timeout true} {:crash (str x)}))))]
     (cond

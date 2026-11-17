@@ -1,0 +1,161 @@
+;; Converted from jdk26u src/java.base/share/classes/java/net/CookieManager.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.net)
+
+(import '(java.io IOException)
+        '(java.util ArrayList Collections Comparator List Map)
+        '(sun.util.logging PlatformLogger PlatformLogger$Level))
+
+(defclass ^:public CookieManager
+  :extends CookieHandler
+
+  (field ^:private ^CookiePolicy policyCallback)
+
+  (field ^:private ^CookieStore cookieJar nil)
+
+  (constructor ^:public [this] (this. nil nil))
+
+  (constructor ^:public [this ^CookieStore store ^CookiePolicy cookiePolicy]
+    (set! policyCallback (if (nil? cookiePolicy) CookiePolicy/ACCEPT_ORIGINAL_SERVER cookiePolicy))
+    (if (nil? store) (set! cookieJar (InMemoryCookieStore.)) (set! cookieJar store)))
+
+  (method ^:public setCookiePolicy ^void [this ^CookiePolicy cookiePolicy]
+    (when (some? cookiePolicy) (set! policyCallback cookiePolicy)))
+
+  (method ^:public getCookieStore ^CookieStore [this] cookieJar)
+
+  (method ^:public get :throws [IOException] ^{:tag (Map String (List String))} [this ^URI uri
+                                                                                 ^{:tag (Map String (List String))} requestHeaders]
+    (when (or (nil? uri) (nil? requestHeaders))
+      (throw (IllegalArgumentException. "Argument is null")))
+    (if (nil? cookieJar)
+        (Map/of)
+        (let [secureLink (.equalsIgnoreCase "https" (.getScheme uri))
+              ^{:tag (List HttpCookie)} cookies (ArrayList.)
+              ^:mutable path (.getPath uri)]
+          (when (or (nil? path) (.isEmpty path)) (set! path "/"))
+          (for-each [^HttpCookie cookie (.get cookieJar uri)]
+            (when (and (.pathMatches this path (.getPath cookie))
+                       (or secureLink (not (.getSecure cookie))))
+              (when (.isHttpOnly cookie)
+                (let [s (.getScheme uri)]
+                  (when (and (not (.equalsIgnoreCase "http" s)) (not (.equalsIgnoreCase "https" s)))
+                    (continue))))
+              (let [ports (.getPortlist cookie)]
+                (if (and (some? ports) (not (.isEmpty ports)))
+                    (let [^:mutable port (.getPort uri)]
+                      (when (== port -1) (set! port (if (.equals "https" (.getScheme uri)) 443 80)))
+                      (when (CookieManager/isInPortList ports port) (.add cookies cookie)))
+                    (.add cookies cookie)))))
+          (let [^{:tag (List String)} cookieHeader (CookieManager/sortByPathAndAge cookies)]
+            (Map/of "Cookie" cookieHeader)))))
+
+  (method ^:public put :throws [IOException] ^void [this ^URI uri
+                                                    ^{:tag (Map String (List String))} responseHeaders]
+    (when (or (nil? uri) (nil? responseHeaders))
+      (throw (IllegalArgumentException. "Argument is null")))
+    (when (some? cookieJar)
+      (let [logger (PlatformLogger/getLogger "java.net.CookieManager")]
+        (for-each [^String headerKey (.keySet responseHeaders)]
+          (when-not (or (nil? headerKey)
+                        (not (or (.equalsIgnoreCase headerKey "Set-Cookie2")
+                                 (.equalsIgnoreCase headerKey "Set-Cookie"))))
+            (for-each [^String headerValue (cast List (.get responseHeaders headerKey))]
+              (try
+                (let [^:mutable ^{:tag (List HttpCookie)} cookies nil]
+                  (try
+                    (set! cookies (HttpCookie/parse headerValue))
+                    (catch IllegalArgumentException e
+                      (set! cookies (Collections/emptyList))
+                      (when (.isLoggable logger PlatformLogger$Level/SEVERE)
+                        (.severe logger (java-str "Invalid cookie for " uri ": " headerValue)))))
+                  (for-each [^HttpCookie cookie cookies]
+                    (when (nil? (.getPath cookie))
+                      (let [^:mutable path (.getPath uri)]
+                        (when-not (.endsWith path "/")
+                          (let [i (.lastIndexOf path \/)]
+                            (if (> i 0)
+                                (set! path (.substring path 0 (unchecked-add-int i 1)))
+                                (set! path "/"))))
+                        (.setPath cookie path)))
+                    (when (nil? (.getDomain cookie))
+                      (let [^:mutable host (.getHost uri)]
+                        (when (and (some? host) (not (.contains host ".")))
+                          (set! host (java-str host ".local")))
+                        (.setDomain cookie host)))
+                    (let [ports (.getPortlist cookie)]
+                      (cond
+                        (some? ports)
+                          (let [^:mutable port (.getPort uri)]
+                            (when (== port -1)
+                              (set! port (if (.equals "https" (.getScheme uri)) 443 80)))
+                            (cond
+                              (.isEmpty ports)
+                                (do
+                                  (.setPortlist cookie (java-str "" port))
+                                  (when (.shouldAcceptInternal this uri cookie)
+                                    (.add cookieJar uri cookie)))
+                              (and (CookieManager/isInPortList ports port)
+                                   (.shouldAcceptInternal this uri cookie))
+                                (.add cookieJar uri cookie)))
+                        (.shouldAcceptInternal this uri cookie) (.add cookieJar uri cookie)))))
+                (catch IllegalArgumentException e))))))))
+
+  (method ^:private shouldAcceptInternal ^boolean [this ^URI uri ^HttpCookie cookie]
+    (try (.shouldAccept policyCallback uri cookie) (catch Exception ignored false)))
+
+  (method ^:private ^:static isInPortList ^boolean [^:mutable ^String lst ^int port]
+    (let [^:mutable i (.indexOf lst \,)
+          ^:mutable ^int val -1]
+      (while (> i 0)
+        (try
+          (set! val (Integer/parseInt lst 0 i 10))
+          (when (== val port) (return true))
+          (catch NumberFormatException numberFormatException))
+        (set! lst (.substring lst (unchecked-add-int i 1)))
+        (set! i (.indexOf lst \,)))
+      (when-not (.isEmpty lst)
+        (try
+          (set! val (Integer/parseInt lst))
+          (when (== val port) (return true))
+          (catch NumberFormatException numberFormatException)))
+      false))
+
+  (method ^:private pathMatches ^boolean [this ^String path ^String pathToMatchWith]
+    (cond
+      (identical? path pathToMatchWith) true
+      (or (nil? path) (nil? pathToMatchWith)) false
+      (.startsWith path pathToMatchWith) true
+      :else false))
+
+  (method ^:static sortByPathAndAge ^{:tag (List String)} [^{:tag (List HttpCookie)} cookies]
+    (.sort cookies (CookieComparator.))
+    (let [^{:tag (List String)} cookieHeader (ArrayList.)]
+      (for-each [^HttpCookie cookie cookies]
+        (when (and (== (.indexOf cookies cookie) 0) (> (.getVersion cookie) 0))
+          (.add cookieHeader "$Version=\"1\""))
+        (.add cookieHeader (.toString cookie)))
+      cookieHeader))
+
+  (defclass ^:static CookieComparator
+    :implements [(Comparator HttpCookie)]
+
+    (method ^:public compare ^int [this ^HttpCookie c1 ^HttpCookie c2]
+      (cond
+        (identical? c1 c2) 0
+        (nil? c1) -1
+        (nil? c2) 1
+        :else
+          (let [^:mutable p1 (.getPath c1)
+                ^:mutable p2 (.getPath c2)]
+            (set! p1 (if (nil? p1) "" p1))
+            (set! p2 (if (nil? p2) "" p2))
+            (let [len1 (.length p1)
+                  len2 (.length p2)]
+              (cond
+                (> len1 len2) -1
+                (> len2 len1) 1
+                :else
+                  (let [creation1 (.getCreationTime c1)
+                        creation2 (.getCreationTime c2)]
+                    (Long/compare creation1 creation2)))))))))

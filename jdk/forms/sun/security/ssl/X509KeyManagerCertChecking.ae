@@ -1,0 +1,296 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/X509KeyManagerCertChecking.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.net Socket)
+        '(java.security AlgorithmConstraints Principal)
+        '(java.security.cert CertPathValidatorException
+                             Certificate
+                             CertificateException
+                             X509Certificate)
+        '(java.util ArrayList Collections Date HashSet List Locale Set)
+        '(javax.net.ssl SNIHostName
+                        SNIServerName
+                        SSLEngine
+                        SSLSocket
+                        StandardConstants
+                        X509ExtendedKeyManager)
+        '(javax.security.auth.x500 X500Principal)
+        '(sun.security.provider.certpath AlgorithmChecker)
+        '(sun.security.util KnownOIDs)
+        '(sun.security.validator Validator))
+
+(defclass ^:abstract X509KeyManagerCertChecking
+  :extends X509ExtendedKeyManager
+
+  (field ^:private ^:final ^boolean checksDisabled)
+
+  (constructor ^:protected [this]
+    (set! checksDisabled (.isCheckingDisabled this)))
+
+  (method ^:abstract isCheckingDisabled ^boolean [this])
+
+  (method ^:abstract chooseQuicClientAlias ^String [this ^String/1 keyTypes ^Principal/1 issuers
+                                                    ^QuicTLSEngineImpl quicTLSEngine])
+
+  (method ^:abstract chooseQuicServerAlias ^String [this ^String keyType ^X500Principal/1 issuers
+                                                    ^QuicTLSEngineImpl quicTLSEngine])
+
+  (method ^:protected checkAlias ^EntryStatus [this ^int keyStoreIndex ^String alias
+                                               ^Certificate/1 chain ^Date verificationDate
+                                               ^{:tag (List KeyType)} keyTypes
+                                               ^{:tag (Set X500Principal)} issuerSet
+                                               ^CheckType checkType
+                                               ^AlgorithmConstraints constraints
+                                               ^{:tag (List SNIServerName)} requestedServerNames
+                                               ^String idAlgorithm]
+    (when-not (or (nil? chain) (== (alength chain) 0))
+      (for-each [^Certificate cert chain] (when-not (instance? X509Certificate cert) (return nil)))
+      (let [^:mutable ^int keyIndex -1
+            ^:mutable ^int j 0]
+        (for-each [^KeyType keyType keyTypes]
+          (when (.matches keyType chain) (set! keyIndex j) (break))
+          (set! j (unchecked-inc-int j)))
+        (if (== keyIndex -1)
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "keymanager"))
+                (SSLLogger/fine (java-str "Ignore alias " alias ": key algorithm does not match")))
+              nil)
+            (do
+              (when (and (some? issuerSet) (not (.isEmpty issuerSet)))
+                (let [^:mutable found false]
+                  (for-each [^Certificate cert chain]
+                    (let [xcert (cast X509Certificate cert)]
+                      (when (.contains issuerSet (.getIssuerX500Principal xcert))
+                        (set! found true)
+                        (break))))
+                  (when-not found
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "keymanager"))
+                      (SSLLogger/fine (java-str "Ignore alias " alias ": issuers do not match")))
+                    (return nil))))
+              (if (and (some? constraints)
+                       (not (.conformsToAlgorithmConstraints
+                              this
+                              constraints
+                              chain
+                              (.getValidator checkType))))
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "keymanager"))
+                      (SSLLogger/fine
+                        (java-str "Ignore alias "
+                                  alias
+                                  ": certificate chain does not conform to algorithm constraints")))
+                    nil)
+                  (let [checkResult (.certificateCheck
+                                      this
+                                      checkType
+                                      (cast X509Certificate (aget chain 0))
+                                      ^Date (if (nil? verificationDate) (Date.) verificationDate)
+                                      requestedServerNames
+                                      idAlgorithm)]
+                    (EntryStatus. keyStoreIndex keyIndex alias chain checkResult))))))))
+
+  (method ^:protected getAlgorithmConstraints ^AlgorithmConstraints [this ^Socket socket]
+    (when-not checksDisabled
+      (when-instance [^SSLSocket sslSocket socket]
+        (when (.isConnected sslSocket)
+          (return (SSLAlgorithmConstraints/forSocket
+                    sslSocket
+                    SSLAlgorithmConstraints$SIGNATURE_CONSTRAINTS_MODE/PEER
+                    true))))
+      SSLAlgorithmConstraints/DEFAULT))
+
+  (method ^:protected getAlgorithmConstraints ^AlgorithmConstraints [this ^SSLEngine engine]
+    (when-not checksDisabled
+      (SSLAlgorithmConstraints/forEngine engine
+                                         SSLAlgorithmConstraints$SIGNATURE_CONSTRAINTS_MODE/PEER
+                                         true)))
+
+  (method ^:protected getAlgorithmConstraints ^AlgorithmConstraints [this ^QuicTLSEngineImpl engine]
+    (when-not checksDisabled
+      (SSLAlgorithmConstraints/forQUIC engine
+                                       SSLAlgorithmConstraints$SIGNATURE_CONSTRAINTS_MODE/PEER
+                                       true)))
+
+  (method ^:private conformsToAlgorithmConstraints ^boolean [this ^AlgorithmConstraints constraints
+                                                             ^Certificate/1 chain ^String variant]
+    (if checksDisabled
+        true
+        (let [checker (AlgorithmChecker. constraints variant)]
+          (try
+            (.init checker false)
+            (catch CertPathValidatorException cpve
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "keymanager"))
+                (SSLLogger/fine "Cannot initialize algorithm constraints checker" cpve))
+              (return false)))
+          (loop [^int i (unchecked-subtract-int (alength chain) 1)]
+            (when (>= i 0)
+              (let [cert (aget chain i)]
+                (try
+                  (.check checker cert (Collections/emptySet))
+                  (catch CertPathValidatorException cpve
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "keymanager"))
+                      (SSLLogger/fine "Certificate does not conform to algorithm constraints"
+                                      cert
+                                      cpve))
+                    (return false)))
+                (recur (unchecked-dec-int i)))))
+          true)))
+
+  (method ^:private certificateCheck ^CheckResult [this ^CheckType checkType ^X509Certificate cert
+                                                   ^Date date
+                                                   ^{:tag (List SNIServerName)} serverNames
+                                                   ^String idAlgorithm]
+    (if checksDisabled CheckResult/OK (.check checkType cert date serverNames idAlgorithm)))
+
+  (defclass ^:enum CheckResult
+    (constants OK INSENSITIVE EXPIRED EXTENSION_MISMATCH))
+
+  (defclass ^:enum CheckType
+    (constants
+      (NONE [(Collections/emptySet)])
+      (CLIENT [(HashSet. (List/of (.value KnownOIDs/anyExtendedKeyUsage)
+                                  (.value KnownOIDs/clientAuth)))])
+      (SERVER [(HashSet. (List/of (.value KnownOIDs/anyExtendedKeyUsage)
+                                  (.value KnownOIDs/serverAuth)
+                                  (.value KnownOIDs/NETSCAPE_ExportApproved)
+                                  (.value KnownOIDs/MICROSOFT_ExportApproved)))]))
+
+    (field ^:final ^{:tag (Set String)} validEku)
+
+    (constructor [this ^{:tag (Set String)} validEku]
+      (set! (.-validEku this) validEku))
+
+    (method ^:private ^:static getBit ^boolean [^boolean/1 keyUsage ^int bit]
+      (and (< bit (alength keyUsage)) (aget keyUsage bit)))
+
+    (method check ^CheckResult [this ^X509Certificate cert ^Date date
+                                ^{:tag (List SNIServerName)} serverNames ^String idAlgorithm]
+      (if (identical? this NONE)
+          CheckResult/OK
+          (do
+            (try
+              (let [^{:tag (List String)} certEku (.getExtendedKeyUsage cert)]
+                (when (and (some? certEku) (Collections/disjoint validEku certEku))
+                  (return CheckResult/EXTENSION_MISMATCH))
+                (let [ku (.getKeyUsage cert)]
+                  (when (some? ku)
+                    (let [algorithm (.getAlgorithm (.getPublicKey cert))
+                          supportsDigitalSignature (CheckType/getBit ku 0)]
+                      (switch algorithm
+                        "RSA"
+                          (when-not supportsDigitalSignature
+                            (when (or (identical? this CLIENT) (not (CheckType/getBit ku 2)))
+                              (return CheckResult/EXTENSION_MISMATCH)))
+                        "RSASSA-PSS"
+                          (when (and (not supportsDigitalSignature) (identical? this SERVER))
+                            (return CheckResult/EXTENSION_MISMATCH))
+                        "DSA"
+                          (when-not supportsDigitalSignature
+                            (return CheckResult/EXTENSION_MISMATCH))
+                        "DH"
+                          (when-not (CheckType/getBit ku 4) (return CheckResult/EXTENSION_MISMATCH))
+                        "EC"
+                          (do
+                            (when-not supportsDigitalSignature
+                              (return CheckResult/EXTENSION_MISMATCH))
+                            (when (and (identical? this SERVER) (not (CheckType/getBit ku 4)))
+                              (return CheckResult/EXTENSION_MISMATCH))))))))
+              (catch CertificateException e (return CheckResult/EXTENSION_MISMATCH)))
+            (try
+              (.checkValidity cert date)
+              (catch CertificateException e (return CheckResult/EXPIRED)))
+            (when (and (some? serverNames) (not (.isEmpty serverNames)))
+              (for-each [^:mutable ^SNIServerName serverName serverNames]
+                (when (== (.getType serverName) StandardConstants/SNI_HOST_NAME)
+                  (when-not (instance? SNIHostName serverName)
+                    (try
+                      (set! serverName (SNIHostName. (.getEncoded serverName)))
+                      (catch IllegalArgumentException iae
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "keymanager"))
+                          (SSLLogger/fine (java-str "Illegal server name: " serverName)))
+                        (return CheckResult/INSENSITIVE))))
+                  (let [hostname (.getAsciiName (cast SNIHostName serverName))]
+                    (try
+                      (X509TrustManagerImpl/checkIdentity hostname cert idAlgorithm)
+                      (catch CertificateException e
+                        (when (and (SSLLogger/isOn) (SSLLogger/isOn "keymanager"))
+                          (SSLLogger/fine
+                            (java-str
+                              "Certificate identity does not match Server Name Indication (SNI): "
+                              hostname)))
+                        (return CheckResult/INSENSITIVE)))
+                    (break)))))
+            CheckResult/OK)))
+
+    (method getValidator ^String [this]
+      (cond
+        (identical? this CLIENT) Validator/VAR_TLS_CLIENT
+        (identical? this SERVER) Validator/VAR_TLS_SERVER
+        :else Validator/VAR_GENERIC)))
+
+  (defclass ^:protected ^:static EntryStatus
+    :implements [(Comparable EntryStatus)]
+
+    (field ^:final ^int keyStoreIndex)
+
+    (field ^:final ^int keyIndex)
+
+    (field ^:final ^String alias)
+
+    (field ^:final ^CheckResult checkResult)
+
+    (constructor [this ^int keyStoreIndex ^int keyIndex ^String alias ^Certificate/1 chain
+                  ^CheckResult checkResult]
+      (set! (.-keyStoreIndex this) keyStoreIndex)
+      (set! (.-keyIndex this) keyIndex)
+      (set! (.-alias this) alias)
+      (set! (.-checkResult this) checkResult))
+
+    (method ^:public compareTo ^int [this ^EntryStatus other]
+      (let [result (.compareTo (.-checkResult this) (.-checkResult other))]
+        (if (== result 0) (unchecked-subtract-int (.-keyIndex this) (.-keyIndex other)) result)))
+
+    (method ^:public toString ^String [this]
+      (let [s (java-str alias " (verified: " checkResult ")")]
+        (if (== keyStoreIndex 0) s (java-str "KeyStore #" keyStoreIndex ", alias: " s)))))
+
+  (defclass ^:protected ^:static KeyType
+    (field ^:final ^String keyAlgorithm)
+
+    (field ^:final ^String sigKeyAlgorithm)
+
+    (constructor [this ^String algorithm]
+      (let [k (.indexOf algorithm \_)]
+        (if (== k -1)
+            (do (set! keyAlgorithm algorithm) (set! sigKeyAlgorithm nil))
+            (do
+              (set! keyAlgorithm (.substring algorithm 0 k))
+              (set! sigKeyAlgorithm (.substring algorithm (unchecked-add-int k 1)))))))
+
+    (method matches ^boolean [this ^Certificate/1 chain]
+      (cond
+        (not (.equals (.getAlgorithm (.getPublicKey (aget chain 0))) keyAlgorithm)) false
+        (nil? sigKeyAlgorithm) true
+        (> (alength chain) 1)
+          (.equals sigKeyAlgorithm (.getAlgorithm (.getPublicKey (aget chain 1))))
+        :else
+          (let [issuer (cast X509Certificate (aget chain 0))
+                sigAlgName (.toUpperCase (.getSigAlgName issuer) Locale/ENGLISH)
+                pattern (java-str "WITH" (.toUpperCase sigKeyAlgorithm Locale/ENGLISH))]
+            (.endsWith sigAlgName pattern)))))
+
+  (method ^:protected ^:static getKeyTypes ^{:tag (List KeyType)} [& ^String/1 keyTypes]
+    (when-not (or (or (nil? keyTypes) (== (alength keyTypes) 0)) (nil? (aget keyTypes 0)))
+      (let [^{:tag (List KeyType)} list (ArrayList. (alength keyTypes))]
+        (for-each [^String keyType keyTypes] (.add list (KeyType. keyType)))
+        list)))
+
+  (method ^:protected ^:static getIssuerSet ^{:tag (Set X500Principal)} [^Principal/1 issuers]
+    (when (and (some? issuers) (not (== (alength issuers) 0)))
+      (let [^{:tag (Set X500Principal)} ret (HashSet. (alength issuers))]
+        (for-each [^Principal p issuers]
+          (if (instance? X500Principal p)
+              (.add ret (cast X500Principal p))
+              (try (.add ret (X500Principal. (.getName p))) (catch Exception e))))
+        (when-not (.isEmpty ret) ret)))))

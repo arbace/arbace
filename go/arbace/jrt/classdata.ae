@@ -1,0 +1,591 @@
+;; jrt: the class file attributes reflection reads (F25, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As
+;; built: F25 (write-ahead)"; J2G-SPEC §12, amendment R16 reversed for them as F14 reversed it for
+;; declaration annotations).
+;;
+;; The closed world records them ahead of time beside the annotations, in the same data
+;; (ClassInfo.Annots; arbace.classes.annot/attribute-lines writes them for j2g and for the
+;; interpreter's host): one record a line, tokens separated by one space,
+;;   S SIG                    the class's Signature attribute (every class that has one)
+;;   K FLAGS KIND OUTER NAME  its InnerClasses entry: the inner class access flags (decimal), KIND m
+;;                            (member), l (local) or a (anonymous), OUTER the declaring class (m) or
+;;                            the enclosing class of EnclosingMethod (l, a), NAME the simple name (- for
+;;                            an anonymous class)
+;;   Q NAME DESC              its EnclosingMethod's method (DESC with binary names), when it has one
+;;   G M NAME DESC SIG        a method's Signature (the class's own members: a program's classes and
+;;   G C DESC SIG             the interpreter's, as the annotations of members, JCS211)
+;;   G F NAME SIG
+;;   E M NAME DESC T...       a method's or constructor's Exceptions attribute (binary names)
+;;   E C DESC T...
+;;   R NAME DESC [SIG]        JCS383 (a): a record class's component (its Record attribute; record.ae), in order
+;;   A NAME ANN               a component's annotation (decoded with the annotations, annotation.ae)
+;;   Y T HEX                  JCS271 (b): the class's RuntimeVisibleTypeAnnotations attribute (JVMS 4.7.20) as
+;;   Y M NAME DESC HEX        the class file holds it, its info's bytes in hex, and its methods', constructors'
+;;   Y C DESC HEX             and fields' (DESC with binary names), indexing the constant pool entries of the
+;;   Y F NAME HEX             N records
+;;   N u "TEXT" | N i INT | N j LONG | N f BITS | N d BITS
+;;                            the constant pool entries the Y records index (CONSTANT_Utf8, Integer, Long, Float
+;;                            and Double, the last two as their raw bits), in index order from 1, a Long or Double
+;;                            taking two indices; read by jdk.internal.jrt.TypeAnnotationData's natives below
+;;                            (jdk26u's TypeAnnotationParser and AnnotationParser over a ConstantPool of them)
+;; and decodes them on first use. What jdk26u's Class.java asks the VM (getSimpleBinaryName0,
+;; getDeclaringClass0, getEnclosingMethod0, getModifiers' InnerClasses flags, getGenericSignature0,
+;; JVM_GetDeclaredClasses) these answer, and Class's, Executable's and Field's Java over them is
+;; ported rule for rule below (java/lang/Class.java, java/lang/reflect/Executable.java, Method.java,
+;; Constructor.java, Field.java at jdk26u baf63fb). The generic members hand their Signature to
+;; jdk26u's sun.reflect.generics through jdk.internal.jrt.ReflectSupport (overlay; its stand-in in
+;; jrt's own build answers no repository, which is never asked: a declaration without a Signature
+;; answers as jdk26u's does without one, from the erased types).
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'go.arbace.jrt)
+
+(go/file "classdata.go"
+  :imports [[hex "encoding/hex"] [strconv "strconv"] [strings "strings"] [sort "sort"] [sync "sync"]])
+
+;; ---------------------------------------------------------------------------------------
+;; The decoded attributes
+
+(go/type classAttrs
+  "classAttrs: a class's decoded attributes (the data's S, K, Q, G and E records).\n"
+  (struct ^string sig
+          ^uint8 kind
+          ^int32 innerFlags
+          ^string outer
+          ^string simple
+          ^bool hasEM
+          ^string emName
+          ^string emDesc
+          ^{:tag (map string string) :doc "G records by key: M name desc, C desc, F name\n"} sigs
+          ^{:tag (map string (slice string)) :doc "E records by key: M name desc, C desc\n"} throws
+          ^{:tag (slice recordComp) :doc "R records: a record class's components in order (record.ae)\n"} comps))
+
+(go/var ^{:tag sync/Map :doc "classAttrsCache: *ClassInfo -> *classAttrs, decoded once.\n"} classAttrsCache)
+(go/var ^{:tag sync/Map :doc "genericRepos: *ClassInfo -> the class's ClassRepository (Class.genericInfo), or a member's by key.\n"} genericRepos)
+
+(go/type memberRepoKey (struct ^{:tag (* ClassInfo)} info ^string key))
+
+(go/func forgetClassAttrs
+  "forgetClassAttrs drops what was decoded from class info's earlier data (SetAnnotations).\n"
+  [^{:tag (* ClassInfo)} info]
+  (.Delete classAttrsCache info)
+  (.Delete genericRepos info)
+  ;; the members' repositories of info
+  (.Range genericRepos (fn ^bool [^any k ^any v]
+                         (let [(values mk ok) (assert memberRepoKey k)]
+                           (when (and ok (== (.-info mk) info))
+                             (.Delete genericRepos k)))
+                         true)))
+
+(go/var ^{:doc "handSignatures: the Signature attributes of jrt's hand-written generic classes, which no encoder
+writes (jdk26u's, as javap prints them, less the interfaces jrt's classes do not implement:
+Class's TypeDescriptor.OfField and Constable, Enum's Constable).\n"} handSignatures
+  (lit (map string string)
+       ["java.lang.Class" "<T:Ljava/lang/Object;>Ljava/lang/Object;Ljava/io/Serializable;Ljava/lang/reflect/GenericDeclaration;Ljava/lang/reflect/Type;Ljava/lang/reflect/AnnotatedElement;"]
+       ["java.lang.Enum" "<E:Ljava/lang/Enum<TE;>;>Ljava/lang/Object;Ljava/lang/Comparable<TE;>;Ljava/io/Serializable;"]
+       ["java.lang.ThreadLocal" "<T:Ljava/lang/Object;>Ljava/lang/Object;"]
+       ["java.lang.InheritableThreadLocal" "<T:Ljava/lang/Object;>Ljava/lang/ThreadLocal<TT;>;"]
+       ["java.lang.ref.Reference" "<T:Ljava/lang/Object;>Ljava/lang/Object;"]
+       ["java.lang.ref.WeakReference" "<T:Ljava/lang/Object;>Ljava/lang/ref/Reference<TT;>;"]
+       ["java.lang.ref.SoftReference" "<T:Ljava/lang/Object;>Ljava/lang/ref/Reference<TT;>;"]
+       ["java.lang.ref.PhantomReference" "<T:Ljava/lang/Object;>Ljava/lang/ref/Reference<TT;>;"]
+       ["java.lang.ref.ReferenceQueue" "<T:Ljava/lang/Object;>Ljava/lang/Object;"]
+       ["java.util.concurrent.atomic.AtomicReference" "<V:Ljava/lang/Object;>Ljava/lang/Object;Ljava/io/Serializable;"]
+       ["java.util.concurrent.Future" "<V:Ljava/lang/Object;>Ljava/lang/Object;"]
+       ["java.util.concurrent.ForkJoinTask" "<V:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/concurrent/Future<TV;>;Ljava/io/Serializable;"]
+       ["java.lang.reflect.Constructor" "<T:Ljava/lang/Object;>Ljava/lang/reflect/Executable;"]))
+
+(go/func attrsOf "attrsOf: c's decoded attributes.\n" ^{:tag (* classAttrs)} [^{:tag (* Class)} c]
+  (let [info (.-info c)
+        (values v ok) (.Load classAttrsCache info)]
+    (when ok (return (assert (* classAttrs) v)))
+    (let [d (addr (lit classAttrs :sigs (make (map string string)) :throws (make (map string (slice string)))))]
+      (when (!= (.-Annots info) "")
+        (range [_ line (strings/Split (.-Annots info) "\n")]
+          (when (> (len line) 2)
+            (let [p (addr (lit annParser :s line :i 2))]
+              (switch (aget line 0)
+                (case [\S] (set! (.-sig d) (.word p)))
+                (case [\K]
+                  (let [(values fl _) (strconv/Atoi (.word p))
+                        k (.word p)
+                        o (.word p)
+                        s (.word p)]
+                    (set! (.-innerFlags d) (conv int32 fl))
+                    (when (> (len k) 0) (set! (.-kind d) (aget k 0)))
+                    (when (!= o "-") (set! (.-outer d) o))
+                    (when (!= s "-") (set! (.-simple d) s))))
+                (case [\Q]
+                  (set! (.-hasEM d) true)
+                  (set! (.-emName d) (.word p))
+                  (set! (.-emDesc d) (.word p)))
+                (case [\G]
+                  (let [k (.word p)]
+                    (switch k
+                      (case ["M"] (let [n (.word p) ds (.word p)] (aset (.-sigs d) (+ "M " n " " ds) (.word p))))
+                      (case ["C"] (let [ds (.word p)] (aset (.-sigs d) (+ "C " ds) (.word p))))
+                      (case ["F"] (let [n (.word p)] (aset (.-sigs d) (+ "F " n) (.word p)))))))
+                (case [\R]
+                  (let [n (.word p) ds (.word p) sg (.word p)]
+                    (set! (.-comps d) (append (.-comps d) (lit recordComp :name n :desc ds :sig sg)))))
+                (case [\E]
+                  (let [k (.word p)
+                        key ""]
+                    (if (== k "M")
+                      (let [n (.word p) ds (.word p)] (set! key (+ "M " n " " ds)))
+                      (set! key (+ "C " (.word p))))
+                    (let [^{:tag (slice string)} ts nil]
+                      (while (< (.-i p) (len (.-s p)))
+                        (set! ts (append ts (.word p))))
+                      (aset (.-throws d) key ts)))))))))
+      (when (== (.-sig d) "")
+        (set! (.-sig d) (aget handSignatures (.-Name info))))
+      (let [(values w _) (.LoadOrStore classAttrsCache info d)]
+        (assert (* classAttrs) w)))))
+
+;; ---------------------------------------------------------------------------------------
+;; InnerClasses and EnclosingMethod (Class.java's isLocalOrAnonymousClass, getSimpleBinaryName0,
+;; getDeclaringClass0, getEnclosingMethodInfo)
+
+(go/method localOrAnonymous
+  "localOrAnonymous is Class.isLocalOrAnonymousClass: the class has an EnclosingMethod attribute.\n"
+  ^bool [^{:tag (* Class)} c]
+  (when (or (.IsArray__Z c) (.IsPrimitive__Z c)) (return false))
+  (let [a (attrsOf c)]
+    (or (== (.-kind a) \l) (== (.-kind a) \a))))
+
+(go/method innerFlagsOf
+  "innerFlagsOf: the class's InnerClasses flags, when it is a nested class the data describes.\n"
+  [^{:tag (* Class)} c] :results [^int32 flags ^bool ok]
+  (when (or (.IsArray__Z c) (.IsPrimitive__Z c)) (return 0 false))
+  (let [a (attrsOf c)]
+    (return (.-innerFlags a) (!= (.-kind a) 0))))
+
+(go/method enclosingClassOf
+  "enclosingClassOf: EnclosingMethod's class of a local or anonymous class (getEnclosingMethodInfo's
+enclosingClass), nil when the closed world has not it.\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} c]
+  (let [a (attrsOf c)]
+    (when (== (.-outer a) "") (return nil))
+    (ForName (.-outer a))))
+
+(go/method IsAnonymousClass__Z
+  "IsAnonymousClass__Z is Class.isAnonymousClass: !isArray() && isLocalOrAnonymousClass() &&
+getSimpleBinaryName0() == null.\n"
+  ^bool [^{:tag (* Class)} c]
+  (and (not (.IsArray__Z c)) (.localOrAnonymous c) (== (.-kind (attrsOf c)) \a)))
+
+(go/method IsLocalClass__Z
+  "IsLocalClass__Z is Class.isLocalClass: isLocalOrAnonymousClass() && (isArray() ||
+getSimpleBinaryName0() != null).\n"
+  ^bool [^{:tag (* Class)} c]
+  (and (.localOrAnonymous c) (== (.-kind (attrsOf c)) \l)))
+
+(go/method IsMemberClass__Z
+  "IsMemberClass__Z is Class.isMemberClass: !isLocalOrAnonymousClass() && getDeclaringClass0() != null.\n"
+  ^bool [^{:tag (* Class)} c]
+  (when (or (.IsArray__Z c) (.IsPrimitive__Z c)) (return false))
+  (let [k (.-kind (attrsOf c))]
+    (or (== k \m) (and (== k 0) (!= (.-Declaring (.-info c)) nil)))))
+
+(go/method GetEnclosingClass__Class
+  "GetEnclosingClass__Class is Class.getEnclosingClass: EnclosingMethod's class for a local or
+anonymous class, else the declaring class (ClassInfo.Declaring).\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} c]
+  (when (.localOrAnonymous c)
+    (return (.enclosingClassOf c)))
+  (.-Declaring (.-info c)))
+
+(go/method simpleBinaryName
+  "simpleBinaryName is Class.getSimpleBinaryName: null for a top-level class, \"\" for an
+anonymous one, else InnerClasses' inner name.\n"
+  [^{:tag (* Class)} c] :results [^string name ^bool ok]
+  (let [a (attrsOf c)]
+    (when (and (== (.-kind a) 0) (== (.-Declaring (.-info c)) nil))
+      (return "" false))
+    (when (== (.-kind a) \a) (return "" true))
+    (when (!= (.-simple a) "") (return (.-simple a) true))
+    (when (!= (.-Simple (.-info c)) "") (return (.-Simple (.-info c)) true))
+    (let [n (.-Name (.-info c))
+          i (strings/LastIndexByte n \$)]
+      (return (subslice n (+ i 1)) true))))
+
+(go/method GetSimpleName__String
+  "GetSimpleName__String is Class.getSimpleName (getSimpleName0): an array's component's and
+[]; the simple binary name of a nested class; a top-level class's name after its package.\n"
+  ^{:tag (* String)} [^{:tag (* Class)} c]
+  (when (.IsArray__Z c)
+    (return (Concat (.GetSimpleName__String (.-comp c)) (Str "[]"))))
+  (when (.IsPrimitive__Z c)
+    (return (Str (.-Name (.-info c)))))
+  (let [(values s ok) (.simpleBinaryName c)]
+    (when ok (return (Str s))))
+  (let [n (.-Name (.-info c))]
+    ;; jrt's hand-written nested classes (Thread$State): ClassInfo.Simple, else after the last $
+    (when (!= (.-Simple (.-info c)) "")
+      (return (Str (.-Simple (.-info c)))))
+    (Str (subslice n (+ (strings/LastIndexAny n ".$") 1)))))
+
+(go/method GetCanonicalName__String
+  "GetCanonicalName__String is Class.getCanonicalName (getCanonicalName0): an array's component's
+and []; null for a local or anonymous class (or one nested in it); a member class's enclosing
+class's and its simple name.\n"
+  ^{:tag (* String)} [^{:tag (* Class)} c]
+  (when (.IsArray__Z c)
+    (let [e (.GetCanonicalName__String (.-comp c))]
+      (when (== e nil)
+        (return nil))
+      (return (Concat e (Str "[]")))))
+  (when (.localOrAnonymous c)
+    (return nil))
+  (let [enc (.GetEnclosingClass__Class c)]
+    (when (== enc nil)
+      (return (.GetName__String c)))
+    (let [o (.GetCanonicalName__String enc)]
+      (when (== o nil)
+        (return nil))
+      (return (Concat o (Str ".") (.GetSimpleName__String c))))))
+
+(go/func descriptorParts
+  "descriptorParts: the parameter descriptors and the return descriptor of a method descriptor
+(binary names).\n"
+  [^string desc] :results [^{:tag (slice string)} params ^string ret]
+  (let [i 1]
+    (while (and (< i (len desc)) (!= (aget desc i) \)))
+      (let [j i]
+        (while (== (aget desc j) \[) (inc! j))
+        (if (== (aget desc j) \L)
+          (set! j (+ j (strings/IndexByte (subslice desc j) \;) 1))
+          (inc! j))
+        (set! params (append params (subslice desc i j)))
+        (set! i j)))
+    (return params (subslice desc (+ i 1)))))
+
+(go/method enclosingExecutable
+  "enclosingExecutable is Class.getEnclosingMethod's and getEnclosingConstructor's search: the
+declared method (name not <init>) or constructor (<init>) of EnclosingMethod's class whose
+parameter and return types are the descriptor's; nil when there is none.\n"
+  ^any [^{:tag (* Class)} c ^bool ctor]
+  (let [a (attrsOf c)]
+    (when (or (not (.localOrAnonymous c)) (not (.-hasEM a)))
+      (return nil))
+    (when (!= ctor (== (.-emName a) "<init>"))
+      (return nil))
+    (let [enc (.enclosingClassOf c)]
+      (when (== enc nil)
+        (return nil))
+      (let [(values ps r) (descriptorParts (.-emDesc a))
+            params (make (slice (* Class)) (len ps))]
+        (range [i p ps]
+          (let [pc (descClassOrNil p)]
+            (when (== pc nil) (return nil))
+            (aset params i pc)))
+        (if ctor
+          (let [ks (.GetDeclaredConstructors__Constructor1 enc)]
+            (range [_ x (.-A ks)]
+              (let [k (assert (* Constructor) x)]
+                (when (sameParams (.-params k) params)
+                  (return k)))))
+          (let [rc (descClassOrNil r)
+                ms (.GetDeclaredMethods__Method1 enc)]
+            (range [_ x (.-A ms)]
+              (let [m (assert (* Method) x)]
+                (when (and (== (.-Name (.-info m)) (.-emName a)) (sameParams (.-params m) params)
+                           (== (.-Return (.-info m)) rc))
+                  (return m))))))
+        (return nil)))))
+
+(go/method GetEnclosingMethod__Method
+  "GetEnclosingMethod__Method is Class.getEnclosingMethod.\n"
+  ^{:tag (* Method)} [^{:tag (* Class)} c]
+  (let [x (.enclosingExecutable c false)]
+    (when (== x nil) (return nil))
+    (assert (* Method) x)))
+
+(go/method GetEnclosingConstructor__Constructor
+  "GetEnclosingConstructor__Constructor is Class.getEnclosingConstructor.\n"
+  ^{:tag (* Constructor)} [^{:tag (* Class)} c]
+  (let [x (.enclosingExecutable c true)]
+    (when (== x nil) (return nil))
+    (assert (* Constructor) x)))
+
+(go/method GetDeclaredClasses__Class1
+  "GetDeclaredClasses__Class1 is Class.getDeclaredClasses (JVM_GetDeclaredClasses): the member
+classes of the closed world whose declaring class is c, by name (the InnerClasses attribute's
+order is javac's pool order, which the closed world does not keep); none for an array or a
+primitive type.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (let [^{:tag (slice (* Class))} out nil]
+    (when (and (not (.IsArray__Z c)) (not (.IsPrimitive__Z c)))
+      (.RLock registryMu)
+      (range [_ x registry]
+        (when (and (== (.-Declaring (.-info x)) c) (!= (.-Kind (.-info x)) KindArray))
+          (set! out (append out x))))
+      (.RUnlock registryMu)
+      (sort/Slice out (fn ^bool [^int i ^int j] (< (.-Name (.-info (aget out i))) (.-Name (.-info (aget out j)))))))
+    (classArray out)))
+
+(go/method GetClasses__Class1
+  "GetClasses__Class1 is Class.getClasses: the public member classes of c and its superclasses.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (let [^{:tag (slice (* Class))} out nil
+        cur c]
+    (while (!= cur nil)
+      (range [_ x (.-A (.GetDeclaredClasses__Class1 cur))]
+        (let [m (assert (* Class) x)]
+          (when (!= (bit-and (.GetModifiers__I m) AccPublic) 0)
+            (set! out (append out m)))))
+      (set! cur (.-Super (.-info cur))))
+    (classArray out)))
+
+;; ---------------------------------------------------------------------------------------
+;; Generic signatures (Class.getGenericInfo, Method's, Constructor's, Field's): the recorded
+;; Signature to jdk26u's repositories through ReflectSupport
+
+(go/method genericSignature
+  "genericSignature is Class.getGenericSignature0: the recorded Signature, or \"\".\n"
+  ^string [^{:tag (* Class)} c]
+  (when (or (.IsArray__Z c) (.IsPrimitive__Z c)) (return ""))
+  (.-sig (attrsOf c)))
+
+(go/method genericInfo
+  "genericInfo is Class.getGenericInfo: the class's ClassRepository, made once; nil without a
+Signature (ClassRepository.NONE).\n"
+  ^any [^{:tag (* Class)} c]
+  (let [sig (.genericSignature c)]
+    (when (== sig "") (return nil))
+    (let [(values v ok) (.Load genericRepos (.-info c))]
+      (when ok (return v))
+      (let [r (ReflectSupport_ClassRepository_Class_String__O c (Str sig))]
+        (when (== r nil) (return nil))
+        (let [(values w _) (.LoadOrStore genericRepos (.-info c) r)]
+          w)))))
+
+(go/func memberRepo
+  "memberRepo: the repository of a member (key: G's) made by mk from its Signature, kept by its
+class; nil without a Signature.\n"
+  ^any [^{:tag (* Class)} c ^string key ^{:tag (func [(* String)] [any])} mk]
+  (let [sig (aget (.-sigs (attrsOf c)) key)]
+    (when (== sig "") (return nil))
+    (let [k (lit memberRepoKey :info (.-info c) :key key)
+          (values v ok) (.Load genericRepos k)]
+      (when ok (return v))
+      (let [r (mk (Str sig))]
+        (when (== r nil) (return nil))
+        (let [(values w _) (.LoadOrStore genericRepos k r)]
+          w)))))
+
+(go/func typeArray
+  "typeArray: the result of a ReflectSupport call returning an array of Type (a RefArray).\n"
+  ^{:tag (* RefArray)} [^any x]
+  (assert (* RefArray) x))
+
+(go/method GetTypeParameters__TypeVariable1
+  "GetTypeParameters__TypeVariable1 is Class.getTypeParameters: the repository's, else none.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (let [r (.genericInfo c)]
+    (when (== r nil) (return (NewRefArray TypeVariable_class 0)))
+    (typeArray (ReflectSupport_TypeParameters_O__O r))))
+
+(go/method Is_GenericDeclaration [^{:tag (* Class)} c])
+
+(go/method GetGenericSuperclass__Type
+  "GetGenericSuperclass__Type is Class.getGenericSuperclass: the superclass without a Signature,
+null for an interface, else the repository's.\n"
+  ^Type [^{:tag (* Class)} c]
+  (let [r (.genericInfo c)]
+    (when (== r nil)
+      (let [s (.-Super (.-info c))]
+        (when (== s nil) (return nil))
+        (return s)))
+    (let [t (ReflectSupport_GenericSuperclass_Class_O__O c r)]
+      (when (== t nil) (return nil))
+      (assert Type t))))
+
+(go/method GetGenericInterfaces__Type1
+  "GetGenericInterfaces__Type1 is Class.getGenericInterfaces: the interfaces without a Signature,
+else the repository's.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (let [r (.genericInfo c)]
+    (when (== r nil)
+      (let [is (.-Interfaces (.-info c))
+            a (NewRefArray Type_class (conv int32 (len is)))]
+        (range [i x is]
+          (aset (.-A a) i x))
+        (return a)))
+    (typeArray (ReflectSupport_GenericInterfaces_O__O r))))
+
+(go/method ToGenericString__String
+  "ToGenericString__String is Class.toGenericString (ReflectSupport, jdk26u's).\n"
+  ^{:tag (* String)} [^{:tag (* Class)} c]
+  (ReflectSupport_ClassToGenericString_Class__String c))
+
+;; ---- Method, Constructor (Executable)
+
+(go/method sigKey ^string [^{:tag (* Method)} m]
+  (+ "M " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m)))))
+(go/method sigKey ^string [^{:tag (* Constructor)} k]
+  (+ "C " (subslice (methodKey "" (.-params k) nil) 1)))
+
+(go/method genericInfo "genericInfo is Method.getGenericInfo: nil without a Signature.\n"
+  ^any [^{:tag (* Method)} m]
+  (memberRepo (.-clazz m) (.sigKey m)
+              (fn ^any [^{:tag (* String)} s] (ReflectSupport_MethodRepository_Method_String__O m s))))
+(go/method genericInfo "genericInfo is Constructor.getGenericInfo: nil without a Signature.\n"
+  ^any [^{:tag (* Constructor)} k]
+  (memberRepo (.-clazz k) (.sigKey k)
+              (fn ^any [^{:tag (* String)} s] (ReflectSupport_ConstructorRepository_Constructor_String__O k s))))
+
+(go/func throwsClasses
+  "throwsClasses: the recorded Exceptions attribute as classes (one outside the closed world left
+out).\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} c ^string key]
+  (let [^{:tag (slice (* Class))} out nil]
+    (range [_ n (aget (.-throws (attrsOf c)) key)]
+      (let [x (ForName n)]
+        (when (!= x nil) (set! out (append out x)))))
+    (classArray out)))
+
+(go/method GetExceptionTypes__Class1
+  "GetExceptionTypes__Class1 is Method.getExceptionTypes: the recorded Exceptions attribute.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Method)} m]
+  (throwsClasses (.-clazz m) (.sigKey m)))
+(go/method GetExceptionTypes__Class1
+  "GetExceptionTypes__Class1 is Constructor.getExceptionTypes: the recorded Exceptions attribute.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Constructor)} k]
+  (throwsClasses (.-clazz k) (.sigKey k)))
+
+(go/func throwsClause
+  "throwsClause: sharedToString's \" throws A,B\", or \"\".\n"
+  ^string [^{:tag (* RefArray)} ts]
+  (when (== (len (.-A ts)) 0) (return ""))
+  (let [ns (make (slice string) (len (.-A ts)))]
+    (range [i x (.-A ts)]
+      (aset ns i (typeName (assert (* Class) x))))
+    (+ " throws " (strings/Join ns ","))))
+
+(go/method GetTypeParameters__TypeVariable1
+  "GetTypeParameters__TypeVariable1 is Method.getTypeParameters.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Method)} m]
+  (let [r (.genericInfo m)]
+    (when (== r nil) (return (NewRefArray TypeVariable_class 0)))
+    (typeArray (ReflectSupport_TypeParameters_O__O r))))
+(go/method GetTypeParameters__TypeVariable1
+  "GetTypeParameters__TypeVariable1 is Constructor.getTypeParameters.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Constructor)} k]
+  (let [r (.genericInfo k)]
+    (when (== r nil) (return (NewRefArray TypeVariable_class 0)))
+    (typeArray (ReflectSupport_TypeParameters_O__O r))))
+
+(go/method Is_GenericDeclaration [^{:tag (* Executable)} e])
+
+(go/method GetGenericReturnType__Type
+  "GetGenericReturnType__Type is Method.getGenericReturnType.\n"
+  ^Type [^{:tag (* Method)} m]
+  (let [r (.genericInfo m)]
+    (when (== r nil) (return (.-Return (.-info m))))
+    (assert Type (ReflectSupport_GenericReturnType_O__O r))))
+
+(go/func genericParams ^{:tag (* RefArray)} [^any r ^{:tag (slice (* Class))} params]
+  (when (== r nil)
+    (let [a (NewRefArray Type_class (conv int32 (len params)))]
+      (range [i p params] (aset (.-A a) i p))
+      (return a)))
+  (typeArray (ReflectSupport_GenericParameterTypes_O__O r)))
+
+(go/func genericThrows
+  "genericThrows is Executable.getGenericExceptionTypes: the repository's when it has some, else
+getExceptionTypes.\n"
+  ^{:tag (* RefArray)} [^any r ^{:tag (* RefArray)} plain]
+  (when (!= r nil)
+    (let [g (typeArray (ReflectSupport_GenericExceptionTypes_O__O r))]
+      (when (> (len (.-A g)) 0) (return g))))
+  (let [a (NewRefArray Type_class (conv int32 (len (.-A plain))))]
+    (range [i p (.-A plain)] (aset (.-A a) i p))
+    a))
+
+(go/method GetGenericParameterTypes__Type1
+  "GetGenericParameterTypes__Type1 is Executable.getGenericParameterTypes.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Method)} m]
+  (genericParams (.genericInfo m) (.-params m)))
+(go/method GetGenericParameterTypes__Type1
+  "GetGenericParameterTypes__Type1 is Executable.getGenericParameterTypes.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Constructor)} k]
+  (genericParams (.genericInfo k) (.-params k)))
+
+(go/method GetGenericExceptionTypes__Type1 ^{:tag (* RefArray)} [^{:tag (* Method)} m]
+  (genericThrows (.genericInfo m) (.GetExceptionTypes__Class1 m)))
+(go/method GetGenericExceptionTypes__Type1 ^{:tag (* RefArray)} [^{:tag (* Constructor)} k]
+  (genericThrows (.genericInfo k) (.GetExceptionTypes__Class1 k)))
+
+(go/method ToGenericString__String
+  "ToGenericString__String is Method.toGenericString (ReflectSupport, jdk26u's).\n"
+  ^{:tag (* String)} [^{:tag (* Method)} m]
+  (ReflectSupport_MethodToGenericString_Method__String m))
+(go/method ToGenericString__String
+  "ToGenericString__String is Constructor.toGenericString (ReflectSupport, jdk26u's).\n"
+  ^{:tag (* String)} [^{:tag (* Constructor)} k]
+  (ReflectSupport_ConstructorToGenericString_Constructor__String k))
+
+;; ---- Field
+
+(go/method genericInfo "genericInfo is Field.getGenericInfo: nil without a Signature.\n"
+  ^any [^{:tag (* Field)} f]
+  (memberRepo (.-clazz f) (+ "F " (.-Name (.-info f)))
+              (fn ^any [^{:tag (* String)} s] (ReflectSupport_FieldRepository_Field_String__O f s))))
+
+(go/method GetGenericType__Type
+  "GetGenericType__Type is Field.getGenericType.\n"
+  ^Type [^{:tag (* Field)} f]
+  (let [r (.genericInfo f)]
+    (when (== r nil) (return (.-Type (.-info f))))
+    (assert Type (ReflectSupport_GenericType_O__O r))))
+
+(go/method ToGenericString__String
+  "ToGenericString__String is Field.toGenericString (ReflectSupport, jdk26u's).\n"
+  ^{:tag (* String)} [^{:tag (* Field)} f]
+  (ReflectSupport_FieldToGenericString_Field__String f))
+
+;; ---------------------------------------------------------------------------------------
+;; JCS271 (b): type annotations as the class file holds them (the Y and N records), for jdk.internal.jrt.
+;; TypeAnnotationData (overlay: what HotSpot's JVM_GetClassTypeAnnotations, JVM_GetMethodTypeAnnotations,
+;; JVM_GetFieldTypeAnnotations and JVM_GetClassConstantPool give jdk26u's TypeAnnotationParser)
+
+(go/func TypeAnnotationData_Bytes0_Class_String__B1_native
+  "TypeAnnotationData_Bytes0_Class_String__B1_native is the RuntimeVisibleTypeAnnotations info of c's Y record
+for key (T, M NAME DESC, C DESC, F NAME), or null when it has none.\n"
+  ^{:tag (* ByteArray)} [^{:tag (* Class)} c ^{:tag (* String)} key]
+  (let [k (.String (NN key))
+        info (.-info (NN c))]
+    (range [_ line (strings/Split (.-Annots info) "\n")]
+      (when (strings/HasPrefix line "Y ")
+        (let [r (subslice line 2)
+              i (strings/LastIndexByte r \space)]
+          (when (and (> i 0) (== (subslice r _ i) k))
+            (let [(values b err) (hex/DecodeString (subslice r (+ i 1)))]
+              (when (!= err nil) (return nil))
+              (let [a (NewByteArray (conv int32 (len b)))]
+                (range [j x b] (aset (.-A a) j (conv int8 x)))
+                (return a)))))))
+    nil))
+
+(go/func TypeAnnotationData_Pool0_Class__O1_native
+  "TypeAnnotationData_Pool0_Class__O1_native is c's constant pool entries the Y records index (the N records),
+by index (0 and a Long's or Double's second index null): a String, an Integer (an Integer's value or a Float's
+raw bits) or a Long (a Long's value or a Double's raw bits).\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (let [info (.-info (NN c))
+        es (make (slice any) 1)]
+    (range [_ line (strings/Split (.-Annots info) "\n")]
+      (when (strings/HasPrefix line "N ")
+        (let [p (addr (lit annParser :s line :i 2))
+              t (.word p)]
+          (switch t
+            (case ["u"] (set! es (append es (.stringValue p))))
+            (case ["i" "f"]
+              (let [(values v _) (strconv/ParseInt (.word p) 10 64)]
+                (set! es (append es (Integer_ValueOf_I__Integer (conv int32 v))))))
+            (case ["j" "d"]
+              (let [(values v _) (strconv/ParseInt (.word p) 10 64)]
+                (set! es (append es (Long_ValueOf_J__Long v) nil))))))))
+    (let [a (NewRefArray Object_class (conv int32 (len es)))]
+      (range [i x es] (aset (.-A a) i x))
+      a)))

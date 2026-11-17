@@ -623,6 +623,15 @@
                                 (kv? (first es)) (recur (next es) (conj acc (keyword (ident-name (first (first es)))) (second (first es))))
                                 :else (recur (next es) (conj acc (first es)))))
                             :else elems)
+                    ;; the keys' positions (types2 reports at the key): a [k v] key's own, else mode
+                    ;; :full's :go/apos of a keyword in the literal
+                    key-form (fn [j]
+                               (let [oe (vec (nnext f))]
+                                 (if (every? kv? oe)
+                                   (first (nth oe j nil))
+                                   (when-let [[l c] (get (:go/apos (meta f)) (+ 2 (* 2 j)))]
+                                     (when (and (keyword? (nth f (+ 2 (* 2 j)) nil)) l)
+                                       (with-meta [] {:line l :go/pos {:name-pos [l c]}}))))))
                     keyed (and (seq elems) (or (keyword? (first elems)) (map? (first elems))))
                     ;; the resolve mode: the literal's elements as written (^:go/key [k v]), the
                     ;; keys' fields, answered as the helper finds them (its
@@ -651,7 +660,7 @@
                                        direct (when (not= "_" nm) (some (fn [[i fd]] (when (and (= nm (:name fd))) i)) (map-indexed vector fields)))]
                                    (cond
                                      (and (nil? direct) (or (nil? r) (not= :field (:kind r))))
-                                     (do (err! vf :MissingLitField "unknown field %s in struct literal of type %s" nm (t/type-str T))
+                                     (do (err! (let [kf (key-form j)] (if (e/line-of kf) kf vf)) :MissingLitField "unknown field %s in struct literal of type %s" nm (t/type-str T))
                                          (expr cx vf) nil)
                                      (and (nil? direct) (not (allow-version? cx 27)))
                                      (do (err! vf :MissingLitField "unknown field %s in struct literal of type %s" nm (t/type-str T))
@@ -707,9 +716,10 @@
                                               (err! vf :InvalidStructLit "too many values in struct literal of type %s" (t/type-str T)))
                                             nil)))))
                                       (take (inc (count fields)) elems)))]
-                      ;; go/types: at the closing brace, whose line the forms do not keep
+                      ;; go/types: at the closing brace, whose line mode :full keeps (its :rbrace, raw-lines'
+                      ;; :go/end), mode :lines not
                       (when (and (seq elems) (< (count elems) (count fields)))
-                        (err! f :InvalidStructLit "too few values in struct literal of type %s%s" (t/type-str T)
+                        (err! (if-let [l (:go/end (meta f))] (with-meta [] {:line l}) f) :InvalidStructLit "too few values in struct literal of type %s%s" (t/type-str T)
                               (if (some #(and (:pkg %) (not= (:pkg %) (pkg-path))) fields)
                                 " (type has unexported fields - use key:value pairs)" "")))
                       {:op :lit :kind :struct :to T :fields (vec (remove nil? nodes)) :mode :value :type T :form f :line (fline f)}))))
@@ -1617,12 +1627,33 @@
     (vector? f) (do (err! f :InvalidSyntaxTree "unexpected list of expressions") (invalid f))
     :else (or (literal f) (do (err! f :InvalidSyntaxTree "not an expression: %s" (pr-str f)) (invalid f)))))
 
+(defn- lang-compat!
+  "types2's langCompat: a numeric literal's spelling (mode :full's text) that needs go1.13."
+  [cx f ^String s]
+  (when (and s (> (count s) 2) (not (allow-version? cx 13)) (not (str/starts-with? s "\"")) (not (str/starts-with? s "'")))
+    (let [r (.charAt s 1)
+          int-lit (and (not (str/ends-with? s "i")) (not (re-find #"[.pP]" s)))]
+      (cond
+        (str/includes? s "_") (err! f :UnsupportedFeature "underscore in numeric literal requires go1.13 or later")
+        (not= \0 (.charAt s 0)) nil
+        (#{\b \B} r) (err! f :UnsupportedFeature "binary literal requires go1.13 or later")
+        (#{\o \O} r) (err! f :UnsupportedFeature "0o/0O-style octal literal requires go1.13 or later")
+        (and (#{\x \X} r) (not int-lit)) (err! f :UnsupportedFeature "hexadecimal floating-point literal requires go1.13 or later")))))
+
 (defn expr-internal
   "An expression, type or builtin of any mode; hint: the element type for an elided
   composite literal."
   [cx f hint]
   (with-line f
-    (let [n (expr-dispatch cx f hint)
+    (let [n (if (instance? arbace.lang.IMeta f)
+              (with-lit-parent f (expr-dispatch cx f hint))
+              (let [n (expr-dispatch cx f hint)
+                    ;; a literal's spelling (mode :full): its parent's :go/atext
+                    t (when (and *lit-parent* (map? n)) (lit-text *lit-parent* f))]
+                (when (and t (number? f)) (lang-compat! cx f t))
+                (if t (assoc n :text t) n)))
+          _ (when (and (seq? f) (#{"imaginary"} (head-name f)) (:go/text (meta f)))
+              (lang-compat! cx f (:go/text (meta f))))
           n (if (and (map? n) (nil? (:form n))) (assoc n :form f) n)]
       ;; the resolve mode: what go/types records (not an invalid operand's)
       (when (and e/*answers* (not= :invalid (:mode n))) (e/answer! f {:mode (:mode n) :type (:type n) :val (:val n)}))

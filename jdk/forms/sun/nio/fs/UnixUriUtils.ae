@@ -1,0 +1,176 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/fs/UnixUriUtils.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io File)
+        '(java.net URI URISyntaxException)
+        '(java.nio.file Path)
+        '(java.util Arrays HexFormat))
+
+(defclass UnixUriUtils
+  (constructor ^:private [this])
+
+  (method ^:static fromUri ^Path [^UnixFileSystem fs ^URI uri]
+    (when-not (.isAbsolute uri) (throw (IllegalArgumentException. "URI is not absolute")))
+    (when (.isOpaque uri) (throw (IllegalArgumentException. "URI is not hierarchical")))
+    (let [scheme (.getScheme uri)]
+      (when (or (nil? scheme) (not (.equalsIgnoreCase scheme "file")))
+        (throw (IllegalArgumentException. "URI scheme is not \"file\"")))
+      (when (some? (.getRawAuthority uri))
+        (throw (IllegalArgumentException. "URI has an authority component")))
+      (when (some? (.getRawFragment uri))
+        (throw (IllegalArgumentException. "URI has a fragment component")))
+      (when (some? (.getRawQuery uri))
+        (throw (IllegalArgumentException. "URI has a query component")))
+      (if (not (.startsWith (.toString uri) "file:///"))
+          (.toPath (File. uri))
+          (let [p (.getRawPath uri)
+                ^:mutable len (.length p)]
+            (when (== len 0) (throw (IllegalArgumentException. "URI path component is empty")))
+            (when (and (.endsWith p "/") (> len 1)) (set! len (unchecked-dec-int len)))
+            (let [^:mutable result (new byte/1 len)
+                  ^:mutable ^int rlen 0
+                  ^:mutable ^int pos 0]
+              (while (< pos len)
+                (let [c (.charAt p (let [old-1 pos] (set! pos (unchecked-inc-int pos)) old-1))
+                      ^:mutable ^byte b 0]
+                  (if (== c \%)
+                      (do
+                        (java-assert (<= (unchecked-add-int pos 2) len))
+                        (let [c1 (.charAt
+                                   p
+                                   (let [old-2 pos] (set! pos (unchecked-inc-int pos)) old-2))
+                              c2 (.charAt
+                                   p
+                                   (let [old-3 pos] (set! pos (unchecked-inc-int pos)) old-3))]
+                          (set! b
+                                (unchecked-byte
+                                  (bit-or-int (bit-shift-left-int (UnixUriUtils/decode c1) 4)
+                                              (UnixUriUtils/decode c2))))
+                          (when (== b 0)
+                            (throw (IllegalArgumentException. "Nul character not allowed")))))
+                      (do
+                        (when (or (== c 0) (>= c 0x80))
+                          (throw (IllegalArgumentException. "Bad escape")))
+                        (set! b (unchecked-byte c))))
+                  (when-not (and (and (== b \/) (> rlen 0))
+                                 (== (aget result (unchecked-subtract-int rlen 1)) \/))
+                    (aset result rlen b)
+                    (set! rlen (unchecked-inc-int rlen)))))
+              (when-not (== rlen (alength result)) (set! result (Arrays/copyOf result rlen)))
+              (UnixPath. fs result))))))
+
+  (method ^:static toUri ^URI [^UnixPath up]
+    (let [path (.asByteArray (.toAbsolutePath up))
+          sb (StringBuilder. "file:///")]
+      (java-assert (== (aget path 0) \/))
+      (let [hex (.withUpperCase (HexFormat/of))]
+        (loop [^int i 1]
+          (when (< i (alength path))
+            (let [c (unchecked-char (bit-and-int (aget path i) 0xff))]
+              (if (UnixUriUtils/match c L_PATH H_PATH)
+                  (do (.append sb c) (recur (unchecked-inc-int i)))
+                  (do
+                    (.append sb \%)
+                    (.toHexDigits hex sb (unchecked-byte c))
+                    (recur (unchecked-inc-int i)))))))
+        (when-not (== (.charAt sb (unchecked-subtract-int (.length sb) 1)) \/)
+          (try
+            (let [attrs (UnixFileAttributes/getIfExists up)]
+              (when (and
+                      (some? attrs)
+                      (== (bit-and-int (.mode attrs) UnixConstants/S_IFMT) UnixConstants/S_IFDIR))
+                (.append sb \/)))
+            (catch UnixException ignore)))
+        (try (URI. (.toString sb)) (catch URISyntaxException x (throw (AssertionError. x)))))))
+
+  (method ^:private ^:static lowMask ^long [^String chars]
+    (let [n (.length chars)
+          ^:mutable m 0]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [c (.charAt chars i)]
+            (if (< c 64)
+                (do (set! m (bit-or m (bit-shift-left 1 c))) (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i))))))
+      m))
+
+  (method ^:private ^:static highMask ^long [^String chars]
+    (let [n (.length chars)
+          ^:mutable m 0]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [c (.charAt chars i)]
+            (if (and (>= c 64) (< c 128))
+                (do
+                  (set! m (bit-or m (bit-shift-left 1 (unchecked-subtract-int c 64))))
+                  (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i))))))
+      m))
+
+  (method ^:private ^:static lowMask ^long [^char first ^char last]
+    (let [^:mutable m 0
+          f (^[long int int] Math/clamp first 0 63)
+          l (^[long int int] Math/clamp last 0 63)]
+      (loop [^int i f]
+        (when (<= i l) (set! m (bit-or m (bit-shift-left 1 i))) (recur (unchecked-inc-int i))))
+      m))
+
+  (method ^:private ^:static highMask ^long [^char first ^char last]
+    (let [^:mutable m 0
+          f (unchecked-subtract-int (^[long int int] Math/clamp first 64 127) 64)
+          l (unchecked-subtract-int (^[long int int] Math/clamp last 64 127) 64)]
+      (loop [^int i f]
+        (when (<= i l) (set! m (bit-or m (bit-shift-left 1 i))) (recur (unchecked-inc-int i))))
+      m))
+
+  (method ^:private ^:static match ^boolean [^char c ^long lowMask ^long highMask]
+    (cond
+      (< c 64) (not (== (bit-and (bit-shift-left 1 c) lowMask) 0))
+      (< c 128) (not (== (bit-and (bit-shift-left 1 (unchecked-subtract-int c 64)) highMask) 0))
+      :else false))
+
+  (method ^:private ^:static decode ^int [^char c]
+    (cond
+      (and (>= c \0) (<= c \9)) (unchecked-subtract-int c \0)
+      (and (>= c \a) (<= c \f)) (unchecked-add-int (unchecked-subtract-int c \a) 10)
+      (and (>= c \A) (<= c \F)) (unchecked-add-int (unchecked-subtract-int c \A) 10)
+      :else (throw (AssertionError.))))
+
+  (field ^:private ^:static ^:final ^long L_DIGIT (UnixUriUtils/lowMask \0 \9))
+
+  (field ^:private ^:static ^:final ^long H_DIGIT 0)
+
+  (field ^:private ^:static ^:final ^long L_UPALPHA 0)
+
+  (field ^:private ^:static ^:final ^long H_UPALPHA (UnixUriUtils/highMask \A \Z))
+
+  (field ^:private ^:static ^:final ^long L_LOWALPHA 0)
+
+  (field ^:private ^:static ^:final ^long H_LOWALPHA (UnixUriUtils/highMask \a \z))
+
+  (field ^:private ^:static ^:final ^long L_ALPHA (bit-or L_LOWALPHA L_UPALPHA))
+
+  (field ^:private ^:static ^:final ^long H_ALPHA (bit-or H_LOWALPHA H_UPALPHA))
+
+  (field ^:private ^:static ^:final ^long L_ALPHANUM (bit-or L_DIGIT L_ALPHA))
+
+  (field ^:private ^:static ^:final ^long H_ALPHANUM (bit-or H_DIGIT H_ALPHA))
+
+  (field ^:private ^:static ^:final ^long L_MARK (UnixUriUtils/lowMask "-_.!~*'()"))
+
+  (field ^:private ^:static ^:final ^long H_MARK (UnixUriUtils/highMask "-_.!~*'()"))
+
+  (field ^:private ^:static ^:final ^long L_UNRESERVED (bit-or L_ALPHANUM L_MARK))
+
+  (field ^:private ^:static ^:final ^long H_UNRESERVED (bit-or H_ALPHANUM H_MARK))
+
+  (field ^:private ^:static ^:final ^long L_PCHAR
+    (bit-or L_UNRESERVED (UnixUriUtils/lowMask ":@&=+$,")))
+
+  (field ^:private ^:static ^:final ^long H_PCHAR
+    (bit-or H_UNRESERVED (UnixUriUtils/highMask ":@&=+$,")))
+
+  (field ^:private ^:static ^:final ^long L_PATH (bit-or L_PCHAR (UnixUriUtils/lowMask ";/")))
+
+  (field ^:private ^:static ^:final ^long H_PATH (bit-or H_PCHAR (UnixUriUtils/highMask ";/"))))

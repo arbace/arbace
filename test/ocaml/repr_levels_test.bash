@@ -13,14 +13,20 @@ expect() { # NAME WANT-STATUS REGEX OUTPUT STATUS
 tool() { ARBACE_PATH=$root GOMEMLIMIT=1500MiB GOMAXPROCS=4 "$exe" -m arbace.repr.ocaml "$@" 2>&1; }
 
 printf 'let x = 1\n' > "$W/x.ml"
-"$OCD" --file x.ml "$W/x.ml" > "$W/o/x.ml.ae"
+# the file's forms by the native reader (OC181 (a): the fixtures need no toolchain; ocdump's dump is the same text, native-check's)
+ARBACE_PATH=$root GOMEMLIMIT=1500MiB GOMAXPROCS=2 "$exe" -m arbace.repr.ocaml.native read --out "$W/o" "$W/x.ml" > "$W/native-read.log" 2>&1 \
+  || { echo "FAIL the native read of x.ml"; cat "$W/native-read.log"; exit 1; }
+[ -f "$W/o/x.ml.ae" ] || { echo "FAIL the native read wrote no $W/o/x.ml.ae"; ls "$W/o"; exit 1; }
 
 # floors: the function of bin/repr-ocaml
 FLOORS=$W/floors.tsv; eval "$(sed -n '/^floor() {/,/^}/p' "$root/bin/repr-ocaml")"
+# with the default corpora's lists it reads (re-review 042's finding 3)
+eval "$(grep -E '^DEFAULT_(DUMPS|RT)_CORPORA=' "$root/bin/repr-ocaml")"
 RECORD=1 floor cmi-compiled demo 10 > /dev/null
 out=$(floor cmi-compiled demo 10); expect "floor: the recorded count passes" 0 '^$' "$out" $?
 out=$(floor cmi-compiled demo 9); expect "floor: a drop fails" 1 'below the recorded 10' "$out" $?
-out=$(floor cmi-compiled other 9); expect "floor: no count recorded fails" 1 'no count recorded' "$out" $?
+# a corpus of the default invocations with no row (re-review 030's finding 2: another corpus is not checked, floors_test's case)
+out=$(floor cmi-compiled stdlib 9); expect "floor: no count recorded fails" 1 'no count recorded' "$out" $?
 
 # compare --record: a file the printer did not print is not recorded
 echo '{}' > "$W/known.edn"
@@ -47,9 +53,12 @@ mkdir -p "$W/empty"
 out=$("$exe" "$root/test/ocaml/spec_check.ae" "$W/empty" 2>&1); st=$?
 expect "spec-check: no entries is a failure" 1 'no entries extracted' "$out" $st
 
+# dumps (bin/repr-ocaml dumps, ocdump's Lambda: the oracle tier's): left out under OI_JUDGES_NO_HOST (bin/oi judges-test --fixtures)
+if [ -z "${OI_JUDGES_NO_HOST:-}" ]; then
 # dumps: a listed file whose dump is no longer an error is reported
 (cd "$W" && "$OCD" --mode lambda --simplify --file x.ml x.ml > d1/x.ml.lambda.ae && cp d1/x.ml.lambda.ae d2/x.ml.lambda.ae)
 printf '{:lambda {"x.ml" :shadowed}}\n' > "$W/dk.edn"
 out=$(tool dumps --mode lambda --root "$W/d1" --again "$W/d2" --known "$W/dk.edn"); st=$?
 expect "dumps: a listed file that no longer errs fails" 1 'no longer an error' "$out" $st
+else echo "skip the dumps case (OI_JUDGES_NO_HOST: ocdump, the oracle tier's)"; fi
 exit $bad

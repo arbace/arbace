@@ -1,0 +1,301 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/ECDHKeyExchange.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.security AlgorithmConstraints
+                        CryptoPrimitive
+                        GeneralSecurityException
+                        KeyFactory
+                        KeyPairGenerator
+                        PrivateKey
+                        PublicKey
+                        SecureRandom)
+        '(java.security.interfaces ECPublicKey)
+        '(java.security.spec ECParameterSpec ECPublicKeySpec)
+        '(java.util EnumSet)
+        '(javax.crypto KeyAgreement SecretKey)
+        '(javax.net.ssl SSLHandshakeException)
+        '(sun.security.util ECUtil))
+
+(defclass ^:final ECDHKeyExchange
+  (field ^:static ^:final ^SSLPossessionGenerator poGenerator (ECDHEPossessionGenerator.))
+
+  (field ^:static ^:final ^SSLKeyAgreementGenerator ecdhKAGenerator (ECDHKAGenerator.))
+
+  (field ^:static ^:final ^SSLKeyAgreementGenerator ecdheKAGenerator (ECDHEKAGenerator.))
+
+  (field ^:static ^:final ^SSLKeyAgreementGenerator ecdheXdhKAGenerator (ECDHEXDHKAGenerator.))
+
+  (defclass ^:static ^:final ECDHECredentials
+    :implements [NamedGroupCredentials]
+
+    (field ^:final ^ECPublicKey popPublicKey)
+
+    (field ^:final ^NamedGroup namedGroup)
+
+    (constructor [this ^ECPublicKey popPublicKey ^NamedGroup namedGroup]
+      (set! (.-popPublicKey this) popPublicKey)
+      (set! (.-namedGroup this) namedGroup))
+
+    (method ^:public getPublicKey ^PublicKey [this] popPublicKey)
+
+    (method ^:public getNamedGroup ^NamedGroup [this] namedGroup)
+
+    (method ^:static valueOf :throws [IOException GeneralSecurityException] ^ECDHECredentials [^NamedGroup namedGroup
+                                                                                               ^byte/1 encodedPoint]
+      (when-not (identical? (.-spec namedGroup) NamedGroup$NamedGroupSpec/NAMED_GROUP_ECDHE)
+        (throw (RuntimeException. "Credentials decoding:  Not ECDHE named group")))
+      (when-not (or (nil? encodedPoint) (== (alength encodedPoint) 0))
+        (let [parameters (cast ECParameterSpec (.-keAlgParamSpec namedGroup))
+              point (ECUtil/decodePoint encodedPoint (.getCurve parameters))
+              factory (KeyFactory/getInstance "EC")
+              publicKey (cast ECPublicKey
+                              (.generatePublic factory (ECPublicKeySpec. point parameters)))]
+          (ECDHECredentials. publicKey namedGroup)))))
+
+  (defclass ^:static ^:final ECDHEPossession
+    :implements [NamedGroupPossession]
+
+    (field ^:final ^PrivateKey privateKey)
+
+    (field ^:final ^ECPublicKey publicKey)
+
+    (field ^:final ^NamedGroup namedGroup)
+
+    (constructor [this ^NamedGroup namedGroup ^SecureRandom random]
+      (try
+        (let [kpg (KeyPairGenerator/getInstance "EC")]
+          (.initialize kpg (.-keAlgParamSpec namedGroup) random)
+          (let [kp (.generateKeyPair kpg)]
+            (set! privateKey (.getPrivate kp))
+            (set! publicKey (cast ECPublicKey (.getPublic kp)))))
+        (catch GeneralSecurityException e
+          (throw (RuntimeException. "Could not generate ECDH keypair" e))))
+      (set! (.-namedGroup this) namedGroup))
+
+    (constructor [this ^ECDHECredentials credentials ^SecureRandom random]
+      (let [params (.getParams (.-popPublicKey credentials))]
+        (try
+          (let [kpg (KeyPairGenerator/getInstance "EC")]
+            (.initialize kpg params random)
+            (let [kp (.generateKeyPair kpg)]
+              (set! privateKey (.getPrivate kp))
+              (set! publicKey (cast ECPublicKey (.getPublic kp)))))
+          (catch GeneralSecurityException e
+            (throw (RuntimeException. "Could not generate ECDH keypair" e))))
+        (set! (.-namedGroup this) (.-namedGroup credentials))))
+
+    (method ^:public encode ^byte/1 [this]
+      (ECUtil/encodePoint (.getW publicKey) (.getCurve (.getParams publicKey))))
+
+    (method getAgreedSecret :throws [SSLHandshakeException] ^SecretKey [this
+                                                                        ^PublicKey peerPublicKey]
+      (try
+        (let [ka (KeyAgreement/getInstance "ECDH")]
+          (.init ka privateKey)
+          (.doPhase ka peerPublicKey true)
+          (.generateSecret ka "TlsPremasterSecret"))
+        (catch GeneralSecurityException e
+          (throw (SSLHandshakeException. "Could not generate secret" e)))))
+
+    (method getAgreedSecret :throws [SSLHandshakeException] ^SecretKey [this ^byte/1 encodedPoint]
+      (try
+        (let [params (.getParams publicKey)
+              point (ECUtil/decodePoint encodedPoint (.getCurve params))
+              kf (KeyFactory/getInstance "EC")
+              spec (ECPublicKeySpec. point params)
+              peerPublicKey (.generatePublic kf spec)]
+          (.getAgreedSecret this peerPublicKey))
+        (catch [GeneralSecurityException IOException] e
+          (throw (SSLHandshakeException. "Could not generate secret" e)))))
+
+    (method checkConstraints :throws [SSLHandshakeException] ^void [this
+                                                                    ^AlgorithmConstraints constraints
+                                                                    ^byte/1 encodedPoint]
+      (try
+        (let [params (.getParams publicKey)
+              point (ECUtil/decodePoint encodedPoint (.getCurve params))
+              spec (ECPublicKeySpec. point params)
+              kf (KeyFactory/getInstance "EC")
+              pubKey (cast ECPublicKey (.generatePublic kf spec))]
+          (when-not (.permits constraints (EnumSet/of CryptoPrimitive/KEY_AGREEMENT) pubKey)
+            (throw (SSLHandshakeException. "ECPublicKey does not comply to algorithm constraints"))))
+        (catch [GeneralSecurityException IOException] e
+          (throw (SSLHandshakeException. "Could not generate ECPublicKey" e)))))
+
+    (method ^:public getPublicKey ^PublicKey [this] publicKey)
+
+    (method ^:public getNamedGroup ^NamedGroup [this] namedGroup)
+
+    (method ^:public getPrivateKey ^PrivateKey [this] privateKey))
+
+  (defclass ^:private ^:static ^:final ECDHEPossessionGenerator
+    :implements [SSLPossessionGenerator]
+
+    (constructor ^:private [this])
+
+    (method ^:public createPossession ^SSLPossession [this ^HandshakeContext context]
+      (let [^NamedGroup preferableNamedGroup (if (and
+                                                   (some? (.-clientRequestedNamedGroups context))
+                                                   (not
+                                                     (.isEmpty
+                                                       (.-clientRequestedNamedGroups context))))
+                                                 (NamedGroup/getPreferredGroup
+                                                   (.-sslConfig context)
+                                                   (.-negotiatedProtocol context)
+                                                   (.-algorithmConstraints context)
+                                                   (new
+                                                     NamedGroup$NamedGroupSpec/1
+                                                     [NamedGroup$NamedGroupSpec/NAMED_GROUP_ECDHE
+                                                      NamedGroup$NamedGroupSpec/NAMED_GROUP_XDH])
+                                                   (.-clientRequestedNamedGroups context))
+                                                 (NamedGroup/getPreferredGroup
+                                                   (.-sslConfig context)
+                                                   (.-negotiatedProtocol context)
+                                                   (.-algorithmConstraints context)
+                                                   (new
+                                                     NamedGroup$NamedGroupSpec/1
+                                                     [NamedGroup$NamedGroupSpec/NAMED_GROUP_ECDHE
+                                                      NamedGroup$NamedGroupSpec/NAMED_GROUP_XDH])))]
+        (when (some? preferableNamedGroup)
+          (.createPossession preferableNamedGroup (.getSecureRandom (.-sslContext context)))))))
+
+  (defclass ^:private ^:static ^:final ECDHKAGenerator
+    :implements [SSLKeyAgreementGenerator]
+
+    (constructor ^:private [this])
+
+    (method ^:public createKeyDerivation :throws [IOException] ^SSLKeyDerivation [this
+                                                                                  ^HandshakeContext context]
+      (if (instance? ServerHandshakeContext context)
+          (.createServerKeyDerivation this (cast ServerHandshakeContext context))
+          (.createClientKeyDerivation this (cast ClientHandshakeContext context))))
+
+    (method ^:private createServerKeyDerivation :throws [IOException] ^SSLKeyDerivation [this
+                                                                                         ^ServerHandshakeContext shc]
+      (let [^:mutable ^X509Authentication$X509Possession x509Possession nil
+            ^:mutable ^ECDHECredentials ecdheCredentials nil]
+        (for-each [^SSLPossession poss (.-handshakePossessions shc)]
+          (when-not (not (instance? X509Authentication$X509Possession poss))
+            (let [params (.getECParameterSpec (cast X509Authentication$X509Possession poss))]
+              (when (some? params)
+                (let [ng (NamedGroup/valueOf params)]
+                  (when (nil? ng)
+                    (throw (.fatal (.-conContext shc)
+                                   Alert/ILLEGAL_PARAMETER
+                                   "Unsupported EC server cert for ECDH key exchange")))
+                  (for-each [^SSLCredentials cred (.-handshakeCredentials shc)]
+                    (when-not (not (instance? ECDHECredentials cred))
+                      (when (.equals ng (.-namedGroup (cast ECDHECredentials cred)))
+                        (set! ecdheCredentials (cast ECDHECredentials cred))
+                        (break))))
+                  (when (some? ecdheCredentials)
+                    (set! x509Possession (cast X509Authentication$X509Possession poss))
+                    (break)))))))
+        (when (nil? x509Possession)
+          (throw (.fatal (.-conContext shc)
+                         Alert/HANDSHAKE_FAILURE
+                         "No sufficient ECDHE key agreement parameters negotiated")))
+        (KAKeyDerivation. "ECDH"
+                          shc
+                          (.-popPrivateKey x509Possession)
+                          (.-popPublicKey ecdheCredentials))))
+
+    (method ^:private createClientKeyDerivation :throws [IOException] ^SSLKeyDerivation [this
+                                                                                         ^ClientHandshakeContext chc]
+      (let [^:mutable ^ECDHEPossession ecdhePossession nil
+            ^:mutable ^X509Authentication$X509Credentials x509Credentials nil]
+        (for-each [^SSLPossession poss (.-handshakePossessions chc)]
+          (when-not (not (instance? ECDHEPossession poss))
+            (let [ng (.-namedGroup (cast ECDHEPossession poss))]
+              (for-each [^SSLCredentials cred (.-handshakeCredentials chc)]
+                (when-not (not (instance? X509Authentication$X509Credentials cred))
+                  (let [publicKey (.-popPublicKey (cast X509Authentication$X509Credentials cred))]
+                    (when-not (not (.equals (.getAlgorithm publicKey) "EC"))
+                      (let [params (.getParams (cast ECPublicKey publicKey))
+                            namedGroup (NamedGroup/valueOf params)]
+                        (when (nil? namedGroup)
+                          (throw (.fatal (.-conContext chc)
+                                         Alert/ILLEGAL_PARAMETER
+                                         "Unsupported EC server cert for ECDH key exchange")))
+                        (when (.equals ng namedGroup)
+                          (set! x509Credentials (cast X509Authentication$X509Credentials cred))
+                          (break)))))))
+              (when (some? x509Credentials)
+                (set! ecdhePossession (cast ECDHEPossession poss))
+                (break)))))
+        (when (nil? ecdhePossession)
+          (throw (.fatal (.-conContext chc)
+                         Alert/HANDSHAKE_FAILURE
+                         "No sufficient ECDH key agreement parameters negotiated")))
+        (KAKeyDerivation. "ECDH"
+                          chc
+                          (.-privateKey ecdhePossession)
+                          (.-popPublicKey x509Credentials)))))
+
+  (defclass ^:private ^:static ^:final ECDHEKAGenerator
+    :implements [SSLKeyAgreementGenerator]
+
+    (constructor ^:private [this])
+
+    (method ^:public createKeyDerivation :throws [IOException] ^SSLKeyDerivation [this
+                                                                                  ^HandshakeContext context]
+      (let [^:mutable ^ECDHEPossession ecdhePossession nil
+            ^:mutable ^ECDHECredentials ecdheCredentials nil]
+        (for-each [^SSLPossession poss (.-handshakePossessions context)]
+          (when-not (not (instance? ECDHEPossession poss))
+            (let [ng (.-namedGroup (cast ECDHEPossession poss))]
+              (for-each [^SSLCredentials cred (.-handshakeCredentials context)]
+                (when-not (not (instance? ECDHECredentials cred))
+                  (when (.equals ng (.-namedGroup (cast ECDHECredentials cred)))
+                    (set! ecdheCredentials (cast ECDHECredentials cred))
+                    (break))))
+              (when (some? ecdheCredentials)
+                (set! ecdhePossession (cast ECDHEPossession poss))
+                (break)))))
+        (when (nil? ecdhePossession)
+          (throw (.fatal (.-conContext context)
+                         Alert/HANDSHAKE_FAILURE
+                         "No sufficient ECDHE key agreement parameters negotiated")))
+        (KAKeyDerivation. "ECDH"
+                          context
+                          (.-privateKey ecdhePossession)
+                          (.-popPublicKey ecdheCredentials)))))
+
+  (defclass ^:private ^:static ^:final ECDHEXDHKAGenerator
+    :implements [SSLKeyAgreementGenerator]
+
+    (constructor ^:private [this])
+
+    (method ^:public createKeyDerivation :throws [IOException] ^SSLKeyDerivation [this
+                                                                                  ^HandshakeContext context]
+      (let [^:mutable ^NamedGroupPossession namedGroupPossession nil
+            ^:mutable ^NamedGroupCredentials namedGroupCredentials nil
+            ^:mutable ^NamedGroup namedGroup nil]
+        (label :search
+          (for-each [^SSLPossession poss (.-handshakePossessions context)]
+            (for-each [^SSLCredentials cred (.-handshakeCredentials context)]
+              (when (or (and (instance? ECDHEPossession poss) (instance? ECDHECredentials cred))
+                        (and (instance? XDHKeyExchange$XDHEPossession poss)
+                             (instance? XDHKeyExchange$XDHECredentials cred)))
+                (let [p (cast NamedGroupPossession poss)
+                      c (cast NamedGroupCredentials cred)]
+                  (when-not (not (identical? (.getNamedGroup p) (.getNamedGroup c)))
+                    (set! namedGroup (.getNamedGroup p))
+                    (set! namedGroupPossession p)
+                    (set! namedGroupCredentials c)
+                    (break :search)))))))
+        (when (nil? namedGroupPossession)
+          (throw (.fatal (.-conContext context)
+                         Alert/HANDSHAKE_FAILURE
+                         "No sufficient ECDHE/XDH key agreement parameters negotiated")))
+        (let [^:mutable ^String alg nil]
+          (switch (.-spec namedGroup)
+            NAMED_GROUP_ECDHE (set! alg "ECDH")
+            NAMED_GROUP_XDH (set! alg "XDH")
+            (throw (RuntimeException. "Unexpected named group type")))
+          (KAKeyDerivation. alg
+                            context
+                            (.getPrivateKey namedGroupPossession)
+                            (.getPublicKey namedGroupCredentials)))))))

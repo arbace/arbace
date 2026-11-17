@@ -1,0 +1,331 @@
+;; Converted from jdk26u src/java.management/share/classes/javax/management/remote/JMXServiceURL.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.management.remote)
+
+(import '(com.sun.jmx.remote.util ClassLogger EnvHelp)
+        '(java.io IOException
+                  InvalidObjectException
+                  ObjectInputStream
+                  ObjectInputStream$GetField
+                  Serializable)
+        '(java.net Inet4Address
+                   Inet6Address
+                   InetAddress
+                   MalformedURLException
+                   NetworkInterface
+                   SocketException
+                   UnknownHostException)
+        '(java.util BitSet Enumeration Locale StringTokenizer))
+
+(defclass ^:public JMXServiceURL
+  :implements [Serializable]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 8173364409860779292)
+
+  (constructor :throws [MalformedURLException] ^:public [this ^String serviceURL]
+    (let [serviceURLLength (.length serviceURL)]
+      (loop [^int i 0]
+        (when (< i serviceURLLength)
+          (let [c (.charAt serviceURL i)]
+            (if (or (< c 32) (>= c 127))
+                (throw (MalformedURLException.
+                         (java-str "Service URL contains non-ASCII character 0x"
+                                   (Integer/toHexString c))))
+                (recur (unchecked-inc-int i))))))
+      (let [^:const requiredPrefix "service:jmx:"
+            requiredPrefixLength (.length requiredPrefix)]
+        (when-not (.regionMatches serviceURL true 0 requiredPrefix 0 requiredPrefixLength)
+          (throw (MalformedURLException. (java-str "Service URL must start with " requiredPrefix))))
+        (let [protoStart requiredPrefixLength
+              protoEnd (JMXServiceURL/indexOf serviceURL \: protoStart)]
+          (set! (.-protocol this)
+                (.toLowerCase (.substring serviceURL protoStart protoEnd) Locale/ENGLISH))
+          (when-not (.regionMatches serviceURL protoEnd "://" 0 3)
+            (throw (MalformedURLException. "Missing \"://\" after protocol name")))
+          (let [hostStart (unchecked-add-int protoEnd 3)
+                ^:mutable ^int hostEnd 0]
+            (if (and (< hostStart serviceURLLength) (== (.charAt serviceURL hostStart) \[))
+                (do
+                  (set! hostEnd (unchecked-add-int (.indexOf serviceURL \] hostStart) 1))
+                  (when (== hostEnd 0)
+                    (throw (MalformedURLException. "Bad host name: [ without ]")))
+                  (set! (.-host this)
+                        (.substring serviceURL
+                                    (unchecked-add-int hostStart 1)
+                                    (unchecked-subtract-int hostEnd 1)))
+                  (when-not (JMXServiceURL/isNumericIPv6Address (.-host this))
+                    (throw (MalformedURLException.
+                             "Address inside [...] must be numeric IPv6 address"))))
+                (do
+                  (set! hostEnd
+                        (JMXServiceURL/indexOfFirstNotInSet serviceURL hostNameBitSet hostStart))
+                  (set! (.-host this) (.substring serviceURL hostStart hostEnd))))
+            (let [^:mutable ^int portEnd 0]
+              (if (and (< hostEnd serviceURLLength) (== (.charAt serviceURL hostEnd) \:))
+                  (do
+                    (when (== (.length (.-host this)) 0)
+                      (throw (MalformedURLException. "Cannot give port number without host name")))
+                    (let [portStart (unchecked-add-int hostEnd 1)]
+                      (set! portEnd
+                            (JMXServiceURL/indexOfFirstNotInSet serviceURL numericBitSet portStart))
+                      (let [portString (.substring serviceURL portStart portEnd)]
+                        (try
+                          (set! (.-port this) (Integer/parseInt portString))
+                          (catch NumberFormatException e
+                            (throw (MalformedURLException.
+                                     (java-str "Bad port number: \"" portString "\": " e))))))))
+                  (do (set! portEnd hostEnd) (set! (.-port this) 0)))
+              (let [urlPathStart portEnd]
+                (if (< urlPathStart serviceURLLength)
+                    (set! (.-urlPath this) (.substring serviceURL urlPathStart))
+                    (set! (.-urlPath this) ""))
+                (.validate this))))))))
+
+  (constructor :throws [MalformedURLException] ^:public [this ^String protocol ^String host
+                                                         ^int port]
+    (this. protocol host port nil))
+
+  (constructor :throws [MalformedURLException] ^:public [this ^String protocol
+                                                         ^:mutable ^String host ^int port
+                                                         ^:mutable ^String urlPath]
+    (when (nil? protocol) (throw (MalformedURLException. "Misssing protocol name")))
+    (when (nil? host)
+      (let [^:mutable ^InetAddress local nil]
+        (try
+          (set! local (InetAddress/getLocalHost))
+          (set! host (.getHostName local))
+          (try
+            (JMXServiceURL/validateHost host port)
+            (catch MalformedURLException e
+              (when (.fineOn logger)
+                (.fine logger
+                       "JMXServiceURL"
+                       (java-str "Replacing illegal local host name "
+                                 host
+                                 " with numeric IP address (see RFC 1034)")
+                       e))
+              (set! host (.getHostAddress local))))
+          (catch UnknownHostException e
+            (try
+              (set! host (.getActiveNetworkInterfaceIP this))
+              (when (nil? host)
+                (throw
+                  (MalformedURLException. "Unable to resolve hostname or get valid IP address")))
+              (catch SocketException ex
+                (throw
+                  (MalformedURLException. "Unable to resolve hostname or get valid IP address"))))))))
+    (when (.startsWith host "[")
+      (when-not (.endsWith host "]")
+        (throw (MalformedURLException. "Host starts with [ but does not end with ]")))
+      (set! host (.substring host 1 (unchecked-subtract-int (.length host) 1)))
+      (when-not (JMXServiceURL/isNumericIPv6Address host)
+        (throw (MalformedURLException. "Address inside [...] must be numeric IPv6 address")))
+      (when (.startsWith host "[") (throw (MalformedURLException. "More than one [[...]]"))))
+    (set! (.-protocol this) (.toLowerCase protocol Locale/ENGLISH))
+    (set! (.-host this) host)
+    (set! (.-port this) port)
+    (when (nil? urlPath) (set! urlPath ""))
+    (set! (.-urlPath this) urlPath)
+    (.validate this))
+
+  (method ^:private getActiveNetworkInterfaceIP :throws [SocketException] ^String [this]
+    (let [^{:tag (Enumeration NetworkInterface)} networkInterface
+            (NetworkInterface/getNetworkInterfaces)
+          ^:mutable ^String ipv6AddrStr nil]
+      (while (.hasMoreElements networkInterface)
+        (let [nic (cast NetworkInterface (.nextElement networkInterface))]
+          (when (and (.isUp nic) (not (.isLoopback nic)))
+            (let [^{:tag (Enumeration InetAddress)} inet (.getInetAddresses nic)]
+              (while (.hasMoreElements inet)
+                (let [addr (cast InetAddress (.nextElement inet))]
+                  (cond
+                    (and (instance? Inet4Address addr) (not (.isLinkLocalAddress addr)))
+                      (return (.getHostAddress addr))
+                    (and (instance? Inet6Address addr) (not (.isLinkLocalAddress addr)))
+                      (set! ipv6AddrStr (.getHostAddress addr)))))))))
+      ipv6AddrStr))
+
+  (field ^:private ^:static ^:final ^String INVALID_INSTANCE_MSG
+    "Trying to deserialize an invalid instance of JMXServiceURL")
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream inputStream]
+    (let [gf (.readFields inputStream)
+          h (cast String (.get gf "host" nil))
+          p (^[String int] ObjectInputStream$GetField/.get gf "port" -1)
+          proto (cast String (.get gf "protocol" nil))
+          url (cast String (.get gf "urlPath" nil))]
+      (when (or (or (nil? proto) (nil? url)) (nil? h))
+        (let [sb (.append (StringBuilder. INVALID_INSTANCE_MSG) \[)
+              ^:mutable empty true]
+          (when (nil? proto) (.append sb "protocol=null") (set! empty false))
+          (when (nil? h)
+            (.append (.append sb ^String (if empty "" ",")) "host=null")
+            (set! empty false))
+          (when (nil? url) (.append (.append sb ^String (if empty "" ",")) "urlPath=null"))
+          (.append sb \])
+          (throw (InvalidObjectException. (.toString sb)))))
+      (when (or (.contains h "[") (.contains h "]"))
+        (throw (InvalidObjectException. (java-str "Invalid host name: " h))))
+      (try
+        (.validate this proto h p url)
+        (set! (.-protocol this) proto)
+        (set! (.-host this) h)
+        (set! (.-port this) p)
+        (set! (.-urlPath this) url)
+        (catch MalformedURLException e
+          (throw (InvalidObjectException.
+                   (java-str (java-str INVALID_INSTANCE_MSG ": ") (.getMessage e))))))))
+
+  (method ^:private validate :throws [MalformedURLException] ^void [this ^String proto ^String h
+                                                                    ^int p ^String url]
+    (let [protoEnd (JMXServiceURL/indexOfFirstNotInSet proto protocolBitSet 0)]
+      (when (or (or (== protoEnd 0) (< protoEnd (.length proto)))
+                (not (.get alphaBitSet (.charAt proto 0))))
+        (throw
+          (MalformedURLException. (java-str "Missing or invalid protocol name: \"" proto "\""))))
+      (JMXServiceURL/validateHost h p)
+      (when (< p 0) (throw (MalformedURLException. (java-str "Bad port: " p))))
+      (when (> (.length url) 0)
+        (when (and (not (.startsWith url "/")) (not (.startsWith url ";")))
+          (throw (MalformedURLException. (java-str "Bad URL path: " url)))))))
+
+  (method ^:private validate :throws [MalformedURLException] ^void [this]
+    (.validate this (.-protocol this) (.-host this) (.-port this) (.-urlPath this)))
+
+  (method ^:private ^:static validateHost :throws [MalformedURLException] ^void [^String h ^int port]
+    (cond
+      (== (.length h) 0)
+        (when-not (== port 0)
+          (throw (MalformedURLException. "Cannot give port number without host name")))
+      (JMXServiceURL/isNumericIPv6Address h)
+        (try
+          (InetAddress/getByName h)
+          (catch Exception e
+            (let [bad (MalformedURLException. (java-str "Bad IPv6 address: " h))]
+              (EnvHelp/initCause bad e)
+              (throw bad))))
+      :else
+        (let [hostLen (.length h)
+              ^:mutable lastc \.
+              ^:mutable sawDot false
+              ^:mutable ^char componentStart 0]
+          (loop [^int i 0]
+            (when (< i hostLen)
+              (let [c (.charAt h i)
+                    isAlphaNumeric (.get alphaNumericBitSet c)]
+                (when (== lastc \.) (set! componentStart c))
+                (cond
+                  isAlphaNumeric (do (set! lastc \a) (recur (unchecked-inc-int i)))
+                  (== c \-) (when-not (== lastc \.) (set! lastc \-) (recur (unchecked-inc-int i)))
+                  (== c \.)
+                    (do
+                      (set! sawDot true)
+                      (when-not (not (== lastc \a)) (set! lastc \.) (recur (unchecked-inc-int i))))
+                  :else (set! lastc \.)))))
+          (try
+            (when-not (== lastc \a) (throw randomException))
+            (when (and sawDot (not (.get alphaBitSet componentStart)))
+              (let [tok (StringTokenizer. h "." true)]
+                (loop [^int i 0]
+                  (when (< i 4)
+                    (let [ns (.nextToken tok)
+                          n (Integer/parseInt ns)]
+                      (when (or (< n 0) (> n 255)) (throw randomException))
+                      (if (and (< i 3) (not (.equals (.nextToken tok) ".")))
+                          (throw randomException)
+                          (recur (unchecked-inc-int i))))))
+                (when (.hasMoreTokens tok) (throw randomException))))
+            (catch Exception e (throw (MalformedURLException. (java-str "Bad host: \"" h "\""))))))))
+
+  (field ^:private ^:static ^:final ^Exception randomException (Exception.))
+
+  (method ^:public getProtocol ^String [this] protocol)
+
+  (method ^:public getHost ^String [this] host)
+
+  (method ^:public getPort ^int [this] port)
+
+  (method ^:public getURLPath ^String [this] urlPath)
+
+  (method ^:public toString ^String [this]
+    (if (some? toString)
+        toString
+        (let [buf (StringBuilder. "service:jmx:")]
+          (.append (.append buf (.getProtocol this)) "://")
+          (let [getHost (.getHost this)]
+            (if (JMXServiceURL/isNumericIPv6Address getHost)
+                (.append (.append (.append buf \[) getHost) \])
+                (.append buf getHost))
+            (let [getPort (.getPort this)]
+              (when-not (== getPort 0) (.append (.append buf \:) getPort))
+              (.append buf (.getURLPath this))
+              (set! toString (.toString buf))
+              toString)))))
+
+  (method ^:public equals ^boolean [this obj]
+    (if (not (instance? JMXServiceURL obj))
+        false
+        (let [u (cast JMXServiceURL obj)]
+          (and (and (and (.equalsIgnoreCase (.getProtocol u) (.getProtocol this))
+                         (.equalsIgnoreCase (.getHost u) (.getHost this)))
+                    (== (.getPort u) (.getPort this)))
+               (.equals (.getURLPath u) (.getURLPath this))))))
+
+  (method ^:public hashCode ^int [this] (.hashCode (.toString this)))
+
+  (method ^:private ^:static isNumericIPv6Address ^boolean [^String s]
+    (>= (.indexOf s \:) 0))
+
+  (method ^:private ^:static indexOf ^int [^String s ^char c ^int fromIndex]
+    (let [index (.indexOf s c fromIndex)] (if (< index 0) (.length s) index)))
+
+  (method ^:private ^:static indexOfFirstNotInSet ^int [^String s ^BitSet set ^int fromIndex]
+    (let [slen (.length s)
+          ^:mutable i fromIndex]
+      (while true
+        (when (>= i slen) (break))
+        (let [c (.charAt s i)]
+          (when (>= c 128) (break))
+          (when-not (.get set c) (break))
+          (set! i (unchecked-inc-int i))))
+      i))
+
+  (field ^:private ^:static ^:final ^BitSet alphaBitSet (BitSet. 128))
+
+  (field ^:private ^:static ^:final ^BitSet numericBitSet (BitSet. 128))
+
+  (field ^:private ^:static ^:final ^BitSet alphaNumericBitSet (BitSet. 128))
+
+  (field ^:private ^:static ^:final ^BitSet protocolBitSet (BitSet. 128))
+
+  (field ^:private ^:static ^:final ^BitSet hostNameBitSet (BitSet. 128))
+
+  (static-initializer
+    (loop [^char c \0]
+      (when (<= c \9) (.set numericBitSet c) (recur (unchecked-char (unchecked-inc-int c)))))
+    (loop [^char c \A]
+      (when (<= c \Z) (.set alphaBitSet c) (recur (unchecked-char (unchecked-inc-int c)))))
+    (loop [^char c \a]
+      (when (<= c \z) (.set alphaBitSet c) (recur (unchecked-char (unchecked-inc-int c)))))
+    (.or alphaNumericBitSet alphaBitSet)
+    (.or alphaNumericBitSet numericBitSet)
+    (.or protocolBitSet alphaNumericBitSet)
+    (.set protocolBitSet \+)
+    (.set protocolBitSet \-)
+    (.or hostNameBitSet alphaNumericBitSet)
+    (.set hostNameBitSet \-)
+    (.set hostNameBitSet \.))
+
+  (field ^:private ^String protocol)
+
+  (field ^:private ^String host)
+
+  (field ^:private ^int port)
+
+  (field ^:private ^String urlPath)
+
+  (field ^:private ^:transient ^String toString)
+
+  (field ^:private ^:static ^:final ^ClassLogger logger
+    (ClassLogger. "javax.management.remote.misc" "JMXServiceURL")))

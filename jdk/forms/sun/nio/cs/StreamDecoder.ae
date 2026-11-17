@@ -1,0 +1,201 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/cs/StreamDecoder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.cs)
+
+(import '(java.io IOException InputStream Reader UnsupportedEncodingException)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.channels FileChannel ReadableByteChannel)
+        '(java.nio.charset Charset
+                           CharsetDecoder
+                           CodingErrorAction
+                           IllegalCharsetNameException
+                           UnsupportedCharsetException)
+        '(java.util Arrays))
+
+(defclass ^:public StreamDecoder
+  :extends Reader
+
+  (field ^:private ^:static ^:final ^int MIN_BYTE_BUFFER_SIZE 32)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_BYTE_BUFFER_SIZE 8192)
+
+  (field ^:private ^:volatile ^boolean closed)
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when closed (throw (IOException. "Stream closed"))))
+
+  (field ^:private ^boolean haveLeftoverChar false)
+
+  (field ^:private ^char leftoverChar)
+
+  (method ^:public ^:static forInputStreamReader :throws [UnsupportedEncodingException] ^StreamDecoder [^InputStream in
+                                                                                                        lock
+                                                                                                        ^String charsetName]
+    (try
+      (StreamDecoder. in lock (Charset/forName charsetName))
+      (catch [IllegalCharsetNameException UnsupportedCharsetException] x
+        (throw (UnsupportedEncodingException. charsetName)))))
+
+  (method ^:public ^:static forInputStreamReader ^StreamDecoder [^InputStream in lock ^Charset cs]
+    (StreamDecoder. in lock cs))
+
+  (method ^:public ^:static forInputStreamReader ^StreamDecoder [^InputStream in lock
+                                                                 ^CharsetDecoder dec]
+    (StreamDecoder. in lock dec))
+
+  (method ^:public ^:static forDecoder ^StreamDecoder [^ReadableByteChannel ch ^CharsetDecoder dec
+                                                       ^int minBufferCap]
+    (StreamDecoder. ch dec minBufferCap))
+
+  (method ^:public getEncoding ^String [this]
+    (when (.isOpen this) (.encodingName this)))
+
+  (method ^:public read :throws [IOException] ^int [this] (.read0 this))
+
+  (method ^:private read0 :throws [IOException] ^int [this]
+    (locking (.-lock this)
+      (if haveLeftoverChar
+          (do (set! haveLeftoverChar false) leftoverChar)
+          (let [cb (new char/1 2)
+                n (.read this cb 0 2)]
+            (switch n
+              -1 -1
+              2 (do (set! leftoverChar (aget cb 1)) (set! haveLeftoverChar true) (aget cb 0))
+              1 (aget cb 0)
+              (do (java-assert false n) -1))))))
+
+  (method ^:public read :throws [IOException] ^int [this ^char/1 cbuf ^int offset ^int length]
+    (locking (.-lock this)
+      (let [^:mutable off offset
+            ^:mutable len length]
+        (.ensureOpen this)
+        (when (or (or (or (or (< off 0) (> off (alength cbuf))) (< len 0))
+                      (> (unchecked-add-int off len) (alength cbuf)))
+                  (< (unchecked-add-int off len) 0))
+          (throw (IndexOutOfBoundsException.)))
+        (if (== len 0)
+            0
+            (let [^:mutable ^int n 0]
+              (when haveLeftoverChar
+                (aset cbuf off leftoverChar)
+                (set! off (unchecked-inc-int off))
+                (set! len (unchecked-dec-int len))
+                (set! haveLeftoverChar false)
+                (set! n 1)
+                (when (or (== len 0) (not (.implReady this))) (return n)))
+              (if (== len 1)
+                  (let [c (.read0 this)]
+                    (if (== c -1)
+                        (if (== n 0) -1 n)
+                        (do (aset cbuf off (unchecked-char c)) (unchecked-add-int n 1))))
+                  (let [nr (.implRead this cbuf off (unchecked-add-int off len))]
+                    (if (< nr 0) (if (== n 1) 1 nr) (unchecked-add-int n nr)))))))))
+
+  (method ^:public ready :throws [IOException] ^boolean [this]
+    (locking (.-lock this) (.ensureOpen this) (or haveLeftoverChar (.implReady this))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (locking (.-lock this) (when-not closed (try (.implClose this) (finally (set! closed true))))))
+
+  (method ^:private isOpen ^boolean [this] (not closed))
+
+  (method ^:public fillZeroToPosition :throws [IOException] ^void [this]
+    (locking (.-lock this)
+      (Arrays/fill (.array bb)
+                   (.arrayOffset bb)
+                   (unchecked-add-int (.arrayOffset bb) (.position bb))
+                   (unchecked-byte 0))))
+
+  (field ^:private ^:final ^Charset cs)
+
+  (field ^:private ^:final ^CharsetDecoder decoder)
+
+  (field ^:private ^:final ^ByteBuffer bb)
+
+  (field ^:private ^:final ^InputStream in)
+
+  (field ^:private ^:final ^ReadableByteChannel ch)
+
+  (constructor [this ^InputStream in lock ^Charset cs]
+    (this. in
+           lock
+           (.onUnmappableCharacter (.onMalformedInput (.newDecoder cs) CodingErrorAction/REPLACE)
+                                   CodingErrorAction/REPLACE)))
+
+  (constructor [this ^InputStream in lock ^CharsetDecoder dec]
+    (super. lock)
+    (set! (.-cs this) (.charset dec))
+    (set! (.-decoder this) dec)
+    (set! (.-in this) in)
+    (set! (.-ch this) nil)
+    (set! (.-bb this) (ByteBuffer/allocate DEFAULT_BYTE_BUFFER_SIZE))
+    (.flip bb))
+
+  (constructor [this ^ReadableByteChannel ch ^CharsetDecoder dec ^int mbc]
+    (set! (.-in this) nil)
+    (set! (.-ch this) ch)
+    (set! (.-decoder this) dec)
+    (set! (.-cs this) (.charset dec))
+    (set! (.-bb this)
+          (ByteBuffer/allocate
+            (cond
+              (< mbc 0) DEFAULT_BYTE_BUFFER_SIZE
+              (< mbc MIN_BYTE_BUFFER_SIZE) MIN_BYTE_BUFFER_SIZE
+              :else mbc)))
+    (.flip bb))
+
+  (method ^:private readBytes :throws [IOException] ^int [this]
+    (.compact bb)
+    (try
+      (if (some? ch)
+          (let [n (.read ch bb)] (when (< n 0) (return n)))
+          (let [lim (.limit bb)
+                pos (.position bb)]
+            (java-assert (<= pos lim))
+            (let [^int rem (if (<= pos lim) (unchecked-subtract-int lim pos) 0)
+                  n (.read in (.array bb) (unchecked-add-int (.arrayOffset bb) pos) rem)]
+              (when (< n 0) (return n))
+              (when (== n 0) (throw (IOException. "Underlying input stream returned zero bytes")))
+              (java-assert (<= n rem) (java-str "n = " n ", rem = " rem))
+              (.position bb (unchecked-add-int pos n)))))
+      (finally (.flip bb)))
+    (let [rem (.remaining bb)] (java-assert (not (== rem 0)) rem) rem))
+
+  (method implRead :throws [IOException] ^int [this ^char/1 cbuf ^int off ^int end]
+    (java-assert (> (unchecked-subtract-int end off) 1))
+    (let [^:mutable cb (CharBuffer/wrap cbuf off (unchecked-subtract-int end off))]
+      (when-not (== (.position cb) 0) (set! cb (.slice cb)))
+      (let [^:mutable eof false]
+        (while true
+          (let [cr (.decode decoder bb cb eof)]
+            (if (.isUnderflow cr)
+                (do
+                  (when eof (break))
+                  (when-not (.hasRemaining cb) (break))
+                  (when (and (> (.position cb) 0) (not (.inReady this))) (break))
+                  (let [n (.readBytes this)]
+                    (when (< n 0)
+                      (set! eof true)
+                      (when (and (== (.position cb) 0) (not (.hasRemaining bb))) (break)))))
+                (do
+                  (when (.isOverflow cr) (java-assert (> (.position cb) 0)) (break))
+                  (.throwException cr)))))
+        (when eof (.reset decoder))
+        (when (== (.position cb) 0) (when eof (return -1)) (java-assert false))
+        (.position cb))))
+
+  (method encodingName ^String [this]
+    (if (instance? HistoricallyNamedCharset cs)
+        (.historicalName (cast HistoricallyNamedCharset cs))
+        (.name cs)))
+
+  (method ^:private inReady ^boolean [this]
+    (try
+      (or (and (some? in) (> (.available in) 0)) (instance? FileChannel ch))
+      (catch IOException x false)))
+
+  (method implReady ^boolean [this]
+    (or (.hasRemaining bb) (.inReady this)))
+
+  (method implClose :throws [IOException] ^void [this]
+    (if (some? ch) (.close ch) (.close in))))

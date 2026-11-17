@@ -1,0 +1,332 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/tcp/TCPEndpoint.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport.tcp)
+
+(import '(java.io DataInput DataOutput IOException ObjectInput ObjectOutput)
+        '(java.lang.reflect Proxy)
+        '(java.net InetAddress ServerSocket Socket UnknownHostException)
+        '(java.rmi ConnectException ConnectIOException RemoteException)
+        '(java.rmi.server RMIClientSocketFactory RMIServerSocketFactory RMISocketFactory)
+        '(java.util Collection HashMap HashSet LinkedList Map Set)
+        '(sun.rmi.runtime Log RuntimeUtil)
+        '(sun.rmi.transport Channel Endpoint Target Transport))
+
+(defclass ^:public TCPEndpoint
+  :implements [Endpoint]
+
+  (field ^:private ^String host)
+
+  (field ^:private ^int port)
+
+  (field ^:private ^:final ^RMIClientSocketFactory csf)
+
+  (field ^:private ^:final ^RMIServerSocketFactory ssf)
+
+  (field ^:private ^int listenPort -1)
+
+  (field ^:private ^TCPTransport transport nil)
+
+  (field ^:private ^:static ^String localHost)
+
+  (field ^:private ^:static ^boolean localHostKnown)
+
+  (method ^:private ^:static getInt ^int [^String name ^int def]
+    (Integer/getInteger name def))
+
+  (method ^:private ^:static getBoolean ^boolean [^String name]
+    (Boolean/getBoolean name))
+
+  (method ^:private ^:static getHostnameProperty ^String []
+    (System/getProperty "java.rmi.server.hostname"))
+
+  (static-initializer
+    (set! localHostKnown true)
+    (set! localHost (TCPEndpoint/getHostnameProperty))
+    (when (nil? localHost)
+      (try
+        (let [localAddr (InetAddress/getLocalHost)
+              raw (.getAddress localAddr)]
+          (when (and (and (and (== (aget raw 0) 127) (== (aget raw 1) 0)) (== (aget raw 2) 0))
+                     (== (aget raw 3) 1))
+            (set! localHostKnown false))
+          (if (TCPEndpoint/getBoolean "java.rmi.server.useLocalHostName")
+              (set! localHost (FQDN/attemptFQDN localAddr))
+              (set! localHost (.getHostAddress localAddr))))
+        (catch Exception e (set! localHostKnown false) (set! localHost nil))))
+    (when (.isLoggable TCPTransport/tcpLog Log/BRIEF)
+      (.log TCPTransport/tcpLog
+            Log/BRIEF
+            (java-str "localHostKnown = " localHostKnown ", localHost = " localHost))))
+
+  (field ^:private ^:static ^:final ^{:tag (Map TCPEndpoint (LinkedList TCPEndpoint))} localEndpoints
+    (HashMap.))
+
+  (constructor ^:public [this ^String host ^int port]
+    (this. host port nil nil))
+
+  (constructor ^:public [this ^:mutable ^String host ^int port ^RMIClientSocketFactory csf
+                         ^RMIServerSocketFactory ssf]
+    (when (nil? host) (set! host ""))
+    (set! (.-host this) host)
+    (set! (.-port this) port)
+    (set! (.-csf this) csf)
+    (set! (.-ssf this) ssf))
+
+  (method ^:public ^:static getLocalEndpoint ^TCPEndpoint [^int port]
+    (TCPEndpoint/getLocalEndpoint port nil nil))
+
+  (method ^:public ^:static getLocalEndpoint ^TCPEndpoint [^int port ^RMIClientSocketFactory csf
+                                                           ^RMIServerSocketFactory ssf]
+    (let [^:mutable ^TCPEndpoint ep nil]
+      (locking localEndpoints
+        (let [endpointKey (TCPEndpoint. nil port csf ssf)
+              ^:mutable ^{:tag (LinkedList TCPEndpoint)} epList (cast
+                                                                  LinkedList
+                                                                  (.get localEndpoints endpointKey))
+              localHost (TCPEndpoint/resampleLocalHost)]
+          (if (nil? epList)
+              (do
+                (set! ep (TCPEndpoint. localHost port csf ssf))
+                (set! epList (LinkedList.))
+                (.add epList ep)
+                (set! (.-listenPort ep) port)
+                (set! (.-transport ep) (TCPTransport. epList))
+                (.put localEndpoints endpointKey epList)
+                (when (.isLoggable TCPTransport/tcpLog Log/BRIEF)
+                  (.log
+                    TCPTransport/tcpLog
+                    Log/BRIEF
+                    (java-str "created local endpoint for socket factory " ssf " on port " port))))
+              (locking epList
+                (set! ep (cast TCPEndpoint (.getLast epList)))
+                (let [lastHost (.-host ep)
+                      lastPort (.-port ep)
+                      lastTransport (.-transport ep)]
+                  (when (and (some? localHost) (not (.equals localHost lastHost)))
+                    (when-not (== lastPort 0) (.clear epList))
+                    (set! ep (TCPEndpoint. localHost lastPort csf ssf))
+                    (set! (.-listenPort ep) port)
+                    (set! (.-transport ep) lastTransport)
+                    (.add epList ep)))))))
+      ep))
+
+  (method ^:private ^:static resampleLocalHost ^String []
+    (let [hostnameProperty (TCPEndpoint/getHostnameProperty)]
+      (locking localEndpoints
+        (when (some? hostnameProperty)
+          (if (not localHostKnown)
+              (TCPEndpoint/setLocalHost hostnameProperty)
+              (when-not (.equals hostnameProperty localHost)
+                (set! localHost hostnameProperty)
+                (when (.isLoggable TCPTransport/tcpLog Log/BRIEF)
+                  (.log TCPTransport/tcpLog
+                        Log/BRIEF
+                        (java-str "updated local hostname to: " localHost))))))
+        localHost)))
+
+  (method ^:static setLocalHost ^void [^String host]
+    (locking localEndpoints
+      (when-not localHostKnown
+        (set! localHost host)
+        (set! localHostKnown true)
+        (when (.isLoggable TCPTransport/tcpLog Log/BRIEF)
+          (.log TCPTransport/tcpLog Log/BRIEF (java-str "local host set to " host)))
+        (for-each [^{:tag (LinkedList TCPEndpoint)} epList (.values localEndpoints)]
+          (locking epList (for-each [^TCPEndpoint ep epList] (set! (.-host ep) host)))))))
+
+  (method ^:static setDefaultPort ^void [^int port ^RMIClientSocketFactory csf
+                                         ^RMIServerSocketFactory ssf]
+    (let [endpointKey (TCPEndpoint. nil 0 csf ssf)]
+      (locking localEndpoints
+        (let [^{:tag (LinkedList TCPEndpoint)} epList (cast
+                                                        LinkedList
+                                                        (.get localEndpoints endpointKey))]
+          (locking epList
+            (let [size (.size epList)
+                  lastEp (cast TCPEndpoint (.getLast epList))]
+              (for-each [^TCPEndpoint ep epList] (set! (.-port ep) port))
+              (when (> size 1) (.clear epList) (.add epList lastEp))))
+          (let [newEndpointKey (TCPEndpoint. nil port csf ssf)]
+            (.put localEndpoints newEndpointKey epList)
+            (when (.isLoggable TCPTransport/tcpLog Log/BRIEF)
+              (.log TCPTransport/tcpLog
+                    Log/BRIEF
+                    (java-str "default port for server socket factory "
+                              ssf
+                              " and client socket factory "
+                              csf
+                              " set to "
+                              port))))))))
+
+  (method ^:public getOutboundTransport ^Transport [this]
+    (let [localEndpoint (TCPEndpoint/getLocalEndpoint 0 nil nil)] (.-transport localEndpoint)))
+
+  (method ^:private ^:static allKnownTransports ^{:tag (Collection TCPTransport)} []
+    (let [^:mutable ^{:tag (Set TCPTransport)} s nil]
+      (locking localEndpoints
+        (set! s (HashSet/newHashSet (.size localEndpoints)))
+        (for-each [^{:tag (LinkedList TCPEndpoint)} epList (.values localEndpoints)]
+          (let [ep (cast TCPEndpoint (.getFirst epList))] (.add s (.-transport ep)))))
+      s))
+
+  (method ^:public ^:static shedConnectionCaches ^void []
+    (for-each [^TCPTransport transport (TCPEndpoint/allKnownTransports)]
+      (.shedConnectionCaches transport)))
+
+  (method ^:public exportObject :throws [RemoteException] ^void [this ^Target target]
+    (.exportObject transport target))
+
+  (method ^:public getChannel ^Channel [this]
+    (.getChannel (.getOutboundTransport this) this))
+
+  (method ^:public getHost ^String [this] host)
+
+  (method ^:public getPort ^int [this] port)
+
+  (method ^:public getListenPort ^int [this] listenPort)
+
+  (method ^:public getInboundTransport ^Transport [this] transport)
+
+  (method ^:public getClientSocketFactory ^RMIClientSocketFactory [this]
+    csf)
+
+  (method ^:public getServerSocketFactory ^RMIServerSocketFactory [this]
+    ssf)
+
+  (method ^:public toString ^String [this]
+    (java-str "["
+              host
+              ":"
+              port
+              (if (some? ssf) (java-str "," ssf) "")
+              (if (some? csf) (java-str "," csf) "")
+              "]"))
+
+  (method ^:public hashCode ^int [this] port)
+
+  (method ^:public equals ^boolean [this obj]
+    (if-instance [^TCPEndpoint ep obj]
+      (cond
+        (or (not (== port (.-port ep))) (not (.equals host (.-host ep)))) false
+        (or (not (= (nil? csf) (nil? (.-csf ep)))) (not (= (nil? ssf) (nil? (.-ssf ep))))) false
+        (and (some? csf)
+             (not
+               (and (identical? (.getClass csf) (.getClass (.-csf ep))) (.equals csf (.-csf ep)))))
+          false
+        (and (some? ssf)
+             (not
+               (and (identical? (.getClass ssf) (.getClass (.-ssf ep))) (.equals ssf (.-ssf ep)))))
+          false
+        :else true)
+      false))
+
+  (field ^:private ^:static ^:final ^int FORMAT_HOST_PORT 0)
+
+  (field ^:private ^:static ^:final ^int FORMAT_HOST_PORT_FACTORY 1)
+
+  (method ^:public write :throws [IOException] ^void [this ^ObjectOutput out]
+    (if (nil? csf)
+        (do (.writeByte out FORMAT_HOST_PORT) (.writeUTF out host) (.writeInt out port))
+        (do
+          (.writeByte out FORMAT_HOST_PORT_FACTORY)
+          (.writeUTF out host)
+          (.writeInt out port)
+          (.writeObject out csf))))
+
+  (method ^:public ^:static read :throws [IOException ClassNotFoundException] ^TCPEndpoint [^ObjectInput in]
+    (let [^:mutable ^String host nil
+          ^:mutable ^int port 0
+          ^:mutable ^RMIClientSocketFactory csf nil
+          format (.readByte in)]
+      (switch format
+        FORMAT_HOST_PORT (do (set! host (.readUTF in)) (set! port (.readInt in)))
+        FORMAT_HOST_PORT_FACTORY
+          (do
+            (set! host (.readUTF in))
+            (set! port (.readInt in))
+            (set! csf (cast RMIClientSocketFactory (.readObject in)))
+            (when (and (some? csf) (Proxy/isProxyClass (.getClass csf)))
+              (throw (IOException. "Invalid SocketFactory"))))
+        (throw (IOException. "invalid endpoint format")))
+      (TCPEndpoint. host port csf nil)))
+
+  (method ^:public writeHostPortFormat :throws [IOException] ^void [this ^DataOutput out]
+    (when (some? csf)
+      (throw (InternalError.
+               "TCPEndpoint.writeHostPortFormat: called for endpoint with non-null socket factory")))
+    (.writeUTF out host)
+    (.writeInt out port))
+
+  (method ^:public ^:static readHostPortFormat :throws [IOException] ^TCPEndpoint [^DataInput in]
+    (let [host (.readUTF in) port (.readInt in)] (TCPEndpoint. host port)))
+
+  (method ^:private ^:static chooseFactory ^RMISocketFactory []
+    (let [^:mutable sf (RMISocketFactory/getSocketFactory)]
+      (when (nil? sf) (set! sf TCPTransport/defaultSocketFactory))
+      sf))
+
+  (method newSocket :throws [RemoteException] ^Socket [this]
+    (when (.isLoggable TCPTransport/tcpLog Log/VERBOSE)
+      (.log TCPTransport/tcpLog Log/VERBOSE (java-str "opening socket to " this)))
+    (let [^:mutable ^Socket socket nil]
+      (try
+        (let [^:mutable clientFactory csf]
+          (when (nil? clientFactory) (set! clientFactory (TCPEndpoint/chooseFactory)))
+          (set! socket (.createSocket clientFactory host port)))
+        (catch UnknownHostException e
+          (throw (java.rmi.UnknownHostException. (java-str "Unknown host: " host) e)))
+        (catch java.net.ConnectException e
+          (throw (ConnectException. (java-str "Connection refused to host: " host) e)))
+        (catch IOException e
+          (try (TCPEndpoint/shedConnectionCaches) (catch [OutOfMemoryError Exception] mem))
+          (throw (ConnectIOException. (java-str "Exception creating connection to: " host) e))))
+      (try (.setTcpNoDelay socket true) (catch Exception e))
+      (try (.setKeepAlive socket true) (catch Exception e))
+      socket))
+
+  (method newServerSocket :throws [IOException] ^ServerSocket [this]
+    (when (.isLoggable TCPTransport/tcpLog Log/VERBOSE)
+      (.log TCPTransport/tcpLog Log/VERBOSE (java-str "creating server socket on " this)))
+    (let [^:mutable serverFactory ssf]
+      (when (nil? serverFactory) (set! serverFactory (TCPEndpoint/chooseFactory)))
+      (let [server (.createServerSocket serverFactory listenPort)]
+        (when (== listenPort 0) (TCPEndpoint/setDefaultPort (.getLocalPort server) csf ssf))
+        server)))
+
+  (defclass ^:private ^:static FQDN
+    :implements [Runnable]
+
+    (field ^:private ^String reverseLookup)
+
+    (field ^:private ^String hostAddress)
+
+    (constructor ^:private [this ^String hostAddress]
+      (set! (.-hostAddress this) hostAddress))
+
+    (method ^:static attemptFQDN :throws [UnknownHostException] ^String [^InetAddress localAddr]
+      (let [^:mutable hostName (.getHostName localAddr)]
+        (when (< (.indexOf hostName \.) 0)
+          (let [hostAddress (.getHostAddress localAddr)
+                f (FQDN. hostAddress)
+                nameServiceTimeOut (TCPEndpoint/getInt
+                                     "sun.rmi.transport.tcp.localHostNameTimeOut"
+                                     10000)]
+            (try
+              (locking f (.getFQDN f) (.wait f nameServiceTimeOut))
+              (catch InterruptedException e (.interrupt (Thread/currentThread))))
+            (set! hostName (.getHost f))
+            (when (or (or (nil? hostName) (.isEmpty hostName)) (< (.indexOf hostName \.) 0))
+              (set! hostName hostAddress))))
+        hostName))
+
+    (method ^:private getFQDN ^void [this]
+      (let [t (RuntimeUtil/newSystemThread this "FQDN Finder" true)] (.start t)))
+
+    (method ^:private ^:synchronized getHost ^String [this] reverseLookup)
+
+    (method ^:public run ^void [this]
+      (let [^:mutable ^String name nil]
+        (try
+          (set! name (.getHostName (InetAddress/getByName hostAddress)))
+          (catch UnknownHostException e)
+          (finally (locking this (set! reverseLookup name) (.notify this))))))))

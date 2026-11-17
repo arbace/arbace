@@ -1,0 +1,217 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/http/KeepAliveCache.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.http)
+
+(import '(java.io IOException NotSerializableException ObjectInputStream ObjectOutputStream)
+        '(java.net URL)
+        '(java.util ArrayDeque ArrayList HashMap List)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(jdk.internal.misc InnocuousThread)
+        '(sun.net.www.protocol.http HttpURLConnection)
+        '(sun.util.logging PlatformLogger PlatformLogger$Level))
+
+(defclasses
+  (defclass ^:public KeepAliveCache
+    :extends (HashMap KeepAliveKey KeepAliveCache$ClientVector)
+    :implements [Runnable]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -2937172892064557949)
+
+    (field ^:private ^:static ^:final ^String keepAliveProp "http.keepAlive.time.")
+
+    (field ^:private ^:static ^:final ^int userKeepAliveServer)
+
+    (field ^:private ^:static ^:final ^int userKeepAliveProxy)
+
+    (field ^:static ^:final ^PlatformLogger logger (HttpURLConnection/getHttpLogger))
+
+    (method ^:static getUserKeepAliveSeconds ^int [^String type]
+      (let [^int v (Integer/getInteger (java-str keepAliveProp type) -1)] (if (< v -1) -1 v)))
+
+    (static-initializer
+      (set! userKeepAliveServer (KeepAliveCache/getUserKeepAliveSeconds "server"))
+      (set! userKeepAliveProxy (KeepAliveCache/getUserKeepAliveSeconds "proxy")))
+
+    (field ^:static ^:final ^int MAX_CONNECTIONS 5)
+
+    (field ^:static ^int result -1)
+
+    (method ^:static getMaxConnections ^int []
+      (when (== result -1)
+        (set! result (Integer/getInteger "http.maxConnections" MAX_CONNECTIONS))
+        (when (<= result 0) (set! result MAX_CONNECTIONS)))
+      result)
+
+    (field ^:static ^:final ^int LIFETIME 5000)
+
+    (field ^:private ^:final ^ReentrantLock cacheLock (ReentrantLock.))
+
+    (field ^:private ^Thread keepAliveTimer nil)
+
+    (constructor ^:public [this])
+
+    (method ^:public put ^void [this ^:final ^URL url obj ^HttpClient http]
+      (let [^:mutable ^HttpClient oldClient nil]
+        (.lock cacheLock)
+        (try
+          (let [^:mutable startThread (nil? keepAliveTimer)]
+            (when-not startThread (when-not (.isAlive keepAliveTimer) (set! startThread true)))
+            (when startThread
+              (.clear this)
+              (let [cache this]
+                (set! keepAliveTimer (InnocuousThread/newSystemThread "Keep-Alive-Timer" cache))
+                (.setDaemon keepAliveTimer true)
+                (.setPriority keepAliveTimer (unchecked-subtract-int Thread/MAX_PRIORITY 2))
+                (.start keepAliveTimer)))
+            (let [key (KeepAliveKey. url obj)
+                  ^:mutable v (cast ClientVector (.get super key))]
+              (if (nil? v)
+                  (let [^:mutable keepAliveTimeout (.getKeepAliveTimeout http)]
+                    (cond
+                      (== keepAliveTimeout 0)
+                        (do
+                          (set! keepAliveTimeout
+                                (KeepAliveCache/getUserKeepAlive (.getUsingProxy http)))
+                          (when (== keepAliveTimeout -1) (set! keepAliveTimeout 5)))
+                      (== keepAliveTimeout -1)
+                        (do
+                          (set! keepAliveTimeout
+                                (KeepAliveCache/getUserKeepAlive (.getUsingProxy http)))
+                          (when (== keepAliveTimeout -1)
+                            (set! keepAliveTimeout (if (.getUsingProxy http) 60 5))))
+                      (== keepAliveTimeout -2) (set! keepAliveTimeout 0))
+                    (java-assert (>= keepAliveTimeout 0))
+                    (if (== keepAliveTimeout 0)
+                        (set! oldClient http)
+                        (do
+                          (set! v (ClientVector. (unchecked-multiply-int keepAliveTimeout 1000)))
+                          (.put v http)
+                          (.put super key v))))
+                  (set! oldClient (.put v http)))))
+          (finally (.unlock cacheLock)))
+        (when (some? oldClient) (.closeServer oldClient))))
+
+    (method ^:private ^:static getUserKeepAlive ^int [^boolean isProxy]
+      (if isProxy userKeepAliveProxy userKeepAliveServer))
+
+    (method ^:private removeVector ^void [this ^KeepAliveKey k]
+      (java-assert (.isHeldByCurrentThread cacheLock))
+      (.remove super k))
+
+    (method ^:public get ^HttpClient [this ^URL url obj]
+      (.lock cacheLock)
+      (try
+        (let [key (KeepAliveKey. url obj)
+              v (cast ClientVector (.get super key))]
+          (when (some? v) (.get v)))
+        (finally (.unlock cacheLock))))
+
+    (method ^:public run ^void [this]
+      (loop []
+        (try (Thread/sleep LIFETIME) (catch InterruptedException e))
+        (let [^:mutable ^{:tag (List HttpClient)} closeList nil]
+          (.lock cacheLock)
+          (try
+            (when (.isEmpty this) (set! keepAliveTimer nil) (break))
+            (let [currentTime (System/currentTimeMillis)
+                  ^{:tag (List KeepAliveKey)} keysToRemove (ArrayList.)]
+              (for-each [^KeepAliveKey key (.keySet this)]
+                (let [v (cast ClientVector (.get this key))
+                      ^:mutable e (cast KeepAliveEntry (.peekLast v))]
+                  (while (some? e)
+                    (if (> (unchecked-subtract currentTime (.-idleStartTime e)) (.-nap v))
+                        (do
+                          (.pollLast v)
+                          (when (nil? closeList) (set! closeList (ArrayList.)))
+                          (.add closeList (.-hc e)))
+                        (break))
+                    (set! e (cast KeepAliveEntry (.peekLast v))))
+                  (when (.isEmpty v) (.add keysToRemove key))))
+              (for-each [^KeepAliveKey key keysToRemove] (.removeVector this key)))
+            (finally
+              (.unlock cacheLock)
+              (when (some? closeList) (for-each [^HttpClient hc closeList] (.closeServer hc))))))
+        (when (identical? keepAliveTimer (Thread/currentThread)) (recur))))
+
+    (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream stream]
+      (throw (NotSerializableException.)))
+
+    (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                     ^ObjectInputStream stream]
+      (throw (NotSerializableException.)))
+
+    (defclass ClientVector
+      :extends (ArrayDeque KeepAliveEntry)
+
+      (field ^:private ^:static ^:final ^long serialVersionUID -8680532108106489459)
+
+      (field ^int nap)
+
+      (constructor [this ^int nap] (set! (.-nap this) nap))
+
+      (method get ^HttpClient [this]
+        (java-assert (.isHeldByCurrentThread cacheLock))
+        (let [e (cast KeepAliveEntry (.peekFirst this))]
+          (when (some? e)
+            (let [currentTime (System/currentTimeMillis)]
+              (when-not (> (unchecked-subtract currentTime (.-idleStartTime e)) nap)
+                (.pollFirst this)
+                (when (.isLoggable KeepAliveCache/logger PlatformLogger$Level/FINEST)
+                  (let [msg (java-str "cached HttpClient was idle for "
+                                      (Long/toString
+                                        (unchecked-subtract currentTime (.-idleStartTime e))))]
+                    (.finest KeepAliveCache/logger msg)))
+                (.-hc e))))))
+
+      (method put ^HttpClient [this ^HttpClient h]
+        (java-assert (.isHeldByCurrentThread cacheLock))
+        (let [^:mutable ^HttpClient staleClient nil]
+          (java-assert (> (KeepAliveCache/getMaxConnections) 0))
+          (when (>= (.size this) (KeepAliveCache/getMaxConnections))
+            (set! staleClient (.-hc (cast KeepAliveEntry (.removeLast this)))))
+          (.addFirst this (KeepAliveEntry. h (System/currentTimeMillis)))
+          staleClient))
+
+      (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream stream]
+        (throw (NotSerializableException.)))
+
+      (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                       ^ObjectInputStream stream]
+        (throw (NotSerializableException.)))))
+
+  (defclass KeepAliveKey
+    (field ^:private ^:final ^String protocol)
+
+    (field ^:private ^:final ^String host)
+
+    (field ^:private ^:final ^int port)
+
+    (field ^:private ^:final obj)
+
+    (constructor ^:public [this ^URL url obj]
+      (set! (.-protocol this) (.getProtocol url))
+      (set! (.-host this) (.getHost url))
+      (set! (.-port this) (.getPort url))
+      (set! (.-obj this) obj))
+
+    (method ^:public equals ^boolean [this obj]
+      (if-instance [^KeepAliveKey kae obj]
+        (and (and (and (.equals host (.-host kae)) (== port (.-port kae)))
+                  (.equals protocol (.-protocol kae)))
+             (identical? (.-obj this) (.-obj kae)))
+        false))
+
+    (method ^:public hashCode ^int [this]
+      (let [str (java-str protocol host port)]
+        (if (nil? (.-obj this))
+            (.hashCode str)
+            (unchecked-add-int (.hashCode str) (.hashCode (.-obj this)))))))
+
+  (defclass KeepAliveEntry
+    (field ^:final ^HttpClient hc)
+
+    (field ^:final ^long idleStartTime)
+
+    (constructor [this ^HttpClient hc ^long idleStartTime]
+      (set! (.-hc this) hc)
+      (set! (.-idleStartTime this) idleStartTime))))

@@ -13,8 +13,9 @@ covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
   `arbace/repr/`, `arbace/build/`, `arbace/j2g/` and `arbace/c2j/`, which are Arbace's own but
-  for repr/java's native lexer and parser, ports of jdk26u's javac, and repr/c's lexer and
-  preprocessor, ports of cc, below) is
+  for repr/java's native lexer and parser, ports of jdk26u's javac, repr/c's lexer and
+  preprocessor, ports of cc, repr/rust's native lexer and parser, ports of rustc, and repr/haskell's native
+  reader, ports of GHC, below) is
   derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -23,7 +24,8 @@ covers what.
   - ASM, under the BSD 3-Clause License (the package renamed from `org.objectweb.asm`, by way
     of `clojure.asm`, to `arbace.asm`), was `arbace/asm/` and `arbace/asm.ae` until 2026-10-12,
     when it left main with the JVM's bytecode back end (doc/STANDALONE-NOTES.md, S4; it remains
-    on the branch `arbace-for-java-26`). No file of main is derived from it now; its license
+    on the branch `arbace-for-java-26`). Since 2026-11-10 `arbace/asm/` holds the assembly crop's
+    assembler instead (Apache-2.0 WITH LLVM-exception, below), nothing of ASM. No file of main is derived from it now; its license
     stays below for the JVM jars main uses or used, which embed it (`seed/arbace-seed.jar`
     while it was committed, until S4, 2026-10-12, now on the branch `arbace-for-java-26`, and the
     frozen jar of `arbace-for-java-26-v4`, the oracle's reference, built from its tag), and for
@@ -165,6 +167,20 @@ covers what.
   same tree's `src/cmd/compile/internal/syntax/`), its namespace and import path renamed
   `arbace/repr/go/internal/syntax` by `arbace.repr.go.syntax/copy-texts`, nothing else changed:
   Copyright The Go Authors, under Go's BSD 3-Clause License (text below); each file's notice kept.
+- `wasm/web/arbace.js`'s part 1 (the gojs imports and the `Go` class; doc/wasm/WEB.md; doc/wasm/WASM-SURVEY.md, "As built:
+  WA11, WA12 (begun)") and wai's headless world `go/arbace/wai/gojs.ae` (the same imports, the reference table and the run
+  written in Go after it): derived from TamaGo's go1.27.1 tree's `lib/wasm/wasm_exec.js` and `lib/wasm/wasm_exec_node.js`
+  (above: `VERSION` "go1.27.1"), Copyright 2018 and 2021 The Go Authors, under Go's BSD 3-Clause License (text below); the
+  notice is kept at the top of `arbace.js`. The rest of `arbace.js`, `wasm/web/index.html` and wai's `js*.ae`, `gojsnode.ae`
+  and `gojspage.ae` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/go/escape.ae` (doc/go/GOI-SPEC.md, "Since v1: gc's escape analysis and inliner"): a port to Arbace of
+  gc's escape analysis and inliner from TamaGo's go1.27.1 tree (above: `VERSION` "go1.27.1"):
+  `src/cmd/compile/internal/escape/` (`escape.go`, `graph.go`, `solve.go`, `expr.go`, `stmt.go`, `assign.go`,
+  `call.go`, `utils.go`, `leaks.go`), `inline/inl.go`, `inline/interleaved/interleaved.go`,
+  `devirtualize/devirtualize.go`, `ir/scc.go`, `ir/reassignment.go`, `ir/fmt.go`, `types/fmt.go`,
+  `loopvar/loopvar.go`, `typecheck/stmt.go`, `typecheck/subr.go` (`convertOp`), `walk/expr.go`,
+  `noder/writer.go` and `ssagen/intrinsics.go` (the amd64 entries of its table, as data), written anew in
+  Arbace after them: Copyright The Go Authors, under Go's BSD 3-Clause License (text below).
 - `go/arbace/repr/go/gcsyntax/errors.ae` (doc/go/GO-PARSER-SURVEY.md, "As built: GPS41 (c)"):
   besides Arbace's own driver, a port of gc's noder's pragma handling from TamaGo's go1.27.1 tree
   (above: `VERSION` "go1.27.1"): `src/cmd/compile/internal/noder/noder.go` (`pragma`,
@@ -253,10 +269,85 @@ covers what.
   (sys.c, signals.c, gc_ctrl.c, weak.c, finalise.c, backtrace.c, memprof.c, domain.c), `ext_digest.ae`
   (md5.c, blake2.c, bigarray.c's minimal part, the LXM generator of random.ml's runtime), `ext_lex.ae`
   (lexing.c, parsing.c), `ext_bigstring.ae` (bigarray.c), and the parts of `ext.ae`, `ext_domain.ae`,
-  `exn.ae`, `run.ae` and `thread.ae` that follow obj.c, sync.c, domain.c, fiber.c and printexc.c: under the
-  GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The test
+  `exn.ae`, `run.ae` and `thread.ae` that follow obj.c, sync.c, domain.c, fiber.c and printexc.c, and `ext_unix.ae`
+  (the Unix library's core, otherlibs/unix's `unixsupport.c`'s error table and the C stubs of the externals unix.ml
+  declares; doc/ocaml/DEFERRED-TRIAGE.md, "As built: OT9's second fix"), `ext_unix_fd.ae` (otherlibs/unix's C stubs of
+  descriptors, files and directories), `ext_thread.ae` (otherlibs/systhreads' `st_stubs.c`; "As built: OT9's next
+  three fixes"), `ext_unix_sock.ae` (otherlibs/unix's C stubs of sockets, the host database and select) and `ext_signal.ae`
+  (runtime/signals.c and otherlibs/unix's signals.c, kill.c, spawn.c, wait.c, itimer.c; "As built: OT9's fixes 6-8"), `ext_str_re.ae`
+  (otherlibs/str's `strstubs.c`) and `ext_bigarray.ae` (bigarray.c's compare, serialization, float16 and reshape, otherlibs/unix's
+  `mmap_unix.c`; "As built: OT21-OT26 and fixes 9-11"): under the
+  GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The Unix library's
+  OCaml units (`otherlibs/unix/unix.mli`, `unix_unix.ml`, `unixLabels.ml{,i}` of the same tarball, same license) are not
+  copied into the tree: `bin/oi stdlib` compiles them from the pinned tarball into `.tmp/oi/unixlib/`, and the threads
+  library's (`otherlibs/systhreads/thread.ml{,i}`, `event.ml{,i}`) into `.tmp/oi/threadlib/`, and compiler-libs' units of
+  `utils/` the triage's programs need (`config.fixed.ml`, `config.common.ml.in`, `build_path_prefix_map`, `format_doc`, `misc`,
+  `identifiable`, `numbers`, `strongly_connected_components`, `stable_matching`, `compression`; since OT21 (b) all of ocamlcommon's
+  `utils/` but `domainstate` and `parsing/`, with `boot/menhir/parser.ml` and `menhirLib.ml`) into `.tmp/oi/complib/`, and the Str
+  library's `otherlibs/str/str.ml{,i}` into `.tmp/oi/strlib/`. The test
   data `test/ocaml/oi/testdata/` and the tables in `go/arbace/oi/lexdata*_test.ae` and `parsedata_test.ae`
   are outputs of the host's OCaml 5.5.0 (ocaml, ocamllex, ocamlyacc) over Arbace's own test programs.
+- oi's C API on ci (doc/ocaml/OCAML-SURVEY.md, "As built: the C API on ci"): `go/arbace/oicapi.ae`, `go/arbace/oicapi/`,
+  `go/arbace/oi/ext_capi.ae` and `test/ocaml/capi/` (the headers `include/caml/*.h`, the C runtime `runtime.c`, `main.c`,
+  `cnodes.ae`) are Arbace's own, under the Eclipse Public License 1.0: clean-room, written from OCaml's manual (chapter 22,
+  "Interfacing C with OCaml": the value layout, the macros' and functions' names and meanings) without OCaml's runtime headers
+  or sources; `runtime.c`'s BLAKE2b is written from RFC 7693's specification (the initialization vector and the message schedule
+  are the RFC's constants).
+- repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"): `arbace/repr/ocaml/lex.ae`
+  (parsing/lexer.mll, the parts of stdlib/lexing.ml that update the positions, utils/misc.ml's Utf8_lexeme),
+  `docstrings.ae` (parsing/docstrings.ml), `ast.ae`'s constructors and docstring attributes (parsing/ast_helper.ml,
+  docstrings.ml, location.ml's mkloc), `actions.ae` (parsing/parser.mly's header and its semantic actions), `report.ae` (parsing/location.ml's
+  batch-mode report printer, utils/format_doc.ml's pp_two_columns, the break rule of stdlib/format.ml; parse.ml's and
+  lexer.mll's error messages are in `actions.ae` and `lex.ae`) and the
+  generated `tables.ae` (parser.mly's automaton, with its actions' texts) are ports of OCaml 5.5.0 (the release
+  tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+  `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, Copyright INRIA), by hand on 2026-11-04, the
+  files carrying the notices: under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking
+  exception (below). `parser.ae`'s engine follows MenhirLib's (boot/menhir/menhirLib.ml of the same tarball: Engine,
+  TableInterpreter) and `menhir.ae` follows Menhir 20250912's documented construction, reproduces nine rules of its
+  standard library (standard.mly) and decodes MenhirLib's table format (PackedIntArray, RowDisplacement): under
+  MenhirLib's terms ("Menhir and MenhirLib", below). The rest of them (`ast.ae`'s dump, which ports Arbace's own
+  tools/ocdump/ocdump.ml, `native.ae`, the LALR(1) construction of `menhir.ae`) is Arbace's own, under the Eclipse
+  Public License 1.0.
+- ocamllex ported (doc/ocaml/OCAML-SURVEY.md, "As built: ocamllex ported (OC186)"): `arbace/repr/ocaml/ocamllex.ae` ports OCaml
+  5.5.0's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml, common.ml, output.ml, main.ml) and the parts of
+  stdlib/set.ml it relies on, from the same release tarball (SHA-256 `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`,
+  Copyright INRIA), by hand on 2026-11-08, the file carrying the notice: under the GNU Lesser General Public License version 2.1 with
+  the OCaml LGPL linking exception (below). Its `check` verb, `bin/repr-ocaml ocamllex-check`, `test/ocaml/oc185.ae` and the samples of
+  `test/ocaml/ocamllex/` are Arbace's own (Eclipse Public License 1.0); `test/ocaml/ocamllex-expected.edn` records the host's ocamllex
+  5.5.0's outputs' digests.
+- ocamlyacc ported (doc/ocaml/OCAML-SURVEY.md, "As built: OC194 (a)"): `arbace/repr/ocaml/ocamlyacc.ae` ports OCaml 5.5.0's yacc/
+  (main.c, reader.c, symtab.c, error.c, lr0.c, closure.c, warshall.c, lalr.c, mkpar.c, output.c, skeleton.c, verbose.c) from the same
+  release tarball (SHA-256 `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`), by hand on 2026-11-09, the file carrying
+  the notice. yacc/ is Berkeley yacc as OCaml adapted it: each file says "Based on public-domain code from Berkeley Yacc" (Berkeley
+  yacc itself is in the public domain), and each carries INRIA's notice (Copyright 1996 INRIA) placing OCaml's adaptation under the GNU
+  Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below); the port is under those terms. Its `check`
+  verb, `bin/repr-ocaml ocamlyacc-check` and the samples of `test/ocaml/ocamlyacc/` are Arbace's own (Eclipse Public License 1.0);
+  `test/ocaml/ocamlyacc-expected.edn` records the host's ocamlyacc 5.5.0's outputs' and messages' digests.
+- oi's native front end (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/types.ae` (typing/types.ml, btype.ml, ctype.ml's
+  levels, unification, generalization and instances, predef.ml, printtyp.ml with out_type.ml and oprint.ml),
+  `env.ae` (typing/env.ml, typetexp.ml, typedecl.ml, datarepr.ml), `parmatch.ae` (typing/patterns.ml, parmatch.ml),
+  `typecore.ae` (typing/typecore.ml, typemod.ml's structure items), `lambda.ae` (lambda/lambda.ml's helpers,
+  switch.ml, printlambda.ml's names), `matching.ae` (lambda/matching.ml), `translcore.ae` (lambda/translcore.ml,
+  translprim.ml, translmod.ml's bytecode structure), `simplif.ae` (lambda/simplif.ml with lambda.ml's traversals,
+  T7), `tmc.ae` (lambda/tmc.ml), `typemod.ae` (typing/typemod.ml, includemod.ml, mtype.ml's nondep_supertype),
+  `translmod.ae` (lambda/translmod.ml), `format.ae` (stdlib/format.ml's engine) and `printtyp.ae` (typing/oprint.ml's
+  printers), with `env.ae` extended by env.ml's module components, subst.ml and mtype.ml (T8), and their polymorphic
+  variants' parts of the same files (types.ml, btype.ml, ctype.ml, typetexp.ml, typecore.ml, parmatch.ml, out_type.ml,
+  matching.ml, switch.ml, translcore.ml, translprim.ml; T9), `typeclass.ae` (typing/typeclass.ml with ctype.ml's class
+  signatures and objects, T9) and `translclass.ae` (lambda/translobj.ml, translclass.ml, T9) with the object parts of
+  the files above (types.ml, ctype.ml, typetexp.ml, typecore.ml, out_type.ml, oprint.ml, translcore.ml, translprim.ml,
+  simplif.ml), and `valuerec.ae` (typing/value_rec_check.ml's classify_expression, lambda/value_rec_compiler.ml, T10)
+  with parmatch.ml's exhaust and typecore.ml's counter-example check in `parmatch.ae` and `typecore.ae`, and (T10's
+  rest, 2026-11-06) lambda/debuginfo.ml's Scoped_location in `translcore.ae` with the effect, let-operator, open,
+  recursive-module, scope and modular-explicit (Tfunctor) parts of the files above, are ports of
+  the same OCaml 5.5.0 tarball (SHA-256
+  `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, Copyright INRIA), by hand on 2026-11-05 and 2026-11-06, the
+  files carrying the notices: under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking
+  exception (below). `arbace/repr/ocaml/typer.ae` (the driver and the judge) and `bin/lib/oi/typer.bash` are Arbace's own,
+  under the Eclipse Public License 1.0; test/ocaml/typer/'s samples are Arbace's own, their `.out` files outputs of the
+  host's OCaml 5.5.0 toplevel, the dumps of `test/ocaml/typer/oracle/` outputs of tools/ocdump on the host's
+  compiler-libs.
 - `jdk/ocaml/` (OCaml's runtime as Java forms, the package `ocaml.rt`; doc/ocaml/OCAML-SURVEY.md, "As built: O6
   (write-ahead)") and `arbace/o2j.ae` (o2j, Lambda to Java forms): the values, the application, the program's
   start (`Block`, `Closure`, `Pap`, `Native`, `Code`, `Exn`, `Exit`, `Fatal`, `I64`, `NInt`, `Custom`, `Rt`, `Main`, `Gil`,
@@ -266,7 +357,9 @@ covers what.
   (extern.c, intern.c), `ExtIo`, `Channel`, `Fd` (io.c, sys.c's open and close), `ExtSys` (sys.c, signals.c), `ExtGc`
   (gc_ctrl.c, weak.c, finalise.c, backtrace.c, memprof.c), `ExtDigest`, `Blake2` (md5.c, blake2.c), `ExtLxm`
   (the LXM generator), `ExtBigarray`, `BigArray` (bigarray.c's part oi has), `ExtLex` (lexing.c, parsing.c), and the
-  parts of `ExtCore`, `Effects` and `Fiber` that follow obj.c, alloc.c, lazy.c, sync.c, domain.c and fiber.c:
+  parts of `ExtCore`, `Effects` and `Fiber` that follow obj.c, alloc.c, lazy.c, sync.c, domain.c and fiber.c, and `ExtUnix`
+  (oi's `ext_unix.ae`, above), `ExtSignal` and `ExtProc` (oi's `ext_signal.ae`'s part Java allows; "As built: OT9's fixes 6-8"),
+  `ExtStrRe` and `BaOps` (oi's `ext_str_re.ae` and `ext_bigarray.ae`'s part but the file mapping):
   under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below).
 - The opam set of the OCaml crop (test/ocaml/corpora.edn, the pins `:opam-NAME`; doc/ocaml/OCAML-SURVEY.md, "As built: O7"):
   sources of ten opam packages, fetched at pinned versions into `.tmp/` and read in place by the checks, **not distributed**
@@ -298,10 +391,12 @@ covers what.
   from jrt's own Java (`jdk/provenance.edn` records the commit; `jdk/sources.txt` lists each
   file's origin, which each form file's first line also names):
   - `jdk/forms/`: Java forms converted by repr/java from jdk26u's Java sources (the closure of
-    java.base's files jrt translates, 815 of `src/java.base/share/classes` (since JC6b), 6 of
+    java.base's files jrt translates, 815 of `src/java.base/share/classes` (since JC6b; 1,150 since
+    F1, the JCA, doc/classes/JAVA-DEFERRED-TRIAGE.md, once `bin/jrt-convert update` has run), 6 of
     `src/java.base/unix/classes`, 2 of `src/java.sql/share/classes`), from the 31 sources the JDK
     build generates (`CharacterData*`, java.nio's buffers, `ScopedMemoryAccess`, the CLDR locale
-    data, `LocaleEquivalentMaps`: generated by `bin/jrt-convert` with jdk26u's build tools from
+    data, `LocaleEquivalentMaps`; 41 since F1, the JCA's fields of `sun.security.util.math.intpoly`
+    made by the build's `FieldGen`: generated by `bin/jrt-convert` with jdk26u's build tools from
     jdk26u's data, as the build generates them) and from `jdk/internal/jrt/LocaleDataIndex`
     (generated by `test/jrt/jrt_sources.ae`): Copyright (c) Oracle and/or its affiliates, under
     the GNU General Public License version 2 with the Classpath Exception (text below), with the
@@ -310,6 +405,10 @@ covers what.
     converted from jrt's own Java (the first line names `overlay/jdk/java.base/...`) are under
     `overlay/jdk/`'s licenses, given in the next item.
   - `jdk/data/`: the JDK's resource data, as listed below ("The JDK's resource data").
+  - `jdk/provides.txt` (A4 of the Ghidra case study's G1 plan, 2026-11-10): the world's module provides, generated by
+    `bin/jrt provides` from jdk26u's `module-info.java` files: the names of services and providers (Copyright (c)
+    Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception, as the
+    files they are read from).
   - `jdk/edge.edn` (j2g's edge, recorded by `bin/j2g-edge`: doc/STANDALONE-NOTES.md, S2): the
     declarations (names, modifiers, signatures, constants, annotations) of the classes outside
     the forms, as the JVM reports them: of the JDK's classes (JDK 26.0.2.1, built from jdk26u at
@@ -446,7 +545,9 @@ covers what.
   Agreement (section above).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
-  JN2), written for Arbace in place of jdk26u's files of the same names (from their
+  JN2; `overlay/jdk/javac/buildtools/` and `buildtools-world/`, the tool-world variants of the JDK build's tools and of
+  the API they call that `bin/javac-vendor gensrc` runs on javac's tool, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built:
+  JCS359 stages 2-3 (day)"), written for Arbace in place of jdk26u's files of the same names (from their
   documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The
   jdk26u files that bin/jrt-convert translates are read from the jdk26u checkout, not kept here;
   their Java forms are, in `jdk/forms/` (above).
@@ -478,35 +579,60 @@ covers what.
   `Inet6AddressImpl.java`, `Inet6Address.java`, `sun/net/util/IPAddressUtil.java`, `jdk/internal/util/Exceptions.java`) where they keep it: Copyright (c)
   Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below); the rest of those files is Arbace's own.
+- Generic reflection (F25, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F25 (write-ahead)"):
+  `overlay/jdk/java.base/jdk/internal/jrt/ReflectSupport.java` holds the bodies of the generic members of
+  https://github.com/openjdk/jdk26u at `baf63fb` (`src/java.base/share/classes/java/lang/Class.java`,
+  `java/lang/reflect/Executable.java`, `Method.java`, `Constructor.java`, `Field.java`; the file's header names them),
+  their receiver a parameter: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of that file, the variant `overlay/jdk/variants/TypeVariableImpl.ae`
+  and `go/arbace/jrt/classdata.ae` (whose Class members follow the same `Class.java`'s rules) are Arbace's own, under
+  the Eclipse Public License 1.0.
+- Serialization (JCS167, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 (write-ahead)"; doc/go/JRT-NOTES.md,
+  "Serialization"): `overlay/jdk/java.base/java/io/ObjectStreamClass.java` and `ObjectInputStream.java` are jdk26u's
+  files of the same names (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/java/io/`) edited
+  by `test/jrt/serialization/variants.py` (each file's header says so): Copyright (c) Oracle and/or its affiliates, under
+  the GNU General Public License version 2 with the Classpath Exception (text below), the edits Arbace's own;
+  `overlay/jdk/java.base/java/io/ClassCache.java` and `jdk/internal/jrt/SerialAlloc.java` are Arbace's own. Since
+  serialization's slice 4, JCS169 and JCS170 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: serialization slice 4",
+  "As built: JCS169 (write-ahead)", "As built: JCS170 (write-ahead)"): `overlay/jdk/variants/SerializedLambda.ae` keeps
+  the code of jdk26u's `src/java.base/share/classes/java/lang/invoke/SerializedLambda.java` where it keeps it (its
+  `toString`'s format; the kinds' names of `MethodHandleInfo.java`), and the `readObject`s the variants `DESKey.ae`,
+  `DESedeKey.ae`, `PBEKey.ae` and `PasswordCallback.ae` restore are jdk26u's as repr/java converts them, less the
+  Cleaner's registration: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below), the rest Arbace's own; `overlay/jdk/java.base/jdk/internal/jrt/SerialLambdas.java`
+  is Arbace's own; `arbace/lang/Compiler.ae`'s `Compiler$ProxySupport` and `Compiler$ProxyFn` are Arbace's own code
+  following the rules of jdk26u's `java/lang/reflect/Proxy.java` and `ProxyGenerator.java` (their messages quoted).
 - Security (doc/go/JRT-NOTES.md, "Security"): `overlay/jdk/java.base/javax/crypto/JceSecurity.java`
   holds the `getInstance` methods of https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/share/classes/javax/crypto/JceSecurity.java.template`),
   `overlay/jdk/java.base/sun/security/provider/SeedGenerator.java` its `getSystemEntropy` and
   `longToByteArray` (`sun/security/provider/SeedGenerator.java`), and the variants
   `overlay/jdk/variants/Provider.ae`, `Security.ae`, `ProviderConfig.ae`, `SunEntries.ae`,
-  `SunJCE.ae`, `DigestBase.ae` and `NativePRNG.ae` keep the code of the jdk26u methods they
+  `DigestBase.ae` and `NativePRNG.ae` keep the code of the jdk26u methods they
   replace (`java/security/Provider.java`, `Security.java`, `sun/security/jca/ProviderConfig.java`,
-  `sun/security/provider/SunEntries.java`, `com/sun/crypto/provider/SunJCE.java`,
+  `sun/security/provider/SunEntries.java`,
   `sun/security/provider/DigestBase.java`,
-  `src/java.base/unix/classes/sun/security/provider/NativePRNG.java`) where they keep it:
-  Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
-  with the Classpath Exception (text below); the rest of those files, the digests' variants
-  (`MD5.ae`, `SHA.ae`, `SHA2.ae`, `SHA5.ae`, `SHA3.ae`), `jdk/internal/jrt/HostRandom.java`,
-  `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` are Arbace's
-  own.
-- `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds code
-  transcribed from https://github.com/openjdk/jdk26u at `baf63fb`
-  (`src/java.base/unix/classes/sun/nio/fs/UnixPath.java`: the path operations, its header names
-  them), `overlay/jdk/java.base/java/nio/file/Path.java` its default methods `resolve` (the two
-  varargs overloads), `resolveSibling(Path)` and `iterator` (`java/nio/file/Path.java`),
-  `overlay/jdk/java.base/java/nio/file/Files.java` its `readAllLines(Path, Charset)` and
-  `copy(Path, OutputStream)` (`java/nio/file/Files.java`), and `go/arbace/jrt/filesystem.ae` jrt's
-  Go forms following `src/java.base/unix/native/libjava/canonicalize_md.c` (`JDK_Canonicalize`) and
-  `path_util.c` (`collapse`) and the results of `UnixFileSystem_md.c`: Copyright (c) Oracle and/or
-  its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
-  below); recorded by the rule of B7. The rest of those files is Arbace's own, and the other files
-  of the change are written from the documented APIs, as the overlay's other files (but for the
-  variants keeping jdk26u's code, listed below).
+  `src/java.base/unix/classes/sun/security/provider/NativePRNG.java`) where they keep it, and since
+  the JCA (doc/classes/JAVA-DEFERRED-TRIAGE.md, F1; `SunJCE.ae` removed, jdk26u's `SunJCE` whole) the
+  variants `PBES2Core.ae`, `HmacPKCS12PBECore.ae`, `PBMAC1Core.ae`, `HKDFKeyDerivation.ae`,
+  `ConstructKeys.ae`, `DESKey.ae`, `DESedeKey.ae`, `PBEKey.ae`, `PBKDF2KeyImpl.ae`
+  (`com/sun/crypto/provider/`), `KeyUtil.ae`, `ECUtil.ae` (`sun/security/util/`) and `PKCS8Key.ae`
+  (`sun/security/pkcs/PKCS8Key.java`) keep the members they replace as repr/java converts them, and
+  `overlay/jdk/java.base/javax/crypto/JceSecurityManager.java` the names and signatures of jdk26u's
+  `javax/crypto/JceSecurityManager.java`: Copyright (c) Oracle and/or its affiliates, under the GNU
+  General Public License version 2 with the Classpath Exception (text below); the rest of those
+  files, the digests' variants (`MD5.ae`, `SHA.ae`, `SHA2.ae`, `SHA5.ae`, `SHA3.ae`), the JCA's
+  variants that only cut or set (`SecretKeySpec.ae`, `EncodedKeySpec.ae`, `SealedObject.ae` until serialization's slice 4,
+  `Signature.ae`; `GaloisCounterMode.ae` until F23, below), `jdk/internal/jrt/HostRandom.java`,
+  `jdk/internal/jrt/CryptoAccess.java`, `sun/security/provider/JrtServices.java`,
+  `com/sun/crypto/provider/JceServices.java` and `sun/security/rsa/RsaServices.java` (their service
+  class names are jdk26u's providers') are Arbace's own.
+- `go/arbace/jrt/filesystem.ae` (doc/go/JRT-NOTES.md, "Files") holds jrt's Go forms following jdk26u's
+  (https://github.com/openjdk/jdk26u at `baf63fb`) `src/java.base/unix/native/libjava/canonicalize_md.c`
+  (`JDK_Canonicalize`) and `path_util.c` (`collapse`) and the results of `UnixFileSystem_md.c`: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below);
+  recorded by the rule of B7. The rest of it is Arbace's own. (jrt's own `HostPath.java`, `Path.java`, `Files.java`
+  and `GlobPatterns.java`, which held code transcribed from jdk26u's UnixPath, Path and Files, left with F9 below.)
 - Processes (doc/go/JRT-NOTES.md, "Processes"; recorded by the rule of B7): the variants
   `overlay/jdk/variants/ProcessImpl.ae`, `Process.ae`, `ProcessBuilder.ae` and
   `ProcessHandleImpl.ae` keep the code of the jdk26u methods they replace
@@ -546,21 +672,158 @@ covers what.
   (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/`) transcribed with
   the changes their headers name, `overlay/jdk/java.base/java/io/FileDescriptor.java` holds
   jdk26u's `attach` and `closeAll`, and the variants `overlay/jdk/variants/RandomAccessFile.ae`,
-  `Adler32.ae`, `CRC32C.ae`, `URLJarFile.ae` and `JarEntry.ae` keep the code of the jdk26u methods they replace
+  `Adler32.ae`, `CRC32C.ae` and `URLJarFile.ae` keep the code of the jdk26u methods they replace
   (`java/io/RandomAccessFile.java`, `java/util/zip/Adler32.java`, `CRC32C.java`,
-  `sun/net/www/protocol/jar/URLJarFile.java`, `java/util/jar/JarEntry.java`) where they keep it: Copyright (c) Oracle and/or its
+  `sun/net/www/protocol/jar/URLJarFile.java`) where they keep it: Copyright (c) Oracle and/or its
   affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
   below); the rest of those files, `overlay/jdk/java.base/java/io/FileCleanable.java`,
-  `java/util/jar/JarVerifier.java`, `sun/security/util/ManifestEntryVerifier.java`,
   `jdk/internal/jrt/ZipAccess.java`, `Utf8Coder.java`, the variants `ZipCoder.ae`, `ZipUtils.ae`,
   `JarFileFactory.ae` and `go/arbace/jrt/checksum.ae` are Arbace's own (zlib's adler32 algorithm
   in `checksum.ae` written from RFC 1950).
+  Since P1 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)", 2026-11-10) jrt's
+  JarVerifier and ManifestEntryVerifier are gone (jdk26u's are translated) and `JarFile.java` holds
+  jdk26u's verifier code again.
+- java.lang.ref and thread groups (P1, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)"):
+  `go/arbace/jrt/threadgroup.ae` transcribes jdk26u's `java/lang/ThreadGroup.java` (at `baf63fb`) into
+  Go: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below); the PhantomReference and the thread "Reference Handler" in
+  `go/arbace/jrt/reference.ae` and the thread groups' members of `thread.ae` are Arbace's own.
+- Records' reflection and the platform logging bean (P2, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by
+  day)", 2026-11-11): `go/arbace/jrt/record.ae` transcribes jdk26u's `java/lang/reflect/RecordComponent.java` (at
+  `baf63fb`) into Go, and `overlay/jdk/java.base/sun/management/ManagementFactoryHelper.java` now also holds jdk26u's
+  `PlatformLoggingImpl` (its calls made directly): Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); `go/arbace/jrt/record_test.ae` is Arbace's own.
+- java.util.logging (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F5 (write-ahead)"; recorded by the
+  rule of B7): the variants `overlay/jdk/variants/LogManager.ae`, `Logger.ae`, `Level.ae`,
+  `LogRecord.ae`, `SimpleFormatter.ae` and `LoggingFileHandler.ae` keep the code of the jdk26u members
+  they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.logging/share/classes/java/util/logging/LogManager.java`, `Logger.java`, `Level.java`,
+  `LogRecord.java`, `FileHandler.java`, and `src/java.base/share/classes/jdk/internal/logger/SimpleConsoleLogger.java`,
+  whose `Formatting.getSimpleFormat` and `isFilteredFrame` `SimpleFormatter.ae` and `LogRecord.ae`
+  transcribe) where they keep it: Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); the rest of those files and
+  `overlay/jdk/java.base/sun/util/logging/internal/LoggingProviderImpl.java` (jrt's own, with jdk26u's
+  names and signatures of its access interface) are Arbace's own.
 - `overlay/jdk/variants/TreeMap.ae` (doc/go/JAVA-BASE.md, amendment JB2): its two
   `buildFromIterator` methods are jdk26u's `buildFromSorted` (https://github.com/openjdk/jdk26u
   at `baf63fb`, `src/java.base/share/classes/java/util/TreeMap.java`) without the deserializing
   branch, and its other members keep the code of the members they replace: Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below), by the rule of B7; the rest of the file is Arbace's own.
+- Permissions, JAAS's core and PKI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F4 (write-ahead)",
+  "As built: F2 (write-ahead)"; recorded by the rule of B7): the variants
+  `overlay/jdk/variants/Password.ae`, `PasswordCallback.ae`, `LoginContext.ae`, `Configuration.ae`,
+  `FilePermission.ae` (F4), `SignatureAccess.ae`, `X500Principal.ae`, `X500Name.ae`,
+  `SignatureUtil.ae`, `JceKeyProtector.ae`, `PKCS12KeyStore.ae`, `Sun.ae` and `SunEntriesPki.ae` (F2)
+  keep the jdk26u members they replace or add (https://github.com/openjdk/jdk26u at `baf63fb`, the
+  classes' files of `src/java.base/share/classes`) as repr/java converts them, with the changes they
+  name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of those files, the variants `Subject.ae`,
+  `PortConfig.ae`, `RegisteredDomain.ae` and `OCSP.ae`, and
+  `overlay/jdk/java.base/jdk/internal/event/EventHelper.java` (with jdk26u's names and signatures),
+  `jdk/internal/jrt/PkiAccess.java` and `sun/security/provider/PkiServices.java` (its service class
+  names are jdk26u's providers') are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
+  closure's files above) once `bin/jrt-convert update` has run: 86 files of permission-sources (69
+  of `src/java.base/share/classes`, 1 of `src/java.base/unix/classes`, 15 of
+  `src/jdk.security.auth/share/classes`, 1 of `src/java.logging/share/classes`) and the 2 security
+  message bundles the build's `CompileProperties` generates, and 219 of pki-sources (218 of
+  `src/java.base/share/classes`, 1 of `src/jdk.security.auth/share/classes`).
+- The JCA's tail and SASL (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)"; recorded by the rule
+  of B7): the variants `overlay/jdk/variants/GaloisCounterMode.ae` (since F23 its `overlapDetection` and `GCMDecrypt.doFinal`)
+  and `ProviderConfig.ae`'s SunSASL case (`ProviderConfigSasl.ae` until JCS232 (a) folded it in) keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.base/share/classes/com/sun/crypto/provider/GaloisCounterMode.java`, `sun/security/jca/ProviderConfig.java`) as
+  repr/java converts them, with the changes they name: Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); the rest of those files and the cases F23 adds to
+  `overlay/jdk/java.base/com/sun/crypto/provider/JceServices.java` and `sun/security/provider/JrtServices.java` are Arbace's
+  own. Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: jca-tail-sources' 3 files of
+  `src/java.base/share/classes` (`CtrDrbg`, `MD4`, `GCMParameters`) and sasl-sources' 34 (28 of
+  `src/java.security.sasl/share/classes`, 5 of `src/java.base/share/classes/com/sun/security/ntlm`, 1 of
+  `src/jdk.security.auth/share/classes`), under the same license.
+- JC9b's small members, charsets, file channels and datagrams (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+  F16 (write-ahead)", "As built: F8 (write-ahead)", "As built: F7 (write-ahead)", "As built: F11 (write-ahead)";
+  recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed with
+  the changes their headers name, `overlay/jdk/java.base/java/util/concurrent/atomic/AtomicIntegerFieldUpdater.java`,
+  `AtomicLongFieldUpdater.java`, `AtomicReferenceFieldUpdater.java` (F16) and `java/nio/channels/FileChannel.java`
+  (F7, until F9: jdk26u's file again); `java/nio/DirectByteBuffer.java` and `DirectByteBufferR.java` (F7), derived from the JDK build's generated
+  `HeapByteBuffer.java` and `HeapByteBufferR.java` (`make/modules/java.base/gensrc/GensrcBuffer.gmk` over
+  `src/java.base/share/classes/java/nio/Heap-X-Buffer.java.template`); `java/nio/MappedByteBuffer.java` and
+  `sun/nio/ch/FileChannelImpl.java` (F7), which keep jdk26u's public members' documented behaviour, checks,
+  messages and some of their code, and `java/io/FileInputStream.java` and `FileOutputStream.java`, jdk26u's
+  `getChannel` and the channel's close; the variants `overlay/jdk/variants/Timer.ae`, `PropertyResourceBundle.ae`
+  (F16), `Charset.ae`, `CsStandardCharsets.ae`, `CsStringUTF16.ae`, `GB18030.ae` (F8),
+  `AbstractInterruptibleChannel.ae`, `RandomAccessFile.ae`'s close (F7) and `DatagramSocket.ae` (F11), which keep
+  the jdk26u members they replace as repr/java converts them: Copyright (c) Oracle and/or its affiliates, under
+  the GNU General Public License version 2 with the Classpath Exception (text below); the rest of those files,
+  `overlay/jdk/java.base/jdk/internal/jrt/FieldUpdaters.java`, `java/sql/DriverManager.java` (with jdk26u's
+  names and signatures), the variant `Scanner.ae` (F16), `sun/nio/cs/JrtCharsets.java` (its class names are
+  jdk26u's charsets'), `jdk/internal/jrt/CharsetStrings.java` (F8), `jdk/internal/jrt/HostFileChannels.java`
+  (F7), `java/net/HostDatagramSocketImpl.java`, `jdk/internal/jrt/HostDatagram.java` and the variants
+  `NetworkInterface.ae`, `InterfaceAddress.ae` (F11) are Arbace's own. Their jdk26u sources join `jdk/forms/`
+  once `bin/jrt-convert update` has run: 27 files of small-members-sources (19 of `src/java.base/share/classes`,
+  5 of `src/java.sql/share/classes`, 3 of `src/java.sql.rowset/share/classes`), 42 of charset-sources and the 51
+  charset sources the build's `Spp` and charsetmapping tool generate (charset-gensrc), 23 of channel-sources and
+  35 generated buffers (added-gensrc), and 12 of datagram-sources (11 of `src/java.base/share/classes`, 1 of
+  `src/java.base/unix/classes`); the data `uprops.icu` (ICU's, under the Unicode License V3 as jdk26u's
+  `legal/icu.md` says, beside `ubidi.icu`) and `sun/net/www/content-types.properties`.
+- F10a's selectors and socket channels (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a (write-ahead)";
+  recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed or
+  derived with the changes their headers name, in `overlay/jdk/java.base/sun/nio/ch/`: `Net.java` (derived from
+  `share/classes/sun/nio/ch/Net.java`), `PollSelectorImpl.java` (from `unix/classes/sun/nio/ch/PollSelectorImpl.java`),
+  `SocketOptionRegistry.java` (from `share/classes/sun/nio/ch/SocketOptionRegistry.java.template`), `NativeDispatcher.java`,
+  `UnixDispatcher.java`, `EventFD.java`, `NativeThread.java`, `Util.java`'s `ungrowableSet`, and the variant
+  `overlay/jdk/variants/SelectorProvider.ae`, which keeps the jdk26u member it replaces, and `go/arbace/jrt/channels_linux.ae`,
+  a port to Go forms of jdk26u's `src/java.base/unix/native/libnio/ch/{Net,IOUtil,SocketDispatcher,UnixDispatcher,
+  PollSelectorImpl}.c`, `src/java.base/linux/native/libnio/ch/{EPoll,EventFD}.c` and
+  `src/java.base/unix/native/libnet/net_util_md.c`'s `NET_SetSockOpt`, `NET_GetSockOpt` and `NET_Bind` (their system
+  calls, flags, conversions and results): Copyright (c) Oracle and/or its affiliates, under the GNU General Public
+  License version 2 with the Classpath Exception (text below); the rest of those files, `IOUtil.java`,
+  `SocketDispatcher.java`, `Poller.java`, `EPoll.java`, `FileDispatcherImpl.java` (jdk26u's
+  names and signatures, jrt's code), `jdk/internal/jrt/HostChannels.java`, the variants `SocketChannelImpl.ae`,
+  `PollSelectorProvider.ae` and `EPollSelectorProvider.ae`, `go/arbace/jrt/channels_other.ae` and `channels_test.ae`
+  are Arbace's own.
+  Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: 47 files of selector-sources (40 of
+  `src/java.base/share/classes`, 4 of `src/java.base/unix/classes`, 3 of `src/java.base/linux/classes`).
+- F10b's datagram channels and multicast (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10b (write-ahead)";
+  recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) transcribed with the
+  changes their headers name, `overlay/jdk/java.base/sun/nio/ch/NativeSocketAddress.java` (from
+  `share/classes/sun/nio/ch/NativeSocketAddress.java`) and `DatagramDispatcher.java` (from
+  `unix/classes/sun/nio/ch/DatagramDispatcher.java`), `Net.java`'s multicast natives, the variant
+  `overlay/jdk/variants/DatagramChannelImpl.ae`, which keeps the jdk26u members it replaces, and the part of
+  `go/arbace/jrt/channels_linux.ae` that ports `src/java.base/unix/native/libnio/ch/DatagramChannelImpl.c`,
+  `DatagramDispatcher.c` and `Net.c`'s `joinOrDrop4/6`, `blockOrUnblock4/6`, `setInterface4/6`, `getInterface4/6` and
+  `initGroupSourceReq`: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below); the rest of those files, the variants `DatagramSocketAdaptor.ae` and
+  `DatagramSocket.ae` (since F10b only an added accessor), `NetworkInterface.ae`'s accessors and
+  `go/arbace/jrt/datagrams_test.ae` are Arbace's own. Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert
+  update` has run: 7 files of datagram-channel-sources (`src/java.base/share/classes`).
+- F9's java.nio.file and JCS162's interrupts (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F9 (write-ahead)", "As
+  built: JCS162"; recorded by the rule of B7): jdk26u's files (https://github.com/openjdk/jdk26u at `baf63fb`) derived
+  with the changes their headers name (`.tmp/f9/derive.py`'s asserted replacements), in `overlay/jdk/java.base/`:
+  `java/nio/file/Files.java`, `FileSystems.java`, `FileChannelLinesSpliterator.java`, `spi/FileSystemProvider.java`,
+  `sun/nio/fs/UnixNativeDispatcher.java`, `LinuxNativeDispatcher.java`, `LinuxWatchService.java`, `UnixFileSystem.java`,
+  `UnixChannelFactory.java`, `UnixPath.java`, `NativeBuffer.java`, `NativeBuffers.java` and
+  `UnixUserDefinedFileAttributeView.java`; `sun/nio/ch/FileChannelImpl.java`'s `setUninterruptible` (jdk26u's);
+  `go/arbace/jrt/nio_fs_linux.ae`, a port to Go forms of jdk26u's
+  `src/java.base/unix/native/libnio/fs/{UnixNativeDispatcher,UnixFileSystem}.c` and
+  `src/java.base/linux/native/libnio/fs/{LinuxNativeDispatcher,LinuxWatchService}.c` (their system calls, flags,
+  results and errors), and `go/arbace/jrt/thread.ae`'s `Thread.interrupt` and `blockedOn` (jdk26u's
+  `java/lang/Thread.java`'s): Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of those files, `go/arbace/jrt/nativemem.ae`, `nio_fs_other.ae`,
+  `nio_fs_linux_amd64.ae`, `nio_fs_linux_arm64.ae`, `nio_fs_test.ae`, `jdk/internal/jrt/NioStrings.java`,
+  `jdk/internal/jrt/HostThreads.java`, `HostFiles.java`'s `adopt` and the variant `AbstractInterruptibleChannel.ae`
+  are Arbace's own. Their jdk26u sources join `jdk/forms/` once `bin/jrt-convert update` has run: 91 files of
+  nio-file-sources (70 of `src/java.base/share/classes`, 15 of `src/java.base/unix/classes`, 6 of
+  `src/java.base/linux/classes`) and the generated `sun/nio/fs/UnixConstants.java`.
+- JCS164's UNIX domain sockets (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS164 (write-ahead)"; recorded by the
+  rule of B7): jdk26u's `src/java.base/share/classes/sun/nio/ch/UnixDomainSockets.java` (https://github.com/openjdk/jdk26u
+  at `baf63fb`) derived with the changes its header names (`.tmp/unix/derive.py`'s asserted replacements) into
+  `overlay/jdk/java.base/sun/nio/ch/UnixDomainSockets.java`, and `go/arbace/jrt/channels_linux.ae`'s UNIX section, a port
+  to Go forms of jdk26u's `src/java.base/unix/native/libnio/ch/UnixDomainSockets.c` (its system calls, its sockaddr_un's
+  layout and lengths, results and errors): Copyright (c) Oracle and/or its affiliates, under the GNU General Public
+  License version 2 with the Classpath Exception (text below); the rest of those files, `HostChannels.java`'s five
+  `unix` natives, `channels_other.ae`'s and `channels_test.ae`'s UNIX parts are Arbace's own. Their jdk26u sources join
+  `jdk/forms/` once `bin/jrt-convert update` has run: the 2 files of unix-socket-sources (`java/net/UnixDomainSocketAddress.java`
+  of `src/java.base/share/classes`, `sun/nio/ch/UnixDomainSocketsUtil.java` of `src/java.base/unix/classes`).
 - Other Go-build variants (J2G-SPEC §4.6; recorded by the rule of B7):
   `overlay/jdk/variants/AbstractChronology.ae`, `BitSet.ae`, `CRC32.ae`, `Collectors.ae`,
   `File.ae`, `FileHandler.ae`, `ParseUtil.ae`, `TimeZone.ae`, `TzdbZoneRulesProvider.ae`,
@@ -576,11 +839,215 @@ covers what.
   (`java/lang/System.java`): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below); the rest of those files is
   Arbace's own.
+- TLS (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F3 (write-ahead)"; recorded by the rule of B7): the
+  variants `overlay/jdk/variants/SSLContext.ae`, `SNIHostName.ae`, `SSLSocketImpl.ae`,
+  `InetAddressAccess.ae` and `ProviderConfig.ae`'s SunJSSE case (`ProviderConfigJsse.ae` until JCS232 (a)) keep the jdk26u members they replace or add
+  (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of `src/java.base/share/classes`)
+  as repr/java converts them, with the changes they name, and `overlay/jdk/java.base/sun/security/ssl/SSLLogger.java`
+  is jdk26u's `SSLLogger.java` transcribed with the changes its header names: Copyright (c) Oracle and/or
+  its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), as its notice says; the rest of the variants, `overlay/jdk/java.base/sun/security/ssl/JsseServices.java`
+  (its service class names are jdk26u's SunJSSE's) and `jdk/internal/jrt/NetAccess.java` are Arbace's own.
+  Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license as above): 205 of
+  tls-sources (`src/java.base/share/classes`); the resource data `sun/net/idn/uidna.spp` joins `jdk/data/`
+  (the resource data's item below).
+- URL and HTTP's classes (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F12 (write-ahead)"; recorded by the
+  rule of B7): the variants `overlay/jdk/variants/DefaultProxySelector.ae`, `HttpClient.ae`,
+  `HttpConnectSocketImpl.ae`, `HttpCookieAccess.ae` and `HttpURLConnectionImpl.ae` keep the jdk26u members
+  they replace (https://github.com/openjdk/jdk26u at `baf63fb`, the classes' files of
+  `src/java.base/share/classes`) as repr/java converts them, with the changes they name, and
+  `overlay/jdk/java.base/sun/util/logging/PlatformLogger.java` is jdk26u's `PlatformLogger.java` transcribed
+  with the changes its header names, its `JulBridge` from jdk26u's
+  `src/java.logging/share/classes/sun/util/logging/internal/LoggingProviderImpl.java`: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), as its notice says; the rest of the variants (`ProxySelector.ae`, `NetProperties.ae` too),
+  `overlay/jdk/java.base/jdk/internal/misc/InnocuousThread.java` (written after jdk26u's documented
+  factories) and NetAccess's cookie access are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
+  converted closure, under the same license as above): 82 of http-sources (`src/java.base/share/classes`);
+  `conf/net.properties` joins `jdk/data/` (the resource data's item below).
+- javax.script's API and JNDI's names (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F19 (write-ahead)"; recorded by
+  the rule of B7): the variants `overlay/jdk/variants/ScriptEngineManager.ae`, `VersionHelper.ae` and
+  `NamingManager.ae` keep the jdk26u members they replace (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.scripting/share/classes`, `src/java.naming/share/classes`) as repr/java converts them, with the changes
+  they name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
+  Classpath Exception (text below); the rest of the variants is Arbace's own. Their jdk26u sources join `jdk/forms/`
+  (the converted closure, under the same license): 63 of naming-script-sources.
+- jdk.httpserver (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F24 (write-ahead)"; recorded by the rule of B7):
+  `overlay/jdk/java.base/sun/net/httpserver/{ServerImpl,ExchangeImpl,HttpConnection,HttpContextImpl,ServerConfig}.java`
+  are jdk26u's files of the same names (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/jdk.httpserver/share/classes/sun/net/httpserver/`) with the exact replacements `test/jrt/derive.ae` makes (each
+  file's header says so): Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below), the derivation Arbace's own; `overlay/jdk/java.base/jdk/internal/jrt/SystemLoggers.java`
+  holds jdk26u's `java.lang.System.Logger` interface (`src/java.base/share/classes/java/lang/System.java`) and the
+  System.Logger half of `LoggingProviderImpl.JULWrapper` (`src/java.logging/share/classes/sun/util/logging/internal/`)
+  under the same license, the rest Arbace's own; the variants `overlay/jdk/variants/HttpServerProvider.ae` and
+  `LogManager.ae`'s `LoggingProviderAccess` keep the jdk26u members they replace as repr/java converts them (the same
+  license), with the changes they name. Their jdk26u sources join `jdk/forms/` (the converted closure, under the same
+  license): 38 of httpserver-sources (`src/jdk.httpserver/share/classes`).
+- java.home, the crypto policy and the trust anchors (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS233"; recorded
+  by the rule of B7): since JCS233 (a) `overlay/jdk/java.base/javax/crypto/JceSecurity.java` also holds jdk26u's
+  `setupJurisdictionPolicies`, its static initializer, `getDefaultPolicy`, `getExemptPolicy` and `isRestricted`
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/javax/crypto/JceSecurity.java.template`, its
+  `@@JCE_DEFAULT_POLICY@@` as `unlimited`), and `JceSecurityManager.java` jdk26u's `getCryptoPermission` (but the code
+  base's walk) and `getDefaultPermission` (`javax/crypto/JceSecurityManager.java`): Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below), the rest Arbace's
+  own; jca-sources' `javax/crypto/CryptoPermissions.java` and `CryptoPolicyParser.java` join `jdk/forms/` under the same
+  license. The resource data `jdk/data/conf/security/policy/` (README.txt and the limited and unlimited policies,
+  `src/java.base/share/conf/security/policy/`) and `jdk/data/lib/security/cacerts` (the JDK build's image file, made by
+  `make/modules/java.base/Gendata.gmk`'s GenerateCacerts from `src/java.base/share/data/cacerts/`, jdk26u's CA list:
+  public certificates, under the same license as jdk26u's tree) are jdk26u's; `go/arbace/jrt/javahome.ae` and its test
+  are Arbace's own (Eclipse Public License 1.0).
+- Kerberos's permissions (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS230"; recorded by the rule of B7):
+  kerberos-sources' 2 files, jdk26u's (https://github.com/openjdk/jdk26u at `baf63fb`)
+  `src/java.security.jgss/share/classes/javax/security/auth/kerberos/DelegationPermission.java` and
+  `ServicePermission.java`, join `jdk/forms/` (the converted closure): Copyright (c) Oracle and/or its affiliates, under
+  the GNU General Public License version 2 with the Classpath Exception (text below).
+- java.net.http's client (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS254 (b)"; recorded by the rule of B7): the 15
+  overlays `overlay/jdk/java.base/jdk/internal/net/http/{HttpClientImpl,ExchangeImpl,Exchange,HttpConnection,Response,AltSvcProcessor,Http1Response,WindowController,RawChannelTube,HttpClientFacade}.java`,
+  `common/{Log,Logger,DebugLogger,Utils}.java` and `hpack/HPACK.java` are jdk26u's files of the same names
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.net.http/share/classes/jdk/internal/net/http/`) with the exact
+  replacements and cuts `test/jrt/derive.ae` makes (each file's header says so), and `test/jrt/derive.ae`'s
+  `http-derivations` hold text of those files as its OLD strings: Copyright (c) Oracle and/or its affiliates, under the
+  GNU General Public License version 2 with the Classpath Exception (text below), the derivation Arbace's own. Their
+  jdk26u sources join `jdk/forms/` (the converted closure, under the same license): 140 of http-client-sources
+  (`src/java.net.http/share/classes`).
+- jrt's derivations as data (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS251 (a), JCS253"; recorded by the rule
+  of B7): `test/jrt/derive.ae`'s tables hold, as the OLD and NEW strings of its replacements, text of jdk26u's files
+  (https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/share/classes/sun/nio/ch/Net.java`,
+  `SocketOptionRegistry.java.template`, `UnixDomainSockets.java`, `src/java.base/unix/classes/sun/nio/ch/PollSelectorImpl.java`,
+  the thirteen files of F9's table under `src/java.base/{share,unix,linux}/classes/`, and the JDK build's generated
+  `java/nio/HeapByteBuffer.java` and `HeapByteBufferR.java`): Copyright (c) Oracle and/or its affiliates, under the GNU
+  General Public License version 2 with the Classpath Exception (text below); the rest of `test/jrt/derive.ae`, the
+  bodies and helpers it writes and `test/jrt/vet.ae` are Arbace's own. The overlays it makes are covered above with
+  their features (F7, F9, F10a, F10b, JCS164, F24).
+- JMX's core, AccessFlag and type annotations (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JMX-1 (write-ahead)", "As built:
+  JCS273 (write-ahead)", "As built: JCS271 (b) (write-ahead)"; recorded by the rule of B7): the derived overlays
+  `overlay/jdk/java.base/{com/sun/jmx,javax/management}/...` (21 files), `java/lang/management/ThreadInfo.java`,
+  `java/lang/reflect/AccessFlag.java` and `sun/reflect/annotation/{TypeAnnotationParser,AnnotationType,AnnotationSupport}.java`
+  are jdk26u's files of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.management/share/classes/`,
+  `src/java.base/share/classes/`) with the exact replacements `test/jrt/derive.ae` makes, whose tables hold their replaced
+  text (each file's header says so); `overlay/jdk/java.base/jdk/internal/jrt/{AccessFlagSupport,TypeAnnotationSupport}.java`
+  hold jdk26u's bodies of `Class.java`'s, `java/lang/reflect/Executable.java`'s, `Method.java`'s, `Constructor.java`'s,
+  `Field.java`'s and `jdk/internal/reflect/ReflectionFactory.java`'s members their headers name, and
+  `jdk/internal/jrt/ClassFileAccess.java` the names and values of `java/lang/classfile/ClassFile.java`'s access flags; and
+  the jdk26u sources the closure adds (`test/jrt/jrt_sources.ae`'s `jmx-sources`, `accessflag-sources`,
+  `type-annotation-sources`) join `jdk/forms/` (the converted closure): Copyright (c) Oracle and/or its affiliates, under the
+  GNU General Public License version 2 with the Classpath Exception (text below), the derivations and the rest of those
+  files Arbace's own; `jdk/internal/jrt/TypeAnnotationData.java`, `jdk/internal/reflect/ConstantPool.java` (jrt's own, in
+  place of jdk26u's), the variant `overlay/jdk/variants/TypeVariableImpl.ae`, `arbace/classes/annot.ae`'s type annotation
+  records and `go/arbace/jrt/classdata.ae`'s natives are Arbace's own, under the Eclipse Public License 1.0. F13's
+  overlays `LockInfo.java`, `MonitorInfo.java`, `MemoryUsage.java`, `javax/management/ObjectName.java` and
+  `openmbean/CompositeData.java` are removed (jdk26u's in their place).
+- java.lang.invoke (F15, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15 (java.lang.invoke)"; recorded by the rule of
+  B7): the derived overlays `overlay/jdk/java.base/java/lang/invoke/{MethodType,MethodTypeForm,LambdaMetafactory}.java` and
+  `sun/invoke/util/VerifyAccess.java` are jdk26u's files of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.base/share/classes/`) with the exact replacements and cuts `test/jrt/derive.ae` makes (`invoke-derivations`,
+  whose tables hold their replaced text; each file's header says so); `java/lang/invoke/MethodHandleStatics.java` and
+  `MethodHandleNatives.java` hold jdk26u's bodies of the members of the files of the same names their headers name, and
+  `MethodHandle.java`, `MethodHandles.java` and `CallSite.java`, `ConstantCallSite.java`, `MutableCallSite.java`,
+  `VolatileCallSite.java` jdk26u's text of the members their headers name (the argument checks and their messages, the
+  lookup modes, `in`, `dropLookupMode`, `toString`, the varargs collector's `asTypeUncached`); and the jdk26u sources the
+  closure adds (`test/jrt/jrt_sources.ae`'s `invoke-sources`) join `jdk/forms/`: Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below), the derivations and
+  the rest of those files Arbace's own; `java/lang/invoke/DirectMethodHandle.java`, `MethodHandleImpl.java`,
+  `ProxyLambdaMetafactory.java` (jrt's own, in place of jdk26u's), `jdk/internal/jrt/Invokers.java`, the analyzer's
+  rewrite in `arbace/classes/analyze.ae` and `go/arbace/jrt/natives.ae`'s two natives are Arbace's own, under the Eclipse
+  Public License 1.0. StringConcatFactory (JCS353 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS350, JCS351,
+  JCS353"; recorded by the rule of B7): `overlay/jdk/java.base/java/lang/invoke/StringConcatFactory.java` holds jdk26u's text
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/java/lang/invoke/StringConcatFactory.java`) of
+  the members its header names (makeConcat, makeConcatWithConstants' checks and messages, parseRecipe, argumentMismatch,
+  constantMismatch, makeSimpleConcat, unaryConcat) and of `StringConcatHelper.stringOf`: Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below); the adapters in
+  place of the hidden class and the rest of the file, and `test/jrt/scf-diff/`, are Arbace's own, under the Eclipse Public
+  License 1.0.
+- java.lang.reflect.Parameter and Runtime.Version.parse (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS280 (a)",
+  "As built: JCS304 (b), JCS293"; recorded by the rule of B7): the derived overlay `overlay/jdk/java.base/java/lang/reflect/Parameter.java`
+  is jdk26u's file of the same path (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/`) with the
+  exact replacements `test/jrt/derive.ae` makes; `overlay/jdk/java.base/jdk/internal/jrt/ParameterSupport.java` transcribes
+  jdk26u's `Executable.getAllGenericParameterTypes` (its branch without real parameter data), and
+  `AccessFlagSupport.parameterAccessFlags` `Parameter.accessFlags`; `go/arbace/jrt/system.ae`'s `Version.parse` ports
+  jdk26u's `Runtime.java` (`Version.parse`, `isSimpleNumber`, `VersionPattern`, `toString`, `compareTo`, `equalsIgnoreOptional`,
+  `compareToIgnoreOptional`): Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below); the rest of those files, the sample `test/j2g/unit/typeann/` and `test/j2g/typeann.ae`
+  are Arbace's own, under the Eclipse Public License 1.0.
+- Java RMI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)"; recorded by the rule of B7): the derived
+  overlays `overlay/jdk/java.base/java/rmi/server/RMIClassLoader.java` and
+  `overlay/jdk/java.base/sun/rmi/{transport/GC,runtime/Log,runtime/RuntimeUtil}.java` are jdk26u's files
+  of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.rmi/share/classes/`) with the exact
+  replacements `test/jrt/derive.ae` makes, whose tables hold their replaced text (each file's header says so); and the
+  jdk26u sources the closure adds (`test/jrt/jrt_sources.ae`'s `rmi-sources`: 89 files of `src/java.rmi/share/classes`
+  and `src/java.base/share/classes/java/lang/NoSuchMethodError.java`) join `jdk/forms/` (the converted closure); likewise
+  JMX-2's, its connectors: the derived overlays `overlay/jdk/java.base/javax/management/remote/{JMXConnectorFactory,
+  JMXConnectorServerFactory}.java`, `com/sun/jmx/remote/internal/{ClientCommunicatorAdmin,ServerCommunicatorAdmin,
+  ClientNotifForwarder}.java` (`src/java.management/share/classes/`) and `javax/management/remote/rmi/RMIConnector.java`
+  (`src/java.management.rmi/share/classes/`), and `jmx-remote-sources`' 41 files of those two trees: Copyright
+  (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below), the derivations Arbace's own; `go/arbace/jrt/rmi.ae` (GC.maxObjectInspectionAge's native, after librmi's
+  `GC.c`, written anew over Go's runtime/debug) and its test, `overlay/jdk/java.base/jdk/internal/jrt/JmxProviders.java` (the
+  providers java.management.rmi's module-info names), jrt's Thread context class loader (`go/arbace/jrt/thread.ae`)
+  and the throws records (`arbace/classes/annot.ae`) are Arbace's own, under the Eclipse Public License 1.0.
+- Java's older proposals (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: Java's older proposals (JCS191-JCS213)";
+  recorded by the rule of B7): `go/arbace/jrt/serial_locks.ae` holds the serial forms and serialization hooks of jdk26u's
+  `java/util/concurrent/locks/{ReentrantLock,ReentrantReadWriteLock,AbstractQueuedSynchronizer,AbstractQueuedLongSynchronizer,AbstractOwnableSynchronizer}.java`,
+  `java/util/concurrent/Semaphore.java` and `ForkJoinTask.java` (https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/java.base/share/classes`; written by Doug Lea with members of JCP JSR-166 and released to the public domain, as their
+  headers say, in files under Oracle's notice): their serialVersionUIDs, fields and hooks' bodies over jrt's state, under the
+  GNU General Public License version 2 with the Classpath Exception (text below) as far as Oracle's notice covers them, the
+  rest Arbace's own. `overlay/jdk/java.base/sun/nio/ch/InheritedChannel.java`, `overlay/jdk/java.base/jdk/net/ExtendedSocketOptions.java`
+  and `LinuxSocketOptions.java` are jdk26u's files (`src/java.base/unix/classes/sun/nio/ch/InheritedChannel.java`,
+  `src/jdk.net/share/classes/jdk/net/ExtendedSocketOptions.java`, `src/jdk.net/linux/classes/jdk/net/LinuxSocketOptions.java`)
+  with the exact replacements `test/jrt/derive.ae` makes (their headers say so), and `go/arbace/jrt/channels_linux.ae`'s
+  inherited-channel and extended-options sections port jdk26u's `src/java.base/unix/native/libnio/ch/InheritedChannel.c` and
+  `src/jdk.net/linux/native/libextnet/LinuxSocketOptions.c` (their system calls, options and results): Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below); the
+  derivations' tables are covered as above; the rest of those files, `HostChannels.java`'s inherited and extended-option
+  natives, `channels_other.ae`'s and the tests' parts, `annotation.ae`'s invocation handler (jdk26u's
+  `sun/reflect/annotation/AnnotationInvocationHandler.java`'s invoke, as F14's port) and `system.ae`'s Runtime.Version rules
+  (jdk26u's `java/lang/Runtime.java`'s Version) are as F14 and the rest of jrt are covered. Their jdk26u sources join
+  `jdk/forms/` once `bin/jrt-convert update` has run: jdk-net-sources (`src/jdk.net/share/classes/jdk/net/{NetworkPermission,Sockets,UnixDomainPrincipal}.java`).
+- java.lang.management without JMX (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F13 (write-ahead)";
+  recorded by the rule of B7): `overlay/jdk/java.base/java/lang/management/{ManagementFactory,ThreadInfo,LockInfo,MonitorInfo,MemoryUsage}.java`
+  `overlay/jdk/java.base/sun/management/{ManagementFactoryHelper,VMManagementImpl}.java` and
+  `overlay/jdk/java.base/com/sun/management/internal/OperatingSystemImpl.java` are jdk26u's files
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.management/share/classes`, and
+  `src/jdk.management/unix/classes` for the last) transcribed with the changes their headers name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below), as their notices say; the variants `overlay/jdk/variants/ThreadImpl.ae` and
+  `BaseOperatingSystemImpl.ae`, `com/sun/management/internal/JrtPlatformBeans.java`, the
+  skeletons `overlay/jdk/java.base/javax/management/ObjectName.java` and `openmbean/CompositeData.java` (written for
+  JMX's documented signatures), `jdk/internal/jrt/HostManagement.java` and `go/arbace/jrt/management{,_linux,_tamago}.ae` are Arbace's
+  own (written for jdk26u's documented natives and Linux's /proc and syscalls). Their jdk26u sources join `jdk/forms/` (the converted closure, under the same license): 29 of management-sources.
+- `go/arbace/jrt/annotation.ae` (F14, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F14 (first slice,
+  write-ahead)"): `AnnotationObj`'s `Equals_O__Z`, `HashCode__I`, `ToString__String`, `Element` and their helpers
+  (`memberValueEquals`, `memberValueHashCode`, `memberValueToString`, the `*SourceString` functions, `quoteChar`,
+  `cloneMember`, `memberMethods`), `withDefaults` and `hashMapOrder` (AnnotationParser's memberValues over
+  AnnotationType's memberDefaults), `classAnnotations` (Class.createAnnotationData), `directlyAndIndirectlyPresent`,
+  `containerFirst` and `containerType` (AnnotationSupport), the `AnnotatedElement_*` default functions, and the
+  Field primitive accessors of `go/arbace/jrt/reflect.ae` (`getMessage`, `setPrimMessage`, `getPrim`, `setPrim`, the
+  `Get*`/`Set*` methods) follow the code of https://github.com/openjdk/jdk26u at `baf63fb`
+  (`src/java.base/share/classes/sun/reflect/annotation/{AnnotationInvocationHandler,AnnotationParser,AnnotationType,
+  AnnotationSupport}.java`, `java/lang/Class.java`, `java/lang/reflect/AnnotatedElement.java`, `java/util/HashMap.java`'s
+  iteration order, `jdk/internal/reflect/FieldAccessorImpl.java`): Copyright (c) Oracle and/or its affiliates, under the
+  GNU General Public License version 2 with the Classpath Exception (text below); recorded as ports, by the rule of B7.
+  The data format, its decoder, the per-type annotation classes, `annotation_test.ae`, `arbace/classes/annot.ae` and
+  j2g's annotation types are Arbace's own.
 - `go/arbace/jrt/fdlibm.ae` and the `FdLibm` part of `go/arbace/jrt/math.ae` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
   and "Phase 2B (step 5)"): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below).
+- `go/arbace/jrt/serial_classes.ae` (JCS167's second slice, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167
+  slices 2-3 (write-ahead)"): the serialization hooks of jrt's hand-written classes port the bodies of
+  https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/java/lang/{Throwable,StringBuilder,StringBuffer}.java`'s
+  and `java/util/Date.java`'s `writeObject` and `readObject` (Throwable's validation of what it reads), with their
+  classes' serialVersionUIDs and serial fields, and `StackTraceElement`'s `toString`, `equals` and `hashCode` in
+  `go/arbace/jrt/throwable.ae` port `java/lang/StackTraceElement.java`'s at the same commit: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below);
+  the rest of these files is Arbace's own, under the Eclipse Public License 1.0. `arbace/classes/suid.ae`
+  (JCS168) ports `src/java.base/share/classes/java/io/ObjectStreamClass.java`'s `computeDefaultSUID` and the parts of
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Lower.java` that name a serializable class's synthetic
+  members (`outerThisName`, `shouldEmitOuterThis`, `assertFlagTest`) at the same commit, under the same license;
+  the samples of `test/jrt/serialization/suid/` and the recorders `test/jrt/serialization/{SerialRecord,DefaultSUIDs}.java`
+  and `suid/runner/` are Arbace's own (Eclipse Public License 1.0).
 - `arbace/repr/c/` (repr/c, C's bridge; doc/C23-SURVEY.md, "As built: C2"): `lex.ae` and `pp.ae`,
   repr/c's lexer and preprocessor, are Arbace forms porting, function by function,
   modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim at
@@ -626,6 +1093,176 @@ covers what.
   helpers the parser calls) and `TreeMaker.java` (its factories' positions): Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below; each file carries the notice of the files it ports).
+- `arbace/repr/rust/lex.ae`, `parse.ae`, `parse/expr.ae`, `parse/pat.ae`, `parse/item.ae` and the meta
+  items, literals and identifiers' names of `native.ae` (repr/rust's native reader, doc/rust/NATIVE-READER.md):
+  Arbace forms porting, function by function, rustc 1.99.1, https://github.com/rust-lang/rust at
+  `58cf8f9c3` (the sources of Alpine's `rust-src-1.99.1-r0`, pinned by `tools/rsdump/apks.sha256`):
+  `compiler/rustc_lexer/src/lib.rs`, `compiler/rustc_parse/src/lexer/mod.rs`, `tokentrees.rs` and (two entries of `UNICODE_ARRAY`) `unicode_chars.rs`,
+  `compiler/rustc_parse/src/parser/`'s `mod.rs`, `attr.rs`, `path.rs`, `generics.rs`, `ty.rs`, `expr.rs`,
+  `stmt.rs`, `pat.rs`, `item.rs`, `function.rs` and the paths of `diagnostics.rs` that accept,
+  `compiler/rustc_ast/src/`'s `token.rs`, `ast.rs` (the tree's shapes), `util/classify.rs`, `util/parser.rs`,
+  `util/literal.rs` and `attr/mod.rs`, and `compiler/rustc_span/src/symbol.rs` (the keywords, `Ident`'s
+  Debug), with the escapes' checks of the crate rustc-literal-escaper 0.0.8 that rustc calls
+  (https://github.com/rust-lang/literal-escaper; its `.crate`, pinned by rustc's `Cargo.lock` by SHA-256
+  `bfe6f213fb658c8fb95baabd5420393438cf5a98d707f5dd701d9197c705f71e`): copyright the Rust project's
+  contributors (The Rust Project Developers), dual-licensed under the MIT License or the Apache License
+  2.0 at the licensee's option (`rustc_lexer`'s and the escaper's `license = "MIT OR Apache-2.0"`), taken
+  here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below).
+  `arbace/repr/rust/unicode.ae` (generated by `bin/rust-unicode` and `test/rust/unicode_gen.ae`, Arbace's own
+  code) holds data from the tables of two crates that rustc 1.99.1's `rustc_lexer` links, from
+  https://crates.io, pinned by `tools/rsdump/unicode-crates.sha256` and rustc's `Cargo.lock`: unicode-ident
+  1.0.24 (`.crate` SHA-256 `e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75`),
+  `src/tables.rs`'s XID_Start and XID_Continue ranges, `license = "(MIT OR Apache-2.0) AND Unicode-3.0"`
+  (the code MIT OR Apache-2.0, taken under the MIT License; the Unicode data under the Unicode License V3, copyright
+  1991-2023 Unicode, Inc., text below), and unicode-properties 0.1.4 (`.crate` SHA-256
+  `7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d`), `src/tables.rs`'s `EMOJI_STATUS`,
+  `license = "MIT/Apache-2.0"` (copyright the Rust project's developers; the MIT License below); the file
+  carries the notice. The rest of `native.ae` (the facts, after `tools/rsdump`'s visitor, the dump and the check) and
+  `test/rust/native-check.txt` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/mir.ae` (the printer), `arbace/rust/back/codegen.ae` and `collect.ae` (the first slice of RF3, doc/rust/FRONTEND-SURVEY.md,
+  "As built: RF1-RF3 (trial)"), and the helper's `tools/rsdump/mirdata.rs`: Arbace forms and Rust written after rustc 1.99.1,
+  https://github.com/rust-lang/rust at `58cf8f9c3` (the sources of Alpine's `rustc-dev-1.99.1-r0` and `rust-src-1.99.1-r0`,
+  pinned by `tools/rsdump/apks.sha256`), reading `compiler/rustc_middle/src/mir/{pretty,syntax,terminator,consts,statement}.rs`
+  (the text of MIR: `write_mir_fn`, the `Debug` impls of places, operands, rvalues, statements and terminators, the labels of
+  successors, `fmt_assert_args`) and `compiler/rustc_codegen_ssa/src/mir/{mod,analyze,block,operand,place,rvalue,statement}.rs`
+  (the SSA analysis of locals, the order and merging of blocks, operands, places, rvalues, terminators), `compiler/rustc_mir_transform/src/
+  remove_noop_landing_pads.rs`, `compiler/rustc_middle/src/mir/{traversal,mod}.rs` (mono reachability, `get_caller_location`'s walk),
+  `compiler/rustc_monomorphize/src/collector.rs` (the collector's roots and uses) and `compiler/rustc_codegen_llvm/src/{intrinsic,consts}.rs`
+  (the intrinsics' lowering, volatile loads and stores among them since 2026-11-08; `codegen_static`): copyright the Rust
+  project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here
+  under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the forms' shapes,
+  `doc/rust/MIR.md`, the judges, `bin/rust-front`) is Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/expand.ae`, `expand_format.ae`, `expand_derive.ae` and `resolve.ae` (RF4-RF5, doc/rust/FRONTEND-SURVEY.md, "As built:
+  RF4-RF5 start"), and the helper's `tools/rsdump/front.rs`: Arbace forms and Rust written after rustc 1.99.1, the same revision and
+  sources, reading `compiler/rustc_expand/src/{expand,config}.rs` and `mbe/{macro_parser,macro_rules,quoted,transcribe}.rs` (macro_rules!'
+  arms, matching, transcription and its spacing, the statement macros' semicolon), `compiler/rustc_builtin_macros/src/{format,assert,
+  edition_panic,source_util,concat,cfg,standard_library_imports}.rs` and `deriving/` (the builtins' and derives' expansions),
+  `compiler/rustc_parse_format/src/lib.rs` (format strings), `compiler/rustc_resolve/src/{build_reduced_graph,imports,ident,late}.rs`
+  (the def collector, imports, globs, preludes, ribs) and `compiler/rustc_middle/src/metadata.rs`, `compiler/rustc_metadata/src/creader.rs`
+  (the helper's modes): copyright the Rust project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the
+  licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the
+  judges `expand_check.ae` and `resolve_check.ae`, the samples `test/rust/front/expand1.rs` and `resolve1.rs`) is Arbace's own, under
+  the Eclipse Public License 1.0.
+- `arbace/rust/front/pp.ae`, `lower.ae` and `hir_pretty.ae` (RF6, doc/rust/FRONTEND-SURVEY.md, "As built: RF6"): Arbace forms written
+  after rustc 1.99.1, the same revision and sources, reading `compiler/rustc_ast_pretty/src/pp.rs`, `pp/ring.rs` and
+  `pprust/state.rs` (Oppen's printer as rustc keeps it, the comments copied forward, PrintState, token streams, macro definitions),
+  `compiler/rustc_ast_lowering/src/{lib,item,expr,pat,block,format}.rs` (AST to HIR: the desugarings of `for`, `while`, `while let`,
+  `?`, ranges and `format_args!`'s bytecode, use trees, generics, implicit self, elided lifetimes), `compiler/rustc_hir_pretty/src/lib.rs`
+  (the HIR printer), `compiler/rustc_hir/src/hir.rs` (expression precedence), `compiler/rustc_ast/src/util/literal.rs` (literals'
+  display) and `compiler/rustc_macros/src/print_attribute.rs` (parsed attributes' printing): copyright the Rust project's contributors,
+  dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc
+  1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `hir_check.ae`, the sample `test/rust/front/lower1.rs`) is
+  Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/collect.ae` (RF7, doc/rust/FRONTEND-SURVEY.md, "As built: RF7") and the helper's RF7 additions to
+  `tools/rsdump/front.rs`'s `--std-names` (defaults, aliases, supertraits, lang items, doc(hidden)): Arbace forms and Rust written after
+  rustc 1.99.1, the same revision and sources, reading `compiler/rustc_resolve/src/def_collector.rs` (definitions and their def path
+  data), `compiler/rustc_hir_analysis/src/collect/{generics_of,resolve_bound_vars,type_of,clauses_of}.rs` (own parameters,
+  is_late_bound_map, gather_explicit_clauses_of), `constrained_generic_params.rs` (setup_constraining_clauses), `hir_ty_lowering/{mod,
+  bounds,dyn_trait}.rs` (type lowering, generic arguments with their defaults, poly trait refs, implicit sizedness bounds, associated
+  item constraints), `compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs` (visible_parent_map),
+  `compiler/rustc_middle/src/ty/print/{mod,pretty}.rs` (the type printer: def paths, visible paths, impl paths, regions, binders' names,
+  trait objects, opaque types, clauses) and `compiler/rustc_middle/src/ty/generics.rs` (own_args_no_defaults): copyright the Rust
+  project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the
+  MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `collect_check.ae`, the samples
+  `test/rust/front/collect1.rs` and `collect2.rs`) is Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/typeck.ae` (RF9's first slice with RF8's part, doc/rust/FRONTEND-SURVEY.md, "As built: RF9a") and the helper's
+  `--typeck` and `--std-iface` modes in `tools/rsdump/front.rs`: Arbace forms and Rust written after rustc 1.99.1, the same revision and
+  sources, reading `compiler/rustc_hir_typeck/src/{expr,expectation,coercion,callee,op,place_op,pat,fallback,writeback,closure}.rs` and
+  `method/{probe,confirm}.rs` (expressions with expectations, coercions, calls, operators, indexing, patterns and default binding
+  modes, closures' signature deduction, the method probe), `compiler/rustc_infer/src/infer/` (type, integer and float variables),
+  `compiler/rustc_trait_selection/src/traits/{select,project,fulfill}.rs` (selection of impls, normalization of projections, pending
+  obligations) and `compiler/rustc_middle/src/ty/{typeck_results,adjustment}.rs` (the facts' shapes), and since RF9b ("As built: RF9b")
+  `rustc_hir_typeck/src/{upvar,expr_use_visitor,cast,fn_ctxt/checks,gather_locals}.rs` (closure kinds, argument checking, casts, locals'
+  initializers), `rustc_infer/src/infer/relate/{generalize,lattice}.rs` and `region_constraints/mod.rs` (generalization, LUB and GLB of
+  regions) and `rustc_infer/src/traits/util.rs` with `rustc_type_ir/src/elaborate.rs` (the parameter environment's elaboration): copyright the Rust project's
+  contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License
+  ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the judge `typeck_check.ae`) is Arbace's own, under the
+  Eclipse Public License 1.0.
+- `arbace/rust/front/build.ae` (RF10's first slice, doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)"): Arbace forms written
+  after rustc 1.99.1, the same revision and sources, reading `compiler/rustc_hir_analysis/src/check/region.rs` and
+  `compiler/rustc_middle/src/middle/region.rs` (the region scope tree, temporary scopes), `compiler/rustc_mir_build/src/thir/cx/{mod,expr,block}.rs`
+  and `thir/pattern/mod.rs` (THIR), `compiler/rustc_mir_build/src/builder/{mod,cfg,scope,block,misc}.rs`,
+  `builder/expr/{into,stmt,as_operand,as_temp,as_rvalue,as_place,as_constant,category}.rs` and
+  `builder/matches/{mod,match_pair,buckets,test}.rs` (MIR building: scopes and drop trees, expressions, the match lowering), and the
+  passes `CleanupPostBorrowck` and `AbortUnwindingCalls`' effect in `arbace/rust/front/build_run.ae`, with the layouts of scalars and
+  scalar pairs after `compiler/rustc_abi/src/layout.rs`: copyright the Rust project's contributors, dual-licensed under the MIT License or
+  the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License
+  2.0" below). The rest (the judge `build_check.ae`, the rest of `build_run.ae`) is Arbace's own, under the Eclipse Public License 1.0.
+  RF10's second slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (second slice)") adds to `build.ae`, from the same sources and
+  under the same terms, the closures' capture analysis after `compiler/rustc_hir_typeck/src/{upvar,expr_use_visitor}.rs` and
+  `compiler/rustc_passes/src/upvars.rs`, the canonical user type annotations after `compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs`,
+  `method/confirm.rs` and `compiler/rustc_middle/src/ty/{typeck_results,print/pretty}.rs` (with `typeck.ae`'s part), lint scopes
+  after `builder/scope.rs`' `maybe_new_source_scope`, allocations after `compiler/rustc_middle/src/mir/pretty.rs`' `write_allocations`;
+  the judge `arbace/rust/front/capture_check.ae` and the helper's `--captures` are Arbace's own (the helper's terms are its own, above).
+  RF10's third slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (third slice)") adds to `build.ae`, from the same sources and under
+  the same terms, the rest of `compiler/rustc_mir_build/src/builder/matches/{mod,match_pair,buckets,test,util}.rs` and `builder/block.rs`'
+  let-else, `thir/pattern/{mod,const_to_pat}.rs`' ranges, slices and string constants, `builder/mod.rs`' `construct_const` and
+  `builder/expr/into.rs`' `write_box_via_move` and functional update; and `arbace/rust/front/passes.ae`, Arbace forms written after
+  `compiler/rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs` and `compiler/rustc_middle/src/mir/{terminator,traversal}.rs`,
+  the same terms.
+  RF10's fourth slice ("As built: RF10 (fourth slice)") adds to `passes.ae`, from the same sources and under the same terms,
+  `compiler/rustc_mir_transform/src/{promote_consts,cleanup_post_borrowck,remove_noop_landing_pads,deref_separator,add_call_guards,
+  post_analysis_normalize,elaborate_drops,elaborate_drop,abort_unwinding_calls,erase_deref_temps,elaborate_box_derefs,lower_intrinsics,
+  remove_place_mention,patch}.rs`, `compiler/rustc_const_eval/src/check_consts/qualifs.rs`, `compiler/rustc_mir_dataflow/src/{move_paths/
+  {mod,builder}.rs,un_derefer.rs,drop_flag_effects.rs,impls/initialized.rs,framework/direction.rs}` and `compiler/rustc_middle/src/ty/
+  layout.rs`' `fn_can_unwind`; and to `build.ae` a port of rustc_apfloat 0.2.3's (`rustc_apfloat-0.2.3+llvm-462a31f5a5ab`,
+  `src/ieee.rs`, `impl Display for IeeeFloat`) float formatting, a port of LLVM's APFloat::toString, under the Apache License 2.0
+  with LLVM Exceptions (the text of section "LLVM (clang): Apache License 2.0 with LLVM Exceptions" below).
+- `arbace/rust/front/mono.ae` (RFP23 (c), doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (c)"): Arbace forms porting, function by
+  function, rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's rust-src-1.99.1-r0):
+  `compiler/rustc_symbol_mangling/src/{lib.rs,v0.rs}` (symbol_name_from_attrs, compute_symbol_name, the v0 mangler, punycode
+  identifiers, mangle_internal_symbol), `compiler/rustc_span/src/def_id.rs` (StableCrateId::new), `compiler/rustc_middle/src/{mono.rs,
+  ty/print/mod.rs,ty/instance.rs,ty/layout.rs}` (instantiation_mode, default_print_def_path, requires_inline, requires_caller_location,
+  discr_range_of_repr), `compiler/rustc_mir_transform/src/cross_crate_inline.rs`, `compiler/rustc_metadata/src/rmeta/{mod.rs,
+  encoder.rs}` (the rmeta header and CrateRoot's first fields, should_encode_mir), `compiler/rustc_attr_ir/src/weak_lang_items.rs`,
+  `compiler/rustc_monomorphize/src/collector.rs` (roots, the uses of calls and drops), `compiler/rustc_abi/src/{layout.rs,
+  layout/simple.rs,lib.rs,wrapping_range.rs}` and `compiler/rustc_ty_utils/src/layout.rs` (layout_of for x86_64); and
+  rustc-stable-hash 0.1.2 (https://github.com/rust-lang/rustc-stable-hash, the version rustc's Cargo.lock pins: `src/sip128.rs`,
+  `src/stable_hasher.rs`, SipHasher128 and StableHasher's writes): copyright the Rust project's contributors, dual-licensed under
+  the MIT License or the Apache License 2.0 at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT
+  License or Apache License 2.0" below). The judge `mono_check.ae` and `test/rust/front/std-crates.edn` are Arbace's own, under the
+  Eclipse Public License 1.0.
+- RF11's first slice (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)"), from rustc 1.99.1, the same revision
+  and sources and under the same terms (MIT): `mono.ae`'s `layout_of_union` after `compiler/rustc_abi/src/layout.rs` (with
+  `BackendRepr::to_union`, `compiler/rustc_abi/src/lib.rs`), `arbace/rust/back/codegen.ae`'s Subslice places after
+  `compiler/rustc_codegen_ssa/src/mir/place.rs` (`project_subslice`) and its PointerExposeProvenance and PointerWithExposedProvenance
+  casts after `compiler/rustc_codegen_ssa/src/mir/rvalue.rs`; `build_run.ae`'s values of core's integer constants follow
+  `library/core/src/num/{int_macros,uint_macros}.rs`' definitions of MIN, MAX and BITS. `eval-promoted` and the rsi switch
+  (`bin/rust-front rsi-build`, `bin/lib/rsi/check`'s `--front own`) are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/core_check.ae` and RF12's first slice's edits (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF12 (first
+  slice)"), from rustc 1.99.1, the same revision and sources and under the same terms (MIT): `compiler/rustc_expand/src/module.rs` (the
+  module tree), `compiler/rustc_expand/src/mbe/{metavar_expr,transcribe,macro_rules}.rs` and `compiler/rustc_expand/src/expand.rs`
+  (metavariable expressions, macros 2.0's arms, the expansion's order) in `expand.ae`, `compiler/rustc_builtin_macros/src/cfg_select.rs`,
+  `compiler/rustc_resolve/src/late.rs` and `compiler/rustc_span/src/hygiene.rs` (a trait's self rib, def-site hygiene) in `resolve.ae`,
+  `compiler/rustc_mir_build/src/builder/mod.rs` (`#[rustc_inherit_overflow_checks]`) in `build.ae`. The driver's judge, core's index and
+  its native interface, `bin/lib/repr-rust/core-build.bash` and `test/rust/front/core-modules.txt` are Arbace's own, under the Eclipse
+  Public License 1.0.
+- RF16 (2026-11-10, doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))"), from rustc 1.99.1, the same revision and sources and
+  under the same terms (MIT): `mono.ae`'s SIMD layouts after `compiler/rustc_ty_utils/src/layout.rs` (layout_of_uncached's repr(simd))
+  and `compiler/rustc_abi/src/layout.rs` (`LayoutCalculator::simd_type`, univariant's newtype ABI), `arbace/rust/back/codegen.ae`'s
+  generic SIMD intrinsics after `compiler/rustc_codegen_llvm/src/intrinsic.rs` (`generic_simd_intrinsic`), its vectors' indirect
+  passing after `compiler/rustc_target/src/callconv/mod.rs` (`adjust_for_rust_abi`) and its thread-local references after
+  `compiler/rustc_codegen_ssa/src/mir/rvalue.rs` (ThreadLocalRef); `mono.ae`'s reading of stdarch's `types!` follows
+  `library/stdarch/crates/core_arch/src/macros.rs`. The source reader of private ADTs and `build_run.ae`'s promoted constants'
+  additions are Arbace's own, under the Eclipse Public License 1.0.
+- The proposals RFP28-RFP41 (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: the rest of RFP28-RFP41"), from rustc 1.99.1, the same
+  revision and sources and under the same terms (MIT): `build.ae`'s byte-array static constants after `compiler/rustc_middle/src/ty/
+  print/pretty.rs` (`pretty_print_const_scalar_ptr`) and a closure's fake reads after `compiler/rustc_mir_build/src/builder/expr/
+  as_rvalue.rs`, its caller spans after `compiler/rustc_middle/src/mir/consts.rs` (`span_as_caller_location`) and
+  `compiler/rustc_span/src/hygiene.rs` (`ExpnId::expansion_cause`); `passes.ae`'s opaque types revealed by their definition after
+  `compiler/rustc_mir_transform/src/post_analysis_normalize.rs`, with `collect.ae`'s opaque types as rustc represents them (an alias of
+  the OpaqueTy's DefId and its parent's identity args); `expand.ae`'s metavariable spans after `compiler/rustc_expand/src/mbe/transcribe.rs` (`mk_delimited`) and
+  `compiler/rustc_span/src/lib.rs` (`Span::to`, `prepare_to_combine`); the helper's `tools/rsdump/front.rs` additions (field-reached
+  ADTs, function attributes) written against `rustc_middle`'s queries. The judges' changes (`build_check.ae`'s class, `build_run.ae`'s
+  batch, `ci_batch.ae`) and `test/rust/front/opaque1.rs` are Arbace's own, under the Eclipse Public License 1.0.
+- The own-verdict judge of `arbace/rust/check.ae` (`own-verdict`, `run-class`, `verdict-met?`, `directives`; rust-90,
+  doc/rust/EVAL.md §13): Arbace forms written after rustc 1.99.1's compiletest, the same revision and sources (the pinned
+  `rustc-1.99.1-src.tar.xz`'s `src/tools/compiletest/src/runtest/ui.rs`: `run_ui_test`'s RunResult of the run and the
+  run-pass, run-fail and run-crash checks; `directives.rs`: the `//@` and `//@[REV]` directive lines and the output
+  directives): copyright the Rust project's contributors, dual-licensed under the MIT License or the Apache License 2.0
+  at the licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0"
+  below). The rest of `check.ae`, `native.ae`'s tree texts (after Arbace's own helper `tools/rsdump`'s transcoder) and
+  `test/rust/roundtrip-controls.edn` are Arbace's own, under the Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,
@@ -739,6 +1376,151 @@ covers what.
   members' original annotations) and `comp/MemberEnter.java` (`handleDeprecatedAnnotations`):
   Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
   Classpath Exception (text below; each file carries the notice).
+- `arbace/repr/haskell/lex.ae`, `header.ae`, `post.ae`, `post_decl.ae`, `rules_module.ae`,
+  `rules_decl.ae`, `rules_expr.ae`, `haddock.ae` and `haddocklex.ae` (repr/haskell's native reader,
+  doc/haskell/NATIVE.md): ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz
+  (SHA-256 `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin):
+  `compiler/GHC/Parser/Lexer.x` (with `Lexer/String.x`, `Lexer/Interface.hs`, `String.hs`,
+  `CharClass.hs`), `GHC/Parser/Header.hs`, the language extensions of `GHC/Driver/{DynFlags,Flags,Session}.hs`,
+  `GHC/Parser.y`'s actions, `GHC/Parser/PostProcess.hs`, `GHC/Parser/PostProcess/Haddock.hs`,
+  `GHC/Parser/HaddockLex.x` and the builders of `GHC/Hs/{Utils,Type}.hs` they use (the tarball names
+  the Alex and Happy sources `*.x.source` and `Parser.y.source`), by hand on 2026-11-04, each file
+  carrying GHC's notice: Copyright 2002, The University Court of the University
+  of Glasgow, under the Glasgow Haskell Compiler License, a BSD 3-Clause License ("GHC: the Glasgow
+  Haskell Compiler License" below). `arbace/repr/haskell/tables.ae` is generated from that tarball's
+  `compiler/GHC/Parser.y.source` (its grammar, the same Glasgow license) by `happy.ae`, Arbace's own port of
+  Happy's LALR(1) construction (no Happy code: Happy is a tool, its tables in GHC's generated
+  `Parser.hs` the check); `happy.ae`, `ast.ae`, `parse.ae`, `native.ae` and `mutate.ae` are Arbace's own,
+  under the Eclipse Public License 1.0. `arbace/repr/haskell/doc.ae`, `errors.ae` and `pprhs.ae` (the
+  native reader's messages, doc/haskell/NATIVE.md, "Messages") port from the same tarball
+  `compiler/GHC/Utils/Ppr.hs` (GHC's copy of the pretty library's HughesPJ printer) and the combinators of
+  `GHC/Utils/Outputable.hs`, `GHC/Parser/Errors/Ppr.hs`, `GHC/Types/Hint/Ppr.hs`, the parser's codes of
+  `GHC/Types/Error/Codes.hs`, the printing of `GHC/Types/Error.hs`, `GHC/Utils/Error.hs`,
+  `GHC/Driver/Errors.hs`, `GHC/Utils/Logger.hs` and the Outputable instances of
+  `GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs` and `GHC/Parser/Types.hs`, by hand on 2026-11-04, each file
+  carrying GHC's notice (the Glasgow license, below). `arbace/repr/haskell/fileargs.ae` (the driver's header
+  phase, 2026-11-05) ports `GHC/Parser/Header.hs` (getOptions', toArgs, checkExtension,
+  checkProcessArgsResult), `GHC/Driver/CmdLine.hs` (processArgs), `GHC/Driver/Session.hs` and
+  `GHC/Driver/Pipeline/Execute.hs` (getFileArgs) with GHC's notice; `arbace/repr/haskell/flags.ae` is generated
+  by the helper's `flags` verb from the names of `flagsDynamic` and `supportedLanguagePragmas` of the same
+  tarball's GHC (the Glasgow license).
+- `arbace/repr/haskell/famenv.ae` (the elaborator's type families, HF9's first slice, doc/haskell/FRONTEND-SURVEY.md, "As built:
+  HF9 (first slice)"): a port of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `reduceTyFamApp_maybe`,
+  `lookupFamInstEnv`'s matching, `chooseBranch`, `findBranch`, `apartnessCheck`, `compatibleBranches` and `computeAxiomIncomps` of
+  `compiler/GHC/Core/FamInstEnv.hs` with `tcMatchTys` and `tcUnifyTysFG` of `compiler/GHC/Core/Unify.hs`, by hand on 2026-11-08,
+  the file carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below).
+  `arbace/repr/haskell/libcheck.ae` and `bin/lib/repr-haskell/lib-check` are Arbace's own; `typecheck.ae`'s HF9 additions (kinds
+  erased, GADTs' givens, ScopedTypeVariables, the implicit parameters, the type applications, the data family instances; the
+  second slice's checking mode, implications, pattern synonyms, DataToTag, WithDict, the implicit parameters' bindings and
+  defaulting) are Arbace's own, GHC's `compiler/GHC/Tc/` read as their specification; `deriv.ae`'s second-slice tables
+  (primOrdOps' ordOpTbl, boxConTbl, postfixModTbl of `compiler/GHC/Tc/Deriv/Generate.hs`) are under the file's GHC notice.
+- `arbace/repr/haskell/ownface.ae` (the front end's own interfaces, HF10-P3, doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P3
+  (first slice)"): written after GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): what `mkIface_` of
+  `compiler/GHC/Iface/Make.hs` writes and `addExternal`/`trimId` of `compiler/GHC/Iface/Tidy.hs` expose at -O0 (with
+  `compiler/GHC/Driver/Config/Tidy.hs`'s ExposeNone and `compiler/GHC/IfaceToCore.hs`'s tcIdInfo), `dataConSrcToImplBang` of
+  `compiler/GHC/Types/Id/Make.hs`, the wired-in definitions of `compiler/GHC/Builtin/Types.hs` (multiplicityTyCon's constructors,
+  heqClass's, eqClass's and coercibleClass's superclasses, the kinds' invisible binders of unboxedSoloTyCon, coercibleTyCon,
+  eqTyCon, heqTyCon, anyTyCon) and the built-in families of `compiler/GHC/Builtin/Types/Literals.hs`, by hand on 2026-11-09, the
+  file carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below); the
+  judge (`compare-ifaces`) and `libcheck.ae`'s HF10-P3 verbs (`own-order`, `own`, `rank-own`) are Arbace's own; HF10-P12's
+  `helper-core` too. HF10-P12 and P14 (2026-11-09): `simplify.ae`'s stable-unfolding mode (updModeForStableUnfoldings of
+  `compiler/GHC/Core/Opt/Simplify/Utils.hs`) and `rename.ae`'s `integral-fl` (generalizeOverLitVal of
+  `compiler/GHC/Rename/Pat.hs`) from the same tarball, under the notices those files carry; `libcheck.ae`'s `dm-unfoldings`,
+  `grow-closure` and `cabal-reexports` are Arbace's own.
+- `arbace/repr/haskell/primiface.ae` (GHC.Internal.Prim's interface from `primops.txt.pp`, HF10-P18 (a), doc/haskell/FRONTEND-SURVEY.md,
+  "As built: HF10-P18"): ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): genprimopcode's lexer and parser
+  (`utils/genprimopcode/Lexer.x`, `Parser.y`), `AccessOps.hs`, `Main.hs`'s desugarVectorSpec, tvsIn and ppTyVarBinders,
+  `compiler/GHC/Builtin/Types/Prim.hs`'s template variables and exposedPrimTyCons, `compiler/GHC/Builtin/Utils.hs`'s
+  ghcPrimExports and ghcPrimFixities and `compiler/GHC/Types/Id/Make.hs`'s ghcPrimIds, by hand on 2026-11-10, under the notices
+  those files carry (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below). `typecheck.ae`'s
+  HF10-P20 Typeable bindings of the wired-in things follow `compiler/GHC/Tc/Instance/Typeable.hs` (mkPrimTypeableTodos,
+  builtInKindReps, mkKindRepRhs, todoForTyCons) of the same tarball, under its notice.
+- `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
+  ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,
+  `mkNegAppRn`, `mkConOpPatRn` and `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of
+  `compiler/GHC/Types/Fixity.hs`, by hand on 2026-11-05, the file carrying GHC's notice (Copyright 2002, The
+  University Court of the University of Glasgow, the Glasgow Haskell Compiler License, a BSD 3-Clause License,
+  "GHC: the Glasgow Haskell Compiler License" below); the rest of `compiler/GHC/Rename/` read as the
+  specification of the scoping and of the dependency analyses. The helper's `rn` and `iface` verbs,
+  `tools/hsdump/HsRn.hs`, are Arbace's own, written against GHC's API.
+- `arbace/repr/haskell/desugar.ae` and `arbace/repr/haskell/tostg.ae` (the front end's match compiler, HF5, and its
+  CorePrep, CoreToStg and Unarise, HF6; doc/haskell/FRONTEND-SURVEY.md, "As built: HF5-HF6"): written on 2026-11-05
+  after GHC 9.14.1's algorithms (the same tarball and pin: `compiler/GHC/HsToCore/Match.hs`, `Match/Constructor.hs`,
+  `Match/Literal.hs`, `GuardedRHSs.hs`, `ListComp.hs`, `compiler/GHC/Core/Utils.hs`'s `refineDefaultAlt`,
+  `compiler/GHC/CoreToStg/Prep.hs`, `CoreToStg.hs`, `compiler/GHC/Stg/Unarise.hs`, `Stg/FVs.hs`,
+  `compiler/GHC/Types/Id/Make.hs`'s dictionary selectors), the files carrying GHC's notice (the Glasgow Haskell
+  Compiler License, "GHC: the Glasgow Haskell Compiler License" below); `stgcmp.ae`, the STG judge, is Arbace's own.
+  Since HF10's first slice (2026-11-08) they also follow `compiler/GHC/CoreToStg/Prep.hs`'s speculative evaluation and
+  cpeArgArity, `compiler/GHC/Core/Utils.hs`'s exprOkForSpecEval, `compiler/GHC/CoreToStg.hs`'s mkStgAltType,
+  `compiler/GHC/HsToCore/Match.hs`'s tidy_bang_pat and matchBangs and `compiler/GHC/Core/Make.hs`'s bindNonRec, under the same notice.
+  Since HF10-P5 and HF10-P8 (2026-11-09) `typecheck.ae` also follows `compiler/GHC/HsToCore/Foreign/Decl.hs`, `Foreign/C.hs`,
+  `Foreign/Prim.hs` and `Foreign/Call.hs` (dsFImport, dsCImport, dsFCall, dsPrimCall, dsFLabel, unboxArg, boxResult, resultWrapper,
+  mk_alt) and `tostg.ae` `compiler/GHC/Types/RepType.hs`'s unboxed sums' slots (SlotTy, primRepSlot, slotPrimRep, fitsIn,
+  ubxSumRepType, layoutUbxSum) with `compiler/GHC/Stg/Unarise.hs`'s mkUbxSum, ubxSumRubbishArg, unariseSumAlts and
+  mapSumIdBinders, and `simplify.ae` (HF10-P10) `Core/Opt/Simplify/Env.hs`'s getSubst laziness, under the same notice.
+- `arbace/repr/haskell/simpleopt.ae` and `arbace/repr/haskell/constfold.ae` (the front end's simple optimiser and the
+  floating-point primops' built-in rules, HF5-HF6's decision 2 (a); doc/haskell/FRONTEND-SURVEY.md, "As built: HF7 (first
+  light)"): ports of GHC 9.14.1 (the same tarball and pin) by hand on 2026-11-06: `compiler/GHC/Core/SimpleOpt.hs`
+  (`simpleOptPgm`, `simple_opt_expr`, `simple_app`, `simple_opt_bind`, `simple_bind_pair`, `simple_out_bind_pair`,
+  `safe_to_inline`, `exprIsConApp_maybe`'s constructor case), the occurrence information of
+  `compiler/GHC/Core/Opt/OccurAnal.hs`, the compulsory unfoldings of `compiler/GHC/Types/Id/Make.hs`, and
+  `compiler/GHC/Core/Opt/ConstantFold.hs`'s `Float#`/`Double#` rules with `compiler/GHC/Types/Literal.hs`'s
+  conversions, the files carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell
+  Compiler License" below). `front.ae` (the driver) and `test/haskell/run_record.ae` are Arbace's own.
+- `arbace/repr/haskell/simplify.ae`, `arbace/repr/haskell/occanal.ae`, `arbace/repr/haskell/core.ae` and
+  `arbace/repr/haskell/primops.ae` (the front end's -O0 Simplifier, the user's decision of 2026-11-06;
+  doc/haskell/FRONTEND-SURVEY.md, "As built: the -O0 Simplifier"): ports of GHC 9.14.1 (the same tarball and pin) by
+  hand on 2026-11-06: `compiler/GHC/Core/Opt/Simplify.hs`, `Simplify/Iteration.hs`, `Simplify/Utils.hs`,
+  `Simplify/Env.hs`, `Simplify/Inline.hs`, `compiler/GHC/Core/Opt/OccurAnal.hs`, `compiler/GHC/Core/Opt/Arity.hs`,
+  `compiler/GHC/Core/Unfold.hs`, `Unfold/Make.hs`, `compiler/GHC/Core/Utils.hs`, `compiler/GHC/Core/SimpleOpt.hs`'s
+  `exprIsConApp_maybe` and `compiler/GHC/Types/Id/Make.hs`'s class-op rule; `primops.ae` is generated by
+  `tools/hsprimops/primops.awk` (Arbace's own) from `compiler/GHC/Builtin/primops.txt.pp`; the files carrying GHC's
+  notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below). `simplcmp.ae`, the
+  simplified Core's judge, is Arbace's own.
+- `arbace/repr/haskell/deriv.ae` (repr/haskell's deriving, HF4, doc/haskell/FRONTEND-SURVEY.md, "As built: HF4", HFS5 (a)):
+  ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): the generators of
+  `compiler/GHC/Tc/Deriv/Generate.hs` (`gen_Eq_binds`, `gen_Ord_binds`, `gen_Enum_binds`, `gen_Bounded_binds`,
+  `gen_Ix_binds`, `gen_Read_binds`, `gen_Show_binds`) and of `compiler/GHC/Tc/Deriv/Functor.hs` (`gen_Functor_binds`,
+  `gen_Foldable_binds`, `gen_Traversable_binds`, `functorLikeTraverse`), by hand on 2026-11-05, the file carrying GHC's
+  notice (Copyright 2002, The University Court of the University of Glasgow, the Glasgow Haskell Compiler License, a
+  BSD 3-Clause License, "GHC: the Glasgow Haskell Compiler License" below); the context inference and the choice of
+  strategy of `compiler/GHC/Tc/Deriv/{Infer,Utils}.hs` and `Deriv.hs` read as the specification, written anew in
+  `typecheck.ae`.
+- `arbace/repr/haskell/target.ae`, `configure.ae` and `hsc2hs.ae` (the native reads' inputs derived, HFS-I2 (a),
+  doc/haskell/NATIVE.md, "The native reads' inputs: derived"): ports of GHC 9.14.1,
+  https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin), by hand on 2026-11-08: hadrian's
+  `src/Rules/Generate.hs` (generateSettings' order, templateRules) and `bindist/Makefile` (lib/settings, patchpackageconf),
+  `rts/configure.ac`'s ghcplatform.h and ghcautoconf.h steps, `rts/gen_event_types.py`'s two outputs, the packages'
+  `configure.ac`s' defines and `aclocal.m4`'s FPTOOLS_CHECK_HTYPE and FP_CHECK_CONST, and `utils/hsc2hs/src/{HSCParser,C,
+  DirectCodegen,UtilsCodegen}.hs` (hsc2hs 0.68.10's direct mode), under the Glasgow Haskell Compiler License (below);
+  autoconf's config.status header rewrite written from its documented behaviour. `arbace/repr/haskell/cabal.ae`: a port of
+  the same tarball's `libraries/Cabal/Cabal-syntax` 3.16.0.0 (`Distribution/Fields/{Parser,Pretty}.hs`'s layout,
+  `Distribution/FieldGrammar/{Parsec,Pretty}.hs`'s free text, `Distribution/Types/InstalledPackageInfo/FieldGrammar.hs`'s
+  ipiFieldGrammar, `Distribution/Types/Condition.hs`), under Cabal's BSD 3-Clause License ("Cabal: BSD 3-Clause License"
+  below).
+- `arbace/repr/haskell/target.ae`'s `libffi-vars` and `libffi-headers` (the system libffi's two headers GHCi/FFI.hsc's hsc2hs run
+  includes, HFS-I11 (a), 2026-11-08): the substitution rules of libffi 3.8.0's `configure.ac` (AC_INIT's version, FFI_VERSION_NUMBER,
+  HAVE_LONG_DOUBLE, FFI_EXEC_TRAMPOLINE_TABLE, the ffitarget.h copy) and `configure.host` (x86_64's TARGET and TARGETDIR), ported by
+  hand from https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz (SHA-256
+  `7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4`, `test/haskell/target/libffi.edn`'s pin); the headers they make,
+  `include/ffi.h.in` substituted and `src/x86/ffitarget.h`, are libffi's text, made in `.tmp/` and not committed: libffi, Copyright (c)
+  1996-2026 Anthony Green, Red Hat, Inc and others, under the MIT License ("libffi: MIT License" below).
+- `arbace/repr/haskell/unlit.ae` (repr/haskell's native unlit, doc/haskell/NATIVE.md): a port of the
+  same tarball's `utils/unlit/unlit.c`, under the Glasgow Haskell Compiler License (below), on
+  2026-11-04; `arbace/repr/haskell/driver.ae` (GHC's driver's preprocessing: `GHC/SysTools/Cpp.hs`'s
+  doCpp, the package database's units as `GHC/Unit/State.hs` closes them) is Arbace's own, written
+  from that tarball's sources, under the Eclipse Public License 1.0.
+- `arbace/repr/haskell/cpp.ae` (repr/haskell's native C preprocessor in GCC's traditional mode,
+  doc/haskell/NATIVE.md) is Arbace's own, under the Eclipse Public License 1.0: a clean-room
+  implementation (2026-11-04) written from the documented behaviour of traditional mode and judged
+  against Alpine's gcc 15.2.0 `cpp -traditional` run as a black box, no code of GCC's (it replaced a
+  port of GCC's libcpp, under the GPL version 3, made on the branch `haskell-pp` and never merged).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
@@ -754,6 +1536,14 @@ covers what.
     `src/java.base/share/classes/jdk/internal/icu/impl/data/icudata/`: ICU4J's normalization data
     (ICU 78.1, as jdk26u's `src/java.base/share/legal/icu.md` records), under the ICU4J License,
     the Unicode License V3 (text below);
+  - `sun/net/idn/uidna.spp` (doc/classes/JAVA-DEFERRED-TRIAGE.md, F3: java.net.IDN), copied from
+    jdk26u's `src/java.base/share/classes/sun/net/idn/`: ICU4J's StringPrep profile for IDNA (RFC 3491),
+    under the ICU4J License, the Unicode License V3 (text below), as jdk26u's
+    `src/java.base/share/legal/icu.md` records ICU's data;
+  - `conf/net.properties` (doc/classes/JAVA-DEFERRED-TRIAGE.md, F12: sun.net.NetProperties' defaults), as
+    `make/modules/java.base/Copy.gmk` makes it: jdk26u's `src/java.base/share/conf/net.properties` followed
+    by `src/java.base/unix/conf/net.properties`, Copyright (c) Oracle and/or its affiliates, under the GNU
+    General Public License version 2 with the Classpath Exception (text below), as their notices say;
   - `java/lang/uniName.dat`, generated as the JDK build generates it
     (`make/modules/java.base/Gendata.gmk`: jdk26u's build tool
     `make/jdk/src/classes/build/tools/generatecharacter/CharacterName.java` run on
@@ -899,6 +1689,110 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
+- `arbace/repr/asm.ae` and `arbace/repr/asm/` (`arbace.repr.asm.*`, repr/asm, the assembly crops' bridge, doc/asm/SPEC.md, AX1):
+  the lexer's token rules (`lex.ae`), the GNU expression precedence and statement shapes (`gnu.ae`) and the AT&T operand
+  grammar (`amd64/att.ae`) follow LLVM's `llvm/lib/MC/MCParser/AsmLexer.cpp`, `AsmParser.cpp` (`getGNUBinOpPrecedence`,
+  `parseStatement`, `parseMacroLikeBody`) and `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (`ParseMemOperand`,
+  `ParseOperand`) from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn` and `test/asm/corpora.edn`), rule
+  for rule, under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below). Its test corpora
+  (`llvm/test/MC/{X86,AsmParser}`, extracted into `.tmp/`, never committed) are under the same licence; musl 1.2.6's
+  `.s` files, read as a corpus, under musl's MIT licence (section "musl: MIT License").
+- `arbace/repr/wasm.ae` and `arbace/repr/wasm/` (`arbace.repr.wasm.*`, repr/wasm, WebAssembly's bridge, doc/wasm/SPEC.md, WA1,
+  WA2): `ops.ae`, the instruction table, is generated by `test/wasm/gen_ops.ae` from the WebAssembly specification's reference
+  interpreter, https://github.com/WebAssembly/spec at the tag `wg-3.0` (`9d36019973201a19f9c9ebb0f10828b2fe2374aa`, the pin of
+  `test/wasm/corpora.edn`), its `interpreter/binary/decode.ml` (each opcode, its immediates' reading) and
+  `interpreter/text/lexer.mll` (the instructions' text names); `binary.ae`'s decoder follows `decode.ml`'s order of reads, its
+  checks and its messages, rule for rule, and `lex.ae` and `text.ae` read the text format of the specification's chapter 6 with
+  the reference interpreter's messages where the testsuite states them: under the Apache License 2.0 (section "The WebAssembly specification's reference interpreter and testsuite"
+  below). The testsuite's scripts (https://github.com/WebAssembly/testsuite, the corpus of WA2 on, extracted into `.tmp/`, never
+  committed) are under the same licence. The rest is Arbace's own, under the Eclipse Public License 1.0. `test/wasm/go/hello/`
+  is Arbace's own; the Go-built corpus's other programs are read in place from `$GOROOT/test` (Go's BSD 3-Clause License).
+- `arbace/asm/` (`arbace.asm.tablegen`, `arbace.asm.amd64.*`: the assembler of the assembly crops, AX2, doc/asm/AMD64.md):
+  the TableGen reader and evaluator follows LLVM's `llvm/lib/TableGen/TGLexer.cpp`, `TGParser.cpp`, `Record.cpp` and
+  `llvm/docs/TableGen/ProgRef.rst`, the table's generator `llvm/utils/TableGen/AsmMatcherEmitter.cpp` and
+  `utils/TableGen/Common/CodeGenInstruction.cpp` (`FlattenAsmStringVariants`) and `CodeGenRegisters.cpp` (`TopoOrderRC`), the matcher
+  `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp`, `X86Operand.h` and `X86AsmParserCommon.h`, the encoder
+  `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`, `X86BaseInfo.h`, `X86MCTargetDesc.cpp` and
+  `X86EncodingOptimization.cpp`, the printer `X86ATTInstPrinter.cpp`, `X86InstPrinterCommon.cpp`, `X86MCAsmInfo.cpp`,
+  `llvm/lib/MC/MCInstPrinter.cpp`, `MCExpr.cpp`, `MCSymbol.cpp` and `MCAsmInfo.cpp` with the table's printer fields after
+  `llvm/utils/TableGen/AsmWriterEmitter.cpp` and `Common/AsmWriterInst.cpp`, from the same `llvm-project-23.1.5.src.tar.xz`, rule for rule, under the Apache License 2.0 with
+  the LLVM Exceptions (section "LLVM (clang)" below); no code is copied. `asm/amd64/table.edn`, generated from that tarball's
+  `llvm/lib/Target/X86/*.td` and `llvm/include/llvm/{Target,CodeGen,IR}/*.td` (extracted into `.tmp/`, never committed), is a work
+  derived from them, under the same licence. AX4's first slice: `arbace/asm/amd64/obj.ae` (the object assembler) follows
+  `llvm/lib/MC/MCObjectStreamer.cpp`, `MCELFStreamer.cpp`, `MCAssembler.cpp`, `MCDwarf.cpp` (FrameEmitterImpl),
+  `MCParser/ELFAsmParser.cpp`, `MCParser/AsmParser.cpp`, `X86AsmBackend.cpp`, `X86ELFObjectWriter.cpp` and
+  `X86EncodingOptimizationForImmediate.def`, and `arbace/asm/elf.ae` (the ELF64 writer and reader) `llvm/lib/MC/ELFObjectWriter.cpp`
+  and `StringTableBuilder.cpp`, the same tarball, licence and manner; no code is copied. The records `test/asm/records/obj-*.edn` hold
+  llvm-mc 23.1.5's output for musl's files (MIT), Arbace's own tests and `llvm/test/MC/X86`'s (Apache 2.0 WITH LLVM-exception). AX4's
+  second slice: `arbace/asm/link.ae` (the static linker) follows lld's `lld/ELF/` from the same tarball (`Driver.cpp`, `InputFiles.cpp`,
+  `SymbolTable.cpp`, `Symbols.cpp`, `LinkerScript.cpp`, `Writer.cpp`, `OutputSections.cpp`, `SyntheticSections.cpp`, `InputSection.cpp`,
+  `Relocations.cpp`, `Arch/X86_64.cpp`), the same licence and manner; no code is copied. `test/asm/run/` is Arbace's own; its
+  `musl:` sources are read from musl 1.2.6's pinned tarball (MIT), never committed. AX4's third slice: `arbace/asm/amd64/decode.ae`
+  (the decoder) follows `llvm/lib/Target/X86/Disassembler/X86Disassembler.cpp`, `X86DisassemblerDecoder.h`,
+  `llvm/include/llvm/Support/X86DisassemblerDecoderCommon.h` and the disassembler tables' generator `llvm/utils/TableGen/X86RecognizableInstr.cpp`,
+  `X86DisassemblerTables.cpp` and `X86ModRMFilters.h`, and `arbace/asm/amd64/decode_check.ae` `llvm/tools/llvm-mc/Disassembler.cpp`,
+  the same tarball, licence and manner; no code is copied. `llvm/test/MC/Disassembler/X86` is read from the tarball as test data
+  (extracted into `.tmp/`, never committed). AX5.2 (x86i): `arbace/asm/amd64/dgen.ae` writes the disassembler's decisions (the same
+  X86DisassemblerTables.cpp rules, through `decode.ae`) as `go/arbace/x86i/dectab.ae`, a work derived from the table, and
+  `go/arbace/x86i/decode.ae` and `tables.ae` follow `X86Disassembler.cpp`'s decoding for 64-bit mode's legacy and REX encodings, the
+  same tarball, licence and manner; no code is copied. The rest of `go/arbace/x86i` (the families, the flags, the lockstep) and
+  `go/arbace/emu` are Arbace's own, written from the Intel 64 and IA-32 Architectures Software Developer's Manual (vol. 2) and the AMD64
+  Architecture Programmer's Manual (vol. 3) as references, nothing copied from them, and from the System V AMD64 psABI and the Linux
+  man pages (getauxval(3), ptrace(2), personality(2)), not from the kernel's source. AX5.3 and AX5.4 (the step mode, the signal
+  frames, the families rcl to movbe) likewise; the signal frame's layout from the psABI and musl 1.2.6's `arch/x86_64/bits/signal.h`
+  (MIT, section "musl: MIT License"), nothing copied; `test/asm/x86i/gen.ae` and the programs it writes are Arbace's own.
+- The same namespaces' arm64 part (AR1, doc/asm/ARM64-SURVEY.md): `arm64/gnu.ae`'s operand grammar follows LLVM's
+  `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` and `lex.ae`'s AArch64 dialects its
+  `MCTargetDesc/AArch64MCAsmInfo.cpp` (the same tarball and licence); `plan9.ae`'s operand grammar follows Go 1.27.1's
+  `src/cmd/asm/internal/asm/parse.go` (TamaGo's GOROOT, pinned by `seed/goroot.sha256`; section "Go: BSD 3-Clause License").
+  No code is copied. Read as corpora, never committed: `llvm/test/MC/AArch64` (LLVM's licence), musl 1.2.6's aarch64 `.s`
+  (MIT), Go's `cmd/asm` testdata (BSD-3-Clause), the box's arm64 `.s` (its own files' licences, box/README.md), and gcc
+  15.2.0's `libgcc/config/aarch64/*.S` from the pinned tarball (GPL-3.0-or-later with the GCC Runtime Library Exception 3.1:
+  read and printed back as test data, never ported).
+- The same namespaces' A64 encoder (AR2, doc/asm/ARM64-SURVEY.md, "As built: AR2 (first slice)"): `arm64/table.ae` is generated
+  data from Go 1.27.1's GOROOT (TamaGo's, pinned by `seed/goroot.sha256`): `src/cmd/vendor/golang.org/x/arch/arm64/arm64asm/`'s
+  `tables.go` (the rows), `condition.go` (the alias conditions, translated into Arbace), `inst.go` (`sysInstsAttrs`) and `inst.json`
+  (the should-be-one bits), golang.org/x/arch at `v0.27.1-0.20260521044007-9c1a596a2c97` as GOROOT's `cmd/vendor/modules.txt`
+  names it, and `src/cmd/internal/obj/arm64/sysRegEnc.go` (the system registers); `arm64/bits.ae` ports arm64asm's
+  `condition_util.go`; `arm64/enc.ae` inverts `decode.go`'s `decodeArg` kind by kind (written by hand, no code copied).
+  golang.org/x/arch's `LICENSE` is Go's BSD 3-Clause License word for word but its first line, `Copyright 2015 The Go Authors.`
+  (section "Go: BSD 3-Clause License"). Its check reads `llvm/test/MC/AArch64` as a corpus, never committed (LLVM's licence).
+- AR2's second slice (doc/asm/ARM64-SURVEY.md, "As built: AR2 (second slice)"; ARS24 (a)): `asm/arm64/table.edn`, generated by
+  `arbace/asm/arm64/gen.ae` from `llvm-project-23.1.5.src.tar.xz`'s `llvm/lib/Target/AArch64/*.td` with
+  `llvm/include/llvm/{Target,CodeGen,IR,TableGen}/*.td` (read by Arbace's TableGen) and the literal messages of
+  `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp`'s `showMatchError` and its `ExtensionDefs` table (read as text; all
+  extracted into `.tmp/`, never committed), is a work derived from them, under the Apache License 2.0 with the LLVM Exceptions
+  (section "LLVM (clang)" below). `arbace/repr/asm/arm64/lenc.ae` (the matcher and encoder over that table) follows
+  `AArch64AsmParser.cpp` (`parseSysAlias`, `parseSyspAlias`, `setRequiredFeatureString`, `validateInstruction`'s MOPS rules,
+  `MatchAndEmitInstruction`'s operand twiddles and messages), `MCTargetDesc/AArch64MCCodeEmitter.cpp` (the encoder methods),
+  `MCTargetDesc/AArch64InstPrinter.cpp` (`printLogicalImm`, `printSIMDType10Operand`, ARS25's spelling) and
+  `llvm/utils/TableGen/AsmMatcherEmitter.cpp` (MatchInstructionImpl's choice of diagnostic) from the same tarball, rule for rule; no
+  code is copied. `test/asm/table_oracle_arm64.ae` reads llvm-tblgen's own output by hand (the oracle tier), never committed.
+- `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
+  a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
+  SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s
+  predefined macros and their helpers, `clang/lib/Basic/Targets/X86.cpp`'s `getTargetDefines` (the baseline CPU's part),
+  `Targets/OSTargets.h`'s `LinuxTargetInfo::getOSDefines` and `Targets.cpp`'s `DefineStd` and `defineCPUMacros`, under
+  the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file carrying clang's notice;
+  `cpp/target/clang.edn`, the facts it reads (PickFP's float strings among them, from the same file), likewise.
+- `arbace/repr/cpp/diag.ae` (`arbace.repr.cpp.diag`, Arbace's own C++ front end's diagnostics, doc/cpp/CPP-SURVEY.md, "As built:
+  CX12 (first slice)"): its diagnostics' texts are clang's (`clang/include/clang/Basic/DiagnosticSemaKinds.td`) and its rules follow
+  clang's Sema (`clang/lib/Sema/SemaExpr.cpp`'s `DiagnoseEmptyLookup`, `SemaDecl.cpp`'s `MergeVarDecl`, `MergeFunctionDecl`,
+  `ActOnTag`, `CheckRedeclaration`, `ActOnParamDeclarator`, `ActOnField`), the LLVM Project from `llvm-project-23.1.5.src.tar.xz` (the
+  pin of `test/cpp/corpora.edn`), under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the file
+  carrying clang's notice. Its second slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (second slice)") adds the checker's rules to the
+  code generator's Sema, `arbace/cpp/sema.ae` (Arbace's own, written after the standard's rules), and to `arbace/cpp/template.ae`'s
+  port of `SemaTemplateDeduction.cpp` (its MemberPointer case and the method qualifiers' mismatch, under that file's LLVM notice).
+  Its rules for GNU attributes clang does not know (`gnu-attrs`, `gattr-rules`; CP294 (a), doc/cpp/CPP-SURVEY.md, "As built:
+  CP290-CP294") are Arbace's own, written clean-room from the GCC 15.2 manual's description of each attribute (no GCC code read or
+  ported; the messages Arbace's own). Its fifth slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (fifth slice)") follows
+  `clang/lib/Sema/SemaDeclCXX.cpp`'s `CheckConstexprFunctionBody`, `CheckConstexprDeclStmt`, `CheckConstexprMissingReturn` and
+  `MergeCXXFunctionDecl` of the same release (`constexpr-bodies`, `constexpr-redecls`), its texts clang's.
+- `test/cpp/builtins.ae` (`cpp.builtins`) and `cpp/target/clang-builtins.edn` (CX12, CP270 (a)): the table is computed from the same
+  tarball's `clang/include/clang/Basic/Builtins.td`, `BuiltinsBase.td`, `BuiltinsX86.td`, `BuiltinsX86Base.td`, `BuiltinsX86_64.td`
+  (read as data, the names as `clang/utils/TableGen/ClangBuiltinsEmitter.cpp` makes them) and `TokenKinds.def`,
+  `TransformTypeTraits.def` (the keywords), under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below);
+  the reader carries clang's notice, the table names its sources.
 - `test/java/` (bin/java-check, Java's conformance check, doc/classes/JAVA-CONFORMANCE-SURVEY.md,
   "As built: JC1"): its tools, data and the hand-curated programs of `test/java/jls/` are Arbace's
   own, under the Eclipse Public License 1.0. jdk26u's jtreg tests are read in place from the
@@ -909,13 +1803,64 @@ covers what.
   first line names its source), under the GNU General Public License version 2 (the text below,
   "OpenJDK (jdk26u)"), without the Classpath Exception, which jdk26u's `test/` does not carry.
   They are inputs of the check, in no executable.
+- `arbace/cpp/template.ae` and the template parts of `arbace/cpp/abi.ae`'s mangling (C++'s code generator,
+  doc/cpp/CODEGEN.md §G3, by the user's decision P6 (b), 2026-11-05): ports of parts of clang, the LLVM Project,
+  https://github.com/llvm/llvm-project at `llvmorg-23.1.4` (commit `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`,
+  the tarball pinned in `test/cpp/corpora.edn`): `clang/lib/Sema/SemaTemplateDeduction.cpp`'s
+  `DeduceTemplateArgumentsByTypeMatch`, `AdjustFunctionParmAndArgTypesForDeduction`, `DeduceTemplateSpecArguments`,
+  `DeduceTemplateBases`, `checkDeducedTemplateArguments`, `isForwardingReference`,
+  `hasInconsistentOrSupersetQualifiersOf` and `isAtLeastAsSpecializedAs`, and `clang/lib/AST/ItaniumMangle.cpp`'s
+  `mangleTemplatePrefix`, `mangleTemplateArgs`, `mangleTemplateParameter`, `mangleIntegerLiteral`, the return-type
+  rule of `mangleFunctionEncodingBareType` and the `sr` form of `mangleUnresolvedPrefix`, and since CP311 (a)
+  (doc/cpp/CPP-SURVEY.md, "As built: CP311 (a) and the rest of CP313 (a)", 2026-11-09) `arbace/cpp/template.ae`'s
+  class template argument deduction, after `clang/lib/Sema/SemaTemplateDeductionGuide.cpp`'s
+  `DeclareImplicitDeductionGuides`, `transformConstructor`, `buildSimpleDeductionGuide` and
+  `DeclareAggregateDeductionGuideFromInitList` and `clang/lib/Sema/SemaInit.cpp`'s
+  `DeduceTemplateSpecializationFromInitializer` at `llvmorg-23.1.5` (the tarball pinned in `test/cpp/corpora.edn`), under the Apache License
+  2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the files carrying clang's notice; and
+  `arbace/cpp/inline.ae` (doc/cpp/CODEGEN.md G5, the user's decision P16 (a), 2026-11-05): a port of LLVM's
+  AlwaysInliner at the same commit, `llvm/lib/Transforms/IPO/AlwaysInliner.cpp`'s `AlwaysInlineImpl`,
+  `llvm/lib/Transforms/Utils/InlineFunction.cpp`'s `InlineFunctionImpl` (the parts -O0 IR uses),
+  `HandleInlinedLandingPad`, `HandleCallsInBlockInlinedThroughInvoke`, `LandingPadInliningInfo::forwardResume` and
+  `getInnerResumeDest`, and `llvm/lib/Analysis/InlineCost.cpp`'s `isInlineViable`, under the same license, the file
+  carrying LLVM's notice. The rest of `arbace/cpp/` is Arbace's own, under the Eclipse Public License 1.0.
+- `go/arbace/libm.ae` and `go/arbace/libm/` (the package `arbace/libm`, musl's libm in Go, shared by hsi and pyi;
+  also `go/arbace/hs/prim_scalar.ae`'s `fmaf`, musl 1.2.6's `src/math/fmaf.c` ported likewise, HE4e;
+  doc/haskell/HASKELL-EVAL-SURVEY.md, HES37 (a), "As built: HE4b, HE4c (write-ahead)", "As built: HES38's :full
+  forms"; until then `go/arbace/hs/libm.ae` and `libm_data.ae`): ported to Go by hand, then converted to Go forms, from musl 1.2.6's
+  `src/math` (https://musl.libc.org/releases/musl-1.2.6.tar.gz, SHA-256
+  `d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a`, the pin of `test/c/corpora.edn`; the files the
+  first file's header names): musl, Copyright (c) 2005-2020 Rich Felker, et al., under the MIT License below ("musl");
+  its exp, log, pow, expf, logf and powf code and their tables Copyright (c) 2017-2018 Arm Limited, MIT; the rest from
+  FreeBSD's msun, Copyright (C) 1993 Sun Microsystems, Inc. ("Permission to use, copy, modify, and distribute this
+  software is freely granted, provided that this notice is preserved"), the float kernels and the argument reductions
+  as optimized by Bruce D. Evans and David Schultz (Copyright (c) 2003-2011, "extremely permissive terms", musl's
+  COPYRIGHT). `go/arbace/hs/` and `test/haskell/hsi/libm-ref.c` are Arbace's own, under the Eclipse Public
+  License 1.0.
+- `go/arbace/hs/cbits.ae` and `go/arbace/hs/cdata.ae` (hsi's C for the packages bytestring and text, doc/haskell/HASKELL-EVAL-SURVEY.md,
+  "As built: HE5 (write-ahead)"): bytestring's `cbits/itoa.c`, `fpstring.c`, `shortbytestring.c`, `is-valid-utf8.c` (its
+  result by Go's `unicode/utf8`) and the tables of `cbits/aligned-static-hs-data.c` (`cdata.ae`, generated by
+  `bin/lib/hsi/cdata-gen`) ported to Go, and text's `cbits/is_ascii.c`, `measure_off.c`, `reverse.c` and `utils.c`, from GHC
+  9.14.1's source tarball (`libraries/bytestring`, `libraries/text`; the pin of `tools/repr-haskell`'s corpus): bytestring,
+  Copyright (c) Don Stewart 2005-2009, Duncan Coutts 2006-2015, David Roundy 2003-2005, Simon Meier 2010-2011, Koz Ross 2021,
+  under the BSD 3-Clause License below ("bytestring"); text, Copyright (c) 2008-2009 Tom Harper (the cbits files' own notices
+  too, Andrew Lelechenko 2021), under the BSD 2-Clause License below ("text"). The rest of `go/arbace/hs/` (`posix.ae`,
+  `cformat.ae` and the rest) is Arbace's own, under the Eclipse Public License 1.0.
+- `go/arbace/hs/alloclimit.ae` and hsi's driver's `test/haskell/hsi/cmd/rtsflags.ae` and `rtsusage.ae` (HE9's allocation
+  limits and the RTS's options, doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE9 on main"): `alloclimit.ae`'s rules from GHC
+  9.14.1's `rts/Schedule.c` (schedulePostRunThread) and `rts/PrimOps.cmm` (stg_{get,set}ThreadAllocationCounterzh);
+  `rtsflags.ae` ports `rts/RtsFlags.c`'s option parsing (procRtsOpts, decodeSize, parseDouble, read_trace_flags, bad_option,
+  errorUsage) and `rtsusage.ae` transcribes its `usage_text[]`, from GHC 9.14.1's source tarball (the pin of
+  `tools/repr-haskell`'s corpus): GHC, Copyright The University Court of the University of Glasgow, under the Glasgow Haskell
+  Compiler License below ("GHC: the Glasgow Haskell Compiler License"). The rest of these files is Arbace's own, under the
+  Eclipse Public License 1.0.
 - `scheme/psyntax/` (Scheme's expander, doc/scheme/SCHEME-SURVEY.md, "As built: SM4"; origins in
   `scheme/provenance.edn`): `expander.ae`, `library-manager.ae`, `builders.ae` and `config.ae` are
   psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus
   Scheme carried it (https://github.com/lambdaconservatory/ikarus at
   `1f2b250ed9e8cb1c2466c939a9a305461db71739`, `scheme/psyntax.*.ss`, each file's notice kept), as Scheme
-  forms; `psyntax.pp.ae` is generated from them (psyntax expanded by itself), and `tools/psyntax/boot.ss`
-  follows the structure of `psyntax-buildscript.ss` of the portable psyntax-r6rs (revision 4, 2007, by the
+  forms; `psyntax.pp.ae` is generated from them (psyntax expanded by itself), and `tools/psyntax/boot.ss` and
+  `tools/psyntax/boot-si.sps` (its program on si itself, SMR7b) follow the structure of `psyntax-buildscript.ss` of the portable psyntax-r6rs (revision 4, 2007, by the
   same authors): all under the MIT License below ("psyntax"). `compat.ae`, `internal.ae`, `patches.edn`,
   `tools/psyntax/chez/`, `tools/psyntax/run.ss` and `tools/psyntax/expand.ss` are Arbace's own, under the
   Eclipse Public License 1.0 (Ikarus's own `psyntax.compat.ss`, under the GPL version 3, is not vendored).
@@ -925,6 +1870,19 @@ covers what.
 - `scheme/vendor/chibi/` (Chibi Scheme 0.12's `(chibi test)` and the libraries it imports, with three of
   their tests; `scheme/vendor/chibi/provenance.edn`) and `scheme/lib/chibi/optional.sls`, derived from
   it: under the BSD 3-Clause License below ("Chibi Scheme").
+- `arbace/repr/scheme/category.ae`, `arbace/repr/scheme/unicode.ae`, `arbace/repr/scheme/casefold.ae` and
+  `go/arbace/scm/unicode.ae` (SCS9 (c), SCS12 (c), SCS13 (b), doc/scheme/SCHEME-SURVEY.md, "As built: SCS9 (c), SCS10 (b),
+  SCS11 (b)", "As built: SCS12-SCS14"): generated by `arbace.repr.scheme.ucd` from the Unicode Character Database 16.0.0
+  (https://www.unicode.org/Public/16.0.0/ucd/ `UnicodeData.txt`, `extracted/DerivedGeneralCategory.txt` and `CaseFolding.txt`,
+  pinned by SHA-256 in `test/scheme/ucd.edn`, fetched 2026-11-08; since SCS16 (b) and SCS17 (c), "As built: SCS15-SCS18", also
+  `SpecialCasing.txt`, `DerivedCoreProperties.txt` and `PropList.txt`, fetched 2026-11-09; since SCS21 (b) also
+  `auxiliary/WordBreakProperty.txt`, fetched 2026-11-09; since SCS23 (b) also `emoji/emoji-data.txt`'s Extended_Pictographic, fetched
+  2026-11-09, and since SCS24 (b) `auxiliary/WordBreakTest.txt`, the cases si's unit test `go/arbace/scm/wordbreak_test.ae` reads, not
+  copied into the tree): the general categories, the identifier,
+  whitespace and printer escape ranges derived from them, the case foldings, si's properties (Alphabetic, Numeric, White_Space,
+  Uppercase, Lowercase, Cased, Case_Ignorable, Extended_Pictographic), its simple and full case mappings and its Word_Break classes are Unicode's data, under the Unicode License V3 below ("The
+  Unicode Character Database 16.0.0 (repr/scheme's Unicode data)"); the generator and the files' code are Arbace's own,
+  under the Eclipse Public License 1.0.
 - `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
   Go-source seed"): the seed of the bootstrap, Arbace's Go program as the Go-hosted fixpoint
   printed it, the source of the Go build's executables (above): the main package with its
@@ -945,6 +1903,12 @@ covers what.
   that tag and the classes compiled from them. Each entry is under the license of the `arbace/`
   file it is or is compiled from, as above (`arbace/asm/...` classes under ASM's BSD 3-Clause
   License, `arbace/lang/Murmur3*` under the Apache License 2.0, and so on).
+- `test/programs/junit4/patches/`: two variants of pinned third-party sources (bin/java-project's `:patches`, A10 of the
+  Ghidra case study's G1 plan), whose context lines are theirs: `hamcrest-core-1.3-javac.patch`, of hamcrest-core 1.3
+  (`org.hamcrest:hamcrest-core:1.3`'s sources jar, http://hamcrest.org), under the BSD License below ("Hamcrest");
+  `junit-4.13.2-jdk18.patch`, of JUnit 4.13.2 (`junit:junit:4.13.2`'s sources jar, https://github.com/junit-team/junit4
+  at `r4.13.2`), under the Eclipse Public License 1.0 (text below). The artifacts themselves are fetched by pin
+  (`test/java/project/maven-pins.edn`) into `.tmp/maven`, never committed.
 
 ## Arbace, Clojure, spec.alpha and core.specs.alpha: Eclipse Public License 1.0
 
@@ -1388,12 +2352,52 @@ Copyright (C) 2011 The Guava Authors
    END OF TERMS AND CONDITIONS
 ```
 
+## LLVM (clang): Apache License 2.0 with LLVM Exceptions
+
+The LLVM Project's `LICENSE.TXT` (in `llvm-project-23.1.4.src/clang/LICENSE.TXT`, sha256
+`ebcd9bbf783a73d05c53ba4d586b8d5813dcdf3bbec50265860ccc885e606f47`) states: "The LLVM Project is under the Apache
+License v2.0 with LLVM Exceptions". The Apache License, Version 2.0, January 2004, is given in full in the section
+"Murmur3 (Guava): Apache License 2.0" above. The exceptions, verbatim:
+
+```
+---- LLVM Exceptions to the Apache 2.0 License ----
+
+As an exception, if, as a result of your compiling your source code, portions
+of this Software are embedded into an Object form of such source code, you
+may redistribute such embedded portions in such Object form without complying
+with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
+
+In addition, if you combine or link compiled forms of this Software with
+software that is licensed under the GPLv2 ("Combined Software") and if a
+court of competent jurisdiction determines that the patent provision (Section
+3), the indemnity provision (Section 9) or other Section of the License
+conflicts with the conditions of the GPLv2, you may retroactively and
+prospectively choose to deem waived or otherwise exclude such Section(s) of
+the License, but only in their entirety and only with respect to the Combined
+Software.
+```
+
+The file's further sections (software from third parties, which the ported functions are not, and the legacy
+University of Illinois/NCSA license of code contributed before the relicensing) state no terms for the ported parts.
+
 ## purego: Apache License 2.0
 
 Copyright 2022 The Ebitengine Authors (https://github.com/ebitengine/purego, v0.11.1). purego's
 `LICENSE` is the Apache License, Version 2.0, January 2004, whose text is given in full in the
 section "Murmur3 (Guava): Apache License 2.0" above (purego's file also carries the license's
 appendix, "How to apply the Apache License to your work", which states no further terms).
+
+## The WebAssembly specification's reference interpreter and testsuite: Apache License 2.0
+
+The WebAssembly specification, https://github.com/WebAssembly/spec (tag `wg-3.0`, commit
+`9d36019973201a19f9c9ebb0f10828b2fe2374aa`): its `LICENSE` states that `interpreter/` and `test/` are under the Apache License
+2.0 (`document/` under the W3C Software and Document Notice and License, read only; `papers/` under CC-BY-4.0, not used). The
+WebAssembly testsuite, https://github.com/WebAssembly/testsuite (commit `92a3d806c7d70f5b63f125e6155b8d76304509f1`): its `LICENSE`
+is the Apache License, Version 2.0, January 2004. Copyright the WebAssembly Community Group's contributors. The license's text
+is given in full in the section "Murmur3 (Guava): Apache License 2.0" above. Covered here: `arbace/repr/wasm/ops.ae` (generated
+from `interpreter/binary/decode.ml` and `interpreter/text/lexer.mll`), the decoder's and the text reader's rules and messages
+after the reference interpreter (`arbace/repr/wasm/binary.ae`, `lex.ae`, `text.ae`), and the testsuite's scripts as test data
+(read from `.tmp/`, not distributed; any later committed copy of an essential subset is under this license).
 
 ## Mozilla NSS's root certificates: Mozilla Public License 2.0
 
@@ -2373,6 +3377,58 @@ Severability.  If any provision of this Agreement is declared invalid or unenfor
 Entire Agreement. This Agreement constitutes the entire agreement between the parties.
 ```
 
+## The Unicode Character Database 16.0.0 (repr/scheme's Unicode data): Unicode License V3
+
+Covers the data of `arbace/repr/scheme/category.ae`, `arbace/repr/scheme/unicode.ae`, `arbace/repr/scheme/casefold.ae` and
+`go/arbace/scm/unicode.ae`, generated from the Unicode Character Database 16.0.0 (`UnicodeData.txt`,
+`extracted/DerivedGeneralCategory.txt`, `CaseFolding.txt`, and since SCS16 (b) `SpecialCasing.txt`, `DerivedCoreProperties.txt`,
+`PropList.txt`, since SCS21 (b) `auxiliary/WordBreakProperty.txt`, and since SCS23 (b) and SCS24 (b) `emoji/emoji-data.txt` and
+`auxiliary/WordBreakTest.txt` (the latter read by si's unit test, not copied); https://www.unicode.org/Public/16.0.0/ucd/, pinned by `test/scheme/ucd.edn`). The license, the text of
+https://www.unicode.org/license.txt as fetched on 2026-11-08 (SHA-256
+`e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96`, pinned in `test/scheme/ucd.edn`):
+
+```
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+```
+
 ## zlib: zlib License
 
 Covers `overlay/jdk/java.base/java/util/zip/Deflater.java` and `Inflater.java` (ports of zlib's
@@ -2612,6 +3668,23 @@ Ty Coon, President of Vice
 That's all there is to it!
 
 --------------------------------------------------
+
+## Menhir and MenhirLib: GNU Library General Public License version 2 with a special exception on linking
+
+MenhirLib, Menhir's runtime library, as OCaml 5.5.0's release tarball carries it (`boot/menhir/menhirLib.ml`), states:
+
+```
+Menhir
+
+Copyright Inria. All rights reserved. This file is distributed under
+the terms of the GNU Library General Public License version 2, with a
+special exception on linking, as described in the file LICENSE.
+```
+
+Menhir's standard library (`standard.mly`) is distributed under the same terms. In the tarball that carries
+MenhirLib, the file LICENSE is OCaml's: the GNU Lesser General Public License text and the linking exception of
+the section "The OCaml Core System" above (the Lesser GPL 2.1 is the Library GPL 2's successor). Arbace's files
+that follow them are named in the list at the top (repr/ocaml's native reader).
 
 ## SRFI 14 (char-sets): MIT Scheme license
 
@@ -3159,7 +4232,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## musl: MIT License
 
 The `COPYRIGHT` of musl 1.2.6 (https://musl.libc.org/releases/musl-1.2.6.tar.gz, test/c/corpora.edn's pin), whole; it
-covers musl's part of the node programs in `go/arbace/clib/` (above):
+covers musl's part of the node programs in `go/arbace/clib/` and hsi's libm, `go/arbace/libm` (above; merged at batch 2 with
+haskell-90's section of musl's `COPYRIGHT`, its part for the whole and for `src/math`, the same text):
 
 ```
 musl as a whole is licensed under the following standard MIT license:
@@ -3355,6 +4429,116 @@ to be subject to copyright, resulting in confusion over whether it
 negated the permissions granted in the license. In the spirit of
 permissive licensing, and of not having licensing issues being an
 obstacle to adoption, that text has been removed.
+## libffi: MIT License
+
+The `LICENSE` of libffi 3.8.0 (https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz,
+`test/haskell/target/libffi.edn`'s pin), whole; it covers what `arbace/repr/haskell/target.ae` ports of its configure and the
+two headers it makes from the tarball (above):
+
+```
+libffi - Copyright (c) 1996-2026  Anthony Green, Red Hat, Inc and others.
+See source files for details.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+``Software''), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## GHC: the Glasgow Haskell Compiler License
+
+The `LICENSE` of GHC 9.14.1's source tarball (above), covering what repr/haskell's native reader
+ports from GHC:
+
+```
+The Glasgow Haskell Compiler License
+
+Copyright 2002, The University Court of the University of Glasgow.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+- Neither name of the University nor the names of its contributors may be
+used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+```
+
+## Cabal: BSD 3-Clause License
+
+The license of Cabal-syntax 3.16.0.0 (GHC 9.14.1's tarball, `libraries/Cabal/Cabal-syntax/LICENSE`), covering
+`arbace/repr/haskell/cabal.ae`:
+
+```
+Copyright (c) 2003-2025, Cabal Development Team.
+See the AUTHORS file for the full list of copyright holders.
+
+See */LICENSE for the copyright holders of the subcomponents.
+
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+    * Neither the name of Isaac Jones nor the names of other
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ## CPython: the PSF License Agreement for Python 3.14
@@ -3639,4 +4823,1110 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+```
+
+## LLVM (llvm/test files in test/llvm/essential/, repr/llvm's verifier and tables): Apache License 2.0 with LLVM Exceptions
+
+The modules of `test/llvm/essential/` are files of `llvm/test` of llvm-project at `llvmorg-23.1.4` (commit 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5, `llvm-project-23.1.4.src.tar.xz`, pinned in `test/cpp/corpora.edn`), copied unchanged as test data; the rest of `llvm/test`, read in place from the pinned tarball, is not stored. The same release's `llvm/lib/IR/Verifier.cpp`, `Intrinsics.cpp`, `AutoUpgrade.cpp`, `Type.cpp`, `Attributes.cpp`, `AsmWriter.cpp`, `DebugInfoMetadata.cpp` and `llvm/lib/AsmParser/LLParser.cpp`, `LLLexer.cpp` are reimplemented in part by `arbace/repr/llvm/verify.ae`, `read.ae`, `intr.ae` and `diag.ae` (doc/ARBACE.md), and those of release 23.1.5 (`llvm-project-23.1.5.src.tar.xz`, the same `llvm/LICENSE.TXT`) with `Attributes.td`, `CallingConv.h`, `DiagnosticInfo.cpp` and (LLS36 (a)) `Intrinsics.cpp` and `DebugInfo.cpp` and (LLS38) `Module.cpp` by `arbace/repr/llvm/expect.ae` (LLS33 (b)), and `arbace/repr/llvm/intr_table.ae` and `di_table.ae` are generated from its `llvm/include/llvm/IR/Intrinsics*.td`, `DebugInfoFlags.def`, `llvm/include/llvm/BinaryFormat/Dwarf.def`, `Dwarf.h`, `LLParser.cpp` and `AsmWriter.cpp` (`bin/llvm-corpus intrinsics`, `di-table`). The text of `llvm/LICENSE.TXT` of that release follows.
+
+The LLVM Project is under the Apache License v2.0 with LLVM Exceptions:
+==============================================================================
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+    TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+    1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+    2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+    3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+    4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+    5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+    6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+    7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+    8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+    9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+    END OF TERMS AND CONDITIONS
+
+    APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+    Copyright [yyyy] [name of copyright owner]
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+
+---- LLVM Exceptions to the Apache 2.0 License ----
+
+As an exception, if, as a result of your compiling your source code, portions
+of this Software are embedded into an Object form of such source code, you
+may redistribute such embedded portions in such Object form without complying
+with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
+
+In addition, if you combine or link compiled forms of this Software with
+software that is licensed under the GPLv2 ("Combined Software") and if a
+court of competent jurisdiction determines that the patent provision (Section
+3), the indemnity provision (Section 9) or other Section of the License
+conflicts with the conditions of the GPLv2, you may retroactively and
+prospectively choose to deem waived or otherwise exclude such Section(s) of
+the License, but only in their entirety and only with respect to the Combined
+Software.
+
+==============================================================================
+Software from third parties included in the LLVM Project:
+==============================================================================
+The LLVM Project contains third party software which is under different license
+terms. All such code will be identified clearly using at least one of two
+mechanisms:
+1) It will be in a separate directory tree with its own `LICENSE.txt` or
+   `LICENSE` file at the top containing the specific license and restrictions
+   which apply to that software, or
+2) It will contain specific license and restriction terms at the top of every
+   file.
+
+==============================================================================
+Legacy LLVM License (https://llvm.org/docs/DeveloperPolicy.html#legacy):
+==============================================================================
+University of Illinois/NCSA
+Open Source License
+
+Copyright (c) 2003-2019 University of Illinois at Urbana-Champaign.
+All rights reserved.
+
+Developed by:
+
+    LLVM Team
+
+    University of Illinois at Urbana-Champaign
+
+    http://llvm.org
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal with
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+    * Redistributions of source code must retain the above copyright notice,
+      this list of conditions and the following disclaimers.
+
+    * Redistributions in binary form must reproduce the above copyright notice,
+      this list of conditions and the following disclaimers in the
+      documentation and/or other materials provided with the distribution.
+
+    * Neither the names of the LLVM Team, University of Illinois at
+      Urbana-Champaign, nor the names of its contributors may be used to
+      endorse or promote products derived from this Software without specific
+      prior written permission.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS WITH THE
+SOFTWARE.
+
+
+## gcc's testsuite (the IR of gcc.c-torture/execute in test/llvm/ir/tx.tar.xz): GNU General Public License version 3 or later
+
+`test/llvm/ir/tx.tar.xz` holds clang 23's IR of the files of gcc 9.1.0's `gcc/testsuite/gcc.c-torture/execute/` and its `ieee/`
+(as packaged by modernc.org/ccorpus2 v1.6.0, `test/c/corpora.edn`'s `:torture-execute`), compiled as test data by `bin/llvmi ir-make`
+(doc/llvm/LLVM-CROP-SURVEY.md, "Decided (2026-11-06, the user: the torture corpora's IR pinned)"); gcc's testsuite is distributed with
+gcc under the GNU General Public License version 3 or later (gcc's `COPYING3`). Its text follows, gcc 15.2.0's `COPYING3`, out of the
+tarball pinned in `test/c/corpora.edn` (`:gcc-15.2.0`; the same version 3 text gcc 9.1.0 ships; doc/llvm/LLVM-CROP-SURVEY.md's LLS26).
+The IR of `test/llvm/ir/c.tar.xz` is made from
+Arbace's own test programs (`test/c/synth`, `test/c/run`, `test/cpp/samples`, `test/cpp/runtime/samples`), under Arbace's license.
+
+```
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <http://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+                            Preamble
+
+  The GNU General Public License is a free, copyleft license for
+software and other kinds of works.
+
+  The licenses for most software and other practical works are designed
+to take away your freedom to share and change the works.  By contrast,
+the GNU General Public License is intended to guarantee your freedom to
+share and change all versions of a program--to make sure it remains free
+software for all its users.  We, the Free Software Foundation, use the
+GNU General Public License for most of our software; it applies also to
+any other work released this way by its authors.  You can apply it to
+your programs, too.
+
+  When we speak of free software, we are referring to freedom, not
+price.  Our General Public Licenses are designed to make sure that you
+have the freedom to distribute copies of free software (and charge for
+them if you wish), that you receive source code or can get it if you
+want it, that you can change the software or use pieces of it in new
+free programs, and that you know you can do these things.
+
+  To protect your rights, we need to prevent others from denying you
+these rights or asking you to surrender the rights.  Therefore, you have
+certain responsibilities if you distribute copies of the software, or if
+you modify it: responsibilities to respect the freedom of others.
+
+  For example, if you distribute copies of such a program, whether
+gratis or for a fee, you must pass on to the recipients the same
+freedoms that you received.  You must make sure that they, too, receive
+or can get the source code.  And you must show them these terms so they
+know their rights.
+
+  Developers that use the GNU GPL protect your rights with two steps:
+(1) assert copyright on the software, and (2) offer you this License
+giving you legal permission to copy, distribute and/or modify it.
+
+  For the developers' and authors' protection, the GPL clearly explains
+that there is no warranty for this free software.  For both users' and
+authors' sake, the GPL requires that modified versions be marked as
+changed, so that their problems will not be attributed erroneously to
+authors of previous versions.
+
+  Some devices are designed to deny users access to install or run
+modified versions of the software inside them, although the manufacturer
+can do so.  This is fundamentally incompatible with the aim of
+protecting users' freedom to change the software.  The systematic
+pattern of such abuse occurs in the area of products for individuals to
+use, which is precisely where it is most unacceptable.  Therefore, we
+have designed this version of the GPL to prohibit the practice for those
+products.  If such problems arise substantially in other domains, we
+stand ready to extend this provision to those domains in future versions
+of the GPL, as needed to protect the freedom of users.
+
+  Finally, every program is threatened constantly by software patents.
+States should not allow patents to restrict development and use of
+software on general-purpose computers, but in those that do, we wish to
+avoid the special danger that patents applied to a free program could
+make it effectively proprietary.  To prevent this, the GPL assures that
+patents cannot be used to render the program non-free.
+
+  The precise terms and conditions for copying, distribution and
+modification follow.
+
+                       TERMS AND CONDITIONS
+
+  0. Definitions.
+
+  "This License" refers to version 3 of the GNU General Public License.
+
+  "Copyright" also means copyright-like laws that apply to other kinds of
+works, such as semiconductor masks.
+
+  "The Program" refers to any copyrightable work licensed under this
+License.  Each licensee is addressed as "you".  "Licensees" and
+"recipients" may be individuals or organizations.
+
+  To "modify" a work means to copy from or adapt all or part of the work
+in a fashion requiring copyright permission, other than the making of an
+exact copy.  The resulting work is called a "modified version" of the
+earlier work or a work "based on" the earlier work.
+
+  A "covered work" means either the unmodified Program or a work based
+on the Program.
+
+  To "propagate" a work means to do anything with it that, without
+permission, would make you directly or secondarily liable for
+infringement under applicable copyright law, except executing it on a
+computer or modifying a private copy.  Propagation includes copying,
+distribution (with or without modification), making available to the
+public, and in some countries other activities as well.
+
+  To "convey" a work means any kind of propagation that enables other
+parties to make or receive copies.  Mere interaction with a user through
+a computer network, with no transfer of a copy, is not conveying.
+
+  An interactive user interface displays "Appropriate Legal Notices"
+to the extent that it includes a convenient and prominently visible
+feature that (1) displays an appropriate copyright notice, and (2)
+tells the user that there is no warranty for the work (except to the
+extent that warranties are provided), that licensees may convey the
+work under this License, and how to view a copy of this License.  If
+the interface presents a list of user commands or options, such as a
+menu, a prominent item in the list meets this criterion.
+
+  1. Source Code.
+
+  The "source code" for a work means the preferred form of the work
+for making modifications to it.  "Object code" means any non-source
+form of a work.
+
+  A "Standard Interface" means an interface that either is an official
+standard defined by a recognized standards body, or, in the case of
+interfaces specified for a particular programming language, one that
+is widely used among developers working in that language.
+
+  The "System Libraries" of an executable work include anything, other
+than the work as a whole, that (a) is included in the normal form of
+packaging a Major Component, but which is not part of that Major
+Component, and (b) serves only to enable use of the work with that
+Major Component, or to implement a Standard Interface for which an
+implementation is available to the public in source code form.  A
+"Major Component", in this context, means a major essential component
+(kernel, window system, and so on) of the specific operating system
+(if any) on which the executable work runs, or a compiler used to
+produce the work, or an object code interpreter used to run it.
+
+  The "Corresponding Source" for a work in object code form means all
+the source code needed to generate, install, and (for an executable
+work) run the object code and to modify the work, including scripts to
+control those activities.  However, it does not include the work's
+System Libraries, or general-purpose tools or generally available free
+programs which are used unmodified in performing those activities but
+which are not part of the work.  For example, Corresponding Source
+includes interface definition files associated with source files for
+the work, and the source code for shared libraries and dynamically
+linked subprograms that the work is specifically designed to require,
+such as by intimate data communication or control flow between those
+subprograms and other parts of the work.
+
+  The Corresponding Source need not include anything that users
+can regenerate automatically from other parts of the Corresponding
+Source.
+
+  The Corresponding Source for a work in source code form is that
+same work.
+
+  2. Basic Permissions.
+
+  All rights granted under this License are granted for the term of
+copyright on the Program, and are irrevocable provided the stated
+conditions are met.  This License explicitly affirms your unlimited
+permission to run the unmodified Program.  The output from running a
+covered work is covered by this License only if the output, given its
+content, constitutes a covered work.  This License acknowledges your
+rights of fair use or other equivalent, as provided by copyright law.
+
+  You may make, run and propagate covered works that you do not
+convey, without conditions so long as your license otherwise remains
+in force.  You may convey covered works to others for the sole purpose
+of having them make modifications exclusively for you, or provide you
+with facilities for running those works, provided that you comply with
+the terms of this License in conveying all material for which you do
+not control copyright.  Those thus making or running the covered works
+for you must do so exclusively on your behalf, under your direction
+and control, on terms that prohibit them from making any copies of
+your copyrighted material outside their relationship with you.
+
+  Conveying under any other circumstances is permitted solely under
+the conditions stated below.  Sublicensing is not allowed; section 10
+makes it unnecessary.
+
+  3. Protecting Users' Legal Rights From Anti-Circumvention Law.
+
+  No covered work shall be deemed part of an effective technological
+measure under any applicable law fulfilling obligations under article
+11 of the WIPO copyright treaty adopted on 20 December 1996, or
+similar laws prohibiting or restricting circumvention of such
+measures.
+
+  When you convey a covered work, you waive any legal power to forbid
+circumvention of technological measures to the extent such circumvention
+is effected by exercising rights under this License with respect to
+the covered work, and you disclaim any intention to limit operation or
+modification of the work as a means of enforcing, against the work's
+users, your or third parties' legal rights to forbid circumvention of
+technological measures.
+
+  4. Conveying Verbatim Copies.
+
+  You may convey verbatim copies of the Program's source code as you
+receive it, in any medium, provided that you conspicuously and
+appropriately publish on each copy an appropriate copyright notice;
+keep intact all notices stating that this License and any
+non-permissive terms added in accord with section 7 apply to the code;
+keep intact all notices of the absence of any warranty; and give all
+recipients a copy of this License along with the Program.
+
+  You may charge any price or no price for each copy that you convey,
+and you may offer support or warranty protection for a fee.
+
+  5. Conveying Modified Source Versions.
+
+  You may convey a work based on the Program, or the modifications to
+produce it from the Program, in the form of source code under the
+terms of section 4, provided that you also meet all of these conditions:
+
+    a) The work must carry prominent notices stating that you modified
+    it, and giving a relevant date.
+
+    b) The work must carry prominent notices stating that it is
+    released under this License and any conditions added under section
+    7.  This requirement modifies the requirement in section 4 to
+    "keep intact all notices".
+
+    c) You must license the entire work, as a whole, under this
+    License to anyone who comes into possession of a copy.  This
+    License will therefore apply, along with any applicable section 7
+    additional terms, to the whole of the work, and all its parts,
+    regardless of how they are packaged.  This License gives no
+    permission to license the work in any other way, but it does not
+    invalidate such permission if you have separately received it.
+
+    d) If the work has interactive user interfaces, each must display
+    Appropriate Legal Notices; however, if the Program has interactive
+    interfaces that do not display Appropriate Legal Notices, your
+    work need not make them do so.
+
+  A compilation of a covered work with other separate and independent
+works, which are not by their nature extensions of the covered work,
+and which are not combined with it such as to form a larger program,
+in or on a volume of a storage or distribution medium, is called an
+"aggregate" if the compilation and its resulting copyright are not
+used to limit the access or legal rights of the compilation's users
+beyond what the individual works permit.  Inclusion of a covered work
+in an aggregate does not cause this License to apply to the other
+parts of the aggregate.
+
+  6. Conveying Non-Source Forms.
+
+  You may convey a covered work in object code form under the terms
+of sections 4 and 5, provided that you also convey the
+machine-readable Corresponding Source under the terms of this License,
+in one of these ways:
+
+    a) Convey the object code in, or embodied in, a physical product
+    (including a physical distribution medium), accompanied by the
+    Corresponding Source fixed on a durable physical medium
+    customarily used for software interchange.
+
+    b) Convey the object code in, or embodied in, a physical product
+    (including a physical distribution medium), accompanied by a
+    written offer, valid for at least three years and valid for as
+    long as you offer spare parts or customer support for that product
+    model, to give anyone who possesses the object code either (1) a
+    copy of the Corresponding Source for all the software in the
+    product that is covered by this License, on a durable physical
+    medium customarily used for software interchange, for a price no
+    more than your reasonable cost of physically performing this
+    conveying of source, or (2) access to copy the
+    Corresponding Source from a network server at no charge.
+
+    c) Convey individual copies of the object code with a copy of the
+    written offer to provide the Corresponding Source.  This
+    alternative is allowed only occasionally and noncommercially, and
+    only if you received the object code with such an offer, in accord
+    with subsection 6b.
+
+    d) Convey the object code by offering access from a designated
+    place (gratis or for a charge), and offer equivalent access to the
+    Corresponding Source in the same way through the same place at no
+    further charge.  You need not require recipients to copy the
+    Corresponding Source along with the object code.  If the place to
+    copy the object code is a network server, the Corresponding Source
+    may be on a different server (operated by you or a third party)
+    that supports equivalent copying facilities, provided you maintain
+    clear directions next to the object code saying where to find the
+    Corresponding Source.  Regardless of what server hosts the
+    Corresponding Source, you remain obligated to ensure that it is
+    available for as long as needed to satisfy these requirements.
+
+    e) Convey the object code using peer-to-peer transmission, provided
+    you inform other peers where the object code and Corresponding
+    Source of the work are being offered to the general public at no
+    charge under subsection 6d.
+
+  A separable portion of the object code, whose source code is excluded
+from the Corresponding Source as a System Library, need not be
+included in conveying the object code work.
+
+  A "User Product" is either (1) a "consumer product", which means any
+tangible personal property which is normally used for personal, family,
+or household purposes, or (2) anything designed or sold for incorporation
+into a dwelling.  In determining whether a product is a consumer product,
+doubtful cases shall be resolved in favor of coverage.  For a particular
+product received by a particular user, "normally used" refers to a
+typical or common use of that class of product, regardless of the status
+of the particular user or of the way in which the particular user
+actually uses, or expects or is expected to use, the product.  A product
+is a consumer product regardless of whether the product has substantial
+commercial, industrial or non-consumer uses, unless such uses represent
+the only significant mode of use of the product.
+
+  "Installation Information" for a User Product means any methods,
+procedures, authorization keys, or other information required to install
+and execute modified versions of a covered work in that User Product from
+a modified version of its Corresponding Source.  The information must
+suffice to ensure that the continued functioning of the modified object
+code is in no case prevented or interfered with solely because
+modification has been made.
+
+  If you convey an object code work under this section in, or with, or
+specifically for use in, a User Product, and the conveying occurs as
+part of a transaction in which the right of possession and use of the
+User Product is transferred to the recipient in perpetuity or for a
+fixed term (regardless of how the transaction is characterized), the
+Corresponding Source conveyed under this section must be accompanied
+by the Installation Information.  But this requirement does not apply
+if neither you nor any third party retains the ability to install
+modified object code on the User Product (for example, the work has
+been installed in ROM).
+
+  The requirement to provide Installation Information does not include a
+requirement to continue to provide support service, warranty, or updates
+for a work that has been modified or installed by the recipient, or for
+the User Product in which it has been modified or installed.  Access to a
+network may be denied when the modification itself materially and
+adversely affects the operation of the network or violates the rules and
+protocols for communication across the network.
+
+  Corresponding Source conveyed, and Installation Information provided,
+in accord with this section must be in a format that is publicly
+documented (and with an implementation available to the public in
+source code form), and must require no special password or key for
+unpacking, reading or copying.
+
+  7. Additional Terms.
+
+  "Additional permissions" are terms that supplement the terms of this
+License by making exceptions from one or more of its conditions.
+Additional permissions that are applicable to the entire Program shall
+be treated as though they were included in this License, to the extent
+that they are valid under applicable law.  If additional permissions
+apply only to part of the Program, that part may be used separately
+under those permissions, but the entire Program remains governed by
+this License without regard to the additional permissions.
+
+  When you convey a copy of a covered work, you may at your option
+remove any additional permissions from that copy, or from any part of
+it.  (Additional permissions may be written to require their own
+removal in certain cases when you modify the work.)  You may place
+additional permissions on material, added by you to a covered work,
+for which you have or can give appropriate copyright permission.
+
+  Notwithstanding any other provision of this License, for material you
+add to a covered work, you may (if authorized by the copyright holders of
+that material) supplement the terms of this License with terms:
+
+    a) Disclaiming warranty or limiting liability differently from the
+    terms of sections 15 and 16 of this License; or
+
+    b) Requiring preservation of specified reasonable legal notices or
+    author attributions in that material or in the Appropriate Legal
+    Notices displayed by works containing it; or
+
+    c) Prohibiting misrepresentation of the origin of that material, or
+    requiring that modified versions of such material be marked in
+    reasonable ways as different from the original version; or
+
+    d) Limiting the use for publicity purposes of names of licensors or
+    authors of the material; or
+
+    e) Declining to grant rights under trademark law for use of some
+    trade names, trademarks, or service marks; or
+
+    f) Requiring indemnification of licensors and authors of that
+    material by anyone who conveys the material (or modified versions of
+    it) with contractual assumptions of liability to the recipient, for
+    any liability that these contractual assumptions directly impose on
+    those licensors and authors.
+
+  All other non-permissive additional terms are considered "further
+restrictions" within the meaning of section 10.  If the Program as you
+received it, or any part of it, contains a notice stating that it is
+governed by this License along with a term that is a further
+restriction, you may remove that term.  If a license document contains
+a further restriction but permits relicensing or conveying under this
+License, you may add to a covered work material governed by the terms
+of that license document, provided that the further restriction does
+not survive such relicensing or conveying.
+
+  If you add terms to a covered work in accord with this section, you
+must place, in the relevant source files, a statement of the
+additional terms that apply to those files, or a notice indicating
+where to find the applicable terms.
+
+  Additional terms, permissive or non-permissive, may be stated in the
+form of a separately written license, or stated as exceptions;
+the above requirements apply either way.
+
+  8. Termination.
+
+  You may not propagate or modify a covered work except as expressly
+provided under this License.  Any attempt otherwise to propagate or
+modify it is void, and will automatically terminate your rights under
+this License (including any patent licenses granted under the third
+paragraph of section 11).
+
+  However, if you cease all violation of this License, then your
+license from a particular copyright holder is reinstated (a)
+provisionally, unless and until the copyright holder explicitly and
+finally terminates your license, and (b) permanently, if the copyright
+holder fails to notify you of the violation by some reasonable means
+prior to 60 days after the cessation.
+
+  Moreover, your license from a particular copyright holder is
+reinstated permanently if the copyright holder notifies you of the
+violation by some reasonable means, this is the first time you have
+received notice of violation of this License (for any work) from that
+copyright holder, and you cure the violation prior to 30 days after
+your receipt of the notice.
+
+  Termination of your rights under this section does not terminate the
+licenses of parties who have received copies or rights from you under
+this License.  If your rights have been terminated and not permanently
+reinstated, you do not qualify to receive new licenses for the same
+material under section 10.
+
+  9. Acceptance Not Required for Having Copies.
+
+  You are not required to accept this License in order to receive or
+run a copy of the Program.  Ancillary propagation of a covered work
+occurring solely as a consequence of using peer-to-peer transmission
+to receive a copy likewise does not require acceptance.  However,
+nothing other than this License grants you permission to propagate or
+modify any covered work.  These actions infringe copyright if you do
+not accept this License.  Therefore, by modifying or propagating a
+covered work, you indicate your acceptance of this License to do so.
+
+  10. Automatic Licensing of Downstream Recipients.
+
+  Each time you convey a covered work, the recipient automatically
+receives a license from the original licensors, to run, modify and
+propagate that work, subject to this License.  You are not responsible
+for enforcing compliance by third parties with this License.
+
+  An "entity transaction" is a transaction transferring control of an
+organization, or substantially all assets of one, or subdividing an
+organization, or merging organizations.  If propagation of a covered
+work results from an entity transaction, each party to that
+transaction who receives a copy of the work also receives whatever
+licenses to the work the party's predecessor in interest had or could
+give under the previous paragraph, plus a right to possession of the
+Corresponding Source of the work from the predecessor in interest, if
+the predecessor has it or can get it with reasonable efforts.
+
+  You may not impose any further restrictions on the exercise of the
+rights granted or affirmed under this License.  For example, you may
+not impose a license fee, royalty, or other charge for exercise of
+rights granted under this License, and you may not initiate litigation
+(including a cross-claim or counterclaim in a lawsuit) alleging that
+any patent claim is infringed by making, using, selling, offering for
+sale, or importing the Program or any portion of it.
+
+  11. Patents.
+
+  A "contributor" is a copyright holder who authorizes use under this
+License of the Program or a work on which the Program is based.  The
+work thus licensed is called the contributor's "contributor version".
+
+  A contributor's "essential patent claims" are all patent claims
+owned or controlled by the contributor, whether already acquired or
+hereafter acquired, that would be infringed by some manner, permitted
+by this License, of making, using, or selling its contributor version,
+but do not include claims that would be infringed only as a
+consequence of further modification of the contributor version.  For
+purposes of this definition, "control" includes the right to grant
+patent sublicenses in a manner consistent with the requirements of
+this License.
+
+  Each contributor grants you a non-exclusive, worldwide, royalty-free
+patent license under the contributor's essential patent claims, to
+make, use, sell, offer for sale, import and otherwise run, modify and
+propagate the contents of its contributor version.
+
+  In the following three paragraphs, a "patent license" is any express
+agreement or commitment, however denominated, not to enforce a patent
+(such as an express permission to practice a patent or covenant not to
+sue for patent infringement).  To "grant" such a patent license to a
+party means to make such an agreement or commitment not to enforce a
+patent against the party.
+
+  If you convey a covered work, knowingly relying on a patent license,
+and the Corresponding Source of the work is not available for anyone
+to copy, free of charge and under the terms of this License, through a
+publicly available network server or other readily accessible means,
+then you must either (1) cause the Corresponding Source to be so
+available, or (2) arrange to deprive yourself of the benefit of the
+patent license for this particular work, or (3) arrange, in a manner
+consistent with the requirements of this License, to extend the patent
+license to downstream recipients.  "Knowingly relying" means you have
+actual knowledge that, but for the patent license, your conveying the
+covered work in a country, or your recipient's use of the covered work
+in a country, would infringe one or more identifiable patents in that
+country that you have reason to believe are valid.
+
+  If, pursuant to or in connection with a single transaction or
+arrangement, you convey, or propagate by procuring conveyance of, a
+covered work, and grant a patent license to some of the parties
+receiving the covered work authorizing them to use, propagate, modify
+or convey a specific copy of the covered work, then the patent license
+you grant is automatically extended to all recipients of the covered
+work and works based on it.
+
+  A patent license is "discriminatory" if it does not include within
+the scope of its coverage, prohibits the exercise of, or is
+conditioned on the non-exercise of one or more of the rights that are
+specifically granted under this License.  You may not convey a covered
+work if you are a party to an arrangement with a third party that is
+in the business of distributing software, under which you make payment
+to the third party based on the extent of your activity of conveying
+the work, and under which the third party grants, to any of the
+parties who would receive the covered work from you, a discriminatory
+patent license (a) in connection with copies of the covered work
+conveyed by you (or copies made from those copies), or (b) primarily
+for and in connection with specific products or compilations that
+contain the covered work, unless you entered into that arrangement,
+or that patent license was granted, prior to 28 March 2007.
+
+  Nothing in this License shall be construed as excluding or limiting
+any implied license or other defenses to infringement that may
+otherwise be available to you under applicable patent law.
+
+  12. No Surrender of Others' Freedom.
+
+  If conditions are imposed on you (whether by court order, agreement or
+otherwise) that contradict the conditions of this License, they do not
+excuse you from the conditions of this License.  If you cannot convey a
+covered work so as to satisfy simultaneously your obligations under this
+License and any other pertinent obligations, then as a consequence you may
+not convey it at all.  For example, if you agree to terms that obligate you
+to collect a royalty for further conveying from those to whom you convey
+the Program, the only way you could satisfy both those terms and this
+License would be to refrain entirely from conveying the Program.
+
+  13. Use with the GNU Affero General Public License.
+
+  Notwithstanding any other provision of this License, you have
+permission to link or combine any covered work with a work licensed
+under version 3 of the GNU Affero General Public License into a single
+combined work, and to convey the resulting work.  The terms of this
+License will continue to apply to the part which is the covered work,
+but the special requirements of the GNU Affero General Public License,
+section 13, concerning interaction through a network will apply to the
+combination as such.
+
+  14. Revised Versions of this License.
+
+  The Free Software Foundation may publish revised and/or new versions of
+the GNU General Public License from time to time.  Such new versions will
+be similar in spirit to the present version, but may differ in detail to
+address new problems or concerns.
+
+  Each version is given a distinguishing version number.  If the
+Program specifies that a certain numbered version of the GNU General
+Public License "or any later version" applies to it, you have the
+option of following the terms and conditions either of that numbered
+version or of any later version published by the Free Software
+Foundation.  If the Program does not specify a version number of the
+GNU General Public License, you may choose any version ever published
+by the Free Software Foundation.
+
+  If the Program specifies that a proxy can decide which future
+versions of the GNU General Public License can be used, that proxy's
+public statement of acceptance of a version permanently authorizes you
+to choose that version for the Program.
+
+  Later license versions may give you additional or different
+permissions.  However, no additional obligations are imposed on any
+author or copyright holder as a result of your choosing to follow a
+later version.
+
+  15. Disclaimer of Warranty.
+
+  THERE IS NO WARRANTY FOR THE PROGRAM, TO THE EXTENT PERMITTED BY
+APPLICABLE LAW.  EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT
+HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY
+OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE.  THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM
+IS WITH YOU.  SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF
+ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+
+  16. Limitation of Liability.
+
+  IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
+WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS
+THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY
+GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE
+USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF
+DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD
+PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS),
+EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES.
+
+  17. Interpretation of Sections 15 and 16.
+
+  If the disclaimer of warranty and limitation of liability provided
+above cannot be given local legal effect according to their terms,
+reviewing courts shall apply local law that most closely approximates
+an absolute waiver of all civil liability in connection with the
+Program, unless a warranty or assumption of liability accompanies a
+copy of the Program in return for a fee.
+
+                     END OF TERMS AND CONDITIONS
+
+            How to Apply These Terms to Your New Programs
+
+  If you develop a new program, and you want it to be of the greatest
+possible use to the public, the best way to achieve this is to make it
+free software which everyone can redistribute and change under these terms.
+
+  To do so, attach the following notices to the program.  It is safest
+to attach them to the start of each source file to most effectively
+state the exclusion of warranty; and each file should have at least
+the "copyright" line and a pointer to where the full notice is found.
+
+    <one line to give the program's name and a brief idea of what it does.>
+    Copyright (C) <year>  <name of author>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+Also add information on how to contact you by electronic and paper mail.
+
+  If the program does terminal interaction, make it output a short
+notice like this when it starts in an interactive mode:
+
+    <program>  Copyright (C) <year>  <name of author>
+    This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
+    This is free software, and you are welcome to redistribute it
+    under certain conditions; type `show c' for details.
+
+The hypothetical commands `show w' and `show c' should show the appropriate
+parts of the General Public License.  Of course, your program's commands
+might be different; for a GUI interface, you would use an "about box".
+
+  You should also get your employer (if you work as a programmer) or school,
+if any, to sign a "copyright disclaimer" for the program, if necessary.
+For more information on this, and how to apply and follow the GNU GPL, see
+<http://www.gnu.org/licenses/>.
+
+  The GNU General Public License does not permit incorporating your program
+into proprietary programs.  If your program is a subroutine library, you
+may consider it more useful to permit linking proprietary applications with
+the library.  If this is what you want to do, use the GNU Lesser General
+Public License instead of this License.  But first, please read
+<http://www.gnu.org/philosophy/why-not-lgpl.html>.
+```
+## Rust (rustc 1.99.1): MIT License or Apache License 2.0
+
+The Rust project's sources are dual-licensed under the MIT License or the Apache License 2.0, at
+the licensee's option. The MIT License's text, as the Rust project's crates carry it (the
+`LICENSE-MIT` of rustc-literal-escaper 0.0.8, the `.crate` above, whole):
+
+```
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+The Apache License 2.0's text (the escaper's `LICENSE-APACHE`, the same terms) is given in full in
+the section "Murmur3 (Guava): Apache License 2.0" above.
+## bytestring: BSD 3-Clause License
+
+The license of the Haskell package bytestring (libraries/bytestring/LICENSE of GHC 9.14.1's source tarball), which covers hsi's ports of its cbits:
+
+```
+Copyright (c) Don Stewart 2005-2009
+          (c) Duncan Coutts 2006-2015
+          (c) David Roundy 2003-2005
+          (c) Simon Meier 2010-2011
+          (c) Koz Ross 2021
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. Neither the name of the author nor the names of his contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+```
+
+## text: BSD 2-Clause License
+
+The license of the Haskell package text (libraries/text/LICENSE of GHC 9.14.1's source tarball), which covers hsi's ports of its cbits:
+
+```
+Copyright (c) 2008-2009, Tom Harper
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## Hamcrest: BSD License
+
+```
+BSD License
+
+Copyright (c) 2000-2006, www.hamcrest.org
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+Redistributions of source code must retain the above copyright notice, this list of
+conditions and the following disclaimer. Redistributions in binary form must reproduce
+the above copyright notice, this list of conditions and the following disclaimer in
+the documentation and/or other materials provided with the distribution.
+
+Neither the name of Hamcrest nor the names of its contributors may be used to endorse
+or promote products derived from this software without specific prior written
+permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY
+WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
 ```

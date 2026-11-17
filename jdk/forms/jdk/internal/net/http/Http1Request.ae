@@ -1,0 +1,317 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/Http1Request.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net InetSocketAddress URI)
+        '(java.net.http HttpClient HttpHeaders HttpRequest$BodyPublisher)
+        '(java.nio ByteBuffer)
+        '(java.nio.charset StandardCharsets)
+        '(java.util ArrayList List Map$Entry Objects)
+        '(java.util.concurrent Flow$Subscription)
+        '(java.util.function BiPredicate Consumer Supplier)
+        '(jdk.internal.net.http.common HttpHeadersBuilder Log Logger Utils))
+
+(defclass Http1Request
+  (field ^:private ^:static ^:final ^String COOKIE_HEADER "Cookie")
+
+  (field ^:private ^:static ^:final ^{:tag (BiPredicate String String)} NOCOOKIES
+    (lambda BiPredicate ^boolean [^String k ^String v] (not (.equalsIgnoreCase COOKIE_HEADER k))))
+
+  (field ^:private ^:final ^HttpRequestImpl request)
+
+  (field ^:private ^:final ^{:tag (Http1Exchange ?)} http1Exchange)
+
+  (field ^:private ^:final ^HttpConnection connection)
+
+  (field ^:private ^:final ^HttpRequest$BodyPublisher requestPublisher)
+
+  (field ^:private ^:volatile ^HttpHeaders userHeaders)
+
+  (field ^:private ^:final ^HttpHeadersBuilder systemHeadersBuilder)
+
+  (field ^:private ^:volatile ^boolean streaming)
+
+  (field ^:private ^:volatile ^long contentLength)
+
+  (constructor :throws [IOException] [this ^HttpRequestImpl request
+                                      ^{:tag (Http1Exchange ?)} http1Exchange]
+    (set! (.-request this) request)
+    (set! (.-http1Exchange this) http1Exchange)
+    (set! (.-connection this) (.connection http1Exchange))
+    (set! (.-requestPublisher this) (.-requestPublisher request))
+    (set! (.-userHeaders this) (.getUserHeaders request))
+    (set! (.-systemHeadersBuilder this) (.getSystemHeadersBuilder request)))
+
+  (method ^:private logHeaders ^void [this ^String completeHeaders]
+    (when (Log/headers)
+      (let [sb (StringBuilder. (.length completeHeaders))]
+        (.append sb "REQUEST HEADERS:\n")
+        (let [firstLine (new boolean/1 [true])]
+          (.forEach (.lines completeHeaders)
+                    (lambda Consumer ^void [^String line]
+                      (if (aget firstLine 0)
+                          (do
+                            (.append (.append (.append sb "  ") line) \newline)
+                            (aset firstLine 0 false))
+                          (when-not (.isBlank line)
+                            (.append (.append (.append sb "    ") line) \newline)))))
+          (Log/logHeaders (.toString sb))))))
+
+  (method ^:public collectHeaders0 ^void [this ^StringBuilder sb]
+    (let [^{:tag (BiPredicate String String)} filter (.headerFilter connection request)
+          ^{:tag (BiPredicate String String)} nocookies (.and NOCOOKIES filter)
+          systemHeaders (.build systemHeadersBuilder)
+          ^HttpClient client (.client http1Exchange)]
+      (set! userHeaders (HttpHeaders/of (.map userHeaders) (.contextRestricted connection request)))
+      (Utils/setUserAuthFlags request userHeaders)
+      (let [uh userHeaders
+            sh (HttpHeaders/of (.map systemHeaders)
+                               (lambda BiPredicate ^boolean [^String k ^String v]
+                                 (.isEmpty (.firstValue uh k))))]
+        (.collectHeaders1 this sb sh nocookies)
+        (.collectHeaders1 this sb uh nocookies)
+        (.collectCookies this sb systemHeaders userHeaders)
+        (.append (.append sb \return) \newline))))
+
+  (method ^:private collectCookies ^void [this ^StringBuilder sb ^HttpHeaders system
+                                          ^HttpHeaders user]
+    (let [^{:tag (List String)} systemList (.allValues system COOKIE_HEADER)
+          ^{:tag (List String)} userList (.allValues user COOKIE_HEADER)
+          ^:mutable found false]
+      (when (some? systemList)
+        (for-each [^String cookie systemList]
+          (if (not found)
+              (do (set! found true) (.append (.append (.append sb COOKIE_HEADER) \:) \space))
+              (.append (.append sb \;) \space))
+          (.append sb cookie)))
+      (when (some? userList)
+        (for-each [^String cookie userList]
+          (if (not found)
+              (do (set! found true) (.append (.append (.append sb COOKIE_HEADER) \:) \space))
+              (.append (.append sb \;) \space))
+          (.append sb cookie)))
+      (when found (.append (.append sb \return) \newline))))
+
+  (method ^:private collectHeaders1 ^void [this ^StringBuilder sb ^HttpHeaders headers
+                                           ^{:tag (BiPredicate String String)} filter]
+    (for-each [^{:tag (Map$Entry String (List String))} entry (.entrySet (.map headers))]
+      (let [key (cast String (.getKey entry))
+            ^{:tag (List String)} values (cast List (.getValue entry))]
+        (for-each [^String value values]
+          (when-not (not (.test filter key value))
+            (.append (.append (.append (.append (.append (.append sb key) \:) \space) value)
+                              \return)
+                     \newline))))))
+
+  (method ^:private getPathAndQuery ^String [this ^URI uri]
+    (let [^:mutable path (.getRawPath uri)
+          ^:mutable query (.getRawQuery uri)]
+      (when (or (nil? path) (.isEmpty path)) (set! path "/"))
+      (when (nil? query) (set! query ""))
+      (if (.isEmpty query) (Utils/encode path) (Utils/encode (java-str path "?" query)))))
+
+  (method ^:private authorityString ^String [this ^InetSocketAddress addr]
+    (java-str (.getHostString addr) ":" (.getPort addr)))
+
+  (method ^:private hostString ^String [this]
+    (let [uri (.uri request)
+          port (.getPort uri)
+          host (.getHost uri)
+          ^boolean defaultPort (cond
+                                 (== port -1) true
+                                 (.secure request) (== port 443)
+                                 :else (== port 80))]
+      (if defaultPort host (java-str host ":" port))))
+
+  (method ^:private requestURI ^String [this]
+    (let [uri (.uri request)
+          method (.method request)]
+      (cond
+        (or (and (nil? (.proxy request)) (not (.equals method "CONNECT"))) (.isWebSocket request))
+          (.getPathAndQuery this uri)
+        (.secure request)
+          (if (.equals (.method request) "CONNECT")
+              (.authorityString this (.authority request))
+              (.getPathAndQuery this uri))
+        (.equals (.method request) "CONNECT") (.authorityString this (.authority request))
+        (nil? uri) (.authorityString this (.authority request))
+        :else (.toString uri))))
+
+  (field ^:private ^boolean finished)
+
+  (method ^:synchronized finished ^boolean [this] finished)
+
+  (method ^:synchronized setFinished ^void [this] (set! finished true))
+
+  (method headers ^{:tag (List ByteBuffer)} [this]
+    (when (and (Log/requests) (some? request)) (Log/logRequest (.toString request)))
+    (let [uriString (.requestURI this)
+          sb (StringBuilder. 64)
+          method (.method request)]
+      (.append (.append (.append (.append sb method) \space) uriString) " HTTP/1.1\r\n")
+      (let [uri (.uri request)]
+        (when (some? uri) (.setHeader systemHeadersBuilder "Host" (.hostString this)))
+        (when (some? requestPublisher)
+          (set! contentLength (.contentLength requestPublisher))
+          (cond
+            (== contentLength 0)
+              (when (or (.equals "POST" method) (.equals "PUT" method))
+                (.setHeader systemHeadersBuilder "Content-Length" "0"))
+            (> contentLength 0)
+              (do
+                (.setHeader systemHeadersBuilder "Content-Length" (Long/toString contentLength))
+                (set! streaming false))
+            :else
+              (do
+                (set! streaming true)
+                (.setHeader systemHeadersBuilder "Transfer-encoding" "chunked"))))
+        (.collectHeaders0 this sb)
+        (let [hs (.toString sb)]
+          (.logHeaders this hs)
+          (let [b (ByteBuffer/wrap (.getBytes hs StandardCharsets/US_ASCII))] (List/of b))))))
+
+  (method continueRequest ^Http1Exchange$Http1RequestBodySubscriber [this]
+    (let [^:mutable ^Http1Exchange$Http1RequestBodySubscriber subscriber nil]
+      (if streaming
+          (do (set! subscriber (StreamSubscriber.)) (.subscribe requestPublisher subscriber))
+          (do
+            (when (== contentLength 0) (return nil))
+            (set! subscriber (FixedContentSubscriber.))
+            (.subscribe requestPublisher subscriber)))
+      subscriber))
+
+  (defclass ^:final StreamSubscriber
+    :extends Http1Exchange$Http1RequestBodySubscriber
+
+    (constructor [this] (super. debug))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (if (.isSubscribed this)
+          (let [^Throwable t (IllegalStateException. "already subscribed")]
+            (.appendToOutgoing http1Exchange t)
+            (.cancel subscription))
+          (.setSubscription this subscription)))
+
+    (method ^:public onNext ^void [this ^ByteBuffer item]
+      (Objects/requireNonNull item)
+      (if (.-complete this)
+          (let [^Throwable t (IllegalStateException. "subscription already completed")]
+            (.appendToOutgoing http1Exchange t))
+          (let [chunklen (.remaining item)]
+            (if (> chunklen 0)
+                (let [^{:tag (ArrayList ByteBuffer)} l (ArrayList. 3)]
+                  (.add l (Http1Request/getHeader chunklen))
+                  (.add l item)
+                  (.add l (ByteBuffer/wrap CRLF))
+                  (.appendToOutgoing http1Exchange l))
+                (do
+                  (when (.on debug) (.log debug "dropping empty buffer, request one more"))
+                  (.request this 1))))))
+
+    (method ^:public currentStateMessage ^String [this]
+      (java-str "streaming request body " (if (.-complete this) "complete" "incomplete")))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (when-not (.-complete this)
+        (.cancelSubscription this)
+        (.appendToOutgoing http1Exchange throwable)))
+
+    (method ^:public onComplete ^void [this]
+      (if (.-complete this)
+          (let [^Throwable t (IllegalStateException. "subscription already completed")]
+            (.appendToOutgoing http1Exchange t))
+          (let [^{:tag (ArrayList ByteBuffer)} l (ArrayList. 2)]
+            (.add l (ByteBuffer/wrap EMPTY_CHUNK_BYTES))
+            (.add l (ByteBuffer/wrap CRLF))
+            (set! (.-complete this) true)
+            (.appendToOutgoing http1Exchange l)
+            (.appendToOutgoing http1Exchange StreamSubscriber/COMPLETED)
+            (.setFinished Http1Request/this)))))
+
+  (defclass ^:final FixedContentSubscriber
+    :extends Http1Exchange$Http1RequestBodySubscriber
+
+    (field ^:private ^:volatile ^long contentWritten)
+
+    (constructor [this] (super. debug))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (if (.isSubscribed this)
+          (let [^Throwable t (IllegalStateException. "already subscribed")]
+            (.appendToOutgoing http1Exchange t)
+            (.cancel subscription))
+          (.setSubscription this subscription)))
+
+    (method ^:public onNext ^void [this ^ByteBuffer item]
+      (when (.on debug) (.log debug "onNext"))
+      (Objects/requireNonNull item)
+      (if (.-complete this)
+          (let [^Throwable t (IllegalStateException. "subscription already completed")]
+            (.appendToOutgoing http1Exchange t))
+          (let [^long writing (.remaining item)
+                written (set! contentWritten (unchecked-add contentWritten writing))]
+            (if (> written contentLength)
+                (do
+                  (.cancelSubscription this)
+                  (let [msg (java-str (.getConnectionFlow connection)
+                                      " ["
+                                      (.getName (Thread/currentThread))
+                                      "] Too many bytes in request body. Expected: "
+                                      contentLength
+                                      ", got: "
+                                      written)]
+                    (.appendToOutgoing http1Exchange (IOException. msg))))
+                (.appendToOutgoing http1Exchange (List/of item))))))
+
+    (method ^:public currentStateMessage ^String [this]
+      (String/format "fixed content-length: %d, bytes sent: %d"
+                     (new Object/1 [contentLength contentWritten])))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (when (.on debug) (.log debug "onError"))
+      (when-not (.-complete this)
+        (.cancelSubscription this)
+        (.appendToOutgoing http1Exchange throwable)))
+
+    (method ^:public onComplete ^void [this]
+      (when (.on debug) (.log debug "onComplete"))
+      (if (.-complete this)
+          (let [^Throwable t (IllegalStateException. "subscription already completed")]
+            (.appendToOutgoing http1Exchange t))
+          (do
+            (set! (.-complete this) true)
+            (let [written contentWritten]
+              (if (> contentLength written)
+                  (do
+                    (.cancelSubscription this)
+                    (let [^Throwable t (IOException.
+                                         (java-str
+                                           (.getConnectionFlow connection)
+                                           " ["
+                                           (.getName (Thread/currentThread))
+                                           "] Too few bytes returned by the publisher ("
+                                           written
+                                           "/"
+                                           contentLength
+                                           ")"))]
+                      (.appendToOutgoing http1Exchange t)))
+                  (.appendToOutgoing http1Exchange FixedContentSubscriber/COMPLETED)))))))
+
+  (field ^:private ^:static ^:final ^byte/1 CRLF
+    (new byte/1 [(unchecked-byte \return) (unchecked-byte \newline)]))
+
+  (field ^:private ^:static ^:final ^byte/1 EMPTY_CHUNK_BYTES
+    (new byte/1 [(unchecked-byte \0) (unchecked-byte \return) (unchecked-byte \newline)]))
+
+  (method ^:private ^:static getHeader ^ByteBuffer [^int size]
+    (let [hexStr (Integer/toHexString size)
+          hexBytes (.getBytes hexStr StandardCharsets/US_ASCII)
+          header (new byte/1 (unchecked-add-int (.length hexStr) 2))]
+      (System/arraycopy hexBytes 0 header 0 (alength hexBytes))
+      (aset header (alength hexBytes) (aget CRLF 0))
+      (aset header (unchecked-add-int (alength hexBytes) 1) (aget CRLF 1))
+      (ByteBuffer/wrap header)))
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this Http1Request/.toString) Utils/DEBUG)))

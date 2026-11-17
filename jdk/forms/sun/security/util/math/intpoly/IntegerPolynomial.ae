@@ -1,0 +1,568 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/math/intpoly/IntegerPolynomial.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util.math.intpoly)
+
+(import '(java.nio ByteBuffer ByteOrder)
+        '(java.util Arrays)
+        '(jdk.internal.vm.annotation ForceInline IntrinsicCandidate)
+        '(sun.security.util.math ImmutableIntegerModuloP
+                                 IntegerFieldModuloP
+                                 IntegerModuloP
+                                 MutableIntegerModuloP
+                                 SmallValue))
+
+(defclass ^:public ^:abstract ^:sealed IntegerPolynomial
+  :implements [IntegerFieldModuloP]
+  :permits [IntegerPolynomial1305
+            IntegerPolynomial25519
+            IntegerPolynomial448
+            IntegerPolynomialP256
+            MontgomeryIntegerPolynomialP256
+            IntegerPolynomialP384
+            IntegerPolynomialP521
+            IntegerPolynomialModBinP
+            P256OrderField
+            P384OrderField
+            P521OrderField
+            Curve25519OrderField
+            Curve448OrderField]
+
+  (field ^:protected ^:static ^:final ^BigInteger TWO (BigInteger/valueOf 2))
+
+  (field ^:protected ^:final ^int numLimbs)
+
+  (field ^:private ^:final ^BigInteger modulus)
+
+  (field ^:protected ^:final ^int bitsPerLimb)
+
+  (field ^:private ^:final ^long/1 posModLimbs)
+
+  (field ^:private ^:final ^int maxAddsMul)
+
+  (field ^:private ^:final ^int maxAddsAdd)
+
+  (method ^:protected ^:abstract reduce ^void [this ^long/1 a])
+
+  (method ^:protected multByInt ^void [this ^long/1 a ^long b]
+    (loop [^int i 0]
+      (when (< i (alength a))
+        (aset a i (unchecked-multiply (aget a i) b))
+        (recur (unchecked-inc-int i))))
+    (.reduce this a))
+
+  (method ^:protected ^:abstract mult ^void [this ^long/1 a ^long/1 b ^long/1 r])
+
+  (method ^:protected ^:abstract square ^void [this ^long/1 a ^long/1 r])
+
+  (constructor [this ^int bitsPerLimb ^int numLimbs ^int maxAddsMul ^BigInteger modulus]
+    (set! (.-numLimbs this) numLimbs)
+    (set! (.-modulus this) modulus)
+    (set! (.-bitsPerLimb this) bitsPerLimb)
+    (set! (.-maxAddsMul this) maxAddsMul)
+    (if (> bitsPerLimb 32)
+        (set! (.-maxAddsAdd this) (unchecked-subtract-int 64 bitsPerLimb))
+        (set! (.-maxAddsAdd this) (unchecked-subtract-int 32 bitsPerLimb)))
+    (set! posModLimbs (.setPosModLimbs this)))
+
+  (method ^:private setPosModLimbs ^long/1 [this]
+    (let [result (new long/1 numLimbs)] (.setLimbsValuePositive this modulus result) result))
+
+  (method ^:protected getNumLimbs ^int [this] numLimbs)
+
+  (method ^:public getMaxAdds ^int [this] maxAddsMul)
+
+  (method ^:public getSize ^BigInteger [this] modulus)
+
+  (method ^:public get0 ^ImmutableElement [this]
+    (ImmutableElement. false))
+
+  (method ^:public get1 ^ImmutableElement [this] (ImmutableElement. true))
+
+  (method ^:public getElement ^ImmutableElement [this ^BigInteger v]
+    (ImmutableElement. v))
+
+  (method ^:public getSmallValue ^SmallValue [this ^int value]
+    (let [maxMag (bit-shift-left-int 1 (unchecked-subtract-int bitsPerLimb 1))]
+      (when (>= (Math/abs value) maxMag)
+        (throw (IllegalArgumentException. (java-str "max magnitude is " maxMag))))
+      (Limb. value)))
+
+  (method ^:protected ^:abstract reduceIn ^void [this ^long/1 c ^long v ^int i])
+
+  (method ^:private reduceHigh ^void [this ^long/1 limbs]
+    (let [extraBits (unchecked-subtract-int 63 (unchecked-multiply-int 2 bitsPerLimb))
+          allowedAdds (bit-shift-left-int 1 extraBits)
+          carryPeriod (unchecked-divide-int allowedAdds numLimbs)
+          ^:mutable ^int reduceCount 0]
+      (loop [^int i (unchecked-subtract-int (alength limbs) 1)]
+        (when (>= i numLimbs)
+          (.reduceIn this limbs (aget limbs i) i)
+          (aset limbs i 0)
+          (set! reduceCount (unchecked-inc-int reduceCount))
+          (if (== (unchecked-remainder-int reduceCount carryPeriod) 0)
+              (do
+                (.carry this limbs 0 i)
+                (.reduceIn this limbs (aget limbs i) i)
+                (aset limbs i 0)
+                (recur (unchecked-dec-int i)))
+              (recur (unchecked-dec-int i)))))))
+
+  (method ^:protected encode ^void [this ^ByteBuffer buf ^int length ^byte highByte ^long/1 result]
+    (let [numHighBits (unchecked-subtract-int 32 (Integer/numberOfLeadingZeros highByte))
+          numBits (unchecked-add-int (unchecked-multiply-int 8 length) numHighBits)
+          requiredLimbs (unchecked-divide-int
+                          (unchecked-subtract-int (unchecked-add-int numBits bitsPerLimb) 1)
+                          bitsPerLimb)]
+      (if (> requiredLimbs numLimbs)
+          (let [temp (new long/1 requiredLimbs)]
+            (.encodeSmall this buf length highByte temp)
+            (.reduceHigh this temp)
+            (System/arraycopy temp 0 result 0 (alength result))
+            (.reduce this result))
+          (do (.encodeSmall this buf length highByte result) (.postEncodeCarry this result)))))
+
+  (method ^:protected encodeSmall ^void [this ^ByteBuffer buf ^int length ^byte highByte
+                                         ^long/1 result]
+    (let [^:mutable ^int limbIndex 0
+          ^:mutable curLimbValue 0
+          ^:mutable ^int bitPos 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (let [^long curV (bit-and-int (.get buf) 0xFF)]
+            (if (>= (unchecked-add-int bitPos 8) bitsPerLimb)
+                (let [bitsThisLimb (unchecked-subtract-int bitsPerLimb bitPos)]
+                  (set! curLimbValue
+                        (unchecked-add curLimbValue
+                                       (bit-shift-left
+                                         (bit-and
+                                           curV
+                                           (bit-shift-right-int
+                                             0xFF
+                                             (unchecked-subtract-int 8 bitsThisLimb)))
+                                         bitPos)))
+                  (aset result limbIndex curLimbValue)
+                  (set! limbIndex (unchecked-inc-int limbIndex))
+                  (set! curLimbValue (bit-shift-right curV bitsThisLimb))
+                  (set! bitPos (unchecked-subtract-int 8 bitsThisLimb))
+                  (recur (unchecked-inc-int i)))
+                (do
+                  (set! curLimbValue (unchecked-add curLimbValue (bit-shift-left curV bitPos)))
+                  (set! bitPos (unchecked-add-int bitPos 8))
+                  (recur (unchecked-inc-int i)))))))
+      (when-not (== highByte 0)
+        (let [^long curV (bit-and-int highByte 0xFF)]
+          (if (>= (unchecked-add-int bitPos 8) bitsPerLimb)
+              (let [bitsThisLimb (unchecked-subtract-int bitsPerLimb bitPos)]
+                (set! curLimbValue
+                      (unchecked-add curLimbValue
+                                     (bit-shift-left
+                                       (bit-and curV
+                                                (bit-shift-right-int
+                                                  0xFF
+                                                  (unchecked-subtract-int 8 bitsThisLimb)))
+                                       bitPos)))
+                (aset result limbIndex curLimbValue)
+                (set! limbIndex (unchecked-inc-int limbIndex))
+                (set! curLimbValue (bit-shift-right curV bitsThisLimb)))
+              (set! curLimbValue (unchecked-add curLimbValue (bit-shift-left curV bitPos))))))
+      (when (< limbIndex (alength result))
+        (aset result limbIndex curLimbValue)
+        (set! limbIndex (unchecked-inc-int limbIndex)))
+      (Arrays/fill result limbIndex (alength result) 0)))
+
+  (method ^:protected encode ^void [this ^byte/1 v ^int offset ^int length ^byte highByte
+                                    ^long/1 result]
+    (let [buf (ByteBuffer/wrap v offset length)]
+      (.order buf ByteOrder/LITTLE_ENDIAN)
+      (.encode this buf length highByte result)))
+
+  (method ^:protected postEncodeCarry ^void [this ^long/1 v]
+    (.reduce this v))
+
+  (method ^:public getElement ^ImmutableElement [this ^byte/1 v ^int offset ^int length
+                                                 ^byte highByte]
+    (let [result (new long/1 numLimbs)]
+      (.encode this v offset length highByte result)
+      (ImmutableElement. result 0)))
+
+  (method ^:protected evaluate ^BigInteger [this ^long/1 limbs]
+    (let [^:mutable result BigInteger/ZERO]
+      (loop [^int i (unchecked-subtract-int (alength limbs) 1)]
+        (when (>= i 0)
+          (set! result (.add (.shiftLeft result bitsPerLimb) (BigInteger/valueOf (aget limbs i))))
+          (recur (unchecked-dec-int i))))
+      (.mod result modulus)))
+
+  (method ^:protected carryValue ^long [this ^long x]
+    (bit-shift-right (unchecked-add x (bit-shift-left-int 1 (unchecked-subtract-int bitsPerLimb 1)))
+                     bitsPerLimb))
+
+  (method ^:protected carry ^void [this ^long/1 limbs ^int start ^int end]
+    (loop [^int i start]
+      (when (< i end)
+        (let [carry (.carryOut this limbs i)]
+          (let [i-1 (unchecked-add-int i 1)]
+            (aset limbs i-1 (unchecked-add (aget limbs i-1) carry)))
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:protected carry ^void [this ^long/1 limbs]
+    (.carry this limbs 0 (unchecked-subtract-int (alength limbs) 1)))
+
+  (method ^:protected carryOut ^long [this ^long/1 limbs ^int index]
+    (let [carry (.carryValue this (aget limbs index))]
+      (aset limbs index (unchecked-subtract (aget limbs index) (bit-shift-left carry bitsPerLimb)))
+      carry))
+
+  (method ^:private setLimbsValue ^void [this ^BigInteger v ^long/1 limbs]
+    (.setLimbsValuePositive this v limbs)
+    (.carry this limbs))
+
+  (method ^:protected setLimbsValuePositive ^void [this ^:mutable ^BigInteger v ^long/1 limbs]
+    (let [limbMask (unchecked-subtract (bit-shift-left 1 bitsPerLimb) 1)]
+      (loop [^int i 0]
+        (when (< i (alength limbs))
+          (aset limbs i (bit-and (.longValue v) limbMask))
+          (set! v (.shiftRight v bitsPerLimb))
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:protected ^:abstract finalCarryReduceLast ^void [this ^long/1 limbs])
+
+  (method ^:protected finalReduce ^void [this ^long/1 limbs]
+    (loop [^int pass 0]
+      (when (< pass 2)
+        (.finalCarryReduceLast this limbs)
+        (let [^:mutable carry 0]
+          (loop [^int i 0]
+            (when (< i (unchecked-subtract-int numLimbs 1))
+              (aset limbs i (unchecked-add (aget limbs i) carry))
+              (set! carry (bit-shift-right (aget limbs i) bitsPerLimb))
+              (aset limbs i (unchecked-subtract (aget limbs i) (bit-shift-left carry bitsPerLimb)))
+              (recur (unchecked-inc-int i))))
+          (let [i-2 (unchecked-subtract-int numLimbs 1)]
+            (aset limbs i-2 (unchecked-add (aget limbs i-2) carry)))
+          (recur (unchecked-inc-int pass)))))
+    (let [^:mutable ^int smallerNonNegative 1
+          smaller (new long/1 numLimbs)]
+      (loop [^int i (unchecked-subtract-int numLimbs 1)]
+        (when (>= i 0)
+          (aset smaller i (unchecked-subtract (aget limbs i) (aget posModLimbs i)))
+          (set! smallerNonNegative
+                (unchecked-multiply-int smallerNonNegative
+                                        (unchecked-add-int
+                                          (unchecked-int (bit-shift-right (aget smaller i) 63))
+                                          1)))
+          (recur (unchecked-dec-int i))))
+      (IntegerPolynomial/conditionalSwap smallerNonNegative limbs smaller)))
+
+  (method ^:protected decode ^void [this ^long/1 v ^byte/1 dst ^int offset ^int length]
+    (let [^:mutable ^int nextLimbIndex 0
+          ^:mutable curLimbValue (aget v
+                                       (let [old-3 nextLimbIndex]
+                                         (set! nextLimbIndex (unchecked-inc-int nextLimbIndex))
+                                         old-3))
+          ^:mutable ^int bitPos 0]
+      (loop [^int i 0]
+        (when (< i length)
+          (let [dstIndex (unchecked-add-int i offset)]
+            (if (>= (unchecked-add-int bitPos 8) bitsPerLimb)
+                (do
+                  (aset dst dstIndex (unchecked-byte curLimbValue))
+                  (set! curLimbValue 0)
+                  (when (< nextLimbIndex (alength v))
+                    (set! curLimbValue (aget v nextLimbIndex))
+                    (set! nextLimbIndex (unchecked-inc-int nextLimbIndex)))
+                  (let [bitsAdded (unchecked-subtract-int bitsPerLimb bitPos)
+                        bitsLeft (unchecked-subtract-int 8 bitsAdded)]
+                    (aset dst
+                          dstIndex
+                          (unchecked-byte
+                            (unchecked-add-int (aget dst dstIndex)
+                                               (unchecked-byte
+                                                 (bit-shift-left
+                                                   (bit-and
+                                                     curLimbValue
+                                                     (bit-shift-right-int 0xFF bitsAdded))
+                                                   bitsAdded)))))
+                    (set! curLimbValue (bit-shift-right curLimbValue bitsLeft))
+                    (set! bitPos bitsLeft)
+                    (recur (unchecked-inc-int i))))
+                (do
+                  (aset dst dstIndex (unchecked-byte curLimbValue))
+                  (set! curLimbValue (bit-shift-right curLimbValue 8))
+                  (set! bitPos (unchecked-add-int bitPos 8))
+                  (recur (unchecked-inc-int i)))))))))
+
+  (method ^:protected addLimbs ^void [this ^long/1 a ^long/1 b ^long/1 dst]
+    (loop [^int i 0]
+      (when (< i (alength dst))
+        (aset dst i (unchecked-add (aget a i) (aget b i)))
+        (recur (unchecked-inc-int i)))))
+
+  (method ^:protected ^:static ^{ForceInline true} ^{IntrinsicCandidate true} conditionalAssign ^void [^int set
+                                                                                                       ^long/1 a
+                                                                                                       ^long/1 b]
+    (let [maskValue (unchecked-negate-int set)]
+      (loop [^int i 0]
+        (when (< i (alength a))
+          (let [dummyLimbs (bit-and maskValue (bit-xor (aget a i) (aget b i)))]
+            (aset a i (bit-xor dummyLimbs (aget a i)))
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:protected ^:static conditionalSwap ^void [^int swap ^long/1 a ^long/1 b]
+    (let [maskValue (unchecked-negate-int swap)]
+      (loop [^int i 0]
+        (when (< i (alength a))
+          (let [dummyLimbs (bit-and maskValue (bit-xor (aget a i) (aget b i)))]
+            (aset a i (bit-xor dummyLimbs (aget a i)))
+            (aset b i (bit-xor dummyLimbs (aget b i)))
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:protected limbsToByteArray ^void [this ^long/1 limbs ^byte/1 result]
+    (let [reducedLimbs (.clone limbs)]
+      (.finalReduce this reducedLimbs)
+      (.decode this reducedLimbs result 0 (alength result))))
+
+  (method ^:protected addLimbsModPowerTwo ^void [this ^long/1 limbs ^long/1 other ^byte/1 result]
+    (let [reducedOther (.clone other)
+          reducedLimbs (.clone limbs)]
+      (.finalReduce this reducedOther)
+      (.finalReduce this reducedLimbs)
+      (.addLimbs this reducedLimbs reducedOther reducedLimbs)
+      (let [^:mutable carry 0]
+        (loop [^int i 0]
+          (when (< i numLimbs)
+            (aset reducedLimbs i (unchecked-add (aget reducedLimbs i) carry))
+            (set! carry (bit-shift-right (aget reducedLimbs i) bitsPerLimb))
+            (aset reducedLimbs
+                  i
+                  (unchecked-subtract (aget reducedLimbs i) (bit-shift-left carry bitsPerLimb)))
+            (recur (unchecked-inc-int i))))
+        (.decode this reducedLimbs result 0 (alength result)))))
+
+  (defclass ^:private ^:abstract Element
+    :implements [IntegerModuloP]
+
+    (field ^:protected ^long/1 limbs)
+
+    (field ^:protected ^int numAdds)
+
+    (constructor ^:public [this ^BigInteger v]
+      (set! limbs (new long/1 numLimbs))
+      (.setValue this v))
+
+    (constructor ^:public [this ^boolean v]
+      (set! (.-limbs this) (new long/1 numLimbs))
+      (aset (.-limbs this) 0 (if v 1 0))
+      (set! (.-numAdds this) 0))
+
+    (constructor ^:private [this ^long/1 limbs ^int numAdds]
+      (set! (.-limbs this) limbs)
+      (set! (.-numAdds this) numAdds))
+
+    (method ^:private setValue ^void [this ^BigInteger v]
+      (.setLimbsValue IntegerPolynomial/this v limbs)
+      (set! (.-numAdds this) 0))
+
+    (method ^:public getField ^IntegerFieldModuloP [this]
+      IntegerPolynomial/this)
+
+    (method ^:public asBigInteger ^BigInteger [this]
+      (.evaluate IntegerPolynomial/this limbs))
+
+    (method ^:public mutable ^MutableElement [this]
+      (MutableElement. ^long/1 (.clone limbs) numAdds))
+
+    (method ^:public add ^ImmutableElement [this ^IntegerModuloP genB]
+      (java-assert (identical? IntegerPolynomial/this (.getField genB)))
+      (let [b (cast Element genB)]
+        (when (> numAdds maxAddsAdd) (.reduce IntegerPolynomial/this limbs) (set! numAdds 0))
+        (when (> (.-numAdds b) maxAddsAdd)
+          (.reduce IntegerPolynomial/this (.-limbs b))
+          (set! (.-numAdds b) 0))
+        (let [newLimbs (new long/1 (alength limbs))]
+          (loop [^int i 0]
+            (when (< i (alength limbs))
+              (aset newLimbs i (unchecked-add (aget limbs i) (aget (.-limbs b) i)))
+              (recur (unchecked-inc-int i))))
+          (let [newNumAdds (unchecked-add-int (Math/max numAdds (.-numAdds b)) 1)]
+            (ImmutableElement. newLimbs newNumAdds)))))
+
+    (method ^:public additiveInverse ^ImmutableElement [this]
+      (let [newLimbs (new long/1 (alength limbs))]
+        (loop [^int i 0]
+          (when (< i (alength limbs))
+            (aset newLimbs i (unchecked-negate (aget limbs i)))
+            (recur (unchecked-inc-int i))))
+        (ImmutableElement. newLimbs (unchecked-add-int numAdds 1))))
+
+    (method ^:protected cloneLow ^long/1 [this ^long/1 limbs]
+      (let [newLimbs (new long/1 numLimbs)] (.copyLow this limbs newLimbs) newLimbs))
+
+    (method ^:protected copyLow ^void [this ^long/1 limbs ^long/1 out]
+      (System/arraycopy limbs 0 out 0 (alength out)))
+
+    (method ^:public multiply ^ImmutableElement [this ^IntegerModuloP genB]
+      (java-assert (identical? IntegerPolynomial/this (.getField genB)))
+      (let [b (cast Element genB)]
+        (when (> numAdds maxAddsMul) (.reduce IntegerPolynomial/this limbs) (set! numAdds 0))
+        (when (> (.-numAdds b) maxAddsMul)
+          (.reduce IntegerPolynomial/this (.-limbs b))
+          (set! (.-numAdds b) 0))
+        (let [newLimbs (new long/1 (alength limbs))]
+          (.mult IntegerPolynomial/this limbs (.-limbs b) newLimbs)
+          (ImmutableElement. newLimbs 0))))
+
+    (method ^:public square ^ImmutableElement [this]
+      (when (> numAdds maxAddsMul) (.reduce IntegerPolynomial/this limbs) (set! numAdds 0))
+      (let [newLimbs (new long/1 (alength limbs))]
+        (.square IntegerPolynomial/this limbs newLimbs)
+        (ImmutableElement. newLimbs 0)))
+
+    (method ^:public addModPowerTwo ^void [this ^IntegerModuloP arg ^byte/1 result]
+      (java-assert (identical? IntegerPolynomial/this (.getField arg)))
+      (let [other (cast Element arg)]
+        (when (> numAdds maxAddsAdd) (.reduce IntegerPolynomial/this limbs) (set! numAdds 0))
+        (when (> (.-numAdds other) maxAddsAdd)
+          (.reduce IntegerPolynomial/this (.-limbs other))
+          (set! (.-numAdds other) 0))
+        (.addLimbsModPowerTwo IntegerPolynomial/this limbs (.-limbs other) result)))
+
+    (method ^:public asByteArray ^void [this ^byte/1 result]
+      (when-not (== numAdds 0) (.reduce IntegerPolynomial/this limbs) (set! numAdds 0))
+      (.limbsToByteArray IntegerPolynomial/this limbs result))
+
+    (method ^:public getLimbs ^long/1 [this] limbs))
+
+  (defclass ^:protected MutableElement
+    :extends Element
+    :implements [MutableIntegerModuloP]
+
+    (constructor ^:protected [this ^long/1 limbs ^int numAdds]
+      (super. limbs numAdds))
+
+    (method ^:public fixed ^ImmutableElement [this]
+      (ImmutableElement. ^long/1 (.clone (.-limbs this)) (.-numAdds this)))
+
+    (method ^:public conditionalSet ^void [this ^IntegerModuloP b ^int set]
+      (java-assert (identical? IntegerPolynomial/this (.getField b)))
+      (let [other (cast Element b)]
+        (IntegerPolynomial/conditionalAssign set (.-limbs this) (.-limbs other))
+        (set! (.-numAdds this) (.-numAdds other))))
+
+    (method ^:public conditionalSwapWith ^void [this ^MutableIntegerModuloP b ^int swap]
+      (java-assert (identical? IntegerPolynomial/this (.getField b)))
+      (let [other (cast MutableElement b)]
+        (IntegerPolynomial/conditionalSwap swap (.-limbs this) (.-limbs other))
+        (let [numAddsTemp (.-numAdds this)]
+          (set! (.-numAdds this) (.-numAdds other))
+          (set! (.-numAdds other) numAddsTemp))))
+
+    (method ^:public setValue ^MutableElement [this ^IntegerModuloP v]
+      (java-assert (identical? IntegerPolynomial/this (.getField v)))
+      (let [other (cast Element v)]
+        (System/arraycopy (.-limbs other) 0 (.-limbs this) 0 (alength (.-limbs other)))
+        (set! (.-numAdds this) (.-numAdds other))
+        this))
+
+    (method ^:public setValue ^MutableElement [this ^byte/1 arr ^int offset ^int length
+                                               ^byte highByte]
+      (.encode IntegerPolynomial/this arr offset length highByte (.-limbs this))
+      (set! (.-numAdds this) 0)
+      this)
+
+    (method ^:public setValue ^MutableElement [this ^ByteBuffer buf ^int length ^byte highByte]
+      (.encode IntegerPolynomial/this buf length highByte (.-limbs this))
+      (set! (.-numAdds this) 0)
+      this)
+
+    (method ^:public setProduct ^MutableElement [this ^IntegerModuloP genB]
+      (java-assert (identical? IntegerPolynomial/this (.getField genB)))
+      (let [b (cast Element genB)]
+        (when (> (.-numAdds this) maxAddsMul)
+          (.reduce IntegerPolynomial/this (.-limbs this))
+          (set! (.-numAdds this) 0))
+        (when (> (.-numAdds b) maxAddsMul)
+          (.reduce IntegerPolynomial/this (.-limbs b))
+          (set! (.-numAdds b) 0))
+        (.mult IntegerPolynomial/this (.-limbs this) (.-limbs b) (.-limbs this))
+        (set! (.-numAdds this) 0)
+        this))
+
+    (method ^:public setProduct ^MutableElement [this ^SmallValue v]
+      (when (> (.-numAdds this) maxAddsMul)
+        (.reduce IntegerPolynomial/this (.-limbs this))
+        (set! (.-numAdds this) 0))
+      (let [value (.-value (cast Limb v))]
+        (.multByInt IntegerPolynomial/this (.-limbs this) value)
+        (set! (.-numAdds this) 0)
+        this))
+
+    (method ^:public setSum ^MutableElement [this ^IntegerModuloP genB]
+      (java-assert (identical? IntegerPolynomial/this (.getField genB)))
+      (let [b (cast Element genB)]
+        (when (> (.-numAdds this) maxAddsAdd)
+          (.reduce IntegerPolynomial/this (.-limbs this))
+          (set! (.-numAdds this) 0))
+        (when (> (.-numAdds b) maxAddsAdd)
+          (.reduce IntegerPolynomial/this (.-limbs b))
+          (set! (.-numAdds b) 0))
+        (loop [^int i 0]
+          (when (< i (alength (.-limbs this)))
+            (aset (.-limbs this) i (unchecked-add (aget (.-limbs this) i) (aget (.-limbs b) i)))
+            (recur (unchecked-inc-int i))))
+        (set! (.-numAdds this) (unchecked-add-int (Math/max (.-numAdds this) (.-numAdds b)) 1))
+        this))
+
+    (method ^:public setDifference ^MutableElement [this ^IntegerModuloP genB]
+      (java-assert (identical? IntegerPolynomial/this (.getField genB)))
+      (let [b (cast Element genB)]
+        (when (> (.-numAdds this) maxAddsAdd)
+          (.reduce IntegerPolynomial/this (.-limbs this))
+          (set! (.-numAdds this) 0))
+        (when (> (.-numAdds b) maxAddsAdd)
+          (.reduce IntegerPolynomial/this (.-limbs b))
+          (set! (.-numAdds b) 0))
+        (loop [^int i 0]
+          (when (< i (alength (.-limbs this)))
+            (aset (.-limbs this)
+                  i
+                  (unchecked-subtract (aget (.-limbs this) i) (aget (.-limbs b) i)))
+            (recur (unchecked-inc-int i))))
+        (set! (.-numAdds this) (unchecked-add-int (Math/max (.-numAdds this) (.-numAdds b)) 1))
+        this))
+
+    (method ^:public setSquare ^MutableElement [this]
+      (when (> (.-numAdds this) maxAddsMul)
+        (.reduce IntegerPolynomial/this (.-limbs this))
+        (set! (.-numAdds this) 0))
+      (.square IntegerPolynomial/this (.-limbs this) (.-limbs this))
+      (set! (.-numAdds this) 0)
+      this)
+
+    (method ^:public setAdditiveInverse ^MutableElement [this]
+      (loop [^int i 0]
+        (when (< i (alength (.-limbs this)))
+          (aset (.-limbs this) i (unchecked-negate (aget (.-limbs this) i)))
+          (recur (unchecked-inc-int i))))
+      (set! (.-numAdds this) (unchecked-inc-int (.-numAdds this)))
+      this))
+
+  (defclass ImmutableElement
+    :extends Element
+    :implements [ImmutableIntegerModuloP]
+
+    (constructor ^:protected [this ^BigInteger v] (super. v))
+
+    (constructor ^:protected [this ^boolean v] (super. v))
+
+    (constructor ^:protected [this ^long/1 limbs ^int numAdds]
+      (super. limbs numAdds))
+
+    (method ^:public fixed ^ImmutableElement [this] this))
+
+  (defclass ^:static Limb
+    :implements [SmallValue]
+
+    (field ^int value)
+
+    (constructor [this ^int value] (set! (.-value this) value))))

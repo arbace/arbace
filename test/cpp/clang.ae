@@ -1,0 +1,271 @@
+;; Part of Arbace. Ports parts of the LLVM Project (llvm-project-23.1.5.src.tar.xz, the pin of test/cpp/corpora.edn, sha256
+;; fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e): clang/lib/Frontend/InitPreprocessor.cpp's
+;; InitializeStandardPredefinedMacros, InitializeCPlusPlusFeatureTestMacros, InitializePredefinedMacros and their helpers
+;; (DefineFloatMacros, DefineTypeSize, DefineTypeMin, DefineFmt, DefineExactWidthIntType, DefineExactWidthIntTypeSize,
+;; DefineLeastWidthIntType, DefineFastIntType), clang/lib/Basic/Targets/X86.cpp's X86TargetInfo::getTargetDefines (the
+;; baseline x86-64 CPU's part), Targets/OSTargets.h's LinuxTargetInfo::getOSDefines and Targets.cpp's DefineStd and
+;; defineCPUMacros, ported by hand on 2026-11-08 (doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"). Their notice:
+;;
+;;   Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+;;   See https://llvm.org/LICENSE.txt for license information.
+;;   SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+;;
+;; LICENSE.md states which license covers what.
+(ns cpp.clang
+  "The clang half of Arbace's C++ target (CP248 (a)): clang 23.1.5's predefined macros of a C++ standard on x86_64-linux-musl,
+  computed as clang's InitPreprocessor computes them, the target's facts from c/target/abi.edn (the integer types' sizes and
+  signedness) and cpp/target/clang.edn (clang's TargetInfo, its defaults, the float formats' tables), and its __has_ answers
+  from clang.edn's tables. test/cpp/predef.ae writes them into cpp/target/host/ beside g++'s (predefined/clang/STD.h,
+  search-clang.txt, has.tsv's fourth column), which the native parser reads (arbace.repr.cpp.native). No compiler is run or
+  read; `bin/repr-cpp target host-oracle` compares them with clang's recorded answers (test/cpp/host/), by hand."
+  (:require [arbace.string :as str])
+  (:import (java.math BigInteger)))
+
+(set! *warn-on-reflection* true)
+
+(defn- int-type [abi t] (get-in abi [:int-types t]))
+(defn- width ^long [abi t] (* 8 (long (:size (int-type abi t)))))
+(defn- signed? [abi t] (:signed (int-type abi t)))
+
+(defn- suffix
+  "TargetInfo::getTypeConstantSuffix: none for the types narrower than int (they promote to int), else U, L, UL, LL, ULL."
+  [abi t]
+  (if (< (width abi t) (width abi :int)) "" (get-in abi [:suffix t])))
+
+(defn- max-val
+  "DefineTypeSize's value: the type's maximum in decimal with its constant suffix."
+  [abi t]
+  (let [w (width abi t)
+        v (.subtract (.shiftLeft BigInteger/ONE (int (if (signed? abi t) (dec w) w))) BigInteger/ONE)]
+    (str v (suffix abi t))))
+
+(defn- fmt [cl abi prefix t]
+  (let [m (get-in cl [:fmt t])]
+    (for [c (if (signed? abi t) "di" "ouxX")] [(str prefix "_FMT" c "__") (str "\"" m c "\"")])))
+
+(defn- type-name [cl t] (get-in cl [:type-names t]))
+
+(defn- size-and-width [abi prefix t] [[(str prefix "_MAX__") (max-val abi t)] [(str prefix "_WIDTH__") (width abi t)]])
+
+(defn- type-min [abi prefix t]
+  [(str prefix "_MIN__") (if (signed? abi t) (str "(-" prefix "_MAX__ - 1)") (str "0" (suffix abi t)))])
+
+(defn- c-macros [abi prefix t]
+  (let [s (suffix abi t)] [[(str prefix "_C_SUFFIX__") s] [(str prefix "_C(c)") (if (seq s) (str "c##" s) "c")]]))
+
+(defn- exact-width
+  "DefineExactWidthIntType and DefineExactWidthIntTypeSize: the 64- and 16-bit types replaced by the target's int64 and int16."
+  [cl abi t]
+  (let [w (width abi t) s (signed? abi t)
+        t (cond (= w 64) (get-in cl [:types (if s :int64 :uint64)]) (= w 16) (get-in cl [:types (if s :int16 :uint16)]) :else t)
+        p (str (if s "__INT" "__UINT") w)]
+    (concat [[(str p "_TYPE__") (type-name cl t)]] (fmt cl abi p t) (c-macros abi p t) [[(str p "_MAX__") (max-val abi t)]])))
+
+(defn- least-fast
+  "DefineLeastWidthIntType and DefineFastIntType (the fast types are the least types, as clang's stdint.h has them)."
+  [cl abi kind w s]
+  (let [t ((get-in cl [:least w]) (if s 0 1))
+        p (str (if s "__INT_" "__UINT_") kind w)]
+    (concat [[(str p "_TYPE__") (type-name cl t)]]
+            (if s (size-and-width abi p t) [[(str p "_MAX__") (max-val abi t)]])
+            (fmt cl abi p t))))
+
+(defn- float-macros
+  "DefineFloatMacros over the format's PickFP row."
+  [cl [prefix fmt-id ext]]
+  (let [{:keys [denorm-min norm-max epsilon min max dig decimal-dig mant-dig min-10-exp max-10-exp min-exp max-exp]}
+        (get-in cl [:float-formats fmt-id])
+        p (str "__" prefix "_")]
+    [[(str p "DENORM_MIN__") (str denorm-min ext)] [(str p "NORM_MAX__") (str norm-max ext)] [(str p "HAS_DENORM__") 1]
+     [(str p "DIG__") dig] [(str p "DECIMAL_DIG__") decimal-dig] [(str p "EPSILON__") (str epsilon ext)]
+     [(str p "HAS_INFINITY__") 1] [(str p "HAS_QUIET_NAN__") 1] [(str p "MANT_DIG__") mant-dig]
+     [(str p "MAX_10_EXP__") max-10-exp] [(str p "MAX_EXP__") max-exp] [(str p "MAX__") (str max ext)]
+     [(str p "MIN_10_EXP__") (str "(" min-10-exp ")")] [(str p "MIN_EXP__") (str "(" min-exp ")")]
+     [(str p "MIN__") (str min ext)]]))
+
+(defn std-year
+  ^long [^String std]
+  (let [y (Long/parseLong (subs std (+ 2 (.indexOf std "++"))))] (cond (= y 3) 1998 (< y 50) (+ 2000 y) :else (+ 1900 y))))
+
+(defn- feature-macros
+  "InitializeCPlusPlusFeatureTestMacros at the standard's year (RTTI, exceptions and thread-safe statics on, the defaults)."
+  [cl y]
+  (let [c11 (>= y 2011) c14 (>= y 2014) c17 (>= y 2017) c20 (>= y 2020) c23 (>= y 2023) c26 (>= y 2026)]
+    (concat
+     [["__cpp_rtti" "199711L"] ["__cpp_exceptions" "199711L"]]
+     (when c11
+       [["__cpp_unicode_characters" "200704L"] ["__cpp_raw_strings" "200710L"] ["__cpp_unicode_literals" "200710L"]
+        ["__cpp_user_defined_literals" "200809L"] ["__cpp_lambdas" "200907L"]
+        ["__cpp_constexpr" (cond c26 "202406L" c23 "202211L" c20 "202002L" c17 "201603L" c14 "201304L" :else "200704")]
+        ["__cpp_constexpr_in_decltype" "201711L"]
+        ["__cpp_range_based_for" (cond c23 "202211L" c17 "201603L" :else "200907")]
+        ["__cpp_static_assert" "202306L"] ["__cpp_decltype" "200707L"] ["__cpp_attributes" "200809L"]
+        ["__cpp_rvalue_references" "200610L"] ["__cpp_variadic_templates" "200704L"] ["__cpp_initializer_lists" "200806L"]
+        ["__cpp_delegating_constructors" "200604L"] ["__cpp_nsdmi" "200809L"] ["__cpp_inheriting_constructors" "201511L"]
+        ["__cpp_ref_qualifiers" "200710L"] ["__cpp_alias_templates" "200704L"]])
+     [["__cpp_threadsafe_static_init" "200806L"]]
+     (when c14
+       [["__cpp_binary_literals" "201304L"] ["__cpp_digit_separators" "201309L"]
+        ["__cpp_init_captures" (if c20 "201803L" "201304L")] ["__cpp_generic_lambdas" (if c20 "201707L" "201304L")]
+        ["__cpp_decltype_auto" "201304L"] ["__cpp_return_type_deduction" "201304L"] ["__cpp_aggregate_nsdmi" "201304L"]
+        ["__cpp_variable_templates" "201304L"]])
+     (when (>= y (long (:sized-deallocation cl))) [["__cpp_sized_deallocation" "201309L"]])
+     (when c17
+       [["__cpp_hex_float" "201603L"] ["__cpp_inline_variables" "201606L"] ["__cpp_noexcept_function_type" "201510L"]
+        ["__cpp_capture_star_this" "201603L"] ["__cpp_if_constexpr" "201606L"] ["__cpp_deduction_guides" "201703L"]
+        ["__cpp_template_auto" "201606L"] ["__cpp_namespace_attributes" "201411L"] ["__cpp_enumerator_attributes" "201411L"]
+        ["__cpp_nested_namespace_definitions" "201411L"] ["__cpp_variadic_using" "201611L"] ["__cpp_aggregate_bases" "201603L"]
+        ["__cpp_structured_bindings" "202411L"] ["__cpp_nontype_template_args" "201411L"] ["__cpp_fold_expressions" "201603L"]
+        ["__cpp_guaranteed_copy_elision" "201606L"] ["__cpp_nontype_template_parameter_auto" "201606L"]])
+     (when (>= y (long (:aligned-allocation cl))) [["__cpp_aligned_new" "201606L"]])
+     [["__cpp_template_template_args" "201611L"]]
+     (when c20
+       [["__cpp_aggregate_paren_init" "201902L"] ["__cpp_concepts" "202002"] ["__cpp_conditional_explicit" "201806L"]
+        ["__cpp_consteval" "202211L"] ["__cpp_constexpr_dynamic_alloc" "201907L"] ["__cpp_constinit" "201907L"]
+        ["__cpp_impl_coroutine" "201902L"] ["__cpp_designated_initializers" "201707L"]
+        ["__cpp_impl_three_way_comparison" "201907L"] ["__cpp_modules" "1"] ["__cpp_using_enum" "201907L"]])
+     (when c23
+       [["__cpp_implicit_move" "202207L"] ["__cpp_size_t_suffix" "202011L"] ["__cpp_if_consteval" "202106L"]
+        ["__cpp_multidimensional_subscript" "202211L"] ["__cpp_auto_cast" "202110L"] ["__cpp_explicit_this_parameter" "202110L"]])
+     (when c11 [["__cpp_static_call_operator" "202207L"]])
+     [["__cpp_named_character_escapes" "202606L"] ["__cpp_placeholder_variables" "202306L"] ["__cpp_pack_indexing" "202311L"]
+      ["__cpp_deleted_function" "202403L"] ["__cpp_variadic_friend" "202403L"] ["__cpp_trivial_relocatability" "202502L"]]
+     (when (>= y (long (:char8 cl))) [["__cpp_char8_t" "202207L"]])
+     [["__cpp_impl_destroying_delete" "201806L"]])))
+
+(defn macros
+  "clang's predefined macros of C++ standard `std` with no options, [NAME VALUE] pairs in clang's order."
+  [abi cl ^String std]
+  (let [y (std-year std) gnu (str/starts-with? std "gnu") ty (:types cl)
+        [ma mi pa] (:version cl) [gma gmi gpa] (:gnuc cl)
+        char8 (>= y (long (:char8 cl)))
+        [lv pie] (:pic cl)
+        std-def (fn [n] (concat (when gnu [[n 1]]) [[(str "__" n) 1] [(str "__" n "__") 1]]))
+        lock-free (fn [p] (concat [[(str p "BOOL_LOCK_FREE") 2] [(str p "CHAR_LOCK_FREE") 2]]
+                                  (when char8 [[(str p "CHAR8_T_LOCK_FREE") 2]])
+                                  (for [n ["CHAR16_T" "CHAR32_T" "WCHAR_T" "SHORT" "INT" "LONG" "LLONG" "POINTER"]]
+                                    [(str p n "_LOCK_FREE") 2])))]
+    (concat
+     ;; InitializeStandardPredefinedMacros
+     [["__STDC__" 1] ["__STDC_HOSTED__" 1] ["__cplusplus" (get (:cplusplus cl) y)]
+      ["__STDCPP_DEFAULT_NEW_ALIGNMENT__" (str (:new-align cl) (suffix abi (:size ty)))] ["__STDCPP_THREADS__" "1"]
+      ["__STDC_UTF_16__" "1"] ["__STDC_UTF_32__" "1"]
+      ["__STDC_EMBED_NOT_FOUND__" "0"] ["__STDC_EMBED_FOUND__" "1"] ["__STDC_EMBED_EMPTY__" "2"]]
+     ;; InitializePredefinedMacros
+     [["__llvm__" 1] ["__clang__" 1] ["__clang_major__" ma] ["__clang_minor__" mi] ["__clang_patchlevel__" pa]
+      ["__clang_version__" (str "\"" ma "." mi "." pa " \"")]
+      ["__GNUC__" gma] ["__GNUC_MINOR__" gmi] ["__GNUC_PATCHLEVEL__" gpa] ["__GXX_ABI_VERSION" (:gxx-abi cl)]
+      ["__GNUG__" gma] ["__GXX_WEAK__" 1]]
+     (for [[n v] [["RELAXED" 0] ["CONSUME" 1] ["ACQUIRE" 2] ["RELEASE" 3] ["ACQ_REL" 4] ["SEQ_CST" 5]]] [(str "__ATOMIC_" n) v])
+     (for [[n v] [["SYSTEM" 0] ["DEVICE" 1] ["WRKGRP" 2] ["WVFRNT" 3] ["SINGLE" 4] ["CLUSTR" 5]]] [(str "__MEMORY_SCOPE_" n) v])
+     (for [[n v] [["WORK_ITEM" 0] ["WORK_GROUP" 1] ["DEVICE" 2] ["ALL_SVM_DEVICES" 3] ["SUB_GROUP" 4]]]
+       [(str "__OPENCL_MEMORY_SCOPE_" n) v])
+     (for [[n v] [["SNAN" "0x0001"] ["QNAN" "0x0002"] ["NEGINF" "0x0004"] ["NEGNORMAL" "0x0008"] ["NEGSUBNORMAL" "0x0010"]
+                  ["NEGZERO" "0x0020"] ["POSZERO" "0x0040"] ["POSSUBNORMAL" "0x0080"] ["POSNORMAL" "0x0100"] ["POSINF" "0x0200"]]]
+       [(str "__FPCLASS_" n) v])
+     [["__PRAGMA_REDEFINE_EXTNAME" "1"] ["__VERSION__" (str "\"" (:vendor cl) " Clang " ma "." mi "." pa "\"")]]
+     (when-not gnu [["__STRICT_ANSI__" 1]])
+     (when (>= y 2011) [["__GXX_EXPERIMENTAL_CXX0X__" 1]])
+     ;; useSignedCharForObjCBool on x86-64 Linux
+     [["__OBJC_BOOL_IS_BOOL" "0"]]
+     (feature-macros cl y)
+     [["__CONSTANT_CFSTRINGS__" 1] ["__EXCEPTIONS" 1] ["__GXX_RTTI" 1] ["__DEPRECATED" 1] ["__private_extern__" "extern"]
+      ["__clang_literal_encoding__" (str "\"" (:literal-encoding cl) "\"")]
+      ["__clang_wide_literal_encoding__" (if (>= (width abi (:wchar ty)) 32) "\"UTF-32\"" "\"UTF-16\"")]
+      ["__ORDER_LITTLE_ENDIAN__" "1234"] ["__ORDER_BIG_ENDIAN__" "4321"] ["__ORDER_PDP_ENDIAN__" "3412"]
+      ["__BYTE_ORDER__" "__ORDER_LITTLE_ENDIAN__"] ["__LITTLE_ENDIAN__" 1]]
+     (when (= :lp64 (:data-model abi)) [["_LP64" 1] ["__LP64__" 1]])
+     [["__CHAR_BIT__" (:char-bit abi)] ["__BOOL_WIDTH__" "1"] ["__SHRT_WIDTH__" (width abi :short)]
+      ["__INT_WIDTH__" (width abi :int)] ["__LONG_WIDTH__" (width abi :long)] ["__LLONG_WIDTH__" (width abi :llong)]
+      ["__BITINT_MAXWIDTH__" (:bitint-maxwidth cl)]
+      ["__SCHAR_MAX__" (max-val abi :schar)] ["__SHRT_MAX__" (max-val abi :short)] ["__INT_MAX__" (max-val abi :int)]
+      ["__LONG_MAX__" (max-val abi :long)] ["__LONG_LONG_MAX__" (max-val abi :llong)]]
+     (size-and-width abi "__WCHAR" (:wchar ty)) [(type-min abi "__WCHAR" (:wchar ty))]
+     (size-and-width abi "__WINT" (:wint ty)) [(type-min abi "__WINT" (:wint ty))]
+     (mapcat (fn [[p k]] (size-and-width abi p (k ty)))
+             [["__INTMAX" :intmax] ["__SIZE" :size] ["__UINTMAX" :uintmax] ["__PTRDIFF" :ptrdiff] ["__INTPTR" :intptr]
+              ["__UINTPTR" :uintptr]])
+     ;; the sizes InitPreprocessor names (__SIZEOF_FLOAT128__ is X86's, below; clang has no __SIZEOF_FLOAT80__)
+     (for [[n s] (:sizeof abi) :when (not (#{"FLOAT80" "FLOAT128"} n))] [(str "__SIZEOF_" n "__") s])
+     [["__INTMAX_TYPE__" (type-name cl (:intmax ty))]] (fmt cl abi "__INTMAX" (:intmax ty)) (c-macros abi "__INTMAX" (:intmax ty))
+     [["__UINTMAX_TYPE__" (type-name cl (:uintmax ty))]] (fmt cl abi "__UINTMAX" (:uintmax ty))
+     (c-macros abi "__UINTMAX" (:uintmax ty))
+     [["__PTRDIFF_TYPE__" (type-name cl (:ptrdiff ty))]] (fmt cl abi "__PTRDIFF" (:ptrdiff ty))
+     [["__INTPTR_TYPE__" (type-name cl (:intptr ty))]] (fmt cl abi "__INTPTR" (:intptr ty))
+     [["__SIZE_TYPE__" (type-name cl (:size ty))]] (fmt cl abi "__SIZE" (:size ty))
+     [["__WCHAR_TYPE__" (type-name cl (:wchar ty))] ["__WINT_TYPE__" (type-name cl (:wint ty))]
+      ["__SIG_ATOMIC_TYPE__" (type-name cl (:sig-atomic ty))]]
+     (size-and-width abi "__SIG_ATOMIC" (:sig-atomic ty)) [(type-min abi "__SIG_ATOMIC" (:sig-atomic ty))]
+     [["__CHAR16_TYPE__" (type-name cl (:char16 ty))] ["__CHAR32_TYPE__" (type-name cl (:char32 ty))]
+      ["__UINTPTR_TYPE__" (type-name cl (:uintptr ty))]]
+     (fmt cl abi "__UINTPTR" (:uintptr ty))
+     (mapcat #(float-macros cl %) (cond->> (:floats cl) (not (:float16 cl)) (remove #(= "FLT16" (first %)))))
+     [["__POINTER_WIDTH__" (* 8 (long (get-in abi [:sizeof "POINTER"])))] ["__BIGGEST_ALIGNMENT__" (:suitable-align cl)]]
+     (when-not (:char-signed abi) [["__CHAR_UNSIGNED__" 1]])
+     (when-not (signed? abi (:wchar ty)) [["__WCHAR_UNSIGNED__" 1]])
+     (when-not (signed? abi (:wint ty)) [["__WINT_UNSIGNED__" 1]])
+     ;; the exact-width types: char, then each wider type whose width is new
+     (mapcat #(exact-width cl abi %) [:schar :short :int :long :uchar :ushort :uint :ulong])
+     (for [w [8 16 32 64] s [true false] m (least-fast cl abi "LEAST" w s)] m)
+     (for [w [8 16 32 64] s [true false] m (least-fast cl abi "FAST" w s)] m)
+     [["__USER_LABEL_PREFIX__" ""]]
+     (when-not (:math-errno cl) [["__NO_MATH_ERRNO__" 1]])
+     [["__FINITE_MATH_ONLY__" "0"] ["__GNUC_GNU_INLINE__" 1] ["__GCC_ATOMIC_TEST_AND_SET_TRUEVAL" "1"]
+      ["__GCC_DESTRUCTIVE_SIZE" (first (:interference cl))] ["__GCC_CONSTRUCTIVE_SIZE" (second (:interference cl))]]
+     (lock-free "__CLANG_ATOMIC_") (lock-free "__GCC_ATOMIC_")
+     [["__NO_INLINE__" 1]]
+     (when lv (concat [["__PIC__" lv] ["__pic__" lv]] (when pie [["__PIE__" lv] ["__pie__" lv]])))
+     [["__FLT_RADIX__" "2"] ["__DECIMAL_DIG__" "__LDBL_DECIMAL_DIG__"]]
+     (when-let [s (:ssp cl)] [s])
+     (when gnu [["__GLIBCXX_TYPE_INT_N_0" "__int128"] ["__GLIBCXX_BITSIZE_INT_N_0" "128"]])
+     [["__ELF__" 1] ["__GCC_HAVE_DWARF2_CFI_ASM" 1]]
+     ;; X86TargetInfo::getTargetDefines (x86_64, the default CPU, the baseline features)
+     [["__GCC_ASM_FLAG_OUTPUTS__" 1] ["__code_model_small__" 1]
+      ["__amd64__" 1] ["__amd64" 1] ["__x86_64" 1] ["__x86_64__" 1]
+      ["__SEG_GS" 1] ["__SEG_FS" 1] ["__seg_gs" "__attribute__((address_space(256)))"]
+      ["__seg_fs" "__attribute__((address_space(257)))"]]
+     (let [c (:cpu cl)] [[(str "__" c) 1] [(str "__" c "__") 1] [(str "__tune_" c "__") 1]])
+     [["__REGISTER_PREFIX__" ""] ["__NO_MATH_INLINES" 1]]
+     (for [n (:features cl)] [n 1])
+     (when (>= (long (:sse-level cl)) 2) [["__SSE2__" 1] ["__SSE2_MATH__" 1]])
+     (when (>= (long (:sse-level cl)) 1) [["__SSE__" 1] ["__SSE_MATH__" 1]])
+     (for [n (:sync-cas cl)] [(str "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_" n) 1])
+     (when (:float128 cl) [["__SIZEOF_FLOAT128__" "16"]])
+     ;; LinuxTargetInfo::getOSDefines
+     (std-def "unix") (std-def "linux") [["__gnu_linux__" 1] ["_GNU_SOURCE" 1]]
+     (when (:float128 cl) [["__FLOAT128__" 1]]))))
+
+(defn- line [[n v]] (str "#define " n " " v))
+
+(defn predefined
+  "The text of predefined/clang/STD.h: clang -dM -E's macros sorted in byte order, then __DATE__ and __TIME__ (as the
+  recorder appends them, `date-lines`). A macro clang defines twice keeps its last definition."
+  [abi cl std date-lines]
+  (let [m (reduce (fn [m [n v]] (assoc m n v)) {} (macros abi cl std))]
+    (str (str/join "\n" (concat (sort (map line m)) date-lines)) "\n")))
+
+;; ---------------------------------------------------------------------------------------------
+;; the __has_ answers
+
+(defn- unscope [^String nm] (let [i (.indexOf nm "::")] (if (neg? i) [nil nm] [(subs nm 0 i) (subs nm (+ i 2))])))
+(defn- bare [^String n] (if (and (> (count n) 4) (str/starts-with? n "__") (str/ends-with? n "__")) (subs n 2 (- (count n) 2)) n))
+
+(defn answer
+  "clang's answer to `op(nm)` (clang.edn's tables; the standard attributes' values as clang -E prints them, with L)."
+  [cl ^String op ^String nm]
+  (let [stda (:std-attributes cl) gnu (set (:gnu-attributes cl)) clang (set (:clang-attributes cl))
+        [scope n] (unscope nm) n (bare n) scope (when scope (bare scope))]
+    (case op
+      "__has_cpp_attribute" (cond (nil? scope) (if-let [v (stda n)] (str v "L") "0")
+                                  (= scope "gnu") (if (gnu n) "1" "0")
+                                  (= scope "clang") (if (clang n) "1" "0")
+                                  :else "0")
+      "__has_attribute" (cond (nil? scope) (if (gnu n) "1" "0")
+                              (= scope "gnu") (if (gnu n) "1" "0")
+                              (= scope "clang") (if (clang n) "1" "0")
+                              :else "0")
+      "__has_builtin" (cond ((set (:builtins cl)) nm) "1"
+                            ((:builtin-values cl) nm) (str ((:builtin-values cl) nm) "L")
+                            :else "0")
+      "__has_feature" (if ((set (:features-on cl)) nm) "1" "0")
+      "0")))

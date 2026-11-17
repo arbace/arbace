@@ -1,0 +1,434 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/DSA.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.security AlgorithmParameters
+                        DigestException
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        InvalidParameterException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        PublicKey
+                        SignatureException
+                        SignatureSpi)
+        '(java.security.interfaces DSAParams)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(java.util Arrays)
+        '(sun.security.jca JCAUtil)
+        '(sun.security.util Debug DerInputStream DerOutputStream DerValue))
+
+(defclass ^:abstract DSA
+  :extends SignatureSpi
+
+  (field ^:private ^:static ^:final ^boolean debug false)
+
+  (field ^:private ^:static ^:final ^int BLINDING_BITS 7)
+
+  (field ^:private ^:static ^:final ^BigInteger BLINDING_CONSTANT
+    (BigInteger/valueOf (bit-shift-left-int 1 BLINDING_BITS)))
+
+  (field ^:private ^DSAParams params)
+
+  (field ^:private ^BigInteger presetP)
+
+  (field ^:private ^BigInteger presetQ)
+
+  (field ^:private ^BigInteger presetG)
+
+  (field ^:private ^BigInteger presetY)
+
+  (field ^:private ^BigInteger presetX)
+
+  (field ^:private ^java.security.SecureRandom signingRandom)
+
+  (field ^:private ^:final ^MessageDigest md)
+
+  (field ^:private ^:final ^boolean p1363Format)
+
+  (constructor [this ^MessageDigest md] (this. md false))
+
+  (constructor [this ^MessageDigest md ^boolean p1363Format]
+    (super.)
+    (set! (.-md this) md)
+    (set! (.-p1363Format this) p1363Format))
+
+  (method ^:private ^:static checkKey :throws [InvalidKeyException] ^void [^DSAParams params
+                                                                           ^int digestLen
+                                                                           ^String mdAlgo]
+    (let [valueN (.bitLength (.getQ params))]
+      (when (> valueN digestLen)
+        (throw (InvalidKeyException.
+                 (java-str "The security strength of "
+                           mdAlgo
+                           " digest algorithm is not sufficient for this key size"))))))
+
+  (method ^:protected engineInitSign :throws [InvalidKeyException] ^void [this
+                                                                          ^PrivateKey privateKey]
+    (if-instance [^java.security.interfaces.DSAPrivateKey priv privateKey]
+      (let [params (.getParams priv)]
+        (when (nil? params) (throw (InvalidKeyException. "DSA private key lacks parameters")))
+        (when-not (.equals "NullDigest20" (.getAlgorithm md))
+          (DSA/checkKey params (unchecked-multiply-int (.getDigestLength md) 8) (.getAlgorithm md)))
+        (set! (.-signingRandom this) nil)
+        (set! (.-params this) params)
+        (set! (.-presetX this) (.getX priv))
+        (set! (.-presetY this) nil)
+        (set! (.-presetP this) (.getP params))
+        (set! (.-presetQ this) (.getQ params))
+        (set! (.-presetG this) (.getG params))
+        (.reset (.-md this)))
+      (throw (InvalidKeyException. (java-str "not a DSA private key: " privateKey)))))
+
+  (method ^:protected engineInitVerify :throws [InvalidKeyException] ^void [this
+                                                                            ^PublicKey publicKey]
+    (if-instance [^java.security.interfaces.DSAPublicKey pub publicKey]
+      (let [params (.getParams pub)]
+        (when (nil? params) (throw (InvalidKeyException. "DSA public key lacks parameters")))
+        (set! (.-params this) params)
+        (set! (.-presetY this) (.getY pub))
+        (set! (.-presetX this) nil)
+        (set! (.-presetP this) (.getP params))
+        (set! (.-presetQ this) (.getQ params))
+        (set! (.-presetG this) (.getG params))
+        (.reset (.-md this)))
+      (throw (InvalidKeyException. (java-str "not a DSA public key: " publicKey)))))
+
+  (method ^:protected engineUpdate ^void [this ^byte b] (.update md b))
+
+  (method ^:protected engineUpdate ^void [this ^byte/1 data ^int off ^int len]
+    (.update md data off len))
+
+  (method ^:protected engineUpdate ^void [this ^ByteBuffer b]
+    (.update md b))
+
+  (method ^:protected engineSign :throws [SignatureException] ^byte/1 [this]
+    (let [k (.generateK this presetQ)
+          r (.generateR this presetP presetQ presetG k)
+          s (.generateS this presetX presetQ r k)]
+      (if p1363Format
+          (let [rBytes (.toByteArray r)
+                sBytes (.toByteArray s)
+                size (unchecked-divide-int (.bitLength presetQ) 8)
+                outseq (new byte/1 (unchecked-multiply-int size 2))
+                rLength (alength rBytes)
+                sLength (alength sBytes)
+                ^:mutable ^int i 0]
+            (set! i rLength)
+            (while (and (> i 0) (== (aget rBytes (unchecked-subtract-int rLength i)) 0))
+              (set! i (unchecked-dec-int i)))
+            (let [^:mutable ^int j 0]
+              (set! j sLength)
+              (while (and (> j 0) (== (aget sBytes (unchecked-subtract-int sLength j)) 0))
+                (set! j (unchecked-dec-int j)))
+              (System/arraycopy rBytes
+                                (unchecked-subtract-int rLength i)
+                                outseq
+                                (unchecked-subtract-int size i)
+                                i)
+              (System/arraycopy sBytes
+                                (unchecked-subtract-int sLength j)
+                                outseq
+                                (unchecked-subtract-int (unchecked-multiply-int size 2) j)
+                                j)
+              outseq))
+          (let [outseq (DerOutputStream. 100)]
+            (.putInteger outseq r)
+            (.putInteger outseq s)
+            (let [result (DerValue. DerValue/tag_Sequence (.toByteArray outseq))]
+              (.toByteArray result))))))
+
+  (method ^:protected engineVerify :throws [SignatureException] ^boolean [this ^byte/1 signature]
+    (.engineVerify this signature 0 (alength signature)))
+
+  (method ^:protected engineVerify :throws [SignatureException] ^boolean [this ^byte/1 signature
+                                                                          ^int offset ^int length]
+    (let [^:mutable ^BigInteger r nil
+          ^:mutable ^BigInteger s nil]
+      (if p1363Format
+          (do
+            (when (== (bit-and-int length 1) 1)
+              (throw (SignatureException. "invalid signature format")))
+            (let [mid (unchecked-divide-int length 2)]
+              (set! r (BigInteger. (Arrays/copyOfRange signature 0 mid)))
+              (set! s (BigInteger. (Arrays/copyOfRange signature mid length)))))
+          (try
+            (let [in (DerInputStream. signature offset length false)
+                  values (.getSequence in 2)]
+              (when (or (not (== (alength values) 2)) (not (== (.available in) 0)))
+                (throw (IOException. "Invalid encoding for signature")))
+              (set! r (.getBigInteger (aget values 0)))
+              (set! s (.getBigInteger (aget values 1))))
+            (catch IOException e (throw (SignatureException. "Invalid encoding for signature" e)))))
+      (when (< (.signum r) 0) (set! r (BigInteger. 1 (.toByteArray r))))
+      (when (< (.signum s) 0) (set! s (BigInteger. 1 (.toByteArray s))))
+      (if (and (and (and (== (.compareTo r presetQ) -1) (== (.compareTo s presetQ) -1))
+                    (> (.signum r) 0))
+               (> (.signum s) 0))
+          (let [w (.generateW this presetP presetQ presetG s)
+                v (.generateV this presetY presetP presetQ presetG w r)]
+            (.equals v r))
+          (throw (SignatureException. "invalid signature: out of range values")))))
+
+  (method ^:protected ^{Deprecated true} engineSetParameter ^void [this ^String key param]
+    (throw (InvalidParameterException. "No parameter accepted")))
+
+  (method ^:protected engineSetParameter :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                             ^AlgorithmParameterSpec params]
+    (when (some? params) (throw (InvalidAlgorithmParameterException. "No parameter accepted"))))
+
+  (method ^:protected ^{Deprecated true} engineGetParameter [this ^String key]
+    nil)
+
+  (method ^:protected engineGetParameters ^AlgorithmParameters [this] nil)
+
+  (method ^:private generateR ^BigInteger [this ^BigInteger p ^BigInteger q ^BigInteger g
+                                           ^:mutable ^BigInteger k]
+    (let [random (.getSigningRandom this)
+          ^:mutable blindingValue (BigInteger. BLINDING_BITS random)]
+      (set! blindingValue (.add blindingValue BLINDING_CONSTANT))
+      (set! k (.add k (.multiply q blindingValue)))
+      (let [temp (.modPow g k p)] (.mod temp q))))
+
+  (method ^:private generateS :throws [SignatureException] ^BigInteger [this ^BigInteger x
+                                                                        ^BigInteger q ^BigInteger r
+                                                                        ^BigInteger k]
+    (let [^:mutable ^byte/1 s2 nil]
+      (try
+        (set! s2 (.digest md))
+        (catch RuntimeException re (throw (SignatureException. (.getMessage re)))))
+      (let [nBytes (unchecked-divide-int (.bitLength q) 8)]
+        (when (< nBytes (alength s2)) (set! s2 (Arrays/copyOfRange s2 0 nBytes)))
+        (let [z (BigInteger. 1 s2)
+              k1 (.modInverse k q)]
+          (.mod (.multiply (.add (.multiply x r) z) k1) q)))))
+
+  (method ^:private generateW ^BigInteger [this ^BigInteger p ^BigInteger q ^BigInteger g
+                                           ^BigInteger s]
+    (.modInverse s q))
+
+  (method ^:private generateV :throws [SignatureException] ^BigInteger [this ^BigInteger y
+                                                                        ^BigInteger p ^BigInteger q
+                                                                        ^BigInteger g ^BigInteger w
+                                                                        ^BigInteger r]
+    (let [^:mutable ^byte/1 s2 nil]
+      (try
+        (set! s2 (.digest md))
+        (catch RuntimeException re (throw (SignatureException. (.getMessage re)))))
+      (let [nBytes (unchecked-divide-int (.bitLength q) 8)]
+        (when (< nBytes (alength s2)) (set! s2 (Arrays/copyOfRange s2 0 nBytes)))
+        (let [z (BigInteger. 1 s2)
+              u1 (.mod (.multiply z w) q)
+              u2 (.mod (.multiply r w) q)
+              t1 (.modPow g u1 p)
+              t2 (.modPow y u2 p)
+              t3 (.multiply t1 t2)
+              t5 (.mod t3 p)]
+          (.mod t5 q)))))
+
+  (method ^:protected generateK ^BigInteger [this ^BigInteger q]
+    (let [random (.getSigningRandom this)
+          kValue (new byte/1
+                      (unchecked-add-int
+                        (unchecked-divide-int (unchecked-add-int (.bitLength q) 7) 8)
+                        8))]
+      (.nextBytes random kValue)
+      (.add (.mod (BigInteger. 1 kValue) (.subtract q BigInteger/ONE)) BigInteger/ONE)))
+
+  (method ^:protected getSigningRandom ^java.security.SecureRandom [this]
+    (when (nil? signingRandom)
+      (if (some? (.-appRandom this))
+          (set! signingRandom (.-appRandom this))
+          (set! signingRandom (JCAUtil/getSecureRandom))))
+    signingRandom)
+
+  (method ^:public toString ^String [this]
+    (let [^:mutable printable "DSA Signature"]
+      (if (and (and (some? presetP) (some? presetQ)) (some? presetG))
+          (do
+            (set! printable (java-str printable (java-str "\n\tp: " (Debug/toHexString presetP))))
+            (set! printable (java-str printable (java-str "\n\tq: " (Debug/toHexString presetQ))))
+            (set! printable (java-str printable (java-str "\n\tg: " (Debug/toHexString presetG)))))
+          (set! printable (java-str printable "\n\t P, Q or G not initialized.")))
+      (when (some? presetY)
+        (set! printable (java-str printable (java-str "\n\ty: " (Debug/toHexString presetY)))))
+      (when (and (nil? presetY) (nil? presetX))
+        (set! printable (java-str printable "\n\tUNINITIALIZED")))
+      printable))
+
+  (defclass ^:public ^:static ^:final SHA3_224withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA3-224"))))
+
+  (defclass ^:public ^:static ^:final SHA3_224withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA3-224") true)))
+
+  (defclass ^:public ^:static ^:final SHA3_256withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA3-256"))))
+
+  (defclass ^:public ^:static ^:final SHA3_256withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA3-256") true)))
+
+  (defclass ^:public ^:static ^:final SHA3_384withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA3-384"))))
+
+  (defclass ^:public ^:static ^:final SHA3_384withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA3-384") true)))
+
+  (defclass ^:public ^:static ^:final SHA3_512withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA3-512"))))
+
+  (defclass ^:public ^:static ^:final SHA3_512withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA3-512") true)))
+
+  (defclass ^:public ^:static ^:final SHA224withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-224"))))
+
+  (defclass ^:public ^:static ^:final SHA224withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-224") true)))
+
+  (defclass ^:public ^:static ^:final SHA256withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-256"))))
+
+  (defclass ^:public ^:static ^:final SHA256withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-256") true)))
+
+  (defclass ^:public ^:static ^:final SHA384withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-384"))))
+
+  (defclass ^:public ^:static ^:final SHA384withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-384") true)))
+
+  (defclass ^:public ^:static ^:final SHA512withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-512"))))
+
+  (defclass ^:public ^:static ^:final SHA512withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-512") true)))
+
+  (defclass ^:public ^:static ^:final SHA1withDSA
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-1"))))
+
+  (defclass ^:public ^:static ^:final SHA1withDSAinP1363Format
+    :extends DSA
+
+    (constructor :throws [NoSuchAlgorithmException] ^:public [this]
+      (super. (MessageDigest/getInstance "SHA-1") true)))
+
+  (defclass ^:static Raw
+    :extends DSA
+
+    (defclass ^:public ^:static ^:final NullDigest20
+      :extends MessageDigest
+
+      (field ^:private ^:final ^byte/1 digestBuffer (new byte/1 20))
+
+      (field ^:private ^int ofs 0)
+
+      (constructor ^:protected [this] (super. "NullDigest20"))
+
+      (method ^:protected engineUpdate ^void [this ^byte input]
+        (if (== ofs (alength digestBuffer))
+            (set! ofs Integer/MAX_VALUE)
+            (aset digestBuffer (let [old-1 ofs] (set! ofs (unchecked-inc-int ofs)) old-1) input)))
+
+      (method ^:protected engineUpdate ^void [this ^byte/1 input ^int offset ^int len]
+        (if (> len (unchecked-subtract-int (alength digestBuffer) ofs))
+            (set! ofs Integer/MAX_VALUE)
+            (do
+              (System/arraycopy input offset digestBuffer ofs len)
+              (set! ofs (unchecked-add-int ofs len)))))
+
+      (method ^:protected engineUpdate ^void [this ^ByteBuffer input]
+        (let [inputLen (.remaining input)]
+          (if (> inputLen (unchecked-subtract-int (alength digestBuffer) ofs))
+              (set! ofs Integer/MAX_VALUE)
+              (do
+                (.get input digestBuffer ofs inputLen)
+                (set! ofs (unchecked-add-int ofs inputLen))))))
+
+      (method ^:protected engineDigest :throws [RuntimeException] ^byte/1 [this]
+        (when-not (== ofs (alength digestBuffer))
+          (throw (RuntimeException. "Data for RawDSA must be exactly 20 bytes long")))
+        (.reset this)
+        digestBuffer)
+
+      (method ^:protected engineDigest :throws [DigestException] ^int [this ^byte/1 buf ^int offset
+                                                                       ^int len]
+        (when-not (== ofs (alength digestBuffer))
+          (throw (DigestException. "Data for RawDSA must be exactly 20 bytes long")))
+        (when (< len (alength digestBuffer))
+          (throw (DigestException. "Output buffer too small; must be at least 20 bytes")))
+        (System/arraycopy digestBuffer 0 buf offset (alength digestBuffer))
+        (.reset this)
+        (alength digestBuffer))
+
+      (method ^:protected engineReset ^void [this] (set! ofs 0))
+
+      (method ^:protected engineGetDigestLength ^int [this]
+        (alength digestBuffer)))
+
+    (constructor ^:private [this ^boolean p1363Format]
+      (super. (NullDigest20.) p1363Format)))
+
+  (defclass ^:public ^:static ^:final RawDSA
+    :extends Raw
+
+    (constructor ^:public [this] (super. false)))
+
+  (defclass ^:public ^:static ^:final RawDSAinP1363Format
+    :extends Raw
+
+    (constructor ^:public [this] (super. true))))

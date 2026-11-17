@@ -1,0 +1,43 @@
+;; Go-build variant of com.sun.crypto.provider.PBKDF2KeyImpl (J2G-SPEC §4.6;
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, F1): read by j2g only. The key's cleaner is the zeroing
+;; action itself, a Runnable, run by clear, not a Cleaner's Cleanable registered with the key
+;; (java.lang.ref.Cleaner and jdk.internal.ref.CleanerFactory are not in the Go build: F17,
+;; references); as jdk26u's ZipFile in JC6b. A key's bytes are zeroed when it is destroyed or
+;; cleared, not when it becomes unreachable. The replacing members are jdk26u's (baf63fb; Copyright
+;; (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md) as repr/java
+;; converts them, with the change named; the rest Copyright (c) the Arbace authors; Eclipse Public
+;; License 1.0.
+(in-ns 'com.sun.crypto.provider)
+
+(j2g/variant PBKDF2KeyImpl
+  (field ^:private ^:final ^:transient ^Runnable cleaner)
+
+  (constructor :throws [InvalidKeySpecException] [this ^PBEKeySpec keySpec ^String prfAlgo]
+    (set! (.-passwd this) (.getPassword keySpec))
+    (let [passwdBytes (PBEUtil/encodePassword (.-passwd this))
+          ^:mutable ^byte/1 key nil]
+      (try
+        (set! (.-salt this) (.getSalt keySpec))
+        (when (nil? salt) (throw (InvalidKeySpecException. "Salt not found")))
+        (set! (.-iterCount this) (.getIterationCount keySpec))
+        (cond
+          (== iterCount 0) (throw (InvalidKeySpecException. "Iteration count not found"))
+          (< iterCount 0) (throw (InvalidKeySpecException. "Iteration count is negative")))
+        (let [keyLength (.getKeyLength keySpec)]
+          (cond
+            (== keyLength 0) (throw (InvalidKeySpecException. "Key length not found"))
+            (< keyLength 0) (throw (InvalidKeySpecException. "Key length is negative")))
+          (set! (.-prf this) (Mac/getInstance prfAlgo (SunJCE/getInstance)))
+          (set! key (PBKDF2KeyImpl/deriveKey prf passwdBytes salt iterCount keyLength)))
+        (catch NoSuchAlgorithmException nsae (throw (InvalidKeySpecException. nsae)))
+        (finally
+          (Arrays/fill passwdBytes (unchecked-byte 0x00))
+          (when (nil? key) (Arrays/fill passwd \u0000))))
+      (let [k (set! (.-key this) key)
+            p (.-passwd this)]
+        (set! cleaner
+              (lambda Runnable ^void []
+                           (Arrays/fill k (unchecked-byte 0x00))
+                           (Arrays/fill p \u0000))))))
+
+  (method ^:public clear ^void [this] (.run cleaner)))

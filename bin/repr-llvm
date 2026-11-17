@@ -1,36 +1,796 @@
 #!/bin/bash
-# repr/llvm, LLVM IR's bridge (doc/cpp/LLVM.md; doc/cpp/CPP-SURVEY.md §5.2, "As built: CX6"): LLVM IR text as LLVM forms
-# and back, arbace.repr.llvm on the tools' host (evaluated from the checkout). The judge is clang as the assembler.
+# repr/llvm, LLVM IR's bridge (doc/llvm/SPEC.md; doc/cpp/CPP-SURVEY.md §5.2, "As built: CX6"): LLVM IR text as LLVM forms
+# and back, arbace.repr.llvm on the tools' host (evaluated from the checkout).
 #
-#   bin/repr-llvm read FILE.ll [-o OUT.ae]     FILE's LLVM forms as .ae text
-#   bin/repr-llvm print FILE.ae [-o OUT.ll]    the forms printed as IR
+#   bin/repr-llvm pins check   (GT9; bin/gate --pins) the host's LLVM against its pins, no fetch: the tools' version (test/cpp/
+#                              corpora.edn's :alpine-clang23), the installed packages, test/llvm's probe list
+#
+# The judges (doc/llvm/LLVM-CROP-SURVEY.md, "As built: LL9a"; the user's decision of 2026-11-07): by default a test's own
+# verdict wherever it has one, so no LLVM tool runs at the check and none of its records is read for such a test: the round
+# trip's forms read again equal and the print taken by Arbace's verifier as its original is; mode :full's text printed back
+# byte for byte; llvm/test's RUN lines (a `not llvm-as`/`not opt` test rejected, with the `error:` its CHECK lines declare; a
+# test with RUN lines and no `not` accepted). A test without one (the mutants, the probes, the hand-written modules, a split
+# section, a `not opt -passes=...` test) is judged against the toolchain's record (test/llvm/ref-opt23.edn). REPR_LLVM_JUDGE:
+#   own      the default, as above
+#   record   every module against the records alone: opt's (ref-opt23.edn), clang -c's objects and llvm-as's bitcode
+#            (ref-rt23.edn); also when REPR_LLVM_REF or REPR_LLVM_RTREF names a record
+#   live     the host's LLVM 23 itself (clang, llvm-as, opt; also REPR_LLVM_LIVE=1): the oracle tier, by hand at a tag
+#
+#   bin/repr-llvm read [--full] FILE.ll [-o OUT.ae]   FILE's LLVM forms as .ae text; --full: mode :full, the text's
+#                                              layer kept in the .ae's last line (comments, blank lines, spacing, spellings)
+#   bin/repr-llvm print [--full] FILE.ae [-o OUT.ll]  the forms printed as IR; --full: with the layer, the original text
+#                                              byte for byte
+#   bin/repr-llvm verify FILE.ll|FILE.ae...    LLVM 23's LLParser checks and Verifier rules over the forms
+#                                              (arbace.repr.llvm.verify): what `opt -passes=verify` prints to stderr for
+#                                              each file, line for line (LLParser's error with file:line:col, the source
+#                                              line and its caret; the Verifier's every message with the values it
+#                                              prints; the debug info's warnings), or nothing; exit 1 when one is invalid
+#   bin/repr-llvm verify-check LIST WORK       verify on each NAME<tab>PATH.ll of LIST against the module's own verdict (WORK/own.tsv:
+#                                              its RUN lines' verdict and declared `error:`), else opt -passes=verify's (the record, or
+#                                              REPR_LLVM_OPT, default /usr/lib/llvm23/bin/opt, live): the same verdict and, for a
+#                                              rejection, the same first message (WORK/verify.tsv), and opt's whole stderr (WORK/full.tsv;
+#                                              `own` for a module judged by its own verdict; verify's in WORK/arb/NAME.err); REPR_LLVM_KNOWN
+#                                              names a file of the known differences, counted apart; the negative controls of
+#                                              test/repr/llvm/verify-controls.txt (REPR_LLVM_VERIFY_CONTROLS) must fail; exit 1 on a
+#                                              different verdict or a control that passes
+#   bin/repr-llvm mutants LIST OUT [N [FIRST [FAMILY]]] N mutants (default 300; the FIRST-th on, default 0) of LIST's
+#                                              modules, each one change meant to be invalid, into OUT/, OUT/mutants.list;
+#                                              FAMILY: base, attrs, cc, musttail, bundles, ... (arbace.repr.llvm.mutate/families)
+#   bin/repr-llvm records-verify [--sample N]  (ORS30 (a), the oracle tier) every N-th module of ref-opt23.edn and ref-rt23.edn recorded
+#                                              again by opt, clang and llvm-as and compared with the records (another LLVM: moved, reported);
+#                                              the pack rt's mutants' own verdicts against opt's record (mutants-oracle, LLS35 (a))
+#   bin/repr-llvm mutants-oracle LIST WORK     (LLS33 (b), the oracle tier) each mutant's own verdict (its `; MUTANT:` line) against opt's:
+#                                              the verdict, and the message a fragment of opt's first message (record) or stderr (live)
+#   bin/repr-llvm heldout-check [WORK]        (LLS45 (a), llvm-full's part heldout) 900 mutants made afresh (test/llvm/heldout-bases.txt,
+#                                              seed REPR_LLVM_HELDOUT_SEED, default 1200000; 300 of each of intrinsics, metadata, debug), each
+#                                              own verdict met by Arbace's verifier (verify-check in own mode, no opt; the unknowns counted),
+#                                              the controls test/repr/llvm/heldout-controls.txt failing; exit 1 otherwise
+#                                              and floors: n = 900 (REPR_LLVM_HELDOUT_N) and at least 880 own verdicts (REPR_LLVM_HELDOUT_MIN_OWN; 886 recorded)
+#   bin/repr-llvm rt-lists DIR                 the pack rt's families' lists (DIR/{roundtrip-rt,verify-rt,verify-rt-heldout}.list), absolute
+#   bin/repr-llvm record-opt LIST...         opt -passes=verify's verdicts of the lists' modules recorded (test/llvm/ref-opt23.edn: digests,
+#                                              first message, stderr's digest with the paths normalized): no LLVM tool at the check
+#   bin/repr-llvm record-rt LIST WORK          the round trip with the tools, its judges recorded (test/llvm/ref-rt23.edn: the original's and the
+#                                              print's digests, the object's and the bitcode's verdicts): the oracle tier's reference
 #   bin/repr-llvm roundtrip LIST WORK          each NAME<tab>PATH.ll of LIST: read, the .ae text read back equal, printed,
-#                                              read again equal (WORK/forms/NAME.ae, WORK/print/NAME.ll), and clang -c of the
-#                                              print equal byte for byte to clang -c of the original (WORK/rt.tsv, WORK/objects.tsv);
-#                                              exit 1 unless every file's forms are equal and its objects the same
+#                                              read again equal (WORK/forms/NAME.ae, WORK/print/NAME.ll), and the print's verdict by
+#                                              Arbace's verifier the original's (WORK/verifier.tsv); WORK/rt.tsv. With REPR_LLVM_JUDGE
+#                                              record or live also clang -c of the print against clang -c of the original, for the
+#                                              module's own target triple (COFF without its time stamp), byte for byte (WORK/objects.tsv),
+#                                              and llvm-as's bitcode of both, module summaries included (WORK/bitcode.tsv; REPR_LLVM_AS,
+#                                              default /usr/lib/llvm23/bin/llvm-as); a judge is `same`, `differs` (the print's output
+#                                              differs or the print does not build where the original does), `none` (the original
+#                                              does not build: a target the back end does not take) or `unjudged` (record: not the
+#                                              recorded print). Exit 1 unless every file's forms are equal, no judge differs, each file
+#                                              has one judge `same`, and the negative controls (test/repr/llvm/roundtrip-controls.txt) fail
+#   bin/repr-llvm check FAMILY [--essential] [--record] [WORK]
+#                                              a check family run over its lists and judged against its record (test/llvm/check-*.edn,
+#                                              bin/reap's): every recorded :pass passes, every module of the run is recorded, the
+#                                              family's negative controls fail (exit 1 otherwise); --essential: the family's essential
+#                                              subset (test/llvm/essential.txt, with essential-verify.txt's rejections for verify),
+#                                              judged against the same record; --record rewrites the record from the run (not with
+#                                              --essential). FAMILY: roundtrip-llvmtest, text-llvmtest, verify-llvmtest, verify-probes;
+#                                              the pack rt's (test/llvm/ir/rt.tar.xz, bin/llvmi ir-make rt; LLS31 (a), no --essential):
+#                                              roundtrip-rt, text-rt (its 257 modules), verify-rt (those, test/llvm/hw.list and the
+#                                              mutant sets a, b, ctl), verify-rt-heldout (the sets h1, h2, ctlh, ctlu);
+#                                              WORK default .tmp/repr-llvm/check/FAMILY. llvm/test's files from the pinned tarball,
+#                                              extracted (bin/llvm-corpus extract)
+#   bin/repr-llvm roundtrip --text LIST WORK   mode :full's round trip: each file read in :full, its .ae text read
+#                                              back (forms and layer equal, the forms the plain mode's), printed back
+#                                              byte for byte, and the plain print read in :full without a layer
+#                                              (WORK/full/NAME.ae, WORK/text.tsv); the negative controls of
+#                                              test/repr/llvm/text-controls.txt must fail; exit 1 unless every file is ok
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 
+# judge NAME ORIG PRINT CMD...: CMD ORIG ORIG-OUT, CMD PRINT PRINT-OUT, the verdict on the two outputs; both inputs are copied
+# to one name (NAME.d/in.ll) first: a module without a source_filename takes it from the file's path, which is no difference
+# of the print (the first 282 modules all wrote one, llvm/test's mostly do not)
+judge() {
+  local o=$1 a=$2 b=$3; shift 3
+  mkdir -p "$o.d"; cp "$a" "$o.d/in.ll"
+  if ! "$@" "$o.d/in.ll" -o "$o.orig" 2> "$o.log"; then echo none
+  elif [ -f "$b" ] && cp "$b" "$o.d/in.ll" && "$@" "$o.d/in.ll" -o "$o.print" 2>> "$o.log" && cmp -s "$o.orig" "$o.print"; then echo same
+  else echo differs; fi
+}
+
+# opt_run LIST WORK OPT: opt -passes=verify on each module: WORK/opt/NAME.log, WORK/opt.tsv (NAME, verdict, first message)
+opt_run() {
+  local list=$1 work=$2 opt=$3 n p v m first
+  : > "$work/opt.tsv"
+  while IFS=$'\t' read -r n p; do
+    [ -n "$n" ] || continue
+    if ( "$opt" -passes=verify -disable-output "$p"; ) > "$work/opt/$n.log" 2>&1; then
+      # opt takes a module whose debug info is broken: it prints the message, then warns and strips the debug info (the
+      # verdict `debug`, the message its first line); a debug info version it does not know is stripped with a warning only
+      v=valid m=
+      first=$(head -1 "$work/opt/$n.log")
+      case $first in
+        "warning: ignoring debug info with an invalid version"*) v=debug; m=$(printf '%s' "$first" | sed -E 's/^warning: //; s/ in [^ ]*$//') ;;
+        "") ;;
+        "warning: "*) ;;
+        *) v=debug; m=$first ;;
+      esac
+    else
+      v=invalid
+      m=$(awk '/error: input module is broken/ { next } { sub(/^[^ ]*opt: /, "") } /^warning: / { next } { if (sub(/^[^ ]*:[0-9]+:[0-9]+: error: /, "") || sub(/^[^ ]*: error: /, "")) { print; exit } print; exit }' "$work/opt/$n.log")
+    fi
+    printf '%s\t%s\t%s\n' "$n" "$v" "$m" >> "$work/opt.tsv"
+  done < "$list"
+}
+# norm_sha LOG PATH OPT: the SHA-256 of LOG with PATH written <input> and OPT written opt (the reference's records are path-free)
+norm_sha() {
+  awk -v p="$2" -v o="$3" '{ s = $0; r = ""
+      while ((i = index(s, p)) > 0) { r = r substr(s, 1, i - 1) "<input>"; s = substr(s, i + length(p)) } s = r s; r = ""
+      while ((i = index(s, o)) > 0) { r = r substr(s, 1, i - 1) "opt"; s = substr(s, i + length(o)) } print r s }' "$1" | sha256sum | cut -d' ' -f1
+}
+# the round trip's judges recorded (test/llvm/ref-rt23.edn, bin/repr-llvm record-rt), so roundtrip needs no clang or llvm-as
+rtref=${REPR_LLVM_RTREF:-$root/test/llvm/ref-rt23.edn}
+# the reference: opt's verdicts recorded (test/llvm/ref-opt23.edn, bin/repr-llvm record-opt), so verify-check needs no opt
+optref=${REPR_LLVM_REF:-$root/test/llvm/ref-opt23.edn}
+# the judge (the header): own (the default), record (REPR_LLVM_REF or REPR_LLVM_RTREF set), live (REPR_LLVM_LIVE=1)
+judge_mode=${REPR_LLVM_JUDGE:-}
+if [ -z "$judge_mode" ]; then
+  if [ -n "${REPR_LLVM_LIVE:-}" ]; then judge_mode=live
+  elif [ -n "${REPR_LLVM_REF:-}${REPR_LLVM_RTREF:-}" ]; then judge_mode=record
+  else judge_mode=own; fi
+fi
+case $judge_mode in own|record|live) ;; *) echo "repr-llvm: REPR_LLVM_JUDGE is own, record or live, not $judge_mode" >&2; exit 2 ;; esac
+
+# own_verdicts LIST OUT: each module's own verdict from its RUN lines (llvm/test's lit tests; the module itself, or an essential
+# copy, which keeps them): NAME<tab>VERDICT<tab>FRAGMENT. VERDICT `invalid`: a RUN line runs `not llvm-as` or `not opt` (no pass but
+# verify) on the file with no option that changes how it is read (-data-layout, -mtriple, ...: only -o, -S, -disable-output,
+# -passes=verify, redirections): the test says the module is rejected; `valid`: RUN lines, none of them a `not` of an LLVM tool,
+# no split-file: the test says it is taken (a split-file section, LLS50: section_verdict, the parent's RUN lines); `-`: no RUN line, a split-file test, a `not` of another tool, of opt's passes, or only
+# with such options (no own verdict of verification; a redirection, `> /dev/null`, `2> %t`, `2>&1`, is not an option), or, for `valid`, a RUN line that reads it with `--disable-verify` (the test
+# claims no verification of it). FRAGMENT, for `invalid`, what follows `error:` on the first check line of the
+# prefixes those RUN lines give FileCheck (--check-prefix[es], default CHECK), its {{...}} and [[...]] taken out; empty when none.
+# SED (the 4th column; the user's decision of 2026-11-07, batch 3's proposal 2 (a)): lit's substitution when the first RUN line
+# feeds the file through `sed 's/A/B/g' %s |` (RISCV's iXLen, llubi's DIVREM): the test's input is sed's output, so verify-check
+# reads that (a plain s/A/B/ or s/A/B/g alone, no other sed command); empty when none
+own_verdicts() {
+  local n p rel par sec
+  while IFS=$'\t' read -r n p; do
+    [ -n "$n" ] || continue
+    # LLS50: a split-file section (.tmp/llvm/split/DIR/TEST.ll/SECTION.ll) is judged by its parent test's RUN lines
+    case $p in
+      */split/*.ll/*)
+        rel=${p#*/split/}; par=${LLVM_SRC:-${p%%/split/*}/src}/llvm-project-23.1.5.src/llvm/test/${rel%%.ll/*}.ll; sec=${rel#*.ll/}
+        if [ -f "$par" ]; then section_verdict "$n" "$par" "$sec"; else printf '%s\t-\t\t\n' "$n"; fi
+        continue ;;
+    esac
+    awk -v n="$n" '
+      function flush() { if (cur != "") { runs[++nr] = cur; cur = "" } }
+      NR == 1 && /^; MUTANT: / { mut = $0 }
+      /^[;#\/ ]*XFAIL:/ { xf = 1 }
+      /^[;#\/ ]*RUN:/ { l = $0; sub(/^[;#\/ ]*RUN: ?/, "", l); c = (l ~ /\\ *$/); sub(/\\ *$/, "", l); cur = cur " " l; if (!c) flush(); next }
+      { flush(); lines[++nl] = $0 }
+      function plain(cmd,   t, k, w, i) { # the tool invocation: only the input, -o FILE, -S, -disable-output, -passes=verify
+        k = split(cmd, w, /[ \t]+/)
+        for (i = 2; i <= k; i++) { t = w[i]
+          if (t == "" || t == "%s" || t == "<" || t == "<%s" || t == "-S" || t == "-disable-output" || t == "--disable-output" || t == "-passes=verify" || t == "-f") continue
+          if (t == "-o" || t == ">" || t == ">>" || t == "1>" || t == "2>" || t == "&>") { i++; continue }  # a redirection with its file as the next word
+          if (t ~ /^-o/ || t ~ /^[12&]?>/) continue
+          return 0 }
+        return 1 }
+      END { if (mut != "") { # a mutant of arbace.repr.llvm.mutate: its own verdict, the first line the mutator wrote (LLS33 (b))
+              m = mut; sub(/^; MUTANT: [^ ]+ /, "", m); v = m; sub(/ .*/, "", v); frag = ""
+              if (v == "invalid" || v == "debug") { frag = m; sub(/^[a-z]+ [A-Za-z]+: /, "", frag) } else if (v != "valid") v = "-"
+              printf "%s\t%s\t%s\t\tmutant\n", n, v, frag; exit }
+            flush(); v = (nr > 0) ? "valid" : "-"; np = 0; delete pre
+            for (i = 1; i <= nr; i++) { r = " " runs[i] " "
+              if (r ~ /split-file/) { v = "-"; break }
+              if (match(r, /[ ;|(]not +(--crash +)?(llvm-as|opt) [^|;]*/)) {
+                t = substr(r, RSTART + 1, RLENGTH - 1); sub(/^not +(--crash +)?/, "", t)
+                if (t ~ /^opt / && t ~ /-passes=|[ ]-p[ =]/ && t !~ /-passes=verify( |$)/) { v = "-"; break }
+                if (!plain(t)) { if (v == "valid") v = "?"; continue }
+                v = (v == "-") ? "-" : "invalid"
+                q = "CHECK"; if (match(r, /--?check-prefix(es)?[= ]+[A-Za-z0-9_,-]+/)) { q = substr(r, RSTART, RLENGTH); sub(/^--?check-prefix(es)?[= ]+/, "", q) }
+                m = split(q, qs, ","); for (x = 1; x <= m; x++) pre[qs[x]] = 1; np++
+                continue }
+              if (r ~ /[ ;|(]not +(--crash +)?(llc|lli|llvm-[a-z-]+|opt|clang)[ ]/) { v = "-"; break } }
+            if (v == "?") v = "-"
+            if (v == "valid") for (i = 1; i <= nr; i++) if ((" " runs[i] " ") ~ /[ ;|(](llvm-as|opt) [^|;]*--?disable-verify[ =]/) v = "-"
+            if (xf) v = "-"
+            sx = ""; if (nr > 0 && match(runs[1], /^ *sed +(-e +)?\047s\/[^\/\047]*\/[^\/\047]*\/g?\047 +%s *\|/)) {
+              sx = substr(runs[1], RSTART, RLENGTH); sub(/^ *sed +(-e +)?\047/, "", sx); sub(/\047 +%s *\|$/, "", sx) }
+            frag = ""
+            if (v == "invalid") for (i = 1; i <= nl && frag == ""; i++) { l = lines[i]
+              if (match(l, /^[;#\/ ]*[A-Za-z][A-Za-z0-9_-]*(-NEXT|-SAME)?: *.*error: /)) {
+                q = l; sub(/^[;#\/ ]*/, "", q); sub(/(-NEXT|-SAME)?:.*$/, "", q)
+                if (q in pre) { f = l; sub(/^.*error: */, "", f); gsub(/\{\{[^}]*\}\}/, "", f); gsub(/\[\[[^]]*\]\]/, "", f); sub(/[[:space:]]+$/, "", f); frag = f } } }
+            printf "%s\t%s\t%s\t%s\n", n, v, frag, sx }' "$p"
+  done < "$1" > "$2"
+}
+
+# section_verdict NAME PARENT SECTION (LLS50): a split-file section's own verdict from the parent test's RUN lines. `valid`: some
+# command (a pipeline's or a `;`/`&&` list's part) of opt, llc, llvm-as or llvm-link names %t/SECTION as an input (not after -o),
+# and no command that names it is under `not` or reads it with --disable-verify (any spelling: -, --, =VALUE) (the tools verify their
+# input, so the test says it is taken, as for a whole file; FileCheck, cat, cp and the like change nothing; after a `cd %t` the bare
+# name counts too); `-` otherwise, and also (review 1111, finding 5) when the parent is XFAIL, when a RUN line that names it has `||`
+# (its failure allowed), when llc starts its pipeline after the IR verifier (-start-after, -start-before, -run-pass), and when
+# llvm-link may drop what is unused (--only-needed, --internalize: only the composite is verified)
+section_verdict() {
+  awk -v n="$1" -v sec="$3" '
+    function flush() { if (cur != "") { runs[++nr] = cur; cur = "" } }
+    /^[;#\/ ]*XFAIL:/ { xf = 1 }
+    /^[;#\/ ]*RUN:/ { l = $0; sub(/^[;#\/ ]*RUN: ?/, "", l); c = (l ~ /\\ *$/); sub(/\\ *$/, "", l); cur = cur " " l; if (!c) flush(); next }
+    { flush() }
+    END { flush(); v = "-"; bad = 0; for (i = 1; i <= nr; i++) if (runs[i] ~ /(^|[ ;&])cd %t([ ;&]|$)/) cdt = 1
+      for (i = 1; i <= nr; i++) { r = runs[i]; alt = (r ~ /\|\|/); gsub(/&&|;|\|/, "\001", r); k = split(r, seg, "\001")
+        for (j = 1; j <= k; j++) { m = split(seg[j], w, /[ \t]+/); used = 0; for (x = 1; x <= m; x++) if ((w[x] == "%t/" sec || (cdt && w[x] == sec)) && w[x-1] != "-o" && w[x-1] != "-o=") used = 1
+          if (!used) continue
+          if (alt) bad = 1
+          f = 1; while (f <= m && w[f] == "") f++
+          if (w[f] ~ /^(opt|llc|llvm-as|llvm-link)$/) {
+            if (seg[j] ~ /(^|[ \t])--?disable-verify([ \t=]|$)/) bad = 1
+            else if (w[f] == "llc" && seg[j] ~ /(^|[ \t])--?(start-after|start-before|run-pass)([ \t=]|$)/) bad = 1
+            else if (w[f] == "llvm-link" && seg[j] ~ /(^|[ \t])--?(only-needed|internalize)([ \t=]|$)/) bad = 1
+            else v = "valid" }
+          else if (w[f] == "not") bad = 1 } }
+      if (bad || xf) v = "-"
+      printf "%s\t%s\t\t\n", n, v }' "$2"
+}
+
+# The pack rt (LLS31 (a); doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS31 (a)"; bin/llvmi ir-make rt): test/llvm/ir/rt.tar.xz, pinned by
+# rt.tar.xz.sha256, its manifest rt.tsv (ID, SOURCE, SOURCE-SHA256, IR-SHA256; a mutant's SOURCE mutant-SET:BASE). rt_pack: extracted
+# once (.tmp/repr-llvm/rt/PIN), its directory on stdout; a checkout source (the C++ samples, Rust's sample, the hand-written modules a
+# mutant was made from) whose digest is not the manifest's makes the pack stale, an error
+rt_ir=${REPR_LLVM_IRDIR:-$root/test/llvm/ir}
+rt_pack() {
+  local d bad
+  [ -f "$rt_ir/rt.tar.xz" ] || { echo "repr-llvm: no $rt_ir/rt.tar.xz (bin/llvmi ir-make rt: clang's, at night)" >&2; return 1; }
+  (cd "$rt_ir" && sha256sum -c --quiet rt.tar.xz.sha256) >&2 || { echo "repr-llvm: rt.tar.xz does not match its pin" >&2; return 1; }
+  d=$root/.tmp/repr-llvm/rt/$(cut -c1-16 "$rt_ir/rt.tar.xz.sha256")
+  if [ ! -f "$d/.ok" ]; then rm -rf "$d"; mkdir -p "$d"; xz -dc "$rt_ir/rt.tar.xz" | tar -xf - -C "$d" && : > "$d/.ok"; fi
+  bad=$(awk -F'\t' -v r="$root" -v hw="$root/test/llvm/hw.list" 'BEGIN { while ((getline l < hw) > 0) { split(l, a, "\t"); H[a[1]] = a[2] } }
+      { p = ""; s = $2
+        if (sub(/^checkout:/, "", s)) p = r "/" s
+        else if (s ~ /^mutant-/) { sub(/^mutant-[^:]*:/, "", s); if (s in H) p = r "/" H[s] }
+        if (p != "") { c = "sha256sum < \"" p "\""; h = ""; c | getline h; close(c); split(h, a, " "); if (a[1] != $3) print $1 } }' "$rt_ir/rt.tsv" | head -5)
+  [ -z "$bad" ] || { echo "repr-llvm: the pack rt is stale for: $(echo $bad) (bin/llvmi ir-make rt; a hand-written module's mutants: ir-make rt --mutants)" >&2; return 1; }
+  echo "$d"
+}
+# rt_list FAMILY DIR: the family's modules NAME<tab>PATH, absolute: roundtrip-rt and text-rt the pack's modules; verify-rt those, the
+# hand-written modules (test/llvm/hw.list, the mutants' other input) and the mutant sets a, b, ctl; verify-rt-heldout the sets h1, h2, ctlh, ctlu
+rt_list() {
+  local fam=$1 d=$2
+  case $fam in
+    roundtrip-rt|text-rt) awk -F'\t' -v d="$d" '$2 !~ /^mutant-/ { print $1 "\t" d "/" $1 ".ll" }' "$rt_ir/rt.tsv" ;;
+    verify-rt)
+      awk -F'\t' -v d="$d" '$2 !~ /^mutant-/ { print $1 "\t" d "/" $1 ".ll" }' "$rt_ir/rt.tsv"
+      awk -F'\t' -v r="$root" 'NF { print $1 "\t" r "/" $2 }' "$root/test/llvm/hw.list"
+      awk -F'\t' -v d="$d" '$2 ~ /^mutant-(a|b|ctl):/ { print $1 "\t" d "/mut/" $1 ".ll" }' "$rt_ir/rt.tsv" ;;
+    verify-rt-heldout) awk -F'\t' -v d="$d" '$2 ~ /^mutant-(h1|h2|ctlh|ctlu):/ { print $1 "\t" d "/mut/" $1 ".ll" }' "$rt_ir/rt.tsv" ;;
+    *) return 2 ;;
+  esac
+}
+
+# pins_check (GT9, GTS211; the gate's `bin/gate --pins`; 058168d99's, which a merge of the LLVM line had dropped): the host's LLVM against
+# its pins (test/cpp/corpora.edn's :pins :alpine-clang23: the version and the installed packages, the tarball's own pin being repr-cpp's
+# `pins check`), the tools the judges run, and test/llvm's probe list: every probe file there, every probe test/llvm/probes-known.tsv
+# classes in the list. No fetch, no network.
+pins_check() {
+  local bad=0 bin=${REPR_LLVM_BIN:-/usr/lib/llvm23/bin} want pkg t have n=0 pk=$TMPDIR/repr-llvm-pins.$$
+  want=$(arbace_tool -e "(print (get-in (read-string (slurp \"$root/test/cpp/corpora.edn\")) [:pins :alpine-clang23 :pkgver]))")
+  [ -n "$want" ] || { echo "  PIN no :alpine-clang23's :pkgver in test/cpp/corpora.edn"; return 1; }
+  for t in llvm-as opt lli FileCheck clang; do
+    [ -x "$bin/$t" ] || { echo "  PIN $bin/$t is missing"; bad=1; continue; }
+    have=$("$bin/$t" --version 2>&1 | grep -o -m1 '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' | head -1)
+    [ "$have" = "$want" ] || { echo "  PIN $t is $have, the pin is $want"; bad=1; }
+  done
+  arbace_tool -e "(doseq [p (get-in (read-string (slurp \"$root/test/cpp/corpora.edn\")) [:pins :alpine-clang23 :installed])] (println p))" > "$pk"
+  while read -r pkg; do
+    [ -n "$pkg" ] || continue
+    apk list -I "${pkg%%-[0-9]*}" 2>"$pk.err" | grep -q "^$pkg " || { echo "  PIN $pkg is not the installed package"; bad=1; }
+  done < "$pk"
+  rm -f "$pk" "$pk.err"
+  while IFS=$'\t' read -r _ p; do
+    [ -n "$p" ] || continue
+    n=$((n + 1)); [ -f "$root/$p" ] || { echo "  PIN test/llvm/probes.list names $p, which is not a file"; bad=1; }
+  done < "$root/test/llvm/probes.list"
+  while IFS=$'\t' read -r id _; do
+    case $id in ''|'#'*) continue ;; esac
+    grep -q "^$id	" "$root/test/llvm/probes.list" || { echo "  PIN test/llvm/probes-known.tsv classes $id, which is not in probes.list"; bad=1; }
+  done < "$root/test/llvm/probes-known.tsv"
+  if [ $bad = 0 ]; then echo "llvm pins: LLVM $want (llvm-as, opt, lli, FileCheck, clang), the installed packages, $n probes"; else echo "llvm pins: NOT held" >&2; return 1; fi
+}
+
 case ${1:-} in
-  read|print) arbace_tool -m arbace.repr.llvm "$@" ;;
+  pins) case ${2:-} in check) pins_check ;; *) echo "usage: bin/repr-llvm pins check" >&2; exit 2 ;; esac ;;
+  read|print|verify) arbace_tool -m arbace.repr.llvm "$@" ;;
   roundtrip)
+    if [ "${2:-}" = --text ]; then
+      list=$3 work=$4
+      mkdir -p "$work"; work=$(cd "$work" && pwd)
+      REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm rt-text "$list" "$work"
+      nf=$(wc -l < "$work/text.tsv"); nok=$(cut -f2 "$work/text.tsv" | grep -c '^ok$' || true)
+      echo "roundtrip --text: $nok of $nf printed back byte for byte"
+      # the negative controls (GTS81 (a)): ID SUBJECT REFERENCE; the SUBJECT's mode :full print (its .ae text printed back with
+      # its layer) against the REFERENCE's original text, byte for byte as the check compares them: it must differ
+      ctl=0
+      controls=${REPR_LLVM_TEXT_CONTROLS:-$root/test/repr/llvm/text-controls.txt}
+      if [ -f "$controls" ]; then
+        while read -r cid csub cref _; do
+          case $cid in ''|'#'*) continue ;; esac
+          cpath=$(awk -F'\t' -v n="$cref" '$1 == n {print $2; exit}' "$list")
+          if [ -z "$cpath" ] || ! grep -q "^$csub	ok" "$work/text.tsv"; then echo "control $cid left: $csub or $cref is not in the list or not printed back"; continue; fi
+          cf=$(arbace_tool -m arbace.repr.llvm text-control "$work" "$csub" "$cpath" 2>/dev/null | tail -1)
+          if [ "$cf" = differs ]; then echo "control $cid fails as it must (the text differs)"
+          elif [ "$cf" = same ]; then echo "control passed: $cid ($csub's print against $cref's text): the same"; ctl=1
+          else echo "control not judged: $cid ($csub against $cref: $cf)"; ctl=1; fi
+        done < "$controls"
+      fi
+      [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && [ "$nf" = "$(grep -c . "$list")" ] && [ "$ctl" = 0 ]
+      exit
+    fi
     list=$2 work=$3
     mkdir -p "$work"; work=$(cd "$work" && pwd)
     REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm rt "$list" "$work"
-    while IFS=$'\t' read -r n p; do
-      mkdir -p "$work/obj/$(dirname "$n")"
-      if clang -c "$p" -o "$work/obj/$n.orig.o" 2> "$work/obj/$n.log" && [ -f "$work/print/$n.ll" ] \
-         && clang -c "$work/print/$n.ll" -o "$work/obj/$n.print.o" 2>> "$work/obj/$n.log"; then
-        if cmp -s "$work/obj/$n.orig.o" "$work/obj/$n.print.o"; then echo "$n	same"; else echo "$n	differs"; fi
-      else echo "$n	none"; fi
-    done < "$list" > "$work/objects.tsv"
+    # the print's own judge (every mode): Arbace's verifier takes the print as it takes the original (WORK/verifier.tsv: NAME,
+    # same or differs, the original's verdict, the print's); a print the round trip did not write is `none`
+    awk -F'\t' -v w="$work" 'NF { print $1 "\t" w "/print/" $1 ".ll" }' "$list" > "$work/print.list"
+    REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm verify-list "$list" "$work/verify-orig.tsv" > "$work/verify-orig.log"
+    REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm verify-list "$work/print.list" "$work/verify-print.tsv" > "$work/verify-print.log"
+    awk -F'\t' -v w="$work" 'FILENAME == ARGV[1] { o[$1] = $2; next } FILENAME == ARGV[2] { p[$1] = $2; next }
+      NF { f = w "/print/" $1 ".ll"; acc = (getline l < f) >= 0; close(f)
+           if (!acc || p[$1] == "") v = "none"; else v = (o[$1] == p[$1]) ? "same" : "differs"
+           print $1 "\t" v "\t" o[$1] "\t" p[$1] }' "$work/verify-orig.tsv" "$work/verify-print.tsv" "$list" > "$work/verifier.tsv"
+    llvm_as=${REPR_LLVM_AS:-/usr/lib/llvm23/bin/llvm-as}
+    [ -x "$llvm_as" ] || llvm_as=
+    : > "$work/objects.tsv"; : > "$work/bitcode.tsv"
+    mode=$judge_mode
+    if [ "$mode" = live ]; then
+      command -v clang > /dev/null || { echo "roundtrip: REPR_LLVM_JUDGE=live and no clang" >&2; exit 2; }
+      while IFS=$'\t' read -r n p; do
+        [ -n "$n" ] || continue
+        mkdir -p "$work/obj/$(dirname "$n")"
+        tr=$(sed -n '/^target triple = /{s/^target triple = "\(.*\)"$/\1/p;q;}' "$p")
+        printf '%s\t%s\n' "$n" "$(judge "$work/obj/$n.o" "$p" "$work/print/$n.ll" \
+          clang -c -mno-incremental-linker-compatible ${tr:+-target "$tr"})" >> "$work/objects.tsv"
+        if [ -n "$llvm_as" ]; then
+          printf '%s\t%s\n' "$n" "$(judge "$work/obj/$n.bc" "$p" "$work/print/$n.ll" "$llvm_as")" >> "$work/bitcode.tsv"
+        fi
+      done < "$list"
+    elif [ "$mode" = record ]; then
+      # the judges recorded by record-rt (test/llvm/ref-rt23.edn) for the same original and the same print (their digests): a print
+      # that is not the recorded one is `unjudged` (record-rt with the tools again), as is a module not recorded
+      llvm_as=ref
+      [ -f "$rtref" ] || { echo "roundtrip: no reference $rtref" >&2; exit 2; }
+      awk -F'\t' -v ref="$rtref" -v w="$work" 'BEGIN { while ((getline l < ref) > 0) if (l ~ /^\{:id "/) {
+            id = l; sub(/^\{:id "/, "", id); sub(/".*/, "", id); R[id] = l } }
+        function f(l, k) { if (match(l, ":" k " [:\"][^ \"}]*")) { v = substr(l, RSTART + length(k) + 2, RLENGTH - length(k) - 2); sub(/^[:\"]/, "", v); return v } return "" }
+        function sha(p,   c, h, a) { c = "sha256sum < \"" p "\" 2>/dev/null"; h = ""; c | getline h; close(c); split(h, a, " "); return a[1] }
+        NF { o = "unjudged"; b = "unjudged"
+             if (($1 in R) && f(R[$1], "ll") == sha($2) && f(R[$1], "print") == sha(w "/print/" $1 ".ll")) { o = f(R[$1], "object"); b = f(R[$1], "bitcode") }
+             print $1 "\t" o > (w "/objects.tsv"); print $1 "\t" b > (w "/bitcode.tsv") }' "$list"
+    else
+      llvm_as=
+    fi
     nf=$(wc -l < "$work/rt.tsv"); nok=$(cut -f2 "$work/rt.tsv" | grep -c '^ok$' || true)
-    no=$(wc -l < "$work/objects.tsv"); nsame=$(grep -c '	same$' "$work/objects.tsv" || true)
-    echo "roundtrip: $nok of $nf forms equal, $nsame of $no objects equal"
-    # a check: every form equal and every object the same, else exit 1 (review 007's finding 11)
-    [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && [ "$nsame" = "$no" ] && [ "$no" = "$(grep -c . "$list")" ] ;;
+    nv=$(wc -l < "$work/verifier.tsv"); nvsame=$(grep -c '	same	' "$work/verifier.tsv" || true)
+    if [ "$mode" = own ]; then
+      echo "roundtrip: $nok of $nf forms equal, $nvsame of $nv prints taken by Arbace's verifier as their originals (the own verdicts; clang's objects and llvm-as's bitcode are the oracle tier's, REPR_LLVM_JUDGE=record or live)"
+    else
+      no=$(wc -l < "$work/objects.tsv"); nsame=$(grep -c '	same$' "$work/objects.tsv" || true)
+      nb=$(wc -l < "$work/bitcode.tsv"); nbsame=$(grep -c '	same$' "$work/bitcode.tsv" || true)
+      echo "roundtrip: $nok of $nf forms equal, $nvsame of $nv prints taken by Arbace's verifier, $nsame of $no objects equal${llvm_as:+, $nbsame of $nb bitcode equal} ($mode)"
+    fi
+    ctl=0
+    controls=${REPR_LLVM_CONTROLS:-$root/test/repr/llvm/roundtrip-controls.txt}
+    if [ -f "$controls" ]; then
+      while read -r cid csub cref _; do
+        case $cid in ''|'#'*) continue ;; esac
+        cpath=$(awk -F'\t' -v n="$cref" '$1 == n {print $2; exit}' "$list")
+        if [ -z "$cpath" ] || ! grep -q "^$csub	" "$list"; then echo "control $cid left: $csub or $cref is not in the list"; continue; fi
+        if ! grep -q "^$csub	ok" "$work/rt.tsv" || ! grep -q "^$cref	ok" "$work/rt.tsv"; then echo "control $cid left: $csub or $cref did not round-trip"; continue; fi
+        cf=$(arbace_tool -m arbace.repr.llvm control "$work" "$csub" "$cpath" 2>/dev/null | tail -1)
+        if [ "$mode" != live ]; then co=differs  # no objects without clang: the forms, the own verdict, decide the control
+        elif [ -f "$work/obj/$csub.o.print" ] && [ -f "$work/obj/$cref.o.orig" ]; then
+          if cmp -s "$work/obj/$csub.o.print" "$work/obj/$cref.o.orig"; then co=same; else co=differs; fi
+        else co=none; fi
+        if [ "$cf" = differs ] && [ "$co" = differs ]; then echo "control $cid fails as it must (forms$([ "$mode" = live ] && echo " and objects") differ)"
+        elif [ "$cf" != same ] && [ "$cf" != differs ] || [ "$co" = none ]; then echo "control not judged: $cid ($csub against $cref: forms $cf, objects $co)"; ctl=1
+        else echo "control passed: $cid ($csub against $cref): forms $cf, objects $co"; ctl=1; fi
+      done < "$controls"
+    fi
+    # a check: every form equal, no judge differing, every file judged same by one of them (review 007's finding 11): the own
+    # verdict (the forms and the verifier) in mode own, an object or bitcode judge in record and live
+    [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && [ "$nf" = "$(grep -c . "$list")" ] && [ "$ctl" = 0 ] || exit 1
+    awk -F'\t' '$2 == "differs" || $2 == "unjudged" { d = 1 } END { exit d }' "$work/verifier.tsv" "$work/objects.tsv" "$work/bitcode.tsv" || exit 1
+    if [ "$mode" != own ]; then
+      judged=$(cat "$work/objects.tsv" "$work/bitcode.tsv" | awk -F'\t' '$2 == "same" { print $1 }' | sort -u | wc -l)
+      [ "$judged" = "$nf" ]
+    fi ;;
+  check)
+    fam=${2:-}; shift 2 || true
+    ess= rec= work=
+    while [ $# -gt 0 ]; do case $1 in --essential) ess=1; shift ;; --record) rec=1; shift ;; *) work=$1; shift ;; esac; done
+    t=$root/test/llvm known=
+    case $fam in
+      roundtrip-llvmtest) kind=roundtrip lists="$t/llvm-test-valid.list $t/essential.txt $t/hw.list" record=$t/check-roundtrip-llvmtest-linux-amd64.edn ;;
+      text-llvmtest) kind=text lists="$t/llvm-test-valid.list $t/essential.txt $t/hw.list" record=$t/check-text-llvmtest-linux-amd64.edn ;;
+      verify-llvmtest) kind=verify lists="$t/llvm-test-valid.list $t/llvm-test-reject.list $t/llvm-test-split.list $t/llvm-test-reject-opt.list" record=$t/check-verify-llvmtest-linux-amd64.edn ;;
+      verify-probes) kind=verify lists="$t/probes.list" record=$t/check-verify-probes-linux-amd64.edn known=$t/probes-known.tsv ;;
+      # the pack rt's (LLS31 (a)): its lists from the pack (rt_list), written into WORK first
+      roundtrip-rt) kind=roundtrip lists=rt record=$t/check-roundtrip-rt-linux-amd64.edn ;;
+      text-rt) kind=text lists=rt record=$t/check-text-rt-linux-amd64.edn ;;
+      verify-rt) kind=verify lists=rt record=$t/check-verify-rt-linux-amd64.edn ;;
+      verify-rt-heldout) kind=verify lists=rt record=$t/check-verify-rt-heldout-linux-amd64.edn ;;
+      *) echo "repr-llvm check: FAMILY is roundtrip-llvmtest, text-llvmtest, verify-llvmtest, verify-probes, roundtrip-rt, text-rt, verify-rt or verify-rt-heldout" >&2; exit 2 ;;
+    esac
+    if [ "$lists" = rt ] && [ -n "$ess" ]; then echo "repr-llvm check: $fam has no essential subset (the pack rt's families are --full's)" >&2; exit 2; fi
+    if [ -n "$ess" ]; then
+      [ -z "$rec" ] || { echo "repr-llvm check: --record takes the whole family, not --essential" >&2; exit 2; }
+      case $kind in verify) lists="$t/essential.txt $t/essential-verify.txt" ;; *) lists=$t/essential.txt ;; esac
+      [ "$fam" = verify-probes ] && lists=$t/essential-probes.txt
+    fi
+    work=${work:-$root/.tmp/repr-llvm/check/$fam${ess:+-essential}}
+    rm -rf "$work"; mkdir -p "$work"; work=$(cd "$work" && pwd)
+    # the lists' paths: llvm/test/... and split/... from the pinned tarball's extraction (bin/llvm-corpus resolve), test/... the checkout's;
+    # an id in two lists is one module (the essential copies of the valid sample's files)
+    if [ "$lists" = rt ]; then
+      rtd=$(rt_pack) || exit 2
+      rt_list "$fam" "$rtd" > "$work/rt.list"; lists=$work/rt.list
+    fi
+    cat $lists | grep . | awk -F'\t' '!s[$1]++' > "$work/rel.list"
+    # the essential subset: the family's modules among the essential lists (those its record holds)
+    if [ -n "$ess" ]; then
+      awk -F'\t' -v rec="$record" 'BEGIN { while ((getline l < rec) > 0) if (l ~ /^\["/) R[substr(l, 3, index(substr(l, 3), "\"") - 1)] = 1 } ($1 in R)' "$work/rel.list" > "$work/rel.new"
+      mv "$work/rel.new" "$work/rel.list"
+    fi
+    "$root/bin/llvm-corpus" resolve "$work/rel.list" "$work/abs.list"
+    awk -F'\t' -v r="$root" 'FILENAME == ARGV[1] { a[$1] = $2; next } { print $1 "\t" ($2 ~ /^\// ? $2 : $2 ~ /^test\// ? r "/" $2 : a[$1]) }' "$work/abs.list" "$work/rel.list" > "$work/list"
+    missing=$(awk -F'\t' '{ if ((getline l < $2) < 0) print $1; close($2) }' "$work/list" | head -3)
+    [ -z "$missing" ] || { echo "repr-llvm check: not found: $missing ... (bin/llvm-corpus extract; the split sections: bin/llvm-corpus scan)" >&2; exit 2; }
+    # the run's own exit status is not the check's: its non-passes are the record's to hold (bin/reap classes them); its
+    # negative controls are: one that passes, or that is not judged, fails the check
+    case $kind in
+      roundtrip) "$0" roundtrip "$work/list" "$work/run" ;;
+      text) "$0" roundtrip --text "$work/list" "$work/run" ;;
+      verify) REPR_LLVM_KNOWN=$known "$0" verify-check "$work/list" "$work/run" ;;
+    esac > "$work/run.out" 2>&1 || true
+    grep -v '^Performance warning\|^Reflection warning' "$work/run.out" | tail -8
+    [ -f "$work/run/rt.tsv" ] || [ -f "$work/run/text.tsv" ] || [ -f "$work/run/verify.tsv" ] || { echo "repr-llvm check: $fam: the run wrote nothing" >&2; exit 1; }
+    "$root/bin/lib/repr-llvm/results" "$kind" "$work/run" $known > "$work/rows.edn"
+    st=0
+    if grep -q '^control passed\|^control not judged' "$work/run.out"; then echo "FAIL a negative control passes or is not judged"; st=1; fi
+    nctl=$(grep -c '^control .* fails as it must' "$work/run.out" || true)
+    awk -v rec="$record" -v fam="$fam${ess:+ --essential}" -v nctl="$nctl" 'BEGIN { while ((getline l < rec) > 0) if (match(l, /^\["[^"]*" :[a-z-]+/)) { id = substr(l, 3, index(substr(l, 3), "\"") - 1); r = l; sub(/^\["[^"]*" /, "", r); sub(/ .*/, "", r); R[id] = r } }
+      match($0, /^\["[^"]*" :[a-z-]+/) { id = substr($0, 3, index(substr($0, 3), "\"") - 1); r = $0; sub(/^\["[^"]*" /, "", r); sub(/ .*/, "", r)
+        n++; if (r == ":pass") p++
+        if (!(id in R)) { print "FAIL not recorded: " id " " r; f++ }
+        else if (R[id] == ":pass" && r != ":pass") { print "FAIL recorded as a pass, does not pass: " $0; f++ }
+        else if (R[id] != ":pass" && r == ":pass") { print "fixed (recorded " R[id] "): " id; x++ }
+        else if (R[id] != r) { print "changed (recorded " R[id] "): " $0 } }
+      END { printf "repr-llvm check %s: %d modules, %d pass; %d failing against the record, %d fixed; %d negative controls fail as they must\n", fam, n, p, f, x, nctl; exit (f > 0) }' "$work/rows.edn" || st=1
+    if [ -n "$rec" ]; then
+      if grep -q '^control passed\|^control not judged' "$work/run.out"; then echo "repr-llvm check: --record refused: a negative control passes" >&2; exit 1; fi
+      if [ ! -f "$record" ]; then  # a family's first record (the pack rt's): its header
+        { echo ";; repr/llvm's check family $fam (bin/repr-llvm check $fam --record; doc/llvm/LLVM-CROP-SURVEY.md, \"As built: LLS31 (a)\"): rows [ID RESULT REASON]"
+          echo ";; Written by bin/lib/repr-llvm/results $kind (the check's work directory as rows, $(date -u +%Y-%m-%d), on the pack test/llvm/ir/rt.tar.xz and the checkout's repr/llvm); read by bin/reap (test/reap/cells.edn, the :llvm row). Read with the Clojure reader."; } > "$record"
+      fi
+      { grep '^;;' "$record"; echo "["; LC_ALL=C sort "$work/rows.edn"; echo "]"; } > "$record.new" && mv "$record.new" "$record"
+      echo "repr-llvm check: recorded $(grep -c '^\[' "$work/rows.edn") rows into ${record#$root/}"
+      exit 0
+    fi
+    exit $st ;;
+  records-verify)
+    # records-verify [--sample N] (ORS30 (a): the oracle tier's llvm-records-verify): every N-th module (default 25) of the records
+    # test/llvm/ref-opt23.edn and ref-rt23.edn recorded again by the tools (record-opt, record-rt into scratch records) and compared
+    # entry for entry with the committed ones: `equal`, `input` (the module is not the recorded one: the record is stale, the checks'
+    # STALE), `print` (rt: repr/llvm prints it otherwise now: the record's judges are for another print), `address` (opt's stderr prints a
+    # value by its address: no stable digest), `moved` (another LLVM than
+    # the record's: reported, not failed, ORS6 (a)) or `differs` (the same LLVM, another answer: a failure); and a crossed pair (one
+    # module's entry against another's record, ORS7 (a)) that must differ. Exit 1 on a `differs` or a crossed pair that is equal
+    every=25
+    [ "${2:-}" = --sample ] && every=${3:-25}
+    opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
+    [ -x "$opt" ] && command -v clang > "$TMPDIR/repr-llvm-rv.which" || { echo "records-verify: needs $opt and clang (the oracle tier's hosts :llvm, :cxx)" >&2; exit 2; }
+    work=$root/.tmp/repr-llvm/records-verify; rm -rf "$work"; mkdir -p "$work"
+    t=$root/test/llvm
+    # the modules the records name, NAME<tab>PATH (the check families' lists, the pack rt's when it is there)
+    cat "$t/llvm-test-valid.list" "$t/llvm-test-reject.list" "$t/llvm-test-split.list" "$t/llvm-test-reject-opt.list" "$t/probes.list" \
+        "$t/essential.txt" "$t/essential-verify.txt" "$t/hw.list" | grep . | awk -F'\t' '!s[$1]++' > "$work/rel.list"
+    "$root/bin/llvm-corpus" resolve "$work/rel.list" "$work/abs.list"
+    awk -F'\t' -v r="$root" 'FILENAME == ARGV[1] { a[$1] = $2; next } { print $1 "\t" ($2 ~ /^test\// ? r "/" $2 : a[$1]) }' "$work/abs.list" "$work/rel.list" > "$work/all.list"
+    if [ -f "$rt_ir/rt.tar.xz" ]; then rtd=$(rt_pack) || exit 2; for f in verify-rt verify-rt-heldout; do rt_list "$f" "$rtd"; done >> "$work/all.list"; fi
+    ids() { grep -o '^{:id "[^"]*"' "$1" | sed 's/^{:id "//; s/"$//'; }
+    # sample REF OUT: every N-th id of REF (its order) whose module is in the lists and readable
+    sample() { ids "$1" | awk -v n="$every" 'NR % n == 1' | awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = $2; next } ($1 in p) { f = p[$1]; if ((getline l < f) >= 0) print $1 "\t" f; close(f) }' "$work/all.list" - > "$2"; }
+    sample "$optref" "$work/opt.list"; sample "$rtref" "$work/rt.list"
+    : > "$work/opt.edn"; : > "$work/rt.edn"
+    REPR_LLVM_REF=$work/opt.edn "$0" record-opt "$work/opt.list" > "$work/record-opt.log" 2>&1 || { cat "$work/record-opt.log" >&2; exit 1; }
+    REPR_LLVM_RTREF=$work/rt.edn "$0" record-rt "$work/rt.list" "$work/rt" > "$work/record-rt.log" 2>&1 || { tail -5 "$work/record-rt.log" >&2; exit 1; }
+    # a stderr that prints a value by its address (`<0x...>`, test/llvm/probes-known.tsv's printed-address) has no stable digest: `address`
+    grep -l '<0x[0-9a-f]*>' "$root"/.tmp/repr-llvm/record-opt/opt/*.log 2> "$work/address.err" | sed 's|.*/||; s|\.log$||' > "$work/address.txt" || true
+    live=$("$opt" --version | grep -o -m1 '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' | head -1)
+    rec=$(sed -n 's/^;; LLVM version \([0-9.]*\).*/\1/p' "$optref" | head -1)
+    # cmp KIND NEW COMMITTED: each new entry against the committed one of its id
+    cmpref() {
+      awk -v kind="$1" -v live="$live" -v rec="$rec" -v addr="$work/address.txt" 'BEGIN { while ((getline l < addr) > 0) A[l] = 1 } function f(l, k) { if (match(l, ":" k " [:\"][^ \"}]*")) return substr(l, RSTART, RLENGTH); return "" }
+        # :stderr-bytes counts the raw stderr, the module'"'"'s path in it (the digest is of the normalized text): not compared
+        { sub(/ :stderr-bytes [0-9]+/, "") }
+        FILENAME == ARGV[1] { if (match($0, /^\{:id "[^"]*"/)) R[substr($0, 7, RLENGTH - 7)] = $0; next }
+        match($0, /^\{:id "[^"]*"/) { id = substr($0, 7, RLENGTH - 7); o = R[id]
+          if (o == $0) v = "equal"
+          else if (f(o, "ll") != f($0, "ll")) v = "input"
+          else if (kind == "rt" && f(o, "print") != f($0, "print")) v = "print"
+          else if (kind == "opt" && (id in A) && f(o, "verdict") == f($0, "verdict") && f(o, "first") == f($0, "first")) v = "address"
+          else if (kind == "opt" && live != rec) v = "moved"
+          else v = "differs"
+          n[v]++; if (v != "equal") print kind " " v ": " id
+          if (v == "differs") bad = 1 }
+        END { printf "records-verify %s: %d sampled, %d equal, %d input, %d print, %d address, %d moved (LLVM %s, the record %s), %d differ\n", kind, n["equal"] + n["input"] + n["print"] + n["address"] + n["moved"] + n["differs"], n["equal"], n["input"], n["print"], n["address"], n["moved"], live, rec, n["differs"]; exit bad }' "$3" "$2"
+    }
+    st=0
+    cmpref opt "$work/opt.edn" "$optref" || st=1
+    cmpref rt "$work/rt.edn" "$rtref" || st=1
+    # the crossed pair: the first sampled module's new opt entry under the id of one whose recorded verdict differs, against that record
+    a=$(grep -m1 ':verdict :valid' "$work/opt.edn"); b=$(grep -m1 ':verdict :invalid' "$optref")
+    if [ -n "$a" ] && [ -n "$b" ]; then
+      bid=$(echo "$b" | sed 's/^{:id "\([^"]*\)".*/\1/'); x=$(echo "$a" | sed "s/^{:id \"[^\"]*\"/{:id \"$bid\"/; s/:ll \"[0-9a-f]*\"/$(echo "$b" | grep -o ':ll "[0-9a-f]*"')/")
+      if [ "$x" = "$b" ]; then echo "FAIL the crossed pair is equal: $(echo "$a" | cut -c1-60) against $bid's record"; st=1
+      else echo "control _control/records-crossed fails as it must ($(echo "$a" | sed 's/^{:id "\([^"]*\)".*/\1/')'s live entry against $bid's record)"; fi
+    else echo "FAIL the crossed pair: no valid sampled module or no invalid record"; st=1; fi
+    # LLS35 (a): the pack rt's mutants, each own verdict (its `; MUTANT:` line) against opt's record (mutants-oracle, :first), over
+    # verify-rt's and verify-rt-heldout's lists whole (no LLVM tool: the record's answers; seconds); a difference is a rule of
+    # arbace.repr.llvm.expect to fix by day. No pack yet (before LLS31 (a)'s night): said, not failed
+    if [ -f "$rt_ir/rt.tar.xz" ]; then
+      for f in verify-rt verify-rt-heldout; do
+        rt_list "$f" "$rtd" > "$work/$f.list"
+        REPR_LLVM_JUDGE=record "$0" mutants-oracle "$work/$f.list" "$work/mo-$f" > "$work/mo-$f.log" 2>&1 || st=1
+        echo "records-verify mutants $f: $(grep '^mutants-oracle:' "$work/mo-$f.log" | sed 's/^mutants-oracle: //')"
+        grep -v '^  \|^mutants-oracle:' "$work/mo-$f.log" | sed 's/^/  /' | head -20
+      done
+    else echo "records-verify mutants: no pack rt (test/llvm/ir/rt.tar.xz, LLS31 (a)'s night): not run"; fi
+    exit $st ;;
+  mutants-oracle)
+    # mutants-oracle LIST WORK (LLS33 (b), the oracle tier): each mutant's own verdict (its first line, `; MUTANT: KIND VERDICT
+    # LAYER: MESSAGE`, arbace.repr.llvm.expect) against opt's: the verdict (valid, invalid, debug) and the message, a fragment of
+    # opt's whole stderr (REPR_LLVM_JUDGE=live: opt run; the oracle tier's authority); record mode (test/llvm/ref-opt23.edn) holds the verdict only (LLS47 (a): the record keeps opt's first message alone).
+    # WORK/oracle.tsv: NAME, KIND, the own verdict, opt's, verdict same|differs, message same|differs|-; the kinds summed. A mutant
+    # whose own verdict is unknown is counted apart. Exit 1 on a difference
+    list=$2 work=$3
+    rm -rf "$work"; mkdir -p "$work/opt"; work=$(cd "$work" && pwd)
+    opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
+    awk -F'\t' 'NF { f = $2; l = ""; getline l < f; close(f); if (l ~ /^; MUTANT: /) print $1 "\t" $2 }' "$list" > "$work/list"
+    if [ "$judge_mode" = live ]; then
+      [ -x "$opt" ] || { echo "mutants-oracle: REPR_LLVM_JUDGE=live and no $opt" >&2; exit 2; }
+      opt_run "$work/list" "$work" "$opt"
+    else
+      awk -F'\t' -v ref="$optref" 'BEGIN { while ((getline l < ref) > 0) if (l ~ /^\{:id "/) { id = l; sub(/^\{:id "/, "", id); sub(/".*/, "", id); R[id] = l } }
+        function field(l, k,   m) { if (match(l, ":" k " \"([^\"\\\\]|\\\\.)*\"")) { m = substr(l, RSTART + length(k) + 3, RLENGTH - length(k) - 4); gsub(/\\"/, "\"", m); gsub(/\\\\/, "\\", m); return m } return "" }
+        function kw(l, k) { if (match(l, ":" k " :[a-z]+")) return substr(l, RSTART + length(k) + 3, RLENGTH - length(k) - 3); return "" }
+        NF { cmd = "sha256sum < \"" $2 "\""; cmd | getline h; close(cmd); split(h, a, " ")
+             if (!($1 in R)) { print $1 "\tunrecorded\t"; next }
+             l = R[$1]; if (field(l, "ll") != a[1]) { print $1 "\tstale\t"; next }
+             print $1 "\t" kw(l, "verdict") "\t" field(l, "first") }' "$work/list" > "$work/opt.tsv"
+    fi
+    awk -F'\t' -v live="$([ "$judge_mode" = live ] && echo 1)" -v od="$work/opt" 'FILENAME == ARGV[1] { v[$1] = $2; m[$1] = $3; next }
+      { f = $2; l = ""; getline l < f; close(f); sub(/^; MUTANT: /, "", l); k = l; sub(/ .*/, "", k); r = l; sub(/^[^ ]+ /, "", r)
+        ov = r; sub(/[ :].*/, "", ov); frag = ""
+        if (ov == "invalid" || ov == "debug") { frag = r; sub(/^[a-z]+ [A-Za-z]+: /, "", frag) }
+        if (ov != "valid" && ov != "invalid" && ov != "debug") { print $1 "\t" k "\tunknown\t" v[$1] "\t-\t-"; next }
+        sv = (ov == v[$1]) ? "same" : "differs"
+        if (frag == "") sm = "-"
+        else if (live) { t = ""; g = od "/" $1 ".log"; while ((getline x < g) > 0) t = t x "\n"; close(g); sm = index(t, frag) ? "same" : "differs" }
+        else sm = "-"  # LLS47 (a): record mode compares the verdict only (the record keeps opt'"'"'s first message, not the later ones a mutant may name)
+        print $1 "\t" k "\t" ov "\t" v[$1] "\t" sv "\t" sm }' "$work/opt.tsv" "$work/list" > "$work/oracle.tsv"
+    awk -F'\t' '{ n[$2]++; if ($3 == "unknown") u[$2]++; else { o[$2]++; if ($5 == "same" && $6 != "differs") s[$2]++ } }
+      END { for (k in n) printf "  %-14s %4d mutants, %4d own, %4d as opt, %4d unknown\n", k, n[k], o[k], s[k], u[k] }' "$work/oracle.tsv" | sort
+    nown=$(awk -F'\t' '$3 != "unknown"' "$work/oracle.tsv" | wc -l)
+    nbad=$(awk -F'\t' '$3 != "unknown" && ($5 != "same" || $6 == "differs")' "$work/oracle.tsv" | wc -l)
+    echo "mutants-oracle: $nown own verdicts, $((nown - nbad)) as opt's ($judge_mode), $nbad differ; $(awk -F'\t' '$3 == "unknown"' "$work/oracle.tsv" | wc -l) unknown"
+    awk -F'\t' '$3 != "unknown" && ($5 != "same" || $6 == "differs")' "$work/oracle.tsv" | head -20
+    [ "$nbad" = 0 ] ;;
+  rt-lists)
+    # rt-lists DIR: the pack rt's families' lists, absolute (DIR/FAMILY.list), for the oracle tier's records (record-opt over verify-rt's
+    # and verify-rt-heldout's, record-rt over roundtrip-rt's)
+    out=${2:?usage: bin/repr-llvm rt-lists DIR}; mkdir -p "$out"
+    rtd=$(rt_pack) || exit 2
+    for f in roundtrip-rt verify-rt verify-rt-heldout; do rt_list "$f" "$rtd" > "$out/$f.list"; echo "rt-lists: $(wc -l < "$out/$f.list") modules in $out/$f.list"; done ;;
+  mutants)
+    list=$2 out=$3
+    mkdir -p "$out"; out=$(cd "$out" && pwd)
+    arbace_tool -m arbace.repr.llvm.mutate "$list" "$out" "${4:-300}" "${5:-0}" ${6:+"$6"} ;;
+  record-rt)
+    # record-rt LIST WORK: the round trip run with the tools (clang -c, llvm-as), its judges recorded into REF (test/llvm/ref-rt23.edn;
+    # REPR_LLVM_RTREF another) with the original's and the print's digests; the entries of other modules kept
+    list=$2 work=$3
+    REPR_LLVM_RTREF= REPR_LLVM_JUDGE=live "$0" roundtrip "$list" "$work" || true
+    work=$(cd "$work" && pwd)
+    while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
+      o=$(awk -F'\t' -v n="$n" '$1 == n { print $2; exit }' "$work/objects.tsv"); b=$(awk -F'\t' -v n="$n" '$1 == n { print $2; exit }' "$work/bitcode.tsv")
+      printf '{:id "%s" :ll "%s" :print "%s" :object :%s :bitcode :%s}\n' "$n" "$(sha256sum < "$p" | cut -d' ' -f1)" \
+        "$(sha256sum < "$work/print/$n.ll" 2>/dev/null | cut -d' ' -f1)" "${o:-none}" "${b:-none}"
+    done < "$list" > "$work/new.edn"
+    touch "$rtref"
+    { echo ";; the judges of repr/llvm's round trip (bin/repr-llvm record-rt LIST WORK; doc/llvm/LLVM-CROP-SURVEY.md, \"As built: LL6\"): each module's"
+      echo ";; SHA-256 (:ll), the SHA-256 of its print by repr/llvm (:print), and the judges of that print: clang 23 -c's object (:object) and llvm-as 23's"
+      echo ";; bitcode (:bitcode) against the original's, :same, :differs or :none (the original does not build); roundtrip reads them when"
+      echo ";; clang is absent (or REPR_LLVM_RTREF names it): the same original printed to the same text has the recorded judges. Read with the Clojure reader."
+      echo "["
+      { awk 'FILENAME == ARGV[1] { if (match($0, /^\{:id "[^"]*"/)) n[substr($0, 6, RLENGTH - 6)] = 1; next }
+             /^\{:id "/ { match($0, /^\{:id "[^"]*"/); if (!(substr($0, 6, RLENGTH - 6) in n)) print }' "$work/new.edn" "$rtref"; cat "$work/new.edn"; } | LC_ALL=C sort
+      echo "]"; } > "$rtref.new"
+    mv "$rtref.new" "$rtref"
+    echo "record-rt: $(wc -l < "$work/new.edn") modules recorded, $(grep -c '^{:id' "$rtref") in $rtref" ;;
+  record-opt)
+    # record-opt LIST...: opt -passes=verify's verdict, first message and stderr (its digest, paths normalized: norm_sha) of each
+    # module of the lists recorded into REF (test/llvm/ref-opt23.edn; REPR_LLVM_REF another), with the module's digest; the entries
+    # of other modules kept
+    shift; opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
+    [ -x "$opt" ] || { echo "record-opt: no $opt" >&2; exit 2; }
+    work=$root/.tmp/repr-llvm/record-opt; rm -rf "$work"; mkdir -p "$work/opt"
+    cat "$@" | grep . | awk -F'\t' '!s[$1]++' > "$work/list"  # an id in two lists is one module (the essential copies)
+    opt_run "$work/list" "$work" "$opt"
+    esc() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
+    while IFS=$'\t' read -r n p; do
+      v=$(awk -F'\t' -v n="$n" '$1 == n { print $2; exit }' "$work/opt.tsv")
+      m=$(awk -F'\t' -v n="$n" '$1 == n { print $3; exit }' "$work/opt.tsv" | esc)
+      printf '{:id "%s" :ll "%s" :verdict :%s :first "%s" :stderr "%s" :stderr-bytes %s}\n' "$n" "$(sha256sum < "$p" | cut -d' ' -f1)" "$v" "$m" \
+        "$(norm_sha "$work/opt/$n.log" "$p" "$opt")" "$(wc -c < "$work/opt/$n.log")"
+    done < "$work/list" > "$work/new.edn"
+    touch "$optref"
+    { echo ";; opt -passes=verify's runs of repr/llvm's verify-check modules (bin/repr-llvm record-opt LIST...; doc/llvm/LLVM-CROP-SURVEY.md, \"As built: LL6\"):"
+      echo ";; $("$opt" --version | grep -m1 -i 'version' | sed 's/^ *//') (the host's llvm23); each module's SHA-256 (:ll), opt's verdict (:valid, :invalid, :debug:"
+      echo ";; the debug info stripped with a warning), its first message as verify-check takes it, and its whole stderr's SHA-256 with the module's"
+      echo ";; path written <input> and opt's own path opt; verify-check reads it when opt is absent (or REPR_LLVM_REF names it). Read with the Clojure reader."
+      echo "["
+      { awk 'FILENAME == ARGV[1] { if (match($0, /^\{:id "[^"]*"/)) n[substr($0, 6, RLENGTH - 6)] = 1; next }
+             /^\{:id "/ { match($0, /^\{:id "[^"]*"/); if (!(substr($0, 6, RLENGTH - 6) in n)) print }' "$work/new.edn" "$optref"; cat "$work/new.edn"; } | LC_ALL=C sort
+      echo "]"; } > "$optref.new"
+    mv "$optref.new" "$optref"
+    echo "record-opt: $(wc -l < "$work/new.edn") modules recorded, $(grep -c '^{:id' "$optref") in $optref" ;;
+  verify-check)
+    list=$2 work=$3
+    mkdir -p "$work/opt"; work=$(cd "$work" && pwd)
+    opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
+    rm -rf "$work/arb"; mkdir -p "$work/arb"
+    # the modules' own verdicts (mode own); the others are opt's (live or recorded)
+    if [ "$judge_mode" = own ]; then own_verdicts "$list" "$work/own.tsv"
+    else awk -F'\t' 'NF { print $1 "\t-\t" }' "$list" > "$work/own.tsv"; fi
+    # lit's substitution (own_verdicts' SED): a module judged by its own verdict whose RUN line feeds it through sed is read as
+    # sed's output, WORK/subst/NAME.ll, as the test's tools read it
+    rm -rf "$work/subst"; mkdir -p "$work/subst"; : > "$work/input.list"
+    while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
+      sx=$(awk -F'\t' -v n="$n" '$1 == n && ($2 == "valid" || $2 == "invalid") { print $4; exit }' "$work/own.tsv")
+      if [ -n "$sx" ]; then sed -e "$sx" "$p" > "$work/subst/$n.ll"; printf '%s\t%s\n' "$n" "$work/subst/$n.ll" >> "$work/input.list"
+      else printf '%s\t%s\n' "$n" "$p" >> "$work/input.list"; fi
+    done < "$list"
+    REPR_LLVM_OPT=$opt REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm verify-list "$work/input.list" "$work/arbace.tsv" "$work/arb"
+    awk -F'\t' 'FILENAME == ARGV[1] { if ($2 != "-") o[$1] = 1; next } NF && !($1 in o)' "$work/own.tsv" "$list" > "$work/opt.list"
+    : > "$work/ref.tsv"
+    if [ "$judge_mode" = live ]; then
+      [ -x "$opt" ] || { echo "verify-check: REPR_LLVM_JUDGE=live and no $opt" >&2; exit 2; }
+      opt_run "$work/opt.list" "$work" "$opt"; mode=opt
+    else
+      # opt's verdict, first message and stderr's digest from the record; a module whose digest is not the recorded one's is
+      # `stale`, one not recorded `unrecorded` (each a different verdict)
+      [ -f "$optref" ] || { echo "verify-check: no opt reference $optref" >&2; exit 2; }
+      awk -F'\t' -v ref="$optref" 'BEGIN { while ((getline l < ref) > 0) if (l ~ /^\{:id "/) {
+            id = l; sub(/^\{:id "/, "", id); sub(/".*/, "", id); R[id] = l } }
+        function field(l, k,   m) { if (match(l, ":" k " \"([^\"\\\\]|\\\\.)*\"")) { m = substr(l, RSTART + length(k) + 3, RLENGTH - length(k) - 4); gsub(/\\"/, "\"", m); gsub(/\\\\/, "\\", m); return m } return "" }
+        function kw(l, k) { if (match(l, ":" k " :[a-z]+")) return substr(l, RSTART + length(k) + 3, RLENGTH - length(k) - 3); return "" }
+        NF { cmd = "sha256sum < \"" $2 "\""; cmd | getline h; close(cmd); split(h, a, " ")
+             if (!($1 in R)) { print $1 "\tunrecorded\t\t-"; next }
+             l = R[$1]; if (field(l, "ll") != a[1]) { print $1 "\tstale\t\t-"; next }
+             print $1 "\t" kw(l, "verdict") "\t" field(l, "first") "\t" field(l, "stderr") }' "$work/opt.list" > "$work/ref.tsv"
+      cut -f1-3 "$work/ref.tsv" > "$work/opt.tsv"; mode=ref
+    fi
+    # the reference of each module: its own verdict (and declared fragment), else opt's
+    awk -F'\t' 'FILENAME == ARGV[1] { if ($2 != "-") { v[$1] = $2; m[$1] = $3; own[$1] = 1; mu[$1] = $5 } next } { v[$1] = $2; m[$1] = $3 }
+      END { for (k in v) print k "\t" v[k] "\t" m[k] "\t" (k in own ? "own" : "opt") "\t" mu[k] }' "$work/own.tsv" "$work/opt.tsv" > "$work/reference.tsv"
+    # the verdicts side by side: NAME, the reference's, Arbace's, same-verdict, same-message, the reference's message, Arbace's, and
+    # whose reference it is (own or opt). An own verdict: `valid` is met by Arbace's valid or debug (taken with a warning), `invalid`
+    # by invalid; its message is the declared fragment, met when verify's output holds it (`-` when the test declares none)
+    awk -F'\t' -v arb="$work/arb" 'NR == FNR { v[$1] = $2; m[$1] = $3; w[$1] = $4; mu[$1] = $5; next }
+      { if (w[$1] == "own") {
+          # a mutant, its own verdict (LLS33 (b)): valid is valid alone, debug (the debug info stripped) debug, with its message
+          sv = ((v[$1] == "valid" && ($2 == "valid" || ($2 == "debug" && mu[$1] != "mutant"))) || (v[$1] == "invalid" && $2 == "invalid") || (v[$1] == "debug" && $2 == "debug")) ? "same" : "differs"
+          if ((v[$1] != "invalid" && v[$1] != "debug") || m[$1] == "") sm = "-"
+          else { f = arb "/" $1 ".err"; t = ""; while ((getline l < f) > 0) t = t l "\n"; close(f); sm = index(t, m[$1]) ? "same" : "differs" }
+        } else {
+          sv = (v[$1] == $2) ? "same" : "differs"; sm = (v[$1] == "valid" && $2 == "valid") ? "-" : (m[$1] == $3 ? "same" : "differs") }
+        print $1 "\t" v[$1] "\t" $2 "\t" sv "\t" sm "\t" m[$1] "\t" $3 "\t" (w[$1] == "own" ? "own" : "opt") }' "$work/reference.tsv" "$work/arbace.tsv" > "$work/verify.tsv"
+    # the whole of opt's stderr against what verify prints (WORK/full.tsv: NAME, same, differs, or own: judged by its own verdict);
+    # from the record by the digests of both with the paths normalized (norm_sha)
+    : > "$work/full.tsv"
+    while IFS=$'\t' read -r n p; do
+      [ -n "$n" ] || continue
+      if grep -q "^$n	\(valid\|invalid\|debug\)	" "$work/own.tsv"; then f=own
+      elif [ "$mode" = opt ]; then
+        if cmp -s "$work/opt/$n.log" "$work/arb/$n.err"; then f=same; else f=differs; fi
+      else
+        r=$(awk -F'\t' -v n="$n" '$1 == n { print $4; exit }' "$work/ref.tsv")
+        if [ "$r" = "$(norm_sha "$work/arb/$n.err" "$p" "$opt")" ]; then f=same; else f=differs; fi
+      fi
+      printf '%s\t%s\n' "$n" "$f" >> "$work/full.tsv"
+    done < "$list"
+    n=$(wc -l < "$work/verify.tsv")
+    sv=$(awk -F'\t' '$4 == "same"' "$work/verify.tsv" | wc -l)
+    nown=$(awk -F'\t' '$8 == "own"' "$work/verify.tsv" | wc -l)
+    ninv=$(awk -F'\t' '$2 == "invalid" || $2 == "debug"' "$work/verify.tsv" | wc -l)
+    sm=$(awk -F'\t' '($2 == "invalid" || $2 == "debug") && $5 != "differs"' "$work/verify.tsv" | wc -l)
+    nf=$(grep -c '	same$' "$work/full.tsv" || true); nfo=$(grep -c '	\(same\|differs\)$' "$work/full.tsv" || true)
+    # the names of a known file (REPR_LLVM_KNOWN: NAME<tab>CLASS<tab>reason) that differ are counted apart
+    nk=0
+    if [ -n "${REPR_LLVM_KNOWN:-}" ] && [ -f "$REPR_LLVM_KNOWN" ]; then
+      nk=$(awk -F'\t' 'NR == FNR { k[$1] = 1; next } $2 == "differs" && ($1 in k)' "$REPR_LLVM_KNOWN" "$work/full.tsv" | wc -l)
+    fi
+    echo "verify-check: $sv of $n verdicts as the reference's ($nown by their own verdict, $((n - nown)) opt's, $mode); $sm of $ninv rejections with the reference's message; $nf of $nfo whole stderr equal to opt's${REPR_LLVM_KNOWN:+ ($nk more differ in the known classes)}"
+    # the negative controls (GTS81 (a)): ID SUBJECT REFERENCE; the SUBJECT's verify output judged against the REFERENCE's reference
+    # (its own verdict, or opt's) by the judge above: the verdict, the message, opt's whole stderr; each must differ somewhere
+    ctl=0
+    controls=${REPR_LLVM_VERIFY_CONTROLS:-$root/test/repr/llvm/verify-controls.txt}
+    if [ -f "$controls" ]; then
+      while read -r cid csub cref _; do
+        case $cid in ''|'#'*) continue ;; esac
+        if ! grep -q "^$csub	" "$work/arbace.tsv" || ! grep -q "^$cref	" "$work/reference.tsv"; then echo "control $cid left: $csub or $cref is not in the list"; continue; fi
+        r=$(awk -F'\t' -v s="$csub" -v c="$cref" -v arb="$work/arb" 'FILENAME == ARGV[1] { if ($1 == c) { v = $2; m = $3; w = $4; mu = $5 } next }
+          $1 == s { if (w == "own") {
+              sv = ((v == "valid" && ($2 == "valid" || ($2 == "debug" && mu != "mutant"))) || (v == "invalid" && $2 == "invalid") || (v == "debug" && $2 == "debug")) ? "same" : "differs"
+              if ((v != "invalid" && v != "debug") || m == "") sm = "same"; else { f = arb "/" s ".err"; t = ""; while ((getline l < f) > 0) t = t l "\n"; close(f); sm = index(t, m) ? "same" : "differs" }
+              print sv "\t" sm "\town" }
+            else { sv = (v == $2) ? "same" : "differs"; sm = (v == "valid" && $2 == "valid") ? "same" : (m == $3 ? "same" : "differs"); print sv "\t" sm "\topt" } }' "$work/reference.tsv" "$work/arbace.tsv")
+        IFS=$'\t' read -r csv csm cw <<< "$r"
+        cfull=-
+        if [ "$cw" = opt ]; then
+          cp_=$(awk -F'\t' -v n="$csub" '$1 == n {print $2; exit}' "$list")
+          if [ "$mode" = opt ]; then cmp -s "$work/opt/$cref.log" "$work/arb/$csub.err" && cfull=same || cfull=differs
+          else rr=$(awk -F'\t' -v n="$cref" '$1 == n { print $4; exit }' "$work/ref.tsv")
+               [ "$rr" = "$(norm_sha "$work/arb/$csub.err" "$cp_" "$opt")" ] && cfull=same || cfull=differs; fi
+        fi
+        if [ "$csv" = differs ] || [ "$csm" = differs ] || [ "$cfull" = differs ]; then
+          echo "control $cid fails as it must ($csub against $cref's $cw reference: verdict $csv, message $csm, stderr $cfull)"
+        else echo "control passed: $cid ($csub against $cref's $cw reference: verdict $csv, message $csm, stderr $cfull)"; ctl=1; fi
+      done < "$controls"
+    fi
+    [ "$n" -gt 0 ] && [ "$sv" = "$n" ] && [ "$ctl" = 0 ] ;;
+  heldout-check)
+    # LLS45 (a): a held-out set made afresh by the current mutator and judged without opt: test/llvm/heldout-bases.txt's 41 modules
+    # (the pinned pack tx, the checkout's hw, llvm/test's from the pinned tarball's extraction), 300 mutants of each of the families
+    # intrinsics, metadata and debug from the fixed seed (REPR_LLVM_HELDOUT_SEED, default 1200000), verify-check in own mode: every
+    # mutant with an own verdict met by Arbace's verifier (the verdict and the declared message); the unknowns (left to opt) only
+    # counted; the negative controls test/repr/llvm/heldout-controls.txt (two mutants of the set crossed) must fail
+    work=${2:-$root/.tmp/repr-llvm/heldout}; seed=${REPR_LLVM_HELDOUT_SEED:-1200000}
+    rm -rf "$work"; mkdir -p "$work/tx"; work=$(cd "$work" && pwd)
+    (cd "$root/test/llvm/ir" && sha256sum -c --quiet tx.tar.xz.sha256) >&2 || { echo "heldout-check: tx.tar.xz does not match its pin" >&2; exit 2; }
+    xz -dc "$root/test/llvm/ir/tx.tar.xz" | tar -xf - -C "$work/tx"
+    grep -v '^#' "$root/test/llvm/heldout-bases.txt" | grep . > "$work/bases.rel"
+    awk -F'\t' '$2 ~ /^llvm\/test\//' "$work/bases.rel" > "$work/llvmtest.rel"
+    "$root/bin/llvm-corpus" resolve "$work/llvmtest.rel" "$work/llvmtest.abs"
+    awk -F'\t' -v r="$root" -v tx="$work/tx" 'FILENAME == ARGV[1] { a[$1] = $2; next }
+      { s = $2; print $1 "\t" (sub(/^tx:/, "", s) ? tx "/" s ".ll" : (s ~ /^test\// ? r "/" s : a[$1])) }' "$work/llvmtest.abs" "$work/bases.rel" > "$work/bases.list"
+    missing=$(awk -F'\t' '{ if ((getline l < $2) < 0) print $1; close($2) }' "$work/bases.list" | head -3)
+    [ -z "$missing" ] || { echo "heldout-check: not found: $missing ... (bin/llvm-corpus extract)" >&2; exit 2; }
+    : > "$work/mutants.list"
+    for fam in intrinsics metadata debug; do
+      "$0" mutants "$work/bases.list" "$work/m-$fam" 300 "$seed" "$fam" > "$work/m-$fam.log" 2>&1 || { tail -3 "$work/m-$fam.log" >&2; exit 1; }
+      cat "$work/m-$fam/mutants.list" >> "$work/mutants.list"
+    done
+    REPR_LLVM_JUDGE=own REPR_LLVM_VERIFY_CONTROLS=$root/test/repr/llvm/heldout-controls.txt "$0" verify-check "$work/mutants.list" "$work/vc" > "$work/vc.out" 2>&1 || true
+    [ -f "$work/vc/verify.tsv" ] || { tail -5 "$work/vc.out" >&2; echo "heldout-check: verify-check wrote nothing" >&2; exit 1; }
+    n=$(wc -l < "$work/mutants.list")
+    own=$(awk -F'\t' '$8 == "own"' "$work/vc/verify.tsv" | wc -l)
+    bad=$(awk -F'\t' '$8 == "own" && ($4 != "same" || $5 == "differs")' "$work/vc/verify.tsv" | tee "$work/disagree.tsv" | wc -l)
+    st=0
+    grep '^control ' "$work/vc.out" || true
+    if grep -q '^control passed\|^control .* left' "$work/vc.out"; then echo "FAIL heldout-check: a negative control passes or is left"; st=1; fi
+    nctl=$(grep -c '^control .* fails as it must' "$work/vc.out" || true)
+    [ "$nctl" -gt 0 ] || { echo "FAIL heldout-check: no negative control failed"; st=1; }
+    # floors (REVIEW2.md, llvm-props4 1): the set is 900 mutants and at least REPR_LLVM_HELDOUT_MIN_OWN of them carry an own verdict
+    # (886 of 900 recorded at LLS45 (a); 880 leaves a margin of 6 for a mutator or rule change, a collapse to few or 0 fails)
+    want_n=${REPR_LLVM_HELDOUT_N:-900}; min_own=${REPR_LLVM_HELDOUT_MIN_OWN:-880}
+    if [ "$n" != "$want_n" ]; then echo "FAIL heldout-check: $n mutants, expected $want_n"; st=1; fi
+    if [ "$own" -lt "$min_own" ]; then echo "FAIL heldout-check: $own own verdicts, fewer than the floor $min_own"; st=1; fi
+    if [ "$bad" != 0 ]; then echo "FAIL heldout-check: $bad own verdicts not met by Arbace's verifier ($work/disagree.tsv):"; cut -f1-7 "$work/disagree.tsv" | head -10 | cut -c1-300; st=1; fi
+    echo "heldout-check: $n mutants (seed $seed, 300 each of intrinsics, metadata, debug); $own own verdicts, $((own - bad)) met by Arbace's verifier, $((n - own)) unknown (left to opt); $nctl negative controls fail as they must"
+    exit $st ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

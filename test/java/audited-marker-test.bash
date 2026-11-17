@@ -186,7 +186,7 @@ for lv in $(grep -o 'java-{[a-z,-]*}' "$t/jj.edn" | head -1 | sed 's/^java-{//; 
   grep -qF "\"java-$lv/audited\"" "$t/jj.edn" || miss="$miss java-$lv/audited"
 done
 if [ -s "$t/jj.edn" ] && [ -z "$miss" ] && grep -q 'java-interp/audited' "$t/jj.edn"; then ok "D1 java-judge's :uses names every producer's audited marker (088 finding 1)"; else no "D1 java-judge's :uses misses:${miss:- the step}"; fi
-if step java-check-judge | grep -qF ':uses ["java-check"]'; then ok "D1b java-check-judge's :uses is java-check's whole output, its marker included"; else no "D1b java-check-judge's :uses"; fi
+if grep -qF ':uses ["java-check"]' <<< "$(step java-check-judge)"; then ok "D1b java-check-judge's :uses is java-check's whole output, its marker included"; else no "D1b java-check-judge's :uses"; fi
 awk '/\{:id :audit-timeout/ { on = 1; print; next } on && /\{:id / { exit } on { print }' "$t/div.edn" > "$t/at.edn"
 if [ -s "$t/at.edn" ] && ! grep -qE '^ *:unstable ' "$t/at.edn" && ! grep -qE '^ *:tests ' "$t/at.edn" && grep -qE '^ *:audited true' "$t/at.edn"; then ok "D2 :audit-timeout: :audited, no :unstable, no :tests (088 finding 2)"; else no "D2 :audit-timeout still holds by list (:unstable or :tests)"; fi
 inlk=""

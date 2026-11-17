@@ -388,7 +388,7 @@
 #define __UINT_LEAST8_MAX__ 255
 #define __UINT_LEAST8_TYPE__ unsigned char
 #define __USER_LABEL_PREFIX__ 
-#define __VERSION__ "Alpine Clang 23.1.4"
+#define __VERSION__ "Alpine Clang 23.1.5"
 #define __WCHAR_MAX__ 2147483647
 #define __WCHAR_MIN__ (-__WCHAR_MAX__ - 1)
 #define __WCHAR_TYPE__ int
@@ -404,8 +404,8 @@
 #define __clang_literal_encoding__ "UTF-8"
 #define __clang_major__ 23
 #define __clang_minor__ 1
-#define __clang_patchlevel__ 4
-#define __clang_version__ "23.1.4 "
+#define __clang_patchlevel__ 5
+#define __clang_version__ "23.1.5 "
 #define __clang_wide_literal_encoding__ "UTF-32"
 #define __code_model_small__ 1
 #define __cplusplus 202002L

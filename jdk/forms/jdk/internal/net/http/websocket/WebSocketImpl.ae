@@ -1,0 +1,598 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/websocket/WebSocketImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.websocket)
+
+(import '(java.io IOException)
+        '(java.lang.ref Reference)
+        '(java.net ProtocolException URI)
+        '(java.net.http HttpClient WebSocket WebSocket$Listener)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset CharacterCodingException CodingErrorAction StandardCharsets)
+        '(java.util Objects)
+        '(java.util.concurrent CompletableFuture CompletionStage Executor)
+        '(java.util.concurrent.atomic AtomicBoolean AtomicLong AtomicReference)
+        '(java.util.function BiConsumer Function Supplier)
+        '(jdk.internal.net.http HttpClientFacade)
+        '(jdk.internal.net.http.common Demand
+                                       Log
+                                       Logger
+                                       MinimalFuture
+                                       SequentialScheduler
+                                       SequentialScheduler$CompleteRestartableTask
+                                       Utils))
+
+(defclass ^:public ^:final WebSocketImpl
+  :implements [WebSocket]
+
+  (field ^:private ^:static ^:final ^Logger debug
+    (Utils/getWebSocketLogger (method-ref Supplier ^String [] "[WebSocket]" String/.toString)))
+
+  (field ^:private ^:final ^AtomicLong sendCounter (AtomicLong.))
+
+  (field ^:private ^:final ^AtomicLong receiveCounter (AtomicLong.))
+
+  (defclass ^:enum State
+    (constants OPEN IDLE WAITING TEXT BINARY PING PONG CLOSE ERROR))
+
+  (field ^:private ^:final ^{:tag (AtomicReference ByteBuffer)} lastAutomaticPong
+    (AtomicReference.))
+
+  (field ^:private ^:final ^{:tag (MinimalFuture WebSocket)} DONE
+    (MinimalFuture/completedFuture this))
+
+  (field ^:private ^:volatile ^boolean inputClosed)
+
+  (field ^:private ^:final ^AtomicBoolean outputClosed (AtomicBoolean.))
+
+  (field ^:private ^:final ^{:tag (AtomicReference State)} state (AtomicReference. State/OPEN))
+
+  (field ^:private ^boolean last)
+
+  (field ^:private ^ByteBuffer binaryData)
+
+  (field ^:private ^CharSequence text)
+
+  (field ^:private ^int statusCode)
+
+  (field ^:private ^String reason)
+
+  (field ^:private ^:final ^{:tag (AtomicReference Throwable)} error (AtomicReference.))
+
+  (field ^:private ^:final ^URI uri)
+
+  (field ^:private ^:final ^String subprotocol)
+
+  (field ^:private ^:final ^WebSocket$Listener listener)
+
+  (field ^:private ^:final ^AtomicBoolean pendingTextOrBinary (AtomicBoolean.))
+
+  (field ^:private ^:final ^AtomicBoolean pendingPingOrPong (AtomicBoolean.))
+
+  (field ^:private ^:final ^Transport transport)
+
+  (field ^:private ^:final ^SequentialScheduler receiveScheduler
+    (SequentialScheduler. (ReceiveTask.)))
+
+  (field ^:private ^:final ^Demand demand (Demand.))
+
+  (field ^:private ^:final ^Executor clientExecutor)
+
+  (method ^:public ^:static newInstanceAsync ^{:tag (CompletableFuture WebSocket)} [^BuilderImpl b]
+    (let [^{:tag (Function OpeningHandshake$Result WebSocket)} newWebSocket
+            (lambda Function ^WebSocket [^OpeningHandshake$Result r]
+              (let [^WebSocket ws (WebSocketImpl/newInstance
+                                    (.getUri b)
+                                    (.getClient b)
+                                    (.-subprotocol r)
+                                    (.getListener b)
+                                    (.-transport r))]
+                (Reference/reachabilityFence b)
+                ws))
+          ^:mutable ^OpeningHandshake h nil]
+      (try
+        (set! h (OpeningHandshake. b))
+        (catch Throwable e (return (MinimalFuture/failedFuture e))))
+      (.thenApply (.send h) newWebSocket)))
+
+  (method ^:static newInstance ^WebSocketImpl [^URI uri ^HttpClient client ^String subprotocol
+                                               ^WebSocket$Listener listener
+                                               ^TransportFactory transport]
+    (let [ws (WebSocketImpl. uri client subprotocol listener transport)] (.signalOpen ws) ws))
+
+  (constructor ^:private [this ^URI uri ^HttpClient client ^String subprotocol
+                          ^WebSocket$Listener listener ^TransportFactory transportFactory]
+    (set! (.-uri this) (cast URI (Objects/requireNonNull uri)))
+    (set! (.-clientExecutor this) (.theExecutor (cast HttpClientFacade client)))
+    (set! (.-subprotocol this) (cast String (Objects/requireNonNull subprotocol)))
+    (set! (.-listener this) (cast WebSocket$Listener (Objects/requireNonNull listener)))
+    (set! (.-transport this)
+          (.createTransport transportFactory (MessageQueue. 6) (SignallingMessageConsumer.))))
+
+  (method ^:public sendText ^{:tag (CompletableFuture WebSocket)} [this ^CharSequence message
+                                                                   ^boolean last]
+    (Objects/requireNonNull message)
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet sendCounter))
+        (.log debug
+              "enter send text %s payload length=%s last=%s"
+              (new Object/1 [id (.length message) last])))
+      (let [^{:tag (CompletableFuture WebSocket)} result (if (not (.setPendingTextOrBinary this))
+                                                             (MinimalFuture/failedFuture
+                                                               (IllegalStateException.
+                                                                 "Send pending"))
+                                                             (.sendText
+                                                               transport
+                                                               message
+                                                               last
+                                                               this
+                                                               (lambda BiConsumer ^void [^WebSocket r
+                                                                                         ^Throwable e]
+                                                                 (.clearPendingTextOrBinary this))))]
+        (when (.on debug) (.log debug "exit send text %s returned %s" (new Object/1 [id result])))
+        (.replaceNull this result))))
+
+  (method ^:public sendBinary ^{:tag (CompletableFuture WebSocket)} [this ^ByteBuffer message
+                                                                     ^boolean last]
+    (Objects/requireNonNull message)
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet sendCounter))
+        (.log debug "enter send binary %s payload=%s last=%s" (new Object/1 [id message last])))
+      (let [^{:tag (CompletableFuture WebSocket)} result (if (not (.setPendingTextOrBinary this))
+                                                             (MinimalFuture/failedFuture
+                                                               (IllegalStateException.
+                                                                 "Send pending"))
+                                                             (.sendBinary
+                                                               transport
+                                                               message
+                                                               last
+                                                               this
+                                                               (lambda BiConsumer ^void [^WebSocket r
+                                                                                         ^Throwable e]
+                                                                 (.clearPendingTextOrBinary this))))]
+        (when (.on debug) (.log debug "exit send binary %s returned %s" (new Object/1 [id result])))
+        (.replaceNull this result))))
+
+  (method ^:private clearPendingTextOrBinary ^void [this]
+    (.set pendingTextOrBinary false))
+
+  (method ^:private setPendingTextOrBinary ^boolean [this]
+    (.compareAndSet pendingTextOrBinary false true))
+
+  (method ^:private replaceNull ^{:tag (CompletableFuture WebSocket)} [this
+                                                                       ^{:tag (CompletableFuture WebSocket)} cf]
+    (if (nil? cf) DONE cf))
+
+  (method ^:public sendPing ^{:tag (CompletableFuture WebSocket)} [this ^ByteBuffer message]
+    (Objects/requireNonNull message)
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet sendCounter))
+        (.log debug "enter send ping %s payload=%s" (new Object/1 [id message])))
+      (let [^{:tag (CompletableFuture WebSocket)} result (if (not (.setPendingPingOrPong this))
+                                                             (MinimalFuture/failedFuture
+                                                               (IllegalStateException.
+                                                                 "Send pending"))
+                                                             (.sendPing
+                                                               transport
+                                                               message
+                                                               this
+                                                               (lambda BiConsumer ^void [^WebSocket r
+                                                                                         ^Throwable e]
+                                                                 (.clearPendingPingOrPong this))))]
+        (when (.on debug) (.log debug "exit send ping %s returned %s" (new Object/1 [id result])))
+        (.replaceNull this result))))
+
+  (method ^:public sendPong ^{:tag (CompletableFuture WebSocket)} [this ^ByteBuffer message]
+    (Objects/requireNonNull message)
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet sendCounter))
+        (.log debug "enter send pong %s payload=%s" (new Object/1 [id message])))
+      (let [^{:tag (CompletableFuture WebSocket)} result (if (not (.setPendingPingOrPong this))
+                                                             (MinimalFuture/failedFuture
+                                                               (IllegalStateException.
+                                                                 "Send pending"))
+                                                             (.sendPong
+                                                               transport
+                                                               message
+                                                               this
+                                                               (lambda BiConsumer ^void [^WebSocket r
+                                                                                         ^Throwable e]
+                                                                 (.clearPendingPingOrPong this))))]
+        (when (.on debug) (.log debug "exit send pong %s returned %s" (new Object/1 [id result])))
+        (.replaceNull this result))))
+
+  (method ^:private setPendingPingOrPong ^boolean [this]
+    (.compareAndSet pendingPingOrPong false true))
+
+  (method ^:private clearPendingPingOrPong ^void [this]
+    (.set pendingPingOrPong false))
+
+  (method ^:public sendClose ^{:tag (CompletableFuture WebSocket)} [this ^int statusCode
+                                                                    ^String reason]
+    (Objects/requireNonNull reason)
+    (let [^:mutable id 0]
+      (when (.on debug)
+        (set! id (.incrementAndGet sendCounter))
+        (.log debug
+              "enter send close %s statusCode=%s reason.length=%s"
+              (new Object/1 [id statusCode (.length reason)])))
+      (let [^{:tag (CompletableFuture WebSocket)} result (cond
+                                                           (not
+                                                             (StatusCodes/isLegalToSendFromClient
+                                                               statusCode))
+                                                             (MinimalFuture/failedFuture
+                                                               (IllegalArgumentException.
+                                                                 "statusCode"))
+                                                           (not
+                                                             (WebSocketImpl/isLegalReason reason))
+                                                             (MinimalFuture/failedFuture
+                                                               (IllegalArgumentException. "reason"))
+                                                           (not
+                                                             (.compareAndSet
+                                                               outputClosed
+                                                               false
+                                                               true))
+                                                             (MinimalFuture/failedFuture
+                                                               (IOException. "Output closed"))
+                                                           :else
+                                                             (.sendClose0 this statusCode reason))]
+        (when (.on debug) (.log debug "exit send close %s returned %s" (new Object/1 [id result])))
+        (.replaceNull this result))))
+
+  (method ^:private ^:static isLegalReason ^boolean [^String reason]
+    (if (> (.length reason) 123)
+        false
+        (let [encoder (.onUnmappableCharacter
+                        (.onMalformedInput (.newEncoder StandardCharsets/UTF_8)
+                                           CodingErrorAction/REPORT)
+                        CodingErrorAction/REPORT)
+              ^:mutable ^ByteBuffer bytes nil]
+          (try
+            (set! bytes (.encode encoder (CharBuffer/wrap reason)))
+            (catch CharacterCodingException ignored (return false)))
+          (<= (.remaining bytes) 123))))
+
+  (method ^:private sendClose0 ^{:tag (CompletableFuture WebSocket)} [this ^int statusCode
+                                                                      ^String reason]
+    (.sendClose transport
+                statusCode
+                reason
+                this
+                (lambda BiConsumer ^void [^WebSocket r ^Throwable e] (.processCloseError this e))))
+
+  (method ^:private processCloseError ^void [this ^Throwable e]
+    (if (nil? e)
+        (.log debug "send close completed successfully")
+        (.log debug "send close completed with error" e))
+    (.set outputClosed true)
+    (try (.closeOutput transport) (catch IOException ignored)))
+
+  (method ^:public request ^void [this ^long n]
+    (when (.on debug) (.log debug "request %s" (new Object/1 [n])))
+    (when (.increase demand n) (.runOrSchedule receiveScheduler clientExecutor)))
+
+  (method ^:public getSubprotocol ^String [this] subprotocol)
+
+  (method ^:public isOutputClosed ^boolean [this] (.get outputClosed))
+
+  (method ^:public isInputClosed ^boolean [this] inputClosed)
+
+  (method ^:public abort ^void [this]
+    (when (.on debug) (.log debug "abort"))
+    (set! inputClosed true)
+    (.set outputClosed true)
+    (.stop receiveScheduler)
+    (.close this))
+
+  (method ^:public toString ^String [this]
+    (java-str (.toString super)
+              "[uri="
+              uri
+              (if (not (.isEmpty subprotocol)) (java-str ", subprotocol=" subprotocol) "")
+              "]"))
+
+  (defclass ^:private ReceiveTask
+    :extends SequentialScheduler$CompleteRestartableTask
+
+    (method ^:public run ^void [this]
+      (when (.on debug) (.log debug "enter receive task"))
+      (while (not (.isStopped receiveScheduler))
+        (let [s (cast State (.get state))]
+          (when (.on debug) (.log debug "receive state: %s" (new Object/1 [s])))
+          (try
+            (switch s
+              OPEN
+                (do (.processOpen this) (.tryChangeState WebSocketImpl/this State/OPEN State/IDLE))
+              TEXT
+                (do (.processText this) (.tryChangeState WebSocketImpl/this State/TEXT State/IDLE))
+              BINARY
+                (do
+                  (.processBinary this)
+                  (.tryChangeState WebSocketImpl/this State/BINARY State/IDLE))
+              PING
+                (do (.processPing this) (.tryChangeState WebSocketImpl/this State/PING State/IDLE))
+              PONG
+                (do (.processPong this) (.tryChangeState WebSocketImpl/this State/PONG State/IDLE))
+              CLOSE (do (.processClose this) (break))
+              ERROR (do (.processError this) (break))
+              IDLE
+                (do
+                  (when (and (.tryDecrement demand)
+                             (.tryChangeState WebSocketImpl/this State/IDLE State/WAITING))
+                    (.request transport 1))
+                  (break))
+              WAITING (break)
+              (throw (InternalError. (String/valueOf s))))
+            (catch Throwable t (.signalError WebSocketImpl/this t)))))
+      (when (.on debug) (.log debug "exit receive task")))
+
+    (method ^:private processError :throws [IOException] ^void [this]
+      (when (.on debug) (.log debug "processError"))
+      (.closeInput transport)
+      (.stop receiveScheduler)
+      (let [^:mutable err (cast Throwable (.get error))]
+        (when (instance? FailWebSocketException err)
+          (let [code1 (.getStatusCode (cast FailWebSocketException err))]
+            (set! err (.initCause (ProtocolException.) err))
+            (when (.on debug)
+              (.log debug
+                    "failing %s with error=%s statusCode=%s"
+                    (new Object/1 [WebSocketImpl/this err code1])))
+            (.sendCloseSilently WebSocketImpl/this code1)))
+        (let [^:mutable id 0]
+          (when (.on debug)
+            (set! id (.incrementAndGet receiveCounter))
+            (.log debug "enter onError %s error=%s" (new Object/1 [id err])))
+          (try
+            (.onError listener WebSocketImpl/this err)
+            (finally (when (.on debug) (.log debug "exit onError %s" (new Object/1 [id]))))))))
+
+    (method ^:private processClose :throws [IOException] ^void [this]
+      (.log debug "processClose")
+      (.closeInput transport)
+      (.stop receiveScheduler)
+      (let [^:mutable ^{:tag (CompletionStage ?)} cs nil
+            ^:mutable id 0]
+        (when (.on debug)
+          (set! id (.incrementAndGet receiveCounter))
+          (.log debug
+                "enter onClose %s statusCode=%s reason.length=%s"
+                (new Object/1 [id statusCode (.length reason)])))
+        (try
+          (set! cs (.onClose listener WebSocketImpl/this statusCode reason))
+          (finally (.log debug "exit onClose %s returned %s" (new Object/1 [id cs]))))
+        (when (nil? cs) (set! cs DONE))
+        (let [^:mutable ^int code 0]
+          (if (or (== statusCode StatusCodes/NO_STATUS_CODE)
+                  (== statusCode StatusCodes/CLOSED_ABNORMALLY))
+              (do
+                (set! code WebSocket/NORMAL_CLOSURE)
+                (.log debug "using statusCode %s instead of %s" (new Object/1 [statusCode code])))
+              (set! code statusCode))
+          (.whenComplete cs
+                         (let [code code]
+                           (lambda BiConsumer ^void [r ^Throwable e]
+                             (when (.on debug)
+                               (.log
+                                 debug
+                                 "CompletionStage returned by onClose completed result=%s error=%s"
+                                 (new Object/1 [r e])))
+                             (.sendCloseSilently WebSocketImpl/this code)))))))
+
+    (method ^:private processPong ^void [this]
+      (let [^:mutable id 0]
+        (when (.on debug)
+          (set! id (.incrementAndGet receiveCounter))
+          (.log debug "enter onPong %s payload=%s" (new Object/1 [id binaryData])))
+        (let [^:mutable ^{:tag (CompletionStage ?)} cs nil]
+          (try
+            (set! cs (.onPong listener WebSocketImpl/this binaryData))
+            (finally
+              (when (.on debug) (.log debug "exit onPong %s returned %s" (new Object/1 [id cs]))))))))
+
+    (method ^:private processPing ^void [this]
+      (when (.on debug) (.log debug "processPing"))
+      (let [slice (.slice binaryData)]
+        (when-not (.get outputClosed)
+          (let [copy (.flip (.put (ByteBuffer/allocate (.remaining binaryData)) binaryData))]
+            (when-not (.trySwapAutomaticPong WebSocketImpl/this copy)
+              (let [^{:tag (BiConsumer WebSocketImpl Throwable)} reporter
+                      (lambda BiConsumer ^void [^WebSocketImpl r ^Throwable e]
+                        (when (some? e)
+                          (.signalError WebSocketImpl/this (Utils/getCompletionCause e))))]
+                (.sendPong transport
+                           (method-ref Supplier
+                                       ^ByteBuffer []
+                                       WebSocketImpl/this
+                                       WebSocketImpl/.clearAutomaticPong)
+                           WebSocketImpl/this
+                           reporter)))))
+        (let [^:mutable id 0]
+          (when (.on debug)
+            (set! id (.incrementAndGet receiveCounter))
+            (.log debug "enter onPing %s payload=%s" (new Object/1 [id slice])))
+          (let [^:mutable ^{:tag (CompletionStage ?)} cs nil]
+            (try
+              (set! cs (.onPing listener WebSocketImpl/this slice))
+              (finally
+                (when (.on debug) (.log debug "exit onPing %s returned %s" (new Object/1 [id cs])))))))))
+
+    (method ^:private processBinary ^void [this]
+      (let [^:mutable id 0]
+        (when (.on debug)
+          (set! id (.incrementAndGet receiveCounter))
+          (.log debug "enter onBinary %s payload=%s last=%s" (new Object/1 [id binaryData last])))
+        (let [^:mutable ^{:tag (CompletionStage ?)} cs nil]
+          (try
+            (set! cs (.onBinary listener WebSocketImpl/this binaryData last))
+            (finally
+              (when (.on debug) (.log debug "exit onBinary %s returned %s" (new Object/1 [id cs]))))))))
+
+    (method ^:private processText ^void [this]
+      (let [^:mutable id 0]
+        (when (.on debug)
+          (set! id (.incrementAndGet receiveCounter))
+          (.log debug
+                "enter onText %s payload.length=%s last=%s"
+                (new Object/1 [id (.length text) last])))
+        (let [^:mutable ^{:tag (CompletionStage ?)} cs nil]
+          (try
+            (set! cs (.onText listener WebSocketImpl/this text last))
+            (finally
+              (when (.on debug) (.log debug "exit onText %s returned %s" (new Object/1 [id cs]))))))))
+
+    (method ^:private processOpen ^void [this]
+      (let [^:mutable id 0]
+        (when (.on debug)
+          (set! id (.incrementAndGet receiveCounter))
+          (.log debug "enter onOpen %s" (new Object/1 [id])))
+        (try
+          (.onOpen listener WebSocketImpl/this)
+          (finally (when (.on debug) (.log debug "exit onOpen %s" (new Object/1 [id]))))))))
+
+  (method ^:private sendCloseSilently ^void [this ^int statusCode]
+    (.whenComplete (.sendClose0 this statusCode "")
+                   (lambda BiConsumer ^void [^WebSocket r ^Throwable e]
+                     (when (some? e)
+                       (when (.on debug)
+                         (.log debug
+                               "automatic closure completed with error"
+                               (new Object/1 [^Object e])))))))
+
+  (method ^:private clearAutomaticPong ^ByteBuffer [this]
+    (let [^:mutable ^ByteBuffer data nil]
+      (loop []
+        (set! data (cast ByteBuffer (.get lastAutomaticPong)))
+        (when (nil? data) (throw (InternalError.)))
+        (when-not (.compareAndSet lastAutomaticPong data nil) (recur)))
+      data))
+
+  (method ^:private trySwapAutomaticPong ^boolean [this ^ByteBuffer copy]
+    (let [^:mutable ^ByteBuffer message nil
+          ^:mutable ^boolean swapped false]
+      (while true
+        (set! message (cast ByteBuffer (.get lastAutomaticPong)))
+        (if (nil? message)
+            (do
+              (when-not (.compareAndSet lastAutomaticPong nil copy) (throw (InternalError.)))
+              (set! swapped false)
+              (break))
+            (when (.compareAndSet lastAutomaticPong message copy) (set! swapped true) (break))))
+      (when (.on debug)
+        (.log debug "swapped automatic pong from %s to %s" (new Object/1 [message copy])))
+      swapped))
+
+  (method ^:private signalOpen ^void [this]
+    (.log debug "signalOpen")
+    (.runOrSchedule receiveScheduler clientExecutor))
+
+  (method ^:private signalError ^void [this ^Throwable error]
+    (when (.on debug) (.log debug "signalError %s" (new Object/1 [^Object error])))
+    (set! inputClosed true)
+    (.set outputClosed true)
+    (if (or (not (.compareAndSet (.-error this) nil error)) (not (.trySetState this State/ERROR)))
+        (do (when (.on debug) (.log debug "signalError" error)) (Log/logError error))
+        (.close this)))
+
+  (method ^:private close ^void [this]
+    (when (.on debug) (.log debug "close"))
+    (let [^:mutable ^Throwable first nil]
+      (try
+        (.closeInput transport)
+        (catch Throwable t1 (set! first t1))
+        (finally
+          (let [^:mutable ^Throwable second nil]
+            (try
+              (.closeOutput transport)
+              (catch Throwable t2 (set! second t2))
+              (finally
+                (let [^:mutable ^Throwable e nil]
+                  (cond
+                    (and (some? first) (some? second))
+                      (do (.addSuppressed first second) (set! e first))
+                    (some? first) (set! e first)
+                    (some? second) (set! e second))
+                  (when (some? e) (when (.on debug) (.log debug "exception in close" e)))))))))))
+
+  (method ^:private signalClose ^void [this ^int statusCode ^String reason]
+    (set! inputClosed true)
+    (set! (.-statusCode this) statusCode)
+    (set! (.-reason this) reason)
+    (let [managed (.trySetState this State/CLOSE)]
+      (when (.on debug)
+        (.log debug
+              "signalClose statusCode=%s reason.length=%s: %s"
+              (new Object/1 [statusCode (.length reason) managed])))
+      (when managed
+        (try
+          (.closeInput transport)
+          (catch Throwable t
+            (when (.on debug) (.log debug "exception closing input" (new Object/1 [^Object t]))))))))
+
+  (defclass ^:private SignallingMessageConsumer
+    :implements [MessageStreamConsumer]
+
+    (method ^:public onText ^void [this ^CharSequence data ^boolean last]
+      (.acknowledgeReception transport)
+      (set! text data)
+      (set! (.-last WebSocketImpl/this) last)
+      (.tryChangeState WebSocketImpl/this State/WAITING State/TEXT))
+
+    (method ^:public onBinary ^void [this ^ByteBuffer data ^boolean last]
+      (.acknowledgeReception transport)
+      (set! binaryData data)
+      (set! (.-last WebSocketImpl/this) last)
+      (.tryChangeState WebSocketImpl/this State/WAITING State/BINARY))
+
+    (method ^:public onPing ^void [this ^ByteBuffer data]
+      (.acknowledgeReception transport)
+      (set! binaryData data)
+      (.tryChangeState WebSocketImpl/this State/WAITING State/PING))
+
+    (method ^:public onPong ^void [this ^ByteBuffer data]
+      (.acknowledgeReception transport)
+      (set! binaryData data)
+      (.tryChangeState WebSocketImpl/this State/WAITING State/PONG))
+
+    (method ^:public onClose ^void [this ^int statusCode ^CharSequence reason]
+      (.acknowledgeReception transport)
+      (.signalClose WebSocketImpl/this statusCode (.toString reason)))
+
+    (method ^:public onComplete ^void [this]
+      (.acknowledgeReception transport)
+      (.signalClose WebSocketImpl/this StatusCodes/CLOSED_ABNORMALLY ""))
+
+    (method ^:public onError ^void [this ^Throwable error]
+      (.signalError WebSocketImpl/this error)))
+
+  (method ^:private trySetState ^boolean [this ^State newState]
+    (let [^:mutable ^State currentState nil
+          ^:mutable success false]
+      (while true
+        (set! currentState (cast State (.get state)))
+        (if (or (identical? currentState State/ERROR) (identical? currentState State/CLOSE))
+            (break)
+            (when (.compareAndSet state currentState newState)
+              (.runOrSchedule receiveScheduler clientExecutor)
+              (set! success true)
+              (break))))
+      (when (.on debug)
+        (.log debug "set state %s (previous %s) %s" (new Object/1 [newState currentState success])))
+      success))
+
+  (method ^:private tryChangeState ^boolean [this ^State expectedState ^State newState]
+    (let [witness (cast State (.compareAndExchange state expectedState newState))
+          ^:mutable success false]
+      (cond
+        (identical? witness expectedState)
+          (do (.runOrSchedule receiveScheduler clientExecutor) (set! success true))
+        (and (not (identical? witness State/ERROR)) (not (identical? witness State/CLOSE)))
+          (throw (InternalError.)))
+      (when (.on debug)
+        (.log debug "change state from %s to %s %s" (new Object/1 [expectedState newState success])))
+      success))
+
+  (method ^:protected transport ^Transport [this] transport))

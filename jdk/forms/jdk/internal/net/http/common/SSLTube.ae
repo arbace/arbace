@@ -1,0 +1,453 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/common/SSLTube.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http.common)
+
+(import '(java.nio ByteBuffer)
+        '(java.util List Objects)
+        '(java.util.concurrent CompletableFuture Executor Flow$Subscriber Flow$Subscription)
+        '(java.util.concurrent.atomic AtomicReference)
+        '(java.util.function Consumer Supplier)
+        '(javax.net.ssl SSLEngine
+                        SSLEngineResult$HandshakeStatus
+                        SSLException
+                        SSLHandshakeException))
+
+(defclass ^:public SSLTube
+  :implements [FlowTube]
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this SSLTube/.dbgString) Utils/DEBUG))
+
+  (field ^:private ^:final ^FlowTube tube)
+
+  (field ^:private ^:final ^SSLSubscriberWrapper readSubscriber)
+
+  (field ^:private ^:final ^SSLSubscriptionWrapper writeSubscription)
+
+  (field ^:private ^:final ^SSLFlowDelegate sslDelegate)
+
+  (field ^:private ^:final ^SSLEngine engine)
+
+  (field ^:private ^:volatile ^boolean finished)
+
+  (field ^:private ^:final ^{:tag (AtomicReference Throwable)} errorRef (AtomicReference.))
+
+  (constructor ^:public [this ^SSLEngine engine ^Executor executor ^FlowTube tube]
+    (this. engine executor nil tube))
+
+  (constructor ^:public [this ^SSLEngine engine ^Executor executor
+                         ^{:tag (Consumer ByteBuffer)} recycler ^FlowTube tube]
+    (Objects/requireNonNull engine)
+    (Objects/requireNonNull executor)
+    (set! (.-tube this) (cast FlowTube (Objects/requireNonNull tube)))
+    (set! writeSubscription (SSLSubscriptionWrapper.))
+    (set! readSubscriber (SSLSubscriberWrapper.))
+    (set! (.-engine this) engine)
+    (set! sslDelegate (SSLTubeFlowDelegate. engine executor recycler readSubscriber tube)))
+
+  (defclass ^:final SSLTubeFlowDelegate
+    :extends SSLFlowDelegate
+
+    (constructor [this ^SSLEngine engine ^Executor executor ^{:tag (Consumer ByteBuffer)} recycler
+                  ^SSLSubscriberWrapper readSubscriber ^FlowTube tube]
+      (super. engine executor recycler readSubscriber tube))
+
+    (method ^:protected enterReadScheduling ^SubscriberWrapper$SchedulingAction [this]
+      (.processPendingSubscriber readSubscriber)
+      SubscriberWrapper$SchedulingAction/CONTINUE)
+
+    (method connect ^void [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downReader
+                           ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} downWriter]
+      (java-assert (identical? downWriter tube))
+      (java-assert (identical? downReader readSubscriber))
+      (.subscribe (.-reader this) downReader)
+      (.connectFlows tube
+                     (FlowTube/asTubePublisher (.-writer this))
+                     (FlowTube/asTubeSubscriber (.upstreamReader this)))
+      (.onSubscribe (.upstreamWriter this) writeSubscription))
+
+    (method ^:protected checkForHandshake ^Throwable [this ^Throwable t]
+      (.checkForHandshake SSLTube/this t)))
+
+  (method ^:private error ^Throwable [this ^Throwable error]
+    (if (.compareAndSet errorRef nil error) error (cast Throwable (.get errorRef))))
+
+  (method ^:public getALPN ^{:tag (CompletableFuture String)} [this]
+    (.alpn sslDelegate))
+
+  (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} s]
+    (.dropSubscription readSubscriber)
+    (.setDelegate readSubscriber s)
+    (.onSubscribe s readSubscription))
+
+  (method ^:public isFinished ^boolean [this] finished)
+
+  (field ^:private ^:volatile ^Flow$Subscription readSubscription)
+
+  (defclass ^:static ^:final DelegateWrapper
+    :implements [FlowTube$TubeSubscriber]
+
+    (field ^:private ^:final ^FlowTube$TubeSubscriber delegate)
+
+    (field ^:private ^:final ^Logger debug)
+
+    (field ^:volatile ^boolean subscribedCalled)
+
+    (field ^:volatile ^boolean subscribedDone)
+
+    (field ^:volatile ^boolean completed)
+
+    (field ^:volatile ^Throwable error)
+
+    (constructor [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} delegate ^Logger debug]
+      (set! (.-delegate this) (FlowTube/asTubeSubscriber delegate))
+      (set! (.-debug this) debug))
+
+    (method ^:public dropSubscription ^void [this]
+      (when (and subscribedCalled (not completed)) (.dropSubscription delegate)))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (java-assert subscribedCalled)
+      (.onNext delegate item))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (.onSubscribe this
+                    (method-ref Consumer
+                                [Flow$Subscription]
+                                delegate
+                                FlowTube$TubeSubscriber/.onSubscribe)
+                    subscription))
+
+    (method ^:private onSubscribe ^void [this ^{:tag (Consumer Flow$Subscription)} method
+                                         ^Flow$Subscription subscription]
+      (set! subscribedCalled true)
+      (.accept method subscription)
+      (let [^:mutable ^Throwable x nil
+            ^:mutable ^boolean finished false]
+        (locking this (set! subscribedDone true) (set! x error) (set! finished completed))
+        (if (some? x)
+            (do
+              (when (.on debug)
+                (.log debug
+                      "Subscriber completed before subscribe: forwarding %s"
+                      (new Object/1 [^Object x])))
+              (.onError delegate x))
+            (when finished
+              (when (.on debug)
+                (.log debug "Subscriber completed before subscribe: calling onComplete()"))
+              (.onComplete delegate)))))
+
+    (method ^:public onError ^void [this ^Throwable t]
+      (if completed
+          (when (.on debug)
+            (.log debug "Subscriber already completed: ignoring %s" (new Object/1 [^Object t])))
+          (let [^:mutable ^boolean subscribed false]
+            (locking this
+              (when completed (return))
+              (set! error t)
+              (set! completed true)
+              (set! subscribed subscribedDone))
+            (cond
+              subscribed (.onError delegate t)
+              (.on debug)
+                (.log debug "Subscriber not yet subscribed: stored %s" (new Object/1 [^Object t]))))))
+
+    (method ^:public onComplete ^void [this]
+      (when-not completed
+        (let [^:mutable ^boolean subscribed false]
+          (locking this
+            (when completed (return))
+            (set! completed true)
+            (set! subscribed subscribedDone))
+          (cond
+            subscribed
+              (do
+                (when (.on debug) (.log debug "DelegateWrapper: completing subscriber"))
+                (.onComplete delegate))
+            (.on debug) (.log debug "Subscriber not yet subscribed: stored completed=true")))))
+
+    (method ^:public toString ^String [this]
+      (java-str "DelegateWrapper[subscribedCalled: "
+                subscribedCalled
+                ", subscribedDone: "
+                subscribedDone
+                ", completed: "
+                completed
+                ", error: "
+                error
+                "]: "
+                delegate)))
+
+  (defclass ^:final SSLSubscriberWrapper
+    :implements [FlowTube$TubeSubscriber]
+
+    (field ^:private ^:final ^{:tag (AtomicReference DelegateWrapper)} pendingDelegate
+      (AtomicReference.))
+
+    (field ^:private ^:volatile ^DelegateWrapper subscribed)
+
+    (field ^:private ^:volatile ^boolean onCompleteReceived)
+
+    (method ^:public toString ^String [this]
+      (let [sub subscribed
+            pend (cast DelegateWrapper (.get pendingDelegate))
+            sslFD sslDelegate]
+        (java-str "SSLSubscriberWrapper["
+                  SSLTube/this
+                  ", delegate: "
+                  (if (nil? sub) pend sub)
+                  ", getALPN: "
+                  (when (some? sslFD) (.alpn sslFD))
+                  ", onCompleteReceived: "
+                  onCompleteReceived
+                  ", onError: "
+                  (.get errorRef)
+                  "]")))
+
+    (method setDelegate ^void [this ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} delegate]
+      (when (.on debug)
+        (.log debug "SSLSubscriberWrapper (reader) got delegate: %s" (new Object/1 [delegate])))
+      (java-assert (some? delegate))
+      (let [delegateWrapper (DelegateWrapper. delegate debug)
+            ^:mutable ^DelegateWrapper previous nil
+            ^:mutable ^Flow$Subscription subscription nil
+            ^:mutable ^boolean handleNow false]
+        (locking this
+          (set! previous (cast DelegateWrapper (.getAndSet pendingDelegate delegateWrapper)))
+          (set! subscription readSubscription)
+          (set! handleNow (or (some? (.get errorRef)) onCompleteReceived)))
+        (when (some? previous) (.dropSubscription previous))
+        (cond
+          (nil? subscription)
+            (when (.on debug) (.log debug "SSLSubscriberWrapper (reader) no subscription yet"))
+          (or handleNow (not (.resumeReader sslDelegate))) (.processPendingSubscriber this))))
+
+    (method processPendingSubscriber ^void [this]
+      (let [^:mutable ^Flow$Subscription subscription nil
+            ^:mutable ^DelegateWrapper delegateWrapper nil
+            ^:mutable ^DelegateWrapper previous nil]
+        (locking this
+          (set! delegateWrapper (cast DelegateWrapper (.get pendingDelegate)))
+          (when (nil? delegateWrapper) (return))
+          (set! subscription readSubscription)
+          (set! previous subscribed))
+        (if (nil? subscription)
+            (when (.on debug)
+              (.log debug
+                    "SSLSubscriberWrapper (reader) processPendingSubscriber: no subscription yet"))
+            (do
+              (set! delegateWrapper (cast DelegateWrapper (.getAndSet pendingDelegate nil)))
+              (when (some? delegateWrapper)
+                (when (some? previous) (.dropSubscription previous))
+                (.onNewSubscription this delegateWrapper subscription))))))
+
+    (method ^:public dropSubscription ^void [this]
+      (let [subscriberImpl subscribed]
+        (when (some? subscriberImpl) (.dropSubscription subscriberImpl))))
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (when (.on debug)
+        (.log debug "SSLSubscriberWrapper (reader) onSubscribe(%s)" (new Object/1 [subscription])))
+      (.onSubscribeImpl this subscription))
+
+    (method ^:private onSubscribeImpl ^void [this ^Flow$Subscription subscription]
+      (java-assert (some? subscription))
+      (let [^:mutable ^DelegateWrapper subscriberImpl nil
+            ^:mutable ^DelegateWrapper pending nil]
+        (locking this
+          (set! readSubscription subscription)
+          (set! subscriberImpl subscribed)
+          (set! pending (cast DelegateWrapper (.get pendingDelegate))))
+        (cond
+          (and (nil? subscriberImpl) (nil? pending))
+            (when (.on debug)
+              (.log debug "SSLSubscriberWrapper (reader) onSubscribeImpl: no delegate yet"))
+          (nil? pending)
+            (do
+              (when (.on debug)
+                (.log debug "SSLSubscriberWrapper (reader) onSubscribeImpl: resubscribing"))
+              (.onNewSubscription this subscriberImpl subscription))
+          :else
+            (do
+              (when (.on debug)
+                (.log debug "SSLSubscriberWrapper (reader) onSubscribeImpl: subscribing pending"))
+              (.processPendingSubscriber this)))))
+
+    (method ^:private complete ^void [this ^DelegateWrapper subscriberImpl ^:mutable ^Throwable t]
+      (try
+        (if (nil? t)
+            (.onComplete subscriberImpl)
+            (.onError subscriberImpl (set! t (.checkForHandshake SSLTube/this t))))
+        (when (.on debug)
+          (.log debug
+                "subscriber completed %s"
+                (new Object/1 [(if (nil? t) "normally" ^Object (java-str "with error: " t))])))
+        (finally (.cancel writeSubscription))))
+
+    (method ^:private onNewSubscription ^void [this ^DelegateWrapper subscriberImpl
+                                               ^Flow$Subscription subscription]
+      (java-assert (some? subscriberImpl))
+      (java-assert (some? subscription))
+      (let [^:mutable ^Throwable failed nil
+            ^:mutable ^boolean completed false]
+        (.resetReaderDemand sslDelegate)
+        (.onSubscribe subscriberImpl subscription)
+        (locking this
+          (set! failed (cast Throwable (.get errorRef)))
+          (set! completed onCompleteReceived)
+          (set! subscribed subscriberImpl))
+        (if (some? failed)
+            (do
+              (when (.on debug)
+                (.log debug
+                      "onNewSubscription: subscriberImpl:%s, invoking onError:%s"
+                      (new Object/1 [subscriberImpl failed])))
+              (.complete this subscriberImpl failed))
+            (when completed
+              (when (.on debug)
+                (.log debug
+                      "onNewSubscription: subscriberImpl:%s, invoking onCompleted"
+                      (new Object/1 [subscriberImpl])))
+              (set! finished true)
+              (.complete this subscriberImpl nil)))))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (.onNext subscribed item))
+
+    (method ^:public onErrorImpl ^void [this ^:mutable ^Throwable throwable]
+      (set! throwable (.checkForHandshake SSLTube/this throwable))
+      (.compareAndSet errorRef nil throwable)
+      (let [failed (cast Throwable (.get errorRef))]
+        (set! finished true)
+        (when (.on debug) (.log debug "%s: onErrorImpl: %s" (new Object/1 [this throwable])))
+        (let [^:mutable ^DelegateWrapper subscriberImpl nil]
+          (locking this (set! subscriberImpl subscribed))
+          (cond
+            (some? subscriberImpl) (.complete this subscriberImpl failed)
+            (.on debug) (.log debug "%s: delegate null, stored %s" (new Object/1 [this failed])))
+          (.processPendingSubscriber this))))
+
+    (method ^:public onError ^void [this ^Throwable throwable]
+      (java-assert (and (not finished) (not onCompleteReceived)))
+      (.onErrorImpl this throwable))
+
+    (method ^:public onComplete ^void [this]
+      (java-assert (and (not finished) (not onCompleteReceived)))
+      (let [^:mutable ^DelegateWrapper subscriberImpl nil]
+        (locking this (set! subscriberImpl subscribed))
+        (let [handshakeFailed (.checkForHandshake SSLTube/this nil)]
+          (cond
+            (some? handshakeFailed) (.onErrorImpl this handshakeFailed)
+            (some? subscriberImpl)
+              (do
+                (set! onCompleteReceived (set! finished true))
+                (.complete this subscriberImpl nil))
+            :else (set! onCompleteReceived true))
+          (.processPendingSubscriber this)))))
+
+  (method ^:private handshaking ^boolean [this]
+    (let [hs (.getHandshakeStatus engine)]
+      (not (or (identical? hs SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING)
+               (identical? hs SSLEngineResult$HandshakeStatus/FINISHED)))))
+
+  (method ^:private handshakeFailed ^String [this]
+    (cond
+      (and (.handshaking this) (or (nil? sslDelegate) (not (.closeNotifyReceived sslDelegate))))
+        "Remote host terminated the handshake"
+      (.equals "SSL_NULL_WITH_NULL_NULL" (.getCipherSuite (.getSession engine)))
+        "Remote host closed the channel"))
+
+  (method checkForHandshake ^Throwable [this ^Throwable t]
+    (if (instance? SSLException t)
+        t
+        (let [handshakeFailed (.handshakeFailed this)]
+          (if (nil? handshakeFailed)
+              t
+              (do
+                (when (.on debug)
+                  (.log debug
+                        "handshake: %s, inbound done: %s, outbound done: %s: %s"
+                        (new Object/1
+                             [(.getHandshakeStatus engine)
+                              (.isInboundDone engine)
+                              (.isOutboundDone engine)
+                              handshakeFailed])))
+                (SSLHandshakeException. handshakeFailed t))))))
+
+  (method ^:public connectFlows ^void [this ^FlowTube$TubePublisher writePub
+                                       ^FlowTube$TubeSubscriber readSub]
+    (when (.on debug) (.log debug "connecting flows"))
+    (.setDelegate readSubscriber readSub)
+    (.subscribe writePub this))
+
+  (field ^:private ^:final ^Demand writeDemand (Demand.))
+
+  (defclass ^:final SSLSubscriptionWrapper
+    :implements [Flow$Subscription]
+
+    (field ^:volatile ^Flow$Subscription delegate)
+
+    (field ^:private ^:volatile ^boolean cancelled)
+
+    (method setSubscription ^void [this ^Flow$Subscription sub]
+      (let [^:mutable ^long demand 0
+            ^:mutable ^boolean cancelled false]
+        (locking this
+          (set! demand (.get writeDemand))
+          (set! delegate sub)
+          (set! cancelled (.-cancelled this)))
+        (when (.on debug)
+          (.log debug
+                "setSubscription: demand=%d, cancelled:%s, new subscription %s"
+                (new Object/1 [demand cancelled sub])))
+        (cond cancelled (.cancel sub) (> demand 0) (.request sub demand))))
+
+    (method ^:public request ^void [this ^long n]
+      (let [^:mutable ^Flow$Subscription sub nil
+            ^:mutable ^long demanded 0]
+        (locking this
+          (set! sub delegate)
+          (set! demanded (.get writeDemand))
+          (.increase writeDemand n))
+        (when (.on debug)
+          (.log debug "request: n=%s to %s (%s already demanded)" (new Object/1 [n sub demanded])))
+        (when (and (some? sub) (> n 0))
+          (when (.on debug) (.log debug "requesting %s from %s" (new Object/1 [n sub])))
+          (.request sub n))))
+
+    (method ^:public cancel ^void [this]
+      (let [^:mutable ^Flow$Subscription sub nil]
+        (locking this (set! cancelled true) (set! sub delegate))
+        (when (.on debug) (.log debug (java-str "cancel: cancelling subscription: " sub)))
+        (when (some? sub) (.cancel sub)))))
+
+  (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+    (Objects/requireNonNull subscription)
+    (let [^:mutable ^Flow$Subscription old nil]
+      (locking this (set! old (.-delegate writeSubscription)))
+      (when (and (some? old) (not (identical? old subscription)))
+        (when (.on debug) (.log debug (java-str "onSubscribe: cancelling old subscription: " old)))
+        (.cancel old))
+      (when (.on debug) (.log debug (java-str "onSubscribe: new subscription: " subscription)))
+      (.setSubscription writeSubscription subscription)))
+
+  (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+    (Objects/requireNonNull item)
+    (let [decremented (.tryDecrement writeDemand)]
+      (java-assert decremented "Unexpected writeDemand: ")
+      (when (.on debug)
+        (.log debug
+              "sending %s  buffers to SSL flow delegate (%s bytes)"
+              (new Object/1 [(.size item) (Utils/remaining item)])))
+      (.onNext (.upstreamWriter sslDelegate) item)))
+
+  (method ^:public onError ^void [this ^Throwable throwable]
+    (Objects/requireNonNull throwable)
+    (.onError (.upstreamWriter sslDelegate) (.error this throwable)))
+
+  (method ^:public onComplete ^void [this]
+    (.onComplete (.upstreamWriter sslDelegate)))
+
+  (method ^:public toString ^String [this] (.dbgString this))
+
+  (method ^:final dbgString ^String [this] (java-str "SSLTube(" tube ")")))

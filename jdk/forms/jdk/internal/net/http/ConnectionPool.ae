@@ -1,0 +1,404 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/ConnectionPool.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net InetSocketAddress)
+        '(java.nio ByteBuffer)
+        '(java.time.temporal ChronoUnit)
+        '(java.util ArrayList
+                    Collections
+                    HashMap
+                    Iterator
+                    LinkedList
+                    List
+                    ListIterator
+                    Objects
+                    Optional)
+        '(java.util.concurrent Flow$Subscriber Flow$Subscription)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(java.util.function Consumer Function Supplier)
+        '(java.util.stream Collectors)
+        '(jdk.internal.net.http.common Deadline
+                                       FlowTube$TubePublisher
+                                       FlowTube$TubeSubscriber
+                                       Log
+                                       Logger
+                                       TimeLine
+                                       TimeSource
+                                       Utils))
+
+(defclass ^:final ConnectionPool
+  (field ^:static ^:final ^long MAX_POOL_SIZE
+    (Utils/getIntegerNetProperty "jdk.httpclient.connectionPoolSize" 0))
+
+  (field ^:final ^Logger debug
+    (Utils/getDebugLogger (method-ref Supplier ^String [] this ConnectionPool/.dbgString)
+                          Utils/DEBUG))
+
+  (field ^:private ^:final ^ReentrantLock stateLock (ReentrantLock.))
+
+  (field ^:private ^:final ^{:tag (HashMap CacheKey (LinkedList HttpConnection))} plainPool)
+
+  (field ^:private ^:final ^{:tag (HashMap CacheKey (LinkedList HttpConnection))} sslPool)
+
+  (field ^:private ^:final ^ExpiryList expiryList)
+
+  (field ^:private ^:final ^String dbgTag)
+
+  (field ^:private ^:final ^TimeLine timeSource)
+
+  (field ^:volatile ^boolean stopped)
+
+  (defclass ^:static CacheKey
+    (field ^:final ^InetSocketAddress proxy)
+
+    (field ^:final ^InetSocketAddress destination)
+
+    (field ^:final ^boolean secure)
+
+    (constructor ^:private [this ^boolean secure ^InetSocketAddress destination
+                            ^InetSocketAddress proxy]
+      (set! (.-proxy this) proxy)
+      (set! (.-destination this) destination)
+      (set! (.-secure this) secure))
+
+    (method ^:public equals ^boolean [this obj]
+      (cond
+        (nil? obj) false
+        (not (identical? (.getClass this) (.getClass obj))) false
+        :else
+          (let [other (cast CacheKey obj)]
+            (cond
+              (not (= (.-secure this) (.-secure other))) false
+              (not (Objects/equals (.-proxy this) (.-proxy other))) false
+              (not (Objects/equals (.-destination this) (.-destination other))) false
+              :else
+                (do
+                  (when (and secure (some? destination))
+                    (let [hostString (.getHostString destination)]
+                      (when (or (nil? hostString)
+                                (not (.equalsIgnoreCase
+                                       hostString
+                                       (.getHostString (.-destination other)))))
+                        (return false))))
+                  true)))))
+
+    (method ^:public hashCode ^int [this] (Objects/hash proxy destination)))
+
+  (constructor [this ^long clientId] (this. clientId (TimeSource/source)))
+
+  (constructor [this ^long clientId ^TimeLine timeSource]
+    (this. (java-str "ConnectionPool(" clientId ")")
+           (cast TimeLine (Objects/requireNonNull timeSource))))
+
+  (constructor ^:private [this ^String tag ^TimeLine timeSource]
+    (set! dbgTag tag)
+    (set! plainPool (HashMap.))
+    (set! sslPool (HashMap.))
+    (set! (.-timeSource this) timeSource)
+    (set! (.-expiryList this) (ExpiryList. timeSource)))
+
+  (method ^:final dbgString ^String [this] dbgTag)
+
+  (method start ^void [this]
+    (java-assert (not stopped) "Already stopped"))
+
+  (method ^:static cacheKey ^CacheKey [^boolean secure ^InetSocketAddress destination
+                                       ^InetSocketAddress proxy]
+    (CacheKey. secure destination proxy))
+
+  (method getConnection ^HttpConnection [this ^boolean secure ^InetSocketAddress addr
+                                         ^InetSocketAddress proxy]
+    (when-not stopped
+      (.lock stateLock)
+      (try (.getConnection0 this secure addr proxy) (finally (.unlock stateLock)))))
+
+  (method ^:private getConnection0 ^HttpConnection [this ^boolean secure
+                                                    ^:mutable ^InetSocketAddress addr
+                                                    ^InetSocketAddress proxy]
+    (when-not stopped
+      (set! addr (when (or secure (nil? proxy)) addr))
+      (let [key (CacheKey. secure addr proxy)
+            ^HttpConnection c (if secure
+                                  (.findConnection this key sslPool)
+                                  (.findConnection this key plainPool))]
+        (java-assert (or (nil? c) (= (.isSecure c) secure)))
+        c)))
+
+  (method returnToPool ^void [this ^HttpConnection conn]
+    (.returnToPool this conn (.instant timeSource) HttpClientImpl/KEEP_ALIVE_TIMEOUT))
+
+  (method returnToPool ^void [this ^HttpConnection conn ^Deadline now ^long keepAlive]
+    (java-assert (or (instance? PlainHttpConnection conn) (.isSecure conn))
+      (java-str "Attempting to return unsecure connection to SSL pool: " (.getClass conn)))
+    (let [cleanup (.registerCleanupTrigger this conn)
+          ^:mutable ^HttpConnection toClose nil
+          ^:mutable stopping false]
+      (.lock stateLock)
+      (try
+        (cond
+          (.isDone cleanup) (return)
+          (set! stopping stopped) (set! toClose conn)
+          :else
+            (do
+              (when (and (> MAX_POOL_SIZE 0) (>= (.size expiryList) MAX_POOL_SIZE))
+                (set! toClose (.removeOldest expiryList))
+                (when (some? toClose) (.removeFromPool this toClose)))
+              (if (instance? PlainHttpConnection conn)
+                  (.putConnection this conn plainPool)
+                  (do (java-assert (.isSecure conn)) (.putConnection this conn sslPool)))
+              (.add expiryList conn now keepAlive)))
+        (finally (.unlock stateLock)))
+      (when (some? toClose)
+        (when (.on debug)
+          (if stopping
+              (.log debug "Stopping: close connection %s" (new Object/1 [(.dbgString toClose)]))
+              (.log debug
+                    "Maximum pool size reached: removing oldest connection %s"
+                    (new Object/1 [(.dbgString toClose)]))))
+        (.close this toClose))))
+
+  (method ^:private registerCleanupTrigger ^CleanupTrigger [this ^HttpConnection conn]
+    (let [cleanup (CleanupTrigger. conn)
+          flow (.getConnectionFlow conn)]
+      (when (.on debug) (.log debug "registering %s" (new Object/1 [cleanup])))
+      (.connectFlows flow cleanup cleanup)
+      cleanup))
+
+  (method ^:private findConnection ^HttpConnection [this ^CacheKey key
+                                                    ^{:tag (HashMap CacheKey (LinkedList HttpConnection))} pool]
+    (let [^{:tag (LinkedList HttpConnection)} l (cast LinkedList (.get pool key))]
+      (when-not (or (nil? l) (.isEmpty l))
+        (let [c (cast HttpConnection (.removeFirst l))] (.remove expiryList c) c))))
+
+  (method ^:private removeFromPool ^boolean [this ^HttpConnection c
+                                             ^{:tag (HashMap CacheKey (LinkedList HttpConnection))} pool]
+    (java-assert (.isHeldByCurrentThread stateLock))
+    (let [k (.cacheKey c)
+          ^{:tag (List HttpConnection)} l (cast List (.get pool k))]
+      (if (or (nil? l) (.isEmpty l)) (do (.remove pool k) false) (.remove l c))))
+
+  (method ^:private putConnection ^void [this ^HttpConnection c
+                                         ^{:tag (HashMap CacheKey (LinkedList HttpConnection))} pool]
+    (let [key (.cacheKey c)
+          ^:mutable ^{:tag (LinkedList HttpConnection)} l (cast LinkedList (.get pool key))]
+      (when (nil? l) (set! l (LinkedList.)) (.put pool key l))
+      (.add l c)))
+
+  (method purgeExpiredConnectionsAndReturnNextDeadline ^long [this]
+    (if (not (.purgeMaybeRequired expiryList))
+        0
+        (.purgeExpiredConnectionsAndReturnNextDeadline this (.instant timeSource))))
+
+  (method purgeExpiredConnectionsAndReturnNextDeadline ^long [this ^Deadline now]
+    (let [^:mutable nextPurge 0]
+      (if (not (.purgeMaybeRequired expiryList))
+          nextPurge
+          (let [^:mutable ^{:tag (List HttpConnection)} closelist nil]
+            (.lock stateLock)
+            (try
+              (set! closelist (.purgeUntil expiryList now))
+              (for-each [^HttpConnection c closelist]
+                (if (instance? PlainHttpConnection c)
+                    (let [wasPresent (.removeFromPool this c plainPool)] (java-assert wasPresent))
+                    (let [wasPresent (.removeFromPool this c sslPool)] (java-assert wasPresent))))
+              (set! nextPurge
+                    (.until now
+                            (cast Deadline (.orElse (.nextExpiryDeadline expiryList) now))
+                            ChronoUnit/MILLIS))
+              (finally (.unlock stateLock)))
+            (.forEach closelist (method-ref Consumer [HttpConnection] this ConnectionPool/.close))
+            nextPurge))))
+
+  (method ^:private close ^void [this ^HttpConnection c]
+    (try (.close c) (catch Throwable e)))
+
+  (method stop ^void [this]
+    (let [^:mutable ^{:tag (List HttpConnection)} closelist (Collections/emptyList)]
+      (try
+        (.lock stateLock)
+        (try
+          (set! stopped true)
+          (set! closelist
+                (cast List
+                      (.collect (.map (.stream expiryList)
+                                      (lambda Function ^HttpConnection [^ExpiryEntry e]
+                                        (.-connection e)))
+                                (Collectors/toList))))
+          (.clear expiryList)
+          (.clear plainPool)
+          (.clear sslPool)
+          (finally (.unlock stateLock)))
+        (finally
+          (.forEach closelist (method-ref Consumer [HttpConnection] this ConnectionPool/.close))))))
+
+  (defclass ^:static ^:final ExpiryEntry
+    (field ^:final ^HttpConnection connection)
+
+    (field ^:final ^Deadline expiry)
+
+    (constructor [this ^HttpConnection connection ^Deadline expiry]
+      (set! (.-connection this) connection)
+      (set! (.-expiry this) expiry)))
+
+  (defclass ^:private ^:static ^:final ExpiryList
+    (field ^:private ^:final ^{:tag (LinkedList ExpiryEntry)} list (LinkedList.))
+
+    (field ^:private ^:final ^TimeLine timeSource)
+
+    (field ^:private ^:volatile ^boolean mayContainEntries)
+
+    (constructor [this ^TimeLine timeSource]
+      (set! (.-timeSource this) timeSource))
+
+    (method size ^int [this] (.size list))
+
+    (method purgeMaybeRequired ^boolean [this] mayContainEntries)
+
+    (method nextExpiryDeadline ^{:tag (Optional Deadline)} [this]
+      (if (.isEmpty list)
+          (Optional/empty)
+          (Optional/of (.-expiry (cast ExpiryEntry (.getLast list))))))
+
+    (method removeOldest ^HttpConnection [this]
+      (let [entry (cast ExpiryEntry (.pollLast list))] (when (some? entry) (.-connection entry))))
+
+    (method add ^void [this ^HttpConnection conn]
+      (.add this conn (.instant timeSource) HttpClientImpl/KEEP_ALIVE_TIMEOUT))
+
+    (method add ^void [this ^HttpConnection conn ^Deadline now ^long keepAlive]
+      (let [then (.plus (.truncatedTo now ChronoUnit/SECONDS) keepAlive ChronoUnit/SECONDS)
+            ^{:tag (ListIterator ExpiryEntry)} li (.listIterator list)]
+        (while (.hasNext li)
+          (let [entry (cast ExpiryEntry (.next li))]
+            (when (.isAfter then (.-expiry entry))
+              (.previous li)
+              (.add li (ExpiryEntry. conn then))
+              (set! mayContainEntries true)
+              (return))))
+        (.add list (ExpiryEntry. conn then))
+        (set! mayContainEntries true)))
+
+    (method remove ^void [this ^HttpConnection c]
+      (when-not (or (nil? c) (.isEmpty list))
+        (let [^{:tag (ListIterator ExpiryEntry)} li (.listIterator list)]
+          (while (.hasNext li)
+            (let [e (cast ExpiryEntry (.next li))]
+              (when (.equals (.-connection e) c)
+                (.remove li)
+                (set! mayContainEntries (not (.isEmpty list)))
+                (return)))))))
+
+    (method purgeUntil ^{:tag (List HttpConnection)} [this ^Deadline now]
+      (if (.isEmpty list)
+          (Collections/emptyList)
+          (let [^{:tag (List HttpConnection)} closelist (ArrayList.)
+                ^{:tag (Iterator ExpiryEntry)} li (.descendingIterator list)]
+            (while (.hasNext li)
+              (let [entry (cast ExpiryEntry (.next li))]
+                (if (not (.isAfter (.-expiry entry) now))
+                    (do (.remove li) (let [c (.-connection entry)] (.add closelist c)))
+                    (break))))
+            (set! mayContainEntries (not (.isEmpty list)))
+            closelist)))
+
+    (method stream ^{:tag (java.util.stream.Stream ExpiryEntry)} [this]
+      (.stream list))
+
+    (method clear ^void [this] (.clear list) (set! mayContainEntries false)))
+
+  (method ^:private removeFromPool ^boolean [this ^HttpConnection c]
+    (java-assert (.isHeldByCurrentThread stateLock))
+    (if (instance? PlainHttpConnection c)
+        (.removeFromPool this c plainPool)
+        (do
+          (java-assert (.isSecure c) (java-str "connection " c " is not secure!"))
+          (.removeFromPool this c sslPool))))
+
+  (method contains ^boolean [this ^HttpConnection c]
+    (.lock stateLock)
+    (try (.contains0 this c) (finally (.unlock stateLock))))
+
+  (method ^:private contains0 ^boolean [this ^HttpConnection c]
+    (let [key (.cacheKey c)
+          ^:mutable ^{:tag (List HttpConnection)} list nil]
+      (when (some? (set! list (cast List (.get plainPool key))))
+        (when (.contains list c) (return true)))
+      (when (some? (set! list (cast List (.get sslPool key))))
+        (when (.contains list c) (return true)))
+      false))
+
+  (method cleanup ^void [this ^HttpConnection c ^long pendingData ^Throwable error]
+    (when (.on debug)
+      (.log debug
+            "%s : ConnectionPool.cleanup(%s)"
+            (new Object/1 [(String/valueOf (.getConnectionFlow c)) error])))
+    (.lock stateLock)
+    (let [^:mutable ^boolean removed false]
+      (try
+        (set! removed (.removeFromPool this c))
+        (.remove expiryList c)
+        (finally (.unlock stateLock)))
+      (if (and (not removed) (not (== pendingData 0)))
+          (do
+            (when (Log/errors)
+              (Log/logError
+                "WARNING: CleanupTrigger triggered for a connection not found in the pool: closing {0}"
+                (new Object/1 [(.dbgString c)])))
+            (when (.on debug)
+              (.log
+                debug
+                "WARNING: CleanupTrigger triggered for a connection not found in the pool: closing %s"
+                (new Object/1 [(.dbgString c)])))
+            (let [^Throwable cause (IOException.
+                                     "Unexpected cleanup triggered for non pooled connection"
+                                     error)]
+              (.close c cause)))
+          (.close c))))
+
+  (defclass ^:private ^:final CleanupTrigger
+    :implements [FlowTube$TubeSubscriber FlowTube$TubePublisher Flow$Subscription]
+
+    (field ^:private ^:final ^HttpConnection connection)
+
+    (field ^:private ^:volatile ^boolean done)
+
+    (field ^:private ^:volatile ^boolean dropped)
+
+    (constructor ^:public [this ^HttpConnection connection]
+      (set! (.-connection this) connection))
+
+    (method ^:public isDone ^boolean [this] done)
+
+    (method ^:private triggerCleanup ^void [this ^long pendingData ^Throwable error]
+      (set! done true)
+      (when (.on debug)
+        (.log debug
+              "Cleanup triggered for %s: pendingData:%s error:%s"
+              (new Object/1 [this pendingData error])))
+      (.cleanup ConnectionPool/this connection pendingData error))
+
+    (method ^:public request ^void [this ^long n])
+
+    (method ^:public cancel ^void [this])
+
+    (method ^:public onSubscribe ^void [this ^Flow$Subscription subscription]
+      (when-not (or dropped done) (.request subscription 1)))
+
+    (method ^:public onError ^void [this ^Throwable error]
+      (.triggerCleanup this 0 error))
+
+    (method ^:public onComplete ^void [this] (.triggerCleanup this 0 nil))
+
+    (method ^:public onNext ^void [this ^{:tag (List ByteBuffer)} item]
+      (.triggerCleanup this (Utils/remaining item) (IOException. "Data received while in pool")))
+
+    (method ^:public subscribe ^void [this
+                                      ^{:tag (Flow$Subscriber (? super (List ByteBuffer)))} subscriber]
+      (.onSubscribe subscriber this))
+
+    (method ^:public toString ^String [this]
+      (java-str "CleanupTrigger(" (.getConnectionFlow connection) ")"))
+
+    (method ^:public dropSubscription ^void [this] (set! dropped true))))

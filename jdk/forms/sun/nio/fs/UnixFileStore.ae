@@ -1,0 +1,176 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/nio/fs/UnixFileStore.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.channels Channels ReadableByteChannel)
+        '(java.nio.file FileStore Files OpenOption Path)
+        '(java.nio.file.attribute BasicFileAttributeView
+                                  FileAttributeView
+                                  FileOwnerAttributeView
+                                  FileStoreAttributeView
+                                  PosixFileAttributeView)
+        '(java.util Arrays Locale Properties)
+        '(java.util.function Function)
+        '(jdk.internal.util StaticProperty)
+        '(sun.nio.cs UTF_8))
+
+(defclass ^:abstract UnixFileStore
+  :extends FileStore
+
+  (field ^:private ^:final ^UnixPath file)
+
+  (field ^:private ^:final ^long dev)
+
+  (field ^:private ^:final ^UnixMountEntry entry)
+
+  (method ^:private ^:static devFor :throws [IOException] ^long [^UnixPath file]
+    (try
+      (.dev (UnixFileAttributes/get file true))
+      (catch UnixException x (.rethrowAsIOException x file) 0)))
+
+  (constructor :throws [IOException] [this ^UnixPath file]
+    (set! (.-file this) file)
+    (set! (.-dev this) (UnixFileStore/devFor file))
+    (set! (.-entry this) (.findMountEntry this)))
+
+  (constructor :throws [IOException] [this ^UnixFileSystem fs ^UnixMountEntry entry]
+    (set! (.-file this) (UnixPath. fs (.dir entry)))
+    (set! (.-dev this) (if (== (.dev entry) 0) (UnixFileStore/devFor (.-file this)) (.dev entry)))
+    (set! (.-entry this) entry))
+
+  (method ^:abstract findMountEntry :throws [IOException] ^UnixMountEntry [this])
+
+  (method file ^UnixPath [this] file)
+
+  (method dev ^long [this] dev)
+
+  (method entry ^UnixMountEntry [this] entry)
+
+  (method ^:public name ^String [this] (.name entry))
+
+  (method ^:public type ^String [this] (.fstype entry))
+
+  (method ^:public isReadOnly ^boolean [this] (.isReadOnly entry))
+
+  (method ^:private readAttributes :throws [IOException] ^UnixFileStoreAttributes [this]
+    (try
+      (UnixFileStoreAttributes/get file)
+      (catch UnixException x (.rethrowAsIOException x file) nil)))
+
+  (method ^:public getTotalSpace :throws [IOException] ^long [this]
+    (let [attrs (.readAttributes this)]
+      (try
+        (Math/multiplyExact (.blockSize attrs) (.totalBlocks attrs))
+        (catch ArithmeticException ignore Long/MAX_VALUE))))
+
+  (method ^:public getUsableSpace :throws [IOException] ^long [this]
+    (let [attrs (.readAttributes this)]
+      (try
+        (Math/multiplyExact (.blockSize attrs) (.availableBlocks attrs))
+        (catch ArithmeticException ignore Long/MAX_VALUE))))
+
+  (method ^:public getUnallocatedSpace :throws [IOException] ^long [this]
+    (let [attrs (.readAttributes this)]
+      (try
+        (Math/multiplyExact (.blockSize attrs) (.freeBlocks attrs))
+        (catch ArithmeticException ignore Long/MAX_VALUE))))
+
+  (method ^:public getBlockSize :throws [IOException] ^long [this]
+    (let [attrs (.readAttributes this)] (.blockSize attrs)))
+
+  (method ^:public getFileStoreAttributeView :type-params [(V extends FileStoreAttributeView)] ^V [this
+                                                                                                   ^{:tag (Class V)} view]
+    (when (nil? view) (throw (NullPointerException.)))
+    (cast FileStoreAttributeView nil))
+
+  (method ^:public getAttribute :throws [IOException] [this ^String attribute]
+    (cond
+      (.equals attribute "totalSpace") (.getTotalSpace this)
+      (.equals attribute "usableSpace") (.getUsableSpace this)
+      (.equals attribute "unallocatedSpace") (.getUnallocatedSpace this)
+      :else (throw (UnsupportedOperationException. (java-str "'" attribute "' not recognized")))))
+
+  (method ^:protected isExtendedAttributesEnabled ^boolean [this ^UnixPath path]
+    (if (not (UnixNativeDispatcher/xattrSupported))
+        false
+        (let [^:mutable ^int fd -1]
+          (try
+            (set! fd (.openForAttributeAccess path false))
+            (let [name (Util/toBytes "user.java")]
+              (UnixNativeDispatcher/fgetxattr fd name 0 0)
+              (return true))
+            (catch UnixException e
+              (when (== (.errno e) UnixConstants/XATTR_NOT_FOUND) (return true)))
+            (finally
+              (UnixNativeDispatcher/close
+                fd
+                (lambda Function ^RuntimeException [^UnixException e] nil))))
+          false)))
+
+  (method ^:public supportsFileAttributeView ^boolean [this
+                                                       ^{:tag (Class (? extends FileAttributeView))} type]
+    (when (nil? type) (throw (NullPointerException.)))
+    (cond
+      (identical? type BasicFileAttributeView) true
+      (or (identical? type PosixFileAttributeView) (identical? type FileOwnerAttributeView))
+        (let [status (.checkIfFeaturePresent this "posix")]
+          (not (identical? status FeatureStatus/NOT_PRESENT)))
+      :else false))
+
+  (method ^:public supportsFileAttributeView ^boolean [this ^String name]
+    (cond
+      (or (.equals name "basic") (.equals name "unix")) true
+      (.equals name "posix") (.supportsFileAttributeView this PosixFileAttributeView)
+      (.equals name "owner") (.supportsFileAttributeView this FileOwnerAttributeView)
+      :else false))
+
+  (method ^:public equals ^boolean [this ob]
+    (if (identical? ob this)
+        true
+        (if-instance [^UnixFileStore other ob]
+          (and (and (== (.-dev this) (.-dev other))
+                    (Arrays/equals (.dir (.-entry this)) (.dir (.-entry other))))
+               (.equals (.name (.-entry this)) (.name (.-entry other))))
+          false)))
+
+  (method ^:public hashCode ^int [this]
+    (bit-xor-int (Long/hashCode dev) (Arrays/hashCode (.dir entry))))
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder. (Util/toString (.dir entry)))]
+      (.append sb " (")
+      (.append sb (.name entry))
+      (.append sb ")")
+      (.toString sb)))
+
+  (field ^:private ^:static ^:final loadLock (Object.))
+
+  (field ^:private ^:static ^:volatile ^Properties props)
+
+  (defclass ^:enum FeatureStatus
+    (constants PRESENT NOT_PRESENT UNKNOWN))
+
+  (method checkIfFeaturePresent ^FeatureStatus [this ^String feature]
+    (when (nil? props)
+      (locking loadLock (when (nil? props) (set! props (UnixFileStore/loadProperties)))))
+    (let [value (.getProperty props (.type this))]
+      (when (some? value)
+        (let [values (.split value "\\s")]
+          (for-each [^:mutable ^String s values]
+            (set! s (.toLowerCase (.trim s) Locale/ROOT))
+            (when (.equals s feature) (return FeatureStatus/PRESENT))
+            (when (.startsWith s "no")
+              (set! s (.substring s 2))
+              (when (.equals s feature) (return FeatureStatus/NOT_PRESENT))))))
+      FeatureStatus/UNKNOWN))
+
+  (method ^:private ^:static loadProperties ^Properties []
+    (let [result (Properties.)
+          fstypes (java-str (StaticProperty/javaHome) "/lib/fstypes.properties")
+          file (Path/of fstypes (new String/1 []))]
+      (try
+        (with-resources [^ReadableByteChannel rbc (Files/newByteChannel file (new OpenOption/1 []))]
+          (.load result (Channels/newReader rbc UTF_8/INSTANCE)))
+        (catch IOException x))
+      result)))

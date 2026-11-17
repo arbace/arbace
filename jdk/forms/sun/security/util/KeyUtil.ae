@@ -1,0 +1,250 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/KeyUtil.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util)
+
+(import '(com.sun.crypto.provider PBKDF2KeyImpl)
+        '(java.io IOException)
+        '(java.security AlgorithmParameters
+                        AsymmetricKey
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        PublicKey
+                        SecureRandom)
+        '(java.security.interfaces DSAKey ECKey EdECKey RSAKey XECKey)
+        '(java.security.spec ECParameterSpec
+                             InvalidParameterSpecException
+                             KeySpec
+                             NamedParameterSpec
+                             PKCS8EncodedKeySpec)
+        '(java.util Arrays)
+        '(javax.crypto SecretKey)
+        '(javax.crypto.interfaces DHKey DHPublicKey)
+        '(javax.crypto.spec DHParameterSpec DHPublicKeySpec PBEKeySpec SecretKeySpec)
+        '(javax.security.auth DestroyFailedException)
+        '(jdk.internal.access SharedSecrets)
+        '(sun.security.jca JCAUtil)
+        '(sun.security.pkcs PKCS8Key)
+        '(sun.security.x509 AlgorithmId))
+
+(defclass ^:public ^:final KeyUtil
+  (method ^:public ^:static getKeySize ^int [^Key key]
+    (let [^:mutable ^int size -1]
+      (when (instance? Length key)
+        (try
+          (let [ruler (cast Length key)] (set! size (.length ruler)))
+          (catch UnsupportedOperationException usoe))
+        (when (>= size 0) (return size)))
+      (if-instance [^SecretKey sk key]
+        (let [format (.getFormat sk)]
+          (when (.equals "RAW" format)
+            (let [encoded (.getEncoded sk)]
+              (when (some? encoded)
+                (set! size (unchecked-multiply-int (alength encoded) 8))
+                (Arrays/fill encoded (unchecked-byte 0))))))
+        (if-instance [^RSAKey pubk key]
+          (set! size (.bitLength (.getModulus pubk)))
+          (if-instance [^ECKey pubk key]
+            (set! size (.bitLength (.getOrder (.getParams pubk))))
+            (if-instance [^DSAKey pubk key]
+              (let [params (.getParams pubk)]
+                (set! size (if (some? params) (.bitLength (.getP params)) -1)))
+              (if-instance [^DHKey pubk key]
+                (set! size (.bitLength (.getP (.getParams pubk))))
+                (if-instance [^XECKey pubk key]
+                  (let [params (.getParams pubk)]
+                    (if (instance? NamedParameterSpec params)
+                        (let [name (.getName (cast NamedParameterSpec params))]
+                          (cond
+                            (.equalsIgnoreCase name (.getName NamedParameterSpec/X25519))
+                              (set! size 255)
+                            (.equalsIgnoreCase name (.getName NamedParameterSpec/X448))
+                              (set! size 448)
+                            :else (set! size -1)))
+                        (set! size -1)))
+                  (when (instance? EdECKey key)
+                    (let [nc (.getName (.getParams (cast EdECKey key)))]
+                      (cond
+                        (.equalsIgnoreCase nc (.getName NamedParameterSpec/ED25519)) (set! size 255)
+                        (.equalsIgnoreCase nc (.getName NamedParameterSpec/ED448)) (set! size 448)
+                        :else (set! size -1))))))))))
+      size))
+
+  (method ^:public ^:static ^:final getKeySize ^int [^AlgorithmParameters parameters]
+    (switch (.getAlgorithm parameters)
+      "EC"
+        (do
+          (when (.equals (.getName (.getProvider parameters)) "SunEC")
+            (try
+              (let [ps (cast ECKeySizeParameterSpec
+                             (.getParameterSpec parameters ECKeySizeParameterSpec))]
+                (when (some? ps) (return (.getKeySize ps))))
+              (catch InvalidParameterSpecException ipse)))
+          (try
+            (let [ps (cast ECParameterSpec (.getParameterSpec parameters ECParameterSpec))]
+              (when (some? ps) (return (.bitLength (.getOrder ps)))))
+            (catch InvalidParameterSpecException ipse)))
+      "DiffieHellman"
+        (try
+          (let [ps (cast DHParameterSpec (.getParameterSpec parameters DHParameterSpec))]
+            (when (some? ps) (return (.bitLength (.getP ps)))))
+          (catch InvalidParameterSpecException ipse)))
+    -1)
+
+  (method ^:public ^:static getAlgorithm ^String [^Key key]
+    (when-instance [^AsymmetricKey ak key]
+      (when-instance [^NamedParameterSpec nps (.getParams ak)] (return (.getName nps))))
+    (.getAlgorithm key))
+
+  (method ^:public ^:static ^:final validate :throws [InvalidKeyException] ^void [^Key key]
+    (when (nil? key) (throw (NullPointerException. "The key to be validated cannot be null")))
+    (when (instance? DHPublicKey key) (KeyUtil/validateDHPublicKey (cast DHPublicKey key))))
+
+  (method ^:public ^:static ^:final validate :throws [InvalidKeyException] ^void [^KeySpec keySpec]
+    (when (nil? keySpec)
+      (throw (NullPointerException. "The key spec to be validated cannot be null")))
+    (when (instance? DHPublicKeySpec keySpec)
+      (KeyUtil/validateDHPublicKey (cast DHPublicKeySpec keySpec))))
+
+  (method ^:public ^:static ^:final isOracleJCEProvider ^boolean [^String providerName]
+    (and (some? providerName)
+         (or (or (.equals providerName "SunJCE") (.equals providerName "SunMSCAPI"))
+             (.startsWith providerName "SunPKCS11"))))
+
+  (method ^:public ^:static checkTlsPreMasterSecretKey ^byte/1 [^int clientVersion
+                                                                ^int serverVersion
+                                                                ^:mutable ^SecureRandom random
+                                                                ^:mutable ^byte/1 encoded
+                                                                ^boolean failure]
+    (let [^:mutable ^byte/1 tmp nil]
+      (when (nil? random) (set! random (JCAUtil/getSecureRandom)))
+      (let [replacer (new byte/1 48)]
+        (.nextBytes random replacer)
+        (if failure (set! tmp replacer) (set! tmp encoded))
+        (if (nil? tmp) (set! encoded replacer) (set! encoded tmp))
+        (if (not (== (alength encoded) 48)) (set! tmp replacer) (set! tmp encoded))
+        (let [encodedVersion (bit-or-int (bit-shift-left-int (bit-and-int (aget tmp 0) 0xFF) 8)
+                                         (bit-and-int (aget tmp 1) 0xFF))
+              ^:mutable check1 (bit-or-int (unchecked-subtract-int clientVersion encodedVersion)
+                                           (unchecked-subtract-int encodedVersion clientVersion))
+              ^:mutable check2 (unchecked-subtract-int 0x0301 clientVersion)
+              check3 (bit-or-int (unchecked-subtract-int serverVersion encodedVersion)
+                                 (unchecked-subtract-int encodedVersion serverVersion))]
+          (set! check1 (bit-shift-right-int (bit-and-int check1 (bit-or-int check2 check3)) 24))
+          (set! check2 (bit-not-int check1))
+          (loop [^int i 0]
+            (when (< i 48)
+              (aset tmp
+                    i
+                    (unchecked-byte
+                      (bit-or-int (bit-and-int (aget tmp i) check2)
+                                  (bit-and-int (aget replacer i) check1))))
+              (recur (unchecked-inc-int i))))
+          tmp))))
+
+  (method ^:private ^:static validateDHPublicKey :throws [InvalidKeyException] ^void [^DHPublicKey publicKey]
+    (let [paramSpec (.getParams publicKey)
+          p (.getP paramSpec)
+          g (.getG paramSpec)
+          y (.getY publicKey)]
+      (KeyUtil/validateDHPublicKey p g y)))
+
+  (method ^:private ^:static validateDHPublicKey :throws [InvalidKeyException] ^void [^DHPublicKeySpec publicKeySpec]
+    (KeyUtil/validateDHPublicKey (.getP publicKeySpec) (.getG publicKeySpec) (.getY publicKeySpec)))
+
+  (method ^:private ^:static validateDHPublicKey :throws [InvalidKeyException] ^void [^BigInteger p
+                                                                                      ^BigInteger g
+                                                                                      ^BigInteger y]
+    (let [leftOpen BigInteger/ONE
+          rightOpen (.subtract p BigInteger/ONE)]
+      (when (<= (.compareTo y leftOpen) 0)
+        (throw (InvalidKeyException. "Diffie-Hellman public key is too small")))
+      (when (>= (.compareTo y rightOpen) 0)
+        (throw (InvalidKeyException. "Diffie-Hellman public key is too large")))
+      (let [r (.remainder p y)]
+        (when (.equals r BigInteger/ZERO)
+          (throw (InvalidKeyException. "Invalid Diffie-Hellman parameters"))))))
+
+  (method ^:public ^:static trimZeroes ^byte/1 [^byte/1 b]
+    (let [^:mutable ^int i 0]
+      (while (and (< i (unchecked-subtract-int (alength b) 1)) (== (aget b i) 0))
+        (set! i (unchecked-inc-int i)))
+      (if (== i 0)
+          b
+          (let [t (new byte/1 (unchecked-subtract-int (alength b) i))]
+            (System/arraycopy b i t 0 (alength t))
+            t))))
+
+  (method ^:public ^:static hashAlgFromHSS :throws [NoSuchAlgorithmException] ^ObjectIdentifier [^PublicKey publicKey]
+    (try
+      (let [val (DerValue. (.getEncoded publicKey))]
+        (.getDerValue (.-data val))
+        (let [rawKey (.getBitString (.-data val))]
+          (when (< (alength rawKey) 8)
+            (throw (NoSuchAlgorithmException. "Cannot decode public key")))
+          (let [num (unchecked-add-int
+                      (unchecked-add-int
+                        (unchecked-add-int
+                          (bit-shift-left-int (bit-and-int (aget rawKey 4) 0xff) 24)
+                          (bit-shift-left-int (bit-and-int (aget rawKey 5) 0xff) 16))
+                        (bit-shift-left-int (bit-and-int (aget rawKey 6) 0xff) 8))
+                      (bit-and-int (aget rawKey 7) 0xff))]
+            (switch num
+              (5 6 7 8 9) AlgorithmId/SHA256_oid
+              (throw (NoSuchAlgorithmException. (java-str "Unknown LMS type: " num)))))))
+      (catch IOException e (throw (NoSuchAlgorithmException. "Cannot decode public key" e)))))
+
+  (method ^:public ^:static isSupportedKeyAgreementOutputAlgorithm ^boolean [^String alg]
+    (or (.equalsIgnoreCase alg "TlsPremasterSecret") (.equalsIgnoreCase alg "Generic")))
+
+  (method ^:public ^:static destroySecretKeys ^void [& ^SecretKey/1 keys]
+    (for-each [^SecretKey k keys]
+      (when (some? k)
+        (if-instance [^SecretKeySpec sk k]
+          (.clearSecretKeySpec (SharedSecrets/getJavaxCryptoSpecAccess) sk)
+          (if-instance [^PBKDF2KeyImpl p2k k]
+            (.clear p2k)
+            (try (.destroy k) (catch DestroyFailedException e)))))))
+
+  (method ^:public ^:static getAlgorithm :throws [IOException] ^String [^byte/1 encoded]
+    (try
+      (.getName (KeyUtil/getAlgorithmId encoded))
+      (catch IOException e (throw (IOException. "No recognized algorithm detected in encoding" e)))))
+
+  (method ^:public ^:static getAlgorithmId :throws [IOException] ^AlgorithmId [^byte/1 encoded]
+    (let [^:mutable is (DerInputStream. encoded)
+          ^:mutable value (.getDerValue is)]
+      (when-not (== (.-tag value) DerValue/tag_Sequence)
+        (throw (IOException. "Unknown DER Format:  Value 1 not a Sequence")))
+      (set! is (.-data value))
+      (set! value (.getDerValue is))
+      (if (== (.-tag value) DerValue/tag_Sequence)
+          (AlgorithmId/parse value)
+          (do
+            (when (== (.-tag value) DerValue/tag_Integer)
+              (set! value (.getDerValue is))
+              (cond
+                (== (.-tag value) DerValue/tag_OctetString)
+                  (do
+                    (set! value (.getDerValue is))
+                    (if (== (.-tag value) DerValue/tag_Sequence)
+                        (return (AlgorithmId/parse value))
+                        (let [oid (.getOID (.-data value))
+                              algo (AlgorithmId. oid (cast AlgorithmParameters nil))]
+                          (when (some? (CurveDB/lookup (.getName algo)))
+                            (return (AlgorithmId. AlgorithmId/EC_oid))))))
+                (== (.-tag value) DerValue/tag_Sequence) (return (AlgorithmId/parse value))))
+            (throw (IOException. "No algorithm detected"))))))
+
+  (method ^:public ^:static clear ^void [& ^Object/1 list]
+    (for-each [o list]
+      (switch o
+        [^byte/1 b] (Arrays/fill b (unchecked-byte 0))
+        [^char/1 c] (Arrays/fill c (unchecked-char 0))
+        [^PKCS8Key p8] (.clear p8)
+        [^PKCS8EncodedKeySpec p8]
+          (.clearEncodedKeySpec (SharedSecrets/getJavaSecuritySpecAccess) p8)
+        [^PBEKeySpec pbe] (.clearPassword pbe)
+        nil nil
+        (throw (IllegalArgumentException.
+                 (java-str (.getName (.getClass o)) " not defined in KeyUtil.clear()")))))))

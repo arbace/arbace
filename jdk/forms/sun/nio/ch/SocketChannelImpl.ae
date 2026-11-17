@@ -1,0 +1,876 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/nio/ch/SocketChannelImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.ch)
+
+(import '(java.io FileDescriptor IOException)
+        '(java.net Inet4Address
+                   InetSocketAddress
+                   ProtocolFamily
+                   Socket
+                   SocketAddress
+                   SocketException
+                   SocketOption
+                   SocketTimeoutException
+                   StandardProtocolFamily
+                   StandardSocketOptions)
+        '(java.nio ByteBuffer)
+        '(java.nio.channels AlreadyBoundException
+                            AlreadyConnectedException
+                            AsynchronousCloseException
+                            ClosedChannelException
+                            ConnectionPendingException
+                            IllegalBlockingModeException
+                            NoConnectionPendingException
+                            NotYetConnectedException
+                            SelectionKey
+                            SocketChannel)
+        '(java.nio.channels.spi SelectorProvider)
+        '(java.util Collections HashSet Objects Set)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(jdk.internal.event SocketReadEvent SocketWriteEvent)
+        '(jdk.internal.util Exceptions)
+        '(sun.net ConnectionResetException)
+        '(sun.net.ext ExtendedSocketOptions))
+
+(defclass SocketChannelImpl
+  :extends SocketChannel
+  :implements [SelChImpl]
+
+  (field ^:private ^:static ^:final ^NativeDispatcher nd (SocketDispatcher.))
+
+  (field ^:private ^:final ^ProtocolFamily family)
+
+  (field ^:private ^:final ^FileDescriptor fd)
+
+  (field ^:private ^:final ^int fdVal)
+
+  (field ^:private ^:final ^ReentrantLock readLock (ReentrantLock.))
+
+  (field ^:private ^:final ^ReentrantLock writeLock (ReentrantLock.))
+
+  (field ^:private ^:final stateLock (Object.))
+
+  (field ^:private ^:volatile ^boolean isInputClosed)
+
+  (field ^:private ^:volatile ^boolean isOutputClosed)
+
+  (field ^:private ^boolean connectionReset)
+
+  (field ^:private ^boolean isReuseAddress)
+
+  (field ^:private ^:static ^:final ^int ST_UNCONNECTED 0)
+
+  (field ^:private ^:static ^:final ^int ST_CONNECTIONPENDING 1)
+
+  (field ^:private ^:static ^:final ^int ST_CONNECTED 2)
+
+  (field ^:private ^:static ^:final ^int ST_CLOSING 3)
+
+  (field ^:private ^:static ^:final ^int ST_CLOSED 4)
+
+  (field ^:private ^:volatile ^int state)
+
+  (field ^:private ^long readerThread)
+
+  (field ^:private ^long writerThread)
+
+  (field ^:private ^SocketAddress localAddress)
+
+  (field ^:private ^SocketAddress remoteAddress)
+
+  (field ^:private ^Socket socket)
+
+  (field ^:private ^:volatile ^boolean forcedNonBlocking)
+
+  (constructor :throws [IOException] [this ^SelectorProvider sp]
+    (this. sp
+           ^ProtocolFamily (if (Net/isIPv6Available)
+                               StandardProtocolFamily/INET6
+                               StandardProtocolFamily/INET)))
+
+  (constructor :throws [IOException] [this ^SelectorProvider sp ^ProtocolFamily family]
+    (super. sp)
+    (Objects/requireNonNull family "'family' is null")
+    (when (and (and (not (identical? family StandardProtocolFamily/INET))
+                    (not (identical? family StandardProtocolFamily/INET6)))
+               (not (identical? family StandardProtocolFamily/UNIX)))
+      (throw (UnsupportedOperationException. "Protocol family not supported")))
+    (when (and (identical? family StandardProtocolFamily/INET6) (not (Net/isIPv6Available)))
+      (throw (UnsupportedOperationException. "IPv6 not available")))
+    (set! (.-family this) family)
+    (if (identical? family StandardProtocolFamily/UNIX)
+        (set! (.-fd this) (UnixDomainSockets/socket))
+        (set! (.-fd this) (Net/socket family true)))
+    (set! (.-fdVal this) (IOUtil/fdVal fd)))
+
+  (constructor :throws [IOException] [this ^SelectorProvider sp ^ProtocolFamily family
+                                      ^FileDescriptor fd ^SocketAddress remoteAddress]
+    (super. sp)
+    (set! (.-family this) family)
+    (set! (.-fd this) fd)
+    (set! (.-fdVal this) (IOUtil/fdVal fd))
+    (locking stateLock
+      (if (identical? family StandardProtocolFamily/UNIX)
+          (set! (.-localAddress this) (UnixDomainSockets/localAddress fd))
+          (set! (.-localAddress this) (Net/localAddress fd)))
+      (set! (.-remoteAddress this) remoteAddress)
+      (set! (.-state this) ST_CONNECTED)))
+
+  (method isNetSocket ^boolean [this]
+    (or (identical? family StandardProtocolFamily/INET)
+        (identical? family StandardProtocolFamily/INET6)))
+
+  (method isUnixSocket ^boolean [this]
+    (identical? family StandardProtocolFamily/UNIX))
+
+  (method ^:private ensureOpen :throws [ClosedChannelException] ^void [this]
+    (when-not (.isOpen this) (throw (ClosedChannelException.))))
+
+  (method ^:private ensureOpenAndConnected :throws [ClosedChannelException] ^void [this]
+    (let [state (.-state this)]
+      (cond
+        (< state ST_CONNECTED) (throw (NotYetConnectedException.))
+        (> state ST_CONNECTED) (throw (ClosedChannelException.)))))
+
+  (method ^:public socket ^Socket [this]
+    (locking stateLock
+      (when (nil? socket)
+        (if (.isNetSocket this)
+            (set! socket (SocketAdaptor/create this))
+            (throw (UnsupportedOperationException. "Not supported"))))
+      socket))
+
+  (method ^:public getLocalAddress :throws [IOException] ^SocketAddress [this]
+    (locking stateLock (.ensureOpen this) localAddress))
+
+  (method ^:public getRemoteAddress :throws [IOException] ^SocketAddress [this]
+    (locking stateLock (.ensureOpen this) remoteAddress))
+
+  (method ^:public setOption :type-params [T] :throws [IOException] ^SocketChannel [this
+                                                                                    ^{:tag (SocketOption T)} name
+                                                                                    ^T value]
+    (Objects/requireNonNull name)
+    (when-not (.contains (.supportedOptions this) name)
+      (throw (UnsupportedOperationException. (java-str "'" name "' not supported"))))
+    (when-not (.isInstance (.type name) value)
+      (throw (IllegalArgumentException. (java-str "Invalid value '" value "'"))))
+    (locking stateLock
+      (.ensureOpen this)
+      (when (.isNetSocket this)
+        (when (identical? name StandardSocketOptions/IP_TOS)
+          (Net/setIpSocketOption fd family name value)
+          (return this))
+        (when (and (identical? name StandardSocketOptions/SO_REUSEADDR) (Net/useExclusiveBind))
+          (set! isReuseAddress (cast Boolean value))
+          (return this)))
+      (Net/setSocketOption fd name value)
+      this))
+
+  (method ^:public getOption :type-params [T] :throws [IOException] ^T [this
+                                                                        ^{:tag (SocketOption T)} name]
+    (Objects/requireNonNull name)
+    (when-not (.contains (.supportedOptions this) name)
+      (throw (UnsupportedOperationException. (java-str "'" name "' not supported"))))
+    (locking stateLock
+      (.ensureOpen this)
+      (when (.isNetSocket this)
+        (when (identical? name StandardSocketOptions/IP_TOS)
+          (return (Net/getSocketOption fd family name)))
+        (when (and (identical? name StandardSocketOptions/SO_REUSEADDR) (Net/useExclusiveBind))
+          (return ^Object (Boolean/valueOf isReuseAddress))))
+      (Net/getSocketOption fd name)))
+
+  (defclass ^:private ^:static DefaultOptionsHolder
+    (field ^:static ^:final ^{:tag (Set (SocketOption ?))} defaultInetOptions
+      (DefaultOptionsHolder/defaultInetOptions))
+
+    (field ^:static ^:final ^{:tag (Set (SocketOption ?))} defaultUnixOptions
+      (DefaultOptionsHolder/defaultUnixOptions))
+
+    (method ^:private ^:static defaultInetOptions ^{:tag (Set (SocketOption ?))} []
+      (let [^{:tag (HashSet (SocketOption ?))} set (HashSet.)]
+        (.add set StandardSocketOptions/SO_SNDBUF)
+        (.add set StandardSocketOptions/SO_RCVBUF)
+        (.add set StandardSocketOptions/SO_KEEPALIVE)
+        (.add set StandardSocketOptions/SO_REUSEADDR)
+        (when (Net/isReusePortAvailable) (.add set StandardSocketOptions/SO_REUSEPORT))
+        (.add set StandardSocketOptions/SO_LINGER)
+        (.add set StandardSocketOptions/TCP_NODELAY)
+        (.add set StandardSocketOptions/IP_TOS)
+        (.add set ExtendedSocketOption/SO_OOBINLINE)
+        (.addAll set (ExtendedSocketOptions/clientSocketOptions))
+        (Collections/unmodifiableSet set)))
+
+    (method ^:private ^:static defaultUnixOptions ^{:tag (Set (SocketOption ?))} []
+      (let [^{:tag (HashSet (SocketOption ?))} set (HashSet.)]
+        (.add set StandardSocketOptions/SO_SNDBUF)
+        (.add set StandardSocketOptions/SO_RCVBUF)
+        (.add set StandardSocketOptions/SO_LINGER)
+        (.addAll set (ExtendedSocketOptions/unixDomainSocketOptions))
+        (Collections/unmodifiableSet set))))
+
+  (method ^:public ^:final supportedOptions ^{:tag (Set (SocketOption ?))} [this]
+    (if (.isUnixSocket this)
+        DefaultOptionsHolder/defaultUnixOptions
+        DefaultOptionsHolder/defaultInetOptions))
+
+  (method ^:private beginRead :throws [ClosedChannelException] ^void [this ^boolean blocking]
+    (when blocking
+      (.begin this)
+      (locking stateLock (.ensureOpen this) (set! readerThread (NativeThread/current)))))
+
+  (method ^:private endRead :throws [AsynchronousCloseException] ^void [this ^boolean blocking
+                                                                        ^boolean completed]
+    (when blocking
+      (locking stateLock (set! readerThread 0) (when (== state ST_CLOSING) (.tryFinishClose this)))
+      (.end this completed)))
+
+  (method ^:private throwConnectionReset :throws [SocketException] ^void [this]
+    (throw (SocketException. "Connection reset")))
+
+  (method ^:private implRead :throws [IOException] ^int [this ^ByteBuffer buf]
+    (Objects/requireNonNull buf)
+    (.lock readLock)
+    (try
+      (.ensureOpenAndConnected this)
+      (let [blocking (.isBlocking this)
+            ^:mutable ^int n 0]
+        (try
+          (.beginRead this blocking)
+          (when connectionReset (.throwConnectionReset this))
+          (when isInputClosed (return IOStatus/EOF))
+          (.configureSocketNonBlockingIfVirtualThread this)
+          (set! n (IOUtil/read fd buf -1 nd))
+          (when blocking
+            (while (and (IOStatus/okayToRetry n) (.isOpen this))
+              (.park this Net/POLLIN)
+              (set! n (IOUtil/read fd buf -1 nd))))
+          (catch ConnectionResetException e
+            (set! connectionReset true)
+            (.throwConnectionReset this))
+          (finally
+            (.endRead this blocking (> n 0))
+            (when (and (<= n 0) isInputClosed) (return IOStatus/EOF))))
+        (IOStatus/normalize n))
+      (finally (.unlock readLock))))
+
+  (method ^:private implRead :throws [IOException] ^long [this ^ByteBuffer/1 dsts ^int offset
+                                                          ^int length]
+    (Objects/checkFromIndexSize offset length (alength dsts))
+    (.lock readLock)
+    (try
+      (.ensureOpenAndConnected this)
+      (let [blocking (.isBlocking this)
+            ^:mutable n 0]
+        (try
+          (.beginRead this blocking)
+          (when connectionReset (.throwConnectionReset this))
+          (when isInputClosed (return IOStatus/EOF))
+          (.configureSocketNonBlockingIfVirtualThread this)
+          (set! n (IOUtil/read fd dsts offset length nd))
+          (when blocking
+            (while (and (IOStatus/okayToRetry n) (.isOpen this))
+              (.park this Net/POLLIN)
+              (set! n (IOUtil/read fd dsts offset length nd))))
+          (catch ConnectionResetException e
+            (set! connectionReset true)
+            (.throwConnectionReset this))
+          (finally
+            (.endRead this blocking (> n 0))
+            (when (and (<= n 0) isInputClosed) (return IOStatus/EOF))))
+        (IOStatus/normalize n))
+      (finally (.unlock readLock))))
+
+  (method ^:public read :throws [IOException] ^int [this ^ByteBuffer buf]
+    (if (not (SocketReadEvent/enabled))
+        (.implRead this buf)
+        (let [start (SocketReadEvent/timestamp)
+              nbytes (.implRead this buf)]
+          (SocketReadEvent/offer start nbytes (.remoteAddress this) 0)
+          nbytes)))
+
+  (method ^:public read :throws [IOException] ^long [this ^ByteBuffer/1 dsts ^int offset ^int length]
+    (if (not (SocketReadEvent/enabled))
+        (.implRead this dsts offset length)
+        (let [start (SocketReadEvent/timestamp)
+              nbytes (.implRead this dsts offset length)]
+          (SocketReadEvent/offer start nbytes (.remoteAddress this) 0)
+          nbytes)))
+
+  (method ^:private beginWrite :throws [ClosedChannelException] ^void [this ^boolean blocking]
+    (when blocking
+      (.begin this)
+      (locking stateLock
+        (.ensureOpen this)
+        (when isOutputClosed (throw (ClosedChannelException.)))
+        (set! writerThread (NativeThread/current)))))
+
+  (method ^:private endWrite :throws [AsynchronousCloseException] ^void [this ^boolean blocking
+                                                                         ^boolean completed]
+    (when blocking
+      (locking stateLock (set! writerThread 0) (when (== state ST_CLOSING) (.tryFinishClose this)))
+      (.end this completed)))
+
+  (method ^:private implWrite :throws [IOException] ^int [this ^ByteBuffer buf]
+    (Objects/requireNonNull buf)
+    (.lock writeLock)
+    (try
+      (.ensureOpenAndConnected this)
+      (let [blocking (.isBlocking this)
+            ^:mutable ^int n 0]
+        (try
+          (.beginWrite this blocking)
+          (.configureSocketNonBlockingIfVirtualThread this)
+          (set! n (IOUtil/write fd buf -1 nd))
+          (when blocking
+            (while (and (IOStatus/okayToRetry n) (.isOpen this))
+              (.park this Net/POLLOUT)
+              (set! n (IOUtil/write fd buf -1 nd))))
+          (finally
+            (.endWrite this blocking (> n 0))
+            (when (and (<= n 0) isOutputClosed) (throw (AsynchronousCloseException.)))))
+        (IOStatus/normalize n))
+      (finally (.unlock writeLock))))
+
+  (method ^:private implWrite :throws [IOException] ^long [this ^ByteBuffer/1 srcs ^int offset
+                                                           ^int length]
+    (Objects/checkFromIndexSize offset length (alength srcs))
+    (.lock writeLock)
+    (try
+      (.ensureOpenAndConnected this)
+      (let [blocking (.isBlocking this)
+            ^:mutable n 0]
+        (try
+          (.beginWrite this blocking)
+          (.configureSocketNonBlockingIfVirtualThread this)
+          (set! n (IOUtil/write fd srcs offset length nd))
+          (when blocking
+            (while (and (IOStatus/okayToRetry n) (.isOpen this))
+              (.park this Net/POLLOUT)
+              (set! n (IOUtil/write fd srcs offset length nd))))
+          (finally
+            (.endWrite this blocking (> n 0))
+            (when (and (<= n 0) isOutputClosed) (throw (AsynchronousCloseException.)))))
+        (IOStatus/normalize n))
+      (finally (.unlock writeLock))))
+
+  (method ^:public write :throws [IOException] ^int [this ^ByteBuffer buf]
+    (if (not (SocketWriteEvent/enabled))
+        (.implWrite this buf)
+        (let [start (SocketWriteEvent/timestamp)
+              nbytes (.implWrite this buf)]
+          (SocketWriteEvent/offer start nbytes (.remoteAddress this))
+          nbytes)))
+
+  (method ^:public write :throws [IOException] ^long [this ^ByteBuffer/1 srcs ^int offset
+                                                      ^int length]
+    (if (not (SocketWriteEvent/enabled))
+        (.implWrite this srcs offset length)
+        (let [start (SocketWriteEvent/timestamp)
+              nbytes (.implWrite this srcs offset length)]
+          (SocketWriteEvent/offer start nbytes (.remoteAddress this))
+          nbytes)))
+
+  (method sendOutOfBandData :throws [IOException] ^int [this ^byte b]
+    (.lock writeLock)
+    (try
+      (.ensureOpenAndConnected this)
+      (let [blocking (.isBlocking this)
+            ^:mutable ^int n 0]
+        (try
+          (.beginWrite this blocking)
+          (.configureSocketNonBlockingIfVirtualThread this)
+          (loop []
+            (set! n (Net/sendOOB fd b))
+            (when (and (== n IOStatus/INTERRUPTED) (.isOpen this)) (recur)))
+          (when (and blocking (== n IOStatus/UNAVAILABLE))
+            (throw (SocketException. "No buffer space available")))
+          (finally
+            (.endWrite this blocking (> n 0))
+            (when (and (<= n 0) isOutputClosed) (throw (AsynchronousCloseException.)))))
+        (IOStatus/normalize n))
+      (finally (.unlock writeLock))))
+
+  (method beforeTransferTo :throws [ClosedChannelException] ^void [this]
+    (let [^:mutable completed false]
+      (.lock writeLock)
+      (try
+        (locking stateLock
+          (.ensureOpenAndConnected this)
+          (when isOutputClosed (throw (ClosedChannelException.)))
+          (set! writerThread (NativeThread/current))
+          (set! completed true))
+        (finally (when-not completed (.unlock writeLock))))))
+
+  (method afterTransferTo :throws [AsynchronousCloseException] ^void [this ^boolean completed]
+    (locking stateLock (set! writerThread 0) (when (== state ST_CLOSING) (.tryFinishClose this)))
+    (.unlock writeLock)
+    (when (and (not completed) (not (.isOpen this))) (throw (AsynchronousCloseException.))))
+
+  (method ^:protected implConfigureBlocking :throws [IOException] ^void [this ^boolean block]
+    (.lock readLock)
+    (try
+      (.lock writeLock)
+      (try (.lockedConfigureBlocking this block) (finally (.unlock writeLock)))
+      (finally (.unlock readLock))))
+
+  (method ^:private lockedConfigureBlocking :throws [IOException] ^void [this ^boolean block]
+    (java-assert (or (.isHeldByCurrentThread readLock) (.isHeldByCurrentThread writeLock)))
+    (locking stateLock
+      (.ensureOpen this)
+      (when-not forcedNonBlocking (IOUtil/configureBlocking fd block))))
+
+  (method ^:private tryLockedConfigureBlocking :throws [IOException] ^boolean [this ^boolean block]
+    (java-assert (or (.isHeldByCurrentThread readLock) (.isHeldByCurrentThread writeLock)))
+    (locking stateLock
+      (if (and (not forcedNonBlocking) (.isOpen this))
+          (do (IOUtil/configureBlocking fd block) true)
+          false)))
+
+  (method ^:private configureSocketNonBlockingIfVirtualThread :throws [IOException] ^void [this]
+    (java-assert (or (.isHeldByCurrentThread readLock) (.isHeldByCurrentThread writeLock)))
+    (when (and (not forcedNonBlocking) (.isVirtual (Thread/currentThread)))
+      (locking stateLock
+        (.ensureOpen this)
+        (IOUtil/configureBlocking fd false)
+        (set! forcedNonBlocking true))))
+
+  (method localAddress ^SocketAddress [this]
+    (locking stateLock localAddress))
+
+  (method remoteAddress ^SocketAddress [this]
+    (locking stateLock remoteAddress))
+
+  (method ^:public bind :throws [IOException] ^SocketChannel [this ^SocketAddress local]
+    (.lock readLock)
+    (try
+      (.lock writeLock)
+      (try
+        (locking stateLock
+          (.ensureOpen this)
+          (when (== state ST_CONNECTIONPENDING) (throw (ConnectionPendingException.)))
+          (when (some? localAddress) (throw (AlreadyBoundException.)))
+          (if (.isUnixSocket this)
+              (set! localAddress (.unixBind this local))
+              (set! localAddress (.netBind this local))))
+        (finally (.unlock writeLock)))
+      (finally (.unlock readLock)))
+    this)
+
+  (method ^:private unixBind :throws [IOException] ^SocketAddress [this ^SocketAddress local]
+    (if (nil? local)
+        (UnixDomainSockets/unnamed)
+        (let [path (.getPath (UnixDomainSockets/checkAddress local))]
+          (if (.isEmpty (.toString path))
+              (UnixDomainSockets/unnamed)
+              (do (UnixDomainSockets/bind fd path) (UnixDomainSockets/localAddress fd))))))
+
+  (method ^:private netBind :throws [IOException] ^SocketAddress [this ^SocketAddress local]
+    (let [^InetSocketAddress isa (if (nil? local)
+                                     (InetSocketAddress. (Net/anyLocalAddress family) 0)
+                                     (Net/checkAddress local family))]
+      (Net/bind family fd (.getAddress isa) (.getPort isa))
+      (Net/localAddress fd)))
+
+  (method ^:public isConnected ^boolean [this] (== state ST_CONNECTED))
+
+  (method ^:public isConnectionPending ^boolean [this]
+    (== state ST_CONNECTIONPENDING))
+
+  (method ^:private beginConnect :throws [IOException] ^void [this ^boolean blocking
+                                                              ^SocketAddress sa]
+    (when blocking (.begin this))
+    (locking stateLock
+      (.ensureOpen this)
+      (let [state (.-state this)]
+        (when (== state ST_CONNECTED) (throw (AlreadyConnectedException.)))
+        (when (== state ST_CONNECTIONPENDING) (throw (ConnectionPendingException.)))
+        (java-assert (== state ST_UNCONNECTED))
+        (set! (.-state this) ST_CONNECTIONPENDING)
+        (when (and (.isNetSocket this) (nil? localAddress))
+          (let [isa (cast InetSocketAddress sa)] nil))
+        (set! remoteAddress sa)
+        (when blocking (set! readerThread (NativeThread/current))))))
+
+  (method ^:private endConnect :throws [IOException] ^void [this ^boolean blocking
+                                                            ^boolean completed]
+    (.endRead this blocking completed)
+    (when completed
+      (locking stateLock
+        (when (== state ST_CONNECTIONPENDING)
+          (if (.isUnixSocket this)
+              (set! localAddress (UnixDomainSockets/localAddress fd))
+              (set! localAddress (Net/localAddress fd)))
+          (set! state ST_CONNECTED)))))
+
+  (method ^:private checkRemote ^SocketAddress [this ^SocketAddress sa]
+    (if (.isUnixSocket this)
+        (UnixDomainSockets/checkAddress sa)
+        (let [isa (Net/checkAddress sa family)
+              address (.getAddress isa)]
+          (if (.isAnyLocalAddress address)
+              (let [port (.getPort isa)]
+                (if (instance? Inet4Address address)
+                    (InetSocketAddress. (Net/inet4LoopbackAddress) port)
+                    (do
+                      (java-assert (identical? family StandardProtocolFamily/INET6))
+                      (InetSocketAddress. (Net/inet6LoopbackAddress) port))))
+              isa))))
+
+  (method ^:public connect :throws [IOException] ^boolean [this ^SocketAddress remote]
+    (let [sa (.checkRemote this remote)]
+      (try
+        (.lock readLock)
+        (try
+          (.lock writeLock)
+          (try
+            (.ensureOpen this)
+            (let [blocking (.isBlocking this)
+                  ^:mutable connected false]
+              (try
+                (.beginConnect this blocking sa)
+                (.configureSocketNonBlockingIfVirtualThread this)
+                (let [^int n (if (.isUnixSocket this)
+                                 (UnixDomainSockets/connect fd sa)
+                                 (Net/connect family fd sa))]
+                  (if (> n 0)
+                      (set! connected true)
+                      (when blocking
+                        (java-assert (IOStatus/okayToRetry n))
+                        (let [^:mutable polled false]
+                          (while (and (not polled) (.isOpen this))
+                            (.park this Net/POLLOUT)
+                            (set! polled (Net/pollConnectNow fd)))
+                          (set! connected (and polled (.isOpen this)))))))
+                (finally (.endConnect this blocking connected)))
+              connected)
+            (finally (.unlock writeLock)))
+          (finally (.unlock readLock)))
+        (catch IOException ioe (.close this) (throw (Exceptions/ioException ioe sa))))))
+
+  (method ^:private beginFinishConnect :throws [ClosedChannelException] ^void [this
+                                                                               ^boolean blocking]
+    (when blocking (.begin this))
+    (locking stateLock
+      (.ensureOpen this)
+      (when-not (== state ST_CONNECTIONPENDING) (throw (NoConnectionPendingException.)))
+      (when blocking (set! readerThread (NativeThread/current)))))
+
+  (method ^:private endFinishConnect :throws [IOException] ^void [this ^boolean blocking
+                                                                  ^boolean completed]
+    (.endRead this blocking completed)
+    (when completed
+      (locking stateLock
+        (when (== state ST_CONNECTIONPENDING)
+          (if (.isUnixSocket this)
+              (set! localAddress (UnixDomainSockets/localAddress fd))
+              (set! localAddress (Net/localAddress fd)))
+          (set! state ST_CONNECTED)))))
+
+  (method ^:public finishConnect :throws [IOException] ^boolean [this]
+    (try
+      (.lock readLock)
+      (try
+        (.lock writeLock)
+        (try
+          (if (.isConnected this)
+              true
+              (do
+                (.ensureOpen this)
+                (let [blocking (.isBlocking this)
+                      ^:mutable connected false]
+                  (try
+                    (.beginFinishConnect this blocking)
+                    (let [^:mutable polled (Net/pollConnectNow fd)]
+                      (when blocking
+                        (while (and (not polled) (.isOpen this))
+                          (.park this Net/POLLOUT)
+                          (set! polled (Net/pollConnectNow fd))))
+                      (set! connected (and polled (.isOpen this))))
+                    (finally (.endFinishConnect this blocking connected)))
+                  (java-assert (not (= (and blocking connected) (not blocking))))
+                  connected)))
+          (finally (.unlock writeLock)))
+        (finally (.unlock readLock)))
+      (catch IOException ioe (.close this) (throw (Exceptions/ioException ioe remoteAddress)))))
+
+  (method ^:private tryClose :throws [IOException] ^boolean [this]
+    (java-assert (and (Thread/holdsLock stateLock) (== state ST_CLOSING)))
+    (if (and (and (== readerThread 0) (== writerThread 0)) (not (.isRegistered this)))
+        (do (set! state ST_CLOSED) (.close nd fd) true)
+        false))
+
+  (method ^:private tryFinishClose ^void [this]
+    (try (.tryClose this) (catch IOException ignore)))
+
+  (method ^:private implCloseBlockingMode :throws [IOException] ^void [this]
+    (locking stateLock
+      (java-assert (< state ST_CLOSING))
+      (let [connected (== state ST_CONNECTED)]
+        (set! state ST_CLOSING)
+        (when (and connected (Net/shouldShutdownWriteBeforeClose))
+          (try
+            (let [SO_LINGER StandardSocketOptions/SO_LINGER]
+              (when-not (== (.intValue (cast Integer (Net/getSocketOption fd SO_LINGER))) 0)
+                (Net/shutdown fd Net/SHUT_WR)))
+            (catch IOException ignore)))
+        (when-not (.tryClose this) (.preClose nd fd readerThread writerThread)))))
+
+  (method ^:private implCloseNonBlockingMode :throws [IOException] ^void [this]
+    (let [^:mutable ^boolean connected false]
+      (locking stateLock
+        (java-assert (< state ST_CLOSING))
+        (set! connected (== state ST_CONNECTED))
+        (set! state ST_CLOSING))
+      (.lock readLock)
+      (.unlock readLock)
+      (.lock writeLock)
+      (.unlock writeLock)
+      (locking stateLock
+        (when (and (and (and (== state ST_CLOSING) (not (.tryClose this))) connected)
+                   (.isRegistered this))
+          (try
+            (let [^{:tag (SocketOption Integer)} opt StandardSocketOptions/SO_LINGER
+                  interval (.intValue (cast Integer (Net/getSocketOption fd Net/UNSPEC opt)))]
+              (when-not (== interval 0)
+                (when (> interval 0) (Net/setSocketOption fd Net/UNSPEC opt (Integer/valueOf -1)))
+                (Net/shutdown fd Net/SHUT_WR)))
+            (catch IOException ignore))))))
+
+  (method ^:protected implCloseSelectableChannel :throws [IOException] ^void [this]
+    (java-assert (not (.isOpen this)))
+    (if (.isBlocking this) (.implCloseBlockingMode this) (.implCloseNonBlockingMode this)))
+
+  (method ^:public kill ^void [this]
+    (.lock readLock)
+    (.unlock readLock)
+    (.lock writeLock)
+    (.unlock writeLock)
+    (locking stateLock (when (== state ST_CLOSING) (.tryFinishClose this))))
+
+  (method ^:public shutdownInput :throws [IOException] ^SocketChannel [this]
+    (locking stateLock
+      (.ensureOpen this)
+      (when-not (.isConnected this) (throw (NotYetConnectedException.)))
+      (when-not isInputClosed
+        (Net/shutdown fd Net/SHUT_RD)
+        (let [reader readerThread]
+          (cond
+            (NativeThread/isVirtualThread reader) (Poller/stopPoll fdVal Net/POLLIN)
+            (NativeThread/isNativeThread reader) (NativeThread/signal reader))
+          (set! isInputClosed true)))
+      this))
+
+  (method ^:public shutdownOutput :throws [IOException] ^SocketChannel [this]
+    (locking stateLock
+      (.ensureOpen this)
+      (when-not (.isConnected this) (throw (NotYetConnectedException.)))
+      (when-not isOutputClosed
+        (Net/shutdown fd Net/SHUT_WR)
+        (let [writer writerThread]
+          (cond
+            (NativeThread/isVirtualThread writer) (Poller/stopPoll fdVal Net/POLLOUT)
+            (NativeThread/isNativeThread writer) (NativeThread/signal writer))
+          (set! isOutputClosed true)))
+      this))
+
+  (method isInputOpen ^boolean [this] (not isInputClosed))
+
+  (method isOutputOpen ^boolean [this] (not isOutputClosed))
+
+  (method ^:private finishTimedConnect :throws [IOException] ^boolean [this ^long nanos]
+    (let [startNanos (System/nanoTime)
+          ^:mutable polled (Net/pollConnectNow fd)]
+      (while (and (not polled) (.isOpen this))
+        (let [remainingNanos (unchecked-subtract
+                               nanos
+                               (unchecked-subtract (System/nanoTime) startNanos))]
+          (when (<= remainingNanos 0) (throw (SocketTimeoutException. "Connect timed out")))
+          (.park this Net/POLLOUT remainingNanos)
+          (set! polled (Net/pollConnectNow fd))))
+      (and polled (.isOpen this))))
+
+  (method blockingConnect :throws [IOException] ^void [this ^SocketAddress remote ^long nanos]
+    (let [sa (.checkRemote this remote)]
+      (try
+        (.lock readLock)
+        (try
+          (.lock writeLock)
+          (try
+            (when-not (.isBlocking this) (throw (IllegalBlockingModeException.)))
+            (let [^:mutable connected false]
+              (try
+                (.beginConnect this true sa)
+                (.lockedConfigureBlocking this false)
+                (try
+                  (let [^int n (if (.isUnixSocket this)
+                                   (UnixDomainSockets/connect fd sa)
+                                   (Net/connect family fd sa))]
+                    (set! connected (if (> n 0) true (.finishTimedConnect this nanos))))
+                  (finally (.tryLockedConfigureBlocking this true)))
+                (finally (.endConnect this true connected))))
+            (finally (.unlock writeLock)))
+          (finally (.unlock readLock)))
+        (catch IOException ioe (.close this) (throw (Exceptions/ioException ioe sa))))))
+
+  (method ^:private tryRead :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (let [dst (Util/getTemporaryDirectBuffer len)]
+      (java-assert (== (.position dst) 0))
+      (try
+        (let [n (.read nd fd (.address (cast DirectBuffer dst)) len)]
+          (when (> n 0) (.get dst b off n))
+          n)
+        (finally (Util/offerFirstTemporaryDirectBuffer dst)))))
+
+  (method ^:private timedRead :throws [IOException] ^int [this ^byte/1 b ^int off ^int len
+                                                          ^long nanos]
+    (let [startNanos (System/nanoTime)
+          ^:mutable n (.tryRead this b off len)]
+      (while (and (== n IOStatus/UNAVAILABLE) (.isOpen this))
+        (let [remainingNanos (unchecked-subtract
+                               nanos
+                               (unchecked-subtract (System/nanoTime) startNanos))]
+          (when (<= remainingNanos 0) (throw (SocketTimeoutException. "Read timed out")))
+          (.park this Net/POLLIN remainingNanos)
+          (set! n (.tryRead this b off len))))
+      n))
+
+  (method blockingRead :throws [IOException] ^int [this ^byte/1 b ^int off ^int len ^long nanos]
+    (Objects/checkFromIndexSize off len (alength b))
+    (if (== len 0)
+        0
+        (do
+          (.lock readLock)
+          (try
+            (.ensureOpenAndConnected this)
+            (when-not (.isBlocking this) (throw (IllegalBlockingModeException.)))
+            (let [^:mutable ^int n 0]
+              (try
+                (.beginRead this true)
+                (when connectionReset (.throwConnectionReset this))
+                (when isInputClosed (return IOStatus/EOF))
+                (if (> nanos 0)
+                    (do
+                      (.lockedConfigureBlocking this false)
+                      (try
+                        (set! n (.timedRead this b off len nanos))
+                        (finally (.tryLockedConfigureBlocking this true))))
+                    (do
+                      (.configureSocketNonBlockingIfVirtualThread this)
+                      (set! n (.tryRead this b off len))
+                      (while (and (IOStatus/okayToRetry n) (.isOpen this))
+                        (.park this Net/POLLIN)
+                        (set! n (.tryRead this b off len)))))
+                (catch ConnectionResetException e
+                  (set! connectionReset true)
+                  (.throwConnectionReset this))
+                (finally
+                  (.endRead this true (> n 0))
+                  (when (and (<= n 0) isInputClosed) (return IOStatus/EOF))))
+              (java-assert (or (> n 0) (== n -1)))
+              n)
+            (finally (.unlock readLock))))))
+
+  (method ^:private tryWrite :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (let [src (Util/getTemporaryDirectBuffer len)]
+      (java-assert (== (.position src) 0))
+      (try
+        (.put src b off len)
+        (.write nd fd (.address (cast DirectBuffer src)) len)
+        (finally (Util/offerFirstTemporaryDirectBuffer src)))))
+
+  (method blockingWriteFully :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (Objects/checkFromIndexSize off len (alength b))
+    (when-not (== len 0)
+      (.lock writeLock)
+      (try
+        (.ensureOpenAndConnected this)
+        (when-not (.isBlocking this) (throw (IllegalBlockingModeException.)))
+        (let [^:mutable pos off
+              end (unchecked-add-int off len)]
+          (try
+            (.beginWrite this true)
+            (.configureSocketNonBlockingIfVirtualThread this)
+            (while (and (< pos end) (.isOpen this))
+              (let [size (unchecked-subtract-int end pos)
+                    ^:mutable n (.tryWrite this b pos size)]
+                (while (and (IOStatus/okayToRetry n) (.isOpen this))
+                  (.park this Net/POLLOUT)
+                  (set! n (.tryWrite this b pos size)))
+                (when (> n 0) (set! pos (unchecked-add-int pos n)))))
+            (finally (.endWrite this true (>= pos end)))))
+        (finally (.unlock writeLock)))))
+
+  (method available :throws [IOException] ^int [this]
+    (locking stateLock (.ensureOpenAndConnected this) (if isInputClosed 0 (Net/available fd))))
+
+  (method ^:public translateReadyOps ^boolean [this ^int ops ^int initialOps ^SelectionKeyImpl ski]
+    (let [intOps (.nioInterestOps ski)
+          oldOps (.nioReadyOps ski)
+          ^:mutable newOps initialOps]
+      (cond
+        (not (== (bit-and-int ops Net/POLLNVAL) 0)) false
+        (not (== (bit-and-int ops (bit-or-int Net/POLLERR Net/POLLHUP)) 0))
+          (do
+            (set! newOps intOps)
+            (.nioReadyOps ski newOps)
+            (not (== (bit-and-int newOps (bit-not-int oldOps)) 0)))
+        :else
+          (let [connected (.isConnected this)]
+            (when (and (and (not (== (bit-and-int ops Net/POLLIN) 0))
+                            (not (== (bit-and-int intOps SelectionKey/OP_READ) 0)))
+                       connected)
+              (set! newOps (bit-or-int newOps SelectionKey/OP_READ)))
+            (when (and (and (not (== (bit-and-int ops Net/POLLCONN) 0))
+                            (not (== (bit-and-int intOps SelectionKey/OP_CONNECT) 0)))
+                       (.isConnectionPending this))
+              (set! newOps (bit-or-int newOps SelectionKey/OP_CONNECT)))
+            (when (and (and (not (== (bit-and-int ops Net/POLLOUT) 0))
+                            (not (== (bit-and-int intOps SelectionKey/OP_WRITE) 0)))
+                       connected)
+              (set! newOps (bit-or-int newOps SelectionKey/OP_WRITE)))
+            (.nioReadyOps ski newOps)
+            (not (== (bit-and-int newOps (bit-not-int oldOps)) 0))))))
+
+  (method ^:public translateAndUpdateReadyOps ^boolean [this ^int ops ^SelectionKeyImpl ski]
+    (.translateReadyOps this ops (.nioReadyOps ski) ski))
+
+  (method ^:public translateAndSetReadyOps ^boolean [this ^int ops ^SelectionKeyImpl ski]
+    (.translateReadyOps this ops 0 ski))
+
+  (method ^:public translateInterestOps ^int [this ^int ops]
+    (let [^:mutable ^int newOps 0]
+      (when-not (== (bit-and-int ops SelectionKey/OP_READ) 0)
+        (set! newOps (bit-or-int newOps Net/POLLIN)))
+      (when-not (== (bit-and-int ops SelectionKey/OP_WRITE) 0)
+        (set! newOps (bit-or-int newOps Net/POLLOUT)))
+      (when-not (== (bit-and-int ops SelectionKey/OP_CONNECT) 0)
+        (set! newOps (bit-or-int newOps Net/POLLCONN)))
+      newOps))
+
+  (method ^:public getFD ^FileDescriptor [this] fd)
+
+  (method ^:public getFDVal ^int [this] fdVal)
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append sb (.getName (.getSuperclass (.getClass this))))
+      (.append sb \[)
+      (if (not (.isOpen this))
+          (.append sb "closed")
+          (locking stateLock
+            (switch state
+              ST_UNCONNECTED (.append sb "unconnected")
+              ST_CONNECTIONPENDING (.append sb "connection-pending")
+              ST_CONNECTED
+                (do
+                  (.append sb "connected")
+                  (when isInputClosed (.append sb " ishut"))
+                  (when isOutputClosed (.append sb " oshut"))))
+            (let [addr (.localAddress this)]
+              (when (some? addr) (.append sb " local=") (.append sb addr))
+              (when (some? (.remoteAddress this))
+                (.append sb " remote=")
+                (.append sb (.remoteAddress this))))))
+      (.append sb \])
+      (.toString sb))))

@@ -1,0 +1,531 @@
+(in-ns 'go.arbace.wai) (go/file "w2g.go" :imports [
+
+    ;; w2g (doc/wasm/WAI.md §9; doc/wasm/WASM-SURVEY.md §7, WAS10 (a), WA7): a module's functions translated to Go, compiled by Go
+    ;; with wai into an AOT program in which each translated function runs as Go code in place of the interpreter. The unit is wai's
+    ;; internal code (§3): its static stack heights make every operand a slot of the frame known at translation, its branches carry
+    ;; their targets, so a function becomes one Go function with a label a branch target and a goto a branch; each instruction that
+    ;; is not a transfer of control is the interpreter's own case (w2gCases, generated from exec.go by `waidriver w2g-cases`) with
+    ;; the instruction's fields made constants. The calling convention is the interpreter's (the arguments and results on the
+    ;; machine's stack at the frame's base), so translated and interpreted functions call each other and the hosts freely. A
+    ;; function with try_table's handlers or a tail call is left to the interpreter (the first part of WA7). The translated
+    ;; functions are registered by the module's SHA-256 (RegisterAOT) and attached at instantiation.
+
+
+    ^{:line 14} [sha256 "crypto/sha256"]
+    ^{:line 15} [binary "encoding/binary"]
+    ^{:line 16} [hex "encoding/hex"]
+    ^{:line 17} [fmt "fmt"]
+    ^{:line 18} [sort "sort"]
+    ^{:line 19} [strconv "strconv"]
+    ^{:line 20} [strings "strings"]])
+
+
+
+(go/type NativeFn "NativeFn is a function translated by w2g: the frame's base fp as the interpreter's exec has it.\n" (func [^{:tag (* Machine)} m ^{:tag (* Func)} f ^int fp] [(* Exn)]))
+
+(go/var aotRegistry (lit (map (array 32 byte) (map int NativeFn))))
+
+
+
+^{:go/end 39} (go/func RegisterAOT "RegisterAOT registers translated functions of a module (by defined function index) under its bytes' SHA-256; a module's\nfunctions may come in several parts (w2g's packages), and an empty part marks a module translated.\n" [^{:tag (array 32 byte)} h ^{:tag (map int NativeFn)} fns]
+  (let [m (aget aotRegistry h)]
+    (when (== m nil)
+      (set! m (lit (map int NativeFn)))
+      (aset aotRegistry h m))
+
+    (range [i f fns]
+      (aset m i f))))
+
+
+
+
+
+(go/var ^{:doc "aotShapes holds the functions translated by shape (WAS40 (c), WAS50 (a)): a function of any module whose ShapeKey is one of\nthem runs as Go, its immediates read from its own code.\n"} aotShapes (lit (map (array 16 byte) NativeFn)))
+
+
+^{:go/end 50} (go/func RegisterShapes "RegisterShapes registers functions translated by shape (W2GShape), under their ShapeKey.\n" [^{:tag (map (array 16 byte) NativeFn)} fns]
+  (range [k f fns]
+    (aset aotShapes k f)))
+
+
+
+
+^{:go/end 53} (go/func AOTCount "AOTCount is the number of modules and shapes registered (zero: not an AOT program).\n" ^int [] (+ (len aotRegistry) (len aotShapes)))
+
+(go/var ^bool aotDisabled)
+
+
+^{:go/end 58} (go/func AOTDisable "AOTDisable leaves every module to the interpreter while the registry stays (the AOT level's negative control).\n" [] (set! aotDisabled true))
+
+^{:go/end 65} (go/func aotNatives ^{:tag (map int NativeFn)} [^{:tag (* Module)} mod]
+  (when (or (== (len aotRegistry) 0) aotDisabled)
+    (return nil))
+
+  (aget aotRegistry (.-Hash mod)))
+
+
+
+
+^{:go/end 83} (go/func AOTInterpreted "AOTInterpreted is the number of the module's defined functions an AOT program runs on the interpreter (w2g left them), and\nwhether the module was translated at all.\n" [^{:tag (* Module)} mod] :results [^int n ^bool translated]
+  (let [(values fs ok) (aget aotRegistry (.-Hash mod))]
+    (when (and (not ok) (> (len aotShapes) 0))
+      (range [_ c (.-Codes mod)]
+        (when [(values _ ok) (aget aotShapes (ShapeKey c))] (not ok)
+          (inc! n)))
+
+
+      (return n true))
+
+    (when (not ok)
+      (return (len (.-Codes mod)) false))
+
+    (return (- (len (.-Codes mod)) (len fs)) true)))
+
+
+
+^{:go/end 86} (go/method X_tailTo "X_tailTo leaves a tail call to Machine.run's trampoline: the callee runs in the caller's frame once the caller returns.\n" [^{:tag (* Machine)} m ^{:tag (* Func)} g] (set! (.-tail m) g))
+
+
+^{:go/end 89} (go/method X_stack "X_stack is the machine's stack for w2g's packages.\n" ^{:tag (slice V)} [^{:tag (* Machine)} m] (.-stack m))
+
+
+(go/type W2GStats "W2GStats counts a translation: the functions translated and those left to the interpreter, by reason.\n" (struct
+    ^{:line 93 :tag int} Funcs ^int Translated
+    ^{:line 94 :tag (map string int)} Left))
+
+
+
+
+(go/type W2GFunc "W2GFunc is a translated function: its index among the module's defined functions, its Go name and source (and its ShapeKey,\ntranslated by shape).\n" (struct
+    ^{:line 100 :tag int} Index
+    ^{:line 101 :tag string} Name ^string Go
+    ^{:line 102 :tag (array 16 byte)} Key))
+
+
+
+
+^{:go/end 122} (go/func W2G "W2G translates a decoded module's functions to Go (doc/wasm/WAI.md §9): sources for a package that dot-imports wai, each\nfunction named NAME_INDEX; the caller registers them (RegisterAOT) by the module's hash.\n" [^{:tag (* Module)} mod ^string name] :results [(slice W2GFunc) W2GStats]
+  (let [st (lit W2GStats :Funcs (len (.-Codes mod)) :Left (lit (map string int)))
+      ^{:line 109 :tag (slice W2GFunc)} out (zero (slice W2GFunc))]
+    (range [i c (.-Codes mod)]
+      (when [why (w2gRefuse c)] (!= why "")
+        (inc! (aget (.-Left st) why))
+        (continue))
+
+      (let [^strings/Builder b (zero strings/Builder)
+          ^{:line 116} fn (fmt/Sprintf "w2g_%s_%d" name i)]
+        (w2gFunc (addr b) fn c false)
+        (set! out (append out (lit W2GFunc :Index i :Name fn :Go (.String b))))
+        (inc! (.-Translated st))))
+
+    (return out st)))
+
+
+
+
+
+
+
+^{:go/end 139} (go/func W2GShape "W2GShape translates one function by its shape (WAS40 (c), WAS50 (a)): every immediate that is not a transfer of control's\n(a constant, an offset, a function's, global's, table's or tag's index) read from the function's code at run time, so the Go\nis a function of the ops, the stack heights and the control structure alone, ShapeKey's, and serves every function of any\nmodule with the same key (a Go program's runtime and libraries, shared across the programs of a corpus). Its name w2g_KEY;\nwhy is w2gRefuse's reason when it is left to the interpreter.\n" [^{:tag (* Code)} c] :results [^W2GFunc f ^string why]
+  (when [why (w2gRefuse c)] (!= why "")
+    (return f why))
+
+  (set! (.-Key f) (ShapeKey c))
+  (set! (.-Name f) (+ "w2g_" (hex/EncodeToString (subslice (.-Key f)))))
+  (let [^strings/Builder b (zero strings/Builder)]
+    (w2gFunc (addr b) (.-Name f) c true)
+    (set! (.-Go f) (.String b))
+    (return f "")))
+
+
+
+^{:go/end 142} (go/func W2GRefuse "W2GRefuse is w2gRefuse's reason (empty: w2g translates the function).\n" ^string [^{:tag (* Code)} c] (w2gRefuse c))
+
+
+(go/const ^{:val 2 :doc "w2gShapeVersion names the shape's definition: changed whenever w2gFunc bakes another field into the shared mode's Go.\n"} w2gShapeVersion 2)
+
+
+
+
+^{:go/end 192} (go/func ShapeKey "ShapeKey is a function's shape (WAS50 (a)): the first 16 bytes of the SHA-256 of what w2gFunc's shared mode writes as\nconstants: the parameters' and locals' counts, each instruction's op and stack height, the transfers of control's arities,\nheights and targets (br_table's entries), the handlers' targets.\n" ^{:tag (array 16 byte)} [^{:tag (* Code)} c]
+  (let [h (sha256/New)
+      ^{:line 152} buf (make (slice byte) 0 8192)
+      ^{:line 153} put ^{:go/end 153} (fn [^uint64 x] (set! buf (binary/AppendUvarint buf x)))]
+    (put w2gShapeVersion)
+    (put (conv uint64 (.-NParams c)))
+    (put (conv uint64 (.-NLocals c)))
+    (put (conv uint64 (len (.-Ins c))))
+    (put (conv uint64 (len (.-Handlers c))))
+    (range [_ hd (.-Handlers c)]
+      (put (conv uint64 (len (.-Catches hd))))
+      (range [_ cl (.-Catches hd)]
+        (put (conv uint64 (.-Kind cl)))
+        (put (conv uint64 (.-PC cl)))))
+
+
+    (range [k in (.-Ins c)]
+      (put (conv uint64 (.-Op in)))
+      (put (conv uint64 (conv uint32 (aget (.-H c) k))))
+      (switch (.-Op in)
+        (case [OpBr OpBrIf OpIf OpJump OpReturn OpBrOnNull OpBrOnNonNull OpBrOnCast OpBrOnCastFail]
+          (put (conv uint64 (.-A in)))
+          (put (conv uint64 (.-B in)))
+          (put (.-C in)))
+        (case [OpBrTable]
+          (let [tb (aget (.-Tables c) (.-B in))]
+            (put (conv uint64 (.-A in)))
+            (put (conv uint64 (len tb)))
+            (range [_ t tb]
+              (put (conv uint64 (.-PC t)))
+              (put (conv uint64 (.-Height t)))))))
+
+
+      (when (> (len buf) 4096)
+        (.Write h buf)
+        (set! buf (subslice buf _ 0))))
+
+
+    (.Write h buf)
+    (let [^{:tag (array 16 byte)} k (zero (array 16 byte))]
+      (copy (subslice k) (.Sum h nil))
+      ^{:line 191} k)))
+
+
+
+^{:go/end 195} (go/func ModuleHash "ModuleHash is the SHA-256 of a module's bytes as the registry keys it.\n" ^{:tag (array 32 byte)} [^{:tag (slice byte)} b] (sha256/Sum256 b))
+
+^{:go/breaks [[4 205]] :go/end 206} (go/func w2gRefuse ^string [^{:tag (* Code)} c]
+  (range [_ in (.-Ins c)]
+    (when [(values _ ok) (aget w2gCases (.-Op in))] (and (not ok) (not (w2gControlOp (.-Op in))))
+      (when [(values _ simd) (aget simdFns (.-Op in))] (not simd)
+        (return (+ "op " (OpName (.-Op in)))))))
+
+
+
+  "")
+
+
+^{:go/breaks [[4 214]] :go/end 215} (go/func w2gControlOp ^bool [^uint16 op]
+  (switch op
+    (case [OpBr OpBrIf OpBrTable OpIf OpJump OpReturn OpBrOnNull OpBrOnNonNull OpBrOnCast OpBrOnCastFail OpCall
+        ^{:line 211} OpCallIndirect OpCallRef OpThrow OpThrowRef OpReturnCall OpReturnCallIndirect OpReturnCallRef]
+      (return true)))
+
+  false)
+
+
+
+
+^{:go/end 224} (go/func w2gRuntimeFields "w2gRuntimeFields: an op whose fields may hold canonical type ids (the process's: not constants of the translation), read from\nthe function's code at run time\n" ^bool [^uint16 op]
+  (let [n (OpName op)]
+    (or (strings/HasPrefix n "struct.") (strings/HasPrefix n "array.") (strings/HasPrefix n "ref.")
+      (strings/HasPrefix n "br_on_cast") (strings/HasPrefix n "call_indirect") (strings/HasPrefix n "call_ref")
+      (strings/HasPrefix n "any.") (strings/HasPrefix n "extern."))))
+
+
+^{:go/end 249} (go/func w2gFields ^string [^string body ^{:tag (* Code)} c ^int k ^bool shared]
+  (let [in (aget (.-Ins c) k)
+      ^{:line 228} rt (or shared (w2gRuntimeFields (.-Op in)))
+      ;; shared: the instructions through w2gFunc's array pointer ins (no bounds check: the shape fixes their count)
+      ^{:line 230} insAt "code.Ins"]
+    (when shared
+      (set! insAt "ins"))
+
+    (let [f ^{:go/end 239} (fn ^string [^string name ^string lit]
+          (when rt
+            (return (fmt/Sprintf "%s[%d].%s" insAt k name)))
+
+          ^{:line 238} lit)
+
+        ^{:line 240} r ^{:go/breaks [1 3 5 7 9 11 13]} (strings/NewReplacer
+          "W2G_IN_Op" (fmt/Sprintf "uint16(%d)" (.-Op in))
+          "W2G_IN_A" (f "A" (fmt/Sprintf "uint32(%d)" (.-A in)))
+          "W2G_IN_B" (f "B" (fmt/Sprintf "uint32(%d)" (.-B in)))
+          "W2G_IN_C" (f "C" (fmt/Sprintf "uint64(%d)" (.-C in)))
+          "W2G_IN_D" (f "D" (fmt/Sprintf "uint32(%d)" (.-D in)))
+          "W2G_IN_E" (f "E" (fmt/Sprintf "int32(%d)" (.-E in)))
+          "W2G_IN" (fmt/Sprintf "(&%s[%d])" insAt k))]
+      (.Replace r body))))
+
+
+
+
+
+(go/const ^{:val 2000 :doc "w2gSegMax: a function of more instructions is written as segments of at most as many, each a Go function entered at a pc and\nreturning the next (Go's compiler's memory grows faster than a function's size: a 22,724-instruction function of a Go program,\n1.8 MB of Go, took over 2 GB to compile in one piece)\n"} w2gSegMax 2000)
+
+
+
+^{:go/end 290} (go/func w2gFunc "w2gFunc writes a function's Go; shared (W2GShape): every immediate that is not a transfer of control's read from the code. A\nfunction of more than w2gSegMax instructions is a dispatcher over its segments (w2gBody with seg).\n" [^{:tag (* strings/Builder)} b ^string fn ^{:tag (* Code)} c ^bool shared]
+  (let [n (len (.-Ins c))]
+    (when (<= n w2gSegMax)
+      (w2gBody b fn c shared 0 n false)
+      (return))
+
+    (fmt/Fprintf b "func %s(m *Machine, f *Func, fp int) *Exn {\n" fn)
+    (.WriteString b "\tcode := f.Code\n\tm.X_ensure(fp + code.MaxHeight + 2)\n\tst := m.X_stack()\n\t_ = st\n")
+    (when (> (.-NLocals c) (.-NParams c))
+      (fmt/Fprintf b "\tfor i := %d; i < %d; i++ {\n\t\tst[fp+i] = V{}\n\t}\n" (.-NParams c) (.-NLocals c)))
+
+    (.WriteString b "\tpc := 0\n\tfor {\n\t\tvar e *Exn\n\t\tswitch {\n")
+    (let [k 0]
+      (for [lo 0] (< lo n) (set! lo + w2gSegMax)
+        (if (< (+ lo w2gSegMax) n)
+          (fmt/Fprintf b "\t\tcase pc < %d:\n" (+ lo w2gSegMax))
+
+          (.WriteString b "\t\tdefault:\n"))
+
+        (fmt/Fprintf b "\t\t\tpc, e = %s_s%d(m, f, fp, pc)\n" fn k)
+        (inc! k))
+
+      (.WriteString b "\t\t}\n\t\tif pc < 0 {\n\t\t\treturn e\n\t\t}\n\t}\n}\n\n")
+      (set! k 0)
+      (for [lo 0] (< lo n) (set! lo + w2gSegMax)
+        (let [hi (+ lo w2gSegMax)]
+          (when (> hi n)
+            (set! hi n))
+
+          (w2gBody b (fmt/Sprintf "%s_s%d" fn k) c shared lo hi true)
+          (inc! k))))))
+
+
+
+
+
+
+^{:go/end 523} (go/func w2gBody "w2gBody writes the instructions lo..hi of a function: the whole function, or (seg) a segment, entered at pc0 (a branch target\nof the segment or its first instruction) and returning the next pc (another segment's, or -1 with the exception or nil when\nthe function returns)\n" [^{:tag (* strings/Builder)} b ^string fn ^{:tag (* Code)} c ^bool shared ^int lo ^int hi ^bool seg]
+  (let [(values retNil retE) (values "return nil" ^{:go/end 296} (fn ^string [^string e] (+ "return " e)))]
+    (when seg
+      (set! (values retNil retE) (values "return -1, nil" ^{:go/end 298} (fn ^string [^string e] (+ "return -1, " e)))))
+
+    ;; idx: an index immediate (a function's, a table's, a tag's) of the instruction k, a constant or read from the code
+    (let [idx ^{:go/end 306} (fn ^string [^int k ^uint32 a]
+          (when shared
+            (return (fmt/Sprintf "ins[%d].A" k)))
+
+          (strconv/FormatUint (conv uint64 a) 10))
+
+        ^{:line 307} targets (lit (map int bool))]
+      (range [_ in (.-Ins c)]
+        (switch (.-Op in)
+          (case [OpBr OpBrIf OpIf OpJump OpBrOnNull OpBrOnNonNull OpBrOnCast OpBrOnCastFail]
+            (aset targets (conv int (.-C in)) true))
+          (case [OpBrTable]
+            (range [_ t (aget (.-Tables c) (.-B in))]
+              (aset targets (conv int (.-PC t)) true)))))
+
+
+
+      (range [t targets]
+        (when (== (.-Op (aget (.-Ins c) t)) OpReturn)
+          (delete targets t)))
+
+
+      (if seg (do
+          (fmt/Fprintf b "func %s(m *Machine, f *Func, fp int, pc0 int) (int, *Exn) {\n" fn)
+          (.WriteString b "\tcode := f.Code\n\tinst := f.Inst\n\tst := m.X_stack()\n"))
+        (do
+          (fmt/Fprintf b "func %s(m *Machine, f *Func, fp int) *Exn {\n" fn)
+          (.WriteString b "\tcode := f.Code\n\tinst := f.Inst\n\tm.X_ensure(fp + code.MaxHeight + 2)\n\tst := m.X_stack()\n")))
+
+      (when shared
+        (fmt/Fprintf b "\tins := (*[%d]Ins)(code.Ins)\n\t_ = ins\n" (len (.-Ins c))))
+
+      (when (and (not seg) (> (.-NLocals c) (.-NParams c)))
+        (fmt/Fprintf b "\tfor i := %d; i < %d; i++ {\n\t\tst[fp+i] = V{}\n\t}\n" (.-NParams c) (.-NLocals c)))
+
+      (.WriteString b "\tvar sp int\n\tvar exn *Exn\n\tvar g *Func\n\t_, _, _, _, _ = code, inst, sp, exn, g\n")
+      ;; jump: to pc t, a return when t is the function's end (the results moved to the frame's base)
+      (let [jump ^{:go/end 347} (fn ^string [^int t ^string ind]
+            (when (and (< t (len (.-Ins c))) (== (.-Op (aget (.-Ins c) t)) OpReturn))
+              (let [n (.-A (aget (.-Ins c) t))]
+                (return (fmt/Sprintf "%scopy(st[fp:fp+%d], st[sp-%d:sp])\n%s%s\n" ind n n ind retNil))))
+
+            (when (or (< t lo) (>= t hi))
+              (return (fmt/Sprintf "%sreturn %d, nil\n" ind t)))
+
+            (fmt/Sprintf "%sgoto L%d\n" ind t))
+
+          ^{:line 348} brTo ^{:go/end 350} (fn ^string [^uint32 a ^uint32 h ^int t ^string ind]
+            (+ (fmt/Sprintf "%ssp = X_br(st, sp, fp, %d, %d)\n" ind a h) (jump t ind)))
+
+          ;; an exception (a callee's, a throw's): returned to the caller, or with try_table's handlers looked up at the instruction k
+          ;; (Machine.catch, as the interpreter's throw: label)
+          ^{:line 353} hasH (> (len (.-Handlers c)) 0)
+          ^{:line 354} thrown false
+          ^{:line 355} raise ^{:go/end 361} (fn ^string [^string e ^int k ^string ind]
+            (when (not hasH)
+              (return (+ ind (retE e) "\n")))
+
+            (set! thrown true)
+            (fmt/Sprintf "%sexn = %s\n%sat = %d\n%sgoto Lthrow\n" ind e ind k ind))
+
+          ;; the handlers' targets, when an instruction can raise (else Lthrow and its switch are not written, nor their labels)
+          ^{:line 363} raises false]
+        (range [_ in (.-Ins c)]
+          (switch (.-Op in)
+            (case [OpCall OpCallIndirect OpCallRef OpThrow OpThrowRef]
+              (set! raises true))))
+
+
+        (range [_ h (.-Handlers c)]
+          (range [_ cl (.-Catches h)]
+            (when (and (!= (.-Kind cl) catchDelegate) raises)
+              (aset targets (conv int (.-PC cl)) true))))
+
+
+
+        (range [t targets]
+          (when (== (.-Op (aget (.-Ins c) t)) OpReturn)
+            (delete targets t)))
+
+
+        (when hasH
+          (.WriteString b "\tvar at int\n\t_ = at\n"))
+
+        ;; the labels: the branch targets of lo..hi (and a segment's first instruction), a segment's entries
+        (let [labels (lit (map int bool))]
+          (range [t targets]
+            (when (and (>= t lo) (< t hi))
+              (aset labels t true)))
+
+
+          (when seg
+            (aset labels lo true)
+            (let [^{:tag (slice int)} ls (zero (slice int))]
+              (range [t labels]
+                (set! ls (append ls t)))
+
+              (sort/Ints ls)
+              (.WriteString b "\tswitch pc0 {\n")
+              (range [_ t ls]
+                (fmt/Fprintf b "\tcase %d:\n\t\tgoto L%d\n" t t))
+
+              (.WriteString b "\t}\n\tpanic(\"w2g: no segment entry\")\n")))
+
+          (let [^int callK (zero int)
+              ^{:line 406} call ^{:go/end 411} (fn ^string [^string get]
+                ^{:go/breaks [4 5 6]} (+ "\t{\n" get "\t\tt := (*X_ctypes)[g.Type]\n\t\tnp := len(t.Params)\n\t\tbase := sp - np\n"
+                  "\t\tif g.Host != nil {\n\t\t\targs := make([]V, np)\n\t\t\tcopy(args, st[base:base+np])\n\t\t\tres := m.HostCall(g, args, base+np)\n"
+                  "\t\t\tst = m.X_stack()\n\t\t\tcopy(st[base:], res)\n\t\t\tsp = base + len(res)\n\t\t} else {\n\t\t\te := m.X_run(g, base)\n\t\t\tst = m.X_stack()\n"
+                  "\t\t\tif e != nil {\n" (raise "e" callK "\t\t\t\t") "\t\t\t}\n\t\t\tsp = base + len(t.Results)\n\t\t}\n\t}\n"))]
+
+            (for [k lo] (< k hi) (inc! k)
+              (let [in (aget (.-Ins c) k)]
+                (set! callK k)
+                (when (aget labels k)
+                  (fmt/Fprintf b "L%d:\n" k))
+
+                (when (!= (.-Op in) OpReturn)
+                  (fmt/Fprintf b "\tsp = fp + %d\n" (aget (.-H c) k)))
+
+                (switch (.-Op in)
+                  (case [OpBr]
+                    (.WriteString b (brTo (.-A in) (.-B in) (conv int (.-C in)) "\t")))
+                  (case [OpBrIf]
+                    (.WriteString b (+ "\tsp--\n\tif uint32(st[sp].L) != 0 {\n" (brTo (.-A in) (.-B in) (conv int (.-C in)) "\t\t") "\t}\n")))
+                  (case [OpIf]
+                    (.WriteString b (+ "\tsp--\n\tif uint32(st[sp].L) == 0 {\n" (jump (conv int (.-C in)) "\t\t") "\t}\n")))
+                  (case [OpJump]
+                    (.WriteString b (jump (conv int (.-C in)) "\t")))
+                  (case [OpReturn]
+                    (fmt/Fprintf b "\tcopy(st[fp:fp+%d], st[sp-%d:sp])\n\t%s\n" (.-A in) (.-A in) retNil))
+                  (case [OpBrTable]
+                    (let [tb (aget (.-Tables c) (.-B in))
+                        ;; the entries grouped by target (the last is the default, as are indices beyond)
+                        ^{:line 435} last (aget tb (- (len tb) 1))
+                        ^{:line 436} groups (lit (map target (slice int)))
+                        ^{:line 437 :tag (slice target)} order (zero (slice target))]
+                      (range [i t (subslice tb _ (- (len tb) 1))]
+                        (when (== t last)
+                          (continue))
+
+                        (when [(values _ ok) (aget groups t)] (not ok)
+                          (set! order (append order t)))
+
+                        (aset groups t (append (aget groups t) i)))
+
+                      (.WriteString b "\tsp--\n\tswitch uint32(st[sp].L) {\n")
+                      (range [_ t order]
+                        (let [ks (make (slice string) (len (aget groups t)))]
+                          (range [i x (aget groups t)]
+                            (aset ks i (strconv/Itoa x)))
+
+                          (.WriteString b (+ "\tcase " (strings/Join ks ", ") ":\n" (brTo (.-A in) (.-Height t) (conv int (.-PC t)) "\t\t")))))
+
+                      (.WriteString b (+ "\tdefault:\n" (brTo (.-A in) (.-Height last) (conv int (.-PC last)) "\t\t") "\t}\n"))))
+                  (case [OpBrOnNull]
+                    (.WriteString b (+ "\tif st[sp-1].H == 0 {\n\t\tsp--\n" (brTo (.-A in) (.-B in) (conv int (.-C in)) "\t\t") "\t}\n")))
+                  (case [OpBrOnNonNull]
+                    (.WriteString b (+ "\tif st[sp-1].H != 0 {\n" (brTo (.-A in) (.-B in) (conv int (.-C in)) "\t\t") "\t}\n\tsp--\n")))
+                  (case [OpBrOnCast OpBrOnCastFail]
+                    (let [not ""]
+                      (when (== (.-Op in) OpBrOnCastFail)
+                        (set! not "!"))
+
+                      (if shared
+                        (fmt/Fprintf b "\tif %sm.X_refTest(st[sp-1], ins[%d].D != 0, ins[%d].E) {\n" not k k)
+
+                        (fmt/Fprintf b "\tif %sm.X_refTest(st[sp-1], code.Ins[%d].D != 0, code.Ins[%d].E) {\n" not k k))
+
+                      (.WriteString b (+ (brTo (.-A in) (.-B in) (conv int (.-C in)) "\t\t") "\t}\n"))))
+                  (case [OpReturnCall OpReturnCallIndirect OpReturnCallRef]
+                    ;; the callee's arguments moved to the frame's base, the call left to Machine.run's trampoline
+                    (let [^string get (zero string)]
+                      (switch (.-Op in)
+                        (case [OpReturnCall]
+                          (set! get (fmt/Sprintf "\t\tg = inst.Funcs[%s]\n" (idx k (.-A in)))))
+                        (case [OpReturnCallIndirect]
+                          (set! get (fmt/Sprintf w2gIndirect (idx k (.-A in)) k)))
+                        (default
+                          (set! get w2gRef)))
+
+                      (.WriteString b ^{:go/breaks [4]} (+ "\t{\n" get "\t\tnp := len((*X_ctypes)[g.Type].Params)\n\t\tcopy(st[fp:fp+np], st[sp-np:sp])\n"
+                          "\t\tm.X_tailTo(g)\n\t\t" retNil "\n\t}\n"))))
+                  (case [OpCall]
+                    (.WriteString b (call (fmt/Sprintf "\t\tg = inst.Funcs[%s]\n" (idx k (.-A in))))))
+                  (case [OpCallIndirect]
+                    (.WriteString b (call (fmt/Sprintf w2gIndirect (idx k (.-A in)) k))))
+                  (case [OpCallRef]
+                    (.WriteString b (call w2gRef)))
+                  (case [OpThrow]
+                    (fmt/Fprintf b ^{:go/breaks [2]} (+ "\t{\n\t\ttag := inst.Tags[%s]\n\t\tn := len((*X_ctypes)[tag.Type].Params)\n\t\tvals := make([]V, n)\n"
+                        "\t\tcopy(vals, st[sp-n:sp])\n%s\t}\n") (idx k (.-A in)) (raise "&Exn{Tag: tag, Vals: vals}" k "\t\t")))
+                  (case [OpThrowRef]
+                    (.WriteString b (+ "\tsp--\n\tif st[sp].H == 0 {\n\t\tX_trap(\"null exception reference\")\n\t}\n" (raise "m.St.Objs[st[sp].L].(*Exn)" k "\t"))))
+                  (default
+                    (let [(values body ok) (aget w2gCases (.-Op in))]
+                      (when (not ok)
+                        (set! body w2gDefault))
+
+                      (.WriteString b (+ "\t{\n" (w2gFields body c k shared) "\t}\n")))))))
+
+
+            (when seg
+              (fmt/Fprintf b "\treturn %d, nil\n" hi))
+
+            (when thrown
+              ;; the handlers: the clause's target with its values pushed (Machine.catch), else the exception to the caller
+              (.WriteString b ^{:go/breaks [4]} (+ "Lthrow:\n\t{\n\t\tnpc, nsp, ok := m.X_catch(code, inst, fp, at, exn)\n\t\tif !ok {\n\t\t\t" (retE "exn") "\n\t\t}\n"
+                  "\t\tst = m.X_stack()\n\t\tsp = nsp\n\t\tswitch npc {\n"))
+              (let [seen (lit (map int bool))]
+                (range [_ h (.-Handlers c)]
+                  (range [_ cl (.-Catches h)]
+                    (when (or (== (.-Kind cl) catchDelegate) (aget seen (conv int (.-PC cl))))
+                      (continue))
+
+                    (aset seen (conv int (.-PC cl)) true)
+                    (fmt/Fprintf b "\t\tcase %d:\n%s" (.-PC cl) (jump (conv int (.-PC cl)) "\t\t\t"))))
+
+
+                (.WriteString b "\t\t}\n\t\tpanic(\"w2g: no handler's target\")\n\t}\n")))
+
+            (.WriteString b "}\n\n")))))))
+
+
+
+(go/const ^{:val "\t\tsp--\n\t\ti := st[sp].L\n\t\ttb := inst.Tables[%s]\n\t\tif i >= uint64(len(tb.Elems)) {\n\t\t\tX_trap(\"undefined element \" + strconv.FormatUint(i, 10))\n\t\t}\n\t\tr := tb.Elems[i]\n\t\tif r.H == 0 {\n\t\t\tX_trap(\"uninitialized element \" + strconv.FormatUint(i, 10))\n\t\t}\n\t\tg = m.St.Funcs[r.L]\n\t\tif !X_subCanon(g.Type, int(code.Ins[%d].B)) {\n\t\t\tX_trap(\"indirect call type mismatch\")\n\t\t}\n" :doc "the callee of call_indirect (table, instruction) and call_ref, into g\n"} w2gIndirect ^{:go/breaks [2 3 4]} (+ "\t\tsp--\n\t\ti := st[sp].L\n\t\ttb := inst.Tables[%s]\n"
+    "\t\tif i >= uint64(len(tb.Elems)) {\n\t\t\tX_trap(\"undefined element \" + strconv.FormatUint(i, 10))\n\t\t}\n"
+    "\t\tr := tb.Elems[i]\n\t\tif r.H == 0 {\n\t\t\tX_trap(\"uninitialized element \" + strconv.FormatUint(i, 10))\n\t\t}\n"
+    "\t\tg = m.St.Funcs[r.L]\n\t\tif !X_subCanon(g.Type, int(code.Ins[%d].B)) {\n\t\t\tX_trap(\"indirect call type mismatch\")\n\t\t}\n"))
+
+(go/const ^{:val "\t\tsp--\n\t\tif st[sp].H == 0 {\n\t\t\tX_trap(\"null function reference\")\n\t\t}\n\t\tg = m.St.Funcs[st[sp].L]\n"} w2gRef "\t\tsp--\n\t\tif st[sp].H == 0 {\n\t\t\tX_trap(\"null function reference\")\n\t\t}\n\t\tg = m.St.Funcs[st[sp].L]\n")

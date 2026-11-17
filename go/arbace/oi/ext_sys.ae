@@ -9,7 +9,9 @@
     ^{:line 9} [runtime "runtime"]
     ^{:line 10} [syscall "syscall"]
     ^{:line 11} [time "time"]
-    ^{:line 12} [unsafe "unsafe"]])
+    [sync "sync"]
+    [atomic "sync/atomic"]
+    [weak "weak"]])
 
 
 ;; The system interface of OCaml's runtime: sys.c, signals.c, gc_ctrl.c, backtrace.c, weak.c,
@@ -62,7 +64,7 @@
 
 
 (go/var openFlags (lit (slice int) syscall/O_RDONLY syscall/O_WRONLY (bit-or syscall/O_APPEND syscall/O_WRONLY)
-    ^{:line 65} syscall/O_CREAT syscall/O_TRUNC syscall/O_EXCL 0 0 syscall/O_NONBLOCK))
+    ^{:line 65} syscall/O_CREAT syscall/O_TRUNC syscall/O_EXCL 0 0 oNonblock))
 
 (go/var ^{:tag (array 65 (struct ^int act ^Value handler))} signalStates)
 
@@ -94,12 +96,15 @@
   ^{:line 94} [^bool backtraceActive]
   ^{:line 95} [^bool parserTraceFlag]
   ^{:line 96} [^bool memprofSampling]
-  ^{:line 97} [gcControl (lit (slice Value) 262144 0 120 0 0 134217728 0 0 44 100 8192)]
+  ^{:line 97} [gcControl (lit (slice Value) 262144 0 120 0 0 (stackWords) 0 0 44 100 8192)]
   ^{:line 98} [gcTweaks (lit (slice (struct
           ^{:line 99 :tag string} name
           ^{:line 100 :tag int} v ^int init))
       (lit _ "mark_stack_prune_factor" 32 32) (lit _ "small_heap_limit" 128 128))]
-  ^{:line 102} [^int forcedMajorCount])
+  ^{:line 102} [^int forcedMajorCount]
+  ;; OC216 (a): the collections a program asks for (Gc.minor, major, full_major, compact) counted as gc_ctrl.c counts them, beside Go's
+  ;; own cycles (NumGC) less those the asked collections ran (gcAbsorbed): a collection of OCaml's is never one of Go's
+  [^int gcMinorAsked] [^int gcMajorAsked] [^int gcCompactions] [^int gcAbsorbed])
 
 
 ^{:go/end 109} (go/func memStats ^{:tag (* runtime/MemStats)} []
@@ -113,9 +118,18 @@
       ^{:line 113} words ^{:go/end 113} (fn ^int [^uint64 b] (conv int (/ b 8)))]
     (addr (lit Block :Tag 0 :F (lit (slice Value)
           ^{:line 115} allocWords (conv float64 0) (conv float64 0)
-          (conv int (.-NumGC m)) (conv int (.-NumGC m))
+          (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMinorAsked) (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMajorAsked)
           (words (.-HeapSys m)) 1 (words (.-HeapAlloc m)) (conv int (- (.-Mallocs m) (.-Frees m)))
-          (words (.-HeapIdle m)) 0 0 0 0 (words (.-HeapSys m)) 0 forcedMajorCount 0)))))
+          (words (.-HeapIdle m)) 0 0 0 gcCompactions (words (.-HeapSys m)) 0 forcedMajorCount 0)))))
+
+(go/method gcAsked "gcAsked is an asked collection (gc_ctrl.c's caml_gc_minor, major, full_major, compaction): Go's collection and the finalisers it fires, Go's cycles it ran absorbed, OCaml's counters advanced as the C runtime's: minors and majors finished cycles, a compaction its own counter, forced the forced major collections (full_major's and compaction's).\n" [^{:tag (* Thread)} th ^int minors ^int majors ^int compactions ^int forced]
+  (let [before (.-NumGC (memStats))]
+    (set! gcMinorAsked + minors)
+    (set! gcMajorAsked + majors)
+    (set! gcCompactions + compactions)
+    (set! forcedMajorCount + forced)
+    (.fullMajor th)
+    (set! gcAbsorbed + (- (conv int (.-NumGC (memStats))) (conv int before)))))
 
 
 
@@ -124,13 +138,6 @@
   (return))
 
 
-^{:go/end 134} (go/func rusageSeconds ^float64 [^int who]
-  (let [^syscall/Rusage ru (zero syscall/Rusage)]
-    (when (!= (syscall/Getrusage who (addr ru)) nil)
-      (return 0))
-
-    (let [tv ^{:go/end 132} (fn ^float64 [^syscall/Timeval t] (+ (conv float64 (.-Sec t)) (/ (conv float64 (.-Usec t)) 1000000.0)))]
-      (+ (tv (.-Utime ru)) (tv (.-Stime ru))))))
 
 
 ^{:go/breaks [[4 140]] :go/end 141} (go/func argv0 ^string []
@@ -152,8 +159,110 @@
 
 (go/var ^Value ephNone (addr (lit Block :Tag TagAbstract)))
 
+;; OC216 (a), the user 2026-11-10 (OC68 (b)'s weak part; OC11 (a), OC64, OC68 reversed for them): a weak array's or an ephemeron's key
+;; is held by a weak pointer of Go's (package weak): a block with fields, a string, a float array, a closure or a custom block is
+;; emptied by the collection that finds it unreachable, as OCaml's collector empties it; an immediate, a boxed float or integer (Go
+;; values without an identity) and an atom stay, as OCaml's static data does. An ephemeron's data stays strong while its keys live;
+;; the collections the program asks for (gcAsked) clear the data of an ephemeron whose key died (weak.c's ephe_clean), so that the
+;; data is collected in turn. Divergence: the data is held by the ephemeron, not by its key, so a key reachable only from its own
+;; ephemeron's data stays alive while the ephemeron does (OCaml's ephemerons collect it).
+(go/type weakRef "weakRef is a weak key: get gives the value, or nil once it is collected; dead is set by the value's cleanup (and
+by a get or an asked collection that finds it collected). A check reads dead alone: a get makes the value strong for a moment, and
+one made while Go's collector marks keeps the value for that cycle, so a loop of checks would keep it alive for ever.
+" (struct ^{:tag (func [] [Value])} get ^{:tag atomic/Bool} dead))
+
+(go/var ^{:tag (slice (weak/Pointer Block))} ephRegistry)
+(go/var ^{:tag sync/Mutex} ephMu)
+(go/var ^bool weakUsed)
+
+(go/func weakFinish "weakFinish notes that a weak key was made (the asked collections then run Go's).\n" ^Value [^{:tag (* weakRef)} r]
+  (set! weakUsed true)
+  r)
+
+(go/func weakDead [^{:tag (* weakRef)} r] (.Store (.-dead r) true))
+
+(go/func weakOf "weakOf is the slot of a weak key v: a weakRef for a value with an identity, else v itself.\n" ^Value [^Value v]
+  (type-switch [x v]
+    (case [(* Block)]
+      (when (> (len (.-F x)) 0)
+        (let [p (^{:inst [Block]} weak/Make x)
+              r (addr (lit weakRef :get (fn ^Value [] (when [y (.Value p)] (!= y nil) (return y)) nil)))]
+          (^{:inst [Block (* weakRef)]} runtime/AddCleanup x weakDead r)
+          (return (weakFinish r)))))
+    (case [(* Bytes)]
+      (let [p (^{:inst [Bytes]} weak/Make x)
+            r (addr (lit weakRef :get (fn ^Value [] (when [y (.Value p)] (!= y nil) (return y)) nil)))]
+        (^{:inst [Bytes (* weakRef)]} runtime/AddCleanup x weakDead r)
+        (return (weakFinish r))))
+    (case [(* FloatArray)]
+      (let [p (^{:inst [FloatArray]} weak/Make x)
+            r (addr (lit weakRef :get (fn ^Value [] (when [y (.Value p)] (!= y nil) (return y)) nil)))]
+        (^{:inst [FloatArray (* weakRef)]} runtime/AddCleanup x weakDead r)
+        (return (weakFinish r))))
+    (case [(* Closure)]
+      (let [p (^{:inst [Closure]} weak/Make x)
+            r (addr (lit weakRef :get (fn ^Value [] (when [y (.Value p)] (!= y nil) (return y)) nil)))]
+        (^{:inst [Closure (* weakRef)]} runtime/AddCleanup x weakDead r)
+        (return (weakFinish r))))
+    (case [(* Custom)]
+      (let [p (^{:inst [Custom]} weak/Make x)
+            r (addr (lit weakRef :get (fn ^Value [] (when [y (.Value p)] (!= y nil) (return y)) nil)))]
+        (^{:inst [Custom (* weakRef)]} runtime/AddCleanup x weakDead r)
+        (return (weakFinish r)))))
+  v)
+
+(go/func weakLive "weakLive reports whether a slot holds a value: not a collected weak key (its dead flag alone, see weakRef), not ephNone.\n" ^bool [^Value v]
+  (when [(values r ok) (assert (* weakRef) v)] ok
+    (return (not (.Load (.-dead r)))))
+  (!= v ephNone))
+
+(go/func ephSlot "ephSlot is a slot's value: a weak key's target, or ephNone once it is collected.\n" ^Value [^Value v]
+  (when [(values r ok) (assert (* weakRef) v)] ok
+    (when (.Load (.-dead r))
+      (return ephNone))
+    (when [y ((.-get r))] (!= y nil)
+      (return y))
+    (weakDead r)
+    (return ephNone))
+  v)
+
+(go/func ephClean "ephClean is weak.c's ephe_clean: the keys collected are unset, and the data with them when one was.\n" [^{:tag (* Block)} b]
+  (let [dead false]
+    (for [i 2] (< i (len (.-F b))) (inc! i)
+      (when [(values r ok) (assert (* weakRef) (aget (.-F b) i))] ok
+        (when (.Load (.-dead r))
+          (aset (.-F b) i ephNone)
+          (set! dead true))))
+    (when dead
+      (aset (.-F b) 1 ephNone))))
+
+(go/func ephRegister "ephRegister keeps a weak pointer to a weak array or an ephemeron, which the asked collections clean.\n" [^{:tag (* Block)} b]
+  (.Lock ephMu)
+  (set! ephRegistry (append ephRegistry (^{:inst [Block]} weak/Make b)))
+  (.Unlock ephMu))
+
+(go/func weakCollect "weakCollect is the asked collections' part for the weak keys: Go's collection, then the live ephemerons cleaned (the\ncollected ones forgotten), so that the data of a dead key is unreachable for the collections that follow.\n" []
+  (when (not weakUsed)
+    (return))
+  (runtime/GC)
+  (.Lock ephMu)
+  ;; each live weak array's and ephemeron's keys: their flags read from their targets after the collection (no marking runs: a get
+  ;; keeps nothing alive), then the ephemeron cleaned; the collected arrays forgotten
+  (let [live (subslice ephRegistry 0 0)]
+    (range [_ p ephRegistry]
+      (when [b (.Value p)] (!= b nil)
+        (for [i 2] (< i (len (.-F b))) (inc! i)
+          (when [(values r ok) (assert (* weakRef) (aget (.-F b) i))] (and ok (not (.Load (.-dead r))))
+            (when (== ((.-get r)) nil)
+              (weakDead r))))
+        (ephClean b)
+        (set! live (append live p))))
+    (set! ephRegistry live))
+  (.Unlock ephMu))
+
 ^{:go/end 164} (go/func ephGet ^Value [^Value e ^int off ^bool cp]
-  (let [v (aget (.-F (AsBlock e)) off)]
+  (ephClean (AsBlock e))
+  (let [v (ephSlot (aget (.-F (AsBlock e)) off))]
     (when (== v ephNone)
       (return None))
 
@@ -339,11 +448,11 @@
 
                 ^{:line 340} code)))
 
-          (r "caml_sys_time" ^{:go/end 342} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (rusageSeconds syscall/RUSAGE_SELF)))
+          (r "caml_sys_time" ^{:go/end 342} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (rusageSeconds rusageSelf)))
           (r "caml_sys_time_include_children" ^{:go/end 349} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
-              (let [t (rusageSeconds syscall/RUSAGE_SELF)]
+              (let [t (rusageSeconds rusageSelf)]
                 (when (Truth (aget a 0))
-                  (set! t + (rusageSeconds syscall/RUSAGE_CHILDREN)))
+                  (set! t + (rusageSeconds rusageChildren)))
 
                 ^{:line 348} t)))
 
@@ -384,9 +493,7 @@
                   (addr (lit Block :Tag 0 :F f))))))
 
           (r "caml_sys_isatty" ^{:go/end 390} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
-              (let [^syscall/Termios t (zero syscall/Termios)
-                  (values _ _ e) (syscall/Syscall syscall/SYS_IOCTL (conv uintptr (.-fd (ChannelOf (aget a 0)))) (conv uintptr syscall/TCGETS) (conv uintptr (conv unsafe/Pointer (addr t))))]
-                (Bool (== e 0)))))
+              (Bool (isatty (.-fd (ChannelOf (aget a 0)))))))
 
           (r "caml_xdg_defaults" ^{:go/end 391} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
           (r "caml_sys_temp_dir_name" ^{:go/end 392} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Str "")))
@@ -399,8 +506,12 @@
           (r "caml_sys_const_ostype_win32" ^{:go/end 399} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
           (r "caml_sys_const_ostype_cygwin" ^{:go/end 400} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
           (r "caml_sys_const_backend_type" ^{:go/end 401} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] BackendType))
+          ;; sys.c's caml_sys_get_stdlib_dirs (compiler-libs' Config): an absolute default is itself, with no relative root
+          ;; compiler-libs' Compression: no zstd (the Compression flag of Marshal is ignored, as a runtime built without zstd does)
+          (r "caml_zstd_initialize" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool false)))
+          (r "caml_sys_get_stdlib_dirs" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Tuple (aget a 0) None)))
 
-          ;; signals.c: handlers are recorded, no real signal is delivered
+          ;; signals.c: handlers are recorded, and the signals caught and delivered at the safe points (ext_signal.go)
           (r "caml_sys_convert_signal_number" ^{:go/end 404} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (convertSignal (AsInt (aget a 0)))))
           (r "caml_sys_rev_convert_signal_number" ^{:go/end 405} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (revConvertSignal (AsInt (aget a 0)))))
           (r "caml_install_signal_handler" ^{:go/end 434} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
@@ -408,7 +519,7 @@
                 (when (or (<= sig 0) (>= sig (len signalStates)))
                   (InvalidArg "Sys.signal: unavailable signal"))
 
-                (when (or (== sig (conv int syscall/SIGKILL)) (== sig (conv int syscall/SIGSTOP)))
+                (when (or (== sig (conv int syscall/SIGKILL)) (== sig sigStop))
                   (raiseSysError syscall/EINVAL "" false))
 
                 (let [act 2]
@@ -429,6 +540,7 @@
                     (set! (.-act st) act)
                     (when [(values b ok) (assert (* Block) (aget a 1))] ok
                       (set! (.-handler st) (aget (.-F b) 0)))
+                    (sigSetAction sig act)
 
                     ^{:line 433} res)))))
 
@@ -451,10 +563,10 @@
 
                 ^{:line 452} Unit)))
 
-          (r "caml_gc_minor" ^{:go/end 454} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
-          (r "caml_gc_major" ^{:go/end 455} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
-          (r "caml_gc_full_major" ^{:go/end 456} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (inc! forcedMajorCount) Unit))
-          (r "caml_gc_compaction" ^{:go/end 457} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+          (r "caml_gc_minor" ^{:go/end 454} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.gcAsked th 1 0 0 0) (reExplicit th 0) Unit))
+          (r "caml_gc_major" ^{:go/end 455} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.gcAsked th 1 1 0 0) (reExplicit th 1) Unit))
+          (r "caml_gc_full_major" ^{:go/end 456} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.gcAsked th 1 3 0 1) (reExplicit th 2) Unit))
+          (r "caml_gc_compaction" ^{:go/end 457} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.gcAsked th 1 3 1 1) (reExplicit th 3) Unit))
           (r "caml_gc_major_slice" ^{:go/end 458} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
           (r "caml_get_minor_free" ^{:go/end 459} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 262144))
           (r "caml_gc_tweak_get" ^{:go/breaks [4] :go/end 468} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
@@ -497,9 +609,14 @@
                 (when runtimeWarnings
                   (set! w 1))
 
-                (Str (fmt/Sprintf "b=%d,c=0,e=16,l=%d,M=%d,m=%d,n=%d,o=%d,p=%d,s=%d,t=0,v=%d,V=0,W=%d"
-                    ^{:line 501} b (AsInt (aget gcControl 5)) (AsInt (aget gcControl 8)) (AsInt (aget gcControl 9)) (AsInt (aget gcControl 10))
-                    (AsInt (aget gcControl 2)) p (AsInt (aget gcControl 0)) (AsInt (aget gcControl 3)) w)))))
+                ;; gc_ctrl.c's format_gc_tweaks (OC216 (a)): ",Xname=value" for each tweak away from its initial value
+                (let [x ""]
+                  (range [_ t gcTweaks]
+                    (when (!= (.-v t) (.-init t))
+                      (set! x + (fmt/Sprintf ",X%s=%d" (.-name t) (.-v t)))))
+                  (Str (fmt/Sprintf "b=%d,c=0,e=16,l=%d,M=%d,m=%d,n=%d,o=%d,p=%d,s=%d,t=0,v=%d,V=0,W=%d%s"
+                      ^{:line 501} b (AsInt (aget gcControl 5)) (AsInt (aget gcControl 8)) (AsInt (aget gcControl 9)) (AsInt (aget gcControl 10))
+                      (AsInt (aget gcControl 2)) p (AsInt (aget gcControl 0)) (AsInt (aget gcControl 3)) w x))))))
 
           (r "caml_ml_enable_runtime_warnings" ^{:go/end 504} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (set! runtimeWarnings (Truth (aget a 0))) Unit))
           (r "caml_ml_runtime_warnings_enabled" ^{:go/end 505} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool runtimeWarnings)))
@@ -509,23 +626,30 @@
 
           (r "caml_ml_gc_ramp_down" ^{:go/end 510} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
 
-          ;; finalise.c: finalisers are accepted and never called
+          ;; finalise.c (ext_final.go, OC192 (a)): the functions run once their values are unreachable
           (let [fin ^{:go/end 518} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
-                (when [(values _ ok) (assert int (aget a 1))] ok
-                  (InvalidArg "Gc.finalise"))
-
+                (finalRegister (aget a 0) (aget a 1) false)
                 ^{:line 517} Unit)]
 
             (r "caml_final_register" fin)
-            (r "caml_final_register_called_without_value" fin)
-            (r "caml_final_release" ^{:go/end 521} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+            (r "caml_final_register_called_without_value" ^{:go/end 519} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (finalRegister (aget a 0) (aget a 1) true)
+                Unit))
+            ;; Gc.finalise_release: the calls of the other finalisers allowed (running_finalisation_function cleared)
+            (r "caml_final_release" ^{:go/end 521} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (set! (.-infinal th) false) Unit))
 
             ;; weak.c: ephemerons and weak arrays as strong blocks [| link; data; key0; key1; ... |]
-            (r "caml_ephe_create" ^{:go/end 524} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephCreate (AsInt (aget a 0)))))
-            (r "caml_weak_create" ^{:go/end 525} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephCreate (AsInt (aget a 0)))))
+            (r "caml_ephe_create" ^{:go/end 524} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (let [e (ephCreate (AsInt (aget a 0)))]
+                  (ephRegister (AsBlock e))
+                  e)))
+            (r "caml_weak_create" ^{:go/end 525} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (let [e (ephCreate (AsInt (aget a 0)))]
+                  (ephRegister (AsBlock e))
+                  e)))
             (let [setKey ^{:go/end 530} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
                   (let [off (ephKeyOffset (aget a 0) (aget a 1) "Weak.set")]
-                    (aset (.-F (AsBlock (aget a 0))) off (aget a 2))
+                    (aset (.-F (AsBlock (aget a 0))) off (weakOf (aget a 2)))
                     ^{:line 529} Unit))]
 
               (r "caml_ephe_set_key" setKey)
@@ -537,7 +661,7 @@
               (r "caml_weak_set" ^{:go/end 545} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
                   (let [off (ephKeyOffset (aget a 0) (aget a 1) "Weak.set")]
                     (if [(values b ok) (assert (* Block) (aget a 2))] (and ok (!= (aget a 2) ephNone))
-                      (aset (.-F (AsBlock (aget a 0))) off (aget (.-F b) 0))
+                      (aset (.-F (AsBlock (aget a 0))) off (weakOf (aget (.-F b) 0)))
 
                       (aset (.-F (AsBlock (aget a 0))) off ephNone))
 
@@ -558,11 +682,11 @@
                 (r "caml_ephe_get_data_copy" ^{:go/end 558} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephGet (aget a 0) 1 true)))
                 (let [checkKey ^{:go/end 562} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
                       (let [off (ephKeyOffset (aget a 0) (aget a 1) "Weak.check")]
-                        (Bool (!= (aget (.-F (AsBlock (aget a 0))) off) ephNone))))]
+                        (Bool (weakLive (aget (.-F (AsBlock (aget a 0))) off)))))]
 
                   (r "caml_ephe_check_key" checkKey)
                   (r "caml_weak_check" checkKey)
-                  (r "caml_ephe_check_data" ^{:go/end 565} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (!= (aget (.-F (AsBlock (aget a 0))) 1) ephNone))))
+                  (r "caml_ephe_check_data" ^{:go/end 565} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephClean (AsBlock (aget a 0))) (Bool (!= (aget (.-F (AsBlock (aget a 0))) 1) ephNone))))
                   (r "caml_ephe_blit_key" ^{:go/end 566} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephBlit (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4))))
                   (r "caml_weak_blit" ^{:go/end 567} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephBlit (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4))))
                   (r "caml_ephe_blit_data" ^{:go/end 571} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]

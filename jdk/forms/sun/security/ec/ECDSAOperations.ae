@@ -1,0 +1,160 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ec/ECDSAOperations.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ec)
+
+(import '(java.security MessageDigest ProviderException)
+        '(java.security.spec ECParameterSpec ECPoint)
+        '(java.util Arrays Optional)
+        '(java.util.function Function)
+        '(sun.security.ec.point AffinePoint)
+        '(sun.security.util ArrayUtil)
+        '(sun.security.util.math ImmutableIntegerModuloP IntegerFieldModuloP IntegerModuloP))
+
+(defclass ^:public ECDSAOperations
+  (defclass ^:public ^:static Seed
+    (field ^:private ^:final ^byte/1 seedValue)
+
+    (constructor ^:public [this ^byte/1 seedValue]
+      (set! (.-seedValue this) seedValue))
+
+    (method ^:public getSeedValue ^byte/1 [this] seedValue))
+
+  (defclass ^:public ^:static Nonce
+    (field ^:private ^:final ^byte/1 nonceValue)
+
+    (constructor ^:public [this ^byte/1 nonceValue]
+      (set! (.-nonceValue this) nonceValue))
+
+    (method ^:public getNonceValue ^byte/1 [this] nonceValue))
+
+  (field ^:private ^:final ^ECOperations ecOps)
+
+  (field ^:private ^:final ^AffinePoint basePoint)
+
+  (constructor ^:public [this ^ECOperations ecOps ^ECPoint basePoint]
+    (set! (.-ecOps this) ecOps)
+    (set! (.-basePoint this) (ECDSAOperations/toAffinePoint basePoint (.getField ecOps))))
+
+  (method ^:public getEcOperations ^ECOperations [this] ecOps)
+
+  (method ^:public basePointMultiply ^AffinePoint [this ^byte/1 scalar]
+    (.asAffine (.multiply ecOps basePoint scalar)))
+
+  (method ^:public ^:static toAffinePoint ^AffinePoint [^ECPoint point ^IntegerFieldModuloP field]
+    (let [affineX (.getElement field (.getAffineX point))
+          affineY (.getElement field (.getAffineY point))]
+      (AffinePoint. affineX affineY)))
+
+  (method ^:public ^:static forParameters ^{:tag (Optional ECDSAOperations)} [^ECParameterSpec ecParams]
+    (let [^{:tag (Optional ECOperations)} curveOps (ECOperations/forParameters ecParams)]
+      (.map curveOps
+            (lambda Function ^ECDSAOperations [^ECOperations ops]
+              (ECDSAOperations. ops (.getGenerator ecParams))))))
+
+  (method ^:public signDigest :throws [ECOperations$IntermediateValueException] ^byte/1 [this
+                                                                                         ^byte/1 privateKey
+                                                                                         ^byte/1 digest
+                                                                                         ^Seed seed]
+    (let [nonceArr (.seedToScalar ecOps (.getSeedValue seed))
+          nonce (Nonce. nonceArr)]
+      (.signDigest this privateKey digest nonce)))
+
+  (method ^:public signDigest :throws [ECOperations$IntermediateValueException] ^byte/1 [this
+                                                                                         ^byte/1 privateKey
+                                                                                         ^byte/1 digest
+                                                                                         ^Nonce nonce]
+    (let [orderField (.getOrderField ecOps)
+          orderBits (.bitLength (.getSize orderField))]
+      (when (and (not (== (unchecked-remainder-int orderBits 8) 0))
+                 (< orderBits (unchecked-multiply-int (alength digest) 8)))
+        (throw (ProviderException. "Invalid digest length")))
+      (let [k (.getNonceValue nonce)
+            length (unchecked-divide-int (unchecked-add-int (.bitLength (.getSize orderField)) 7) 8)]
+        (when-not (== (alength k) length) (throw (ProviderException. "Incorrect nonce length")))
+        (let [R (.multiply ecOps basePoint k)
+              ^:mutable ^IntegerModuloP r (.getX (.asAffine R))
+              temp (new byte/1 length)]
+          (set! r (ECDSAOperations/b2a r orderField temp))
+          (let [result (new byte/1 (unchecked-multiply-int 2 length))]
+            (ArrayUtil/reverse temp)
+            (System/arraycopy temp 0 result 0 length)
+            (when (ECOperations/allZero temp) (throw (ECOperations$IntermediateValueException.)))
+            (let [^IntegerModuloP dU (.getElement orderField privateKey)
+                  lengthE (Math/min length (alength digest))
+                  E (new byte/1 lengthE)]
+              (System/arraycopy digest 0 E 0 lengthE)
+              (ArrayUtil/reverse E)
+              (let [^IntegerModuloP e (.getElement orderField E)
+                    ^IntegerModuloP kElem (.getElement orderField k)
+                    ^IntegerModuloP kInv (.multiplicativeInverse kElem)
+                    s (.mutable r)]
+                (.setProduct (.setSum (.setProduct s dU) e) kInv)
+                (.asByteArray s temp)
+                (ArrayUtil/reverse temp)
+                (System/arraycopy temp 0 result length length)
+                (when (ECOperations/allZero temp)
+                  (throw (ECOperations$IntermediateValueException.)))
+                result)))))))
+
+  (method ^:public verifySignedDigest ^boolean [this ^byte/1 digest ^byte/1 sig ^ECPoint pp]
+    (let [field (.getField ecOps)
+          orderField (.getOrderField ecOps)
+          mod (.getSize orderField)
+          length (unchecked-divide-int (unchecked-add-int (.bitLength mod) 7) 8)
+          ^:mutable ^byte/1 r nil
+          ^:mutable ^byte/1 s nil
+          encodeLength (unchecked-divide-int (alength sig) 2)]
+      (if (or (not (== (unchecked-remainder-int (alength sig) 2) 0)) (> encodeLength length))
+          false
+          (do
+            (if (== encodeLength length)
+                (do
+                  (set! r (Arrays/copyOf sig length))
+                  (set! s (Arrays/copyOfRange sig length (unchecked-multiply-int length 2))))
+                (do
+                  (set! r (new byte/1 length))
+                  (set! s (new byte/1 length))
+                  (System/arraycopy sig
+                                    0
+                                    r
+                                    (unchecked-subtract-int length encodeLength)
+                                    encodeLength)
+                  (System/arraycopy sig
+                                    encodeLength
+                                    s
+                                    (unchecked-subtract-int length encodeLength)
+                                    encodeLength)))
+            (let [rb (BigInteger. 1 r)
+                  sb (BigInteger. 1 s)]
+              (if (or (or (or (== (.signum rb) 0) (== (.signum sb) 0)) (>= (.compareTo rb mod) 0))
+                      (>= (.compareTo sb mod) 0))
+                  false
+                  (do
+                    (ArrayUtil/reverse r)
+                    (ArrayUtil/reverse s)
+                    (let [^IntegerModuloP ri (.getElement orderField r)
+                          ^IntegerModuloP si (.getElement orderField s)
+                          lengthE (Math/min length (alength digest))
+                          E (new byte/1 lengthE)]
+                      (System/arraycopy digest 0 E 0 lengthE)
+                      (ArrayUtil/reverse E)
+                      (let [^IntegerModuloP e (.getElement orderField E)
+                            ^IntegerModuloP sInv (.multiplicativeInverse si)
+                            u1 (.multiply e sInv)
+                            u2 (.multiply ri sInv)
+                            temp1 (new byte/1 length)]
+                        (ECDSAOperations/b2a u1 orderField temp1)
+                        (let [temp2 (new byte/1 length)]
+                          (ECDSAOperations/b2a u2 orderField temp2)
+                          (let [p1 (.multiply ecOps basePoint temp1)
+                                p2 (.multiply ecOps pp temp2)]
+                            (.setSum ecOps p1 p2)
+                            (let [^IntegerModuloP result (.getX (.asAffine p1))]
+                              (ECDSAOperations/b2a result orderField temp1)
+                              (MessageDigest/isEqual temp1 r)))))))))))))
+
+  (method ^:public ^:static b2a ^ImmutableIntegerModuloP [^IntegerModuloP b
+                                                          ^IntegerFieldModuloP orderField
+                                                          ^byte/1 temp1]
+    (.asByteArray b temp1)
+    (let [b2 (.getElement orderField temp1)] (.asByteArray b2 temp1) b2)))

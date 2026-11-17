@@ -1,0 +1,29 @@
+(ns arbace.rust.front.ci-batch
+  "RFP36 (c) (doc/rust/FRONTEND-SURVEY.md, \"As built: RFP30 (a), RFP31 (a), RFP36 (c), RFP40 (c)\"): the essential step's
+  lowered programs read, checked, linked with musl's forms and built into ci's node programs in one session, as `bin/ci run
+  --std gnu23 FILE...` builds one program (arbace.c.run's read-unit and nodes; musl's library prebuilt once for all of them),
+  so musl's forms are read once rather than once a program; bin/rust-front run-built then runs each node program on cirun.
+
+    -main HOST-DIR LIST   LIST's lines ID<TAB>OUT<TAB>FILE... (absolute paths): OUT the node program of FILE...; prints
+                          `ci-batch: ID ok` or `ci-batch: ID STATUS: MESSAGE`"
+  (:require [arbace.c.run :as run] [arbace.repr.c.host :as host] [arbace.string :as str]))
+
+(defn -main [host-dir list]
+  (let [h (host/load-host host-dir)
+        lib (when-not (System/getenv "CI_NO_MUSL") ((requiring-resolve 'arbace.c.runtime/library) h (System/getProperty "user.dir")))
+        opts ["-std=gnu23"]]
+    (doseq [l (str/split-lines (slurp list)) :when (seq l)]
+      (let [[id out & files] (str/split l #"\t")
+            r (try
+                (let [us (mapv #(run/read-unit h opts "." %) files)
+                      bad (first (remove #(= :ok (:status %)) us))]
+                  (if bad
+                    (str (name (:status bad)) ": " (:message bad))
+                    (let [n (binding [run/*musl* lib] (run/nodes us))]
+                      (if (= :ok (:status n))
+                        (do (spit out (:text n)) "ok")
+                        (str "refused (" (name (:class n)) "): " (:message n))))))
+                (catch Throwable e (str "build-error: " (.getName (class e)) ": " (.getMessage e))))]
+        (println (str "ci-batch: " id " " r))
+        (flush)))
+    (System/exit 0)))

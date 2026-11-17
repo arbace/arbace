@@ -1,0 +1,397 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/SSLEngineOutputRecord.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.util LinkedList)
+        '(javax.net.ssl SSLHandshakeException))
+
+(defclass ^:final SSLEngineOutputRecord
+  :extends OutputRecord
+  :implements [SSLRecord]
+
+  (field ^:private ^HandshakeFragment fragmenter)
+
+  (field ^:private ^boolean isTalkingToV2)
+
+  (field ^:private ^ByteBuffer v2ClientHello)
+
+  (field ^:private ^:volatile ^boolean isCloseWaiting)
+
+  (constructor [this ^HandshakeHash handshakeHash]
+    (super. handshakeHash (SSLCipher$SSLWriteCipher/nullTlsWriteCipher))
+    (set! (.-packetSize this) SSLRecord/maxRecordSize)
+    (set! (.-protocolVersion this) ProtocolVersion/NONE))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (.lock (.-recordLock this))
+    (try
+      (when-not (.-isClosed this)
+        (if (and (some? fragmenter) (not (.isEmpty fragmenter)))
+            (set! isCloseWaiting true)
+            (.close super)))
+      (finally (.unlock (.-recordLock this)))))
+
+  (method isClosed ^boolean [this] (or (.-isClosed this) isCloseWaiting))
+
+  (method encodeAlert ^void [this ^byte level ^byte description]
+    (if (.isClosed this)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning
+            (java-str "outbound has closed, ignore outbound alert message: "
+                      (Alert/nameOf description))))
+        (do
+          (when (nil? fragmenter) (set! fragmenter (HandshakeFragment.)))
+          (.queueUpAlert fragmenter level description))))
+
+  (method encodeHandshake ^void [this ^byte/1 source ^int offset ^int length]
+    (if (.isClosed this)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "outbound has closed, ignore outbound handshake message"
+                             (ByteBuffer/wrap source offset length)))
+        (do
+          (when (nil? fragmenter) (set! fragmenter (HandshakeFragment.)))
+          (when (.-firstMessage this)
+            (set! (.-firstMessage this) false)
+            (when (and (and (identical? (.-helloVersion this) ProtocolVersion/SSL20Hello)
+                            (== (aget source offset) (.-id SSLHandshake/CLIENT_HELLO)))
+                       (== (aget source
+                                 (unchecked-add-int
+                                   (unchecked-add-int (unchecked-add-int offset 4) 2)
+                                   32))
+                           0))
+              (set! v2ClientHello
+                    (SSLEngineOutputRecord/encodeV2ClientHello
+                      source
+                      (unchecked-add-int offset 4)
+                      (unchecked-subtract-int length 4)))
+              (.position v2ClientHello 2)
+              (.deliver (.-handshakeHash this) v2ClientHello)
+              (.position v2ClientHello 0)
+              (return)))
+          (let [handshakeType (aget source offset)]
+            (when (.isHashable (.-handshakeHash this) handshakeType)
+              (.deliver (.-handshakeHash this) source offset length))
+            (.queueUpFragment fragmenter source offset length)))))
+
+  (method encodeChangeCipherSpec ^void [this]
+    (if (.isClosed this)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "outbound has closed, ignore outbound change_cipher_spec message"))
+        (do
+          (when (nil? fragmenter) (set! fragmenter (HandshakeFragment.)))
+          (.queueUpChangeCipherSpec fragmenter))))
+
+  (method disposeWriteCipher ^void [this]
+    (if (nil? fragmenter) (.dispose (.-writeCipher this)) (.queueUpCipherDispose fragmenter)))
+
+  (method encodeV2NoCipher ^void [this] (set! isTalkingToV2 true))
+
+  (method encode :throws [IOException] ^Ciphertext [this ^:mutable ^ByteBuffer/1 srcs
+                                                    ^int srcsOffset ^int srcsLength
+                                                    ^ByteBuffer/1 dsts ^int dstsOffset
+                                                    ^int dstsLength]
+    (if (.-isClosed this)
+        (do
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning
+              "outbound has closed, ignore outbound application data or cached messages"))
+          nil)
+        (do
+          (when isCloseWaiting
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+              (SSLLogger/warning "outbound has closed, ignore outbound application data"))
+            (set! srcs nil))
+          (.encode this srcs srcsOffset srcsLength (aget dsts 0)))))
+
+  (method ^:private encode :throws [IOException] ^Ciphertext [this ^ByteBuffer/1 sources
+                                                              ^:mutable ^int offset
+                                                              ^:mutable ^int length
+                                                              ^ByteBuffer destination]
+    (when (.seqNumOverflow (.-authenticator (.-writeCipher this)))
+      (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+        (SSLLogger/fine
+          "sequence number extremely close to overflow (2^64-1 packets). Closing connection."))
+      (throw (SSLHandshakeException. "sequence number overflow")))
+    (let [ct (.acquireCiphertext this destination)]
+      (if (some? ct)
+          ct
+          (when-not (or (nil? sources) (== (alength sources) 0))
+            (let [^:mutable ^int srcsRemains 0]
+              (loop [^int i offset]
+                (when (< i (unchecked-add-int offset length))
+                  (set! srcsRemains (unchecked-add-int srcsRemains (.remaining (aget sources i))))
+                  (recur (unchecked-inc-int i))))
+              (when-not (== srcsRemains 0)
+                (let [dstLim (.limit destination)
+                      ^:mutable isFirstRecordOfThePayload true
+                      ^:mutable packetLeftSize (Math/min
+                                                 SSLEngineOutputRecord/maxRecordSize
+                                                 (.-packetSize this))
+                      ^:mutable needMorePayload true
+                      ^:mutable recordSN 0]
+                  (while needMorePayload
+                    (let [^:mutable ^int fragLen 0]
+                      (if (and isFirstRecordOfThePayload (.needToSplitPayload this))
+                          (do (set! fragLen 1) (set! isFirstRecordOfThePayload false))
+                          (do
+                            (set! needMorePayload false)
+                            (if (> packetLeftSize 0)
+                                (do
+                                  (set! fragLen
+                                        (.calculateFragmentSize
+                                          (.-writeCipher this)
+                                          packetLeftSize
+                                          SSLEngineOutputRecord/headerSize))
+                                  (set! fragLen (Math/min fragLen Record/maxDataSize)))
+                                (set! fragLen Record/maxDataSize))
+                            (set! fragLen (.calculateFragmentSize this fragLen))))
+                      (let [dstPos (.position destination)
+                            dstContent (unchecked-add-int
+                                         (unchecked-add-int dstPos SSLEngineOutputRecord/headerSize)
+                                         (.getExplicitNonceSize (.-writeCipher this)))]
+                        (.position destination dstContent)
+                        (let [^:mutable remains (Math/min fragLen (.remaining destination))]
+                          (set! fragLen 0)
+                          (let [srcsLen (unchecked-add-int offset length)]
+                            (loop [^int i offset]
+                              (when (and (< i srcsLen) (> remains 0))
+                                (let [amount (Math/min (.remaining (aget sources i)) remains)
+                                      srcLimit (.limit (aget sources i))]
+                                  (.limit (aget sources i)
+                                          (unchecked-add-int (.position (aget sources i)) amount))
+                                  (.put destination (aget sources i))
+                                  (.limit (aget sources i) srcLimit)
+                                  (set! remains (unchecked-subtract-int remains amount))
+                                  (set! fragLen (unchecked-add-int fragLen amount))
+                                  (if (> remains 0)
+                                      (do
+                                        (set! offset (unchecked-inc-int offset))
+                                        (set! length (unchecked-dec-int length))
+                                        (recur (unchecked-inc-int i)))
+                                      (recur (unchecked-inc-int i))))))
+                            (.limit destination (.position destination))
+                            (.position destination dstContent)
+                            (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+                              (SSLLogger/fine
+                                (java-str "WRITE: "
+                                          (.-name (.-protocolVersion this))
+                                          " "
+                                          (.-name ContentType/APPLICATION_DATA)
+                                          ", length = "
+                                          (.remaining destination))))
+                            (set! recordSN
+                                  (SSLEngineOutputRecord/encrypt
+                                    (.-writeCipher this)
+                                    (.-id ContentType/APPLICATION_DATA)
+                                    destination
+                                    dstPos
+                                    dstLim
+                                    SSLEngineOutputRecord/headerSize
+                                    (.-protocolVersion this)))
+                            (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+                              (let [temporary (.duplicate destination)]
+                                (.limit temporary (.position temporary))
+                                (.position temporary dstPos)
+                                (SSLLogger/fine "Raw write" temporary)))
+                            (set! packetLeftSize
+                                  (unchecked-subtract-int
+                                    packetLeftSize
+                                    (unchecked-subtract-int (.position destination) dstPos)))
+                            (.limit destination dstLim)
+                            (when (.-isFirstAppOutputRecord this)
+                              (set! (.-isFirstAppOutputRecord this) false)))))))
+                  (Ciphertext. (.-id ContentType/APPLICATION_DATA)
+                               (.-id SSLHandshake/NOT_APPLICABLE)
+                               recordSN))))))))
+
+  (method ^:private acquireCiphertext :throws [IOException] ^Ciphertext [this
+                                                                         ^ByteBuffer destination]
+    (cond
+      isTalkingToV2
+        (do
+          (.put destination SSLRecord/v2NoCipher)
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+            (SSLLogger/fine "Raw write" SSLRecord/v2NoCipher))
+          (set! isTalkingToV2 false)
+          (Ciphertext. (.-id ContentType/ALERT) (.-id SSLHandshake/NOT_APPLICABLE) -1))
+      (some? v2ClientHello)
+        (do
+          (when (SSLLogger/isOn)
+            (when (SSLLogger/isOn "record")
+              (SSLLogger/fine
+                (java-str (.getName (Thread/currentThread))
+                          ", WRITE: SSLv2 ClientHello message, length = "
+                          (.remaining v2ClientHello))))
+            (when (SSLLogger/isOn "packet") (SSLLogger/fine "Raw write" v2ClientHello)))
+          (.put destination v2ClientHello)
+          (set! v2ClientHello nil)
+          (Ciphertext. (.-id ContentType/HANDSHAKE) (.-id SSLHandshake/CLIENT_HELLO) -1))
+      (some? fragmenter) (.acquireCiphertext fragmenter destination)))
+
+  (method isEmpty ^boolean [this]
+    (and (and (not isTalkingToV2) (nil? v2ClientHello))
+         (or (nil? fragmenter) (.isEmpty fragmenter))))
+
+  (defclass ^:private ^:static RecordMemo
+    (field ^byte contentType)
+
+    (field ^byte majorVersion)
+
+    (field ^byte minorVersion)
+
+    (field ^SSLCipher$SSLWriteCipher encodeCipher)
+
+    (field ^boolean disposeCipher)
+
+    (field ^byte/1 fragment))
+
+  (defclass ^:private ^:static HandshakeMemo
+    :extends RecordMemo
+
+    (field ^byte handshakeType)
+
+    (field ^int acquireOffset))
+
+  (defclass ^:final HandshakeFragment
+    (field ^:private ^:final ^{:tag (LinkedList RecordMemo)} handshakeMemos (LinkedList.))
+
+    (method queueUpFragment ^void [this ^byte/1 source ^int offset ^int length]
+      (let [memo (HandshakeMemo.)]
+        (set! (.-contentType memo) (.-id ContentType/HANDSHAKE))
+        (set! (.-majorVersion memo) (.-major (.-protocolVersion SSLEngineOutputRecord/this)))
+        (set! (.-minorVersion memo) (.-minor (.-protocolVersion SSLEngineOutputRecord/this)))
+        (set! (.-encodeCipher memo) (.-writeCipher SSLEngineOutputRecord/this))
+        (set! (.-handshakeType memo) (aget source offset))
+        (set! (.-acquireOffset memo) 0)
+        (set! (.-fragment memo) (new byte/1 (unchecked-subtract-int length 4)))
+        (System/arraycopy source
+                          (unchecked-add-int offset 4)
+                          (.-fragment memo)
+                          0
+                          (unchecked-subtract-int length 4))
+        (.add handshakeMemos memo)))
+
+    (method queueUpChangeCipherSpec ^void [this]
+      (let [memo (RecordMemo.)]
+        (set! (.-contentType memo) (.-id ContentType/CHANGE_CIPHER_SPEC))
+        (set! (.-majorVersion memo) (.-major (.-protocolVersion SSLEngineOutputRecord/this)))
+        (set! (.-minorVersion memo) (.-minor (.-protocolVersion SSLEngineOutputRecord/this)))
+        (set! (.-encodeCipher memo) (.-writeCipher SSLEngineOutputRecord/this))
+        (set! (.-fragment memo) (new byte/1 1))
+        (aset (.-fragment memo) 0 1)
+        (.add handshakeMemos memo)))
+
+    (method queueUpAlert ^void [this ^byte level ^byte description]
+      (let [memo (RecordMemo.)]
+        (set! (.-contentType memo) (.-id ContentType/ALERT))
+        (set! (.-majorVersion memo) (.-major (.-protocolVersion SSLEngineOutputRecord/this)))
+        (set! (.-minorVersion memo) (.-minor (.-protocolVersion SSLEngineOutputRecord/this)))
+        (set! (.-encodeCipher memo) (.-writeCipher SSLEngineOutputRecord/this))
+        (set! (.-fragment memo) (new byte/1 2))
+        (aset (.-fragment memo) 0 level)
+        (aset (.-fragment memo) 1 description)
+        (.add handshakeMemos memo)))
+
+    (method queueUpCipherDispose ^void [this]
+      (let [lastMemo (cast RecordMemo (.peekLast handshakeMemos))]
+        (if (some? lastMemo)
+            (set! (.-disposeCipher lastMemo) true)
+            (.dispose (.-writeCipher SSLEngineOutputRecord/this)))))
+
+    (method acquireCiphertext :throws [IOException] ^Ciphertext [this ^ByteBuffer dstBuf]
+      (when-not (.isEmpty this)
+        (let [memo (cast RecordMemo (.getFirst handshakeMemos))
+              ^:mutable ^HandshakeMemo hsMemo nil]
+          (when (== (.-contentType memo) (.-id ContentType/HANDSHAKE))
+            (set! hsMemo (cast HandshakeMemo memo)))
+          (let [^:mutable ^int fragLen 0]
+            (if (> (.-packetSize SSLEngineOutputRecord/this) 0)
+                (do
+                  (set!
+                    fragLen
+                    (Math/min SSLRecord/maxRecordSize (.-packetSize SSLEngineOutputRecord/this)))
+                  (set! fragLen
+                        (.calculateFragmentSize (.-encodeCipher memo) fragLen SSLRecord/headerSize)))
+                (set! fragLen Record/maxDataSize))
+            (set! fragLen (.calculateFragmentSize SSLEngineOutputRecord/this fragLen))
+            (let [dstPos (.position dstBuf)
+                  dstLim (.limit dstBuf)
+                  dstContent (unchecked-add-int (unchecked-add-int dstPos SSLRecord/headerSize)
+                                                (.getExplicitNonceSize (.-encodeCipher memo)))]
+              (.position dstBuf dstContent)
+              (if (some? hsMemo)
+                  (let [^:mutable remainingFragLen fragLen]
+                    (while (and (> remainingFragLen 0) (not (.isEmpty handshakeMemos)))
+                      (let [memoFragLen (alength (.-fragment hsMemo))]
+                        (when (== (.-acquireOffset hsMemo) 0)
+                          (when (<= remainingFragLen 4) (break))
+                          (.put dstBuf (.-handshakeType hsMemo))
+                          (.put dstBuf
+                                (unchecked-byte
+                                  (bit-and-int (bit-shift-right-int memoFragLen 16) 0xFF)))
+                          (.put dstBuf
+                                (unchecked-byte
+                                  (bit-and-int (bit-shift-right-int memoFragLen 8) 0xFF)))
+                          (.put dstBuf (unchecked-byte (bit-and-int memoFragLen 0xFF)))
+                          (set! remainingFragLen (unchecked-subtract-int remainingFragLen 4)))
+                        (let [chipLen (Math/min remainingFragLen
+                                                (unchecked-subtract-int
+                                                  memoFragLen
+                                                  (.-acquireOffset hsMemo)))]
+                          (.put dstBuf (.-fragment hsMemo) (.-acquireOffset hsMemo) chipLen)
+                          (set! (.-acquireOffset hsMemo)
+                                (unchecked-add-int (.-acquireOffset hsMemo) chipLen))
+                          (when (== (.-acquireOffset hsMemo) memoFragLen)
+                            (.removeFirst handshakeMemos)
+                            (when (and (> remainingFragLen chipLen) (not (.isEmpty handshakeMemos)))
+                              (let [rm (cast RecordMemo (.getFirst handshakeMemos))]
+                                (if (and (== (.-contentType rm) (.-id ContentType/HANDSHAKE))
+                                         (identical? (.-encodeCipher rm) (.-encodeCipher hsMemo)))
+                                    (set! hsMemo (cast HandshakeMemo rm))
+                                    (break)))))
+                          (set! remainingFragLen (unchecked-subtract-int remainingFragLen chipLen))))))
+                  (do
+                    (set! fragLen (Math/min fragLen (alength (.-fragment memo))))
+                    (.put dstBuf (.-fragment memo) 0 fragLen)
+                    (.removeFirst handshakeMemos)))
+              (.limit dstBuf (.position dstBuf))
+              (.position dstBuf dstContent)
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "record"))
+                (SSLLogger/fine
+                  (java-str "WRITE: "
+                            (.-name (.-protocolVersion SSLEngineOutputRecord/this))
+                            " "
+                            (ContentType/nameOf (.-contentType memo))
+                            ", length = "
+                            (.remaining dstBuf))))
+              (let [recordSN (OutputRecord/encrypt
+                               (.-encodeCipher memo)
+                               (.-contentType memo)
+                               dstBuf
+                               dstPos
+                               dstLim
+                               SSLRecord/headerSize
+                               (ProtocolVersion/valueOf (.-majorVersion memo) (.-minorVersion memo)))]
+                (when (.-disposeCipher memo) (.dispose (.-encodeCipher memo)))
+                (when (and (SSLLogger/isOn) (SSLLogger/isOn "packet"))
+                  (let [temporary (.duplicate dstBuf)]
+                    (.limit temporary (.position temporary))
+                    (.position temporary dstPos)
+                    (SSLLogger/fine "Raw write" temporary)))
+                (.limit dstBuf dstLim)
+                (try
+                  (if (some? hsMemo)
+                      (Ciphertext. (.-contentType hsMemo) (.-handshakeType hsMemo) recordSN)
+                      (Ciphertext. (.-contentType memo) (.-id SSLHandshake/NOT_APPLICABLE) recordSN))
+                  (finally
+                    (when (and isCloseWaiting (.isEmpty this)) (.close SSLEngineOutputRecord/this))))))))))
+
+    (method isEmpty ^boolean [this] (.isEmpty handshakeMemos)))
+
+  (method needToSplitPayload ^boolean [this]
+    (and (and (and (not (.useTLS11PlusSpec (.-protocolVersion this)))
+                   (.isCBCMode (.-writeCipher this)))
+              (not (.-isFirstAppOutputRecord this)))
+         Record/enableCBCProtection)))

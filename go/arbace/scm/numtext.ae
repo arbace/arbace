@@ -9,21 +9,30 @@
   :imports [[math "math"] [big "math/big"] [bits "math/bits"] [strconv "strconv"] [strings "strings"]])
 
 (go/func checkRadix ^int [^string who ^int radix]
-  (when (not (or (== radix 2) (== radix 8) (== radix 10) (== radix 16)))
+  (when (or (< radix 2) (> radix 36))
     (Violation CondAssertion who "~s is not a valid radix" (conv int64 radix)))
   radix)
 
-(go/func NumberToString "NumberToString is number x in radix (2, 8, 10 or 16) as Chez writes it.\n" ^string [^any x ^int radix]
+(go/func NumberToString "NumberToString is number x in radix (2 to 36) as Chez writes it.\n" ^string [^any x ^int radix]
+  (NumberToStringPrec x radix ""))
+
+(go/func NumberToStringPrec "NumberToStringPrec is NumberToString with the R6RS precision argument (SMR4): prec is the text of its digits, \"\" for none; a finite flonum then ends in |prec, as Chez writes it (the precision at least 53, the caller's job).\n"
+  ^string [^any x ^int radix ^string prec]
   (checkRadix "number->string" radix)
   (type-switch [v x]
     (case [int64] (return (strings/ToUpper (strconv/FormatInt v radix))))
     (case [(* big/Int)] (return (strings/ToUpper (.Text v radix))))
     (case [(* big/Rat)]
       (return (+ (strings/ToUpper (.Text (.Num v) radix)) "/" (strings/ToUpper (.Text (.Denom v) radix)))))
-    (case [float64] (return (flonumText v radix)))
-    (case [(* Complex)] (return (cxToString v radix))))
+    (case [float64] (return (flonumTextP v radix prec)))
+    (case [(* Complex)] (return (cxToStringP v radix prec))))
   (NotA "number->string" "number" x)
   "")
+
+(go/func precSuffix ^string [^string prec]
+  (when (== prec "")
+    (return ""))
+  (+ "|" prec))
 
 (go/func zeros ^string [^int n]
   (when (<= n 0)
@@ -31,6 +40,10 @@
   (strings/Repeat "0" n))
 
 (go/func flonumText "flonumText is flonum v in radix as Chez prints it.\n" ^string [^float64 v ^int radix]
+  (flonumTextP v radix ""))
+
+(go/func flonumTextP "flonumTextP is flonum v in radix with the precision suffix prec (\"\": none, and the denormals' own suffix in R6RS mode).\n"
+  ^string [^float64 v ^int radix ^string prec]
   (when (math/IsNaN v)
     (return "+nan.0"))
   (when (math/IsInf v 1)
@@ -39,20 +52,20 @@
     (return "-inf.0"))
   (when (== v 0)
     (when (math/Signbit v)
-      (return "-0.0"))
-    (return "0.0"))
+      (return (+ "-0.0" (precSuffix prec))))
+    (return (+ "0.0" (precSuffix prec))))
   (let [a (math/Abs v)
         (values ds k) (flonumDigits a radix)
         x (- k 1)
         n (len ds)
         ^strings/Builder sb (zero strings/Builder)
-        ^string alpha "0123456789ABCDEF"
+        ^string alpha "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         ^{:tag (slice byte)} txt (make (slice byte) n)]
     (range [i d ds]
       (aset txt i (aget alpha d)))
     (when (math/Signbit v)
       (.WriteByte (addr sb) (conv byte \-)))
-    (if (or (== radix 16) (and (>= x -3) (< x 10)))
+    (if (or (>= radix 16) (and (>= x -3) (< x 10)))
       (cond
         (< x 0)
         (do (.WriteString (addr sb) "0.")
@@ -67,12 +80,18 @@
             (.WriteString (addr sb) ".")
             (.WriteString (addr sb) (conv string (subslice txt (+ x 1) n)))))
       (do (.WriteByte (addr sb) (aget txt 0))
-          (when (> n 1)
-            (.WriteString (addr sb) ".")
-            (.WriteString (addr sb) (conv string (subslice txt 1 n))))
+          (if (> n 1)
+            (do (.WriteString (addr sb) ".")
+                (.WriteString (addr sb) (conv string (subslice txt 1 n))))
+            ;; SMR5: in R7RS mode a denormal's one digit is written d.0 (the suite's accepted strings)
+            (when (and R7RS (< a 2.2250738585072014e-308))
+              (.WriteString (addr sb) ".0")))
           (.WriteString (addr sb) "e")
           (.WriteString (addr sb) (strconv/FormatInt (conv int64 x) radix))))
-    (when (< a 2.2250738585072014e-308)
+    (when (!= prec "")
+      (.WriteString (addr sb) "|")
+      (.WriteString (addr sb) prec))
+    (when (and (== prec "") (not R7RS) (< a 2.2250738585072014e-308))
       (let [m (bit-and (math/Float64bits a) (- (<< 1 52) 1))]
         (.WriteString (addr sb) "|")
         (.WriteString (addr sb) (strconv/Itoa (- 64 (bits/LeadingZeros64 m))))))
@@ -208,7 +227,11 @@ that v is 0.d1d2... times B^k (Burger and Dybvig's free-format algorithm; a tie 
       (case [int64 (* big/Int) (* big/Rat)] (return (Sub (conv int64 0) x)))))
   x)
 
-(go/func StringToNumber "StringToNumber is the number s denotes in default radix radix, or false.\n" ^any [^string s ^int radix]
+(go/func StringToNumber "StringToNumber is the number s denotes in default radix radix, or false (R6RS's syntax).\n" ^any [^string s ^int radix]
+  (StringToNumberX s radix false))
+
+(go/func StringToNumberX "StringToNumberX is StringToNumber, with Chez's own extended syntax when ext (SMR4: #Nr, # placeholders, a point and an exponent in any radix, rationals with exponents) that (rnrs)'s string->number does not read.\n"
+  ^any [^string s ^int radix ^bool ext]
   (checkRadix "string->number" radix)
   (let [^int exact 0
         ^int rad 0
@@ -216,6 +239,19 @@ that v is 0.d1d2... times B^k (Burger and Dybvig's free-format algorithm; a tie 
     (while (and (< (+ i 1) (len s)) (== (aget s i) \#))
       (watchdogTick)
       (let [c (lowerB (aget s (+ i 1)))]
+        ;; SMR4: #Nr, radix N from 2 to 36
+        (when (and ext (>= c \0) (<= c \9))
+          (let [^int j (+ i 1)]
+            (while (and (< j (len s)) (>= (aget s j) \0) (<= (aget s j) \9) (< j (+ i 4)))
+              (inc! j))
+            (when (or (>= j (len s)) (!= (lowerB (aget s j)) \r) (!= rad 0))
+              (return false))
+            (let [(values nv _) (strconv/Atoi (subslice s (+ i 1) j))]
+              (when (or (< nv 2) (> nv 36))
+                (return false))
+              (set! rad nv)
+              (set! i (+ j 1))
+              (continue))))
         (switch c
           (case [\x] (when (!= rad 0) (return false)) (set! rad 16))
           (case [\b] (when (!= rad 0) (return false)) (set! rad 2))
@@ -227,14 +263,14 @@ that v is 0.d1d2... times B^k (Burger and Dybvig's free-format algorithm; a tie 
         (set! i (+ i 2))))
     (when (== rad 0)
       (set! rad radix))
-    (parseComplex (subslice s i) rad exact)))
+    (parseComplex (subslice s i) rad exact ext)))
 
 (go/func isExactZero2 ^bool [^any x]
   (let [(values n ok) (assert int64 x)]
     (and ok (== n 0))))
 
-(go/func parseComplex ^any [^string b ^int rad ^int exact]
-  (let [(values v ok) (parseReal b rad exact)]
+(go/func parseComplex ^any [^string b ^int rad ^int exact ^bool ext]
+  (let [(values v ok) (parseReal b rad exact ext)]
     (when ok
       (return v)))
   (when (== (len b) 0)
@@ -249,7 +285,7 @@ that v is 0.d1d2... times B^k (Burger and Dybvig's free-format algorithm; a tie 
                   ^any re (conv int64 0)
                   reok true]
               (when (> j 0)
-                (let [(values rv rok) (parseReal (subslice body 0 j) rad exact)]
+                (let [(values rv rok) (parseReal (subslice body 0 j) rad exact ext)]
                   (set! re rv)
                   (set! reok rok)))
               (when reok
@@ -257,20 +293,171 @@ that v is 0.d1d2... times B^k (Burger and Dybvig's free-format algorithm; a tie 
                       ^bool imok false]
                   (if (== (len im) 1)
                     (do (set! imv (conv int64 1)) (when (== (aget im 0) \-) (set! imv (conv int64 -1))) (set! imok true))
-                    (let [(values iv iok) (parseReal im rad exact)]
+                    (let [(values iv iok) (parseReal im rad exact ext)]
                       (set! imv iv)
                       (set! imok iok)))
                   (when imok
                     (return (MkRect re imv))))))))))
     (let [at (strings/IndexByte b \@)]
       (when (> at 0)
-        (let [(values mv mok) (parseReal (subslice b 0 at) rad exact)
-              (values av aok) (parseReal (subslice b (+ at 1)) rad exact)]
+        (let [(values mv mok) (parseReal (subslice b 0 at) rad exact ext)
+              (values av aok) (parseReal (subslice b (+ at 1)) rad exact ext)]
+          ;; SMR4: #e names no exact number of a nonzero angle
+          (when (and mok aok (== exact 1) (not (IsExactZero av)))
+            (return false))
           (when (and mok aok)
             (return (MakePolar mv av)))))))
   false)
 
-(go/func parseReal "parseReal is the real number b denotes (exact: 0 as written, 1 #e, 2 #i), ok false if none.\n"
+(go/func parseReal "parseReal is the real number b denotes (exact: 0 as written, 1 #e, 2 #i), ok false if none: parseRealBase's, else Chez's general syntax (SMR4).\n"
+  ^any [^string b ^int rad ^int exact ^bool ext] :results [any bool]
+  (let [(values v ok) (parseRealBase b rad exact)]
+    (when ok
+      (return v true)))
+  (when (not ext)
+    (return false false))
+  (when (== (len b) 0)
+    (return false false))
+  (let [^bool neg false
+        ^string rest b
+        ^int wbits -1]
+    (when (or (== (aget b 0) \+) (== (aget b 0) \-))
+      (set! neg (== (aget b 0) \-))
+      (set! rest (subslice b 1)))
+    (let [bar (strings/IndexByte rest \|)]
+      (when (>= bar 0)
+        (when (not (allDigits (subslice rest (+ bar 1)) 10))
+          (return false false))
+        (let [(values wv werr) (strconv/Atoi (subslice rest (+ bar 1)))]
+          (if (!= werr nil) (set! wbits 1000) (set! wbits wv)))
+        (set! rest (subslice rest 0 bar))))
+    (parseGeneral rest neg rad exact wbits)))
+
+(go/func scanRun "scanRun is the end of the run of digits of radix rad in s from i.\n" ^int [^string s ^int i ^int rad]
+  (let [^int j i]
+    (while (and (< j (len s)) (< (digitVal (aget s j)) rad))
+      (watchdogTick)
+      (inc! j))
+    j))
+
+(go/func scanHash "scanHash is the end of the run of # in s from i.\n" ^int [^string s ^int i]
+  (let [^int j i]
+    (while (and (< j (len s)) (== (aget s j) \#))
+      (inc! j))
+    j))
+
+(go/func parseGeneral
+  "parseGeneral is Chez's real syntax beyond the plain one (SMR4), rest without sign and width: digits then # (placeholders for 0, inexact), a point in any radix, n/d with #, an exponent marker e s f d l that is no digit of the radix, its digits and sign in the radix, the radix the exponent's base.\n"
+  ^any [^string rest ^bool neg ^int rad ^int exact ^int wbits] :results [any bool]
+  (let [ie (scanRun rest 0 rad)
+        he (scanHash rest ie)
+        ^int i he
+        ^int nh1 (- he ie)
+        ^string frac ""
+        ^int nh2 0
+        ^string den ""
+        ^int nh3 0
+        ^bool dot false
+        ^bool slash false
+        ^bool expSeen false
+        ^bool hash (> (- he ie) 0)]
+    (when (and (== ie 0) (> nh1 0))
+      (return false false))
+    (when (and (< i (len rest)) (== (aget rest i) \.))
+      (set! dot true)
+      (inc! i)
+      (if (> nh1 0)
+        (let [h2 (scanHash rest i)]
+          (set! nh2 (- h2 i))
+          (set! i h2))
+        (let [fe (scanRun rest i rad)
+              h2 (scanHash rest fe)]
+          (set! frac (subslice rest i fe))
+          (set! nh2 (- h2 fe))
+          (set! i h2)))
+      (when (> nh2 0)
+        (set! hash true))
+      (when (and (== ie 0) (== (len frac) 0))
+        (return false false)))
+    (when (and (not dot) (< i (len rest)) (== (aget rest i) \/))
+      (when (== ie 0)
+        (return false false))
+      (set! slash true)
+      (inc! i)
+      (let [de (scanRun rest i rad)
+            h3 (scanHash rest de)]
+        (when (== de i)
+          (return false false))
+        (set! den (subslice rest i de))
+        (set! nh3 (- h3 de))
+        (when (> nh3 0)
+          (set! hash true))
+        (set! i h3)))
+    (when (and (not dot) (not slash) (== ie 0))
+      (return false false))
+    (let [^int ex 0
+          ^bool exBig false]
+      (when (< i (len rest))
+        (let [m (lowerB (aget rest i))]
+          (when (not (or (== m \e) (== m \d) (== m \f) (== m \s) (== m \l)))
+            (return false false))
+          (set! expSeen true)
+          (inc! i)
+          (let [^bool eneg false]
+            (when (and (< i (len rest)) (or (== (aget rest i) \+) (== (aget rest i) \-)))
+              (set! eneg (== (aget rest i) \-))
+              (inc! i))
+            (let [ee (scanRun rest i rad)]
+              (when (or (== ee i) (!= ee (len rest)))
+                (return false false))
+              (let [eb (parseBig (subslice rest i ee) rad)]
+                (if (> (.BitLen eb) 40)
+                  (set! exBig true)
+                  (set! ex (conv int (.Int64 eb))))
+                (when eneg
+                  (set! ex (- ex)))
+                (when (and exBig eneg)
+                  (set! ex -2000000000))
+                (when (and exBig (not eneg))
+                  (set! ex 2000000000)))))))
+      (let [^bool inexact (or (== exact 2) (and (== exact 0) (or hash dot expSeen (and (>= wbits 0) (not slash)))))]
+        (when (and slash (>= wbits 0))
+          (return false false))
+        (let [^{:tag (* big/Rat)} q (new big/Rat)]
+          (if slash
+            (let [n (parseBig (+ (subslice rest 0 ie) (zeros nh1)) rad)
+                  d (parseBig (+ den (zeros nh3)) rad)]
+              (when (== (.Sign d) 0)
+                ;; a # of the numerator alone makes no infinity or NaN (Chez's: 1#/0 is no number, 1/0# is +inf.0)
+                (when (or (== exact 1) (not (or (== exact 2) (> nh3 0) expSeen)))
+                  (return false false))
+                (when (== (.Sign n) 0)
+                  (return (math/NaN) true))
+                (if neg (return (math/Inf -1) true) (return (math/Inf 1) true)))
+              (set! q (newRat n d)))
+            (let [m (parseBig (+ (subslice rest 0 ie) (zeros nh1) frac (zeros nh2)) rad)
+                  fl (+ (len frac) nh2)]
+              (.SetInt q m)
+              (when (> fl 0)
+                (.Quo q q (.SetInt (new big/Rat) (bigPow rad fl))))))
+          (when (or (> ex 1000000) (< ex -1000000))
+            (when (== exact 1)
+              (return false false))
+            (when (== (.Sign (.Num q)) 0)
+              (return (negNum 0.0 neg) true))
+            (if (> ex 0)
+              (return (negNum (math/Inf 1) neg) true)
+              (return (negNum 0.0 neg) true)))
+          (when (> ex 0)
+            (.Mul q q (.SetInt (new big/Rat) (bigPow rad ex))))
+          (when (< ex 0)
+            (.Quo q q (.SetInt (new big/Rat) (bigPow rad (- ex)))))
+          (when inexact
+            (return (negNum (roundWidth (ToFloat (NormRat q)) wbits) neg) true))
+          (return (negNum (NormRat q) neg) true))))
+  (return false false)))
+
+(go/func parseRealBase "parseRealBase is the real number b denotes (exact: 0 as written, 1 #e, 2 #i), ok false if none, in the syntax before SMR4's general one.\n"
   ^any [^string b ^int rad ^int exact] :results [any bool]
   (when (== (len b) 0)
     (return false false))

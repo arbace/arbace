@@ -1,0 +1,112 @@
+;; Converted from jdk26u src/jdk.httpserver/share/classes/sun/net/httpserver/ChunkedInputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.httpserver)
+
+(import '(java.io IOException InputStream))
+
+(defclass ChunkedInputStream
+  :extends LeftOverInputStream
+
+  (constructor [this ^ExchangeImpl t ^InputStream src] (super. t src))
+
+  (field ^:private ^int remaining)
+
+  (field ^:private ^boolean needToReadHeader true)
+
+  (field ^:static ^:final ^char CR \return)
+
+  (field ^:static ^:final ^char LF \newline)
+
+  (field ^:private ^:static ^:final ^int MAX_CHUNK_HEADER_SIZE 2050)
+
+  (method ^:private numeric :throws [IOException] ^int [this ^char/1 arr ^int nchars]
+    (java-assert (>= (alength arr) nchars))
+    (let [^:mutable ^int len 0]
+      (loop [^int i 0]
+        (when (< i nchars)
+          (let [c (aget arr i)
+                ^:mutable ^int val 0]
+            (cond
+              (and (>= c \0) (<= c \9)) (set! val (unchecked-subtract-int c \0))
+              (and (>= c \a) (<= c \f))
+                (set! val (unchecked-add-int (unchecked-subtract-int c \a) 10))
+              (and (>= c \A) (<= c \F))
+                (set! val (unchecked-add-int (unchecked-subtract-int c \A) 10))
+              :else (throw (IOException. "invalid chunk length")))
+            (set! len (unchecked-add-int (unchecked-multiply-int len 16) val))
+            (recur (unchecked-inc-int i)))))
+      len))
+
+  (method ^:private readChunkHeader :throws [IOException] ^int [this]
+    (let [^:mutable gotCR false
+          ^:mutable ^int c 0
+          len_arr (new char/1 16)
+          ^:mutable ^int len_size 0
+          ^:mutable end_of_len false
+          ^:mutable ^int read 0]
+      (while (not (== (set! c (.read (.-in this))) -1))
+        (let [ch (unchecked-char c)]
+          (set! read (unchecked-inc-int read))
+          (when (or (== len_size (unchecked-subtract-int (alength len_arr) 1))
+                    (> read MAX_CHUNK_HEADER_SIZE))
+            (throw (IOException. "invalid chunk header")))
+          (cond
+            gotCR
+              (do
+                (if (== ch LF)
+                    (let [l (.numeric this len_arr len_size)] (return l))
+                    (set! gotCR false))
+                (when-not end_of_len
+                  (aset len_arr len_size ch)
+                  (set! len_size (unchecked-inc-int len_size))))
+            (== ch CR) (set! gotCR true)
+            (== ch \;) (set! end_of_len true)
+            :else
+              (when-not end_of_len
+                (aset len_arr len_size ch)
+                (set! len_size (unchecked-inc-int len_size))))))
+      (throw (IOException. "end of stream reading chunk header"))))
+
+  (method ^:protected readImpl :throws [IOException] ^int [this ^byte/1 b ^int off
+                                                           ^:mutable ^int len]
+    (if (.-eof this)
+        -1
+        (do
+          (when needToReadHeader
+            (set! remaining (.readChunkHeader this))
+            (when (== remaining 0)
+              (set! (.-eof this) true)
+              (.consumeCRLF this)
+              (.requestCompleted (.getServerImpl (.-t this)) (.getConnection (.-t this)))
+              (return -1))
+            (set! needToReadHeader false))
+          (when (> len remaining) (set! len remaining))
+          (let [n (.read (.-in this) b off len)]
+            (when (> n -1) (set! remaining (unchecked-subtract-int remaining n)))
+            (when (== remaining 0) (set! needToReadHeader true) (.consumeCRLF this))
+            (when (and (< n 0) (not (.-eof this)))
+              (throw (IOException. "connection closed before all data received")))
+            n))))
+
+  (method ^:private consumeCRLF :throws [IOException] ^void [this]
+    (let [^:mutable ^char c (unchecked-char 0)]
+      (set! c (unchecked-char (.read (.-in this))))
+      (when-not (== c CR) (throw (IOException. "invalid chunk end")))
+      (set! c (unchecked-char (.read (.-in this))))
+      (when-not (== c LF) (throw (IOException. "invalid chunk end")))))
+
+  (method ^:public available :throws [IOException] ^int [this]
+    (if (or (.-eof this) (.-closed this))
+        0
+        (let [n (.available (.-in this))] (if (> n remaining) remaining n))))
+
+  (method ^:public isDataBuffered :throws [IOException] ^boolean [this]
+    (java-assert (.-eof this))
+    (> (.available (.-in this)) 0))
+
+  (method ^:public markSupported ^boolean [this] false)
+
+  (method ^:public mark ^void [this ^int l])
+
+  (method ^:public reset :throws [IOException] ^void [this]
+    (throw (IOException. "mark/reset not supported"))))

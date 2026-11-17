@@ -1,0 +1,197 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/GHASH.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(java.nio ByteBuffer ByteOrder)
+        '(java.security ProviderException)
+        '(jdk.internal.vm.annotation IntrinsicCandidate))
+
+(defclass ^:final GHASH
+  :implements [Cloneable GCM]
+
+  (field ^:private ^:static ^:final ^int AES_BLOCK_SIZE 16)
+
+  (field ^:private ^:static ^:final ^VarHandle asLongView
+    (MethodHandles/byteArrayViewVarHandle long/1 ByteOrder/BIG_ENDIAN))
+
+  (field ^:private ^:static ^:final ^int MAX_LEN 1024)
+
+  (method ^:private ^:static blockMult ^void [^long/1 st ^long/1 subH]
+    (let [^:mutable Z0 0
+          ^:mutable Z1 0
+          ^:mutable V0 (aget subH 0)
+          ^:mutable V1 (aget subH 1)
+          ^:mutable ^long X 0]
+      (set! X (aget st 0))
+      (loop [^int i 0]
+        (when (< i 64)
+          (let [^:mutable mask (bit-shift-right X 63)]
+            (set! Z0 (bit-xor Z0 (bit-and V0 mask)))
+            (set! Z1 (bit-xor Z1 (bit-and V1 mask)))
+            (set! mask (bit-shift-right (bit-shift-left V1 63) 63))
+            (let [carry (bit-and V0 1)]
+              (set! V0 (unsigned-bit-shift-right V0 1))
+              (set! V1 (bit-or (unsigned-bit-shift-right V1 1) (bit-shift-left carry 63)))
+              (set! V0 (bit-xor V0 (bit-and (unchecked-long 0xe100000000000000) mask)))
+              (set! X (bit-shift-left X 1))
+              (recur (unchecked-inc-int i))))))
+      (set! X (aget st 1))
+      (loop [^int i 64]
+        (when (< i 127)
+          (let [^:mutable mask (bit-shift-right X 63)]
+            (set! Z0 (bit-xor Z0 (bit-and V0 mask)))
+            (set! Z1 (bit-xor Z1 (bit-and V1 mask)))
+            (set! mask (bit-shift-right (bit-shift-left V1 63) 63))
+            (let [carry (bit-and V0 1)]
+              (set! V0 (unsigned-bit-shift-right V0 1))
+              (set! V1 (bit-or (unsigned-bit-shift-right V1 1) (bit-shift-left carry 63)))
+              (set! V0 (bit-xor V0 (bit-and (unchecked-long 0xe100000000000000) mask)))
+              (set! X (bit-shift-left X 1))
+              (recur (unchecked-inc-int i))))))
+      (let [mask (bit-shift-right X 63)]
+        (set! Z0 (bit-xor Z0 (bit-and V0 mask)))
+        (set! Z1 (bit-xor Z1 (bit-and V1 mask)))
+        (aset st 0 Z0)
+        (aset st 1 Z1))))
+
+  (field ^:private ^:final ^long/1 subkeyHtbl)
+
+  (field ^:private ^:final ^long/1 state)
+
+  (constructor :throws [ProviderException] [this ^byte/1 subkeyH]
+    (when (or (nil? subkeyH) (not (== (alength subkeyH) AES_BLOCK_SIZE)))
+      (throw (ProviderException. "Internal error")))
+    (set! state (new long/1 2))
+    (set! subkeyHtbl (new long/1 (unchecked-multiply-int 2 9)))
+    (aset subkeyHtbl 0 ^long (^[byte/1 int] VarHandle/.get asLongView subkeyH 0))
+    (aset subkeyHtbl 1 ^long (^[byte/1 int] VarHandle/.get asLongView subkeyH 8)))
+
+  (constructor ^:private [this ^GHASH g]
+    (set! state (.clone (.-state g)))
+    (set! subkeyHtbl (.clone (.-subkeyHtbl g))))
+
+  (method ^:public clone ^GHASH [this] (GHASH. this))
+
+  (method ^:private ^:static processBlock ^void [^byte/1 data ^int ofs ^long/1 st ^long/1 subH]
+    (aset st 0 (bit-xor (aget st 0) ^long (^[byte/1 int] VarHandle/.get asLongView data ofs)))
+    (aset st
+          1
+          (bit-xor (aget st 1)
+                   ^long (^[byte/1 int] VarHandle/.get asLongView data (unchecked-add-int ofs 8))))
+    (GHASH/blockMult st subH))
+
+  (method update ^int [this ^byte/1 in] (.update this in 0 (alength in)))
+
+  (method update ^int [this ^byte/1 in ^int inOfs ^int inLen]
+    (if (== inLen 0)
+        0
+        (let [len (unchecked-subtract-int inLen (unchecked-remainder-int inLen AES_BLOCK_SIZE))]
+          (GHASH/ghashRangeCheck in inOfs len state subkeyHtbl)
+          (GHASH/processBlocks in inOfs (unchecked-divide-int len AES_BLOCK_SIZE) state subkeyHtbl)
+          len)))
+
+  (method update ^int [this ^ByteBuffer ct ^:mutable ^int inLen]
+    (set! inLen (unchecked-subtract-int inLen (unchecked-remainder-int inLen AES_BLOCK_SIZE)))
+    (cond
+      (== inLen 0) 0
+      (.isDirect ct) (do (.processBlocksDirect this ct inLen) inLen)
+      (not (.isReadOnly ct))
+        (let [processed (.update this
+                                 (.array ct)
+                                 (unchecked-add-int (.arrayOffset ct) (.position ct))
+                                 inLen)]
+          (.position ct (unchecked-add-int (.position ct) processed))
+          processed)
+      :else
+        (let [^:mutable to_process inLen
+              in (new byte/1 (Math/min MAX_LEN inLen))]
+          (while (> to_process MAX_LEN)
+            (.get ct in 0 MAX_LEN)
+            (.update this in 0 MAX_LEN)
+            (set! to_process (unchecked-subtract-int to_process MAX_LEN)))
+          (.get ct in 0 to_process)
+          (.update this in 0 to_process)
+          inLen)))
+
+  (method doFinal ^int [this ^ByteBuffer src ^int inLen]
+    (let [^:mutable ^int processed 0]
+      (when (>= inLen AES_BLOCK_SIZE) (set! processed (.update this src inLen)))
+      (if (== inLen processed)
+          processed
+          (let [block (new byte/1 AES_BLOCK_SIZE)]
+            (.get src block 0 (unchecked-subtract-int inLen processed))
+            (.update this block 0 AES_BLOCK_SIZE)
+            inLen))))
+
+  (method doFinal ^int [this ^byte/1 in ^:mutable ^int inOfs ^int inLen]
+    (let [remainder (unchecked-remainder-int inLen AES_BLOCK_SIZE)]
+      (set! inOfs
+            (unchecked-add-int inOfs
+                               (.update this in inOfs (unchecked-subtract-int inLen remainder))))
+      (when (> remainder 0)
+        (let [block (new byte/1 AES_BLOCK_SIZE)]
+          (System/arraycopy in inOfs block 0 remainder)
+          (.update this block 0 AES_BLOCK_SIZE)))
+      inLen))
+
+  (method ^:private ^:static ghashRangeCheck ^void [^byte/1 in ^int inOfs ^int inLen ^long/1 st
+                                                    ^long/1 subH]
+    (when (< inLen 0) (throw (RuntimeException. (java-str "invalid input length: " inLen))))
+    (when (< inOfs 0) (throw (RuntimeException. (java-str "invalid offset: " inOfs))))
+    (when (> inLen (unchecked-subtract-int (alength in) inOfs))
+      (throw (RuntimeException.
+               (java-str "input length out of bound: "
+                         inLen
+                         " > "
+                         (unchecked-subtract-int (alength in) inOfs)))))
+    (when-not (== (unchecked-remainder-int inLen AES_BLOCK_SIZE) 0)
+      (throw (RuntimeException. (java-str "input length/block size mismatch: " inLen))))
+    (when-not (== (alength st) 2)
+      (throw (RuntimeException. (java-str "internal state has invalid length: " (alength st)))))
+    (when-not (== (alength subH) 18)
+      (throw (RuntimeException.
+               (java-str "internal subkeyHtbl has invalid length: " (alength subH))))))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} processBlocks ^void [^byte/1 data ^int inOfs
+                                                                             ^:mutable ^int blocks
+                                                                             ^long/1 st ^long/1 subH]
+    (let [^:mutable offset inOfs]
+      (while (> blocks 0)
+        (GHASH/processBlock data offset st subH)
+        (set! blocks (unchecked-dec-int blocks))
+        (set! offset (unchecked-add-int offset AES_BLOCK_SIZE)))))
+
+  (method ^:private processBlocksDirect ^void [this ^ByteBuffer ct ^:mutable ^int inLen]
+    (let [data (new byte/1 (Math/min MAX_LEN inLen))]
+      (while (> inLen MAX_LEN)
+        (.get ct data 0 MAX_LEN)
+        (GHASH/processBlocks data 0 (unchecked-divide-int MAX_LEN AES_BLOCK_SIZE) state subkeyHtbl)
+        (set! inLen (unchecked-subtract-int inLen MAX_LEN)))
+      (when (>= inLen AES_BLOCK_SIZE)
+        (let [len (unchecked-subtract-int inLen (unchecked-remainder-int inLen AES_BLOCK_SIZE))]
+          (.get ct data 0 len)
+          (GHASH/processBlocks data 0 (unchecked-divide-int len AES_BLOCK_SIZE) state subkeyHtbl)))))
+
+  (method digest ^byte/1 [this]
+    (let [result (new byte/1 AES_BLOCK_SIZE)]
+      ^void (^[byte/1 int long] VarHandle/.set asLongView result 0 (aget state 0))
+      ^void (^[byte/1 int long] VarHandle/.set asLongView result 8 (aget state 1))
+      (aset state 0 0)
+      (aset state 1 0)
+      result))
+
+  (method ^:public update ^int [this ^byte/1 in ^int inOfs ^int inLen ^byte/1 out ^int outOfs]
+    (.update this in inOfs inLen))
+
+  (method ^:public update ^int [this ^byte/1 in ^int inOfs ^int inLen ^ByteBuffer dst]
+    (.update this in inOfs inLen))
+
+  (method ^:public update ^int [this ^ByteBuffer src ^ByteBuffer dst]
+    (.update this src (.remaining src)))
+
+  (method ^:public doFinal ^int [this ^byte/1 in ^int inOfs ^int inLen ^byte/1 out ^int outOfs]
+    (.doFinal this in inOfs inLen))
+
+  (method ^:public doFinal ^int [this ^ByteBuffer src ^ByteBuffer dst]
+    (.doFinal this src (.remaining src))))

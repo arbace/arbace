@@ -1,0 +1,606 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/http/HttpClient.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.http)
+
+(import '(java.io BufferedInputStream
+                  BufferedOutputStream
+                  IOException
+                  InputStream
+                  OutputStream
+                  PrintStream
+                  UnsupportedEncodingException)
+        '(java.net CacheRequest
+                   InetSocketAddress
+                   MalformedURLException
+                   ProtocolException
+                   Proxy
+                   Proxy$Type
+                   SocketException
+                   SocketTimeoutException
+                   URL)
+        '(java.util Locale Objects)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(sun.net NetworkClient)
+        '(sun.net.util ProxyUtil)
+        '(sun.net.www HeaderParser MessageHeader MeteredStream ParseUtil URLConnection)
+        '(sun.net.www.protocol.http AuthCacheImpl HttpURLConnection HttpURLConnection$TunnelState)
+        '(sun.util.logging PlatformLogger PlatformLogger$Level))
+
+(defclass ^:public HttpClient
+  :extends NetworkClient
+
+  (field ^:private ^:final ^ReentrantLock clientLock (ReentrantLock.))
+
+  (field ^:protected ^boolean cachedHttpClient false)
+
+  (field ^:protected ^boolean inCache)
+
+  (field ^MessageHeader requests)
+
+  (field ^PosterOutputStream poster nil)
+
+  (field ^boolean streaming)
+
+  (field ^boolean failedOnce false)
+
+  (field ^:private ^boolean ignoreContinue true)
+
+  (field ^:private ^:static ^:final ^int HTTP_CONTINUE 100)
+
+  (field ^:static ^:final ^int httpPortNumber 80)
+
+  (method ^:protected getDefaultPort ^int [this] httpPortNumber)
+
+  (method ^:private ^:static getDefaultPort ^int [^String proto]
+    (cond (.equalsIgnoreCase "http" proto) 80 (.equalsIgnoreCase "https" proto) 443 :else -1))
+
+  (field ^:protected ^boolean proxyDisabled)
+
+  (field ^:public ^boolean usingProxy false)
+
+  (field ^:protected ^String host)
+
+  (field ^:protected ^int port)
+
+  (field ^:protected ^:static ^:final ^KeepAliveCache kac (KeepAliveCache.))
+
+  (field ^:private ^:static ^:final ^boolean keepAliveProp)
+
+  (field ^:private ^:static ^:final ^boolean retryPostProp)
+
+  (field ^:private ^:static ^:final ^boolean cacheNTLMProp)
+
+  (field ^:private ^:static ^:final ^boolean cacheSPNEGOProp)
+
+  (field ^:protected ^:volatile ^AuthCacheImpl authcache)
+
+  (field ^:volatile ^boolean keepingAlive)
+
+  (field ^:volatile ^boolean disableKeepAlive)
+
+  (field ^int keepAliveConnections -1)
+
+  (field ^int keepAliveTimeout 0)
+
+  (field ^:private ^CacheRequest cacheRequest nil)
+
+  (field ^:protected ^URL url)
+
+  (field ^:public ^boolean reuse false)
+
+  (field ^:private ^HttpCapture capture nil)
+
+  (field ^:private ^:static ^:final ^String spnegoCBT)
+
+  (field ^:private ^:static ^:final ^PlatformLogger logger (HttpURLConnection/getHttpLogger))
+
+  (method ^:private ^:static logFinest ^void [^String msg]
+    (when (.isLoggable logger PlatformLogger$Level/FINEST) (.finest logger msg)))
+
+  (method ^:private ^:static logError ^void [^String msg]
+    (when (.isLoggable logger PlatformLogger$Level/SEVERE) (.severe logger msg)))
+
+  (method ^:public ^:static ^:synchronized ^{Deprecated true} resetProperties ^void [])
+
+  (method getKeepAliveTimeout ^int [this] keepAliveTimeout)
+
+  (method ^:public getHttpProxy ^Proxy [this]
+    (when (and (some? (.-proxy this)) (identical? (.type (.-proxy this)) Proxy$Type/HTTP))
+      (.-proxy this)))
+
+  (method ^:static normalizeCBT ^String [^String s]
+    (cond
+      (or (nil? s) (.equals s "never")) "never"
+      (or (.equals s "always") (.startsWith s "domain:")) s
+      :else
+        (do
+          (HttpClient/logError "Unexpected value for \"jdk.https.negotiate.cbt\" system property")
+          "never")))
+
+  (static-initializer
+    (let [props (System/getProperties)
+          keepAlive (.getProperty props "http.keepAlive")
+          retryPost (.getProperty props "sun.net.http.retryPost")
+          cacheNTLM (.getProperty props "jdk.ntlm.cache")
+          cacheSPNEGO (.getProperty props "jdk.spnego.cache")
+          s (.getProperty props "jdk.https.negotiate.cbt")]
+      (set! spnegoCBT (HttpClient/normalizeCBT s))
+      (if (some? keepAlive)
+          (set! keepAliveProp (Boolean/parseBoolean keepAlive))
+          (set! keepAliveProp true))
+      (if (some? retryPost)
+          (set! retryPostProp (Boolean/parseBoolean retryPost))
+          (set! retryPostProp true))
+      (if (some? cacheNTLM)
+          (set! cacheNTLMProp (Boolean/parseBoolean cacheNTLM))
+          (set! cacheNTLMProp true))
+      (if (some? cacheSPNEGO)
+          (set! cacheSPNEGOProp (Boolean/parseBoolean cacheSPNEGO))
+          (set! cacheSPNEGOProp true))))
+
+  (method ^:public getHttpKeepAliveSet ^boolean [this] keepAliveProp)
+
+  (method ^:public getSpnegoCBT ^String [this] spnegoCBT)
+
+  (constructor ^:protected [this])
+
+  (constructor :throws [IOException] ^:protected [this ^URL url ^boolean proxyDisabled]
+    (this. url nil -1 proxyDisabled))
+
+  (constructor :throws [IOException] ^:public [this ^URL url ^String proxyHost ^int proxyPort]
+    (this. url proxyHost proxyPort false))
+
+  (constructor :throws [IOException] ^:protected [this ^URL url ^Proxy p ^int to]
+    (set! (.-proxy this) (if (nil? p) Proxy/NO_PROXY (ProxyUtil/copyProxy p)))
+    (set! (.-host this) (.getHost url))
+    (set! (.-url this) url)
+    (set! port (.getPort url))
+    (when (== port -1) (set! port (.getDefaultPort this)))
+    (.setConnectTimeout this to)
+    (set! capture (HttpCapture/getCapture url))
+    (.openServer this))
+
+  (method ^:protected ^:static newHttpProxy ^Proxy [^String proxyHost ^int proxyPort ^String proto]
+    (if (or (nil? proxyHost) (nil? proto))
+        Proxy/NO_PROXY
+        (let [^int pport (if (< proxyPort 0) (HttpClient/getDefaultPort proto) proxyPort)
+              saddr (InetSocketAddress/createUnresolved proxyHost pport)]
+          (Proxy. Proxy$Type/HTTP saddr))))
+
+  (constructor :throws [IOException] ^:private [this ^URL url ^String proxyHost ^int proxyPort
+                                                ^boolean proxyDisabled]
+    (this. url
+           ^Proxy (if proxyDisabled
+                      Proxy/NO_PROXY
+                      (HttpClient/newHttpProxy proxyHost proxyPort "http"))
+           -1))
+
+  (constructor :throws [IOException] ^:public [this ^URL url ^String proxyHost ^int proxyPort
+                                               ^boolean proxyDisabled ^int to]
+    (this. url
+           ^Proxy (if proxyDisabled
+                      Proxy/NO_PROXY
+                      (HttpClient/newHttpProxy proxyHost proxyPort "http"))
+           to))
+
+  (method ^:public ^:static New :throws [IOException] ^HttpClient [^URL url]
+    (HttpClient/New url Proxy/NO_PROXY -1 true nil))
+
+  (method ^:public ^:static New :throws [IOException] ^HttpClient [^URL url ^boolean useCache]
+    (HttpClient/New url Proxy/NO_PROXY -1 useCache nil))
+
+  (method ^:public ^:static New :throws [IOException] ^HttpClient [^URL url ^:mutable ^Proxy p
+                                                                   ^int to ^boolean useCache
+                                                                   ^HttpURLConnection httpuc]
+    (set! p (if (nil? p) Proxy/NO_PROXY (ProxyUtil/copyProxy p)))
+    (let [^:mutable ^HttpClient ret nil]
+      (when useCache
+        (set! ret (.get kac url nil))
+        (when (and (and (and (some? ret) (some? httpuc)) (.streaming httpuc))
+                   (.equals "POST" (.getRequestMethod httpuc)))
+          (when-not (.available ret) (set! (.-inCache ret) false) (.closeServer ret) (set! ret nil)))
+        (when (some? ret)
+          (let [^AuthCacheImpl ak (if (nil? httpuc)
+                                      (AuthCacheImpl/getDefault)
+                                      (.getAuthCache httpuc))
+                compatible (and (Objects/equals (.-proxy ret) p)
+                                (Objects/equals (.getAuthCache ret) ak))]
+            (if compatible
+                (do
+                  (.lock ret)
+                  (try
+                    (set! (.-cachedHttpClient ret) true)
+                    (java-assert (.-inCache ret))
+                    (set! (.-inCache ret) false)
+                    (when (and (some? httpuc) (.needsTunneling ret))
+                      (.setTunnelState httpuc HttpURLConnection$TunnelState/TUNNELING))
+                    (HttpClient/logFinest
+                      (java-str "KeepAlive stream retrieved from the cache, " ret))
+                    (finally (.unlock ret))))
+                (do
+                  (.lock ret)
+                  (try (set! (.-inCache ret) false) (.closeServer ret) (finally (.unlock ret)))
+                  (set! ret nil))))))
+      (if (nil? ret)
+          (do
+            (set! ret (HttpClient. url p to))
+            (when (some? httpuc) (set! (.-authcache ret) (.getAuthCache httpuc))))
+          (set! (.-url ret) url))
+      ret))
+
+  (method ^:public ^:static New :throws [IOException] ^HttpClient [^URL url ^Proxy p ^int to
+                                                                   ^HttpURLConnection httpuc]
+    (HttpClient/New url p to true httpuc))
+
+  (method ^:public ^:static New :throws [IOException] ^HttpClient [^URL url ^String proxyHost
+                                                                   ^int proxyPort ^boolean useCache]
+    (HttpClient/New url (HttpClient/newHttpProxy proxyHost proxyPort "http") -1 useCache nil))
+
+  (method ^:public ^:static New :throws [IOException] ^HttpClient [^URL url ^String proxyHost
+                                                                   ^int proxyPort ^boolean useCache
+                                                                   ^int to ^HttpURLConnection httpuc]
+    (HttpClient/New url (HttpClient/newHttpProxy proxyHost proxyPort "http") to useCache httpuc))
+
+  (method ^:public ^:final getAuthCache ^AuthCacheImpl [this]
+    (if (nil? authcache) (AuthCacheImpl/getDefault) authcache))
+
+  (method ^:public finished ^void [this]
+    (when-not reuse
+      (set! keepAliveConnections (unchecked-dec-int keepAliveConnections))
+      (set! poster nil)
+      (if (and (and (> keepAliveConnections 0) (.isKeepingAlive this))
+               (not (.checkError (.-serverOutput this))))
+          (.putInKeepAliveCache this)
+          (.closeServer this))))
+
+  (method ^:protected available ^boolean [this]
+    (let [^:mutable available true
+          ^:mutable ^int old -1]
+      (.lock this)
+      (try
+        (try
+          (set! old (.getSoTimeout (.-serverSocket this)))
+          (.setSoTimeout (.-serverSocket this) 1)
+          (let [tmpbuf (BufferedInputStream. (.getInputStream (.-serverSocket this)))
+                r (.read tmpbuf)]
+            (when (== r -1)
+              (HttpClient/logFinest "HttpClient.available(): read returned -1: not available")
+              (set! available false)))
+          (catch SocketTimeoutException e
+            (HttpClient/logFinest "HttpClient.available(): SocketTimeout: its available"))
+          (finally (when-not (== old -1) (.setSoTimeout (.-serverSocket this) old))))
+        (catch IOException e
+          (HttpClient/logFinest "HttpClient.available(): SocketException: not available")
+          (set! available false))
+        (finally (.unlock this)))
+      available))
+
+  (method ^:protected putInKeepAliveCache ^void [this]
+    (.lock this)
+    (try
+      (if inCache
+          (java-assert false "Duplicate put to keep alive cache")
+          (do (set! inCache true) (.put kac url nil this)))
+      (finally (.unlock this))))
+
+  (method ^:protected isInKeepAliveCache ^boolean [this]
+    (.lock this)
+    (try inCache (finally (.unlock this))))
+
+  (method ^:public closeIdleConnection ^void [this]
+    (let [http (.get kac url nil)] (when (some? http) (.closeServer http))))
+
+  (method ^:public openServer :throws [IOException] ^void [this ^String server ^int port]
+    (set! (.-serverSocket this) (.doConnect this server port))
+    (try
+      (let [^:mutable out (.getOutputStream (.-serverSocket this))]
+        (when (some? capture) (set! out (HttpCaptureOutputStream. out capture)))
+        (set! (.-serverOutput this)
+              (PrintStream. (BufferedOutputStream. out) false HttpClient/encoding)))
+      (catch UnsupportedEncodingException e
+        (throw (InternalError. (java-str HttpClient/encoding " encoding not found") e))))
+    (.setTcpNoDelay (.-serverSocket this) true))
+
+  (method ^:public needsTunneling ^boolean [this] false)
+
+  (method ^:public isCachedConnection ^boolean [this]
+    (.lock this)
+    (try cachedHttpClient (finally (.unlock this))))
+
+  (method ^:public afterConnect :throws [IOException] ^void [this])
+
+  (method ^:private openServer :throws [IOException] ^void [this ^:final ^InetSocketAddress server]
+    (java-assert (.isHeldByCurrentThread clientLock))
+    (.openServer this (.getHostString server) (.getPort server)))
+
+  (method ^:private superOpenServer :throws [IOException] ^void [this ^:final ^String proxyHost
+                                                                 ^:final ^int proxyPort]
+    (.openServer super proxyHost proxyPort))
+
+  (method ^:protected openServer :throws [IOException] ^void [this]
+    (.lock this)
+    (try
+      (when-not keepingAlive
+        (cond
+          (or (.equals (.getProtocol url) "http") (.equals (.getProtocol url) "https"))
+            (if (and (some? (.-proxy this)) (identical? (.type (.-proxy this)) Proxy$Type/HTTP))
+                (do
+                  (URLConnection/setProxiedHost host)
+                  (.openServer this (cast InetSocketAddress (.address (.-proxy this))))
+                  (set! usingProxy true))
+                (do (.openServer this host port) (set! usingProxy false)))
+          (and (some? (.-proxy this)) (identical? (.type (.-proxy this)) Proxy$Type/HTTP))
+            (do
+              (URLConnection/setProxiedHost host)
+              (.openServer this (cast InetSocketAddress (.address (.-proxy this))))
+              (set! usingProxy true))
+          :else (do (.openServer super host port) (set! usingProxy false))))
+      (finally (.unlock this))))
+
+  (method ^:public getURLFile :throws [IOException] ^String [this]
+    (let [^:mutable ^String fileName nil]
+      (if (and usingProxy (not proxyDisabled))
+          (let [result (StringBuilder. 128)]
+            (.append result (.getProtocol url))
+            (.append result ":")
+            (when (and (some? (.getAuthority url)) (not (.isEmpty (.getAuthority url))))
+              (.append result "//")
+              (.append result (.getAuthority url)))
+            (when (some? (.getPath url)) (.append result (.getPath url)))
+            (when (some? (.getQuery url)) (.append result \?) (.append result (.getQuery url)))
+            (set! fileName (.toString result)))
+          (do
+            (set! fileName (.getFile url))
+            (cond
+              (or (nil? fileName) (.isEmpty fileName)) (set! fileName "/")
+              (== (.charAt fileName 0) \?) (set! fileName (java-str "/" fileName)))))
+      (if (== (.indexOf fileName \newline) -1)
+          fileName
+          (throw (MalformedURLException. "Illegal character in URL")))))
+
+  (method ^:public ^{Deprecated true} writeRequests ^void [this ^MessageHeader head]
+    (set! requests head)
+    (.print requests (.-serverOutput this))
+    (.flush (.-serverOutput this)))
+
+  (method ^:public writeRequests :throws [IOException] ^void [this ^MessageHeader head
+                                                              ^PosterOutputStream pos]
+    (set! requests head)
+    (.print requests (.-serverOutput this))
+    (set! poster pos)
+    (when (some? poster) (.writeTo poster (.-serverOutput this)))
+    (.flush (.-serverOutput this)))
+
+  (method ^:public writeRequests :throws [IOException] ^void [this ^MessageHeader head
+                                                              ^PosterOutputStream pos
+                                                              ^boolean streaming]
+    (set! (.-streaming this) streaming)
+    (.writeRequests this head pos))
+
+  (method ^:public parseHTTP :throws [IOException] ^boolean [this ^MessageHeader responses
+                                                             ^HttpURLConnection httpuc]
+    (try
+      (set! (.-serverInput this) (.getInputStream (.-serverSocket this)))
+      (when (some? capture)
+        (set! (.-serverInput this) (HttpCaptureInputStream. (.-serverInput this) capture)))
+      (set! (.-serverInput this) (BufferedInputStream. (.-serverInput this)))
+      (.parseHTTPHeader this responses httpuc)
+      (catch SocketTimeoutException stex (when ignoreContinue (.closeServer this)) (throw stex))
+      (catch IOException e
+        (.closeServer this)
+        (set! cachedHttpClient false)
+        (when (and (not failedOnce) (some? requests))
+          (let [thread (Thread/currentThread)
+                doNotRetry (and (.isVirtual thread) (.isInterrupted thread))]
+            (set! failedOnce true)
+            (when-not (or (or (or (.equals (.getRequestMethod this) "CONNECT") streaming)
+                              doNotRetry)
+                          (and (.equals (.getRequestMethod httpuc) "POST") (not retryPostProp)))
+              (.openServer this)
+              (.checkTunneling this httpuc)
+              (.afterConnect this)
+              (.writeRequests this requests poster)
+              (return (.parseHTTP this responses httpuc)))))
+        (throw e))))
+
+  (method ^:private checkTunneling :throws [IOException] ^void [this ^HttpURLConnection httpuc]
+    (when (.needsTunneling this)
+      (let [origRequests requests
+            origPoster poster]
+        (.doTunneling httpuc)
+        (set! requests origRequests)
+        (set! poster origPoster))))
+
+  (method ^:private parseHTTPHeader :throws [IOException] ^boolean [this ^MessageHeader responses
+                                                                    ^HttpURLConnection httpuc]
+    (set! keepAliveConnections -1)
+    (set! keepAliveTimeout 0)
+    (let [^:mutable ^boolean ret false
+          b (new byte/1 8)]
+      (try
+        (let [^:mutable ^int nread 0]
+          (.mark (.-serverInput this) 10)
+          (while (< nread 8)
+            (let [r (.read (.-serverInput this) b nread (unchecked-subtract-int 8 nread))]
+              (when (< r 0) (break))
+              (set! nread (unchecked-add-int nread r))))
+          (let [^:mutable ^String keep nil
+                ^:mutable ^String authenticate nil]
+            (set! ret
+                  (and (and (and (and (and (and (== (aget b 0) \H) (== (aget b 1) \T))
+                                           (== (aget b 2) \T))
+                                      (== (aget b 3) \P))
+                                 (== (aget b 4) \/))
+                            (== (aget b 5) \1))
+                       (== (aget b 6) \.)))
+            (.reset (.-serverInput this))
+            (cond
+              ret
+                (do
+                  (.parseHeader responses (.-serverInput this))
+                  (let [cookieHandler (.getCookieHandler httpuc)]
+                    (when (some? cookieHandler)
+                      (let [uri (ParseUtil/toURI url)]
+                        (when (some? uri) (.put cookieHandler uri (.getHeaders responses)))))
+                    (when usingProxy
+                      (set! keep (.findValue responses "Proxy-Connection"))
+                      (set! authenticate (.findValue responses "Proxy-Authenticate")))
+                    (when (nil? keep)
+                      (set! keep (.findValue responses "Connection"))
+                      (set! authenticate (.findValue responses "WWW-Authenticate")))
+                    (let [^:mutable canKeepAlive (not disableKeepAlive)]
+                      (when (and (and canKeepAlive
+                                      (or (= cacheNTLMProp false) (= cacheSPNEGOProp false)))
+                                 (some? authenticate))
+                        (set! authenticate (.toLowerCase authenticate Locale/US))
+                        (when (= cacheNTLMProp false)
+                          (set! canKeepAlive
+                                (let [a-1 canKeepAlive
+                                      b-2 (not (.startsWith authenticate "ntlm "))]
+                                  (and a-1 b-2))))
+                        (when (= cacheSPNEGOProp false)
+                          (set! canKeepAlive
+                                (let [a-3 canKeepAlive
+                                      b-4 (not (.startsWith authenticate "negotiate "))]
+                                  (and a-3 b-4)))
+                          (set! canKeepAlive
+                                (let [a-5 canKeepAlive
+                                      b-6 (not (.startsWith authenticate "kerberos "))]
+                                  (and a-5 b-6)))))
+                      (set! disableKeepAlive
+                            (let [a-7 disableKeepAlive b-8 (not canKeepAlive)] (or a-7 b-8)))
+                      (if (and (some? keep) (.equals (.toLowerCase keep Locale/US) "keep-alive"))
+                          (if disableKeepAlive
+                              (set! keepAliveConnections 1)
+                              (let [p (HeaderParser. (.findValue responses "Keep-Alive"))]
+                                (set! keepAliveConnections (.findInt p "max" (if usingProxy 50 5)))
+                                (when (< keepAliveConnections 0)
+                                  (set! keepAliveConnections (if usingProxy 50 5)))
+                                (let [timeout (.findInt p "timeout")]
+                                  (if (.isEmpty timeout)
+                                      (set! keepAliveTimeout -1)
+                                      (do
+                                        (set! keepAliveTimeout (.getAsInt timeout))
+                                        (cond
+                                          (< keepAliveTimeout 0) (set! keepAliveTimeout -1)
+                                          (== keepAliveTimeout 0) (set! keepAliveTimeout -2)))))))
+                          (when-not (== (aget b 7) \0)
+                            (if (or (some? keep) disableKeepAlive)
+                                (set! keepAliveConnections 1)
+                                (set! keepAliveConnections 5)))))))
+              (not (== nread 8))
+                (do
+                  (when (and (not failedOnce) (some? requests))
+                    (set! failedOnce true)
+                    (when-not (or (or (.equals (.getRequestMethod this) "CONNECT") streaming)
+                                  (and (.equals (.getRequestMethod httpuc) "POST")
+                                       (not retryPostProp)))
+                      (.closeServer this)
+                      (set! cachedHttpClient false)
+                      (.openServer this)
+                      (.checkTunneling this httpuc)
+                      (.afterConnect this)
+                      (.writeRequests this requests poster)
+                      (return (.parseHTTP this responses httpuc))))
+                  (throw (SocketException. "Unexpected end of file from server")))
+              :else (.set responses "Content-type" "unknown/unknown"))))
+        (catch IOException e (throw e)))
+      (let [^:mutable ^int code -1]
+        (try
+          (let [^:mutable ^String resp nil]
+            (set! resp (.getValue responses 0))
+            (let [^:mutable ^int ind 0]
+              (set! ind (.indexOf resp \space))
+              (while (== (.charAt resp ind) \space) (set! ind (unchecked-inc-int ind)))
+              (set! code (Integer/parseInt resp ind (unchecked-add-int ind 3) 10))))
+          (catch Exception e))
+        (when (== code 101)
+          (.closeServer this)
+          (HttpClient/logFinest "Closed connection due to unexpected 101 response")
+          (.reset responses)
+          (throw (ProtocolException. "Unexpected 101 response from server")))
+        (if (or (and (== code HTTP_CONTINUE) ignoreContinue) (and (>= code 102) (<= code 199)))
+            (do
+              (HttpClient/logFinest (java-str "Ignoring interim informational 1xx response: " code))
+              (.reset responses)
+              (.parseHTTPHeader this responses httpuc))
+            (let [^:mutable cl -1
+                  te (.findValue responses "Transfer-Encoding")]
+              (if (and (some? te) (.equalsIgnoreCase te "chunked"))
+                  (do
+                    (set! (.-serverInput this)
+                          (ChunkedInputStream. (.-serverInput this) this responses))
+                    (if (<= keepAliveConnections 1)
+                        (do (set! keepAliveConnections 1) (set! keepingAlive false))
+                        (set! keepingAlive (not disableKeepAlive)))
+                    (set! failedOnce false))
+                  (let [cls (.findValue responses "content-length")]
+                    (when (some? cls)
+                      (try
+                        (set! cl (Long/parseLong cls))
+                        (catch NumberFormatException e (set! cl -1))))
+                    (let [requestLine (.getKey requests 0)]
+                      (when (or (or (and (some? requestLine) (.startsWith requestLine "HEAD"))
+                                    (== code HttpURLConnection/HTTP_NOT_MODIFIED))
+                                (== code HttpURLConnection/HTTP_NO_CONTENT))
+                        (set! cl 0))
+                      (cond
+                        (and (> keepAliveConnections 1)
+                             (or (or (>= cl 0) (== code HttpURLConnection/HTTP_NOT_MODIFIED))
+                                 (== code HttpURLConnection/HTTP_NO_CONTENT)))
+                          (do (set! keepingAlive (not disableKeepAlive)) (set! failedOnce false))
+                        keepingAlive (set! keepingAlive false)))))
+              (when (> cl 0)
+                (let [useKeepAliveStream (or (.isKeepingAlive this) disableKeepAlive)]
+                  (if useKeepAliveStream
+                      (do
+                        (HttpClient/logFinest (java-str "KeepAlive stream used: " url))
+                        (set! (.-serverInput this) (KeepAliveStream. (.-serverInput this) cl this))
+                        (set! failedOnce false))
+                      (set! (.-serverInput this) (MeteredStream. (.-serverInput this) cl)))))
+              ret)))))
+
+  (method ^:public getInputStream ^InputStream [this]
+    (.lock this)
+    (try (.-serverInput this) (finally (.unlock this))))
+
+  (method ^:public getOutputStream ^OutputStream [this]
+    (.-serverOutput this))
+
+  (method ^:public toString ^String [this]
+    (java-str (.getName (.getClass this)) "(" url ")"))
+
+  (method ^:public ^:final isKeepingAlive ^boolean [this]
+    (and (.getHttpKeepAliveSet this) keepingAlive))
+
+  (method ^:public setCacheRequest ^void [this ^CacheRequest cacheRequest]
+    (set! (.-cacheRequest this) cacheRequest))
+
+  (method getCacheRequest ^CacheRequest [this] cacheRequest)
+
+  (method getRequestMethod ^String [this]
+    (when (some? requests)
+      (let [requestLine (.getKey requests 0)]
+        (when (some? requestLine) (return (aget (.split requestLine "\\s+") 0)))))
+    "")
+
+  (method ^:public setDoNotRetry ^void [this ^boolean value]
+    (set! failedOnce value))
+
+  (method ^:public setIgnoreContinue ^void [this ^boolean value]
+    (set! ignoreContinue value))
+
+  (method ^:public closeServer ^void [this]
+    (try (set! keepingAlive false) (.close (.-serverSocket this)) (catch Exception e)))
+
+  (method ^:public getProxyHostUsed ^String [this]
+    (when-not (not usingProxy) (.getHostString (cast InetSocketAddress (.address (.-proxy this))))))
+
+  (method ^:public getUsingProxy ^boolean [this] usingProxy)
+
+  (method ^:public getProxyPortUsed ^int [this]
+    (if usingProxy (.getPort (cast InetSocketAddress (.address (.-proxy this)))) -1))
+
+  (method ^:public ^:final lock ^void [this] (.lock clientLock))
+
+  (method ^:public ^:final unlock ^void [this] (.unlock clientLock)))

@@ -498,7 +498,12 @@
           (str why))))
 
 (defn- class-missing [n]
-  (when-not (m/in-world? n) (str "class " (str/replace n "/" ".") " is not in the closed world")))
+  (when-not (m/in-world? n)
+    ;; a class j2g refused (its analysis failed): its cause, so that the stub's exception names it
+    ;; (GH6 (iv); J2G-SPEC §4.1, "Refusals at the unresolved class")
+    (if-let [why (some-> (a/decl n) :state deref :analysis-failed)]
+      (str "class " (str/replace n "/" ".") " was refused by j2g: " (str/replace (str why) #"\s+" " "))
+      (str "class " (str/replace n "/" ".") " is not in the closed world"))))
 
 (defn- desc-missing [d] (some class-missing (m/desc-classes d)))
 (defn- mdesc-missing [d] (some class-missing (m/method-desc-classes d)))
@@ -507,12 +512,22 @@
   (or (contains? (:funcs (:jrt m/*w*)) (str (m/go-name cls) "_" base))
       (m/j2g-static? cls base)))
 
-(defn- lookup-call?
+(defn lookup-call?
   "MethodHandles.lookup(): the lookup VarHandle constants are found with (J2G-SPEC §8.5); in Go
-  a nil of no use, the handles being compiled statically."
+  a nil of no use, the handles being compiled statically. Since F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+  \"As built: F15 (java.lang.invoke)\") the analyzer writes it as jdk.internal.jrt.Invokers.lookup(C.class)
+  when the world has java.lang.invoke: in a JDK class of the world (pkg-of :jrt, where the VarHandle idiom
+  lives) still the nil, so the JDK's static initializers stay as they were; in a program's own class and
+  in Arbace's a real lookup of the caller's class."
   [node]
-  (and (= :invoke (:op node)) (= :static (:kind node)) (= "java/lang/invoke/MethodHandles" (:owner node))
-       (= "lookup" (:name node)) (empty? (:args node))))
+  (and (= :invoke (:op node)) (= :static (:kind node))
+       (or (and (= "java/lang/invoke/MethodHandles" (:owner node))
+                (= "lookup" (:name node)) (empty? (:args node)))
+           (and (= "jdk/internal/jrt/Invokers" (:owner node)) (= "lookup" (:name node))
+                (= 1 (count (:args node)))
+                (let [c (first (:args node))]
+                  (and (= :class-lit (:op c)) (t/class-desc? (:class c))
+                       (= :jrt (nm/pkg-of (t/desc->internal (:class c))))))))))
 
 (defn vh-op
   "The constant VarHandle and access mode of a VarHandle call (J2G-SPEC §8.5), or nil."
@@ -922,8 +937,10 @@
           :xor (list 'bit-xor a b)
           :not (list 'bit-not a)
           :andnot (list 'bit-and-not a b)
-          :shl (list '<< a (cnt))
-          :shr (list '>> a (cnt))
+          ;; a constant shifted by a variable count: typed as the operation's (Go gives an untyped
+          ;; constant left operand the type of its context, int8 in (byte) (0xFF << n): an overflow)
+          :shl (list '<< (if (and (go-lit? a) (not (go-lit? b))) (list 'conv (gotype ty) a) a) (cnt))
+          :shr (list '>> (if (and (go-lit? a) (not (go-lit? b))) (list 'conv (gotype ty) a) a) (cnt))
           :ushr (if (and (go-lit? a) (go-lit? b))
                   ;; both constant: folded here (Go would reject the overflowing constant)
                   (if (= ty "J")
@@ -1169,7 +1186,10 @@
     (cond
       ;; VarHandles (§8.5): fences, the lookup, access modes on constant handles
       (vh/fence? node) (v (list (jsym "VhFence")) "V")
-      (lookup-call? node) (v (list 'conv 'any nil) r)
+      ;; the nil of the lookup's Go type (B2, 2026-11-16: since F15 MethodHandles.Lookup is a Go type of its own,
+      ;; *MethodHandles_Lookup, which an untyped (conv any nil) does not initialize; a conversion, zero being a
+      ;; var binding's alone)
+      (lookup-call? node) (v (list 'conv (gotype r) nil) r)
       (vh-op node) (vh-val node (vh-op node))
 
       ;; an array's clone
@@ -2297,6 +2317,96 @@
     (env/assignable? from to) (coerce x from to false)
     :else (:x (cast-val {:class to :expr {:op ::go :x (coerce x from "Ljava/lang/Object;" false) :t "Ljava/lang/Object;"}}))))
 
+;; ---------------------------------------------------------------------------------------
+;; serializable lambdas and method references (JCS169 (a), the user's decision of 2026-11-08;
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS169 (write-ahead)")
+
+(def serial-lambdas "jrt's own Java the serializable lambdas' sites register with." "jdk/internal/jrt/SerialLambdas")
+
+(def serial-lambdas-methods
+  "SerialLambdas' methods a site calls ([name desc]); reachability roots (arbace.j2g.main)."
+  [["register" (str "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;"
+                    "Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljdk/internal/jrt/SerialLambdas$Factory;)"
+                    "Ljdk/internal/jrt/SerialLambdas$Site;")]
+   ["instance" "(Ljdk/internal/jrt/SerialLambdas$Site;[Ljava/lang/Object;)Ljava/lang/Object;"]
+   ["replace" "(Ljava/lang/Object;)Ljava/lang/Object;"]])
+
+(defn serial-site?
+  "Is node (a lambda or method reference) serializable in a world with jrt's SerialLambdas?"
+  [node]
+  (and (:serializable node) (m/translated? serial-lambdas)))
+
+(defn- serial-impl
+  "The SerializedLambda's implementation of node: [kind class name signature], as javac and
+  LambdaMetafactory give them (a lambda's own method lambda$..., static or, capturing this, an
+  instance method; a method reference's method and its MethodHandleInfo REF_ kind); the
+  signature of a lambda's method its captured values' types, then its parameters'."
+  [node]
+  (if (= :lambda (:op node))
+    (let [b (:boundary node)]
+      [(if @(:uses-this b) 7 6) (:class node) (:name node)
+       (t/method-desc (concat (map :type @(:captures b)) (map :type (:params node))) (:ret node))])
+    (let [owner (:owner node)]
+      [(case (:kind node)
+         :static 6
+         :new 8
+         (if (env/interface? owner) 9 5))
+       owner (:name node) (:desc node)])))
+
+(defn serial-lambda-val
+  "A serializable lambda's or method reference's value (JCS169): the adapter value made by a
+  factory of its captured values, which the site registers with SerialLambdas as javac's
+  $deserializeLambda$ would find it, and whose objects hold their serial state (the adapter's Ser:
+  SerialLambdas.instance), so that the adapter's writeReplace answers a SerializedLambda. caps are
+  [go-name java-type] of the Go locals the adapter's code closes over (the receiver first): the
+  factory's code is the site's, those names shadowed by the factory's captured arguments."
+  [node adapter-x caps extra]
+  (let [fi (:fi node)
+        a (adapter-sym fi (lambda-markers node))
+        sam (:sam node)
+        [kind icls iname isig] (serial-impl node)
+        cls (:class node)
+        site (fresh-raw "serialSite")
+        fac (fresh-raw "serialFactory")
+        mcall (fn [nme desc & args] (apply list (m/class-sym (pkg) serial-lambdas (str "_" (nm/method-base nme desc))) args))
+        [[_ rdesc] [_ idesc] _] serial-lambdas-methods
+        str-lit (fn [x] (list (jsym "Str") x))
+        recv-sym (fresh-raw "serialObj")
+        facf (list 'fn (with-meta [(tag 'caps (list '* (jsym "RefArray")))] {:tag 'any})
+                   (apply list 'let
+                          (vec (concat
+                                 (mapcat (fn [[nme d] i]
+                                           [(tag nme (gotype d))
+                                            (convert-ref-or-prim (list 'aget '(.-A caps) i) "Ljava/lang/Object;" d)])
+                                         caps (range))
+                                 (mapcat (fn [[nme init]] [nme init]) extra)))
+                          (concat
+                            (for [[nme _] (concat caps extra)] (list 'set! '_ nme))
+                            [(list 'let [recv-sym adapter-x]
+                                   (list 'set! (list '.-Ser recv-sym) (mcall "instance" idesc site 'caps))
+                                   (list 'return recv-sym))])))]
+    (decl! site (gotype "Ljdk/internal/jrt/SerialLambdas$Site;") nil)
+    (decl! fac (list 'func [(list '* (jsym "RefArray"))] ['any]) facf)
+    (emit! (list 'set! site
+                 (apply mcall (concat (first serial-lambdas-methods)
+                                      [(csym cls "_class") (str-lit fi) (str-lit (:name sam)) (str-lit (:desc sam))
+                                       (list 'conv 'int32 kind) (str-lit icls) (str-lit iname) (str-lit isig)
+                                       (str-lit (:inst-desc node))
+                                       (list 'addr (list 'lit (adapter-sym "jdk/internal/jrt/SerialLambdas$Factory") :Fn fac))]))))
+    (v (list (m/class-sym (pkg) fi "_Cast")
+             (list fac (apply list (jsym "RefArrayOf") (jsym "Object_class")
+                              (for [[nme d] caps] (convert-ref-or-prim nme d "Ljava/lang/Object;")))))
+       (str "L" fi ";") :nn true)))
+
+(defn- receiver-caps
+  "The enclosing object as serial-lambda-val's caps and extra bindings: [[this-sym its type]] and,
+  for a class whose struct is not its object (not a leaf), the struct t bound from it."
+  []
+  (let [this (:this *f*) t (:t *f*) c (:class *f*)]
+    [[[this (str "L" c ";")]]
+     (when (and t (not= t this))
+       [[t (list (symbol (str ".Self_" (m/go-name c))) this)]])]))
+
 (defn lambda-val [node]
   (let [fi (:fi node)
         {:keys [ps r]} (sam-sig fi)
@@ -2318,7 +2428,13 @@
                     (concat (list 'fn (cond-> (with-meta (vec (map (fn [s d] (tag s (gotype d))) psyms ps)) {})
                                         (not= "V" r) (vary-meta assoc :tag (gotype r))))
                             body)))))]
-    (v (list 'addr (list 'lit (adapter-sym fi (lambda-markers node)) :Fn fnf)) (str "L" fi ";") :nn true)))
+    (let [x (list 'addr (list 'lit (adapter-sym fi (lambda-markers node)) :Fn fnf))]
+      (if (serial-site? node)
+        ;; JCS169: made by its site's factory of its captured values (the receiver first)
+        (let [b (:boundary node)
+              [rcaps rext] (when @(:uses-this b) (receiver-caps))]
+          (serial-lambda-val node x (vec (concat rcaps (for [cb @(:captures b)] [(binding-sym cb) (:type cb)]))) rext))
+        (v x (str "L" fi ";") :nn true)))))
 
 (defn fi-adapter-val
   "Clojure's adapter of an argument to a functional interface parameter (Compiler's
@@ -2385,14 +2501,27 @@
                                (apply list (symbol (str "." base)) rx args)))
                     :unbound (let [od (str "L" owner ";")
                                    rx (convert-ref-or-prim (first psyms) (first ps) od)]
-                               (if (object-like? od)
-                                 (apply list (jsym (object-helpers [(:name node) (:desc node)])) rx args)
-                                 (apply list (symbol (str "." base)) (if (m/pointer-desc? od) (list (jsym "NN") rx) rx) args))))))
+                               (let [mm (m/find-method owner (:name node) (:desc node))]
+                                 (cond
+                                   (object-like? od)
+                                   (apply list (jsym (object-helpers [(:name node) (:desc node)])) rx args)
+                                   ;; an unbound reference to a private method of a non-leaf class, its Impl_ as the
+                                   ;; bound case's (B2, 2026-11-16: ObjectInputStream::checkArray, ::readString,
+                                   ;; SharedSecrets' accessors; the class interface has no private method)
+                                   (and mm (m/private? mm) (m/translated? owner) (not (m/leaf? owner)))
+                                   (apply list (symbol (str ".Impl_" base))
+                                          (list (symbol (str ".Self_" (m/go-name owner))) rx) rx args)
+                                   :else
+                                   (apply list (symbol (str "." base)) (if (m/pointer-desc? od) (list (jsym "NN") rx) rx) args)))))))
         ret-d (if (= kind :new) (str "L" owner ";") mr)
         fnf (concat (list 'fn (cond-> (vec (map (fn [s d] (tag s (gotype d))) psyms ps))
                                 (not= "V" r) (vary-meta assoc :tag (gotype r))))
                     (if (= "V" r)
                       [(callf)]
                       [(list 'return (convert-ref-or-prim (callf) ret-d r))]))]
-    (v (list 'addr (list 'lit (adapter-sym fi (lambda-markers node)) :Fn fnf)) (str "L" fi ";") :nn true)))
+    (let [x (list 'addr (list 'lit (adapter-sym fi (lambda-markers node)) :Fn fnf))]
+      (if (serial-site? node)
+        ;; JCS169: made by its site's factory, the bound receiver its captured value
+        (serial-lambda-val node x (if (and recv (symbol? (:x recv))) [[(:x recv) (:t recv)]] []) nil)
+        (v x (str "L" fi ";") :nn true)))))
 

@@ -1,0 +1,385 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/TransportContext.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.net SocketException)
+        '(java.util HashMap HashSet List Map Set)
+        '(javax.net.ssl HandshakeCompletedEvent
+                        HandshakeCompletedListener
+                        SSLEngineResult$HandshakeStatus
+                        SSLException
+                        SSLSocket))
+
+(defclass ^:final TransportContext
+  :implements [ConnectionContext]
+
+  (field ^:final ^SSLTransport transport)
+
+  (field ^:final ^{:tag (Map Byte SSLConsumer)} consumers)
+
+  (field ^:final ^SSLContextImpl sslContext)
+
+  (field ^:final ^SSLConfiguration sslConfig)
+
+  (field ^:final ^InputRecord inputRecord)
+
+  (field ^:final ^OutputRecord outputRecord)
+
+  (field ^boolean isUnsureMode)
+
+  (field ^boolean isNegotiated false)
+
+  (field ^boolean isBroken false)
+
+  (field ^boolean isInputCloseNotified false)
+
+  (field ^boolean peerUserCanceled false)
+
+  (field ^Exception closeReason nil)
+
+  (field ^Exception delegatedThrown nil)
+
+  (field ^boolean needHandshakeFinishedStatus false)
+
+  (field ^boolean hasDelegatedFinished false)
+
+  (field ^SSLSessionImpl conSession)
+
+  (field ^ProtocolVersion protocolVersion)
+
+  (field ^String applicationProtocol nil)
+
+  (field ^HandshakeContext handshakeContext nil)
+
+  (field ^boolean secureRenegotiation false)
+
+  (field ^byte/1 clientVerifyData)
+
+  (field ^byte/1 serverVerifyData)
+
+  (field ^{:tag (List NamedGroup)} serverRequestedNamedGroups)
+
+  (field ^CipherSuite cipherSuite)
+
+  (field ^:private ^:static ^:final ^byte/1 emptyByteArray (new byte/1 0))
+
+  (constructor [this ^SSLContextImpl sslContext ^SSLTransport transport ^InputRecord inputRecord
+                ^OutputRecord outputRecord]
+    (this. sslContext transport (SSLConfiguration. sslContext false) inputRecord outputRecord true))
+
+  (constructor [this ^SSLContextImpl sslContext ^SSLTransport transport ^InputRecord inputRecord
+                ^OutputRecord outputRecord ^boolean isClientMode]
+    (this. sslContext
+           transport
+           (SSLConfiguration. sslContext isClientMode)
+           inputRecord
+           outputRecord
+           false))
+
+  (constructor [this ^SSLContextImpl sslContext ^SSLTransport transport ^SSLConfiguration sslConfig
+                ^InputRecord inputRecord ^OutputRecord outputRecord]
+    (this. sslContext
+           transport
+           (cast SSLConfiguration (.clone sslConfig))
+           inputRecord
+           outputRecord
+           false))
+
+  (constructor ^:private [this ^SSLContextImpl sslContext ^SSLTransport transport
+                          ^SSLConfiguration sslConfig ^InputRecord inputRecord
+                          ^OutputRecord outputRecord ^boolean isUnsureMode]
+    (set! (.-transport this) transport)
+    (set! (.-sslContext this) sslContext)
+    (set! (.-inputRecord this) inputRecord)
+    (set! (.-outputRecord this) outputRecord)
+    (set! (.-sslConfig this) sslConfig)
+    (when (== (.-maximumPacketSize (.-sslConfig this)) 0)
+      (set! (.-maximumPacketSize (.-sslConfig this)) (.getMaxPacketSize outputRecord)))
+    (set! (.-isUnsureMode this) isUnsureMode)
+    (set! (.-conSession this) (SSLSessionImpl.))
+    (set! (.-protocolVersion this) (.-maximumProtocolVersion (.-sslConfig this)))
+    (set! (.-clientVerifyData this) emptyByteArray)
+    (set! (.-serverVerifyData this) emptyByteArray)
+    (set! (.-consumers this) (HashMap.))
+    (when-instance [^DTLSInputRecord dtlsInputRecord inputRecord]
+      (.setTransportContext dtlsInputRecord this)
+      (.setSSLContext dtlsInputRecord (.-sslContext this))))
+
+  (method dispatch :throws [IOException] ^void [this ^Plaintext plaintext]
+    (when (some? plaintext)
+      (let [ct (ContentType/valueOf (.-contentType plaintext))]
+        (when (nil? ct)
+          (throw (.fatal this
+                         Alert/UNEXPECTED_MESSAGE
+                         (java-str "Unknown content type: " (.-contentType plaintext)))))
+        (switch ct
+          HANDSHAKE
+            (let [type (HandshakeContext/getHandshakeType this plaintext)]
+              (when (nil? handshakeContext)
+                (if (or (== type (.-id SSLHandshake/KEY_UPDATE))
+                        (== type (.-id SSLHandshake/NEW_SESSION_TICKET)))
+                    (do
+                      (when-not isNegotiated
+                        (throw (.fatal this
+                                       Alert/UNEXPECTED_MESSAGE
+                                       (java-str
+                                         "Unexpected unnegotiated post-handshake message: "
+                                         (SSLHandshake/nameOf type)))))
+                      (when-not (PostHandshakeContext/isConsumable this type)
+                        (throw (.fatal this
+                                       Alert/UNEXPECTED_MESSAGE
+                                       (java-str
+                                         "Unexpected post-handshake message: "
+                                         (SSLHandshake/nameOf type)))))
+                      (set! handshakeContext (PostHandshakeContext. this)))
+                    (do
+                      (set! handshakeContext
+                            (if (.-isClientMode sslConfig)
+                                ^HandshakeContext (ClientHandshakeContext. sslContext this)
+                                ^HandshakeContext (ServerHandshakeContext. sslContext this)))
+                      (.initHandshaker outputRecord))))
+              (.dispatch handshakeContext type plaintext))
+          ALERT (.consume Alert/alertConsumer this (.-fragment plaintext))
+          (let [consumer (cast SSLConsumer (.get consumers (.-contentType plaintext)))]
+            (if (some? consumer)
+                (.consume consumer this (.-fragment plaintext))
+                (throw (.fatal this
+                               Alert/UNEXPECTED_MESSAGE
+                               (java-str "Unexpected content: " (.-contentType plaintext))))))))))
+
+  (method kickstart :throws [IOException] ^void [this]
+    (when isUnsureMode (throw (IllegalStateException. "Client/Server mode not yet set.")))
+    (let [isNotUsable (if (.atKeyLimit (.-writeCipher outputRecord))
+                          (or (.isClosed outputRecord) isBroken)
+                          (or (or (.isClosed outputRecord) (.isClosed inputRecord)) isBroken))]
+      (when isNotUsable
+        (if (some? closeReason)
+            (throw (SSLException. "Cannot kickstart, the connection is broken or closed"
+                                  closeReason))
+            (throw (SSLException. "Cannot kickstart, the connection is broken or closed"))))
+      (when (nil? handshakeContext)
+        (if (and isNegotiated (.useTLS13PlusSpec protocolVersion))
+            (set! handshakeContext (PostHandshakeContext. this))
+            (do
+              (set! handshakeContext
+                    (if (.-isClientMode sslConfig)
+                        ^HandshakeContext (ClientHandshakeContext. sslContext this)
+                        ^HandshakeContext (ServerHandshakeContext. sslContext this)))
+              (.initHandshaker outputRecord))))
+      (when (or isNegotiated (.-isClientMode sslConfig)) (.kickstart handshakeContext))))
+
+  (method isPostHandshakeContext ^boolean [this]
+    (and (some? handshakeContext) (instance? PostHandshakeContext handshakeContext)))
+
+  (method warning ^void [this ^Alert alert]
+    (when (or isNegotiated (some? handshakeContext))
+      (try
+        (.encodeAlert outputRecord (.-level Alert$Level/WARNING) (.-id alert))
+        (catch IOException ioe
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning (java-str "Warning: failed to send warning alert " alert) ioe))))))
+
+  (method closeNotify :throws [IOException] ^void [this ^boolean isUserCanceled]
+    (if (instance? SSLSocketImpl transport)
+        (.closeNotify (cast SSLSocketImpl transport) isUserCanceled)
+        (do
+          (.lock (.-recordLock outputRecord))
+          (try
+            (try
+              (when isUserCanceled (.warning this Alert/USER_CANCELED))
+              (.warning this Alert/CLOSE_NOTIFY)
+              (finally (.close outputRecord)))
+            (finally (.unlock (.-recordLock outputRecord)))))))
+
+  (method fatal :throws [SSLException] ^SSLException [this ^Alert alert ^String diagnostic]
+    (.fatal this alert diagnostic nil))
+
+  (method fatal :throws [SSLException] ^SSLException [this ^Alert alert ^Throwable cause]
+    (.fatal this alert nil cause))
+
+  (method fatal :throws [SSLException] ^SSLException [this ^Alert alert ^String diagnostic
+                                                      ^Throwable cause]
+    (.fatal this alert diagnostic false cause))
+
+  (method fatal :throws [SSLException] ^SSLException [this ^Alert alert ^:mutable ^String diagnostic
+                                                      ^boolean recvFatalAlert
+                                                      ^:mutable ^Throwable cause]
+    (when (some? closeReason)
+      (when (nil? cause)
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "Closed transport, general or untracked problem"))
+        (throw (.createSSLException alert "Closed transport, general or untracked problem")))
+      (if (instance? SSLException cause)
+          (throw (cast SSLException cause))
+          (do
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+              (SSLLogger/warning "Closed transport, unexpected rethrowing" cause))
+            (throw (.createSSLException alert "Unexpected rethrowing" cause)))))
+    (when (nil? diagnostic)
+      (if (nil? cause)
+          (set! diagnostic "General/Untracked problem")
+          (set! diagnostic (.getMessage cause))))
+    (when (nil? cause) (set! cause (.createSSLException alert diagnostic)))
+    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+      (SSLLogger/severe (java-str "Fatal (" alert "): " diagnostic) cause))
+    (if (instance? SSLException cause)
+        (set! closeReason (cast SSLException cause))
+        (set! closeReason (.createSSLException alert diagnostic cause)))
+    (try
+      (.close inputRecord)
+      (catch IOException ioe
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "Fatal: input record closure failed" ioe))
+        (.addSuppressed closeReason ioe)))
+    (when (some? conSession) (when-not (instance? SocketException cause) (.invalidate conSession)))
+    (when (and (some? handshakeContext) (some? (.-handshakeSession handshakeContext)))
+      (.invalidate (.-handshakeSession handshakeContext)))
+    (when (and (and (and (not recvFatalAlert) (not (.isOutboundClosed this))) (not isBroken))
+               (or isNegotiated (some? handshakeContext)))
+      (try
+        (.encodeAlert outputRecord (.-level Alert$Level/FATAL) (.-id alert))
+        (catch IOException ioe
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning (java-str "Fatal: failed to send fatal alert " alert) ioe))
+          (.addSuppressed closeReason ioe))))
+    (try
+      (.close outputRecord)
+      (catch IOException ioe
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "Fatal: output record closure failed" ioe))
+        (.addSuppressed closeReason ioe)))
+    (when (some? handshakeContext) (set! handshakeContext nil))
+    (try
+      (.shutdown transport)
+      (catch IOException ioe
+        (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+          (SSLLogger/warning "Fatal: transport closure failed" ioe))
+        (.addSuppressed closeReason ioe))
+      (finally (set! isBroken true)))
+    (if (instance? SSLException closeReason)
+        (throw (cast SSLException closeReason))
+        (throw (cast RuntimeException closeReason))))
+
+  (method setUseClientMode ^void [this ^boolean useClientMode]
+    (when (or (some? handshakeContext) isNegotiated)
+      (throw (IllegalArgumentException. "Cannot change mode after SSL traffic has started")))
+    (when-not (= (.-isClientMode sslConfig) useClientMode)
+      (when (.isDefaultProtocolVersions sslContext (.-enabledProtocols sslConfig))
+        (set! (.-enabledProtocols sslConfig)
+              (.getDefaultProtocolVersions sslContext (not useClientMode))))
+      (when (.isDefaultCipherSuiteList sslContext (.-enabledCipherSuites sslConfig))
+        (set! (.-enabledCipherSuites sslConfig)
+              (.getDefaultCipherSuites sslContext (not useClientMode))))
+      (.toggleClientMode sslConfig))
+    (set! isUnsureMode false))
+
+  (method ^:public setQuic ^void [this ^boolean quic]
+    (.setQuic sslConfig quic))
+
+  (method isOutboundDone ^boolean [this]
+    (and (.isClosed outputRecord) (.isEmpty outputRecord)))
+
+  (method isOutboundClosed ^boolean [this] (.isClosed outputRecord))
+
+  (method isInboundClosed ^boolean [this] (.isClosed inputRecord))
+
+  (method closeInbound ^void [this]
+    (when-not (.isInboundClosed this)
+      (try
+        (if (not isInputCloseNotified) (.initiateInboundClose this) (.passiveInboundClose this))
+        (catch IOException ioe
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning "inbound closure failed" ioe))))))
+
+  (method ^:private passiveInboundClose :throws [IOException] ^void [this]
+    (when-not (.isInboundClosed this) (.close inputRecord))
+    (when-not (.isOutboundClosed this)
+      (let [^:mutable needCloseNotify SSLConfiguration/acknowledgeCloseNotify]
+        (when-not needCloseNotify
+          (cond
+            isNegotiated (when-not (.useTLS13PlusSpec protocolVersion) (set! needCloseNotify true))
+            (some? handshakeContext)
+              (let [pv (.-negotiatedProtocol handshakeContext)]
+                (when (or (nil? pv) (not (.useTLS13PlusSpec pv))) (set! needCloseNotify true)))))
+        (when needCloseNotify (.closeNotify this false)))))
+
+  (method ^:private initiateInboundClose :throws [IOException] ^void [this]
+    (when-not (.isInboundClosed this) (.close inputRecord)))
+
+  (method closeOutbound ^void [this]
+    (when-not (.isOutboundClosed this)
+      (try
+        (.initiateOutboundClose this)
+        (catch IOException ioe
+          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl"))
+            (SSLLogger/warning "outbound closure failed" ioe))))))
+
+  (method ^:private initiateOutboundClose :throws [IOException] ^void [this]
+    (let [useUserCanceled (and (and (not isNegotiated) (some? handshakeContext))
+                               (not peerUserCanceled))]
+      (.closeNotify this useUserCanceled)))
+
+  (method getHandshakeStatus ^SSLEngineResult$HandshakeStatus [this]
+    (cond
+      (not (.isEmpty outputRecord)) SSLEngineResult$HandshakeStatus/NEED_WRAP
+      (and (.isOutboundClosed this) (.isInboundClosed this))
+        SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING
+      :else
+        (do
+          (cond
+            (some? handshakeContext)
+              (cond
+                (not (.isEmpty (.-delegatedActions handshakeContext)))
+                  (return SSLEngineResult$HandshakeStatus/NEED_TASK)
+                (not (.isInboundClosed this))
+                  (if (and (.isDTLS sslContext) (not (.isEmpty inputRecord)))
+                      (return SSLEngineResult$HandshakeStatus/NEED_UNWRAP_AGAIN)
+                      (return SSLEngineResult$HandshakeStatus/NEED_UNWRAP))
+                :else
+                  (when-not (.isOutboundClosed this)
+                    (return SSLEngineResult$HandshakeStatus/NEED_WRAP)))
+            needHandshakeFinishedStatus (return SSLEngineResult$HandshakeStatus/NEED_WRAP))
+          SSLEngineResult$HandshakeStatus/NOT_HANDSHAKING)))
+
+  (method finishHandshake ^SSLEngineResult$HandshakeStatus [this]
+    (when (.useTLS13PlusSpec protocolVersion)
+      (set! (.-tc outputRecord) this)
+      (set! (.-tc inputRecord) this)
+      (set! cipherSuite (.-negotiatedCipherSuite handshakeContext))
+      (set! (.-baseSecret (.-readCipher inputRecord)) (.-baseReadSecret handshakeContext))
+      (set! (.-baseSecret (.-writeCipher outputRecord)) (.-baseWriteSecret handshakeContext)))
+    (set! handshakeContext nil)
+    (.finish (.-handshakeHash outputRecord))
+    (.finishHandshake inputRecord)
+    (.finishHandshake outputRecord)
+    (set! isNegotiated true)
+    (when (and (and (instance? SSLSocket transport) (some? (.-handshakeListeners sslConfig)))
+               (not (.isEmpty (.-handshakeListeners sslConfig))))
+      (let [hce (HandshakeCompletedEvent. (cast SSLSocket transport) conSession)
+            thread (Thread. nil
+                            (NotifyHandshake. (.-handshakeListeners sslConfig) hce)
+                            "HandshakeCompletedNotify-Thread"
+                            0
+                            false)]
+        (.start thread)))
+    SSLEngineResult$HandshakeStatus/FINISHED)
+
+  (method finishPostHandshake ^SSLEngineResult$HandshakeStatus [this]
+    (set! handshakeContext nil)
+    SSLEngineResult$HandshakeStatus/FINISHED)
+
+  (defclass ^:private ^:static NotifyHandshake
+    :implements [Runnable]
+
+    (field ^:private ^:final ^{:tag (Set HandshakeCompletedListener)} targets)
+
+    (field ^:private ^:final ^HandshakeCompletedEvent event)
+
+    (constructor [this ^{:tag (Set HandshakeCompletedListener)} listeners
+                  ^HandshakeCompletedEvent event]
+      (set! (.-targets this) (HashSet. listeners))
+      (set! (.-event this) event))
+
+    (method ^:public run ^void [this]
+      (for-each [^HandshakeCompletedListener listener targets] (.handshakeCompleted listener event)))))

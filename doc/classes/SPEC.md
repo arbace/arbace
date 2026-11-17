@@ -898,7 +898,11 @@ where Arbace converts exactly as javac does, and are explicit elsewhere.
   types from the param-tags, or else from the arguments' static types; the return type from a
   tag on the call form, `Object` without one. Java's `(boolean) mh.invoke(m, target)` is
   `^boolean (^[Method Object] MethodHandle/.invoke mh m target)`; a call used as a statement is
-  tagged `^void`.
+  tagged `^void`. In the Go build (F15, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15
+  (java.lang.invoke)") the analyzer gives such a call of `MethodHandle.invokeExact` or `invoke` the node of
+  a static call of `jdk.internal.jrt.Invokers` (its descriptor as class literals, the arguments boxed), and
+  `MethodHandles.lookup()` the node of `Invokers.lookup(C.class)`, C the class of the code, when the class
+  environment has `jdk.internal.jrt.Invokers`; else the polymorphic node as above.
 - **Reflection** is an error in class bodies (§12, question 7).
 - **Constant fields.** Reading a static final field with a constant initializer is replaced by
   the constant, as in javac (it does not initialize the field's class). For classes loaded

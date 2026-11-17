@@ -1,0 +1,257 @@
+;; jrt: B1a's datagram network (udp.ae's UDPHost): OSHost over Go's net and the sockets' descriptors
+;; through syscall. Linux's: on other systems (TamaGo's, B1b) OSHost has no datagrams.
+(in-ns 'go.arbace.jrt)
+
+(go/file "udp_linux.go"
+  :build ["//go:build linux"]
+  :imports [[context "context"] [errors "errors"] [net "net"] [strconv "strconv"] [syscall "syscall"]
+            [unsafe "unsafe"]])
+
+;; SO_DOMAIN (39 on amd64 and arm64; syscall lacks the name), IP_ADD_SOURCE_MEMBERSHIP and
+;; IP_DROP_SOURCE_MEMBERSHIP
+(go/const
+  [^{:val 39} soDomain 39]
+  [^{:val 39} ipAddSourceMembership 39]
+  [^{:val 40} ipDropSourceMembership 40])
+
+(go/method ListenUDP [^OSHost h ^string address ^bool reuseAddr ^bool reusePort]
+  :results [(* net/UDPConn) error]
+  (let [lc (lit net/ListenConfig
+                :Control (fn ^error [^string network ^string addr ^syscall/RawConn rc]
+                           (let [^error serr nil
+                                 err (.Control rc (fn [^uintptr fd]
+                                                    (when reuseAddr
+                                                      (set! serr (syscall/SetsockoptInt (conv int fd) syscall/SOL_SOCKET
+                                                                                        syscall/SO_REUSEADDR 1)))
+                                                    (when (and (== serr nil) reusePort)
+                                                      ;; SO_REUSEPORT (15 on amd64 and arm64)
+                                                      (set! serr (syscall/SetsockoptInt (conv int fd) syscall/SOL_SOCKET 15 1)))))]
+                             (when (!= err nil)
+                               (return err))
+                             serr)))
+        (values pc err) (.ListenPacket (addr lc) (context/Background) "udp" address)]
+    (when (!= err nil)
+      (return nil err))
+    (let [(values u ok) (assert (* net/UDPConn) pc)]
+      (when (not ok)
+        (.Close pc)
+        (return nil (errors/New "Not a UDP socket")))
+      (return u nil))))
+
+(go/method Interfaces [^OSHost h] :results [(slice net/Interface) error]
+  (net/Interfaces))
+
+(go/method Peek [^OSHost h ^{:tag (* net/UDPConn)} c ^{:tag (slice byte)} p]
+  :results [int net/IP int error]
+  (let [(values rc err) (.SyscallConn c)]
+    (when (!= err nil)
+      (return 0 nil 0 err))
+    (let [^int n 0
+          ^net/IP ip nil
+          ^int port 0
+          ^error serr nil]
+      ;; MSG_PEEK without waiting, inside the poller's read: false (nothing yet) waits for the
+      ;; socket to be readable under the read deadline
+      (set! err (.Read rc (fn ^bool [^uintptr fd]
+                            (let [(values k from e) (syscall/Recvfrom (conv int fd) p
+                                                                      (bit-or syscall/MSG_PEEK syscall/MSG_DONTWAIT))]
+                              (when (or (== e syscall/EAGAIN) (== e syscall/EINTR))
+                                (return false))
+                              (set! serr e)
+                              (set! n k)
+                              (let [(values s4 ok4) (assert (* syscall/SockaddrInet4) from)
+                                    (values s6 ok6) (assert (* syscall/SockaddrInet6) from)]
+                                (cond ok4 (do (set! ip (make net/IP 4))
+                                              (copy ip (subslice (.-Addr s4) 0 4))
+                                              (set! port (.-Port s4)))
+                                      ok6 (do (set! ip (make net/IP 16))
+                                              (copy ip (subslice (.-Addr s6) 0 16))
+                                              (set! port (.-Port s6)))))
+                              true))))
+      (when (!= err nil)
+        (return 0 nil 0 err))
+      (when (!= serr nil)
+        (return 0 nil 0 serr))
+      (return n ip port nil))))
+
+(go/func zoneIndex "zoneIndex is the index of the interface a scope zone names (by name, else by number).\n"
+  ^uint32 [^string zone]
+  (when (== zone "")
+    (return 0))
+  (let [(values ifc err) (net/InterfaceByName zone)]
+    (when (== err nil)
+      (return (conv uint32 (.-Index ifc)))))
+  (let [(values i err) (strconv/Atoi zone)]
+    (when (== err nil)
+      (return (conv uint32 i))))
+  0)
+
+(go/func sockPort "sockPort is the port of a socket address (0 for another family).\n"
+  ^int [^syscall/Sockaddr sa]
+  (let [(values s4 ok4) (assert (* syscall/SockaddrInet4) sa)
+        (values s6 ok6) (assert (* syscall/SockaddrInet6) sa)]
+    (cond ok4 (return (.-Port s4))
+          ok6 (return (.-Port s6))))
+  0)
+
+(go/func sockaddrFor "sockaddrFor is a as a socket address of a socket of address family domain.\n"
+  [^int domain ^{:tag (* net/UDPAddr)} a] :results [syscall/Sockaddr error]
+  (let [v4 (.To4 (.-IP a))]
+    (if (== domain syscall/AF_INET)
+      (do (when (== v4 nil)
+            (return nil syscall/EAFNOSUPPORT))
+          (let [s (addr (lit syscall/SockaddrInet4 :Port (.-Port a)))]
+            (copy (subslice (.-Addr s) 0 4) v4)
+            (return s nil)))
+      (let [s (addr (lit syscall/SockaddrInet6 :Port (.-Port a) :ZoneId (zoneIndex (.-Zone a))))]
+        (copy (subslice (.-Addr s) 0 16) (.To16 (.-IP a)))
+        (return s nil)))))
+
+(go/method ConnectUDP ^error [^OSHost h ^{:tag (* net/UDPConn)} c ^{:tag (* net/UDPAddr)} a]
+  (let [(values rc err) (.SyscallConn c)]
+    (when (!= err nil)
+      (return err))
+    (let [^error serr nil]
+      (set! err (.Control rc (fn [^uintptr fd]
+                               (if (== a nil)
+                                 ;; AF_UNSPEC dissolves the association; Linux then releases a port the
+                                 ;; bind took by itself (port 0), so the socket's address is bound again
+                                 (let [ra (lit syscall/RawSockaddrInet6)
+                                       (values before _) (syscall/Getsockname (conv int fd))
+                                       (values _ _ e) (syscall/Syscall syscall/SYS_CONNECT fd
+                                                                       (conv uintptr (conv unsafe/Pointer (addr ra)))
+                                                                       (conv uintptr (unsafe/Sizeof ra)))]
+                                   (if (!= e 0)
+                                     (set! serr e)
+                                     (let [(values after _) (syscall/Getsockname (conv int fd))]
+                                       (when (and (!= before nil) (!= (sockPort after) (sockPort before)))
+                                         (set! serr (syscall/Bind (conv int fd) before))))))
+                                 (let [(values dom derr) (syscall/GetsockoptInt (conv int fd) syscall/SOL_SOCKET soDomain)]
+                                   (if (!= derr nil)
+                                     (set! serr derr)
+                                     (let [(values sa aerr) (sockaddrFor dom a)]
+                                       (if (!= aerr nil)
+                                         (set! serr aerr)
+                                         (set! serr (syscall/Connect (conv int fd) sa))))))))))
+      (when (!= err nil)
+        (return err))
+      serr)))
+
+(go/func ifaceV4 "ifaceV4 is the first IPv4 address of the interface of index ifindex (zero: none).\n"
+  ^{:tag (array 4 byte)} [^int ifindex]
+  (let [^{:tag (array 4 byte)} r (lit (array 4 byte))
+        (values ifc err) (net/InterfaceByIndex ifindex)]
+    (when (!= err nil)
+      (return r))
+    (let [(values addrs _) (.Addrs ifc)]
+      (range [_ a addrs]
+        (let [(values ipn ok) (assert (* net/IPNet) a)]
+          (when (and ok (!= (.To4 (.-IP ipn)) nil))
+            (copy (subslice r 0 4) (.To4 (.-IP ipn)))
+            (return r)))))
+    r))
+
+(go/method Membership ^error [^OSHost h ^{:tag (* net/UDPConn)} c ^{:tag net/IP} group ^int ifindex
+                              ^{:tag net/IP} source ^bool join]
+  (let [(values rc err) (.SyscallConn c)]
+    (when (!= err nil)
+      (return err))
+    (when (and (== (.To4 group) nil) (!= (len group) 16))
+      (return syscall/EINVAL))
+    (let [^error serr nil
+          g4 (.To4 group)]
+      (set! err (.Control rc (fn [^uintptr fd]
+                               (let [f (conv int fd)]
+                                 (cond (and (!= g4 nil) (== source nil))
+                                       (let [m (lit syscall/IPMreqn :Ifindex (conv int32 ifindex))
+                                             op syscall/IP_ADD_MEMBERSHIP]
+                                         (when (not join)
+                                           (set! op syscall/IP_DROP_MEMBERSHIP))
+                                         (copy (subslice (.-Multiaddr m) 0 4) g4)
+                                         (set! serr (syscall/SetsockoptIPMreqn f syscall/IPPROTO_IP op (addr m))))
+                                       ;; ip_mreq_source: group, the interface's address, source
+                                       (and (!= g4 nil) (!= (.To4 source) nil))
+                                       (let [buf (lit (array 12 byte))
+                                             ifa (ifaceV4 ifindex)
+                                             op ipAddSourceMembership]
+                                         (when (not join)
+                                           (set! op ipDropSourceMembership))
+                                         (copy (subslice buf 0 4) g4)
+                                         (copy (subslice buf 4 8) (subslice ifa 0 4))
+                                         (copy (subslice buf 8 12) (.To4 source))
+                                         (let [(values _ _ e) (syscall/Syscall6 syscall/SYS_SETSOCKOPT fd
+                                                                                (conv uintptr syscall/IPPROTO_IP)
+                                                                                (conv uintptr op)
+                                                                                (conv uintptr (conv unsafe/Pointer (addr buf)))
+                                                                                12 0)]
+                                           (when (!= e 0)
+                                             (set! serr e))))
+                                       (and (== g4 nil) (== source nil))
+                                       (let [m (lit syscall/IPv6Mreq :Interface (conv uint32 ifindex))
+                                             op syscall/IPV6_JOIN_GROUP]
+                                         (when (not join)
+                                           (set! op syscall/IPV6_LEAVE_GROUP))
+                                         (copy (subslice (.-Multiaddr m) 0 16) (.To16 group))
+                                         (set! serr (syscall/SetsockoptIPv6Mreq f syscall/IPPROTO_IPV6 op (addr m))))
+                                       ;; MCAST_JOIN_SOURCE_GROUP's group_source_req is not written
+                                       :else (set! serr syscall/EOPNOTSUPP))))))
+      (when (!= err nil)
+        (return err))
+      serr)))
+
+(go/func mcastSet "mcastSet sets jrt's multicast option opt (the time to live, loopback, interface by index) of a
+datagram socket, both its IP and (an IPv6 socket) its IPv6 level.\n"
+  ^error [^syscall/RawConn rc ^int opt ^int value]
+  (let [^error serr nil
+        err (.Control rc (fn [^uintptr fd]
+                           (let [f (conv int fd)
+                                 (values dom e) (syscall/GetsockoptInt f syscall/SOL_SOCKET soDomain)
+                                 v6 (and (== e nil) (== dom syscall/AF_INET6))]
+                             (when (!= e nil)
+                               (set! serr e)
+                               (return))
+                             (switch opt
+                               (case [optMcastTTL]
+                                 (set! serr (syscall/SetsockoptInt f syscall/IPPROTO_IP syscall/IP_MULTICAST_TTL value))
+                                 (when (and (== serr nil) v6)
+                                   (set! serr (syscall/SetsockoptInt f syscall/IPPROTO_IPV6 syscall/IPV6_MULTICAST_HOPS value))))
+                               (case [optMcastLoop]
+                                 (set! serr (syscall/SetsockoptInt f syscall/IPPROTO_IP syscall/IP_MULTICAST_LOOP value))
+                                 (when (and (== serr nil) v6)
+                                   (set! serr (syscall/SetsockoptInt f syscall/IPPROTO_IPV6 syscall/IPV6_MULTICAST_LOOP value))))
+                               (case [optMcastIf]
+                                 (let [m (lit syscall/IPMreqn :Ifindex (conv int32 value))]
+                                   (set! serr (syscall/SetsockoptIPMreqn f syscall/IPPROTO_IP syscall/IP_MULTICAST_IF (addr m)))
+                                   (when v6
+                                     (set! serr (syscall/SetsockoptInt f syscall/IPPROTO_IPV6 syscall/IPV6_MULTICAST_IF value)))))))))]
+    (when (!= err nil)
+      (return err))
+    serr))
+
+(go/func mcastGet "mcastGet is jrt's multicast option opt of a datagram socket (the interface: its index on an IPv6
+socket, else 0: an IPv4 socket answers an address).\n"
+  [^syscall/RawConn rc ^int opt] :results [int error]
+  (let [^int v 0
+        ^error serr nil
+        err (.Control rc (fn [^uintptr fd]
+                           (let [f (conv int fd)
+                                 (values dom e) (syscall/GetsockoptInt f syscall/SOL_SOCKET soDomain)
+                                 v6 (and (== e nil) (== dom syscall/AF_INET6))]
+                             (when (!= e nil)
+                               (set! serr e)
+                               (return))
+                             (switch opt
+                               (case [optMcastTTL]
+                                 (if v6
+                                   (set! (values v serr) (syscall/GetsockoptInt f syscall/IPPROTO_IPV6 syscall/IPV6_MULTICAST_HOPS))
+                                   (set! (values v serr) (syscall/GetsockoptInt f syscall/IPPROTO_IP syscall/IP_MULTICAST_TTL))))
+                               (case [optMcastLoop]
+                                 (if v6
+                                   (set! (values v serr) (syscall/GetsockoptInt f syscall/IPPROTO_IPV6 syscall/IPV6_MULTICAST_LOOP))
+                                   (set! (values v serr) (syscall/GetsockoptInt f syscall/IPPROTO_IP syscall/IP_MULTICAST_LOOP))))
+                               (case [optMcastIf]
+                                 (when v6
+                                   (set! (values v serr) (syscall/GetsockoptInt f syscall/IPPROTO_IPV6 syscall/IPV6_MULTICAST_IF))))))))]
+    (when (!= err nil)
+      (return 0 err))
+    (return v serr)))

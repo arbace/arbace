@@ -1,0 +1,1060 @@
+(in-ns 'go.arbace.wai) (go/file "wasi.go" :imports [
+
+
+    ^{:line 4} [binary "encoding/binary"]
+    ^{:line 5} [errors "errors"]
+    ^{:line 6} [io "io"]
+    ^{:line 7} [fs "io/fs"]
+    ^{:line 8} [rand "math/rand"]
+    ^{:line 9} [os "os"]
+    ^{:line 10} [sort "sort"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [syscall "syscall"]
+    ^{:line 13} [time "time"]])
+
+
+;; WASI preview 1 (wasi_snapshot_preview1; doc/wasm/WAI.md §6): the functions Go's wasip1 port imports (runtime, syscall,
+;; internal/syscall/unix: 36 names) and the rest of the snapshot's as ENOSYS, over a sandboxed directory tree. The guest sees its
+;; preopened directories by their guest names; a path is resolved component by component inside its preopen (`..` never above it,
+;; a symbolic link followed inside it, an absolute link target refused: ENOTCAPABLE), so the guest reaches nothing else of the
+;; host's file system. Written after the snapshot's witx (WebAssembly/WASI, legacy/preview1) as Go's syscall/fs_wasip1.go reads it;
+;; wazero's imports/wasi_snapshot_preview1 (v1.12.0) read as a reference for the layouts, nothing of it converted.
+
+
+(go/type Exit "Exit is proc_exit's: the guest's exit status, recovered at the engine's boundary as an error.\n" (struct ^int32 Code))
+
+^{:go/end 26} (go/method Error ^string [^{:tag (* Exit)} e] (+ "exit status " (itoa (conv int (.-Code e)))))
+
+^{:go/end 48} (go/func itoa ^string [^int n]
+  (when (== n 0)
+    (return "0"))
+
+  (let [neg (< n 0)]
+    (when neg
+      (set! n (- n)))
+
+    (let [^{:tag (array 20 byte)} b (zero (array 20 byte))
+        ^{:line 37} i (len b)]
+      (while (> n 0)
+        (dec! i)
+        (aset b i (conv byte (+ \0 (% n 10))))
+        (set! n / 10))
+
+      (when neg
+        (dec! i)
+        (aset b i \-))
+
+      (conv string (subslice b i)))))
+
+
+
+(go/type Preopen "Preopen is a host directory the guest sees as Guest (an absolute path); ReadOnly refuses every change below it (EROFS).\n" (struct
+    ^{:line 52 :tag string} Guest ^string Host
+    ^{:line 53 :tag bool} ReadOnly))
+
+
+
+(go/type WASI "WASI is one guest's world: its arguments, environment, standard streams, preopened directories, clocks and randomness.\n" (struct
+    ^{:line 58 :tag (slice string)} Args ^{:tag (slice string)} Env
+    ^{:line 59 :tag io/Reader} Stdin
+    ^{:line 60 :tag io/Writer} Stdout ^io/Writer Stderr
+    ^{:line 61 :tag (slice Preopen)} Dirs
+    ^{:line 62 :tag int64} Seed ; random_get's generator (deterministic: a check's runs are reproducible)
+
+    ^{:line 64 :tag (* Memory)} mem
+    ^{:line 65 :tag (map int32 (* wfd))} fds
+    ^{:line 66 :tag int32} next
+    ^{:line 67 :tag (* rand/Rand)} rnd
+    ^{:line 68 :tag time/Time} start))
+
+
+(go/type wfd (struct
+    ^{:line 72 :tag byte} kind ; filetype
+    ^{:line 73 :tag int} pre ; the preopen it is under (-1 for the standard streams)
+    ^{:line 74 :tag (slice string)} rel
+    ^{:line 75 :tag (* os/File)} f
+    ^{:line 76 :tag io/Reader} r
+    ^{:line 77 :tag io/Writer} w
+    ^{:line 78 :tag bool} isPre
+    ^{:line 79 :tag uint16} flags
+    ^{:line 80 :tag uint64} rights
+    ^{:line 81 :tag (slice dirent)} dir)) ; fd_readdir's listing, read at cookie 0
+
+
+(go/type dirent (struct
+    ^{:line 85 :tag string} name
+    ^{:line 86 :tag uint64} ino
+    ^{:line 87 :tag byte} typ))
+
+
+
+(go/const "The snapshot's errnos (witx's $errno).\n"
+  ^{:line 92} [^{:val 0} eSuccess 0]
+  ^{:line 93} [^{:val 2} eAcces 2]
+  ^{:line 94} [^{:val 8} eBadf 8]
+  ^{:line 95} [^{:val 20} eExist 20]
+  ^{:line 96} [^{:val 21} eFault 21]
+  ^{:line 97} [^{:val 28} eInval 28]
+  ^{:line 98} [^{:val 29} eIO 29]
+  ^{:line 99} [^{:val 31} eIsdir 31]
+  ^{:line 100} [^{:val 32} eLoop 32]
+  ^{:line 101} [^{:val 37} eNametoolong 37]
+  ^{:line 102} [^{:val 44} eNoent 44]
+  ^{:line 103} [^{:val 52} eNosys 52]
+  ^{:line 104} [^{:val 54} eNotdir 54]
+  ^{:line 105} [^{:val 55} eNotempty 55]
+  ^{:line 106} [^{:val 58} eNotsup 58]
+  ^{:line 107} [^{:val 63} ePerm 63]
+  ^{:line 108} [^{:val 69} eRofs 69]
+  ^{:line 109} [^{:val 70} eSpipe 70]
+  ^{:line 110} [^{:val 76} eNotcapable 76])
+
+
+
+(go/const "The filetypes.\n"
+  ^{:line 115} [^{:val 0} ftUnknown 0]
+  ^{:line 116} [^{:val 2} ftChar 2]
+  ^{:line 117} [^{:val 3} ftDir 3]
+  ^{:line 118} [^{:val 4} ftReg 4]
+  ^{:line 119} [^{:val 7} ftSymlink 7])
+
+
+(go/const ^{:val 1073741823} allRights (- (<< 1 30) 1))
+
+
+^{:go/end 187} (go/func wasiErr "wasiErr is the snapshot's errno of a host error.\n" ^uint32 [^error err]
+  (when (== err nil)
+    (return eSuccess))
+
+  (let [^{:tag (* fs/PathError)} pe (zero (* fs/PathError))]
+    (when (errors/As err (addr pe))
+      (set! err (.-Err pe)))
+
+    (let [^{:tag (* os/LinkError)} le (zero (* os/LinkError))]
+      (when (errors/As err (addr le))
+        (set! err (.-Err le)))
+
+      (let [^{:tag (* os/SyscallError)} se (zero (* os/SyscallError))]
+        (when (errors/As err (addr se))
+          (set! err (.-Err se)))
+
+        (when [(values e ok) (assert syscall/Errno err)] ok
+          (switch e
+            (case [syscall/EACCES]
+              (return eAcces))
+            (case [syscall/EBADF]
+              (return eBadf))
+            (case [syscall/EEXIST]
+              (return eExist))
+            (case [syscall/EINVAL]
+              (return eInval))
+            (case [syscall/EISDIR]
+              (return eIsdir))
+            (case [syscall/ELOOP]
+              (return eLoop))
+            (case [syscall/ENAMETOOLONG]
+              (return eNametoolong))
+            (case [syscall/ENOENT]
+              (return eNoent))
+            (case [syscall/ENOTDIR]
+              (return eNotdir))
+            (case [syscall/ENOTEMPTY]
+              (return eNotempty))
+            (case [syscall/EPERM]
+              (return ePerm))
+            (case [syscall/EROFS]
+              (return eRofs))
+            (case [syscall/ESPIPE]
+              (return eSpipe))
+            (case [syscall/EXDEV]
+              (return 75))
+            (case [syscall/EMLINK]
+              (return 34))
+            (case [syscall/ENOSPC]
+              (return 51)))
+
+          (return eIO))
+
+        (switch
+          (case [(errors/Is err fs/ErrNotExist)]
+            (return eNoent))
+          (case [(errors/Is err fs/ErrExist)]
+            (return eExist))
+          (case [(errors/Is err fs/ErrPermission)]
+            (return ePerm)))
+
+        ^{:line 186} eIO))))
+
+
+(go/type wasiFault (struct))
+
+^{:go/end 197} (go/method bytes ^{:tag (slice byte)} [^{:tag (* WASI)} w ^uint32 p ^uint32 n]
+  (let [d (.-Data (.-mem w))]
+    (when (> (+ (conv uint64 p) (conv uint64 n)) (conv uint64 (len d)))
+      (panic (lit wasiFault)))
+
+    (subslice d p (+ p n))))
+
+
+^{:go/end 199} (go/method u32 ^uint32 [^{:tag (* WASI)} w ^uint32 p] (.Uint32 binary/LittleEndian (.bytes w p 4)))
+^{:go/end 200} (go/method put32 [^{:tag (* WASI)} w ^uint32 p ^uint32 v] (.PutUint32 binary/LittleEndian (.bytes w p 4) v))
+^{:go/end 201} (go/method put64 [^{:tag (* WASI)} w ^uint32 p ^uint64 v] (.PutUint64 binary/LittleEndian (.bytes w p 8) v))
+^{:go/end 202} (go/method str ^string [^{:tag (* WASI)} w ^uint32 p ^uint32 n] (conv string (.bytes w p n)))
+
+
+^{:go/end 212} (go/method iovs "iovs are an iovec array's buffers.\n" ^{:tag (slice (slice byte))} [^{:tag (* WASI)} w ^uint32 p ^uint32 n]
+  (let [^{:tag (slice (slice byte))} out (zero (slice (slice byte)))]
+    (for [i (conv uint32 0)] (< i n) (inc! i)
+      (let [(values b l) (values (.u32 w (+ p (* 8 i))) (.u32 w (+ p (* 8 i) 4)))]
+        (set! out (append out (.bytes w b l)))))
+
+    ^{:line 211} out))
+
+
+
+^{:go/end 613} (go/method Instance "Instance is the module wasi_snapshot_preview1 over this world, registered in m's store. Bind gives it its guest's memory.\n" ^{:tag (* Instance)} [^{:tag (* WASI)} w ^{:tag (* Machine)} m]
+  (set! (.-fds w) (lit (map int32 (* wfd))))
+  (set! (.-start w) (time/Now))
+  (set! (.-rnd w) (rand/New (rand/NewSource (.-Seed w))))
+  (when (== (.-Stdin w) nil)
+    (set! (.-Stdin w) (strings/NewReader "")))
+
+  (when (== (.-Stdout w) nil)
+    (set! (.-Stdout w) io/Discard))
+
+  (when (== (.-Stderr w) nil)
+    (set! (.-Stderr w) io/Discard))
+
+  (aset (.-fds w) 0 (addr (lit wfd :kind ftChar :pre -1 :r (.-Stdin w) :rights allRights)))
+  (aset (.-fds w) 1 (addr (lit wfd :kind ftChar :pre -1 :w (.-Stdout w) :rights allRights)))
+  (aset (.-fds w) 2 (addr (lit wfd :kind ftChar :pre -1 :w (.-Stderr w) :rights allRights)))
+  (range [i (.-Dirs w)]
+    (aset (.-fds w) (conv int32 (+ 3 i)) (addr (lit wfd :kind ftDir :pre i :isPre true :rights allRights))))
+
+  (set! (.-next w) (conv int32 (+ 3 (len (.-Dirs w)))))
+  (let [inst (addr (lit Instance :Exports (lit (map string Extern))))
+      (values i32 i64) (values (lit ValType :K tI32) (lit ValType :K tI64))
+      ^{:line 237} def ^{:go/end 254} (fn [^string name ^{:tag (slice ValType)} params ^{:tag (slice ValType)} results ^{:tag (func [^{:tag (slice V)} a] [uint32])} fn]
+        (let [f (.addFunc (.-St m) (addr (lit Func :Type (funcTypeID params results) :Host ^{:go/end 252} (fn [^{:tag (* Machine)} m ^{:tag (slice V)} args] :results [^{:tag (slice V)} res]
+                    (defer (^{:go/end 246} (fn []
+                          (when [x (recover)] (!= x nil)
+                            (when [(values _ ok) (assert wasiFault x)] (not ok)
+                              (panic x))
+
+                            (set! res (lit (slice V) (lit _ :L eFault)))))))
+
+
+                    (let [e (go/call fn args)]
+                      (when (== (len results) 0)
+                        (return nil))
+
+                      (lit (slice V) (lit _ :L (conv uint64 e))))))))]
+
+          (aset (.-Exports inst) name (lit Extern :Kind xFunc :Func f))))
+
+      ^{:line 255} ts ^{:go/end 265} (fn ^{:tag (slice ValType)} [& ^{:tag (slice byte)} ks]
+        (let [^{:tag (slice ValType)} out (zero (slice ValType))]
+          (range [_ k ks]
+            (if (== k \I)
+              (set! out (append out i64))
+
+              (set! out (append out i32))))
+
+
+          ^{:line 264} out))
+
+      ^{:line 266} r1 (lit (slice ValType) i32)
+      ^{:line 267} a ^{:go/end 267} (fn ^uint32 [^V v] (conv uint32 (.-L v)))]
+
+    (def "args_sizes_get" (ts \i \i) r1 ^{:go/end 269} (fn ^uint32 [^{:tag (slice V)} x] (.sizes w (.-Args w) (a (aget x 0)) (a (aget x 1)))))
+    (def "args_get" (ts \i \i) r1 ^{:go/end 270} (fn ^uint32 [^{:tag (slice V)} x] (.strs w (.-Args w) (a (aget x 0)) (a (aget x 1)))))
+    (def "environ_sizes_get" (ts \i \i) r1 ^{:go/end 271} (fn ^uint32 [^{:tag (slice V)} x] (.sizes w (.-Env w) (a (aget x 0)) (a (aget x 1)))))
+    (def "environ_get" (ts \i \i) r1 ^{:go/end 272} (fn ^uint32 [^{:tag (slice V)} x] (.strs w (.-Env w) (a (aget x 0)) (a (aget x 1)))))
+    (def "clock_res_get" (ts \i \i) r1 ^{:go/breaks [4] :go/end 279} (fn ^uint32 [^{:tag (slice V)} x]
+        (when (> (a (aget x 0)) 3)
+          (return eInval))
+
+        (.put64 w (a (aget x 1)) 1)
+        0))
+
+    (def "clock_time_get" (ts \i \I \i) r1 ^{:go/breaks [[3 289]] :go/end 290} (fn ^uint32 [^{:tag (slice V)} x]
+        (switch (a (aget x 0))
+          (case [0]
+            (.put64 w (a (aget x 2)) (conv uint64 (.UnixNano (time/Now)))))
+          (case [1 2 3]
+            (.put64 w (a (aget x 2)) (+ (conv uint64 (.Nanoseconds (time/Since (.-start w)))) 1)))
+          (default
+            (return eInval)))
+
+        0))
+
+    (def "random_get" (ts \i \i) r1 ^{:go/end 295} (fn ^uint32 [^{:tag (slice V)} x]
+        ^{:go/breaks [3]} (let [b (.bytes w (a (aget x 0)) (a (aget x 1)))]
+          (.Read (.-rnd w) b)
+          0)))
+
+    (def "proc_exit" (ts \i) nil ^{:go/end 296} (fn ^uint32 [^{:tag (slice V)} x] (panic (addr (lit Exit (conv int32 (a (aget x 0))))))))
+    (def "proc_raise" (ts \i) r1 ^{:go/end 297} (fn ^uint32 [^{:tag (slice V)} x] eNosys))
+    (def "sched_yield" nil r1 ^{:go/end 298} (fn ^uint32 [^{:tag (slice V)} x] 0))
+    (def "poll_oneoff" (ts \i \i \i \i) r1 ^{:go/end 299} (fn ^uint32 [^{:tag (slice V)} x] (.poll w (a (aget x 0)) (a (aget x 1)) (a (aget x 2)) (a (aget x 3)))))
+
+    (def "fd_write" (ts \i \i \i \i) r1 ^{:go/end 301} (fn ^uint32 [^{:tag (slice V)} x] (.rw w (a (aget x 0)) (a (aget x 1)) (a (aget x 2)) (a (aget x 3)) true -1)))
+    (def "fd_read" (ts \i \i \i \i) r1 ^{:go/end 302} (fn ^uint32 [^{:tag (slice V)} x] (.rw w (a (aget x 0)) (a (aget x 1)) (a (aget x 2)) (a (aget x 3)) false -1)))
+    (def "fd_pwrite" (ts \i \i \i \I \i) r1 ^{:go/end 305} (fn ^uint32 [^{:tag (slice V)} x]
+        (.rw w (a (aget x 0)) (a (aget x 1)) (a (aget x 2)) (a (aget x 4)) true (conv int64 (.-L (aget x 3))))))
+
+    (def "fd_pread" (ts \i \i \i \I \i) r1 ^{:go/end 308} (fn ^uint32 [^{:tag (slice V)} x]
+        (.rw w (a (aget x 0)) (a (aget x 1)) (a (aget x 2)) (a (aget x 4)) false (conv int64 (.-L (aget x 3))))))
+
+    (def "fd_close" (ts \i) r1 ^{:go/end 322} (fn ^uint32 [^{:tag (slice V)} x]
+        ^{:go/breaks [[6 321]]} (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (not ok)
+            (return eBadf))
+
+          (when (.-isPre fd)
+            (return eNotsup))
+
+          (delete (.-fds w) (conv int32 (a (aget x 0))))
+          (when (!= (.-f fd) nil)
+            (return (wasiErr (.Close (.-f fd)))))
+
+          0)))
+
+    (def "fd_seek" (ts \i \I \i \i) r1 ^{:go/end 344} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (not ok)
+            (return eBadf))
+
+          (when (or (== (.-f fd) nil) (== (.-kind fd) ftDir))
+            (when (== (.-kind fd) ftDir)
+              (return eIsdir))
+
+            (return eSpipe))
+
+          (let [wh (a (aget x 2))]
+            (when (> wh 2)
+              (return eInval))
+
+            ^{:go/breaks [4]} (let [(values n err) (.Seek (.-f fd) (conv int64 (.-L (aget x 1))) (conv int wh))]
+              (when (!= err nil)
+                (return (wasiErr err)))
+
+              (.put64 w (a (aget x 3)) (conv uint64 n))
+              0)))))
+
+    (def "fd_tell" (ts \i \i) r1 ^{:go/end 359} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (not ok)
+            (return eBadf))
+
+          (when (or (== (.-f fd) nil) (== (.-kind fd) ftDir))
+            (return eSpipe))
+
+          ^{:go/breaks [4]} (let [(values n err) (.Seek (.-f fd) 0 io/SeekCurrent)]
+            (when (!= err nil)
+              (return (wasiErr err)))
+
+            (.put64 w (a (aget x 1)) (conv uint64 n))
+            0))))
+
+    (def "fd_fdstat_get" (ts \i \i) r1 ^{:go/end 374} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (not ok)
+            (return eBadf))
+
+          ^{:go/breaks [7]} (let [b (.bytes w (a (aget x 1)) 24)]
+            (range [i b]
+              (aset b i 0))
+
+            (aset b 0 (.-kind fd))
+            (.PutUint16 binary/LittleEndian (subslice b 2) (.-flags fd))
+            (.PutUint64 binary/LittleEndian (subslice b 8) (.-rights fd))
+            (.PutUint64 binary/LittleEndian (subslice b 16) (.-rights fd))
+            0))))
+
+    (def "fd_fdstat_set_flags" (ts \i \i) r1 ^{:go/end 386} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (not ok)
+            (return eBadf))
+
+          ^{:go/breaks [4]} (let [fl (conv uint16 (a (aget x 1)))]
+            (when (!= (bit-and-not fl (bit-or 1 4)) 0)
+              (return eNotsup))
+
+            (set! (.-flags fd) fl)
+            0))))
+
+    (def "fd_fdstat_set_rights" (ts \i \I \I) r1 ^{:go/end 397} (fn ^uint32 [^{:tag (slice V)} x]
+        ^{:go/breaks [5]} (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (not ok)
+            (return eBadf))
+
+          (when (!= (bit-and-not (.-L (aget x 1)) (.-rights fd)) 0)
+            (return eNotcapable))
+
+          (set! (.-rights fd) (.-L (aget x 1)))
+          0)))
+
+    (def "fd_filestat_get" (ts \i \i) r1 ^{:go/end 424} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (not ok)
+            (return eBadf))
+
+          (when (< (.-pre fd) 0)
+            (let [b (.bytes w (a (aget x 1)) 64)]
+              (range [i b]
+                (aset b i 0))
+
+              (aset b 16 ftChar)
+              (aset b 24 1)
+              (return 0)))
+
+          ^{:go/breaks [5]} (let [^os/FileInfo fi (zero os/FileInfo)
+              ^{:line 413 :tag error} err (zero error)]
+            (if (!= (.-f fd) nil)
+              (set! (values fi err) (.Stat (.-f fd)))
+
+              (set! (values fi err) (os/Stat (.host w (.-pre fd) (.-rel fd)))))
+
+            (when (!= err nil)
+              (return (wasiErr err)))
+
+            (.filestat w (a (aget x 1)) fi)
+            0))))
+
+    (def "fd_filestat_set_size" (ts \i \I) r1 ^{:go/end 434} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (or (not ok) (== (.-f fd) nil))
+            (return eBadf))
+
+          (when (.-ReadOnly (aget (.-Dirs w) (.-pre fd)))
+            (return eRofs))
+
+          (wasiErr (.Truncate (.-f fd) (conv int64 (.-L (aget x 1))))))))
+
+    (def "fd_filestat_set_times" (ts \i \I \I \i) r1 ^{:go/end 441} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (or (not ok) (< (.-pre fd) 0))
+            (return eBadf))
+
+          (.setTimes w (.-pre fd) (.host w (.-pre fd) (.-rel fd)) (.-L (aget x 1)) (.-L (aget x 2)) (a (aget x 3))))))
+
+    (def "fd_sync" (ts \i) r1 ^{:go/end 451} (fn ^uint32 [^{:tag (slice V)} x]
+        ^{:go/breaks [[4 450]]} (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (not ok)
+            (return eBadf))
+
+          (when (and (!= (.-f fd) nil) (== (.-kind fd) ftReg))
+            (return (wasiErr (.Sync (.-f fd)))))
+
+          0)))
+
+    (def "fd_datasync" (ts \i) r1 ^{:go/breaks [[3 456]] :go/end 457} (fn ^uint32 [^{:tag (slice V)} x]
+        (when [(values _ ok) (aget (.-fds w) (conv int32 (a (aget x 0))))] (not ok)
+          (return eBadf))
+
+        0))
+
+    (def "fd_advise" (ts \i \I \I \i) r1 ^{:go/breaks [[3 462]] :go/end 463} (fn ^uint32 [^{:tag (slice V)} x]
+        (when [(values _ ok) (aget (.-fds w) (conv int32 (a (aget x 0))))] (not ok)
+          (return eBadf))
+
+        0))
+
+    (def "fd_allocate" (ts \i \I \I) r1 ^{:go/end 464} (fn ^uint32 [^{:tag (slice V)} x] eNotsup))
+    (def "fd_renumber" (ts \i \i) r1 ^{:go/end 480} (fn ^uint32 [^{:tag (slice V)} x]
+        ^{:go/breaks [[6 479]]} (let [(values from to) (values (conv int32 (a (aget x 0))) (conv int32 (a (aget x 1))))
+            (values fd ok) (aget (.-fds w) from)
+            (values old ok2) (aget (.-fds w) to)]
+          (when (or (not ok) (not ok2) (.-isPre fd) (.-isPre old))
+            (return eBadf))
+
+          (when (and (!= (.-f old) nil) (!= from to))
+            (.Close (.-f old)))
+
+          (aset (.-fds w) to fd)
+          (when (!= from to)
+            (delete (.-fds w) from))
+
+          0)))
+
+    (def "fd_prestat_get" (ts \i \i) r1 ^{:go/end 489} (fn ^uint32 [^{:tag (slice V)} x]
+        ^{:go/breaks [5]} (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (or (not ok) (not (.-isPre fd)))
+            (return eBadf))
+
+          (.put32 w (a (aget x 1)) 0)
+          (.put32 w (+ (a (aget x 1)) 4) (conv uint32 (len (.-Guest (aget (.-Dirs w) (.-pre fd))))))
+          0)))
+
+    (def "fd_prestat_dir_name" (ts \i \i \i) r1 ^{:go/end 501} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values fd ok) (aget (.-fds w) (conv int32 (a (aget x 0))))]
+          (when (or (not ok) (not (.-isPre fd)))
+            (return eBadf))
+
+          ^{:go/breaks [4]} (let [n (.-Guest (aget (.-Dirs w) (.-pre fd)))]
+            (when (> (conv uint32 (len n)) (a (aget x 2)))
+              (return eNametoolong))
+
+            (copy (.bytes w (a (aget x 1)) (conv uint32 (len n))) n)
+            0))))
+
+    (def "fd_readdir" (ts \i \i \i \I \i) r1 ^{:go/end 502} (fn ^uint32 [^{:tag (slice V)} x] (.readdir w (a (aget x 0)) (a (aget x 1)) (a (aget x 2)) (.-L (aget x 3)) (a (aget x 4)))))
+
+    (def "path_open" (ts \i \i \i \i \i \I \I \i \i) r1 ^{:go/end 506} (fn ^uint32 [^{:tag (slice V)} x]
+        (.open w (a (aget x 0)) (a (aget x 1)) (.str w (a (aget x 2)) (a (aget x 3))) (a (aget x 4)) (.-L (aget x 5)) (a (aget x 7)) (a (aget x 8)))))
+
+    (def "path_filestat_get" (ts \i \i \i \i \i) r1 ^{:go/end 519} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values pre hp e) (.resolve w (a (aget x 0)) (.str w (a (aget x 2)) (a (aget x 3))) (!= (bit-and (a (aget x 1)) 1) 0))]
+          (set! _ pre)
+          (when (!= e 0)
+            (return e))
+
+          ^{:go/breaks [4]} (let [(values fi err) (os/Lstat hp)]
+            (when (!= err nil)
+              (return (wasiErr err)))
+
+            (.filestat w (a (aget x 4)) fi)
+            0))))
+
+    (def "path_filestat_set_times" (ts \i \i \i \i \I \I \i) r1 ^{:go/end 526} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values pre hp e) (.resolve w (a (aget x 0)) (.str w (a (aget x 2)) (a (aget x 3))) (!= (bit-and (a (aget x 1)) 1) 0))]
+          (when (!= e 0)
+            (return e))
+
+          (.setTimes w pre hp (.-L (aget x 4)) (.-L (aget x 5)) (a (aget x 6))))))
+
+    (def "path_create_directory" (ts \i \i \i) r1 ^{:go/end 529} (fn ^uint32 [^{:tag (slice V)} x]
+        (.change w (a (aget x 0)) (.str w (a (aget x 1)) (a (aget x 2))) ^{:go/end 528} (fn ^error [^string hp] (os/Mkdir hp 0777)))))
+
+    (def "path_remove_directory" (ts \i \i \i) r1 ^{:go/end 541} (fn ^uint32 [^{:tag (slice V)} x]
+        (.change w (a (aget x 0)) (.str w (a (aget x 1)) (a (aget x 2))) ^{:go/end 540} (fn ^error [^string hp]
+            (let [(values fi err) (os/Lstat hp)]
+              (when (!= err nil)
+                (return err))
+
+              (when (not (.IsDir fi))
+                (return syscall/ENOTDIR))
+
+              (syscall/Rmdir hp))))))
+
+
+    (def "path_unlink_file" (ts \i \i \i) r1 ^{:go/end 553} (fn ^uint32 [^{:tag (slice V)} x]
+        (.change w (a (aget x 0)) (.str w (a (aget x 1)) (a (aget x 2))) ^{:go/end 552} (fn ^error [^string hp]
+            (let [(values fi err) (os/Lstat hp)]
+              (when (!= err nil)
+                (return err))
+
+              (when (.IsDir fi)
+                (return syscall/EISDIR))
+
+              (syscall/Unlink hp))))))
+
+
+    (def "path_readlink" (ts \i \i \i \i \i \i) r1 ^{:go/end 570} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values _ hp e) (.resolve w (a (aget x 0)) (.str w (a (aget x 1)) (a (aget x 2))) false)]
+          (when (!= e 0)
+            (return e))
+
+          (let [(values t err) (os/Readlink hp)]
+            (when (!= err nil)
+              (return (wasiErr err)))
+
+            ^{:go/breaks [5]} (let [n (conv uint32 (len t))]
+              (when (> n (a (aget x 4)))
+                (set! n (a (aget x 4))))
+
+              (copy (.bytes w (a (aget x 3)) n) t)
+              (.put32 w (a (aget x 5)) n)
+              0)))))
+
+    (def "path_symlink" (ts \i \i \i \i \i) r1 ^{:go/end 577} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [old (.str w (a (aget x 0)) (a (aget x 1)))]
+          (when (strings/HasPrefix old "/")
+            (return eNotcapable))
+
+          (.change w (a (aget x 2)) (.str w (a (aget x 3)) (a (aget x 4))) ^{:go/end 576} (fn ^error [^string hp] (os/Symlink old hp))))))
+
+    (def "path_link" (ts \i \i \i \i \i \i \i) r1 ^{:go/end 587} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values p1 h1 e) (.resolve w (a (aget x 0)) (.str w (a (aget x 2)) (a (aget x 3))) (!= (bit-and (a (aget x 1)) 1) 0))]
+          (when (!= e 0)
+            (return e))
+
+          (when (.-ReadOnly (aget (.-Dirs w) p1))
+            (return eRofs))
+
+          (.change w (a (aget x 4)) (.str w (a (aget x 5)) (a (aget x 6))) ^{:go/end 586} (fn ^error [^string hp] (os/Link h1 hp))))))
+
+    (def "path_rename" (ts \i \i \i \i \i \i) r1 ^{:go/end 597} (fn ^uint32 [^{:tag (slice V)} x]
+        (let [(values p1 h1 e) (.resolve w (a (aget x 0)) (.str w (a (aget x 1)) (a (aget x 2))) false)]
+          (when (!= e 0)
+            (return e))
+
+          (when (.-ReadOnly (aget (.-Dirs w) p1))
+            (return eRofs))
+
+          (.change w (a (aget x 3)) (.str w (a (aget x 4)) (a (aget x 5))) ^{:go/end 596} (fn ^error [^string hp] (os/Rename h1 hp))))))
+
+    (def "sock_accept" (ts \i \i \i) r1 ^{:go/end 603} (fn ^uint32 [^{:tag (slice V)} x]
+        (when [(values _ ok) (aget (.-fds w) (conv int32 (a (aget x 0))))] (not ok)
+          (return eBadf))
+
+        ^{:line 602} eNotsup))
+
+    (def "sock_shutdown" (ts \i \i) r1 ^{:go/breaks [[3 608]] :go/end 609} (fn ^uint32 [^{:tag (slice V)} x]
+        (when [(values _ ok) (aget (.-fds w) (conv int32 (a (aget x 0))))] (not ok)
+          (return eBadf))
+
+        57)) ; ENOTSOCK
+
+    (def "sock_recv" (ts \i \i \i \i \i \i) r1 ^{:go/end 610} (fn ^uint32 [^{:tag (slice V)} x] eNotsup))
+    (def "sock_send" (ts \i \i \i \i \i) r1 ^{:go/end 611} (fn ^uint32 [^{:tag (slice V)} x] eNotsup))
+    ^{:line 612} inst))
+
+
+
+^{:go/end 620} (go/method Bind "Bind gives the world its guest's memory (the instance's export \"memory\").\n" [^{:tag (* WASI)} w ^{:tag (* Instance)} inst]
+  (when [(values x ok) (aget (.-Exports inst) "memory")] (and ok (== (.-Kind x) xMemory))
+    (set! (.-mem w) (.-Mem x))))
+
+
+
+^{:go/end 630} (go/method sizes ^uint32 [^{:tag (* WASI)} w ^{:tag (slice string)} ss ^uint32 pc ^uint32 pn]
+  ^{:go/breaks [5]} (let [n 0]
+    (range [_ s ss]
+      (set! n + (+ (len s) 1)))
+
+    (.put32 w pc (conv uint32 (len ss)))
+    (.put32 w pn (conv uint32 n))
+    0))
+
+
+^{:go/breaks [[4 639]] :go/end 640} (go/method strs ^uint32 [^{:tag (* WASI)} w ^{:tag (slice string)} ss ^uint32 pv ^uint32 pb]
+  (range [i s ss]
+    (.put32 w (+ pv (* 4 (conv uint32 i))) pb)
+    (copy (.bytes w pb (conv uint32 (len s))) s)
+    (aset (.bytes w (+ pb (conv uint32 (len s))) 1) 0 0)
+    (set! pb + (+ (conv uint32 (len s)) 1)))
+
+  0)
+
+
+^{:go/end 703} (go/method rw ^uint32 [^{:tag (* WASI)} w ^uint32 fdn ^uint32 iov ^uint32 niov ^uint32 pn ^bool write ^int64 off]
+  (let [(values fd ok) (aget (.-fds w) (conv int32 fdn))]
+    (when (not ok)
+      (return eBadf))
+
+    (when (== (.-kind fd) ftDir)
+      (return eIsdir))
+
+    ^{:go/breaks [4]} (let [bufs (.iovs w iov niov)
+        ^{:line 651} total 0]
+      (range [_ b bufs]
+        (let [^int n (zero int)
+            ^{:line 654 :tag error} err (zero error)]
+          (switch
+            (case [(and write (!= (.-w fd) nil))]
+              (set! (values n err) (.Write (.-w fd) b)))
+            (case [(and (not write) (!= (.-r fd) nil))]
+              (set! (values n err) (.Read (.-r fd) b))
+              (when (== err io/EOF)
+                (set! err nil)))
+
+            (case [(and (!= (.-f fd) nil) (>= off 0) write)]
+              (set! (values n err) (.WriteAt (.-f fd) b off))
+              (set! off + (conv int64 n)))
+            (case [(and (!= (.-f fd) nil) (>= off 0))]
+              (set! (values n err) (.ReadAt (.-f fd) b off))
+              (set! off + (conv int64 n))
+              (when (== err io/EOF)
+                (set! err nil)))
+
+            (case [(and (!= (.-f fd) nil) write)]
+              (when (.-ReadOnly (aget (.-Dirs w) (.-pre fd)))
+                (return eRofs))
+
+              (when (!= (bit-and (.-flags fd) 1) 0)
+                (when [(values _ err) (.Seek (.-f fd) 0 io/SeekEnd)] (!= err nil)
+                  (return (wasiErr err))))
+
+
+              (set! (values n err) (.Write (.-f fd) b)))
+            (case [(!= (.-f fd) nil)]
+              (set! (values n err) (.Read (.-f fd) b))
+              (when (== err io/EOF)
+                (set! err nil)))
+
+            (default
+              (return eBadf)))
+
+          (set! total + n)
+          (when (!= err nil)
+            (when (> total 0)
+              (break))
+
+            (return (wasiErr err)))
+
+          (when (< n (len b))
+            (break))))
+
+
+      (.put32 w pn (conv uint32 total))
+      0)))
+
+
+
+^{:go/end 711} (go/method host "host is the host path of components rel under preopen pre.\n" ^string [^{:tag (* WASI)} w ^int pre ^{:tag (slice string)} rel]
+  (when (== (len rel) 0)
+    (return (.-Host (aget (.-Dirs w) pre))))
+
+  (+ (.-Host (aget (.-Dirs w) pre)) "/" (strings/Join rel "/")))
+
+
+
+
+^{:go/end 721} (go/method resolve "resolve is a guest path relative to the directory fd dirfd as a host path inside its preopen: the preopen and the path, or\nan errno. follow: a symbolic link as the last component is followed.\n" [^{:tag (* WASI)} w ^uint32 dirfd ^string p ^bool follow] :results [int string uint32]
+  (let [(values pre rel e) (.resolveRel w dirfd p follow)]
+    (when (!= e 0)
+      (return 0 "" e))
+
+    (return pre (.host w pre rel) 0)))
+
+
+^{:go/end 776} (go/method resolveRel [^{:tag (* WASI)} w ^uint32 dirfd ^string p ^bool follow] :results [int (slice string) uint32]
+  (let [(values fd ok) (aget (.-fds w) (conv int32 dirfd))]
+    (when (not ok)
+      (return 0 nil eBadf))
+
+    (when (or (< (.-pre fd) 0) (!= (.-kind fd) ftDir))
+      (return 0 nil eNotdir))
+
+    (when (strings/HasPrefix p "/")
+      (return 0 nil eNotcapable))
+
+    (when (>= (strings/IndexByte p 0) 0)
+      (return 0 nil eInval))
+
+    (let [rel (append (conv (slice string) nil) (spread (.-rel fd)))
+        ^{:line 738} todo (strings/Split p "/")
+        ^{:line 739} links 0]
+      (while (> (len todo) 0)
+        (let [c (aget todo 0)]
+          (set! todo (subslice todo 1))
+          (switch c
+            (case ["" "."]
+              (continue))
+            (case [".."]
+              (when (== (len rel) 0)
+                (return 0 nil eNotcapable))
+
+              (set! rel (subslice rel _ (- (len rel) 1)))
+              (continue)))
+
+          (set! rel (append rel c))
+          (when (and (== (len todo) 0) (not follow))
+            (break))
+
+          (let [(values fi err) (os/Lstat (.host w (.-pre fd) rel))]
+            (when (or (!= err nil) (== (bit-and (.Mode fi) fs/ModeSymlink) 0))
+              (continue))
+
+            (inc! links)
+            (when (> links 40)
+              (return 0 nil eLoop))
+
+            (let [(values t ^:assign err) (os/Readlink (.host w (.-pre fd) rel))]
+              (when (!= err nil)
+                (return 0 nil (wasiErr err)))
+
+              (when (strings/HasPrefix t "/")
+                (return 0 nil eNotcapable))
+
+              (set! rel (subslice rel _ (- (len rel) 1)))
+              (set! todo (append (strings/Split t "/") (spread todo)))))))
+
+      (return (.-pre fd) rel 0))))
+
+
+
+^{:go/end 788} (go/method change "change runs a change to the file system at a guest path (its last component not followed), refused under a read-only preopen.\n" ^uint32 [^{:tag (* WASI)} w ^uint32 dirfd ^string p ^{:tag (func [^string hp] [error])} fn]
+  (let [(values pre hp e) (.resolve w dirfd p false)]
+    (when (!= e 0)
+      (return e))
+
+    (when (.-ReadOnly (aget (.-Dirs w) pre))
+      (return eRofs))
+
+    (wasiErr (go/call fn hp))))
+
+
+^{:go/end 802} (go/func fileType ^byte [^fs/FileMode m]
+  (switch
+    (case [(.IsDir m)]
+      (return ftDir))
+    (case [(!= (bit-and m fs/ModeSymlink) 0)]
+      (return ftSymlink))
+    (case [(.IsRegular m)]
+      (return ftReg))
+    (case [(!= (bit-and m fs/ModeCharDevice) 0)]
+      (return ftChar)))
+
+  ^{:line 801} ftUnknown)
+
+
+^{:go/end 823} (go/method filestat [^{:tag (* WASI)} w ^uint32 p ^os/FileInfo fi]
+  (let [b (.bytes w p 64)]
+    (range [i b]
+      (aset b i 0))
+
+    (let [(values ^uint64 dev ^uint64 ino ^uint64 nlink) (values 0 0 1)
+        (values atim ctim) (values (.UnixNano (.ModTime fi)) (.UnixNano (.ModTime fi)))]
+      (when [(values st ok) (assert (* syscall/Stat_t) (.Sys fi))] ok
+        (set! (values dev ino nlink) (values (conv uint64 (.-Dev st)) (conv uint64 (.-Ino st)) (conv uint64 (.-Nlink st))))
+        (set! (values atim ctim) (statTimes st)))
+
+      (.PutUint64 binary/LittleEndian (subslice b 0) dev)
+      (.PutUint64 binary/LittleEndian (subslice b 8) ino)
+      (aset b 16 (fileType (.Mode fi)))
+      (.PutUint64 binary/LittleEndian (subslice b 24) nlink)
+      (.PutUint64 binary/LittleEndian (subslice b 32) (conv uint64 (.Size fi)))
+      (.PutUint64 binary/LittleEndian (subslice b 40) (conv uint64 atim))
+      (.PutUint64 binary/LittleEndian (subslice b 48) (conv uint64 (.UnixNano (.ModTime fi))))
+      (.PutUint64 binary/LittleEndian (subslice b 56) (conv uint64 ctim)))))
+
+
+^{:go/end 855} (go/method setTimes ^uint32 [^{:tag (* WASI)} w ^int pre ^string hp ^uint64 atim ^uint64 mtim ^uint32 fl]
+  (when (.-ReadOnly (aget (.-Dirs w) pre))
+    (return eRofs))
+
+  (when (or ^:go/paren (and (!= (bit-and fl 1) 0) (!= (bit-and fl 2) 0)) ^:go/paren (and (!= (bit-and fl 4) 0) (!= (bit-and fl 8) 0)))
+    (return eInval))
+
+  (let [(values fi err) (os/Stat hp)]
+    (when (!= err nil)
+      (return (wasiErr err)))
+
+    (let [(values at mt) (values (.ModTime fi) (.ModTime fi))]
+      (when [(values st ok) (assert (* syscall/Stat_t) (.Sys fi))] ok
+        (let [(values a _) (statTimes st)]
+          (set! at (time/Unix 0 a))))
+
+      (let [now (time/Now)]
+        (switch
+          (case [(!= (bit-and fl 1) 0)]
+            (set! at (time/Unix 0 (conv int64 atim))))
+          (case [(!= (bit-and fl 2) 0)]
+            (set! at now)))
+
+        (switch
+          (case [(!= (bit-and fl 4) 0)]
+            (set! mt (time/Unix 0 (conv int64 mtim))))
+          (case [(!= (bit-and fl 8) 0)]
+            (set! mt now)))
+
+        (wasiErr (os/Chtimes hp at mt))))))
+
+
+^{:go/end 927} (go/method open ^uint32 [^{:tag (* WASI)} w ^uint32 dirfd ^uint32 lookup ^string p ^uint32 oflags ^uint64 rights ^uint32 fdflags ^uint32 pfd]
+  (let [(values pre rel e) (.resolveRel w dirfd p (!= (bit-and lookup 1) 0))]
+    (when (!= e 0)
+      (return e))
+
+    (let [hp (.host w pre rel)
+        ^{:line 863} ro (.-ReadOnly (aget (.-Dirs w) pre))
+        (values ^:const ^{:val 2} rRead ^:const ^{:val 64} rWrite) (values (<< 1 1) (<< 1 6))
+        ^{:line 865} flag 0]
+      (switch
+        (case [(and (!= (bit-and rights rWrite) 0) (!= (bit-and rights rRead) 0))]
+          (set! flag os/O_RDWR))
+        (case [(!= (bit-and rights rWrite) 0)]
+          (set! flag os/O_WRONLY)))
+
+      (when (!= (bit-and oflags 1) 0)
+        (set! flag bit-or os/O_CREATE))
+
+      (when (!= (bit-and oflags 4) 0)
+        (set! flag bit-or os/O_EXCL))
+
+      (when (!= (bit-and oflags 8) 0)
+        (set! flag bit-or os/O_TRUNC))
+
+      (when (!= (bit-and fdflags 1) 0)
+        (set! flag bit-or os/O_APPEND))
+
+      (when (== (bit-and lookup 1) 0)
+        (set! flag bit-or syscall/O_NOFOLLOW))
+
+      (when (and ro ^:go/paren (!= (bit-and flag (bit-or os/O_WRONLY os/O_RDWR os/O_CREATE os/O_TRUNC)) 0))
+        (when [(values _ err) (os/Lstat hp)] (and (!= err nil) (!= (bit-and flag os/O_CREATE) 0))
+          (return eRofs))
+
+        (when (!= (bit-and flag (bit-or os/O_WRONLY os/O_RDWR os/O_TRUNC)) 0)
+          (return eRofs))
+
+        (set! flag bit-and-not (bit-or os/O_CREATE os/O_EXCL)))
+
+      (let [(values fi serr) (os/Stat hp)]
+        (when (!= (bit-and oflags 2) 0)
+          (when (!= serr nil)
+            (return (wasiErr serr)))
+
+          (when (not (.IsDir fi))
+            (return eNotdir)))
+
+
+        (when (and (== serr nil) (.IsDir fi))
+          (when (!= (bit-and flag (bit-or os/O_WRONLY os/O_RDWR)) 0)
+            (return eIsdir))
+
+          (when (!= (bit-and flag os/O_EXCL) 0)
+            (return eExist))
+
+          (let [(values f err) (os/Open hp)]
+            (when (!= err nil)
+              (return (wasiErr err)))
+
+            (return (.add w pfd (addr (lit wfd :kind ftDir :pre pre :rel rel :f f :rights allRights))))))
+
+        (let [(values f err) (os/OpenFile hp flag 0666)]
+          (when (!= err nil)
+            (return (wasiErr err)))
+
+          (let [k (conv byte ftReg)]
+            (when [(values fi2 err) (.Stat f)] (== err nil)
+              (set! k (fileType (.Mode fi2))))
+
+            (.add w pfd (addr (lit wfd :kind k :pre pre :rel rel :f f :flags (conv uint16 fdflags) :rights allRights)))))))))
+
+
+^{:go/end 941} (go/method add ^uint32 [^{:tag (* WASI)} w ^uint32 pfd ^{:tag (* wfd)} fd]
+  ^{:go/breaks [6]} (let [n (.-next w)]
+    (while true
+      (when [(values _ used) (aget (.-fds w) n)] (not used)
+        (break))
+
+      (inc! n))
+
+    (aset (.-fds w) n fd)
+    (set! (.-next w) (+ n 1))
+    (.put32 w pfd (conv uint32 n))
+    0))
+
+
+^{:go/end 982} (go/method readdir ^uint32 [^{:tag (* WASI)} w ^uint32 fdn ^uint32 buf ^uint32 n ^uint64 cookie ^uint32 pused]
+  (let [(values fd ok) (aget (.-fds w) (conv int32 fdn))]
+    (when (not ok)
+      (return eBadf))
+
+    (when (!= (.-kind fd) ftDir)
+      (return eNotdir))
+
+    (when (or (== cookie 0) (== (.-dir fd) nil))
+      (let [(values es err) (os/ReadDir (.host w (.-pre fd) (.-rel fd)))]
+        (when (!= err nil)
+          (return (wasiErr err)))
+
+        (set! (.-dir fd) (lit (slice dirent) (lit _ :name "." :typ ftDir) (lit _ :name ".." :typ ftDir)))
+        (range [_ e es]
+          (let [d (lit dirent :name (.Name e) :typ (fileType (.Type e)))]
+            (when [(values fi err) (.Info e)] (== err nil)
+              (when [(values st ok) (assert (* syscall/Stat_t) (.Sys fi))] ok
+                (set! (.-ino d) (conv uint64 (.-Ino st)))))
+
+
+            (set! (.-dir fd) (append (.-dir fd) d))))
+
+        (sort/SliceStable (subslice (.-dir fd) 2) ^{:go/end 966} (fn ^bool [^int i ^int j] (< (.-name (aget (.-dir fd) (+ 2 i))) (.-name (aget (.-dir fd) (+ 2 j))))))))
+
+    ^{:go/breaks [4]} (let [out (.bytes w buf n)
+        ^{:line 969} used (conv uint32 0)]
+      (for [i cookie] (and (< i (conv uint64 (len (.-dir fd)))) (< used n)) (inc! i)
+        (let [d (aget (.-dir fd) i)
+            ^{:line 972 :tag (array 24 byte)} h (zero (array 24 byte))]
+          (.PutUint64 binary/LittleEndian (subslice h 0) (+ i 1))
+          (.PutUint64 binary/LittleEndian (subslice h 8) (.-ino d))
+          (.PutUint32 binary/LittleEndian (subslice h 16) (conv uint32 (len (.-name d))))
+          (aset h 20 (.-typ d))
+          (let [rec (append (subslice h) (spread (.-name d)))]
+            (set! used + (conv uint32 (copy (subslice out used) rec))))))
+
+      (.put32 w pused used)
+      0)))
+
+
+
+
+^{:go/end 1056} (go/method poll "poll waits for the subscriptions: a clock's for its timeout (relative or absolute, the monotonic and the real clocks), a\nfile's (fd_read, fd_write) ready at once. Its events written, their number at pn.\n" ^uint32 [^{:tag (* WASI)} w ^uint32 in ^uint32 out ^uint32 nsub ^uint32 pn]
+  (when (== nsub 0)
+    (return eInval))
+
+  (let-type [sub (struct
+        ^{:line 991 :tag uint64} ud
+        ^{:line 992 :tag byte} tag
+        ^{:line 993 :tag uint32} fd
+        ^{:line 994 :tag time/Duration} wait)]
+
+    (let [subs (make (slice sub) nsub)
+        ^{:line 997} ready false
+        ^{:line 998 :tag time/Duration} minWait -1]
+      (range [i subs]
+        (let [b (.bytes w (+ in (* 48 (conv uint32 i))) 48)
+            ^{:line 1001} s (lit sub :ud (.Uint64 binary/LittleEndian b) :tag (aget b 8))]
+          (switch (.-tag s)
+            (case [0]
+              (let [id (.Uint32 binary/LittleEndian (subslice b 16))
+                  ^{:line 1005} to (.Uint64 binary/LittleEndian (subslice b 24))
+                  ^{:line 1006} abs (!= (bit-and (.Uint16 binary/LittleEndian (subslice b 40)) 1) 0)
+                  ^{:line 1007} d (conv time/Duration to)]
+                (when abs
+                  (let [^uint64 now (zero uint64)]
+                    (if (== id 0)
+                      (set! now (conv uint64 (.UnixNano (time/Now))))
+
+                      (set! now (+ (conv uint64 (.Nanoseconds (time/Since (.-start w)))) 1)))
+
+                    (if (> to now)
+                      (set! d (conv time/Duration (- to now)))
+
+                      (set! d 0))))
+
+
+                (set! (.-wait s) d)
+                (when (or (< minWait 0) (< d minWait))
+                  (set! minWait d))))
+
+            (case [1 2]
+              (set! (.-fd s) (.Uint32 binary/LittleEndian (subslice b 16)))
+              (set! ready true)))
+
+          (aset subs i s)))
+
+      (when (and (not ready) (> minWait 0))
+        (time/Sleep minWait))
+
+      ^{:go/breaks [4]} (let [ne (conv uint32 0)]
+        (range [_ s subs]
+          (when (and (== (.-tag s) 0) ^:go/paren (or ready (> (.-wait s) minWait)))
+            (continue))
+
+          (let [e (.bytes w (+ out (* 32 ne)) 32)]
+            (range [i e]
+              (aset e i 0))
+
+            (.PutUint64 binary/LittleEndian e (.-ud s))
+            (aset e 10 (.-tag s))
+            (when (!= (.-tag s) 0)
+              (if [(values _ ok) (aget (.-fds w) (conv int32 (.-fd s)))] (not ok)
+                (.PutUint16 binary/LittleEndian (subslice e 8) eBadf)
+
+                (.PutUint64 binary/LittleEndian (subslice e 16) 1)))
+
+
+            (inc! ne)))
+
+        (.put32 w pn ne)
+        0))))
+
+
+
+^{:go/end 1061} (go/func statTimes "statTimes is a stat's access and change times (linux's Stat_t).\n" [^{:tag (* syscall/Stat_t)} st] :results [int64 int64]
+  (return (+ (* (.-Sec (.-Atim st)) 1.0E9) (.-Nsec (.-Atim st))) (+ (* (.-Sec (.-Ctim st)) 1.0E9) (.-Nsec (.-Ctim st)))))

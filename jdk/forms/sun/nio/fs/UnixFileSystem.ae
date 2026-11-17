@@ -1,0 +1,578 @@
+;; Converted from overlay/jdk/java.base/sun/nio/fs/UnixFileSystem.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.fs)
+
+(import '(java.io IOException)
+        '(java.nio.file AtomicMoveNotSupportedException
+                        CopyOption
+                        DirectoryNotEmptyException
+                        DirectoryStream$Filter
+                        FileAlreadyExistsException
+                        FileStore
+                        FileSystem
+                        FileSystemException
+                        LinkOption
+                        Path
+                        PathMatcher
+                        StandardCopyOption)
+        '(java.nio.file.attribute GroupPrincipal UserPrincipal UserPrincipalLookupService)
+        '(java.nio.file.spi FileSystemProvider)
+        '(java.util Arrays Iterator List NoSuchElementException Objects)
+        '(java.util.concurrent ExecutionException TimeUnit)
+        '(java.util.function Function)
+        '(java.util.regex Pattern)
+        '(sun.nio.ch IOStatus))
+
+(defclass ^:abstract UnixFileSystem
+  :extends FileSystem
+
+  (field ^:private ^:static ^:final ^int MIN_BUFFER_SIZE 16384)
+
+  (field ^:private ^:static ^:volatile ^boolean directCopyNotSupported)
+
+  (field ^:private ^:final ^UnixFileSystemProvider provider)
+
+  (field ^:private ^:final ^byte/1 defaultDirectory)
+
+  (field ^:private ^:final ^boolean needToResolveAgainstDefaultDirectory)
+
+  (field ^:private ^:final ^UnixPath rootDirectory)
+
+  (constructor [this ^UnixFileSystemProvider provider ^String dir]
+    (set! (.-provider this) provider)
+    (set! (.-defaultDirectory this) (Util/toBytes (UnixPath/normalizeAndCheck dir)))
+    (when-not (== (aget (.-defaultDirectory this) 0) \/)
+      (throw (RuntimeException. "default directory must be absolute")))
+    (let [propValue (System/getProperty "sun.nio.fs.chdirAllowed" "false")
+          chdirAllowed (if (.isEmpty propValue) true (Boolean/parseBoolean propValue))]
+      (if chdirAllowed
+          (set! (.-needToResolveAgainstDefaultDirectory this) true)
+          (let [cwd (UnixNativeDispatcher/getcwd)
+                ^:mutable defaultIsCwd (== (alength cwd) (alength defaultDirectory))]
+            (when defaultIsCwd
+              (loop [^int i 0]
+                (if (< i (alength cwd))
+                    (if (not (== (aget cwd i) (aget defaultDirectory i)))
+                        (set! defaultIsCwd false)
+                        (recur (unchecked-inc-int i)))
+                    nil)))
+            (set! (.-needToResolveAgainstDefaultDirectory this) (not defaultIsCwd))))
+      (set! (.-rootDirectory this) (UnixPath. this "/"))))
+
+  (method defaultDirectory ^byte/1 [this] defaultDirectory)
+
+  (method needToResolveAgainstDefaultDirectory ^boolean [this]
+    needToResolveAgainstDefaultDirectory)
+
+  (method isCaseInsensitiveAndPreserving ^boolean [this] false)
+
+  (method rootDirectory ^UnixPath [this] rootDirectory)
+
+  (method ^:static standardFileAttributeViews ^{:tag (List String)} []
+    (Arrays/asList (new String/1 ["basic" "posix" "unix" "owner"])))
+
+  (method ^:public ^:final provider ^FileSystemProvider [this] provider)
+
+  (method ^:public ^:final getSeparator ^String [this] "/")
+
+  (method ^:public ^:final isOpen ^boolean [this] true)
+
+  (method ^:public ^:final isReadOnly ^boolean [this] false)
+
+  (method ^:public ^:final close :throws [IOException] ^void [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method copyNonPosixAttributes ^void [this ^int sfd ^int tfd])
+
+  (method ^:public ^:final getRootDirectories ^{:tag (Iterable Path)} [this]
+    (List/of rootDirectory))
+
+  (method ^:abstract getMountEntries ^{:tag (Iterable UnixMountEntry)} [this])
+
+  (method ^:abstract getFileStore :throws [IOException] ^FileStore [this ^UnixMountEntry entry])
+
+  (defclass ^:private FileStoreIterator
+    :implements [(Iterator FileStore)]
+
+    (field ^:private ^:final ^{:tag (Iterator UnixMountEntry)} entries)
+
+    (field ^:private ^FileStore next)
+
+    (constructor [this]
+      (set! (.-entries this) (.iterator (.getMountEntries UnixFileSystem/this))))
+
+    (method ^:private readNext ^FileStore [this]
+      (java-assert (Thread/holdsLock this))
+      (while true
+        (when-not (.hasNext entries) (return nil))
+        (let [entry (cast UnixMountEntry (.next entries))]
+          (when-not (.isIgnored entry)
+            (try (return (.getFileStore UnixFileSystem/this entry)) (catch IOException ignore))))))
+
+    (method ^:public ^:synchronized hasNext ^boolean [this]
+      (if (some? next) true (do (set! next (.readNext this)) (some? next))))
+
+    (method ^:public ^:synchronized next ^FileStore [this]
+      (when (nil? next) (set! next (.readNext this)))
+      (if (nil? next) (throw (NoSuchElementException.)) (let [result next] (set! next nil) result)))
+
+    (method ^:public remove ^void [this]
+      (throw (UnsupportedOperationException.))))
+
+  (method ^:public ^:final getFileStores ^{:tag (Iterable FileStore)} [this]
+    (method-ref Iterable FileStoreIterator/new))
+
+  (method ^:public ^:final getPath ^Path [this ^String first & ^String/1 more]
+    (Objects/requireNonNull first)
+    (let [^:mutable ^String path nil]
+      (if (== (alength more) 0)
+          (set! path first)
+          (let [sb (StringBuilder.)]
+            (.append sb first)
+            (for-each [^String segment more]
+              (when-not (.isEmpty segment)
+                (when (> (.length sb) 0) (.append sb \/))
+                (.append sb segment)))
+            (set! path (.toString sb))))
+      (UnixPath. this path)))
+
+  (method ^:public getPathMatcher ^PathMatcher [this ^String syntaxAndInput]
+    (let [pos (.indexOf syntaxAndInput \:)]
+      (when (<= pos 0) (throw (IllegalArgumentException.)))
+      (let [syntax (.substring syntaxAndInput 0 pos)
+            input (.substring syntaxAndInput (unchecked-add-int pos 1))
+            ^:mutable ^String expr nil]
+        (cond
+          (.equalsIgnoreCase syntax GLOB_SYNTAX) (set! expr (Globs/toUnixRegexPattern input))
+          (.equalsIgnoreCase syntax REGEX_SYNTAX) (set! expr input)
+          :else
+            (throw (UnsupportedOperationException. (java-str "Syntax '" syntax "' not recognized"))))
+        (let [pattern (.compilePathMatchPattern this expr)]
+          (anon PathMatcher []
+            (method ^:public matches ^boolean [this ^Path path]
+              (.matches (.matcher pattern (.toString path)))))))))
+
+  (field ^:private ^:static ^:final ^String GLOB_SYNTAX "glob")
+
+  (field ^:private ^:static ^:final ^String REGEX_SYNTAX "regex")
+
+  (method ^:public ^:final getUserPrincipalLookupService ^UserPrincipalLookupService [this]
+    LookupService/instance)
+
+  (defclass ^:private ^:static LookupService
+    (field ^:static ^:final ^UserPrincipalLookupService instance
+      (anon UserPrincipalLookupService []
+        (method ^:public lookupPrincipalByName :throws [IOException] ^UserPrincipal [this
+                                                                                     ^String name]
+          (UnixUserPrincipals/lookupUser name))
+
+        (method ^:public lookupPrincipalByGroupName :throws [IOException] ^GroupPrincipal [this
+                                                                                           ^String group]
+          (UnixUserPrincipals/lookupGroup group)))))
+
+  (method compilePathMatchPattern ^Pattern [this ^String expr]
+    (Pattern/compile expr))
+
+  (method ^:private ^:static lcm ^long [^long x ^long y]
+    (java-assert (and (> x 0) (> y 0)) "Non-positive parameter")
+    (let [^:mutable u x
+          ^:mutable v y]
+      (while (not (== u v)) (if (< u v) (set! u (unchecked-add u x)) (set! v (unchecked-add v y))))
+      u))
+
+  (method ^:private ^:static temporaryBufferSize ^int [^UnixPath source ^UnixPath target]
+    (let [^:mutable bufferSize MIN_BUFFER_SIZE]
+      (try
+        (let [bss (.blockSize (UnixFileStoreAttributes/get source))
+              bst (.blockSize (UnixFileStoreAttributes/get target))]
+          (when (and (> bss 0) (> bst 0))
+            (set! bufferSize (unchecked-int (if (== bss bst) bss (UnixFileSystem/lcm bss bst)))))
+          (when (< bufferSize MIN_BUFFER_SIZE)
+            (let [factor (unchecked-divide-int
+                           (unchecked-subtract-int (unchecked-add-int MIN_BUFFER_SIZE bufferSize) 1)
+                           bufferSize)]
+              (set! bufferSize (unchecked-multiply-int bufferSize factor)))))
+        (catch UnixException ignored))
+      bufferSize))
+
+  (defclass ^:protected ^:static Flags
+    (field ^boolean replaceExisting)
+
+    (field ^boolean atomicMove)
+
+    (field ^boolean followLinks)
+
+    (field ^boolean interruptible)
+
+    (field ^boolean copyBasicAttributes)
+
+    (field ^boolean copyPosixAttributes)
+
+    (field ^boolean copyNonPosixAttributes)
+
+    (field ^boolean failIfUnableToCopyBasic)
+
+    (field ^boolean failIfUnableToCopyPosix)
+
+    (field ^boolean failIfUnableToCopyNonPosix)
+
+    (method ^:static fromCopyOptions ^Flags [& ^CopyOption/1 options]
+      (let [flags (Flags.)]
+        (set! (.-followLinks flags) true)
+        (for-each [^CopyOption option options]
+          (cond
+            (identical? option StandardCopyOption/REPLACE_EXISTING)
+              (set! (.-replaceExisting flags) true)
+            (identical? option LinkOption/NOFOLLOW_LINKS) (set! (.-followLinks flags) false)
+            (identical? option StandardCopyOption/COPY_ATTRIBUTES)
+              (do
+                (set! (.-copyBasicAttributes flags) true)
+                (set! (.-copyPosixAttributes flags) true)
+                (set! (.-copyNonPosixAttributes flags) true)
+                (set! (.-failIfUnableToCopyBasic flags) true))
+            (.matches ExtendedOptions/INTERRUPTIBLE option) (set! (.-interruptible flags) true)
+            :else
+              (do
+                (when (nil? option) (throw (NullPointerException.)))
+                (throw (UnsupportedOperationException.
+                         (java-str "Unsupported copy option: " option))))))
+        flags))
+
+    (method ^:static fromMoveOptions ^Flags [& ^CopyOption/1 options]
+      (let [flags (Flags.)]
+        (for-each [^CopyOption option options]
+          (cond
+            (identical? option StandardCopyOption/ATOMIC_MOVE) (set! (.-atomicMove flags) true)
+            (identical? option StandardCopyOption/REPLACE_EXISTING)
+              (set! (.-replaceExisting flags) true)
+            :else
+              (when-not (identical? option LinkOption/NOFOLLOW_LINKS)
+                (when (nil? option) (throw (NullPointerException.)))
+                (throw (UnsupportedOperationException. (java-str "Unsupported option: " option))))))
+        (set! (.-copyBasicAttributes flags) true)
+        (set! (.-copyPosixAttributes flags) true)
+        (set! (.-copyNonPosixAttributes flags) true)
+        (set! (.-failIfUnableToCopyBasic flags) true)
+        flags)))
+
+  (method ^:private copyDirectory :throws [IOException] ^void [this ^UnixPath source
+                                                               ^UnixFileAttributes attrs
+                                                               ^UnixPath target ^Flags flags]
+    (try
+      (UnixNativeDispatcher/mkdir target (.mode attrs))
+      (catch UnixException x
+        (when (and (== (.errno x) UnixConstants/EEXIST) (.-replaceExisting flags))
+          (throw (FileSystemException. (.toString target))))
+        (.rethrowAsIOException x target)))
+    (when-not (and (and (not (.-copyBasicAttributes flags)) (not (.-copyPosixAttributes flags)))
+                   (not (.-copyNonPosixAttributes flags)))
+      (let [^:mutable ^int dfd -1]
+        (try
+          (set! dfd (UnixNativeDispatcher/open target UnixConstants/O_RDONLY 0))
+          (catch UnixException x
+            (when (and (.-copyNonPosixAttributes flags) (.-failIfUnableToCopyNonPosix flags))
+              (try (UnixNativeDispatcher/rmdir target) (catch UnixException ignore))
+              (.rethrowAsIOException x target))))
+        (let [^:mutable done false]
+          (try
+            (when (.-copyPosixAttributes flags)
+              (try
+                (if (>= dfd 0)
+                    (do
+                      (UnixNativeDispatcher/fchown dfd (.uid attrs) (.gid attrs))
+                      (UnixNativeDispatcher/fchmod dfd (.mode attrs)))
+                    (do
+                      (UnixNativeDispatcher/chown target (.uid attrs) (.gid attrs))
+                      (UnixNativeDispatcher/chmod target (.mode attrs))))
+                (catch UnixException x
+                  (when (.-failIfUnableToCopyPosix flags) (.rethrowAsIOException x target)))))
+            (when (and (.-copyNonPosixAttributes flags) (>= dfd 0))
+              (let [^:mutable ^int sfd -1]
+                (try
+                  (set! sfd (UnixNativeDispatcher/open source UnixConstants/O_RDONLY 0))
+                  (catch UnixException x
+                    (when (.-failIfUnableToCopyNonPosix flags) (.rethrowAsIOException x source))))
+                (when (>= sfd 0)
+                  (.copyNonPosixAttributes (.getFileSystem source) sfd dfd)
+                  (UnixNativeDispatcher/close sfd
+                                              (lambda Function ^RuntimeException [^UnixException e]
+                                                nil)))))
+            (when (.-copyBasicAttributes flags)
+              (try
+                (if (>= dfd 0)
+                    (UnixNativeDispatcher/futimens
+                      dfd
+                      (.to (.lastAccessTime attrs) TimeUnit/NANOSECONDS)
+                      (.to (.lastModifiedTime attrs) TimeUnit/NANOSECONDS))
+                    (UnixNativeDispatcher/utimensat
+                      UnixConstants/AT_FDCWD
+                      target
+                      (.to (.lastAccessTime attrs) TimeUnit/NANOSECONDS)
+                      (.to (.lastModifiedTime attrs) TimeUnit/NANOSECONDS)
+                      0))
+                (catch UnixException x
+                  (when (.-failIfUnableToCopyBasic flags) (.rethrowAsIOException x target)))))
+            (set! done true)
+            (finally
+              (when (>= dfd 0)
+                (UnixNativeDispatcher/close dfd
+                                            (lambda Function ^RuntimeException [^UnixException e]
+                                              nil)))
+              (when-not done (try (UnixNativeDispatcher/rmdir target) (catch UnixException ignore)))))))))
+
+  (method directCopy :throws [UnixException] ^int [this ^int dst ^int src
+                                                   ^long addressToPollForCancel]
+    IOStatus/UNSUPPORTED)
+
+  (method bufferedCopy :throws [UnixException] ^void [this ^int dst ^int src ^long address ^int size
+                                                      ^long addressToPollForCancel]
+    (UnixFileSystem/bufferedCopy0 dst src address size addressToPollForCancel))
+
+  (method copyFile :throws [IOException] ^void [this ^UnixPath source ^UnixFileAttributes attrs
+                                                ^UnixPath target ^Flags flags
+                                                ^long addressToPollForCancel]
+    (let [^:mutable ^int fi -1]
+      (try
+        (set! fi (UnixNativeDispatcher/open source UnixConstants/O_RDONLY 0))
+        (catch UnixException x (.rethrowAsIOException x source)))
+      (try
+        (let [^:mutable ^int fo -1]
+          (try
+            (set! fo
+                  (UnixNativeDispatcher/open target
+                                             (bit-or-int
+                                               (bit-or-int
+                                                 UnixConstants/O_WRONLY
+                                                 UnixConstants/O_CREAT)
+                                               UnixConstants/O_EXCL)
+                                             (.mode attrs)))
+            (catch UnixException x
+              (when (and (== (.errno x) UnixConstants/EEXIST) (.-replaceExisting flags))
+                (throw (FileSystemException. (.toString target))))
+              (.rethrowAsIOException x target)))
+          (let [^:mutable complete false]
+            (try
+              (let [^:mutable copied false]
+                (when (and (not directCopyNotSupported) (> (.size attrs) 0))
+                  (try
+                    (let [res (.directCopy this fo fi addressToPollForCancel)]
+                      (cond
+                        (== res 0) (set! copied true)
+                        (== res IOStatus/UNSUPPORTED) (set! directCopyNotSupported true)))
+                    (catch UnixException x (.rethrowAsIOException x source target))))
+                (when-not copied
+                  (let [bufferSize (UnixFileSystem/temporaryBufferSize source target)]
+                    (with-resources [buf (NativeBuffers/getNativeBuffer bufferSize)]
+                      (try
+                        (.bufferedCopy this fo fi (.address buf) bufferSize addressToPollForCancel)
+                        (catch UnixException x (.rethrowAsIOException x source target))))))
+                (when (.-copyPosixAttributes flags)
+                  (try
+                    (UnixNativeDispatcher/fchown fo (.uid attrs) (.gid attrs))
+                    (UnixNativeDispatcher/fchmod fo (.mode attrs))
+                    (catch UnixException x
+                      (when (.-failIfUnableToCopyPosix flags) (.rethrowAsIOException x target)))))
+                (when (.-copyNonPosixAttributes flags)
+                  (.copyNonPosixAttributes (.getFileSystem source) fi fo))
+                (when (.-copyBasicAttributes flags)
+                  (try
+                    (UnixNativeDispatcher/futimens
+                      fo
+                      (.to (.lastAccessTime attrs) TimeUnit/NANOSECONDS)
+                      (.to (.lastModifiedTime attrs) TimeUnit/NANOSECONDS))
+                    (catch UnixException x
+                      (when (.-failIfUnableToCopyBasic flags) (.rethrowAsIOException x target)))))
+                (set! complete true))
+              (finally
+                (UnixNativeDispatcher/close fo
+                                            (lambda Function ^RuntimeException [^UnixException e]
+                                              nil))
+                (when-not complete
+                  (try (UnixNativeDispatcher/unlink target) (catch UnixException ignore)))))))
+        (finally
+          (UnixNativeDispatcher/close fi (lambda Function ^RuntimeException [^UnixException e] nil))))))
+
+  (method ^:private copyLink :throws [IOException] ^void [this ^UnixPath source
+                                                          ^UnixFileAttributes attrs ^UnixPath target
+                                                          ^Flags flags]
+    (let [^:mutable ^byte/1 linktarget nil]
+      (try
+        (set! linktarget (UnixNativeDispatcher/readlink source))
+        (catch UnixException x (.rethrowAsIOException x source)))
+      (try
+        (UnixNativeDispatcher/symlink linktarget target)
+        (when (.-copyPosixAttributes flags)
+          (try
+            (UnixNativeDispatcher/lchown target (.uid attrs) (.gid attrs))
+            (catch UnixException x)))
+        (catch UnixException x
+          (when (and (== (.errno x) UnixConstants/EEXIST) (.-replaceExisting flags))
+            (throw (FileSystemException. (.toString target))))
+          (.rethrowAsIOException x target)))))
+
+  (method ^:private copySpecial :throws [IOException] ^void [this ^UnixPath source
+                                                             ^UnixFileAttributes attrs
+                                                             ^UnixPath target ^Flags flags]
+    (try
+      (UnixNativeDispatcher/mknod target (.mode attrs) (.rdev attrs))
+      (catch UnixException x
+        (when (and (== (.errno x) UnixConstants/EEXIST) (.-replaceExisting flags))
+          (throw (FileSystemException. (.toString target))))
+        (.rethrowAsIOException x target)))
+    (let [^:mutable done false]
+      (try
+        (when (.-copyPosixAttributes flags)
+          (try
+            (UnixNativeDispatcher/chown target (.uid attrs) (.gid attrs))
+            (UnixNativeDispatcher/chmod target (.mode attrs))
+            (catch UnixException x
+              (when (.-failIfUnableToCopyPosix flags) (.rethrowAsIOException x target)))))
+        (when (.-copyBasicAttributes flags)
+          (try
+            (UnixNativeDispatcher/utimensat UnixConstants/AT_FDCWD
+                                            target
+                                            (.to (.lastAccessTime attrs) TimeUnit/NANOSECONDS)
+                                            (.to (.lastModifiedTime attrs) TimeUnit/NANOSECONDS)
+                                            0)
+            (catch UnixException x
+              (when (.-failIfUnableToCopyBasic flags) (.rethrowAsIOException x target)))))
+        (set! done true)
+        (finally
+          (when-not done (try (UnixNativeDispatcher/unlink target) (catch UnixException ignore)))))))
+
+  (method ^:static ensureEmptyDir :throws [IOException] ^void [^UnixPath dir]
+    (try
+      (let [ptr (UnixNativeDispatcher/opendir dir)]
+        (with-resources [stream (UnixDirectoryStream.
+                                  dir
+                                  ptr
+                                  (lambda DirectoryStream$Filter ^boolean [^Path e] true))]
+          (when (.hasNext (.iterator stream))
+            (throw (DirectoryNotEmptyException. (.getPathForExceptionMessage dir))))))
+      (catch UnixException e (.rethrowAsIOException e dir))))
+
+  (method move :throws [IOException] ^void [this ^UnixPath source ^UnixPath target &
+                                            ^CopyOption/1 options]
+    (let [flags (Flags/fromMoveOptions options)]
+      (if (.-atomicMove flags)
+          (try
+            (UnixNativeDispatcher/rename source target)
+            (catch UnixException x
+              (when (== (.errno x) UnixConstants/EXDEV)
+                (throw (AtomicMoveNotSupportedException.
+                         (.getPathForExceptionMessage source)
+                         (.getPathForExceptionMessage target)
+                         (.errorString x))))
+              (.rethrowAsIOException x source target)))
+          (let [^:mutable ^UnixFileAttributes sourceAttrs nil
+                ^:mutable ^UnixFileAttributes targetAttrs nil]
+            (try
+              (set! sourceAttrs (UnixFileAttributes/get source false))
+              (when (.isDirectory sourceAttrs)
+                (let [errno (UnixNativeDispatcher/access source UnixConstants/W_OK)]
+                  (when-not (== errno 0) (.rethrowAsIOException (UnixException. errno) source))))
+              (catch UnixException x
+                (when (== (.errno x) UnixConstants/ENOTDIR) (.setError x UnixConstants/ENOENT))
+                (.rethrowAsIOException x source)))
+            (try (set! targetAttrs (UnixFileAttributes/get target false)) (catch UnixException x))
+            (let [targetExists (some? targetAttrs)]
+              (when targetExists
+                (when (.isSameFile sourceAttrs targetAttrs) (return))
+                (when-not (.-replaceExisting flags)
+                  (throw (FileAlreadyExistsException. (.getPathForExceptionMessage target))))
+                (try
+                  (if (.isDirectory targetAttrs)
+                      (UnixNativeDispatcher/rmdir target)
+                      (UnixNativeDispatcher/unlink target))
+                  (catch UnixException x
+                    (when (and (.isDirectory targetAttrs)
+                               (or (== (.errno x) UnixConstants/EEXIST)
+                                   (== (.errno x) UnixConstants/ENOTEMPTY)))
+                      (throw (DirectoryNotEmptyException. (.getPathForExceptionMessage target))))
+                    (when-not (== (.errno x) UnixConstants/ENOENT) (.rethrowAsIOException x target)))))
+              (try
+                (UnixNativeDispatcher/rename source target)
+                (return)
+                (catch UnixException x
+                  (when (and (not (== (.errno x) UnixConstants/EXDEV))
+                             (not (== (.errno x) UnixConstants/EISDIR)))
+                    (.rethrowAsIOException x source target))))
+              (cond
+                (.isDirectory sourceAttrs)
+                  (do
+                    (UnixFileSystem/ensureEmptyDir source)
+                    (.copyDirectory this source sourceAttrs target flags))
+                (.isSymbolicLink sourceAttrs) (.copyLink this source sourceAttrs target flags)
+                (.isDevice sourceAttrs) (.copySpecial this source sourceAttrs target flags)
+                :else (.copyFile this source sourceAttrs target flags 0))
+              (try
+                (if (.isDirectory sourceAttrs)
+                    (UnixNativeDispatcher/rmdir source)
+                    (UnixNativeDispatcher/unlink source))
+                (catch UnixException x
+                  (try
+                    (if (.isDirectory sourceAttrs)
+                        (UnixNativeDispatcher/rmdir target)
+                        (UnixNativeDispatcher/unlink target))
+                    (catch UnixException ignore))
+                  (when (and (.isDirectory sourceAttrs)
+                             (or (== (.errno x) UnixConstants/EEXIST)
+                                 (== (.errno x) UnixConstants/ENOTEMPTY)))
+                    (throw (DirectoryNotEmptyException. (.getPathForExceptionMessage source))))
+                  (.rethrowAsIOException x source))))))))
+
+  (method copy :throws [IOException] ^void [this ^:final ^UnixPath source ^:final ^UnixPath target &
+                                            ^CopyOption/1 options]
+    (let [flags (Flags/fromCopyOptions options)
+          ^:mutable ^UnixFileAttributes sourceAttrs nil
+          ^:mutable ^UnixFileAttributes targetAttrs nil]
+      (try
+        (set! sourceAttrs (UnixFileAttributes/get source (.-followLinks flags)))
+        (catch UnixException x
+          (when (== (.errno x) UnixConstants/ENOTDIR) (.setError x UnixConstants/ENOENT))
+          (.rethrowAsIOException x source)))
+      (when (or (not (.isSymbolicLink sourceAttrs)) (.-followLinks flags))
+        (let [errno (UnixNativeDispatcher/access source UnixConstants/R_OK)]
+          (when-not (== errno 0) (.rethrowAsIOException (UnixException. errno) source))))
+      (try (set! targetAttrs (UnixFileAttributes/get target false)) (catch UnixException x))
+      (let [targetExists (some? targetAttrs)]
+        (when targetExists
+          (when (.isSameFile sourceAttrs targetAttrs) (return))
+          (when-not (.-replaceExisting flags)
+            (throw (FileAlreadyExistsException. (.getPathForExceptionMessage target))))
+          (try
+            (if (.isDirectory targetAttrs)
+                (UnixNativeDispatcher/rmdir target)
+                (UnixNativeDispatcher/unlink target))
+            (catch UnixException x
+              (when (and (.isDirectory targetAttrs)
+                         (or (== (.errno x) UnixConstants/EEXIST)
+                             (== (.errno x) UnixConstants/ENOTEMPTY)))
+                (throw (DirectoryNotEmptyException. (.getPathForExceptionMessage target))))
+              (when-not (== (.errno x) UnixConstants/ENOENT) (.rethrowAsIOException x target)))))
+        (cond
+          (.isDirectory sourceAttrs) (.copyDirectory this source sourceAttrs target flags)
+          (.isSymbolicLink sourceAttrs) (.copyLink this source sourceAttrs target flags)
+          (not (.-interruptible flags)) (.copyFile this source sourceAttrs target flags 0)
+          :else
+            (let [attrsToCopy sourceAttrs
+                  ^Cancellable copyTask (anon Cancellable []
+                                          (method ^:public implRun :throws [IOException] ^void [this]
+                                            (.copyFile
+                                              UnixFileSystem/this
+                                              source
+                                              attrsToCopy
+                                              target
+                                              flags
+                                              (.addressToPollForCancel this))))]
+              (try
+                (Cancellable/runInterruptibly copyTask)
+                (catch ExecutionException e
+                  (let [t (.getCause e)]
+                    (when (instance? IOException t) (throw (cast IOException t)))
+                    (throw (IOException. t))))))))))
+
+  (method ^:private ^:static ^:native bufferedCopy0 :throws [UnixException] ^void [^int dst ^int src
+                                                                                   ^long address
+                                                                                   ^int size
+                                                                                   ^long addressToPollForCancel]))

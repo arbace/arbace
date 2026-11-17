@@ -1,0 +1,288 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/Http1HeaderParser.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.net ProtocolException)
+        '(java.net.http HttpHeaders)
+        '(java.nio ByteBuffer)
+        '(java.util ArrayList HashMap List Locale Map Objects)
+        '(java.util.function Function)
+        '(jdk.internal.net.http.common Utils))
+
+(defclass Http1HeaderParser
+  (field ^:private ^:static ^:final ^char CR \return)
+
+  (field ^:private ^:static ^:final ^char LF \newline)
+
+  (field ^:private ^:static ^:final ^char HT \tab)
+
+  (field ^:private ^:static ^:final ^char SP \space)
+
+  (field ^:private ^StringBuilder sb (StringBuilder.))
+
+  (field ^:private ^String statusLine)
+
+  (field ^:private ^int responseCode)
+
+  (field ^:private ^HttpHeaders headers)
+
+  (field ^:private ^{:tag (Map String (List String))} privateMap (HashMap.))
+
+  (field ^:private ^long size)
+
+  (field ^:private ^:static ^:final ^int K 1024)
+
+  (field ^:private ^:static ^:final ^int MAX_HTTP_HEADER_SIZE
+    (Utils/getIntegerNetProperty "jdk.http.maxHeaderSize"
+                                 Integer/MIN_VALUE
+                                 Integer/MAX_VALUE
+                                 (unchecked-multiply-int 384 K)
+                                 true))
+
+  (defclass ^:enum State
+    (constants
+      INITIAL
+      STATUS_LINE
+      STATUS_LINE_FOUND_CR
+      STATUS_LINE_FOUND_LF
+      STATUS_LINE_END
+      STATUS_LINE_END_CR
+      STATUS_LINE_END_LF
+      HEADER
+      HEADER_FOUND_CR
+      HEADER_FOUND_LF
+      HEADER_FOUND_CR_LF
+      HEADER_FOUND_CR_LF_CR
+      FINISHED))
+
+  (field ^:private ^State state State/INITIAL)
+
+  (method statusLine ^String [this] statusLine)
+
+  (method responseCode ^int [this] responseCode)
+
+  (method headers ^HttpHeaders [this]
+    (java-assert (identical? state State/FINISHED) (java-str "Unexpected state " state))
+    headers)
+
+  (method ^:public currentStateMessage ^String [this]
+    (let [stateName (.name state)
+          ^:mutable ^String msg nil]
+      (if (.contains stateName "INITIAL")
+          (String/format "HTTP/1.1 header parser received no bytes" (new Object/1 []))
+          (do
+            (cond
+              (.contains stateName "STATUS")
+                (set! msg
+                      (String/format "parsing HTTP/1.1 status line, receiving [%s]"
+                                     (new Object/1 [(.toString sb)])))
+              (.contains stateName "HEADER")
+                (let [^:mutable headerName (.toString sb)]
+                  (when-not (== (.indexOf headerName \:) -1)
+                    (set! headerName
+                          (java-str (.substring headerName
+                                                0
+                                                (unchecked-add-int (.indexOf headerName \:) 1))
+                                    "...")))
+                  (set! msg
+                        (String/format "parsing HTTP/1.1 header, receiving [%s]"
+                                       (new Object/1 [headerName]))))
+              :else
+                (set! msg
+                      (String/format "HTTP/1.1 parser receiving [%s]"
+                                     (new Object/1 [(.toString sb)]))))
+            (String/format "%s, parser state [%s]" (new Object/1 [msg state]))))))
+
+  (method parse :throws [ProtocolException] ^boolean [this ^ByteBuffer input]
+    (Objects/requireNonNull input "null input")
+    (while (.canContinueParsing this input)
+      (switch state
+        INITIAL (set! state State/STATUS_LINE)
+        STATUS_LINE (.readResumeStatusLine this input)
+        (STATUS_LINE_FOUND_CR STATUS_LINE_FOUND_LF) (.readStatusLineFeed this input)
+        STATUS_LINE_END (.maybeStartHeaders this input)
+        (STATUS_LINE_END_CR STATUS_LINE_END_LF) (.maybeEndHeaders this input)
+        HEADER (.readResumeHeader this input)
+        (HEADER_FOUND_CR HEADER_FOUND_LF) (.resumeOrLF this input)
+        HEADER_FOUND_CR_LF (.resumeOrSecondCR this input)
+        HEADER_FOUND_CR_LF_CR (.resumeOrEndHeaders this input)
+        (throw (InternalError. (java-str "Unexpected state: " state)))))
+    (identical? state State/FINISHED))
+
+  (method ^:private canContinueParsing ^boolean [this ^ByteBuffer buffer]
+    (switch state
+      FINISHED false
+      (STATUS_LINE_FOUND_LF STATUS_LINE_END_LF HEADER_FOUND_LF) true
+      (.hasRemaining buffer)))
+
+  (method ^:private get ^char [this ^ByteBuffer input]
+    (unchecked-char (bit-and-int (.get input) 0xFF)))
+
+  (method ^:private readResumeStatusLine :throws [ProtocolException] ^void [this ^ByteBuffer input]
+    (let [max (unchecked-subtract
+                (unchecked-subtract (unchecked-subtract MAX_HTTP_HEADER_SIZE size) 32)
+                (.length sb))
+          ^:mutable ^int count 0
+          ^:mutable ^char c 0]
+      (while (and (.hasRemaining input) (not (== (set! c (.get this input)) CR)))
+        (when (== c LF) (break))
+        (.append sb c)
+        (when (> (set! count (unchecked-inc-int count)) max)
+          (.checkMaxHeaderSize this (.length sb))))
+      (cond
+        (== c CR) (set! state State/STATUS_LINE_FOUND_CR)
+        (== c LF) (set! state State/STATUS_LINE_FOUND_LF))))
+
+  (method ^:private readStatusLineFeed :throws [ProtocolException] ^void [this ^ByteBuffer input]
+    (let [^char c (if (identical? state State/STATUS_LINE_FOUND_LF) LF (.get this input))]
+      (when-not (== c LF)
+        (throw (.protocolException this
+                                   "Bad trailing char, \"%s\", when parsing status line, \"%s\""
+                                   c
+                                   (.toString sb))))
+      (set! statusLine (.toString sb))
+      (set! size (unchecked-add (unchecked-add size 32) (.length statusLine)))
+      (set! sb (StringBuilder.))
+      (when-not (.startsWith statusLine "HTTP/1.")
+        (throw (.protocolException this "Invalid status line: \"%s\"" statusLine)))
+      (when (< (.length statusLine) 12)
+        (throw (.protocolException this "Invalid status line: \"%s\"" statusLine)))
+      (try
+        (set! responseCode (Integer/parseInt (.substring statusLine 9 12)))
+        (catch NumberFormatException nfe
+          (throw (.protocolException this "Invalid status line: \"%s\"" statusLine))))
+      (when (< responseCode 100)
+        (throw (.protocolException this "Invalid status line: \"%s\"" statusLine)))
+      (set! state State/STATUS_LINE_END)))
+
+  (method ^:private checkMaxHeaderSize :throws [ProtocolException] ^void [this ^int sz]
+    (let [s (unchecked-add (unchecked-add size sz) 32)]
+      (when (and (> MAX_HTTP_HEADER_SIZE 0) (> s MAX_HTTP_HEADER_SIZE))
+        (throw (ProtocolException.
+                 (String/format "Header size too big: %s > %s"
+                                (new Object/1 [s MAX_HTTP_HEADER_SIZE])))))))
+
+  (method ^:private ^:static newSize :throws [ProtocolException] ^long [^long size ^int name
+                                                                        ^int value]
+    (let [newSize (unchecked-add (unchecked-add (unchecked-add size name) value) 32)]
+      (when (and (> MAX_HTTP_HEADER_SIZE 0) (> newSize MAX_HTTP_HEADER_SIZE))
+        (throw (ProtocolException.
+                 (String/format "Header size too big: %s > %s"
+                                (new Object/1 [newSize MAX_HTTP_HEADER_SIZE])))))
+      newSize))
+
+  (method ^:private maybeStartHeaders :throws [ProtocolException] ^void [this ^ByteBuffer input]
+    (java-assert (identical? state State/STATUS_LINE_END))
+    (java-assert (== (.length sb) 0))
+    (let [c (.get this input)]
+      (cond
+        (== c CR) (set! state State/STATUS_LINE_END_CR)
+        (== c LF) (set! state State/STATUS_LINE_END_LF)
+        :else (do (.append sb c) (.checkMaxHeaderSize this (.length sb)) (set! state State/HEADER)))))
+
+  (method ^:private maybeEndHeaders :throws [ProtocolException] ^void [this ^ByteBuffer input]
+    (java-assert (or (identical? state State/STATUS_LINE_END_CR)
+                     (identical? state State/STATUS_LINE_END_LF)))
+    (java-assert (== (.length sb) 0))
+    (let [^char c (if (identical? state State/STATUS_LINE_END_LF) LF (.get this input))]
+      (if (== c LF)
+          (do
+            (set! headers (HttpHeaders/of privateMap Utils/ACCEPT_ALL))
+            (set! privateMap nil)
+            (set! state State/FINISHED))
+          (throw (.protocolException this "Unexpected \"%s\", after status line CR" c)))))
+
+  (method ^:private readResumeHeader :throws [ProtocolException] ^void [this ^ByteBuffer input]
+    (java-assert (identical? state State/HEADER))
+    (java-assert (.hasRemaining input))
+    (let [max (unchecked-subtract
+                (unchecked-subtract (unchecked-subtract MAX_HTTP_HEADER_SIZE size) 32)
+                (.length sb))
+          ^:mutable ^int count 0]
+      (while (.hasRemaining input)
+        (let [^:mutable c (.get this input)]
+          (if (== c CR)
+              (do (set! state State/HEADER_FOUND_CR) (break))
+              (when (== c LF) (set! state State/HEADER_FOUND_LF) (break)))
+          (when (== c HT) (set! c SP))
+          (.append sb c)
+          (when (> (set! count (unchecked-inc-int count)) max)
+            (.checkMaxHeaderSize this (.length sb)))))))
+
+  (method ^:private addHeaderFromString :throws [ProtocolException] ^void [this ^String headerString]
+    (java-assert (== (.length sb) 0))
+    (let [idx (.indexOf headerString \:)]
+      (when-not (== idx -1)
+        (let [name (.substring headerString 0 idx)]
+          (when-not (.isEmpty name)
+            (when-not (Utils/isValidName name)
+              (throw (.protocolException this "Invalid header name \"%s\"" name)))
+            (let [value (.trim (.substring headerString (unchecked-add-int idx 1)))]
+              (when-not (Utils/isValidValue value)
+                (throw (.protocolException this "Invalid header value \"%s: %s\"" name value)))
+              (set! size (Http1HeaderParser/newSize size (.length name) (.length value)))
+              (.add (cast List
+                          (.computeIfAbsent privateMap
+                                            (.toLowerCase name Locale/US)
+                                            (lambda Function ^List [^String k] (ArrayList.))))
+                    value)))))))
+
+  (method ^:private resumeOrLF :throws [ProtocolException] ^void [this ^ByteBuffer input]
+    (java-assert (or (identical? state State/HEADER_FOUND_CR)
+                     (identical? state State/HEADER_FOUND_LF)))
+    (let [^char c (if (identical? state State/HEADER_FOUND_LF) LF (.get this input))]
+      (cond
+        (== c LF) (set! state State/HEADER_FOUND_CR_LF)
+        (or (== c SP) (== c HT))
+          (do (.append sb SP) (.checkMaxHeaderSize this (.length sb)) (set! state State/HEADER))
+        :else
+          (do
+            (set! sb (StringBuilder.))
+            (.append sb c)
+            (.checkMaxHeaderSize this 1)
+            (set! state State/HEADER)))))
+
+  (method ^:private resumeOrSecondCR :throws [ProtocolException] ^void [this ^ByteBuffer input]
+    (java-assert (identical? state State/HEADER_FOUND_CR_LF))
+    (let [c (.get this input)]
+      (cond
+        (or (== c CR) (== c LF))
+          (do
+            (when (> (.length sb) 0)
+              (let [headerString (.toString sb)]
+                (set! sb (StringBuilder.))
+                (.addHeaderFromString this headerString)))
+            (if (== c CR)
+                (set! state State/HEADER_FOUND_CR_LF_CR)
+                (do
+                  (set! state State/FINISHED)
+                  (set! headers (HttpHeaders/of privateMap Utils/ACCEPT_ALL))
+                  (set! privateMap nil))))
+        (or (== c SP) (== c HT))
+          (do
+            (java-assert (not (== (.length sb) 0)))
+            (.append sb SP)
+            (.checkMaxHeaderSize this (.length sb))
+            (set! state State/HEADER))
+        :else
+          (do
+            (when (> (.length sb) 0)
+              (let [headerString (.toString sb)]
+                (set! sb (StringBuilder.))
+                (.addHeaderFromString this headerString)))
+            (.append sb c)
+            (.checkMaxHeaderSize this (.length sb))
+            (set! state State/HEADER)))))
+
+  (method ^:private resumeOrEndHeaders :throws [ProtocolException] ^void [this ^ByteBuffer input]
+    (java-assert (identical? state State/HEADER_FOUND_CR_LF_CR))
+    (let [c (.get this input)]
+      (if (== c LF)
+          (do
+            (set! state State/FINISHED)
+            (set! headers (HttpHeaders/of privateMap Utils/ACCEPT_ALL))
+            (set! privateMap nil))
+          (throw (.protocolException this "Unexpected \"%s\", after CR LF CR" c)))))
+
+  (method ^:private protocolException ^ProtocolException [this ^String format & ^Object/1 args]
+    (ProtocolException. (String/format format args))))

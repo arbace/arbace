@@ -1,0 +1,198 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/PBEUtil.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util)
+
+(import '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset StandardCharsets)
+        '(java.security AlgorithmParameters
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        Provider
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec InvalidParameterSpecException)
+        '(java.util Arrays)
+        '(javax.crypto Cipher SecretKey)
+        '(javax.crypto.interfaces PBEKey)
+        '(javax.crypto.spec IvParameterSpec PBEKeySpec PBEParameterSpec))
+
+(defclass ^:public ^:final PBEUtil
+  (defclass ^:public ^:static ^:final PBES2Params
+    (field ^:private ^:static ^:final ^int DEFAULT_SALT_LENGTH 20)
+
+    (field ^:private ^:static ^:final ^int DEFAULT_ITERATIONS 4096)
+
+    (field ^:private ^int iCount)
+
+    (field ^:private ^byte/1 salt)
+
+    (field ^:private ^IvParameterSpec ivSpec)
+
+    (method ^:public initialize :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                                    ^int blkSize
+                                                                                    ^int opmode
+                                                                                    ^int iCount
+                                                                                    ^:mutable ^byte/1 salt
+                                                                                    ^AlgorithmParameterSpec ivSpec
+                                                                                    ^SecureRandom random]
+      (try
+        (let [doEncrypt (or (== opmode Cipher/ENCRYPT_MODE) (== opmode Cipher/WRAP_MODE))]
+          (if-instance [^IvParameterSpec iv ivSpec]
+            (set! (.-ivSpec this) iv)
+            (if (and (nil? ivSpec) doEncrypt)
+                (let [ivBytes (new byte/1 blkSize)]
+                  (.nextBytes random ivBytes)
+                  (set! (.-ivSpec this) (IvParameterSpec. ivBytes)))
+                (throw (InvalidAlgorithmParameterException.
+                         (java-str "Wrong parameter type: IvParameterSpec "
+                                   (if doEncrypt "or null " "")
+                                   "expected")))))
+          (set! (.-iCount this) (if (== iCount 0) DEFAULT_ITERATIONS iCount))
+          (when (nil? salt)
+            (if doEncrypt
+                (do (set! salt (new byte/1 DEFAULT_SALT_LENGTH)) (.nextBytes random salt))
+                (throw (InvalidAlgorithmParameterException. "Salt needed for decryption"))))
+          (set! (.-salt this) salt))
+        (catch InvalidAlgorithmParameterException e
+          (set! (.-ivSpec this) nil)
+          (set! (.-iCount this) 0)
+          (set! (.-salt this) nil)
+          (throw e))))
+
+    (method ^:public getIvSpec ^IvParameterSpec [this] ivSpec)
+
+    (method ^:public getAlgorithmParameters ^AlgorithmParameters [this ^int blkSize ^String pbeAlgo
+                                                                  ^Provider algParamsProv
+                                                                  ^SecureRandom random]
+      (let [^:mutable ^AlgorithmParameters params nil]
+        (try
+          (when (and (and (== iCount 0) (nil? salt)) (nil? ivSpec))
+            (.initialize this blkSize Cipher/ENCRYPT_MODE 0 nil nil random))
+          (set! params (AlgorithmParameters/getInstance pbeAlgo algParamsProv))
+          (.init params (PBEParameterSpec. salt iCount ivSpec))
+          (catch NoSuchAlgorithmException nsae
+            (throw (RuntimeException.
+                     (java-str "AlgorithmParameters for " pbeAlgo " not configured"))))
+          (catch InvalidParameterSpecException ipse
+            (throw (RuntimeException. "PBEParameterSpec not supported")))
+          (catch InvalidAlgorithmParameterException iape
+            (throw (RuntimeException. "Error initializing PBES2Params"))))
+        params))
+
+    (method ^:public getPBEKeySpec :throws [InvalidKeyException InvalidAlgorithmParameterException] ^PBEKeySpec [this
+                                                                                                                 ^int blkSize
+                                                                                                                 ^int keyLength
+                                                                                                                 ^int opmode
+                                                                                                                 ^Key key
+                                                                                                                 ^AlgorithmParameterSpec params
+                                                                                                                 ^SecureRandom random]
+      (when (nil? key) (throw (InvalidKeyException. "Null key")))
+      (let [^:mutable ^byte/1 passwdBytes nil
+            ^:mutable ^char/1 passwdChars nil]
+        (when (or (not (.regionMatches (.getAlgorithm key) true 0 "PBE" 0 3))
+                  (nil? (set! passwdBytes (.getEncoded key))))
+          (throw (InvalidKeyException. "Missing password")))
+        (try
+          (let [^:mutable ^int iCountInit 0
+                ^:mutable ^byte/1 saltInit nil
+                ^:mutable ^AlgorithmParameterSpec ivSpecInit nil]
+            (if-instance [^PBEParameterSpec pbeParams params]
+              (do
+                (set! iCountInit (PBES2Params/check (.getIterationCount pbeParams)))
+                (set! saltInit (PBES2Params/check (.getSalt pbeParams)))
+                (set! ivSpecInit (.getParameterSpec pbeParams)))
+              (if (nil? params)
+                  (do
+                    (if-instance [^PBEKey pbeKey key]
+                      (do
+                        (set! iCountInit (PBES2Params/check (.getIterationCount pbeKey)))
+                        (set! saltInit (PBES2Params/check (.getSalt pbeKey))))
+                      (do (set! iCountInit 0) (set! saltInit nil)))
+                    (set! ivSpecInit nil))
+                  (throw (InvalidAlgorithmParameterException. "Wrong parameter type: PBE expected"))))
+            (.initialize this blkSize opmode iCountInit saltInit ivSpecInit random)
+            (set! passwdChars (PBEUtil/decodePassword passwdBytes))
+            (PBEKeySpec. passwdChars salt iCount keyLength))
+          (finally
+            (when (some? passwdChars) (Arrays/fill passwdChars \u0000))
+            (when (some? passwdBytes) (Arrays/fill passwdBytes (unchecked-byte 0x00)))))))
+
+    (method ^:public ^:static getParameterSpec :throws [InvalidAlgorithmParameterException] ^AlgorithmParameterSpec [^AlgorithmParameters params]
+      (let [^:mutable ^AlgorithmParameterSpec pbeSpec nil]
+        (when (some? params)
+          (try
+            (set! pbeSpec (.getParameterSpec params PBEParameterSpec))
+            (catch InvalidParameterSpecException ipse
+              (throw (InvalidAlgorithmParameterException. "Wrong parameter type: PBE expected")))))
+        pbeSpec))
+
+    (method ^:private ^:static check :throws [InvalidAlgorithmParameterException] ^byte/1 [^byte/1 salt]
+      (when (and (some? salt) (< (alength salt) 8))
+        (throw (InvalidAlgorithmParameterException. "Salt must be at least 8 bytes long")))
+      salt)
+
+    (method ^:private ^:static check :throws [InvalidAlgorithmParameterException] ^int [^int iCount]
+      (when (< iCount 0)
+        (throw (InvalidAlgorithmParameterException. "Iteration count must be a positive number")))
+      iCount))
+
+  (method ^:public ^:static getPBAKeySpec :throws [InvalidKeyException
+                                                   InvalidAlgorithmParameterException] ^PBEKeySpec [^Key key
+                                                                                                    ^AlgorithmParameterSpec params]
+    (let [^:mutable ^char/1 passwdChars nil
+          ^:mutable ^byte/1 salt nil
+          ^:mutable ^int iCount 0]
+      (if-instance [^PBEKey pbeKey key]
+        (do
+          (set! passwdChars (.getPassword pbeKey))
+          (set! salt (.getSalt pbeKey))
+          (set! iCount (.getIterationCount pbeKey)))
+        (if (instance? SecretKey key)
+            (let [^:mutable ^byte/1 passwdBytes nil]
+              (when (or (not (.regionMatches (.getAlgorithm key) true 0 "PBE" 0 3))
+                        (nil? (set! passwdBytes (.getEncoded key))))
+                (throw (InvalidKeyException. "Missing password")))
+              (set! passwdChars (PBEUtil/decodePassword passwdBytes))
+              (Arrays/fill passwdBytes (unchecked-byte 0x00)))
+            (throw (InvalidKeyException. "SecretKey of PBE type required"))))
+      (try
+        (if (nil? params)
+            (when (or (nil? salt) (== iCount 0))
+              (throw (InvalidAlgorithmParameterException.
+                       "PBEParameterSpec required for salt and iteration count")))
+            (if-instance [^PBEParameterSpec pbeParams params]
+              (do
+                (if (some? salt)
+                    (when-not (Arrays/equals salt (.getSalt pbeParams))
+                      (throw (InvalidAlgorithmParameterException.
+                               "Inconsistent value of salt between key and params")))
+                    (set! salt (.getSalt pbeParams)))
+                (if (not (== iCount 0))
+                    (when-not (== iCount (.getIterationCount pbeParams))
+                      (throw (InvalidAlgorithmParameterException.
+                               "Different iteration count between key and params")))
+                    (set! iCount (.getIterationCount pbeParams))))
+              (throw (InvalidAlgorithmParameterException. "PBEParameterSpec type required"))))
+        (when (< (alength salt) 8)
+          (throw (InvalidAlgorithmParameterException. "Salt must be at least 8 bytes long")))
+        (when (<= iCount 0)
+          (throw (InvalidAlgorithmParameterException. "IterationCount must be a positive number")))
+        (PBEKeySpec. passwdChars salt iCount)
+        (finally (when (some? passwdChars) (Arrays/fill passwdChars \u0000))))))
+
+  (method ^:public ^:static encodePassword ^byte/1 [^char/1 passwd]
+    (let [bb (.encode StandardCharsets/UTF_8 (CharBuffer/wrap passwd))
+          len (.limit bb)
+          passwdBytes (new byte/1 len)]
+      (.get bb passwdBytes 0 len)
+      (.put (.clear bb) (new byte/1 len))
+      passwdBytes))
+
+  (method ^:private ^:static decodePassword ^char/1 [^byte/1 passwdBytes]
+    (let [cb (.decode StandardCharsets/UTF_8 (ByteBuffer/wrap passwdBytes))
+          len (.limit cb)
+          passwd (new char/1 len)]
+      (.get cb passwd)
+      (.put (.clear cb) (new char/1 len))
+      passwd)))

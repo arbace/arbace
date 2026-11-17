@@ -27,6 +27,9 @@
 #                      typed invokers (every call by reflect.Value.Call), the sizes printed:
 #                      the table's whole size and the invokers' part (GS4: above 1 MB, the
 #                      threshold variant, --min-sharing)
+#        bin/goi table-configs
+#                      the generator's --config arguments as table gives them, one a line (bin/oi
+#                      table-check's, doc/ocaml/OCAML-SURVEY.md, OC170)
 #   bin/goi annotations [--record] [--jobs N] [CORPUS...]
 #                                 the annotation check (§11.4): every package of the corpora
 #                                 type-checked by goi's checker, without running anything: zero
@@ -94,7 +97,9 @@
 #                                 only for a timeout, "positions: ", "runs the go command: ", "runtime.GOROOT "
 #                                 only for a fail, "go build's -complete: " an AOT build error, "errorcheck: "
 #                                 a fail but not of the printing; apply_known) or skip (an action
-#                                 with gc's flags); a run program's time limit 10 s, its action's
+#                                 setting -goexperiment or -godebug; its go build flags, -gcflags,
+#                                 -ldflags and -tags, build gc's reference alone, goi running the
+#                                 program as written); a run program's time limit 10 s, its action's
 #                                 -t, or its line in test/goi/timeouts.txt; the results against
 #                                 test/goi/check-linux-amd64.edn: a program passing there and not
 #                                 now fails the check, as does a listed program with no result (its
@@ -140,7 +145,7 @@
 #                                 goi's, noder's pragmas', then its writer's declaration checks);
 #                                 unsupported: an action flag
 #                                 of gc's later phases (-m, -l, -live, -d=..., -race, -std, -+),
-#                                 line directives, or errors go/types does not report either (gc's
+#                                 /*line directives (a //line maps the checker's lines), or errors go/types does not report either (gc's
 #                                 phases after type checking)
 #   bin/goi check --aot [--record] [--jobs N] [--essential] [--only REGEX] [--list FILE]
 #                                 the AOT level (REAP2, doc/FULL-SUPPORT-SURVEY.md "As built:
@@ -391,7 +396,7 @@ gc_env() {
 # one that reads STDLIB_IMPORTCFG finds it (fixedbugs/bug369.go: without it gc's own run failed, "open : no
 # such file or directory", skipped since gc_ref_fails). In gc_ref's key by its definition
 run_env() {
-  echo STDLIB_IMPORTCFG="$gcwork/importcfg" GOENV=off GOFLAGS= PATH="$goroot/bin:$PATH"
+  echo STDLIB_IMPORTCFG="$gcwork/importcfg" GOENV=off GOFLAGS= GOROOT="$goroot" PATH="$goroot/bin:$PATH"
 }
 
 # stderr_head FILE: stderr up to the first line that starts with "goroutine " (§11.1), the
@@ -552,7 +557,7 @@ aot_build() {
   local src=$1 out=$2 log=$3 fl gf=()
   shift 3
   for fl in "$@"; do gf+=(--go-flag "$fl"); done
-  (cd "$root" && REPR_GO_EXE=$hexe bin/build-go --layout lines ${gf[@]+"${gf[@]}"} --print-cache "$cwork/print-cache" \
+  (cd "$root" && REPR_GO_EXE=$hexe bin/build-go --layout "${aot_layout:-lines}" ${gf[@]+"${gf[@]}"} --print-cache "$cwork/print-cache" \
      -o "$out" --work "$out.work" "$src") > "$log" 2>&1
   local s=$?
   rm -rf "$out.work"
@@ -568,8 +573,9 @@ action_parse() {
   local p=$1 act x w=()
   tmo=10 bflags=() args=()
   act=$(action_of "$goroot/test/$p")
-  if [ -n "${aot:-}" ]; then
-    # the action's words as the test driver splits them, its flags go build's (RPS17)
+  if [ -n "${aot:-}" ] || [[ $act == *[\'\"]* ]]; then
+    # the action's words as the test driver splits them, its flags go build's (RPS17); at the
+    # interpreted level too when it quotes (a flag's value with spaces, -gcflags='all=-N -l')
     x=$(action_words "$act" 2>&1) || { why="error	the action cannot be split: $act"; return 1; }
     while IFS= read -r x; do w+=("$x"); done <<< "$x"
     set -- "${w[@]}"
@@ -581,8 +587,12 @@ action_parse() {
     case $1 in
       -t) tmo=$2; shift 2 ;;
       -goexperiment|-godebug) why="skip	the action sets ${1#-}: $act"; return 1 ;;
-      *) if [ -n "${aot:-}" ]; then bflags+=("$1"); shift
-         else why="skip	the action needs gc flags: $act"; return 1; fi ;;
+      # go build's flags (-gcflags, -ldflags, -tags): at --aot the program's build's (RPS17); at the
+      # interpreted level gc's reference's alone (gc_ref), goi running the program as written (GOI-SPEC.md
+      # "Since v1: gc's flags of run actions"): they choose gc's code generation (checkptr's
+      # instrumentation, inlining, softfloat, the SSA checks, the linker's), not what the program prints,
+      # and a program whose output does depend on them is a known difference in its own class
+      *) bflags+=("$1"); shift ;;
     esac
   done
   # a program's own limit (test/goi/timeouts.txt), where the default is too short for it
@@ -600,6 +610,22 @@ check_one() {
   g=$goroot/test/$p
   f=$cforms/go/test/$(forms_rel "$p").ae
   [ -f "$f" ] || { printf '%s\terror\tno forms (%s)\n' "$id" "${f#$root/}"; return; }
+  # the retry's controls (test/goi/retry-test.bash): GOI_CHECK_FAIL_ONCE=ID fails ID's first run of this check (a
+  # marker in cwork, made atomically), GOI_CHECK_FAIL=ID every run of it; neither is set by the gate
+  if [ -n "${GOI_CHECK_FAIL:-}" ] && [ "$id" = "$GOI_CHECK_FAIL" ]; then printf '%s\tfail\tforced (GOI_CHECK_FAIL)\n' "$id"; return; fi
+  if [ -n "${GOI_CHECK_FAIL_ONCE:-}" ] && [ "$id" = "$GOI_CHECK_FAIL_ONCE" ] \
+     && mkdir "$cwork/fail-once.$(printf '%s' "$id" | tr '/' '_')" 2>"$cwork/fail-once.err"; then
+    printf '%s\tfail\tforced once (GOI_CHECK_FAIL_ONCE)\n' "$id"; return
+  fi
+  # the forms of mode :full when the program has them (GOI-DESIGN-REVIEW.md, "As built: :full forms"):
+  # positions within a line (/*line directives, a call split over lines, an index's [); at the AOT
+  # level only with GOI_AOT_LAYOUT=full (printed back to the original text: Proposed 8), else the
+  # forms of mode :lines in the lines layout as before
+  local froot=$cforms layout=lines
+  if [ -f "$cfull/go/test/$(forms_rel "$p").ae" ] && { [ -z "${aot:-}" ] || [ "${GOI_AOT_LAYOUT:-lines}" = full ]; }; then
+    froot=$cfull f=$cfull/go/test/$(forms_rel "$p").ae
+    [ -n "${aot:-}" ] && layout=full
+  fi
   action_parse "$p" || { printf '%s\t%s\n' "$id" "$why"; return; }
   ns=$(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$f")
   # no reference (gc's build failed, its run timed out): its row printed by gc_ref, and the job's status 0
@@ -626,7 +652,7 @@ check_one() {
     rm -rf "$r.src" "$r.exe"; mkdir -p "$(dirname "$r.src/go/test/$(forms_rel "$p")")"
     cp "$f" "$r.src/go/test/$(forms_rel "$p").ae"
     [ -d "${f%.ae}" ] && cp -R "${f%.ae}" "$r.src/go/test/$(forms_rel "$p")"
-    if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
+    if ! aot_layout=$layout aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
       printf '%s\terror\tthe AOT build failed: %s\n' "$id" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
     (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$r.exe" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
@@ -634,7 +660,7 @@ check_one() {
   elif [ -n "${box:-}" ]; then
     box_run "$cforms" "$tmo" "$ns" "${f#$cforms/}" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" || st=$?
   else
-    (cd "$goroot/test" && export $(run_env) && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+    (cd "$goroot/test" && export $(run_env) && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run "$froot" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
     cover_settle goi "$p"
   fi
   stderr_head "$r.err.raw" > "$r.err"
@@ -839,7 +865,8 @@ check_dir() {
            fi
            shift
          else
-           printf '%s\tskip\tthe action needs gc flags: %s\n' "$p" "$act"; return
+           # gc's flags, not the program's: the golden output is the reference (action_parse's note)
+           shift
          fi ;;
     esac
   done
@@ -870,7 +897,7 @@ check_dir() {
       || { printf '%s\terror\tthe module of the directory'"'"'s forms: %s\n' "$p" "$(tail -1 "$r.root.log" | cut -c1-200)"; return; }
     [ ${#gfl[@]} -gt 0 ] && bflags+=("-gcflags=$module/...=${gfl[*]}")
     [ ${#lfl[@]} -gt 1 ] && bflags+=("-ldflags=${lfl[*]:1}")
-    if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
+    if ! aot_layout=$layout aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
       printf '%s\terror\tthe AOT build failed: %s\n' "$p" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
     (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$r.exe" > "$r.out" 2>&1 < "$empty") || st=$?
@@ -924,6 +951,7 @@ dir_verdict() {
 # PROGRAM<TAB>RESULT<TAB>REASON.
 check_err() {
   local p=$1 g=$goroot/test/$1 f act fl tmo=10 want=1 auto="" lang="" maxerr="" goflags=() why="" ns key ref st r types dump reason syn rejected froot=$eforms raw=""
+  local mlev=0 nolinl="" escdebug="" d
   act=$(action_of "$g")
   set -- $act
   [ "$1" = errorcheckwithauto ] && auto=-auto
@@ -937,19 +965,34 @@ check_err() {
       -e|-d=panic) goflags+=("$fl") ;;
       -e=0|-e=false) goflags+=("$fl"); maxerr=10 ;; # gc's limit of 10 errors (GR10)
       -lang=*) lang=${fl#-lang=}; goflags+=("$fl") ;;
-      -m|-m=*|-l|-l=*|-live|-wb=*|-N|-smallframes) why=${why:-"$fl: gc's escape analysis, inlining and liveness, which goi does not have"} ;;
-      -d=*) why=${why:-"$fl: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
-      -race) why=${why:-"-race: gc's race instrumentation, which goi does not have"} ;;
+      # gc's -m: its inliner's (without -l), escape analysis' and walk's diagnostics, arbace.go.escape
+      # (GOI-SPEC.md, "Since v1: gc's escape analysis"); liveness, the write barriers and the SSA
+      # back end's passes stay gc's
+      -m) mlev=$((mlev + 1)); goflags+=("$fl") ;;
+      -m=*) mlev=${fl#-m=}; goflags+=("$fl") ;;
+      -l) nolinl=1; goflags+=("$fl") ;;
+      -N) goflags+=("$fl") ;;
+      -smallframes) escdebug="$escdebug :smallframes true"; goflags+=("$fl") ;;
+      -l=*|-live|-wb=*) why=${why:-"$fl: gc's liveness and write barriers (-l=N: its inliner's debugging), which goi does not have"} ;;
+      -d=*) for d in $(echo "${fl#-d=}" | tr ',' ' '); do
+              case $d in
+                escapemutationscalls|escapemutationscalls=*|zerocopy|zerocopy=*|inlfuncswithclosures|inlfuncswithclosures=*)
+                  case $d in *=*) escdebug="$escdebug :${d%%=*} ${d#*=}" ;; *) escdebug="$escdebug :$d 1" ;; esac ;;
+                *) why=${why:-"-d=$d: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
+              esac
+            done
+            goflags+=("$fl") ;;
+      -race) goflags+=("$fl"); escdebug="$escdebug :race true" ;; # gc's race instrumentation adds code, no error: the errorcheck tests under -race expect none (but a -m's, below; the inliner's go:norace)
       -std|-+|-complete|-asmhdr*|-spectre*) why=${why:-"$fl: gc compiling the standard library or the runtime, out of goi's scope"} ;;
       -goexperiment) why=${why:-"-goexperiment: another GOEXPERIMENT"}; shift ;;
       *) why=${why:-"$fl: a flag of gc's"} ;;
     esac
   done
   tmo=$(program_tmo "$p" "$tmo")
+  # the escape analysis of the imports' forms (their tags, cached in $gcwork/escape-tags): a first run
+  # checks and analyzes the standard packages the program's calls reach
+  [ "$mlev" = 0 ] || [ "$tmo" -ge 180 ] || tmo=180
   [ -n "$why" ] && { printf '%s\tunsupported\t%s\n' "$p" "$why"; return; }
-  if grep -qE '^//line |/\*line ' "$g"; then
-    printf '%s\tunsupported\tline directives: gc'"'"'s positions follow them, goi'"'"'s errors the forms'"'"' lines\n' "$p"; return
-  fi
   # gc's reference: the errors of the original, judged
   key=$( { cat "$goroot/VERSION"; cat "$g"; printf '%s\n' "${goflags[@]}"; echo "judge: ${gocmp_key:-}"; } | sha256sum | cut -c1-24)
   ref=$gcwork/eref/$key
@@ -972,6 +1015,9 @@ check_err() {
   mkdir -p "$(dirname "$r")"
   reason=""
   [ -f "$f" ] || reason=$(awk -F'\t' -v k="$p" '$2 == k { print $1 "\t" $7; exit }' "$etsv")
+  # the forms of mode :full when the program has them (GOI-DESIGN-REVIEW.md, "As built: :full forms"):
+  # columns, the source's spellings, an implicit return told from a final expression statement
+  [ -f "$f" ] && [ -f "$efull/go/test/$(forms_rel "$p").ae" ] && { froot=$efull f=$efull/go/test/$(forms_rel "$p").ae; }
   # gc's syntax errors (GP6): judged alone when one is a syntax error (gc stops after them) or
   # when go/parser rejects the file
   syn=$esyntax/$p.txt rejected=""
@@ -981,6 +1027,13 @@ check_err() {
     # GTS85 (b): the controls whose subject this test is: the same errors against the reference's // ERROR comments
     controls_of "$p" | while read -r c x; do syn_verdict "$c" "$goroot/test/$x" "$syn" "$r.${c//\//_}.judge"; done
     return
+  fi
+  # the checker's positions are the forms' lines, mapped by arbace.go.run through the file's //line
+  # directives (GOI-SPEC.md, "Since v1: line directives"); a /*line directive sets a position within a
+  # line, which mode :lines does not keep (gc's syntax's errors above follow both): with the forms of
+  # mode :full the checker's errors have their columns and arbace.go.run maps both
+  if [ "$froot" != "$efull" ] && grep -qE '/\*line ' "$g"; then
+    printf '%s\tunsupported\tline directives: gc'"'"'s positions follow /*line directives within a line, goi'"'"'s errors the forms'"'"' lines\n' "$p"; return
   fi
   if [ ! -f "$f" ]; then
     case $reason in
@@ -1000,7 +1053,9 @@ check_err() {
   if [ -f "$dump" ] && "$gocmp" errorcheck -dump-errors "$dump" > "$r.types" 2> "$r.types.err"; then
     types=$(grep -c . "$r.types" || true)
   fi
-  st=0; (cd "$goroot/test" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
+  st=0; (cd "$goroot/test" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw \
+    $( [ "$mlev" = 0 ] || echo "--escape $mlev --escape-std $root/.tmp/repr-go/forms/linux-amd64 --escape-cache $gcwork/escape-tags"; [ -n "$nolinl" ] || echo --inline ) \
+    ${escdebug:+--escape-debug "{$escdebug}"} --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
   cover_settle goi "$p"
   if { [ "$st" = 124 ] || [ "$st" = 137 ] || [ "$st" = 152 ]; } && [ "$types" = 0 ] && [ -n "$want" ]; then
     printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none; goi'"'"'s check over %s s)\n' "$p" "$tmo"; return
@@ -1019,7 +1074,9 @@ check_err() {
     else printf '%s\tfail\t%s\n' "$c" "$(sed -n 2,3p "$r.${c//\//_}.judge" | tr '\t\n' '  ' | cut -c1-240)"; fi
   done
   err_verdict "$g" "$r.out" "$st" "$r.judge" && { printf '%s\tpass\t\n' "$p"; return; }
-  if [ "$types" = 0 ] && [ "$st" = 0 ]; then
+  # gc's -m: goi's port's diagnostics are the program's errors (a difference is a fail, a known one
+  # test/goi/check-known.edn's)
+  if [ "$types" = 0 ] && [ "$st" = 0 ] && [ "$mlev" = 0 ]; then
     printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none)\n' "$p"; return
   fi
   printf '%s\tfail\t%s\n' "$p" "$(sed -n 2,3p "$r.judge" | tr '\t\n' '  ' | cut -c1-240)"
@@ -1072,6 +1129,8 @@ no_forms_row() {
   local p=$1 want=$2 line kind msg
   line=$(awk -F'\t' -v k="$p" '$2 == k { print $1 "\t" $7; exit }' "$3")
   kind=${line%%$'\t'*}; msg=${line#*$'\t'}
+  # the record holds no path of the host: the Go tree's, in a message that names a file (gc's "already defined at PATH"), is ${GOROOT}
+  [ -z "${goroot:-}" ] || msg=${msg//"$goroot/"/'${GOROOT}/'}
   if [ -z "$line" ]; then printf '%s\terror\tno forms: the program is not in the corpus (%s)\n' "$p" "${3##*/}"
   elif [ -z "$want" ]; then printf '%s\terror\tno forms: a valid program (-0) must convert (%s: %s)\n' "$p" "$kind" "$msg"
   elif [ "$kind" != errors ] && [ "$kind" != fail ]; then printf '%s\terror\tno forms: the corpus read it as %s, but there are no forms\n' "$p" "$kind"
@@ -1237,12 +1296,17 @@ refresh_corpora() {
     "$root/bin/repr-go" read --corpus linux-test > "$cwork/read.log" 2>&1 || { tail "$cwork/read.log" >&2; return 1; }
     echo "$ckey" > "$cforms.goi-key"
   fi
+  if corpus_stale "$cfull" "$ckey" "$gd/linux-test-programs.txt"; then
+    echo "== bin/repr-go read --full --corpus linux-test (.tmp/goi-check/read-full.log)" >&2
+    "$root/bin/repr-go" read --full --corpus linux-test > "$cwork/read-full.log" 2>&1 || { tail "$cwork/read-full.log" >&2; return 1; }
+    echo "$ckey" > "$cfull.goi-key"
+  fi
   if corpus_stale "$dforms" "$ckey" "$gd/linux-dirtest-list.txt"; then
     echo "== bin/repr-go read --corpus linux-dirtest (.tmp/goi-check/read-dirtest.log)" >&2
     "$root/bin/repr-go" read --corpus linux-dirtest > "$cwork/read-dirtest.log" 2>&1 || { tail "$cwork/read-dirtest.log" >&2; return 1; }
     echo "$ckey" > "$dforms.goi-key"
   fi
-  if [ -n "$aot" ] && { corpus_stale "$efull" "$ckey" "$gd/linux-errtest-programs.txt" || [ ! -f "$efull.tsv" ]; }; then
+  if { corpus_stale "$efull" "$ckey" "$gd/linux-errtest-programs.txt" || [ ! -f "$efull.tsv" ]; }; then
     echo "== bin/repr-go read --full --corpus linux-errtest (.tmp/goi-check/read-errtest-full.log)" >&2
     "$root/bin/repr-go" read --full --corpus linux-errtest > "$gcwork/read-errtest-full.log" 2>&1 \
       || grep -q '^converted [0-9]* of [0-9]* dumps.*, 0 did not read back$' "$gcwork/read-errtest-full.log" \
@@ -1380,6 +1444,7 @@ check() {
   . "$root/bin/lib/host.bash"
   hexe=$(arbace_host_exe) || return 1
   cforms=$root/.tmp/repr-go/forms/linux-test
+  cfull=$root/.tmp/repr-go/forms/linux-test-full
   dforms=$root/.tmp/repr-go/forms/linux-dirtest
   cwork=$root/.tmp/goi-check
   # gc's references, the importcfg and the judge shared by every level and the box
@@ -1479,10 +1544,38 @@ check() {
   # host's go 1.27.2 compile std within issue21576.go's minute, under gc and goi alike; the host's go is
   # pinned by nothing)
   export PATH=$goroot/bin:$PATH
+  # gc's -m (GOI-SPEC.md, "Since v1: gc's escape analysis and inliner"): the escape tags of the standard
+  # packages the -m programs import, made first by one process into $gcwork/escape-tags (each program a
+  # package's imports not yet covered), so that the parallel runs read them instead of each making them
+  if [ -z "$aot" ] && [ -z "$box" ]; then
+    local wl="" seen=" " q imps im nsq
+    while read -r q; do
+      grep -qE '^// *errorcheck[a-z]* .*-m( |=|$)' "$goroot/test/$q" 2>/dev/null || continue
+      [ -f "$eforms/go/test/$(forms_rel "$q").ae" ] || continue
+      imps=$(awk '/^import \(/{f=1;next} f&&/^\)/{f=0} f{print $NF} /^import "/{print $2}' "$goroot/test/$q" | tr -d '"')
+      nsq=""
+      for im in $imps; do case $seen in *" $im "*) ;; *) seen="$seen$im "; nsq=1 ;; esac; done
+      [ -n "$nsq" ] && wl="$wl $(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$eforms/go/test/$(forms_rel "$q").ae")"
+    done < "$list"
+    if [ -n "$wl" ]; then
+      # the standard library's tags with gc's inliner (GOI-SPEC.md, "Decided (2026-11-06)": Proposed 1 (b)): a
+      # process a package, its imports first, under GOMEMLIMIT; then each program's imports' rest
+      local wp
+      echo "== goi check: the escape tags of the -m programs' imports (.tmp/goi-check/escape-warm.log)" >&2
+      : > "$cwork/escape-warm.log"
+      for wp in $(cd "$goroot/test" && "$rexe" -m arbace.go.run --escape-order "$root/.tmp/repr-go/forms/linux-amd64" "$gcwork/escape-tags" $seen 2>> "$cwork/escape-warm.log"); do
+        (cd "$goroot/test" && GOMEMLIMIT=${GOI_ESCAPE_WARM_MEM:-1200MiB} "$rexe" -m arbace.go.run --escape-warm-pkg \
+           "$root/.tmp/repr-go/forms/linux-amd64" "$gcwork/escape-tags" "$wp") >> "$cwork/escape-warm.log" 2>&1 || echo "escape-warm-pkg: $wp failed" >> "$cwork/escape-warm.log"
+      done
+      (cd "$goroot/test" && GOMEMLIMIT=${GOI_ESCAPE_WARM_MEM:-1200MiB} "$rexe" -m arbace.go.run --escape-warm "$root/.tmp/repr-go/forms/linux-amd64" "$gcwork/escape-tags" "$eforms" $wl) \
+        >> "$cwork/escape-warm.log" 2>&1 || true
+    fi
+  fi
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
   export -f cover_env cover_settle forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
-  export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw
+  export root goroot rexe hexe cforms cfull dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw
   local t0=$SECONDS
+  rm -rf "$cwork"/fail-once.*
   # a job that dies prints no row: xargs's status is not the check's (missing_rows reports the program)
   { xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
       || echo "goi check: xargs exited $?" >&2; } | LC_ALL=C sort > "$cwork/results.tsv"
@@ -1499,6 +1592,33 @@ check() {
     # (a subject's controls' rows come with it, GTS86 (b): those the first run did not print added)
     awk -F'\t' 'NR==FNR { r[$1] = $0; next } ($1 in r) { print r[$1]; delete r[$1]; next } { print } END { for (k in r) print r[k] }' "$cwork/retried.tsv" "$cwork/results.tsv" \
       | LC_ALL=C sort > "$cwork/results.r" && mv "$cwork/results.r" "$cwork/results.tsv"
+  fi
+  # a program the reference records passing that failed among the others runs again alone, once, as a timeout does:
+  # a program that waits on the wall clock for the collector (typeparam/chans.go's _Ranger: a finalizer must run
+  # within time.Minute of one runtime.GC, which under a loaded host can find the receiving goroutine not yet gone)
+  # fails at 8 at a time beside the concurrent gate and passes by itself (night 13); its second result stands, its
+  # first row kept in $cwork/first-fails.tsv. A real regression fails again and is judged as before
+  : > "$cwork/first-fails.tsv"
+  if [ -f "$ref" ] && [ -z "$record$bundle" ]; then
+    sed -n 's/^ *\["\([^"]*\)" :pass.*/\1/p' "$ref" > "$cwork/ref-pass.pre"
+    awk -F'\t' 'NR==FNR { p[$1] = 1; next } ($1 in p) && $2 == "fail" { print $1 }' "$cwork/ref-pass.pre" "$cwork/results.tsv" > "$cwork/fails.txt"
+    # review 300's finding 6 (b): more than GOI_RETRY_MAX (default 10) is a broken build, not a loaded host: judged at once
+    if [ "$(wc -l < "$cwork/fails.txt")" -gt "${GOI_RETRY_MAX:-10}" ]; then
+      echo "== goi check: $(wc -l < "$cwork/fails.txt") passing in $(basename "$ref") failed, more than GOI_RETRY_MAX=${GOI_RETRY_MAX:-10}: judged without the retry" >&2
+      : > "$cwork/fails.txt"
+    fi
+    if [ -s "$cwork/fails.txt" ]; then
+      echo "== goi check: $(wc -l < "$cwork/fails.txt") passing in $(basename "$ref") failed, run again one at a time (their first rows kept in $cwork/first-fails.tsv)" >&2
+      awk -F'\t' 'NR==FNR { f[$1] = 1; next } ($1 in f)' "$cwork/fails.txt" "$cwork/results.tsv" > "$cwork/first-fails.tsv"
+      xargs -a "$cwork/fails.txt" -P 1 -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
+        > "$cwork/refailed.tsv" || echo "goi check: xargs exited $? (the retry of the failed)" >&2
+      awk -F'\t' 'NR==FNR { r[$1] = $0; next } ($1 in r) { print r[$1]; delete r[$1]; next } { print } END { for (k in r) print r[k] }' "$cwork/refailed.tsv" "$cwork/results.tsv" \
+        | LC_ALL=C sort > "$cwork/results.r" && mv "$cwork/results.r" "$cwork/results.tsv"
+      # review 300's finding 6 (a): the programs that passed only on their retry named in the summary, so an intermittent
+      # regression is seen
+      awk -F'\t' 'NR==FNR { f[$1] = 1; next } ($1 in f) && $2 == "pass" { print $1 }' "$cwork/fails.txt" "$cwork/results.tsv" > "$cwork/retry-passed.txt"
+      if [ -s "$cwork/retry-passed.txt" ]; then echo "goi check: $(wc -l < "$cwork/retry-passed.txt") passed only on their retry: $(tr '\n' ' ' < "$cwork/retry-passed.txt")"; fi
+    fi
   fi
   if [ -n "$bundle" ]; then
     # the bundle's list: PROGRAM, the timeout, the status expected, the comparison
@@ -1562,7 +1682,9 @@ check() {
         echo ";; result, pass, fail, error, unsupported (with the reason), known or skip. bin/goi check --record"
       fi
       echo "["
-      awk -F'\t' '{ gsub(/\\/, "&&", $3); gsub(/"/, "\\\"", $3); printf " [\"%s\" :%s \"%s\"]\n", $1, $2, $3 }' "$cwork/results.tsv"
+      # CSP5 (doc/CROPS-SCORE.md): no host path in the record, the toolchain's GOROOT as ${GOROOT}
+      awk -F'\t' '{ gsub(/\\/, "&&", $3); gsub(/"/, "\\\"", $3); printf " [\"%s\" :%s \"%s\"]\n", $1, $2, $3 }' "$cwork/results.tsv" \
+        | sed "s|$goroot/|\${GOROOT}/|g"
       echo "]"; } > "$ref"
     echo "   recorded $ref"
     return 0
@@ -1912,6 +2034,16 @@ cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
   table) table "$@" ;;
+  # the --config arguments bin/goi table gives the generator, one a line (linux's std converted when not cached): bin/oi
+  # table-check's (doc/ocaml/OCAML-SURVEY.md, OC170)
+  table-configs)
+    exe=$(host_exe) || exit 1
+    for c in linux/amd64 linux/arm64 tamago/amd64 tamago/arm64; do
+      case $c in
+        linux/*) r=$(linux_forms "${c#linux/}" "$exe") || exit 1; printf -- '--config\n%s\n' "$c=$r" ;;
+        tamago/*) printf -- '--config\n%s\n' "$c=$root/tamago/goroot,$root/tamago/goroot/arch/${c#tamago/}" ;;
+      esac
+    done ;;
   annotations)
     corpora=() forms="" skip=""
     for a in "$@"; do

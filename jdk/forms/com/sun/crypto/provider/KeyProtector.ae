@@ -1,0 +1,251 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/KeyProtector.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.io IOException)
+        '(java.security AlgorithmParameters
+                        GeneralSecurityException
+                        Key
+                        KeyFactory
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        Provider
+                        UnrecoverableKeyException)
+        '(java.security.spec InvalidParameterSpecException PKCS8EncodedKeySpec)
+        '(java.util Arrays)
+        '(javax.crypto Cipher CipherSpi SealedObject SecretKey)
+        '(javax.crypto.spec PBEKeySpec PBEParameterSpec)
+        '(javax.security.auth DestroyFailedException)
+        '(jdk.internal.access SharedSecrets)
+        '(sun.security.util KnownOIDs ObjectIdentifier SecurityProperties)
+        '(sun.security.x509 AlgorithmId))
+
+(defclasses
+  (defclass ^:final KeyProtector
+    (field ^:private ^:static ^:final ^int MAX_ITERATION_COUNT 5000000)
+
+    (field ^:private ^:static ^:final ^int MIN_ITERATION_COUNT 10000)
+
+    (field ^:private ^:static ^:final ^int DEFAULT_ITERATION_COUNT 200000)
+
+    (field ^:private ^:static ^:final ^int SALT_LEN 20)
+
+    (field ^:private ^:static ^:final ^int DIGEST_LEN 20)
+
+    (field ^:private ^:static ^:final ^int ITERATION_COUNT)
+
+    (field ^:private ^:final ^char/1 password)
+
+    (static-initializer
+      (let [^:mutable iterationCount DEFAULT_ITERATION_COUNT
+            ic (SecurityProperties/getOverridableProperty "jdk.jceks.iterationCount")]
+        (when (and (some? ic) (not (.isEmpty ic)))
+          (try
+            (set! iterationCount (Integer/parseInt ic))
+            (when (or (< iterationCount MIN_ITERATION_COUNT) (> iterationCount MAX_ITERATION_COUNT))
+              (set! iterationCount DEFAULT_ITERATION_COUNT))
+            (catch NumberFormatException ignored)))
+        (set! ITERATION_COUNT iterationCount)))
+
+    (constructor [this ^char/1 password]
+      (when (nil? password) (throw (IllegalArgumentException. "password can't be null")))
+      (set! (.-password this) password))
+
+    (method protect :throws [Exception] ^byte/1 [this ^PrivateKey key]
+      (let [salt (new byte/1 8)]
+        (.nextBytes (SunJCE/getRandom) salt)
+        (let [pbeSpec (PBEParameterSpec. salt ITERATION_COUNT)
+              pbeKeySpec (PBEKeySpec. (.-password this))
+              ^:mutable ^SecretKey sKey nil
+              ^:mutable ^PBEWithMD5AndTripleDESCipher cipher nil]
+          (try
+            (set! sKey (PBEKey. pbeKeySpec "PBEWithMD5AndTripleDES"))
+            (set! cipher (PBEWithMD5AndTripleDESCipher.))
+            (.engineInit cipher Cipher/ENCRYPT_MODE sKey pbeSpec nil)
+            (finally (.clearPassword pbeKeySpec) (when (some? sKey) (.destroy sKey))))
+          (let [plain (.getEncoded key)
+                encrKey (.engineDoFinal cipher plain 0 (alength plain))]
+            (Arrays/fill plain (unchecked-byte 0x00))
+            (let [pbeParams (AlgorithmParameters/getInstance "PBE" (SunJCE/getInstance))]
+              (.init pbeParams pbeSpec)
+              (let [encrAlg (AlgorithmId. (ObjectIdentifier/of KnownOIDs/JAVASOFT_JCEKeyProtector)
+                                          pbeParams)]
+                (.getEncoded (EncryptedPrivateKeyInfo. encrAlg encrKey))))))))
+
+    (method recover :throws [UnrecoverableKeyException NoSuchAlgorithmException] ^Key [this
+                                                                                       ^EncryptedPrivateKeyInfo encrInfo]
+      (let [^:mutable ^byte/1 plain nil
+            ^:mutable ^SecretKey sKey nil]
+        (try
+          (let [encrAlg (.toString (.getOID (.getAlgorithm encrInfo)))]
+            (when (and (not (.equals encrAlg (.value KnownOIDs/JAVASOFT_JCEKeyProtector)))
+                       (not (.equals encrAlg (.value KnownOIDs/JAVASOFT_JDKKeyProtector))))
+              (throw (UnrecoverableKeyException. "Unsupported encryption algorithm")))
+            (if (.equals encrAlg (.value KnownOIDs/JAVASOFT_JDKKeyProtector))
+                (set! plain (.recover this (.getEncryptedData encrInfo)))
+                (let [encodedParams (.getEncodedParams (.getAlgorithm encrInfo))]
+                  (when (nil? encodedParams) (throw (IOException. "Missing PBE parameters")))
+                  (let [pbeParams (AlgorithmParameters/getInstance "PBE")]
+                    (.init pbeParams encodedParams)
+                    (let [pbeSpec (cast PBEParameterSpec
+                                        (.getParameterSpec pbeParams PBEParameterSpec))]
+                      (when (> (.getIterationCount pbeSpec) MAX_ITERATION_COUNT)
+                        (throw (IOException. "PBE iteration count too large")))
+                      (let [pbeKeySpec (PBEKeySpec. (.-password this))]
+                        (set! sKey (PBEKey. pbeKeySpec "PBEWithMD5AndTripleDES"))
+                        (.clearPassword pbeKeySpec)
+                        (let [^:mutable ^PBEWithMD5AndTripleDESCipher cipher nil]
+                          (set! cipher (PBEWithMD5AndTripleDESCipher.))
+                          (.engineInit cipher Cipher/DECRYPT_MODE sKey pbeSpec nil)
+                          (set! plain
+                                (.engineDoFinal cipher
+                                                (.getEncryptedData encrInfo)
+                                                0
+                                                (alength (.getEncryptedData encrInfo))))))))))
+            (let [privateKeyInfo (PrivateKeyInfo. plain)
+                  spec (PKCS8EncodedKeySpec. plain)
+                  oidName (.getName (AlgorithmId. (.getOID (.getAlgorithm privateKeyInfo))))]
+              (try
+                (let [kFac (KeyFactory/getInstance oidName)] (.generatePrivate kFac spec))
+                (finally
+                  (.clear privateKeyInfo)
+                  (.clearEncodedKeySpec (SharedSecrets/getJavaSecuritySpecAccess) spec)))))
+          (catch NoSuchAlgorithmException ex (throw ex))
+          (catch [IOException GeneralSecurityException] e
+            (throw (UnrecoverableKeyException. (.getMessage e))))
+          (finally
+            (when (some? plain) (Arrays/fill plain (unchecked-byte 0x00)))
+            (when (some? sKey) (try (.destroy sKey) (catch DestroyFailedException e)))))))
+
+    (method ^:private recover :throws [UnrecoverableKeyException NoSuchAlgorithmException] ^byte/1 [this
+                                                                                                    ^byte/1 protectedKey]
+      (let [^:mutable ^int i 0
+            ^:mutable ^int j 0
+            ^:mutable ^byte/1 digest nil
+            ^:mutable ^int numRounds 0
+            ^:mutable ^int xorOffset 0
+            ^:mutable ^int encrKeyLen 0
+            md (MessageDigest/getInstance "SHA")
+            salt (new byte/1 SALT_LEN)]
+        (System/arraycopy protectedKey 0 salt 0 SALT_LEN)
+        (set! encrKeyLen
+              (unchecked-subtract-int (unchecked-subtract-int (alength protectedKey) SALT_LEN)
+                                      DIGEST_LEN))
+        (set! numRounds (unchecked-divide-int encrKeyLen DIGEST_LEN))
+        (when-not (== (unchecked-remainder-int encrKeyLen DIGEST_LEN) 0)
+          (set! numRounds (unchecked-inc-int numRounds)))
+        (let [encrKey (new byte/1 encrKeyLen)]
+          (System/arraycopy protectedKey SALT_LEN encrKey 0 encrKeyLen)
+          (let [xorKey (new byte/1 (alength encrKey))
+                ^:mutable passwdBytes (new byte/1 (unchecked-multiply-int (alength password) 2))]
+            (set! i 0)
+            (set! j 0)
+            (while (< i (alength password))
+              (aset passwdBytes j (unchecked-byte (bit-shift-right-int (aget password i) 8)))
+              (set! j (unchecked-inc-int j))
+              (aset passwdBytes j (unchecked-byte (aget password i)))
+              (set! j (unchecked-inc-int j))
+              (set! i (unchecked-inc-int i)))
+            (set! i 0)
+            (set! xorOffset 0)
+            (set! digest salt)
+            (while (< i numRounds)
+              (.update md passwdBytes)
+              (.update md digest)
+              (set! digest (.digest md))
+              (.reset md)
+              (if (< i (unchecked-subtract-int numRounds 1))
+                  (System/arraycopy digest 0 xorKey xorOffset (alength digest))
+                  (System/arraycopy digest
+                                    0
+                                    xorKey
+                                    xorOffset
+                                    (unchecked-subtract-int (alength xorKey) xorOffset)))
+              (set! i (unchecked-inc-int i))
+              (set! xorOffset (unchecked-add-int xorOffset DIGEST_LEN)))
+            (let [plainKey (new byte/1 (alength encrKey))]
+              (set! i 0)
+              (while (< i (alength plainKey))
+                (aset plainKey i (unchecked-byte (bit-xor-int (aget encrKey i) (aget xorKey i))))
+                (set! i (unchecked-inc-int i)))
+              (.update md passwdBytes)
+              (Arrays/fill passwdBytes (unchecked-byte 0x00))
+              (set! passwdBytes nil)
+              (.update md plainKey)
+              (set! digest (.digest md))
+              (.reset md)
+              (set! i 0)
+              (while (< i (alength digest))
+                (when-not (== (aget digest i)
+                              (aget protectedKey
+                                    (unchecked-add-int (unchecked-add-int SALT_LEN encrKeyLen) i)))
+                  (throw (UnrecoverableKeyException. "Cannot recover key")))
+                (set! i (unchecked-inc-int i)))
+              plainKey)))))
+
+    (method seal :throws [Exception] ^SealedObject [this ^Key key]
+      (let [salt (new byte/1 8)]
+        (.nextBytes (SunJCE/getRandom) salt)
+        (let [pbeSpec (PBEParameterSpec. salt ITERATION_COUNT)
+              pbeKeySpec (PBEKeySpec. (.-password this))
+              ^:mutable ^SecretKey sKey nil
+              ^:mutable ^Cipher cipher nil]
+          (try
+            (set! sKey (PBEKey. pbeKeySpec "PBEWithMD5AndTripleDES"))
+            (.clearPassword pbeKeySpec)
+            (let [^:mutable ^PBEWithMD5AndTripleDESCipher cipherSpi nil]
+              (set! cipherSpi (PBEWithMD5AndTripleDESCipher.))
+              (set!
+                cipher
+                (CipherForKeyProtector. cipherSpi (SunJCE/getInstance) "PBEWithMD5AndTripleDES"))
+              (.init cipher Cipher/ENCRYPT_MODE sKey pbeSpec))
+            (finally (when (some? sKey) (.destroy sKey))))
+          (SealedObjectForKeyProtector. key cipher))))
+
+    (method unseal :throws [NoSuchAlgorithmException UnrecoverableKeyException] ^Key [this
+                                                                                      ^SealedObject so
+                                                                                      ^int maxLength]
+      (let [^:mutable ^SecretKey sKey nil]
+        (try
+          (let [pbeKeySpec (PBEKeySpec. (.-password this))]
+            (set! sKey (PBEKey. pbeKeySpec "PBEWithMD5AndTripleDES"))
+            (.clearPassword pbeKeySpec)
+            (let [^SealedObjectForKeyProtector soForKeyProtector (if (not
+                                                                       (instance?
+                                                                         SealedObjectForKeyProtector
+                                                                         so))
+                                                                     (SealedObjectForKeyProtector.
+                                                                       so)
+                                                                     (cast
+                                                                       SealedObjectForKeyProtector
+                                                                       so))]
+              (let [params (.getParameters soForKeyProtector)]
+                (when (nil? params)
+                  (throw (UnrecoverableKeyException. "Cannot get algorithm parameters")))
+                (let [^:mutable ^PBEParameterSpec pbeSpec nil]
+                  (try
+                    (set! pbeSpec
+                          (cast PBEParameterSpec (.getParameterSpec params PBEParameterSpec)))
+                    (catch InvalidParameterSpecException ipse
+                      (throw (IOException. "Invalid PBE algorithm parameters"))))
+                  (when (> (.getIterationCount pbeSpec) MAX_ITERATION_COUNT)
+                    (throw (IOException. "PBE iteration count too large")))
+                  (let [^:mutable ^PBEWithMD5AndTripleDESCipher cipherSpi nil]
+                    (set! cipherSpi (PBEWithMD5AndTripleDESCipher.))
+                    (let [^Cipher cipher (CipherForKeyProtector.
+                                           cipherSpi
+                                           (SunJCE/getInstance)
+                                           "PBEWithMD5AndTripleDES")]
+                      (.init cipher Cipher/DECRYPT_MODE sKey params)
+                      (.getKey soForKeyProtector cipher maxLength)))))))
+          (catch NoSuchAlgorithmException ex (throw ex))
+          (catch [IOException GeneralSecurityException ClassNotFoundException] e
+            (throw (UnrecoverableKeyException. (.getMessage e))))
+          (finally (when (some? sKey) (try (.destroy sKey) (catch DestroyFailedException e))))))))
+
+  (defclass ^:final CipherForKeyProtector
+    :extends Cipher
+
+    (constructor ^:protected [this ^CipherSpi cipherSpi ^Provider provider ^String transformation]
+      (super. cipherSpi provider transformation))))

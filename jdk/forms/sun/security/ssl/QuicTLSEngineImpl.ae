@@ -1,0 +1,667 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/QuicTLSEngineImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.lang.invoke MethodHandles VarHandle)
+        '(java.nio ByteBuffer)
+        '(java.security AlgorithmConstraints GeneralSecurityException)
+        '(java.util HashSet List Map Objects Set)
+        '(java.util.function IntFunction)
+        '(javax.crypto AEADBadTagException SecretKey ShortBufferException)
+        '(javax.net.ssl SSLHandshakeException SSLParameters SSLSession)
+        '(jdk.internal.net.quic QuicKeyUnavailableException
+                                QuicOneRttContext
+                                QuicTLSEngine
+                                QuicTLSEngine$HandshakeState
+                                QuicTLSEngine$KeySpace
+                                QuicTransportErrors
+                                QuicTransportException
+                                QuicTransportParametersConsumer
+                                QuicVersion))
+
+(defclass ^:public ^:final QuicTLSEngineImpl
+  :implements [QuicTLSEngine SSLTransport]
+
+  (field ^:private ^:static ^:final ^{:tag (Map Byte QuicTLSEngine$KeySpace)} messageTypeMap
+    (Map/of (.-id SSLHandshake/CLIENT_HELLO)
+            QuicTLSEngine$KeySpace/INITIAL
+            (.-id SSLHandshake/SERVER_HELLO)
+            QuicTLSEngine$KeySpace/INITIAL
+            (.-id SSLHandshake/ENCRYPTED_EXTENSIONS)
+            QuicTLSEngine$KeySpace/HANDSHAKE
+            (.-id SSLHandshake/CERTIFICATE_REQUEST)
+            QuicTLSEngine$KeySpace/HANDSHAKE
+            (.-id SSLHandshake/CERTIFICATE)
+            QuicTLSEngine$KeySpace/HANDSHAKE
+            (.-id SSLHandshake/CERTIFICATE_VERIFY)
+            QuicTLSEngine$KeySpace/HANDSHAKE
+            (.-id SSLHandshake/FINISHED)
+            QuicTLSEngine$KeySpace/HANDSHAKE
+            (.-id SSLHandshake/NEW_SESSION_TICKET)
+            QuicTLSEngine$KeySpace/ONE_RTT))
+
+  (field ^:static ^:final ^long BASE_CRYPTO_ERROR 256)
+
+  (field ^:private ^:static ^:final ^{:tag (Set QuicVersion)} SUPPORTED_QUIC_VERSIONS
+    (Set/of QuicVersion/QUIC_V1 QuicVersion/QUIC_V2))
+
+  (field ^:private ^:static ^:final ^VarHandle HANDSHAKE_STATE_HANDLE)
+
+  (static-initializer
+    (let [lookup (MethodHandles/lookup)]
+      (try
+        (let [^{:tag (Class ?)} quicTlsEngineImpl QuicTLSEngineImpl]
+          (set! HANDSHAKE_STATE_HANDLE
+                (.findVarHandle lookup
+                                quicTlsEngineImpl
+                                "handshakeState"
+                                QuicTLSEngine$HandshakeState)))
+        (catch Exception e (throw (ExceptionInInitializerError. e))))))
+
+  (field ^:private ^:final ^TransportContext conContext)
+
+  (field ^:private ^:final ^String peerHost)
+
+  (field ^:private ^:final ^int peerPort)
+
+  (field ^:private ^:volatile ^QuicTLSEngine$HandshakeState handshakeState)
+
+  (field ^:private ^:volatile ^QuicTLSEngine$KeySpace sendKeySpace)
+
+  (field ^:private ^:volatile ^ByteBuffer localQuicTransportParameters)
+
+  (field ^:private ^:volatile ^QuicTransportParametersConsumer remoteQuicTransportParametersConsumer)
+
+  (field ^:private ^:final ^QuicKeyManager$InitialKeyManager initialKeyManager
+    (QuicKeyManager$InitialKeyManager.))
+
+  (field ^:private ^:final ^QuicKeyManager$HandshakeKeyManager handshakeKeyManager
+    (QuicKeyManager$HandshakeKeyManager.))
+
+  (field ^:private ^:final ^QuicKeyManager$OneRttKeyManager oneRttKeyManager
+    (QuicKeyManager$OneRttKeyManager.))
+
+  (field ^:private ^:volatile ^ByteBuffer incomingCryptoBuffer)
+
+  (field ^:private ^:volatile ^QuicTLSEngine$KeySpace incomingCryptoSpace)
+
+  (field ^:private ^:volatile ^QuicVersion negotiatedVersion)
+
+  (constructor ^:public [this ^SSLContextImpl sslContextImpl]
+    (this. sslContextImpl nil -1))
+
+  (constructor ^:public [this ^SSLContextImpl sslContextImpl ^:final ^String peerHost
+                         ^:final ^int peerPort]
+    (set! (.-peerHost this) peerHost)
+    (set! (.-peerPort this) peerPort)
+    (set! (.-sendKeySpace this) QuicTLSEngine$KeySpace/INITIAL)
+    (let [handshakeHash (HandshakeHash.)]
+      (set! (.-conContext this)
+            (TransportContext. sslContextImpl
+                               this
+                               (SSLEngineInputRecord. handshakeHash)
+                               (QuicEngineOutputRecord. handshakeHash)))
+      (set! (.-enabledProtocols (.-sslConfig conContext)) (List/of ProtocolVersion/TLS13))
+      (when (some? peerHost)
+        (set! (.-serverNames (.-sslConfig conContext))
+              (Utilities/addToSNIServerNameList (.-serverNames (.-sslConfig conContext)) peerHost)))
+      (.setQuic conContext true)))
+
+  (method ^:public setUseClientMode ^void [this ^boolean mode]
+    (.setUseClientMode conContext mode)
+    (set! (.-handshakeState this)
+          (if mode
+              QuicTLSEngine$HandshakeState/NEED_SEND_CRYPTO
+              QuicTLSEngine$HandshakeState/NEED_RECV_CRYPTO)))
+
+  (method ^:public getUseClientMode ^boolean [this]
+    (.-isClientMode (.-sslConfig conContext)))
+
+  (method ^:public setSSLParameters ^void [this ^:final ^SSLParameters params]
+    (Objects/requireNonNull params)
+    (let [protos (.getProtocols params)]
+      (when (or (nil? protos) (== (alength protos) 0))
+        (throw (IllegalArgumentException. "No TLS protocols set")))
+      (let [^:mutable tlsv13Present false
+            ^{:tag (Set String)} unsupported (HashSet.)]
+        (for-each [^String p protos]
+          (if (.equals "TLSv1.3" p) (set! tlsv13Present true) (.add unsupported p)))
+        (when-not tlsv13Present
+          (throw (IllegalArgumentException. "required TLSv1.3 protocol version hasn't been set")))
+        (when-not (.isEmpty unsupported)
+          (throw (IllegalArgumentException.
+                   (java-str "Unsupported TLS protocol versions " unsupported))))
+        (.setSSLParameters (.-sslConfig conContext) params))))
+
+  (method ^:public getSession ^SSLSession [this]
+    (.-conSession conContext))
+
+  (method ^:public getHandshakeSession ^SSLSession [this]
+    (let [handshakeContext (.-handshakeContext conContext)]
+      (when (some? handshakeContext) ^SSLSession (.-handshakeSession handshakeContext))))
+
+  (method getAlgorithmConstraints ^AlgorithmConstraints [this]
+    (let [handshakeContext (.-handshakeContext conContext)]
+      (if (nil? handshakeContext)
+          (.getAlgorithmConstraints (.getSSLParameters this))
+          (.-userSpecifiedAlgorithmConstraints (.-sslConfig handshakeContext)))))
+
+  (method ^:public getSSLParameters ^SSLParameters [this]
+    (.getSSLParameters (.-sslConfig conContext)))
+
+  (method ^:public getApplicationProtocol ^String [this]
+    (.-applicationProtocol conContext))
+
+  (method ^:public getSupportedQuicVersions ^{:tag (Set QuicVersion)} [this]
+    SUPPORTED_QUIC_VERSIONS)
+
+  (method ^:public setOneRttContext ^void [this ^:final ^QuicOneRttContext ctx]
+    (.setOneRttContext (.-oneRttKeyManager this) ctx))
+
+  (method ^:private getNegotiatedVersion ^QuicVersion [this]
+    (let [negotiated (.-negotiatedVersion this)]
+      (when (nil? negotiated)
+        (throw (IllegalStateException. "Quic version hasn't been negotiated yet")))
+      negotiated))
+
+  (method ^:private isEnabled ^boolean [this ^:final ^QuicVersion quicVersion]
+    (let [^{:tag (Set QuicVersion)} enabled (.getSupportedQuicVersions this)]
+      (if (nil? enabled) false (.contains enabled quicVersion))))
+
+  (method ^:public getHandshakeState ^QuicTLSEngine$HandshakeState [this]
+    handshakeState)
+
+  (method ^:public getCurrentSendKeySpace ^QuicTLSEngine$KeySpace [this]
+    sendKeySpace)
+
+  (method ^:public keysAvailable ^boolean [this ^QuicTLSEngine$KeySpace keySpace]
+    (switch keySpace
+      INITIAL (.keysAvailable (.-initialKeyManager this))
+      HANDSHAKE (.keysAvailable (.-handshakeKeyManager this))
+      ONE_RTT (.keysAvailable (.-oneRttKeyManager this))
+      ZERO_RTT false
+      RETRY true
+      (throw (IllegalArgumentException. (java-str keySpace " not expected here")))))
+
+  (method ^:public discardKeys ^void [this ^QuicTLSEngine$KeySpace keySpace]
+    (switch keySpace
+      INITIAL (.discardKeys (.-initialKeyManager this))
+      HANDSHAKE (.discardKeys (.-handshakeKeyManager this))
+      ONE_RTT (.discardKeys (.-oneRttKeyManager this))
+      (throw (IllegalArgumentException. (java-str "key discarding not implemented for " keySpace)))))
+
+  (method ^:public getHeaderProtectionSampleSize ^int [this ^QuicTLSEngine$KeySpace keySpace]
+    (switch keySpace
+      (INITIAL HANDSHAKE ZERO_RTT ONE_RTT) 16
+      (throw (IllegalArgumentException. (java-str "Type '" keySpace "' not expected here")))))
+
+  (method ^:public computeHeaderProtectionMask :throws [QuicKeyUnavailableException
+                                                        QuicTransportException] ^ByteBuffer [this
+                                                                                             ^QuicTLSEngine$KeySpace keySpace
+                                                                                             ^boolean incoming
+                                                                                             ^ByteBuffer sample]
+    (let [keyManager (.keyManager this keySpace)]
+      (if incoming
+          (let [quicCipher (.getReadCipher keyManager)]
+            (.computeHeaderProtectionMask quicCipher sample))
+          (let [quicCipher (.getWriteCipher keyManager)]
+            (.computeHeaderProtectionMask quicCipher sample)))))
+
+  (method ^:public getAuthTagSize ^int [this] 16)
+
+  (method ^:public encryptPacket :throws [QuicKeyUnavailableException
+                                          QuicTransportException
+                                          ShortBufferException] ^void [this
+                                                                       ^:final ^QuicTLSEngine$KeySpace keySpace
+                                                                       ^:final ^long packetNumber
+                                                                       ^:final ^{:tag (IntFunction ByteBuffer)} headerGenerator
+                                                                       ^:final ^ByteBuffer packetPayload
+                                                                       ^:final ^ByteBuffer output]
+    (let [keyManager (.keyManager this keySpace)]
+      (.encryptPacket keyManager packetNumber headerGenerator packetPayload output)))
+
+  (method ^:public decryptPacket :throws [QuicKeyUnavailableException
+                                          AEADBadTagException
+                                          QuicTransportException
+                                          ShortBufferException] ^void [this
+                                                                       ^:final ^QuicTLSEngine$KeySpace keySpace
+                                                                       ^:final ^long packetNumber
+                                                                       ^:final ^int keyPhase
+                                                                       ^:final ^ByteBuffer packet
+                                                                       ^:final ^int headerLength
+                                                                       ^:final ^ByteBuffer output]
+    (when (and (identical? keySpace QuicTLSEngine$KeySpace/ONE_RTT)
+               (not (.isTLSHandshakeComplete this)))
+      (throw (QuicKeyUnavailableException. "QUIC TLS handshake not yet complete"
+                                           QuicTLSEngine$KeySpace/ONE_RTT)))
+    (let [keyManager (.keyManager this keySpace)]
+      (.decryptPacket keyManager packetNumber keyPhase packet headerLength output)))
+
+  (method ^:public signRetryPacket :throws [ShortBufferException QuicTransportException] ^void [this
+                                                                                                ^:final ^QuicVersion quicVersion
+                                                                                                ^:final ^ByteBuffer originalConnectionId
+                                                                                                ^:final ^ByteBuffer packet
+                                                                                                ^:final ^ByteBuffer output]
+    (when-not (.isEnabled this quicVersion)
+      (throw (IllegalArgumentException. (java-str "Quic version " quicVersion " isn't enabled"))))
+    (let [connIdLength (.remaining originalConnectionId)]
+      (when (or (>= connIdLength 256) (< connIdLength 0))
+        (throw (IllegalArgumentException. "connection ID length")))
+      (let [cipher (QuicKeyManager$InitialKeyManager/getRetryCipher quicVersion false)]
+        (.updateAAD cipher (new byte/1 [(unchecked-byte connIdLength)]))
+        (.updateAAD cipher originalConnectionId)
+        (.updateAAD cipher packet)
+        (try
+          (.doFinal cipher (ByteBuffer/allocate 0) output)
+          (catch ShortBufferException e (throw e))
+          (catch Exception e
+            (throw (QuicTransportException. "Failed to sign packet"
+                                            nil
+                                            0
+                                            (unchecked-add
+                                              BASE_CRYPTO_ERROR
+                                              (.-id Alert/INTERNAL_ERROR))
+                                            e)))))))
+
+  (method ^:public verifyRetryPacket :throws [AEADBadTagException QuicTransportException] ^void [this
+                                                                                                 ^:final ^QuicVersion quicVersion
+                                                                                                 ^:final ^ByteBuffer originalConnectionId
+                                                                                                 ^:final ^ByteBuffer packet]
+    (when-not (.isEnabled this quicVersion)
+      (throw (IllegalArgumentException. (java-str "Quic version " quicVersion " isn't enabled"))))
+    (let [connIdLength (.remaining originalConnectionId)]
+      (when (or (>= connIdLength 256) (< connIdLength 0))
+        (throw (IllegalArgumentException. "connection ID length")))
+      (let [originalLimit (.limit packet)]
+        (.limit packet (unchecked-subtract-int originalLimit 16))
+        (let [cipher (QuicKeyManager$InitialKeyManager/getRetryCipher quicVersion true)]
+          (.updateAAD cipher (new byte/1 [(unchecked-byte connIdLength)]))
+          (.updateAAD cipher originalConnectionId)
+          (.updateAAD cipher packet)
+          (.limit packet originalLimit)
+          (try
+            (java-assert (== (.remaining packet) 16))
+            (let [outBufLength (.getOutputSize cipher (.remaining packet))
+                  outBuffer (ByteBuffer/allocate outBufLength)]
+              (.doFinal cipher packet outBuffer)
+              (java-assert (== (.position outBuffer) 0)))
+            (catch AEADBadTagException e (throw e))
+            (catch Exception e
+              (throw (QuicTransportException. "Failed to verify packet"
+                                              nil
+                                              0
+                                              (unchecked-add
+                                                BASE_CRYPTO_ERROR
+                                                (.-id Alert/INTERNAL_ERROR))
+                                              e))))))))
+
+  (method ^:private keyManager ^QuicKeyManager [this ^:final ^QuicTLSEngine$KeySpace keySpace]
+    (switch keySpace
+      INITIAL (.-initialKeyManager this)
+      HANDSHAKE (.-handshakeKeyManager this)
+      ONE_RTT (.-oneRttKeyManager this)
+      (throw (IllegalArgumentException.
+               (java-str "No key manager available for key space: " keySpace)))))
+
+  (method ^:public getHandshakeBytes :throws [IOException] ^ByteBuffer [this
+                                                                        ^QuicTLSEngine$KeySpace keySpace]
+    (when-not (identical? keySpace sendKeySpace)
+      (throw (IllegalStateException.
+               (java-str "Unexpected key space: " keySpace " (expected " sendKeySpace ")"))))
+    (when (or (identical? handshakeState QuicTLSEngine$HandshakeState/NEED_SEND_CRYPTO)
+              (not (.isEmpty (.-outputRecord conContext))))
+      (let [bytes (.produceNextHandshakeMessage this)] (ByteBuffer/wrap bytes))))
+
+  (method ^:private produceNextHandshakeMessage :throws [IOException] ^byte/1 [this]
+    (when (and (and (and (not (.-isNegotiated conContext)) (not (.-isBroken conContext)))
+                    (not (.isInboundClosed conContext)))
+               (not (.isOutboundClosed conContext)))
+      (.kickstart conContext))
+    (let [message (.getHandshakeMessage (.-outputRecord conContext))]
+      (if (identical? handshakeState QuicTLSEngine$HandshakeState/NEED_SEND_CRYPTO)
+          (cond
+            (.isEmpty (.-outputRecord conContext))
+              (if (.-isNegotiated conContext)
+                  (do
+                    (set! handshakeState QuicTLSEngine$HandshakeState/NEED_RECV_HANDSHAKE_DONE)
+                    (set! sendKeySpace QuicTLSEngine$KeySpace/ONE_RTT))
+                  (set! handshakeState QuicTLSEngine$HandshakeState/NEED_RECV_CRYPTO))
+            (and (identical? sendKeySpace QuicTLSEngine$KeySpace/INITIAL)
+                 (not (.getUseClientMode this)))
+              (set! sendKeySpace (.getHandshakeMessageKeySpace (.-outputRecord conContext))))
+          (java-assert (.-isNegotiated conContext)))
+      message))
+
+  (method ^:public consumeHandshakeBytes :throws [QuicTransportException] ^void [this
+                                                                                 ^QuicTLSEngine$KeySpace keySpace
+                                                                                 ^ByteBuffer payload]
+    (when-not (.hasRemaining payload) (throw (IllegalArgumentException. "Empty crypto buffer")))
+    (when (identical? keySpace QuicTLSEngine$KeySpace/ZERO_RTT)
+      (throw (IllegalArgumentException. "Crypto in zero-rtt")))
+    (when (and (some? incomingCryptoSpace) (not (identical? incomingCryptoSpace keySpace)))
+      (throw (QuicTransportException. "Unexpected message"
+                                      nil
+                                      0
+                                      (unchecked-add
+                                        BASE_CRYPTO_ERROR
+                                        (.-id Alert/UNEXPECTED_MESSAGE))
+                                      (SSLHandshakeException.
+                                        (java-str "Unfinished message in " incomingCryptoSpace)))))
+    (try
+      (when (and (and (and (not (.-isNegotiated conContext)) (not (.-isBroken conContext)))
+                      (not (.isInboundClosed conContext)))
+                 (not (.isOutboundClosed conContext)))
+        (.kickstart conContext))
+      (catch IOException e
+        (throw (QuicTransportException. (.toString e)
+                                        nil
+                                        0
+                                        (unchecked-add
+                                          BASE_CRYPTO_ERROR
+                                          (.-id Alert/INTERNAL_ERROR))
+                                        e))))
+    (while (.hasRemaining payload)
+      (when (and (not (identical? keySpace QuicTLSEngine$KeySpace/ONE_RTT))
+                 (not (identical? handshakeState QuicTLSEngine$HandshakeState/NEED_RECV_CRYPTO)))
+        (throw (QuicTransportException. "Unexpected message"
+                                        nil
+                                        0
+                                        (unchecked-add
+                                          BASE_CRYPTO_ERROR
+                                          (.-id Alert/UNEXPECTED_MESSAGE))
+                                        (SSLHandshakeException.
+                                          (java-str
+                                            "Not expecting a handshake message, state: "
+                                            handshakeState)))))
+      (if (some? incomingCryptoBuffer)
+          (if (<= (.remaining payload) (.remaining incomingCryptoBuffer))
+              (.put incomingCryptoBuffer payload)
+              (let [remaining (.remaining incomingCryptoBuffer)]
+                (.put incomingCryptoBuffer
+                      (.position incomingCryptoBuffer)
+                      payload
+                      (.position payload)
+                      remaining)
+                (.position incomingCryptoBuffer (.limit incomingCryptoBuffer))
+                (.position payload (unchecked-add-int (.position payload) remaining))
+                (when (== (.capacity incomingCryptoBuffer) 4)
+                  (let [messageSize (bit-or-int (bit-or-int
+                                                  (bit-shift-left-int
+                                                    (bit-and-int (.get incomingCryptoBuffer 1) 0xFF)
+                                                    16)
+                                                  (bit-shift-left-int
+                                                    (bit-and-int (.get incomingCryptoBuffer 2) 0xFF)
+                                                    8))
+                                                (bit-and-int (.get incomingCryptoBuffer 3) 0xFF))]
+                    (when-not (== messageSize 0)
+                      (when (> messageSize SSLConfiguration/maxHandshakeMessageSize)
+                        (throw (QuicTransportException.
+                                 (java-str "The size of the handshake message ("
+                                           messageSize
+                                           ") exceeds the maximum allowed size ("
+                                           SSLConfiguration/maxHandshakeMessageSize
+                                           ")")
+                                 nil
+                                 0
+                                 QuicTransportErrors/CRYPTO_BUFFER_EXCEEDED)))
+                      (let [newBuffer (ByteBuffer/allocate (unchecked-add-int messageSize 4))]
+                        (.flip incomingCryptoBuffer)
+                        (.put newBuffer incomingCryptoBuffer)
+                        (set! incomingCryptoBuffer newBuffer)
+                        (java-assert (== (.position incomingCryptoBuffer) 4)
+                          (.position incomingCryptoBuffer))
+                        (continue)))))))
+          (let [messageType (.get payload (.position payload))]
+            (when (SSLLogger/isOn)
+              (SSLLogger/fine
+                (java-str "Received message of type 0x"
+                          (Integer/toHexString (bit-and-int messageType 0xFF)))))
+            (let [expected (cast QuicTLSEngine$KeySpace (.get messageTypeMap messageType))]
+              (when-not (identical? expected keySpace)
+                (throw (QuicTransportException. "Unexpected message"
+                                                nil
+                                                0
+                                                (unchecked-add
+                                                  BASE_CRYPTO_ERROR
+                                                  (.-id Alert/UNEXPECTED_MESSAGE))
+                                                (SSLHandshakeException.
+                                                  (java-str
+                                                    "Message "
+                                                    messageType
+                                                    " received in "
+                                                    keySpace
+                                                    " but should be "
+                                                    expected)))))
+              (when (< (.remaining payload) 4)
+                (set! incomingCryptoBuffer (ByteBuffer/allocate 4))
+                (.put incomingCryptoBuffer payload)
+                (set! incomingCryptoSpace keySpace)
+                (return))
+              (let [payloadPos (.position payload)
+                    messageSize (bit-or-int (bit-or-int
+                                              (bit-shift-left-int
+                                                (bit-and-int
+                                                  (.get payload (unchecked-add-int payloadPos 1))
+                                                  0xFF)
+                                                16)
+                                              (bit-shift-left-int
+                                                (bit-and-int
+                                                  (.get payload (unchecked-add-int payloadPos 2))
+                                                  0xFF)
+                                                8))
+                                            (bit-and-int
+                                              (.get payload (unchecked-add-int payloadPos 3))
+                                              0xFF))]
+                (when (< (.remaining payload) (unchecked-add-int messageSize 4))
+                  (when (> messageSize SSLConfiguration/maxHandshakeMessageSize)
+                    (throw (QuicTransportException.
+                             (java-str "The size of the handshake message ("
+                                       messageSize
+                                       ") exceeds the maximum allowed size ("
+                                       SSLConfiguration/maxHandshakeMessageSize
+                                       ")")
+                             nil
+                             0
+                             QuicTransportErrors/CRYPTO_BUFFER_EXCEEDED)))
+                  (set! incomingCryptoBuffer
+                        (ByteBuffer/allocate (unchecked-add-int messageSize 4)))
+                  (.put incomingCryptoBuffer payload)
+                  (set! incomingCryptoSpace keySpace)
+                  (return))
+                (set! incomingCryptoSpace keySpace)
+                (set! incomingCryptoBuffer
+                      (.slice payload payloadPos (unchecked-add-int messageSize 4)))
+                (.position incomingCryptoBuffer (unchecked-add-int messageSize 4))
+                (java-assert (not (.hasRemaining incomingCryptoBuffer))
+                  (.remaining incomingCryptoBuffer))
+                (.position payload (unchecked-add-int (unchecked-add-int payloadPos messageSize) 4))))))
+      (if (not (.hasRemaining incomingCryptoBuffer))
+          (do
+            (.flip incomingCryptoBuffer)
+            (.handleHandshakeMessage this keySpace incomingCryptoBuffer)
+            (set! incomingCryptoBuffer nil)
+            (set! incomingCryptoSpace nil))
+          (do (java-assert (not (.hasRemaining payload)) (.remaining payload)) (return)))))
+
+  (method ^:private handleHandshakeMessage :throws [QuicTransportException] ^void [this
+                                                                                   ^QuicTLSEngine$KeySpace keySpace
+                                                                                   ^ByteBuffer message]
+    (let [useClientMode (.getUseClientMode this)
+          messageType (.get message)
+          messageSize (bit-or-int (bit-or-int (bit-shift-left-int
+                                                (bit-and-int (.get message) 0xFF)
+                                                16)
+                                              (bit-shift-left-int
+                                                (bit-and-int (.get message) 0xFF)
+                                                8))
+                                  (bit-and-int (.get message) 0xFF))]
+      (java-assert (== (.remaining message) messageSize)
+        (unchecked-subtract-int (.remaining message) messageSize))
+      (try
+        (when (.isHashable (.-handshakeHash (.-inputRecord conContext)) messageType)
+          (let [temp (.duplicate message)]
+            (.position temp 0)
+            (.receive (.-handshakeHash (.-inputRecord conContext)) temp)))
+        (when (nil? (.-handshakeContext conContext))
+          (when-not (.-isNegotiated conContext)
+            (throw (QuicTransportException.
+                     (java-str "Cannot process crypto message, broken: " (.-isBroken conContext))
+                     nil
+                     0
+                     QuicTransportErrors/INTERNAL_ERROR)))
+          (set! (.-handshakeContext conContext) (PostHandshakeContext. conContext)))
+        (.dispatch (.-handshakeContext conContext) messageType (.slice message))
+        (catch SSLHandshakeException e
+          (when-instance [^QuicTransportException qte (.getCause e)] (throw qte))
+          (let [alert (.getAlert (cast QuicEngineOutputRecord (.-outputRecord conContext)))]
+            (throw (QuicTransportException. (.-description alert)
+                                            keySpace
+                                            0
+                                            (unchecked-add BASE_CRYPTO_ERROR (.-id alert))
+                                            e))))
+        (catch IOException e (throw (RuntimeException. e))))
+      (if (identical? handshakeState QuicTLSEngine$HandshakeState/NEED_RECV_CRYPTO)
+          (cond
+            (.isEmpty (.-outputRecord conContext))
+              (cond
+                (.-isNegotiated conContext)
+                  (do
+                    (set! handshakeState QuicTLSEngine$HandshakeState/NEED_SEND_HANDSHAKE_DONE)
+                    (set! sendKeySpace QuicTLSEngine$KeySpace/ONE_RTT))
+                (identical? sendKeySpace QuicTLSEngine$KeySpace/INITIAL)
+                  (set! sendKeySpace QuicTLSEngine$KeySpace/HANDSHAKE))
+            (and (.-isNegotiated conContext) (not useClientMode))
+              (do
+                (set! handshakeState QuicTLSEngine$HandshakeState/NEED_SEND_HANDSHAKE_DONE)
+                (set! sendKeySpace QuicTLSEngine$KeySpace/ONE_RTT))
+            :else (set! handshakeState QuicTLSEngine$HandshakeState/NEED_SEND_CRYPTO))
+          (java-assert (.-isNegotiated conContext)))))
+
+  (method ^:public deriveInitialKeys :throws [IOException] ^void [this
+                                                                  ^:final ^QuicVersion quicVersion
+                                                                  ^:final ^ByteBuffer connectionId]
+    (when-not (.isEnabled this quicVersion)
+      (throw (IllegalArgumentException. (java-str "Quic version " quicVersion " isn't enabled"))))
+    (let [connectionIdBytes (new byte/1 (.remaining connectionId))]
+      (.get connectionId connectionIdBytes)
+      (.deriveKeys (.-initialKeyManager this)
+                   quicVersion
+                   connectionIdBytes
+                   (.getUseClientMode this))))
+
+  (method ^:public versionNegotiated ^void [this ^:final ^QuicVersion quicVersion]
+    (Objects/requireNonNull quicVersion)
+    (when-not (.isEnabled this quicVersion)
+      (throw (IllegalArgumentException. (java-str "Quic version " quicVersion " is not enabled"))))
+    (locking this
+      (let [prevNegotiated (.-negotiatedVersion this)]
+        (when (some? prevNegotiated)
+          (throw (IllegalStateException. "A Quic version has already been negotiated previously")))
+        (set! (.-negotiatedVersion this) quicVersion))))
+
+  (method ^:public deriveHandshakeKeys :throws [IOException] ^void [this]
+    (let [quicVersion (.getNegotiatedVersion this)]
+      (.deriveKeys (.-handshakeKeyManager this)
+                   quicVersion
+                   (.-handshakeContext (.-conContext this))
+                   (.getUseClientMode this))))
+
+  (method ^:public deriveOneRTTKeys :throws [IOException] ^void [this]
+    (let [quicVersion (.getNegotiatedVersion this)]
+      (.deriveKeys (.-oneRttKeyManager this)
+                   quicVersion
+                   (.-handshakeContext (.-conContext this))
+                   (.getUseClientMode this))))
+
+  (method deriveOneRTTKeys :throws [IOException GeneralSecurityException] ^void [this
+                                                                                 ^:final ^QuicVersion version
+                                                                                 ^:final ^SecretKey client_application_traffic_secret_0
+                                                                                 ^:final ^SecretKey server_application_traffic_secret_0
+                                                                                 ^:final ^CipherSuite negotiatedCipherSuite
+                                                                                 ^:final ^boolean clientMode]
+    (.deriveOneRttKeys (.-oneRttKeyManager this)
+                       version
+                       client_application_traffic_secret_0
+                       server_application_traffic_secret_0
+                       negotiatedCipherSuite
+                       clientMode))
+
+  (method ^:public getDelegatedTask ^Runnable [this] nil)
+
+  (method ^:public getPeerHost ^String [this] peerHost)
+
+  (method ^:public getPeerPort ^int [this] peerPort)
+
+  (method ^:public useDelegatedTask ^boolean [this] true)
+
+  (method ^:public getLocalQuicTransportParameters ^byte/1 [this]
+    (let [ltp localQuicTransportParameters]
+      (when (some? ltp) (let [result (new byte/1 (.remaining ltp))] (.get ltp 0 result) result))))
+
+  (method ^:public setLocalQuicTransportParameters ^void [this ^ByteBuffer params]
+    (set! (.-localQuicTransportParameters this) params))
+
+  (method ^:public restartHandshake :throws [IOException] ^void [this]
+    (when (some? negotiatedVersion) (throw (IllegalStateException. "Version already negotiated")))
+    (when (or (not (identical? sendKeySpace QuicTLSEngine$KeySpace/INITIAL))
+              (not (identical? handshakeState QuicTLSEngine$HandshakeState/NEED_RECV_CRYPTO)))
+      (throw (IllegalStateException. "Unexpected handshake state")))
+    (let [context (.-handshakeContext conContext)
+          chc (cast ClientHandshakeContext context)]
+      (.finish (.-handshakeHash chc))
+      (.reproduce (.-extensions (.-initialClientHelloMsg chc))
+                  chc
+                  (new SSLExtension/1
+                       [SSLExtension/CH_QUIC_TRANSPORT_PARAMETERS SSLExtension/CH_PRE_SHARED_KEY]))
+      (.write (.-initialClientHelloMsg chc) (.-handshakeOutput chc))
+      (set! handshakeState QuicTLSEngine$HandshakeState/NEED_SEND_CRYPTO)))
+
+  (method ^:public setRemoteQuicTransportParametersConsumer ^void [this
+                                                                   ^QuicTransportParametersConsumer consumer]
+    (set! (.-remoteQuicTransportParametersConsumer this) consumer))
+
+  (method processRemoteQuicTransportParameters :throws [QuicTransportException] ^void [this
+                                                                                       ^ByteBuffer buffer]
+    (.accept remoteQuicTransportParametersConsumer buffer))
+
+  (method ^:public tryMarkHandshakeDone ^boolean [this]
+    (when (.getUseClientMode this)
+      (throw (IllegalStateException. "Not expected to be called in client mode")))
+    (let [confirmed
+            ^boolean (^[QuicTLSEngineImpl QuicTLSEngine$HandshakeState QuicTLSEngine$HandshakeState] VarHandle/.compareAndSet
+                       HANDSHAKE_STATE_HANDLE
+                       this
+                       QuicTLSEngine$HandshakeState/NEED_SEND_HANDSHAKE_DONE
+                       QuicTLSEngine$HandshakeState/HANDSHAKE_CONFIRMED)]
+      (when confirmed
+        (when (SSLLogger/isOn)
+          (SSLLogger/fine "QuicTLSEngine (server) marked handshake state as HANDSHAKE_CONFIRMED")))
+      confirmed))
+
+  (method ^:public tryReceiveHandshakeDone ^boolean [this]
+    (let [isClient (.getUseClientMode this)]
+      (when-not isClient
+        (throw (IllegalStateException. "Not expected to receive HANDSHAKE_DONE in server mode")))
+      (let [confirmed
+              ^boolean (^[QuicTLSEngineImpl QuicTLSEngine$HandshakeState QuicTLSEngine$HandshakeState] VarHandle/.compareAndSet
+                         HANDSHAKE_STATE_HANDLE
+                         this
+                         QuicTLSEngine$HandshakeState/NEED_RECV_HANDSHAKE_DONE
+                         QuicTLSEngine$HandshakeState/HANDSHAKE_CONFIRMED)]
+        (when confirmed
+          (when (SSLLogger/isOn)
+            (SSLLogger/fine
+              "QuicTLSEngine (client) received HANDSHAKE_DONE, marking state as HANDSHAKE_DONE")))
+        confirmed)))
+
+  (method ^:public isTLSHandshakeComplete ^boolean [this]
+    (let [isClient (.getUseClientMode this)
+          hsState (.-handshakeState this)]
+      (if isClient
+          (or (identical? hsState QuicTLSEngine$HandshakeState/NEED_RECV_HANDSHAKE_DONE)
+              (identical? hsState QuicTLSEngine$HandshakeState/HANDSHAKE_CONFIRMED))
+          (identical? hsState QuicTLSEngine$HandshakeState/HANDSHAKE_CONFIRMED))))
+
+  (method ^:public getOneRttKeyPhase :throws [QuicKeyUnavailableException] ^int [this]
+    (.getKeyPhase (.getReadCipher (.-oneRttKeyManager this)))))

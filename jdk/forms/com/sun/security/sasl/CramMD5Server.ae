@@ -1,0 +1,151 @@
+;; Converted from jdk26u src/java.security.sasl/share/classes/com/sun/security/sasl/CramMD5Server.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.security.sasl)
+
+(import '(java.io IOException)
+        '(java.nio.charset StandardCharsets)
+        '(java.security NoSuchAlgorithmException SecureRandom)
+        '(java.util Map)
+        '(java.util.logging Level)
+        '(javax.security.auth.callback Callback
+                                       CallbackHandler
+                                       NameCallback
+                                       PasswordCallback
+                                       UnsupportedCallbackException)
+        '(javax.security.sasl AuthorizeCallback SaslException SaslServer)
+        '(sun.security.jca JCAUtil))
+
+(defclass ^:final CramMD5Server
+  :extends CramMD5Base
+  :implements [SaslServer]
+
+  (field ^:private ^:static ^:final ^SecureRandom SECURE_RANDOM (JCAUtil/getDefSecureRandom))
+
+  (field ^:private ^String fqdn)
+
+  (field ^:private ^byte/1 challengeData nil)
+
+  (field ^:private ^String authzid)
+
+  (field ^:private ^CallbackHandler cbh)
+
+  (constructor :throws [SaslException] [this ^String protocol ^String serverFqdn
+                                        ^{:tag (Map String ?)} props ^CallbackHandler cbh]
+    (when (nil? serverFqdn)
+      (throw (SaslException. "CRAM-MD5: fully qualified server name must be specified")))
+    (set! fqdn serverFqdn)
+    (set! (.-cbh this) cbh))
+
+  (method ^:public evaluateResponse :throws [SaslException] ^byte/1 [this ^byte/1 responseData]
+    (when (.-completed this)
+      (throw (IllegalStateException. "CRAM-MD5 authentication already completed")))
+    (when (.-aborted this)
+      (throw (IllegalStateException. "CRAM-MD5 authentication previously aborted due to error")))
+    (try
+      (if (nil? challengeData)
+          (do
+            (when-not (== (alength responseData) 0)
+              (set! (.-aborted this) true)
+              (throw (SaslException. "CRAM-MD5 does not expect any initial response")))
+            (let [rand (.nextLong SECURE_RANDOM)
+                  timestamp (System/currentTimeMillis)
+                  sb (StringBuilder.)]
+              (.append sb \<)
+              (.append sb rand)
+              (.append sb \.)
+              (.append sb timestamp)
+              (.append sb \@)
+              (.append sb fqdn)
+              (.append sb \>)
+              (let [challengeStr (.toString sb)]
+                (.log CramMD5Server/logger
+                      Level/FINE
+                      "CRAMSRV01:Generated challenge: {0}"
+                      challengeStr)
+                (set! challengeData (.getBytes challengeStr StandardCharsets/UTF_8))
+                (.clone challengeData))))
+          (do
+            (when (.isLoggable CramMD5Server/logger Level/FINE)
+              (.log CramMD5Server/logger
+                    Level/FINE
+                    "CRAMSRV02:Received response: {0}"
+                    (String. responseData StandardCharsets/UTF_8)))
+            (let [^:mutable ^int ulen 0]
+              (loop [^int i 0]
+                (if (< i (alength responseData))
+                    (if (== (aget responseData i) \space)
+                        (set! ulen i)
+                        (recur (unchecked-inc-int i)))
+                    nil))
+              (when (== ulen 0)
+                (set! (.-aborted this) true)
+                (throw (SaslException. "CRAM-MD5: Invalid response; space missing")))
+              (let [username (String. responseData 0 ulen StandardCharsets/UTF_8)]
+                (.log CramMD5Server/logger Level/FINE "CRAMSRV03:Extracted username: {0}" username)
+                (let [ncb (NameCallback. "CRAM-MD5 authentication ID: " username)
+                      pcb (PasswordCallback. "CRAM-MD5 password: " false)]
+                  (.handle cbh (new Callback/1 [ncb pcb]))
+                  (let [pwChars (.getPassword pcb)]
+                    (when (or (nil? pwChars) (== (alength pwChars) 0))
+                      (set! (.-aborted this) true)
+                      (throw (SaslException. (java-str "CRAM-MD5: username not found: " username))))
+                    (.clearPassword pcb)
+                    (let [pwStr (String. pwChars)]
+                      (loop [^int i 0]
+                        (when (< i (alength pwChars))
+                          (aset pwChars i 0)
+                          (recur (unchecked-inc-int i))))
+                      (set! (.-pw this) (.getBytes pwStr StandardCharsets/UTF_8))
+                      (let [digest (CramMD5Server/HMAC_MD5 (.-pw this) challengeData)]
+                        (.log CramMD5Server/logger
+                              Level/FINE
+                              "CRAMSRV04:Expecting digest: {0}"
+                              digest)
+                        (.clearPassword this)
+                        (let [expectedDigest (.getBytes digest StandardCharsets/UTF_8)
+                              digestLen (unchecked-subtract-int
+                                          (unchecked-subtract-int (alength responseData) ulen)
+                                          1)]
+                          (when-not (== (alength expectedDigest) digestLen)
+                            (set! (.-aborted this) true)
+                            (throw (SaslException. "Invalid response")))
+                          (let [^:mutable ^int j 0]
+                            (loop [^int i (unchecked-add-int ulen 1)]
+                              (if (< i (alength responseData))
+                                  (if (not (== (aget
+                                                 expectedDigest
+                                                 (let [old-1 j]
+                                                   (set! j (unchecked-inc-int j))
+                                                   old-1))
+                                               (aget responseData i)))
+                                      (do
+                                        (set! (.-aborted this) true)
+                                        (throw (SaslException. "Invalid response")))
+                                      (recur (unchecked-inc-int i)))
+                                  nil))
+                            (let [acb (AuthorizeCallback. username username)]
+                              (.handle cbh (new Callback/1 [acb]))
+                              (if (.isAuthorized acb)
+                                  (set! authzid (.getAuthorizedID acb))
+                                  (do
+                                    (set! (.-aborted this) true)
+                                    (throw (SaslException.
+                                             (java-str "CRAM-MD5: user not authorized: " username)))))
+                              (.log CramMD5Server/logger
+                                    Level/FINE
+                                    "CRAMSRV05:Authorization id: {0}"
+                                    authzid)
+                              (set! (.-completed this) true)
+                              nil)))))))))))
+      (catch NoSuchAlgorithmException e
+        (set! (.-aborted this) true)
+        (throw (SaslException. "MD5 algorithm not available on platform" e)))
+      (catch SaslException e (throw e))
+      (catch [UnsupportedCallbackException IOException] e
+        (set! (.-aborted this) true)
+        (throw (SaslException. "CRAM-MD5 authentication failed" e)))))
+
+  (method ^:public getAuthorizationID ^String [this]
+    (if (.-completed this)
+        authzid
+        (throw (IllegalStateException. "CRAM-MD5 authentication not completed")))))

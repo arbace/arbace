@@ -1,0 +1,190 @@
+;; Converted from overlay/jdk/java.base/java/lang/invoke/StringConcatFactory.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.lang.invoke)
+
+(import '(java.util Objects))
+
+(defclass ^:public ^:final StringConcatFactory
+  (field ^:private ^:static ^:final ^char TAG_ARG \u0001)
+
+  (field ^:private ^:static ^:final ^char TAG_CONST \u0002)
+
+  (field ^:private ^:static ^:final ^int MAX_INDY_CONCAT_ARG_SLOTS 200)
+
+  (method ^:public ^:static makeConcat :throws [StringConcatException] ^CallSite [^MethodHandles$Lookup lookup
+                                                                                  ^String name
+                                                                                  ^MethodType concatType]
+    (let [recipe (.repeat "\u0001" (.parameterCount concatType))]
+      (StringConcatFactory/makeConcatWithConstants lookup name concatType recipe)))
+
+  (method ^:public ^:static makeConcatWithConstants :throws [StringConcatException] ^CallSite [^MethodHandles$Lookup lookup
+                                                                                               ^String name
+                                                                                               ^MethodType concatType
+                                                                                               ^String recipe
+                                                                                               &
+                                                                                               ^Object/1 constants]
+    (Objects/requireNonNull lookup "Lookup is null")
+    (Objects/requireNonNull name "Name is null")
+    (Objects/requireNonNull recipe "Recipe is null")
+    (Objects/requireNonNull concatType "Concat type is null")
+    (Objects/requireNonNull constants "Constants are null")
+    (for-each [o constants] (Objects/requireNonNull o "Cannot accept null constants"))
+    (when (== (bit-and-int (.lookupModes lookup) MethodHandles$Lookup/PRIVATE) 0)
+      (throw
+        (StringConcatException. (java-str "Invalid caller: " (.getName (.lookupClass lookup))))))
+    (let [constantStrings (StringConcatFactory/parseRecipe concatType recipe constants)]
+      (when-not (.isAssignableFrom (.returnType concatType) String)
+        (throw (StringConcatException.
+                 (java-str "The return type should be compatible with String, but it is "
+                           (.returnType concatType)))))
+      (when (> (.parameterSlotCount concatType) MAX_INDY_CONCAT_ARG_SLOTS)
+        (throw (StringConcatException.
+                 (java-str "Too many concat argument slots: "
+                           (.parameterSlotCount concatType)
+                           ", can only accept "
+                           MAX_INDY_CONCAT_ARG_SLOTS))))
+      (try
+        (let [^:mutable mh (StringConcatFactory/makeSimpleConcat concatType constantStrings)]
+          (when (nil? mh) (set! mh (StringConcatFactory/generate concatType constantStrings)))
+          (set! mh (.asType mh concatType))
+          (ConstantCallSite. mh))
+        (catch Error e (throw e))
+        (catch Throwable t (throw (StringConcatException. "Generator failed" t))))))
+
+  (method ^:private ^:static parseRecipe :throws [StringConcatException] ^String/1 [^MethodType concatType
+                                                                                    ^String recipe
+                                                                                    ^Object/1 constants]
+    (Objects/requireNonNull recipe "Recipe is null")
+    (let [paramCount (.parameterCount concatType)
+          consts (new String/1 (unchecked-add-int paramCount 1))
+          ^:mutable ^int cCount 0
+          ^:mutable ^int oCount 0
+          acc (StringBuilder.)]
+      (loop [^int i 0]
+        (when (< i (.length recipe))
+          (let [c (.charAt recipe i)]
+            (cond
+              (== c TAG_CONST)
+                (do
+                  (when (== cCount (alength constants))
+                    (throw (StringConcatFactory/constantMismatch constants cCount)))
+                  (.append acc (aget constants cCount))
+                  (set! cCount (unchecked-inc-int cCount))
+                  (recur (unchecked-inc-int i)))
+              (== c TAG_ARG)
+                (do
+                  (when (>= oCount paramCount)
+                    (throw (StringConcatFactory/argumentMismatch concatType oCount)))
+                  (aset consts oCount (if (> (.length acc) 0) (.toString acc) ""))
+                  (set! oCount (unchecked-inc-int oCount))
+                  (.setLength acc 0)
+                  (recur (unchecked-inc-int i)))
+              :else (do (.append acc c) (recur (unchecked-inc-int i)))))))
+      (when-not (== oCount (.parameterCount concatType))
+        (throw (StringConcatFactory/argumentMismatch concatType oCount)))
+      (when (< cCount (alength constants))
+        (throw (StringConcatFactory/constantMismatch constants cCount)))
+      (aset consts oCount (if (> (.length acc) 0) (.toString acc) ""))
+      consts))
+
+  (method ^:private ^:static argumentMismatch ^StringConcatException [^MethodType concatType
+                                                                      ^int oCount]
+    (StringConcatException.
+      (java-str "Mismatched number of concat arguments: recipe wants "
+                oCount
+                " arguments, but signature provides "
+                (.parameterCount concatType))))
+
+  (method ^:private ^:static constantMismatch ^StringConcatException [^Object/1 constants
+                                                                      ^int cCount]
+    (StringConcatException.
+      (java-str "Mismatched number of concat constants: recipe wants "
+                cCount
+                " constants, but only "
+                (alength constants)
+                " are passed")))
+
+  (method ^:private ^:static makeSimpleConcat ^MethodHandle [^MethodType mt ^String/1 constants]
+    (let [paramCount (.parameterCount mt)
+          suffix (aget constants paramCount)]
+      (if (== paramCount 0)
+          (MethodHandles/insertArguments (StringConcatFactory/newStringifier)
+                                         0
+                                         (if (nil? suffix) "" ^Object suffix))
+          (do
+            (cond
+              (== paramCount 1)
+                (let [prefix (aget constants 0)]
+                  (cond
+                    (.isEmpty prefix)
+                      (if (.isEmpty suffix)
+                          (return (StringConcatFactory/unaryConcat (.parameterType mt 0)))
+                          (when-not (.hasPrimitives mt)
+                            (return (MethodHandles/insertArguments
+                                      (StringConcatFactory/simpleConcat)
+                                      1
+                                      suffix))))
+                    (and (.isEmpty suffix) (not (.hasPrimitives mt)))
+                      (return (MethodHandles/insertArguments
+                                (StringConcatFactory/simpleConcat)
+                                0
+                                prefix))))
+              (and (and (and (and (== paramCount 2) (not (.hasPrimitives mt))) (.isEmpty suffix))
+                        (.isEmpty (aget constants 0)))
+                   (.isEmpty (aget constants 1)))
+                (return (StringConcatFactory/simpleConcat)))
+            nil))))
+
+  (method ^:private ^:static stringOf ^String [value]
+    (let [^:mutable ^String s nil]
+      (if (or (nil? value) (nil? (set! s (.toString value)))) "null" s)))
+
+  (method ^:private ^:static simpleConcat ^MethodHandle []
+    (MethodHandleImpl/adapter (MethodType/methodType String Object (new Class/1 [Object]))
+                              (lambda MethodHandleImpl$Body [^Object/1 a]
+                                (String. (.concat
+                                           (StringConcatFactory/stringOf (aget a 0))
+                                           (StringConcatFactory/stringOf (aget a 1)))))))
+
+  (method ^:private ^:static newStringifier ^MethodHandle []
+    (MethodHandleImpl/adapter (MethodType/methodType String Object)
+                              (lambda MethodHandleImpl$Body [^Object/1 a]
+                                (String. (StringConcatFactory/stringOf (aget a 0))))))
+
+  (method ^:private ^:static unaryConcat ^MethodHandle [^{:tag (Class ?)} cl]
+    (cond
+      (not (.isPrimitive cl)) (StringConcatFactory/newStringifier)
+      (or (or (identical? cl Integer/TYPE) (identical? cl Short/TYPE)) (identical? cl Byte/TYPE))
+        (StringConcatFactory/stringValueOf Integer/TYPE)
+      (identical? cl Long/TYPE) (StringConcatFactory/stringValueOf Long/TYPE)
+      (identical? cl Character/TYPE) (StringConcatFactory/stringValueOf Character/TYPE)
+      (identical? cl Boolean/TYPE) (StringConcatFactory/stringValueOf Boolean/TYPE)
+      (identical? cl Float/TYPE) (StringConcatFactory/stringValueOf Float/TYPE)
+      (identical? cl Double/TYPE) (StringConcatFactory/stringValueOf Double/TYPE)
+      :else (throw (InternalError. (java-str "Unhandled type for unary concatenation: " cl)))))
+
+  (method ^:private ^:static stringValueOf ^MethodHandle [^{:tag (Class ?)} ptype]
+    (MethodHandleImpl/adapter (MethodType/methodType String ptype)
+                              (lambda MethodHandleImpl$Body [^Object/1 a]
+                                (String/valueOf (aget a 0)))))
+
+  (method ^:private ^:static generate ^MethodHandle [^MethodType args ^String/1 constants]
+    (let [n (.parameterCount args)
+          cs (.clone constants)]
+      (MethodHandleImpl/adapter (.changeReturnType args String)
+                                (lambda MethodHandleImpl$Body [^Object/1 a]
+                                  (let [strs (new String/1 n)]
+                                    (loop [^int i 0]
+                                      (when (< i n)
+                                        (aset strs i (StringConcatFactory/stringOf (aget a i)))
+                                        (recur (unchecked-inc-int i))))
+                                    (let [sb (StringBuilder.)]
+                                      (loop [^int i 0]
+                                        (when (< i n)
+                                          (when (some? (aget cs i)) (.append sb (aget cs i)))
+                                          (.append sb (aget strs i))
+                                          (recur (unchecked-inc-int i))))
+                                      (when (some? (aget cs n)) (.append sb (aget cs n)))
+                                      (.toString sb)))))))
+
+  (constructor ^:private [this]))

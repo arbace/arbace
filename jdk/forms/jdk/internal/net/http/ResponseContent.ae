@@ -1,0 +1,454 @@
+;; Converted from jdk26u src/java.net.http/share/classes/jdk/internal/net/http/ResponseContent.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.net.http)
+
+(import '(java.io IOException)
+        '(java.net.http HttpHeaders HttpResponse$BodySubscriber)
+        '(java.nio ByteBuffer)
+        '(java.nio.charset StandardCharsets)
+        '(java.util ArrayList Collections List)
+        '(java.util.function Consumer Supplier)
+        '(jdk.internal.net.http.common Logger Utils))
+
+(defclass ResponseContent
+  (field ^:final ^{:tag (HttpResponse$BodySubscriber ?)} pusher)
+
+  (field ^:final ^long contentLength)
+
+  (field ^:final ^HttpHeaders headers)
+
+  (field ^:private ^:final ^Runnable onFinished)
+
+  (field ^:private ^:final ^String dbgTag)
+
+  (constructor [this ^HttpConnection connection ^long contentLength ^HttpHeaders h
+                ^{:tag (HttpResponse$BodySubscriber ?)} userSubscriber ^Runnable onFinished]
+    (set! (.-pusher this) userSubscriber)
+    (set! (.-contentLength this) contentLength)
+    (set! (.-headers this) h)
+    (set! (.-onFinished this) onFinished)
+    (set! (.-dbgTag this) (java-str (.dbgString connection) "/ResponseContent")))
+
+  (field ^:static ^:final ^int LF 10)
+
+  (field ^:static ^:final ^int CR 13)
+
+  (field ^:private ^boolean chunkedContent)
+
+  (field ^:private ^boolean chunkedContentInitialized)
+
+  (method contentChunked :throws [IOException] ^boolean [this]
+    (cond
+      chunkedContentInitialized chunkedContent
+      (== contentLength -2)
+        (do (set! chunkedContentInitialized true) (set! chunkedContent false) chunkedContent)
+      :else
+        (do
+          (when (== contentLength -1)
+            (let [tc (cast String (.orElse (.firstValue headers "Transfer-Encoding") ""))]
+              (if (not (.isEmpty tc))
+                  (if (.equalsIgnoreCase tc "chunked")
+                      (set! chunkedContent true)
+                      (throw (IOException. "invalid content")))
+                  (set! chunkedContent false))))
+          (set! chunkedContentInitialized true)
+          chunkedContent)))
+
+  (defclass ^:interface BodyParser
+    :extends [(Consumer ByteBuffer)]
+
+    (method onSubscribe ^void [this ^AbstractSubscription sub])
+
+    (method currentStateMessage ^String [this])
+
+    (method onError ^void [this ^Throwable t]))
+
+  (method getBodyParser :throws [IOException] ^BodyParser [this
+                                                           ^{:tag (Consumer Throwable)} onComplete]
+    (cond
+      (.contentChunked this) (ChunkedBodyParser. onComplete)
+      (== contentLength -2) ^BodyParser (UnknownLengthBodyParser. onComplete)
+      :else ^BodyParser (FixedLengthBodyParser. contentLength onComplete)))
+
+  (defclass ^:static ^:enum ChunkState
+    (constants READING_LENGTH READING_DATA DONE))
+
+  (field ^:static ^:final ^int MAX_CHUNK_HEADER_SIZE 2050)
+
+  (defclass ChunkedBodyParser
+    :implements [BodyParser]
+
+    (field ^:final ^ByteBuffer READMORE Utils/EMPTY_BYTEBUFFER)
+
+    (field ^:final ^{:tag (Consumer Throwable)} onComplete)
+
+    (field ^:final ^Logger debug
+      (Utils/getDebugLogger (method-ref Supplier ^String [] this ChunkedBodyParser/.dbgString)
+                            Utils/DEBUG))
+
+    (field ^:final ^String dbgTag (java-str (.-dbgTag ResponseContent/this) "/ChunkedBodyParser"))
+
+    (field ^:volatile ^Throwable closedExceptionally)
+
+    (field ^:volatile ^int partialChunklen 0)
+
+    (field ^:volatile ^int chunklen -1)
+
+    (field ^:volatile ^int bytesremaining)
+
+    (field ^:volatile ^boolean cr false)
+
+    (field ^:volatile ^int chunkext 0)
+
+    (field ^:volatile ^int digits 0)
+
+    (field ^:volatile ^int bytesToConsume)
+
+    (field ^:volatile ^ChunkState state ChunkState/READING_LENGTH)
+
+    (field ^:volatile ^AbstractSubscription sub)
+
+    (constructor [this ^{:tag (Consumer Throwable)} onComplete]
+      (set! (.-onComplete this) onComplete))
+
+    (method dbgString ^String [this] dbgTag)
+
+    (method ^:private debugBuffer ^void [this ^ByteBuffer b]
+      (when-not (not (.on debug))
+        (let [printable (.asReadOnlyBuffer b)
+              bytes (new byte/1 (unchecked-subtract-int (.limit printable) (.position printable)))]
+          (.get printable bytes 0 (alength bytes))
+          (let [^:mutable msg "============== accepted ==================\n"]
+            (try
+              (let [str (String. bytes StandardCharsets/UTF_8)] (set! msg (java-str msg str)))
+              (catch Exception x (set! msg (java-str msg x)) (.printStackTrace x)))
+            (set! msg (java-str msg "\n==========================================\n"))
+            (.log debug msg)))))
+
+    (method ^:public onSubscribe ^void [this ^AbstractSubscription sub]
+      (when (.on debug) (.log debug (java-str "onSubscribe: " (.getName (.getClass pusher)))))
+      (.onSubscribe pusher (set! (.-sub this) sub)))
+
+    (method ^:public onError ^void [this ^Throwable t]
+      (set! closedExceptionally t)
+      (.accept onComplete t))
+
+    (method ^:public currentStateMessage ^String [this]
+      (String/format "chunked transfer encoding, state: %s" (new Object/1 [state])))
+
+    (method ^:public accept ^void [this ^ByteBuffer b]
+      (if (some? closedExceptionally)
+          (when (.on debug) (.log debug (java-str "already closed: " closedExceptionally)))
+          (let [^:mutable completed false]
+            (try
+              (let [^{:tag (List ByteBuffer)} out (ArrayList.)]
+                (loop []
+                  (when (.tryPushOneHunk this b out)
+                    (when-not (.isEmpty out)
+                      (let [hasDemand (.tryDecrement (.demand sub))]
+                        (java-assert hasDemand)
+                        (.onNext pusher (Collections/unmodifiableList out))
+                        (when (.on debug) (.log debug "Chunks sent"))))
+                    (when (.on debug) (.log debug "done!"))
+                    (java-assert (nil? closedExceptionally))
+                    (java-assert (identical? state ChunkState/DONE))
+                    (.run onFinished)
+                    (.onComplete pusher)
+                    (when (.on debug) (.log debug "subscriber completed"))
+                    (set! completed true)
+                    (.accept onComplete closedExceptionally)
+                    (break))
+                  (when (.hasRemaining b) (recur)))
+                (when (and (not completed) (not (.isEmpty out)))
+                  (let [hasDemand (.tryDecrement (.demand sub))]
+                    (java-assert hasDemand)
+                    (.onNext pusher (Collections/unmodifiableList out))
+                    (when (.on debug) (.log debug "Chunk sent"))))
+                (java-assert (or (identical? state ChunkState/DONE) (not (.hasRemaining b)))))
+              (catch Throwable t
+                (when (.on debug)
+                  (.log debug "Error while processing buffer: %s" (new Object/1 [^Object t])))
+                (set! closedExceptionally t)
+                (when-not completed (.accept onComplete t)))))))
+
+    (method ^:private tryReadChunkLen :throws [IOException] ^int [this ^ByteBuffer chunkbuf]
+      (java-assert (identical? state ChunkState/READING_LENGTH))
+      (while (.hasRemaining chunkbuf)
+        (when (>= (unchecked-add-int chunkext digits) MAX_CHUNK_HEADER_SIZE)
+          (throw (IOException. (java-str "Chunk header size too long: "
+                                         (unchecked-add-int chunkext digits)))))
+        (let [^int c (.get chunkbuf)]
+          (when cr
+            (if (== c LF) (return partialChunklen) (throw (IOException. "invalid chunk header"))))
+          (cond
+            (== c CR)
+              (do
+                (set! cr true)
+                (when (and (== digits 0) (.on debug))
+                  (.log debug "tryReadChunkLen: invalid chunk header? No digits in chunkLen?")))
+            (and (= cr false) (> chunkext 0))
+              (do
+                (set! chunkext (unchecked-inc-int chunkext))
+                (when (.on debug)
+                  (.log debug
+                        (java-str "tryReadChunkLen: More extraneous character after chunk length: "
+                                  c))))
+            :else
+              (let [digit (.toDigit this c)]
+                (if (< digit 0)
+                    (if (> digits 0)
+                        (do
+                          (set! chunkext (unchecked-inc-int chunkext))
+                          (when (.on debug)
+                            (.log debug
+                                  (java-str
+                                    "tryReadChunkLen: Extraneous character after chunk length: "
+                                    c))))
+                        (throw (IOException. (java-str "Illegal character in chunk size: " c))))
+                    (do
+                      (set! digits (unchecked-inc-int digits))
+                      (set! partialChunklen
+                            (unchecked-add-int (unchecked-multiply-int partialChunklen 16) digit))))))))
+      -1)
+
+    (method ^:private tryConsumeBytes :throws [IOException] ^int [this ^ByteBuffer chunkbuf]
+      (let [^:mutable n bytesToConsume]
+        (when (> n 0)
+          (let [e (Math/min (.remaining chunkbuf) n)]
+            (when Utils/ASSERTIONSENABLED
+              (java-assert (and (<= n 2) (<= e 2)))
+              (let [tmp (.slice chunkbuf)]
+                (java-assert (if (and (== n 2) (> e 0)) (== (.get tmp) CR) true))
+                (java-assert (if (or (== n 1) (== e 2)) (== (.get tmp) LF) true))))
+            (.position chunkbuf (unchecked-add-int (.position chunkbuf) e))
+            (set! n (unchecked-subtract-int n e))
+            (set! bytesToConsume n)))
+        (java-assert (>= n 0))
+        n))
+
+    (method tryReadOneHunk :throws [IOException] ^ByteBuffer [this ^ByteBuffer chunk]
+      (let [^:mutable unfulfilled bytesremaining
+            ^:mutable toconsume bytesToConsume
+            ^:mutable st state]
+        (when (and (identical? st ChunkState/READING_LENGTH) (== chunklen -1))
+          (when (.on debug)
+            (.log debug
+                  (lambda Supplier ^String []
+                    (java-str "Trying to read chunk len (remaining in buffer:"
+                              (.remaining chunk)
+                              ")"))))
+          (let [clen (set! chunklen (.tryReadChunkLen this chunk))]
+            (when (== clen -1) (return READMORE))
+            (set! digits (set! chunkext 0))
+            (when (.on debug) (.log debug "Got chunk len %d" (new Object/1 [clen])))
+            (set! cr false)
+            (set! partialChunklen 0)
+            (set! unfulfilled (set! bytesremaining clen))
+            (if (== clen 0)
+                (set! toconsume (set! bytesToConsume 2))
+                (set! st (set! state ChunkState/READING_DATA)))))
+        (when (> toconsume 0)
+          (when (.on debug)
+            (.log debug
+                  "Trying to consume bytes: %d (remaining in buffer: %s)"
+                  (new Object/1 [toconsume (.remaining chunk)])))
+          (when (> (.tryConsumeBytes this chunk) 0) (return READMORE)))
+        (set! toconsume bytesToConsume)
+        (java-assert (== toconsume 0))
+        (if (identical? st ChunkState/READING_LENGTH)
+            (let [clen chunklen]
+              (java-assert (== clen 0))
+              (when (.on debug) (.log debug "No more chunks: %d" (new Object/1 [clen])))
+              (set! state ChunkState/DONE)
+              nil)
+            (let [clen chunklen]
+              (java-assert (> clen 0))
+              (java-assert (identical? st ChunkState/READING_DATA))
+              (let [^:mutable returnBuffer READMORE]
+                (when (> unfulfilled 0)
+                  (let [bytesread (.remaining chunk)]
+                    (when (.on debug)
+                      (.log debug
+                            "Reading chunk: available %d, needed %d"
+                            (new Object/1 [bytesread unfulfilled])))
+                    (let [bytes2return (Math/min bytesread unfulfilled)]
+                      (when (.on debug)
+                        (.log debug "Returning chunk bytes: %d" (new Object/1 [bytes2return])))
+                      (set! returnBuffer
+                            (.asReadOnlyBuffer (Utils/sliceWithLimitedCapacity chunk bytes2return)))
+                      (set! unfulfilled
+                            (set! bytesremaining
+                                  (unchecked-subtract-int bytesremaining bytes2return)))
+                      (when (== unfulfilled 0) (set! bytesToConsume 2)))))
+                (java-assert (>= unfulfilled 0))
+                (when (== unfulfilled 0)
+                  (when (.on debug)
+                    (.log debug
+                          "No more bytes to read - %d yet to consume."
+                          (new Object/1 [unfulfilled])))
+                  (when (== (.tryConsumeBytes this chunk) 0)
+                    (set! chunklen -1)
+                    (set! partialChunklen 0)
+                    (set! cr false)
+                    (set! digits (set! chunkext 0))
+                    (set! state ChunkState/READING_LENGTH)
+                    (when (.on debug) (.log debug "Ready to read next chunk"))))
+                (when (identical? returnBuffer READMORE)
+                  (when (.on debug) (.log debug "Need more data")))
+                returnBuffer)))))
+
+    (method ^:private tryPushOneHunk :throws [IOException] ^boolean [this ^ByteBuffer b
+                                                                     ^{:tag (List ByteBuffer)} out]
+      (java-assert (not (identical? state ChunkState/DONE)))
+      (let [b1 (.tryReadOneHunk this b)]
+        (if (some? b1)
+            (do
+              (when (.hasRemaining b1)
+                (when (.on debug)
+                  (.log debug "Sending chunk to consumer (%d)" (new Object/1 [(.remaining b1)])))
+                (.add out b1))
+              false)
+            true)))
+
+    (method ^:private toDigit :throws [IOException] ^int [this ^int b]
+      (cond
+        (and (>= b 0x30) (<= b 0x39)) (unchecked-subtract-int b 0x30)
+        (and (>= b 0x41) (<= b 0x46)) (unchecked-add-int (unchecked-subtract-int b 0x41) 10)
+        (and (>= b 0x61) (<= b 0x66)) (unchecked-add-int (unchecked-subtract-int b 0x61) 10)
+        :else -1)))
+
+  (defclass UnknownLengthBodyParser
+    :implements [BodyParser]
+
+    (field ^:final ^{:tag (Consumer Throwable)} onComplete)
+
+    (field ^:final ^Logger debug
+      (Utils/getDebugLogger (method-ref Supplier ^String [] this UnknownLengthBodyParser/.dbgString)
+                            Utils/DEBUG))
+
+    (field ^:final ^String dbgTag
+      (java-str (.-dbgTag ResponseContent/this) "/UnknownLengthBodyParser"))
+
+    (field ^:volatile ^Throwable closedExceptionally)
+
+    (field ^:volatile ^AbstractSubscription sub)
+
+    (field ^:volatile ^int breceived 0)
+
+    (constructor [this ^{:tag (Consumer Throwable)} onComplete]
+      (set! (.-onComplete this) onComplete))
+
+    (method dbgString ^String [this] dbgTag)
+
+    (method ^:public onSubscribe ^void [this ^AbstractSubscription sub]
+      (when (.on debug) (.log debug (java-str "onSubscribe: " (.getName (.getClass pusher)))))
+      (.onSubscribe pusher (set! (.-sub this) sub)))
+
+    (method ^:public onError ^void [this ^Throwable t]
+      (set! closedExceptionally t)
+      (.accept onComplete t))
+
+    (method ^:public currentStateMessage ^String [this]
+      (String/format "http1_0 content, bytes received: %d" (new Object/1 [breceived])))
+
+    (method ^:public accept ^void [this ^ByteBuffer b]
+      (if (some? closedExceptionally)
+          (when (.on debug) (.log debug (java-str "already closed: " closedExceptionally)))
+          (try
+            (when (.on debug) (.log debug "Parser got %d bytes " (new Object/1 [(.remaining b)])))
+            (when (.hasRemaining b)
+              (let [hasDemand (.tryDecrement (.demand sub))]
+                (java-assert hasDemand)
+                (set! breceived (unchecked-add-int breceived (.remaining b)))
+                (.onNext pusher (List/of (.asReadOnlyBuffer b)))))
+            (catch Throwable t
+              (when (.on debug) (.log debug "Unexpected exception" t))
+              (set! closedExceptionally t)
+              (.accept onComplete t)))))
+
+    (method ^:public complete ^void [this]
+      (when (.on debug) (.log debug "Parser got all expected bytes: completing"))
+      (java-assert (nil? closedExceptionally))
+      (.run onFinished)
+      (.onComplete pusher)
+      (.accept onComplete closedExceptionally)))
+
+  (defclass FixedLengthBodyParser
+    :implements [BodyParser]
+
+    (field ^:final ^long contentLength)
+
+    (field ^:final ^{:tag (Consumer Throwable)} onComplete)
+
+    (field ^:final ^Logger debug
+      (Utils/getDebugLogger (method-ref Supplier ^String [] this FixedLengthBodyParser/.dbgString)
+                            Utils/DEBUG))
+
+    (field ^:final ^String dbgTag
+      (java-str (.-dbgTag ResponseContent/this) "/FixedLengthBodyParser"))
+
+    (field ^:volatile ^long remaining)
+
+    (field ^:volatile ^Throwable closedExceptionally)
+
+    (field ^:volatile ^AbstractSubscription sub)
+
+    (constructor [this ^long contentLength ^{:tag (Consumer Throwable)} onComplete]
+      (set! (.-contentLength this) (set! (.-remaining this) contentLength))
+      (set! (.-onComplete this) onComplete))
+
+    (method dbgString ^String [this] dbgTag)
+
+    (method ^:public onSubscribe ^void [this ^AbstractSubscription sub]
+      (when (.on debug)
+        (.log debug
+              (java-str "length=" contentLength ", onSubscribe: " (.getName (.getClass pusher)))))
+      (.onSubscribe pusher (set! (.-sub this) sub))
+      (try
+        (when (== contentLength 0) (.run onFinished) (.onComplete pusher) (.accept onComplete nil))
+        (catch Throwable t
+          (set! closedExceptionally t)
+          (try (.onError pusher t) (finally (.accept onComplete t))))))
+
+    (method ^:public onError ^void [this ^Throwable t]
+      (if (not (== contentLength 0))
+          (do (set! closedExceptionally t) (.accept onComplete t))
+          (.accept onComplete nil)))
+
+    (method ^:public currentStateMessage ^String [this]
+      (String/format "fixed content-length: %d, bytes received: %d"
+                     (new Object/1 [contentLength (unchecked-subtract contentLength remaining)])))
+
+    (method ^:public accept ^void [this ^ByteBuffer b]
+      (if (some? closedExceptionally)
+          (when (.on debug) (.log debug (java-str "already closed: " closedExceptionally)))
+          (let [^:mutable completed false]
+            (try
+              (let [^:mutable unfulfilled remaining]
+                (when (.on debug)
+                  (.log debug
+                        "Parser got %d bytes (%d remaining / %d)"
+                        (new Object/1 [(.remaining b) unfulfilled contentLength])))
+                (java-assert (or (or (not (== unfulfilled 0)) (== contentLength 0))
+                                 (== (.remaining b) 0)))
+                (when-not (and (== unfulfilled 0) (> contentLength 0))
+                  (when (and (.hasRemaining b) (> unfulfilled 0))
+                    (let [hasDemand (.tryDecrement (.demand sub))]
+                      (java-assert hasDemand)
+                      (let [amount (unchecked-int (Math/min (.remaining b) unfulfilled))]
+                        (set! unfulfilled (set! remaining (unchecked-subtract remaining amount)))
+                        (let [buffer (Utils/sliceWithLimitedCapacity b amount)]
+                          (.onNext pusher (List/of (.asReadOnlyBuffer buffer)))))))
+                  (if (== unfulfilled 0)
+                      (do
+                        (when (.on debug) (.log debug "Parser got all expected bytes: completing"))
+                        (java-assert (nil? closedExceptionally))
+                        (.run onFinished)
+                        (.onComplete pusher)
+                        (set! completed true)
+                        (.accept onComplete closedExceptionally))
+                      (java-assert (== (.remaining b) 0)))))
+              (catch Throwable t
+                (when (.on debug) (.log debug "Unexpected exception" t))
+                (set! closedExceptionally t)
+                (when-not completed (.accept onComplete t)))))))))

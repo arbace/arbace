@@ -1,0 +1,169 @@
+(ns records.check
+  "bin/records-check (GD4: doc/GATE-DIET-SURVEY.md §5.2, GDS15 (a), \"As built: GD4\"): the records against their known files,
+  judge-only, from the committed files alone (no run; seconds). The pairs are a recorded results file (rows [ID RESULT REASON],
+  RESULT :pass or :known, the check's --record) and the known file that accounts for its non-passes (SECTION -> corpus -> file
+  -> {:class K}, the class texts in :classes): every source of test/reap/cells.edn read :c-known with a :results (C's token,
+  tree, annotation and round trip checks, C++'s token check, Python's checks; their :id-sep), and the extra pairs of
+  test/records/pairs.edn. Each pair's problems:
+    known-unlisted  a row :known whose file no section of the known file lists (the entry was dropped, or the results were
+                    recorded from a run the known file no longer matches): record the results again, or restore the entry
+    stale           a known entry (of the pair's sections) whose row is :pass: the entry is stale, record the known file again
+    unclassed       a row neither :pass nor :known: the record holds a failure
+    lacking         a known entry whose file the results lack, of a corpus the results hold (the two files from other runs)
+  A results file not written yet (a check not recorded: reap's :until) is passed over and said. The negative controls (always
+  run, GTS81 (a)): for the first pair with a :known row and a known entry, the judge on mutated copies (a known row's entry
+  dropped, a known entry's row made :pass, a row made :fail) must find each problem; a control that finds nothing fails.
+
+  -main check ROOT   every pair, then the controls; exit 1 on a problem or a control that passed"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-edn [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- exists? [root ^String f] (.isFile (File. (str root "/" f))))
+
+(defn pairs
+  "the pairs: {:name :known :results :sections :id-sep} from cells.edn's :c-known sources with :results (one a distinct
+  known/results/id-sep, their sections joined), then pairs.edn's :pairs"
+  [root]
+  (let [cells (read-edn (str root "/test/reap/cells.edn"))
+        srcs (for [[_ c] (:cells cells) s (:sources c)
+                   :when (and (= :c-known (:reader s)) (:results s))]
+               s)
+        by (group-by (juxt :file :results :id-sep) srcs)
+        pf (let [f (str root "/test/records/pairs.edn")] (when (.isFile (File. f)) (read-edn f)))
+        ;; pairs.edn's :also-known: the other known files a check reads for a results file (C's tree check reads the token
+        ;; level's: its :known rows "pp-known" are listed there)
+        also (:also-known pf)]
+    (concat
+     (for [[[kf rf sep] ss] (sort-by (comp str key) by)]
+       {:name (str/join "; " (distinct (map :name ss))) :known kf :results rf :id-sep (or sep " ")
+        :also-known (get also rf)
+        :exclude-corpora (set (get (:exclude-corpora pf) rf))
+        :sections (vec (distinct (mapcat #(or (:sections %) [(:section %)]) ss)))})
+     (:pairs pf))))
+
+(defn- entries
+  "a known file's entries, [section id] for every section (or SECS alone) of corpus -> file maps"
+  [known sep secs]
+  (for [[sec v] known
+        :when (and (not= :classes sec) (map? v) (or (nil? secs) (some #{sec} secs)))
+        [corpus files] v :when (map? files)
+        [f _] files]
+    [sec (str (name corpus) sep f)]))
+
+(defn- corpus-of [^String id sep] (first (str/split id (re-pattern (java.util.regex.Pattern/quote sep)) 2)))
+
+(defn judge
+  "a pair's problems ([KIND ID TEXT]...), given its known file's map and its results' rows"
+  [{:keys [id-sep sections also]} known rows]
+  (let [sep (or id-sep " ")
+        all (into (set (map second (entries known sep nil))) (mapcat #(map second (entries % sep nil)) also))
+        mine (distinct (map second (entries known sep sections)))
+        by (into {} (map (fn [[id r]] [id r]) rows))
+        corpora (set (map #(corpus-of (first %) sep) rows))]
+    (concat
+     (for [[id r] rows :when (and (= :known r) (not (all id)))] [:known-unlisted id "recorded :known, no section of the known file lists it"])
+     (for [id mine :when (= :pass (by id))] [:stale id "the known file lists it, the results pass it"])
+     (for [[id r why] rows :when (not (#{:pass :known} r))] [:unclassed id (str (pr-str r) " " why)])
+     (for [id mine :when (and (nil? (by id)) (corpora (corpus-of id sep)))] [:lacking id "the known file lists it, the results (which hold its corpus) do not"]))))
+
+(defn- some-of [xs] (str (str/join "; " (take 3 xs)) (when (> (count xs) 3) (str " ... (" (count xs) ")"))))
+
+(defn- dissoc-entry [known sep ^String id]
+  (into {} (for [[sec v] known]
+             [sec (if (and (not= :classes sec) (map? v))
+                    (into {} (for [[corpus files] v]
+                               [corpus (if (map? files)
+                                         (into {} (remove (fn [[f _]] (= id (str (name corpus) sep f))) files))
+                                         files)]))
+                    v)])))
+
+(defn controls
+  "the negative controls on PAIR's data: each mutation must give its problem; [[NAME ok?]...]"
+  [pair known rows]
+  (let [sep (or (:id-sep pair) " ")
+        mine (set (map second (entries known sep (:sections pair))))
+        krow (first (filter #(= :known (second %)) rows))
+        kent (first (filter #(mine (first %)) (filter #(= :known (second %)) rows)))
+        kinds (fn [ps] (set (map first ps)))]
+    (when (and krow kent)
+      [["a :known row whose entry is dropped is known-unlisted"
+        (contains? (kinds (judge pair (dissoc-entry known sep (first krow)) rows)) :known-unlisted)]
+       ["a known entry whose row is made :pass is stale"
+        (contains? (kinds (judge pair known (map #(if (= (first %) (first kent)) (assoc (vec %) 1 :pass) %) rows))) :stale)]
+       ["a row made :fail is unclassed"
+        (contains? (kinds (judge pair known (cons [(first krow) :fail "control"] (remove #(= (first %) (first krow)) rows)))) :unclassed)]
+       ["a known entry's row removed is lacking"
+        (contains? (kinds (judge pair known (remove #(= (first %) (first kent)) rows))) :lacking)]])))
+
+(defn check [root]
+  (let [ps (pairs root)
+        accepted (let [f (str root "/test/records/accepted.edn")] (if (.isFile (File. f)) (read-edn f) {}))
+        bad (atom 0)
+        ctl (atom nil)]
+    (doseq [p ps]
+      (cond
+        (not (exists? root (:known p)))
+        (do (swap! bad inc) (println (str "records-check: FAIL " (:name p) ": " (:known p) " is gone")))
+        (not (exists? root (:results p)))
+        (println (str "records-check: " (:name p) ": " (:results p) " not recorded yet: passed over"))
+        :else
+        (let [known (read-edn (str root "/" (:known p)))
+              p (assoc p :also (vec (for [f (:also-known p)] (read-edn (str root "/" f)))))
+              ex (or (:exclude-corpora p) #{})
+              rows (vec (remove #(ex (corpus-of (first %) (or (:id-sep p) " "))) (read-edn (str root "/" (:results p)))))
+              probs (judge p known rows)
+              ;; accepted.edn: the problems found when the check landed (GD4), each its crop's to clear at its next --record:
+              ;; printed, not failed; an accepted one that is no longer a problem is stale (the list drains, never grows)
+              acc (set (get accepted (:results p)))
+              found (set (map (juxt first second) probs))
+              new (remove #(acc [(first %) (second %)]) probs)
+              gone (remove found acc)]
+          (when (and (nil? @ctl) (controls p known rows)) (reset! ctl [p known rows]))
+          (when (seq acc)
+            (println (str "records-check: " (:results p) ": " (- (count acc) (count gone)) " problems accepted (test/records/accepted.edn: "
+                          (str/join ", " (for [[k n] (frequencies (map first (filter found acc)))] (str n " " (name k))))
+                          "), its crop's to clear")))
+          (when (seq gone)
+            (swap! bad inc)
+            (println (str "records-check: FAIL " (:results p) ": " (count gone) " accepted problems are no longer problems (remove them from"
+                          " test/records/accepted.edn): " (some-of (map #(str (name (first %)) " " (second %)) gone)))))
+          (if (empty? new)
+            (println (str "records-check: ok " (:results p) " (" (count rows) " rows) against " (:known p) " " (pr-str (:sections p))
+                          (when (seq (:also-known p)) (str " and " (str/join ", " (:also-known p))))))
+            (do (swap! bad inc)
+                (println (str "records-check: FAIL " (:results p) " against " (:known p) ":"))
+                (doseq [[k ids] (group-by first new)]
+                  (println (str "   " (name k) " (" (count ids) "): " (some-of (map #(str (second %) ": " (nth % 2)) ids))))))))))
+    (if-let [[p known rows] @ctl]
+      (doseq [[nm ok] (controls p known rows)]
+        (if ok
+          (println (str "records-check: control ok (" (:results p) "): " nm))
+          (do (swap! bad inc) (println (str "records-check: CONTROL FAILED (" (:results p) "): " nm ": the judge found nothing")))))
+      (do (swap! bad inc) (println "records-check: no pair has a :known row and a known entry: no negative control ran")))
+    (println (str "records-check: " (count ps) " pairs, " @bad " problem(s)"))
+    (System/exit (if (zero? @bad) 0 1))))
+
+(defn problems
+  "every pair's problems as accepted.edn's map {RESULTS [[KIND ID]...]} (the file's first writing, and its review)"
+  [root]
+  (doseq [p (pairs root)
+          :when (and (exists? root (:known p)) (exists? root (:results p)))
+          :let [known (read-edn (str root "/" (:known p)))
+                p (assoc p :also (vec (for [f (:also-known p)] (read-edn (str root "/" f)))))
+                ex (or (:exclude-corpora p) #{})
+                rows (remove #(ex (corpus-of (first %) (or (:id-sep p) " "))) (read-edn (str root "/" (:results p))))
+                ps (judge p known rows)]
+          :when (seq ps)]
+    (println (str " " (pr-str (:results p))))
+    (println (str " [" (str/join "\n  " (for [[k id] (sort-by second ps)] (pr-str [k id]))) "]"))))
+
+(defn -main [& args]
+  (case (first args)
+    "check" (check (second args))
+    "problems" (problems (second args))
+    (do (println "usage: records.check check ROOT") (System/exit 2))))

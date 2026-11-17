@@ -1,7 +1,9 @@
 ;; ci's system calls that TamaGo's syscall spells otherwise (queue 214, a REQUEST for C's owner: crt listed in goi's table, checked
 ;; in its tamago configurations too; sys_other.ae there): Linux's.
 (in-ns 'go.arbace.crt) (go/file "sys_linux.go" :build ["//go:build linux"] :imports [
-    [syscall "syscall"]])
+    [os "os"]
+    [syscall "syscall"]
+    [unsafe "unsafe"]])
 
 (go/func sysAccess ^error [^string p ^uint32 mode]
   (syscall/Access p mode))
@@ -17,3 +19,72 @@
     (case [0] (return (.-Nsec (.-Atim st))))
     (case [1] (return (.-Nsec (.-Mtim st)))))
   (.-Nsec (.-Ctim st)))
+
+(go/func pwriteInPlace "pwriteInPlace writes b to f at off whatever its description's O_APPEND (Sys.WriteBack, queue 310): Go's WriteAt refuses
+an append-mode file and Linux's pwrite on an O_APPEND descriptor appends, so the host description's O_APPEND is cleared around the
+pwrite and put back (the program's threads run one at a time).
+" [^{:tag (* os/File)} f ^{:tag (slice byte)} b ^int64 off] :results [int error]
+  (let [(values rc err) (.SyscallConn f)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (let [^int n 0
+          ^error werr nil
+          cerr (.Control rc (fn [^uintptr fd]
+                  (let [(values fl _ e) (syscall/Syscall syscall/SYS_FCNTL fd syscall/F_GETFL 0)]
+                    (when (!= e 0)
+                      (set! werr e)
+                      (return))
+
+                    (when (!= (bit-and fl syscall/O_APPEND) 0)
+                      (syscall/Syscall syscall/SYS_FCNTL fd syscall/F_SETFL (bit-and-not fl syscall/O_APPEND))
+                      (defer (syscall/Syscall syscall/SYS_FCNTL fd syscall/F_SETFL fl)))
+
+                    (set! (values n werr) (syscall/Pwrite (conv int fd) b off)))))]
+      (when (!= cerr nil)
+        (return 0 cerr))
+
+      (when (< n 0)
+        (set! n 0))
+
+      (return n werr))))
+
+(go/func hostAlloc "hostAlloc is size zero bytes of the host's demand-zero memory (Reserve, queue 311): an anonymous private MAP_NORESERVE\nmapping, whose pages the host allocates at their first touch; nil when the host refuses it.\n" ^{:tag (slice byte)} [^uint64 size]
+  (let [(values b err) (syscall/Mmap -1 0 (conv int size) (bit-or syscall/PROT_READ syscall/PROT_WRITE) (bit-or syscall/MAP_PRIVATE syscall/MAP_ANON syscall/MAP_NORESERVE))]
+    (when (!= err nil)
+      (return nil))
+
+    b))
+
+
+(go/func hostFree "hostFree returns hostAlloc's mapping b to the host.\n" [^{:tag (slice byte)} b]
+  (syscall/Munmap b))
+
+
+(go/func hostZero "hostZero frees the host's whole pages of b[lo:hi] (hostAlloc's mapping), which then read as zeros (MADV_DONTNEED): the\nrange [l, h) it freed (l == h: none).\n" [^{:tag (slice byte)} b ^uint64 lo ^uint64 hi] :results [^uint64 l ^uint64 h]
+  (let [ps (conv uint64 (syscall/Getpagesize))
+        fl (bit-and-not (- (+ lo ps) 1) (- ps 1))
+        fh (bit-and-not hi (- ps 1))]
+    (when (or (>= fl fh) (!= (syscall/Madvise (subslice b fl fh) syscall/MADV_DONTNEED) nil))
+      (return 0 0))
+
+    (return fl fh)))
+
+
+(go/func sysUtimens "sysUtimens is the host's utimensat of the path p (queue 314): t the two timespecs' four words when have (else now), UTIME_NOW\nand UTIME_OMIT the host's, a link's own times with nofollow.\n" ^error [^string p ^{:tag (array 4 int64)} t ^bool have ^bool nofollow]
+  (let [(values b err) (syscall/BytePtrFromString p)
+      ^int at -100
+      ^uintptr fl 0]
+    (when (!= err nil)
+      (return err))
+
+    (when nofollow
+      (set! fl 0x100))
+
+    (if have
+      (when [(values _ _ e) (syscall/Syscall6 syscall/SYS_UTIMENSAT (conv uintptr at) (conv uintptr (conv unsafe/Pointer b)) (conv uintptr (conv unsafe/Pointer (addr (aget t 0)))) fl 0 0)] (!= e 0)
+        (return e))
+      (when [(values _ _ e) (syscall/Syscall6 syscall/SYS_UTIMENSAT (conv uintptr at) (conv uintptr (conv unsafe/Pointer b)) 0 fl 0 0)] (!= e 0)
+        (return e)))
+
+    nil))

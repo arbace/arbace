@@ -1,0 +1,200 @@
+;; Converted from jdk26u src/java.rmi/share/classes/sun/rmi/transport/tcp/TCPChannel.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.rmi.transport.tcp)
+
+(import '(java.io DataInputStream DataOutputStream IOException)
+        '(java.rmi ConnectIOException RemoteException)
+        '(java.util ArrayList List ListIterator)
+        '(java.util.concurrent Future ScheduledExecutorService TimeUnit)
+        '(sun.rmi.runtime Log RuntimeUtil)
+        '(sun.rmi.transport Channel Connection Endpoint TransportConstants))
+
+(defclasses
+  (defclass ^:public TCPChannel
+    :implements [Channel]
+
+    (field ^:private ^:final ^TCPEndpoint ep)
+
+    (field ^:private ^:final ^TCPTransport tr)
+
+    (field ^:private ^:final ^{:tag (List TCPConnection)} freeList (ArrayList.))
+
+    (field ^:private ^{:tag (Future ?)} reaper nil)
+
+    (field ^:private ^ConnectionAcceptor acceptor)
+
+    (field ^:private ^:static ^:final ^long idleTimeout
+      (Long/getLong "sun.rmi.transport.connectionTimeout" 15000))
+
+    (field ^:private ^:static ^:final ^int handshakeTimeout
+      (Integer/getInteger "sun.rmi.transport.tcp.handshakeTimeout" 60000))
+
+    (field ^:private ^:static ^:final ^int responseTimeout
+      (Integer/getInteger "sun.rmi.transport.tcp.responseTimeout" 0))
+
+    (field ^:private ^:static ^:final ^ScheduledExecutorService scheduler
+      (.getScheduler (RuntimeUtil/getInstance)))
+
+    (constructor [this ^TCPTransport tr ^TCPEndpoint ep]
+      (set! (.-tr this) tr)
+      (set! (.-ep this) ep))
+
+    (method ^:public getEndpoint ^Endpoint [this] ep)
+
+    (method ^:public newConnection :throws [RemoteException] ^Connection [this]
+      (let [^:mutable ^TCPConnection conn nil]
+        (loop []
+          (set! conn nil)
+          (locking freeList
+            (let [elementPos (unchecked-subtract-int (.size freeList) 1)]
+              (when (>= elementPos 0)
+                (set! conn (cast TCPConnection (.get freeList elementPos)))
+                (.remove freeList elementPos))))
+          (when (some? conn)
+            (when-not (.isDead conn)
+              (.log TCPTransport/tcpLog Log/BRIEF "reuse connection")
+              (return conn))
+            (.free this conn false))
+          (when (some? conn) (recur)))
+        (.createConnection this)))
+
+    (method ^:private createConnection :throws [RemoteException] ^Connection [this]
+      (let [^:mutable ^Connection conn nil]
+        (.log TCPTransport/tcpLog Log/BRIEF "create connection")
+        (let [sock (.newSocket ep)]
+          (set! conn (TCPConnection. this sock))
+          (try
+            (let [^:mutable ^int originalSoTimeout 0]
+              (try
+                (set! originalSoTimeout (.getSoTimeout sock))
+                (.setSoTimeout sock handshakeTimeout)
+                (catch Exception e))
+              (let [out (DataOutputStream. (.getOutputStream conn))]
+                (.writeTransportHeader this out)
+                (if (not (.isReusable conn))
+                    (.writeByte out TransportConstants/SingleOpProtocol)
+                    (do
+                      (.writeByte out TransportConstants/StreamProtocol)
+                      (.flush out)
+                      (let [in (DataInputStream. (.getInputStream conn))
+                            ack (.readByte in)]
+                        (when-not (== ack TransportConstants/ProtocolAck)
+                          (throw (ConnectIOException.
+                                   ^String (if (== ack TransportConstants/ProtocolNack)
+                                               "JRMP StreamProtocol not supported by server"
+                                               "non-JRMP server at remote endpoint"))))
+                        (let [suggestedHost (.readUTF in)
+                              suggestedPort (.readInt in)]
+                          (when (.isLoggable TCPTransport/tcpLog Log/VERBOSE)
+                            (.log TCPTransport/tcpLog
+                                  Log/VERBOSE
+                                  (java-str "server suggested " suggestedHost ":" suggestedPort)))
+                          (TCPEndpoint/setLocalHost suggestedHost)
+                          (let [localEp (TCPEndpoint/getLocalEndpoint 0 nil nil)]
+                            (.writeUTF out (.getHost localEp))
+                            (.writeInt out (.getPort localEp))
+                            (when (.isLoggable TCPTransport/tcpLog Log/VERBOSE)
+                              (.log TCPTransport/tcpLog
+                                    Log/VERBOSE
+                                    (java-str "using " (.getHost localEp) ":" (.getPort localEp))))
+                            (try
+                              (.setSoTimeout sock
+                                             (if (not (== originalSoTimeout 0))
+                                                 originalSoTimeout
+                                                 responseTimeout))
+                              (catch Exception e))
+                            (.flush out))))))))
+            (catch IOException e
+              (try (.close conn) (catch Exception ex))
+              (if (instance? RemoteException e)
+                  (throw (cast RemoteException e))
+                  (throw (ConnectIOException. "error during JRMP connection establishment" e)))))
+          conn)))
+
+    (method ^:public free ^void [this ^Connection conn ^boolean reuse]
+      (when (some? conn)
+        (if (and reuse (.isReusable conn))
+            (let [lastuse (System/currentTimeMillis)
+                  tcpConnection (cast TCPConnection conn)]
+              (.log TCPTransport/tcpLog Log/BRIEF "reuse connection")
+              (locking freeList
+                (.add freeList tcpConnection)
+                (when (nil? reaper)
+                  (.log TCPTransport/tcpLog Log/BRIEF "create reaper")
+                  (set! reaper
+                        (.scheduleWithFixedDelay
+                          scheduler
+                          (anon Runnable []
+                            (method ^:public run ^void [this]
+                              (.log TCPTransport/tcpLog Log/VERBOSE "wake up")
+                              (.freeCachedConnections TCPChannel/this)))
+                          idleTimeout
+                          idleTimeout
+                          TimeUnit/MILLISECONDS))))
+              (.setLastUseTime tcpConnection lastuse)
+              (.setExpiration tcpConnection (unchecked-add lastuse idleTimeout)))
+            (do
+              (.log TCPTransport/tcpLog Log/BRIEF "close connection")
+              (try (.close conn) (catch IOException ignored))))))
+
+    (method ^:private writeTransportHeader :throws [RemoteException] ^void [this
+                                                                            ^DataOutputStream out]
+      (try
+        (let [dataOut (DataOutputStream. out)]
+          (.writeInt dataOut TransportConstants/Magic)
+          (.writeShort dataOut TransportConstants/Version))
+        (catch IOException e (throw (ConnectIOException. "error writing JRMP transport header" e)))))
+
+    (method ^:public shedCache ^void [this]
+      (let [^:mutable ^Connection/1 conn nil]
+        (locking freeList
+          (set! conn (cast Connection/1 (.toArray freeList (new Connection/1 (.size freeList)))))
+          (.clear freeList))
+        (let [^:mutable i (alength conn)]
+          (while (>= (set! i (unchecked-dec-int i)) 0)
+            (let [c (aget conn i)] (aset conn i nil) (try (.close c) (catch IOException e)))))))
+
+    (method ^:private freeCachedConnections ^void [this]
+      (locking freeList
+        (let [size (.size freeList)]
+          (when (> size 0)
+            (let [time (System/currentTimeMillis)
+                  ^{:tag (ListIterator TCPConnection)} iter (.listIterator freeList size)]
+              (while (.hasPrevious iter)
+                (let [conn (cast TCPConnection (.previous iter))]
+                  (when (.expired conn time)
+                    (.log TCPTransport/tcpLog Log/VERBOSE "connection timeout expired")
+                    (try (.close conn) (catch IOException e))
+                    (.remove iter))))))
+          (when (.isEmpty freeList) (.cancel reaper false) (set! reaper nil))))))
+
+  (defclass ConnectionAcceptor
+    :implements [Runnable]
+
+    (field ^:private ^TCPTransport transport)
+
+    (field ^:private ^{:tag (List Connection)} queue (ArrayList.))
+
+    (field ^:private ^:static ^int threadNum 0)
+
+    (constructor ^:public [this ^TCPTransport transport]
+      (set! (.-transport this) transport))
+
+    (method ^:public startNewAcceptor ^void [this]
+      (let [t (RuntimeUtil/newSystemThread this
+                                           (java-str
+                                             "TCPChannel Accept-"
+                                             (set! threadNum (unchecked-inc-int threadNum)))
+                                           true)]
+        (.start t)))
+
+    (method ^:public accept ^void [this ^Connection conn]
+      (locking queue (.add queue conn) (.notify queue)))
+
+    (method ^:public run ^void [this]
+      (let [^:mutable ^Connection conn nil]
+        (locking queue
+          (while (== (.size queue) 0) (try (.wait queue) (catch InterruptedException e)))
+          (.startNewAcceptor this)
+          (set! conn (cast Connection (^[int] List/.remove queue 0))))
+        (.handleMessages transport conn true)))))

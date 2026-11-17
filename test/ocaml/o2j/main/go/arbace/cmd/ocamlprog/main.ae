@@ -1,0 +1,464 @@
+;; The compiled level's main package (doc/ocaml/DEFERRED-TRIAGE.md, "As built: OT9's first fix"; OC93 (a)): a shard of
+;; OCaml programs translated by arbace.o2j into Java forms (each program's units in a package ocaml.p<N>, the library's in
+;; ocaml.u) and by j2g into Go; main is the dispatcher's, ocaml.u.Shard (the program O2J_PROG names, the whole command line its
+;; argv, argv.(0) O2J_ARGV0 when set), inside jrt.RunMain (the thread main). Given to bin/j2g with --main by bin/oi's compiled level.
+;;
+;; OC208 (b) (doc/ocaml/OCAML-SURVEY.md, "As built: OC208 (b)"): the program's host is jrt's (ProgramHost) with one file of its own,
+;; execPath, where the AOT runtime's Unix.execv and its kin (jdk/ocaml/ocaml/rt/ExtProc.ae, exec) write their request; its Close
+;; is the exec: the working directory and the standard descriptors made the program's, then syscall.Exec, as oi's ext_signal does.
+;; Java cannot replace its process; this main can, through jrt's file layer (HostFiles' Open, Write and Close), with no change to jrt.
+;;
+;; OC216 (a), the rest (doc/ocaml/OCAML-SURVEY.md, "As built: OC216 (a), the rest"): a second file, hostPath, where the AOT runtime's
+;; HostSys (jdk/ocaml/ocaml/rt/HostSys.ae) asks for the system calls Java has not: AF_UNIX sockets (datagrams, abstract names,
+;; socketpair) and the OS's signals (kill of another process, Sys.signal's actions, the signals' arrival). A request written there
+;; (fields, each a u32 big-endian length and its bytes, the operation first) is made at once, its reply read next (u32 its length,
+;; then fields: "ok" and the results, or "e" and the errno). The calls are oi's ext_unix_sock.go's and ext_signal.go's, after
+;; otherlibs/unix's socket.c, socketpair.c, socketaddr.c, accept.c, bind.c, connect.c, listen.c, shutdown.c, getsockname.c,
+;; getpeername.c, sendrecv.c, sockopt.c, select.c, kill.c and runtime/signals.c (OCaml 5.5.0).
+(in-ns 'go.arbace.cmd.ocamlprog)
+
+(go/file "main.go" :imports [[binary "encoding/binary"] [errors "errors"] [fmt "fmt"] [io "io"] [os "os"] [signal "os/signal"]
+                             [filepath "path/filepath"] [strconv "strconv"] [strings "strings"] [sync "sync"] [syscall "syscall"]
+                             [jrt "arbace/jrt"] [lang "arbace/lang"]])
+
+(go/const ^{:doc "execPath is the file ExtProc.exec writes its request to: a path no file system lets a program create, so that where\nno host serves it (the light level) the open fails.\n"}
+  execPath "/proc/self/ocaml-exec")
+
+(go/type execHost "execHost is jrt's host with execPath served (Open).\n" (struct jrt/Host))
+
+(go/method Open "Open is the host's, execPath a new request.\n" [^execHost h ^string name ^int flag ^uint32 perm] :results [jrt/HostFile error]
+  (when (== name execPath)
+    (return (addr (lit execFile)) nil))
+  (when (== name hostPath)
+    (return (addr (lit hostFile)) nil))
+  (return (.Open (.-Host h) name flag perm)))
+
+(go/type execFile "execFile is a request being written: NUL-terminated fields (ExtProc.exec's).\n"
+  (struct ^{:tag (slice byte)} buf))
+
+(go/method Write [^{:tag (* execFile)} f ^{:tag (slice byte)} p] :results [int error]
+  (set! (.-buf f) (append (.-buf f) (spread p)))
+  (return (len p) nil))
+
+(go/method Read [^{:tag (* execFile)} f ^{:tag (slice byte)} p] :results [int error]
+  (return 0 io/EOF))
+
+(go/method Seek [^{:tag (* execFile)} f ^int64 offset ^int whence] :results [int64 error]
+  (return (conv int64 (len (.-buf f))) nil))
+
+(go/func errnoError "errnoError is err as ExtProc.exec reads it: \"ocaml-exec: errno N\" (EIO when it carries none).\n" ^error [^error err]
+  (let [^syscall/Errno e syscall/EIO]
+    (errors/As err (addr e))
+    (fmt/Errorf "ocaml-exec: errno %d" (conv int e))))
+
+(go/func lookPath "lookPath is cmd found in PATH as execvp finds it, a name holding a slash itself (oi's, ext_signal's).\n"
+  ^string [^string cmd ^{:tag (slice string)} env]
+  (when (strings/Contains cmd "/")
+    (return cmd))
+  (let [path (os/Getenv "PATH")]
+    (range [_ kv env]
+      (when (strings/HasPrefix kv "PATH=")
+        (set! path (subslice kv 5))))
+    (when (== path "")
+      (set! path "/bin:/usr/bin"))
+    (range [_ dir (filepath/SplitList path)]
+      (when (== dir "")
+        (set! dir "."))
+      (let [p (filepath/Join dir cmd)
+            ^syscall/Stat_t st (zero syscall/Stat_t)]
+        (when (and (== (syscall/Stat p (addr st)) nil) (== (bit-and (.-Mode st) syscall/S_IFMT) syscall/S_IFREG)
+                   (== (syscall/Access p 1) nil))
+          (return p))))
+    cmd))
+
+(go/type request "request is an exec's request as fields: the function, the working directory, the path, whether to search PATH,\nthe arguments, the environment and the three standard descriptors' redirections.\n"
+  (struct ^string fn ^string cwd ^string path ^bool search ^{:tag (slice string)} argv ^{:tag (slice string)} env
+          ^{:tag (slice string)} std))
+
+(go/func parseRequest "parseRequest reads ExtProc.exec's fields.\n" [^{:tag (slice byte)} b] :results [request error]
+  (let [fs (strings/Split (conv string b) "\u0000")
+        i 0
+        ^request r (lit request)]
+    (when (or (< (len fs) 8) (!= (aget fs (- (len fs) 1)) ""))
+      (return r (errors/New "ocaml-exec: a malformed request")))
+    (let [next (fn ^string [] (let [s (aget fs i)] (inc! i) (return s)))
+          num (fn ^int [] (let [(values n err) (strconv/Atoi (next))] (when (!= err nil) (return -1)) (return n)))]
+      (set! (.-fn r) (next))
+      (set! (.-cwd r) (next))
+      (set! (.-path r) (next))
+      (set! (.-search r) (== (next) "1"))
+      (let [n (num)]
+        (when (or (< n 0) (> (+ i n) (len fs)))
+          (return r (errors/New "ocaml-exec: a malformed request")))
+        (set! (.-argv r) (subslice fs i (+ i n)))
+        (set! i (+ i n)))
+      (let [n (num)]
+        (when (or (< n 0) (!= (+ i n 4) (len fs)))
+          (return r (errors/New "ocaml-exec: a malformed request")))
+        (set! (.-env r) (subslice fs i (+ i n)))
+        (set! i (+ i n)))
+      (set! (.-std r) (subslice fs i (+ i 3)))
+      (return r nil))))
+
+(go/func redirect "redirect makes the standard descriptors the request names the process's: closed (-), a dup of another (dN, each\nsource saved first, so that a swap holds), a file at its offset (fFLAGS:POS:PATH).\n"
+  ^error [^{:tag (slice string)} std]
+  (let [^{:tag (array 3 int)} src (lit (array 3 int) -1 -1 -1)]
+    (range [i s std]
+      (when (strings/HasPrefix s "d")
+        (let [(values n err) (strconv/Atoi (subslice s 1))]
+          (when (!= err nil)
+            (return err))
+          (let [(values d err) (syscall/Dup n)]
+            (when (!= err nil)
+              (return err))
+            (aset src i d)))))
+    (range [i s std]
+      (when (== s "-")
+        (syscall/Close i)
+        (continue))
+      (when (strings/HasPrefix s "d")
+        (when [err (syscall/Dup2 (aget src i) i)] (!= err nil)
+          (return err))
+        (syscall/Close (aget src i))
+        (continue))
+      (when (strings/HasPrefix s "f")
+        (let [parts (strings/SplitN (subslice s 1) ":" 3)]
+          (when (!= (len parts) 3)
+            (return (errors/New "ocaml-exec: a malformed redirection")))
+          (let [flag syscall/O_RDONLY]
+            (switch (aget parts 0)
+              (case ["rw"] (set! flag syscall/O_RDWR))
+              (case ["w"] (set! flag syscall/O_WRONLY))
+              (case ["a"] (set! flag (bit-or syscall/O_WRONLY syscall/O_APPEND))))
+            (let [(values fd err) (syscall/Open (aget parts 2) flag 0)]
+              (when (!= err nil)
+                (return err))
+              (let [(values pos _) (strconv/ParseInt (aget parts 1) 10 64)]
+                (when (> pos 0)
+                  (syscall/Seek fd pos 0)))
+              (when [err (syscall/Dup2 fd i)] (!= err nil)
+                (return err))
+              (syscall/Close fd))))))
+    nil))
+
+(go/func restore "restore makes the saved descriptors the standard ones again (an exec that failed leaves the runtime's view: its own\nFd table holds the redirections).\n" [^{:tag (array 3 int)} saved]
+  (range [i fd saved]
+    (when (>= fd 0)
+      (syscall/Dup2 fd i)
+      (syscall/Close fd))))
+
+(go/method Close "Close is the exec: it returns only when the exec failed, its errno in the error, the working directory and the\nstandard descriptors as they were.\n" ^error [^{:tag (* execFile)} f]
+  (let [(values r err) (parseRequest (.-buf f))]
+    (when (!= err nil)
+      (return err))
+    (let [(values wd _) (os/Getwd)
+          ^{:tag (array 3 int)} saved (lit (array 3 int) -1 -1 -1)]
+      (range [i _ saved]
+        (let [(values d derr) (syscall/Dup i)]
+          (when (== derr nil)
+            (aset saved i d)
+            (syscall/CloseOnExec d))))
+      (when [cerr (os/Chdir (.-cwd r))] (!= cerr nil)
+        (restore saved)
+        (return (errnoError cerr)))
+      (when [rerr (redirect (.-std r))] (!= rerr nil)
+        (restore saved)
+        (os/Chdir wd)
+        (return (errnoError rerr)))
+      (let [prog (.-path r)]
+        (when (.-search r)
+          (set! prog (lookPath prog (.-env r))))
+        (let [xerr (syscall/Exec prog (.-argv r) (.-env r))]
+          (restore saved)
+          (os/Chdir wd)
+          (return (errnoError xerr)))))))
+
+;; ---- hostPath: the system calls of HostSys (OC216 (a), the rest)
+
+(go/const ^{:doc "hostPath is the file HostSys writes its requests to (as execPath: no host serves it at the light level).\n"}
+  hostPath "/proc/self/ocaml-host")
+
+(go/type hostFile "hostFile is a request handled at its write, its reply read next.\n"
+  (struct ^{:tag (slice byte)} reply ^int pos))
+
+(go/method Write [^{:tag (* hostFile)} f ^{:tag (slice byte)} p] :results [int error]
+  (let [out (hostDo (hostFields p))
+        b (.AppendUint32 binary/BigEndian (lit (slice byte)) (conv uint32 (len out)))]
+    (set! (.-reply f) (append b (spread out)))
+    (set! (.-pos f) 0)
+    (return (len p) nil)))
+
+(go/method Read [^{:tag (* hostFile)} f ^{:tag (slice byte)} p] :results [int error]
+  (when (>= (.-pos f) (len (.-reply f)))
+    (return 0 io/EOF))
+  (let [n (copy p (subslice (.-reply f) (.-pos f)))]
+    (set! (.-pos f) (+ (.-pos f) n))
+    (return n nil)))
+
+(go/method Seek [^{:tag (* hostFile)} f ^int64 offset ^int whence] :results [int64 error]
+  (return 0 nil))
+
+(go/method Close ^error [^{:tag (* hostFile)} f] nil)
+
+(go/func hostFields "hostFields is a request's fields.\n" ^{:tag (slice (slice byte))} [^{:tag (slice byte)} p]
+  (let [^{:tag (slice (slice byte))} fs nil]
+    (while (>= (len p) 4)
+      (let [n (conv int (.Uint32 binary/BigEndian p))]
+        (when (> (+ 4 n) (len p))
+          (break))
+        (set! fs (append fs (subslice p 4 (+ 4 n))))
+        (set! p (subslice p (+ 4 n)))))
+    fs))
+
+(go/func hostReply "hostReply is fields as a reply.\n" ^{:tag (slice byte)} [^{:tag (slice (slice byte))} fs]
+  (let [^{:tag (slice byte)} b nil]
+    (range [_ x fs]
+      (set! b (.AppendUint32 binary/BigEndian b (conv uint32 (len x))))
+      (set! b (append b (spread x))))
+    b))
+
+(go/func hostOk "hostOk is a reply \"ok\" with the results xs (a number, a string, bytes).\n" ^{:tag (slice byte)} [& ^{:tag (slice any)} xs]
+  (let [fs (lit (slice (slice byte)) (conv (slice byte) "ok"))]
+    (range [_ x xs]
+      (type-switch [v x]
+        (case [int] (set! fs (append fs (conv (slice byte) (strconv/Itoa v)))))
+        (case [string] (set! fs (append fs (conv (slice byte) v))))
+        (case [(slice byte)] (set! fs (append fs v)))))
+    (hostReply fs)))
+
+(go/func hostErr "hostErr is a reply \"e\" with err's errno (EIO when it carries none).\n" ^{:tag (slice byte)} [^error err]
+  (let [^syscall/Errno e syscall/EIO]
+    (errors/As err (addr e))
+    (hostReply (lit (slice (slice byte)) (conv (slice byte) "e") (conv (slice byte) (strconv/Itoa (conv int e)))))))
+
+(go/var ^{:doc "hostDomains are socket_domain's constructors' address families.\n"}
+  hostDomains (lit (slice int) syscall/AF_UNIX syscall/AF_INET syscall/AF_INET6))
+
+(go/var ^{:doc "hostTypes are socket_type's constructors' socket types.\n"}
+  hostTypes (lit (slice int) syscall/SOCK_STREAM syscall/SOCK_DGRAM syscall/SOCK_RAW syscall/SOCK_SEQPACKET))
+
+(go/var ^{:doc "hostBoolOpts are socket_bool_option's (level, option) pairs (sockopt.c's table).\n"}
+  hostBoolOpts (lit (slice (array 2 int))
+    (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_DEBUG) (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_BROADCAST)
+    (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_REUSEADDR) (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_KEEPALIVE)
+    (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_DONTROUTE) (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_OOBINLINE)
+    (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_ACCEPTCONN) (lit (array 2 int) syscall/IPPROTO_TCP syscall/TCP_NODELAY)
+    (lit (array 2 int) syscall/IPPROTO_IPV6 syscall/IPV6_V6ONLY) (lit (array 2 int) syscall/SOL_SOCKET 15)))
+
+(go/var ^{:doc "hostIntOpts are socket_int_option's options (SOL_SOCKET).\n"}
+  hostIntOpts (lit (slice int) syscall/SO_SNDBUF syscall/SO_RCVBUF syscall/SO_ERROR syscall/SO_TYPE syscall/SO_RCVLOWAT
+                   syscall/SO_SNDLOWAT))
+
+(go/func hostSockaddr "hostSockaddr is HostSys's address field as a syscall.Sockaddr (get_sockaddr): \"u\" and a path (Linux's\nabstract names, a leading NUL, are Go's leading @), or \"i\", the port's two bytes and the address.\n"
+  [^{:tag (slice byte)} b] :results [syscall/Sockaddr error]
+  (when (and (> (len b) 0) (== (aget b 0) \u))
+    (let [p (conv string (subslice b 1))]
+      (when (>= (len p) 108)
+        (return nil syscall/ENAMETOOLONG))
+      (when (and (> (len p) 0) (== (aget p 0) 0))
+        (set! p (+ "@" (subslice p 1))))
+      (return (addr (lit syscall/SockaddrUnix :Name p)) nil)))
+  (when (or (< (len b) 3) (!= (aget b 0) \i))
+    (return nil syscall/EINVAL))
+  (let [port (bit-or (<< (conv int (aget b 1)) 8) (conv int (aget b 2)))
+        ip (subslice b 3)]
+    (when (== (len ip) 16)
+      (let [sa (addr (lit syscall/SockaddrInet6 :Port port))]
+        (copy (subslice (.-Addr sa)) ip)
+        (return sa nil)))
+    (let [sa (addr (lit syscall/SockaddrInet4 :Port port))]
+      (copy (subslice (.-Addr sa)) ip)
+      (return sa nil))))
+
+(go/func hostAddrOf "hostAddrOf is a syscall.Sockaddr as HostSys's address field (alloc_sockaddr; an unnamed peer an empty path).\n"
+  ^{:tag (slice byte)} [^syscall/Sockaddr sa]
+  (type-switch [x sa]
+    (case [(* syscall/SockaddrInet4)]
+      (return (append (lit (slice byte) \i (conv byte (>> (.-Port x) 8)) (conv byte (.-Port x))) (spread (subslice (.-Addr x))))))
+    (case [(* syscall/SockaddrInet6)]
+      (return (append (lit (slice byte) \i (conv byte (>> (.-Port x) 8)) (conv byte (.-Port x))) (spread (subslice (.-Addr x))))))
+    (case [(* syscall/SockaddrUnix)]
+      (let [n (.-Name x)]
+        (when (and (> (len n) 0) (== (aget n 0) \@))
+          (set! n (+ "\u0000" (subslice n 1))))
+        (return (append (lit (slice byte) \u) (spread (conv (slice byte) n)))))))
+  (lit (slice byte) \u))
+
+(go/var
+  [^sync/Mutex hostSigMu]
+  [^{:tag (chan os/Signal) :doc "hostSigCh receives the signals the program handles (Sys.signal's Signal_handle).\n"} hostSigCh
+   (make (chan os/Signal) 64)])
+
+(go/func hostDo "hostDo makes the request fs: its reply.\n" ^{:tag (slice byte)} [^{:tag (slice (slice byte))} fs]
+  (when (== (len fs) 0)
+    (return (hostErr syscall/EINVAL)))
+  (let [num (fn ^int [^int i]
+              (when (>= i (len fs))
+                (return 0))
+              (let [(values n _) (strconv/Atoi (conv string (aget fs i)))]
+                (return n)))
+        arg (fn ^{:tag (slice byte)} [^int i]
+              (when (>= i (len fs))
+                (return nil))
+              (return (aget fs i)))
+        cloexec (fn ^int [^int i]
+                  (when (!= (num i) 0)
+                    (return syscall/SOCK_CLOEXEC))
+                  (return 0))]
+    (switch (conv string (aget fs 0))
+      (case ["socket"]
+        (let [d (num 1) t (num 2)]
+          (when (or (< d 0) (>= d (len hostDomains)) (< t 0) (>= t (len hostTypes)))
+            (return (hostErr syscall/EINVAL)))
+          (let [(values fd err) (syscall/Socket (aget hostDomains d) (bit-or (aget hostTypes t) (cloexec 4)) (num 3))]
+            (when (!= err nil)
+              (return (hostErr err)))
+            (return (hostOk fd)))))
+      (case ["socketpair"]
+        (let [d (num 1) t (num 2)]
+          (when (or (< d 0) (>= d (len hostDomains)) (< t 0) (>= t (len hostTypes)))
+            (return (hostErr syscall/EINVAL)))
+          (let [(values fds err) (syscall/Socketpair (aget hostDomains d) (bit-or (aget hostTypes t) (cloexec 4)) (num 3))]
+            (when (!= err nil)
+              (return (hostErr err)))
+            (return (hostOk (aget fds 0) (aget fds 1))))))
+      (case ["bind" "connect"]
+        (let [(values sa err) (hostSockaddr (arg 2))]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (if (== (conv string (aget fs 0)) "bind")
+            (set! err (syscall/Bind (num 1) sa))
+            (set! err (syscall/Connect (num 1) sa)))
+          (when (!= err nil)
+            (return (hostErr err)))
+          (return (hostOk))))
+      (case ["listen"]
+        (when [err (syscall/Listen (num 1) (num 2))] (!= err nil)
+          (return (hostErr err)))
+        (return (hostOk)))
+      (case ["shutdown"]
+        (when [err (syscall/Shutdown (num 1) (num 2))] (!= err nil)
+          (return (hostErr err)))
+        (return (hostOk)))
+      (case ["accept"]
+        (let [(values nfd sa err) (syscall/Accept4 (num 1) (cloexec 2))]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (return (hostOk nfd (hostAddrOf sa)))))
+      (case ["getsockname"]
+        (let [(values sa err) (syscall/Getsockname (num 1))]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (return (hostOk (hostAddrOf sa)))))
+      (case ["getpeername"]
+        (let [(values sa err) (syscall/Getpeername (num 1))]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (return (hostOk (hostAddrOf sa)))))
+      (case ["read"]
+        (let [buf (make (slice byte) (num 2))
+              (values k err) (syscall/Read (num 1) buf)]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (return (hostOk (subslice buf 0 k)))))
+      (case ["write"]
+        (let [(values k err) (syscall/Write (num 1) (arg 2))]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (return (hostOk k))))
+      (case ["recv" "recvfrom"]
+        (let [buf (make (slice byte) (num 2))
+              (values k sa err) (syscall/Recvfrom (num 1) buf (num 3))]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (return (hostOk (subslice buf 0 k) (hostAddrOf sa)))))
+      (case ["send"]
+        (let [(values k err) (syscall/SendmsgN (num 1) (arg 2) nil nil (num 3))]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (return (hostOk k))))
+      (case ["sendto"]
+        (let [(values sa err) (hostSockaddr (arg 4))]
+          (when (!= err nil)
+            (return (hostErr err)))
+          (let [(values k err2) (syscall/SendmsgN (num 1) (arg 2) nil sa (num 3))]
+            (when (!= err2 nil)
+              (return (hostErr err2)))
+            (return (hostOk k)))))
+      (case ["close"]
+        (when [err (syscall/Close (num 1))] (!= err nil)
+          (return (hostErr err)))
+        (return (hostOk)))
+      (case ["setsockopt" "getsockopt"]
+        (let [kind (num 2) o (num 3) lvl 0 opt 0]
+          (cond (and (== kind 0) (>= o 0) (< o (len hostBoolOpts)))
+                (do (set! lvl (aget (aget hostBoolOpts o) 0))
+                    (set! opt (aget (aget hostBoolOpts o) 1)))
+                (and (== kind 1) (>= o 0) (< o (len hostIntOpts)))
+                (do (set! lvl syscall/SOL_SOCKET)
+                    (set! opt (aget hostIntOpts o)))
+                :else (return (hostErr syscall/EINVAL)))
+          (when (== (conv string (aget fs 0)) "setsockopt")
+            (when [err (syscall/SetsockoptInt (num 1) lvl opt (num 4))] (!= err nil)
+              (return (hostErr err)))
+            (return (hostOk)))
+          (let [(values v err) (syscall/GetsockoptInt (num 1) lvl opt)]
+            (when (!= err nil)
+              (return (hostErr err)))
+            (when (and (== kind 0) (!= v 0))
+              (set! v 1))
+            (return (hostOk v)))))
+      (case ["poll"]
+        ;; whether descriptor fs[1] is ready for reading now (select.c with no wait)
+        (let [fd (num 1)
+              ^syscall/FdSet set (zero syscall/FdSet)
+              ^syscall/Timeval tv (zero syscall/Timeval)]
+          (when (or (< fd 0) (>= fd 1024))
+            (return (hostErr syscall/EINVAL)))
+          (aset (.-Bits set) (/ fd 64) (bit-or (aget (.-Bits set) (/ fd 64)) (<< (conv int64 1) (conv uint (% fd 64)))))
+          (let [(values n err) (syscall/Select (+ fd 1) (addr set) nil nil (addr tv))]
+            (when (!= err nil)
+              (return (hostErr err)))
+            (if (> n 0)
+              (return (hostOk 1))
+              (return (hostOk 0))))))
+      (case ["kill"]
+        (when [err (syscall/Kill (num 1) (conv syscall/Signal (num 2)))] (!= err nil)
+          (return (hostErr err)))
+        (return (hostOk)))
+      (case ["sigaction"]
+        ;; Sys.signal's action for signal fs[1]: 0 the default, 1 ignored, 2 a handler (caught for HostSys's sigwait)
+        (let [sg (conv syscall/Signal (num 1))]
+          (.Lock hostSigMu)
+          (switch (num 2)
+            (case [0] (signal/Reset sg))
+            (case [1] (signal/Ignore sg))
+            (default (signal/Notify hostSigCh sg)))
+          (.Unlock hostSigMu)
+          (return (hostOk))))
+      (case ["sigwait"]
+        ;; the next signal the program handles (HostSys's watching thread)
+        (let [s (<! hostSigCh)]
+          (when [(values sg ok) (assert syscall/Signal s)] ok
+            (return (hostOk (conv int sg))))
+          (return (hostErr syscall/EINVAL)))))
+    (hostErr syscall/ENOSYS)))
+
+(go/var ^{:tag (func [jrt/Host] [jrt/Host]) :doc "hostWrap, when set (capi.go, the shards of the programs with C stubs: OC215 (a)), wraps the program's host.\n"}
+  hostWrap)
+
+(go/var ^{:tag (func []) :doc "atEnd, when set (capi.go), runs after the program, before the exit (the C's stdio flushed).\n"}
+  atEnd)
+
+(go/func main []
+  (let [^jrt/Host h (lit execHost :Host (jrt/ProgramHost nil))]
+    (when (!= hostWrap nil)
+      (set! h (hostWrap h)))
+    (jrt/SetHost h))
+  (let [args (jrt/NewRefArray jrt/String_class (conv int32 (len os/Args)))]
+    (range [i a os/Args]
+      (aset (.-A args) i (jrt/Str a)))
+    (let [status (jrt/RunMain (fn [] (lang/J_ocaml_u_Shard_J_Main_String1__V args)))]
+      (when (!= atEnd nil)
+        (atEnd))
+      (os/Exit status))))

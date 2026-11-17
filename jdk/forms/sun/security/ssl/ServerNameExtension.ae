@@ -1,0 +1,328 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/ServerNameExtension.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(java.nio.charset StandardCharsets)
+        '(java.util ArrayList Collection LinkedHashMap List Map Objects)
+        '(javax.net.ssl SNIHostName SNIMatcher SNIServerName SSLProtocolException StandardConstants))
+
+(defclass ^:final ServerNameExtension
+  (field ^:static ^:final ^HandshakeProducer chNetworkProducer (CHServerNameProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer chOnLoadConsumer (CHServerNameConsumer.))
+
+  (field ^:static ^:final ^SSLStringizer chStringizer (CHServerNamesStringizer.))
+
+  (field ^:static ^:final ^HandshakeProducer shNetworkProducer (SHServerNameProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer shOnLoadConsumer (SHServerNameConsumer.))
+
+  (field ^:static ^:final ^SSLStringizer shStringizer (SHServerNamesStringizer.))
+
+  (field ^:static ^:final ^HandshakeProducer eeNetworkProducer (EEServerNameProducer.))
+
+  (field ^:static ^:final ^SSLExtension$ExtensionConsumer eeOnLoadConsumer (EEServerNameConsumer.))
+
+  (defclass ^:static ^:final CHServerNamesSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:static ^:final ^int NAME_HEADER_LENGTH 3)
+
+    (field ^:final ^{:tag (List SNIServerName)} serverNames)
+
+    (constructor ^:private [this ^{:tag (List SNIServerName)} serverNames]
+      (set! (.-serverNames this) (List/copyOf serverNames)))
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (when (< (.remaining buffer) 2)
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException. "Invalid server_name extension: insufficient data"))))
+      (let [sniLen (Record/getInt16 buffer)]
+        (when (or (== sniLen 0) (not (== sniLen (.remaining buffer))))
+          (throw (.fatal (.-conContext hc)
+                         Alert/DECODE_ERROR
+                         (SSLProtocolException. "Invalid server_name extension: incomplete data"))))
+        (let [^{:tag (Map Integer SNIServerName)} sniMap (LinkedHashMap.)]
+          (while (.hasRemaining buffer)
+            (let [nameType (Record/getInt8 buffer)
+                  ^:mutable ^SNIServerName serverName nil
+                  encoded (Record/getBytes16 buffer)]
+              (if (== nameType StandardConstants/SNI_HOST_NAME)
+                  (do
+                    (when (== (alength encoded) 0)
+                      (throw (.fatal (.-conContext hc)
+                                     Alert/DECODE_ERROR
+                                     (SSLProtocolException.
+                                       "Empty HostName in server_name extension"))))
+                    (try
+                      (set! serverName (SNIHostName. encoded))
+                      (catch IllegalArgumentException iae
+                        (let [spe (SSLProtocolException.
+                                    (java-str "Illegal server name, type=host_name("
+                                              nameType
+                                              "), name="
+                                              (String. encoded StandardCharsets/UTF_8)
+                                              ", value={"
+                                              (Utilities/toHexString encoded)
+                                              "}")
+                                    iae)]
+                          (throw (.fatal (.-conContext hc) Alert/ILLEGAL_PARAMETER spe))))))
+                  (try
+                    (set! serverName (UnknownServerName. nameType encoded))
+                    (catch IllegalArgumentException iae
+                      (let [spe (SSLProtocolException.
+                                  (java-str "Illegal server name, type=("
+                                            nameType
+                                            "), value={"
+                                            (Utilities/toHexString encoded)
+                                            "}")
+                                  iae)]
+                        (throw (.fatal (.-conContext hc) Alert/ILLEGAL_PARAMETER spe))))))
+              (when (some? (.put sniMap (.getType serverName) serverName))
+                (throw (.fatal
+                         (.-conContext hc)
+                         Alert/ILLEGAL_PARAMETER
+                         (SSLProtocolException.
+                           (java-str "Duplicated server name of type " (.getType serverName))))))))
+          (set! (.-serverNames this) (ArrayList. (.values sniMap))))))
+
+    (method ^:public toString ^String [this]
+      (if (or (nil? serverNames) (.isEmpty serverNames))
+          "<no server name indicator specified>"
+          (let [builder (StringBuilder. 512)]
+            (for-each [^SNIServerName sn serverNames]
+              (.append builder (.toString sn))
+              (.append builder "\n"))
+            (.toString builder))))
+
+    (defclass ^:private ^:static UnknownServerName
+      :extends SNIServerName
+
+      (constructor [this ^int code ^byte/1 encoded] (super. code encoded))))
+
+  (defclass ^:private ^:static ^:final CHServerNamesStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (CHServerNamesSpec. hc buffer)) (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final CHServerNameProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [chc (cast ClientHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig chc) SSLExtension/CH_SERVER_NAME))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/warning "Ignore unavailable server_name extension"))
+              nil)
+            (let [^{:tag (List SNIServerName)} serverNames (if (and
+                                                                 (.-isResumption chc)
+                                                                 (some? (.-resumingSession chc)))
+                                                               (.getRequestedServerNames
+                                                                 (.-resumingSession chc))
+                                                               (.-serverNames (.-sslConfig chc)))]
+              (if (and (some? serverNames) (not (.isEmpty serverNames)))
+                  (let [^:mutable ^int sniLen 0]
+                    (for-each [^SNIServerName sniName serverNames]
+                      (set! sniLen (unchecked-add-int sniLen CHServerNamesSpec/NAME_HEADER_LENGTH))
+                      (set! sniLen (unchecked-add-int sniLen (alength (.getEncoded sniName)))))
+                    (let [extData (new byte/1 (unchecked-add-int sniLen 2))
+                          m (ByteBuffer/wrap extData)]
+                      (Record/putInt16 m sniLen)
+                      (for-each [^SNIServerName sniName serverNames]
+                        (Record/putInt8 m (.getType sniName))
+                        (Record/putBytes16 m (.getEncoded sniName)))
+                      (set! (.-requestedServerNames chc) serverNames)
+                      (.put (.-handshakeExtensions chc)
+                            SSLExtension/CH_SERVER_NAME
+                            (CHServerNamesSpec. serverNames))
+                      extData))
+                  (do
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/warning "Unable to indicate server name"))
+                    nil)))))))
+
+  (defclass ^:private ^:static ^:final CHServerNameConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [shc (cast ServerHandshakeContext context)]
+        (if (not (.isAvailable (.-sslConfig shc) SSLExtension/CH_SERVER_NAME))
+            (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+              (SSLLogger/fine
+                (java-str "Ignore unavailable extension: " (.-name SSLExtension/CH_SERVER_NAME))))
+            (let [spec (CHServerNamesSpec. shc buffer)]
+              (.put (.-handshakeExtensions shc) SSLExtension/CH_SERVER_NAME spec)
+              (let [^:mutable ^SNIServerName sni nil]
+                (cond
+                  (not (.isEmpty (.-sniMatchers (.-sslConfig shc))))
+                    (do
+                      (set! sni
+                            (CHServerNameConsumer/chooseSni
+                              (.-sniMatchers (.-sslConfig shc))
+                              (.-serverNames spec)))
+                      (if (some? sni)
+                          (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                            (SSLLogger/fine
+                              (java-str "server name indication (" sni ") is accepted")))
+                          (throw (.fatal (.-conContext shc)
+                                         Alert/UNRECOGNIZED_NAME
+                                         "Unrecognized server name indication"))))
+                  (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                    (SSLLogger/fine "no server name matchers, ignore server name indication"))
+                (when (and (.-isResumption shc) (some? (.-resumingSession shc)))
+                  (when-not (Objects/equals sni (.-serverNameIndication (.-resumingSession shc)))
+                    (set! (.-isResumption shc) false)
+                    (set! (.-resumingSession shc) nil)
+                    (.remove (.-handshakeExtensions shc) SSLExtension/SH_PRE_SHARED_KEY)
+                    (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                      (SSLLogger/fine
+                        "abort session resumption, different server name indication used"))))
+                (set! (.-requestedServerNames shc) (.-serverNames spec))
+                (set! (.-negotiatedServerName shc) sni))))))
+
+    (method ^:private ^:static chooseSni ^SNIServerName [^{:tag (Collection SNIMatcher)} matchers
+                                                         ^{:tag (List SNIServerName)} sniNames]
+      (when (and (some? sniNames) (not (.isEmpty sniNames)))
+        (for-each [^SNIMatcher matcher matchers]
+          (let [matcherType (.getType matcher)]
+            (for-each [^SNIServerName sniName sniNames]
+              (when (== (.getType sniName) matcherType)
+                (when (.matches matcher sniName) (return sniName))
+                (break))))))
+      nil))
+
+  (defclass ^:static ^:final SHServerNamesSpec
+    :implements [SSLExtension$SSLExtensionSpec]
+
+    (field ^:static ^:final ^SHServerNamesSpec DEFAULT (SHServerNamesSpec.))
+
+    (constructor ^:private [this])
+
+    (constructor :throws [IOException] ^:private [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (when-not (== (.remaining buffer) 0)
+        (throw (.fatal (.-conContext hc)
+                       Alert/DECODE_ERROR
+                       (SSLProtocolException.
+                         "Invalid ServerHello server_name extension: not empty")))))
+
+    (method ^:public toString ^String [this] "<empty extension_data field>"))
+
+  (defclass ^:private ^:static ^:final SHServerNamesStringizer
+    :implements [SSLStringizer]
+
+    (method ^:public toString ^String [this ^HandshakeContext hc ^ByteBuffer buffer]
+      (try (.toString (SHServerNamesSpec. hc buffer)) (catch IOException ioe (.getMessage ioe)))))
+
+  (defclass ^:private ^:static ^:final SHServerNameProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            spec (cast CHServerNamesSpec
+                       (.get (.-handshakeExtensions shc) SSLExtension/CH_SERVER_NAME))]
+        (cond
+          (nil? spec)
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/finest
+                  (java-str "Ignore unavailable extension: " (.-name SSLExtension/SH_SERVER_NAME))))
+              nil)
+          (or (.-isResumption shc) (nil? (.-negotiatedServerName shc)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/finest "No expected server name indication response"))
+              nil)
+          :else
+            (do
+              (.put (.-handshakeExtensions shc)
+                    SSLExtension/SH_SERVER_NAME
+                    SHServerNamesSpec/DEFAULT)
+              (new byte/1 0))))))
+
+  (defclass ^:private ^:static ^:final SHServerNameConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)
+            spec (cast CHServerNamesSpec
+                       (.get (.-handshakeExtensions chc) SSLExtension/CH_SERVER_NAME))]
+        (when (nil? spec)
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected ServerHello server_name extension")))
+        (when-not (== (.remaining buffer) 0)
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Invalid ServerHello server_name extension")))
+        (.put (.-handshakeExtensions chc) SSLExtension/SH_SERVER_NAME SHServerNamesSpec/DEFAULT)
+        (set! (.-negotiatedServerName chc) (cast SNIServerName (.get (.-serverNames spec) 0))))))
+
+  (defclass ^:private ^:static ^:final EEServerNameProducer
+    :implements [HandshakeProducer]
+
+    (constructor ^:private [this])
+
+    (method ^:public produce :throws [IOException] ^byte/1 [this ^ConnectionContext context
+                                                            ^SSLHandshake$HandshakeMessage message]
+      (let [shc (cast ServerHandshakeContext context)
+            spec (cast CHServerNamesSpec
+                       (.get (.-handshakeExtensions shc) SSLExtension/CH_SERVER_NAME))]
+        (cond
+          (nil? spec)
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/finest
+                  (java-str "Ignore unavailable extension: " (.-name SSLExtension/EE_SERVER_NAME))))
+              nil)
+          (or (.-isResumption shc) (nil? (.-negotiatedServerName shc)))
+            (do
+              (when (and (SSLLogger/isOn) (SSLLogger/isOn "ssl,handshake"))
+                (SSLLogger/finest "No expected server name indication response"))
+              nil)
+          :else
+            (do
+              (.put (.-handshakeExtensions shc)
+                    SSLExtension/EE_SERVER_NAME
+                    SHServerNamesSpec/DEFAULT)
+              (new byte/1 0))))))
+
+  (defclass ^:private ^:static ^:final EEServerNameConsumer
+    :implements [SSLExtension$ExtensionConsumer]
+
+    (constructor ^:private [this])
+
+    (method ^:public consume :throws [IOException] ^void [this ^ConnectionContext context
+                                                          ^SSLHandshake$HandshakeMessage message
+                                                          ^ByteBuffer buffer]
+      (let [chc (cast ClientHandshakeContext context)
+            spec (cast CHServerNamesSpec
+                       (.get (.-handshakeExtensions chc) SSLExtension/CH_SERVER_NAME))]
+        (when (nil? spec)
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Unexpected EncryptedExtensions server_name extension")))
+        (when-not (== (.remaining buffer) 0)
+          (throw (.fatal (.-conContext chc)
+                         Alert/UNEXPECTED_MESSAGE
+                         "Invalid EncryptedExtensions server_name extension")))
+        (.put (.-handshakeExtensions chc) SSLExtension/EE_SERVER_NAME SHServerNamesSpec/DEFAULT)
+        (set! (.-negotiatedServerName chc) (cast SNIServerName (.get (.-serverNames spec) 0)))))))

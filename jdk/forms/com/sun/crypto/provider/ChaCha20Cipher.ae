@@ -1,0 +1,970 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/crypto/provider/ChaCha20Cipher.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.crypto.provider)
+
+(import '(java.io IOException)
+        '(java.lang.invoke MethodHandles VarHandle)
+        '(java.nio ByteBuffer ByteOrder)
+        '(java.security AlgorithmParameters
+                        InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        KeyException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        ProviderException
+                        SecureRandom)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(java.util Arrays Objects)
+        '(javax.crypto AEADBadTagException
+                       Cipher
+                       CipherSpi
+                       IllegalBlockSizeException
+                       NoSuchPaddingException
+                       ShortBufferException)
+        '(javax.crypto.spec ChaCha20ParameterSpec IvParameterSpec SecretKeySpec)
+        '(jdk.internal.vm.annotation ForceInline IntrinsicCandidate)
+        '(sun.security.util DerValue))
+
+(defclass ^:abstract ChaCha20Cipher
+  :extends CipherSpi
+
+  (field ^:private ^:static ^:final ^int MODE_NONE 0)
+
+  (field ^:private ^:static ^:final ^int MODE_AEAD 1)
+
+  (field ^:private ^:static ^:final ^int STATE_CONST_0 0x61707865)
+
+  (field ^:private ^:static ^:final ^int STATE_CONST_1 0x3320646e)
+
+  (field ^:private ^:static ^:final ^int STATE_CONST_2 0x79622d32)
+
+  (field ^:private ^:static ^:final ^int STATE_CONST_3 0x6b206574)
+
+  (field ^:private ^:static ^:final ^int KS_MAX_LEN 1024)
+
+  (field ^:private ^:static ^:final ^int KS_BLK_SIZE 64)
+
+  (field ^:private ^:static ^:final ^int KS_SIZE_INTS
+    (unchecked-divide-int KS_BLK_SIZE Integer/BYTES))
+
+  (field ^:private ^boolean initialized)
+
+  (field ^:protected ^int mode)
+
+  (field ^:private ^int direction)
+
+  (field ^:private ^boolean aadDone false)
+
+  (field ^:private ^byte/1 keyBytes)
+
+  (field ^:private ^byte/1 nonce)
+
+  (field ^:private ^:static ^:final ^long MAX_UINT32 0x00000000FFFFFFFF)
+
+  (field ^:private ^long finalCounterValue)
+
+  (field ^:private ^long initCounterValue)
+
+  (field ^:private ^long counter)
+
+  (field ^:private ^:final ^int/1 startState (new int/1 KS_SIZE_INTS))
+
+  (field ^:private ^:final ^byte/1 keyStream (new byte/1 KS_MAX_LEN))
+
+  (field ^:private ^int keyStrLimit)
+
+  (field ^:private ^int keyStrOffset)
+
+  (field ^:private ^:static ^:final ^int TAG_LENGTH 16)
+
+  (field ^:private ^long aadLen)
+
+  (field ^:private ^long dataLen)
+
+  (field ^:private ^:static ^:final ^byte/1 padBuf (new byte/1 TAG_LENGTH))
+
+  (field ^:private ^:final ^byte/1 lenBuf (new byte/1 TAG_LENGTH))
+
+  (field ^:protected ^String authAlgName)
+
+  (field ^:private ^Poly1305 authenticator)
+
+  (field ^:private ^ChaChaEngine engine)
+
+  (field ^:private ^:static ^:final ^VarHandle asIntLittleEndian
+    (MethodHandles/byteArrayViewVarHandle int/1 ByteOrder/LITTLE_ENDIAN))
+
+  (field ^:private ^:static ^:final ^VarHandle asLongLittleEndian
+    (MethodHandles/byteArrayViewVarHandle long/1 ByteOrder/LITTLE_ENDIAN))
+
+  (field ^:private ^:static ^:final ^VarHandle asLongView
+    (MethodHandles/byteArrayViewVarHandle long/1 (ByteOrder/nativeOrder)))
+
+  (constructor ^:protected [this])
+
+  (method ^:protected engineSetMode :throws [NoSuchAlgorithmException] ^void [this ^String mode]
+    (when-not (.equalsIgnoreCase mode "None")
+      (throw (NoSuchAlgorithmException. "Mode must be None"))))
+
+  (method ^:protected engineSetPadding :throws [NoSuchPaddingException] ^void [this ^String padding]
+    (when-not (.equalsIgnoreCase padding "NoPadding")
+      (throw (NoSuchPaddingException. "Padding must be NoPadding"))))
+
+  (method ^:protected engineGetBlockSize ^int [this] 0)
+
+  (method ^:protected engineGetOutputSize ^int [this ^int inputLen]
+    (.getOutputSize engine inputLen true))
+
+  (method ^:protected engineGetIV ^byte/1 [this]
+    (when (some? nonce) (.clone nonce)))
+
+  (method ^:protected engineGetParameters ^AlgorithmParameters [this]
+    (let [^:mutable ^AlgorithmParameters params nil]
+      (when (== mode MODE_AEAD)
+        (let [^byte/1 nonceData (if (or initialized (some? nonce))
+                                    nonce
+                                    (ChaCha20Cipher/createRandomNonce nil))]
+          (try
+            (set! params (AlgorithmParameters/getInstance "ChaCha20-Poly1305"))
+            (.init params (.toByteArray (DerValue. DerValue/tag_OctetString nonceData)))
+            (catch [NoSuchAlgorithmException IOException] exc (throw (ProviderException. exc))))))
+      params))
+
+  (method ^:protected engineInit :throws [InvalidKeyException] ^void [this ^int opmode ^Key key
+                                                                      ^SecureRandom random]
+    (if (not (== opmode Cipher/DECRYPT_MODE))
+        (let [newNonce (ChaCha20Cipher/createRandomNonce random)]
+          (set! counter 1)
+          (.init this opmode key newNonce))
+        (throw (InvalidKeyException.
+                 "Default parameter generation disallowed in DECRYPT and UNWRAP modes"))))
+
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^int opmode
+                                                                                                         ^Key key
+                                                                                                         ^AlgorithmParameterSpec params
+                                                                                                         ^SecureRandom random]
+    (if (nil? params)
+        (.engineInit this opmode key random)
+        (let [^:mutable ^byte/1 newNonce nil]
+          (switch mode
+            MODE_NONE
+              (do
+                (when-not (instance? ChaCha20ParameterSpec params)
+                  (throw (InvalidAlgorithmParameterException.
+                           "ChaCha20 algorithm requires ChaCha20ParameterSpec")))
+                (let [chaParams (cast ChaCha20ParameterSpec params)]
+                  (set! newNonce (.getNonce chaParams))
+                  (set! initCounterValue
+                        (bit-and (long (.getCounter chaParams)) 0x00000000FFFFFFFF))
+                  (set! counter initCounterValue)))
+            MODE_AEAD
+              (do
+                (when-not (instance? IvParameterSpec params)
+                  (throw (InvalidAlgorithmParameterException.
+                           "ChaCha20-Poly1305 requires IvParameterSpec")))
+                (let [ivParams (cast IvParameterSpec params)]
+                  (set! newNonce (.getIV ivParams))
+                  (when-not (== (alength newNonce) 12)
+                    (throw (InvalidAlgorithmParameterException.
+                             "ChaCha20-Poly1305 nonce must be 12 bytes in length")))))
+            (throw (ProviderException. "ChaCha20 in unsupported mode")))
+          (.init this opmode key newNonce))))
+
+  (method ^:protected engineInit :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                         ^int opmode
+                                                                                                         ^Key key
+                                                                                                         ^AlgorithmParameters params
+                                                                                                         ^SecureRandom random]
+    (if (nil? params)
+        (.engineInit this opmode key random)
+        (let [^:mutable ^byte/1 newNonce nil]
+          (switch mode
+            MODE_NONE
+              (throw (InvalidAlgorithmParameterException. "AlgorithmParameters not supported"))
+            MODE_AEAD
+              (let [paramAlg (.getAlgorithm params)]
+                (when-not (.equalsIgnoreCase paramAlg "ChaCha20-Poly1305")
+                  (throw (InvalidAlgorithmParameterException.
+                           (java-str "Invalid parameter type: " paramAlg))))
+                (try
+                  (let [dv (DerValue. (.getEncoded params))]
+                    (set! newNonce (.getOctetString dv))
+                    (when-not (== (alength newNonce) 12)
+                      (throw (InvalidAlgorithmParameterException.
+                               "ChaCha20-Poly1305 nonce must be 12 bytes in length"))))
+                  (catch IOException ioe (throw (InvalidAlgorithmParameterException. ioe)))))
+            (throw (ProviderException. (java-str "Invalid mode: " mode))))
+          (.init this opmode key newNonce))))
+
+  (method ^:protected engineUpdateAAD ^void [this ^byte/1 src ^int offset ^int len]
+    (cond
+      (not initialized)
+        (throw (IllegalStateException. "Attempted to update AAD on uninitialized Cipher"))
+      aadDone
+        (throw (IllegalStateException.
+                 "Attempted to update AAD on Cipher after plaintext/ciphertext update"))
+      (not (== mode MODE_AEAD))
+        (throw (IllegalStateException. "Cipher is running in non-AEAD mode"))
+      :else
+        (try
+          (set! aadLen (Math/addExact aadLen len))
+          (.authUpdate this src offset len)
+          (catch ArithmeticException ae (throw (IllegalStateException. "AAD overflow" ae))))))
+
+  (method ^:protected engineUpdateAAD ^void [this ^ByteBuffer src]
+    (cond
+      (not initialized)
+        (throw (IllegalStateException. "Attempted to update AAD on uninitialized Cipher"))
+      aadDone
+        (throw (IllegalStateException.
+                 "Attempted to update AAD on Cipher after plaintext/ciphertext update"))
+      (not (== mode MODE_AEAD))
+        (throw (IllegalStateException. "Cipher is running in non-AEAD mode"))
+      :else
+        (try
+          (set! aadLen (Math/addExact aadLen (unchecked-subtract-int (.limit src) (.position src))))
+          (.engineUpdate authenticator src)
+          (catch ArithmeticException ae (throw (IllegalStateException. "AAD overflow" ae))))))
+
+  (method ^:private ^:static createRandomNonce ^byte/1 [^SecureRandom random]
+    (let [newNonce (new byte/1 12)
+          ^SecureRandom rand (if (some? random) random (SecureRandom.))]
+      (.nextBytes rand newNonce)
+      newNonce))
+
+  (method ^:private init :throws [InvalidKeyException] ^void [this ^int opmode ^Key key
+                                                              ^byte/1 newNonce]
+    (when (or (== opmode Cipher/WRAP_MODE) (== opmode Cipher/UNWRAP_MODE))
+      (throw (UnsupportedOperationException.
+               "WRAP_MODE and UNWRAP_MODE are not currently supported")))
+    (let [newKeyBytes (ChaCha20Cipher/getEncodedKey key)]
+      (when (== opmode Cipher/ENCRYPT_MODE) (.checkKeyAndNonce this newKeyBytes newNonce))
+      (when (some? (.-keyBytes this)) (Arrays/fill (.-keyBytes this) (unchecked-byte 0)))
+      (set! (.-keyBytes this) newKeyBytes)
+      (set! nonce newNonce)
+      (.setInitialState this)
+      (cond
+        (== mode MODE_NONE) (set! engine (EngineStreamOnly.))
+        (== mode MODE_AEAD)
+          (cond
+            (== opmode Cipher/ENCRYPT_MODE) (set! engine (EngineAEADEnc.))
+            (== opmode Cipher/DECRYPT_MODE) (set! engine (EngineAEADDec.))
+            :else (throw (InvalidKeyException. "Not encrypt or decrypt mode"))))
+      (set! finalCounterValue (unchecked-add counter MAX_UINT32))
+      (set! (.-keyStrLimit this) (ChaCha20Cipher/chaCha20Block startState counter keyStream))
+      (set! (.-keyStrOffset this) 0)
+      (set! (.-counter this)
+            (unchecked-add (.-counter this) (unchecked-divide-int keyStrLimit KS_BLK_SIZE)))
+      (set! direction opmode)
+      (set! aadDone false)
+      (set! initialized true)))
+
+  (method ^:private checkKeyAndNonce :throws [InvalidKeyException] ^void [this ^byte/1 newKeyBytes
+                                                                          ^byte/1 newNonce]
+    (when (and (MessageDigest/isEqual newKeyBytes keyBytes) (MessageDigest/isEqual newNonce nonce))
+      (throw (InvalidKeyException. "Matching key and nonce from previous initialization"))))
+
+  (method ^:private ^:static getEncodedKey :throws [InvalidKeyException] ^byte/1 [^Key key]
+    (when-not (.equals "RAW" (.getFormat key))
+      (throw (InvalidKeyException. "Key encoding format must be RAW")))
+    (let [encodedKey (.getEncoded key)]
+      (when (or (nil? encodedKey) (not (== (alength encodedKey) 32)))
+        (when (some? encodedKey) (Arrays/fill encodedKey (unchecked-byte 0)))
+        (throw (InvalidKeyException. "Key length must be 256 bits")))
+      encodedKey))
+
+  (method ^:protected engineUpdate ^byte/1 [this ^byte/1 in ^int inOfs ^int inLen]
+    (let [out (new byte/1 (.getOutputSize engine inLen false))]
+      (try
+        (.doUpdate engine in inOfs inLen out 0)
+        (catch [ShortBufferException KeyException] exc (throw (ProviderException. exc))))
+      out))
+
+  (method ^:protected engineUpdate :throws [ShortBufferException] ^int [this ^byte/1 in ^int inOfs
+                                                                        ^int inLen ^byte/1 out
+                                                                        ^int outOfs]
+    (let [^:mutable ^int bytesUpdated 0]
+      (try
+        (set! bytesUpdated (.doUpdate engine in inOfs inLen out outOfs))
+        (catch KeyException ke (throw (ProviderException. ke))))
+      bytesUpdated))
+
+  (method ^:protected engineUpdate :throws [ShortBufferException] ^int [this ^ByteBuffer input
+                                                                        ^ByteBuffer output]
+    (try
+      (.bufferCrypt this input output true)
+      (catch AEADBadTagException e (throw (AssertionError. e)))))
+
+  (method ^:protected engineDoFinal :throws [AEADBadTagException] ^byte/1 [this ^byte/1 in
+                                                                           ^int inOfs ^int inLen]
+    (let [output (new byte/1 (.getOutputSize engine inLen true))]
+      (try
+        (.doFinal engine in inOfs inLen output 0)
+        (catch [ShortBufferException KeyException] exc (throw (ProviderException. exc)))
+        (finally (.resetStartState this)))
+      output))
+
+  (method ^:protected engineDoFinal :throws [ShortBufferException AEADBadTagException] ^int [this
+                                                                                             ^byte/1 in
+                                                                                             ^int inOfs
+                                                                                             ^int inLen
+                                                                                             ^byte/1 out
+                                                                                             ^int outOfs]
+    (let [^:mutable ^int bytesUpdated 0]
+      (try
+        (set! bytesUpdated (.doFinal engine in inOfs inLen out outOfs))
+        (catch KeyException ke (throw (ProviderException. ke)))
+        (finally (.resetStartState this)))
+      bytesUpdated))
+
+  (method ^:protected engineDoFinal :throws [ShortBufferException AEADBadTagException] ^int [this
+                                                                                             ^ByteBuffer input
+                                                                                             ^ByteBuffer output]
+    (.bufferCrypt this input output false))
+
+  (method ^:private bufferCrypt :throws [ShortBufferException AEADBadTagException] ^int [this
+                                                                                         ^ByteBuffer input
+                                                                                         ^ByteBuffer output
+                                                                                         ^boolean isUpdate]
+    (when (or (nil? input) (nil? output))
+      (throw (NullPointerException. "Input and output buffers must not be null")))
+    (let [inPos (.position input)
+          inLimit (.limit input)
+          inLen (unchecked-subtract-int inLimit inPos)]
+      (if (and isUpdate (== inLen 0))
+          0
+          (let [outLenNeeded (.getOutputSize engine inLen (not isUpdate))]
+            (when (< (.remaining output) outLenNeeded)
+              (throw (ShortBufferException.
+                       (java-str "Need at least " outLenNeeded " bytes of space in output buffer"))))
+            (let [^:mutable ^int total 0]
+              (if (.hasArray input)
+                  (let [inArray (.array input)
+                        inOfs (unchecked-add-int (.arrayOffset input) inPos)
+                        ^:mutable ^byte/1 outArray nil]
+                    (if (.hasArray output)
+                        (do
+                          (set! outArray (.array output))
+                          (let [outPos (.position output)
+                                ^:mutable outOfs (unchecked-add-int (.arrayOffset output) outPos)
+                                ^:mutable useTempOut false]
+                            (when (and (identical? inArray outArray)
+                                       (and (< inOfs outOfs)
+                                            (< outOfs (unchecked-add-int inOfs inLen))))
+                              (set! useTempOut true)
+                              (set! outArray (new byte/1 outLenNeeded))
+                              (set! outOfs 0))
+                            (try
+                              (if isUpdate
+                                  (set! total
+                                        (.doUpdate engine inArray inOfs inLen outArray outOfs))
+                                  (set! total (.doFinal engine inArray inOfs inLen outArray outOfs)))
+                              (catch KeyException e (throw (ProviderException. e))))
+                            (if useTempOut
+                                (.put output outArray outOfs total)
+                                (.position output (unchecked-add-int outPos total)))))
+                        (do
+                          (if isUpdate
+                              (set! outArray (.engineUpdate this inArray inOfs inLen))
+                              (set! outArray (.engineDoFinal this inArray inOfs inLen)))
+                          (when (and (some? outArray) (not (== (alength outArray) 0)))
+                            (.put output outArray)
+                            (set! total (alength outArray)))))
+                    (.position input inLimit))
+                  (try
+                    (when isUpdate (return (.doUpdate engine input output)))
+                    (return (.doFinal engine input output))
+                    (catch KeyException e (throw (ProviderException. e)))))
+              total)))))
+
+  (method ^:protected engineWrap :throws [IllegalBlockSizeException InvalidKeyException] ^byte/1 [this
+                                                                                                  ^Key key]
+    (throw (UnsupportedOperationException. "Wrap operations are not supported")))
+
+  (method ^:protected engineUnwrap :throws [InvalidKeyException NoSuchAlgorithmException] ^Key [this
+                                                                                                ^byte/1 wrappedKey
+                                                                                                ^String algorithm
+                                                                                                ^int type]
+    (throw (UnsupportedOperationException. "Unwrap operations are not supported")))
+
+  (method ^:protected engineGetKeySize :throws [InvalidKeyException] ^int [this ^Key key]
+    (let [encodedKey (ChaCha20Cipher/getEncodedKey key)]
+      (Arrays/fill encodedKey (unchecked-byte 0))
+      (bit-shift-left-int (alength encodedKey) 3)))
+
+  (method ^:private setInitialState ^void [this]
+    (aset startState 0 STATE_CONST_0)
+    (aset startState 1 STATE_CONST_1)
+    (aset startState 2 STATE_CONST_2)
+    (aset startState 3 STATE_CONST_3)
+    (loop [^int i 0]
+      (when (< i 32)
+        (aset startState
+              (unchecked-add-int (unchecked-divide-int i 4) 4)
+              (bit-or-int (bit-or-int (bit-or-int
+                                        (bit-and-int (aget keyBytes i) 0x000000FF)
+                                        (bit-and-int
+                                          (bit-shift-left-int
+                                            (aget keyBytes (unchecked-add-int i 1))
+                                            8)
+                                          0x0000FF00))
+                                      (bit-and-int
+                                        (bit-shift-left-int
+                                          (aget keyBytes (unchecked-add-int i 2))
+                                          16)
+                                        0x00FF0000))
+                          (bit-and-int (bit-shift-left-int
+                                         (aget keyBytes (unchecked-add-int i 3))
+                                         24)
+                                       (unchecked-int 0xFF000000))))
+        (recur (unchecked-add-int i 4))))
+    (aset startState 12 0)
+    (loop [^int i 0]
+      (when (< i 12)
+        (aset startState
+              (unchecked-add-int (unchecked-divide-int i 4) 13)
+              (bit-or-int (bit-or-int (bit-or-int
+                                        (bit-and-int (aget nonce i) 0x000000FF)
+                                        (bit-and-int
+                                          (bit-shift-left-int
+                                            (aget nonce (unchecked-add-int i 1))
+                                            8)
+                                          0x0000FF00))
+                                      (bit-and-int
+                                        (bit-shift-left-int (aget nonce (unchecked-add-int i 2)) 16)
+                                        0x00FF0000))
+                          (bit-and-int (bit-shift-left-int (aget nonce (unchecked-add-int i 3)) 24)
+                                       (unchecked-int 0xFF000000))))
+        (recur (unchecked-add-int i 4)))))
+
+  (method ^:private ^:static ^{ForceInline true} chaCha20Block ^int [^int/1 initState ^long counter
+                                                                     ^byte/1 result]
+    (when (or (not (== (alength initState) KS_SIZE_INTS)) (not (== (alength result) KS_MAX_LEN)))
+      (throw (IllegalArgumentException. "Illegal state or keystream buffer length")))
+    (aset initState 12 (unchecked-int counter))
+    (ChaCha20Cipher/implChaCha20Block initState result))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} implChaCha20Block ^int [^int/1 initState
+                                                                                ^byte/1 result]
+    (let [^:mutable ws00 STATE_CONST_0
+          ^:mutable ws01 STATE_CONST_1
+          ^:mutable ws02 STATE_CONST_2
+          ^:mutable ws03 STATE_CONST_3
+          ^:mutable ws04 (aget initState 4)
+          ^:mutable ws05 (aget initState 5)
+          ^:mutable ws06 (aget initState 6)
+          ^:mutable ws07 (aget initState 7)
+          ^:mutable ws08 (aget initState 8)
+          ^:mutable ws09 (aget initState 9)
+          ^:mutable ws10 (aget initState 10)
+          ^:mutable ws11 (aget initState 11)
+          ^:mutable ws12 (aget initState 12)
+          ^:mutable ws13 (aget initState 13)
+          ^:mutable ws14 (aget initState 14)
+          ^:mutable ws15 (aget initState 15)]
+      (loop [^int round 0]
+        (when (< round 10)
+          (set! ws00 (unchecked-add-int ws00 ws04))
+          (set! ws12 (Integer/rotateLeft (bit-xor-int ws12 ws00) 16))
+          (set! ws08 (unchecked-add-int ws08 ws12))
+          (set! ws04 (Integer/rotateLeft (bit-xor-int ws04 ws08) 12))
+          (set! ws00 (unchecked-add-int ws00 ws04))
+          (set! ws12 (Integer/rotateLeft (bit-xor-int ws12 ws00) 8))
+          (set! ws08 (unchecked-add-int ws08 ws12))
+          (set! ws04 (Integer/rotateLeft (bit-xor-int ws04 ws08) 7))
+          (set! ws01 (unchecked-add-int ws01 ws05))
+          (set! ws13 (Integer/rotateLeft (bit-xor-int ws13 ws01) 16))
+          (set! ws09 (unchecked-add-int ws09 ws13))
+          (set! ws05 (Integer/rotateLeft (bit-xor-int ws05 ws09) 12))
+          (set! ws01 (unchecked-add-int ws01 ws05))
+          (set! ws13 (Integer/rotateLeft (bit-xor-int ws13 ws01) 8))
+          (set! ws09 (unchecked-add-int ws09 ws13))
+          (set! ws05 (Integer/rotateLeft (bit-xor-int ws05 ws09) 7))
+          (set! ws02 (unchecked-add-int ws02 ws06))
+          (set! ws14 (Integer/rotateLeft (bit-xor-int ws14 ws02) 16))
+          (set! ws10 (unchecked-add-int ws10 ws14))
+          (set! ws06 (Integer/rotateLeft (bit-xor-int ws06 ws10) 12))
+          (set! ws02 (unchecked-add-int ws02 ws06))
+          (set! ws14 (Integer/rotateLeft (bit-xor-int ws14 ws02) 8))
+          (set! ws10 (unchecked-add-int ws10 ws14))
+          (set! ws06 (Integer/rotateLeft (bit-xor-int ws06 ws10) 7))
+          (set! ws03 (unchecked-add-int ws03 ws07))
+          (set! ws15 (Integer/rotateLeft (bit-xor-int ws15 ws03) 16))
+          (set! ws11 (unchecked-add-int ws11 ws15))
+          (set! ws07 (Integer/rotateLeft (bit-xor-int ws07 ws11) 12))
+          (set! ws03 (unchecked-add-int ws03 ws07))
+          (set! ws15 (Integer/rotateLeft (bit-xor-int ws15 ws03) 8))
+          (set! ws11 (unchecked-add-int ws11 ws15))
+          (set! ws07 (Integer/rotateLeft (bit-xor-int ws07 ws11) 7))
+          (set! ws00 (unchecked-add-int ws00 ws05))
+          (set! ws15 (Integer/rotateLeft (bit-xor-int ws15 ws00) 16))
+          (set! ws10 (unchecked-add-int ws10 ws15))
+          (set! ws05 (Integer/rotateLeft (bit-xor-int ws05 ws10) 12))
+          (set! ws00 (unchecked-add-int ws00 ws05))
+          (set! ws15 (Integer/rotateLeft (bit-xor-int ws15 ws00) 8))
+          (set! ws10 (unchecked-add-int ws10 ws15))
+          (set! ws05 (Integer/rotateLeft (bit-xor-int ws05 ws10) 7))
+          (set! ws01 (unchecked-add-int ws01 ws06))
+          (set! ws12 (Integer/rotateLeft (bit-xor-int ws12 ws01) 16))
+          (set! ws11 (unchecked-add-int ws11 ws12))
+          (set! ws06 (Integer/rotateLeft (bit-xor-int ws06 ws11) 12))
+          (set! ws01 (unchecked-add-int ws01 ws06))
+          (set! ws12 (Integer/rotateLeft (bit-xor-int ws12 ws01) 8))
+          (set! ws11 (unchecked-add-int ws11 ws12))
+          (set! ws06 (Integer/rotateLeft (bit-xor-int ws06 ws11) 7))
+          (set! ws02 (unchecked-add-int ws02 ws07))
+          (set! ws13 (Integer/rotateLeft (bit-xor-int ws13 ws02) 16))
+          (set! ws08 (unchecked-add-int ws08 ws13))
+          (set! ws07 (Integer/rotateLeft (bit-xor-int ws07 ws08) 12))
+          (set! ws02 (unchecked-add-int ws02 ws07))
+          (set! ws13 (Integer/rotateLeft (bit-xor-int ws13 ws02) 8))
+          (set! ws08 (unchecked-add-int ws08 ws13))
+          (set! ws07 (Integer/rotateLeft (bit-xor-int ws07 ws08) 7))
+          (set! ws03 (unchecked-add-int ws03 ws04))
+          (set! ws14 (Integer/rotateLeft (bit-xor-int ws14 ws03) 16))
+          (set! ws09 (unchecked-add-int ws09 ws14))
+          (set! ws04 (Integer/rotateLeft (bit-xor-int ws04 ws09) 12))
+          (set! ws03 (unchecked-add-int ws03 ws04))
+          (set! ws14 (Integer/rotateLeft (bit-xor-int ws14 ws03) 8))
+          (set! ws09 (unchecked-add-int ws09 ws14))
+          (set! ws04 (Integer/rotateLeft (bit-xor-int ws04 ws09) 7))
+          (recur (unchecked-inc-int round))))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              0
+                                              (unchecked-add-int ws00 STATE_CONST_0))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              4
+                                              (unchecked-add-int ws01 STATE_CONST_1))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              8
+                                              (unchecked-add-int ws02 STATE_CONST_2))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              12
+                                              (unchecked-add-int ws03 STATE_CONST_3))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              16
+                                              (unchecked-add-int ws04 (aget initState 4)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              20
+                                              (unchecked-add-int ws05 (aget initState 5)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              24
+                                              (unchecked-add-int ws06 (aget initState 6)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              28
+                                              (unchecked-add-int ws07 (aget initState 7)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              32
+                                              (unchecked-add-int ws08 (aget initState 8)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              36
+                                              (unchecked-add-int ws09 (aget initState 9)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              40
+                                              (unchecked-add-int ws10 (aget initState 10)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              44
+                                              (unchecked-add-int ws11 (aget initState 11)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              48
+                                              (unchecked-add-int ws12 (aget initState 12)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              52
+                                              (unchecked-add-int ws13 (aget initState 13)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              56
+                                              (unchecked-add-int ws14 (aget initState 14)))
+      ^void (^[byte/1 int int] VarHandle/.set asIntLittleEndian
+                                              result
+                                              60
+                                              (unchecked-add-int ws15 (aget initState 15)))
+      KS_BLK_SIZE))
+
+  (method ^:private chaCha20Transform :throws [KeyException] ^void [this ^byte/1 in
+                                                                    ^:mutable ^int inOff ^int inLen
+                                                                    ^byte/1 out
+                                                                    ^:mutable ^int outOff]
+    (let [^:mutable remainingData inLen]
+      (while (> remainingData 0)
+        (let [^:mutable ksRemain (unchecked-subtract-int keyStrLimit keyStrOffset)]
+          (when (<= ksRemain 0)
+            (if (<= counter finalCounterValue)
+                (do
+                  (set! keyStrLimit (ChaCha20Cipher/chaCha20Block startState counter keyStream))
+                  (set! counter
+                        (unchecked-add counter (unchecked-divide-int keyStrLimit KS_BLK_SIZE)))
+                  (when (> counter finalCounterValue)
+                    (set! keyStrLimit
+                          (unchecked-subtract-int
+                            keyStrLimit
+                            (unchecked-multiply-int
+                              (unchecked-int (unchecked-subtract counter finalCounterValue))
+                              64))))
+                  (set! keyStrOffset 0)
+                  (set! ksRemain keyStrLimit))
+                (throw (KeyException. "Counter exhausted.  Reinitialize with new key and/or nonce"))))
+          (let [xformLen (Math/min remainingData ksRemain)]
+            (ChaCha20Cipher/xor keyStream keyStrOffset in inOff out outOff xformLen)
+            (set! outOff (unchecked-add-int outOff xformLen))
+            (set! inOff (unchecked-add-int inOff xformLen))
+            (set! keyStrOffset (unchecked-add-int keyStrOffset xformLen))
+            (set! remainingData (unchecked-subtract-int remainingData xformLen)))))))
+
+  (method ^:private ^:static xor ^void [^byte/1 in1 ^:mutable ^int off1 ^byte/1 in2
+                                        ^:mutable ^int off2 ^byte/1 out ^:mutable ^int outOff
+                                        ^:mutable ^int len]
+    (while (>= len 8)
+      (let [v1 ^long (^[byte/1 int] VarHandle/.get asLongView in1 off1)
+            v2 ^long (^[byte/1 int] VarHandle/.get asLongView in2 off2)]
+        ^void (^[byte/1 int long] VarHandle/.set asLongView out outOff (bit-xor v1 v2))
+        (set! off1 (unchecked-add-int off1 8))
+        (set! off2 (unchecked-add-int off2 8))
+        (set! outOff (unchecked-add-int outOff 8))
+        (set! len (unchecked-subtract-int len 8))))
+    (while (> len 0)
+      (aset out outOff (unchecked-byte (bit-xor-int (aget in1 off1) (aget in2 off2))))
+      (set! off1 (unchecked-inc-int off1))
+      (set! off2 (unchecked-inc-int off2))
+      (set! outOff (unchecked-inc-int outOff))
+      (set! len (unchecked-dec-int len))))
+
+  (method ^:private initAuthenticator :throws [InvalidKeyException] ^void [this]
+    (set! authenticator (Poly1305.))
+    (let [serializedKey (new byte/1 KS_MAX_LEN)]
+      (ChaCha20Cipher/chaCha20Block startState 0 serializedKey)
+      (.engineInit authenticator (SecretKeySpec. serializedKey 0 32 authAlgName) nil)
+      (set! aadLen 0)
+      (set! dataLen 0)))
+
+  (method ^:private authUpdate ^int [this ^byte/1 data ^int offset ^int length]
+    (Objects/checkFromIndexSize offset length (alength data))
+    (.engineUpdate authenticator data offset length)
+    length)
+
+  (method ^:private authFinalizeData ^void [this ^byte/1 data ^int dataOff ^int length ^byte/1 out
+                                            ^int outOff]
+    (when (some? data)
+      (set! dataLen (unchecked-add dataLen (.authUpdate this data dataOff length))))
+    (.authPad16 this dataLen)
+    (.authWriteLengths this aadLen dataLen lenBuf)
+    (.engineUpdate authenticator lenBuf 0 (alength lenBuf))
+    (let [tag (.engineDoFinal authenticator)]
+      (Objects/checkFromIndexSize outOff (alength tag) (alength out))
+      (System/arraycopy tag 0 out outOff (alength tag))
+      (set! aadLen 0)
+      (set! dataLen 0)))
+
+  (method ^:private authPad16 ^void [this ^long dataLen]
+    (.engineUpdate authenticator
+                   padBuf
+                   0
+                   (bit-and-int (unchecked-subtract-int
+                                  TAG_LENGTH
+                                  (bit-and-int (unchecked-int dataLen) 15))
+                                15)))
+
+  (method ^:private authWriteLengths ^void [this ^long aLen ^long dLen ^byte/1 buf]
+    ^void (^[byte/1 int long] VarHandle/.set asLongLittleEndian buf 0 aLen)
+    ^void (^[byte/1 int long] VarHandle/.set asLongLittleEndian buf Long/BYTES dLen))
+
+  (method ^:private resetStartState ^void [this]
+    (set! keyStrLimit 0)
+    (set! keyStrOffset 0)
+    (set! counter initCounterValue)
+    (set! aadDone false)
+    (set! initialized (== direction Cipher/DECRYPT_MODE)))
+
+  (defclass ^:interface ChaChaEngine
+    (method getOutputSize ^int [this ^int inLength ^boolean isFinal])
+
+    (method doUpdate :throws [ShortBufferException KeyException] ^int [this ^byte/1 in ^int inOff
+                                                                       ^int inLen ^byte/1 out
+                                                                       ^int outOff])
+
+    (method doFinal :throws [ShortBufferException AEADBadTagException KeyException] ^int [this
+                                                                                          ^byte/1 in
+                                                                                          ^int inOff
+                                                                                          ^int inLen
+                                                                                          ^byte/1 out
+                                                                                          ^int outOff])
+
+    (method doUpdate :throws [ShortBufferException KeyException] ^int [this ^ByteBuffer input
+                                                                       ^ByteBuffer output])
+
+    (method doFinal :throws [ShortBufferException KeyException AEADBadTagException] ^int [this
+                                                                                          ^ByteBuffer input
+                                                                                          ^ByteBuffer output]))
+
+  (defclass ^:private ^:final EngineStreamOnly
+    :implements [ChaChaEngine]
+
+    (constructor ^:private [this])
+
+    (method ^:public getOutputSize ^int [this ^int inLength ^boolean isFinal]
+      inLength)
+
+    (method ^:public doUpdate :throws [ShortBufferException KeyException] ^int [this ^byte/1 in
+                                                                                ^int inOff
+                                                                                ^int inLen
+                                                                                ^byte/1 out
+                                                                                ^int outOff]
+      (if initialized
+          (do
+            (try
+              (if (some? out)
+                  (Objects/checkFromIndexSize outOff inLen (alength out))
+                  (throw (ShortBufferException. "Output buffer too small")))
+              (catch IndexOutOfBoundsException iobe
+                (throw (ShortBufferException. "Output buffer too small"))))
+            (when (some? in)
+              (Objects/checkFromIndexSize inOff inLen (alength in))
+              (.chaCha20Transform ChaCha20Cipher/this in inOff inLen out outOff))
+            inLen)
+          (throw (IllegalStateException. "Must use either a different key or iv."))))
+
+    (method ^:public doFinal :throws [ShortBufferException KeyException] ^int [this ^byte/1 in
+                                                                               ^int inOff ^int inLen
+                                                                               ^byte/1 out
+                                                                               ^int outOff]
+      (.doUpdate this in inOff inLen out outOff))
+
+    (method ^:public doUpdate :throws [ShortBufferException KeyException] ^int [this
+                                                                                ^ByteBuffer input
+                                                                                ^ByteBuffer output]
+      (let [data (new byte/1 (.remaining input))]
+        (.get input data)
+        (.doUpdate this data 0 (alength data) data 0)
+        (.put output data)
+        (alength data)))
+
+    (method ^:public doFinal :throws [ShortBufferException KeyException] ^int [this
+                                                                               ^ByteBuffer input
+                                                                               ^ByteBuffer output]
+      (.doUpdate this input output)))
+
+  (defclass ^:private ^:final EngineAEADEnc
+    :implements [ChaChaEngine]
+
+    (method ^:public getOutputSize ^int [this ^int inLength ^boolean isFinal]
+      (if isFinal (Math/addExact inLength TAG_LENGTH) inLength))
+
+    (constructor :throws [InvalidKeyException] ^:private [this]
+      (.initAuthenticator ChaCha20Cipher/this)
+      (set! initCounterValue 1)
+      (set! counter initCounterValue))
+
+    (method ^:public doUpdate :throws [ShortBufferException KeyException] ^int [this ^byte/1 in
+                                                                                ^int inOff
+                                                                                ^int inLen
+                                                                                ^byte/1 out
+                                                                                ^int outOff]
+      (if initialized
+          (do
+            (when-not aadDone (.authPad16 ChaCha20Cipher/this aadLen) (set! aadDone true))
+            (try
+              (if (some? out)
+                  (Objects/checkFromIndexSize outOff inLen (alength out))
+                  (throw (ShortBufferException. "Output buffer too small")))
+              (catch IndexOutOfBoundsException iobe
+                (throw (ShortBufferException. "Output buffer too small"))))
+            (when (some? in)
+              (Objects/checkFromIndexSize inOff inLen (alength in))
+              (.chaCha20Transform ChaCha20Cipher/this in inOff inLen out outOff)
+              (set! dataLen
+                    (unchecked-add dataLen (.authUpdate ChaCha20Cipher/this out outOff inLen))))
+            inLen)
+          (throw (IllegalStateException. "Must use either a different key or iv."))))
+
+    (method ^:public doFinal :throws [ShortBufferException KeyException] ^int [this ^byte/1 in
+                                                                               ^int inOff ^int inLen
+                                                                               ^byte/1 out
+                                                                               ^int outOff]
+      (when (> (unchecked-add-int inLen TAG_LENGTH) (unchecked-subtract-int (alength out) outOff))
+        (throw (ShortBufferException. "Output buffer too small")))
+      (.doUpdate this in inOff inLen out outOff)
+      (.authFinalizeData ChaCha20Cipher/this nil 0 0 out (unchecked-add-int outOff inLen))
+      (set! aadDone false)
+      (unchecked-add-int inLen TAG_LENGTH))
+
+    (method ^:public doUpdate :throws [ShortBufferException KeyException] ^int [this
+                                                                                ^ByteBuffer input
+                                                                                ^ByteBuffer output]
+      (let [data (new byte/1 (.remaining input))]
+        (.get input data)
+        (.doUpdate this data 0 (alength data) data 0)
+        (.put output data)
+        (alength data)))
+
+    (method ^:public doFinal :throws [ShortBufferException KeyException] ^int [this
+                                                                               ^ByteBuffer input
+                                                                               ^ByteBuffer output]
+      (let [len (.remaining input)
+            data (new byte/1 (unchecked-add-int len TAG_LENGTH))]
+        (.get input data 0 len)
+        (.doFinal this data 0 len data 0)
+        (.put output data)
+        (alength data))))
+
+  (defclass ^:private ^:final EngineAEADDec
+    :implements [ChaChaEngine]
+
+    (field ^:private ^AEADBufferedStream cipherBuf nil)
+
+    (field ^:private ^:final ^byte/1 tag)
+
+    (method ^:public getOutputSize ^int [this ^int inLen ^boolean isFinal]
+      (if isFinal
+          (Integer/max (Math/addExact (unchecked-subtract-int inLen TAG_LENGTH)
+                                      (.getBufferedLength this))
+                       0)
+          0))
+
+    (method ^:private initBuffer ^void [this ^int len]
+      (when (nil? cipherBuf) (set! cipherBuf (AEADBufferedStream. len))))
+
+    (method ^:private getBufferedLength ^int [this]
+      (if (some? cipherBuf) (.size cipherBuf) 0))
+
+    (constructor :throws [InvalidKeyException] ^:private [this]
+      (.initAuthenticator ChaCha20Cipher/this)
+      (set! initCounterValue 1)
+      (set! counter initCounterValue)
+      (set! tag (new byte/1 TAG_LENGTH)))
+
+    (method ^:public doUpdate ^int [this ^byte/1 in ^int inOff ^int inLen ^byte/1 out ^int outOff]
+      (if initialized
+          (do
+            (when-not aadDone (.authPad16 ChaCha20Cipher/this aadLen) (set! aadDone true))
+            (when (some? in)
+              (Objects/checkFromIndexSize inOff inLen (alength in))
+              (.initBuffer this inLen)
+              (.write cipherBuf in inOff inLen)))
+          (throw (IllegalStateException. "Must use either a different key or iv.")))
+      0)
+
+    (method ^:public doUpdate ^int [this ^ByteBuffer input ^ByteBuffer output]
+      (.initBuffer this (.remaining input))
+      (.write cipherBuf input)
+      0)
+
+    (method ^:public doFinal :throws [ShortBufferException AEADBadTagException KeyException] ^int [this
+                                                                                                   ^byte/1 in
+                                                                                                   ^:mutable ^int inOff
+                                                                                                   ^int inLen
+                                                                                                   ^byte/1 out
+                                                                                                   ^int outOff]
+      (let [^:mutable ^byte/1 ctPlusTag nil
+            ^:mutable ^int ctPlusTagLen 0]
+        (if (== (.getBufferedLength this) 0)
+            (do
+              (.doUpdate this nil inOff inLen out outOff)
+              (set! ctPlusTag in)
+              (set! ctPlusTagLen inLen))
+            (do
+              (.doUpdate this in inOff inLen out outOff)
+              (set! ctPlusTag (.getBuffer cipherBuf))
+              (set! inOff 0)
+              (set! ctPlusTagLen (.size cipherBuf))
+              (.reset cipherBuf)))
+        (when (< ctPlusTagLen TAG_LENGTH)
+          (throw (AEADBadTagException. "Input too short - need tag")))
+        (let [ctLen (unchecked-subtract-int ctPlusTagLen TAG_LENGTH)]
+          (try
+            (Objects/checkFromIndexSize outOff ctLen (alength out))
+            (catch IndexOutOfBoundsException ioobe
+              (throw (ShortBufferException. "Output buffer too small"))))
+          (.authFinalizeData ChaCha20Cipher/this ctPlusTag inOff ctLen tag 0)
+          (let [tagCompare (bit-or (bit-xor ^long (^[byte/1 int] VarHandle/.get
+                                                    asLongView
+                                                    ctPlusTag
+                                                    (unchecked-add-int ctLen inOff))
+                                            ^long (^[byte/1 int] VarHandle/.get asLongView tag 0))
+                                   (bit-xor ^long (^[byte/1 int] VarHandle/.get
+                                                    asLongView
+                                                    ctPlusTag
+                                                    (unchecked-add-int
+                                                      (unchecked-add-int ctLen inOff)
+                                                      Long/BYTES))
+                                            ^long (^[byte/1 int] VarHandle/.get
+                                                    asLongView
+                                                    tag
+                                                    Long/BYTES)))]
+            (when-not (== tagCompare 0) (throw (AEADBadTagException. "Tag mismatch")))
+            (.chaCha20Transform ChaCha20Cipher/this ctPlusTag inOff ctLen out outOff)
+            (set! aadDone false)
+            ctLen))))
+
+    (method ^:public doFinal :throws [ShortBufferException AEADBadTagException KeyException] ^int [this
+                                                                                                   ^ByteBuffer input
+                                                                                                   ^ByteBuffer output]
+      (let [^:mutable ^int len 0
+            inLen (.remaining input)
+            ^:mutable ^byte/1 ct nil
+            ^:mutable ^byte/1 buf nil
+            ^:mutable ^int bufLen 0
+            ctLen (unchecked-add-int (.getBufferedLength this) inLen)]
+        (when (< ctLen TAG_LENGTH) (throw (AEADBadTagException. "Input too short - need tag")))
+        (if (< inLen TAG_LENGTH)
+            (do
+              (when (> inLen 0) (.doUpdate this input output))
+              (when (some? cipherBuf) (set! ct (.getBuffer cipherBuf)))
+              (set! len ctLen))
+            (do
+              (when (some? cipherBuf)
+                (set! buf (.getBuffer cipherBuf))
+                (set! bufLen (.size cipherBuf)))
+              (set! ct (new byte/1 inLen))
+              (.get input ct 0 inLen)
+              (set! len inLen)))
+        (.doUpdate this nil 0 0 nil 0)
+        (when (some? buf) (set! dataLen (.authUpdate ChaCha20Cipher/this buf 0 bufLen)))
+        (set! len (unchecked-subtract-int len TAG_LENGTH))
+        (.authFinalizeData ChaCha20Cipher/this ct 0 len tag 0)
+        (when-not (== (bit-or (bit-xor ^long (^[byte/1 int] VarHandle/.get asLongView ct len)
+                                       ^long (^[byte/1 int] VarHandle/.get asLongView tag 0))
+                              (bit-xor ^long (^[byte/1 int] VarHandle/.get
+                                               asLongView
+                                               ct
+                                               (unchecked-add-int len Long/BYTES))
+                                       ^long (^[byte/1 int] VarHandle/.get
+                                               asLongView
+                                               tag
+                                               Long/BYTES)))
+                      0)
+          (throw (AEADBadTagException. "Tag mismatch")))
+        (when (some? buf)
+          (.chaCha20Transform ChaCha20Cipher/this buf 0 bufLen buf 0)
+          (.put output buf 0 bufLen))
+        (.chaCha20Transform ChaCha20Cipher/this ct 0 len ct 0)
+        (.put output ct 0 len)
+        (set! aadDone false)
+        (unchecked-subtract-int ctLen TAG_LENGTH))))
+
+  (defclass ^:public ^:static ^:final ChaCha20Only
+    :extends ChaCha20Cipher
+
+    (constructor ^:public [this] (set! (.-mode this) MODE_NONE)))
+
+  (defclass ^:public ^:static ^:final ChaCha20Poly1305
+    :extends ChaCha20Cipher
+
+    (constructor ^:public [this]
+      (set! (.-mode this) MODE_AEAD)
+      (set! (.-authAlgName this) "Poly1305"))))

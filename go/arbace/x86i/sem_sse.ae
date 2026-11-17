@@ -1,0 +1,1263 @@
+(in-ns 'go.arbace.x86i) (go/file "sem_sse.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [math "math"]
+    ^{:line 6} [big "math/big"]])
+
+
+;; SSE and SSE2 (AX5.5, AXS59 (a), AXS62 (a); from the Intel SDM vol. 1 ch. 10-11 and vol. 2 and the AMD APM vol. 4 as
+;; references): the 128-bit XMM forms of the moves, the logic, the shuffles and unpacks, the packed integer operations, the
+;; scalar and packed single and double arithmetic, comparisons, minimum and maximum, square roots and the conversions, MXCSR
+;; (ldmxcsr, stmxcsr). The floating-point results are computed in software at round to nearest, MXCSR's six status flags with
+;; them (invalid, denormal operand, divide by zero, overflow, underflow as tininess after rounding and inexact, precision):
+;; Go's float64 arithmetic is IEEE 754's at round to nearest even, the inexactness by the operations' exact error terms
+;; (two-sum, fused multiply-add), the tiny results' by math/big. A rounding mode other than nearest, DAZ or FTZ in MXCSR, an
+;; unmasked exception, and the approximations (rcpps, rsqrtps: each vendor's own tables) raise SIGILL as :unimplemented (AX8).
+;; The MMX forms (an MM register) are unimplemented with the x87 (AX6).
+
+(go/const
+  ^{:line 20} [^{:val 1} mxIE (<< 1 0)]
+  ^{:line 21} [^{:val 2} mxDE (<< 1 1)]
+  ^{:line 22} [^{:val 4} mxZE (<< 1 2)]
+  ^{:line 23} [^{:val 8} mxOE (<< 1 3)]
+  ^{:line 24} [^{:val 16} mxUE (<< 1 4)]
+  ^{:line 25} [^{:val 32} mxPE (<< 1 5)]
+  ^{:line 26} [^{:val 64} mxDAZ (<< 1 6)]
+  ^{:line 27} [^{:val 24576} mxRC (<< 3 13)]
+  ^{:line 28} [^{:val 32768} mxFTZ (<< 1 15)]
+
+  ^{:line 30} [^{:val 65535 :doc "MXCSRMask is the model's MXCSR_MASK: the sixteen low bits (DAZ supported, no misaligned-SSE mode)\n"} MXCSRMask 0xffff])
+
+
+(go/var sseFamilies (lit (map string (struct
+        ^{:line 34 :tag uint8} fam
+        ^{:line 35 :tag execFn} fn))))
+
+
+^{:go/end 45} (go/func defX [^uint8 fam ^execFn fn & ^{:tag (slice string)} mnems]
+  (range [_ m mnems]
+    (aset sseFamilies m (lit (struct
+          ^{:line 41 :tag uint8} fam
+          ^{:line 42 :tag execFn} fn)
+        ^{:line 43} fam fn))))
+
+
+
+^{:go/end 75} (go/func init []
+  (defX famSSE xmov "movaps" "movups" "movapd" "movupd" "movdqa" "movdqu" "movntps" "movntpd" "movntdq")
+  (defX famSSE xmovs "movss" "movsd")
+  (defX famSSE xmovd "movd" "movq")
+  (defX famSSE xmovhl "movlps" "movlpd" "movhps" "movhpd" "movlhps" "movhlps")
+  (defX famSSE xmovmsk "movmskps" "movmskpd" "pmovmskb")
+  (defX famSSE xlogic "andps" "andpd" "andnps" "andnpd" "orps" "orpd" "xorps" "xorpd" "pand" "pandn" "por" "pxor")
+  ^{:go/breaks [12]} (defX famSSE xshuf "shufps" "shufpd" "pshufd" "pshuflw" "pshufhw" "unpcklps" "unpckhps" "unpcklpd" "unpckhpd"
+    "punpcklbw" "punpcklwd" "punpckldq" "punpcklqdq" "punpckhbw" "punpckhwd" "punpckhdq" "punpckhqdq")
+  (defX famSSE xextr "pextrw" "pinsrw")
+  (defX famSSE maskmov "maskmovdqu")
+  ^{:go/breaks [14 26 37]} (defX famSSEInt xint "paddb" "paddw" "paddd" "paddq" "psubb" "psubw" "psubd" "psubq" "paddsb" "paddsw" "paddusb"
+    "paddusw" "psubsb" "psubsw" "psubusb" "psubusw" "pmullw" "pmulhw" "pmulhuw" "pmuludq" "pmaddwd" "psadbw" "pavgb"
+    "pavgw" "pminub" "pmaxub" "pminsw" "pmaxsw" "pcmpeqb" "pcmpeqw" "pcmpeqd" "pcmpgtb" "pcmpgtw" "pcmpgtd"
+    "packsswb" "packssdw" "packuswb")
+  (defX famSSEInt xshift "psllw" "pslld" "psllq" "psrlw" "psrld" "psrlq" "psraw" "psrad" "pslldq" "psrldq")
+  ^{:go/breaks [15 28]} (defX famSSEFP xarith "addps" "addss" "addpd" "addsd" "subps" "subss" "subpd" "subsd" "mulps" "mulss" "mulpd" "mulsd"
+    "divps" "divss" "divpd" "divsd" "sqrtps" "sqrtss" "sqrtpd" "sqrtsd" "minps" "minss" "minpd" "minsd" "maxps"
+    "maxss" "maxpd" "maxsd")
+  (defX famSSEFP xcmp "cmpps" "cmpss" "cmppd" "cmpsd")
+  (defX famSSEFP xcomi "comiss" "ucomiss" "comisd" "ucomisd")
+  ^{:go/breaks [11]} (defX famSSECvt xcvt "cvtsi2ss" "cvtsi2sd" "cvtss2si" "cvtsd2si" "cvttss2si" "cvttsd2si" "cvtss2sd" "cvtsd2ss"
+    "cvtps2pd" "cvtpd2ps" "cvtdq2ps" "cvtps2dq" "cvttps2dq" "cvtdq2pd" "cvtpd2dq" "cvttpd2dq")
+  ;; without an XMM operand
+  (def famSSE mxcsrOp "ldmxcsr" "stmxcsr")
+  (def famSSE movnti "movnti")
+  (def famSSE nop "prefetcht0" "prefetcht1" "prefetcht2" "prefetchnta" "prefetchw")
+  (def famSSE clflush "clflush"))
+
+
+(go/type ^:alias vec (array 2 uint64))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; operands
+
+
+
+(go/var ^{:doc "unaligned are the instructions whose 16-byte memory operand may be misaligned; every other legacy SSE instruction's\nraises #GP (SIGSEGV, si_code SI_KERNEL, address 0) on one.\n"} unaligned (lit (map string bool) ["movups" true] ["movupd" true] ["movdqu" true]))
+
+^{:go/end 88} (go/method misaligned ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint64 a]
+  (.raise c SIGSEGV 0 (fmt/Sprintf "%s: a misaligned 16-byte operand at %#x (#GP)" (.-Name in) a)))
+
+
+
+
+^{:go/end 127} (go/method xload "xload reads operand o as a vector: an XMM register whole, memory of the operand's size zero-extended (16 bytes aligned\nunless the instruction is an unaligned one), a general register of its size.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^{:tag (* Opnd)} o] :results [vec bool]
+  (switch (.-K o)
+    (case [OXMM]
+      (return (aget (.-X c) (.-Reg o)) true))
+    (case [OReg]
+      (return (lit vec (.reg c (.-Reg o) (.-Size o)) 0) true))
+    (case [OMem]
+      (let [a (.ea c in o)]
+        (switch (.-Size o)
+          (case [16]
+            (when (and (!= (bit-and a 15) 0) (not (aget unaligned (.-Mnem in))))
+              (.misaligned c in a)
+              (return (lit vec) false))
+
+            (let [(values lo ok) (.Read (.-AS c) a 8)]
+              (when (not ok)
+                (.fault c (.-FaultAddr (.-AS c)))
+                (return (lit vec) false))
+
+              (let [(values hi ^:assign ok) (.Read (.-AS c) (+ a 8) 8)]
+                (when (not ok)
+                  (.fault c (.-FaultAddr (.-AS c)))
+                  (return (lit vec) false))
+
+                (return (lit vec lo hi) true))))
+          (case [1 2 4 8]
+            (let [(values v ok) (.Read (.-AS c) a (conv int (.-Size o)))]
+              (when (not ok)
+                (.fault c (.-FaultAddr (.-AS c)))
+                (return (lit vec) false))
+
+              (return (lit vec v 0) true)))))))
+
+
+  (panic (fmt/Sprintf "x86i: xload of operand kind %d size %d (%s)" (.-K o) (.-Size o) (.-Name in))))
+
+
+
+
+^{:go/end 159} (go/method xstore "xstore writes operand o from v: an XMM register whole, memory the operand's size (16 bytes aligned unless unaligned), a\ngeneral register of its size.\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^{:tag (* Opnd)} o ^vec v]
+  (switch (.-K o)
+    (case [OXMM]
+      (aset (.-X c) (.-Reg o) v)
+      (return true))
+    (case [OReg]
+      (.setReg c (.-Reg o) (.-Size o) (aget v 0))
+      (return true))
+    (case [OMem]
+      (let [a (.ea c in o)
+          ^{:line 141} n (conv int (.-Size o))]
+        (when (and (== n 16) (!= (bit-and a 15) 0) (not (aget unaligned (.-Mnem in))))
+          (.misaligned c in a)
+          (return false))
+
+        (when (not (.Probe (.-AS c) a n))
+          (.fault c (.-FaultAddr (.-AS c)))
+          (return false))
+
+        (if (== n 16) (do
+            (.Write (.-AS c) a 8 (aget v 0))
+            (.Write (.-AS c) (+ a 8) 8 (aget v 1)))
+
+          (.Write (.-AS c) a n (aget v 0)))
+
+        (return true))))
+
+  (panic (fmt/Sprintf "x86i: xstore to operand kind %d (%s)" (.-K o) (.-Name in))))
+
+
+
+(go/type lanes "lanes: the vector as bytes, a lane of w bytes read and written little-endian\n" (array 16 byte))
+
+^{:go/end 170} (go/func toLanes [^vec v] :results [^lanes b]
+  (for [i 0] (< i 8) (inc! i)
+    (aset b i (conv byte (>> (aget v 0) (* 8 i))))
+    (aset b (+ 8 i) (conv byte (>> (aget v 1) (* 8 i)))))
+
+  (return))
+
+
+^{:go/end 178} (go/method vec [^{:tag (* lanes)} b] :results [^vec v]
+  (for [i 0] (< i 8) (inc! i)
+    (set! (aget v 0) bit-or (<< (conv uint64 (aget b i)) (* 8 i)))
+    (set! (aget v 1) bit-or (<< (conv uint64 (aget b (+ 8 i))) (* 8 i))))
+
+  (return))
+
+
+^{:go/end 186} (go/method get ^uint64 [^{:tag (* lanes)} b ^int w ^int i]
+  (let [^uint64 v (zero uint64)]
+    (for [k (- w 1)] (>= k 0) (dec! k)
+      (set! v (bit-or (<< v 8) (conv uint64 (aget b (+ (* w i) k))))))
+
+    ^{:line 185} v))
+
+
+^{:go/end 192} (go/method set [^{:tag (* lanes)} b ^int w ^int i ^uint64 v]
+  (for [k 0] (< k w) (inc! k)
+    (aset b (+ (* w i) k) (conv byte (>> v (* 8 k))))))
+
+
+
+^{:go/end 194} (go/func get32 ^uint64 [^vec v ^int i] (bit-and (>> (aget v (>> i 1)) (* 32 (conv uint (bit-and i 1)))) 0xffffffff))
+
+^{:go/end 199} (go/func set32 [^{:tag (* vec)} v ^int i ^uint64 x]
+  (let [sh (* 32 (conv uint (bit-and i 1)))]
+    (aset v (>> i 1) (bit-or (bit-and-not (aget v (>> i 1)) ^uint64 (<< 0xffffffff sh)) (<< (bit-and x 0xffffffff) sh)))))
+
+
+
+^{:go/breaks [6] :go/end 209} (go/method mxFlags "sseDone ends an SSE instruction: the destination written by the caller, MXCSR's flags or'ed in.\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint32 fl]
+  (when [un (bit-and fl (bit-not (>> (.-MXCSR c) 7)) 0x3f)] (!= un 0)
+    (.raise c SIGILL (.-RIP c) (fmt/Sprintf ":unimplemented %s: an unmasked SIMD floating-point exception (%#x; AX8)" (.-Name in) un))
+    (return false))
+
+  (set! (.-MXCSR c) bit-or fl)
+  true)
+
+
+
+^{:go/breaks [[5 217]] :go/end 218} (go/method fpReady "fpReady: a floating-point instruction needs MXCSR at round to nearest without DAZ and FTZ (other modes: AX8).\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (!= (bit-and (.-MXCSR c) (bit-or mxDAZ mxRC mxFTZ)) 0)
+    (.raise c SIGILL (.-RIP c) (fmt/Sprintf ":unimplemented %s with MXCSR %#x (a rounding mode, DAZ or FTZ: AX8)" (.-Name in) (.-MXCSR c)))
+    (return false))
+
+  true)
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; moves
+
+
+^{:go/end 230} (go/func xmov "movaps movups movapd movupd movdqa movdqu, movntps movntpd movntdq: 16 bytes.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values v ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+    (when (or (not ok) (not (.xstore c in (addr (aget (.-Ops in) 0)) v)))
+      (return stopSignal))
+
+    (.done c)))
+
+
+
+^{:go/end 260} (go/func xmovs "movss, movsd (SSE2's): between registers the low lane replaced; from memory zero-extended; to memory the low lane.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (addr (aget (.-Ops in) 0)) (addr (aget (.-Ops in) 1)))
+      ^{:line 235} n 4]
+    (when (== (.-Mnem in) "movsd")
+      (set! n 8))
+
+    (switch
+      (case [(and (== (.-K d) OXMM) (== (.-K s) OXMM))]
+        (let [v (aget (.-X c) (.-Reg d))]
+          (if (== n 4)
+            (set32 (addr v) 0 (aget (aget (.-X c) (.-Reg s)) 0))
+
+            (aset v 0 (aget (aget (.-X c) (.-Reg s)) 0)))
+
+          (aset (.-X c) (.-Reg d) v)))
+      (case [(== (.-K d) OXMM)]
+        (let [(values v ok) (.xload c in s)]
+          (when (not ok)
+            (return stopSignal))
+
+          (aset (.-X c) (.-Reg d) v)))
+      (default
+        (when (not (.xstore c in d (lit vec (bit-and (aget (aget (.-X c) (.-Reg s)) 0) (mask (conv uint8 n))) 0)))
+          (return stopSignal))))
+
+
+    (.done c)))
+
+
+
+
+^{:go/end 281} (go/func xmovd "movd, movq: a general register or memory into an XMM register zero-extended, the low lane out; movq between XMM registers\nthe low quadword with the high one cleared.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (addr (aget (.-Ops in) 0)) (addr (aget (.-Ops in) 1)))]
+    (switch
+      (case [(and (== (.-K d) OXMM) (== (.-K s) OXMM))]
+        (aset (.-X c) (.-Reg d) (lit vec (aget (aget (.-X c) (.-Reg s)) 0) 0)))
+      (case [(== (.-K d) OXMM)]
+        (let [(values v ok) (.xload c in s)]
+          (when (not ok)
+            (return stopSignal))
+
+          (aset (.-X c) (.-Reg d) (lit vec (aget v 0) 0))))
+      (default
+        (when (not (.xstore c in d (lit vec (bit-and (aget (aget (.-X c) (.-Reg s)) 0) (mask (.-Size d))) 0)))
+          (return stopSignal))))
+
+
+    (.done c)))
+
+
+
+
+^{:go/end 309} (go/func xmovhl "movlps movlpd movhps movhpd (a quadword of memory into the low or high half, or out of it), movlhps (the source's low half\ninto the high), movhlps (the source's high half into the low).\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (addr (aget (.-Ops in) 0)) (addr (aget (.-Ops in) 1)))
+      ^{:line 287} hi (or (== (.-Mnem in) "movhps") (== (.-Mnem in) "movhpd"))]
+    (switch (.-Mnem in)
+      (case ["movlhps"]
+        (aset (aget (.-X c) (.-Reg d)) 1 (aget (aget (.-X c) (.-Reg s)) 0)))
+      (case ["movhlps"]
+        (aset (aget (.-X c) (.-Reg d)) 0 (aget (aget (.-X c) (.-Reg s)) 1)))
+      (default
+        (let [k 0]
+          (when hi
+            (set! k 1))
+
+          (cond (== (.-K d) OXMM)
+            (let [(values v ok) (.xload c in s)]
+              (when (not ok)
+                (return stopSignal))
+
+              (aset (aget (.-X c) (.-Reg d)) k (aget v 0)))
+            (not (.xstore c in d (lit vec (aget (aget (.-X c) (.-Reg s)) k) 0)))
+            (return stopSignal)))))
+
+
+    (.done c)))
+
+
+
+^{:go/end 321} (go/func xmovmsk "movmskps, movmskpd, pmovmskb: the lanes' sign bits into a general register, zero-extended.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [b (toLanes (aget (.-X c) (.-Reg (aget (.-Ops in) 1))))
+      ^{:line 314} w (aget (lit (map string int) ["movmskps" 4] ["movmskpd" 8] ["pmovmskb" 1]) (.-Mnem in))
+      ^{:line 315 :tag uint64} r (zero uint64)]
+    (for [i 0] (< i (/ 16 w)) (inc! i)
+      (set! r bit-or (<< (bit-and (>> (.get b w i) (- (* 8 (conv uint w)) 1)) 1) i)))
+
+    (.setReg c (.-Reg (aget (.-Ops in) 0)) 8 r)
+    (.done c)))
+
+
+
+^{:go/end 346} (go/func xlogic "the logic: and andn or xor, bitwise over the 128 bits (andn: the destination complemented first).\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (addr (aget (.-Ops in) 0))
+      (values b ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [a (aget (.-X c) (.-Reg d))
+        ^{:line 331 :tag vec} r (zero vec)]
+      (for [i 0] (< i 2) (inc! i)
+        (switch (.-Mnem in)
+          (case ["andps" "andpd" "pand"]
+            (aset r i (bit-and (aget a i) (aget b i))))
+          (case ["andnps" "andnpd" "pandn"]
+            (aset r i (bit-and (bit-not (aget a i)) (aget b i))))
+          (case ["orps" "orpd" "por"]
+            (aset r i (bit-or (aget a i) (aget b i))))
+          (default
+            (aset r i (bit-xor (aget a i) (aget b i))))))
+
+
+      (aset (.-X c) (.-Reg d) r)
+      (.done c))))
+
+
+^{:go/end 348} (go/func imm8 ^uint64 [^{:tag (* Inst)} in] (bit-and (conv uint64 (.-Imm (aget (.-Ops in) (- (len (.-Ops in)) 1)))) 0xff))
+
+
+^{:go/end 416} (go/func xshuf "shuffles and unpacks.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (addr (aget (.-Ops in) 0))
+      (values s ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [a (aget (.-X c) (.-Reg d))
+        (values A B) (values (toLanes a) (toLanes s))
+        ^{:line 359 :tag lanes} R (zero lanes)
+        ^{:line 360} unpack ^{:go/end 370} (fn [^int w ^bool high]
+          (let [n (/ 8 w)
+              ^{:line 362} base 0]
+            (when high
+              (set! base n))
+
+            (for [i 0] (< i n) (inc! i)
+              (.set R w (* 2 i) (.get A w (+ base i)))
+              (.set R w (+ (* 2 i) 1) (.get B w (+ base i))))))]
+
+
+      (switch (.-Mnem in)
+        (case ["shufps"]
+          (let [m (imm8 in)]
+            (.set R 4 0 (.get A 4 (conv int (bit-and m 3))))
+            (.set R 4 1 (.get A 4 (conv int (bit-and (>> m 2) 3))))
+            (.set R 4 2 (.get B 4 (conv int (bit-and (>> m 4) 3))))
+            (.set R 4 3 (.get B 4 (conv int (bit-and (>> m 6) 3))))))
+        (case ["shufpd"]
+          (let [m (imm8 in)]
+            (.set R 8 0 (.get A 8 (conv int (bit-and m 1))))
+            (.set R 8 1 (.get B 8 (conv int (bit-and (>> m 1) 1))))))
+        (case ["pshufd"]
+          (let [m (imm8 in)]
+            (for [i 0] (< i 4) (inc! i)
+              (.set R 4 i (.get B 4 (conv int (bit-and (>> m (* 2 (conv uint i))) 3)))))))
+
+        (case ["pshuflw" "pshufhw"]
+          (let [m (imm8 in)]
+            (set! R B)
+            (let [base 0]
+              (when (== (.-Mnem in) "pshufhw")
+                (set! base 4))
+
+              (for [i 0] (< i 4) (inc! i)
+                (.set R 2 (+ base i) (.get B 2 (+ base (conv int (bit-and (>> m (* 2 (conv uint i))) 3)))))))))
+
+        (case ["unpcklps" "punpckldq"]
+          (unpack 4 false))
+        (case ["unpckhps" "punpckhdq"]
+          (unpack 4 true))
+        (case ["unpcklpd" "punpcklqdq"]
+          (unpack 8 false))
+        (case ["unpckhpd" "punpckhqdq"]
+          (unpack 8 true))
+        (case ["punpcklbw"]
+          (unpack 1 false))
+        (case ["punpckhbw"]
+          (unpack 1 true))
+        (case ["punpcklwd"]
+          (unpack 2 false))
+        (case ["punpckhwd"]
+          (unpack 2 true)))
+
+      (aset (.-X c) (.-Reg d) (.vec R))
+      (.done c))))
+
+
+
+
+^{:go/end 445} (go/func xextr "pextrw: a word of the XMM register (the immediate's low three bits) into a general register, zero-extended; pinsrw: the\nsource's low word into that word of the XMM register.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (addr (aget (.-Ops in) 0)) (addr (aget (.-Ops in) 1)))
+      ^{:line 422} k (conv int (bit-and (imm8 in) 7))]
+    (when (== (.-Mnem in) "pextrw")
+      (when (!= (.-K d) OReg) ; SSE4.1's memory form
+        (return (unimplemented c in)))
+
+      (let [b (toLanes (aget (.-X c) (.-Reg s)))]
+        (.setReg c (.-Reg d) 8 (.get b 2 k))
+        (return (.done c))))
+
+    (let [^uint64 v (zero uint64)]
+      (if (== (.-K s) OMem)
+        (let [(values x ok) (.Read (.-AS c) (.ea c in s) 2)]
+          (when (not ok)
+            (return (.fault c (.-FaultAddr (.-AS c)))))
+
+          (set! v x))
+
+        (set! v (.reg c (.-Reg s) 4)))
+
+      (let [b (toLanes (aget (.-X c) (.-Reg d)))]
+        (.set b 2 k (bit-and v 0xffff))
+        (aset (.-X c) (.-Reg d) (.vec b))
+        (.done c)))))
+
+
+
+^{:go/end 465} (go/func maskmov "maskmovdqu: the source's bytes whose mask byte has its top bit set stored at [RDI] (non-temporal; a fault before any byte).\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values src m) (values (toLanes (aget (.-X c) (.-Reg (aget (.-Ops in) 0)))) (toLanes (aget (.-X c) (.-Reg (aget (.-Ops in) 1)))))
+      ^{:line 450} a (aget (.-R c) 7)]
+    (when (.-AdSize32 in)
+      (set! a bit-and 0xffffffff))
+
+    (for [i 0] (< i 16) (inc! i)
+      (when (and (!= (bit-and (aget m i) 0x80) 0) (not (.Probe (.-AS c) (+ a (conv uint64 i)) 1)))
+        (return (.fault c (.-FaultAddr (.-AS c))))))
+
+
+    (for [i 0] (< i 16) (inc! i)
+      (when (!= (bit-and (aget m i) 0x80) 0)
+        (.Write (.-AS c) (+ a (conv uint64 i)) 1 (conv uint64 (aget src i)))))
+
+
+    (.done c)))
+
+
+
+^{:go/end 486} (go/func mxcsrOp "ldmxcsr (a reserved bit set: #GP), stmxcsr.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [o (addr (aget (.-Ops in) 0))
+      ^{:line 470} a (.ea c in o)]
+    (when (== (.-Mnem in) "stmxcsr")
+      (when (not (.Write (.-AS c) a 4 (conv uint64 (.-MXCSR c))))
+        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+      (return (.done c)))
+
+    (let [(values v ok) (.Read (.-AS c) a 4)]
+      (when (not ok)
+        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+      (when (!= (bit-and-not v MXCSRMask) 0)
+        (return (.raise c SIGSEGV 0 (fmt/Sprintf "ldmxcsr %#x: a reserved bit (#GP)" v))))
+
+      (set! (.-MXCSR c) (conv uint32 v))
+      (.done c))))
+
+
+
+^{:go/end 495} (go/func movnti "movnti: a general register stored (non-temporal: a plain store here).\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))]
+    (when (not (.store c in (addr d) (.-Size d) (.reg c (.-Reg s) (.-Size d))))
+      (return stopSignal))
+
+    (.done c)))
+
+
+
+^{:go/end 504} (go/func clflush "clflush: the line's address must be mapped (a read's fault).\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [o (aget (.-Ops in) 0)]
+    (when [(values _ ok) (.Read (.-AS c) (.ea c in (addr o)) 1)] (not ok)
+      (return (.fault c (.-FaultAddr (.-AS c)))))
+
+    (.done c)))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; packed integers
+
+^{:go/end 517} (go/func satS ^uint64 [^int64 v ^int w]
+  (let [(values lo hi) (values (- (<< (conv int64 1) (- (* 8 w) 1))) (- (<< (conv int64 1) (- (* 8 w) 1)) 1))]
+    (cond (< v lo)
+      (set! v lo)
+      (> v hi)
+      (set! v hi))
+
+    (bit-and (conv uint64 v) (mask (conv uint8 w)))))
+
+
+^{:go/end 527} (go/func satU ^uint64 [^int64 v ^int w]
+  (let [hi (- (<< (conv int64 1) (* 8 w)) 1)]
+    (cond (< v 0)
+      (set! v 0)
+      (> v hi)
+      (set! v hi))
+
+    (conv uint64 v)))
+
+
+^{:go/end 529} (go/func sl ^int64 [^uint64 v ^int w] (conv int64 (sx v (conv uint8 w))))
+
+^{:go/end 638} (go/func xint ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (addr (aget (.-Ops in) 0))
+      (values s ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [(values A B) (values (toLanes (aget (.-X c) (.-Reg d))) (toLanes s))
+        ^{:line 538 :tag lanes} R (zero lanes)
+        ^{:line 539} each ^{:go/end 543} (fn [^int w ^{:tag (func [^uint64 a ^uint64 b] [uint64])} f]
+          (for [i 0] (< i (/ 16 w)) (inc! i)
+            (.set R w i (bit-and (f (.get A w i) (.get B w i)) (mask (conv uint8 w))))))
+
+
+        ^{:line 544} m (.-Mnem in)]
+      (switch m
+        (case ["paddb" "paddw" "paddd" "paddq"]
+          (each (aget (lit (map string int) ["paddb" 1] ["paddw" 2] ["paddd" 4] ["paddq" 8]) m) ^{:go/end 547} (fn ^uint64 [^uint64 a ^uint64 b] (+ a b))))
+        (case ["psubb" "psubw" "psubd" "psubq"]
+          (each (aget (lit (map string int) ["psubb" 1] ["psubw" 2] ["psubd" 4] ["psubq" 8]) m) ^{:go/end 549} (fn ^uint64 [^uint64 a ^uint64 b] (- a b))))
+        (case ["paddsb" "paddsw"]
+          (let [w (aget (lit (map string int) ["paddsb" 1] ["paddsw" 2]) m)]
+            (each w ^{:go/end 552} (fn ^uint64 [^uint64 a ^uint64 b] (satS (+ (sl a w) (sl b w)) w)))))
+        (case ["psubsb" "psubsw"]
+          (let [w (aget (lit (map string int) ["psubsb" 1] ["psubsw" 2]) m)]
+            (each w ^{:go/end 555} (fn ^uint64 [^uint64 a ^uint64 b] (satS (- (sl a w) (sl b w)) w)))))
+        (case ["paddusb" "paddusw"]
+          (let [w (aget (lit (map string int) ["paddusb" 1] ["paddusw" 2]) m)]
+            (each w ^{:go/end 558} (fn ^uint64 [^uint64 a ^uint64 b] (satU (+ (conv int64 a) (conv int64 b)) w)))))
+        (case ["psubusb" "psubusw"]
+          (let [w (aget (lit (map string int) ["psubusb" 1] ["psubusw" 2]) m)]
+            (each w ^{:go/end 561} (fn ^uint64 [^uint64 a ^uint64 b] (satU (- (conv int64 a) (conv int64 b)) w)))))
+        (case ["pmullw"]
+          (each 2 ^{:go/end 563} (fn ^uint64 [^uint64 a ^uint64 b] (* a b))))
+        (case ["pmulhw"]
+          (each 2 ^{:go/end 565} (fn ^uint64 [^uint64 a ^uint64 b] (>> (conv uint64 (* (sl a 2) (sl b 2))) 16))))
+        (case ["pmulhuw"]
+          (each 2 ^{:go/end 567} (fn ^uint64 [^uint64 a ^uint64 b] (>> (* a b) 16))))
+        (case ["pmuludq"]
+          (for [i 0] (< i 2) (inc! i)
+            (.set R 8 i (* (.get A 4 (* 2 i)) (.get B 4 (* 2 i))))))
+
+        (case ["pmaddwd"]
+          (for [i 0] (< i 4) (inc! i)
+            (let [v (+ (* (sl (.get A 2 (* 2 i)) 2) (sl (.get B 2 (* 2 i)) 2)) (* (sl (.get A 2 (+ (* 2 i) 1)) 2) (sl (.get B 2 (+ (* 2 i) 1)) 2)))]
+              (.set R 4 i (bit-and (conv uint64 v) 0xffffffff)))))
+
+        (case ["psadbw"]
+          (for [i 0] (< i 2) (inc! i)
+            (let [^uint64 sum (zero uint64)]
+              (for [k 0] (< k 8) (inc! k)
+                (let [(values x y) (values (conv int64 (aget A (+ (* 8 i) k))) (conv int64 (aget B (+ (* 8 i) k))))]
+                  (if (> x y)
+                    (set! sum + (conv uint64 (- x y)))
+
+                    (set! sum + (conv uint64 (- y x))))))
+
+
+              (.set R 8 i sum))))
+
+        (case ["pavgb" "pavgw"]
+          (let [w (aget (lit (map string int) ["pavgb" 1] ["pavgw" 2]) m)]
+            (each w ^{:go/end 592} (fn ^uint64 [^uint64 a ^uint64 b] (>> (+ a b 1) 1)))))
+        (case ["pminub"]
+          (each 1 ^{:go/end 594} (fn ^uint64 [^uint64 a ^uint64 b] (min a b))))
+        (case ["pmaxub"]
+          (each 1 ^{:go/end 596} (fn ^uint64 [^uint64 a ^uint64 b] (max a b))))
+        (case ["pminsw"]
+          (each 2 ^{:go/end 598} (fn ^uint64 [^uint64 a ^uint64 b] (conv uint64 (min (sl a 2) (sl b 2))))))
+        (case ["pmaxsw"]
+          (each 2 ^{:go/end 600} (fn ^uint64 [^uint64 a ^uint64 b] (conv uint64 (max (sl a 2) (sl b 2))))))
+        (case ["pcmpeqb" "pcmpeqw" "pcmpeqd"]
+          (each (aget (lit (map string int) ["pcmpeqb" 1] ["pcmpeqw" 2] ["pcmpeqd" 4]) m) ^{:go/breaks [[3 606]] :go/end 607} (fn ^uint64 [^uint64 a ^uint64 b]
+              (when (== a b)
+                (return (bit-not (conv uint64 0))))
+
+              0)))
+
+        (case ["pcmpgtb" "pcmpgtw" "pcmpgtd"]
+          (let [w (aget (lit (map string int) ["pcmpgtb" 1] ["pcmpgtw" 2] ["pcmpgtd" 4]) m)]
+            (each w ^{:go/breaks [[3 614]] :go/end 615} (fn ^uint64 [^uint64 a ^uint64 b]
+                (when (> (sl a w) (sl b w))
+                  (return (bit-not (conv uint64 0))))
+
+                0))))
+
+        (case ["packsswb" "packssdw" "packuswb"]
+          (let [w 2]
+            (when (== m "packssdw")
+              (set! w 4))
+
+            (let [n (/ 16 w)]
+              (for [i 0] (< i (* 2 n)) (inc! i)
+                (let [^int64 x (zero int64)]
+                  (if (< i n)
+                    (set! x (sl (.get A w i) w))
+
+                    (set! x (sl (.get B w (- i n)) w)))
+
+                  (if (== m "packuswb")
+                    (.set R 1 i (satU x 1))
+
+                    (.set R (/ w 2) i (satS x (/ w 2))))))))))
+
+
+
+      (aset (.-X c) (.-Reg d) (.vec R))
+      (.done c))))
+
+
+
+
+^{:go/end 690} (go/func xshift "the shifts: by an XMM register's or memory's low quadword or by an immediate; a count beyond the lane's bits clears it\n(an arithmetic shift fills it with the sign); pslldq and psrldq shift the whole register by bytes.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (addr (aget (.-Ops in) 0))
+      ^{:line 644 :tag uint64} n (zero uint64)]
+    (if (== (.-K (aget (.-Ops in) 1)) OImm)
+      (set! n (imm8 in))
+
+      (let [(values s ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+        (when (not ok)
+          (return stopSignal))
+
+        (set! n (aget s 0))))
+
+    (let [A (toLanes (aget (.-X c) (.-Reg d)))
+        ^{:line 655 :tag lanes} R (zero lanes)
+        ^{:line 656} m (.-Mnem in)]
+      (switch m
+        (case ["pslldq" "psrldq"]
+          (let [k (conv int (min n 16))]
+            (for [i 0] (< i 16) (inc! i)
+              (cond (and (== m "pslldq") (>= i k))
+                (aset R i (aget A (- i k)))
+                (and (== m "psrldq") (< (+ i k) 16))
+                (aset R i (aget A (+ i k)))))))
+
+
+        (default
+          (let [w (aget (lit (map byte int) [\w 2] [\d 4] [\q 8]) (aget m (- (len m) 1)))
+              ^{:line 669} bitsN (conv uint64 (* 8 w))]
+            (for [i 0] (< i (/ 16 w)) (inc! i)
+              (let [a (.get A w i)
+                  ^{:line 672 :tag uint64} r (zero uint64)]
+                (switch (subslice m _ 4)
+                  (case ["psll"]
+                    (when (< n bitsN)
+                      (set! r (<< a n))))
+
+                  (case ["psrl"]
+                    (when (< n bitsN)
+                      (set! r (>> a n))))
+
+                  (default
+                    (set! r (conv uint64 (>> (sl a w) (min n (- bitsN 1)))))))
+
+                (.set R w i (bit-and r (mask (conv uint8 w)))))))))
+
+
+      (aset (.-X c) (.-Reg d) (.vec R))
+      (.done c))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; floating point in software
+
+
+^{:go/end 701} (go/func isNaNb "a lane's format: single (dbl false) or double\n" ^bool [^uint64 x ^bool dbl]
+  (when dbl
+    (return (and (== (bit-and x 0x7ff0000000000000) 0x7ff0000000000000) (!= (bit-and x 0xfffffffffffff) 0))))
+
+  (and (== (bit-and x 0x7f800000) 0x7f800000) (!= (bit-and x 0x7fffff) 0)))
+
+
+^{:go/end 708} (go/func isSNaNb ^bool [^uint64 x ^bool dbl]
+  (when dbl
+    (return (and (isNaNb x dbl) (== (bit-and x (<< 1 51)) 0))))
+
+  (and (isNaNb x dbl) (== (bit-and x (<< 1 22)) 0)))
+
+
+^{:go/end 715} (go/func quietb ^uint64 [^uint64 x ^bool dbl]
+  (when dbl
+    (return (bit-or x (<< 1 51))))
+
+  (bit-or x (<< 1 22)))
+
+
+^{:go/end 722} (go/func isDenb ^bool [^uint64 x ^bool dbl]
+  (when dbl
+    (return (and (== (bit-and x 0x7ff0000000000000) 0) (!= (bit-and x 0xfffffffffffff) 0))))
+
+  (and (== (bit-and x 0x7f800000) 0) (!= (bit-and x 0x7fffff) 0)))
+
+
+
+^{:go/breaks [[5 729]] :go/end 730} (go/func defNaN "defNaN is the QNaN floating-point indefinite.\n" ^uint64 [^bool dbl]
+  (when dbl
+    (return 0xfff8000000000000))
+
+  0xffc00000)
+
+
+^{:go/end 737} (go/func toF ^float64 [^uint64 x ^bool dbl]
+  (when dbl
+    (return (math/Float64frombits x)))
+
+  (conv float64 (math/Float32frombits (conv uint32 x))))
+
+
+(go/const ^{:val 1/44942328371557897693232629769725618340449424473557664318357520289433168951375240783177119330601884005280028469967848339414697442203604155623211857659868531094441973356216371319075554900311523529863270738021251442209537670585615720368478277635206809290837627671146574559986811484619929076208839082406056034304} minNormal64 1/44942328371557897693232629769725618340449424473557664318357520289433168951375240783177119330601884005280028469967848339414697442203604155623211857659868531094441973356216371319075554900311523529863270738021251442209537670585615720368478277635206809290837627671146574559986811484619929076208839082406056034304)
+
+
+
+^{:go/end 749} (go/func tiny32 "tinyAfter: the value rounded to p bits with an unbounded exponent is below the format's smallest normal (x86's tininess\nafter rounding). x is the exact value (or, for single, a double that rounds to the same single).\n" ^bool [^float64 x]
+  (when (== x 0)
+    (return false))
+
+  (let [(values m e) (math/Frexp x)]
+    (< (math/Abs (math/Ldexp (conv float64 (conv float32 m)) e)) 1/85070591730234615865843651857942052864)))
+
+
+
+^{:go/breaks [[6 771]] :go/end 772} (go/func exact64 "exactness: whether x op y is exact in double, from the operation's error term (no underflow: the caller's big path).\n" ^bool [^byte op ^float64 x ^float64 y ^float64 r]
+  (when (or (math/IsInf r 0) (math/IsNaN r) (math/IsInf x 0) (math/IsInf y 0))
+    (return true))
+
+  (switch op
+    (case [\+ \-]
+      (when (== op \-)
+        (set! y (- y)))
+
+      (let [bb (- r x)
+          ^{:line 762} e (+ (- x (- r bb)) (- y bb))]
+        (return (== e 0))))
+    (case [\*]
+      (return (== (math/FMA x y (- r)) 0)))
+    (case [\/]
+      (return (== (math/FMA (- r) y x) 0)))
+    (case [\q]
+      (return (== (math/FMA (- r) r y) 0))))
+
+  true)
+
+
+
+
+^{:go/end 802} (go/func big64 "big64: the double result's tininess and inexactness from the exact value (math/big), for results near the normal range's\nbottom.\n" [^byte op ^float64 x ^float64 y ^float64 r] :results [^bool tiny ^bool inexact]
+  (let [X (.SetFloat64 (.SetPrec (new big/Float) 2400) x)
+      ^{:line 778} Y (.SetFloat64 (.SetPrec (new big/Float) 2400) y)
+      ^{:line 779} Z (.SetPrec (new big/Float) 2400)
+      ^{:line 780} exact true]
+    (switch op
+      (case [\+]
+        (.Add Z X Y))
+      (case [\-]
+        (.Sub Z X Y))
+      (case [\*]
+        (.Mul Z X Y))
+      (case [\/]
+        (.Quo (.SetPrec Z 300) X Y)
+        (set! exact (== (.Acc Z) big/Exact)))
+      (case [\q]
+        (let [R (.SetFloat64 (.SetPrec (new big/Float) 2400) r)]
+          (return false (!= (.Cmp (.Mul R R R) Y) 0)))))
+
+    (set! inexact (or (not exact) (!= (.Cmp Z (.SetFloat64 (new big/Float) r)) 0)))
+    (when (!= (.Sign Z) 0)
+      (let [t (.Set (.SetMode (.SetPrec (new big/Float) 53) big/ToNearestEven) Z)]
+        (.Abs t t)
+        (set! tiny (< (.Cmp t (big/NewFloat minNormal64)) 0))))
+
+    (return)))
+
+
+
+^{:go/end 805} (go/func nearBottom "nearBottom: a nonzero finite double small enough that an operation's error term on it can underflow (math/big then)\n" ^bool [^float64 x] (and (!= x 0) (< (math/Abs x) 1/8452712498170643941637436558664265704301557216577944354047371344426782440907597751590676094202515006314790319892114058862117560952042968596008623655407033230534186943984081346699704282822823056848387726531379014466368452684024987821414350380272583623832617294363807973376)))
+
+
+^{:go/end 892} (go/func fpArith "fpArith: a op b ('+' '-' '*' '/', 'q' the square root of b) in the format, at round to nearest: the result and the flags.\n" [^byte op ^uint64 a ^uint64 b ^bool dbl] :results [uint64 uint32]
+  (let [^uint32 fl (zero uint32)]
+    (when (or ^:go/paren (and (!= op \q) (isNaNb a dbl)) (isNaNb b dbl))
+      (when (or ^:go/paren (and (!= op \q) (isSNaNb a dbl)) (isSNaNb b dbl))
+        (set! fl bit-or mxIE))
+
+      (when (and (!= op \q) (isNaNb a dbl))
+        (return (quietb a dbl) fl))
+
+      (return (quietb b dbl) fl))
+
+    (when (or ^:go/paren (and (!= op \q) (isDenb a dbl)) (isDenb b dbl))
+      (set! fl bit-or mxDE))
+
+    (let [(values x y) (values (toF a dbl) (toF b dbl))
+        ^{:line 823} inv false]
+      (switch op
+        (case [\+]
+          (set! inv (and (math/IsInf x 0) (math/IsInf y 0) (!= (math/Signbit x) (math/Signbit y)))))
+        (case [\-]
+          (set! inv (and (math/IsInf x 0) (math/IsInf y 0) (== (math/Signbit x) (math/Signbit y)))))
+        (case [\*]
+          (set! inv (or ^:go/paren (and (== x 0) (math/IsInf y 0)) ^:go/paren (and (== y 0) (math/IsInf x 0)))))
+        (case [\/]
+          (set! inv (or ^:go/paren (and (== x 0) (== y 0)) ^:go/paren (and (math/IsInf x 0) (math/IsInf y 0))))
+          (when (and (not inv) (== y 0) (not (math/IsInf x 0))) ; divide by zero alone (no denormal operand's flag beside it, as invalid)
+            (set! fl (bit-or (bit-and-not fl mxDE) mxZE))))
+
+        (case [\q]
+          (set! inv (< y 0))))
+
+      (when inv ; an invalid operation reports invalid alone (the denormal operand's flag not beside it, as the CPU's priority)
+        (return (defNaN dbl) (bit-or (bit-and-not fl mxDE) mxIE)))
+
+      (let [^float64 r (zero float64)]
+        (switch op
+          (case [\+]
+            (set! r (+ x y)))
+          (case [\-]
+            (set! r (- x y)))
+          (case [\*]
+            (set! r (* x y)))
+          (case [\/]
+            (set! r (/ x y)))
+          (case [\q]
+            (set! r (math/Sqrt y))))
+
+        (let [finite (and (not (math/IsInf x 0)) (not (math/IsInf y 0)) (== (bit-and fl mxZE) 0))]
+          (when dbl
+            (switch
+              (case [(math/IsInf r 0)]
+                (when finite
+                  (set! fl bit-or (bit-or mxOE mxPE))))
+
+              (case [(or (<= (math/Abs r) minNormal64) (nearBottom x) (nearBottom y) (nearBottom r))]
+                (let [(values tiny inexact) (big64 op x y r)]
+                  (when inexact
+                    (set! fl bit-or mxPE)
+                    (when tiny
+                      (set! fl bit-or mxUE)))))
+
+
+              (default
+                (when (not (exact64 op x y r))
+                  (set! fl bit-or mxPE))))
+
+
+            (return (math/Float64bits r) fl))
+
+          (let [r32 (conv float32 r)]
+            (switch
+              (case [(math/IsInf (conv float64 r32) 0)]
+                (when finite
+                  (set! fl bit-or (bit-or mxOE mxPE))))
+
+              (default
+                (when (or (not (exact64 op x y r)) (!= (conv float64 r32) r))
+                  (set! fl bit-or mxPE)
+                  (when (tiny32 r)
+                    (set! fl bit-or mxUE)))))
+
+
+
+            (return (conv uint64 (math/Float32bits r32)) fl)))))))
+
+
+
+^{:go/end 908} (go/func fpMinMax "fpMinMax: min or max; a NaN in either operand (invalid) or two zeros give the second operand unchanged.\n" [^bool isMax ^uint64 a ^uint64 b ^bool dbl] :results [uint64 uint32]
+  (when (or (isNaNb a dbl) (isNaNb b dbl))
+    (return b mxIE))
+
+  (let [^uint32 fl (zero uint32)]
+    (when (or (isDenb a dbl) (isDenb b dbl))
+      (set! fl bit-or mxDE))
+
+    (let [(values x y) (values (toF a dbl) (toF b dbl))]
+      (when (or ^:go/paren (and isMax (> x y)) ^:go/paren (and (not isMax) (< x y)))
+        (return a fl))
+
+      (return b fl))))
+
+
+
+^{:go/end 943} (go/func fpCmp "fpCmp: the predicate (EQ LT LE UNORD NEQ NLT NLE ORD) on a and b; the signalling ones (LT LE NLT NLE) invalid on a QNaN too.\n" [^uint64 pred ^uint64 a ^uint64 b ^bool dbl] :results [bool uint32]
+  (let [un (or (isNaNb a dbl) (isNaNb b dbl))
+      ^{:line 913 :tag uint32} fl (zero uint32)]
+    (switch
+      (case [(or (isSNaNb a dbl) (isSNaNb b dbl))]
+        (set! fl bit-or mxIE))
+      (case [(and un ^:go/paren (or (== pred 1) (== pred 2) (== pred 5) (== pred 6)))]
+        (set! fl bit-or mxIE))
+      (case [(and (not un) ^:go/paren (or (isDenb a dbl) (isDenb b dbl)))]
+        (set! fl bit-or mxDE)))
+
+    (let [(values x y) (values (toF a dbl) (toF b dbl))
+        ^{:line 923 :tag bool} r (zero bool)]
+      (switch pred
+        (case [0]
+          (set! r (and (not un) (== x y))))
+        (case [1]
+          (set! r (and (not un) (< x y))))
+        (case [2]
+          (set! r (and (not un) (<= x y))))
+        (case [3]
+          (set! r un))
+        (case [4]
+          (set! r (or un (!= x y))))
+        (case [5]
+          (set! r (or un (not (< x y)))))
+        (case [6]
+          (set! r (or un (not (<= x y)))))
+        (default
+          (set! r (not un))))
+
+      (return r fl))))
+
+
+
+
+^{:go/end 966} (go/func fpToInt "fpToInt: the value as a signed integer of w bytes, rounded to nearest or truncated; a NaN or a value out of range is the\ninteger indefinite (the sign bit alone), invalid; inexact when rounded.\n" [^uint64 a ^bool dbl ^bool trunc ^uint8 w] :results [uint64 uint32]
+  (let [indef (signBit w)]
+    (when (isNaNb a dbl)
+      (return indef mxIE))
+
+    (let [x (toF a dbl)
+        ^{:line 953} r (math/RoundToEven x)]
+      (when trunc
+        (set! r (math/Trunc x)))
+
+      (let [lim (math/Ldexp 1 (- (* 8 (conv int w)) 1))]
+        (when (or (>= r lim) (< r (- lim)))
+          (return indef mxIE))
+
+        (let [^uint32 fl (zero uint32)]
+          (when (!= r x)
+            (set! fl mxPE))
+
+          (return (bit-and (conv uint64 (conv int64 r)) (mask w)) fl))))))
+
+
+
+^{:go/end 984} (go/func intToF "intToF: a signed integer of w bytes as single or double, rounded to nearest; inexact when rounded.\n" [^uint64 v ^uint8 w ^bool dbl] :results [uint64 uint32]
+  (let [i (conv int64 (sx v w))
+      ^{:line 971 :tag uint32} fl (zero uint32)]
+    (when dbl
+      (let [r (conv float64 i)]
+        (when (or (>= r 9223372036854775808.0M) (!= (conv int64 r) i))
+          (set! fl mxPE))
+
+        (return (math/Float64bits r) fl)))
+
+    (let [r (conv float32 i)]
+      (when (or (>= (conv float64 r) 9223372036854775808.0M) (!= (conv int64 r) i))
+        (set! fl mxPE))
+
+      (return (conv uint64 (math/Float32bits r)) fl))))
+
+
+
+^{:go/end 1000} (go/func fpWiden "fpWiden: single to double (exact; an SNaN quieted, invalid; a denormal operand flagged).\n" [^uint64 a] :results [uint64 uint32]
+  (when (isNaNb a false)
+    (let [^uint32 fl (zero uint32)]
+      (when (isSNaNb a false)
+        (set! fl mxIE))
+
+      (return (quietb (bit-or (<< (>> a 31) 63) 0x7ff0000000000000 (<< (bit-and a 0x7fffff) 29)) true) fl)))
+
+  (let [^uint32 fl (zero uint32)]
+    (when (isDenb a false)
+      (set! fl mxDE))
+
+    (return (math/Float64bits (conv float64 (math/Float32frombits (conv uint32 a)))) fl)))
+
+
+
+^{:go/end 1027} (go/func fpNarrow "fpNarrow: double to single at round to nearest (a NaN's payload's top bits kept, quieted; overflow, underflow, inexact).\n" [^uint64 a] :results [uint64 uint32]
+  (when (isNaNb a true)
+    (let [^uint32 fl (zero uint32)]
+      (when (isSNaNb a true)
+        (set! fl mxIE))
+
+      (return (quietb (bit-or (<< (>> a 63) 31) 0x7f800000 (bit-and (>> a 29) 0x7fffff)) false) fl)))
+
+  (let [^uint32 fl (zero uint32)]
+    (when (isDenb a true)
+      (set! fl mxDE))
+
+    (let [x (math/Float64frombits a)
+        ^{:line 1016} r (conv float32 x)]
+      (switch
+        (case [(and (math/IsInf (conv float64 r) 0) (not (math/IsInf x 0)))]
+          (set! fl bit-or (bit-or mxOE mxPE)))
+        (case [(!= (conv float64 r) x)]
+          (set! fl bit-or mxPE)
+          (when (tiny32 x)
+            (set! fl bit-or mxUE))))
+
+
+      (return (conv uint64 (math/Float32bits r)) fl))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the floating-point instructions
+
+
+^{:go/end 1035} (go/func fpShape "scalar or packed, single or double, by the mnemonic's suffix\n" [^string m] :results [^bool scalar ^bool dbl]
+  (return (== (aget m (- (len m) 2)) \s) (== (aget m (- (len m) 1)) \d)))
+
+
+^{:go/end 1089} (go/func xarith ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (not (.fpReady c in))
+    (return stopSignal))
+
+  (let [d (addr (aget (.-Ops in) 0))
+      (values s ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [m (.-Mnem in)
+        (values scalar dbl) (fpShape m)
+        ^{:line 1048} a (aget (.-X c) (.-Reg d))
+        ^{:line 1049} r a]
+      (when (and (== (subslice m _ 4) "sqrt") (not scalar))
+        (set! r (lit vec)))
+
+      (let [^uint32 fl (zero uint32)
+          (values n w) (values 4 4)]
+        (when dbl
+          (set! (values n w) (values 2 8)))
+
+        (when scalar
+          (set! n 1))
+
+        (let [op (aget (lit (map string byte) ["add" \+] ["sub" \-] ["mul" \*] ["div" \/] ["sqr" \q]) (subslice m _ 3))]
+          (for [i 0] (< i n) (inc! i)
+            (let [(values ^uint64 x ^uint64 y) (zero uint64)]
+              (if dbl
+                (set! (values x y) (values (aget a i) (aget s i)))
+
+                (set! (values x y) (values (get32 a i) (get32 s i))))
+
+              (let [^uint64 z (zero uint64)
+                  ^{:line 1070 :tag uint32} f (zero uint32)]
+                (switch (subslice m _ 3)
+                  (case ["min" "max"]
+                    (set! (values z f) (fpMinMax (== (subslice m _ 3) "max") x y dbl)))
+                  (default
+                    (set! (values z f) (fpArith op x y dbl))))
+
+                (set! fl bit-or f)
+                (if (== w 8)
+                  (aset r i z)
+
+                  (set32 (addr r) i z)))))
+
+
+          (when (not (.mxFlags c in fl))
+            (return stopSignal))
+
+          (aset (.-X c) (.-Reg d) r)
+          (.done c))))))
+
+
+
+^{:go/end 1136} (go/func xcmp "cmpps cmpss cmppd cmpsd: each lane all ones where the predicate (the immediate's low three bits) holds.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (not (.fpReady c in))
+    (return stopSignal))
+
+  (let [d (addr (aget (.-Ops in) 0))
+      (values s ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [(values scalar dbl) (fpShape (.-Mnem in))
+        ^{:line 1102} pred (bit-and (imm8 in) 7)
+        ^{:line 1103} a (aget (.-X c) (.-Reg d))
+        ^{:line 1104} r a
+        ^{:line 1105 :tag uint32} fl (zero uint32)
+        ^{:line 1106} n 4]
+      (when dbl
+        (set! n 2))
+
+      (when scalar
+        (set! n 1))
+
+      (for [i 0] (< i n) (inc! i)
+        (if dbl
+          (let [(values t f) (fpCmp pred (aget a i) (aget s i) true)]
+            (set! fl bit-or f)
+            (aset r i 0)
+            (when t
+              (aset r i (bit-not (conv uint64 0)))))
+
+
+          (let [(values t f) (fpCmp pred (get32 a i) (get32 s i) false)]
+            (set! fl bit-or f)
+            (let [^uint64 z (zero uint64)]
+              (when t
+                (set! z 0xffffffff))
+
+              (set32 (addr r) i z)))))
+
+
+      (when (not (.mxFlags c in fl))
+        (return stopSignal))
+
+      (aset (.-X c) (.-Reg d) r)
+      (.done c))))
+
+
+
+
+^{:go/end 1178} (go/func xcomi "comiss ucomiss comisd ucomisd: ZF PF CF from the comparison (unordered 111, less 001, equal 100, greater 000), OF SF AF\ncleared; comis invalid on any NaN, ucomis on an SNaN.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (not (.fpReady c in))
+    (return stopSignal))
+
+  (let [(values s ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [dbl (== (aget (.-Mnem in) (- (len (.-Mnem in)) 1)) \d)
+        (values a b) (values (aget (aget (.-X c) (.-Reg (aget (.-Ops in) 0))) 0) (aget s 0))]
+      (when (not dbl)
+        (set! (values a b) (values (bit-and a 0xffffffff) (bit-and b 0xffffffff))))
+
+      (let [^uint32 fl (zero uint32)
+          ^{:line 1154} un (or (isNaNb a dbl) (isNaNb b dbl))]
+        (switch
+          (case [(or (isSNaNb a dbl) (isSNaNb b dbl))]
+            (set! fl bit-or mxIE))
+          (case [(and un (== (aget (.-Mnem in) 0) \c))]
+            (set! fl bit-or mxIE))
+          (case [(and (not un) ^:go/paren (or (isDenb a dbl) (isDenb b dbl)))]
+            (set! fl bit-or mxDE)))
+
+        (when (not (.mxFlags c in fl))
+          (return stopSignal))
+
+        (let [(values x y) (values (toF a dbl) (toF b dbl))
+            ^{:line 1167 :tag uint64} f (zero uint64)]
+          (switch
+            (case [un]
+              (set! f (bit-or ZF PF CF)))
+            (case [(< x y)]
+              (set! f CF))
+            (case [(== x y)]
+              (set! f ZF)))
+
+          (.Put (.-F c) f arith)
+          (.done c))))))
+
+
+^{:go/end 1264} (go/func xcvt ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (not (.fpReady c in))
+    (return stopSignal))
+
+  (let [d (addr (aget (.-Ops in) 0))
+      (values s ok) (.xload c in (addr (aget (.-Ops in) 1)))]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [^uint32 fl (zero uint32)
+        ^{:line 1190} m (.-Mnem in)
+        ^{:line 1191 :tag vec} r (zero vec)]
+      (switch m
+        (case ["cvtsi2ss" "cvtsi2sd"]
+          (let [dbl (== m "cvtsi2sd")
+              (values z f) (intToF (aget s 0) (.-Size (aget (.-Ops in) 1)) dbl)]
+            (set! fl bit-or f)
+            (set! r (aget (.-X c) (.-Reg d)))
+            (if dbl
+              (aset r 0 z)
+
+              (set32 (addr r) 0 z))))
+
+        (case ["cvtss2si" "cvtsd2si" "cvttss2si" "cvttsd2si"]
+          (let [dbl (== (aget m (- (len m) 4)) \d)
+              ^{:line 1205} x (aget s 0)]
+            (when (not dbl)
+              (set! x bit-and 0xffffffff))
+
+            (let [(values z f) (fpToInt x dbl (== (aget m 3) \t) (.-Size d))]
+              (when (not (.mxFlags c in f))
+                (return stopSignal))
+
+              (.setReg c (.-Reg d) (.-Size d) z)
+              (return (.done c)))))
+        (case ["cvtss2sd"]
+          (set! r (aget (.-X c) (.-Reg d)))
+          (let [(values z f) (fpWiden (bit-and (aget s 0) 0xffffffff))]
+            (set! (values (aget r 0) fl) (values z f))))
+        (case ["cvtsd2ss"]
+          (set! r (aget (.-X c) (.-Reg d)))
+          (let [(values z f) (fpNarrow (aget s 0))]
+            (set32 (addr r) 0 z)
+            (set! fl f)))
+        (case ["cvtps2pd"]
+          (for [i 0] (< i 2) (inc! i)
+            (let [(values z f) (fpWiden (get32 s i))]
+              (set! (values (aget r i) fl) (values z (bit-or fl f))))))
+
+        (case ["cvtpd2ps"]
+          (for [i 0] (< i 2) (inc! i)
+            (let [(values z f) (fpNarrow (aget s i))]
+              (set32 (addr r) i z)
+              (set! fl bit-or f))))
+
+        (case ["cvtdq2ps"]
+          (for [i 0] (< i 4) (inc! i)
+            (let [(values z f) (intToF (get32 s i) 4 false)]
+              (set32 (addr r) i z)
+              (set! fl bit-or f))))
+
+        (case ["cvtps2dq" "cvttps2dq"]
+          (for [i 0] (< i 4) (inc! i)
+            (let [(values z f) (fpToInt (get32 s i) false (== (aget m 3) \t) 4)]
+              (set32 (addr r) i z)
+              (set! fl bit-or f))))
+
+        (case ["cvtdq2pd"]
+          (for [i 0] (< i 2) (inc! i)
+            (let [(values z _) (intToF (get32 s i) 4 true)]
+              (aset r i z))))
+
+        (case ["cvtpd2dq" "cvttpd2dq"]
+          (for [i 0] (< i 2) (inc! i)
+            (let [(values z f) (fpToInt (aget s i) true (== (aget m 3) \t) 4)]
+              (set32 (addr r) i z)
+              (set! fl bit-or f)))))
+
+
+      (when (not (.mxFlags c in fl))
+        (return stopSignal))
+
+      (aset (.-X c) (.-Reg d) r)
+      (.done c))))

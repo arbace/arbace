@@ -14,6 +14,7 @@
             [arbace.j2g.code :as c]
             [arbace.j2g.decls :as d]
             [arbace.j2g.edge :as edge]
+            [arbace.classes.annot :as annot]
             [arbace.classes.opcodes :as Opcodes]))
 
 (defn- tag [sym type] (with-meta sym {:tag type}))
@@ -123,7 +124,8 @@
 
 (def import-paths
   {"jrt" "arbace/jrt" "math" "math" "atomic" "sync/atomic" "reflect" "reflect" "unsafe" "unsafe"
-   "strings" "strings" "lang" "arbace/lang" "sync" "sync" "goi" "arbace/goi" "cinterp" "arbace/cinterp"})
+   "strings" "strings" "lang" "arbace/lang" "sync" "sync" "goi" "arbace/goi" "cinterp" "arbace/cinterp"
+   "scminterp" "arbace/scminterp"})
 
 (defn- used-qualifiers [forms]
   (let [acc (volatile! #{})]
@@ -282,6 +284,12 @@
                 (list 'func (vec (map #(m/go-type pkg %) ps)))
                 (list 'func (vec (map #(m/go-type pkg %) ps)) [(m/go-type pkg r)]))
         call (apply list (list '.-Fn 't) pn)
+        ;; JCS169: a serializable lambda's adapter holds its serial state (Ser, SerialLambdas.instance:
+        ;; code/serial-lambda-val) and its writeReplace answers the SerializedLambda, as
+        ;; InnerClassLambdaMetafactory's class of a FLAG_SERIALIZABLE lambda
+        ser? (and (m/translated? c/serial-lambdas)
+                  (or (env/assignable? (str "L" fi ";") "Ljava/io/Serializable;")
+                      (some #{"java/io/Serializable"} markers)))
         ;; the SAM's bridges (its other erased descriptors, a/find-sam): methods of their own
         ;; descriptors calling Fn, the arguments and the result converted through Object, as
         ;; LambdaMetafactory's FLAG_BRIDGES (JCS63 (a), JCS116 (a), "As built: JC4c"); a bridge
@@ -312,11 +320,18 @@
                                          (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) eps))]
                         {:line (str "M1 " (:name sam) " " (dotted-desc d))
                          :body (if (= "V" er) [ecall '(return nil)] [(list 'return (result-any pkg er ecall))])}))
-        [tfns table] (member-table-form pkg a {:methods (map entry (cons (:desc sam) (map :desc bridges)))})]
+        replace-desc "(Ljava/lang/Object;)Ljava/lang/Object;"
+        write-replace {:line "M18 writeReplace ()Ljava.lang.Object;"
+                       :body [(list 'return (list (m/class-sym pkg c/serial-lambdas (str "_" (nm/method-base "replace" replace-desc)))
+                                                  (list '.-Ser recv-of)))]}
+        [tfns table] (member-table-form pkg a {:methods (concat (map entry (cons (:desc sam) (map :desc bridges)))
+                                                                (when ser? [write-replace]))})]
     (concat
       [(list 'j2g/comment (str "---- the lambda adapter of " (str/replace fi "/" ".")
                                (apply str (map #(str " & " (str/replace % "/" ".")) markers))))
-       (list 'go/type (symbol a) (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype)))
+       (list 'go/type (symbol a) (if ser?
+                                    (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype) (tag 'Ser 'any))
+                                    (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype))))
        (list 'go/method (symbol (nm/method-base (:name sam) (:desc sam)))
              (cond-> (vec (cons recv (map #(tag %1 (m/go-type pkg %2)) pn ps)))
                (not= "V" r) (vary-meta assoc :tag (m/go-type pkg r)))
@@ -345,11 +360,15 @@
               (if (and impl (= :default (:kind impl)))
                 (apply list (m/class-sym pkg (:owner impl) (str "_" base)) 't mpn)
                 (list 'panic (list (m/jrt-sym pkg "J2g_NotTranslated") (str "abstract " name desc))))))
+      (remove nil?
       [(list 'go/method 'Ref (with-meta [recv] {:tag 'any}) (list 'when (list '== 't nil) (list 'return nil)) 't)
        (list 'go/method 'GetClass__Class (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "Class"))}) (symbol (str a "_class")))
        (list 'go/method 'ToString__String (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "String"))})
              (list (m/jrt-sym pkg "Object_toString") 't))
-       (list 'go/method 'Clone__O (with-meta [recv] {:tag 'any}) (list 'panic (list (m/jrt-sym pkg "CloneNotSupported") 't)))
+       ;; a lambda is not Cloneable, unless the SAM is clone() itself (java.security.cert.CertStoreParameters's
+       ;; Object clone(), GetInstanceNullsEmpties' `() -> null`; night 13): then the SAM's method is Clone__O
+       (when-not (= "Clone__O" (nm/method-base (:name sam) (:desc sam)))
+         (list 'go/method 'Clone__O (with-meta [recv] {:tag 'any}) (list 'panic (list (m/jrt-sym pkg "CloneNotSupported") 't))))
        (list 'go/var (symbol (str a "_class"))
              (list (m/jrt-sym pkg "Define")
                    (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
@@ -359,7 +378,7 @@
                                      :Super (m/jrt-sym pkg "Object_class")
                                      :Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
                                                         (map #(m/class-sym pkg % "_class") (cons fi markers)))
-                                     :Go (str (nm/pkg-path pkg) "." a)))))]
+                                     :Go (str (nm/pkg-path pkg) "." a)))))])
       tfns
       [(list 'go/var (tag (symbol (str a "_members")) (list '* (m/jrt-sym pkg "MemberTable"))) table)
        (list 'go/func 'init [] (list 'set! (list '.-Table (list '.Info (symbol (str a "_class")))) (symbol (str a "_members"))))])))
@@ -454,6 +473,75 @@
                        assoc :tag (m/go-type :jrt r))
             (list 'return (apply list (m/class-sym :jrt fjp-support-class (str "_" (nm/method-base hn hd))) 't pn))))))
 
+(defn access-flags?
+  "Whether j2g writes Class, Method, Constructor and Field's accessFlags (JCS273): AccessFlag and jrt's
+  AccessFlagSupport translated."
+  []
+  (and (m/translated? "java/lang/reflect/AccessFlag") (m/translated? "jdk/internal/jrt/AccessFlagSupport")))
+
+(defn parameters?
+  "Whether j2g writes Method and Constructor's getParameters (JCS280 (a)): java.lang.reflect.Parameter translated."
+  []
+  (m/translated? "java/lang/reflect/Parameter"))
+
+(def parameters-roots
+  "What the getParameters methods j2g writes call (JCS280 (a)): Parameter's constructor, a root of the program."
+  [["java/lang/reflect/Parameter" "<init>" "(Ljava/lang/String;ILjava/lang/reflect/Executable;I)V"]])
+
+(def access-flags-roots
+  "What the accessFlags methods j2g writes call (JCS273): AccessFlagSupport's three methods, roots of the program."
+  [["jdk/internal/jrt/AccessFlagSupport" "classAccessFlags" "(Ljava/lang/Class;)Ljava/util/Set;"]
+   ["jdk/internal/jrt/AccessFlagSupport" "executableAccessFlags" "(ILjava/lang/Class;)Ljava/util/Set;"]
+   ["jdk/internal/jrt/AccessFlagSupport" "fieldAccessFlags" "(ILjava/lang/Class;)Ljava/util/Set;"]])
+
+(defn type-annotations?
+  "Whether j2g writes Class, Method, Constructor and Field's getAnnotated* (JCS271 (b)): TypeAnnotationParser and
+  jrt's TypeAnnotationSupport translated."
+  []
+  (and (m/translated? "sun/reflect/annotation/TypeAnnotationParser") (m/translated? "jdk/internal/jrt/TypeAnnotationSupport")))
+
+(def type-annotation-calls
+  "JCS271 (b): each getAnnotated* j2g writes, [jrt type, the Java method, its Go name, returns an array?,
+  TypeAnnotationSupport's method, its descriptor]."
+  (let [at "Ljava/lang/reflect/AnnotatedType;" ats "[Ljava/lang/reflect/AnnotatedType;"
+        c "Ljava/lang/Class;" e "Ljava/lang/reflect/Executable;" f "Ljava/lang/reflect/Field;"]
+    (concat
+      [["Class" "getAnnotatedSuperclass" false "annotatedSuperclass" (str "(" c ")" at)]
+       ["Class" "getAnnotatedInterfaces" true "annotatedInterfaces" (str "(" c ")" ats)]
+       ["Field" "getAnnotatedType" false "annotatedType" (str "(" f ")" at)]]
+      (for [t ["Method" "Constructor"]
+            [jm arr sm] [["getAnnotatedReturnType" false "annotatedReturnType"]
+                         ["getAnnotatedReceiverType" false "annotatedReceiverType"]
+                         ["getAnnotatedParameterTypes" true "annotatedParameterTypes"]
+                         ["getAnnotatedExceptionTypes" true "annotatedExceptionTypes"]]]
+        [t jm arr sm (str "(" e ")" (if arr ats at))]))))
+
+(defn- ta-go-name [jm arr] (str (str/upper-case (subs jm 0 1)) (subs jm 1) "__AnnotatedType" (when arr "1")))
+
+(def type-annotation-methods
+  "The jrt types' methods the getAnnotated* add (main's scan)."
+  (vec (for [[t jm arr] type-annotation-calls] [t (ta-go-name jm arr)])))
+
+(def type-annotation-roots
+  "What the getAnnotated* methods j2g writes call (JCS271 (b)): TypeAnnotationSupport's methods, roots of the program."
+  (vec (distinct (for [[_ _ _ sm d] type-annotation-calls] ["jdk/internal/jrt/TypeAnnotationSupport" sm d]))))
+
+(defn- ta-support-forms
+  "The getAnnotated* methods of jrt's Class, Method, Constructor and Field (JCS271 (b))."
+  []
+  (for [[t jm arr sm d] type-annotation-calls
+        :let [gn (symbol (ta-go-name jm arr))
+              ret (if arr '(* RefArray) (m/go-type :jrt "Ljava/lang/reflect/AnnotatedType;"))
+              arg ({"Ljava/lang/Class;" "Class" "Ljava/lang/reflect/Executable;" "Executable" "Ljava/lang/reflect/Field;" "Field"}
+                   ;; the parameter's descriptor alone (B2, 2026-11-15: with the ")" the lookup gave nil and the
+                   ;; call's name lost its parameter, TypeAnnotationSupport_AnnotatedSuperclass___AnnotatedType)
+                   (subs d 1 (.indexOf ^String d ")")))
+              fn-name (symbol (str "TypeAnnotationSupport_" (str/upper-case (subs sm 0 1)) (subs sm 1) "_" arg "__AnnotatedType" (when arr "1")))]]
+    (list 'go/method gn
+          (str gn " is " t "." jm ": TypeAnnotationSupport." sm " (jdk26u's).\n")
+          (with-meta [(tag 'x (list '* (symbol t)))] {:tag ret})
+          (list fn-name 'x))))
+
 (defn support-forms
   "j2g's helpers in package jrt (j2g_support): what translated code calls besides jrt's API."
   []
@@ -478,6 +566,41 @@
                           assoc :tag (m/go-type :jrt r))
                '(NN rt)
                (list 'return (apply list (symbol (str "RuntimeExec_" base)) pn)))))
+     ;; System.inheritedChannel (JCS201 (a); m/support-call-helpers): the provider's, as jdk26u's System
+     (when (and (m/translated? "java/nio/channels/spi/SelectorProvider") (m/hand-written? "java/lang/System"))
+       [(list 'go/func 'J2g_SystemInheritedChannel
+              "J2g_SystemInheritedChannel is System.inheritedChannel(): SelectorProvider.provider().inheritedChannel().\n"
+              (with-meta [] {:tag (m/go-type :jrt "Ljava/nio/channels/Channel;")})
+              ;; the provider's Go type is an interface (an abstract class), which NN (a pointer's) does not take
+              ;; (B2, 2026-11-15: Go's compile, "cannot infer T")
+              '(let [p (SelectorProvider_Provider__SelectorProvider)]
+                 (when (== p nil) (panic (NPE)))
+                 (return (.InheritedChannel__Channel p))))])
+     ;; ClassLoader's resources for translated calls (m/class-loader-resource-helpers; A5 of the Ghidra
+     ;; case study's G1 plan, J2G-SPEC §10.3): a loader's own override of the method first (a translated
+     ;; subclass, URLClassLoader's), else jrt's own Java ClassPathResources, which main.ae roots
+     (when (and (m/translated? "jdk/internal/jrt/ClassPathResources") (m/hand-written? "java/lang/ClassLoader"))
+       (for [[nme desc f] m/class-loader-resource-helpers
+             :when (m/class-loader-resource-ready? nme desc)
+             :let [[_ r] (t/parse-method-desc desc)
+                   rt (m/go-type :jrt r)
+                   st (m/go-type :jrt "Ljava/lang/String;")
+                   base (nm/method-base nme desc)
+                   static? (str/starts-with? nme "getSystem")
+                   cpr (symbol (str "ClassPathResources_" (apply nm/method-base (m/class-loader-resource-target nme desc))))]]
+         (if static?
+           (list 'go/func (symbol f)
+                 (str f " is ClassLoader." nme desc ": the system loader's, jdk.internal.jrt.ClassPathResources'.\n")
+                 (with-meta [(tag 'name st)] {:tag rt})
+                 (list 'return (list cpr 'name)))
+           (list 'go/func (symbol f)
+                 (str f " is ClassLoader." nme desc " of a loader: its own override, else\njdk.internal.jrt.ClassPathResources'.\n")
+                 (with-meta [(tag 'cl 'ClassLoader_I) (tag 'name st)] {:tag rt})
+                 '(when (== cl nil) (panic (NPE)))
+                 (list 'let [(list 'values 'o 'ok)
+                             (list 'assert (list 'interface (list (symbol base) (with-meta [(tag 'n st)] {:tag rt}))) 'cl)]
+                       (list 'when 'ok (list 'return (list (symbol (str "." base)) 'o 'name))))
+                 (list 'return (list cpr 'cl 'name))))))
      (when (and (m/translated? "java/time/Instant") (m/hand-written? "java/util/Date"))
        [(list 'go/type 'J2g_DateInstant
               "J2g_DateInstant is a Date subclass's own toInstant (java.sql.Timestamp's).\n"
@@ -510,6 +633,33 @@
        ['(go/method DescribeConstable__Optional "DescribeConstable__Optional is String.describeConstable: Optional.of(this).\n"
           ^{:tag (* Optional)} [^{:tag (* String)} t]
           (Optional_Of_O__Optional t))])
+     ;; Runtime.Version's parts of translated types (JCS304 (b) with JCS293, doc/classes/JAVA-DEFERRED-TRIAGE.md,
+     ;; "As built: JCS304 (b), JCS293"): pre, build and optional as Optionals, version as List.of the numbers; jrt's
+     ;; Runtime$Version (system.go) holds the parts (main.ae's world-scan names these methods, its roots their calls)
+     (when (and (m/translated? "java/util/Optional") (m/hand-written? "java/lang/Runtime$Version"))
+       ['(go/method Pre__Optional "Pre__Optional is Version.pre: the pre-release, or Optional.empty().\n"
+          ^{:tag (* Optional)} [^{:tag (* Runtime_Version)} v]
+          (when (not (.-hasPre v))
+            (return (Optional_Empty__Optional)))
+          (Optional_Of_O__Optional (Str (.-pre v))))
+        '(go/method Build__Optional "Build__Optional is Version.build: the build number as an Integer, or Optional.empty().\n"
+          ^{:tag (* Optional)} [^{:tag (* Runtime_Version)} v]
+          (when (not (.-hasBuild v))
+            (return (Optional_Empty__Optional)))
+          (Optional_Of_O__Optional (Integer_ValueOf_I__Integer (.-build v))))
+        '(go/method Optional__Optional "Optional__Optional is Version.optional: the optional part, or Optional.empty().\n"
+          ^{:tag (* Optional)} [^{:tag (* Runtime_Version)} v]
+          (when (not (.-hasOpt v))
+            (return (Optional_Empty__Optional)))
+          (Optional_Of_O__Optional (Str (.-opt v))))])
+     (when (and (m/translated? "java/util/List") (m/hand-written? "java/lang/Runtime$Version"))
+       ['(go/method Version__List "Version__List is Version.version: List.of the numbers, as Integers.\n"
+          ^List [^{:tag (* Runtime_Version)} v]
+          (let [ns (.numbers v)
+                a (NewRefArray Integer_class (conv int32 (len ns)))]
+            (range [i x ns]
+              (.Store a (conv int32 i) (Integer_ValueOf_I__Integer x)))
+            (List_Of_O1__List a)))])
      (when (and (m/translated? "java/util/stream/Stream") (m/translated? "java/util/ArrayList"))
        ['(go/method Lines__Stream "Lines__Stream is String.lines: the lines (split at \\n, \\r, \\r\\n) as a
 sequential stream (over an ArrayList: not jdk26u's lazy spliterator).\n"
@@ -545,6 +695,28 @@ when there is none.\n"
                      (range [i x b]
                        (aset (.-A a) i (conv int8 x)))
                      (return (ByteArrayInputStream_New_B1 a))))))])
+     ;; Class.getResource by URL (F26: the class-file tests' helpers name it, javac's ClassfileTestHelper): the
+     ;; name resolved as getResourceAsStream resolves it, then the system loader's getResource over the class
+     ;; path's resources (jdk.internal.jrt.ClassPathResources, JRT-NOTES.md, "Resources by URL"); null when
+     ;; there is none
+     (when (m/translated? "jdk/internal/jrt/ClassPathResources")
+       [(list 'go/method 'GetResource_String__URL
+              "GetResource_String__URL is Class.getResource: the resource name resolved as Class.resolveName
+resolves it (absolute without its /, else in the package of the class or of its arrays' element class),
+then the system loader's getResource (ClassPathResources.getResource); null when there is none.\n"
+              (with-meta [(tag 'c '(* Class)) (tag 'name '(* String))] {:tag (m/go-type :jrt "Ljava/net/URL;")})
+              '(let [n (.String (NN name))]
+                 (if (strings/HasPrefix n "/")
+                   (set! n (subslice n 1))
+                   (let [e c]
+                     (while (.IsArray__Z e)
+                       (set! e (.GetComponentType__Class e)))
+                     (let [cn (.-Name (.Info e))
+                           i (strings/LastIndexByte cn \.)]
+                       (when (>= i 0)
+                         (set! n (+ (strings/ReplaceAll (subslice cn _ i) "." "/") "/" n))))))
+                 (return (ClassPathResources_GetResource_ClassLoader_String__URL
+                           (ClassLoader_GetSystemClassLoader__ClassLoader) (Str n)))))])
      ;; Module.getResourceAsStream over the same resources (RPS150 (b)): the name from the module's
      ;; root (a leading / is dropped), as a ByteArrayInputStream; null when there is none
      (when (m/translated? "java/io/ByteArrayInputStream")
@@ -582,6 +754,45 @@ module is this one, and the packages of module_table.ae for a named module, as a
                    (when (== pm m)
                      (.Add_O__Z s (Str p))))
                  (return s)))])
+     ;; Class, Method, Constructor and Field's accessFlags (JCS273, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+     ;; JCS273 (write-ahead)"): jdk26u's bodies in jrt's own Java jdk.internal.jrt.AccessFlagSupport over the modifiers
+     ;; (jrt's hand-written classes cannot name AccessFlag's Set)
+     (when (access-flags?)
+       (let [set-t (m/go-type :jrt "Ljava/util/Set;")]
+         [(list 'go/method 'AccessFlags__Set
+                "AccessFlags__Set is Class.accessFlags: AccessFlagSupport.classAccessFlags (jdk26u's Class.accessFlags).\n"
+                (with-meta [(tag 'c '(* Class))] {:tag set-t})
+                '(AccessFlagSupport_ClassAccessFlags_Class__Set c))
+          (list 'go/method 'AccessFlags__Set
+                "AccessFlags__Set is Method.accessFlags (Executable's): AccessFlagSupport.executableAccessFlags of the modifiers.\n"
+                (with-meta [(tag 'e '(* Method))] {:tag set-t})
+                '(AccessFlagSupport_ExecutableAccessFlags_I_Class__Set (.GetModifiers__I e) (.GetDeclaringClass__Class e)))
+          (list 'go/method 'AccessFlags__Set
+                "AccessFlags__Set is Constructor.accessFlags (Executable's): AccessFlagSupport.executableAccessFlags of the modifiers.\n"
+                (with-meta [(tag 'e '(* Constructor))] {:tag set-t})
+                '(AccessFlagSupport_ExecutableAccessFlags_I_Class__Set (.GetModifiers__I e) (.GetDeclaringClass__Class e)))
+          (list 'go/method 'AccessFlags__Set
+                "AccessFlags__Set is Field.accessFlags: AccessFlagSupport.fieldAccessFlags of the modifiers.\n"
+                (with-meta [(tag 'f '(* Field))] {:tag set-t})
+                '(AccessFlagSupport_FieldAccessFlags_I_Class__Set (.GetModifiers__I f) (.GetDeclaringClass__Class f)))]))
+     ;; Method and Constructor's getParameters (JCS280 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS280
+     ;; (a)"): jdk26u's Executable.synthesizeAllParams, the Go build recording no MethodParameters: arg0, arg1, ...,
+     ;; modifiers 0, a new array of new Parameters each call (jdk26u's copies its cached array)
+     (when (parameters?)
+       (for [t ['Method 'Constructor]]
+         (list 'go/method 'GetParameters__Parameter1
+               (str "GetParameters__Parameter1 is " t ".getParameters (Executable's): the synthesized parameters, arg0 ... with
+modifiers 0 (jdk26u's synthesizeAllParams: no MethodParameters records in the Go build).\n")
+               (with-meta [(tag 'e (list '* t))] {:tag '(* RefArray)})
+               '(let [n (.GetParameterCount__I e)
+                      a (NewRefArray Parameter_class n)]
+                  (for [i (conv int32 0)] (< i n) (inc! i)
+                    (.Store a i (Parameter_New_String_I_Executable_I (Str (+ "arg" (.String (StrOfInt i)))) 0 e i)))
+                  (return a)))))
+     ;; Class, Method, Constructor and Field's getAnnotated* (JCS271 (b), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As
+     ;; built: JCS271 (b) (write-ahead)"): jdk26u's bodies in jrt's own Java jdk.internal.jrt.TypeAnnotationSupport
+     (when (type-annotations?)
+       (ta-support-forms))
      ;; java.util.Date's default zone (JRT-NOTES.md, "Time"): jrt's Date computes its local
      ;; fields, toString's zone name and its local constructors through jrt's DateZone hooks,
      ;; which jrt's own Java jdk.internal.jrt.DefaultZone answers over the translated TimeZone
@@ -593,6 +804,29 @@ module is this one, and the packages of module_table.ae for a named module, as a
           (set! DateZoneName (fn ^string [^int64 ms] (return (.String (DefaultZone_Name_J__String ms)))))
           true)
         '(go/var ^bool j2gDateZoneSet (j2gSetDateZone))])
+     ;; SharedSecrets' serialization accessors (JCS167, m/serial-accessors): a variable per
+     ;; access interface, its setter, and its getter, which initializes the class that sets it
+     ;; first (jdk26u's ensureClassInitialized)
+     (apply concat
+       (for [[i owner] (sort m/serial-accessors)
+             :when (m/translated? i)
+             :let [[gb sb] (m/serial-accessor-bases i)
+                   v (symbol (str "SharedSecrets_" (subs gb 3 (.indexOf ^String gb "__"))))
+                   ty (m/go-type :jrt (str "L" i ";"))]]
+         [(list 'go/var (tag v ty))
+          (list 'go/func (symbol (str "SharedSecrets_" sb))
+                (str "SharedSecrets_" sb " is SharedSecrets' setter (m/serial-accessors).\n")
+                [(tag 'access ty)]
+                (list 'set! v 'access))
+          (list 'go/func (symbol (str "SharedSecrets_" gb))
+                (str "SharedSecrets_" gb " is SharedSecrets' getter: " (str/replace owner "/" ".")
+                     " initialized first when the access is not set yet.\n")
+                (with-meta [] {:tag ty})
+                (list 'when (list '== v nil)
+                      (if (and (m/translated? owner) (not (m/trivial-init? owner)))
+                        (list (symbol (str (m/go-name owner) "_Init")))
+                        '(do)))
+                v)]))
      (remove nil? [(list 'go/var (tag 'J2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'J2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "j2g: not translated: " 'what))))
@@ -706,6 +940,18 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
 (m/j2g-static?).\n"
              (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
              '(J2g_SystemGetProperties)))
+     ;; Thread.getAllStackTraces() (JCS320 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS320 (a)";
+     ;; m/j2g-static?): jdk26u's map of the live threads (HostManagement's threads0) to their stacks (its stackTrace0:
+     ;; the current thread's, a waiting thread's as it began to wait, else none, F13's records)
+     (when (and (m/translated? "java/util/HashMap") (m/hand-written? "java/lang/Thread"))
+       (list 'go/func 'Thread_GetAllStackTraces__Map
+             "Thread_GetAllStackTraces__Map is Thread.getAllStackTraces(): a HashMap of each live thread to its stack
+(stackOf: the current thread's own, a waiting thread's as it began to wait, an empty array otherwise).\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Map;")})
+             '(let [m (HashMap_New)]
+                (range [_ t (liveThreads)]
+                  (.Put_O_O__O m (.-self t) (stackOf t)))
+                (return m))))
      ;; jrt's statics whose values are translated objects (J2G-NOTES.md, phase 2C)
      (when (m/translated? "jdk/internal/jrt/StandardStreams")
        (let [is (m/go-type :jrt "Ljava/io/InputStream;")
@@ -861,7 +1107,11 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
           ;; JC4c"); the shipped program's classes are none of them
           own (and *absent-members* (nm/own-class? n))
           public? (if own (constantly true) public?)
-          listed? #(or (public? %) (and (m/has? (:flags %) Opcodes/ACC_PROTECTED) (m/static? %)))
+          ;; JCS167: a Serializable class's serialization hooks and serial fields (m/serial-hook?,
+          ;; m/serial-field?), which ObjectStreamClass finds by reflection, whatever their access
+          serial (and (not iface) (m/serialization?) (m/serializable? n))
+          listed? #(or (public? %) (and (m/has? (:flags %) Opcodes/ACC_PROTECTED) (m/static? %))
+                       (and serial (m/serial-hook? %)))
           cls (fn [dd] (c/class-val dd))
           methods (for [mm (d/class-methods n)
                         :when (and (listed? mm) (not= "<init>" (:name mm)))
@@ -950,7 +1200,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                        :body [(list 'return (apply list (symbol (nm/new-name g real))
                                                    (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)))]}))
           fields (for [f (d/class-fields n)
-                       :when (public? f)
+                       :when (or (public? f) (and serial (m/serial-field? f)))
                        :let [static (m/static? f)
                              place (if static (symbol (nm/static-field-name g (:name f)))
                                        (list (symbol (str ".-" (nm/field-name (:name f))))
@@ -958,12 +1208,15 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                                  (list (symbol (str ".Self_" g)) (list 'assert rty 'o)))))
                              vol (c/volatile-field? f)
                              cval (env/const-value f)
-                             final (m/has? (:flags f) Opcodes/ACC_FINAL)]]
+                             final (m/has? (:flags f) Opcodes/ACC_FINAL)
+                             ;; a final instance field has a Set too: jrt's Field.set writes it when
+                             ;; made accessible, as the JDK's (JCS167; serialization's reflector)
+                             settable (or (not final) (not static))]]
                    (do (cls (:desc f))
-                       {:line (str (if final "G" "F") (bit-and (:flags f) 0x5fff) " " (:name f) " " (dotted-desc (:desc f)))
+                       {:line (str (if settable "F" "G") (bit-and (:flags f) 0x5fff) " " (:name f) " " (dotted-desc (:desc f)))
                         :get [(list 'return (let [r (if vol (c/volatile-read place (:desc f)) place)]
                                               (or (result-any pkg (:desc f) r) r)))]
-                        :set (when-not final
+                        :set (when settable
                                [(if vol
                                   (c/volatile-write place (:desc f) (arg-conv pkg (:desc f) 'v))
                                   (list 'set! place (arg-conv pkg (:desc f) 'v)))])}))]
@@ -990,6 +1243,12 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
           ;; a compiled fn's code (S6, :c2j/code) has none: nothing reflects on it, its fn's
           ;; class is made at run time (SA154)
           tables (if (or (:reflected dd) (:c2j/code (:meta dd))) {} (member-tables pkg n))
+          ;; F14: the RUNTIME-visible annotations as data (arbace.classes.annot): a class's own and
+          ;; an annotation type's defaults; a --program's own class's members' and parameters' too
+          annots (when-not (or (:reflected dd) (:c2j/code (:meta dd)) (nm/compiled-pkg? pkg))
+                   (annot/class-data n :members (and *absent-members* (nm/own-class? n))
+                                     ;; JCS240 (a) (F27): every class's throws clauses, the JDK's too
+                                     :throws true))
           cls-sym (symbol (str g "_class"))]
       (if (m/code-class? n)
         ;; a compiled fn's code (SA159): its variable, and its entry of the package's table of
@@ -1025,13 +1284,21 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                     [:Simple (or (:simple dd) "")])
                                   [:Go (str (nm/pkg-path pkg) "." g)]
                                   ;; a compiled namespace's class: its source file (standalone S6)
-                                  (when-let [src (:c2j/source (:meta dd))] [:Source src]))))))
+                                  (when-let [src (:c2j/source (:meta dd))] [:Source src])
+                                  (when annots [:Annots annots]))))))
        (list 'go/func 'init []
              (list* 'let ['i (list '.Info cls-sym)]
                     (concat
                       [(list 'set! (list '.-IsInstance 'i) (symbol (str g "_InstanceOf")))]
                       (when-not (m/trivial-init? n)
                         [(list 'set! (list '.-Init 'i) (symbol (str g "_Init")))])
+                      ;; CDR10: the allocation for deserialization (jrt's SerialAlloc)
+                      (when (m/serial-super n)
+                        [(list 'set! (list '.-SerialNew 'i) (symbol (str g "_SerialNew")))])
+                      ;; JCS168: the default serialVersionUID computed ahead of time (m/serial-uid)
+                      (when-let [v (m/serial-uid n)]
+                        [(list 'set! (list '.-SerialUID 'i) v)
+                         (list 'set! (list '.-HasSerialUID 'i) true)])
                       (when (= :enum (:kind dd))
                         [(list 'set! (list '.-Enum 'i)
                                (list* 'fn (with-meta [] {:tag (list '* (m/jrt-sym pkg "RefArray"))})
@@ -1039,6 +1306,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                               [(symbol (str g "__VALUES"))])))])
                       (when (member-table-form pkg g tables)
                         [(list 'set! (list '.-Table 'i) (symbol (str g "_members")))])
+                      ;; F14: an annotation type's objects (decls/annotation-impl-forms)
+                      (when (= :annotation (:kind dd))
+                        [(list 'set! (list '.-AnnNew 'i) (symbol (str g "_AnnNew")))])
                       ;; (Unsafe's field offsets: not of a compiled namespace's classes, SA154)
                       (when-not (or iface (nm/compiled-pkg? pkg))
                         [(list (m/jrt-sym pkg "RegisterGoType") cls-sym (list (list 'inst 'reflect/TypeFor (symbol g))))]))))])))))))
@@ -1125,10 +1395,36 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         ci? (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
         ;; Date's members that name java.time.Instant, which jrt's own build cannot (JRT-NOTES.md,
         ;; phase 2B "Dates")
-        instant? (m/translated? "java/time/Instant")]
-    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec?)
+        instant? (m/translated? "java/time/Instant")
+        ;; accessFlags (JCS273): support-forms' methods, found by reflection at the REPL too
+        flags? (access-flags?)
+        ;; getAnnotated* (JCS271 (b))
+        tann? (type-annotations?)
+        ;; System.inheritedChannel (JCS201 (a))
+        inherited? (m/translated? "java/nio/channels/spi/SelectorProvider")
+        ;; Runtime.Version's pre, build, optional and version (JCS304 (b), JCS293: support-forms' methods)
+        ver-opt? (and (m/translated? "java/util/Optional") (m/hand-written? "java/lang/Runtime$Version"))
+        ver-list? (and (m/translated? "java/util/List") (m/hand-written? "java/lang/Runtime$Version"))
+        ;; Thread.getAllStackTraces (JCS320 (a))
+        stacks? (and (m/translated? "java/util/HashMap") (m/hand-written? "java/lang/Thread"))]
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags? tann? inherited? ver-opt? ver-list? stacks?
+              (parameters?))
       [(apply list 'go/func 'init []
               (concat
+                (when tann?
+                  (for [[t jm arr] type-annotation-calls
+                        :let [c (symbol (str t "_class"))]]
+                    (list 'set! (list '.-Methods (list '.Info c))
+                          (list 'append (list '.-Methods (list '.Info c))
+                                (sig jm [] (if arr '(.ArrayClass AnnotatedType_class) 'AnnotatedType_class) 0x1
+                                     (list (symbol (str "." (ta-go-name jm arr))) (list 'assert (list '* (symbol t)) 'this)))))))
+                (when flags?
+                  (for [[c t] '[[Class_class (* Class)] [Method_class (* Method)]
+                                [Constructor_class (* Constructor)] [Field_class (* Field)]]]
+                    (list 'set! (list '.-Methods (list '.Info c))
+                          (list 'append (list '.-Methods (list '.Info c))
+                                (sig "accessFlags" [] 'Set_class 0x1
+                                     (list '.AccessFlags__Set (list 'assert t 'this)))))))
                 (when (or pst-w? pst-s?)
                   [(apply list 'set! '(.-Methods (.Info Throwable_class))
                           [(apply list 'append '(.-Methods (.Info Throwable_class))
@@ -1141,6 +1437,31 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                       [(sig "printStackTrace" '[PrintWriter_class] 'Prim_void 0x1
                                             '(do (J2g_PrintStackTraceWriter (assert Throwable_I this) (PrintWriter_Cast (aget args 0)))
                                                  (return nil)))])))])])
+                (when (or ver-opt? ver-list?)
+                  [(apply list 'set! '(.-Methods (.Info Runtime_Version_class))
+                          [(apply list 'append '(.-Methods (.Info Runtime_Version_class))
+                                  (concat
+                                    (when ver-opt?
+                                      (for [[jm gm] [["pre" '.Pre__Optional] ["build" '.Build__Optional] ["optional" '.Optional__Optional]]]
+                                        (sig jm [] 'Optional_class 0x1 (list gm '(assert (* Runtime_Version) this)))))
+                                    (when ver-list?
+                                      [(sig "version" [] 'List_class 0x1 '(.Version__List (assert (* Runtime_Version) this)))])))])])
+                (when inherited?
+                  ['(set! (.-Methods (.Info System_class))
+                          (append (.-Methods (.Info System_class))
+                                  (lit MethodInfo :Name "inheritedChannel" :Return Channel_class :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (J2g_SystemInheritedChannel)))))])
+                (when (parameters?)
+                  (for [[c t] '[[Method_class (* Method)] [Constructor_class (* Constructor)]]]
+                    (list 'set! (list '.-Methods (list '.Info c))
+                          (list 'append (list '.-Methods (list '.Info c))
+                                (sig "getParameters" [] '(.ArrayClass Parameter_class) 0x1
+                                     (list '.GetParameters__Parameter1 (list 'assert t 'this)))))))
+                (when stacks?
+                  ['(set! (.-Methods (.Info Thread_class))
+                          (append (.-Methods (.Info Thread_class))
+                                  (lit MethodInfo :Name "getAllStackTraces" :Return Map_class :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_GetAllStackTraces__Map)))))])
                 (when getenv?
                   ['(set! (.-Methods (.Info System_class))
                           (append (.-Methods (.Info System_class))
@@ -1183,6 +1504,16 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                (sig "getContextClassLoader" [] 'ClassLoader_class 0x1
                                     '(ClassLoader_GetSystemClassLoader__ClassLoader))
                                (sig "setContextClassLoader" '[ClassLoader_class] 'Prim_void 0x1 '(return nil))))
+                   ;; Class.getResourceAsStream and getResource, which the compiled program has
+                   ;; (support-forms), in Class's table for the interpreter (F19's day finding; F26)
+                   (list 'set! '(.-Methods (.Info Class_class))
+                         (apply list 'append '(.-Methods (.Info Class_class))
+                                (concat
+                                  [(sig "getResourceAsStream" '[String_class] 'InputStream_class 0x1
+                                        (list '.GetResourceAsStream_String__InputStream '((inst As (* Class)) this) s0))]
+                                  (when cp-resources?
+                                    [(sig "getResource" '[String_class] 'URL_class 0x1
+                                          (list '.GetResource_String__URL '((inst As (* Class)) this) s0))]))))
                    (list 'set! '(.-Methods (.Info ClassLoader_class))
                          (apply list 'append '(.-Methods (.Info ClassLoader_class))
                                (concat

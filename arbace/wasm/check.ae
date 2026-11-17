@@ -1,0 +1,196 @@
+(ns arbace.wasm.check
+  "The Wasm crop's eval check's planner (doc/wasm/WAI.md §5; doc/wasm/WASM-SURVEY.md §10.1, WA4): each script of the testsuite read
+  by repr/wasm (arbace.repr.wasm.wast's reading, the same commands numbered the same way) into a plan wai runs: each module
+  written as its binary (a `binary` module's own bytes, a text or `quote` one encoded canonically by arbace.repr.wasm.binary),
+  each command a line with its action's arguments and its expected results as wai's tokens. wai (go/arbace/wai, the light driver
+  test/wasm/wai-driver) decodes, instantiates and runs them and judges each command by its own assertion; the planner judges
+  nothing. A plan line is tab-separated: K KIND FIELDS... (doc/wasm/WAI.md §5.1)."
+  (:require [arbace.repr.wasm.lex :as lex]
+            [arbace.repr.wasm.text :as text]
+            [arbace.repr.wasm.binary :as bin]
+            [arbace.repr.wasm.wast :as wast]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private hexf (java.util.HexFormat/of))
+
+(defn- hex-str ^String [^String s] (.formatHex ^java.util.HexFormat hexf (.getBytes s java.nio.charset.StandardCharsets/UTF_8)))
+(defn- hex-bytes ^String [^bytes b] (.formatHex ^java.util.HexFormat hexf b))
+(defn- utf8 ^String [x] (String. ^bytes (:b x) java.nio.charset.StandardCharsets/UTF_8))
+
+(defn- int-lit ^long [x ^long bits] (#'arbace.repr.wasm.text/int-lit x bits))
+(defn- float-lit [x ^long bits] (#'arbace.repr.wasm.text/float-lit x bits))
+
+(defn- f32-bits ^long [v] (if (seq? v) (bit-and (long (second v)) 0xffffffff) (bit-and (long (Float/floatToRawIntBits (.floatValue (Double/valueOf (double v))))) 0xffffffff)))
+(defn- f64-bits ^long [v] (if (seq? v) (long (second v)) (Double/doubleToRawLongBits (double v))))
+
+(defn- h8 ^String [^long v] (format "%08x" (bit-and v 0xffffffff)))
+(defn- h16 ^String [^long v] (format "%016x" v))
+
+(def ^:private shapes {"i8x16" [16 8] "i16x8" [8 16] "i32x4" [4 32] "i64x2" [2 64] "f32x4" [4 32] "f64x2" [2 64]})
+
+(defn- nan-pat [x] (when (= :kw (:t x)) ({"nan:canonical" "canonical" "nan:arithmetic" "arithmetic"} (:s x))))
+
+(defn- lane ^String [x ^String shape ^long bits]
+  (or (nan-pat x)
+      (case shape
+        "f32x4" (h8 (f32-bits (float-lit x 32)))
+        "f64x2" (h16 (f64-bits (float-lit x 64)))
+        (let [v (int-lit x bits)]
+          (case (long bits) 8 (format "%02x" (bit-and v 0xff)) 16 (format "%04x" (bit-and v 0xffff)) 32 (h8 v) 64 (h16 v))))))
+
+(defn- v128-bytes ^String [^String shape lanes]
+  ;; the 16 bytes in memory order (little-endian lanes), as hex
+  (let [[n bits] (shapes shape)
+        bb (java.nio.ByteBuffer/allocate 16)]
+    (.order bb java.nio.ByteOrder/LITTLE_ENDIAN)
+    (doseq [l lanes]
+      (case shape
+        "f32x4" (.putInt bb (unchecked-int (f32-bits (float-lit l 32))))
+        "f64x2" (.putLong bb (f64-bits (float-lit l 64)))
+        (let [v (int-lit l bits)]
+          (case (long bits) 8 (.put bb (unchecked-byte v)) 16 (.putShort bb (unchecked-short v)) 32 (.putInt bb (unchecked-int v)) 64 (.putLong bb v)))))
+    (hex-bytes (.array bb))))
+
+(defn- heap-name ^String [x] (if x (if (= :id (:t x)) "type" (str (:s x))) "any"))
+
+(defn value-token
+  "A script's constant (an argument or an expected result) as wai's token (doc/wasm/WAI.md §5.2)."
+  ^String [c]
+  (let [h (lex/head c) [a b] (rest (:xs c))]
+    (case h
+      "i32.const" (str "i32:" (h8 (int-lit a 32)))
+      "i64.const" (str "i64:" (h16 (int-lit a 64)))
+      "f32.const" (str "f32:" (or (nan-pat a) (h8 (f32-bits (float-lit a 32)))))
+      "f64.const" (str "f64:" (or (nan-pat a) (h16 (f64-bits (float-lit a 64)))))
+      "v128.const" (let [shape (:s a) [n bits] (shapes shape) ls (rest (rest (:xs c)))]
+                     (when-not (= n (count ls)) (throw (ex-info "plan: v128 lanes" {})))
+                     (if (some nan-pat ls)
+                       (str "v128:" shape ":" (str/join "," (map #(lane % shape bits) ls)))
+                       (str "v128:" (v128-bytes shape ls))))
+      "ref.null" (str "null:" (heap-name a))
+      "ref.extern" (if a (str "extern:" (Long/toUnsignedString (#'arbace.repr.wasm.text/nat64 a))) "ref:extern")
+      "ref.host" (if a (str "host:" (Long/toUnsignedString (#'arbace.repr.wasm.text/nat64 a))) "ref:any")
+      ("ref.func" "ref.any" "ref.eq" "ref.i31" "ref.struct" "ref.array" "ref.exn" "ref.none")
+      (if a (throw (ex-info (str "plan: " h " with an operand") {})) (str "ref:" (subs h 4)))
+      "either" (str "either:" (str/join "|" (map value-token (rest (:xs c)))))
+      (throw (ex-info (str "plan: unknown constant " h) {})))))
+
+(defn- name-of [x] (if (= :id (:t x)) (:s x) "-"))
+
+(defn- action
+  "An action's fields: [KIND INST NAMEHEX ARGS]."
+  [a]
+  (let [h (lex/head a) xs (rest (:xs a))
+        [inst xs] (if (= :id (:t (first xs))) [(:s (first xs)) (rest xs)] ["-" xs])
+        nm (first xs) args (rest xs)]
+    (case h
+      "invoke" ["invoke" inst (hex-str (utf8 nm)) (str/join " " (map value-token args))]
+      "get" ["get" inst (hex-str (utf8 nm)) ""]
+      (throw (ex-info (str "plan: unknown action " h) {})))))
+
+(defn- module-bytes
+  "A module command's binary: a `binary` one's bytes, a text or quote one encoded canonically."
+  ^bytes [[kind p :as m]]
+  (if (= kind :binary) p (bin/encode (wast/read-items m) nil)))
+
+(defn- verdict
+  "arbace.wasm.valid's verdict on a module command's module (WAS30 (a): wai's validator is judged against it): `ok`, `invalid:MSGHEX`,
+  or `none:REASONHEX` when its items do not read or the validator crashes."
+  ^String [m]
+  (let [items (try (wast/read-items m) (catch Throwable e e))]
+    (if (instance? Throwable items)
+      (str "none:" (hex-str (str "does not read: " (.getMessage ^Throwable items))))
+      (let [[k v] (wast/validate items)]
+        (case k
+          :invalid (str "invalid:" (hex-str (str v)))
+          :crash (str "none:" (hex-str (str "crash in validation: " v)))
+          "ok")))))
+
+(defn- tsv ^String [& fs] (str/join "\t" (map str fs)))
+
+(defn script-plan
+  "The plan of a script: [LINES MODULES], LINES the plan's lines, MODULES [[FILE-NAME BYTES]...]. A command the plan cannot
+  carry (its module does not read) is a `fail` line with the reason; a command that is no eval case (assert_malformed,
+  assert_invalid, ...) has no line."
+  [^String text]
+  (let [cmds (lex/read-sexps text)
+        mods (java.util.ArrayList.)
+        vlines (java.util.ArrayList.)
+        add-mod! (fn [k m] (let [f (str k ".wasm")]
+                             (.add mods [f (module-bytes m)])
+                             (.add vlines (tsv k "valid" f (verdict m)))
+                             f))
+        inline? (and (seq cmds) (#{"func" "memory" "type" "import" "export" "table" "global" "data" "elem" "start" "tag" "rec"} (lex/head (first cmds))))
+        cmds (if inline? [{:t :list :xs (into [{:t :kw :s "module"}] cmds)}] cmds)
+        lines (vec
+                (keep-indexed
+                  (fn [i c]
+                    (let [k (inc i) h (lex/head c)]
+                      (try
+                        (case h
+                          "module"
+                          (let [xs (rest (:xs c))
+                                [nm xs] (if (= :id (:t (first xs))) [(:s (first xs)) (rest xs)] ["-" xs])
+                                defn? (lex/kw? (first xs) "definition")
+                                xs (if defn? (rest xs) xs)
+                                [nm xs] (if (and defn? (= :id (:t (first xs)))) [(:s (first xs)) (rest xs)] [nm xs])]
+                            (if (lex/kw? (first xs) "instance")
+                              (let [ids (filter #(= :id (:t %)) (rest xs))]
+                                (case (count ids)
+                                  2 (tsv k "instance" (:s (first ids)) (:s (second ids)))
+                                  1 (tsv k "instance" (:s (first ids)) "-")
+                                  (tsv k "instance" "-" "-")))
+                              (let [f (add-mod! k (wast/module-of c))]
+                                (tsv k (if defn? "definition" "module") nm f))))
+                          "register" (let [[_ s m] (:xs c)] (tsv k "register" (hex-str (utf8 s)) (if m (name-of m) "-")))
+                          ("invoke" "get") (apply tsv k "action" (action c))
+                          "assert_return" (let [[_ a & rs] (:xs c)]
+                                            (apply tsv k "assert_return" (concat (action a) [(str/join " " (map value-token rs))])))
+                          ("assert_trap" "assert_exhaustion" "assert_uninstantiable" "assert_unlinkable")
+                          (let [[_ a m] (:xs c)
+                                msg (hex-str (utf8 m))]
+                            (if (lex/list-of? a "module")
+                              (let [f (add-mod! k (wast/module-of a))]
+                                (tsv k (case h "assert_trap" "assert_trap_module" h) f msg))
+                              (apply tsv k h (concat (action a) [msg]))))
+                          "assert_exception" (let [[_ a] (:xs c)] (apply tsv k "assert_exception" (action a)))
+                          ;; an invalid module: no eval case (the read cell's), only wai's validator's verdict against Arbace's
+                          "assert_invalid" (let [mm (try (wast/module-of (second (:xs c))) (catch Throwable e nil))
+                                                 b (try (module-bytes mm) (catch Throwable e e))]
+                                             (if (instance? Throwable b)
+                                               (do (.add vlines (tsv k "valid" "-" (str "none:" (hex-str (str "not encoded: " (.getMessage ^Throwable b)))))) nil)
+                                               (let [f (str k ".wasm")]
+                                                 (.add mods [f b])
+                                                 (.add vlines (tsv k "valid" f (verdict mm)))
+                                                 nil)))
+                          nil)
+                        (catch Throwable e
+                          (tsv k "fail" (str/replace (str "plan: " (#'arbace.repr.wasm.wast/clean (.getMessage e))) "\t" " "))))))
+                  cmds))]
+    [(into lines vlines) (vec mods)]))
+
+(defn -main
+  "check plan LIST WORK: each script of LIST (NAME<tab>PATH) planned into WORK/plans/SLUG.plan with its modules in
+  WORK/mods/SLUG/; WORK/plans.list a line NAME<tab>PLAN<tab>MODDIR a script."
+  [& args]
+  (let [[verb lst work] args]
+    (case verb
+      "plan"
+      (let [sb (StringBuilder.)]
+        (doseq [l (str/split-lines (slurp lst)) :when (seq l)
+                :let [[n p] (str/split l #"\t")
+                      slug (str/replace (subs n (inc (.indexOf ^String n "/"))) #"[/]" "__")
+                      pf (str work "/plans/" slug ".plan")
+                      md (str work "/mods/" slug)
+                      [lines mods] (try (script-plan (slurp p))
+                                        (catch Throwable e [[(tsv 0 "fail" (str "plan: the script does not read: " (#'arbace.repr.wasm.wast/clean (.getMessage e))))] []]))]]
+          (.mkdirs (java.io.File. ^String md))
+          (.mkdirs (java.io.File. (str work "/plans")))
+          (doseq [[f ^bytes b] mods]
+            (with-open [o (java.io.FileOutputStream. (str md "/" f))] (.write o b)))
+          (spit pf (str (str/join "\n" lines) "\n"))
+          (.append sb (str n "\t" pf "\t" md "\n")))
+        (spit (str work "/plans.list") (str sb)))
+      (do (println "arbace.wasm.check plan LIST WORK") (System/exit 2)))))

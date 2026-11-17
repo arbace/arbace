@@ -1,0 +1,100 @@
+;; Converted from jdk26u src/java.base/share/classes/com/sun/security/ntlm/Server.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.security.ntlm)
+
+(import '(java.util Arrays Locale))
+
+(defclass ^:public ^:abstract Server
+  :extends NTLM
+
+  (field ^:private ^:final ^String domain)
+
+  (field ^:private ^:final ^boolean allVersion)
+
+  (constructor :throws [NTLMException] ^:public [this ^String version ^String domain]
+    (super. version)
+    (when (nil? domain) (throw (NTLMException. NTLMException/PROTOCOL "domain cannot be null")))
+    (set! (.-allVersion this) (nil? version))
+    (set! (.-domain this) domain)
+    (.debug this "NTLM Server: (t,version) = (%s,%s)\n" (new Object/1 [domain version])))
+
+  (method ^:public type2 :throws [NTLMException] ^byte/1 [this ^byte/1 type1 ^byte/1 nonce]
+    (when (or (nil? nonce) (not (== (alength nonce) 8)))
+      (throw (NTLMException. NTLMException/PROTOCOL "nonce must be 8-byte long")))
+    (.debug this "NTLM Server: Type 1 received\n" (new Object/1 []))
+    (when (some? type1) (.debug this type1))
+    (let [p (NTLM$Writer. 2 32)
+          ^int flags 0x90205]
+      (.writeSecurityBuffer p 12 domain true)
+      (.writeInt p 20 flags)
+      (.writeBytes p 24 nonce)
+      (.debug this "NTLM Server: Type 2 created\n" (new Object/1 []))
+      (.debug this (.getBytes p))
+      (.getBytes p)))
+
+  (method ^:public verify :throws [NTLMException] ^String/1 [this ^byte/1 type3 ^byte/1 nonce]
+    (when (or (nil? type3) (nil? nonce))
+      (throw (NTLMException. NTLMException/PROTOCOL "type1 or nonce cannot be null")))
+    (.debug this "NTLM Server: Type 3 received\n" (new Object/1 []))
+    (when (some? type3) (.debug this type3))
+    (let [r (NTLM$Reader. type3)
+          username (.readSecurityBuffer r 36 true)
+          hostname (.readSecurityBuffer r 44 true)
+          incomingDomain (.readSecurityBuffer r 28 true)
+          ^:mutable verified false
+          password (.getPassword this incomingDomain username)]
+      (when (nil? password) (throw (NTLMException. NTLMException/USER_UNKNOWN "Unknown user")))
+      (let [incomingLM (.readSecurityBuffer r 12)
+            incomingNTLM (.readSecurityBuffer r 20)]
+        (when (and (not verified) (or allVersion (identical? (.-v this) Version/NTLM)))
+          (when (> (alength incomingLM) 0)
+            (let [pw1 (Server/getP1 password)
+                  lmhash (.calcLMHash this pw1)
+                  lmresponse (.calcResponse this lmhash nonce)]
+              (when (Arrays/equals lmresponse incomingLM) (set! verified true))))
+          (when (> (alength incomingNTLM) 0)
+            (let [pw2 (Server/getP2 password)
+                  nthash (.calcNTHash this pw2)
+                  ntresponse (.calcResponse this nthash nonce)]
+              (when (Arrays/equals ntresponse incomingNTLM) (set! verified true))))
+          (.debug this
+                  (java-str "NTLM Server: verify using NTLM: " verified "\n")
+                  (new Object/1 [])))
+        (when (and (not verified) (or allVersion (identical? (.-v this) Version/NTLM2)))
+          (let [pw2 (Server/getP2 password)
+                nthash (.calcNTHash this pw2)
+                clientNonce (Arrays/copyOf incomingLM 8)
+                ntlmresponse (.ntlm2NTLM this nthash clientNonce nonce)]
+            (when (Arrays/equals incomingNTLM ntlmresponse) (set! verified true))
+            (.debug this
+                    (java-str "NTLM Server: verify using NTLM2: " verified "\n")
+                    (new Object/1 []))))
+        (when (and (not verified) (or allVersion (identical? (.-v this) Version/NTLMv2)))
+          (let [pw2 (Server/getP2 password)
+                nthash (.calcNTHash this pw2)]
+            (when (> (alength incomingLM) 0)
+              (let [clientNonce (Arrays/copyOfRange incomingLM 16 (alength incomingLM))
+                    lmresponse (.calcV2 this
+                                        nthash
+                                        (java-str (.toUpperCase username Locale/US) incomingDomain)
+                                        clientNonce
+                                        nonce)]
+                (when (Arrays/equals lmresponse incomingLM) (set! verified true))))
+            (when (> (alength incomingNTLM) 0)
+              (let [clientBlob (Arrays/copyOfRange incomingNTLM 16 (alength incomingNTLM))
+                    ntlmresponse (.calcV2 this
+                                          nthash
+                                          (java-str
+                                            (.toUpperCase username Locale/US)
+                                            incomingDomain)
+                                          clientBlob
+                                          nonce)]
+                (when (Arrays/equals ntlmresponse incomingNTLM) (set! verified true))))
+            (.debug this
+                    (java-str "NTLM Server: verify using NTLMv2: " verified "\n")
+                    (new Object/1 []))))
+        (when-not verified
+          (throw (NTLMException. NTLMException/AUTH_FAILED "None of LM and NTLM verified")))
+        (new String/1 [username hostname incomingDomain]))))
+
+  (method ^:public ^:abstract getPassword ^char/1 [this ^String domain ^String username]))

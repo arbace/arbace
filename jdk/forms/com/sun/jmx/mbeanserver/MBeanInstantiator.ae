@@ -1,0 +1,349 @@
+;; Converted from overlay/jdk/java.base/com/sun/jmx/mbeanserver/MBeanInstantiator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.jmx.mbeanserver)
+
+(import '(com.sun.jmx.defaults JmxProperties)
+        '(java.io ByteArrayInputStream IOException ObjectInputStream)
+        '(java.lang.reflect Constructor InvocationTargetException Modifier)
+        '(java.util Map)
+        '(javax.management InstanceNotFoundException
+                           MBeanException
+                           NotCompliantMBeanException
+                           ObjectName
+                           OperationsException
+                           ReflectionException
+                           RuntimeErrorException
+                           RuntimeMBeanException
+                           RuntimeOperationsException)
+        '(jdk.internal.jrt SystemLoggers$Logger$Level))
+
+(defclass ^:public MBeanInstantiator
+  (field ^:private ^:final ^ModifiableClassLoaderRepository clr)
+
+  (constructor [this ^ModifiableClassLoaderRepository clr]
+    (set! (.-clr this) clr))
+
+  (method ^:public testCreation :throws [NotCompliantMBeanException] ^void [this ^{:tag (Class ?)} c]
+    (Introspector/testCreation c))
+
+  (method ^:public findClassWithDefaultLoaderRepository :throws [ReflectionException] ^{:tag (Class ?)} [this
+                                                                                                         ^String className]
+    (let [^:mutable ^{:tag (Class ?)} theClass nil]
+      (when (nil? className)
+        (throw (RuntimeOperationsException.
+                 (IllegalArgumentException. "The class name cannot be null")
+                 "Exception occurred during object instantiation")))
+      (try
+        (when (nil? clr) (throw (ClassNotFoundException. className)))
+        (set! theClass (.loadClass clr className))
+        (catch ClassNotFoundException ee
+          (throw (ReflectionException.
+                   ee
+                   "The MBean class could not be loaded by the default loader repository"))))
+      theClass))
+
+  (method ^:public findClass :throws [ReflectionException] ^{:tag (Class ?)} [this ^String className
+                                                                              ^ClassLoader loader]
+    (MBeanInstantiator/loadClass className loader))
+
+  (method ^:public findClass :throws [ReflectionException InstanceNotFoundException] ^{:tag (Class ?)} [this
+                                                                                                        ^String className
+                                                                                                        ^ObjectName aLoader]
+    (when (nil? aLoader)
+      (throw (RuntimeOperationsException. (IllegalArgumentException.)
+                                          "Null loader passed in parameter")))
+    (let [^:mutable ^ClassLoader loader nil]
+      (locking this (set! loader (.getClassLoader this aLoader)))
+      (when (nil? loader)
+        (throw (InstanceNotFoundException.
+                 (java-str "The loader named " aLoader " is not registered in the MBeanServer"))))
+      (.findClass this className loader)))
+
+  (method ^:public findSignatureClasses :throws [ReflectionException] ^{:tag (array (Class ?))} [this
+                                                                                                 ^String/1 signature
+                                                                                                 ^ClassLoader loader]
+    (when (some? signature)
+      (let [aLoader loader
+            length (alength signature)
+            ^{:tag (array (Class ?))} tab (new Class/1 length)]
+        (if (== length 0)
+            tab
+            (do
+              (try
+                (loop [^int i 0]
+                  (when (< i length)
+                    (let [^{:tag (Class ?)} primCla (cast
+                                                      Class
+                                                      (.get primitiveClasses (aget signature i)))]
+                      (cond
+                        (some? primCla) (do (aset tab i primCla) (recur (unchecked-inc-int i)))
+                        (some? aLoader)
+                          (do
+                            (aset tab i (Class/forName (aget signature i) false aLoader))
+                            (recur (unchecked-inc-int i)))
+                        :else
+                          (do
+                            (aset tab
+                                  i
+                                  (.findClass this
+                                              (aget signature i)
+                                              (.getClassLoader (.getClass this))))
+                            (recur (unchecked-inc-int i)))))))
+                (catch ClassNotFoundException e
+                  (when (.isLoggable JmxProperties/MBEANSERVER_LOGGER
+                                     SystemLoggers$Logger$Level/DEBUG)
+                    (.log JmxProperties/MBEANSERVER_LOGGER
+                          SystemLoggers$Logger$Level/DEBUG
+                          "The parameter class could not be found"
+                          e))
+                  (throw (ReflectionException. e "The parameter class could not be found")))
+                (catch RuntimeException e
+                  (when (.isLoggable JmxProperties/MBEANSERVER_LOGGER
+                                     SystemLoggers$Logger$Level/DEBUG)
+                    (.log JmxProperties/MBEANSERVER_LOGGER
+                          SystemLoggers$Logger$Level/DEBUG
+                          "Unexpected exception"
+                          e))
+                  (throw e)))
+              tab)))))
+
+  (method ^:public instantiate :throws [ReflectionException MBeanException] [this
+                                                                             ^{:tag (Class ?)} theClass]
+    (let [^:mutable ^Object moi nil
+          ^{:tag (Constructor ?)} cons (.findConstructor this theClass nil)]
+      (when (nil? cons)
+        (throw (ReflectionException. (NoSuchMethodException. "No such constructor"))))
+      (try
+        (MBeanInstantiator/ensureClassAccess theClass)
+        (set! moi (.newInstance cons))
+        (catch InvocationTargetException e
+          (let [t (.getCause e)]
+            (cond
+              (instance? RuntimeException t)
+                (throw (RuntimeMBeanException.
+                         (cast RuntimeException t)
+                         "RuntimeException thrown in the MBean's empty constructor"))
+              (instance? Error t)
+                (throw (RuntimeErrorException. (cast Error t)
+                                               "Error thrown in the MBean's empty constructor"))
+              :else
+                (throw (MBeanException. (cast Exception t)
+                                        "Exception thrown in the MBean's empty constructor")))))
+        (catch NoSuchMethodError error
+          (throw (ReflectionException. (NoSuchMethodException. "No constructor")
+                                       "No such constructor")))
+        (catch [InstantiationException IllegalArgumentException IllegalAccessException] e
+          (throw (ReflectionException.
+                   e
+                   "Exception thrown trying to invoke the MBean's empty constructor"))))
+      moi))
+
+  (method ^:public instantiate :throws [ReflectionException MBeanException] [this
+                                                                             ^{:tag (Class ?)} theClass
+                                                                             ^Object/1 params
+                                                                             ^String/1 signature
+                                                                             ^ClassLoader loader]
+    (let [^:mutable ^{:tag (array (Class ?))} tab nil
+          ^:mutable ^Object moi nil]
+      (try
+        (let [aLoader (.getClassLoader theClass)]
+          (set! tab (when (some? signature) (.findSignatureClasses this signature aLoader))))
+        (catch IllegalArgumentException e
+          (throw (ReflectionException. e "The constructor parameter classes could not be loaded"))))
+      (let [^{:tag (Constructor ?)} cons (.findConstructor this theClass tab)]
+        (when (nil? cons)
+          (throw (ReflectionException. (NoSuchMethodException. "No such constructor"))))
+        (try
+          (MBeanInstantiator/ensureClassAccess theClass)
+          (set! moi (.newInstance cons params))
+          (catch NoSuchMethodError error
+            (throw (ReflectionException. (NoSuchMethodException. "No such constructor found")
+                                         "No such constructor")))
+          (catch [InstantiationException IllegalAccessException] e
+            (throw (ReflectionException.
+                     e
+                     "Exception thrown trying to invoke the MBean's constructor")))
+          (catch InvocationTargetException e
+            (let [th (.getCause e)]
+              (cond
+                (instance? RuntimeException th)
+                  (throw (RuntimeMBeanException.
+                           (cast RuntimeException th)
+                           "RuntimeException thrown in the MBean's constructor"))
+                (instance? Error th)
+                  (throw (RuntimeErrorException.
+                           (cast Error th)
+                           "Error thrown in the MBean's constructor"))
+                :else
+                  (throw (MBeanException. (cast Exception th)
+                                          "Exception thrown in the MBean's constructor"))))))
+        moi)))
+
+  (method ^:public deserialize :throws [OperationsException] ^ObjectInputStream [this
+                                                                                 ^ClassLoader loader
+                                                                                 ^byte/1 data]
+    (when (nil? data)
+      (throw (RuntimeOperationsException. (IllegalArgumentException.)
+                                          "Null data passed in parameter")))
+    (when (== (alength data) 0)
+      (throw (RuntimeOperationsException. (IllegalArgumentException.)
+                                          "Empty data passed in parameter")))
+    (let [^:mutable ^ByteArrayInputStream bIn nil
+          ^:mutable ^ObjectInputStream objIn nil]
+      (set! bIn (ByteArrayInputStream. data))
+      (try
+        (set! objIn (ObjectInputStreamWithLoader. bIn loader))
+        (catch IOException e
+          (throw (OperationsException. "An IOException occurred trying to de-serialize the data"))))
+      objIn))
+
+  (method ^:public deserialize :throws [InstanceNotFoundException
+                                        OperationsException
+                                        ReflectionException] ^ObjectInputStream [this
+                                                                                 ^String className
+                                                                                 ^ObjectName loaderName
+                                                                                 ^byte/1 data
+                                                                                 ^ClassLoader loader]
+    (when (nil? data)
+      (throw (RuntimeOperationsException. (IllegalArgumentException.)
+                                          "Null data passed in parameter")))
+    (when (== (alength data) 0)
+      (throw (RuntimeOperationsException. (IllegalArgumentException.)
+                                          "Empty data passed in parameter")))
+    (when (nil? className)
+      (throw (RuntimeOperationsException. (IllegalArgumentException.)
+                                          "Null className passed in parameter")))
+    (let [^:mutable ^{:tag (Class ?)} theClass nil]
+      (if (nil? loaderName)
+          (set! theClass (.findClass this className loader))
+          (try
+            (let [^:mutable ^ClassLoader instance nil]
+              (set! instance (.getClassLoader this loaderName))
+              (when (nil? instance) (throw (ClassNotFoundException. className)))
+              (set! theClass (Class/forName className false instance)))
+            (catch ClassNotFoundException e
+              (throw (ReflectionException. e
+                                           (java-str
+                                             "The MBean class could not be loaded by the "
+                                             (.toString loaderName)
+                                             " class loader"))))))
+      (let [^:mutable ^ByteArrayInputStream bIn nil
+            ^:mutable ^ObjectInputStream objIn nil]
+        (set! bIn (ByteArrayInputStream. data))
+        (try
+          (set! objIn (ObjectInputStreamWithLoader. bIn (.getClassLoader theClass)))
+          (catch IOException e
+            (throw (OperationsException. "An IOException occurred trying to de-serialize the data"))))
+        objIn)))
+
+  (method ^:public instantiate :throws [ReflectionException MBeanException] [this ^String className]
+    (.instantiate this className (cast Object/1 nil) (cast String/1 nil) nil))
+
+  (method ^:public instantiate :throws [ReflectionException
+                                        MBeanException
+                                        InstanceNotFoundException] [this ^String className
+                                                                    ^ObjectName loaderName
+                                                                    ^ClassLoader loader]
+    (.instantiate this className loaderName (cast Object/1 nil) (cast String/1 nil) loader))
+
+  (method ^:public instantiate :throws [ReflectionException MBeanException] [this ^String className
+                                                                             ^Object/1 params
+                                                                             ^String/1 signature
+                                                                             ^ClassLoader loader]
+    (let [^{:tag (Class ?)} theClass (.findClassWithDefaultLoaderRepository this className)]
+      (.instantiate this theClass params signature loader)))
+
+  (method ^:public instantiate :throws [ReflectionException
+                                        MBeanException
+                                        InstanceNotFoundException] [this ^String className
+                                                                    ^ObjectName loaderName
+                                                                    ^Object/1 params
+                                                                    ^String/1 signature
+                                                                    ^ClassLoader loader]
+    (let [^{:tag (Class ?)} theClass (if (nil? loaderName)
+                                         (.findClass this className loader)
+                                         (.findClass this className loaderName))]
+      (.instantiate this theClass params signature loader)))
+
+  (method ^:public getClassLoaderRepository ^ModifiableClassLoaderRepository [this]
+    clr)
+
+  (method ^:static loadClass :throws [ReflectionException] ^{:tag (Class ?)} [^String className
+                                                                              ^:mutable ^ClassLoader loader]
+    (let [^:mutable ^{:tag (Class ?)} theClass nil]
+      (when (nil? className)
+        (throw (RuntimeOperationsException.
+                 (IllegalArgumentException. "The class name cannot be null")
+                 "Exception occurred during object instantiation")))
+      (try
+        (when (nil? loader) (set! loader (.getClassLoader MBeanInstantiator)))
+        (if (some? loader)
+            (set! theClass (Class/forName className false loader))
+            (set! theClass (Class/forName className)))
+        (catch ClassNotFoundException e
+          (throw (ReflectionException. e "The MBean class could not be loaded"))))
+      theClass))
+
+  (method ^:static loadSignatureClasses :throws [ReflectionException] ^{:tag (array (Class ?))} [^String/1 signature
+                                                                                                 ^ClassLoader loader]
+    (when (some? signature)
+      (let [^ClassLoader aLoader (if (nil? loader) (.getClassLoader MBeanInstantiator) loader)
+            length (alength signature)
+            ^{:tag (array (Class ?))} tab (new Class/1 length)]
+        (if (== length 0)
+            tab
+            (do
+              (try
+                (loop [^int i 0]
+                  (when (< i length)
+                    (let [^{:tag (Class ?)} primCla (cast
+                                                      Class
+                                                      (.get primitiveClasses (aget signature i)))]
+                      (if (some? primCla)
+                          (do (aset tab i primCla) (recur (unchecked-inc-int i)))
+                          (do
+                            (aset tab i (Class/forName (aget signature i) false aLoader))
+                            (recur (unchecked-inc-int i)))))))
+                (catch ClassNotFoundException e
+                  (when (.isLoggable JmxProperties/MBEANSERVER_LOGGER
+                                     SystemLoggers$Logger$Level/DEBUG)
+                    (.log JmxProperties/MBEANSERVER_LOGGER
+                          SystemLoggers$Logger$Level/DEBUG
+                          "The parameter class could not be found"
+                          e))
+                  (throw (ReflectionException. e "The parameter class could not be found")))
+                (catch RuntimeException e
+                  (when (.isLoggable JmxProperties/MBEANSERVER_LOGGER
+                                     SystemLoggers$Logger$Level/DEBUG)
+                    (.log JmxProperties/MBEANSERVER_LOGGER
+                          SystemLoggers$Logger$Level/DEBUG
+                          "Unexpected exception"
+                          e))
+                  (throw e)))
+              tab)))))
+
+  (method ^:private findConstructor ^{:tag (Constructor ?)} [this ^{:tag (Class ?)} c
+                                                             ^{:tag (array (Class ?))} params]
+    (try (.getConstructor c params) (catch Exception e nil)))
+
+  (field ^:private ^:static ^:final ^{:tag (Map String (Class ?))} primitiveClasses (Util/newMap))
+
+  (static-initializer
+    (for-each [^{:tag (Class ?)} c (new Class/1
+                                        [Byte/TYPE
+                                         Short/TYPE
+                                         Integer/TYPE
+                                         Long/TYPE
+                                         Float/TYPE
+                                         Double/TYPE
+                                         Character/TYPE
+                                         Boolean/TYPE])]
+      (.put primitiveClasses (.getName c) c)))
+
+  (method ^:private ^:static ensureClassAccess :throws [IllegalAccessException] ^void [^{:tag (Class ?)} clazz]
+    (let [mod (.getModifiers clazz)]
+      (when-not (Modifier/isPublic mod)
+        (throw (IllegalAccessException. "Class is not public and can't be instantiated")))))
+
+  (method ^:private getClassLoader ^ClassLoader [this ^:final ^ObjectName name]
+    (when (some? clr) (.getClassLoader clr name))))

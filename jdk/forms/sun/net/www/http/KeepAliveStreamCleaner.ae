@@ -1,0 +1,86 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/http/KeepAliveStreamCleaner.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.http)
+
+(import '(java.io IOException)
+        '(java.util LinkedList)
+        '(java.util.concurrent TimeUnit)
+        '(java.util.concurrent.locks Condition ReentrantLock)
+        '(sun.net NetProperties))
+
+(defclass KeepAliveStreamCleaner
+  :extends (LinkedList KeepAliveCleanerEntry)
+  :implements [Runnable]
+
+  (field ^:protected ^:static ^:final ^long MAX_DATA_REMAINING)
+
+  (field ^:protected ^:static ^:final ^int MAX_CAPACITY)
+
+  (field ^:protected ^:static ^:final ^int TIMEOUT 5000)
+
+  (field ^:private ^:static ^:final ^int MAX_RETRIES 5)
+
+  (static-initializer
+    (let [^:const maxDataKey "http.KeepAlive.remainingData"]
+      (set! MAX_DATA_REMAINING (unchecked-multiply (NetProperties/getInteger maxDataKey 512) 1024))
+      (let [^:const maxCapacityKey "http.KeepAlive.queuedConnections"]
+        (set! MAX_CAPACITY (NetProperties/getInteger maxCapacityKey 10)))))
+
+  (field ^:private ^:final ^ReentrantLock queueLock (ReentrantLock.))
+
+  (field ^:private ^:final ^Condition waiter (.newCondition queueLock))
+
+  (method ^:final signalAll ^void [this] (.signalAll waiter))
+
+  (method ^:final lock ^void [this] (.lock queueLock))
+
+  (method ^:final unlock ^void [this] (.unlock queueLock))
+
+  (method ^:public offer ^boolean [this ^KeepAliveCleanerEntry e]
+    (if (>= (.size this) MAX_CAPACITY) false (.offer super e)))
+
+  (method ^:public run ^void [this]
+    (let [^:mutable ^KeepAliveCleanerEntry kace nil]
+      (loop []
+        (try
+          (.lock this)
+          (try
+            (let [^:mutable before (System/currentTimeMillis)
+                  ^:mutable ^long timeout TIMEOUT]
+              (while (nil? (set! kace (cast KeepAliveCleanerEntry (.poll this))))
+                (.await waiter timeout TimeUnit/MILLISECONDS)
+                (let [after (System/currentTimeMillis)
+                      elapsed (unchecked-subtract after before)]
+                  (when (> elapsed timeout)
+                    (set! kace (cast KeepAliveCleanerEntry (.poll this)))
+                    (break))
+                  (set! before after)
+                  (set! timeout (unchecked-subtract timeout elapsed)))))
+            (finally (.unlock this)))
+          (when (nil? kace) (break))
+          (let [kas (.getKeepAliveStream kace)]
+            (when (some? kas)
+              (.lock kas)
+              (try
+                (let [hc (.getHttpClient kace)]
+                  (try
+                    (when (and (some? hc) (not (.isInKeepAliveCache hc)))
+                      (let [oldTimeout (.getReadTimeout hc)]
+                        (.setReadTimeout hc TIMEOUT)
+                        (let [^:mutable remainingToRead (.remainingToRead kas)]
+                          (when (> remainingToRead 0)
+                            (let [^:mutable n 0
+                                  ^:mutable ^int retries 0]
+                              (while (and (< n remainingToRead) (< retries MAX_RETRIES))
+                                (set! remainingToRead (unchecked-subtract remainingToRead n))
+                                (set! n (.skip kas remainingToRead))
+                                (when (== n 0) (set! retries (unchecked-inc-int retries))))
+                              (set! remainingToRead (unchecked-subtract remainingToRead n))))
+                          (if (== remainingToRead 0)
+                              (do (.setReadTimeout hc oldTimeout) (.finished hc))
+                              (.closeServer hc)))))
+                    (catch IOException ioe (.closeServer hc))
+                    (finally (.setClosed kas))))
+                (finally (.unlock kas)))))
+          (catch InterruptedException ie))
+        (when (some? kace) (recur))))))

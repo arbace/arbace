@@ -1,0 +1,468 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/util/Cache.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.util)
+
+(import '(java.lang.ref ReferenceQueue SoftReference)
+        '(java.util Arrays HashMap HexFormat Iterator LinkedHashMap Map Queue)
+        '(java.util.concurrent ConcurrentLinkedQueue)
+        '(java.util.concurrent.atomic AtomicInteger)
+        '(java.util.function Consumer Predicate)
+        '(javax.net.ssl SSLSession))
+
+(defclasses
+  (defclass ^:public ^:abstract Cache
+    :type-params [K V]
+
+    (constructor ^:protected [this])
+
+    (method ^:public ^:abstract size ^int [this])
+
+    (method ^:public ^:abstract clear ^void [this])
+
+    (method ^:public ^:abstract put ^void [this ^K key ^V value])
+
+    (method ^:public put ^void [this ^K key ^V value ^boolean canQueue]
+      (.put this key value))
+
+    (method ^:public ^:abstract get ^V [this key])
+
+    (method ^:public ^:abstract remove ^void [this key])
+
+    (method ^:public ^:abstract pull ^V [this key])
+
+    (method ^:public ^:abstract setCapacity ^void [this ^int size])
+
+    (method ^:public ^:abstract setTimeout ^void [this ^int timeout])
+
+    (method ^:public ^:abstract accept ^void [this ^{:tag (CacheVisitor K V)} visitor])
+
+    (method ^:public ^:static newSoftMemoryCache :type-params [K V] ^{:tag (Cache K V)} [^int size]
+      (MemoryCache. true size))
+
+    (method ^:public ^:static newSoftMemoryCache :type-params [K V] ^{:tag (Cache K V)} [^int size
+                                                                                         ^int timeout]
+      (MemoryCache. true size timeout))
+
+    (method ^:public ^:static newSoftMemoryQueue :type-params [K V] ^{:tag (Cache K V)} [^int size
+                                                                                         ^int timeout
+                                                                                         ^int maxQueueSize]
+      (MemoryCache. true size timeout maxQueueSize))
+
+    (method ^:public ^:static newHardMemoryCache :type-params [K V] ^{:tag (Cache K V)} [^int size]
+      (MemoryCache. false size))
+
+    (method ^:public ^:static newNullCache :type-params [K V] ^{:tag (Cache K V)} []
+      NullCache/INSTANCE)
+
+    (method ^:public ^:static newHardMemoryCache :type-params [K V] ^{:tag (Cache K V)} [^int size
+                                                                                         ^int timeout]
+      (MemoryCache. false size timeout))
+
+    (defclass ^:public ^:static EqualByteArray
+      (field ^:private ^:final ^byte/1 b)
+
+      (field ^:private ^int hash)
+
+      (constructor ^:public [this ^byte/1 b] (set! (.-b this) b))
+
+      (method ^:public hashCode ^int [this]
+        (let [^:mutable h hash]
+          (when (and (== h 0) (> (alength b) 0)) (set! hash (set! h (Arrays/hashCode b))))
+          h))
+
+      (method ^:public equals ^boolean [this obj]
+        (if (identical? this obj)
+            true
+            (if-instance [^EqualByteArray other obj] (Arrays/equals (.-b this) (.-b other)) false))))
+
+    (defclass ^:public ^:interface CacheVisitor
+      :type-params [K V]
+
+      (method visit ^void [this ^{:tag (Map K V)} map])))
+
+  (defclass NullCache
+    :extends (Cache K V)
+    :type-params [K V]
+
+    (field ^:static ^:final ^{:tag (Cache Object Object)} INSTANCE (NullCache.))
+
+    (constructor ^:private [this])
+
+    (method ^:public size ^int [this] 0)
+
+    (method ^:public clear ^void [this])
+
+    (method ^:public put ^void [this ^K key ^V value])
+
+    (method ^:public get ^V [this key] nil)
+
+    (method ^:public remove ^void [this key])
+
+    (method ^:public pull ^V [this key] nil)
+
+    (method ^:public setCapacity ^void [this ^int size])
+
+    (method ^:public setTimeout ^void [this ^int timeout])
+
+    (method ^:public accept ^void [this ^{:tag (Cache$CacheVisitor K V)} visitor]))
+
+  (defclass MemoryCache
+    :extends (Cache K V)
+    :type-params [K V]
+
+    (field ^:private ^:static ^:final ^boolean DEBUG false)
+
+    (field ^:private ^:final ^{:tag (Map K (CacheEntry K V))} cacheMap)
+
+    (field ^:private ^int maxSize)
+
+    (field ^:private ^:final ^int maxQueueSize)
+
+    (field ^:private ^long lifetime)
+
+    (field ^:private ^long nextExpirationTime Long/MAX_VALUE)
+
+    (field ^:private ^:final ^{:tag (ReferenceQueue V)} queue)
+
+    (constructor ^:public [this ^boolean soft ^int maxSize]
+      (this. soft maxSize 0 0))
+
+    (constructor ^:public [this ^boolean soft ^int maxSize ^int lifetime]
+      (this. soft maxSize lifetime 0))
+
+    (constructor ^:public [this ^boolean soft ^int maxSize ^int lifetime ^int qSize]
+      (set! (.-maxSize this) maxSize)
+      (set! (.-maxQueueSize this) qSize)
+      (set! (.-lifetime this) (unchecked-multiply lifetime 1000))
+      (if soft (set! (.-queue this) (ReferenceQueue.)) (set! (.-queue this) nil))
+      (set! cacheMap (LinkedHashMap. 1 (float 0.75) true)))
+
+    (method ^:private emptyQueue ^void [this]
+      (when (some? queue)
+        (let [startSize (.size cacheMap)]
+          (while true
+            (let [^{:tag (CacheEntry K V)} entry (cast CacheEntry (.poll queue))]
+              (when (nil? entry) (break))
+              (let [^K key (.getKey entry)]
+                (when (some? key)
+                  (let [^{:tag (CacheEntry K V)} currentEntry (cast
+                                                                CacheEntry
+                                                                (.remove cacheMap key))]
+                    (when (and (some? currentEntry) (not (identical? entry currentEntry)))
+                      (.put cacheMap key currentEntry)))))))
+          (when DEBUG
+            (let [endSize (.size cacheMap)]
+              (when-not (== startSize endSize)
+                (.println System/out
+                          (java-str "*** Expunged "
+                                    (unchecked-subtract-int startSize endSize)
+                                    " entries, "
+                                    endSize
+                                    " entries left"))))))))
+
+    (method ^:private expungeExpiredEntries ^void [this]
+      (.emptyQueue this)
+      (when-not (== lifetime 0)
+        (let [^:mutable ^int cnt 0
+              time (System/currentTimeMillis)]
+          (when-not (> nextExpirationTime time)
+            (set! nextExpirationTime Long/MAX_VALUE)
+            (loop [^{:tag (Iterator (CacheEntry K V))} t (.iterator (.values cacheMap))]
+              (when (.hasNext t)
+                (let [^{:tag (CacheEntry K V)} entry (cast CacheEntry (.next t))]
+                  (cond
+                    (not (.isValid entry time))
+                      (do (.remove t) (set! cnt (unchecked-inc-int cnt)) (recur t))
+                    (> nextExpirationTime (.getExpirationTime entry))
+                      (do
+                        (set! nextExpirationTime (.getExpirationTime entry))
+                        (if-instance [^{:tag (QueueCacheEntry K V)} qe entry]
+                          (do
+                            (.removeIf (.getQueue qe)
+                                       (lambda Predicate ^boolean [^CacheEntry e]
+                                         (not (.isValid e time))))
+                            (recur t))
+                          (recur t)))
+                    :else (recur t)))))
+            (when DEBUG
+              (when-not (== cnt 0)
+                (.println System/out
+                          (java-str "Removed " cnt " expired entries, remaining " (.size cacheMap)))))))))
+
+    (method ^:public ^:synchronized size ^int [this]
+      (.expungeExpiredEntries this)
+      (.size cacheMap))
+
+    (method ^:public ^:synchronized clear ^void [this]
+      (when (some? queue)
+        (for-each [^{:tag (CacheEntry K V)} entry (.values cacheMap)] (.invalidate entry))
+        (while (some? (.poll queue))))
+      (.clear cacheMap))
+
+    (method ^:public put ^void [this ^K key ^V value]
+      (.put this key value false))
+
+    (method ^:public ^:synchronized put ^void [this ^K key ^V value ^boolean canQueue]
+      (.emptyQueue this)
+      (let [expirationTime (if (== lifetime 0)
+                               0
+                               (unchecked-add (System/currentTimeMillis) lifetime))]
+        (when (< expirationTime nextExpirationTime) (set! nextExpirationTime expirationTime))
+        (let [^{:tag (CacheEntry K V)} newEntry (.newEntry this key value expirationTime queue)]
+          (if (or (== maxQueueSize 0) (not canQueue))
+              (let [^{:tag (CacheEntry K V)} oldEntry (cast CacheEntry (.put cacheMap key newEntry))]
+                (when (some? oldEntry) (.invalidate oldEntry)))
+              (let [^{:tag (CacheEntry K V)} entry (cast CacheEntry (.get cacheMap key))]
+                (switch entry
+                  [^{:tag (QueueCacheEntry K V)} qe]
+                    (do
+                      (.putValue qe newEntry)
+                      (when DEBUG
+                        (.println System/out (java-str "QueueCacheEntry= " qe))
+                        (let [i (AtomicInteger. 1)]
+                          (.forEach (.stream (.-queue qe))
+                                    (lambda Consumer ^void [^CacheEntry e]
+                                      (.println System/out (java-str (.getAndIncrement i) "= " e)))))))
+                  (nil :default)
+                    (.put cacheMap key (QueueCacheEntry. key newEntry expirationTime maxQueueSize)))
+                (when DEBUG
+                  (.println System/out
+                            (java-str "Cache entry added: key="
+                                      (.toString key)
+                                      ", class="
+                                      (when (some? entry) (.getName (.getClass entry))))))))
+          (when (and (> maxSize 0) (> (.size cacheMap) maxSize))
+            (.expungeExpiredEntries this)
+            (when (> (.size cacheMap) maxSize)
+              (let [^{:tag (Iterator (CacheEntry K V))} t (.iterator (.values cacheMap))
+                    ^{:tag (CacheEntry K V)} lruEntry (cast CacheEntry (.next t))]
+                (when DEBUG
+                  (.println System/out
+                            (java-str "** Overflow removal "
+                                      (.getKey lruEntry)
+                                      " | "
+                                      (.getValue lruEntry))))
+                (.remove t)
+                (.invalidate lruEntry)))))))
+
+    (method ^:public ^:synchronized get ^V [this key]
+      (.emptyQueue this)
+      (let [^{:tag (CacheEntry K V)} entry (cast CacheEntry (.get cacheMap key))]
+        (when (some? entry)
+          (if (and (> lifetime 0) (not (.isValid entry (System/currentTimeMillis))))
+              (do
+                (.remove cacheMap key)
+                (when DEBUG (.println System/out "Ignoring expired entry"))
+                nil)
+              (if-instance [^{:tag (QueueCacheEntry K V)} qe entry]
+                (let [^V result (.getValue qe lifetime)]
+                  (when (.isEmpty qe) (.removeImpl this key))
+                  result)
+                (.getValue entry))))))
+
+    (method ^:public ^:synchronized remove ^void [this key]
+      (.emptyQueue this)
+      (.removeImpl this key))
+
+    (method ^:private removeImpl ^void [this key]
+      (let [^{:tag (CacheEntry K V)} entry (cast CacheEntry (.remove cacheMap key))]
+        (when (some? entry) (.invalidate entry))))
+
+    (method ^:public ^:synchronized pull ^V [this key]
+      (.emptyQueue this)
+      (let [^{:tag (CacheEntry K V)} entry (cast CacheEntry (.remove cacheMap key))]
+        (when (some? entry)
+          (let [time (if (== lifetime 0) 0 (System/currentTimeMillis))]
+            (if (.isValid entry time)
+                (let [^V value (.getValue entry)] (.invalidate entry) value)
+                (do (when DEBUG (.println System/out "Ignoring expired entry")) nil))))))
+
+    (method ^:public ^:synchronized setCapacity ^void [this ^int size]
+      (.expungeExpiredEntries this)
+      (when (and (> size 0) (> (.size cacheMap) size))
+        (let [^{:tag (Iterator (CacheEntry K V))} t (.iterator (.values cacheMap))]
+          (loop [^int i (unchecked-subtract-int (.size cacheMap) size)]
+            (when (> i 0)
+              (let [^{:tag (CacheEntry K V)} lruEntry (cast CacheEntry (.next t))]
+                (when DEBUG
+                  (.println System/out
+                            (java-str "** capacity reset removal "
+                                      (.getKey lruEntry)
+                                      " | "
+                                      (.getValue lruEntry))))
+                (.remove t)
+                (.invalidate lruEntry)
+                (recur (unchecked-dec-int i)))))))
+      (set! maxSize (^[int int] Math/max size 0))
+      (when DEBUG (.println System/out (java-str "** capacity reset to " size))))
+
+    (method ^:public ^:synchronized setTimeout ^void [this ^int timeout]
+      (.emptyQueue this)
+      (set! lifetime (if (> timeout 0) (unchecked-multiply timeout 1000) 0))
+      (when DEBUG (.println System/out (java-str "** lifetime reset to " timeout))))
+
+    (method ^:public ^:synchronized accept ^void [this ^{:tag (Cache$CacheVisitor K V)} visitor]
+      (.expungeExpiredEntries this)
+      (let [^{:tag (Map K V)} cached (.getCachedEntries this)] (.visit visitor cached)))
+
+    (method ^:private getCachedEntries ^{:tag (Map K V)} [this]
+      (let [^{:tag (Map K V)} kvmap (HashMap/newHashMap (.size cacheMap))]
+        (for-each [^{:tag (CacheEntry K V)} entry (.values cacheMap)]
+          (.put kvmap (.getKey entry) (.getValue entry)))
+        kvmap))
+
+    (method ^:protected newEntry ^{:tag (CacheEntry K V)} [this ^K key ^V value ^long expirationTime
+                                                           ^{:tag (ReferenceQueue V)} queue]
+      (if (some? queue)
+          (SoftCacheEntry. key value expirationTime queue)
+          (HardCacheEntry. key value expirationTime)))
+
+    (defclass ^:private ^:interface CacheEntry
+      :type-params [K V]
+
+      (method isValid ^boolean [this ^long currentTime])
+
+      (method invalidate ^void [this])
+
+      (method getKey ^K [this])
+
+      (method getValue ^V [this])
+
+      (method getExpirationTime ^long [this]))
+
+    (defclass ^:private ^:static HardCacheEntry
+      :implements [(CacheEntry K V)]
+      :type-params [K V]
+
+      (field ^:private ^K key)
+
+      (field ^:private ^V value)
+
+      (field ^:private ^long expirationTime)
+
+      (constructor [this ^K key ^V value ^long expirationTime]
+        (set! (.-key this) key)
+        (set! (.-value this) value)
+        (set! (.-expirationTime this) expirationTime))
+
+      (method ^:public getKey ^K [this] key)
+
+      (method ^:public getValue ^V [this] value)
+
+      (method ^:public getExpirationTime ^long [this] expirationTime)
+
+      (method ^:public isValid ^boolean [this ^long currentTime]
+        (let [valid (<= currentTime expirationTime)] (when-not valid (.invalidate this)) valid))
+
+      (method ^:public invalidate ^void [this]
+        (set! key nil)
+        (set! value nil)
+        (set! expirationTime -1)))
+
+    (defclass ^:private ^:static SoftCacheEntry
+      :extends (SoftReference V)
+      :implements [(CacheEntry K V)]
+      :type-params [K V]
+
+      (field ^:private ^K key)
+
+      (field ^:private ^long expirationTime)
+
+      (constructor [this ^K key ^V value ^long expirationTime ^{:tag (ReferenceQueue V)} queue]
+        (super. value queue)
+        (set! (.-key this) key)
+        (set! (.-expirationTime this) expirationTime))
+
+      (method ^:public getKey ^K [this] key)
+
+      (method ^:public getValue ^V [this] (.get this))
+
+      (method ^:public getExpirationTime ^long [this] expirationTime)
+
+      (method ^:public isValid ^boolean [this ^long currentTime]
+        (let [valid (and (<= currentTime expirationTime) (some? (.get this)))]
+          (when-not valid (.invalidate this))
+          valid))
+
+      (method ^:public invalidate ^void [this]
+        (.clear this)
+        (set! key nil)
+        (set! expirationTime -1))
+
+      (method ^:public toString ^String [this]
+        (if-instance [^SSLSession se (.get this)]
+          (.formatHex (HexFormat/of) (.getId se))
+          (.toString super))))
+
+    (defclass ^:private ^:static QueueCacheEntry
+      :implements [(CacheEntry K V)]
+      :type-params [K V]
+
+      (field ^:private ^:final ^int MAXQUEUESIZE)
+
+      (field ^:final ^boolean DEBUG false)
+
+      (field ^:private ^K key)
+
+      (field ^:private ^long expirationTime)
+
+      (field ^:final ^{:tag (Queue (CacheEntry K V))} queue (ConcurrentLinkedQueue.))
+
+      (constructor [this ^K key ^{:tag (CacheEntry K V)} entry ^long expirationTime ^int maxSize]
+        (set! (.-key this) key)
+        (set! (.-expirationTime this) expirationTime)
+        (set! (.-MAXQUEUESIZE this) maxSize)
+        (.add queue entry))
+
+      (method ^:public getKey ^K [this] key)
+
+      (method ^:public getValue ^V [this] (.getValue this 0))
+
+      (method ^:public getValue ^V [this ^long lifetime]
+        (let [time (if (== lifetime 0) 0 (System/currentTimeMillis))]
+          (loop []
+            (let [entry (cast CacheEntry (.poll queue))]
+              (when (nil? entry) (return nil))
+              (when (.isValid entry time) (return (.getValue entry)))
+              (.invalidate entry))
+            (when-not (.isEmpty queue) (recur)))
+          nil))
+
+      (method ^:public getExpirationTime ^long [this] expirationTime)
+
+      (method ^:public setExpirationTime ^void [this ^long time]
+        (set! expirationTime time))
+
+      (method ^:public putValue ^void [this ^{:tag (CacheEntry K V)} entry]
+        (when DEBUG
+          (.println System/out
+                    (java-str "Added to queue (size="
+                              (.size queue)
+                              "): "
+                              (.toString (.getKey entry))
+                              ",  "
+                              entry)))
+        (set! expirationTime (.getExpirationTime entry))
+        (when (>= (.size queue) MAXQUEUESIZE) (.remove queue))
+        (.add queue entry))
+
+      (method ^:public isValid ^boolean [this ^long currentTime]
+        (let [valid (and (<= currentTime expirationTime) (not (.isEmpty queue)))]
+          (when-not valid (.invalidate this))
+          valid))
+
+      (method ^:public isValid ^boolean [this]
+        (.isValid this (System/currentTimeMillis)))
+
+      (method ^:public invalidate ^void [this]
+        (.clear this)
+        (set! key nil)
+        (set! expirationTime -1))
+
+      (method ^:public clear ^void [this]
+        (.forEach queue (method-ref Consumer [CacheEntry] CacheEntry/.invalidate))
+        (.clear queue))
+
+      (method ^:public isEmpty ^boolean [this] (.isEmpty queue))
+
+      (method ^:public getQueue ^{:tag (Queue (CacheEntry K V))} [this] queue))))

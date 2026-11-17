@@ -1,0 +1,63 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/ssl/PostHandshakeContext.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.ssl)
+
+(import '(java.io IOException)
+        '(java.nio BufferOverflowException BufferUnderflowException ByteBuffer)
+        '(java.util ArrayList))
+
+(defclass ^:final PostHandshakeContext
+  :extends HandshakeContext
+
+  (constructor :throws [IOException] [this ^TransportContext context]
+    (super. context)
+    (when-not (.useTLS13PlusSpec (.-negotiatedProtocol this))
+      (throw (.fatal (.-conContext this)
+                     Alert/UNEXPECTED_MESSAGE
+                     (java-str "Post-handshake not supported in "
+                               (.-name (.-negotiatedProtocol this))))))
+    (set! (.-localSupportedCertSignAlgs this)
+          (ArrayList. (.getLocalSupportedSignatureSchemes (.-conSession context))))
+    (when-not (.-isQuic (.-sslConfig context))
+      (.putIfAbsent (.-handshakeConsumers this)
+                    (.-id SSLHandshake/KEY_UPDATE)
+                    SSLHandshake/KEY_UPDATE))
+    (when (.-isClientMode (.-sslConfig context))
+      (.putIfAbsent (.-handshakeConsumers this)
+                    (.-id SSLHandshake/NEW_SESSION_TICKET)
+                    SSLHandshake/NEW_SESSION_TICKET))
+    (set! (.-handshakeFinished this) true)
+    (set! (.-handshakeSession this) (.-conSession context)))
+
+  (method kickstart :throws [IOException] ^void [this]
+    (SSLHandshake/kickstart this))
+
+  (method dispatch :throws [IOException] ^void [this ^byte handshakeType ^ByteBuffer fragment]
+    (let [consumer (cast SSLConsumer (.get (.-handshakeConsumers this) handshakeType))]
+      (when (nil? consumer)
+        (throw (.fatal (.-conContext this)
+                       Alert/UNEXPECTED_MESSAGE
+                       (java-str "Unexpected post-handshake message: "
+                                 (SSLHandshake/nameOf handshakeType)))))
+      (try
+        (.consume consumer this fragment)
+        (catch UnsupportedOperationException unsoe
+          (throw (.fatal (.-conContext this)
+                         Alert/UNEXPECTED_MESSAGE
+                         (java-str "Unsupported post-handshake message: "
+                                   (SSLHandshake/nameOf handshakeType))
+                         unsoe)))
+        (catch [BufferUnderflowException BufferOverflowException] be
+          (throw (.fatal (.-conContext this)
+                         Alert/DECODE_ERROR
+                         (java-str "Illegal handshake message: "
+                                   (SSLHandshake/nameOf handshakeType))
+                         be))))))
+
+  (method ^:static isConsumable ^boolean [^TransportContext context ^byte handshakeType]
+    (cond
+      (== handshakeType (.-id SSLHandshake/KEY_UPDATE))
+        (if (.-isQuic (.-sslConfig context)) false (.useTLS13PlusSpec (.-protocolVersion context)))
+      (== handshakeType (.-id SSLHandshake/NEW_SESSION_TICKET))
+        (.-isClientMode (.-sslConfig context))
+      :else false)))

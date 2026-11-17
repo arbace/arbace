@@ -1,0 +1,108 @@
+(ns arbace.rust.front.collect-check
+  "RF7's judge (bin/rust-front collect-check): each program's collected items by arbace.rust.front.collect over
+  arbace.rust.front.lower's HIR of the helper's expanded crate (DIR/NAME.exp.edn) and resolutions (DIR/NAME.res.edn),
+  against the helper's --iface (DIR/NAME.iface.edn: rustc's generics_of, type_of, fn_sig, explicit_clauses_of, ADTs
+  and impls as rustc prints them), item by item: an item is keyed by its printed def path and kind (a multiset), equal
+  when every field is; per program the differing items (COLLECT_VERBOSE=1), our lines in COLLECT_DUMP=DIR; a negative
+  control (one program's items against another's oracle) must differ. --ours: the native reader, arbace.rust.front.expand
+  and arbace.rust.front.resolve in place of the helper's crate and resolutions (the pipeline)."
+  (:require [arbace.rust.front.lower :as lower] [arbace.rust.front.collect :as collect] [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- read-all [file]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp file)))]
+    (loop [acc []] (let [x (read rdr false ::eof)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(def ^:private source-dirs ["test/rust/synthetic" "test/rust/sample" "test/rust/eval" "test/rust/front"])
+(def ^:dynamic *dir* nil)
+(defn- source-file [n]
+  (or (let [f (File. (str *dir* "/" n ".src"))] (when (.exists f) (str/trim (slurp f))))   ; a crate's root file (bin/rust-front crates)
+      (some #(let [f (File. (str % "/" n ".rs"))] (when (.exists f) (str f))) source-dirs)))
+
+(defn- key-of [m] [(:def m) (:kind m)])
+
+(defn- compare-items
+  "The oracle's items against ours as multisets by key: [equal-count total differing-pairs missing extra]"
+  [want got]
+  (let [gm (atom (group-by key-of got))
+        res (for [w want]
+              (let [k (key-of w) cands (get @gm k)]
+                (if (empty? cands)
+                  [:missing w nil]
+                  (let [hit (or (first (filter #(= w %) cands)) (first cands))]
+                    (swap! gm update k (fn [cs] (let [i (.indexOf ^java.util.List cs hit)] (vec (concat (subvec (vec cs) 0 i) (subvec (vec cs) (inc i)))))))
+                    [(if (= w hit) :equal :differ) w hit]))))
+        res (vec res)]
+    {:equal (count (filter #(= :equal (first %)) res))
+     :total (count want)
+     :differ (filter #(= :differ (first %)) res)
+     :missing (filter #(= :missing (first %)) res)
+     :extra (mapcat val @gm)}))
+
+(defn- field-class [w g]
+  (let [ks (filter #(not= (get w %) (get g %)) [:generics :sig :ty :variants :trait-ref :self :predicates])]
+    (str/join "," (map name ks))))
+
+(defn -main [dir & args]
+  (alter-var-root #'*dir* (constantly dir))
+  (let [ours? (= "--ours" (first args))
+        names (if ours? (rest args) args)
+        verbose (System/getenv "COLLECT_VERBOSE")
+        dump (System/getenv "COLLECT_DUMP")
+        std-file (str dir "/std-names.edn")
+        std (collect/load-std std-file)
+        std-generics (lower/load-std-generics std-file)
+        pipeline (when ours?
+                   (require 'arbace.rust.front.expand 'arbace.rust.front.resolve)
+                   {:macros ((resolve 'arbace.rust.front.expand/load-std-macros) std-file)
+                    :names ((resolve 'arbace.rust.front.resolve/load-std-names) std-file)})
+        got-all (atom {})
+        classes (atom {})
+        results
+        (vec (for [n names
+                   :let [oracle (File. (str dir "/" n ".iface.edn"))]
+                   :when (and (.exists oracle) (pos? (.length oracle)))]
+               (let [want (mapv second (read-all oracle))
+                     src (slurp (source-file n))
+                     got (try
+                           (let [[crate res mark-crates]
+                                 (if ours?
+                                   (let [mc (atom {})
+                                         c (with-bindings {(resolve 'arbace.rust.front.expand/*mark-crates*) mc}
+                                             ((resolve 'arbace.rust.front.expand/expand-file) (source-file n) (if (= n "edition2015") 2015 2024) (:macros pipeline)))
+                                         r ((resolve 'arbace.rust.front.resolve/resolve-crate) c (:names pipeline) {:source src})]
+                                     [c r @mc])
+                                   [(first (read-all (str dir "/" n ".exp.edn")))
+                                    (let [f (File. (str dir "/" n ".res.edn"))] (when (.exists f) (read-all f)))])
+                                 res-map (into {} (for [[_ s rs] res] [s rs]))
+                                 hir (lower/lower-crate crate res-map {:file (.getCanonicalPath (File. ^String (source-file n))) :mark-crates mark-crates :std-generics std-generics})]
+                             (collect/collect-crate hir res-map std {:source src :edition (let [f (File. (str dir "/" n ".edition"))] (if (.exists f) (Long/parseLong (str/trim (slurp f))) (if (= n "edition2015") 2015 2024)))}))
+                           (catch Throwable e (binding [*out* *err*] (println n "ERROR" e) (.printStackTrace e)) []))
+                     cmp (compare-items want got)]
+                 (swap! got-all assoc n got)
+                 (when dump (spit (str dump "/" n ".iface.edn") (str/join "\n" (map collect/item-form got))))
+                 (doseq [[_ w g] (:differ cmp)] (swap! classes update (str "differs: " (field-class w g)) (fnil inc 0)))
+                 (when (seq (:missing cmp)) (swap! classes update "missing" (fnil + 0) (count (:missing cmp))))
+                 (when (seq (:extra cmp)) (swap! classes update "extra" (fnil + 0) (count (:extra cmp))))
+                 (assoc cmp :name n))))
+        tot (reduce + (map :total results))
+        eq (reduce + (map :equal results))
+        whole (count (filter #(and (= (:equal %) (:total %)) (empty? (:extra %))) results))]
+    (doseq [r results]
+      (println (format "%-28s %4d of %4d items equal%s" (:name r) (:equal r) (:total r)
+                       (if (seq (:extra r)) (str ", " (count (:extra r)) " extra") "")))
+      (when verbose
+        (doseq [[_ w g] (take 6 (:differ r))]
+          (println "    want:" (collect/item-form w))
+          (println "    got: " (collect/item-form g)))
+        (doseq [[_ w] (take 4 (:missing r))] (println "    missing:" (collect/item-form w)))
+        (doseq [g (take 4 (:extra r))] (println "    extra:  " (collect/item-form g)))))
+    (println "classes of the items not equal:")
+    (doseq [[c k] (sort-by (comp - val) @classes)] (println (format "  %4d  %s" k c)))
+    (println (format "collect-check: %d of %d items equal to rustc's (the helper's --iface), %d of %d programs whole%s"
+                     eq tot whole (count results) (if ours? " (input: the pipeline)" " (input: the helper's expanded crates and resolutions)")))
+    (when (>= (count results) 2)
+      (let [[a b] (map :name results)
+            c (compare-items (mapv second (read-all (str dir "/" b ".iface.edn"))) (get @got-all a))]
+        (println "control (" a "against" b "):" (if (= (:equal c) (:total c)) "PASSED (a bug)" "differs, as it must"))))
+    (System/exit 0)))
