@@ -306,6 +306,55 @@
       (oracle-rejection? st log) [id "oracle-rejected" "" (first-error) ""]
       :else [id "ir-error" "" (str "status " st) ""])))
 
+(defn- c-target-input
+  "CP400 (a), CP401 (a): the C target ci read the lowered C on (ARBACE_C_HOST as bin/cppi's c_target_host exports it, else
+  arbace.cpp.run's default): :own for Arbace's c/target, else what it is (never a path of the host: the records hold none)."
+  []
+  (let [e (System/getenv "ARBACE_C_HOST")
+        dir (if (and e (not= e "")) e (if (= "gcc" (System/getenv "ARBACE_C_TARGET")) "test/c/host" "c/target"))
+        canon #(.getCanonicalPath (java.io.File. ^String %))]
+    (cond (= (canon dir) (canon "c/target")) :own
+          (= (canon dir) (canon "test/c/host")) "gcc's recorded answers, test/c/host"
+          :else "another C target (ARBACE_C_HOST)")))
+
+(defn- ir-input
+  "CP401 (a): who made an IR, from its directory's route file (bin/lib/cppi/route.bash; bin/cppi runtime-build's units, whose
+  absent route file is clang's, DEFAULT, as runtime-judge reads it): :own for Arbace's route (ours), else clang's."
+  [^String dir & [default]]
+  (case (or (slurp? (str dir "/route")) default)
+    "ours" :own
+    "clang" (if (seq (System/getenv "CPPI_LIVE")) "clang++ -O0, live (CPPI_LIVE)" "clang's -O0 IR from its pack (test/cpp/records/)")
+    nil "no route recorded: no IR made"
+    "another route"))
+
+(defn write-inputs
+  "CP401 (a) (taken overnight, round 52; CP356 (a)): the inputs of the programs of ROWS run in WORK, [ID {:ir V :ci-target V}] a
+  program (test/crops/crops.edn's :own-inputs :cpp), into INPUTSF, the rows of the run's CORPORA replaced and the others kept (a
+  whole run and a sampling share the level's file); and the units of the runtime the run linked (CPPI_RUNTIME_DIR, bin/cppi
+  runtime-build's OUT: OUT/units.tsv, OUT/units/U/route) into test/cpp/runtime/inputs-linux-amd64.edn, every unit. Read by
+  crops.score's :case-inputs (test/crops/independence.edn's C++ eval and AOT facts)."
+  [work rows corpora ^String inputsf what]
+  (let [ct (c-target-input)
+        in? (fn [id] (some #(str/starts-with? id (str % "/")) corpora))
+        old (let [f (java.io.File. inputsf)] (if (.exists f) (read-string (slurp f)) []))
+        new (for [[id] rows] [id {:ir (ir-input (str work "/files/" id)) :ci-target ct}])
+        all (sort-by first (concat (remove (comp in? first) old) new))
+        head ";; Read with the Clojure reader. CP401 (a) (taken overnight, round 52; doc/cpp/CPP-SURVEY.md, \"As built: n-cpp-indep\"):\n"
+        rt (System/getenv "CPPI_RUNTIME_DIR")
+        rtf "test/cpp/runtime/inputs-linux-amd64.edn"]
+    (spit inputsf (str head ";; each program's inputs in " what ", [ID {:ir V :ci-target V}]: :ir :own when Arbace's route made its IR\n"
+                       ";; (WORK/files/ID/route ours), :ci-target :own when ci read its lowered C on c/target; written by --record (a run's\n"
+                       ";; corpora's rows replaced). A program whose every input is :own scores 1, any other 0.5 (crops.edn's :own-inputs :cpp).\n[\n"
+                       (str/join "\n" (map pr-str all)) "\n]\n"))
+    (println "recorded" inputsf (str "(" (count (filter #(= :own (:ir (second %))) new)) " of " (count new) " programs' IR by our route, ci target " (pr-str ct) ")"))
+    (when (and rt (.exists (java.io.File. (str rt "/units.tsv"))))
+      (let [us (vec (for [[u] (tsv (str rt "/units.tsv"))] [u {:ir (ir-input (str rt "/units/" u) "clang") :ci-target ct}]))]
+        (spit rtf (str head ";; the units of the lowered runtime the run checks link (bin/cppi runtime-build's units.tsv), [UNIT {:ir V :ci-target V}]:\n"
+                       ";; :ir :own when Arbace's route made the unit's IR (OUT/units/U/route ours, CPPI_RUNTIME_ROUTE), :ci-target as the programs';\n"
+                       ";; the run checks' stages the mean of the programs' split and this runtime's share (CP333 (b), the user 2026-11-09).\n[\n"
+                       (str/join "\n" (map pr-str us)) "\n]\n"))
+        (println "recorded" rtf (str "(" (count (filter #(= :own (:ir (second %))) us)) " of " (count us) " units by our route)"))))))
+
 (defn run-judge
   "run-judge WORK LEVEL [--record] CORPUS...: LEVEL eval (bin/cppi check: WORK/CORPUS/nodes.tsv, run.tsv) or aot (check --aot:
   the same, and the interpreted record beside); each program's result against g++'s run and the classes (test/cpp/divergences.edn;
@@ -404,7 +453,10 @@
         (spit timesf (str ";; each program's seconds in bin/cppi check" (if aot " --aot" "") "'s last recorded run (GT8, GTS205's subsets): ID [IR "
                           (if aot "BUILD TRANSLATE RUN" "LOWER BUILD RUN") "], the light tier's (4 jobs, 3 threads); nil: the step did not run.\n{\n"
                           (str/join "\n" (for [[k v] tall] (str " " (pr-str k) " " (pr-str v)))) "\n}\n"))
-        (println "recorded" recf "and" timesf)))
+        (println "recorded" recf "and" timesf)
+        ;; CP401 (a): the programs' and the runtime's inputs beside the record (crops.score's :case-inputs)
+        (write-inputs work rows corpora (str "test/cpp/check" (when aot "-aot") "-inputs-linux-amd64.edn")
+                      (str "bin/cppi check" (when aot " --aot") "'s records (test/cpp/check" (when aot "-aot") "-linux-amd64.edn and the samplings')"))))
     (let [fids (set (map first failing))
           failing (concat failing (remove #(fids (first %)) ((resolve 'arbace.c.run/report-record) cmp)) cfail)]
       (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
@@ -433,4 +485,11 @@
     "runtime-judge" (runtime-judge (first args))
     "run-judge" (run-judge args)
     "divergences" (divergences (or (first args) "eval") (second args))
-    (do (println "cppi check: judge or runtime-judge") (System/exit 2))))
+    ;; inputs WORK LEVEL CORPUS... (CP401 (a)): the inputs records written from a kept run's WORK alone, its record untouched
+    ;; (bin/cppi inputs [--aot] [WORK] CORPUS...; --record writes them with the record)
+    "inputs" (let [[work level & corpora] args aot (= level "aot")
+                   rows (for [c corpora [id] (tsv (str work "/" c "/list.tsv"))] [id])]
+               (when (empty? rows) (println "cppi inputs: no program listed in" work "for" (str/join " " corpora)) (System/exit 2))
+               (write-inputs work rows corpora (str "test/cpp/check" (when aot "-aot") "-inputs-linux-amd64.edn")
+                             (str "bin/cppi check" (when aot " --aot") "'s records (test/cpp/check" (when aot "-aot") "-linux-amd64.edn and the samplings')")))
+    (do (println "cppi check: judge, runtime-judge, run-judge, divergences or inputs") (System/exit 2))))

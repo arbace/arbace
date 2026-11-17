@@ -8395,3 +8395,88 @@ On the branch after its merge into next (77630727b), test/cpp/divergences-dg.edn
 `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 1,083 / 103 to
 5,309 / 243 / 943 (36 n/a); the crop's completeness 91 (0.9137, unchanged), without by design 96 to 93 (0.9603 to 0.9274; the read cell's
 98 to 85). No key moves (a record and its classes).
+
+## As built: n-cpp-indep (2026-11-17/18; branch `n-cpp-indep` from next 42bf8614b; night round 52, memory-free: each process under 1 GiB)
+
+### Where C++'s independence is lost (72.4: read 0.712, eval 0.5, AOT 0.5, print 1, judge 0.907)
+
+Eval and AOT lose the most, 0.5 each (read 0.288, judge 0.093). Both for the same three reasons, none of them the programs' IR any
+more (the route is `auto` since night 11, CP240 (b): the gate's samples-runtime run of 2026-11-16 made 14 of its 15 programs' IR by
+Arbace's route, `WORK/files/ID/route`, coroutine.cpp alone clang's pack):
+
+1. **No record says which route made a program's IR** (CP356, proposed on cpp-s2, not built): the route files stay in the run's WORK,
+   so `independence.edn`'s facts could not count them and stayed a stated 0.5.
+2. **ci reads the lowered C on gcc's recorded answers**, `test/c/host` (`arbace.cpp.run`'s `-main`, runtime-ci's key), where C, llvmi
+   and (since RIND4 (a)) rsi read Arbace's own `c/target`; runtime-ci's overrides (`test/cpp/runtime/ci/snprintf_lite.c`: `<stdarg.h>`,
+   `<stdio.h>`) even read the host's installed headers (no sysroot). By RFP53 (a)'s rule (Rust's C7) no case on it is own.
+3. **The runtime is clang's IR** (`cppi_runtime_route_default=clang`, P21 (b) not flipped): 0 of 198 units by our route.
+
+### Built
+
+- **CP400 (a) (taken overnight, round 52): ci on Arbace's own C target**, RIND4 (a)'s for C++. `bin/cppi` sources
+  `bin/lib/repr-c/sysroot.bash` and calls `c_target_host` (ARBACE_C_HOST: `c/target` by default, `test/c/host` under
+  `ARBACE_C_TARGET=gcc`, the oracle tier's); `arbace.cpp.run`'s `-main` loads that host (its own default `c/target`); runtime-ci calls
+  `c_sysroot` (the overrides' headers from Arbace's sysroot, c/include and musl's tarball, never the host's /usr/include) and its two
+  keys hash `$chost` and the sysroot's name in place of `test/c/host`: the next runtime-ci reads the runtime again (about 40 min, 3 GB).
+  Behaviour: c/target's `predefined/` and `has.tsv` are byte for byte test/c/host's (`diff -rq`: only host.edn's comments and
+  search.txt differ; the lowered C has no `#include`), so a program's read is the same; the overrides' read moves from the host's
+  musl headers to the tarball's (the day's proof below).
+- **CP401 (a) (taken overnight, round 52): the run checks' inputs as records, CP356 (a) on RFP53 (a)'s rule and the user's CP333 (b).**
+  `arbace.cpp.check`'s `run-judge --record` (and the new `bin/cppi inputs [--aot] [WORK] [CORPUS...]`, from a kept WORK, the record
+  untouched) writes `test/cpp/check[-aot]-inputs-linux-amd64.edn`, `[ID {:ir V :ci-target V}]` a program (`:ir :own` when the route
+  file says ours, `:ci-target :own` when ARBACE_C_HOST is c/target; a run's corpora's rows replaced, so the whole run and the
+  sampling share the level's file) and `test/cpp/runtime/inputs-linux-amd64.edn`, every unit of the runtime the run linked
+  (`CPPI_RUNTIME_DIR`, exported by bin/lib/cppi/check and check-aot; an absent route file clang's, as runtime-judge reads it).
+  `test/crops/crops.edn`'s `:own-inputs :cpp` names `:ir` and `:ci-target`; `crops.score`'s `:case-inputs` takes `:runtime FILE`:
+  the stage is the mean of the programs' split ((N + 0.5 M) / cases) and the runtime's share ((own + 0.5 rest) / units), CP333 (b);
+  `independence.edn`'s C++ eval and AOT facts name both files. The records are written tonight from the gate's run of next
+  (2026-11-16, its WORK's route files copied, `ARBACE_C_TARGET=gcc` so that they say what that run read): 14 of 15 programs by our
+  route, all on test/c/host, the runtime 0 of 198: 0 of 82 cases own, eval and AOT 0.5, **independence 72.4, unchanged** (now
+  counted, not stated). The self-test (`bin/crops-score --self-test`, every `--judge`): 50 of 81 own with a runtime of 62 of 198
+  gives 0.733; its control, ci on test/c/host, 0.500; with `own-case?` broken (the first input alone) the control fails as it must.
+
+### Checked (one process at a time, peaks by busybox `time -v`)
+
+| check | result |
+|---|---|
+| `bin/crops-score --self-test` | every test passes, every control fails; broken rule: 4 failures (0.5 GB) |
+| `bin/cppi inputs` / `--aot` over next's copied WORK (`.tmp/nw/`) | 14 of 15 by our route, 0 of 198 units (0.5 GB) |
+| trial (not committed): the three files' `:ci-target :own` | eval and AOT 0.543, independence 74.1 |
+| `arbace.cpp.run check-c` on samples' p1-first, vexing, bitfields lowered C, ARBACE_C_HOST c/target and test/c/host | ok 3 of 3 both (0.98 GB, 1.0 GB) |
+| `bin/cppi divergences`, `--aot`; `ARBACE_C_TARGET=bogus` | as before; refused, exit 2 |
+| `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check` | 0 problems each (53 of 56 cells; crops-score exit 0; 9 pairs) |
+
+### The day's proofs and records (main host, one at a time; the commands as the gate runs them)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace CPPI_THREADS=2 CPPI_CI_MEMLIMIT=3GiB
+bin/cppi runtime-ci                                         # CP400 (a): the runtime read again on c/target (key moved): ~40 min, 3 GB
+bin/cppi check --only test/cpp/essential-check.txt          # cpp-check-essential on it: ~10 min, 3-5 GB
+bin/cppi check --record                                     # samples+runtime, writes the record and both inputs files: ~45 min, 2-6 GB
+bin/cppi check --aot --record                               # ~60 min, 4-7 GB
+bin/cppi check --corpus gxx-dg-run --sample 25 --record     # the sampling under auto from the packs (no clang): ~40 min, 2-6 GB
+bin/cppi check --aot --corpus gxx-dg-run --sample 25 --record
+bin/reap --record && bin/crops-score --record && bin/crops-score --judge --strict && bin/records-check
+```
+
+A recorded pass lost under c/target is a regression the judge names; the overrides' read (snprintf_lite.c) is the one change of input.
+
+### Projected
+
+| after | eval, AOT | independence |
+|---|---|---|
+| tonight (records from next's run, test/c/host) | 0.5 | 72.4 |
+| the day's samples+runtime `--record` on c/target (14 of 82 own) | 0.543 | 74.1 (measured as a trial) |
+| and the samplings' `--record` (about 55 of 67 by our route, cpp-s3's 69 of 82 generated) | about 0.71 | about 81 |
+| and P21 (b)'s flip, `cppi_runtime_route_default=auto` (76 of 198 units, CP348 (a)'s list) | about 0.81 | about 85 |
+
+### Proposed
+
+- **CP402: the sampling's run checks on stage 0.** The pack `cpp-ir-gxx-dg-run` (night 8) covers the every-25th sampling, but its
+  parts are only the oracle tier's live ones (cpp-check-oracle). (a) `:phase :weekly` parts `gxx-dg-run-every-25` of cpp-check and
+  cpp-aot (`bin/cppi check [--aot] --corpus gxx-dg-run --sample 25`, auto from the packs), once the day's run above passes; (b) as now.
+  **Recommended: (a)**, after the day's run.
+- **CP403: P21 (b)'s flip** (the runtime by auto), the largest remaining step of eval and AOT; its proofs are cpp-s2's commands
+  (`CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build`, runtime-ci, the run checks on it). **Recommended: (a)** on the next night with room.
+
+Scratch: `.tmp/nw/` (next's WORK's route files and lists, the runtime's units), `.tmp/p400/` (the check-c probe).

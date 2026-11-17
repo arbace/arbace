@@ -10319,3 +10319,15 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-18: n-cpp-indep, C++'s eval and AOT independence counted from records (CP400 (a), CP401 (a), taken overnight, round 52)
+
+Branch `n-cpp-indep` from next 42bf8614b. C++'s independence 72.4 loses most in eval and AOT (0.5 each): the route that makes the
+programs' IR is Arbace's for 14 of 15 programs since night 11, but no record said so (CP356), ci read the lowered C on gcc's recorded
+test/c/host (and runtime-ci's overrides on the host's headers), and the runtime is clang's IR (P21 (b)). CP400 (a): bin/cppi's ci on
+c/target by c_target_host and c_sysroot, as rsi's RIND4 (a) (runtime-ci's key moves: one re-read by day). CP401 (a): run-judge
+--record and `bin/cppi inputs` write the programs' and the runtime's inputs records; crops.score's :case-inputs takes :runtime, the
+stage the mean of both (the user's CP333 (b)); facts in test/crops/independence.edn. Written tonight from the gate's run of next of
+2026-11-16 (on test/c/host): 72.4 unchanged; projected 74 after the day's samples+runtime records, about 81 with the samplings',
+about 85 with P21 (b). Alternatives: counting the programs alone (CP333 (a), 0.75 a program on a clang runtime) against the user's
+CP333 (b); leaving ci on test/c/host (no case own by RFP53's C7). doc/cpp/CPP-SURVEY.md, "As built: n-cpp-indep".

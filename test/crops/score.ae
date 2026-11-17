@@ -235,8 +235,11 @@
 (defn- mixed-score [f]
   (cond (and (map? (:cases f)) (number? (get-in f [:cases :self])) (number? (get-in f [:cases :recorded])))
         ;; C's form (c-indep-b1): {:self N :recorded M}, (N + 0.5 M) / (N + M)
-        (let [o (get-in f [:cases :self]) r (get-in f [:cases :recorded]) n (+ o r)]
-          (when (pos? n) [(double (/ (+ o (* 0.5 r)) n)) n]))
+        ;; CP401 (a) (taken overnight, round 52, on the user's CP333 (b) of 2026-11-09): with :runtime-share, the mean of the
+        ;; programs' split and the share of the runtime they link (C++'s: half of what runs is the lowered runtime)
+        (let [o (get-in f [:cases :self]) r (get-in f [:cases :recorded]) n (+ o r) rs (get-in f [:cases :runtime-share])
+              s (when (pos? n) (double (/ (+ o (* 0.5 r)) n)))]
+          (when s [(if (number? rs) (/ (+ s (double rs)) 2.0) s) n]))
         (map? (:cases f))
         (let [cs (vals (:cases f)) n (reduce + (map first cs))]
           (when (pos? n) [(double (/ (reduce + (map (fn [[k v]] (* k v)) cs)) n)) n]))
@@ -269,6 +272,14 @@
         n (count (filter own (distinct ids)))]
     {:self n :recorded (max 0 (- total n))}))
 
+(defn runtime-share
+  "CP401 (a) (taken overnight, round 52; CP333 (b), the user 2026-11-09): the share of a runtime whose units are ROWS
+  ([UNIT {INPUT VALUE ...}] a unit, the inputs INPUTS): a unit whose every input is :own counts 1, any other 0.5; nil when ROWS
+  holds no unit."
+  [rows inputs]
+  (let [us (filter vector? rows) n (count us) o (count (filter #(own-case? inputs (second %)) us))]
+    (when (pos? n) {:own o :units n :share (double (/ (+ o (* 0.5 (- n o))) n))})))
+
 (defn- cell-ids
   "The ids of the cell's cases: the first element of each row of its sources' records."
   [t crop st]
@@ -288,9 +299,19 @@
             (not (and r (:checked r))) {:note "RFP53 (a): the cell has no record yet, the stated score"}
             (not (has? t file)) {:note (str "RFP53 (a): no " file " yet, the stated score")}
             (interim? (text t file)) {:note (str "HF10-P29 (a): " file " is marked INTERIM (not one run's outcome), the stated score")}
-            :else (let [c (rfp53-counts (cell-ids t crop st) (input-rows (edn-forms t file)) inputs (cases r))]
-                    (assoc c :note (str "RFP53 (a): " (:self c) " of " (+ (:self c) (:recorded c)) " cases own in all "
-                                        (count inputs) " inputs (" file "), the rest 0.5")))))))
+            :else (let [c (rfp53-counts (cell-ids t crop st) (input-rows (edn-forms t file)) inputs (cases r))
+                        ;; CP401 (a): the runtime's units' inputs (:case-inputs's :runtime), the stage the mean of both
+                        rfile (get-in f [:case-inputs :runtime])
+                        rt (when (and rfile (has? t rfile) (not (interim? (text t rfile))))
+                             (runtime-share (input-rows (edn-forms t rfile)) inputs))
+                        note (str "RFP53 (a): " (:self c) " of " (+ (:self c) (:recorded c)) " cases own in all "
+                                  (count inputs) " inputs (" file "), the rest 0.5")]
+                    (cond (nil? rfile) (assoc c :note note)
+                          (nil? rt) (assoc c :runtime-share 0.5
+                                           :note (str note "; CP401 (a): no " rfile " yet, the runtime 0.5, the stage the mean"))
+                          :else (assoc c :runtime-share (:share rt)
+                                       :note (str note "; CP401 (a): the runtime " (:own rt) " of " (:units rt) " units own ("
+                                                  rfile "), " (format "%.3f" (:share rt)) ", the stage the mean of both"))))))))
 
 ;; ---- OC222 (a) (the user, 2026-11-10): a class of :kind :na is ocamltest's own skip on the pinned configuration
 
@@ -403,7 +424,7 @@
         rows (for [st stages
                    :let [f (merge (get-in facts [:stages st]) (get at st))
                          ci (case-inputs t config m crop st f)
-                         f (if (:self ci) (assoc f :cases (select-keys ci [:self :recorded]) :rfp53 true) f)
+                         f (if (:self ci) (assoc f :cases (select-keys ci [:self :recorded :runtime-share]) :rfp53 true) f)
                          named (mapcat #(by-name (str %)) (:steps f))
                          live (remove #(= :oracle (:phase %)) named)
                          hosted (for [s live h (:hosts s) :when (and (tool-hosts h) (not (exempt? s h)))] [(:name s) h])
@@ -606,6 +627,21 @@
         ;; the control: the same 37 cases with C7 test/c/host (ci on gcc's recorded host): none own, the stage 0.5
         ctl-rows (vec (for [[id m] rows] [id (if (= m own) (assoc m :c7 "test/c/host") m)]))
         ctl (rfp53-counts ids ctl-rows inputs 73)
+        ;; CP401 (a) (taken overnight, round 52): C++'s cell of 81 cases, 50 own in :ir and :ci-target, 20 on clang's pack, 11 with
+        ;; no row; its runtime 62 of 198 units own: the stage the mean of (50 + 0.5 x 31) / 81 and (62 + 0.5 x 136) / 198, 0.733; the
+        ;; control: the same with ci on gcc's recorded test/c/host, none own, the runtime's units too: 0.5
+        cx-in [:ir :ci-target]
+        cx-own {:ir :own :ci-target :own}
+        cx-ids (for [i (range 1 82)] (format "gxx-dg-run/p%02d.C" i))
+        cx-rows (vec (concat (for [id (take 50 cx-ids)] [id cx-own])
+                             (for [id (take 20 (drop 50 cx-ids))] [id (assoc cx-own :ir "clang's -O0 IR from its pack")])))
+        cx-rt (vec (for [i (range 198)] [(str "u" i) (if (< i 62) cx-own (assoc cx-own :ir "clang's -O0 IR from its pack"))]))
+        cx-stage (fn [rows rt] (let [c (rfp53-counts cx-ids rows cx-in 81)
+                                     [x] (mixed-score {:cases (assoc c :runtime-share (:share (runtime-share rt cx-in)))})]
+                                 (format "%.3f" x)))
+        cx-host (fn [rows] (vec (for [[id m] rows] [id (assoc m :ci-target "gcc's recorded test/c/host")])))
+        cx-good (cx-stage cx-rows cx-rt)
+        cx-ctl (cx-stage (cx-host cx-rows) (cx-host cx-rt))
         conf {:config {"architecture" "amd64" "system" "linux" "os_type" "Unix" "tsan" "false" "flambda" "false" "with_frame_pointers" "false"}
               :actions {"tsan" {:key "tsan" :passes "true"} "arch_amd64" {:key "architecture" :passes "amd64"}
                         "target-windows" {:key "os_type" :passes "Win32"}}}
@@ -631,6 +667,8 @@
      (when-not (= hs-ctl {:self 0 :recorded 10}) [(str "HF10-P29 control (every program :libs :pack) passed: counted " (pr-str hs-ctl))])
      (when-not (and (interim? ";; INTERIM (review)\n{:id \"a\"}") (not (interim? ";; hsi's check\n;; INTERIM"))) ["HF10-P29: the INTERIM mark misread"])
      (when (= "90.1" (indep ctl)) ["RFP53 control (C7 test/c/host) reached 90.1"])
+     (when-not (= "0.733" cx-good) [(str "CP401: C++'s 50 of 81 own with the runtime's 62 of 198 gives " cx-good ", expected 0.733")])
+     (when-not (= "0.500" cx-ctl) [(str "CP401 control (ci on test/c/host) passed: the stage " cx-ctl ", not 0.500")])
      (when (seq good) [(str "OC222: a valid :na class refused: " (first good))])
      (for [[k v] controls :when (empty? v)] (str "OC222 control passed: " k))
      (when-not (and (= "82.5" (compl before)) (= "84.2" (compl after)))
@@ -656,7 +694,7 @@
     (when (some #{"--self-test"} args)
       (let [fails (self-test)]
         (doseq [x fails] (println (str "   FAIL " x)))
-        (println (str "crops-score: self-test (RFP53 (a), OC222 (a), HF10-P29 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
+        (println (str "crops-score: self-test (RFP53 (a), OC222 (a), HF10-P29 (a), CP401 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
         (shutdown-agents)
         (System/exit (if (empty? fails) 0 1))))
     (let [o (parse-args args)
