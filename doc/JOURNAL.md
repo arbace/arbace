@@ -10373,3 +10373,26 @@ the samples' and baseline's round trips as known. The jdk corpora, jdk/ and jdk/
 the night (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-readprint"). Alternatives considered: the literal written
 `(long 0)` (a cast of a constant javac folds; the widened operand is what javac's Lower compares); the printer writing every
 literal of a long comparison as long (it cannot tell a long literal from an int one in the forms).
+
+## 2026-11-17: the own platform's switch prepared by day (JOP1-JOP8 (a), the user; branch `h-java-platform`)
+
+The user approved JOP1-JOP8, all (a), and asked for the transition night (round 51). By day, light (no platform build, no
+re-read), on `h-java-platform` with next `8049a4359` merged: the known file's 48 `:param-names` entries (JOP8); the build tree's
+other reads behind the pin's kind (JOP5: `bin/lib/repr-java/platform.bash`, front-check, parse-check, `bin/jrt-convert`,
+`jrt.derive`; jdk/'s two build-tree inputs recorded in `jdk/javac/platform-records/`); `bin/javac-vendor platform-own`,
+`platform-cache` (built on a miss by javac-tool's step), `platform-rebuild` (weekly step `javac-platform-rebuild`), `platform-oracle`
+(oracle step `javac-platform-oracle`) and the audit's build-tree rule (JOP2-JOP4, JOP6; logic in `test/javac-platform/own.bash`); the
+two `bin/javac-vendor` bugs fixed with `test/gate/javac-platform-test.bash` (21 checks); the facts staged in
+`test/javac-platform/switch.patch` (JOP7); the night's script `.tmp/goal/java-platform-night.sh` (`--dry-run`). Proven on three modules
+by hand: the own build's java.logging and jdk.unsupported have the build pin's module hashes, java.prefs its known class; seed,
+platform and oracle as designed. Found: the generators need a platform, so a cold clone needs the generated sources committed (JOP9,
+proposed: a 3 MB pack, as built); jdk/'s conversion takes CaseFolding.java and cacerts from the build tree (JOP10, proposed: recorded
+copies as built); JCS365's pin out of the javac key needs a `gate_key` move (JOP11). Keys: `gate_key` and the runtime key unchanged,
+`arbace_javac_key` moved (and again at the switch). Details: doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the own platform's
+tooling, for the switch night".
+
+## 2026-11-17: JOP9 (a), JOP10 (c), JOP11 (a) decided (the user, round 51)
+
+The generated sources' pack committed (as built), the two recorded inputs kept until a Java night generates them, the pin out of
+the javac key with the next `gate_key` move. Recorded in doc/classes/JAVA-FRONTEND-SURVEY.md, "Decided (the user, 2026-11-17, round
+51)". No code or key change.
