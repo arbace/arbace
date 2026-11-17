@@ -2401,3 +2401,35 @@ fractions): a = 0x1.fb64e2p+0, b = 0x1.78ee6p+0, c = 0x1.e80002p-37: twice round
 builds; T22296 (the testsuite's SIMD test) passes alone; hsi-essential's command below. The vector fma's result itself is not run by any
 recorded program (no test of the corpora uses `fmadd*FloatX*#`).
 hsi-essential's command: 123 programs, 0 not passing in no class, the controls fail as they must (24 min, 0.4 GB).
+
+## The eval and AOT cells' deferred rows, and the design classes, audited (2026-11-17, branch `h-haskell-deferred`)
+
+No hsi change: the 34 eval and 1 AOT deferred rows (eval 811 / 63 / 34, AOT 137 / 1 / 1) hold no cheap group left after HES88 and
+HES90. By cause: `:speed` 12 (the CPU limit: nofib/imaginary/kahan run alone with no cap, 119 s of CPU and 160 s of wall, 0.24 GB,
+status 0, so about twice hsi's speed is needed, not the collector's threads: GOMAXPROCS 2 does not bring it under 60 s); `:test-cmm` 10
+(a Cmm interpreter, HES67); `:threaded-way` 4 and `:threaded-only` 1, AOT's ffi014 (HES84 (a): the threaded ways' references and
+hs_exit's shutdown); `:rts` 4 (conc037, conc038: no model of the non-threaded RTS's safe sleep matches all three references, HES88;
+T3279, HES56; setnumcapabilities001 at the CPU limit); `:test-c` 3 (C threads, HES68; rts_clearMemory about 2.4 GB, above the light
+cap, its night's record expected to pass, HES83).
+
+The design classes (eval 63, print 14):
+- `:no-reference` holds nofib/smp/callback002, which has a reference since HES85 (a) and passes at 3 GiB (HES85's run): its row is
+  the light cap's `:limit`, not a missing reference. HES91 below.
+- `:no-reference`'s T24809 (rejected without its all.T setup), T17920 (a C main) and unboxedsums/ManyUbxSums (its main written by
+  all.T's pre_cmd) are references record-ref could build (all.T's options, HES60's -no-hs-main, the pre_cmd run first): work to do
+  rather than design. HES92.
+- `:process` (forkProcess), `:skipped` (T4262), `:async-revert` (HES56) and nofib's 57 programs of packages the host lacks: by design.
+- Print's `:module-view-comments` 3 and `:module-view-include` 11: the printed text is byte for byte the original in every one; the
+  difference is mode `:full`'s tree outside the module view. HES93.
+
+### Proposed (HES91 onward)
+
+- **HES91 callback002's class.** (a) the night's `bin/hsi check --corpus nofib --only nofib/smp/callback002 --record` (16 GiB) and its
+  id out of `:no-reference` (expected a pass: eval 812 / 62 / 34); (b) a deferred `:light-cap` class for it until then. **Recommended:
+  (a)**, with rts_clearMemory's row (HES83's night command) in the same run.
+- **HES92 the buildable references.** (a) record-ref builds T24809 with its all.T options, T17920 with -no-hs-main and its C, and
+  ManyUbxSums after its pre_cmd (GHC by hand, the oracle tier), the three judged (`:no-reference` 60 to 57); (b) keep them by design.
+  **Recommended: (a)**.
+- **HES93 the print cell's module-view rows.** (a) a module printed back byte for byte passes the text level, the mode `:full` tree's
+  difference outside the module view reported beside it (print 1,345 / 0); (b) as now, by design. **Recommended: (a)**: the cell's
+  criterion is the text printed back byte for byte, which all 14 meet.
