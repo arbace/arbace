@@ -10413,3 +10413,16 @@ next's gate executable with arbace.classes.env and analyze from the checkout, 13
 (type annotations' known rows, invokers' fixture); test/gate/javac-platform-test.bash 21 of 21; bin/reap 0 problems; crops-score
 --record, --judge --strict; records-check 0 problems; bin/gate --plan exits 0. Keys: gate_key (arbace/j2g, arbace/classes),
 arbace_javac_key (the platform's tooling) and the reader's key (convert.ae) move. Nothing built.
+
+## 2026-11-17: n-java-serial, the interp cell's serialization rows outside the stack (round 52, overnight)
+
+Branch `n-java-serial` (from mac/n-review-c `6ff92621f`). Of `:serialization`'s 21 deferred rows outside the stack's triage, the 12
+of n-java-defer's `System$Logger` finding left as they are; the other 9 run at interp on next `42bf8614b`'s gate executable
+(`e8e0d017243dca8a9f9f`), every process under 1 GiB, and re-recorded (all ran differently from their pre-object-stream record):
+t04291 t04707 t05550 pass. Causes and fixes: t04389, the Java forms interpreter kept a dead local in its frame slot
+(arbace/classes/interp.ae: a let's slots released after its body, as javac reuses them; proved light, t04389 passes with the
+checkout on ARBACE_PATH, `--essential` 428 of 428 with it); t04433 t04440, a proxy class lacked Proxy's Serializable for the nominal
+instance check (arbace/j2g/dyn.ae); t04623, jrt's CaseInsensitiveComparator's member table and missing readResolve (overlay/jdk);
+t05237 t05251, MarshalInputStream's registry stub never in the closed world (a derived overlay, test/jrt/derive.ae). The last three
+wait for the next build. Records: check-interp.edn's 9 rows, test/reap/matrix.edn, test/crops/scores.edn. Decisions taken
+overnight (round 52) and the day's commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-serial".

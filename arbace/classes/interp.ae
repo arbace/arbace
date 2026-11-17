@@ -124,19 +124,33 @@
 ;; building context: one per method body
 ;;
 ;; ctx: {:class internal-name :klass Klass :slots atom{binding-id [kind index]} :nr atom :np atom
+;;       :mr atom :mp atom (the frame's sizes: the most slots in use at once) :pats atom (pattern bindings made)
 ;;       :targets {target-id {:brk code :rec code :slots [...] :kinds [...] :type t}}
 ;;       :ret desc :self slot (the receiver's, -1 for static code) :ctor-site fn}
 
 (defn new-ctx [cls ret]
-  {:class cls :klass (klass cls) :slots (atom {}) :nr (atom 0) :np (atom 0) :targets {}
+  {:class cls :klass (klass cls) :slots (atom {}) :nr (atom 0) :np (atom 0) :mr (atom 0) :mp (atom 0) :pats (atom 0)
+   :targets {}
    :ret ret :self -1})
 
 (defn slot!
-  "A new slot for a value of type ty (in the long slots for J and D kinds)."
+  "A new slot for a value of type ty (in the long slots for J and D kinds): the next free one (a let's slots are
+  free again after its body, release!), the frame's size the most in use at once."
   [ctx ty]
   (case (kind ty)
-    (\J \D) (let [i @(:np ctx)] (swap! (:np ctx) inc) i)
-    (let [i @(:nr ctx)] (swap! (:nr ctx) inc) i)))
+    (\J \D) (let [i @(:np ctx)] (swap! (:np ctx) inc) (swap! (:mp ctx) max (inc i)) i)
+    (let [i @(:nr ctx)] (swap! (:nr ctx) inc) (swap! (:mr ctx) max (inc i)) i)))
+
+(defn- release!
+  "After a let's body (n-java-serial, 2026-11-17): its slots and those of everything in it are free again, as javac
+  reuses a block's local variable slots after it, so that a frame does not keep a dead local's object reachable
+  (jdk/java/io/Serializable/clearHandleTable: the loop's last String held by its slot after the loop, its
+  WeakReference never cleared). Not when a pattern binding was made inside it: its scope may flow out of the let
+  (a while's or a for's condition, JLS 6.3.2), so its slot stays taken."
+  [ctx [r p pats]]
+  (when (== pats @(:pats ctx))
+    (reset! (:nr ctx) r)
+    (reset! (:np ctx) p)))
 
 (defn bind!
   "A slot for binding b (by its id)."
@@ -439,6 +453,7 @@
 (defn- let-node [ctx an loop?]
   (let [ty (vt an)
         bs (:bindings an)
+        mark [@(:nr ctx) @(:np ctx) @(:pats ctx)]
         ;; the initial values are built before their bindings are entered (a binding's
         ;; initializer does not see it)
         parts (reduce (fn [acc [b init]]
@@ -457,6 +472,7 @@
                          :type ty})
               ctx)
         body (node ctx (:body an))]
+    (release! ctx mark)
     (arbace.lang.Compiler$CF$Let. (char (tc ty)) (int-array (map first parts)) (char-array (map second parts))
                       (nodes (map #(nth % 2) parts)) body
                       (int (if loop? (target-code tid false) 0))
@@ -843,6 +859,7 @@
     (when (t/array? cd) (set! (.-c pt) (desc->class cd)))
     (case (:kind p)
       :type (when-let [b (:b p)]
+              (swap! (:pats ctx) inc)
               (set! (.-slot pt) (int (bind! ctx b)))
               (set! (.-kind pt) (char (kind (:type b)))))
       :record (let [s (slot! ctx "Ljava/lang/Object;")]
@@ -1051,8 +1068,8 @@
 
 (defn- finish! [ctx ^arbace.lang.Compiler$CF$Meth mt body]
   (set! (.-self mt) (int (:self ctx)))
-  (set! (.-nr mt) (int @(:nr ctx)))
-  (set! (.-np mt) (int @(:np ctx)))
+  (set! (.-nr mt) (int @(:mr ctx)))
+  (set! (.-np mt) (int @(:mp ctx)))
   (set! (.-body mt) body))
 
 (defn- record-op-node [^arbace.lang.Compiler$CF$Klass k d m self]
@@ -1619,8 +1636,8 @@
             [ctx body] (try (build) (catch Throwable e (if (pending? e) nil (throw e))))]
         (if body
           (do (set! (.-clinit k) body)
-              (set! (.-clinitR k) (int @(:nr ctx)))
-              (set! (.-clinitP k) (int @(:np ctx))))
+              (set! (.-clinitR k) (int @(:mr ctx)))
+              (set! (.-clinitP k) (int @(:mp ctx))))
           ;; it refers to a sibling not defined yet: a static method of its own, built on the
           ;; class's initialization as a method is on its first call
           (let [mt (arbace.lang.Compiler$CF$Meth. k "<clinit>" "()V" (int ACC_STATIC))]
