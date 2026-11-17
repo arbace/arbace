@@ -6965,3 +6965,118 @@ Review 307 (of 286-298) found four medium gaps; each is fixed as CPython 3.14.10
   `['-']`. The hook in every REPL path and PYTHONSTARTUP after `-i FILE` on a terminal (_pyrepl's
   `interactive_console(pythonstartup=True)`) were 298's already; `.tmp/q313/t/check6.sh`'s eight start paths
   equal python3's.
+
+## As built: 305, pyi's speed, round three (2026-11-16, the Mac VM, queue 305)
+
+The brief: profile pyi compiled and interpreted on the bench and on slow Lib/test modules, find where the time goes,
+and cut it without changing any result. Go's profile (`PYI_CPUPROFILE`) was taken on the compiled executables of 20
+benchmarks (4 to 8 runs each, merged) and of an import probe (`import unittest, argparse, json, re, typing,
+dataclasses, asyncio, ...`). A heap profile and `GODEBUG=gctrace=1` were taken at Py_FinalizeEx's start, on a build
+instrumented for the purpose and not kept.
+
+**Where the time goes (compiled; % of a benchmark's CPU, cumulative):**
+
+| item | where it shows | weight |
+|---|---|---|
+| attribute load (loadAttrAt, typeGetAttr for a class's attributes) | deltablue 20% + 7.6%, richards 14%, float 14%, mdp 14%, go 13% | the largest call-heavy item |
+| frames (newFrame, freeFrame) | richards 6% + 12%, spectral_norm 7% + 6%, coroutines 3% + 7%, raytrace 5% + 7% | `*f = Frame{...}` was 7% of richards |
+| store-attr into a new instance's dict (insertNew: growslice, the index's map) | raytrace 18% | `__init__`'s stores grew the entries 1, 2, 4, 8 |
+| int and float operations (numberFast, NewFloat) | nbody 47%, spectral_norm 35%, base64 14% | every number is a heap object |
+| generator resumption (resume, run, guardedStep, AotExec's yield-from) | coroutines 72%, nqueens 76%, generators 59% | a nested run per level of `yield from` |
+| Go's collector (gcBgMarkWorker) | async_tree 30%, hexiom 22%, go 17%, json_dumps 15%, 5-8% elsewhere | the live heap: 25 MB at a benchmark's end, a quarter of it attribute caches |
+| reading the modules' IR text (ReadIR, the EDN reader) | hexiom 31%, chaos 12%, go 11%, nbody 10%, the import probe 21% | every import of a compiled module parses its IR |
+| code run on the loop at start (step) | hexiom 60%, chaos 31%, go 27%, richards 12% | about 1,300 code objects of 41 sources compiled at run time (below) |
+| the interpreter's end (Py_FinalizeEx's collections) | richards 25-73 ms, hexiom 18-83 ms, the import probe 200-240 ms of a process | 3 to 9 forced Go collections, each with a quiet wait of 3 ms or more |
+
+An empty compiled program starts and ends in 5 ms. A benchmark's process is mostly its start and end when it is
+short (hexiom: about 150 ms, CPython 63 ms).
+
+**The changes (go/arbace/py; no IR, generator or bin/pyi change):**
+- attr.go: an instruction's attribute cache (4 ways, 192 bytes) is made at its first lookup, and the code keeps an
+  array of pointers. Before, it was made for every instruction of any code that ran one attribute instruction. That
+  was a quarter of richards' heap. The live heap at the last collection went 29 -> 21 MB (raytrace), 25 -> 18
+  (richards), 25 -> 20 (deltablue), 43 -> 35 (float), 48 -> 27 (the import probe), so every Go collection marks
+  less, Py_FinalizeEx's forced ones too.
+- attr.go: load-attr of a class whose metatype is type is answered from the instruction's cache entry for the class
+  itself (CPython 3.14's LOAD_ATTR_CLASS). This applies when the attribute was found on a class statement's class
+  of its MRO and type has no data descriptor of that name. The answer is d, or d's `__get__(None, cls)`, as
+  typeGetAttr gives it. The entry is valid while typeEpoch holds, as every entry of the cache, and it is not used
+  while a type watcher is set. The entry is marked only after typeGetAttr returned and only if the entry still holds
+  the class's answer.
+- frame.go: freeFrame zeroes the frame and then puts back Code, Fast and Stack. That takes half the time of
+  assigning the literal (a micro-benchmark: 22 -> 11 ns). The value stack is cleared up to SP only, because its slots
+  above SP are already nil: every pop, AotDrop and truncation clears what it leaves. This was checked with a panic on
+  a stale slot, over the 20 benchmarks.
+- type.go, class.go, dict.go: a class remembers the most entries store-attr gave one of its instances' dicts (at
+  most 32). A new instance's dict is made with that room.
+- registry.go, abstract.go: isNumberDunder compares `r`+name and `i`+name without building the strings (they were 5%
+  of an import's start). binaryOp1's reflected method name is made once.
+
+**The table** (the compiled process: the median wall and CPU milliseconds of 15 interleaved rounds, base 288fc7dc7
+and head, B H then H B per benchmark; the VM's load 7.6-18.7, task 304 running beside it: single-run swings of 2x,
+so the CPU columns are the readable ones; CPython 3.14.10's milliseconds from test/python/bench-aot-linux-arm64.edn):
+
+| benchmark | CPython | base wall | head wall | base CPU | head CPU | CPU change | CPU / CPython |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| raytrace | 306 | 960 | 720 | 787 | 700 | -11.1% | 2.6x -> 2.3x |
+| deltablue | 180 | 719 | 599 | 564 | 466 | -17.4% | 3.1x -> 2.6x |
+| fannkuch | 319 | 999 | 901 | 804 | 806 | +0.2% | 2.5x -> 2.5x |
+| generators | 296 | 1007 | 970 | 857 | 837 | -2.3% | 2.9x -> 2.8x |
+| nqueens | 357 | 838 | 804 | 732 | 735 | +0.4% | 2.1x -> 2.1x |
+| go | 112 | 373 | 380 | 340 | 328 | -3.5% | 3.0x -> 2.9x |
+| richards | 358 | 756 | 672 | 666 | 632 | -5.1% | 1.9x -> 1.8x |
+| chaos | 139 | 359 | 325 | 310 | 290 | -6.5% | 2.2x -> 2.1x |
+| json_dumps | 67 | 411 | 317 | 310 | 289 | -6.8% | 4.6x -> 4.3x |
+| spectral_norm | 367 | 986 | 881 | 777 | 752 | -3.2% | 2.1x -> 2.0x |
+| unpack_sequence | 263 | 948 | 896 | 767 | 724 | -5.6% | 2.9x -> 2.8x |
+| coroutines | 517 | 1193 | 1234 | 1027 | 999 | -2.7% | 2.0x -> 1.9x |
+| float | 378 | 748 | 683 | 591 | 593 | +0.3% | 1.6x -> 1.6x |
+| nbody | 376 | 615 | 512 | 460 | 445 | -3.3% | 1.2x -> 1.2x |
+| hexiom | 63 | 221 | 191 | 174 | 161 | -7.5% | 2.8x -> 2.6x |
+| base64 | 1797 | 3766 | 3774 | 3317 | 3412 | +2.9% | 1.8x -> 1.9x |
+| bpe_tokeniser | 3461 | 7871 | 7863 | 7063 | 7148 | +1.2% | 2.0x -> 2.1x |
+| async_tree | 266 | 1217 | 1334 | 1290 | 1244 | -3.6% | 4.8x -> 4.7x |
+| mdp | 948 | 4335 | 4028 | 3872 | 3569 | -7.8% | 4.1x -> 3.8x |
+| pprint | 1536 | 5611 | 5620 | 5165 | 5191 | +0.5% | 3.4x -> 3.4x |
+| the import probe | - | 461 | 412 | 428 | 416 | -2.8% | - |
+
+Over the 20: CPU 29.9 s -> 29.3 s (-1.8%), wall 33.9 s -> 32.7 s (-3.6%), CPU against CPython's recorded run 2.47x ->
+2.42x. A third run of 6 rounds (load 12-17) gave deltablue -12%, raytrace -8%, richards -6%, base64 -4% and
+bpe_tokeniser +1.5%: the gains of deltablue, raytrace, richards, mdp and hexiom hold in all three runs, and the rest
+is within the VM's noise. On goi, 8 interleaved rounds of a class's calls and attribute loads (30,000 iterations)
+gave medians of 2.80 s at base and 2.62 s at head, and `python -c pass` took 31-35 s at both: no difference beyond
+the noise.
+
+**Lib/test** (`bin/pyi check --aot --lib-test --fresh` over 16 modules, every method's outcome the same at base and
+head; the modules' run seconds as the check reports them): 6 runs, interleaved H B B H B H (load 11-15), all of
+them with every one of the 4,195 methods' outcomes identical (3,621 pass, 572 classed, the same 2 failing at base
+and head: test_functools' test_update_type_wrapper, a base failure from 313's type `__dict__`, below). The 16
+modules' run seconds summed: base 584, 331 and 381, head 484, 403 and 419. That is no measurable difference: the
+wall moves by up to 1.8x with the load between runs of the same tree. On goi, `bin/pyi lib-test-all --fresh
+test_class test_scope test_list test_generators` took 772 s at head (load 17-18) and 657 s at base (load 15-16),
+with the same outcomes (0 failing).
+
+**Not changed, and why:** generator resumption, a design change (CPython's SEND_GEN in the caller's loop). The
+numbers stay boxed: 202b and 210 already took the exact int and float paths. The dict's Go-map index stays: 202b's
+open addressing was decided for after the re-seed. Py_FinalizeEx's collections stay: their rounds and quiet waits are
+218's, 241's and 253's semantics (DECISION 1 of report 305).
+
+**Found, not this task's:** test_functools' TestUpdateWrapper and TestWraps test_update_type_wrapper fail compiled at
+base 288fc7dc7 too. `update_wrapper(wrapper, type)` copies `type.__dict__`, which since 313 holds type's getsets, into
+the wrapper's `__dict__`, and `wrapper.__annotations__` then answers type's `__annotations__` getset. CPython answers
+the function's own (a data descriptor ahead of the dict). The AOT lib-test record for arm64 does not exist yet, so the
+check does not judge regressions.
+
+**The next steps, by measured gain:**
+1. The interpreter's end: Py_FinalizeEx runs finCollect and the two exitCollects. Each finRounds is one forced Go
+   collection per wave plus one that finds nothing, and each round waits at least 3 ms for Go's finalizer goroutine
+   to go quiet. That is 3-9 collections, 20-240 ms of every compiled process: hexiom 18-83 of about 200, the import
+   probe about 200 of 450. Every Lib/test child pays it too.
+2. The IR read at import: an AOT module's IR is EDN text, parsed into generic values and then into code objects at
+   every import. That is 11-12% of go and chaos and 31% of hexiom. Emitting the code objects as Go data, or a binary
+   form, would remove most of it.
+3. The startup modules compiled ahead. 41 sources are compiled at run time and run on the loop in every benchmark:
+   importlib's bootstrap, io, codecs, encodings, and argparse's lazy `_colorize`, which brings dataclasses, inspect,
+   dis, ast and tokenize, plus 5 dataclass and 12 namedtuple execs. Probed by importing them at the top of hexiom's
+   main module (1,296 -> 72 code objects interpreted), the CPU fell by only about 5%. Most of their cost is the IR
+   read and the collections, not the loop.
