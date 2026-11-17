@@ -5988,6 +5988,70 @@ evaluates the changed namespaces from the checkout until the next re-seed. The m
 whole (`bin/repr-c roundtrip --record`, `check --tokens --record`, `parse-check --record`, `bin/ci annotations --record`,
 `dg --record`), so the rows of files these changes touch outside the lists are recorded too.
 
+## As built: the read cell's dg diagnostics (2026-11-17, branch `h-c-decl-diag`, from `next` `498d7296f`)
+
+The host burst's task after h-c-deferred: the read cell's 27 deferred rows (dg 22, eval-depth 5). Ten dg rows fixed, each
+proved on its file and on a list of 284 dg files (the essential list, every file of the corpora's `inline`, `goto`, `typeof`,
+fixed `enum`, `_Generic`, `alignof`, `va_start` and static-prototype tests, every tag, attribute and `__has_` test, the
+pp groups and the controls' subjects): no other row changed. Read 5225 / 223 / 27 to 5234 / 224 / 17 (pass / by design / deferred; gnu23-varmod-1.c's tree check row moves from pass
+to known, below; the read cell's completeness 96, 100 without by design; C's 98, 100 without by design).
+
+- The checker (`arbace/c/check.ae`):
+  - C99 6.7.4p3: a modifiable static (a static local or a `static` compound literal) in an inline definition of a function of
+    external linkage, gcc's check_inline_statics pedwarn ("'X' is static but declared in inline function 'F' which is not
+    static"), given at the unit's end unless a declaration without `inline` or with `extern` made the definition external:
+    c23-complit-8.c;
+  - a function of internal linkage used in an evaluated context and never defined, gcc's "'F' used but never defined" at its
+    declaration; sizeof's, typeof's, `_Alignof`'s and `_Generic`'s controlling operands are unevaluated (`unevaluated`, gcc's
+    in_typeof and pop_maybe_used: a use counts when the operand's type is variably modified): c23-typeof-2.c. These two are
+    diagnosed after the parse by a compilation, not under -fsyntax-only (the annotations' and round trip's reference): the
+    option `:compile` of `check-unit`, which dg's compile and run tests give (`arbace/c/dg.ae`, `annot/port-dump`);
+  - a goto into the scope of a variably modified identifier, gcc's "jump into scope of identifier with variably modified type"
+    (`*vm-scope*`: a block's VM declaration opens a scope over the items after it; each function's gotos checked against its
+    labels' scopes); `vm-type?` takes a function returning a variably modified type: c23-tag-composite-11.c, gnu23-varmod-1.c;
+  - the conditional's composite of two compatible structures takes a member of constant size over one of variable size, so a
+    `typeof` of it is judged by `vla-struct?` (the typeof exemption removed): gnu23-tag-composite-5.c;
+  - C23's fixed enums (c23-enum-7.c): the empty declaration's specifiers (storage class, `_Thread_local`, `alignas`, a qualifier
+    with an underlying type; `inline`, `_Noreturn`; `auto` and `register` at file scope), "'enum' underlying type may not be
+    specified here" outside `enum e : T;`, "wrong kind of tag", an underlying type incompatible with the previous declaration,
+    invalid underlying types (not an integer type, an enum, `restrict`, none: `enum e : const;`, the converter's
+    `:c/underlying-implicit`, printed back), and gcc's words "outside the range of underlying type";
+  - `va_start ()` in C23 (`__builtin_c23_va_start` with no operand): "expected expression before ')' token": c23-stdarg-11.c;
+  - a structure's `transaction_safe` attribute is part of its type's identity (gcc's comp_type_attributes): gnu23-tag-2.c.
+- The parser (`parse.ae`): a GNU nested function's definition gives the enclosing function's scope back, where the enclosing
+  body's later labels are declared (cc lost it: "label undefined"; gnu23-varmod-1.c). The tree check's reference, cc, keeps the
+  error: the file is known there, `:gcc-syntax` (test/repr/c/parse-check-known.edn).
+- The preprocessor (`pp.ae`): `__has_c_attribute` (and `__has_attribute`, `__has_cpp_attribute`) without its parenthesis is
+  gcc's "missing '(' after \"OP\"", at the operator when the line ends (c23-has-c-attribute-4.c, its "-:" error located); a
+  pasting error whose left operand is a stringized argument or that a `__VA_OPT__`'s body makes is placed at the invocation
+  (`*paste-at*`), as gcc does (va-opt-6.c).
+
+Left deferred: decl-diag 3: c23-auto-3.c and c23-constexpr-3.c (the read's error at a definition whose declarator is not a
+function's stops the checker; a form the checker reports and the printer prints back, `(c/bad-defn MESSAGE TEXT)`, was tried: the
+checker then runs and misses 29 and about 150 lines, the long tail of gcc's C23 checks, so it was not kept), c23-complit-5.c (file
+scope compound literals' storage classes; a parse gap first); pp-diag 4 (embed-18.c, embed-27.c: gnu::base64's operand checks;
+c-c++-common's embed-4.c: one diagnostic per parameter fault in __has_embed; gcc.dg/cpp/embed-4.c: -traditional-cpp's unlocated
+errors); wrong-reason 3, pedantic-diag 1, parse-gap 1 as h-c-deferred left them; eval-depth 5 (below).
+
+eval-depth (limits-caselabels.c, -declparen.c, -exprparen.c, -pointer.c, -structnest.c, the tree check's rows): the parse stops at
+MAX-NEST 4000 on purpose (`parse.ae`'s `nest!`): beyond it the compiled parse itself recurses, and the converter, the tree check's
+dump and comparison, the printer and the checker recurse over its tree past Go's 1 GB stack, a fatal error that ends a whole
+corpus's run. No converter change helps these rows while the cap stands (the converter never sees the trees), so none was made: a
+DECISION (an explicit stack in the parser's five nesting productions and every tree walker after it, then the cap moved; or the
+rows kept deferred).
+
+Checks: `bin/ci dg --only` on the 284 files (274 pass, 2 unsupported, the 8 others the rows left deferred; the negative control
+fails as it must), `bin/ci dg --essential` within it (92 of 92), the token check, tree check,
+annotations and round trip (levels 3-4 under gcc's judge, `ARBACE_C_JUDGE=gcc`, for the two rows whose read changed) of the files
+these changes touch, `bin/ci check --only test/c/essential-check.txt`, `bin/ci judge-test` (110 tests, 0 failures), `bin/ci c2j-check` (27
+sources); `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`. Not run here (the night's gate): `bin/ci check --aot
+--only test/c/essential-aot.txt`, `bin/repr-c check --c23`.
+
+Keys: arbace/c/ and arbace/repr/c/ are embedded (in `gate_key`): the key moves, the C steps and `--full` rerun, and stage 0
+evaluates the changed namespaces from the checkout until the next re-seed. The main host's night: the C full runs record whole
+(`bin/ci dg --record`, `annotations --record`, `bin/repr-c roundtrip --record`, `parse-check --record`, `check --tokens
+--record`), so the rows of files outside the lists that these changes touch are recorded too.
+
 ## As built: GNU vector types (CS320 (a), 2026-11-17, branch `h-c-run`)
 
 `arbace/c/build.ae`: a vector type is of kind `:m` (an aggregate, its address), so declarations, copies, parameters, results,
