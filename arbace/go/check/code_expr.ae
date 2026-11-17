@@ -85,6 +85,94 @@
         (str (apply str (repeat ps "(")) s (apply str (repeat ps ")")))
         s))))
 
+;;; Type literals written whole, as types2's syntax printer writes them in its messages
+;;; (syntax.String, ShortForm: struct{a, b int; c string}, interface{M() int; ~int | string},
+;;; func(x int, s ...string) (int, error)); go/types' ExprString abridges them (struct{…}).
+
+(defn- name-entry?
+  "Whether x is a name with its type in a parameter, result or field vector (SPEC §5.3: a symbol
+  or (go/id ...) with a :tag)."
+  [x]
+  (and (or (symbol? x) (go-id? x)) (contains? (meta x) :tag)))
+
+(defn- field-entries
+  "A vector of parameters, results or fields as [{:name :type :dots :meta}], & marking the
+  variadic last one (its type (slice T), written ...T)."
+  [v]
+  (loop [xs (seq v) dots false acc []]
+    (if-let [[x & more] xs]
+      (if (= '& x)
+        (recur more true acc)
+        (let [t (if (name-entry? x) (:tag (meta x)) x)
+              t (if (and dots (seq? t) (= "slice" (head-name t))) (second t) t)]
+          (recur more false (conj acc {:name (when (name-entry? x) (expr-str x)) :type t :dots dots
+                                       :meta (meta x)}))))
+      acc)))
+
+(defn- groups
+  "Entries in groups of names sharing one written type: by :go/grouped when the list marks it
+  (the source's groups), else consecutive names of an equal type (N3)."
+  [es]
+  (let [marked (some #(contains? (:meta %) :go/grouped) es)]
+    (reduce (fn [gs e]
+              (let [prev (peek (peek gs))]
+                (if (and prev (:name e) (:name prev) (not (:dots prev)) (not (:dots e))
+                         (if marked (:go/grouped (:meta e)) (= (:type e) (:type prev))))
+                  (conj (pop gs) (conj (peek gs) e))
+                  (conj gs [e]))))
+            [] es)))
+
+(defn- entry-type-str [e] (str (when (:dots e) "...") (expr-str (:type e))))
+
+(defn- param-list-str
+  "A parameter or result vector as types2 writes it: (a, b int, c string), (int, error)."
+  [v]
+  (str "(" (str/join ", " (for [g (groups (field-entries v))]
+                            (if (:name (first g))
+                              (str (str/join ", " (map :name g)) " " (entry-type-str (first g)))
+                              (str/join ", " (map entry-type-str g)))))
+       ")"))
+
+(defn- results-str
+  "The results of a signature: \"\", \" T\" (one unnamed), \" (...)\"."
+  [rv]
+  (let [es (field-entries rv)]
+    (cond
+      (empty? es) ""
+      (and (= 1 (count es)) (nil? (:name (first es)))) (str " " (entry-type-str (first es)))
+      :else (str " " (param-list-str rv)))))
+
+(defn- method-elem-str
+  "An interface's method element (Name params ...) (SPEC §5.3: ^T params, params :results [...])."
+  [[nm ps & opts]]
+  (let [rs (:results (apply hash-map opts))
+        rv (cond rs rs
+                 (contains? (meta ps) :tag) [(:tag (meta ps))]
+                 :else [])]
+    (str (expr-str nm) (param-list-str ps) (results-str rv))))
+
+(defn- struct-str
+  [fields]
+  (str "struct{"
+       (str/join "; " (for [g (groups (field-entries fields))
+                            :let [e (first g)
+                                  m (if (:name e) (:meta (peek g)) (meta (:type e)))
+                                  tag (or (:go/tag-text m) (some-> (:go/tag m) pr-str))]]
+                        (str (if (:name e)
+                               (str (str/join ", " (map :name g)) " " (expr-str (:type e)))
+                               (expr-str (:type e)))
+                             (when tag (str " " tag)))))
+       "}"))
+
+(defn- interface-str
+  [elems]
+  (str "interface{"
+       (str/join "; " (for [x elems]
+                        (if (and (seq? x) (symbol? (first x)) (nil? (namespace (first x))) (vector? (second x)))
+                          (method-elem-str x)
+                          (expr-str x))))
+       "}"))
+
 (defn- expr-str*
   [f]
   (cond
@@ -133,9 +221,11 @@
         (= h "array") (str "[" (expr-str (first args)) "]" (expr-str (second args)))
         (= h "map") (str "map[" (expr-str (first args)) "]" (expr-str (second args)))
         (= h "chan") (str "chan " (expr-str (last args)))
-        (= h "func") "func(…)"
-        (= h "struct") (if (seq args) "struct{…}" "struct{}")
-        (= h "interface") (if (seq args) "interface{…}" "interface{}")
+        (= h "func") (str "func" (param-list-str (first args)) (results-str (second args)))
+        (= h "struct") (struct-str args)
+        (= h "interface") (interface-str args)
+        (= h "|") (str/join " | " (map expr-str args))
+        (= h "tilde") (str "~" (expr-str (first args)))
         (= h "spread") (str (expr-str (first args)) "...")
         (= h "method-expr") (str (let [t (first args)]
                                    (if (and (seq? t) (= "*" (head-name t)) (empty? (:go/parens (meta t)))) (str "(" (expr-str t) ")") (expr-str t)))

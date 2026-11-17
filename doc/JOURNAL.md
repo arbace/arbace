@@ -10319,3 +10319,26 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+## 2026-11-17: goi's weak and unique interpreted over Go's own, type literals written whole in messages (branch `h-go-weak`, from `next` `77630727b`)
+
+The host burst (light checks), round 51's deferred Go rows (test/goi/divergences.edn). `:std-weak-unique` (weak.go,
+escape_unique.go, fixedbugs/issue68415.go): weak and unique leave go/arbace/gotable.edn's `:out` and are interpretable packages of
+the digest, Go's own sources (go1.27.1's src/weak, src/unique, as tamago/goroot and the linux std conversion hold them), their
+runtime hooks compiled in the package arbace's new file std.go (go/arbace/std.ae; arbace/j2g/main.ae copies it with api.ae): weak's
+two runtime pulls `:replace`d by arbace.WeakRegister and arbace.WeakStrong over compiled weak.Pointer[byte] (the runtime's handles
+are untyped), unique.Make `:replace`d by arbace.UniqueMake (a canonical reflect.New copy per static type and value, strings cloned,
+held weakly and removed by runtime.AddCleanup), unique's canonmap.go, clone.go, uniqueMaps and uniqueMap left out by the list's new
+`:trim` (arbace.go.table/trim-source: their internal/sync and internal/abi imports leave the classification). `:abridged-type-literal`
+(issue11614): the checker's expr-str (arbace/go/check/code_expr.ae) writes struct, interface and func type literals whole as types2's
+syntax printer (ShortForm) does; issue11614 passes, its known entry gone, its row :pass, the class removed. escape_unique.go imports unique now and is a
+`:gc-m` known row (goi's escape port leaves out declarations that use generic instances). `GOI_DIGEST` (arbace.go.repl): a table's
+digest read in place of the executable's, so the new list's packages were checked on the gate's executable at next's key: weak.go
+pass, issue11614 pass, `--essential` 801 of 801 with the controls failing, the 118 errorcheck programs with type literals on ERROR
+lines without regression, AOT of the six unchanged; Go eval 1,755 / 70 / 9 to 1,757 / 70 / 7, completeness 98 (meant 99), reap and
+crops-score recorded. `:no-forms` (issue50372,
+slice3err) not taken: types2's checks on syntax's tree (GPS9 (c)'s adapter), not cheap. Proof: GOI-SPEC.md, "Since v1: weak and
+unique, type literals written whole". Alternatives considered: interpreting unique's own canonMap (internal/sync's HashTrieMap pulls
+the runtime's semaphores and rand: not interpretable), unique.Make[any] compiled with the handle's word reinterpreted (pointer-shaped
+types store the value in the interface's word: no stable *T), a strong map (never reclaimed: unique's contract says otherwise), and
+weak pointers by finalizers over hidden uintptrs (unsafe, one finalizer per object). fixedbugs/issue68415.go (a run of unique.Make) waits for an
+executable built with the new table, `:std-weak-unique` kept for it (gate_key moves: arbace/go, go/arbace, the list, j2g).
