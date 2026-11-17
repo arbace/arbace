@@ -9439,3 +9439,39 @@ DataInputStream, MathContext, ConcurrentLinkedQueue, AtomicLong, GZIP streams, Z
 rewrote it and, by `bin/javac-vendor edge`, jdk/javac/provenance.edn's `:jdk-edge` (jdk/javac/edge.edn unchanged); then
 `bin/j2g-edge verify` passes. Keys: gate_key moves (617642c7f0db to a867c735c5f3: read.ae and jdk/edge.edn), the runtime key
 does not (d7b7705e8b81).
+
+## 2026-11-17: the consolidation's stack, the re-seed W and the one full gate (rounds 45-50)
+
+The plan (the user, 2026-11-16 afternoon): merge everything onto one stack with an essential gate after each merge, re-seed
+last, run one full gate by day (round 47 (4)), then fast-forward main. The intermediate full gates were dropped: every key moves
+at the re-seed, so a full gate before it proves nothing its last one does not. The stack, in order:
+
+- `stack-b2` (`2816a6e39`): next (B1 `9da791cd4` with `revisit-b1` `fa87475c8`), B2 (`aac02c52c`: java-night without F26,
+  round 45 (b); F26 fixed apart on `mac/f26-classfile` `acaae3905`), the Python queue's 313 and 297, rec-ocaml (`bb1abe163`) and
+  rec-llvm-cpp (`9308ed0ab`). Its essential gate (236 min) failed cpp-c2j and scheme-c2j, which need the re-seed (the old
+  stage 0 lacks JCS167's serial plan), and a64i-essential (three thread controls judged `left` off arm64).
+- `stack-w1` (`b1f27d8b3`): + W1 (`w1-1116`) and the a64i fix (the control kind `thread` needs the arm64 CPU, as `cpu`,
+  `sys`, `step` and `bisect` do). Essential gate (239 min): only cpp-c2j and scheme-c2j. Fixpoint G1 = G2 = G3 (`3a095e94`).
+- `stack-w2` (`53da41d93`): + W2 (`mac/w2-1116` `c364cb29b`, with `window-w2e` `d383f18c8`: the embedding, goi's table listing
+  `arbace/{py,libm,crt,ci}`, a program package's `_test.go` files out of its source). One conflict (OCAML-SURVEY.md, two new
+  sections), kept both. The build passed, `bin/pyi table-check --configs tamago/amd64,tamago/arm64` passed (151 s), and the
+  fixpoint holds (G1 = G2 = G3 `cbaa0801`, 1 h 19 min).
+- The re-seed (`03fec28a4`): `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make`, seed `3c48859d`; `bin/seed
+  --verify` passed (stage 0 = G1 = G2 = G3, 74 min). Run unattended by round 50 (2) (stop and keep the old seed on a failed
+  verify).
+- The post-seed essential gate (191 min): cpp-c2j and scheme-c2j pass; j2g-edge and llvm-controls-test failed, fixed by agents
+  as round 50 (1) says (the two entries above: `4192d6a45`, `2455fa2be`), merged as `5fa2be47d`.
+- R (`mac/w-retire-4` `4af284706`), merged as `f1969748f`: annot-lenient, classes_stale and bin/lib/ci/fresh.bash retired;
+  only comments name them.
+
+The essential gate on `f1969748f` was stopped in its build (the user, 09:15: redundant before the full gate, whose tier runs
+every essential step; round 50 (3)'s condition, the post-seed essential steps passing, is read from the full gate). The full gate
+(`bin/gate --full --concurrent`, 358 steps, simulated wall 7:27) started at 09:20 UTC; when it ends main and next fast-forward
+to `f1969748f` and its failures go to a REVISIT list (`.tmp/goal/advance-after-full.sh`). Beside it, light: `tmpdates-fix` and
+`memdecl-fix` (the user's approval, 09:30).
+
+Operations: the disk reached 85-91% four times; freed each time by removing merged worktrees (their logs kept in
+`.tmp/keep/wt-*`), superseded gate executables and the fixpoint's directories, never Go's build cache while a build ran (a trim
+at 2 h had broken stack-py's java-compiled on 11-16). Two operational mistakes, both harmless: the fixpoint on stack-w2 got an
+empty `--g1` (`bin/lib/gate-cache.bash` is sourced, not run), so it built G1 itself (20 min more); and the heavy lanes
+(`ARBACE_HEAVY_LOCK=.tmp/big-{b..h}.lock`) were used for the stack's gates beside each other, which the memory check admitted.

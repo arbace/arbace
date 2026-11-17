@@ -1,6 +1,6 @@
 # Agenda
 
-The current state of the work (as of 2026-11-10). This file is rewritten as things change. For the history, see
+The current state of the work (as of 2026-11-17; the sections below "The consolidation" are as of 2026-11-10 unless dated). This file is rewritten as things change. For the history, see
 [JOURNAL.md](JOURNAL.md) (since 2026-11-07), the journals at the tags
 [`arbace-reaps-4-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-4-crops-v1/doc/JOURNAL.md)
 (2026-11-01 to 2026-11-07),
@@ -15,16 +15,21 @@ The current state of the work (as of 2026-11-10). This file is rewritten as thin
 
 ## State
 
-- **The seed** is unchanged since the tag: `seed/arbace-seed-go.tar.xz` `d5548e72…` (2026-11-05, verified: stage 0 = G1 =
-  G2 = G3). Stage 0 runs its own compiled copy of every embedded namespace but the tools' (`RT.toolSource`: `arbace/{j2g,
-  repr,build,c2j,go}/`), so two stopgaps stand until the re-seed W: `bin/lib/ci/fresh.bash` (CS281 (c): ci evaluated from
-  the checkout) and java-night's stage-0 patches (`annot-lenient`, `build-classes-host2`: F14's analyzer on the old stage 0).
-- **The branches.** `main` is at `2a72c94a` (the last gated `next`, 2026-11-08). `next` is about 240 commits ahead,
-  ungated (night 9 was deferred by the user, 2026-11-08). `java-night` is `next` plus the Java slices that need a
-  conversion night (below); it takes every `next` as it moves.
-- **The REAP matrix** (`bin/reap`): eleven rows (Clojure, Java, Go, C, C++, OCaml, Scheme, Haskell, Rust, LLVM IR,
-  Python), 44 cells, 41 checked, 0 problems; "no check yet": Rust's AOT (tonight's record) and Python's eval and AOT (its
-  records night).
+- **The seed** is `3c48859d…` (2026-11-17, the consolidation's re-seed W: W2's embedding of the crops, pyi, oi and goi's
+  listing of `arbace/{py,libm,crt,ci}`; packed from the fixpoint's G3 at `53da41d93`, verified: stage 0 = G1 = G2 = G3). R
+  (`w-retire-4`) retired the stopgaps the old seed `d5548e72` needed (`annot-lenient`, `classes_stale`,
+  `bin/lib/ci/fresh.bash`).
+- **The branches.** All work is consolidated on `stack-w2` (`f1969748f`, 2026-11-17): next, B1's revisit, B2 (java-night
+  without F26), the crops' records (rec-ocaml, rec-llvm-cpp), W1, W2, the re-seed, its two fixes and R. Its one full gate
+  (`bin/gate --full --concurrent`, 358 steps) runs by day 2026-11-17; main and next fast-forward to it when it ends, its
+  failures on a REVISIT list (round 50 (3)). Below: "The consolidation (2026-11-15/17)".
+- **The crops' scores** (`test/crops/scores.edn` on `stack-w2`; completeness, without by design, maturity, independence):
+  Clojure 99 99 100 100, Java 87 90 100 60, Go 97 100 100 100, C 96 100 100 100, C++ 91 96 100 72, OCaml 86 96 100 100,
+  Scheme 98 100 100 100, Haskell 97 99 100 76, Rust 75 75 96 80, LLVM IR 98 99 100 98, Python 0 0 83 60 (eval and AOT wait
+  for its records night), x86-64 assembly 99 100 100 100, arm64 assembly 100 100 100 100, WebAssembly 98 98 100 100.
+- **The REAP matrix** (`bin/reap`, `test/reap/matrix.edn` on `stack-w2`): fourteen rows (Clojure, Java, Go, C, C++,
+  OCaml, Scheme, Haskell, Rust, LLVM IR, Python, x86-64 and arm64 assembly, WebAssembly), 56 cells, 53 checked, 0 problems;
+  "no check yet": Rust's AOT and Python's eval and AOT (its records night).
 - **The gate** (at the morning's merge, `bin/gate --plan`): the essential tier 49 steps, about 44 minutes; `--full` 316
   steps, about 9:52 simulated serial; the oracle tier (`--oracle`, the host toolchains) 64 steps. The crops' fragments
   spliced: C++, Scheme, OCaml, LLVM IR, Rust, Haskell; Python's after its records night.
@@ -272,6 +277,36 @@ Six crops are above 90 on all three. What the others still need:
   is night 11's. After it: the branch merged into `next` (`merge-py`, the morning of 11-11), the independence facts moved to
   the checkout's (the user, 2026-11-09: 20 → about 79), Python's gate fragment spliced
   ([python/PYTHON-SURVEY.md](python/PYTHON-SURVEY.md)).
+
+## The consolidation (2026-11-15/17)
+
+One stack, essential gates after the merges, the re-seed last, then one full gate (the user, 2026-11-16: the intermediate full
+gates moved with every key the re-seed moves anyway; rounds 45-50 in the journal).
+
+- **B1** (`9da791cd4`, the key-window batch): its full gate's 16 failures fixed by `revisit-b1` (`fa87475c8`); main advanced
+  to B1 anyway (round 44).
+- **B2** (`aac02c52c`): java-night merged without F26 (round 45 (b)), 206 build errors fixed. F26 (the classfile API) is fixed
+  apart on `mac/f26-classfile` (`acaae3905`) and waits for after the goal.
+- **The crops' records**: rec-ocaml (OCaml's independence 52 -> 100), rec-llvm-cpp (LLVM 97 -> 98, C++ 71 -> 72), the asm
+  arm64 controls fix (`b1f27d8b3`: the thread kind needs the arm64 CPU).
+- **W1** (`stack-w1`): essential gate passed but cpp-c2j and scheme-c2j (the old stage 0 lacked JCS167's serial plan); the
+  fixpoint holds.
+- **W2** (`53da41d93`): the embedding; `bin/pyi table-check --configs tamago/amd64,tamago/arm64` passes; the fixpoint holds.
+- **The re-seed** (`03fec28a4`): seed `3c48859d`, verified. Its essential gate: cpp-c2j and scheme-c2j pass; two new failures
+  fixed: `j2g-edge` (repr/scheme's reader, now embedded, had fns with primitive hints and over 4 parameters, refused by the
+  frozen v4 compiler; the edge recorded afresh, `4192d6a45`, moves gate_key) and `llvm-controls-test` (the gate's cheap prune
+  of TMPDIR's files older than 2 days removed llvmi's IR modules, extracted with their packs' 1970 dates; `tar -m`,
+  `2455fa2be`).
+- **R** (`w-retire-4`, merged as `f1969748f`).
+- **The full gate** on `f1969748f` from 09:20 UTC (plan: simulated wall 7:27); the essential gate before it was dropped as
+  redundant (the full tier runs every essential step; the user, 2026-11-17).
+- **Beside it** (light, branches to land after the advance): `tmpdates-fix` (every other extraction of an old-dated archive
+  where the gate's age prune reaches), `memdecl-fix` (the steps whose peaks exceed their `:mem-gib`: cpp-runtime 8.1 GiB
+  for 3, go-build 25 for 20, ...), `goal-records` (these records).
+- **After the goal** (round 50 (4)): F26 (its classfile sources again, the conversion, the edge, its 4 commits), the Mac's
+  304 and 305, Ghidra's PropertyChangeEvent slice (a quiet host, about 34 GiB), then analyze and G1.md §8 on a gate build,
+  Python's gate fragment and amd64 records night, oi-divergences judging the native records, t03832 recorded again, and the
+  branches pruned (cpp-cp338, night-py, oi-table2-scratch; wasm-wa8's content checked).
 
 ## The branch consolidation (2026-11-08/09)
 
