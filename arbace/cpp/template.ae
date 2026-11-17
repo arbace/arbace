@@ -101,7 +101,9 @@
                                         (:_tc k) (assoc :tc (:_tc k) :tc-args (:_tcargs k))
                                         ;; (its arguments' forms as written, C<A...> T: the immediately-declared constraint
                                         ;; C<T, A...>, [temp.param]/4; from the parameter's text)
-                                        (and (:_tc k) (:_tcargs k)) (assoc :tc-forms (tc-arg-forms k)))
+                                        (and (:_tc k) (:_tcargs k)) (assoc :tc-forms (tc-arg-forms k))
+                                        ;; (n-cpp-concepts: an abbreviated template's invented parameter, [dcl.fct]/22)
+                                        (:isImplicit k) (assoc :invented true))
                "NonTypeTemplateParmDecl" {:name (:name k) :kind :value :qt (str/replace (get-in k [:type :qualType]) #"\s*\.\.\.$" "")
                                           :default (some-> (first (kids k)) kids first)}
                "TemplateTemplateParmDecl" {:name (:name k) :kind :template})
@@ -1818,6 +1820,48 @@
         parts (remove nil? (concat tcs [rc]))]
     (when (seq parts) (reduce (fn [a b] [:and a b]) parts))))
 
+(defn- identity-constraints
+  "n-cpp-concepts: a template's associated constraints (its parameters' type-constraints, then its requires-clause) as one
+  normal form or nil, as partial-constraints's, a constrained pack's (C... Ts) an atom of its own declaration (its fold
+  expansion, [temp.param]/4, comparable with no other: GCC 15's reading, concepts/variadic4.C); ::unknown for a
+  type-constraint with arguments or a concept not found."
+  [pt]
+  (let [ss (bind-scope (:scope pt) (:params pt) nil (:id pt))
+        tcs (for [[i p] (map-indexed vector (:params pt)) :when (:tc p)]
+              (cond (:tc-args p) (throw (ex-info "codegen: a type-constraint with arguments" {:codegen/refused :template}))
+                    (:pack p) [:atom [:pack-tc (:id pt) i]]
+                    :else (let [c (or (concept-of pt p) (throw (ex-info "codegen: no concept" {:codegen/refused :template})))
+                                ty (:ty (first (sema/lookup ss (:name p))))]
+                            (normal-form (bind-scope (:scope c) (:params c) [ty] nil) (:expr c) (canonical [ty]) 1))))
+        rc (when-let [x (:constraint pt)] (normal-form ss x nil 0))
+        parts (remove nil? (concat tcs [rc]))]
+    (when (seq parts) (reduce (fn [a b] [:and a b]) parts))))
+
+(defn- identity-partial-check!
+  "n-cpp-concepts (the checker), [temp.spec.partial.general]/9.2: a class template partial specialization whose arguments
+  are its own parameters in order (S<T>, zip<Ts...>) is more specialized than the primary template only by its constraints:
+  they subsume the primary's, which do not subsume them ([temp.constr.order]); else GCC's \"does not specialize any template
+  arguments\", reported at the declaration `n` (the declaration kept). A constraint the slice cannot normalize judges nothing."
+  [t pt n]
+  (when-let [h (when (sema/checking?) sema/*on-refusal*)]
+    (let [forms (vec (:forms pt)) ps (:params pt)]
+      (when (and (seq ps) (= (count forms) (count ps) (count (:params t)))
+                 (every? true? (map (fn [f p] (if (:pack p)
+                                                (and (seq? f) (= 'pack-expand (first f)) (= (str (second f)) (:name p)))
+                                                (and (symbol? f) (= (str f) (:name p)))))
+                                    forms ps))
+                 (= (mapv (comp boolean :pack) ps) (mapv (comp boolean :pack) (:params t))))
+        (let [pc (try (identity-constraints pt) (catch arbace.lang.ExceptionInfo _ ::unknown))
+              qc (try (identity-constraints {:id (:id t) :scope (:scope t) :params (:params t) :constraint (:class-constraint t)})
+                      (catch arbace.lang.ExceptionInfo _ ::unknown))]
+          (when (and (not= ::unknown pc) (not= ::unknown qc)
+                     (not (and pc (or (nil? qc) (and (subsumes? pc qc) (not (subsumes? qc pc)))))))
+            ;; (at its name, as GCC: the class-head, not the template-head)
+            (let [at (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))]
+              (h (ex-info (str "codegen: partial specialization of '" (:name t) "' does not specialize any template arguments and is not more constrained than the primary template")
+                          {:codegen/refused :template :cx/node at})
+                 n))))))))
+
 (defn- more-constrained-partial?
   [p1 p2]
   (let [p (try (partial-constraints p1) (catch arbace.lang.ExceptionInfo _ ::unknown))
@@ -1865,6 +1909,25 @@
                                 (:name (tmpl tid)) ")")
                            {:codegen/refused :depth}))))))
 
+(declare type-constraints-satisfied?)
+
+(defn- class-constraints-check!
+  "n-cpp-concepts (the checker), [temp.names]/7: a simple-template-id naming a constrained class template with non-dependent
+  arguments satisfies the template's associated constraints (its parameters' type-constraints, then its requires-clause,
+  [temp.constr.decl]/3); not satisfied with no doubt, GCC's \"template constraint failure\" (a substitution failure where a
+  deduction names it: a sure drop)."
+  [t args]
+  (when (and (sema/checking?) (or (:class-constraint t) (some :tc (:params t))) (not (dependent? args)))
+    (let [d (atom false)
+          ok (try (let [ps (bind-scope (:scope t) (:params t) args nil)]
+                    (binding [sema/*constraint-doubt* d sema/*no-user* false sema/*cutoff* Long/MAX_VALUE]
+                      (and (type-constraints-satisfied? t args ps)
+                           (or (nil? (:class-constraint t)) (sema/constraint-satisfied? ps (:class-constraint t))))))
+                  (catch arbace.lang.ExceptionInfo _ (reset! d true) true))]
+      (when (and (not ok) (not @d))
+        (throw (ex-info (str "codegen: template constraint failure for '" (:name t) "'")
+                        {:codegen/refused :template :cx/sure-drop true}))))))
+
 (defn- instantiate-class*
   [tid args]
   (sema/tick!)
@@ -1875,6 +1938,7 @@
         (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of 1024 (" (:name (tmpl tid)) ")")
                         {:codegen/refused :depth})))
       (let [t (tmpl tid)]
+        (class-constraints-check! t args)
         (when-let [nm (System/getenv "CPP_INST_TRACE")]
           (when (= nm (:name t))
             (binding [*out* *err*] (println "instance miss" (:name t) tid (pr-str args) (System/identityHashCode *tmpls*) (count (:insts t))))))
@@ -2073,6 +2137,77 @@
             (#{"<" "(" "["} t) (recur (inc i) (inc d) (conj seg (get ts i)) out)
             (#{">" ")" "]"} t) (recur (inc i) (dec d) (conj seg (get ts i)) out)
             :else (recur (inc i) d (conj seg (get ts i)) out)))))))
+
+(declare ool-qualifier)
+
+(defn- outer-head
+  "n-cpp-concepts: the leading template-head of `text` (`template<...> requires ...`) as data, its parameters by position:
+  [[param ...] requires] -- each parameter its tokens before a default argument without its name (typename as class),
+  the requires-clause's tokens (primaries joined by && and ||, [temp.pre]/1) with the names as $i -- or nil."
+  [^String text]
+  (let [ts (vec (ct/tokens (or text "")))
+        tx (fn [i] (nth (get ts i) 1 nil))]
+    (when (and (= "template" (tx 0)) (= "<" (tx 1)))
+      (let [[segs j] (loop [i 2 d 0 seg [] out []]
+                       (let [t (tx i)]
+                         (cond
+                           (nil? t) [nil i]
+                           (and (zero? d) (#{"," ">"} t)) (let [out (conj out seg)] (if (= t ">") [out (inc i)] (recur (inc i) d [] out)))
+                           (#{"<" "(" "["} t) (recur (inc i) (inc d) (conj seg t) out)
+                           (#{">" ")" "]"} t) (recur (inc i) (dec d) (conj seg t) out)
+                           (= ">>" t) (recur (inc i) (- d 2) (conj seg ">" ">") out)
+                           :else (recur (inc i) d (conj seg t) out))))]
+        (when segs
+          (let [kw #{"class" "typename" "int" "unsigned" "long" "short" "char" "bool" "signed" "const" "auto" "template" "..."}
+                names (mapv (fn [seg] (last (filter #(and (re-matches #"[A-Za-z_]\w*" %) (not (kw %))) (take-while #(not= "=" %) seg)))) segs)
+                ;; (a parameter's name is its last identifier before = that is no keyword; a constrained one's C T has C first)
+                params (mapv (fn [seg nm] (let [s (vec (take-while #(not= "=" %) seg))
+                                                s (if (and nm (= nm (peek s))) (pop s) s)]
+                                            (mapv #(if (= "typename" %) "class" %) s)))
+                             segs names)
+                ;; the requires-clause's extent
+                bal (fn [i o c] (loop [i (inc i) d 1] (let [t (tx i)] (cond (nil? t) i (= t o) (recur (inc i) (inc d)) (= t c) (if (= d 1) (inc i) (recur (inc i) (dec d))) :else (recur (inc i) d)))))
+                prim (fn [i] (cond (= "(" (tx i)) (bal i "(" ")")
+                                   (and (tx i) (re-matches #"[A-Za-z_]\w*" (tx i)))
+                                   (let [i (loop [i (inc i)] (if (and (= "::" (tx i)) (tx (inc i)) (re-matches #"[A-Za-z_]\w*" (tx (inc i)))) (recur (+ i 2)) i))]
+                                     (if (= "<" (tx i)) (bal i "<" ">") i))
+                                   :else nil))
+                rq (when (= "requires" (tx j))
+                     (loop [i (inc j)]
+                       (when-let [e (prim i)]
+                         (if (#{"&&" "||" "and" "or"} (tx e)) (recur (inc e)) (subvec (mapv second ts) (inc j) e)))))
+                pos (into {} (keep-indexed (fn [i nm] (when nm [nm (str "$" i)])) names))]
+            [params (when rq (mapv #(get pos % %) rq))]))))))
+
+(defn- ool-head-check!
+  "n-cpp-concepts (the checker), [temp.mem.func]/1 with [temp.over.link]/6-7: an out-of-line member `n` of the class template
+  `t` (its qualifier's arguments the template-head's parameters in order, the primary's member) repeats the class template's
+  template-head, its parameters and constraints the same as written: else GCC's \"declaration ... with different
+  constraints\", at the member's name."
+  [t n]
+  (when-let [h (when (and (sema/checking?) (not (sema/header-node? n))) sema/*on-refusal*)]
+    (let [;; (a member template's node starts at its own template-head, its declaration's at the outer one: the longer text)
+          text (->> (cons n (kids n)) (map node-text) (filter #(and % (re-find #"^\s*template\b" %))) (sort-by count) last)
+          mine (outer-head text)
+          theirs (some-> (:head-text t) outer-head)
+          [_ qt] (ool-qualifier (if (= "FunctionTemplateDecl" (:kind n))
+                                  (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl" "CXXDestructorDecl"} (:kind %)) (kids n)))
+                                  (or (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n))) n)))
+          f (when (string? qt) (try (ct/parse-type qt) (catch Throwable _ nil)))
+          hn (header-params (str/trim (str text)))
+          primary? (and (seq? f) (= '<> (first f)) (seq hn)
+                        (= (mapv (fn [a] (if (and (seq? a) (= 'pack-expand (first a))) (str (second a)) (str a))) (nnext f))
+                           (mapv #(str/replace (str %) #"\.\.\.$" "") hn)))]
+      ;; (the constraints alone compared: each parameter's concept names and the requires-clause; a non-type parameter's
+      ;; type spelled otherwise, std::size_t for size_t, judges nothing)
+      (when (and mine theirs primary? (= (count (first mine)) (count (first theirs)))
+                 (let [concept? (fn [tok] (some #(and (= :tmpl (:e %)) (= :concept (:tk %)))
+                                                (try (sema/lookup (:scope t) tok) (catch arbace.lang.ExceptionInfo _ nil))))
+                       sig (fn [[ps rq]] [(mapv (fn [p] (filterv concept? p)) ps) rq])]
+                   (not= (sig mine) (sig theirs))))
+        (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)
+              at (if (:offset l) {:range {:begin l}} n)]
+          (h (ex-info (str "codegen: out-of-line declaration of a member of '" (:name t) "' with different constraints") {:codegen/refused :template :cx/node at}) n))))))
 
 (declare ool-qualifier)
 
@@ -2683,6 +2818,7 @@
       (let [cls (sema/resolve-type scope qt)]
         (attach-member-template! (:id cls) {:node n :pnames []} []))
       (let [tid (ool-class-template scope cn qt)
+            _ (ool-head-check! (tmpl tid) n)
             o {:node n :pnames (header-params text)}]
         (upd-tmpl! tid update :ool-tmpls (fnil conj []) o)
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-member-template! cid o (:params (tmpl tid)))))))
@@ -2733,13 +2869,32 @@
   its trailing requires-clause), the template parameters' names replaced by their positions: two declarations of the same
   template spell them alike (equivalent), else they declare two templates."
   [params rc trc]
-  (let [txt (str (pr-str (map (juxt :tc :tc-args) params)) " | " (some-> rc node-text) " | " (some-> trc node-text))]
+  ;; (n-cpp-concepts, the checker: an abbreviated template's invented parameters marked, GCC's reading of [temp.over.link]/6:
+  ;; `void f(C auto)` and `template<C T> void f(T)` are functionally equivalent but not equivalent, two templates, a call
+  ;; of both ambiguous: concepts/equiv.C)
+  (let [txt (str (pr-str (map (if (sema/checking?) (juxt :tc :tc-args :invented) (juxt :tc :tc-args)) params)) " | " (some-> rc node-text) " | " (some-> trc node-text))]
     (reduce (fn [^String s [i p]]
               (if (string? (:name p))
                 (str/replace s (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote (:name p)) "(?![A-Za-z0-9_])")) (str "\\$" i))
                 s))
             (str/replace txt #"\s+" " ")
             (map-indexed vector params))))
+
+(defn- class-redecl-constraints!
+  "n-cpp-concepts (the checker), [temp.over.link]/7 with [temp.class.general]/2: a class template's redeclaration `n` has
+  the template-head of the template `t`'s declaration, its constraints the same as written (constraint-spelling: the
+  type-constraints, then the requires-clause, the parameters by position); else GCC's \"redeclaration ... with different
+  constraints\", at the first parameter whose type-constraint differs, else at the class's name."
+  [t n]
+  (when-let [h sema/*on-refusal*]
+    (let [ops (:params t) nps (tparams n)]
+      (when (and (= (count ops) (count nps))
+                 (not= (constraint-spelling ops (:class-constraint t) nil) (constraint-spelling nps (:requiresClause n) nil)))
+        (let [i (first (filter #(not= ((juxt :tc :tc-args) (nth ops %)) ((juxt :tc :tc-args) (nth nps %))) (range (count nps))))
+              pn (when i (nth (vec (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (kids n))) i nil))
+              pos (fn [x] (let [l (:loc x) l (if (:expansionLoc l) (:expansionLoc l) l)] (when (:offset l) {:range {:begin l}})))
+              at (or (some-> pn pos) (when-let [r (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))] (pos r)) n)]
+          (h (ex-info (str "codegen: redeclaration of '" (:name t) "' with different constraints") {:codegen/refused :template :cx/node at}) n))))))
 
 (defn declare-template
   "The :declare hook: a template's declaration node entered (nil when the node is not one of a template's)."
@@ -2749,6 +2904,7 @@
     (if-let [[cn qt nested] (when (:completeDefinition (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))) (ool-qualifier n))]
       ;; a member class of a class template defined outside it (G5: basic_ostream<_CharT, _Traits>::sentry)
       (let [tid (ool-class-template scope cn qt)
+            _ (ool-head-check! (tmpl tid) n)
             o {:k :class :node (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n))) :pnames (mapv :name (tparams n)) :nested nested}]
         (upd-tmpl! tid update :ool (fnil conj []) o)
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
@@ -2757,6 +2913,7 @@
           scope (class-key-scope scope n)
           old (find-template scope (:name n) :class)
           tid (or old (next-id))]
+      (when (and old (sema/checking?) (not (sema/header-node? n))) (class-redecl-constraints! (tmpl old) n))
       (if old
         ;; the definition's parameters, the earlier declarations' default arguments kept ([temp.param]/12; G4:
         ;; basic_string's defaults are on its declaration in <stringfwd.h>)
@@ -2772,7 +2929,7 @@
           (let [news (tparams n)]
             (upd-tmpl! tid update :params (fn [ps] (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get news i))) (inherit-default p news ps i) p)) ps))))))
         (do (swap! *tmpls* assoc tid {:id tid :tk :class :name (:name n) :scope scope :path (:path scope) :params (tparams n)
-                                      :class-constraint (:requiresClause n)
+                                      :class-constraint (:requiresClause n) :head-text (when (sema/checking?) (node-text n))
                                       :pattern (when (:completeDefinition pattern) pattern) :pos (:_b n) :insts {} :specs {} :partials [] :ool []})
             (enter! scope (:name n) {:e :tmpl :tk :class :id tid :pos (long (or (:_b n) 0))})))
       :template))
@@ -2889,6 +3046,10 @@
         :template)
     ("TypeAliasTemplateDecl" "VarTemplateDecl")
     (let [tk (if (= "VarTemplateDecl" (:kind n)) :var :alias)
+          ;; (n-cpp-concepts, the checker: a member variable template defined out of line, its template-heads checked)
+          _ (when (and (sema/checking?) (= :var tk))
+              (when-let [[cn qt] (ool-qualifier (or (first (filter #(= "VarDecl" (:kind %)) (kids n))) n))]
+                (when-let [ot (try (ool-class-template scope cn qt) (catch arbace.lang.ExceptionInfo _ nil))] (ool-head-check! (tmpl ot) n))))
           pattern (first (filter #(#{"TypeAliasDecl" "VarDecl"} (:kind %)) (kids n)))
           tid (next-id)]
       (swap! *tmpls* assoc tid {:id tid :tk tk :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
@@ -2943,6 +3104,7 @@
             pt (cond-> {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
                         :forms (template-text-args n) :tmpl t}
                  (seq nx) (assoc :nx nx))]
+        (when-not same (identity-partial-check! t pt n))
         (if same
           (when (:completeDefinition n)
             (upd-tmpl! tid update :partials (fn [ps] (mapv #(if (identical? % same) pt %) ps))))
@@ -2989,6 +3151,7 @@
         (let [[cn qt] (ool-qualifier n)
               tid (ool-class-template scope cn qt)
               t (tmpl tid)
+              _ (ool-head-check! t n)
               pnames (header-params text)
               o {:k (if (= "VarDecl" (:kind n)) :var :fn) :node n :pnames pnames :nested (nth (ool-qualifier n) 2 nil)}
               ;; a partial specialization's member: the qualifier's arguments, with the header's names standing for the
