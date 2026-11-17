@@ -10401,3 +10401,27 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   (0.9140 to 0.9153). `own-verdicts --check`, `divergences`, the negative control, `bin/reap --record`, `bin/crops-score --record`,
   `--judge --strict`, `bin/records-check` pass. One typer process (compiler-libs' parser.ml in the native library's rebuild, 1.09 GB)
   stopped by PID under the night's 1 GiB rule: only this worktree's scratch library lacks Parser.
+
+## 2026-11-17 (round 52, overnight): queue 331 (OC218 (a)'s first part) merged onto OC217's stages (branch `n-ocaml-stack`)
+
+- On `n-ocaml-stack` from `mac/n-oc217b` (759dd34df: n-review-d, i.e. the Mac's 323, then n-ocaml-defer, then OC217's stages 1 and 3),
+  merged `mac/331-ocaml-decided-rows` (4f4b5a6eb, from 323's 65109ab43; its report `.tmp/mac-queue/reports/331-ocaml-decided-rows.md`):
+  Gc's word counters, Gc.Memprof's sampling, oi's let slots cleared at their scope's end, `Main/reset` of the profile.
+- Conflicts: `go/arbace/oi/thread.ae` alone in the code (OC217's `bt`, `btBuf`, `btExn` and 331's `mpQ`, `mpInCb`: both kept);
+  `test/crops/scores.edn` and `test/reap/matrix.edn` (generated: recorded again). The records merged row by row (a three-way
+  comparison per id of check-oi-native, check-aot*, check-suite-*, oi-known, aot-known, own-verdict and every divergences file): no
+  row changed by both sides, so no row needed the run to decide.
+- The runtime: OC217's events push and pop the thread's `bt` slots around calls and primitives (`applyEvNode`, `primEv`), 331 counts
+  words inside the primitives' ops and wraps the allocating externals; `primEv` calls the same ops, so the counts hold under -g.
+  Memprof's callbacks run at `tick`, balanced on `bt`. No collision. Memprof's callstack stays empty: it could now take the thread's
+  `bt` slots as `caml_get_current_callstack` does (a follow-up, not built).
+- Checks on the merge: `bin/oi test`; `repl-check --native` (24 phrases); `bin/oi check --record --only-list` over the 36 ids either
+  side moved at eval: 25 pass, 0 failing, every row as merged (no record change), the negative control why-at-vs-why-swallow differs;
+  the essential list's first 20 programs pass; `own-verdicts --check` 0 differ at the four corpora and levels; `bin/reap --record`
+  0 problems; `bin/crops-score --record`, `--judge --strict` and `bin/records-check` pass. OCaml eval 512 / 75 / 54 → 521 / 75 / 45,
+  AOT 429 / 74 / 138 → 434 / 74 / 133, completeness 87 (0.8655 to 0.8710), without by design 92 (0.9153 to 0.9215).
+- Not done under the night's 1 GiB rule: the AOT list (`check --aot --only-list` of 331's ids and three backtrace programs): o2j's
+  batch on stage 0 grew past 1 GiB three times, stopped by PID, nothing recorded. The native library's rebuild stopped at
+  compiler-libs' parser.ml (1.05 GB) as on n-oc217b: only this worktree's scratch library lacks Parser.
+- `bin/oi pins` exits 1, "not attested" (331's finding 1: its re-pinned and dropped pins), until the main host's whole runs and
+  `bin/oi pins --attest`; the gate's oi-essential step fails until then.
