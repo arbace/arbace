@@ -7930,3 +7930,64 @@ printf 't04727\nt04740\nt04741\n' > .tmp/njc.txt
 bin/java-check --levels read,interp,compiled,print --list .tmp/njc.txt --save .tmp/njc
 bin/java-check --judge --partial --record .tmp/njc/...      # the three rows alone
 ```
+
+## As built: n-jrt-aih (write-ahead), 2026-11-17 (round 52, overnight)
+
+Branch `n-jrt-aih` (from mac/n-java-conv `92eabf1b7`), under the night's rules (each process under 1 GiB, no build): the row
+of n-java-defer's `:reflection` table "AnnotationInvocationHandler's constructor missing from jrt" (t04724 t04735 t04738
+t04742, and t04740 t04741 after n-java-conv's receiver fix).
+
+**The cause.** Declaration annotations are jrt's (F14: `AnnotationObj`, decoded from ClassInfo.Annots); since JCS210 (a)
+jrt registers `sun.reflect.annotation.AnnotationInvocationHandler` itself (`annotationHandler`, annotation.ae), so j2g
+treats the class as hand-written and does not translate jdk26u's copy, though JCS271 (b)'s `type-annotation-sources` list
+it. The annotations of type annotations are made by translated jdk26u code, `AnnotationParser.annotationForMap`:
+`Proxy.newProxyInstance(loader, {type}, new AnnotationInvocationHandler(type, memberValues))`. jrt had no
+`annotationHandler_New_Class_Map`, so j2g wrote the handler as `J2g_Missing` ("jrt lacks constructor
+sun/reflect/annotation/AnnotationInvocationHandler(Ljava/lang/Class;Ljava/util/Map;)V", the gate executable
+`f60652fb7fb9568e76b1`'s report.edn), and every type annotation's lookup failed on it.
+
+**Decided, taken overnight (round 52), recommended: the constructor in jrt's handler** (option a), not jdk26u's class
+translated in place of jrt's (b). Why: (a) keeps JCS210's one handler class for both kinds of annotations (declaration
+annotations' `Proxy.getInvocationHandler` and the type annotations' proxies answer the same class, with jdk26u's rules
+ported once); (b) would drop jrt's class, so a declaration annotation's handler would be the world's class made by name
+through a package-private constructor (no member table entry), and jrt alone (`bin/jrt test`) would have no handler.
+
+**As built** (go/arbace/jrt/annotation.ae):
+- `annotationHandler_New_Class_Map(type, memberValues)`: jdk26u's checks (an annotation type whose one superinterface is
+  Annotation, else `AnnotationFormatError("Attempt to create proxy for a non-annotation type: " + name)`, the world's class
+  by name as `incompleteAnnotation` reaches its exception; in jrt alone an InternalError naming it). The member values
+  become the handler's annotation object in the map's order (its entrySet, which jdk26u's toStringImpl and hashCodeImpl
+  walk). The map is a translated class jrt alone does not know, so its parameter is `any` (the Map value j2g passes
+  converts implicitly) and it is read through the world's member tables by name with serial_classes.ae's `serialCall`
+  (Map.entrySet, Set.iterator, Iterator.hasNext and next, Map$Entry.getKey and getValue). invoke, equalsImpl, hashCodeImpl
+  and toStringImpl are then JCS210's.
+- invoke's `equals`: jdk26u's first rule, `o == proxy` true, before equalsImpl.
+- equalsImpl's asOneOfUs (`annotationObjOf`): the other annotation's member values are read directly when it is jrt's
+  annotation object or a proxy whose handler is an AnnotationInvocationHandler (a type annotation), else by its methods as
+  before.
+- Test: `TestAnnotationHandlerNew` (annotation_test.ae): over a stand-in map answering serialCall's test hook, toString
+  `@test.Ann(name="x", tags={"a", "bé"}, value=5)` and hashCode -2079738441 (the JDK's for test.Host's @Ann), the members,
+  the array cloned, equals with the declaration annotation of the same values both ways, a non-annotation type refused.
+- **Left**: `memberValues()` (its Map return type, which jrt alone cannot name; only jdk.internal.vm.VMSupport calls it,
+  outside the world: j2g's AnnotationSupport.memberValues stays untranslated, unreached); an ExceptionProxy value's
+  exception at invoke (`generateException` is protected, no member table entry: a type annotation naming a missing class
+  or a mismatched element); the handler's serial form (JCS291).
+
+**Proof, light.** annotation.ae and annotation_test.ae printed alone by repr/go (stage 0, 0.33 GB) and accepted by gofmt -e;
+the types checked by reading (jrt alone was not compiled: printing jrt takes 1.7 GB). No Java and no overlay class changed,
+so no committed forms are re-read (jdk/forms' AnnotationInvocationHandler.ae stays jdk26u's, unused while jrt provides the
+class); the edge is unchanged (no new JDK class in an embedded namespace).
+
+**Keys.** go/arbace/jrt moves `gate_key`, `arbace_runtime_key` (the next build compiles the namespaces in two runs, about 5.5
+minutes) and `arbace_javac_key`; the program hosts' units (jrt's annotation.go).
+
+The day's commands (after the stack's build, in the merged worktree):
+
+```sh
+bin/jrt test --arch amd64 -run 'TestAnnotation'                       # TestAnnotationHandlerNew, TestAnnotationProxy...
+bin/arbace-go --gate-build                                            # or the gate's go-build; then:
+grep -c 'jrt lacks constructor sun/reflect/annotation/AnnotationInvocationHandler' "$(. bin/lib/gate-cache.bash; arbace_gate_cache)/amd64/j2g/report.edn"   # 0
+printf 't04724\nt04735\nt04738\nt04740\nt04741\nt04742\n' > .tmp/njra.txt
+bin/java-check --levels read,interp --list .tmp/njra.txt --save .tmp/njra
+bin/java-check --judge --partial --record .tmp/njra/...               # the six rows alone; divergences.edn's :reflection rows
+```

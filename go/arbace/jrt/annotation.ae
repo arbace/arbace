@@ -199,22 +199,23 @@ without parameters, not synthetic), as getMemberMethods and AnnotationType list 
 
 (go/method Equals_O__Z
   "Equals_O__Z is equalsImpl: the same object, or an instance of the type whose every member
-equals ours (another implementation's members by its methods).\n"
+equals ours (one of ours, asOneOfUs: an annotation object or a proxy over an AnnotationInvocationHandler, by
+its member values; another implementation's members by its methods).\n"
   ^bool [^{:tag (* AnnotationObj)} a ^any o]
   (let [(values oo ok) (assert Object_I o)]
     (when (and ok (== (.Self_Object oo) (addr (.-Object a))))
       (return true)))
   (when (not (.IsInstance_O__Z (.-typ a) o))
     (return false))
-  (let [(values ob us) (assert annotationBased o)]
+  (let [b (annotationObjOf o)
+        us (!= b nil)]
     (range [_ m (memberMethods (.-typ a))]
       (let [i (.index a (.-Name m))
             ^any ours nil
             ^any theirs nil]
         (when (>= i 0) (set! ours (aget (.-vals a) i)))
         (if us
-          (let [b (.annBase ob)
-                j (.index b (.-Name m))]
+          (let [j (.index b (.-Name m))]
             (when (>= j 0) (set! theirs (aget (.-vals b) j))))
           (let [^Throwable_I exc nil]
             (set! theirs ((fn ^any [] :results [^any v]
@@ -1038,6 +1039,9 @@ declared ones, else for an @Inherited type the nearest superclass's.\n"
     (when (and (== (len ps) 1) (== member "equals") (== (aget ps 0) Object_class))
       (when (or (== args nil) (!= (len (.-A args)) 1))
         (panic (IllegalArgumentException_New_String (Str "wrong number of arguments"))))
+      ;; equalsImpl's first rule: the proxy itself
+      (when (and (!= proxy nil) (== (aget (.-A args) 0) proxy))
+        (return true))
       (return (.Equals_O__Z (.-a h) (aget (.-A args) 0))))
     (when (!= (len ps) 0)
       (panic (AssertionError_New_O (Str "Too many parameters for an annotation method"))))
@@ -1060,3 +1064,60 @@ nil.\n"
         (return h))
       (.CompareAndSwap (.-handler a) nil (addr (lit annotationHandler :a a)))
       (return (.Load (.-handler a))))))
+;; ---------------------------------------------------------------------------------------
+;; the handler's constructor (n-jrt-aih, round 52; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-jrt-aih"):
+;; jdk26u's AnnotationInvocationHandler(Class, Map), which AnnotationParser.annotationForMap calls for the
+;; annotations of type annotations (translated jdk26u code: AnnotatedTypeFactory, TypeAnnotationParser) and wraps
+;; in a java.lang.reflect.Proxy of the type. Its checks are jdk26u's; its member values become the handler's
+;; annotation object, in the map's order (memberValues' entrySet, which toStringImpl and hashCodeImpl walk), so
+;; invoke, equalsImpl, hashCodeImpl and toStringImpl are the ones above. The map is a translated class jrt alone
+;; does not know: its parameter is any, read through the world's member tables by name (serialCall: Map.entrySet,
+;; Set.iterator, Iterator.hasNext and next, Map$Entry.getKey and getValue), as serial_classes.ae reaches the streams.
+;; Left: memberValues() (its Map return type; only VMSupport calls it, outside the world), an ExceptionProxy value's
+;; exception at invoke (generateException is protected: no member table entry), the handler's serial form (JCS291).
+
+(go/func annotationHandler_New_Class_Map
+  "annotationHandler_New_Class_Map is new AnnotationInvocationHandler(type, memberValues): AnnotationFormatError
+for a type that is not an annotation type with Annotation its one superinterface.\n"
+  ^{:tag (* annotationHandler)} [^{:tag (* Class)} typ ^any memberValues]
+  (when (== typ nil) (panic (NPE)))
+  (let [is (.-Interfaces (.Info typ))]
+    (when (or (not (.IsAnnotation__Z typ)) (!= (len is) 1) (!= (aget is 0) Annotation_class))
+      (panic (annotationFormatError (+ "Attempt to create proxy for a non-annotation type: " (.-Name (.Info typ)))))))
+  (when (== memberValues nil) (panic (NPE)))
+  (let [a (addr (lit AnnotationObj :typ typ))
+        it (serialCall (serialCall memberValues "java.util.Map" "entrySet" nil nil) "java.util.Set" "iterator" nil nil)]
+    (while (assert bool (serialCall it "java.util.Iterator" "hasNext" nil nil))
+      (let [e (serialCall it "java.util.Iterator" "next" nil nil)
+            k (serialCall e "java.util.Map$Entry" "getKey" nil nil)]
+        (set! (.-names a) (append (.-names a) (.String (assert (* String) k))))
+        (set! (.-vals a) (append (.-vals a) (serialCall e "java.util.Map$Entry" "getValue" nil nil)))))
+    (set! (.-self a) a)
+    (addr (lit annotationHandler :a a))))
+
+(go/var ^{:doc "the error of a malformed annotation (F14's annotation-sources: the world's, translated from jdk26u)\n"}
+  annotationFormatErrorName "java.lang.annotation.AnnotationFormatError")
+
+(go/func annotationFormatError
+  "annotationFormatError is new AnnotationFormatError(msg): the world's class, as incompleteAnnotation reaches its
+exception; in a world without it an InternalError naming it.\n"
+  ^Throwable_I [^string msg]
+  (when (!= (ForName annotationFormatErrorName) nil)
+    (return (Throwable_Cast (serialNewObject annotationFormatErrorName (lit (slice (* Class)) String_class)
+                                             (lit (slice any) (Str msg))))))
+  (Thrown (InternalError_New_String (Str (+ "AnnotationFormatError: " msg)))))
+
+(go/func annotationObjOf
+  "annotationObjOf is o's annotation object when o is one of ours (equalsImpl's asOneOfUs): an annotation object
+jrt made, or a proxy whose handler is an AnnotationInvocationHandler; else nil.\n"
+  ^{:tag (* AnnotationObj)} [^any o]
+  (let [(values b ok) (assert annotationBased o)]
+    (when ok (return (.annBase b))))
+  (let [(values d ok) (assert proxyFields o)]
+    (when (or (not ok) (not (IsProxyClass (GetClass o))))
+      (return nil))
+    (let [f (deref (.DynFields d))]
+      (when (== (len f) 0) (return nil))
+      (let [(values h ok2) (assert (* annotationHandler) (aget f 0))]
+        (when (not ok2) (return nil))
+        (.-a h)))))

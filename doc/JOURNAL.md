@@ -10493,3 +10493,20 @@ printed and read again, equal; the class files of the originals and of the print
 missing AnnotationInvocationHandler constructor (another row); 18 of 18 annotation tests that passed still pass. The reader's
 hash moves (already stale on the base); the day rewrites the provenance (bin/jrt-convert update, bin/javac-vendor convert,
 --java-fixtures update, --forms update).
+
+## 2026-11-17: n-jrt-aih, AnnotationInvocationHandler(Class, Map) in jrt (round 52, overnight)
+
+Branch n-jrt-aih from mac/n-java-conv 92eabf1b7: the row "AnnotationInvocationHandler's constructor missing from jrt"
+(t04724 t04735 t04738 t04742, t04740 t04741; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer" on
+mac/n-java-defer). jrt registers sun.reflect.annotation.AnnotationInvocationHandler itself (JCS210 (a)), so j2g does not
+translate jdk26u's copy; the type annotations' annotations come from translated jdk26u AnnotationParser.annotationForMap,
+`new AnnotationInvocationHandler(type, memberValues)`, which j2g wrote as J2g_Missing (the gate executable
+f60652fb7fb9568e76b1's report.edn). Added to go/arbace/jrt/annotation.ae: the constructor with jdk26u's checks
+(src/java.base/share/classes/sun/reflect/annotation/AnnotationInvocationHandler.java at jdk26u baf63fb), the map read by
+name through the world's member tables (serialCall) into the handler's annotation object in entrySet order; invoke's
+`o == proxy` rule; equalsImpl's asOneOfUs for proxies over the handler. Taken overnight (round 52), recommended: the
+constructor in jrt's handler, over translating jdk26u's class in place of jrt's (which would leave declaration annotations'
+handler to a package-private constructor reached by name and jrt alone without one). Left: memberValues() (Map return
+type; only VMSupport calls it), ExceptionProxy values at invoke, the serial form (JCS291). Proof, light: the two files
+printed alone by repr/go and accepted by gofmt; a unit test TestAnnotationHandlerNew for the day's bin/jrt test. Keys:
+gate_key, arbace_runtime_key, arbace_javac_key. The day: bin/jrt test, the build, java-check read,interp on the six ids.
