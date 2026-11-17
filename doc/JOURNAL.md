@@ -10319,3 +10319,15 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: h-cpp-consteval, C++'s constant-evaluation diagnostics (branch `h-cpp-consteval` from next 55e8c0ae7)
+
+- The constant-evaluation group of the read cell's :own-diag (167 files, the Mac's review 336 at mac/336-cpp-own-diag 82d055533,
+  test/cpp/own-diag-review.edn) taken rule by rule in arbace.cpp.sema's evaluator as a checker: const objects modified, unions'
+  members, non-constexpr calls anywhere, constinit, the potential constant check of a constexpr body (GCC's
+  potential_constant_expression, before C++23), reinterpret_cast, bounds/null/overflow at their operation, lifetimes, asm/goto,
+  indeterminate values; class objects' initializers and static_asserts' non-constant conditions evaluated. 48 files moved to pass
+  (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-consteval", per rule), no recorded pass lost, the dg control failing; the 48 rows recorded
+  alone. C++ read 5,309 / 243 / 943 to 5,357 / 243 / 895; crop completeness 91 to 92. Source: the standard's [expr.const] and
+  gcc-15.2.0's g++.dg tests (the pinned tarball); no GCC code read. gate_key moves. Alternative: a separate constant evaluator for
+  the checker (not taken: the code generator's folds share these semantics, and the checker's rules are gated by `checking?`).
