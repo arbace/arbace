@@ -11,6 +11,7 @@
             [arbace.j2g.access :as access]
             [arbace.j2g.checks :as chk]
             [arbace.j2g.code :as code]
+            [arbace.j2g.decls :as decls]
             [arbace.j2g.edge :as edge]
             [arbace.j2g.embed :as embed]
             [arbace.j2g.main :as jm]
@@ -557,10 +558,123 @@
                       (= "org.example:toyext:1.0" (get (outside/asked d) "org/example/toyext/ToyText"))
                       (= (:declared r) (count (:classes r))))
                  (pr-str (outside/asked d))))
-        (check "outside: control: java.base is not declared from the platform (java.lang.classfile, out of the world)"
-               (not (contains? d "java/lang/classfile/ClassFile")))
+        ;; since A8c java.base's API is declared too, when neither the world nor the edge has the class (its
+        ;; internal packages not: test-outside-completion's control)
+        (check "outside: java.base's API outside the world is declared from java.base (java.lang.classfile, A8c)"
+               (= outside/base-origin (:outside (get d "java/lang/classfile/ClassFile"))))
         (check "outside: the edge's classes keep its answers (String's info is the edge's)"
                (identical? (:info (get (:classes e) "java/lang/String")) (:info (get d "java/lang/String"))))))))
+
+;; A8c (the Ghidra demo's 20 classes left after A8): the world's variants completed from the platform (java.awt.Color's
+;; Paint and its cut ColorSpace members), java.base's API that neither the world nor the edge has declared too (in a
+;; program's own classes' members alone), an edge class's missing generics read from java.base's class file, and a
+;; file's own import before its package's namespace-wide one
+
+(defn test-outside-completion []
+  (let [srcs (outside-sources)
+        e (edge/read-edge "jdk/edge.edn")
+        files ["jdk/forms/java/util/EventListener.ae" "jdk/forms/java/util/EventObject.ae"
+               "jdk/forms/java/awt/Color.ae" "jdk/forms/java/awt/Transparency.ae" "jdk/forms/java/io/Serializable.ae"
+               "jdk/forms/java/util/function/Supplier.ae"]
+        load (fn [declared completion]
+               (binding [m/*run* true env/*declared* declared edge/*edge* e a/*source-lookup* false
+                         a/*completion* completion]
+                 (w/load-world [{:root "test/j2g/unit/outside" :tree true} {:files files}] :variant-files [])))
+        failed-of (fn [world] (into {} (for [[c msg] (:failed world)] [c msg])))]
+    (when srcs
+      (let [d (outside/declared (:classes e) srcs)
+            w0 (load (:classes e) nil)
+            wd (load d nil)
+            w1 (load d (outside/completion d))
+            f0 (failed-of w0) fd (failed-of wd) f1 (failed-of w1)
+            mw {:T (set (keys @(:compile-set w1))) :jrt-classes {} :jrt {}}
+            reason (fn [cls mname op]
+                     (w/with-world w1
+                       (binding [m/*w* mw env/*declared* d]
+                         (some (fn [[[n _] b]]
+                                 (when (= n mname)
+                                   (some #(when (= op (:op %)) (code/missing-reason %)) (nodes-of b))))
+                               (:bodies @(:state (a/decl cls)))))))
+            color-method (fn [nm desc] (w/with-world w1 (some #(when (and (= nm (:name %)) (= desc (:desc %))) %)
+                                                              (:methods (a/decl "java/awt/Color")))))
+            cs "(Ljava/awt/color/ColorSpace;[F)[F"]
+        (check "completion: the world's Color and its fixtures load" (not-any? #(contains? f1 %) ["java/awt/Color" "q/Paints" "q/Tint"])
+               (pr-str (select-keys f1 ["java/awt/Color" "q/Paints" "q/Tint"])))
+        (check "completion: control: with the declarations but no completion, Paints is refused (Color is no Paint)"
+               (str/includes? (str (get fd "q/Paints")) "setPaint") (pr-str (get fd "q/Paints")))
+        (check "completion: control: without the declarations Paints is refused" (contains? f0 "q/Paints"))
+        (check "completion: Color implements java.awt.Paint (the platform's), Transparency and Serializable kept"
+               (= ["java/awt/Transparency" "java/io/Serializable" "java/awt/Paint"] (w/with-world w1 (:interfaces (a/decl "java/awt/Color"))))
+               (pr-str (w/with-world w1 (:interfaces (a/decl "java/awt/Color")))))
+        (check "completion: getComponents(ColorSpace, float[]) is an outside member naming java.desktop"
+               (let [mm (color-method "getComponents" cs)]
+                 (and (= :outside-member (:derived mm)) (= "java.desktop (the platform)" (:outside mm))
+                      (= 1 (:flags mm))))
+               (pr-str (color-method "getComponents" cs)))
+        (check "completion: the world's own members stay the forms' (getRGB, getComponents(float[]) not derived)"
+               (and (nil? (:derived (color-method "getRGB" "()I"))) (nil? (:derived (color-method "getComponents" "([F)[F")))))
+        (check "completion: getColorSpace and createContext declared, no constructor"
+               (and (color-method "getColorSpace" "()Ljava/awt/color/ColorSpace;")
+                    (some #(= "createContext" (:name %)) (w/with-world w1 (:methods (a/decl "java/awt/Color"))))
+                    (not-any? #(and (= "<init>" (:name %)) (:derived %)) (w/with-world w1 (:methods (a/decl "java/awt/Color"))))))
+        (check "completion: the outside member's Go body throws, naming it"
+               (= (str "method java.awt.Color.getComponents" cs " is outside the closed world: the world's java.awt.Color lacks it;"
+                       " declarations only, from java.desktop (the platform)")
+                  (decls/outside-member-reason "java/awt/Color" (color-method "getComponents" cs))))
+        (let [body (w/with-world w1
+                     (binding [m/*w* (assoc mw :subclass-index (constantly {})) env/*declared* d code/*f* {}]
+                       (try (decls/derived-body :jrt "java/awt/Color" (color-method "getComponents" cs) '[p0 p1])
+                            (catch Throwable t (str "threw: " t)))))]
+          (check "completion: the outside member's Go body returns J2g_Missing's value, with that message"
+                 (and (sequential? body) (= 1 (count body)) (= 'return (first (first body)))
+                      (str/includes? (pr-str body) "J2g_Missing")
+                      (str/includes? (pr-str body) "lacks it; declarations only, from java.desktop (the platform)"))
+                 (pr-str body)))
+        (check "completion: the call of the outside member is no stub at the call (Color's method throws)"
+               (nil? (reason "q/Paints" "comps" :invoke)) (pr-str (reason "q/Paints" "comps" :invoke)))
+        (check "completion: a method the class has or inherits concretely is never added (keys given)"
+               (let [f (outside/completion d)
+                     ks (set (map (juxt :name :desc) (f :methods "java/awt/Color" [["getColorSpace" "()Ljava/awt/color/ColorSpace;"]])))]
+                 (and (contains? ks ["getComponents" cs]) (not (contains? ks ["getColorSpace" "()Ljava/awt/color/ColorSpace;"])))))
+        (check "completion: control: an interface is never completed (Transparency)"
+               (nil? ((outside/completion d) :methods "java/awt/Transparency" [])))
+        ;; java.base's API (A8c)
+        (check "base: Guarded, Watcher (extends SecurityManager) and Handler analyze" (not-any? #(contains? f1 %) ["q/Guarded" "q/Watcher" "q/Handler"])
+               (pr-str (select-keys f1 ["q/Guarded" "q/Watcher" "q/Handler"])))
+        (check "base: control: with the edge alone they are refused (SecurityManager unknown, the handler's generics undeclared)"
+               (every? #(contains? f0 %) ["q/Guarded" "q/Watcher" "q/Handler"]) (pr-str (select-keys f0 ["q/Guarded" "q/Watcher" "q/Handler"])))
+        (check "base: SecurityManager and FunctionDescriptor declared from java.base"
+               (and (= outside/base-origin (get (outside/asked d) "java/lang/SecurityManager"))
+                    (= outside/base-origin (get (outside/asked d) "java/lang/foreign/FunctionDescriptor"))))
+        (check "base: FunctionDescriptor.ofVoid is J2g_Missing naming java.base"
+               (= (reason "q/Guarded" "descriptor" :invoke)
+                  "class java.lang.foreign.FunctionDescriptor is outside the closed world: declarations only, from java.base (the platform)")
+               (pr-str (reason "q/Guarded" "descriptor" :invoke)))
+        (check "base: the edge's UncaughtExceptionHandler gains its generics, not :outside, not reported"
+               (let [h (get d "java/lang/Thread$UncaughtExceptionHandler")]
+                 (and (contains? h :generics) (nil? (:outside h)) (identical? (:info h) (:info (get (:classes e) "java/lang/Thread$UncaughtExceptionHandler")))
+                      (not (contains? (outside/asked d) "java/lang/Thread$UncaughtExceptionHandler")))))
+        (w/with-world w1
+          (binding [m/*w* mw env/*declared* d]
+            (check "base: a program's own member may name a java.base outside class (Guarded's SecurityManager field)"
+                   (m/member-desc? "q/Guarded" "Ljava/lang/SecurityManager;"))
+            (check "base: control: a world class's member may not (java.awt.Color, a JDK class), nor one without an owner"
+                   (and (not (m/member-desc? "java/awt/Color" "Ljava/lang/SecurityManager;"))
+                        (not (m/member-desc? "Ljava/lang/SecurityManager;"))))
+            (check "base: control: a non-java.base outside class is a world member's type still (A8)"
+                   (m/member-desc? "java/awt/Color" "Ljava/awt/color/ColorSpace;"))))
+        (check "base: control: java.base's internal packages are not declared (jdk.internal)"
+               (nil? (get d "jdk/internal/classfile/impl/ClassFileImpl")))
+        ;; a file's own import (A8c)
+        (check "imports: Imports' lambda is its own import's Supplier, though Watched.ae's import of q.other.Supplier came last"
+               (and (not (contains? f1 "q/Imports")) (not (contains? f1 "q/Watched"))
+                    (= "q/other/Supplier" (get-in @env/source-imports ['q 'Supplier])))
+               (pr-str (select-keys f1 ["q/Imports" "q/Watched"]) (get-in @env/source-imports ['q 'Supplier])))
+        (check "imports: control: without the file's imports the namespace's Supplier is q.other's"
+               (w/with-world w1
+                 (and (= "java/util/function/Supplier" (a/resolve-class-sym {:class "q/Imports" :ns (the-ns 'q)} 'Supplier))
+                      (= "q/other/Supplier" (binding [a/*unit* (dissoc a/*unit* :file-imports)]
+                                              (a/resolve-class-sym {:class "q/Imports" :ns (the-ns 'q)} 'Supplier))))))))))
 
 (defn -main [& _]
   (test-support-tables)
@@ -579,6 +693,7 @@
   (test-arch-collisions)
   (test-inherited-static-accessor)
   (test-outside)
+  (test-outside-completion)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
   (shutdown-agents)
   (System/exit (if (zero? @failures) 0 1)))

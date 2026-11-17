@@ -8,9 +8,12 @@
 
   Two kinds of source, in javac's order (the platform, then the class path):
   - the platform (A8): the exploded modules of the platform javac compiles against
-    (jdk/javac/platform.sha256's pin, bin/repr-java platform-dir), every module but java.base:
-    java.base's classes outside the world are jrt's, the cut ones or refused on purpose, and keep
-    the edge's answers alone;
+    (jdk/javac/platform.sha256's pin, bin/repr-java platform-dir), every module but java.base;
+    since A8c (the Ghidra demo's analysis, 2026-11-17) also java.base, for its API (java.*, javax.*)
+    that neither the world nor the edge has (java.lang.SecurityManager, java.lang.foreign's
+    FunctionDescriptor: base-origin, a program's own classes' member types alone, j2g.model's
+    member-class?) and for the facets an edge class lacks (Thread.UncaughtExceptionHandler's
+    generics: not declared outside, not reported); its internal packages stay refused;
   - class directories (A8b): a program's binary jars on javac's class path alone (bin/java-project's
     unpacked jars, the multi-release layer chosen), each named by its Maven coordinate.
 
@@ -27,6 +30,10 @@
   stand-in's are read by no translated code) and the nest host's NestHost attribute (taken as the
   outermost class of InnerClasses, else the name before its first $).
 
+  A8c's completion (completion, analyze/*completion*): a world class that is a platform class outside
+  java.base (a jrt variant, java.awt.Color) takes from the platform's class the interfaces and the
+  methods it lacks, declared outside the world, the methods throwing when called.
+
   (declared base sources) is env/*declared* over the edge's classes `base`: a lookup (ILookup,
   Associative's containsKey and entryAt) that answers the edge's entries and the outside classes,
   made on first use and kept; (asked d) the outside classes the run looked up, {internal name
@@ -34,6 +41,7 @@
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.classes.types :as t]
+            [arbace.classes.env :as env]
             [arbace.j2g.edge :as edge])
   (:import (java.io File)
            (java.util.concurrent ConcurrentHashMap)))
@@ -92,6 +100,24 @@
     :class-path
     (let [f (File. (str (:dir src) "/" n ".class"))]
       (when (.isFile f) [f (:origin src)]))))
+
+(def base-origin
+  "The source a java.base class declared outside the world names (A8c)."
+  "java.base (the platform)")
+
+(defn- base-class-file
+  "[^File the class file of internal name n, its origin] in the platform's java.base, or nil (A8c:
+  a platform source only)."
+  [src ^String n]
+  (when (= :platform (:kind src))
+    (let [f (File. (str (:dir src) "/java.base/" n ".class"))]
+      (when (.isFile f) [f base-origin]))))
+
+(defn- base-api?
+  "Is n of java.base's exported API (java.*, javax.*), which a program's sources can name (A8c)? Its
+  internal packages (jdk.internal, sun) stay refused."
+  [^String n]
+  (or (str/starts-with? n "java/") (str/starts-with? n "javax/")))
 
 ;; ---------------------------------------------------------------------------------------
 ;; a class file as declarations (the edge's data shape)
@@ -254,6 +280,33 @@
 
 (def ^:private none (Object.))
 
+(def ^:private facet-keys
+  "The facets facets-data makes (an edge class lacking none of them reads no java.base class file)."
+  [:exists :info :generics :tparams :functional :fi-method :retention :targets :enum-constants :record-components])
+
+(defn- read-facets
+  "The facets of the class file f of internal name k (facets-data in env's shape), or nil."
+  [^File f k origin info-of]
+  (let [read-file (cf 'read-file)
+        c (try (read-file f) (catch Exception _ nil))]
+    (when (and c (= k (:this c)))
+      (edge/facets-value (facets-data c origin info-of)))))
+
+(defn- platform-facets
+  "The platform's facets of world class n (A8c: a platform class outside java.base the world holds as
+  forms, a jrt variant such as java.awt.Color), not recorded as declared; cached in cache under
+  [::platform n]."
+  [^ConcurrentHashMap cache sources n info-of]
+  (let [k [::platform n]
+        v (.get cache k)]
+    (if (some? v)
+      (when-not (identical? v none) v)
+      (let [r (or (when-let [[^File f origin] (some #(when (= :platform (:kind %)) (class-file % n)) sources)]
+                    (read-facets f n origin info-of))
+                  none)]
+        (.putIfAbsent cache k r)
+        (when-not (identical? r none) r)))))
+
 (defn- edge-fillable?
   "May an edge class's missing facets be the class file's? Only a platform class outside
   java.base (the outside modules: the world has none of their classes as forms)."
@@ -272,31 +325,86 @@
                      (if (some? v)
                        (when-not (identical? v none) v)
                        (let [b (get base k)
-                             found (some #(class-file % k) sources)
+                             found (or (some #(class-file % k) sources)
+                                       ;; A8c: java.base's class file, for an edge class's missing
+                                       ;; facets or a class of its API neither the world nor the edge has
+                                       (when (if b (some #(not (contains? b %)) facet-keys) (base-api? k))
+                                         (some #(base-class-file % k) sources)))
+                             base? (= base-origin (second found))
                              o (when-let [[^File f origin] found]
-                                 (when (or (nil? b) (edge-fillable? origin))
-                                   (let [read-file (cf 'read-file)
-                                         c (try (read-file f) (catch Exception _ nil))]
-                                     (when (and c (= k (:this c)))
-                                       (edge/facets-value
-                                         (facets-data c origin #(:info (lookup %))))))))
-                             r (cond (and b o) (merge o b)
+                                 (when (or (nil? b) (edge-fillable? origin) base?)
+                                   (read-facets f k origin #(:info (lookup %)))))
+                             r (cond (and b o) (merge (if base? (dissoc o :outside) o) b)
                                      b b
                                      o o
                                      :else none)]
                          (when (and o (nil? b)) (.put asked k (:outside o)))
                          (.putIfAbsent cache k r)
                          (let [v (.get cache k)] (when-not (identical? v none) v)))))))]
+    (let [lookup* (fn [k]
+                    (if (vector? k)
+                      (when (= ::platform (first k)) (platform-facets cache sources (second k) #(:info (lookup %))))
+                      (lookup k)))]
     (reify
       arbace.lang.ILookup
-      (valAt [_ k] (lookup k))
-      (valAt [_ k nf] (let [v (lookup k)] (if (some? v) v nf)))
+      ;; [::platform n]: the platform's facets of a world class (platform-facets; completion)
+      (valAt [_ k] (lookup* k))
+      (valAt [_ k nf] (let [v (lookup* k)] (if (some? v) v nf)))
       arbace.lang.Associative
       (containsKey [_ k] (some? (lookup k)))
       (entryAt [_ k] (when-let [v (lookup k)] (arbace.lang.MapEntry. k v)))
       (assoc [_ k v] (throw (UnsupportedOperationException. "j2g: the declared classes are read only")))
       arbace.lang.IDeref
-      (deref [_] (into (sorted-map) asked)))))
+      (deref [_] (into (sorted-map) asked))))))
+
+;; ---------------------------------------------------------------------------------------
+;; A8c: the world's variants completed from the platform
+
+(defn- api? [^String n] (or (str/starts-with? n "java/") (str/starts-with? n "javax/")))
+
+(defn- exists? [d n] (or (env/from-source? n) (some? (get d n))))
+
+(defn completion
+  "arbace.classes.analyze/*completion* over d (declared's lookup, A8c): what a world class that is a
+  platform class outside java.base (a jrt variant in the world's forms: java.awt.Color, which jrt cut of
+  Paint and of its ColorSpace members) lacks of the platform's class, declared outside the world:
+  (f :interfaces n names): the platform class's interfaces that names lack and the world has not, declared
+  outside it (Color's java.awt.Paint); (f :methods n keys): its public and protected methods, neither
+  abstract, synthetic nor bridges, whose [name desc] keys lack and whose descriptors' classes all exist
+  (the world's or declared), as {:name :desc :flags :outside origin}, the analysis's derived
+  :outside-member methods, whose bodies throw (decls/derived-body); keys hold the methods the class
+  inherits, concrete, from its supertypes too (a method a variant cut so that the class inherits it stays
+  inherited); (f :completes? n nil) whether n is such a class. Constructors and fields are left out,
+  and an interface is never completed (a method added there would be every world implementor's). nil for
+  any other class."
+  [d]
+  (fn [what n have]
+    (when-let [p (when (api? n) (get d [::platform n]))]
+      (let [info (:info p)]
+        (case what
+          :completes? true
+          :interfaces
+          (seq (for [i (:interfaces info)
+                     :when (not (some #{i} have))
+                     :when (not (env/from-source? i))
+                     :when (:outside (get d i))]
+                 i))
+          :methods
+          (when-not (:interface? info)
+            (let [have (set have)]
+              (seq (for [m (:methods info)
+                         :let [fl (long (:flags m))]
+                         :when (not (#{"<init>" "<clinit>"} (:name m)))
+                         :when (has? fl 0x0005)
+                         :when (not (has? fl (bit-or 0x0400 0x1000 0x0040)))
+                         :when (not (contains? have [(:name m) (:desc m)]))
+                         :when (every? #(exists? d %) (keep #(when (t/class-desc? %) (t/desc->internal %))
+                                                            (map #(loop [x %] (if (t/array? x) (recur (t/elem-type x)) x))
+                                                                 (let [[ps r] (t/parse-method-desc (:desc m))] (cons r ps)))))]
+                     {:name (:name m) :desc (:desc m)
+                      ;; public or protected, static, final, varargs, deprecated: not native or synchronized
+                      :flags (bit-and fl (bit-or 0x0001 0x0004 0x0008 0x0010 0x0080 0x20000))
+                      :outside (:outside p)})))))))))
 
 (defn asked
   "The outside classes the run declared, {internal name source} (sorted)."

@@ -99,6 +99,18 @@
   [sym c]
   (identical? c (get arbace.lang.RT/DEFAULT_IMPORTS sym)))
 
+(defn- file-import
+  "The class the source file of scope's class imports as sym, or nil: a unit's :file-imports (an atom
+  {top-level class {simple name symbol internal name}}, j2g's world: its files' import forms). A package's
+  files share one namespace, so its imports are the union of theirs, the last file's winning a simple name
+  two files import (ghidra.util's DateUtils java.util.function.Predicate, AddressRangeIterators
+  commons-collections4's): the file's own import is the class Java means (JLS 7.5.1)."
+  [scope sym]
+  (when-let [fi (some-> *unit* :file-imports deref)]
+    (when-let [c (:class scope)]
+      (when-let [top (or (some-> (decl c) :nest-host) c)]
+        (get-in fi [top sym])))))
+
 (defn resolve-class-sym
   "Resolves a class name symbol from `scope` {:class internal-name :ns ns :local-classes {}}:
   member classes of the class and its enclosing classes, then the namespace's explicit imports,
@@ -110,7 +122,8 @@
           ns (:ns scope)]
       (cond
         (and (str/includes? s "$") (not (str/starts-with? s "$")))
-        (or (let [v (when ns (get (ns-map ns) sym))]   ; (import '(java.util Map$Entry))
+        (or (when-let [n (file-import scope sym)] (when (class-exists? n) n))
+            (let [v (when ns (get (ns-map ns) sym))]   ; (import '(java.util Map$Entry))
               (when (class? v) (str/replace (.getName ^Class v) "." "/")))
             ;; the same import of a class compiled from source (import-classes!)
             (when-let [n (when ns (get-in @env/source-imports [(ns-name ns) sym]))]
@@ -140,7 +153,9 @@
                     (get (:local-classes d) sym)
                     (recur (:outer d)))))
             ;; Java's order: imports, the class's own package, then the imports on demand
-            ;; (java.lang and Clojure's default imports, RT/DEFAULT_IMPORTS)
+            ;; (java.lang and Clojure's default imports, RT/DEFAULT_IMPORTS); the file's own
+            ;; imports first (file-import)
+            (when-let [n (file-import scope sym)] (when (class-exists? n) n))
             (let [v (when ns (get (ns-map ns) sym))]
               (when (and (class? v) (not (default-import? sym v)))
                 (let [n (str/replace (.getName ^Class v) "." "/")]
@@ -464,6 +479,15 @@
   (let [d (apply assoc (decl! n) :own-bounds own kvs)]
     (apply update-decl! n assoc :own-bounds own :bounds (bounds-of-scope d) kvs)))
 
+(def ^:dynamic *completion*
+  "nil, or (f what n have): what a class compiled from source lacks of the class of the same name a
+  program's sources were compiled against (j2g's declarations outside the world, A8c:
+  arbace.j2g.outside/completion; a jrt variant cut of members, java.awt.Color): (f :interfaces n
+  names) interfaces to add, (f :methods n [[name desc]...]) {:name :desc :flags :outside} methods to add
+  as derived :outside-member methods (no body forms; j2g's throws), or nil; (f :completes? n nil) whether
+  it completes n at all."
+  nil)
+
 (defn resolve-header!
   "Resolves type parameters, superclass, interfaces and the class Signature of n."
   [n]
@@ -495,6 +519,10 @@
                           (= n "java/lang/Object") nil
                           :else {:t :class :name "java/lang/Object" :args []})
                     impl]))
+        ;; A8c: the interfaces the class's declaration outside the world adds (*completion*)
+        ifaces-t (if-let [more (when *completion* (*completion* :interfaces n (map :name ifaces-t)))]
+                   (concat ifaces-t (for [i more] {:t :class :name i :args []}))
+                   ifaces-t)
         sig? (or (seq tps) (and super-t (t/generic? super-t)) (some t/generic? ifaces-t))
         sig (when sig?
               (str (t/type-params-signature env/interface? tps)
@@ -888,7 +916,21 @@
                         :kind :ctor :scope scope}])
                     ctors)
             all-fields (vec (concat enum-fields record-fields fields))
-            all-methods (vec (concat enum-methods record-methods methods ctors))]
+            all-methods (vec (concat enum-methods record-methods methods ctors))
+            ;; A8c: the methods the class's declaration outside the world adds (*completion*)
+            ;; (have: its own methods and the concrete ones it inherits: a method a variant cut so that
+            ;; the class inherits it is no outside member)
+            all-methods (if-let [more (when (and *completion* (*completion* :completes? n nil))
+                                        (*completion* :methods n
+                                                      (concat (map (juxt :name :desc) all-methods)
+                                                              (for [s (rest (env/all-supertypes n))
+                                                                    m (:methods (env/info! s))
+                                                                    :when (not (has? (:flags m) Opcodes/ACC_ABSTRACT))]
+                                                                [(:name m) (:desc m)]))))]
+                          (into all-methods (for [m more]
+                                              (derived-method n (:name m) (:desc m) (:flags m) :outside-member
+                                                              :outside (:outside m))))
+                          all-methods)]
         (update-decl! n assoc :fields all-fields :methods all-methods :components comps
                       :members-done true)))
     n))

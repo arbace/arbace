@@ -519,9 +519,11 @@
 (defn- desc-missing [d] (some class-missing (m/desc-classes d)))
 ;; a member's descriptor: a class declared outside the world (A8: m/outside?) is Go's any there, the member
 ;; existing (decls/class-methods, class-fields); a value of the class, a cast to it or an array of it stays missing
-(defn- member-class-missing [n] (when-not (m/outside? n) (class-missing n)))
-(defn- fdesc-missing [d] (some member-class-missing (m/desc-classes d)))
-(defn- mdesc-missing [d] (some member-class-missing (m/method-desc-classes d)))
+(defn- member-class-missing [owner n] (when-not (m/member-desc? owner (t/internal->desc n)) (class-missing n)))
+;; owner: the member's class (a java.base class declared outside the world is a member's type in a program's
+;; own class alone, m/member-desc?: A8c)
+(defn- fdesc-missing [owner d] (some #(member-class-missing owner %) (m/desc-classes d)))
+(defn- mdesc-missing [owner d] (some #(member-class-missing owner %) (m/method-desc-classes d)))
 
 (defn- hw-static-exists? [cls base]
   (or (contains? (:funcs (:jrt m/*w*)) (str (m/go-name cls) "_" base))
@@ -590,7 +592,7 @@
         (if-let [why (vh-missing node)]
           (when-not (= why ::vh-ok) why)
         (or (when-not (:array-clone node) (or (class-missing owner) (class-missing mowner)))
-            (mdesc-missing (:desc node))
+            (mdesc-missing mowner (:desc node))
             ;; a receiver that cannot be translated (a field of a class outside the closed world:
             ;; JN7's xerces), so neither can the call
             (let [t (:target node)] (when (and (map? t) (:op t)) (missing-reason t)))
@@ -607,14 +609,14 @@
                     (str "jrt lacks " (str/replace mowner "/" ".") "." (:name node) (:desc node))))))
             (when (and (m/translated? mowner) (not (m/member-in-world? mowner (assoc (or mm node) :desc (:desc node)))))
               (str "method " (:name node) (:desc node) " is not in the closed world")))))
-      :new (or (class-missing (:class node)) (mdesc-missing (:desc (:ctor node)))
+      :new (or (class-missing (:class node)) (mdesc-missing (:class node) (:desc (:ctor node)))
                (when (and (m/hand-written? (:class node)) (not= "java/lang/Object" (:class node)))
                  (let [n (nm/new-name (m/go-name (:class node)) (:desc (:ctor node)))]
                    (when-not (contains? (:funcs (:jrt m/*w*)) n)
                      (str "jrt lacks constructor " (str/replace (:class node) "/" ".") (:desc (:ctor node)))))))
       (:get-static :set-static :get-field :set-field)
       (let [f (:field node) o (or (:declarer f) (:owner f))]
-        (or (class-missing o) (fdesc-missing (:desc f))
+        (or (class-missing o) (fdesc-missing o (:desc f))
             (when (and (m/hand-written? o) (m/static? f))
               (let [s (nm/static-field-name (m/go-name o) (:name f))
                     scan (:jrt m/*w*)]
@@ -625,7 +627,7 @@
       :class-lit nil
       (:new-array :array-init) (desc-missing (:type node))
       :lambda (class-missing (:fi node))
-      :method-ref (or (class-missing (:fi node)) (class-missing (:owner node)) (mdesc-missing (:desc node)))
+      :method-ref (or (class-missing (:fi node)) (class-missing (:owner node)) (mdesc-missing (:owner node) (:desc node)))
       :fi-adapter (class-missing (t/desc->internal (:type node)))
       :const (when (= :bigint (:type node)) "a BigInt constant")
       nil)))
@@ -1523,9 +1525,9 @@
   (let [f (:field node)]
     (or (and (:clinit *f*) (= :set-static (:op node))
              (let [o (or (:declarer f) (:owner f))]
-               (and (= o (:class *f*)) (not (m/member-desc? (:desc f))))))
+               (and (= o (:class *f*)) (not (m/member-desc? o (:desc f))))))
         (and (#{:set-field :set-static} (:op node))
-             (not (m/member-desc? (:desc f)))
+             (not (m/member-desc? (or (:declarer f) (:owner f)) (:desc f)))
              (let [vn (acc/unaccess (:val node))] (and (= :const (:op vn)) (nil? (:val vn))))
              (or (= :set-static (:op node)) (= :this-path (:op (acc/unaccess (:target node))))))
         ;; a store into a field of an erased type (j2g/erase, proposed amendment B2): the field
