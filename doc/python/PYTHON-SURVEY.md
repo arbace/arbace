@@ -7577,3 +7577,44 @@ pass, 102 classed, 2 failing, head 798, 102, 1 failing; the one difference test_
 test_async_gen_asyncio_shutdown_exception_02 (failing at base, passing at head: 297's base row, flaky), test_sys_setprofile's
 ProfileHookTestCase.test_caught_exception failing on goi at both; every other method's outcome and message the same.
 
+
+## As built: 339, a generator a for loop leaves closed at the loop's end (2026-11-17, the Mac VM, queue 339; 330's DECISION 1 (a), the user's)
+
+297 closed a fresh generator at the return of a consumer that keeps nothing (`next(gen())`, `any(...)`); a generator a for
+loop leaves by `break`, by `return` or by an exception was still closed at its Go collection, after the code that follows
+the loop, where CPython closes it as the loop drops it (its POP_TOP at a break or a return, the exception's unwinding, the
+frame's clear: reference counting).
+
+- **Held** (`finalize.go`'s `holdLoopGen`, `loopNext`; the generator type's iter slot). The get-iter of a generator not yet
+  run marks it held by its for loop when 297's stamp says the frame's previous instruction made it with no call since
+  (stampGen: the making frame, its instruction, callSeq), it was never handed out (`exposed`), and the next instruction is
+  the loop's for-iter, or an inlined comprehension's start that reaches its for-iter with only its own slots' moves between
+  (load-fast-and-clear, load-cell-and-clear, swap, an empty build). Such a generator was held by the value stack alone and
+  then by the loop's iterator slot, which no Python code reaches (not f_locals; a frame object's f_generator marks it
+  exposed). `iter(gen())`, `g = gen(); for x in g`, a walrus and a generator expression's argument are not marked.
+- **Closed** (`dropLoopGen`, `dropLoopGens`, `aotDropHeld`): when the loop's frame pops it (step's pop, the compiled code's
+  AotDrop), when a handler's unwinding pops it (the top first), and when an exception leaves the frame (its stack from the
+  bottom, as `_PyFrame_ClearLocals`, after PY_UNWIND): 297's dropGen (close, an error to sys.unraisablehook, the locals with
+  a finalizer due at 222's moment). A loop that runs the generator to its end pops it finished (`unhold` at its end).
+  Nothing is checked until a loop holds one (`loopHeldN`), then one test per pop.
+- **The compiled code** (`arbace/python/aot.ae`): a for-iter starts a block, so a loop's iterator is in the frame's stack
+  for the whole loop, also in a loop with no back edge (`for b in g(): return a, b`), where the register generator kept it
+  in a Go local that a pop dropped unseen; the pops of it are then AotDrop's (a return's swap takes it into the locals
+  only to pop it). The generator's digest changes: the AOT packages are compiled afresh once.
+- **Not covered**: a generator a for loop iterates through `iter(...)` or a name; a generator expression's own iterator
+  (its frame's `.0`) when the expression is closed; a loop's generator found by gc.get_referrers or gc.get_objects (marked
+  all the same: closed at the loop's end, where CPython keeps it while the referrer holds it).
+
+**Proved** (the VM; the base is 330's head 30efa1e7d, whose Python runtime is 593c97d03's: `git diff --stat 30efa1e7d
+593c97d03 -- go/arbace/py arbace/python` names only run.ae's require-runtime!). Three probes (`.tmp/q330/t/p339.py`,
+`p339c.py`, 330's `p330b.py`: break, return, a return from a with block, exceptions caught in the frame and leaving it,
+nested loops left by return, named and walrus-held generators kept, exhaustion, an outer generator closed or dropped while
+suspended in its loop, continue, a comprehension left by an exception, a close whose finally raises, settrace's events of
+the close, a generator method, f_back exposed, 297's next()/any() and held cases beside, f_generator exposed and kept)
+compiled and on the loop: equal to python3 -I, 21, 11 and 16 lines (the base: 32, 16 and 2 lines late). Lib/test compiled
+(`check --aot --lib-test --fresh`, test_generators test_coroutines test_asyncgen test_contextlib test_sys_settrace
+test_sys_setprofile test_monitoring): 901 methods, 805 pass, 96 classed, 0 failing, each method's outcome and message the
+base's; on goi (nf's stage 0, the checkout's runtime interpreted) test_generators and test_sys_settrace: 507 methods, 423
+pass, 84 classed, 0 failing, each the same as at 330's head. The generator programs of the synthetic corpus (13, `check
+--aot --no-pyi`): 13 pass compiled and on the loop by their golden text; `make python-essential`: 20 pass, 1 classed, 0
+failing.
