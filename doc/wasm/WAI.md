@@ -30,7 +30,9 @@ scripts have no `thread` command.
 Custom descriptors (queue 327; `proposals/custom-descriptors`), by part: exact references (`ValType.Exact`; 0x62 and a type index;
 matched only by the same canonical type or a bottom; an allocation's and a defined or exactly imported function's reference exact;
 an exact cast's target in an instruction's E with `hExactBit`, `refTest` comparing the dynamic type itself; an exact function import,
-0x20, linked to a function of that very type). A module using what is not built (a shared memory, an atomic) is refused at decoding as
+0x20, linked to a function of that very type; descriptor types (`rawSub.readClauses`, `CType.Describes` and `Descriptor`, part of the canonical
+key; the validator's rules as arbace.wasm.valid's: in the rec group, describes earlier, structs of one finality, a subtype's described
+type and descriptor its supertype's subtypes). A module using what is not built (a shared memory, an atomic) is refused at decoding as
 `unimplemented: FEATURE (WHAT)`, not as malformed.
 
 Since WA5 wai validates every module before it decodes it (`valid.go`, §7; WAS30 (a)): the driver runs no module its own validator

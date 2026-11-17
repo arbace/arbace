@@ -195,10 +195,18 @@
       0x5e (list 'array (fieldtype r))
       (malformed (if (>= (bit-and 0xff (aget ^bytes (:b r) (int at))) 0x80) "integer representation too long" "malformed definition type") at))))
 
+(defn- desc-clauses
+  "A type's describes (0x4c X) and descriptor (0x4d Y) clauses, in that order (custom descriptors, queue 327)."
+  [r]
+  (let [a (when (= 0x4c (peek8 r)) (u8 r) (u32 r))
+        b (when (= 0x4d (peek8 r)) (u8 r) (u32 r))]
+    (cond-> {} a (assoc :describes a) b (assoc :descriptor b))))
+
 (defn- subtype [r]
   (case (peek8 r)
-    0x50 (do (u8 r) (let [s (vec-of r u32)] (list 'sub {:final false :supers s} (comptype r))))
-    0x4f (do (u8 r) (let [s (vec-of r u32)] (list 'sub {:final true :supers s} (comptype r))))
+    0x50 (do (u8 r) (let [s (vec-of r u32) m (desc-clauses r)] (list 'sub (merge {:final false :supers s} m) (comptype r))))
+    0x4f (do (u8 r) (let [s (vec-of r u32) m (desc-clauses r)] (list 'sub (merge {:final true :supers s} m) (comptype r))))
+    (0x4c 0x4d) (let [m (desc-clauses r)] (list 'sub (merge {:final true :supers []} m) (comptype r)))
     (comptype r)))
 
 (defn- limits
@@ -672,8 +680,13 @@
 
 (defn- wsub [w t]
   (if (= 'sub (first t))
-    (let [{:keys [final supers]} (second t)]
-      (w8 w (if final 0x4f 0x50)) (wvec w supers wuleb) (wcomp w (nth t 2)))
+    (let [{:keys [final supers describes descriptor]} (second t)
+          clauses (fn [] (when describes (w8 w 0x4c) (wuleb w describes)) (when descriptor (w8 w 0x4d) (wuleb w descriptor)))]
+      ;; a final type of no supertype with descriptor clauses: the clauses alone (custom descriptors, queue 327)
+      (if (and final (empty? supers) (or describes descriptor))
+        (clauses)
+        (do (w8 w (if final 0x4f 0x50)) (wvec w supers wuleb) (clauses)))
+      (wcomp w (nth t 2)))
     (wcomp w t)))
 
 (defn- wlimits [w l]

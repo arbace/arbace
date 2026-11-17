@@ -250,16 +250,40 @@
       (when-not (= (count ps) (count (distinct (map first ps)))) (malformed "duplicate field" x))
       (into {} ps))))
 
+(defn- desc-clauses
+  "A type's `(describes X)?` `(descriptor Y)?` at the head of ys, in that order (custom descriptors, queue 327): [{:describes X
+  :descriptor Y} rest]."
+  [ctx ys]
+  (let [one (fn [ys k] (if (lex/list-of? (first ys) k)
+                         (let [[_ y & more] (:xs (first ys))]
+                           (when (or (nil? y) more (not (idx? y))) (malformed "unexpected token" (first ys)))
+                           [(resolve-idx ctx :type y) (rest ys)])
+                         [nil ys]))
+        [a ys] (one ys "describes")
+        [b ys] (one ys "descriptor")]
+    [(cond-> {} a (assoc :describes a) b (assoc :descriptor b)) ys]))
+
 (defn- subtype [ctx x]
   (if (lex/list-of? x "sub")
     (let [ys (rest (:xs x))
           final? (lex/kw? (first ys) "final")
           ys (if final? (rest ys) ys)
           supers (vec (take-while idx? ys))
-          ct (drop (count supers) ys)]
+          [m ct] (desc-clauses ctx (drop (count supers) ys))]
       (when-not (= 1 (count ct)) (malformed "unexpected token" x))
-      (list 'sub {:final final? :supers (mapv #(resolve-idx ctx :type %) supers)} (comptype ctx (first ct))))
+      (list 'sub (merge {:final final? :supers (mapv #(resolve-idx ctx :type %) supers)} m) (comptype ctx (first ct))))
     (comptype ctx x)))
+
+(defn- type-body
+  "A type definition's body (its xs after the identifier): a subtype, or the descriptor clauses and a composite type (a final
+  type of no supertype; custom descriptors, queue 327)."
+  [ctx t]
+  (let [xs (let [ys (rest (:xs t))] (if (= :id (:t (first ys))) (rest ys) ys))]
+    (if (= 1 (count xs))
+      (subtype ctx (first xs))
+      (let [[m ct] (desc-clauses ctx xs)]
+        (when-not (and (seq m) (= 1 (count ct))) (malformed "unexpected token" t))
+        (list 'sub (merge {:final true :supers []} m) (comptype ctx (first ct)))))))
 
 (defn- typeuse
   "A type use at the head of `xs`: [type-index param-ids rest]; an inline function type not defined appended (implicit)."
@@ -743,7 +767,7 @@
   (if (lex/list-of? x "offset") (expr ctx (rest (:xs x))) (expr ctx [x])))
 
 (defn- type-item [ctx i t]
-  (list 'wasm/type i (subtype ctx (last (:xs t)))))
+  (list 'wasm/type i (type-body ctx t)))
 
 (defn- import-desc
   "An import's description read once: [SPACE (fn [i] the item's description at index i)] (a type use's implicit type added
@@ -788,7 +812,7 @@
           "type" (let [i @tindex] (swap! tindex inc) (add! :type (type-item ctx i f)))
           "rec" (let [i @tindex ts (rest (:xs f))]
                   (swap! tindex + (count ts))
-                  (add! :type (list 'wasm/rec i (mapv #(subtype ctx (last (:xs %))) ts))))
+                  (add! :type (list 'wasm/rec i (mapv #(type-body ctx %) ts))))
           "import" (if-let [[m its shared] (compact-import f)]
                      ;; the second encoding's description read once (one implicit type use), even for no name
                      (let [one (when shared (import-desc ctx shared))]
@@ -1178,8 +1202,8 @@
             ;; implicit type is the rec group of one, (rec (type (func ...))))
             (doseq [t ts]
               (when (> (count ts) 1) (swap! (:multi ctx) conj (count @(:types ctx))))
-              (swap! (:types ctx) conj (subtype ctx (last (:xs t))))))
-          (swap! (:types ctx) conj (subtype ctx (last (:xs f)))))))
+              (swap! (:types ctx) conj (type-body ctx t))))
+          (swap! (:types ctx) conj (type-body ctx f)))))
     (parse-fields ctx fields)))
 
 (defn- read-module*

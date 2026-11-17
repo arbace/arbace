@@ -29,6 +29,7 @@ the binary numbers them).
 | `(wasm/table I {:type R :min N :max N :i64 true :init EXPR})` | a table (`:init`: Wasm 3.0's initializer) |
 | `(wasm/memory I {:min N :max N :i64 true :page P})` | a memory (`:page`: the custom page sizes proposal's page size, its log2, when the text or the binary states one; queue 326) |
 | `(exact X)` | an exact heap type (custom descriptors, queue 327): in `(ref (exact X))`, `(ref null (exact X))`, the casts' and `ref.null`'s heap types; an exact function import `(func I {:type T :exact true})` (binary kind 0x20) |
+| `(sub {:final B :supers [I...] :describes X :descriptor Y} COMP)` | the descriptor clauses (custom descriptors, queue 327): text `(type $t (describes X)? (descriptor Y)? COMP)` or in a `sub`, binary 0x4c X and 0x4d Y before the composite type (a final type of no supertype written with its clauses alone) |
 | `(wasm/tag I {:type T})` | an exception tag |
 | `(wasm/global I {:type V :mut B} EXPR)` | a global and its initializer |
 | `(wasm/export "NAME" (KIND I))` | KIND `func`, `table`, `memory`, `global`, `tag` |

@@ -75,7 +75,9 @@
 
 (defn- sub-of [t]
   (if (and (seq? t) (= 'sub (first t)))
-    (let [{:keys [final supers]} (second t)] {:final (boolean final) :supers (vec supers) :comp (comp-of (nth t 2))})
+    (let [{:keys [final supers describes descriptor]} (second t)]
+      (cond-> {:final (boolean final) :supers (vec supers) :comp (comp-of (nth t 2))}
+        describes (assoc :describes describes) descriptor (assoc :descriptor descriptor)))
     {:final true :supers [] :comp (comp-of t)}))
 
 (defn- map-heaps
@@ -101,7 +103,8 @@
                                 (exact? y) [:exact (ref (second y))]
                                 :else y))
               g (vec (for [i (range s (+ s n)) :let [di (type-def c i)]]
-                       [(:final di) (mapv ref (:supers di)) (map-heaps ref (:comp di))]))
+                       ;; the descriptor clauses are the type's identity too (custom descriptors, queue 327)
+                       [(:final di) (mapv ref (:supers di)) (map-heaps ref (:comp di)) (some-> (:describes di) ref) (some-> (:descriptor di) ref)]))
               v [:def g (- x s)]]
           (.put memo x v)
           v))))
@@ -662,13 +665,34 @@
             (require! (<= (count (:supers d)) 1) "multiple supertypes")
             (run! #(type-def c' %) (:supers d))
             (check-comp c' (:comp d)))
+          ;; the descriptor clauses (custom descriptors, queue 327): a describes clause names an earlier type of the group whose
+          ;; descriptor this is, a descriptor clause a type of the group that describes this one, both structs of one finality
+          (doseq [i (range n) :let [x (+ s i) d (type-def c' x) in? (fn [y] (and (>= (long y) s) (< (long y) (+ s n))))]]
+            (when-let [y (:describes d)]
+              (require! (in? y) "described type is outside rec group")
+              (require! (< (long y) x) "forward use of described type")
+              (require! (= :struct (first (:comp d))) "described type must be a struct")
+              (require! (= x (:descriptor (type-def c' y))) "described type is not described by descriptor"))
+            (when-let [y (:descriptor d)]
+              (require! (in? y) "descriptor type is outside rec group")
+              (require! (= :struct (first (:comp d))) "descriptor type must be a struct")
+              (require! (= x (:describes (type-def c' y))) "type is not described by its descriptor")
+              (require! (= (:final d) (:final (type-def c' y))) "descriptor and described types have mismatched finality")))
           ;; check_subtype_sub
           (doseq [i (range n) :let [x (+ s i) d (type-def c' x)]]
             (doseq [xi (:supers d)]
               (let [di (type-def c' xi)]
                 (require! (< (long xi) x) #(str "forward use of type " (u-str xi) " in sub type definition"))
                 (require! (not (:final di)) #(str "sub type " (u-str x) " has final super type " (u-str xi)))
-                (require! (match-comp c' (:comp d) (:comp di)) #(str "sub type " (u-str x) " does not match super type " (u-str xi))))))
+                (require! (and (match-comp c' (:comp d) (:comp di))
+                               (= (some? (:describes d)) (some? (:describes di)))
+                               (= (some? (:descriptor d)) (some? (:descriptor di))))
+                          #(str "sub type " (u-str x) " does not match super type " (u-str xi)))
+                ;; a subtype's described type and descriptor are the supertype's subtypes
+                (when-let [y (:describes d)]
+                  (require! (match-def c' y (:describes di)) #(str "described type " (u-str y) " does not match")))
+                (when-let [y (:descriptor d)]
+                  (require! (match-def c' y (:descriptor di)) #(str "descriptor type " (u-str y) " does not match"))))))
           c'))
       c groups)))
 
