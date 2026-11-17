@@ -506,7 +506,7 @@ forms over `go/arbace/py`, a compiled interpreter (the survey's §7):
   them, compiled by `arbace.python.run/compile-source` (the compiler pyi's imports use) and each translated into a package
   `arbace/pyaot/mHASH` (HASH of its IR text; a module compiled once is the same package for every program, printed once
   and kept by `bin/pyi`): the IR as the binary IR (§7.2; queue 329: the text when a shape keeps it,
-  `PYI_AOT_BINARY_IR=0` every module), its functions in the loader's pre-order (the code object, then its nested code
+  `PYI_AOT_BINARY_IR=0` every module, a generator of its own for `bin/pyi`'s package cache), its functions in the loader's pre-order (the code object, then its nested code
   objects in constant order), `Register` (`AotRegister` by the source's `AotKey`, the SHA-256 of the mode and the
   source). The main package calls each `Register` and `AotMain`: `sys.argv` (the process's arguments, else the file),
   `sys.path`, the compiler (`SetCompiler`: a source compiled ahead by its key, else the host's) and `RunModule`.
