@@ -60,6 +60,10 @@
                :when fc]
            {:mode (mode-of r) :prefixes (prefixes-of fc) :error? err?
             :intel? (boolean (re-find #"x86-asm-syntax[= ]intel" own))
+            ;; llvm-mc's lexer options the reader takes (the dialect's :masm-integers, :motorola-integers)
+            :lexer (cond-> {}
+                     (and (re-find #"-masm-integers" own) (not (re-find #"-masm-integers=(0|false)" own))) (assoc :masm-integers true)
+                     (re-find #"-motorola-integers" own) (assoc :motorola-integers true))
             :encoding? (boolean (re-find #"-?-show-encoding" r))
             :obj? (boolean (re-find #"filetype[= ]obj" r))
             ;; what llvm-mc prints: AT&T unless the output variant is Intel's; immediates in hex with --print-imm-hex; the
@@ -73,7 +77,9 @@
             :lfi? (boolean (re-find #"-m?triple[= ]+\S*lfi" r))
             :other-tool? (boolean (or (re-find #"filetype[= ]obj" r) (re-find #"llvm-(objdump|readobj|readelf|nm|dwarfdump)" fc)
                                       (re-find #"llvm-(objdump|readobj|readelf|nm|dwarfdump)" r)))
-            :options? (boolean (re-find #"x86-sse2avx|x86-align-branch|x86-pad-|x86-branches-within|mc-relax-all|-defsym|--defsym" r))}))))
+            :options? (boolean (re-find #"x86-sse2avx|x86-align-branch|x86-pad-|x86-branches-within|mc-relax-all" r))
+            ;; --defsym's names: the print level follows the file's conditionals for them (AXS32 (a)'s part)
+            :defsym (let [ds (map second (re-seq #"-?-defsym[= ]([A-Za-z_.$][\w.$]*)=" r))] (when (seq ds) (set ds)))}))))
 
 (defn checks
   "The CHECK lines of `prefixes`: [LINE KIND CONTENT] (KIND \"\" -NEXT ...)."
@@ -116,21 +122,37 @@
   "{:asm LINE} the instruction as llvm-mc prints it (arbace.asm.amd64.print), or {:punsup CLASS} what the printer cannot
   print yet."
   [inst mi flags mode]
-  (try (binding [p/*t* x/*t*] {:asm (p/print-inst inst mi (or flags #{}) mode)})
+  (try (binding [p/*t* x/*t*]
+         (let [c (try (p/inst-comment inst mi) (catch Throwable _ nil))]
+           (cond-> {:asm (p/print-inst inst mi (or flags #{}) mode)} c (assoc :comment c))))
        (catch arbace.lang.ExceptionInfo e
          (if-let [c (:print/unsupported (ex-data e))] {:punsup c :pwhat (.getMessage e)} (throw e)))))
 
 (defn assemble-file
   "[[LINE ENCODINGS] ...] for each instruction statement in `mode`: ENCODINGS a vector of {:text \"encoding: [...]\"} or
   {:error MSG} or {:unsupported C}. The statements are in the syntax arbace.asm.amd64.asm/*intel* says at the start, then as
-  `.intel_syntax` and `.att_syntax` switch it."
-  [items starts ^long mode]
-  (loop [items items mode mode syms {} out [] gcc false intel x/*intel*]
+  `.intel_syntax` and `.att_syntax` switch it. With `defs` (a run's --defsym names) the conditionals `.ifdef`, `.ifndef`,
+  `.else` and `.endif` are followed, a name defined by --defsym or an assignment before (AsmParser's parseDirectiveIfdef);
+  without, every statement is assembled."
+  ([items starts mode] (assemble-file items starts mode nil))
+  ([items starts ^long mode defs]
+  (loop [items items mode mode syms {} out [] gcc false intel x/*intel* conds ()]
     (if (empty? items)
       out
-      (let [[f s _] (first items)]
+      (let [[f s _] (first items)
+            h (when (and defs (seq? f) (symbol? (first f)) (= "asm" (namespace (first f)))) (name (first f)))
+            active? (every? second conds)]
         (cond
-          (not (seq? f)) (recur (rest items) mode syms out gcc intel)
+          (not (seq? f)) (recur (rest items) mode syms out gcc intel conds)
+          (#{"ifdef" "ifndef" "ifnotdef"} h)
+          (let [nm (let [a (second f)] (cond (symbol? a) (name a) (and (seq? a) (= 'sym (first a))) (second a) :else (str a)))
+                d (or (contains? defs nm) (contains? syms nm))]
+            (recur (rest items) mode syms out gcc intel (conj conds [true (if (= h "ifdef") d (not d))])))
+          (and h (.startsWith ^String h "if")) (recur (rest items) mode syms out gcc intel (conj conds [false true]))
+          (= h "else") (recur (rest items) mode syms out gcc intel
+                              (if (seq conds) (let [[known c] (first conds)] (conj (rest conds) [known (if known (not c) true)])) conds))
+          (= h "endif") (recur (rest items) mode syms out gcc intel (if (seq conds) (rest conds) conds))
+          (not active?) (recur (rest items) mode syms out gcc intel conds)
           (insn? f)
           (let [es (vec (mapcat (fn [r] (cond (:bytes r) (cond->> [(merge {:text (x/encoding-text r) :inst (:inst r) :mi (:mi r) :pflags (:pflags r) :mode mode}
                                                                          (print-of (:inst r) (:mi r) (:pflags r) mode))]
@@ -139,20 +161,20 @@
                                                :else [r]))
                                 (try (binding [x/*gcc* gcc x/*intel* intel] (x/assemble-insn f mode syms))
                                      (catch Throwable e [{:unsupported :crash :what (str (pr-str f) ": " e)}]))))]
-            (recur (rest items) mode syms (conj out [(line-of starts s) es]) gcc intel))
+            (recur (rest items) mode syms (conj out [(line-of starts s) es]) gcc intel conds))
           :else
           (let [h (name (first f))]
             (case h
-              "code16" (recur (rest items) 16 syms out false intel)
-              "code16gcc" (recur (rest items) 16 syms out true intel)
-              "code32" (recur (rest items) 32 syms out false intel)
-              "code64" (recur (rest items) 64 syms out false intel)
-              "intel_syntax" (recur (rest items) mode syms out gcc true)
-              "att_syntax" (recur (rest items) mode syms out gcc false)
+              "code16" (recur (rest items) 16 syms out false intel conds)
+              "code16gcc" (recur (rest items) 16 syms out true intel conds)
+              "code32" (recur (rest items) 32 syms out false intel conds)
+              "code64" (recur (rest items) 64 syms out false intel conds)
+              "intel_syntax" (recur (rest items) mode syms out gcc true conds)
+              "att_syntax" (recur (rest items) mode syms out gcc false conds)
               ("=" "set" "equ")
               (let [[_ a b] f nm (cond (symbol? a) (name a) (and (seq? a) (= 'sym (first a))) (second a))]
-                (recur (rest items) mode (if nm (assoc syms nm b) syms) out gcc intel))
-              (recur (rest items) mode syms out gcc intel))))))))
+                (recur (rest items) mode (if nm (assoc syms nm b) syms) out gcc intel conds))
+              (recur (rest items) mode syms out gcc intel conds)))))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; judging a file
@@ -251,6 +273,23 @@
               t (when-not (#{"-NOT" "-EMPTY"} kind) (text-part c))]
           (cond
             (or (nil? t) (re-find #"^-COUNT" kind)) (recur (rest cs) k off res)
+            ;; a comment's text held to the printed lines with their comments (`inst-comment`), FileCheck's way: met, else
+            ;; :mismatch beside an instruction whose comment the printer writes, else still :comment
+            (= :comment (text-kind t))
+            (let [pat (pattern t)
+                  line (fn [i] (let [e (second (nth outs i))] (when (and (:asm e) (:comment e)) (str (:asm e) "\t# " (:comment e)))))
+                  try-at (fn [i from] (when-let [a (line i)]
+                                        (let [m (re-matcher pat a)] (when (.find m (int (min (count a) from))) [i (.end m)]))))
+                  hit (if (= kind "-SAME")
+                        (when (< k n) (try-at k off))
+                        (or (when (< k n) (try-at k off)) (some #(try-at % 0) (range (inc k) n))))]
+              (if hit
+                (recur (rest cs) (long (first hit)) (long (second hit)) (conj res [l :pass (line (first hit))]))
+                (let [rest-outs (subvec outs (min k n))
+                      e (when (seq rest-outs)
+                          (second (reduce (fn [a b] (if (< (Math/abs (- (long (first b)) (long l))) (Math/abs (- (long (first a)) (long l)))) b a))
+                                          rest-outs)))]
+                  (recur (rest cs) k off (conj res [l (if (:comment e) :mismatch :comment) (when e (:asm e))])))))
             (text-kind t) (recur (rest cs) k off (conj res [l (text-kind t) nil]))
             :else
             (let [pat (pattern t)
@@ -343,7 +382,7 @@
         all-enc (count (filter (fn [l] (and (re-find #"encoding: \[" l) (re-find #"[A-Za-z0-9_-]+(-NEXT|-SAME)?:.*encoding:" l)))
                                (str/split-lines src)))
         ;; the file read in a run's syntax (AT&T, or Intel's: -x86-asm-syntax=intel), once each
-        read-of (memoize (fn [syn] (try {:items (asm/read-items src {:arch :amd64 :syntax syn})}
+        read-of (memoize (fn [syn lx] (try {:items (asm/read-items src (merge {:arch :amd64 :syntax syn} lx))}
                                         (catch Throwable e {:refused (if (= :intel (:asm/refused (ex-data e))) :intel :unread)}))))
         cross (volatile! nil)
         starts (line-starts src)
@@ -353,7 +392,7 @@
                            :let [cs (vec (remove (fn [[l]] (.contains seen l)) (checks src (:prefixes r))))
                                  _ (doseq [[l] cs] (.add seen l))]
                            :when (seq cs)]
-                       (let [read (read-of (if (:intel? r) :intel :att))
+                       (let [read (read-of (if (:intel? r) :intel :att) (:lexer r))
                              txt-cs (when-not (:error? r)
                                       (vec (filter (fn [[_ k c]] (and (not (#{"-NOT" "-EMPTY"} k)) (not (re-find #"^-COUNT" k)) (text-part c))) cs)))
                              txt-as (fn [cls] (vec (for [[l] txt-cs] [l cls])))]
@@ -374,6 +413,10 @@
                             :txt (cond (:other-tool? r) (txt-as :other-tool)
                                        (:options? r) (txt-as :options)
                                        (:lfi? r) (txt-as :lfi)
+                                       ;; the statements the run's --defsym selects
+                                       (:defsym r) (judge-text txt-cs (binding [p/*imm-hex* (:imm-hex? r) p/*intel* (:out-intel? r) x/*intel* (:intel? r)]
+                                                                        (assemble-file (:items read) starts (:mode r) (:defsym r)))
+                                                               (:encoding? r))
                                        :else (judge-text txt-cs stmts (:encoding? r)))
                             :errors (when (:error? r) (judge-errors cs stmts))})))))
         enc (vec (mapcat :enc results))

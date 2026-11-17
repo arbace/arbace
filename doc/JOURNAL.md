@@ -9622,3 +9622,21 @@ runner, which ccorpus2 does not carry); fixing the 4 mutants whose expectation t
   cases (gains nothing), keeping `shim.ll`; byte equality of the text (repr/llvm's print drops the comments, so the forms and the
   lowered C are the level).
 - Not run: the whole `bin/rsi check` (8 GiB declared; its runs unchanged by construction). Crop paths only: no key moves.
+
+## 2026-11-17: x86-64 assembly's deferred rows, the cheap groups (branch `h-asm-deferred`, from `next` `e4a7a30f3`)
+
+The read cell's 32 and the print cell's 400 deferred rows (test/crops/scores.edn) grouped by cause: the error tests' refusals (24 +
+1 input, read and print), `--mdis`'s markup (4, read), llvm-mc's lexer options (3 + 11 texts), the comments (119), the streamer's
+lines (102), LFI (61), --defsym and the other options (13), a local label (1 + 1), a fixup (1). Fixed: the printer's markup
+(AXS66 (a), `arbace.asm.amd64.print/*markup*`), the lexer options (AXS35 (a) taken over its recommended (b): the header's
+`:masm-integers`, `:motorola-integers`, LLVM's LexDigit ported, `bin/repr-asm`'s list flags and check.ae's runs), the shuffle and
+immediate comments (X86InstComments.cpp's EmitAnyX86InstComments for PALIGNR, PSHUFD, PUNPCK*, SHUFP*, UNPCK*P*, INSERTPS without a
+mask, X86ShuffleDecode.cpp's decoders, printOperand's `imm =`; llvm-project 23.1.5, written again from their behaviour, the judge
+holding a comment text to the printed line with its comment), --defsym's conditionals at the print level. Proven on the touched
+files alone (encode-check `--only` 29 files with every control's, round trip of the three lexer files, decode-check of the two markup
+tests, 25 musl and 31 arm64 files' round trip unchanged); the rows re-recorded alone (`encode-check --record --only`, new). Read
+25,229 / 1 / 25 (was 25,222 / 1 / 32), print 194,722 / 1,536 / 256 (was 194,582 / 1,532 / 400): 4 texts of two --defsym runs are
+warnings and fall under the existing by-design `:diagnostic`. Alternatives: a whole streamer (AXS30 (b)) for the directives, left; the
+comments printed into every line (rejected: it would change the judging of every file, unprovable without the whole corpus).
+Proposed AXS95-AXS97 (doc/asm/AMD64-SURVEY.md): the 655 `:other-tool` texts of objects no check judges, the error tests' judge,
+the matcher's debug trace.
