@@ -9629,3 +9629,11 @@ runner, which ccorpus2 does not carry); fixing the 4 mutants whose expectation t
   crops-tier step `rsi-shim-essential` (`bin/rsi shim-check`, 1 GiB, Rust's essential chain, its own crossed control as the
   waiver's reason) to `test/gate/steps.edn`; gate.crops check, crops-test, crop-tier-test pass and the plan runs it. Alternative: a
   `--full` step (it is seconds: the essential tier's crop rule fits it).
+
+## 2026-11-17: RIND4 (a), rsi's ci on Arbace's own C target (branch `h-rust-indep`)
+
+- `bin/rsi` takes C's target as `bin/lib/repr-c/sysroot.bash`'s `c_target_host` names it (c/target by default, gcc's test/c/host under
+  `ARBACE_C_TARGET=gcc`); `arbace.rust.run` loads it and runtime-ci's keys hash it; `bin/rust-front`'s ci session the same. Proven on
+  ten lowered units (forms equal on both hosts) and by `bin/rust-front essential` on c/target (7 of 7 runs, its known summary). C7
+  `:own` on the cell's cases; independence 80. The runtime-ci re-read on c/target is the main host's night. Alternative: only the
+  program's units on c/target (RIND4 (b), std's library still on gcc's macros: C7 not own).

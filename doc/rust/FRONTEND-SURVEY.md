@@ -3957,3 +3957,22 @@ C printed by repr/c) in `test/gate/steps.edn`, among the crop's steps, its contr
 a control that passes fails the check). `gate.crops check` 0 problems, `test/gate/crops-test.bash` ok, `test/gate/crop-tier-test.bash`
 20 of 20, `bin/gate --plan`: the step runs (never passed), simulated at 0:00 (unmeasured). Its load closure for
 `test/gate/loads.edn` is the main host's (`bin/gate --loads-update`) with its first audited run.
+
+## As built: RIND4 (a), ci on Arbace's own C target (2026-11-17)
+
+- `bin/rsi` sources `bin/lib/repr-c/sysroot.bash` and calls `c_target_host`: `ARBACE_C_HOST` is `c/target` by default (gcc's recorded
+  `test/c/host` under `ARBACE_C_TARGET=gcc`, the oracle tier's, as for every C reader); `arbace.rust.run`'s `-main` loads that host
+  (its own default `c/target`), so `read-lib`, `nodes-list`, `compile-list` and `nodes` read and check the lowered C on it, and
+  runtime-ci's two keys (`ci/key`, `ci/ports/key`, also `bin/rsi runtime-keys`) hash it in place of `test/c/host`. musl's forms were
+  already c/target's (`bin/lib/ci/musl`'s `c_target_host`); only the program's and the library's read moved. `bin/rust-front`'s ci
+  session (`rust-front-essential`'s runs) passes `$ARBACE_C_HOST` (c_sysroot's) in place of `test/c/host` likewise.
+- Proven light: ten lowered units (five synthetic programs' codegen units and shims: casts, int-ops-u8, panic-todo, closures,
+  algorithms) read and checked by `arbace.rust.run/read-program` on both hosts: all `:ok`, the read forms, the errors and the standard
+  flags equal (the checker's symbol table an identity map, not compared). `bin/rust-front essential` on c/target: run-built 7 of 7
+  programs from Arbace's MIR give rustc's status and output through ci, the summary equal to its known file, every control differing
+  (5 min 48 s, 1.77 GB). `bin/rsi runtime-keys`: lowered `3f1a0098...` unchanged (std's lowering is not redone), ci `f0730105...`
+  (gcc's `b43f9a75...`), ports `dfa2da64...` (gcc's `c84a13ea...`).
+- `test/rust/eval-inputs-linux-amd64.edn`: C7 `:own` on the five cases (C5 and C7 own, five inputs rustc's); independence 80.
+- The main host's night: `bin/heavy-lock bin/rsi runtime-ci` (the lowered std at its key is kept: the ci library and the ports read
+  again on c/target, compiler_builtins' units lowered and read; minutes to about an hour, `RSI_CI_MEMLIMIT` 6 GiB), then `bin/rsi
+  aot-lib` (its units' keys moved), then the cell's runs as before (`bin/rsi check --corpus samples,synthetic --record`, `check --aot`).
