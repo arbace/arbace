@@ -2463,3 +2463,30 @@ FMAX, REV16 leaving bits 16-31): the arm64 reference's subject (DECISION 5 (a)).
 Proved (linux/arm64): `bin/hsi check --corpus synthetic` judged by the record and by the golden files: the same verdicts, 32
 pass, 5 fail (arm64's floating point, below), 37 of 37 `:judge :own`; the control primops-int8 against primops-word8 fails
 against the golden file.
+
+## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
+
+(The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
+amd64 record: not Go's fused multiply-add, as queue 325's report guessed, but the default NaN's sign. A NaN made from numbers
+(0/0) is Go's hardware result, positive on arm64 and negative on x86-64 (SSE's "QNaN floating-point indefinite"), and it shows
+wherever its bits do: castDoubleToWord64#, decodeFloat, significand, toRational, properFraction and realToFrac (at -O0
+`fromRational . toRational`, so -Infinity on amd64, Infinity on arm64). GHC 9.14.1 on arm64 prints those lines as hsi does.
+- `test/haskell/ref-ghc914-arm64.edn`: GHC 9.14.1's runs on linux/arm64 (the VM's ghc) of the programs `test/haskell/arm64-ref.txt`
+  lists, `bin/hsi record-ref --arm64` (refused on another machine), classed apart from the amd64 records (its own file and
+  header). Six programs: the three class programs, primops-double, primops-float, testsuite/numeric/should_run/T3676. Found by
+  recording samples, synthetic and testsuite-core (806 programs) on arm64 and comparing with the amd64 record: 21 differ; the
+  15 others are the installation's facts (System.Info.arch, containers' unit id, the arm64 RTS's shorter usage text in cgrun057
+  and T16916: hsi prints the reference's),
+  the file system's order (samples/LibSystem), the scheduler's timing (conc066, setnumcapabilities001, IncallAffinity), the code
+  generator where hsi computes amd64's (primops-word's byteSwap16#, REV16, and bitReverse16#, RBIT) and five Cmm and assembly
+  tests GHC does not build on arm64: none of them belongs in the reference.
+- `bin/lib/hsi/check`: on an arm64 host (`uname -m`; `HSI_REF_ARCH=arm64|amd64` says it), at -O0 and not under `HSI_JUDGE=ref`,
+  a program the arm64 reference records is judged by it before its own verdict and the amd64 record, its result `:ref :arm64`;
+  the controls likewise. The golden files and the amd64 records are amd64's and stay so; on amd64 nothing changes.
+- primops-double and primops-float still fail on arm64 against GHC's arm64 run: GHC's arm64 code is FMIN/FMAX and FCVTZS, hsi
+  computes amd64's MINSD/MAXSD and CVTTSD2SI on every host. Their class, `:arm64-amd64-ops` (by design, `:fail`), in
+  `test/haskell/divergences.edn`.
+- A negative control, `synthetic/class-realfloat synthetic/class-realfrac` (`test/haskell/hsi-controls.txt`): on arm64 judged
+  against class-realfrac's arm64 run, elsewhere against its golden file; it fails as it must.
+Proved (linux/arm64): the six and four others by `bin/hsi check`, without the arm64 reference (`HSI_REF_ARCH=amd64`): 4 pass,
+6 fail, 4 in no class; with it: 8 pass, 2 fail (`:arm64-amd64-ops`), 0 in no class, every control failing as it must.
