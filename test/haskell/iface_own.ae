@@ -1,0 +1,70 @@
+;; DECISION 1 (a) of queue 325 (the user, 2026-11-17): the round trip's interface level judged by Arbace's own interfaces for the
+;; packages the front end compiles (bin/repr-haskell roundtrip --iface-own): each own package's printed modules, read again
+;; natively, compiled bottom-up by lib-check --ifaces own on the originals' own pools below it, and each module's own interface
+;; (lib-check's POOL/M.iface.edn, a boot file's BOOT/M.iface.edn: arbace.repr.haskell.ownface's text) compared byte for byte
+;; with the original's, its spans' columns aside (norm below). The units are the modules whose original has an own interface (the front end compiles them); every
+;; other module of the corpus stays GHC's interface level (the oracle tier's, test/haskell/roundtrip-CORPUS-iface-known.edn).
+;; usage: arbace test/haskell/iface_own.ae CORPUS.edn ORIG-ROOT SIDE-ROOT KNOWN.edn UNITS.edn LABEL PKG...
+;;   ORIG-ROOT/PKG/{pool,boot}: the originals' own interfaces (.tmp/repr-haskell/lib-check/own); SIDE-ROOT/PKG/{pool,boot}: the
+;;   printed side's; KNOWN.edn: {PKG/FILE REASON} the known differences; UNITS.edn: the units this level judges, written when
+;;   ARBACE_IFACE_OWN_RECORD=1 (the record of what the own level covers), else compared with the run's (a unit gained or lost
+;;   fails, as a known entry that no longer differs does)
+(require '[arbace.string :as str])
+(import '[java.io File])
+;; The comparison's normalizations (as GHC's level drops spans and columns, mode :lines): the printed module keeps the original's
+;; lines but not its columns, so a name made from a span (NAME_L1_C1_L2_C2, the front end's local binders) and a span's text
+;; ("L1:C1:L2:C2@M", a CallStack's or a Typeable's) keep their lines alone
+(defn norm [t]
+  (-> t
+      (str/replace #"_([0-9]+)_[0-9]+_([0-9]+)_[0-9]+\"" "_$1_$2\"")
+      (str/replace #"\"([0-9]+):[0-9]+:([0-9]+):[0-9]+@" "\"$1:$2@")))
+(let [[corpus orig side known-file units-file label & pkgs] *command-line-args*
+      c (read-string (slurp corpus))
+      want (set pkgs)
+      mod-of-boot (fn [p] (-> p (str/replace #"^src/" "") (str/replace #"\.hs-boot$" "") (str/replace "/" ".")))
+      units (vec (for [p (:packages c) :when (want (:name p))
+                       [kind m path] (concat (for [[m f] (:modules p)] [:pool (str m) f])
+                                             (for [[m f] (:hsc p)] [:pool (str m) f])
+                                             (for [f (:boot p)] [:boot (mod-of-boot f) f]))
+                       :let [o (File. (str orig "/" (:name p) "/" (name kind) "/" m ".iface.edn"))]
+                       :when (.isFile o)]
+                   {:key (str (:name p) "/" path) :orig o :side (File. (str side "/" (:name p) "/" (name kind) "/" m ".iface.edn"))}))
+      diffs (into (sorted-map)
+                  (for [{:keys [key orig side]} units
+                        :let [why (cond (not (.isFile ^File side)) "the printed module has no own interface (the front end stopped on it)"
+                                        (not= (norm (slurp orig)) (norm (slurp side))) "the own interfaces differ"
+                                        :else nil)]
+                        :when why]
+                    [key why]))
+      known (if (.isFile (File. ^String known-file)) (read-string (slurp known-file)) {})
+      ukeys (vec (sort (map :key units)))
+      record? (= "1" (System/getenv "ARBACE_IFACE_OWN_RECORD"))
+      problems (concat (for [[k why] diffs :when (not (contains? known k))] (str "differs, not known: " k ": " why))
+                       (for [k (keys known) :when (and (some #{(first (str/split (str k) #"/"))} pkgs) (not (contains? diffs k)))]
+                         (str "known, no longer differs: " k)))]
+  (if record?
+    (spit units-file (str ";; The units the round trip's own interface level judges (DECISION 1 (a) of queue 325; bin/repr-haskell roundtrip\n"
+                          ";; --iface-own, test/haskell/iface_own.ae): the modules of the own packages whose original has an own interface,\n"
+                          ";; PKG/FILE; the read and print cells' interface sources take them from the own level, the rest from GHC's.\n"
+                          (pr-str ukeys) "\n"))
+    nil)
+  (let [rec (when (and (not record?) (.isFile (File. ^String units-file))) (read-string (slurp units-file)))
+        rec (filter #(some (fn [p] (str/starts-with? % (str p "/"))) pkgs) rec)
+        gained (when-not record? (remove (set rec) ukeys)) lost (when-not record? (remove (set ukeys) rec))
+        ;; the negative control (GTS81 (a)): a unit's printed interface against another unit's original must differ
+        [u1 u2] (filter #(.isFile ^File (:side %)) units)
+        control (when (and u1 u2) (= (norm (slurp (:side u1))) (norm (slurp (:orig u2)))))
+        problems (concat problems
+                         (when (or (seq gained) (seq lost))
+                           [(str "the units differ from " units-file ": " (count gained) " gained, " (count lost) " lost (ARBACE_IFACE_OWN_RECORD=1 rewrites it)")])
+                         (when control [(str "control: " (:key u1) "'s printed interface equals " (:key u2) "'s original")]))]
+  (when (and u1 u2) (println (str "iface-own " label ": control (" (:key u1) "'s printed interface against " (:key u2) "'s original) "
+                                  (if control "equal: the judge is blind" "differs, as it must"))))
+  (doseq [p pkgs]
+    (let [us (filter #(str/starts-with? (:key %) (str p "/")) units)
+          ds (filter #(str/starts-with? (key %) (str p "/")) diffs)]
+      (println (str "iface-own " label ": " p " " (- (count us) (count ds)) " of " (count us) " own interfaces equal"))))
+  (doseq [x problems] (println (str "iface-own " label ": " x)))
+  (println (str "iface-own " label ": " (- (count units) (count diffs)) " of " (count units) " units equal, " (count diffs) " differ ("
+                (count (filter #(contains? known (key %)) diffs)) " known), " (count problems) " problems"))
+  (System/exit (if (seq problems) 1 0))))
