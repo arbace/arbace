@@ -7826,3 +7826,51 @@ bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge   # j
 bin/arbace-go --gate-build                                                   # arbace/classes and arbace/j2g moved gate_key
 # then "The night's commands" above: shard 1 with t04508 t04680 t05089 t05653 t05707 t07956 t06387 added
 ```
+
+## As built: n-java-defer (write-ahead), 2026-11-17 (round 52, overnight)
+
+Branch `n-java-defer` (from mac/n-review-c `6ff92621f`), under the night's rules (each process under 1 GiB): the eval cell's 443
+deferred rows less those the stack's triage took (h-java-deferred's four groups and its id lists, h-java-members' 85, the AT rows),
+read from h-java-deferred's light run (its `rem.tsv`, next's gate executable `f60652fb7fb9568e76b1`) and classed by
+test/java/divergences.edn: **145 rows left**, by class serialization 21, reflection 20, net 13, jrt-dates 13, mxbeans 12, stack 9,
+references 8, security 6, nio 5, charsets-locales 5, the rest 4 or fewer.
+
+**The serialization 21 are mostly the stack's.** 12 of them (t04377 t04402 t04412 t04419-t04424 t04426-t04428) record stdout's first
+line as their reason ("Regression test for ..."), but stderr shows ObjectInputFilter's `System$Logger` (t04428 run here): h-java-deferred's
+derivation removes their first failure though its id list misses them. Add them to its night's list.
+
+**The largest class left with interpreter causes is `:reflection` (20).** Run here at interp (read on javac's tool, each run under
+0.75 GB): its causes, one to three tests each: an annotation proxy's instanceof (t04729), an enum constructor's reflected parameters
+(t04717), the converter dropping a receiver parameter's type annotations (t04740 t04741: `(constructor [this])`, repr/java), repeated
+declaration annotations written as two `^{Ann ...}` maps that the reader merges into one (t04727: `^{Ann 20} ^{Ann 21}` keeps one, repr/java),
+AnnotationInvocationHandler's constructor missing from jrt (t04724 t04735 t04738 t04742), Executable.getGenericParameterTypes (t04869),
+a world interface's default dispatched on the wrong interface by j2g's dyn (t04836: AnnotatedArrayType), reflective access checks (t07688),
+lambdas' synthetic methods (t06144 t06157), arrays over 255 dimensions (t04504 t04837). Two are the interpreter's, fixed here:
+
+- **Rt.isInstance** (arbace/lang/Compiler.ae, compiled: **built tomorrow**): instance?, checkcast, a catch and a type pattern of an
+  interpreted class or interface answered by the object's Klass, and false for an object the interpreter did not make. A
+  java.lang.reflect.Proxy of an interpreted interface (every annotation of an interpreted annotation type is one) is such an object: its
+  class implements the interface (getInterfaces says so, Class.isInstance answers true) but `(instance? Foo a)` was false. Now an
+  object with no Klass is answered by the Klass's Class (`(.isInstance (.-cls k) o)`). Proof, light: the same answer made in
+  arbace.classes.interp (an interface Klass's instance? and cast by its Class), the checkout on ARBACE_PATH (RT.toolSource loads
+  arbace/classes/ from it): t04729 passes (status 0; without it status 1). That substitute was removed: the committed fix is the
+  runtime's.
+- **implicit-params!** (arbace/classes/interp.ae): an enum's and an enum constant body's constructor reflects javac's descriptor, String
+  and int before the declared parameters (the Meth already takes the constant's name and ordinal first: build-method!'s `:enum-slots`),
+  so getParameters and getParameterAnnotations index the declared ones after them, as arbace.classes.annot writes them (ctor-lead).
+  Proof, light: t04717 passes with the checkout on ARBACE_PATH (status 0; without it status 1).
+- No regression: the 141 tests of test/java/check-interp.edn that pass and whose path names annotation, reflect, enum, Proxy, instanceof,
+  pattern or cast, run at interp with the checkout on ARBACE_PATH (the gate's executable behind a wrapper adding it), the isInstance substitute in place:
+  141 of 141 pass (and the negative controls c00001 c00004 still fail as controls must).
+
+No row moves tonight: java-check runs the executable's embedded analyzer and runtime, so both fixes reach the record with the next
+build (arbace/lang and arbace/classes move `gate_key`; arbace/lang the runtime key too). Expected: t04729 and t04717 to pass at interp; the
+compiled level is unaffected by implicit-params! (j2g's own reflection) and by Rt.isInstance (the evaluator's).
+
+The day's commands (after the stack's build, `bin/arbace-go --gate-build`):
+
+```sh
+printf 't04717\nt04729\n' > .tmp/njd.txt
+bin/java-check --levels interp --list .tmp/njd.txt --save .tmp/njd
+bin/java-check --judge --partial --record .tmp/njd/...      # the two rows alone
+```
