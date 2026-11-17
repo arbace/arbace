@@ -7393,3 +7393,62 @@ controls failing as they must. So the eval fact is 1 (`:steps [pyi-check]`) and 
 DECISION 3 (a)): judge 0.196 to 0.910, Python's independence 64 to 98. Queue 319's port is moot (its remainder: a wider stub run).
 The review (`.tmp/goal/review-mac-python.md` on the main host) also found that 317's splice of test/gate/crops/python.edn fails the
 planner until the main host's records (the big corpora's packs, the four results files, the eval and AOT records) are committed.
+
+## As built: 328, the next deferred classes (round 5): itertools, float(), the sequences' repeat, the runtime's panics, the core objects' and built-ins' checks, -W (2026-11-17, the Mac VM, queue 328)
+
+Base python-1117-on-next 7baf829c0 (317's merge onto next with 318-320). The deferred classes of divergences.edn with the most
+rows that pyi code can close, after 304's round: `:pyi-command-line` 40, `:ordered-dict-c` 31 (odictobject.c's port: not cheap),
+`:pyi-main-module` 28 (runpy's main: not cheap), `:core-objects-287` 27, `:builtin-functions-core` 18, `:itertools-core` 12,
+`:float-core` 12, `:runtime-panics` 12, `:sequence-index-ops` 10. Taken here, by root cause in go/arbace/py (and one in
+arbace/python/compile.ae, one in bin/pyi):
+
+- **the runtime's panics** (`builtins_collections.ae`, `set.ae`, `eval.ae`, `aot.ae`, compile.ae): deque.count and deque.remove
+  read the items by index and check the deque's state after each comparison (deque_count's RuntimeError, deque_remove's
+  IndexError "deque mutated during iteration", its "deque.remove(x): x not in deque"; a comparison that cleared or popped was a
+  nil and a slice bound); SET_ADD's target an exact set (gh-154902: a rebound `__conditional_annotations__` is a TypeError
+  "'T' object is not a set", it was a type assertion's panic; the loop's and the compiled code's one-line change); a
+  class-visible scope's `__classdict__` free variable even when the class binds that name (`__classdict__: int`: CPython's
+  codegen adds it to u_freevars as it emits LOAD_DEREF; the annotate function's closure index was nil).
+- **itertools** (`builtins_itertools.ae`, `builtins_iter.ae`): count's PyNumber_Check of start and step and count_repr (the
+  type's name, the step left out when it is an int equal to 1); repeat_repr and `__length_hint__` (TypeError "len() of unsized
+  object" when unbounded, so operator.length_hint's default); accumulate's `initial` and batched's `strict` keyword-only;
+  pairwise_next's old item read before the next is asked (re-entrancy); groupby_next and _grouper_next as C's (the current value
+  taken by the grouper that returns it, the target key compared first: gh-146613); tee_fromiterable (a tee of a tee is a copy,
+  gh-123884's independent objects) and `_tee(iterable)`; the no-keyword types (chain, cycle, islice, pairwise, starmap,
+  dropwhile, takewhile, filterfalse, and builtins' filter) take keywords in a subclass with its own `__init__`
+  (`type->tp_init == X.tp_init`); an exhausted iterator drops its closure (its source).
+- **float()** (`float.ae`, `floatextra.ae`, `builtins.ae`, `format.ae`, `percent.ae`): PyFloat_FromString (a str's Unicode decimal
+  digits and spaces as ASCII, `_PyUnicode_TransformDecimalAndSpaceToASCII`; ASCII whitespace stripped; the error the object's
+  repr); float_new_impl's PyNumber_Float (an exact str parsed, then `__float__` (a float subclass's too; a strict subclass
+  returned warned of, DeprecationWarning), `__index__`, a float subclass's value); keywords for a subclass with its own
+  `__init__`; float.fromhex's one sign and no underscore; round()'s ndigits clamped as PyNumber_AsSsize_t(NULL); format's 3.14
+  fraction grouping (`'._f'`, `'.10_f'`, `'021_._e'`; "Cannot specify ... with 'n'.") and the omitted type with a precision
+  (Py_DTSF_ADD_DOT_0's exponent a digit earlier: `format(1234.56, '.4')` is '1.235e+03'); `'%f' % str` a TypeError.
+- **the sequences' repeat and strip** (`str.ae`, `bytes.ae`, `bytesmethods.ae`, `strmethods.ae`): str, bytes and bytearray
+  times an object with `__index__` (and their `__mul__`/`__rmul__` wrappers); an exact str or bytes stripped of nothing is itself.
+- **ints, slices, ranges** (`builtins.ae`, `intbytes.ae`, `slice.ae`, `range.ae`): int.__round__ at any size (long_round's
+  _PyLong_DivmodNear); to_bytes' signed range [-2**(8n-1), 2**(8n-1)); from_bytes' PyObject_Bytes (an int or a str a TypeError,
+  `__bytes__`); slice.indices and a range's slice by _PySlice_GetLongIndices (past sys.maxsize).
+- **the core objects and the built-ins' checks** (`class.ae`, `containers.ae`, `descr.ae`, `builtins_exec.ae`, `memoryview.ae`,
+  `func.ae`, `funcattrs.ae`): object_isinstance's `__class__` error propagated; list += a heap type's `__radd__` first
+  (binary_iop1 before sq_inplace_concat: list += UserList is a UserList); type()'s name and a str `__doc__` as UTF-8 (a lone
+  surrogate a UnicodeEncodeError) and the name without NUL; `__type_params__` not deletable; a dict subclass namespace with its
+  own `__iter__` (OrderedDict) copied in its keys() order; object.__dir__ without `__class__` merges no class; format() of a str
+  subclass's spec; compile()'s unrecognised flags and optimize value; exec()'s `closure=`; exec's frame builtins the globals'
+  `__builtins__` (a module its dict); bytes' and bytearray's `__buffer__` (collections.abc.Buffer); a function's `__name__` and
+  `__qualname__` objects kept (functools.wraps' identity).
+- **-W, -b and PYTHONWARNINGS** (`sys.ae`, bin/pyi python): sys.warnoptions as config_init_warnoptions orders it ("default" in
+  development mode, PYTHONWARNINGS's options unless -E/-I, -W's, -b's "default::BytesWarning" or -bb's "error::BytesWarning"),
+  sys.flags.bytes_warning, and the warnings module imported at start when there is an option (its _processoptions; an invalid
+  -W reported). bin/pyi python passes -W and -b (PYI_WARNOPTIONS, PYI_BYTES_WARNING) where it dropped them.
+
+Proof (the VM, run): `bin/pyi check --only` and `bin/pyi check --aot --lib-test --only` over the 108 rows these classes named
+(25 modules) and the controls' subjects. Compiled: base 7baf829c0 15 of the 108 pass (149 methods: 56 pass, 93 classed, 0
+failing), head 80 (121 pass, 28 classed, 0 failing), no row passing at the base lost. Interpreted (goi, under 201's stage 0
+`nf`, whose pyi runtime is the checkout's: next's stage 0 embeds next's), head 79 of the 108 (120 pass, 29 classed, 0 failing):
+the levels agree but for ShutdownTest's test_cleanup (compiled only). The classes edited by both levels' passes (identical edits
+in divergences-315.edn): `:sequence-index-ops` (10), `:float-core` (12), `:runtime-panics` (12) and `:itertools-core` (12;
+test_islice to `:finalization-collect`) retired; `:core-objects-287` 27 to 13, `:builtin-functions-core` 18 to 9,
+`:pyi-command-line` 40 to 26 (3 to `:warnings-c`). 15 of the rows served passed at the base already (test_clinic's 6, test_float's
+4, test_pprint's, test_builtin's top-level await, test_enum's getnewargs_ex, test_reprlib's descriptors): fixed by earlier
+queues, never re-recorded.
