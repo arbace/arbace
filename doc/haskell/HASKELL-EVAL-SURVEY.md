@@ -2431,3 +2431,35 @@ the RTS's "atomically was nested", text's decode error, the uncaught-exception l
 delays and MVars (Conc, MVarOrder, ThrowMasked, Weak's newest-first finalizers), and two facts of the host: LibPosix's mode 33124
 (0o100544: `setPermissions` sets the owner's bits and keeps 0o044 of the umask 022 file) and LibIO's stdin and stdout not
 terminals. AsyncRerun's golden is GHC's semantics (the frozen thunk resumed: counter 1); hsi's known divergence is its class.
+
+The synthetic corpus's review (37 of 37): `test/haskell/eval/gen.ae` writes each program's golden files from an own model of
+every line it generates, `test/haskell/eval/golden.ae` (`bin/hsi generate`; `--check`: the committed files are the generator's).
+The model is the program's own logic, the Haskell report's semantics and, where the report leaves the result to the
+implementation, GHC 9.14.1's libraries and its x86-64 code, each such choice named in golden.ae's header:
+- show: GHC.Show's showLitChar and showLitString, `showsPrec`'s parentheses, GHC.Float's `floatToDigits` (ported) and
+  `formatRealFloatAlt`, Ratio's `%` layout;
+- the primops by their primops.txt.pp meaning, over the literals' values; GHC's constant folding at -O0
+  (GHC.Core.Opt.ConstantFold): a Double#/Float# operation on literals computed on their rationals and rounded (so
+  `*## 0.0## (-2.5##)` is 0.0, `+## 0.0## x` is x even for x = -0.0, a folded quotient's zero positive), the conversions on the
+  source's decimal (`float2Int# 3.4028235e38#` wraps 3.4028235e38 mod 2^64); the Cmm optimiser's literal-second rule
+  (GHC.Cmm.Opt) before MINSD/MAXSD;
+- x86-64's machine where the primop's result is the machine's: SSE's default NaN (sign set: `castDoubleToWord64# (0.0## /##
+  0.0##)` is 18444492273895866368, decodeFloat of that NaN negative), CVTTSD2SI's minBound, BSWAP then SHR 16 for
+  `byteSwap16#`, and `bitReverse16#`'s C call leaving bits 16-31 of gcc's register (the RTS's object code);
+- libm as musl 1.2.6 on x86-64: Java's StrictMath (fdlibm) and musl's own formulas for asinh, acosh and atanh, with ten
+  values listed where musl's result is another (one ulp away at most, checked when the file is written): acosf(±0) and atanf
+  of a huge or infinite x return musl's pio2_hi (0x3FC90FDA, below π/2), tanf, sinhf, asinhf, acoshf, atanhf of one input
+  each, cos(0.1) (musl's kernel 0x3FEFD712F9A817C1, fdlibm's one ulp below);
+- the classes' methods by their GHC 9.14.1 definitions (properFractionDouble through decodeFloat, `roundDouble`'s banker's
+  rounding, `realToFrac` at -O0 as `fromRational . toRational`, so the NaN of a Double is -Infinity, Ix's `index` and
+  `rangeSize` Ints, the Enum instances' arithmetic sequences and their error messages, RealFloat's default `atan2`);
+- the eight runtime programs' runs written by hand in gen.ae from their lines (runtime-integer's computed), with their stderr
+  and exit status.
+Checked: every one of the 37 stdouts is GHC's recorded amd64 run byte for byte by the record's SHA-256 (the differences the
+review found, the model's errors, were fixed in the model until none was left; none is left unexplained), the stderrs and
+statuses likewise (`bin/hsi own-verdicts --check`: 747 of 908 programs by their own verdict). Against GHC's run on linux/arm64
+the model differs where arm64's machine does (six programs: AArch64's positive default NaN, FCVTZS's saturation, FMIN and
+FMAX, REV16 leaving bits 16-31): the arm64 reference's subject (DECISION 5 (a)).
+Proved (linux/arm64): `bin/hsi check --corpus synthetic` judged by the record and by the golden files: the same verdicts, 32
+pass, 5 fail (arm64's floating point, below), 37 of 37 `:judge :own`; the control primops-int8 against primops-word8 fails
+against the golden file.

@@ -1,0 +1,951 @@
+;; The synthetic corpus's golden files (queue 325's DECISION 2 (a), the user's choice of 2026-11-17): an own model of what
+;; each line of a program test/haskell/eval/gen.ae writes must print, derived from the program's own logic, the Haskell
+;; report's semantics and, where the report leaves it to the implementation, GHC 9.14.1's libraries and its x86-64 code
+;; (the reference host's: the amd64 record test/haskell/ref-ghc914.edn), each such choice named below. gen.ae loads it and
+;; writes NAME.stdout (NAME.stderr, NAME.exit) beside each program; bin/hsi own-verdicts lists a program when its golden
+;; files are GHC's recorded run (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: queue 325g, DECISION 2 (a)").
+;;
+;; The implementation's choices the model takes from the reference host (x86-64, SSE2, GHC's native code generator):
+;;   - a NaN made from operands that are not NaNs is the default NaN, sign bit set (0xFFF8000000000000, Float 0xFFC00000:
+;;     SSE's "QNaN floating-point indefinite"); an operation on a NaN returns its first NaN operand, quieted
+;;   - minDouble# a b and maxDouble# a b are MINSD/MAXSD (GHC's MO_F_Min/MO_F_Max, b the source operand): a < b ? a : b and
+;;     a > b ? a : b, so a NaN either side or two zeros give b; a literal a and a computed b are swapped first (Cmm's rule)
+;;   - double2Int# and float2Int# are CVTTSD2SI/CVTTSS2SI: a NaN or a value outside Int's range gives minBound
+;;   - byteSwap16# is BSWAP and SHR 16 (bits above 16 cleared); bitReverse16# is the RTS's C function, its result's bits
+;;     16-31 what gcc's code leaves in the register (x86-bitrev16)
+;;   - GHC's constant folding of Double# and Float# literals (fold-value)
+;;   - libm is musl 1.2.6's as x86-64 builds it (no FMA): the model computes Java's StrictMath (fdlibm) and the formulas of
+;;     musl's sources where Java has none; the values where musl and the model differ are listed in libm-overrides, each
+;;     with its reason
+(ns hsi.golden
+  (:require [arbace.string :as s])
+  (:import [java.math BigInteger BigDecimal MathContext RoundingMode]))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; Integers
+
+(def ^:const MIN Long/MIN_VALUE)
+(def ^:const MAX Long/MAX_VALUE)
+
+(defn big ^BigInteger [x] (if (instance? BigInteger x) x (BigInteger/valueOf (long x))))
+(def two64 (.shiftLeft BigInteger/ONE 64))
+(defn ubig "a 64-bit word as an unsigned Integer" ^BigInteger [w] (let [b (big w)] (if (neg? (long w)) (.add b two64) b)))
+(defn narrow-s ^long [bits ^long x] (case (long bits) 8 (long (unchecked-byte x)) 16 (long (unchecked-short x)) 32 (long (unchecked-int x)) 64 x))
+(defn narrow-u ^long [bits ^long x] (if (= 64 bits) x (bit-and x (dec (bit-shift-left 1 bits)))))
+(defn ult [a b] (neg? (Long/compareUnsigned a b)))
+(defn ucmp [a b] (Long/compareUnsigned a b))
+
+(defn paren [d neg? s] (if (and neg? (> d 6)) (str "(" s ")") s))
+(defn show-int ([x] (show-int 0 x)) ([d x] (paren d (neg? (long x)) (str (long x)))))
+(defn show-word [x] (Long/toUnsignedString (long x)))
+(defn show-integer ([x] (show-integer 0 x)) ([d ^BigInteger x] (paren d (neg? (.signum x)) (str x))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; Doubles and Floats as their bits (a NaN's bits matter: castDoubleToWord64#, decodeFloat)
+
+(def DNAN (unchecked-long 0xFFF8000000000000))       ; x86-64's default NaN
+(def FNAN (unchecked-long 0xFFFFFFFFFFC00000))       ; as an Int, 0xFFC00000
+(defn d ^double [b] (Double/longBitsToDouble (long b)))
+(defn db [^double x] (Double/doubleToRawLongBits x))
+(defn f ^double [b] (double (Float/intBitsToFloat (unchecked-int b))))
+(defn ->f "a double rounded to the nearest float (Clojure's float refuses a value out of range)" [x] (.floatValue (Double/valueOf (double x))))
+(defn fb [x] (long (Float/floatToRawIntBits (->f x))))
+(defn dnan? [b] (Double/isNaN (d b)))
+(defn fnan? [b] (Double/isNaN (f b)))
+(defn dquiet [b] (bit-or (long b) 0x0008000000000000))
+(defn fquiet [b] (long (unchecked-int (bit-or (long b) 0x00400000))))
+(defn dres [^double r] (if (Double/isNaN r) DNAN (db r)))
+(defn fres [^double r] (if (Double/isNaN r) FNAN (fb r)))
+(defn dop2 [g a b] (cond (dnan? a) (dquiet a) (dnan? b) (dquiet b) :else (dres (g (d a) (d b)))))
+(defn dop1 [g a] (if (dnan? a) (dquiet a) (dres (g (d a)))))
+;; a Float operation computed in double and rounded once to float: exact for +, -, *, / and sqrt (53 >= 2 x 24 + 2)
+(defn fop2 [g a b] (cond (fnan? a) (fquiet a) (fnan? b) (fquiet b) :else (fres (g (f a) (f b)))))
+(defn fop1 [g a] (if (fnan? a) (fquiet a) (fres (g (f a)))))
+
+(defn ddiv ^double [^double x ^double y] (/ x y))   ; IEEE division (Clojure's boxed / refuses a zero divisor)
+(defn dneg [b] (bit-xor (long b) MIN))
+(defn fneg [b] (long (unchecked-int (bit-xor (long b) 0x80000000))))
+(defn dabs [b] (bit-and (long b) MAX))
+(defn fabs* [b] (bit-and (long b) 0x7FFFFFFF))
+
+;; decodeFloat (the RTS's __decodeDouble_2Int, __decodeFloat_Int): [mantissa exponent], denormals normalised, NaN and
+;; Infinity decoded as finite bits (exponent 972, Float 105)
+(defn decode-double-2int [b]
+  (let [b (long b) low (bit-and b 0xFFFFFFFF) high (bit-and (unsigned-bit-shift-right b 32) 0xFFFFFFFF)]
+    (if (and (zero? low) (zero? (bit-and high 0x7FFFFFFF)))
+      {:sign nil :high 0 :low 0 :exp 0}
+      (let [iexp (+ (bit-and (bit-shift-right high 20) 0x7ff) -1075)
+            sign (if (neg? b) -1 1)
+            high (bit-and high 0xFFFFF)]
+        (if (not= iexp -1075)
+          {:sign sign :high (bit-or high 0x100000) :low low :exp iexp}
+          (loop [high high low low iexp (inc iexp)]
+            (if (zero? (bit-and high 0x100000))
+              (recur (bit-and 0xFFFFFFFF (+ (bit-shift-left high 1) (if (zero? (bit-and low 0x80000000)) 0 1)))
+                     (bit-and 0xFFFFFFFF (bit-shift-left low 1)) (dec iexp))
+              {:sign sign :high high :low low :exp iexp})))))))
+
+(defn decode-double [b]
+  (let [{:keys [sign high low exp]} (decode-double-2int b)
+        m (bit-or (bit-shift-left (long high) 32) (long low))]
+    [(big (* m (long (or sign 0)))) exp]))
+
+(defn decode-float [b]
+  (let [high (long (unchecked-int b))]
+    (if (zero? (bit-and high 0x7FFFFFFF))
+      [(big 0) 0]
+      (let [e (+ (bit-and (bit-shift-right high 23) 0xff) -150)
+            m (bit-and high 0x7FFFFF)]
+        (let [[m e] (if (not= e -150) [(bit-or m 0x800000) e]
+                        (loop [m m e (inc e)] (if (zero? (bit-and m 0x800000)) (recur (bit-shift-left m 1) (dec e)) [m e])))]
+          [(big (if (neg? high) (- m) m)) e])))))
+
+(defn pow2 ^BigInteger [n] (.shiftLeft BigInteger/ONE (int n)))
+
+;; GHC.Float's floatToDigits base 10 (Burger and Dybvig), ported: the shortest digits that read back to x
+(defn float-to-digits [[f0 e0] p minexp0]
+  (if (zero? (.signum ^BigInteger f0))
+    [[0] 0]
+    (let [b (big 2) base (big 10)
+          minexp (- minexp0 p)
+          n (- minexp e0)
+          [^BigInteger f e] (if (pos? n) [(.divide ^BigInteger f0 (pow2 n)) (+ e0 n)] [f0 e0])
+          [r s mup mdn] (if (>= e 0)
+                          (let [be (pow2 e)]
+                            (if (= f (pow2 (dec p)))
+                              [(.multiply f (.multiply be (big 4))) (big 4) (.multiply be b) be]
+                              [(.multiply f (.multiply be b)) (big 2) be be]))
+                          (if (and (> e minexp) (= f (pow2 (dec p))))
+                            [(.multiply f (big 4)) (.multiply (pow2 (inc (- e))) b) b BigInteger/ONE]
+                            [(.multiply f b) (.multiply (pow2 (- e)) b) BigInteger/ONE BigInteger/ONE]))
+          ^BigInteger r r ^BigInteger s s ^BigInteger mup mup ^BigInteger mdn mdn
+          expt (fn ^BigInteger [k] (.pow base (int k)))
+          lx (+ (dec p) e0)
+          k1 (quot (* lx 8651) 28738)
+          k0 (if (>= lx 0) (inc k1) k1)
+          k (loop [k k0]
+              (if (>= k 0)
+                (if (<= (.compareTo (.add r mup) (.multiply (expt k) s)) 0) k (recur (inc k)))
+                (if (<= (.compareTo (.multiply (expt (- k)) (.add r mup)) s) 0) k (recur (inc k)))))
+          gen (fn [rn sn mupn mdnn]
+                (loop [ds [] ^BigInteger rn rn ^BigInteger sn sn ^BigInteger mupn mupn ^BigInteger mdnn mdnn]
+                  (let [qr (.divideAndRemainder (.multiply rn base) sn)
+                        dn (.intValue ^BigInteger (aget qr 0)) rn' ^BigInteger (aget qr 1)
+                        mupn' (.multiply mupn base) mdnn' (.multiply mdnn base)
+                        lo (neg? (.compareTo rn' mdnn')) hi (pos? (.compareTo (.add rn' mupn') sn))]
+                    (cond (and lo (not hi)) (conj ds dn)
+                          (and hi (not lo)) (conj ds (inc dn))
+                          (and lo hi) (if (neg? (.compareTo (.multiply rn' (big 2)) sn)) (conj ds dn) (conj ds (inc dn)))
+                          :else (recur (conj ds dn) rn' sn mupn' mdnn')))))
+          ds (if (>= k 0) (gen r (.multiply s (expt k)) mup mdn)
+                 (let [bk (expt (- k))] (gen (.multiply r bk) s (.multiply mup bk) (.multiply mdn bk))))]
+      [ds k])))
+
+(defn format-generic [[is e]]
+  (let [ds (apply str is)]
+    (if (or (< e 0) (> e 7))
+      (let [se (str (dec e))]
+        (cond (= ds "0") "0.0e0"
+              (= 1 (count ds)) (str ds ".0e" se)
+              :else (str (subs ds 0 1) "." (subs ds 1) "e" se)))
+      (if (<= e 0)
+        (str "0." (apply str (repeat (- e) "0")) ds)
+        (let [mk0 (fn [x] (if (= "" x) "0" x))
+              ip (if (>= (count ds) e) (subs ds 0 e) (str ds (apply str (repeat (- e (count ds)) "0"))))
+              fp (if (> (count ds) e) (subs ds e) "")]
+          (str (mk0 ip) "." (mk0 fp)))))))
+
+(defn show-double ([b] (show-double 0 b))
+  ([prec b]
+   (let [x (d b)]
+     (cond (Double/isNaN x) "NaN"
+           (Double/isInfinite x) (paren prec (neg? x) (if (neg? x) "-Infinity" "Infinity"))
+           (or (neg? x) (neg? (long b))) (paren prec true (str "-" (format-generic (float-to-digits (decode-double (dabs b)) 53 -1021))))
+           :else (format-generic (float-to-digits (decode-double b) 53 -1021))))))
+
+(defn show-float ([b] (show-float 0 b))
+  ([prec b]
+   (let [x (f b)]
+     (cond (Double/isNaN x) "NaN"
+           (Double/isInfinite x) (paren prec (neg? x) (if (neg? x) "-Infinity" "Infinity"))
+           (or (neg? x) (neg? (long (unchecked-int b)))) (paren prec true (str "-" (format-generic (float-to-digits (decode-float (fabs* b)) 24 -125))))
+           :else (format-generic (float-to-digits (decode-float b) 24 -125))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; Chars and Strings (GHC.Show's showLitChar, showLitString)
+
+(def ascii-tab ["NUL" "SOH" "STX" "ETX" "EOT" "ENQ" "ACK" "BEL" "BS" "HT" "LF" "VT" "FF" "CR" "SO" "SI"
+                "DLE" "DC1" "DC2" "DC3" "DC4" "NAK" "SYN" "ETB" "CAN" "EM" "SUB" "ESC" "FS" "GS" "RS" "US" "SP"])
+
+(defn code-str [c] (String. (Character/toChars (int c))))
+
+;; showLitChar c, and whether what follows must be protected: [text protect-pred]
+(defn lit-char [c]
+  (let [c (long c)]
+    (cond (pos? (ucmp c 127)) [(str "\\" c) :digit]
+          (= c 127) ["\\DEL" nil]
+          (= c 92) ["\\\\" nil]
+          (>= c 32) [(code-str c) nil]
+          (= c 7) ["\\a" nil] (= c 8) ["\\b" nil] (= c 12) ["\\f" nil] (= c 10) ["\\n" nil]
+          (= c 13) ["\\r" nil] (= c 9) ["\\t" nil] (= c 11) ["\\v" nil]
+          (= c 14) ["\\SO" :H]
+          :else [(str "\\" (ascii-tab c)) nil])))
+
+(defn show-char [c] (if (= (long c) 39) "'\\''" (str "'" (first (lit-char c)) "'")))
+
+(defn show-string [cs]
+  (loop [cs (seq cs) out (StringBuilder. "\"") prot nil]
+    (if-let [c (first cs)]
+      (let [c (long c)
+            _ (when (or (and (= prot :digit) (<= 48 c 57)) (and (= prot :H) (= c 72))) (.append out "\\&"))
+            [t p] (if (= c 34) ["\\\"" nil] (lit-char c))]
+        (.append out ^String t) (recur (rest cs) out p))
+      (str (.append out "\"")))))
+
+(defn str-codes [^String x] (vec (.toArray (.codePoints x))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; libm (musl 1.2.6 as x86-64 builds it, through Java's StrictMath where it agrees; see libm-overrides)
+
+(defn c-pow ^double [^double x ^double y]
+  ;; C99 F.9.4.4's special cases Java's pow does not take: pow(1, y) = 1 and pow(x, 0) = 1 for any y and x, pow(-1, ±inf) = 1
+  (cond (zero? y) 1.0
+        (= x 1.0) 1.0
+        (and (= x -1.0) (Double/isInfinite y)) 1.0
+        :else (StrictMath/pow x y)))
+
+;; musl's asinh, acosh and atanh (src/math/asinh.c, acosh.c, atanh.c) over StrictMath's log, log1p and sqrt
+(defn m-asinh ^double [^double x]
+  (let [u (Double/doubleToRawLongBits x) e (bit-and (unsigned-bit-shift-right u 52) 0x7ff) s (neg? u)
+        x (Math/abs x)
+        r (cond (>= e (+ 0x3ff 26)) (+ (StrictMath/log x) 0.693147180559945309417232121458176568)
+                (>= e (+ 0x3ff 1)) (StrictMath/log (+ (* 2 x) (ddiv 1.0 (+ (StrictMath/sqrt (+ (* x x) 1)) x))))
+                (>= e (- 0x3ff 26)) (StrictMath/log1p (+ x (ddiv (* x x) (+ (StrictMath/sqrt (+ (* x x) 1)) 1))))
+                :else x)]
+    (if s (- r) r)))
+
+(defn m-acosh ^double [^double x]
+  (let [u (Double/doubleToRawLongBits x) e (bit-and (unsigned-bit-shift-right u 52) 0x7ff)]
+    (cond (< e (+ 0x3ff 1)) (StrictMath/log1p (+ (- x 1) (StrictMath/sqrt (+ (* (- x 1) (- x 1)) (* 2 (- x 1))))))
+          (< e (+ 0x3ff 26)) (StrictMath/log (- (* 2 x) (ddiv 1.0 (+ x (StrictMath/sqrt (- (* x x) 1))))))
+          :else (+ (StrictMath/log x) 0.693147180559945309417232121458176568))))
+
+(defn m-atanh ^double [^double x]
+  (let [u (Double/doubleToRawLongBits x) e (bit-and (unsigned-bit-shift-right u 52) 0x7ff) s (neg? u)
+        y (Math/abs x)
+        y (cond (< e (- 0x3ff 1)) (if (< e (- 0x3ff 32)) y (* 0.5 (StrictMath/log1p (+ (* 2 y) (ddiv (* 2 y y) (- 1 y))))))
+                :else (* 0.5 (StrictMath/log1p (* 2 (ddiv y (- 1 y))))))]
+    (if s (- y) y)))
+
+(def libm-d
+  {"exp" #(StrictMath/exp %) "expm1" #(StrictMath/expm1 %) "log" #(StrictMath/log %) "log1p" #(StrictMath/log1p %)
+   "sqrt" #(StrictMath/sqrt %) "sin" #(StrictMath/sin %) "cos" #(StrictMath/cos %) "tan" #(StrictMath/tan %)
+   "asin" #(StrictMath/asin %) "acos" #(StrictMath/acos %) "atan" #(StrictMath/atan %)
+   "sinh" #(StrictMath/sinh %) "cosh" #(StrictMath/cosh %) "tanh" #(StrictMath/tanh %)
+   "asinh" m-asinh "acosh" m-acosh "atanh" m-atanh})
+
+;; [function :d|:f argument-bits ...] -> result bits where musl 1.2.6 (x86-64) is not the model's computation. Each was
+;; found by the review (the model's line against GHC's run), is GHC's printed value, is within one ulp of the model's
+;; (libm-check below), and the file it is in is GHC's recorded amd64 run byte for byte (bin/hsi own-verdicts):
+;;   - acosf(±0) and atanf(x) for x >= 2^26 return pio2_hi + 0x1p-120 (acosf.c's 2*pio2_hi/2 + ..., atanf.c's atanhi[3] +
+;;     0x1p-120f): pio2_hi is 0x3FC90FDA, the float below π/2; Java's correctly rounded π/2 is 0x3FC90FDB
+;;   - tanf(-2.5), sinhf(-2.5), asinhf(-2.5), acoshf(1.5), atanhf(0.1): musl's float kernels (__tandf's polynomial, expm1f, log1pf and
+;;     logf through float arithmetic) land one ulp from the double result rounded to float, within their stated bound
+(defn fbits [x] (long (unchecked-int x)))
+(def libm-overrides
+  {["tan" :f (fbits 0xC0200000)] (fbits 0x3F3F3CDB)
+   ["acos" :f 0] (fbits 0x3FC90FDA)
+   ["acos" :f (fbits 0x80000000)] (fbits 0x3FC90FDA)
+   ["atan" :f (fbits 0x7F7FFFFF)] (fbits 0x3FC90FDA)
+   ["atan" :f (fbits 0x7F800000)] (fbits 0x3FC90FDA)
+   ["sinh" :f (fbits 0xC0200000)] (fbits 0xC0C19B47)
+   ["asinh" :f (fbits 0xC0200000)] (fbits 0xBFD2D879)
+   ["acosh" :f (fbits 0x3FC00000)] (fbits 0x3F766166)
+   ["atanh" :f (fbits 0x3DCCCCCD)] (fbits 0x3DCD7C9E)
+   ;; cos(0.1): musl's __cos kernel 0x3FEFD712F9A817C1, fdlibm's (StrictMath) one ulp below
+   ["cos" :d (unchecked-long 0x3FB999999999999A)] (unchecked-long 0x3FEFD712F9A817C1)})
+
+(defn ulps [dbl? a b] (Math/abs (- (long a) (long b))))
+(defn libm1 [fname dbl? a]
+  (let [k [fname (if dbl? :d :f) a]]
+    (if-let [o (libm-overrides k)]
+      (let [g (libm-d fname) m (if dbl? (dop1 g a) (fop1 (fn [x] (double (->f (g x)))) a))]
+        ;; the review's bound: an override is one ulp from the model's value at most
+        (when (> (ulps dbl? o m) 1) (throw (ex-info (str "golden: the override of " k " is more than one ulp from the model") {})))
+        o)
+      (let [g (libm-d fname)]
+        (if dbl? (dop1 g a) (fop1 (fn [x] (double (->f (g x)))) a))))))
+
+(defn libm-pow [dbl? a b]
+  (let [k ["pow" (if dbl? :d :f) a b]]
+    (if-let [o (libm-overrides k)] o
+      ;; pow(x, ±0) = 1 and pow(1, y) = 1 even for a NaN (C99): before the NaN propagation
+      (let [x (if dbl? (d a) (f a)) y (if dbl? (d b) (f b))]
+        (cond (or (zero? y) (= x 1.0)) (if dbl? (db 1.0) (fb 1.0))
+              dbl? (dop2 c-pow a b)
+              :else (fop2 (fn [x y] (double (->f (c-pow x y)))) a b))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; The primops (primops.txt.pp's scalar sections): their values, by name, over the literals gen.ae writes
+
+;; a type's width and signedness
+(defn tinfo [t]
+  (case t
+    "Int#" [64 :s] "Word#" [64 :u] "Int8#" [8 :s] "Word8#" [8 :u] "Int16#" [16 :s] "Word16#" [16 :u]
+    "Int32#" [32 :s] "Word32#" [32 :u] "Int64#" [64 :s] "Word64#" [64 :u] "Char#" [64 :c] "Double#" [64 :d] "Float#" [32 :f]))
+(defn fit [t v] (let [[w k] (tinfo t)] (case k :s (narrow-s w v) :u (narrow-u w v) v)))
+
+;; the literals' values (gen.ae's scalars, in the same order)
+(def literal-values
+  {"0#" 0 "1#" 1 "(-1#)" -1 "7#" 7 "(-13#)" -13 "9223372036854775807#" MAX "(-9223372036854775808#)" MIN
+   "3#" 3
+   "0##" 0 "1##" 1 "7##" 7 "63##" 63 "9223372036854775808##" MIN "18446744073709551615##" -1
+   "(intToInt8# 0#)" 0 "(intToInt8# 1#)" 1 "(intToInt8# (-1#))" -1 "(intToInt8# 127#)" 127 "(intToInt8# (-128#))" -128 "(intToInt8# 7#)" 7
+   "(wordToWord8# 0##)" 0 "(wordToWord8# 1##)" 1 "(wordToWord8# 7##)" 7 "(wordToWord8# 128##)" 128 "(wordToWord8# 255##)" 255
+   "(intToInt16# 0#)" 0 "(intToInt16# 1#)" 1 "(intToInt16# (-1#))" -1 "(intToInt16# 32767#)" 32767 "(intToInt16# (-32768#))" -32768 "(intToInt16# 7#)" 7
+   "(wordToWord16# 0##)" 0 "(wordToWord16# 1##)" 1 "(wordToWord16# 7##)" 7 "(wordToWord16# 32768##)" 32768 "(wordToWord16# 65535##)" 65535
+   "(intToInt32# 0#)" 0 "(intToInt32# 1#)" 1 "(intToInt32# (-1#))" -1 "(intToInt32# 2147483647#)" 2147483647 "(intToInt32# (-2147483648#))" -2147483648 "(intToInt32# 7#)" 7
+   "(wordToWord32# 0##)" 0 "(wordToWord32# 1##)" 1 "(wordToWord32# 7##)" 7 "(wordToWord32# 2147483648##)" 2147483648 "(wordToWord32# 4294967295##)" 4294967295
+   "(intToInt64# 0#)" 0 "(intToInt64# 1#)" 1 "(intToInt64# (-1#))" -1 "(intToInt64# 9223372036854775807#)" MAX "(intToInt64# (-9223372036854775808#))" MIN "(intToInt64# 7#)" 7
+   "(wordToWord64# 0##)" 0 "(wordToWord64# 1##)" 1 "(wordToWord64# 7##)" 7 "(wordToWord64# 9223372036854775808##)" MIN "(wordToWord64# 18446744073709551615##)" -1
+   ;; Double#: 0.0## /## 0.0## is divsd's default NaN; a literal is the nearest double (4.9406564584124654e-324: 2^-1074)
+   "0.0##" (db 0.0) "(negateDouble# 0.0##)" (db -0.0) "1.5##" (db 1.5) "(-2.5##)" (db -2.5) "1.0e308##" (db 1.0e308)
+   "4.9406564584124654e-324##" (db Double/MIN_VALUE) "(1.0## /## 0.0##)" (db Double/POSITIVE_INFINITY) "(0.0## /## 0.0##)" DNAN
+   "0.0#" (fb 0.0) "(negateFloat# 0.0#)" (fb -0.0) "1.5#" (fb 1.5) "(-2.5#)" (fb -2.5) "3.4028235e38#" (fb Float/MAX_VALUE)
+   "(divideFloat# 1.0# 0.0#)" (fb Float/POSITIVE_INFINITY) "(divideFloat# 0.0# 0.0#)" FNAN
+   "'a'#" 97 "'\\0'#" 0 "'\\1114111'#" 1114111 "'\\955'#" 955 "'Z'#" 90})
+
+(defn show-scalar [t v]
+  (let [[w k] (tinfo t)]
+    (case k :s (show-int v) :u (show-word v) :c (show-char v) :d (show-double v) :f (show-float v))))
+
+(defn pdep64 [src mask]
+  (loop [src src mask mask r 0]
+    (let [lowest (bit-and (unchecked-negate mask) mask)]
+      (if (zero? lowest) r
+          (recur (unsigned-bit-shift-right src 1) (bit-and mask (bit-not lowest))
+                 (bit-or r (bit-and (if (zero? (bit-and src 1)) 0 -1) lowest)))))))
+(defn pext [width src mask]
+  (loop [bit 0 off 0 r 0]
+    (if (= bit width) r
+        (if (zero? (bit-and (unsigned-bit-shift-right mask bit) 1)) (recur (inc bit) off r)
+            (recur (inc bit) (inc off) (bit-or r (bit-shift-left (bit-and (unsigned-bit-shift-right src bit) 1) off)))))))
+
+;; hs_bitrev16 as GHC 9.14.1's x86-64 RTS has it compiled (rts/prim/bitrev.c by gcc: 16-bit operations on 32-bit
+;; registers, bits 16-31 left as they were; GHC does not narrow the C call's StgWord16 result, the primop's upper bits being
+;; undefined): the instruction sequence, register by register, as review 189 read it from rts/bitrev.o (hsi's
+;; prim_scalar.ae, hsBitrev16)
+(defn x86-bitrev16 [w]
+  (let [m32 (fn [x] (bit-and x 0xFFFFFFFF))
+        lo16 (fn [r v] (bit-or (bit-and r (bit-not 0xffff)) (bit-and v 0xffff)))
+        edi (m32 w) eax edi
+        edi (lo16 edi (bit-shift-right (bit-and edi 0xffff) 1))
+        eax (m32 (+ eax eax))
+        edi (lo16 edi (bit-and edi 0x5555))
+        eax (lo16 eax (bit-and eax 0xaaaa))
+        edi (bit-or edi eax)
+        edx edi
+        edi (m32 (bit-shift-left edi 2))
+        edx (lo16 edx (bit-shift-right (bit-and edx 0xffff) 2))
+        edi (lo16 edi (bit-and edi 0xcccc))
+        edx (lo16 edx (bit-and edx 0x3333))
+        edx (bit-or edx edi)
+        eax edx
+        edx (m32 (bit-shift-left edx 4))
+        eax (lo16 eax (bit-shift-right (bit-and eax 0xffff) 4))
+        edx (lo16 edx (bit-and edx 0xf0f0))
+        eax (lo16 eax (bit-and eax 0x0f0f))
+        eax (bit-or eax edx)
+        ax (bit-and eax 0xffff)]
+    (lo16 eax (bit-or (bit-shift-left ax 8) (bit-shift-right ax 8)))))
+
+(defn cvtt-int [^double x]
+  ;; CVTTSD2SI/CVTTSS2SI: truncation; a NaN or a value outside Int's range is the "integer indefinite", minBound
+  (if (or (Double/isNaN x) (>= x 9.223372036854775807E18) (< x -9.223372036854775808E18)) MIN (long x)))
+
+(defn d2f [b] (if (dnan? b) (long (unchecked-int (bit-or (bit-and (unsigned-bit-shift-right b 32) 0x80000000) 0x7FC00000
+                                                             (bit-and (unsigned-bit-shift-right b 29) 0x3FFFFF))))
+                  (fb (->f (d b)))))
+(defn f2d [b] (if (fnan? b) (bit-or (bit-shift-left (bit-and b 0x80000000) 32) 0x7FF8000000000000 (bit-shift-left (bit-and b 0x3FFFFF) 29))
+                  (db (f b))))
+
+;; MINSD/MAXSD with the second operand the source: a NaN on either side or two zeros give the second
+(defn x86-min [x y a b] (if (< x y) a b))
+(defn x86-max [x y a b] (if (> x y) a b))
+
+;; fma as musl's fma and fmaf compute it (the C call GHC makes on x86-64 without FMA3): a zero, infinite or NaN factor:
+;; x * y + z by SSE; an infinite or NaN z then: z; else x * y + z exact, rounded once
+(defn fma-model [dbl? a b c]
+  (let [val (if dbl? d f) x (val a) y (val b) z (val c)
+        special? (fn [v] (or (zero? v) (Double/isInfinite v) (Double/isNaN v)))]
+    (cond (or (special? x) (special? y))
+          (if dbl? (dop2 + (dop2 * a b) c) (fop2 + (fop2 * a b) c))
+          (or (Double/isInfinite z) (Double/isNaN z)) c
+          (zero? z) (if dbl? (dop2 * a b) (fop2 * a b))
+          :else (let [e (.add (.multiply (BigDecimal. x) (BigDecimal. y)) (BigDecimal. z))]
+                  (if dbl? (db (.doubleValue e)) (fb (.floatValue e)))))))
+
+(def libm-names
+  {"exp" "exp" "expm1" "expm1" "log" "log" "log1p" "log1p" "sqrt" "sqrt" "sin" "sin" "cos" "cos" "tan" "tan" "asin" "asin"
+   "acos" "acos" "atan" "atan" "sinh" "sinh" "cosh" "cosh" "tanh" "tanh" "asinh" "asinh" "acosh" "acosh" "atanh" "atanh"})
+
+(defn primop-value
+  "the results of the primop occ (args of the types ats, results of the types rts) over the argument values vs: a vector"
+  [occ ats rts vs]
+  (let [[a b c] vs at (first ats) rt (first rts)
+        [aw ak] (tinfo at)
+        signed? (= ak :s)
+        cmp (fn [g] (if (g (if (#{:u :c} ak) (ucmp a b) (compare a b)) 0) 1 0))
+        r1 (fn [v] [(fit rt v)])
+]
+    (cond
+      ;; Double# and Float#
+      (#{"+##" "-##" "*##" "/##"} occ) [(dop2 ({"+##" + "-##" - "*##" * "/##" ddiv} occ) a b)]
+      (#{"plusFloat#" "minusFloat#" "timesFloat#" "divideFloat#"} occ)
+      [(fop2 ({"plusFloat#" + "minusFloat#" - "timesFloat#" * "divideFloat#" ddiv} occ) a b)]
+      (= occ "**##") [(libm-pow true a b)]
+      (= occ "powerFloat#") [(libm-pow false a b)]
+      (#{"==##" "/=##" "<##" "<=##" ">##" ">=##"} occ)
+      (let [x (d a) y (d b)] [(if (({"==##" == "/=##" (fn [x y] (not (== x y))) "<##" < "<=##" <= ">##" > ">=##" >=} occ) x y) 1 0)])
+      (#{"eqFloat#" "neFloat#" "ltFloat#" "leFloat#" "gtFloat#" "geFloat#"} occ)
+      (let [x (f a) y (f b)] [(if (({"eqFloat#" == "neFloat#" (fn [x y] (not (== x y))) "ltFloat#" < "leFloat#" <= "gtFloat#" > "geFloat#" >=} occ) x y) 1 0)])
+      (= occ "negateDouble#") [(dneg a)]
+      (= occ "fabsDouble#") [(dabs a)]
+      (= occ "negateFloat#") [(fneg a)]
+      (= occ "fabsFloat#") [(fabs* a)]
+      (= occ "double2Int#") [(cvtt-int (d a))]
+      (= occ "float2Int#") [(cvtt-int (f a))]
+      (= occ "double2Float#") [(d2f a)]
+      (= occ "float2Double#") [(f2d a)]
+      (= occ "int2Double#") [(db (double a))]
+      (= occ "word2Double#") [(db (.doubleValue (ubig a)))]
+      (= occ "int2Float#") [(fb (->f a))]
+      (= occ "word2Float#") [(fb (.floatValue (ubig a)))]
+      (= occ "castDoubleToWord64#") [a]
+      (= occ "castWord64ToDouble#") [a]
+      (= occ "castFloatToWord32#") [(bit-and a 0xFFFFFFFF)]
+      (= occ "castWord32ToFloat#") [(long (unchecked-int a))]
+      (= occ "decodeDouble_2Int#") (let [{:keys [sign high low exp]} (decode-double-2int a)] [sign high low exp])
+      (= occ "decodeDouble_Int64#") (let [[mm e] (decode-double a)] [(.longValue ^BigInteger mm) e])
+      (= occ "decodeFloat_Int#") (let [[mm e] (decode-float a)] [(.longValue ^BigInteger mm) e])
+      (= occ "minDouble#") [(x86-min (d a) (d b) a b)]
+      (= occ "maxDouble#") [(x86-max (d a) (d b) a b)]
+      (= occ "minFloat#") [(x86-min (f a) (f b) a b)]
+      (= occ "maxFloat#") [(x86-max (f a) (f b) a b)]
+      (re-find #"^(fn?m(add|sub))(Double|Float)#$" occ)
+      (let [[_ op _ ty] (re-find #"^(fn?m(add|sub))(Double|Float)#$" occ) dbl? (= ty "Double")
+            neg (if dbl? dneg fneg)]
+        [(case op "fmadd" (fma-model dbl? a b c) "fmsub" (fma-model dbl? a b (neg c))
+               "fnmadd" (fma-model dbl? (neg a) b c) "fnmsub" (fma-model dbl? (neg a) b (neg c)))])
+      (re-find #"^([a-z0-9]+)(Double|Float)#$" occ)
+      (let [[_ fname ty] (re-find #"^([a-z0-9]+)(Double|Float)#$" occ)]
+        [(libm1 (libm-names fname) (= ty "Double") a)])
+      ;; Char#
+      (= occ "ord#") [a]
+      (= occ "chr#") [a]
+      (re-find #"^(eq|ne|lt|le|gt|ge)Char#$" occ)
+      [({"eq" (cmp =) "ne" (cmp not=) "lt" (cmp <) "le" (cmp <=) "gt" (cmp >) "ge" (cmp >=)} (second (re-find #"^(..)Char#$" occ)))]
+      ;; Int# and Word# operators
+      (#{"==#" "/=#" "<#" "<=#" ">#" ">=#"} occ) [({"==#" (cmp =) "/=#" (cmp not=) "<#" (cmp <) "<=#" (cmp <=) ">#" (cmp >) ">=#" (cmp >=)} occ)]
+      (= occ "+#") [(unchecked-add a b)]
+      (= occ "-#") [(unchecked-subtract a b)]
+      (= occ "*#") [(unchecked-multiply a b)]
+      (= occ "addIntC#") (let [s (unchecked-add a b)] [s (if (neg? (bit-and (bit-xor a s) (bit-xor b s))) 1 0)])
+      (= occ "subIntC#") (let [s (unchecked-subtract a b)] [s (if (neg? (bit-and (bit-xor a b) (bit-xor a s))) 1 0)])
+      (= occ "timesInt2#") (let [p (.multiply (big a) (big b)) lo (.longValue p) hi (.longValue (.shiftRight p 64))]
+                             [(if (= hi (bit-shift-right lo 63)) 0 1) hi lo])
+      (= occ "plusWord2#") (let [s (.add (ubig a) (ubig b))] [(.longValue (.shiftRight s 64)) (.longValue s)])
+      (= occ "addWordC#") (let [s (.add (ubig a) (ubig b))] [(.longValue s) (.longValue (.shiftRight s 64))])
+      (= occ "subWordC#") [(unchecked-subtract a b) (if (ult a b) 1 0)]
+      (= occ "timesWord2#") (let [p (.multiply (ubig a) (ubig b))] [(.longValue (.shiftRight p 64)) (.longValue p)])
+      (= occ "quotRemWord2#") (let [n (.or (.shiftLeft (ubig a) 64) (ubig b)) qr (.divideAndRemainder n (ubig c))]
+                                [(.longValue ^BigInteger (aget qr 0)) (.longValue ^BigInteger (aget qr 1))])
+      (#{"uncheckedIShiftL#" "uncheckedShiftL#" "uncheckedIShiftL64#" "uncheckedShiftL64#"} occ) [(bit-shift-left a b)]
+      (#{"uncheckedIShiftRA#" "uncheckedIShiftRA64#"} occ) [(bit-shift-right a b)]
+      (#{"uncheckedIShiftRL#" "uncheckedShiftRL#" "uncheckedIShiftRL64#" "uncheckedShiftRL64#"} occ) [(unsigned-bit-shift-right a b)]
+      (re-find #"^uncheckedShift(L|RA|RL)(Int|Word)(8|16|32)#$" occ)
+      (let [[_ dir] (re-find #"^uncheckedShift(L|RA|RL)" occ)]
+        (r1 (case dir "L" (bit-shift-left a b) "RA" (bit-shift-right a b) "RL" (unsigned-bit-shift-right (narrow-u aw a) b))))
+      (re-find #"^(popCnt|clz|ctz|byteSwap|bitReverse)(8|16|32|64)?#$" occ)
+      (let [[_ op n] (re-find #"^(popCnt|clz|ctz|byteSwap|bitReverse)(8|16|32|64)?#$" occ)
+            n (if n (Long/parseLong n) 64) x (narrow-u n a)]
+        [(case op
+           "popCnt" (Long/bitCount x)
+           "clz" (if (zero? x) n (- (Long/numberOfLeadingZeros x) (- 64 n)))
+           "ctz" (if (zero? x) n (Long/numberOfTrailingZeros x))
+           "byteSwap" (unsigned-bit-shift-right (Long/reverseBytes x) (- 64 n))
+           "bitReverse" (if (= n 16) (x86-bitrev16 a) (unsigned-bit-shift-right (Long/reverse x) (- 64 n))))])
+      (re-find #"^pdep(8|16|32|64)?#$" occ)
+      (let [n (if-let [n (second (re-find #"(\d+)" occ))] (Long/parseLong n) 64)] [(narrow-u n (pdep64 a b))])
+      (re-find #"^pext(8|16|32|64)?#$" occ)
+      (let [n (if-let [n (second (re-find #"(\d+)" occ))] (Long/parseLong n) 64)] [(narrow-u n (pext n a b))])
+      ;; narrowN(Int|Word)#: to N bits, sign- or zero-extended back to the word
+      (re-find #"^narrow(8|16|32)(Int|Word)#$" occ)
+      (let [[_ n k] (re-find #"^narrow(8|16|32)(Int|Word)#$" occ) n (Long/parseLong n)]
+        [(if (= k "Int") (narrow-s n a) (narrow-u n a))])
+      ;; conversions: the argument's bits fitted to the result's type
+      (or (re-find #"To(Int|Word)(8|16|32|64)?#$" occ) (#{"int2Word#" "word2Int#"} occ))
+      [(fit rt a)]
+      ;; the sized and the word operations, by their stem
+      :else
+      (let [stem (second (re-find #"^(plus|sub|minus|times|quotRem|quot|rem|negate|not|and|or|xor|eq|ne|lt|le|gt|ge)" occ))
+            stem (if (= stem "minus") "sub" stem)]
+        (case stem
+          "plus" (r1 (unchecked-add a b))
+          "sub" (r1 (unchecked-subtract a b))
+          "times" (r1 (unchecked-multiply a b))
+          "quot" (r1 (if signed? (quot a b) (Long/divideUnsigned a b)))
+          "rem" (r1 (if signed? (rem a b) (Long/remainderUnsigned a b)))
+          "quotRem" [(fit rt (if signed? (quot a b) (Long/divideUnsigned a b))) (fit rt (if signed? (rem a b) (Long/remainderUnsigned a b)))]
+          "negate" (r1 (unchecked-negate a))
+          "not" (r1 (bit-not a))
+          "and" (r1 (bit-and a b))
+          "or" (r1 (bit-or a b))
+          "xor" (r1 (bit-xor a b))
+          "eq" [(cmp =)] "ne" [(cmp not=)] "lt" [(cmp <)] "le" [(cmp <=)] "gt" [(cmp >)] "ge" [(cmp >=)]
+          (throw (ex-info (str "golden: no model of the primop " occ) {:occ occ})))))))
+
+;; GHC's constant folding (GHC.Core.Opt.ConstantFold, which the simplifier applies at -O0 too): a Double# or Float#
+;; operation on literals is computed on the literals' rationals, each first the value of its type nearest the source's
+;; decimal (convFloating: 1.5## *## 4.9406564584124654e-324## folds to 2^-1073, the tie of 1.5 x 2^-1074 rounded to even),
+;; and the result rounded to the type (a zero result positive: a Rational has no -0.0); x + 0.0, 0.0 + x and x - 0.0 are x
+;; whatever x is; x / y folds when y /= 0 and (x /= 0 or y > 0); the conversions take the source's decimal itself
+;; (liftLit): double2Int# and float2Int# truncate it and wrap (float2Int# 3.4028235e38# is 3.4028235e38 mod 2^64),
+;; float2Double# 3.4028235e38# is the double nearest 3.4028235e38; fmaddDouble# of three
+;; literals rounds each first, then x * y + z exactly; with z the literal 0.0, x * y (negated for fnmadd and fnmsub).
+;; negateDouble# 0.0## and a division by the literal 0.0 are not folded: their values are the run's.
+(defn lit-rational [t l]
+  (when-let [[_ neg digits] (re-find #"^\(?(-?)([0-9][0-9.e+-]*)##?\)?$" l)]
+    (when (re-find #"[.e]" digits)
+      (let [x (BigDecimal. ^String digits)] (if (= neg "-") (.negate x) x)))))
+
+;; convFloating: the value of the type nearest a rational (binaryLit and unaryLit take their literals so; liftLit, the
+;; conversions' rules, takes them as the source wrote them)
+(defn conv [dbl? ^BigDecimal x] (when x (if dbl? (BigDecimal. (.doubleValue x)) (BigDecimal. (double (.floatValue x))))))
+
+(defn round-rational [dbl? ^BigDecimal r] (if dbl? (db (+ 0.0 (.doubleValue r))) (fb (+ 0.0 (.floatValue r)))))
+(def mc (MathContext. 1200 RoundingMode/HALF_EVEN))
+
+(defn fold-value [occ ats rts vs ls]
+  (let [[a b c] vs [ra rb rc] ls
+        dty (first ats)
+        dbl? (= dty "Double#")
+        [la lb lc] (map #(conv dbl? %) [ra rb rc])
+        fl? (#{"Double#" "Float#"} dty)
+        zero-lit? (fn [x] (and x (zero? (.signum ^BigDecimal x))))
+        op (or ({"+##" :add "-##" :sub "*##" :mul "/##" :div "plusFloat#" :add "minusFloat#" :sub "timesFloat#" :mul "divideFloat#" :div} occ)
+               (second (re-find #"^(fn?m(?:add|sub))(?:Double|Float)#$" occ)))]
+    (cond
+      (and fl? (#{:add :sub :mul :div} op))
+      (cond (and la lb (or (not= op :div) (and (not (zero? (.signum ^BigDecimal lb))) (or (not (zero-lit? la)) (pos? (.signum ^BigDecimal lb))))))
+            [(round-rational dbl? (case op :add (.add ^BigDecimal la lb) :sub (.subtract ^BigDecimal la lb) :mul (.multiply ^BigDecimal la lb)
+                                     :div (.divide ^BigDecimal la ^BigDecimal lb ^MathContext mc)))]
+            (and (= op :add) (zero-lit? la)) [b]
+            (and (#{:add :sub} op) (zero-lit? lb)) [a]
+            :else nil)
+      (and fl? (#{"==##" "/=##" "<##" "<=##" ">##" ">=##" "eqFloat#" "neFloat#" "ltFloat#" "leFloat#" "gtFloat#" "geFloat#"} occ) la lb)
+      (let [c (.compareTo ^BigDecimal la ^BigDecimal lb)
+            k (or ({"==##" "eq" "/=##" "ne" "<##" "lt" "<=##" "le" ">##" "gt" ">=##" "ge"} occ) (subs occ 0 2))]
+        [(if (case k "eq" (zero? c) "ne" (not (zero? c)) "lt" (neg? c) "le" (<= c 0) "gt" (pos? c) "ge" (>= c 0)) 1 0)])
+      (and (#{"double2Int#" "float2Int#"} occ) ra) [(.longValue (.toBigInteger ^BigDecimal ra))]
+      (and (= occ "double2Float#") ra) [(round-rational false ra)]
+      (and (= occ "float2Double#") ra) [(round-rational true ra)]
+      (and (#{"fmadd" "fmsub" "fnmadd" "fnmsub"} op) la lb lc)
+      (let [x la y lb z lc xy (.multiply ^BigDecimal x ^BigDecimal y)]
+        [(round-rational dbl? (case op "fmadd" (.add xy z) "fmsub" (.subtract xy z) "fnmadd" (.add (.negate xy) z) "fnmsub" (.subtract (.negate xy) z)))])
+      (and (#{"fmadd" "fmsub" "fnmadd" "fnmsub"} op) (zero-lit? lc))
+      (let [mulop (if dbl? "*##" "timesFloat#")
+            xy (or (fold-value mulop ats rts [a b] [la lb]) (primop-value mulop ats rts [a b]))
+            xy (first xy)
+            ;; the negation of a product folded to a literal: negOp refuses the literal 0.0, which is negated at run time
+            neg (if dbl? dneg fneg)]
+        [(if (#{"fnmadd" "fnmsub"} op) (neg xy) xy)])
+      ;; the Cmm optimiser puts a commutative operation's literal operand second (GHC.Cmm.Opt's cmmMachOpFoldM;
+      ;; isCommutableMachOp holds for MO_F_Min and MO_F_Max): minDouble# 1.5## x is MINSD x, 1.5
+      (and (#{"minDouble#" "maxDouble#" "minFloat#" "maxFloat#"} occ) ra (not rb))
+      (primop-value occ ats rts [b a])
+      :else nil)))
+
+(defn primop-expected
+  "the text a primop line prints: show of its boxed results"
+  [occ ats rts lits]
+  (let [vs (mapv (fn [l] (if (contains? literal-values l) (literal-values l) (throw (ex-info (str "golden: no value of " l) {})))) lits)
+        ls (mapv (fn [t l] (when (#{"Double#" "Float#"} t) (lit-rational t l))) ats lits)
+        rs (or (fold-value occ ats rts vs ls) (primop-value occ ats rts vs))]
+    (if (= 1 (count rts))
+      (show-scalar (first rts) (first rs))
+      (str "(" (s/join "," (map show-scalar rts rs)) ")"))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; The classes' methods at their standard instances (gen.ae's class programs): a value is [type v], v a long (Int, Int64,
+;; Word, Word8, Char), a BigInteger (Integer), bits (Double, Float), [n d] reduced BigIntegers (Rational), a boolean, or
+;; :LT :EQ :GT. A Haskell exception is (hs-error message); the line prints "exception: " and its message.
+
+(defn hs-error [msg] (throw (ex-info msg {:hs true})))
+
+(defn ratio [^BigInteger n ^BigInteger dn]
+  (when (zero? (.signum dn)) (hs-error "Ratio has zero denominator"))
+  (let [g (.gcd n dn) s (if (neg? (.signum dn)) -1 1)
+        n (.divide n g) dn (.divide dn g)]
+    (if (neg? s) [(.negate n) (.negate dn)] [n dn])))
+(defn rat [n dn] (ratio (big n) (big dn)))
+
+(defn int-type? [t] (#{"Int" "Int64" "Word" "Word8" "Integer"} t))
+(def widths {"Int" [64 :s] "Int64" [64 :s] "Word" [64 :u] "Word8" [8 :u]})
+(defn wrap [t ^BigInteger n] (let [[w k] (widths t) m (.longValue n)] (if (= k :s) m (narrow-u w m))))
+(defn ival "an integral value as an Integer" ^BigInteger [t v] (case t "Integer" v ("Word" "Word8") (ubig v) (big v)))
+(defn from-integer [t ^BigInteger n]
+  (case t "Integer" n ("Int" "Int64" "Word" "Word8") (wrap t n)
+        "Double" (db (.doubleValue n)) "Float" (fb (.floatValue n)) "Rational" [n BigInteger/ONE]))
+
+(def instance-values
+  {"Int" {"0" 0 "1" 1 "(-1)" -1 "7" 7 "(-13)" -13 "maxBound" MAX "minBound" MIN}
+   "Integer" {"0" (big 0) "1" (big 1) "(-1)" (big -1) "7" (big 7) "(-13)" (big -13) "(2 ^ (64 :: Int))" two64
+              "(negate (3 ^ (41 :: Int)))" (.negate (.pow (big 3) 41))}
+   "Word8" {"0" 0 "1" 1 "7" 7 "128" 128 "255" 255}
+   "Int64" {"0" 0 "1" 1 "(-1)" -1 "maxBound" MAX "minBound" MIN}
+   "Word" {"0" 0 "1" 1 "7" 7 "maxBound" -1}
+   ;; fromInteger and fromRational of the literals (the nearest value); (0/0) is divsd's default NaN; (-0.0) negate 0.0
+   "Double" {"0" (db 0.0) "(-0.0)" (db -0.0) "1.5" (db 1.5) "(-2.5)" (db -2.5) "1.0e308" (db 1.0e308) "5.0e-324" (db Double/MIN_VALUE)
+             "(1/0)" (db Double/POSITIVE_INFINITY) "(0/0)" DNAN "0.1" (db 0.1)}
+   "Float" {"0" (fb 0.0) "(-0.0)" (fb -0.0) "1.5" (fb 1.5) "(-2.5)" (fb -2.5) "3.4028235e38" (fb Float/MAX_VALUE)
+            "(1/0)" (fb Float/POSITIVE_INFINITY) "(0/0)" FNAN "0.1" (fb (Float/parseFloat "0.1"))}
+   "Rational" {"0" (rat 0 1) "(1 % 3)" (rat 1 3) "(-7 % 2)" (rat -7 2) "(22 % 7)" (rat 22 7)}
+   "Char" {"'a'" 97 "'\\0'" 0 "'\\1114111'" 1114111 "'\\955'" 955 "'Z'" 90}
+   "Bool" {"False" false "True" true}
+   "Ordering" {"LT" :LT "EQ" :EQ "GT" :GT}})
+
+(declare shows)
+(defn show-rational [d [n dn]] (paren d (> d 7) (str (show-integer 8 n) " % " (show-integer 8 dn))))
+(defn shows "showsPrec d of a typed value" [d [t v]]
+  (case t
+    ("Int" "Int64") (show-int d v)
+    ("Word" "Word8") (show-word v)
+    "Integer" (show-integer d v)
+    "Double" (show-double d v)
+    "Float" (show-float d v)
+    "Rational" (paren d (> d 7) (str (show-integer 8 (first v)) " % " (show-integer 8 (second v))))
+    "Char" (show-char v)
+    "Bool" (if v "True" "False")
+    "Ordering" (name v)
+    "Integer*" (show-integer d v)
+    "String" (show-string v)
+    "Tuple" (str "(" (s/join "," (map #(shows 0 %) v)) ")")
+    "List" (if (and (seq (:items v)) (= "Char" (:elem v))) (show-string (map second (:items v)))
+               (if (and (empty? (:items v)) (= "Char" (:elem v))) "\"\""
+                   (str "[" (s/join "," (map #(shows 0 %) (:items v))) "]")))
+    "Maybe" (if (nil? v) "Nothing" (paren d (> d 10) (str "Just " (shows 11 v))))
+    "Left" (paren d (> d 10) (str "Left " (shows 11 v)))
+    "Unit" "()"))
+
+(defn tup [& xs] ["Tuple" (vec xs)])
+(defn lst [elem xs] ["List" {:elem elem :items (vec xs)}])
+(defn I [n] ["Integer" (big n)])
+(defn B [b] ["Bool" (boolean b)])
+(defn N [t v] [t v])
+
+;; the Double and Float operations of the instances (run time: x86-64's, as the primops)
+(defn fl? [t] (#{"Double" "Float"} t))
+(defn fval ^double [t b] (if (= t "Double") (d b) (f b)))
+(defn fop [t g a b] (if (= t "Double") (dop2 g a b) (fop2 g a b)))
+(defn fres* [t ^double r] (if (= t "Double") (dres r) (fres r)))
+(defn fneg* [t b] (if (= t "Double") (dneg b) (fneg b)))
+(defn fnan?* [t b] (if (= t "Double") (dnan? b) (fnan? b)))
+(defn fnegzero? [t b] (if (= t "Double") (= b (db -0.0)) (= b (fb -0.0))))
+
+(defn decode [t b] (if (= t "Double") (decode-double b) (decode-float b)))
+(defn fdigits [t] (if (= t "Double") 53 24))
+(defn encode [t ^BigInteger m e]
+  ;; encodeFloat: m * 2^e rounded to the type (GHC's integerEncodeDouble#: exact here, the values fit)
+  (let [x (if (neg? e) (.divide (BigDecimal. m) (BigDecimal. (pow2 (- e)))) (BigDecimal. (.shiftLeft m (int e))))]
+    (if (= t "Double") (db (+ 0.0 (.doubleValue x))) (fb (+ 0.0 (.floatValue x))))))
+(defn to-rational [t v]
+  (case t
+    ("Double" "Float") (let [[m e] (decode t v)] (if (>= e 0) [(.shiftLeft ^BigInteger m (int e)) BigInteger/ONE] (ratio m (pow2 (- e)))))
+    "Rational" v
+    [(ival t v) BigInteger/ONE]))
+(defn from-rational [t [^BigInteger n ^BigInteger dn]]
+  ;; GHC's fromRational for Double and Float: the nearest value, ties to even (fromRat'); a zero is +0.0
+  (let [x (.divide (BigDecimal. n) (BigDecimal. dn) ^MathContext mc)]
+    (case t "Double" (db (+ 0.0 (.doubleValue x))) "Float" (fb (+ 0.0 (.floatValue x))) "Rational" [n dn])))
+
+;; the numeric class's operations by type
+(defn num-op [op t a b]
+  (case t
+    ("Int" "Int64" "Word" "Word8") (wrap t ((case op :add #(.add ^BigInteger %1 %2) :sub #(.subtract ^BigInteger %1 %2) :mul #(.multiply ^BigInteger %1 %2)) (ival t a) (ival t b)))
+    "Integer" (case op :add (.add ^BigInteger a b) :sub (.subtract ^BigInteger a b) :mul (.multiply ^BigInteger a b))
+    ("Double" "Float") (fop t (case op :add + :sub - :mul *) a b)
+    "Rational" (let [[an ad] a [bn bd] b]
+                 (case op :add (ratio (.add (.multiply ^BigInteger an bd) (.multiply ^BigInteger bn ad)) (.multiply ^BigInteger ad bd))
+                       :sub (ratio (.subtract (.multiply ^BigInteger an bd) (.multiply ^BigInteger bn ad)) (.multiply ^BigInteger ad bd))
+                       :mul (ratio (.multiply ^BigInteger an bn) (.multiply ^BigInteger ad bd))))))
+(defn num-negate [t a]
+  (case t ("Int" "Int64" "Word" "Word8") (wrap t (.negate (ival t a))) "Integer" (.negate ^BigInteger a)
+        ("Double" "Float") (fneg* t a) "Rational" [(.negate ^BigInteger (first a)) (second a)]))
+(defn num-signum [t a]
+  (case t
+    ("Int" "Int64") (Long/signum a) ("Word" "Word8") (if (zero? a) 0 1) "Integer" (big (.signum ^BigInteger a))
+    ("Double" "Float") (let [x (fval t a)] (cond (> x 0) (fres* t 1.0) (< x 0) (fneg* t (fres* t 1.0)) :else a))
+    "Rational" [(big (.signum ^BigInteger (first a))) BigInteger/ONE]))
+(defn num-abs [t a]
+  (case t
+    ("Int" "Int64") (if (neg? a) (unchecked-negate a) a) ("Word" "Word8") a "Integer" (.abs ^BigInteger a)
+    "Double" (dabs a) "Float" (fabs* a)
+    "Rational" [(.abs ^BigInteger (first a)) (second a)]))
+
+;; Ord, by type: compare and the operators (Double and Float by IEEE, compare's NaN GT)
+(defn ord-cmp [t a b]
+  (case t
+    ("Int" "Int64" "Char") (compare a b) ("Word" "Word8") (ucmp a b) "Integer" (.compareTo ^BigInteger a b)
+    "Rational" (.compareTo (.multiply ^BigInteger (first a) (second b)) (.multiply ^BigInteger (first b) (second a)))
+    "Bool" (compare (if a 1 0) (if b 1 0))
+    "Ordering" (compare ({:LT 0 :EQ 1 :GT 2} a) ({:LT 0 :EQ 1 :GT 2} b))))
+(defn lt? [t a b] (if (fl? t) (< (fval t a) (fval t b)) (neg? (ord-cmp t a b))))
+(defn le? [t a b] (if (fl? t) (<= (fval t a) (fval t b)) (<= (ord-cmp t a b) 0)))
+(defn gt? [t a b] (if (fl? t) (> (fval t a) (fval t b)) (pos? (ord-cmp t a b))))
+(defn ge? [t a b] (if (fl? t) (>= (fval t a) (fval t b)) (>= (ord-cmp t a b) 0)))
+(defn eq? [t a b] (if (fl? t) (== (fval t a) (fval t b)) (zero? (ord-cmp t a b))))
+(defn compare* [t a b] (if (fl? t) (cond (lt? t a b) :LT (eq? t a b) :EQ :else :GT) ({-1 :LT 0 :EQ 1 :GT} (Long/signum (ord-cmp t a b)))))
+(defn max* [t a b] (if (le? t a b) b a))
+(defn min* [t a b] (if (le? t a b) a b))
+
+;; Enum
+(def bounds-of {"Int" [MIN MAX] "Word8" [0 255] "Char" [0 1114111] "Bool" [0 1] "Ordering" [0 2] "Int64" [MIN MAX] "Word" [0 -1]})
+(defn to-ord [t v] (case t "Bool" (if v 1 0) "Ordering" ({:LT 0 :EQ 1 :GT 2} v) v))
+(defn from-ord [t n] (case t "Bool" (= n 1) "Ordering" ([:LT :EQ :GT] n) n))
+(def succ-msgs {"Int" ["Enum.succ{Int}: tried to take `succ' of last tag in enumeration" "Enum.pred{Int}: tried to take `pred' of first tag in enumeration"]
+                "Word8" ["Enum.succ{Word8}: tried to take `succ' of last tag in enumeration" "Enum.pred{Word8}: tried to take `pred' of first tag in enumeration"]
+                "Char" ["Prelude.Enum.Char.succ: bad argument" "Prelude.Enum.Char.pred: bad argument"]
+                "Bool" ["Prelude.Enum.Bool.succ: bad argument" "Prelude.Enum.Bool.pred: bad argument"]
+                "Ordering" ["Prelude.Enum.Ordering.succ: bad argument" "Prelude.Enum.Ordering.pred: bad argument"]})
+
+(defn progression
+  "x1, x1 + d, ... while within lim (up when d >= 0, else down), as Integers; nil lim: unbounded; at most n"
+  [n ^BigInteger x1 ^BigInteger dlt lim]
+  (let [up? (>= (.signum dlt) 0)]
+    (take n (take-while (fn [^BigInteger v] (or (nil? lim) (if up? (<= (.compareTo v lim) 0) (>= (.compareTo v lim) 0))))
+                        (iterate #(.add ^BigInteger % dlt) x1)))))
+
+(defn enum-list [t from then to]
+  ;; [from ..], [from, then ..], [from .. to]: 5 at most
+  (if (fl? t)
+    (let [one (fres* t 1.0)
+          k (fn [i] (fres* t (double i)))
+          xs (cond (some? then) (let [step (fop t - then from)] (map (fn [i] (fop t + from (fop t * (k i) step))) (range)))
+                   :else (map (fn [i] (fop t + from (k i))) (range)))
+          xs (if (some? to) (let [lim (fop t + to (fres* t 0.5))] (take-while #(le? t % lim) xs)) xs)]
+      (map #(N t %) (take 5 xs)))
+    (let [iv (fn [v] (if (= t "Integer") v (if (#{"Word" "Word8"} t) (ubig v) (big (to-ord t v)))))
+          back (fn [^BigInteger b] (N t (if (= t "Integer") b (from-ord t (if (#{"Word" "Word8"} t) (wrap t b) (.longValue b))))))
+          [lo hi] (when-let [[a b] (bounds-of t)] [(iv (from-ord t a)) (if (= t "Word") (ubig b) (iv (from-ord t b)))])
+          x1 (iv from)
+          dlt (if (some? then) (.subtract ^BigInteger (iv then) x1) BigInteger/ONE)
+          lim (cond (some? to) (iv to) (= t "Integer") nil (>= (.signum ^BigInteger dlt) 0) hi :else lo)]
+      (map back (progression 5 x1 dlt lim)))))
+
+(defn enum-succ [t v dir]
+  (case t
+    "Integer" (N t (.add ^BigInteger v (big dir)))
+    ("Double" "Float") (N t (fop t (if (pos? dir) + -) v (fres* t 1.0)))
+    (let [[lo hi] (bounds-of t) o (to-ord t v)]
+      (if (= o (if (pos? dir) hi lo)) (hs-error ((succ-msgs t) (if (pos? dir) 0 1)))
+          (N t (from-ord t (+ o dir)))))))
+
+;; properFraction (GHC.Float's properFractionDouble and properFractionFloat, GHC.Real's for Ratio): [n r], n at type nt
+(defn proper-fraction [t v nt]
+  (if (fl? t)
+    (let [[^BigInteger m e] (decode t v)]
+      (if (>= e 0)
+        ;; fromInteger m * 2 ^ e at the target type (an Int wraps: 2 ^ e is 0 from e = 64)
+        [(if (= nt "Integer") (.shiftLeft m (int e)) (wrap nt (.shiftLeft m (int e)))) (fres* t 0.0)]
+        (let [qr (.divideAndRemainder m (pow2 (- e))) w (aget qr 0) r (aget qr 1)]
+          [(if (= nt "Integer") w (wrap nt w)) (encode t r e)])))
+    (let [[^BigInteger n ^BigInteger dn] v qr (.divideAndRemainder n dn)]
+      [(if (= nt "Integer") (aget qr 0) (wrap nt (aget qr 0))) (ratio (aget qr 1) dn)])))
+
+(defn int-add [nt ^BigInteger a k] (if (= nt "Integer") (.add a (big k)) (wrap nt (.add (big a) (big k)))))
+(defn r-neg? [t r] (if (fl? t) (< (fval t r) 0.0) (neg? (.signum ^BigInteger (first r)))))
+(defn r-pos? [t r] (if (fl? t) (> (fval t r) 0.0) (pos? (.signum ^BigInteger (first r)))))
+(defn round* [t v nt]
+  (let [[n r] (proper-fraction t v nt)
+        m (if (r-neg? t r) (int-add nt n -1) (int-add nt n 1))
+        c (if (fl? t)
+            (let [hd (fop t - (if (= t "Double") (dabs r) (fabs* r)) (fres* t 0.5)) x (fval t hd)] (cond (< x 0.0) -1 (== x 0.0) 0 :else 1))
+            (let [[an ad] [(.abs ^BigInteger (first r)) (second r)]] (.compareTo (.multiply ^BigInteger an (big 2)) ^BigInteger ad)))]
+    (case (long c) -1 n 0 (if (even? (if (= nt "Integer") (.longValue (.mod ^BigInteger n (big 2))) n)) n m) 1 m)))
+(defn ceiling* [t v] (let [[n r] (proper-fraction t v "Integer")] (if (r-pos? t r) (.add ^BigInteger n BigInteger/ONE) n)))
+(defn floor* [t v] (let [[n r] (proper-fraction t v "Integer")] (if (r-neg? t r) (.subtract ^BigInteger n BigInteger/ONE) n)))
+
+;; Integral
+(defn idiv [t op a b]
+  (let [A (ival t a) B (ival t b)]
+    (when (zero? (.signum B)) (hs-error "divide by zero"))
+    (when (and (#{"Int" "Int64"} t) (= a MIN) (= b -1) (#{:quot :div} op)) (hs-error "arithmetic overflow"))
+    (let [q (.divide A B) r (.subtract A (.multiply q B))
+          [fq fr] (if (and (not (zero? (.signum r))) (not= (.signum r) (.signum B))) [(.subtract q BigInteger/ONE) (.add r B)] [q r])
+          res (case op :quot q :rem r :div fq :mod fr)]
+      (if (= t "Integer") res (wrap t res)))))
+(defn gcd* [t a b]
+  (let [ab (fn [x] (num-abs t x))]
+    (loop [x (ab a) y (ab b)]
+      (if (zero? (.signum (ival t y))) x (recur y (idiv t :rem x y))))))
+(defn lcm* [t a b]
+  (if (or (zero? (.signum (ival t a))) (zero? (.signum (ival t b)))) (from-integer t BigInteger/ZERO)
+      (num-abs t (num-op :mul t (idiv t :quot a (gcd* t a b)) b))))
+
+;; Bits
+(defn bits-op [t op a & [k]]
+  (case t
+    "Integer" (case op :and (.and ^BigInteger a k) :or (.or ^BigInteger a k) :xor (.xor ^BigInteger a k) :not (.not ^BigInteger a)
+                    :shl (.shiftLeft ^BigInteger a (int k)) :shr (.shiftRight ^BigInteger a (int k))
+                    :pop (let [c (.bitCount ^BigInteger (.abs ^BigInteger a))] (if (neg? (.signum ^BigInteger a)) (- c) c))
+                    :test (.testBit ^BigInteger a (int k)) :rot (.shiftLeft ^BigInteger a (int k)))
+    (let [[w sg] (widths t) fit (fn [x] (if (= sg :s) x (narrow-u w x)))]
+      (case op :and (bit-and a k) :or (bit-or a k) :xor (bit-xor a k) :not (fit (bit-not a))
+            :shl (fit (bit-shift-left a k)) :shr (if (= sg :s) (bit-shift-right a k) (unsigned-bit-shift-right a k))
+            :pop (Long/bitCount (narrow-u w a)) :test (bit-test a k)
+            :rot (if (= w 64) (Long/rotateLeft a (int k)) (fit (bit-or (bit-shift-left a (mod k w)) (unsigned-bit-shift-right (narrow-u w a) (- w (mod k w))))))))))
+
+;; atan2 y x: GHC.Float's RealFloat default
+(defn atan2* [t y x]
+  (let [v (fn [b] (fval t b)) zero (fres* t 0.0) pi* (if (= t "Double") (db Math/PI) (fb Math/PI))
+        atan (fn [b] (libm1 "atan" (= t "Double") b))
+        nz? (fn [b] (fnegzero? t b))]
+    (cond (> (v x) 0) (atan (fop t ddiv y x))
+          (and (== (v x) 0) (> (v y) 0)) (fop t ddiv pi* (fres* t 2.0))
+          (and (< (v x) 0) (> (v y) 0)) (fop t + pi* (atan (fop t ddiv y x)))
+          (or (and (<= (v x) 0) (< (v y) 0)) (and (< (v x) 0) (nz? y)) (and (nz? x) (nz? y))) (fneg* t (atan2* t (fneg* t y) x))
+          (and (== (v y) 0) (or (< (v x) 0) (nz? x))) pi*
+          (and (== (v x) 0) (== (v y) 0)) y
+          :else (fop t + x y))))
+
+(defn denormal? [t b] (let [x (Math/abs (fval t b))] (and (> x 0) (< x (if (= t "Double") Double/MIN_NORMAL (double Float/MIN_NORMAL))))))
+
+(defn read-back [t x] x)  ; read of a shown value: Show and Read round trip (the shortest digits read back to the value)
+
+(defn class-value
+  "the typed value a class line shows: cls the class, m gen.ae's method template, t the instance type, x and y its values"
+  [cls m t x y]
+  (let [X (N t x) Y (N t y) f1 (fn [b] (N t b)) dbl? (= t "Double")]
+    (case [cls m]
+      ["Show" "show x"] X
+      ["Show" "showsPrec 11 x \"\""] [:prec 11 X]
+      ["Show" "show [x, x]"] (lst t [X X])
+      ["Show" "show (Just x)"] ["Maybe" X]
+      ["Show" "show (x, Left x :: Either T ())"] (tup X ["Left" X])
+      ["Read" "show (read (show x) :: T)"] X
+      ["Read" "show (reads (show x ++ \" rest\") :: [(T, String)])"] (lst "Tuple" [(tup X ["String" (str-codes " rest")])])
+      ["Read" "show (read (\"  (\" ++ show x ++ \")  \") :: T)"] X
+      ["Eq-Ord" "show (x == y, x /= y)"] (tup (B (eq? t x y)) (B (not (eq? t x y))))
+      ["Eq-Ord" "show (compare x y, x < y, x <= y, x > y, x >= y)"]
+      (tup (N "Ordering" (compare* t x y)) (B (lt? t x y)) (B (le? t x y)) (B (gt? t x y)) (B (ge? t x y)))
+      ["Eq-Ord" "show (max x y, min x y)"] (tup (N t (max* t x y)) (N t (min* t x y)))
+      ["Enum" "show (succ x)"] (enum-succ t x 1)
+      ["Enum" "show (pred x)"] (enum-succ t x -1)
+      ["Enum" "show (fromEnum x)"]
+      (N "Int" (case t "Integer" (.longValue ^BigInteger x) ("Double" "Float") (first (proper-fraction t x "Int")) (to-ord t x)))
+      ["Enum" "show (take 5 [x ..])"] (lst t (enum-list t x nil nil))
+      ["Enum" "show (take 5 [x, y ..])"] (lst t (enum-list t x y nil))
+      ["Enum" "show (take 5 [x .. y])"] (lst t (enum-list t x nil y))
+      ["Bounded" "show (minBound :: T, maxBound :: T)"]
+      (let [[lo hi] (bounds-of t)] (tup (N t (from-ord t lo)) (N t (from-ord t hi))))
+      ["Num" "show (x + y)"] (f1 (num-op :add t x y))
+      ["Num" "show (x - y)"] (f1 (num-op :sub t x y))
+      ["Num" "show (x * y)"] (f1 (num-op :mul t x y))
+      ["Num" "show (negate x)"] (f1 (num-negate t x))
+      ["Num" "show (abs x)"] (f1 (num-abs t x))
+      ["Num" "show (signum x)"] (f1 (num-signum t x))
+      ["Num" "show (fromInteger 300 :: T)"] (f1 (from-integer t (big 300)))
+      ["Integral" "show (quot x y, rem x y)"] (tup (f1 (idiv t :quot x y)) (f1 (idiv t :rem x y)))
+      ["Integral" "show (div x y, mod x y)"] (tup (f1 (idiv t :div x y)) (f1 (idiv t :mod x y)))
+      ["Integral" "show (quotRem x y)"] (do (idiv t :quot x y) (tup (f1 (idiv t :quot x y)) (f1 (idiv t :rem x y))))
+      ["Integral" "show (divMod x y)"] (do (idiv t :div x y) (tup (f1 (idiv t :div x y)) (f1 (idiv t :mod x y))))
+      ["Integral" "show (toInteger x)"] (I (ival t x))
+      ["Integral" "show (gcd x y, lcm x y)"] (tup (f1 (gcd* t x y)) (f1 (lcm* t x y)))
+      ["Integral" "show (x ^ (3 :: Int))"] (f1 (num-op :mul t (num-op :mul t x x) x))
+      ["Real-Fractional" "show (toRational x)"] (N "Rational" (to-rational t x))
+      ["Real-Fractional" "show (x / y)"]
+      (f1 (if (fl? t) (fop t ddiv x y) (let [[a b] x [c e] y] (ratio (.multiply ^BigInteger a e) (.multiply ^BigInteger b c)))))
+      ["Real-Fractional" "show (recip x)"]
+      (f1 (if (fl? t) (fop t ddiv (fres* t 1.0) x) (let [[a b] x] (ratio b a))))
+      ["Real-Fractional" "show (fromRational (7 % 3) :: T)"] (f1 (from-rational t (rat 7 3)))
+      ["Real-Fractional" "show (realToFrac x :: Double)"] (N "Double" (from-rational "Double" (to-rational t x)))
+      ["RealFrac" "show (properFraction x :: (Integer, T))"] (let [[n r] (proper-fraction t x "Integer")] (tup (I n) (f1 r)))
+      ["RealFrac" "show (truncate x :: Integer)"] (I (first (proper-fraction t x "Integer")))
+      ["RealFrac" "show (round x :: Integer)"] (I (round* t x "Integer"))
+      ["RealFrac" "show (ceiling x :: Integer, floor x :: Integer)"] (tup (I (ceiling* t x)) (I (floor* t x)))
+      ["RealFrac" "show (round x :: Int)"] (N "Int" (round* t x "Int"))
+      ["Floating" "show (exp x, log x, sqrt x)"] (tup (f1 (libm1 "exp" dbl? x)) (f1 (libm1 "log" dbl? x)) (f1 (libm1 "sqrt" dbl? x)))
+      ["Floating" "show (sin x, cos x, tan x)"] (tup (f1 (libm1 "sin" dbl? x)) (f1 (libm1 "cos" dbl? x)) (f1 (libm1 "tan" dbl? x)))
+      ["Floating" "show (asin x, acos x, atan x)"] (tup (f1 (libm1 "asin" dbl? x)) (f1 (libm1 "acos" dbl? x)) (f1 (libm1 "atan" dbl? x)))
+      ["Floating" "show (sinh x, cosh x, tanh x)"] (tup (f1 (libm1 "sinh" dbl? x)) (f1 (libm1 "cosh" dbl? x)) (f1 (libm1 "tanh" dbl? x)))
+      ["Floating" "show (asinh x, acosh x, atanh x)"] (tup (f1 (libm1 "asinh" dbl? x)) (f1 (libm1 "acosh" dbl? x)) (f1 (libm1 "atanh" dbl? x)))
+      ["Floating" "show (x ** y, logBase x y)"] (tup (f1 (libm-pow dbl? x y)) (f1 (fop t ddiv (libm1 "log" dbl? y) (libm1 "log" dbl? x))))
+      ["Floating" "show (pi :: T)"] (f1 (if dbl? (db Math/PI) (fb Math/PI)))
+      ["RealFloat" "show (decodeFloat x)"] (let [[m e] (decode t x)] (tup (I m) (N "Int" e)))
+      ["RealFloat" "show (isNaN x, isInfinite x, isNegativeZero x, isDenormalized x)"]
+      (let [v (fval t x)] (tup (B (Double/isNaN v)) (B (Double/isInfinite v)) (B (fnegzero? t x)) (B (denormal? t x))))
+      ["RealFloat" "show (exponent x, significand x)"]
+      (let [[^BigInteger m e] (decode t x)]
+        (tup (N "Int" (if (zero? (.signum m)) 0 (+ e (fdigits t)))) (f1 (encode t m (- (fdigits t))))))
+      ["RealFloat" "show (atan2 x y)"] (f1 (atan2* t x y))
+      ["RealFloat" "show (floatDigits x, floatRange x)"]
+      (if dbl? (tup (N "Int" 53) (tup (N "Int" -1021) (N "Int" 1024))) (tup (N "Int" 24) (tup (N "Int" -125) (N "Int" 128))))
+      ["RealFloat" "show (encodeFloat 3 (-2) :: T)"] (f1 (encode t (big 3) -2))
+      ["Bits" "show (x .&. y, x .|. y, xor x y)"] (tup (f1 (bits-op t :and x y)) (f1 (bits-op t :or x y)) (f1 (bits-op t :xor x y)))
+      ["Bits" "show (complement x)"] (f1 (bits-op t :not x))
+      ["Bits" "show (shiftL x 3, shiftR x 3)"] (tup (f1 (bits-op t :shl x 3)) (f1 (bits-op t :shr x 3)))
+      ["Bits" "show (popCount x)"] (N "Int" (bits-op t :pop x))
+      ["Bits" "show (testBit x 0, testBit x 7)"] (tup (B (bits-op t :test x 0)) (B (bits-op t :test x 7)))
+      ["Bits" "show (rotate x 5)"] (f1 (bits-op t :rot x 5))
+      ["FiniteBits" "show (finiteBitSize x, countLeadingZeros x, countTrailingZeros x)"]
+      (let [[w] (widths t) u (narrow-u w x)]
+        (tup (N "Int" w) (N "Int" (- (Long/numberOfLeadingZeros u) (- 64 w))) (N "Int" (if (zero? u) w (Long/numberOfTrailingZeros u)))))
+      ["Ix" "show (take 10 (range (min x y, max x y)))"]
+      (let [lo (min* t x y) hi (max* t x y)]
+        (lst t (map (fn [^BigInteger b] (N t (if (= t "Integer") b (from-ord t (.longValue b)))))
+                    (take 10 (progression 10 (if (= t "Integer") lo (big (to-ord t lo))) BigInteger/ONE (if (= t "Integer") hi (big (to-ord t hi))))))))
+      ["Ix" "show (inRange (min x y, max x y) x)"] (B (and (le? t (min* t x y) x) (le? t x (max* t x y))))
+      ["Ix" "show (rangeSize (min x y, max x y))"]
+      (let [lo (min* t x y) hi (max* t x y)]
+        ;; Ix's index and rangeSize are Ints: an Integer range's wraps
+        (if (= t "Integer") (N "Int" (.longValue (.add (.subtract ^BigInteger hi lo) BigInteger/ONE)))
+            (N "Int" (unchecked-add (unchecked-subtract (to-ord t hi) (to-ord t lo)) 1))))
+      ["Ix" "show (index (min x y, max x y) (max x y))"]
+      (let [lo (min* t x y) hi (max* t x y)]
+        (if (= t "Integer") (N "Int" (.longValue (.subtract ^BigInteger hi lo))) (N "Int" (unchecked-subtract (to-ord t hi) (to-ord t lo)))))
+      (throw (ex-info (str "golden: no model of " cls " " m) {})))))
+
+(defn class-expected
+  "the text a class line prints after \" = \": the value shown, or exception: and its message"
+  [cls m t xl yl]
+  (let [vals (instance-values t)
+        x (when xl (if (contains? vals xl) (vals xl) (throw (ex-info (str "golden: no value " xl " of " t) {}))))
+        y (when yl (if (contains? vals yl) (vals yl) (throw (ex-info (str "golden: no value " yl " of " t) {}))))]
+    (try
+      (let [v (class-value cls m t x y)]
+        (if (= :prec (first v)) (shows (second v) (nth v 2)) (shows 0 v)))
+      (catch arbace.lang.ExceptionInfo e
+        (if (:hs (ex-data e)) (str "exception: " (.getMessage e)) (throw e))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; runtime-integer's lines: Integer arithmetic at every size (gen.ae's program, computed)
+
+(defn runtime-integer-stdout []
+  (let [ks [31 32 63 64 65 127 128 1000]
+        ns (mapcat (fn [k] (let [p (pow2 k)] [(.subtract p BigInteger/ONE) p (.add p BigInteger/ONE) (.negate p)])) ks)
+        q (BigInteger. "12345678901234567")
+        line (fn [^BigInteger n]
+               (shows 0 (tup (I n) (I (.multiply n n))
+                             (tup (I (idiv "Integer" :quot n q)) (I (idiv "Integer" :rem n q)))
+                             (tup (I (idiv "Integer" :div n (big -97))) (I (idiv "Integer" :mod n (big -97))))
+                             (I (.gcd n (big 360))))))]
+    (str (s/join "\n" (map line ns)) "\n"
+         (reduce #(.multiply ^BigInteger %1 (big %2)) BigInteger/ONE (range 1 201)) "\n"
+         (.mod (.pow (big 3) 1000) (.pow (big 10) 40)) "\n"
+         (show-double (db (.doubleValue (pow2 70)))) "\n"
+         ;; truncate (1.0e30 :: Double): the double nearest 10^30, exactly
+         (.toBigInteger (BigDecimal. 1.0E30)) "\n"
+         "-123456789012345678901234567890" "\n"
+         ;; (toInteger (maxBound :: Int) + 1, fromInteger (2 ^ 64 + 5) :: Int): fromInteger keeps the low 64 bits
+         (shows 0 (tup (I (.add (big MAX) BigInteger/ONE)) (N "Int" (.longValue (.add two64 (big 5)))))) "\n")))
