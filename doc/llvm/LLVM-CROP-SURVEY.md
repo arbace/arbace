@@ -2533,3 +2533,33 @@ and the steps' table (see the report's key check).
 
 One phase stays (a class where a program shows it); the links above 2.5 GiB run in the night lanes only when no gate runs and the main
 session schedules them (the night's commands above); llvmi's full steps keep needing cpp-runtime.
+
+## As built: the read and eval cells' cheap deferred groups (2026-11-17, branch `h-haskell-deferred` from next e4a7a30f3)
+
+Light, one process at a time, no gate. The REAP cells' deferred rows taken by cause (read 17, eval 15, AOT 15):
+
+- **Read: constant expression types** (`arbace/repr/llvm/verify.ae`'s `check-constexpr-type`). A `getelementptr` constant's own type
+  is its base's pointer type (the address space kept, when neither the base nor an index is a vector), and a `blockaddress` of a
+  function already defined is a pointer in that function's address space: both are held to the expected type as LLParser's
+  ValID::t_Constant does ("constant expression type mismatch: got type ... but expected ..."). `parse-global` checks the initializer
+  before the name's redefinition and forward reference, as LLParser::parseGlobal does (opt's first message on
+  Bitcode/blockaddress-addrspace.ll is the initializer's), and `run-phases-parser` (the module the reader stopped in) binds the data
+  layout's address spaces as `run-phases` does (its functions were in address space 0). layouts.g0.type.1122 (`:constant-type-rules`)
+  and Bitcode-blockaddress-addrspace (`:llvmtest-messages`) pass: read 3,828 / 1 / 17 to 3,830 / 1 / 15.
+- **Eval: the modules that unwind** (`:personality`, 13). llvm-eh (2026-11-13) runs them; the record still held the refusals.
+  Recorded by `bin/llvmi check --only` the 13 with `--record`, which now rewrites a subset's own rows and keeps the others
+  (`arbace/llvm/check.ae`, as `bin/hsi check --record --only`): 10 pass, ctor-throw and uncaught in `:abort-report`, thread-throw in
+  `:cpp-threads`. runtime/threads.cpp timed out at llvmi's flat 10 s on the loaded host (17 s of CPU, 21 s of wall): `run_budget`
+  gives a C++ program check-budget.edn does not list bin/cppi check's default, 30 s of CPU (CPPI_BUDGET). The C++ runtime was the
+  next worktree's `bin/cppi runtime-ci` library (`LLVMI_CPP_RTLIB`, by hand; its key differs from this checkout's by the tools' host
+  alone, the re-seed). Eval 537 / 10 / 15 to 547 / 12 / 3.
+- **Left.** AOT's 13 `:personality` rows: the `:eh` modules' AOT build (cf2g with C++'s runtime) is above the light tier, the night's
+  `bin/llvmi check --aot --only` them `--record`. `:dg-options` (2): the pack tx made again with each torture test's dg-options (clang,
+  the oracle tier; LLS54 below). Read's 15: the Verifier's AMDGPU and debug-info rules, intrinsic tables, the probes' reader and metadata
+  numbering (the classes' own :why).
+
+### Proposed
+
+- **LLS54 The torture pack's dg-options.** (a) `bin/llvmi ir-make tx` passes each test's `dg-options`/`dg-additional-options` (by hand,
+  clang 23.1.5, the pack's pin moves; the other modules' IR byte for byte the same), tx-O0.restrict-1 and tx-O2.20040409-3w judged on
+  their own program; (b) keep the class. **Recommended: (a)** at the next oracle-tier recording.

@@ -9552,3 +9552,20 @@ Alternatives considered: moving the subsets to `:phase :full` (simplest, but a c
 crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
+
+## 2026-11-17: LLVM IR's read and eval deferred groups; Haskell's deferred rows and design classes audited (branch `h-haskell-deferred`)
+
+From next `e4a7a30f3`, light (one process at a time, under 2.5 GB), no gate. LLVM IR (doc/llvm/LLVM-CROP-SURVEY.md, "As built: the
+read and eval cells' cheap deferred groups"): repr/llvm's verifier holds a `getelementptr` constant's and a defined function's
+`blockaddress`'s own type to the expected one, checks a global's initializer before its redefinition (LLParser::parseGlobal's order)
+and binds the data layout's address spaces for a module the reader stopped in; layouts.g0.type.1122 and Bitcode-blockaddress-addrspace
+pass (verify-check over every rt and llvm/test module with a constant getelementptr, a quarter of them, and every one with a blockaddress
+or a recorded redefinition: 126 of 126 as the references; verify-llvmtest and verify-probes essential pass, their controls failing).
+The 13 modules that unwind, run since llvm-eh but still recorded refused, recorded by `bin/llvmi check --only ... --record` (which now
+keeps a subset's other rows): 10 pass, 3 in `:abort-report` and `:cpp-threads`; llvmi gives an unlisted C++ program bin/cppi check's
+30 s of CPU (runtime/threads.cpp timed out at the flat 10 s on the loaded host). Read 3,828 / 1 / 17 to 3,830 / 1 / 15, eval 537 / 10 /
+15 to 547 / 12 / 3; LLVM's completeness 98 (meant 99). Haskell (doc/haskell/HASKELL-EVAL-SURVEY.md, the audit of 2026-11-17): no cheap
+group left (kahan alone needs 119 s of CPU against the 60 s limit); callback002 misplaced in `:no-reference`, three references record-ref
+could build, the print cell's 14 byte-identical rows: HES91-HES93 proposed. Alternatives considered: running the whole `bin/llvmi check
+--record` (refused by the day's rules: a subset's record instead), raising the C++ budget in test/cpp/check-budget.edn for threads alone
+(the default for every C++ program keeps llvmi and cppi equal).
