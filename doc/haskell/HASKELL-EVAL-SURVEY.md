@@ -2478,3 +2478,87 @@ The design classes (eval 63, print 14):
   the records amended into that commit (expected eval 813 / 61 / 35). With it, rts_clearMemory's row (HES83's night command).
 - **Found beside.** `bin/hsi pins --check` reports testsuite-core's run-tests 743 against the recorded 722 (eval-corpora.edn, last
   changed at 829eb1d4e): not this branch's (the old run_plan.ae gives 743 too).
+
+## HES67's design: Cmm on hsi (queue 332, 2026-11-17)
+
+HES67 (a) kept the tests' own Cmm a class until HE8; its (b) proposed the helper dumping GHC's parsed `CmmGroup`. This design
+takes neither form of (b): **the Cmm is read by Arbace, not by GHC**, so the class leaves without a new GHC-made input, and hsi's
+back end runs it over the machine it already has. The first stage covers what the testsuite's `.cmm` sources of `:test-cmm` use.
+
+### The parts
+
+1. **The reader, `arbace.repr.haskell.cmm`** (`arbace/repr/haskell/cmm.ae`, evaluated from the checkout on stage 0, `bin/hsi cmm
+   OUT [-D...] FILE...`):
+   - **preprocessing** by repr/c's preprocessor (`arbace.repr.c.pp`, cc's, already Arbace's) as GHC runs the C preprocessor on a
+     `.cmm`; the `#include "Cmm.h"` is **hsi's own header** (`test/haskell/eval/cmm/Cmm.h`, `MachDeps.h`): the definitions of GHC
+     9.14.1's `rts/include/Cmm.h` for x86_64-linux that hsi gives a meaning to (the types, `WDS`, `TO_W_`, `Sp(n)`, `ASSERT`,
+     `ccall`, `RET_R1`, the closure types' numbers), and of `DerivedConstants.h` only the closures hsi lays out (`SIZEOF_StgHeader`,
+     `SIZEOF_StgArrBytes`, `StgArrBytes_bytes`). GHC's own `Cmm.h` includes generated headers (`ghcautoconf.h`,
+     `DerivedConstants.h`) that only a GHC build makes; a macro hsi's header lacks is a name the parser makes a label, as GHC's
+     does, so a test needing more fails at its use, by name (HES94);
+   - **the lexer** as `compiler/GHC/Cmm/Lexer.x` (names with `.` `$` `@`, the global registers before names, octal, hexadecimal,
+     the signed float token, strings with C's escapes), over the preprocessed text;
+   - **the parser** as `compiler/GHC/Cmm/Parser.y`'s grammar, by recursive descent: the operators' precedences of its `%left` and
+     `%nonassoc` lines, unary `-` at `-`'s level (Happy's rule), `bool_expr`'s `&&`, `||`, `!` beside expressions in parentheses,
+     every statement of `stmt` but `push`, `reserve` and `unwind` (refused by name), the info tables' headers, `section`s' statics,
+     `CLOSURE`, `import`, `export`;
+   - **elaboration** as the semantic actions build the `CmmGroup`: a procedure's declarations visible throughout it (`loopDecls`),
+     names to locals, `initEnv`'s constants (`SIZEOF_StgHeader`, `SIZEOF_StgInfoTable`) or labels (`lookupName`), each MachOp's
+     width from its first argument's type and its result's type as `machOpResultType`, a store of a narrower value coerced
+     (`doStore`), the `exprMacros` of tables next to code (`ENTRY_CODE`, `INFO_PTR`, `GET_ENTRY`), `callishMachOps` with the
+     `memcpy` family's constant alignment, `stmtMacros`' names checked, `if`/`else` and the boolean operators lowered to labels and
+     branches as `cmmIfThenElse` and `emitCond`, `switch`'s arms out of line, a string literal an anonymous `rodata` datum;
+   - **the forms** (the namespace's docstring is their grammar): `(cmm FILE TOP...)`, `TOP` a `data`, `closure` or `proc` (its
+     convention, info table, formals and locals, then a flat vector of statements over labels), expressions `int`, `float` (IEEE
+     bits), `label`, `local`, `global`, `load`, `op` (GHC's MachOp names and widths).
+2. **The back end, `go/arbace/hs/cmm.ae`** (`cmm.go`): the forms loaded (`hsi run --cmm FILE`, `--cmm-main`), the data laid out in
+   crt's memory (a `.string` NUL-terminated, as GHC's assembler output), the procedures compiled to statements over closures, and
+   interpreted. The model is x86_64's GHC where the forms reach:
+   - **registers**: R1-R10, F1-F6 and D1-D6 as XMM1-XMM6 (one counter for both, `passFloatArgsInXmm`), L1, Sp, Hp, BaseReg and the
+     rest, words; every value a word, a float its IEEE bits;
+   - **calls**: `GHC.Cmm.CallConv`'s `assignArgumentsPos` on x86_64 (R1-R6, XMM1-XMM6; a stack argument refused): a Haskell
+     primcall's non-void arguments assigned by `NativeNodeCall`, a procedure's formals copied in from them, `return (...)` assigning
+     `NativeReturn`'s registers and jumping to the stack's top word; the Haskell's call pushes that word, the **return address**, on
+     a Cmm stack in crt's memory (`Sp`), so `jump %ENTRY_CODE(Sp(0)) [R1]` returns as GHC's does; the results read from the
+     registers by the primcall's REPS;
+   - **heap objects** a Cmm function gets (a gcptr argument) are words of an **object window** (`0x4000000000000000 + index <<
+     32`), laid out as GHC lays out what hsi can (a byte array: its info word, its size, its payload at `SIZEOF_StgArrBytes`), the
+     same word for the same object, and a gcptr result back to its object; code labels are words of a code window, a jump to one
+     the procedure's code;
+   - **the MachOps** at their widths (MulMayOflo exact: no false positives, as Note [MO_S_MulMayOflo significant width] wants;
+     the conversions; amd64's `cvttsd2si` and `minsd`/`maxsd` as hsi's primops have them), the callish ones the tests use
+     (`memcpy`, `memset`, `memmove`, `memcmp`, `popcnt*`, `bswap*`, the fences);
+   - **foreign "C" calls** to the program's own C (ci) or hsi's table of C functions (`puts`, `printf`, `malloc`, `free`), and the
+     RTS's `stg_exit` (C's `exit`: the C stdio flushed, no `hs_exit`) and `_assertFail` (`barf`'s text, then `abort`, status 134);
+   - **a Cmm main** (all.T's `cmm_src`, T17920): `hs_main`'s `rts_evalLazyIO` entering `ZCMain_main_closure`, its info pointer's
+     code run with R1 the closure; `SAVE_`/`RESTORE_SCALAR_ARG_REGS` into BaseReg's table (hsi's layout).
+3. **The entry points** in hsi (kept to lines that keep the files' line counts, so the forms' positions do not move: queue 333
+   works on the evaluator beside): `compile.ae`'s primcall that hsi's own `primcalls` lack is a `PrimE` whose code
+   (`cmmPrimcallOf`) runs the Cmm procedure of that label when one is loaded, else stops as before ("unimplemented: primcall
+   LBL", reason `:primcall`); the images write such a primcall by its label and results (`cmmImageName`, read back by
+   `cmmImagePrimcall`), so a library's Cmm call keeps its message; the driver takes `--cmm` and `--cmm-main` (`hs.CmmArgs`) and
+   runs through `RunMain`. Nothing of the machine's loop, frames or scheduling changed.
+4. **`bin/hsi check`** gives a test's `.cmm` sources (all.T's flags, multi_compile_and_run's extra sources) to the reader with the
+   flags' `-D` (the forms kept by the files', the reader's and the headers' digests, `PROG/cmm.ae`), and a Cmm main runs with no
+   STG (`:stg :none`: no dump, no record of haskell-stg-progs). `HSI_REF` names another reference file (a probe's scratch record).
+
+### Not in the first stage (the second's, when a test needs it)
+
+`call` (a Cmm call that returns: its continuation's frame), stack arguments and results, `push`/`reserve`, info tables read back
+(`%INFO_TYPE` and the rest), the RTS's own Cmm (`rts/*.cmm`: the libraries' primcalls hsi lacks, `getStackClosurezh` and the
+stack decoder's) and other heap objects' layouts (a closure's fields), the profiling headers. Assembly (CallConv's `.s`) is another
+crop's (repr/asm, x86i): out of this design.
+
+### Proposed (HES94 onward)
+
+- **HES94 Cmm.h's source.** (a) hsi's own header, GHC's definitions for x86_64 copied for what hsi models (as built); (b) GHC's
+  `rts/include/Cmm.h` from the source tarball with the generated headers made by Arbace (a port of `utils/deriveConstants` over
+  hsi's layouts): every macro GHC has, more work. **Recommended: (a)** until a test needs more of the RTS's macros.
+- **HES95 the references built without their Cmm.** (a) the main host's `bin/hsi record-ref --only` the five multi_compile_and_run
+  tests (MulMayOflo_full, PopCnt, T5149, cgrun069, T21305; CallConv stays `:no-build`: all.T names its `.s` under `when(arch(...))`,
+  which the plan does not evaluate, and it is assembly), then `bin/hsi check --only ... --record` and the class
+  narrowed to CallConv and T21305 (prepared on the branch `332-haskell-cmm-classes`); (b) leave them :fail in the class. **Recommended: (a)**.
+- **HES96 T21305's out-of-bounds writes** (DECISION 332-1 of queue 332's report): (a) a class of its own by design, the test's
+  undefined behaviour (its `writeByteArray#` steps by 8 elements, past a 3-element array); (b) hsi drops a byte array's write past
+  its end, as GHC's heap absorbs it unseen. **Recommended: (a)**: (b) would hide hsi's bounds checks from every other program.
+
