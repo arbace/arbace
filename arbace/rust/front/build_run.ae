@@ -1061,8 +1061,12 @@
                     ;; RF17: a std ADT's tuple constructor used as a function value and instantiated in the program's crate (the
                     ;; record's `mir/external`: rustc's build_ctor shim, whose MIR the helper does not dump), built natively
                     ;; (mono/ctor-shim-body) from the function constant naming it in the record's bodies
+                    ;; RIND5: the local crate's own root (a program named after a library crate: std.rs, crate `std`)
                     crate-tok (let [cn (str/replace (str n) "-" "_")]
-                                (some (fn [b] (when (local? b) (re-find (re-pattern (str "Cs[0-9A-Za-z]+_" (count cn) cn)) (str (:symbol b))))) rec-bodies))
+                                (or (try (let [{:keys [id]} (mono/local-crate n) t (str "C" (mono/disambiguator (mono/u64 id)) (mono/ident cn))]
+                                              (when (some #(and (local? %) (str/includes? (str (:symbol %)) t)) rec-bodies) t))
+                                         (catch Throwable _ nil))
+                                    (some (fn [b] (when (local? b) (re-find (re-pattern (str "Cs[0-9A-Za-z]+_" (count cn) cn)) (str (:symbol b))))) rec-bodies)))
                     fndef-of (let [acc (atom {})]
                                (doseq [b rec-bodies]
                                  (walk (fn [x] (when (and (seq? x) (= 'const (first x)) (some #{:fn-symbol} x))
@@ -1197,8 +1201,9 @@
   false)
 
 (defn- emit-and-lower
-  "The module at DIR/NAME.mono.edn through codegen and rsi's lowering: nil, or why not"
-  [dir n]
+  "The module at DIR/NAME.mono.edn through codegen and rsi's lowering: nil, or why not (CRATES: std's crates' file, the local
+  crate's identity for the check of instances not collected)"
+  [dir n & [crates]]
   ;; RF13: a failure past codegen (the printer's) is the program's refusal, not the batch's end
   (let [[st what] (try ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n *std-linked*)
                        (catch Throwable e [:unsupported (str "the module's printing: " (.getMessage e))]))
@@ -1211,7 +1216,13 @@
           ;; would fail, so the module is not the program's
           (let [ll (slurp (str dir "/" n ".ours.ll"))
                 cn (str/replace n "-" "_")
-                tok (re-find (re-pattern (str "Cs[0-9A-Za-z]+_" (count cn) cn)) ll)
+                ;; RIND5: the local crate's own root (its StableCrateId's disambiguator), not the first crate root of its
+                ;; name: a program named after a library crate (rsi's sample std.rs, crate `std`) declares the real std's items
+                tok (or (try (let [{:keys [id]} (binding [mono/*crates* (or mono/*crates* (mono/load-crates crates))] (mono/local-crate n))
+                                   t (str "C" (mono/disambiguator (mono/u64 id)) (mono/ident cn))]
+                               (when (str/includes? ll t) t))
+                             (catch Throwable _ nil))
+                        (re-find (re-pattern (str "Cs[0-9A-Za-z]+_" (count cn) cn)) ll))
                 missing (when tok (for [[_ sym] (re-seq #"(?m)^declare [^@]*@([^ (]+)\(" ll) :when (str/includes? sym tok)] sym))]
             (when (seq missing)
               (str "a local instance not collected (" (count missing) ": " (first missing) ")")))))))
@@ -1264,14 +1275,14 @@
               (swap! ctl-lines conj [n (cons (str "mono-check: " n " against " other "'s record: " (tally-line ctally "/"))
                                              (for [d (take 3 cdiffs)] (str "   " (pr-str d))))])
               (doseq [[k [e t]] ctally] (swap! ctl-total update k (fnil (fn [[a b]] [(+ a e) (+ b t)]) [0 0]))))
-            (println (str "run-built: " n ": " (if-let [why (emit-and-lower dir n)] why "ready")))
+            (println (str "run-built: " n ": " (if-let [why (emit-and-lower dir n crates)] why "ready")))
             (mem-mark (str n " batch: codegen and lowering done"))
             (when (= n (:control opts))
               (let [cdir (str work "/_control/" n)
                     _ (.mkdirs (File. cdir))
                     c (binding [*control* true] (native-run crates front-dir (rec-file n) n abort? nil))]
                 (write-forms (str cdir "/" n ".mono.edn") (:forms c))
-                (println (str "run-built: _control/" n ": " (if-let [why (emit-and-lower cdir n)] why "ready"))))))))))
+                (println (str "run-built: _control/" n ": " (if-let [why (emit-and-lower cdir n crates)] why "ready"))))))))))
     (spit (str work "/mono.log")
           (str (str/join "\n" (concat @mono-lines [(str "mono-check: " (count progs) " programs: " (tally-line @total " of "))])) "\n"))
     (when ca

@@ -221,7 +221,7 @@
     (vector? d) {:data [:crate] :parent nil :dis 0}
     (number? d) (let [x (c/def-of d)]
                   {:data (let [[k n] (:data x)] (if (= k :crate) [:crate] [k (some-> n str)]))
-                   :parent (let [p (:parent x)] (if (= 0 p) [:crate (:name *local*)] p))
+                   :parent (let [p (:parent x)] (if (= 0 p) [:crate (:name *local*) :local] p))
                    ;; RF14: an impl's disambiguator is its place among its parent's impls in rustc's order of definitions (a
                    ;; derive's impls after the crate's other items: rustc-def-index), not the source's
                    :dis (if (and (= :impl (first (:data x))) *def-order*)
@@ -238,7 +238,7 @@
                 {:data (case k "impl" [:impl] "closure" [:closure] "constant" [:anon] "constructor" [:ctor]) :parent parent :dis (parse-long i)}
                 {:data [(if (ext-value-ns? d) :value :type) last-seg] :parent parent :dis 0})))))
 
-(defn- def-local? [d] (or (number? d) (and (vector? d) (= (second d) (:name *local*)))))
+(defn- def-local? [d] (or (number? d) (and (vector? d) (= :local (nth d 2 nil)))))
 
 (defn- generics [d]
   (cond (vector? d) nil
@@ -287,9 +287,12 @@
 (defn- path-append-ns! [m prefix! ns dis nm]
   (push! m (str "N" ns)) (prefix!) (push! m (disambiguator dis)) (push! m (ident nm)))
 
-(defn- print-crate-name! [m nm]
+(defn- print-crate-name!
+  "RIND5: LOCAL? the crate being compiled (its root `[:crate NAME :local]`), else another crate by NAME: a program named after a
+  library crate (rsi's sample std.rs, crate `std`) keeps both apart"
+  [m nm & [local?]]
   (push! m "C")
-  (push! m (disambiguator (u64 (if (= nm (:name *local*)) (:id *local*) (crate-id nm)))))
+  (push! m (disambiguator (u64 (if local? (:id *local*) (crate-id nm)))))
   (push! m (ident nm)))
 
 (defn- print-generic-args! [m prefix! args]
@@ -321,7 +324,7 @@
 (defn- default-print-def-path! [m d args]
   (let [{:keys [data parent dis]} (def-key d)]
     (case (first data)
-      :crate (print-crate-name! m (if (vector? d) (second d) (ext-crate (str d))))
+      :crate (print-crate-name! m (if (vector? d) (second d) (ext-crate (str d))) (and (vector? d) (= :local (nth d 2 nil))))
       :impl (print-impl-path! m d args)
       (let [g (when (seq args) (generics d))
             pc (long (:parent-count g 0))
@@ -445,7 +448,7 @@
   (let [m (m-new)]
     (binding [*instance-def* d]
       (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "reify"))
-    (print-def-path! m [:crate (:name *local*)] [])
+    (print-def-path! m [:crate (:name *local*) :local] [])
     (str (:sb m))))
 
 (defn vtable-shim-mangle
@@ -456,7 +459,7 @@
   (let [m (m-new)]
     (binding [*instance-def* d]
       (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "vtable"))
-    (print-def-path! m [:crate (:name *local*)] [])
+    (print-def-path! m [:crate (:name *local*) :local] [])
     (str (:sb m))))
 
 (defn v0-mangle
@@ -465,7 +468,7 @@
   [d args instantiating?]
   (let [m (m-new)]
     (binding [*instance-def* d] (print-def-path! m d (erase-regions args)))
-    (when instantiating? (print-def-path! m [:crate (:name *local*)] []))
+    (when instantiating? (print-def-path! m [:crate (:name *local*) :local] []))
     (str (:sb m))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -750,8 +753,9 @@
     (let [r (:repr (get (:adts c/*si*) adt))]
       (cond-> {} (and (string? r) (re-matches #"[iu](8|16|32|64|128|size)" r)) (assoc :int r)
                  (= "C" r) (assoc :c true)
-                 ;; RFP58 (a): repr(simd), read from the sources of an ADT the interface lacks
-                 (and (not (tc/std-adt-known? adt)) (:simd (src-adt adt))) (assoc :simd true)))))
+                 ;; RFP58 (a): repr(simd), read from the sources of an ADT the interface lacks; RIND5: also of a known one in a
+                 ;; SIMD module (core::simd's `Simd<T, N>`, `#[repr(simd, packed)]`: the interface writes no repr(simd))
+                 (and (or (not (tc/std-adt-known? adt)) (str/includes? (str adt) "simd")) (:simd (src-adt adt))) (assoc :simd true)))))
 
 (defn- pattern-field
   "A std field written as text (the interface's pattern types, `(*const T) is !null`): its type, or [:err ...]"
@@ -2104,10 +2108,21 @@
           ;; RFP49 (a): the local instances std's bodies reach: each trait method's call or function constant of the record's
           ;; std instances' bodies (STD-CALLS: [PATH ARG-FORMS]) resolved by mono, those that are a local function's or
           ;; closure's at no type argument (a generic one's instantiation is not ported)
+          ;; RIND5: a Fn trait's call on a local closure whose arguments mono does not read (`and_then::<String, {closure#6}>`
+          ;; over `Box<dyn Any + Send>`): the closure's body, by its name in the record's closure type (a closure is not generic
+          ;; at the program's own definitions; an instance it reaches through a ClosureOnceShim still needs the body)
+          closure-by-name (into {} (for [[d nm] by-def* :when (and nm (str/includes? (str nm) "{closure#"))] [(str nm) d]))
+          fn-call-closure (fn [path forms]
+                            (when (re-find #"(^|::)(FnOnce::call_once|FnMut::call_mut|Fn::call)$" (str path))
+                              (let [f (first forms) st (when (seq? f) (nth f 2 nil))]
+                                (when (and (seq? st) (= 'closure (first st)))
+                                  (let [d (get closure-by-name (str (second st)))] (when (and d (local-instance? d [])) d))))))
           std-roots (distinct (for [[path forms] std-calls
-                                    :let [r (try (let [[d args] (std-call path forms)] (resolve-instance d args)) (catch Throwable _ nil))]
-                                    :when r :let [[rd rargs shim] r]
-                                    :when (nil? shim) :let [k (local-key rd rargs)] :when k]
+                                    :let [r (try (let [[d args] (std-call path forms)] (resolve-instance d args)) (catch Throwable _ nil))
+                                          k (if r
+                                              (let [[rd rargs shim] r] (when (nil? shim) (local-key rd rargs)))
+                                              (fn-call-closure path forms))]
+                                    :when k]
                                 k))
           ;; RF15: the local functions std's bodies' vtables point to (the record's std bodies' function allocations, STD-FN-SYMS:
           ;; `<Failure as Debug>::fmt` in `<Box<dyn Error> as From<Failure>>::from`'s vtable), matched by their symbols
