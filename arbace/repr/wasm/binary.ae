@@ -139,10 +139,18 @@
 
 (defn- heaptype [r]
   (let [b (peek8 r)]
-    (if (and (>= b 0) (= 0x40 (bit-and b 0xc0)))
+    (cond
+      ;; an exact heap type (custom descriptors, queue 327): 0x62 and a type index
+      (= b 0x62)
+      (let [at (do (u8 r) (pos r))
+            x (try (sleb r 33) (catch arbace.lang.ExceptionInfo _ -1))]
+        (when (neg? x) (malformed "malformed heap type" at))
+        (list 'exact x))
+      (and (>= b 0) (= 0x40 (bit-and b 0xc0)))
       (do (u8 r) (or (heap-bytes b) (malformed "malformed heap type" (dec (pos r)))))
       ;; decode.ml's heaptype: `either` a type index (s33, not negative) or an abstract heap type (s7); when the index fails,
       ;; the s7 read of a byte with its continuation bit set is `integer representation too long`
+      :else
       (let [at (pos r)
             x (try (sleb r 33) (catch arbace.lang.ExceptionInfo _ -1))]
         (if (neg? x)
@@ -168,7 +176,14 @@
 (defn- mutability [r] (case (u8 r) 0 false 1 true (malformed "malformed mutability" (dec (pos r)))))
 
 (defn- storagetype [r]
-  (case (peek8 r) 0x78 (do (u8 r) 'i8) 0x77 (do (u8 r) 'i16) (valtype r)))
+  (case (peek8 r) 0x78 (do (u8 r) 'i8) 0x77 (do (u8 r) 'i16)
+    ;; a field's malformed type is a malformed storage type (the custom descriptors scripts' message, queue 327)
+    (let [at (pos r)]
+      (try (valtype r)
+           (catch arbace.lang.ExceptionInfo e
+             (if (#{"malformed value type" "malformed heap type" "malformed number type"} (:wasm/malformed (ex-data e)))
+               (malformed "malformed storage type" at)
+               (throw e)))))))
 
 (defn- fieldtype [r] (let [t (storagetype r) m (mutability r)] (list 'field t m)))
 
@@ -327,6 +342,8 @@
   (let [at (pos r)]
     (case (u8 r)
       0x00 [:func (u32 r)]
+      ;; an exact function import (custom descriptors, queue 327)
+      0x20 [:efunc (u32 r)]
       0x01 [:table (let [t (reftype r) l (limits r)] (assoc l :type t))]
       0x02 [:memory (limits r true)]
       0x03 [:global (let [t (valtype r) m (mutability r)] {:type t :mut m})]
@@ -428,10 +445,11 @@
                 out)))
     :import (let [counts (:imports state)
                   item (fn [m nm [k d]]
-                         (let [i (get @counts k 0)]
+                         (let [ex? (= k :efunc) k (if ex? :func k)
+                               i (get @counts k 0)]
                            (swap! counts assoc k (inc i))
                            (list 'wasm/import m nm (case k
-                                                     :func (list 'func i {:type d})
+                                                     :func (list 'func i (cond-> {:type d} ex? (assoc :exact true)))
                                                      :table (list 'table i d)
                                                      :memory (list 'memory i d)
                                                      :global (list 'global i d)
@@ -630,7 +648,9 @@
 (defn- bad [msg x] (throw (ex-info (str msg ": " (pr-str x)) {:wasm/form x})))
 
 (defn- wheap [w h]
-  (if (integer? h) (wsleb w h) (w8 w (or (heap-codes h) (bad "an unknown heap type" h)))))
+  (cond (integer? h) (wsleb w h)
+        (and (seq? h) (= 'exact (first h))) (do (w8 w 0x62) (wsleb w (second h)))
+        :else (w8 w (or (heap-codes h) (bad "an unknown heap type" h)))))
 
 (defn- wvaltype [w t]
   (cond
@@ -807,7 +827,7 @@
                           (wsub w (nth it 2)))))
     :import (let [desc (fn [w k d]
                          (case k
-                           func (do (w8 w 0) (wuleb w (:type d)))
+                           func (do (w8 w (if (:exact d) 0x20 0)) (wuleb w (:type d)))
                            table (do (w8 w 1) (wvaltype w (:type d)) (wlimits w d))
                            memory (do (w8 w 2) (wlimits w d))
                            global (do (w8 w 3) (wvaltype w (:type d)) (w8 w (if (:mut d) 1 0)))
@@ -822,7 +842,7 @@
                             0 (let [[_ m nm [k _ d]] (first g)] (wname! w m) (wname! w nm) (desc w k d))
                             0x7f (do (wname! w m) (wname! w "") (w8 w 0x7f) (wuleb w n)
                                      (doseq [[_ _ nm [k _ d]] g] (wname! w nm) (desc w k d)))
-                            0x7e (let [[k d] (if (seq g) (let [[_ _ _ [k _ d]] (first g)] [k d]) (let [k (symbol (name (first kd)))] [k (if (#{'func 'tag} k) {:type (second kd)} (second kd))]))]
+                            0x7e (let [[k d] (if (seq g) (let [[_ _ _ [k _ d]] (first g)] [k d]) (let [k0 (first kd) k (symbol (name (if (= k0 :efunc) :func k0)))] [k (if (#{'func 'tag} k) (cond-> {:type (second kd)} (= k0 :efunc) (assoc :exact true)) (second kd))]))]
                                    (wname! w m) (wname! w "") (w8 w 0x7e) (desc w k d) (wuleb w n)
                                    (doseq [[_ _ nm] g] (wname! w nm))))
                           (recur (next gs) (drop n its))))))

@@ -41,6 +41,7 @@
     ^{:line 41 :tag int} ntypes
     ^{:line 42 :tag (slice int)} funcs
     ^{:line 43 :tag int} nimpf
+    ^{:tag (slice bool) :doc "each imported function's exactness (custom descriptors, queue 327)\n"} impExact
     ^{:line 44 :tag (slice TableType)} tables
     ^{:line 45 :tag (slice Limits)} mems
     ^{:line 46 :tag (slice GlobalType)} globals
@@ -281,6 +282,23 @@
 
 
 ^{:go/end 286} (go/method heap "heap reads a heap type (a type index checked and made canonical).\n" ^int32 [^{:tag (* validator)} v]
+  (let [(values h _) (.heapE v)]
+    ^{:line 1} h))
+
+
+(go/method heapE "heapE reads a heap type and its exactness (custom descriptors, queue 327: 0x62 and a type index).\n" [^{:tag (* validator)} v] :results [int32 bool]
+  (when (and (< (.-p (.-r v)) (len (.-b (.-r v)))) (== (aget (.-b (.-r v)) (.-p (.-r v))) 0x62))
+    (inc! (.-p (.-r v)))
+    (let [h (.sleb (.-r v) 33)]
+      (when (< h 0)
+        (panic (addr (lit Malformed "malformed heap type"))))
+
+      (return (conv int32 (.typeIdx v (conv uint64 h))) true)))
+
+  (return (.heapAt v) false))
+
+
+(go/method heapAt ^int32 [^{:tag (* validator)} v]
   (let [h (.sleb (.-r v) 33)]
     (when (>= h 0)
       (return (conv int32 (.typeIdx v (conv uint64 h)))))
@@ -296,10 +314,9 @@
     (switch
       (case [(and (>= c 0x7b) (<= c 0x7f))]
         (return (lit ValType :K c)))
-      (case [(== c 0x63)]
-        (return (lit ValType :K tRef :Null true :H (.heap v))))
-      (case [(== c 0x64)]
-        (return (lit ValType :K tRef :H (.heap v))))
+      (case [(or (== c 0x63) (== c 0x64))]
+        (let [(values h e) (.heapE v)]
+          (return (lit ValType :K tRef :Null (== c 0x63) :H h :Exact e))))
       (case [(and (>= c 0x69) (<= c 0x74))]
         (return (lit ValType :K tRef :Null true :H (- (conv int32 c) 0x80)))))
 
@@ -322,10 +339,12 @@
 (go/method importDesc "importDesc reads an import's description at the reader and adds it n times to its index space.\n" [^{:tag (* validator)} v ^int n]
   (let [r (.-r v)]
     (switch [k (.u8 r)] k
-      (case [xFunc]
+      (case [xFunc 0x20]
+        ;; 0x20: an exact function import (custom descriptors, queue 327)
         (let [t (.funcType v (.u32 r))]
           (for [j 0] (< j n) (inc! j)
             (set! (.-funcs v) (append (.-funcs v) t))
+            (set! (.-impExact v) (append (.-impExact v) (== k 0x20)))
             (inc! (.-nimpf v)))))
       (case [xTable]
         (let [t (.tableType v)]
@@ -546,6 +565,13 @@
 
   (when (and (.-Null a) (not (.-Null b)))
     (return false))
+
+  ;; an exact type (custom descriptors, queue 327): matched by the same type exactly, or a bottom
+  (when (.-Exact b)
+    (when (or (== (.-H a) hBot) (== (.-H a) hNone) (== (.-H a) hNoFunc) (== (.-H a) hNoExtern) (== (.-H a) hNoExn))
+      (return (matchHeap (.-H a) (.-H b))))
+
+    (return (and (.-Exact a) (== (.-H a) (.-H b)))))
 
   (matchHeap (.-H a) (.-H b)))
 
@@ -1327,7 +1353,7 @@
             ^{:line 1254} t (.popRef v)]
           (.pops v lt)
           (.pushs v lt)
-          (.push v (refT false (.-H t)))))
+          (.push v (lit ValType :K tRef :H (.-H t) :Exact (.-Exact t)))))
       (case [OpBrOnNonNull]
         (let [lt (.labelTypes v (.label v (.u32 r)))]
           (when (or (== (len lt) 0) (!= (.-K (aget lt (- (len lt) 1))) tRef))
@@ -1343,12 +1369,14 @@
             (panic (addr (lit Malformed "malformed br_on_cast flags"))))
 
           (let [l (.u32 r)
-              ^{:line 1273} rt1 (refT (!= (bit-and f 1) 0) (.heap v))
-              ^{:line 1274} rt2 (refT (!= (bit-and f 2) 0) (.heap v))]
+              ^{:line 1273} (values h1 e1) (.heapE v)
+              ^{:line 1274} (values h2 e2) (.heapE v)
+              rt1 (lit ValType :K tRef :Null (!= (bit-and f 1) 0) :H h1 :Exact e1)
+              rt2 (lit ValType :K tRef :Null (!= (bit-and f 2) 0) :H h2 :Exact e2)]
             (when (not (match rt2 rt1))
               (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1))
 
-            (let [diff (refT (and (.-Null rt1) (not (.-Null rt2))) (.-H rt1))
+            (let [diff (lit ValType :K tRef :Null (and (.-Null rt1) (not (.-Null rt2))) :H (.-H rt1) :Exact (.-Exact rt1))
                 (values want rest) (values rt2 diff)]
               (when (== op OpBrOnCastFail)
                 (set! (values want rest) (values diff rt2)))
@@ -1546,7 +1574,8 @@
       (case [OpDataDrop]
         (.data v (.u32 r)))
       (case [OpRefNull]
-        (.push v (refT true (.heap v))))
+        (let [(values h e) (.heapE v)]
+          (.push v (lit ValType :K tRef :Null true :H h :Exact e))))
       (case [OpRefFunc]
         (let [x (.u32 r)
             ^{:line 1479} id (.fn v x)]
@@ -1555,24 +1584,25 @@
             (not (aget (.-refs v) x))
             (invalid "undeclared function reference %d" x))
 
-          (.push v (refT false (conv int32 id)))))
+          ;; a defined function's reference is exact, an imported one's when imported exactly (custom descriptors, queue 327)
+          (.push v (lit ValType :K tRef :H (conv int32 id) :Exact (or (>= (conv int x) (.-nimpf v)) (aget (.-impExact v) x))))))
       (case [OpRefIsNull]
         (.popRef v)
         (.push v i32T))
       (case [OpRefAsNonNull]
         (let [t (.popRef v)]
-          (.push v (refT false (.-H t)))))
+          (.push v (lit ValType :K tRef :H (.-H t) :Exact (.-Exact t)))))
       (case [OpRefEq]
         (.popT v (refT true hEq))
         (.popT v (refT true hEq))
         (.push v i32T))
       (case [OpRefTest OpRefTestNull OpRefCast OpRefCastNull]
-        (let [h (.heap v)]
+        (let [(values h e) (.heapE v)]
           (.popT v (refT true (topOf h)))
           (if (or (== op OpRefTest) (== op OpRefTestNull))
             (.push v i32T)
 
-            (.push v (refT (== op OpRefCastNull) h)))))
+            (.push v (lit ValType :K tRef :Null (== op OpRefCastNull) :H h :Exact e)))))
 
       (case [OpRefI31]
         (.popT v i32T)
@@ -1594,7 +1624,8 @@
 
 
 
-          (.push v (refT false (conv int32 (aget (.-canon (.-d v)) x))))))
+          ;; an allocation's reference is exact (custom descriptors, queue 327)
+          (.push v (lit ValType :K tRef :H (conv int32 (aget (.-canon (.-d v)) x)) :Exact true))))
       (case [OpStructGet OpStructGetS OpStructGetU OpStructSet]
         (let [x (.u32 r)
             ^{:line 1527} i (.u32 r)
@@ -1652,7 +1683,7 @@
                 (.popT v i32T)
                 (.popT v i32T))))
 
-          (.push v (refT false (conv int32 (aget (.-canon (.-d v)) x))))))
+          (.push v (lit ValType :K tRef :H (conv int32 (aget (.-canon (.-d v)) x)) :Exact true))))
       (case [OpArrayGet OpArrayGetS OpArrayGetU]
         (let [x (.u32 r)
             ^{:line 1585} f (aget (.-Fields (.arrayType v x)) 0)]

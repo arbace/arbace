@@ -28,6 +28,7 @@ the binary numbers them).
 | `(wasm/func I {:type T :locals [V...]} INSTR...)` | a function: its type index, its locals (flat, the binary's grouping in the layer) and its body |
 | `(wasm/table I {:type R :min N :max N :i64 true :init EXPR})` | a table (`:init`: Wasm 3.0's initializer) |
 | `(wasm/memory I {:min N :max N :i64 true :page P})` | a memory (`:page`: the custom page sizes proposal's page size, its log2, when the text or the binary states one; queue 326) |
+| `(exact X)` | an exact heap type (custom descriptors, queue 327): in `(ref (exact X))`, `(ref null (exact X))`, the casts' and `ref.null`'s heap types; an exact function import `(func I {:type T :exact true})` (binary kind 0x20) |
 | `(wasm/tag I {:type T})` | an exception tag |
 | `(wasm/global I {:type V :mut B} EXPR)` | a global and its initializer |
 | `(wasm/export "NAME" (KIND I))` | KIND `func`, `table`, `memory`, `global`, `tag` |

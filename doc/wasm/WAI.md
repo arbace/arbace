@@ -25,7 +25,12 @@ exactly, spectest's `shared_memory`), the atomic accesses (0xfe: loads, stores, 
 `atomicAt`, which traps "unaligned atomic" at an address not aligned to the access, their alignment immediate exactly natural),
 `memory.atomic.notify` (0 woken), `memory.atomic.wait32`/`wait64` ("expected shared memory" on another, else 1 not-equal or 2
 timed-out: wai runs one thread, so nothing can wake a wait) and `atomic.fence`. With one thread an atomic access is a plain one; the
-scripts have no `thread` command. A module using what is not built (a shared memory, an atomic) is refused at decoding as
+scripts have no `thread` command.
+
+Custom descriptors (queue 327; `proposals/custom-descriptors`), by part: exact references (`ValType.Exact`; 0x62 and a type index;
+matched only by the same canonical type or a bottom; an allocation's and a defined or exactly imported function's reference exact;
+an exact cast's target in an instruction's E with `hExactBit`, `refTest` comparing the dynamic type itself; an exact function import,
+0x20, linked to a function of that very type). A module using what is not built (a shared memory, an atomic) is refused at decoding as
 `unimplemented: FEATURE (WHAT)`, not as malformed.
 
 Since WA5 wai validates every module before it decodes it (`valid.go`, §7; WAS30 (a)): the driver runs no module its own validator

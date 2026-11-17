@@ -171,6 +171,11 @@
   (cond
     (and (= :kw (:t x)) (heaptypes (:s x))) (symbol (:s x))
     (idx? x) (resolve-idx ctx :type x)
+    ;; an exact heap type (custom descriptors, queue 327): a defined type's index alone
+    (lex/list-of? x "exact")
+    (let [[_ y & more] (:xs x)]
+      (when (or (nil? y) more (not (idx? y))) (malformed "unexpected token" x))
+      (list 'exact (resolve-idx ctx :type y)))
     :else (malformed "unexpected token" x)))
 
 (defn- valtype [ctx x]
@@ -748,7 +753,12 @@
         _ (when-not sp (malformed "unexpected token" d))
         ds (after-id (rest (:xs d)))
         [k v] (case sp
-                :func (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) ['func {:type ti}])
+                ;; an exact import's type use (exact TYPEUSE) (custom descriptors, queue 327)
+                :func (let [ex? (and (lex/list-of? (first ds) "exact") (empty? (rest ds)))
+                            ds (if ex? (rest (:xs (first ds))) ds)
+                            [ti _ more] (typeuse ctx ds)]
+                        (when (seq more) (malformed "unexpected token" (first more)))
+                        ['func (cond-> {:type ti} ex? (assoc :exact true))])
                 :tag (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) ['tag {:type ti}])
                 :global (let [[g more] [(first ds) (rest ds)]]
                           (when (or (nil? g) (seq more)) (malformed "unexpected token" d))
@@ -791,12 +801,15 @@
                        (add! :import (list 'wasm/import (name-str m) (name-str nm) (desc (next! sp))))))
           "func" (let [i (next! :func)
                        [names imp ys] (exports+import (after-id xs))
+                       ;; an inline import's exact type use (custom descriptors, queue 327)
+                       ex? (and imp (lex/list-of? (first ys) "exact") (empty? (rest ys)))
+                       ys (if ex? (rest (:xs (first ys))) ys)
                        [ti pids ys] (typeuse ctx ys)
                        t (get @(:types ctx) ti)]
                    (export! names 'func i)
                    (if imp
                      (do (when (seq ys) (malformed "unexpected token" (first ys)))
-                         (add! :import (list 'wasm/import (first imp) (second imp) (list 'func i {:type ti}))))
+                         (add! :import (list 'wasm/import (first imp) (second imp) (list 'func i (cond-> {:type ti} ex? (assoc :exact true))))))
                      (let [ls (take-while #(lex/list-of? % "local") ys)
                            body (drop (count ls) ys)
                            pids (if (and (seq? t) (= 'func (first t))) (vec (take (count (second t)) (concat pids (repeat nil)))) pids)

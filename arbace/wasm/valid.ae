@@ -39,7 +39,11 @@
 (defn- vec? [t] (or (= t 'v128) (= t :bot)))
 (defn- reft? [t] (or (vector? t) (= t :bot)))
 
-(defn- ht-str [h] (cond (= h :bot) "something" (integer? h) (str h) :else (str h)))
+(defn exact?
+  "An exact heap type `(exact X)` (custom descriptors, queue 327): only the defined type X, not its subtypes."
+  [h] (and (seq? h) (= 'exact (first h))))
+
+(defn- ht-str [h] (cond (= h :bot) "something" (integer? h) (str h) (exact? h) (str "(exact " (second h) ")") :else (str h)))
 (defn- rt-str [[_ n h]] (str "(ref " (when n "null ") (ht-str h) ")"))
 (defn- t-str [t] (cond (= t :bot) "bot" (vector? t) (rt-str t) :else (str t)))
 (defn- ts-str [ts] (str "[" (apply str (interpose " " (map t-str ts))) "]"))
@@ -92,9 +96,10 @@
         (let [d (type-def c x)
               [s n] (:group d)
               s (long s) n (long n)
-              ref (fn [y] (if (integer? y)
-                            (let [y (long y)] (if (and (>= y s) (< y (+ s n))) [:rec (- y s)] (canon c y)))
-                            y))
+              ref (fn ref [y] (cond
+                                (integer? y) (let [y (long y)] (if (and (>= y s) (< y (+ s n))) [:rec (- y s)] (canon c y)))
+                                (exact? y) [:exact (ref (second y))]
+                                :else y))
               g (vec (for [i (range s (+ s n)) :let [di (type-def c i)]]
                        [(:final di) (mapv ref (:supers di)) (map-heaps ref (:comp di))]))
               v [:def g (- x s)]]
@@ -117,7 +122,8 @@
 (def ^:private any-family '#{any none eq struct array i31})
 
 (defn- top-of-heap [c h]
-  (cond (integer? h) (if (= :func (first (expand c h))) 'func 'any)
+  (cond (exact? h) (top-of-heap c (second h))
+        (integer? h) (if (= :func (first (expand c h))) 'func 'any)
         (any-family h) 'any
         ('#{func nofunc} h) 'func
         ('#{exn noexn} h) 'exn
@@ -140,6 +146,10 @@
     (= h1 'nofunc) (match-heap c h2 'func)
     (= h1 'noexn) (match-heap c h2 'exn)
     (= h1 'noextern) (match-heap c h2 'extern)
+    ;; exactness (custom descriptors, queue 327): (exact x) matches (exact y) when x and y are the same type, and what x matches
+    (and (exact? h1) (exact? h2)) (= (canon c (second h1)) (canon c (second h2)))
+    (exact? h1) (match-heap c (second h1) h2)
+    (exact? h2) false
     (and (integer? h1) (integer? h2)) (match-def c h1 h2)
     (integer? h1) (case (first (expand c h1))
                     :struct (contains? '#{any eq struct} h2)
@@ -177,7 +187,7 @@
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; type checks
 
-(defn- check-heap [c h] (when (integer? h) (type-def c h)) nil)
+(defn- check-heap [c h] (cond (integer? h) (type-def c h) (exact? h) (type-def c (second h))) nil)
 (defn- check-val [c t] (when (vector? t) (check-heap c (nth t 2))) nil)
 (defn- check-comp [c cm]
   (case (first cm)
@@ -488,7 +498,8 @@
       ref.null (do (check-heap c a1) (sig [] [[:ref true a1]]))
       ref.func (let [_ (func c a1)]
                  (require! (contains? (:refs c) a1) #(str "undeclared function reference " (u-str a1)))
-                 (sig [] [[:ref false (func c a1)]]))
+                 ;; a defined function's reference is exact, an imported one's when imported exactly (custom descriptors, queue 327)
+                 (sig [] [[:ref false (if (contains? (:inexact c) a1) (func c a1) (list 'exact (func c a1)))]]))
       ref.is_null (let [[_ _ h] (peek-ref 0 s)] (sig [[:ref true h]] '[i32]))
       ref.as_non_null (let [[_ _ h] (peek-ref 0 s)] (sig [[:ref true h]] [[:ref false h]]))
       ref.test (let [rt (vt a1)] (check-val c rt) (sig [[:ref true (top-of-heap c (nth rt 2))]] '[i32]))
@@ -499,7 +510,8 @@
       (struct.new struct.new_default)
       (let [fts (struct-type c a1)]
         (require! (or (= nm 'struct.new) (every? (fn [[s]] (defaultable? (unpacked s))) fts)) "field type is not defaultable")
-        (sig (if (= nm 'struct.new) (mapv (fn [[s]] (unpacked s)) fts) []) [[:ref false a1]]))
+        ;; an allocation's reference is exact (custom descriptors, queue 327)
+        (sig (if (= nm 'struct.new) (mapv (fn [[s]] (unpacked s)) fts) []) [[:ref false (list 'exact a1)]]))
       (struct.get struct.get_s struct.get_u)
       (let [fts (struct-type c a1) i (long (nth e 2))]
         (require! (< i (count fts)) #(str "unknown field " (u-str i)))
@@ -514,16 +526,16 @@
       (array.new array.new_default)
       (let [[s] (array-type c a1)]
         (require! (or (= nm 'array.new) (defaultable? (unpacked s))) "array type is not defaultable")
-        (sig (conj (if (= nm 'array.new) [(unpacked s)] []) 'i32) [[:ref false a1]]))
-      array.new_fixed (let [[s] (array-type c a1)] (sig (vec (repeat (nth e 2) (unpacked s))) [[:ref false a1]]))
+        (sig (conj (if (= nm 'array.new) [(unpacked s)] []) 'i32) [[:ref false (list 'exact a1)]]))
+      array.new_fixed (let [[s] (array-type c a1)] (sig (vec (repeat (nth e 2) (unpacked s))) [[:ref false (list 'exact a1)]]))
       array.new_elem (let [[s :as ft] (array-type c a1) rt (elem c (nth e 2))]
                        (require! (match-val c rt (unpacked s))
                                  #(str "type mismatch: element segment's type " (rt-str rt) " does not match array's field type " (ft-str ft)))
-                       (sig '[i32 i32] [[:ref false a1]]))
+                       (sig '[i32 i32] [[:ref false (list 'exact a1)]]))
       array.new_data (let [[s] (array-type c a1)]
                        (data c (nth e 2))
                        (let [t (unpacked s)] (require! (or (num? t) (vec? t)) "array type is not numeric or vector"))
-                       (sig '[i32 i32] [[:ref false a1]]))
+                       (sig '[i32 i32] [[:ref false (list 'exact a1)]]))
       (array.get array.get_s array.get_u)
       (let [[s] (array-type c a1)]
         (require! (= (not= nm 'array.get) (boolean (#{'i8 'i16} s))) (str "array is " (if (= nm 'array.get) "packed" "unpacked")))
@@ -681,7 +693,9 @@
         ;; imports, in order
         c (reduce (fn [c [_ _ _ [k _ d]]]
                     (case k
-                      func (do (func-type c (:type d)) (update c :funcs conj (:type d)))
+                      func (do (func-type c (:type d))
+                               (cond-> (update c :funcs conj (:type d))
+                                 (not (:exact d)) (update :inexact (fnil conj #{}) (count (:funcs c)))))
                       table (do (check-tabletype c d) (update c :tables conj (table-of d)))
                       memory (do (check-memtype d) (update c :mems conj d))
                       global (let [t (vt (:type d))] (check-val c t) (update c :globals conj {:mut (boolean (:mut d)) :t t}))
