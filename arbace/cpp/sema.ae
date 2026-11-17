@@ -2170,6 +2170,11 @@
 
 (declare ce-lv ce-init ce-glvalue ce-store ce-construct ce-args-env)
 
+(def ^:dynamic *ce-analyzing*
+  "h-cpp-read: the functions whose bodies a constant evaluation is analyzing (their ids), so that a call of one from within
+  its own body is not evaluated again."
+  #{})
+
 (defn ce-eval
   "The constant value of the typed expression `e` (`env` {var-id atom} the locals of the evaluated calls; ::this the
   location of a member's object, ::ret the function's return type)."
@@ -2323,7 +2328,12 @@
                (when (or (not (or (:constexpr f) (and (:cls f) (:lambda (abi/cls (:cls f))))))
                          (:virtual e))
                  (not-constant "a call of " (:name f)))
-               (when-not (:tbody f) (when (:body f) (binding [*ce-manifest* false] (analyze-fn! (:id f)))))
+               ;; (h-cpp-read: a call from within the function's own definition, before its body is analyzed -- f3's
+               ;; `enum E { a = f3 () };` -- is not a constant, GCC's "called in a constant expression before its definition is
+               ;; complete", [expr.const]/5.3: the analysis had recursed until the stack overflowed, fatal on stage 0's Go)
+               (when (and (not (:tbody f)) (contains? *ce-analyzing* (:id f)))
+                 (not-constant "'" (:name f) "' called in a constant expression before its definition is complete"))
+               (when-not (:tbody f) (when (:body f) (binding [*ce-manifest* false *ce-analyzing* (conj *ce-analyzing* (:id f))] (analyze-fn! (:id f)))))
                (let [f (fnd (:fn e))
                      member? (and (:cls f) (not (:static f)))
                      this (when (and member? (not (abi/empty-class? (:cls f))))
@@ -5061,8 +5071,27 @@
         t ((:ctad @hooks) ctx (first ct) kind a)]
     {:op :temp-obj :init (init-for t a ctx (cond (map? a) :list (empty? a) :value :else :direct)) :ty t :cat :pr}))
 
+(def ^:dynamic *analyze-depth*
+  "h-cpp-read: when bound (arbace.repr.cpp.diag's Sema, a long array of one), the nesting of `analyze` on this thread; past
+  `max-analyze-depth` a StackOverflowError, as the evaluating host throws one when its stack ends: compiled into stage 0 (W2)
+  the analysis' own stack had grown to Go's 1 GB limit, a fatal error ending the whole run (constexpr-recursion1.C)."
+  nil)
+
+(def ^:const max-analyze-depth 4000)
+
+(declare analyze*)
+
 (defn analyze
   "The typed expression of the tree node `n` in the context `ctx` ({:scope :fn :this-type ...})."
+  [ctx n]
+  (if-let [^longs d *analyze-depth*]
+    (let [k (aget d 0)]
+      (when (> k max-analyze-depth) (throw (StackOverflowError.)))
+      (aset d 0 (inc k))
+      (try (analyze* ctx n) (finally (aset d 0 k))))
+    (analyze* ctx n)))
+
+(defn- analyze*
   [ctx n]
   (let [r (analyze-node ctx n)]
     ;; (CX12, the checker: a binary operator's position kept, for the constant evaluation's diagnostics)
