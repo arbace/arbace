@@ -18,6 +18,9 @@
 ;; usage: arbace test/haskell/eval/gen.ae PRIMOPS.txt OUTDIR
 (require '[arbace.string :as s])
 (import '[java.io File])
+;; queue 325's DECISION 2 (a): the golden files' model (each line's expected text), test/haskell/eval/golden.ae
+(load "/test/haskell/eval/golden")
+(alias 'g 'hsi.golden)
 
 (def bound 64)
 
@@ -86,7 +89,7 @@
 (defn- combos [vss]
   (if (empty? vss) [[]] (for [v (first vss) r (combos (rest vss))] (cons v r))))
 
-(defn primop-lines [{:keys [occ type with]}]
+(defn primop-cases [{:keys [occ type with]}]
   (let [ts (split-arrow type) args (vec (butlast ts)) res (result-types (last ts))
         div? (re-find #"div_like\s*=\s*True" with)
         shift? (re-find #"(?i)shift" occ)
@@ -96,7 +99,12 @@
                           (or (not= occ "quotRemWord2#") (= "0##" (first vs)))
                           ;; decodeDouble_2Int# of a zero: GHC's RTS leaves its sign uninitialised (review 189, F6)
                           (not (and (= occ "decodeDouble_2Int#") (#{"0.0##" "(negateDouble# 0.0##)"} (first vs))))))
-        cs (take bound (filter ok? (combos vss)))
+        cs (take bound (filter ok? (combos vss)))]
+    {:args args :res res :cases cs}))
+
+(defn primop-lines [{:keys [occ] :as op}]
+  (let [{:keys [res cases]} (primop-cases op)
+        cs cases
         n (count res)
         vars (map #(str "r" %) (range n))
         shown (if (= 1 n) (str "show (" (:box (scalars (first res))) " r0)")
@@ -106,6 +114,11 @@
         (if (= 1 n)
           (str "  t " (pr-str (str occ " " (s/join " " vs))) " (case " app " of r0 -> " shown ")")
           (str "  t " (pr-str (str occ " " (s/join " " vs))) " (case " app " of (# " (s/join ", " vars) " #) -> " shown ")"))))))
+
+(defn primop-golden [{:keys [occ] :as op}]
+  (let [{:keys [args res cases]} (primop-cases op)]
+    (for [vs cases]
+      (str occ " " (s/join " " vs) " = " (g/primop-expected occ args res vs)))))
 
 (def prelude-t
   ["t :: String -> String -> IO ()"
@@ -204,6 +217,15 @@
                                 (s/replace #"\by\b" (fn [_] (if y (str "(" y " :: " ty ")") "y"))))]
                       (str "  t " (pr-str (str ty ": " m (when x (str " with " x)) (when y (str ", " y)))) " (" e ")")))
                   [""])))
+
+(defn class-golden [[cls types methods]]
+  (for [ty types
+        :let [vs (instances ty)
+              pairs (take 12 (for [x vs y vs] [x y]))]
+        m methods
+        :let [uses-y (re-find #"\by\b" m) uses-x (re-find #"\bx\b" m)]
+        [x y] (cond uses-y pairs uses-x (map (fn [v] [v nil]) vs) :else [[nil nil]])]
+    (str ty ": " m (when x (str " with " x)) (when y (str ", " y)) " = " (g/class-expected cls m ty x y))))
 
 ;; ---------------------------------------------------------------------------------------------------------
 ;; The runtime's paths
@@ -352,6 +374,47 @@
 
 (def runtime-stdin {"runtime-textio" "first line\nsecond, ünïcödé\nlast without newline"})
 
+;; queue 325's DECISION 2 (a): each runtime program's expected run, derived from its lines above by hand (runtime-integer's
+;; by the model, golden.ae) and the libraries' messages (GHC 9.14.1's ghc-internal: the uncaught exception's layout of
+;; GHC.Internal.Conc.Sync's handler, displayException's HasCallStack backtrace, NonTermination's <<loop>>), each checked
+;; against GHC's recorded run (bin/hsi own-verdicts). NAME's stdout, stderr and exit status.
+(defn uncaught-line [prog text]
+  ;; the source line of text in the generated file (its first line the header)
+  (inc (inc (.indexOf ^java.util.List (vec (runtime-programs prog)) text))))
+(def runtime-expected
+  {"runtime-deep"
+   ;; foldl and foldr (+) over [1 .. 10^6]: 10^6 (10^6 + 1) / 2; 2^20000 has floor(20000 log10 2) + 1 = 6021 digits
+   {:stdout "500000500000\n500000500000\n6021\n1000000\n"}
+   "runtime-loop"
+   ;; x = x + 1 :: Int is a black hole: NonTermination, uncaught after "before"
+   {:stdout "before\n" :exit 1
+    :stderr "runtime-loop: Uncaught exception ghc-internal:GHC.Internal.Control.Exception.Base.NonTermination:\n\n<<loop>>\n"}
+   "runtime-laziness"
+   ;; sum (reverse ...) forces c, b, a; length forces no element; xs !! 2 traces x3 alone; fst forces the pair, not its
+   ;; second; the shared thunk traces once; head of [] is caught; cycle's element traced once; the strict foldr
+   {:stdout "6\n4\n3\n1\n4\ncaught Prelude.head: empty list\n\"zzzzz\"\n100000\n"
+    :stderr "c\nb\na\nx3\npair\nshared\ncyc\n"}
+   "runtime-exceptions"
+   ;; each try's Left; mask states: Unmasked, mask_ MaskedInterruptible, uninterruptibleMask_ MaskedUninterruptible,
+   ;; restore Unmasked; Map.!'s error's first line; the final throwIO uncaught, with its call site
+   {:stdout (str "Left divide by zero\nLeft arithmetic overflow\nLeft (E \"io\")\nLeft (E \"pure\")\nboom\nhandled E \"h\"\n"
+                 "body\ncaught b\nfinally\nacquire\nrelease\nin\nout\nLeft (E \"inner\")\n"
+                 "Unmasked\nMaskedInterruptible\nMaskedUninterruptible\nUnmasked\nMap.!: given key is not an element in the map\n")
+    :exit 1
+    :stderr (str "runtime-exceptions: Uncaught exception main:Main.E:\n\nE \"uncaught\"\n\nHasCallStack backtrace:\n"
+                 "  throwIO, called at runtime-exceptions.hs:" (uncaught-line "runtime-exceptions" "  throwIO (E \"uncaught\")") ":3 in main:Main\n\n")}
+   "runtime-threads"
+   ;; 1 + ... + 5; 10 threads x 100 increments; an MVar no one else reaches; throwTo itself, caught; one capability
+   {:stdout "15\n1000\nkilled\nLeft thread blocked indefinitely in an MVar operation\nLeft self\n1\n"}
+   "runtime-stm"
+   ;; 1 + ... + 20; the queue in order; the TVar is positive, so retry, and orElse's right; throwSTM; retry forever
+   {:stdout "210\n[1,2,3,4,5]\nelse\nLeft stm\nLeft thread blocked indefinitely in an STM transaction\n"}
+   "runtime-integer" {:stdout (g/runtime-integer-stdout)}
+   "runtime-textio"
+   ;; "block " flushed before the line-buffered line; stdin's 47 characters (10 + 1 + 15 + 1 + 20), upper-cased by line
+   {:stdout "block línea ünïcödé λ→ 😀\nJust UTF-8\nFalse\nFIRST LINE\nSECOND, ÜNÏCÖDÉ\nLAST WITHOUT NEWLINE\n47\n"
+    :stderr "to stderr\nno newline at the end"}})
+
 (let [[primops-file out] *command-line-args*
       dir (File. ^String out)
       ops (parse-primops (slurp primops-file))
@@ -362,13 +425,19 @@
   (doseq [^File f (.listFiles dir)] (.delete f))
   (doseq [[section os] (sort-by key by-section)]
     (let [slug (-> section (s/replace "#" "") (s/replace #"[^A-Za-z0-9]+" "-") s/lower-case)]
-      (write! (str "primops-" slug ".hs") (primop-program section os))))
+      (write! (str "primops-" slug ".hs") (primop-program section os))
+      (write! (str "primops-" slug ".stdout") (str (s/join "\n" (mapcat primop-golden os)) "\n"))))
   (doseq [c classes]
-    (write! (str "class-" (s/lower-case (first c)) ".hs") (class-program c)))
+    (write! (str "class-" (s/lower-case (first c)) ".hs") (class-program c))
+    (write! (str "class-" (s/lower-case (first c)) ".stdout") (str (s/join "\n" (class-golden c)) "\n")))
   (doseq [[n ls] (sort-by key runtime-programs)]
     (write! (str n ".hs") (str "-- generated by test/haskell/eval/gen.ae: the runtime's paths: do not edit\n"
                                (s/join "\n" ls) "\n")))
   (doseq [[n text] runtime-stdin]
     (write! (str n ".stdin") text))
+  (doseq [[n {:keys [stdout stderr exit]}] (sort-by key runtime-expected)]
+    (write! (str n ".stdout") stdout)
+    (when stderr (write! (str n ".stderr") stderr))
+    (when exit (write! (str n ".exit") (str exit "\n"))))
   (println (str "hsi generate: " (count by-section) " primop programs (" (count scalar) " of " (count ops) " primops), "
                 (count classes) " class programs, " (count runtime-programs) " runtime programs")))

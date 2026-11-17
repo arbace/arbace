@@ -2537,3 +2537,92 @@ semantics, staged (`go/arbace/hs/threaded.ae`, new; made on the printed Go as HE
 - **Left** (stages 2 onward): Haskell threads in parallel on capabilities (the machine's state is one goroutine's); safe calls into
   the program's own C off the machine (ci's state); the threaded event manager; interruptible calls (`interruptible` FFI's
   pthread_kill); C threads calling back (`:test-c`, HES68).
+
+## As built: queue 325g, DECISION 2 (a): the samples' and the synthetic corpus's golden files
+
+(The user's choice of 2026-11-17, queue 325's DECISION 2 (a).) The samples (`test/haskell/eval/samples`, 26) and the synthetic
+corpus (`test/haskell/eval/synthetic`, 37) were judged only by GHC's recorded run (`ref-ghc914.edn`, 0.5). Each program now has
+its expected output committed beside it: `NAME.stdout`, `NAME.stderr` (none: an empty one) and `NAME.exit` (none: 0), the
+synthetic corpus's written by its generator. `bin/hsi own-verdicts` lists a program in `own-verdicts.tsv` when its golden files
+are GHC's recorded -O0 run (the testsuite's rule); one that is not is a review left open: reported, and `--check` fails.
+`bin/lib/hsi/check`'s `own_ref` reads them at -O0 (at -O1 the -O1 record judges: five synthetic programs print otherwise at
+-O1, GHC's optimiser's choices). `bin/hsi record-ref --keep DIR` keeps each run's outputs (the text the review reads).
+
+The samples' review (26 of 26). Each program read against its output, line by line, from the program's own logic and the
+Haskell report's semantics (and the libraries' source where the text is theirs: GHC 9.14.1's tarball by its pin), then checked
+against GHC's recorded run by the record's SHA-256s. The text is GHC 9.14.1's run on linux/arm64 (the VM's ghc, `record-ref
+--keep`): 22 programs equal the amd64 record as they are; four differ, each by one line whose amd64 form was derived and proved
+by the record's hash:
+- LibMisc: `System.Info.arch` is the compiling host's machine (`"x86_64"`, not `"aarch64"`): base's STG in the pack is amd64's,
+  so hsi prints `"x86_64"` on any host.
+- Exc and Trace: the uncaught `Map.!` error's backtrace names containers' unit id, the installation's (`containers-0.8-b42e`,
+  `test/haskell/target/installation.edn`), not the VM's (`containers-0.8-8666`).
+- LibSystem: `listDirectory` lists in the file system's order (unspecified by the directory package): the amd64 host's gives
+  `["b","f.txt"]`, the VM's `["f.txt","b"]` (hsi prints the VM's there, as GHC does: an unclassed failure on that host before
+  and after; the program would sort to be host-independent).
+Checked by hand: the arithmetic (sums, factorials, 2^100 `div` 3, the squares' sums, nfib 32 = 2 fib 33 - 1 = 7049155, the
+UTF-8 byte counts, the Float fma's rounding at the halfway case: 1 + 2^-11 + 2^-24 ties to even, 0x3F801000, and 2^-80 above
+it rounds up, 0x3F801001), the libraries' messages against their source (`control0#`'s in GHC.Internal.Control.Exception.Base,
+the RTS's "atomically was nested", text's decode error, the uncaught-exception layout), the scheduling the programs fix by their
+delays and MVars (Conc, MVarOrder, ThrowMasked, Weak's newest-first finalizers), and two facts of the host: LibPosix's mode 33124
+(0o100544: `setPermissions` sets the owner's bits and keeps 0o044 of the umask 022 file) and LibIO's stdin and stdout not
+terminals. AsyncRerun's golden is GHC's semantics (the frozen thunk resumed: counter 1); hsi's known divergence is its class.
+
+The synthetic corpus's review (37 of 37): `test/haskell/eval/gen.ae` writes each program's golden files from an own model of
+every line it generates, `test/haskell/eval/golden.ae` (`bin/hsi generate`; `--check`: the committed files are the generator's).
+The model is the program's own logic, the Haskell report's semantics and, where the report leaves the result to the
+implementation, GHC 9.14.1's libraries and its x86-64 code, each such choice named in golden.ae's header:
+- show: GHC.Show's showLitChar and showLitString, `showsPrec`'s parentheses, GHC.Float's `floatToDigits` (ported) and
+  `formatRealFloatAlt`, Ratio's `%` layout;
+- the primops by their primops.txt.pp meaning, over the literals' values; GHC's constant folding at -O0
+  (GHC.Core.Opt.ConstantFold): a Double#/Float# operation on literals computed on their rationals and rounded (so
+  `*## 0.0## (-2.5##)` is 0.0, `+## 0.0## x` is x even for x = -0.0, a folded quotient's zero positive), the conversions on the
+  source's decimal (`float2Int# 3.4028235e38#` wraps 3.4028235e38 mod 2^64); the Cmm optimiser's literal-second rule
+  (GHC.Cmm.Opt) before MINSD/MAXSD;
+- x86-64's machine where the primop's result is the machine's: SSE's default NaN (sign set: `castDoubleToWord64# (0.0## /##
+  0.0##)` is 18444492273895866368, decodeFloat of that NaN negative), CVTTSD2SI's minBound, BSWAP then SHR 16 for
+  `byteSwap16#`, and `bitReverse16#`'s C call leaving bits 16-31 of gcc's register (the RTS's object code);
+- libm as musl 1.2.6 on x86-64: Java's StrictMath (fdlibm) and musl's own formulas for asinh, acosh and atanh, with ten
+  values listed where musl's result is another (one ulp away at most, checked when the file is written): acosf(±0) and atanf
+  of a huge or infinite x return musl's pio2_hi (0x3FC90FDA, below π/2), tanf, sinhf, asinhf, acoshf, atanhf of one input
+  each, cos(0.1) (musl's kernel 0x3FEFD712F9A817C1, fdlibm's one ulp below);
+- the classes' methods by their GHC 9.14.1 definitions (properFractionDouble through decodeFloat, `roundDouble`'s banker's
+  rounding, `realToFrac` at -O0 as `fromRational . toRational`, so the NaN of a Double is -Infinity, Ix's `index` and
+  `rangeSize` Ints, the Enum instances' arithmetic sequences and their error messages, RealFloat's default `atan2`);
+- the eight runtime programs' runs written by hand in gen.ae from their lines (runtime-integer's computed), with their stderr
+  and exit status.
+Checked: every one of the 37 stdouts is GHC's recorded amd64 run byte for byte by the record's SHA-256 (the differences the
+review found, the model's errors, were fixed in the model until none was left; none is left unexplained), the stderrs and
+statuses likewise (`bin/hsi own-verdicts --check`: 747 of 908 programs by their own verdict). Against GHC's run on linux/arm64
+the model differs where arm64's machine does (six programs: AArch64's positive default NaN, FCVTZS's saturation, FMIN and
+FMAX, REV16 leaving bits 16-31): the arm64 reference's subject (DECISION 5 (a)).
+Proved (linux/arm64): `bin/hsi check --corpus synthetic` judged by the record and by the golden files: the same verdicts, 32
+pass, 5 fail (arm64's floating point, below), 37 of 37 `:judge :own`; the control primops-int8 against primops-word8 fails
+against the golden file.
+
+## As built: queue 325g, DECISION 5 (a): the arm64 hosts' reference
+
+(The user's choice of 2026-11-17, queue 325's DECISION 5 (a).) hsi on linux/arm64 failed five synthetic programs against the
+amd64 record: not Go's fused multiply-add, as queue 325's report guessed, but the default NaN's sign. A NaN made from numbers
+(0/0) is Go's hardware result, positive on arm64 and negative on x86-64 (SSE's "QNaN floating-point indefinite"), and it shows
+wherever its bits do: castDoubleToWord64#, decodeFloat, significand, toRational, properFraction and realToFrac (at -O0
+`fromRational . toRational`, so -Infinity on amd64, Infinity on arm64). GHC 9.14.1 on arm64 prints those lines as hsi does.
+- `test/haskell/ref-ghc914-arm64.edn`: GHC 9.14.1's runs on linux/arm64 (the VM's ghc) of the programs `test/haskell/arm64-ref.txt`
+  lists, `bin/hsi record-ref --arm64` (refused on another machine), classed apart from the amd64 records (its own file and
+  header). Six programs: the three class programs, primops-double, primops-float, testsuite/numeric/should_run/T3676. Found by
+  recording samples, synthetic and testsuite-core (806 programs) on arm64 and comparing with the amd64 record: 21 differ; the
+  15 others are the installation's facts (System.Info.arch, containers' unit id, the arm64 RTS's shorter usage text in cgrun057
+  and T16916: hsi prints the reference's),
+  the file system's order (samples/LibSystem), the scheduler's timing (conc066, setnumcapabilities001, IncallAffinity), the code
+  generator where hsi computes amd64's (primops-word's byteSwap16#, REV16, and bitReverse16#, RBIT) and five Cmm and assembly
+  tests GHC does not build on arm64: none of them belongs in the reference.
+- `bin/lib/hsi/check`: on an arm64 host (`uname -m`; `HSI_REF_ARCH=arm64|amd64` says it), at -O0 and not under `HSI_JUDGE=ref`,
+  a program the arm64 reference records is judged by it before its own verdict and the amd64 record, its result `:ref :arm64`;
+  the controls likewise. The golden files and the amd64 records are amd64's and stay so; on amd64 nothing changes.
+- primops-double and primops-float still fail on arm64 against GHC's arm64 run: GHC's arm64 code is FMIN/FMAX and FCVTZS, hsi
+  computes amd64's MINSD/MAXSD and CVTTSD2SI on every host. Their class, `:arm64-amd64-ops` (by design, `:fail`), in
+  `test/haskell/divergences.edn`.
+- A negative control, `synthetic/class-realfloat synthetic/class-realfrac` (`test/haskell/hsi-controls.txt`): on arm64 judged
+  against class-realfrac's arm64 run, elsewhere against its golden file; it fails as it must.
+Proved (linux/arm64): the six and four others by `bin/hsi check`, without the arm64 reference (`HSI_REF_ARCH=amd64`): 4 pass,
+6 fail, 4 in no class; with it: 8 pass, 2 fail (`:arm64-amd64-ops`), 0 in no class, every control failing as it must.
