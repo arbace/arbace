@@ -9552,3 +9552,30 @@ Alternatives considered: moving the subsets to `:phase :full` (simplest, but a c
 crops-score's maturity counts essential steps); keying them without stage 0 (wrong: a crop runs on stage 0); a separate gate
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
+
+## 2026-11-17: Java's own platform: the survey "Own platform" (JOP1-JOP8) and the light proof (branch `h-java-platform`, from `next` `e4a7a30f3`)
+
+Asked: Java's independence is 60 because javac on Arbace attributes against jdk26u's build tree's class files
+(`jdk/javac/platform.sha256`); design the own platform for the user and prove it lightly. Found that the route was decided on
+2026-11-10 (JCS359 (a) staged, JCS360 (a), JCS362-JCS369; doc/classes/JAVA-CONFORMANCE-SURVEY.md) and stages 1-3's tooling
+built, but stage 1's 68-module measure (night 15) never ran. So the survey section (doc/classes/JAVA-FRONTEND-SURVEY.md, "Own
+platform") restates the route against the alternative of natively made declarations (JOP1) and puts the open parts of stages
+4-5 to the user as JOP2-JOP8: what the platform and its pin hold, where it is built and how it is kept honest (a content pin
+built on a miss, a weekly rebuild by the current tool), the switch night's bootstrap proof, the build tree's other reads
+(`support/gensrc` in the jdk corpora), the oracle tier and an audit rule against `$JDK/build/`, when the facts move.
+
+The proof (by day, javac's tool `javac-f70d1a9d900e` of 2026-11-15: none at `next`'s key existed, the F26 agent's build had
+failed; jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259`; `bin/javac-vendor classes modules`, `GOMEMLIMIT=2GiB`, serial, a 3 GiB
+watchdog that never fired): java.logging and jdk.unsupported equal, java.prefs known, controls failing as they must; then the 24
+modules stage 1 had not measured, java.base, java.desktop, java.xml, jdk.localedata, jdk.hotspot.agent and jdk.compiler among
+them: 23,406 classes in 1,143 s, every process at most 2.07 GB, 15 modules equal, 9 differing in 36 classes, each (javap -v -p
+of both, by hand) only an anonymous class's LocalVariableTable parameter names (`arg0` in the build, the source's on Arbace),
+JCS360's `:param-names`. All 68 modules are now measured: 27,530 class files, 50 modules byte for byte, 48 classes in 18
+modules `:param-names`, no other kind. The own chain end to end on two modules (own generated sources, classes, descriptors; a
+platform with them in place of the build's) compiles the module sample to the same 4 class files; the declarations
+`arbace.repr.java.classfile` reads (`parse`, `strip`) of all 37 differing pairs are equal. Two small bugs of `bin/javac-vendor`
+found, not fixed here (it is in `arbace_javac_key`): `pb_modules | grep -qx` under `pipefail` refuses java.base; control 2 may
+pick an equal module with no class. Nothing committed but the documents; no key moves. Alternatives considered: running the
+heavy chain in the night slot as planned (not needed: under a memory limit every module fits the light tier); a forms-level
+proof now (needs the platform dir of `bin/repr-java` swapped, a stage 4 switch, which the brief excludes). Evidence and scripts:
+`.tmp/worktrees/h-java-platform/.tmp/poc/`.

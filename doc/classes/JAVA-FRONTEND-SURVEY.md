@@ -6905,3 +6905,221 @@ measured no gain from the second.
 What remains, after the rerun and with the main session's go-ahead: the whole parts (night commands in the journal entry),
 then `:clean-only` lifted and `:mem-gib` set from their peaks. No key moves (gate_key the same; bin/lib/repr-java is out of
 the javac key). No proposals (JFS161 none).
+
+## Own platform (survey, 2026-11-17; branch `h-java-platform`)
+
+Java's independence is 60 (`test/crops/independence.edn`, 59.7): read, eval, AOT and print 0.5 each, by the user's ruling of
+2026-11-09, because javac on Arbace attributes against the platform `jdk/javac/platform.sha256` pins, jdk26u's build tree's
+exploded modules with the jmods' descriptors: class files the JDK's own build made (its interim javac on the boot JDK 25),
+consumed as a record. This section gathers what an own platform takes, with what is already decided and built, and puts
+the remaining choices to the user as JOP1-JOP8. Nothing here switches the platform or moves a pin.
+
+### What is already decided and built (JCS359-JCS369, doc/classes/JAVA-CONFORMANCE-SURVEY.md)
+
+The route and most of the shape were decided on 2026-11-10 (JCS359 (a), staged; JCS360 (a); JCS362-JCS369 as recommended):
+
+| stage | what | state |
+|---|---|---|
+| (1) | every module's class files by javac on Arbace from jdk26u's sources, `--module-source-path`, `--system none` (no class file read), the build's options and file lists as data (`jdk/javac/platform-build.edn`), each difference from the build's class files in `jdk/javac/platform-own-known.edn` | tooling built (`bin/javac-vendor classes modules`); all 68 measured, 44 on 2026-11-10 and 24 (java.base again) with this section's proof (below) |
+| (2) | the 16 modules' generated sources by the build's own tools on javac's tool (`bin/javac-vendor gensrc`) | built: 2,305 of 2,307 the build's byte for byte, 2 known (CaseFolding's Unicode, VarHandleGuards' method order) |
+| (3) | the descriptors as the image holds them (`bin/javac-vendor descriptors`, `test/javac-platform/modinfo.ae`) | built: 67 of 68 the jmods', java.base known (ModuleHashes, JCS364 (a)) |
+| (4) | `bin/javac-vendor platform --own`, a content pin (JCS365 (a): `jdk/javac/platform.sha256` rewritten, out of `arbace_javac_key`, built on a miss into `ARBACE_GATE_EXES/platform-PIN20`), both platforms selectable for one transition night (JCS367 (a)) | not begun |
+| (5) | the gate's steps, the independence facts, the build tree only in the oracle tier's `javac-platform-oracle` (JCS366 (a)) | not begun |
+
+So this survey does not reopen the route; JOP1 restates it against the alternative the brief names (declarations made
+natively), with the numbers measured since. JOP2-JOP8 are the open parts of stages 4 and 5, and JCS389-JCS392's (still
+proposed) are folded in where they belong.
+
+### The proof of concept (2026-11-17, by day)
+
+javac's tool: none at `next`'s javac key existed this afternoon (the F26 + Ghidra agent's tool build failed at 13:42), so the
+newest one in `ARBACE_GATE_EXES`, `javac-f70d1a9d900e` (built 2026-11-15 22:31, before B2's conversion of javac's world), ran
+`bin/javac-vendor classes modules` (`JAVAC_VENDOR_MODULES`, serial, `GOMEMLIMIT=2GiB`, a watchdog killing any process above
+3 GiB, which never fired). The class files are a function of jdk26u's sources and javac's semantics, which B2 did not change
+(javac's world gained library classes, not compiler code), so the result stands for `next`'s tool; it is to be repeated on it
+at stage 4 anyway (JOP4).
+
+- **The brief's three**: java.logging 54 classes **equal**, jdk.unsupported 12 **equal**, java.prefs 25 **known** (its one
+  `:param-names` class, with the digests the known file holds: the tool of 11-10 and this one give the same bytes); the
+  two negative controls failed as they must. 103 s, peak 1.98 GB (java.prefs).
+- **The modules not measured before** (stage 1's day measure had 44 of 68): 19 more, 424 s, every peak at most 2.06 GB
+  (jdk.jconsole; jdk.compiler, 1,608 classes, 2.02 GB): java.se, jdk.crypto.ec, jdk.graal.compiler,
+  jdk.graal.compiler.management, jdk.jdwp.agent (descriptor shells), jdk.incubator.vector, java.compiler, jdk.internal.md,
+  jdk.jpackage, java.security.jgss, jdk.internal.vm.ci (the one module with `-source 25 -parameters`) and jdk.jfr **equal**;
+  jdk.jconsole (14 classes), jdk.jshell (7), jdk.javadoc (4), jdk.compiler (3), jdk.jlink (2), jdk.internal.le (2) and
+  jdk.jdeps (1) **differ**, 33 classes of 5,537.
+- **The big ones** (one at a time, `GOMEMLIMIT=2GiB`): jdk.hotspot.agent 1,485 classes (1 differs, 92 s, 2.01 GB), java.xml 2,209 (2 differ, 111 s, 2.02 GB),
+  jdk.localedata 1,577 **equal** (90 s, 2.05 GB), java.desktop 5,366 **equal** (245 s, 2.07 GB), and java.base 7,433 **equal**
+  (189 s, 2.07 GB; JN3.5's run without a limit peaked at 3.25 GB). (`classes modules` refused java.base at first: "no module
+  java.base in platform-build.edn": `pb_modules | grep -qx "$m"` under `pipefail`, the `sed` killed by SIGPIPE when grep stops
+  at the file's first module; run from a copy with the check fixed, `.tmp/poc/`, not committed.)
+- **Every difference is JCS360's `:param-names`**: `javap -v -p` of each pair (the build's JDK, by hand,
+  `.tmp/poc/cmp.sh`), all lines but the LocalVariableTable's name column and the Utf8 constants equal; the names are the
+  build's `arg0, arg1, ...` against the source's (`name`, `uri, kind`, `descriptor, location`, ...), each an anonymous class's
+  method implementing or overriding a JDK method (`JavaFileManager`, `ForwardingJavaFileManager`, `ModuleFinder`, `Thread`,
+  `JLabel`, ...). Two jconsole classes also renumber their constant pool from that entry on (`SheetDialog$3`,
+  `OverviewPanel$1`: the source's name `text` is already in the pool, so one Utf8 fewer), nothing else.
+- **No new kind of difference**: with stage 1's day (10 classes in 41 modules) and JN3.5 (java.base, 7,434 classes, equal
+  but its rewritten descriptor), all 68 modules are now measured: 27,530 class files (every one but the 68 descriptors), 50 modules byte for byte
+  the build's, 18 with 48 differing classes (12 from 11-10, 36 today), every one `:param-names`.
+- **The chain, own end to end, on two modules** (`.tmp/poc/chain.sh`): `gensrc java.base java.logging` (java.base 234 of 236
+  the build's, 2 known; java.logging 12 of 12), java.logging and java.prefs compiled from those generated sources
+  (`PB_GENSRC`: equal, known), their descriptors from the own ones (2 of 2 the jmods'), then a platform of the build's 66
+  modules with these two own ones in their place: the module sample (`test/repr/java/module`, `requires transitive
+  java.logging`, `requires static java.desktop`, which requires java.prefs) compiled by javac on Arbace against each, the 4
+  class files equal byte for byte and no diagnostic either way.
+- **The declarations nattr reads are equal**: for the 37 differing pairs at hand (today's 36 and java.prefs'), `arbace.repr.java.
+  classfile`'s `parse` of the own and the build's class file are equal, and so are their `strip`ped bytes (the java.base pack's
+  form, JN10): repr/java's native attribution and the pack cannot tell the two platforms apart (`.tmp/poc/decls-all.ae`).
+- **Found on the way**: `modules_controls`' control 2 takes the first equal module of the run, which may have no class
+  (java.se, a descriptor shell): the 19-module run printed "no equal class in this run (none taken)" though 12 modules were
+  equal. A one-line fix (the first equal module with a class) for stage 4's commit, with the `pipefail` one above:
+  `bin/javac-vendor` is in `arbace_javac_key`, so neither is made in this light task.
+
+**What it implies.** (i) The own platform's class files are the build's but for debug names of anonymous classes'
+methods, which no declaration reads: an anonymous class is never named from another compilation unit, and the
+declarations repr/java's native attribution reads are equal (above); javac reads a class file's LocalVariableTable names only
+as parameter names (diagnostics, `Elements`), for these anonymous classes never. So the forms read against the own platform
+are expected to equal today's byte for byte, which the switch proves corpus by corpus (JOP4).
+(ii) The cost is small: every module, java.base among them, ran under 2.1 GB with `GOMEMLIMIT=2GiB`; the whole platform is about 35-40 minutes serial at 2.1 GB a process, or about 15-20 at `--jobs 3` (about
+6.5 GB), plus `gensrc` (2-4.5 minutes, 1 GB) and `descriptors` (1 minute): no night slot is needed for the measure itself,
+only for the gate's build step beside the other heavy steps (JOP3). The 2026-11-10 estimates (4-8 GiB a process) were
+without a memory limit. (iii) The known file
+grows to about 48 classes, all one reason; once the own platform is the pin it is the oracle tier's only (JOP6).
+
+### JOP1: the route
+
+- (a) **Own class files** (JCS359 (a), decided): the 68 modules compiled by javac on Arbace from jdk26u's sources and the own
+  generated sources, with the own descriptors; the platform javac on Arbace, repr/java's native attribution (nattr and decls
+  read class files through `arbace.repr.java.classfile`) and the java.base pack (`jdk/platform/java.base.decls`, made from the
+  platform by `bin/repr-java platform-pack`) all read it, unchanged.
+- (b) **Declarations made natively**: decls entering jdk26u's sources itself (the native parser and decls' Enter, MemberEnter,
+  Annotate over the 27,598 classes' sources), no class file. It gives nattr a source-made platform, but javac on Arbace still
+  needs class files for every level that runs javac (the read's attribution provider, the classes level, print's acceptance,
+  diagnostics, the fixtures, javac's own build tools), so (b) alone moves no stage to 1; and its answers would be a second
+  implementation's, checked against (a)'s anyway.
+- (c) (a), then (b)'s cheap half: the declarations-only pack of all 68 modules (JN10's `strip`, proven `(parse (strip b))` =
+  `(parse b)` for all 27,598 class files, JN10w.3), so that a shipped reader carries the platform as data.
+
+*Recommended: (a)*, as decided; (c)'s pack follows from it by JN10's plan (the pack is a function of the platform: it moves
+with the pin), not needed for the score.
+
+### JOP2: what the own platform holds, and its pin
+
+- (a) **Class files and descriptors only**: per module the own class files and the own `module-info.class` (stage 3's), no
+  resources. javac on Arbace's file manager lists only class files from a platform module (`overlay/jdk/javac/jdk.compiler/
+  jdk/internal/jrt/javac/FileManager.java`, its listing skips `Kind.OTHER`; `-proc:none` everywhere), and nothing else reads the
+  platform's resources (the exploded tree's 804 non-class files: properties, data). The pin keeps its format (a module a line,
+  the SHA-256 of its files' listing) with a new header naming the own platform's recipe, and gains the generated sources'
+  digests (JCS392 (a): `jdk/javac/platform-gensrc.sha256`, a module a line), so that `gensrc` judges without the build tree.
+- (b) (a) plus the resources copied from jdk26u's sources as make's copy rules do: the build tree's layout, at the cost of
+  porting `make`'s `CopyFiles` and properties' compilation (CompileProperties runs for the gensrc already); no consumer known.
+- (c) A pin per class file (27,598 lines) instead of per module: a mismatch names its class without a rebuild.
+
+*Recommended: (a)*, with (c)'s listing written beside the built platform (not committed) so that a mismatch names the class;
+the stage 4 audit (JOP6) proves no resource is read.
+
+### JOP3: where it is built, kept, and when it is rebuilt
+
+The platform is a function of jdk26u's sources at the pin, `platform-build.edn`, `platform-gensrc.edn`,
+`test/javac-platform/` and javac's semantics (javac's forms `jdk/javac/forms`, run by the tool).
+
+- (a) **Content pin, built on a miss, proven weekly**: JCS365 (a)'s `ARBACE_GATE_EXES/platform-PIN20`, built by a build step
+  `javac-platform` (after `javac-tool`, heavy, under the big lock) only when absent (a clean clone, a new host, a new pin), and
+  checked against the pin; a `:phase :weekly` step `javac-platform-rebuild` builds it again with the current javac tool and
+  requires the pin's bytes, so a change to javac on Arbace that would change the platform fails within a week; the clean run
+  builds it fresh (no cache read, as its executables).
+- (b) **Keyed by the tool**: rebuilt whenever `arbace_javac_key` moves (most nights with a change to `arbace/`, `go/`, `jdk/`):
+  about 35-40 minutes serial, 15-20 at `--jobs 3` more on every such `--full`, heavy, for a result that the pin fixes anyway.
+- (c) **Committed**: the class files (about 160 MB, or an xz pack of a few tens of MB) in the repository, never built by the
+  gate but weekly: no build on a miss, but a large blob per pin change, and the repository then holds a toolchain-shaped
+  product even if Arbace's own.
+
+*Recommended: (a)*. Its only new cost is the clean run's build (35-40 minutes serial, 15-20 at `--jobs 3`) and the weekly step.
+
+### JOP4: the switch, and the bootstrap's proof
+
+The tool that compiles the platform is built from forms read against the platform (`jdk/javac/forms` by javac on Arbace, JN5;
+`jdk/` likewise): the switch must close the loop once.
+
+- (a) **Once, on a transition night** (JCS367 (a): both platforms selectable, `JAVAC_VENDOR_PLATFORM=build|own`): (1) P_own by
+  the tool T (built from forms read against the build's platform); (2) every committed read made again against P_own and
+  required byte for byte but the provenance's `:jdk` (`bin/jrt-convert verify`, `bin/javac-vendor verify`, `bin/clojure-tests
+  --java-fixtures verify`, `bin/repr-java check --jdk`'s hashes, `bin/java-check --forms verify`, `bin/repr-java platform-check`
+  for the pack, the jtreg read level's cache); (3) T rebuilt as T' (its key moves only by the pin's removal from it, JCS365 (a));
+  (4) P_own by T' = P_own (the fixpoint: G2 = G3's rule). Then the pin rewritten and the provenance files written again.
+- (b) (a)'s steps (3)-(4) every week instead of JOP3's rebuild (one more tool build a week, about 30 minutes and 45 GiB).
+
+*Recommended: (a)*, then JOP3 (a)'s weekly rebuild, which is (4) with the current tool.
+
+### JOP5: the build tree's other reads at check time
+
+Beyond the platform, Java's steps read the build tree's `support/gensrc` as corpora: `bin/lib/repr-java/front-check:198` and
+`parse-check:121` (the jdk26u corpus's generated files), `bin/jrt-convert`'s reference for its generate step (`:149`, `:229`), and
+`bin/javac-vendor classes java.base`/`modules` and `bin/lib/repr-java/roundtrip`'s originals.
+
+- (a) **All to the own generated sources**: stage 2's output kept beside the platform (`platform-PIN20/gensrc`, pinned by
+  JCS392 (a)'s digests), `PB_GENSRC` and the corpora's gensrc root pointing at it; the build tree's then read only by the
+  oracle tier.
+- (b) Leave them: they are inputs of the read's corpora, not the platform; but by the ruling's rule a record a toolchain made,
+  consumed at check time, keeps read at 0.5.
+
+*Recommended: (a)*: without it the read stage cannot honestly score 1.
+
+### JOP6: how the gate keeps it honest
+
+- (a) **The oracle tier and an audit rule**: JCS366 (a)'s `javac-platform-oracle` (`:phase :oracle`): `classes modules` against the
+  build's class files with the known file, `gensrc` against `support/gensrc` (`platform-gensrc --check`), `descriptors` against
+  the jmods, `platform-build --check`; `javac-classes` (the JVM's javac against javac on Arbace, the host `:jdk`) moves there too;
+  `bin/gate --pins` checks jdk26u's commit and the own platform's pin, no longer the build tree's; and `test/gate/audit.ae` gains
+  a rule: a step outside the oracle tier that reads under `$JDK/build/` fails, but the frozen JVM's `images/jdk` for the hosts
+  `:frozen` and `:jdk` (the ruling's exemption).
+- (b) The oracle step alone, no audit rule.
+
+*Recommended: (a)*: the audit is what shows no step still reads the build tree (JOP5's list is what a grep found; the
+strace finds the rest).
+
+### JOP7: the independence facts, and when they move
+
+On the switch, `test/crops/independence.edn`'s Java read, eval, AOT and print become 1: `:why` "javac on Arbace attributes
+against the own platform (jdk26u's sources compiled by javac on Arbace, `bin/javac-vendor platform --own`, pinned by
+`jdk/javac/platform.sha256`)", the evidence the pin's header and the audit rule, `:verified` a stub run (the read and the
+interpreted level of a sample with `JDK` a source-only view of jdk26u, no `build/`); the header's "the platform's class files,
+jdk/javac/platform.sha256, consumed by Java's stages: 0.5" line rewritten. Java's independence 60 → 100 (99.7: the judge's
+0.986 stays, JCS361). `gate_key` and `arbace_runtime_key` do not move (they leave `jdk/javac/` out); `arbace_javac_key` moves
+once (the pin leaves it, JCS365 (a)); the steps that declare the pin (`java-check`, `java-compiled`, `jrt-derive` in the
+essential gate; `javac-verify`, `javac-classes`, the Java `--full` steps) rerun once; the provenance files' `:jdk` (`jdk/`,
+`jdk/javac/`, `jdk/platform/`, `test/java-fixtures/`, `test/java/forms/`) are written again; `jdk/platform/java.base.decls` is
+made again from the own java.base (its bytes equal if java.base's class files are, JN3.5).
+
+- (a) **At the clean run after the switch night**: the facts move in the commit that records the clean run's audited pass.
+- (b) At the switch night's commit.
+
+*Recommended: (a)*: the clean run is the only run that builds the platform from nothing under the audit.
+
+### JOP8: the known differences' form
+
+- (a) **As built**: one entry per class with both digests (JCS360 (a)); about 48 entries, all `:param-names`.
+- (b) A judged reason: the oracle step parses both class files (`arbace.repr.java.classfile`) and accepts a pair whose only
+  difference is a LocalVariableTable's parameter names (and the constant pool's renumbering that follows), no digest list.
+
+*Recommended: (a)* now (the list is short and exact; after the switch it is only the oracle's), (b) if a jdk26u update makes
+the list churn.
+
+### Cost
+
+| part | time | peak a process | when |
+|---|---|---|---|
+| stage 1, 68 modules | 35-40 min serial; 15-20 min `--jobs 3` | 2.1 GB (`GOMEMLIMIT=2GiB`); 6.5 GB at `--jobs 3` | the build step on a miss, the weekly rebuild, the clean run |
+| stage 2, `gensrc` (16 modules) | 2-4.5 min | 1 GB | with stage 1 |
+| stage 3, `descriptors` (68) | 1 min | 0.3 GB | with stage 1 |
+| JOP4's switch night | one tool build (about 30 min, 45 GiB, `javac-tool`'s), the verifies (their usual `--full` cost), stage 1 twice | as their steps | once |
+
+The platform's tree is about 160 MB on disk (27,598 class files), one per pin in `ARBACE_GATE_EXES`.
+
+### Sources
+
+- jdk26u (`https://github.com/openjdk/jdk26u`) at `baf63fbe42b8758448fee570a9d9bb914272d259`, `/root/jdk26u`: `src/*/share/classes`,
+  `src/*/{unix,linux}/classes`, the build tree's `jdk/modules` (the reference), `images/jdk/bin/javap` (the comparison by hand).
+- javac's tool `.tmp/gate-exe/javac-f70d1a9d900eb07a9afc/arbace-javac` (2026-11-15). The PoC's work and logs:
+  `.tmp/worktrees/h-java-platform/.tmp/poc/` (`jv1`-`jv3`, `cmp.sh`, `cmp*.txt`).
