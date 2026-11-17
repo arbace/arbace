@@ -1298,14 +1298,16 @@
                                    {:ty "ptr" :v sy})
                                  (unsupported "reified function without a symbol"))
                                ;; RF13: a trait object to the same trait object (a coercion of its lifetime: rustc's unsize_ptr
-                               ;; keeps the old metadata when the principal is the same)
+                               ;; keeps the old metadata when the principal is the same); RIND5: also when only auto traits are
+                               ;; dropped (`&dyn Any + Send` to `&dyn Any`: the principal's vtable serves both)
                                (and (.startsWith ^String kind "PointerCoercion(Unsize") (not (some #{:vtable} r))
                                     (let [dyn-text (fn [t] (let [p (case (ty-kind t)
                                                                      ("ref" "ptr") (pointee-type t)
                                                                      "adt" (let [a (first (nth (ty-struct t) 3))] (when (and (seq? a) (= "ty" (name (first a)))) a))
                                                                      nil)]
                                                              (when (and p (str/includes? (str (second p)) "dyn "))
-                                                               (-> (str (second p)) (str/replace #"^\((.*)\)$" "$1") (str/replace #" \+ '[A-Za-z_]+" "")))))
+                                                               (-> (str (second p)) (str/replace #"^\((.*)\)$" "$1") (str/replace #" \+ '[A-Za-z_]+" "")
+                                                                 (str/replace #" \+ (std|core)::(marker::(Send|Sync|Unpin)|panic::(Ref)?UnwindSafe)\b" "")))))
                                           a (dyn-text (ty-of o)) b (dyn-text t)]
                                       (and a (= a b))))
                                (operand! bb o)
@@ -1716,7 +1718,9 @@
                                      ;; generic_simd_intrinsic (intrinsic.rs, 1.99.1) emits them: each vector operand loaded from its memory,
                                      ;; the result stored to the destination's
                                      ("simd_splat" "simd_eq" "simd_ne" "simd_lt" "simd_le" "simd_gt" "simd_ge" "simd_or" "simd_and" "simd_xor"
-                                      "simd_add" "simd_sub" "simd_bitmask")
+                                      "simd_add" "simd_sub" "simd_bitmask"
+                                      "simd_reduce_all" "simd_reduce_any" "simd_reduce_and" "simd_reduce_or" "simd_reduce_xor"
+                                      "simd_reduce_max" "simd_reduce_min" "simd_reduce_add_ordered" "simd_cast" "simd_as")
                                      (let [vty (fn [l] (let [v (or (:vector l) (unsupported (str intrinsic " of a non-vector")))]
                                                          (list 'vector (:n v) (symbol (:imm (:elem v))))))
                                            load-vec (fn [o] (let [l (layout lt (ty-of o)) v (operand! bb o)
@@ -1752,6 +1756,53 @@
                                          (let [[l a] (load-vec (first args)) [_ b] (load-vec (second args)) r (fresh!)]
                                            (emit! bb (list '= r (list (symbol (subs intrinsic 5)) (vty l) a b)))
                                            (store-vec! r))
+                                         ;; RIND5: simd_cast and simd_as (generic_simd_intrinsic's casts): lane by lane, the integer widths by
+                                         ;; trunc, sext (a signed source) or zext, integers and floats by the conversions (simd_as saturating
+                                         ;; float to integer as `as` does: fpto[su]i.sat)
+                                         ("simd_cast" "simd_as")
+                                         (let [[l a] (load-vec (first args)) fe (:elem (:vector l)) te (:elem (:vector dl)) n (:n (:vector l))
+                                               r (fresh!) fi? (= :float (:prim fe)) ti? (= :float (:prim te))
+                                               from (vty l) to (vty dl)]
+                                           (cond
+                                             (and (not fi?) (not ti?))
+                                             (if (= (:bits fe) (:bits te))
+                                               (store-vec! a)
+                                               (do (emit! bb (list '= r (list (cond (> (:bits fe) (:bits te)) 'trunc (:signed fe) 'sext :else 'zext) from a to)))
+                                                   (store-vec! r)))
+                                             (and (not fi?) ti?) (do (emit! bb (list '= r (list (if (:signed fe) 'sitofp 'uitofp) from a to))) (store-vec! r))
+                                             (and fi? ti?) (if (= (:bits fe) (:bits te))
+                                                             (store-vec! a)
+                                                             (do (emit! bb (list '= r (list (if (< (:bits fe) (:bits te)) 'fpext 'fptrunc) from a to))) (store-vec! r)))
+                                             (= intrinsic "simd_cast") (do (emit! bb (list '= r (list (if (:signed te) 'fptosi 'fptoui) from a to))) (store-vec! r))
+                                             :else (let [iname (symbol "g" (str "llvm.fpto" (if (:signed te) "s" "u") "i.sat.v" n (:imm te) ".v" n (:imm fe)))]
+                                                     (declare! gl iname to [[from]])
+                                                     (emit! bb (list '= r (list 'call to iname [[from a]])))
+                                                     (store-vec! r))))
+                                         ;; RIND5: the reductions (rustc_codegen_llvm's generic_simd_intrinsic, bitwise_red!, minmax_red!,
+                                         ;; arith_red!): llvm.vector.reduce.OP over the vector; all and any over the lanes made <N x i1>
+                                         ("simd_reduce_all" "simd_reduce_any")
+                                         (let [[l a] (load-vec (first args)) n (:n (:vector l)) tr (fresh!) r (fresh!)
+                                               op (if (= intrinsic "simd_reduce_all") "and" "or")
+                                               iname (symbol "g" (str "llvm.vector.reduce." op ".v" n "i1"))]
+                                           (declare! gl iname 'i1 [[(list 'vector n 'i1)]])
+                                           (emit! bb (list '= tr (list 'trunc (vty l) a (list 'vector n 'i1))))
+                                           (emit! bb (list '= r (list 'call 'i1 iname [[(list 'vector n 'i1) tr]])))
+                                           (assign! bb dest {:ty "i1" :v r}))
+                                         ("simd_reduce_and" "simd_reduce_or" "simd_reduce_xor" "simd_reduce_max" "simd_reduce_min" "simd_reduce_add_ordered")
+                                         (let [[l a] (load-vec (first args)) el (:elem (:vector l)) n (:n (:vector l))
+                                               _ (when (= :float (:prim el)) (unsupported (str intrinsic " of floats")))
+                                               ety (symbol (:imm el)) r (fresh!)
+                                               op (case intrinsic
+                                                    "simd_reduce_and" "and" "simd_reduce_or" "or" "simd_reduce_xor" "xor" "simd_reduce_add_ordered" "add"
+                                                    "simd_reduce_max" (if (:signed el) "smax" "umax") "simd_reduce_min" (if (:signed el) "smin" "umin"))
+                                               iname (symbol "g" (str "llvm.vector.reduce." op ".v" n (:imm el)))]
+                                           (declare! gl iname ety [[(vty l)]])
+                                           (emit! bb (list '= r (list 'call ety iname [[(vty l) a]])))
+                                           (if (= intrinsic "simd_reduce_add_ordered")
+                                             (let [acc (operand! bb (second args)) s2 (fresh!)]
+                                               (emit! bb (list '= s2 (list 'add ety (:v acc) r)))
+                                               (assign! bb dest {:ty (:imm el) :v s2}))
+                                             (assign! bb dest {:ty (:imm el) :v r})))
                                          ;; each element's most significant bit (lshr by its width less one, trunc to <N x i1>) as an
                                          ;; N-bit integer, widened or narrowed to the result's
                                          "simd_bitmask"
@@ -1772,6 +1823,10 @@
                                                  (if target (br-or-merge bb t target) (emit! bb '(unreachable))))
                                      ("cold_path" "assert_inhabited" "assert_zero_valid" "assert_mem_uninitialized_valid")
                                      (when target (br-or-merge bb t target))
+                                     ;; RIND5: caller_location (rustc_codegen_ssa's codegen_intrinsic_call: get_caller_location at the
+                                     ;; call's source info, the &'static Location stored to the destination)
+                                     "caller_location" (do (assign! bb dest {:ty "ptr" :v (caller-location! fn-loc scope)})
+                                                           (when target (br-or-merge bb t target)))
                                      "black_box" (let [pl (place-of! bb dest) v (operand! bb (first args)) dl (layout lt (place-type body dest))]
                                                    (when v (store-val! bb pl v))
                                                    (emit! bb (if (zst? dl)

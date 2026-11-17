@@ -9637,3 +9637,16 @@ runner, which ccorpus2 does not carry); fixing the 4 mutants whose expectation t
   ten lowered units (forms equal on both hosts) and by `bin/rust-front essential` on c/target (7 of 7 runs, its known summary). C7
   `:own` on the cell's cases; independence 80. The runtime-ci re-read on c/target is the main host's night. Alternative: only the
   program's units on c/target (RIND4 (b), std's library still on gcc's macros: C7 not own).
+
+## 2026-11-17: RIND5 (a), the samples from Arbace's MIR: 0 -> 4 of the cell's 5 (branch `h-rust-indep`)
+
+- `bin/rust-front rsi-build` over rsi's samples, one program a process (2.16-2.31 GB peaks). Fixed after rustc 1.99.1's code: codegen's
+  Unsize between trait objects of one principal (auto traits dropped), the `caller_location` intrinsic, the SIMD reductions and casts;
+  mono's collector takes a local closure called through a std generic body whose arguments it cannot read (`and_then` over
+  `Box<dyn Any + Send>`); the local crate's root kept apart from a library crate of the same name (the sample `std.rs`), in mono's
+  mangling and build-run's checks; core::simd's `Simd<T, N>` read as repr(simd). intrinsics, panics, std and unwind are own; vectors
+  waits for `simd_shuffle`'s inline constant (CTFE). `bin/rust-front essential` and `core-essential` equal their known summaries.
+- `bin/lib/rsi/check`: `--record` defaults to `--front own` and writes the cell's case inputs C1-C7 from the run (front.tsv, shims.tsv,
+  the C target). The record itself is the night's (ci needs runtime-ci at c/target). Alternative: keep the packs the record's default
+  until the night proves the own cases (RFP42 (a)'s letter); the user's RIND5 (a) makes the own path the record's, the pack the
+  fallback per case.

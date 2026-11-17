@@ -3976,3 +3976,52 @@ a control that passes fails the check). `gate.crops check` 0 problems, `test/gat
 - The main host's night: `bin/heavy-lock bin/rsi runtime-ci` (the lowered std at its key is kept: the ci library and the ports read
   again on c/target, compiler_builtins' units lowered and read; minutes to about an hour, `RSI_CI_MEMLIMIT` 6 GiB), then `bin/rsi
   aot-lib` (its units' keys moved), then the cell's runs as before (`bin/rsi check --corpus samples,synthetic --record`, `check --aot`).
+
+## As built: RIND5 (a), the samples from Arbace's MIR (2026-11-17)
+
+`bin/rust-front rsi-build` over rsi's six samples, one program a process (`RF11_BATCH=1 RF11_PROCS=2 RF11_GOMEMLIMIT=1700MiB`, the
+peak 2.16-2.31 GB, every process watched), the core attributes made once (`core-attrs.edn`, 35 minutes, then again after `mono.ae`
+moved: its key hashes it). Before: **0 of the 6** (RF11's measure: none built). The causes, in the order the runs met them, each
+after rustc 1.99.1's own code:
+
+- **intrinsics**: own at the first run (RF12-RF20's work).
+- **panics**: `&dyn Any + Send` to `&dyn Any` (codegen's Unsize between trait objects of one principal, the auto traits dropped:
+  rustc's unsize_ptr keeps the metadata; `dyn-text` drops `+ Send`, `+ Sync`, `+ Unpin`, `+ UnwindSafe`, `+ RefUnwindSafe`); the
+  `caller_location` intrinsic (codegen_intrinsic_call's get_caller_location, the location stored to the destination); then the
+  closures below.
+- **unwind** and **panics**: closures passed to std's generic functions over trait objects (`r.err().and_then(|e|
+  e.downcast_ref::<u32>().copied())`, `Option<Box<dyn Any + Send>>`): the collector's RFP49 roots resolve each std body's
+  function constant through `std-call`, which cannot read `dyn Any + Send` in the arguments, so the closure was never collected
+  ("a local instance not collected"). Now a Fn trait's call (`FnOnce::call_once`, `FnMut::call_mut`, `Fn::call`) whose self is a
+  local closure (the record's `(closure "main::{closure#6}" ...)`) collects that closure's body when the resolution fails (a closure
+  has no arguments of its own at the program's definitions).
+- **std** (the sample is named `std.rs`: the crate `std`): two crate roots of one name. mono printed every std path's root with the
+  local crate's disambiguator when the names matched (`HashMap::get`'s instance under `Cs69PB9vw0pp4_3std`, the program's), and
+  build-run's check of instances not collected took the first `Cs..._3std` of the module, the real std's. The local root is now
+  `[:crate NAME :local]` (def-key, the instantiating crate, `def-local?`, `print-crate-name!`), and both checks take the local
+  crate's own token (its StableCrateId's disambiguator), the name's first match only when that token is absent.
+- **vectors**: `std::simd::Simd<T, N>` (`#[repr(simd, packed)]`) had a memory layout of alignment 1: the interface writes no
+  repr(simd) and `adt-repr` read the sources only for ADTs the interface lacks; a known ADT of a SIMD module is now read too
+  (`Simd<i8, 16>`: size 16, align 16, a vector; a packed one of a non-power-of-two length is not handled yet). Then codegen's
+  reductions (`simd_reduce_all`, `_any`, `_and`, `_or`, `_xor`, `_max`, `_min`, `_add_ordered` on integers: llvm.vector.reduce.OP,
+  all and any over the lanes made `<N x i1>`) and casts (`simd_cast`, `simd_as`). Left: `simd_shuffle`, whose index is an inline
+  constant of `Swizzle::concat_swizzle` (CTFE of a trait's associated constant at the impl's arguments), then `simd_mul`, `_div`,
+  `_rem`, `_neg`, `_saturating_add` and `simd_select` (the sample's other intrinsics; not written: nothing reaches them yet).
+- **threads** (not a case of the cell: threads are a class): `unsupported callee of kind other`, not looked at.
+
+**After: 4 of the cell's 5 cases own** (intrinsics, panics, std, unwind: every body of the program's own from Arbace's MIR,
+codegen and rsi's lowering accept the module; `front.tsv`'s `own`), vectors on the pack. Their runs on ci are not proven here: the
+ci leg needs runtime-ci's library (a night's build), and the native leg (`rsi-native`) runs rustc as the linker (the oracle tier).
+Regressions: `bin/rust-front essential` equals its known summary (run-built 7 of 7, mono-check unchanged, every control differing;
+1.77 GB); `bin/rust-front core-essential`: 566 equal, the known summary, the control differing (2.18 GB).
+
+`bin/lib/rsi/check`: `--record` may take `--front own`, and a `--record`'s default is `--front own` (`RSI_FRONT` another default;
+a run that does not record keeps the packs, so the gate's `rsi-check` and `rsi-essential` are as before); a passing `--record` writes
+the cell's case inputs (`test/rust/eval-inputs-linux-amd64.edn`, AOT `aot-inputs-linux-amd64.edn`) from the run: C1 from
+`front.tsv`, C5 from `shims.tsv`, C7 from the C target read, the rest the products still consumed (checked on a made-up run of
+the synthetic list: 67 rows the Clojure reader reads).
+
+The main host's night, after RIND4's `bin/heavy-lock bin/rsi runtime-ci`: `RF11_BATCH=1 bin/heavy-lock bin/rsi check --corpus samples,synthetic
+--record` (now `--front own`: rsi-build inside it, about 35 minutes for core's attributes then a few minutes a program at 2.3 GB a
+process; `RF11_BATCH=1` keeps one process at that), which writes the record and the case inputs; `bin/reap`, `bin/crops-score
+--record`. Independence stays 80 until C2, C3, C4 and C6 are own (RFP53 (a)).
