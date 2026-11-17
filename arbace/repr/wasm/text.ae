@@ -945,15 +945,43 @@
         (annot-error "malformed UTF-8 encoding" a))
       s)))
 
+(def ^:dynamic *custom-invalid*
+  "When bound to an atom: the first custom section check that fails (the branch hints' invalid target), for
+  assert_invalid_custom (the module reads; handler_branch_hint.ml's check rejects it)."
+  nil)
+
+(def ^:private hint-name "metadata.code.branch_hint")
+
+(defn- hint? [x] (and (annot? x) (= hint-name (:name x))))
+
+(defn- check-hints
+  "The branch hints of a function's instruction sequence xs (the branch hinting proposal's annotations, queue 326; its
+  handler_branch_hint.ml): one hint an instruction (another before the same one: malformed), on an `if` or a `br_if` (else
+  an invalid target, a custom check). The hints themselves are not kept in the forms."
+  [xs]
+  (doseq [[y z] (partition 2 1 (concat xs [nil])) :when (hint? y)]
+    (let [[s & more] (:xs y)]
+      (when (or (not= :str (:t s)) (seq more)) (annot-error "@metadata.code.branch_hint annotation: unexpected token" y)))
+    (cond
+      (hint? z) (annot-error "@metadata.code.branch_hint annotation: duplicate annotation" z)
+      (or (lex/kw? z "if") (lex/kw? z "br_if") (lex/list-of? z "if") (lex/list-of? z "br_if")) nil
+      :else (when *custom-invalid* (swap! *custom-invalid* #(or % "@metadata.code.branch_hint annotation: invalid target"))))))
+
 (defn- strip-deep
-  "x without annotations; one inside it is misplaced (`msg` names the error for a @name, a @custom is always misplaced)."
-  [x name-msg]
-  (if (= :list (:t x))
-    (assoc x :xs (vec (for [y (:xs x)]
-                        (if (annot? y)
-                          (annot-error (if (= "custom" (:name y)) "misplaced @custom annotation" name-msg) y)
-                          (strip-deep y name-msg)))))
-    x))
+  "x without annotations; one inside it is misplaced (`msg` names the error for a @name, a @custom is always misplaced; a
+  branch hint is a function's, checked and dropped, when `func?`)."
+  ([x name-msg] (strip-deep x name-msg false))
+  ([x name-msg func?]
+   (if (= :list (:t x))
+     (do (when func? (check-hints (:xs x)))
+         (assoc x :xs (vec (for [y (:xs x)
+                                 :when (not (and func? (hint? y)))]
+                             (if (annot? y)
+                               (annot-error (cond (= "custom" (:name y)) "misplaced @custom annotation"
+                                                  (hint? y) "@metadata.code.branch_hint annotation: not in a function"
+                                                  :else name-msg) y)
+                               (strip-deep y name-msg func?))))))
+     x)))
 
 (defn- strip-field
   "A module field without its annotations: [field name-or-nil] (a func's or a tag's @name, handler_name.ml's locate_func and
@@ -963,10 +991,15 @@
         xs (:xs f)
         out (java.util.ArrayList.)
         nm (atom nil)]
+    (when (= kind "func") (check-hints xs))
     (doseq [[i y] (map-indexed vector xs)]
       (if (annot? y)
-        (if (= "custom" (:name y))
+        (cond
+          (and (hint? y) (= kind "func")) nil
+          (hint? y) (annot-error "@metadata.code.branch_hint annotation: not in a function" y)
+          (= "custom" (:name y))
           (annot-error "misplaced @custom annotation" y)
+          :else
           (let [s (name-of-annot y)
                 before (subvec xs (min 1 i) i)]
             (case kind
@@ -980,7 +1013,7 @@
               "tag" (do (when @nm (annot-error "@name annotation: multiple tag names" y)) (reset! nm s))
               ("type" "rec") (annot-error "@name annotation: type and field names not yet supported" y)
               (annot-error "misplaced @name annotation" y))))
-        (.add out (strip-deep y (if (= kind "func") "@name annotation: misplaced annotation" "misplaced @name annotation")))))
+        (.add out (strip-deep y (if (= kind "func") "@name annotation: misplaced annotation" "misplaced @name annotation") (= kind "func")))))
     [(assoc f :xs (vec out)) @nm]))
 
 (defn- annotations
@@ -991,6 +1024,7 @@
     (if-let [f (first fs)]
       (cond
         (and (annot? f) (= "custom" (:name f))) (recur (next fs) seen? out (conj customs (parse-custom f)) module funcs)
+        (hint? f) (annot-error "@metadata.code.branch_hint annotation: not in a function" f)
         (annot? f) (let [s (name-of-annot f)]
                      (when seen? (annot-error "misplaced @name annotation" f))
                      (when module (annot-error "@name annotation: multiple module names" f))
