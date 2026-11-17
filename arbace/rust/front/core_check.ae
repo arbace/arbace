@@ -26,6 +26,11 @@
   (:import [java.io File]))
 
 (defn- fget [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+
+(def ^:dynamic *crate*
+  "RIND9 (a): the crate whose sources are read (its module tree under LIB/CRATE/src, `crate::` its root): core, or alloc for
+  arbace.rust.front.alloc-check's interface pass"
+  "core")
 (defn- head [x] (when (seq? x) (first x)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -103,16 +108,16 @@
                       (when (.exists (File. ^String f))
                         (swap! out conj {:path p :file canon :vendored (boolean (re-find #"/(stdarch|portable-simd)/" canon))})
                         (walk p canon fd (fget (parse-file canon) :items) nil)))))))]
-      (let [lib (.getCanonicalPath (File. (str lib-dir "/core/src/lib.rs")))]
-        (swap! out conj {:path "core" :file lib})
-        (walk "core" lib (.getParent (File. lib)) (fget (parse-file lib) :items) nil)))
+      (let [lib (.getCanonicalPath (File. (str lib-dir "/" *crate* "/src/lib.rs")))]
+        (swap! out conj {:path *crate* :file lib})
+        (walk *crate* lib (.getParent (File. lib)) (fget (parse-file lib) :items) nil)))
     @out))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; core's macro_rules! from its sources
 
 (defn rel-path "A file of the copy of library/ as rustc's remapped path names it" [^String file]
-  (if-let [m (re-find #"/(?:lib|library)/((core|stdarch|portable-simd)/.*)$" file)] (str "library/" (second m)) file))
+  (if-let [m (re-find #"/(?:lib|library)/((core|alloc|stdarch|portable-simd)/.*)$" file)] (str "library/" (second m)) file))
 
 (defn- foreign-spans
   "A macro definition's tokens with their spans written as places in FILE ((span FILE l1 c1 l2 c2 0)): the expansion
@@ -222,9 +227,10 @@
                     Use (letfn [(abs [segs]
                                   (let [[f & r] segs]
                                     (case f
-                                      ("crate" "$crate") (into ["core"] r)
+                                      ("crate" "$crate") (into [*crate*] r)
                                       "self" (into (vec (str/split m #"::")) r)
                                       "super" (let [ps (str/split m #"::")] (abs (into (if (> (count ps) 1) ["crate"] ["crate"]) (concat (drop 1 (butlast ps)) r))))
+                                      ;; core's own path (core's `use core::..`), and alloc's (RIND9 (a): an extern crate's)
                                       ("core") (vec segs)
                                       ;; RFP52 (a): a uniform path's first name an item of the module (`use
                                       ;; unicode_data::alphabetic::lookup as Alphabetic`): core names no other crate
@@ -285,7 +291,7 @@
             (let [i (.lastIndexOf ^String p "::") mp (when (pos? i) (subs p 0 i)) nm (when (pos? i) (subs p (+ i 2)))
                   e (when mp (get m mp)) ck (:ctor (first (:variants a)))
                   has? (fn [ns] (some #(and (= ns (:ns %)) (= nm (:name %))) (:children e)))]
-              (if (or (nil? e) (not= "Struct" (:kind a)) (not (str/starts-with? p "core::")))
+              (if (or (nil? e) (not= "Struct" (:kind a)) (not (str/starts-with? p (str *crate* "::"))))
                 m
                 (assoc m mp (update e :children into
                                     (cond-> []
@@ -420,7 +426,7 @@
                                        {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
                                         :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                        :abi "\"Rust\"" :const (= :const (get-in (:node k) [:header :constness])) :promotable false
+                                        :abi "\"Rust\"" :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d)))) :promotable false
                                         :nounwind false :native true}]))]
                    (if (and self (or (nil? tr) trs))
                      (-> acc
@@ -535,7 +541,7 @@
 
 (declare body-key)
 
-(defn- rel-module [^String p] (if (= p "core") "" (str (subs p 6) "::")))
+(defn- rel-module [^String p] (if (= p *crate*) "" (str (subs p (+ 2 (count *crate*))) "::")))
 
 (defn- stage [stages k f]
   (try (let [t0 (System/nanoTime) v (f)]
@@ -572,7 +578,9 @@
                            #(binding [ex/*mark-crates* mc ex/*sites* sites]
                               (ex/expand-file file 2024 (merge (ex/load-std-macros std-file) (macros-for table file)))))
               vtext (ex/virtual-text)
-              res (stage stages :resolve #(binding [resolve/*def-sites* (into {} (for [[k v] @mc :when (and (vector? k) (= :def-site (first k)))] [(second k) v]))]
+              res (stage stages :resolve #(binding [resolve/*def-sites* (into {} (for [[k v] @mc :when (and (vector? k) (= :def-site (first k)))] [(second k) v]))
+                                                    ;; RIND9 (a): a macro's `$crate` by its crate (alloc's: core's macros name core)
+                                                    resolve/*mark-crates* @mc]
                                             (resolve/resolve-crate crate names {:source vtext})))
               res-map (into {} (for [[_ s rs] res] [s rs]))
               _ (when-let [d (System/getenv "CORE_DUMP")]
@@ -638,7 +646,7 @@
                    :impl (recur (collect/def-of (:parent d)) (cons (str "{impl#" (:disamb d) "}") acc))
                    :closure (recur (collect/def-of (:parent d)) (cons (str "{closure#" (:disamb d) "}") acc))
                    (recur (collect/def-of (:parent d)) acc))))]
-    (str/join "-" (concat (when (not= path "core") (rest (str/split path #"::"))) segs))))
+    (str/join "-" (concat (when (not= path *crate*) (rest (str/split path #"::"))) segs))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; RF12-P6: a native core body for a program's run (CORE_EXPORT): its runtime MIR (the 21 passes) with every local definition

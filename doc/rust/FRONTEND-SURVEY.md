@@ -4138,3 +4138,63 @@ C4's two inputs:
 Not built tonight: from 19:00 UTC only code and unit tests under 1 GiB, and each step above needs an rsi-build or a core-attrs
 pass (2.3 GB). The main host's commands for RIND10 (a) once decided: add the five lines, then `RF11_BATCH=1 bin/rust-front
 rsi-build vectors` (core-attrs is rebuilt first: about 35 minutes, 2.3 GB), its `mono-check` line's callees against 62/82.
+
+## As built: RIND9 (a), alloc's pass (2026-11-17, night, branch `n-rust-alloc`)
+
+The user approved RIND9 (a). alloc's interface pass is written on core-check's (RF12-P2 (b)) and proven light on two modules; the
+whole crate's pass is the day's run.
+
+- `arbace/rust/front/alloc_check.ae` (`arbace.rust.front.alloc-check`): alloc's module files (core-check's `module-files` with the
+  crate `alloc`, cfg as core's: 84 files of library/alloc), alloc's index (its 17 macro_rules! and its modules' names from the
+  sources, cached in `.tmp/rust-front/alloc/index.edn`, about 5 minutes once), each module run by core-check's `run-module` with
+  `*collect-only*` (expand, resolve, lower, collect; no body), its facts written by `native-iface` and read by the modules after
+  it. The pass reads std's interface **with every alloc fact taken out** (`without-crate`: alloc's fns, ADTs, traits, impls and
+  consts, and its impls out of the selection indexes), so all it writes of alloc is its own; std-names stays (names, not
+  types). `ALLOC_IFACE_ROUNDS=2`: a second round over every module, each reading the first round's facts of the others (the
+  modules' order). The output is the helper's shape, `(si/fn "PATH" {..})` with the helper's key order
+  (`.tmp/rust-front/alloc/alloc-iface.edn`), and the compare holds every alloc fact of the helper's `std-iface.edn` to the
+  native one: equal, differing (the keys, and the first fact's two values, by cause), missing; the native's extras (crate-private
+  items the helper does not write) counted apart, not failures; the negative control judges an equal fact against another
+  path's helper fact, which must differ.
+- Generalized from core to the crate being built (core's build unchanged by construction): `cc/*crate*` (the tree, `crate::`
+  in the names, `body-key`, the remapped `library/alloc/` paths), `resolve/crate-root` (`crate::`, `super::` at the root, the
+  local paths' printing in collect), and `$crate`: a dependency's macro's `$crate` names that dependency
+  (`resolve/crate-deps`, alloc `#{"core"}`; `resolve/*mark-crates*` bound by `run-module` from the expansion's marks, and a
+  `use $crate::..`'s `:krate` in collect), core's build having none. lower keeps an impl's constness (`const unsafe impl
+  Allocator for Global`), and native-iface writes its functions `:const true`, as fn_sig does.
+- `bin/rust-front alloc-iface [FILE...]` (the pass and the compare), `--list`, `--units [--record]`
+  (`bin/lib/repr-rust/core-build.bash`): the unit cases `test/rust/front/alloc_iface_test.ae`, 22 pure cases (the crate root,
+  the tree with its negative case, `without-crate`, `owner`, the compare's four outcomes and its control, the shape written and
+  read back) at GOMEMLIMIT 500MiB (0.75 GB), then each module of `test/rust/front/alloc-iface-units.txt` passed alone and
+  compared at 600MiB, its summary held to `test/rust/front/alloc-iface-units-known.txt`.
+
+### Results (light, 0.92 GB peak)
+
+| module | facts | equal | differ | missing | native extras |
+|---|---|---|---|---|---|
+| `alloc::borrow` (borrow.rs) | 47 | 43 | 4 | 0 | 0 |
+| `alloc::alloc` (alloc.rs) | 36 | 31 | 0 | 5 | 2 |
+
+The causes the compare names (each a fix of its own, RIND9's next steps):
+- a trait's associated type's bounds (`ToOwned::Owned: Borrow<Self>`): native-iface writes `[]`;
+- an associated-type bound in a where clause (`B: ToOwned<Owned: Debug>`, Cow's Debug, Display and Default impls): the
+  projection's clause is not among `explicit-clauses`;
+- `#[derive_const(Clone, Default)]` and `#[derive(Copy, Debug)]` on `Global`: the derived impls (`{impl#6..8}`) and their
+  functions not written (missing);
+- (fixed here) a const impl's functions' `:const`: alloc.rs' 6 differences (18 equal of 36 before, 31 after) before the impl's constness was kept;
+- the extras `dealloc_nonnull`, `realloc_nonnull`: crate-private, the helper's interface lacks them, as expected.
+
+### Decisions taken overnight (round 52)
+
+- RIND9a-1 (a) the pass reads std's interface less every alloc fact (no answer read from the helper), std-names kept: taken.
+- RIND9a-2 (a) every helper fact judged (equal, differing, missing), the native extras counted apart: taken.
+- RIND9a-3 (a) one round by default, `ALLOC_IFACE_ROUNDS=2` the second: taken (the day's run tells whether the order matters).
+- RIND9a-4 (a) core's cfg for alloc (none of alloc's item cfgs reads debug_assertions or ub_checks; its features off): taken.
+- RIND9a-5 (a) a dependency's macro's `$crate` names the dependency (`crate-deps`), core's own build unchanged: taken.
+
+### The day's commands (not run here)
+
+- The whole pass and its compare, about 25 minutes and 2.3 GB, one process (`GOMEMLIMIT=1800MiB`):
+  `bin/rust-front alloc-iface` (its summary lines; `.tmp/rust-front/alloc/alloc-iface.edn.report` the causes), then
+  `ALLOC_IFACE_ROUNDS=2 bin/rust-front alloc-iface` once to see whether a second round changes the counts.
+- core unchanged by the generalization: `bin/rust-front core-essential` (its known summary) and `bin/rust-front rind-test`.

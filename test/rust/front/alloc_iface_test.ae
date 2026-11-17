@@ -1,0 +1,92 @@
+(ns rust.front.alloc-iface-test
+  "RIND9 (a)'s unit cases (doc/rust/FRONTEND-SURVEY.md, \"As built: RIND9 (a), alloc's pass\"), light (under 1 GiB): the crate
+  root of a module path, alloc's module tree, the interface less a crate's facts, a path's module, the compare fact by fact
+  with its negative control, the helper's shape written and read back; with FRONT-DIR, the pass over one small module of alloc
+  (test/rust/front/alloc-iface-units.txt's modules, one process each by bin/rust-front alloc-iface --units) compared with the
+  helper's facts of that module, held to the known line. `bin/rust-front alloc-iface --units`."
+  (:require [arbace.rust.front.alloc-check :as ac]
+            [arbace.rust.front.core-check :as cc]
+            [arbace.rust.front.collect :as collect]
+            [arbace.rust.front.resolve :as resolve]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn -main [lib & [front cache file]]
+  (let [bad (atom 0)
+        check (fn [what ok] (println (if ok "ok  " "FAIL") what) (when-not ok (swap! bad inc)))]
+    (if-not front
+      (do
+        ;; the crate root of the module being built
+        (check "crate-root of alloc::vec is alloc" (= "alloc" (binding [resolve/*crate-path* "alloc::vec"] (resolve/crate-root))))
+        (check "crate-root of core is core" (= "core" (binding [resolve/*crate-path* "core"] (resolve/crate-root))))
+        (check "no crate-root outside a crate's build" (nil? (binding [resolve/*crate-path* nil] (resolve/crate-root))))
+        ;; alloc's module tree (cfg evaluated: test-only modules out)
+        (let [mods (binding [cc/*crate* "alloc"] (cc/module-files lib))
+              ps (set (map :path mods))]
+          (println "     alloc's module files:" (count mods))
+          (check "alloc's tree: the root, vec, btree::map, sync, ffi::c_str, raw_vec"
+                 (every? ps ["alloc" "alloc::vec" "alloc::collections::btree::map" "alloc::sync" "alloc::ffi::c_str" "alloc::raw_vec"]))
+          (check "alloc's tree: the root first, every file under library/alloc/"
+                 (and (= "alloc" (:path (first mods))) (every? #(re-find #"/alloc/src/" (:file %)) mods)))
+          (check "negative: no cfg(test) module (alloc::tests, a vec's tests)" (not-any? #(re-find #"::tests$" %) ps))
+          (check "rel-path names alloc's files as rustc's remapped paths do"
+                 (= "library/alloc/src/borrow.rs" (cc/rel-path (str lib "/alloc/src/borrow.rs")))))
+        ;; the interface less a crate's facts
+        (let [si {:fns {"alloc::a::f" {:x 1} "core::g" {:x 2}} :adts {"alloc::A" {}} :traits {} :consts {}
+                  :impls {"alloc::{impl#0}" {:trait '(trait "core::clone::Clone" [])} "core::{impl#0}" {}}
+                  :inherent {"alloc::A" ["alloc::{impl#1}"] "core::B" ["core::{impl#0}"]}
+                  :trait-impls {"core::clone::Clone" ["alloc::{impl#0}" "core::{impl#0}"]}
+                  :trait-impls-by {"core::clone::Clone" {:blanket ["alloc::{impl#0}"] "core::B" ["core::{impl#0}"]}}}
+              w (ac/without-crate si "alloc")]
+          (check "without-crate: alloc's facts out, core's kept"
+                 (and (= {"core::g" {:x 2}} (:fns w)) (empty? (:adts w)) (= ["core::{impl#0}"] (keys (:impls w)))))
+          (check "without-crate: alloc's impls out of the indexes"
+                 (and (= [] (get-in w [:inherent "alloc::A"])) (= ["core::{impl#0}"] (get-in w [:trait-impls "core::clone::Clone"]))
+                      (= [] (get-in w [:trait-impls-by "core::clone::Clone" :blanket]))))
+          (check "crate-facts: alloc's alone" (= {"alloc::a::f" {:x 1}} (:fns (ac/crate-facts si "alloc"))))
+          (check "negative: crate-path? is not a prefix match (allocator::x is not alloc's)" (not (ac/crate-path? "alloc" "allocator::x"))))
+        ;; a path's module
+        (let [mps ["alloc" "alloc::vec" "alloc::vec::into_iter" "alloc::collections"]]
+          (check "owner: an impl's method in vec/mod.rs" (= "alloc::vec" (ac/owner mps "alloc::vec::{impl#3}::push")))
+          (check "owner: the longest module" (= "alloc::vec::into_iter" (ac/owner mps "alloc::vec::into_iter::IntoIter")))
+          (check "owner: the root's own" (= "alloc" (ac/owner mps "alloc::format")))
+          (check "negative: owner of a path outside alloc is none" (nil? (ac/owner mps "core::vec::x"))))
+        ;; the compare and its control
+        (let [f1 {:generics [] :inputs ['(prim "u8")] :output '(tuple [])}
+              helper {:fns {"alloc::f" f1 "alloc::g" (assoc f1 :output '(prim "bool")) "alloc::h" f1} :adts {} :traits {} :impls {} :consts {}}
+              native {:fns {"alloc::f" (assoc f1 :native true) "alloc::g" f1 "alloc::p" f1} :adts {} :traits {} :impls {} :consts {}}
+              cmp (ac/compare-facts helper native)
+              fs (:fns cmp)]
+          (check "compare: f equal (the native mark dropped)" (= 1 (:equal fs)))
+          (check "compare: g differs by :output" (= [["alloc::g" [:output]]] (:differs fs)))
+          (check "compare: h missing, p a native extra" (and (= ["alloc::h"] (:missing fs)) (= ["alloc::p"] (:extra fs))))
+          (check "compare: the total line" (some #(= "alloc-iface: total 3 facts: 1 equal, 1 differ, 1 missing (native extras 1)" %) (ac/summary-lines cmp)))
+          (check "control: f judged against g's helper fact differs, as it must" (= ["alloc::f" "alloc::g" true] (ac/control helper native))))
+        ;; the helper's shape written and read back
+        (let [facts {:fns {"alloc::f" {:generics ['(type "T")] :parent-count 0 :has-self false :predicates [] :inputs [] :output '(param 0 "T")
+                                       :variadic false :safety "Safe" :abi "\"Rust\"" :const false :promotable false :nounwind false :native true}}
+                     :adts {"alloc::A" {:kind "Struct" :generics [] :parent-count 0 :has-self false :variants [{:name "A" :path "alloc::A" :ctor "Const" :fields []}]}}
+                     :traits {} :impls {} :consts {}}
+              t (ac/facts-text facts)
+              f (str (System/getenv "TMPDIR") "/alloc-iface-units.edn")]
+          (spit f t)
+          (check "the helper's key order: (si/fn PATH {:generics .. :nounwind ..})"
+                 (str/starts-with? t "(si/fn \"alloc::f\" {:generics [(type \"T\")] :parent-count 0 :has-self false :predicates []"))
+          (check "written and read back: the same facts" (= (ac/crate-facts {:fns (:fns (ac/read-facts f)) :adts (:adts (ac/read-facts f))} "alloc")
+                                                            (ac/crate-facts {:fns {"alloc::f" (ac/strip (get-in facts [:fns "alloc::f"]))} :adts (:adts facts)} "alloc")))))
+      ;; one module's pass against the helper's facts of that module
+      (let [mods (binding [cc/*crate* "alloc"] (cc/module-files lib))
+            m (some #(when (= (.getCanonicalPath (File. ^String file)) (:file %)) %) mods)
+            setup (binding [cc/*crate* "alloc"] (ac/crate-setup "alloc" front cache mods))
+            mps (map :path mods)
+            native (binding [cc/*crate* "alloc"] (ac/pass "alloc" lib setup [m] mps 1))
+            facts (ac/crate-facts native "alloc")
+            helper (ac/facts-of-modules (:helper setup) mps [(:path m)])
+            cmp (ac/compare-facts helper facts)
+            ctl (ac/control helper facts)]
+        (doseq [l (ac/summary-lines cmp)] (println l))
+        (spit (str (System/getenv "TMPDIR") "/alloc-iface-" (str/replace (:path m) "::" "-") ".report") (ac/report-text cmp helper facts))
+        (check (str "no alloc fact read from the helper's interface: " (count (:fns (ac/crate-facts (:si setup) "alloc")))) (empty? (:fns (ac/crate-facts (:si setup) "alloc"))))
+        (check (str "the control: " (pr-str ctl)) (and ctl (nth ctl 2)))))
+    (println (str "alloc-iface units: " (if (zero? @bad) "passed" (str @bad " failed"))))
+    (System/exit (if (zero? @bad) 0 1))))

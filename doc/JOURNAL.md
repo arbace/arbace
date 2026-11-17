@@ -10319,3 +10319,20 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   `-C metadata` hash), so a native computation needs Cargo's hash (a fetch) or Arbace's own std build. Proposed RIND8 (a) (the
   library build's identities as data, RIND6's reading), RIND9 (a) (the interface pass crate by crate, compared fact by fact),
   RIND10 (a) (portable SIMD in core-attrs, then the refusals one by one). Nothing built: past 19:00 UTC, every step a 2.3 GB run.
+
+## 2026-11-17: RIND9 (a): alloc's interface pass, written and proven light (branch `n-rust-alloc`, from next `42bf8614b`)
+
+- The user approved RIND9 (a). `arbace.rust.front.alloc-check` (`bin/rust-front alloc-iface`) runs core-check's interface pass
+  (collect only) over alloc's 84 module files of rust-src 1.99.1's library/alloc, reading std's interface with every alloc fact
+  taken out, and writes alloc's facts in the helper's `--std-iface` shape, compared fact by fact with the helper's
+  `std-iface.edn` (equal, differing by keys, missing; native extras apart; a negative control). core-check, resolve and collect
+  generalized from core to the crate being built (`cc/*crate*`, `resolve/crate-root`, a dependency's macro's `$crate` by
+  `resolve/crate-deps`; core's own build unchanged by construction); lower keeps an impl's constness, native-iface writes a const
+  impl's functions `:const`.
+- Proven light (under 1 GiB, 0.93 GB peak): 22 pure unit cases, and borrow.rs alone 43 of 47 facts equal, alloc.rs 31 of 36 (18
+  before the constness fix), held to `test/rust/front/alloc-iface-units-known.txt`. The causes named: associated types' bounds,
+  associated-type bounds in where clauses, `derive_const`/`derive` impls on `Global` not written.
+- Not run: the whole pass (about 25 minutes, 2.3 GB), the day's `bin/rust-front alloc-iface`; core's `core-essential` and
+  `rind-test` to confirm core unchanged. Decisions RIND9a-1 to RIND9a-5 taken overnight (round 52), doc/rust/FRONTEND-SURVEY.md,
+  "As built: RIND9 (a), alloc's pass". Alternatives: keeping alloc's facts in the interface the pass reads (no proof: the answers
+  read back) and comparing only the facts the pass writes (a missing fact unseen), both set aside.
