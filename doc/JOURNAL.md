@@ -9847,3 +9847,20 @@ Scheme's completeness 98 -> 99.9. Checks: `bin/si unit`, `r7rs`, `r7rs --chibi-t
 test/scheme/essential-check.txt`, `check --aot --only test/scheme/essential-aot.txt` (no regression, the controls found), `corpora files`,
 `records-check`, test/gate/crops-test.bash, `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`. Not run: the gate,
 `bin/si check --aot` whole, ecraven whole (interpreted or compiled), the mats, the shipped path (`bin/si interp-check --exe`).
+
+## 2026-11-17: Java's read and print cells triaged (branch `h-java-readprint`, from `next` `77630727b`)
+
+The read cell's 96 deferred rows and the print cell's 139 non-passing rows run again, light, on next's gate executable
+`f60652fb7fb9568e76b1` and javac's tool `javac-f70d1a9d900eb07a9afc` (stale-ok): read's 96 (read 1, classes 2, diagnostics 93)
+fail as recorded, each a limit of javac on Arbace (JCS50-JCS53: --release's ct.sym, processors from class files, doclint, its
+Main and file manager; javac's tool rebuilt with more world); three print rows were stale (t05276, t05749 recorded before JCV11
+(b), t04728 now equal). The print level's class-file namer (test/java/print.ae) took the sets of code lines, so an early return
+or a loop's goto also met elsewhere in a method named nothing: `counted-kinds` counts the lines (branches without targets) where
+the sets name nothing and names the kinds only when every instruction differing in number is one of theirs. 47 rows re-recorded
+alone: Java print 3,186 / 32 / 107 → 3,236 / 29 / 60, Java completeness 87 → 88. The 25 left unnamed are the converter's (a
+static member's pure qualifier dropped 16, a String compound assignment 3, an inherited static's owner 1, a local's slot 1, a
+long literal's and a float local's type 2, mixed 2): proposals RP1-RP3 in doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+h-java-readprint". The 29 by-design rows audited (print-shapes 18, print-erasure 11). Alternatives considered: naming the
+counted kinds for every row (stricter than the sets' rule for rows that pass now: a whole print run would be needed to see
+none regresses, so the counted rule is only the sets' fallback); fixing the printer for the 25 (the forms do not carry what they
+differ by: the converter's rules).
