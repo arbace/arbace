@@ -294,12 +294,20 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own mod
     *.c|*.o|*.cmm|*.s|*.S|-optc*) front_why="c $f"; return 1 ;;
     -cpp|-XCPP) front_why="cpp $f"; return 1 ;;
     -fdefer-type-errors|-fdefer-typed-holes) front_why="defer $f"; return 1 ;;
-    # (HF10-P24 (a): GHC's -main-is FN names Main's entry, which the front end does not take yet: T16453M6, T19397M2-M4)
-    -main-is) front_why="main-is $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//')"; return 1 ;; esac; done; fi
+    # (HF10-P59 (a): GHC's -main-is FN names Main's entry, an unqualified FN resolved in Main's scope by the front end:
+    # T16453M6, T19397M2-M4; a module's name, M or M.fn, another main module, is refused)
+    -main-is) case $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//') in [a-z_]*) ;;
+      *) front_why="main-is $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//')"; return 1 ;; esac ;; esac; done; fi
   # HF10-P24 (a): the program's own modules (an import whose source is in the program's directory, M.hs or M.lhs, as GHC's
   # finder finds it on ".") are scanned as the main file is, to their imports' closure; an hs-boot file of one refuses
   # (local-boot: the front end compiles no boot file of a program yet)
-  local todo=("$main") seen=" " cur txt
+  local todo=("$main") seen=" " cur txt sp d
+  # the search path after "." (HF10-P59's round): all.T's -iDIR (T5462Yes2's -iGFunctor), and for nofib its mk's EXTRA_SRCS
+  # (../../nofib-common, whose NofibUtils mk/boilerplate.mk compiles with every program); front_search, the plan's flags
+  front_search=""
+  sp=(); if [ "$flags" != - ]; then for f in $flags; do case $f in -i?*) sp+=("${f#-i}") ;; esac; done; fi
+  [ "$kind" != nofib ] || [ ! -d "$src/../../nofib-common" ] || sp+=(../../nofib-common)
+  for d in ${sp[@]+"${sp[@]}"}; do front_search="$front_search -i$d"; done
   while [ ${#todo[@]} -gt 0 ]; do
     cur=${todo[0]}; todo=("${todo[@]:1}")
     case $seen in *" $cur "*) continue ;; esac
@@ -326,6 +334,9 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own mod
       if [ -f "$src/${m//.//}.hs-boot" ] || [ -f "$src/${m//.//}.lhs-boot" ]; then front_why="local-boot $m"; return 1
       elif [ -f "$src/${m//.//}.hs" ]; then todo+=("${m//.//}.hs")
       elif [ -f "$src/${m//.//}.lhs" ]; then todo+=("${m//.//}.lhs")
+      elif d=$(for d in ${sp[@]+"${sp[@]}"}; do for e in hs lhs hs-boot lhs-boot; do [ -f "$src/$d/${m//.//}.$e" ] && { echo "$d/${m//.//}.$e"; break 2; }; done; done) && [ -n "$d" ]; then
+        case $d in *-boot) front_why="local-boot $m"; return 1 ;; esac
+        todo+=("$d")
       elif [ -f "$ifs/$m.iface.edn" ] || grep -qF "\"$m\" " "$ifs/reexports.edn"; then :
       else front_why="import $m"; [ "$cur" = "$main" ] || front_why="$front_why (in $cur)"; return 1; fi
     done
@@ -367,6 +378,9 @@ if [ "$front" = native ]; then
     fi
     if front_eligible "$src" "$main" "$flags" "$kind" "$ifaces"; then
       xf=""; if [ "$flags" != - ]; then for f in $flags; do case $f in -X*) xf="$xf $f" ;; esac; done; fi
+      # (HF10-P59 (a): -main-is FN to the front end, which takes it out of the reader's flags)
+      case " $flags " in *" -main-is "*) xf="$xf -main-is $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//')" ;; esac
+      xf="$xf$front_search"
       printf '%s@%s\t%s\n' "$src/$main" "${id//\//_}" "${xf# }" >> "$fw/plan.tsv"
     else printf '%s\t%s\n' "${id//\//_}" "${front_why:-unknown}" >> "$fw/ineligible.tsv"
     fi

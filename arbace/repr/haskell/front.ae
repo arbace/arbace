@@ -57,10 +57,17 @@
   (vec (distinct (map (fn [[_ m b]] [m (= b "IsBoot")]) (re-seq import-re (slurp dump))))))
 
 (defn local-source
-  "The program's own source of module M in directory DIR (GHC's finder on \".\"), or nil"
+  "The program's own source of module M in directory DIR (GHC's finder on \".\"), or nil: [File relative-path
+  source-name]. DIR may be [DIR SEARCH...] (HF10-P59's round: GHC's -iDIR search path, relative to DIR, after \".\"; the
+  source named DIR/M.hs as GHC's finder names it, ./M.hs on \".\")"
   [dir m]
-  (let [b (str/replace m "." "/")]
-    (some (fn [ext] (let [f (File. (str dir "/" b ext))] (when (.isFile f) [f (str b ext)]))) [".hs" ".lhs"])))
+  (let [[dir & search] (if (sequential? dir) dir [dir])
+        b (str/replace m "." "/")]
+    (some (fn [d]
+            (some (fn [ext] (let [f (File. (str dir "/" (if (= d ".") "" (str d "/")) b ext))]
+                              (when (.isFile f) [f (str (if (= d ".") "" (str d "/")) b ext) (str d "/" b ext)])))
+                  [".hs" ".lhs"]))
+          (cons "." search))))
 
 (defn module-order
   "The program's own modules below the main file: read each (read-fn [File relative-path] -> dump path, or [:read msg]),
@@ -72,14 +79,14 @@
                 (when-not (:stop @state)
                   (swap! state assoc-in [:seen m] :open)
                   (doseq [[i boot?] (dump-imports dump) :while (not (:stop @state))]
-                    (when-let [[f irel] (local-source dir i)]
+                    (when-let [[f irel isrc] (local-source dir i)]
                       (cond boot? (swap! state assoc :stop [:local (str "an hs-boot import of " i " (SOURCE): not compiled yet")])
                             (= :open (get-in @state [:seen i])) (swap! state assoc :stop [:local (str "an import cycle through " i ": " (str/join " -> " (conj path i)))])
                             (get-in @state [:seen i]) nil
                             :else (let [d (read-fn f irel)]
                                     (if (vector? d)
                                       (swap! state assoc :stop [(first d) (str irel ": " (second d))])
-                                      (visit i d irel (conj path i)))))))
+                                      (visit i d isrc (conj path i)))))))
                   (when-not (:stop @state)
                     (swap! state #(-> % (assoc-in [:seen m] :done) (update :order conj [m dump rel]))))))]
     (visit nil main-dump nil [])
@@ -90,10 +97,10 @@
   "One module through rename, elaboration and STG; pool the program's own modules' interfaces (written into it when
   WRITE-IFACE), units the libraries' {MODULE {:unit :file}} with the program's modules compiled before it: {:r :rr} or
   [stage message]"
-  [dump w nm srcfile ifaces pool units out base write-iface]
+  [dump w nm srcfile ifaces pool units out base write-iface & [main-fn]]
   (let [local (str w "/ifl/" nm)
         dirs (if pool (vec (cons pool ifaces)) ifaces)
-        rr (try (binding [rn/*ifdirs* (vec (cons local dirs))]
+        rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*main-fn* (or main-fn "main")]
                   (rn/rename-file dump (str w "/tree") local))
                 (catch Throwable e [:rename (msg e)]))]
     (if (vector? rr)
@@ -104,7 +111,7 @@
         (if (vector? r)
           r
           (try
-            (let [forms (tostg/module-stg r units srcfile)]
+            (let [forms (binding [tostg/*main-name* (:main-name rr)] (tostg/module-stg r units srcfile))]
               (tostg/write-stg forms (str out "/stg/" base) (:module r))
               (when (System/getenv "REPR_HASKELL_SIMPL_OUT")
                 (spit (str out "/stg/" base "/" (:module r) ".simpl.edn")
@@ -126,8 +133,17 @@
 (defn build-one
   "FILE (a path) through the front end into OUT; [stage message] when a stage stops it, else [:ok n-errors]. The
   program's own modules (HF10-P24 (a)) first, each into OUT/stg/NAME beside the main module's"
-  [file out ifaces units flags]
+  [file out ifaces units flags0]
   (let [[file oname] (str/split file #"@" 2)
+        ;; HF10-P59 (a): GHC's -main-is FN (an unqualified FN: Main's entry), out of the reader's flags
+        mi (.indexOf ^java.util.List (vec flags0) "-main-is")
+        main-fn (when (and (>= mi 0) (< (inc mi) (count flags0))) (nth flags0 (inc mi)))
+        flags1 (if (>= mi 0) (vec (concat (take mi flags0) (drop (+ mi 2) flags0))) flags0)
+        ;; GHC's -iDIR (the search path after ".", relative to the program's directory: T5462Yes2's -iGFunctor; nofib's
+        ;; mk compiles its programs with ../../nofib-common's NofibUtils, EXTRA_SRCS, given as -i../../nofib-common), out
+        ;; of the reader's flags
+        search (vec (keep #(when (and (str/starts-with? % "-i") (> (count %) 2)) (subs % 2)) flags1))
+        flags (vec (remove #(str/starts-with? % "-i") flags1))
         f (File. ^String file)
         nm (.getName f)
         dir (.getParent (.getAbsoluteFile f))
@@ -139,9 +155,9 @@
     (let [main-dump (str nd "/" nm ".edn")
           read-ok (read-module f nm flags main-dump)]
       (or read-ok
-          (let [mo (module-order dir main-dump
+          (let [mo (module-order (into [dir] search) main-dump
                                  (fn [^File lf rel]
-                                   (let [d (str nd "/" (str/replace rel "/" ".") ".edn")]
+                                   (let [d (str nd "/" (str/replace (str/replace rel #"^[./]+" "") "/" ".") ".edn")]
                                      (or (read-module lf (.getName lf) flags d) d))))]
             (if (:stop mo)
               (:stop mo)
@@ -150,9 +166,9 @@
                 (try
                   (loop [[[m dump rel] & more] own units units]
                     (if-not m
-                      (let [r (compile-module main-dump w nm nm ifaces (when (seq own) pool) units out base false)]
+                      (let [r (compile-module main-dump w nm nm ifaces (when (seq own) pool) units out base false main-fn)]
                         (if (vector? r) r [:ok (count (:errors (:rr r)))]))
-                      (let [srcfile (str "./" rel)
+                      (let [srcfile rel
                             _ (swap! locals conj m)
                             r (compile-module dump w m srcfile ifaces pool units out base true)]
                         (if (vector? r)

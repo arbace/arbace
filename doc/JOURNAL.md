@@ -10358,3 +10358,21 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   tcrun038, the four T23146 tests, nofib spectral pretty and scc), 3 nofib programs over the light 1 GiB cap; a final `--only` run exit 0 with its controls
   failing as they must. Alternatives considered: refusing an imported main (as before) instead of checkMain's rule; porting
   `-main-is` tonight (left for a round of its own).
+
+## 2026-11-18: Haskell, HF10-P59 (a) `-main-is` and the front end's search path; the 85 `import` refusals grouped (round 52, branch `n-hs-p59`)
+
+- Base: `mac/n-hs-indep` `b5d04b12a` (HF10-P24 (a)). Its dry plan (`.tmp/keep/wt-n-hs-indep/p24/plan-all.txt`, 950 programs) refused
+  85 as `import`. Grouped by module: NofibUtils 29 (nofib's `nofib-common/NofibUtils.hs`, compiled with every program by
+  `mk/boilerplate.mk`'s `EXTRA_SRCS`), the test's `-i` helpers 2 (T5462Yes1/2), boot packages 33 (containers 10, bytestring 9, time 6,
+  transformers and mtl 4, directory 3, unix, binary, template-haskell, ghc-experimental 1 each, ghc 3), packages outside the pinned
+  tarball 14 (parallel, random, old-time, ...; GHC's reference `:no-build`), T17920's Cmm 1.
+- Built: `-main-is FN` resolved in Main's scope (rename's `*main-fn*`, implicit header `module Main (FN)`, `:main-name`; tostg's
+  `:Main.main` runs it); GHC's `-iDIR` and nofib's `-i../../nofib-common` as the front end's search path (`front_eligible`,
+  `front.ae`'s `local-source`). The dry plan: tried own 672 to 677, `import` 85 to 54, `main-is` 4 to 0, `cpp` 47 to 77 (NofibUtils
+  and Enum use CPP). `bin/hsi check --libs own --only`: T5462Yes2, T16453M6, T19397M0, M2-M4 pass own, with T16453M1, M5, nofib pretty
+  and scc and samples/Hello unchanged; the control fails as it must.
+- Found: GHC's reference builds none of the 29 NofibUtils programs (record-ref gives GHC no `EXTRA_SRCS`): HF10-P64, a DECISION for
+  the oracle window. No package was added: none is small enough to prove light (P17's slices 2-5 stand). HF10-P59 (a), P62 (a) taken
+  overnight (round 52); P63 (CPP in the front end) proposed. doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P59 (a) and the search
+  path". Alternatives considered: refusing `-main-is` until a round of its own (P59 (b)); a hard-coded NofibUtils source instead of
+  the search path.
