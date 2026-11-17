@@ -62,13 +62,14 @@
 #                                              does not build: a target the back end does not take) or `unjudged` (record: not the
 #                                              recorded print). Exit 1 unless every file's forms are equal, no judge differs, each file
 #                                              has one judge `same`, and the negative controls (test/repr/llvm/roundtrip-controls.txt) fail
-#   bin/repr-llvm check FAMILY [--essential] [--record] [WORK]
+#   bin/repr-llvm check FAMILY [--essential | --only ID,...] [--record] [WORK]
 #                                              a check family run over its lists and judged against its record (test/llvm/check-*.edn,
 #                                              bin/reap's): every recorded :pass passes, every module of the run is recorded, the
 #                                              family's negative controls fail (exit 1 otherwise); --essential: the family's essential
 #                                              subset (test/llvm/essential.txt, with essential-verify.txt's rejections for verify),
 #                                              judged against the same record; --record rewrites the record from the run (not with
-#                                              --essential). FAMILY: roundtrip-llvmtest, text-llvmtest, verify-llvmtest, verify-probes;
+#                                              --essential); --only ID,...: those modules and the family's negative controls' (queue 335),
+#                                              --record then rewrites the named rows alone. FAMILY: roundtrip-llvmtest, text-llvmtest, verify-llvmtest, verify-probes;
 #                                              the pack rt's (test/llvm/ir/rt.tar.xz, bin/llvmi ir-make rt; LLS31 (a), no --essential):
 #                                              roundtrip-rt, text-rt (its 257 modules), verify-rt (those, test/llvm/hw.list and the
 #                                              mutant sets a, b, ctl), verify-rt-heldout (the sets h1, h2, ctlh, ctlu);
@@ -410,8 +411,8 @@ case ${1:-} in
     fi ;;
   check)
     fam=${2:-}; shift 2 || true
-    ess= rec= work=
-    while [ $# -gt 0 ]; do case $1 in --essential) ess=1; shift ;; --record) rec=1; shift ;; *) work=$1; shift ;; esac; done
+    ess= rec= work= only=
+    while [ $# -gt 0 ]; do case $1 in --essential) ess=1; shift ;; --record) rec=1; shift ;; --only) only=${2:-}; shift 2 ;; *) work=$1; shift ;; esac; done
     t=$root/test/llvm known=
     case $fam in
       roundtrip-llvmtest) kind=roundtrip lists="$t/llvm-test-valid.list $t/essential.txt $t/hw.list" record=$t/check-roundtrip-llvmtest-linux-amd64.edn ;;
@@ -425,13 +426,14 @@ case ${1:-} in
       verify-rt-heldout) kind=verify lists=rt record=$t/check-verify-rt-heldout-linux-amd64.edn ;;
       *) echo "repr-llvm check: FAMILY is roundtrip-llvmtest, text-llvmtest, verify-llvmtest, verify-probes, roundtrip-rt, text-rt, verify-rt or verify-rt-heldout" >&2; exit 2 ;;
     esac
+    if [ -n "$only" ] && [ -n "$ess" ]; then echo "repr-llvm check: --only names its modules, not with --essential" >&2; exit 2; fi
     if [ "$lists" = rt ] && [ -n "$ess" ]; then echo "repr-llvm check: $fam has no essential subset (the pack rt's families are --full's)" >&2; exit 2; fi
     if [ -n "$ess" ]; then
       [ -z "$rec" ] || { echo "repr-llvm check: --record takes the whole family, not --essential" >&2; exit 2; }
       case $kind in verify) lists="$t/essential.txt $t/essential-verify.txt" ;; *) lists=$t/essential.txt ;; esac
       [ "$fam" = verify-probes ] && lists=$t/essential-probes.txt
     fi
-    work=${work:-$root/.tmp/repr-llvm/check/$fam${ess:+-essential}}
+    work=${work:-$root/.tmp/repr-llvm/check/$fam${ess:+-essential}${only:+-only}}
     rm -rf "$work"; mkdir -p "$work"; work=$(cd "$work" && pwd)
     # the lists' paths: llvm/test/... and split/... from the pinned tarball's extraction (bin/llvm-corpus resolve), test/... the checkout's;
     # an id in two lists is one module (the essential copies of the valid sample's files)
@@ -443,6 +445,21 @@ case ${1:-} in
     # the essential subset: the family's modules among the essential lists (those its record holds)
     if [ -n "$ess" ]; then
       awk -F'\t' -v rec="$record" 'BEGIN { while ((getline l < rec) > 0) if (l ~ /^\["/) R[substr(l, 3, index(substr(l, 3), "\"") - 1)] = 1 } ($1 in R)' "$work/rel.list" > "$work/rel.new"
+      mv "$work/rel.new" "$work/rel.list"
+    fi
+    # --only ID,...: the named modules and the family's negative controls' two each (those the family holds), judged against the
+    # record; --record then rewrites the named rows alone (queue 335)
+    if [ -n "$only" ]; then
+      case $kind in
+        verify) ctlf=${REPR_LLVM_VERIFY_CONTROLS:-$root/test/repr/llvm/verify-controls.txt} ;;
+        roundtrip) ctlf=${REPR_LLVM_CONTROLS:-$root/test/repr/llvm/roundtrip-controls.txt} ;;
+        text) ctlf=${REPR_LLVM_TEXT_CONTROLS:-$root/test/repr/llvm/text-controls.txt} ;;
+      esac
+      printf '%s\n' "$only" | tr ',' '\n' | grep . > "$work/only.ids"
+      bad=$(awk -F'\t' 'FILENAME == ARGV[1] { h[$1] = 1; next } !($1 in h)' "$work/rel.list" "$work/only.ids" | head -3)
+      [ -z "$bad" ] || { echo "repr-llvm check: --only: not a module of $fam: $(echo $bad)" >&2; exit 2; }
+      awk -F'\t' -v ctl="$ctlf" 'BEGIN { while ((getline l < ctl) > 0) if (l !~ /^#/ && l != "") { split(l, c, " "); C[c[2]] = 1; C[c[3]] = 1 } }
+        FILENAME == ARGV[1] { O[$1] = 1; next } ($1 in O) || ($1 in C)' "$work/only.ids" "$work/rel.list" > "$work/rel.new"
       mv "$work/rel.new" "$work/rel.list"
     fi
     "$root/bin/llvm-corpus" resolve "$work/rel.list" "$work/abs.list"
@@ -475,6 +492,16 @@ case ${1:-} in
       if [ ! -f "$record" ]; then  # a family's first record (the pack rt's): its header
         { echo ";; repr/llvm's check family $fam (bin/repr-llvm check $fam --record; doc/llvm/LLVM-CROP-SURVEY.md, \"As built: LLS31 (a)\"): rows [ID RESULT REASON]"
           echo ";; Written by bin/lib/repr-llvm/results $kind (the check's work directory as rows, $(date -u +%Y-%m-%d), on the pack test/llvm/ir/rt.tar.xz and the checkout's repr/llvm); read by bin/reap (test/reap/cells.edn, the :llvm row). Read with the Clojure reader."; } > "$record"
+      fi
+      if [ -n "$only" ]; then
+        # the named rows replaced where the record has them, in its order; a named row it lacks before its closing `]`
+        awk -v ids="$work/only.ids" -v rows="$work/rows.edn" 'BEGIN { while ((getline l < ids) > 0) O[l] = 1
+            while ((getline l < rows) > 0) if (match(l, /^\["[^"]*"/)) { id = substr(l, 3, RLENGTH - 3); if (id in O) N[id] = l } }
+          match($0, /^\["[^"]*"/) { id = substr($0, 3, RLENGTH - 3); if (id in N) { print N[id]; done[id] = 1; next } }
+          /^\]$/ { for (id in N) if (!(id in done)) print N[id] }
+          { print }' "$record" > "$record.new" && mv "$record.new" "$record"
+        echo "repr-llvm check: recorded $(grep -c . "$work/only.ids") rows (--only) into ${record#$root/}"
+        exit 0
       fi
       { grep '^;;' "$record"; echo "["; LC_ALL=C sort "$work/rows.edn"; echo "]"; } > "$record.new" && mv "$record.new" "$record"
       echo "repr-llvm check: recorded $(grep -c '^\[' "$work/rows.edn") rows into ${record#$root/}"

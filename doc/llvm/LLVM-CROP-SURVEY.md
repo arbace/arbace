@@ -2603,3 +2603,63 @@ c-O0.run.ptr-sub-unsigned and tx-O0.20000121-1 judged the negative control, whic
 (its 21 tx bases from the pack, none of the 61) on the new pack: 900 mutants, 886 own verdicts, all met, 2 negative controls failing. Eval 547 / 12 / 3 to 549 / 12 / 1, AOT 537 / 10 / 15 to 539 / 10
 / 13. For the main host's whole night run: `LLVMI_TX_ALL=1 bin/llvmi check` and `--aot` judge the whole 3,040 on the new pack (not
 recorded: the records are the sample's).
+
+## As built: queue 335, the read cell's 15 deferred rows (2026-11-17, branch `335-llvm-verifier` from next d23b2215c)
+
+Light, on the VM (arm64): each rule ported from llvm-project 23.1.5 (the pinned tarball's lib/IR/Verifier.cpp, VerifierAMDGPU.cpp,
+ConvergenceVerifier.cpp, AsmWriter.cpp's slot tracker, lib/AsmParser/LLParser.cpp, AutoUpgrade.cpp's UpgradeTBAANode) as a commit
+of its own, each checked against the VM's opt 23.1.5 live (the whole stderr, byte for byte) on the rows it is for, then the rows
+re-run against the records by `bin/repr-llvm check FAMILY --only ID,...` (new: the named modules with the family's negative
+controls' modules, judged against the record; `--record` rewrites the named rows alone) and re-recorded so. The 15 rows and what
+took them:
+
+- **AMDGPU's intrinsics** (verifyAMDGPUIntrinsicCall, whole): `llvm.amdgcn.call.whole.wave` with visitFunction's
+  AMDGPU_Gfx_WholeWave and isCallableCC (amdgpu_ls, amdgpu_gfx_whole_wave), the twelve load-to-LDS data sizes, mfma.scale's and
+  wmma f8f6f4's formats and operands; also cs.chain, init.exec.from.input, set.inactive.chain.arg, amdgcn.kill's callbr
+  (visitCallBrInst: a callbr of a function is no visitCallBase), s.prefetch.data's message without a culprit, av.load/store's last
+  argument a node of one string (six valid CodeGen/AMDGPU modules were rejected), and amdgpu_es out of visitFunction's shader
+  conventions. A remangled declaration is visited at the module's end (getOrInsertDeclaration appends it); a call's undefined
+  attribute group prints none. Verifier-AMDGPU-intrinsic-amdgcn-call-whole-wave, -intrinsic-load-to-lds, -mfma-scale
+  (`:llvmtest-rules`); Verifier/AMDGPU's 15 files all print opt's stderr but intrinsic-immarg (half constants and `i1 1` in the
+  printer, below).
+- **Debug info**: visitMDNode's AreDebugLocsAllowed (a DILocation under an attachment other than !dbg and !llvm.loop), opt's
+  second verification numbered on the stripped module (Verifier-dilocation-in-wrong-place, `:llvmtest-rules`); visitDICompileUnit's
+  global variables list (a DIGlobalVariableExpression, its variable's scope no local scope; a DILocation as the variable is
+  `invalid tag`, after the unit and at visitGlobalVariable's direct call, which visits a DIGlobalVariable again: V:1742)
+  (auto.g2.di-retarget.500565, `:debug-info-rules`).
+- **Intrinsics**: is.fpclass's and vp.is.fpclass's test mask (alias-access-path-2.g0.intr-rename.600557: the Verifier's unchecked
+  cast of another operand reads bits outside the mask on the pin, as its record shows); a declaration with other suffixes than its
+  type's is remangled (pr57344-4.win.intr-decl.500228); the convergence verifier's messages numbered by Value::print's slot tracker,
+  the module's metadata and the printed function's alone (pr79354.g2.bundle.500227). The intrinsic table regenerated from 23.1.5 by
+  `bin/llvm-corpus intrinsics`: every line as 23.1.4's.
+- **The parser and the probes**: skipModuleSummaryEntry's end of file (Assembler-thinlto-bad-summary3, `:llvmtest-messages`);
+  parseMemoryAttr's errors and parseFnAttributeValuePairs's words in a header (attrs-p87, attrs-p52); a label defined twice is one
+  block moved to the function's end (defineBB), pred_empty counting a terminator anywhere, `Terminator found in the middle` printing
+  the block (verify-lab3); MDTuple::get's uniquing of equal tuples and UpgradeTBAANode's tags (metadata-w68, metadata-w77).
+  test/llvm/probes-known.tsv keeps cc-s39 alone (an address in opt's message, `:probe-pointer`); the classes `:probe-label`,
+  `:probe-reader` and `:probe-metadata` are gone.
+- **Left**: pr79354.g2.di-retarget.500483 (`:debug-info-rules`): Arbace's verifier now prints opt's stderr whole (three `invalid
+  file`), but the pack's mutant line says `invalid` and opt `debug` (LLS46 (b)): the row passes when the night re-makes the pack
+  (`bin/llvmi ir-make rt --mutants`).
+
+Also fixed on the way: arbace.repr.llvm.diag took the lexer's Toks by its class, and a read.ae evaluated from the checkout (any
+change to it) made every parser error's caret a crash; it reads the arrays through `rd/token-arrays` now.
+
+Checks (live opt 23.1.5 against Arbace's verify, A/B against next d23b2215c, whole stderr byte for byte; the VM's light tier, no
+whole family run): the 478 probes 472 to 477 (cc-s39 left), 475 to 478 verdicts; Assembler/ and Verifier/ (931 files) 813 to 827,
+882 to 889 verdicts, 592 to 601 first messages, no file worse; the pack rt's 715 mutants of the kinds touched 690 to 699, 714 to
+715 verdicts; its 252 modules, DebugInfo/ and TypeBasedAliasAnalysis/ (78), 150 FunctionAttrs and Attributor modules with
+`memory(`: unchanged (all of the pack's and the 150 equal before and after); llvm/test's 33 modules with summary entries 31 to 32;
+the AMDGPU slices (55 and 72 files) 46 to 51 and 57 to 70. `check verify-llvmtest --only` (5 rows), `verify-probes --only` (5),
+`verify-rt-heldout --only` (5): 14 fixed, 0 failing, their families' negative controls failing (5, 2, 1); the essential subsets of
+verify-llvmtest, verify-probes, roundtrip-llvmtest and text-llvmtest pass as recorded; expect-test 44 cases, 13 controls. The
+14 rows re-recorded by `--only --record`; `bin/reap --record`: LLVM read 3,830 / 1 / 15 to 3,844 / 1 / 1, the classes
+`:probe-label`, `:probe-reader` and `:probe-metadata` gone and `:llvmtest-rules`' and `:llvmtest-messages`' lists without the
+fixed tests; `bin/crops-score --record`: the LLVM row's completeness 0.9829 to 0.9839, meant 0.9927 to 0.9936.
+
+Not taken, seen on the way (no row of the cell): the printer's half constants (`half 1.0`, opt `half 1.000000e+00`: LLVM 23's
+writeAPFloatInternal prints every type's decimal when it reads back) and an i1 written `1` (opt `true`), in
+Verifier/AMDGPU/intrinsic-immarg.ll's stderr; CodeGen/AMDGPU's wmma gfx1250 tests (llvm.amdgcn.wmma.*.gfx1250.w32, three) rejected
+as `intrinsic has incorrect number of args. Expected 8, but got 7` where opt upgrades the old form (AutoUpgrade); Verifier/callbr.ll's
+callbr.landingpad rules; a lifetime intrinsic's failure ending the call's visit before the convergence verifier's message (a
+module of the VM's, opt prints both).

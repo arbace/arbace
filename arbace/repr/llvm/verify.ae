@@ -1354,9 +1354,13 @@
   [forms]
   (merge
    (into {} (for [f forms :when (= (first f) 'llvm/declare) :let [k (global-key (second f))] :when (str/starts-with? k "llvm.")
-                  :let [e (intr/lookup k)] :when (and e (:overloaded e) (= k (:name e)))
+                  :let [e (intr/lookup k)] :when (and e (:overloaded e))
                   :let [fty (:fty (.get *gdefs* k)) m (when fty (intr/mangled-name e fty tstr resolve-type))]
-                  :when (and m (not= m k))]
+                  ;; queue 335: a name with other suffixes than its type's is remangled too, when the type is the
+                  ;; intrinsic's (remangleIntrinsicFunction's getIntrinsicSignature)
+                  :when (and m (not= m k)
+                             (or (= k (:name e))
+                                 (nil? (try (check-intrinsic-signature k fty) nil (catch arbace.lang.ExceptionInfo x (.getMessage x))))))]
               [k m]))
   ;; an implicit declaration is made per call, by its own function type (getOrInsertDeclaration with its overload types)
   (into {} (for [k (filter #(str/starts-with? % "llvm.") (keys *gfwd*))
@@ -1597,10 +1601,11 @@
 ;; Calling conventions, function headers, call sites, musttail, operand bundles
 
 (def ^:private cc-no-calls
-  #{"spir_kernel" "amdgpu_kernel" "amdgpu_vs" "amdgpu_hs" "amdgpu_es" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs" "amdgpu_cs_chain"
-    "amdgpu_cs_chain_preserve" "ptx_kernel"})
+  "CallingConv.h's isCallableCC false (queue 335: amdgpu_ls and amdgpu_gfx_whole_wave, called by llvm.amdgcn.call.whole.wave alone)."
+  #{"spir_kernel" "amdgpu_kernel" "amdgpu_vs" "amdgpu_hs" "amdgpu_es" "amdgpu_ls" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs" "amdgpu_cs_chain"
+    "amdgpu_cs_chain_preserve" "amdgpu_gfx_whole_wave" "ptx_kernel"})
 (def ^:private cc-void-ret #{"amdgpu_kernel" "spir_kernel" "amdgpu_cs_chain" "amdgpu_cs_chain_preserve"})
-(def ^:private cc-shader #{"amdgpu_vs" "amdgpu_hs" "amdgpu_es" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs"})
+(def ^:private cc-shader #{"amdgpu_vs" "amdgpu_hs" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs"})   ; visitFunction's (queue 335: not amdgpu_es)
 (def ^:private cc-no-varargs #{"fastcc" "coldcc" "intel_ocl_bicc" "ptx_kernel" "ptx_device"})
 
 (defn- check-function-header
@@ -1641,6 +1646,12 @@
                 (when (and (has-attr? as "byref") (= (addrspace (norm-type (first (nth pl i)))) *alloca-as*))
                   (verr :verifier/cc "Calling convention disallows stack byref")))))
           (when var? (verr :verifier/cc "Calling convention does not support varargs or perfect forwarding!")))
+        ;; queue 335: AMDGPU_Gfx_WholeWave, its first parameter the i1 of the active lanes
+        (= cc "amdgpu_gfx_whole_wave")
+        (do (when-not (and (seq pl) (= 'i1 (norm-type (first (first pl)))))
+              (verr :verifier/cc "Calling convention requires first argument to be i1"))
+            (when (has-attr? first-attrs "inreg") (verr :verifier/cc "Calling convention requires first argument to not be inreg"))
+            (when var? (verr :verifier/cc "Calling convention does not support varargs or perfect forwarding!")))
         :else nil))
     (when-not intr?
       (doseq [[pi p] (map-indexed vector pl) :let [t (norm-type (first p)) at (str (pr/type-str t) " " (pr/value-str (if (local? (peek p)) (peek p) (symbol (str "%" pi)))))]]
@@ -1753,7 +1764,8 @@
               (when-not (and (= 1 (count ops)) (global? (peek (first ops))) (= :function (:kind (.get *gdefs* (global-key (peek (first ops)))))))
                 (verr :verifier/bundle "operand bundle \"clang.arc.attachedcall\" requires one function as an argument")))
           "convergencectrl" (when-not (and (= 1 (count ops)) (= 'token (first (first ops))))
-                              (verr :verifier/bundle "The 'convergencectrl' bundle requires exactly one token use."))
+                              ;; the convergence verifier's (ConvergenceVerifier.cpp): it prints by Value::print, its own slot tracker
+                              (verr :verifier/bundle "The 'convergencectrl' bundle requires exactly one token use." {:slots :fn}))
           nil)))))
 
 (def ^:dynamic *fn-seen* nil)
@@ -1812,10 +1824,13 @@
       (str/starts-with? id "llvm.amdgcn.s.prefetch.data")
       (let [as (addrspace (aty 0))]
         (when-not (or (#{0 1 4} as) (> (long as) 9))
-          (verr :verifier/intrinsic-call "llvm.amdgcn.s.prefetch.data only supports global or constant memory" :inst)))
+          (verr :verifier/intrinsic-call "llvm.amdgcn.s.prefetch.data only supports global or constant memory" :none)))
+      ;; queue 335: a node of one string (`metadata !0`, !0 = !{!"agent"}), not the string itself; the operand printed after the call
       (re-find #"^llvm\.amdgcn\.av\.(load|store)\." id)
-      (when-not (md-str (arg (dec (count args))))
-        (verr :verifier/intrinsic-call "the last argument to av load/store intrinsics must be a metadata string" :inst))
+      (let [ops (md-ops (arg (dec (count args))))]
+        (when-not (and (= 1 (count ops)) (md-str (first ops)))
+          (verr :verifier/intrinsic-call "the last argument to av load/store intrinsics must be a metadata string" :inst
+                (value-culprit 'metadata (arg (dec (count args))) defs))))
       (str/starts-with? id "llvm.amdgcn.cooperative.atomic.")
       (do (when-not (#{0 1} (addrspace (aty 0)))
             (verr :verifier/intrinsic-call "cooperative atomic intrinsics require a generic or global pointer" :inst (value-culprit (aty 0) (arg 0) defs)))
@@ -1825,6 +1840,83 @@
                     (value-culprit 'metadata (arg (dec (count args))) defs)))))
       :else nil)
     (case id
+      ;; queue 335 (lib/IR/VerifierAMDGPU.cpp's verifyAMDGPUIntrinsicCall, amdgcn_call_whole_wave): a direct call of an
+      ;; amdgpu_gfx_whole_wave function, not variadic, its arguments the callee's after the first (an i1), type and inreg
+      "llvm.amdgcn.call.whole.wave"
+      (let [fa (arg 0) d (when (global? fa) (.get *gdefs* (global-key fa)))
+            _ (when-not (and d (= :function (:kind d))) (verr :verifier/intrinsic-call "Indirect whole wave calls are not allowed" :inst))
+            [_ _ _ fps & fopts] (:form d) fo (apply hash-map fopts) fpl (vec (remove #{'&} fps))]
+        (when-not (= "amdgpu_gfx_whole_wave" (:cconv fo))
+          (verr :verifier/intrinsic-call "Callee must have the amdgpu_gfx_whole_wave calling convention" :inst))
+        (when (some #{'&} fps) (verr :verifier/intrinsic-call "Variadic whole wave calls are not allowed" :inst))
+        (when-not (= (count args) (count fpl)) (verr :verifier/intrinsic-call "Call argument count must match callee argument count" :inst))
+        (when-not (= 'i1 (norm-type (first (first fpl)))) (verr :verifier/intrinsic-call "Callee must have i1 as its first argument" :inst))
+        (doseq [i (range 1 (count fpl))]
+          (when-not (= (aty i) (norm-type (first (nth fpl i)))) (verr :verifier/intrinsic-call "Argument types must match" :inst))
+          (when-not (= (has-attr? (group-items (param-attrs (nth args i))) "inreg") (has-attr? (group-items (param-attrs (nth fpl i))) "inreg"))
+            (verr :verifier/intrinsic-call "Argument inreg attributes must match" :inst))))
+      ;; queue 335 (verifyAMDGPUIntrinsicCall's load-to-LDS cases): the data size, argument 2, one of 1, 2, 4, 12 and 16
+      ("llvm.amdgcn.load.to.lds" "llvm.amdgcn.load.async.to.lds" "llvm.amdgcn.global.load.lds" "llvm.amdgcn.global.load.async.lds"
+       "llvm.amdgcn.raw.buffer.load.lds" "llvm.amdgcn.raw.buffer.load.async.lds" "llvm.amdgcn.raw.ptr.buffer.load.lds"
+       "llvm.amdgcn.raw.ptr.buffer.load.async.lds" "llvm.amdgcn.struct.buffer.load.lds" "llvm.amdgcn.struct.buffer.load.async.lds"
+       "llvm.amdgcn.struct.ptr.buffer.load.lds" "llvm.amdgcn.struct.ptr.buffer.load.async.lds")
+      (when-not (contains? #{1 2 4 12 16} (arg 2))
+        (verr :verifier/intrinsic-call "invalid data size for load-to-LDS intrinsic; must be 1, 2, 4, 12, or 16" :inst))
+      ;; queue 335 (verifyAMDGPUIntrinsicCall's mfma.scale and wmma f8f6f4 cases): the formats (immediates) at most 4, the A and B
+      ;; operands fixed vectors of i32 of the lengths the cases allow, as long as the formats need (Src1's against the
+      ;; mfma's argument 5, as the Verifier prints it)
+      ("llvm.amdgcn.mfma.scale.f32.16x16x128.f8f6f4" "llvm.amdgcn.mfma.scale.f32.32x32x64.f8f6f4"
+       "llvm.amdgcn.wmma.f32.16x16x128.f8f6f4" "llvm.amdgcn.wmma.scale.f32.16x16x128.f8f6f4" "llvm.amdgcn.wmma.scale16.f32.16x16x128.f8f6f4")
+      (let [mfma? (str/starts-with? id "llvm.amdgcn.mfma.")
+            [s0 s1 f0 f1 p1 fmsg lens regs]
+            (if mfma?
+              [0 1 3 4 5 ["invalid value for cbsz format" "invalid value for blgp format"] #{4 6 8} {0 8 1 8 2 6 3 6 4 4}]
+              [1 3 0 2 2 ["invalid value for matrix format" "invalid value for matrix format"] #{8 12 16} {0 16 1 16 2 12 3 12 4 8}])
+            vc (fn [i] (value-culprit (aty i) (arg i) defs))
+            fmt (fn [i] (let [v (arg i)] (if (and (integer? v) (>= (long v) 0)) (long v) Long/MAX_VALUE)))
+            ok? (fn [t] (and (seq? t) (= 'vector (first t)) (= 'i32 (nth t 2)) (contains? lens (long (nth t 1)))))
+            lens-text (if mfma? "4, 6 or 8" "8, 12 or 16")]
+        (when-not (<= (fmt f0) 4) (verr :verifier/intrinsic-call (first fmsg) :inst (vc f0)))
+        (when-not (<= (fmt f1) 4) (verr :verifier/intrinsic-call (second fmsg) :inst (vc f1)))
+        (when-not (ok? (aty s0)) (verr :verifier/intrinsic-call (str "operand " s0 " must be " lens-text " element i32 vector") :inst (vc s0)))
+        (when-not (ok? (aty s1)) (verr :verifier/intrinsic-call (str "operand " s1 " must be " lens-text " element i32 vector") :inst (vc s1)))
+        (when-not (>= (long (nth (aty s0) 1)) (long (regs (fmt f0)))) (verr :verifier/intrinsic-call "invalid vector type for format" :inst (vc s0) (vc f0)))
+        (when-not (>= (long (nth (aty s1) 1)) (long (regs (fmt f1)))) (verr :verifier/intrinsic-call "invalid vector type for format" :inst (vc s1) (vc p1))))
+      ;; queue 335 (verifyAMDGPUIntrinsicCall's kill, cs.chain, init.exec.from.input and set.inactive.chain.arg cases)
+      "llvm.amdgcn.kill"
+      (when (= h 'callbr)
+        (let [ind (:indirect o)
+              blk (when (= 1 (count ind)) (first (filter #(= (local-key (second %)) (local-key (first ind))) (:body fo))))
+              x0 (when blk (first (remove #(dbg-record? (body %)) (drop 2 blk))))
+              b0 (when x0 (body x0))]
+          (when-not (= 1 (count ind)) (verr :verifier/intrinsic-call "callbr amdgcn_kill only supports one indirect dest" :none))
+          (when-not (or (= '(unreachable) b0)
+                        (let [c (callee-of b0)] (and (= 'call (first b0)) (global? c) (= (:name (intr/lookup (global-key c))) "llvm.amdgcn.unreachable"))))
+            (verr :verifier/intrinsic-call "callbr amdgcn_kill indirect dest needs to be unreachable" :none))))
+      "llvm.amdgcn.cs.chain"
+      (let [inreg? (fn [i] (has-attr? (group-items (param-attrs (nth args i []))) "inreg"))
+            nx (some-> (:next *ctx*) body) nc (when nx (callee-of nx))]
+        (when-not (#{"amdgpu_cs" "amdgpu_cs_chain" "amdgpu_cs_chain_preserve" "amdgpu_es" "amdgpu_gs" "amdgpu_hs" "amdgpu_ls" "amdgpu_vs"} (:cconv fo))
+          (soft! :verifier/intrinsic-call "Intrinsic cannot be called from functions with this calling convention" :inst))
+        (when-not (inreg? 2) (verr :verifier/intrinsic-call "SGPR arguments must have the `inreg` attribute" :inst))
+        (when (inreg? 3) (verr :verifier/intrinsic-call "VGPR arguments must not have the `inreg` attribute" :inst))
+        (when-not (and (integer? (arg 4)) (<= 0 (long (arg 4)) 1)) (verr :verifier/intrinsic-call "flags must be 0 or 1 for llvm.amdgcn.cs.chain" :inst))
+        (when-not (or (= '(unreachable) nx)
+                      (and nc (= 'call (first nx)) (global? nc) (= (:name (intr/lookup (global-key nc))) "llvm.amdgcn.unreachable")))
+          (verr :verifier/intrinsic-call "llvm.amdgcn.cs.chain must be followed by unreachable" :inst)))
+      ("llvm.amdgcn.init.exec.from.input" "llvm.amdgcn.set.inactive.chain.arg")
+      (let [init? (= id "llvm.amdgcn.init.exec.from.input") i (if init? 0 1) v (arg i)
+            p (when (local? v) (first (filter #(and (vector? %) (local? (peek %)) (= (local-key (peek %)) (local-key v))) (nth f 3))))
+            p-inreg? (and p (has-attr? (group-items (param-attrs p)) "inreg"))]
+        (if init?
+          (when-not p-inreg?
+            (verr :verifier/intrinsic-call "only inreg arguments to the parent function are valid as inputs to this intrinsic" :inst))
+          (do (when-not (#{"amdgpu_cs_chain" "amdgpu_cs_chain_preserve"} (:cconv fo))
+                (soft! :verifier/intrinsic-call "Intrinsic can only be used from functions with the amdgpu_cs_chain or amdgpu_cs_chain_preserve calling conventions" :inst))
+              (when (has-attr? (group-items (param-attrs (nth args 1 []))) "inreg")
+                (verr :verifier/intrinsic-call "Value for inactive lanes must not have the `inreg` attribute" :inst))
+              (when-not p (verr :verifier/intrinsic-call "Value for inactive lanes must be a function argument" :inst))
+              (when p-inreg? (verr :verifier/intrinsic-call "Value for inactive lanes must be a VGPR function argument" :inst)))))
       "llvm.assume"
       (do (when (seq (:bundles o)) (when-not (#{1 true} (arg 0)) (verr :verifier/intrinsic-call "assume with operand bundles must have i1 true condition" :inst)))
           (doseq [[tag & ins] (:bundles o)]
@@ -1922,6 +2014,13 @@
       (let [v (arg 0) d (when (global? v) (.get *gdefs* (global-key v)))]
         (when-not d (verr :verifier/intrinsic-call "llvm.threadlocal.address first argument must be a GlobalValue" :none))
         (when-not (:thread-local (global-opts (:form d))) (verr :verifier/intrinsic-call "llvm.threadlocal.address operand isThreadLocal() must be true" :none)))
+      ;; queue 335 (visitIntrinsicCall's is_fpclass): the test mask's bits within fcAllFlags (0x3ff); the Verifier casts the operand
+      ;; to a ConstantInt unchecked, and on any other operand (a call whose type is not the intrinsic's, a mutant's) the pin's opt
+      ;; reads bits outside the mask: the message, as its records show
+      ("llvm.is.fpclass" "llvm.vp.is.fpclass")
+      (let [m (arg 1)]
+        (when-not (and (integer? m) (<= 0 m 0x3ff))
+          (verr :verifier/intrinsic-call (str "unsupported bits for " id " test mask") :none)))
       "llvm.reloc.none" (when-not (md-str (arg 0)) (verr :verifier/intrinsic-call "llvm.reloc.none argument must be a metadata string" :inst))
       "llvm.bswap" (let [t (elem (result-type b))] (when (and (int-type? t) (not (zero? (mod (int-bits t) 16)))) (verr :verifier/intrinsic-call "bswap must be an even number of bytes" :inst)))
       ("llvm.ucmp" "llvm.scmp")
@@ -2926,6 +3025,15 @@
         (when (and (= k "DICompileUnit") (set? :enums) (not (tuple? (:enums fs)))) (apply verr :di/node "invalid enum list" (N :enums)))
         (when (and (= k "DICompileUnit") (set? :retainedTypes) (not (tuple? (:retainedTypes fs)))) (apply verr :di/node "invalid retained type list" (N :retainedTypes)))
         (when (and (= k "DICompileUnit") (set? :globals) (not (tuple? (:globals fs)))) (apply verr :di/node "invalid global variable list" (N :globals)))
+        ;; queue 335 (V:1479-1486): each a DIGlobalVariableExpression whose variable's scope is no local scope (the variable's first
+        ;; operand, read through the Verifier's unchecked cast: a DILocation's scope too)
+        (when (and (= k "DICompileUnit") (set? :globals) (tuple? (:globals fs)))
+          (doseq [op (md-ops (:globals fs))]
+            (when-not (= "DIGlobalVariableExpression" (kind-of op)) (verr :di/node "invalid global variable ref" [:md id] [:mdv op]))
+            (let [v (:var (di-fields (node-of op)))]
+              (when (and (#{"DIGlobalVariable" "DILocalVariable" "DILocation"} (kind-of v))
+                         (local-scope-kinds (kind-of (:scope (di-fields (node-of v))))))
+                (verr :di/node "function-local variables are not allowed in a DICompileUnit's global variables list" [:md id] [:mdv op])))))
         (when (and (= k "DICompileUnit") (set? :imports) (not (tuple? (:imports fs)))) (apply verr :di/node "invalid imported entity list" (N :imports)))
         (when (and (= k "DICompileUnit") (set? :macros) (not (tuple? (:macros fs)))) (apply verr :di/node "invalid macro list" (N :macros)))
         (when (and (= k "DISubprogram") (set? :retainedNodes) (not (tuple? (:retainedNodes fs)))) (apply verr :di/node "invalid retained nodes list" (N :retainedNodes)))
@@ -3019,6 +3127,68 @@
         (recur)))
     seen))
 
+(defn- check-md-locs
+  "visitMDNode's AreDebugLocsAllowed (queue 335): the nodes a function's attachments reach, in the Verifier's order (a
+  definition's !dbg, then its other attachments; each instruction's !dbg location, then its attachments, !dbg and !llvm.loop
+  allowing locations; a declaration's all allowing), each node once (MDNodes): a DILocation operand of a node reached where
+  locations are not allowed is `DILocation not allowed within this metadata node`, and that node's walk ends. `stripped?`:
+  the module after StripDebugInfo (no !dbg, no debug records or intrinsics, a loop id without its locations)."
+  [forms stripped?]
+  (let [seen (java.util.HashSet.)
+        loc? (fn [r] (= "DILocation" (di-kind (get *meta* r))))
+        walk (fn [base allow? loop?]
+               (when (and (md-ref? base) (.add seen base))
+                 (let [work (java.util.ArrayDeque.)]
+                   (.add work base)
+                   (loop []
+                     (when-let [cur (.poll work)]
+                       (let [ops (remove #(and stripped? loop? (= cur base) (loc? %)) (filter md-ref? (md-refs-in (get *meta* cur))))
+                             bad (when-not allow? (first (filter loc? ops)))]
+                         (if bad
+                           (visiting (binding [*ctx* {:md cur}] (verr :di/node "DILocation not allowed within this metadata node" [:md cur] [:mdv bad])))
+                           (do (doseq [o ops] (when (.add seen o) (.add work o)))
+                               (recur)))))))))
+        attach (fn [md decl?]
+                 (doseq [[k v] (partition 2 md) :when (not (and stripped? (= k '!dbg)))]
+                   (walk v (or decl? (= k '!dbg) (= k '!llvm.loop)) (= k '!llvm.loop))))]
+    (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
+      (let [o (apply hash-map (drop 4 f)) decl? (= 'llvm/declare (first f))
+            md (:md o)
+            ;; a definition's !dbg first (visitFunction's attachments in their order, the subprogram among them)
+            md (if decl? md (vec (mapcat identity (sort-by #(if (= '!dbg (first %)) 0 1) (partition 2 md)))))]
+        (attach md decl?)
+        (doseq [[_ _ & items] (:body o) x items
+                :let [b (body x) c (callee-of b)]
+                :when (not (dbg-record? b))
+                :when (not (and c (global? c) (re-find #"^llvm\.dbg\." (global-key c))))]
+          (attach (:md (nth (split-inst b) 2)) false))))))
+
+(declare strip-md-pairs)
+
+(defn- strip-debug-forms
+  "The forms as StripDebugInfo leaves them, for the slot tracker's numbering of opt's second verification (queue 335): no
+  llvm.dbg.* or llvm.gcov named metadata, no !dbg attachments, debug records or debug intrinsics' calls."
+  [forms]
+  (let [drop-dbg (fn [x] (let [v (vec x) i (.indexOf ^java.util.List v :md)]
+                           (if (neg? i) x (apply list (assoc v (inc i) (strip-md-pairs (nth v (inc i))))))))
+        inst (fn [x] (if (= (first x) '=) (list '= (second x) (drop-dbg (nth x 2))) (drop-dbg x)))]
+    (vec (keep (fn [f]
+                 (case (first f)
+                   llvm/named-meta (when-not (or (str/starts-with? (name (second f)) "!llvm.dbg.") (= (second f) '!llvm.gcov)) f)
+                   (llvm/define llvm/declare)
+                   (let [v (vec (drop-dbg f)) bi (.indexOf ^java.util.List v :body)]
+                     (if (and (>= bi 0) (nth v (inc bi)))
+                       (apply list (assoc v (inc bi)
+                                          (mapv (fn [blk] (apply list (concat (take 2 blk)
+                                                                              (map inst (remove #(let [b (body %) c (callee-of b)]
+                                                                                                   (or (dbg-record? b) (and c (global? c) (re-find #"^llvm\.dbg\." (global-key c)))))
+                                                                                                (drop 2 blk))))))
+                                                (nth v (inc bi)))))
+                       (apply list v)))
+                   llvm/global (drop-dbg f)
+                   f))
+               forms))))
+
 (defn- strip-md-pairs [md] (vec (mapcat identity (remove #(= '!dbg (first %)) (partition 2 md)))))
 
 (defn- stripped-reachable-md
@@ -3093,6 +3263,7 @@
   "The DI nodes still reachable after StripDebugInfo, checked with their errors hard (into *errs2*)."
   [forms]
   (binding [*errs* *errs2*]
+    (check-md-locs forms true)
     (let [left (stripped-reachable-md forms)]
       (doseq [f forms :when (= (first f) 'llvm/meta) :let [id (second f) n (nth f 2)] :when (and (di-kind n) (.contains ^java.util.Set left id))]
         (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
@@ -3140,6 +3311,7 @@
                 (let [e (.get *errs* i)] (.set *errs* (int i) (ex-info (.getMessage ^Throwable e) (assoc (ex-data e) :llvm/verify :verifier/di))))))
             (throw (ex-info "stripped" {::stripped true})))
           (do
+            (check-md-locs forms false)
             (binding [*inst-locs* (reduce (fn [m [l lf lx]] (if (contains? m l) m (assoc m l [lf lx])))
                                           ;; visitFunction's walk (Verifier.cpp:3313-3335): a function with a subprogram, its
                                           ;; instructions' locations; a call of an old debug intrinsic is a debug record by then
@@ -3156,12 +3328,22 @@
                   (let [v (:var (di-fields n))]
                     (when (and v (some? (get *meta* v)) (= "DIGlobalVariable" (di-kind (get *meta* v))))
                       (visiting (binding [*ctx* {:md v}] (check-di-node v (get *meta* v)))))
+                    ;; queue 335: a DILocation as the variable, visitDIGlobalVariable through the unchecked cast: its tag is no
+                    ;; DW_TAG_variable (the pin's opt: `invalid tag`); a compile unit's are visited after the unit (below)
+                    (when (and v (= "DILocation" (di-kind (get *meta* v))) (not (contains? cu-gves id)))
+                      (visiting (binding [*ctx* {:md v}] (verr :di/node "invalid tag"))))
                     ;; LLS43 (a): its expression's fragment against the variable (V:1749-1753), here when visitMDNode reaches it (a
                     ;; compile unit's globals); a global's !dbg is checked again by visitGlobalVariable's direct call (V:799, below)
                     (when (and v (some? (node-of v)) (contains? cu-gves id))
                       (when-let [fi (frag-info (node-of (:expr (di-fields n))))]
                         (visiting (binding [*ctx* {:md id}] (check-fragment v fi [:mdv id])))))))
-                (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
+                (visiting (binding [*ctx* {:md id}] (check-di-node id n)))
+                ;; queue 335: visitMDNode reaches a unit's global variable expressions after the unit itself
+                (when (= "DICompileUnit" (di-kind n))
+                  (doseq [g (md-ops (:globals (di-fields n)))
+                          :let [v (when (= "DIGlobalVariableExpression" (di-kind (node-of g))) (:var (di-fields (node-of g))))]
+                          :when (and v (= "DILocation" (di-kind (get *meta* v))))]
+                    (visiting (binding [*ctx* {:md v}] (verr :di/node "invalid tag")))))))
             (doseq [:let [attached (java.util.HashMap.)]
                     f forms :when (#{'llvm/define 'llvm/declare} (first f))]
               (let [o (apply hash-map (drop 4 f)) md (apply hash-map (:md o))
@@ -3236,6 +3418,11 @@
               ;; LLS43 (a): visitGlobalVariable calls visitDIGlobalVariableExpression itself (V:799): the fragment again
               (when (and d (= "DIGlobalVariableExpression" (di-kind (node-of d))))
                 (let [v (:var (di-fields (node-of d)))]
+                  (when (and v (= "DILocation" (di-kind (node-of v))))   ; queue 335, as above
+                    (visiting (binding [*ctx* {:md v}] (verr :di/node "invalid tag"))))
+                  ;; queue 335: and visitDIGlobalVariable again (V:1742), its errors printed once more
+                  (when (and v (= "DIGlobalVariable" (di-kind (node-of v))))
+                    (visiting (binding [*ctx* {:md v}] (check-di-node v (node-of v)))))
                   (when (and v (= "DIGlobalVariable" (di-kind (node-of v))))
                     (when-let [fi (frag-info (node-of (:expr (di-fields (node-of d)))))]
                       (visiting (binding [*ctx* {:md d}] (check-fragment v fi [:mdv d]))))))))))))))
@@ -3381,7 +3568,12 @@
                 (when-let [r (result x)] (.put defs (local-key r) [bi ii (body x) x])))
             lp-type (volatile! nil)]
         (visiting (binding [*ctx* {:fn f :bb (second (first blocks))}]
-                    (when (seq (nth (:preds g) 0)) (verr :verifier/entry-predecessors "Entry block to function must not have predecessors!"))))
+                    ;; pred_empty: the block's users that are terminators, wherever they stand (queue 335: one in the middle of a
+                    ;; block, after a label defined twice)
+                    (when (or (seq (nth (:preds g) 0))
+                              (let [ek (some-> (second (first blocks)) local-key)]
+                                (some (fn [[_ _ & items]] (some #(and (terminator? %) (some (fn [l] (= (local-key l) ek)) (labels-of (body %)))) items)) blocks)))
+                      (verr :verifier/entry-predecessors "Entry block to function must not have predecessors!"))))
         (doseq [[bi [_ l & items]] (map-indexed vector blocks)]
           (let [items (vec items)
                 insts (vec (remove #(dbg-record? (body %)) items))]
@@ -3415,9 +3607,12 @@
                     (recur (inc ii) seen-non-phi)
                     (do
                      (visiting
-                      (binding [*ctx* {:fn f :bb l :bi bi :inst x :defs defs}]
+                      (binding [*ctx* {:fn f :bb l :bi bi :inst x :defs defs
+                                       :next (first (remove #(let [nb (body %) c (callee-of nb)]   ; the next instruction: a debug record or intrinsic is none
+                                                                  (or (dbg-record? nb) (and c (global? c) (re-find #"^llvm\.dbg\.(declare|value|assign|label)" (global-key c)))))
+                                                               (drop (inc ii) items)))}]
                       (when (and (terminator? x) (< ii (dec (count items))))
-                        (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!"))
+                        (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!" :bb))
                       (when (and (= hd 'phi) seen-non-phi) (verr :verifier/phi-grouped "PHI nodes not grouped at top of basic block!" :inst :bb))
                       (when (and (= hd 'phi) (token-like? (norm-type (first (strip-flags (second (split-inst b)))))))
                         (verr :verifier/phi-grouped "PHI nodes cannot have token type!" :none))
@@ -3493,7 +3688,22 @@
                                         (and (global? c)
                                              (or (re-find #"^llvm\.dbg\.(declare|value|assign|label)" (global-key c))
                                                  (let [d (.get *gdefs* (global-key c))] (and d (old-form-decl? (global-key c) (:fty d)))))))))
-                        (check-call-site b defs)
+                        (let [c (callee-of b)]
+                          (if (and (= hd 'callbr) (not (and (seq? c) (= 'asm (first c)))))
+                            ;; visitCallBrInst (queue 335): a callbr of a function is no visitCallBase; a direct one of the
+                            ;; function's own type, without bundles, of an intrinsic it supports (amdgcn.kill), then visitIntrinsicCall
+                            (let [[_ ps o] (split-inst b)
+                                  d (when (global? c) (.get *gdefs* (global-key c)))]
+                              ;; an intrinsic the module calls undeclared is declared by LLParser with the call's type
+                              (when-not (if d
+                                          (and (= :function (:kind d)) (= (:fty d) (call-fty (first ps) (nth ps 2))))
+                                          (and (global? c) (intr/recognized? (global-key c))))
+                                (verr :verifier/call "callbr: indirect function / invalid signature" :none))
+                              (when (seq (:bundles o)) (verr :verifier/call "callbr for intrinsics currently doesn't support operand bundles" :none))
+                              (when-not (= "llvm.amdgcn.kill" (:name (intr/lookup (global-key c))))
+                                (soft! :verifier/call "callbr currently only supports asm-goto and selected intrinsics" :none))
+                              (when (intr/recognized? (global-key c)) (visiting (check-intrinsic-call (global-key c) b defs))))
+                            (check-call-site b defs)))
                         (when (and (= hd 'call) (= :musttail (:tail (nth (split-inst b) 2))))
                           (try (check-musttail f x b items ii defs)
                                (catch arbace.lang.ExceptionInfo e (when-not (::tailcc (ex-data e)) (throw e))))))
@@ -3760,8 +3970,14 @@
             :let [b (body x) c (callee-of b)]
             :when (and c (global? c) (str/starts-with? (global-key c) "llvm."))]
       (let [[_ ps] (split-inst b)] (.put users (global-key c) (conj (vec (.get users (global-key c))) [(call-fty (first ps) (nth ps 2)) x]))))
-    (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
-      (verify-function f (into {} users)))
+    ;; a declaration remangled (Intrinsic::remangleIntrinsicFunction, the upgrade at validateEndOfModule) is a new one at the
+    ;; module's end (getOrInsertDeclaration), visited after the others (queue 335)
+    (let [fns (filter #(#{'llvm/define 'llvm/declare} (first %)) forms)
+          names (set (map #(global-key (second %)) fns))
+          moved? (fn [f] (and (= 'llvm/declare (first f))
+                              (let [m (get *renames* (global-key (second f)))] (and (string? m) (not (names m))))))]
+      (doseq [f (concat (remove moved? fns) (filter moved? fns))]
+        (verify-function f (into {} users))))
     (doseq [f forms :when (= (first f) 'llvm/global)]
       (visiting (binding [*ctx* {:global f}] (check-global-variable forms f))))
     (doseq [f forms :when (= (first f) 'llvm/alias)]
@@ -3771,6 +3987,26 @@
     (check-module-flags forms)
     (check-module-ident forms)
     (check-errno-tbaa forms)))
+
+(defn- merge-labels
+  "A definition's blocks as LLParser makes them when a label is defined twice (queue 335): PerFunctionState::defineBB takes
+  the block of that name again, moves it to the function's end and appends the second body's instructions to it."
+  [forms]
+  (mapv (fn [f]
+          (let [o (when (= (first f) 'llvm/define) (apply hash-map (drop 4 f)))
+                ls (keep second (:body o))]
+            (if (= (count ls) (count (distinct (map local-key ls))))
+              f
+              (let [merged (reduce (fn [acc blk]
+                                     (let [l (second blk) k (when l (local-key l))
+                                           i (when k (first (keep-indexed (fn [i b] (when (and (second b) (= k (local-key (second b)))) i)) acc)))]
+                                       (if i
+                                         (conj (vec (concat (subvec acc 0 i) (subvec acc (inc i)))) (apply list (concat (nth acc i) (drop 2 blk))))
+                                         (conj acc blk))))
+                                   [] (:body o))
+                    v (vec f) bi (.indexOf ^java.util.List v :body)]
+                (apply list (assoc v (inc bi) merged))))))
+        forms))
 
 (defn- run-phases
   "The checks over the forms: [parser-error verifier-errors], an error an ExceptionInfo of `verr`. A parser error stops
@@ -3792,9 +4028,11 @@
     (try
       (phase-parser forms)
       (set! *renames* (implicit-renames forms))
+      (let [forms (merge-labels forms)]
+      (set! *all-forms* forms)
       (try (phase-verifier forms) (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) (.add *errs* e) (throw e))))
       (try (phase-debug forms) (catch arbace.lang.ExceptionInfo e (cond (::stripped (ex-data e)) nil (:llvm/verify (ex-data e)) (.add *errs* e) :else (throw e))))
-      [nil (vec *errs*) *renames* (vec *errs2*)]
+      [nil (vec *errs*) *renames* (vec *errs2*)])
       (catch arbace.lang.ExceptionInfo e
         (if (:llvm/verify (ex-data e)) [e [] {}] (throw e))))))
 
@@ -4018,7 +4256,8 @@
                   *group-numbers*)
               nb (set-opt b :attrs (fn [attrs]
                                      (let [k (if (#{'llvm/define 'llvm/declare} h) (fn-attrs-key b) (attrs-key attrs))]
-                                       (if-let [n (get m k)] [n] attrs))))]
+                                       ;; no attribute at all (a group the module does not define: LLParser's empty set) prints none
+                                       (cond (empty? k) [] (get m k) [(get m k)] :else attrs))))]
           (if (= (first x) '=) (list '= (second x) nb) nb))
         :else x))))
 
@@ -4199,7 +4438,11 @@
   "The text opt prints for a Verifier error: its message and the values it names, a line each."
   ^String [e metaforms slots]
   (let [d (ex-data e) ctx (:ctx d)
-        cs (cond (= [:none] (:culprits d)) [] (seq (:culprits d)) (:culprits d) :else (default-culprits ctx))]
+        cs (cond (= [:none] (:culprits d)) [] (seq (:culprits d)) (:culprits d) :else (default-culprits ctx))
+        ;; a message printed by Value::print (opts {:slots :fn}): the module's metadata and its function's alone (queue 335)
+        slots (if (and (= :fn (:slots (:opts d))) (:fn ctx) *group-forms*)
+                (try (diag/md-slots *group-forms* (second (:fn ctx))) (catch Throwable _ slots))
+                slots)]
     (binding [*ctx* ctx]
       (apply str (.getMessage ^Throwable e) "\n" (map #(if (and (vector? %) (= :raw (first %))) (second %) (when-let [t (culprit-text % ctx metaforms)] (str (diag/renumber t slots) "\n"))) cs)))))
 
@@ -4223,6 +4466,89 @@
       (and (vector? hint) (= (first hint) :fn-find) whole) (diag/offset-of src (first whole) (second whole) [:find (second hint)])
       item (diag/offset-of src (first item) (second item) hint)
       :else 0)))
+
+(defn- replace-md-refs
+  "The forms with the metadata references of `m` (old id -> new id) replaced."
+  [forms m]
+  (letfn [(walk [y] (cond (and (symbol? y) (contains? m y)) (get m y)
+                          (seq? y) (apply list (map walk y))
+                          (vector? y) (mapv walk y)
+                          (map? y) (into (empty y) (map (fn [[k v]] [k (walk v)]) y))
+                          :else y))]
+    (mapv (fn [f] (if (= (first f) 'llvm/meta) (apply list (first f) (second f) (map walk (drop 2 f))) (walk f))) forms)))
+
+(defn unique-md
+  "The forms with equal metadata tuples one node, as LLParser's MDTuple::get makes them (queue 335): two numbered tuples, not
+  distinct and in no cycle, whose operands are the same once their own tuples are, are the first one (the text's order); the
+  references to the others are to it, their definitions dropped."
+  [forms]
+  (let [order (vec (keep #(when (= (first %) 'llvm/meta) (second %)) forms))
+        pos (into {} (map-indexed (fn [i id] [id i]) order))
+        tup (into {} (keep (fn [f] (let [n (nth f 2 nil)]
+                                     (when (and (= (first f) 'llvm/meta) (md-ref? (second f)) (not (:distinct (apply hash-map (drop 3 f))))
+                                                (seq? n) (= (first n) '!) (vector? (second n)))
+                                       [(second f) (second n)])))
+                           forms))
+        state (java.util.HashMap.)   ; id -> :visiting, :cyclic or :done
+        cyclic? (fn cyc [id]
+                  (case (.get state id)
+                    :visiting true :cyclic true :done false
+                    (do (.put state id :visiting)
+                        (let [c (boolean (some #(and (contains? tup %) (cyc %)) (filter md-ref? (md-refs-in (get tup id)))))]
+                          (.put state id (if c :cyclic :done)) c))))
+        _ (doseq [id (keys tup)] (cyclic? id))
+        ok (set (filter #(= :done (.get state %)) (keys tup)))
+        height (java.util.HashMap.)
+        h (fn hh [id] (or (.get height id)
+                          (let [v (reduce max 0 (map #(inc (long (hh %))) (filter ok (filter md-ref? (md-refs-in (get tup id))))))]
+                            (.put height id v) v)))
+        reps (java.util.HashMap.)]
+    (doseq [id ok] (h id))
+    (doseq [lvl (sort (distinct (vals height)))]
+      (let [ids (sort-by pos (filter #(= lvl (.get height %)) ok))
+            claimed (java.util.HashMap.)]
+        (doseq [id ids]
+          (let [k (replace-md-refs [(get tup id)] (into {} reps))
+                k (first k)]
+            (if-let [r (.get claimed k)] (.put reps id r) (.put claimed k id))))))
+    (if (.isEmpty reps)
+      forms
+      (let [m (into {} reps)]
+        (replace-md-refs (vec (remove #(and (= (first %) 'llvm/meta) (contains? m (second %))) forms)) m)))))
+
+(defn upgrade-tbaa
+  "LLParser's UpgradeTBAANode at the module's end (queue 335): an instruction's !tbaa tag that is not struct-path aware (its
+  first operand no node, or fewer than three operands) replaced by <MD, MD, i64 0> (three operands: <S, S, i64 0, const>, S
+  the node of the first two), each new node uniqued against the module's (MDNode::get)."
+  [forms]
+  (let [nodes (java.util.HashMap.)   ; content -> id of the non-distinct nodes
+        _ (doseq [f forms :when (and (= (first f) 'llvm/meta) (md-ref? (second f)) (not (:distinct (apply hash-map (drop 3 f)))))]
+            (.putIfAbsent nodes (nth f 2) (second f)))
+        nxt (volatile! (inc (reduce max -1 (keep #(when (and (= (first %) 'llvm/meta) (md-ref? (second %))) (Long/parseLong (subs (name (second %)) 1))) forms))))
+        added (java.util.ArrayList.)
+        get! (fn [ops] (let [c (list '! ops)]
+                         (or (.get nodes c)
+                             (let [id (symbol (str "!" @nxt))] (vswap! nxt inc) (.put nodes c id) (.add added (list 'llvm/meta id c)) id))))
+        meta (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
+        up (fn [x] (let [n (get meta x) ops (when (and (seq? n) (= (first n) '!) (vector? (second n))) (second n))]
+                     (cond (or (nil? ops) (empty? ops)) x
+                           (and (md-ref? (first ops)) (>= (count ops) 3)) x
+                           (= 3 (count ops)) (let [sc (get! [(nth ops 0) (nth ops 1)])] (get! [sc sc '[i64 0] (nth ops 2)]))
+                           :else (get! [x x '[i64 0]]))))
+        inst (fn [x] (let [b (body x) v (vec b) i (.indexOf ^java.util.List v :md)]
+                       (if (or (dbg-record? b) (neg? i)) x
+                           (let [md (nth v (inc i))
+                                 md2 (vec (mapcat (fn [[k t]] [k (if (and (= k '!tbaa) (md-ref? t)) (up t) t)]) (partition 2 md)))]
+                             (if (= md md2) x
+                                 (let [b2 (apply list (assoc v (inc i) md2))] (if (= (first x) '=) (list '= (second x) b2) b2)))))))
+        out (mapv (fn [f] (if (= (first f) 'llvm/define)
+                            (let [v (vec f) bi (.indexOf ^java.util.List v :body)]
+                              (if (and (>= bi 0) (nth v (inc bi)))
+                                (apply list (assoc v (inc bi) (mapv (fn [blk] (apply list (concat (take 2 blk) (map inst (drop 2 blk))))) (nth v (inc bi)))))
+                                f))
+                            f))
+                  forms)]
+    (if (.isEmpty added) (if (= out forms) forms out) (into out added))))
 
 (defn hoist-inline-md
   "The forms with their inline metadata nodes (tuples and specialized nodes but DIExpression and DIArgList) numbered, as
@@ -4277,6 +4603,7 @@
   (let [[pe es renames es2] (run-phases forms)
         ;; past the parser, the Verifier sees the inline nodes as numbered ones
         hoisted (when-not pe (try (hoist-inline-md forms) (catch Throwable _ forms)))
+        hoisted (when hoisted (try (upgrade-tbaa (unique-md hoisted)) (catch Throwable _ hoisted)))
         [es renames es2 forms] (if (and hoisted (not (identical? hoisted forms)))
                                  (let [[_ es* r* e2*] (run-phases hoisted)] [es* r* e2* hoisted])
                                  [es renames es2 forms])
@@ -4314,8 +4641,10 @@
                            (when-not ver (apply str (map #(error-text % metaforms slots) dis))))
             ;; after the warning and the stripping, opt verifies again: what is left of the debug info fails hard
             again (when (and (empty? broken) (not ver) (seq dis) (seq es2)) es2)
+            ;; the second verification's slot tracker numbers the stripped module (queue 335)
+            slots2 (when again (try (diag/md-slots (strip-debug-forms forms)) (catch Throwable _ slots)))
             body-text (if again
-                        (str body-text "warning: ignoring invalid debug info in " file "\n" (apply str (map #(error-text % metaforms slots) again)))
+                        (str body-text "warning: ignoring invalid debug info in " file "\n" (apply str (map #(error-text % metaforms slots2) again)))
                         body-text)
             broken (if again (vec again) broken)
             tail (cond
