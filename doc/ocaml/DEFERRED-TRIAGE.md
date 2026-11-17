@@ -942,3 +942,28 @@ kills a process above 3.4 GB (4 GB for one rerun). The pinned tarball and the op
   `bin/oi build` failed on arm64).
 - The light-speed rows: a sample on the VM (`ast-invariants`, `basic/tailcalls`, `lazy/lazy3` time out, `effect-syntax/coroutines`
   at its depth) showed no cheap gain; the 44 rows stay the compiled level's (OT8 (a)).
+
+## As built: OC218 (a)'s first part, Gc's words and Memprof's sampling (2026-11-17, queue 331, branch `331-ocaml-decided-rows`)
+
+The cheapest of OT30's decided classes, `:gc-and-memory` (OC218 (a)), built at both levels; light, by list, on the VM.
+
+- **The words counted** (oi: `go/arbace/oi/ext_sys.ae` `countWords`, `countWordsT`, `countValue`; prim.ae; the AOT runtime: `Rt/words`,
+  `Rt/counted`). An allocation is counted at its making by its wosize plus its header, in the minor heap up to Max_young_wosize
+  (256), else in the major heap: the Lambda's `makeblock`, `makemutable`, lazy and forward blocks and float records; the results of
+  the allocating externals (arrays: make, sub, append, concat; strings; `Obj.dup`, `with_tag`, `new_block`). oi counts as ocamlc's
+  bytecode allocates: also the boxed results of float arithmetic, `floatfield`, `float_of_int`, and `Gc.minor_words`' and
+  `Gc.counters`' own boxes, after the read (probed against ocamlc 5.5.0 here: the same deltas, `2 2 2 4 4`). The light level counts
+  as ocamlopt allocates (`Sys.backend_type` is `Native` there: no float boxes). Not counted yet: closures, the boxed integers, the
+  runtime's own blocks. `Gc.stat`, `quick_stat`, `counters` and `minor_words` read the counters.
+- **Gc.Memprof's sampling** (oi: `memprofSample`, `memprofRun`; the runtime: `ExtGc/memprofSample`, `memprofRun`). A profile samples
+  the counted words at its rate (a word with probability lambda: the geometric distance of memprof.c's `rand_geom`). An allocation
+  with samples calls the tracker's `alloc_minor` (or `alloc_major` above 256 words) with its record `{n_samples; size; source; callstack}`.
+  The call runs in the allocating thread, at its next poll point (`tick`) or when the profile stops. Each thread keeps its own queue
+  and in-callback flag (oi's `Thread.mpQ`; a `ThreadLocal` in the runtime). A sample of a profile since stopped is dropped (the
+  profile's generation), a raising callback drops the samples after it, and the callbacks' own allocations are not sampled. Not
+  built: the tracked values' `promote`, `dealloc_minor` and `dealloc_major` (they need OC218's simulated minor heap), the callstack
+  (empty: OC217).
+- **A let's slot cleared at its scope's end** (`compile.ae`'s `let`, when its body is not in tail position). The bytecode pops the
+  variable at its scope's end. oi kept it in the frame's slot, so a finished let held a value against the collector: `lib-sys/opaque`'s
+  finaliser never ran.
+- `Main/reset` resets the runtime's profile and counters for a batch's next program.
