@@ -9733,3 +9733,10 @@ floating point (`_Float16`, `_Float128`, decimal), the target's instructions (x8
 asm operands structured by repr/c's converter (CS76 (b)), left (another branch owns repr/c's read; the text holds them); giving
 `-funsigned-bitfields` a model, not needed (the test checks it does not apply). Proposed CS320 (GNU vector types, 41 programs) and
 CS321 (GNU nested functions, 31): gaps ci could build, not cheap; reclassifying them as deferred waits for the user.
+
+## 2026-11-17: CS320 (a), CS321 (a): GNU vector types and nested functions deferred (branch `h-c-run`)
+
+The user's decision (round 51): the 41 programs refused for GNU vector types and the 31 for GNU nested functions move from the
+class `by-design` to the deferred classes `vector` and `nested-fn` (test/c/divergences.edn, matched on the refusals' text, so no
+record row moves); doc/c/SPEC.md §14's rows struck. C eval 2,173 / 34 / 72, AOT 2,181 / 26 / 72 (`bin/reap --record`,
+`bin/crops-score --record`, `--judge --strict`). Both are to be built in ci next, on this branch.

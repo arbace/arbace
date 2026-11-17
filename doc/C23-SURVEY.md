@@ -5908,3 +5908,9 @@ entries of 990130-1, 20030222-1, bitint-34 and 95_bitfields_ms removed; the clas
   address as a closure in go/arbace/ci and cf2g, a non-local goto to the parent's `__label__`s; a few days. (b) Keep them by design.
   *Recommended: (a).*
 - Either (a) moves no pass: completeness stays, "meant" (without by design) falls from 100 to about 97 at eval and AOT until built.
+
+### Decided (the user, 2026-11-17, round 51): CS320 (a), CS321 (a)
+
+GNU vector types and GNU nested functions are deferred, not by design: `test/c/divergences.edn`'s classes `vector` (41 eval, 41
+AOT) and `nested-fn` (31, 31), kind `:deferred`, judged before `by-design` on the refusals' text; SPEC §14's two rows struck. C eval
+2,173 / 34 / 72, AOT 2,181 / 26 / 72; completeness 96, meant 100 to 98. Then both built in ci and cf2g (below, as they land).
