@@ -1438,3 +1438,69 @@ the scene from Arbace, the demo as Go forms (WAS46).
 - **WAS54 Large functions in w2g.** (a) as built: a function over 2,000 instructions written as segments under a dispatcher, in both
   modes; (b) a larger memory for Go's compiler (over 2.5 GiB for one runtime function, past the agents' limit); (c) large functions left
   to the interpreter (the AOT judge refuses them). *Recommended: (a)*.
+
+## As built: queue 326, three proposals beyond Wasm 3.0 (2026-11-17, branch `326-wasm-deferred`)
+
+The deferred classes triaged by what each proposal costs (the testsuite's pin fetched to the VM by its pin): **wide arithmetic**,
+**the compact import section** and **custom page sizes** built at every level, their scripts recorded (the slices' rows alone, as
+the judge's `--record` writes them) and their deferred classes gone; extended name section, branch hints, custom descriptors and
+threads left deferred.
+
+- **Wide arithmetic** (`proposals/wide-arithmetic`): `i64.add128`, `i64.sub128`, `i64.mul_wide_s`, `i64.mul_wide_u` (0xfc 19-22, no
+  immediates). The instruction table takes them after decode.ml's rows (`test/wasm/gen_ops.ae`'s `proposal-rows`, their names among
+  the keywords; `bin/repr-wasm ops check` still reproduces ops.ae byte for byte); arbace.wasm.valid's and wai's signatures, wai's
+  stack effects and cases over `math/bits`, w2g's cases regenerated. Proved first on an own script of 114 assertions whose values
+  Python's integers gave (eval and AOT 111 of 111, a corrupted copy failing on its two rows), then on the pin: read 10 of 10, eval
+  and AOT 101 of 101.
+- **The compact import section** (`proposals/compact-import-section`): binary, after an empty name 0x7f a vector of names and
+  descriptions, 0x7e one description and a vector of names; text, `(import "m" (item "n" DESC)*)` and `(import "m" (item "n")*
+  DESC)` (the second's description read once, one implicit type use even for no name, and no identifier: "identifier not
+  allowed"). The forms are the imports the groups stand for; the layer's flags `[:imports]` keep the groups so a binary module
+  prints back byte for byte (doc/wasm/SPEC.md §5). wai's decoder and validator read both encodings. Read 45 of 45, eval and AOT
+  54 of 54.
+- **Custom page sizes** (`proposals/custom-page-sizes`): `(pagesize N)` after a memory's limits (and before its inline data), the
+  limits flag 0x08 with the log2 after them (forms `:page`, present when stated); valid page sizes 1 and 64 KiB, the bounds in
+  pages of the size (2^32-1 for an i32 memory of 1-byte pages, none for an i64 one); wai's `Limits.CustomPage`/`PageExp` and
+  `PageSize` in `memory.size`, `memory.grow`, instantiation and import matching (a page size must match exactly). Read 176 of 176,
+  eval and AOT 74 of 74. Two messages differ by design: the i64 limit past 2^64 ('constant out of range', wg-3.0's lexer, where the
+  proposal's interpreter says 'i64 constant out of range') and Wasm 3.0's binary.wast#82 (a memory's flag 0x08, malformed in 3.0,
+  now a page size whose module ends: 'unexpected end of section or function'); both rejections stand.
+
+wasm's cells: read 7,854 -> 7,934 pass (deferred 440 -> 360), eval 62,088 -> 62,288 and AOT 62,091 -> 62,291 (deferred 971 -> 771),
+print 2,785 -> 2,838; completeness 0.9790 -> 0.9830.
+
+**Not done**: the extended name section (the name section's subsections 3-11, the @name annotations of every kind and their
+messages, the custom sections' own checks: 69 read and 12 eval rows), branch hints (3 read rows: the annotation's placement and
+target checks), custom descriptors (descriptor types, exact references and their casts on top of GC: 215 read, 500 eval rows) and
+threads (WA13, WAS26 (a): 73 read, 259 eval rows). With the first two built completeness would be about 0.986; 100 needs threads and
+custom descriptors.
+
+## As built: queue 326, round 2 (2026-11-17, branch `326-wasm-deferred`; the user's D326-1 (a), D326-2 (a))
+
+Three more groups built and recorded, a commit each: **branch hints** (the annotations checked, a function's instruction's one:
+'duplicate annotation', 'not in a function', the custom check's 'invalid target'; not kept in the forms), **the extended name
+section** (`@name` at every binding's place with the proposal's messages; a `@custom "name"` decoded as the reference's name section,
+subsections 0-13, `arbace.repr.wasm.binary/check-names`: malformed or a custom check; the names beyond the module's and the
+functions' not kept) and **threads** (WAS26 (a)'s ordering lifted by the user: shared memories, the 67 atomics with a new kind `:zero`
+for `atomic.fence`, wai on one thread: 'unaligned atomic', 'expected shared memory', wait 1 or 2, notify 0; w2g's cases regenerated).
+The threads scripts' rules of Wasm 1.0 (one memory, one table, i32 limits) classed by design, `:threads-before-wasm-3.0`.
+
+wasm's cells: read 7,934 -> 8,068 pass (by design 0 -> 11, deferred 360 -> 215), eval 62,288 -> 62,559 and AOT 62,291 -> 62,562
+(deferred 771 -> 500), print 2,838 -> 2,871; completeness 0.9830 -> 0.9892.
+
+**Not done**: custom descriptors (215 read, 500 eval rows): descriptor and describes clauses, exact references, their subtyping and
+casts, six instructions, exact function imports; to derive from its 14 scripts (its Overview not pinned).
+
+## As built: queue 327, custom descriptors (2026-11-17, branch `327-wasm-custom-descriptors`; the user's D326-4 (a))
+
+Derived from the pinned testsuite's 14 scripts of `proposals/custom-descriptors/` (92a3d806; the proposal's Overview not pinned),
+in three parts, a commit each: **exact references** (`(ref null? (exact X))`, 0x62; matched only by the same type or a bottom; an
+allocation's and a defined or exactly imported function's reference exact; exact casts by the dynamic type itself; exact function
+imports, 0x20), **descriptor types** (the describes and descriptor clauses, 0x4c and 0x4d, part of the types' identity, their rules
+of placement, kind, finality and subtyping with the scripts' messages) and **the instructions** (`struct.new_desc`,
+`struct.new_default_desc`, `ref.get_desc`, `ref.cast_desc_eq`, `br_on_cast_desc_eq` and `_fail`, 0xfb 0x20-0x26: 0x22 from the pin's
+binary module, the rest in its order). The proposal's relaxation of `br_on_cast`'s rule conflicts with Wasm 3.0's own scripts: Wasm
+3.0's kept, the proposal's two rows by design (the descriptor casts take the proposal's rule, which no Wasm 3.0 script contradicts).
+
+wasm's cells: read 8,068 -> 8,281 pass (deferred 215 -> 0), eval 62,559 -> 63,057 and AOT 62,562 -> 63,060 (deferred 500 -> 0),
+print 2,871 -> 2,935; completeness 0.9892 -> 0.9996 (meant 1.0000): every deferred row of the crop built.
