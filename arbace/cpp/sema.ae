@@ -554,6 +554,11 @@
                               ps))
             :va (boolean va)}))
       cpp/elaborated (resolve-type-form scope (nth f 2))
+      ;; (n-cpp-concepts, the checker: a constrained placeholder, `C auto` ([dcl.spec.auto.general]/1), an auto with its
+      ;; type-constraint's text, checked once deduced: placeholder-check!; the code generator refuses it as before)
+      constrained (if (and (checking?) (:tc-text (meta f)) (#{'auto 'decltype-auto} (nth f 2 nil)))
+                    (assoc (resolve-type-form scope (nth f 2)) :tc (:tc-text (meta f)))
+                    (fail :type "type form " (pr-str f)))
       typename (resolve-type-form scope (second f))
       ;; decltype of the two forms headers name types by (typedef decltype(nullptr) nullptr_t; ... decltype(sizeof 0)
       ;; size_t;): the others wait for decltype proper
@@ -1063,7 +1068,62 @@
 ;; or evaluate (a refusal read as not satisfied): its false then not sure. A false with the atom unset is the program's own
 ;; (an atomic constraint that evaluated to false, [temp.constr.atomic]/3), a sure deduction failure.
 (def ^:dynamic *constraint-doubt* nil)
+(def ^:dynamic *constraint-this*
+  "n-cpp-concepts (the checker): the class pointer type `this` has in a member function's trailing requires-clause while it is
+  checked at the declaration ([expr.prim.this]/2; its unevaluated operands name the members, [expr.prim.id.general]/3), else nil."
+  nil)
+
 (defn doubt! [] (when-let [d *constraint-doubt*] (reset! d true)) false)
+
+(defn- class-scope?
+  "Whether `scope` is a class's or within one (a member's body, a member template's constraint)."
+  [scope]
+  (loop [s scope] (cond (nil? s) false (or (:cls s) (= :class (:kind s))) true :else (recur (:parent s)))))
+
+(defn sure-failure?
+  "n-cpp-concepts (the checker): whether the refusal `e`, met while a constraint or a requirement was substituted or analyzed,
+  is the program's own error ([temp.constr.atomic]/3, [expr.prim.req.simple]/1: a substitution failure, so not satisfied, with
+  no doubt): the errors the checker reports as the program's at a statement (arbace.repr.cpp.diag's sema-rules: no member, an
+  inaccessible or deleted function, no viable or an ambiguous call, no operator, an undeclared name, a call of a non-function,
+  too few arguments, `*` of a non-pointer, a member of a non-class), and a qualified name no complete class without bases
+  declares (name-expr's); never over a type the slice left dependent or undeduced."
+  [e]
+  (let [m (str (ex-message e))]
+    (boolean (and (checking?)
+                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|unknown name \S+: no member of the complete class|template constraint failure for)" m)
+                  (not (re-find #":k :(auto|dep|tparam)" m))))))
+
+(declare const-int analyze)
+
+(defn- atom-types-check
+  "n-cpp-concepts (the checker), [temp.constr.atomic]/3: each atomic constraint satisfaction reaches (the operands of the
+  constraint-expression's && and ||, in order, short-circuited, [temp.constr.op]/3-4) has type bool, no conversion; one of
+  class type, or the non-bool result of a call (an overloaded operator's), is GCC's \"constraint expression does not have type
+  'bool'\", reported at the atom: ::bad (not satisfied), else nil. Anything the slice cannot analyze or evaluate decides
+  nothing here (the satisfaction's own evaluation follows)."
+  [scope n]
+  (let [k (:kind n)]
+    (cond
+      (#{"ParenExpr" "ExprWithCleanups"} k) (atom-types-check scope (first (kids n)))
+      (and (= "BinaryOperator" k) (#{"&&" "||"} (:opcode n)))
+      (let [[a b] (kids n)
+            ra (atom-types-check scope a)]
+        (if (= ::bad ra)
+          ::bad
+          (let [v (try (const-int scope a) (catch arbace.lang.ExceptionInfo _ nil))]
+            (if (or (nil? v) (if (= "&&" (:opcode n)) (not= 0 (long v)) (= 0 (long v))))
+              (when v (atom-types-check scope b))
+              nil))))
+      ;; (a concept-id is no atom: normalized into its concept's, checked by its own satisfaction)
+      (= "ConceptSpecializationExpr" k) nil
+      :else
+      (let [x (try (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} n)) (catch arbace.lang.ExceptionInfo _ nil))
+            t (some-> x :ty abi/non-ref abi/unq)]
+        (when (and t (not (dt-dependent? t)) (not= :bool (abi/bn t))
+                   (or (abi/class? t) (and (= :call (:op x)) (or (abi/arith? t) (abi/ptr? t)))))
+          (when-let [h *on-refusal*]
+            (h (ex-info "codegen: constraint expression does not have type 'bool'" {:codegen/refused :constraint :cx/node n}) n))
+          ::bad)))))
 
 (defn constraint-satisfied?
   "A constraint expression's satisfaction in `scope` ([temp.constr.constr]: the atomic constraints constant expressions
@@ -1078,11 +1138,14 @@
                  *constraint-stack* (when (System/getenv "CPP_CONCEPT_TRACE") (conj (or *constraint-stack* []) (let [t (str (node-text rc))] (subs t 0 (min 60 (count t))))))]
          ;; (the checker's position stays the call's: the constraint's nodes are the template's)
          (let [a *at* saved (some-> a deref)]
-           (try (not= 0 (long (const-int scope rc)))
+           (try (if (and (checking?) (= ::bad (atom-types-check scope rc)))
+                  false
+                  (not= 0 (long (const-int scope rc))))
                 (finally (when a (reset! a saved))))))
        (catch arbace.lang.ExceptionInfo e
          (when (or (System/getenv "CPP_TMPL_TRACE") (System/getenv "CPP_CONCEPT_TRACE")) (binding [*out* *err*] (println "constraint not satisfied:" (.getMessage e))))
-         (doubt!))))
+         ;; (n-cpp-concepts: an atomic constraint whose substitution fails by the program's own error is false, no doubt)
+         (if (sure-failure? e) false (doubt!)))))
 
 (defn- always-inline-node?
   "Whether a function declaration's attributes hold GNU's always_inline ([[gnu::always_inline]], __attribute__((always_inline)))."
@@ -1135,7 +1198,12 @@
   now; any other true."
   [f]
   (if-let [[ps rc] (:trailing-defer f)]
-    (constraint-satisfied? ps rc)
+    (if (checking?)
+      ;; (n-cpp-concepts: in the checker a doubt keeps the function viable, its class's `this` in scope)
+      (let [d (atom false)
+            v (binding [*constraint-doubt* d *constraint-this* (when-let [c (:cls f)] (abi/ptr {:k :class :id c}))] (constraint-satisfied? ps rc))]
+        (or v @d))
+      (constraint-satisfied? ps rc))
     true))
 
 (defn fn-type-scope
@@ -1174,7 +1242,15 @@
         ;; [over.match.viable]/3, where it is checked: declared now, neither dropped nor kept by an answer that would
         ;; change once the class is complete)
         defer (boolean (and rc (unfinished-targs? scope)))
-        sat (or (nil? rc) defer (constraint-satisfied? rps rc))]
+        ;; (n-cpp-concepts, the checker: a member's constraint with `this` its class's, *constraint-this*; one not satisfied
+        ;; with a doubt, the function declared with its constraint deferred to overload resolution, trailing-ok?, where a
+        ;; doubt keeps it viable: before, dropped, its calls "no member": cpp2a/concepts-this1.C's A<B>().g(0))
+        dd (atom false)
+        sat (or (nil? rc) defer (binding [*constraint-this* (when (and (checking?) (:cls scope)) (abi/ptr {:k :class :id (:cls scope)}))
+                                          *constraint-doubt* (if (checking?) dd *constraint-doubt*)]
+                                  (constraint-satisfied? rps rc)))
+        _ (when (and (checking?) @dd *constraint-doubt*) (reset! *constraint-doubt* true))
+        defer (or defer (boolean (and (checking?) (not sat) @dd)))]
   (if (and (not sat) (not defer))
     nil
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n))
@@ -1597,7 +1673,16 @@
              (if (and (:codegen/refused (ex-data e)) (re-find #"an incomplete class template" (str (.getMessage e))))
                (do (swap! *main-retry* conj [scope n e]) nil)
                (throw e))))
-      (declare-node*! scope n))))
+      ;; (n-cpp-concepts, the checker: a main file's declaration that names a constrained class template's specialization
+      ;; whose constraints are surely not satisfied, or deduces a constrained placeholder's type that does not satisfy its
+      ;; constraint, is reported at the declaration and dropped, the unit going on, as a statement's refusal is)
+      (if (checking?)
+        (try (declare-node*! scope n)
+             (catch arbace.lang.ExceptionInfo e
+               (if (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied)" (str (.getMessage e)))
+                 (do (*on-refusal* e n) nil)
+                 (throw e))))
+        (declare-node*! scope n)))))
 
 (defn- placeholder-split
   "cpp-s11: a parameter's type as written with a placeholder ([dcl.spec.auto]: `auto`, `C auto`, `C<A...> auto`, cv and
@@ -3777,7 +3862,15 @@
                          ;; (CP323 (a): a class inheriting constructors, which the slice does not declare: for the checker
                          ;; an initialization no declared constructor accepts is not judged, the object declared all the same;
                          ;; the code generator refuses it, as before)
-                         (and (checking?) (:inherits-ctors (abi/cls id)) (re-find #"no viable|ambiguous" (str (.getMessage e))))
+                         ;; (n-cpp-concepts: judged when every class named by its using-declarations is a direct base
+                         ;; that inherits none itself, so the candidates above are all of them, [namespace.udecl]/3: a
+                         ;; base constructor whose constraints are not satisfied is no candidate, concepts/inherit-ctor1.C)
+                         (and (checking?) (:inherits-ctors (abi/cls id)) (re-find #"no viable|ambiguous" (str (.getMessage e)))
+                              (not (and (re-find #"^codegen: no viable function among [1-9]" (str (.getMessage e)))
+                                        (let [c (abi/cls id) nms (:inherits-ctors c)
+                                              bs (filter #(contains? nms (:name (abi/cls (:cls %)))) (:bases c))]
+                                          (and (= (count nms) (count (set (map #(:name (abi/cls (:cls %))) bs))))
+                                               (every? #(and (not (:virtual %)) (empty? (:inherits-ctors (abi/cls (:cls %))))) bs))))))
                          ::inherited
                          (and (System/getenv "CPP_HDR_TRACE") (:codegen/refused (ex-data e)))
                          (fail (:codegen/refused (ex-data e)) (.getMessage e) " (constructing " (:name (abi/cls id)) ")")
@@ -4071,8 +4164,9 @@
 (defn- this-expr [ctx]
   (if (:lambda ctx)
     (capture-field ctx :this)
-    (do (when-not (:this-type ctx) (fail :this "this outside a method"))
-        {:op :this :ty (:this-type ctx) :cat :pr})))
+    (let [tt (or (:this-type ctx) *constraint-this*)]
+      (when-not tt (fail :this "this outside a method"))
+      {:op :this :ty tt :cat :pr})))
 
 (defn- deref-node [e]
   (let [e (rv e)]
@@ -4224,7 +4318,15 @@
         ;; class members found through a class's scope keep their class
         es (if (and (seq q) (seq es)) es es)]
     ;; nothing visible: a call's argument-dependent lookup may still find a function (template)
-    (when (and (empty? es) (or g (seq q))) (fail :name "unknown name " nm))
+    (when (and (empty? es) (or g (seq q)))
+      ;; (n-cpp-concepts: a qualified name a complete class without bases does not declare, T::is_pettable for a T bound to
+      ;; such a class: said so, the constraints' sure substitution failure, sure-failure?)
+      (let [cid (when (and (checking?) (seq q))
+                  (try (class-id (:ty (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q g))))) (catch arbace.lang.ExceptionInfo _ nil)))
+            c (when cid (abi/cls cid))]
+        (if (and c (:complete c) (not (:defining c)) (empty? (:bases c)) (not (dt-dependent? (:targs c))))
+          (fail :name "unknown name " nm ": no member of the complete class " (:name c))
+          (fail :name "unknown name " nm))))
     (let [e (entity-expr ctx es n)]
       ;; (an unqualified name that finds nothing, with explicit template arguments: argument-dependent lookup's templates
       ;; take them, [temp.names]/3's P0846; get<i>(e) of a structured binding, [dcl.struct.bind]/4)
@@ -5571,24 +5673,49 @@
     "RequiresExpr" (if (and (empty? (:inner n)) (nil? (:params n)))
                      (fail :expr "a requires-expression the parser kept as its text")
                      (let [c (block-ctx ctx)
+                           ;; (n-cpp-concepts, the checker: a parameter of type void, [dcl.fct]/2 with [expr.prim.req.general]/5:
+                           ;; the substitution fails, the requires-expression false; GCC's "invalid parameter type", reported
+                           ;; at the requires-expression)
+                           void-param (atom false)
                            _ (doseq [pn (:params n)]
-                               (let [id (next-id)]
-                                 (swap! *vars* assoc id {:id id :name (:name pn) :ty (resolve-type (:scope c) (get-in pn [:type :qualType])) :storage :local :fn (:fn-id ctx)})
+                               (let [id (next-id)
+                                     pt (resolve-type (:scope c) (get-in pn [:type :qualType]))]
+                                 (when (and (checking?) (abi/void? pt) (not (:c pt)) (not (:v pt)) (not (str/includes? (str (get-in pn [:type :qualType])) "...")))
+                                   (reset! void-param true))
+                                 (swap! *vars* assoc id {:id id :name (:name pn) :ty pt :storage :local :fn (:fn-id ctx)})
                                  (when (:name pn) (enter! (:scope c) (:name pn) {:e :var :id id}))))
+                           _ (when @void-param
+                               (when-let [h *on-refusal*]
+                                 (h (ex-info "codegen: invalid parameter type 'void' in a requires-expression's parameters" {:codegen/refused :constraint :cx/node n}) n)))
                            ;; (CX12, the checker: a requirement the program surely fails is false with no doubt: a type
                            ;; requirement naming a member of a type that is no class, [temp.res.general]/3's typename-
                            ;; specifier over a scalar or pointer; an expression requirement whose analysis failed by an error
                            ;; Sema is sure of, `*` of a non-pointer or a member of a non-class)
                            type-sure-false? (fn [r]
                                               (when-let [[_ q] (re-matches #"(?:typename\s+)?(.+?)\s*::\s*(?:template\s+)?[A-Za-z_]\w*(?:<.*>)?" (str/trim (str (get-in r [:type :qualType]))))]
-                                                (let [qt (try (abi/unq (abi/non-ref (resolve-type (:scope c) q))) (catch arbace.lang.ExceptionInfo _ nil))]
+                                                (let [qt (try (abi/unq (abi/non-ref (resolve-type (:scope c) q))) (catch arbace.lang.ExceptionInfo _ nil))
+                                                      ;; (n-cpp-concepts: else the qualifier's first name, a plain identifier bound
+                                                      ;; to a type that is no class: T::_name_t::template _member_t<int> for T = int,
+                                                      ;; concepts/template-parm11.C)
+                                                      qt (or qt (when-let [[_ q0] (re-matches #"([A-Za-z_]\w*)\s*::.*" q)]
+                                                                  (try (abi/unq (abi/non-ref (resolve-type (:scope c) q0))) (catch arbace.lang.ExceptionInfo _ nil))))]
                                                   (and qt (or (abi/arith? qt) (abi/ptr? qt) (abi/void? qt))))))
-                           sure-expr-failure? (fn [e] (re-find #"^codegen: (\* of a non-pointer|member of a non-class)" (str (ex-message e))))
+                           sure-expr-failure? sure-failure?
                            ok? (fn [r]
                                  (try (case (:kind r)
-                                        "TypeRequirement" (try (resolve-type (:scope c) (get-in r [:type :qualType])) true
+                                        "TypeRequirement" (try (resolve-type (:scope c) (get-in r [:type :qualType]))
+                                                               ;; (n-cpp-concepts, [expr.prim.req.type]/1 with [class.access]/1: a
+                                                               ;; private or protected member type named where no class's scope
+                                                               ;; grants it, a concept's definition, is a substitution failure)
+                                                               (when (and (checking?) (not (:this-type c)) (not (class-scope? (:scope c))))
+                                                                 (check-type-access! (:scope c) (-> (str (get-in r [:type :qualType])) (str/replace #"^\s*typename\s+" "") (str/replace #"\s*::\s*" "::")) r))
+                                                               true
                                                                (catch arbace.lang.ExceptionInfo e
-                                                                 (if (and (checking?) (type-sure-false? r)) false (throw e))))
+                                                                 ;; (n-cpp-concepts: and a nested-name-specifier naming a type
+                                                                 ;; that is no class, [temp.res.general]/3, resolve-type-form's)
+                                                                 (if (and (checking?) (or (type-sure-false? r) (sure-failure? e)
+                                                                                          (re-find #"^codegen: a scope of a non-class" (str (ex-message e)))))
+                                                                   false (throw e))))
                                         "NestedRequirement" (constraint-satisfied? (:scope c) (first (:inner r)))
                                         (let [x (analyze c (first (:inner r)))]
                                           (cond
@@ -5597,6 +5724,9 @@
                                             ;; constraint satisfied by decltype((E)); since CP292 (a) for the code
                                             ;; generator too. What the slice cannot evaluate, and a noexcept it does
                                             ;; not check: in the checker a doubt, for the code generator true as before)
+                                            ;; (n-cpp-concepts: one the parser found no type-constraint, its error given there:
+                                            ;; judged by nothing)
+                                            (:_ret_bad r) (do (doubt!) true)
                                             (and (:_ret r) (:type-constraint @hooks))
                                             (let [t (abi/non-ref (:ty x))
                                                   dt (case (:cat x) :lv (abi/lref t) :xv (abi/rref t) t)
@@ -5613,11 +5743,11 @@
                                       (catch arbace.lang.ExceptionInfo e
                                         (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "requirement" (:kind r) "fails:" (ex-message e) "|" (some-> (node-text r) (subs 0 (min 120 (count (node-text r))))))))
                                         (if (and (checking?) (sure-expr-failure? e)) false (doubt!)))))]
-                       {:op :int :v (if (every? (fn [r] (let [v (ok? r)]
+                       {:op :int :v (if (and (not @void-param) (every? (fn [r] (let [v (ok? r)]
                                                          (when (and (not v) (System/getenv "CPP_CONCEPT_TRACE"))
                                                            (binding [*out* *err*] (println "requirement" (:kind r) "false:" (pr-str (some-> (node-text r) (subs 0 (min 120 (count (node-text r)))))) (pr-str (keys r)))))
                                                          v))
-                                                (:inner n)) 1 0) :ty abi/bool* :cat :pr}))
+                                                (:inner n))) 1 0) :ty abi/bool* :cat :pr}))
     ;; noexcept(e) ([expr.unary.noexcept]): e unevaluated, true when no function it calls may throw (an implicit or
     ;; defaulted special member counted as not throwing; G4)
     "CXXNoexceptExpr" (let [x (binding [*unevaluated* true] (analyze ctx (first (kids n))))
@@ -6093,16 +6223,46 @@
 
 (defn- has-auto? [t] (cond (= :auto (:k t)) true (#{:ref :rref :ptr} (:k t)) (has-auto? (:to t)) :else false))
 
+(declare deduce-auto)
+
+(defn- placeholder-check!
+  "n-cpp-concepts (the checker), [dcl.type.auto.deduct]/2: a constrained placeholder's type `t` (an auto with :tc, under
+  references or a pointer) deduced as `d`: the type T deduced for its auto satisfies the immediately-declared constraint
+  C<T, A...> of its type-constraint, looked up in `scope` (template.ae's :type-constraint hook); a false met with no doubt is
+  the program's error, GCC's \"placeholder constraints not satisfied\" (\"deduced initializer does not satisfy\", \"deduced
+  return type does not satisfy\")."
+  [scope t d what node]
+  (when (and (checking?) scope)
+    (when-let [[a T] (loop [t t d d]
+                       (cond (= :auto (:k t)) [t d]
+                             ;; (a forwarding reference given an lvalue: T is the lvalue reference, [temp.deduct.call]/3)
+                             (and (= :rref (:k t)) (= :auto (:k (:to t))) (= :ref (:k d))) [(:to t) d]
+                             (and (#{:ref :rref :ptr} (:k t)) (map? d) (:to d)) (recur (:to t) (:to d))
+                             :else nil))]
+      (when-let [tc (:tc a)]
+        (when-let [h (:type-constraint @hooks)]
+          (let [dd (atom false)
+                T (if (abi/ref? T) T (abi/unq T))
+                ok (when-not (dt-dependent? T) (binding [*constraint-doubt* dd] (h scope tc T)))]
+            (when (and (false? ok) (not @dd))
+              (throw (ex-info (str "codegen: placeholder constraints not satisfied: the deduced " what " does not satisfy " tc)
+                              ;; (at the declaration, else its initializer: a namespace-scope variable's node made of
+                              ;; its initializer alone, global-init's)
+                              (let [at (if (:range node) node (first (filter :range (:inner node))))]
+                                (cond-> {:codegen/refused :placeholder} at (assoc :cx/node at))))))))))))
+
 (defn deduce-auto
   "The type `t` with its auto deduced from the initializer `e` ([dcl.type.auto.deduct]: a plain auto drops references,
-  top-level cv-qualifiers and decays; auto& keeps the initializer's cv; auto&& is a forwarding reference)."
-  [t e]
+  top-level cv-qualifiers and decays; auto& keeps the initializer's cv; auto&& is a forwarding reference); with `scope`
+  (the checker) a constrained placeholder's constraint checked too (placeholder-check!)."
+  ([t e scope what node] (let [d (deduce-auto t e)] (placeholder-check! scope t d what node) d))
+  ([t e]
   (case (:k t)
     :auto (let [et (if (abi/class? (abi/unq (:ty e))) (abi/unq (:ty e)) (abi/unq (:ty (rv e))))] (cond-> et (:c t) (assoc :c true) (:v t) (assoc :v true)))
     :ref (assoc t :to (if (= :auto (:k (:to t))) (cond-> (:ty e) (:c (:to t)) (assoc :c true)) (deduce-auto (:to t) e)))
     :rref (if (and (= :auto (:k (:to t))) (= :lv (:cat e))) (abi/lref (:ty e)) (assoc t :to (if (= :auto (:k (:to t))) (:ty e) (deduce-auto (:to t) e))))
     :ptr (assoc t :to (let [pt (:to (abi/unq (:ty (rv e))))] (if (= :auto (:k (:to t))) (cond-> pt (:c (:to t)) (assoc :c true)) (deduce-auto (:to t) {:op :deref :ty pt :cat :lv}))))
-    t))
+    t)))
 
 (defn- decl-init
   "A local declaration's initializer from its node (`:init` c, call or list)."
@@ -6120,7 +6280,7 @@
                     :else t))
             t)
         pre (when (and init (has-auto? t) (not (#{"call" "list"} (:init n)))) (analyze ctx init))
-        t (if pre (deduce-auto t pre) t)
+        t (if pre (deduce-auto t pre (:scope ctx) "initializer" n) t)
         _ (upd-var! id assoc :ty t)
         ;; (CP311 (a): the initializer a deduced class type was deduced from, analyzed once)
         ci (:ctad-init (var* id))]
@@ -6172,11 +6332,13 @@
                             {:codegen/refused :decomp :cx/node d})))
         [t init] (if (and (= :auto (:k t)) (abi/arr? pu))
                    (let [at (cond-> pu (:c t) (assoc :c true) (:v t) (assoc :v true))
+                         ;; (n-cpp-concepts: a constrained placeholder's T, the array type, [dcl.type.auto.deduct]/2)
+                         _ (placeholder-check! (:scope ctx) t pu "initializer" d)
                          el (:of pu) pt (abi/ptr el)]
                      [at {:i :list :n (:n pu)
                           :items (vec (for [i (range (:n pu))]
                                         (init-for (:of at) {:op :deref :e {:op :ptradd :o "+" :p (rv pre) :n {:op :int :v i :ty abi/long* :cat :pr} :ty pt :cat :pr} :ty el :cat :lv} ctx :copy)))}])
-                   (let [t (deduce-auto t pre)] [t (init-for t pre ctx :copy)]))
+                   (let [t (deduce-auto t pre (:scope ctx) "initializer" d)] [t (init-for t pre ctx :copy)]))
         _ (upd-var! eid assoc :ty t)
         hn (str "__binding" eid)
         _ (enter! (:scope ctx) hn {:e :var :id eid})
@@ -6421,6 +6583,7 @@
     "DeclStmt" {:s :block :flat true :items (decl-stmt ctx n)}
     "NullStmt" {:s :null}
     "ReturnStmt" (let [[e] (kids n)
+                       _ (some-> (:saw-return ctx) (reset! true))
                        rt (:ret (:ty (fnd (:fn-id ctx))))
                        ;; (a deduced return type: auto, and since CP301 (a) auto&, auto&&, auto* -- a generic lambda's
                        ;; `-> auto&` among them -- [dcl.spec.auto.general]/11)
@@ -6435,7 +6598,10 @@
                                                                  (= :lv (:cat x)) (abi/lref (:ty x))
                                                                  (= :xv (:cat x)) (abi/rref (:ty x))
                                                                  :else (abi/unq (:ty x))))
-                                          :else (deduce-auto rt pre))] (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
+                                          :else (deduce-auto rt pre))]
+                              ;; (n-cpp-concepts: a constrained placeholder's, [dcl.type.auto.deduct]/2)
+                              (placeholder-check! (:scope ctx) rt t "return type" n)
+                              (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
                             rt)]
                    (cond
                      (nil? e) {:s :return}
@@ -6752,7 +6918,7 @@
         ;; and the names visible at the lambda, [temp.res])
         glam (when cls (:glam (abi/cls cls)))
         _ (when glam (doseq [[nm es] (:names glam) e es] (enter! fs nm e)))
-        ctx (cond-> {:scope fs :fn-id fid :this-type this-t :statics (atom [])} glam (assoc :lambda glam))]
+        ctx (cond-> {:scope fs :fn-id fid :this-type this-t :statics (atom []) :saw-return (atom false)} glam (assoc :lambda glam))]
     (binding [*cutoff* (cond glam (long (:glam-cutoff (abi/cls cls))) cls Long/MAX_VALUE :else (max (long cut) (long (or (:_b (:body f)) 0))))
               *src* (or (:src f) *src*)]
       (let [trace (fn [g] (if (System/getenv "CPP_HDR_TRACE")
@@ -6780,7 +6946,11 @@
         ;; (cpp-s3: any function's declared `auto` with no return statement in its body, [dcl.spec.auto.general]/10:
         ;; pr77550.C's `static auto construct(_Alloc, _Tp p2, _Args) { _S_construct(p2); }`)
         (when (or (and glam (has-auto? (:ret (:ty (fnd fid))))) (and body (= :auto (:k (:ret (:ty (fnd fid)))))))
-          (upd-fn! fid assoc-in [:ty :ret] abi/void))))))
+          ;; (n-cpp-concepts: a constrained placeholder's void, [dcl.type.auto.deduct]/2, at the function's declaration)
+          ;; (a body whose return statement the checker refused leaves the auto: not this case)
+          (let [rt (:ret (:ty (fnd fid)))]
+            (upd-fn! fid assoc-in [:ty :ret] abi/void)
+            (when (and (= :auto (:k rt)) (not @(:saw-return ctx))) (placeholder-check! (:scope ctx) rt abi/void "return type" (:node f)))))))))
 
 (defn- defaulted-comparison!
   "A defaulted == or <=> ([class.compare.default], [class.eq], [class.spaceship]): the bases' and members' comparisons

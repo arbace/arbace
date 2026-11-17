@@ -706,7 +706,9 @@
              (if (and (:tmpl en) (not (:inj en)) (nil? (:args lp)))
                (case ak :id :true :paren :ambig :brace braced :false) ; a class template's name: deduced arguments
                (case ak :paren :ambig :brace braced :true))
-             (concept-ent? en) (if (or (t= (tok-at p e) "auto") (t= (tok-at p e) "decltype")) :true :false)
+             ;; (n-cpp-concepts: and before a name: a concept's name meant as a type, parse-decl-specs' "expected 'auto'" /
+             ;; "does not constrain a type"; no expression has a concept-id followed by a name)
+             (concept-ent? en) (if (or (t= (tok-at p e) "auto") (t= (tok-at p e) "decltype") (= ak :id)) :true :false)
              (and (nil? en) (nil? (:q qn)) (= 1 (count (:parts qn))) (not (:g qn)) (= ak :id)
                   (not (#{"final" "override"} (ts (tok-at p e)))))
              :true ; an unknown name followed by a name: a declaration with a type the table misses (clang: unknown type name)
@@ -2531,6 +2533,8 @@
             (#{"__restrict" "__restrict__"} s) (do (adv! p) (recur ds words))
             (and (contains? builtin-kws s) (nil? (:type ds))) (do (adv! p) (recur ds (conj words s)))
             (and (= s "auto") (not has-type)) (do (adv! p) (recur (assoc ds :type (if (< (.-year p) 2011) {:t :b :w ["int"]} {:t :auto})) words))
+            ;; (n-cpp-concepts: `C const auto`, the placeholder after its cv-qualifier, the error given at C: the auto taken)
+            (and (= s "auto") (:bare-concept ds)) (do (adv! p) (recur (dissoc ds :bare-concept) words))
             (and (= s "__auto_type") (not has-type)) (do (adv! p) (recur (assoc ds :type {:t :auto}) words))
             (and (#{"decltype" "__decltype"} s) (not has-type) (is-at? p 1 "("))
             (if (and (is-at? p 2 "auto") (is-at? p 3 ")"))
@@ -2585,6 +2589,18 @@
               (let [cn (name-str p qn)]
                 (if (is? p "auto") (adv! p) (dotimes [_ 4] (adv! p)))
                 (recur (assoc ds :type {:t :auto :cn cn}) words))
+              ;; (n-cpp-concepts, [dcl.spec.auto.general]/1 with [temp.param]/4: a concept's name where a type stands, before
+              ;; a declarator's name or a parameter's end: a type concept wants `auto` after it (GCC's "expected 'auto' or
+              ;; 'decltype(auto)' after"), another "does not constrain a type"; taken as its placeholder, the declaration
+              ;; kept)
+              (and (concept-ent? e) (or decl-ctx (= ctx :alias)) (not (skim? p))
+                   (or (= ctx :alias) (id? p) (is? p "&") (is? p "&&") (is? p "*") (is? p "const") (is? p "volatile")
+                       (and (= ctx :param) (or (is? p ")") (is? p ",")))))
+              (let [cn (name-str p qn)]
+                (soft-diag! p save (if (false? (:type-concept e))
+                                     (str "'" cn "' does not constrain a type")
+                                     (str "expected 'auto' or 'decltype(auto)' after '" cn "'")))
+                (recur (assoc ds :type {:t :auto :cn cn} :bare-concept true) words))
               ;; a dependent name where only a type can stand (P0634: a parameter's, an alias's, a return type's)
               (and (nil? e) (or (:q qn) (> (count (:parts qn)) 1)) (or decl-ctx (= ctx :alias))
                    (or (= ctx :alias) (id? p) (is? p "*") (is? p "&") (is? p "&&")
@@ -3399,8 +3415,12 @@
                   ;; GCC's "parameter packs not expanded")
                   _ (when rq
                       (let [re (ix p)]
-                        (when (and (not (in-template? p)) (not (dep-this? p))
-                                   (not-any? #(t= (tok-at p %) "auto") (range (long (:b d)) (long (:e d)))))
+                        ;; (n-cpp-concepts: and a block-scope function declaration, never a templated entity's own
+                        ;; declaration even inside a template, [dcl.decl.general]/4 with [temp.pre]/8: GCC's "constraints on
+                        ;; a non-templated function", concepts/local-extern.C)
+                        (when (or (= ctx :block)
+                                  (and (not (in-template? p)) (not (dep-this? p))
+                                       (not-any? #(t= (tok-at p %) "auto") (range (long (:b d)) (long (:e d))))))
                           (soft-diag! p rb "constraints on a non-templated function"))
                         (when (not-any? #(t= (tok-at p %) "...") (range rb re))
                           (when-let [i (first (filter (fn [i] (let [^T t (tok-at p i)]
@@ -3648,7 +3668,11 @@
                     [(node p "TemplateTemplateParmDecl" b (last-ix p) (cond-> {} nm (assoc :name nm)))
                      (when nm (str nm (when pack "...")))]))
               ;; a type-constraint: a concept's name (with arguments) before the parameter's
-              (and (name-start? p) (when-let [[qn _] (scan-name p)] (concept-ent? (:ent qn))))
+              ;; (n-cpp-concepts: not before auto or decltype(auto), a constrained placeholder's non-type parameter,
+              ;; [temp.param]/1's parameter-declaration with [dcl.spec.auto.general]/1: `template<Type auto N>`)
+              (and (name-start? p) (when-let [[qn e] (scan-name p)]
+                                     (and (concept-ent? (:ent qn))
+                                          (not (t= (tok-at p e) "auto")) (not (t= (tok-at p e) "decltype")))))
               (let [tc (parse-name p (if (skim? p) :scan :parse))
                     pack (accept! p "...")
                     nm (when (id? p) (ts (cur p)))
@@ -3657,7 +3681,11 @@
                 (when nm (sc/declare! (scope p) (cond-> {:k :type :name nm :tparam true} pack (assoc :pack true))))
                 ;; (queue 336: [temp.param]/4, the type-constraint's concept takes the parameter and its own arguments: as
                 ;; many as the concept's parameters unless its last is a pack, GCC's "wrong number of template arguments")
-                (when (and (map? tc) (not (skim? p)))
+                ;; (n-cpp-concepts, [temp.param]/4 with [temp.concept]/7: a type-constraint's concept a type concept, GCC's
+                ;; "does not constrain a type")
+                (when (and (map? tc) (not (skim? p)) (false? (:type-concept (:ent tc))))
+                  (soft-diag! p b (str "'" (:s (peek (:parts tc))) "' does not constrain a type")))
+                (when (and (map? tc) (not (skim? p)) (not (false? (:type-concept (:ent tc)))))
                   (let [ce (:ent tc) lp (peek (:parts tc)) as (:args lp)]
                     (when (and (pos? (long (or (:nparams ce) 0))) (not (:vpack ce)) (or (nil? as) (vector? as))
                                ;; (an argument's pack expansion: its count unknown here)
@@ -3871,7 +3899,10 @@
                     (expect! p ";")
                     ;; (queue 336: its parameters' count and whether the last is a pack, for a type-constraint's arguments)
                     (sc/declare! (sc/decl-scope (scope p)) {:k :concept :name nm :nparams (count ps)
-                                                            :vpack (boolean (:isParameterPack (peek ps)))})
+                                                            :vpack (boolean (:isParameterPack (peek ps)))
+                                                            ;; (n-cpp-concepts: whether it is a type concept, [temp.concept]/7: its
+                                                            ;; first template parameter a type parameter)
+                                                            :type-concept (= "TemplateTypeParmDecl" (:kind (first ps)))})
                     [(node p "ConceptDecl" hb e (cond-> {:name nm :loc (loc p ni) :inner ps} cx (assoc :constraintExpr cx)))])))
             :else
             (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps})
@@ -4294,11 +4325,22 @@
                                        ;; (cpp-s11: its decltypes' operands kept too, __cpp17_randacc_iterator's
                                        ;; `{ __it - __it } -> same_as<decltype(__n)>`)
                                        (when rb (keep-decltypes! p rb (ix p)))
-                                       (let [rt (when (and rb (> (long (ix p)) (long rb))) (tok-text p rb (last-ix p)))]
+                                       (let [rt (when (and rb (> (long (ix p)) (long rb))) (tok-text p rb (last-ix p)))
+                                             ;; (n-cpp-concepts, [expr.prim.req.compound]/1: a return-type-requirement is
+                                             ;; `-> type-constraint`, a concept's name with its arguments and nothing else;
+                                             ;; GCC's "return-type-requirement is not a type-constraint" on a type, `-> T`)
+                                             bad (when (and rt (not (skim? p)))
+                                                   (let [end (ix p)]
+                                                     (seek! p rb)
+                                                     (let [ok (when (name-start? p)
+                                                                (when-let [[qn e] (scan-name p)] (and (concept-ent? (:ent qn)) (= (long e) (long end)))))]
+                                                       (seek! p end)
+                                                       (when-not ok (soft-diag! p rb "return-type-requirement is not a type-constraint") true))))]
                                          (expect! p ";")
                                          (recur (conj out (cond-> {:kind "CompoundRequirement" :inner [x]}
                                                             nx (assoc :_noexcept true)
-                                                            rt (assoc :_ret rt))))))))
+                                                            rt (assoc :_ret rt)
+                                                            bad (assoc :_ret_bad true))))))))
                    (is? p "requires") (do (adv! p)
                                           (let [x (with-gt p true (parse-expr p))] (expect! p ";")
                                             (recur (conj out {:kind "NestedRequirement" :inner [x]}))))
