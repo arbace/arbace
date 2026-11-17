@@ -10413,3 +10413,23 @@ next's gate executable with arbace.classes.env and analyze from the checkout, 13
 (type annotations' known rows, invokers' fixture); test/gate/javac-platform-test.bash 21 of 21; bin/reap 0 problems; crops-score
 --record, --judge --strict; records-check 0 problems; bin/gate --plan exits 0. Keys: gate_key (arbace/j2g, arbace/classes),
 arbace_javac_key (the platform's tooling) and the reader's key (convert.ae) move. Nothing built.
+
+## 2026-11-18: n-java-dates, the interp cell's `:jrt-dates` rows (round 52, overnight)
+
+Branch `n-java-dates` from mac/n-review-c `6ff92621f`, under the night's rules (each process under 1 GiB). The 13 `:jrt-dates` rows of
+n-java-defer's triage run at interp on next `42bf8614b`'s gate executable (`e8e0d017243dca8a9f9f`, read on `javac-8526ceb9d1ea3ff0bd68`)
+as recorded: nothing re-recorded. Causes and fixes (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-dates"): jrt's own
+overlay/jdk/java.base/java/util/Calendar.java and GregorianCalendar.java take jdk26u's (openjdk/jdk26u `baf63fb`,
+src/java.base/share/classes/java/util/{Calendar,GregorianCalendar}.java, GPL 2 with the Classpath Exception, already in LICENSE.md)
+field states after computeTime (setFieldsNormalized, the caller's zone offsets, HOUR and AM_PM computed in the fields constructor),
+setWeekDate, getWeeksInWeekYear, add's zone-offset adjustment and roll's wall-clock hour (t05450 t05453 t05468 t05467 t05451 t05459
+t04927); go/arbace/jrt/date.ae's Date.UTC wraps the year as Java's int and compares the cutover's sides as day counts (t05506 t05507).
+Their jdk/forms by `bin/repr-java read-jdk --check --no-javac --origins` on the two files (HEAD's sources so give the committed
+forms byte for byte). Proof without a build: the two classes patched into jdk26u's JDK (`--patch-module java.base`), jdk26u's
+Calendar, DateFormat, Date, TimeZone, Formatter, CookieHandler and HttpCookie mains (99): 7 fail → pass, 0 pass → fail; Date.UTC
+printed by repr/go and run alone: 4,755 cases equal to the JDK's (942 differed before); `bin/java-check --essential` with the
+checkout on ARBACE_PATH 428 of 428, controls failing. Left: t05396 is repr/java's converter (a post-increment hoisted after a
+statement that throws; DECISION, recommended: hoist before in a try's body), t08307 waits for CDR1's `common` locales
+(mac/n-clojure-cdr `8a3d28662`: es, fr, it, sv's zone names), t05398 and t05462 need the Japanese and Buddhist calendars (F18).
+Decisions taken overnight (round 52): transcribe the field-state machinery rather than replace jrt's calendar by jdk26u's; fix
+Date.UTC in Go in place. Keys: gate_key and the runtime key (overlay/jdk, jdk/forms, go/arbace/jrt). Nothing built.

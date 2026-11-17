@@ -1,6 +1,6 @@
 /*
  * jrt's own java.util.GregorianCalendar for the Go build (doc/go/JRT-NOTES.md, phase 2B "Dates"). Parts of its code
- * (computeTime and its field resolution, add, roll, getWeekYear, the week numbering, getActualMaximum, the field tables) are transcribed from openjdk/jdk26u at baf63fb,
+ * (computeTime and its field resolution, add, roll, getWeekYear, setWeekDate, getWeeksInWeekYear, the week numbering, getActualMaximum, the field tables, the fields' states after computeTime and computeFields) are transcribed from openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/java/util/GregorianCalendar.java, Copyright (c) Oracle and/or its affiliates,
  * under the GNU General Public License version 2 with the Classpath Exception (LICENSE.md);
  * the rest is Arbace's own.
@@ -15,8 +15,8 @@ import sun.util.calendar.ZoneInfo;
  * Gregorian from it, as the JDK's (and jrt's Date) count; the fields computed in the calendar's
  * zone (TimeZone, jdk26u's: a ZoneInfo's offsets as the JDK takes them, by the instant and by
  * the wall time); the time from the fields as the JDK resolves them, leniently or not; add,
- * roll and the week year as the JDK's; toZonedDateTime and from(ZonedDateTime). Not here:
- * setWeekDate, getWeeksInWeekYear, serialization.
+ * roll, the week year and the week dates (setWeekDate, getWeeksInWeekYear) as the JDK's;
+ * toZonedDateTime and from(ZonedDateTime). Not here: serialization.
  */
 public class GregorianCalendar extends Calendar {
     public static final int BC = 0;
@@ -97,6 +97,8 @@ public class GregorianCalendar extends Calendar {
         } else {
             this.internalSet(HOUR, hourOfDay);
         }
+        // the stamps of AM_PM and HOUR computed (jdk26u's 6440854, 6178071)
+        setFieldsComputed((1 << HOUR) | (1 << AM_PM));
         this.set(HOUR_OF_DAY, hourOfDay);
         this.set(MINUTE, minute);
         this.set(SECOND, second);
@@ -265,18 +267,41 @@ public class GregorianCalendar extends Calendar {
 
     @Override
     protected void computeFields() {
+        // jdk26u's computeFields(): when the fields are partially normalized (after
+        // computeTime), the zone offsets the caller set stay those the fields are computed in
+        int tzMask = 0;
+        if (isPartiallyNormalized()) {
+            tzMask = getSetStateFields() & ((1 << ZONE_OFFSET) | (1 << DST_OFFSET));
+        }
+        computeFields(tzMask);
+        setFieldsComputed(ALL_FIELDS);
+    }
+
+    /**
+     * Every field from the time, in the zone's offsets at the time, or in the ZONE_OFFSET and
+     * DST_OFFSET fields where tzMask names them (jdk26u's computeFields(int, int)).
+     */
+    private void computeFields(int tzMask) {
         TimeZone tz = getTimeZone();
-        int zoneOffset;
-        int dstOffset;
-        if (tz instanceof ZoneInfo zi) {
-            // the zone's raw offset at the time and its daylight saving (jdk26u's computeFields)
-            int[] offsets = new int[2];
-            zi.getOffsets(time, offsets);
-            zoneOffset = offsets[0];
-            dstOffset = offsets[1];
-        } else {
-            zoneOffset = tz.getRawOffset();
-            dstOffset = tz.getOffset(time) - zoneOffset;
+        int zoneOffset = 0;
+        int dstOffset = 0;
+        if (tzMask != ((1 << ZONE_OFFSET) | (1 << DST_OFFSET))) {
+            if (tz instanceof ZoneInfo zi) {
+                // the zone's raw offset at the time and its daylight saving (jdk26u's computeFields)
+                int[] offsets = new int[2];
+                zi.getOffsets(time, offsets);
+                zoneOffset = offsets[0];
+                dstOffset = offsets[1];
+            } else {
+                zoneOffset = tz.getRawOffset();
+                dstOffset = tz.getOffset(time) - zoneOffset;
+            }
+        }
+        if (isFieldSet(tzMask, ZONE_OFFSET)) {
+            zoneOffset = internalGet(ZONE_OFFSET);
+        }
+        if (isFieldSet(tzMask, DST_OFFSET)) {
+            dstOffset = internalGet(DST_OFFSET);
         }
         long local = time + zoneOffset + dstOffset;
         long days = Math.floorDiv(local, ONE_DAY);
@@ -325,7 +350,33 @@ public class GregorianCalendar extends Calendar {
         internalSet(MILLISECOND, tod % ONE_SECOND);
         internalSet(ZONE_OFFSET, zoneOffset);
         internalSet(DST_OFFSET, dstOffset);
-        areFieldsSet = areAllFieldsSet = true;
+    }
+
+    /**
+     * The fields computeFields(int, int) of jdk26u reports as set for fieldMask: ERA and YEAR,
+     * and each group of fields it computes together whole.
+     */
+    private static int computedMask(int fieldMask) {
+        int mask = fieldMask | (1 << ERA) | (1 << YEAR);
+        int date = (1 << MONTH) | (1 << DAY_OF_MONTH) | (1 << DAY_OF_WEEK);
+        int tod = (1 << HOUR_OF_DAY) | (1 << AM_PM) | (1 << HOUR) | (1 << MINUTE) | (1 << SECOND)
+            | (1 << MILLISECOND);
+        int tz = (1 << ZONE_OFFSET) | (1 << DST_OFFSET);
+        int weeks = (1 << DAY_OF_YEAR) | (1 << WEEK_OF_YEAR) | (1 << WEEK_OF_MONTH)
+            | (1 << DAY_OF_WEEK_IN_MONTH);
+        if ((fieldMask & date) != 0) {
+            mask |= date;
+        }
+        if ((fieldMask & tod) != 0) {
+            mask |= tod;
+        }
+        if ((fieldMask & tz) != 0) {
+            mask |= tz;
+        }
+        if ((fieldMask & weeks) != 0) {
+            mask |= weeks;
+        }
+        return mask;
     }
 
     @Override
@@ -354,6 +405,11 @@ public class GregorianCalendar extends Calendar {
             year = 1 - year;
         } else if (era != CE) {
             throw new IllegalArgumentException("Invalid era");
+        }
+        // a year 0 or before sets ERA later (jdk26u's computeTime)
+        if (year <= 0 && !isSet(ERA)) {
+            fieldMask |= 1 << ERA;
+            setFieldsComputed(1 << ERA);
         }
         long timeOfDay = 0;
         if (isFieldSet(fieldMask, HOUR_OF_DAY)) {
@@ -445,7 +501,12 @@ public class GregorianCalendar extends Calendar {
         }
         t = local - (offsets[0] + offsets[1]);
         time = t;
-        computeFields();
+        // the fields in the offsets the caller set; then those the time did not use unset
+        // (jdk26u's computeTime: computeFields(fieldMask | getSetStateFields(), tzMask) and
+        // setFieldsNormalized)
+        int tzMask = fieldMask & ((1 << ZONE_OFFSET) | (1 << DST_OFFSET));
+        int mask = computedMask(fieldMask | getSetStateFields());
+        computeFields(tzMask);
         if (originalFields != null) {
             for (int field = 0; field < FIELD_COUNT; field++) {
                 if (userSet[field] && originalFields[field] != internalGet(field)) {
@@ -455,6 +516,7 @@ public class GregorianCalendar extends Calendar {
                 }
             }
         }
+        setFieldsNormalized(mask);
     }
 
     /**
@@ -655,7 +717,54 @@ public class GregorianCalendar extends Calendar {
             fd += delta;
             int zoneOffset = internalGet(ZONE_OFFSET) + internalGet(DST_OFFSET);
             setTimeInMillis(fd * ONE_DAY + timeOfDay - zoneOffset);
+            zoneOffset -= internalGet(ZONE_OFFSET) + internalGet(DST_OFFSET);
+            // If the time zone offset has changed, then adjust the difference (jdk26u's add).
+            if (zoneOffset != 0) {
+                setTimeInMillis(time + zoneOffset);
+                long fd2 = currentDay();
+                // If the adjustment has changed the date, then take the previous one.
+                if (fd2 != fd) {
+                    setTimeInMillis(time - zoneOffset);
+                }
+            }
         }
+    }
+
+    /** The zone's raw offset and daylight saving at the time t. */
+    private int[] zoneOffsets(long t) {
+        TimeZone tz = getTimeZone();
+        int[] offsets = new int[2];
+        if (tz instanceof ZoneInfo zi) {
+            zi.getOffsets(t, offsets);
+        } else {
+            offsets[0] = tz.getRawOffset();
+            offsets[1] = tz.getOffset(t) - offsets[0];
+        }
+        return offsets;
+    }
+
+    /**
+     * The time of the day fd at hourOfDay and the current minute, second and millisecond, in
+     * the zone's offsets by the wall time (sun.util.calendar.AbstractCalendar's getTime).
+     */
+    private long wallTime(long fd, int hourOfDay) {
+        long ms = fd * ONE_DAY
+            + ((hourOfDay * 60L + internalGet(MINUTE)) * 60 + internalGet(SECOND)) * 1000
+            + internalGet(MILLISECOND);
+        TimeZone tz = getTimeZone();
+        int zoneOffset;
+        if (tz instanceof ZoneInfo zi) {
+            zoneOffset = zi.getOffsetsByWall(ms, new int[2]);
+        } else {
+            zoneOffset = tz.getOffset(ms - tz.getRawOffset());
+        }
+        return ms - zoneOffset;
+    }
+
+    /** The hour of the day of the time t in the zone. */
+    private int hourOfTime(long t) {
+        int[] offsets = zoneOffsets(t);
+        return (int) (Math.floorMod(t + offsets[0] + offsets[1], ONE_DAY) / ONE_HOUR);
     }
 
     /** The day count of the current local date (fields and time in sync). */
@@ -719,10 +828,29 @@ public class GregorianCalendar extends Calendar {
             if (field == HOUR && internalGet(AM_PM) == PM) {
                 hourOfDay += 12;
             }
+            // the wall-clock roll of jdk26u: the date's new hour in the zone's offsets by the
+            // wall time; when it stays on the same wall-clock hour (a transition) and the amount
+            // is not a whole cycle, the next or the previous hour
             long fd = currentDay();
-            long tod = ((hourOfDay * 60L + internalGet(MINUTE)) * 60 + internalGet(SECOND)) * 1000
-                + internalGet(MILLISECOND);
-            setTimeInMillis(fd * ONE_DAY + tod - internalGet(ZONE_OFFSET) - internalGet(DST_OFFSET));
+            long t = wallTime(fd, hourOfDay);
+            int newHour = hourOfTime(t);
+            if (((field == HOUR_OF_DAY && amount % 24 != 0) || (field == HOUR && amount % 12 != 0))
+                && internalGet(HOUR_OF_DAY) == newHour) {
+                hourOfDay = getRolledValue(rolledValue, amount > 0 ? +1 : -1, min, max);
+                if (field == HOUR && internalGet(AM_PM) == PM) {
+                    hourOfDay += 12;
+                }
+                t = wallTime(fd, hourOfDay);
+                newHour = hourOfTime(t);
+            }
+            time = t;
+            // the hour fields and the zone's offsets, the other fields as they were
+            internalSet(HOUR_OF_DAY, newHour);
+            internalSet(AM_PM, newHour / 12);
+            internalSet(HOUR, newHour % 12);
+            int[] offsets = zoneOffsets(t);
+            internalSet(ZONE_OFFSET, offsets[0]);
+            internalSet(DST_OFFSET, offsets[1]);
             return;
         }
         case MONTH: {
@@ -939,6 +1067,78 @@ public class GregorianCalendar extends Calendar {
     @Override
     public boolean isWeekDateSupported() {
         return true;
+    }
+
+    /** jdk26u's setWeekDate: the date of the week year's week and day of the week. */
+    @Override
+    public void setWeekDate(int weekYear, int weekOfYear, int dayOfWeek) {
+        if (dayOfWeek < SUNDAY || dayOfWeek > SATURDAY) {
+            throw new IllegalArgumentException("invalid dayOfWeek: " + dayOfWeek);
+        }
+        // To avoid changing the time of day fields by date calculations, use a clone with the
+        // GMT time zone.
+        GregorianCalendar gc = (GregorianCalendar) clone();
+        gc.setLenient(true);
+        int era = gc.get(ERA);
+        gc.clear();
+        gc.setTimeZone(TimeZone.getTimeZone("GMT"));
+        gc.set(ERA, era);
+        gc.set(YEAR, weekYear);
+        gc.set(WEEK_OF_YEAR, 1);
+        gc.set(DAY_OF_WEEK, getFirstDayOfWeek());
+        int days = dayOfWeek - getFirstDayOfWeek();
+        if (days < 0) {
+            days += 7;
+        }
+        days += 7 * (weekOfYear - 1);
+        if (days != 0) {
+            gc.add(DAY_OF_YEAR, days);
+        } else {
+            gc.complete();
+        }
+        if (!isLenient() &&
+            (gc.getWeekYear() != weekYear
+             || gc.internalGet(WEEK_OF_YEAR) != weekOfYear
+             || gc.internalGet(DAY_OF_WEEK) != dayOfWeek)) {
+            throw new IllegalArgumentException();
+        }
+        set(ERA, gc.internalGet(ERA));
+        set(YEAR, gc.internalGet(YEAR));
+        set(MONTH, gc.internalGet(MONTH));
+        set(DAY_OF_MONTH, gc.internalGet(DAY_OF_MONTH));
+        // to avoid throwing an IllegalArgumentException in non-lenient, set WEEK_OF_YEAR
+        // internally
+        internalSet(WEEK_OF_YEAR, weekOfYear);
+        complete();
+    }
+
+    /** jdk26u's getWeeksInWeekYear: the weeks of the week year. */
+    @Override
+    public int getWeeksInWeekYear() {
+        GregorianCalendar gc = getNormalizedCalendar();
+        int weekYear = gc.getWeekYear();
+        if (weekYear == gc.internalGet(YEAR)) {
+            return gc.getActualMaximum(WEEK_OF_YEAR);
+        }
+        // Use the 2nd week for calculating the max of WEEK_OF_YEAR
+        if (gc == this) {
+            gc = (GregorianCalendar) gc.clone();
+        }
+        gc.setWeekDate(weekYear, 2, internalGet(DAY_OF_WEEK));
+        return gc.getActualMaximum(WEEK_OF_YEAR);
+    }
+
+    /** This calendar when its fields are in sync with its time, else a lenient copy completed. */
+    private GregorianCalendar getNormalizedCalendar() {
+        GregorianCalendar gc;
+        if (areFieldsSet && areAllFieldsSet) {
+            gc = this;
+        } else {
+            gc = (GregorianCalendar) this.clone();
+            gc.setLenient(true);
+            gc.complete();
+        }
+        return gc;
     }
 
     /** The week year, as the JDK's GregorianCalendar computes it. */

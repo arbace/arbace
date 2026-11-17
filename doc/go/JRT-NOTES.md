@@ -1639,6 +1639,11 @@ hand-written `Date`; the other classes join the world around it.
   `construct-calendar` relies on.
 - The week parameters are en_US's (Sunday, 1) for every locale, display names English. Not
   there: `setWeekDate`, `getWeeksInWeekYear`, `toZonedDateTime`, serialization.
+  (Since n-java-dates, 2026-11-18: `setWeekDate` and `getWeeksInWeekYear` are; `toZonedDateTime` was
+  already; the fields' states after `computeTime` are jdk26u's (the fields it did not use unset, the
+  zone offsets the caller set kept), `add` of a day field and `roll` of an hour follow a zone's
+  offset changes as jdk26u's, and Go's `Date.UTC` wraps its year as Java's int and compares the
+  cutover's sides as day counts; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-dates".)
 - `String.format`'s `%t` conversions now work over a `Calendar`, a `Date` or a `long` (the
   translated `Formatter`'s `printDateTime` reaches `Calendar.getInstance`, `get`,
   `getTimeZone`), except those that need `DateFormatSymbols` (month and day names, AM/PM:

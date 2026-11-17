@@ -2,7 +2,7 @@
  * jrt's own java.util.Calendar for the Go build (doc/go/JRT-NOTES.md, phase 2B "Dates" and "Text
  * and locales"). Parts of its code (the field resolution of selectFields, the stamps,
  * adjustStamp, equals, hashCode, toString; the week parameters by locale, setWeekCountData; the
- * display names, getDisplayName, getDisplayNames and their helpers) are transcribed from openjdk/jdk26u at baf63fb,
+ * fields' states, getSetStateFields, setFieldsComputed, setFieldsNormalized; the display names, getDisplayName, getDisplayNames and their helpers) are transcribed from openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/java/util/Calendar.java, Copyright (c) Oracle and/or its affiliates,
  * under the GNU General Public License version 2 with the Classpath Exception (LICENSE.md);
  * the rest is Arbace's own.
@@ -415,17 +415,69 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
         }
         if (!areFieldsSet || !areAllFieldsSet) {
             computeFields();
-            markFieldsComputed();
+            areAllFieldsSet = areFieldsSet = true;
         }
     }
 
     /** Marks every field computed (after computeFields). */
     private void markFieldsComputed() {
+        setFieldsComputed(ALL_FIELDS);
+    }
+
+    static final int ALL_FIELDS = (1 << FIELD_COUNT) - 1;
+
+    // The fields' states after a computation (jdk26u's getSetStateFields, setFieldsComputed,
+    // setFieldsNormalized, isPartiallyNormalized): computeTime leaves the fields it did not
+    // use unset, and the next get computes them
+
+    final int getSetStateFields() {
+        int mask = 0;
         for (int i = 0; i < fields.length; i++) {
-            stamp[i] = COMPUTED;
-            isSet[i] = true;
+            if (stamp[i] != UNSET) {
+                mask |= 1 << i;
+            }
         }
-        areFieldsSet = areAllFieldsSet = true;
+        return mask;
+    }
+
+    final void setFieldsComputed(int fieldMask) {
+        if (fieldMask == ALL_FIELDS) {
+            for (int i = 0; i < fields.length; i++) {
+                stamp[i] = COMPUTED;
+                isSet[i] = true;
+            }
+            areFieldsSet = areAllFieldsSet = true;
+        } else {
+            for (int i = 0; i < fields.length; i++) {
+                if ((fieldMask & 1) == 1) {
+                    stamp[i] = COMPUTED;
+                    isSet[i] = true;
+                } else {
+                    if (areAllFieldsSet && !isSet[i]) {
+                        areAllFieldsSet = false;
+                    }
+                }
+                fieldMask >>>= 1;
+            }
+        }
+    }
+
+    final void setFieldsNormalized(int fieldMask) {
+        if (fieldMask != ALL_FIELDS) {
+            for (int i = 0; i < fields.length; i++) {
+                if ((fieldMask & 1) == 0) {
+                    stamp[i] = fields[i] = 0; // UNSET == 0
+                    isSet[i] = false;
+                }
+                fieldMask >>= 1;
+            }
+        }
+        areFieldsSet = true;
+        areAllFieldsSet = false;
+    }
+
+    final boolean isPartiallyNormalized() {
+        return areFieldsSet && !areAllFieldsSet;
     }
 
     /**
@@ -557,9 +609,6 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
     private void updateTime() {
         computeTime();
         isTimeSet = true;
-        if (areFieldsSet) {
-            markFieldsComputed();
-        }
     }
 
     private void adjustStamp() {

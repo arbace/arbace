@@ -7826,3 +7826,68 @@ bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge   # j
 bin/arbace-go --gate-build                                                   # arbace/classes and arbace/j2g moved gate_key
 # then "The night's commands" above: shard 1 with t04508 t04680 t05089 t05653 t05707 t07956 t06387 added
 ```
+
+## As built: n-java-dates (write-ahead), 2026-11-18 (round 52, overnight)
+
+Branch `n-java-dates` (from mac/n-review-c `6ff92621f`), under the night's rules (each process under 1 GiB): the interp cell's
+`:jrt-dates` rows, 13 by n-java-defer's count (mac/n-java-defer, "As built: n-java-defer"). All 13 run at interp on next `42bf8614b`'s
+gate executable (`e8e0d017243dca8a9f9f`, read on javac's tool `javac-8526ceb9d1ea3ff0bd68`, `bin/java-check --levels read,interp --list`,
+0.75 GB) as recorded (`--judge --partial`: 13 as recorded, 0 changed), so **no row is re-recorded tonight**: every fix is in jrt's own
+Java or Go, which only the next build carries. The fixes were proved instead on the JVM, jrt's `Calendar` and `GregorianCalendar`
+compiled with `--patch-module java.base` into jdk26u's own JDK (the differential harness of JRT-NOTES.md, "Dates: Calendar, Timestamp,
+Instant"), the jtreg tests run as plain mains (each JVM under 0.1 GB), and Go's `Date.UTC` in a small Go program of the printed
+functions against the JDK's `Date.UTC`.
+
+By cause:
+
+- **t05450 Bug4851640, t05453 Bug6178071, t05468 ZoneOffsets: the fields' states.** jrt's `computeTime` marked every field computed;
+  jdk26u's leaves the fields the time did not use unset (`setFieldsNormalized` of `computeFields(fieldMask | getSetStateFields(),
+  tzMask)`'s mask, its groups whole), computes the fields in the ZONE_OFFSET and DST_OFFSET the caller set (the tzMask, also in
+  `computeFields()` when partially normalized), and the constructor of fields marks HOUR and AM_PM computed (6440854, 6178071). Now
+  transcribed (Calendar: `getSetStateFields`, `setFieldsComputed`, `setFieldsNormalized`, `isPartiallyNormalized`, `updateTime` without
+  marking; GregorianCalendar: `computeFields(int tzMask)`, `computedMask`, ERA computed for a year 0 or before).
+- **t05467 Calendar/WeekDateTest: `setWeekDate`, `getWeeksInWeekYear`** threw UnsupportedOperationException: jdk26u's transcribed.
+  **t05398 DateFormat/WeekDateTest** gets past them and fails on its last case, the Japanese imperial calendar's lack of week dates
+  (`noWeekDateSupport`): jrt has no Japanese calendar (stays `:jrt-dates`).
+- **t05451 Bug4958050: `add` of a day field across a zone's offset change** (Asia/Novosibirsk's 1919 and 1930): jdk26u's adjustment
+  after the add (the offset's difference, undone when it moves the date) transcribed.
+- **t05459 Bug8152077: `roll` of HOUR/HOUR_OF_DAY across a DST transition**: jdk26u's wall-clock roll (the hour in the zone's offsets
+  by the wall time, the next or previous hour when it stays on the same one, only the hour fields and the offsets updated).
+- **t04927 CookieHandler/B6644726** passes on the JVM with the changes above (the expires date's fields).
+- **t05506 Bug4955000, t05507 DateGregorianCalendarTest: Go's `Date.UTC`** (go/arbace/jrt/date.ae) added `year + 1900` in int64 where Java
+  wraps an int, and compared the cutover's sides in milliseconds, which overflow for far years (jdk26u goes through GregorianCalendar
+  beyond 280,000,000, comparing days). Now the year wraps as an int32 and the sides are compared as day counts: 4,755 cases (the two
+  tests' years, the extremes, the cutover, 3,000 random) all equal to the JDK's `Date.UTC`, 942 of them different before. t05507 also
+  needs its three parts to complete in its 15 s at interp: the build shows it.
+- **t08307 Bug4848242**: es_ES, fr_FR, it_IT and sv_SV's short names of MET (CET, CEST): the shipped locale data is root and English
+  (`:locales "none"`; the executable gives `GMT+01:00` for es_ES, `CET` for en). **CDR1's `common`** (mac/n-clojure-cdr `8a3d28662`,
+  JRT_LOCALES' default, with es, fr, it and sv) carries them: this row waits for that conversion, nothing here.
+- **t05462 CalendarTypeTest**: the Buddhist and Japanese calendars (th_TH, ja_JP_JP, `-u-ca-`): not in jrt; not light (stays).
+- **t05396 ISO8601ZoneTest: not dates but repr/java's converter.** `c = text.charAt(index++);` in SimpleDateFormat's
+  `subParseNumericZone` is converted with the increment hoisted after the statement (`with-hoisting ... :after`, convert.ae's
+  `hoistable-increments`): when charAt throws StringIndexOutOfBoundsException the catch sees the old index, so the error index is one
+  less. Java increments before the call. **DECISION** (left for the user, it reconverts jdk/ and javac's world): (a, recommended) a
+  statement inside a try's body hoists a local's postfix increment `:before` (the old value bound, then the call), as the let
+  initializers already do; (b) no hoisting of a local in a try's body at all; (c) leave it, the row classed by its cause.
+
+Regression check on the JVM, jrt's classes before and after: jdk26u's java/util/Calendar, java/text/Format/DateFormat, java/util/Date,
+java/util/TimeZone, java/util/Formatter, java/net/CookieHandler and java/net/HttpCookie mains (99 tests): 7 fail → pass (Bug4851640,
+Bug4958050, Bug6178071, Bug8152077, Calendar/WeekDateTest, ZoneOffsets, B6644726), none pass → fail. `bin/java-check --essential` with
+the checkout on ARBACE_PATH: 428 of 428, the controls c00001 c00003 c00004 fail as they must (it runs the executable's jrt: no proof of
+the change, no regression of arbace/). The jdk/ forms of the two files converted by `bin/repr-java read-jdk --check --no-javac
+--origins` on the file alone; HEAD's sources so converted give the committed forms byte for byte.
+
+Decisions taken overnight (round 52): transcribe jdk26u's field-state machinery into jrt's Calendar (rather than replacing jrt's
+Calendar and GregorianCalendar by jdk26u's, which F18 keeps for its 4 days: sun.util.calendar's Gregorian, the Buddhist and Japanese
+calendars, Calendar.Builder); fix Go's `Date.UTC` in place (rather than routing far years through the translated GregorianCalendar);
+leave t08307 to CDR1. Keys: overlay/jdk, jdk/forms and go/arbace/jrt move `gate_key` and the runtime key; no arbace/ change.
+
+The day's commands (after `bin/arbace-go --gate-build`; then `bin/jrt-convert verify` in the night's `--full`):
+
+```sh
+printf 't04927\nt05398\nt05450\nt05451\nt05453\nt05459\nt05467\nt05468\nt05506\nt05507\n' > .tmp/njd.txt
+bin/java-check --levels interp --list .tmp/njd.txt --save .tmp/njd
+bin/java-check --judge --partial --record .tmp/njd/results.tsv      # the rows that run differently
+bin/reap --record && bin/crops-score --record
+# the compiled level's rows of the same tests at the night's compiled shard; :jrt-dates' :tests then the rows left
+```
