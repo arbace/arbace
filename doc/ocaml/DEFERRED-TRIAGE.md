@@ -900,3 +900,45 @@ clean-room `test/ocaml/capi/include/caml/` does not declare, likely misc.h's `ch
 - **OT32 Two tests ocamltest skips on the pinned configuration.** (a) `:config-skipped` (`:na`) with two new actions in
   `test/ocaml/ocamltest-config.edn`: `not-root` over the runner's uid (OC223 (a)) and `has-execvpe.sh` over the C library (musl
   1.2.x has `execvpe`); 2 rows a level out of the denominators; (b) as now. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-17): OT30-OT32
+
+OT30 (a), OT31 (a) and OT32 (a) as recommended, OC223 (a) with OT32.
+
+## As built: OT30-OT32 and the cheap groups (2026-11-17, queue 323, branch `323-ocaml-deferred`)
+
+Run on the VM (arm64, stage 0 of next's seed 3c48859d), light: by list, at most two heavy processes, each under a memory watch that
+kills a process above 3.4 GB (4 GB for one rerun). The pinned tarball and the opam set were taken from the main checkout.
+
+- **OT30 (a)**, the classes only (no run): in every run level's classes file (divergences, -suite, -aot, -suite-aot, -aot-compiled,
+  -suite-aot-compiled; -testsuite's `:runtime-parameters`), `:runtime-parameters`, `:backtraces` (OC217 (a)), `:gc-and-memory` and
+  `:obj-representation` (OC218 (a)) are `:kind :deferred`; three classes are split off before theirs: `:dynlink-decided` (OC220 (a):
+  5 programs; `tool-debugger/dynlink/host`, the debugger's test, stays `:dynlink`), `:c-runtime-decided` (OC221 (a): 12 programs; the
+  C threads' registration and master lock 4, natdynlink, complete-obj and the runtime-events C consumer stay `:c-runtime-internals`)
+  and `:backtrace-references` (OC217 (a): `backtrace_effects_nested`, `backtrace/lazy`). One less than §"Triage of 2026-11-17"
+  counted at each level (the debugger's Dynlink test).
+- **OT32 (a)** with OC223 (a): `test_create_cursor_failures` (`not-root`) and `lib-unix/unix-execvpe/exec` (`has-execvpe.sh`) in
+  `:config-skipped` (`:na`) of divergences.edn and divergences-aot.edn; `test/ocaml/ocamltest-config.edn`'s `:config` gains
+  `runner_is_root` "true" and `has_execvpe` "true" (the installed OCaml 5.5.0's `caml/s.h` defines `HAS_EXECVPE`: musl has it), its
+  `:actions` `not-root` (ocamltest/builtin_actions.ml:308-313) and `has-execvpe.sh` (the test's script), each passing on "false".
+- **The light level's Gc counters (a runtime bug, fixed).** `jdk/ocaml/ocaml/rt/ExtGc.ae` counted the runtime's own collections by a
+  canary, a `WeakReference` read by `get` at each `Gc.quick_stat`: a get while Go's collector marks makes the referent strong for
+  that cycle, so a program that reads the counters in a loop never saw one (a probe on stage 0: 100 of Go's collections, the major
+  count 0; `weaklifetime`, which loops until 20 major collections, never ended). The canary is now seen collected on its
+  `ReferenceQueue` (jrt's cleanup enqueues it; nothing reads the referent), only the current canary counting, a fresh one after each
+  asked collection, its referent an array (jrt's bare Object is one pointer-free word, which Go's tiny allocator may share). The
+  same probe: 44 counted. The compiled level runs the same runtime.
+- **OT31 (a).** At `OI_TIMEOUT=900`, the light level: `weaklifetime` and `weaktest` time out at 920 s of CPU (before the canary fix),
+  `pr5233` grows past 3.4 GB (its `fill` of `Gc.stat`'s `heap_words`/3 conses: at the light level stage 0's whole heap). After the
+  fix, at 120 s: **`weaklifetime` passes** (39 s), `weaktest` still times out. `aot-known.edn`: weaklifetime's pin dropped, pr5233's
+  and weaktest's now `light:`, the new class `:light-unfinished` (`:kind :light`, deferred) in divergences-aot.edn. weaktest's row is
+  re-recorded in it; pr5233's row stays the main host's (a rerun here is killed by the memory watch, not a run of the program):
+  the main host's rerun moves it.
+- **oi's speed rows at eval.** `ast-invariants/test`, `parallel/churn` and `weak-ephe-final/weak_array_par` pass under the 120 s of
+  CPU on the VM (wall 145-239 s at a load of 20-28); they stay in oi-slow.edn (a listed program the limit stops is no change).
+  `misc/darkening_work` ends with its known gc output. `lib-bigarray/subarraystub` (41,000 `Gc.minor`, each two of Go's collections
+  while a finaliser is registered) and `parallel/fib_threads` (fib 42 on four domains) stay over the limit.
+- `go/arbace/oicapi/capi.ae`: the C stubs' `fstat` stores `Nlink` converted to `uint64` (linux/arm64's `Stat_t.Nlink` is `uint32`:
+  `bin/oi build` failed on arm64).
+- The light-speed rows: a sample on the VM (`ast-invariants`, `basic/tailcalls`, `lazy/lazy3` time out, `effect-syntax/coroutines`
+  at its depth) showed no cheap gain; the 44 rows stay the compiled level's (OT8 (a)).
