@@ -8374,3 +8374,24 @@ guard needs the gate's executable at the branch's key (the main host).
   (b) `:na`, as dg-unsupported (CP260 (a)): out of both denominators, read completeness about +2 (crop about +0.5). (c) Deferred (OpenMP's
   directives and clauses, TM and GCC's contracts ported: weeks). **Recommended: (a)**: DejaGnu runs them on gcc, so they have verdicts;
   Arbace not taking the dialect is a choice, which by design records (also the 27 syntax-own files of gomp/ and goacc/ once decided).
+
+## As built: h-cpp-read (2) (2026-11-17; CP398 (a) then (c), CP399 (a), the user's round 51)
+
+On the branch after its merge into next (77630727b), test/cpp/divergences-dg.edn only, no run:
+
+- CP399 (a): `:gcc-dialect`, by design, first of the classes, by file (`:tests`): the audit's 150 files of the clang-* classes in the
+  dialects Arbace's C++ does not take (OpenMP/OpenACC 102, GNU TM 17, GCC's contracts 19, -fpermissive 10, -fms-extensions 2) and the
+  syntax-only files of gomp/, goacc/ and contracts/ that syntax-own held: 23, not the report's estimated 27 (22 of gomp/ and goacc/
+  still failing after the fixes, and contracts/contracts8.C); 173 files.
+- CP398 (a): CX9's six clang-* classes are one deferred class, `:own-diag` (their regexps together, after every named class): 863
+  files neither clang's record nor the own front end's meets. How clang's errors differ stays in each row's reason.
+- CP398 (c): `:gcc-own-rules`, by design, by file: the review of clang-accepts' 177 (less the dialects') and clang-pedantic's 29 by their
+  dg-error messages and the files named 64 whose expectation is GCC's own (GNU extensions' rules, GCC's ABI and runtime interface,
+  -ftemplate-depth, a driver option, the IFNDR "changes meaning" rule, -Werror=deprecated-copy-dtor): cpp0x/depr-copy5.C, cpp23/lambda-attr2.C, ext/constexpr-vla1.C, ext/constexpr-vla2.C, ext/flexary18.C, abi/mangle41.C, conversion/simd3.C, coroutines/pr105475-1.C, coroutines/pr105475-broken-spec-2.C, coroutines/pr105475.C, cpp0x/initlist93.C, cpp1z/constexpr-if36.C, cpp1z/pr115440.C, dfp/base.C, dfp/nofields.C, eh/builtin10.C, eh/builtin11.C, eh/builtin6.C, eh/builtin7.C, eh/builtin9.C, ext/anon-struct8.C, ext/anon-struct9.C, ext/array1.C, ext/asm10.C, ext/asm15.C, ext/asm16.C, ext/asmspecInvalid.C, ext/attr-noinline-4.C, ext/attrib45.C, ext/attrib68.C, ext/constexpr-attr-cleanup1.C, ext/decay1.C, ext/flexary29.C, ext/int128-1.C, ext/int128-6.C, ext/is_empty2.C, ext/packed3.C, ext/packed8.C, ext/stmtexpr21.C, ext/transparent-union.C, ext/typeof10.C, ext/underlying_type7.C, ext/uow-3.C, ext/uow-4.C, init/dso_handle2.C, lookup/name-clash7.C, lookup/name-clash12.C, lookup/name-clash13.C, lookup/name-clash14.C, lookup/redecl1.C, musttail10.C, musttail11.C, musttail8.C, musttail9.C, opt/musttail4.C, opt/pr79659.C, other/crash-4.C, parse/pragma2.C, rtti/dyncast8.C, template/pr23510.C, template/recurse.C, warn/changes-meaning2.C, warn/deprecated-19.C, warn/register-var-1.C. The other 142 of
+  those two classes ask the standard's rules (attributes' arguments, constant evaluation, designators, narrowing, access, templates) or
+  mix GCC's with the standard's in one file (ext/attr-no-dangling7.C): `:own-diag`'s. The rest of `:own-diag` (the former
+  clang-fewer-errors, -other-lines, -extra, -elsewhere) is not reviewed file by file yet.
+
+`bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 1,083 / 103 to
+5,309 / 243 / 943 (36 n/a); the crop's completeness 91 (0.9137, unchanged), without by design 96 to 93 (0.9603 to 0.9274; the read cell's
+98 to 85). No key moves (a record and its classes).

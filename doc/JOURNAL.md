@@ -9959,6 +9959,37 @@ Alternatives considered: reclassifying the gcc-only rejections by hand (rejected
 of 2026-11-07); balanced tokens for every unknown attribute outside `*recover*` (left: it would change cc-equal trees of the
 tree check; c23-attr-syntax-5.c stays deferred); raising the read budget for the limits-*.c files (rejected, as GTS-B did).
 
+## 2026-11-17: C++'s dg classes after the user's CP398 (a) then (c) and CP399 (a) (branch `h-cpp-read`, after next 77630727b)
+
+The user's round 51 on the read audit: test/cpp/divergences-dg.edn's six clang-* classes (by design under CP2 (a)) became `:own-diag`,
+deferred (863 files neither clang nor Arbace's own front end meets), `:gcc-dialect` (by design, 173 files by name: the 150 of OpenMP,
+OpenACC, GNU TM, GCC's contracts, -fpermissive and -fms-extensions, and the 23 syntax-only files of gomp/, goacc/ and contracts/; the
+report had estimated 27) and `:gcc-own-rules` (by design, 64 files by name after reviewing clang-accepts' and clang-pedantic's 206 by
+their messages: GNU extensions', GCC's ABI and runtime interface, its limits and IFNDR diagnoses). C++ read 5,309 / 1,083 / 103 to 5,309 /
+243 / 943; completeness 91 unchanged, without by design 96 to 93 (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-read (2)"). Not yet: the
+file-by-file review of the other four former classes' files.
+
+## 2026-11-17: GNU vector types in ci (CS320 (a), branch `h-c-run`)
+
+Built in `arbace/c/build.ae` (and the checker's result types of the shuffles, SSE2's cmp*pd and movmskp[ds], and of a floating
+vector comparison): vectors as aggregates of lanes in memory, the operators lane by lane into a temporary with a scalar operand
+broadcast, comparisons to 0 / -1, subscripts, initializers, bit conversions, `__builtin_convertvector`, `__builtin_shuffle`,
+`__builtin_shufflevector`. No back-end change (scalar nodes only), so cf2g compiles them unchanged. The 41 programs pass at eval and
+AOT; 268 programs at eval move only those 41, the controls differ. C eval 2,214 / 34 / 31, AOT 2,222 / 26 / 31 (completeness 97).
+Alternatives: vectors as a node kind of their own in go/arbace/ci (faster, but a back-end and cf2g change for no case that needs
+speed), left; the `_mm_*` functions of Arbace's headers as builtins, left (no check reaches them: benchmarksgame's SSE programs are
+recorded faulting without their argument; mandelbrot.c, -3, -4 run by hand with 200 print mandelbrot-2.c's image).
+
+## 2026-11-17: genclass.ae: no fn defined after it in arbace.core again (`into`, `mapv`; branch `h-prepare-fail`)
+
+`test/gate/prepare-fail-test.bash` failed on next (`c36f7366f`) with next's own stage 0: its host-compile control (prepfix.ok
+alone) could not load arbace.core from the checkout, "Unable to resolve symbol: into" at arbace/genclass.ae:167. arbace.core loads
+genclass.ae at core.ae:6927, before `into` (7105) and `mapv` (7133); 729785948 (CDR11, gen-class's `:exposes-methods` over the
+world's protected methods) added `gc-world-protected-methods`, which uses both, the same kind of break as 080c5ec64 fixed. The
+executables compile arbace.core from their embedded copy, so only a load from the checkout (the host compile, the image prepare)
+showed it. Fixed as 080c5ec64 did: `(reduce1 conj acc (for ...))` and `(vec (map ...))`, the same values. prepare-fail-test: 4 of 4
+on next's stage 0. Moves `gate_key` (arbace/genclass.ae is embedded), as 729785948 already did.
+
 ## 2026-11-17: Java's deferred interp rows triaged (branch `h-java-deferred`, from `next` `e4a7a30f3`)
 
 The eval cell's 611 deferred rows (gate 13c's record, 2026-11-14) run again at interp, light, on next's gate executable
