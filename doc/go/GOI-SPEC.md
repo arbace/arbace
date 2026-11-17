@@ -1178,6 +1178,17 @@ reads every program path under `arbace/repr/` from go/, `program-path?`). The ex
 150,806,688 bytes against 149,749,920 (+1,056,768); the table 10,489,856 bytes against 9,584,640
 (+905,216), of which the invokers 1,597,440 against 1,519,616.
 
+A listed package loaded from source (2026-11-17, h-pyi-runtime; the user's DECISION of round 51,
+Mac task 317's DECISION 2): `ARBACE_GOI_FROM_SOURCE` (import paths, commas between) names table
+packages goi treats as unlisted and loads from their forms on `ARBACE_PATH`, interpreted
+(`arbace.go.repl/from-source`, `require-source!`: RT.load would make the namespace from the table,
+so `require-source!` loads the package file itself and adds the namespace to the loaded libs before
+anything requires it; `load-import` takes that path for such a package). An executable whose
+compiled copy is older than the checkout's (stage 0 until the next re-seed) then runs the
+checkout's, as RT.toolSource does for a tool's namespaces. A listed package that imports such a path
+keeps the compiled copy, so the set must be closed under the listed importers. Its one user:
+`bin/pyi`'s `runtime_from_source`, for pyi's runtime `arbace/py` and the `arbace/libm` it imports.
+
 The list grows by a commit to `go/arbace/gotable.edn` with the size it costs recorded (the
 program's executable before and after, `bin/goi table --size`). The check's corpus will ask for
 more (`bufio`, `regexp`, `container/*`, `encoding/json`, `slices` ...): a package is added when the

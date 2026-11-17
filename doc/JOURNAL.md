@@ -9864,3 +9864,22 @@ h-java-readprint". The 29 by-design rows audited (print-shapes 18, print-erasure
 counted kinds for every row (stricter than the sets' rule for rows that pass now: a whole print run would be needed to see
 none regresses, so the counted rule is only the sets' fallback); fixing the printer for the 25 (the forms do not carry what they
 differ by: the converter's rules).
+
+## 2026-11-17: pyi runs the checkout's runtime when stage 0's is older (branch `h-pyi-runtime`, from `next` `8049a4359`)
+
+The user's decision (round 51, Mac task 317's DECISION 2): since seed 3c48859d (W2's embedding) stage 0 lists pyi's runtime
+go/arbace/py and libm in goi's table, so `bin/pyi` on stage 0 ran the seed's compiled runtime and a runtime change was not
+exercised until the next re-seed. Built (doc/python/PYTHON-SURVEY.md, "As built: pyi runs the checkout's runtime when stage
+0's is older"; doc/go/GOI-SPEC.md §6.6): goi's `ARBACE_GOI_FROM_SOURCE` (arbace.go.repl's `from-source`,
+`require-source!`: a table package treated as unlisted and loaded from its forms on ARBACE_PATH, bypassing RT.load's
+table), `arbace.python.run/require-runtime!`, and bin/pyi's `runtime_from_source` (the executable's commit from its version
+map against `git diff` of go/arbace/py and libm; equal: compiled; else the checkout's interpreted, with a one-line message;
+`PYI_RUNTIME` overrides), plus `bin/pyi runtime programs` (the 145 programs and their controls alone). Proved lightly on
+stage 0: a scratch change to sys.version seen by `bin/pyi run`; no change, the compiled path; the 145 programs compiled 143
+equal (two host differences against this host's live CPython, on the unchanged runtime), the controls failing; a slice of 6
+interpreted 6 equal, controls failing; libm's change runs both from source. Alternatives considered: renaming the checkout's
+copy to another import path (as repr/go's gcsyntaxsrc; every lazy package's import of arbace/py would need renaming too);
+a source digest embedded at build time (only after the next re-seed, and a gate_key change for every build); a runtime
+change in RT.load or GoInterp.loadTable (compiled into stage 0: inert until a re-seed). Keys: gate_key moves (arbace/go/repl.ae,
+arbace/python.ae, arbace/python/run.ae are embedded sources); Python's steps' keys (:python's bin/pyi and arbace/python) and
+the goi steps keyed by arbace/go move.

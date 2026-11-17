@@ -7004,3 +7004,41 @@ Review 307 (of 286-298) found four medium gaps; each is fixed as CPython 3.14.10
   `['-']`. The hook in every REPL path and PYTHONSTARTUP after `-i FILE` on a terminal (_pyrepl's
   `interactive_console(pythonstartup=True)`) were 298's already; `.tmp/q313/t/check6.sh`'s eight start paths
   equal python3's.
+
+## As built: pyi runs the checkout's runtime when stage 0's is older (2026-11-17, h-pyi-runtime; round 51, Mac task 317's DECISION 2)
+
+Since W2's re-seed (seed 3c48859d) stage 0 lists pyi's runtime `arbace/py` and the libm port it imports in goi's table, so
+`bin/pyi run` and every check on stage 0 ran the seed's compiled runtime: a change to go/arbace/py was not exercised by
+pyi-runtime or pyi-check-aot-goi until the next re-seed (317's finding: queue 304's `_bisect` failed under stage 0). The
+namespaces needed nothing: RT.toolSource already loads a changed arbace/python, arbace/repr/python or arbace/go namespace
+from the checkout.
+
+- **The decision** (bin/pyi's `runtime_from_source`, once by the outermost bin/pyi of the verbs that run pyi, exported to
+  its children): the executable's version map (`*arbace-version*`, its commit; read once and kept in
+  `.tmp/repr-python/pyi/exe-version/` by the executable's path, size, time and inode) against the checkout's
+  `go/arbace/py{.ae,/}` and `go/arbace/libm{.ae,/}` (`git diff --quiet COMMIT --`, the working tree's changes included,
+  about 10 ms). Equal: the compiled runtime (`ARBACE_GOI_FROM_SOURCE` empty). py differs: `arbace/py` from source; libm
+  differs: both (compiled py would call compiled libm). An executable of no commit of this repository, or built dirty:
+  both. `PYI_RUNTIME=compiled|checkout` overrides. One line on stderr says which runtime runs (`pyi: the compiled runtime
+  of ...: go/arbace/py and libm are the executable's 53da41d93b5d`, or `pyi: the checkout's runtime (arbace/py)
+  interpreted by goi: go/arbace/py differs from ...`), printed once (`PYI_RUNTIME_NOTED`), never by `bin/pyi python`
+  (sys.executable), and by `run` and `repl` only when the checkout's runs (the program's own stderr otherwise).
+- **goi's half** (arbace.go.repl, doc/go/GOI-SPEC.md §6.6): `ARBACE_GOI_FROM_SOURCE` names table packages that goi treats
+  as unlisted (`from-source`, out of `listed?` and `interpretable?`) and loads from their forms on ARBACE_PATH
+  (`require-source!`: RT.load would make the namespace from the table, so it loads the package file itself, completes the
+  package as the after-load hook does and adds the namespace to the loaded libs; `load-import` takes it for such a path).
+  `arbace.python.run/require-runtime!` (and arbace.python's runtime-fn) calls it before requiring `go.arbace.py`, so
+  pyexpat, pybz2 and the other lazy packages, interpreted, import the same copy. No package goi's table lists imports
+  `arbace/py`, and only `arbace/py` (and hsi's `arbace/hs`, outside pyi's runs) imports `arbace/libm`.
+- **The cost**: the checkout's runtime starts in about 45-65 s against 2-3 s compiled, at a 2.3-3.1 GB peak (2.3 GB under
+  `PYI_GOMEMLIMIT=2GiB`): the pre-W2 cost, only on a checkout whose runtime moved past stage 0's.
+- **`bin/pyi runtime programs`**: runtime check's 145 programs and their controls, then repl --check, without its print,
+  read and tables (`runtime_programs`, shared with `check`).
+- **Proved** (stage 0 at 53da41d93b5d, next 8049a4359): a scratch change to `go/arbace/py/sys.ae`'s sysVersion (not
+  committed) seen by `bin/pyi run` (`3.14.10 (pyi CHANGED, Arbace) [Go]`, the message naming go/arbace/py); with no change
+  the compiled path (2.1 s, the message naming the executable's commit); `bin/pyi runtime programs` on the compiled path
+  (live oracle, `REPR_PYTHON_ORACLE=live`: the smoke outcomes are not recorded yet) 143 of 145 equal, the two (d-mmap's
+  module constants, f-struct's one number) this host's CPython against pyi on the unchanged runtime, the controls failing
+  as they must, repl 2 of 2; the interpreted path with a neutral scratch change (a docstring of sys.ae) over a slice
+  (arith, calls, d-generators, d-json, e-builtins, f-time) 6 of 6, both controls failing as they must, repl 1 of 1; a
+  scratch change to libm.ae runs both from source (math.cbrt, erf, exp2 as CPython's); `PYI_RUNTIME=checkout` likewise.

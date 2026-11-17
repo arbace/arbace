@@ -113,7 +113,7 @@
 #                                  of the runtime (go/arbace/py), each module on its loop with its GOCOVERDIR (run: the main
 #                                  host's night); blocks: tools/covsubset's block sets per module; subset: the modules of every
 #                                  covered block, one per class, the controls (bin/cover subset); --write: corpora.edn's :subset
-#   bin/pyi runtime print|read|vet|check|tables|gen-tables
+#   bin/pyi runtime print|read|vet|check|programs|tables|gen-tables
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
 #                                  read back into go/arbace/py (read; go/arbace/libm, go/arbace/expat and go/arbace/pyexpat,
@@ -250,6 +250,60 @@ arbace_exe() {
   main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
   if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
   die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
+}
+
+# runtime_from_source (the user's DECISION of 2026-11-17, Mac task 317's DECISION 2): pyi's runtime, go/arbace/py, and the
+# libm port it imports are compiled into the executable since W2's re-seed (goi's table lists them), so a run on stage 0
+# ran the seed's runtime, not the checkout's, until the next re-seed. Here the executable's commit (its version map,
+# *arbace-version*, kept in WORK/exe-version by the executable's path, size and time) is compared with the checkout's
+# go/arbace/py{.ae,/} and go/arbace/libm{.ae,/} (git diff against that commit, the working tree's changes included): equal,
+# the compiled runtime runs (ARBACE_GOI_FROM_SOURCE empty); else goi interprets the checkout's (ARBACE_GOI_FROM_SOURCE
+# arbace/py, with arbace/libm when libm differs: arbace.go.repl/from-source, arbace.python.run/require-runtime!), about
+# 50 s more a start. An executable of no commit of this repository or built dirty: the checkout's. The namespaces
+# (arbace/python, arbace/repr/python, goi's arbace/go) need none of this: RT.toolSource loads a changed one from the
+# checkout. Decided once by the outermost bin/pyi and exported, so its children (sys.executable, the checks' runs)
+# inherit it; PYI_RUNTIME=compiled|checkout overrides; the decision is printed once on stderr (PYI_RUNTIME_NOTED), but not
+# by bin/pyi python (sys.executable) nor, when the compiled runtime runs, by run and repl (the program's stderr).
+pyi_runtime_paths=(go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm)
+exe_version() {
+  local exe=$1 k f
+  k=$(stat -L -c '%n %s %Y %i' "$exe" | sha256sum | cut -c1-16)
+  f="$WORK/exe-version/$k"
+  if [ ! -s "$f" ]; then
+    mkdir -p "$WORK/exe-version"
+    env -u ARBACE_PATH "$exe" -e '(print (System/getProperty "arbace.version"))' > "$f.$$" 2>"$f.$$.err" || true
+    mv -f "$f.$$" "$f"; rm -f "$f.$$.err"
+  fi
+  cat "$f"
+}
+runtime_from_source() {
+  local verb=${1:-} exe v commit set="" why
+  if [ -z "${ARBACE_GOI_FROM_SOURCE+x}" ]; then
+    exe=$(arbace_exe 2>&1) || return 0   # no stage 0: the verb's own run says so
+    case ${PYI_RUNTIME:-auto} in
+      compiled) why="PYI_RUNTIME=compiled" ;;
+      checkout) set=arbace/libm,arbace/py; why="PYI_RUNTIME=checkout" ;;
+      auto)
+        v=$(exe_version "$exe")
+        commit=$(sed -n 's/.*:commit "\([0-9a-f]*\)".*/\1/p' <<< "$v")
+        if [ -z "$commit" ] || ! git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null; then
+          set=arbace/libm,arbace/py; why="the executable's commit ${commit:-(none)} is none of this repository's"
+        elif grep -q ':dirty true' <<< "$v"; then
+          set=arbace/libm,arbace/py; why="the executable was built from a dirty tree at ${commit:0:12}"
+        elif ! git -C "$root" diff --quiet "$commit" -- go/arbace/libm.ae go/arbace/libm; then
+          set=arbace/libm,arbace/py; why="go/arbace/libm differs from the executable's ${commit:0:12}"
+        elif ! git -C "$root" diff --quiet "$commit" -- go/arbace/py.ae go/arbace/py; then
+          set=arbace/py; why="go/arbace/py differs from the executable's ${commit:0:12}"
+        else why="go/arbace/py and libm are the executable's ${commit:0:12}"; fi ;;
+      *) die "PYI_RUNTIME: compiled, checkout or auto, not ${PYI_RUNTIME}" ;;
+    esac
+    export ARBACE_GOI_FROM_SOURCE=$set
+    if [ -z "${PYI_RUNTIME_NOTED:-}" ] && [ "$verb" != python ] && { [ -n "$set" ] || { [ "$verb" != run ] && [ "$verb" != repl ]; }; }; then
+      if [ -n "$set" ]; then echo "pyi: the checkout's runtime (${set//,/ and }) interpreted by goi: $why" >&2
+      else echo "pyi: the compiled runtime of ${exe#$root/}: $why" >&2; fi
+    fi
+  fi
+  export PYI_RUNTIME_NOTED=1
 }
 # the oracle, CPython (queue 213): looked for only when a verb runs it (the records, the native read and the AOT need none;
 # doc/ORACLE-RECORDS-SURVEY.md, ORS14 (a)); a call through env, timeout or a list (smoke_run, run_one) checks first
@@ -1719,22 +1773,14 @@ cmd_runtime() {
         echo "runtime: builtins_cjk_table.go DIFFERS from cjkcodecs_table.py's"; rc=1
       fi
       pa_arbace runtime-ops || rc=1
-      local n=0 bad=0 b
-      local -A gots=()
-      for p in "$root"/test/python/pyi/*.py; do
-        b=$(basename "$p")
-        # PYI_SMOKE_ONLY=REGEX: the programs (and sessions) whose names match, a sample (queue 213); the controls'
-        # subjects run with every selection (queue 235)
-        [[ $b =~ ${PYI_SMOKE_ONLY:-.} ]] || smoke_control_subject smoke "$b" || continue
-        n=$((n + 1))
-        local want got
-        want=$(smoke_want "$p") || { echo "  FAIL $b: no reference (the oracle's records)"; bad=$((bad + 1)); continue; }
-        got=$(cd "$(dirname "$p")" && smoke_run "$root/bin/pyi" run "$b"); gots[$b]=$got
-        smoke_verdict "$b" "$want" "$got" smoke || bad=$((bad + 1))
-      done
-      echo "runtime: $n programs of test/python/pyi run by pyi as by the oracle: $((n - bad)) equal"
-      smoke_controls smoke gots || bad=$((bad + 1))
-      [ $bad -eq 0 ] || rc=1
+      runtime_programs || rc=1
+      repl_check || rc=1
+      return $rc ;;
+    programs)
+      # the programs of test/python/pyi and their controls, then repl --check, without check's print, read and tables: a light
+      # proof of the runtime a run loads (runtime_from_source)
+      local rc=0
+      runtime_programs || rc=1
       repl_check || rc=1
       return $rc ;;
     tables)
@@ -1768,8 +1814,29 @@ cmd_runtime() {
       done
       return $rc ;;
     gen-tables) shift; runtime_gen_tables "$@" ;;
-    *) die "usage: bin/pyi runtime print|read|vet|check|tables|gen-tables" ;;
+    *) die "usage: bin/pyi runtime print|read|vet|check|programs|tables|gen-tables" ;;
   esac
+}
+
+# runtime_programs (runtime check's and runtime programs'): the programs of test/python/pyi run by bin/pyi run against the
+# oracle's recorded runs (PYI_SMOKE_ONLY=REGEX a sample), then their controls (smoke_controls)
+runtime_programs() {
+  local n=0 bad=0 b p
+  local -A gots=()
+  for p in "$root"/test/python/pyi/*.py; do
+    b=$(basename "$p")
+    # PYI_SMOKE_ONLY=REGEX: the programs (and sessions) whose names match, a sample (queue 213); the controls'
+    # subjects run with every selection (queue 235)
+    [[ $b =~ ${PYI_SMOKE_ONLY:-.} ]] || smoke_control_subject smoke "$b" || continue
+    n=$((n + 1))
+    local want got
+    want=$(smoke_want "$p") || { echo "  FAIL $b: no reference (the oracle's records)"; bad=$((bad + 1)); continue; }
+    got=$(cd "$(dirname "$p")" && smoke_run "$root/bin/pyi" run "$b"); gots[$b]=$got
+    smoke_verdict "$b" "$want" "$got" smoke || bad=$((bad + 1))
+  done
+  echo "runtime: $n programs of test/python/pyi run by pyi as by the oracle: $((n - bad)) equal"
+  smoke_controls smoke gots || bad=$((bad + 1))
+  [ $bad -eq 0 ]
 }
 
 # musl_src: musl 1.2.6's release tarball (test/c/corpora.edn's :musl-1.2.6, the C crop's pin) checked by its SHA-256 and
@@ -2430,6 +2497,10 @@ cmd_wheels() {
   esac
 }
 
+# the verbs that run pyi on goi decide its runtime first (runtime_from_source), for their children too
+case "${1:-}" in
+  run|ir|repl|lib-test|python|lib-test-all|runtime|aot|bench|check|cover|wheels|runner|script) mkdir -p "$WORK"; runtime_from_source "$1" ;;
+esac
 case "${1:-}" in
   gen) shift; cmd_gen "$@" ;;
   golden) shift; cmd_golden "$@" ;;
