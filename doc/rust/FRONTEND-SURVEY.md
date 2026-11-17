@@ -4194,3 +4194,201 @@ maturity 96, independence 80. What holds each, from `bin/crops-score --judge --s
   keeps no old versions, so a local repository from the archive's apks). *Recommended: (a)*: the gate's pins and clean run pass
   again at once, honestly (no gate step needs rustc), and the records stay valid; (b) only when the front end moves to a new
   rustc on purpose.
+
+## As built: RIND9 (a), alloc's pass (2026-11-17, night, branch `n-rust-alloc`)
+
+The user approved RIND9 (a). alloc's interface pass is written on core-check's (RF12-P2 (b)) and proven light on two modules; the
+whole crate's pass is the day's run.
+
+- `arbace/rust/front/alloc_check.ae` (`arbace.rust.front.alloc-check`): alloc's module files (core-check's `module-files` with the
+  crate `alloc`, cfg as core's: 84 files of library/alloc), alloc's index (its 17 macro_rules! and its modules' names from the
+  sources, cached in `.tmp/rust-front/alloc/index.edn`, about 5 minutes once), each module run by core-check's `run-module` with
+  `*collect-only*` (expand, resolve, lower, collect; no body), its facts written by `native-iface` and read by the modules after
+  it. The pass reads std's interface **with every alloc fact taken out** (`without-crate`: alloc's fns, ADTs, traits, impls and
+  consts, and its impls out of the selection indexes), so all it writes of alloc is its own; std-names stays (names, not
+  types). `ALLOC_IFACE_ROUNDS=2`: a second round over every module, each reading the first round's facts of the others (the
+  modules' order). The output is the helper's shape, `(si/fn "PATH" {..})` with the helper's key order
+  (`.tmp/rust-front/alloc/alloc-iface.edn`), and the compare holds every alloc fact of the helper's `std-iface.edn` to the
+  native one: equal, differing (the keys, and the first fact's two values, by cause), missing; the native's extras (crate-private
+  items the helper does not write) counted apart, not failures; the negative control judges an equal fact against another
+  path's helper fact, which must differ.
+- Generalized from core to the crate being built (core's build unchanged by construction): `cc/*crate*` (the tree, `crate::`
+  in the names, `body-key`, the remapped `library/alloc/` paths), `resolve/crate-root` (`crate::`, `super::` at the root, the
+  local paths' printing in collect), and `$crate`: a dependency's macro's `$crate` names that dependency
+  (`resolve/crate-deps`, alloc `#{"core"}`; `resolve/*mark-crates*` bound by `run-module` from the expansion's marks, and a
+  `use $crate::..`'s `:krate` in collect), core's build having none. lower keeps an impl's constness (`const unsafe impl
+  Allocator for Global`), and native-iface writes its functions `:const true`, as fn_sig does.
+- `bin/rust-front alloc-iface [FILE...]` (the pass and the compare), `--list`, `--units [--record]`
+  (`bin/lib/repr-rust/core-build.bash`): the unit cases `test/rust/front/alloc_iface_test.ae`, 22 pure cases (the crate root,
+  the tree with its negative case, `without-crate`, `owner`, the compare's four outcomes and its control, the shape written and
+  read back) at GOMEMLIMIT 500MiB (0.75 GB), then each module of `test/rust/front/alloc-iface-units.txt` passed alone and
+  compared at 600MiB, its summary held to `test/rust/front/alloc-iface-units-known.txt`.
+
+### Results (light, 0.92 GB peak)
+
+| module | facts | equal | differ | missing | native extras |
+|---|---|---|---|---|---|
+| `alloc::borrow` (borrow.rs) | 47 | 43 | 4 | 0 | 0 |
+| `alloc::alloc` (alloc.rs) | 36 | 31 | 0 | 5 | 2 |
+
+The causes the compare names (each a fix of its own, RIND9's next steps):
+- a trait's associated type's bounds (`ToOwned::Owned: Borrow<Self>`): native-iface writes `[]`;
+- an associated-type bound in a where clause (`B: ToOwned<Owned: Debug>`, Cow's Debug, Display and Default impls): the
+  projection's clause is not among `explicit-clauses`;
+- `#[derive_const(Clone, Default)]` and `#[derive(Copy, Debug)]` on `Global`: the derived impls (`{impl#6..8}`) and their
+  functions not written (missing);
+- (fixed here) a const impl's functions' `:const`: alloc.rs' 6 differences (18 equal of 36 before, 31 after) before the impl's constness was kept;
+- the extras `dealloc_nonnull`, `realloc_nonnull`: crate-private, the helper's interface lacks them, as expected.
+
+### Decisions taken overnight (round 52)
+
+- RIND9a-1 (a) the pass reads std's interface less every alloc fact (no answer read from the helper), std-names kept: taken.
+- RIND9a-2 (a) every helper fact judged (equal, differing, missing), the native extras counted apart: taken.
+- RIND9a-3 (a) one round by default, `ALLOC_IFACE_ROUNDS=2` the second: taken (the day's run tells whether the order matters).
+- RIND9a-4 (a) core's cfg for alloc (none of alloc's item cfgs reads debug_assertions or ub_checks; its features off): taken.
+- RIND9a-5 (a) a dependency's macro's `$crate` names the dependency (`crate-deps`), core's own build unchanged: taken.
+
+### The day's commands (not run here)
+
+- The whole pass and its compare, about 25 minutes and 2.3 GB, one process (`GOMEMLIMIT=1800MiB`):
+  `bin/rust-front alloc-iface` (its summary lines; `.tmp/rust-front/alloc/alloc-iface.edn.report` the causes), then
+  `ALLOC_IFACE_ROUNDS=2 bin/rust-front alloc-iface` once to see whether a second round changes the counts.
+- core unchanged by the generalization: `bin/rust-front core-essential` (its known summary) and `bin/rust-front rind-test`.
+
+## As built: RIND9 (a), alloc's pass: its three causes fixed (2026-11-17, night, branch `n-rust-alloc2`)
+
+The three causes the compare named on borrow.rs and alloc.rs are fixed, each in the code core's build shares:
+
+- A trait's associated type's bounds: native-iface wrote `[]`; it now writes `collect/item-bounds` (explicit_item_bounds: the
+  implicit `Sized`, or `?Sized`'s `MetaSized`, the written bounds, the trait's where clauses on the item), self the item's
+  projection over the trait's identity arguments (`ToOwned::Owned`: Sized, then `Borrow<Self>`; `Join::Output`: Sized over
+  `[Self Separator]`).
+- An associated-type bound in a bound (`B: ToOwned<Owned: Debug>`): lower dropped the constraint's bounds (`{:bounds []}`); it
+  now lowers them, and collect's `lower-trait-ref` gives the trait ref the metadata `:clauses`, lower_assoc_item_constraint's
+  clauses in the constraints' order (an equality's projection, a bound's clauses on the projection, lower_bounds without
+  implicit sizedness), which `lower-bounds` puts after the trait clause (`:constraints` stays for its other readers: dyn's
+  projections).
+- `#[derive_const(...)]`: the expansion read `#[derive]` alone, so `derive_const`'s impls were never made (and every later
+  impl of the module numbered one or two short). expand_derive now reads both attributes in their order and writes a
+  `derive_const` trait's impls `const impl` (TraitDef's is_const; Clone on a Copy type both TrivialClone's and Clone's, as core
+  writes its own `const unsafe impl TrivialClone`); the attribute is dropped as `derive` is (expand, lower's attributes).
+
+### Results (light, one process a module, 0.91 GB peak)
+
+| module | facts | before: equal / differ / missing | after: equal / differ / missing | native extras |
+|---|---|---|---|---|
+| `alloc::borrow` (borrow.rs) | 47 | 43 / 4 / 0 | 47 / 0 / 0 | 0 |
+| `alloc::alloc` (alloc.rs) | 36 | 31 / 0 / 5 | 36 / 0 / 0 | 2 |
+| `alloc::slice` (slice.rs) | 37 | 30 / 5 / 2 | 32 / 3 / 2 | 7 |
+| `alloc::collections` (collections/mod.rs) | 29 | 29 / 0 / 0 | 29 / 0 / 0 | 2 |
+| `alloc::collections::btree::set_val` | 18 | 18 / 0 / 0 | 18 / 0 / 0 | 6 |
+
+(vec/in_place_collect.rs was tried and left out: the helper writes none of its facts, all crate-private, so its control has
+no pair.) slice.rs' remaining causes, not this round's: the late-bound regions of a where clause's Fn sugar written `'_`
+where the helper writes `'^#0` (`sort_by`, `sort_by_key`, `sort_by_cached_key`'s `F: FnMut(&T, &T) -> Ordering`), and an
+impl inside a function body inside an impl's function (`{impl#0}::to_vec_in::{impl#0}::to_vec::{impl#0}`) not written. The
+unit cases: 25 pure (3 new: derive_const's text, its negative), and per module the causes' facts written by value
+(test/rust/front/alloc_iface_test.ae's `module-cases`, with negatives: Cow's Hash impl has no projection clause, derive's
+`fmt` not const), the summary held to `alloc-iface-units-known.txt` (five modules).
+
+core's pass shares the code, so its facts may move: derive_const is written in 12 of core's files (cmp, any, option, result,
+ops/control_flow, ops/range among `test/rust/front/core-modules.txt`: their impls now made, later `{impl#N}` renumbered as
+rustc numbers them), associated-type bounds in option, convert/mod and ops/try_trait (their clauses now in the param envs);
+none in core-essential's six modules.
+
+### Decisions taken overnight (round 52)
+
+- RIND9a-6 (a) a `derive_const` trait's every impl is const, TrivialClone's too (rustc passes is_const to each TraitDef of the
+  derive; core's hand-written `const unsafe impl TrivialClone`): taken. Alternative: Clone's alone, set aside (no source for it).
+- RIND9a-7 (a) the constraints' clauses as one ordered metadata `:clauses` beside `:constraints` (left for dyn's readers):
+  taken. Alternative: `:constraints` extended with bound entries, set aside (its readers destructure `[ad args term]`).
+
+### The day's commands (not run here)
+
+- `bin/rust-front core-essential` (its known summary: expected unchanged) and `bin/rust-front rind-test`.
+- core's whole check over `test/rust/front/core-modules.txt` (`bin/rust-front core-check --records`, as the day runs it) to see
+  the derive_const and associated-type-bound modules move; re-record its known lines from a passing run.
+- The whole alloc pass, `bin/rust-front alloc-iface` (about 25 minutes, 2.3 GB), for the crate's counts after the fixes.
+
+## As built: RIND9 (a), alloc's pass: the compare module by module (2026-11-17/18, night, branch `n-rust-alloc3`)
+
+slice.rs' two open causes fixed, then nine more modules passed alone (one process each, 0.90 GB peak, GOMEMLIMIT 500 MiB) and
+each cause the compare showed fixed in the code core's build shares:
+
+- Fn sugar's elided regions in a where clause (`F: FnMut(&T, &T) -> Ordering`): native-iface wrote `'_`; a clause is now
+  written in its binder (`*clause-binder*`): an elided region `'^#N` (its index after the binder's named ones), a `for<'a>` one
+  `'^'a`; inside a type's own binder (a fn pointer's, a trait object's) one more `^` (`'^^#0`).
+- An impl in a body inside an impl's function (`{impl#0}::to_vec_in::{impl#0}::to_vec::{impl#0}`, Drop for to_vec's
+  `DropGuard`) and every impl in an impl function's body (`{impl#17}::from::{impl#0}`): written at its def path (`body-path`:
+  a body's impl `{impl#N}` under its function's path), a body's ADT named by its def path in the impl's types; a body's trait,
+  functions and ADT facts not written (the helper writes none: the ConvertVec impl stays out).
+- Trait objects (`Box<dyn Any, A>`, `dyn Error + Send + Sync + 'a`): ty->sty had no `:dyn` (the fact dropped); it writes the
+  helper's `(dyn (trait P ARGS) [(proj ..)] [AUTOS] REGION)`, the auto traits Sync before Send (rustc's order in every one of
+  std-iface's 83), an anonymous object region `'_`.
+- Clauses the writer dropped: `E: 'a` `(type-outlives TY R)`, `'b: 'a` and a const parameter's ConstArgHasType as the helper's
+  `(other TEXT)` (686 of std-iface's `the constant `N` has type `usize``).
+- `#[cfg_attr(PRED, derive(Clone))]` (string.rs' FromUtf8Error, IntoChars): the attribute made from cfg_attr's items had empty
+  arguments, so derive-names failed and the whole of string.rs did not expand; it now carries the list as delimited arguments.
+- A generic associated type's own arguments (`<&'b str as Pattern>::Searcher<'a>`): a std trait's GAT had no own parameters
+  (ext-generics); they are read off its bounds in std's interface (the projection over the trait's identity arguments, then its
+  own).
+- Lifetime elision: a by-value `self` is no elision candidate (resolve_fn_params' find_lifetime_for_self empty), though Self may
+  be a reference (`impl Pattern for &'b String`'s `into_searcher(self, haystack: &str) -> Searcher<'_>`: the haystack's).
+- A type parameter's default in generics (`Box<T, A = Global>`: `(type "A" (adt "alloc::alloc::Global" []))`, ADTs and traits),
+  an impl's or trait's function's ABI (`extern "rust-call" fn call_once`), a negative impl's `:negative true` (`impl !Send for
+  Rc`, so with-native-iface's selection no longer takes it as a candidate).
+- An item with a tool attribute (`#[rustfmt::skip] const impl ...`) is an attribute invocation in rustc's InvocationCollector, so
+  its DefId (and its impl's disambiguator) comes after its fragment's: the expansion numbers it when expanded (`:rf-order`), as
+  a derive's. vec/mod.rs' `const impl<T, A> Vec<T, A>` and raw_vec's two: every later `{impl#N}` of those modules was one or two
+  off; core's option.rs `FromResidual<Yeet<()>>` is the helper's `{impl#66}`, the last of 67, by the same rule.
+
+### Results (light, one process a pass)
+
+| module | facts | before | after | native extras |
+|---|---|---|---|---|
+| `alloc::slice` (slice.rs) | 37 | 32 / 3 / 2 | 37 / 0 / 0 | 7 |
+| `alloc::boxed::convert` (boxed/convert.rs) | 54 | 26 / 3 / 25 | 54 / 0 / 0 | 7 |
+| `alloc::string` (string.rs) | 284 | 0 / 0 / 284 (expand failed) | 284 / 0 / 0 | 74 |
+| `alloc::boxed` (boxed.rs) | 166 | 159 / 7 / 0 (with the fixes above it) | 166 / 0 / 0 | 1 |
+| `alloc::rc` (rc.rs) | 274 | 268 / 6 / 0 (likewise) | 274 / 0 / 0 | 49 |
+| `alloc::sync` (sync.rs) | 287 | not measured | 287 / 0 / 0 | 35 |
+| `alloc::fmt` (fmt.rs) | 1 | not measured | 1 / 0 / 0 | 0 |
+| `alloc::collections::vec_deque` (alone) | 185 | not measured | 184 / 1 / 0 | 19 |
+| `alloc::raw_vec` with `alloc::collections::vec_deque` | 189 | 187 / 1 / 1 | not rerun | 83 |
+| `alloc::raw_vec` with `alloc::vec` (vec/mod.rs) | 168 | vec alone 12 / 52 / 100 | 168 / 0 / 0 | 71 |
+
+(equal / differ / missing. A module passed alone lacks its crate siblings' facts: vec_deque's and vec's `buf: RawVec<T, A>`
+written `RawVec<>` alone, equal with raw_vec passed before it, as the whole pass orders them.) The unit cases: 8 new pure ones
+(the clause and inner binders, trait objects, outlives, an unknown clause's negative), the module cases of boxed/convert,
+string, boxed, rc and raw_vec with negatives (test/rust/front/alloc_iface_test.ae), `alloc-iface-units.txt` ten modules, its
+known file re-recorded from a passing `--record`.
+
+core's pass shares every one of these, so its native facts may move toward the helper's: const generics' ConstArgHasType and
+outlives clauses (every core impl and function with a const parameter or `T: 'a`), trait objects in signatures (formerly
+dropped), Fn-sugar bounds of crate-private functions, impls in function bodies, GAT projections (`Pattern::Searcher<'a>`),
+by-value self elision, defaults, negative impls (selection), `rust-call`, and the impl numbering of core's files with a tool
+attribute on an impl (option.rs, result.rs: their later `{impl#N}` renumbered as rustc numbers them).
+
+### Decisions taken overnight (round 52)
+
+- RIND9a-8 (a) an item with a tool attribute numbered when its invocation is expanded, in source order with the derives'
+  (rustc's InvocationCollector; option.rs' Yeet impl and vec's const impl confirm it): taken. Alternative: at the very end of
+  the module, set aside (no case separates the two yet).
+- RIND9a-9 (a) the auto traits of a trait object written Sync before Send, others after by path (std-iface's 83 objects; rustc
+  sorts by DefPathHash, which Arbace does not compute): taken. Alternative: compute the stable hash, set aside (no case needs it).
+- RIND9a-10 (a) a std GAT's own parameters read off its bounds in std's interface: taken. Alternative: a std-names field, set
+  aside (the pack's format is the helper's).
+
+### Open (not this round)
+
+- vec_deque, vec and raw_vec are equal only passed together: the whole pass's order covers it.
+- Arguments of type `Self` in an impl for a reference still count Self's regions as elision candidates (only by-value `self`
+  is excused); no compared fact shows it yet.
+
+### The day's commands (not run here)
+
+- `bin/rust-front core-essential` and `bin/rust-front rind-test` (core's essential summary may move: ConstArgHasType and
+  outlives clauses in its native facts); core's whole check over `test/rust/front/core-modules.txt`, its known lines re-recorded
+  from a passing run.
+- The whole alloc pass, `bin/rust-front alloc-iface` (about 25 minutes, 2.3 GB), for the crate's counts after the fixes (remove
+  `.tmp/rust-front/alloc/index.edn` first: the expansion changed).

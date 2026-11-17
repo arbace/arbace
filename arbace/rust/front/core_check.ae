@@ -26,6 +26,11 @@
   (:import [java.io File]))
 
 (defn- fget [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+
+(def ^:dynamic *crate*
+  "RIND9 (a): the crate whose sources are read (its module tree under LIB/CRATE/src, `crate::` its root): core, or alloc for
+  arbace.rust.front.alloc-check's interface pass"
+  "core")
 (defn- head [x] (when (seq? x) (first x)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -103,16 +108,16 @@
                       (when (.exists (File. ^String f))
                         (swap! out conj {:path p :file canon :vendored (boolean (re-find #"/(stdarch|portable-simd)/" canon))})
                         (walk p canon fd (fget (parse-file canon) :items) nil)))))))]
-      (let [lib (.getCanonicalPath (File. (str lib-dir "/core/src/lib.rs")))]
-        (swap! out conj {:path "core" :file lib})
-        (walk "core" lib (.getParent (File. lib)) (fget (parse-file lib) :items) nil)))
+      (let [lib (.getCanonicalPath (File. (str lib-dir "/" *crate* "/src/lib.rs")))]
+        (swap! out conj {:path *crate* :file lib})
+        (walk *crate* lib (.getParent (File. lib)) (fget (parse-file lib) :items) nil)))
     @out))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; core's macro_rules! from its sources
 
 (defn rel-path "A file of the copy of library/ as rustc's remapped path names it" [^String file]
-  (if-let [m (re-find #"/(?:lib|library)/((core|stdarch|portable-simd)/.*)$" file)] (str "library/" (second m)) file))
+  (if-let [m (re-find #"/(?:lib|library)/((core|alloc|stdarch|portable-simd)/.*)$" file)] (str "library/" (second m)) file))
 
 (defn- foreign-spans
   "A macro definition's tokens with their spans written as places in FILE ((span FILE l1 c1 l2 c2 0)): the expansion
@@ -222,9 +227,10 @@
                     Use (letfn [(abs [segs]
                                   (let [[f & r] segs]
                                     (case f
-                                      ("crate" "$crate") (into ["core"] r)
+                                      ("crate" "$crate") (into [*crate*] r)
                                       "self" (into (vec (str/split m #"::")) r)
                                       "super" (let [ps (str/split m #"::")] (abs (into (if (> (count ps) 1) ["crate"] ["crate"]) (concat (drop 1 (butlast ps)) r))))
+                                      ;; core's own path (core's `use core::..`), and alloc's (RIND9 (a): an extern crate's)
                                       ("core") (vec segs)
                                       ;; RFP52 (a): a uniform path's first name an item of the module (`use
                                       ;; unicode_data::alphabetic::lookup as Alphabetic`): core names no other crate
@@ -285,7 +291,7 @@
             (let [i (.lastIndexOf ^String p "::") mp (when (pos? i) (subs p 0 i)) nm (when (pos? i) (subs p (+ i 2)))
                   e (when mp (get m mp)) ck (:ctor (first (:variants a)))
                   has? (fn [ns] (some #(and (= ns (:ns %)) (= nm (:name %))) (:children e)))]
-              (if (or (nil? e) (not= "Struct" (:kind a)) (not (str/starts-with? p "core::")))
+              (if (or (nil? e) (not= "Struct" (:kind a)) (not (str/starts-with? p (str *crate* "::"))))
                 m
                 (assoc m mp (update e :children into
                                     (cond-> []
@@ -327,18 +333,34 @@
   helper writes them (`'^#N` an anonymous one, its bound variable's index after the named ones; `'^'a` a named one), not erased"
   nil)
 
+(def ^:dynamic *clause-binder*
+  "RIND9 (a): while a where clause is written, the count of its binder's named regions (`for<'a>`): its bound variables as
+  the helper writes them (`'^'a` a named one, `'^#N` an anonymous one, Fn sugar's elided `&T`, its index after the named
+  ones: `F: FnMut(&T, &T)`'s `'^#0`, `'^#1`), not erased"
+  nil)
+
+(def ^:dynamic *inner-depth*
+  "RIND9 (a): inside a type's own binder (a trait object's, a fn pointer's) its depth, 2 for the first: the binder's bound
+  variables as the helper writes them, one `^` a level (`Box<dyn Fn(&T)>`'s `'^^#0`); nil outside"
+  nil)
+
 (defn- region-name [r]
   (case (first r)
     :re-static "'static"
     :re-early (nth r 2)
-    :re-bound (cond (nil? *late-sig*) "'_"
+    :re-bound (cond (and *inner-depth* (nil? (second r)) (number? (nth r 2 nil)))
+                    (str "'" (apply str (repeat *inner-depth* "^")) "#" (dec (long (nth r 2))))
+                    (and *inner-depth* (= :for (nth r 2 nil)) (string? (second r))) (str "'" (apply str (repeat *inner-depth* "^")) (second r))
+                    (and *clause-binder* (nil? (second r)) (number? (nth r 2 nil))) (str "'^#" (+ (long *clause-binder*) (dec (long (nth r 2)))))
+                    (and *clause-binder* (= :for (nth r 2 nil)) (string? (second r))) (str "'^" (second r))
+                    (nil? *late-sig*) "'_"
                     (= :anon (nth r 2 nil)) (let [[n m] @*late-sig* id (nth r 3)]
                                               (str "'^#" (or (get m id) (let [k (+ (long n) (count m))] (swap! *late-sig* assoc-in [1 id] k) k))))
                     (and (= 2 (count r)) (string? (second r)) (not= "'_" (second r))) (str "'^" (second r))
                     :else "'_")
     "'_"))
 
-(declare ty->sty)
+(declare ty->sty clause->sty*)
 
 (defn- sig-sty
   "RF20: a function's inputs and output as the helper writes them, its late-bound regions bound ([INS OUT])"
@@ -364,11 +386,35 @@
               :array (list 'array (s (nth t 1)) (let [c (nth t 2)] (case (first c) :cval (second c) :cparam (list 'cparam (nth c 1) (nth c 2)) (throw (ex-info "const" {})))))
               :tuple (list 'tuple (mapv s (second t)))
               :proj (list 'projection (d (nth t 1)) (mapv s (nth t 2)))
-              :fnptr (list 'fnptr (mapv s (:inputs (second t))) (s (:output (second t))))
+              :fnptr (binding [*inner-depth* (inc (long (or *inner-depth* 1)))] (list 'fnptr (mapv s (:inputs (second t))) (s (:output (second t)))))
+              ;; RIND9 (a): a trait object as the helper writes it: (dyn (trait P ARGS) [(proj ITEM ARGS TERM)] [AUTOS] REGION),
+              ;; Self out of the arguments, the auto traits in rustc's order (Sync before Send), an anonymous region `'_`
+              :dyn (let [{:keys [principal projections autos]} (nth t 1) r (nth t 2)
+                         inner (binding [*inner-depth* (inc (long (or *inner-depth* 1)))]
+                                 [(when principal (list 'trait (d (first principal)) (mapv s (second principal))))
+                                  (vec (for [[ad args term] projections] (list 'proj (d ad) (mapv s args) (s term))))])]
+                     (list 'dyn (first inner) (second inner)
+                           (vec (sort-by (fn [p] [(get {"core::marker::Sync" 0 "core::marker::Send" 1} p 2) p]) (map d autos)))
+                           (if (and (= :re-bound (first r)) (= :anon (nth r 2 nil))) "'_" (region-name r))))
               (if (collect/region? t) (list 'lt (region-name t)) (throw (ex-info "kind" {})))))]
     (try (s t) (catch Throwable _ nil))))
 
+(defn- for-names
+  "RIND9 (a): the named regions a clause's `for<...>` binds ([:re-bound NAME :for]), distinct"
+  [c]
+  (let [acc (java.util.LinkedHashSet.)]
+    (letfn [(walk [x] (cond (and (vector? x) (= :re-bound (first x)) (= :for (nth x 2 nil))) (.add acc (second x))
+                            (or (vector? x) (seq? x)) (doseq [y x] (walk y))
+                            (map? x) (doseq [y (vals x)] (walk y))
+                            :else nil))]
+      (walk c))
+    (count acc)))
+
 (defn- clause->sty [c path-of]
+  (binding [*clause-binder* (for-names c)]
+    (clause->sty* c path-of)))
+
+(defn- clause->sty* [c path-of]
   (case (first c)
     :trait (let [[tr args] (second c) p (if (number? tr) (path-of tr) tr) as (mapv #(ty->sty % path-of) args)]
              (when (and p (every? some? as)) (list 'trait p as)))
@@ -376,28 +422,52 @@
     ;; the helper writes it: (proj ITEM [ARGS] TERM)
     :proj (let [[_ ad args term] c p (if (number? ad) (path-of ad) ad) as (mapv #(ty->sty % path-of) args) tt (ty->sty term path-of)]
             (when (and p (every? some? as) tt) (list 'proj p as tt)))
+    ;; RIND9 (a): `E: 'a` as the helper writes it; `'b: 'a` and a const parameter's type (ConstArgHasType) as its (other TEXT)
+    :type-outlives (when-let [t (ty->sty (second c) path-of)] (list 'type-outlives t (region-name (nth c 2))))
+    :region-outlives (list 'other (str (region-name (second c)) ": " (region-name (nth c 2))))
+    :const-has-type (list 'other (#'collect/print-clause c))
     nil))
 
-(defn- generics-sty [g]
-  (vec (for [p (:params g)]
-         (case (:kind p) :lifetime (list 'lifetime (:name p)) :const (list 'const (:name p)) (list 'type (:name p))))))
+(defn- generics-sty
+  ([g] (generics-sty g nil nil))
+  ;; round 52: with the definition, a type parameter's default as the helper writes it, (type "A" (adt "alloc::alloc::Global" []))
+  ([g id path-of]
+   (let [ds (if id (collect/param-defaults id) {})]
+     (vec (for [p (:params g)]
+            (case (:kind p)
+              :lifetime (list 'lifetime (:name p))
+              :const (list 'const (:name p))
+              (if-let [t (some-> (get ds (:name p)) (ty->sty path-of))] (list 'type (:name p) t) (list 'type (:name p)))))))))
 
 (defn native-iface
   "The module's functions and ADTs (not impls' items) as {:fns {path form} :adts {path form}}, those std's interface lacks"
   [path si]
   (let [lp @collect/*local-paths*
         rev (into {} (for [[p id] lp] [id p]))
-        path-of (fn [id] (get rev id))]
+        ;; RIND9 (a): a definition inside a body (local-paths names none) by its def path, as rustc's interface writes it:
+        ;; a body's impl `{impl#N}` among its parent's impls, under the function's own path
+        ;; (`alloc::slice::{impl#0}::to_vec_in::{impl#0}::to_vec::{impl#0}`, Drop for to_vec's `DropGuard`)
+        body-path (fn body-path [id]
+                    (or (get rev id)
+                        (let [d (collect/def-of id)]
+                          (case (first (:data d))
+                            :crate resolve/*crate-path*
+                            (:type :value) (some-> (body-path (:parent d)) (str "::" (second (:data d))))
+                            :impl (when (some? (:disamb d)) (some-> (body-path (:parent d)) (str "::{impl#" (:disamb d) "}")))
+                            nil))))
+        ;; a body's ADT named by its def path (an impl's self type); its traits, functions and the ADT's own fact not
+        path-of (fn [id] (or (get rev id)
+                             (when (and (number? id) (#{"Struct" "Enum" "Union"} (:kind (collect/def-of id)))) (body-path id))))]
     (reduce
      (fn [acc d]
-       (let [p (path-of (:id d))]
+       (let [p (get rev (:id d))]
          (try
            (cond
              ;; RFP52 (a): an impl the interface lacks (an inherent impl of crate-private methods: `IndexRange`'s `start`,
              ;; a crate-private type's trait impl: `NeverShortCircuit`'s Try), its items and its functions' signatures, at
              ;; its `{impl#N}` path in its module
              (and (str/starts-with? (str (:kind d)) "Impl") (some? (:disamb d)))
-             (let [mp (or (path-of (:parent d)) (when (zero? (long (:parent d))) resolve/*crate-path*))
+             (let [mp (body-path (:parent d))
                    ip (str mp "::{impl#" (:disamb d) "}")]
                (if (or (nil? mp) (get (:impls si) ip))
                  acc
@@ -420,11 +490,11 @@
                                        {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
                                         :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                        :abi "\"Rust\"" :const (= :const (get-in (:node k) [:header :constness])) :promotable false
+                                        :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d)))) :promotable false
                                         :nounwind false :native true}]))]
                    (if (and self (or (nil? tr) trs))
                      (-> acc
-                         (assoc-in [:impls ip] {:trait trs :negative false :self self :generics (generics-sty g) :parent-count 0
+                         (assoc-in [:impls ip] {:trait trs :negative (boolean (get-in (:node d) [:of-trait :negative])) :self self :generics (generics-sty g) :parent-count 0
                                                 :has-self false :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))
                                                 :items items :native true})
                          (update :fns merge fns))
@@ -466,7 +536,7 @@
                                       :fields (field-tys (:id v) (:data (:node v)))}))
                               [{:name (:ident n) :path p :ctor (case (:kind (:data n)) :tuple "Fn" :unit "Const" nil) :fields (field-tys (:id d) (:data n))}])]
                (if (every? (fn [v] (every? (comp some? second) (:fields v))) variants)
-                 (assoc-in acc [:adts p] (cond-> {:kind (:kind d) :generics (generics-sty g) :parent-count 0 :has-self false :variants variants :native true}
+                 (assoc-in acc [:adts p] (cond-> {:kind (:kind d) :generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self false :variants variants :native true}
                                            (= "Enum" (:kind d)) (assoc :repr nil :discrs (vec (range (count variants))))))
                  acc))
              ;; a trait's associated constants' types (std's interface writes none: `SizedTypeProperties::ALIGN`)
@@ -482,7 +552,12 @@
                    kids (filter #(and (= (:id d) (:parent %)) (#{"AssocFn" "AssocTy"} (:kind %)) ) (collect/defs))
                    kids (concat kids (filter #(and (= (:id d) (:parent %)) (str/starts-with? (str (:kind %)) "AssocConst")) (collect/defs)))
                    items (vec (for [k kids] (let [n (second (:data k)) kp (str p "::" n)]
-                                              (if (= "AssocTy" (:kind k)) [n "AssocTy" kp []] [n (:kind k) kp]))))
+                                              ;; RIND9 (a): an associated type's bounds as the helper writes them (explicit_item_bounds:
+                                              ;; the implicit Sized or ?Sized's MetaSized, the written bounds, the trait's where clauses
+                                              ;; on it; `ToOwned::Owned`'s Sized and Borrow<Self>), self the item's projection
+                                              (if (= "AssocTy" (:kind k))
+                                                [n "AssocTy" kp (vec (keep #(clause->sty % path-of) (collect/item-bounds (:id k))))]
+                                                [n (:kind k) kp]))))
                    fns (into {} (for [k kids :when (= "AssocFn" (:kind k))
                                       :let [kg (collect/generics-of (:id k)) sig (collect/fn-sig (:id k))
                                             [ins out] (sig-sty (:id k) sig path-of)]
@@ -491,9 +566,9 @@
                                    {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self true
                                     :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                     :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                    :abi "\"Rust\"" :const false :promotable false :nounwind false :native true}]))]
+                                    :abi (str "\"" (or (:abi sig) "Rust") "\"") :const false :promotable false :nounwind false :native true}]))]
                (-> acc
-                   (assoc-in [:traits p] {:generics (generics-sty g) :parent-count 0 :has-self true
+                   (assoc-in [:traits p] {:generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self true
                                           :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))
                                           :items items :native true})
                    (update :fns merge fns)
@@ -535,7 +610,7 @@
 
 (declare body-key)
 
-(defn- rel-module [^String p] (if (= p "core") "" (str (subs p 6) "::")))
+(defn- rel-module [^String p] (if (= p *crate*) "" (str (subs p (+ 2 (count *crate*))) "::")))
 
 (defn- stage [stages k f]
   (try (let [t0 (System/nanoTime) v (f)]
@@ -572,7 +647,9 @@
                            #(binding [ex/*mark-crates* mc ex/*sites* sites]
                               (ex/expand-file file 2024 (merge (ex/load-std-macros std-file) (macros-for table file)))))
               vtext (ex/virtual-text)
-              res (stage stages :resolve #(binding [resolve/*def-sites* (into {} (for [[k v] @mc :when (and (vector? k) (= :def-site (first k)))] [(second k) v]))]
+              res (stage stages :resolve #(binding [resolve/*def-sites* (into {} (for [[k v] @mc :when (and (vector? k) (= :def-site (first k)))] [(second k) v]))
+                                                    ;; RIND9 (a): a macro's `$crate` by its crate (alloc's: core's macros name core)
+                                                    resolve/*mark-crates* @mc]
                                             (resolve/resolve-crate crate names {:source vtext})))
               res-map (into {} (for [[_ s rs] res] [s rs]))
               _ (when-let [d (System/getenv "CORE_DUMP")]
@@ -638,7 +715,7 @@
                    :impl (recur (collect/def-of (:parent d)) (cons (str "{impl#" (:disamb d) "}") acc))
                    :closure (recur (collect/def-of (:parent d)) (cons (str "{closure#" (:disamb d) "}") acc))
                    (recur (collect/def-of (:parent d)) acc))))]
-    (str/join "-" (concat (when (not= path "core") (rest (str/split path #"::"))) segs))))
+    (str/join "-" (concat (when (not= path *crate*) (rest (str/split path #"::"))) segs))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; RF12-P6: a native core body for a program's run (CORE_EXPORT): its runtime MIR (the 21 passes) with every local definition

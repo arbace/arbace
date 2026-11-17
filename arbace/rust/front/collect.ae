@@ -558,7 +558,19 @@
                                                      (and (zero? i) (:has-self m) (= "Self" nm)) (assoc :self true)))
                                (:generics m)))}
   (if (and (#{"AssocTy" "AssocFn" "AssocConst { is_type_const: false }"} (ext-kind p)) (= "Trait" (ext-kind (path-parent p))))
-    {:parent-count (count (get (:generics *std*) (path-parent p))) :params [] :has-parent true}
+    (let [pc (count (get (:generics *std*) (path-parent p)))
+          ;; round 52: a generic associated type's own parameters (`Pattern::Searcher<'a>`), read off its bounds in std's
+          ;; interface: the item's projection over the trait's identity arguments, then its own
+          own (when (= "AssocTy" (ext-kind p))
+                (let [bs (some (fn [it] (when (and (vector? it) (= p (nth it 2 nil))) (nth it 3 nil))) (:items (get (:traits *si*) (path-parent p))))
+                      pr (when (sequential? bs)
+                           (first (filter (fn [x] (and (seq? x) (= 'projection (first x)) (= p (second x))))
+                                          (tree-seq (fn [x] (or (seq? x) (vector? x))) seq bs))))]
+                  (when pr (drop pc (nth pr 2)))))]
+      {:parent-count pc :has-parent true
+       :params (vec (map-indexed (fn [i a] {:name (if (= 'lt (first a)) (second a) (nth a 2))
+                                             :kind (case (first a) lt :lifetime cparam :const :type) :index (+ pc i)})
+                                 own))})
   (let [ps (or (get (:generics *std*) p)
                ;; RF10: a lang item ADT no public module reaches (std's names lack it): its interface's generics
                (:generics (get (:adts *si*) p)))]
@@ -655,8 +667,8 @@
     (cond
       ;; RF12: building one of core's modules, `crate::` (`$crate::`, a root's `super::`) names core: the path as std's, the
       ;; root file's own definitions local
-      (and cp (#{"crate" "$crate"} f)) (let [p (std-path-def (into ["core"] more))] (when p [:ext p]))
-      (and cp (= "super" f) (= 0 (or module 0)) (not= cp "core"))
+      (and cp (#{"crate" "$crate"} f)) (let [p (std-path-def (into [(resolve/crate-root)] more))] (when p [:ext p]))
+      (and cp (= "super" f) (= 0 (or module 0)) (not= cp (resolve/crate-root)))
       (let [p (std-path-def (into (vec (str/split (subs cp 0 (.lastIndexOf ^String cp "::")) #"::")) more))] (when p [:ext p]))
       :else
     (case f
@@ -678,7 +690,12 @@
         ;; RIND5: a macro's `use $crate::..` (simd_swizzle!'s block): the macro's crate, the use's :krate (else core)
         (some (fn [u] (when (and (= :single (:use u)) (= nm (:ident u)))
                         (let [names (mapv :ident (:path u))]
-                          (resolve-written (if (and (= "$crate" (first names)) (nil? resolve/*crate-path*)) (assoc names 0 (or (:krate u) "core")) names) module))))
+                          (resolve-written (cond (not= "$crate" (first names)) names
+                                                 (nil? resolve/*crate-path*) (assoc names 0 (or (:krate u) "core"))
+                                                 ;; RIND9 (a): building alloc, a core macro's `use $crate::..` names core
+                                                 (contains? (get resolve/crate-deps (resolve/crate-root)) (:krate u)) (assoc names 0 (:krate u))
+                                                 :else names)
+                                           module))))
               (:uses d))
         (some (fn [u] (when (= :glob (:use u))
                         (let [m (resolve-written (mapv :ident (:path u)) module)]
@@ -1110,11 +1127,18 @@
               found (assoc-in-trait tr "Output")]
           (with-meta tr {:constraints (if found [[(first found) (second found) out]] [])}))
         (let [args (lower-generic-args d ga self-ty)
-              tr [d args]]
-          (with-meta tr {:constraints (vec (for [c (:constraints ga) :when (:eq (:kind c))
-                                                 :let [found (assoc-in-trait tr (:ident c))]
-                                                 :when found]
-                                             [(first found) (second found) (lower-ty (:eq (:kind c)))]))}))))))
+              tr [d args]
+              cs (vec (for [c (:constraints ga) :let [found (assoc-in-trait tr (:ident c))] :when found] [c found]))]
+          (with-meta tr {:constraints (vec (for [[c found] cs :when (:eq (:kind c))]
+                                             [(first found) (second found) (lower-ty (:eq (:kind c)))]))
+                         ;; RIND9 (a): lower_assoc_item_constraint's clauses in the constraints' order: an equality's projection,
+                         ;; an associated-type bound's (`ToOwned<Owned: Debug>`) bounds with the projection as their self type
+                         ;; (lower_bounds: no implicit sizedness)
+                         :clauses (vec (mapcat (fn [[c found]]
+                                                 (cond (:eq (:kind c)) [[:proj (first found) (second found) (lower-ty (:eq (:kind c)))]]
+                                                       (seq (:bounds (:kind c))) (lower-bounds [:proj (first found) (second found)] (:bounds (:kind c)))
+                                                       :else []))
+                                               cs))}))))))
 
 (defn- trait-assoc-ty
   "A trait's associated type named NM: its definition, or nil"
@@ -1205,9 +1229,9 @@
   "RF12: building core, its own definitions of other files (std's interface paths `core::...`) are the local crate's: no
   visible path, the default path from the crate's root, which prints nothing"
   [p]
-  (and resolve/*crate-path* (string? p) (or (= p "core") (str/starts-with? p "core::"))))
+  (and resolve/*crate-path* (string? p) (let [r (resolve/crate-root)] (or (= p r) (str/starts-with? p (str r "::"))))))
 
-(defn- root-print [] (if-let [cp resolve/*crate-path*] (if (= cp "core") "" (subs cp 6)) ""))
+(defn- root-print [] (if-let [cp resolve/*crate-path*] (let [r (resolve/crate-root)] (if (= cp r) "" (subs cp (+ 2 (count r))))) ""))
 
 (defn- visible-path
   "try_print_visible_def_path for another crate's definition, or nil"
@@ -1560,6 +1584,15 @@
           (let [self-ty (binding [*self-ty* nil] (lower-ty (:self-ty n)))]
             [self-ty (when-let [ot (:of-trait n)] (binding [*self-ty* self-ty] (lower-trait-ref (:path ot) self-ty)))]))))))
 
+(defn param-defaults
+  "round 52: a definition's own type parameters' defaults as types ({NAME TY}; `Box<T, A = Global>`'s A), as type_of writes
+  them in generics_of"
+  [id]
+  (let [g (generics-of id)]
+    (into {} (for [p (:params g) :when (and (:default p) (not= :const (:kind p)))
+                   :let [t (try (in-def id (lower-ty (:default p))) (catch Throwable _ nil))] :when t]
+               [(:name p) t]))))
+
 (def ^:dynamic *impl-cache* nil)
 (defn impl-header [id] (or (get @*impl-cache* id) (let [h (impl-header* id)] (swap! *impl-cache* assoc id h) h)))
 
@@ -1585,7 +1618,9 @@
               inputs (vec (for [p (:params f)] (lower-ty (:ty p))))
               ;; RF9b: lifetime elision (resolve_fn_signature): the output's elided lifetimes are the reference
               ;; receiver's, else the inputs' one lifetime position's
-              rs (input-regions inputs)
+              ;; round 52: a by-value `self` (its type the implicit Self) has no elision candidates (resolve_fn_params:
+              ;; find_lifetime_for_self empty), though Self may stand for a reference (`impl Pattern for &'b String`)
+              rs (input-regions (if (#{:imm :mut} (:self f)) (vec (rest inputs)) inputs))
               fixed (cond (and (#{:ref-imm :ref-mut} (:self f)) (= :ref (first (first inputs)))) (second (first inputs))
                           (= 1 (count rs)) (first rs)
                           :else nil)]
@@ -1689,7 +1724,8 @@
                      (cond (nil? tr) [[:err (str "bound " (pr-str (mapv :ident (:segs (:trait b)))))]]
                            (= 'Maybe (head (:polarity b))) []
                            (= (first tr) (lang "pointee_sized")) []
-                           :else (into [[:trait tr]] (for [[ad args term] (:constraints (meta tr))] [:proj ad args term]))))
+                           :else (into [[:trait tr]] (or (:clauses (meta tr))
+                                                         (for [[ad args term] (:constraints (meta tr))] [:proj ad args term])))))
                    :else []))
                ;; lower_poly_trait_ref: a Sized bound goes to the front of its predicate's bounds
                (let [sized (lang "sized")

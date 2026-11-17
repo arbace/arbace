@@ -10548,3 +10548,51 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   another the `:rustc` host absent, then a pinned 1.99.1 outside apk for the oracle tier (a fetch); (b) re-pin to 1.100.0 (weeks).
 - Checks (each under 1 GiB): `bin/crops-score --self-test` ok, `--judge --strict` exit 0 (972 MB), `bin/reap` 0 problems,
   `bin/records-check` 0 problems.
+
+## 2026-11-17: RIND9 (a): alloc's interface pass, written and proven light (branch `n-rust-alloc`, from next `42bf8614b`)
+
+- The user approved RIND9 (a). `arbace.rust.front.alloc-check` (`bin/rust-front alloc-iface`) runs core-check's interface pass
+  (collect only) over alloc's 84 module files of rust-src 1.99.1's library/alloc, reading std's interface with every alloc fact
+  taken out, and writes alloc's facts in the helper's `--std-iface` shape, compared fact by fact with the helper's
+  `std-iface.edn` (equal, differing by keys, missing; native extras apart; a negative control). core-check, resolve and collect
+  generalized from core to the crate being built (`cc/*crate*`, `resolve/crate-root`, a dependency's macro's `$crate` by
+  `resolve/crate-deps`; core's own build unchanged by construction); lower keeps an impl's constness, native-iface writes a const
+  impl's functions `:const`.
+- Proven light (under 1 GiB, 0.93 GB peak): 22 pure unit cases, and borrow.rs alone 43 of 47 facts equal, alloc.rs 31 of 36 (18
+  before the constness fix), held to `test/rust/front/alloc-iface-units-known.txt`. The causes named: associated types' bounds,
+  associated-type bounds in where clauses, `derive_const`/`derive` impls on `Global` not written.
+- Not run: the whole pass (about 25 minutes, 2.3 GB), the day's `bin/rust-front alloc-iface`; core's `core-essential` and
+  `rind-test` to confirm core unchanged. Decisions RIND9a-1 to RIND9a-5 taken overnight (round 52), doc/rust/FRONTEND-SURVEY.md,
+  "As built: RIND9 (a), alloc's pass". Alternatives: keeping alloc's facts in the interface the pass reads (no proof: the answers
+  read back) and comparing only the facts the pass writes (a missing fact unseen), both set aside.
+
+## 2026-11-17: RIND9 (a): alloc's pass, its three causes fixed (branch `n-rust-alloc2`, from `n-rust-alloc` `0ad256435`)
+
+- Fixed in the code core's build shares (arbace/rust/front/): native-iface writes a trait's associated types' bounds
+  (`collect/item-bounds`, not `[]`); lower keeps an associated-type bound's bounds and collect's `lower-trait-ref` lowers them as
+  clauses on the projection (`:clauses` metadata, lower_assoc_item_constraint's order), so `B: ToOwned<Owned: Debug>` gives
+  `<B as ToOwned>::Owned: Debug`; expand_derive reads `#[derive_const]` beside `#[derive]` in order, its impls `const impl`.
+- Proven light (one process a module, 0.91 GB peak), against the helper's std-iface: borrow.rs 43 to 47 of 47 equal, alloc.rs 31
+  to 36 of 36, slice.rs 30 to 32 of 37 (left: Fn sugar's late-bound regions in where clauses, a nested impl in a body),
+  collections/mod.rs 29 of 29 and btree/set_val.rs 18 of 18 unchanged; unit cases 22 to 25 pure, and per module the causes'
+  facts by value with negatives; `test/rust/front/alloc-iface-units-known.txt` re-recorded over five modules.
+- core may move (derive_const in 12 core files, 6 of them among core-modules.txt; associated-type bounds in option,
+  convert/mod, ops/try_trait), none in core-essential's modules: the day runs core-essential, rind-test and core's check.
+  Decisions RIND9a-6, RIND9a-7 taken overnight (round 52), doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass:
+  its three causes fixed". Alternatives there.
+
+## 2026-11-18: RIND9 (a): alloc's pass, the compare module by module (branch `n-rust-alloc3`, from `n-rust-alloc2` `1a6ec44bf`)
+
+- slice.rs' two causes fixed (Fn sugar's late-bound regions in where clauses written in their binder, `'^#0`; an impl in a
+  body inside an impl's function written at its def path), then boxed/convert, string, boxed, rc, sync, fmt, vec_deque, raw_vec
+  and vec passed alone or in pairs (one process each, under 0.91 GB) against the helper's std-iface (rust-src 1.99.1), and their
+  causes fixed in arbace/rust/front/ (core_check's writer, collect, expand, expand_derive): trait objects, outlives and
+  ConstArgHasType clauses, cfg_attr's derive (string.rs did not expand), a std GAT's own parameters, by-value self's elision,
+  type parameter defaults, the `rust-call` ABI, negative impls, and tool-attributed items' DefId order (`#[rustfmt::skip]`:
+  rustc's attribute invocation), which renumbered vec's and raw_vec's impls.
+- Results: slice 32 to 37 of 37, boxed/convert 26 to 54 of 54, string 0 to 284 of 284, boxed 166 of 166, rc 274 of 274, sync
+  287 of 287, vec with raw_vec 168 of 168 (vec alone 12 of 164 before); unit cases 8 more pure and five more modules
+  (`alloc-iface-units.txt` ten), the known file re-recorded. Decisions RIND9a-8 to RIND9a-10 taken overnight (round 52),
+  doc/rust/FRONTEND-SURVEY.md, "As built: RIND9 (a), alloc's pass: the compare module by module", alternatives there.
+- core's native facts may move (const generics' clauses, trait objects, impl numbering in option.rs and result.rs): the day runs
+  core-essential, rind-test, core's check and the whole alloc pass.

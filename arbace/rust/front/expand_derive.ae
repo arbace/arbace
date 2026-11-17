@@ -7,17 +7,27 @@
 
 (declare replace-holder cfg-item)
 
+(def ^:private derive-attr?
+  "RIND9 (a): #[derive(...)] and #[derive_const(...)] (rustc_builtin_macros' derive::Expander, is_const), in their order"
+  #{"derive" "derive_const"})
+
 (defn- derive-names
-  "The traits of an item's #[derive(...)] attributes, in order (with derive-spans: [name span] pairs)"
+  "The traits of an item's #[derive(...)] and #[derive_const(...)] attributes, in order (with derive-spans: [name span]
+  pairs)"
   ([attrs] (mapv first (derive-names attrs true)))
   ([attrs _]
    (vec (mapcat (fn [a]
-                  (when (= "derive" (attr-name a))
+                  (when (derive-attr? (attr-name a))
                     (let [item (fget (second (fget a :kind)) :item)
                           toks (second (fget (second (fget item :args)) :tokens))]
                       (for [t toks :let [k (fget (second t) :kind)] :when (and (seq? k) (= 'Ident (first k)))]
                         [(second k) (fget (second t) :span)]))))
                 attrs))))
+
+(defn- const-derive-names
+  "RIND9 (a): the traits of an item's #[derive_const(...)] attributes: their impls are `const impl` (TraitDef's is_const)"
+  [attrs]
+  (set (derive-names (filter #(= "derive_const" (attr-name %)) attrs))))
 
 (defn- variant-shape
   "VariantData as [:named [[name ty]...]] [:tuple [ty...]] [:unit]"
@@ -82,7 +92,7 @@
 
 (defn- derive-text
   "One derive's impls as text, the fields' types as fragments (frags: an atom of N -> {:frag :ty :ast})"
-  [trait {:keys [kind name tparams ptoks gparams shape variants copy? ord? default-variant field-spans]} frags]
+  [trait {:keys [kind name tparams ptoks gparams shape variants copy? ord? default-variant field-spans const-traits]} frags]
   (let [fr (fn [ty] (let [n (count @frags)] (swap! frags assoc n {:frag :ty :ast ty}) (str "__rf_frag_" n)))
         ;; the type parameters' names are the item's own tokens (generic/mod.rs copies the parameters with their spans)
         tparams (map (fn [nm t] (if t (let [n (count @frags)] (swap! frags assoc n (titem t 0)) (str "__rf_frag_" n)) nm))
@@ -99,7 +109,7 @@
                                                         gparams)) ">")
                            ""))
         head (fn [attrs unsafe? path bound body]
-               (str "#[automatically_derived] " attrs (if unsafe? "unsafe " "") "impl" (gens bound) " " path " for " self-ty " {" body "}\n"))
+               (str "#[automatically_derived] " attrs (if (contains? const-traits trait) "const " "") (if unsafe? "unsafe " "") "impl" (gens bound) " " path " for " self-ty " {" body "}\n"))
         ;; RF13d: each assertion's field span recorded (assert_ty_bounds' span is field.span), put back by assert-spans
         asserts (fn [path fields-tys]
                   (let [seen (atom #{})]
@@ -392,8 +402,8 @@
                                      (some (fn [v] (when (some #(= "default" (attr-name %)) (fget v :attrs)) (second (fget v :ident))))
                                            (fget data :variants)))
                   :field-spans (if (= 'Struct kw) (field-spans-of data) (vec (mapcat #(field-spans-of (fget % :data)) (fget data :variants))))
-                  :copy? (some #{"Copy"} names) :ord? (some #{"Ord"} names)}
-            it' (fset it :attrs (vec (remove #(= "derive" (attr-name %)) attrs)))
+                  :copy? (some #{"Copy"} names) :ord? (some #{"Ord"} names) :const-traits (const-derive-names attrs)}
+            it' (fset it :attrs (vec (remove #(derive-attr? (attr-name %)) attrs)))
             spans (into {} (derive-names attrs true))
             derived (vec (mapcat (fn [trait]
                                    (let [tsp (get spans trait)
@@ -468,9 +478,15 @@
   "An attribute written as items (cfg_attr's): name, name = literal"
   [items a]
   (let [[n eq lit] items
-        args (if (punct-item? eq :Eq)
-               (list 'Eq :eq_span (items-span [eq]) :expr (parse-fragment [lit] :expr))
-               'Empty)]
+        args (cond (punct-item? eq :Eq)
+                   (list 'Eq :eq_span (items-span [eq]) :expr (parse-fragment [lit] :expr))
+                   ;; round 52: `cfg_attr(PRED, derive(Clone))` (string.rs' FromUtf8Error): the derive's list as delimited
+                   ;; arguments whose tokens are its names (what derive-names reads), each at its span
+                   (and (derive-attr? (tsym n)) (:g eq))
+                   (list 'Delimited (list 'DelimArgs :dspan (items-span [eq]) :delim 'Parenthesis
+                                          :tokens (list 'TokenStream (vec (for [x (:kids eq) :when (ident-item? x)]
+                                                                            (list 'Token (list 'Token :kind (list 'Ident (tsym x) false) :span (items-span [x])) 'Alone))))))
+                   :else 'Empty)]
     (list 'Attribute :kind (list 'Normal (list 'NormalAttr :item (list 'AttrItem :unsafety 'Default
                                                                          :path (list 'Path :span (items-span [n]) :segments [(list 'PathSegment :ident (list 'id (tsym n) 0) :args 'None)])
                                                                          :args args :span (items-span items))))

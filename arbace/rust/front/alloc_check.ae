@@ -1,0 +1,244 @@
+;; RIND9 (a) (doc/rust/FRONTEND-SURVEY.md, "RIND stage 4 (C3, C4)", "As built: RIND9 (a), alloc's pass"): alloc's interface
+;; built natively from its own sources (rust-src 1.99.1's library/alloc, pinned by tools/rsdump/apks.sha256), on the model of
+;; core-check's interface pass, and compared fact by fact with the helper's std-iface; rustc is dual-licensed MIT OR
+;; Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.alloc-check
+  "RIND9 (a): alloc's interface pass. Each module file of alloc read by the native reader, expanded (alloc's own
+  macro_rules! from its sources, core's and std's from std-names), resolved, lowered and collected (no body built), its
+  functions, ADTs, traits, impls and constants written by core-check's native-iface in the helper's --std-iface forms. The
+  pass reads std's interface with every alloc fact taken out (without-crate): what it writes of alloc is its own, read
+  back by the modules after it (and, ALLOC_IFACE_ROUNDS=2, by a second round over every module, each module's own facts
+  of the first round left out). The compare holds every alloc fact of the helper's std-iface to the native one: equal,
+  differing (the keys that differ), missing (the helper's, not written natively), and the native's extras (crate-private
+  items the helper does not write) counted apart; a negative control judges an equal fact against another path's.
+
+    bin/rust-front alloc-iface [FILE...]       the pass (every module file, or FILEs) then the compare (the day's proof)
+    bin/rust-front alloc-iface --list          alloc's module files
+    bin/rust-front alloc-iface --units         the unit cases (light: under 1 GiB)"
+  (:require [arbace.rust.front.core-check :as cc]
+            [arbace.rust.front.collect :as collect]
+            [arbace.rust.front.resolve :as resolve]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(def kinds
+  "The helper's std-iface kinds: the form's head and the load-std-iface key"
+  [['si/fn :fns] ['si/adt :adts] ['si/trait :traits] ['si/impl :impls] ['si/const :consts]])
+
+;; ---------------------------------------------------------------------------------------------
+;; A crate's facts
+
+(defn crate-path? [^String crate ^String p] (or (= p crate) (str/starts-with? p (str crate "::"))))
+
+(defn crate-facts
+  "The facts of std's interface (load-std-iface's map) whose path is CRATE's: {:fns {p m} :adts .. :traits .. :impls ..
+  :consts ..}"
+  [si crate]
+  (into {} (for [[_ k] kinds] [k (into {} (filter #(crate-path? crate (key %)) (get si k)))])))
+
+(defn without-crate
+  "std's interface with CRATE's facts taken out (its impls out of the selection indexes too): what the pass may read"
+  [si crate]
+  (let [gone? #(crate-path? crate %)
+        drop-ps (fn [ps] (vec (remove gone? ps)))]
+    (-> (reduce (fn [si [_ k]] (update si k #(into {} (remove (comp gone? key) %)))) si kinds)
+        (update :inherent #(into {} (for [[t ps] %] [t (drop-ps ps)])))
+        (update :trait-impls #(into {} (for [[t ps] %] [t (drop-ps ps)])))
+        (update :trait-impls-by #(into {} (for [[t by] %] [t (into {} (for [[x ps] by] [x (drop-ps ps)]))]))))))
+
+(defn owner
+  "The module file a path belongs to: the longest of MOD-PATHS that is the path or prefixes it at a `::`"
+  [mod-paths ^String p]
+  (reduce (fn [best ^String m]
+            (if (and (or (= p m) (str/starts-with? p (str m "::"))) (> (count m) (count (or best ""))))
+              m best))
+          nil mod-paths))
+
+(defn facts-of-modules
+  "FACTS (crate-facts' shape) restricted to the paths whose owner (among MOD-PATHS) is in MODS"
+  [facts mod-paths mods]
+  (let [ms (set mods)]
+    (into {} (for [[k m] facts] [k (into {} (filter #(ms (owner mod-paths (key %))) m))]))))
+
+(defn without-modules
+  "FACTS with the paths owned by MODS taken out (a second round's module rewrites its own)"
+  [facts mod-paths mods]
+  (let [ms (set mods)]
+    (into {} (for [[k m] facts] [k (if (map? m) (into {} (remove #(ms (owner mod-paths (key %))) m)) m)]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The helper's shape: one form a fact, its keys in the helper's order
+
+(def key-order
+  {:fns [:generics :parent-count :has-self :predicates :inputs :output :variadic :safety :abi :const :promotable :nounwind]
+   :adts [:kind :generics :parent-count :has-self :variants :repr :discrs]
+   :traits [:generics :parent-count :has-self :predicates :items]
+   :impls [:trait :negative :self :generics :parent-count :has-self :predicates :items]
+   :consts [:kind :ty :value]})
+
+(defn strip "A native fact as the helper's (the pass's own mark dropped)" [m] (dissoc m :native))
+
+(defn fact-form
+  "A fact as the helper's line: (si/fn \"PATH\" {..}), the map's keys in the helper's order"
+  [head k p m]
+  (let [m (strip m)
+        ks (concat (filter #(contains? m %) (key-order k)) (sort (remove (set (key-order k)) (keys m))))]
+    (str "(" head " " (pr-str p) " {" (str/join " " (for [x ks] (str (pr-str x) " " (pr-str (get m x))))) "})")))
+
+(defn facts-text "FACTS as the helper's std-iface lines, by kind then path" [facts]
+  (str/join "" (for [[head k] kinds [p m] (sort-by key (get facts k))] (str (fact-form head k p m) "\n"))))
+
+(defn read-facts "The facts of a file in the helper's shape (an std-iface, or the pass's output)" [^String f]
+  (let [si (collect/load-std-iface f)] (into {} (for [[_ k] kinds] [k (get si k {})]))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The compare, fact by fact
+
+(defn diff-keys "The keys whose values differ between the helper's fact H and the native N" [h n]
+  (let [n (strip n)] (vec (sort (filter #(not= (get h %) (get n %)) (distinct (concat (keys h) (keys n))))))))
+
+(defn compare-facts
+  "Every helper fact against the native one: {kind {:equal N :differs [[path keys]] :missing [path] :extra [path]}}"
+  [helper native]
+  (into (sorted-map)
+        (for [[_ k] kinds
+              :let [h (get helper k {}) n (get native k {})]]
+          [k (reduce (fn [acc [p hm]]
+                       (if-let [nm (get n p)]
+                         (let [d (diff-keys hm nm)]
+                           (if (empty? d) (update acc :equal inc) (update acc :differs conj [p d])))
+                         (update acc :missing conj p)))
+                     {:equal 0 :differs [] :missing [] :extra (vec (sort (remove #(contains? h %) (keys n))))}
+                     (sort-by key h))])))
+
+(defn control
+  "The negative control (GTS81 (a)): an equal fact judged against another path's helper fact of its kind, which must
+  differ; [path other differs?] or nil when no fact is equal"
+  [helper native]
+  (first (for [[_ k] kinds
+               :let [h (get helper k {}) n (get native k {})]
+               [p hm] (sort-by key h)
+               :let [nm (get n p)]
+               :when (and nm (empty? (diff-keys hm nm)))
+               :let [other (first (filter #(and (not= p (key %)) (not= hm (val %))) (sort-by key h)))]
+               :when other]
+           [p (key other) (boolean (seq (diff-keys (val other) nm)))])))
+
+(defn summary-lines
+  "The compare's lines: one a kind (helper facts, equal, differing, missing, native extras), then the total"
+  [cmp]
+  (let [line (fn [nm {:keys [equal differs missing extra]}]
+               (format "alloc-iface: %s %d facts: %d equal, %d differ, %d missing (native extras %d)"
+                       nm (+ equal (count differs) (count missing)) equal (count differs) (count missing) (count extra)))
+        tot (reduce (fn [a [_ v]] (merge-with (fn [x y] (if (number? x) (+ x y) (into x y))) a v)) {:equal 0 :differs [] :missing [] :extra []} cmp)]
+    (concat (for [[k v] cmp] (line (name k) v)) [(line "total" tot)])))
+
+(defn report-text
+  "The compare in full: the differing facts with their keys, by the keys' set (the causes first; with HELPER and NATIVE the
+  first fact's two values of those keys), then the missing ones"
+  [cmp & [helper native]]
+  (with-out-str
+    (doseq [l (summary-lines cmp)] (println l))
+    (doseq [[k {:keys [differs missing extra]}] cmp]
+      (println)
+      (println (str ";; " (name k) ": differing facts by the keys that differ"))
+      (doseq [[ks ps] (sort-by (comp - count val) (group-by second differs))]
+        (println (pr-str ks) (count ps) (pr-str (vec (take 5 (map first ps)))))
+        (when (and helper native)
+          (let [p (ffirst ps)]
+            (doseq [x ks]
+              (println "   helper" (pr-str x) (pr-str (get-in helper [k p x])))
+              (println "   native" (pr-str x) (pr-str (get (strip (get-in native [k p])) x)))))))
+      (println (str ";; " (name k) ": missing (" (count missing) ")"))
+      (doseq [p missing] (println " " p))
+      (println (str ";; " (name k) ": native extras (" (count extra) ")"))
+      (doseq [p extra] (println " " p)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The pass
+
+(defn crate-setup
+  "The pass's inputs over front-dir's std-names and std-iface, the crate's index (cached in CACHE-DIR/index.edn): {:std-file
+  :std :si (std's interface less the crate's facts) :helper (the crate's facts) :table :names}"
+  [crate front-dir cache-dir mods]
+  (let [std-file (str front-dir "/std-names.edn")
+        si-full (collect/load-std-iface (str front-dir "/std-iface.edn"))
+        index (let [cache (File. (str cache-dir "/index.edn"))]
+                (if (.exists cache)
+                  (read-string (slurp cache))
+                  (let [t (binding [cc/*crate* crate] (cc/crate-index (remove :vendored mods)))]
+                    (println "alloc-iface:" crate "'s index over" (count mods) "files:" (count (:macros t)) "macros," (count (:names t)) "modules")
+                    (.mkdirs (File. ^String cache-dir))
+                    (spit cache (pr-str t)) t)))
+        names (cc/with-core-names (resolve/load-std-names std-file) (:names index))
+        std (assoc (cc/with-core-kinds (collect/load-std std-file) (:names index)) :mods names)]
+    {:std-file std-file :std std :si (without-crate si-full crate) :helper (crate-facts si-full crate)
+     :table (:macros index) :names names}))
+
+(defn pass
+  "The interface pass over MODS (in order) for ROUNDS rounds: the native facts {:fns :adts :traits :impls :consts :aliases
+  :alias-generics}; each module's stages printed"
+  [crate lib-dir {:keys [std-file std si table names]} mods all-mod-paths rounds]
+  (let [native (atom {})]
+    (binding [cc/*crate* crate]
+      (dotimes [r rounds]
+        (let [t0 (System/nanoTime) prev @native]
+          (reset! native (if (zero? r) {} (without-modules prev all-mod-paths (map :path mods))))
+          (doseq [m mods]
+            (let [t1 (System/nanoTime)
+                  ;; a later round: the other modules' facts of the round before, this module's own written again
+                  seen (if (zero? r) @native (merge-with merge (without-modules prev all-mod-paths [(:path m)]) @native))
+                  {stages :stages nat :native}
+                  (binding [cc/*collect-only* true]
+                    (cc/run-module m table (cc/with-native-names names seen) std-file (cc/with-native-std std seen)
+                                   (cc/with-native-iface si seen) lib-dir identity))]
+              (when nat (swap! native #(merge-with merge % nat)))
+              (println (format "alloc-iface: round %d %s stages %s: %d fns, %d ADTs, %d traits, %d impls (%d s)" (inc r) (:path m) (pr-str stages)
+                               (count (:fns nat)) (count (:adts nat)) (count (:traits nat)) (count (:impls nat)) (quot (- (System/nanoTime) t1) 1000000000)))
+              (flush)))
+          (println (format "alloc-iface: round %d over %d files: %d functions, %d ADTs, %d traits, %d impls, %d consts (%d s)" (inc r) (count mods)
+                           (count (:fns @native)) (count (:adts @native)) (count (:traits @native)) (count (:impls @native)) (count (:consts @native))
+                           (quot (- (System/nanoTime) t0) 1000000000))))))
+    @native))
+
+(defn read-modules "core-check --list's lines as module maps" [^String f]
+  (vec (for [l (str/split-lines (slurp f)) :when (seq (str/trim l)) :let [[p fl v] (str/split l #" ")]]
+         {:path p :file fl :vendored (= v "vendored")})))
+
+(defn -main [cmd & args]
+  (binding [cc/*crate* "alloc"]
+    (case cmd
+      ;; --list LIB: alloc's module files (core-check --list's lines)
+      "--list" (doseq [m (cc/module-files (first args))] (println (:path m) (:file m) (if (:vendored m) "vendored" "")))
+      ;; --pass LIB FRONT CACHE MODULES OUT [FILE...]: the pass (ALLOC_IFACE_ROUNDS, default 1) into OUT (the helper's
+      ;; shape), then the compare with the helper's facts of the modules passed into OUT.report, its summary printed
+      "--pass"
+      (let [[lib front cache modules-file out & files] args
+            mods (read-modules modules-file)
+            by-file (into {} (for [m mods] [(:file m) m]))
+            sel (if (seq files)
+                  (vec (for [f files :let [m (get by-file (.getCanonicalPath (File. ^String f)))]] (or m (throw (ex-info (str "not a module file of alloc: " f) {})))))
+                  mods)
+            setup (crate-setup "alloc" front cache mods)
+            rounds (Long/parseLong (or (System/getenv "ALLOC_IFACE_ROUNDS") "1"))
+            mod-paths (map :path mods)
+            native (pass "alloc" lib setup sel mod-paths rounds)
+            facts (crate-facts native "alloc")
+            helper (facts-of-modules (:helper setup) mod-paths (map :path sel))
+            cmp (compare-facts helper facts)]
+        (spit out (facts-text facts))
+        (spit (str out ".report") (report-text cmp helper facts))
+        (doseq [l (summary-lines cmp)] (println l))
+        (when-let [[p o d] (control helper facts)]
+          (println "alloc-iface: control (" p "against" o "):" (if d "differs, as it must" "PASSED (a bug)")))
+        (println "alloc-iface: wrote" out "and" (str out ".report")))
+      ;; --compare FRONT NATIVE [MODULES]: the compare of a pass's output alone
+      "--compare"
+      (let [[front nat modules-file] args
+            helper (crate-facts (collect/load-std-iface (str front "/std-iface.edn")) "alloc")
+            facts (read-facts nat)
+            cmp (compare-facts helper facts)]
+        (spit (str nat ".report") (report-text cmp helper facts))
+        (doseq [l (summary-lines cmp)] (println l))))
+    (System/exit 0)))
