@@ -1083,6 +1083,18 @@
     (do (note! :conv/float-promotion) (list 'unchecked-float (:f x)))
     (:f x)))
 
+(defn- long-compare-operand
+  "Operand result `x` of a comparison on long (parameter type `p`) whose other operand is `y`: an int operand
+  compared with a long literal widened explicitly ((long x)), since the literal's form is the same integer
+  as an int literal's and the printed Java would compare ints (pos[0] != 0L, RP3 (a), the user 2026-11-17:
+  t03434); otherwise coerced as an assignment context converts it."
+  [env x y p]
+  (let [int-t? (fn [r] (and (m/type? (:t r)) (prim? (:t r)) (#{"INT" "SHORT" "BYTE" "CHAR"} (tag-name (:t r)))))
+        long-lit? (fn [r] (and (integer? (:f r)) (m/type? (:t r)) (prim? (:t r)) (= "LONG" (tag-name (:t r)))))]
+    (if (and (= "LONG" (tag-name p)) (int-t? x) (long-lit? y))
+      (do (note! :conv/long-compare-widening) (coerce env x p true))
+      (coerce env x p))))
+
 (defn- logic-form
   "Java's non-short-circuit boolean & | ^ over results `a` and `b`."
   [env tg a b]
@@ -1110,8 +1122,8 @@
       (logic-form env tg (assoc a :f (test-form env a)) (assoc b :f (test-form env b)))
       (#{"EQ" "NE"} tg)
       (let [refs? (not (prim? pa))
-            af (if refs? (:f a) (coerce env a pa))
-            bf (if refs? (:f b) (coerce env b pb))
+            af (if refs? (:f a) (long-compare-operand env a b pa))
+            bf (if refs? (:f b) (long-compare-operand env b a pb))
             float? (= "FLOAT" (tag-name pa))
             af (if float? (float-compare-operand env a) af)
             bf (if float? (float-compare-operand env b) bf)
@@ -1127,8 +1139,8 @@
       (cmp-ops tg)
       (let [float? (= "FLOAT" (tag-name pa))]
         (list (cmp-ops tg)
-              (if float? (float-compare-operand env a) (coerce env a pa))
-              (if float? (float-compare-operand env b) (coerce env b pb))))
+              (if float? (float-compare-operand env a) (long-compare-operand env a b pa))
+              (if float? (float-compare-operand env b) (long-compare-operand env b a pb))))
       :else
       (let [shift? (#{"SL" "SR" "USR"} tg)
             sym (op-sym tg (if shift? pa result))]
@@ -1924,6 +1936,12 @@
       (and (not var?) (m/tvar? decl)) (type-form env decl)
       :else nil))))
 
+(defn- unboxed-of
+  "The primitive a reference result `x` unboxes to: its own type's, else javac's type's (a generic result,
+  Iterator<Integer>'s next())."
+  [x]
+  (or (m/unboxed (:t x)) (some-> (:jtree x) (attr/type-of :types/expr) erasure m/unboxed)))
+
 (defn- binding-for
   "[sym-form init-form env'] for local declaration `d` (with `init` result or nil). In a
   loop binding (`loop?`) a primitive type other than long, double or boolean is always tagged,
@@ -1944,6 +1962,11 @@
                        (let [u (m/unboxed decl)
                              p (if (= :lit-int (:t init)) (int-type) (:t init))]
                          (m/boxed (if (and u (#{"BYTE" "SHORT" "CHAR"} (tag-name u))) u p)))
+                       ;; a box unboxed into a wider primitive (float i = it.next() of an Iterator<Integer>,
+                       ;; RP3 (a), the user 2026-11-17): the unboxed value's type is the box's, so the local is
+                       ;; tagged with its declared type (t06032: it was read untagged, an int)
+                       (and (prim? decl) (m/type? (:t init)) (not (prim? (:t init))) (unboxed-of init))
+                       (unboxed-of init)
                        :else decl)
                  nil)
         tg (or (local-tag env d init-t)

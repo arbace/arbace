@@ -10361,3 +10361,15 @@ update`, which must precede the essential `j2g-edge` step); AT10, j2g translates
 the receiver's declares as Object's empty body (`jrt.NN` of the receiver; t06387). Each with a bin/j2g-unit test and controls (pass on
 `31f89bf86be7dac52b3d`). Alternatives: AT9 (b) java-check's compiled level over the platform's declarations (changes refusals into run-time
 stubs); AT10 (b) a Finalize__V on every translated struct (jrt and every class's code grow for one test).
+
+## 2026-11-17: RP3 (a), two of the converter's type losses fixed (branch `h-java-readprint`)
+
+arbace/repr/java/convert.ae: an int operand compared with a long literal is widened explicitly, `(== (long x) 0)` (the
+literal's form being an int literal's, the printed Java compared ints: t03434's `pos[0] != 0L`); a box unboxed into a wider
+primitive local keeps the local's declared type as its tag (`float i = it.next()` of an Iterator<Integer>, t06032, was an
+int). Proved on javac's tool at hand (it loads the changed converter from the checkout): both tests pass read, print (class
+files equal) and interp; repr/java's check as expected but the baseline's two ASM files (`bits == 0L`), their hashes updated;
+the samples' and baseline's round trips as known. The jdk corpora, jdk/ and jdk/javac/ forms and the essential forms wait for
+the night (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-readprint"). Alternatives considered: the literal written
+`(long 0)` (a cast of a constant javac folds; the widened operand is what javac's Lower compares); the printer writing every
+literal of a long comparison as long (it cannot tell a long literal from an int one in the forms).
