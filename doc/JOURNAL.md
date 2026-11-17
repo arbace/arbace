@@ -9883,3 +9883,12 @@ a source digest embedded at build time (only after the next re-seed, and a gate_
 change in RT.load or GoInterp.loadTable (compiled into stage 0: inert until a re-seed). Keys: gate_key moves (arbace/go/repl.ae,
 arbace/python.ae, arbace/python/run.ae are embedded sources); Python's steps' keys (:python's bin/pyi and arbace/python) and
 the goi steps keyed by arbace/go move.
+
+## 2026-11-17: the print level's by-design kinds RP1 (a), RP2 (a) (branch `h-java-readprint`, after next `cc5766d95`)
+
+The user's round 51: the converter's dropped pure qualifier of a static member, a String compound assignment written out and
+a static member named through its inheriting class are by-design class-file kinds (test/java/print.ae's counted-kinds,
+class-kinds; test/java/divergences.edn's :print-classes pattern). 20 rows re-recorded alone: Java print 3,236 / 29 / 60 →
+3,256 / 29 / 40. A conditional branch's sense beside another kind's instructions now counts as control flow too (t06347).
+Alternatives considered: one kind "the converter's shapes" for the three (less precise for a later audit); the converter keeping
+the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of meaning).
