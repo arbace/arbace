@@ -9622,3 +9622,10 @@ runner, which ccorpus2 does not carry); fixing the 4 mutants whose expectation t
   cases (gains nothing), keeping `shim.ll`; byte equality of the text (repr/llvm's print drops the comments, so the forms and the
   lowered C are the level).
 - Not run: the whole `bin/rsi check` (8 GiB declared; its runs unchanged by construction). Crop paths only: no key moves.
+
+## 2026-11-17: RIND3 (a), `rsi-shim-essential` (branch `h-rust-indep`, after next `e5aac8bbe`)
+
+- The user decided RIND1-RIND7 (a) (round 51: the inputs cheapest first, the emulated rustc's identity an own constant). Added the
+  crops-tier step `rsi-shim-essential` (`bin/rsi shim-check`, 1 GiB, Rust's essential chain, its own crossed control as the
+  waiver's reason) to `test/gate/steps.edn`; gate.crops check, crops-test, crop-tier-test pass and the plan runs it. Alternative: a
+  `--full` step (it is seconds: the essential tier's crop rule fits it).

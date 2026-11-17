@@ -3948,3 +3948,12 @@ cheap inputs first so that each later stage is the only thing left between a cas
 - Keys: `arbace/rust/` and `bin/lib/rsi/` are crop paths (`arbace_crop_paths`): no gate key moves; `bin/rsi` and the Makefile are
   in Rust's steps' inputs. The main host: the night's `rsi-check` (weekly) and `rsi-essential` run on the own shim; RIND3's step to
   add; stage 2's runtime-ci rebuild (RIND4) a night.
+
+## As built: RIND3 (a), the shim's step (2026-11-17)
+
+The user decided RIND1-RIND7 (a) on 2026-11-17 (round 51). `rsi-shim-essential` (`bin/rsi shim-check`, `:mem-gib 1`, the crops tier's
+`rust-essential` chain after `rust-read-essential`, `:essential-when-changed :rust`; inputs `:lib-tools :tools :rust :c`, the lowered
+C printed by repr/c) in `test/gate/steps.edn`, among the crop's steps, its control the check's own crossed pair (a waiver naming it:
+a control that passes fails the check). `gate.crops check` 0 problems, `test/gate/crops-test.bash` ok, `test/gate/crop-tier-test.bash`
+20 of 20, `bin/gate --plan`: the step runs (never passed), simulated at 0:00 (unmeasured). Its load closure for
+`test/gate/loads.edn` is the main host's (`bin/gate --loads-update`) with its first audited run.
