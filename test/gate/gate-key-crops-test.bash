@@ -12,6 +12,11 @@
 # bin/lib/javac-key.bash's arbace_javac_key leave out the crops' Go forms too (go/arbace/{oi,scm,scminterp,py,libm}),
 # run for real (sha256sum) on the fabricated checkout: a change under each moves neither key, a change to jrt's, ci's
 # or cinterp's Go forms moves both; the audit's :javac host names the same exclusions.
+# W2 (doc/W-WINDOW.md, the keys at W2): repr/scheme, arbace/scheme, repr/cpp, repr/llvm, arbace/cpp, repr/python and arbace/python
+# embedded, and the Go forms oi, scm, scminterp, py and libm copied into the program and javac's tool: all of them hashed by gate_key
+# and the javac key (the audit's :gate and :javac name none of them), the Go forms left out of arbace_runtime_key alone
+# (arbace_runtime_not, W-P3 (a)); C++'s oracle check tools (ncheck, tcheck, mutate; W-P4 (a)), rsi's and llvmi's tools (W-P5 (a),
+# W-D4 (a)), repr/ocaml (W-D5 (a)) and oicapi, hs, expat, pyexpat and pyi's lazy modules (W-P6 (a)) stay out of every key.
 # By hand: test/gate/gate-key-crops-test.bash [ARBACE_GO [VERSION_BASH [AUDIT_AE [JAVAC_KEY_BASH]]]]   (older copies to test)
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
@@ -26,17 +31,26 @@ ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fails=$((fails + 1)); }
 for f in gate_key gate_rest_key; do sed -n "/^$f() {/,/^}/p" "$ago"; done > "$d/fns.bash"
 sed -n '/^arbace_embedded_sources() {/,/^}/p' "$ver" >> "$d/fns.bash"
+sed -n '/^arbace_embedded_resources() {/,/^}/p' "$ver" >> "$d/fns.bash"
 grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources() {' "$d/fns.bash" \
-  || { echo "FAIL: gate_key, gate_rest_key or arbace_embedded_sources not found"; exit 1; }
+  && grep -q '^arbace_embedded_resources() {' "$d/fns.bash" \
+  || { echo "FAIL: gate_key, gate_rest_key, arbace_embedded_sources or arbace_embedded_resources not found"; exit 1; }
 
-excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/crops/c2j-check bin/lib/hsi/check
-go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/libm.ae go/arbace/libm/libm.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
-arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/cpp/lower.ae
-arbace/repr/ocaml.ae arbace/repr/scheme.ae arbace/scheme/aot.ae arbace/repr/python.ae arbace/repr/python/print.ae
-arbace/python.ae arbace/python/scope.ae go/arbace/py.ae go/arbace/py/frame.ae
-go/arbace/x86i.ae go/arbace/x86i/cpu.ae go/arbace/emu.ae go/arbace/emu/as.ae go/arbace/a64i.ae go/arbace/a64i/exec.ae"
+excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/crops/c2j-check bin/lib/hsi/check bin/lib/si/x bin/lib/pyi/x
+go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae go/arbace/pyctypes.ae go/arbace/pyctypes/x.ae
+jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
+arbace/repr/cpp/ncheck.ae arbace/repr/cpp/tcheck.ae arbace/repr/llvm/mutate.ae arbace/rust.ae arbace/rust/x.ae arbace/llvm/run.ae
+arbace/repr/ocaml.ae arbace/repr/ocaml/print.ae arbace/repr/haskell.ae arbace/repr/rust/x.ae
+go/arbace/x86i.ae go/arbace/x86i/cpu.ae go/arbace/emu.ae go/arbace/emu/as.ae go/arbace/a64i.ae go/arbace/a64i/exec.ae
+arbace/repr/wasm.ae arbace/repr/wasm/x.ae arbace/wasm/x.ae go/arbace/wai.ae go/arbace/wai/x.ae bin/lib/repr-wasm/x bin/lib/wai/x"
 kept="go/arbace/ci.ae go/arbace/ci/expr.ae go/arbace/cinterp.ae go/arbace/cinterp/natives.ae go/arbace/crt.ae go/arbace/crt/mem.ae
 arbace/c.ae arbace/c/build.ae arbace/c/cinterp.ae arbace/repr/c.ae arbace/repr/c/lex.ae arbace/lang/CInterp.ae
+arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/repr/llvm/read.ae arbace/cpp/lower.ae arbace/cpp/rt/eh.c.ae
+arbace/repr/scheme.ae arbace/repr/scheme/read.ae arbace/scheme/aot.ae arbace/repr/python.ae arbace/repr/python/print.ae
+arbace/python.ae arbace/python/scope.ae
+go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/scminterp.ae go/arbace/scminterp/natives.ae
+go/arbace/py.ae go/arbace/py/frame.ae go/arbace/libm.ae go/arbace/libm/libm.ae
+arbace/lang/SchemeInterp.ae arbace/scheme/interp.ae arbace/scheme/resource.ae scheme/psyntax/psyntax.pp.ae
 arbace/core.ae arbace/o2j.ae arbace/http.ae arbace/tls/x.ae arbace/go/check.ae arbace/repr/go.ae
 go/arbace.ae go/arbace/api.ae go/arbace/goi.ae go/arbace/goi/x.ae go/arbace/jrt/x.ae go/arbace/repr/go/godump.ae
 go/arbace/gotable.edn go/arbace/cmd/arbace/image.ae go/arbace/cimore/x.ae arbace/lang/RT.ae
@@ -74,24 +88,32 @@ host_block() { awk -v h="$1" '$0 ~ "^ *(\\{)?:" h " " {f=1} f && $0 ~ /^ *:[a-z-
 gb=$(host_block gate); pb=$(host_block prog)
 [ -n "$gb" ] && [ -n "$pb" ] || { echo "FAIL: no :gate or :prog in $aud"; exit 1; }
 # (bin/lib/crops/, e6f88eb3's c2j-check: in arbace_crop_paths since batch 1, so in crop-rules, checked below)
-for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!go/arbace/oi.ae' \
-         '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!bin/lib/hsi/' '!go/arbace/hs.ae' '!go/arbace/hs/' '!go/arbace/py.ae' '!go/arbace/py/' \
-         '!go/arbace/libm.ae' '!go/arbace/libm/'; do
+for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!bin/lib/hsi/' '!go/arbace/hs.ae' '!go/arbace/hs/' \
+         'scheme/psyntax/psyntax.pp.ae'; do
   if grep -qF "\"$p\"" <<< "$gb"; then ok "audit :gate names $p"; else bad "audit :gate does not name $p"; fi
+done
+# W2: the embedded crops' Go forms and namespaces are read (copied into the program, compiled with it), so the audit's :gate leaves
+# none of them out (crop-rules neither: checked below with the list)
+for p in '!go/arbace/oi.ae' '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!go/arbace/scminterp.ae' '!go/arbace/py.ae' \
+         '!go/arbace/py/' '!go/arbace/libm.ae' '!go/arbace/libm/' '!arbace/repr/cpp/' '!arbace/cpp/' '!arbace/scheme/' '!arbace/python/' \
+         '!arbace/repr/scheme/' '!arbace/repr/python/' '!arbace/repr/llvm/'; do
+  if grep -qF "\"$p\"" <<< "$gb$(sed -n '/^(def crop-rules/,/\])$/p' "$aud")"; then bad "audit :gate or crop-rules still name $p"
+  else ok "audit :gate and crop-rules do not name $p"; fi
 done
 for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!bin/lib/hsi/'; do
   if grep -qF "\"$p\"" <<< "$pb"; then ok "audit :prog names $p"; else bad "audit :prog does not name $p"; fi
 done
-# the runtime's and javac's tool's keys (the re-seed after the backlog, the user 2026-11-03): computed for real on the
-# fabricated checkout, before and after a change to one file; the crops' Go forms (scminterp: the embedding's gaps,
-# not on main yet, fabricated here) move neither, jrt's, ci's and cinterp's move both
+# the runtime's and javac's tool's keys (the re-seed after the backlog, the user 2026-11-03; W2): computed for real on the
+# fabricated checkout, before and after a change to one file; the embedded crops' Go forms move the javac key and not the
+# runtime key (W-P3 (a)), the crops' Go forms still out move neither, jrt's, ci's and cinterp's move both
 sed -n '/^arbace_runtime_key() {/,/^}/p' "$ver" > "$d/keys.bash"
 sed -n '/^arbace_javac_key() {/,/^}/p' "$jkb" >> "$d/keys.bash"
 grep -q '^arbace_runtime_key() {' "$d/keys.bash" && grep -q '^arbace_javac_key() {' "$d/keys.bash" \
   || { echo "FAIL: arbace_runtime_key or arbace_javac_key not found"; exit 1; }
 crop_go="go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/scminterp.ae
 go/arbace/scminterp/natives.ae go/arbace/py.ae go/arbace/py/frame.ae go/arbace/libm.ae go/arbace/libm/libm.ae"
-for f in go/arbace/scminterp.ae go/arbace/scminterp/natives.ae seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 \
+out_go="go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae go/arbace/wai.ae go/arbace/wai/x.ae go/arbace/pyctypes/x.ae"
+for f in seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 \
          bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi bin/javac-vendor; do
   mkdir -p "$r/$(dirname "$f")"; echo x > "$r/$f"
 done
@@ -102,13 +124,20 @@ keys() {
 k0=$(keys)
 grep -qE '^runtime [0-9a-f]{64}$' <<< "$k0" && grep -qE '^javac [0-9a-f]{64}$' <<< "$k0" \
   || { echo "FAIL: the keys' run printed no keys"; echo "$k0"; exit 1; }
-for f in $crop_go; do
+for f in $out_go; do
   echo changed >> "$r/$f"
   k=$(keys)
   for n in runtime javac; do
     if [ "$(echo "$k" | grep "^$n ")" = "$(echo "$k0" | grep "^$n ")" ]; then ok "arbace_${n}_key unmoved by a change to $f"
     else bad "arbace_${n}_key moved by a change to $f"; fi
   done
+done
+for f in $crop_go; do
+  k1=$(keys); echo changed >> "$r/$f"; k=$(keys)
+  if [ "$(echo "$k" | grep "^runtime ")" = "$(echo "$k1" | grep "^runtime ")" ]; then ok "arbace_runtime_key unmoved by a change to $f"
+  else bad "arbace_runtime_key moved by a change to $f"; fi
+  if [ "$(echo "$k" | grep "^javac ")" != "$(echo "$k1" | grep "^javac ")" ]; then ok "arbace_javac_key moved by a change to $f (W2)"
+  else bad "arbace_javac_key unmoved by a change to $f (W2: copied into javac's tool)"; fi
 done
 for f in go/arbace/jrt/x.ae go/arbace/ci/expr.ae go/arbace/cinterp/natives.ae arbace/lang/RT.ae; do
   k1=$(keys); echo changed >> "$r/$f"; k=$(keys)
@@ -121,7 +150,7 @@ jb=$(host_block javac)
 [ -n "$jb" ] || { echo "FAIL: no :javac in $aud"; exit 1; }
 for p in '!go/arbace/oi.ae' '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!go/arbace/scminterp.ae' \
          '!go/arbace/scminterp/' '!go/arbace/py.ae' '!go/arbace/py/' '!go/arbace/libm.ae' '!go/arbace/libm/'; do
-  if grep -qF "\"$p\"" <<< "$jb"; then ok "audit :javac names $p"; else bad "audit :javac does not name $p"; fi
+  if grep -qF "\"$p\"" <<< "$jb"; then bad "audit :javac still names $p (W2)"; else ok "audit :javac does not name $p (W2)"; fi
 done
 # PYS30 (a), the keys commit (doc/GATE-SURVEY.md, "As built: GT9 (write-ahead)"): bin/lib/version.bash's arbace_crop_paths, the one
 # list of the crops' paths, out of all three keys: gate_key, arbace_runtime_key and arbace_javac_key computed for real on the
@@ -138,7 +167,7 @@ keys3() {
     echo "gate $(gate_key)"; echo "runtime $(arbace_runtime_key "$1")"; echo "javac $(arbace_javac_key "$1")"' _ "$r" "$ver" "$d/keys3.bash"
 }
 crops=$(env -i PATH="$PATH" bash -c '. "$1"; printf "%s\n" "${arbace_crop_paths[@]}"' _ "$ver")
-[ "$(echo "$crops" | wc -l)" -ge 40 ] && ok "arbace_crop_paths: $(echo "$crops" | wc -l) patterns" || bad "arbace_crop_paths: $(echo "$crops" | wc -l) patterns"
+[ "$(echo "$crops" | wc -l)" -ge 30 ] && ok "arbace_crop_paths: $(echo "$crops" | wc -l) patterns" || bad "arbace_crop_paths: $(echo "$crops" | wc -l) patterns"
 b0=$(keys3)
 grep -qE '^gate [0-9a-f]{64}$' <<< "$b0" && grep -qE '^runtime [0-9a-f]{64}$' <<< "$b0" && grep -qE '^javac [0-9a-f]{64}$' <<< "$b0" \
   || { echo "FAIL: the three keys' run printed no keys"; echo "$b0"; exit 1; }
@@ -151,7 +180,10 @@ for p in $crops; do
   rm -f "$r/$f"
 done
 for spec in "arbace/core.ae gate javac" "arbace/repr/java/read.ae javac" "arbace/lang/RT.ae gate runtime javac" "go/arbace/jrt/x.ae gate runtime javac" \
-            "go/arbace/ci/expr.ae gate runtime javac" "arbace/o2j.ae gate javac" "jdk/forms/java.base/x.ae gate runtime javac"; do
+            "go/arbace/ci/expr.ae gate runtime javac" "arbace/o2j.ae gate javac" "jdk/forms/java.base/x.ae gate runtime javac" \
+            "arbace/repr/cpp/convert.ae gate javac" "arbace/cpp/lower.ae gate javac" "arbace/scheme/rt.ae gate javac" \
+            "arbace/python/scope.ae gate javac" "arbace/repr/python/print.ae gate javac" "go/arbace/oi/apply.ae gate javac" \
+            "go/arbace/py/frame.ae gate javac" "go/arbace/scminterp/natives.ae gate javac" "arbace/lang/SchemeInterp.ae gate runtime javac"; do
   set -- $spec; f=$1; shift
   k1=$(keys3); mkdir -p "$r/$(dirname "$f")"; echo "moved $RANDOM" >> "$r/$f"; k=$(keys3)
   moved=$(for n in gate runtime javac; do [ "$(echo "$k" | grep "^$n ")" = "$(echo "$k1" | grep "^$n ")" ] || printf '%s ' "$n"; done)

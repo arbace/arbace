@@ -22,6 +22,11 @@
 #   bin/si unit [GO-TEST-FLAGS...]      si's runtime's unit tests: go/arbace/scm printed by repr/go and go test (TamaGo's go)
 #   bin/si unit --control                SCS26 (b): TestWordBreakUAX29's negative control: a copy of the runtime without WB3c's rule
 #                                        must differ from UAX #29's conformance data in exactly 9 positions, else it fails
+#   bin/si interp-check [--exe EXE]      si's shipped path (SC61 (a), SC240; "As built: the embedding's gaps"): psyntax.pp.ss
+#                                        generated into the program's resource tree and loaded from it by arbace.scheme.resource
+#                                        (no checkout; RT.toolSource's rule), go/arbace/scminterp built with a stand-in jrt, the
+#                                        test samples (test/scheme/expand/cases) run through it and judged as test --si; --exe EXE:
+#                                        the executable's own resource and arbace.lang.SchemeInterp (the re-seed window's)
 #   bin/si light                         the light driver (test/scheme/si-driver: arbace/scm alone, no Arbace build)
 #                                        built into .tmp/si/si-light, psyntax.pp printed as Scheme text beside it
 #   bin/si run [--lib DIR]... FILE [ARG]...  a top-level program run on si (the light driver): psyntax on si
@@ -357,6 +362,118 @@ bench_one() {
   printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$si_s" "$aot_s" "$chez_s" "$ct"
 }
 
+# interp_check [--exe EXE]: si's shipped path checked without an executable (doc/scheme/SCHEME-SURVEY.md, SC61 (a), SC240; "As
+# built: the embedding's gaps"). 1. The program's resource tree as j2g --program embeds it (arbace.j2g.embed's sources and
+# generated, uncompressed) written into .tmp/si/interp/res; 2. psyntax.pp.ss loaded from it by arbace.scheme.resource/text on the
+# tools' host with ARBACE_PATH at the tree alone and ARBACE_ROOT an empty directory (no checkout: "embedded"), then with the
+# checkout after it (the same digest: "embedded") and with a changed psyntax.pp.ae before it (RT.toolSource's rule: "checkout"),
+# and the text compared with bin/si light's psyntax.pp.ss (the same forms, the header comment apart); 3. go/arbace/scm and
+# go/arbace/scminterp printed by repr/go into .tmp/si/interp/go with a stand-in for jrt (the two types the natives take) and a main
+# calling SchemeInterp_RunProgram_String_String1_String_String1_I__I_native, built by TamaGo's go; 4. bin/si test's samples
+# (test/scheme/expand/cases) run through it in case mode with the text loaded from the resource, judged as bin/si test --si
+# judges the light driver's runs. --exe EXE (the re-seed window's check): EXE's own resource and arbace.lang.SchemeInterp, each
+# sample run by `EXE -m arbace.scheme.interp --case FILE` without ARBACE_PATH; nothing built.
+interp_check() {
+  local w=$light_dir/interp exe= host fails=0
+  if [ "${1:-}" = --exe ]; then exe=${2:?interp-check: --exe EXE}; [ -x "$exe" ] || { echo "interp-check: no executable $exe" >&2; return 1; }; fi
+  rm -rf "$w"; mkdir -p "$w/res" "$w/noroot" "$w/alt/scheme/psyntax" "$w/test"
+  if [ -z "$exe" ]; then
+    . "$root/bin/lib/host.bash"; host=$(arbace_host_exe) || return 1
+    # 1. the resource tree
+    arbace_tool -e "(require 'arbace.j2g.embed)
+      (let [w \"$w/res/\" put (fn [p ^bytes b] (let [f (java.io.File. (str w p))] (.mkdirs (.getParentFile f)) (with-open [o (java.io.FileOutputStream. f)] (.write o b))))
+            srcs (arbace.j2g.embed/sources \"$root\") gen (arbace.j2g.embed/generated \"$root\")]
+        (doseq [[p t] srcs] (put p (.getBytes ^String t \"UTF-8\")))
+        (doseq [[p b] gen] (put p b))
+        (println \"interp-check: the resource tree:\" (count srcs) \"sources,\" (count gen) \"generated:\" (arbace.string/join \" \" (keys gen)))
+        (shutdown-agents))" || return 1
+    [ -f "$w/res/scheme/psyntax/psyntax.pp.ss" ] || { echo "interp-check: no scheme/psyntax/psyntax.pp.ss in the tree" >&2; return 1; }
+    # 2. loaded from it, by the rule
+    cp "$root/scheme/psyntax/psyntax.pp.ae" "$w/alt/scheme/psyntax/psyntax.pp.ae"; printf '\n(quote changed)\n' >> "$w/alt/scheme/psyntax/psyntax.pp.ae"
+    local how want path
+    for c in "embedded:$w/res" "embedded:$w/res:$root" "checkout:$w/alt:$w/res"; do
+      want=${c%%:*} path=${c#*:}
+      how=$(cd "$w/noroot" && ARBACE_PATH=$path ARBACE_ROOT=$w/noroot "$host" -m arbace.scheme.resource text "$w/pp-$want.ss" 2>&1 \
+              | grep -v '^Reflection warning\|recur arg\|^Auto-boxing' | tail -n 1)
+      if [ "${how#psyntax.pp.ss: }" != "$how" ] && [ "$(echo "$how" | cut -d' ' -f2)" = "$want" ]; then echo "ok   loaded $want with ARBACE_PATH ${path//$root/ROOT}"
+      else echo "FAIL loaded with ARBACE_PATH ${path//$root/ROOT}: '$how', not $want"; fails=$((fails + 1)); fi
+    done
+    tail -n +2 "$w/pp-checkout.ss" | tail -n 1 | grep -qx '(quote changed)\|changed\|'"'"'changed' \
+      && echo "ok   the checkout's copy generated from the changed .ae" || { echo "FAIL the checkout's copy does not end with the changed form"; fails=$((fails + 1)); }
+    mv "$w/pp-embedded.ss" "$w/psyntax.pp.ss"
+    light >&2 || return 1
+    if tail -n +2 "$w/psyntax.pp.ss" | cmp -s - "$light_dir/psyntax.pp.ss"; then echo "ok   the resource's forms are bin/si light's psyntax.pp.ss"
+    else echo "FAIL the resource's text differs from bin/si light's psyntax.pp.ss"; fails=$((fails + 1)); fi
+    # 3. the natives with a stand-in jrt
+    local goroot=${ARBACE_GOROOT:-/root/tamago-go} p
+    mkdir -p "$w/go/jrt" "$w/go/cmain"
+    printf 'module arbace\n\ngo 1.27\n' > "$w/go/go.mod"
+    for p in scm scminterp; do
+      mkdir -p "$w/go/$p"
+      "$root/bin/repr-go" print --layout lines --no-line-directives "$root/go/arbace/$p.ae" "$w/go/$p" > "$w/print-$p.log" 2>&1 \
+        || { cat "$w/print-$p.log" >&2; echo "interp-check: $p did not print" >&2; return 1; }
+    done
+    rm -f "$w"/go/scm/*_test.go
+    cat > "$w/go/jrt/jrt.go" <<'G'
+// A stand-in for arbace/jrt: the two types si's natives take (String and RefArray), for bin/si interp-check.
+package jrt
+
+type String struct{ s string }
+
+func NewString(s string) *String { return &String{s} }
+
+func (s *String) String() string { return s.s }
+
+type RefArray struct{ A []any }
+G
+    cat > "$w/go/cmain/main.go" <<'G'
+// bin/si interp-check's runner: si-interp PP FLAGS FILE [ARG...], scminterp's native called as arbace.lang.SchemeInterp's is.
+package main
+
+import (
+	"os"
+	"strconv"
+
+	"arbace/jrt"
+	"arbace/scminterp"
+)
+
+func main() {
+	pp, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	flags, _ := strconv.Atoi(os.Args[2])
+	args := []any{}
+	for _, a := range os.Args[4:] {
+		args = append(args, jrt.NewString(a))
+	}
+	os.Exit(int(scminterp.SchemeInterp_RunProgram_String_String1_String_String1_I__I_native(jrt.NewString(string(pp)),
+		&jrt.RefArray{A: []any{}}, jrt.NewString(os.Args[3]), &jrt.RefArray{A: args}, int32(flags))))
+}
+G
+    (cd "$w/go" && CGO_ENABLED=0 GOFLAGS=-mod=mod GOTOOLCHAIN=local GOWORK=off GOPROXY=off GOCACHE=${SI_GOCACHE:-$light_dir/gocache} GOMAXPROCS=2 \
+       "$goroot/bin/go" build -p 2 -trimpath -o "$w/si-interp" ./cmain) || { echo "interp-check: the natives did not build" >&2; return 1; }
+    echo "ok   go/arbace/scminterp built against the stand-in jrt"
+  fi
+  # 4. bin/si test's samples, in case mode
+  : > "$w/test/empty.in"
+  local c n
+  for c in "$root"/test/scheme/expand/cases/*.sps; do
+    n=$(basename "$c" .sps)
+    if [ -n "$exe" ]; then
+      (cd "$(dirname "$c")" && timeout "${SI_TIMEOUT:-120}" env -u ARBACE_PATH GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+         "$exe" -m arbace.scheme.interp --case "$n.sps" < "$w/test/empty.in" > "$w/test/$n.out" 2> "$w/test/$n.err"; echo $? > "$w/test/$n.rc") || true
+    else
+      (cd "$(dirname "$c")" && timeout "${SI_TIMEOUT:-120}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+         "$w/si-interp" "$w/psyntax.pp.ss" 1 "$n.sps" < "$w/test/empty.in" > "$w/test/$n.out" 2> "$w/test/$n.err"; echo $? > "$w/test/$n.rc") || true
+    fi
+  done
+  arbace_tool -m arbace.scheme.expand test --si "$w/test" | tee "$w/test.log" | tail -n 1
+  [ "${PIPESTATUS[0]}" = 0 ] || fails=$((fails + 1))
+  if [ $fails = 0 ]; then echo "interp-check: ok"; else echo "interp-check: $fails failures"; return 1; fi
+}
+
 cmd=${1:-}; [ $# -eq 0 ] || shift
 case $cmd in
   vendor)
@@ -415,6 +532,7 @@ case $cmd in
     fi
     si_print_build test "$@" ;;
   light) light ;;
+  interp-check) interp_check "$@" ;;
   aot)
     aot_module; : > "$light_dir/empty.in"
     libs=(); while [ "${1:-}" = --lib ]; do libs+=("$(cd "$2" && pwd)"); shift 2; done

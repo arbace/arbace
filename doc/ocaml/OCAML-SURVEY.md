@@ -3816,3 +3816,91 @@ tupled functions (Translcore's transl_tupled_function runs only under native_cod
 light level's CPU limit. A `--native-code` mode of the typer for o2j's dump would remove the cause; it is not done. The judge's
 remaining 19 eval and 13 AOT cases have no verdict of their own (OC209 (a), OC210 (a), OC211 (a)) and are counted by design at 0.5.
 Independence is 51.5% → 100.0% (judge 0.998); completeness is 85.6%. The journal's entry of the day has the runs.
+
+## Carried from `embed-gaps` (2026-11-16, the consolidation's U5 (a)): the embedding's preparation and gaps
+
+The two sections below were written on the branch `embed-gaps` (012dc86a1, 2026-11-04, on that day's next) and reached no other
+branch; they are kept as written, with their 2026-11-04 measurements. Their code was redone since, and the commits they cite
+(0c711daa6, ad0165745, 16fac1462) are superseded: D-W2a's `window-w2b` (2026-11-09, on next c2536d182), then `window-w2c`
+(11-10), `window-w2d` (11-11) and `window-w2e` (2026-11-16, on B2's `b2-1115` with W1: the replays of 999a74178, the gaps, and
+99339f807, the embedding; doc/W-WINDOW.md, "As built: D-W2a"). What changed from the text: pyi is embedded with the crops (W-D1
+(a)), `arbace/classes/` joins `RT.toolSource` (W-D3 (a)), llvmi, rsi, repr/ocaml, the assembly and Wasm crops stay out (W-D4 (a),
+W-P5 (a), W-D5 (a)), and the embedded crops' Go forms stay out of the runtime key alone (`arbace_runtime_not`, W-P3 (a)). `bin/oi table-check`'s
+memory default stayed `3000MiB` (`OI_TABLE_GOMEMLIMIT`): 012dc86a1's `2500MiB`, named below, was not carried (its own
+run peaked at 3.97 GB).
+
+## As built: the embedding's preparation (OC165 (a); 2026-11-04)
+
+On `embed-crops` from main `01d3ce9f`, light tier, with C++'s (CP180 (a)) and Scheme's (SC230 (a)); the shared parts and **the night's commands
+are doc/cpp/CPP-SURVEY.md's section of this name, E.1-E.4**. Taken as decided: OC161-OC166 as recommended (the user's decision as relayed); for the
+embedding OC165 (a): OCaml joins the re-seed after `arbace-reaps-4-crops-v1` with oi alone, repr/ocaml stays evaluated (its exclusion in
+`arbace/j2g/embed.ae` stays, `test/ocaml/embed_check.ae` holds it: `bin/repr-ocaml embed-check` ok, 187 embedded sources, none repr/ocaml's).
+
+- **The check** (`6412f205`): `bin/repr-ocaml c2j-check` (`bin/lib/crops/c2j-check ocaml`; Makefile `repr-ocaml-c2j-check`): repr/ocaml's four
+  namespaces, `arbace.repr.ocaml` and `arbace.o2j` compiled by c2j alone: 6 of 6 (418 classes), no reflection warning, 13 s, 1 GB, from the first run;
+  6 of 6 on the held `ocaml-o8` too. No gate step: `arbace.o2j` is embedded and compiled by every build already, and repr/ocaml is not embedded;
+  the check says what OC165 (b) would meet (nothing to fix).
+- **The embedding**: nothing of OCaml's Arbace side changes in it (C++'s and Scheme's do). `RT.toolSource` already covers repr/ocaml
+  (`arbace/repr/`), for the day it is embedded.
+- **Not built (OC165 (a)'s oi, O5's heavy list items 1-3):** `go/arbace/oi` listed in `go/arbace/gotable.edn` with its size (`bin/goi table --size`, an
+  executable needed), copied into the program by j2g (`arbace/j2g/main.ae`'s package list, as ci's), `gate_key`'s and the audit's `!go/arbace/oi`
+  lifted, an Arbace namespace `arbace.ocaml.oi` (the REPL and `run` through oi's `Toplevel`), `bin/oi` on the shipped program, and tamago build
+  constraints for `ext_sys.ae` and `ext_io.ae` (`syscall`: the table is generated for the tamago configurations too, and the box, parked, builds the
+  program). None has a light check: the table's generation and the size need the executable, and `arbace.ocaml.oi` an executable whose table lists oi.
+
+**Proposals (OC170 onward; none decided)**
+
+- **OC170 oi at this re-seed or the next.** (a) a branch before the window with the list's items (the constraints first; the table regenerated and the
+  executable built in the window, `bin/goi table`, then `bin/oi` on it), batched into the same re-seed; (b) the next re-seed, with O9's compiled level.
+  *Recommended: (a)* only if the window has the hours (the table and a build, about 30 minutes more, and oi's check on the executable, 7 minutes);
+  else (b).
+
+## As built: the embedding's gaps (OC170 (a); 2026-11-04)
+
+On `embed-gaps` from `embed-crops` (`ad016574`), light tier (no Go build of Arbace, no gate), with Scheme's gap (SC61's shipped path,
+doc/scheme/SCHEME-SURVEY.md, the section of this name); **the night's commands are doc/cpp/CPP-SURVEY.md's E.4, extended there (E.6)**. OC170 is
+taken as (a): oi listed now, built in the same re-seed window as the rest of the embedding.
+
+- **The listing** (OC165 (a)'s items 1-3 of "Not built" above, but the size): `go/arbace/gotable.edn` lists `arbace/oi` (the comment says why
+  and that its size is the window's to record, `bin/goi table --size`); `arbace.go.table/program-path?` takes `arbace/oi` as a package of the
+  program's own `go/` (its forms read from `go/arbace/oi.ae`, as `arbace` and `arbace/repr/*` are); `j2g --program` copies `go/arbace/oi` into
+  the program with ci's and Scheme's packages (`arbace/j2g/main.ae`), so `go build` compiles it and the table's registration imports it;
+  `gate_key`'s and the audit's `!go/arbace/oi` lifted (`bin/arbace-go`, `test/gate/audit.ae`; `test/gate/gate-key-crops-test.bash` moves oi to
+  the kept side: passes). oi's imports are std only (fmt, math, strconv, strings, os, sync, encoding/binary, bytes, math/bits, syscall,
+  runtime, crypto/md5, encoding/hex, errors, unicode/utf8, unsafe, time, sort, regexp, crypto/rand, io, path/filepath, os/exec, sync/atomic):
+  no other package joins the list with it (the program compiles those it imports).
+- **The build constraints** (the check found them; the "Not built" list above guessed `ext_sys.ae` and `ext_io.ae`): goi's checker in the
+  tamago configurations gave 10 errors, all in `ext_sys.ae` (TamaGo's syscall has no `O_NONBLOCK`, `Getrusage`/`Rusage`'s `RUSAGE_*`,
+  `Termios`/`SYS_IOCTL`/`TCGETS`, `SIGSTOP`); `ext_io.ae`'s syscall calls (Read, Write, Seek, Close, the errnos) are all in TamaGo's. They
+  moved into `ext_sys_linux.ae` (`//go:build linux`: the constants `oNonblock`, `rusageSelf`, `rusageChildren`, `sigStop`, `rusageSeconds`,
+  `isatty`) beside `ext_sys_other.ae` (`//go:build !linux`: Linux's numbers, no process time, no terminal), as `go/arbace/scm`'s
+  `clock_linux.ae`/`clock_other.ae`; `ext_sys.ae` calls them and no longer imports `unsafe`. The constants carry their `:val` (2048,
+  0, -1, 19: amd64's and arm64's alike), as the converted files' constants do: the checker verifies the annotations of a package in the
+  converter's style and refused them bare (its second run, "annotation :val ... forms say none"). The behaviour on Linux is the same code: `bin/oi
+  test` (go vet and go test on the printed package) passes; the printed package builds with `GOOS=tamago` for amd64 and arm64 (TamaGo's go).
+- **The c2j/j2g side**: nothing for c2j (oi is Go forms; `arbace.o2j` is embedded and compiled already; repr/ocaml stays evaluated, OC165
+  (a)). j2g: the copy only. No runtime class: oi has no natives of Arbace's; Arbace reaches it through goi's table, as any listed package
+  (Go forms that import `arbace/oi`, or interop through `arbace.go`). The namespace `arbace.ocaml.oi` (the REPL and `run` through oi's
+  `Toplevel`, `RunProgram`) and `bin/oi` on the shipped program stay O5's heavy list (an executable whose table lists oi).
+- **The check: `bin/oi table-check`** (`test/ocaml/table_check.ae`; Makefile `oi-table-check`; on stage 0, no executable; `bin/goi
+  table-configs` gives the four configurations' `--config` arguments as `bin/goi table` does, linux's std from its cache): the list lists
+  `arbace/oi` and `program-path?` takes it; goi's checker checks the package in linux/amd64, linux/arm64, tamago/amd64 and tamago/arm64 (its
+  files as each configuration's build constraints select them) with no error, its errors listed otherwise; the generator (`arbace.go.table/run`)
+  tables a list of oi alone into `.tmp/oi/table/out` and every configuration has oi's members, none skipped. **Run** (stage 0 of the committed seed, 2026-11-04): first on oi as it was, 10 errors in each tamago
+  configuration (the list above; linux's none), the table made all the same (the generator does not stop on a listed package's errors, which is
+  why the check reads them itself); then with the constraints and the annotations: **checked in the four configurations, 32 files each, no
+  error; tabled: 102 functions, 17 variables, 30 types, 18 methods in each configuration, digests about 556 KB (128 KB compressed) a
+  configuration; `table-check: ok`**, 17 min 50 s on a host at load 30 to 40 (205 s for the table alone on a quieter host), peak RSS 3.97 GB
+  with `GOMEMLIMIT=3000MiB` (the default is now 2500MiB, `OI_TABLE_GOMEMLIMIT`, to stay under 4 GB; not rerun at it). Beside it: `bin/repr-scheme
+  c2j-check` (18 of 18: `arbace.scheme.resource` new, `arbace.scheme.interp` left out), `bin/repr-ocaml embed-check` (189 embedded sources, all
+  keyed, none of repr/ocaml), `test/gate/gate-key-crops-test.bash`, `audited-test.bash` (19 of 19), `costs-test.bash`, `claude-md-test.bash`,
+  `make check-makefile`.
+- **Not run** (the window's): the table of the whole list with oi and its size (`bin/goi table --size` on the build's work module), the build,
+  oi called through the table on the executable, `bin/repr-ocaml embed-check` after the re-seed (unchanged: repr/ocaml not embedded).
+
+**Proposals (OC180 onward; none decided)**
+
+- **OC180 `bin/oi table-check` as a gate step.** (a) an essential step on stage 0 (inputs `go/arbace/oi*`, `go/arbace/gotable.edn`,
+  `arbace/go/table.ae`, the checker; 3.5 to 18 minutes by the host's load and up to 4 GB, most of it the table's classification of std) once the re-seed carries oi; (b)
+  by hand only, the go-build step tells a broken listing anyway (after 8 minutes). *Recommended: (a)*, the checker's errors in a tamago
+  configuration show nowhere else while the box is parked.
