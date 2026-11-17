@@ -1934,3 +1934,27 @@ no source in the corpora to port), the local label (1 + 1), a fixup (1).
 - **AXS97 `-debug-only=asm-matcher`.** x86_64-asm-match's 57 texts are LLVM's matcher's debug trace (REQUIRES: asserts), no
   streamer's line: (a) a by-design class `:debug-trace` (no printer writes it; the matcher's choice is judged by the encodings);
   (b) keep `:directive`. *Recommended: (a)*.
+
+## As built: AXS95 (a), AXS96 (a), AXS97 (a) (2026-11-17; branch `h-asm-deferred`, from `next` `af41f0944`; the user's round 51)
+
+- **AXS95 (a).** The print level's other-tool texts are `:other-tool` (by design) only for a file whose object object-check holds
+  to llvm-mc's recorded one (its `mc-x86-obj/NAME` row passing in `test/asm/object-results-amd64.edn`, read by check.ae beside the
+  table), else `:object-unjudged` (deferred). **Correction to the proposal's numbers:** 406 of the 772 texts are unjudged, not 655
+  (the proposal's count missed that `apx/*-reloc.s` are object-check's `add-reloc` and the like, by base name); 366 stay by design.
+- **AXS97 (a).** A run with `-debug-only` prints LLVM's debug trace: `:debug-trace`, by design (x86_64-asm-match's 57).
+- **AXS96 (a).** An error test's read (the list's `reject` flag) goes on after a refused statement (`gnu/*recover*`: the
+  statement kept as `(asm/unread TEXT MESSAGE)`, as inside a conditional block, ARS49), so the file reads, round-trips and prints
+  back byte for byte; each refusal outside a conditional block is then held to the lines the test states errors at
+  (`arbace.repr.asm/error-lines`): a `[[#@LINE+N]]` place, a `NAME.s:N:C:` place, else the statement just before and just after the
+  CHECK line (labels between kept); a CHECK line counts when it holds `error:`, its prefix names ERR, or every llvm-mc run of the
+  test is `not llvm-mc`; a split-file part is named by its test (`split=`, `part=` in the list's flags) and its lines counted
+  from its `#---` line. A refusal elsewhere is `:error-misplaced`, deferred: a test need not state every error llvm-mc reports,
+  so llvm-mc may refuse it too (the oracle tier's, by hand). The message is not judged (the reader's words are not LLVM's).
+  amd64: the 24 error tests pass (66 refusals at their tests' errors); arm64, the same judge: 6 of its 8 pass, 2 `:error-misplaced`
+  (basic-a64-diagnostics' `;; Exponent too large`, a statement in AArch64's ELF syntax; neon-diagnostics' `ld1 v0.8b, v1.8b}`).
+  Controls `test/asm/controls-error.txt` (an error test's refusals against another's error lines; `bin/repr-asm roundtrip`, amd64):
+  4, each fails as it must by hand, and a test against itself passes. The one `:error-input` (an Inputs/ file with no RUN line) stays.
+- Proof: encode-check `--record --only` over the 64 files with other-tool or debug texts (the judge ok, every listed control left);
+  the round trip of the 24 + 8 error tests; the earlier musl, arm64 and lexer samples unchanged.
+
+After: x86-64 read 25,253 pass / 1 design / 1 deferred, print 194,746 / 1,187 / 581; arm64 read 6,654 / 0 / 2, print 12,664 / 5 / 2.

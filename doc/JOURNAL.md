@@ -9674,3 +9674,17 @@ group left (kahan alone needs 119 s of CPU against the 60 s limit); callback002 
 could build, the print cell's 14 byte-identical rows: HES91-HES93 proposed. Alternatives considered: running the whole `bin/llvmi check
 --record` (refused by the day's rules: a subset's record instead), raising the C++ budget in test/cpp/check-budget.edn for threads alone
 (the default for every C++ program keeps llvmi and cppi equal).
+
+## 2026-11-17: AXS95 (a), AXS96 (a), AXS97 (a) built (branch `h-asm-deferred`, from `next` `af41f0944`)
+
+The user's round 51 decisions on the x86-64 cells (doc/asm/AMD64-SURVEY.md, "As built: AXS95 (a), AXS96 (a), AXS97 (a)"). AXS95 (a):
+the other-tool texts of files whose objects object-check does not judge are `:object-unjudged`, deferred: 406, not the proposal's
+655 (its count missed `apx/*-reloc.s` judged under their base names; 366 stay by design). AXS97 (a): `:debug-trace`, by design (57).
+AXS96 (a): an error test's read goes on after a refused statement (`(asm/unread TEXT MESSAGE)`), its round trip then judged as any
+file's, and each refusal held to a line the test states an error at (a `[[#@LINE]]` or `NAME.s:N:` place, else the statements beside
+the CHECK line); elsewhere `:error-misplaced`, deferred, since a test need not state every error llvm-mc reports. The messages are not
+judged. The judge serves both arches' round trips: amd64's 24 error tests pass, arm64's 6 of 8. New controls
+`test/asm/controls-error.txt` (4). Rows re-recorded alone (encode-check `--record --only` 64 files; the 24 + 8 round-trip rows).
+Scores: x86-64 read 25,253 / 1 / 1 (was 25,229 / 1 / 25), print 194,746 / 1,187 / 581 (was 194,722 / 1,536 / 256): the print
+cell's deferred rose by AXS95's reclassification; arm64 read 6,654 / 0 / 2 (was 6,648 / 0 / 8), print 12,664 / 5 / 2 (was 12,658 /
+5 / 8). Alternative considered for the misplaced refusals: pending (a failure), rejected since llvm-mc may refuse them too.
