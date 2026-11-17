@@ -3468,7 +3468,12 @@
                 (when-let [r (result x)] (.put defs (local-key r) [bi ii (body x) x])))
             lp-type (volatile! nil)]
         (visiting (binding [*ctx* {:fn f :bb (second (first blocks))}]
-                    (when (seq (nth (:preds g) 0)) (verr :verifier/entry-predecessors "Entry block to function must not have predecessors!"))))
+                    ;; pred_empty: the block's users that are terminators, wherever they stand (queue 335: one in the middle of a
+                    ;; block, after a label defined twice)
+                    (when (or (seq (nth (:preds g) 0))
+                              (let [ek (some-> (second (first blocks)) local-key)]
+                                (some (fn [[_ _ & items]] (some #(and (terminator? %) (some (fn [l] (= (local-key l) ek)) (labels-of (body %)))) items)) blocks)))
+                      (verr :verifier/entry-predecessors "Entry block to function must not have predecessors!"))))
         (doseq [[bi [_ l & items]] (map-indexed vector blocks)]
           (let [items (vec items)
                 insts (vec (remove #(dbg-record? (body %)) items))]
@@ -3507,7 +3512,7 @@
                                                                   (or (dbg-record? nb) (and c (global? c) (re-find #"^llvm\.dbg\.(declare|value|assign|label)" (global-key c)))))
                                                                (drop (inc ii) items)))}]
                       (when (and (terminator? x) (< ii (dec (count items))))
-                        (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!"))
+                        (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!" :bb))
                       (when (and (= hd 'phi) seen-non-phi) (verr :verifier/phi-grouped "PHI nodes not grouped at top of basic block!" :inst :bb))
                       (when (and (= hd 'phi) (token-like? (norm-type (first (strip-flags (second (split-inst b)))))))
                         (verr :verifier/phi-grouped "PHI nodes cannot have token type!" :none))
@@ -3880,6 +3885,26 @@
     (check-module-ident forms)
     (check-errno-tbaa forms)))
 
+(defn- merge-labels
+  "A definition's blocks as LLParser makes them when a label is defined twice (queue 335): PerFunctionState::defineBB takes
+  the block of that name again, moves it to the function's end and appends the second body's instructions to it."
+  [forms]
+  (mapv (fn [f]
+          (let [o (when (= (first f) 'llvm/define) (apply hash-map (drop 4 f)))
+                ls (keep second (:body o))]
+            (if (= (count ls) (count (distinct (map local-key ls))))
+              f
+              (let [merged (reduce (fn [acc blk]
+                                     (let [l (second blk) k (when l (local-key l))
+                                           i (when k (first (keep-indexed (fn [i b] (when (and (second b) (= k (local-key (second b)))) i)) acc)))]
+                                       (if i
+                                         (conj (vec (concat (subvec acc 0 i) (subvec acc (inc i)))) (apply list (concat (nth acc i) (drop 2 blk))))
+                                         (conj acc blk))))
+                                   [] (:body o))
+                    v (vec f) bi (.indexOf ^java.util.List v :body)]
+                (apply list (assoc v (inc bi) merged))))))
+        forms))
+
 (defn- run-phases
   "The checks over the forms: [parser-error verifier-errors], an error an ExceptionInfo of `verr`. A parser error stops
   at the first; the Verifier's visits go on (`visiting`), the debug info's last."
@@ -3900,9 +3925,11 @@
     (try
       (phase-parser forms)
       (set! *renames* (implicit-renames forms))
+      (let [forms (merge-labels forms)]
+      (set! *all-forms* forms)
       (try (phase-verifier forms) (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) (.add *errs* e) (throw e))))
       (try (phase-debug forms) (catch arbace.lang.ExceptionInfo e (cond (::stripped (ex-data e)) nil (:llvm/verify (ex-data e)) (.add *errs* e) :else (throw e))))
-      [nil (vec *errs*) *renames* (vec *errs2*)]
+      [nil (vec *errs*) *renames* (vec *errs2*)])
       (catch arbace.lang.ExceptionInfo e
         (if (:llvm/verify (ex-data e)) [e [] {}] (throw e))))))
 
