@@ -5819,3 +5819,21 @@ musl reread, no evaluated checker at the first ci commit after W, which `fresh.b
 trio. R applies only at W2's step 11 (after `bin/seed --verify`): before the seed, stage 0 (`d5548e72`) has no `arbace/c/` in
 `toolSource`, and without `fresh.bash` a checkout's changed ci would run the seed's checker and builder again (night 7's and
 8's failures). The `:c` inputs hold `bin/lib/ci/`, so the C steps rerun at step 14's gate, which reruns everything anyway.
+
+## As built: h-judges, andrewchambers_c by its own verdict (2026-11-17, branch `h-judges`)
+
+The judge's rows still on gcc's recorded runs, counted over `test/c/check-linux-amd64.edn` and `check-aot-linux-amd64.edn`
+(2,279 rows each; `bin/ci selfref ref`): 171 a level, of which mir's 103 (andrewchambers_c 67, lacc 13, new 23), benchmarksgame
+29, ci-run 19, tcc-tests2 9, cxgo 2, gcc-gnu23-run 4, torture 3, compcert 1, gcc-c23-sub-run 1.
+- **Moved: mir/andrewchambers_c, 67 a level.** Their README.md says they are the execute tests of Andrew Chambers' C compiler
+  (its test/execute): each main returns non-zero on a failed check and 0 at its end, none prints, and the directory carries no
+  `.expectrc` or `.expect` (lacc's beside it carry 204 `.expectrc`, 32 of them `0`). `test/c/selfref.ae`: exit 0, `:verdict
+  :execute`, the output not compared. `bin/ci selfref agree`: 2,172 cases with a verdict of their own, gcc's run meets each
+  (execute 67 of 67). `bin/ci check --only` and `check --aot --only` of the 67: 67 of 67 pass each; the new control
+  `_control/ptr-sub-unsigned-vs-execute` (ptr-sub-unsigned's status 3 against 0001-sanity's own exit 0) differs at both levels.
+  `bin/ci judge-test`: 108 tests, 0 failures.
+- **Left, with the reason.** benchmarksgame and ci-run's 19 print what they compute, with no expected output in the corpus or the
+  checkout; lacc's 13 without `.expectrc` follow lacc's own harness (the output against the host compiler's); MIR's new 23 without
+  either file: MIR's runner is not in the corpus, so its default is not established here; the exceptions keep their reasons.
+- **The fact** (`test/crops/independence.edn`, C's judge): the cells' cases as `test/reap/matrix.edn` counts them today, 14,855,
+  315 by a record (72 read, 104 eval, 104 AOT, 35 print): 0.985 to 0.989; C's independence 99.7 to 99.8.
