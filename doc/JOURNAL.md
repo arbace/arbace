@@ -10338,3 +10338,22 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   chain-needs, gate-key-crops, caches and stale-comments tests pass; `bin/gate --plan` plans. Only 334 moves gate_key (go/arbace/scm
   and arbace/scheme are embedded since W2): next's e8e0d017 to fa199ec1, so the next gate builds the executables afresh.
 - Every arm64-made or interim record waits for the main host's amd64 runs (the branches' reports, queue 323, 325, 326, 327, 334).
+
+## 2026-11-17: OCaml's print cell, mode :full keeps a file's bytes that are not UTF-8 (round 52, branch `n-ocaml-defer`)
+
+- On `next` 42bf8614b with queue 323's stack merged (`mac/n-review-d` b60d7ffb2). The OCaml cells' deferred rows read from
+  `test/reap/matrix.edn` and the classes: eval 71 (`:gc-and-memory` 25, `:runtime-parameters` 19, `:c-runtime-decided` 11,
+  `:dynlink-decided` 5, `:backtraces` 4, `:speed` 3, `:backtrace-references` 2, `:header-flags` 1, `:obj-representation` 1), AOT 138
+  (`:light-speed` 39, `:c-api` 25, `:gc-and-memory` 24, `:runtime-parameters` 19, `:c-runtime-decided` 12, `:light-depth` 5,
+  `:dynlink-decided` 5 and 9 more), print 1 (`:full-not-utf8`), read none (19 by design). Every eval and AOT class is the work of a
+  decision of days (OC217's backtraces, OC218's heap model, OC221's C runtime on ci, OC220's Dynlink) or the compiled level's whole
+  record (the AOT's `:light-*` and `:c-api`, OT8 (a)): none is a light fix proven under 1 GiB. Two probed: `embedded/cmcaml` (C's
+  main calling `caml_main`: OC221's `caml_startup` embedding, not a header) and `c-api/alloc_async` (`caml_stat_major_collections`
+  advanced by C's allocations: OC218's model).
+- Fixed the print row: mode :full's native layout keeps a byte that is not UTF-8 as OC214 (a)'s byte mark, written `\uDCxx` in
+  the dumps and forms and back as the byte (doc/ocaml/OCAML-SURVEY.md, "As built: mode :full's layout of a file that is not UTF-8").
+  Taken overnight (round 52): the native layout goes beyond ocdump's refusal (the alternative, keeping the refusal and the class
+  by design, leaves a byte-for-byte round trip undone for one byte); the old refusal stays behind an option.
+- Recorded only opam-re's rows (`bin/repr-ocaml roundtrip --record-results --corpus opam-re`); `bin/reap --record`,
+  `bin/crops-score --record`; `--judge --strict` and `bin/records-check` pass. OCaml print 3,082 / 0 / 0; completeness 86, 91
+  without by design (0.8589, 0.9078).

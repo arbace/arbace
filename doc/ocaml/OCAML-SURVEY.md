@@ -3904,3 +3904,19 @@ taken as (a): oi listed now, built in the same re-seed window as the rest of the
   `arbace/go/table.ae`, the checker; 3.5 to 18 minutes by the host's load and up to 4 GB, most of it the table's classification of std) once the re-seed carries oi; (b)
   by hand only, the go-build step tells a broken listing anyway (after 8 minutes). *Recommended: (a)*, the checker's errors in a tamago
   configuration show nowhere else while the box is parked.
+
+## As built: mode :full's layout of a file that is not UTF-8 (2026-11-17, round 52, branch `n-ocaml-defer`)
+
+The print cell's last deferred row, `:full-not-utf8` (OC214 (a)'s residue): re's `lib_test/expect/test_pcre.ml` holds the byte 0xFF in
+an `[%expect {| ... |}]` string, so the native layout (`native/layout-text`, ocdump's tokens_form) refused the file and mode `:full`
+could not print it back. The layout now decodes such a file with byte marks (`lex/marked-text`: each valid UTF-8 sequence its
+character, each other byte U+DC00+BYTE, OC214 (a)'s mark), the dump writer (`ast.ae`'s `escape`) and the forms writer (`convert.ae`'s
+`atom-text`) write a lone mark as `\uDCxx` (the pair halves of a character above U+FFFF are not marks, as in `text-bytes`), and
+`roundtrip --text`'s judge and `print --full` write and compare `print.ae`'s `text-bytes` of the text, byte for byte. A file that is
+valid UTF-8 is laid out as before. `layout-text` keeps the old refusal behind `{:encoding :reject}`. ocdump's tokens_form still
+refuses the file: the oracle tier's `native-check --layout` would differ on it, but its default corpora (samples, stdlib) hold no
+such file. Proof: `bin/repr-ocaml roundtrip --text --corpus opam-re`, 97 of 97 text equal (it was 96 plus the rejection; 61 s, peak RSS
+839 MB); `--corpus samples` 8 of 8; `--only-list` of `tool-toplevel/strings.ml` (the cuneiform surrogates) and `parsing/docstrings.ml`
+2 of 2; `--record-results --corpus opam-re` moved the row to pass; `test/ocaml/full-known.edn` is `{}` and the class was retired
+(`divergences-print.edn` `[]`). Print cell 3,081 / 0 / 1 to 3,082 / 0 / 0; completeness 0.8588 to 0.8589, meant 0.9077 to 0.9078. No key
+moves (`arbace/repr/ocaml` is a crop path).
