@@ -60,8 +60,13 @@
 #                                        --record: test/scheme/check-aot-linux-amd64.edn), then compared with
 #                                        si's interpreted runs (.tmp/si/runs, bin/si check's)
 #   bin/si srfi [--record] [N...]       the SRFIs' programs (test/scheme/srfi/srfi-N*.sps) run on si with the libraries of scheme/lib, judged by their counted checks (SC173)
-#   bin/si srfi --aot [N...]            the same programs compiled (aot_compile) and run, judged the same way, their
-#                                        stdout compared with si's interpreted run of each ("same"/"differs")
+#   bin/si srfi --aot [--record] [N...] the same programs compiled (aot_run) and run, judged the same way (--record:
+#                                        test/scheme/check-srfi-aot-linux-amd64.edn); SI_AOT_SAME=1: each stdout compared with si's
+#                                        interpreted run ("same"/"differs")
+#   bin/si r7rs --aot [--record]        h-scheme (2026-11-17): Chibi's R7RS suite compiled (aot_run), judged as si's run
+#                                        (test/scheme/check-r7rs-aot-linux-amd64.edn)
+#   bin/si ecraven --aot [--record] [--only FILE] [NAME...]  ecraven's benchmarks compiled (aot_run), SI_TIMEOUT s each run,
+#                                        judged as si's run (test/scheme/check-ecraven-aot-linux-amd64.edn)
 #   bin/si bench [--n N]                 timings for the speed report: larceny's fib (stdin N, default 40) and the R6RS
 #                                        suite's programs, wall seconds on si, compiled (compile time apart) and on Chez,
 #                                        one after another: a TSV (program, si_s, aot_s, chez_s, compile_s) and a total
@@ -291,6 +296,28 @@ aot_compile() {
   if ! aot_go build -p 2 -trimpath -o "$out" "./scmaot/$pkg/prog" > "$log.build" 2>&1; then
     echo "go build fails: $(grep -m1 . "$log.build")" > "$out.refused"; return 0
   fi
+}
+# aot_run PKG DIR FILE O IN RUNDIR TIMEOUT [LIB...] (h-scheme, 2026-11-17: the corpora compiled, r7rs|srfi|ecraven --aot): program
+# FILE of DIR compiled (aot_compile) and run in RUNDIR with stdin IN under TIMEOUT seconds into O.out, O.err, O.rc as the
+# interpreted runs write them, O.time the seconds compiling and running; a refusal is status 3 with "aot refused: WHY" on O.err,
+# a compile-time rejection the dump's own output and status; the executable and its packages deleted after the run
+aot_run() {
+  local pkg=$1 d=$2 file=$3 o=$4 in=$5 rd=$6 to=$7; shift 7
+  rm -f "$o.out" "$o.err" "$o.rc" "$o.time"
+  local t0 t1 t2; t0=$(date +%s.%N)
+  aot_compile "$pkg" "$d" "$file" "$aot_dir/bin/$pkg" "$@"
+  t1=$(date +%s.%N)
+  if [ -f "$aot_dir/bin/$pkg.refused" ]; then
+    : > "$o.out"; echo "aot refused: $(cat "$aot_dir/bin/$pkg.refused")" > "$o.err"; echo 3 > "$o.rc"; rm -f "$aot_dir/bin/$pkg.refused"
+  elif [ -f "$aot_dir/bin/$pkg.crc" ]; then
+    mv "$aot_dir/bin/$pkg.cout" "$o.out"; mv "$aot_dir/bin/$pkg.cerr" "$o.err"; mv "$aot_dir/bin/$pkg.crc" "$o.rc"
+  else
+    (cd "$rd" && timeout "$to" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
+       "$aot_dir/bin/$pkg" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+  fi
+  t2=$(date +%s.%N)
+  echo "$t0 $t1 $t2" | awk '{printf "compile %.2f run %.2f\n", $2-$1, $3-$2}' > "$o.time"
+  rm -rf "$aot_dir/bin/$pkg" "$aot_mod/scmaot/$pkg"
 }
 # aot_cache_trim: Go's cache of the compiled programs kept under 500 MB
 aot_cache_trim() {
@@ -654,34 +681,34 @@ case $cmd in
   srfi)
     aot=0; if [ "${1:-}" = --aot ]; then aot=1; shift; fi
     if [ $aot = 1 ]; then
+      # h-scheme (2026-11-17): the programs compiled (aot_run) into .tmp/si/aot/srfi, stamped, judged by the interpreted run's judge
+      # (arbace.scheme.corpora srfi --aot: test/scheme/check-srfi-aot-linux-amd64.edn with --record); SI_AOT_SAME=1 also runs each on si
+      # interpreted and compares the stdouts (as before)
+      need_gnu_timeout
+      rec=(); sel=()
+      while [ $# -gt 0 ]; do case $1 in --record) rec=(--record); shift ;; *) sel+=("$1"); shift ;; esac; done
       [ -x "$si_light" ] || light
       aot_module; : > "$light_dir/empty.in"
-      rc=0; ran=0; mkdir -p "$aot_dir/srfi"
+      d=$aot_dir/srfi; mkdir -p "$d"; run_key_v=$(run_key si "$root/arbace/scheme/aot.ae")
+      if [ ${#sel[@]} -eq 0 ]; then find "$d" -maxdepth 1 -type f -delete; fi
       for f in "$root"/test/scheme/srfi/srfi-*.sps; do
         b=$(basename "$f" .sps); n=${b#srfi-}; n=${n%%-*}
-        if [ $# -gt 0 ]; then case " $* " in *" $n "*) ;; *) continue ;; esac; fi
-        pkg=p_srfi_$(echo "$b" | tr -c 'A-Za-z0-9\n' '_'); o=$aot_dir/srfi/$b
-        ran=$((ran+1))
-        aot_compile "$pkg" "$(dirname "$f")" "$(basename "$f")" "$aot_dir/bin/$pkg" "$root/scheme/lib"
-        if [ -f "$aot_dir/bin/$pkg.refused" ]; then
-          echo "FAIL $b: refused: $(cat "$aot_dir/bin/$pkg.refused")"; rc=1; rm -f "$aot_dir/bin/$pkg.refused"; rm -rf "$aot_mod/scmaot/$pkg"; continue
-        elif [ -f "$aot_dir/bin/$pkg.crc" ]; then
-          mv "$aot_dir/bin/$pkg.cout" "$o.out"; mv "$aot_dir/bin/$pkg.cerr" "$o.err"; mv "$aot_dir/bin/$pkg.crc" "$o.rc"
-        else
+        if [ ${#sel[@]} -gt 0 ]; then case " ${sel[*]} " in *" $n "*) ;; *) continue ;; esac; fi
+        pkg=p_srfi_$(echo "$b" | tr -c 'A-Za-z0-9\n' '_'); o=$d/$b
+        aot_run "$pkg" "$(dirname "$f")" "$(basename "$f")" "$o" "$light_dir/empty.in" "$(dirname "$f")" "${SI_TIMEOUT:-300}" "$root/scheme/lib"
+        stamp "$o" "${SI_TIMEOUT:-300}"
+        same=
+        if [ -n "${SI_AOT_SAME:-}" ]; then
+          ii=$light_dir/srfi-$b; : > "$ii.in"
           (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
-             "$aot_dir/bin/$pkg" < "$light_dir/empty.in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+             "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$(basename "$f")" < "$ii.in" > "$ii.out" 2> "$ii.err"; echo $? > "$ii.rc") || true
+          if cmp -s "$o.out" "$ii.out"; then same=" (same as si)"; else same=" (differs from si)"; fi
         fi
-        rm -rf "$aot_dir/bin/$pkg" "$aot_mod/scmaot/$pkg"
-        # si's interpreted run of the same program
-        ii=$light_dir/srfi-$b; : > "$ii.in"
-        (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
-           "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$(basename "$f")" < "$ii.in" > "$ii.out" 2> "$ii.err"; echo $? > "$ii.rc") || true
-        st=$(cat "$o.rc"); fails=$(grep -c '^FAIL' "$o.out" || true)
-        if cmp -s "$o.out" "$ii.out"; then same=same; else same=differs; fi
-        if [ "$st" = 0 ] && [ "$fails" = 0 ]; then echo "pass $b: $(tail -1 "$o.out") ($same as si)"; else echo "FAIL $b: status $st, $fails FAIL lines ($o.out, $o.err) ($same as si)"; rc=1; fi
+        echo "$b: rc $(cat "$o.rc") $(cat "$o.time"): $(tail -1 "$o.out")$same"
       done
       aot_cache_trim
-      echo "srfi --aot: $ran programs"; exit $rc
+      arbace_tool -m arbace.scheme.corpora srfi "$d" --aot --key "$run_key_v" ${rec[@]+"${rec[@]}"}
+      exit $?
     fi
     # bin/si srfi [--record] [N...]: test/scheme/srfi/srfi-N*.sps (SM6: the SRFIs as libraries under scheme/lib/srfi/) run on si
     # (the light driver) into .tmp/si/srfi; judged by the checks counted (SC173 (b)): status 0, no FAIL line, the report line
@@ -708,7 +735,7 @@ case $cmd in
     # R7RS libraries of scheme/lib/scheme and (chibi test): one result a test (SM8), judged by the file's own pass/fail,
     # every failing test in a class of test/scheme/divergences-corpora.edn; --record: test/scheme/check-r7rs-linux-amd64.edn
     rec=(); impl=si
-    while [ $# -gt 0 ]; do case $1 in --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; --chibi-test) impl=own; shift ;; --chibi) impl=chibi; shift ;; *) echo "bin/si r7rs: unknown argument $1" >&2; exit 2 ;; esac; done
+    while [ $# -gt 0 ]; do case $1 in --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; --chibi-test) impl=own; shift ;; --chibi) impl=chibi; shift ;; --aot) impl=aot; shift ;; *) echo "bin/si r7rs: unknown argument $1" >&2; exit 2 ;; esac; done
     mkdir -p "$light_dir"; : > "$light_dir/empty.in"
     "$root/bin/repr-scheme" corpus fetch chibi-r7rs > "$light_dir/fetch.log"
     corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
@@ -730,6 +757,17 @@ case $cmd in
       exit $?
     fi
     [ -x "$si_light" ] || light
+    if [ $impl = aot ]; then
+      # h-scheme (2026-11-17): the suite compiled (aot_run, the R7RS mode its imports give) and run, judged as si's run
+      # (arbace.scheme.corpora r7rs --aot: test/scheme/check-r7rs-aot-linux-amd64.edn with --record)
+      aot_module; d=$aot_dir/r7rs; rm -rf "$d"; mkdir -p "$d"
+      aot_run p_r7rs "$corpora/chibi-r7rs" r7rs-tests.scm "$d/run" "$light_dir/empty.in" "$corpora/chibi-r7rs" "${SI_TIMEOUT:-600}" "$root/scheme/lib"
+      for x in out err rc time; do mv "$d/run.$x" "$d/$x"; done
+      echo "r7rs --aot: $(cat "$d/time"), status $(cat "$d/rc")"
+      aot_cache_trim
+      arbace_tool -m arbace.scheme.corpora r7rs "$d" --aot ${rec[@]+"${rec[@]}"}
+      exit $?
+    fi
     if [ $impl = own ]; then
       # SC130 (a): the suite with Chibi's own (chibi test), vendored in scheme/vendor/chibi (its library path before scheme/lib's,
       # whose (chibi test) is SM8's); ANSI_ESCAPES_ENABLED=0: no colors; one answer a test, from the marks of its output
@@ -778,25 +816,31 @@ case $cmd in
     # --judge: no run, the last run's outputs judged again (against a reference recorded since)
     mkdir -p "$light_dir"; : > "$light_dir/empty.in"; need_gnu_timeout
     count=1; rec=(); names=(); impl=si; judge=; fresh=
-    while [ $# -gt 0 ]; do case $1 in --count) count=$2; shift 2 ;; --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; --chibi) impl=chibi; shift ;; --judge) judge=1; shift ;; --only) fresh=1; mapfile -t -O "${#names[@]}" names < <(grep -v '^#' "$2" | grep . | sed 's|^ecraven/||'); shift 2 ;; *) names+=("$1"); shift ;; esac; done
+    while [ $# -gt 0 ]; do case $1 in --count) count=$2; shift 2 ;; --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; --chibi) impl=chibi; shift ;; --aot) impl=aot; shift ;; --judge) judge=1; shift ;; --only) fresh=1; mapfile -t -O "${#names[@]}" names < <(grep -v '^#' "$2" | grep . | sed 's|^ecraven/||'); shift 2 ;; *) names+=("$1"); shift ;; esac; done
     "$root/bin/repr-scheme" corpus fetch ecraven-r7rs > "$light_dir/fetch.log"
     corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}; ec=$corpora/ecraven-r7rs
-    if [ $impl = chez ]; then d=$light_dir/ecraven-chez; chez_libdir; elif [ $impl = chibi ]; then d=$light_dir/ecraven-chibi; else [ -x "$si_light" ] || light; d=$light_dir/ecraven; fi
+    if [ $impl = chez ]; then d=$light_dir/ecraven-chez; chez_libdir; elif [ $impl = chibi ]; then d=$light_dir/ecraven-chibi
+    elif [ $impl = aot ]; then [ -x "$si_light" ] || light; aot_module; d=$aot_dir/ecraven
+    else [ -x "$si_light" ] || light; d=$light_dir/ecraven; fi
     mkdir -p "$d" "$ec/outputs"   # slatex writes outputs/z0.scm
     if [ -n "$fresh" ]; then rm -rf "$d"; mkdir -p "$d"; fi   # --only (a rotation's list): judged on its own outputs alone
     partial=; [ ${#names[@]} -eq 0 ] || partial=1
     if [ -n "$judge" ]; then names=(); elif [ ${#names[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$ec"/inputs/*.input; do names+=("$(basename "$f" .input)"); done; fi
     for n in ${names[@]+"${names[@]}"}; do [ -f "$ec/src/$n.scm" ] || { echo "bin/si ecraven: no benchmark $n" >&2; exit 2; }; done
-    run_key_v=$(run_key $impl)
+    if [ $impl = aot ]; then run_key_v=$(run_key si "$root/arbace/scheme/aot.ae"); else run_key_v=$(run_key $impl); fi
     for n in ${names[@]+"${names[@]}"}; do
       # Chez reads a program in R6RS's mode: #!chezscheme takes its own lexical syntax, --program the R7RS program's scope
-      { [ $impl = chez ] && echo '#!chezscheme'; cat "$ec/src/$n.scm"; echo; cat "$ec/src/common.scm"; echo "(define (this-scheme-implementation-name) \"$impl\")"; cat "$ec/src/common-postlude.scm"; } > "$d/$n.sps"
+      iname=$impl; [ $impl = aot ] && iname=si   # the compiled run's CSVLINE is si's, as the judge reads it
+      { [ $impl = chez ] && echo '#!chezscheme'; cat "$ec/src/$n.scm"; echo; cat "$ec/src/common.scm"; echo "(define (this-scheme-implementation-name) \"$iname\")"; cat "$ec/src/common-postlude.scm"; } > "$d/$n.sps"
       # the input: the file with its first number (the count) replaced
       awk -v c="$count" 'BEGIN{done=0} { if (!done && match($0, /^[ \t]*[0-9]+/)) { sub(/^[ \t]*[0-9]+/, c); done=1 } print }' "$ec/inputs/$n.input" > "$d/$n.in"
       s=$(date +%s)
       if [ $impl = chibi ]; then
         # SC151: Chibi 0.12.0 (CHIBI, the host's chibi-scheme) runs the same program file; the program's own imports are (scheme ...) libraries
         (cd "$ec" && timeout "${SI_TIMEOUT:-60}" "${CHIBI:-chibi-scheme}" "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      elif [ $impl = aot ]; then
+        # h-scheme (2026-11-17): compiled (aot_run), the compile's time apart from the limit, run in the corpus as si's run is
+        aot_run "p_ec_$(echo "$n" | tr -c 'A-Za-z0-9\n' '_')" "$d" "$n.sps" "$d/$n" "$d/$n.in" "$ec" "${SI_TIMEOUT:-60}" "$root/scheme/lib"
       elif [ $impl = chez ]; then
         (cd "$ec" && timeout "${SI_TIMEOUT:-60}" "$CHEZ" --libdirs "$chez_lib" --program "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
       else
@@ -804,14 +848,16 @@ case $cmd in
            "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
       fi
       stamp "$d/$n" "${SI_TIMEOUT:-60}" "$count"
-      echo "$n: rc $(cat "$d/$n.rc") $(( $(date +%s) - s )) s: $(grep -h 'CSVLINE' "$d/$n.out" | head -1)"
+      echo "$n: rc $(cat "$d/$n.rc") $(( $(date +%s) - s )) s$( [ -f "$d/$n.time" ] && [ $impl = aot ] && echo " ($(cat "$d/$n.time"))"): $(grep -h 'CSVLINE' "$d/$n.out" | head -1)"
     done
+    [ $impl != aot ] || aot_cache_trim
     if [ $impl = chez ]; then arbace_tool -m arbace.scheme.corpora ecraven-chez "$d" --key "$run_key_v" ${rec[@]+"${rec[@]}"}
     elif [ $impl = chibi ]; then arbace_tool -m arbace.scheme.corpora ecraven-chibi "$d" --key "$run_key_v" ${rec[@]+"${rec[@]}"}
     elif [ -z "${ARBACE_ECRAVEN_NOJUDGE:-}" ]; then
       # SM9: a partial run (NAME... or --only) judged against the record of the benchmarks it ran alone
       only=(); if [ -z "$judge" ] && [ -n "$partial" ]; then for n in "${names[@]}"; do only+=(--only "$n"); done; fi
-      arbace_tool -m arbace.scheme.corpora ecraven "$d" --key "$run_key_v" ${only[@]+"${only[@]}"} ${rec[@]+"${rec[@]}"}
+      aot=(); [ $impl != aot ] || aot=(--aot)
+      arbace_tool -m arbace.scheme.corpora ecraven "$d" ${aot[@]+"${aot[@]}"} --key "$run_key_v" ${only[@]+"${only[@]}"} ${rec[@]+"${rec[@]}"}
     fi ;;
   mats)
     # bin/si mats [--record] [FILE...]: Chez's mats (the corpus chez-mats) on si: each (mat NAME e ...) of a .ms file, its
