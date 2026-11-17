@@ -10453,3 +10453,20 @@ day's. doc/C23-SURVEY.md, "As built: libcpp's unterminated literals and GNU raw 
   overnight (round 52)), two negative controls in test/c/controls.edn. `bin/ci run`: 134 (139 on the old tkill); `bin/ci check
   --only` 4 of 4 and `--aot --only` 1 of 1, controls differ. LLVM's and C++'s rows not run (the lowered C++ runtime's build is
   over 1 GiB): doc/C23-SURVEY.md, "As built: abort off the main thread", has the day's commands.
+
+## 2026-11-18: correction, n-ci-thread's CS322 and CS323 renumbered CS327 and CS328 (branch `n-goc-night`, night round 52)
+
+The entry "2026-11-17: abort off the main thread, CS322 (a), CS323 (a)" above (branch `n-ci-thread`, from `next` `42bf8614b`)
+numbered its two decisions CS322 and CS323, which `n-c-defer` had already taken (CS322: `#embed`'s parameters as libcpp parses
+them; CS323: the C lexer's two deferred classes), and `n-c-lex` took CS324 to CS326. Stacked on `n-goc-night` (from
+`mac/n-review-a` `413012075`, with `mac/n-go-gcm` `9a3ec7129`, `mac/n-c-lex` `e0dca79f8` on `mac/n-c-defer` `95615687e`, then
+`mac/n-ci-thread` `c48015a93`), they are CS327 (a) (crt's `tkill` and `tgkill` take any live thread's id, the signal
+process-directed) and CS328 (a) (`test/c/selfref.ae`'s ci-run rule reads "ci-run verdict: exit N."): doc/C23-SURVEY.md's "As built:
+abort off the main thread" and `test/c/run/README` renumbered; the code's comments named no CS number. The entries above keep their
+numbers. The merges' conflicts were the journal's and the survey's appends (both kept, in order) and `test/reap/matrix.edn` and
+`test/crops/scores.edn`, re-recorded on the stack; no record row was changed by two branches.
+Checked on the stack (light, each process under 1 GiB, stopped by PID when over): `bin/goi check --list` of typeparam/pragma.go,
+typeparam/issue54497.go and devirtualization.go on the gate's executable `e8e0d017243dca8a9f9f` with `ARBACE_PATH` (3 of 3 pass,
+peak 0.80 GB at `GOMEMLIMIT=600MiB`); `bin/ci dg --essential` (92 of 92, the control differs, 0.73 GB); `bin/reap --record` (Go
+eval 1762 / 70 / 2, C read 5237 / 226 / 12, C eval 2246 / 34 / 0, AOT 2254 / 26 / 0), `bin/crops-score --record`, `--judge
+--strict`, `bin/records-check` (9 pairs, 0 problems), `bin/gate --plan`.
