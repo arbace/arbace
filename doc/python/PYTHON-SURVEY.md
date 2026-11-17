@@ -7465,6 +7465,21 @@ the VM. Base 201 cb8457fc0, then 317's merge (80a6f9eaa, 201 onto next): reap's 
   test_manager on goi) leaves the record without a problem: the judge's "N failing" line and exit 3 are the night's signal.
   Pre-existing: `bin/pyi divergences` reports two shadowed names (test_capi's test_no_FatalError_infinite_loop under
   `:testcapi`, test_pyexpat's test_error_path_no_crash under `:cpython-only`).
+- **Round 2** (on python-1117-on-next merged with next d694a2f7e, which brings h-pyi-runtime's `runtime_from_source`). With it a
+  stale stage 0 runs the checkout's go/arbace/py (and libm) interpreted from source (`ARBACE_GOI_FROM_SOURCE`), so
+  `runtime_state` reads that decision: `interpreted`, `compiled COMMIT`, `checkout COMMIT` (the checkout's interpreted) or
+  `stale COMMIT N`. Stale can now only come from `PYI_RUNTIME=compiled` on an older executable, or from ci and crt, which
+  runtime_from_source leaves compiled. `runtime_guard` still refuses a `--record` in every state but compiled. The
+  checkout's runtime interpreted is correct, but it runs at goi's speed and has goi's own divergences (this slice: 1 h 54
+  min against 31 min, test_manager's 82 and three more failing on goi alone), so it is not the record the gate's compiled
+  checks judge against. Off a record, a stale runtime fails unless `PYI_RUNTIME=compiled` asked for it.
+  `bin/pyi records` takes the state its checks will see (`records_state`). DECISION 1 (a) (the user): pyi-check,
+  pyi-check-aot-goi and pyi-runtime run with `ARBACE_HOST_EXE="$GATE_EXE" PYI_RUNTIME_REQUIRE=compiled` (`:prog`,
+  `go-build`). The gate's build at the checkout's key compiles the checkout's runtime in, since go/arbace/py and libm are
+  in gate_key, and any other state fails the step; `bin/pyi runtime check` passes through the guard. DECISION 2 (a): the
+  record's header names its modules (`;; (modules M ...)`, kept across writes), and reap wants the methods of every one.
+  Re-judged on this slice's run, reap reports 92 missing methods, the control without the line 10: test_manager's 82 had
+  been silent.
 
 ## As built: pyi runs the checkout's runtime when stage 0's is older (2026-11-17, h-pyi-runtime; round 51, Mac task 317's DECISION 2)
 
