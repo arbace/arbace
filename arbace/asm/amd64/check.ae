@@ -77,6 +77,8 @@
             :lfi? (boolean (re-find #"-m?triple[= ]+\S*lfi" r))
             :other-tool? (boolean (or (re-find #"filetype[= ]obj" r) (re-find #"llvm-(objdump|readobj|readelf|nm|dwarfdump)" fc)
                                       (re-find #"llvm-(objdump|readobj|readelf|nm|dwarfdump)" r)))
+            ;; AXS97 (a): a run that prints LLVM's debug trace (-debug-only=..., an assertions build's)
+            :debug? (boolean (re-find #"-debug-only" r))
             :options? (boolean (re-find #"x86-sse2avx|x86-align-branch|x86-pad-|x86-branches-within|mc-relax-all" r))
             ;; --defsym's names: the print level follows the file's conditionals for them (AXS32 (a)'s part)
             :defsym (let [ds (map second (re-seq #"-?-defsym[= ]([A-Za-z_.$][\w.$]*)=" r))] (when (seq ds) (set ds)))}))))
@@ -374,6 +376,22 @@
                (if-let [c (:print/unsupported (ex-data ex))] [l c (.getMessage ex)] [l :crash (str ex)]))
              (catch Throwable ex [l :crash (str ex)]))))))
 
+(def ^:private obj-judged
+  ;; AXS95 (a): the files whose objects object-check holds to llvm-mc's recorded ones, their mc-x86-obj rows passing
+  ;; (test/asm/object-results-amd64.edn, beside the table: REPR_ASM_TABLE's checkout, else the working directory's)
+  (delay
+    (let [t (System/getenv "REPR_ASM_TABLE")
+          f (or (System/getenv "REPR_ASM_OBJ_RESULTS")
+                (if t (str (.getParentFile (.getParentFile (.getParentFile (.getAbsoluteFile (java.io.File. ^String t))))) "/test/asm/object-results-amd64.edn")
+                    "test/asm/object-results-amd64.edn"))]
+      (set (for [[id r] (read-string (slurp f)) :when (and (= r :pass) (.startsWith ^String id "mc-x86-obj/"))]
+             (first (str/split (subs id (count "mc-x86-obj/")) #"@")))))))
+
+(defn- other-tool-class
+  "The class of another tool's CHECK text: :other-tool when object-check judges the file's object, else :object-unjudged."
+  [^String path]
+  (let [n (.getName (java.io.File. path))] (if (contains? @obj-judged (subs n 0 (max 0 (- (count n) 2)))) :other-tool :object-unjudged)))
+
 (defn check-file
   "One file's row: {:stated N :met N :by {CLASS N} :errors [MET STATED] :fails [[LINE CLASS DETAIL] ...]}."
   [^String path flags]
@@ -410,7 +428,8 @@
                            (when (and (nil? @cross) (not (:intel? r)) (not (:error? r)) (not (:lfi? r)))
                              (vreset! cross (cross-judge stmts (:mode r) (:items read))))
                            {:enc (if (:encoding? r) (judge-encodings cs stmts) (vec (for [[l _ c] cs :when (enc-content c)] [l :not-shown])))
-                            :txt (cond (:other-tool? r) (txt-as :other-tool)
+                            :txt (cond (:debug? r) (txt-as :debug-trace)
+                                       (:other-tool? r) (txt-as (other-tool-class path))
                                        (:options? r) (txt-as :options)
                                        (:lfi? r) (txt-as :lfi)
                                        ;; the statements the run's --defsym selects
