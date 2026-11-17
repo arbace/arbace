@@ -1504,3 +1504,24 @@ binary module, the rest in its order). The proposal's relaxation of `br_on_cast`
 
 wasm's cells: read 8,068 -> 8,281 pass (deferred 215 -> 0), eval 62,559 -> 63,057 and AOT 62,562 -> 63,060 (deferred 500 -> 0),
 print 2,871 -> 2,935; completeness 0.9892 -> 0.9996 (meant 1.0000): every deferred row of the crop built.
+
+## As built: n-wasm-defer, the i64 limit's message (2026-11-17, branch `n-wasm-defer`, round 52)
+
+With 326 and 327 merged (n-review-d) no deferred or pending row is left: read 8,281 pass and 13 by design, eval and AOT 2 by
+design each (and eval's 3 `:budget`, WAS35), print none; completeness 0.9996, meant 1.0000. Of the classes, one was not a conflict:
+`custom-page-sizes-i64-message` said wg-3.0's lexer reads a limit past 2^64 as "constant out of range", but wg-3.0's own
+`interpreter/text/parser.mly` (the pinned spec, its `nat64`, which reads the limits, `offset=` and `align=`) says "i64 constant out of
+range", as the proposal's script does. `arbace.repr.wasm.text`'s `nat64` now says so (`nat`, the 32-bit one, keeps "constant out of
+range": wg-3.0's `nat32` is not what the root scripts' cases reach, and none states an i32 message); no root script asserts a
+malformed limit, offset or alignment past 2^64. The class is removed, its row `msg/proposals/custom-page-sizes/memory_max_i64.wast#5`
+passes (messages, a beside source: 5,337 -> 5,338 of 5,346; the cells' counts and the score unchanged). Taken overnight (round 52):
+the message follows wg-3.0's parser (recommended; the alternative, keeping the class, rested on a misreading of the reference).
+
+The other classes stay by design: `threads-before-wasm-3.0` and `custom-page-sizes-flag-message` are scripts that contradict Wasm 3.0's
+own, and `custom-descriptors-br-on-cast-relaxed` is queue 327's DECISION; `go-speed`'s three programs (finprofiled, issue78081,
+issue79186) are wai's interpretive speed (WAS35), no light check can move them.
+
+Checks (each under 1 GiB): `bin/repr-wasm wast --only` the five custom-page-sizes scripts (176 cases, msg 133 of 133), twelve root
+scripts of limits, offsets and alignment (961, msg 375 of 375) and `test/wasm/essential-wast.txt` (2,431; the ten controls fail as they
+must); the row re-recorded by hand from the `--only` run's rows (`--only` does not `--record`; the run's 352 rows differ from the
+record in that one); `bin/reap --record`, `bin/crops-score --record`, then `bin/reap` and `bin/crops-score --judge --strict`, 0 problems.
