@@ -253,6 +253,9 @@ At the merges, in order:
    classed once PY7-runtime fixes `divergences-synth.edn`'s classes; a program pyi on goi runs otherwise than the compiled one
    shows as `pyi-differs` in the eval cell); remove both `:until "PY8 ..."`; `bin/reap --record` → AOT `138 / 0 / 13`.
 3. PY7 (`mac/201-python-py7check`): `bin/pyi check --record` (the night's); remove `:until "PY7 ..."`; `bin/reap --record`.
+   Since queue 321 steps 2 and 3 are one command, `bin/pyi records` (`make pyi-records`): the host checked to run the
+   checkout's runtime, both records, the `:until` dropped, `bin/reap --record`, `bin/crops-score --record`
+   (PYTHON-SURVEY.md, "As built: 321").
 4. R1 written: `bin/repr-python roundtrip --record`, `--text --record`, `lex-check --record`, `parse-check --full --record` on
    amd64; the read and print cells then count their passes (the "+" goes).
 5. GT9's planner changes, then the block of §2; `bin/gate --plan` and `bin/gate --audit pyi-aot-essential python-read-essential`.

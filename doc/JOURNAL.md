@@ -9717,6 +9717,19 @@ crops-score's maturity counts essential steps); keying them without stage 0 (wro
 command for the crops (one more thing to remember by day). Result: after a re-seed the essential gate runs the core alone,
 29.5 minutes of serial work measured (the plan's simulation 2:35 → 1:08 hours); a crop's change runs its subsets only.
 
+## 2026-11-17: review of the Mac VM's Python branches (317's 80a6f9eaa, 318 84bc8fd21, 320 8b5fac0b4; h-review-mac-py)
+
+An independent review before the branches land on next. 317's merge of 201 (cb8457fc0) onto next (e4a7a30f3) is clean: its diff
+against next is 201's 31 files, the three changed on both sides equal git merge-file's clean merge, and the merged runtime passes
+`bin/pyi runtime vet` (go vet and go test of py and pyctypes, queue 261's ctypes work against 296-316's runtime). Fixed on
+h-review-mac-py (from 320): the eval fact and the judge's Lib/test cases in test/crops/independence.edn, stale since queues 234 and
+279 (bin/pyi check's runner is compiled by pyi's AOT, no python3; a stub run on amd64 proved it): eval 0 to 1, judge 0.196 to
+0.910, Python's independence 64 to 98 (test/crops/scores.edn recorded). Found, not fixed: 317's splice of
+test/gate/crops/python.edn as is makes the planner refuse the table (56 pins and rotation universes not yet recorded), so the
+main host's records come first (DECISION F1 of the review, (a) recommended); 320 needs 318's known-file fix on next's runtime
+(the koi8-r and cp1251 entries GONE, reproduced). Alternatives considered for F1: splicing only the steps whose files exist, or
+a planner exception for a :full step's missing files (rejected: weakens a check every crop relies on).
+
 ## 2026-11-17: Clojure's stale deferred rows recorded, gen-class's exposer, Go's by-design audit (branch `h-clojure-go`, from `next` `e4a7a30f3`)
 
 The host burst (light checks only). Clojure: the eval level's deferred classes `:q1-typing`, `:desktop` and `:javadoc-url` were
