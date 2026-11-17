@@ -705,8 +705,12 @@
       (let [tr (c/def-parent ad)
             nm (if (number? ad) (second (:data (c/def-of ad))) (c/path-name ad))
             s (snapshot)]
-        (if-let [[ip iargs _] (let [r (impls-for self tr (vec (rest args)))] (when (and (vector? r) (not= :env (first r))) r))]
-          (let [v (if (number? ip)
+        (if-let [[ip iargs0 _] (let [r (impls-for self tr (vec (rest args)))] (when (and (vector? r) (not= :env (first r))) r))]
+          (let [;; RIND5: a generic associated type's own arguments after the impl's (`<Simd<f32, 4> as SimdFloat>::Cast<i32>`,
+                ;; the impl's `type Cast<T> = Simd<T, N>`: N the impl's, T the projection's own)
+                own (drop (count (fresh-args tr)) args)
+                iargs (into (vec iargs0) own)
+                v (if (number? ip)
                     (some (fn [d] (when (and (= ip (:parent d)) (= [:type nm] (:data d))) (erase (c/subst (c/type-of (:id d)) iargs)))) (c/defs))
                     (some (fn [[n k _ v]] (when (= n nm) (erase (c/subst (c/sty->ty v) iargs)))) (:items (get (:impls c/*si*) ip))))]
             (if v (deep v) (do (rollback! s) t)))
@@ -835,8 +839,12 @@
   []
   (let [pre (str c/*root-crate* "::prelude::rust_" (if (= 2015 c/*edition*) 2015 c/*edition*))
         kids (fn [m] (for [ch (:children (get (:mods c/*std*) m)) :when (= "Trait" (:kind ch))] (:path ch)))
+        ;; RIND5: a macro's `use $crate::..` (simd_swizzle!'s `use $crate::simd::Swizzle` in its block): the macro's crate
+        ;; (the use's :krate, else core, as res-def takes a std macro's $crate)
         uses (for [d (c/defs) u (:uses d)
-                   :let [r (try (c/resolve-written (mapv :ident (:path u)) (:id d)) (catch Throwable _ nil))]
+                   :let [names (mapv :ident (:path u))
+                         names (if (= "$crate" (first names)) (assoc names 0 (or (:krate u) "core")) names)
+                         r (try (c/resolve-written names (:id d)) (catch Throwable _ nil))]
                    :when (= :ext (first r))
                    p (if (= :glob (:use u)) (kids (second r)) [(second r)])
                    :when (get (:traits c/*si*) p)]
@@ -2532,6 +2540,7 @@
         facts (atom [])]
     (binding [*vars* (atom {}) *next-var* (atom 0) *facts* facts *obligations* (atom []) *anon-consts* (atom 0) *budget* (atom (or (some-> (System/getenv "TYPECK_BUDGET") parse-long) 200000)) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {}) *scalar-fixes* (atom []) *casts* (atom []) *closures* (atom []) *closure-calls* (atom []) *owner* owner *env* [{}] *loops* nil]
       (c/in-def (:id d)
+       (binding [c/*body* (c/body-fn (:id d))]
         (if (#{"Fn" "AssocFn"} k)
           (let [sig (erase (c/fn-sig (:id d)))
                 env (atom {})
@@ -2560,7 +2569,7 @@
                 t))))
           (let [_ (doseq [l (ty-consts (:ty n))] (anon-const! l false))
                 t (erase (c/type-of (:id d)))]
-            (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t))))))
+            (binding [*ret* t] (let [x (check-expr (:expr n) t)] (coerce! (:expr n) x t)))))))
       (solve-obligations!)
       (fallback!)
       (check-casts!)
@@ -2631,7 +2640,7 @@
             *budget* (atom 200000) *select-cache* (atom {}) *norm-cache* (atom {}) *param-env-cache* (atom {})
             *scalar-fixes* (atom []) *casts* (atom []) *closures* (atom []) *closure-calls* (atom []) *env* [{}] *loops* nil
             *scope-traits* (or *scope-traits* (std-traits-in-scope))]
-    (c/in-def (:id d) (f))))
+    (c/in-def (:id d) (binding [c/*body* (c/body-fn (:id d))] (f)))))
 
 (defn copy-type? [t] (copy-ty? t))
 

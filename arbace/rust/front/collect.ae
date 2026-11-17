@@ -581,6 +581,7 @@
 (def ^:dynamic *late* #{})       ; the late-bound lifetimes of the signature being lowered
 (def ^:dynamic *elided* :erased) ; what an elided lifetime is: :anon (a signature), :static (a const's type), :erased
 (def ^:dynamic *module* 0)       ; the module whose items an unresolved name is looked up in
+(def ^:dynamic *body* nil)       ; RIND5: the function whose body is being checked (its block items are in scope there)
 
 (defn- scope-param [nm]
   (some (fn [g] (some #(when (and (= nm (:name %)) (not= :lifetime (:kind %))) %) (all-params g))) *scope*))
@@ -674,8 +675,10 @@
     (when-not (contains? *looking* k)
      (binding [*looking* (conj *looking* k)]
     (or (some (fn [x] (when (and (= module (:parent x)) (#{[:type nm] [:value nm]} (:data x)) (not (str/starts-with? (str (:kind x)) "Ctor"))) [:local (:id x)])) @*defs*)
+        ;; RIND5: a macro's `use $crate::..` (simd_swizzle!'s block): the macro's crate, the use's :krate (else core)
         (some (fn [u] (when (and (= :single (:use u)) (= nm (:ident u)))
-                        (resolve-written (mapv :ident (:path u)) module)))
+                        (let [names (mapv :ident (:path u))]
+                          (resolve-written (if (and (= "$crate" (first names)) (nil? resolve/*crate-path*)) (assoc names 0 (or (:krate u) "core")) names) module))))
               (:uses d))
         (some (fn [u] (when (= :glob (:use u))
                         (let [m (resolve-written (mapv :ident (:path u)) module)]
@@ -776,12 +779,15 @@
               (let [nm (:ident (first segs))]
                 (cond (= "Self" nm) (if (and *self-ty* (not= *self-ty* [:param 0 "Self"])) [:self-alias] [:self-param])
                       (scope-param nm) [:param (scope-param nm)]
-                      (lookup-name nm *module* true) (let [r (lookup-name nm *module* true)]
+                      (lookup-name nm (or *body* *module*) true) (let [r (lookup-name nm (or *body* *module*) true)]
                                                        (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
                       (get prim-tys nm) [:prim nm]
                       :else [:unresolved nm]))
               (and (> (count segs) 1) (not (:lang path)) (nil? (get *res* (let [sp (:span path)] (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count (:ident (first segs))))])))))
-              (when-let [r (resolve-written names *module*)]
+              ;; RIND5: a name of the body's block items (a macro 2.0 expansion's `struct Impl` in main's block) before the module's
+              (when-let [r (or (when (and *body* (not (#{"self" "super" "crate" "$crate" "std" "core" "alloc"} (first names))))
+                                 (resolve-written names *body*))
+                               (resolve-written names *module*))]
                 (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
               :else nil))
       [:unresolved (str r)])))
@@ -848,10 +854,25 @@
   [x]
   (eval-int-expr x))
 
+(defn- array-literal-len
+  "RIND5: the length of an array expression, when the expression alone gives it: `[a, b, c]` (its elements), `[x; N]` (a
+  literal N), through parentheses"
+  [x]
+  (when (map? x)
+    (case (:kind x)
+      :array (when (:exprs x) (count (:exprs x)))
+      :repeat (let [c (:count x)] (when (and (map? c) (= :lit (:kind c))) (some-> (or (:symbol (:lit c)) (:text (:lit c)) (:lit c)) str (str/replace #"_?usize$|_" "") parse-long)))
+      (:paren :group) (array-literal-len (:expr x))
+      nil)))
+
 (defn lower-const-arg [x]
   ;; a const argument: a literal's value, a const parameter, else an unevaluated anonymous constant, printed by its
   ;; expression's source text (pretty_print_const's span_to_snippet)
   (cond
+    ;; RIND5: constant evaluation's first step, `[..].len()` of an array literal (simd_swizzle!'s `Swizzle<{$index.len()}>`):
+    ;; the const fn's value, `<[T; N]>::len` being N
+    (and (map? x) (= :method (:kind x)) (= "len" (str (:ident (:seg x)))) (empty? (:args x)) (array-literal-len (:receiver x)))
+    [:cval (str (array-literal-len (:receiver x)))]
     (and (map? x) (= :binary (:kind x)) (eval-int-expr x)) [:cval (str (eval-int-expr x))]
     (and (map? x) (= :lit (:kind x))) (let [l (:lit x)] [:cval (str (or (:symbol l) (:text l) l))])
     (and (map? x) (= :path (:kind x))) (let [nm (:ident (peek (:segs (:path x))))]
@@ -1513,6 +1534,17 @@
               (= "Trait" (:kind d)) [:param 0 "Self"]
               (or (:module d) (= :crate (first (:data d)))) nil
               :else (recur (:parent d)))))))
+
+(defn body-fn
+  "RIND5: the function whose body holds ID (ID itself when a function, else its nearest function ancestor: a closure's, a
+  block item's), nil at module level"
+  [id]
+  (loop [id id]
+    (let [d (def-of id)]
+      (cond (nil? d) nil
+            (#{"Fn" "AssocFn"} (:kind d)) id
+            (or (:module d) (= :crate (first (:data d)))) nil
+            :else (recur (:parent d))))))
 
 (defmacro in-def [id & body]
   `(let [id# ~id]

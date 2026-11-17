@@ -10298,3 +10298,16 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
 - **Results.** eval 812 / 62 / 35 to 817 / 62 / 30 (conc037, conc038, conc059, numsparks001, ffi014 pass; T21651 and
   setnumcapabilities001 correct with no limit, 270 s, so `:speed`; hs_try_putmvar003 `:test-c`); AOT 137 / 1 / 1 to 138 / 1 / 0
   (ffi014). The classes `:threaded-only` and `:threaded-way` removed; a negative control added (conc038 against conc037).
+
+## 2026-11-17: RIND5's swizzle: simd_swizzle!'s block resolved, `[..].len()` evaluated (branch `h-rust-indep`)
+
+- vectors' `main` was refused at `Impl::concat_swizzle`. Probed with the pipeline over a seven-line program: collect's res-def
+  looked the expansion's names up in the enclosing module, not main's block (`collect/*body*` now, bound by typeck's check-body and
+  with-solver); a macro's `use $crate::simd::Swizzle` resolved `$crate` as a name (now the macro's crate, in lookup-name and in
+  typeck's traits in scope); the impl's trait argument `{$index.len()}` stayed unevaluated (lower-const-arg evaluates `[..].len()` of
+  an array literal: constant evaluation's first step). Unit cases `bin/rust-front rind-test` (test/rust/front/rind_test.ae,
+  swizzle1.rs) with a negative case; `bin/rust-front essential` equal. Alternative: a general CTFE of the const argument (the
+  interpreter over the anonymous constant's MIR), larger; the literal's length covers simd_swizzle!, whose index is always one.
+- Then vectors' `f.cast::<i32>()`: a generic associated type's own arguments in normalize* (the impl's then the projection's own),
+  and MIR forms' constant arguments `(cst V)`. vectors is own (`bin/rust-front rsi-build vectors`, 2.04 GB): 5 of the eval cell's 5
+  cases at C1. Independence 80 (C2, C3, C4, C6 rustc's).
