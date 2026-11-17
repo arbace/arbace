@@ -34,8 +34,10 @@ PYREC_LIB=${REPR_PYTHON_ORACLE_LIB:-$root/test/oracle-records/oracle.bash}
 if [ -f "$PYREC_LIB" ]; then
   . "$PYREC_LIB"
   PYREC_MODE=${REPR_PYTHON_ORACLE:-records}
-  # :python's identity (bin/gate's :host-ids :python recipe) until the shared library knows it (queue 213's patch)
-  if [ "$(oracle_host_id python 2>"$TMPDIR/pyrec-id.err")" = none ] && grep -q 'no identity recipe' "$TMPDIR/pyrec-id.err"; then
+  # :python's identity (bin/gate's :host-ids :python recipe) where the shared library does not know it (queue 213's patch;
+  # since queue 320 test/oracle-records/oracle.bash's oracle_python_id, the same recipe)
+  # (asked of the library without computing the identity: that runs python3 --version, and records mode runs no python3)
+  if ! declare -F oracle_python_id >/dev/null; then
     eval "pyrec_host_id_base() $(declare -f oracle_host_id | tail -n +2)"
     eval "pyrec_host_version_base() $(declare -f oracle_host_version | tail -n +2)"
     oracle_host_id() { if [ "$1" = python ]; then pyrec_python_id; else pyrec_host_id_base "$@"; fi; }
