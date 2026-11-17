@@ -9974,3 +9974,30 @@ ClassDescs), `SystemLoggers.isSystem`, ClassCache computing outside the map, and
 a finally that jumps discards the pending exception (JLS 14.20.2; t03210). Alternatives considered: System.Logger in jrt itself
 (JCS155 (a), a Go port of the interface and LoggerFinder: larger, and the derivations follow the rule F24 and JMX-1 already use);
 bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no ConstantDesc).
+
+## 2026-11-17: A8c, the declarations outside the world completed (branch `h-ghidra-20`, next `e4a7a30f3` with `ghidra-a8` merged)
+
+- Why: after A8/A8b the Ghidra demo's `bin/run-g1 analyze` (arbace-ghidra `results/analyze-g1.edn` `:after-a8`) left 20 failing
+  classes, none loaded by the JDK's runs, in four causes. Fixed generically in j2g, Ghidra unedited, no program variant
+  (`b2110296a`; J2G-SPEC §4.1, "A8c"; `arbace/j2g/outside.ae`, `arbace/classes/analyze.ae`, `arbace/j2g/{model,code,decls,world,main}.ae`):
+  1. java.base's API (`java.*`, `javax.*`) that neither the world, jrt nor the edge has is declared from the platform's java.base
+     class files (`java.base (the platform)`): SecurityManager, java.lang.foreign. A8 had left java.base out; the change is kept
+     away from the world: such a class is a member's type only in a program's own class (`m/member-desc? owner d`), so the
+     world's classes keep the members jrt's hand-written Go knows; jdk.internal and sun stay refused.
+  2. An edge class's missing facets read from java.base's class file (Thread.UncaughtExceptionHandler's and
+     ReentrantReadWriteLock's generics), as A8 did for the other modules; the edge's answers kept, not reported as outside.
+     Chosen over `bin/j2g-edge update`: the edge records the world's questions, a program's are its own.
+  3. The world's variants of platform classes completed (`outside/completion`, `analyze/*completion*`): jrt's java.awt.Color
+     takes Paint and the cut ColorSpace members from java.desktop's class, the members derived `:outside-member` methods whose Go
+     bodies return J2g_Missing's value. Alternatives: Paint into the world with a reduced overlay (a conversion, a Paint without
+     createContext, and GColor's ColorSpace calls still failing); stubs at the call sites (Color would still be no Paint).
+     Constructors, fields and interfaces are never completed, nor a method the class inherits concretely.
+  4. Not an overload: ghidra.util's files share a namespace, and DateUtils' import of java.util.function.Predicate, read last,
+     won over AddressRangeIterators' commons-collections4 Predicate. A file's own imports now resolve first
+     (`analyze/file-import`, the world unit's `:file-imports`), as JLS 7.5.1 means.
+- Proof: `bin/j2g-unit` 110 pass (23 new checks in `test-outside-completion`, fixtures `test/j2g/unit/outside/q/{Paints,Guarded,
+  Imports,Watched}.ae`, each fix with its negative control), the 7 failures next has too (invokers, type annotations) unchanged.
+  `bin/run-g1 analyze` by day under the heavy lock (the plan with guava's sources module): 15,271 classes, 0 failing (was 20),
+  45 min 55 s, peak 6.25 GiB; 771 classes declared, 9 of java.base (arbace-ghidra g1g `3f086eb`, `:after-a8c`).
+- Left: the translation of A8c (Color's Go methods, a class extending the outside SecurityManager) is first compiled by the
+  build (§8's jobs at the merged key); log4j-core's PropertyChangeEvent stays a stub until GH5 (iii)'s conversion.

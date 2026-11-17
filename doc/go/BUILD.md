@@ -493,7 +493,9 @@ data, `:java`:
   `:outside` the whole class is refused (A7). Without `:outside` nothing changes. The fixture `test/programs/outside`
   (java.beans, java.awt.Desktop, javax.sql and the binary-only toy jar `org.example:toyext:1.0`; its runs `reach`
   and `reach-jar` the negative controls, which must fail naming the source); `bin/java-project test` checks
-  `outside.args`, `bin/j2g-unit`'s `test-outside` the declarations and the stubs.
+  `outside.args`, `bin/j2g-unit`'s `test-outside` the declarations and the stubs. Since A8c (2026-11-17, J2G-SPEC
+  §4.1) `:platform` also declares java.base's API the world and the edge lack and completes the world's variants
+  of platform classes (java.awt.Color's Paint and ColorSpace members), with no change to `outside.args`.
 - **The commands.** `bin/java-project plan|sources|classes|read MODEL WORK` (MODEL a program's
   directory or a plan file holding the same map; `--root`, `--repository`, `--only M,...`, `--check
   front|nread`: each module also read from the native trees, the forms equal to javac's trees' as

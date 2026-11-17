@@ -652,8 +652,9 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   modifiers, an inner class's from InnerClasses, ACC_SUPER off; no super for an interface; the fields with their
   constants; the methods and constructors, an inner member class's without the outer instance; the generic
   signatures; an annotation type's retention and targets; `@FunctionalInterface` and its method; an enum's constants;
-  a record's components), read back as the edge's are (`edge/facets-value`). java.base is never a source: its classes
-  outside the world are jrt's, the cut ones or refused on purpose. An edge class keeps every facet the edge gives; one
+  a record's components), read back as the edge's are (`edge/facets-value`). java.base was no source in A8 (its
+  classes outside the world jrt's, the cut ones or refused on purpose); since A8c (below) its API is. An edge class
+  keeps every facet the edge gives; one
   it lacks (java.desktop's `JPanel` recorded without its generics) is the class file's when the class is a platform
   class. A class so declared is outside the world: a class naming it analyzes and is translated, and each operation on
   it is a `J2g_Missing` stub that throws `UnsupportedOperationException` when reached, `class C is outside the closed
@@ -672,6 +673,35 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   `bin/j2g-unit`'s `test-outside` (the fixture test/j2g/unit/outside, with the control that without the declarations
   the classes are refused); the program `test/programs/outside`, its runs `reach` and `reach-jar` the negative
   controls.
+- **A8c** (2026-11-17, branch `h-ghidra-20`: the Ghidra demo's analysis after A8 left 20 failing classes, none
+  run by the JDK's runs). Four generic completions of the declarations, all under `--outside-platform` alone:
+  (1) **java.base's API** (`java.*`, `javax.*`) that neither the world, jrt nor the edge has is declared from the
+  platform's java.base class files, its source `java.base (the platform)` (`outside/base-origin`;
+  `java.lang.SecurityManager`, `java.lang.foreign.FunctionDescriptor` and `StructLayout`); java.base's internal
+  packages stay refused. Such a class is a member's type (Go's `any`) only in a program's own class
+  (`nm/own-class?`; `m/member-desc? owner d`, `member-mdesc?`, the call sites' `mdesc-missing owner`): the world's
+  classes keep the members they have without the declarations, jrt's hand-written Go being written against them.
+  (2) **An edge class's missing facets** are read from java.base's class file too (A8 did so for the other modules):
+  `Thread.UncaughtExceptionHandler`'s and `ReentrantReadWriteLock`'s generics, which the edge recorded only for the
+  world's questions; such a class keeps the edge's answers, is not outside and is not reported. (3) **The world's
+  variants completed** (`outside/completion`, `analyze/*completion*`): a world class that is a platform class outside
+  java.base (a jrt variant: `java.awt.Color`, which jrt cut of `Paint` and of its `ColorSpace` members) takes from
+  the platform's class the interfaces the world has not and that are declared outside (Color implements
+  `java.awt.Paint`, so `Graphics2D.setPaint(Color)` resolves) and its public and protected methods, neither
+  abstract, synthetic nor bridges, that it neither has nor inherits concretely and whose descriptors' classes exist
+  (`getComponents(ColorSpace, float[])`, `getColorSpace()`, `createContext(...)`): derived `:outside-member` methods,
+  whose Go bodies return `J2g_Missing`'s value, `method C.m(D) is outside the closed world: the world's C lacks it;
+  declarations only, from java.desktop (the platform)` (`decls/outside-member-reason`). Constructors and fields are
+  left out, and an interface is never completed (a method there would be every world implementor's). (4) **A file's
+  own imports** (`analyze/file-import`, the unit's `:file-imports`, j2g's world): the files of a package share
+  one namespace, whose imports were the union of theirs, the last file's winning a simple name two files import
+  (Ghidra's `ghidra.util`: DateUtils' `java.util.function.Predicate` over AddressRangeIterators' commons-collections4
+  `Predicate`); the file's own single-type import now resolves first, as JLS 7.5.1 means (not an outside matter:
+  any program's two files can meet it). `bin/j2g-unit`'s `test-outside-completion` (the fixtures `q/Paints`,
+  `q/Guarded`, `q/Imports` and `q/Watched` of test/j2g/unit/outside, each fix with its negative control: without
+  the completion Paints is refused, with the edge alone Guarded, Watcher and Handler, a world class's member never
+  names a java.base outside class, jdk.internal is not declared, without the file's imports Supplier is the
+  namespace's).
 
 ### 4.2 Go packages
 
