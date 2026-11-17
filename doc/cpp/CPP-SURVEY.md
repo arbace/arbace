@@ -8196,11 +8196,40 @@ Arbace's front end (CX12, 1), and 3,774 are judged on clang's recorded dumps (cx
 case-inputs` pass; `bin/crops-score --crop cpp` with a fabricated 60-own record 0.683 (eval), removed after; `bin/crops-score --judge
 --strict` exit 0, 0 problems; `bin/reap` 0 problems; `bin/gate --plan` exit 0.
 
+### Resumed: the slice proof on the VM (2026-11-17, the pinned tarballs and the packs fetched)
+
+The coordinator fetched the gcc-15.2.0, llvm-project-23.1.5 and musl-1.2.6 tarballs at their pins; the packs cpp-ir-samples,
+cpp-runtime-ir and cpp-ir-gxx-dg-run came from the mirror (`bin/oracle-records fetch`). Stage 0 next's 3c48859d, arm64, one or two
+processes, each under 2.5 GB.
+
+**Found and fixed: Sema read a header's text from the host.** `arbace.cpp.sema`'s `text-of` (a declaration's text: its qualifier,
+its written arguments) opened a header by the absolute name the preprocessor gave it, `/usr/include/c++/15.2.0/...`, from the host,
+while the preprocessor itself had read that header from the target tree (`ARBACE_C_SYSROOT`, arbace.repr.c.pp's `sysroot-file`). On
+amd64 the host's installed libstdc++ held the same bytes (834 of 834), so it went unseen, and the code generator read the host's
+headers at check time against CP241 (b). On arm64 `x86_64-alpine-linux-musl/bits/c++config.h` is absent: the text fell back to the
+main file's and every program with a header crashed (`StringIndexOutOfBoundsException` in `qualifier-before`, `__terminate`'s
+declaration at offset 9923). `located-file` now takes a name under the tree's roots from the tree, any other as before
+(`test/cpp/selftest/sysroot-text.sh`, with its control: a name outside the roots stays the host's).
+
+| Run | Result |
+|---|---|
+| `bin/cppi codegen-gen --only-list` six samples with `<cstdio>` (arith, eh-basic, hdr-move, lambdas, rtti, tmpl-enable-if), before / after the fix | 0 of 6 (each a crash) / **6 of 6, forms byte for byte the amd64 record** (test/cpp/codegen/forms.sha256) |
+| `bin/cppi codegen-gen` (all 155 samples) | **155 of 155 as recorded on amd64**, both controls failing as they must (224 s, 1.4 GB) |
+| `bin/cppi runtime-build` (records mode, the pack's IR) and `runtime-ci` (`CPPI_CI_CHUNK=20`) | 198 of 198 (4.7 min, 0.8 GB); ci's library 13.6 min, 2.5 GB. `OUT/inputs.edn`'s rows equal the committed inputs-linux-amd64.edn's |
+| `CPPI_ROUTE=clang` / `CPPI_ROUTE=ours bin/cppi check --only` samples' auto, bitfields, classes, vexing, p1-first and runtime's ctor-throw, uncaught | 7 of 7 pass by the pack's IR; **7 of 7 pass by our IR alone**, each program's status and stdout digest the same by both routes; the control bitfields-vs-io differs, as it must, in both |
+| `CPPI_ROUTE=clang` / `auto` (the default) `bin/cppi check --corpus gxx-dg-run --only` ten of the sampling (empty24, pr85081, pr106188, defaulted19a, initlist-throw2, lambda-return1, rv-life, decomp1, pr79937-3, no-elide2) | clang 9 pass, defaulted19a oracle-rejected (clang refuses `new A[5]` of a class with a deleted destructor); **auto 10 of 10, 9 by our IR** (pr106188, a coroutine, refused by ours, the pack's), the nine both ran equal; the control no-elide2-vs-io differs, as it must |
+| the inputs record on the slices (run-judge's `ir-input` over each WORK; scratch, not committed: an `--only` run is not recorded) | ours: 7 of 7 `:own`; clang: 7 of 7 `pack: cpp-ir-samples ... not tried`; auto's gxx-dg-run: 9 `:own`, pr106188 `pack: cpp-ir-gxx-dg-run ...; our route refused it (expr)` |
+| P21 (b)'s chain on the slice: `CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build` into its own OUT, `runtime-ci` (the pack runtime's ci library copied in: 66 changed units read) | **198 of 198, 76 by our route** (libsupc++'s 63 and CP348's 13), the names level equal for every one; 4.4 min, 1.5 GB; ci 2.2 min |
+| the two slices on that runtime (ours; auto) | 7 of 7 and 10 of 10 pass, every run the same status and stdout as on the pack's runtime; the controls differ as they must |
+
+Not run: runtime-swap and codegen-check on the runtime by our route (they need gcc: the oracle tier's), the whole corpora, AOT.
+
 ### The main host's commands (amd64, light; one at a time)
 
 ```
 export CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB
-bin/cppi selftest case-inputs
+bin/cppi selftest case-inputs sysroot-text
+bin/cppi codegen-gen                                       # 155 of 155 as recorded (the sema fix changes no sample's forms)
 bin/cppi check --record                                    # samples, runtime: check-linux-amd64.edn and eval-inputs (about 48 min)
 bin/cppi check --corpus gxx-dg-run --sample 25 --record    # the sampling's rows
 CPPI_CI_MEMLIMIT=4GiB bin/cppi check --aot --record        # aot-inputs
