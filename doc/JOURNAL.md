@@ -9943,3 +9943,20 @@ the qualifier (RP1 (b): javac's tool rebuilt, jdk/ reconverted, for no change of
   the C target). The record itself is the night's (ci needs runtime-ci at c/target). Alternative: keep the packs the record's default
   until the night proves the own cases (RFP42 (a)'s letter); the user's RIND5 (a) makes the own path the record's, the pack the
   fallback per case.
+
+## 2026-11-17: Java's interp members and missing classes by cause (branch `h-java-members`, from `next` `55e8c0ae7`)
+
+h-java-deferred's two costlier groups, the 48 "No accessible" / "No matching" members and the 37 ClassNotFoundExceptions, run
+again at interp on next's gate executable `f60652fb7fb9568e76b1` (85 tests, 55 s, the same results) and each test's cause read
+from its full trace and the executable's j2g output (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-members"). No cause is
+in the interpreter's analysis, so nothing is provable by day and no row moves. Built for the night (a build, no conversion):
+j2g's DynSub list gains ObjectInputStream, ObjectOutputStream, SimpleFileVisitor, FileTypeDetector, BreakIterator and HttpRequest
+(15 member tests and 6 "cannot extend" ones); j2g's support tables give Executable what Method and Constructor have (accessFlags,
+getAnnotated*, getParameters: 3), String.transform (1), System.setProperties over jrt's table (1) and Object's protected finalize
+(1); the member tables list an inner member class's constructors with the outer instance first (AQLS's ConditionObject, 1). Left,
+with the night's conversion list: jrt's hand-written gaps (getProtectionDomain, Thread.ofPlatform, ForkJoinPool's schedule and
+getStealCount, Semaphore's protected reducePermits, AQS's ConditionObject being ReentrantLock's), Package and the asynchronous
+channels outside the world, RMI (F27), SimpleFileVisitor missing from javac's tool's world (the launcher tests, 11),
+Calendar.Builder, MalformedParametersException. Alternatives considered: the members through the interpreter's reflection
+fallback (no: the methods are not in the Go program's tables at all); listing each extended class's protected members without a
+DynSub_C (no: an interpreted subclass needs the DynSub to call them).
