@@ -7080,3 +7080,58 @@ check does not judge regressions.
    dis, ast and tokenize, plus 5 dataclass and 12 namedtuple execs. Probed by importing them at the top of hexiom's
    main module (1,296 -> 72 code objects interpreted), the CPU fell by only about 5%. Most of their cost is the IR
    read and the collections, not the loop.
+
+## As built: 316, the exit collections with less waiting (2026-11-17, the Mac VM, queue 316; 305's DECISION 1 (b), the user's)
+
+Py_FinalizeEx's collections (finCollect, then exitCollect after the modules' removal and after their clearing) are 218's,
+241's and 253's rounds unchanged: the same Go collections, the same drains, the same cycle probes in the same order. Two
+things changed, both in `go/arbace/py/finalize.go` and `pylifecycle.go`.
+
+- **A barrier in place of the quiet waits** (`finBarrier`). After `runtime.GC()` every round waited until Go's finalizer
+  goroutine had run nothing for 3 ms (polled each millisecond, at most 500), there being no public barrier. There is one:
+  `runtime.GC` returns with its sweep done, so every finalizer of its collection is queued by then, and runtime/metrics'
+  `/gc/finalizers/queued:finalizers` and `/gc/finalizers/executed:finalizers` (the second counted once a block of
+  finalizers has run) are equal once all of them ran. The wait now ends at that point, or when the caller's condition
+  holds (finVerify's record moved, cyProbe's probes all fired), and is polled by Gosched and 20 us sleeps. A finalizer that
+  does not return (no run counted for 3 ms) still ends it as 218's wait did. finRound, finVerify (222's moment at a
+  deletion) and cyProbe use it. runtime/metrics is in goi's table, so the interpreted runtime reads the same counts.
+- **The exit's last empty round skipped** (`finExitRounds`, `finDueLocked`). A round can only queue a dead object with
+  work (`__del__`, a generator's close, a socket's warning, a tp_finalize) or with weak callbacks. When no tracked record
+  has either and the queue is empty, the round's only effect is the Go finalizers of plain records: the record dropped and
+  its plain weak references cleared. At the interpreter's end the next collection does that before any Python code of the
+  end runs (that code runs in drains, each after a collection), so such a round is skipped there: in Py_FinalizeEx's
+  finCollect when gc.callbacks is empty, and in exitCollect. Before a cycle collection the skipped round is owed
+  (`finExitOwe`, `finRoundOwed`): a dead object still under its Go finalizer would hold what it reaches through the probe's
+  collection, so cyCollect runs the owed round first when its graph has anything to probe (or passed `cyMaxNodes`,
+  `cyGraphFull`), and nothing when it does not. exitCollect with dead module dictionaries always probes, so its first
+  rounds keep every round. gc.collect() keeps every round: a program reads its weak references right after it (an object
+  only a callback-only object held is freed in the round after the callback's).
+- **What it leaves**: the residual skipped round is observable only to Python code of the end outside a drain that reads
+  a plain weak reference to such an object: a user's `sys.__stdout__` whose `flush` does so. gc.callbacks at the end keep
+  every round. The other empty rounds at the end (a record with work alive, `due` true) still run: the import probe's 9
+  collections are 9.
+
+**Measured** (the VM, base e892ff58b against head, compiled, interleaved B H / H B; Finalize timed by an instrument in
+the AOT module's printed copy, not committed; `.tmp/q316/ab/`):
+- Finalize, median ms (20 rounds, load 6.9-7.4): richards 39.3 -> 17.1 (Go collections 2-3 -> 2), hexiom 30.6 -> 11.1
+  (3 -> 2), the import probe 118 -> 81 (9 -> 9); an earlier round with the barrier alone (15 rounds, load 6.6-7.4):
+  richards 27.2 -> 12.4, hexiom 22.0 -> 12.0, the import probe 90.4 -> 44.5. Finalize's share of the process's wall:
+  hexiom 21.9% -> 8.3%, the import probe 35.4% -> 25.7%, richards 6.6% -> 3.0%.
+- The benchmarks (30 interleaved rounds, two runs of 15, load 6.9-10.0, warm): CPU median change richards -2.9%,
+  deltablue -2.0%, raytrace -1.7%, mdp +0.2%, hexiom -5.5%, float -3.2%, base64 +1.0%, the import probe -1.1%; the wall's
+  medians move by up to 15% either way between the two runs at this load (the gain is a few to 40 ms of wait per process).
+  Every run's stdout the same at base and head.
+
+**Order unchanged** (the VM): 218's, 241's and 253's own cases are gone with their scratch; six cases written anew
+(`.tmp/q316/cases/`: rounds and waves of `__del__`, weak callbacks' list order, a plain reference held by a callback-only
+object, resurrection, generators closed, the moment at `del`, gc.callbacks, WeakValueDictionary and WeakSet; cycles with
+`__del__` and callbacks, PEP 442's order, a `__del__` that breaks its cycle; the end with module globals' `__del__`, a
+wave at exit, cycles, callbacks, gc.callbacks, atexit, a suspended generator; the end without gc.callbacks, where the skip
+applies; SystemExit; synth/datamodel/del.py): compiled, every output equal at base and head (the moment at `del` in the
+rounds case moves at base too from run to run under load: 222's time budget; 6 of 6 pairs agree). On goi the rounds and
+cycles cases are not stable at base itself (3 base runs, 3 outputs: goi's registers, `:finalization-goi`), and head's
+outputs are among base's; the four end cases equal. Lib/test compiled (`bin/pyi check --aot --lib-test --fresh`, 12
+modules: test_weakref, test_gc, test_finalization, test_module, test_atexit, test_threading_local, test_struct, test_sys,
+test_coroutines, test_queue, test_generators, test_threading): 985 methods, every outcome the same (806 pass, 178 classed,
+test_threading's test_can_interrupt_tight_loops failing at both; base's first run had 20 more child-process failures in
+test_threading and test_gc, a rerun of the two modules alone at base gave head's outcomes).
