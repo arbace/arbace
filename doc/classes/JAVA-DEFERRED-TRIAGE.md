@@ -7550,3 +7550,83 @@ DefaultLoggerFinder: t04313 t04792 t05061 t07855 t07856 t07857 t07859 t07860 t07
 rows of these tests fail on the same classes, or on the old ObjectOutputStream reason gate 13c recorded); print is unaffected (its
 rows of these tests pass). Interp's other large groups (cannot extend, JCS120's members) need j2g's model and a build per class:
 no light fix.
+## As built: h-java-members (write-ahead), 2026-11-17
+
+Branch `h-java-members` (from next `55e8c0ae7`), by day under the host burst's light rules: the two groups h-java-deferred left
+by root cause ("As built: h-java-deferred", on its branch), the 48 "No accessible" / "No matching" members and the 37
+ClassNotFoundExceptions, run again at interp on next's gate executable `f60652fb7fb9568e76b1` (javac's tool
+`javac-f70d1a9d900eb07a9afc`, `REPR_JAVA_STALE_OK=1`; 85 tests, 6 jobs, 55 s): the same 85 results as h-java-deferred's run, each
+test's cause then read from its full trace (test/java/run.ae with the trace printed) and from the executable's j2g output
+(`amd64/j2g/prog`). Next's key has no gate executable yet; nothing built, nothing converted.
+
+**Nothing of the two groups is provable by day**: every cause is in the executable (jrt's member tables, j2g's support tables,
+j2g's DynSub list) or outside the world (a conversion). The interpreter's analysis (arbace.classes, loaded from a checkout that
+differs) is not among the causes. No row moves by day; the rows stay as recorded (deferred, their classes h-java-deferred's).
+
+### The 48 members by cause
+
+| cause | tests | where | built here |
+|---|---|---|---|
+| protected members of a translated class a test extends, not in the DynSub list (`class-supers`): the object streams' protected constructors, resolveClass, readClassDescriptor, writeClassDescriptor, enableReplaceObject | 11: t04308 t04309 t04378 t04383 t04394 t04400 t04418 t04436 t04437 t04443 t04444 | arbace/j2g/model.ae | ObjectInputStream, ObjectOutputStream listed (and the 6 "cannot extend" tests of the object streams: t04379 t04385 t04387 t04388 t04432 t04439) |
+| the same for SimpleFileVisitor (its constructor not even translated: J2g_NotTranslated), FileTypeDetector, BreakIterator, HttpRequest (protected constructors of anonymous or own subclasses) | 4: t05225 t05224 t05378 t05071 | arbace/j2g/model.ae | listed |
+| Executable's own table lacks what Method and Constructor have (accessFlags, getAnnotated*): a call on an Executable does not resolve | 3: t04832 t04723 t04733 | j2g's support tables (out/support-table-forms) | Executable's entries: accessFlags, the four getAnnotated*, getParameters, each the receiver's Method's or Constructor's |
+| String.transform missing (jrt's String hand-written, Function translated) | 1: t04649 | j2g's support forms and tables | `Transform_Function__O` (f.apply(this)) and its entry |
+| System.setProperties missing (jrt keeps the properties in its own table; getProperties answers a copy) | 1: t04794 | j2g's support forms and tables | `J2g_SystemSetProperties`: jrt's table made the argument's stringPropertyNames (null leaves them) |
+| Object's protected finalize missing from Object's table (clone was its only protected method) | 1: t06387 | j2g's support tables | Object.finalize, protected, jdk26u's empty body |
+| an inner member class's constructors not in its member table (`member-tables` kept those whose real descriptor has the declared parameters alone) | 1: t05722 (AbstractQueuedLongSynchronizer$ConditionObject) | arbace/j2g/out.ae | listed with the outer instance first, as the JVM's reflection gives them (the interpreter's env drops it, inner-member?) |
+| AQS's ConditionObject is jrt's ReentrantLock condition (go/arbace/jrt/locks.ae takes its name), with no constructor and tied to a ReentrantLock | 1: t04809 | jrt | no: an AQS-backed condition in jrt |
+| jrt's hand-written classes lack the member: Class.getProtectionDomain (t03296 t04873), Thread.ofPlatform (Thread.Builder.OfPlatform, t04689 t04690 t05166), ForkJoinPool.schedule (the DelayScheduler, t05691) and getStealCount (t05719), ClassLoader.getSystemResourceAsStream (t03295: the test then defines its class from its class file, which the Go build does not have) | 8 | go/arbace/jrt (manifest, tables) | no |
+| a protected member of a hand-written class that is not extendable: Semaphore.reducePermits | 1: t05707 | jrt (a class interface, JC4c's way) | no |
+| java.lang.Package is a cut class (outside the world): registered with no interfaces (t04730: not an AnnotatedElement), no Class.getPackage (t07858), no ClassLoader.getDefinedPackage (t04539) | 3 | the closure (a conversion) | no |
+| AsynchronousFileChannel cut (FileLock's constructor, tryToDeadlock(Channel)) | 2: t05141 t05150 | the closure | no |
+| RMI's protected constructors (RemoteStub, RemoteObject, UnicastRemoteObject) and RMIJRMPServerImpl.makeClient | 11: t05241 t05242 t05243 t05246 t05248 t05249 t05250 t05252 t05253 t05256 t07954 | F27's RMI slice | no |
+
+### The 37 ClassNotFoundExceptions by cause
+
+| cause | tests | night |
+|---|---|---|
+| `java.nio.file.SimpleFileVisitor` not in javac's tool's world: jdk/tools/launcher's TestHelper names java.util.spi.ToolProvider, so the tests run on javac's tool (F6), whose java.base closure (bin/javac-vendor's base files) lacks it (the shipped program has it) | 11: t08312-t08322 | add it to javac's world (`bin/javac-vendor convert`); the tests then launch a JDK (test.jdk is none): expect them to fail further on |
+| the asynchronous channels outside the world (AsynchronousChannel, AsynchronousChannelGroup, AsynchronousServerSocketChannel, AsynchronousSocketChannel, CompletionHandler; their sun.nio.ch providers) | 9: t05091-t05096 t05098 t05099 t05101 | a slice of its own (the providers over jrt's poller): not one closure line |
+| `java.util.Calendar$Builder`: jrt's own Calendar (overlay) has no Builder | 2: t05460 t05461 | the overlay's Calendar.Builder (jdk26u's, over GregorianCalendar), `bin/jrt-convert update` |
+| one class outside the world each: java.lang.reflect.MalformedParametersException (t04868), java.util.prefs (t05784), javax.naming.directory (t07839), com.sun.nio.sctp (t07863), LdapLoginModule (t07869 t07870), javax.security.auth.kerberos (t08053), javax.smartcardio (t08071), javax.xml.xpath (t08082), jdk.dynalink (t08097) | 10 | MalformedParametersException is one file (java.base share): the cheapest line; the others are modules or areas |
+| `sun.rmi.transport.DGCImpl_Stub`: converted but not reached (RMI names its stubs by name) | 2: t05244 t05247 | F27's RMI slice (a root) |
+| by design, the REPL's model (`:repl-sibling`): two of the test's packages importing each other (p1 imports p2.T3, which extends p1.T2) | 2: t04756 t06388 | none |
+| a class defined from bytes (Proxy/nonJavaNames' "Test+Interface") | 1: t04878 | none (no class files in the Go build) |
+
+### Built (unproven here: each needs the night's build; no conversion)
+
+- **arbace/j2g/model.ae** `class-supers`: java.io.ObjectInputStream, java.io.ObjectOutputStream, java.nio.file.SimpleFileVisitor,
+  java.nio.file.spi.FileTypeDetector, java.text.BreakIterator, java.net.http.HttpRequest (each translated and not final: a
+  DynSub_C each, their protected members in the world's signatures' `:protected`).
+- **arbace/j2g/out.ae** `support-table-forms`: Executable's accessFlags, getAnnotatedReturnType, getAnnotatedReceiverType,
+  getAnnotatedParameterTypes, getAnnotatedExceptionTypes and getParameters (under the conditions Method's are written by), each
+  calling the receiver's (a Method or a Constructor); String.transform; System.setProperties; Object.finalize (protected).
+  `support-forms`: `String.Transform_Function__O`, `J2g_SystemSetProperties`. `member-tables`: an inner member class's public
+  constructors with the outer instance first.
+- **arbace/j2g/main.ae**: the scan's `Transform_Function__O`; the roots Properties.stringPropertyNames and getProperty
+  (setProperties' calls).
+- Light checks: the changed namespaces load on stage 0; the support forms made in a stand-in world (the conditions' classes
+  translated) print as Go that gofmt accepts (`gofmt -e`).
+
+Expected yield at interp: 22 of the 48 lose their first failure (11 object streams, 4 protected constructors, 3 Executable, transform,
+setProperties, finalize, the AQLS condition) and 6 "cannot extend" tests of the object streams; how many pass beyond it is the night's
+run. A risk to watch: Object's table now lists finalize, so an interpreted class's `super.finalize()` resolves where it failed (34
+files of jdk/java and javac's tests declare a finalize; FinalizeOverride calls super's).
+
+### The night's commands
+
+```sh
+bin/arbace-go --gate-build                                  # arbace/j2g moved gate_key (and javac's tool's key)
+bin/java-check --levels interp,compiled --list IDS --save .tmp/hjm-night   # IDS below, one a line
+bin/java-check --judge --partial --record .tmp/hjm-night/...                # the rows that moved alone
+```
+
+IDS: t04308 t04309 t04378 t04383 t04394 t04400 t04418 t04436 t04437 t04443 t04444 t04379 t04385 t04387 t04388 t04432 t04439
+t05225 t05224 t05378 t05071 t04832 t04723 t04733 t04649 t04794 t06387 t05722, and for the finalize risk the tests of
+jdk/java/lang/ref and the javac protectedAccess corpus.
+
+The conversions for the night (not done here): `java/nio/file/SimpleFileVisitor.java` into javac's world's java.base files
+(bin/javac-vendor, 11 tests); `java/lang/reflect/MalformedParametersException.java` into the closure (test/jrt/jrt_sources.ae, 1);
+Calendar.Builder in overlay/jdk/java.base/java/util/Calendar.java (2); java.lang.Package into the world (3, with Class.getPackage).
+The asynchronous channels (11 with the two cut AsynchronousFileChannel uses), RMI (13) and the single-class areas (prefs, JNDI's
+directory, SCTP, kerberos, smartcardio, xpath, dynalink) are slices of their own, not closure lines.

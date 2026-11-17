@@ -500,6 +500,18 @@
   []
   (and (m/translated? "sun/reflect/annotation/TypeAnnotationParser") (m/translated? "jdk/internal/jrt/TypeAnnotationSupport")))
 
+(defn string-transform?
+  "Whether j2g writes String.transform (h-java-members): Function translated."
+  []
+  (m/translated? "java/util/function/Function"))
+
+(defn- executable-call
+  "An Executable entry's call of Go method gm on this, a Method or a Constructor (h-java-members)."
+  [gm]
+  (list 'let ['(values m ok) '(assert (* Method) this)]
+        (list 'when 'ok (list 'return (list gm 'm)))
+        (list 'return (list gm '(assert (* Constructor) this)))))
+
 (def type-annotation-calls
   "JCS271 (b): each getAnnotated* j2g writes, [jrt type, the Java method, its Go name, returns an array?,
   TypeAnnotationSupport's method, its descriptor]."
@@ -716,6 +728,11 @@ sequential stream (over an ArrayList: not jdk26u's lazy spliterator).\n"
             (range [_ x (splitLines (.-value t))]
               (.Add_O__Z l (NewStringUTF16 x)))
             (.Stream__Stream l)))])
+     ;; String.transform (h-java-members; jdk26u's f.apply(this)), for the program and the interpreter's table
+     (when (string-transform?)
+       [(list 'go/method 'Transform_Function__O "Transform_Function__O is String.transform: f.apply(this) (jdk26u's).\n"
+              (with-meta [(tag 't '(* String)) (tag 'f (m/go-type :jrt "Ljava/util/function/Function;"))] {:tag 'any})
+              '(.Apply_O__O f t))])
      ;; Class.getResourceAsStream over the host's resources (the program's embedded data, then
      ;; ARBACE_PATH: jrt's ResourceOrPath) once ByteArrayInputStream is translated (JRT-NOTES.md,
      ;; "The JDK's resource data"); jrt's Class cannot name the translated InputStream
@@ -982,6 +999,26 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                     (when (!= v nil)
                       (.SetProperty_String_String__O p (Str k) v))))
                 p)))
+     ;; System.setProperties(props) (h-java-members): jrt's table made props' string properties (its defaults'
+     ;; too, stringPropertyNames), the Go build keeping no Properties object of its own (getProperties answers a
+     ;; copy); null, which the JDK answers by reinitializing them, leaves them as they are
+     (when (and (m/translated? "java/util/Properties") (m/translated? "java/util/Iterator"))
+       (list 'go/func 'J2g_SystemSetProperties
+             "J2g_SystemSetProperties is System.setProperties(props): the system properties made props' string
+properties (stringPropertyNames, the defaults' too); null leaves them as they are.\n"
+             [(tag 'p (m/go-type :jrt "Ljava/util/Properties;"))]
+             '(when (== p nil)
+                (return))
+             '(let [it (.Iterator__Iterator (.StringPropertyNames__Set p))
+                    kv (make (map string (* String)))]
+                (while (.HasNext__Z it)
+                  (let [k ((inst As (* String)) (.Next__O it))]
+                    (aset kv (.String k) (.GetProperty_String__String p k))))
+                (range [_ k (PropertyNames)]
+                  (System_ClearProperty_String__String (Str k)))
+                (range [k v kv]
+                  (when (!= v nil)
+                    (System_SetProperty_String_String__String (Str k) v))))))
      (when (m/translated? "java/util/Properties")
        (list 'go/func 'System_GetProperties__Properties
              "System_GetProperties__Properties is System.getProperties() as translated code calls it
@@ -1237,16 +1274,23 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                  :let [[ps _] (t/parse-method-desc (:desc mm))]]
                              (do (run! cls ps)
                                  {:line (str "c" (bit-and (:flags mm) 0x1fff) " " (dotted-desc (:desc mm)))})))
+          ;; an inner member class's constructors too (h-java-members: AbstractQueuedSynchronizer's ConditionObject,
+          ;; which a subclass makes with new ConditionObject()): their outer instance first, as the JVM's
+          ;; reflection gives them (getParameterTypes), which the interpreter's env drops (inner-member?); a
+          ;; local or anonymous class's captures and a super-outer stay out
+          dd (a/decl n)
+          inner-ctor? (fn [ps rps] (and (:outer-instance? dd) (= :member (:nesting dd)) (nil? (:super-outer dd))
+                                        (= (count rps) (inc (count ps)))))
           ctors (for [mm (d/class-methods n)
                       :when (and (public? mm) (= "<init>" (:name mm)) (not abstract) (not iface))
                       :let [real (a/ctor-real-desc n mm)
                             [ps _] (t/parse-method-desc (:desc mm))
                             [rps _] (t/parse-method-desc real)]
-                      :when (= (count ps) (count rps))]
-                  (do (run! cls ps)
-                      {:line (str "C" (bit-and (:flags mm) 0x1fff) " " (dotted-desc (:desc mm)))
+                      :when (or (= (count ps) (count rps)) (inner-ctor? ps rps))]
+                  (do (run! cls rps)
+                      {:line (str "C" (bit-and (:flags mm) 0x1fff) " " (dotted-desc real))
                        :body [(list 'return (apply list (symbol (nm/new-name g real))
-                                                   (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)))]}))
+                                                   (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) rps)))]}))
           fields (for [f (d/class-fields n)
                        :when (or (public? f) (and serial (m/serial-field? f)))
                        :let [static (m/static? f)
@@ -1460,6 +1504,12 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         ver-list? (and (m/translated? "java/util/List") (m/hand-written? "java/lang/Runtime$Version"))
         ;; Thread.getAllStackTraces (JCS320 (a))
         stacks? (and (m/translated? "java/util/HashMap") (m/hand-written? "java/lang/Thread"))
+        ;; String.transform (support-forms; h-java-members)
+        string-transform? (string-transform?)
+        ;; Object's protected finalize (h-java-members): jdk26u's empty body, so that a class calling it
+        ;; (super.finalize(), C.this.finalize()) resolves; Object's table had clone alone of its protected
+        ;; methods
+        object-finalize? true
         cls-ms (concat
                    ;; F26: Class.describeConstable (support-forms), for the interpreter (the smoke's
                    ;; "No accessible method describeConstable in java.lang.Class")
@@ -1467,7 +1517,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                               (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/ClassDesc"))
                      [(sig "describeConstable" [] 'Optional_class 0x1 '(.DescribeConstable__Optional ((inst As (* Class)) this)))]))]
     (when (or (seq str-ms) (seq cls-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags? tann? inherited? ver-opt? ver-list? stacks?
-              (parameters?))
+              (parameters?) string-transform? object-finalize?)
       [(apply list 'go/func 'init []
               (concat
                 (when tann?
@@ -1484,6 +1534,35 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                           (list 'append (list '.-Methods (list '.Info c))
                                 (sig "accessFlags" [] 'Set_class 0x1
                                      (list '.AccessFlags__Set (list 'assert t 'this)))))))
+                ;; h-java-members: Executable's own entries of what Method and Constructor have above (accessFlags,
+                ;; getAnnotated*, getParameters), so that the interpreter resolves a call on an Executable (jdk26u's
+                ;; MethodAccessFlagTest, GetAnnotatedReceiverType, TypeAnnotationReflection): each the receiver's, a
+                ;; Method's or a Constructor's
+                (let [ms (concat
+                           (when flags?
+                             [(sig "accessFlags" [] 'Set_class 0x1 (executable-call '.AccessFlags__Set))])
+                           (when tann?
+                             (for [[t jm arr] type-annotation-calls :when (= t "Method")]
+                               (sig jm [] (if arr '(.ArrayClass AnnotatedType_class) 'AnnotatedType_class) 0x1
+                                    (executable-call (symbol (str "." (ta-go-name jm arr)))))))
+                           (when (parameters?)
+                             [(sig "getParameters" [] '(.ArrayClass Parameter_class) 0x1
+                                   (executable-call '.GetParameters__Parameter1))]))]
+                  (when (seq ms)
+                    [(list 'set! '(.-Methods (.Info Executable_class))
+                           (apply list 'append '(.-Methods (.Info Executable_class)) ms))]))
+                (when string-transform?
+                  ['(set! (.-Methods (.Info String_class))
+                          (append (.-Methods (.Info String_class))
+                                  (lit MethodInfo :Name "transform" :Params (lit (slice (* Class)) Function_class)
+                                       :Return Object_class :Modifiers 0x1
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args]
+                                                 (.Transform_Function__O ((inst As (* String)) this) ((inst As Function) (aget args 0)))))))])
+                (when object-finalize?
+                  ['(set! (.-Methods (.Info Object_class))
+                          (append (.-Methods (.Info Object_class))
+                                  (lit MethodInfo :Name "finalize" :Return Prim_void :Modifiers 0x4
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (return nil)))))])
                 (when (or pst-w? pst-s?)
                   [(apply list 'set! '(.-Methods (.Info Throwable_class))
                           [(apply list 'append '(.-Methods (.Info Throwable_class))
@@ -1552,6 +1631,14 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                           (append (.-Methods (.Info System_class))
                                   (lit MethodInfo :Name "getProperties" :Return Properties_class :Modifiers 0x9
                                        :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (J2g_SystemGetProperties)))))])
+                (when (and props? (m/translated? "java/util/Iterator"))
+                  ['(set! (.-Methods (.Info System_class))
+                          (append (.-Methods (.Info System_class))
+                                  (lit MethodInfo :Name "setProperties" :Params (lit (slice (* Class)) Properties_class)
+                                       :Return Prim_void :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args]
+                                                 (J2g_SystemSetProperties (Properties_Cast (aget args 0)))
+                                                 (return nil)))))])
                 (when ci?
                   ['(set! (.-Fields (.Info String_class))
                           (append (.-Fields (.Info String_class))
