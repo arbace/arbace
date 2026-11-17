@@ -7826,3 +7826,59 @@ bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge   # j
 bin/arbace-go --gate-build                                                   # arbace/classes and arbace/j2g moved gate_key
 # then "The night's commands" above: shard 1 with t04508 t04680 t05089 t05653 t05707 t07956 t06387 added
 ```
+
+## As built: n-java-conv (write-ahead), 2026-11-17 (round 52, overnight)
+
+Branch `n-java-conv` (from mac/n-review-c `6ff92621f`), under the night's rules (each process under 1 GiB): the two
+converter bugs n-java-defer found in the `:reflection` class (mac/n-java-defer's "As built: n-java-defer").
+
+- **Repeated annotations (t04727).** `@Ann(20) @Ann(21)` was written `^{Ann 20} ^{Ann 21}`, which the reader merges into
+  one map (the second kept). Decided, taken overnight (round 52), recommended: **the container as javac's class files have
+  it**, `^{AnnCont [(Ann {:value 20}) (Ann {:value 21})]}` at the first one's place, not a vector of annotations under the
+  containee's key. Why: it is what javac's Annotate makes (the class file, reflection's `getAnnotationsByType` and
+  `getAnnotation(AnnCont.class)` all see the container), so the forms take no new meaning and the analyzer, the interpreter
+  and j2g need nothing new; a vector under `Ann` would need Annotate's wrapping in arbace.classes.analyze and would read like
+  an array-valued element. The cost is one way at the lines level: the printer writes `@AnnCont({@Ann(value = 20), ...})`,
+  which javac compiles to the same class files (checked below); mode `:full` keeps the original text. Converter:
+  `compound-items` (arbace/repr/java/convert.ae) for declaration and type annotations; the container from the annotation
+  class's `@Repeatable` (`m/repeatable-container`: nattr's from the source tree or the class file, javac's
+  `Symbol.attribute(repeatableType)` through the new hook `:model/repeatable-container`), dropped when the container's
+  retention is SOURCE (`m/class-retention`, hook `:model/class-retention`); without a container (an erroneous program) the
+  annotations stay as before. SPEC §4.4 amended.
+- **Receiver parameters' type annotations (t04740, t04741).** `Inner(Outer<@TA(0) T> Outer.this)` and `void m(C<@TA(0) T>
+  this)` lost the annotations inside the receiver's type (only the modifiers' annotations went on the receiver symbol).
+  Now the receiver symbol carries its declared type as its tag when annotations sit inside it (or, with annotations, for an
+  inner class constructor, whose receiver is the enclosing class): `[^{:tag (C ^{TA 0} T)} this]`, `[^{:tag (.. (C ^{TA 1}
+  T) (Inner ^{TA 0} S))} this]`. A second bug under it: `type-form*` wrote an inner type of the class's own generic outer
+  without its outer (`Inner`), losing the outer's annotations; an annotated outer is now written (`(.. (C ^{TA 1} T) ...)`).
+  The analyzer (arbace/classes/analyze.ae, `method-type-annotations`) gives a tagged receiver's type annotations their paths
+  at `METHOD_RECEIVER`, as a parameter's (`type-annotations`); untagged receivers as before. The printer
+  (`receiver-param-text`) prints a tagged receiver's type and, for a constructor, `Outer.this` (constructors' receivers were
+  not printed at all before). SPEC §4.6 amended.
+
+**Proof, light** (javac's tool `javac-f70d1a9d900eb07a9afc` with the checkout on ARBACE_PATH, stage 0 for print, each process
+under 0.9 GB): the three tests' files read by `bin/repr-java read --front native --no-javac` and by `--front javac` (the new
+hook loaded from the checkout), the forms equal; `bin/repr-java print --layout lines`, read again by both fronts, the forms
+equal to the first read's; the originals and the printed files compiled by javac on Arbace (`-g:none`), all 23 class files
+equal byte for byte. `bin/java-check --levels read,interp` with the gate's executable `f60652fb7fb9568e76b1` and the checkout
+on ARBACE_PATH (arbace/classes from the checkout): **t04727 passes at interp** (it failed with the merged map); t04740 and
+t04741 now reach the receiver's type annotations and fail on the next row of n-java-defer's table, jrt's missing
+`AnnotationInvocationHandler(Class, Map)` constructor (as t04724 t04735 t04738 t04742: a jrt change, a build). No regression:
+the 18 tests of check-interp.edn that pass and whose path names annotation, receiver or repeat, 18 of 18 pass read and interp.
+
+**Keys.** The reader's hash (`repr_java_reader_hash`: convert, model, nattr, javac_model) moves; it was already stale on
+n-review-c (RP3's convert.ae: provenance files at `777fe301`, the base's reader `009fca19`, this branch's `e92adf00`), so the
+day's writers rewrite the provenance once for both. `gate_key` moves (arbace/classes/analyze.ae); repr/java is not embedded in
+the executable, but is in javac's tool (`arbace_javac_key`). The committed forms (jdk/forms, jdk/javac/forms, test/java/forms,
+test/java-fixtures) hold no annotated receiver and no repeated annotation key (grepped), so the day's updates are expected to
+leave them byte for byte; an annotated generic outer is possible but none is expected in the JDK's sources.
+
+The day's commands (after the stack's build, in the merged worktree):
+
+```sh
+bin/jrt-convert update && bin/javac-vendor convert && bin/clojure-tests --java-fixtures update && bin/java-check --forms update
+bin/provenance-check
+printf 't04727\nt04740\nt04741\n' > .tmp/njc.txt
+bin/java-check --levels read,interp,compiled,print --list .tmp/njc.txt --save .tmp/njc
+bin/java-check --judge --partial --record .tmp/njc/...      # the three rows alone
+```
