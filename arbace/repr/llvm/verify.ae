@@ -1875,6 +1875,16 @@
         (when-not (>= (long (nth (aty s0) 1)) (long (regs (fmt f0)))) (verr :verifier/intrinsic-call "invalid vector type for format" :inst (vc s0) (vc f0)))
         (when-not (>= (long (nth (aty s1) 1)) (long (regs (fmt f1)))) (verr :verifier/intrinsic-call "invalid vector type for format" :inst (vc s1) (vc p1))))
       ;; queue 335 (verifyAMDGPUIntrinsicCall's kill, cs.chain, init.exec.from.input and set.inactive.chain.arg cases)
+      "llvm.amdgcn.kill"
+      (when (= h 'callbr)
+        (let [ind (:indirect o)
+              blk (when (= 1 (count ind)) (first (filter #(= (local-key (second %)) (local-key (first ind))) (:body fo))))
+              x0 (when blk (first (remove #(dbg-record? (body %)) (drop 2 blk))))
+              b0 (when x0 (body x0))]
+          (when-not (= 1 (count ind)) (verr :verifier/intrinsic-call "callbr amdgcn_kill only supports one indirect dest" :none))
+          (when-not (or (= '(unreachable) b0)
+                        (let [c (callee-of b0)] (and (= 'call (first b0)) (global? c) (= (:name (intr/lookup (global-key c))) "llvm.amdgcn.unreachable"))))
+            (verr :verifier/intrinsic-call "callbr amdgcn_kill indirect dest needs to be unreachable" :none))))
       "llvm.amdgcn.cs.chain"
       (let [inreg? (fn [i] (has-attr? (group-items (param-attrs (nth args i []))) "inreg"))
             nx (some-> (:next *ctx*) body) nc (when nx (callee-of nx))]
@@ -3570,7 +3580,19 @@
                                         (and (global? c)
                                              (or (re-find #"^llvm\.dbg\.(declare|value|assign|label)" (global-key c))
                                                  (let [d (.get *gdefs* (global-key c))] (and d (old-form-decl? (global-key c) (:fty d)))))))))
-                        (check-call-site b defs)
+                        (let [c (callee-of b)]
+                          (if (and (= hd 'callbr) (not (and (seq? c) (= 'asm (first c)))))
+                            ;; visitCallBrInst (queue 335): a callbr of a function is no visitCallBase; a direct one of the
+                            ;; function's own type, without bundles, of an intrinsic it supports (amdgcn.kill), then visitIntrinsicCall
+                            (let [[_ ps o] (split-inst b)
+                                  d (when (global? c) (.get *gdefs* (global-key c)))]
+                              (when-not (and d (= :function (:kind d)) (= (:fty d) (call-fty (first ps) (nth ps 2))))
+                                (verr :verifier/call "callbr: indirect function / invalid signature" :none))
+                              (when (seq (:bundles o)) (verr :verifier/call "callbr for intrinsics currently doesn't support operand bundles" :none))
+                              (when-not (= "llvm.amdgcn.kill" (:name (intr/lookup (global-key c))))
+                                (soft! :verifier/call "callbr currently only supports asm-goto and selected intrinsics" :none))
+                              (when (intr/recognized? (global-key c)) (visiting (check-intrinsic-call (global-key c) b defs))))
+                            (check-call-site b defs)))
                         (when (and (= hd 'call) (= :musttail (:tail (nth (split-inst b) 2))))
                           (try (check-musttail f x b items ii defs)
                                (catch arbace.lang.ExceptionInfo e (when-not (::tailcc (ex-data e)) (throw e))))))
