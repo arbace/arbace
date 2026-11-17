@@ -9883,3 +9883,13 @@ a source digest embedded at build time (only after the next re-seed, and a gate_
 change in RT.load or GoInterp.loadTable (compiled into stage 0: inert until a re-seed). Keys: gate_key moves (arbace/go/repl.ae,
 arbace/python.ae, arbace/python/run.ae are embedded sources); Python's steps' keys (:python's bin/pyi and arbace/python) and
 the goi steps keyed by arbace/go move.
+
+## 2026-11-17: Scheme's round-51 decisions applied: SCS31 (a), SCS32 (b) (branch `h-scheme`, merged with `next` `cc5766d95`)
+
+The user decided SCS27 (a) and SCS28 (a) as built, SCS31 (a) and SCS32 (b) (doc/scheme/SCHEME-SURVEY.md, "Decided (the user, 2026-11-17,
+round 51)"). SCS31 (a): `ecraven-reader-corners` (read0, INCORRECT on every implementation) `:na`, was `:design`: Scheme's eval 2,832 / 4 / 3
+-> 2,832 / 3 / 3 (n/a 4), completeness 99.91 -> 99.92. SCS32 (b): the step `si-ecraven-aot` (`env SI_TIMEOUT=300 bin/si ecraven --aot`,
+`:phase :weekly`, chain scheme-full, the ecraven family's controls waived as run by its judge), in test/gate/crops/scheme.edn and
+steps.edn alike: `bin/gate --weekly --plan` runs it, `bin/gate --plan` and `--nightly --plan` do not list it. Alternative not taken:
+SCS32 (a), a rotated `--full` step. Checks: `bin/reap --record`, `bin/crops-score --record` and `--judge --strict`, `bin/records-check`,
+test/gate/crops-test.bash, crop-tier-test.bash (20 of 20). The ecraven AOT record stays the main host's first weekly (or by-hand) run.
