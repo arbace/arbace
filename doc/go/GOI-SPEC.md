@@ -5142,6 +5142,58 @@ which no program of the check reaches).
 in no class but issue24651a (fixed after), 9 in their classes; then escape2, escape2n, issue24651a and issue24651b: 4 of 4 pass, no
 regression. `arbace/go` is embedded: gate_key moves.
 
+## Since v1: weak and unique, type literals written whole (2026-11-17, branch `h-go-weak`)
+
+Round 51 (DECISION A (a), the user, 2026-11-17) made three deferred classes of `test/goi/divergences.edn` out of GR8a's and
+GC49's design choices: `:std-weak-unique`, `:abridged-type-literal` and `:no-forms`. This branch builds the first two.
+
+**weak and unique.** Both are generic over the runtime (weak handles; unique's canonical map), so the table holds no compiled
+instance for an interpreted type, and GR8a refused them at the import (`:out`). They are interpretable packages now, Go's own
+sources in the digest (`go/arbace/gotable.edn`), their runtime hooks compiled in the package `arbace` (`go/arbace/std.ae`, the
+file `std.go`, copied by j2g with `api.ae`):
+
+- `weak`: its two body-less pulls, `runtime_registerWeakPointer` and `runtime_makeStrongFromWeak`, are `:replace`d by calls of
+  `arbace.WeakRegister` and `arbace.WeakStrong`, which go through compiled `weak.Make[byte]` and `weak.Pointer[byte].Value`: the
+  runtime's handles are untyped (one per object and offset), and `weak.Pointer[T]`'s only word is the handle, so the
+  interpreted `Make`, `Value` and `==` are Go's own over the runtime's own weak pointers (reclaimed objects answer nil).
+- `unique`: `Make` is `:replace`d by `Handle[T]{(*T)(arbace.UniqueMake(reflect.TypeFor[T](), value))}`; `Handle` and `Value` are
+  Go's. `UniqueMake` keeps one canonical copy per (static type, value), a `reflect.New` of the type with its strings cloned through
+  structs and arrays (unique's clone), held by a weak pointer in a map under a mutex and removed by `runtime.AddCleanup` when
+  collected (unique's canonMap holds its entries weakly the same way); zero-sized types share one address; a value that is not
+  comparable panics at the map's hash as `Make` does. unique's canonMap (`canonmap.go`, over `internal/sync`'s `HashTrieMap`)
+  and clone (`clone.go`, over `internal/abi`'s layouts), its `uniqueMaps` and `uniqueMap`, are left out by the list's new
+  `:trim` (`arbace.go.table/trim-source`: a package's `:files` and `:decls` left out of its classification and digest, each file's
+  imports then those its kept declarations use), so `internal/sync` neither blocks the package nor joins its closure.
+- Divergence kept: the canonical map is goi's, not unique's (its own hash trie, no `unique`'s internal cleanup queue); the
+  identity, equality and reclamation contract of `Handle` is the same.
+
+**Type literals in messages.** The checker's `expr-str` (`arbace/go/check/code_expr.ae`) wrote a type literal in an expression
+as go/types' ExprString does (`interface{…}`, `struct{…}`, `func(…)`), where gc's types2 writes it whole with syntax's
+`ShortForm` printer. It now writes `struct{a, b int; c string "tag"}`, `interface{M() int; io.Reader; ~int | string}` and
+`func(x int, s ...string) (int, error)` as that printer does (the source's groups by `:go/grouped` when the list marks them, else
+equal consecutive types); a func literal (`func literal`) and a composite literal's body (`T{…}`) are unchanged.
+`fixedbugs/issue11614.go`'s message is gc's, `(interface{int}) (type) is not an expression`: it passes, its check-known entry gone.
+
+**A digest before its build.** `GOI_DIGEST=FILE` (`arbace.go.repl`'s digest-index) reads a table's digest
+(`target/.../gotable/digest_GOOS_GOARCH.edn.z`, zlib) in place of the executable's: a new list's interpretable packages and the
+declarations of its listed ones checked on an executable built before it (the listed members' values stay the executable's).
+
+**escape_unique.go** imports unique now, and goi's port of gc's escape analysis leaves out every declaration that uses a generic
+instance (`unique.Handle[T]`, `unique.Make[T]`): its -m lines are none, a `known` row of `:gc-m` (generic instances, as
+`typeparam/pragma.go`'s), not `:std-weak-unique`.
+
+**Proof (light, the host burst's rules).** The table generator (stage 0, `arbace.go.table`) over linux/amd64 (next's cached std
+forms) and tamago/amd64: 110 packages, weak and unique in the digest as above (weak's two pulls replaced; unique's files
+`doc.go` and `handle.go`, imports `arbace` and `reflect` only), 19.5 min, 2.9 GB peak. With `GOI_DIGEST` that digest on the gate's
+executable at next's key and the checkout's goi (`ARBACE_PATH`): `bin/goi check --only` weak.go pass (types2's conversion error),
+escape_unique.go known (`:gc-m`), fixedbugs/issue68415.go unsupported (`arbace.UniqueMake is not in the table of compiled
+packages`: the run needs the build), fixedbugs/issue11614.go pass; `--list` of the 118 errorcheck programs with a type literal on
+an ERROR line: no regression (96 pass, the rest as recorded); `--essential`: 801 of 801 pass, the three controls fail as they
+must. The arbace package's `std.go` printed by repr/go and run by TamaGo's go with a test program: weak's handles shared per
+object and nil once collected; unique's handles equal per value and type, `any`'s apart from `int`'s, strings cloned, a slice
+in `any` panicking, an entry made again after collection. The records: weak.go `:pass`, issue11614 `:pass`, escape_unique
+`:known`; issue68415 waits for an executable built with the table (the main host), `:std-weak-unique` kept for it until then.
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,

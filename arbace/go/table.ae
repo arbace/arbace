@@ -1018,6 +1018,31 @@ of function types, elements of composites), each with its data."
             dot (.indexOf t "." (int (max 0 slash)))]
         (when (pos? dot) [(subs t 0 dot) (subs t (inc dot))])))))
 
+(defn- trim-source
+  "Checker source src of package p as the list's :trim leaves it (GOI-SPEC.md, \"Since v1: weak and
+  unique\"): its :files files left out, its :decls declarations (func, var, type: by name) left out of
+  the others, and each file's imports those its kept declarations use (\"_\" and \".\" kept), so that
+  what the left-out parts imported (unique's internal/sync) neither blocks the package nor joins
+  its closure; src itself for a package the list does not trim."
+  [list-cfg p src]
+  (if-let [{:keys [files decls]} (and src (get-in list-cfg [:trim p]))]
+    (let [gone-file (set files)
+          gone (set decls)
+          dname (fn [f] (when (and (seq? f) (#{"func" "var" "type"} (head-name f)))
+                          (some-> (second f) name-of str)))]
+      (assoc src :files
+             (vec (for [fi (:files src)
+                        :when (not (gone-file (str (:name fi))))
+                        :let [ds (vec (remove #(gone (dname %)) (:decls fi)))
+                              quals (reduce into #{} (map used-quals ds))]]
+                    (assoc fi :decls ds
+                           :opts (update (:opts fi) :imports
+                                         (fn [is] (vec (filter #(or (not (vector? %))
+                                                                    (#{"_" "."} (str (first %)))
+                                                                    (contains? quals (str (first %))))
+                                                               is)))))))))
+    src))
+
 (defn classify
   "The interpretable packages of one configuration (§6.1): every package of root but the listed
   ones, :out and cmd's, whose body-less declarations are all :replace'd, :drop'ped or go:linkname
@@ -1043,7 +1068,7 @@ of function types, elements of composites), each with its data."
                               :else i))
         infos (into {}
                     (for [p paths
-                          :let [src (load/package-source root p config)]
+                          :let [src (trim-source list-cfg p (load/package-source root p config))]
                           :when (and src (seq (:files src)))
                           :let [pk (source-package src)
                                 imports (set (for [fi (:files pk) [n i] (:specs fi) :when (not= i "C")] (resolve i)))
