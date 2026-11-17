@@ -530,13 +530,43 @@ gensrc_judge() {
   return $st
 }
 
+# gensrc_judge_pin: each module's .java files' digest (own.bash's gensrc_hash) against the own pin's gensrc/MODULE line, into
+# WORK/gensrc/summary.tsv; a negative control (a module's tree less one file must not match); status 1 on any difference
+gensrc_judge_pin() {
+  local m st=0 a b f
+  printf 'MODULE\tFILES\tPIN\tRESULT\tMS\n' > "$work/gensrc/summary.tsv"
+  : > "$work/gensrc/explain.txt"
+  for m in $gmods; do
+    a=$(gensrc_hash "$gout/$m"); b=$(pin_line "$out/platform.sha256" "gensrc/$m")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$m" "$(find "$gout/$m" -name '*.java' | wc -l)" "${b:0:12}" "$([ "$a" = "$b" ] && echo equal || echo differ)" \
+      "$(cat "$work/gensrc/log/$m.ms" 2>"$quiet")" >> "$work/gensrc/summary.tsv"
+    [ "$a" = "$b" ] || { echo "$m	differs from the pin: $a, pinned ${b:-none}" >> "$work/gensrc/explain.txt"; st=1; }
+  done
+  m=${gmods%% *}
+  f=$(cd "$gout/$m" && find . -name '*.java' | LC_ALL=C sort | head -1)
+  if [ -n "$f" ]; then
+    rm -rf "$work/gensrc/control"; cp -r "$gout/$m" "$work/gensrc/control"; rm -f "$work/gensrc/control/$f"
+    if [ "$(gensrc_hash "$work/gensrc/control")" = "$(pin_line "$out/platform.sha256" "gensrc/$m")" ]; then
+      echo "javac-vendor gensrc: the control ($m less $f) matches the pin" >&2; st=1
+    else echo "   control ($m less ${f#./}): differs from the pin, as it must" >&2; fi
+  fi
+  return $st
+}
+
 # gensrc MODULE...: the modules' generated sources made into WORK/gensrc/out (the platform for the tools that compile,
 # flagsgenerator's, made first), then judged
 gensrc() {
   local m t0 st=0 c
   t0=$(date +%s)
-  c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build (its support/gensrc, the reference)"
-  gbuild=$(dirname "$c")
+  # with the own pin (JOP3 (a)'s weekly rebuild) each module is judged by the pin's gensrc/MODULE line, no build tree read;
+  # JAVAC_VENDOR_ORACLE=1 (the oracle tier's javac-platform-oracle, JOP6 (a)) against the build tree's as before
+  local ref=build
+  [ "$(platform_kind)" = own ] && [ -z "${JAVAC_VENDOR_ORACLE:-}" ] && ref=pin
+  if [ $ref = pin ]; then gbuild={build}
+  else
+    c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build (its support/gensrc, the reference)"
+    gbuild=$(dirname "$c")
+  fi
   gexe=${JAVAC_EXE:-$(gen_exe)}
   [ -x "$gexe" ] || fail "no $gexe (bin/javac-vendor build, JAVAC_EXE or REPR_JAVA_EXE)"
   [ -f "$pgensrc" ] || fail "no $pgensrc (bin/javac-vendor platform-gensrc)"
@@ -549,7 +579,7 @@ gensrc() {
     echo "   $m" >&2
     gensrc_module "$m" || { st=1; echo "$m" >> "$work/gensrc/failed.txt"; }
   done
-  gensrc_judge || st=1
+  if [ $ref = pin ]; then gensrc_judge_pin || st=1; else gensrc_judge || st=1; fi
   cat "$work/gensrc/summary.tsv" >&2
   [ ! -s "$work/gensrc/explain.txt" ] || { echo "   differences not explained by ${gknown#$root/}:" >&2; head -30 "$work/gensrc/explain.txt" >&2; }
   echo "   ($(since "$t0"))" >&2
@@ -565,6 +595,27 @@ gensrc() {
 # classes modules has run for the module (from own), else the build's exploded descriptor and classes (from exploded:
 # step 2 alone proves the writer). Into WORK/descriptors/MODULE/{exploded,jmod}.class and WORK/descriptors/summary.tsv
 dknown=${JAVAC_VENDOR_DESCRIPTORS_KNOWN:-$out/platform-descriptors-known.edn}
+# descriptor_args MODULE FILE: modinfo.ae's options for jmod create's step, from platform-build.edn's :jmod (its version,
+# target platform, main class and resolution flags), a line each into FILE (descriptors' and the own platform's, own.bash)
+descriptor_args() {
+  local ja=() resn=0 jm=()
+  pb_get "$1" jmod > "$2.jmod"
+  mapfile -t jm < "$2.jmod"
+  while [ ${#jm[@]} -gt 0 ]; do
+    case ${jm[0]} in
+      --module-version) ja+=(--version "${jm[1]}"); jm=("${jm[@]:2}") ;;
+      --target-platform) ja+=(--target "${jm[1]}"); jm=("${jm[@]:2}") ;;
+      --main-class) ja+=(--main-class "${jm[1]}"); jm=("${jm[@]:2}") ;;
+      --do-not-resolve-by-default) resn=$((resn | 1)); jm=("${jm[@]:1}") ;;
+      --warn-if-resolved=deprecated) resn=$((resn | 2)); jm=("${jm[@]:1}") ;;
+      --warn-if-resolved=deprecated-for-removal) resn=$((resn | 4)); jm=("${jm[@]:1}") ;;
+      --warn-if-resolved=incubating) resn=$((resn | 8)); jm=("${jm[@]:1}") ;;
+      *) jm=("${jm[@]:1}") ;;
+    esac
+  done
+  [ $resn = 0 ] || ja+=(--resolution "$resn")
+  : > "$2"; [ ${#ja[@]} = 0 ] || printf '%s\n' "${ja[@]}" > "$2"
+}
 descriptors() {
   local c b m w from st=0 t0 mex x r1 r2 jm k u s kt
   t0=$(date +%s)
@@ -596,23 +647,8 @@ descriptors() {
       if [ $r1 != failed ]; then cmp -s "$w/exploded.class" "$b/jdk/modules/$m/module-info.class" && r1=equal || r1=differ; x=$w/exploded.class; fi
     fi
     # step 2: jmod create's
-    pb_get "$m" jmod > "$w/jmod.args"
-    local ja=() resn=0
-    mapfile -t jm < "$w/jmod.args"
-    while [ ${#jm[@]} -gt 0 ]; do
-      case ${jm[0]} in
-        --module-version) ja+=(--version "${jm[1]}"); jm=("${jm[@]:2}") ;;
-        --target-platform) ja+=(--target "${jm[1]}"); jm=("${jm[@]:2}") ;;
-        --main-class) ja+=(--main-class "${jm[1]}"); jm=("${jm[@]:2}") ;;
-        --do-not-resolve-by-default) resn=$((resn | 1)); jm=("${jm[@]:1}") ;;
-        --warn-if-resolved=deprecated) resn=$((resn | 2)); jm=("${jm[@]:1}") ;;
-        --warn-if-resolved=deprecated-for-removal) resn=$((resn | 4)); jm=("${jm[@]:1}") ;;
-        --warn-if-resolved=incubating) resn=$((resn | 8)); jm=("${jm[@]:1}") ;;
-        *) jm=("${jm[@]:1}") ;;
-      esac
-    done
-    [ $resn = 0 ] || ja+=(--resolution "$resn")
-    printf '%s\n' "${ja[@]}" > "$w/modinfo.args"
+    descriptor_args "$m" "$w/modinfo.args"
+    local ja=(); mapfile -t ja < "$w/modinfo.args"
     unzip -p "$b/images/jmods/$m.jmod" classes/module-info.class > "$w/build-jmod.class" 2> "$w/unzip.log"
     r2=failed
     if [ "$r1" != failed ] && "$mex" "$root/test/javac-platform/modinfo.ae" "$x" "$w/jmod.class" --packages-file "$w/packages.txt" "${ja[@]}" >> "$w/log" 2>&1; then
