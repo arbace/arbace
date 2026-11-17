@@ -10382,3 +10382,22 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
 - Left of OC217 (4-6 days): the library with -g, backtraces per domain and across fibers, the finer placements of four programs, the
   AOT levels.
 
+
+## 2026-11-17 (round 52, overnight): OC217's third stage, the four programs of the finer placement (branch `n-oc217b`)
+
+- On `n-oc217b` from `mac/n-oc217` (d11577d4c). The four `:backtraces` programs left for the finer placement (testsuite/tests/backtrace/
+  callstack, event_after_prim, methods, names, OCaml 5.5.0's tarball) compared with their `.reference`: oi's lines equal it for
+  event_after_prim, methods and names (events after primitives, method frames, nested modules', functors' and classes' names), so no
+  Translcore event and no oi stack change was needed. They failed against ocamlc's recorded runs in test/ocaml/ref-ocaml55.edn, made
+  without -g; the host's `ocamlc -g` and `ocamlopt -g` print the `.reference` byte for byte (checked in `.tmp/host`).
+- Taken overnight (round 52), as recommended: OC228 (a), the four rows re-recorded (`bin/oi record-ref --only-list`) and their
+  own-verdict exceptions dropped at both levels (their premise, per-backend references, false: one `.reference` each). Alternatives:
+  re-record alone (rejected: the exceptions stale, `own-verdicts --check` fails); leave both (rejected: judged against a run without
+  debug information).
+- callstack differs by `Called from Thread.create.(fun)` alone (thread.ml without -g, OC226): its pin reworded. methods pinned at the AOT
+  levels (aot-known.edn, aot-compiled-known.edn), as names already was, for the AOT level's next run.
+- `bin/oi check --record --only-list` on the four, then test/ocaml/oc217.txt: 17 of 24 pass (14 before), only the four rows moved.
+  OCaml eval 509 / 75 / 57 → 512 / 75 / 54; completeness 86 → 87 (0.8643 to 0.8655), without by design 91 → 92
+  (0.9140 to 0.9153). `own-verdicts --check`, `divergences`, the negative control, `bin/reap --record`, `bin/crops-score --record`,
+  `--judge --strict`, `bin/records-check` pass. One typer process (compiler-libs' parser.ml in the native library's rebuild, 1.09 GB)
+  stopped by PID under the night's 1 GiB rule: only this worktree's scratch library lacks Parser.

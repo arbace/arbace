@@ -3407,6 +3407,12 @@ all (a), as recommended there:
   library Lambda changes (an event at each call site of the stdlib), which a whole record must prove; it is the second stage.
 - **OC227 (a)** (taken overnight, round 52) the AOT levels keep -g dropped and `b=` classed (`:runtime-parameters`) until o2j has a
   backtrace of its own (OC217's (b) part).
+- **OC228 (a)** (taken overnight, round 52, as recommended) callstack, event_after_prim, methods and names judged by their own verdict
+  at both levels: their own-verdict exceptions (whose premise, per-backend references, the tarball does not bear out: one `.reference`
+  each, which the host's `ocamlc -g` and `ocamlopt -g` print byte for byte) dropped and their four rows of ref-ocaml55.edn recorded
+  again (`bin/oi record-ref --only-list`; the old ocamlc rows were runs without -g). (b) keep the exceptions and re-record the rows
+  alone: rejected, the exceptions would be stale (`bin/oi own-verdicts --check` fails). (c) keep both as they were: rejected, oi's
+  lines, equal to ocamlc -g's, would stay judged against a run without debug information.
 Order (the plan's): OC213, OC214 (S1) with OC209 and OC210 first (branch `ocaml-s1`), then OC215, OC216, OC217, OC218 then OC219,
 OC220 and OC221; OC222 with the scoring's next change.
 
@@ -3981,7 +3987,31 @@ typer on stage 0 under GOMEMLIMIT=900MiB, a program about 0.94 GB): over the nig
 **What remains of OC217** (about 4-6 days): (2) the native library with -g (OC226: `stdlib-build --debug`, a whole record), which
 gives backtrace2's, the threads' and Stdlib.failwith's frames; with it the frames of calls without an event as "unknown location"
 where a bytecode stack has them; (3) the backtrace per domain and across fibers (Domain.join's, effects' continuations,
-get_continuation_callstack); (4) the before-events' and the finer placements callstack, event_after_prim, methods and names need
-(Printexc's call stacks of threads, the event after a primitive, methods' frames, the names of functors and classes); (5) the AOT
-levels (o2j's shadow stack for -g programs, the plain references of the two flambda-referenced tests).
+get_continuation_callstack); (4) the before-events (no backtrace program reads them: OC228's stage found no placement left to fix);
+(5) the AOT levels (o2j's shadow stack for -g programs, the plain references of the two flambda-referenced tests).
+
+## As built: OC217's third stage, the four programs of the finer placement (2026-11-17, round 52, branch `n-oc217b`)
+
+The four `:backtraces` programs left by the first stage for "the finer placement" (callstack, event_after_prim, methods, names) were
+compared line by line with their `.reference` (OCaml 5.5.0's tarball, testsuite/tests/backtrace/). oi's lines already equal it for
+event_after_prim (the event after `Array.make`'s C call, Translprim's primitive_needs_event_after), methods (`bar#bang`, `foo#go`,
+`object#meth`: Translclass's enter_method_definition scopes) and names (the 28 frames: nested modules `Mod1.Nested.apply`, a local
+module `local_module.N.foo`, the functor `Functor.fn`, the recursive modules `Rec1.fn` and `Rec2.fn`, the operator `(+@+)`,
+`nested.(fun)` against `flat`, classes and immediate objects), byte for byte: nothing in the typer's Translcore events nor oi's stack
+places them differently. They failed against ocamlc's recorded runs, which test/ocaml/ref-ocaml55.edn kept from a run without -g (79,
+116, 783 and 452 bytes of "Called from unknown location"); the host's `ocamlc -g` and `ocamlopt -g` print the `.reference` for all
+four. OC228 (a): their rows recorded again (`bin/oi record-ref --only-list`, ocamlc and ocamlopt now equal the `.reference`) and their
+exceptions of test/ocaml/own-verdict.edn dropped (both levels), so they are judged by their own verdict. callstack differs by its last
+line alone, `Called from Thread.create.(fun) in file "thread.ml", line 48`: the new thread's frame in the threads library, compiled
+without -g (OC226, the second stage); its pin's reason says so.
+
+**Results (light).** `bin/oi check --record --only-list` on the four (1 min 21 s), then on test/ocaml/oc217.txt's 24 (3 min 2 s, two
+jobs, the typer under GOMEMLIMIT=700MiB: peak 0.96 GB): 17 pass by their own verdict (event_after_prim, methods, names newly), 7 in
+`:backtraces`; check-oi-native.edn's four rows moved and no other. oi-known.edn: three pins gone, callstack's reworded;
+aot-known.edn and aot-compiled-known.edn pin methods (the AOT light level prints no backtrace, OC227; its record's row still says
+pass, judged against the old 0-byte ocamlopt row, until the AOT level runs again). `:backtraces` 10 to 7; eval 509 / 75 / 57 to 512 /
+75 / 54; completeness 0.8643 to 0.8655, meant 0.9140 to 0.9153. Checks: `bin/oi own-verdicts --check` (no disagreement, no stale
+exception), `bin/oi divergences` (pins attested), the negative control `_control/why-at-vs-why-swallow` differs, `bin/reap --record`,
+`bin/crops-score --record` and `--judge --strict`, `bin/records-check`. The oracle path's check-oi.edn (ocdump, whose events carry no
+information) and the rollup were not run again. No code changed.
 
