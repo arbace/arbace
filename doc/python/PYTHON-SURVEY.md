@@ -7662,3 +7662,103 @@ the executables 0.8-2.9% smaller (the import probe's 237.7 MB -> 230.9 MB). Go's
 (rebuilt alone, `-p 2`): 26.2 s -> 26.5 s of CPU, peak 440 -> 436 MiB, the same. The writer adds about 50 ms per module to
 `arbace.python.aot program` (the 1,751 modules in 77-90 s on stage 0). The binary is 40-45% of the text's bytes (62 MB for
 the 140 MB).
+
+## As built: 328, the next deferred classes (round 5): itertools, float(), the sequences' repeat, the runtime's panics, the core objects' and built-ins' checks, -W (2026-11-17, the Mac VM, queue 328)
+
+Base python-1117-on-next 7baf829c0 (317's merge onto next with 318-320). The deferred classes of divergences.edn with the most
+rows that pyi code can close, after 304's round: `:pyi-command-line` 40, `:ordered-dict-c` 31 (odictobject.c's port: not cheap),
+`:pyi-main-module` 28 (runpy's main: not cheap), `:core-objects-287` 27, `:builtin-functions-core` 18, `:itertools-core` 12,
+`:float-core` 12, `:runtime-panics` 12, `:sequence-index-ops` 10. Taken here, by root cause in go/arbace/py (and one in
+arbace/python/compile.ae, one in bin/pyi):
+
+- **the runtime's panics** (`builtins_collections.ae`, `set.ae`, `eval.ae`, `aot.ae`, compile.ae): deque.count and deque.remove
+  read the items by index and check the deque's state after each comparison (deque_count's RuntimeError, deque_remove's
+  IndexError "deque mutated during iteration", its "deque.remove(x): x not in deque"; a comparison that cleared or popped was a
+  nil and a slice bound); SET_ADD's target an exact set (gh-154902: a rebound `__conditional_annotations__` is a TypeError
+  "'T' object is not a set", it was a type assertion's panic; the loop's and the compiled code's one-line change); a
+  class-visible scope's `__classdict__` free variable even when the class binds that name (`__classdict__: int`: CPython's
+  codegen adds it to u_freevars as it emits LOAD_DEREF; the annotate function's closure index was nil).
+- **itertools** (`builtins_itertools.ae`, `builtins_iter.ae`): count's PyNumber_Check of start and step and count_repr (the
+  type's name, the step left out when it is an int equal to 1); repeat_repr and `__length_hint__` (TypeError "len() of unsized
+  object" when unbounded, so operator.length_hint's default); accumulate's `initial` and batched's `strict` keyword-only;
+  pairwise_next's old item read before the next is asked (re-entrancy); groupby_next and _grouper_next as C's (the current value
+  taken by the grouper that returns it, the target key compared first: gh-146613); tee_fromiterable (a tee of a tee is a copy,
+  gh-123884's independent objects) and `_tee(iterable)`; the no-keyword types (chain, cycle, islice, pairwise, starmap,
+  dropwhile, takewhile, filterfalse, and builtins' filter) take keywords in a subclass with its own `__init__`
+  (`type->tp_init == X.tp_init`); an exhausted iterator drops its closure (its source).
+- **float()** (`float.ae`, `floatextra.ae`, `builtins.ae`, `format.ae`, `percent.ae`): PyFloat_FromString (a str's Unicode decimal
+  digits and spaces as ASCII, `_PyUnicode_TransformDecimalAndSpaceToASCII`; ASCII whitespace stripped; the error the object's
+  repr); float_new_impl's PyNumber_Float (an exact str parsed, then `__float__` (a float subclass's too; a strict subclass
+  returned warned of, DeprecationWarning), `__index__`, a float subclass's value); keywords for a subclass with its own
+  `__init__`; float.fromhex's one sign and no underscore; round()'s ndigits clamped as PyNumber_AsSsize_t(NULL); format's 3.14
+  fraction grouping (`'._f'`, `'.10_f'`, `'021_._e'`; "Cannot specify ... with 'n'.") and the omitted type with a precision
+  (Py_DTSF_ADD_DOT_0's exponent a digit earlier: `format(1234.56, '.4')` is '1.235e+03'); `'%f' % str` a TypeError.
+- **the sequences' repeat and strip** (`str.ae`, `bytes.ae`, `bytesmethods.ae`, `strmethods.ae`): str, bytes and bytearray
+  times an object with `__index__` (and their `__mul__`/`__rmul__` wrappers); an exact str or bytes stripped of nothing is itself.
+- **ints, slices, ranges** (`builtins.ae`, `intbytes.ae`, `slice.ae`, `range.ae`): int.__round__ at any size (long_round's
+  _PyLong_DivmodNear); to_bytes' signed range [-2**(8n-1), 2**(8n-1)); from_bytes' PyObject_Bytes (an int or a str a TypeError,
+  `__bytes__`); slice.indices and a range's slice by _PySlice_GetLongIndices (past sys.maxsize).
+- **the core objects and the built-ins' checks** (`class.ae`, `containers.ae`, `descr.ae`, `builtins_exec.ae`, `memoryview.ae`,
+  `func.ae`, `funcattrs.ae`): object_isinstance's `__class__` error propagated; list += a heap type's `__radd__` first
+  (binary_iop1 before sq_inplace_concat: list += UserList is a UserList); type()'s name and a str `__doc__` as UTF-8 (a lone
+  surrogate a UnicodeEncodeError) and the name without NUL; `__type_params__` not deletable; a dict subclass namespace with its
+  own `__iter__` (OrderedDict) copied in its keys() order; object.__dir__ without `__class__` merges no class; format() of a str
+  subclass's spec; compile()'s unrecognised flags and optimize value; exec()'s `closure=`; exec's frame builtins the globals'
+  `__builtins__` (a module its dict); bytes' and bytearray's `__buffer__` (collections.abc.Buffer); a function's `__name__` and
+  `__qualname__` objects kept (functools.wraps' identity).
+- **-W, -b and PYTHONWARNINGS** (`sys.ae`, bin/pyi python): sys.warnoptions as config_init_warnoptions orders it ("default" in
+  development mode, PYTHONWARNINGS's options unless -E/-I, -W's, -b's "default::BytesWarning" or -bb's "error::BytesWarning"),
+  sys.flags.bytes_warning, and the warnings module imported at start when there is an option (its _processoptions; an invalid
+  -W reported). bin/pyi python passes -W and -b (PYI_WARNOPTIONS, PYI_BYTES_WARNING) where it dropped them.
+
+Proof (the VM, run): `bin/pyi check --only` and `bin/pyi check --aot --lib-test --only` over the 108 rows these classes named
+(25 modules) and the controls' subjects. Compiled: base 7baf829c0 15 of the 108 pass (149 methods: 56 pass, 93 classed, 0
+failing), head 80 (121 pass, 28 classed, 0 failing), no row passing at the base lost. Interpreted (goi, under 201's stage 0
+`nf`, whose pyi runtime is the checkout's: next's stage 0 embeds next's), head 79 of the 108 (120 pass, 29 classed, 0 failing):
+the levels agree but for ShutdownTest's test_cleanup (compiled only). The classes edited by both levels' passes (identical edits
+in divergences-315.edn): `:sequence-index-ops` (10), `:float-core` (12), `:runtime-panics` (12) and `:itertools-core` (12;
+test_islice to `:finalization-collect`) retired; `:core-objects-287` 27 to 13, `:builtin-functions-core` 18 to 9,
+`:pyi-command-line` 40 to 26 (3 to `:warnings-c`). 15 of the rows served passed at the base already (test_clinic's 6, test_float's
+4, test_pprint's, test_builtin's top-level await, test_enum's getnewargs_ex, test_reprlib's descriptors): fixed by earlier
+queues, never re-recorded.
+
+## As built: 339, a generator a for loop leaves closed at the loop's end (2026-11-17, the Mac VM, queue 339; 330's DECISION 1 (a), the user's)
+
+297 closed a fresh generator at the return of a consumer that keeps nothing (`next(gen())`, `any(...)`); a generator a for
+loop leaves by `break`, by `return` or by an exception was still closed at its Go collection, after the code that follows
+the loop, where CPython closes it as the loop drops it (its POP_TOP at a break or a return, the exception's unwinding, the
+frame's clear: reference counting).
+
+- **Held** (`finalize.go`'s `holdLoopGen`, `loopNext`; the generator type's iter slot). The get-iter of a generator not yet
+  run marks it held by its for loop when 297's stamp says the frame's previous instruction made it with no call since
+  (stampGen: the making frame, its instruction, callSeq), it was never handed out (`exposed`), and the next instruction is
+  the loop's for-iter, or an inlined comprehension's start that reaches its for-iter with only its own slots' moves between
+  (load-fast-and-clear, load-cell-and-clear, swap, an empty build). Such a generator was held by the value stack alone and
+  then by the loop's iterator slot, which no Python code reaches (not f_locals; a frame object's f_generator marks it
+  exposed). `iter(gen())`, `g = gen(); for x in g`, a walrus and a generator expression's argument are not marked.
+- **Closed** (`dropLoopGen`, `dropLoopGens`, `aotDropHeld`): when the loop's frame pops it (step's pop, the compiled code's
+  AotDrop), when a handler's unwinding pops it (the top first), and when an exception leaves the frame (its stack from the
+  bottom, as `_PyFrame_ClearLocals`, after PY_UNWIND): 297's dropGen (close, an error to sys.unraisablehook, the locals with
+  a finalizer due at 222's moment). A loop that runs the generator to its end pops it finished (`unhold` at its end).
+  Nothing is checked until a loop holds one (`loopHeldN`), then one test per pop.
+- **The compiled code** (`arbace/python/aot.ae`): a for-iter starts a block, so a loop's iterator is in the frame's stack
+  for the whole loop, also in a loop with no back edge (`for b in g(): return a, b`), where the register generator kept it
+  in a Go local that a pop dropped unseen; the pops of it are then AotDrop's (a return's swap takes it into the locals
+  only to pop it). The generator's digest changes: the AOT packages are compiled afresh once.
+- **Not covered**: a generator a for loop iterates through `iter(...)` or a name; a generator expression's own iterator
+  (its frame's `.0`) when the expression is closed; a loop's generator found by gc.get_referrers or gc.get_objects (marked
+  all the same: closed at the loop's end, where CPython keeps it while the referrer holds it).
+
+**Proved** (the VM; the base is 330's head 30efa1e7d, whose Python runtime is 593c97d03's: `git diff --stat 30efa1e7d
+593c97d03 -- go/arbace/py arbace/python` names only run.ae's require-runtime!). Three probes (`.tmp/q330/t/p339.py`,
+`p339c.py`, 330's `p330b.py`: break, return, a return from a with block, exceptions caught in the frame and leaving it,
+nested loops left by return, named and walrus-held generators kept, exhaustion, an outer generator closed or dropped while
+suspended in its loop, continue, a comprehension left by an exception, a close whose finally raises, settrace's events of
+the close, a generator method, f_back exposed, 297's next()/any() and held cases beside, f_generator exposed and kept)
+compiled and on the loop: equal to python3 -I, 21, 11 and 16 lines (the base: 32, 16 and 2 lines late). Lib/test compiled
+(`check --aot --lib-test --fresh`, test_generators test_coroutines test_asyncgen test_contextlib test_sys_settrace
+test_sys_setprofile test_monitoring): 901 methods, 805 pass, 96 classed, 0 failing, each method's outcome and message the
+base's; on goi (nf's stage 0, the checkout's runtime interpreted) test_generators and test_sys_settrace: 507 methods, 423
+pass, 84 classed, 0 failing, each the same as at 330's head. The generator programs of the synthetic corpus (13, `check
+--aot --no-pyi`): 13 pass compiled and on the loop by their golden text; `make python-essential`: 20 pass, 1 classed, 0
+failing.
