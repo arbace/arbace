@@ -8395,3 +8395,48 @@ On the branch after its merge into next (77630727b), test/cpp/divergences-dg.edn
 `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 1,083 / 103 to
 5,309 / 243 / 943 (36 n/a); the crop's completeness 91 (0.9137, unchanged), without by design 96 to 93 (0.9603 to 0.9274; the read cell's
 98 to 85). No key moves (a record and its classes).
+
+## As built: 336, the :own-diag files file by file (2026-11-17; CP398 (c)'s rest; branch `336-cpp-own-diag` from next d23b2215c)
+
+Review only, no run of the check: the 863 files `:own-diag` held (`bin/reap --entries`), each read by its dg-error messages, options and
+lines in gcc-15.2.0's `gcc/testsuite/g++.dg` (the pinned tarball, `.tmp/c1/gcc/gcc-15.2.0.tar.xz`, its g++.dg extracted into the task's
+scratch), and judged against the standard: whose rule asks the expected error. The judgments are data, `test/cpp/own-diag-review.edn`
+(one map a file: `:file`, `:class`, for `:own-diag` the Sema `:group` and its clauses as `:rule`, else the GCC rule named; `:own`, the own
+record's kind at the review; `:note`), for the main host and CX12's slices; no tool reads it. The rule of the line: a file is GCC's own
+only when every expected error is (a file mixing GCC's rules with the standard's, ext/attr-no-dangling7.C's case, stays `:own-diag`);
+a GNU extension rejected under -pedantic-errors is the standard's (the construct is ill-formed ISO C++: ext/anon-struct5.C, init/brace4.C);
+a later standard's feature GCC takes at an earlier one (C++20's concepts under -fconcepts at C++17, 40 files; C++20's designators at
+C++11 and C++17, 2; coroutines at C++14, 1) is the later standard's rule, `:note` says so.
+
+- `:gcc-own-rules`, 83 more (147): GNU extensions' rules 42 (flexible array members 13, the unavailable, abi_tag, format, gnu_inline and
+  visibility attributes 8, vector types 4, VLAs 3, labels as values 3, `_Complex` types and keywords 3, statement expressions 2, the
+  -fext-numeric-literals suffixes 2, typeof, __int128's enumerator, case ranges, constexpr asm strings 1 each), GCC's builtins and
+  built-in traits 14, its pragmas (unroll, ivdep) 4, GCC options that change the rules 10 (-fno-new-ttp-matching 3, -fno-new-inheriting-ctors
+  2, -Wno-template-body and -Wno-error=template-body 2, -fno-immediate-escalation, -fimplicit-constexpr, -fno-exceptions), implementation
+  limits 7 (set by -fconstexpr-depth, -fconstexpr-loop-limit, -ftemplate-depth 3; the instantiation depth of an infinite recursion, which
+  [temp.inst] leaves undefined, 2; the maximum object size of a declared array 2), an IFNDR rule GCC diagnoses 4 (cpp2a/concepts-complete1-4.C:
+  a satisfaction result changing, [temp.constr.atomic]), GCC's coroutine interface 2 (coroutines/pr105475-3.C, -broken-spec.C: from_address,
+  as pr105475*.C). Nine of them are among the 142 h-cpp-read (2) judged standard (cpp0x/inh-ctor11.C, inh-ctor3.C, variadic-ex14.C,
+  template/ttp16.C, ttp17.C, cpp1y/pr68180.C, cpp2a/consteval-prop17.C, nontype-complex1.C, init/enum1.C): each one's expectation needs a
+  GCC option or a GNU type, which that review's message-level reading missed; corrected here.
+- `:gcc-dialect`, 2 more (175): template/permissive-error1a.C, permissive-error2.C (-fpermissive, CP399 (a)'s dialect, not in its audit).
+- `:own-diag`, 778 (by the group of the Sema rule the own front end needs; the own record accepts the file, no own error, in the second
+  column's count): constant evaluation ([expr.const], [dcl.constinit], static_assert, [bit.cast]) 167 / 146, concepts ([temp.constr],
+  [expr.prim.req]) 76 / 28, templates ([temp.param], [temp.arg], [temp.spec], [temp.variadic]) 57 / 49, lookup ([basic.lookup], [temp.res]'s
+  typename, P2169's name-independent declarations) 48 / 25, overload resolution ([over.match]) 47 / 34, deleted functions (implicitly
+  deleted special members) 37 / 28, redeclarations ([basic.def.odr], [basic.link]) 30 / 23, initialization (designators, braces, default
+  member initializers) 26 / 20, declarations ([dcl.spec], [dcl.stc], [dcl.fct]) 25 / 20, coroutines 23 / 21, incomplete types 21 / 12,
+  attributes 20 / 8, conversions 19 / 11, constexpr's requirements ([dcl.constexpr], literal types) 19 / 10, deduction (auto, CTAD) 18 / 14,
+  class members 16 / 12, defaulted comparisons 14 / 14, narrowing 13 / 10, special members 12 / 11, literal operators 12 / 9, the parser's
+  errors and recovery 11 / 3, expressions 10 / 8, jumps (into constexpr if, consteval if, past initialization) 10 / 10, lexical (UCNs,
+  encodings, NFC, __VA_OPT__) 9 / 5, access 7 / 5, exception specifications 7 / 7, abstract classes 6 / 6, new and delete 6 / 5, lambdas
+  4 / 4, enumerations 3 / 3, structured bindings 3 / 1, inheritance 1 / 1, a later standard's construct 1 / 1. Of the 778, the own record
+  says accepted 564, missed 90, both 84, extra 30, crash 5, timeout 4, stopped 1.
+
+Found: the native parser takes `concept` and `requires` as keywords only from C++20 (arbace/repr/cpp/parse.ae's `kws20`), not under
+-fconcepts as GCC does at C++17, so 35 of the 40 concepts/ files that run at C++17 with -fconcepts fail the own record on a `[syntax]`
+error at the first constrained declaration: a cheap first step for the concepts group (D336-1). Not changed here (review only).
+
+`bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 243 / 943 to
+5,309 / 328 / 858 (36 n/a); the crop's completeness 91 (0.9137, unchanged), without by design 93 (0.9274 to 0.9303; the read cell's
+85 to 86). No key moves (a record and its classes, and a data file no tool reads).
