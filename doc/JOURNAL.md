@@ -9439,3 +9439,25 @@ DataInputStream, MathContext, ConcurrentLinkedQueue, AtomicLong, GZIP streams, Z
 rewrote it and, by `bin/javac-vendor edge`, jdk/javac/provenance.edn's `:jdk-edge` (jdk/javac/edge.edn unchanged); then
 `bin/j2g-edge verify` passes. Keys: gate_key moves (617642c7f0db to a867c735c5f3: read.ae and jdk/edge.edn), the runtime key
 does not (d7b7705e8b81).
+
+## 2026-11-17: declared `:mem-gib` corrected to the measured peaks (branch `memdecl-fix`)
+
+The memory lanes (GD4: a step admitted by the larger of its `:mem-gib` and 1.1 x its recorded peak) overcommitted because
+some declarations sat under the peaks the gates measured. Sources: the summaries' "OVER ITS DECLARED :mem-gib" lines of last
+night's gates (`.tmp/keep/wt-*/gate/`, `.tmp/night13/`, stack-w2's essential logs) and the store of passes (`.tmp/gate-pass/`,
+tree peak or maxrss, passes since 2026-11-10), read only. Rule: the tree peak plus about 10 percent, to a whole GiB; one-offs
+(a run with several times its usual CPU, a single sample, a failed run) not followed. `test/gate/steps.edn` is the table (the
+crop fragments are splice sources only and had already drifted from it; only cpp-runtime's line is kept in step).
+Raised: cpp-runtime 3 to 8 (a :build step, so GTS215's 3 GiB rule for essential checks does not apply; 6.6-8.1 GiB, 8 keeps it
+non-heavy, the 8.1 being the 111-minute run under contention), go-build 20 to 37 (tree 24-34, 36.0 once in a 52-minute run),
+diffcheck 31 to 43, programs 28 to 34, java-compiled 28 to 34 (52.0 GiB once at 509 CPU-minutes not followed), suite-aot 32 to 45,
+hsi-check 10 to 14, oracle-go 5 to 7, java-check 2 to 3, j2g-edge 7 to 8 (8.4 twice, usually 7.0-7.3: 9 would make it :heavy),
+cpp-c2j 3 to 4, cpp-read-essential 2 to 3, a64i-essential and a64i-check 1 to 2, cpp-aot 5 to 7, si-ecraven 2 to 4; parts
+repr-go-native.cmd-linux-amd64 33, c-check.compcert 3, c-tokens.torture-compile 8, c-roundtrip.torture-compile 16,
+llvm-read.verify-rt and verify-rt-heldout 2, llvm-print.text-rt 2, repr-java-roundtrip.samples 2, oi-check.run 3.
+Left, on purpose: oi-aot and oi-suite-aot (4; failed-run peaks of 5.4 and 4.9 GiB, but a step above :max-step-gib 4 leaves
+ocaml-full out of `:night-concurrent`, which crops-test pins), oi-essential (3.4 GiB, three of 14 passes: an essential
+check of an OCaml, a new crop, at most 3 by GTS215), goi-check (8.5 once, 2 of 13 over 8), cpp-selftest, haskell-read-essential,
+suite-aot-essential (1 percent over), cpp-builtins (a 3 s step, peak 2.3 with tree 0.0: a sampler artefact; the table says 3).
+Checked: `test/gate/crops-test.bash` (gate.crops check on steps.edn included) ok. Step keys: `:mem-gib` is outside the keys
+(crops.ae header), so none moves; only the lanes' admission changes.
