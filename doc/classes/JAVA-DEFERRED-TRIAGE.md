@@ -7416,3 +7416,55 @@ super-outer parameter published and set (`implicit` gains a third group: the sup
 JCS357 (b) and JCS358 (b), as recommended: as built until a test reads a local or anonymous class's constructor parameter
 annotations, or constructs an anonymous class with an inner superclass reflectively. Nothing built (branch `java-indep`;
 doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS340-JCS343, JCS357, JCS358").
+
+## As built: h-java-readprint (write-ahead), 2026-11-17
+
+Branch `h-java-readprint` (from next `77630727b`), by day under the host burst's light rules: Java's read cell (7,748 / 0 / 96)
+and print cell (3,186 / 32 / 107) triaged by a light run of their non-passing tests on next's gate executable
+`f60652fb7fb9568e76b1` and javac's tool `javac-f70d1a9d900eb07a9afc` (`REPR_JAVA_STALE_OK=1`): `--levels read,classes,print`
+over the 139 print and read/classes ids (6 jobs, 6 minutes), `--corpus langtools-diagnostics --levels diagnostics` over the
+93 diagnostics ids (77 s); nothing built.
+
+**Stale rows.** The read cell's 96 are not stale: read 1, classes 2 and diagnostics 93 fail as recorded (`:read-platform` 3;
+`:diag-release` 44, `:diag-processors` 25, `:diag-doclint` 8, `:diag-file-manager` 8, `:diag-closed-world` 4,
+`:diag-command-line` 4), each a limit of javac on Arbace's world or command line (JCS50-JCS53: ct.sym for --release, processors
+from class files, jdk.javadoc's doclint, javac's own Main and file manager), all needing javac's tool rebuilt with more world.
+Three print rows were stale: t05276 and t05749 (by design `:print-classes`, recorded before JCV11 (b) made such a row a pass
+with its note) and t04728 (`:print-erasure`, its forms now equal).
+
+**The class files' namer counted.** 44 more of the 72 `:print-classes-unnamed` rows were the named kinds: the namer took the
+sets of code lines of the two class files, so an early return, a loop's `goto` or a default value's `aconst_null`/`astore`
+also met elsewhere in the method left no line in the difference, and the first branch whose target moved was reported (`code:
+main ...: ifeq L51`). `java.print/counted-kinds` (test/java/print.ae), used only where the sets name nothing: the lines counted,
+each branch without its target; the kinds named only when every instruction that differs in number belongs to one (control
+flow: the branches, goto, the returns, when a goto or a return differs or only conditional branches do, a test's sense and its
+arms swapped; an increment: iinc, wide iinc and i = i + n's int arithmetic; a local's initializer: a default's constant and a
+local's store); no instruction differing in number, the order of the code. Stricter than the sets' rule (which names a kind on
+one matching line), and only additive: a row the sets named keeps its reason. The 47 rows (44 and the 3 stale) re-recorded
+alone (`--judge --partial --record`): Java print **3,186 / 32 / 107 → 3,236 / 29 / 60**, Java completeness 87 → **88** (meant 90).
+The negative control c00001 still differs at print; t06032 (below) stays unnamed as it must.
+
+**The 25 left in `:print-classes-unnamed`** (all the converter's, none the printer's): a static member through a pure
+qualifier, `_instance.vMeth()`, `"foo".copyValueOf(...)`, whose local or literal the converter drops (`pure?`, convert.ae's
+static field and call sites; javac's `aload`/`ldc` `pop`) 16 (t03444 t03733 t03807 t03808 t03825 t04629 t04700 t04806 t04807
+t05058 t05059 t06111 t06347 t07690 t07692 t07763); `s = s + x` on a String field read as the form `s += x` prints (`aload_0`
+against `dup`) 3 (t03356 t03770 t05101); an inherited static called by its simple name in a subclass, `sleep(1)`, printed
+`Thread.sleep(1)` (the method ref's owner) 1 (t05179); a local's slot, locals declared in another order 1 (t05125); the
+converter's types: `pos[0] != 0L` read as `(== (aget pos 0) 0)` (the long literal lost, i2l/lcmp against if_icmp) t03434, and
+`float i = it.next()` read without its float tag (i2f fstore against istore) t06032; two mixed (t03567, t06072). The
+`:print-type-arguments` 31 stay JFS75 (b)'s (the printer cannot write type arguments the forms do not carry: a raw
+`new Function[]{lambdas}`, a cast to a type variable dropped), `:print-overload-cast` 1 RPS65's, `:print-release` 2 JCS50's.
+
+**The by-design rows audited** (29 after the stale three): `:print-shapes` 18 (when/if, do/if tails, the converter's temporaries
+o-30 printed o_30, labels, a folded constant, a mutable local's default initializer dropped: RPS64 (a)) and `:print-erasure` 11
+(the casts and tags of type arguments the forms lack: RPS9 (a)) each hold their reason; t04728 left `:print-erasure`'s :tests.
+
+**Proposals.** RP1: the converter's pure qualifier of a static member (16 rows): (a) a named kind, by design (the forms keep
+no evaluation without effect: a local's or a literal's), test/java/print.ae naming `aload`/`ldc`/`getstatic` with `pop`;
+(b) the converter keeping `(do q (C/m))` for a pure q too (javac's tool rebuilt, jdk/ reconverted). Recommended (a). RP2: the
+String compound assignment and the inherited static's owner (4 rows): (a) by design as RP1 (a); (b) the printer writing
+`s = s + x` for a String field (the forms do not say which), the simple name for an inherited static when the class extends
+the owner. Recommended (a). RP3: t03434 and t06032 are the converter's losses of a type (a long literal in a comparison, an
+unused local's float): (a) fix in convert.ae for the night (javac's tool rebuilt; `bin/repr-java roundtrip` and `check --jdk`
+records may move); (b) deferred. Recommended (a). arbace/repr/java/roundtrip.ae's class-differences has the same sets' rule
+(the round trip's classes level); its counted form waits for a whole round trip's record at night.

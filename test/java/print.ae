@@ -225,9 +225,41 @@
                                                 (operand pool bsms b c0 pc op)))))))]
            line))))
 
+(def ^:private kind-flow "a value's control flow: ?: or a switch expression on one side, if or a switch statement on the other")
+(def ^:private kind-inc "an increment's place (i++ in an expression or as a statement)")
+(def ^:private kind-init "a local's initializer (Java's default value written or not)")
+
+(defn- counted-kinds
+  "h-java-readprint (2026-11-17): the kinds of the differences of the method code lines a and b counted, each
+  instruction as often as it occurs, a branch without its target (an early return's `return` or a loop's `goto`
+  also met elsewhere in the method is a difference, which the sets of lines do not see): the kinds when every
+  instruction that differs in number is one of a named kind's, else nil. The instructions of each kind: control
+  flow, the branches, goto and the returns, when a goto or a return differs or only conditional branches do (a test's
+  sense and its arms swapped); an increment, iinc (also wide) and the
+  int arithmetic of i = i + n, when an iinc differs; a local's initializer, a default value's constant and a local's
+  store, when such a constant differs. None differing: the order of the code."
+  [a b]
+  (let [norm (fn [l] (str/replace l #": (if[a-z_]*|goto|goto_w) L\d+$" ": $1"))
+        fa (frequencies (map norm a)) fb (frequencies (map norm b))
+        ds (vec (for [k (distinct (concat (keys fa) (keys fb)))
+                      :when (not= (get fa k 0) (get fb k 0))]
+                  (str/trim (second (re-find #": (.*)$" k)))))
+        has (fn [re] (some #(re-find re %) ds))
+        branch? (fn [i] (re-find #"^if[a-z_]*$" i))
+        flow? (or (has #"^(goto|goto_w|[ailfd]?return)$") (every? branch? ds))
+        inc? (has #"^(wide )?iinc ")
+        init? (has #"^([ailfd]const_0|aconst_null)$")
+        ok? (fn [i] (or (and flow? (re-find #"^(if[a-z_]*|goto|goto_w|[ailfd]?return)$" i))
+                        (and inc? (re-find #"^((wide )?iinc .*|iload(_\d| \d+)|istore(_\d| \d+)|iadd|isub|iconst_m?\d|bipush .*|sipush .*)$" i))
+                        (and init? (re-find #"^([ailfd]const_0|aconst_null|[ailfd]store(_\d| \d+))$" i))))]
+    (cond
+      (empty? ds) ["the order of the code (the same instructions)"]
+      (every? ok? ds) (cond-> [] flow? (conj kind-flow) inc? (conj kind-inc) init? (conj kind-init)))))
+
 (defn class-differences
   "Short reasons for the differences of class file c in the trees c1 and c2, named as
-  arbace.repr.java.roundtrip/class-differences names javap's."
+  arbace.repr.java.roundtrip/class-differences names javap's; where the lines' sets name none, the lines
+  counted (counted-kinds) name them when they explain every instruction that differs."
   [c1 c2 c]
   (let [a (code-lines (io/file c1 c)) b (code-lines (io/file c2 c))]
     (if (= a b)
@@ -235,11 +267,14 @@
       (let [ds (set (remove str/blank? (concat (remove (set b) a) (remove (set a) b))))
             has (fn [re] (some #(re-find re %) ds))]
         (cond-> []
-          (has #": (goto|goto_w|[ailfd]?return) ") (conj "a value's control flow: ?: or a switch expression on one side, if or a switch statement on the other")
-          (has #": iinc ") (conj "an increment's place (i++ in an expression or as a statement)")
-          (has #": ([ail]const_0|aconst_null|lconst_0|fconst_0|dconst_0) ") (conj "a local's initializer (Java's default value written or not)")
+          (has #": (goto|goto_w|[ailfd]?return) ") (conj kind-flow)
+          (has #": iinc ") (conj kind-inc)
+          (has #": ([ail]const_0|aconst_null|lconst_0|fconst_0|dconst_0) ") (conj kind-init)
           (has #": (lookupswitch|tableswitch) ") (conj "a switch's arms (fall-through repeated)")
-          true (#(if (empty? %) [(if (seq ds) (str "code: " (str/trim (first (sort ds)))) "the order of the code (the same instructions)")] %)))))))
+          true (#(if (empty? %)
+                   (or (when (seq ds) (counted-kinds a b))
+                       [(if (seq ds) (str "code: " (str/trim (first (sort ds)))) "the order of the code (the same instructions)")])
+                   %)))))))
 
 (def class-kinds
   "The class-file differences class-differences names (the forms do not record what they differ by: JCV11 (b))."
