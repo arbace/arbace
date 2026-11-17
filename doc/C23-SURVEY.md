@@ -6106,3 +6106,152 @@ The 31 programs of the class: eval 31 of 31, AOT 31 of 31 (`bin/ci check --only`
 programs at eval (the vector piece's 268 and the 31; only the 31 move, compcert/fft.c's one timeout under the AOT run beside it
 passes alone, every control differs) and test/c/essential-aot.txt at AOT (0 failing, the controls differ). The class `nested-fn`
 stays as a guard class. C eval 2,245 / 34 / 0, AOT 2,253 / 26 / 0: completeness 97 to 98 (0.9726 to 0.9794), meant 100.
+
+## As built: #embed's parameters as libcpp parses them (2026-11-18, branch `n-c-defer`, from `next` `42bf8614b` with `mac/n-review-a`)
+
+The night's task (round 52, memory-free: every process under 1 GiB): the read cell's 17 deferred rows and the print cell's 22, by
+cause, after h-c-deferred and h-c-decl-diag. Four of the read cell's dg rows (embed-3.c, embed-18.c, embed-27.c, embed-4.c of
+c-c++-common/cpp) had one cause: the preprocessor's reading of `#embed`'s and `__has_embed`'s parameters was its own, not libcpp's.
+In gcc a parameter error mostly stops the directive before the resource is looked up; the port looked the resource up anyway, and
+`#embed __FILE__ gnu::base64 ...` on a file that is not `"."` gave `No such file or directory`, a fatal error that closed the unit
+(embed-18.c's and embed-27.c's "after the read's last error"). Read from gcc 15.2's tarball (the pin `:gcc-15.2.0`,
+`gcc-15.2.0/libcpp/directives.cc`'s `_cpp_parse_embed_params` and `skip_balanced_token_seq`, `files.cc`'s `_cpp_stack_embed` and
+`finish_base64_embed`, `macro.cc`'s `builtin_has_embed` and `builtin_has_include_1`; GPL-3.0-or-later, studied, the port written in
+Arbace, no text copied but the diagnostics' words).
+
+Built (`arbace/repr/c/pp.ae`):
+- `parse-embed-params`: `_cpp_parse_embed_params` ported over the parameters' tokens: a name expected (the directive stopped), a
+  scope (C's `:` immediately followed by `:`, libcpp's COLON_SCOPE; C++'s `::`) and its second name, `__x__` spellings, a duplicate,
+  an unknown parameter (not under `__has_embed`; the directive not read), a missing `(` (the token kept as the next name),
+  `limit` and `gnu::offset` evaluated as #if's (`division by zero in #embed`, gcc's words, `*embed-param*`), `gnu::base64`'s narrow
+  string literals and its `)`, "expected character string literal", the balanced runs of `prefix`, `suffix`, `if_empty` and of an
+  unknown parameter (`skip-balanced`: gcc's "unbalanced 'C'" per closer and per opener left), and at the end `gnu::base64` against
+  `limit`/`gnu::offset` and `-fpreprocessed`'s requirement; the old `embed-params` removed.
+- `embed-resource`: a parsed `gnu::base64` decoded by gcc's rules (`base64-bytes`: the spelling, not the value, so escapes fail;
+  padding in the last group only; the last character's unused bits 0), only on `"."` ("'gnu::base64' parameter can be only used
+  with '\".\"'", not under `__has_embed`), else "'gnu::base64' argument not valid base64 encoded string"; an empty `gnu::base64()`
+  is no base64 (the resource read as usual).
+- `embed!`: libcpp's `do_embed` order; `'#embed' expects '"FILENAME"' or '<FILENAME>'` in gcc's words; a `<` without its `>`
+  "missing terminating '>' character" then the name so far (`empty filename in #embed` for `#embed <`).
+- `__has_embed` in a `#if`: `builtin_has_embed`: "missing '(' before '__has_embed' operand", "operator '__has_embed' requires a
+  header-name" (the token and, with a parenthesis, one more taken), "empty filename in '__has_embed'", the parameters by
+  `parse-embed-params` and the tokens after what they took given back to the expression (gcc's "missing binary operator before
+  token ..." then follows from the evaluator, in cc's words); outside a directive "'__has_embed' used outside of preprocessing
+  directive" (then evaluated, as gcc does).
+
+Records: dg rows re-recorded by id from listed runs (`bin/ci dg --only`, the merge by id of the run's `judge-rows.edn`): embed-3.c
+and embed-18.c pass, embed-4.c and embed-27.c fail further on (two new deferred classes, below), and gnu23-attr-syntax-3.c passes
+(h-c-decl-diag's checker; its row was recorded before). Read 5234 / 224 / 17 to 5237 / 224 / 14 (pass / by design / deferred);
+C's completeness 0.9811 to 0.9813, meant 0.9980 to 0.9982. Print unchanged (4798 / 3 / 22). `test/c/dg-wording.edn`: embed-3.c's
+`:wrong-reason` entry removed (it passes on gcc's words), a family `:if-stray-paren` (embed-18.c, embed-27.c: gcc's "missing '(' in
+expression" for the `)` a stopped `__has_embed` leaves, the evaluator's cc's "unexpected ')'", kept because the tree check compares
+#if errors with cc's).
+
+Checks (each process under 1 GiB): `bin/ci dg --corpus gcc-embed` (47 files: 43 pass; only embed-3.c and embed-18.c moved, to
+pass), the listed nine dg rows, `bin/ci dg --essential` (92 of 92, the control differs), `bin/repr-c check --tokens --corpus
+gcc-embed,gcc-cpp-c23` (no failing, no stale known entry), `parse-check --corpus gcc-embed,gcc-cpp-c23 --no-mutants` (all known or
+equal, as recorded), `roundtrip --corpus gcc-embed,gcc-cpp-c23` (63 of 63 pass, as recorded), `bin/repr-c check --c23` (59 pass, 3
+expected, the controls refused), `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`.
+
+Keys: `arbace/repr/c/pp.ae` is embedded (in `gate_key`): the key moves, the C steps and `--full` rerun, and stage 0 evaluates the
+changed namespace from the checkout until the next re-seed. Nothing was built here.
+
+### Decided (taken overnight, round 52)
+
+- CS322 (a): `#embed`'s and `__has_embed`'s parameters are libcpp's (`_cpp_parse_embed_params`, `finish_base64_embed`,
+  `builtin_has_embed`), their diagnostics in gcc's words; (b) widening the old reader's messages one by one was the alternative.
+- CS323 (a): two deferred classes of the dg check named for the C lexer's causes that remain after CS322: `:unterminated-literal`
+  (embed-4.c: cc's scanner ends the unit at line 97's unterminated `"`, libcpp makes it a stray token and goes on) and
+  `:gnu-raw-strings` (embed-27.c: gcc reads raw strings in gnu99 and later, the port's C lexer does not); (b) leaving the rows in
+  pp-diag by widening its regexes would hide the cause.
+
+### Proposed (DECISIONs for the user)
+
+- CS324: C's lexing of an unterminated literal: (a) recommended, libcpp's (a stray token to the line's end, a warning in a
+  directive, the parser's error in code), as C++ mode already does, judged by a night's whole token and tree checks (cc's dumps then
+  differ on such files: known entries); it would move embed-4.c and is the cause of c23-digit-separators-2.c's `:pedantic-diag`
+  row (its unterminated character constants at lines 16 and 23 stop the read before the converter's digit separator errors); (b)
+  keep cc's.
+- CS325: raw string literals in the GNU C modes (gnu99 and later, libcpp's rliterals): (a) recommended, the lexer's F-RAW in
+  those modes, judged by a night's whole token check; (b) keep them C++'s only.
+
+Left deferred, unchanged: read: decl-diag 3 (h-c-decl-diag's own rows), eval-depth 5 (MAX-NEST, h-c-decl-diag's DECISION),
+pp-diag 1 (gcc.dg/cpp/embed-4.c: `-traditional-cpp` is not modelled, and dg's "-:" column prefix is not read by the judge),
+pedantic-diag 1 (CS324), parse-gap 1 (embed-10.c: the read error stops the checker before "makes pointer from integer"),
+wrong-reason 1 (c23-bool-errors-3.c, a test's quoting); print: as h-c-deferred left them (eval-limits 11, macro-context 4,
+cc-grammar 3, split-declaration 2, objects-macro-body 2): no light change found tonight (each needs the compiled reader, the
+macro printer's planned fix, or the DECISION on tcc-pp's assembler sources).
+
+## As built: libcpp's unterminated literals and GNU raw strings in C (CS324 (a), CS325 (a), 2026-11-18, branch `n-c-lex`, from `mac/n-c-defer` `95615687e`)
+
+The night's task (round 52, memory-free: every process under 1 GiB): the two lexer DECISIONs n-c-defer proposed, taken overnight
+as recommended. Read from gcc 15.2's tarball (the pin `:gcc-15.2.0`: `libcpp/lex.cc`'s `lex_string` and `lex_number`,
+`libcpp/init.cc`'s `lang_defaults`, `gcc/c-family/c-lex.cc`'s `c_lex_with_flags`; GPL-3.0-or-later, studied, no text copied but
+the diagnostics' words).
+
+Built:
+- `arbace/repr/c/lex.ae` (CS324 (a)): `quoted` makes an unterminated string literal or character constant one `:OTHER` token to
+  its line's end in C as in C++ (CX2's path, now shared): libcpp's `CPP_OTHER`, no error of the lexer's (libcpp's pedwarn is a
+  warning, which the dg judge does not count), the file read on. cc's scanner reported "... not terminated" and ended the unit.
+- `arbace/repr/c/parse.ae`: the parser's `next!` reports a stray `:OTHER` as c-lex does and drops it, the parse going on:
+  "missing terminating ' character" (or `"`), else "stray 'X' in program" (`'\NNN'` for a character that is not graphic).
+- `arbace/repr/c/host.ae` (CS325 (a)): `raw-string-stds` (gnu99, gnu11, gnu17, gnu23, gnu2y: `lang_defaults`' rliterals, never
+  strict ISO C) and `lex-mask`: the configuration's `:trigraphs`, the lexer's argument, is the mask of bit 0 (trigraphs) and
+  `F-RAW` in those modes (as repr/cpp's `feature-mask` already gives C++), else the boolean as before. `lex.ae`'s `uR`, `UR`, `u8R`
+  tests take `feat?` for `F-ULIT` (true in C).
+- `arbace/repr/c/pp.ae`: `gnu::base64` takes a raw string as a narrow string literal (libcpp's `CPP_STRING`), whose spelling is not
+  base64 (embed-27.c's "'gnu::base64' argument not valid base64"). `arbace/repr/c/convert.ae`: a raw string's value (`unraw`: its
+  characters, backslashes escaped, through the ordinary literal's decoding).
+- `arbace/repr/c/ppcheck.ae`: `classify` names the two lexer causes first (`:unterminated-literal`: a file whose tokens hold an
+  `:OTHER`; `:gnu-raw-strings`), the known file's two new classes; the record prints each corpus's entries sorted (a corpus not
+  re-recorded kept its reader's hash order before).
+- `test/c/dg-wording.edn`: a family `:if-operand-left` (embed-4.c, now read to its end: gcc's reduce names the token left after a
+  stopped `__has_embed`, "missing binary operator before token", "':' without preceding '?'", "token '::' is not valid", the
+  evaluator cc's "unexpected ...", kept because the tree check compares #if errors with cc's). `test/c/divergences-dg.edn`: CS323's
+  two classes removed (no row left in them).
+
+Records (rows of the runs only): dg embed-4.c and embed-27.c pass, c23-digit-separators-2.c re-recorded ("both: missed [10 11 12 13
+14 15] extra [25]", still `:pedantic-diag`); the token check's known file at `:lex` gcc-embed's embed-4.c and tcc-pp's 13.S (an
+assembler source whose comment line holds an apostrophe: libcpp reads it on as the port now does), both `:unterminated-literal`,
+with their results files' rows, and c23-digit-separators-2.c at `:pp` and `:lex` by hand (`--record` takes whole corpora; gcc-c23
+did not fit the cap whole).
+
+c23-digit-separators-2.c is not the lexer's unterminated literals alone: its lines 16 and 23 now give gcc's "missing terminating '"
+at gcc's columns, but (1) libcpp's pp-number takes every `'` and backs off a trailing one (`lex_number`: "A number can't end with a
+digit separator"), so `1''2` is one pp-number whose "adjacent digit separators" the converter reports, where the port's `ppnumber`
+takes a `'` only before an identifier character (`1`, `''`, `2`: a parse error at line 9); (2) a read with parse errors never runs
+the converter, whose digit separator errors are lines 10 to 15, 21 and 22; (3) gcc places a missing `;` at the previous token's end
+(line 23), the port at the next token (line 25). Proposed as CS326 below.
+
+Checks (each process under 1 GiB, `REPR_C_THREADS` 1 or 2 where 3 passed the cap): `bin/ci dg --only` the three rows; `bin/ci dg
+--corpus` gcc-embed (45 of 47 pass: embed-4.c and embed-27.c moved), gcc-cpp-c23 (16 of 16), gcc-va-opt (12 of 12), gcc-gnu23 (50
+of 50), gcc-c23-sub (30 of 30), gcc-bitint (201 of 201), every row as recorded; `bin/repr-c check --tokens --corpus` gcc-embed,
+gcc-cpp-c23, tcc-pp, tcc-tests2 (88 equal) and `--only` c23-digit-separators-2.c (all known or equal); `parse-check --no-mutants`
+on the same (all equal or known; the results' rows of gcc-embed's embed-3.c, embed-4.c, embed-18.c, embed-27.c and tcc-pp's 13.S
+re-recorded from the run, embed-3.c's and embed-18.c's counts n-c-defer's); `roundtrip --corpus gcc-embed,gcc-cpp-c23,tcc-pp` (47,
+16 and 21 pass, 13.S known as recorded; 12.S's known entry stale under each test's own verdict, cc rejecting it too: its row was
+recorded under `ARBACE_C_JUDGE=gcc`, not re-recorded here); `bin/ci dg --essential` (92 of 92, the control differs); `bin/reap
+--record` (read 5237 / 224 / 14 to 5237 / 226 / 12: the new token check entries are by design, `test/c/divergences-read.edn`'s two
+new classes), `bin/crops-score --record`, `--judge --strict`, `bin/records-check`. gcc-c23's whole dg, token and tree runs passed
+the cap (the day's).
+
+Keys: `arbace/repr/c/` is embedded (in `gate_key`): the key moves, the C steps and `--full` rerun, and stage 0 evaluates the changed
+namespaces from the checkout until the next re-seed. Nothing was built here.
+
+For the day (whole corpora, the token and tree checks' new known entries wherever a file holds an unterminated literal or, in a GNU
+mode, `R"`): `bin/repr-c check --tokens --record`, `bin/repr-c parse-check --record` (mutants included), `bin/repr-c roundtrip
+--record`, `bin/ci annotations --record`, `bin/ci dg --record` (gcc-c23 whole), `bin/ci check` and `check --aot` (no change expected:
+the run corpora hold neither), then `bin/reap --record`, `bin/crops-score --record`.
+
+### Decided (taken overnight, round 52)
+
+- CS324 (a): C's unterminated literals as libcpp lexes them, C++'s path shared (the user's choice listed by n-c-defer; (b) cc's kept).
+- CS325 (a): raw strings in the GNU C modes from gnu99 (`lang_defaults`' rliterals), off in strict ISO C ((b) C++'s only).
+
+### Proposed (DECISION for the user)
+
+- CS326: libcpp's pp-number in C and C++ (`lex_number`: every `'` taken under digit separators, a trailing one given back), so that
+  `1''2` is one pp-number and its error the converter's: (a) recommended, judged by a night's whole token checks of both crops (cc's
+  and clang's dumps then differ on such files: known entries); (b) keep go-whim's rule (`'` only before an identifier character).
+  c23-digit-separators-2.c also needs the converter to run past a parse error (or the parser to report gcc's digit separator
+  errors), and gcc's location of a missing `;`; it stays `:pedantic-diag` until then.

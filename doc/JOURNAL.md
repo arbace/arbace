@@ -10405,3 +10405,38 @@ recommended for goi's next generics round, 1-2 days); the `.dict` parameter not 
 dropping only generic declarations and keeping their users (their calls then an unknown callee's: wrong tags and no instance
 lines); substituting named generic types in the shaped receivers through the checker's `instantiate` (needs the checker's
 context; the receiver keeps its generic type instead). doc/go/GOI-SPEC.md "Since v1: gc's -m of generic instances".
+
+## 2026-11-18: C's read cell, #embed's parameters as libcpp parses them (branch `n-c-defer`, from `next` `42bf8614b` with `mac/n-review-a`)
+
+The night's task (round 52, memory-free, each process under 1 GiB): the C read cell's 17 and print cell's 22 deferred rows. Four
+dg rows of gcc 15.2's c-c++-common/cpp/embed-*.c had one cause: repr/c's preprocessor read `#embed`'s and `__has_embed`'s
+parameters its own way and looked the resource up after a parameter error (a fatal "No such file" closed embed-18.c and
+embed-27.c). Ported libcpp's `_cpp_parse_embed_params`, `skip_balanced_token_seq`, `finish_base64_embed` and `builtin_has_embed`
+(studied in gcc-15.2.0's tarball at the pin `:gcc-15.2.0`, libcpp/directives.cc, files.cc, macro.cc; GPL-3.0-or-later, no code
+copied) into `arbace/repr/c/pp.ae` (CS322 (a), taken overnight). embed-3.c and embed-18.c pass; embed-4.c and embed-27.c fail
+further on, in two new deferred classes of the C lexer (CS323 (a), taken overnight: `:unterminated-literal`, `:gnu-raw-strings`);
+gnu23-attr-syntax-3.c's row passes (h-c-decl-diag's checker). Read 5234 / 224 / 17 to 5237 / 224 / 14; C's completeness 0.9811 to
+0.9813. Rows re-recorded by id from listed runs (dg 5 rows); the token, tree and round trip checks of gcc-embed and gcc-cpp-c23 as
+recorded. Alternatives considered: widening the old messages one by one (rejected: the stops and the base64 rules are libcpp's
+logic, not words); gcc's "missing '(' in expression" in the #if evaluator (tried, reverted: the tree check compares #if errors with
+cc's; a dg-wording family instead); libcpp's unterminated literals and GNU raw strings in the C lexer (proposed as CS324, CS325: they
+need a night's whole token check). doc/C23-SURVEY.md, "As built: #embed's parameters as libcpp parses them".
+
+## 2026-11-18: C's lexer, libcpp's unterminated literals and GNU raw strings (CS324 (a), CS325 (a); branch `n-c-lex`, from `mac/n-c-defer` `95615687e`)
+
+The night's task (round 52, memory-free, each process under 1 GiB): n-c-defer's two proposed lexer DECISIONs, taken overnight as
+recommended. Studied in gcc 15.2's tarball (the pin `:gcc-15.2.0`; `libcpp/lex.cc` `lex_string`, `lex_number`; `libcpp/init.cc`
+`lang_defaults`; `gcc/c-family/c-lex.cc` `c_lex_with_flags`; GPL-3.0-or-later, no code copied). `arbace/repr/c/lex.ae`: an
+unterminated literal is one `:OTHER` token to the line's end in C too (C++'s CX2 path shared), no lexer error; `parse.ae` reports
+it as c-lex does ("missing terminating ' character", "stray 'X' in program") and drops it; `host.ae`'s `lex-mask` turns on
+`F-RAW` in gnu99 to gnu2y (lang_defaults' rliterals), `pp.ae`'s `gnu::base64` takes a raw string as a narrow literal, `convert.ae`
+gives a raw string's value. The dg rows embed-4.c and embed-27.c pass (CS323's two classes removed; a dg-wording family for
+embed-4.c's #if errors in cc's words); c23-digit-separators-2.c reads to its end but stays `:pedantic-diag`: libcpp's pp-number
+rule (every `'`, a trailing one given back) is a separate cause, proposed as CS326. The token check's new known entries
+(`:unterminated-literal`: embed-4.c, c23-digit-separators-2.c, tcc-pp's 13.S) are by design in the read cell (new classes in
+`test/c/divergences-read.edn`). Read 5237 / 224 / 14 to 5237 / 226 / 12; C's meant completeness 0.9982 to 0.9983. Rows re-recorded
+by id from listed or whole small-corpus runs (dg 3, token 3 rows and the known file of gcc-embed and tcc-pp, tree 5 rows). The token
+check's record now prints each corpus's entries sorted. Alternatives considered: a separate C feature bit for the unterminated
+literal (rejected: libcpp does it in every C mode and C++, so the path is unconditional); keeping the converter's `prefix-of` blind
+to raw strings (rejected: a raw string's value would be misread). The whole token, tree, round trip and annotation checks are the
+day's. doc/C23-SURVEY.md, "As built: libcpp's unterminated literals and GNU raw strings in C".
