@@ -111,7 +111,11 @@ cd "$root"
 jdk=${JDK:-/root/jdk26u}
 if [ "${1:-}" = derive ]; then
   shift
-  JDK=$jdk arbace_tool -p "$root/test" -m jrt.derive "$@"
+  # JOP5 (a): the generated files it derives from (HeapByteBuffer(R).java, SocketOptionRegistry.java) under the generated
+  # sources' root: the build tree's, or with the own pin the own pack's
+  . bin/lib/repr-java/platform.bash
+  g=$(repr_java_gensrc_root) || exit 1
+  JDK=$jdk JRT_GENSRC=$g arbace_tool -p "$root/test" -m jrt.derive "$@"
   exit $?
 fi
 if [ "${1:-}" = vet ]; then
@@ -147,6 +151,18 @@ for f in "$jdk"/build/*/spec.gmk; do if [ -e "$f" ]; then conf=$f; break; fi; do
 . bin/lib/host.bash
 gen_exe=${REPR_JAVA_EXE:-$root/target/arbace-go/$(arbace_host_arch)/arbace-javac}
 gensrc_ref=${conf:+$(dirname "$conf")/support/gensrc/java.base}
+# JOP5 (a), the own pin (bin/lib/repr-java/platform.bash): the generated sources' reference the own pack's, and the two files
+# the conversion took from the JDK build tree (CaseFolding.java, the boot JDK's; the image's cacerts) its recorded copies,
+# jdk/javac/platform-records/ (JOP10, proposed): no read of the build tree
+. bin/lib/repr-java/platform.bash
+platform_kind=$(repr_java_platform_kind)
+records=$root/jdk/javac/platform-records/java.base
+if [ "$platform_kind" = own ]; then gensrc_ref=$(repr_java_gensrc_root)/java.base || exit 1; conf=; fi
+# spec.gmk's COPYRIGHT_YEAR (the CLDR converter's -year): the build's, else platform-gensrc.edn's (the same value, derived once)
+copyright_year=
+[ -z "$conf" ] || copyright_year=$(sed -n 's/^COPYRIGHT_YEAR := *//p' "$conf")
+[ -n "$copyright_year" ] || copyright_year=$(sed -n 's/^  \["value" "COPYRIGHT_YEAR" "\([0-9]*\)"\]$/\1/p' "$root/jdk/javac/platform-gensrc.edn")
+[ -n "$copyright_year" ] || copyright_year=2026
 
 # the closure's sources, then the generated ones, into tree $1
 make_sources() {
@@ -226,7 +242,7 @@ preproc_src() {
   { awk '/@@END_COPYRIGHT@@/{exit}1' "$t"
     awk '/@@START_HERE@@/,0' "$o.E" | sed -e 's/@@START_HERE@@/\/\/ AUTOMATICALLY GENERATED FILE - DO NOT EDIT/' -e 's/PREFIX_//' -e 's/^#.*//'
   } > "$o" && rm -f "$o.E" "$o.opts" || return 1
-  b=${conf:+$(dirname "$conf")/support/gensrc/java.base/${o#*/java.base/}}
+  b=${gensrc_ref:+$gensrc_ref/${o#*/java.base/}}
   if [ -n "$b" ] && [ -f "$b" ]; then
     cmp -s "$o" "$b" || { echo "jrt-convert: ${o#*/java.base/} differs from the JDK build's $b" >&2; return 1; }
     echo "   ${o#*/java.base/}: generated, the JDK build's byte for byte" >&2
@@ -273,10 +289,11 @@ generate() {
   # tree's file when it differs from the tool's by entries the boot JDK keeps alone (lines of the
   # build's the tool's lacks, none the other way: generated.edn's :boot-jdk), else the tool's
   # (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN7", JFS43)
-  local cf=jdk/internal/lang/CaseFolding.java
-  if [ -n "$gensrc_ref" ] && [ -f "$gensrc_ref/$cf" ] && ! cmp -s "$tools/CaseFolding.java" "$gensrc_ref/$cf" &&
-     ! diff "$tools/CaseFolding.java" "$gensrc_ref/$cf" | grep -q '^<'; then
-    cp "$gensrc_ref/$cf" "$out/$cf"
+  local cf=jdk/internal/lang/CaseFolding.java cfr=$gensrc_ref
+  [ "$platform_kind" != own ] || cfr=$records
+  if [ -n "$cfr" ] && [ -f "$cfr/$cf" ] && ! cmp -s "$tools/CaseFolding.java" "$cfr/$cf" &&
+     ! diff "$tools/CaseFolding.java" "$cfr/$cf" | grep -q '^<'; then
+    cp "$cfr/$cf" "$out/$cf"
   else
     cp "$tools/CaseFolding.java" "$out/$cf"
   fi || return 1
@@ -377,7 +394,7 @@ generate() {
   # taken (the tool writes more: other bundles, Windows' tzmappings)
   local cl=$tools/cldr-out
   "${java[@]}" build.tools.cldrconverter.CLDRConverter -base "$jdk/make/data/cldr/common" \
-    -baselocales "en-US" -o "$cl" -basemodule -year "$(sed -n 's/^COPYRIGHT_YEAR := *//p' "$conf" 2>"$quiet" || echo 2026)" \
+    -baselocales "en-US" -o "$cl" -basemodule -year "$copyright_year" \
     -zntempfile "$c/java/time/format/ZoneName.java.template" \
     -tzdatadir "$jdk/src/java.base/share/data/tzdata" -utf8 || return 1
   while read -r _ kind rel; do
@@ -393,7 +410,7 @@ generate() {
   "${java[@]}" build.tools.generatelsrequivmaps.EquivMapsGenerator \
     "$jdk/src/java.base/share/data/lsrdata/language-subtag-registry.txt" \
     "$out/sun/util/locale/LocaleEquivalentMaps.java" \
-    "$(sed -n 's/^COPYRIGHT_YEAR := *//p' "$conf" 2>"$quiet" || echo 2026)" || return 1
+    "$copyright_year" || return 1
   # the security and auth messages of sun.security.util.ResourcesMgr (doc/classes/JAVA-DEFERRED-TRIAGE.md,
   # F4: Subject's, the principals', LoginContext's and ConfigFile's texts), as make/modules/java.base/
   # Gensrc.gmk makes them (SECURITY_RESOURCES: TOOL_COMPILEPROPERTIES, build.tools.compileproperties.
@@ -441,7 +458,7 @@ generate() {
   # jdk.internal.jrt.LocaleDataIndex (generated here, KIND jrtgen)
   local ld=$tools/cldr-ld-out
   "${java[@]}" build.tools.cldrconverter.CLDRConverter -base "$jdk/make/data/cldr/common" \
-    -baselocales "en-US" -year "$(sed -n 's/^COPYRIGHT_YEAR := *//p' "$conf" 2>"$quiet" || echo 2026)" \
+    -baselocales "en-US" -year "$copyright_year" \
     -o "$ld" -tzdatadir "$jdk/src/java.base/share/data/tzdata" -utf8 || return 1
   clj "(jrt.jrt-sources/expand-locales \"$work/sources.txt\" \"$ld\" \"$cl/sun/util/cldr/CLDRBaseLocaleDataMetaInfo.java\" \"$jdk\" \"$out/jdk/internal/jrt/LocaleDataIndex.java\")" || return 1
   while read -r _ kind rel; do
@@ -533,6 +550,7 @@ generate() {
   # KeyStore and CertificateFactory, which javac's tool's world does not hold, so the file is the JDK
   # build's, copied from its image (generated.edn's :data names it :build-image, not :same)
   local cacerts=${conf:+$(dirname "$conf")/images/jdk/lib/security/cacerts}
+  [ "$platform_kind" != own ] || cacerts=$records/lib/security/cacerts
   [ -n "$cacerts" ] && [ -f "$cacerts" ] || { echo "jrt-convert: no JDK build image with lib/security/cacerts under $jdk/build" >&2; return 1; }
   mkdir -p "$data/lib/security"
   cp "$cacerts" "$data/lib/security/cacerts" || return 1
@@ -769,6 +787,8 @@ if has generate; then
         *) continue ;;
       esac
       if [ -z "$ref" ] || [ ! -f "$ref/$rel" ]; then v=:no-reference
+      elif [ "$platform_kind" = own ] && [ "$rel" = jdk/internal/lang/CaseFolding.java ] && cmp -s "$work/src/java.base/$rel" "$records/$rel"; then
+        v=:record  # the recorded copy of the build's (JOP10), the own pack's the tool's
       elif [ "$rel" = jdk/internal/lang/CaseFolding.java ] && ! cmp -s "$work/gen-tools/CaseFolding.java" "$ref/$rel" &&
            cmp -s "$work/src/java.base/$rel" "$ref/$rel"; then v=:boot-jdk  # the build's, the tool's apart (above)
       elif cmp -s "$work/src/java.base/$rel" "$ref/$rel"; then v=:same
@@ -778,6 +798,8 @@ if has generate; then
     echo " }"
     # the resource data, against the JDK build's module image (jdk/modules/java.base)
     modules_ref=${conf:+$(dirname "$conf")/jdk/modules/java.base}
+    # the own pin: no build tree read; the data without a reference (the oracle tier's javac-platform-oracle compares it)
+    [ "$platform_kind" != own ] || { modules_ref=; conf=; }
     echo " :data {"
     (cd "$work/data" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while read -r rel; do
       # lib/ and conf/: the image's own files (tzdb.dat, java.security), against the build's jdk/
