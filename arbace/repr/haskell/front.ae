@@ -10,7 +10,8 @@
             [arbace.repr.haskell.cpp :as cpp]
             [arbace.repr.haskell.rename :as rn]
             [arbace.repr.haskell.typecheck :as tc]
-            [arbace.repr.haskell.tostg :as tostg])
+            [arbace.repr.haskell.tostg :as tostg]
+            [arbace.repr.haskell.ownface :as ownface])
   (:import [java.io File]))
 
 (defn- parse-args [args]
@@ -24,53 +25,141 @@
 
 (defn- msg [^Throwable e] (str/replace (str (.getName (class e)) ": " (ex-message e)) #"\s+" " "))
 
+(defn- read-module
+  "One module's file F (a File; nm the name the reader is given) read natively into DUMP (a path): nil, or [:read message]"
+  [^File f nm flags dump]
+  (try (let [;; a literate module (.lhs) is unlit's output, as GHC's driver runs unlit before the parse
+             ;; (arbace.repr.haskell.driver/preprocess, the file named as GHC's command line names it,
+             ;; its directory the cwd; the plan's programs need no CPP). Read as plain text its code is
+             ;; all comments, the module empty and main missing (gate B1's sixteen nofib programs:
+             ;; "no binding of main::Main/main")
+             lit (drv/literate? nm)
+             text (if lit (:text (binding [cpp/*cwd* (.getParent (.getAbsoluteFile f))] (drv/preprocess nil flags (.getName f) false))) (slurp f))
+             r (native/read-text text nm flags)
+             cfg (native/config flags (if lit (java.nio.file.Files/readAllBytes (.toPath f)) (.getBytes ^String text "UTF-8"))
+                                :pre {:unlit lit})]
+         (spit dump (str (str/join "\n" (map pr-str (native/dump-forms r cfg))) "\n"))
+         nil)
+       (catch Throwable e [:read (msg e)])))
+
+;; HF10-P24 (a) (the user, 2026-11-10; built 2026-11-17, round 52): a program of several modules. A module the main file
+;; imports (transitively) whose source is in the program's directory, as GHC's finder finds it on the default search path
+;; (".": M.hs or M.lhs, the module name's dots directories), is the program's own: read, renamed, elaborated and made STG
+;; in dependency order before the main module, its own interface (arbace.repr.haskell.ownface, as lib-check writes a
+;; library module's) written into the program's pool for the modules above it, its STG beside Main's (OUT/stg/NAME/M.stg.ae,
+;; :unit "main", :file "./M.hs" as GHC's --make names a module the finder found).
+
+(def ^:private import-re #"\(mod \"([A-Za-z0-9_.']+)\"\)\) NoRawPkgQual (IsBoot|NotBoot)")
+
+(defn- dump-imports
+  "The imports of a native dump file: [[MODULE boot?] ...]"
+  [dump]
+  (vec (distinct (map (fn [[_ m b]] [m (= b "IsBoot")]) (re-seq import-re (slurp dump))))))
+
+(defn local-source
+  "The program's own source of module M in directory DIR (GHC's finder on \".\"), or nil"
+  [dir m]
+  (let [b (str/replace m "." "/")]
+    (some (fn [ext] (let [f (File. (str dir "/" b ext))] (when (.isFile f) [f (str b ext)]))) [".hs" ".lhs"])))
+
+(defn module-order
+  "The program's own modules below the main file: read each (read-fn [File relative-path] -> dump path, or [:read msg]),
+  follow its imports in DIR, and order them so each comes after its imports (a depth-first postorder, the main module
+  last): {:order [[M dump relative-path] ...]} or {:stop [stage message]} (a read failure, an hs-boot import, a cycle)"
+  [dir main-dump read-fn]
+  (let [state (atom {:seen {} :order [] :stop nil})
+        visit (fn visit [m dump rel path]
+                (when-not (:stop @state)
+                  (swap! state assoc-in [:seen m] :open)
+                  (doseq [[i boot?] (dump-imports dump) :while (not (:stop @state))]
+                    (when-let [[f irel] (local-source dir i)]
+                      (cond boot? (swap! state assoc :stop [:local (str "an hs-boot import of " i " (SOURCE): not compiled yet")])
+                            (= :open (get-in @state [:seen i])) (swap! state assoc :stop [:local (str "an import cycle through " i ": " (str/join " -> " (conj path i)))])
+                            (get-in @state [:seen i]) nil
+                            :else (let [d (read-fn f irel)]
+                                    (if (vector? d)
+                                      (swap! state assoc :stop [(first d) (str irel ": " (second d))])
+                                      (visit i d irel (conj path i)))))))
+                  (when-not (:stop @state)
+                    (swap! state #(-> % (assoc-in [:seen m] :done) (update :order conj [m dump rel]))))))]
+    (visit nil main-dump nil [])
+    (let [{:keys [stop order]} @state]
+      (if stop {:stop stop} {:order order}))))
+
+(defn- compile-module
+  "One module through rename, elaboration and STG; pool the program's own modules' interfaces (written into it when
+  WRITE-IFACE), units the libraries' {MODULE {:unit :file}} with the program's modules compiled before it: {:r :rr} or
+  [stage message]"
+  [dump w nm srcfile ifaces pool units out base write-iface]
+  (let [local (str w "/ifl/" nm)
+        dirs (if pool (vec (cons pool ifaces)) ifaces)
+        rr (try (binding [rn/*ifdirs* (vec (cons local dirs))]
+                  (rn/rename-file dump (str w "/tree") local))
+                (catch Throwable e [:rename (msg e)]))]
+    (if (vector? rr)
+      rr
+      (let [tree (read-string (slurp (str w "/tree/" (:name rr) ".rn-tree.edn")))
+            r (try (binding [tc/*ifdirs* (vec (concat dirs [local])) tc/*srcfile* srcfile] (tc/typecheck-module tree))
+                   (catch Throwable e [:typecheck (msg e)]))]
+        (if (vector? r)
+          r
+          (try
+            (let [forms (tostg/module-stg r units srcfile)]
+              (tostg/write-stg forms (str out "/stg/" base) (:module r))
+              (when (System/getenv "REPR_HASKELL_SIMPL_OUT")
+                (spit (str out "/stg/" base "/" (:module r) ".simpl.edn")
+                      (binding [*print-length* nil *print-level* nil *print-meta* false] (str/join "\n" (map pr-str @tostg/last-prog)))))
+              (if (seq (:errors r))
+                [:typecheck-errors (str (when write-iface (str (:module r) ": ")) (count (:errors r)) ": "
+                                        (str/join " | " (map #(str/replace (pr-str %) #"\s+" " ") (take 3 (:errors r)))))]
+                (do (when write-iface
+                      ;; HF10-P24 (a): no default method's simplified unfolding (lib-check's dm-unfoldings): a module
+                      ;; above calls the $dm binding the module's STG exports, as GHC's -O0 does when it does not inline
+                      (let [text (ownface/own-iface-text rr r "main")]
+                        (.mkdirs (File. ^String pool))
+                        (spit (str pool "/" (:module r) ".iface.edn") text)))
+                    {:r r :rr rr})))
+            (catch Throwable e
+              (when (System/getenv "REPR_HASKELL_FRONT_TRACE") (.printStackTrace e))
+              [:stg (msg e)])))))))
+
 (defn build-one
-  "FILE (a path) through the front end into OUT; [stage message] when a stage stops it, else [:ok n-errors]"
+  "FILE (a path) through the front end into OUT; [stage message] when a stage stops it, else [:ok n-errors]. The
+  program's own modules (HF10-P24 (a)) first, each into OUT/stg/NAME beside the main module's"
   [file out ifaces units flags]
   (let [[file oname] (str/split file #"@" 2)
         f (File. ^String file)
         nm (.getName f)
+        dir (.getParent (.getAbsoluteFile f))
         base (or oname (str/replace nm #"\.l?hs$" ""))
         w (str out "/" base)
-        nd (str w "/nd")]
+        nd (str w "/nd")
+        pool (str w "/pool")]
     (.mkdirs (File. ^String nd))
-    (let [read-ok (try (let [;; a literate module (.lhs) is unlit's output, as GHC's driver runs unlit before the parse
-                             ;; (arbace.repr.haskell.driver/preprocess, the file named as GHC's command line names it,
-                             ;; its directory the cwd; the plan's programs need no CPP). Read as plain text its code is
-                             ;; all comments, the module empty and main missing (gate B1's sixteen nofib programs:
-                             ;; "no binding of main::Main/main")
-                             lit (drv/literate? nm)
-                             text (if lit (:text (binding [cpp/*cwd* (.getParent (.getAbsoluteFile f))] (drv/preprocess nil flags nm false))) (slurp f))
-                             r (native/read-text text nm flags)
-                             cfg (native/config flags (if lit (java.nio.file.Files/readAllBytes (.toPath f)) (.getBytes ^String text "UTF-8"))
-                                                :pre {:unlit lit})]
-                         (spit (str nd "/" nm ".edn") (str (str/join "\n" (map pr-str (native/dump-forms r cfg))) "\n"))
-                         nil)
-                       (catch Throwable e [:read (msg e)]))]
+    (let [main-dump (str nd "/" nm ".edn")
+          read-ok (read-module f nm flags main-dump)]
       (or read-ok
-          (let [local (str w "/ifl")
-                rr (try (binding [rn/*ifdirs* (vec (cons local ifaces))]
-                          (rn/rename-file (str nd "/" nm ".edn") (str w "/tree") local))
-                        (catch Throwable e [:rename (msg e)]))]
-            (if (vector? rr)
-              rr
-              (let [tree (read-string (slurp (str w "/tree/" nm ".rn-tree.edn")))
-                    r (try (binding [tc/*ifdirs* (vec (concat ifaces [local])) tc/*srcfile* nm] (tc/typecheck-module tree))
-                           (catch Throwable e [:typecheck (msg e)]))]
-                (if (vector? r)
-                  r
-                  (try
-                    (let [forms (tostg/module-stg r units nm)]
-                      (tostg/write-stg forms (str out "/stg/" base) (:module r))
-                      (when (System/getenv "REPR_HASKELL_SIMPL_OUT")
-                        (spit (str out "/stg/" base "/" (:module r) ".simpl.edn")
-                              (binding [*print-length* nil *print-level* nil *print-meta* false] (str/join "\n" (map pr-str @tostg/last-prog)))))
-                      (if (seq (:errors r))
-                        [:typecheck-errors (str (count (:errors r)) ": " (str/join " | " (map #(str/replace (pr-str %) #"\s+" " ") (take 3 (:errors r)))))]
-                        [:ok (count (:errors rr))]))
-                    (catch Throwable e
-                      (when (System/getenv "REPR_HASKELL_FRONT_TRACE") (.printStackTrace e))
-                      [:stg (msg e)]))))))))))
+          (let [mo (module-order dir main-dump
+                                 (fn [^File lf rel]
+                                   (let [d (str nd "/" (str/replace rel "/" ".") ".edn")]
+                                     (or (read-module lf (.getName lf) flags d) d))))]
+            (if (:stop mo)
+              (:stop mo)
+              (let [own (butlast (:order mo))
+                    locals (atom [])]
+                (try
+                  (loop [[[m dump rel] & more] own units units]
+                    (if-not m
+                      (let [r (compile-module main-dump w nm nm ifaces (when (seq own) pool) units out base false)]
+                        (if (vector? r) r [:ok (count (:errors (:rr r)))]))
+                      (let [srcfile (str "./" rel)
+                            _ (swap! locals conj m)
+                            r (compile-module dump w m srcfile ifaces pool units out base true)]
+                        (if (vector? r)
+                          r
+                          (recur more (assoc units m {:unit "main" :file (str out "/stg/" base "/" m ".stg.ae")}))))))
+                  ;; the program's modules are no library's: tostg's constructor cache (by module name) forgets them
+                  (finally (swap! tostg/lib-data #(apply dissoc % @locals)))))))))))
 
 (defn -main
   "build --ifaces DIR,... --libs DIR,... -o OUT [--flags \"-XHaskell2010 ...\"] [--plan FILE] FILE.hs[@NAME]...: each program

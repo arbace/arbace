@@ -4630,3 +4630,71 @@ Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy st
   is typed at `m a -> (a -> m b) -> m b` and fails (`[a]` against InfDo). (a) port tcSyntaxOp's shapes for a rebound `>>=`,
   `>>`, `fail`; (b) leave it on the pack. *Recommended: (a)*, next round (the one testsuite-core program the front end does not
   compile but the 5 that time out).
+
+## As built: HF10-P24 (a), programs of several modules (2026-11-17/18, round 52, branch `n-hs-indep`, from next `42bf8614b` with `mac/n-review-d` `b60d7ffb2`)
+
+By an agent during the night's full gate (memory-free work: each run one at a time, `HSI_JOBS=1`, one front shard, `GOMEMLIMIT`
+700 MiB; stage 0 linked from next; the own libraries the gate's own producers' tars of 2026-11-16, `HSI_OWN_TARS`; no GHC, no
+build, no network). The decision is HF10-P24 (a) of 2026-11-10 ("multi-module programs through the front end, own-order over the
+program's modules"), not built until now. GHC's behaviour followed: `compiler/GHC/Unit/Finder.hs` (a home module found on the
+default search path "." as `./M.hs`, the name its STG's `:file` and SrcLoc carry: the pack's `nofib/spectral/scc/stg/Digraph.stg.ae`
+has `"./Digraph.hs"`), `compiler/GHC/Tc/Module.hs` (checkMain: Main's entry is the `main` it exports, which may be imported).
+
+**Why this item.** Haskell's independence is 78 (`test/crops/scores.edn`: read 1, eval 0.5, AOT 0.5, print 1, judge 0.887). Eval and
+AOT lose the most, 0.5 each: their cases count 1 only from `bin/hsi check --libs own`'s record (HF10-P29 (a)), and
+`test/haskell/check-hsi-own.edn` is marked INTERIM (review 1111b) so it counts none, and `check-hsi-aot-own.edn` does not exist: both
+stages stand at the stated 0.5 until a whole run records them (a night job). What the code can move is how many programs that record
+can call own. Today's eligibility (`HSI_FRONT_DRY=1`, the four corpora, 950 programs): 635 tried on the own libraries, 46 on
+`own-fallback.txt`, 269 ineligible: local 65 (a module of the program's own: the front end compiled one module), import 59, C 57, CPP
+43, pragma 18, kind 15, defer 9, no main 3. The largest refusal is the one HF10-P24 lifts.
+
+**What is in the tree.**
+- `arbace/repr/haskell/front.ae`: `build-one` reads the main file, follows its imports to the program's own sources (`local-source`:
+  M.hs or M.lhs below the main file's directory, the dots directories), orders them depth first (`module-order`, the main module
+  last; an hs-boot import or a cycle stops it, stage `:local`) and compiles each (`compile-module`: read, rename, elaborate, STG)
+  with the program's pool of its earlier modules' own interfaces first in the search (GHC's home modules before the packages), each
+  module's interface written by `arbace.repr.haskell.ownface/own-iface-text` at unit main (lib-check's writer), its STG into
+  `OUT/stg/NAME/M.stg.ae` beside Main's (`:file "./M.hs"`), the libraries' units extended by it for the modules above; tostg's
+  constructor cache forgets the program's modules after it (it is keyed by module name, a process builds many programs). A program
+  of one module goes through the same path as before (the pool empty, the same directories).
+- `arbace/repr/haskell/tostg.ae`: Main's `main::Main/main` runs the `main` Main exports when it is another module's (T16453M1's
+  `module Main (T16453T.main)`, T16453M4, T16453M5, T19397M0's `module Main (main) where import T19397S`); before, an imported main
+  gave no entry (hsi: "no binding of main::Main/main").
+- `bin/lib/hsi/check`'s `front_eligible`: the program's own modules scanned as the main file is (pragmas, CPP, foreign stubs,
+  imports), to their imports' closure; refusals `local-boot M` (an hs-boot file of its own), `import M (in FILE)`, `main-is`
+  (GHC's `-main-is FN`: T16453M6, T19397M2-M4, HF10-P59 below), a LANGUAGE pragma over several lines naming CPP (T1735, read
+  as no CPP before: `cpp pragma`); kind `multimod_compile_and_run` is taken.
+- `test/haskell/own-fallback.txt`: tcrun025 (tcrun024 across two modules, newly eligible) `:own-lib`, as tcrun024: class IP's selector
+  `ip` is not in the own GHC.Internal.Classes.
+
+**Results** (light; the host loaded by the gate, so 30-40 s a program in the front end):
+
+| | before | after |
+|---|---|---|
+| tried on the own libraries (of 950; the fallback list's 46, 47 after, apart) | 635 | 672 (+37: 19 nofib, 18 testsuite) |
+| ineligible `local` | 65 | 0 (`import` 59 to 85: the modules' own imports now named, e.g. NofibUtils, Data.Map, Control.Parallel) |
+| the front end on the 25 programs tried first (the 37's 19 and 6 refused or listed since) | | 25 of 25 compile |
+
+`bin/hsi check --libs own --only` (`ARBACE_MEM_GIB=1`, `HSI_JOBS=1`): pass on the own libraries, `:libs :own`: nofib/spectral/pretty,
+nofib/spectral/scc, T12622, T8103, T9577, cgrun067, T22282, T16453M0-M5, T19397M0, T19397M1, tcrun038 and the four T23146 tests
+(T23146, _lifted, _lifted_unlifted, _liftedeq) (20 of the 23 tried; each run exit 0 once its programs were classed); controls samples/Hello and
+samples/Echo pass, their negative controls fail as they must. Not passing under the light cap: nofib/gc/mutstore1 and
+nofib/spectral/awards (out of memory at `ARBACE_MEM_GIB=1`), nofib/spectral/primetest (the 60 s CPU limit on the loaded host): the
+night's 16 GiB run decides them. tcrun025 on the list. The STG of T16453T (`./T16453T.hs`) is the pack's up to the binders' names.
+
+**Not run**: the whole own run (`--record`), the AOT level, the oracle tier.
+
+### Proposals
+
+- **HF10-P59 `-main-is`** (taken overnight, round 52: (b)). GHC's `-main-is [M.]fn` names Main's entry (T16453M6, T19397M2-M4, 4
+  programs). (a) take the flag into the plan and resolve FN in Main's scope (an imported FN, T19397S's foo), the entry
+  `runMainIO FN`; (b) refuse it, the 4 on the pack. *Recommended and taken: (b)* tonight, (a) next round.
+- **HF10-P60 the program's default methods' unfoldings** (taken overnight, round 52: (b)). lib-check writes a module's `$dm`
+  unfoldings simplified (HF10-P12 (a)); a program's own module's interface carries the elaborator's. (a) run lib-check's
+  dm-unfoldings for a program's modules; (b) not: a module above calls the `$dm` binding the module's STG exports. *Recommended and
+  taken: (b)*: runs, not STG equality, judge a program.
+- **HF10-P61 the own run's new programs** (taken overnight, round 52: (a)). The night's whole `--libs own --record` will meet the 37
+  newly eligible programs at 16 GiB for the first time; one failing on the own libraries otherwise than on the pack is in no class
+  and fails the run. (a) a light try of the 37 the next day (`--only`, 2 GiB) and each that does not pass put on `own-fallback.txt`
+  with its class before the record; (b) record first and class after. *Recommended and taken: (a)*: 23 of the 37 are tried
+  tonight (above: 20 pass, 3 over the light cap); the 14 untried nofib programs and the 3 are the day's run at 16 GiB.

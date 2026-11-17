@@ -10338,3 +10338,23 @@ and over the 20 control files (13 min, 1.9 GB peak; every control, two new ones 
   chain-needs, gate-key-crops, caches and stale-comments tests pass; `bin/gate --plan` plans. Only 334 moves gate_key (go/arbace/scm
   and arbace/scheme are embedded since W2): next's e8e0d017 to fa199ec1, so the next gate builds the executables afresh.
 - Every arm64-made or interim record waits for the main host's amd64 runs (the branches' reports, queue 323, 325, 326, 327, 334).
+
+## 2026-11-18: Haskell's independence, HF10-P24 (a): programs of several modules through the native front end (round 52, branch `n-hs-indep`)
+
+- Base: next `42bf8614b` with `mac/n-review-d` `b60d7ffb2` merged (queue 325 and its stack: Haskell 78 independent, eval and AOT
+  0.5 each, read and print 1, judge 0.887). Eval and AOT lose the most: their cases count 1 only from `bin/hsi check --libs own`'s
+  records, and `test/haskell/check-hsi-own.edn` is INTERIM (counts none), `check-hsi-aot-own.edn` absent, so both stand at the stated
+  0.5. The open item that moves how many programs those records can call own is HF10-P24 (a) (decided 2026-11-10, not built): of the
+  950 planned programs 269 were ineligible, `local` (a module of the program's own) the largest refusal, 65.
+- Built: `arbace/repr/haskell/front.ae` compiles a program's own modules (found as GHC's finder finds them on ".", `./M.hs`) in
+  dependency order, each module's own interface (`ownface/own-iface-text`, unit main) in the program's pool for the modules above,
+  their STG beside Main's; `tostg.ae` runs the `main` Main exports when it is imported (GHC's checkMain); `bin/lib/hsi/check`'s
+  eligibility scans the program's modules too, refuses `-main-is` (HF10-P59 (b), taken overnight), an hs-boot file of the program's
+  own, a LANGUAGE pragma over several lines naming CPP (T1735). Tried on the own libraries 635 to 672 of 950. tcrun025 on
+  `own-fallback.txt` (`:own-lib`, as tcrun024). doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P24 (a)"; HF10-P59 (b), P60 (b),
+  P61 (a) taken overnight (round 52).
+- Checked light (one process at a time, `HSI_JOBS=1`, own libraries from the gate's tars of 2026-11-16): the front end 25 of 25 new
+  programs compiled; 20 of the 23 new ones tried pass on the own libraries (T16453M0-M5, T19397M0-M1, T12622, T8103, T9577, cgrun067, T22282,
+  tcrun038, the four T23146 tests, nofib spectral pretty and scc), 3 nofib programs over the light 1 GiB cap; a final `--only` run exit 0 with its controls
+  failing as they must. Alternatives considered: refusing an imported main (as before) instead of checkMain's rule; porting
+  `-main-is` tonight (left for a round of its own).

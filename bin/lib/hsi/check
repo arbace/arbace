@@ -31,8 +31,9 @@
 #   --verify-progs [--sample N]   N programs of the plan (default all, evenly spread) dumped again by the helper and compared with the
 #                       pack file for file (ORS6 (a)'s verdict) and the crossed pair
 # HFS-I1 (a) (doc/haskell/FRONTEND-SURVEY.md, "As built: HFS-I1 (a)"): the program's STG from Arbace's native front end.
-#   --front native|ghc  (HSI_FRONT; default ghc, default_front below) native: each program the front end can take (a single module:
-#                       every module its main file imports is a library's, in the interfaces pack; no C of its own, no foreign export,
+#   --front native|ghc  (HSI_FRONT; default ghc, default_front below) native: each program the front end can take (every module its
+#                       main file imports a library's, in the interfaces pack, or since HF10-P24 (a) one of the program's own, its
+#                       source in the program's directory, M.hs or M.lhs, compiled first in dependency order, no hs-boot file; no C of its own, no foreign export,
 #                       wrapper or capi import) compiled by arbace.repr.haskell.front (native read, rename, elaborate, desugar, the
 #                       simple optimiser, CorePrep, CoreToStg, Unarise) over the pack haskell-ifaces-ghc-9.14.1 and the libraries' STG,
 #                       with its all.T -X flags (none: GHC2021, as GHC compiled the pack's STG), in HSI_FRONT_SHARDS processes (default 4,
@@ -55,7 +56,7 @@
 #                       case Arbace's own (1); every other program as --front ghc runs it (haskell-stg-progs over haskell-stg-libs):
 #                       :libs :pack with :front the reason (:ineligible: an import not own, a C file, a foreign stub, a CPP module;
 #                       :fallback: the list; else the stage that stopped the front end; queue 325: an :ineligible line's :why "CATEGORY
-#                       DETAIL" names its refusal: kind, no-main, c, cpp, defer, pragma, local (a module of its own), import (a
+#                       DETAIL" names its refusal: kind, no-main, c, cpp, defer, main-is, pragma, local-boot (an hs-boot file of its own), import (a
 #                       module no interface here has), summed at the end). Work .tmp/hsi/check-own (check-aot-own);
 #                       --record writes test/haskell/check-hsi-own.edn (-aot-own). own-fallback.txt (P23 (a)): the eligible programs
 #                       that did not pass on the own libraries, each with its class, run on the pack; it may only shrink: review
@@ -278,12 +279,13 @@ echo "== hsi check: $(wc -l < "$plan") programs, $jobs at a time" >&2
 
 # HFS-I1 (a): the native front end's STG of the programs it can take (--front native), before the runs
 front_why=""
-front_eligible() { # SRC MAIN FLAGS KIND IFACES: a single module of the library's imports alone, no C, no foreign stubs
+front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own modules (HF10-P24 (a)) on the libraries' imports alone, no C, no foreign stubs
   # queue 325: a refusal names its reason in front_why (CATEGORY DETAIL: kind, no-main, c, cpp, defer, pragma, local, import),
   # which the run's line of the program carries as :why (the rest named: what keeps it on GHC's STG)
   local src=$1 main=$2 flags=$3 kind=$4 ifs=$5 m f hit
   front_why=""
-  case $kind in plain|compile_and_run|nofib) ;; *) front_why="kind $kind"; return 1 ;; esac
+  # (HF10-P24 (a): multimod_compile_and_run, a main file and the modules it imports, as GHC's --make compiles them)
+  case $kind in plain|compile_and_run|multimod_compile_and_run|nofib) ;; *) front_why="kind $kind"; return 1 ;; esac
   [ "$main" != - ] && [ -f "$src/$main" ] || { front_why="no-main $main"; return 1; }
   # (HF10-P32: an OPTIONS or OPTIONS_GHC pragma's -cpp or -XCPP is CPP too: cgrun044, conc036, conc037 read as empty modules;
   # -fdefer-type-errors: a program GHC compiles with a type error raised at run time, in GHC's words; RULES: rewrite rules,
@@ -291,28 +293,42 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: a single module of the library'
   if [ "$flags" != - ]; then for f in $flags; do case $f in
     *.c|*.o|*.cmm|*.s|*.S|-optc*) front_why="c $f"; return 1 ;;
     -cpp|-XCPP) front_why="cpp $f"; return 1 ;;
-    -fdefer-type-errors|-fdefer-typed-holes) front_why="defer $f"; return 1 ;; esac; done; fi
-  # a literate module's code (gate B1): its bird-tracked lines without the track (a \begin{code} block's lines are plain), so
-  # that its imports and pragmas are scanned as the front end reads them after unlit
-  local txt=$src/$main
-  case $main in *.lhs) txt=$TMPDIR/hsi-front-unbird.$BASHPID; sed 's/^>[ \t]*//' "$src/$main" > "$txt" ;; esac
-  hit=$(grep -oE 'foreign +export|"wrapper"|foreign +import +capi|^ *\{-# *LANGUAGE[^#]*CPP|\{-# *OPTIONS(_GHC)?[^#]*(-cpp|-XCPP)|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$txt" | head -1) || true
-  if [ -n "$hit" ]; then
-    case $hit in
-      foreign*export) front_why="pragma foreign export" ;; *wrapper*) front_why="pragma foreign import wrapper" ;;
-      foreign*capi) front_why="pragma foreign import capi" ;; *CPP*|*-cpp*) front_why="cpp pragma" ;;
-      *defer*) front_why="defer pragma" ;; *RULES*) front_why="pragma RULES" ;; *) front_why="pragma ${hit//\"/}" ;;
-    esac
-    return 1
-  fi
-  for m in $(sed -n 's/^import *\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\3/p' "$txt" | sort -u); do
-    # a library's module: its interface, or a package's reexport of one (GHC.Prim is ghc-internal's GHC.Internal.Prim)
-    [ -f "$ifs/$m.iface.edn" ] || grep -qF "\"$m\" " "$ifs/reexports.edn" || {
-      # a module of the program's own (a program of several modules: the front end compiles one) or a library's without an
-      # interface here (with --libs own: a package not made own yet)
-      if [ -f "$src/${m//.//}.hs" ] || [ -f "$src/${m//.//}.lhs" ] || [ -f "$src/${m//.//}.hs-boot" ]; then front_why="local $m"
-      else front_why="import $m"; fi
-      return 1; }
+    -fdefer-type-errors|-fdefer-typed-holes) front_why="defer $f"; return 1 ;;
+    # (HF10-P24 (a): GHC's -main-is FN names Main's entry, which the front end does not take yet: T16453M6, T19397M2-M4)
+    -main-is) front_why="main-is $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//')"; return 1 ;; esac; done; fi
+  # HF10-P24 (a): the program's own modules (an import whose source is in the program's directory, M.hs or M.lhs, as GHC's
+  # finder finds it on ".") are scanned as the main file is, to their imports' closure; an hs-boot file of one refuses
+  # (local-boot: the front end compiles no boot file of a program yet)
+  local todo=("$main") seen=" " cur txt
+  while [ ${#todo[@]} -gt 0 ]; do
+    cur=${todo[0]}; todo=("${todo[@]:1}")
+    case $seen in *" $cur "*) continue ;; esac
+    seen="$seen$cur "
+    # a literate module's code (gate B1): its bird-tracked lines without the track (a \begin{code} block's lines are plain), so
+    # that its imports and pragmas are scanned as the front end reads them after unlit
+    txt=$src/$cur
+    case $cur in *.lhs) txt=$TMPDIR/hsi-front-unbird.$BASHPID; sed 's/^>[ \t]*//' "$src/$cur" > "$txt" ;; esac
+    hit=$(grep -oE 'foreign +export|"wrapper"|foreign +import +capi|^ *\{-# *LANGUAGE[^#]*CPP|\{-# *OPTIONS(_GHC)?[^#]*(-cpp|-XCPP)|\{-# *OPTIONS_GHC[^#]*-fdefer-type|\{-# *RULES' "$txt" | head -1) || true
+    # (a LANGUAGE pragma over several lines naming CPP: T1735's)
+    [ -n "$hit" ] || ! tr '\n' ' ' < "$txt" | grep -qE '\{-# *LANGUAGE[^#]*CPP' || hit="LANGUAGE CPP"
+    if [ -n "$hit" ]; then
+      case $hit in
+        foreign*export) front_why="pragma foreign export" ;; *wrapper*) front_why="pragma foreign import wrapper" ;;
+        foreign*capi) front_why="pragma foreign import capi" ;; *CPP*|*-cpp*) front_why="cpp pragma" ;;
+        *defer*) front_why="defer pragma" ;; *RULES*) front_why="pragma RULES" ;; *) front_why="pragma ${hit//\"/}" ;;
+      esac
+      [ "$cur" = "$main" ] || front_why="$front_why (in $cur)"
+      return 1
+    fi
+    for m in $(sed -n 's/^import *\({-# *SOURCE *#-} *\)\?\(safe \)\?\(qualified \)\?\([A-Z][A-Za-z0-9_.]*\).*/\4/p' "$txt" | sort -u); do
+      # a module of the program's own first (GHC's home modules shadow the packages'), then a library's: its interface, or a
+      # package's reexport of one (GHC.Prim is ghc-internal's GHC.Internal.Prim)
+      if [ -f "$src/${m//.//}.hs-boot" ] || [ -f "$src/${m//.//}.lhs-boot" ]; then front_why="local-boot $m"; return 1
+      elif [ -f "$src/${m//.//}.hs" ]; then todo+=("${m//.//}.hs")
+      elif [ -f "$src/${m//.//}.lhs" ]; then todo+=("${m//.//}.lhs")
+      elif [ -f "$ifs/$m.iface.edn" ] || grep -qF "\"$m\" " "$ifs/reexports.edn"; then :
+      else front_why="import $m"; [ "$cur" = "$main" ] || front_why="$front_why (in $cur)"; return 1; fi
+    done
   done
 }
 if [ "$front" = native ]; then
