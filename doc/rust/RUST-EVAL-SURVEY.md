@@ -1496,3 +1496,47 @@ Numbered RES61-RES63 on branch `res34`; renumbered RES64-RES66 at batch 2's merg
   (`test/rust/check-budget.edn` gains a memory column, the shard run under it), the night's slots given to them last**; (b) RES43's
   compact fragment format first. *Recommended: (a)*, (b) with RES43's measure.
 
+
+## As built: queue 322, the AOT cell's gap (2026-11-17, branch `322-rust-aot-cell` from next `e4a7a30f3`)
+
+By the Mac VM's agent (light tier: no gate, no build, no corpus run; stage 0 of next's seed `3c48859d`). The brief: what the AOT
+cell expects against what `rsi-aot` and `bin/rsi check --aot --record` produce, and the gap closed.
+
+**What the cell expects and what exists.** `[:rust :aot]` reads `test/rust/check-aot-linux-amd64.edn` with the reader `:results`
+(rows `[ID RESULT REASON]`), its `:until` keeping it "no check yet" while the file is absent. The writer was there since RE4
+(`arbace.rust.check/run-judge WORK aot --record`: rows `[id result reason]`, the times file beside; whole corpora only). Three gaps:
+(1) the cell's classes were `divergences-aot.edn` alone, while the judge (`run-judge`, `bin/rsi divergences --aot`) tries
+`divergences-aot.edn` then `divergences.edn`: a recorded AOT non-pass of an interpreted class (threads, process, speed, env, lto, ...)
+would have been unclassed, a reap problem; (2) the records' names were linux/amd64's on any host: a `--record` on the arm64 VM would
+have rewritten the gate's amd64 record with arm64 runs; (3) no light test of the AOT judge (`judge-test` judged the eval level only).
+Nobody records the cell: `rsi-aot` (`:clean-only`, samples) judges against the record and never writes it; the record is the main
+host's by hand (RES34's night command 2).
+
+| piece | files | what |
+|---|---|---|
+| the cell's classes | `test/reap/cells.edn` | `["test/rust/divergences-aot.edn" "test/rust/divergences.edn"]`, as C's and C++'s AOT cells |
+| the records by host | `arbace/rust/check.ae` (`record-arch`, `record-file`) | `test/rust/check{,-aot}{,-times}-linux-ARCH.edn`, ARCH from `os.arch` (`RSI_RECORD_ARCH` overrides); the interpreted record beside the AOT rows and `bin/rsi divergences` the host's, else amd64's |
+| the AOT judge's test | `bin/rsi judge-test` | `run-judge WORK aot` on make-fake's runs: the judge's own pass (with the compiled-against-interpreted line, the controls differing), the changed output fails |
+
+**Proofs (run here).** `bin/rsi judge-test`: eval and AOT, 4 of 4 as they must, the own verdicts 12 of 12 (4 s). A scratch arm64
+record through the writer: `make-fake` over samples and synthetic, `RSI_RECORD_ARCH=arm64 run-judge WORK aot --record samples synthetic`:
+73 programs pass, the four controls differ, `test/rust/check-aot-linux-arm64.edn` written (not committed; no amd64 file touched). These
+runs are synthesized from rustc's recorded runs (the judge's path, not compiled programs): the VM cannot run `check --aot` (rustc
+1.100.0 for aarch64-musl against the pin's 1.99.1, no rust-src apk, no std build, lowered library or ci read: hours and 6 GiB on the
+main host). Placed as the amd64 record with the `:until` dropped (scratch, restored): `bin/reap` judges Rust AOT 73 / 0 / 0, after
+`--record` 0 problems; `bin/crops-score --crop rust` 100 / 100 / 80 (completeness, maturity, independence; before 75 / 96 / 80). The
+same record with `threads.rs` failing on `undefined function __clone`: 72 / 0 / 1 in the class threads (deferred) with the classes
+fixed; with the old classes "in no class of test/rust/divergences-aot.edn", a problem; `bin/rsi divergences --aot` counts it under
+threads.
+
+**The record's commit (the main host's).** The record and the cell's `:until` go together: the file with the `:until` kept is a stale
+`:until` (a reap problem), the `:until` dropped without the file is a missing file. Then `bin/reap --record`, `bin/crops-score --record`.
+
+**Why eval has 5 cases.** `test/rust/check-linux-amd64.edn` was recorded once, at RE4 (`15ce6591e`, 2026-11-03), over the samples of
+the day (5; `threads.rs` came at RE6). RE6's and rust-90's night commands (`check --corpus samples,synthetic --record`, then the UI
+corpus) never landed a record; `rsi-check` (samples, synthetic; weekly) and `rsi-check-ui` (every 40th, `:clean-only`: its pack was
+never made, the user 2026-11-13) judge and never `--record`. Widening it, in cost order: the samples and the synthetic corpus recorded
+(73 programs, RE6: 69 pass, four over the day's memory line; about two hours in batches); the UI corpus's every 40th (93 programs, 90
+pass at RE6) needs a subset record (RES65 (a)); the whole UI suite by rsi (3,718 programs, 3,409 by their own verdict) needs the UI IR
+pack (`bin/rsi ir-pack --corpus ui`, rustc 1.99.1, the oracle tier) and about 5.5 hours. Completeness is a ratio per cell, so the
+eval cell's 5 of 5 is already 100: widening buys coverage, and moves the judge stage's own-verdict share, not the score.
