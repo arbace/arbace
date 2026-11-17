@@ -355,7 +355,7 @@
 ;; {:op "+"} {:conv type} {:dtor "S"} {:lit "_km"}, each with :i. An argument: {:k :type :t T} {:k :expr :x node}
 ;; {:k :tmpl :name name} with :b :e (its tokens) and :pack.
 
-(declare parse-template-args parse-type-id parse-cond-expr parse-assign-expr parse-expr tentatively)
+(declare parse-template-args parse-type-id parse-cond-expr parse-assign-expr parse-expr tentatively soft-diag! class-ctx)
 
 (defn- root-ent [^P p] {:k :ns :name "" :scope (stv p ROOT)})
 
@@ -411,9 +411,15 @@
         (and (or (t= t "new") (t= t "delete")) (is-at? p 1 "[") (is-at? p 2 "]")) (do (adv! p) (adv! p) (adv! p) {:op (str (ts t) "[]") :i i})
         (or (t= t "new") (t= t "delete") (t= t "co_await")) (do (adv! p) {:op (ts t) :i i})
         (#{:str :udls} (tk t)) (let [s (ts t)]
+                                 ;; (h-cpp-read: [over.literal]/1, the literal-operator-id's string-literal is empty: GCC's
+                                 ;; "expected empty string after 'operator' keyword", the name taken)
+                                 (when-not (re-find #"^(u8|u|U|L)?[\"][\"]" s)
+                                   (soft-diag! p (ix p) "expected empty string after 'operator' keyword"))
                                  (adv! p)
                                  (if (= s "\"\"")
-                                   (let [nm (ts (cur p))] (adv! p) {:lit nm :i i :spaced true})
+                                   (let [nm (ts (cur p))]
+                                     (when-not (identical? :id (tk (cur p))) (soft-diag! p (ix p) "expected suffix identifier"))
+                                     (adv! p) {:lit nm :i i :spaced true})
                                    {:lit (subs s 2) :i i}))
         (t= t ">") (cond (and (.-glue t) (is-at? p 1 ">") (.-glue (nxt p 1)) (is-at? p 2 "="))
                          (do (adv! p) (adv! p) (adv! p) {:op ">>=" :i i})
@@ -1834,6 +1840,9 @@
 (defn- parse-new [^P p ^long b global]
   (adv! p) ; new
   (let [paren-type? (fn [] (and (is? p "(") (let [save (ix p)] (adv! p) (let [r (is-type-id? p :paren)] (seek! p save) r))))
+        ;; (h-cpp-read: a new-placement is an expression-list, not empty, [expr.new]/1: GCC's "expected expression-list or
+        ;; type-id")
+        _ (when (and (is? p "(") (is-at? p 1 ")")) (soft-diag! p (inc (ix p)) "expected expression-list or type-id"))
         place (when (and (is? p "(") (not (paren-type?))) (paren-args p))
         ;; the allocated type: (type-id) or a new-type-id with its array bounds
         [ty dims] (if (paren-type?)
@@ -1845,7 +1854,10 @@
                                                         (recur (with-cv {:t (case o "*" :p "&" :lr "&&" :rr) :of t} c v))))
                                                     :else t))
                           dims (loop [ds []] (if (is? p "[")
-                                               (do (adv! p) (let [x (with-gt p true (if (is? p "]") nil (parse-expr p)))] (expect! p "]") (recur (conj ds x))))
+                                               ;; (h-cpp-read: only the first bound may be omitted, [expr.new]/1's
+                                               ;; noptr-new-declarator: GCC's "expected primary-expression")
+                                               (do (when (and (seq ds) (is-at? p 1 "]")) (soft-diag! p (inc (ix p)) "expected primary-expression before ']' token"))
+                                                   (adv! p) (let [x (with-gt p true (if (is? p "]") nil (parse-expr p)))] (expect! p "]") (recur (conj ds x))))
                                                ds))]
                       [ptrs dims]))
         arr (seq dims)
@@ -1887,7 +1899,11 @@
                                (not (and (or (is? p "++") (is? p "--")) (not (let [_ (adv! p)] (cast-operand-start? p))))))]
                    (seek! p save) ok)))))
       (do (adv! p)
-          (let [ty (parse-type-id p :paren)]
+          (let [ty (parse-type-id p :paren)
+                ;; (h-cpp-read: a cast's type-id holds no placeholder type, [dcl.spec.auto.general]/5: GCC's "expected
+                ;; primary-expression")
+                _ (when (some #(= :auto (:t %)) (tree-seq map? (comp vector :of) ty))
+                    (soft-diag! p (inc b) (str "expected primary-expression before '" (ts (tok-at p (inc b))) "'")))]
             (expect! p ")")
             (if (is? p "{")
               (let [l (parse-braced-init p)] (node p "CompoundLiteralExpr" b (ne l) {:inner [l]}))
@@ -1969,6 +1985,39 @@
   [^P p ^long i ^String why]
   (soft-diag! p i (str "pedantic: " why)))
 
+(defn- decl-comma!
+  "h-cpp-read: the `,` between a declaration's declarators, consumed (true) or not there; a `;` after it is no declarator
+  ([dcl.decl]/1's init-declarator-list): GCC's \"stray ',' at end of member declaration\" (\"expected unqualified-id\" at
+  namespace scope), the declaration taken."
+  [^P p]
+  (when (accept! p ",")
+    (when (or (is? p ";") (is? p ","))
+      (soft-diag! p (ix p) (if (class-ctx p) "stray ',' at end of member declaration" "expected unqualified-id before ';' token")))
+    true))
+
+(defn- delete-reason!
+  "h-cpp-read: C++26's `= delete ( unevaluated-string )` (P2573R2, [dcl.fct.def.delete]/1) at its `(`: a string-literal
+  without an encoding prefix, then `)`, as GCC's cp_parser_function_definition_after_declarator checks it (\"expected
+  string-literal\", \"a wide string is invalid in this context\", \"expected ')'\"); past an error the tokens to the `)` or
+  the `;` skipped, the deletion taken."
+  [^P p]
+  (adv! p)
+  (if (identical? :str (tk (cur p)))
+    (do (when (re-find #"^(u8|u|U|L)" (ts (cur p))) (soft-diag! p (ix p) "a wide string is invalid in this context"))
+        (while (identical? :str (tk (cur p))) (adv! p))
+        (when-not (accept! p ")")
+          (soft-diag! p (ix p) (str "expected ')' before '" (ts (cur p)) "'"))
+          (skip-until! p #{";"})))
+    (do (soft-diag! p (ix p) (str "expected string-literal before '" (ts (cur p)) "'"))
+        (loop [d 0]
+          (let [^T t (cur p)]
+            (cond (identical? :eof (.-k t)) nil
+                  (and (zero? d) (t= t ";")) nil
+                  (and (zero? d) (t= t ")")) (adv! p)
+                  (or (t= t "(") (t= t "[") (t= t "{")) (do (adv! p) (recur (inc d)))
+                  (or (t= t ")") (t= t "]") (t= t "}")) (do (adv! p) (recur (dec d)))
+                  :else (do (adv! p) (recur d))))))))
+
 (defn- parse-asm-parts
   "CP338 (a): an asm statement from its keyword to its `)`: {:volatile :inline :goto :template S :outputs [[name constraint]]
   :inputs [...] :clobbers [S] :labels [S] :inner [output operands..., input operands...]} (the strings' values as the
@@ -1986,6 +2035,9 @@
                  qs)))
         _ (expect! p "(")
         lit (fn [] (if (identical? :str (tk (cur p))) (:value (parse-string-literal p)) (perr p "an asm string")))
+        ;; (h-cpp-read: the template is a string-literal, or C++26's parenthesized constant expression (GCC's constexpr asm):
+        ;; GCC's "expected string-literal" else, before the statement is skipped)
+        _ (when-not (or (identical? :str (tk (cur p))) (is? p "(")) (soft-diag! p (ix p) "expected string-literal"))
         tmpl (lit)
         ;; the sections' separators: `:` each, `::` two
         colons (atom 0)
@@ -2291,6 +2343,21 @@
   (when-let [^HashMap m (stv p GATTRS)]
     (not-empty (vec (sort-by :i (filter #(<= b (long (:i %)) e) (vals m)))))))
 
+(defn- attr-args-semicolon!
+  "h-cpp-read: an attribute's argument clause at its `(` holds balanced tokens ([dcl.attr.grammar]/1) that GCC parses as
+  expressions: a `;` among them, outside braces, is GCC's \"expected primary-expression before ';' token\" (the clause still
+  skipped whole)."
+  [^P p]
+  (loop [j (inc (ix p)) d 1 br 0]
+    (let [^T t (tok-at p j)]
+      (cond (identical? :eof (.-k t)) nil
+            (t= t "{") (recur (inc j) d (inc br))
+            (t= t "}") (recur (inc j) d (dec br))
+            (or (t= t "(") (t= t "[")) (recur (inc j) (inc d) br)
+            (or (t= t ")") (t= t "]")) (when (> d 1) (recur (inc j) (dec d) br))
+            (and (t= t ";") (<= br 0)) (soft-diag! p j "expected primary-expression before ';' token")
+            :else (recur (inc j) d br)))))
+
 (defn attr-nodes
   "The attribute-specifiers at the cursor: [[...]], __attribute__((...)), alignas(...): their nodes."
   [^P p]
@@ -2309,7 +2376,13 @@
                               nsname (when ns? (ts (cur p)))]
                           (adv! p) (when ns? (adv! p) (adv! p))
                           (let [args? (is? p "(")]
-                            (when args? (skip-balanced! p))
+                            ;; (h-cpp-read: nodiscard's and deprecated's argument is a string-literal, [dcl.attr.nodiscard]/1,
+                            ;; [dcl.attr.deprecated]/1: GCC's "expected string-literal")
+                            (when (and args? (nil? nsname) (#{"nodiscard" "deprecated"} (ts (tok-at p b)))
+                                       (not (and (identical? :str (tk (nxt p 1)))
+                                                 (loop [k 2] (if (identical? :str (tk (nxt p k))) (recur (inc k)) (is-at? p k ")"))))))
+                              (soft-diag! p (inc (ix p)) (str "expected string-literal before '" (ts (nxt p 1)) "'")))
+                            (when args? (attr-args-semicolon! p) (skip-balanced! p))
                             (when (is? p "...")
                               ;; ([dcl.attr.grammar]/4: an attribute followed by an ellipsis is a pack expansion; the
                               ;; standard attributes take none -- clang's err_cxx11_attribute_forbids_ellipsis, gcc's
@@ -2343,7 +2416,7 @@
                         (let [b (ix p)
                               ;; format with a kind of gcc's own (__gcc_diag__ ...): clang drops the attribute
                               gcc-kind (and (is-at? p 1 "(") (re-matches #"__gcc_\w+__|gcc_\w+" (ts (tok-at p (+ b 2)))))]
-                          (adv! p) (when (is? p "(") (skip-balanced! p))
+                          (adv! p) (when (is? p "(") (attr-args-semicolon! p) (skip-balanced! p))
                           (when-not (known-gnu-attr? (ts (tok-at p b))) (unknown-gnu-attr! p b b (t= (tok-at p (inc b)) "(")))
                           (recur (if (and (known-gnu-attr? (ts (tok-at p b))) (not gcc-kind))
                                    (conj out (node p "NativeAttr" b (last-ix p) (cond-> {:_gnu (ts (tok-at p b))}
@@ -2352,7 +2425,10 @@
                         :else (perr p "a GNU attribute")))]
             (recur out)))
       (and (or (is? p "alignas") (is? p "_Alignas")) (is-at? p 1 "("))
-      (let [b (ix p)] (adv! p) (skip-balanced! p) (recur (conj out (node p "AlignedAttr" b b {:_arg (tok-text p (+ b 2) (- (ix p) 2))}))))
+      (let [b (ix p)]
+        ;; (h-cpp-read: alignas takes a type-id or a constant-expression, [dcl.align]/1, none an error)
+        (when (is-at? p 2 ")") (soft-diag! p (+ b 2) "expected type-id or expression before ')' token"))
+        (adv! p) (skip-balanced! p) (recur (conj out (node p "AlignedAttr" b b {:_arg (tok-text p (+ b 2) (- (ix p) 2))}))))
       (and (is? p "__declspec") (is-at? p 1 "(")) (do (adv! p) (skip-balanced! p) (recur out))
       ;; an attribute keyword without its parenthesis (`alignas a`, g++.dg's cpp0x/pr96440.C): clang's "expected '('" (ParseAlignmentSpecifier,
       ;; ParseGNUAttributes); a declaration-specifier loop that asks again would otherwise never advance (cpp-90)
@@ -2432,7 +2508,7 @@
         (cond
           (identical? k :kw)
           (cond
-            (and (= s "extern") (#{:str} (tk (nxt p 1)))) (if (seq words) (assoc ds :type {:t :b :w words} :e (last-ix p)) (assoc ds :e (last-ix p)))
+            (and (= s "extern") (#{:str :udls} (tk (nxt p 1)))) (if (seq words) (assoc ds :type {:t :b :w words} :e (last-ix p)) (assoc ds :e (last-ix p)))
             (#{"static" "extern" "register"} s) (do (adv! p) (recur (assoc ds :storage s) words))
             (= s "mutable") (do (adv! p) (recur (assoc ds :mutable true) words))
             (= s "typedef") (do (adv! p) (recur (assoc ds :typedef true) words))
@@ -2462,6 +2538,12 @@
                   (do (seek! p save) (let [qn (parse-name p :parse)] (recur (assoc ds :type {:t :n :s (name-str p qn)}) words)))
                   (do (seek! p save) (adv! p)
                       (let [ob (ix p)]
+                        ;; (h-cpp-read: decltype's operand is an expression, [dcl.type.decltype]/1: none, or a keyword that
+                        ;; begins none, is GCC's "expected primary-expression")
+                        (when (or (is-at? p 1 ")")
+                                  (and (is-at? p 2 ")") (identical? :kw (tk (nxt p 1)))
+                                       (not (#{"this" "true" "false" "nullptr"} (ts (nxt p 1))))))
+                          (soft-diag! p (inc (ix p)) (str "expected primary-expression before '" (ts (nxt p 1)) "'")))
                         ;; G4: the operand parsed for the code generator's decltype, keyed by its text
                         (when (and *full-headers* (not (skim? p)))
                           (let [x (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))]
@@ -2507,7 +2589,12 @@
                        (and (= ctx :param) (or (is? p ")") (is? p ",") (is? p "=") (is? p "...")))
                        ;; a friend-type-specifier (friend Ts::Y..., Us...;)
                        (and (:friend ds) (or (is? p "...") (is? p ",") (is? p ";")))))
-              (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn}) words)
+              (do ;; (h-cpp-read: before C++20 a dependent qualified name names a type only after typename, [temp.res]/3: GCC's
+                  ;; "need 'typename' before 'T::type' because 'T' is a dependent scope", for a declarator's name after it)
+                  (when (and (< (.-year p) 2020) (not (:friend ds)) (not= ctx :alias) (id? p)
+                             (some-> (sc/lookup (scope p) (:s (first (:parts qn)))) :tparam))
+                    (soft-diag! p save (str "need 'typename' before '" (name-str p qn) "' because '" (:s (first (:parts qn))) "' is a dependent scope")))
+                  (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn}) words))
               (and decl-ctx (nil? e) (id? p) (not (#{"final" "override"} (ts (cur p)))))
               (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn :unknown true}) words)
               :else (do (seek! p save) (assoc ds :e (last-ix p)))))
@@ -2646,6 +2733,8 @@
       (and (is? p "&&") (not (:ref m))) (do (adv! p) (recur (str q " &&") (assoc m :ref "&&")))
       (is? p "noexcept")
       (do (adv! p)
+          ;; (h-cpp-read: noexcept's operand is a constant-expression, none written is an error, [except.spec]/1)
+          (when (and (is? p "(") (is-at? p 1 ")")) (soft-diag! p (inc (ix p)) "expected primary-expression before ')' token"))
           (if (is? p "(")
             (let [ob (ix p)
                   ;; G5: the operand parsed for the code generator (noexcept(e) evaluated per specialization), keyed by its text
@@ -2854,7 +2943,12 @@
           ty (if (is? p "decltype")
                (let [ds (parse-decl-specs p :type-id)] (ds-type ds))
                (let [qn (or (parse-name p :parse) (perr p "a base class"))
-                     lp (peek (:parts qn))]
+                     lp (peek (:parts qn))
+                     ;; (h-cpp-read: a class template's name without its arguments names no class, [class.derived.general]/2:
+                     ;; GCC's "expected class-name"; the injected-class-name, a class, is not one)
+                     en (:ent qn)
+                     _ (when (and en (:tmpl en) (not (:tparam en)) (nil? (:args lp)) (not (:inj en)) (not (:inj-full en)) (= :type (:k en)))
+                         (soft-diag! p (ix p) (str "expected class-name before '" (ts (cur p)) "' token")))]
                  (sc/add-base! cs (ent-scope (:ent qn)))
                  (.add order [(:s lp) virt])
                  (when info (.add ^ArrayList (.get info :bases) {:ty {:t :n :s (name-str p qn) :ent (:ent qn) :qn qn} :virt virt
@@ -3138,7 +3232,11 @@
           (or (id-is? p "final") (id-is? p "__final")) (let [i (ix p)] (adv! p) (recur (conj out (node p "FinalAttr" i i {}))))
           :else out)))
 
-(defn- skip-asm-label! [^P p] (when (and (or (is? p "asm") (is? p "__asm__") (is? p "__asm")) (is-at? p 1 "(")) (adv! p) (skip-balanced! p)))
+(defn- skip-asm-label! [^P p]
+  (when (and (or (is? p "asm") (is? p "__asm__") (is? p "__asm")) (is-at? p 1 "("))
+    ;; (h-cpp-read: GNU's asm label is a string-literal, GCC's "expected string-literal")
+    (when-not (or (identical? :str (tk (nxt p 2))) (is-at? p 2 "(")) (soft-diag! p (+ (ix p) 2) "expected string-literal"))
+    (adv! p) (skip-balanced! p)))
 
 (defn- decl-kind
   "The node kind of a function declarator named `qn` (`lp` its last part) in context `ctx`."
@@ -3274,12 +3372,16 @@
                                      (some #(when (#{"mode" "__mode__"} (:_gnu %)) (:_arg %)) (concat (:attrs ds) (:attrs d) as))
                                      (assoc :size (get {"QI" 1 "HI" 2 "SI" 4 "DI" 8 "TI" 16}
                                                        (str/replace (str/trim (some #(when (#{"mode" "__mode__"} (:_gnu %)) (:_arg %)) (concat (:attrs ds) (:attrs d) as))) #"^__|__$" ""))))))
-              (cond (accept! p ",") (recur (conj out n))
+              (cond (decl-comma! p) (recur (conj out n))
                     (accept! p ";") (conj out n)
                     :else (perr p "a typedef")))
             ;; a function
             (and fs (not (:a fs)))
             (let [kind (decl-kind p ctx ds qn lp ctor guide)
+                  ;; (h-cpp-read: a friend destructor is named with its class, [class.friend]/1's qualified name: GCC's
+                  ;; "expected qualified name")
+                  _ (when (and (:friend ds) (:dtor lp) (= 1 (count (:parts qn))) (not (:g qn)))
+                      (soft-diag! p (long (or (:i lp) (ix p))) "expected qualified name"))
                   as1 (attr-nodes p)
                   _ (skip-asm-label! p)
                   virts (virt-specifiers p)
@@ -3289,7 +3391,7 @@
                   [pure dflt del] (when (is? p "=")
                                     (cond (let [^T n (nxt p 1)] (and (identical? :num (.-k n)) (= "0" (.-s n)))) (do (adv! p) (adv! p) [true nil nil])
                                           (is-at? p 1 "default") (do (adv! p) (adv! p) [nil true nil])
-                                          (is-at? p 1 "delete") (do (adv! p) (adv! p) (when (is? p "(") (skip-balanced! p)) [nil nil true])
+                                          (is-at? p 1 "delete") (do (adv! p) (adv! p) (when (is? p "(") (delete-reason! p)) [nil nil true])
                                           :else (perr p "a function's = ")))
                   _ (when guide (when-let [ge (sc/lookup (scope p) nn)] (when-let [^HashMap gi (sema/info ge)] (.put gi :user-guide true))))
                   smk (when (= ctx :member)
@@ -3396,7 +3498,7 @@
                 (when (and tmpl (= ctx :member)) (.add ^HashSet (stv p MTMPL) nm)))
               (cond
                 body? (conj out n)
-                (accept! p ",") (recur (conj out n))
+                (decl-comma! p) (recur (conj out n))
                 (accept! p ";") (conj out n)
                 :else (perr p "a function declaration")))
             ;; a variable, a data member
@@ -3458,7 +3560,7 @@
                                                              (= "static" (:storage ds)) (assoc :static true)
                                                              (= "C" *linkage*) (assoc :clink true))))
               (cond
-                (accept! p ",") (recur (conj out n))
+                (decl-comma! p) (recur (conj out n))
                 (accept! p ";") (conj out n)
                 :else (perr p "a declaration")))))))))
 
@@ -3511,7 +3613,12 @@
                   (with-scope p :tparams nil (parse-template-params p))
                   (expect! p ">")
                   (when (is? p "requires") (skip-requires-clause! p))
-                  (when (or (is? p "class") (is? p "typename")) (adv! p))
+                  ;; (h-cpp-read: [temp.param]/1's type-parameter-key: GCC's "expected 'class' or 'typename' before" another
+                  ;; token, the parameter taken; concept and auto, P2841's template parameters, left alone)
+                  (cond (or (is? p "class") (is? p "typename")) (adv! p)
+                        (or (is? p "concept") (is? p "auto")) nil
+                        :else (do (soft-diag! p (ix p) (str "expected 'class' or 'typename' before '" (ts (cur p)) "'"))
+                                  (when (or (is? p "struct") (is? p "union")) (adv! p))))
                   (let [pack (accept! p "...")
                         nm (when (id? p) (ts (cur p)))
                         _ (when nm (adv! p))]
@@ -3709,7 +3816,13 @@
         (adv! p)
         (let [[ps names] (parse-template-params p)
               _ (expect! p ">")
-              rc (when (is? p "requires") (requires-clause! p))]
+              rc (when (is? p "requires") (requires-clause! p))
+              ;; (h-cpp-read: an enumeration is no templated entity's declaration, [temp.pre]/2: GCC's "template declaration
+              ;; of 'enum E'"; the enumeration taken)
+              _ (when (and (is? p "enum") (seq ps)
+                           (let [j (if (or (is-at? p 1 "class") (is-at? p 1 "struct")) 2 1)]
+                             (not (or (is-at? p (inc j) "::") (is-at? p (inc j) "<") (is-at? p j "::")))))
+                  (soft-diag! p (ix p) "template declaration of an enumeration"))]
           (cond
             (is? p "template") (parse-template-decl p ctx ob (inc depth))
             (is? p "concept")
@@ -3787,7 +3900,18 @@
 (defn- parse-linkage [^P p]
   (let [b (ix p)]
     (adv! p)
-    (let [lang (let [s (ts (cur p))] (subs s 1 (dec (count s))))]
+    ;; (h-cpp-read: a string-literal with a ud-suffix is a user-defined-string-literal, not a linkage spec's string-literal
+    ;; ([dcl.link]/2): GCC's "expected unqualified-id before user-defined string literal"; the linkage taken without the suffix)
+    (let [lang (let [s (ts (cur p))
+                     ;; (the shared lexer ends the literal before a keyword written against it, "c"void: the keyword's token
+                     ;; glued to the literal's in the main file is its ud-suffix)
+                     ^T t0 (cur p) ^T t1 (nxt p 1)
+                     _ (when (and (main-tok? p (ix p)) (nil? (.-mac t0)) (identical? :kw (.-k t1)) (= (.-o t1) (+ (.-o t0) (.-n t0))))
+                         (soft-diag! p (ix p) "expected unqualified-id before user-defined string literal"))
+                     s (if-let [[_ q] (re-matches #"(.*[\"])[A-Za-z_][A-Za-z0-9_]*" s)]
+                         (do (soft-diag! p (ix p) "expected unqualified-id before user-defined string literal") q)
+                         s)]
+                 (subs s 1 (dec (count s))))]
       (adv! p)
       (binding [*linkage* lang]
       (if (accept! p "{")
@@ -3962,7 +4086,7 @@
       (and (t= t "__extension__") (is-at? p 1 "using")) (do (adv! p) (parse-using p))
       ;; clang's recovery of `inline template <...>`: the stray specifier dropped, the template declaration read
       (and (t= t "inline") (is-at? p 1 "template")) (do (adv! p) (parse-template-decl p ctx (ix p) 1))
-      (and (t= t "extern") (identical? :str (tk (nxt p 1))) (not (is-at? p 2 ";"))) (parse-linkage p)
+      (and (t= t "extern") (#{:str :udls} (tk (nxt p 1))) (not (is-at? p 2 ";"))) (parse-linkage p)
       (or (t= t "static_assert") (t= t "_Static_assert")) (parse-static-assert p)
       (and (= ctx :member) (#{"public" "private" "protected"} (.-s t)) (sym? t) (is-at? p 1 ":"))
       (do (adv! p) (adv! p)
@@ -4193,6 +4317,9 @@
                             (perr p "a capture")))))
             ;; (an explicit template-parameter-list's nodes: CP290 (a)'s generic lambda keeps them as data)
             tmpl (when (is? p "<")
+                   ;; (h-cpp-read: a lambda's template-parameter-list is not empty, [expr.prim.lambda.general]/1: GCC's
+                   ;; "expected identifier before '>' token")
+                   (when (is-at? p 1 ">") (soft-diag! p (inc (ix p)) "expected identifier before '>' token"))
                    (let [ts (sc/new-scope :tparams (scope p) nil)]
                      (st! p SCOPE ts) (adv! p) (let [[tns] (parse-template-params p)] (expect! p ">") (vec tns))))
             _ (when (is? p "requires") (skip-requires-clause! p))
@@ -4200,11 +4327,17 @@
             ;; (CX12: a lambda declared constexpr keeps the fact, `:_cexpr`, for the checker's rules of a constexpr function's
             ;; body, [dcl.constexpr]/3)
             cexpr (volatile! false)
+            ;; (h-cpp-read: the lambda-specifier-seq precedes the attributes of the call operator's type, [expr.prim.lambda.general]/1:
+            ;; a specifier after them is GCC's "expected '{' before" it)
+            latt (volatile! false)
             _ (loop [] (cond (or (is? p "mutable") (is? p "constexpr") (is? p "consteval") (is? p "static"))
-                             (do (when (or (is? p "constexpr") (is? p "consteval")) (vreset! cexpr true)) (adv! p) (recur))
-                             (is? p "noexcept") (do (adv! p) (when (is? p "(") (skip-balanced! p)) (recur))
+                             (do (when @latt (soft-diag! p (ix p) (str "expected '{' before '" (ts (cur p)) "'")))
+                                 (when (or (is? p "constexpr") (is? p "consteval")) (vreset! cexpr true)) (adv! p) (recur))
+                             (is? p "noexcept") (do (adv! p)
+                                                    (when (and (is? p "(") (is-at? p 1 ")")) (soft-diag! p (inc (ix p)) "expected primary-expression before ')' token"))
+                                                    (when (is? p "(") (skip-balanced! p)) (recur))
                              (and (is? p "throw") (is-at? p 1 "(")) (do (adv! p) (skip-balanced! p) (recur))
-                             (or (and (is? p "[") (is-at? p 1 "[")) (is? p "__attribute__")) (do (attr-nodes p) (recur))
+                             (or (and (is? p "[") (is-at? p 1 "[")) (is? p "__attribute__")) (do (vreset! latt true) (attr-nodes p) (recur))
                              :else nil))
             ret (when (is? p "->") (adv! p) (parse-type-id p :trailing))
             _ (when (is? p "requires") (skip-requires-clause! p))
@@ -4377,6 +4510,47 @@
                       nil)))
              nodes]))))))
 
+(defn- digit-sep-error
+  "h-cpp-read: what is wrong with a pp-number's digit separators ([lex.icon]/1, [lex.fcon]/1: a separator between two digits
+  of one digit sequence), as cpplib's cpp_classify_number words it, or nil."
+  [^String s]
+  (when (str/includes? s "'")
+    (let [hex (re-find #"^0[xX]" s)]
+      (cond (re-find #"^0[xXbB]'" s) "digit separator after base indicator"
+            (or (str/includes? s ".'") (str/includes? s "'.")) "digit separator adjacent to decimal point"
+            (re-find (if hex #"'[pP]|[pP][+-]?'" #"'[eE]|[eE][+-]?'") s) "digit separator adjacent to exponent"
+            (re-find (if hex #"'(?![0-9A-Fa-f])" #"'(?![0-9])") s) "digit separator outside digit sequence"))))
+
+(defn- ucn-error
+  "h-cpp-read: a universal-character-name in an identifier that names no identifier character ([lex.name]/1, [lex.charset]/6):
+  a surrogate, a control or basic character (below U+00A0; $ GCC's extension before C++26, where it is basic), or a
+  bidirectional control (not XID_Continue), in cpplib's words; or nil."
+  [^String s ^long year]
+  (some (fn [[u h4 h8]]
+          (let [v (Long/parseLong (or h4 h8) 16)]
+            (cond (<= 0xD800 v 0xDFFF) (str u " is not a valid universal character")
+                  (or (and (< v 0xA0) (not (and (= v 0x24) (< year 2026))))
+                      (<= 0x202A v 0x202E) (<= 0x2066 v 0x2069) (= v 0x200E) (= v 0x200F))
+                  (str "universal character " u " is not valid in an identifier"))))
+        (re-seq #"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})" s)))
+
+(defn- lexical-diags!
+  "h-cpp-read (CP262 (b)'s syntax files): the main file's own tokens' lexical errors the shared lexer leaves to the
+  compiler proper: digit separators out of place (C++14 on) and identifiers' universal-character-names, each a syntax error
+  at its token, the parse unchanged."
+  [^P p]
+  (dotimes [i (.-cnt p)]
+    (let [^T t (tok-at p i)]
+      (when (and (main-tok? p i) (nil? (.-mac t)))
+        (when-let [why (case (.-k t)
+                         :num (when (>= (.-year p) 2014) (digit-sep-error (.-s t)))
+                         :id (when (str/includes? (.-s t) "\\") (ucn-error (.-s t) (.-year p)))
+                         ;; (a user-defined literal's ud-suffix is an identifier too, [lex.ext]/1)
+                         :udls (let [^String s (.-s t) x (subs s (inc (.lastIndexOf s "\"")))] (when (str/includes? x "\\") (ucn-error x (.-year p))))
+                         :udlc (let [^String s (.-s t) x (subs s (inc (.lastIndexOf s "'")))] (when (str/includes? x "\\") (ucn-error x (.-year p))))
+                         nil)]
+          (soft-diag! p i why))))))
+
 (defn parse-unit
   "The main file's top-level declarations as clang's AST nodes, from the parser's tokens `toks` (tokens'):
   {:nodes [...] :declines n :reasons {why n} :skim-cache :hit|:stored|nil}. `main` the main file's name in locations,
@@ -4389,6 +4563,7 @@
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
     (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.)) (st! p DIAGS (ArrayList.)) (st! p GATTRS (HashMap.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
+    (lexical-diags! p)
     ;; clang's builtin templates (BuiltinTemplateDecl: __type_pack_element<N, T...>, __make_integer_seq<Seq, T, N>), names in
     ;; every scope as clang's ASTContext declares them; <bits/utility.h> uses them when __has_builtin answers 1 (CP332 (a))
     (doseq [nm builtin-templates] (sc/declare! root {:k :type :name nm :tmpl true :builtin-tmpl true}))

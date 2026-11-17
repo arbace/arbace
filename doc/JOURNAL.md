@@ -9760,3 +9760,23 @@ at eval and AOT, all pass; `:dg-options` gone; heldout-check passes on the new p
 10 / 15 to 539 / 10 / 13. Completeness: Haskell 97 (meant 99), LLVM 98 (meant 99). Alternatives considered: building T24809 without
 `-prof` (not the test's way), a pack mixing the old clang's modules with the 61 new ones (not reproducible by ir-make), a guard in the
 classes for HES91 (no judge reads one; a commit of its own instead).
+
+## 2026-11-17: C++'s read cell audited, 33 syntax files and a fatal Sema recursion fixed (branch `h-cpp-read`, from `next` `e4a7a30f3`)
+
+The host burst (light checks). The read cell's 1,083 by design audited (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-read"): musl-libc (4)
+and gxx-only-rules (2) stand; the clang-* classes (1,077) rest on CP2 (a)'s "repr/cpp has no Sema", stale since CX12 and CP344 (a):
+each is a file neither clang nor Arbace's own front end meets, 150 of them in dialects Arbace does not take (OpenMP/OpenACC, GNU TM,
+GCC's contracts, -fpermissive, -fms-extensions), 927 the own front end's unported diagnostics. No class changed: CP398 (the 927 as a
+deferred own-diagnostics class) and CP399 (the 150 as a GCC-dialect class by design) proposed. Of the 136 deferred, syntax-own's cheap
+groups closed in arbace/repr/cpp/parse.ae (a lexical pass for digit separators and identifiers' UCNs; literal operators, linkage
+specs with a ud-suffix, = delete's reason, asm strings, attribute arguments, stray commas, template enums, template template keys,
+friend destructors, template names as bases, lambda specifiers, noexcept(), decltype(), casts to auto, new's placement and bounds, a
+missing typename before C++20) and native.ae (-fno-gnu-keywords): syntax-own 128 to 95, the own record's 33 rows re-recorded, C++
+read 5,276 / 1,083 / 136 to 5,309 / 1,083 / 103, completeness 91 and 96 without by design (unchanged as integers). Found: since W2's
+re-seed stage 0 runs arbace.cpp.sema compiled, and Sema's unbounded recursion (cpp1y/constexpr-recursion1.C's enum calling its own
+function) overflowed Go's 1 GB stack, a fatal error that ended the whole own dg run; arbace/cpp/sema.ae now refuses a self-call before
+the body is analyzed (*ce-analyzing*) and, under diag's Sema, throws StackOverflowError past 4,000 nested analyze calls, as the
+interpreter does (proved evaluated only: the compiled guard waits for the gate's executable at the new key). Alternatives: a depth
+limit in the interpreter's terms only (Rt/MAX_DEPTH is the evaluator's; compiled code has none), or catching the Go fatal error
+(impossible). Not done: OpenMP's parse errors (27 gomp/goacc syntax files; CP399), named UCNs (a Unicode name table), the
+parser's recovery lines (extra errors after a decline), #embed and line-directive pedantry (the shared C preprocessor, gate-wide).
