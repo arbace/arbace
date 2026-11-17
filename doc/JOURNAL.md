@@ -10333,7 +10333,6 @@ run: `bin/cppi check` (no lowered runtime at the key here; its records-mode buil
 doc/cpp/CPP-SURVEY.md's "As built: queue 324" lists. Alternative considered: rebuilding the runtime at one job to run two samples
 (rejected: over the day's 2 GiB a process, and the night's record runs the same path whole).
 
-
 ## 2026-11-17: h-cpp-consteval, C++'s constant-evaluation diagnostics (branch `h-cpp-consteval` from next 55e8c0ae7)
 
 - The constant-evaluation group of the read cell's :own-diag (167 files, the Mac's review 336 at mac/336-cpp-own-diag 82d055533,
@@ -10428,3 +10427,21 @@ CP333 (b); leaving ci on test/c/host (no case own by RFP53's C7). doc/cpp/CPP-SU
   constraint unsatisfied with a doubt keeps the function in the checker). Alternatives: the standard's reading of CP400 (one
   template; concepts/equiv.C's "not equivalent" is GCC's), and leaving CP323 (a)'s not-judged rule for every inheriting class.
 - gate_key and arbace_javac_key move (arbace/cpp and repr/cpp are embedded since W2); no runtime key.
+
+## 2026-11-18: n-cpp-night, the night's four C++ branches on n-review-b's stack, and a correction: CP numbers renumbered (round 52)
+
+- Branch `n-cpp-night` from mac/n-review-b aaa6d7786; merged in order mac/n-cpp-indep 0466c4d68, mac/n-cpp-read 3b118ef27,
+  mac/n-cpp-eval bc7e9f7fe, mac/n-cpp-concepts 6607f42df. n-cpp-indep (from next) had built CP356 (a) again beside the stack's queue
+  324: 324's records and `:mean-with` kept, n-cpp-indep's CP400 (a) (ci on c/target), `:ci-target`, `bin/cppi inputs` and self-test
+  added on them, its second runtime mean dropped (alternative: both mechanisms side by side, rejected: two counts of one runtime).
+  n-cpp-concepts' consteval and 336 are the stack's own commits: the merge is the stack plus its own changes, line for line.
+  Records merged by rows, none changed by two branches. doc/cpp/CPP-SURVEY.md, "As built: n-cpp-night".
+- Correction to the entries above of n-cpp-read and n-cpp-concepts (2026-11-18): three branches each took CP400-CP402 tonight.
+  n-cpp-indep keeps CP400, CP401 (and its proposed CP402, CP403); n-cpp-read's CP400-CP402 (a) are CP407-CP409 (a) (the error at
+  the label; the conservative vacuousness; a `:tests` file of a class that now passes); n-cpp-concepts' CP400-CP402 (a) are
+  CP410-CP412 (a) (abbreviated and constrained templates two templates; an inheriting class's initialization judged when every
+  inherited base is known; a member's doubtful constraint keeps the function). n-cpp-eval's CP405, CP406 unchanged. The survey's
+  sections carry the new numbers.
+- Checked light (each process under 1 GiB, stopped by PID above): crops-score's self-test, `bin/cppi selftest concepts-diag`, the
+  36 moved dg rows in four lists of 9 (36 pass) and the dg control (fails as it must), reap, crops-score `--record` and `--judge
+  --strict`, records-check. C++ read 5,396 / 326 / 773, completeness 92, independence 72.
