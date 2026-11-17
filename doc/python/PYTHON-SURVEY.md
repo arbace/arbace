@@ -7287,3 +7287,10 @@ from the slice's 35 KB a file), the mutants' (2,000 files) and the prints' (pyth
 committed under `essential/printed-samples`), recorded by `bin/repr-python records record samples stdlib site-packages
 lib-test mutants` and pinned; until then the full gate's python-roundtrip and python-native parts of those corpora fail
 UNRECORDED in records mode, and the essential round trip leaves levels 2 and 3 of samples to the oracle tier.
+
+On the merge with 317 (next's shared tooling): Python's kinds in `test/oracle-records/kinds.edn` (pydump, outcomes, runs:
+`bin/oracle-records list|record|verify python`), `oracle_python_id` in `test/oracle-records/oracle.bash` (the `:host-ids
+:python` recipe records.bash patched in since 213; records.bash now asks whether the library has it by `declare -F`, since
+computing it ran `python3 --version` at every start, 6 calls in the stub run), and the judge's fact in
+`test/crops/independence.edn` as a case-weighted mean: 0.196 (66,657 cases; Lib/test's 47,621 methods live, 0, until
+319's driver), Python's independence 60 to 64; with 319 and the methods by their own verdict (queue 234), 0.910.
