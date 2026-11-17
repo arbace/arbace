@@ -10219,3 +10219,18 @@ bringing java.lang.constant back for Wrapper (F26's failure: jrt's String is no 
   corpus tests; the rest of JAVA-DEFERRED-TRIAGE.md's 154 ids (a sample of 12 of them, `bin/java-check --levels interp --list`
   on the gate build: 11 now passing against `check-interp.edn`, t04706, StackTraceSerialization, still failing in the serialization
   class (JCS167); none regress).
+
+## 2026-11-17: Java's AOT cell triaged by root cause (branch `h-java-aot-triage`, from `next` `498d7296f`)
+
+The AOT cell's 536 deferred and 201 by-design rows (test/java/check-compiled.edn, gate 13c's) read by cause against the interp triage
+(h-java-deferred's run, h-java-members' tables) and one light measurement: `bin/java-check --levels compiled --analyze-only` of the 328
+rows recorded `:refused`, over today's jdk/forms (F26's conversion), on f26-ghidra's executable `31f89bf86be7dac52b3d` (52 min, peak
+2.8 GB): 140 of the 198 deferred refusals and 62 of the 130 by-design ones analyze today. The record predates B2's world and F26: 135
+rows wait on next's conversion (h-java-deferred's ObjectInputFilter, Logger, ClassCache; F26's Wrapper), 148 pass at interp already,
+52 are h-java-members', 24 compiled-only (javac's API on the shipped program 16, JCS158), 177 shared with interp's remaining causes.
+Built: j2g's `up-sym` gives `(conv any nil)` for a null constant cast to a class (t05934's "nil.Ref undefined"), with a unit test and its
+control. The by-design audit found `:design-also-compiled` stale (serialization out of by design since JCS167 (a), the class-file API in
+the world since F26: 44 of its rows deferred or passing at interp, 43 analyzing), `:classloading` taking world gaps by its pattern, `:jmx`
+wider than what JMX-1 left out: AT1-AT10 proposed (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: h-java-aot-triage"), no row moved.
+Alternatives considered: re-sorting the classes now (refused: the user decides, and the night's whole record moves them anyway); a light
+compiled run (not light: a shard is a whole-program j2g run and a build).
