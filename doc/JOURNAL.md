@@ -10332,3 +10332,15 @@ process). Fixed: `bin/lib/cppi/check`'s header (auto, not clang, the default rou
 run: `bin/cppi check` (no lowered runtime at the key here; its records-mode build declares 8 GiB): the records stay the night's, as
 doc/cpp/CPP-SURVEY.md's "As built: queue 324" lists. Alternative considered: rebuilding the runtime at one job to run two samples
 (rejected: over the day's 2 GiB a process, and the night's record runs the same path whole).
+
+## 2026-11-17: h-cpp-consteval, C++'s constant-evaluation diagnostics (branch `h-cpp-consteval` from next 55e8c0ae7)
+
+- The constant-evaluation group of the read cell's :own-diag (167 files, the Mac's review 336 at mac/336-cpp-own-diag 82d055533,
+  test/cpp/own-diag-review.edn) taken rule by rule in arbace.cpp.sema's evaluator as a checker: const objects modified, unions'
+  members, non-constexpr calls anywhere, constinit, the potential constant check of a constexpr body (GCC's
+  potential_constant_expression, before C++23), reinterpret_cast, bounds/null/overflow at their operation, lifetimes, asm/goto,
+  indeterminate values; class objects' initializers and static_asserts' non-constant conditions evaluated. 48 files moved to pass
+  (doc/cpp/CPP-SURVEY.md, "As built: h-cpp-consteval", per rule), no recorded pass lost, the dg control failing; the 48 rows recorded
+  alone. C++ read 5,309 / 243 / 943 to 5,357 / 243 / 895; crop completeness 91 to 92. Source: the standard's [expr.const] and
+  gcc-15.2.0's g++.dg tests (the pinned tarball); no GCC code read. gate_key moves. Alternative: a separate constant evaluator for
+  the checker (not taken: the code generator's folds share these semantics, and the checker's rules are gated by `checking?`).

@@ -8575,3 +8575,47 @@ error at the first constrained declaration: a cheap first step for the concepts 
 - `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 328 / 858 to
   5,314 / 328 / 853; completeness 91 (0.9137 to 0.9139), without by design 93 (0.9303 to 0.9305). test/cpp/own-diag-review.edn's
   `:own` follows the record. Keys: `gate_key` and `arbace_javac_key` move (repr/cpp is embedded since W2).
+
+## As built: h-cpp-consteval (2026-11-17; branch `h-cpp-consteval` from next 55e8c0ae7; the host burst's light tier)
+
+The largest group of the read cell's `:own-diag` (the Mac's review 336, mac/336-cpp-own-diag 82d055533,
+test/cpp/own-diag-review.edn: constant evaluation, 167 files) taken rule by rule in arbace.cpp.sema's constant evaluator as a
+checker (`ce-eval`, `ce-exec`, `cx-check-constant!`; GCC 15.2's constexpr.cc diagnostics as the model, clean-room from the
+standard's [expr.const]/5 and the tests' dg-error lines). Each rule's error is sure (`:cx/sure`) only where the program's own
+operation decides it; anything the evaluator cannot reach still judges nothing. The foundations: the evaluation's last position
+(`*ce-pos*`: every typed expression of the checker carries `:cx-at`, a macro's begin taken at its expansion), a class object's
+constexpr (or constinit) initializer evaluated too (before: scalars alone), a constexpr object of namespace or class scope read
+from its initializer, a static_assert whose condition is surely not constant ("non-constant condition", with the operation's own
+error), a null pointer (`:null`, the checker's alone), arrays inside objects as pointers' bases, `switch` evaluated.
+
+| rule | files moved to pass |
+|---|---|
+| a const object modified ([dcl.type.cv]/4: the complete const objects' cells, const members from their initialization on, mutable members not) | cpp1y/constexpr-tracking-const{1,2,3,4,7,8,9,10,14,16,18,19,21,22}.C (14) |
+| a union's inactive or uninitialized member read, the active member changed ([class.union.general]/2,6: by member access from C++20, "change of the active member" before; a default member initializer naming `this`) | cpp0x/constexpr-48089.C, cpp1y/constexpr-89481.C, cpp1y/constexpr-union{6,7}.C, cpp2a/constexpr-union{2,4,5}.C (7) |
+| non-constexpr calls anywhere in an evaluation (members, inline functions, constructors: no -fimplicit-constexpr), constinit's "does not have a constant initializer", assignment of a read-only variable | cpp1y/constexpr-loop{5,8}.C, cpp2a/constexpr-new7.C, cpp2a/constinit{1,12}.C, cpp23/constexpr-nonlit2.C (6) |
+| the potential constant check of a constexpr function's body at its definition ([dcl.constexpr]/6 before C++23, GCC's potential_constant_expression: throw, non-constexpr calls, reinterpret_cast, "neither branch of 'if'"), and the var's own error when the callee fails it | cpp0x/constexpr-generated1.C, cpp0x/constexpr-neg{2,3}.C, cpp1y/constexpr-105050.C, cpp1y/constexpr-throw.C, cpp23/constexpr-nonlit6.C (6) |
+| reinterpret_cast and pointer/integer conversions ([expr.const]/5.15; C-style casts that are reinterpret_casts) | cpp0x/constexpr-cast.C, cpp1y/constexpr-82304.C, cpp1y/constexpr-89285-2.C, cpp1y/constexpr-shift1.C, cpp2a/constexpr-new24.C (5) |
+| out of bounds, null, overflow at their operation's line | cpp0x/constexpr-70323{,a}.C, cpp0x/constexpr-memfn2.C, cpp1y/constexpr-79655.C, cpp1y/pr77830.C (5) |
+| lifetimes ended: a block's locals, a call's parameters, a full-expression's temporaries | cpp1y/constexpr-lifetime{2,3,5}.C (3) |
+| an asm statement, a goto, a static or thread-local definition reached | cpp2a/inline-asm2.C (1) |
+| an indeterminate value read ([basic.indet]) | cpp2a/constexpr-indeterminate1.C (1) |
+
+48 of the 167; the rest need what the evaluator does not model (new/delete, dynamic_cast, bit_cast, pointers to members, virtual
+bases, consteval's escalation and immediate-address rules, templates' errors) or are other Sema gaps (call is ambiguous in
+constexpr-89336-3.C, union `{}` with a default member initializer taken as zero-initialization: cpp1y/constexpr-union5.C,
+pr94066*.C). Also fixed: ubsan/pr63956.C's crash (a float conversion of an infinite double), now missed.
+
+### Checked (one process at a time, peaks by busybox `time -v`)
+
+- `bin/repr-cpp dg --corpus dg-error --front native --only LIST` (REPR_CPP_THREADS=3, GOMEMLIMIT=1500MiB) over the 856 recorded own
+  passes, dr2082/dr1423 (the control) and the 167: 856 + 0 to 856 + 48, no recorded pass failing, the control
+  `_control/dg/dr2082-vs-dr1423` failing as it must, 2.5 min, peak 1.81 GB (sema evaluated from the checkout: the analysis stack
+  guard of h-cpp-read applies; no new recursion).
+- Recorded (`--only --record`, the 48 rows alone) in test/cpp/check-dg-own-linux-amd64.edn. `bin/reap --record`,
+  `bin/crops-score --record`, `--judge --strict` (0), `bin/records-check` (0): C++ read 5,309 / 243 / 943 to 5,357 / 243 / 895
+  (own-diag 863 to 815 on this branch's base, without 336's review); the crop's completeness 91 to 92 (0.9137 to 0.9155), without by
+  design 93 (0.9274 to 0.9293).
+- Not run here (light tier): the code generator's users of the evaluator (`cpp-essential`, `cpp-check-essential` at 5 GiB). The
+  evaluator's changes outside the checker only fold more (arrays in objects, `this` in default member initializers, switch) or
+  fold less (a union's other members after zero-initialization, `:null` refused): the night's `cpp-essential` and `cpp-check` judge it.
+- Keys: `gate_key` moves (arbace/cpp and repr/cpp embedded since W2), as `arbace_javac_key`; the runtime key does not.
